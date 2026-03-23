@@ -89,9 +89,49 @@ describe("Rig CRUD routes", () => {
     expect(repo.getRig(rig.id)).toBeNull();
   });
 
-  it("DELETE /api/rigs/:id with nonexistent id -> 204 (idempotent)", async () => {
+  it("DELETE /api/rigs/:id -> rig.deleted event row in DB", async () => {
+    const rig = repo.createRig("test-rig");
+
+    const res = await app.request(`/api/rigs/${rig.id}`, { method: "DELETE" });
+    expect(res.status).toBe(204);
+
+    const events = db
+      .prepare("SELECT type, payload FROM events WHERE type = 'rig.deleted'")
+      .all() as { type: string; payload: string }[];
+    expect(events).toHaveLength(1);
+    const payload = JSON.parse(events[0]!.payload);
+    expect(payload.rigId).toBe(rig.id);
+  });
+
+  it("DELETE /api/rigs/:id with nonexistent id -> 204 + no rig.deleted event", async () => {
     const res = await app.request("/api/rigs/nonexistent", { method: "DELETE" });
     expect(res.status).toBe(204);
+
+    const events = db
+      .prepare("SELECT * FROM events WHERE type = 'rig.deleted'")
+      .all();
+    expect(events).toHaveLength(0);
+  });
+
+  it("DELETE /api/rigs/:id with sabotaged events -> rig still exists + no event row", async () => {
+    const rig = repo.createRig("test-rig");
+
+    // Sabotage events table so event insert fails inside the transaction
+    db.exec("DROP TABLE events");
+    db.exec(
+      "CREATE TABLE events (seq INTEGER PRIMARY KEY AUTOINCREMENT, rig_id TEXT, node_id TEXT, type TEXT NOT NULL, payload TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now')), CONSTRAINT force_fail CHECK(length(type) < 1))"
+    );
+
+    const res = await app.request(`/api/rigs/${rig.id}`, { method: "DELETE" });
+    // Should fail (transaction rolled back)
+    expect(res.status).toBe(500);
+
+    // Rig still exists (rollback)
+    expect(repo.getRig(rig.id)).not.toBeNull();
+
+    // No partial event row
+    const events = db.prepare("SELECT * FROM events").all();
+    expect(events).toHaveLength(0);
   });
 
   it("POST /api/rigs with invalid body -> 400", async () => {

@@ -173,13 +173,37 @@ describe("003_events", () => {
     expect(events[1]!.type).toBe("session.status_changed");
   });
 
-  it("cascades on rig delete", () => {
+  it("events survive rig deletion (audit trail preserved)", () => {
     db.prepare(
       "INSERT INTO events (rig_id, type, payload) VALUES (?, ?, ?)"
     ).run("rig-1", "event.a", "{}");
+    db.prepare(
+      "INSERT INTO events (rig_id, type, payload) VALUES (?, ?, ?)"
+    ).run("rig-1", "event.b", "{}");
 
     db.prepare("DELETE FROM rigs WHERE id = ?").run("rig-1");
-    const events = db.prepare("SELECT * FROM events").all();
-    expect(events).toHaveLength(0);
+
+    // Events must still exist with original rig_id intact
+    const events = db
+      .prepare("SELECT rig_id, type FROM events ORDER BY seq")
+      .all() as { rig_id: string; type: string }[];
+    expect(events).toHaveLength(2);
+    expect(events[0]!.rig_id).toBe("rig-1");
+    expect(events[1]!.rig_id).toBe("rig-1");
+  });
+
+  it("allows event with rig_id referencing nonexistent rig (orphan refs)", () => {
+    expect(() =>
+      db
+        .prepare(
+          "INSERT INTO events (rig_id, type, payload) VALUES (?, ?, ?)"
+        )
+        .run("nonexistent-rig", "rig.created", "{}")
+    ).not.toThrow();
+
+    const event = db
+      .prepare("SELECT rig_id FROM events WHERE rig_id = ?")
+      .get("nonexistent-rig") as { rig_id: string };
+    expect(event.rig_id).toBe("nonexistent-rig");
   });
 });

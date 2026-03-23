@@ -5,11 +5,12 @@ export const eventsSchema: Migration = {
   sql: `
     CREATE TABLE events (
       seq         INTEGER PRIMARY KEY AUTOINCREMENT,
-      rig_id      TEXT REFERENCES rigs(id) ON DELETE CASCADE,
+      -- INTENTIONALLY NOT AN FK to rigs(id).
+      -- Events are an append-only history log. They must survive rig deletion
+      -- so the full timeline is preserved for replay and audit.
+      rig_id      TEXT,
       -- INTENTIONALLY NOT AN FK to nodes(id).
-      -- Events are an append-only history log. They must survive node deletion
-      -- so the full timeline is preserved for replay and audit. An FK with
-      -- CASCADE would destroy history; SET NULL would lose the node reference.
+      -- Same rationale: events must survive node deletion.
       node_id     TEXT,
       type        TEXT NOT NULL,
       payload     TEXT NOT NULL,

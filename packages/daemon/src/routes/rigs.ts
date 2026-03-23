@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import type { RigRepository } from "../domain/rig-repository.js";
 import type { SessionRegistry } from "../domain/session-registry.js";
+import type { EventBus } from "../domain/event-bus.js";
 import { projectRigToGraph } from "../domain/graph-projection.js";
 
 export const rigsRoutes = new Hono();
@@ -46,6 +47,32 @@ rigsRoutes.get("/:id/graph", (c) => {
 });
 
 rigsRoutes.delete("/:id", (c) => {
-  getRepo(c).deleteRig(c.req.param("id"));
-  return c.body(null, 204);
+  const rigId = c.req.param("id");
+  const repo = getRepo(c);
+  const eventBus = c.get("eventBus" as never) as EventBus;
+
+  // Only emit event + delete if rig exists
+  const rig = repo.getRig(rigId);
+  if (!rig) {
+    return c.body(null, 204);
+  }
+
+  // Atomic: event persist + rig delete in one transaction
+  // Uses eventBus.db (same handle as rigRepo.db — enforced by shared AppDeps)
+  const txn = eventBus.db.transaction(() => {
+    const persisted = eventBus.persistWithinTransaction({
+      type: "rig.deleted",
+      rigId,
+    });
+    repo.deleteRig(rigId);
+    return persisted;
+  });
+
+  try {
+    const persistedEvent = txn();
+    eventBus.notifySubscribers(persistedEvent);
+    return c.body(null, 204);
+  } catch (err) {
+    return c.json({ error: "delete failed" }, 500);
+  }
 });

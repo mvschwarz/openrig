@@ -20,6 +20,15 @@ export interface AppDeps {
 }
 
 export function createApp(deps: AppDeps): Hono {
+  // Hard runtime invariant: all domain services must share the same db handle.
+  // Routes that use atomic transactions across services depend on this.
+  if (deps.rigRepo.db !== deps.eventBus.db) {
+    throw new Error("createApp: rigRepo and eventBus must share the same db handle");
+  }
+  if (deps.rigRepo.db !== deps.sessionRegistry.db) {
+    throw new Error("createApp: rigRepo and sessionRegistry must share the same db handle");
+  }
+
   const app = new Hono();
 
   // Inject dependencies into context for all routes
