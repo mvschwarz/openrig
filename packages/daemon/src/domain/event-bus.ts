@@ -7,6 +7,10 @@ export class EventBus {
   private subscribers = new Set<Subscriber>();
   readonly db: Database.Database;
 
+  get subscriberCount(): number {
+    return this.subscribers.size;
+  }
+
   constructor(db: Database.Database) {
     this.db = db;
   }

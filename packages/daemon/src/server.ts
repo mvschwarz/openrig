@@ -8,6 +8,7 @@ import type { CmuxAdapter } from "./adapters/cmux.js";
 import { rigsRoutes } from "./routes/rigs.js";
 import { sessionsRoutes, nodesRoutes } from "./routes/sessions.js";
 import { adaptersRoutes } from "./routes/adapters.js";
+import { eventsRoute } from "./routes/events.js";
 
 export interface AppDeps {
   rigRepo: RigRepository;
@@ -40,6 +41,7 @@ export function createApp(deps: AppDeps): Hono {
   app.route("/api/rigs/:rigId/sessions", sessionsRoutes);
   app.route("/api/rigs/:rigId/nodes", nodesRoutes);
   app.route("/api/adapters", adaptersRoutes);
+  app.route("/api/events", eventsRoute);
 
   return app;
 }
