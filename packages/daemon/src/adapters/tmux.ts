@@ -121,7 +121,7 @@ export class TmuxAdapter {
 
   async listWindows(sessionName: string): Promise<TmuxWindow[]> {
     try {
-      const output = await this.exec(`tmux list-windows -t ${sessionName} -F "${WINDOW_FORMAT}"`);
+      const output = await this.exec(`tmux list-windows -t ${shellQuote(sessionName)} -F "${WINDOW_FORMAT}"`);
       return parseLines(output, parseWindowLine);
     } catch (err) {
       if (isNoServerError(err)) return [];
@@ -131,7 +131,7 @@ export class TmuxAdapter {
 
   async listPanes(target: string): Promise<TmuxPane[]> {
     try {
-      const output = await this.exec(`tmux list-panes -t ${target} -F "${PANE_FORMAT}"`);
+      const output = await this.exec(`tmux list-panes -t ${shellQuote(target)} -F "${PANE_FORMAT}"`);
       return parseLines(output, parsePaneLine);
     } catch (err) {
       if (isNoServerError(err)) return [];
@@ -166,7 +166,7 @@ export class TmuxAdapter {
   }
 
   async sendKeys(target: string, keys: string[]): Promise<TmuxResult> {
-    const cmd = `tmux send-keys -t ${shellQuote(target)} ${keys.join(" ")}`;
+    const cmd = `tmux send-keys -t ${shellQuote(target)} ${keys.map(shellQuote).join(" ")}`;
     try {
       await this.exec(cmd);
       return { ok: true };

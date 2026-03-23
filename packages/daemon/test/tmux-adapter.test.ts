@@ -66,7 +66,19 @@ describe("TmuxAdapter", () => {
 
       expect(exec).toHaveBeenCalledOnce();
       expect(exec.mock.calls[0]![0]).toBe(
-        'tmux list-windows -t my-session -F "#{window_index}\t#{window_name}\t#{window_panes}\t#{window_active}"'
+        'tmux list-windows -t \'my-session\' -F "#{window_index}\t#{window_name}\t#{window_panes}\t#{window_active}"'
+      );
+    });
+
+    it("shell-sensitive session name is quoted in list-windows", async () => {
+      const exec = vi.fn<ExecFn>().mockResolvedValue("");
+      const adapter = new TmuxAdapter(exec);
+
+      await adapter.listWindows("my session's name");
+
+      expect(exec).toHaveBeenCalledOnce();
+      expect(exec.mock.calls[0]![0]).toBe(
+        'tmux list-windows -t \'my session\'\"\'\"\'s name\' -F "#{window_index}\t#{window_name}\t#{window_panes}\t#{window_active}"'
       );
     });
 
@@ -104,7 +116,19 @@ describe("TmuxAdapter", () => {
 
       expect(exec).toHaveBeenCalledOnce();
       expect(exec.mock.calls[0]![0]).toBe(
-        'tmux list-panes -t my-session:0 -F "#{pane_id}\t#{pane_index}\t#{pane_current_path}\t#{pane_width}\t#{pane_height}\t#{pane_active}"'
+        'tmux list-panes -t \'my-session:0\' -F "#{pane_id}\t#{pane_index}\t#{pane_current_path}\t#{pane_width}\t#{pane_height}\t#{pane_active}"'
+      );
+    });
+
+    it("shell-sensitive target is quoted in list-panes", async () => {
+      const exec = vi.fn<ExecFn>().mockResolvedValue("");
+      const adapter = new TmuxAdapter(exec);
+
+      await adapter.listPanes("my session's:0");
+
+      expect(exec).toHaveBeenCalledOnce();
+      expect(exec.mock.calls[0]![0]).toBe(
+        'tmux list-panes -t \'my session\'\"\'\"\'s:0\' -F "#{pane_id}\t#{pane_index}\t#{pane_current_path}\t#{pane_width}\t#{pane_height}\t#{pane_active}"'
       );
     });
 
@@ -261,7 +285,7 @@ describe("TmuxAdapter", () => {
   });
 
   describe("sendKeys", () => {
-    it("calls exec with exact command (target quoted, key names as separate args)", async () => {
+    it("calls exec with exact command (target quoted, key names individually quoted)", async () => {
       const exec = vi.fn<ExecFn>().mockResolvedValue("");
       const adapter = new TmuxAdapter(exec);
 
@@ -269,7 +293,19 @@ describe("TmuxAdapter", () => {
 
       expect(exec).toHaveBeenCalledOnce();
       expect(exec.mock.calls[0]![0]).toBe(
-        "tmux send-keys -t 'r01-dev1-impl' C-c Enter"
+        "tmux send-keys -t 'r01-dev1-impl' 'C-c' 'Enter'"
+      );
+    });
+
+    it("shell-sensitive key names are individually quoted", async () => {
+      const exec = vi.fn<ExecFn>().mockResolvedValue("");
+      const adapter = new TmuxAdapter(exec);
+
+      await adapter.sendKeys("r01-dev1-impl", ["Enter; rm -rf /", "C-c"]);
+
+      expect(exec).toHaveBeenCalledOnce();
+      expect(exec.mock.calls[0]![0]).toBe(
+        "tmux send-keys -t 'r01-dev1-impl' 'Enter; rm -rf /' 'C-c'"
       );
     });
 
