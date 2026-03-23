@@ -15,6 +15,7 @@ import { TmuxAdapter } from "./adapters/tmux.js";
 import { CmuxAdapter } from "./adapters/cmux.js";
 import { execCommand } from "./adapters/tmux-exec.js";
 import { createCmuxCliTransport } from "./adapters/cmux-transport.js";
+import { Reconciler } from "./domain/reconciler.js";
 import { createApp, type AppDeps } from "./server.js";
 
 interface DaemonOptions {
@@ -59,6 +60,13 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
 
   // Connect to cmux at startup — degrades gracefully if absent
   await cmuxAdapter.connect();
+
+  // Reconcile all managed rigs — marks stale sessions as detached
+  const reconciler = new Reconciler({ db, sessionRegistry, eventBus, tmuxAdapter });
+  const rigs = rigRepo.listRigs();
+  for (const rig of rigs) {
+    await reconciler.reconcile(rig.id);
+  }
 
   const deps: AppDeps = {
     rigRepo,

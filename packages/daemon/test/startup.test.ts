@@ -1,7 +1,33 @@
 import { describe, it, expect, vi } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { createDaemon } from "../src/startup.js";
+import { createDb } from "../src/db/connection.js";
+import { migrate } from "../src/db/migrate.js";
+import { coreSchema } from "../src/db/migrations/001_core_schema.js";
+import { bindingsSessionsSchema } from "../src/db/migrations/002_bindings_sessions.js";
+import { eventsSchema } from "../src/db/migrations/003_events.js";
+import { RigRepository } from "../src/domain/rig-repository.js";
+import { SessionRegistry } from "../src/domain/session-registry.js";
 import type { CmuxTransportFactory } from "../src/adapters/cmux.js";
 import type { ExecFn } from "../src/adapters/tmux.js";
+
+function seedDbWithStaleSessions(dbPath: string, rigs: { rigName: string; logicalId: string; sessionName: string }[]) {
+  const db = createDb(dbPath);
+  migrate(db, [coreSchema, bindingsSessionsSchema, eventsSchema]);
+  const rigRepo = new RigRepository(db);
+  const sessionRegistry = new SessionRegistry(db);
+
+  for (const r of rigs) {
+    const rig = rigRepo.createRig(r.rigName);
+    const node = rigRepo.addNode(rig.id, r.logicalId);
+    const session = sessionRegistry.registerSession(node.id, r.sessionName);
+    sessionRegistry.updateStatus(session.id, "running");
+  }
+
+  db.close();
+}
 
 describe("createDaemon startup composition", () => {
   it("calls cmuxAdapter.connect() during startup", async () => {
@@ -88,6 +114,74 @@ describe("createDaemon startup composition", () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.available).toBe(false);
+
+    db.close();
+  });
+
+  it("startup reconciles stale session: status=detached + event row in DB", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "rigged-test-"));
+    const dbPath = path.join(tmpDir, "test.sqlite");
+
+    seedDbWithStaleSessions(dbPath, [
+      { rigName: "r01", logicalId: "dev1-impl", sessionName: "r01-dev1-impl" },
+    ]);
+
+    // tmux reports no sessions (session is gone)
+    const tmuxExec: ExecFn = async () => "";
+    const cmuxExec: ExecFn = async () => { throw Object.assign(new Error(""), { code: "ENOENT" }); };
+
+    const { db } = await createDaemon({ dbPath, tmuxExec, cmuxExec });
+
+    // After createDaemon returns, session should be detached
+    const sessions = db.prepare("SELECT status FROM sessions").all() as { status: string }[];
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0]!.status).toBe("detached");
+
+    // Event row should exist
+    const events = db.prepare("SELECT type FROM events WHERE type = 'session.detached'").all();
+    expect(events).toHaveLength(1);
+
+    db.close();
+    fs.rmSync(tmpDir, { recursive: true });
+  });
+
+  it("startup reconciles multiple rigs: all stale sessions detached", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "rigged-test-"));
+    const dbPath = path.join(tmpDir, "test.sqlite");
+
+    seedDbWithStaleSessions(dbPath, [
+      { rigName: "r01", logicalId: "dev1-impl", sessionName: "r01-dev1-impl" },
+      { rigName: "r02", logicalId: "dev2-impl", sessionName: "r02-dev2-impl" },
+    ]);
+
+    const tmuxExec: ExecFn = async () => "";
+    const cmuxExec: ExecFn = async () => { throw Object.assign(new Error(""), { code: "ENOENT" }); };
+
+    const { db } = await createDaemon({ dbPath, tmuxExec, cmuxExec });
+
+    // Both sessions should be detached
+    const sessions = db.prepare("SELECT status FROM sessions ORDER BY session_name").all() as { status: string }[];
+    expect(sessions).toHaveLength(2);
+    expect(sessions[0]!.status).toBe("detached");
+    expect(sessions[1]!.status).toBe("detached");
+
+    // Both events should exist
+    const events = db.prepare("SELECT type FROM events WHERE type = 'session.detached'").all();
+    expect(events).toHaveLength(2);
+
+    db.close();
+    fs.rmSync(tmpDir, { recursive: true });
+  });
+
+  it("startup reconcile with empty DB runs without error", async () => {
+    const tmuxExec: ExecFn = async () => "";
+    const cmuxExec: ExecFn = async () => { throw Object.assign(new Error(""), { code: "ENOENT" }); };
+
+    const { db } = await createDaemon({ tmuxExec, cmuxExec });
+
+    // No sessions, no events, no errors
+    const sessions = db.prepare("SELECT * FROM sessions").all();
+    expect(sessions).toHaveLength(0);
 
     db.close();
   });
