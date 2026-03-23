@@ -10,6 +10,21 @@ export interface CmuxStatus {
   capabilities: Record<string, boolean>;
 }
 
+export interface CmuxWorkspace {
+  id: string;
+  name: string;
+}
+
+export interface CmuxSurface {
+  id: string;
+  title: string;
+  type: string;
+}
+
+export type CmuxResult<T> =
+  | { ok: true; data: T }
+  | { ok: false; code: string; message: string };
+
 interface CmuxAdapterOptions {
   timeoutMs: number;
 }
@@ -83,6 +98,59 @@ export class CmuxAdapter {
 
   isAvailable(): boolean {
     return this.status.available;
+  }
+
+  async listWorkspaces(): Promise<CmuxResult<CmuxWorkspace[]>> {
+    if (!this.transport) {
+      return { ok: false, code: "unavailable", message: "cmux is not connected" };
+    }
+    try {
+      const result = (await this.transport.request("workspace.list")) as {
+        workspaces?: CmuxWorkspace[];
+      };
+      return { ok: true, data: result.workspaces ?? [] };
+    } catch (err) {
+      return { ok: false, code: "request_failed", message: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  async listSurfaces(workspaceId?: string): Promise<CmuxResult<CmuxSurface[]>> {
+    if (!this.transport) {
+      return { ok: false, code: "unavailable", message: "cmux is not connected" };
+    }
+    try {
+      const params = workspaceId != null ? { workspaceId } : undefined;
+      const result = (await this.transport.request("surface.list", params)) as {
+        surfaces?: CmuxSurface[];
+      };
+      return { ok: true, data: result.surfaces ?? [] };
+    } catch (err) {
+      return { ok: false, code: "request_failed", message: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  async focusSurface(surfaceId: string): Promise<CmuxResult<void>> {
+    if (!this.transport) {
+      return { ok: false, code: "unavailable", message: "cmux is not connected" };
+    }
+    try {
+      await this.transport.request("surface.focus", { surfaceId });
+      return { ok: true, data: undefined };
+    } catch (err) {
+      return { ok: false, code: "request_failed", message: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  async sendText(surfaceId: string, text: string): Promise<CmuxResult<void>> {
+    if (!this.transport) {
+      return { ok: false, code: "unavailable", message: "cmux is not connected" };
+    }
+    try {
+      await this.transport.request("surface.sendText", { surfaceId, text });
+      return { ok: true, data: undefined };
+    } catch (err) {
+      return { ok: false, code: "request_failed", message: err instanceof Error ? err.message : String(err) };
+    }
   }
 }
 

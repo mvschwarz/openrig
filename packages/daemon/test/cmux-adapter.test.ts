@@ -4,6 +4,9 @@ import type {
   CmuxTransport,
   CmuxTransportFactory,
   CmuxStatus,
+  CmuxResult,
+  CmuxWorkspace,
+  CmuxSurface,
 } from "../src/adapters/cmux.js";
 
 function workingFactory(capabilities: string[] = ["workspace.list", "surface.list", "surface.focus"]): CmuxTransportFactory {
@@ -24,6 +27,21 @@ function failingFactory(code: string): CmuxTransportFactory {
     err.code = code;
     throw err;
   };
+}
+
+function surfaceFactory(responses: Record<string, unknown>): CmuxTransportFactory {
+  return async () => ({
+    request: async (method: string) => {
+      if (method === "capabilities") {
+        return { capabilities: Object.keys(responses) };
+      }
+      if (method in responses) {
+        return responses[method];
+      }
+      return {};
+    },
+    close: () => {},
+  });
 }
 
 function hangingFactory(): CmuxTransportFactory {
@@ -184,5 +202,172 @@ describe("CmuxAdapter", () => {
     expect(adapter.isAvailable()).toBe(true);
     expect(adapter.getStatus().capabilities["workspace.list"]).toBe(true);
     expect(callCount).toBe(2);
+  });
+
+  // -- Surface operations (T14) --
+
+  describe("listWorkspaces", () => {
+    it("returns typed workspace list from transport", async () => {
+      const factory = surfaceFactory({
+        "workspace.list": { workspaces: [{ id: "ws-1", name: "review" }, { id: "ws-2", name: "dev" }] },
+      });
+      const adapter = new CmuxAdapter(factory, { timeoutMs: 1000 });
+      await adapter.connect();
+
+      const result: CmuxResult<CmuxWorkspace[]> = await adapter.listWorkspaces();
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.data).toHaveLength(2);
+        expect(result.data[0]!.id).toBe("ws-1");
+        expect(result.data[0]!.name).toBe("review");
+        expect(result.data[1]!.id).toBe("ws-2");
+      }
+    });
+
+    it("returns { ok: false, code: 'unavailable' } when not connected", async () => {
+      const adapter = new CmuxAdapter(workingFactory(), { timeoutMs: 1000 });
+      // No connect()
+      const result = await adapter.listWorkspaces();
+      expect(result).toEqual({ ok: false, code: "unavailable", message: "cmux is not connected" });
+    });
+  });
+
+  describe("listSurfaces", () => {
+    it("returns typed surface list from transport", async () => {
+      const factory = surfaceFactory({
+        "surface.list": { surfaces: [{ id: "s-1", title: "orchestrator", type: "terminal" }] },
+      });
+      const adapter = new CmuxAdapter(factory, { timeoutMs: 1000 });
+      await adapter.connect();
+
+      const result: CmuxResult<CmuxSurface[]> = await adapter.listSurfaces();
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.data).toHaveLength(1);
+        expect(result.data[0]!.id).toBe("s-1");
+        expect(result.data[0]!.title).toBe("orchestrator");
+      }
+    });
+
+    it("with workspaceId forwards filter param to transport", async () => {
+      const requestSpy = vi.fn().mockImplementation(async (method: string) => {
+        if (method === "capabilities") return { capabilities: ["surface.list"] };
+        if (method === "surface.list") return { surfaces: [] };
+        return {};
+      });
+      const factory: CmuxTransportFactory = async () => ({
+        request: requestSpy,
+        close: () => {},
+      });
+      const adapter = new CmuxAdapter(factory, { timeoutMs: 1000 });
+      await adapter.connect();
+
+      await adapter.listSurfaces("ws-1");
+
+      // Find the surface.list call (not the capabilities call)
+      const surfaceCall = requestSpy.mock.calls.find((c: unknown[]) => c[0] === "surface.list");
+      expect(surfaceCall).toBeDefined();
+      expect(surfaceCall![1]).toEqual({ workspaceId: "ws-1" });
+    });
+
+    it("returns { ok: false, code: 'unavailable' } when not connected", async () => {
+      const adapter = new CmuxAdapter(workingFactory(), { timeoutMs: 1000 });
+      const result = await adapter.listSurfaces();
+      expect(result).toEqual({ ok: false, code: "unavailable", message: "cmux is not connected" });
+    });
+  });
+
+  describe("focusSurface", () => {
+    it("calls transport with correct method and params", async () => {
+      const requestSpy = vi.fn().mockImplementation(async (method: string) => {
+        if (method === "capabilities") return { capabilities: ["surface.focus"] };
+        return {};
+      });
+      const factory: CmuxTransportFactory = async () => ({
+        request: requestSpy,
+        close: () => {},
+      });
+      const adapter = new CmuxAdapter(factory, { timeoutMs: 1000 });
+      await adapter.connect();
+
+      await adapter.focusSurface("s-1");
+
+      const focusCall = requestSpy.mock.calls.find((c: unknown[]) => c[0] === "surface.focus");
+      expect(focusCall).toBeDefined();
+      expect(focusCall![1]).toEqual({ surfaceId: "s-1" });
+    });
+
+    it("returns { ok: true, data: undefined } on success", async () => {
+      const factory = surfaceFactory({ "surface.focus": {} });
+      const adapter = new CmuxAdapter(factory, { timeoutMs: 1000 });
+      await adapter.connect();
+
+      const result: CmuxResult<void> = await adapter.focusSurface("s-1");
+      expect(result).toEqual({ ok: true, data: undefined });
+    });
+
+    it("returns { ok: false, code: 'unavailable' } when not connected", async () => {
+      const adapter = new CmuxAdapter(workingFactory(), { timeoutMs: 1000 });
+      const result = await adapter.focusSurface("s-1");
+      expect(result).toEqual({ ok: false, code: "unavailable", message: "cmux is not connected" });
+    });
+  });
+
+  describe("sendText (cmux)", () => {
+    it("calls transport with correct method and params", async () => {
+      const requestSpy = vi.fn().mockImplementation(async (method: string) => {
+        if (method === "capabilities") return { capabilities: ["surface.sendText"] };
+        return {};
+      });
+      const factory: CmuxTransportFactory = async () => ({
+        request: requestSpy,
+        close: () => {},
+      });
+      const adapter = new CmuxAdapter(factory, { timeoutMs: 1000 });
+      await adapter.connect();
+
+      await adapter.sendText("s-1", "hello world");
+
+      const sendCall = requestSpy.mock.calls.find((c: unknown[]) => c[0] === "surface.sendText");
+      expect(sendCall).toBeDefined();
+      expect(sendCall![1]).toEqual({ surfaceId: "s-1", text: "hello world" });
+    });
+
+    it("returns { ok: true, data: undefined } on success", async () => {
+      const factory = surfaceFactory({ "surface.sendText": {} });
+      const adapter = new CmuxAdapter(factory, { timeoutMs: 1000 });
+      await adapter.connect();
+
+      const result: CmuxResult<void> = await adapter.sendText("s-1", "test");
+      expect(result).toEqual({ ok: true, data: undefined });
+    });
+
+    it("returns { ok: false, code: 'unavailable' } when not connected", async () => {
+      const adapter = new CmuxAdapter(workingFactory(), { timeoutMs: 1000 });
+      const result = await adapter.sendText("s-1", "test");
+      expect(result).toEqual({ ok: false, code: "unavailable", message: "cmux is not connected" });
+    });
+  });
+
+  describe("transport request failure", () => {
+    it("returns { ok: false, code: 'request_failed' }", async () => {
+      const requestSpy = vi.fn().mockImplementation(async (method: string) => {
+        if (method === "capabilities") return { capabilities: ["workspace.list"] };
+        throw new Error("socket closed unexpectedly");
+      });
+      const factory: CmuxTransportFactory = async () => ({
+        request: requestSpy,
+        close: () => {},
+      });
+      const adapter = new CmuxAdapter(factory, { timeoutMs: 1000 });
+      await adapter.connect();
+
+      const result = await adapter.listWorkspaces();
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.code).toBe("request_failed");
+        expect(result.message).toContain("socket closed unexpectedly");
+      }
+    });
   });
 });
