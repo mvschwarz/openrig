@@ -1,10 +1,16 @@
 import { Hono } from "hono";
 import type { RigRepository } from "../domain/rig-repository.js";
+import type { SessionRegistry } from "../domain/session-registry.js";
+import { projectRigToGraph } from "../domain/graph-projection.js";
 
 export const rigsRoutes = new Hono();
 
 function getRepo(c: { get: (key: string) => unknown }): RigRepository {
   return c.get("rigRepo" as never) as RigRepository;
+}
+
+function getSessionRegistry(c: { get: (key: string) => unknown }): SessionRegistry {
+  return c.get("sessionRegistry" as never) as SessionRegistry;
 }
 
 rigsRoutes.post("/", async (c) => {
@@ -28,6 +34,15 @@ rigsRoutes.get("/:id", (c) => {
     return c.json({ error: "rig not found" }, 404);
   }
   return c.json(rig);
+});
+
+rigsRoutes.get("/:id/graph", (c) => {
+  const rig = getRepo(c).getRig(c.req.param("id"));
+  if (!rig) {
+    return c.json({ error: "rig not found" }, 404);
+  }
+  const sessions = getSessionRegistry(c).getSessionsForRig(c.req.param("id"));
+  return c.json(projectRigToGraph({ ...rig, sessions }));
 });
 
 rigsRoutes.delete("/:id", (c) => {
