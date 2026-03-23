@@ -36,6 +36,15 @@ export interface Binding {
   updatedAt: string;
 }
 
+export interface Session {
+  id: string;
+  nodeId: string;
+  sessionName: string;
+  status: string;
+  lastSeenAt: string | null;
+  createdAt: string;
+}
+
 export interface NodeWithBinding extends Node {
   binding: Binding | null;
 }
