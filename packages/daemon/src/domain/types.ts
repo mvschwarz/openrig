@@ -45,6 +45,25 @@ export interface Session {
   createdAt: string;
 }
 
+// -- Event types --
+
+export type RigEvent =
+  | { type: "rig.created"; rigId: string }
+  | { type: "rig.deleted"; rigId: string }
+  | { type: "node.added"; rigId: string; nodeId: string; logicalId: string }
+  | { type: "node.removed"; rigId: string; nodeId: string }
+  | { type: "binding.updated"; rigId: string; nodeId: string }
+  | { type: "session.status_changed"; rigId: string; nodeId: string; status: string }
+  | { type: "session.detached"; rigId: string; nodeId: string; sessionName: string }
+  | { type: "node.launched"; rigId: string; nodeId: string; sessionName: string };
+
+export type PersistedEvent = RigEvent & {
+  seq: number;
+  createdAt: string;
+};
+
+// -- Composite types --
+
 export interface NodeWithBinding extends Node {
   binding: Binding | null;
 }
