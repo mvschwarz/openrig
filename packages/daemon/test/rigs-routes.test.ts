@@ -1,12 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import type { Hono } from "hono";
 import type Database from "better-sqlite3";
-import { createDb } from "../src/db/connection.js";
-import { migrate } from "../src/db/migrate.js";
-import { coreSchema } from "../src/db/migrations/001_core_schema.js";
-import { bindingsSessionsSchema } from "../src/db/migrations/002_bindings_sessions.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
-import { createApp } from "../src/server.js";
+import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
 
 describe("Rig CRUD routes", () => {
   let db: Database.Database;
@@ -14,10 +10,10 @@ describe("Rig CRUD routes", () => {
   let repo: RigRepository;
 
   beforeEach(() => {
-    db = createDb();
-    migrate(db, [coreSchema, bindingsSessionsSchema]);
-    repo = new RigRepository(db);
-    app = createApp({ rigRepo: repo });
+    db = createFullTestDb();
+    const setup = createTestApp(db);
+    app = setup.app;
+    repo = setup.rigRepo;
   });
 
   afterEach(() => {
@@ -73,7 +69,6 @@ describe("Rig CRUD routes", () => {
 
     const worker = body.nodes.find((n: { logicalId: string }) => n.logicalId === "worker");
     expect(worker).toBeDefined();
-    // binding must be explicitly null in JSON, not undefined/omitted
     expect(worker).toHaveProperty("binding");
     expect(worker.binding).toBeNull();
   });
@@ -88,8 +83,6 @@ describe("Rig CRUD routes", () => {
 
     const res = await app.request(`/api/rigs/${rig.id}`, { method: "DELETE" });
     expect(res.status).toBe(204);
-
-    // Verify it's gone
     expect(repo.getRig(rig.id)).toBeNull();
   });
 

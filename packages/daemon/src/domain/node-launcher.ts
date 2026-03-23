@@ -6,8 +6,10 @@ import type { TmuxAdapter } from "../adapters/tmux.js";
 import type { PersistedEvent } from "./types.js";
 import { validateSessionName, deriveSessionName } from "./session-name.js";
 
+import type { Session, Binding } from "./types.js";
+
 export type LaunchResult =
-  | { ok: true; sessionName: string }
+  | { ok: true; sessionName: string; session: Session; binding: Binding }
   | { ok: false; code: string; message: string };
 
 interface LaunchOpts {
@@ -113,6 +115,16 @@ export class NodeLauncher {
     // 5. Notify subscribers (best-effort, after commit)
     this.eventBus.notifySubscribers(persistedEvent);
 
-    return { ok: true, sessionName };
+    // 6. Fetch the created session + binding for the caller
+    const sessions = this.sessionRegistry.getSessionsForRig(rigId);
+    const session = sessions.find((s) => s.nodeId === node.id);
+    const binding = this.sessionRegistry.getBindingForNode(node.id);
+
+    return {
+      ok: true,
+      sessionName,
+      session: session!,
+      binding: binding!,
+    };
   }
 }
