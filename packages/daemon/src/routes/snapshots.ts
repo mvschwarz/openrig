@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { RigNotFoundError } from "../domain/errors.js";
 import type { SnapshotCapture } from "../domain/snapshot-capture.js";
 import type { SnapshotRepository } from "../domain/snapshot-repository.js";
 import type { RestoreOrchestrator } from "../domain/restore-orchestrator.js";
@@ -25,9 +26,8 @@ snapshotsRoutes.post("/", async (c) => {
     const snapshot = snapshotCapture.captureSnapshot(rigId, kind);
     return c.json(snapshot, 201);
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    if (message.includes("not found")) {
-      return c.json({ error: message }, 404);
+    if (err instanceof RigNotFoundError) {
+      return c.json({ error: err.message }, 404);
     }
     return c.json({ error: "Failed to capture snapshot" }, 500);
   }

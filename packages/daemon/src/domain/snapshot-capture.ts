@@ -6,6 +6,7 @@ import type { SnapshotRepository } from "./snapshot-repository.js";
 import type { PersistedEvent } from "./types.js";
 import type { CheckpointStore } from "./checkpoint-store.js";
 import type { Snapshot, SnapshotData } from "./types.js";
+import { RigNotFoundError } from "./errors.js";
 
 interface SnapshotCaptureDeps {
   db: Database.Database;
@@ -53,7 +54,7 @@ export class SnapshotCapture {
     // 1. Get rig with nodes, edges, bindings
     const rig = this.rigRepo.getRig(rigId);
     if (!rig) {
-      throw new Error(`Rig ${rigId} not found`);
+      throw new RigNotFoundError(rigId);
     }
 
     // 2. Get sessions with resume metadata

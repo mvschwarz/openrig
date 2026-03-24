@@ -80,6 +80,22 @@ describe("Snapshot routes", () => {
     expect(res.status).toBe(404);
   });
 
+  it("POST with non-rig error containing 'not found' -> 500 (not false-positive 404)", async () => {
+    const rig = rigRepo.createRig("r99");
+
+    // Sabotage with error message containing 'not found' — must NOT match as 404
+    db.exec("CREATE TRIGGER block_snap_notfound BEFORE INSERT ON snapshots BEGIN SELECT RAISE(ABORT, 'index not found in cache'); END;");
+
+    const res = await app.request(`/api/rigs/${rig.id}/snapshots`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ kind: "manual" }),
+    });
+    expect(res.status).toBe(500);
+
+    db.exec("DROP TRIGGER block_snap_notfound");
+  });
+
   it("POST snapshot with sabotaged DB -> 500 (not 404)", async () => {
     const rig = rigRepo.createRig("r99");
 

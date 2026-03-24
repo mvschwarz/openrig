@@ -156,8 +156,15 @@ describe("SnapshotCapture", () => {
     expect(snap.data.checkpoints).toEqual({});
   });
 
-  it("nonexistent rig -> error", () => {
-    expect(() => capture.captureSnapshot("nonexistent", "manual")).toThrow();
+  it("nonexistent rig -> throws RigNotFoundError specifically", async () => {
+    const { RigNotFoundError } = await import("../src/domain/errors.js");
+    let caught: unknown;
+    try {
+      capture.captureSnapshot("nonexistent", "manual");
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(RigNotFoundError);
   });
 
   it("constructor throws on mismatched db handles", () => {
