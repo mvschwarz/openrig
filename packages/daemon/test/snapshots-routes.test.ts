@@ -71,6 +71,31 @@ describe("Snapshot routes", () => {
     expect(body.data.nodes).toHaveLength(1);
   });
 
+  it("POST /api/rigs/nonexistent/snapshots -> 404", async () => {
+    const res = await app.request("/api/rigs/nonexistent-rig/snapshots", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ kind: "manual" }),
+    });
+    expect(res.status).toBe(404);
+  });
+
+  it("POST snapshot with sabotaged DB -> 500 (not 404)", async () => {
+    const rig = rigRepo.createRig("r99");
+
+    // Sabotage snapshots table so creation fails with non-not-found error
+    db.exec("CREATE TRIGGER block_snap_create BEFORE INSERT ON snapshots BEGIN SELECT RAISE(ABORT, 'db error'); END;");
+
+    const res = await app.request(`/api/rigs/${rig.id}/snapshots`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ kind: "manual" }),
+    });
+    expect(res.status).toBe(500);
+
+    db.exec("DROP TRIGGER block_snap_create");
+  });
+
   it("GET nonexistent snapshot -> 404", async () => {
     const rig = rigRepo.createRig("r99");
     const res = await app.request(`/api/rigs/${rig.id}/snapshots/nonexistent`);

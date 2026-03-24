@@ -24,7 +24,11 @@ snapshotsRoutes.post("/", async (c) => {
   try {
     const snapshot = snapshotCapture.captureSnapshot(rigId, kind);
     return c.json(snapshot, 201);
-  } catch {
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (message.includes("not found")) {
+      return c.json({ error: message }, 404);
+    }
     return c.json({ error: "Failed to capture snapshot" }, 500);
   }
 });
