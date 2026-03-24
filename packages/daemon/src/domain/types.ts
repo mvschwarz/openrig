@@ -76,3 +76,32 @@ export interface RigWithRelations {
   nodes: NodeWithBinding[];
   edges: Edge[];
 }
+
+export interface SnapshotData {
+  rig: Rig;
+  nodes: NodeWithBinding[];
+  edges: Edge[];
+  sessions: Session[];
+  checkpoints: Record<string, Checkpoint | null>;
+}
+
+export interface Snapshot {
+  id: string;
+  rigId: string;
+  kind: string;
+  status: string;
+  data: SnapshotData;
+  createdAt: string;
+}
+
+export interface Checkpoint {
+  id: string;
+  nodeId: string;
+  summary: string;
+  currentTask: string | null;
+  nextStep: string | null;
+  blockedOn: string | null;
+  keyArtifacts: string[];
+  confidence: string | null;
+  createdAt: string;
+}
