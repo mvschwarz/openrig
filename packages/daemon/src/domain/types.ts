@@ -160,3 +160,14 @@ export interface RigSpecEdge {
   to: string;
   kind: string;
 }
+
+export interface ValidationResult {
+  valid: boolean;
+  errors: string[];
+}
+
+export interface PreflightResult {
+  ready: boolean;
+  warnings: string[];
+  errors: string[];
+}
