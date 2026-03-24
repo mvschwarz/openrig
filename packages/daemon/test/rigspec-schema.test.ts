@@ -116,6 +116,22 @@ describe("RigSpecSchema", () => {
       expect(result.errors.some((e) => e.includes("unknown_kind"))).toBe(true);
     });
 
+    it("package_refs non-array -> error", () => {
+      const raw = validRaw();
+      (raw["nodes"] as Record<string, unknown>[])[0]!["package_refs"] = "not-an-array";
+      const result = RigSpecSchema.validate(raw);
+      expect(result.valid).toBe(false);
+      expect(result.errors.some((e) => e.includes("package_refs"))).toBe(true);
+    });
+
+    it("package_refs with non-string elements -> error", () => {
+      const raw = validRaw();
+      (raw["nodes"] as Record<string, unknown>[])[0]!["package_refs"] = [123, true];
+      const result = RigSpecSchema.validate(raw);
+      expect(result.valid).toBe(false);
+      expect(result.errors.some((e) => e.includes("package_refs"))).toBe(true);
+    });
+
     it("edge references nonexistent node -> error", () => {
       const raw = validRaw();
       (raw["edges"] as Record<string, unknown>[])[0]!["to"] = "nonexistent";

@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import type Database from "better-sqlite3";
 import type { RigRepository } from "./rig-repository.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
@@ -64,8 +64,18 @@ export class RigSpecPreflight {
 
     // cwd existence
     for (const node of spec.nodes) {
-      if (node.cwd && !existsSync(node.cwd)) {
-        errors.push(`cwd '${node.cwd}' does not exist for node '${node.id}'`);
+      if (node.cwd) {
+        if (!existsSync(node.cwd)) {
+          errors.push(`cwd '${node.cwd}' does not exist for node '${node.id}'`);
+        } else {
+          try {
+            if (!statSync(node.cwd).isDirectory()) {
+              errors.push(`cwd '${node.cwd}' is not a directory for node '${node.id}'`);
+            }
+          } catch {
+            errors.push(`cwd '${node.cwd}' is not accessible for node '${node.id}'`);
+          }
+        }
       }
     }
 

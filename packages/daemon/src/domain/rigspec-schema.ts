@@ -65,6 +65,14 @@ export class RigSpecSchema {
         if (node["restore_policy"] != null && !KNOWN_RESTORE_POLICIES.has(node["restore_policy"] as string)) {
           errors.push(`node ${node["id"]}: unknown restorePolicy '${node["restore_policy"]}'`);
         }
+
+        if (node["package_refs"] != null) {
+          if (!Array.isArray(node["package_refs"])) {
+            errors.push(`node ${node["id"]}: package_refs must be an array`);
+          } else if (!(node["package_refs"] as unknown[]).every((r) => typeof r === "string")) {
+            errors.push(`node ${node["id"]}: package_refs must contain only strings`);
+          }
+        }
       }
     }
 

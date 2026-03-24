@@ -171,6 +171,23 @@ describe("RigSpecExporter", () => {
     expect(worker.restorePolicy).toBe("relaunch_fresh"); // s2 is newest
   });
 
+  it("same-second sessions: tiebreaker by id (ULID) for deterministic result", () => {
+    const { rig, n1 } = seedRig();
+    // Two sessions with identical createdAt but different IDs and policies
+    // ULID "B..." sorts after "A..." so sess-b is the "latest"
+    db.prepare(
+      "INSERT INTO sessions (id, node_id, session_name, status, restore_policy, created_at) VALUES (?, ?, ?, ?, ?, ?)"
+    ).run("AAAA_sess_first", n1.id, "r99-orchestrator", "running", "relaunch_fresh", "2026-03-23 05:00:00");
+    db.prepare(
+      "INSERT INTO sessions (id, node_id, session_name, status, restore_policy, created_at) VALUES (?, ?, ?, ?, ?, ?)"
+    ).run("ZZZZ_sess_second", n1.id, "r99-orchestrator", "running", "checkpoint_only", "2026-03-23 05:00:00");
+
+    const spec = exporter.exportRig(rig.id);
+    const orch = spec.nodes.find((n) => n.id === "orchestrator")!;
+    // ZZZZ sorts after AAAA, so checkpoint_only should win
+    expect(orch.restorePolicy).toBe("checkpoint_only");
+  });
+
   it("export nonexistent rig -> throws RigNotFoundError", () => {
     expect(() => exporter.exportRig("nonexistent")).toThrow(RigNotFoundError);
   });

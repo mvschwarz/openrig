@@ -139,6 +139,27 @@ describe("RigSpecPreflight", () => {
     expect(result.errors.some((e) => e.includes("claude-code"))).toBe(true);
   });
 
+  it("cwd points to a file -> error", async () => {
+    // /etc/hosts is a file, not a directory
+    const spec = validSpec({
+      nodes: [{ id: "worker", runtime: "claude-code", cwd: "/etc/hosts" }],
+    });
+    const pf = createPreflight();
+    const result = await pf.check(spec);
+    expect(result.ready).toBe(false);
+    expect(result.errors.some((e) => e.includes("/etc/hosts") && e.includes("directory"))).toBe(true);
+  });
+
+  it("cwd points to a directory -> passes cwd check", async () => {
+    const spec = validSpec({
+      nodes: [{ id: "worker", runtime: "claude-code", cwd: "/tmp" }],
+    });
+    const pf = createPreflight();
+    const result = await pf.check(spec);
+    // Should not have a cwd error (may have other errors like session name)
+    expect(result.errors.filter((e) => e.includes("cwd") || e.includes("/tmp"))).toHaveLength(0);
+  });
+
   it("multiple errors reported (2 bad cwds -> 2 errors)", async () => {
     const spec = validSpec({
       nodes: [

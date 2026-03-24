@@ -36,7 +36,7 @@ export class RigSpecExporter {
       // Find latest session's restorePolicy for this node
       const nodeSessions = sessions
         .filter((s) => s.nodeId === node.id)
-        .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+        .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id));
       const latestSession = nodeSessions.length > 0
         ? nodeSessions[nodeSessions.length - 1]!
         : null;
