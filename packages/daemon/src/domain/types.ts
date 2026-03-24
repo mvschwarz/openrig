@@ -132,3 +132,31 @@ export type RestoreOutcome =
   | { ok: false; code: "rig_not_found"; message: string }
   | { ok: false; code: "restore_error"; message: string }
   | { ok: false; code: "restore_in_progress"; message: string };
+
+// -- RigSpec types (Phase 3) --
+
+export interface RigSpec {
+  schemaVersion: number;
+  name: string;
+  version: string;
+  nodes: RigSpecNode[];
+  edges: RigSpecEdge[];
+}
+
+export interface RigSpecNode {
+  id: string;
+  runtime: string;
+  role?: string;
+  model?: string;
+  cwd?: string;
+  surfaceHint?: string;
+  workspace?: string;
+  restorePolicy?: string;
+  packageRefs?: string[];
+}
+
+export interface RigSpecEdge {
+  from: string;
+  to: string;
+  kind: string;
+}
