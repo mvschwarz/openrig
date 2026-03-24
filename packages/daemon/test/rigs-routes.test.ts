@@ -3,6 +3,7 @@ import type { Hono } from "hono";
 import type Database from "better-sqlite3";
 import type { RigRepository } from "../src/domain/rig-repository.js";
 import type { SessionRegistry } from "../src/domain/session-registry.js";
+import type { SnapshotRepository } from "../src/domain/snapshot-repository.js";
 import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
 
 describe("Rig CRUD routes", () => {
@@ -10,6 +11,7 @@ describe("Rig CRUD routes", () => {
   let app: Hono;
   let repo: RigRepository;
   let sessionRegistry: SessionRegistry;
+  let snapshotRepo: SnapshotRepository;
 
   beforeEach(() => {
     db = createFullTestDb();
@@ -17,6 +19,7 @@ describe("Rig CRUD routes", () => {
     app = setup.app;
     repo = setup.rigRepo;
     sessionRegistry = setup.sessionRegistry;
+    snapshotRepo = setup.snapshotRepo;
   });
 
   afterEach(() => {
@@ -219,5 +222,85 @@ describe("Rig CRUD routes", () => {
   it("GET /api/rigs/:id/graph with nonexistent id -> 404", async () => {
     const res = await app.request("/api/rigs/nonexistent/graph");
     expect(res.status).toBe(404);
+  });
+
+  // -- UX-T01b: Rig summary endpoint --
+
+  it("GET /api/rigs/summary -> rig list with node counts", async () => {
+    const rig1 = repo.createRig("alpha");
+    repo.addNode(rig1.id, "orchestrator", { runtime: "claude-code" });
+    repo.addNode(rig1.id, "worker", { runtime: "codex" });
+
+    const rig2 = repo.createRig("beta");
+    repo.addNode(rig2.id, "solo", { runtime: "claude-code" });
+
+    const res = await app.request("/api/rigs/summary");
+    expect(res.status).toBe(200);
+    const body = await res.json();
+
+    expect(body).toHaveLength(2);
+    const alpha = body.find((r: { name: string }) => r.name === "alpha");
+    const beta = body.find((r: { name: string }) => r.name === "beta");
+    expect(alpha.id).toBe(rig1.id);
+    expect(alpha.nodeCount).toBe(2);
+    expect(beta.id).toBe(rig2.id);
+    expect(beta.nodeCount).toBe(1);
+  });
+
+  it("GET /api/rigs/summary -> multiple snapshots with explicit timestamps, newest wins", async () => {
+    const rig = repo.createRig("gamma");
+    repo.addNode(rig.id, "worker", { runtime: "codex" });
+
+    // Insert snapshots with explicit timestamps to prove newest-wins
+    db.prepare(
+      "INSERT INTO snapshots (id, rig_id, kind, status, data, created_at) VALUES (?, ?, ?, ?, ?, ?)"
+    ).run("snap-old", rig.id, "manual", "complete", "{}", "2026-03-23 01:00:00");
+    db.prepare(
+      "INSERT INTO snapshots (id, rig_id, kind, status, data, created_at) VALUES (?, ?, ?, ?, ?, ?)"
+    ).run("snap-new", rig.id, "manual", "complete", "{}", "2026-03-23 03:00:00");
+    db.prepare(
+      "INSERT INTO snapshots (id, rig_id, kind, status, data, created_at) VALUES (?, ?, ?, ?, ?, ?)"
+    ).run("snap-mid", rig.id, "manual", "complete", "{}", "2026-03-23 02:00:00");
+
+    const res = await app.request("/api/rigs/summary");
+    expect(res.status).toBe(200);
+    const body = await res.json();
+
+    const gamma = body.find((r: { name: string }) => r.name === "gamma");
+    expect(gamma.latestSnapshotId).toBe("snap-new");
+    expect(gamma.latestSnapshotAt).toBe("2026-03-23 03:00:00");
+  });
+
+  it("GET /api/rigs/summary -> no snapshots: both latestSnapshotAt and latestSnapshotId are null", async () => {
+    const rig = repo.createRig("delta");
+    repo.addNode(rig.id, "worker", { runtime: "codex" });
+
+    const res = await app.request("/api/rigs/summary");
+    expect(res.status).toBe(200);
+    const body = await res.json();
+
+    const delta = body.find((r: { name: string }) => r.name === "delta");
+    expect(delta).toBeDefined();
+    expect(delta.latestSnapshotAt).toBeNull();
+    expect(delta.latestSnapshotId).toBeNull();
+  });
+
+  it("GET /api/rigs/summary -> empty DB returns empty array", async () => {
+    const res = await app.request("/api/rigs/summary");
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toEqual([]);
+  });
+
+  it("GET /api/rigs/summary -> returns array shape, not rig-by-id shape (route order guardrail)", async () => {
+    // This test proves /summary is not swallowed by /:id
+    // If /:id resolves first, "summary" would be treated as a rig ID
+    // and return either a 404 or a rig-by-id object — not an array
+    const res = await app.request("/api/rigs/summary");
+    expect(res.status).toBe(200);
+    const body = await res.json();
+
+    // Must be an array (summary shape), not an object (rig-by-id shape or 404 error shape)
+    expect(Array.isArray(body)).toBe(true);
   });
 });
