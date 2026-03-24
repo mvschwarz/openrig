@@ -58,7 +58,10 @@ export type RigEvent =
   | { type: "binding.updated"; rigId: string; nodeId: string }
   | { type: "session.status_changed"; rigId: string; nodeId: string; status: string }
   | { type: "session.detached"; rigId: string; nodeId: string; sessionName: string }
-  | { type: "node.launched"; rigId: string; nodeId: string; sessionName: string };
+  | { type: "node.launched"; rigId: string; nodeId: string; sessionName: string }
+  | { type: "snapshot.created"; rigId: string; snapshotId: string; kind: string }
+  | { type: "restore.started"; rigId: string; snapshotId: string }
+  | { type: "restore.completed"; rigId: string; snapshotId: string; result: RestoreResult };
 
 export type PersistedEvent = RigEvent & {
   seq: number;
@@ -104,4 +107,17 @@ export interface Checkpoint {
   keyArtifacts: string[];
   confidence: string | null;
   createdAt: string;
+}
+
+export interface RestoreResult {
+  snapshotId: string;
+  preRestoreSnapshotId: string;
+  nodes: RestoreNodeResult[];
+}
+
+export interface RestoreNodeResult {
+  nodeId: string;
+  logicalId: string;
+  status: "resumed" | "fresh_with_checkpoint" | "fresh_no_checkpoint" | "failed";
+  error?: string;
 }
