@@ -17,10 +17,14 @@ import { SnapshotRepository } from "../../src/domain/snapshot-repository.js";
 import { CheckpointStore } from "../../src/domain/checkpoint-store.js";
 import { SnapshotCapture } from "../../src/domain/snapshot-capture.js";
 import { RestoreOrchestrator } from "../../src/domain/restore-orchestrator.js";
+import { RigSpecExporter } from "../../src/domain/rigspec-exporter.js";
+import { RigSpecPreflight } from "../../src/domain/rigspec-preflight.js";
+import { RigInstantiator } from "../../src/domain/rigspec-instantiator.js";
 import { ClaudeResumeAdapter } from "../../src/adapters/claude-resume.js";
 import { CodexResumeAdapter } from "../../src/adapters/codex-resume.js";
 import { CmuxAdapter } from "../../src/adapters/cmux.js";
 import type { TmuxAdapter } from "../../src/adapters/tmux.js";
+import type { ExecFn } from "../../src/adapters/tmux.js";
 import type { CmuxTransportFactory } from "../../src/adapters/cmux.js";
 import { createApp } from "../../src/server.js";
 
@@ -37,7 +41,7 @@ export function mockTmuxAdapter(): TmuxAdapter {
     listSessions: vi.fn(async () => []),
     listWindows: async () => [],
     listPanes: async () => [],
-    hasSession: async () => false,
+    hasSession: vi.fn(async () => false),
     sendText: vi.fn(async () => ({ ok: true as const })),
     sendKeys: vi.fn(async () => ({ ok: true as const })),
   } as unknown as TmuxAdapter;
@@ -66,10 +70,19 @@ export function createTestApp(db: Database.Database, opts?: { cmux?: CmuxAdapter
     db, rigRepo, sessionRegistry, eventBus, snapshotRepo, snapshotCapture,
     checkpointStore, nodeLauncher, tmuxAdapter: tmux, claudeResume, codexResume,
   });
+  const rigSpecExporter = new RigSpecExporter({ rigRepo, sessionRegistry });
+  const exec: ExecFn = async () => "";
+  const rigSpecPreflight = new RigSpecPreflight({ rigRepo, tmuxAdapter: tmux, exec, cmuxExec: exec });
+  const rigInstantiator = new RigInstantiator({ db, rigRepo, sessionRegistry, eventBus, nodeLauncher, preflight: rigSpecPreflight });
 
   const app = createApp({
     rigRepo, sessionRegistry, eventBus, nodeLauncher, tmuxAdapter: tmux, cmuxAdapter: cmux,
     snapshotCapture, snapshotRepo, restoreOrchestrator,
+    rigSpecExporter, rigSpecPreflight, rigInstantiator,
   });
-  return { app, rigRepo, sessionRegistry, eventBus, nodeLauncher, snapshotRepo, snapshotCapture, checkpointStore, restoreOrchestrator, db };
+  return {
+    app, rigRepo, sessionRegistry, eventBus, nodeLauncher, snapshotRepo,
+    snapshotCapture, checkpointStore, restoreOrchestrator,
+    rigSpecExporter, rigSpecPreflight, rigInstantiator, db,
+  };
 }

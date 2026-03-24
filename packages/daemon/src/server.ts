@@ -8,11 +8,15 @@ import type { CmuxAdapter } from "./adapters/cmux.js";
 import type { SnapshotCapture } from "./domain/snapshot-capture.js";
 import type { SnapshotRepository } from "./domain/snapshot-repository.js";
 import type { RestoreOrchestrator } from "./domain/restore-orchestrator.js";
+import type { RigSpecExporter } from "./domain/rigspec-exporter.js";
+import type { RigSpecPreflight } from "./domain/rigspec-preflight.js";
+import type { RigInstantiator } from "./domain/rigspec-instantiator.js";
 import { rigsRoutes } from "./routes/rigs.js";
 import { sessionsRoutes, nodesRoutes } from "./routes/sessions.js";
 import { adaptersRoutes } from "./routes/adapters.js";
 import { eventsRoute } from "./routes/events.js";
 import { snapshotsRoutes, restoreRoutes } from "./routes/snapshots.js";
+import { handleExportYaml, handleExportJson, rigspecImportRoutes } from "./routes/rigspec.js";
 
 export interface AppDeps {
   rigRepo: RigRepository;
@@ -24,11 +28,13 @@ export interface AppDeps {
   snapshotCapture: SnapshotCapture;
   snapshotRepo: SnapshotRepository;
   restoreOrchestrator: RestoreOrchestrator;
+  rigSpecExporter: RigSpecExporter;
+  rigSpecPreflight: RigSpecPreflight;
+  rigInstantiator: RigInstantiator;
 }
 
 export function createApp(deps: AppDeps): Hono {
   // Hard runtime invariant: all domain services must share the same db handle.
-  // Routes that use atomic transactions across services depend on this.
   if (deps.rigRepo.db !== deps.eventBus.db) {
     throw new Error("createApp: rigRepo and eventBus must share the same db handle");
   }
@@ -44,6 +50,15 @@ export function createApp(deps: AppDeps): Hono {
   if (deps.rigRepo.db !== deps.restoreOrchestrator.db) {
     throw new Error("createApp: restoreOrchestrator must share the same db handle");
   }
+  if (deps.rigRepo.db !== deps.rigSpecExporter.db) {
+    throw new Error("createApp: rigSpecExporter must share the same db handle");
+  }
+  if (deps.rigRepo.db !== deps.rigSpecPreflight.db) {
+    throw new Error("createApp: rigSpecPreflight must share the same db handle");
+  }
+  if (deps.rigRepo.db !== deps.rigInstantiator.db) {
+    throw new Error("createApp: rigInstantiator must share the same db handle");
+  }
 
   const app = new Hono();
 
@@ -58,6 +73,9 @@ export function createApp(deps: AppDeps): Hono {
     c.set("snapshotCapture" as never, deps.snapshotCapture);
     c.set("snapshotRepo" as never, deps.snapshotRepo);
     c.set("restoreOrchestrator" as never, deps.restoreOrchestrator);
+    c.set("rigSpecExporter" as never, deps.rigSpecExporter);
+    c.set("rigSpecPreflight" as never, deps.rigSpecPreflight);
+    c.set("rigInstantiator" as never, deps.rigInstantiator);
     await next();
   });
 
@@ -72,6 +90,9 @@ export function createApp(deps: AppDeps): Hono {
   app.route("/api/events", eventsRoute);
   app.route("/api/rigs/:rigId/snapshots", snapshotsRoutes);
   app.route("/api/rigs/:rigId/restore", restoreRoutes);
+  app.route("/api/rigs/import", rigspecImportRoutes);
+  app.get("/api/rigs/:rigId/spec", handleExportYaml);
+  app.get("/api/rigs/:rigId/spec.json", handleExportJson);
 
   return app;
 }

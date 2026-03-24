@@ -9,6 +9,7 @@ interface RigSpecExporterDeps {
 }
 
 export class RigSpecExporter {
+  readonly db: import("better-sqlite3").Database;
   private rigRepo: RigRepository;
   private sessionRegistry: SessionRegistry;
 
@@ -16,6 +17,7 @@ export class RigSpecExporter {
     if (deps.rigRepo.db !== deps.sessionRegistry.db) {
       throw new Error("RigSpecExporter: rigRepo and sessionRegistry must share the same db handle");
     }
+    this.db = deps.rigRepo.db;
     this.rigRepo = deps.rigRepo;
     this.sessionRegistry = deps.sessionRegistry;
   }

@@ -21,6 +21,9 @@ import { SnapshotCapture } from "./domain/snapshot-capture.js";
 import { RestoreOrchestrator } from "./domain/restore-orchestrator.js";
 import { ClaudeResumeAdapter } from "./adapters/claude-resume.js";
 import { CodexResumeAdapter } from "./adapters/codex-resume.js";
+import { RigSpecExporter } from "./domain/rigspec-exporter.js";
+import { RigSpecPreflight } from "./domain/rigspec-preflight.js";
+import { RigInstantiator } from "./domain/rigspec-instantiator.js";
 import { Reconciler } from "./domain/reconciler.js";
 import { createApp, type AppDeps } from "./server.js";
 import { snapshotsSchema } from "./db/migrations/004_snapshots.js";
@@ -88,6 +91,14 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     await reconciler.reconcile(rig.id);
   }
 
+  const rigSpecExporter = new RigSpecExporter({ rigRepo, sessionRegistry });
+  const rigSpecPreflight = new RigSpecPreflight({
+    rigRepo, tmuxAdapter, exec: opts?.tmuxExec ?? execCommand, cmuxExec: opts?.cmuxExec ?? execCommand,
+  });
+  const rigInstantiator = new RigInstantiator({
+    db, rigRepo, sessionRegistry, eventBus, nodeLauncher, preflight: rigSpecPreflight,
+  });
+
   const deps: AppDeps = {
     rigRepo,
     sessionRegistry,
@@ -98,6 +109,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     snapshotCapture,
     snapshotRepo,
     restoreOrchestrator,
+    rigSpecExporter,
+    rigSpecPreflight,
+    rigInstantiator,
   };
 
   const app = createApp(deps);

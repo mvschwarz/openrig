@@ -21,7 +21,7 @@ interface RigInstantiatorDeps {
 }
 
 export class RigInstantiator {
-  private db: Database.Database;
+  readonly db: Database.Database;
   private rigRepo: RigRepository;
   private sessionRegistry: SessionRegistry;
   private eventBus: EventBus;
