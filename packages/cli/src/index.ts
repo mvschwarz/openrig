@@ -2,11 +2,15 @@
 import { Command } from "commander";
 import { daemonCommand } from "./commands/daemon.js";
 import { statusCommand, type StatusDeps } from "./commands/status.js";
+import { snapshotCommand } from "./commands/snapshot.js";
+import { restoreCommand } from "./commands/restore.js";
 import type { LifecycleDeps } from "./daemon-lifecycle.js";
 
 export interface ProgramDeps {
   daemonDeps?: LifecycleDeps;
   statusDeps?: StatusDeps;
+  snapshotDeps?: StatusDeps;
+  restoreDeps?: StatusDeps;
 }
 
 export function createProgram(depsOverride?: ProgramDeps): Command {
@@ -19,6 +23,8 @@ export function createProgram(depsOverride?: ProgramDeps): Command {
 
   program.addCommand(daemonCommand(depsOverride?.daemonDeps));
   program.addCommand(statusCommand(depsOverride?.statusDeps));
+  program.addCommand(snapshotCommand(depsOverride?.snapshotDeps));
+  program.addCommand(restoreCommand(depsOverride?.restoreDeps));
 
   return program;
 }
