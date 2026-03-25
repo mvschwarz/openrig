@@ -8,7 +8,7 @@ export interface Snapshot {
 }
 
 async function fetchSnapshots(rigId: string): Promise<Snapshot[]> {
-  const res = await fetch(`/api/rigs/${rigId}/snapshots`);
+  const res = await fetch(`/api/rigs/${encodeURIComponent(rigId)}/snapshots`);
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
 }

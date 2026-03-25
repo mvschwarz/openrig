@@ -40,7 +40,7 @@ export function Dashboard() {
   const handleExport = async (rigId: string) => {
     setActionError(null);
     try {
-      const res = await fetch(`/api/rigs/${rigId}/spec`);
+      const res = await fetch(`/api/rigs/${encodeURIComponent(rigId)}/spec`);
       if (!res.ok) {
         setActionError(`Export failed (HTTP ${res.status})`);
         return;

@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
-import { useImportRig } from "../hooks/mutations.js";
+import { useImportRig, ImportError } from "../hooks/mutations.js";
 import { getInstantiateStatusColorClass } from "@/lib/instantiate-status-colors";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -161,11 +161,10 @@ export function ImportFlow({ onBack }: ImportFlowProps = {}) {
       setResult(data);
       setStep("done");
     } catch (err) {
-      try {
-        const parsed = JSON.parse(err instanceof Error ? err.message : String(err)) as InstantiateFailure;
-        const errorList = parsed.errors ?? (parsed.message ? [parsed.message] : ["Import failed"]);
-        setErrors(errorList);
-      } catch {
+      if (err instanceof ImportError) {
+        setErrors(err.errors);
+        setWarnings(err.warnings);
+      } else {
         setErrors([err instanceof Error ? err.message : "Instantiate request failed"]);
       }
       setErrorAtStep(3);

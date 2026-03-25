@@ -81,7 +81,7 @@ export function RigGraph({ rigId }: { rigId: string | null }) {
         className: shouldAnimate ? "edge-draw-in" : undefined,
         style: {
           ...styleResult.style,
-          animationDelay: shouldAnimate ? `${rawNodes.length * 50 + 100}ms` : undefined,
+          animationDelay: shouldAnimate ? `${Math.min(rawNodes.length * 50 + 100, 2000)}ms` : undefined,
         },
       };
     });
@@ -94,7 +94,7 @@ export function RigGraph({ rigId }: { rigId: string | null }) {
       className: shouldAnimate ? "node-enter" : undefined,
       style: {
         ...(node.style ?? {}),
-        animationDelay: shouldAnimate ? `${index * 50}ms` : undefined,
+        animationDelay: shouldAnimate ? `${Math.min(index * 50, 2000)}ms` : undefined,
       },
     }));
   }, [rawNodes, shouldAnimate]);
@@ -115,7 +115,7 @@ export function RigGraph({ rigId }: { rigId: string | null }) {
 
       try {
         const res = await fetch(
-          `/api/rigs/${rigId}/nodes/${nodeData.logicalId}/focus`,
+          `/api/rigs/${encodeURIComponent(rigId)}/nodes/${encodeURIComponent(nodeData.logicalId)}/focus`,
           { method: "POST" }
         );
 

@@ -6,7 +6,7 @@ interface GraphData {
 }
 
 async function fetchGraph(rigId: string): Promise<GraphData> {
-  const res = await fetch(`/api/rigs/${rigId}/graph`);
+  const res = await fetch(`/api/rigs/${encodeURIComponent(rigId)}/graph`);
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
 }

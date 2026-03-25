@@ -25,6 +25,7 @@ export function Sidebar() {
             key={item.to}
             to={item.to}
             data-testid={`nav-${item.label.toLowerCase()}`}
+            aria-current={isActive ? "page" : undefined}
             className={cn(
               "px-spacing-6 py-spacing-3 text-label-lg uppercase tracking-[0.02em] transition-colors duration-150 ease-tactical",
               isActive

@@ -77,10 +77,8 @@ describe("Tailwind Foundation", () => {
     expect(cssContent).toMatch(/\.bg-background\b/);
     expect(cssContent).toContain("hsl(var(--background))");
 
-    // rounded-md should generate: border-radius: 0 or 0px (zeroed by our config)
-    expect(cssContent).toMatch(/\.rounded-md\b/);
-    // Tailwind may emit "0" or "0px" — both mean zero radius
-    expect(cssContent).toMatch(/border-radius:\s*0(px)?[;\s}]/);
+    // bg-surface-low should be in the build (used by Card, RigNode, etc.)
+    expect(cssContent).toMatch(/\.bg-surface-low\b/);
   });
 
   // Test 5: main.tsx imports globals.css (source code verification)

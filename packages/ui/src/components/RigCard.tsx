@@ -38,7 +38,10 @@ export function RigCard({ rig, onSelect, onSnapshot, onExport }: RigCardProps) {
     <Card
       data-testid={`rig-card-${rig.id}`}
       className="cursor-pointer mb-spacing-1"
+      role="button"
+      tabIndex={0}
       onClick={() => onSelect(rig.id)}
+      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onSelect(rig.id); } }}
     >
       <CardContent className="p-spacing-4">
         {/* Header: name + node count */}
