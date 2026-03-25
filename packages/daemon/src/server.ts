@@ -11,12 +11,17 @@ import type { RestoreOrchestrator } from "./domain/restore-orchestrator.js";
 import type { RigSpecExporter } from "./domain/rigspec-exporter.js";
 import type { RigSpecPreflight } from "./domain/rigspec-preflight.js";
 import type { RigInstantiator } from "./domain/rigspec-instantiator.js";
+import type { PackageRepository } from "./domain/package-repository.js";
+import type { InstallRepository } from "./domain/install-repository.js";
+import type { InstallEngine } from "./domain/install-engine.js";
+import type { InstallVerifier } from "./domain/install-verifier.js";
 import { rigsRoutes } from "./routes/rigs.js";
 import { sessionsRoutes, nodesRoutes } from "./routes/sessions.js";
 import { adaptersRoutes } from "./routes/adapters.js";
 import { eventsRoute } from "./routes/events.js";
 import { snapshotsRoutes, restoreRoutes } from "./routes/snapshots.js";
 import { handleExportYaml, handleExportJson, rigspecImportRoutes } from "./routes/rigspec.js";
+import { packagesRoutes } from "./routes/packages.js";
 
 export interface AppDeps {
   rigRepo: RigRepository;
@@ -31,6 +36,10 @@ export interface AppDeps {
   rigSpecExporter: RigSpecExporter;
   rigSpecPreflight: RigSpecPreflight;
   rigInstantiator: RigInstantiator;
+  packageRepo: PackageRepository;
+  installRepo: InstallRepository;
+  installEngine: InstallEngine;
+  installVerifier: InstallVerifier;
 }
 
 export function createApp(deps: AppDeps): Hono {
@@ -59,6 +68,12 @@ export function createApp(deps: AppDeps): Hono {
   if (deps.rigRepo.db !== deps.rigInstantiator.db) {
     throw new Error("createApp: rigInstantiator must share the same db handle");
   }
+  if (deps.rigRepo.db !== deps.packageRepo.db) {
+    throw new Error("createApp: packageRepo must share the same db handle");
+  }
+  if (deps.rigRepo.db !== deps.installRepo.db) {
+    throw new Error("createApp: installRepo must share the same db handle");
+  }
 
   const app = new Hono();
 
@@ -76,6 +91,10 @@ export function createApp(deps: AppDeps): Hono {
     c.set("rigSpecExporter" as never, deps.rigSpecExporter);
     c.set("rigSpecPreflight" as never, deps.rigSpecPreflight);
     c.set("rigInstantiator" as never, deps.rigInstantiator);
+    c.set("packageRepo" as never, deps.packageRepo);
+    c.set("installRepo" as never, deps.installRepo);
+    c.set("installEngine" as never, deps.installEngine);
+    c.set("installVerifier" as never, deps.installVerifier);
     await next();
   });
 
@@ -93,6 +112,7 @@ export function createApp(deps: AppDeps): Hono {
   app.route("/api/rigs/import", rigspecImportRoutes);
   app.get("/api/rigs/:rigId/spec", handleExportYaml);
   app.get("/api/rigs/:rigId/spec.json", handleExportJson);
+  app.route("/api/packages", packagesRoutes);
 
   return app;
 }

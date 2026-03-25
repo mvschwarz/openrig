@@ -25,7 +25,12 @@ import { RigSpecExporter } from "./domain/rigspec-exporter.js";
 import { RigSpecPreflight } from "./domain/rigspec-preflight.js";
 import { RigInstantiator } from "./domain/rigspec-instantiator.js";
 import { Reconciler } from "./domain/reconciler.js";
+import { PackageRepository } from "./domain/package-repository.js";
+import { InstallRepository } from "./domain/install-repository.js";
+import { InstallEngine } from "./domain/install-engine.js";
+import { InstallVerifier } from "./domain/install-verifier.js";
 import { createApp, type AppDeps } from "./server.js";
+import fs from "node:fs";
 import { snapshotsSchema } from "./db/migrations/004_snapshots.js";
 import { checkpointsSchema } from "./db/migrations/005_checkpoints.js";
 import { resumeMetadataSchema } from "./db/migrations/006_resume_metadata.js";
@@ -102,6 +107,24 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     db, rigRepo, sessionRegistry, eventBus, nodeLauncher, preflight: rigSpecPreflight,
   });
 
+  // Phase 4: Package install services
+  const packageRepo = new PackageRepository(db);
+  const installRepo = new InstallRepository(db);
+  const engineFsOps = {
+    readFile: (p: string) => fs.readFileSync(p, "utf-8"),
+    writeFile: (p: string, content: string) => fs.writeFileSync(p, content, "utf-8"),
+    exists: (p: string) => fs.existsSync(p),
+    mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }),
+    copyFile: (src: string, dest: string) => fs.copyFileSync(src, dest),
+    deleteFile: (p: string) => fs.unlinkSync(p),
+  };
+  const installEngine = new InstallEngine(installRepo, engineFsOps);
+  const verifierFsOps = {
+    readFile: (p: string) => fs.readFileSync(p, "utf-8"),
+    exists: (p: string) => fs.existsSync(p),
+  };
+  const installVerifier = new InstallVerifier(installRepo, packageRepo, verifierFsOps);
+
   const deps: AppDeps = {
     rigRepo,
     sessionRegistry,
@@ -115,6 +138,10 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     rigSpecExporter,
     rigSpecPreflight,
     rigInstantiator,
+    packageRepo,
+    installRepo,
+    installEngine,
+    installVerifier,
   };
 
   const app = createApp(deps);

@@ -10,8 +10,17 @@ import { SnapshotCapture } from "../src/domain/snapshot-capture.js";
 import { RestoreOrchestrator } from "../src/domain/restore-orchestrator.js";
 import { ClaudeResumeAdapter } from "../src/adapters/claude-resume.js";
 import { CodexResumeAdapter } from "../src/adapters/codex-resume.js";
+import { RigSpecExporter } from "../src/domain/rigspec-exporter.js";
+import { RigSpecPreflight } from "../src/domain/rigspec-preflight.js";
+import { RigInstantiator } from "../src/domain/rigspec-instantiator.js";
+import { PackageRepository } from "../src/domain/package-repository.js";
+import { InstallRepository } from "../src/domain/install-repository.js";
+import { InstallEngine } from "../src/domain/install-engine.js";
+import { InstallVerifier } from "../src/domain/install-verifier.js";
 import { createApp } from "../src/server.js";
 import { mockTmuxAdapter, unavailableCmuxAdapter } from "./helpers/test-app.js";
+import type { ExecFn } from "../src/adapters/tmux.js";
+import fs from "node:fs";
 
 function buildFullDeps(db: ReturnType<typeof createFullTestDb>, overrides?: { snapshotRepo?: SnapshotRepository; snapshotCapture?: SnapshotCapture; restoreOrchestrator?: RestoreOrchestrator }) {
   const rigRepo = new RigRepository(db);
@@ -29,7 +38,30 @@ function buildFullDeps(db: ReturnType<typeof createFullTestDb>, overrides?: { sn
     db, rigRepo, sessionRegistry, eventBus, snapshotRepo, snapshotCapture,
     checkpointStore, nodeLauncher, tmuxAdapter: tmux, claudeResume, codexResume,
   });
-  return { rigRepo, sessionRegistry, eventBus, nodeLauncher, tmuxAdapter: tmux, cmuxAdapter: cmux, snapshotCapture, snapshotRepo, restoreOrchestrator };
+  const exec: ExecFn = async () => "";
+  const rigSpecExporter = new RigSpecExporter({ rigRepo, sessionRegistry });
+  const rigSpecPreflight = new RigSpecPreflight({ rigRepo, tmuxAdapter: tmux, exec, cmuxExec: exec });
+  const rigInstantiator = new RigInstantiator({ db, rigRepo, sessionRegistry, eventBus, nodeLauncher, preflight: rigSpecPreflight });
+
+  const packageRepo = new PackageRepository(db);
+  const installRepo = new InstallRepository(db);
+  const fsOps = { readFile: (p: string) => fs.readFileSync(p, "utf-8"), exists: (p: string) => fs.existsSync(p) };
+  const engineFsOps = {
+    ...fsOps,
+    writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"),
+    mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }),
+    copyFile: (s: string, d: string) => fs.copyFileSync(s, d),
+    deleteFile: (p: string) => fs.unlinkSync(p),
+  };
+  const installEngine = new InstallEngine(installRepo, engineFsOps);
+  const installVerifier = new InstallVerifier(installRepo, packageRepo, fsOps);
+
+  return {
+    rigRepo, sessionRegistry, eventBus, nodeLauncher, tmuxAdapter: tmux, cmuxAdapter: cmux,
+    snapshotCapture, snapshotRepo, restoreOrchestrator,
+    rigSpecExporter, rigSpecPreflight, rigInstantiator,
+    packageRepo, installRepo, installEngine, installVerifier,
+  };
 }
 
 describe("Hono server (production app)", () => {
@@ -135,6 +167,32 @@ describe("Hono server (production app)", () => {
     (deps as Record<string, unknown>).restoreOrchestrator = otherOrch;
 
     expect(() => createApp(deps)).toThrow(/restoreOrchestrator.*same db handle/);
+
+    db1.close();
+    db2.close();
+  });
+
+  it("createApp throws if packageRepo uses different db handle", () => {
+    const db1 = createFullTestDb();
+    const db2 = createFullTestDb();
+
+    const deps = buildFullDeps(db1);
+    (deps as Record<string, unknown>).packageRepo = new PackageRepository(db2);
+
+    expect(() => createApp(deps)).toThrow(/packageRepo.*same db handle/);
+
+    db1.close();
+    db2.close();
+  });
+
+  it("createApp throws if installRepo uses different db handle", () => {
+    const db1 = createFullTestDb();
+    const db2 = createFullTestDb();
+
+    const deps = buildFullDeps(db1);
+    (deps as Record<string, unknown>).installRepo = new InstallRepository(db2);
+
+    expect(() => createApp(deps)).toThrow(/installRepo.*same db handle/);
 
     db1.close();
     db2.close();
