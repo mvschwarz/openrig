@@ -1,4 +1,8 @@
-interface RigSummary {
+import { Card, CardContent } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { useCountUp } from "../hooks/useCountUp.js";
+
+export interface RigSummary {
   id: string;
   name: string;
   nodeCount: number;
@@ -9,8 +13,8 @@ interface RigSummary {
 interface RigCardProps {
   rig: RigSummary;
   onSelect: (rigId: string) => void;
-  onSnapshot: (rigId: string) => void;
-  onExport: (rigId: string) => void;
+  onSnapshot: () => void;
+  onExport: () => void;
 }
 
 function formatAge(timestamp: string | null): string {
@@ -28,40 +32,60 @@ function formatAge(timestamp: string | null): string {
 }
 
 export function RigCard({ rig, onSelect, onSnapshot, onExport }: RigCardProps) {
+  const animatedCount = useCountUp(rig.nodeCount);
+
   return (
-    <div
+    <Card
       data-testid={`rig-card-${rig.id}`}
+      className="cursor-pointer mb-spacing-1"
       onClick={() => onSelect(rig.id)}
-      style={{
-        border: "1px solid #ccc",
-        borderRadius: 8,
-        padding: 16,
-        cursor: "pointer",
-        marginBottom: 8,
-      }}
     >
-      <div style={{ fontWeight: "bold", fontSize: 16 }}>{rig.name}</div>
-      <div>{rig.nodeCount} node(s)</div>
-      <div data-testid={`snapshot-age-${rig.id}`}>
-        Snapshot: {formatAge(rig.latestSnapshotAt)}
-      </div>
-      <div style={{ marginTop: 8, display: "flex", gap: 8 }}>
-        <button
-          onClick={(e) => { e.stopPropagation(); onSnapshot(rig.id); }}
-        >
-          Snapshot
-        </button>
-        <button
-          onClick={(e) => { e.stopPropagation(); onExport(rig.id); }}
-        >
-          Export
-        </button>
-        <button
-          onClick={(e) => { e.stopPropagation(); onSelect(rig.id); }}
-        >
-          View Graph
-        </button>
-      </div>
-    </div>
+      <CardContent className="p-spacing-4">
+        {/* Header: name + node count */}
+        <div className="flex justify-between items-baseline mb-spacing-2">
+          <h3 className="text-headline-md uppercase">{rig.name}</h3>
+          <span className="text-label-md font-mono text-foreground-muted" data-testid={`node-count-${rig.id}`}>
+            {animatedCount} NODE{rig.nodeCount !== 1 ? "S" : ""}
+          </span>
+        </div>
+
+        {/* Recessed telemetry section */}
+        <div className="bg-surface p-spacing-3 mb-spacing-3">
+          <div className="flex gap-spacing-6 text-label-md">
+            <span className="text-foreground-muted">
+              SNAPSHOT{" "}
+              <span className="font-mono text-foreground" data-testid={`snapshot-age-${rig.id}`}>
+                {formatAge(rig.latestSnapshotAt)}
+              </span>
+            </span>
+          </div>
+        </div>
+
+        {/* Tactical action buttons */}
+        <div className="flex gap-spacing-2">
+          <Button
+            variant="tactical"
+            size="sm"
+            onClick={(e) => { e.stopPropagation(); onSnapshot(); }}
+          >
+            SNAPSHOT
+          </Button>
+          <Button
+            variant="tactical"
+            size="sm"
+            onClick={(e) => { e.stopPropagation(); onExport(); }}
+          >
+            EXPORT
+          </Button>
+          <Button
+            variant="tactical"
+            size="sm"
+            onClick={(e) => { e.stopPropagation(); onSelect(rig.id); }}
+          >
+            GRAPH →
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
   );
 }

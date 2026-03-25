@@ -34,7 +34,7 @@ describe("App (scaffold)", () => {
     mockFetch.mockReturnValue(new Promise(() => {}));
     render(createTestRouter({ component: Dashboard }));
     await waitFor(() => {
-      expect(screen.getByText(/loading dashboard/i)).toBeDefined();
+      expect(screen.getByTestId("dashboard-loading")).toBeDefined();
     });
   });
 
@@ -63,12 +63,12 @@ describe("App (scaffold)", () => {
     });
   });
 
-  it("shows error message on fetch failure", async () => {
+  it("shows error state on fetch failure", async () => {
     mockFetch.mockResolvedValue({ ok: false, status: 500 });
     render(createTestRouter({ component: Dashboard }));
 
     await waitFor(() => {
-      expect(screen.getByText(/error/i)).toBeDefined();
+      expect(screen.getByTestId("dashboard-error")).toBeDefined();
     });
   });
 
