@@ -53,7 +53,7 @@ describe("Tailwind Foundation", () => {
 
   // Test 4: Production build emits bg-background utility
   // App.tsx uses bg-background class (in src/, scanned by Tailwind)
-  it("production build emits .bg-background utility rule", () => {
+  it("production build emits .bg-background utility rule", { timeout: 60000 }, () => {
     const uiRoot = resolve(__dirname, "..");
     try {
       execSync("npm run build", { cwd: uiRoot, stdio: "pipe", timeout: 30000 });

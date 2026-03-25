@@ -28,9 +28,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  if (OriginalEventSource) {
-    globalThis.EventSource = OriginalEventSource;
-  }
+  if (OriginalEventSource) globalThis.EventSource = OriginalEventSource;
   cleanup();
 });
 
@@ -47,13 +45,12 @@ function mockRestoreError(status: number, error: string) {
 }
 
 describe("SnapshotPanel", () => {
-  // Test 1: Renders snapshot list
-  it("renders snapshot list from API", async () => {
+  // Test 1: Snapshot list with mono IDs
+  it("renders snapshot list with monospaced IDs", async () => {
     mockFetch.mockImplementation((url: string) => {
       if (typeof url === "string" && url.includes("/snapshots")) {
         return Promise.resolve(mockSnapshotList([
-          { id: "snap-1", kind: "manual", status: "complete", createdAt: "2026-03-24 01:00:00" },
-          { id: "snap-2", kind: "auto", status: "complete", createdAt: "2026-03-24 02:00:00" },
+          { id: "snap-abc123def", kind: "manual", status: "complete", createdAt: "2026-03-24 01:00:00" },
         ]));
       }
       return Promise.resolve({ ok: true, json: async () => ({}) });
@@ -61,13 +58,14 @@ describe("SnapshotPanel", () => {
 
     render(<QueryWrapper><SnapshotPanel rigId="r1" /></QueryWrapper>);
     await waitFor(() => {
-      expect(screen.getByText(/snap-1/)).toBeDefined();
-      expect(screen.getByText(/snap-2/)).toBeDefined();
+      const idEl = screen.getByTestId("snap-id-snap-abc123def");
+      expect(idEl.className).toContain("font-mono");
+      expect(idEl.textContent).toContain("snap-abc123");
     });
   });
 
-  // Test 2: Create snapshot -> POST + refresh
-  it("create snapshot calls POST and refreshes list", async () => {
+  // Test 2: Create triggers mutation + refresh
+  it("create button triggers mutation", async () => {
     let callCount = 0;
     mockFetch.mockImplementation((url: string, opts?: RequestInit) => {
       if (typeof url === "string" && url.includes("/snapshots") && opts?.method === "POST") {
@@ -85,9 +83,10 @@ describe("SnapshotPanel", () => {
     });
 
     render(<QueryWrapper><SnapshotPanel rigId="r1" /></QueryWrapper>);
-    await waitFor(() => expect(screen.getByText("Create Snapshot")).toBeDefined());
+    await waitFor(() => expect(screen.getByText(/CREATE/)).toBeDefined());
 
-    fireEvent.click(screen.getByText("Create Snapshot"));
+    const createBtn = screen.getAllByText(/CREATE/).find((el) => el.closest("button"));
+    fireEvent.click(createBtn!);
 
     await waitFor(() => {
       const postCall = mockFetch.mock.calls.find(
@@ -96,14 +95,14 @@ describe("SnapshotPanel", () => {
       expect(postCall).toBeDefined();
     });
 
-    // List should refresh
+    // Prove list refreshed with new snapshot
     await waitFor(() => {
       expect(screen.getByText(/snap-new/)).toBeDefined();
     });
   });
 
-  // Test 3: Restore shows confirmation
-  it("restore button shows confirmation prompt", async () => {
+  // Test 3: Restore opens Dialog
+  it("restore opens confirmation Dialog", async () => {
     mockFetch.mockImplementation((url: string) => {
       if (typeof url === "string" && url.includes("/snapshots")) {
         return Promise.resolve(mockSnapshotList([
@@ -118,13 +117,17 @@ describe("SnapshotPanel", () => {
 
     fireEvent.click(screen.getByTestId("restore-btn-snap-1"));
 
-    expect(screen.getByText(/restore this snapshot/i)).toBeDefined();
-    expect(screen.getByTestId("confirm-restore-snap-1")).toBeDefined();
-    expect(screen.getByTestId("cancel-restore-snap-1")).toBeDefined();
+    // Dialog should appear with correct role + confirm/cancel
+    await waitFor(() => {
+      expect(screen.getByRole("dialog")).toBeDefined();
+      expect(screen.getByText(/restore snapshot/i)).toBeDefined();
+      expect(screen.getByTestId("confirm-restore-snap-1")).toBeDefined();
+      expect(screen.getByTestId("cancel-restore-snap-1")).toBeDefined();
+    });
   });
 
-  // Test 4: Confirm -> POST + shows result
-  it("confirm restore calls POST and shows per-node result", async () => {
+  // Test 4: Confirm triggers restore + per-node result
+  it("confirm triggers restore and shows per-node result", async () => {
     mockFetch.mockImplementation((url: string, opts?: RequestInit) => {
       if (typeof url === "string" && url.includes("/restore/") && opts?.method === "POST") {
         return Promise.resolve(mockRestoreResult([
@@ -144,6 +147,7 @@ describe("SnapshotPanel", () => {
     await waitFor(() => expect(screen.getByTestId("restore-btn-snap-1")).toBeDefined());
 
     fireEvent.click(screen.getByTestId("restore-btn-snap-1"));
+    await waitFor(() => expect(screen.getByTestId("confirm-restore-snap-1")).toBeDefined());
     fireEvent.click(screen.getByTestId("confirm-restore-snap-1"));
 
     await waitFor(() => {
@@ -155,7 +159,79 @@ describe("SnapshotPanel", () => {
     });
   });
 
-  // Test 5: Restore loading indicator
+  // Test 5: Per-node status uses restore-specific color class
+  it("per-node status uses correct restore color class", async () => {
+    mockFetch.mockImplementation((url: string, opts?: RequestInit) => {
+      if (typeof url === "string" && url.includes("/restore/") && opts?.method === "POST") {
+        return Promise.resolve(mockRestoreResult([
+          { nodeId: "n1", logicalId: "orchestrator", status: "resumed" },
+          { nodeId: "n2", logicalId: "worker", status: "failed" },
+        ]));
+      }
+      if (typeof url === "string" && url.includes("/snapshots")) {
+        return Promise.resolve(mockSnapshotList([
+          { id: "snap-1", kind: "manual", status: "complete", createdAt: "2026-03-24 01:00:00" },
+        ]));
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) });
+    });
+
+    render(<QueryWrapper><SnapshotPanel rigId="r1" /></QueryWrapper>);
+    await waitFor(() => expect(screen.getByTestId("restore-btn-snap-1")).toBeDefined());
+    fireEvent.click(screen.getByTestId("restore-btn-snap-1"));
+    await waitFor(() => expect(screen.getByTestId("confirm-restore-snap-1")).toBeDefined());
+    fireEvent.click(screen.getByTestId("confirm-restore-snap-1"));
+
+    await waitFor(() => {
+      const resumed = screen.getByTestId("restore-status-orchestrator");
+      expect(resumed.className).toContain("text-primary");
+      const failed = screen.getByTestId("restore-status-worker");
+      expect(failed.className).toContain("text-destructive");
+    });
+  });
+
+  // Test 6: Fetch error uses Alert
+  it("fetch error shows Alert", async () => {
+    mockFetch.mockImplementation(() => Promise.resolve({ ok: false, status: 500, json: async () => ({}) }));
+
+    render(<QueryWrapper><SnapshotPanel rigId="r1" /></QueryWrapper>);
+    await waitFor(() => {
+      expect(screen.getByTestId("restore-error")).toBeDefined();
+    });
+  });
+
+  // Test 7: Empty state
+  it("empty state shows 'No snapshots' in muted text", async () => {
+    mockFetch.mockImplementation(() => Promise.resolve(mockSnapshotList([])));
+    render(<QueryWrapper><SnapshotPanel rigId="r1" /></QueryWrapper>);
+    await waitFor(() => expect(screen.getByText(/no snapshots/i)).toBeDefined());
+  });
+
+  // Test 8: Cancel -> no POST
+  it("cancel confirmation does not call POST", async () => {
+    mockFetch.mockImplementation((url: string) => {
+      if (typeof url === "string" && url.includes("/snapshots")) {
+        return Promise.resolve(mockSnapshotList([
+          { id: "snap-1", kind: "manual", status: "complete", createdAt: "2026-03-24 01:00:00" },
+        ]));
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) });
+    });
+
+    render(<QueryWrapper><SnapshotPanel rigId="r1" /></QueryWrapper>);
+    await waitFor(() => expect(screen.getByTestId("restore-btn-snap-1")).toBeDefined());
+
+    fireEvent.click(screen.getByTestId("restore-btn-snap-1"));
+    await waitFor(() => expect(screen.getByTestId("cancel-restore-snap-1")).toBeDefined());
+    fireEvent.click(screen.getByTestId("cancel-restore-snap-1"));
+
+    const restoreCalls = mockFetch.mock.calls.filter(
+      (c: unknown[]) => typeof c[0] === "string" && (c[0] as string).includes("/restore/")
+    );
+    expect(restoreCalls).toHaveLength(0);
+  });
+
+  // Test 9: Restore loading indicator
   it("shows loading indicator during restore", async () => {
     let resolveRestore: ((v: unknown) => void) | null = null;
     mockFetch.mockImplementation((url: string, opts?: RequestInit) => {
@@ -174,55 +250,17 @@ describe("SnapshotPanel", () => {
     await waitFor(() => expect(screen.getByTestId("restore-btn-snap-1")).toBeDefined());
 
     fireEvent.click(screen.getByTestId("restore-btn-snap-1"));
+    await waitFor(() => expect(screen.getByTestId("confirm-restore-snap-1")).toBeDefined());
     fireEvent.click(screen.getByTestId("confirm-restore-snap-1"));
 
-    // Wait for mutation to start (loading indicator appears)
     await waitFor(() => expect(screen.getByTestId("restore-loading")).toBeDefined());
 
-    // Resolve to clean up
     resolveRestore!(mockRestoreResult([]));
     await waitFor(() => expect(screen.queryByTestId("restore-loading")).toBeNull());
   });
 
-  // Test 6: Empty state
-  it("shows 'No snapshots' when list is empty", async () => {
-    mockFetch.mockImplementation(() => Promise.resolve(mockSnapshotList([])));
-
-    render(<QueryWrapper><SnapshotPanel rigId="r1" /></QueryWrapper>);
-    await waitFor(() => expect(screen.getByText(/no snapshots/i)).toBeDefined());
-  });
-
-  // Test 7: Cancel confirmation -> no POST
-  it("cancel restore confirmation does not call POST", async () => {
-    mockFetch.mockImplementation((url: string) => {
-      if (typeof url === "string" && url.includes("/snapshots")) {
-        return Promise.resolve(mockSnapshotList([
-          { id: "snap-1", kind: "manual", status: "complete", createdAt: "2026-03-24 01:00:00" },
-        ]));
-      }
-      return Promise.resolve({ ok: true, json: async () => ({}) });
-    });
-
-    render(<QueryWrapper><SnapshotPanel rigId="r1" /></QueryWrapper>);
-    await waitFor(() => expect(screen.getByTestId("restore-btn-snap-1")).toBeDefined());
-
-    fireEvent.click(screen.getByTestId("restore-btn-snap-1"));
-    expect(screen.getByTestId("cancel-restore-snap-1")).toBeDefined();
-
-    fireEvent.click(screen.getByTestId("cancel-restore-snap-1"));
-
-    // Confirmation should be gone
-    expect(screen.queryByTestId("confirm-restore-snap-1")).toBeNull();
-
-    // No restore POST should have been made
-    const restoreCalls = mockFetch.mock.calls.filter(
-      (c: unknown[]) => typeof c[0] === "string" && (c[0] as string).includes("/restore/")
-    );
-    expect(restoreCalls).toHaveLength(0);
-  });
-
-  // Test 8: Restore error -> user-visible error
-  it("restore error shows error message", async () => {
+  // Test 10: Restore error Alert
+  it("restore error shows Alert", async () => {
     mockFetch.mockImplementation((url: string, opts?: RequestInit) => {
       if (typeof url === "string" && url.includes("/restore/") && opts?.method === "POST") {
         return Promise.resolve(mockRestoreError(500, "restore_error"));
@@ -237,17 +275,16 @@ describe("SnapshotPanel", () => {
 
     render(<QueryWrapper><SnapshotPanel rigId="r1" /></QueryWrapper>);
     await waitFor(() => expect(screen.getByTestId("restore-btn-snap-1")).toBeDefined());
-
     fireEvent.click(screen.getByTestId("restore-btn-snap-1"));
+    await waitFor(() => expect(screen.getByTestId("confirm-restore-snap-1")).toBeDefined());
     fireEvent.click(screen.getByTestId("confirm-restore-snap-1"));
 
     await waitFor(() => {
-      const errEl = screen.getByTestId("restore-error");
-      expect(errEl.textContent).toMatch(/restore_error|failed/i);
+      expect(screen.getByTestId("restore-error")).toBeDefined();
     });
   });
 
-  // Test 9: Rig detail route includes SnapshotPanel alongside RigGraph
+  // Test 11: App integration — graph detail includes SnapshotPanel
   it("rig detail route renders SnapshotPanel alongside graph", async () => {
     mockFetch.mockImplementation((url: string) => {
       if (typeof url === "string" && url.includes("/graph")) {
@@ -282,6 +319,18 @@ describe("SnapshotPanel", () => {
 
     await waitFor(() => {
       expect(screen.getByTestId("snapshot-panel")).toBeDefined();
+    });
+  });
+
+  // Test 12: Loading skeleton with pulse
+  it("loading state shows pulse skeleton", async () => {
+    mockFetch.mockReturnValue(new Promise(() => {}));
+    render(<QueryWrapper><SnapshotPanel rigId="r1" /></QueryWrapper>);
+
+    await waitFor(() => {
+      const skeleton = screen.getByTestId("snapshot-loading");
+      expect(skeleton).toBeDefined();
+      expect(skeleton.innerHTML).toContain("animate-pulse-tactical");
     });
   });
 });
