@@ -124,7 +124,7 @@ function createMockDaemon() {
           res.end(JSON.stringify({ ok: false, code: "preflight_failed", message: "conflict" }));
         } else {
           res.writeHead(201, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ id: "rig-new", name: "imported-rig", nodes: [{ logicalId: "orchestrator", status: "launched" }, { logicalId: "worker", status: "launched" }] }));
+          res.end(JSON.stringify({ rigId: "rig-new", specName: "imported-rig", specVersion: "0.1.0", nodes: [{ logicalId: "orchestrator", status: "launched" }, { logicalId: "worker", status: "launched" }] }));
         }
       });
       return;

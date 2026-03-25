@@ -70,23 +70,20 @@ export function importCommand(depsOverride?: ImportDeps): Command {
       }
 
       if (opts.instantiate) {
-        const res = await client.postText<{ id?: string; name?: string; nodes?: Array<{ logicalId: string; status?: string }> } | { ok: false; code: string; message: string }>("/api/rigs/import", yaml);
-        if (res.status === 409) {
-          console.error("Import failed: preflight conflict");
-          process.exitCode = 1;
-        } else if (res.status === 400) {
-          console.error(`Import failed: ${JSON.stringify(res.data)}`);
+        const res = await client.postText<{ rigId: string; specName: string; specVersion: string; nodes: Array<{ logicalId: string; status: string }> } | { ok: false; code: string; errors?: string[]; message?: string }>("/api/rigs/import", yaml);
+        if (res.status === 409 || res.status === 400) {
+          const data = res.data as { ok: false; code: string; errors?: string[]; message?: string };
+          const detail = data.errors?.join(", ") ?? data.message ?? `status ${res.status}`;
+          console.error(`Import failed: ${detail}`);
           process.exitCode = 1;
         } else if (res.status >= 400) {
           console.error(`Import failed: ${JSON.stringify(res.data)}`);
           process.exitCode = 1;
         } else {
-          const data = res.data as { id?: string; name?: string; nodes?: Array<{ logicalId: string; status?: string }> };
-          console.log(`Rig created: ${data.name ?? data.id}`);
-          if (data.nodes) {
-            for (const n of data.nodes) {
-              console.log(`  ${n.logicalId}: ${n.status ?? "launched"}`);
-            }
+          const data = res.data as { rigId: string; specName: string; specVersion: string; nodes: Array<{ logicalId: string; status: string }> };
+          console.log(`Rig created: ${data.specName} (${data.rigId})`);
+          for (const n of data.nodes) {
+            console.log(`  ${n.logicalId}: ${n.status}`);
           }
         }
         return;

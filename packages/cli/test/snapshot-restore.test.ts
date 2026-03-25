@@ -128,8 +128,8 @@ function createMockDaemon() {
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({
         nodes: [
-          { nodeId: "orchestrator", status: "resumed" },
-          { nodeId: "worker", status: "checkpoint_written" },
+          { nodeId: "n1", logicalId: "orchestrator", status: "resumed" },
+          { nodeId: "n2", logicalId: "worker", status: "checkpoint_written" },
         ],
       }));
       return;
