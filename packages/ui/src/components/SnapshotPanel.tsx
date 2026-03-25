@@ -69,10 +69,16 @@ export function SnapshotPanel({ rigId }: SnapshotPanelProps) {
   };
 
   return (
-    <div data-testid="snapshot-panel" className="bg-surface-low p-spacing-4 min-w-[280px]">
+    <div data-testid="snapshot-panel" className="bg-surface-low bg-noise p-spacing-6 min-w-[300px] max-w-[320px] relative overflow-y-auto">
+
       {/* Header */}
-      <div className="flex justify-between items-center mb-spacing-4">
-        <h3 className="text-headline-md uppercase tracking-[0.05em]">SNAPSHOTS</h3>
+      <div className="flex justify-between items-center mb-spacing-6">
+        <div>
+          <h3 className="text-headline-md uppercase tracking-[0.04em]">SNAPSHOTS</h3>
+          <p className="text-label-sm text-foreground-muted opacity-50 mt-spacing-1">
+            {snapshots.length} capture{snapshots.length !== 1 ? "s" : ""}
+          </p>
+        </div>
         <Button
           variant="tactical"
           size="sm"
@@ -92,16 +98,18 @@ export function SnapshotPanel({ rigId }: SnapshotPanelProps) {
 
       {/* Restore result */}
       {restoreResult && (
-        <div data-testid="restore-result" className="mb-spacing-3 p-spacing-3 bg-surface">
-          <div className="text-label-md uppercase text-foreground-muted mb-spacing-2">RESTORE COMPLETE</div>
-          {restoreResult.map((n) => (
-            <div key={n.nodeId} className="flex items-center gap-spacing-2 text-label-md">
-              <span className="font-mono text-foreground">{n.logicalId}</span>
-              <span className={`font-mono ${getRestoreStatusColorClass(n.status)}`} data-testid={`restore-status-${n.logicalId}`}>
-                {n.status}
-              </span>
-            </div>
-          ))}
+        <div data-testid="restore-result" className="mb-spacing-4 p-spacing-4 inset-surface">
+          <div className="text-label-sm uppercase text-foreground-muted opacity-60 tracking-[0.06em] mb-spacing-3">RESTORE COMPLETE</div>
+          <div className="space-y-spacing-2">
+            {restoreResult.map((n) => (
+              <div key={n.nodeId} className="flex items-center justify-between text-label-md">
+                <span className="font-mono text-foreground">{n.logicalId}</span>
+                <span className={`font-mono ${getRestoreStatusColorClass(n.status)}`} data-testid={`restore-status-${n.logicalId}`}>
+                  {n.status}
+                </span>
+              </div>
+            ))}
+          </div>
         </div>
       )}
 
@@ -114,27 +122,29 @@ export function SnapshotPanel({ rigId }: SnapshotPanelProps) {
 
       {/* Loading skeleton */}
       {loading ? (
-        <div data-testid="snapshot-loading">
+        <div data-testid="snapshot-loading" className="space-y-spacing-2">
           {[1, 2].map((i) => (
-            <div key={i} className="bg-surface p-spacing-3 mb-spacing-2">
-              <div className="h-4 w-32 animate-pulse-tactical mb-spacing-1" />
-              <div className="h-3 w-48 animate-pulse-tactical" />
+            <div key={i} className="inset-surface p-spacing-4">
+              <div className="h-4 w-32 shimmer mb-spacing-2" />
+              <div className="h-3 w-48 shimmer" />
             </div>
           ))}
         </div>
       ) : snapshots.length === 0 ? (
-        <div className="text-label-md text-foreground-muted">No snapshots</div>
+        <div className="text-label-md text-foreground-muted py-spacing-4 text-center opacity-50">
+          No snapshots yet
+        </div>
       ) : (
-        <div>
+        <div className="space-y-spacing-2">
           {snapshots.map((snap) => (
-            <div key={snap.id} className="bg-surface p-spacing-3 mb-spacing-2">
+            <div key={snap.id} className="inset-surface p-spacing-4 transition-colors duration-150 hover:bg-surface-high/30">
               <div className="flex justify-between items-start">
                 <div>
                   <div className="font-mono text-label-md text-foreground" data-testid={`snap-id-${snap.id}`}>
                     {snap.id.slice(0, 12)}
                   </div>
-                  <div className="text-label-sm text-foreground-muted">
-                    {snap.kind} · {formatAge(snap.createdAt)}
+                  <div className="text-label-sm text-foreground-muted mt-spacing-1">
+                    {snap.kind} &middot; {formatAge(snap.createdAt)}
                   </div>
                 </div>
                 <Button

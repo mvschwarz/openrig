@@ -19,7 +19,7 @@ const buttonVariants = cva(
         ghost: "text-foreground-muted hover:bg-surface-low hover:text-foreground",
         link: "text-primary underline-offset-4 hover:underline",
         tactical:
-          "bg-transparent text-foreground-muted uppercase text-label-md tracking-[0.04em] hover:text-foreground",
+          "bg-transparent text-foreground-muted uppercase text-label-md tracking-[0.04em] hover:text-primary hover:bg-primary/5 transition-all",
       },
       size: {
         default: "h-10 px-4 py-2",

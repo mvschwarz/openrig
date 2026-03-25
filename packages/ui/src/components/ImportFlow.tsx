@@ -65,24 +65,26 @@ function StepIndicator({ currentStep, errorAtStep }: { currentStep: Step; errorA
   const activeNum = currentStep === "error" ? errorAtStep : getStepNumber(currentStep);
 
   return (
-    <div className="flex items-center gap-spacing-3 mb-spacing-6" data-testid="step-indicator">
+    <div className="flex items-center gap-spacing-2 mb-spacing-8 p-spacing-4 inset-surface" data-testid="step-indicator">
       {STEPS.map((s, i) => {
         const isCompleted = activeNum > s.num;
         const isActive = activeNum === s.num;
         const isPending = activeNum < s.num;
 
         return (
-          <div key={s.num} className="flex items-center gap-spacing-3">
-            {i > 0 && <span className="text-foreground-muted/40">→</span>}
+          <div key={s.num} className="flex items-center gap-spacing-2">
+            {i > 0 && (
+              <div className={`w-8 h-px mx-spacing-1 ${isCompleted ? "bg-primary/40" : "bg-foreground-muted/20"}`} />
+            )}
             <span
               data-testid={`step-${s.num}`}
-              className={`text-label-md uppercase tracking-[0.04em] ${
+              className={`text-label-md uppercase tracking-[0.04em] font-mono px-spacing-2 py-spacing-1 transition-colors ${
                 isCompleted ? "text-foreground-muted" :
-                isActive ? "text-primary" :
-                isPending ? "text-foreground-muted/40" : ""
+                isActive ? "text-primary bg-primary/10" :
+                isPending ? "text-foreground-muted/30" : ""
               }`}
             >
-              {isCompleted ? "✓" : ""} [ {s.num} {s.label} ]
+              {isCompleted ? "\u2713" : ""} [ {s.num} {s.label} ]
             </span>
           </div>
         );
@@ -173,12 +175,17 @@ export function ImportFlow({ onBack }: ImportFlowProps = {}) {
   };
 
   return (
-    <div data-testid="import-flow" className="p-spacing-6 max-w-3xl">
+    <div data-testid="import-flow" className="p-spacing-8 max-w-3xl">
       {/* Header */}
-      <div className="flex items-center justify-between mb-spacing-6">
-        <h2 className="text-headline-lg uppercase tracking-[0.05em]">IMPORT RIG</h2>
+      <div className="flex items-center justify-between mb-spacing-8">
+        <div>
+          <h2 className="text-headline-lg uppercase tracking-[0.06em]">IMPORT RIG</h2>
+          <p className="text-label-md text-foreground-muted font-grotesk mt-spacing-1">
+            Instantiate a topology from YAML spec
+          </p>
+        </div>
         <Button variant="ghost" onClick={handleBack}>
-          ← Dashboard
+          &larr; Dashboard
         </Button>
       </div>
 

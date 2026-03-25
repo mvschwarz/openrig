@@ -39,52 +39,62 @@ export function RigNode({ data }: { data: RigNodeData }) {
     }
     prevStatusRef.current = data.status;
   }, [data.status]);
-  const runtimeModel = [data.runtime, data.model].filter(Boolean).join(" · ");
+
+  const runtimeModel = [data.runtime, data.model].filter(Boolean).join(" \u00B7 ");
   const sessionName = data.binding?.tmuxSession;
+  const isRunning = data.status === "running";
 
   return (
-    <div className="bg-surface-low p-spacing-3 min-w-[200px]" data-testid="rig-node">
+    <div
+      className="min-w-[220px] relative transition-all duration-150 ease-tactical card-elevated cursor-pointer"
+      data-testid="rig-node"
+    >
       <Handle type="target" position={Position.Top} />
 
-      {/* Header: status dot + uppercase label */}
-      <div className="flex items-center gap-spacing-2 mb-spacing-1">
-        <span
-          data-testid={`status-dot-${data.logicalId}`}
-          className={`inline-block w-2 h-2 ${statusColor} ${statusChanged ? "status-changed" : ""}`}
-          style={{ "--status-color": statusCssColor } as React.CSSProperties}
-        />
-        <span className="text-label-md uppercase tracking-[0.04em] text-foreground">
-          {data.logicalId}
-        </span>
-      </div>
-
-      {/* Runtime + model */}
-      {runtimeModel && (
-        <div className="text-label-sm text-foreground-muted mb-spacing-1">
-          {runtimeModel}
-        </div>
+      {/* Left accent bar for running nodes */}
+      {isRunning && (
+        <div className="absolute left-0 top-0 bottom-0 w-[2px] bg-primary opacity-60" />
       )}
 
-      {/* Session name (mono) */}
-      {sessionName && (
-        <div className="text-label-sm font-mono text-foreground-muted mb-spacing-2">
-          {sessionName}
+      <div className="p-spacing-4">
+        {/* Header: status dot + uppercase label */}
+        <div className="flex items-center gap-spacing-2 mb-spacing-2">
+          <span
+            data-testid={`status-dot-${data.logicalId}`}
+            className={`inline-block w-2 h-2 ${statusColor} ${statusChanged ? "status-changed" : ""} ${isRunning ? "status-dot-running" : ""}`}
+            style={{ "--status-color": statusCssColor } as React.CSSProperties}
+          />
+          <span className="text-label-lg uppercase tracking-[0.03em] text-foreground font-inter">
+            {data.logicalId}
+          </span>
         </div>
-      )}
 
-      {/* Recessed telemetry block */}
-      <div className="bg-surface p-spacing-2">
-        <div className="flex items-center gap-spacing-2 text-label-sm">
-          <span className="text-foreground-muted uppercase">STATUS</span>
-          <span className={`font-mono ${data.status === "running" ? "text-primary" : data.status === "exited" ? "text-destructive" : data.status === "detached" ? "text-warning" : "text-foreground-muted"}`}>
-            {data.status ?? "unknown"}
-          </span>
-        </div>
-        <div className="flex items-center gap-spacing-2 text-label-sm mt-spacing-1">
-          <span className="text-foreground-muted uppercase">BOUND</span>
-          <span className="font-mono text-foreground-muted">
-            {data.binding ? `tmux:${data.binding.tmuxSession ?? "—"}` : "unbound"}
-          </span>
+        {/* Runtime + model */}
+        {runtimeModel && (
+          <div className="text-label-md text-foreground-muted mb-spacing-1 pl-spacing-4">
+            {runtimeModel}
+          </div>
+        )}
+
+        {/* Session name (mono) */}
+        {sessionName && (
+          <div className="text-label-sm font-mono text-foreground-muted opacity-60 mb-spacing-3 pl-spacing-4">
+            {sessionName}
+          </div>
+        )}
+
+        {/* Recessed telemetry block */}
+        <div className="inset-surface p-spacing-3 mt-spacing-2">
+          <div className="grid grid-cols-[auto_1fr] gap-x-spacing-3 gap-y-spacing-1 text-label-sm">
+            <span className="text-foreground-muted uppercase tracking-[0.06em] opacity-60">STATUS</span>
+            <span className={`font-mono ${data.status === "running" ? "text-primary" : data.status === "exited" ? "text-destructive" : data.status === "detached" ? "text-warning" : "text-foreground-muted"}`}>
+              {data.status ?? "unknown"}
+            </span>
+            <span className="text-foreground-muted uppercase tracking-[0.06em] opacity-60">BOUND</span>
+            <span className="font-mono text-foreground-muted">
+              {data.binding ? `tmux:${data.binding.tmuxSession ?? "\u2014"}` : "unbound"}
+            </span>
+          </div>
         </div>
       </div>
 

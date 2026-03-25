@@ -67,12 +67,16 @@ export function StatusBar() {
   return (
     <footer
       data-testid="status-bar"
-      className="h-8 bg-surface-low bg-noise flex items-center px-spacing-6 gap-spacing-6 text-label-md font-grotesk shrink-0"
+      className="h-8 bg-surface-low bg-noise flex items-center px-spacing-6 gap-spacing-6 text-label-md font-grotesk shrink-0 relative"
     >
+      {/* Top edge */}
+      <div className="absolute top-0 left-0 right-0 h-px bg-gradient-to-r from-transparent via-ghost-border to-transparent" />
+
+      {/* Health status */}
       <span className="flex items-center gap-spacing-2">
         <span
           data-testid="health-dot"
-          className={`inline-block w-2 h-2 ${isConnected ? "bg-primary" : "bg-destructive"} ${reconnectPulse ? "status-changed" : ""}`}
+          className={`inline-block w-[6px] h-[6px] ${isConnected ? "bg-primary" : "bg-destructive"} ${reconnectPulse ? "status-changed" : ""} ${isConnected ? "status-dot-running" : ""}`}
         />
         <span
           data-testid="health-text"
@@ -82,14 +86,24 @@ export function StatusBar() {
         </span>
       </span>
 
+      {/* Separator dot */}
+      <span className="text-foreground-muted opacity-30">&middot;</span>
+
       <span data-testid="rig-count" className="text-foreground-muted uppercase">
-        RIGS: <span className="font-mono text-foreground">{rigCount ?? "—"}</span>
+        RIGS <span className="font-mono text-foreground">{rigCount ?? "\u2014"}</span>
       </span>
 
+      <span className="text-foreground-muted opacity-30">&middot;</span>
+
       <span data-testid="cmux-status" className="text-foreground-muted uppercase">
-        CMUX: <span className="font-mono text-foreground">
-          {cmuxAvailable === null ? "—" : cmuxAvailable ? "OK" : "UNAVAILABLE"}
+        CMUX <span className="font-mono text-foreground">
+          {cmuxAvailable === null ? "\u2014" : cmuxAvailable ? "OK" : "UNAVAILABLE"}
         </span>
+      </span>
+
+      {/* Right-aligned timestamp */}
+      <span className="ml-auto text-label-sm font-mono text-foreground-muted opacity-30">
+        {new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit" })}
       </span>
     </footer>
   );

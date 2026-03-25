@@ -147,7 +147,7 @@ describe("Dashboard", () => {
       const loading = screen.getByTestId("dashboard-loading");
       expect(loading).toBeDefined();
       // Should contain pulse animation elements
-      expect(loading.innerHTML).toContain("animate-pulse-tactical");
+      expect(loading.innerHTML).toContain("shimmer");
     });
   });
 

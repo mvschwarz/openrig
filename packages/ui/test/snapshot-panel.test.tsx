@@ -330,7 +330,7 @@ describe("SnapshotPanel", () => {
     await waitFor(() => {
       const skeleton = screen.getByTestId("snapshot-loading");
       expect(skeleton).toBeDefined();
-      expect(skeleton.innerHTML).toContain("animate-pulse-tactical");
+      expect(skeleton.innerHTML).toContain("shimmer");
     });
   });
 });

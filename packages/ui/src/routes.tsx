@@ -34,11 +34,15 @@ const indexRoute = createRoute({
 function RigDetail() {
   const { rigId } = rigDetailRoute.useParams();
   return (
-    <div className="flex flex-1 h-full">
-      <div className="flex-1">
-        <RigGraph rigId={rigId} />
+    <div className="flex flex-col flex-1 h-full">
+      <div className="flex flex-1 min-h-0">
+        <div className="flex-1 relative">
+          <RigGraph rigId={rigId} />
+        </div>
+        <div className="relative border-l border-ghost-border/30">
+          <SnapshotPanel rigId={rigId} />
+        </div>
       </div>
-      <SnapshotPanel rigId={rigId} />
     </div>
   );
 }

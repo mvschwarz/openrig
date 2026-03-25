@@ -15,31 +15,31 @@ export function getEdgeStyle(kind: string): EdgeStyleResult {
       return {
         style: { stroke: "hsl(var(--primary))", strokeWidth: 2 },
         animated: false,
-        type: "default",
+        type: "smoothstep",
       };
     case "spawned_by":
       return {
         style: { stroke: "hsl(var(--primary))", strokeWidth: 2, strokeDasharray: "6 3" },
         animated: false,
-        type: "default",
+        type: "smoothstep",
       };
     case "can_observe":
       return {
         style: { stroke: "hsl(var(--foreground-muted))", strokeWidth: 1.5, strokeDasharray: "2 2" },
         animated: false,
-        type: "default",
+        type: "smoothstep",
       };
     case "uses":
       return {
         style: { stroke: "hsl(var(--accent))", strokeWidth: 1 },
         animated: false,
-        type: "default",
+        type: "smoothstep",
       };
     default:
       return {
         style: { stroke: "hsl(var(--foreground-muted))", strokeWidth: 1 },
         animated: false,
-        type: "default",
+        type: "smoothstep",
       };
   }
 }

@@ -4,6 +4,7 @@ import "@xyflow/react/dist/style.css";
 import { useRigGraph } from "../hooks/useRigGraph.js";
 import { useRigEvents } from "../hooks/useRigEvents.js";
 import { getEdgeStyle } from "@/lib/edge-styles";
+import { applyTreeLayout } from "@/lib/graph-layout";
 import { RigNode } from "./RigNode.js";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 
@@ -87,9 +88,10 @@ export function RigGraph({ rigId }: { rigId: string | null }) {
     });
   }, [rawEdges, shouldAnimate, rawNodes.length]);
 
-  // Apply entrance animation to nodes via className
+  // Apply tree layout + entrance animation to nodes
   const rfNodes = useMemo(() => {
-    return (rawNodes as Node[]).map((node, index) => ({
+    const layoutNodes = applyTreeLayout(rawNodes as Node[], rawEdges as Edge[]);
+    return layoutNodes.map((node, index) => ({
       ...node,
       className: shouldAnimate ? "node-enter" : undefined,
       style: {
@@ -97,7 +99,7 @@ export function RigGraph({ rigId }: { rigId: string | null }) {
         animationDelay: shouldAnimate ? `${Math.min(index * 50, 2000)}ms` : undefined,
       },
     }));
-  }, [rawNodes, shouldAnimate]);
+  }, [rawNodes, rawEdges, shouldAnimate]);
 
   const onNodeClick: NodeMouseHandler = useCallback(
     async (_event, node) => {
@@ -169,19 +171,22 @@ export function RigGraph({ rigId }: { rigId: string | null }) {
 
   return (
     <div
-      className="w-full h-full relative"
+      className="w-full h-full relative bg-background"
       data-testid="graph-view"
       data-animated={shouldAnimate ? "true" : "false"}
     >
+      {/* Atmospheric grid overlay */}
+      <div className="absolute inset-0 bg-grid pointer-events-none z-0" />
+
       {reconnecting && (
-        <div className="absolute top-spacing-2 right-spacing-2 z-10">
+        <div className="absolute top-spacing-4 right-spacing-4 z-20">
           <Alert>
             <AlertDescription className="text-warning">Reconnecting...</AlertDescription>
           </Alert>
         </div>
       )}
       {focusMessage && (
-        <div className={`absolute top-spacing-2 left-spacing-2 z-10 px-spacing-3 py-spacing-1 text-label-md font-mono ${
+        <div className={`absolute top-spacing-4 left-spacing-4 z-20 px-spacing-4 py-spacing-2 text-label-md font-mono rim-light ${
           focusMessage.type === "success" ? "bg-primary text-primary-foreground" :
           focusMessage.type === "error" ? "bg-destructive text-destructive-foreground" :
           "bg-surface-high text-foreground"
@@ -195,9 +200,19 @@ export function RigGraph({ rigId }: { rigId: string | null }) {
         nodeTypes={nodeTypes}
         onNodeClick={onNodeClick}
         fitView
+        fitViewOptions={{ padding: 0.3, maxZoom: 1.0 }}
+        className="relative z-10"
+        proOptions={{ hideAttribution: true }}
+        minZoom={0.3}
+        maxZoom={1.5}
       >
         <Controls />
       </ReactFlow>
+
+      {/* Bottom-left rig ID label */}
+      <div className="absolute bottom-spacing-4 left-spacing-4 z-20 text-label-sm font-mono text-foreground-muted opacity-30">
+        RIG {rigId?.slice(0, 8)}
+      </div>
     </div>
   );
 }

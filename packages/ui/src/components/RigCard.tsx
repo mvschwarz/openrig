@@ -37,35 +37,50 @@ export function RigCard({ rig, onSelect, onSnapshot, onExport }: RigCardProps) {
   return (
     <Card
       data-testid={`rig-card-${rig.id}`}
-      className="cursor-pointer mb-spacing-1"
+      className="cursor-pointer mb-spacing-3 card-elevated transition-all duration-150 ease-tactical group"
       role="button"
       tabIndex={0}
       onClick={() => onSelect(rig.id)}
       onKeyDown={(e) => { if ((e.key === "Enter" || e.key === " ") && e.target === e.currentTarget) { e.preventDefault(); onSelect(rig.id); } }}
     >
-      <CardContent className="p-spacing-4">
+      <CardContent className="p-spacing-6">
         {/* Header: name + node count */}
-        <div className="flex justify-between items-baseline mb-spacing-2">
-          <h3 className="text-headline-md uppercase">{rig.name}</h3>
-          <span className="text-label-md font-mono text-foreground-muted" data-testid={`node-count-${rig.id}`}>
-            {animatedCount} NODE{rig.nodeCount !== 1 ? "S" : ""}
+        <div className="flex justify-between items-baseline mb-spacing-4">
+          <div className="flex items-center gap-spacing-3">
+            {/* Active indicator dot */}
+            <div className="w-1.5 h-1.5 bg-primary opacity-60" />
+            <h3 className="text-headline-md uppercase tracking-[0.02em]">{rig.name}</h3>
+          </div>
+          <span className="text-label-lg font-mono text-foreground-muted" data-testid={`node-count-${rig.id}`}>
+            <span className="font-mono text-foreground text-body-md">{animatedCount}</span>
+            {" "}NODE{rig.nodeCount !== 1 ? "S" : ""}
           </span>
         </div>
 
         {/* Recessed telemetry section */}
-        <div className="bg-surface p-spacing-3 mb-spacing-3">
-          <div className="flex gap-spacing-6 text-label-md">
-            <span className="text-foreground-muted">
-              SNAPSHOT{" "}
-              <span className="font-mono text-foreground" data-testid={`snapshot-age-${rig.id}`}>
+        <div className="inset-surface p-spacing-4 mb-spacing-4">
+          <div className="flex gap-spacing-8 text-label-md">
+            <div className="flex flex-col gap-spacing-1">
+              <span className="text-label-sm uppercase text-foreground-muted opacity-60 tracking-[0.06em]">
+                SNAPSHOT
+              </span>
+              <span className="font-mono text-foreground text-body-sm" data-testid={`snapshot-age-${rig.id}`}>
                 {formatAge(rig.latestSnapshotAt)}
               </span>
-            </span>
+            </div>
+            <div className="flex flex-col gap-spacing-1">
+              <span className="text-label-sm uppercase text-foreground-muted opacity-60 tracking-[0.06em]">
+                STATUS
+              </span>
+              <span className="font-mono text-primary text-body-sm">
+                ACTIVE
+              </span>
+            </div>
           </div>
         </div>
 
         {/* Tactical action buttons */}
-        <div className="flex gap-spacing-2">
+        <div className="flex gap-spacing-3 pt-spacing-2">
           <Button
             variant="tactical"
             size="sm"
@@ -83,9 +98,10 @@ export function RigCard({ rig, onSelect, onSnapshot, onExport }: RigCardProps) {
           <Button
             variant="tactical"
             size="sm"
+            className="ml-auto group-hover:text-primary transition-colors"
             onClick={(e) => { e.stopPropagation(); onSelect(rig.id); }}
           >
-            GRAPH →
+            GRAPH &rarr;
           </Button>
         </div>
       </CardContent>
