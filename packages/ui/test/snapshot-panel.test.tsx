@@ -1,8 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, waitFor, cleanup, fireEvent } from "@testing-library/react";
 import { SnapshotPanel } from "../src/components/SnapshotPanel.js";
-import { App } from "../src/App.js";
+import { RigGraph } from "../src/components/RigGraph.js";
 import { createMockEventSourceClass } from "./helpers/mock-event-source.js";
+import { createAppTestRouter } from "./helpers/test-router.js";
 
 const mockFetch = vi.fn();
 globalThis.fetch = mockFetch;
@@ -234,15 +235,9 @@ describe("SnapshotPanel", () => {
     });
   });
 
-  // Test 9: App integration — graph detail includes SnapshotPanel
-  it("App: selecting rig renders graph detail with SnapshotPanel", async () => {
+  // Test 9: Rig detail route includes SnapshotPanel alongside RigGraph
+  it("rig detail route renders SnapshotPanel alongside graph", async () => {
     mockFetch.mockImplementation((url: string) => {
-      if (url === "/api/rigs/summary") {
-        return Promise.resolve({
-          ok: true,
-          json: async () => [{ id: "r1", name: "alpha", nodeCount: 1, latestSnapshotAt: null, latestSnapshotId: null }],
-        });
-      }
       if (typeof url === "string" && url.includes("/graph")) {
         return Promise.resolve({
           ok: true,
@@ -258,15 +253,22 @@ describe("SnapshotPanel", () => {
       return Promise.resolve({ ok: true, json: async () => ({}) });
     });
 
-    render(<App />);
-    await waitFor(() => expect(screen.getByText("alpha")).toBeDefined());
-
-    // Navigate to graph
-    fireEvent.click(screen.getByTestId("rig-card-r1"));
+    render(createAppTestRouter({
+      routes: [
+        {
+          path: "/rigs/$rigId",
+          component: () => (
+            <div className="flex">
+              <RigGraph rigId="r1" />
+              <SnapshotPanel rigId="r1" />
+            </div>
+          ),
+        },
+      ],
+      initialPath: "/rigs/r1",
+    }));
 
     await waitFor(() => {
-      // Both graph back button and snapshot panel should be present
-      expect(screen.getByText("Back to Dashboard")).toBeDefined();
       expect(screen.getByTestId("snapshot-panel")).toBeDefined();
     });
   });

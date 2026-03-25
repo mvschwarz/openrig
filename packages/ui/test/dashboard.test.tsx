@@ -1,7 +1,8 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll } from "vitest";
 import { render, screen, waitFor, cleanup, fireEvent } from "@testing-library/react";
-import { App } from "../src/App.js";
 import { createMockEventSourceClass } from "./helpers/mock-event-source.js";
+import { createTestRouter, createAppTestRouter } from "./helpers/test-router.js";
+import { Dashboard } from "../src/components/Dashboard.js";
 
 const mockFetch = vi.fn();
 globalThis.fetch = mockFetch;
@@ -49,63 +50,52 @@ function mockExportResponse() {
   return { ok: true, text: async () => "schema_version: 1\nname: test\n" };
 }
 
-describe("Dashboard", () => {
-  // Test 1: Renders rig cards from summary API
-  it("renders rig cards from /api/rigs/summary", async () => {
-    mockFetch.mockImplementation((url: string) => {
-      if (url === "/api/rigs/summary") {
-        return Promise.resolve(mockSummaryResponse([
-          { id: "r1", name: "alpha", nodeCount: 3, latestSnapshotAt: null, latestSnapshotId: null },
-          { id: "r2", name: "beta", nodeCount: 1, latestSnapshotAt: null, latestSnapshotId: null },
-        ]));
-      }
-      return Promise.resolve({ ok: true, json: async () => ({}) });
-    });
+function setupSummaryMock(rigs: Array<{
+  id: string; name: string; nodeCount: number;
+  latestSnapshotAt: string | null; latestSnapshotId: string | null;
+}>) {
+  mockFetch.mockImplementation((url: string, opts?: RequestInit) => {
+    if (url === "/api/rigs/summary") return Promise.resolve(mockSummaryResponse(rigs));
+    if (typeof url === "string" && url.includes("/graph")) return Promise.resolve(mockGraphResponse());
+    if (typeof url === "string" && url.includes("/snapshots") && opts?.method === "POST") return Promise.resolve(mockSnapshotResponse());
+    if (typeof url === "string" && url.includes("/snapshots")) return Promise.resolve({ ok: true, json: async () => [] });
+    if (typeof url === "string" && url.includes("/spec")) return Promise.resolve(mockExportResponse());
+    if (url === "/api/healthz") return Promise.resolve({ ok: true, json: async () => ({ status: "ok" }) });
+    if (url === "/api/adapters/cmux/status") return Promise.resolve({ ok: true, json: async () => ({ available: false }) });
+    return Promise.resolve({ ok: true, json: async () => ({}) });
+  });
+}
 
-    render(<App />);
+const TWO_RIGS = [
+  { id: "r1", name: "alpha", nodeCount: 3, latestSnapshotAt: "2026-03-24 01:00:00", latestSnapshotId: "snap-1" },
+  { id: "r2", name: "beta", nodeCount: 1, latestSnapshotAt: null, latestSnapshotId: null },
+];
+
+describe("Dashboard", () => {
+  it("renders rig cards from /api/rigs/summary", async () => {
+    setupSummaryMock(TWO_RIGS);
+    render(createTestRouter({ component: Dashboard }));
     await waitFor(() => {
       expect(screen.getByText("alpha")).toBeDefined();
       expect(screen.getByText("beta")).toBeDefined();
     });
   });
 
-  // Test 2: Card shows name + node count
   it("card shows name and node count", async () => {
-    mockFetch.mockImplementation((url: string) => {
-      if (url === "/api/rigs/summary") {
-        return Promise.resolve(mockSummaryResponse([
-          { id: "r1", name: "alpha", nodeCount: 5, latestSnapshotAt: null, latestSnapshotId: null },
-        ]));
-      }
-      return Promise.resolve({ ok: true, json: async () => ({}) });
-    });
-
-    render(<App />);
+    setupSummaryMock([{ id: "r1", name: "alpha", nodeCount: 5, latestSnapshotAt: null, latestSnapshotId: null }]);
+    render(createTestRouter({ component: Dashboard }));
     await waitFor(() => {
       expect(screen.getByText("alpha")).toBeDefined();
       expect(screen.getByText("5 node(s)")).toBeDefined();
     });
   });
 
-  // Test 3: Snapshot button calls POST /api/rigs/:rigId/snapshots
   it("snapshot button calls POST /api/rigs/:rigId/snapshots", async () => {
-    mockFetch.mockImplementation((url: string, opts?: RequestInit) => {
-      if (url === "/api/rigs/summary") {
-        return Promise.resolve(mockSummaryResponse([
-          { id: "r1", name: "alpha", nodeCount: 2, latestSnapshotAt: null, latestSnapshotId: null },
-        ]));
-      }
-      if (url === "/api/rigs/r1/snapshots" && opts?.method === "POST") {
-        return Promise.resolve(mockSnapshotResponse());
-      }
-      return Promise.resolve({ ok: true, json: async () => ({}) });
-    });
-
-    render(<App />);
+    setupSummaryMock([{ id: "r1", name: "alpha", nodeCount: 2, latestSnapshotAt: null, latestSnapshotId: null }]);
+    render(createTestRouter({ component: Dashboard }));
     await waitFor(() => expect(screen.getByText("alpha")).toBeDefined());
 
-    const snapshotBtn = screen.getAllByText("Snapshot")[0]!;
-    fireEvent.click(snapshotBtn);
+    fireEvent.click(screen.getAllByText("Snapshot")[0]!);
 
     await waitFor(() => {
       const postCall = mockFetch.mock.calls.find(
@@ -115,242 +105,117 @@ describe("Dashboard", () => {
     });
   });
 
-  // Test 4: Export button triggers download
   it("export button fetches /api/rigs/:rigId/spec", async () => {
-    // Mock URL.createObjectURL and document.createElement for download
-    const origCreate = URL.createObjectURL;
-    const origRevoke = URL.revokeObjectURL;
     URL.createObjectURL = vi.fn(() => "blob:test");
     URL.revokeObjectURL = vi.fn();
 
-    mockFetch.mockImplementation((url: string) => {
-      if (url === "/api/rigs/summary") {
-        return Promise.resolve(mockSummaryResponse([
-          { id: "r1", name: "alpha", nodeCount: 1, latestSnapshotAt: null, latestSnapshotId: null },
-        ]));
-      }
-      if (url === "/api/rigs/r1/spec") {
-        return Promise.resolve(mockExportResponse());
-      }
-      return Promise.resolve({ ok: true, json: async () => ({}) });
-    });
-
-    render(<App />);
+    setupSummaryMock([{ id: "r1", name: "alpha", nodeCount: 1, latestSnapshotAt: null, latestSnapshotId: null }]);
+    render(createTestRouter({ component: Dashboard }));
     await waitFor(() => expect(screen.getByText("alpha")).toBeDefined());
 
-    const exportBtn = screen.getAllByText("Export")[0]!;
-    fireEvent.click(exportBtn);
+    fireEvent.click(screen.getAllByText("Export")[0]!);
 
     await waitFor(() => {
-      const specCall = mockFetch.mock.calls.find(
-        (c: unknown[]) => c[0] === "/api/rigs/r1/spec"
-      );
+      const specCall = mockFetch.mock.calls.find((c: unknown[]) => c[0] === "/api/rigs/r1/spec");
       expect(specCall).toBeDefined();
     });
-
-    URL.createObjectURL = origCreate;
-    URL.revokeObjectURL = origRevoke;
   });
 
-  // Test 5: Click card -> graph view
-  it("click card -> switches to graph view", async () => {
-    mockFetch.mockImplementation((url: string) => {
-      if (url === "/api/rigs/summary") {
-        return Promise.resolve(mockSummaryResponse([
-          { id: "r1", name: "alpha", nodeCount: 1, latestSnapshotAt: null, latestSnapshotId: null },
-        ]));
-      }
-      if (typeof url === "string" && url.includes("/graph")) {
-        return Promise.resolve(mockGraphResponse());
-      }
-      if (typeof url === "string" && url.includes("/snapshots")) {
-        return Promise.resolve({ ok: true, json: async () => [] });
-      }
-      return Promise.resolve({ ok: true, json: async () => ({}) });
-    });
+  it("click card navigates (View Graph button)", async () => {
+    setupSummaryMock([{ id: "r1", name: "alpha", nodeCount: 1, latestSnapshotAt: null, latestSnapshotId: null }]);
 
-    render(<App />);
+    render(createAppTestRouter({
+      routes: [
+        { path: "/", component: Dashboard },
+        { path: "/rigs/$rigId", component: () => <div data-testid="rig-detail">detail</div> },
+      ],
+    }));
+
     await waitFor(() => expect(screen.getByText("alpha")).toBeDefined());
-
-    // Click the card itself (not buttons)
-    const card = screen.getByTestId("rig-card-r1");
-    fireEvent.click(card);
+    fireEvent.click(screen.getAllByText("View Graph")[0]!);
 
     await waitFor(() => {
-      expect(screen.getByText("Back to Dashboard")).toBeDefined();
+      expect(screen.getByTestId("rig-detail")).toBeDefined();
     });
   });
 
-  // Test 6: Import button sets import view
-  it("import button opens import view", async () => {
-    mockFetch.mockImplementation((url: string) => {
-      if (url === "/api/rigs/summary") {
-        return Promise.resolve(mockSummaryResponse([
-          { id: "r1", name: "alpha", nodeCount: 1, latestSnapshotAt: null, latestSnapshotId: null },
-        ]));
-      }
-      return Promise.resolve({ ok: true, json: async () => ({}) });
-    });
+  it("import button navigates to /import", async () => {
+    setupSummaryMock([{ id: "r1", name: "alpha", nodeCount: 1, latestSnapshotAt: null, latestSnapshotId: null }]);
 
-    render(<App />);
+    render(createAppTestRouter({
+      routes: [
+        { path: "/", component: Dashboard },
+        { path: "/import", component: () => <div data-testid="import-page">import</div> },
+      ],
+    }));
+
     await waitFor(() => expect(screen.getByText("alpha")).toBeDefined());
-
-    const importBtn = screen.getByText("Import Rig");
-    fireEvent.click(importBtn);
+    fireEvent.click(screen.getByText("Import Rig"));
 
     await waitFor(() => {
-      expect(screen.getByTestId("import-flow")).toBeDefined();
+      expect(screen.getByTestId("import-page")).toBeDefined();
     });
   });
 
-  // Test 7: Empty state -> "No rigs" + import CTA
   it("empty state shows 'No rigs' + Import button", async () => {
-    mockFetch.mockImplementation((url: string) => {
-      if (url === "/api/rigs/summary") {
-        return Promise.resolve(mockSummaryResponse([]));
-      }
-      return Promise.resolve({ ok: true, json: async () => ({}) });
-    });
-
-    render(<App />);
+    setupSummaryMock([]);
+    render(createTestRouter({ component: Dashboard }));
     await waitFor(() => {
       expect(screen.getByText(/no rigs/i)).toBeDefined();
       expect(screen.getByText("Import Rig")).toBeDefined();
     });
   });
 
-  // Test 8: Loading state
-  it("shows loading state", () => {
+  it("shows loading state", async () => {
     mockFetch.mockReturnValue(new Promise(() => {}));
-    render(<App />);
-    expect(screen.getByText(/loading dashboard/i)).toBeDefined();
+    render(createTestRouter({ component: Dashboard }));
+    await waitFor(() => {
+      expect(screen.getByText(/loading dashboard/i)).toBeDefined();
+    });
   });
 
-  // Test 9: Clicking Snapshot does NOT trigger card navigation
-  it("snapshot button click does not navigate to graph", async () => {
-    mockFetch.mockImplementation((url: string, opts?: RequestInit) => {
-      if (url === "/api/rigs/summary") {
-        return Promise.resolve(mockSummaryResponse([
-          { id: "r1", name: "alpha", nodeCount: 1, latestSnapshotAt: null, latestSnapshotId: null },
-        ]));
-      }
-      if (url === "/api/rigs/r1/snapshots" && opts?.method === "POST") {
-        return Promise.resolve(mockSnapshotResponse());
-      }
-      return Promise.resolve({ ok: true, json: async () => ({}) });
-    });
-
-    render(<App />);
+  it("snapshot button click does not navigate away", async () => {
+    setupSummaryMock([{ id: "r1", name: "alpha", nodeCount: 1, latestSnapshotAt: null, latestSnapshotId: null }]);
+    render(createTestRouter({ component: Dashboard }));
     await waitFor(() => expect(screen.getByText("alpha")).toBeDefined());
 
-    const snapshotBtn = screen.getAllByText("Snapshot")[0]!;
-    fireEvent.click(snapshotBtn);
+    fireEvent.click(screen.getAllByText("Snapshot")[0]!);
 
-    // Should still be on dashboard, not graph
     await waitFor(() => {
-      expect(screen.queryByText("Back to Dashboard")).toBeNull();
       expect(screen.getByText("alpha")).toBeDefined();
     });
   });
 
-  // Test 9b: Clicking Export does NOT trigger card navigation
-  it("export button click does not navigate to graph", async () => {
+  it("export button click does not navigate away", async () => {
     URL.createObjectURL = vi.fn(() => "blob:test");
     URL.revokeObjectURL = vi.fn();
 
-    mockFetch.mockImplementation((url: string) => {
-      if (url === "/api/rigs/summary") {
-        return Promise.resolve(mockSummaryResponse([
-          { id: "r1", name: "alpha", nodeCount: 1, latestSnapshotAt: null, latestSnapshotId: null },
-        ]));
-      }
-      if (url === "/api/rigs/r1/spec") {
-        return Promise.resolve(mockExportResponse());
-      }
-      return Promise.resolve({ ok: true, json: async () => ({}) });
-    });
-
-    render(<App />);
+    setupSummaryMock([{ id: "r1", name: "alpha", nodeCount: 1, latestSnapshotAt: null, latestSnapshotId: null }]);
+    render(createTestRouter({ component: Dashboard }));
     await waitFor(() => expect(screen.getByText("alpha")).toBeDefined());
 
-    const exportBtn = screen.getAllByText("Export")[0]!;
-    fireEvent.click(exportBtn);
+    fireEvent.click(screen.getAllByText("Export")[0]!);
 
-    // Should still be on dashboard, not graph
     await waitFor(() => {
-      expect(screen.queryByText("Back to Dashboard")).toBeNull();
       expect(screen.getByText("alpha")).toBeDefined();
     });
   });
 
-  // Test 10: Back button from graph -> dashboard
-  it("back button returns from graph to dashboard", async () => {
-    mockFetch.mockImplementation((url: string) => {
-      if (url === "/api/rigs/summary") {
-        return Promise.resolve(mockSummaryResponse([
-          { id: "r1", name: "alpha", nodeCount: 1, latestSnapshotAt: null, latestSnapshotId: null },
-        ]));
-      }
-      if (typeof url === "string" && url.includes("/graph")) {
-        return Promise.resolve(mockGraphResponse());
-      }
-      if (typeof url === "string" && url.includes("/snapshots")) {
-        return Promise.resolve({ ok: true, json: async () => [] });
-      }
-      return Promise.resolve({ ok: true, json: async () => ({}) });
-    });
-
-    render(<App />);
-    await waitFor(() => expect(screen.getByText("alpha")).toBeDefined());
-
-    // Navigate to graph
-    fireEvent.click(screen.getByTestId("rig-card-r1"));
-    await waitFor(() => expect(screen.getByText("Back to Dashboard")).toBeDefined());
-
-    // Navigate back
-    fireEvent.click(screen.getByText("Back to Dashboard"));
-
-    // Dashboard should re-render (will re-fetch summary)
-    await waitFor(() => {
-      expect(screen.queryByText("Back to Dashboard")).toBeNull();
-      // Dashboard is loading or showing content
-      expect(screen.getByText(/loading dashboard|alpha|no rigs/i)).toBeDefined();
-    });
-  });
-
-  // Test 12: Card with latestSnapshotAt renders age string
   it("card with snapshot timestamp renders age string", async () => {
-    // Use a timestamp from 2 hours ago to get a stable "2h ago" result
     const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+    setupSummaryMock([{ id: "r1", name: "alpha", nodeCount: 1, latestSnapshotAt: twoHoursAgo, latestSnapshotId: "snap-1" }]);
 
-    mockFetch.mockImplementation((url: string) => {
-      if (url === "/api/rigs/summary") {
-        return Promise.resolve(mockSummaryResponse([
-          { id: "r1", name: "alpha", nodeCount: 1, latestSnapshotAt: twoHoursAgo, latestSnapshotId: "snap-1" },
-        ]));
-      }
-      return Promise.resolve({ ok: true, json: async () => ({}) });
-    });
-
-    render(<App />);
+    render(createTestRouter({ component: Dashboard }));
     await waitFor(() => {
       const ageEl = screen.getByTestId("snapshot-age-r1");
       expect(ageEl.textContent).toMatch(/2h ago/);
     });
   });
 
-  // Test 13: Card with no snapshot renders "none"
   it("card with no snapshot renders 'none'", async () => {
-    mockFetch.mockImplementation((url: string) => {
-      if (url === "/api/rigs/summary") {
-        return Promise.resolve(mockSummaryResponse([
-          { id: "r1", name: "alpha", nodeCount: 1, latestSnapshotAt: null, latestSnapshotId: null },
-        ]));
-      }
-      return Promise.resolve({ ok: true, json: async () => ({}) });
-    });
+    setupSummaryMock([{ id: "r1", name: "alpha", nodeCount: 1, latestSnapshotAt: null, latestSnapshotId: null }]);
 
-    render(<App />);
+    render(createTestRouter({ component: Dashboard }));
     await waitFor(() => {
       const ageEl = screen.getByTestId("snapshot-age-r1");
       expect(ageEl.textContent).toContain("none");

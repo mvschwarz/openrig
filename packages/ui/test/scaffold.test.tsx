@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, waitFor, cleanup } from "@testing-library/react";
-import { App } from "../src/App.js";
 import { createMockEventSourceClass } from "./helpers/mock-event-source.js";
+import { createTestRouter } from "./helpers/test-router.js";
+import { Dashboard } from "../src/components/Dashboard.js";
 
 const mockFetch = vi.fn();
 globalThis.fetch = mockFetch;
@@ -29,15 +30,17 @@ function mockSummaryResponse(rigs: Array<{
 }
 
 describe("App (scaffold)", () => {
-  it("shows loading state while fetching summary", () => {
+  it("shows loading state while fetching summary", async () => {
     mockFetch.mockReturnValue(new Promise(() => {}));
-    render(<App />);
-    expect(screen.getByText(/loading dashboard/i)).toBeDefined();
+    render(createTestRouter({ component: Dashboard }));
+    await waitFor(() => {
+      expect(screen.getByText(/loading dashboard/i)).toBeDefined();
+    });
   });
 
   it("shows 'No rigs' when summary returns empty", async () => {
-    mockFetch.mockResolvedValueOnce(mockSummaryResponse([]));
-    render(<App />);
+    mockFetch.mockResolvedValue(mockSummaryResponse([]));
+    render(createTestRouter({ component: Dashboard }));
 
     await waitFor(() => {
       expect(screen.getByText(/no rigs/i)).toBeDefined();
@@ -54,15 +57,15 @@ describe("App (scaffold)", () => {
       return Promise.resolve({ ok: true, json: async () => ({}) });
     });
 
-    render(<App />);
+    render(createTestRouter({ component: Dashboard }));
     await waitFor(() => {
       expect(screen.getByText("r01")).toBeDefined();
     });
   });
 
   it("shows error message on fetch failure", async () => {
-    mockFetch.mockResolvedValueOnce({ ok: false, status: 500 });
-    render(<App />);
+    mockFetch.mockResolvedValue({ ok: false, status: 500 });
+    render(createTestRouter({ component: Dashboard }));
 
     await waitFor(() => {
       expect(screen.getByText(/error/i)).toBeDefined();
@@ -70,8 +73,8 @@ describe("App (scaffold)", () => {
   });
 
   it("dashboard fetches /api/rigs/summary", async () => {
-    mockFetch.mockResolvedValueOnce(mockSummaryResponse([]));
-    render(<App />);
+    mockFetch.mockResolvedValue(mockSummaryResponse([]));
+    render(createTestRouter({ component: Dashboard }));
 
     await waitFor(() => {
       expect(mockFetch).toHaveBeenCalled();

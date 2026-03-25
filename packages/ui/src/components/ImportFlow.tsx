@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useNavigate } from "@tanstack/react-router";
 
 type Step = "input" | "validating" | "valid" | "preflight" | "preflight_done" | "instantiating" | "done" | "error";
 
@@ -29,10 +30,12 @@ interface InstantiateFailure {
 }
 
 interface ImportFlowProps {
-  onBack: () => void;
+  onBack?: () => void;
 }
 
-export function ImportFlow({ onBack }: ImportFlowProps) {
+export function ImportFlow({ onBack }: ImportFlowProps = {}) {
+  const navigate = useNavigate();
+  const handleBack = onBack ?? (() => navigate({ to: "/" }));
   const [yaml, setYaml] = useState("");
   const [step, setStep] = useState<Step>("input");
   const [errors, setErrors] = useState<string[]>([]);
@@ -112,7 +115,7 @@ export function ImportFlow({ onBack }: ImportFlowProps) {
 
   return (
     <div data-testid="import-flow" style={{ padding: 16 }}>
-      <button onClick={onBack}>Back to Dashboard</button>
+      <button onClick={handleBack}>Back to Dashboard</button>
       <h2>Import Rig</h2>
 
       {step === "input" && (

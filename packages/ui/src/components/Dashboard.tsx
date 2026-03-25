@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { useNavigate } from "@tanstack/react-router";
 import { RigCard } from "./RigCard.js";
 
 interface RigSummary {
@@ -9,12 +10,8 @@ interface RigSummary {
   latestSnapshotId: string | null;
 }
 
-interface DashboardProps {
-  onSelectRig: (rigId: string) => void;
-  onImport: () => void;
-}
-
-export function Dashboard({ onSelectRig, onImport }: DashboardProps) {
+export function Dashboard() {
+  const navigate = useNavigate();
   const [rigs, setRigs] = useState<RigSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -76,25 +73,30 @@ export function Dashboard({ onSelectRig, onImport }: DashboardProps) {
 
   if (rigs.length === 0) {
     return (
-      <div style={{ padding: 32, textAlign: "center" }}>
-        <div>No rigs</div>
-        <button onClick={onImport} style={{ marginTop: 16 }}>Import Rig</button>
+      <div className="p-spacing-8 text-center">
+        <div className="text-foreground-muted">No rigs</div>
+        <button
+          onClick={() => navigate({ to: "/import" })}
+          className="mt-spacing-4"
+        >
+          Import Rig
+        </button>
       </div>
     );
   }
 
   return (
-    <div style={{ padding: 16 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 16 }}>
-        <h2>Rigs</h2>
-        <button onClick={onImport}>Import Rig</button>
+    <div className="p-spacing-4">
+      <div className="flex justify-between mb-spacing-4">
+        <h2 className="text-headline-md uppercase">Rigs</h2>
+        <button onClick={() => navigate({ to: "/import" })}>Import Rig</button>
       </div>
-      {actionError && <div style={{ color: "red", marginBottom: 8 }}>{actionError}</div>}
+      {actionError && <div className="text-destructive mb-spacing-2">{actionError}</div>}
       {rigs.map((rig) => (
         <RigCard
           key={rig.id}
           rig={rig}
-          onSelect={onSelectRig}
+          onSelect={(rigId) => navigate({ to: "/rigs/$rigId", params: { rigId } })}
           onSnapshot={handleSnapshot}
           onExport={handleExport}
         />

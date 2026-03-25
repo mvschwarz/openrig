@@ -15,6 +15,10 @@ export default defineConfig({
         target: "http://localhost:7433",
         changeOrigin: true,
       },
+      "/healthz": {
+        target: "http://localhost:7433",
+        changeOrigin: true,
+      },
     },
   },
 });
