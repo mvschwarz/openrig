@@ -13,6 +13,8 @@ export type ActionClassification =
 
 export interface ConflictInfo {
   existingPath: string;
+  existingHash?: string;
+  sourceHash?: string;
   reason: string;
 }
 
@@ -22,6 +24,7 @@ export interface InstallPlanEntry {
   classification: ActionClassification;
   targetPath: string;
   scope: string;
+  sourcePath?: string; // Absent for requirements (no source file)
   conflict?: ConflictInfo;
   deferred: boolean;
   deferReason?: string;
@@ -72,6 +75,7 @@ export class InstallPlanner {
         exportName: skill.name,
         classification: "safe_projection",
         targetPath,
+        sourcePath: path.join(resolved.sourceRef, skill.source, "SKILL.md"),
         scope: "project_shared",
         deferred: false,
       };
@@ -152,26 +156,38 @@ export class InstallPlanner {
         exportName: g.name,
         classification: exists ? "managed_merge" : "safe_projection",
         targetPath,
+        sourcePath: path.join(resolved.sourceRef, g.source),
         scope: "project_shared",
         deferred: false,
       });
     }
 
-    // Plan agents
+    // Plan agents (single YAML files, not directories)
     for (const agent of exports.agents) {
       const agentName = agent.name ?? path.basename(agent.source, path.extname(agent.source));
       const targetPath = runtime === "claude-code"
-        ? path.join(targetRoot, ".claude", "agents", agentName)
-        : path.join(targetRoot, ".agents", agentName);
+        ? path.join(targetRoot, ".claude", "agents", `${agentName}.yaml`)
+        : path.join(targetRoot, ".agents", `${agentName}.yaml`);
 
-      entries.push({
+      const exists = this.fs.exists(targetPath);
+      const entry: InstallPlanEntry = {
         exportType: "agent",
         exportName: agentName,
         classification: "safe_projection",
         targetPath,
+        sourcePath: path.join(resolved.sourceRef, agent.source),
         scope: "project_shared",
         deferred: false,
-      });
+      };
+
+      if (exists) {
+        entry.conflict = {
+          existingPath: targetPath,
+          reason: `Agent '${agentName}' already exists at target`,
+        };
+      }
+
+      entries.push(entry);
     }
 
     // Plan deferred (hooks, mcp from role resolver)

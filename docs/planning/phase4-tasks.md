@@ -59,7 +59,7 @@ Peer consultation: /tmp/rigged/phase4-consultation.md
 | Skills | `.claude/skills/<name>/` or `<project>/.claude/skills/` | `.agents/skills/<name>/` |
 | Guidance (AGENTS.md) | N/A (Claude uses CLAUDE.md) | `AGENTS.md` managed block |
 | Guidance (CLAUDE.md) | `CLAUDE.md` managed block | N/A (Codex uses AGENTS.md) |
-| Agents | `.claude/agents/<name>/` | `.agents/<name>/` |
+| Agents | `.claude/agents/<name>.yaml` | `.agents/<name>.yaml` |
 
 ---
 
@@ -125,10 +125,18 @@ interface InstallPlanEntry {
   exportName: string;
   classification: ActionClassification;
   targetPath: string;
+  sourcePath?: string;  // Absent for requirements (no source file)
   scope: string;
   conflict?: ConflictInfo;
   deferred: boolean;
   deferReason?: string;
+}
+
+interface ConflictInfo {
+  existingPath: string;
+  existingHash?: string;
+  sourceHash?: string;
+  reason: string;
 }
 
 interface InstallPlan {

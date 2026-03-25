@@ -246,6 +246,62 @@ roles:
     expect(agentEntry).toBeDefined();
     expect(agentEntry!.exportName).toBe("reviewer");
     expect(agentEntry!.targetPath).toContain("reviewer");
+    expect(agentEntry!.sourcePath).toBeDefined();
+  });
+
+  // Test 18: Agent targets are .yaml files (not directories)
+  it("agent targets are .yaml files, not directories", () => {
+    const resolved = resolvePackage(BASIC_MANIFEST);
+    const planner = new InstallPlanner(mockFs({}));
+
+    const ccPlan = planner.plan(resolved, "/repo", "claude-code");
+    const ccAgent = ccPlan.entries.find((e) => e.exportType === "agent");
+    expect(ccAgent!.targetPath).toMatch(/\.claude\/agents\/reviewer\.yaml$/);
+
+    const cxPlan = planner.plan(resolved, "/repo", "codex");
+    const cxAgent = cxPlan.entries.find((e) => e.exportType === "agent");
+    expect(cxAgent!.targetPath).toMatch(/\.agents\/reviewer\.yaml$/);
+  });
+
+  // Test 19: sourcePath set on file-backed entries, undefined on requirements
+  it("sourcePath set on skills/guidance/agents, undefined on requirements", () => {
+    const manifest = `
+schema_version: 1
+name: test
+version: 1.0.0
+summary: Test
+compatibility:
+  runtimes: [codex]
+exports:
+  skills:
+    - source: skills/foo
+      name: foo
+  guidance:
+    - source: guidance/AGENTS.md
+      kind: agents_md
+      merge_strategy: managed_block
+  agents:
+    - source: agents/reviewer.yaml
+requirements:
+  cli_tools:
+    - name: ripgrep
+`;
+    const resolved = resolvePackage(manifest);
+    const planner = new InstallPlanner(mockFs({}));
+    const plan = planner.plan(resolved, "/repo", "codex");
+
+    const skill = plan.entries.find((e) => e.exportType === "skill");
+    expect(skill!.sourcePath).toBeDefined();
+    expect(skill!.sourcePath).toContain("skills/foo");
+
+    const guidance = plan.entries.find((e) => e.exportType === "guidance" && !e.deferred);
+    expect(guidance!.sourcePath).toBeDefined();
+
+    const agent = plan.entries.find((e) => e.exportType === "agent");
+    expect(agent!.sourcePath).toBeDefined();
+
+    const req = plan.entries.find((e) => e.exportType === "requirement");
+    expect(req!.sourcePath).toBeUndefined();
   });
 
   // Test 12: generic_rules_overlay -> deferred
