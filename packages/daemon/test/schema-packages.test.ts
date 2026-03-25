@@ -11,11 +11,12 @@ import { resumeMetadataSchema } from "../src/db/migrations/006_resume_metadata.j
 import { nodeSpecFieldsSchema } from "../src/db/migrations/007_node_spec_fields.js";
 import { packagesSchema } from "../src/db/migrations/008_packages.js";
 import { installJournalSchema } from "../src/db/migrations/009_install_journal.js";
+import { journalSeqSchema } from "../src/db/migrations/010_journal_seq.js";
 
 const ALL_MIGRATIONS = [
   coreSchema, bindingsSessionsSchema, eventsSchema, snapshotsSchema,
   checkpointsSchema, resumeMetadataSchema, nodeSpecFieldsSchema,
-  packagesSchema, installJournalSchema,
+  packagesSchema, installJournalSchema, journalSeqSchema,
 ];
 
 function setupDb(): Database.Database {
@@ -123,8 +124,8 @@ describe("P4-T00: Package storage schema", () => {
     ).run("inst-1", "pkg-1", "/tmp/repo", "project_shared");
 
     db.prepare(
-      "INSERT INTO install_journal (id, install_id, action, export_type, classification, target_path, before_hash, after_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
-    ).run("j-1", "inst-1", "copy", "skill", "safe_projection", ".claude/skills/foo/SKILL.md", null, "def456");
+      "INSERT INTO install_journal (id, install_id, seq, action, export_type, classification, target_path, before_hash, after_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    ).run("j-1", "inst-1", 1, "copy", "skill", "safe_projection", ".claude/skills/foo/SKILL.md", null, "def456");
 
     const rows = db.prepare("SELECT * FROM install_journal WHERE install_id = ?")
       .all("inst-1") as Array<{ id: string; action: string; after_hash: string }>;
@@ -192,8 +193,8 @@ describe("P4-T00: Package storage schema", () => {
   it("insert journal with nonexistent install_id throws FK error", () => {
     expect(() => {
       db.prepare(
-        "INSERT INTO install_journal (id, install_id, action, export_type, classification, target_path) VALUES (?, ?, ?, ?, ?, ?)"
-      ).run("j-1", "nonexistent-inst", "copy", "skill", "safe_projection", "/target");
+        "INSERT INTO install_journal (id, install_id, seq, action, export_type, classification, target_path) VALUES (?, ?, ?, ?, ?, ?, ?)"
+      ).run("j-1", "nonexistent-inst", 1, "copy", "skill", "safe_projection", "/target");
     }).toThrow(/FOREIGN KEY/);
   });
 
@@ -214,6 +215,38 @@ describe("P4-T00: Package storage schema", () => {
       expect(tableNames).toContain("packages");
       expect(tableNames).toContain("package_installs");
       expect(tableNames).toContain("install_journal");
+    } finally {
+      daemonDb.close();
+    }
+  });
+
+  // Test 14: install_journal has seq column after 010
+  it("install_journal has seq column", () => {
+    const cols = db.pragma("table_info(install_journal)") as Array<{ name: string }>;
+    const names = cols.map((c) => c.name);
+    expect(names).toContain("seq");
+  });
+
+  // Test 15: UNIQUE(install_id, seq) constraint on install_journal
+  it("UNIQUE(install_id, seq) constraint enforced", () => {
+    db.prepare("INSERT INTO packages (id, name, version, source_kind, source_ref, manifest_hash) VALUES (?, ?, ?, ?, ?, ?)").run("p1", "pkg", "1.0.0", "local_path", "/p", "h");
+    db.prepare("INSERT INTO package_installs (id, package_id, target_root, scope) VALUES (?, ?, ?, ?)").run("i1", "p1", "/repo", "project_shared");
+    db.prepare("INSERT INTO install_journal (id, install_id, seq, action, export_type, classification, target_path) VALUES (?, ?, ?, ?, ?, ?, ?)").run("j1", "i1", 1, "copy", "skill", "safe_projection", "/t1");
+
+    expect(() => {
+      db.prepare("INSERT INTO install_journal (id, install_id, seq, action, export_type, classification, target_path) VALUES (?, ?, ?, ?, ?, ?, ?)").run("j2", "i1", 1, "copy", "skill", "safe_projection", "/t2");
+    }).toThrow(/UNIQUE/);
+  });
+
+  // Test 16: createDaemon applies 010 (seq column present via startup)
+  it("createDaemon applies 010 migration (seq column in install_journal)", async () => {
+    db.close();
+    const { createDaemon } = await import("../src/startup.js");
+    const { db: daemonDb } = await createDaemon({ dbPath: ":memory:" });
+
+    try {
+      const cols = daemonDb.pragma("table_info(install_journal)") as Array<{ name: string }>;
+      expect(cols.map((c) => c.name)).toContain("seq");
     } finally {
       daemonDb.close();
     }

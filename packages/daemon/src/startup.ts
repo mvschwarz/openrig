@@ -32,6 +32,7 @@ import { resumeMetadataSchema } from "./db/migrations/006_resume_metadata.js";
 import { nodeSpecFieldsSchema } from "./db/migrations/007_node_spec_fields.js";
 import { packagesSchema } from "./db/migrations/008_packages.js";
 import { installJournalSchema } from "./db/migrations/009_install_journal.js";
+import { journalSeqSchema } from "./db/migrations/010_journal_seq.js";
 
 interface DaemonOptions {
   dbPath?: string;
@@ -50,7 +51,7 @@ interface DaemonResult {
 export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> {
   const dbPath = opts?.dbPath ?? ":memory:";
   const db = createDb(dbPath);
-  migrate(db, [coreSchema, bindingsSessionsSchema, eventsSchema, snapshotsSchema, checkpointsSchema, resumeMetadataSchema, nodeSpecFieldsSchema, packagesSchema, installJournalSchema]);
+  migrate(db, [coreSchema, bindingsSessionsSchema, eventsSchema, snapshotsSchema, checkpointsSchema, resumeMetadataSchema, nodeSpecFieldsSchema, packagesSchema, installJournalSchema, journalSeqSchema]);
 
   const rigRepo = new RigRepository(db);
   const sessionRegistry = new SessionRegistry(db);
