@@ -1,0 +1,68 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* Tactical Control Plane — Dark Theme */
+    /* Source: docs/design/design-system.md */
+
+    /* Surface hierarchy */
+    --background: 0 2% 8%;         /* #141313 */
+    --surface-low: 0 2% 11%;       /* #1c1b1b */
+    --surface: 0 1% 14%;           /* #242323 */
+    --surface-high: 0 1% 21%;      /* #353434 */
+
+    /* Foreground */
+    --foreground: 20 7% 89%;       /* #e5e2e1 */
+    --foreground-muted: 60 2% 56%; /* #919188 */
+
+    /* Primary — Tactical Olive */
+    --primary: 72 12% 75%;         /* #c4c9b3 */
+    --primary-dark: 70 10% 30%;    /* #505544 */
+    --primary-foreground: 0 2% 8%; /* #141313 */
+
+    /* Semantic */
+    --destructive: 6 100% 84%;     /* #ffb4ab */
+    --destructive-foreground: 0 2% 8%; /* #141313 */
+    --warning: 40 72% 69%;         /* #e5c07b */
+    --accent: 207 82% 66%;         /* #61afef */
+
+    /* Ghost border */
+    --ghost-border: rgba(145, 145, 136, 0.15);
+
+    /* shadcn compatibility tokens */
+    --border: var(--ghost-border);
+    --input: 0 1% 14%;             /* --surface */
+    --ring: 72 12% 75%;            /* --primary */
+    --radius: 0px;
+
+    /* Card */
+    --card: 0 2% 11%;              /* --surface-low */
+    --card-foreground: 20 7% 89%;  /* --foreground */
+
+    /* Popover */
+    --popover: 0 1% 14%;           /* --surface */
+    --popover-foreground: 20 7% 89%;
+
+    /* Muted */
+    --muted: 0 2% 11%;             /* --surface-low */
+    --muted-foreground: 60 2% 56%; /* --foreground-muted */
+
+    /* Secondary */
+    --secondary: 0 1% 21%;         /* --surface-high */
+    --secondary-foreground: 20 7% 89%;
+  }
+
+  * {
+    border-color: var(--ghost-border);
+  }
+
+  body {
+    background-color: hsl(var(--background));
+    color: hsl(var(--foreground));
+    font-family: "Inter", system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+}

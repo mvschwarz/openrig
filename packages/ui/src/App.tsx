@@ -11,7 +11,7 @@ export function App() {
 
   if (view.type === "graph") {
     return (
-      <div style={{ width: "100%", height: "100vh", display: "flex", flexDirection: "column" }}>
+      <div className="bg-background text-foreground rounded-md" style={{ width: "100%", height: "100vh", display: "flex", flexDirection: "column" }}>
         <div style={{ padding: 8, borderBottom: "1px solid #ccc" }}>
           <button onClick={() => setView({ type: "dashboard" })}>Back to Dashboard</button>
         </div>
