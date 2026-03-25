@@ -7,6 +7,7 @@ import { restoreCommand } from "./commands/restore.js";
 import { exportCommand, type ExportDeps } from "./commands/export.js";
 import { importCommand, type ImportDeps } from "./commands/import.js";
 import { uiCommand, type UiDeps } from "./commands/ui.js";
+import { packageCommand } from "./commands/package.js";
 import type { LifecycleDeps } from "./daemon-lifecycle.js";
 
 export interface ProgramDeps {
@@ -17,6 +18,7 @@ export interface ProgramDeps {
   uiDeps?: UiDeps;
   exportDeps?: ExportDeps;
   importDeps?: ImportDeps;
+  packageDeps?: StatusDeps;
 }
 
 export function createProgram(depsOverride?: ProgramDeps): Command {
@@ -34,6 +36,7 @@ export function createProgram(depsOverride?: ProgramDeps): Command {
   program.addCommand(exportCommand(depsOverride?.exportDeps));
   program.addCommand(importCommand(depsOverride?.importDeps));
   program.addCommand(uiCommand(depsOverride?.uiDeps));
+  program.addCommand(packageCommand(depsOverride?.packageDeps));
 
   return program;
 }
