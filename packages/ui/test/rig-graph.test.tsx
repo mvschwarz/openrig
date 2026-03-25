@@ -1,10 +1,22 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, waitFor, cleanup, act } from "@testing-library/react";
 import { ReactFlowProvider } from "@xyflow/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { RigGraph } from "../src/components/RigGraph.js";
 import { RigNode } from "../src/components/RigNode.js";
 import { createMockEventSourceClass, instances } from "./helpers/mock-event-source.js";
 import type { MockEventSourceInstance } from "./helpers/mock-event-source.js";
+
+function createTestQueryClient() {
+  return new QueryClient({
+    defaultOptions: { queries: { retry: false, gcTime: 0 } },
+  });
+}
+
+function QueryWrapper({ children }: { children: React.ReactNode }) {
+  const qc = createTestQueryClient();
+  return <QueryClientProvider client={qc}>{children}</QueryClientProvider>;
+}
 
 // Mock fetch globally
 const mockFetch = vi.fn();
@@ -89,7 +101,7 @@ describe("RigGraph", () => {
   it("renders nodes from mock graph data", async () => {
     mockFetch.mockResolvedValueOnce(mockGraphResponse(sampleNodes(), sampleEdges()));
 
-    const { container } = render(<RigGraph rigId="rig-1" />);
+    const { container } = render(<QueryWrapper><RigGraph rigId="rig-1" /></QueryWrapper>);
 
     await waitFor(() => {
       // React Flow renders nodes with data-testid="rf__node-{id}"
@@ -101,7 +113,7 @@ describe("RigGraph", () => {
   it("passes edges to ReactFlow (edge container rendered)", async () => {
     mockFetch.mockResolvedValueOnce(mockGraphResponse(sampleNodes(), sampleEdges()));
 
-    const { container } = render(<RigGraph rigId="rig-1" />);
+    const { container } = render(<QueryWrapper><RigGraph rigId="rig-1" /></QueryWrapper>);
 
     await waitFor(() => {
       // React Flow renders nodes successfully (proves graph data was accepted)
@@ -122,14 +134,14 @@ describe("RigGraph", () => {
     // Never resolves — stays in loading
     mockFetch.mockReturnValueOnce(new Promise(() => {}));
 
-    render(<RigGraph rigId="rig-1" />);
+    render(<QueryWrapper><RigGraph rigId="rig-1" /></QueryWrapper>);
     expect(screen.getByText(/loading/i)).toBeDefined();
   });
 
   it("empty state rendered when nodes array is empty", async () => {
     mockFetch.mockResolvedValueOnce(mockGraphResponse([], []));
 
-    render(<RigGraph rigId="rig-1" />);
+    render(<QueryWrapper><RigGraph rigId="rig-1" /></QueryWrapper>);
 
     await waitFor(() => {
       expect(screen.getByText(/no nodes/i)).toBeDefined();
@@ -139,7 +151,7 @@ describe("RigGraph", () => {
   it("error state rendered on fetch failure", async () => {
     mockFetch.mockResolvedValueOnce({ ok: false, status: 500 });
 
-    render(<RigGraph rigId="rig-1" />);
+    render(<QueryWrapper><RigGraph rigId="rig-1" /></QueryWrapper>);
 
     await waitFor(() => {
       expect(screen.getByText(/error/i)).toBeDefined();
@@ -147,7 +159,7 @@ describe("RigGraph", () => {
   });
 
   it("rigId=null shows 'No rig selected' placeholder, no fetch", () => {
-    render(<RigGraph rigId={null} />);
+    render(<QueryWrapper><RigGraph rigId={null} /></QueryWrapper>);
 
     expect(screen.getByText(/no rig selected/i)).toBeDefined();
     expect(mockFetch).not.toHaveBeenCalled();
@@ -156,7 +168,7 @@ describe("RigGraph", () => {
   it("rigId='abc' fetches /api/rigs/abc/graph", async () => {
     mockFetch.mockResolvedValueOnce(mockGraphResponse([], []));
 
-    render(<RigGraph rigId="abc" />);
+    render(<QueryWrapper><RigGraph rigId="abc" /></QueryWrapper>);
 
     await waitFor(() => {
       expect(mockFetch).toHaveBeenCalledWith("/api/rigs/abc/graph");
@@ -166,7 +178,7 @@ describe("RigGraph", () => {
   it("renders custom RigNode content via nodeTypes registration", async () => {
     mockFetch.mockResolvedValueOnce(mockGraphResponse(sampleNodes(), sampleEdges()));
 
-    const { container } = render(<RigGraph rigId="rig-1" />);
+    const { container } = render(<QueryWrapper><RigGraph rigId="rig-1" /></QueryWrapper>);
 
     await waitFor(() => {
       // React Flow uses our custom node type — nodes have class react-flow__node-rigNode
@@ -225,7 +237,7 @@ describe("RigGraph SSE integration", () => {
   it("SSE message triggers second fetch to /api/rigs/:id/graph", async () => {
     mockFetch.mockResolvedValue(mockGraphResponse(sampleNodes(), sampleEdges()));
 
-    render(<RigGraph rigId="rig-1" />);
+    render(<QueryWrapper><RigGraph rigId="rig-1" /></QueryWrapper>);
 
     // Wait for initial fetch
     await waitFor(() => {
@@ -254,7 +266,7 @@ describe("RigGraph SSE integration", () => {
       ))
       .mockResolvedValueOnce(mockGraphResponse(sampleNodes(), sampleEdges()));
 
-    const { container } = render(<RigGraph rigId="rig-1" />);
+    const { container } = render(<QueryWrapper><RigGraph rigId="rig-1" /></QueryWrapper>);
 
     // Wait for initial render with 1 node
     await waitFor(() => {
@@ -278,7 +290,7 @@ describe("RigGraph SSE integration", () => {
   it("reconnecting indicator visible on EventSource error", async () => {
     mockFetch.mockResolvedValue(mockGraphResponse(sampleNodes(), sampleEdges()));
 
-    render(<RigGraph rigId="rig-1" />);
+    render(<QueryWrapper><RigGraph rigId="rig-1" /></QueryWrapper>);
 
     await waitFor(() => expect(instances.length).toBeGreaterThan(0));
 
@@ -294,7 +306,7 @@ describe("RigGraph SSE integration", () => {
   it("reconnect open event clears indicator and triggers refetch", async () => {
     mockFetch.mockResolvedValue(mockGraphResponse(sampleNodes(), sampleEdges()));
 
-    render(<RigGraph rigId="rig-1" />);
+    render(<QueryWrapper><RigGraph rigId="rig-1" /></QueryWrapper>);
 
     await waitFor(() => expect(instances.length).toBeGreaterThan(0));
     await waitFor(() => expect(mockFetch).toHaveBeenCalledTimes(1));
@@ -331,7 +343,7 @@ describe("RigGraph click-through to focus", () => {
       .mockResolvedValueOnce(mockGraphResponse(sampleNodes(), sampleEdges()))
       .mockResolvedValueOnce({ ok: true, json: async () => ({ ok: true }) });
 
-    const { container } = render(<RigGraph rigId="rig-1" />);
+    const { container } = render(<QueryWrapper><RigGraph rigId="rig-1" /></QueryWrapper>);
 
     await waitFor(() => {
       expect(container.querySelector("[data-testid='rf__node-n1']")).not.toBeNull();
@@ -358,7 +370,7 @@ describe("RigGraph click-through to focus", () => {
       .mockResolvedValueOnce(mockGraphResponse(sampleNodes(), sampleEdges()))
       .mockResolvedValueOnce({ ok: true, json: async () => ({ ok: true }) });
 
-    const { container } = render(<RigGraph rigId="rig-1" />);
+    const { container } = render(<QueryWrapper><RigGraph rigId="rig-1" /></QueryWrapper>);
 
     await waitFor(() => {
       expect(container.querySelector("[data-testid='rf__node-n1']")).not.toBeNull();
@@ -377,7 +389,7 @@ describe("RigGraph click-through to focus", () => {
   it("click node without binding -> 'not bound' message, no focus fetch", async () => {
     mockFetch.mockResolvedValueOnce(mockGraphResponse(sampleNodes(), sampleEdges()));
 
-    const { container } = render(<RigGraph rigId="rig-1" />);
+    const { container } = render(<QueryWrapper><RigGraph rigId="rig-1" /></QueryWrapper>);
 
     await waitFor(() => {
       expect(container.querySelector("[data-testid='rf__node-n2']")).not.toBeNull();
@@ -407,7 +419,7 @@ describe("RigGraph click-through to focus", () => {
       .mockResolvedValueOnce(mockGraphResponse(sampleNodes(), sampleEdges()))
       .mockResolvedValueOnce({ ok: true, json: async () => ({ ok: false, code: "unavailable" }) });
 
-    const { container } = render(<RigGraph rigId="rig-1" />);
+    const { container } = render(<QueryWrapper><RigGraph rigId="rig-1" /></QueryWrapper>);
 
     await waitFor(() => {
       expect(container.querySelector("[data-testid='rf__node-n1']")).not.toBeNull();
@@ -428,7 +440,7 @@ describe("RigGraph click-through to focus", () => {
       .mockResolvedValueOnce(mockGraphResponse(sampleNodes(), sampleEdges()))
       .mockResolvedValueOnce({ ok: false, status: 500 });
 
-    const { container } = render(<RigGraph rigId="rig-1" />);
+    const { container } = render(<QueryWrapper><RigGraph rigId="rig-1" /></QueryWrapper>);
 
     await waitFor(() => {
       expect(container.querySelector("[data-testid='rf__node-n1']")).not.toBeNull();
@@ -449,7 +461,7 @@ describe("RigGraph click-through to focus", () => {
       .mockResolvedValueOnce(mockGraphResponse(sampleNodes(), sampleEdges()))
       .mockResolvedValueOnce({ ok: true, json: async () => ({ ok: true }) });
 
-    const { container } = render(<RigGraph rigId="my-rig-id" />);
+    const { container } = render(<QueryWrapper><RigGraph rigId="my-rig-id" /></QueryWrapper>);
 
     await waitFor(() => {
       expect(container.querySelector("[data-testid='rf__node-n1']")).not.toBeNull();
@@ -472,7 +484,7 @@ describe("RigGraph click-through to focus", () => {
     const nodes = [...sampleNodes(), nodeWithBindingNoSurface()];
     mockFetch.mockResolvedValueOnce(mockGraphResponse(nodes, sampleEdges()));
 
-    const { container } = render(<RigGraph rigId="rig-1" />);
+    const { container } = render(<QueryWrapper><RigGraph rigId="rig-1" /></QueryWrapper>);
 
     await waitFor(() => {
       expect(container.querySelector("[data-testid='rf__node-n3']")).not.toBeNull();
@@ -504,7 +516,7 @@ describe("RigGraph click-through to focus", () => {
       .mockResolvedValueOnce({ ok: true, json: async () => ({ ok: true }) })
       .mockResolvedValueOnce({ ok: true, json: async () => ({ ok: false, code: "unavailable" }) });
 
-    const { container } = render(<RigGraph rigId="rig-1" />);
+    const { container } = render(<QueryWrapper><RigGraph rigId="rig-1" /></QueryWrapper>);
 
     await waitFor(() => {
       expect(container.querySelector("[data-testid='rf__node-n1']")).not.toBeNull();

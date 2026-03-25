@@ -4,6 +4,8 @@ import {
   createRouter,
   Outlet,
 } from "@tanstack/react-router";
+import { QueryClientProvider } from "@tanstack/react-query";
+import { queryClient } from "./lib/query-client.js";
 import { AppShell } from "./components/AppShell.js";
 import { Dashboard } from "./components/Dashboard.js";
 import { RigGraph } from "./components/RigGraph.js";
@@ -13,9 +15,11 @@ import { ImportFlow } from "./components/ImportFlow.js";
 // Root route — wraps everything in AppShell
 const rootRoute = createRootRoute({
   component: () => (
-    <AppShell>
-      <Outlet />
-    </AppShell>
+    <QueryClientProvider client={queryClient}>
+      <AppShell>
+        <Outlet />
+      </AppShell>
+    </QueryClientProvider>
   ),
 });
 

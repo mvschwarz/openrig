@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 
 const DEBOUNCE_MS = 100;
 
@@ -7,24 +8,22 @@ export interface UseRigEventsResult {
   reconnecting: boolean;
 }
 
-export function useRigEvents(
-  rigId: string | null,
-  onEvent: () => void
-): UseRigEventsResult {
+export function useRigEvents(rigId: string | null): UseRigEventsResult {
+  const queryClient = useQueryClient();
   const [connected, setConnected] = useState(false);
   const [reconnecting, setReconnecting] = useState(false);
   const hasErroredRef = useRef(false);
   const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const onEventRef = useRef(onEvent);
-  onEventRef.current = onEvent;
 
-  const debouncedOnEvent = useCallback(() => {
+  const invalidateGraph = useCallback(() => {
+    if (!rigId) return;
     if (debounceTimerRef.current) return;
     debounceTimerRef.current = setTimeout(() => {
       debounceTimerRef.current = null;
-      onEventRef.current();
+      // Only invalidate the graph query — matches previous behavior
+      queryClient.invalidateQueries({ queryKey: ["rig", rigId, "graph"] });
     }, DEBOUNCE_MS);
-  }, []);
+  }, [rigId, queryClient]);
 
   useEffect(() => {
     if (!rigId) {
@@ -33,7 +32,6 @@ export function useRigEvents(
       return;
     }
 
-    // Reset state for new rig — clears stale reconnecting from previous rig
     hasErroredRef.current = false;
     setConnected(false);
     setReconnecting(false);
@@ -42,15 +40,16 @@ export function useRigEvents(
     es.addEventListener("open", () => {
       setConnected(true);
       if (hasErroredRef.current) {
-        // Reconnect after error — clear indicator and trigger refetch
+        // Reconnect after error — clear indicator and trigger graph refetch
         setReconnecting(false);
         hasErroredRef.current = false;
-        debouncedOnEvent();
+        invalidateGraph();
       }
+      // Initial open does NOT trigger invalidation (preserving existing behavior)
     });
 
     es.addEventListener("message", () => {
-      debouncedOnEvent();
+      invalidateGraph();
     });
 
     es.addEventListener("error", () => {
@@ -66,7 +65,7 @@ export function useRigEvents(
         debounceTimerRef.current = null;
       }
     };
-  }, [rigId, debouncedOnEvent]);
+  }, [rigId, invalidateGraph]);
 
   return { connected, reconnecting };
 }

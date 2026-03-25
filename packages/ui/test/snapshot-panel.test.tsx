@@ -1,9 +1,20 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, waitFor, cleanup, fireEvent } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { SnapshotPanel } from "../src/components/SnapshotPanel.js";
 import { RigGraph } from "../src/components/RigGraph.js";
 import { createMockEventSourceClass } from "./helpers/mock-event-source.js";
 import { createAppTestRouter } from "./helpers/test-router.js";
+
+function createTestQueryClient() {
+  return new QueryClient({
+    defaultOptions: { queries: { retry: false, gcTime: 0 } },
+  });
+}
+
+function QueryWrapper({ children }: { children: React.ReactNode }) {
+  return <QueryClientProvider client={createTestQueryClient()}>{children}</QueryClientProvider>;
+}
 
 const mockFetch = vi.fn();
 globalThis.fetch = mockFetch;
@@ -48,7 +59,7 @@ describe("SnapshotPanel", () => {
       return Promise.resolve({ ok: true, json: async () => ({}) });
     });
 
-    render(<SnapshotPanel rigId="r1" />);
+    render(<QueryWrapper><SnapshotPanel rigId="r1" /></QueryWrapper>);
     await waitFor(() => {
       expect(screen.getByText(/snap-1/)).toBeDefined();
       expect(screen.getByText(/snap-2/)).toBeDefined();
@@ -73,7 +84,7 @@ describe("SnapshotPanel", () => {
       return Promise.resolve({ ok: true, json: async () => ({}) });
     });
 
-    render(<SnapshotPanel rigId="r1" />);
+    render(<QueryWrapper><SnapshotPanel rigId="r1" /></QueryWrapper>);
     await waitFor(() => expect(screen.getByText("Create Snapshot")).toBeDefined());
 
     fireEvent.click(screen.getByText("Create Snapshot"));
@@ -102,7 +113,7 @@ describe("SnapshotPanel", () => {
       return Promise.resolve({ ok: true, json: async () => ({}) });
     });
 
-    render(<SnapshotPanel rigId="r1" />);
+    render(<QueryWrapper><SnapshotPanel rigId="r1" /></QueryWrapper>);
     await waitFor(() => expect(screen.getByTestId("restore-btn-snap-1")).toBeDefined());
 
     fireEvent.click(screen.getByTestId("restore-btn-snap-1"));
@@ -129,7 +140,7 @@ describe("SnapshotPanel", () => {
       return Promise.resolve({ ok: true, json: async () => ({}) });
     });
 
-    render(<SnapshotPanel rigId="r1" />);
+    render(<QueryWrapper><SnapshotPanel rigId="r1" /></QueryWrapper>);
     await waitFor(() => expect(screen.getByTestId("restore-btn-snap-1")).toBeDefined());
 
     fireEvent.click(screen.getByTestId("restore-btn-snap-1"));
@@ -159,13 +170,14 @@ describe("SnapshotPanel", () => {
       return Promise.resolve({ ok: true, json: async () => ({}) });
     });
 
-    render(<SnapshotPanel rigId="r1" />);
+    render(<QueryWrapper><SnapshotPanel rigId="r1" /></QueryWrapper>);
     await waitFor(() => expect(screen.getByTestId("restore-btn-snap-1")).toBeDefined());
 
     fireEvent.click(screen.getByTestId("restore-btn-snap-1"));
     fireEvent.click(screen.getByTestId("confirm-restore-snap-1"));
 
-    expect(screen.getByTestId("restore-loading")).toBeDefined();
+    // Wait for mutation to start (loading indicator appears)
+    await waitFor(() => expect(screen.getByTestId("restore-loading")).toBeDefined());
 
     // Resolve to clean up
     resolveRestore!(mockRestoreResult([]));
@@ -176,7 +188,7 @@ describe("SnapshotPanel", () => {
   it("shows 'No snapshots' when list is empty", async () => {
     mockFetch.mockImplementation(() => Promise.resolve(mockSnapshotList([])));
 
-    render(<SnapshotPanel rigId="r1" />);
+    render(<QueryWrapper><SnapshotPanel rigId="r1" /></QueryWrapper>);
     await waitFor(() => expect(screen.getByText(/no snapshots/i)).toBeDefined());
   });
 
@@ -191,7 +203,7 @@ describe("SnapshotPanel", () => {
       return Promise.resolve({ ok: true, json: async () => ({}) });
     });
 
-    render(<SnapshotPanel rigId="r1" />);
+    render(<QueryWrapper><SnapshotPanel rigId="r1" /></QueryWrapper>);
     await waitFor(() => expect(screen.getByTestId("restore-btn-snap-1")).toBeDefined());
 
     fireEvent.click(screen.getByTestId("restore-btn-snap-1"));
@@ -223,7 +235,7 @@ describe("SnapshotPanel", () => {
       return Promise.resolve({ ok: true, json: async () => ({}) });
     });
 
-    render(<SnapshotPanel rigId="r1" />);
+    render(<QueryWrapper><SnapshotPanel rigId="r1" /></QueryWrapper>);
     await waitFor(() => expect(screen.getByTestId("restore-btn-snap-1")).toBeDefined());
 
     fireEvent.click(screen.getByTestId("restore-btn-snap-1"));

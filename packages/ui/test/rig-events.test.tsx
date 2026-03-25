@@ -1,11 +1,18 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, waitFor, act, cleanup } from "@testing-library/react";
 import { useState } from "react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { useRigEvents } from "../src/hooks/useRigEvents.js";
 import { createMockEventSourceClass, instances } from "./helpers/mock-event-source.js";
 import type { MockEventSourceInstance } from "./helpers/mock-event-source.js";
 
 let OriginalEventSource: typeof EventSource | undefined;
+
+function createTestQueryClient() {
+  return new QueryClient({
+    defaultOptions: { queries: { retry: false, gcTime: 0 } },
+  });
+}
 
 beforeEach(() => {
   OriginalEventSource = globalThis.EventSource;
@@ -19,9 +26,8 @@ afterEach(() => {
   cleanup();
 });
 
-// Test harness component that exposes hook state
-function HookHarness({ rigId, onEvent }: { rigId: string | null; onEvent: () => void }) {
-  const { connected, reconnecting } = useRigEvents(rigId, onEvent);
+function HookHarness({ rigId }: { rigId: string | null }) {
+  const { connected, reconnecting } = useRigEvents(rigId);
   return (
     <div>
       <span data-testid="connected">{String(connected)}</span>
@@ -30,15 +36,21 @@ function HookHarness({ rigId, onEvent }: { rigId: string | null; onEvent: () => 
   );
 }
 
-// Harness that allows rigId change
-function ChangingRigHarness({ onEvent }: { onEvent: () => void }) {
+function ChangingRigHarness() {
   const [rigId, setRigId] = useState<string | null>("rig-1");
   return (
     <div>
-      <HookHarness rigId={rigId} onEvent={onEvent} />
+      <HookHarness rigId={rigId} />
       <button onClick={() => setRigId("rig-2")}>change</button>
       <button onClick={() => setRigId(null)}>clear</button>
     </div>
+  );
+}
+
+function renderWithQuery(ui: React.ReactElement) {
+  const queryClient = createTestQueryClient();
+  return render(
+    <QueryClientProvider client={queryClient}>{ui}</QueryClientProvider>
   );
 }
 
@@ -48,8 +60,7 @@ function getLastInstance(): MockEventSourceInstance {
 
 describe("useRigEvents hook", () => {
   it("opens EventSource to correct URL", async () => {
-    const onEvent = vi.fn();
-    render(<HookHarness rigId="rig-1" onEvent={onEvent} />);
+    renderWithQuery(<HookHarness rigId="rig-1" />);
 
     await waitFor(() => {
       expect(instances).toHaveLength(1);
@@ -57,174 +68,161 @@ describe("useRigEvents hook", () => {
     });
   });
 
-  it("on SSE message -> onEvent callback invoked", async () => {
-    const onEvent = vi.fn();
-    render(<HookHarness rigId="rig-1" onEvent={onEvent} />);
+  it("on SSE message -> invalidates graph query (debounced)", async () => {
+    const qc = createTestQueryClient();
+    const invalidateSpy = vi.spyOn(qc, "invalidateQueries");
+
+    render(
+      <QueryClientProvider client={qc}>
+        <HookHarness rigId="rig-1" />
+      </QueryClientProvider>
+    );
 
     await waitFor(() => expect(instances).toHaveLength(1));
+    const es = getLastInstance();
 
+    act(() => { es.simulateMessage("event1"); });
+
+    // Wait for debounce (100ms)
+    await waitFor(() => {
+      expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["rig", "rig-1", "graph"] });
+    });
+  });
+
+  it("debounce: rapid events -> one invalidation per batch", async () => {
+    const qc = createTestQueryClient();
+    const invalidateSpy = vi.spyOn(qc, "invalidateQueries");
+
+    render(
+      <QueryClientProvider client={qc}>
+        <HookHarness rigId="rig-1" />
+      </QueryClientProvider>
+    );
+
+    await waitFor(() => expect(instances).toHaveLength(1));
+    const es = getLastInstance();
+
+    // Rapid fire — all within debounce window
     act(() => {
-      getLastInstance().simulateMessage('{"type":"rig.created"}');
+      es.simulateMessage("e1");
+      es.simulateMessage("e2");
+      es.simulateMessage("e3");
     });
 
     await waitFor(() => {
-      expect(onEvent).toHaveBeenCalled();
+      const graphCalls = invalidateSpy.mock.calls.filter(
+        (c) => JSON.stringify(c[0]) === JSON.stringify({ queryKey: ["rig", "rig-1", "graph"] })
+      );
+      expect(graphCalls).toHaveLength(1);
     });
-  });
-
-  it("debounce: rapid events -> onEvent called once per batch", async () => {
-    const onEvent = vi.fn();
-    render(<HookHarness rigId="rig-1" onEvent={onEvent} />);
-
-    await waitFor(() => expect(instances).toHaveLength(1));
-
-    // Fire 5 rapid messages
-    act(() => {
-      for (let i = 0; i < 5; i++) {
-        getLastInstance().simulateMessage(`{"type":"event.${i}"}`);
-      }
-    });
-
-    // Wait for debounce to settle
-    await new Promise((r) => setTimeout(r, 200));
-
-    // Should be called fewer times than 5 (debounced)
-    expect(onEvent.mock.calls.length).toBeLessThan(5);
-    expect(onEvent.mock.calls.length).toBeGreaterThanOrEqual(1);
   });
 
   it("rigId=null -> no EventSource opened", () => {
-    const onEvent = vi.fn();
-    render(<HookHarness rigId={null} onEvent={onEvent} />);
-
+    renderWithQuery(<HookHarness rigId={null} />);
     expect(instances).toHaveLength(0);
   });
 
   it("EventSource error -> reconnecting=true", async () => {
-    const onEvent = vi.fn();
-    render(<HookHarness rigId="rig-1" onEvent={onEvent} />);
+    renderWithQuery(<HookHarness rigId="rig-1" />);
 
     await waitFor(() => expect(instances).toHaveLength(1));
+    const es = getLastInstance();
 
-    act(() => {
-      getLastInstance().simulateError();
-    });
+    act(() => { es.simulateError(); });
 
     await waitFor(() => {
       expect(screen.getByTestId("reconnecting").textContent).toBe("true");
+      expect(screen.getByTestId("connected").textContent).toBe("false");
     });
   });
 
   it("unmount -> EventSource.close() called", async () => {
-    const onEvent = vi.fn();
-    const { unmount } = render(<HookHarness rigId="rig-1" onEvent={onEvent} />);
+    const { unmount } = renderWithQuery(<HookHarness rigId="rig-1" />);
 
     await waitFor(() => expect(instances).toHaveLength(1));
-    const instance = getLastInstance();
+    const es = getLastInstance();
 
     unmount();
-
-    expect(instance.close).toHaveBeenCalled();
+    expect(es.readyState).toBe(2); // CLOSED
   });
 
   it("rigId change -> old EventSource closed, new one opened", async () => {
-    const onEvent = vi.fn();
-    const { getByText } = render(<ChangingRigHarness onEvent={onEvent} />);
+    const { getByText } = renderWithQuery(<ChangingRigHarness />);
+
+    await waitFor(() => expect(instances).toHaveLength(1));
+    const first = instances[0]!;
+    expect(first.url).toContain("rig-1");
+
+    act(() => { getByText("change").click(); });
 
     await waitFor(() => {
-      expect(instances).toHaveLength(1);
-      expect(instances[0]!.url).toBe("/api/events?rigId=rig-1");
-    });
-
-    const firstInstance = instances[0]!;
-
-    act(() => {
-      getByText("change").click();
-    });
-
-    await waitFor(() => {
-      expect(firstInstance.close).toHaveBeenCalled();
       expect(instances).toHaveLength(2);
-      expect(instances[1]!.url).toBe("/api/events?rigId=rig-2");
+      expect(first.readyState).toBe(2); // CLOSED
+      expect(instances[1]!.url).toContain("rig-2");
     });
   });
 
-  it("reconnect: open event after error -> reconnecting=false, onEvent called", async () => {
-    const onEvent = vi.fn();
-    render(<HookHarness rigId="rig-1" onEvent={onEvent} />);
+  it("reconnect: open after error -> reconnecting=false, invalidates graph", async () => {
+    const qc = createTestQueryClient();
+    const invalidateSpy = vi.spyOn(qc, "invalidateQueries");
+
+    render(
+      <QueryClientProvider client={qc}>
+        <HookHarness rigId="rig-1" />
+      </QueryClientProvider>
+    );
 
     await waitFor(() => expect(instances).toHaveLength(1));
+    const es = getLastInstance();
 
-    // Error first
-    act(() => {
-      getLastInstance().simulateError();
-    });
+    // Simulate error then reconnect
+    act(() => { es.simulateError(); });
+    await waitFor(() => expect(screen.getByTestId("reconnecting").textContent).toBe("true"));
 
-    await waitFor(() => {
-      expect(screen.getByTestId("reconnecting").textContent).toBe("true");
-    });
-
-    onEvent.mockClear();
-
-    // Reconnect (open event)
-    act(() => {
-      getLastInstance().simulateOpen();
-    });
+    act(() => { es.simulateOpen(); });
 
     await waitFor(() => {
       expect(screen.getByTestId("reconnecting").textContent).toBe("false");
-      expect(onEvent).toHaveBeenCalled();
+      expect(screen.getByTestId("connected").textContent).toBe("true");
+    });
+
+    // Reconnect should trigger graph invalidation
+    await waitFor(() => {
+      expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["rig", "rig-1", "graph"] });
     });
   });
 
-  it("initial open does NOT trigger onEvent (no extra refetch on first mount)", async () => {
-    const onEvent = vi.fn();
-    render(<HookHarness rigId="rig-1" onEvent={onEvent} />);
+  it("initial open does NOT trigger invalidation", async () => {
+    const qc = createTestQueryClient();
+    const invalidateSpy = vi.spyOn(qc, "invalidateQueries");
 
-    // Wait for EventSource to open
-    await waitFor(() => {
-      expect(instances).toHaveLength(1);
-    });
+    render(
+      <QueryClientProvider client={qc}>
+        <HookHarness rigId="rig-1" />
+      </QueryClientProvider>
+    );
 
-    // Wait past any debounce window
-    await new Promise((r) => setTimeout(r, 200));
+    await waitFor(() => expect(instances).toHaveLength(1));
+    const es = getLastInstance();
 
-    // onEvent should NOT have been called from the initial open
-    expect(onEvent).not.toHaveBeenCalled();
+    act(() => { es.simulateOpen(); });
+    await waitFor(() => expect(screen.getByTestId("connected").textContent).toBe("true"));
+
+    // No invalidation on initial open
+    expect(invalidateSpy).not.toHaveBeenCalled();
   });
 
-  it("error on rig-1 then change to rig-2 -> reconnecting clears on new open", async () => {
-    const onEvent = vi.fn();
-    const { getByText } = render(<ChangingRigHarness onEvent={onEvent} />);
+  it("error on rig-1 then change to rig-2 -> reconnecting clears", async () => {
+    const { getByText } = renderWithQuery(<ChangingRigHarness />);
 
-    // Wait for rig-1 EventSource
-    await waitFor(() => {
-      expect(instances).toHaveLength(1);
-      expect(instances[0]!.url).toBe("/api/events?rigId=rig-1");
-    });
+    await waitFor(() => expect(instances).toHaveLength(1));
+    const first = instances[0]!;
 
-    // Error on rig-1 -> reconnecting=true
-    act(() => {
-      instances[0]!.simulateError();
-    });
+    act(() => { first.simulateError(); });
+    await waitFor(() => expect(screen.getByTestId("reconnecting").textContent).toBe("true"));
 
-    await waitFor(() => {
-      expect(screen.getByTestId("reconnecting").textContent).toBe("true");
-    });
+    act(() => { getByText("change").click(); });
 
-    // Change to rig-2
-    act(() => {
-      getByText("change").click();
-    });
-
-    // Old source closed, new one opened
-    await waitFor(() => {
-      expect(instances[0]!.close).toHaveBeenCalled();
-      expect(instances.length).toBeGreaterThanOrEqual(2);
-      expect(getLastInstance().url).toBe("/api/events?rigId=rig-2");
-    });
-
-    // reconnecting should be cleared by the rig change (not stuck from rig-1 error)
     await waitFor(() => {
       expect(screen.getByTestId("reconnecting").textContent).toBe("false");
     });

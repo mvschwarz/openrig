@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
+import { useImportRig } from "../hooks/mutations.js";
 
 type Step = "input" | "validating" | "valid" | "preflight" | "preflight_done" | "instantiating" | "done" | "error";
 
@@ -36,6 +37,7 @@ interface ImportFlowProps {
 export function ImportFlow({ onBack }: ImportFlowProps = {}) {
   const navigate = useNavigate();
   const handleBack = onBack ?? (() => navigate({ to: "/" }));
+  const importRig = useImportRig();
   const [yaml, setYaml] = useState("");
   const [step, setStep] = useState<Step>("input");
   const [errors, setErrors] = useState<string[]>([]);
@@ -92,23 +94,17 @@ export function ImportFlow({ onBack }: ImportFlowProps = {}) {
     setStep("instantiating");
     setErrors([]);
     try {
-      const res = await fetch("/api/rigs/import", {
-        method: "POST",
-        headers: { "Content-Type": "text/yaml" },
-        body: yaml,
-      });
-      if (!res.ok) {
-        const data = (await res.json().catch(() => ({}))) as InstantiateFailure;
-        const errorList = data.errors ?? (data.message ? [data.message] : [`Import failed (${res.status})`]);
-        setErrors(errorList);
-        setStep("error");
-        return;
-      }
-      const data = (await res.json()) as InstantiateResult;
+      const data = await importRig.mutateAsync(yaml) as InstantiateResult;
       setResult(data);
       setStep("done");
-    } catch {
-      setErrors(["Instantiate request failed"]);
+    } catch (err) {
+      try {
+        const parsed = JSON.parse(err instanceof Error ? err.message : String(err)) as InstantiateFailure;
+        const errorList = parsed.errors ?? (parsed.message ? [parsed.message] : ["Import failed"]);
+        setErrors(errorList);
+      } catch {
+        setErrors([err instanceof Error ? err.message : "Instantiate request failed"]);
+      }
       setStep("error");
     }
   };

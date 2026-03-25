@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useSnapshots } from "../hooks/useSnapshots.js";
+import { useCreateSnapshot, useRestoreSnapshot } from "../hooks/mutations.js";
 
 interface RestoreNodeResult {
   nodeId: string;
@@ -13,60 +14,48 @@ interface SnapshotPanelProps {
 }
 
 export function SnapshotPanel({ rigId }: SnapshotPanelProps) {
-  const { snapshots, loading, error: fetchError, refresh } = useSnapshots(rigId);
-  const [creating, setCreating] = useState(false);
-  const [restoring, setRestoring] = useState<string | null>(null);
+  const { data: snapshots = [], isPending: loading, error: fetchError } = useSnapshots(rigId);
+  const createSnapshot = useCreateSnapshot(rigId);
+  const restoreSnapshot = useRestoreSnapshot(rigId);
+
   const [confirmRestore, setConfirmRestore] = useState<string | null>(null);
   const [restoreResult, setRestoreResult] = useState<RestoreNodeResult[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const handleCreate = async () => {
-    setCreating(true);
+  const handleCreate = () => {
     setError(null);
-    try {
-      const res = await fetch(`/api/rigs/${rigId}/snapshots`, { method: "POST" });
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        setError((data as { error?: string }).error ?? `Snapshot failed (${res.status})`);
-        return;
-      }
-      await refresh();
-    } catch {
-      setError("Failed to create snapshot");
-    } finally {
-      setCreating(false);
-    }
+    createSnapshot.mutate(undefined, {
+      onError: (err) => setError(err.message),
+    });
   };
 
-  const handleRestore = async (snapshotId: string) => {
-    setRestoring(snapshotId);
+  const handleRestore = (snapshotId: string) => {
     setError(null);
     setRestoreResult(null);
-    try {
-      const res = await fetch(`/api/rigs/${rigId}/restore/${snapshotId}`, { method: "POST" });
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        setError((data as { error?: string; message?: string }).error ?? (data as { message?: string }).message ?? `Restore failed (${res.status})`);
-        return;
-      }
-      const data = await res.json();
-      setRestoreResult((data as { nodes?: RestoreNodeResult[] }).nodes ?? []);
-    } catch {
-      setError("Restore failed");
-    } finally {
-      setRestoring(null);
-      setConfirmRestore(null);
-    }
+    restoreSnapshot.mutate(snapshotId, {
+      onSuccess: (data) => {
+        setRestoreResult((data as { nodes?: RestoreNodeResult[] }).nodes ?? []);
+        setConfirmRestore(null);
+      },
+      onError: (err) => {
+        setError(err.message);
+        setConfirmRestore(null);
+      },
+    });
   };
 
   return (
     <div data-testid="snapshot-panel" style={{ padding: 16, borderLeft: "1px solid #ccc", minWidth: 280 }}>
       <h3>Snapshots</h3>
-      <button onClick={handleCreate} disabled={creating}>
-        {creating ? "Creating..." : "Create Snapshot"}
+      <button onClick={handleCreate} disabled={createSnapshot.isPending}>
+        {createSnapshot.isPending ? "Creating..." : "Create Snapshot"}
       </button>
 
-      {(error ?? fetchError) && <div data-testid="restore-error" style={{ color: "red", marginTop: 8 }}>{error ?? fetchError}</div>}
+      {(error ?? fetchError?.message) && (
+        <div data-testid="restore-error" style={{ color: "red", marginTop: 8 }}>
+          {error ?? fetchError?.message}
+        </div>
+      )}
 
       {restoreResult && (
         <div data-testid="restore-result" style={{ marginTop: 8 }}>
@@ -77,7 +66,7 @@ export function SnapshotPanel({ rigId }: SnapshotPanelProps) {
         </div>
       )}
 
-      {restoring && <div data-testid="restore-loading">Restoring...</div>}
+      {restoreSnapshot.isPending && <div data-testid="restore-loading">Restoring...</div>}
 
       {loading ? (
         <div>Loading snapshots...</div>

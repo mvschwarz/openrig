@@ -1,51 +1,14 @@
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
+import { useRigSummary } from "../hooks/useRigSummary.js";
+import { useCreateSnapshot } from "../hooks/mutations.js";
 import { RigCard } from "./RigCard.js";
-
-interface RigSummary {
-  id: string;
-  name: string;
-  nodeCount: number;
-  latestSnapshotAt: string | null;
-  latestSnapshotId: string | null;
-}
 
 export function Dashboard() {
   const navigate = useNavigate();
-  const [rigs, setRigs] = useState<RigSummary[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const res = await fetch("/api/rigs/summary");
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = await res.json();
-        if (!cancelled) setRigs(data);
-      } catch (err) {
-        if (!cancelled) setError(err instanceof Error ? err.message : String(err));
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    })();
-    return () => { cancelled = true; };
-  }, []);
-
+  const { data: rigs, isPending, error } = useRigSummary();
   const [actionError, setActionError] = useState<string | null>(null);
-
-  const handleSnapshot = async (rigId: string) => {
-    setActionError(null);
-    try {
-      const res = await fetch(`/api/rigs/${rigId}/snapshots`, { method: "POST" });
-      if (!res.ok) {
-        setActionError(`Snapshot failed (HTTP ${res.status})`);
-      }
-    } catch (err) {
-      setActionError(err instanceof Error ? err.message : "Snapshot failed");
-    }
-  };
+  const [activeSnapshotRig, setActiveSnapshotRig] = useState<string | null>(null);
 
   const handleExport = async (rigId: string) => {
     setActionError(null);
@@ -68,17 +31,14 @@ export function Dashboard() {
     }
   };
 
-  if (loading) return <div>Loading dashboard...</div>;
-  if (error) return <div>Error: {error}</div>;
+  if (isPending) return <div>Loading dashboard...</div>;
+  if (error) return <div>Error: {error.message}</div>;
 
-  if (rigs.length === 0) {
+  if (!rigs || rigs.length === 0) {
     return (
       <div className="p-spacing-8 text-center">
         <div className="text-foreground-muted">No rigs</div>
-        <button
-          onClick={() => navigate({ to: "/import" })}
-          className="mt-spacing-4"
-        >
+        <button onClick={() => navigate({ to: "/import" })} className="mt-spacing-4">
           Import Rig
         </button>
       </div>
@@ -93,14 +53,45 @@ export function Dashboard() {
       </div>
       {actionError && <div className="text-destructive mb-spacing-2">{actionError}</div>}
       {rigs.map((rig) => (
-        <RigCard
+        <DashboardRigCard
           key={rig.id}
           rig={rig}
           onSelect={(rigId) => navigate({ to: "/rigs/$rigId", params: { rigId } })}
-          onSnapshot={handleSnapshot}
           onExport={handleExport}
+          onActionError={setActionError}
         />
       ))}
     </div>
+  );
+}
+
+/** Wrapper that provides the useCreateSnapshot mutation per rig */
+function DashboardRigCard({
+  rig,
+  onSelect,
+  onExport,
+  onActionError,
+}: {
+  rig: { id: string; name: string; nodeCount: number; latestSnapshotAt: string | null; latestSnapshotId: string | null };
+  onSelect: (rigId: string) => void;
+  onExport: (rigId: string) => void;
+  onActionError: (error: string | null) => void;
+}) {
+  const createSnapshot = useCreateSnapshot(rig.id);
+
+  const handleSnapshot = () => {
+    onActionError(null);
+    createSnapshot.mutate(undefined, {
+      onError: (err) => onActionError(err.message),
+    });
+  };
+
+  return (
+    <RigCard
+      rig={rig}
+      onSelect={onSelect}
+      onSnapshot={handleSnapshot}
+      onExport={onExport}
+    />
   );
 }

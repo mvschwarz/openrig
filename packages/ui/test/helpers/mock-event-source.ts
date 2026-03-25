@@ -22,7 +22,7 @@ export function createMockEventSourceClass() {
     url: string;
     readyState = 0; // CONNECTING
     listeners: Record<string, ((event: unknown) => void)[]> = {};
-    close = vi.fn();
+    close = vi.fn(() => { this.readyState = 2; });
 
     constructor(url: string) {
       this.url = url;

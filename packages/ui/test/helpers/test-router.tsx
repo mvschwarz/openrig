@@ -1,9 +1,20 @@
 import { createMemoryHistory, createRootRoute, createRoute, createRouter, RouterProvider, Outlet } from "@tanstack/react-router";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactNode } from "react";
+
+/** Creates a fresh QueryClient for test isolation */
+function createTestQueryClient() {
+  return new QueryClient({
+    defaultOptions: {
+      queries: { retry: false, gcTime: 0 },
+      mutations: { retry: false },
+    },
+  });
+}
 
 /**
  * Creates a test router that renders children at a given path.
- * Use for testing components that need router context (useNavigate, useParams, etc.)
+ * Wraps in QueryClientProvider for hooks that need query context.
  */
 export function createTestRouter(opts: {
   component: () => ReactNode;
@@ -11,9 +22,14 @@ export function createTestRouter(opts: {
   initialPath?: string;
 }) {
   const { component: Component, path = "/", initialPath } = opts;
+  const queryClient = createTestQueryClient();
 
   const rootRoute = createRootRoute({
-    component: () => <Outlet />,
+    component: () => (
+      <QueryClientProvider client={queryClient}>
+        <Outlet />
+      </QueryClientProvider>
+    ),
   });
 
   const testRoute = createRoute({
@@ -22,7 +38,6 @@ export function createTestRouter(opts: {
     component: Component,
   });
 
-  // Add a catch-all so navigation doesn't fail
   const catchAllRoute = createRoute({
     getParentRoute: () => rootRoute,
     path: "$",
@@ -41,19 +56,25 @@ export function createTestRouter(opts: {
 
 /**
  * Creates a full app-like router for integration tests.
- * Renders the given routes at specific paths.
+ * Wraps in QueryClientProvider.
  */
 export function createAppTestRouter(opts: {
   routes: Array<{ path: string; component: () => ReactNode }>;
   initialPath?: string;
   rootComponent?: (props: { children: ReactNode }) => ReactNode;
 }) {
+  const queryClient = createTestQueryClient();
+
   const rootRoute = createRootRoute({
     component: () => {
-      if (opts.rootComponent) {
-        return opts.rootComponent({ children: <Outlet /> });
-      }
-      return <Outlet />;
+      const inner = opts.rootComponent
+        ? opts.rootComponent({ children: <Outlet /> })
+        : <Outlet />;
+      return (
+        <QueryClientProvider client={queryClient}>
+          {inner}
+        </QueryClientProvider>
+      );
     },
   });
 

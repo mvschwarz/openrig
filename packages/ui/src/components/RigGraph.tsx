@@ -15,8 +15,11 @@ interface FocusMessage {
 }
 
 export function RigGraph({ rigId }: { rigId: string | null }) {
-  const { nodes, edges, loading, error, refetch } = useRigGraph(rigId);
-  const { reconnecting } = useRigEvents(rigId, refetch);
+  const { data, isPending: loading, error: queryError } = useRigGraph(rigId ?? "");
+  const nodes = data?.nodes ?? [];
+  const edges = data?.edges ?? [];
+  const error = queryError?.message ?? null;
+  const { reconnecting } = useRigEvents(rigId);
   const [focusMessage, setFocusMessage] = useState<FocusMessage | null>(null);
   const dismissTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
