@@ -73,4 +73,18 @@ describe("cmux CLI transport", () => {
 
     await expect(transport.request("workspace.list")).rejects.toThrow(/JSON/i);
   });
+
+  it("workspace.agentPIDs maps to 'cmux agent-pids --json'", async () => {
+    const exec: ExecFn = vi.fn(async (cmd: string) => {
+      if (cmd.includes("capabilities")) return '{"capabilities":[]}';
+      if (cmd === "cmux agent-pids --json") return '{"agents":[{"pid":1234,"runtime":"claude_code"}]}';
+      throw new Error(`unexpected: ${cmd}`);
+    }) as unknown as ExecFn;
+    const factory = createCmuxCliTransport(exec);
+    const transport = await factory();
+
+    const result = await transport.request("workspace.agentPIDs");
+    expect(result).toEqual({ agents: [{ pid: 1234, runtime: "claude_code" }] });
+    expect(exec).toHaveBeenCalledWith("cmux agent-pids --json");
+  });
 });

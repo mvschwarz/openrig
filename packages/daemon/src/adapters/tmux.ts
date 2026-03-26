@@ -207,4 +207,14 @@ export class TmuxAdapter {
       return null;
     }
   }
+
+  /** Capture pane content (last N lines). Returns null if unavailable. */
+  async capturePaneContent(paneId: string, lines: number = 20): Promise<string | null> {
+    try {
+      const output = await this.exec(`tmux capture-pane -p -t ${shellQuote(paneId)} -S -${lines}`);
+      return output || null;
+    } catch {
+      return null;
+    }
+  }
 }

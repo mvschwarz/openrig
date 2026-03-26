@@ -152,6 +152,27 @@ export class CmuxAdapter {
       return { ok: false, code: "request_failed", message: err instanceof Error ? err.message : String(err) };
     }
   }
+
+  /** Query cmux for agent PIDs (sidebar metadata). Returns Map<pid, { runtime, pid }>. */
+  async queryAgentPIDs(): Promise<CmuxResult<Map<number, { runtime: string; pid: number }>>> {
+    if (!this.transport) {
+      return { ok: false, code: "unavailable", message: "cmux is not connected" };
+    }
+    try {
+      const result = (await this.transport.request("workspace.agentPIDs")) as {
+        agents?: Array<{ pid: number; runtime: string }>;
+      };
+      const map = new Map<number, { runtime: string; pid: number }>();
+      if (result.agents) {
+        for (const agent of result.agents) {
+          map.set(agent.pid, { runtime: agent.runtime, pid: agent.pid });
+        }
+      }
+      return { ok: true, data: map };
+    } catch (err) {
+      return { ok: false, code: "request_failed", message: err instanceof Error ? err.message : String(err) };
+    }
+  }
 }
 
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {

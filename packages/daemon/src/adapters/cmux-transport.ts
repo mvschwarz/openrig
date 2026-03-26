@@ -14,6 +14,7 @@ const METHOD_MAP: Record<string, { cmd: string; json: boolean }> = {
   capabilities: { cmd: "cmux capabilities --json", json: true },
   "workspace.list": { cmd: "cmux list-workspaces --json", json: true },
   "surface.list": { cmd: "cmux list-surfaces --json", json: true },
+  "workspace.agentPIDs": { cmd: "cmux agent-pids --json", json: true },
 };
 
 function buildCommand(

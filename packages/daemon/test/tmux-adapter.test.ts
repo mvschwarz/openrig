@@ -420,4 +420,32 @@ describe("TmuxAdapter", () => {
       expect(await adapter.getPaneCommand("%0")).toBeNull();
     });
   });
+
+  describe("capturePaneContent", () => {
+    it("calls exact tmux capture-pane command with shell quoting", async () => {
+      const exec: ExecFn = vi.fn(async () => "line 1\nline 2\n") as unknown as ExecFn;
+      const adapter = new TmuxAdapter(exec);
+
+      const content = await adapter.capturePaneContent("%0");
+
+      expect(content).toBe("line 1\nline 2\n");
+      expect(exec).toHaveBeenCalledWith("tmux capture-pane -p -t '%0' -S -20");
+    });
+
+    it("returns null on error", async () => {
+      const exec: ExecFn = async () => { throw new Error("pane gone"); };
+      const adapter = new TmuxAdapter(exec);
+
+      expect(await adapter.capturePaneContent("%0")).toBeNull();
+    });
+
+    it("uses custom line count", async () => {
+      const exec: ExecFn = vi.fn(async () => "output") as unknown as ExecFn;
+      const adapter = new TmuxAdapter(exec);
+
+      await adapter.capturePaneContent("%5", 50);
+
+      expect(exec).toHaveBeenCalledWith("tmux capture-pane -p -t '%5' -S -50");
+    });
+  });
 });
