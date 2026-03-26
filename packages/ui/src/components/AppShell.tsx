@@ -2,6 +2,8 @@ import { type ReactNode, useState } from "react";
 import { useRouterState } from "@tanstack/react-router";
 import { Sidebar } from "./Sidebar.js";
 import { StatusBar } from "./StatusBar.js";
+import { ActivityFeed } from "./ActivityFeed.js";
+import { useActivityFeed } from "../hooks/useActivityFeed.js";
 
 interface AppShellProps {
   children: ReactNode;
@@ -11,6 +13,7 @@ export function AppShell({ children }: AppShellProps) {
   const routerState = useRouterState();
   const pathname = routerState.location.pathname;
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const { events, feedOpen, setFeedOpen } = useActivityFeed();
 
   return (
     <div className="h-screen flex flex-col">
@@ -61,8 +64,11 @@ export function AppShell({ children }: AppShellProps) {
         </main>
       </div>
 
+      {/* Activity Feed */}
+      <ActivityFeed events={events} open={feedOpen} onClose={() => setFeedOpen(false)} />
+
       {/* Status Bar */}
-      <StatusBar />
+      <StatusBar onToggleFeed={() => setFeedOpen(!feedOpen)} feedOpen={feedOpen} eventCount={events.length} />
     </div>
   );
 }

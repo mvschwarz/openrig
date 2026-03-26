@@ -20,7 +20,13 @@ async function fetchCmux(): Promise<{ available: boolean }> {
   return res.json();
 }
 
-export function StatusBar() {
+interface StatusBarProps {
+  onToggleFeed?: () => void;
+  feedOpen?: boolean;
+  eventCount?: number;
+}
+
+export function StatusBar({ onToggleFeed, feedOpen, eventCount }: StatusBarProps = {}) {
   const healthQuery = useQuery({
     queryKey: ["daemon", "health"],
     queryFn: fetchHealth,
@@ -89,6 +95,24 @@ export function StatusBar() {
           {cmuxAvailable === null ? "\u2014" : cmuxAvailable ? "OK" : "UNAVAILABLE"}
         </span>
       </span>
+
+      {onToggleFeed && (
+        <>
+          <span className="flex-1" />
+          <button
+            data-testid="feed-toggle"
+            onClick={onToggleFeed}
+            className="flex items-center gap-spacing-1 text-label-sm text-foreground-muted-on-dark hover:text-foreground-on-dark transition-colors duration-150 ease-tactical"
+            aria-label="Toggle activity feed"
+            aria-expanded={feedOpen}
+          >
+            ACTIVITY
+            {(eventCount ?? 0) > 0 && (
+              <span className="font-mono text-foreground-on-dark">{eventCount}</span>
+            )}
+          </button>
+        </>
+      )}
     </footer>
   );
 }
