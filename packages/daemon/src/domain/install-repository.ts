@@ -67,11 +67,17 @@ export class InstallRepository {
     this.db = db;
   }
 
-  createInstall(packageId: string, targetRoot: string, scope: string): Install {
+  createInstall(packageId: string, targetRoot: string, scope: string, bootstrapId?: string): Install {
     const id = ulid();
-    this.db
-      .prepare("INSERT INTO package_installs (id, package_id, target_root, scope) VALUES (?, ?, ?, ?)")
-      .run(id, packageId, targetRoot, scope);
+    if (bootstrapId) {
+      this.db
+        .prepare("INSERT INTO package_installs (id, package_id, target_root, scope, bootstrap_id) VALUES (?, ?, ?, ?, ?)")
+        .run(id, packageId, targetRoot, scope, bootstrapId);
+    } else {
+      this.db
+        .prepare("INSERT INTO package_installs (id, package_id, target_root, scope) VALUES (?, ?, ?, ?)")
+        .run(id, packageId, targetRoot, scope);
+    }
     return this.getInstall(id)!;
   }
 

@@ -48,8 +48,9 @@ export class InstallEngine {
     plan: RefinedInstallPlan,
     packageId: string,
     targetRoot: string,
+    bootstrapId?: string,
   ): InstallResult {
-    const install = this.installRepo.createInstall(packageId, targetRoot, "project_shared");
+    const install = this.installRepo.createInstall(packageId, targetRoot, "project_shared", bootstrapId);
     const applied: JournalEntry[] = [];
     const backupRoot = path.join(targetRoot, ".rigged-backups", install.id);
 

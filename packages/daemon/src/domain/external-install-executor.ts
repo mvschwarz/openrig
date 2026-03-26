@@ -36,7 +36,7 @@ export interface ExecutionSummary {
  */
 export class ExternalInstallExecutor {
   private exec: ExecFn;
-  private db: Database.Database;
+  readonly db: Database.Database;
 
   constructor(deps: { exec: ExecFn; db: Database.Database }) {
     this.exec = deps.exec;
@@ -48,12 +48,12 @@ export class ExternalInstallExecutor {
    * @param bootstrapId - links journal entries to a bootstrap run
    * @param taggedActions - full action set with approval decisions
    */
-  async execute(bootstrapId: string, taggedActions: TaggedAction[]): Promise<ExecutionSummary> {
+  async execute(bootstrapId: string, taggedActions: TaggedAction[], startSeq: number = 1): Promise<ExecutionSummary> {
     const results: ExecutionResult[] = [];
 
     for (let i = 0; i < taggedActions.length; i++) {
       const { action, approved } = taggedActions[i]!;
-      const seq = i + 1;
+      const seq = startSeq + i;
       const actionId = ulid();
 
       // Skip: unapproved, manual_only (defense in depth), or no command

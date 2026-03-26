@@ -1,18 +1,17 @@
 import fs from "node:fs";
 import nodePath from "node:path";
-import { createHash } from "node:crypto";
 import { Hono } from "hono";
 import type { PackageRepository } from "../domain/package-repository.js";
 import type { InstallRepository } from "../domain/install-repository.js";
 import type { InstallEngine } from "../domain/install-engine.js";
 import type { InstallVerifier } from "../domain/install-verifier.js";
-import { parseManifest, validateManifest, normalizeManifest, type PackageManifest } from "../domain/package-manifest.js";
 import { InstallPlanner } from "../domain/install-planner.js";
 import { detectConflicts } from "../domain/conflict-detector.js";
 import { applyPolicy } from "../domain/install-policy.js";
-import type { ResolvedPackage, FsOps } from "../domain/package-resolver.js";
+import type { FsOps } from "../domain/package-resolver.js";
 import type { EngineFsOps } from "../domain/install-engine.js";
 import type { EventBus } from "../domain/event-bus.js";
+import { resolvePackage } from "../domain/package-resolve-helper.js";
 
 export const packagesRoutes = new Hono();
 
@@ -23,59 +22,6 @@ function getDeps(c: { get: (key: string) => unknown }) {
     installEngine: c.get("installEngine" as never) as InstallEngine,
     installVerifier: c.get("installVerifier" as never) as InstallVerifier,
     eventBus: c.get("eventBus" as never) as EventBus,
-  };
-}
-
-type ResolveResult =
-  | { ok: true; resolved: ResolvedPackage }
-  | { ok: false; kind: "resolution"; error: string }
-  | { ok: false; kind: "validation"; errors: string[] };
-
-/**
- * Two-step resolve: find manifest file, then parse+validate separately.
- * Keeps resolution errors (missing file) distinct from validation errors (bad schema).
- */
-function resolvePackage(sourceRef: string, cwd: string | undefined, fsOps: FsOps): ResolveResult {
-  const absoluteRef = nodePath.isAbsolute(sourceRef)
-    ? sourceRef
-    : nodePath.resolve(cwd ?? process.cwd(), sourceRef);
-  const manifestPath = nodePath.join(absoluteRef, "package.yaml");
-
-  if (!fsOps.exists(manifestPath)) {
-    return { ok: false, kind: "resolution", error: `No package.yaml found at ${manifestPath}` };
-  }
-
-  let rawYaml: string;
-  try {
-    rawYaml = fsOps.readFile(manifestPath);
-  } catch (err) {
-    return { ok: false, kind: "resolution", error: (err as Error).message };
-  }
-
-  let raw: unknown;
-  try {
-    raw = parseManifest(rawYaml);
-  } catch (err) {
-    return { ok: false, kind: "resolution", error: (err as Error).message };
-  }
-
-  const validation = validateManifest(raw);
-  if (!validation.valid) {
-    return { ok: false, kind: "validation", errors: validation.errors };
-  }
-
-  const manifest = normalizeManifest(raw) as PackageManifest;
-  const manifestHash = createHash("sha256").update(rawYaml).digest("hex");
-
-  return {
-    ok: true,
-    resolved: {
-      sourceKind: "local_path",
-      sourceRef: absoluteRef,
-      manifest,
-      manifestHash,
-      rawManifestYaml: rawYaml,
-    },
   };
 }
 
