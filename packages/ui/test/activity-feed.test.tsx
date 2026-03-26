@@ -11,6 +11,7 @@ import {
   eventRoute,
   type ActivityEvent,
 } from "../src/hooks/useActivityFeed.js";
+import { usePackages } from "../src/hooks/usePackages.js";
 import { createMockEventSourceClass, instances } from "./helpers/mock-event-source.js";
 import type { MockEventSourceInstance } from "./helpers/mock-event-source.js";
 
@@ -98,6 +99,27 @@ function renderHookHarness() {
   return render(
     <QueryClientProvider client={queryClient}>
       <HookHarness />
+    </QueryClientProvider>
+  );
+}
+
+function PackagesInvalidationHarness() {
+  const { events } = useActivityFeed();
+  const { data: packages = [] } = usePackages();
+
+  return (
+    <div>
+      <span data-testid="packages-count">{packages.length}</span>
+      <span data-testid="feed-events">{events.length}</span>
+    </div>
+  );
+}
+
+function renderPackagesInvalidationHarness() {
+  const queryClient = createTestQueryClient();
+  return render(
+    <QueryClientProvider client={queryClient}>
+      <PackagesInvalidationHarness />
     </QueryClientProvider>
   );
 }
@@ -343,6 +365,61 @@ describe("Activity Feed", () => {
     await waitFor(() => {
       expect(screen.getByTestId("packages-page")).toBeTruthy();
     });
+  });
+
+  it("package SSE invalidates and refetches the packages query", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    fetchSpy
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => [],
+      } as Response)
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => [
+          {
+            id: "pkg-1",
+            name: "demo",
+            version: "1.0.0",
+            sourceKind: "local_path",
+            sourceRef: "/tmp/demo",
+            manifestHash: "abc",
+            summary: "demo pkg",
+            createdAt: "2026-03-25 10:00:00",
+            installCount: 1,
+            latestInstallStatus: "applied",
+          },
+        ],
+      } as Response);
+
+    renderPackagesInvalidationHarness();
+
+    await waitFor(() => {
+      expect(screen.getByTestId("packages-count").textContent).toBe("0");
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+    });
+
+    act(() => {
+      getLastInstance().simulateMessage(JSON.stringify({
+        type: "package.installed",
+        packageName: "demo",
+        packageVersion: "1.0.0",
+        applied: 1,
+        deferred: 0,
+        createdAt: new Date().toISOString(),
+        seq: 1,
+      }));
+    });
+
+    await waitFor(() => {
+      expect(fetchSpy).toHaveBeenCalledTimes(2);
+      expect(screen.getByTestId("packages-count").textContent).toBe("1");
+      expect(screen.getByTestId("feed-events").textContent).toBe("1");
+    });
+
+    fetchSpy.mockRestore();
   });
 });
 

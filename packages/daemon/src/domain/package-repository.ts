@@ -69,7 +69,7 @@ export class PackageRepository {
 
   listPackages(): Package[] {
     const rows = this.db
-      .prepare("SELECT * FROM packages ORDER BY created_at")
+      .prepare("SELECT * FROM packages ORDER BY created_at DESC")
       .all() as PackageRow[];
     return rows.map((r) => this.rowToPackage(r));
   }
@@ -83,7 +83,7 @@ export class PackageRepository {
         FROM packages p
         LEFT JOIN package_installs pi ON pi.package_id = p.id
         GROUP BY p.id
-        ORDER BY p.created_at
+        ORDER BY p.created_at DESC
       `)
       .all() as (PackageRow & { install_count: number; latest_install_status: string | null })[];
     return rows.map((r) => ({
