@@ -30,6 +30,19 @@ export class SessionRegistry {
         "INSERT INTO sessions (id, node_id, session_name) VALUES (?, ?, ?)"
       )
       .run(id, nodeId, sessionName);
+    return this.rowToSession(
+      this.db.prepare("SELECT * FROM sessions WHERE id = ?").get(id) as SessionRow
+    );
+  }
+
+  /** Register a claimed session — skips naming validation, sets origin='claimed'. */
+  registerClaimedSession(nodeId: string, sessionName: string): Session {
+    const id = ulid();
+    this.db
+      .prepare(
+        "INSERT INTO sessions (id, node_id, session_name, status, origin) VALUES (?, ?, ?, 'running', 'claimed')"
+      )
+      .run(id, nodeId, sessionName);
 
     return this.rowToSession(
       this.db.prepare("SELECT * FROM sessions WHERE id = ?").get(id) as SessionRow
