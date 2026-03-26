@@ -226,7 +226,20 @@ export class BootstrapOrchestrator {
       }
     }
 
-    stages.push({ stage: "probe_requirements", status: "ok", detail: { probed: probeResults.length } });
+    stages.push({
+      stage: "probe_requirements",
+      status: "ok",
+      detail: {
+        probed: probeResults.length,
+        results: probeResults.map((p) => ({
+          name: p.name,
+          kind: p.kind,
+          status: p.status,
+          version: p.version,
+          detectedPath: p.detectedPath,
+        })),
+      },
+    });
 
     // --- Stage 5: BUILD_INSTALL_PLAN ---
     const installPlan = this.deps.installPlanner.planInstalls(probeResults);

@@ -897,4 +897,54 @@ edges: []
     const ripgrepActions = detail.actions.filter((a) => a.requirementName === "ripgrep");
     expect(ripgrepActions).toHaveLength(1);
   });
+
+  // T23: plan probe_requirements.detail includes per-requirement results
+  it("plan probe_requirements detail includes per-requirement results with status", async () => {
+    const pkgDir = path.join(tmpDir, "test-pkg");
+    const manifest = `
+schema_version: 1
+name: test-pkg
+version: "1.0.0"
+summary: Test
+compatibility:
+  runtimes: [claude-code]
+exports:
+  skills:
+    - source: skills/h
+      name: h
+      supported_scopes: [project_shared]
+      default_scope: project_shared
+requirements:
+  cli_tools:
+    - name: git
+    - name: missing-tool
+`.trim();
+    writePkg(pkgDir, manifest, { "skills/h/SKILL.md": "# H" });
+    const specPath = writeSpec(SPEC_WITH_PACKAGES_YAML);
+
+    const exec = createMockExec({
+      "tmux -V": "tmux 3.4",
+      "claude --version": "claude 1.0.0",
+      "'git'": "/usr/bin/git",
+      "'missing-tool'": new Error("not found"),
+    });
+    const orch = buildOrchestrator({ exec });
+
+    const result = await orch.bootstrap({ mode: "plan", sourceRef: specPath });
+
+    const reqStage = result.stages.find((s) => s.stage === "probe_requirements");
+    expect(reqStage).toBeDefined();
+    const detail = reqStage!.detail as { probed: number; results: Array<{ name: string; kind: string; status: string; detectedPath: string | null }> };
+    expect(detail.probed).toBe(2);
+    expect(detail.results).toHaveLength(2);
+
+    const gitResult = detail.results.find((r) => r.name === "git");
+    expect(gitResult).toBeDefined();
+    expect(gitResult!.status).toBe("installed");
+    expect(gitResult!.detectedPath).toBeTruthy();
+
+    const missingResult = detail.results.find((r) => r.name === "missing-tool");
+    expect(missingResult).toBeDefined();
+    expect(missingResult!.status).toBe("missing");
+  });
 });
