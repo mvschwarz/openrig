@@ -13,6 +13,11 @@ export interface Install {
   rolledBackAt: string | null;
 }
 
+export interface InstallSummary extends Install {
+  appliedCount: number;
+  deferredCount: null; // Deferred items not persisted in journal — to be added in future phase
+}
+
 export interface JournalEntry {
   id: string;
   installId: string;
@@ -88,6 +93,23 @@ export class InstallRepository {
       .prepare("SELECT * FROM package_installs WHERE id = ?")
       .get(installId) as InstallRow | undefined;
     return row ? this.rowToInstall(row) : null;
+  }
+
+  listInstallSummaries(packageId: string): InstallSummary[] {
+    const rows = this.db
+      .prepare(`
+        SELECT pi.*,
+          (SELECT COUNT(*) FROM install_journal ij WHERE ij.install_id = pi.id AND ij.action != 'rollback') AS applied_count
+        FROM package_installs pi
+        WHERE pi.package_id = ?
+        ORDER BY pi.created_at DESC, pi.rowid DESC
+      `)
+      .all(packageId) as (InstallRow & { applied_count: number })[];
+    return rows.map((r) => ({
+      ...this.rowToInstall(r),
+      appliedCount: r.applied_count,
+      deferredCount: null,
+    }));
   }
 
   listInstalls(packageId?: string): Install[] {

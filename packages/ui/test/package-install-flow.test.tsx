@@ -81,6 +81,7 @@ function renderFlow() {
       routes: [
         { path: "/packages/install", component: PackageInstallFlow },
         { path: "/packages", component: () => <div data-testid="packages-page">Packages</div> },
+        { path: "/packages/$packageId", component: () => <div data-testid="package-detail-page">Detail</div> },
       ],
       initialPath: "/packages/install",
     })
@@ -316,20 +317,17 @@ describe("PackageInstallFlow", () => {
     expect(screen.getByTestId("requirements-section").textContent).toContain("jq");
   });
 
-  // Test 13: Done state detail link is disabled — click is no-op (deferred to PUX-T04)
-  it("done state: detail link is disabled and click is no-op", async () => {
+  // Test 13: Done state detail link navigates to package detail
+  it("done state: detail link navigates to package detail", async () => {
     await advanceToStep("done");
 
     const detailLink = screen.getByTestId("detail-link");
-    expect(detailLink).toHaveProperty("disabled", true);
+    expect(detailLink).toHaveProperty("disabled", false);
 
-    // Click the disabled link — should NOT navigate away
     act(() => { fireEvent.click(detailLink); });
 
-    // Still on the install result page
     await waitFor(() => {
-      expect(screen.getByTestId("install-result")).toBeTruthy();
+      expect(screen.getByTestId("package-detail-page")).toBeTruthy();
     });
-    expect(screen.queryByTestId("packages-page")).toBeNull();
   });
 });

@@ -189,10 +189,20 @@ describe("PackageList", () => {
     });
   });
 
-  // Test 8: Card click is no-op (deferred to PUX-T04)
-  it("card click does not navigate (deferred to PUX-T04)", async () => {
+  // Test 8: Card click navigates to package detail
+  it("card click navigates to package detail page", async () => {
     mockFetchPackages(MOCK_PACKAGES);
-    renderPackageList();
+
+    render(
+      createAppTestRouter({
+        routes: [
+          { path: "/packages", component: PackageList },
+          { path: "/packages/install", component: () => <div data-testid="install-flow-page">Install Flow</div> },
+          { path: "/packages/$packageId", component: () => <div data-testid="package-detail-page">Detail</div> },
+        ],
+        initialPath: "/packages",
+      })
+    );
 
     await waitFor(() => {
       const cards = screen.getAllByTestId("package-card");
@@ -200,16 +210,15 @@ describe("PackageList", () => {
     });
 
     const card = screen.getAllByTestId("package-card")[0]!;
-    // No link role or cursor-pointer
-    expect(card.getAttribute("role")).toBeNull();
-    expect(card.className).not.toContain("cursor-pointer");
+    expect(card.getAttribute("role")).toBe("link");
+    expect(card.className).toContain("cursor-pointer");
 
-    // Click does nothing — still on packages page
     act(() => {
       fireEvent.click(card);
     });
 
-    // Still showing packages (cards still visible)
-    expect(screen.getAllByTestId("package-card")).toHaveLength(2);
+    await waitFor(() => {
+      expect(screen.getByTestId("package-detail-page")).toBeTruthy();
+    });
   });
 });

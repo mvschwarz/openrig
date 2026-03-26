@@ -738,6 +738,94 @@ requirements:
     expect(bodyApproved.actionable).toBeGreaterThan(0);
   });
 
+  // === PUX-T04: Package detail + install history ===
+
+  // --- Test: GET /api/packages/:packageId returns package or 404 ---
+  it("GET /api/packages/:packageId returns package or 404", async () => {
+    writePkg(pkgDir, VALID_MANIFEST_YAML, { "skills/helper/SKILL.md": SKILL_CONTENT });
+
+    // Install a package to create the package record
+    const installRes = await app.request("/api/packages/install", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sourceRef: pkgDir, targetRoot: targetDir, runtime: "claude-code" }),
+    });
+    expect(installRes.status).toBe(201);
+    const { packageId } = await installRes.json();
+
+    // GET existing package → 200
+    const res = await app.request(`/api/packages/${packageId}`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.name).toBe("test-pkg");
+    expect(body.version).toBe("1.0.0");
+
+    // GET nonexistent package → 404
+    const res404 = await app.request("/api/packages/nonexistent");
+    expect(res404.status).toBe(404);
+  });
+
+  // --- Test: GET /api/packages/:packageId/installs returns InstallSummary with appliedCount and deferredCount ---
+  it("GET /api/packages/:packageId/installs returns InstallSummary with appliedCount and deferredCount", async () => {
+    writePkg(pkgDir, VALID_MANIFEST_YAML, { "skills/helper/SKILL.md": SKILL_CONTENT });
+
+    // Install a package
+    const installRes = await app.request("/api/packages/install", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sourceRef: pkgDir, targetRoot: targetDir, runtime: "claude-code" }),
+    });
+    expect(installRes.status).toBe(201);
+    const { packageId } = await installRes.json();
+
+    // GET installs for this package → 200 array
+    const res = await app.request(`/api/packages/${packageId}/installs`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(Array.isArray(body)).toBe(true);
+    expect(body.length).toBe(1);
+
+    // Assert appliedCount is a number > 0
+    expect(typeof body[0].appliedCount).toBe("number");
+    expect(body[0].appliedCount).toBeGreaterThan(0);
+
+    // Assert deferredCount === null (explicitly)
+    expect(body[0].deferredCount).toBe(null);
+  });
+
+  // --- Test: install history orders same-second installs deterministically ---
+  it("GET /api/packages/:packageId/installs orders same-second installs by rowid DESC", async () => {
+    writePkg(pkgDir, VALID_MANIFEST_YAML, { "skills/helper/SKILL.md": SKILL_CONTENT });
+
+    // First install
+    const res1 = await app.request("/api/packages/install", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sourceRef: pkgDir, targetRoot: targetDir, runtime: "claude-code" }),
+    });
+    expect(res1.status).toBe(201);
+    const { installId: id1, packageId } = await res1.json();
+
+    // Rollback so target is clean for second install
+    await app.request(`/api/packages/${id1}/rollback`, { method: "POST" });
+
+    // Second install — same second (in-memory DB, both get same datetime('now'))
+    const res2 = await app.request("/api/packages/install", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sourceRef: pkgDir, targetRoot: targetDir, runtime: "claude-code" }),
+    });
+    expect(res2.status).toBe(201);
+    const { installId: id2 } = await res2.json();
+
+    // Newest first (id2 before id1)
+    const listRes = await app.request(`/api/packages/${packageId}/installs`);
+    const installs = await listRes.json();
+    expect(installs.length).toBe(2);
+    expect(installs[0].id).toBe(id2);
+    expect(installs[1].id).toBe(id1);
+  });
+
   // === PUX-T00: Event emission tests ===
 
   function getEvents(database: Database.Database): Array<{ type: string; payload: string }> {

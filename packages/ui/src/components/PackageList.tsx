@@ -22,11 +22,15 @@ function statusLabel(status: string | null): string {
   }
 }
 
-function PackageCard({ pkg }: { pkg: PackageSummary }) {
+function PackageCard({ pkg, onSelect }: { pkg: PackageSummary; onSelect: (id: string) => void }) {
   return (
     <div
       data-testid="package-card"
-      className="card-dark p-spacing-6 mb-spacing-3"
+      role="link"
+      tabIndex={0}
+      className="card-dark p-spacing-6 mb-spacing-3 cursor-pointer"
+      onClick={() => onSelect(pkg.id)}
+      onKeyDown={(e) => { if (e.key === "Enter") onSelect(pkg.id); }}
     >
       <div className="flex items-baseline justify-between mb-spacing-2">
         <h3 className="text-headline-md uppercase">{pkg.name}</h3>
@@ -132,7 +136,11 @@ export function PackageList() {
       </div>
 
       {packages.map((pkg) => (
-        <PackageCard key={pkg.id} pkg={pkg} />
+        <PackageCard
+          key={pkg.id}
+          pkg={pkg}
+          onSelect={(id) => navigate({ to: "/packages/$packageId", params: { packageId: id } })}
+        />
       ))}
     </div>
   );

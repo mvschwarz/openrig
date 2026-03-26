@@ -14,6 +14,7 @@ import { SnapshotPanel } from "./components/SnapshotPanel.js";
 import { ImportFlow } from "./components/ImportFlow.js";
 import { PackageList } from "./components/PackageList.js";
 import { PackageInstallFlow } from "./components/PackageInstallFlow.js";
+import { PackageDetail } from "./components/PackageDetail.js";
 
 // Root route — wraps everything in AppShell
 const rootRoute = createRootRoute({
@@ -97,8 +98,15 @@ const packageInstallRoute = createRoute({
   component: PackageInstallFlow,
 });
 
+// Package detail route
+const packageDetailRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/packages/$packageId",
+  component: PackageDetail,
+});
+
 // Route tree
-const routeTree = rootRoute.addChildren([indexRoute, rigDetailRoute, importRoute, packagesRoute, packageInstallRoute]);
+const routeTree = rootRoute.addChildren([indexRoute, rigDetailRoute, importRoute, packagesRoute, packageInstallRoute, packageDetailRoute]);
 
 // Router
 export const router = createRouter({ routeTree });

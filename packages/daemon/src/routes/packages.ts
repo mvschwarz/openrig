@@ -396,9 +396,21 @@ packagesRoutes.get("/installs/:installId/journal", (c) => {
   return c.json(installRepo.getJournalEntries(installId));
 });
 
+// GET /api/packages/:packageId
+// NOTE: Registered after /summary and /installs/:installId/journal to avoid collision
+packagesRoutes.get("/:packageId", (c) => {
+  const { packageRepo } = getDeps(c);
+  const packageId = c.req.param("packageId")!;
+  const pkg = packageRepo.getPackage(packageId);
+  if (!pkg) {
+    return c.json({ error: "Package not found" }, 404);
+  }
+  return c.json(pkg);
+});
+
 // GET /api/packages/:packageId/installs
 packagesRoutes.get("/:packageId/installs", (c) => {
   const { installRepo } = getDeps(c);
   const packageId = c.req.param("packageId")!;
-  return c.json(installRepo.listInstalls(packageId));
+  return c.json(installRepo.listInstallSummaries(packageId));
 });

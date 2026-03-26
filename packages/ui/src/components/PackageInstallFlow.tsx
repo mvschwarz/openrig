@@ -480,9 +480,8 @@ export function PackageInstallFlow() {
             </Button>
             <Button
               variant="tactical"
-              disabled
-              title="Available in next update"
               data-testid="detail-link"
+              onClick={() => navigate({ to: "/packages/$packageId", params: { packageId: installResult.packageId } })}
             >
               VIEW INSTALL DETAILS
             </Button>
