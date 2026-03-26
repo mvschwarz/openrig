@@ -50,6 +50,7 @@ export interface Session {
   restorePolicy: string;
   lastSeenAt: string | null;
   createdAt: string;
+  origin: "launched" | "claimed";
 }
 
 // -- Event types --

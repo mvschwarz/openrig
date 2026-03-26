@@ -142,6 +142,7 @@ export class SessionRegistry {
       restorePolicy: row.restore_policy ?? "resume_if_possible",
       lastSeenAt: row.last_seen_at,
       createdAt: row.created_at,
+      origin: (row.origin === "claimed" ? "claimed" : "launched"),
     };
   }
 
@@ -171,6 +172,7 @@ interface SessionRow {
   restore_policy: string | null;
   last_seen_at: string | null;
   created_at: string;
+  origin: string;
 }
 
 interface BindingRow {
