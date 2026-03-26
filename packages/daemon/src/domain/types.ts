@@ -79,7 +79,10 @@ export type RigEvent =
   | { type: "bootstrap.started"; runId: string; sourceRef: string }
   | { type: "bootstrap.completed"; runId: string; rigId: string; sourceRef: string }
   | { type: "bootstrap.partial"; runId: string; sourceRef: string; rigId?: string; completed: number; failed: number }
-  | { type: "bootstrap.failed"; runId: string; sourceRef: string; error: string };
+  | { type: "bootstrap.failed"; runId: string; sourceRef: string; error: string }
+  // Discovery events (cross-rig, no rigId)
+  | { type: "session.discovered"; discoveredId: string; tmuxSession: string; tmuxPane: string; runtimeHint: string; confidence: string }
+  | { type: "session.vanished"; tmuxSession: string; tmuxPane: string };
 
 export type PersistedEvent = RigEvent & {
   seq: number;
