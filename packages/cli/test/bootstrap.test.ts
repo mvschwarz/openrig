@@ -204,4 +204,29 @@ describe("Bootstrap CLI", () => {
     const body = JSON.parse(lastReq.body);
     expect(body.autoApprove).toBe(false);
   });
+
+  // T9: partial status -> exit 1 (R2-M1)
+  it("partial result returns exit code 1", async () => {
+    const partialServer = http.createServer((_, res) => {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({
+        runId: "run-p", status: "partial", rigId: "rig-p",
+        stages: [{ stage: "execute_external_installs", status: "failed" }, { stage: "import_rig", status: "ok" }],
+        errors: ["brew install failed"], warnings: [],
+      }));
+    });
+    await new Promise<void>((resolve) => { partialServer.listen(0, resolve); });
+    const partialPort = (partialServer.address() as { port: number }).port;
+
+    const prog = new Command();
+    prog.exitOverride();
+    prog.addCommand(bootstrapCommand(runningDeps(partialPort)));
+
+    const { exitCode } = await captureLogs(async () => {
+      await prog.parseAsync(["node", "rigged", "bootstrap", "/tmp/rig.yaml", "--yes"]);
+    });
+
+    expect(exitCode).toBe(1);
+    partialServer.close();
+  });
 });

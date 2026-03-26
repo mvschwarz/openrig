@@ -70,6 +70,20 @@ function actionKey(actionKind: string, subjectType: string | null, subjectName: 
  */
 export class BootstrapOrchestrator {
   private deps: BootstrapOrchestratorDeps;
+  private activeLocks = new Set<string>();
+
+  /** Try to acquire the lock for a sourceRef. Returns false if already locked. */
+  tryAcquire(sourceRef: string): boolean {
+    const key = nodePath.resolve(sourceRef);
+    if (this.activeLocks.has(key)) return false;
+    this.activeLocks.add(key);
+    return true;
+  }
+
+  /** Release the lock for a sourceRef. */
+  release(sourceRef: string): void {
+    this.activeLocks.delete(nodePath.resolve(sourceRef));
+  }
 
   constructor(deps: BootstrapOrchestratorDeps) {
     // Same-db-handle checks
@@ -101,7 +115,7 @@ export class BootstrapOrchestrator {
       const raw = RigSpecCodec.parse(rawYaml);
       const validation = RigSpecSchema.validate(raw);
       if (!validation.valid) {
-        stages.push({ stage: "resolve_spec", status: "failed", detail: { errors: validation.errors } });
+        stages.push({ stage: "resolve_spec", status: "failed", detail: { code: "validation_failed", errors: validation.errors } });
         this.deps.bootstrapRepo.updateRunStatus(run.id, "failed");
         return { runId: run.id, status: "failed", stages, errors: validation.errors, warnings };
       }
@@ -109,7 +123,10 @@ export class BootstrapOrchestrator {
       stages.push({ stage: "resolve_spec", status: "ok", detail: { specName: spec.name, specVersion: spec.schemaVersion } });
     } catch (err) {
       const msg = (err as Error).message;
-      stages.push({ stage: "resolve_spec", status: "failed", detail: { error: msg } });
+      const code = (err as NodeJS.ErrnoException).code === "ENOENT" ? "file_not_found"
+        : msg.includes("YAML") || msg.includes("parse") ? "parse_error"
+        : "read_error";
+      stages.push({ stage: "resolve_spec", status: "failed", detail: { code, error: msg } });
       errors.push(msg);
       this.deps.bootstrapRepo.updateRunStatus(run.id, "failed");
       return { runId: run.id, status: "failed", stages, errors, warnings };
@@ -363,6 +380,14 @@ export class BootstrapOrchestrator {
     });
 
     // --- Stage 8: IMPORT_RIG ---
+    // Skip rig import if package installs failed — a rig without its packages is broken
+    if (packageInstallFailed) {
+      errors.push("Rig import skipped due to package install failures");
+      stages.push({ stage: "import_rig", status: "skipped", detail: { reason: "package install failures" } });
+      this.deps.bootstrapRepo.updateRunStatus(run.id, "failed");
+      return { runId: run.id, status: "failed", stages, errors, warnings };
+    }
+
     const instantiateOutcome = await this.deps.rigInstantiator.instantiate(spec);
 
     this.deps.bootstrapRepo.journalAction(run.id, seqCounter++, "rig_import", null, spec.name, instantiateOutcome.ok ? "completed" : "failed", {

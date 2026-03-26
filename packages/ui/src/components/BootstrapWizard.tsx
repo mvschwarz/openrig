@@ -31,7 +31,8 @@ function StepIndicator({ current }: { current: number }) {
 function currentStepNumber(step: Step): number {
   switch (step) {
     case "enter": return 1;
-    case "planning": case "planned": return 2;
+    case "planning": return 2;
+    case "planned": return 3;
     case "applying": return 4;
     case "done": case "error": return 4;
     default: return 1;
@@ -223,10 +224,31 @@ export function BootstrapWizard() {
         </div>
       )}
 
-      {/* Step 4: Applying */}
-      {step === "applying" && (
-        <div data-testid="step-applying" className="text-body-md text-foreground-muted">
-          Bootstrapping...
+      {/* Step 4: Applying — show stage checklist from plan */}
+      {step === "applying" && planResult && (
+        <div data-testid="step-applying">
+          <h3 className="text-headline-md uppercase mb-spacing-3">APPLYING</h3>
+          <div className="space-y-spacing-1 mb-spacing-4" data-testid="applying-checklist">
+            {planResult.stages.map((s) => (
+              <div key={s.stage} className="flex items-center gap-spacing-3 text-label-sm font-mono">
+                <span className="text-foreground-muted">○</span>
+                <span>{s.stage}</span>
+              </div>
+            ))}
+            <div className="flex items-center gap-spacing-3 text-label-sm font-mono">
+              <span className="text-foreground-muted">○</span>
+              <span>execute_external_installs</span>
+            </div>
+            <div className="flex items-center gap-spacing-3 text-label-sm font-mono">
+              <span className="text-foreground-muted">○</span>
+              <span>install_packages</span>
+            </div>
+            <div className="flex items-center gap-spacing-3 text-label-sm font-mono">
+              <span className="text-foreground-muted">○</span>
+              <span>import_rig</span>
+            </div>
+          </div>
+          <p className="text-body-sm text-foreground-muted">Bootstrapping...</p>
         </div>
       )}
 

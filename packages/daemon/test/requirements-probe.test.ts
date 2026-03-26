@@ -184,4 +184,31 @@ describe("RequirementsProbeRegistry", () => {
     expect(result.installHints).toEqual(hints);
     expect(result.status).toBe("installed");
   });
+
+  // T13: EACCES probe error -> unknown (not missing) — trust boundary fix
+  it("EACCES probe error returns unknown, not missing", async () => {
+    const exec = vi.fn(async () => { throw new Error("EACCES: permission denied"); }) as unknown as ExecFn;
+    const registry = new RequirementsProbeRegistry(exec);
+
+    const result = await registry.probeCli("rg");
+
+    expect(result.status).toBe("unknown");
+    expect(result.error).toContain("EACCES");
+  });
+
+  // T14: unknown status does NOT become auto_approvable via planner
+  it("unknown probe status maps to manual_only in planner, not auto_approvable", async () => {
+    const { ExternalInstallPlanner } = await import("../src/domain/external-install-planner.js");
+    const planner = new ExternalInstallPlanner({ platform: "darwin" });
+
+    const probeResult = {
+      name: "rg", kind: "cli_tool" as const, status: "unknown" as const,
+      version: null, detectedPath: null, provider: null, command: null,
+      installHints: null, error: "EACCES: permission denied",
+    };
+
+    const plan = planner.planInstalls([probeResult]);
+    expect(plan.manualOnly).toHaveLength(1);
+    expect(plan.autoApprovable).toHaveLength(0);
+  });
 });

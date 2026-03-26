@@ -268,4 +268,108 @@ describe("Bootstrap API routes", () => {
     expect(payload.completed).toBe(3);
     expect(payload.failed).toBe(1);
   });
+
+  // T13: Failed plan returns 400 + no bootstrap.planned event (R2-H2)
+  it("POST /api/bootstrap/plan with nonexistent spec returns 400, no bootstrap.planned", async () => {
+    const res = await app.request("/api/bootstrap/plan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sourceRef: "/tmp/nonexistent-spec-12345.yaml" }),
+    });
+
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.status).toBe("failed");
+
+    // Should NOT have emitted bootstrap.planned
+    const plannedEvents = getEvents(db).filter((e) => e.type === "bootstrap.planned");
+    expect(plannedEvents).toHaveLength(0);
+
+    // Should have emitted bootstrap.failed instead
+    const failedEvents = getEvents(db).filter((e) => e.type === "bootstrap.failed");
+    expect(failedEvents.length).toBeGreaterThanOrEqual(1);
+  });
+
+  // T14: Apply exception boundary — thrown error gets caught (R2-H3)
+  it("POST /api/bootstrap/apply catches thrown orchestrator error", async () => {
+    // Temporarily replace the orchestrator's bootstrap method with one that throws
+    const origBootstrap = setup.bootstrapOrchestrator.bootstrap.bind(setup.bootstrapOrchestrator);
+    (setup.bootstrapOrchestrator as unknown as { bootstrap: unknown }).bootstrap = async () => {
+      throw new Error("unexpected planner crash");
+    };
+
+    const specPath = writeSpec(SIMPLE_SPEC_YAML);
+    const res = await app.request("/api/bootstrap/apply", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sourceRef: specPath, autoApprove: true }),
+    });
+
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.status).toBe("failed");
+    expect(body.error).toContain("unexpected planner crash");
+
+    // bootstrap.started should have been emitted (before the throw)
+    const startedEvents = getEvents(db).filter((e) => e.type === "bootstrap.started");
+    expect(startedEvents.length).toBeGreaterThanOrEqual(1);
+
+    // bootstrap.failed should also have been emitted (exception boundary)
+    const failedEvents = getEvents(db).filter((e) => e.type === "bootstrap.failed");
+    expect(failedEvents.length).toBeGreaterThanOrEqual(1);
+
+    // Run should be 'failed', not stuck in 'running'
+    const run = db.prepare("SELECT status FROM bootstrap_runs WHERE id = ?")
+      .get(body.runId) as { status: string };
+    expect(run.status).toBe("failed");
+
+    // Restore
+    (setup.bootstrapOrchestrator as unknown as { bootstrap: unknown }).bootstrap = origBootstrap;
+  });
+
+  // T15: Concurrency lock — second apply returns 409 with no run/started (R1-F4.6)
+  it("concurrent apply for same spec returns 409 with no run created", async () => {
+    const specPath = writeSpec(SIMPLE_SPEC_YAML);
+
+    // Acquire the lock manually
+    setup.bootstrapOrchestrator.tryAcquire(specPath);
+
+    const res = await app.request("/api/bootstrap/apply", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sourceRef: specPath, autoApprove: true }),
+    });
+
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body.code).toBe("conflict");
+
+    // No bootstrap.started event should have been emitted for this request
+    // (The lock blocks before run creation)
+    const startedEvents = getEvents(db).filter((e) => e.type === "bootstrap.started");
+    expect(startedEvents).toHaveLength(0);
+
+    // Release for cleanup
+    setup.bootstrapOrchestrator.release(specPath);
+  });
+
+  // T16: Concurrent plan for same spec conflicts
+  it("concurrent plan for same spec returns 409", async () => {
+    const specPath = writeSpec(SIMPLE_SPEC_YAML);
+
+    // Acquire the lock manually (simulating a concurrent plan in progress)
+    setup.bootstrapOrchestrator.tryAcquire(specPath);
+
+    const res = await app.request("/api/bootstrap/plan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sourceRef: specPath }),
+    });
+
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body.code).toBe("conflict");
+
+    setup.bootstrapOrchestrator.release(specPath);
+  });
 });

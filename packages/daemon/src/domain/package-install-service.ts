@@ -57,9 +57,14 @@ export class PackageInstallService {
     const { resolved, targetRoot, runtime, roleName, allowMerge, bootstrapId, fsOps } = opts;
 
     // Plan + detect conflicts
-    const planner = new InstallPlanner(fsOps);
-    const plan = planner.plan(resolved, targetRoot, runtime, { roleName });
-    const refined = detectConflicts(plan, fsOps);
+    let plan, refined;
+    try {
+      const planner = new InstallPlanner(fsOps);
+      plan = planner.plan(resolved, targetRoot, runtime, { roleName });
+      refined = detectConflicts(plan, fsOps);
+    } catch (err) {
+      return { ok: false, code: "apply_error", message: (err as Error).message };
+    }
 
     // Check for content-level conflicts
     if (refined.conflicts.length > 0) {

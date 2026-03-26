@@ -88,6 +88,10 @@ describe("BootstrapWizard", () => {
 
     const rows = screen.getAllByTestId("stage-row");
     expect(rows.length).toBeGreaterThanOrEqual(2);
+
+    // Step indicator should show REVIEW (step 3), not PLAN (step 2)
+    const indicator = screen.getByTestId("step-indicator");
+    expect(indicator.textContent).toContain("3 REVIEW");
   });
 
   // T3: requirements panel shows all 4 statuses with correct colors
@@ -175,6 +179,30 @@ describe("BootstrapWizard", () => {
     await waitFor(() => {
       expect(screen.getByTestId("step-enter")).toBeTruthy();
     });
+  });
+
+  // T8b: applying step shows stage checklist from plan
+  it("applying step renders stage checklist from plan", async () => {
+    fetchMock
+      .mockResolvedValueOnce({ ok: true, json: async () => PLAN_RESPONSE })
+      .mockImplementationOnce(() => new Promise(() => {})); // Never resolves — stays in applying
+
+    renderWizard();
+    await waitFor(() => expect(screen.getByTestId("spec-input")).toBeTruthy());
+    act(() => { fireEvent.change(screen.getByTestId("spec-input"), { target: { value: "/tmp/rig.yaml" } }); });
+    act(() => { fireEvent.click(screen.getByTestId("plan-btn")); });
+    await waitFor(() => expect(screen.getByTestId("apply-btn")).toBeTruthy());
+    act(() => { fireEvent.click(screen.getByTestId("apply-btn")); });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("step-applying")).toBeTruthy();
+      expect(screen.getByTestId("applying-checklist")).toBeTruthy();
+    });
+
+    // Should show stages from the plan + apply-only stages
+    const checklist = screen.getByTestId("applying-checklist");
+    expect(checklist.textContent).toContain("resolve_spec");
+    expect(checklist.textContent).toContain("import_rig");
   });
 
   // T9: apply button disabled when plan is blocked

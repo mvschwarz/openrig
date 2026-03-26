@@ -80,10 +80,13 @@ export function bootstrapCommand(depsOverride?: StatusDeps): Command {
         }
       }
 
+      const resultStatus = (res.data["status"] as string) ?? "";
       if (res.status === 409) {
         process.exitCode = 1; // blocked
       } else if (res.status >= 500) {
         process.exitCode = 2; // failure
+      } else if (resultStatus === "partial") {
+        process.exitCode = 1; // partial is not clean success
       }
     });
 

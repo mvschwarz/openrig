@@ -73,17 +73,27 @@ export class RequirementsProbeRegistry {
         error: null,
       };
     } catch (err) {
-      if ((err as Error).message?.includes("timed out")) {
+      const msg = (err as Error).message ?? "";
+      if (msg.includes("timed out")) {
         return {
           name, kind: "cli_tool", status: "unknown", version: null,
           detectedPath: null, provider: null, command: cmd,
           installHints: null, error: "probe timed out",
         };
       }
+      // Only treat "not found" / exit-code errors as genuinely missing.
+      // Other errors (EACCES, etc) are unknown — must not become auto_approvable.
+      if (msg.includes("not found") || msg.includes("No such") || msg.includes("exit code")) {
+        return {
+          name, kind: "cli_tool", status: "missing", version: null,
+          detectedPath: null, provider: null, command: cmd,
+          installHints: null, error: null,
+        };
+      }
       return {
-        name, kind: "cli_tool", status: "missing", version: null,
+        name, kind: "cli_tool", status: "unknown", version: null,
         detectedPath: null, provider: null, command: cmd,
-        installHints: null, error: null,
+        installHints: null, error: msg,
       };
     }
   }
@@ -112,17 +122,25 @@ export class RequirementsProbeRegistry {
         error: null,
       };
     } catch (err) {
-      if ((err as Error).message?.includes("timed out")) {
+      const msg = (err as Error).message ?? "";
+      if (msg.includes("timed out")) {
         return {
           name, kind: "system_package", status: "unknown", version: null,
           detectedPath: null, provider: "homebrew", command: cmd,
           installHints: null, error: "probe timed out",
         };
       }
+      if (msg.includes("No such keg") || msg.includes("not found") || msg.includes("exit code")) {
+        return {
+          name, kind: "system_package", status: "missing", version: null,
+          detectedPath: null, provider: "homebrew", command: cmd,
+          installHints: null, error: null,
+        };
+      }
       return {
-        name, kind: "system_package", status: "missing", version: null,
+        name, kind: "system_package", status: "unknown", version: null,
         detectedPath: null, provider: "homebrew", command: cmd,
-        installHints: null, error: null,
+        installHints: null, error: msg,
       };
     }
   }

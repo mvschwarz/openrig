@@ -947,4 +947,36 @@ requirements:
     expect(missingResult).toBeDefined();
     expect(missingResult!.status).toBe("missing");
   });
+
+  // T24: Package install failure skips rig import (R1-F4.3)
+  it("package install failure skips rig import with status=failed", async () => {
+    // Create a package that will fail install (incompatible runtime)
+    const pkgDir = path.join(tmpDir, "test-pkg");
+    const manifest = `
+schema_version: 1
+name: codex-only-pkg
+version: "1.0.0"
+summary: Only works on codex
+compatibility:
+  runtimes:
+    - codex
+exports:
+  skills:
+    - source: skills/h
+      name: h
+      supported_scopes: [project_shared]
+      default_scope: project_shared
+`.trim();
+    writePkg(pkgDir, manifest, { "skills/h/SKILL.md": "# H" });
+    const specPath = writeSpec(SPEC_WITH_PACKAGES_YAML);
+
+    const orch = buildOrchestrator();
+    const result = await orch.bootstrap({ mode: "apply", sourceRef: specPath, autoApprove: true });
+
+    expect(result.status).toBe("failed");
+    // import_rig should be skipped
+    const importStage = result.stages.find((s) => s.stage === "import_rig");
+    expect(importStage?.status).toBe("skipped");
+    expect(result.errors.some((e) => e.includes("skipped"))).toBe(true);
+  });
 });
