@@ -385,4 +385,39 @@ describe("TmuxAdapter", () => {
       expect(sessions[1]!.name).toBe("another-good");
     });
   });
+
+  // Discovery adapter extensions
+  describe("getPanePid", () => {
+    it("returns parsed integer PID from tmux output", async () => {
+      const exec: ExecFn = async () => "1234\n";
+      const adapter = new TmuxAdapter(exec);
+      const pid = await adapter.getPanePid("%0");
+      expect(pid).toBe(1234);
+    });
+
+    it("returns null for empty or non-numeric output", async () => {
+      const exec: ExecFn = async () => "\n";
+      const adapter = new TmuxAdapter(exec);
+      expect(await adapter.getPanePid("%0")).toBeNull();
+
+      const exec2: ExecFn = async () => "not-a-pid";
+      const adapter2 = new TmuxAdapter(exec2);
+      expect(await adapter2.getPanePid("%0")).toBeNull();
+    });
+  });
+
+  describe("getPaneCommand", () => {
+    it("returns command string from tmux output", async () => {
+      const exec: ExecFn = async () => "claude\n";
+      const adapter = new TmuxAdapter(exec);
+      const cmd = await adapter.getPaneCommand("%0");
+      expect(cmd).toBe("claude");
+    });
+
+    it("returns null for empty output", async () => {
+      const exec: ExecFn = async () => "\n";
+      const adapter = new TmuxAdapter(exec);
+      expect(await adapter.getPaneCommand("%0")).toBeNull();
+    });
+  });
 });

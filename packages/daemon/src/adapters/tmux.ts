@@ -184,4 +184,27 @@ export class TmuxAdapter {
       return classifyWriteError(err);
     }
   }
+
+  /** Get the PID of the foreground process in a pane. Returns null if unavailable. */
+  async getPanePid(paneId: string): Promise<number | null> {
+    try {
+      const output = await this.exec(`tmux display-message -p -t ${shellQuote(paneId)} "#{pane_pid}"`);
+      const trimmed = output.trim();
+      const parsed = parseInt(trimmed, 10);
+      return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Get the current foreground command in a pane. Returns null if unavailable. */
+  async getPaneCommand(paneId: string): Promise<string | null> {
+    try {
+      const output = await this.exec(`tmux display-message -p -t ${shellQuote(paneId)} "#{pane_current_command}"`);
+      const trimmed = output.trim();
+      return trimmed || null;
+    } catch {
+      return null;
+    }
+  }
 }
