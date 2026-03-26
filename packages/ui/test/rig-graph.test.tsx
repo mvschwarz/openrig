@@ -663,4 +663,89 @@ describe("RigGraph click-through to focus", () => {
     // The old "Focused" message should be gone (replaced)
     expect(screen.queryByText(/focused/i)).toBeNull();
   });
+
+  // === PUX-T05: Package badge tests ===
+
+  it("node with packageRefs shows package badge with count and names in title", async () => {
+    const nodesWithPkgs = [
+      {
+        id: "n1",
+        type: "rigNode",
+        position: { x: 0, y: 0 },
+        data: {
+          logicalId: "orchestrator",
+          role: "orchestrator",
+          runtime: "claude-code",
+          model: "opus",
+          status: "running",
+          packageRefs: ["acme-standards", "test-tools"],
+          binding: { tmuxSession: "r01-orch1-lead", cmuxSurface: "s-1" },
+        },
+      },
+    ];
+
+    mockFetch.mockResolvedValue(mockGraphResponse(nodesWithPkgs, []));
+    render(<QueryWrapper><RigGraph rigId="rig-badge-1" /></QueryWrapper>);
+
+    await waitFor(() => {
+      const badge = screen.getByTestId("package-badge");
+      expect(badge).toBeDefined();
+      expect(badge.textContent).toContain("PKG 2");
+      expect(badge.getAttribute("title")).toBe("acme-standards, test-tools");
+    });
+  });
+
+  it("node without packageRefs has no badge", async () => {
+    // sampleNodes() have no packageRefs
+    mockFetch.mockResolvedValue(mockGraphResponse(sampleNodes(), sampleEdges()));
+    render(<QueryWrapper><RigGraph rigId="rig-badge-2" /></QueryWrapper>);
+
+    await waitFor(() => {
+      expect(screen.getAllByTestId("rig-node").length).toBeGreaterThan(0);
+    });
+
+    expect(screen.queryByTestId("package-badge")).toBeNull();
+  });
+
+  it("badge click does not trigger node focus/cmux handler", async () => {
+    const nodesWithPkgs = [
+      {
+        id: "n1",
+        type: "rigNode",
+        position: { x: 0, y: 0 },
+        data: {
+          logicalId: "orchestrator",
+          role: "orchestrator",
+          runtime: "claude-code",
+          model: "opus",
+          status: "running",
+          packageRefs: ["acme-standards"],
+          binding: { tmuxSession: "r01-orch1-lead", cmuxSurface: "s-1" },
+        },
+      },
+    ];
+
+    mockFetch.mockResolvedValue(mockGraphResponse(nodesWithPkgs, []));
+    render(<QueryWrapper><RigGraph rigId="rig-badge-3" /></QueryWrapper>);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("package-badge")).toBeDefined();
+    });
+
+    // Reset fetch mock to track focus calls
+    mockFetch.mockClear();
+    mockFetch.mockResolvedValue({ ok: true, json: async () => ({ focused: true }) });
+
+    // Click the badge
+    const badge = screen.getByTestId("package-badge");
+    await act(async () => {
+      badge.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    // No focus POST should have been made (stopPropagation prevents node click)
+    const focusCalls = mockFetch.mock.calls.filter(
+      (c: unknown[]) => typeof c[0] === "string" && (c[0] as string).includes("/focus")
+    );
+    expect(focusCalls.length).toBe(0);
+  });
 });

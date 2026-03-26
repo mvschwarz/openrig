@@ -7,6 +7,7 @@ interface RigNodeData {
   runtime: string | null;
   model: string | null;
   status: string | null;
+  packageRefs?: string[];
   binding: {
     tmuxSession?: string | null;
     cmuxSurface?: string | null;
@@ -109,6 +110,19 @@ export function RigNode({ data }: { data: RigNodeData }) {
             </span>
           </div>
         </div>
+
+        {/* Package badge — non-interactive until name->ID resolution exists */}
+        {data.packageRefs && data.packageRefs.length > 0 && (
+          <div
+            data-testid="package-badge"
+            title={data.packageRefs.join(", ")}
+            className="mt-spacing-2 px-spacing-2 py-spacing-1 bg-primary/12 text-label-sm text-primary font-mono"
+            onClick={(e) => e.stopPropagation()}
+            onKeyDown={(e) => e.stopPropagation()}
+          >
+            PKG {data.packageRefs.length}
+          </div>
+        )}
       </div>
 
       <Handle type="source" position={Position.Bottom} />
