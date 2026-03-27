@@ -6,6 +6,8 @@ export interface BundlePackageEntry {
   version: string;
   path: string;
   originalSource: string;
+  /** All original source refs when deduped from multiple inputs */
+  originalSources?: string[];
 }
 
 /** Integrity section with per-file checksums */
@@ -117,12 +119,18 @@ export function parseBundleManifest(yaml: string): unknown {
 /** Normalize raw parsed manifest to typed BundleManifest */
 export function normalizeBundleManifest(raw: unknown): BundleManifest {
   const m = raw as Record<string, unknown>;
-  const pkgs = (m["packages"] as Array<Record<string, unknown>>).map((p) => ({
-    name: p["name"] as string,
-    version: p["version"] as string,
-    path: p["path"] as string,
-    originalSource: (p["original_source"] as string) ?? "",
-  }));
+  const pkgs = (m["packages"] as Array<Record<string, unknown>>).map((p) => {
+    const entry: BundlePackageEntry = {
+      name: p["name"] as string,
+      version: p["version"] as string,
+      path: p["path"] as string,
+      originalSource: (p["original_source"] as string) ?? "",
+    };
+    if (Array.isArray(p["original_sources"])) {
+      entry.originalSources = p["original_sources"] as string[];
+    }
+    return entry;
+  });
 
   const result: BundleManifest = {
     schemaVersion: (m["schema_version"] as number) ?? 1,
@@ -157,6 +165,7 @@ export function serializeBundleManifest(manifest: BundleManifest): string {
       version: p.version,
       path: p.path,
       original_source: p.originalSource,
+      ...(p.originalSources && p.originalSources.length > 1 ? { original_sources: p.originalSources } : {}),
     })),
   };
 
