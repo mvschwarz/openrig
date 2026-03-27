@@ -1,3 +1,4 @@
+import nodePath from "node:path";
 import { Command } from "commander";
 import { DaemonClient } from "../client.js";
 import { getDaemonStatus, startDaemon, type LifecycleDeps } from "../daemon-lifecycle.js";
@@ -39,7 +40,7 @@ export function upCommand(depsOverride?: StatusDeps & { lifecycleDeps?: Lifecycl
       const client = deps.clientFactory(`http://127.0.0.1:${status.port}`);
 
       const res = await client.post<Record<string, unknown>>("/api/up", {
-        sourceRef: source,
+        sourceRef: nodePath.resolve(source),
         plan: opts.plan ?? false,
         autoApprove: opts.yes ?? false,
         targetRoot: opts.target,

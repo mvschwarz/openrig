@@ -1,6 +1,6 @@
 === rigged up /tmp/rigged/e2e/test-rig.yaml ===
 {
-    "runId": "01KMPZKV12TQGYWYC5QJR5R574",
+    "runId": "01KMQ34705JZ2AY62B1MW29VYZ",
     "status": "completed",
     "stages": [
         {
@@ -72,7 +72,7 @@
             "stage": "import_rig",
             "status": "ok",
             "detail": {
-                "rigId": "01KMPZKWS5HVV5F08NRQZ6QWF6",
+                "rigId": "01KMQ347CCW12T356DMPS1PJ9M",
                 "specName": "e2e-test-rig",
                 "specVersion": "1.0.0",
                 "nodes": [
@@ -88,7 +88,7 @@
             }
         }
     ],
-    "rigId": "01KMPZKWS5HVV5F08NRQZ6QWF6",
+    "rigId": "01KMQ347CCW12T356DMPS1PJ9M",
     "errors": [],
     "warnings": []
 }
@@ -96,117 +96,19 @@
 === rigged ps ===
 [
     {
-        "rigId": "01KMPZKWS5HVV5F08NRQZ6QWF6",
+        "rigId": "01KMQ347CCW12T356DMPS1PJ9M",
         "name": "e2e-test-rig",
         "nodeCount": 2,
-        "runningCount": 0,
-        "status": "stopped",
-        "uptime": null,
+        "runningCount": 2,
+        "status": "running",
+        "uptime": "0s",
         "latestSnapshot": null
     }
 ]
 
-=== rig detail ===
+=== rigged down 01KMQ347CCW12T356DMPS1PJ9M ===
 {
-    "rig": {
-        "id": "01KMPZKWS5HVV5F08NRQZ6QWF6",
-        "name": "e2e-test-rig",
-        "createdAt": "2026-03-27 06:27:28",
-        "updatedAt": "2026-03-27 06:27:28"
-    },
-    "nodes": [
-        {
-            "id": "01KMPZKWS5Z7FP1203S312QCSB",
-            "rigId": "01KMPZKWS5HVV5F08NRQZ6QWF6",
-            "logicalId": "impl",
-            "role": "impl",
-            "runtime": "claude-code",
-            "model": "sonnet",
-            "cwd": null,
-            "surfaceHint": null,
-            "workspace": null,
-            "restorePolicy": "resume_if_possible",
-            "packageRefs": [],
-            "createdAt": "2026-03-27 06:27:28",
-            "binding": {
-                "id": "01KMPZKWXD1T6WY9CHNQEBKWVN",
-                "nodeId": "01KMPZKWS5Z7FP1203S312QCSB",
-                "tmuxSession": "r00-e2e-test-rig-impl",
-                "tmuxWindow": null,
-                "tmuxPane": null,
-                "cmuxWorkspace": null,
-                "cmuxSurface": null,
-                "updatedAt": "2026-03-27 06:27:28"
-            }
-        },
-        {
-            "id": "01KMPZKWS56H3BMJ8GZ0MJTJ8X",
-            "rigId": "01KMPZKWS5HVV5F08NRQZ6QWF6",
-            "logicalId": "orchestrator",
-            "role": "orchestrator",
-            "runtime": "claude-code",
-            "model": "opus",
-            "cwd": null,
-            "surfaceHint": null,
-            "workspace": null,
-            "restorePolicy": "resume_if_possible",
-            "packageRefs": [],
-            "createdAt": "2026-03-27 06:27:28",
-            "binding": {
-                "id": "01KMPZKWV3YR14AD70CNBAJ4GS",
-                "nodeId": "01KMPZKWS56H3BMJ8GZ0MJTJ8X",
-                "tmuxSession": "r00-e2e-test-rig-orchestrator",
-                "tmuxWindow": null,
-                "tmuxPane": null,
-                "cmuxWorkspace": null,
-                "cmuxSurface": null,
-                "updatedAt": "2026-03-27 06:27:28"
-            }
-        }
-    ],
-    "edges": [
-        {
-            "id": "01KMPZKWS5JENRWZ8FPBVM19BT",
-            "rigId": "01KMPZKWS5HVV5F08NRQZ6QWF6",
-            "sourceId": "01KMPZKWS56H3BMJ8GZ0MJTJ8X",
-            "targetId": "01KMPZKWS5Z7FP1203S312QCSB",
-            "kind": "delegates_to",
-            "createdAt": "2026-03-27 06:27:28"
-        }
-    ]
-}
-
-=== sessions ===
-[
-    {
-        "id": "01KMPZKWTXTTJCCCD1Y3JQ2BRG",
-        "nodeId": "01KMPZKWS56H3BMJ8GZ0MJTJ8X",
-        "sessionName": "r00-e2e-test-rig-orchestrator",
-        "status": "unknown",
-        "resumeType": null,
-        "resumeToken": null,
-        "restorePolicy": "resume_if_possible",
-        "lastSeenAt": null,
-        "createdAt": "2026-03-27 06:27:28",
-        "origin": "launched"
-    },
-    {
-        "id": "01KMPZKWXDR9X7085FV7PYYEW3",
-        "nodeId": "01KMPZKWS5Z7FP1203S312QCSB",
-        "sessionName": "r00-e2e-test-rig-impl",
-        "status": "unknown",
-        "resumeType": null,
-        "resumeToken": null,
-        "restorePolicy": "resume_if_possible",
-        "lastSeenAt": null,
-        "createdAt": "2026-03-27 06:27:28",
-        "origin": "launched"
-    }
-]
-
-=== rigged down 01KMPZKWS5HVV5F08NRQZ6QWF6 ===
-{
-    "rigId": "01KMPZKWS5HVV5F08NRQZ6QWF6",
+    "rigId": "01KMQ347CCW12T356DMPS1PJ9M",
     "sessionsKilled": 2,
     "snapshotId": null,
     "deleted": false,
@@ -218,7 +120,7 @@
 === rigged ps (after down) ===
 [
     {
-        "rigId": "01KMPZKWS5HVV5F08NRQZ6QWF6",
+        "rigId": "01KMQ347CCW12T356DMPS1PJ9M",
         "name": "e2e-test-rig",
         "nodeCount": 2,
         "runningCount": 0,
@@ -228,81 +130,9 @@
     }
 ]
 
-=== Create bundle from rig ===
+=== rigged up --plan ===
 {
-    "error": "specPath, bundleName, bundleVersion, and outputPath are required"
-}
-
-=== Create bundle from spec ===
-{
-    "bundleName": "e2e-test-bundle",
-    "bundleVersion": "1.0.0",
-    "archiveHash": "25dd07aef55cf4db0e97e11ea20af8064bc49df00ddeed4976994d03e29a1344",
-    "packages": 0
-}
-
-=== Delete existing rig ===
-{
-    "rigId": "01KMPZKWS5HVV5F08NRQZ6QWF6",
-    "sessionsKilled": 0,
-    "snapshotId": null,
-    "deleted": true,
-    "deleteBlocked": false,
-    "alreadyStopped": true,
-    "errors": []
-}
-
-=== rigged up /tmp/rigged/e2e/e2e-test.rigbundle ===
-{
-    "runId": "01KMPZSKTCCE883N6BBVKK25AS",
-    "status": "failed",
-    "stages": [
-        {
-            "stage": "resolve_spec",
-            "status": "failed",
-            "detail": {
-                "code": "bundle_error",
-                "error": "Invalid bundle manifest: packages must be a non-empty array"
-            }
-        }
-    ],
-    "errors": [
-        "Invalid bundle manifest: packages must be a non-empty array"
-    ],
-    "warnings": []
-}
-
-=== BUNDLE NOTE: Bundle install requires packages. Spec had no package_refs, so bundle contains 0 packages. Bundle source resolver rejects empty packages array. This is correct validation behavior. ===
-
-=== rigged bundle inspect ===
-{
-    "manifest": {
-        "schemaVersion": 1,
-        "name": "e2e-test-bundle",
-        "version": "1.0.0",
-        "createdAt": "2026-03-27T06:30:02.601Z",
-        "rigSpec": "rig.yaml",
-        "packages": [],
-        "integrity": {
-            "algorithm": "sha256",
-            "files": {
-                "rig.yaml": "b19f571dfa3c8d0f0391b3ba79aa60fcdbc22cd7582459107415fcec912b8383"
-            }
-        }
-    },
-    "digestValid": true,
-    "integrityResult": {
-        "passed": true,
-        "mismatches": [],
-        "missing": [],
-        "extra": [],
-        "errors": []
-    }
-}
-
-=== rigged up --plan /tmp/rigged/e2e/test-rig.yaml ===
-{
-    "runId": "01KMPZTBJ33T8QA1J661E2E51M",
+    "runId": "01KMQ347HN2D0X8ETK5PFHARCV",
     "status": "planned",
     "stages": [
         {
@@ -358,6 +188,17 @@
     "errors": [],
     "warnings": [],
     "actionKeys": []
+}
+
+=== rigged down --delete ===
+{
+    "rigId": "01KMQ347CCW12T356DMPS1PJ9M",
+    "sessionsKilled": 0,
+    "snapshotId": null,
+    "deleted": true,
+    "deleteBlocked": false,
+    "alreadyStopped": true,
+    "errors": []
 }
 
 === Stopping daemon ===

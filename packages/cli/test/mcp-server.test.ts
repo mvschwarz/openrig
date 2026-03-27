@@ -236,4 +236,23 @@ describe("MCP Server", () => {
     expect(parsed.integrityResult.passed).toBe(false);
     await cleanup();
   });
+
+  // T10: MCP tools URL-encode path parameters
+  it("snapshot_create URL-encodes rigId in path", async () => {
+    const postFn = vi.fn(async () => ({
+      status: 201,
+      data: { id: "snap-1", rigId: "rig/with/slashes", kind: "manual", status: "complete" },
+    }));
+    await setup({ post: postFn });
+
+    await mcpClient.callTool({
+      name: "rigged_snapshot_create",
+      arguments: { rigId: "rig/with/slashes" },
+    });
+
+    const calledPath = postFn.mock.calls[0][0] as string;
+    expect(calledPath).toBe(`/api/rigs/${encodeURIComponent("rig/with/slashes")}/snapshots`);
+    expect(calledPath).toContain("rig%2Fwith%2Fslashes");
+    await cleanup();
+  });
 });

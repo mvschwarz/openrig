@@ -18,6 +18,8 @@ export interface TeardownResult {
 
 interface TeardownOptions {
   delete?: boolean;
+  /** Reserved for future graceful-stop support. Currently a no-op because
+   *  tmux kill-session is already immediate — there is no graceful stop to skip. */
   force?: boolean;
   snapshot?: boolean;
 }

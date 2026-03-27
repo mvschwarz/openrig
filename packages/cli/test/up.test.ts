@@ -160,4 +160,31 @@ describe("Up CLI", () => {
     expect(exitCode).toBe(2);
     failServer.close();
   });
+
+  // T13: Relative path resolved to absolute before sending
+  it("resolves relative path to absolute in POST body", async () => {
+    let lastBody: Record<string, unknown> = {};
+    const origListeners = server.listeners("request");
+    server.removeAllListeners("request");
+    server.on("request", async (req: http.IncomingMessage, res: http.ServerResponse) => {
+      let body = "";
+      for await (const chunk of req) body += chunk;
+      if (req.url === "/api/up") {
+        lastBody = JSON.parse(body);
+        res.writeHead(201, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ status: "completed", runId: "r", rigId: "g", stages: [], errors: [] }));
+      }
+    });
+
+    await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rigged", "up", "relative/spec.yaml"]);
+    });
+
+    // sourceRef must be an absolute path, not the raw relative input
+    expect(lastBody.sourceRef).toMatch(/^\//);
+    expect((lastBody.sourceRef as string).endsWith("relative/spec.yaml")).toBe(true);
+
+    server.removeAllListeners("request");
+    for (const l of origListeners) server.on("request", l as (...args: unknown[]) => void);
+  });
 });

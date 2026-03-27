@@ -135,7 +135,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
     },
     async ({ rigId }) => {
       try {
-        const res = await client.post(`/api/rigs/${rigId}/snapshots`, {});
+        const res = await client.post(`/api/rigs/${encodeURIComponent(rigId)}/snapshots`, {});
         return mapResult(res);
       } catch (err) {
         return { content: [{ type: "text" as const, text: (err as Error).message }], isError: true as const };
@@ -152,7 +152,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
     },
     async ({ rigId }) => {
       try {
-        const res = await client.get(`/api/rigs/${rigId}/snapshots`);
+        const res = await client.get(`/api/rigs/${encodeURIComponent(rigId)}/snapshots`);
         return mapResult(res);
       } catch (err) {
         return { content: [{ type: "text" as const, text: (err as Error).message }], isError: true as const };
@@ -170,7 +170,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
     },
     async ({ rigId, snapshotId }) => {
       try {
-        const res = await client.post(`/api/rigs/${rigId}/restore/${snapshotId}`, {});
+        const res = await client.post(`/api/rigs/${encodeURIComponent(rigId)}/restore/${encodeURIComponent(snapshotId)}`, {});
         return mapResult(res);
       } catch (err) {
         return { content: [{ type: "text" as const, text: (err as Error).message }], isError: true as const };
@@ -204,7 +204,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
     },
     async ({ discoveryId, rigId, logicalId }) => {
       try {
-        const res = await client.post(`/api/discovery/${discoveryId}/claim`, { rigId, logicalId });
+        const res = await client.post(`/api/discovery/${encodeURIComponent(discoveryId)}/claim`, { rigId, logicalId });
         return mapResult(res);
       } catch (err) {
         return { content: [{ type: "text" as const, text: (err as Error).message }], isError: true as const };
