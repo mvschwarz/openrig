@@ -29,6 +29,7 @@ import { handleExportYaml, handleExportJson, rigspecImportRoutes } from "./route
 import { packagesRoutes } from "./routes/packages.js";
 import { bootstrapRoutes } from "./routes/bootstrap.js";
 import { discoveryRoutes } from "./routes/discovery.js";
+import { bundleRoutes } from "./routes/bundles.js";
 
 export interface AppDeps {
   rigRepo: RigRepository;
@@ -141,6 +142,7 @@ export function createApp(deps: AppDeps): Hono {
   app.route("/api/packages", packagesRoutes);
   app.route("/api/bootstrap", bootstrapRoutes);
   app.route("/api/discovery", discoveryRoutes);
+  app.route("/api/bundles", bundleRoutes);
 
   return app;
 }

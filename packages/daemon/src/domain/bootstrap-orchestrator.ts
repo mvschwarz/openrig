@@ -27,6 +27,8 @@ export interface BootstrapOptions {
   approvedActionKeys?: string[];
   /** Pre-created run ID (route creates run for real-time started event) */
   runId?: string;
+  /** Override install target root (required for bundle install apply) */
+  targetRoot?: string;
 }
 
 /** Stage result */
@@ -416,7 +418,7 @@ export class BootstrapOrchestrator {
         const runtime = rt as "claude-code" | "codex";
         const outcome = this.deps.packageInstallService.install({
           resolved: resolved.resolved,
-          targetRoot: specDir,
+          targetRoot: opts.targetRoot ?? specDir,
           runtime,
           allowMerge: true,
           bootstrapId: run.id,
