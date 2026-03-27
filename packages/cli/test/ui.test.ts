@@ -53,16 +53,16 @@ function runningDeps(port: number, execFn?: UiDeps["exec"]): UiDeps {
 }
 
 describe("rigged ui open", () => {
-  // Test 1: Daemon up -> exec open with correct URL AND prints URL
-  it("daemon up -> exec open with correct URL and prints URL", async () => {
+  // Test 1: Daemon up -> exec open with UI URL AND prints URL
+  it("daemon up -> exec open with UI URL and prints URL", async () => {
     const execFn = vi.fn(async () => {});
     const deps = runningDeps(8888, execFn);
     const program = new Command();
     program.addCommand(uiCommand(deps));
     const logs = await captureLogs(() => program.parseAsync(["node", "rigged", "ui", "open"]));
 
-    expect(execFn).toHaveBeenCalledWith("open", ["http://localhost:8888"]);
-    expect(logs.join("\n")).toContain("http://localhost:8888");
+    expect(execFn).toHaveBeenCalledWith("open", ["http://127.0.0.1:5173"]);
+    expect(logs.join("\n")).toContain("http://127.0.0.1:5173");
   });
 
   // Test 2: Daemon down -> error, no exec
@@ -80,16 +80,16 @@ describe("rigged ui open", () => {
     expect(execFn).not.toHaveBeenCalled();
   });
 
-  // Test 3: URL includes correct port from daemon.json
-  it("URL includes stored port from daemon.json", async () => {
+  // Test 3: UI URL is stable even when daemon runs on another port
+  it("UI URL does not change with daemon port", async () => {
     const execFn = vi.fn(async () => {});
     const deps = runningDeps(9999, execFn);
     const program = new Command();
     program.addCommand(uiCommand(deps));
     const logs = await captureLogs(() => program.parseAsync(["node", "rigged", "ui", "open"]));
 
-    expect(execFn).toHaveBeenCalledWith("open", ["http://localhost:9999"]);
-    expect(logs.join("\n")).toContain("9999");
+    expect(execFn).toHaveBeenCalledWith("open", ["http://127.0.0.1:5173"]);
+    expect(logs.join("\n")).toContain("http://127.0.0.1:5173");
   });
 
   // Test 4: Unhealthy daemon -> error, no exec
@@ -128,8 +128,8 @@ describe("rigged ui open", () => {
     expect(logs.join("\n")).toMatch(/not running/i);
   });
 
-  // Test 6: open exec fails -> URL still printed, clean error, non-zero exit
-  it("open exec fails -> URL still printed + clean error + exitCode 1", async () => {
+  // Test 6: open exec fails -> UI URL still printed, clean error, non-zero exit
+  it("open exec fails -> UI URL still printed + clean error + exitCode 1", async () => {
     const execFn = vi.fn(async () => { throw new Error("no browser"); });
     const deps = runningDeps(7433, execFn);
     const program = new Command();
@@ -142,7 +142,7 @@ describe("rigged ui open", () => {
 
     const output = logs.join("\n");
     // URL must be printed even when open fails
-    expect(output).toContain("http://localhost:7433");
+    expect(output).toContain("http://127.0.0.1:5173");
     // Clean error message
     expect(output).toMatch(/failed to open|manually/i);
     // Non-zero exit code
@@ -152,14 +152,14 @@ describe("rigged ui open", () => {
   });
 
   // Test 7: Print always: even on success, URL is in output
-  it("URL is always printed even on successful open", async () => {
+  it("UI URL is always printed even on successful open", async () => {
     const execFn = vi.fn(async () => {});
     const deps = runningDeps(5555, execFn);
     const program = new Command();
     program.addCommand(uiCommand(deps));
     const logs = await captureLogs(() => program.parseAsync(["node", "rigged", "ui", "open"]));
 
-    expect(logs.join("\n")).toContain("http://localhost:5555");
+    expect(logs.join("\n")).toContain("http://127.0.0.1:5173");
     expect(execFn).toHaveBeenCalled();
   });
 });

@@ -7,6 +7,8 @@ export interface UiDeps {
   exec: (cmd: string, args: string[]) => Promise<void>;
 }
 
+const DEFAULT_UI_URL = process.env["RIGGED_UI_URL"]?.trim() || "http://127.0.0.1:5173";
+
 export function uiCommand(depsOverride?: UiDeps): Command {
   const cmd = new Command("ui").description("UI commands");
   const getDeps = (): UiDeps => depsOverride ?? {
@@ -35,7 +37,7 @@ export function uiCommand(depsOverride?: UiDeps): Command {
         return;
       }
 
-      const url = `http://localhost:${status.port}`;
+      const url = DEFAULT_UI_URL;
       console.log(url);
 
       try {
