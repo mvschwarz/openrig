@@ -132,6 +132,7 @@ export function createTestApp(db: Database.Database, opts?: { cmux?: CmuxAdapter
       exists: (p: string) => fs.existsSync(p),
       listFiles: () => [],
     },
+    bundleSourceResolver: null,
   });
 
   // Discovery services

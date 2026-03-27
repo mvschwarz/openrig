@@ -10,9 +10,10 @@ import type { ExternalInstallPlanner, ExternalInstallAction } from "./external-i
 import type { ExternalInstallExecutor, TaggedAction } from "./external-install-executor.js";
 import type { PackageInstallService } from "./package-install-service.js";
 import type { RigInstantiator } from "./rigspec-instantiator.js";
-import type { FsOps } from "./package-resolver.js";
+import type { FsOps, ResolvedPackage } from "./package-resolver.js";
 import { resolvePackage, type ResolveResult } from "./package-resolve-helper.js";
 import type { BootstrapStatus } from "./bootstrap-types.js";
+import type { BundleSourceResolver, BundleResolvedSource } from "./bundle-source-resolver.js";
 
 /** Bootstrap mode */
 export type BootstrapMode = "plan" | "apply";
@@ -57,6 +58,7 @@ interface BootstrapOrchestratorDeps {
   packageInstallService: PackageInstallService;
   rigInstantiator: RigInstantiator;
   fsOps: FsOps;
+  bundleSourceResolver: BundleSourceResolver | null;
 }
 
 /** Generates a deterministic action key for plan->apply identity */
@@ -109,30 +111,79 @@ export class BootstrapOrchestrator {
 
     // --- Stage 1: RESOLVE_SPEC ---
     let spec: RigSpec;
-    try {
-      const specDir = nodePath.dirname(nodePath.resolve(sourceRef));
-      const rawYaml = this.deps.fsOps.readFile(nodePath.resolve(sourceRef));
-      const raw = RigSpecCodec.parse(rawYaml);
-      const validation = RigSpecSchema.validate(raw);
-      if (!validation.valid) {
-        stages.push({ stage: "resolve_spec", status: "failed", detail: { code: "validation_failed", errors: validation.errors } });
-        this.deps.bootstrapRepo.updateRunStatus(run.id, "failed");
-        return { runId: run.id, status: "failed", stages, errors: validation.errors, warnings };
+    let specDir: string;
+    let bundleSource: BundleResolvedSource | null = null;
+    let bundleTempDir: string | null = null;
+
+    if (sourceKind === "rig_bundle") {
+      // Bundle resolution path
+      if (!this.deps.bundleSourceResolver) {
+        throw new Error("BundleSourceResolver required for rig_bundle source kind");
       }
-      spec = RigSpecSchema.normalize(raw);
-      stages.push({ stage: "resolve_spec", status: "ok", detail: { specName: spec.name, specVersion: spec.schemaVersion } });
-    } catch (err) {
-      const msg = (err as Error).message;
-      const code = (err as NodeJS.ErrnoException).code === "ENOENT" ? "file_not_found"
-        : msg.includes("YAML") || msg.includes("parse") ? "parse_error"
-        : "read_error";
-      stages.push({ stage: "resolve_spec", status: "failed", detail: { code, error: msg } });
-      errors.push(msg);
-      this.deps.bootstrapRepo.updateRunStatus(run.id, "failed");
-      return { runId: run.id, status: "failed", stages, errors, warnings };
+      try {
+        bundleSource = await this.deps.bundleSourceResolver.resolve(sourceRef);
+        bundleTempDir = bundleSource.tempDir;
+        specDir = nodePath.dirname(bundleSource.specPath);
+        const rawYaml = this.deps.fsOps.readFile(bundleSource.specPath);
+        const raw = RigSpecCodec.parse(rawYaml);
+        const validation = RigSpecSchema.validate(raw);
+        if (!validation.valid) {
+          stages.push({ stage: "resolve_spec", status: "failed", detail: { code: "validation_failed", errors: validation.errors } });
+          this.deps.bootstrapRepo.updateRunStatus(run.id, "failed");
+          return { runId: run.id, status: "failed", stages, errors: validation.errors, warnings };
+        }
+        spec = RigSpecSchema.normalize(raw);
+        stages.push({ stage: "resolve_spec", status: "ok", detail: { specName: spec.name, specVersion: spec.schemaVersion, source: "rig_bundle" } });
+      } catch (err) {
+        const msg = (err as Error).message;
+        stages.push({ stage: "resolve_spec", status: "failed", detail: { code: "bundle_error", error: msg } });
+        errors.push(msg);
+        this.deps.bootstrapRepo.updateRunStatus(run.id, "failed");
+        return { runId: run.id, status: "failed", stages, errors, warnings };
+      }
+    } else {
+      // Direct rig_spec path
+      try {
+        specDir = nodePath.dirname(nodePath.resolve(sourceRef));
+        const rawYaml = this.deps.fsOps.readFile(nodePath.resolve(sourceRef));
+        const raw = RigSpecCodec.parse(rawYaml);
+        const validation = RigSpecSchema.validate(raw);
+        if (!validation.valid) {
+          stages.push({ stage: "resolve_spec", status: "failed", detail: { code: "validation_failed", errors: validation.errors } });
+          this.deps.bootstrapRepo.updateRunStatus(run.id, "failed");
+          return { runId: run.id, status: "failed", stages, errors: validation.errors, warnings };
+        }
+        spec = RigSpecSchema.normalize(raw);
+        stages.push({ stage: "resolve_spec", status: "ok", detail: { specName: spec.name, specVersion: spec.schemaVersion } });
+      } catch (err) {
+        const msg = (err as Error).message;
+        const code = (err as NodeJS.ErrnoException).code === "ENOENT" ? "file_not_found"
+          : msg.includes("YAML") || msg.includes("parse") ? "parse_error"
+          : "read_error";
+        stages.push({ stage: "resolve_spec", status: "failed", detail: { code, error: msg } });
+        errors.push(msg);
+        this.deps.bootstrapRepo.updateRunStatus(run.id, "failed");
+        return { runId: run.id, status: "failed", stages, errors, warnings };
+      }
     }
 
-    const specDir = nodePath.dirname(nodePath.resolve(sourceRef));
+    // Wrap remaining stages in try/finally for bundle temp cleanup
+    try { return await this.executeStages(opts, run, spec, specDir, bundleSource, stages, errors, warnings, seqCounter); }
+    finally { if (bundleTempDir && this.deps.bundleSourceResolver) this.deps.bundleSourceResolver.cleanup(bundleTempDir); }
+  }
+
+  private async executeStages(
+    opts: BootstrapOptions,
+    run: { id: string },
+    spec: RigSpec,
+    specDir: string,
+    bundleSource: BundleResolvedSource | null,
+    stages: BootstrapStageResult[],
+    errors: string[],
+    warnings: string[],
+    seqCounter: number,
+  ): Promise<BootstrapResult> {
+    const { mode, autoApprove, approvedActionKeys } = opts;
 
     // --- Stage 2: RESOLVE_PACKAGES ---
     const packageRefs = new Set<string>();
@@ -148,9 +199,19 @@ export class BootstrapOrchestrator {
     const unresolvedRefs: string[] = [];
 
     for (const ref of packageRefs) {
+      // Bundle path: lookup in packageRefMap
+      if (bundleSource) {
+        const bundleResolved = bundleSource.packageRefMap[ref];
+        if (bundleResolved) {
+          resolvedPackages.set(ref, { ok: true, resolved: bundleResolved });
+          continue;
+        }
+        // Ref not in bundle map — try local resolution as fallback
+      }
+
       // Check for unsupported schemes
       if (ref.includes("github:") || ref.includes("://")) {
-        errors.push(`Unsupported package ref scheme in Phase 5: '${ref}'`);
+        errors.push(`Unsupported package ref scheme: '${ref}'`);
         unresolvedRefs.push(ref);
         continue;
       }

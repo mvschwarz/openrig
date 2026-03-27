@@ -42,6 +42,7 @@ import { SessionEnricher } from "./domain/session-enricher.js";
 import { DiscoveryRepository } from "./domain/discovery-repository.js";
 import { DiscoveryCoordinator } from "./domain/discovery-coordinator.js";
 import { ClaimService } from "./domain/claim-service.js";
+import { BundleSourceResolver } from "./domain/bundle-source-resolver.js";
 import { createApp, type AppDeps } from "./server.js";
 import fs from "node:fs";
 import nodePath from "node:path";
@@ -165,10 +166,12 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       return results;
     },
   };
+  const bundleSourceResolver = new BundleSourceResolver({ fsOps: resolverFsOps });
   const bootstrapOrchestrator = new BootstrapOrchestrator({
     db, bootstrapRepo, runtimeVerifier, probeRegistry,
     installPlanner: externalInstallPlanner, installExecutor: externalInstallExecutor,
     packageInstallService, rigInstantiator, fsOps: resolverFsOps,
+    bundleSourceResolver,
   });
 
   // Discovery services

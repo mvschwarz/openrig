@@ -207,6 +207,7 @@ describe("BootstrapOrchestrator", () => {
       packageInstallService,
       rigInstantiator: instantiator as any,
       fsOps: realFsOps(),
+      bundleSourceResolver: null,
     });
   }
 
@@ -978,5 +979,121 @@ exports:
     const importStage = result.stages.find((s) => s.stage === "import_rig");
     expect(importStage?.status).toBe("skipped");
     expect(result.errors.some((e) => e.includes("skipped"))).toBe(true);
+  });
+
+  // === P7-T05: Bundle source tests ===
+
+  // T25: Real bundle bootstrap happy path
+  it("bootstrap from rig_bundle resolves vendored packages", async () => {
+    // Create a real bundle
+    const { BundleAssembler } = await import("../src/domain/bundle-assembler.js");
+    const { computeIntegrity, writeIntegrity } = await import("../src/domain/bundle-integrity.js");
+    const { pack } = await import("../src/domain/bundle-archive.js");
+    const { BundleSourceResolver } = await import("../src/domain/bundle-source-resolver.js");
+
+    // Write package source
+    const pkgDir = path.join(tmpDir, "src-pkg");
+    writePkg(pkgDir, VALID_MANIFEST_YAML, { "skills/helper/SKILL.md": "# Helper" });
+
+    // Write spec
+    const specPath = writeSpec(SPEC_WITH_PACKAGES_YAML);
+
+    // Assemble bundle
+    const staging = path.join(tmpDir, "staging");
+    const assembler = new BundleAssembler({
+      fsOps: {
+        readFile: (p: string) => fs.readFileSync(p, "utf-8"),
+        exists: (p: string) => fs.existsSync(p),
+        mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }),
+        writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"),
+        copyDir: (s: string, d: string) => fs.cpSync(s, d, { recursive: true }),
+      },
+    });
+    assembler.assemble({
+      specPath, outputDir: staging, bundleName: "test-bundle", bundleVersion: "0.1.0",
+      packages: [{ name: "test-pkg", version: "1.0.0", sourcePath: pkgDir, originalSource: "./test-pkg", manifestHash: "h1" }],
+    });
+
+    // Add integrity
+    const integrityFsOps = {
+      readFile: (p: string) => fs.readFileSync(p, "utf-8"),
+      readFileBuffer: (p: string) => fs.readFileSync(p),
+      writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"),
+      exists: (p: string) => fs.existsSync(p),
+      walkFiles: (dir: string) => { const r: string[] = []; function w(d: string, pre: string) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.isDirectory()) w(path.join(d, e.name), pre ? `${pre}/${e.name}` : e.name); else r.push(pre ? `${pre}/${e.name}` : e.name); } } w(dir, ""); return r; },
+    };
+    const integrity = computeIntegrity(staging, integrityFsOps);
+    writeIntegrity(staging, integrity, integrityFsOps);
+
+    // Pack
+    const bundlePath = path.join(tmpDir, "test.rigbundle");
+    await pack(staging, bundlePath);
+
+    // Bootstrap from bundle
+    const bundleResolver = new BundleSourceResolver({ fsOps: realFsOps() });
+    const exec = createMockExec({
+      "tmux -V": "tmux 3.4",
+      "claude --version": "claude 1.0.0",
+    });
+    const bootstrapRepo = new (await import("../src/domain/bootstrap-repository.js")).BootstrapRepository(db);
+    const runtimeVerifier = new (await import("../src/domain/runtime-verifier.js")).RuntimeVerifier({ exec, db });
+    const probeRegistry = new (await import("../src/domain/requirements-probe.js")).RequirementsProbeRegistry(exec, { platform: "darwin" });
+    const installPlanner = new (await import("../src/domain/external-install-planner.js")).ExternalInstallPlanner({ platform: "darwin" });
+    const installExecutor = new (await import("../src/domain/external-install-executor.js")).ExternalInstallExecutor({ exec, db });
+    const packageRepo = new (await import("../src/domain/package-repository.js")).PackageRepository(db);
+    const installRepo = new (await import("../src/domain/install-repository.js")).InstallRepository(db);
+    const installEngine = new (await import("../src/domain/install-engine.js")).InstallEngine(installRepo, realEngineFsOps());
+    const installVerifier = new (await import("../src/domain/install-verifier.js")).InstallVerifier(installRepo, packageRepo, { readFile: (p: string) => fs.readFileSync(p, "utf-8"), exists: (p: string) => fs.existsSync(p) });
+    const packageInstallService = new (await import("../src/domain/package-install-service.js")).PackageInstallService({ packageRepo, installRepo, installEngine, installVerifier });
+
+    const { BootstrapOrchestrator: BO } = await import("../src/domain/bootstrap-orchestrator.js");
+    const orch = new BO({
+      db, bootstrapRepo, runtimeVerifier, probeRegistry,
+      installPlanner, installExecutor: installExecutor, packageInstallService,
+      rigInstantiator: createMockInstantiator(db) as any,
+      fsOps: realFsOps(),
+      bundleSourceResolver: bundleResolver,
+    });
+
+    const result = await orch.bootstrap({ mode: "plan", sourceRef: bundlePath, sourceKind: "rig_bundle" });
+
+    expect(result.status).toBe("planned");
+    expect(result.stages.some((s) => s.stage === "resolve_spec" && s.status === "ok")).toBe(true);
+    expect(result.stages.some((s) => s.stage === "resolve_packages" && s.status === "ok")).toBe(true);
+
+    // Verify source_kind recorded
+    const run = db.prepare("SELECT source_kind FROM bootstrap_runs WHERE id = ?")
+      .get(result.runId) as { source_kind: string };
+    expect(run.source_kind).toBe("rig_bundle");
+
+    // Verify temp dir was cleaned up by the orchestrator's finally block
+    // After the plan completes, no rigbundle- temp dirs should remain from this test
+    const tmpBase = os.tmpdir();
+    const leakedDirs = fs.readdirSync(tmpBase).filter((d) =>
+      d.startsWith("rigbundle-") && fs.existsSync(path.join(tmpBase, d, "bundle.yaml"))
+    );
+    expect(leakedDirs).toHaveLength(0);
+  });
+
+  // T26: rig_bundle with null resolver throws
+  it("rig_bundle with null bundleSourceResolver throws", async () => {
+    const specPath = writeSpec(SIMPLE_SPEC_YAML);
+    const orch = buildOrchestrator();
+
+    await expect(
+      orch.bootstrap({ mode: "plan", sourceRef: specPath, sourceKind: "rig_bundle" })
+    ).rejects.toThrow(/BundleSourceResolver required/);
+  });
+
+  // T26: bootstrap_runs records source_kind from options
+  it("bootstrap_runs records source_kind from options", async () => {
+    const specPath = writeSpec(SIMPLE_SPEC_YAML);
+    const orch = buildOrchestrator();
+
+    const result = await orch.bootstrap({ mode: "plan", sourceRef: specPath, sourceKind: "rig_spec" });
+
+    const run = db.prepare("SELECT source_kind FROM bootstrap_runs WHERE id = ?")
+      .get(result.runId) as { source_kind: string };
+    expect(run.source_kind).toBe("rig_spec");
   });
 });
