@@ -14,6 +14,8 @@ import { discoverCommand } from "./commands/discover.js";
 import { claimCommand } from "./commands/claim.js";
 import { bundleCommand } from "./commands/bundle.js";
 import { upCommand } from "./commands/up.js";
+import { downCommand } from "./commands/down.js";
+import { psCommand } from "./commands/ps.js";
 import type { LifecycleDeps } from "./daemon-lifecycle.js";
 
 export interface ProgramDeps {
@@ -31,6 +33,8 @@ export interface ProgramDeps {
   claimDeps?: StatusDeps;
   bundleDeps?: StatusDeps;
   upDeps?: StatusDeps;
+  downDeps?: StatusDeps;
+  psDeps?: StatusDeps;
 }
 
 export function createProgram(depsOverride?: ProgramDeps): Command {
@@ -55,6 +59,8 @@ export function createProgram(depsOverride?: ProgramDeps): Command {
   program.addCommand(claimCommand(depsOverride?.claimDeps));
   program.addCommand(bundleCommand(depsOverride?.bundleDeps));
   program.addCommand(upCommand(depsOverride?.upDeps));
+  program.addCommand(downCommand(depsOverride?.downDeps));
+  program.addCommand(psCommand(depsOverride?.psDeps));
 
   return program;
 }

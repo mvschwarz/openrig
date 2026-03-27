@@ -33,7 +33,9 @@ import { bundleRoutes } from "./routes/bundles.js";
 import { psRoutes } from "./routes/ps.js";
 import type { PsProjectionService } from "./domain/ps-projection.js";
 import type { UpCommandRouter } from "./domain/up-command-router.js";
+import type { RigTeardownOrchestrator } from "./domain/rig-teardown.js";
 import { upRoutes } from "./routes/up.js";
+import { downRoutes } from "./routes/down.js";
 
 export interface AppDeps {
   rigRepo: RigRepository;
@@ -59,6 +61,7 @@ export interface AppDeps {
   claimService: ClaimService;
   psProjectionService: PsProjectionService;
   upRouter: UpCommandRouter;
+  teardownOrchestrator: RigTeardownOrchestrator;
 }
 
 export function createApp(deps: AppDeps): Hono {
@@ -105,6 +108,9 @@ export function createApp(deps: AppDeps): Hono {
   if (deps.rigRepo.db !== deps.psProjectionService.db) {
     throw new Error("createApp: psProjectionService must share the same db handle");
   }
+  if (deps.rigRepo.db !== deps.teardownOrchestrator.db) {
+    throw new Error("createApp: teardownOrchestrator must share the same db handle");
+  }
 
   const app = new Hono();
 
@@ -133,6 +139,7 @@ export function createApp(deps: AppDeps): Hono {
     c.set("claimService" as never, deps.claimService);
     c.set("psProjectionService" as never, deps.psProjectionService);
     c.set("upRouter" as never, deps.upRouter);
+    c.set("teardownOrchestrator" as never, deps.teardownOrchestrator);
     await next();
   });
 
@@ -156,6 +163,7 @@ export function createApp(deps: AppDeps): Hono {
   app.route("/api/bundles", bundleRoutes);
   app.route("/api/ps", psRoutes);
   app.route("/api/up", upRoutes);
+  app.route("/api/down", downRoutes);
 
   return app;
 }

@@ -4,12 +4,14 @@ import type { SessionRegistry } from "./session-registry.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import type { SnapshotCapture } from "./snapshot-capture.js";
 import type { EventBus } from "./event-bus.js";
+import { RigNotFoundError } from "./errors.js";
 
 export interface TeardownResult {
   rigId: string;
   sessionsKilled: number;
   snapshotId: string | null;
   deleted: boolean;
+  deleteBlocked: boolean;
   alreadyStopped: boolean;
   errors: string[];
 }
@@ -57,11 +59,11 @@ export class RigTeardownOrchestrator {
   async teardown(rigId: string, opts?: TeardownOptions): Promise<TeardownResult> {
     // 1. Validate rig
     const rig = this.deps.rigRepo.getRig(rigId);
-    if (!rig) throw new Error(`Rig not found: ${rigId}`);
+    if (!rig) throw new RigNotFoundError(rigId);
 
     const result: TeardownResult = {
       rigId, sessionsKilled: 0, snapshotId: null,
-      deleted: false, alreadyStopped: false, errors: [],
+      deleted: false, deleteBlocked: false, alreadyStopped: false, errors: [],
     };
 
     // 2. Get latest session per node
@@ -111,6 +113,7 @@ export class RigTeardownOrchestrator {
       if (killFailures > 0) {
         result.errors.push("Rig deletion blocked: some sessions could not be killed");
         result.deleted = false;
+        result.deleteBlocked = true;
       } else {
         try {
           this.atomicDelete(rigId);

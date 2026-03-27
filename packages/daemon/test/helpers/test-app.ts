@@ -28,6 +28,7 @@ import { SessionEnricher } from "../../src/domain/session-enricher.js";
 import { DiscoveryRepository } from "../../src/domain/discovery-repository.js";
 import { PsProjectionService } from "../../src/domain/ps-projection.js";
 import { UpCommandRouter } from "../../src/domain/up-command-router.js";
+import { RigTeardownOrchestrator } from "../../src/domain/rig-teardown.js";
 import { DiscoveryCoordinator } from "../../src/domain/discovery-coordinator.js";
 import { ClaimService } from "../../src/domain/claim-service.js";
 import { RigRepository } from "../../src/domain/rig-repository.js";
@@ -158,6 +159,7 @@ export function createTestApp(db: Database.Database, opts?: { cmux?: CmuxAdapter
     discoveryCoordinator, discoveryRepo, claimService,
     psProjectionService: new PsProjectionService({ db }),
     upRouter: new UpCommandRouter({ fsOps: { exists: () => false, readFile: () => "", readHead: () => Buffer.alloc(0) } }),
+    teardownOrchestrator: new RigTeardownOrchestrator({ db, rigRepo, sessionRegistry, tmuxAdapter: tmux, snapshotCapture, eventBus }),
   });
   return {
     app, rigRepo, sessionRegistry, eventBus, nodeLauncher, snapshotRepo,
@@ -167,6 +169,7 @@ export function createTestApp(db: Database.Database, opts?: { cmux?: CmuxAdapter
     bootstrapOrchestrator, bootstrapRepo,
     discoveryCoordinator, discoveryRepo, claimService, tmuxScanner,
     psProjectionService: new PsProjectionService({ db }),
-    upRouter: new UpCommandRouter({ fsOps: { exists: () => false, readFile: () => "", readHead: () => Buffer.alloc(0) } }), db,
+    upRouter: new UpCommandRouter({ fsOps: { exists: () => false, readFile: () => "", readHead: () => Buffer.alloc(0) } }),
+    teardownOrchestrator: new RigTeardownOrchestrator({ db, rigRepo, sessionRegistry, tmuxAdapter: tmux, snapshotCapture, eventBus }), db,
   };
 }
