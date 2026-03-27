@@ -61,6 +61,19 @@ describe("Discovery API routes", () => {
     expect(Array.isArray(body.sessions)).toBe(true);
   });
 
+  // T1b: POST /scan with scanner failure -> 500 with structured error
+  it("POST /api/discovery/scan with scanner failure returns 500 with error", async () => {
+    // Override scanner to throw
+    (setup.tmuxScanner as unknown as { scan: unknown }).scan = async () => {
+      throw new Error("tmux boom");
+    };
+
+    const res = await app.request("/api/discovery/scan", { method: "POST" });
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.error).toContain("tmux boom");
+  });
+
   // T2: GET /discovery lists with status filter
   it("GET /api/discovery?status=active lists active sessions", async () => {
     seedDiscovery("s1", "%0");

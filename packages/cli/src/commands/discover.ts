@@ -24,7 +24,13 @@ export function discoverCommand(depsOverride?: StatusDeps): Command {
       const client = await getClient(deps);
       if (!client) { process.exitCode = 1; return; }
 
-      const res = await client.post<{ sessions: Array<Record<string, unknown>> }>("/api/discovery/scan", {});
+      const res = await client.post<{ sessions?: Array<Record<string, unknown>>; error?: string }>("/api/discovery/scan", {});
+
+      if (res.status >= 400) {
+        console.error(res.data.error ?? `Scan failed (HTTP ${res.status})`);
+        process.exitCode = 1;
+        return;
+      }
 
       if (opts.json) {
         console.log(JSON.stringify(res.data));

@@ -34,7 +34,7 @@ export function useDiscoveryScan() {
   });
 }
 
-/** Read discovered sessions list. Pure read, no scan side effect. */
+/** Read discovered sessions list. Pure read, no scan side effect. Normalizes non-array responses. */
 export function useDiscoveredSessions(status?: string, enabled: boolean = true) {
   const url = status ? `/api/discovery?status=${encodeURIComponent(status)}` : "/api/discovery";
   return useQuery<DiscoveredSession[]>({
@@ -42,7 +42,8 @@ export function useDiscoveredSessions(status?: string, enabled: boolean = true) 
     queryFn: async () => {
       const res = await fetch(url);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      return res.json();
+      const data = await res.json();
+      return Array.isArray(data) ? data : [];
     },
     enabled,
   });

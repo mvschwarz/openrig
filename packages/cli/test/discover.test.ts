@@ -137,6 +137,29 @@ describe("Discover + Claim CLI", () => {
     expect(logs.some((l) => l.includes("node-1"))).toBe(true);
   });
 
+  // T12: discover with 500 response -> exit 1 with error
+  it("discover with scan failure returns exit 1 with error", async () => {
+    const failServer = http.createServer((_, res) => {
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "tmux boom" }));
+    });
+    await new Promise<void>((resolve) => { failServer.listen(0, resolve); });
+    const failPort = (failServer.address() as { port: number }).port;
+
+    const prog = new Command();
+    prog.exitOverride();
+    prog.addCommand(discoverCommand(runningDeps(failPort)));
+
+    const { logs, exitCode } = await captureLogs(async () => {
+      await prog.parseAsync(["node", "rigged", "discover"]);
+    });
+
+    expect(exitCode).toBe(1);
+    expect(logs.some((l) => l.includes("tmux boom"))).toBe(true);
+    expect(logs.some((l) => l.includes("No unmanaged sessions"))).toBe(false);
+    failServer.close();
+  });
+
   // T13: claim nonexistent -> exit 1
   it("claim nonexistent discovery returns exit 1", async () => {
     const prog = new Command();

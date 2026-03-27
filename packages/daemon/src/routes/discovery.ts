@@ -16,8 +16,12 @@ function getDeps(c: { get: (key: string) => unknown }) {
 // POST /api/discovery/scan — trigger one-shot scan
 discoveryRoutes.post("/scan", async (c) => {
   const { discoveryCoordinator } = getDeps(c);
-  const sessions = await discoveryCoordinator.scanOnce();
-  return c.json({ sessions }, 200);
+  try {
+    const sessions = await discoveryCoordinator.scanOnce();
+    return c.json({ sessions }, 200);
+  } catch (err) {
+    return c.json({ error: (err as Error).message ?? "scan failed" }, 500);
+  }
 });
 
 // GET /api/discovery — list discovered sessions

@@ -14,6 +14,7 @@ import { installJournalSchema } from "../src/db/migrations/009_install_journal.j
 import { journalSeqSchema } from "../src/db/migrations/010_journal_seq.js";
 import { bootstrapSchema } from "../src/db/migrations/011_bootstrap.js";
 import { discoverySchema } from "../src/db/migrations/012_discovery.js";
+import { discoveryFkFix } from "../src/db/migrations/013_discovery_fk_fix.js";
 
 const PRE_DISCOVERY_MIGRATIONS = [
   coreSchema, bindingsSessionsSchema, eventsSchema, snapshotsSchema,
@@ -21,7 +22,7 @@ const PRE_DISCOVERY_MIGRATIONS = [
   packagesSchema, installJournalSchema, journalSeqSchema, bootstrapSchema,
 ];
 
-const ALL_MIGRATIONS = [...PRE_DISCOVERY_MIGRATIONS, discoverySchema];
+const ALL_MIGRATIONS = [...PRE_DISCOVERY_MIGRATIONS, discoverySchema, discoveryFkFix];
 
 function setupDb(): Database.Database {
   const db = createDb();
@@ -176,5 +177,27 @@ describe("DS-T00: Discovery schema", () => {
         "INSERT INTO discovered_sessions (id, tmux_session, tmux_pane, claimed_node_id) VALUES (?, ?, ?, ?)"
       ).run("ds-1", "sess", "%0", "nonexistent-node");
     }).toThrow(/FOREIGN KEY/);
+  });
+
+  // T10: Rig deletion with claimed discovery row — ON DELETE SET NULL
+  it("rig deletion nulls claimed_node_id via ON DELETE SET NULL", () => {
+    // Create rig + node
+    db.prepare("INSERT INTO rigs (id, name) VALUES (?, ?)").run("rig-1", "test-rig");
+    db.prepare("INSERT INTO nodes (id, rig_id, logical_id) VALUES (?, ?, ?)").run("node-1", "rig-1", "dev");
+
+    // Create claimed discovery row
+    db.prepare(
+      "INSERT INTO discovered_sessions (id, tmux_session, tmux_pane, status, claimed_node_id) VALUES (?, ?, ?, 'claimed', ?)"
+    ).run("ds-1", "sess", "%0", "node-1");
+
+    // Delete rig (cascades to node)
+    db.prepare("DELETE FROM rigs WHERE id = ?").run("rig-1");
+
+    // Discovery row should survive with claimed_node_id = NULL
+    const row = db.prepare("SELECT * FROM discovered_sessions WHERE id = ?")
+      .get("ds-1") as { id: string; claimed_node_id: string | null; status: string };
+    expect(row).toBeDefined();
+    expect(row.claimed_node_id).toBeNull();
+    expect(row.status).toBe("claimed");
   });
 });
