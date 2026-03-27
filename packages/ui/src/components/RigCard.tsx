@@ -1,5 +1,5 @@
-import { Button } from "@/components/ui/button";
 import { useCountUp } from "../hooks/useCountUp.js";
+import type { PsEntry } from "../hooks/usePsEntries.js";
 
 export interface RigSummary {
   id: string;
@@ -11,9 +11,11 @@ export interface RigSummary {
 
 interface RigCardProps {
   rig: RigSummary;
+  psEntry?: PsEntry;
   onSelect: (rigId: string) => void;
   onSnapshot: () => void;
   onExport: () => void;
+  onDown?: () => void;
 }
 
 function formatAge(timestamp: string | null): string {
@@ -30,13 +32,22 @@ function formatAge(timestamp: string | null): string {
   return `${diffDay}d ago`;
 }
 
-export function RigCard({ rig, onSelect, onSnapshot, onExport }: RigCardProps) {
+function statusColor(status: PsEntry["status"]): string {
+  switch (status) {
+    case "running": return "text-success";
+    case "partial": return "text-warning";
+    case "stopped": return "text-foreground-muted-on-dark";
+  }
+}
+
+export function RigCard({ rig, psEntry, onSelect, onSnapshot, onExport, onDown }: RigCardProps) {
   const animatedCount = useCountUp(rig.nodeCount);
+  const isStopped = psEntry?.status === "stopped";
 
   return (
     <div
       data-testid={`rig-card-${rig.id}`}
-      className="card-dark p-spacing-6 mb-spacing-3 cursor-pointer transition-all duration-150 ease-tactical hover:bg-surface-mid group"
+      className={`card-dark p-spacing-6 mb-spacing-3 cursor-pointer transition-all duration-150 ease-tactical hover:bg-surface-mid group ${isStopped ? "opacity-60" : ""}`}
       role="button"
       tabIndex={0}
       onClick={() => onSelect(rig.id)}
@@ -61,12 +72,20 @@ export function RigCard({ rig, onSelect, onSnapshot, onExport }: RigCardProps) {
           </div>
           <div>
             <span className="text-foreground-muted-on-dark/60 uppercase text-label-sm tracking-[0.06em]">STATUS </span>
-            <span className="font-mono text-success">ACTIVE</span>
+            <span className={`font-mono ${psEntry ? statusColor(psEntry.status) : "text-foreground-muted-on-dark"}`} data-testid={`status-badge-${rig.id}`}>
+              {psEntry ? psEntry.status.toUpperCase() : "—"}
+            </span>
           </div>
+          {psEntry?.uptime && (
+            <div>
+              <span className="text-foreground-muted-on-dark/60 uppercase text-label-sm tracking-[0.06em]">UPTIME </span>
+              <span className="font-mono text-foreground-on-dark">{psEntry.uptime}</span>
+            </div>
+          )}
         </div>
       </div>
 
-      {/* Action buttons — light styled buttons on dark card */}
+      {/* Action buttons */}
       <div className="flex gap-spacing-2">
         <button
           className="px-spacing-3 py-spacing-1 text-label-md uppercase tracking-[0.04em] text-foreground-muted-on-dark bg-white/6 border border-white/10 hover:bg-white/12 hover:text-foreground-on-dark transition-all"
@@ -80,6 +99,15 @@ export function RigCard({ rig, onSelect, onSnapshot, onExport }: RigCardProps) {
         >
           EXPORT
         </button>
+        {onDown && (
+          <button
+            data-testid={`down-btn-${rig.id}`}
+            className="px-spacing-3 py-spacing-1 text-label-md uppercase tracking-[0.04em] text-destructive bg-white/6 border border-destructive/20 hover:bg-destructive/10 transition-all"
+            onClick={(e) => { e.stopPropagation(); onDown(); }}
+          >
+            DOWN
+          </button>
+        )}
         <button
           className="px-spacing-3 py-spacing-1 text-label-md uppercase tracking-[0.04em] text-foreground-on-dark bg-white/10 border border-white/15 hover:bg-white/20 transition-all ml-auto"
           onClick={(e) => { e.stopPropagation(); onSelect(rig.id); }}

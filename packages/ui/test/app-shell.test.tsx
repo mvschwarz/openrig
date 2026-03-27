@@ -32,6 +32,12 @@ function mockAllApis() {
         json: async () => [{ id: "r1", name: "alpha", nodeCount: 3, latestSnapshotAt: null, latestSnapshotId: null }],
       });
     }
+    if (url === "/api/ps") {
+      return Promise.resolve({
+        ok: true,
+        json: async () => [{ rigId: "r1", name: "alpha", nodeCount: 3, runningCount: 3, status: "running", uptime: "1h", latestSnapshot: null }],
+      });
+    }
     if (url === "/healthz") {
       return Promise.resolve({ ok: true, json: async () => ({ status: "ok" }) });
     }

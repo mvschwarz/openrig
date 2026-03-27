@@ -52,6 +52,37 @@ export function useRestoreSnapshot(rigId: string) {
   });
 }
 
+export function useTeardownRig(rigId: string) {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async () => {
+      const res = await fetch("/api/down", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ rigId }),
+      });
+      const data = await res.json().catch(() => ({})) as {
+        errors?: string[];
+        error?: string;
+        sessionsKilled?: number;
+      };
+      if (!res.ok) {
+        throw new Error(data.error ?? `Teardown failed (HTTP ${res.status})`);
+      }
+      // Body-driven: errors[] on 200 is a failure
+      if (Array.isArray(data.errors) && data.errors.length > 0) {
+        throw new Error(data.errors.join("; "));
+      }
+      return data;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["rigs", "summary"] });
+      queryClient.invalidateQueries({ queryKey: ["ps"] });
+    },
+  });
+}
+
 export function useImportRig() {
   const queryClient = useQueryClient();
 

@@ -1,10 +1,19 @@
 import { useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { useRigSummary } from "../hooks/useRigSummary.js";
-import { useCreateSnapshot } from "../hooks/mutations.js";
+import { useCreateSnapshot, useTeardownRig } from "../hooks/mutations.js";
+import { usePsEntries } from "../hooks/usePsEntries.js";
 import { RigCard } from "./RigCard.js";
 import { Button } from "@/components/ui/button";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 
 /** Wireframe ghost SVG — faint blueprint of a topology */
 function WireframeGhost() {
@@ -31,7 +40,10 @@ function WireframeGhost() {
 export function Dashboard() {
   const navigate = useNavigate();
   const { data: rigs, isPending, error } = useRigSummary();
+  const { data: psEntries, isPending: psPending, error: psError } = usePsEntries();
   const [actionError, setActionError] = useState<string | null>(null);
+  const [confirmDown, setConfirmDown] = useState<string | null>(null);
+  const [teardownError, setTeardownError] = useState<string | null>(null);
 
   const handleExport = async (rigId: string) => {
     setActionError(null);
@@ -53,6 +65,13 @@ export function Dashboard() {
       setActionError(err instanceof Error ? err.message : "Export failed");
     }
   };
+
+  // Aggregate stats from PsEntry data (null when ps unavailable)
+  const psAvailable = !psPending && !psError && psEntries != null;
+  const totalNodes = psAvailable ? psEntries.reduce((sum, e) => sum + e.runningCount, 0) : null;
+
+  // PsEntry lookup by rigId
+  const psMap = new Map(psEntries?.map((e) => [e.rigId, e]) ?? []);
 
   // Loading state
   if (isPending) {
@@ -91,18 +110,21 @@ export function Dashboard() {
         <WireframeGhost />
         <div className="relative z-10 text-center">
           <h2 className="text-display-lg text-foreground mb-spacing-4">NO RIGS</h2>
-          <p className="text-body-md text-foreground-muted mb-spacing-8">Import a rig spec to get started</p>
+          <p className="text-body-md text-foreground-muted mb-spacing-8">Set up a rig to get started</p>
           <Button
             variant="default"
             size="lg"
-            onClick={() => navigate({ to: "/import" })}
+            data-testid="empty-up-btn"
+            onClick={() => navigate({ to: "/bootstrap" })}
           >
-            IMPORT YOUR FIRST RIG
+            SET UP YOUR FIRST RIG
           </Button>
         </div>
       </div>
     );
   }
+
+  const confirmRig = rigs.find((r) => r.id === confirmDown);
 
   return (
     <div className="p-spacing-6 max-w-[800px]">
@@ -110,12 +132,12 @@ export function Dashboard() {
       <div className="flex justify-between items-baseline mb-spacing-6">
         <div>
           <h2 className="text-headline-lg uppercase">RIGS</h2>
-          <p className="text-label-md text-foreground-muted font-grotesk mt-spacing-1">
-            {rigs.length} active topolog{rigs.length !== 1 ? "ies" : "y"}
+          <p className="text-label-md text-foreground-muted font-grotesk mt-spacing-1" data-testid="aggregate-header">
+            {rigs.length} rig{rigs.length !== 1 ? "s" : ""}{totalNodes !== null ? `, ${totalNodes} node${totalNodes !== 1 ? "s" : ""} running` : ""}
           </p>
         </div>
-        <Button variant="default" size="sm" onClick={() => navigate({ to: "/import" })}>
-          IMPORT
+        <Button variant="default" size="sm" data-testid="header-up-btn" onClick={() => navigate({ to: "/bootstrap" })}>
+          UP
         </Button>
       </div>
 
@@ -129,25 +151,86 @@ export function Dashboard() {
         <DashboardRigCard
           key={rig.id}
           rig={rig}
+          psEntry={psMap.get(rig.id)}
           onSelect={(rigId) => navigate({ to: "/rigs/$rigId", params: { rigId } })}
           onExport={() => handleExport(rig.id)}
           onActionError={setActionError}
+          onDown={() => { setTeardownError(null); setConfirmDown(rig.id); }}
         />
       ))}
+
+      {/* Teardown confirmation dialog */}
+      <Dialog open={confirmDown !== null} onOpenChange={(open) => { if (!open) { setConfirmDown(null); setTeardownError(null); } }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Tear Down Rig</DialogTitle>
+            <DialogDescription>
+              Tear down <strong>{confirmRig?.name}</strong>? This will kill all running sessions.
+            </DialogDescription>
+          </DialogHeader>
+          {teardownError && (
+            <Alert data-testid="teardown-error">
+              <AlertDescription>{teardownError}</AlertDescription>
+            </Alert>
+          )}
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => { setConfirmDown(null); setTeardownError(null); }}>Cancel</Button>
+            {confirmDown && (
+              <ConfirmDownButton
+                rigId={confirmDown}
+                onSuccess={() => { setConfirmDown(null); setTeardownError(null); }}
+                onError={(msg) => setTeardownError(msg)}
+              />
+            )}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
+  );
+}
+
+function ConfirmDownButton({
+  rigId,
+  onSuccess,
+  onError,
+}: {
+  rigId: string;
+  onSuccess: () => void;
+  onError: (msg: string) => void;
+}) {
+  const teardown = useTeardownRig(rigId);
+
+  return (
+    <Button
+      variant="destructive"
+      data-testid="confirm-down-btn"
+      disabled={teardown.isPending}
+      onClick={() => {
+        teardown.mutate(undefined, {
+          onSuccess: () => onSuccess(),
+          onError: (err) => onError(err.message),
+        });
+      }}
+    >
+      {teardown.isPending ? "Tearing down…" : "Confirm"}
+    </Button>
   );
 }
 
 function DashboardRigCard({
   rig,
+  psEntry,
   onSelect,
   onExport,
   onActionError,
+  onDown,
 }: {
   rig: { id: string; name: string; nodeCount: number; latestSnapshotAt: string | null; latestSnapshotId: string | null };
+  psEntry?: import("../hooks/usePsEntries.js").PsEntry;
   onSelect: (rigId: string) => void;
   onExport: () => void;
   onActionError: (error: string | null) => void;
+  onDown: () => void;
 }) {
   const createSnapshot = useCreateSnapshot(rig.id);
 
@@ -161,9 +244,11 @@ function DashboardRigCard({
   return (
     <RigCard
       rig={rig}
+      psEntry={psEntry}
       onSelect={onSelect}
       onSnapshot={handleSnapshot}
       onExport={onExport}
+      onDown={onDown}
     />
   );
 }

@@ -54,6 +54,9 @@ describe("App (scaffold)", () => {
           { id: "r1", name: "r01", nodeCount: 2, latestSnapshotAt: null, latestSnapshotId: null },
         ]));
       }
+      if (url === "/api/ps") {
+        return Promise.resolve({ ok: true, json: async () => [{ rigId: "r1", name: "r01", nodeCount: 2, runningCount: 2, status: "running", uptime: "1h", latestSnapshot: null }] });
+      }
       return Promise.resolve({ ok: true, json: async () => ({}) });
     });
 
