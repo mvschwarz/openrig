@@ -193,7 +193,7 @@ describe("BundleSourceResolver", () => {
     const manifest = {
       schemaVersion: 1, name: "no-spec", version: "0.1.0",
       createdAt: "2026-01-01T00:00:00Z", rigSpec: "rig.yaml",
-      packages: [{ name: "pkg", version: "1.0", path: "packages/pkg", originalSource: "" }],
+      packages: [{ name: "pkg", version: "1.0", path: "packages/pkg", originalSource: "local:./pkg" }],
     };
     fs.writeFileSync(path.join(rawDir, "bundle.yaml"), serializeBundleManifest(manifest));
 

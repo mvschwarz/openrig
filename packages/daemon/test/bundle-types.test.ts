@@ -20,8 +20,8 @@ const VALID_RAW = {
   integrity: {
     algorithm: "sha256",
     files: {
-      "rig.yaml": "abc123",
-      "packages/review-kit/package.yaml": "def456",
+      "rig.yaml": "a".repeat(64),
+      "packages/review-kit/package.yaml": "b".repeat(64),
     },
   },
 };
@@ -80,7 +80,7 @@ describe("Bundle types", () => {
       ],
       integrity: {
         algorithm: "sha256",
-        files: { "rig.yaml": "hash1", "packages/pkg-a/package.yaml": "hash2" },
+        files: { "rig.yaml": "c".repeat(64), "packages/pkg-a/package.yaml": "d".repeat(64) },
       },
     };
 
@@ -92,7 +92,7 @@ describe("Bundle types", () => {
     const normalized = normalizeBundleManifest(parsed);
     expect(normalized.name).toBe("test-bundle");
     expect(normalized.packages).toHaveLength(1);
-    expect(normalized.integrity?.files["rig.yaml"]).toBe("hash1");
+    expect(normalized.integrity?.files["rig.yaml"]).toBe("c".repeat(64));
   });
 
   // T7: Absolute rig_spec path rejected

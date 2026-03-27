@@ -65,6 +65,7 @@ export function validateBundleManifest(
   if (m["schema_version"] !== 1) errors.push("schema_version must be 1");
   if (typeof m["name"] !== "string" || !m["name"]) errors.push("name is required");
   if (typeof m["version"] !== "string" || !m["version"]) errors.push("version is required");
+  if (typeof m["created_at"] !== "string" || !m["created_at"]) errors.push("created_at is required");
 
   // rig_spec path
   if (typeof m["rig_spec"] !== "string" || !m["rig_spec"]) {
@@ -86,23 +87,29 @@ export function validateBundleManifest(
       } else if (!isRelativeSafePath(pkg["path"] as string)) {
         errors.push(`packages[${i}].path is not a safe relative path: '${pkg["path"]}'`);
       }
+      if (typeof pkg["original_source"] !== "string" || !pkg["original_source"]) errors.push(`packages[${i}].original_source is required`);
     }
   }
 
   // integrity (optional unless requireIntegrity)
-  if (requireIntegrity) {
-    if (!m["integrity"] || typeof m["integrity"] !== "object") {
-      errors.push("integrity section is required");
+  // Integrity validation — always validate structure when present, require when flag set
+  const hasIntegrity = m["integrity"] && typeof m["integrity"] === "object";
+  if (requireIntegrity && !hasIntegrity) {
+    errors.push("integrity section is required");
+  }
+  if (hasIntegrity) {
+    const integrity = m["integrity"] as Record<string, unknown>;
+    if (integrity["algorithm"] !== "sha256") errors.push("integrity.algorithm must be 'sha256'");
+    if (!integrity["files"] || typeof integrity["files"] !== "object" || Object.keys(integrity["files"] as object).length === 0) {
+      errors.push("integrity.files must be a non-empty object");
     } else {
-      const integrity = m["integrity"] as Record<string, unknown>;
-      if (integrity["algorithm"] !== "sha256") errors.push("integrity.algorithm must be 'sha256'");
-      if (!integrity["files"] || typeof integrity["files"] !== "object" || Object.keys(integrity["files"] as object).length === 0) {
-        errors.push("integrity.files must be a non-empty object");
-      } else {
-        for (const key of Object.keys(integrity["files"] as object)) {
-          if (!isRelativeSafePath(key)) {
-            errors.push(`integrity.files key is not a safe relative path: '${key}'`);
-          }
+      const files = integrity["files"] as Record<string, unknown>;
+      for (const [key, value] of Object.entries(files)) {
+        if (!isRelativeSafePath(key)) {
+          errors.push(`integrity.files key is not a safe relative path: '${key}'`);
+        }
+        if (typeof value !== "string" || !/^[a-f0-9]{64}$/.test(value)) {
+          errors.push(`integrity.files['${key}'] must be a 64-char hex SHA-256 hash`);
         }
       }
     }

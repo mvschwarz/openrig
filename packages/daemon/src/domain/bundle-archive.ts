@@ -1,3 +1,12 @@
+/**
+ * TRUST MODEL: Bundle integrity verifies self-consistency, not authenticity.
+ * The sibling .sha256 detects corruption during transfer. Content hashes
+ * detect tampering of individual files within the archive. Neither mechanism
+ * authenticates the bundle author — an attacker who can rewrite the full
+ * bundle + digest can bypass verification. Users must trust the source they
+ * obtained the bundle from (same model as unsigned npm packages/Docker images).
+ * Cryptographic signing (Ed25519) is a future enhancement.
+ */
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import nodePath from "node:path";

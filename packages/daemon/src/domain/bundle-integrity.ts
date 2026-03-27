@@ -129,7 +129,7 @@ export function verifyIntegrity(dir: string, manifest: BundleManifest, fsOps: In
     }
   }
 
-  // Check for extra files
+  // Check for extra files + sensitive paths
   const allFiles = fsOps.walkFiles(dir);
   const expectedSet = new Set(Object.keys(expectedFiles));
   for (const relPath of allFiles) {
@@ -138,6 +138,11 @@ export function verifyIntegrity(dir: string, manifest: BundleManifest, fsOps: In
     if (CONTROL_FILES.has(relPath)) continue;
     if (!expectedSet.has(relPath)) {
       result.extra.push(relPath);
+      result.passed = false;
+    }
+    // Check for sensitive paths on install/verify path (not just create)
+    if (isSensitivePath(relPath)) {
+      result.errors.push(`Sensitive file detected: ${relPath}`);
       result.passed = false;
     }
   }
