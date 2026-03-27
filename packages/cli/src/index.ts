@@ -13,6 +13,7 @@ import { requirementsCommand } from "./commands/requirements.js";
 import { discoverCommand } from "./commands/discover.js";
 import { claimCommand } from "./commands/claim.js";
 import { bundleCommand } from "./commands/bundle.js";
+import { upCommand } from "./commands/up.js";
 import type { LifecycleDeps } from "./daemon-lifecycle.js";
 
 export interface ProgramDeps {
@@ -29,6 +30,7 @@ export interface ProgramDeps {
   discoverDeps?: StatusDeps;
   claimDeps?: StatusDeps;
   bundleDeps?: StatusDeps;
+  upDeps?: StatusDeps;
 }
 
 export function createProgram(depsOverride?: ProgramDeps): Command {
@@ -52,6 +54,7 @@ export function createProgram(depsOverride?: ProgramDeps): Command {
   program.addCommand(discoverCommand(depsOverride?.discoverDeps));
   program.addCommand(claimCommand(depsOverride?.claimDeps));
   program.addCommand(bundleCommand(depsOverride?.bundleDeps));
+  program.addCommand(upCommand(depsOverride?.upDeps));
 
   return program;
 }

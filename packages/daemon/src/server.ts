@@ -32,6 +32,8 @@ import { discoveryRoutes } from "./routes/discovery.js";
 import { bundleRoutes } from "./routes/bundles.js";
 import { psRoutes } from "./routes/ps.js";
 import type { PsProjectionService } from "./domain/ps-projection.js";
+import type { UpCommandRouter } from "./domain/up-command-router.js";
+import { upRoutes } from "./routes/up.js";
 
 export interface AppDeps {
   rigRepo: RigRepository;
@@ -56,6 +58,7 @@ export interface AppDeps {
   discoveryRepo: DiscoveryRepository;
   claimService: ClaimService;
   psProjectionService: PsProjectionService;
+  upRouter: UpCommandRouter;
 }
 
 export function createApp(deps: AppDeps): Hono {
@@ -129,6 +132,7 @@ export function createApp(deps: AppDeps): Hono {
     c.set("discoveryRepo" as never, deps.discoveryRepo);
     c.set("claimService" as never, deps.claimService);
     c.set("psProjectionService" as never, deps.psProjectionService);
+    c.set("upRouter" as never, deps.upRouter);
     await next();
   });
 
@@ -151,6 +155,7 @@ export function createApp(deps: AppDeps): Hono {
   app.route("/api/discovery", discoveryRoutes);
   app.route("/api/bundles", bundleRoutes);
   app.route("/api/ps", psRoutes);
+  app.route("/api/up", upRoutes);
 
   return app;
 }

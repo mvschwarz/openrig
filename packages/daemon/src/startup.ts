@@ -44,6 +44,7 @@ import { DiscoveryCoordinator } from "./domain/discovery-coordinator.js";
 import { ClaimService } from "./domain/claim-service.js";
 import { BundleSourceResolver } from "./domain/bundle-source-resolver.js";
 import { PsProjectionService } from "./domain/ps-projection.js";
+import { UpCommandRouter } from "./domain/up-command-router.js";
 import { createApp, type AppDeps } from "./server.js";
 import fs from "node:fs";
 import nodePath from "node:path";
@@ -214,6 +215,13 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     discoveryRepo,
     claimService,
     psProjectionService: new PsProjectionService({ db }),
+    upRouter: new UpCommandRouter({
+      fsOps: {
+        exists: (p: string) => fs.existsSync(p),
+        readFile: (p: string) => fs.readFileSync(p, "utf-8"),
+        readHead: (p: string, bytes: number) => { const fd = fs.openSync(p, "r"); const buf = Buffer.alloc(bytes); fs.readSync(fd, buf, 0, bytes, 0); fs.closeSync(fd); return buf; },
+      },
+    }),
   };
 
   const app = createApp(deps);
