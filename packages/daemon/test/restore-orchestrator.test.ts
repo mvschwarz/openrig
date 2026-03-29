@@ -12,6 +12,7 @@ import { snapshotsSchema } from "../src/db/migrations/004_snapshots.js";
 import { checkpointsSchema } from "../src/db/migrations/005_checkpoints.js";
 import { resumeMetadataSchema } from "../src/db/migrations/006_resume_metadata.js";
 import { nodeSpecFieldsSchema } from "../src/db/migrations/007_node_spec_fields.js";
+import { agentspecRebootSchema } from "../src/db/migrations/014_agentspec_reboot.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { EventBus } from "../src/domain/event-bus.js";
@@ -28,7 +29,7 @@ import type { PersistedEvent, Snapshot } from "../src/domain/types.js";
 
 function setupDb(): Database.Database {
   const db = createDb();
-  migrate(db, [coreSchema, bindingsSessionsSchema, eventsSchema, snapshotsSchema, checkpointsSchema, resumeMetadataSchema, nodeSpecFieldsSchema]);
+  migrate(db, [coreSchema, bindingsSessionsSchema, eventsSchema, snapshotsSchema, checkpointsSchema, resumeMetadataSchema, nodeSpecFieldsSchema, agentspecRebootSchema]);
   return db;
 }
 

@@ -18,6 +18,13 @@ interface NodeOptions {
   workspace?: string;
   restorePolicy?: string;
   packageRefs?: string[];
+  podId?: string;
+  agentRef?: string;
+  profile?: string;
+  label?: string;
+  resolvedSpecName?: string;
+  resolvedSpecVersion?: string;
+  resolvedSpecHash?: string;
 }
 
 export class RigRepository {
@@ -38,10 +45,19 @@ export class RigRepository {
   }
 
   addNode(rigId: string, logicalId: string, opts?: NodeOptions): Node {
+    // Same-rig guard for podId
+    if (opts?.podId) {
+      const pod = this.db.prepare("SELECT rig_id FROM pods WHERE id = ?").get(opts.podId) as { rig_id: string } | undefined;
+      if (!pod) throw new Error(`Pod not found: ${opts.podId}`);
+      if (pod.rig_id !== rigId) throw new Error("Pod belongs to a different rig");
+    }
+
     const id = ulid();
     this.db
       .prepare(
-        "INSERT INTO nodes (id, rig_id, logical_id, role, runtime, model, cwd, surface_hint, workspace, restore_policy, package_refs) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        `INSERT INTO nodes (id, rig_id, logical_id, role, runtime, model, cwd, surface_hint, workspace, restore_policy, package_refs,
+         pod_id, agent_ref, profile, label, resolved_spec_name, resolved_spec_version, resolved_spec_hash)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         id,
@@ -54,7 +70,14 @@ export class RigRepository {
         opts?.surfaceHint ?? null,
         opts?.workspace ?? null,
         opts?.restorePolicy ?? null,
-        opts?.packageRefs ? JSON.stringify(opts.packageRefs) : null
+        opts?.packageRefs ? JSON.stringify(opts.packageRefs) : null,
+        opts?.podId ?? null,
+        opts?.agentRef ?? null,
+        opts?.profile ?? null,
+        opts?.label ?? null,
+        opts?.resolvedSpecName ?? null,
+        opts?.resolvedSpecVersion ?? null,
+        opts?.resolvedSpecHash ?? null,
       );
 
     return this.rowToNode(

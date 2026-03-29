@@ -7,6 +7,8 @@ import { bindingsSessionsSchema } from "../src/db/migrations/002_bindings_sessio
 import { eventsSchema } from "../src/db/migrations/003_events.js";
 import { resumeMetadataSchema } from "../src/db/migrations/006_resume_metadata.js";
 import { nodeSpecFieldsSchema } from "../src/db/migrations/007_node_spec_fields.js";
+import { checkpointsSchema } from "../src/db/migrations/005_checkpoints.js";
+import { agentspecRebootSchema } from "../src/db/migrations/014_agentspec_reboot.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { RigSpecExporter } from "../src/domain/rigspec-exporter.js";
@@ -16,7 +18,7 @@ import { RigNotFoundError } from "../src/domain/errors.js";
 
 function setupDb(): Database.Database {
   const db = createDb();
-  migrate(db, [coreSchema, bindingsSessionsSchema, eventsSchema, resumeMetadataSchema, nodeSpecFieldsSchema]);
+  migrate(db, [coreSchema, bindingsSessionsSchema, eventsSchema, resumeMetadataSchema, checkpointsSchema, nodeSpecFieldsSchema, agentspecRebootSchema]);
   return db;
 }
 
