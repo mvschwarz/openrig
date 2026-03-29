@@ -437,6 +437,14 @@ describe("rigged package", () => {
     expect(deps.clientFactory).not.toHaveBeenCalled();
   });
 
+  // T9: package description contains "(legacy)"
+  it("package description contains '(legacy)'", async () => {
+    const program = new Command();
+    program.addCommand(packageCommand(runningDeps(port)));
+    const helpOutput = program.commands.find(c => c.name() === "package")?.description();
+    expect(helpOutput).toContain("(legacy)");
+  });
+
   // Test 16: request-body assertion — install flags → correct JSON body
   it("install sends correct request body fields", async () => {
     capturedBodies = [];

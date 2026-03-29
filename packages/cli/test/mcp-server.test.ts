@@ -7,10 +7,12 @@ import { DaemonClient, type DaemonResponse } from "../src/client.js";
 function mockClient(overrides?: {
   get?: (path: string) => Promise<DaemonResponse>;
   post?: (path: string, body?: unknown) => Promise<DaemonResponse>;
+  postText?: (path: string, text: string, contentType?: string, extraHeaders?: Record<string, string>) => Promise<DaemonResponse>;
 }): DaemonClient {
   const client = new DaemonClient("http://127.0.0.1:9999");
   client.get = overrides?.get ?? vi.fn(async () => ({ status: 200, data: { status: "ok" } }));
   client.post = overrides?.post ?? vi.fn(async () => ({ status: 200, data: { status: "ok" } }));
+  client.postText = overrides?.postText ?? vi.fn(async () => ({ status: 200, data: { valid: true, errors: [] } }));
   return client;
 }
 
@@ -39,18 +41,20 @@ describe("MCP Server", () => {
     if (cleanup) await cleanup();
   });
 
-  // T1: MCP server lists all 10 tools
-  it("lists all 10 tools", async () => {
+  // T1: MCP server lists all 12 tools
+  it("lists all 12 tools", async () => {
     await setup();
     const result = await mcpClient.listTools();
     const names = result.tools.map((t) => t.name).sort();
     expect(names).toEqual([
+      "rigged_agent_validate",
       "rigged_bundle_inspect",
       "rigged_claim",
       "rigged_discover",
       "rigged_down",
       "rigged_ps",
       "rigged_restore",
+      "rigged_rig_validate",
       "rigged_snapshot_create",
       "rigged_snapshot_list",
       "rigged_status",
@@ -193,7 +197,7 @@ describe("MCP Server", () => {
 
     // Verify server is responsive
     const result = await mcpClient.listTools();
-    expect(result.tools.length).toBe(10);
+    expect(result.tools.length).toBe(12);
 
     // Clean disconnect
     await cleanup();
@@ -207,7 +211,7 @@ describe("MCP Server", () => {
     await client2.connect(ct2);
 
     const result2 = await client2.listTools();
-    expect(result2.tools.length).toBe(10);
+    expect(result2.tools.length).toBe(12);
 
     await client2.close();
     await server2.close();
@@ -237,7 +241,42 @@ describe("MCP Server", () => {
     await cleanup();
   });
 
-  // T10: MCP tools URL-encode path parameters
+  // T10: MCP server lists rigged_agent_validate + rigged_rig_validate tools
+  it("rigged_agent_validate and rigged_rig_validate tools are registered", async () => {
+    await setup();
+    const result = await mcpClient.listTools();
+    const names = result.tools.map((t) => t.name);
+    expect(names).toContain("rigged_agent_validate");
+    expect(names).toContain("rigged_rig_validate");
+
+    // Verify schema: both have required "yaml" input
+    const agentTool = result.tools.find((t) => t.name === "rigged_agent_validate")!;
+    expect(agentTool.inputSchema.required).toContain("yaml");
+    const rigTool = result.tools.find((t) => t.name === "rigged_rig_validate")!;
+    expect(rigTool.inputSchema.required).toContain("yaml");
+
+    await cleanup();
+  });
+
+  // T10b: rigged_agent_validate calls postText with correct path
+  it("rigged_agent_validate calls postText on /api/packages/validate-agentspec", async () => {
+    const postTextFn = vi.fn(async () => ({
+      status: 200,
+      data: { valid: true, errors: [] },
+    }));
+    await setup({ postText: postTextFn });
+
+    const result = await mcpClient.callTool({
+      name: "rigged_agent_validate",
+      arguments: { yaml: "name: my-agent\nversion: 1.0.0\n" },
+    });
+
+    expect(postTextFn).toHaveBeenCalledWith("/api/packages/validate-agentspec", "name: my-agent\nversion: 1.0.0\n");
+    expect(result.isError).toBeFalsy();
+    await cleanup();
+  });
+
+  // T11: MCP tools URL-encode path parameters
   it("snapshot_create URL-encodes rigId in path", async () => {
     const postFn = vi.fn(async () => ({
       status: 201,

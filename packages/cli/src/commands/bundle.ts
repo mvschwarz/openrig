@@ -1,3 +1,4 @@
+import nodePath from "node:path";
 import { Command } from "commander";
 import { DaemonClient } from "../client.js";
 import { getDaemonStatus } from "../daemon-lifecycle.js";
@@ -24,8 +25,9 @@ export function bundleCommand(depsOverride?: StatusDeps): Command {
     .option("--name <name>", "Bundle name", "my-bundle")
     .option("--bundle-version <ver>", "Bundle version", "0.1.0")
     .option("--include-packages <refs...>", "Package refs to include (default: all from spec)")
+    .option("--rig-root <root>", "Root directory for pod-aware resolution")
     .option("--json", "JSON output")
-    .action(async (spec: string, opts: { output: string; name: string; bundleVersion: string; includePackages?: string[]; json?: boolean }) => {
+    .action(async (spec: string, opts: { output: string; name: string; bundleVersion: string; includePackages?: string[]; rigRoot?: string; json?: boolean }) => {
       const deps = getDepsF();
       const client = await getClient(deps);
       if (!client) { process.exitCode = 1; return; }
@@ -33,6 +35,7 @@ export function bundleCommand(depsOverride?: StatusDeps): Command {
       const res = await client.post<Record<string, unknown>>("/api/bundles/create", {
         specPath: spec, bundleName: opts.name, bundleVersion: opts.bundleVersion, outputPath: opts.output,
         includePackages: opts.includePackages,
+        rigRoot: opts.rigRoot ? nodePath.resolve(opts.rigRoot) : undefined,
       });
 
       if (opts.json) {

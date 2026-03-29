@@ -17,6 +17,8 @@ import { upCommand } from "./commands/up.js";
 import { downCommand } from "./commands/down.js";
 import { psCommand } from "./commands/ps.js";
 import { mcpCommand } from "./commands/mcp.js";
+import { agentCommand, type AgentDeps } from "./commands/agent.js";
+import { rigCommand, type RigDeps } from "./commands/rig.js";
 import type { LifecycleDeps } from "./daemon-lifecycle.js";
 
 export interface ProgramDeps {
@@ -37,6 +39,8 @@ export interface ProgramDeps {
   downDeps?: StatusDeps;
   psDeps?: StatusDeps;
   mcpDeps?: StatusDeps;
+  agentDeps?: AgentDeps;
+  rigDeps?: RigDeps;
 }
 
 export function createProgram(depsOverride?: ProgramDeps): Command {
@@ -64,6 +68,8 @@ export function createProgram(depsOverride?: ProgramDeps): Command {
   program.addCommand(downCommand(depsOverride?.downDeps));
   program.addCommand(psCommand(depsOverride?.psDeps));
   program.addCommand(mcpCommand(depsOverride?.mcpDeps));
+  program.addCommand(agentCommand(depsOverride?.agentDeps));
+  program.addCommand(rigCommand(depsOverride?.rigDeps));
 
   return program;
 }

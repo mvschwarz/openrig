@@ -1,3 +1,4 @@
+import nodePath from "node:path";
 import { Command } from "commander";
 import fs from "node:fs";
 import { DaemonClient } from "../client.js";
@@ -21,7 +22,8 @@ export function importCommand(depsOverride?: ImportDeps): Command {
     .argument("<path>", "Path to YAML rig spec file")
     .option("--instantiate", "Instantiate the rig after import")
     .option("--preflight", "Run preflight checks")
-    .action(async (filePath: string, opts: { instantiate?: boolean; preflight?: boolean }) => {
+    .option("--rig-root <root>", "Root directory for pod-aware resolution")
+    .action(async (filePath: string, opts: { instantiate?: boolean; preflight?: boolean; rigRoot?: string }) => {
       const deps = getDeps();
 
       // Read local file first (before daemon check — fail fast on missing file)
@@ -47,8 +49,16 @@ export function importCommand(depsOverride?: ImportDeps): Command {
 
       const client = deps.clientFactory(`http://127.0.0.1:${status.port}`);
 
+      // Detect pod-aware specs for X-Rig-Root header
+      let podAware = false;
+      try { const { parse } = await import("yaml"); const parsed = parse(yaml); podAware = !!parsed && Array.isArray(parsed.pods); } catch { /* not parseable — let daemon validate */ }
+      const rigRoot = podAware
+        ? (opts.rigRoot ? nodePath.resolve(opts.rigRoot) : nodePath.dirname(nodePath.resolve(filePath)))
+        : undefined;
+      const extraHeaders = rigRoot ? { "X-Rig-Root": rigRoot } : undefined;
+
       if (opts.preflight) {
-        const res = await client.postText<{ ready?: boolean; warnings?: string[]; errors?: string[] }>("/api/rigs/import/preflight", yaml);
+        const res = await client.postText<{ ready?: boolean; warnings?: string[]; errors?: string[] }>("/api/rigs/import/preflight", yaml, "text/yaml", extraHeaders);
         if (res.status >= 400) {
           console.error(`Preflight failed: ${JSON.stringify(res.data)}`);
           process.exitCode = 1;
@@ -70,7 +80,7 @@ export function importCommand(depsOverride?: ImportDeps): Command {
       }
 
       if (opts.instantiate) {
-        const res = await client.postText<{ rigId: string; specName: string; specVersion: string; nodes: Array<{ logicalId: string; status: string }> } | { ok: false; code: string; errors?: string[]; message?: string }>("/api/rigs/import", yaml);
+        const res = await client.postText<{ rigId: string; specName: string; specVersion: string; nodes: Array<{ logicalId: string; status: string }> } | { ok: false; code: string; errors?: string[]; message?: string }>("/api/rigs/import", yaml, "text/yaml", extraHeaders);
         if (res.status === 409 || res.status === 400) {
           const data = res.data as { ok: false; code: string; errors?: string[]; message?: string };
           const detail = data.errors?.join(", ") ?? data.message ?? `status ${res.status}`;

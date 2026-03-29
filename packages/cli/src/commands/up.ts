@@ -53,7 +53,12 @@ export function upCommand(depsOverride?: StatusDeps & { lifecycleDeps?: Lifecycl
       }
 
       if (res.status >= 400) {
-        console.error(res.data["error"] ?? "Up failed");
+        const code = res.data["code"] as string | undefined;
+        if (code === "cycle_error") {
+          console.error("Cycle detected in rig topology");
+        } else {
+          console.error(res.data["error"] ?? "Up failed");
+        }
         const stages = (res.data["stages"] as Array<{ stage: string; status: string }>) ?? [];
         for (const s of stages) {
           console.log(`  ${s.stage}: ${s.status}`);

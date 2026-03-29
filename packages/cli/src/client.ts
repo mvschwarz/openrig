@@ -35,10 +35,10 @@ export class DaemonClient {
     });
   }
 
-  async postText<T = unknown>(path: string, text: string, contentType = "text/yaml"): Promise<DaemonResponse<T>> {
+  async postText<T = unknown>(path: string, text: string, contentType = "text/yaml", extraHeaders?: Record<string, string>): Promise<DaemonResponse<T>> {
     return this.requestJson<T>(path, {
       method: "POST",
-      headers: { "Content-Type": contentType },
+      headers: { "Content-Type": contentType, ...extraHeaders },
       body: text,
     });
   }

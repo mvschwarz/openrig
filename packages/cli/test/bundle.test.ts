@@ -52,6 +52,9 @@ function runningDeps(port: number): StatusDeps {
   };
 }
 
+// Captured create bodies for assertion
+let capturedCreateBodies: Record<string, unknown>[] = [];
+
 describe("Bundle CLI", () => {
   let server: http.Server;
   let port: number;
@@ -63,6 +66,7 @@ describe("Bundle CLI", () => {
 
       if (req.url === "/api/bundles/create" && req.method === "POST") {
         const parsed = JSON.parse(body || "{}");
+        capturedCreateBodies.push(parsed);
         if (String(parsed.specPath ?? "").includes("missing")) {
           res.writeHead(400, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: "Missing package" }));
@@ -191,5 +195,20 @@ describe("Bundle CLI", () => {
     });
     expect(JSON.parse(logs.join("")).error).toBe("blocked");
     expect(exitCode).toBe(1);
+  });
+
+  // T6: bundle create --rig-root passes rigRoot in request body
+  it("bundle create --rig-root passes rigRoot in request body", async () => {
+    capturedCreateBodies = [];
+    await captureLogs(async () => {
+      await makeCmd().parseAsync([
+        "node", "rigged", "bundle", "create", "/tmp/rig.yaml",
+        "-o", "/tmp/test.rigbundle",
+        "--rig-root", "/my/project",
+      ]);
+    });
+    const createBody = capturedCreateBodies[capturedCreateBodies.length - 1];
+    expect(createBody).toBeTruthy();
+    expect(createBody!["rigRoot"]).toMatch(/\/my\/project/);
   });
 });

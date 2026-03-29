@@ -235,5 +235,39 @@ export function createMcpServer(client: DaemonClient): McpServer {
     },
   );
 
+  // 11. rigged_agent_validate — validate an AgentSpec
+  server.tool(
+    "rigged_agent_validate",
+    "Validate an AgentSpec (agent.yaml) from YAML text",
+    {
+      yaml: z.string().describe("YAML text of the agent spec"),
+    },
+    async ({ yaml }) => {
+      try {
+        const res = await client.postText("/api/packages/validate-agentspec", yaml);
+        return mapResult(res);
+      } catch (err) {
+        return { content: [{ type: "text" as const, text: (err as Error).message }], isError: true as const };
+      }
+    },
+  );
+
+  // 12. rigged_rig_validate — validate a RigSpec
+  server.tool(
+    "rigged_rig_validate",
+    "Validate a RigSpec (rig.yaml) from YAML text",
+    {
+      yaml: z.string().describe("YAML text of the rig spec"),
+    },
+    async ({ yaml }) => {
+      try {
+        const res = await client.postText("/api/rigs/import/validate", yaml);
+        return mapResult(res);
+      } catch (err) {
+        return { content: [{ type: "text" as const, text: (err as Error).message }], isError: true as const };
+      }
+    },
+  );
+
   return server;
 }

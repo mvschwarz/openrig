@@ -68,6 +68,9 @@ function unhealthyLifecycleDeps(): LifecycleDeps {
   });
 }
 
+// Track captured headers for import assertions
+let capturedImportHeaders: Record<string, string | string[] | undefined> = {};
+
 // Mock daemon for export/import
 function createMockDaemon() {
   const server = http.createServer((req, res) => {
@@ -116,6 +119,9 @@ function createMockDaemon() {
 
     // POST /api/rigs/import
     if (req.method === "POST" && url.pathname === "/api/rigs/import") {
+      capturedImportHeaders = {
+        "x-rig-root": req.headers["x-rig-root"],
+      };
       let body = "";
       req.on("data", (c: Buffer) => { body += c.toString(); });
       req.on("end", () => {
@@ -365,5 +371,18 @@ describe("rigged export + import", () => {
     program.addCommand(exportCommand(deps));
     const logs = await captureLogs(() => program.parseAsync(["node", "rigged", "export", "broken"]));
     expect(logs.join("\n")).toMatch(/failed|error/i);
+  });
+
+  // T5: import --instantiate pod-aware + --rig-root -> sends X-Rig-Root header
+  it("import --instantiate pod-aware with --rig-root sends X-Rig-Root header", async () => {
+    capturedImportHeaders = {};
+    const deps = importDeps("schema_version: 1\nname: test\npods:\n  - name: pod-a\n");
+    const program = new Command();
+    program.addCommand(importCommand(deps));
+    const logs = await captureLogs(() => program.parseAsync(["node", "rigged", "import", "rig.yaml", "--instantiate", "--rig-root", "/my/project"]));
+    const output = logs.join("\n");
+    expect(output).toContain("imported-rig");
+    // Verify X-Rig-Root header was sent
+    expect(capturedImportHeaders["x-rig-root"]).toMatch(/\/my\/project/);
   });
 });

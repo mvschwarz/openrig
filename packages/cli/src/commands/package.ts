@@ -5,7 +5,7 @@ import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 
 export function packageCommand(depsOverride?: StatusDeps): Command {
-  const cmd = new Command("package").description("Manage agent packages");
+  const cmd = new Command("package").description("Manage agent packages (legacy)");
   const getDeps = () => depsOverride ?? { lifecycleDeps: realDeps(), clientFactory: (url: string) => new DaemonClient(url) };
 
   async function getClient(deps: StatusDeps): Promise<DaemonClient | null> {
