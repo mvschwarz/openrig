@@ -10,7 +10,8 @@ import type { SnapshotRepository } from "./domain/snapshot-repository.js";
 import type { RestoreOrchestrator } from "./domain/restore-orchestrator.js";
 import type { RigSpecExporter } from "./domain/rigspec-exporter.js";
 import type { RigSpecPreflight } from "./domain/rigspec-preflight.js";
-import type { RigInstantiator } from "./domain/rigspec-instantiator.js";
+import type { RigInstantiator, PodRigInstantiator } from "./domain/rigspec-instantiator.js";
+import type { PodBundleSourceResolver } from "./domain/bundle-source-resolver.js";
 import type { PackageRepository } from "./domain/package-repository.js";
 import type { InstallRepository } from "./domain/install-repository.js";
 import type { InstallEngine } from "./domain/install-engine.js";
@@ -62,6 +63,8 @@ export interface AppDeps {
   psProjectionService: PsProjectionService;
   upRouter: UpCommandRouter;
   teardownOrchestrator: RigTeardownOrchestrator;
+  podInstantiator: PodRigInstantiator;
+  podBundleSourceResolver: PodBundleSourceResolver | null;
 }
 
 export function createApp(deps: AppDeps): Hono {
@@ -111,6 +114,9 @@ export function createApp(deps: AppDeps): Hono {
   if (deps.rigRepo.db !== deps.teardownOrchestrator.db) {
     throw new Error("createApp: teardownOrchestrator must share the same db handle");
   }
+  if (deps.rigRepo.db !== deps.podInstantiator.db) {
+    throw new Error("createApp: podInstantiator must share the same db handle");
+  }
 
   const app = new Hono();
 
@@ -140,6 +146,8 @@ export function createApp(deps: AppDeps): Hono {
     c.set("psProjectionService" as never, deps.psProjectionService);
     c.set("upRouter" as never, deps.upRouter);
     c.set("teardownOrchestrator" as never, deps.teardownOrchestrator);
+    c.set("podInstantiator" as never, deps.podInstantiator);
+    c.set("podBundleSourceResolver" as never, deps.podBundleSourceResolver);
     await next();
   });
 

@@ -44,6 +44,7 @@ import { DiscoveryCoordinator } from "./domain/discovery-coordinator.js";
 import { ClaimService } from "./domain/claim-service.js";
 // TODO: AS-T12 — migrate to pod-aware bundle source resolver
 import { LegacyBundleSourceResolver as BundleSourceResolver } from "./domain/bundle-source-resolver.js";
+import { PodBundleSourceResolver } from "./domain/bundle-source-resolver.js";
 import { PsProjectionService } from "./domain/ps-projection.js";
 import { UpCommandRouter } from "./domain/up-command-router.js";
 import { RigTeardownOrchestrator } from "./domain/rig-teardown.js";
@@ -190,11 +191,13 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     adapters: { "claude-code": claudeAdapter, "codex": codexAdapter },
   });
 
+  const podBundleSourceResolver = new PodBundleSourceResolver();
+
   const bootstrapOrchestrator = new BootstrapOrchestrator({
     db, bootstrapRepo, runtimeVerifier, probeRegistry,
     installPlanner: externalInstallPlanner, installExecutor: externalInstallExecutor,
     packageInstallService, rigInstantiator, fsOps: resolverFsOps,
-    bundleSourceResolver, podInstantiator,
+    bundleSourceResolver, podInstantiator, podBundleSourceResolver,
   });
 
   // Discovery services
@@ -246,6 +249,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     teardownOrchestrator: new RigTeardownOrchestrator({
       db, rigRepo, sessionRegistry, tmuxAdapter, snapshotCapture, eventBus,
     }),
+    podInstantiator,
+    podBundleSourceResolver,
   };
 
   const app = createApp(deps);

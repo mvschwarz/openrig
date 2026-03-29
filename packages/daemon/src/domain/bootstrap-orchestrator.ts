@@ -15,6 +15,11 @@ import { resolvePackage, type ResolveResult } from "./package-resolve-helper.js"
 import type { BootstrapStatus } from "./bootstrap-types.js";
 // TODO: AS-T12 — migrate to pod-aware bundle source resolver
 import type { LegacyBundleSourceResolver as BundleSourceResolver, BundleResolvedSource } from "./bundle-source-resolver.js";
+import type { PodBundleSourceResolver } from "./bundle-source-resolver.js";
+import { unpack } from "./bundle-archive.js";
+import { parsePodBundleManifest } from "./bundle-types.js";
+import os from "node:os";
+import fs from "node:fs";
 
 /** Bootstrap mode */
 export type BootstrapMode = "plan" | "apply";
@@ -65,6 +70,7 @@ interface BootstrapOrchestratorDeps {
   fsOps: FsOps;
   bundleSourceResolver: BundleSourceResolver | null;
   podInstantiator?: PodRigInstantiator;
+  podBundleSourceResolver?: PodBundleSourceResolver;
 }
 
 /** Generates a deterministic action key for plan->apply identity */
@@ -122,7 +128,45 @@ export class BootstrapOrchestrator {
     let bundleTempDir: string | null = null;
 
     if (sourceKind === "rig_bundle") {
-      // Bundle resolution path
+      // Peek at bundle manifest to detect schema version
+      let bundleSchemaVersion = 1;
+      const peekDir = fs.mkdtempSync(nodePath.join(os.tmpdir(), "bundle-peek-"));
+      try {
+        await unpack(sourceRef, peekDir);
+        const manifestPath = nodePath.join(peekDir, "bundle.yaml");
+        if (fs.existsSync(manifestPath)) {
+          const manifestYaml = fs.readFileSync(manifestPath, "utf-8");
+          const raw = parsePodBundleManifest(manifestYaml) as Record<string, unknown>;
+          if (raw && raw["schema_version"] === 2) {
+            bundleSchemaVersion = 2;
+          }
+        }
+      } catch { /* peek failed — fall through to legacy */ }
+      finally { try { fs.rmSync(peekDir, { recursive: true, force: true }); } catch {} }
+
+      if (bundleSchemaVersion === 2 && this.deps.podBundleSourceResolver) {
+        let podBundleTempDir: string | null = null;
+        try {
+          const podSource = await this.deps.podBundleSourceResolver.resolve(sourceRef);
+          const rawYaml = this.deps.fsOps.readFile(podSource.specPath);
+          specDir = nodePath.dirname(podSource.specPath);
+          podBundleTempDir = podSource.tempDir;
+          stages.push({ stage: "resolve_spec", status: "ok", detail: { specName: podSource.manifest.name, source: "pod_bundle" } });
+          try {
+            return await this.handlePodAwareSpec(opts, run, rawYaml, specDir, stages, errors, warnings);
+          } finally {
+            if (podBundleTempDir) this.deps.podBundleSourceResolver.cleanup(podBundleTempDir);
+          }
+        } catch (err) {
+          const msg = (err as Error).message;
+          stages.push({ stage: "resolve_spec", status: "failed", detail: { code: "bundle_error", error: msg } });
+          errors.push(msg);
+          this.deps.bootstrapRepo.updateRunStatus(run.id, "failed");
+          return { runId: run.id, status: "failed", stages, errors, warnings };
+        }
+      }
+
+      // Legacy v1 bundle path
       if (!this.deps.bundleSourceResolver) {
         throw new Error("BundleSourceResolver required for rig_bundle source kind");
       }

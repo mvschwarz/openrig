@@ -374,3 +374,15 @@ packagesRoutes.get("/:packageId/installs", (c) => {
   const packageId = c.req.param("packageId")!;
   return c.json(installRepo.listInstallSummaries(packageId));
 });
+
+// POST /api/packages/validate-agentspec
+import { validateAgentSpecFromYaml } from "../domain/spec-validation-service.js";
+
+packagesRoutes.post("/validate-agentspec", async (c) => {
+  const body = await c.req.text();
+  if (!body.trim()) {
+    return c.json({ valid: false, errors: ["Empty YAML body"] }, 400);
+  }
+  const result = validateAgentSpecFromYaml(body);
+  return c.json(result);
+});

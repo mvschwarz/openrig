@@ -1175,3 +1175,57 @@ requirements:
     expect(eventsAfterSecond).toBe(eventsAfterFirst);
   });
 });
+
+describe("AgentSpec validation route", () => {
+  let db: ReturnType<typeof createDb>;
+  let app: ReturnType<typeof createTestApp>["app"];
+
+  beforeEach(() => {
+    db = createDb();
+    migrate(db, ALL_MIGRATIONS);
+    const setup = createTestApp(db);
+    app = setup.app;
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  it("POST /api/packages/validate-agentspec with valid YAML returns valid:true", async () => {
+    const yaml = 'name: test-agent\nversion: "1.0"\nprofiles: {}';
+    const res = await app.request("/api/packages/validate-agentspec", {
+      method: "POST",
+      headers: { "Content-Type": "text/plain" },
+      body: yaml,
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.valid).toBe(true);
+    expect(body.errors).toEqual([]);
+  });
+
+  it("POST /api/packages/validate-agentspec with empty body returns 400", async () => {
+    const res = await app.request("/api/packages/validate-agentspec", {
+      method: "POST",
+      headers: { "Content-Type": "text/plain" },
+      body: "  ",
+    });
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.valid).toBe(false);
+    expect(body.errors).toContain("Empty YAML body");
+  });
+
+  it("POST /api/packages/validate-agentspec with invalid spec returns errors", async () => {
+    const yaml = "summary: missing name and version";
+    const res = await app.request("/api/packages/validate-agentspec", {
+      method: "POST",
+      headers: { "Content-Type": "text/plain" },
+      body: yaml,
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.valid).toBe(false);
+    expect(body.errors.length).toBeGreaterThan(0);
+  });
+});

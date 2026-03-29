@@ -17,6 +17,10 @@ import { PackageRepository } from "../src/domain/package-repository.js";
 import { InstallRepository } from "../src/domain/install-repository.js";
 import { InstallEngine } from "../src/domain/install-engine.js";
 import { InstallVerifier } from "../src/domain/install-verifier.js";
+import { PodRigInstantiator } from "../src/domain/rigspec-instantiator.js";
+import { PodRepository } from "../src/domain/pod-repository.js";
+import { StartupOrchestrator } from "../src/domain/startup-orchestrator.js";
+import { PodBundleSourceResolver } from "../src/domain/bundle-source-resolver.js";
 import { createApp } from "../src/server.js";
 import { mockTmuxAdapter, unavailableCmuxAdapter } from "./helpers/test-app.js";
 import type { ExecFn } from "../src/adapters/tmux.js";
@@ -56,11 +60,28 @@ function buildFullDeps(db: ReturnType<typeof createFullTestDb>, overrides?: { sn
   const installEngine = new InstallEngine(installRepo, engineFsOps);
   const installVerifier = new InstallVerifier(installRepo, packageRepo, fsOps);
 
+  const podRepo = new PodRepository(db);
+  const startupOrchestrator = new StartupOrchestrator({ db, sessionRegistry, eventBus, tmuxAdapter: tmux });
+  const mockAdapter = {
+    runtime: "claude-code",
+    listInstalled: async () => [],
+    project: async () => ({ projected: [], skipped: [], failed: [] }),
+    deliverStartup: async () => ({ delivered: 0, failed: [] }),
+    checkReady: async () => ({ ready: true }),
+  };
+  const podInstantiator = new PodRigInstantiator({
+    db, rigRepo, podRepo, sessionRegistry, eventBus, nodeLauncher,
+    startupOrchestrator,
+    fsOps: { readFile: () => "", exists: () => false },
+    adapters: { "claude-code": mockAdapter, "codex": { ...mockAdapter, runtime: "codex" } },
+  });
+
   return {
     rigRepo, sessionRegistry, eventBus, nodeLauncher, tmuxAdapter: tmux, cmuxAdapter: cmux,
     snapshotCapture, snapshotRepo, restoreOrchestrator,
     rigSpecExporter, rigSpecPreflight, rigInstantiator,
     packageRepo, installRepo, installEngine, installVerifier,
+    podInstantiator, podBundleSourceResolver: new PodBundleSourceResolver(),
   };
 }
 
@@ -193,6 +214,46 @@ describe("Hono server (production app)", () => {
     (deps as Record<string, unknown>).installRepo = new InstallRepository(db2);
 
     expect(() => createApp(deps)).toThrow(/installRepo.*same db handle/);
+
+    db1.close();
+    db2.close();
+  });
+
+  it("createApp throws if podInstantiator uses different db handle", () => {
+    const db1 = createFullTestDb();
+    const db2 = createFullTestDb();
+
+    const fullSetup = createTestApp(db1);
+    const deps = {
+      rigRepo: fullSetup.rigRepo,
+      sessionRegistry: fullSetup.sessionRegistry,
+      eventBus: fullSetup.eventBus,
+      nodeLauncher: fullSetup.nodeLauncher,
+      tmuxAdapter: (fullSetup as any).tmuxAdapter ?? mockTmuxAdapter(),
+      cmuxAdapter: (fullSetup as any).cmuxAdapter ?? unavailableCmuxAdapter(),
+      snapshotCapture: fullSetup.snapshotCapture,
+      snapshotRepo: fullSetup.snapshotRepo,
+      restoreOrchestrator: fullSetup.restoreOrchestrator,
+      rigSpecExporter: fullSetup.rigSpecExporter,
+      rigSpecPreflight: fullSetup.rigSpecPreflight,
+      rigInstantiator: fullSetup.rigInstantiator,
+      packageRepo: fullSetup.packageRepo,
+      installRepo: fullSetup.installRepo,
+      installEngine: fullSetup.installEngine,
+      installVerifier: fullSetup.installVerifier,
+      bootstrapOrchestrator: fullSetup.bootstrapOrchestrator,
+      bootstrapRepo: fullSetup.bootstrapRepo,
+      discoveryCoordinator: fullSetup.discoveryCoordinator,
+      discoveryRepo: fullSetup.discoveryRepo,
+      claimService: fullSetup.claimService,
+      psProjectionService: fullSetup.psProjectionService,
+      upRouter: fullSetup.upRouter,
+      teardownOrchestrator: fullSetup.teardownOrchestrator,
+      podInstantiator: { db: db2 } as any,
+      podBundleSourceResolver: null,
+    };
+
+    expect(() => createApp(deps)).toThrow(/podInstantiator.*same db handle/);
 
     db1.close();
     db2.close();

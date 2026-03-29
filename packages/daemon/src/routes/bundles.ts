@@ -5,15 +5,16 @@ import { Hono } from "hono";
 import type { EventBus } from "../domain/event-bus.js";
 import type { BootstrapOrchestrator } from "../domain/bootstrap-orchestrator.js";
 import type { BootstrapRepository } from "../domain/bootstrap-repository.js";
-// TODO: AS-T12 — migrate to pod-aware bundle assembler
 import { LegacyBundleAssembler as BundleAssembler, type AssemblerFsOps } from "../domain/bundle-assembler.js";
+import { PodBundleAssembler, type PodAssemblerFsOps } from "../domain/pod-bundle-assembler.js";
 import { computeIntegrity, writeIntegrity, verifyIntegrity, type IntegrityFsOps } from "../domain/bundle-integrity.js";
 import { pack, unpack, verifyArchiveDigest } from "../domain/bundle-archive.js";
 import { resolvePackage } from "../domain/package-resolve-helper.js";
-import { LegacyRigSpecCodec as RigSpecCodec } from "../domain/rigspec-codec.js"; // TODO: AS-T08b — migrate to pod-aware RigSpec
-import { LegacyRigSpecSchema as RigSpecSchema } from "../domain/rigspec-schema.js"; // TODO: AS-T08b — migrate to pod-aware RigSpec
-// TODO: AS-T12 — migrate to pod-aware bundle types
-import { parseLegacyBundleManifest as parseBundleManifest, normalizeLegacyBundleManifest as normalizeBundleManifest } from "../domain/bundle-types.js";
+import { LegacyRigSpecCodec } from "../domain/rigspec-codec.js";
+import { LegacyRigSpecSchema } from "../domain/rigspec-schema.js";
+import { RigSpecCodec } from "../domain/rigspec-codec.js";
+import { RigSpecSchema } from "../domain/rigspec-schema.js";
+import { parseLegacyBundleManifest as parseBundleManifest, normalizeLegacyBundleManifest as normalizeBundleManifest, serializePodBundleManifest } from "../domain/bundle-types.js";
 import type { FsOps } from "../domain/package-resolver.js";
 
 export const bundleRoutes = new Hono();
@@ -64,6 +65,15 @@ function integrityFsOps(): IntegrityFsOps {
   };
 }
 
+function podAssemblerFsOps(): PodAssemblerFsOps {
+  return {
+    ...assemblerFsOps(),
+    readFile: (p) => fs.readFileSync(p, "utf-8"),
+    exists: (p) => fs.existsSync(p),
+    listFiles: (dir) => realFsOps().listFiles!(dir),
+  };
+}
+
 // POST /api/bundles/create
 bundleRoutes.post("/create", async (c) => {
   const { eventBus } = getDeps(c);
@@ -72,6 +82,7 @@ bundleRoutes.post("/create", async (c) => {
   const bundleName = typeof body["bundleName"] === "string" ? body["bundleName"] : "";
   const bundleVersion = typeof body["bundleVersion"] === "string" ? body["bundleVersion"] : "";
   const outputPath = typeof body["outputPath"] === "string" ? body["outputPath"] : "";
+  const rigRoot = typeof body["rigRoot"] === "string" ? body["rigRoot"] : undefined;
   const includePackages = Array.isArray(body["includePackages"]) ? body["includePackages"] as string[] : undefined;
 
   if (!specPath || !bundleName || !bundleVersion || !outputPath) {
@@ -79,12 +90,38 @@ bundleRoutes.post("/create", async (c) => {
   }
 
   try {
-    // Read spec and collect package_refs
+    // Read spec and detect format
     const specYaml = fs.readFileSync(nodePath.resolve(specPath), "utf-8");
-    const raw = RigSpecCodec.parse(specYaml);
-    const validation = RigSpecSchema.validate(raw);
+    const rawParsed = RigSpecCodec.parse(specYaml);
+    const isPodAware = rawParsed && typeof rawParsed === "object" && Array.isArray((rawParsed as Record<string, unknown>).pods);
+
+    if (isPodAware) {
+      // Pod-aware bundle creation
+      const podValidation = RigSpecSchema.validate(rawParsed);
+      if (!podValidation.valid) return c.json({ error: "Invalid pod-aware rig spec", errors: podValidation.errors }, 400);
+
+      const effectiveRigRoot = rigRoot ? nodePath.resolve(rigRoot) : nodePath.dirname(nodePath.resolve(specPath));
+      const tmpStaging = fs.mkdtempSync(nodePath.join(os.tmpdir(), "pod-bundle-create-"));
+      try {
+        const assembler = new PodBundleAssembler({ fsOps: podAssemblerFsOps() });
+        const result = assembler.assemble({ rigRoot: effectiveRigRoot, rigSpecPath: nodePath.resolve(specPath), outputDir: tmpStaging, bundleName, bundleVersion });
+
+        const integrity = computeIntegrity(tmpStaging, integrityFsOps());
+        result.manifest.integrity = integrity;
+        fs.writeFileSync(nodePath.join(tmpStaging, "bundle.yaml"), serializePodBundleManifest(result.manifest), "utf-8");
+
+        const archiveHash = await pack(tmpStaging, nodePath.resolve(outputPath));
+        eventBus.emit({ type: "bundle.created", bundleName, bundleVersion, archiveHash });
+        return c.json({ bundleName, bundleVersion, archiveHash, schemaVersion: 2, agents: result.manifest.agents.length }, 201);
+      } finally {
+        fs.rmSync(tmpStaging, { recursive: true, force: true });
+      }
+    }
+
+    // Legacy bundle creation
+    const validation = LegacyRigSpecSchema.validate(rawParsed);
     if (!validation.valid) return c.json({ error: "Invalid rig spec", errors: validation.errors }, 400);
-    const spec = RigSpecSchema.normalize(raw);
+    const spec = LegacyRigSpecSchema.normalize(rawParsed);
 
     const specDir = nodePath.dirname(nodePath.resolve(specPath));
     const allRefs = new Set<string>();
@@ -92,10 +129,8 @@ bundleRoutes.post("/create", async (c) => {
       if (node.packageRefs) for (const ref of node.packageRefs) allRefs.add(ref);
     }
 
-    // Determine which refs to bundle
     const refsToBundle = includePackages ?? [...allRefs];
 
-    // Validate coverage: included must cover all spec refs
     if (includePackages) {
       const includedSet = new Set(includePackages);
       const missing = [...allRefs].filter((r) => !includedSet.has(r));
@@ -104,7 +139,6 @@ bundleRoutes.post("/create", async (c) => {
       }
     }
 
-    // Resolve packages
     const fsOps = realFsOps();
     const packages = [];
     for (const ref of refsToBundle) {
@@ -123,23 +157,18 @@ bundleRoutes.post("/create", async (c) => {
       });
     }
 
-    // Assemble
-      const tmpStaging = fs.mkdtempSync(nodePath.join(os.tmpdir(), "bundle-create-"));
+    const tmpStaging = fs.mkdtempSync(nodePath.join(os.tmpdir(), "bundle-create-"));
     try {
       const assembler = new BundleAssembler({ fsOps: assemblerFsOps() });
       const manifest = assembler.assemble({
         specPath: nodePath.resolve(specPath), packages, outputDir: tmpStaging, bundleName, bundleVersion,
       });
 
-      // Integrity
       const integrity = computeIntegrity(tmpStaging, integrityFsOps());
       writeIntegrity(tmpStaging, integrity, integrityFsOps());
 
-      // Pack
       const archiveHash = await pack(tmpStaging, nodePath.resolve(outputPath));
-
       eventBus.emit({ type: "bundle.created", bundleName, bundleVersion, archiveHash });
-
       return c.json({ bundleName, bundleVersion, archiveHash, packages: manifest.packages.length }, 201);
     } finally {
       fs.rmSync(tmpStaging, { recursive: true, force: true });

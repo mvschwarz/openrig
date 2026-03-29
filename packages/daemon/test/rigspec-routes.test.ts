@@ -274,6 +274,126 @@ describe("Rigspec wiring", () => {
   });
 });
 
+const POD_AWARE_YAML = `
+version: "0.2"
+name: pod-rig
+pods:
+  - id: dev
+    label: Dev
+    members:
+      - id: impl
+        agent_ref: "local:agents/impl"
+        profile: default
+        runtime: claude-code
+        cwd: /tmp
+    edges: []
+edges: []
+`;
+
+const INVALID_POD_YAML = `
+version: "0.2"
+name: bad
+pods:
+  - id: dev
+    label: Dev
+    members:
+      - id: impl
+        runtime: claude-code
+        cwd: .
+    edges: []
+edges: []
+`;
+
+describe("Rigspec import routes (pod-aware dual-stack)", () => {
+  let db: Database.Database;
+  let app: Hono;
+
+  beforeEach(() => {
+    db = createFullTestDb();
+    const setup = createTestApp(db);
+    app = setup.app;
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  // T3: validate endpoint auto-detects pod-aware format
+  it("POST /api/rigs/import/validate with pod-aware YAML returns valid:true", async () => {
+    const res = await app.request("/api/rigs/import/validate", {
+      method: "POST",
+      headers: { "Content-Type": "text/plain" },
+      body: POD_AWARE_YAML,
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.valid).toBe(true);
+  });
+
+  // T4: validate endpoint with invalid pod-aware YAML returns errors
+  it("POST /api/rigs/import/validate with invalid pod-aware YAML returns errors", async () => {
+    const res = await app.request("/api/rigs/import/validate", {
+      method: "POST",
+      headers: { "Content-Type": "text/plain" },
+      body: INVALID_POD_YAML,
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.valid).toBe(false);
+    expect(body.errors.length).toBeGreaterThan(0);
+  });
+
+  // T5: validate still works for legacy YAML
+  it("POST /api/rigs/import/validate still works for legacy YAML", async () => {
+    const res = await app.request("/api/rigs/import/validate", {
+      method: "POST",
+      headers: { "Content-Type": "text/plain" },
+      body: VALID_YAML,
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.valid).toBe(true);
+  });
+
+  // T7: import pod-aware spec without X-Rig-Root returns 400
+  it("POST /api/rigs/import with pod-aware YAML but no X-Rig-Root returns 400", async () => {
+    const res = await app.request("/api/rigs/import", {
+      method: "POST",
+      headers: { "Content-Type": "text/plain" },
+      body: POD_AWARE_YAML,
+    });
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.code).toBe("missing_rig_root");
+  });
+
+  // T8: preflight pod-aware spec without X-Rig-Root returns 400
+  it("POST /api/rigs/import/preflight with pod-aware YAML but no X-Rig-Root returns 400", async () => {
+    const res = await app.request("/api/rigs/import/preflight", {
+      method: "POST",
+      headers: { "Content-Type": "text/plain" },
+      body: POD_AWARE_YAML,
+    });
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.ready).toBe(false);
+    expect(body.errors).toContain("X-Rig-Root header required for pod-aware specs");
+  });
+
+  // T9: legacy import still works through dual-stack
+  it("POST /api/rigs/import with legacy YAML still creates rig", async () => {
+    const res = await app.request("/api/rigs/import", {
+      method: "POST",
+      headers: { "Content-Type": "text/plain" },
+      body: VALID_YAML,
+    });
+    expect(res.status).toBe(201);
+    const body = await res.json();
+    expect(body.rigId).toBeDefined();
+    expect(body.specName).toBe("r99");
+  });
+});
+
 function extractDeps(setup: ReturnType<typeof createTestApp>) {
   return {
     rigRepo: setup.rigRepo,
@@ -288,5 +408,7 @@ function extractDeps(setup: ReturnType<typeof createTestApp>) {
     rigSpecExporter: setup.rigSpecExporter,
     rigSpecPreflight: setup.rigSpecPreflight,
     rigInstantiator: setup.rigInstantiator,
+    podInstantiator: (setup as any).podInstantiator,
+    podBundleSourceResolver: (setup as any).podBundleSourceResolver,
   };
 }

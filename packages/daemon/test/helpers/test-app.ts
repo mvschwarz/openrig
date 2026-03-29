@@ -56,6 +56,7 @@ import { PackageRepository } from "../../src/domain/package-repository.js";
 import { InstallRepository } from "../../src/domain/install-repository.js";
 import { InstallEngine } from "../../src/domain/install-engine.js";
 import { InstallVerifier } from "../../src/domain/install-verifier.js";
+import { PodBundleSourceResolver } from "../../src/domain/bundle-source-resolver.js";
 import { createApp } from "../../src/server.js";
 import fs from "node:fs";
 
@@ -157,6 +158,7 @@ export function createTestApp(db: Database.Database, opts?: { cmux?: CmuxAdapter
     },
     bundleSourceResolver: null,
     podInstantiator,
+    podBundleSourceResolver: new PodBundleSourceResolver(),
   });
 
   // Discovery services
@@ -171,6 +173,8 @@ export function createTestApp(db: Database.Database, opts?: { cmux?: CmuxAdapter
   });
   const claimService = new ClaimService({ db, rigRepo, sessionRegistry, discoveryRepo, eventBus });
 
+  const podBundleSourceResolver = new PodBundleSourceResolver();
+
   const app = createApp({
     rigRepo, sessionRegistry, eventBus, nodeLauncher, tmuxAdapter: tmux, cmuxAdapter: cmux,
     snapshotCapture, snapshotRepo, restoreOrchestrator,
@@ -181,6 +185,8 @@ export function createTestApp(db: Database.Database, opts?: { cmux?: CmuxAdapter
     psProjectionService: new PsProjectionService({ db }),
     upRouter: new UpCommandRouter({ fsOps: { exists: () => false, readFile: () => "", readHead: () => Buffer.alloc(0) } }),
     teardownOrchestrator: new RigTeardownOrchestrator({ db, rigRepo, sessionRegistry, tmuxAdapter: tmux, snapshotCapture, eventBus }),
+    podInstantiator,
+    podBundleSourceResolver,
   });
   return {
     app, rigRepo, sessionRegistry, eventBus, nodeLauncher, snapshotRepo,
@@ -191,6 +197,7 @@ export function createTestApp(db: Database.Database, opts?: { cmux?: CmuxAdapter
     discoveryCoordinator, discoveryRepo, claimService, tmuxScanner,
     psProjectionService: new PsProjectionService({ db }),
     upRouter: new UpCommandRouter({ fsOps: { exists: () => false, readFile: () => "", readHead: () => Buffer.alloc(0) } }),
-    teardownOrchestrator: new RigTeardownOrchestrator({ db, rigRepo, sessionRegistry, tmuxAdapter: tmux, snapshotCapture, eventBus }), db,
+    teardownOrchestrator: new RigTeardownOrchestrator({ db, rigRepo, sessionRegistry, tmuxAdapter: tmux, snapshotCapture, eventBus }),
+    podInstantiator, podBundleSourceResolver, db,
   };
 }

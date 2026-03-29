@@ -233,6 +233,112 @@ describe("Bundle API routes", () => {
     expect(body.digestValid).toBe(false);
   });
 
+  // T6-AS-T12: Pod-aware bundle create
+  it("POST /api/bundles/create with pod-aware spec returns schemaVersion:2", async () => {
+    // Seed a pod-aware rig spec + agent on disk
+    const agentsDir = path.join(tmpDir, "agents", "impl");
+    fs.mkdirSync(agentsDir, { recursive: true });
+    fs.writeFileSync(path.join(agentsDir, "agent.yaml"), [
+      'name: impl-agent',
+      'version: "1.0.0"',
+      'resources:',
+      '  skills: []',
+      'profiles:',
+      '  default:',
+      '    uses:',
+      '      skills: []',
+    ].join("\n"));
+
+    const specPath = path.join(tmpDir, "rig.yaml");
+    fs.writeFileSync(specPath, [
+      'version: "0.2"',
+      'name: pod-test-rig',
+      'pods:',
+      '  - id: dev',
+      '    label: Dev',
+      '    members:',
+      '      - id: impl',
+      '        agent_ref: "local:agents/impl"',
+      '        profile: default',
+      '        runtime: claude-code',
+      '        cwd: .',
+      '    edges: []',
+      'edges: []',
+    ].join("\n"));
+
+    const outputPath = path.join(tmpDir, "pod.rigbundle");
+    const res = await app.request("/api/bundles/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ specPath, bundleName: "pod-test", bundleVersion: "0.1.0", outputPath }),
+    });
+
+    expect(res.status).toBe(201);
+    const body = await res.json();
+    expect(body.schemaVersion).toBe(2);
+    expect(body.bundleName).toBe("pod-test");
+    expect(body.archiveHash).toMatch(/^[a-f0-9]{64}$/);
+    expect(fs.existsSync(outputPath)).toBe(true);
+  });
+
+  // T11-AS-T12: Legacy bundle create still works (regression guard)
+  it("POST /api/bundles/create with legacy spec still works", async () => {
+    const { specPath } = seedPackage();
+    const outputPath = path.join(tmpDir, "legacy.rigbundle");
+
+    const res = await app.request("/api/bundles/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ specPath, bundleName: "legacy-test", bundleVersion: "0.1.0", outputPath }),
+    });
+
+    expect(res.status).toBe(201);
+    const body = await res.json();
+    expect(body.bundleName).toBe("legacy-test");
+    expect(body.packages).toBeDefined();
+    expect(body.schemaVersion).toBeUndefined();
+  });
+
+  // T11-AS-T12: v2 bundle install routes through pod-aware bootstrap path
+  it("POST /api/bundles/install with v2 bundle enters pod-aware path", async () => {
+    // Create a v2 bundle on disk
+    const agentsDir = path.join(tmpDir, "agents", "impl");
+    fs.mkdirSync(agentsDir, { recursive: true });
+    fs.writeFileSync(path.join(agentsDir, "agent.yaml"), [
+      'name: impl-agent', 'version: "1.0.0"', 'resources:', '  skills: []',
+      'profiles:', '  default:', '    uses:', '      skills: []',
+    ].join("\n"));
+    const specPath = path.join(tmpDir, "rig.yaml");
+    fs.writeFileSync(specPath, [
+      'version: "0.2"', 'name: v2-install-test', 'pods:', '  - id: dev', '    label: Dev',
+      '    members:', '      - id: impl', '        agent_ref: "local:agents/impl"',
+      '        profile: default', '        runtime: claude-code', '        cwd: .',
+      '    edges: []', 'edges: []',
+    ].join("\n"));
+    const bundlePath = path.join(tmpDir, "v2-install.rigbundle");
+    const createRes = await app.request("/api/bundles/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ specPath, bundleName: "v2-install", bundleVersion: "0.1.0", outputPath: bundlePath }),
+    });
+    expect(createRes.status).toBe(201);
+
+    // Install the v2 bundle — test app's podInstantiator has mock fsOps so agent resolution
+    // will fail, but the bootstrap should detect v2 and enter the pod-aware path
+    const installRes = await app.request("/api/bundles/install", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ bundlePath, targetRoot: tmpDir }),
+    });
+    const installBody = await installRes.json();
+    // The result should have stages proving the pod-aware path was entered
+    // (resolve_spec stage with source: "pod_bundle" or the bootstrap ran through handlePodAwareSpec)
+    expect(installBody.stages).toBeDefined();
+    const resolveStage = installBody.stages.find((s: { stage: string }) => s.stage === "resolve_spec");
+    expect(resolveStage).toBeDefined();
+    expect(resolveStage.detail.source).toBe("pod_bundle");
+  });
+
   // T11: Install concurrency lock
   it("concurrent bundle install returns 409", async () => {
     // Acquire lock manually

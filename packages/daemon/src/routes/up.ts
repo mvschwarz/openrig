@@ -69,7 +69,7 @@ upRoutes.post("/", async (c) => {
       if (failedStage?.status === "blocked") httpStatus = 409;
       else if (failedStage?.stage === "resolve_spec") {
         const detail = failedStage.detail as { code?: string } | undefined;
-        if (detail?.code === "file_not_found" || detail?.code === "parse_error" || detail?.code === "validation_failed" || detail?.code === "bundle_error") httpStatus = 400;
+        if (detail?.code === "file_not_found" || detail?.code === "parse_error" || detail?.code === "validation_failed" || detail?.code === "bundle_error" || detail?.code === "cycle_error") httpStatus = 400;
       }
       return c.json(result, httpStatus);
     }
