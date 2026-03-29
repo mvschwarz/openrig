@@ -259,7 +259,7 @@ describe("MCP Server", () => {
   });
 
   // T10b: rigged_agent_validate calls postText with correct path
-  it("rigged_agent_validate calls postText on /api/packages/validate-agentspec", async () => {
+  it("rigged_agent_validate calls postText on /api/agents/validate", async () => {
     const postTextFn = vi.fn(async () => ({
       status: 200,
       data: { valid: true, errors: [] },
@@ -271,7 +271,7 @@ describe("MCP Server", () => {
       arguments: { yaml: "name: my-agent\nversion: 1.0.0\n" },
     });
 
-    expect(postTextFn).toHaveBeenCalledWith("/api/packages/validate-agentspec", "name: my-agent\nversion: 1.0.0\n");
+    expect(postTextFn).toHaveBeenCalledWith("/api/agents/validate", "name: my-agent\nversion: 1.0.0\n");
     expect(result.isError).toBeFalsy();
     await cleanup();
   });

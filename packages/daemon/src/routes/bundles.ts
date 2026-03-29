@@ -230,6 +230,8 @@ bundleRoutes.post("/inspect", async (c) => {
         version: (a["version"] as string) ?? "",
         path: a["path"] as string,
       }));
+      // Extract integrity from raw manifest
+      const integritySection = rawParsed["integrity"] as { algorithm?: string; files?: Record<string, string> } | undefined;
       const podManifest = {
         schemaVersion: 2 as const,
         name: rawParsed["name"] as string,
@@ -237,9 +239,11 @@ bundleRoutes.post("/inspect", async (c) => {
         createdAt: rawParsed["created_at"] as string,
         rigSpec: rawParsed["rig_spec"] as string,
         agents,
+        integrity: integritySection ? {
+          algorithm: integritySection.algorithm ?? "sha256",
+          files: integritySection.files ?? {},
+        } : undefined,
       };
-      // Build a legacy-compatible object for verifyIntegrity
-      const integritySection = rawParsed["integrity"] as { algorithm?: string; files?: Record<string, string> } | undefined;
       const integrityCompat = integritySection ? {
         schemaVersion: 2,
         name: podManifest.name,

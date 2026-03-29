@@ -22,7 +22,8 @@ export function rigCommand(depsOverride?: RigDeps): Command {
   cmd
     .command("validate <path>")
     .description("Validate a rig spec (pure schema validation)")
-    .action(async (filePath: string) => {
+    .option("--json", "JSON output")
+    .action(async (filePath: string, opts: { json?: boolean }) => {
       const deps = getDeps();
 
       let yaml: string;
@@ -48,6 +49,13 @@ export function rigCommand(depsOverride?: RigDeps): Command {
       const client = deps.clientFactory(`http://127.0.0.1:${status.port}`);
 
       const res = await client.postText<{ valid?: boolean; errors?: string[]; name?: string }>("/api/rigs/import/validate", yaml);
+
+      if (opts.json) {
+        console.log(JSON.stringify(res.data));
+        if (res.status >= 400 || !res.data.valid) process.exitCode = 1;
+        return;
+      }
+
       if (res.status >= 400) {
         const data = res.data;
         if (data.errors && data.errors.length > 0) {
@@ -78,7 +86,8 @@ export function rigCommand(depsOverride?: RigDeps): Command {
     .command("preflight <path>")
     .description("Run preflight diagnostics on a rig spec")
     .option("--rig-root <root>", "Root directory for pod-aware resolution")
-    .action(async (filePath: string, opts: { rigRoot?: string }) => {
+    .option("--json", "JSON output")
+    .action(async (filePath: string, opts: { rigRoot?: string; json?: boolean }) => {
       const deps = getDeps();
 
       let yaml: string;
@@ -110,6 +119,13 @@ export function rigCommand(depsOverride?: RigDeps): Command {
       const extraHeaders: Record<string, string> = { "X-Rig-Root": rigRoot };
 
       const res = await client.postText<{ ready?: boolean; warnings?: string[]; errors?: string[] }>("/api/rigs/import/preflight", yaml, "text/yaml", extraHeaders);
+
+      if (opts.json) {
+        console.log(JSON.stringify(res.data));
+        if (res.status >= 400 || !res.data.ready) process.exitCode = 1;
+        return;
+      }
+
       if (res.status >= 400) {
         console.error(`Preflight failed: ${JSON.stringify(res.data)}`);
         process.exitCode = 1;

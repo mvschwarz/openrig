@@ -43,7 +43,8 @@ function buildFullDeps(db: ReturnType<typeof createFullTestDb>, overrides?: { sn
     checkpointStore, nodeLauncher, tmuxAdapter: tmux, claudeResume, codexResume,
   });
   const exec: ExecFn = async () => "";
-  const rigSpecExporter = new RigSpecExporter({ rigRepo, sessionRegistry });
+  const podRepo = new PodRepository(db);
+  const rigSpecExporter = new RigSpecExporter({ rigRepo, sessionRegistry, podRepo });
   const rigSpecPreflight = new RigSpecPreflight({ rigRepo, tmuxAdapter: tmux, exec, cmuxExec: exec });
   const rigInstantiator = new RigInstantiator({ db, rigRepo, sessionRegistry, eventBus, nodeLauncher, preflight: rigSpecPreflight });
 
@@ -60,7 +61,6 @@ function buildFullDeps(db: ReturnType<typeof createFullTestDb>, overrides?: { sn
   const installEngine = new InstallEngine(installRepo, engineFsOps);
   const installVerifier = new InstallVerifier(installRepo, packageRepo, fsOps);
 
-  const podRepo = new PodRepository(db);
   const startupOrchestrator = new StartupOrchestrator({ db, sessionRegistry, eventBus, tmuxAdapter: tmux });
   const mockAdapter = {
     runtime: "claude-code",

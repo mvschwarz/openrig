@@ -27,7 +27,8 @@ export function agentCommand(depsOverride?: AgentDeps): Command {
   cmd
     .command("validate <path>")
     .description("Validate an agent spec (agent.yaml)")
-    .action(async (filePath: string) => {
+    .option("--json", "JSON output")
+    .action(async (filePath: string, opts: { json?: boolean }) => {
       const deps = getDeps();
 
       let yaml: string;
@@ -52,7 +53,14 @@ export function agentCommand(depsOverride?: AgentDeps): Command {
 
       const client = deps.clientFactory(`http://127.0.0.1:${status.port}`);
 
-      const res = await client.postText<{ valid?: boolean; errors?: string[] }>("/api/packages/validate-agentspec", yaml);
+      const res = await client.postText<{ valid?: boolean; errors?: string[] }>("/api/agents/validate", yaml);
+
+      if (opts.json) {
+        console.log(JSON.stringify(res.data));
+        if (res.status >= 400 || !res.data.valid) process.exitCode = 1;
+        return;
+      }
+
       if (res.status >= 400) {
         const data = res.data;
         if (data.errors && data.errors.length > 0) {

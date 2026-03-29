@@ -65,8 +65,8 @@ function createMockDaemon() {
       return;
     }
 
-    // POST /api/packages/validate-agentspec
-    if (req.method === "POST" && url.pathname === "/api/packages/validate-agentspec") {
+    // POST /api/agents/validate
+    if (req.method === "POST" && url.pathname === "/api/agents/validate") {
       let body = "";
       req.on("data", (c: Buffer) => { body += c.toString(); });
       req.on("end", () => {

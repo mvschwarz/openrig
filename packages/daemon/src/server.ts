@@ -31,6 +31,7 @@ import { packagesRoutes } from "./routes/packages.js";
 import { bootstrapRoutes } from "./routes/bootstrap.js";
 import { discoveryRoutes } from "./routes/discovery.js";
 import { bundleRoutes } from "./routes/bundles.js";
+import { agentsRoutes } from "./routes/agents.js";
 import { psRoutes } from "./routes/ps.js";
 import type { PsProjectionService } from "./domain/ps-projection.js";
 import type { UpCommandRouter } from "./domain/up-command-router.js";
@@ -166,6 +167,7 @@ export function createApp(deps: AppDeps): Hono {
   app.get("/api/rigs/:rigId/spec", handleExportYaml);
   app.get("/api/rigs/:rigId/spec.json", handleExportJson);
   app.route("/api/packages", packagesRoutes);
+  app.route("/api/agents", agentsRoutes);
   app.route("/api/bootstrap", bootstrapRoutes);
   app.route("/api/discovery", discoveryRoutes);
   app.route("/api/bundles", bundleRoutes);

@@ -29,7 +29,11 @@ export function handleExportYaml(c: Context): Response {
 
   try {
     const spec = exporter.exportRig(rigId);
-    const yaml = LegacyRigSpecCodec.serialize(spec);
+    // Detect format: pod-aware RigSpec has `pods`, legacy has `schemaVersion`
+    const isPodAware = "pods" in spec;
+    const yaml = isPodAware
+      ? RigSpecCodec.serialize(spec as import("../domain/types.js").RigSpec)
+      : LegacyRigSpecCodec.serialize(spec as import("../domain/types.js").LegacyRigSpec);
     return new Response(yaml, {
       status: 200,
       headers: { "Content-Type": "text/yaml" },

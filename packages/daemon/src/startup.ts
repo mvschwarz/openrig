@@ -22,6 +22,7 @@ import { RestoreOrchestrator } from "./domain/restore-orchestrator.js";
 import { ClaudeResumeAdapter } from "./adapters/claude-resume.js";
 import { CodexResumeAdapter } from "./adapters/codex-resume.js";
 import { RigSpecExporter } from "./domain/rigspec-exporter.js";
+import { PodRepository } from "./domain/pod-repository.js";
 import { RigSpecPreflight } from "./domain/rigspec-preflight.js";
 import { RigInstantiator } from "./domain/rigspec-instantiator.js";
 import { Reconciler } from "./domain/reconciler.js";
@@ -124,7 +125,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     await reconciler.reconcile(rig.id);
   }
 
-  const rigSpecExporter = new RigSpecExporter({ rigRepo, sessionRegistry });
+  const podRepo = new PodRepository(db);
+  const rigSpecExporter = new RigSpecExporter({ rigRepo, sessionRegistry, podRepo });
   const rigSpecPreflight = new RigSpecPreflight({
     rigRepo, tmuxAdapter, exec: opts?.tmuxExec ?? execCommand, cmuxExec: opts?.cmuxExec ?? execCommand,
   });
@@ -185,7 +187,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const codexAdapter = new CodexRuntimeAdapter({ tmux: tmuxAdapter, fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"), exists: (p: string) => fs.existsSync(p), mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }), listFiles: (dir: string) => { const r: string[] = []; function w(d: string, pre: string) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.isDirectory()) w(nodePath.join(d, e.name), nodePath.join(pre, e.name)); else r.push(pre ? nodePath.join(pre, e.name) : e.name); } } w(dir, ""); return r; } } });
 
   const podInstantiator = new PodRigInstantiator({
-    db, rigRepo, podRepo: new (await import("./domain/pod-repository.js")).PodRepository(db),
+    db, rigRepo, podRepo,
     sessionRegistry, eventBus, nodeLauncher, startupOrchestrator,
     fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), exists: (p: string) => fs.existsSync(p) },
     adapters: { "claude-code": claudeAdapter, "codex": codexAdapter },

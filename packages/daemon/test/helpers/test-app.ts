@@ -102,7 +102,8 @@ export function createTestApp(db: Database.Database, opts?: { cmux?: CmuxAdapter
     db, rigRepo, sessionRegistry, eventBus, snapshotRepo, snapshotCapture,
     checkpointStore, nodeLauncher, tmuxAdapter: tmux, claudeResume, codexResume,
   });
-  const rigSpecExporter = new RigSpecExporter({ rigRepo, sessionRegistry });
+  const podRepo = new PodRepository(db);
+  const rigSpecExporter = new RigSpecExporter({ rigRepo, sessionRegistry, podRepo });
   const exec: ExecFn = async () => "";
   const rigSpecPreflight = new RigSpecPreflight({ rigRepo, tmuxAdapter: tmux, exec, cmuxExec: exec });
   const rigInstantiator = new RigInstantiator({ db, rigRepo, sessionRegistry, eventBus, nodeLauncher, preflight: rigSpecPreflight });
@@ -132,7 +133,6 @@ export function createTestApp(db: Database.Database, opts?: { cmux?: CmuxAdapter
   const externalInstallPlanner = new ExternalInstallPlanner();
   const externalInstallExecutor = new ExternalInstallExecutor({ exec, db });
   const packageInstallService = new PackageInstallService({ packageRepo, installRepo, installEngine, installVerifier });
-  const podRepo = new PodRepository(db);
   const startupOrchestrator = new StartupOrchestrator({ db, sessionRegistry, eventBus, tmuxAdapter: tmux });
   const mockAdapter = {
     runtime: "claude-code",

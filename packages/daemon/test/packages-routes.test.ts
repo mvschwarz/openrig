@@ -1191,9 +1191,9 @@ describe("AgentSpec validation route", () => {
     db.close();
   });
 
-  it("POST /api/packages/validate-agentspec with valid YAML returns valid:true", async () => {
+  it("POST /api/agents/validate with valid YAML returns valid:true", async () => {
     const yaml = 'name: test-agent\nversion: "1.0"\nprofiles: {}';
-    const res = await app.request("/api/packages/validate-agentspec", {
+    const res = await app.request("/api/agents/validate", {
       method: "POST",
       headers: { "Content-Type": "text/plain" },
       body: yaml,
@@ -1204,8 +1204,8 @@ describe("AgentSpec validation route", () => {
     expect(body.errors).toEqual([]);
   });
 
-  it("POST /api/packages/validate-agentspec with empty body returns 400", async () => {
-    const res = await app.request("/api/packages/validate-agentspec", {
+  it("POST /api/agents/validate with empty body returns 400", async () => {
+    const res = await app.request("/api/agents/validate", {
       method: "POST",
       headers: { "Content-Type": "text/plain" },
       body: "  ",
@@ -1216,9 +1216,9 @@ describe("AgentSpec validation route", () => {
     expect(body.errors).toContain("Empty YAML body");
   });
 
-  it("POST /api/packages/validate-agentspec with invalid spec returns errors", async () => {
+  it("POST /api/agents/validate with invalid spec returns errors", async () => {
     const yaml = "summary: missing name and version";
-    const res = await app.request("/api/packages/validate-agentspec", {
+    const res = await app.request("/api/agents/validate", {
       method: "POST",
       headers: { "Content-Type": "text/plain" },
       body: yaml,

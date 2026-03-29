@@ -244,7 +244,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
     },
     async ({ yaml }) => {
       try {
-        const res = await client.postText("/api/packages/validate-agentspec", yaml);
+        const res = await client.postText("/api/agents/validate", yaml);
         return mapResult(res);
       } catch (err) {
         return { content: [{ type: "text" as const, text: (err as Error).message }], isError: true as const };
