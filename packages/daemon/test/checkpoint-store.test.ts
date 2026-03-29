@@ -1,16 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import type Database from "better-sqlite3";
-import { createDb } from "../src/db/connection.js";
-import { migrate } from "../src/db/migrate.js";
-import { coreSchema } from "../src/db/migrations/001_core_schema.js";
-import { checkpointsSchema } from "../src/db/migrations/005_checkpoints.js";
-import { nodeSpecFieldsSchema } from "../src/db/migrations/007_node_spec_fields.js";
+import { createFullTestDb } from "./helpers/test-app.js";
 import { CheckpointStore } from "../src/domain/checkpoint-store.js";
 
 function setupDb(): Database.Database {
-  const db = createDb();
-  migrate(db, [coreSchema, checkpointsSchema, nodeSpecFieldsSchema]);
-  return db;
+  return createFullTestDb();
 }
 
 function seedRigWithNodes(db: Database.Database, rigId: string, rigName: string, nodeIds: { id: string; logicalId: string }[]) {

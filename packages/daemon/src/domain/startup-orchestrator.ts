@@ -128,7 +128,20 @@ export class StartupOrchestrator {
       return this.fail(input, afterReadyResult.errors);
     }
 
-    // 7. Mark ready
+    // 7. Persist startup context for restore replay
+    try {
+      this.db.prepare(
+        "INSERT OR REPLACE INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, ?, ?, ?)"
+      ).run(
+        input.nodeId,
+        JSON.stringify(input.plan.entries.map((e) => ({ category: e.category, effectiveId: e.effectiveId, sourceSpec: e.sourceSpec, sourcePath: e.sourcePath, resourcePath: e.resourcePath, absolutePath: e.absolutePath, mergeStrategy: e.mergeStrategy, target: e.target }))),
+        JSON.stringify(input.resolvedStartupFiles),
+        JSON.stringify(input.startupActions),
+        input.adapter.runtime,
+      );
+    } catch { /* best-effort persistence */ }
+
+    // 8. Mark ready
     this.sessionRegistry.updateStartupStatus(input.sessionId, "ready", new Date().toISOString());
     this.eventBus.emit({ type: "node.startup_ready", rigId: input.rigId, nodeId: input.nodeId });
 

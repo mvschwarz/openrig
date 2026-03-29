@@ -141,12 +141,33 @@ export interface RigWithRelations {
   edges: Edge[];
 }
 
+export interface PersistedProjectionEntry {
+  category: string;
+  effectiveId: string;
+  sourceSpec: string;
+  sourcePath: string;
+  resourcePath: string;
+  absolutePath: string;
+  mergeStrategy?: string;
+  target?: string;
+}
+
+export interface NodeStartupSnapshot {
+  projectionEntries: PersistedProjectionEntry[];
+  resolvedStartupFiles: import("./runtime-adapter.js").ResolvedStartupFile[];
+  startupActions: StartupAction[];
+  runtime: string;
+}
+
 export interface SnapshotData {
   rig: Rig;
   nodes: NodeWithBinding[];
   edges: Edge[];
   sessions: Session[];
   checkpoints: Record<string, Checkpoint | null>;
+  pods?: Pod[];
+  continuityStates?: ContinuityState[];
+  nodeStartupContext?: Record<string, NodeStartupSnapshot | null>;
 }
 
 export interface Snapshot {
@@ -177,6 +198,7 @@ export interface RestoreResult {
   snapshotId: string;
   preRestoreSnapshotId: string;
   nodes: RestoreNodeResult[];
+  warnings: string[];
 }
 
 export interface RestoreNodeResult {

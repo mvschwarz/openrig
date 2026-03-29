@@ -87,7 +87,10 @@ export class RestoreOrchestrator {
     this.codexResume = deps.codexResume;
   }
 
-  async restore(snapshotId: string): Promise<RestoreOutcome> {
+  async restore(snapshotId: string, opts?: {
+    adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>;
+    fsOps?: { exists(path: string): boolean };
+  }): Promise<RestoreOutcome> {
     // 1. Load snapshot
     const snapshot = this.snapshotRepo.getSnapshot(snapshotId);
     if (!snapshot) {
@@ -122,8 +125,9 @@ export class RestoreOrchestrator {
 
       // 5. Execute restore with compensating pattern per node
       const nodeResults: RestoreNodeResult[] = [];
+      const restoreWarnings: string[] = [];
       for (const entry of plan) {
-        const result = await this.restoreNodeWithCompensation(entry, rigId, snapshot.data);
+        const result = await this.restoreNodeWithCompensation(entry, rigId, snapshot.data, opts, restoreWarnings);
         nodeResults.push(result);
       }
 
@@ -131,6 +135,7 @@ export class RestoreOrchestrator {
         snapshotId,
         preRestoreSnapshotId: preRestoreSnapshot.id,
         nodes: nodeResults,
+        warnings: restoreWarnings,
       };
 
       // 7. Emit restore.completed
@@ -275,10 +280,28 @@ export class RestoreOrchestrator {
   private async restoreNodeWithCompensation(
     entry: PlanEntry,
     rigId: string,
-    data: SnapshotData
+    data: SnapshotData,
+    opts?: { adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>; fsOps?: { exists(path: string): boolean } },
+    warnings?: string[],
   ): Promise<RestoreNodeResult> {
     const node = entry.node;
     const nodeId = node.id;
+
+    // Consult live continuity state BEFORE clearing stale state
+    if (node.podId) {
+      const continuityRow = this.db.prepare(
+        "SELECT status FROM continuity_state WHERE pod_id = ? AND node_id = ?"
+      ).get(node.podId, nodeId) as { status: string } | undefined;
+      if (continuityRow) {
+        if (continuityRow.status === "restoring") {
+          warnings?.push(`Node ${node.logicalId}: continuity state is 'restoring', skipping`);
+          return { nodeId, logicalId: node.logicalId, status: "fresh_no_checkpoint" };
+        }
+        if (continuityRow.status === "degraded") {
+          warnings?.push(`Node ${node.logicalId}: continuity state is 'degraded', proceeding with caution`);
+        }
+      }
+    }
 
     // Capture prior state for compensation
     const priorState = this.captureNodeState(nodeId, rigId);
@@ -301,14 +324,17 @@ export class RestoreOrchestrator {
 
     // Launch succeeded — do NOT compensate on post-launch failures
     // (the new session/binding are now the current state)
-    return this.postLaunchRestore(entry, rigId, data, launchResult.sessionName);
+    return this.postLaunchRestore(entry, rigId, data, launchResult.sessionName, launchResult, opts, warnings);
   }
 
   private async postLaunchRestore(
     entry: PlanEntry,
     rigId: string,
     data: SnapshotData,
-    sessionName: string
+    sessionName: string,
+    launchResult?: { ok: true; sessionName: string; session: import("./types.js").Session; binding: import("./types.js").Binding },
+    opts?: { adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>; fsOps?: { exists(path: string): boolean } },
+    warnings?: string[],
   ): Promise<RestoreNodeResult> {
     const node = entry.node;
     const session = data.sessions.find((s) => s.nodeId === node.id) ?? null;
@@ -319,27 +345,108 @@ export class RestoreOrchestrator {
     const resumeType = session?.resumeType ?? null;
     const resumeToken = session?.resumeToken ?? null;
 
+    let baseStatus: RestoreNodeResult["status"] = "fresh_no_checkpoint";
+
     if (restorePolicy === "resume_if_possible" && resumeType && resumeType !== "none") {
-      // Attempt resume
       const resumed = await this.attemptResume(sessionName, resumeType, resumeToken, node.cwd ?? "/");
       if (resumed) {
-        return { nodeId: node.id, logicalId: node.logicalId, status: "resumed" };
+        baseStatus = "resumed";
       }
     }
 
-    // Fall through to file-based checkpoint delivery
-    if (checkpoint) {
+    // Checkpoint delivery (if not already resumed)
+    if (baseStatus !== "resumed" && checkpoint) {
       if (!node.cwd) {
         return { nodeId: node.id, logicalId: node.logicalId, status: "failed", error: "Checkpoint available but node has no cwd" };
       }
       const written = this.writeCheckpointFile(node.cwd, checkpoint);
-      if (!written) {
+      if (written) {
+        baseStatus = "checkpoint_written";
+      } else {
         return { nodeId: node.id, logicalId: node.logicalId, status: "failed", error: "Checkpoint file write failed" };
       }
-      return { nodeId: node.id, logicalId: node.logicalId, status: "checkpoint_written" };
     }
 
-    return { nodeId: node.id, logicalId: node.logicalId, status: "fresh_no_checkpoint" };
+    // Attempt restore-safe startup replay if context available
+    if (data.nodeStartupContext && opts?.adapters && launchResult) {
+      const startupCtx = data.nodeStartupContext[node.id];
+      if (startupCtx) {
+        const adapter = opts.adapters[startupCtx.runtime];
+        if (adapter) {
+          // Prefilter: check which files/entries still exist
+          const existsFn = opts.fsOps?.exists ?? (() => true);
+          const filteredEntries = startupCtx.projectionEntries.filter((e) => {
+            if (!existsFn(e.absolutePath)) {
+              warnings?.push(`Restore: missing projection entry ${e.absolutePath} (skipped)`);
+              return false;
+            }
+            return true;
+          });
+          const filteredFiles = startupCtx.resolvedStartupFiles.filter((f) => {
+            if (!existsFn(f.absolutePath)) {
+              if (f.required) {
+                warnings?.push(`Restore: missing REQUIRED startup file ${f.absolutePath}`);
+                return false; // will cause failure below
+              }
+              warnings?.push(`Restore: missing optional startup file ${f.absolutePath} (skipped)`);
+              return false;
+            }
+            return true;
+          });
+
+          // Check if any required files were dropped
+          const missingRequired = startupCtx.resolvedStartupFiles.filter((f) => f.required && !existsFn(f.absolutePath));
+          if (missingRequired.length > 0) {
+            return { nodeId: node.id, logicalId: node.logicalId, status: "failed", error: `Missing required startup files: ${missingRequired.map((f) => f.path).join(", ")}` };
+          }
+
+          // Build fresh projection plan (all safe_projection)
+          const plan: import("./projection-planner.js").ProjectionPlan = {
+            runtime: startupCtx.runtime,
+            cwd: node.cwd ?? ".",
+            entries: filteredEntries.map((e) => ({
+              ...e,
+              classification: "safe_projection" as const,
+              category: e.category as import("./projection-planner.js").ProjectionEntry["category"],
+              mergeStrategy: e.mergeStrategy as import("./projection-planner.js").ProjectionEntry["mergeStrategy"],
+            })),
+            startup: { files: filteredFiles as import("./types.js").StartupFile[], actions: startupCtx.startupActions },
+            conflicts: [],
+            noOps: [],
+            diagnostics: [],
+          };
+
+          const binding = {
+            ...launchResult.binding,
+            cwd: node.cwd ?? ".",
+          };
+
+          try {
+            const { StartupOrchestrator } = await import("./startup-orchestrator.js");
+            const startupOrch = new StartupOrchestrator({ db: this.db, sessionRegistry: this.sessionRegistry, eventBus: this.eventBus, tmuxAdapter: this.tmuxAdapter });
+            const startupResult = await startupOrch.startNode({
+              rigId,
+              nodeId: node.id,
+              sessionId: launchResult.session.id,
+              binding: binding as import("./runtime-adapter.js").NodeBinding,
+              adapter,
+              plan,
+              resolvedStartupFiles: filteredFiles,
+              startupActions: startupCtx.startupActions,
+              isRestore: true,
+            });
+            if (startupResult.ok) {
+              return { nodeId: node.id, logicalId: node.logicalId, status: "resumed" };
+            }
+            warnings?.push(`Restore startup failed for ${node.logicalId}: ${startupResult.errors.join("; ")}`);
+          } catch (err) {
+            warnings?.push(`Restore startup error for ${node.logicalId}: ${(err as Error).message}`);
+          }
+        }
+      }
+    }
+
+    return { nodeId: node.id, logicalId: node.logicalId, status: baseStatus };
   }
 
   private async attemptResume(

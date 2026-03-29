@@ -16,6 +16,7 @@ import { bootstrapSchema } from "../../src/db/migrations/011_bootstrap.js";
 import { discoverySchema } from "../../src/db/migrations/012_discovery.js";
 import { discoveryFkFix } from "../../src/db/migrations/013_discovery_fk_fix.js";
 import { agentspecRebootSchema } from "../../src/db/migrations/014_agentspec_reboot.js";
+import { startupContextSchema } from "../../src/db/migrations/015_startup_context.js";
 import { BootstrapRepository } from "../../src/domain/bootstrap-repository.js";
 import { RuntimeVerifier } from "../../src/domain/runtime-verifier.js";
 import { RequirementsProbeRegistry } from "../../src/domain/requirements-probe.js";
@@ -60,7 +61,7 @@ import fs from "node:fs";
 
 export function createFullTestDb(): Database.Database {
   const db = createDb();
-  migrate(db, [coreSchema, bindingsSessionsSchema, eventsSchema, snapshotsSchema, checkpointsSchema, resumeMetadataSchema, nodeSpecFieldsSchema, packagesSchema, installJournalSchema, journalSeqSchema, bootstrapSchema, discoverySchema, discoveryFkFix, agentspecRebootSchema]);
+  migrate(db, [coreSchema, bindingsSessionsSchema, eventsSchema, snapshotsSchema, checkpointsSchema, resumeMetadataSchema, nodeSpecFieldsSchema, packagesSchema, installJournalSchema, journalSeqSchema, bootstrapSchema, discoverySchema, discoveryFkFix, agentspecRebootSchema, startupContextSchema]);
   return db;
 }
 

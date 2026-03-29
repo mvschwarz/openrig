@@ -9,6 +9,9 @@ interface CreateCheckpointData {
   blockedOn?: string | null;
   keyArtifacts?: string[];
   confidence?: string | null;
+  podId?: string | null;
+  continuitySource?: string | null;
+  continuityArtifactsJson?: string | null;
 }
 
 export class CheckpointStore {
@@ -22,8 +25,8 @@ export class CheckpointStore {
     const id = ulid();
     this.db
       .prepare(
-        `INSERT INTO checkpoints (id, node_id, summary, current_task, next_step, blocked_on, key_artifacts, confidence)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO checkpoints (id, node_id, summary, current_task, next_step, blocked_on, key_artifacts, confidence, pod_id, continuity_source, continuity_artifacts_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         id,
@@ -33,7 +36,10 @@ export class CheckpointStore {
         data.nextStep ?? null,
         data.blockedOn ?? null,
         JSON.stringify(data.keyArtifacts ?? []),
-        data.confidence ?? null
+        data.confidence ?? null,
+        data.podId ?? null,
+        data.continuitySource ?? null,
+        data.continuityArtifactsJson ?? null,
       );
 
     return this.rowToCheckpoint(

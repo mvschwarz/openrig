@@ -63,13 +63,37 @@ export class SnapshotCapture {
     // 3. Get checkpoints as map (latest per node)
     const checkpoints = this.checkpointStore.getCheckpointsForRig(rigId);
 
-    // 4. Assemble SnapshotData
+    // 4. Get pods + continuity state + startup context
+    const podRows = this.db.prepare("SELECT * FROM pods WHERE rig_id = ?")
+      .all(rigId) as Array<{ id: string; rig_id: string; label: string; summary: string | null; continuity_policy_json: string | null; created_at: string }>;
+    const podIds = podRows.map((p) => p.id);
+    const continuityRows = podIds.length > 0
+      ? this.db.prepare(`SELECT * FROM continuity_state WHERE pod_id IN (${podIds.map(() => "?").join(",")})`)
+          .all(...podIds) as Array<{ pod_id: string; node_id: string; status: string; artifacts_json: string | null; last_sync_at: string | null; updated_at: string }>
+      : [];
+
+    const nodeStartupContext: Record<string, import("./types.js").NodeStartupSnapshot | null> = {};
+    for (const node of rig.nodes) {
+      const ctx = this.db.prepare("SELECT * FROM node_startup_context WHERE node_id = ?")
+        .get(node.id) as { projection_entries_json: string; resolved_files_json: string; startup_actions_json: string; runtime: string } | undefined;
+      nodeStartupContext[node.id] = ctx ? {
+        projectionEntries: JSON.parse(ctx.projection_entries_json),
+        resolvedStartupFiles: JSON.parse(ctx.resolved_files_json),
+        startupActions: JSON.parse(ctx.startup_actions_json),
+        runtime: ctx.runtime,
+      } : null;
+    }
+
+    // 5. Assemble SnapshotData
     const data: SnapshotData = {
       rig: rig.rig,
       nodes: rig.nodes,
       edges: rig.edges,
       sessions,
       checkpoints,
+      pods: podRows.map((p) => ({ id: p.id, rigId: p.rig_id, label: p.label, summary: p.summary, continuityPolicyJson: p.continuity_policy_json, createdAt: p.created_at })),
+      continuityStates: continuityRows.map((r) => ({ podId: r.pod_id, nodeId: r.node_id, status: r.status as "healthy" | "degraded" | "restoring", artifactsJson: r.artifacts_json, lastSyncAt: r.last_sync_at, updatedAt: r.updated_at })),
+      nodeStartupContext,
     };
 
     // 5. Atomic: persist snapshot + event in one transaction
