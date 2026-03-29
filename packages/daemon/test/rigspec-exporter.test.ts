@@ -10,8 +10,8 @@ import { nodeSpecFieldsSchema } from "../src/db/migrations/007_node_spec_fields.
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { RigSpecExporter } from "../src/domain/rigspec-exporter.js";
-import { RigSpecSchema } from "../src/domain/rigspec-schema.js";
-import { RigSpecCodec } from "../src/domain/rigspec-codec.js";
+import { LegacyRigSpecSchema as RigSpecSchema } from "../src/domain/rigspec-schema.js"; // TODO: AS-T08b — migrate to pod-aware RigSpec
+import { LegacyRigSpecCodec as RigSpecCodec } from "../src/domain/rigspec-codec.js"; // TODO: AS-T08b — migrate to pod-aware RigSpec
 import { RigNotFoundError } from "../src/domain/errors.js";
 
 function setupDb(): Database.Database {

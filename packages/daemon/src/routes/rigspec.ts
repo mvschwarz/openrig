@@ -3,8 +3,8 @@ import type { Context } from "hono";
 import type { RigSpecExporter } from "../domain/rigspec-exporter.js";
 import type { RigInstantiator } from "../domain/rigspec-instantiator.js";
 import type { RigSpecPreflight } from "../domain/rigspec-preflight.js";
-import { RigSpecCodec } from "../domain/rigspec-codec.js";
-import { RigSpecSchema } from "../domain/rigspec-schema.js";
+import { LegacyRigSpecCodec as RigSpecCodec } from "../domain/rigspec-codec.js"; // TODO: AS-T08b — migrate to pod-aware RigSpec
+import { LegacyRigSpecSchema as RigSpecSchema } from "../domain/rigspec-schema.js"; // TODO: AS-T08b — migrate to pod-aware RigSpec
 import { RigNotFoundError } from "../domain/errors.js";
 
 export const rigspecImportRoutes = new Hono();

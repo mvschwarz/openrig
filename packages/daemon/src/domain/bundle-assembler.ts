@@ -1,6 +1,6 @@
 import nodePath from "node:path";
-import { RigSpecCodec } from "./rigspec-codec.js";
-import { RigSpecSchema } from "./rigspec-schema.js";
+import { LegacyRigSpecCodec as RigSpecCodec } from "./rigspec-codec.js"; // TODO: AS-T08b — migrate to pod-aware RigSpec
+import { LegacyRigSpecSchema as RigSpecSchema } from "./rigspec-schema.js"; // TODO: AS-T08b — migrate to pod-aware RigSpec
 import { serializeBundleManifest, type BundleManifest } from "./bundle-types.js";
 
 export interface AssemblerFsOps {

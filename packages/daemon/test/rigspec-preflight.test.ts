@@ -8,7 +8,7 @@ import { bindingsSessionsSchema } from "../src/db/migrations/002_bindings_sessio
 import { nodeSpecFieldsSchema } from "../src/db/migrations/007_node_spec_fields.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { RigSpecPreflight } from "../src/domain/rigspec-preflight.js";
-import type { RigSpec } from "../src/domain/types.js";
+import type { LegacyRigSpec as RigSpec } from "../src/domain/types.js"; // TODO: AS-T08b — migrate to pod-aware RigSpec
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import type { ExecFn } from "../src/adapters/tmux.js";
 

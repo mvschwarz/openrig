@@ -3,7 +3,7 @@ import type Database from "better-sqlite3";
 import type { Hono } from "hono";
 import type { RigRepository } from "../src/domain/rig-repository.js";
 import type { RigSpecExporter } from "../src/domain/rigspec-exporter.js";
-import { RigSpecCodec } from "../src/domain/rigspec-codec.js";
+import { LegacyRigSpecCodec as RigSpecCodec } from "../src/domain/rigspec-codec.js"; // TODO: AS-T08b — migrate to pod-aware RigSpec
 import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
 import { createDaemon } from "../src/startup.js";
 import { RigSpecExporter as RigSpecExporterClass } from "../src/domain/rigspec-exporter.js";

@@ -9,8 +9,8 @@ import { BundleAssembler, type AssemblerFsOps } from "../domain/bundle-assembler
 import { computeIntegrity, writeIntegrity, verifyIntegrity, type IntegrityFsOps } from "../domain/bundle-integrity.js";
 import { pack, unpack, verifyArchiveDigest } from "../domain/bundle-archive.js";
 import { resolvePackage } from "../domain/package-resolve-helper.js";
-import { RigSpecCodec } from "../domain/rigspec-codec.js";
-import { RigSpecSchema } from "../domain/rigspec-schema.js";
+import { LegacyRigSpecCodec as RigSpecCodec } from "../domain/rigspec-codec.js"; // TODO: AS-T08b — migrate to pod-aware RigSpec
+import { LegacyRigSpecSchema as RigSpecSchema } from "../domain/rigspec-schema.js"; // TODO: AS-T08b — migrate to pod-aware RigSpec
 import { parseBundleManifest, normalizeBundleManifest } from "../domain/bundle-types.js";
 import type { FsOps } from "../domain/package-resolver.js";
 

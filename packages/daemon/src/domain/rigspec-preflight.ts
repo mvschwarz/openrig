@@ -3,7 +3,7 @@ import type Database from "better-sqlite3";
 import type { RigRepository } from "./rig-repository.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import type { ExecFn } from "../adapters/tmux.js";
-import type { RigSpec, PreflightResult } from "./types.js";
+import type { LegacyRigSpec as RigSpec, PreflightResult } from "./types.js"; // TODO: AS-T08b — migrate to pod-aware RigSpec
 import { deriveSessionName, validateSessionName } from "./session-name.js";
 
 const RUNTIME_COMMANDS: Record<string, string> = {

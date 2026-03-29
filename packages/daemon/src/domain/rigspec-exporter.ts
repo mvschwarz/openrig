@@ -1,6 +1,6 @@
 import type { RigRepository } from "./rig-repository.js";
 import type { SessionRegistry } from "./session-registry.js";
-import type { RigSpec, RigSpecNode, RigSpecEdge } from "./types.js";
+import type { LegacyRigSpec as RigSpec, LegacyRigSpecNode as RigSpecNode, LegacyRigSpecEdge as RigSpecEdge } from "./types.js"; // TODO: AS-T08b — migrate to pod-aware RigSpec
 import { RigNotFoundError } from "./errors.js";
 
 interface RigSpecExporterDeps {

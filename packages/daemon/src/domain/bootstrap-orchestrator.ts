@@ -1,8 +1,8 @@
 import nodePath from "node:path";
 import type Database from "better-sqlite3";
-import type { RigSpec } from "./types.js";
-import { RigSpecCodec } from "./rigspec-codec.js";
-import { RigSpecSchema } from "./rigspec-schema.js";
+import type { LegacyRigSpec as RigSpec } from "./types.js"; // TODO: AS-T08b — migrate to pod-aware RigSpec
+import { LegacyRigSpecCodec as RigSpecCodec } from "./rigspec-codec.js"; // TODO: AS-T08b — migrate to pod-aware RigSpec
+import { LegacyRigSpecSchema as RigSpecSchema } from "./rigspec-schema.js"; // TODO: AS-T08b — migrate to pod-aware RigSpec
 import type { BootstrapRepository } from "./bootstrap-repository.js";
 import type { RuntimeVerifier } from "./runtime-verifier.js";
 import type { RequirementsProbeRegistry, RequirementSpec } from "./requirements-probe.js";

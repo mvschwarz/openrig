@@ -270,17 +270,18 @@ export interface AgentSpec {
   profiles: Record<string, ProfileSpec>;
 }
 
-// -- RigSpec types (Phase 3) --
+// -- Legacy RigSpec types (Phase 3, pre-reboot flat contract) --
+// TODO: Remove when AS-T08b/AS-T12 migrate all consumers to pod-aware RigSpec
 
-export interface RigSpec {
+export interface LegacyRigSpec {
   schemaVersion: number;
   name: string;
   version: string;
-  nodes: RigSpecNode[];
-  edges: RigSpecEdge[];
+  nodes: LegacyRigSpecNode[];
+  edges: LegacyRigSpecEdge[];
 }
 
-export interface RigSpecNode {
+export interface LegacyRigSpecNode {
   id: string;
   runtime: string;
   role?: string;
@@ -292,10 +293,63 @@ export interface RigSpecNode {
   packageRefs?: string[];
 }
 
-export interface RigSpecEdge {
+export interface LegacyRigSpecEdge {
   from: string;
   to: string;
   kind: string;
+}
+
+// -- RigSpec types (pod-aware, AgentSpec reboot) --
+
+export interface ContinuityPolicySpec {
+  enabled: boolean;
+  syncTriggers?: string[];
+  artifacts?: { sessionLog?: boolean; restoreBrief?: boolean; quiz?: boolean };
+  restoreProtocol?: { peerDriven?: boolean; verifyViaQuiz?: boolean };
+}
+
+export interface RigSpecPodMember {
+  id: string;
+  label?: string;
+  agentRef: string;
+  profile: string;
+  runtime: string;
+  model?: string;
+  cwd: string;
+  restorePolicy?: string;
+  startup?: StartupBlock;
+}
+
+export interface RigSpecPodEdge {
+  kind: string;
+  from: string;
+  to: string;
+}
+
+export interface RigSpecCrossPodEdge {
+  kind: string;
+  from: string;
+  to: string;
+}
+
+export interface RigSpecPod {
+  id: string;
+  label: string;
+  summary?: string;
+  continuityPolicy?: ContinuityPolicySpec;
+  startup?: StartupBlock;
+  members: RigSpecPodMember[];
+  edges: RigSpecPodEdge[];
+}
+
+export interface RigSpec {
+  version: string;
+  name: string;
+  summary?: string;
+  cultureFile?: string;
+  startup?: StartupBlock;
+  pods: RigSpecPod[];
+  edges: RigSpecCrossPodEdge[];
 }
 
 export interface ValidationResult {
