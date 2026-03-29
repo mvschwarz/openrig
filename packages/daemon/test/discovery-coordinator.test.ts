@@ -14,6 +14,8 @@ import { installJournalSchema } from "../src/db/migrations/009_install_journal.j
 import { journalSeqSchema } from "../src/db/migrations/010_journal_seq.js";
 import { bootstrapSchema } from "../src/db/migrations/011_bootstrap.js";
 import { discoverySchema } from "../src/db/migrations/012_discovery.js";
+import { discoveryFkFix } from "../src/db/migrations/013_discovery_fk_fix.js";
+import { agentspecRebootSchema } from "../src/db/migrations/014_agentspec_reboot.js";
 import { DiscoveryCoordinator } from "../src/domain/discovery-coordinator.js";
 import { DiscoveryRepository } from "../src/domain/discovery-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
@@ -25,7 +27,7 @@ import type { SessionEnricher, EnrichmentResult } from "../src/domain/session-en
 const ALL_MIGRATIONS = [
   coreSchema, bindingsSessionsSchema, eventsSchema, snapshotsSchema,
   checkpointsSchema, resumeMetadataSchema, nodeSpecFieldsSchema,
-  packagesSchema, installJournalSchema, journalSeqSchema, bootstrapSchema, discoverySchema,
+  packagesSchema, installJournalSchema, journalSeqSchema, bootstrapSchema, discoverySchema, discoveryFkFix, agentspecRebootSchema,
 ];
 
 function makePane(overrides?: Partial<ScannedPane>): ScannedPane {

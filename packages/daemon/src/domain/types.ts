@@ -5,6 +5,24 @@ export interface Rig {
   updatedAt: string;
 }
 
+export interface Pod {
+  id: string;
+  rigId: string;
+  label: string;
+  summary: string | null;
+  continuityPolicyJson: string | null;
+  createdAt: string;
+}
+
+export interface ContinuityState {
+  podId: string;
+  nodeId: string;
+  status: "healthy" | "degraded" | "restoring";
+  artifactsJson: string | null;
+  lastSyncAt: string | null;
+  updatedAt: string;
+}
+
 export interface Node {
   id: string;
   rigId: string;
@@ -17,6 +35,13 @@ export interface Node {
   workspace: string | null;
   restorePolicy: string | null;
   packageRefs: string[];
+  podId: string | null;
+  agentRef: string | null;
+  profile: string | null;
+  label: string | null;
+  resolvedSpecName: string | null;
+  resolvedSpecVersion: string | null;
+  resolvedSpecHash: string | null;
   createdAt: string;
 }
 
@@ -51,6 +76,8 @@ export interface Session {
   lastSeenAt: string | null;
   createdAt: string;
   origin: "launched" | "claimed";
+  startupStatus: "pending" | "ready" | "failed";
+  startupCompletedAt: string | null;
 }
 
 // -- Event types --
@@ -87,7 +114,15 @@ export type RigEvent =
   // Bundle events (cross-rig)
   | { type: "bundle.created"; bundleName: string; bundleVersion: string; archiveHash: string }
   // Teardown events
-  | { type: "rig.stopped"; rigId: string };
+  | { type: "rig.stopped"; rigId: string }
+  // AgentSpec reboot events — pods + startup + continuity
+  | { type: "pod.created"; rigId: string; podId: string; label: string }
+  | { type: "pod.deleted"; rigId: string; podId: string }
+  | { type: "node.startup_pending"; rigId: string; nodeId: string }
+  | { type: "node.startup_ready"; rigId: string; nodeId: string }
+  | { type: "node.startup_failed"; rigId: string; nodeId: string; error: string }
+  | { type: "continuity.sync"; rigId: string; podId: string; nodeId: string }
+  | { type: "continuity.degraded"; rigId: string; podId: string; nodeId: string; reason: string };
 
 export type PersistedEvent = RigEvent & {
   seq: number;
@@ -132,6 +167,9 @@ export interface Checkpoint {
   blockedOn: string | null;
   keyArtifacts: string[];
   confidence: string | null;
+  podId: string | null;
+  continuitySource: string | null;
+  continuityArtifactsJson: string | null;
   createdAt: string;
 }
 

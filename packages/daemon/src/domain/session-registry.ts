@@ -35,12 +35,12 @@ export class SessionRegistry {
     );
   }
 
-  /** Register a claimed session — skips naming validation, sets origin='claimed'. */
+  /** Register a claimed session — skips naming validation, sets origin='claimed', startup_status='ready'. */
   registerClaimedSession(nodeId: string, sessionName: string): Session {
     const id = ulid();
     this.db
       .prepare(
-        "INSERT INTO sessions (id, node_id, session_name, status, origin) VALUES (?, ?, ?, 'running', 'claimed')"
+        "INSERT INTO sessions (id, node_id, session_name, status, origin, startup_status) VALUES (?, ?, ?, 'running', 'claimed', 'ready')"
       )
       .run(id, nodeId, sessionName);
 
@@ -156,6 +156,8 @@ export class SessionRegistry {
       lastSeenAt: row.last_seen_at,
       createdAt: row.created_at,
       origin: (row.origin === "claimed" ? "claimed" : "launched"),
+      startupStatus: (row.startup_status as Session["startupStatus"]) ?? "pending",
+      startupCompletedAt: row.startup_completed_at ?? null,
     };
   }
 
@@ -186,6 +188,8 @@ interface SessionRow {
   last_seen_at: string | null;
   created_at: string;
   origin: string;
+  startup_status: string | null;
+  startup_completed_at: string | null;
 }
 
 interface BindingRow {

@@ -82,6 +82,9 @@ export class CheckpointStore {
       blockedOn: row.blocked_on,
       keyArtifacts: row.key_artifacts ? JSON.parse(row.key_artifacts) as string[] : [],
       confidence: row.confidence,
+      podId: row.pod_id ?? null,
+      continuitySource: row.continuity_source ?? null,
+      continuityArtifactsJson: row.continuity_artifacts_json ?? null,
       createdAt: row.created_at,
     };
   }
@@ -96,5 +99,8 @@ interface CheckpointRow {
   blocked_on: string | null;
   key_artifacts: string | null;
   confidence: string | null;
+  pod_id: string | null;
+  continuity_source: string | null;
+  continuity_artifacts_json: string | null;
   created_at: string;
 }

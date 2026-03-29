@@ -170,6 +170,13 @@ export class RigRepository {
       workspace: row.workspace ?? null,
       restorePolicy: row.restore_policy ?? null,
       packageRefs: row.package_refs ? JSON.parse(row.package_refs) as string[] : [],
+      podId: row.pod_id ?? null,
+      agentRef: row.agent_ref ?? null,
+      profile: row.profile ?? null,
+      label: row.label ?? null,
+      resolvedSpecName: row.resolved_spec_name ?? null,
+      resolvedSpecVersion: row.resolved_spec_version ?? null,
+      resolvedSpecHash: row.resolved_spec_hash ?? null,
       createdAt: row.created_at,
     };
   }
@@ -220,6 +227,13 @@ interface NodeRow {
   workspace: string | null;
   restore_policy: string | null;
   package_refs: string | null;
+  pod_id: string | null;
+  agent_ref: string | null;
+  profile: string | null;
+  label: string | null;
+  resolved_spec_name: string | null;
+  resolved_spec_version: string | null;
+  resolved_spec_hash: string | null;
   created_at: string;
 }
 

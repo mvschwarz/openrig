@@ -188,6 +188,36 @@ describe("EventBus", () => {
     expect(row!.seq).toBe(persisted.seq);
   });
 
+  // T12: AgentSpec reboot event types persist and round-trip
+  it("new AgentSpec reboot event types persist via EventBus", () => {
+    const events: RigEvent[] = [
+      { type: "pod.created", rigId: "rig-1", podId: "p1", label: "Dev" },
+      { type: "pod.deleted", rigId: "rig-1", podId: "p1" },
+      { type: "node.startup_pending", rigId: "rig-1", nodeId: "n1" },
+      { type: "node.startup_ready", rigId: "rig-1", nodeId: "n1" },
+      { type: "node.startup_failed", rigId: "rig-1", nodeId: "n1", error: "timeout" },
+      { type: "continuity.sync", rigId: "rig-1", podId: "p1", nodeId: "n1" },
+      { type: "continuity.degraded", rigId: "rig-1", podId: "p1", nodeId: "n1", reason: "stale artifacts" },
+    ];
+
+    for (const event of events) {
+      const persisted = bus.emit(event);
+      expect(persisted.seq).toBeDefined();
+      expect(persisted.type).toBe(event.type);
+    }
+
+    // Verify all 7 are in the DB
+    const rows = db.prepare("SELECT type FROM events ORDER BY seq").all() as { type: string }[];
+    const types = rows.map((r) => r.type);
+    expect(types).toContain("pod.created");
+    expect(types).toContain("pod.deleted");
+    expect(types).toContain("node.startup_pending");
+    expect(types).toContain("node.startup_ready");
+    expect(types).toContain("node.startup_failed");
+    expect(types).toContain("continuity.sync");
+    expect(types).toContain("continuity.degraded");
+  });
+
   it("notifySubscribers fans out to subscribers without DB insert", () => {
     const received: PersistedEvent[] = [];
     bus.subscribe((event) => received.push(event));
