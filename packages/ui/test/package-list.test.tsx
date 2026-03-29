@@ -179,7 +179,7 @@ describe("PackageList", () => {
     );
 
     await waitFor(() => {
-      const navItem = screen.getByTestId("nav-packages");
+      const navItem = screen.getByTestId("nav-pkgs");
       expect(navItem).toBeTruthy();
       expect(navItem.getAttribute("aria-current")).toBe("page");
     });

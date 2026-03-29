@@ -142,7 +142,7 @@ describe("App Shell + Routing", () => {
     await renderRealAppAt("/");
 
     await waitFor(() => {
-      expect(screen.getByTestId("health-text").textContent).toBe("CONNECTED");
+      expect(screen.getByTestId("health-text").textContent).toBe("SYSTEM_STABLE");
     });
   });
 

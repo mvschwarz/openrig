@@ -37,13 +37,13 @@ function mockDisconnected() {
 
 describe("StatusBar", () => {
   // Test 1: Connected state
-  it("shows CONNECTED with health dot bg-success", async () => {
+  it("shows SYSTEM_STABLE with health dot bg-success", async () => {
     mockConnected();
     const qc = createTestQueryClient();
     render(<QueryClientProvider client={qc}><StatusBar /></QueryClientProvider>);
 
     await waitFor(() => {
-      expect(screen.getByTestId("health-text").textContent).toBe("CONNECTED");
+      expect(screen.getByTestId("health-text").textContent).toBe("SYSTEM_STABLE");
       expect(screen.getByTestId("health-dot").className).toContain("bg-success");
     });
   });
@@ -67,7 +67,7 @@ describe("StatusBar", () => {
 
     await waitFor(() => {
       expect(screen.getByTestId("health-text").textContent).toBe("DISCONNECTED");
-      expect(screen.getByTestId("health-dot").className).toContain("bg-destructive");
+      expect(screen.getByTestId("health-dot").className).toContain("bg-tertiary");
       expect(screen.getByTestId("rig-count").textContent).toContain("—");
       expect(screen.getByTestId("cmux-status").textContent).toContain("—");
     });
@@ -91,7 +91,7 @@ describe("StatusBar", () => {
     });
 
     await waitFor(() => {
-      expect(screen.getByTestId("health-text").textContent).toBe("CONNECTED");
+      expect(screen.getByTestId("health-text").textContent).toBe("SYSTEM_STABLE");
     });
   });
 
@@ -136,7 +136,7 @@ describe("StatusBar", () => {
 
     // Rig count and cmux should refresh after reconnect
     await waitFor(() => {
-      expect(screen.getByTestId("health-text").textContent).toBe("CONNECTED");
+      expect(screen.getByTestId("health-text").textContent).toBe("SYSTEM_STABLE");
       expect(screen.getByTestId("rig-count").textContent).toContain("2");
       expect(screen.getByTestId("cmux-status").textContent).toContain("OK");
     });
@@ -159,7 +159,7 @@ describe("StatusBar", () => {
     });
 
     await waitFor(() => {
-      expect(screen.getByTestId("health-text").textContent).toBe("CONNECTED");
+      expect(screen.getByTestId("health-text").textContent).toBe("SYSTEM_STABLE");
       expect(screen.getByTestId("health-dot").className).toContain("status-changed");
     });
   });

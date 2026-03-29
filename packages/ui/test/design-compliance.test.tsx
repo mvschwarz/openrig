@@ -24,10 +24,14 @@ describe("Design System Compliance", () => {
     const radiusMatch = config.match(/borderRadius:\s*\{([^}]+)\}/);
     expect(radiusMatch).not.toBeNull();
 
-    // All radius values are 0px
-    const pairs = [...radiusMatch![1]!.matchAll(/:\s*"([^"]+)"/g)];
-    for (const [, value] of pairs) {
-      expect(value).toBe("0px");
+    // All radius values are 0px (except `full: "9999px"` for stamp circles)
+    const pairs = [...radiusMatch![1]!.matchAll(/(\w+):\s*"([^"]+)"/g)];
+    for (const [, key, value] of pairs) {
+      if (key === "full") {
+        expect(value).toBe("9999px");
+      } else {
+        expect(value).toBe("0px");
+      }
     }
 
     // No inline borderRadius in source files

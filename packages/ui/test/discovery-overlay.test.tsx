@@ -137,8 +137,14 @@ describe("DiscoveryOverlay", () => {
         return { ok: true, json: async () => ({ sessions: claimDone ? [] : MOCK_SESSIONS }) };
       }
       if (typeof url === "string" && url.includes("/discovery")) {
-        // After claim, return empty (claimed session removed from active)
-        return { ok: true, json: async () => claimDone ? [] : MOCK_SESSIONS };
+        // The real API returns claimed rows from the unfiltered list.
+        // The overlay must hide them while still allowing vanished rows through.
+        return {
+          ok: true,
+          json: async () => claimDone
+            ? [{ ...MOCK_SESSIONS[0]!, status: "claimed", claimedNodeId: "n-1" }]
+            : [MOCK_SESSIONS[0]!],
+        };
       }
       return { ok: false, status: 404, json: async () => ({}) };
     });
@@ -160,8 +166,9 @@ describe("DiscoveryOverlay", () => {
       expect(screen.queryByTestId("claim-dialog")).toBeNull();
     });
 
-    // The claim mutation's onSuccess invalidates ['discovery'] which triggers refetch
-    // After refetch with claimDone=true, mock returns empty -> empty state shows
+    // The claim mutation's onSuccess invalidates ['discovery'] which triggers refetch.
+    // After refetch with claimDone=true, the backend still returns the claimed row,
+    // but the overlay hides claimed sessions from the discovery list.
     await waitFor(() => {
       expect(screen.getByTestId("discovery-empty")).toBeTruthy();
     });

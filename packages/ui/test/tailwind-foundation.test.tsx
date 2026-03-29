@@ -25,10 +25,10 @@ describe("Tailwind Foundation", () => {
     const root = document.documentElement;
     const styles = getComputedStyle(root);
 
-    expect(styles.getPropertyValue("--background").trim()).toContain("50 5% 84%");
-    expect(styles.getPropertyValue("--foreground").trim()).toContain("0 0% 2%");
-    expect(styles.getPropertyValue("--primary").trim()).toContain("0 0% 2%");
-    expect(styles.getPropertyValue("--destructive").trim()).toContain("0 72% 51%");
+    expect(styles.getPropertyValue("--background").trim()).toContain("47 20% 97%");
+    expect(styles.getPropertyValue("--on-surface").trim()).toContain("120 8% 19%");
+    expect(styles.getPropertyValue("--primary").trim()).toContain("0 1% 37%");
+    expect(styles.getPropertyValue("--tertiary").trim()).toContain("1 63% 42%");
   });
 
   // Test 2: ALL borderRadius tokens zeroed in config
@@ -38,10 +38,14 @@ describe("Tailwind Foundation", () => {
     const radiusMatch = config.match(/borderRadius:\s*\{([^}]+)\}/);
     expect(radiusMatch).not.toBeNull();
 
-    const pairs = [...radiusMatch![1]!.matchAll(/:\s*"([^"]+)"/g)];
+    const pairs = [...radiusMatch![1]!.matchAll(/(\w+):\s*"([^"]+)"/g)];
     expect(pairs.length).toBeGreaterThanOrEqual(6);
-    for (const [, value] of pairs) {
-      expect(value).toBe("0px");
+    for (const [, key, value] of pairs) {
+      if (key === "full") {
+        expect(value).toBe("9999px");
+      } else {
+        expect(value).toBe("0px");
+      }
     }
   });
 
@@ -93,7 +97,7 @@ describe("Tailwind Foundation", () => {
     const cssText = Array.from(styleSheets).map((s) => s.textContent).join("");
 
     expect(cssText).toContain("--background");
-    expect(cssText).toContain("--surface-dark");
-    expect(cssText).toContain("--ghost-border");
+    expect(cssText).toContain("--surface-container-low");
+    expect(cssText).toContain("--outline-variant");
   });
 });

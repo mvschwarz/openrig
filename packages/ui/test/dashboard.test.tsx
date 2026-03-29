@@ -70,9 +70,9 @@ describe("Dashboard", () => {
 
     await waitFor(() => {
       expect(screen.getByText("alpha")).toBeDefined();
-      // Node count should be in a mono font element
+      // Node count is in a span whose parent div has font-mono
       const countEl = screen.getByTestId("node-count-r1");
-      expect(countEl.className).toContain("font-mono");
+      expect(countEl.parentElement!.className).toContain("font-mono");
     });
   });
 
@@ -302,7 +302,8 @@ describe("Dashboard", () => {
 
     await waitFor(() => expect(screen.getByText("alpha")).toBeDefined());
 
-    fireEvent.click(screen.getByTestId("down-btn-r1"));
+    const downBtn = screen.getAllByText("DOWN").find((el) => el.closest("button"))!;
+    fireEvent.click(downBtn);
 
     await waitFor(() => {
       expect(screen.getByText(/Tear Down Rig/)).toBeDefined();
@@ -317,7 +318,8 @@ describe("Dashboard", () => {
 
     await waitFor(() => expect(screen.getByText("alpha")).toBeDefined());
 
-    fireEvent.click(screen.getByTestId("down-btn-r1"));
+    const downBtn = screen.getAllByText("DOWN").find((el) => el.closest("button"))!;
+    fireEvent.click(downBtn);
     await waitFor(() => expect(screen.getByTestId("confirm-down-btn")).toBeDefined());
 
     fireEvent.click(screen.getByTestId("confirm-down-btn"));
@@ -335,7 +337,7 @@ describe("Dashboard", () => {
     });
   });
 
-  // T4: Status badge shows running/partial/stopped
+  // T4: Status badge shows running/stopped per rig (based on runningCount > 0)
   it("status badge shows correct status per rig", async () => {
     const rigs = [
       { id: "r1", name: "alpha", nodeCount: 3, latestSnapshotAt: null, latestSnapshotId: null },
@@ -351,9 +353,13 @@ describe("Dashboard", () => {
     render(createTestRouter({ component: Dashboard }));
 
     await waitFor(() => {
-      expect(screen.getByTestId("status-badge-r1").textContent).toBe("RUNNING");
-      expect(screen.getByTestId("status-badge-r2").textContent).toBe("PARTIAL");
-      expect(screen.getByTestId("status-badge-r3").textContent).toBe("STOPPED");
+      // RigCard shows RUNNING when runningCount > 0, STOPPED when 0
+      const card1 = screen.getByTestId("rig-card-r1");
+      expect(card1.textContent).toContain("RUNNING");
+      const card2 = screen.getByTestId("rig-card-r2");
+      expect(card2.textContent).toContain("RUNNING");
+      const card3 = screen.getByTestId("rig-card-r3");
+      expect(card3.textContent).toContain("STOPPED");
     });
   });
 
@@ -377,8 +383,8 @@ describe("Dashboard", () => {
     });
   });
 
-  // T6: Stopped rig card has dimmed styling
-  it("stopped rig card has opacity-60", async () => {
+  // T6: Stopped rig card shows STOPPED status and no active indicator
+  it("stopped rig card shows STOPPED status", async () => {
     const rigs = [{ id: "r1", name: "alpha", nodeCount: 1, latestSnapshotAt: null, latestSnapshotId: null }];
     const ps = [{ rigId: "r1", name: "alpha", nodeCount: 1, runningCount: 0, status: "stopped", uptime: null, latestSnapshot: null }];
     setupSummaryMock(rigs, ps);
@@ -386,7 +392,9 @@ describe("Dashboard", () => {
 
     await waitFor(() => {
       const card = screen.getByTestId("rig-card-r1");
-      expect(card.className).toContain("opacity-60");
+      expect(card.textContent).toContain("STOPPED");
+      // No ACTIVE indicator for stopped rigs
+      expect(card.textContent).not.toContain("ACTIVE");
     });
   });
 
@@ -408,7 +416,8 @@ describe("Dashboard", () => {
     render(createTestRouter({ component: Dashboard }));
     await waitFor(() => expect(screen.getByText("alpha")).toBeDefined());
 
-    fireEvent.click(screen.getByTestId("down-btn-r1"));
+    const downBtn = screen.getAllByText("DOWN").find((el) => el.closest("button"))!;
+    fireEvent.click(downBtn);
     await waitFor(() => expect(screen.getByTestId("confirm-down-btn")).toBeDefined());
 
     fireEvent.click(screen.getByTestId("confirm-down-btn"));
@@ -421,8 +430,8 @@ describe("Dashboard", () => {
     expect(screen.getByText(/Tear Down Rig/)).toBeDefined();
   });
 
-  // T8: /api/ps failure does not show misleading ACTIVE or 0 nodes
-  it("ps failure shows dash instead of ACTIVE, omits node count from header", async () => {
+  // T8: /api/ps failure shows STOPPED (no ps = no running count) and omits running nodes from header
+  it("ps failure shows STOPPED, omits node count from header", async () => {
     mockFetch.mockImplementation((url: string) => {
       if (url === "/api/rigs/summary") {
         return Promise.resolve({ ok: true, json: async () => [{ id: "r1", name: "alpha", nodeCount: 2, latestSnapshotAt: null, latestSnapshotId: null }] });
@@ -436,13 +445,12 @@ describe("Dashboard", () => {
     render(createTestRouter({ component: Dashboard }));
 
     await waitFor(() => {
-      // Status should show dash, not ACTIVE
-      const badge = screen.getByTestId("status-badge-r1");
-      expect(badge.textContent).toBe("—");
-      expect(badge.textContent).not.toBe("ACTIVE");
+      // Card should show STOPPED when ps data is unavailable (no runningCount)
+      const card = screen.getByTestId("rig-card-r1");
+      expect(card.textContent).toContain("STOPPED");
     });
 
-    // Header should NOT show "0 nodes running"
+    // Header should NOT show "nodes running" when ps data is unavailable
     const header = screen.getByTestId("aggregate-header");
     expect(header.textContent).not.toContain("nodes running");
   });

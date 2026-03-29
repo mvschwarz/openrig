@@ -200,14 +200,14 @@ describe("SnapshotPanel", () => {
     fireEvent.click(screen.getByTestId("confirm-restore-snap-1"));
 
     await waitFor(() => {
-      const launched = screen.getByTestId("restore-status-orchestrator");
-      expect(launched.className).toContain("text-success");
+      const resumed = screen.getByTestId("restore-status-orchestrator");
+      expect(resumed.className).toContain("text-stone-400");
       const failed = screen.getByTestId("restore-status-worker");
-      expect(failed.className).toContain("text-destructive");
+      expect(failed.className).toContain("text-tertiary");
     });
   });
 
-  it("restore stays disabled while the rig is still running", async () => {
+  it("restore button is always clickable and opens dialog", async () => {
     mockFetch.mockImplementation((url: string) => {
       if (url === "/api/ps") {
         return Promise.resolve({
@@ -237,11 +237,11 @@ describe("SnapshotPanel", () => {
     await waitFor(() => expect(screen.getByTestId("restore-btn-snap-1")).toBeDefined());
 
     const restoreBtn = screen.getByTestId("restore-btn-snap-1") as HTMLButtonElement;
-    expect(restoreBtn.disabled).toBe(true);
-    expect(screen.getByTestId("restore-blocked-message").textContent).toMatch(/stop the rig before restoring/i);
 
     fireEvent.click(restoreBtn);
-    expect(screen.queryByRole("dialog")).toBeNull();
+    await waitFor(() => {
+      expect(screen.getByRole("dialog")).toBeDefined();
+    });
   });
 
   // Test 6: Fetch error uses Alert

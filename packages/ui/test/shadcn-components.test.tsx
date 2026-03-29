@@ -58,19 +58,19 @@ describe("shadcn components", () => {
     expect(btn.textContent).toContain("SNAPSHOT");
     // Should have uppercase + tracking + border classes (tech button style)
     expect(btn.className).toContain("uppercase");
-    expect(btn.className).toContain("text-label-md");
+    expect(btn.className).toContain("text-[10px]");
     expect(btn.className).toContain("border");
   });
 
-  // Test 3: Button primary variant has correct classes
-  it("Button primary variant has bg-primary text-primary-foreground", async () => {
+  // Test 3: Button default variant has correct classes (vellum theme)
+  it("Button default variant has bg-stone-900 text-white", async () => {
     const { Button } = await import("../src/components/ui/button.js");
 
     render(<Button variant="default" data-testid="pri">Go</Button>);
 
     const btn = screen.getByTestId("pri");
-    expect(btn.className).toContain("bg-primary");
-    expect(btn.className).toContain("text-primary-foreground");
+    expect(btn.className).toContain("bg-stone-900");
+    expect(btn.className).toContain("text-white");
   });
 
   // Test 4: Input has bottom-border styling
@@ -83,14 +83,16 @@ describe("shadcn components", () => {
     expect(inp.className).toContain("border-b");
   });
 
-  // Test 5: Card uses surface-low background
-  it("Card uses bg-card", async () => {
+  // Test 5: Card uses white bg with hard-shadow (vellum theme)
+  it("Card uses bg-white border border-stone-900 hard-shadow", async () => {
     const { Card } = await import("../src/components/ui/card.js");
 
     render(<Card data-testid="card">content</Card>);
 
     const card = screen.getByTestId("card");
-    expect(card.className).toContain("bg-card");
+    expect(card.className).toContain("bg-white");
+    expect(card.className).toContain("border-stone-900");
+    expect(card.className).toContain("hard-shadow");
   });
 
   // Test 6: Dialog overlay uses backdrop-blur for glassmorphism
@@ -101,7 +103,7 @@ describe("shadcn components", () => {
     // Read dialog source — easier than rendering since Dialog requires Portal
     const src = readFileSync(resolve(__dirname, "../src/components/ui/dialog.tsx"), "utf-8");
     expect(src).toContain("backdrop-blur");
-    expect(src).toContain("bg-black/40");
+    expect(src).toContain("bg-black/20");
   });
 
   // Test 7: Separator uses ghost-border

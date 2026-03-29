@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, waitFor, cleanup, act } from "@testing-library/react";
-import { ReactFlowProvider } from "@xyflow/react";
+import { ReactFlowProvider, MarkerType } from "@xyflow/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { RigGraph } from "../src/components/RigGraph.js";
 import { RigNode } from "../src/components/RigNode.js";
@@ -209,10 +209,10 @@ describe("RigNode", () => {
 
     expect(screen.getByText("dev1-impl")).toBeDefined();
     expect(screen.getByText(/claude-code · opus/)).toBeDefined();
-    expect(screen.getByText("running")).toBeDefined();
+    expect(screen.getByText("ACTIVE")).toBeDefined();
   });
 
-  it("shows 'unbound' indicator when binding is null", () => {
+  it("shows 'UNKNOWN' status when binding is null and status is null", () => {
     const data = {
       logicalId: "worker",
       role: "worker",
@@ -228,20 +228,20 @@ describe("RigNode", () => {
       </ReactFlowProvider>
     );
 
-    expect(screen.getByText(/unbound/i)).toBeDefined();
+    expect(screen.getByText("UNKNOWN")).toBeDefined();
   });
 
-  // UIF-T05 Test 1: Status dot color per status
-  it("status dot has correct color class per status", () => {
+  // UIF-T05 Test 1: Status dot (pill badge) shows correct label and border style per status
+  it("status dot has correct border/text class per status", () => {
     const statuses = [
-      { status: "running", expected: "bg-success" },
-      { status: "idle", expected: "bg-foreground-muted-on-dark" },
-      { status: "exited", expected: "bg-destructive" },
-      { status: "detached", expected: "bg-warning" },
-      { status: null, expected: "bg-foreground-muted-on-dark" },
+      { status: "running", expectedLabel: "ACTIVE", expectedClass: "border-stone-900" },
+      { status: "idle", expectedLabel: "IDLE", expectedClass: "border-stone-400" },
+      { status: "exited", expectedLabel: "EXITED", expectedClass: "border-tertiary" },
+      { status: "detached", expectedLabel: "DETACHED", expectedClass: "border-stone-400" },
+      { status: null, expectedLabel: "UNKNOWN", expectedClass: "border-stone-400" },
     ];
 
-    for (const { status, expected } of statuses) {
+    for (const { status, expectedLabel, expectedClass } of statuses) {
       cleanup();
       const data = {
         logicalId: "test-node",
@@ -259,40 +259,49 @@ describe("RigNode", () => {
       );
 
       const dot = screen.getByTestId("status-dot-test-node");
-      expect(dot.className).toContain(expected);
+      expect(dot.textContent).toBe(expectedLabel);
+      expect(dot.className).toContain(expectedClass);
     }
   });
 });
 
 // UIF-T05: Edge style helper tests
 describe("Edge styles", () => {
-  it("delegates_to: solid, primary color", async () => {
+  it("delegates_to: solid, secondary blue", async () => {
     const { getEdgeStyle } = await import("../src/lib/edge-styles.js");
     const result = getEdgeStyle("delegates_to");
-    expect(result.style.stroke).toBe("#050505");
+    expect(result.style.stroke).toBe("#546073");
     expect(result.style.strokeDasharray).toBeUndefined();
+    expect(result.markerEnd.type).toBe(MarkerType.ArrowClosed);
+    expect(result.label).toBeUndefined();
   });
 
-  it("spawned_by: dashed, primary color", async () => {
+  it("spawned_by: dashed, secondary blue", async () => {
     const { getEdgeStyle } = await import("../src/lib/edge-styles.js");
     const result = getEdgeStyle("spawned_by");
-    expect(result.style.stroke).toBe("#050505");
+    expect(result.style.stroke).toBe("#546073");
     expect(result.style.strokeDasharray).toBeDefined();
+    expect(result.markerEnd.type).toBe(MarkerType.ArrowClosed);
+    expect(result.label).toBeUndefined();
   });
 
-  it("can_observe: dotted, foreground-muted", async () => {
+  it("can_observe: dotted, secondary blue", async () => {
     const { getEdgeStyle } = await import("../src/lib/edge-styles.js");
     const result = getEdgeStyle("can_observe");
-    expect(result.style.stroke).toBe("#666666");
+    expect(result.style.stroke).toBe("#546073");
     expect(result.style.strokeDasharray).toBeDefined();
+    expect(result.markerEnd.type).toBe(MarkerType.ArrowClosed);
+    expect(result.label).toBeUndefined();
   });
 
-  it("uses: thin solid, accent color", async () => {
+  it("uses: thin dashed, secondary blue", async () => {
     const { getEdgeStyle } = await import("../src/lib/edge-styles.js");
     const result = getEdgeStyle("uses");
-    expect(result.style.stroke).toBe("#1272b8");
+    expect(result.style.stroke).toBe("#546073");
     expect(result.style.strokeWidth).toBe(1);
-    expect(result.style.strokeDasharray).toBeUndefined();
+    expect(result.style.strokeDasharray).toBeDefined();
+    expect(result.markerEnd.type).toBe(MarkerType.ArrowClosed);
+    expect(result.label).toBeUndefined();
   });
 });
 
