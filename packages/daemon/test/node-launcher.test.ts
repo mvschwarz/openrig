@@ -88,6 +88,7 @@ describe("NodeLauncher", () => {
     // DB: session exists
     const sessions = sessionRegistry.getSessionsForRig(rig.id);
     expect(sessions).toHaveLength(1);
+    expect(sessions[0]!.status).toBe("running");
 
     // DB: binding exists
     const fullRig = rigRepo.getRig(rig.id);

@@ -18,7 +18,7 @@ export function packageCommand(depsOverride?: StatusDeps): Command {
       }
       return null;
     }
-    return deps.clientFactory(`http://localhost:${status.port}`);
+    return deps.clientFactory(`http://127.0.0.1:${status.port}`);
   }
 
   // rigged package validate <path>

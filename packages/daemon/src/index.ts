@@ -7,7 +7,7 @@ export async function startServer(port?: number) {
 
   const { app } = await createDaemon({ dbPath });
 
-  return serve({ fetch: app.fetch, port: p }, (info) => {
+  return serve({ fetch: app.fetch, port: p, hostname: "127.0.0.1" }, (info) => {
     console.log(`rigged daemon listening on http://localhost:${info.port}`);
   });
 }

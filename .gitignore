@@ -12,3 +12,6 @@ docs/*
 .env.local
 *.sqlite
 *.sqlite-journal
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite.pre-reboot-backup

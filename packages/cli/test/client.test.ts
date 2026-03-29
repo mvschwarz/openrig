@@ -112,13 +112,13 @@ describe("DaemonClient", () => {
     await expect(client.get("/api/rigs")).rejects.toThrow(DaemonConnectionError);
   });
 
-  // Test 5: Client uses RIGGED_URL env, falls back to http://localhost:7433
-  it("uses RIGGED_URL env when set, falls back to http://localhost:7433", () => {
+  // Test 5: Client uses RIGGED_URL env, falls back to http://127.0.0.1:7433
+  it("uses RIGGED_URL env when set, falls back to http://127.0.0.1:7433", () => {
     // Default (no env)
     const saved = process.env["RIGGED_URL"];
     delete process.env["RIGGED_URL"];
     const defaultClient = new DaemonClient();
-    expect(defaultClient.baseUrl).toBe("http://localhost:7433");
+    expect(defaultClient.baseUrl).toBe("http://127.0.0.1:7433");
 
     // With env
     process.env["RIGGED_URL"] = "http://custom:9000";

@@ -212,4 +212,19 @@ describe("SessionFingerprinter", () => {
     expect(result.evidence.cmuxSignal!.pid).toBe(42);
     expect(result.evidence.layerUsed).toBe(0);
   });
+
+  // T13: conversational "Codex" mentions do not trigger codex fingerprinting
+  it("does not classify arbitrary Codex mentions in pane content as codex", async () => {
+    const fp = new SessionFingerprinter({
+      cmuxAdapter: mockCmux(),
+      tmuxAdapter: mockTmux("⏺ Codex already merged their sections. Let me read the full document to verify everything"),
+      fsExists: () => false,
+    });
+
+    const result = await fp.fingerprint(makePane({ activeCommand: "2.1.84" }));
+
+    expect(result.runtimeHint).toBe("unknown");
+    expect(result.confidence).toBe("low");
+    expect(result.evidence.layerUsed).toBe(-1);
+  });
 });

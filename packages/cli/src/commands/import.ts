@@ -45,7 +45,7 @@ export function importCommand(depsOverride?: ImportDeps): Command {
         return;
       }
 
-      const client = deps.clientFactory(`http://localhost:${status.port}`);
+      const client = deps.clientFactory(`http://127.0.0.1:${status.port}`);
 
       if (opts.preflight) {
         const res = await client.postText<{ ready?: boolean; warnings?: string[]; errors?: string[] }>("/api/rigs/import/preflight", yaml);

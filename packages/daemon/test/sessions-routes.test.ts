@@ -86,16 +86,20 @@ describe("Session routes", () => {
     expect(res.status).toBe(404);
   });
 
-  it("POST .../launch with invalid derived session name -> 400", async () => {
+  it("POST .../launch with ordinary rig name normalizes to r00-managed session name", async () => {
     const { app, rigRepo } = createTestApp(db);
-    // Rig name without rNN- prefix -> derived name fails validation
+    // Ordinary rig names are normalized into the managed r00- namespace.
     const rig = rigRepo.createRig("badname");
     rigRepo.addNode(rig.id, "worker");
 
     const res = await app.request(`/api/rigs/${rig.id}/nodes/worker/launch`, {
       method: "POST",
     });
-    expect(res.status).toBe(400);
+    expect(res.status).toBe(201);
+    const body = await res.json();
+    expect(body.sessionName).toBe("r00-badname-worker");
+    expect(body.session.sessionName).toBe("r00-badname-worker");
+    expect(body.binding.tmuxSession).toBe("r00-badname-worker");
   });
 
   it("POST .../focus with valid cmux binding -> calls focusSurface", async () => {

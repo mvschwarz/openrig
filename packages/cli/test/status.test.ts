@@ -272,8 +272,8 @@ describe("rigged status", () => {
       program.addCommand(statusCommand(deps));
       await captureLogs(() => program.parseAsync(["node", "rigged", "status"]));
 
-      expect(usedUrls[0]).toBe(`http://localhost:${port}`);
-      expect(usedUrls[0]).not.toBe("http://localhost:7433");
+      expect(usedUrls[0]).toBe(`http://127.0.0.1:${port}`);
+      expect(usedUrls[0]).not.toBe("http://127.0.0.1:7433");
     });
   });
 

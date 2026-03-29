@@ -290,7 +290,7 @@ describe("rigged export + import", () => {
     const program = new Command();
     program.addCommand(importCommand(deps));
     await captureLogs(() => program.parseAsync(["node", "rigged", "import", "rig.yaml"]));
-    expect(usedUrls[0]).toBe(`http://localhost:${port}`);
+    expect(usedUrls[0]).toBe(`http://127.0.0.1:${port}`);
   });
 
   // Test 11: createProgram: both export AND import mounted

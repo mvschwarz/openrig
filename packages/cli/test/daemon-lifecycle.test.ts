@@ -150,7 +150,7 @@ describe("Daemon Lifecycle", () => {
     expect(status.port).toBe(9000);
     expect(status.pid).toBe(777);
     // Must have checked healthz
-    expect(deps.fetch).toHaveBeenCalledWith("http://localhost:9000/healthz");
+    expect(deps.fetch).toHaveBeenCalledWith("http://127.0.0.1:9000/healthz");
   });
 
   // Test 8: status stopped (no daemon.json) -> reports stopped

@@ -14,7 +14,7 @@ export class DaemonClient {
   readonly baseUrl: string;
 
   constructor(baseUrl?: string) {
-    this.baseUrl = baseUrl ?? process.env["RIGGED_URL"] ?? "http://localhost:7433";
+    this.baseUrl = baseUrl ?? process.env["RIGGED_URL"] ?? "http://127.0.0.1:7433";
   }
 
   async get<T = unknown>(path: string): Promise<DaemonResponse<T>> {

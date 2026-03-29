@@ -62,13 +62,35 @@ describe("Bundle CLI", () => {
       for await (const chunk of req) body += chunk;
 
       if (req.url === "/api/bundles/create" && req.method === "POST") {
+        const parsed = JSON.parse(body || "{}");
+        if (String(parsed.specPath ?? "").includes("missing")) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Missing package" }));
+          return;
+        }
         res.writeHead(201, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ bundleName: "test", bundleVersion: "0.1.0", archiveHash: "abc123", packages: 1 }));
+        res.end(JSON.stringify({
+          bundleName: parsed.bundleName ?? "test",
+          bundleVersion: parsed.bundleVersion ?? "0.1.0",
+          archiveHash: "abc123",
+          packages: 1,
+        }));
       } else if (req.url === "/api/bundles/inspect" && req.method === "POST") {
+        const parsed = JSON.parse(body || "{}");
+        if (String(parsed.bundlePath ?? "").includes("bad")) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Inspect failed" }));
+          return;
+        }
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ manifest: { name: "test", version: "0.1.0" }, digestValid: true, integrityResult: { passed: true } }));
       } else if (req.url === "/api/bundles/install" && req.method === "POST") {
         const parsed = JSON.parse(body);
+        if (String(parsed.bundlePath ?? "").includes("blocked")) {
+          res.writeHead(409, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "blocked" }));
+          return;
+        }
         if (parsed.plan) {
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ status: "planned", runId: "run-1", stages: [] }));
@@ -101,6 +123,23 @@ describe("Bundle CLI", () => {
     });
     expect(logs.some((l) => l.includes("Bundle created"))).toBe(true);
     expect(logs.some((l) => l.includes("abc123"))).toBe(true);
+  });
+
+  it("bundle create uses --bundle-version without colliding with the CLI version flag", async () => {
+    const { logs } = await captureLogs(async () => {
+      await makeCmd().parseAsync([
+        "node",
+        "rigged",
+        "bundle",
+        "create",
+        "/tmp/rig.yaml",
+        "-o",
+        "/tmp/test.rigbundle",
+        "--bundle-version",
+        "2.0.0",
+      ]);
+    });
+    expect(logs.some((l) => l.includes("v2.0.0"))).toBe(true);
   });
 
   // T12: inspect prints summary
@@ -136,5 +175,21 @@ describe("Bundle CLI", () => {
       await makeCmd().parseAsync(["node", "rigged", "bundle", "install", "/tmp/test.rigbundle", "--plan"]);
     });
     expect(logs.some((l) => l.includes("planned"))).toBe(true);
+  });
+
+  it("bundle create --json preserves failure exit code", async () => {
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rigged", "bundle", "create", "/tmp/missing.rig.yaml", "-o", "/tmp/test.rigbundle", "--json"]);
+    });
+    expect(JSON.parse(logs.join("")).error).toBe("Missing package");
+    expect(exitCode).toBe(2);
+  });
+
+  it("bundle install --json preserves blocked exit code", async () => {
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rigged", "bundle", "install", "/tmp/blocked.rigbundle", "--json"]);
+    });
+    expect(JSON.parse(logs.join("")).error).toBe("blocked");
+    expect(exitCode).toBe(1);
   });
 });

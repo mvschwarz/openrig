@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import os from "node:os";
 import nodePath from "node:path";
 import { Hono } from "hono";
 import type { EventBus } from "../domain/event-bus.js";
@@ -121,7 +122,7 @@ bundleRoutes.post("/create", async (c) => {
     }
 
     // Assemble
-    const tmpStaging = fs.mkdtempSync(nodePath.join(require("os").tmpdir(), "bundle-create-"));
+      const tmpStaging = fs.mkdtempSync(nodePath.join(os.tmpdir(), "bundle-create-"));
     try {
       const assembler = new BundleAssembler({ fsOps: assemblerFsOps() });
       const manifest = assembler.assemble({
@@ -159,7 +160,7 @@ bundleRoutes.post("/inspect", async (c) => {
     digestValid = dr.valid;
   } catch { /* missing digest = invalid */ }
 
-  const tmpDir = fs.mkdtempSync(nodePath.join(require("os").tmpdir(), "bundle-inspect-"));
+  const tmpDir = fs.mkdtempSync(nodePath.join(os.tmpdir(), "bundle-inspect-"));
   try {
     // Extract with safety pre-scan (same as unpack) but without content integrity verification
     const tar = await import("tar");

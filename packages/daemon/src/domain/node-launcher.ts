@@ -92,7 +92,8 @@ export class NodeLauncher {
     let persistedEvent: PersistedEvent;
     try {
       const txn = this.db.transaction(() => {
-        this.sessionRegistry.registerSession(node.id, sessionName);
+        const session = this.sessionRegistry.registerSession(node.id, sessionName);
+        this.sessionRegistry.updateStatus(session.id, "running");
         this.sessionRegistry.updateBinding(node.id, { tmuxSession: sessionName });
         return this.eventBus.persistWithinTransaction({
           type: "node.launched",

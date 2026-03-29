@@ -49,7 +49,7 @@ export function statusCommand(depsOverride?: StatusDeps): Command {
       return;
     }
 
-    const client = deps.clientFactory(`http://localhost:${status.port}`);
+    const client = deps.clientFactory(`http://127.0.0.1:${status.port}`);
 
     // Fetch summary + cmux status
     const [summaryRes, cmuxRes] = await Promise.all([

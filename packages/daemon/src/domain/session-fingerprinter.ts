@@ -24,8 +24,17 @@ const SHELL_NAMES = new Set(["bash", "zsh", "fish", "sh", "dash", "tcsh", "csh"]
 const CLAUDE_PROCESS_PATTERNS = ["claude", "claude-code"];
 const CODEX_PROCESS_PATTERNS = ["codex"];
 
-const CLAUDE_PANE_PATTERNS = ["Claude Code", "claude>", "╭─ Claude"];
-const CODEX_PANE_PATTERNS = ["Codex", "codex>", "╭─ Codex"];
+const CLAUDE_PANE_PATTERNS = [
+  { label: "Claude Code", test: (line: string) => /^\s*Claude Code\b/i.test(line) },
+  { label: "claude>", test: (line: string) => /^\s*claude>\s*/i.test(line) },
+  { label: "╭─ Claude", test: (line: string) => /^\s*╭─ Claude\b/i.test(line) },
+];
+
+const CODEX_PANE_PATTERNS = [
+  { label: "Codex CLI", test: (line: string) => /^\s*Codex CLI\b/i.test(line) },
+  { label: "codex>", test: (line: string) => /^\s*codex>\s*/i.test(line) },
+  { label: "╭─ Codex", test: (line: string) => /^\s*╭─ Codex\b/i.test(line) },
+];
 
 /**
  * Four-layer runtime detection pipeline.
@@ -107,17 +116,17 @@ export class SessionFingerprinter {
 
       for (const line of lines) {
         for (const pattern of CLAUDE_PANE_PATTERNS) {
-          if (line.includes(pattern)) {
+          if (pattern.test(line)) {
             evidence.layerUsed = 2;
-            evidence.paneContentSignal = { pattern, matchedLine: line.trim() };
+            evidence.paneContentSignal = { pattern: pattern.label, matchedLine: line.trim() };
             return { runtimeHint: "claude-code", confidence: "medium", evidence };
           }
         }
 
         for (const pattern of CODEX_PANE_PATTERNS) {
-          if (line.includes(pattern)) {
+          if (pattern.test(line)) {
             evidence.layerUsed = 2;
-            evidence.paneContentSignal = { pattern, matchedLine: line.trim() };
+            evidence.paneContentSignal = { pattern: pattern.label, matchedLine: line.trim() };
             return { runtimeHint: "codex", confidence: "medium", evidence };
           }
         }

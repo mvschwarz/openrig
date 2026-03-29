@@ -70,7 +70,7 @@ function readState(deps: LifecycleDeps): DaemonState | null {
 async function checkPid(state: DaemonState, deps: LifecycleDeps): Promise<"rigged" | "not_rigged" | "dead"> {
   if (!deps.isProcessAlive(state.pid)) return "dead";
   try {
-    await deps.fetch(`http://localhost:${state.port}/healthz`);
+    await deps.fetch(`http://127.0.0.1:${state.port}/healthz`);
     // Any response (ok or not) means something is listening on our port → rigged
     return "rigged";
   } catch {
@@ -115,7 +115,7 @@ export async function startDaemon(opts: StartOptions, deps: LifecycleDeps): Prom
   const pid = child.pid!;
 
   // Poll healthz
-  const healthzUrl = `http://localhost:${port}/healthz`;
+  const healthzUrl = `http://127.0.0.1:${port}/healthz`;
   let healthy = false;
   for (let i = 0; i < HEALTHZ_RETRIES; i++) {
     try {
@@ -195,7 +195,7 @@ export async function getDaemonStatus(deps: LifecycleDeps): Promise<DaemonStatus
   // Process alive — check healthz
   let healthy = false;
   try {
-    const res = await deps.fetch(`http://localhost:${state.port}/healthz`);
+    const res = await deps.fetch(`http://127.0.0.1:${state.port}/healthz`);
     healthy = res.ok;
   } catch {
     // healthz unreachable
