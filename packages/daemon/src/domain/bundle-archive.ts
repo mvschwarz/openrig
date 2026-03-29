@@ -12,7 +12,8 @@ import fs from "node:fs";
 import nodePath from "node:path";
 import * as tar from "tar";
 import { verifyIntegrity, type IntegrityFsOps } from "./bundle-integrity.js";
-import { parseBundleManifest, normalizeBundleManifest } from "./bundle-types.js";
+// TODO: AS-T12 — migrate to pod-aware bundle types
+import { parseLegacyBundleManifest as parseBundleManifest, normalizeLegacyBundleManifest as normalizeBundleManifest } from "./bundle-types.js";
 
 /**
  * Pack a staging directory into a .rigbundle archive (deterministic tar.gz).
@@ -93,10 +94,26 @@ export async function unpack(archivePath: string, outputDir: string): Promise<vo
     throw new Error("Extracted archive missing bundle.yaml");
   }
 
-  const raw = parseBundleManifest(fs.readFileSync(manifestPath, "utf-8"));
-  const manifest = normalizeBundleManifest(raw);
+  const rawYaml = fs.readFileSync(manifestPath, "utf-8");
+  const raw = parseBundleManifest(rawYaml) as Record<string, unknown>;
 
-  if (!manifest.integrity) {
+  // Schema-version-aware integrity extraction
+  const schemaVersion = raw["schema_version"] as number;
+  let integrity: { algorithm: string; files: Record<string, string> } | undefined;
+
+  if (schemaVersion === 2) {
+    // Pod-aware bundle: integrity is optional in manifest
+    if (raw["integrity"] && typeof raw["integrity"] === "object") {
+      const integ = raw["integrity"] as Record<string, unknown>;
+      integrity = { algorithm: integ["algorithm"] as string, files: (integ["files"] as Record<string, string>) ?? {} };
+    }
+  } else {
+    // Legacy bundle: parse as v1
+    const manifest = normalizeBundleManifest(raw);
+    integrity = manifest.integrity;
+  }
+
+  if (!integrity) {
     throw new Error("Bundle manifest missing integrity section — cannot verify content");
   }
 
@@ -109,7 +126,8 @@ export async function unpack(archivePath: string, outputDir: string): Promise<vo
       walkFiles: (dir) => walkFilesSync(dir),
     };
 
-    const result = verifyIntegrity(outputDir, manifest, fsOps);
+    // verifyIntegrity only reads manifest.integrity — safe to cast
+    const result = verifyIntegrity(outputDir, { integrity } as unknown as Parameters<typeof verifyIntegrity>[1], fsOps);
     if (!result.passed) {
       const details = [
         ...result.mismatches.map((f) => `tampered: ${f}`),

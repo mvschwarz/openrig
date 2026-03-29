@@ -1,7 +1,98 @@
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 
-/** A package entry in the bundle manifest */
-export interface BundlePackageEntry {
+// -- Pod-aware bundle types (AgentSpec reboot) --
+
+export interface PodBundleAgentImportEntry {
+  name: string;
+  version: string;
+  path: string;
+  originalRef: string;
+  hash: string;
+}
+
+export interface PodBundleAgentEntry {
+  name: string;
+  version: string;
+  path: string;
+  originalRef: string;
+  hash: string;
+  importEntries: PodBundleAgentImportEntry[];
+}
+
+export interface PodBundleManifest {
+  schemaVersion: 2;
+  name: string;
+  version: string;
+  createdAt: string;
+  rigSpec: string;
+  agents: PodBundleAgentEntry[];
+  cultureFile?: string;
+  integrity?: BundleIntegrity;
+}
+
+export function validatePodBundleManifest(raw: unknown): { valid: boolean; errors: string[] } {
+  const errors: string[] = [];
+  if (!raw || typeof raw !== "object") return { valid: false, errors: ["manifest must be an object"] };
+  const m = raw as Record<string, unknown>;
+
+  if (m["schema_version"] !== 2) errors.push("schema_version must be 2");
+  if (typeof m["name"] !== "string" || !m["name"]) errors.push("name is required");
+  if (typeof m["version"] !== "string" || !m["version"]) errors.push("version is required");
+  if (typeof m["created_at"] !== "string" || !m["created_at"]) errors.push("created_at is required");
+  if (typeof m["rig_spec"] !== "string" || !m["rig_spec"]) errors.push("rig_spec path is required");
+  else if (!isRelativeSafePath(m["rig_spec"] as string)) errors.push(`rig_spec path is not safe: '${m["rig_spec"]}'`);
+
+  if (!Array.isArray(m["agents"])) {
+    errors.push("agents must be an array");
+  } else {
+    for (let i = 0; i < m["agents"].length; i++) {
+      const a = m["agents"][i] as Record<string, unknown>;
+      if (typeof a["name"] !== "string" || !a["name"]) errors.push(`agents[${i}].name is required`);
+      if (typeof a["path"] !== "string" || !a["path"]) errors.push(`agents[${i}].path is required`);
+      else if (!isRelativeSafePath(a["path"] as string)) errors.push(`agents[${i}].path is not safe`);
+      if (typeof a["hash"] !== "string" || !a["hash"]) errors.push(`agents[${i}].hash is required`);
+    }
+  }
+
+  return { valid: errors.length === 0, errors };
+}
+
+export function serializePodBundleManifest(manifest: PodBundleManifest): string {
+  const doc: Record<string, unknown> = {
+    schema_version: 2,
+    name: manifest.name,
+    version: manifest.version,
+    created_at: manifest.createdAt,
+    rig_spec: manifest.rigSpec,
+    agents: manifest.agents.map((a) => ({
+      name: a.name,
+      version: a.version,
+      path: a.path,
+      original_ref: a.originalRef,
+      hash: a.hash,
+      import_entries: a.importEntries.map((ie) => ({
+        name: ie.name,
+        version: ie.version,
+        path: ie.path,
+        original_ref: ie.originalRef,
+        hash: ie.hash,
+      })),
+    })),
+  };
+  if (manifest.cultureFile) doc["culture_file"] = manifest.cultureFile;
+  if (manifest.integrity) doc["integrity"] = { algorithm: manifest.integrity.algorithm, files: manifest.integrity.files };
+  return stringifyYaml(doc);
+}
+
+export function parsePodBundleManifest(yaml: string): unknown {
+  return parseYaml(yaml);
+}
+
+// -- Legacy bundle types (pre-reboot) --
+// TODO: Remove when AS-T12 migrates all consumers
+
+/** A package entry in the legacy bundle manifest */
+export interface LegacyBundlePackageEntry {
   name: string;
   version: string;
   path: string;
@@ -17,13 +108,13 @@ export interface BundleIntegrity {
 }
 
 /** The bundle.yaml manifest */
-export interface BundleManifest {
+export interface LegacyBundleManifest {
   schemaVersion: number;
   name: string;
   version: string;
   createdAt: string;
   rigSpec: string;
-  packages: BundlePackageEntry[];
+  packages: LegacyBundlePackageEntry[];
   integrity?: BundleIntegrity;
 }
 
@@ -49,7 +140,7 @@ export function isRelativeSafePath(p: string): boolean {
 }
 
 /** Validate a raw parsed bundle manifest */
-export function validateBundleManifest(
+export function validateLegacyBundleManifest(
   raw: unknown,
   opts?: ValidateOptions,
 ): { valid: boolean; errors: string[] } {
@@ -119,15 +210,15 @@ export function validateBundleManifest(
 }
 
 /** Parse bundle.yaml YAML string to unknown */
-export function parseBundleManifest(yaml: string): unknown {
+export function parseLegacyBundleManifest(yaml: string): unknown {
   return parseYaml(yaml);
 }
 
-/** Normalize raw parsed manifest to typed BundleManifest */
-export function normalizeBundleManifest(raw: unknown): BundleManifest {
+/** Normalize raw parsed manifest to typed LegacyBundleManifest */
+export function normalizeLegacyBundleManifest(raw: unknown): LegacyBundleManifest {
   const m = raw as Record<string, unknown>;
   const pkgs = (m["packages"] as Array<Record<string, unknown>>).map((p) => {
-    const entry: BundlePackageEntry = {
+    const entry: LegacyBundlePackageEntry = {
       name: p["name"] as string,
       version: p["version"] as string,
       path: p["path"] as string,
@@ -139,7 +230,7 @@ export function normalizeBundleManifest(raw: unknown): BundleManifest {
     return entry;
   });
 
-  const result: BundleManifest = {
+  const result: LegacyBundleManifest = {
     schemaVersion: (m["schema_version"] as number) ?? 1,
     name: m["name"] as string,
     version: m["version"] as string,
@@ -159,8 +250,8 @@ export function normalizeBundleManifest(raw: unknown): BundleManifest {
   return result;
 }
 
-/** Serialize a BundleManifest to YAML */
-export function serializeBundleManifest(manifest: BundleManifest): string {
+/** Serialize a LegacyBundleManifest to YAML */
+export function serializeLegacyBundleManifest(manifest: LegacyBundleManifest): string {
   const doc: Record<string, unknown> = {
     schema_version: manifest.schemaVersion,
     name: manifest.name,

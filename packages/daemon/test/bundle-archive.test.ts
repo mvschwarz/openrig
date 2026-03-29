@@ -5,7 +5,8 @@ import os from "node:os";
 import { createHash } from "node:crypto";
 import * as tar from "tar";
 import { pack, unpack, verifyArchiveDigest } from "../src/domain/bundle-archive.js";
-import { serializeBundleManifest, type BundleManifest } from "../src/domain/bundle-types.js";
+// TODO: AS-T12 — migrate to pod-aware bundle types
+import { serializeLegacyBundleManifest as serializeBundleManifest, type LegacyBundleManifest as BundleManifest } from "../src/domain/bundle-types.js";
 import { computeIntegrity, writeIntegrity, type IntegrityFsOps } from "../src/domain/bundle-integrity.js";
 
 function sha256(content: string): string {
@@ -183,7 +184,8 @@ describe("Bundle archive", () => {
 
     // Re-verification would fail (but unpack already verified — this tests the verify function)
     const { verifyIntegrity: vi2 } = await import("../src/domain/bundle-integrity.js");
-    const { parseBundleManifest, normalizeBundleManifest } = await import("../src/domain/bundle-types.js");
+    // TODO: AS-T12 — migrate to pod-aware bundle types
+    const { parseLegacyBundleManifest: parseBundleManifest, normalizeLegacyBundleManifest: normalizeBundleManifest } = await import("../src/domain/bundle-types.js");
     const manifestYaml = fs.readFileSync(path.join(extractDir, "bundle.yaml"), "utf-8");
     const manifest = normalizeBundleManifest(parseBundleManifest(manifestYaml));
     const result = vi2(extractDir, manifest, realIntegrityFsOps());

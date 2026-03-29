@@ -1,7 +1,8 @@
 import nodePath from "node:path";
 import { LegacyRigSpecCodec as RigSpecCodec } from "./rigspec-codec.js"; // TODO: AS-T08b — migrate to pod-aware RigSpec
 import { LegacyRigSpecSchema as RigSpecSchema } from "./rigspec-schema.js"; // TODO: AS-T08b — migrate to pod-aware RigSpec
-import { serializeBundleManifest, type BundleManifest } from "./bundle-types.js";
+// TODO: AS-T12 — migrate to pod-aware bundle types
+import { serializeLegacyBundleManifest as serializeBundleManifest, type LegacyBundleManifest as BundleManifest } from "./bundle-types.js";
 
 export interface AssemblerFsOps {
   readFile: (path: string) => string;
@@ -31,7 +32,8 @@ export interface AssembleOptions {
  * Assembles a bundle staging directory with canonical layout.
  * Generates bundle.yaml without integrity (P7-T02 adds that).
  */
-export class BundleAssembler {
+// TODO: AS-T12 — migrate to pod-aware bundle assembler
+export class LegacyBundleAssembler {
   private fs: AssemblerFsOps;
 
   constructor(deps: { fsOps: AssemblerFsOps }) {

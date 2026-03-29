@@ -2,7 +2,8 @@ import os from "node:os";
 import fs from "node:fs";
 import nodePath from "node:path";
 import { unpack } from "./bundle-archive.js";
-import { parseBundleManifest, validateBundleManifest, normalizeBundleManifest, type BundleManifest } from "./bundle-types.js";
+// TODO: AS-T12 — migrate to pod-aware bundle types
+import { parseLegacyBundleManifest as parseBundleManifest, validateLegacyBundleManifest as validateBundleManifest, normalizeLegacyBundleManifest as normalizeBundleManifest, type LegacyBundleManifest as BundleManifest } from "./bundle-types.js";
 import { resolvePackage } from "./package-resolve-helper.js";
 import type { ResolvedPackage, FsOps } from "./package-resolver.js";
 
@@ -20,7 +21,8 @@ export interface BundleResolvedSource {
  * Resolves a .rigbundle archive into bootstrap-compatible sources.
  * Extracts, verifies, parses manifest, maps vendored packages.
  */
-export class BundleSourceResolver {
+// TODO: AS-T12 — migrate to pod-aware bundle source resolver
+export class LegacyBundleSourceResolver {
   private fsOps: FsOps;
 
   constructor(deps: { fsOps: FsOps }) {
@@ -103,6 +105,87 @@ export class BundleSourceResolver {
   }
 
   /** Remove the temp extraction directory. */
+  cleanup(tempDir: string): void {
+    try {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    } catch {
+      // Best-effort cleanup
+    }
+  }
+}
+
+// -- Pod-aware bundle source resolver (AgentSpec reboot) --
+
+import { parsePodBundleManifest, validatePodBundleManifest, type PodBundleManifest } from "./bundle-types.js";
+
+/** Result of resolving a pod-aware bundle */
+export interface PodBundleResolvedSource {
+  specPath: string;
+  manifest: PodBundleManifest;
+  tempDir: string;
+}
+
+/**
+ * Resolves a pod-aware .rigbundle archive (schemaVersion 2).
+ * Extracts, verifies manifest shape, returns paths for downstream resolution.
+ */
+export class PodBundleSourceResolver {
+  async resolve(bundlePath: string): Promise<PodBundleResolvedSource> {
+    const tempDir = fs.mkdtempSync(nodePath.join(os.tmpdir(), "podbundle-"));
+
+    try {
+      // Safe unpack with digest/symlink/integrity verification
+      await unpack(bundlePath, tempDir);
+
+      const manifestPath = nodePath.join(tempDir, "bundle.yaml");
+      if (!fs.existsSync(manifestPath)) {
+        throw new Error("Bundle missing bundle.yaml manifest");
+      }
+
+      const raw = parsePodBundleManifest(fs.readFileSync(manifestPath, "utf-8"));
+      const validation = validatePodBundleManifest(raw);
+      if (!validation.valid) {
+        throw new Error(`Invalid pod bundle manifest: ${validation.errors.join("; ")}`);
+      }
+
+      const m = raw as Record<string, unknown>;
+      const manifest: PodBundleManifest = {
+        schemaVersion: 2,
+        name: m["name"] as string,
+        version: m["version"] as string,
+        createdAt: m["created_at"] as string,
+        rigSpec: m["rig_spec"] as string,
+        agents: (m["agents"] as Array<Record<string, unknown>>).map((a) => ({
+          name: a["name"] as string,
+          version: a["version"] as string,
+          path: a["path"] as string,
+          originalRef: (a["original_ref"] as string) ?? "",
+          hash: a["hash"] as string,
+          importEntries: Array.isArray(a["import_entries"])
+            ? (a["import_entries"] as Array<Record<string, unknown>>).map((ie) => ({
+                name: ie["name"] as string,
+                version: ie["version"] as string,
+                path: ie["path"] as string,
+                originalRef: (ie["original_ref"] as string) ?? "",
+                hash: ie["hash"] as string,
+              }))
+            : [],
+        })),
+        cultureFile: m["culture_file"] as string | undefined,
+      };
+
+      const specPath = nodePath.join(tempDir, manifest.rigSpec);
+      if (!fs.existsSync(specPath)) {
+        throw new Error(`Bundle missing rig spec at ${manifest.rigSpec}`);
+      }
+
+      return { specPath, manifest, tempDir };
+    } catch (err) {
+      this.cleanup(tempDir);
+      throw err;
+    }
+  }
+
   cleanup(tempDir: string): void {
     try {
       fs.rmSync(tempDir, { recursive: true, force: true });

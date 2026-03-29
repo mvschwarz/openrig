@@ -42,7 +42,8 @@ import { SessionEnricher } from "./domain/session-enricher.js";
 import { DiscoveryRepository } from "./domain/discovery-repository.js";
 import { DiscoveryCoordinator } from "./domain/discovery-coordinator.js";
 import { ClaimService } from "./domain/claim-service.js";
-import { BundleSourceResolver } from "./domain/bundle-source-resolver.js";
+// TODO: AS-T12 — migrate to pod-aware bundle source resolver
+import { LegacyBundleSourceResolver as BundleSourceResolver } from "./domain/bundle-source-resolver.js";
 import { PsProjectionService } from "./domain/ps-projection.js";
 import { UpCommandRouter } from "./domain/up-command-router.js";
 import { RigTeardownOrchestrator } from "./domain/rig-teardown.js";

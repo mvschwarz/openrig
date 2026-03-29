@@ -2,8 +2,10 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import { BundleAssembler, type AssemblerFsOps } from "../src/domain/bundle-assembler.js";
-import { parseBundleManifest, validateBundleManifest, normalizeBundleManifest } from "../src/domain/bundle-types.js";
+// TODO: AS-T12 — migrate to pod-aware bundle assembler
+import { LegacyBundleAssembler as BundleAssembler, type AssemblerFsOps } from "../src/domain/bundle-assembler.js";
+// TODO: AS-T12 — migrate to pod-aware bundle types
+import { parseLegacyBundleManifest as parseBundleManifest, validateLegacyBundleManifest as validateBundleManifest, normalizeLegacyBundleManifest as normalizeBundleManifest } from "../src/domain/bundle-types.js";
 
 const VALID_SPEC = `
 schema_version: 1

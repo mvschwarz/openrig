@@ -4,7 +4,8 @@ import path from "node:path";
 import os from "node:os";
 import { createHash } from "node:crypto";
 import { computeIntegrity, writeIntegrity, verifyIntegrity, type IntegrityFsOps } from "../src/domain/bundle-integrity.js";
-import { serializeBundleManifest, type BundleManifest } from "../src/domain/bundle-types.js";
+// TODO: AS-T12 — migrate to pod-aware bundle types
+import { serializeLegacyBundleManifest as serializeBundleManifest, type LegacyBundleManifest as BundleManifest } from "../src/domain/bundle-types.js";
 
 function realFsOps(): IntegrityFsOps {
   return {

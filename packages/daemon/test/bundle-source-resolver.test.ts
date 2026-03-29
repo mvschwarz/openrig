@@ -2,10 +2,12 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import { BundleAssembler, type AssemblerFsOps } from "../src/domain/bundle-assembler.js";
+// TODO: AS-T12 — migrate to pod-aware bundle assembler
+import { LegacyBundleAssembler as BundleAssembler, type AssemblerFsOps } from "../src/domain/bundle-assembler.js";
 import { computeIntegrity, writeIntegrity, type IntegrityFsOps } from "../src/domain/bundle-integrity.js";
 import { pack } from "../src/domain/bundle-archive.js";
-import { BundleSourceResolver } from "../src/domain/bundle-source-resolver.js";
+// TODO: AS-T12 — migrate to pod-aware bundle source resolver
+import { LegacyBundleSourceResolver as BundleSourceResolver } from "../src/domain/bundle-source-resolver.js";
 import type { FsOps } from "../src/domain/package-resolver.js";
 
 const VALID_SPEC = `
@@ -189,7 +191,8 @@ describe("BundleSourceResolver", () => {
     fs.mkdirSync(path.join(rawDir, "packages/pkg/skills/deep"), { recursive: true });
     fs.writeFileSync(path.join(rawDir, "packages/pkg/skills/deep/SKILL.md"), "# Skill");
     // bundle.yaml references rig.yaml but we don't create it
-    const { serializeBundleManifest } = await import("../src/domain/bundle-types.js");
+    // TODO: AS-T12 — migrate to pod-aware bundle types
+    const { serializeLegacyBundleManifest: serializeBundleManifest } = await import("../src/domain/bundle-types.js");
     const manifest = {
       schemaVersion: 1, name: "no-spec", version: "0.1.0",
       createdAt: "2026-01-01T00:00:00Z", rigSpec: "rig.yaml",
@@ -272,5 +275,79 @@ describe("BundleSourceResolver", () => {
     // No new temp dirs should remain
     const after = fs.readdirSync(tmpBase).filter((d) => d.startsWith("rigbundle-")).length;
     expect(after).toBeLessThanOrEqual(before);
+  });
+});
+
+// -- Pod-aware bundle source resolver (schemaVersion 2) --
+
+describe("PodBundleSourceResolver", () => {
+  it("resolves schemaVersion 2 archive via resolve(): unpack, parse, validate, specPath", async () => {
+    const { createHash } = await import("node:crypto");
+    const { PodBundleSourceResolver } = await import("../src/domain/bundle-source-resolver.js");
+    const { serializePodBundleManifest } = await import("../src/domain/bundle-types.js");
+    const { RigSpecCodec } = await import("../src/domain/rigspec-codec.js");
+
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "podbundle-resolver-test-"));
+    try {
+      const stagingDir = path.join(tmpDir, "staging");
+      fs.mkdirSync(stagingDir, { recursive: true });
+
+      // Write rig.yaml
+      const rigYaml = RigSpecCodec.serialize({
+        version: "0.2", name: "resolver-rig",
+        pods: [{ id: "dev", label: "Dev", members: [{ id: "impl", agentRef: "local:agents/impl", profile: "default", runtime: "claude-code", cwd: "." }], edges: [] }],
+        edges: [],
+      });
+      fs.writeFileSync(path.join(stagingDir, "rig.yaml"), rigYaml);
+
+      // Write agent
+      fs.mkdirSync(path.join(stagingDir, "agents", "impl"), { recursive: true });
+      fs.writeFileSync(path.join(stagingDir, "agents", "impl", "agent.yaml"), 'name: impl\nversion: "1.0"\nprofiles: {}');
+
+      // Compute file hashes for integrity section (excluding bundle.yaml per convention)
+      const fileHashes: Record<string, string> = {};
+      function hashFilesInDir(dir: string, prefix: string) {
+        for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+          const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+          if (entry.isDirectory()) hashFilesInDir(path.join(dir, entry.name), rel);
+          else if (rel !== "bundle.yaml") fileHashes[rel] = createHash("sha256").update(fs.readFileSync(path.join(dir, entry.name))).digest("hex");
+        }
+      }
+      hashFilesInDir(stagingDir, "");
+
+      // Write manifest with integrity
+      const manifestYaml = serializePodBundleManifest({
+        schemaVersion: 2, name: "resolver-test", version: "1.0.0",
+        createdAt: new Date().toISOString(), rigSpec: "rig.yaml",
+        agents: [{ name: "impl", version: "1.0", path: "agents/impl", originalRef: "local:agents/impl", hash: "test-hash", importEntries: [] }],
+        integrity: { algorithm: "sha256", files: fileHashes },
+      });
+      fs.writeFileSync(path.join(stagingDir, "bundle.yaml"), manifestYaml);
+
+      // Pack archive
+      const archivePath = path.join(tmpDir, "test.rigbundle");
+      await pack(stagingDir, archivePath);
+
+      // Create .sha256 digest
+      const archiveDigest = createHash("sha256").update(fs.readFileSync(archivePath)).digest("hex");
+      fs.writeFileSync(`${archivePath}.sha256`, archiveDigest);
+
+      // Resolve via PodBundleSourceResolver.resolve()
+      const resolver = new PodBundleSourceResolver();
+      const result = await resolver.resolve(archivePath);
+
+      try {
+        expect(result.manifest.schemaVersion).toBe(2);
+        expect(result.manifest.name).toBe("resolver-test");
+        expect(result.manifest.agents).toHaveLength(1);
+        expect(result.manifest.agents[0]!.name).toBe("impl");
+        expect(fs.existsSync(result.specPath)).toBe(true);
+        expect(result.specPath).toContain("rig.yaml");
+      } finally {
+        resolver.cleanup(result.tempDir);
+      }
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
   });
 });

@@ -1,11 +1,12 @@
 import { describe, it, expect } from "vitest";
+// TODO: AS-T12 — migrate to pod-aware bundle types
 import {
-  validateBundleManifest,
-  parseBundleManifest,
-  normalizeBundleManifest,
-  serializeBundleManifest,
+  validateLegacyBundleManifest as validateBundleManifest,
+  parseLegacyBundleManifest as parseBundleManifest,
+  normalizeLegacyBundleManifest as normalizeBundleManifest,
+  serializeLegacyBundleManifest as serializeBundleManifest,
   isRelativeSafePath,
-  type BundleManifest,
+  type LegacyBundleManifest as BundleManifest,
 } from "../src/domain/bundle-types.js";
 
 const VALID_RAW = {

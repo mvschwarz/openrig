@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
 import nodePath from "node:path";
-import type { BundleManifest, BundleIntegrity } from "./bundle-types.js";
-import { parseBundleManifest, normalizeBundleManifest, serializeBundleManifest } from "./bundle-types.js";
+// TODO: AS-T12 — migrate to pod-aware bundle types
+import type { LegacyBundleManifest as BundleManifest, BundleIntegrity } from "./bundle-types.js";
+import { parseLegacyBundleManifest as parseBundleManifest, normalizeLegacyBundleManifest as normalizeBundleManifest, serializeLegacyBundleManifest as serializeBundleManifest } from "./bundle-types.js";
 
 export interface IntegrityFsOps {
   readFile: (path: string) => string;

@@ -986,10 +986,10 @@ exports:
   // T25: Real bundle bootstrap happy path
   it("bootstrap from rig_bundle resolves vendored packages", async () => {
     // Create a real bundle
-    const { BundleAssembler } = await import("../src/domain/bundle-assembler.js");
+    const { LegacyBundleAssembler: BundleAssembler } = await import("../src/domain/bundle-assembler.js"); // TODO: AS-T12
     const { computeIntegrity, writeIntegrity } = await import("../src/domain/bundle-integrity.js");
     const { pack } = await import("../src/domain/bundle-archive.js");
-    const { BundleSourceResolver } = await import("../src/domain/bundle-source-resolver.js");
+    const { LegacyBundleSourceResolver: BundleSourceResolver } = await import("../src/domain/bundle-source-resolver.js"); // TODO: AS-T12
 
     // Write package source
     const pkgDir = path.join(tmpDir, "src-pkg");

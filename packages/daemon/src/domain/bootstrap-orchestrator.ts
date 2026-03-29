@@ -13,7 +13,8 @@ import type { RigInstantiator } from "./rigspec-instantiator.js";
 import type { FsOps, ResolvedPackage } from "./package-resolver.js";
 import { resolvePackage, type ResolveResult } from "./package-resolve-helper.js";
 import type { BootstrapStatus } from "./bootstrap-types.js";
-import type { BundleSourceResolver, BundleResolvedSource } from "./bundle-source-resolver.js";
+// TODO: AS-T12 — migrate to pod-aware bundle source resolver
+import type { LegacyBundleSourceResolver as BundleSourceResolver, BundleResolvedSource } from "./bundle-source-resolver.js";
 
 /** Bootstrap mode */
 export type BootstrapMode = "plan" | "apply";

@@ -5,13 +5,15 @@ import { Hono } from "hono";
 import type { EventBus } from "../domain/event-bus.js";
 import type { BootstrapOrchestrator } from "../domain/bootstrap-orchestrator.js";
 import type { BootstrapRepository } from "../domain/bootstrap-repository.js";
-import { BundleAssembler, type AssemblerFsOps } from "../domain/bundle-assembler.js";
+// TODO: AS-T12 — migrate to pod-aware bundle assembler
+import { LegacyBundleAssembler as BundleAssembler, type AssemblerFsOps } from "../domain/bundle-assembler.js";
 import { computeIntegrity, writeIntegrity, verifyIntegrity, type IntegrityFsOps } from "../domain/bundle-integrity.js";
 import { pack, unpack, verifyArchiveDigest } from "../domain/bundle-archive.js";
 import { resolvePackage } from "../domain/package-resolve-helper.js";
 import { LegacyRigSpecCodec as RigSpecCodec } from "../domain/rigspec-codec.js"; // TODO: AS-T08b — migrate to pod-aware RigSpec
 import { LegacyRigSpecSchema as RigSpecSchema } from "../domain/rigspec-schema.js"; // TODO: AS-T08b — migrate to pod-aware RigSpec
-import { parseBundleManifest, normalizeBundleManifest } from "../domain/bundle-types.js";
+// TODO: AS-T12 — migrate to pod-aware bundle types
+import { parseLegacyBundleManifest as parseBundleManifest, normalizeLegacyBundleManifest as normalizeBundleManifest } from "../domain/bundle-types.js";
 import type { FsOps } from "../domain/package-resolver.js";
 
 export const bundleRoutes = new Hono();
