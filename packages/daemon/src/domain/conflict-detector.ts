@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { ProjectionClassification } from "./projection-planner.js";
 import type { FsOps } from "./package-resolver.js";
 import type { InstallPlan, InstallPlanEntry, ConflictInfo } from "./install-planner.js";
 
@@ -121,4 +122,54 @@ export function detectConflicts(
     conflicts,
     noOps,
   };
+}
+
+// -- Projection-specific conflict classification (AgentSpec reboot) --
+
+interface ProjectionFsOps {
+  readFile(path: string): string;
+  exists(path: string): boolean;
+}
+
+/**
+ * Classify a resource projection using hash-based comparison.
+ * Returns projection-specific classification states (not legacy ActionClassification).
+ * @param sourcePath - absolute path to source resource
+ * @param targetPath - absolute path to target location
+ * @param category - resource category
+ * @param mergeStrategy - guidance merge strategy if applicable
+ * @param fsOps - filesystem operations
+ * @returns ProjectionClassification
+ */
+export function classifyResourceProjection(
+  sourcePath: string,
+  targetPath: string,
+  category: string,
+  mergeStrategy: string | undefined,
+  fsOps: ProjectionFsOps,
+): ProjectionClassification {
+  // Guidance with managed_block: always managed_merge
+  if (category === "guidance" && mergeStrategy === "managed_block") {
+    return "managed_merge";
+  }
+
+  // Target doesn't exist: safe projection
+  if (!fsOps.exists(targetPath)) {
+    return "safe_projection";
+  }
+
+  // Target exists: compare hashes
+  try {
+    const sourceContent = fsOps.readFile(sourcePath);
+    const targetContent = fsOps.readFile(targetPath);
+    const sourceHash = hashContent(sourceContent);
+    const targetHash = hashContent(targetContent);
+
+    if (sourceHash === targetHash) {
+      return "no_op";
+    }
+    return "hash_conflict";
+  } catch {
+    return "hash_conflict";
+  }
 }
