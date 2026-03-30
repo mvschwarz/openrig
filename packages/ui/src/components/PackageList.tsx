@@ -104,15 +104,15 @@ export function PackageList() {
   if (sortedPackages.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center min-h-[60vh]" data-testid="packages-empty">
-        <h2 className="text-display-lg text-foreground mb-spacing-4">NO PACKAGES</h2>
-        <p className="text-body-md text-foreground-muted mb-spacing-8">Install an agent package to get started</p>
+        <h2 className="text-display-lg text-foreground mb-spacing-4">NO SPECS</h2>
+        <p className="text-body-md text-foreground-muted mb-spacing-8">Import a RigSpec or validate an AgentSpec to get started</p>
         <Button
           variant="default"
           size="lg"
           data-testid="empty-install-btn"
-          onClick={() => navigate({ to: "/packages/install" })}
+          onClick={() => navigate({ to: "/import" })}
         >
-          INSTALL YOUR FIRST PACKAGE
+          IMPORT RIGSPEC
         </Button>
       </div>
     );

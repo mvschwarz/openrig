@@ -116,15 +116,28 @@ export function BootstrapWizard() {
       {/* Step 1: Enter */}
       {step === "enter" && (
         <div data-testid="step-enter">
-          <label className="text-label-md uppercase block mb-spacing-2">SPEC PATH</label>
+          <label className="text-label-md uppercase block mb-spacing-2">SPEC OR BUNDLE PATH</label>
           <input
             data-testid="spec-input"
             type="text"
             value={sourceRef}
             onChange={(e) => setSourceRef(e.target.value)}
-            placeholder="/path/to/rig.yaml"
+            placeholder="/path/to/rig.yaml or /path/to/bundle.rigbundle"
             className="w-full bg-transparent border-b border-foreground/20 py-spacing-2 text-body-md font-mono focus:outline-none focus:border-primary"
           />
+          <p className="text-label-sm text-foreground-muted mt-spacing-1">
+            Accepts .yaml rig specs or .rigbundle archives.{" "}
+            <span
+              role="link"
+              tabIndex={0}
+              className="text-primary cursor-pointer"
+              data-testid="inspect-link"
+              onClick={() => navigate({ to: "/bundles/inspect" })}
+              onKeyDown={(e) => { if (e.key === "Enter") navigate({ to: "/bundles/inspect" }); }}
+            >
+              Inspect a bundle first →
+            </span>
+          </p>
           <div className="mt-spacing-4">
             <Button variant="tactical" onClick={handlePlan} disabled={!sourceRef.trim()} data-testid="plan-btn">
               PLAN

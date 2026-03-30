@@ -66,6 +66,7 @@ function renderPackageList() {
       routes: [
         { path: "/packages", component: PackageList },
         { path: "/packages/install", component: () => <div data-testid="install-flow-page">Install Flow</div> },
+        { path: "/import", component: () => <div data-testid="import-page">Import Flow</div> },
       ],
       initialPath: "/packages",
     })
@@ -130,7 +131,7 @@ describe("PackageList", () => {
     expect(statuses[1]!.textContent).toBe("APPLIED");
   });
 
-  // Test 3: Empty state CTA navigates to /packages/install
+  // Test 3: Empty state CTA navigates to /import
   it("empty state CTA navigates to install flow", async () => {
     mockFetchPackages([]);
     renderPackageList();
@@ -140,13 +141,13 @@ describe("PackageList", () => {
     });
 
     const btn = screen.getByTestId("empty-install-btn");
-    expect(btn.textContent).toContain("INSTALL YOUR FIRST PACKAGE");
+    expect(btn.textContent).toContain("IMPORT RIGSPEC");
     expect(btn).toHaveProperty("disabled", false);
 
     act(() => { fireEvent.click(btn); });
 
     await waitFor(() => {
-      expect(screen.getByTestId("install-flow-page")).toBeTruthy();
+      expect(screen.getByTestId("import-page")).toBeTruthy();
     });
   });
 

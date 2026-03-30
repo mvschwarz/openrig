@@ -227,7 +227,7 @@ export function ImportFlow({ onBack }: ImportFlowProps = {}) {
             onClick={handleValidate}
             disabled={!yaml.trim()}
           >
-            VALIDATE
+            VALIDATE RIGSPEC
           </Button>
         </div>
       )}

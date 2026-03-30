@@ -45,7 +45,7 @@ export function AppShell({ children }: AppShellProps) {
         <nav className="hidden md:flex gap-spacing-8">
           {[
             { path: "/", label: "RIGS" },
-            { path: "/packages", label: "PACKAGES" },
+            { path: "/packages", label: "SPECS" },
             { path: "/discovery", label: "DISCOVERY" },
           ].map((item) => {
             const isActive = item.path === "/"
