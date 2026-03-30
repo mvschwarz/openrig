@@ -2,11 +2,12 @@
 ## AgentSpec Reboot Snapshot (as of 2026-03-29)
 
 Status:
-- Current audited daemon count: 1135 tests across 90 Vitest files.
-- Daemon footprint: 108 source files total, including 65 domain files, 13 route files, 9 adapters, and 15 migrations.
-- CLI footprint: 21 source files.
+- Current audited daemon count: 1153 tests across 90 Vitest files.
+- Current audited CLI count: 168 tests across 17 Vitest files.
+- Daemon footprint: 109 source files total, including 65 domain files, 14 route files, 9 adapters, and 15 migrations.
+- CLI footprint: 23 source files (added agent.ts, rig.ts commands).
 - UI footprint: 53 source files including `globals.css` (`52` TypeScript/TSX files plus `1` CSS entrypoint).
-- Reboot status: engine work through AS-T11 plus Checkpoint 2 fixes is landed. AS-T12 route/app reboot is still pending, so the current HTTP surface is hybrid.
+- Reboot status: all 16 tasks (AS-T00 through AS-T14) plus three checkpoint fix rounds are landed. The full surface — engine, routes, CLI, and UI — is rebooted.
 
 Packages: `@rigged/daemon` + `@rigged/cli` + `@rigged/ui`
 
@@ -45,11 +46,9 @@ Domain services (framework-agnostic)
       +-- runtime adapters (Claude Code / Codex)
 ```
 
-The main architectural fact at current `HEAD` is this:
-- The rebooted engine is substantially complete.
-- The public route layer is not fully rewired yet.
-
-That is why the daemon currently contains both canonical rebooted seams and legacy compatibility seams.
+The reboot is complete across all layers:
+- The engine, route surface, CLI, and UI are all rebooted.
+- Legacy compatibility seams remain for pre-reboot data but all new flows use the canonical pod-aware model.
 
 ---
 
@@ -446,45 +445,28 @@ The bootstrap subsystem is now partially reboot-aware.
 - Detects pod-aware direct rig specs before legacy validation.
 - Supports pod-aware plan/apply for direct `rig_spec` sources via `PodRigInstantiator`.
 
-### What is still hybrid
+### What was hybrid (now resolved)
 
-At current `HEAD`, bundle import/install is still not fully route-wired to the canonical pod bundle path:
-- the pod bundle assembler exists
-- the pod bundle source resolver exists
-- but the public route/app surface is not fully rebooted yet
-
-This is exactly the gap AS-T12 is intended to close.
+AS-T12 closed the route/app wiring gap. The pod bundle assembler, pod bundle source resolver, and PodRigInstantiator are now fully wired into the public route surface. Bundle create, inspect, and install all support schemaVersion 2. Legacy v1 bundles continue to work through the existing path.
 
 ---
 
 ## 7. Current HTTP / App Wiring State
 
-This section is intentionally candid: the daemon route layer is not fully rebooted yet.
+The route layer is fully rebooted.
 
-### Current reality
+### Rebooted route surface
 
-**Already reboot-aware**
-- `up-command-router.ts`
-- `bootstrap-orchestrator.ts` for direct pod-aware rig specs
-- `startup.ts` already constructs:
-  - `StartupOrchestrator`
-  - `ClaudeCodeAdapter`
-  - `CodexRuntimeAdapter`
-  - `PodRigInstantiator`
+- `routes/rigspec.ts` — dual-format import/validate/preflight with auto-detection
+- `routes/agents.ts` — `POST /api/agents/validate` for AgentSpec validation
+- `routes/bundles.ts` — dual-format create/inspect/install (v1 + v2 bundles)
+- `routes/up.ts` — handles pod-aware specs and bundles via bootstrap orchestrator
+- `server.ts` — `podInstantiator` and `podBundleSourceResolver` in `AppDeps`
+- `startup.ts` — constructs all rebooted services including `PodBundleSourceResolver`
 
-**Still mostly legacy at route level**
-- `routes/rigspec.ts`
-- `routes/bundles.ts`
-- `routes/packages.ts`
-- `server.ts` / `createApp()` dependency surface
+### Legacy compatibility
 
-### Important consequence
-
-The current daemon is engine-ready but surface-incomplete:
-- the engine understands AgentSpec + pods
-- the route layer still mostly exposes legacy contracts
-
-That mismatch is deliberate temporary debt, not an accident.
+Legacy routes remain functional for pre-reboot data. The dual-format detection pattern (`Array.isArray(raw.pods)`) routes pod-aware specs to the new engine and legacy specs to the existing path.
 
 ### CLI / UI cross-reference
 
@@ -672,22 +654,13 @@ Important current limitation:
 
 These are the most important outstanding gaps at current `HEAD`:
 
-1. **AS-T12 route reboot is still pending.**
-   - The public route layer does not yet fully expose the rebooted engine.
-
-2. **AS-T13 CLI vocabulary reboot is still pending.**
-   - CLI surface still largely speaks the legacy route contracts.
-
-3. **Bundle install is still hybrid.**
-   - Pod bundle assembly and pod bundle resolution exist, but the app surface is not fully rewired.
-
-4. **Readiness polling is still a single check.**
+1. **Readiness polling is still a single check.**
    - No backoff/timeout loop yet.
 
-5. **Remote import sources remain unsupported in the rebooted v1 constraints.**
+2. **Remote import sources remain unsupported in the rebooted v1 constraints.**
 
-6. **Startup actions remain intentionally constrained.**
+3. **Startup actions remain intentionally constrained.**
    - No shell actions.
 
-7. **Legacy compatibility seams still exist throughout the daemon.**
-   - This is temporary and expected until the route/CLI reboot is finished.
+4. **Legacy compatibility seams still exist for pre-reboot data.**
+   - The dual-format detection handles this transparently.
