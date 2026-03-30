@@ -1,58 +1,164 @@
 # Rigged — As-Built Architecture
-## AgentSpec Reboot Snapshot (as of 2026-03-29)
+## Complete Reboot Snapshot (as of 2026-03-30)
 
 Status:
-- Current audited daemon count: 1153 tests across 90 Vitest files.
-- Current audited CLI count: 168 tests across 17 Vitest files.
+- Reboot scope landed: all 16 implementation tasks (`AS-T00` through `AS-T14`, with split `AS-T08a` and `AS-T08b`) plus the Checkpoint 2 and Checkpoint 3 fix cycles.
+- Shipped source footprint: 185 source files across the three packages.
 - Daemon footprint: 109 source files total, including 65 domain files, 14 route files, 9 adapters, and 15 migrations.
-- CLI footprint: 23 source files (added agent.ts, rig.ts commands).
-- UI footprint: 53 source files including `globals.css` (`52` TypeScript/TSX files plus `1` CSS entrypoint).
-- Reboot status: all 16 tasks (AS-T00 through AS-T14) plus three checkpoint fix rounds are landed. The full surface — engine, routes, CLI, and UI — is rebooted.
+- CLI footprint: 23 source files.
+- UI footprint: 53 source files total (`52` TypeScript/TSX files plus `globals.css`).
+- Current test footprint at `HEAD`: 127 Vitest files containing 1,558 tests (`90/1153` daemon, `17/168` CLI, `20/237` UI).
+- Current full-suite verification during this refresh:
+  - daemon: `1153/1153` passing
+  - CLI: `168/168` passing
+  - UI: `236/237` passing, with 1 Tailwind foundation assertion failing
 
-Packages: `@rigged/daemon` + `@rigged/cli` + `@rigged/ui`
+Packages: `@rigged/daemon`, `@rigged/cli`, `@rigged/ui`
 
 ---
 
 ## 1. System Overview
 
-Rigged is still a local control plane for multi-agent coding topologies, but the daemon now has two architectural layers in parallel:
+Rigged is a local control plane for multi-agent coding topologies. The shipped architecture is now a real dual-stack:
 
-1. A legacy flat-node / package-ref path that still serves much of the current HTTP surface.
-2. A rebooted AgentSpec / pod-aware engine that already owns parsing, resolution, startup, continuity, restore replay, bundle assembly, and pod-aware instantiation.
+1. Legacy flat-node/package flows remain for compatibility with pre-reboot data and v1 artifacts.
+2. The canonical shipped path is the AgentSpec + pod-aware RigSpec reboot:
+   - AgentSpec parsing and validation
+   - pod-aware RigSpec parsing, preflight, instantiation, export
+   - layered startup resolution and runtime projection
+   - continuity-aware snapshot/restore replay
+   - schema-version-2 bundle create/inspect/install
 
-Current shape:
+The stack is:
 
-```
+```text
 CLI / UI / MCP
       |
       v
 Hono daemon routes
       |
-      +-- Legacy route surface still active for many endpoints
-      |
-      +-- Rebooted engine already active in:
-          - UpCommandRouter source detection
-          - BootstrapOrchestrator direct pod-aware rig path
-          - PodRigInstantiator
-          - StartupOrchestrator
-          - Pod bundle assembly / pod bundle resolution
-          - AgentSpec validation / preflight domain services
+      +-- dual-format route adapters
+      |     - legacy v1 rigs / package bundles
+      |     - rebooted v0.2 rigs / v2 pod bundles
       |
       v
-Domain services (framework-agnostic)
+Framework-free domain services
       |
       +-- SQLite state
-      +-- tmux / cmux adapters
+      +-- tmux / cmux / resume adapters
       +-- runtime adapters (Claude Code / Codex)
 ```
 
-The reboot is complete across all layers:
-- The engine, route surface, CLI, and UI are all rebooted.
-- Legacy compatibility seams remain for pre-reboot data but all new flows use the canonical pod-aware model.
+Architecturally, the reboot is complete at the public surface: the route layer, CLI, MCP wrappers, and UI all speak the rebooted vocabulary, while legacy seams continue to exist for compatibility.
 
 ---
 
-## 2. Database Schema
+## 2. Current Public Surface
+
+### HTTP routes
+
+`createApp()` mounts the following public route groups:
+
+- `GET /healthz`
+- `/api/rigs`
+- `/api/rigs/:rigId/sessions`
+- `/api/rigs/:rigId/nodes`
+- `/api/adapters`
+- `/api/events`
+- `/api/rigs/:rigId/snapshots`
+- `/api/rigs/:rigId/restore`
+- `/api/rigs/import`
+- `GET /api/rigs/:rigId/spec`
+- `GET /api/rigs/:rigId/spec.json`
+- `/api/packages`
+- `/api/agents`
+- `/api/bootstrap`
+- `/api/discovery`
+- `/api/bundles`
+- `/api/ps`
+- `/api/up`
+- `/api/down`
+
+Important rebooted route behavior:
+
+- `/api/agents/validate` is the canonical AgentSpec validation endpoint.
+- `/api/rigs/import`, `/validate`, and `/preflight` are dual-format.
+- Pod-aware import and preflight require `X-Rig-Root`.
+- `/api/bundles/create`, `/inspect`, and `/install` are dual-format.
+- `/api/up` accepts both direct pod-aware rig specs and schema-version-2 bundles through the bootstrap orchestrator.
+
+### CLI commands
+
+The shipped CLI command groups are:
+
+- `daemon`
+- `status`
+- `snapshot`
+- `restore`
+- `export`
+- `import`
+- `ui`
+- `package`
+- `bootstrap`
+- `requirements`
+- `discover`
+- `claim`
+- `bundle`
+- `up`
+- `down`
+- `ps`
+- `mcp`
+- `agent`
+- `rig`
+
+Reboot-era additions and changes:
+
+- `rigged agent validate <path> [--json]`
+- `rigged rig validate <path> [--json]`
+- `rigged rig preflight <path> [--rig-root <path>] [--json]`
+- `rigged import ... --rig-root <path>` for pod-aware import/preflight flows
+- `rigged bundle create ... --rig-root <path>` for pod-aware bundle assembly
+- `package` remains mounted as the legacy package-management surface
+
+### MCP tools
+
+The CLI-hosted MCP server exposes 12 tools:
+
+1. `rigged_up`
+2. `rigged_down`
+3. `rigged_ps`
+4. `rigged_status`
+5. `rigged_snapshot_create`
+6. `rigged_snapshot_list`
+7. `rigged_restore`
+8. `rigged_discover`
+9. `rigged_claim`
+10. `rigged_bundle_inspect`
+11. `rigged_agent_validate`
+12. `rigged_rig_validate`
+
+### UI screens
+
+The current UI route tree exposes:
+
+- dashboard
+- rig topology
+- import flow
+- package/spec list and package detail
+- bootstrap wizard
+- bundle inspector
+- bundle install flow
+- discovery overlay
+- snapshot panel
+
+Terminology is rebooted on the main authoring/install surfaces:
+- RigSpec / AgentSpec vocabulary in validation and import
+- `SPECS` in navigation
+- legacy labeling on the old package surfaces
+
+---
+
+## 3. Database Schema
 
 The daemon now has 15 migrations.
 
@@ -62,8 +168,8 @@ The daemon now has 15 migrations.
 - Top-level topology container.
 
 **nodes**
-- Logical node identity within a rig.
-- Legacy fields still exist: `logical_id`, `runtime`, `model`, `cwd`, `restore_policy`, `package_refs`.
+- Logical node identity inside a rig.
+- Legacy columns remain (`logical_id`, `runtime`, `model`, `cwd`, `restore_policy`, `package_refs`).
 - Reboot additions from migration 014:
   - `pod_id`
   - `agent_ref`
@@ -74,23 +180,23 @@ The daemon now has 15 migrations.
   - `resolved_spec_hash`
 
 **edges**
-- Logical relationships between nodes.
+- Logical topology relationships.
 
 **bindings**
 - Physical surface attachment: tmux/cmux coordinates.
 
 **sessions**
-- Live harness execution state.
+- Live execution state.
 - Reboot additions from migration 014:
-  - `startup_status` (`pending | ready | failed`)
+  - `startup_status`
   - `startup_completed_at`
-- Resume metadata and restore policy still live here because restore reads the newest session row, not the node row.
+- Restore still reads the newest session row, so narrowed restore policy must be propagated to both node and session rows.
 
 **events**
 - Append-only event log.
 
 **snapshots**
-- Point-in-time serialized rig state.
+- Serialized rig state.
 
 **checkpoints**
 - Per-node recovery state.
@@ -99,9 +205,9 @@ The daemon now has 15 migrations.
   - `continuity_source`
   - `continuity_artifacts_json`
 
-### Package / bootstrap / discovery tables
+### Legacy package / bootstrap / discovery tables
 
-These remain from the pre-reboot system:
+These remain active:
 - `packages`
 - `package_installs`
 - `install_journal`
@@ -112,18 +218,17 @@ These remain from the pre-reboot system:
 
 ### Reboot-specific tables
 
-**pods** (migration 014)
-- Bounded context grouping inside a rig.
-- Stores `label`, `summary`, and serialized continuity policy.
+**pods** (`014_agentspec_reboot.ts`)
+- Persisted pod record containing label, summary, and serialized continuity policy.
 
-**continuity_state** (migration 014)
+**continuity_state** (`014_agentspec_reboot.ts`)
 - Live per-`pod_id` / `node_id` operational continuity state.
 - Current statuses:
   - `healthy`
   - `degraded`
   - `restoring`
 
-**node_startup_context** (migration 015)
+**node_startup_context** (`015_startup_context.ts`)
 - Persisted startup replay context for restore.
 - Stores:
   - classification-free projection intent
@@ -131,80 +236,53 @@ These remain from the pre-reboot system:
   - startup actions
   - runtime
 
-This table is the bridge between the startup engine and restore replay.
-
 Migration boundary:
-- `014_agentspec_reboot.ts` adds the reboot schema shape: pods, continuity state, node/session/checkpoint reboot columns.
-- `015_startup_context.ts` adds only `node_startup_context`, the persisted startup replay payload used by restore.
+- `014_agentspec_reboot.ts` adds the reboot schema shape.
+- `015_startup_context.ts` adds only persisted startup replay context.
 
 ---
 
-## 3. Rebooted Core Types
+## 4. Canonical Reboot Types
 
-The reboot introduced a second canonical topology and execution vocabulary.
-
-### Spec / topology types
+### Spec and topology
 
 **AgentSpec**
 - Parsed from `agent.yaml`.
-- Owns:
-  - imports
-  - defaults
-  - startup
-  - resources
-  - profiles
+- Owns imports, defaults, startup, resources, and profiles.
 
-**RigSpec** (pod-aware)
-- No longer a flat `nodes[]`-only contract.
-- Owns:
-  - `pods[]`
-  - cross-pod `edges[]`
-  - `cultureFile`
-  - rig-level startup overlays
+**RigSpec**
+- Canonical pod-aware rig topology.
+- Uses `version: "0.2"` and `pods[]`.
+- Owns cross-pod `edges[]`, rig-level startup overlays, and `cultureFile`.
 
 **RigSpecPod**
-- Bounded pod with:
-  - `members[]`
-  - pod-local `edges[]`
-  - optional continuity policy
-  - pod-level startup overlays
+- Pod-local bounded context with `members[]`, pod-local `edges[]`, pod startup, and optional continuity policy.
 
 **RigSpecPodMember**
-- Member-authoritative runtime surface:
+- Member-level runtime and startup surface:
   - `agentRef`
   - `profile`
   - `runtime`
   - `model?`
   - `cwd`
   - `restorePolicy?`
-  - member-level startup overlays
+  - member startup overlays
 
 **Pod**
-- Persisted DB record for a pod.
+- Persisted DB entity for a pod.
 
 **ContinuityState**
 - Persisted live continuity row keyed by `podId + nodeId`.
 
-### Execution / restore types
+### Execution and restore
 
 **ResolvedNodeConfig**
 - Output of profile resolution.
-- Carries:
-  - effective runtime / model / cwd
-  - narrowed restore policy
-  - selected resources
-  - layered startup block
-  - resolved spec identity
+- Carries effective runtime/model/cwd, narrowed restore policy, selected resources, layered startup block, and resolved spec identity.
 
 **ProjectionPlan**
-- Output of projection planning for one node.
-- Carries:
-  - runtime
-  - cwd
-  - projection entries
-  - startup block
-  - diagnostics
-  - conflict / no-op classification output
+- Runtime projection plan for a node.
+- Carries runtime, cwd, projection entries, startup block, diagnostics, and conflict/no-op classifications.
 
 **RuntimeAdapter**
 - Four-method contract:
@@ -214,418 +292,264 @@ The reboot introduced a second canonical topology and execution vocabulary.
   - `checkReady(binding)`
 
 **StartupOrchestrator**
-- Takes:
-  - session + binding
-  - runtime adapter
-  - projection plan
-  - resolved startup files
-  - startup actions
-  - restore/fresh context
-- Returns `ready` or `failed`.
+- Takes session/binding, adapter, projection plan, resolved startup files, startup actions, and restore/fresh context.
+- Persists replay context after successful startup.
 
 **SnapshotData**
-- Has optional reboot-specific extensions:
+- Current serialized snapshot payload.
+- Reboot extensions are optional for compatibility with older snapshots:
   - `pods?`
   - `continuityStates?`
   - `nodeStartupContext?`
 
-Those fields are optional because restore/snapshot code must still accept legacy snapshots that predate the rebooted capture payload.
-
 **NodeStartupSnapshot**
 - Persisted restore replay input:
-  - projection entries
+  - classification-free projection entries
   - resolved startup files
   - startup actions
   - runtime
 
+**PersistedProjectionEntry**
+- The classification-free restore replay seam.
+- Persists only entry identity and source metadata, not stale `classification`, `conflicts`, or `noOps`.
+
 ---
 
-## 4. Rebooted Domain Services
+## 5. Domain Services
 
-All rebooted services live under `packages/daemon/src/domain/`. They continue the existing rule: zero Hono imports in domain code.
+All rebooted services live under `packages/daemon/src/domain/`. The rule remains: zero Hono imports in domain code.
 
-### Spec parsing and validation
+### Parsing and validation
 
-**agent-manifest.ts**
-- Canonical AgentSpec parser / normalizer / validator.
-
-**rigspec-schema.ts**
-- Now contains both:
-  - legacy flat-node RigSpec validation
-  - canonical pod-aware RigSpec validation
-
-**startup-validation.ts**
-- Shared startup validation / normalization:
-  - validates startup files
-  - validates startup actions
-  - rejects unsupported shell startup actions in v1
-  - enforces restore-safety rules for non-idempotent actions
-
-**path-safety.ts**
-- Shared relative-path validation used by AgentSpec, RigSpec, package manifests, and startup config.
-- Centralizes path traversal rejection for user-authored manifest paths.
-
-**spec-validation-service.ts**
-- Pure YAML validation service for:
-  - AgentSpec YAML
-  - pod-aware RigSpec YAML
+- `agent-manifest.ts`: canonical AgentSpec parse/normalize/validate
+- `rigspec-schema.ts`: dual-format RigSpec validation
+- `rigspec-codec.ts`: dual-format YAML codec
+- `startup-validation.ts`: shared startup block validation
+- `path-safety.ts`: shared relative-path safety checks
+- `spec-validation-service.ts`: pure raw-YAML validation helpers
 
 ### Resolution pipeline
 
-**agent-resolver.ts**
-- Resolves `agent_ref` plus flat imports.
-- Builds collision diagnostics across:
-  - base resources
-  - imported resources
-- Enforces source resolution rules:
-  - `local:...`
-  - `path:/abs/...`
-- Rejects unsupported remote import behavior in the current v1 reboot.
+- `agent-resolver.ts`: resolves `agent_ref`, imports, and collision metadata
+- `agent-preflight.ts`: single-agent resolution/preflight
+- `profile-resolver.ts`: applies defaults, profile uses, resource selection, startup layering, and restore-policy narrowing
+- `startup-resolver.ts`: additive startup layering
+- `projection-planner.ts`: runtime resource projection planning
 
-**profile-resolver.ts**
-- Resolves profile-selected resources against the base/import pool.
-- Produces `ResolvedNodeConfig`.
-- Owns:
-  - missing-profile failure
-  - ambiguous unqualified import/import failure
-  - restore-policy narrowing
-  - runtime/model/cwd precedence
+### Startup, runtime, and instantiation
 
-**startup-resolver.ts**
-- Builds effective startup in fixed additive order:
-  1. agent base startup
-  2. profile startup
-  3. rig culture file
-  4. rig startup
-  5. pod startup
-  6. member startup
-  7. operator debug append
+- `runtime-adapter.ts`: adapter contract and bridge types
+- `startup-orchestrator.ts`: startup projection, delivery, actions, readiness, and replay persistence
+- `rigspec-preflight.ts`: dual-stack legacy preflight plus rebooted `rigPreflight(...)`
+- `rigspec-instantiator.ts`: dual-stack `RigInstantiator` plus `PodRigInstantiator`
+- `rigspec-exporter.ts`: dual-format live rig export back to YAML/JSON
+- `pod-repository.ts`: pod CRUD plus live continuity-state CRUD
 
-### Projection and startup
+### Runtime adapters
 
-**projection-planner.ts**
-- Converts `ResolvedNodeConfig` plus collision diagnostics into a runtime projection plan.
-- Filters runtime resources by member runtime.
-- Produces projection diagnostics and conflict/no-op classification.
+The shipped runtime adapters now own projection, startup-file delivery, installed-resource listing, and readiness checks.
 
-**runtime-adapter.ts**
-- Defines the runtime adapter contract and resolved startup file shape.
+**ClaudeCodeAdapter**
+- projects Claude-facing resources into `.claude/...`
+- merges guidance into `CLAUDE.md`
 
-**startup-orchestrator.ts**
-- Drives the startup sequence:
-  1. mark session `startup_status = pending`
-  2. project resources
-  3. deliver startup files
-  4. run `after_files` actions
-  5. `checkReady`
-  6. run `after_ready` actions
-  7. mark `startup_status = ready`
-- Persists startup context to `node_startup_context` for restore replay.
-
-### Validation / preflight
-
-**agent-preflight.ts**
-- Agent-only resolution/preflight.
-- No runtime check.
-
-**rigspec-preflight.ts**
-- Still contains the legacy `RigSpecPreflight` class.
-- Also now exports rebooted `rigPreflight(...)`, which validates:
-  - pod-aware RigSpec YAML
-  - all `agent_ref`s
-  - profile selection
-  - ambiguity rules
-  - restore-policy narrowing
-  - runtime and cwd requirements
-
-### Instantiation / continuity / restore
-
-**rigspec-instantiator.ts**
-- Still contains the legacy `RigInstantiator`.
-- Also now contains `PodRigInstantiator`.
-- Pod-aware instantiation owns:
-  - parse + validate
-  - preflight
-  - pod creation
-  - node creation with resolved spec identity
-  - topological member launch ordering
-  - cycle rejection
-  - startup orchestration
-
-**pod-repository.ts**
-- CRUD for pods.
-- Also owns continuity-state CRUD:
-  - query continuity for a rig
-  - update per-node continuity state
-
-**checkpoint-store.ts**
-- Evolved to carry pod / continuity context on checkpoints.
-
-**snapshot-capture.ts**
-- Now captures pods, continuity state, and startup replay context.
-
-**restore-orchestrator.ts**
-- Now mixes legacy restore mechanics with rebooted replay:
-  - reads newest session
-  - consults live `continuity_state`
-  - preserves state on `restoring`
-  - replays restore-safe startup when persisted startup context exists
-  - prefilters missing optional artifacts into warnings
-  - hard-fails a node if a required startup file is missing
-
-### Bundles
-
-**pod-bundle-assembler.ts**
-- Canonical schema-version-2 bundle walker.
-- Walks pod members via `agent_ref`.
-- Vendors referenced AgentSpecs plus imports.
-- Produces the rebooted `agents[]` bundle manifest shape.
-
-**bundle-types.ts**
-- Now contains both:
-  - canonical pod-aware bundle types / parse / validate
-  - legacy bundle types / parse / validate
-
-**bundle-source-resolver.ts**
-- Now contains both:
-  - `LegacyBundleSourceResolver`
-  - `PodBundleSourceResolver`
-
-### Current dual-stack reality
-
-The daemon currently has a real dual-stack:
-- legacy domain seams still exist for the old route surface
-- canonical rebooted seams already exist and are used by the rebooted engine
-
-That duality is intentional at current `HEAD`.
-
----
-
-## 5. Adapter Layer
-
-The adapter layer grew from tmux/cmux/resume support into a harness-delivery abstraction.
-
-**tmux.ts**
-- Still the command surface for tmux enumeration, session creation, and `sendText`.
-
-**cmux.ts**
-- Still optional / degraded.
-
-**claude-resume.ts / codex-resume.ts**
-- Still own resume behavior.
-
-**claude-code-adapter.ts**
-- Runtime adapter for Claude Code.
-- Projects to `.claude/...` targets and merges into `CLAUDE.md`.
-
-**codex-runtime-adapter.ts**
-- Runtime adapter for Codex.
-- Preserves existing Codex-facing target conventions:
+**CodexRuntimeAdapter**
+- preserves Codex-facing target conventions:
   - skills -> `.agents/skills/{id}/`
   - guidance -> `AGENTS.md`
   - subagents -> `.agents/{id}.yaml`
   - hooks -> `.agents/hooks/`
   - runtime resources -> `.agents/extensions/{id}/`
 
-Current runtime adapters own file projection, startup file delivery, installed-resource listing, and readiness checks.
-They do not execute startup actions directly.
+### Snapshot, restore, and continuity
+
+- `checkpoint-store.ts`: checkpoint persistence with pod/continuity context
+- `snapshot-capture.ts`: captures pods, continuity state, and startup replay context
+- `snapshot-repository.ts`: snapshot CRUD
+- `restore-orchestrator.ts`: resume, checkpoint delivery, startup replay, live continuity consultation, and topology ordering
+
+### Bundles, bootstrap, and legacy compatibility
+
+- `pod-bundle-assembler.ts`: schema-version-2 bundle assembler
+- `bundle-types.ts`: v1 and v2 manifest types plus parse/validate/serialize
+- `bundle-source-resolver.ts`: `LegacyBundleSourceResolver` plus `PodBundleSourceResolver`
+- `bootstrap-orchestrator.ts`: staged bootstrap flow with direct pod-aware rig and v2 bundle delegation
+- `up-command-router.ts`: spec/bundle source classification for `/api/up`
+
+### Legacy systems that still ship
+
+- package install engine (`package-*`, `install-*`, `conflict-detector.ts`, `role-resolver.ts`)
+- bootstrap and requirement probe support
+- discovery and claim services
+- tmux/cmux adapters and resume adapters
 
 ---
 
-## 6. Bootstrap and Bundle State
+## 6. Current Execution Flows
 
-The bootstrap subsystem is now partially reboot-aware.
+### RigSpec import / validate / preflight / export
 
-### What is already rebooted
+`routes/rigspec.ts` is the main dual-format seam:
 
-**up-command-router.ts**
-- Accepts both pod-aware and legacy rig specs.
+- validate:
+  - pod-aware -> `RigSpecSchema.validate`
+  - legacy -> `LegacyRigSpecSchema.validate`
+- preflight:
+  - pod-aware -> `rigPreflight({ rigSpecYaml, rigRoot, fsOps })`
+  - legacy -> `RigSpecPreflight.check(spec)`
+- import:
+  - pod-aware -> `podInstantiator.instantiate(yaml, rigRoot)`
+  - legacy -> `RigInstantiator.instantiate(spec)`
+- export:
+  - pod-aware rigs export canonical `version: "0.2"` RigSpec YAML/JSON
+  - legacy rigs export flat-node v1 YAML/JSON
 
-**bootstrap-orchestrator.ts**
-- Detects pod-aware direct rig specs before legacy validation.
-- Supports pod-aware plan/apply for direct `rig_spec` sources via `PodRigInstantiator`.
+### Bundle create / inspect / install
 
-### What was hybrid (now resolved)
+`routes/bundles.ts` is fully dual-format:
 
-AS-T12 closed the route/app wiring gap. The pod bundle assembler, pod bundle source resolver, and PodRigInstantiator are now fully wired into the public route surface. Bundle create, inspect, and install all support schemaVersion 2. Legacy v1 bundles continue to work through the existing path.
+- create:
+  - detects pod-aware RigSpec and uses `PodBundleAssembler`
+  - accepts optional `rigRoot`
+  - legacy create still uses `LegacyBundleAssembler`
+- inspect:
+  - safely extracts the archive
+  - detects `schema_version`
+  - v2 returns `schemaVersion: 2`, `agents[]`, and integrity data
+  - v1 returns the legacy manifest shape
+- install:
+  - uses full bootstrap plan/apply
+  - bootstrap peeks the manifest and routes deterministically to `pod_bundle` or `rig_bundle`
+
+### `/api/up`
+
+`UpCommandRouter` and `BootstrapOrchestrator` now own:
+
+- direct pod-aware rig specs
+- legacy rig specs
+- v1 bundle installs
+- v2 pod-bundle installs
+
+Plan mode and apply mode both work across those source kinds.
+
+### Snapshot / restore
+
+Restore now:
+
+- reads the newest session by monotonic ULID, not timestamp alone
+- consults live `continuity_state`
+- preserves state when a node is already `restoring`
+- replays restore-safe startup using persisted startup context
+- prefilters missing optional artifacts into warnings
+- hard-fails a node if a required startup file is missing
 
 ---
 
-## 7. Current HTTP / App Wiring State
+## 7. Architecture Rules
 
-The route layer is fully rebooted.
+1. Zero Hono in `domain/` and `adapters/`.
+2. Routes depend on the domain; the domain never depends on routes.
+3. Shared DB-handle invariants are enforced at construction time.
+4. The reboot is engine-first: domain services land before public-surface rewiring.
+5. Runtime is member-authoritative in the pod-aware model.
+6. Startup layering is additive and ordered:
+   1. agent base
+   2. profile
+   3. rig culture file
+   4. rig startup
+   5. pod startup
+   6. member startup
+   7. operator debug append
+7. Restore-policy narrowing is one-way only:
+   - `resume_if_possible`
+   - `relaunch_fresh`
+   - `checkpoint_only`
+8. Base/import collisions warn; ambiguous import/import unqualified refs fail loudly.
+9. Bundle assembly and startup-file resolution use containment checks rooted in the owning artifact.
+10. Restore replay uses classification-free projection intent, not stale startup-time `no_op` / conflict classifications.
+11. Startup status is explicit session state: `pending`, `ready`, `failed`.
+12. Session recency depends on monotonic ULIDs:
+    - `session-registry.ts` uses `monotonicFactory()`
+    - restore selects the newest session by max ULID
+13. Current readiness checking is still a single poll, not a retry loop.
 
-### Rebooted route surface
+### Current startup action constraints
 
-- `routes/rigspec.ts` — dual-format import/validate/preflight with auto-detection
-- `routes/agents.ts` — `POST /api/agents/validate` for AgentSpec validation
-- `routes/bundles.ts` — dual-format create/inspect/install (v1 + v2 bundles)
-- `routes/up.ts` — handles pod-aware specs and bundles via bootstrap orchestrator
-- `server.ts` — `podInstantiator` and `podBundleSourceResolver` in `AppDeps`
-- `startup.ts` — constructs all rebooted services including `PodBundleSourceResolver`
-
-### Legacy compatibility
-
-Legacy routes remain functional for pre-reboot data. The dual-format detection pattern (`Array.isArray(raw.pods)`) routes pod-aware specs to the new engine and legacy specs to the existing path.
-
-### CLI / UI cross-reference
-
-This document focuses on the daemon architecture because that is where the reboot landed.
-
-For file-by-file CLI and UI structure, use:
-- [codemap.md](/Users/mschwarz/code/rigged/docs/as-built/codemap.md)
-
-That codemap is the companion artifact for:
-- CLI command/module layout
-- UI route tree, shell, hooks, and component inventory
-- exact source-file entrypoints across all three packages
-
----
-
-## 8. Startup / Restore Rules
-
-These are now core architectural rules, not incidental behavior.
-
-### Startup file ordering
-
-Effective startup is additive and ordered:
-1. agent base
-2. profile
-3. rig culture file
-4. rig startup
-5. pod startup
-6. member startup
-7. operator debug append
-
-No layer removes earlier files or actions.
-No deduplication happens in the resolver.
-
-### Restore policy narrowing
-
-The narrowing direction is one-way:
-- `resume_if_possible`
-- `relaunch_fresh`
-- `checkpoint_only`
-
-Members may narrow the policy selected by the AgentSpec defaults/profile.
-They may not broaden it.
-
-### Import collision handling
-
-Base/import collision:
-- warning only
-- base keeps the unqualified id
-- import remains reachable through a qualified id
-
-Import/import collision:
-- unqualified reference is ambiguous
-- profile resolution fails loudly
-- qualified references remain valid
-
-### Startup action constraints
-
-Current v1 reboot constraints:
 - no shell startup actions
 - action types are `slash_command` and `send_text` only
 - non-idempotent actions must not apply on restore
 - retrying failed startup is handled as restore
 
-### Restore replay constraints
+### Remote import constraints
 
-Restore replay uses persisted startup context:
-- classification-free projection intent
-- resolved startup files with owner roots
-- startup actions
-- runtime
+The reboot currently supports:
+- `local:...`
+- `path:/abs/...`
 
-“Classification-free projection intent” is concrete:
-- restore persists only the projection entry identity and source metadata:
-  - category
-  - effective id
-  - source spec
-  - source/resource paths
-  - absolute source path
-  - merge target / strategy
-- restore does **not** persist `classification`, `conflicts`, or `noOps`
-- on replay, every surviving entry is treated as projectable intent and the runtime adapter re-applies its own idempotency checks against the live filesystem
-
-Missing optional artifacts become warnings.
-Missing required startup files fail that node before startup replay begins.
-
-### Session recency rule
-
-Newest-session restore depends on monotonic ULIDs:
-- `session-registry.ts` uses `monotonicFactory()` from `ulid`
-- restore chooses the newest session by max ULID, not by second-resolution `created_at` alone
-- this avoids restore selecting the wrong session when multiple sessions are created within the same timestamp bucket
+Remote `agent_ref` sources remain unsupported and fail in preflight.
 
 ---
 
-## 9. Architecture Rules
+## 8. Event System
 
-1. Zero Hono in `domain/` and `adapters/`.
-2. The route layer depends on the domain; the domain never depends on routes.
-3. Shared DB handle invariants are enforced at construction time.
-4. The reboot is engine-first: domain services land before route rewiring.
-5. Runtime is member-authoritative in the pod-aware model.
-6. Startup layering is additive and ordered.
-7. Restore-policy narrowing is one-way only.
-8. Ambiguous import/import references fail loudly; base/import collisions warn.
-9. Bundle assembly and startup file resolution use containment checks rooted in the owning artifact.
-10. Restore replay uses classification-free projection intent, not stale startup-time no-op/conflict classifications.
-11. Startup status is explicit session state: `pending`, `ready`, `failed`.
-12. Current readiness checking is still a single poll, not a retry loop.
+The `RigEvent` union now includes reboot-era signals.
 
----
-
-## 10. Event System
-
-The event union now includes reboot-specific signals in addition to the earlier rig/package/bootstrap/discovery events.
-
-Reboot-era events currently emitted in production code:
+Currently emitted in production code:
 - `node.startup_pending`
 - `node.startup_ready`
 - `node.startup_failed`
 
-Reboot-era events present in the `RigEvent` union but not yet emitted by production code:
+Present in the union but not yet emitted by production code:
 - `pod.created`
 - `pod.deleted`
 - `continuity.sync`
 - `continuity.degraded`
 
-The event system remains append-only and SQLite-backed.
+The event log remains append-only and SQLite-backed.
 
 ---
 
-## 11. Startup Sequence (`createDaemon`)
+## 9. Startup Sequence (`createDaemon`)
 
-Current `startup.ts` now does more than the pre-reboot system:
+`createDaemon()` now does the following:
 
 1. Open SQLite and run all 15 migrations.
-2. Construct legacy core services.
-3. Construct legacy install/bootstrap/discovery services.
-4. Construct rebooted startup execution services:
+2. Construct core repositories and legacy services.
+3. Construct package/bootstrap/discovery services.
+4. Construct rebooted startup/runtime services:
    - `StartupOrchestrator`
-   - runtime adapters
+   - `ClaudeCodeAdapter`
+   - `CodexRuntimeAdapter`
    - `PodRigInstantiator`
-5. Pass `podInstantiator` into `BootstrapOrchestrator`.
-6. Build `AppDeps` and create the Hono app.
+   - `PodBundleSourceResolver`
+5. Construct `BootstrapOrchestrator` with both legacy and rebooted seams.
+6. Build `AppDeps`, enforce shared-DB invariants in `createApp()`, and mount the full route tree.
 
-Important current limitation:
-- `createDaemon()` already knows about the rebooted engine.
-- `createApp()` and many routes still expose the older surface.
+This is no longer a daemon that only "knows about" the rebooted engine. The public app wiring now includes the rebooted seams.
 
 ---
 
-## 12. Test Infrastructure
+## 10. Test And Verification State
 
-### Audited in this branch
+### Test footprint
 
-**Daemon**
-- 1135 tests across 90 Vitest files.
-- 90 test files in `packages/daemon/test`.
+- daemon: 90 Vitest files / 1,153 tests
+- CLI: 17 Vitest files / 168 tests
+- UI: 20 Vitest files / 237 tests
 
-### Reboot-heavy test areas now present
+### Verified during this doc refresh
+
+- `npm test -- -w @rigged/daemon`
+  - result: `1153/1153` passing
+- `npm test -- -w @rigged/cli`
+  - result: `168/168` passing
+- `npm test -- -w @rigged/ui`
+  - result: `236/237` passing
+  - known failure: 1 Tailwind foundation assertion (`.bg-card` emission)
+
+### Reboot-heavy suites
+
+Representative rebooted coverage now includes:
 
 - `agent-manifest.test.ts`
 - `agent-resolver.test.ts`
@@ -636,31 +560,39 @@ Important current limitation:
 - `agentspec-startup.integration.test.ts`
 - `pod-rigspec-instantiator.test.ts`
 - `pod-bundle-assembler.test.ts`
-- `bundle-source-resolver.test.ts` schema-version-2 coverage
-- `rigspec-preflight.test.ts` rebooted preflight coverage
+- `bundle-source-resolver.test.ts`
+- `rigspec-preflight.test.ts`
 - `agentspec-restore.integration.test.ts`
 - `pod-repository.test.ts`
 - `spec-validation-service.test.ts`
 - `agent-preflight.test.ts`
+- CLI tests for `agent`, `rig`, bundle, MCP, export/import, and daemon lifecycle
+- UI tests for import flow, bundle install/inspect, dashboard, topology, discovery, and legacy package surfaces
 
-### Notes
+### Dogfood status
 
-- The daemon test count has materially grown since the pre-reboot as-built.
-- CLI and UI file structure are tracked in [codemap.md](/Users/mschwarz/code/rigged/docs/as-built/codemap.md); this refresh did not re-audit a separate CLI/UI test total.
+Checkpoint 3 Round 2 dogfood verified:
+
+- CLI pod-aware import, `up`, export, bundle create/inspect/install, `ps`, and `down`
+- MCP all 12 tools
+- browser import flow, topology view, bundle inspector, bundle install flow, and dashboard
 
 ---
 
-## 13. What Is Still Not Done
+## 11. Remaining Compatibility Notes
 
-These are the most important outstanding gaps at current `HEAD`:
+These are the main intentional limits that still describe the shipped system:
 
-1. **Readiness polling is still a single check.**
-   - No backoff/timeout loop yet.
+1. Readiness polling is still a single `checkReady()` pass.
+2. Remote `agent_ref` imports remain unsupported.
+3. Startup actions remain intentionally constrained (`slash_command`, `send_text`).
+4. Legacy compatibility seams still ship for pre-reboot data and v1 artifacts.
 
-2. **Remote import sources remain unsupported in the rebooted v1 constraints.**
+---
 
-3. **Startup actions remain intentionally constrained.**
-   - No shell actions.
+## 12. Cross-References
 
-4. **Legacy compatibility seams still exist for pre-reboot data.**
-   - The dual-format detection handles this transparently.
+This document is the architecture-level source of truth.
+
+For file-by-file structure across daemon, CLI, and UI, use:
+- [codemap.md](/Users/mschwarz/code/rigged/docs/as-built/codemap.md)
