@@ -269,5 +269,22 @@ export function createMcpServer(client: DaemonClient): McpServer {
     },
   );
 
+  // 13. rigged_rig_nodes — node inventory for a rig
+  server.tool(
+    "rigged_rig_nodes",
+    "Get node inventory for a rig — session names, status, attach commands, resume commands",
+    {
+      rigId: z.string().describe("Rig identifier"),
+    },
+    async ({ rigId }) => {
+      try {
+        const res = await client.get(`/api/rigs/${encodeURIComponent(rigId)}/nodes`);
+        return mapResult(res);
+      } catch (err) {
+        return { content: [{ type: "text" as const, text: (err as Error).message }], isError: true as const };
+      }
+    },
+  );
+
   return server;
 }

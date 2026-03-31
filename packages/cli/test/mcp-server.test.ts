@@ -41,8 +41,8 @@ describe("MCP Server", () => {
     if (cleanup) await cleanup();
   });
 
-  // T1: MCP server lists all 12 tools
-  it("lists all 12 tools", async () => {
+  // T1: MCP server lists all 13 tools
+  it("lists all 13 tools", async () => {
     await setup();
     const result = await mcpClient.listTools();
     const names = result.tools.map((t) => t.name).sort();
@@ -54,6 +54,7 @@ describe("MCP Server", () => {
       "rigged_down",
       "rigged_ps",
       "rigged_restore",
+      "rigged_rig_nodes",
       "rigged_rig_validate",
       "rigged_snapshot_create",
       "rigged_snapshot_list",
@@ -197,7 +198,7 @@ describe("MCP Server", () => {
 
     // Verify server is responsive
     const result = await mcpClient.listTools();
-    expect(result.tools.length).toBe(12);
+    expect(result.tools.length).toBe(13);
 
     // Clean disconnect
     await cleanup();
@@ -211,7 +212,7 @@ describe("MCP Server", () => {
     await client2.connect(ct2);
 
     const result2 = await client2.listTools();
-    expect(result2.tools.length).toBe(12);
+    expect(result2.tools.length).toBe(13);
 
     await client2.close();
     await server2.close();
@@ -292,6 +293,36 @@ describe("MCP Server", () => {
     const calledPath = postFn.mock.calls[0][0] as string;
     expect(calledPath).toBe(`/api/rigs/${encodeURIComponent("rig/with/slashes")}/snapshots`);
     expect(calledPath).toContain("rig%2Fwith%2Fslashes");
+    await cleanup();
+  });
+
+  // NS-T09: rigged_rig_nodes calls GET /api/rigs/:rigId/nodes
+  it("rigged_rig_nodes returns node inventory", async () => {
+    const getFn = vi.fn(async (path: string) => {
+      if (path.includes("/nodes")) {
+        return {
+          status: 200,
+          data: [
+            { rigId: "rig-1", rigName: "test", logicalId: "dev.impl", nodeKind: "agent", runtime: "claude-code", sessionStatus: "running", tmuxAttachCommand: "tmux attach -t dev-impl@test" },
+          ],
+        };
+      }
+      return { status: 200, data: {} };
+    });
+    await setup({ get: getFn });
+
+    const result = await mcpClient.callTool({
+      name: "rigged_rig_nodes",
+      arguments: { rigId: "rig-1" },
+    });
+
+    expect(getFn).toHaveBeenCalled();
+    const calledPath = getFn.mock.calls.find((c) => (c[0] as string).includes("/nodes"))?.[0] as string;
+    expect(calledPath).toBe("/api/rigs/rig-1/nodes");
+    expect(result.isError).toBeUndefined();
+    const parsed = JSON.parse((result.content as Array<{ text: string }>)[0]!.text);
+    expect(Array.isArray(parsed)).toBe(true);
+    expect(parsed[0].nodeKind).toBe("agent");
     await cleanup();
   });
 });

@@ -3,7 +3,7 @@ import type { RigRepository } from "../domain/rig-repository.js";
 import type { SessionRegistry } from "../domain/session-registry.js";
 import type { NodeLauncher } from "../domain/node-launcher.js";
 import type { CmuxAdapter } from "../adapters/cmux.js";
-import { getNodeInventory } from "../domain/node-inventory.js";
+import { getNodeInventory, getNodeDetail } from "../domain/node-inventory.js";
 
 export const sessionsRoutes = new Hono();
 export const nodesRoutes = new Hono();
@@ -32,6 +32,18 @@ nodesRoutes.get("/", (c) => {
   if (!rig) return c.json({ error: `Rig "${rigId}" not found. List rigs with: rigged ps` }, 404);
   const inventory = getNodeInventory(deps.rigRepo.db, rigId);
   return c.json(inventory);
+});
+
+// GET /api/rigs/:rigId/nodes/:logicalId — node detail
+nodesRoutes.get("/:logicalId", (c) => {
+  const rigId = c.req.param("rigId")!;
+  const logicalId = decodeURIComponent(c.req.param("logicalId")!);
+  const deps = getDeps(c);
+  const rig = deps.rigRepo.getRig(rigId);
+  if (!rig) return c.json({ error: `Rig "${rigId}" not found. List rigs with: rigged ps` }, 404);
+  const detail = getNodeDetail(deps.rigRepo.db, rigId, logicalId);
+  if (!detail) return c.json({ error: `Node "${logicalId}" not found in rig "${rigId}". Check node IDs with: rigged ps --nodes` }, 404);
+  return c.json(detail);
 });
 
 // POST /api/rigs/:rigId/nodes/:logicalId/launch

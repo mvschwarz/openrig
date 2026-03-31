@@ -189,4 +189,29 @@ describe("Session routes", () => {
     const body = await res.json();
     expect(body.error).toContain("not found");
   });
+
+  // NS-T09: node detail route
+  it("GET /api/rigs/:rigId/nodes/:logicalId -> node detail", async () => {
+    const { app, rigRepo, sessionRegistry } = createTestApp(db);
+    const rig = rigRepo.createRig("test-rig");
+    const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code" });
+    sessionRegistry.registerSession(node.id, "dev-impl@test-rig");
+
+    const res = await app.request(`/api/rigs/${rig.id}/nodes/${encodeURIComponent("dev.impl")}`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.logicalId).toBe("dev.impl");
+    expect(body.nodeKind).toBe("agent");
+    expect(Array.isArray(body.startupFiles)).toBe(true);
+    expect(Array.isArray(body.recentEvents)).toBe(true);
+  });
+
+  it("GET /api/rigs/:rigId/nodes/:logicalId -> 404 for unknown node", async () => {
+    const { app, rigRepo } = createTestApp(db);
+    const rig = rigRepo.createRig("test-rig");
+    const res = await app.request(`/api/rigs/${rig.id}/nodes/nonexistent`);
+    expect(res.status).toBe(404);
+    const body = await res.json();
+    expect(body.error).toContain("not found");
+  });
 });
