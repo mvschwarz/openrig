@@ -1,0 +1,8 @@
+name: r1
+version: "1.0.0"
+resources:
+  skills: []
+profiles:
+  default:
+    uses:
+      skills: []

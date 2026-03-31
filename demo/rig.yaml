@@ -1,0 +1,86 @@
+version: "0.2"
+name: demo-rig
+culture_file: culture.md
+pods:
+  - id: orch
+    label: Orchestration
+    members:
+      - id: lead
+        agent_ref: "local:agents/lead"
+        profile: default
+        runtime: claude-code
+        cwd: .
+    edges: []
+  - id: dev
+    label: Development
+    members:
+      - id: impl
+        agent_ref: "local:agents/impl"
+        profile: default
+        runtime: claude-code
+        cwd: .
+      - id: qa
+        agent_ref: "local:agents/qa"
+        profile: default
+        runtime: codex
+        cwd: .
+      - id: design
+        agent_ref: "local:agents/design"
+        profile: default
+        runtime: claude-code
+        cwd: .
+    edges:
+      - kind: can_observe
+        from: qa
+        to: impl
+  - id: rev
+    label: Review
+    members:
+      - id: r1
+        agent_ref: "local:agents/r1"
+        profile: default
+        runtime: claude-code
+        cwd: .
+      - id: r2
+        agent_ref: "local:agents/r2"
+        profile: default
+        runtime: codex
+        cwd: .
+    edges:
+      - kind: collaborates_with
+        from: r1
+        to: r2
+  - id: infra
+    label: Infrastructure
+    members:
+      - id: daemon
+        agent_ref: "builtin:terminal"
+        profile: "none"
+        runtime: terminal
+        cwd: .
+        startup:
+          files: []
+          actions:
+            - type: send_text
+              value: "rigged status"
+              phase: after_ready
+              idempotent: true
+              applies_on: [fresh_start]
+      - id: ui
+        agent_ref: "builtin:terminal"
+        profile: "none"
+        runtime: terminal
+        cwd: packages/ui
+        startup:
+          files: []
+          actions:
+            - type: send_text
+              value: "npm run dev"
+              phase: after_ready
+              idempotent: true
+              applies_on: [fresh_start]
+    edges: []
+edges:
+  - kind: delegates_to
+    from: orch.lead
+    to: dev.impl
