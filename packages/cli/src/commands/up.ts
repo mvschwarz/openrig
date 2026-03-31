@@ -39,8 +39,12 @@ export function upCommand(depsOverride?: StatusDeps & { lifecycleDeps?: Lifecycl
 
       const client = deps.clientFactory(`http://127.0.0.1:${status.port}`);
 
+      // Detect rig name vs file path: names don't contain / and don't end in .yaml/.yml/.rigbundle
+      const isRigName = !source.includes("/") && !source.match(/\.(ya?ml|rigbundle)$/i);
+      const sourceRef = isRigName ? source : nodePath.resolve(source);
+
       const res = await client.post<Record<string, unknown>>("/api/up", {
-        sourceRef: nodePath.resolve(source),
+        sourceRef,
         plan: opts.plan ?? false,
         autoApprove: opts.yes ?? false,
         targetRoot: opts.target,
@@ -75,16 +79,41 @@ export function upCommand(depsOverride?: StatusDeps & { lifecycleDeps?: Lifecycl
 
       // Success output
       const resStatus = res.data["status"] as string;
-      const stages = (res.data["stages"] as Array<{ stage: string; status: string }>) ?? [];
-      for (const s of stages) {
-        console.log(`  ${s.stage}: ${s.status}`);
+
+      if (resStatus === "restored") {
+        // Existing-rig power-on handoff
+        const rigId = res.data["rigId"] as string;
+        const rigName = res.data["rigName"] as string | undefined;
+        console.log(`Rig "${rigName ?? rigId}" restored (ID: ${rigId})`);
+        const nodes = (res.data["nodes"] as Array<{ logicalId: string; status: string }>) ?? [];
+        for (const n of nodes) {
+          console.log(`  ${n.logicalId}: ${n.status}`);
+        }
+        const warnings = (res.data["warnings"] as string[]) ?? [];
+        for (const w of warnings) {
+          console.error(`  warning: ${w}`);
+        }
+        // Attach command from server response (uses real canonical session name)
+        const attachCommand = res.data["attachCommand"] as string | undefined;
+        if (attachCommand) {
+          console.log(`Attach: ${attachCommand}`);
+        }
+        if (nodes.some((n) => n.status === "failed")) {
+          process.exitCode = 1;
+        }
+      } else {
+        // Fresh boot output
+        const stages = (res.data["stages"] as Array<{ stage: string; status: string }>) ?? [];
+        for (const s of stages) {
+          console.log(`  ${s.stage}: ${s.status}`);
+        }
+
+        const rigId = res.data["rigId"] as string | undefined;
+        if (rigId) console.log(`\nRig: ${rigId}`);
+        console.log(`Status: ${resStatus}`);
+
+        if (resStatus === "partial") process.exitCode = 1;
       }
-
-      const rigId = res.data["rigId"] as string | undefined;
-      if (rigId) console.log(`\nRig: ${rigId}`);
-      console.log(`Status: ${resStatus}`);
-
-      if (resStatus === "partial") process.exitCode = 1;
     });
 
   return cmd;

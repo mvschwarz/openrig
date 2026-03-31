@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import type { RigTeardownOrchestrator } from "../domain/rig-teardown.js";
+import type { RigRepository } from "../domain/rig-repository.js";
 import { RigNotFoundError } from "../domain/errors.js";
 
 export const downRoutes = new Hono();
@@ -45,7 +46,13 @@ downRoutes.post("/", async (c) => {
       return c.json(result, 500);
     }
 
-    return c.json(result, 200);
+    // Include rig name + uniqueness in response for post-command handoff
+    const rigRepo = c.get("rigRepo" as never) as RigRepository;
+    const rig = rigRepo.getRig(rigId);
+    const rigName = rig?.rig.name ?? null;
+    const isUniqueName = rigName ? rigRepo.findRigsByName(rigName).length === 1 : false;
+    const enriched = { ...result, rigName, isUniqueName };
+    return c.json(enriched, 200);
   } catch (err) {
     if (err instanceof RigNotFoundError) {
       return c.json({ error: err.message }, 404);

@@ -84,14 +84,13 @@ export class RigTeardownOrchestrator {
       return result;
     }
 
-    // 4. Snapshot before teardown
-    if (opts?.snapshot) {
-      try {
-        const snap = this.deps.snapshotCapture.captureSnapshot(rigId, "manual");
-        result.snapshotId = snap.id;
-      } catch (err) {
-        result.errors.push(`Snapshot failed: ${(err as Error).message}`);
-      }
+    // 4. Auto-snapshot before teardown (always, best-effort)
+    try {
+      const snap = this.deps.snapshotCapture.captureSnapshot(rigId, "auto-pre-down");
+      result.snapshotId = snap.id;
+    } catch (err) {
+      result.errors.push(`Snapshot failed: ${(err as Error).message}`);
+      // Best-effort — teardown proceeds even if snapshot fails
     }
 
     // 5. Kill each live session

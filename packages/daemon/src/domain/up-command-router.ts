@@ -3,7 +3,7 @@ import { LegacyRigSpecSchema as LegacySchema } from "./rigspec-schema.js";
 import { RigSpecCodec as PodCodec } from "./rigspec-codec.js";
 import { RigSpecSchema as PodSchema } from "./rigspec-schema.js";
 
-export type SourceKind = "rig_spec" | "rig_bundle";
+export type SourceKind = "rig_spec" | "rig_bundle" | "rig_name";
 
 export interface RouteResult {
   sourceKind: SourceKind;
@@ -31,8 +31,13 @@ export class UpCommandRouter {
   }
 
   route(sourceRef: string): RouteResult {
+    // Rig name detection: no '/' and no file extension → treat as existing rig name
+    if (!sourceRef.includes("/") && !sourceRef.match(/\.(ya?ml|rigbundle)$/i)) {
+      return { sourceKind: "rig_name", sourceRef };
+    }
+
     if (!this.fs.exists(sourceRef)) {
-      throw new Error(`Source not found: ${sourceRef}`);
+      throw new Error(`Source not found: ${sourceRef}. Provide a .yaml rig spec path or a rig name to restore.`);
     }
 
     // Extension-based routing

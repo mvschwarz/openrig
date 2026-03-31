@@ -138,6 +138,13 @@ export class RigRepository {
     return rows.map((r) => this.rowToRig(r));
   }
 
+  findRigsByName(name: string): Rig[] {
+    const rows = this.db
+      .prepare("SELECT * FROM rigs WHERE name = ? ORDER BY created_at")
+      .all(name) as RigRow[];
+    return rows.map((r) => this.rowToRig(r));
+  }
+
   getRigSummaries(): Array<{ id: string; name: string; nodeCount: number; latestSnapshotAt: string | null; latestSnapshotId: string | null }> {
     const rows = this.db.prepare(`
       SELECT

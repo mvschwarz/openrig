@@ -128,4 +128,47 @@ describe("POST /api/down route", () => {
 
     snapshotCapture.captureSnapshot = origCapture;
   });
+
+  // NS-T06: auto-snapshot on down
+  it("auto-snapshots before teardown (auto-pre-down)", async () => {
+    const db = createFullTestDb();
+    const { app, rigRepo, sessionRegistry } = createTestApp(db);
+    const rig = rigRepo.createRig("auto-snap-rig");
+    const node = rigRepo.addNode(rig.id, "impl", { runtime: "claude-code" });
+    const session = sessionRegistry.registerSession(node.id, "r01-impl");
+    sessionRegistry.updateStatus(session.id, "running");
+
+    const res = await app.request("/api/down", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ rigId: rig.id }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    // Auto-snapshot should have been created
+    expect(body.snapshotId).toBeTruthy();
+    // Verify snapshot kind
+    const snap = db.prepare("SELECT kind FROM snapshots WHERE id = ?").get(body.snapshotId) as { kind: string } | undefined;
+    expect(snap?.kind).toBe("auto-pre-down");
+    db.close();
+  });
+
+  // NS-T06: down response includes rig name for handoff
+  it("response includes rigName for post-command handoff", async () => {
+    const db = createFullTestDb();
+    const { app, rigRepo, sessionRegistry } = createTestApp(db);
+    const rig = rigRepo.createRig("handoff-test");
+    const node = rigRepo.addNode(rig.id, "impl");
+    const session = sessionRegistry.registerSession(node.id, "r01-impl");
+    sessionRegistry.updateStatus(session.id, "running");
+
+    const res = await app.request("/api/down", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ rigId: rig.id }),
+    });
+    const body = await res.json();
+    expect(body.rigName).toBe("handoff-test");
+    db.close();
+  });
 });

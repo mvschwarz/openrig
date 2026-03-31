@@ -326,4 +326,19 @@ describe("Rig CRUD routes", () => {
     // ZZZZ sorts after AAAA, so ZZZZ_snap should win the tiebreak
     expect(epsilons[0].latestSnapshotId).toBe("ZZZZ_snap");
   });
+
+  // NS-T06: POST /api/rigs/:id/up — power-on from auto-pre-down snapshot
+  it("POST /api/rigs/:id/up returns 404 when no auto-pre-down snapshot exists", async () => {
+    const rig = repo.createRig("no-snap-rig");
+    const res = await app.request(`/api/rigs/${rig.id}/up`, { method: "POST" });
+    expect(res.status).toBe(404);
+    const body = await res.json();
+    expect(body.code).toBe("no_snapshot");
+  });
+
+  it("POST /api/rigs/:id/up returns 404 for nonexistent rig", async () => {
+    const res = await app.request("/api/rigs/nonexistent/up", { method: "POST" });
+    expect(res.status).toBe(404);
+    expect((await res.json()).error).toContain("not found");
+  });
 });

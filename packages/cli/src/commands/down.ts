@@ -92,9 +92,19 @@ export function downCommand(depsOverride?: StatusDeps): Command {
         return;
       }
 
-      // Clean stop
+      // Clean stop with post-command handoff
       console.log(`Rig ${rigId} stopped. ${result.sessionsKilled} session(s) killed.`);
-      if (result.snapshotId) console.log(`Snapshot: ${result.snapshotId}`);
+      if (result.snapshotId) {
+        console.log(`Snapshot: ${result.snapshotId}`);
+        // Post-command handoff: how to restore (check for duplicate names)
+        const rigName = (res.data as Record<string, unknown>)["rigName"] as string | undefined;
+        const isUniqueName = (res.data as Record<string, unknown>)["isUniqueName"] as boolean | undefined;
+        if (rigName && isUniqueName !== false) {
+          console.log(`To restore: rigged up ${rigName}`);
+        } else {
+          console.log(`To restore: rigged restore ${result.snapshotId} --rig ${rigId}`);
+        }
+      }
     });
 
   return cmd;

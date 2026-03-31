@@ -4,6 +4,9 @@ import type { BootstrapOrchestrator } from "../domain/bootstrap-orchestrator.js"
 import type { BootstrapRepository } from "../domain/bootstrap-repository.js";
 import type { EventBus } from "../domain/event-bus.js";
 import type { UpCommandRouter } from "../domain/up-command-router.js";
+import type { RigRepository } from "../domain/rig-repository.js";
+import type { SnapshotRepository } from "../domain/snapshot-repository.js";
+import type { RestoreOrchestrator } from "../domain/restore-orchestrator.js";
 
 export const upRoutes = new Hono();
 
@@ -13,7 +16,48 @@ function getDeps(c: { get: (key: string) => unknown }) {
     bootstrapRepo: c.get("bootstrapRepo" as never) as BootstrapRepository,
     eventBus: c.get("eventBus" as never) as EventBus,
     upRouter: c.get("upRouter" as never) as UpCommandRouter,
+    rigRepo: c.get("rigRepo" as never) as RigRepository,
+    snapshotRepo: c.get("snapshotRepo" as never) as SnapshotRepository,
+    restoreOrchestrator: c.get("restoreOrchestrator" as never) as RestoreOrchestrator | undefined,
   };
+}
+
+/**
+ * Restore a rig by ID from its latest auto-pre-down snapshot.
+ * Shared helper used by both /api/up (rig_name) and /api/rigs/:rigId/up (Explorer).
+ */
+async function restoreByRigId(rigId: string, rigName: string | null, deps: ReturnType<typeof getDeps>, c: { json: (data: unknown, status?: number) => Response }) {
+  const { snapshotRepo, restoreOrchestrator } = deps;
+
+  const snapshot = snapshotRepo.findLatestAutoPreDown(rigId);
+  if (!snapshot) {
+    return c.json({ error: `Rig exists but has no auto-pre-down snapshot. Start fresh with: rigged up <spec-path>`, code: "no_snapshot" }, 404);
+  }
+
+  if (!restoreOrchestrator) {
+    return c.json({ error: "Restore orchestrator not available" }, 500);
+  }
+
+  const result = await restoreOrchestrator.restore(snapshot.id);
+  if (!result.ok) {
+    return c.json({ error: result.message, code: result.code }, result.code === "rig_not_stopped" ? 409 : 400);
+  }
+
+  // Compute attach command from first running node (same logic as /api/rigs/:id/up)
+  const { getNodeInventory } = await import("../domain/node-inventory.js");
+  const inventory = getNodeInventory(deps.snapshotRepo.db, rigId);
+  const firstRunning = inventory.find((n) => n.canonicalSessionName && n.sessionStatus === "running");
+  const attachCommand = firstRunning?.tmuxAttachCommand ?? inventory.find((n) => n.canonicalSessionName)?.tmuxAttachCommand ?? null;
+
+  return c.json({
+    status: "restored",
+    rigId,
+    rigName,
+    snapshotId: snapshot.id,
+    nodes: result.result.nodes,
+    warnings: result.result.warnings,
+    attachCommand,
+  }, 200);
 }
 
 // POST /api/up — the hero route
@@ -29,11 +73,29 @@ upRoutes.post("/", async (c) => {
     return c.json({ error: "sourceRef is required" }, 400);
   }
 
-  // Route source
+  // Route source — classify raw sourceRef first, only resolve path for file-based kinds
   let sourceKind: string;
+  let resolvedSourceRef = sourceRef;
   try {
-    const route = upRouter.route(nodePath.resolve(sourceRef));
+    const route = upRouter.route(sourceRef);
     sourceKind = route.sourceKind;
+
+    // Rig name: restore from latest auto-pre-down snapshot
+    if (sourceKind === "rig_name") {
+      const { rigRepo } = getDeps(c);
+      const rigs = rigRepo.findRigsByName(sourceRef);
+      if (rigs.length === 0) {
+        return c.json({ error: `No rig found named "${sourceRef}". Provide a .yaml spec path to create a new rig.`, code: "rig_not_found" }, 404);
+      }
+      if (rigs.length > 1) {
+        const ids = rigs.map((r) => r.id).join(", ");
+        return c.json({ error: `Multiple rigs named "${sourceRef}" found (IDs: ${ids}). Use rigged restore --rig <rigId> with a specific rig ID.`, code: "ambiguous_name" }, 409);
+      }
+      return restoreByRigId(rigs[0]!.id, sourceRef, getDeps(c), c) as any;
+    }
+
+    // File-based: resolve path now
+    resolvedSourceRef = nodePath.resolve(sourceRef);
   } catch (err) {
     return c.json({ error: (err as Error).message }, 400);
   }
@@ -53,7 +115,7 @@ upRoutes.post("/", async (c) => {
       // Plan mode — no run lifecycle
       const result = await bootstrapOrchestrator.bootstrap({
         mode: "plan",
-        sourceRef: nodePath.resolve(sourceRef),
+        sourceRef: resolvedSourceRef,
         sourceKind,
         targetRoot,
       });
@@ -82,7 +144,7 @@ upRoutes.post("/", async (c) => {
     try {
       const result = await bootstrapOrchestrator.bootstrap({
         mode: "apply",
-        sourceRef: nodePath.resolve(sourceRef),
+        sourceRef: resolvedSourceRef,
         sourceKind,
         autoApprove,
         targetRoot,

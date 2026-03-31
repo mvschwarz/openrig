@@ -196,4 +196,25 @@ edges: []
     const result = router.route(specPath);
     expect(result.sourceKind).toBe("rig_spec");
   });
+
+  // NS-T06: rig name detection
+  it("bare name without / or extension → rig_name", () => {
+    const router = new UpCommandRouter({ fsOps: realFsOps() });
+    const result = router.route("auth-feats");
+    expect(result.sourceKind).toBe("rig_name");
+    expect(result.sourceRef).toBe("auth-feats");
+  });
+
+  it("name with .yaml extension → NOT rig_name (file path)", () => {
+    const specPath = path.join(tmpDir, "auth.yaml");
+    fs.writeFileSync(specPath, VALID_SPEC);
+    const router = new UpCommandRouter({ fsOps: realFsOps() });
+    const result = router.route(specPath);
+    expect(result.sourceKind).toBe("rig_spec");
+  });
+
+  it("path with / → NOT rig_name", () => {
+    const router = new UpCommandRouter({ fsOps: realFsOps() });
+    expect(() => router.route("/tmp/nonexistent")).toThrow(/Source not found/);
+  });
 });

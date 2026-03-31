@@ -34,6 +34,15 @@ export class SnapshotRepository {
     return row ? this.rowToSnapshot(row) : null;
   }
 
+  findLatestAutoPreDown(rigId: string): Snapshot | null {
+    const row = this.db
+      .prepare(
+        "SELECT * FROM snapshots WHERE rig_id = ? AND kind = 'auto-pre-down' ORDER BY created_at DESC LIMIT 1"
+      )
+      .get(rigId) as SnapshotRow | undefined;
+    return row ? this.rowToSnapshot(row) : null;
+  }
+
   getLatestSnapshot(rigId: string): Snapshot | null {
     const row = this.db
       .prepare(
