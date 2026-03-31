@@ -194,8 +194,7 @@ describe("Up CLI", () => {
       await makeCmd().parseAsync(["node", "rigged", "up", "/tmp/test.yaml"]);
     });
     const output = logs.join("\n");
-    expect(output).toContain("Dashboard:");
-    expect(output).toContain(`http://localhost:${port}/rigs/rig-1`);
+    expect(output).toContain("Dashboard: rigged ui open");
     expect(output).toContain("Attach:");
     expect(output).toContain("tmux attach -t dev-impl@test-rig");
   });

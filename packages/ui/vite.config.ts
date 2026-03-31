@@ -2,6 +2,8 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import path from "node:path";
 
+const daemonUrl = process.env.RIGGED_URL ?? "http://localhost:7433";
+
 export default defineConfig({
   plugins: [react()],
   resolve: {
@@ -12,11 +14,11 @@ export default defineConfig({
   server: {
     proxy: {
       "/api": {
-        target: "http://localhost:7433",
+        target: daemonUrl,
         changeOrigin: true,
       },
       "/healthz": {
-        target: "http://localhost:7433",
+        target: daemonUrl,
         changeOrigin: true,
       },
     },

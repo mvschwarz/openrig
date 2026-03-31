@@ -111,10 +111,8 @@ export function upCommand(depsOverride?: StatusDeps & { lifecycleDeps?: Lifecycl
         const rigId = res.data["rigId"] as string | undefined;
         if (rigId) {
           console.log(`\nRig: ${rigId}`);
-          // Dashboard URL
-          if (status.port) {
-            console.log(`Dashboard: http://localhost:${status.port}/rigs/${rigId}`);
-          }
+          // Dashboard — use rigged ui open (knows the real UI URL)
+          console.log(`Dashboard: rigged ui open`);
         }
         console.log(`Status: ${resStatus}`);
 
