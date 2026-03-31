@@ -56,13 +56,24 @@ describe("Ps CLI", () => {
   let server: http.Server;
   let port: number;
   let psData: unknown[];
+  let nodesData: Record<string, unknown[]>;
 
   beforeAll(async () => {
     psData = [];
+    nodesData = {};
     server = http.createServer(async (req, res) => {
       if (req.url === "/api/ps" && req.method === "GET") {
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify(psData));
+      } else if (req.url?.match(/^\/api\/rigs\/([^/]+)\/nodes$/) && req.method === "GET") {
+        const rigId = decodeURIComponent(req.url.match(/^\/api\/rigs\/([^/]+)\/nodes$/)![1]!);
+        if (rigId in nodesData) {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify(nodesData[rigId]));
+        } else {
+          res.writeHead(404, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: `Rig "${rigId}" not found` }));
+        }
       } else {
         res.writeHead(404, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "not found" }));
@@ -122,5 +133,129 @@ describe("Ps CLI", () => {
       await makeCmd().parseAsync(["node", "rigged", "ps"]);
     });
     expect(logs.some((l) => l.includes("No rigs"))).toBe(true);
+  });
+
+  // NS-T08: ps --nodes tests
+
+  it("ps --nodes formats table with correct columns including RESTORE", async () => {
+    psData = [
+      { rigId: "rig-1", name: "test-rig", nodeCount: 2, runningCount: 2, status: "running", uptime: "1h", latestSnapshot: null },
+    ];
+    nodesData["rig-1"] = [
+      {
+        rigId: "rig-1", rigName: "test-rig", logicalId: "dev.impl", podId: "pod-1",
+        canonicalSessionName: "dev-impl@test-rig", nodeKind: "agent", runtime: "claude-code",
+        sessionStatus: "running", startupStatus: "ready", restoreOutcome: "n-a",
+        tmuxAttachCommand: "tmux attach -t dev-impl@test-rig", resumeCommand: null, latestError: null,
+      },
+      {
+        rigId: "rig-1", rigName: "test-rig", logicalId: "infra.server", podId: "pod-1",
+        canonicalSessionName: "infra-server@test-rig", nodeKind: "infrastructure", runtime: "terminal",
+        sessionStatus: "running", startupStatus: "ready", restoreOutcome: "n-a",
+        tmuxAttachCommand: "tmux attach -t infra-server@test-rig", resumeCommand: null, latestError: null,
+      },
+    ];
+    const { logs } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rigged", "ps", "--nodes"]);
+    });
+    const output = logs.join("\n");
+    expect(output).toContain("POD");
+    expect(output).toContain("MEMBER");
+    expect(output).toContain("SESSION");
+    expect(output).toContain("RUNTIME");
+    expect(output).toContain("RESTORE");
+    expect(output).toContain("dev-impl@test-rig");
+    expect(output).toContain("terminal");
+  });
+
+  it("ps --nodes --json produces valid JSON array with restoreOutcome", async () => {
+    psData = [
+      { rigId: "rig-1", name: "test-rig", nodeCount: 1, runningCount: 1, status: "running", uptime: "1m", latestSnapshot: null },
+    ];
+    nodesData["rig-1"] = [
+      {
+        rigId: "rig-1", rigName: "test-rig", logicalId: "dev.impl", podId: "pod-1",
+        canonicalSessionName: "dev-impl@test-rig", nodeKind: "agent", runtime: "claude-code",
+        sessionStatus: "running", startupStatus: "ready", restoreOutcome: "resumed",
+        tmuxAttachCommand: null, resumeCommand: null, latestError: null,
+      },
+    ];
+    const { logs } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rigged", "ps", "--nodes", "--json"]);
+    });
+    const parsed = JSON.parse(logs.join(""));
+    expect(Array.isArray(parsed)).toBe(true);
+    expect(parsed[0].restoreOutcome).toBe("resumed");
+    expect(parsed[0].nodeKind).toBe("agent");
+  });
+
+  it("ps --nodes includes infrastructure nodes", async () => {
+    psData = [
+      { rigId: "rig-1", name: "test-rig", nodeCount: 1, runningCount: 1, status: "running", uptime: "1m", latestSnapshot: null },
+    ];
+    nodesData["rig-1"] = [
+      {
+        rigId: "rig-1", rigName: "test-rig", logicalId: "infra.daemon", podId: "pod-1",
+        canonicalSessionName: "infra-daemon@test-rig", nodeKind: "infrastructure", runtime: "terminal",
+        sessionStatus: "running", startupStatus: "ready", restoreOutcome: "n-a",
+        tmuxAttachCommand: null, resumeCommand: null, latestError: null,
+      },
+    ];
+    const { logs } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rigged", "ps", "--nodes"]);
+    });
+    const output = logs.join("\n");
+    expect(output).toContain("infra");
+    expect(output).toContain("terminal");
+  });
+
+  it("ps (no flag) still works backward compatible", async () => {
+    psData = [
+      { rigId: "rig-1", name: "compat-rig", nodeCount: 1, runningCount: 1, status: "running", uptime: "5m", latestSnapshot: null },
+    ];
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rigged", "ps"]);
+    });
+    const output = logs.join("\n");
+    expect(output).toContain("compat-rig");
+    expect(output).toContain("RIG");
+    expect(exitCode).toBeUndefined();
+  });
+
+  it("ps help text includes examples and exit codes", () => {
+    const psCmd = psCommand(runningDeps(port));
+    let helpOutput = "";
+    psCmd.configureOutput({ writeOut: (s) => { helpOutput += s; } });
+    psCmd.outputHelp();
+    expect(helpOutput).toContain("rigged ps --nodes");
+    expect(helpOutput).toContain("Exit codes");
+  });
+
+  it("ps --nodes warns on per-rig fetch failure", async () => {
+    psData = [
+      { rigId: "nonexistent", name: "bad-rig", nodeCount: 1, runningCount: 0, status: "stopped", uptime: null, latestSnapshot: null },
+    ];
+    nodesData = {}; // no nodes data → server returns 404
+    const { logs } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rigged", "ps", "--nodes"]);
+    });
+    const output = logs.join("\n");
+    expect(output).toContain("Warning");
+    expect(output).toContain("bad-rig");
+  });
+
+  it("daemon not running error includes guidance", async () => {
+    const stoppedDeps: StatusDeps = {
+      lifecycleDeps: mockLifecycleDeps(),
+      clientFactory: (baseUrl) => new DaemonClient(baseUrl),
+    };
+    const prog = new Command();
+    prog.exitOverride();
+    prog.addCommand(psCommand(stoppedDeps));
+    const { logs, exitCode } = await captureLogs(async () => {
+      await prog.parseAsync(["node", "rigged", "ps"]);
+    });
+    expect(logs.some((l) => l.includes("rigged daemon start"))).toBe(true);
+    expect(exitCode).toBe(1);
   });
 });

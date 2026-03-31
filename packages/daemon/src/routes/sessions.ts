@@ -3,6 +3,7 @@ import type { RigRepository } from "../domain/rig-repository.js";
 import type { SessionRegistry } from "../domain/session-registry.js";
 import type { NodeLauncher } from "../domain/node-launcher.js";
 import type { CmuxAdapter } from "../adapters/cmux.js";
+import { getNodeInventory } from "../domain/node-inventory.js";
 
 export const sessionsRoutes = new Hono();
 export const nodesRoutes = new Hono();
@@ -21,6 +22,16 @@ sessionsRoutes.get("/", (c) => {
   const rigId = c.req.param("rigId")!;
   const { sessionRegistry } = getDeps(c);
   return c.json(sessionRegistry.getSessionsForRig(rigId));
+});
+
+// GET /api/rigs/:rigId/nodes — node inventory projection
+nodesRoutes.get("/", (c) => {
+  const rigId = c.req.param("rigId")!;
+  const deps = getDeps(c);
+  const rig = deps.rigRepo.getRig(rigId);
+  if (!rig) return c.json({ error: `Rig "${rigId}" not found. List rigs with: rigged ps` }, 404);
+  const inventory = getNodeInventory(deps.rigRepo.db, rigId);
+  return c.json(inventory);
 });
 
 // POST /api/rigs/:rigId/nodes/:logicalId/launch

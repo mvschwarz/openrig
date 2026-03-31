@@ -39,9 +39,9 @@ export function importCommand(depsOverride?: ImportDeps): Command {
       const status = await getDaemonStatus(deps.lifecycleDeps);
       if (status.state !== "running" || status.healthy === false) {
         if (status.state === "running" && status.healthy === false) {
-          console.error("Daemon unhealthy — healthz failed");
+          console.error("Daemon unhealthy — healthz check failed. Restart with: rigged daemon start");
         } else {
-          console.error("Daemon not running");
+          console.error("Daemon not running. Start it with: rigged daemon start");
         }
         process.exitCode = 1;
         return;
@@ -60,21 +60,22 @@ export function importCommand(depsOverride?: ImportDeps): Command {
       if (opts.preflight) {
         const res = await client.postText<{ ready?: boolean; warnings?: string[]; errors?: string[] }>("/api/rigs/import/preflight", yaml, "text/yaml", extraHeaders);
         if (res.status >= 400) {
-          console.error(`Preflight failed: ${JSON.stringify(res.data)}`);
+          console.error(`Preflight failed (HTTP ${res.status}). Check your spec syntax and rig-root path.`);
           process.exitCode = 1;
           return;
         }
         const data = res.data;
         if (data.errors && data.errors.length > 0) {
-          console.log("Preflight errors:");
-          for (const e of data.errors) console.log(`  - ${e}`);
+          console.error(`Preflight errors:\n${data.errors.map((e) => `  ${e}`).join("\n")}`);
         }
         if (data.warnings && data.warnings.length > 0) {
-          console.log("Preflight warnings:");
-          for (const w of data.warnings) console.log(`  - ${w}`);
+          console.log(`Preflight warnings:\n${data.warnings.map((w) => `  ${w}`).join("\n")}`);
         }
         if (data.ready) {
           console.log("Preflight passed");
+        } else {
+          console.error("Preflight not ready. Fix: resolve the errors above and retry.");
+          process.exitCode = 1;
         }
         return;
       }
@@ -83,11 +84,11 @@ export function importCommand(depsOverride?: ImportDeps): Command {
         const res = await client.postText<{ rigId: string; specName: string; specVersion: string; nodes: Array<{ logicalId: string; status: string }> } | { ok: false; code: string; errors?: string[]; message?: string }>("/api/rigs/import", yaml, "text/yaml", extraHeaders);
         if (res.status === 409 || res.status === 400) {
           const data = res.data as { ok: false; code: string; errors?: string[]; message?: string };
-          const detail = data.errors?.join(", ") ?? data.message ?? `status ${res.status}`;
-          console.error(`Import failed: ${detail}`);
+          const detail = data.errors?.join("\n  ") ?? data.message ?? `status ${res.status}`;
+          console.error(`Import failed:\n  ${detail}\nFix: check your rig spec and retry. Validate first with: rigged rig validate <path>`);
           process.exitCode = 1;
         } else if (res.status >= 400) {
-          console.error(`Import failed: ${JSON.stringify(res.data)}`);
+          console.error(`Import failed (HTTP ${res.status}). Check spec and daemon logs.`);
           process.exitCode = 1;
         } else {
           const data = res.data as { rigId: string; specName: string; specVersion: string; nodes: Array<{ logicalId: string; status: string }> };
@@ -102,7 +103,7 @@ export function importCommand(depsOverride?: ImportDeps): Command {
       // Default: validate only
       const res = await client.postText<{ valid?: boolean; errors?: string[] }>("/api/rigs/import/validate", yaml);
       if (res.status >= 400) {
-        console.error(`Validation failed: ${JSON.stringify(res.data)}`);
+        console.error(`Validation failed: invalid spec (HTTP ${res.status}). Check your YAML syntax and retry.`);
         process.exitCode = 1;
         return;
       }
@@ -110,8 +111,8 @@ export function importCommand(depsOverride?: ImportDeps): Command {
       if (data.valid) {
         console.log("Valid");
       } else {
-        console.log("Invalid:");
-        for (const e of data.errors ?? []) console.log(`  - ${e}`);
+        console.error(`Rig spec invalid:\n${(data.errors ?? []).map((e) => `  ${e}`).join("\n")}\nFix: update your spec and re-validate with: rigged rig validate <path>`);
+        process.exitCode = 1;
       }
     });
 

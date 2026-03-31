@@ -43,9 +43,9 @@ export function agentCommand(depsOverride?: AgentDeps): Command {
       const status = await getDaemonStatus(deps.lifecycleDeps);
       if (status.state !== "running" || status.healthy === false) {
         if (status.state === "running" && status.healthy === false) {
-          console.error("Daemon unhealthy — healthz failed");
+          console.error("Daemon unhealthy — healthz check failed. Restart with: rigged daemon start");
         } else {
-          console.error("Daemon not running");
+          console.error("Daemon not running. Start it with: rigged daemon start");
         }
         process.exitCode = 1;
         return;
@@ -64,9 +64,9 @@ export function agentCommand(depsOverride?: AgentDeps): Command {
       if (res.status >= 400) {
         const data = res.data;
         if (data.errors && data.errors.length > 0) {
-          for (const e of data.errors) console.error(`  - ${e}`);
+          console.error(`Agent spec invalid:\n${data.errors.map((e) => `  ${e}`).join("\n")}\nFix: update ${filePath} and re-validate.`);
         } else {
-          console.error(`Validation failed: ${JSON.stringify(res.data)}`);
+          console.error(`Validation failed (HTTP ${res.status}). Check agent.yaml syntax.`);
         }
         process.exitCode = 1;
         return;
@@ -79,7 +79,7 @@ export function agentCommand(depsOverride?: AgentDeps): Command {
         console.log(`Agent spec valid: ${name} v${version}`);
       } else {
         if (data.errors && data.errors.length > 0) {
-          for (const e of data.errors) console.error(`  - ${e}`);
+          console.error(`Agent spec invalid:\n${data.errors.map((e) => `  ${e}`).join("\n")}\nFix: update ${filePath} and re-validate.`);
         }
         process.exitCode = 1;
       }

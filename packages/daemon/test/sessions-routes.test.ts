@@ -164,4 +164,29 @@ describe("Session routes", () => {
     expect(body.ok).toBe(false);
     expect(body.code).toBe("unavailable");
   });
+
+  // NS-T08: node inventory route
+  it("GET /api/rigs/:rigId/nodes -> node inventory array", async () => {
+    const { app, rigRepo, sessionRegistry } = createTestApp(db);
+    const rig = rigRepo.createRig("test-rig");
+    const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code" });
+    sessionRegistry.registerSession(node.id, "dev-impl@test-rig");
+
+    const res = await app.request(`/api/rigs/${rig.id}/nodes`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(Array.isArray(body)).toBe(true);
+    expect(body).toHaveLength(1);
+    expect(body[0].logicalId).toBe("dev.impl");
+    expect(body[0].nodeKind).toBe("agent");
+    expect(body[0].canonicalSessionName).toBe("dev-impl@test-rig");
+  });
+
+  it("GET /api/rigs/:rigId/nodes -> 404 for unknown rig", async () => {
+    const { app } = createTestApp(db);
+    const res = await app.request("/api/rigs/nonexistent/nodes");
+    expect(res.status).toBe(404);
+    const body = await res.json();
+    expect(body.error).toContain("not found");
+  });
 });

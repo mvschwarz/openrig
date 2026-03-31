@@ -25,14 +25,14 @@ export function upCommand(depsOverride?: StatusDeps & { lifecycleDeps?: Lifecycl
           await startDaemon({}, deps.lifecycleDeps);
           status = await getDaemonStatus(deps.lifecycleDeps);
         } catch {
-          console.error("Failed to auto-start daemon");
+          console.error("Failed to auto-start daemon. Start manually with: rigged daemon start");
           process.exitCode = 2;
           return;
         }
       }
 
       if (status.state !== "running" || status.healthy === false) {
-        console.error("Daemon not running");
+        console.error("Daemon not running. Start it with: rigged daemon start");
         process.exitCode = 1;
         return;
       }
@@ -55,9 +55,15 @@ export function upCommand(depsOverride?: StatusDeps & { lifecycleDeps?: Lifecycl
       if (res.status >= 400) {
         const code = res.data["code"] as string | undefined;
         if (code === "cycle_error") {
-          console.error("Cycle detected in rig topology");
+          console.error("Cycle detected in rig topology. Check edge definitions for circular dependencies.");
+        } else if (code === "validation_failed") {
+          const errors = (res.data["errors"] as string[]) ?? [];
+          console.error(`Rig spec validation failed:\n${errors.map((e) => `  ${e}`).join("\n")}\nFix: update your rig spec and retry.`);
+        } else if (code === "preflight_failed") {
+          const errors = (res.data["errors"] as string[]) ?? [];
+          console.error(`Preflight check failed:\n${errors.map((e) => `  ${e}`).join("\n")}\nFix: resolve the issues above and retry.`);
         } else {
-          console.error(res.data["error"] ?? "Up failed");
+          console.error(`Up failed: ${res.data["error"] ?? "unknown error"} (HTTP ${res.status}). Check daemon logs or validate your spec with: rigged rig validate <path>`);
         }
         const stages = (res.data["stages"] as Array<{ stage: string; status: string }>) ?? [];
         for (const s of stages) {

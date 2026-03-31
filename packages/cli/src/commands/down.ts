@@ -34,7 +34,7 @@ export function downCommand(depsOverride?: StatusDeps): Command {
 
       const status = await getDaemonStatus(deps.lifecycleDeps);
       if (status.state !== "running" || status.healthy === false) {
-        console.error("Daemon not running");
+        console.error("Daemon not running. Start it with: rigged daemon start");
         process.exitCode = 1;
         return;
       }
@@ -62,7 +62,8 @@ export function downCommand(depsOverride?: StatusDeps): Command {
 
       // HTTP error
       if (res.status >= 400) {
-        console.error((res.data as { error: string }).error ?? "Down failed");
+        const errMsg = (res.data as { error: string }).error ?? "unknown error";
+        console.error(`Down failed: ${errMsg} (HTTP ${res.status}). Check rig ID with: rigged ps`);
         process.exitCode = 2;
         return;
       }
