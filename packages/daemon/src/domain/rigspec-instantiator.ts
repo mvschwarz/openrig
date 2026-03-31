@@ -265,6 +265,7 @@ import { RigSpecSchema as PodRigSpecSchema } from "./rigspec-schema.js";
 import { rigPreflight } from "./rigspec-preflight.js";
 import { resolveAgentRef, type AgentResolverFsOps } from "./agent-resolver.js";
 import { resolveNodeConfig } from "./profile-resolver.js";
+import { resolveStartup } from "./startup-resolver.js";
 import { planProjection } from "./projection-planner.js";
 import { StartupOrchestrator } from "./startup-orchestrator.js";
 import { PodRepository } from "./pod-repository.js";
@@ -371,6 +372,15 @@ export class PodRigInstantiator {
 
     // Phase 2: Process members in launch order
     for (const { pod, member, podId, qualifiedId } of memberEntries) {
+
+        // Terminal fast-path: skip agent resolution and profile resolution
+        if (member.agentRef === "builtin:terminal") {
+          const termResult = await this.processTerminalMember(
+            rigId, rigSpec, rigRoot, pod, member, podId, qualifiedId, nodeIdMap,
+          );
+          nodeResults.push(termResult);
+          continue;
+        }
 
         // Resolve agent ref
         const resolveResult = resolveAgentRef(member.agentRef, rigRoot, this.deps.fsOps);
@@ -600,6 +610,159 @@ export class PodRigInstantiator {
     }
 
     return order;
+  }
+
+  private async processTerminalMember(
+    rigId: string,
+    rigSpec: PodRigSpec,
+    rigRoot: string,
+    pod: PodRigSpec["pods"][0],
+    member: RigSpecPodMember,
+    podId: string,
+    qualifiedId: string,
+    nodeIdMap: Record<string, string>,
+  ): Promise<{ logicalId: string; status: "launched" | "failed"; error?: string }> {
+    // Create node with sentinel values
+    let nodeId: string;
+    try {
+      const node = this.deps.rigRepo.addNode(rigId, qualifiedId, {
+        runtime: member.runtime,
+        model: member.model,
+        cwd: member.cwd,
+        restorePolicy: "checkpoint_only",
+        podId,
+        agentRef: member.agentRef,
+        profile: member.profile,
+        label: member.label,
+      });
+      nodeId = node.id;
+      nodeIdMap[qualifiedId] = nodeId;
+    } catch (err) {
+      return { logicalId: qualifiedId, status: "failed", error: (err as Error).message };
+    }
+
+    // Validate session name components
+    const sessionNameErrors = validateSessionComponents(pod.id, member.id, rigSpec.name);
+    if (sessionNameErrors.length > 0) {
+      return { logicalId: qualifiedId, status: "failed", error: sessionNameErrors.join("; ") };
+    }
+
+    // Launch session
+    const canonicalSessionName = deriveCanonicalSessionName(pod.id, member.id, rigSpec.name);
+    const launchResult = await this.deps.nodeLauncher.launchNode(rigId, qualifiedId, { sessionName: canonicalSessionName });
+    if (!launchResult.ok) {
+      return { logicalId: qualifiedId, status: "failed", error: launchResult.message };
+    }
+
+    // Propagate restore_policy to session row (restore-orchestrator reads session.restorePolicy)
+    try {
+      this.db.prepare("UPDATE sessions SET restore_policy = ? WHERE id = ?")
+        .run("checkpoint_only", launchResult.session.id);
+    } catch { /* best-effort */ }
+
+    // Assemble startup layers (empty agent base + profile, keep rig/pod/member)
+    const startup = resolveStartup({
+      specStartup: { files: [], actions: [] },
+      profileStartup: undefined,
+      rigCultureFile: rigSpec.cultureFile,
+      rigStartup: rigSpec.startup,
+      podStartup: pod.startup,
+      memberStartup: member.startup,
+      operatorStartup: undefined,
+    });
+
+    // Build resolved startup files for rig/pod/member layers (skip agent/profile)
+    const resolvedFiles = this.buildTerminalResolvedStartupFiles(rigSpec, rigRoot, pod, member);
+
+    // Build binding
+    const binding: NodeBinding = {
+      id: launchResult.ok ? launchResult.binding.id : "",
+      nodeId,
+      tmuxSession: launchResult.ok ? launchResult.binding.tmuxSession : null,
+      tmuxWindow: null,
+      tmuxPane: null,
+      cmuxWorkspace: null,
+      cmuxSurface: null,
+      updatedAt: "",
+      cwd: member.cwd,
+    };
+
+    // Select terminal adapter
+    const adapter = this.deps.adapters["terminal"];
+    if (!adapter) {
+      return { logicalId: qualifiedId, status: "failed", error: 'No adapter for runtime "terminal"' };
+    }
+
+    // Empty projection plan for terminal nodes
+    const emptyPlan = {
+      entries: [],
+      diagnostics: [],
+      conflicts: [],
+      noOps: [],
+      runtime: "terminal",
+      cwd: member.cwd,
+    };
+
+    // Run startup (terminal adapter no-ops project/deliver/checkReady; send_text actions execute)
+    const startupResult = await this.deps.startupOrchestrator.startNode({
+      rigId,
+      nodeId,
+      sessionId: launchResult.ok ? launchResult.session.id : "",
+      binding,
+      adapter,
+      plan: emptyPlan as any,
+      resolvedStartupFiles: resolvedFiles,
+      startupActions: startup.actions,
+      isRestore: false,
+    });
+
+    return {
+      logicalId: qualifiedId,
+      status: startupResult.ok ? "launched" : "failed",
+      error: startupResult.ok ? undefined : startupResult.errors.join("; "),
+    };
+  }
+
+  private buildTerminalResolvedStartupFiles(
+    rigSpec: PodRigSpec,
+    rigRoot: string,
+    pod: RigSpecPod,
+    member: RigSpecPodMember,
+  ): ResolvedStartupFile[] {
+    const files: ResolvedStartupFile[] = [];
+
+    // Skip layers 1-2 (agent base, profile) — terminal nodes have no agent spec
+    // Layer 3: Rig culture file
+    if (rigSpec.cultureFile) {
+      files.push({
+        path: rigSpec.cultureFile,
+        absolutePath: nodePath.resolve(rigRoot, rigSpec.cultureFile),
+        ownerRoot: rigRoot,
+        deliveryHint: "auto",
+        required: true,
+        appliesOn: ["fresh_start", "restore"],
+      });
+    }
+    // Layer 4: Rig startup
+    if (rigSpec.startup) {
+      for (const f of rigSpec.startup.files) {
+        files.push({ ...f, absolutePath: nodePath.resolve(rigRoot, f.path), ownerRoot: rigRoot });
+      }
+    }
+    // Layer 5: Pod startup
+    if (pod.startup) {
+      for (const f of pod.startup.files) {
+        files.push({ ...f, absolutePath: nodePath.resolve(rigRoot, f.path), ownerRoot: rigRoot });
+      }
+    }
+    // Layer 6: Member startup
+    if (member.startup) {
+      for (const f of member.startup.files) {
+        files.push({ ...f, absolutePath: nodePath.resolve(rigRoot, f.path), ownerRoot: rigRoot });
+      }
+    }
+
+    return files;
   }
 
   private buildResolvedStartupFiles(

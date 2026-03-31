@@ -74,7 +74,7 @@ describe("PodRigInstantiator", () => {
 
     const inst = new PodRigInstantiator({
       db, rigRepo, podRepo, sessionRegistry, eventBus, nodeLauncher, startupOrchestrator: startupOrch,
-      fsOps, adapters: { "claude-code": adapter, "codex": mockAdapter() },
+      fsOps, adapters: { "claude-code": adapter, "codex": mockAdapter(), "terminal": mockAdapter() },
     });
 
     return { db, rigRepo, podRepo, sessionRegistry, eventBus, inst, adapter, tmux };
@@ -330,6 +330,93 @@ describe("PodRigInstantiator", () => {
       expect(result.errors.some((e: string) => e.includes("pod name") && e.includes(" "))).toBe(true);
       expect(result.errors.some((e: string) => e.includes("member name") && e.includes("!"))).toBe(true);
       expect(result.errors.some((e: string) => e.includes("rig name") && e.includes(" "))).toBe(true);
+    }
+    db.close();
+  });
+
+  // NS-T03: terminal member instantiation — skips agent resolution, executes startup
+  it("instantiates terminal member without agent resolution", async () => {
+    const files = {
+      [`${RIG_ROOT}/agents/impl/agent.yaml`]: agentYaml("impl"),
+    };
+    const { db, tmux, rigRepo, inst } = setup(files);
+    const spec = makeRigSpec({
+      pods: [
+        {
+          id: "dev", label: "Dev",
+          members: [{ id: "impl", agentRef: "local:agents/impl", profile: "default", runtime: "claude-code", cwd: "." }],
+          edges: [],
+        },
+        {
+          id: "infra", label: "Infrastructure",
+          members: [{ id: "server", agentRef: "builtin:terminal", profile: "none", runtime: "terminal", cwd: ".", startup: { files: [], actions: [{ type: "send_text", value: "npm run dev", phase: "after_ready", idempotent: true, appliesOn: ["fresh_start"] }] } }],
+          edges: [],
+        },
+      ],
+    });
+    const yaml = RigSpecCodec.serialize(spec);
+    const result = await inst.instantiate(yaml, RIG_ROOT);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.result.nodes).toHaveLength(2);
+      const launched = result.result.nodes.filter((n) => n.status === "launched");
+      expect(launched).toHaveLength(2);
+      // Terminal node was launched with canonical name
+      const createSession = tmux.createSession as ReturnType<typeof vi.fn>;
+      const sessionNames = createSession.mock.calls.map((c: string[]) => c[0]);
+      expect(sessionNames).toContain("infra-server@test-rig");
+    }
+    db.close();
+  });
+
+  // NS-T03: terminal member restore_policy propagated to session
+  it("terminal member propagates checkpoint_only restore_policy to session row", async () => {
+    const files = {
+      [`${RIG_ROOT}/agents/impl/agent.yaml`]: agentYaml("impl"),
+    };
+    const { db, inst } = setup(files);
+    const spec = makeRigSpec({
+      pods: [{
+        id: "infra", label: "Infra",
+        members: [{ id: "server", agentRef: "builtin:terminal", profile: "none", runtime: "terminal", cwd: "." }],
+        edges: [],
+      }],
+    });
+    const yaml = RigSpecCodec.serialize(spec);
+    const result = await inst.instantiate(yaml, RIG_ROOT);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      // Check session has checkpoint_only
+      const sessions = db.prepare("SELECT restore_policy FROM sessions").all() as Array<{ restore_policy: string }>;
+      expect(sessions.length).toBeGreaterThan(0);
+      expect(sessions[0]!.restore_policy).toBe("checkpoint_only");
+    }
+    db.close();
+  });
+
+  // NS-T03: terminal node visible in node-inventory as infrastructure
+  it("terminal-instantiated node appears in inventory with nodeKind infrastructure", async () => {
+    const files = {
+      [`${RIG_ROOT}/agents/impl/agent.yaml`]: agentYaml("impl"),
+    };
+    const { db, rigRepo, inst } = setup(files);
+    const spec = makeRigSpec({
+      pods: [{
+        id: "infra", label: "Infra",
+        members: [{ id: "server", agentRef: "builtin:terminal", profile: "none", runtime: "terminal", cwd: "." }],
+        edges: [],
+      }],
+    });
+    const yaml = RigSpecCodec.serialize(spec);
+    const result = await inst.instantiate(yaml, RIG_ROOT);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      // Verify via node-inventory projection
+      const { getNodeInventory } = await import("../src/domain/node-inventory.js");
+      const inventory = getNodeInventory(db, result.result.rigId);
+      expect(inventory).toHaveLength(1);
+      expect(inventory[0]!.nodeKind).toBe("infrastructure");
+      expect(inventory[0]!.runtime).toBe("terminal");
     }
     db.close();
   });

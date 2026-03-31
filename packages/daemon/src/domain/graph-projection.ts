@@ -11,6 +11,7 @@ interface RFNodeData {
   model: string | null;
   status: string | null;
   binding: Binding | null;
+  nodeKind: "agent" | "infrastructure";
 }
 
 interface RFNode {
@@ -58,6 +59,7 @@ export function projectRigToGraph(input: RigGraphInput): ReactFlowGraph {
         model: node.model,
         status: latestSession ? latestSession.status : null,
         binding: node.binding,
+        nodeKind: node.runtime === "terminal" ? "infrastructure" : "agent",
       },
     };
   });

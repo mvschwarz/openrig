@@ -331,4 +331,53 @@ describe("RigSpec schema (pod-aware)", () => {
     expect(result.valid).toBe(false);
     expect(result.errors[0]).toMatch(/cross-pod edge must reference different pods/);
   });
+
+  // -- NS-T03: Terminal sentinel validation --
+
+  // Test 4: validates terminal member with exact sentinel triple
+  it("validates terminal member with builtin:terminal + none + terminal", () => {
+    const rig = structuredClone(VALID_RIG);
+    rig.pods.push({
+      id: "infra",
+      label: "Infrastructure",
+      members: [
+        { id: "server", agent_ref: "builtin:terminal", profile: "none", runtime: "terminal", cwd: "." } as any,
+      ],
+      edges: [],
+    });
+    const result = RigSpecSchema.validate(rig);
+    expect(result.valid).toBe(true);
+  });
+
+  // Test 5: rejects terminal member with wrong sentinel pair
+  it("rejects terminal member with builtin:terminal but profile != none", () => {
+    const rig = structuredClone(VALID_RIG);
+    rig.pods.push({
+      id: "infra",
+      label: "Infrastructure",
+      members: [
+        { id: "server", agent_ref: "builtin:terminal", profile: "default", runtime: "terminal", cwd: "." } as any,
+      ],
+      edges: [],
+    });
+    const result = RigSpecSchema.validate(rig);
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.includes("terminal") && e.includes("profile") && e.includes("none"))).toBe(true);
+  });
+
+  // Test 6: rejects non-terminal member using builtin:terminal
+  it("rejects non-terminal member using builtin:terminal", () => {
+    const rig = structuredClone(VALID_RIG);
+    rig.pods.push({
+      id: "infra",
+      label: "Infrastructure",
+      members: [
+        { id: "server", agent_ref: "builtin:terminal", profile: "none", runtime: "claude-code", cwd: "." } as any,
+      ],
+      edges: [],
+    });
+    const result = RigSpecSchema.validate(rig);
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.includes("builtin:terminal") && e.includes("terminal"))).toBe(true);
+  });
 });

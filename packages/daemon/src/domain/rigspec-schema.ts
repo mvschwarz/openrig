@@ -196,6 +196,27 @@ function validateMember(member: Record<string, unknown>, index: number, podPrefi
     errors.push(`${prefix}.cwd: required non-empty string`);
   }
 
+  // Terminal sentinel validation: exact triple required
+  const isTerminalRuntime = member["runtime"] === "terminal";
+  const isTerminalRef = member["agent_ref"] === "builtin:terminal";
+  const isNoneProfile = member["profile"] === "none";
+
+  if (isTerminalRuntime) {
+    if (!isTerminalRef) {
+      errors.push(`${prefix}: terminal runtime requires agent_ref "builtin:terminal" (got "${member["agent_ref"]}")`);
+    }
+    if (!isNoneProfile) {
+      errors.push(`${prefix}: terminal runtime requires profile "none" (got "${member["profile"]}")`);
+    }
+  } else {
+    if (isTerminalRef) {
+      errors.push(`${prefix}: agent_ref "builtin:terminal" is only valid with runtime "terminal" (got runtime "${member["runtime"]}")`);
+    }
+    if (isNoneProfile && typeof member["profile"] === "string") {
+      errors.push(`${prefix}: profile "none" is only valid with runtime "terminal" (got runtime "${member["runtime"]}")`);
+    }
+  }
+
   // restore_policy: closed set
   if (member["restore_policy"] !== undefined && member["restore_policy"] !== null) {
     if (!VALID_RESTORE_POLICIES.has(member["restore_policy"] as string)) {
@@ -203,8 +224,8 @@ function validateMember(member: Record<string, unknown>, index: number, podPrefi
     }
   }
 
-  // agent_ref: must be local: or path: with correct shape
-  if (typeof member["agent_ref"] === "string") {
+  // agent_ref: must be local: or path: with correct shape (skip for terminal sentinel)
+  if (typeof member["agent_ref"] === "string" && !isTerminalRef) {
     const ref = member["agent_ref"] as string;
     const hasValidPrefix = VALID_IMPORT_PREFIXES.some((p) => ref.startsWith(p));
     if (!hasValidPrefix) {

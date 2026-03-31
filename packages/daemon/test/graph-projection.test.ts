@@ -187,4 +187,18 @@ describe("projectRigToGraph", () => {
     expect(result.nodes[0]!.data).toHaveProperty("status");
     expect(result.nodes[0]!.data.status).toBeNull();
   });
+
+  // NS-T03: nodeKind derived from runtime
+  it("nodeKind is 'infrastructure' for terminal runtime, 'agent' otherwise", () => {
+    const input = makeRig([
+      { id: "n1", logicalId: "impl", runtime: "claude-code" },
+      { id: "n2", logicalId: "server", runtime: "terminal" },
+      { id: "n3", logicalId: "qa", runtime: "codex" },
+    ]);
+
+    const result = projectRigToGraph(input);
+    expect(result.nodes[0]!.data.nodeKind).toBe("agent");
+    expect(result.nodes[1]!.data.nodeKind).toBe("infrastructure");
+    expect(result.nodes[2]!.data.nodeKind).toBe("agent");
+  });
 });

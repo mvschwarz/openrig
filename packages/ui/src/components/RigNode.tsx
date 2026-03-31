@@ -8,6 +8,7 @@ interface RigNodeData {
   model: string | null;
   status: string | null;
   packageRefs?: string[];
+  nodeKind?: "agent" | "infrastructure";
   binding: {
     tmuxSession?: string | null;
     cmuxSurface?: string | null;
@@ -43,6 +44,7 @@ export function RigNode({ data }: { data: RigNodeData }) {
   const prevStatusRef = useRef(data.status);
   const [statusChanged, setStatusChanged] = useState(false);
   const core = isCore(data.role);
+  const isInfra = data.nodeKind === "infrastructure";
   const statusCssColor = getStatusCssColor(data.status);
 
   useEffect(() => {
@@ -64,13 +66,15 @@ export function RigNode({ data }: { data: RigNodeData }) {
     >
       <Handle type="target" position={Position.Top} />
 
-      {/* Header stripe — dark for core, light for workers */}
+      {/* Header stripe — dark for core, muted for infra, light for workers */}
       <div className={`px-3 py-1 font-mono text-[10px] flex justify-between items-center ${
-        core
-          ? "bg-stone-900 text-white"
-          : "bg-stone-200 text-stone-900 border-b border-stone-900"
+        isInfra
+          ? "bg-stone-400 text-stone-900 border-b border-stone-900"
+          : core
+            ? "bg-stone-900 text-white"
+            : "bg-stone-200 text-stone-900 border-b border-stone-900"
       }`}>
-        <span>NODE_TYPE: {(data.role ?? "AGENT").toUpperCase()}</span>
+        <span>NODE_TYPE: {isInfra ? "INFRA" : (data.role ?? "AGENT").toUpperCase()}</span>
         <span className="material-symbols-outlined text-[12px]" style={{ fontVariationSettings: "'FILL' 0, 'wght' 300" }}>
           {core ? "settings" : "link"}
         </span>

@@ -121,7 +121,7 @@ import { RigSpecSchema } from "./rigspec-schema.js";
 import { resolveAgentRef, type AgentResolverFsOps } from "./agent-resolver.js";
 import { resolveNodeConfig, type ResolutionContext } from "./profile-resolver.js";
 
-const SUPPORTED_RUNTIMES = new Set(["claude-code", "codex"]);
+const SUPPORTED_RUNTIMES = new Set(["claude-code", "codex", "terminal"]);
 
 export interface RigPreflightInput {
   rigSpecYaml: string;
@@ -166,6 +166,18 @@ export function rigPreflight(input: RigPreflightInput): PreflightResult {
   // 3. For each pod member: resolve agent_ref + profile, check runtime, check cwd
   for (const pod of rigSpec.pods) {
     for (const member of pod.members) {
+      // Terminal members: skip agent resolution and profile resolution
+      if (member.agentRef === "builtin:terminal") {
+        // Only validate runtime and cwd for terminal members
+        if (!SUPPORTED_RUNTIMES.has(member.runtime)) {
+          errors.push(`${pod.id}.${member.id}: unsupported runtime "${member.runtime}"`);
+        }
+        if (!member.cwd) {
+          errors.push(`${pod.id}.${member.id}: cwd is required`);
+        }
+        continue;
+      }
+
       // Resolve agent_ref
       const resolveResult = resolveAgentRef(member.agentRef, input.rigRoot, input.fsOps);
       if (!resolveResult.ok) {
