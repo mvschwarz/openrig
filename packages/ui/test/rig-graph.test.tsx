@@ -156,7 +156,7 @@ describe("RigGraph", () => {
       expect(groupNode).not.toBeNull();
     });
 
-    expect(screen.getByText("alpha")).toBeDefined();
+    expect(screen.getByText("alpha pod")).toBeDefined();
   });
 
   it("clicking a pod group routes selection back to the rig drawer", async () => {
@@ -334,6 +334,7 @@ describe("RigNode", () => {
 
     expect(screen.getByText("impl")).toBeDefined();
     expect(screen.getByText(/claude-code · opus/)).toBeDefined();
+    expect(screen.queryByText("WORKER")).toBeNull();
     expect(screen.getByTestId("status-dot-dev.impl").getAttribute("aria-label")).toBe("stopped");
   });
 
@@ -412,6 +413,40 @@ describe("RigNode", () => {
     expect(screen.getByTestId("toolbar-copy-attach")).toBeDefined();
     expect(screen.getByTestId("toolbar-cmux-focus")).toBeDefined();
     expect(screen.getByTestId("toolbar-copy-resume")).toBeDefined();
+  });
+
+  it("copy actions show copied feedback after click", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(globalThis.navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+
+    const data = {
+      logicalId: "dev.impl",
+      rigId: "rig-1",
+      role: "worker",
+      runtime: "claude-code",
+      model: null,
+      status: "running",
+      startupStatus: "ready" as const,
+      canonicalSessionName: "dev-impl@test-rig",
+      binding: { tmuxSession: "dev-impl@test-rig", cmuxSurface: null },
+      resumeToken: "abc-123",
+    };
+
+    render(
+      <ReactFlowProvider>
+        <RigNode data={data} />
+      </ReactFlowProvider>
+    );
+
+    fireEvent.click(screen.getByTestId("toolbar-copy-attach"));
+
+    expect(writeText).toHaveBeenCalledWith("tmux attach -t dev-impl@test-rig");
+    await waitFor(() => {
+      expect(screen.getByTestId("toolbar-copy-attach").textContent?.toLowerCase()).toContain("copied");
+    });
   });
 
   it("clicking the tmux action copies the attach command", async () => {
@@ -499,6 +534,18 @@ describe("RigNode", () => {
     expect(screen.getByTestId("toolbar-copy-attach")).toBeDefined();
     expect(screen.queryByTestId("toolbar-copy-resume")).toBeNull();
     expect(screen.queryByTestId("toolbar-cmux-focus")).toBeNull(); // no cmux surface
+  });
+
+  it("treats nodes as non-draggable so the canvas can pan through them", async () => {
+    mockFetch.mockResolvedValueOnce(mockGraphResponse(sampleNodes(), sampleEdges()));
+
+    const { container } = render(<QueryWrapper><RigGraph showDiscovered={false} rigId="rig-1" /></QueryWrapper>);
+
+    await waitFor(() => {
+      const node = container.querySelector(".react-flow__node-rigNode");
+      expect(node).not.toBeNull();
+      expect(node?.className).not.toContain("draggable");
+    });
   });
 });
 

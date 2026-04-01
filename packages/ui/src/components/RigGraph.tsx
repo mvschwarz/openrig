@@ -20,8 +20,8 @@ function PodGroupNode({ data }: { data: { podLabel?: string | null; logicalId?: 
       data-testid="pod-group-node"
       className="w-full h-full relative pointer-events-auto"
     >
-      <div className="absolute left-3 top-2 px-2 py-1 bg-white/90 border border-stone-300 font-mono text-[10px] tracking-[0.12em] text-stone-600 shadow-sm">
-        {label}
+      <div className="absolute left-3 top-2 px-2 py-1 bg-white/90 border border-stone-300 font-mono text-[10px] text-stone-700 shadow-sm">
+        {`${label} pod`}
       </div>
     </div>
   );
@@ -295,6 +295,9 @@ export function RigGraph({ rigId, showDiscovered = true }: { rigId: string | nul
         edges={rfEdges}
         nodeTypes={nodeTypes}
         onNodeClick={onNodeClick}
+        nodesDraggable={false}
+        selectionOnDrag={false}
+        panOnDrag
         fitView
         fitViewOptions={{ padding: 0.16, maxZoom: 1.15 }}
         className="relative z-10"
