@@ -8,6 +8,7 @@ import type {
 } from "../domain/runtime-adapter.js";
 import { resolveConcreteHint } from "../domain/runtime-adapter.js";
 import type { ProjectionPlan, ProjectionEntry } from "../domain/projection-planner.js";
+import { assessNativeResumeProbe } from "../domain/native-resume-probe.js";
 
 export interface ClaudeAdapterFsOps {
   readFile(path: string): string;
@@ -168,12 +169,17 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     for (let attempt = 0; attempt < attempts; attempt++) {
       const paneCommand = await this.tmux.getPaneCommand(tmuxSession);
       const paneContent = (await this.tmux.capturePaneContent(tmuxSession, 40)) ?? "";
+      const probe = assessNativeResumeProbe({
+        runtime: "claude-code",
+        paneCommand,
+        paneContent,
+      });
 
-      if (paneContent.includes("No conversation found")) {
+      if (probe.code === "no_conversation_found") {
         return { ok: false, error: "Claude resume failed: no conversation found for the requested session" };
       }
 
-      if (paneCommand === "claude") {
+      if (probe.status === "resumed") {
         return { ok: true };
       }
 
@@ -183,6 +189,17 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     }
 
     const finalCommand = await this.tmux.getPaneCommand(tmuxSession);
+    const finalContent = (await this.tmux.capturePaneContent(tmuxSession, 40)) ?? "";
+    const finalProbe = assessNativeResumeProbe({
+      runtime: "claude-code",
+      paneCommand: finalCommand,
+      paneContent: finalContent,
+    });
+
+    if (finalProbe.status === "resumed") {
+      return { ok: true };
+    }
+
     if (finalCommand && SHELL_COMMANDS.has(finalCommand)) {
       return { ok: false, error: "Claude resume failed: pane returned to shell instead of entering Claude" };
     }

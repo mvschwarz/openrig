@@ -2,6 +2,23 @@
 
 A complete multi-agent topology demonstrating Rigged's core capabilities.
 
+This directory is the canonical authoring example for Rigged. It is meant to be
+read by both humans and coding agents as the reference layout for a real rig:
+
+- `rig.yaml` — the topology source of truth
+- `culture.md` — rig-wide culture/guidance
+- `agents/*/agent.yaml` — per-agent package manifests
+- `scripts/` — baseline seeding, verification, and proof helpers
+
+The same tree is also the golden source for same-checkout bundle tests:
+
+```bash
+rigged bundle create demo/rig.yaml --rig-root demo -o /tmp/demo.rigbundle
+rigged bundle inspect /tmp/demo.rigbundle
+rigged bundle install /tmp/demo.rigbundle --yes --target /tmp/demo-install
+rigged up /tmp/demo.rigbundle
+```
+
 ## Topology
 
 - **orch** pod: `lead` (claude-code) — orchestrator
@@ -25,6 +42,21 @@ A complete multi-agent topology demonstrating Rigged's core capabilities.
 ./demo/run.sh
 ```
 
+## Resume Baseline
+
+Before treating restore as trustworthy, establish and verify the runtime resume
+baseline on a fresh boot:
+
+```bash
+npx tsx demo/scripts/check-demo-health.ts --rig demo-rig
+npx tsx demo/scripts/seed-resume-baseline.ts --rig demo-rig
+npx tsx demo/scripts/verify-native-resume.ts --rig demo-rig
+```
+
+The baseline matters because Claude and Codex have different native resume
+semantics. See `docs/planning/post-northstar-round/runtime-resume-semantics.md`
+for the currently observed runtime caveats.
+
 ## Full Proof Package
 
 ```bash
@@ -37,6 +69,11 @@ This produces automated proof artifacts in `demo/proof/`:
 |----------|--------|------|
 | `up-transcript.txt` | `rigged up demo/rig.yaml` output | Automatic |
 | `ps-nodes.txt` | `rigged ps --nodes` after boot | Automatic |
+| `health-after-boot.json` | `check-demo-health.ts` after boot | Automatic |
+| `seed-resume-baseline.txt` | baseline seeding summary | Automatic |
+| `seed-resume-baseline.json` | baseline seeding machine output | Automatic |
+| `native-resume-before-down.txt` | native Claude/Codex probe before down | Automatic |
+| `native-resume-before-down.json` | native probe machine output | Automatic |
 | `down-transcript.txt` | `rigged down` output | Automatic |
 | `tmux-check.txt` | `tmux ls` after teardown | Automatic |
 | `restore-transcript.txt` | `rigged up demo-rig` output | Automatic |

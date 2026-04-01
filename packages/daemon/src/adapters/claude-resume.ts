@@ -1,6 +1,7 @@
 import { setTimeout as sleep } from "node:timers/promises";
 import type { TmuxAdapter } from "./tmux.js";
 import { shellQuote } from "./shell-quote.js";
+import { assessNativeResumeProbe } from "../domain/native-resume-probe.js";
 
 export type ResumeResult =
   | { ok: true }
@@ -65,8 +66,13 @@ export class ClaudeResumeAdapter {
     for (let attempt = 0; attempt < attempts; attempt++) {
       const paneCommand = await this.tmux.getPaneCommand(tmuxSessionName);
       const paneContent = (await this.tmux.capturePaneContent(tmuxSessionName, 40)) ?? "";
+      const probe = assessNativeResumeProbe({
+        runtime: "claude-code",
+        paneCommand,
+        paneContent,
+      });
 
-      if (paneContent.includes("No conversation found")) {
+      if (probe.code === "no_conversation_found") {
         return {
           ok: false,
           code: "resume_failed",
@@ -74,7 +80,7 @@ export class ClaudeResumeAdapter {
         };
       }
 
-      if (paneCommand === "claude") {
+      if (probe.status === "resumed") {
         return { ok: true };
       }
 
@@ -84,6 +90,17 @@ export class ClaudeResumeAdapter {
     }
 
     const finalCommand = await this.tmux.getPaneCommand(tmuxSessionName);
+    const finalContent = (await this.tmux.capturePaneContent(tmuxSessionName, 40)) ?? "";
+    const finalProbe = assessNativeResumeProbe({
+      runtime: "claude-code",
+      paneCommand: finalCommand,
+      paneContent: finalContent,
+    });
+
+    if (finalProbe.status === "resumed") {
+      return { ok: true };
+    }
+
     if (finalCommand && SHELL_COMMANDS.has(finalCommand)) {
       return {
         ok: false,

@@ -197,6 +197,35 @@ describe("Claude Code runtime adapter", () => {
     });
   });
 
+  it("launchHarness treats a live Claude TUI as success even when tmux reports a version-string foreground command", async () => {
+    const tmux = mockTmux();
+    (tmux.getPaneCommand as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce("zsh")
+      .mockResolvedValue("2.1.89");
+    (tmux.capturePaneContent as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce("")
+      .mockResolvedValue(
+        [
+          "Claude Code v2.1.89",
+          "❯ Baseline warmup 4/6 for dev.impl.",
+          "────────────────────────────────────────────────────────────────────────────────",
+          "  ? for shortcuts                                             ● high · /effort",
+        ].join("\n")
+      );
+    const adapter = new ClaudeCodeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {} });
+
+    const result = await adapter.launchHarness(makeBinding(), {
+      name: "dev-impl@test-rig",
+      resumeToken: "abc-123",
+    });
+
+    expect(result).toEqual({
+      ok: true,
+      resumeToken: "abc-123",
+      resumeType: "claude_id",
+    });
+  });
+
   it("launchHarness captures resume token from session file", async () => {
     const tmux = mockTmux();
     const sessionData = JSON.stringify({ pid: 12345, sessionId: "abc-session-id", name: "dev-impl@test-rig" });

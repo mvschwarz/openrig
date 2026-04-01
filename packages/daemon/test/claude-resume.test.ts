@@ -167,5 +167,31 @@ describe("ClaudeResumeAdapter", () => {
       expect(result).toEqual({ ok: true });
       expect(getPaneCommand).toHaveBeenCalledTimes(2);
     });
+
+    it("treats a live Claude TUI as success even when tmux reports a version-string foreground command", async () => {
+      const getPaneCommand = vi
+        .fn<(_: string) => Promise<string | null>>()
+        .mockResolvedValueOnce("zsh")
+        .mockResolvedValueOnce("2.1.89");
+      const capturePaneContent = vi
+        .fn<(_: string, __?: number) => Promise<string | null>>()
+        .mockResolvedValueOnce("")
+        .mockResolvedValueOnce(
+          [
+            "Claude Code v2.1.89",
+            "❯ Baseline warmup 4/6 for dev.impl.",
+            "────────────────────────────────────────────────────────────────────────────────",
+            "  ? for shortcuts                                             ● high · /effort",
+          ].join("\n")
+        );
+      const adapter = new ClaudeResumeAdapter(
+        mockTmux({ getPaneCommand, capturePaneContent }),
+        { pollMs: 0, maxWaitMs: 1, sleep: async () => {} }
+      );
+
+      const result = await adapter.resume("r99-demo1-lead", "claude_name", "my-session", "/repo");
+
+      expect(result).toEqual({ ok: true });
+    });
   });
 });
