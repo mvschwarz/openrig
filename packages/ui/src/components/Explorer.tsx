@@ -5,11 +5,13 @@ import { usePsEntries, type PsEntry } from "../hooks/usePsEntries.js";
 import { useNodeInventory, type NodeInventoryEntry } from "../hooks/useNodeInventory.js";
 import { cn } from "../lib/utils.js";
 
+import type { DrawerSelection } from "./SharedDetailDrawer.js";
+
 interface ExplorerProps {
   open: boolean;
   onClose: () => void;
-  selectedNode: { rigId: string; logicalId: string } | null;
-  onSelectNode: (node: { rigId: string; logicalId: string } | null) => void;
+  selection: DrawerSelection;
+  onSelect: (sel: DrawerSelection) => void;
 }
 
 function statusColor(startupStatus: string | null): string {
@@ -30,11 +32,11 @@ function rigStatusColor(status: string): string {
   }
 }
 
-function RigTree({ rig, ps, selectedNode, onSelectNode, onClose }: {
+function RigTree({ rig, ps, selection, onSelect, onClose }: {
   rig: RigSummary;
   ps: PsEntry | undefined;
-  selectedNode: ExplorerProps["selectedNode"];
-  onSelectNode: ExplorerProps["onSelectNode"];
+  selection: ExplorerProps["selection"];
+  onSelect: ExplorerProps["onSelect"];
   onClose: () => void;
 }) {
   const [expanded, setExpanded] = useState(false);
@@ -52,13 +54,17 @@ function RigTree({ rig, ps, selectedNode, onSelectNode, onClose }: {
           {expanded ? "▾" : "▸"}
         </button>
         <span className={cn("w-2 h-2 rounded-full shrink-0", rigStatusColor(rigStatus))} />
-        <a
-          href={`/rigs/${rig.id}`}
-          onClick={onClose}
+        <Link
+          to="/rigs/$rigId"
+          params={{ rigId: rig.id }}
+          onClick={() => {
+            onSelect({ type: "rig", rigId: rig.id });
+            onClose();
+          }}
           className="font-mono text-xs font-bold text-stone-900 truncate flex-1"
         >
           {rig.name}
-        </a>
+        </Link>
         <span className="font-mono text-[9px] text-stone-400 uppercase hidden group-hover:inline">
           {rigStatus}
         </span>
@@ -69,19 +75,19 @@ function RigTree({ rig, ps, selectedNode, onSelectNode, onClose }: {
         <RigNodes
           rigId={rig.id}
           rigStatus={rigStatus}
-          selectedNode={selectedNode}
-          onSelectNode={onSelectNode}
+          selection={selection}
+          onSelect={onSelect}
         />
       )}
     </div>
   );
 }
 
-function RigNodes({ rigId, rigStatus, selectedNode, onSelectNode }: {
+function RigNodes({ rigId, rigStatus, selection, onSelect }: {
   rigId: string;
   rigStatus: string;
-  selectedNode: ExplorerProps["selectedNode"];
-  onSelectNode: ExplorerProps["onSelectNode"];
+  selection: ExplorerProps["selection"];
+  onSelect: ExplorerProps["onSelect"];
 }) {
   const { data: nodes, isLoading } = useNodeInventory(rigId);
 
@@ -129,13 +135,13 @@ function RigNodes({ rigId, rigStatus, selectedNode, onSelectNode }: {
             </div>
           )}
           {podNodes.map((node) => {
-            const isSelected = selectedNode?.rigId === node.rigId && selectedNode?.logicalId === node.logicalId;
+            const isSelected = selection?.type === "node" && selection.rigId === node.rigId && selection.logicalId === node.logicalId;
             const memberName = node.logicalId.includes(".") ? node.logicalId.split(".").slice(1).join(".") : node.logicalId;
 
             return (
               <button
                 key={node.logicalId}
-                onClick={() => onSelectNode({ rigId: node.rigId, logicalId: node.logicalId })}
+                onClick={() => onSelect({ type: "node", rigId: node.rigId, logicalId: node.logicalId })}
                 data-testid={`node-${node.logicalId}`}
                 className={cn(
                   "flex items-center gap-2 w-full px-7 py-1 text-left hover:bg-stone-100 transition-colors",
@@ -157,7 +163,7 @@ function RigNodes({ rigId, rigStatus, selectedNode, onSelectNode }: {
   );
 }
 
-export function Explorer({ open, onClose, selectedNode, onSelectNode }: ExplorerProps) {
+export function Explorer({ open, onClose, selection, onSelect }: ExplorerProps) {
   const routerState = useRouterState();
   const currentPath = routerState.location.pathname;
   const { data: rigs } = useRigSummary();
@@ -189,8 +195,8 @@ export function Explorer({ open, onClose, selectedNode, onSelectNode }: Explorer
               key={rig.id}
               rig={rig}
               ps={psMap.get(rig.id)}
-              selectedNode={selectedNode}
-              onSelectNode={onSelectNode}
+              selection={selection}
+              onSelect={onSelect}
               onClose={onClose}
             />
           ))

@@ -1,31 +1,37 @@
 import { type ReactNode, useState, createContext, useContext } from "react";
 import { useRouterState } from "@tanstack/react-router";
 import { Explorer } from "./Explorer.js";
-import { NodeDetailPanel } from "./NodeDetailPanel.js";
+import { SharedDetailDrawer, type DrawerSelection } from "./SharedDetailDrawer.js";
 import { StatusBar } from "./StatusBar.js";
 import { ActivityFeed } from "./ActivityFeed.js";
 import { useActivityFeed } from "../hooks/useActivityFeed.js";
 import { useGlobalEvents } from "../hooks/useGlobalEvents.js";
 
-// -- Shared node selection context --
+// -- Shared drawer selection context --
 
-interface SelectedNode {
-  rigId: string;
-  logicalId: string;
+interface DrawerSelectionContextValue {
+  selection: DrawerSelection;
+  setSelection: (sel: DrawerSelection) => void;
 }
 
-interface NodeSelectionContextValue {
-  selectedNode: SelectedNode | null;
-  setSelectedNode: (node: SelectedNode | null) => void;
-}
-
-export const NodeSelectionContext = createContext<NodeSelectionContextValue>({
-  selectedNode: null,
-  setSelectedNode: () => {},
+export const DrawerSelectionContext = createContext<DrawerSelectionContextValue>({
+  selection: null,
+  setSelection: () => {},
 });
 
+export function useDrawerSelection() {
+  return useContext(DrawerSelectionContext);
+}
+
+// Backward-compat alias for consumers that still use the old name
+export const NodeSelectionContext = DrawerSelectionContext;
 export function useNodeSelection() {
-  return useContext(NodeSelectionContext);
+  const { selection, setSelection } = useDrawerSelection();
+  return {
+    selectedNode: selection?.type === "node" ? { rigId: selection.rigId, logicalId: selection.logicalId } : null,
+    setSelectedNode: (node: { rigId: string; logicalId: string } | null) =>
+      setSelection(node ? { type: "node", rigId: node.rigId, logicalId: node.logicalId } : null),
+  };
 }
 
 // -- AppShell --
@@ -39,13 +45,13 @@ export function AppShell({ children }: AppShellProps) {
   const pathname = routerState.location.pathname;
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const { events, feedOpen, setFeedOpen } = useActivityFeed();
-  const [selectedNode, setSelectedNode] = useState<SelectedNode | null>(null);
+  const [selection, setSelection] = useState<DrawerSelection>(null);
 
   // Mount global SSE event listener
   useGlobalEvents();
 
   return (
-    <NodeSelectionContext.Provider value={{ selectedNode, setSelectedNode }}>
+    <DrawerSelectionContext.Provider value={{ selection, setSelection }}>
       <div className="h-screen flex flex-col">
         {/* Header — paper with thick bottom border */}
         <header
@@ -122,22 +128,19 @@ export function AppShell({ children }: AppShellProps) {
           <Explorer
             open={sidebarOpen}
             onClose={() => setSidebarOpen(false)}
-            selectedNode={selectedNode}
-            onSelectNode={setSelectedNode}
+            selection={selection}
+            onSelect={setSelection}
           />
 
           <main data-testid="content-area" className="flex-1 flex flex-col overflow-auto relative">
             <div key={pathname} className="relative z-10 route-enter flex-1 flex flex-col">{children}</div>
           </main>
 
-          {/* Node detail panel — visible when a node is selected */}
-          {selectedNode && (
-            <NodeDetailPanel
-              rigId={selectedNode.rigId}
-              logicalId={selectedNode.logicalId}
-              onClose={() => setSelectedNode(null)}
-            />
-          )}
+          {/* Detail drawer — visible when a rig or node is selected */}
+          <SharedDetailDrawer
+            selection={selection}
+            onClose={() => setSelection(null)}
+          />
         </div>
 
         {/* Activity Feed */}
@@ -146,6 +149,6 @@ export function AppShell({ children }: AppShellProps) {
         {/* Status Bar */}
         <StatusBar onToggleFeed={() => setFeedOpen(!feedOpen)} feedOpen={feedOpen} eventCount={events.length} />
       </div>
-    </NodeSelectionContext.Provider>
+    </DrawerSelectionContext.Provider>
   );
 }

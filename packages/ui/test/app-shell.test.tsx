@@ -102,7 +102,7 @@ describe("App Shell + Routing", () => {
     await renderRealAppAt("/");
 
     await waitFor(() => {
-      expect(screen.getByText("alpha")).toBeDefined();
+      expect(screen.getAllByText("alpha").length).toBeGreaterThan(0);
     });
   });
 

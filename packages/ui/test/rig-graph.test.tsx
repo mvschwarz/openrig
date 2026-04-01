@@ -859,19 +859,19 @@ describe("RigGraph discovery integration", () => {
   });
 });
 
-// NS-T12: graph selection — clicking a graph node sets shared selectedNode
-import { NodeSelectionContext } from "../src/components/AppShell.js";
+// NS-T12: graph selection — clicking a graph node sets shared selection
+import { DrawerSelectionContext } from "../src/components/AppShell.js";
 
 describe("RigGraph node selection", () => {
-  it("click node -> setSelectedNode({ rigId, logicalId }) called via shared context", async () => {
-    const setSelectedNodeSpy = vi.fn();
+  it("click node -> setSelection({ type: 'node', rigId, logicalId }) called via shared context", async () => {
+    const setSelectionSpy = vi.fn();
 
     // Wrap RigGraph in selection context with spy
     function SelectionWrapper({ children }: { children: React.ReactNode }) {
       return (
-        <NodeSelectionContext.Provider value={{ selectedNode: null, setSelectedNode: setSelectedNodeSpy }}>
+        <DrawerSelectionContext.Provider value={{ selection: null, setSelection: setSelectionSpy }}>
           {children}
-        </NodeSelectionContext.Provider>
+        </DrawerSelectionContext.Provider>
       );
     }
 
@@ -897,9 +897,10 @@ describe("RigGraph node selection", () => {
       node.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
 
-    // setSelectedNode should have been called with the correct rigId and logicalId
+    // setSelection should have been called with a node selection
     await waitFor(() => {
-      expect(setSelectedNodeSpy).toHaveBeenCalledWith({
+      expect(setSelectionSpy).toHaveBeenCalledWith({
+        type: "node",
         rigId: "rig-1",
         logicalId: "orchestrator",
       });

@@ -14,27 +14,27 @@ const mockFetch = vi.fn();
 global.fetch = mockFetch;
 
 function renderExplorer(props?: {
-  selectedNode?: { rigId: string; logicalId: string } | null;
-  onSelectNode?: (node: { rigId: string; logicalId: string } | null) => void;
+  selection?: import("../src/components/SharedDetailDrawer.js").DrawerSelection;
+  onSelect?: (sel: import("../src/components/SharedDetailDrawer.js").DrawerSelection) => void;
 }) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
 
-  const onSelectNode = props?.onSelectNode ?? vi.fn();
+  const onSelect = props?.onSelect ?? vi.fn();
 
   const result = render(
     <QueryClientProvider client={queryClient}>
       <Explorer
         open={true}
         onClose={vi.fn()}
-        selectedNode={props?.selectedNode ?? null}
-        onSelectNode={onSelectNode}
+        selection={props?.selection ?? null}
+        onSelect={onSelect}
       />
     </QueryClientProvider>
   );
 
-  return { ...result, onSelectNode };
+  return { ...result, onSelect };
 }
 
 describe("Explorer sidebar", () => {
@@ -97,9 +97,9 @@ describe("Explorer sidebar", () => {
     });
   });
 
-  // Test 3: Node click calls onSelectNode
-  it("clicking a node calls onSelectNode with rigId and logicalId", async () => {
-    const onSelectNode = vi.fn();
+  // Test 3: Node click calls onSelect with type "node"
+  it("clicking a node calls onSelect with type node, rigId, and logicalId", async () => {
+    const onSelect = vi.fn();
     mockFetch.mockImplementation(async (url: string) => {
       if (url.includes("/api/rigs/summary")) {
         return { ok: true, json: async () => [{ id: "rig-1", name: "test-rig", nodeCount: 1, latestSnapshotAt: null, latestSnapshotId: null }] };
@@ -115,7 +115,7 @@ describe("Explorer sidebar", () => {
       return { ok: true, json: async () => [] };
     });
 
-    renderExplorer({ onSelectNode });
+    renderExplorer({ onSelect });
 
     await waitFor(() => expect(screen.getByText("test-rig")).toBeDefined());
     fireEvent.click(screen.getAllByLabelText("Expand")[0]!);
@@ -125,7 +125,26 @@ describe("Explorer sidebar", () => {
     await fireEvent.click(nodeBtn);
 
     await waitFor(() => {
-      expect(onSelectNode).toHaveBeenCalledWith({ rigId: "rig-1", logicalId: "dev.impl" });
+      expect(onSelect).toHaveBeenCalledWith({ type: "node", rigId: "rig-1", logicalId: "dev.impl" });
+    });
+  });
+
+  // Test PNS-T09: Clicking rig name sets rig selection
+  it("clicking rig name calls onSelect with type rig", async () => {
+    const onSelect = vi.fn();
+    mockFetch.mockImplementation(async (url: string) => {
+      if (url === "/api/rigs/summary") return { ok: true, json: async () => [{ id: "rig-1", name: "test-rig", nodeCount: 2, latestSnapshotAt: null, latestSnapshotId: null }] };
+      if (url === "/api/ps") return { ok: true, json: async () => [{ rigId: "rig-1", name: "test-rig", nodeCount: 2, runningCount: 1, status: "running", uptime: "1h", latestSnapshot: null }] };
+      return { ok: true, json: async () => [] };
+    });
+
+    renderExplorer({ onSelect });
+    await waitFor(() => expect(screen.getByText("test-rig")).toBeDefined());
+
+    fireEvent.click(screen.getByText("test-rig"));
+
+    await waitFor(() => {
+      expect(onSelect).toHaveBeenCalledWith({ type: "rig", rigId: "rig-1" });
     });
   });
 

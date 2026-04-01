@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
+import { useDrawerSelection } from "./AppShell.js";
 import { useRigSummary } from "../hooks/useRigSummary.js";
 import { useCreateSnapshot, useTeardownRig } from "../hooks/mutations.js";
 import { usePsEntries } from "../hooks/usePsEntries.js";
@@ -39,6 +40,7 @@ function WireframeGhost() {
 
 export function Dashboard() {
   const navigate = useNavigate();
+  const { setSelection } = useDrawerSelection();
   const { data: rigs, isPending, error } = useRigSummary();
   const { data: psEntries, isPending: psPending, error: psError } = usePsEntries();
   const [actionError, setActionError] = useState<string | null>(null);
@@ -152,7 +154,10 @@ export function Dashboard() {
           key={rig.id}
           rig={rig}
           psEntry={psMap.get(rig.id)}
-          onSelect={(rigId) => navigate({ to: "/rigs/$rigId", params: { rigId } })}
+          onSelect={(rigId) => {
+            setSelection({ type: "rig", rigId });
+            navigate({ to: "/rigs/$rigId", params: { rigId } });
+          }}
           onExport={() => handleExport(rig.id)}
           onActionError={setActionError}
           onDown={() => { setTeardownError(null); setConfirmDown(rig.id); }}

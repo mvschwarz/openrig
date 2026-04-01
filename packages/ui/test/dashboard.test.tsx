@@ -1,3 +1,4 @@
+import React from "react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, waitFor, cleanup, fireEvent, act } from "@testing-library/react";
 import { createMockEventSourceClass } from "./helpers/mock-event-source.js";
@@ -133,6 +134,38 @@ describe("Dashboard", () => {
 
     await waitFor(() => {
       expect(screen.getByTestId("rig-detail")).toBeDefined();
+    });
+  });
+
+  // Test PNS-T09: Card click sets rig drawer selection
+  it("card click triggers rig drawer selection", async () => {
+    setupSummaryMock([{ id: "r1", name: "alpha", nodeCount: 1, latestSnapshotAt: null, latestSnapshotId: null }]);
+    const { DrawerSelectionContext } = await import("../src/components/AppShell.js");
+    const setSelectionSpy = vi.fn();
+
+    function SelectionWrapper({ children }: { children: React.ReactNode }) {
+      return (
+        <DrawerSelectionContext.Provider value={{ selection: null, setSelection: setSelectionSpy }}>
+          {children}
+        </DrawerSelectionContext.Provider>
+      );
+    }
+
+    render(createAppTestRouter({
+      routes: [
+        { path: "/", component: Dashboard },
+        { path: "/rigs/$rigId", component: () => <div data-testid="rig-route">graph</div> },
+      ],
+      rootComponent: ({ children }) => <SelectionWrapper>{children}</SelectionWrapper>,
+    }));
+
+    await waitFor(() => expect(screen.getByText("alpha")).toBeDefined());
+
+    const card = screen.getByTestId("rig-card-r1");
+    fireEvent.click(card);
+
+    await waitFor(() => {
+      expect(setSelectionSpy).toHaveBeenCalledWith({ type: "rig", rigId: "r1" });
     });
   });
 
