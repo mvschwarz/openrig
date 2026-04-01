@@ -41,14 +41,15 @@ describe("MCP Server", () => {
     if (cleanup) await cleanup();
   });
 
-  // T1: MCP server lists all 13 tools
-  it("lists all 13 tools", async () => {
+  // T1: MCP server lists all 15 tools
+  it("lists all 15 tools", async () => {
     await setup();
     const result = await mcpClient.listTools();
     const names = result.tools.map((t) => t.name).sort();
     expect(names).toEqual([
       "rigged_agent_validate",
       "rigged_bundle_inspect",
+      "rigged_capture",
       "rigged_claim",
       "rigged_discover",
       "rigged_down",
@@ -56,6 +57,7 @@ describe("MCP Server", () => {
       "rigged_restore",
       "rigged_rig_nodes",
       "rigged_rig_validate",
+      "rigged_send",
       "rigged_snapshot_create",
       "rigged_snapshot_list",
       "rigged_status",
@@ -198,7 +200,7 @@ describe("MCP Server", () => {
 
     // Verify server is responsive
     const result = await mcpClient.listTools();
-    expect(result.tools.length).toBe(13);
+    expect(result.tools.length).toBe(15);
 
     // Clean disconnect
     await cleanup();
@@ -212,7 +214,7 @@ describe("MCP Server", () => {
     await client2.connect(ct2);
 
     const result2 = await client2.listTools();
-    expect(result2.tools.length).toBe(13);
+    expect(result2.tools.length).toBe(15);
 
     await client2.close();
     await server2.close();
@@ -323,6 +325,48 @@ describe("MCP Server", () => {
     const parsed = JSON.parse((result.content as Array<{ text: string }>)[0]!.text);
     expect(Array.isArray(parsed)).toBe(true);
     expect(parsed[0].nodeKind).toBe("agent");
+    await cleanup();
+  });
+
+  // T14: rigged_send returns structured result
+  it("rigged_send returns structured result", async () => {
+    const postFn = vi.fn(async () => ({
+      status: 200,
+      data: { ok: true, sessionName: "dev-impl@my-rig" },
+    }));
+    await setup({ post: postFn });
+
+    const result = await mcpClient.callTool({
+      name: "rigged_send",
+      arguments: { session: "dev-impl@my-rig", text: "hello" },
+    });
+
+    expect(postFn).toHaveBeenCalled();
+    expect(result.isError).toBeUndefined();
+    const parsed = JSON.parse((result.content as Array<{ text: string }>)[0]!.text);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.sessionName).toBe("dev-impl@my-rig");
+    await cleanup();
+  });
+
+  // T15: rigged_capture returns structured result
+  it("rigged_capture returns structured result", async () => {
+    const postFn = vi.fn(async () => ({
+      status: 200,
+      data: { ok: true, sessionName: "dev-impl@my-rig", content: "pane output", lines: 20 },
+    }));
+    await setup({ post: postFn });
+
+    const result = await mcpClient.callTool({
+      name: "rigged_capture",
+      arguments: { session: "dev-impl@my-rig" },
+    });
+
+    expect(postFn).toHaveBeenCalled();
+    expect(result.isError).toBeUndefined();
+    const parsed = JSON.parse((result.content as Array<{ text: string }>)[0]!.text);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.content).toBe("pane output");
     await cleanup();
   });
 });

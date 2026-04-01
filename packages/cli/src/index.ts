@@ -20,6 +20,9 @@ import { mcpCommand } from "./commands/mcp.js";
 import { agentCommand, type AgentDeps } from "./commands/agent.js";
 import { rigCommand, type RigDeps } from "./commands/rig.js";
 import { transcriptCommand } from "./commands/transcript.js";
+import { sendCommand } from "./commands/send.js";
+import { captureCommand } from "./commands/capture.js";
+import { broadcastCommand } from "./commands/broadcast.js";
 import type { LifecycleDeps } from "./daemon-lifecycle.js";
 
 export interface ProgramDeps {
@@ -43,6 +46,9 @@ export interface ProgramDeps {
   agentDeps?: AgentDeps;
   rigDeps?: RigDeps;
   transcriptDeps?: StatusDeps;
+  sendDeps?: StatusDeps;
+  captureDeps?: StatusDeps;
+  broadcastDeps?: StatusDeps;
 }
 
 export function createProgram(depsOverride?: ProgramDeps): Command {
@@ -73,6 +79,9 @@ export function createProgram(depsOverride?: ProgramDeps): Command {
   program.addCommand(agentCommand(depsOverride?.agentDeps));
   program.addCommand(rigCommand(depsOverride?.rigDeps));
   program.addCommand(transcriptCommand(depsOverride?.transcriptDeps));
+  program.addCommand(sendCommand(depsOverride?.sendDeps));
+  program.addCommand(captureCommand(depsOverride?.captureDeps));
+  program.addCommand(broadcastCommand(depsOverride?.broadcastDeps));
 
   return program;
 }

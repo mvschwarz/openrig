@@ -1,0 +1,126 @@
+import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
+import http from "node:http";
+import { Command } from "commander";
+import { sendCommand } from "../src/commands/send.js";
+import { DaemonClient } from "../src/client.js";
+import { STATE_FILE, type LifecycleDeps, type DaemonState } from "../src/daemon-lifecycle.js";
+import type { StatusDeps } from "../src/commands/status.js";
+
+function mockLifecycleDeps(): LifecycleDeps {
+  return {
+    spawn: vi.fn(() => ({ pid: 1, unref: vi.fn() }) as never),
+    fetch: vi.fn(async () => ({ ok: true })),
+    kill: vi.fn(() => true),
+    readFile: vi.fn(() => null),
+    writeFile: vi.fn(),
+    removeFile: vi.fn(),
+    exists: vi.fn(() => false),
+    mkdirp: vi.fn(),
+    openForAppend: vi.fn(() => 3),
+    isProcessAlive: vi.fn(() => true),
+  };
+}
+
+function captureLogs(fn: () => Promise<void>): Promise<{ logs: string[]; exitCode: number | undefined }> {
+  return new Promise(async (resolve) => {
+    const logs: string[] = [];
+    const origLog = console.log;
+    const origErr = console.error;
+    const origExitCode = process.exitCode;
+    process.exitCode = undefined;
+    console.log = (...args: unknown[]) => logs.push(args.join(" "));
+    console.error = (...args: unknown[]) => logs.push(args.join(" "));
+    try { await fn(); } finally { console.log = origLog; console.error = origErr; }
+    const exitCode = process.exitCode;
+    process.exitCode = origExitCode;
+    resolve({ logs, exitCode });
+  });
+}
+
+function runningDeps(port: number): StatusDeps {
+  return {
+    lifecycleDeps: {
+      ...mockLifecycleDeps(),
+      exists: vi.fn((p: string) => p === STATE_FILE),
+      readFile: vi.fn((p: string) => {
+        if (p === STATE_FILE) return JSON.stringify({ pid: 123, port, db: "test.sqlite", startedAt: "2026-04-01T00:00:00Z" } as DaemonState);
+        return null;
+      }),
+      fetch: vi.fn(async () => ({ ok: true })),
+    },
+    clientFactory: (baseUrl) => new DaemonClient(baseUrl),
+  };
+}
+
+describe("Send CLI", () => {
+  let server: http.Server;
+  let port: number;
+
+  beforeAll(async () => {
+    server = http.createServer((req, res) => {
+      const url = decodeURIComponent(req.url ?? "");
+      let body = "";
+      req.on("data", (chunk: Buffer) => { body += chunk; });
+      req.on("end", () => {
+        if (req.method === "POST" && url === "/api/transport/send") {
+          const parsed = JSON.parse(body);
+          if (parsed.session === "dev-impl@my-rig") {
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ ok: true, sessionName: "dev-impl@my-rig" }));
+          } else if (parsed.session === "busy-session") {
+            res.writeHead(409, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ ok: false, sessionName: "busy-session", reason: "mid_work", error: "Target pane appears mid-task. Use force: true to send anyway." }));
+          } else {
+            res.writeHead(404, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ ok: false, error: "not found" }));
+          }
+        } else {
+          res.writeHead(404).end();
+        }
+      });
+    });
+    await new Promise<void>((resolve) => { server.listen(0, resolve); });
+    port = (server.address() as { port: number }).port;
+  });
+
+  afterAll(() => { server.close(); });
+
+  function makeCmd(): Command {
+    const prog = new Command();
+    prog.exitOverride();
+    prog.addCommand(sendCommand(runningDeps(port)));
+    return prog;
+  }
+
+  it("send prints success output", async () => {
+    const { logs } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rigged", "send", "dev-impl@my-rig", "hello world"]);
+    });
+    expect(logs.join("\n")).toContain("Sent to dev-impl@my-rig");
+  });
+
+  it("send with 409 mid-work prints error and exits non-zero", async () => {
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rigged", "send", "busy-session", "hello"]);
+    });
+    expect(logs.join("\n")).toContain("mid-task");
+    expect(exitCode).toBe(1);
+  });
+
+  it("send --json prints raw JSON", async () => {
+    const { logs } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rigged", "send", "dev-impl@my-rig", "hello", "--json"]);
+    });
+    const parsed = JSON.parse(logs.join("\n"));
+    expect(parsed.ok).toBe(true);
+    expect(parsed.sessionName).toBe("dev-impl@my-rig");
+  });
+
+  it("send --help includes rediscovery examples", () => {
+    const cmd = sendCommand(runningDeps(port));
+    const helpText = cmd.helpInformation();
+    expect(helpText).toContain("--verify");
+    expect(helpText).toContain("--force");
+    expect(helpText).toContain("dev-impl@my-rig");
+  });
+});

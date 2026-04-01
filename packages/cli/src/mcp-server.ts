@@ -286,5 +286,50 @@ export function createMcpServer(client: DaemonClient): McpServer {
     },
   );
 
+  // 14. rigged_send — send message to agent session
+  server.tool(
+    "rigged_send",
+    "Send a message to an agent's terminal using reliable two-step send",
+    {
+      session: z.string().describe("Target session name (e.g. dev-impl@my-rig)"),
+      text: z.string().describe("Message text to send"),
+      verify: z.boolean().optional().describe("Verify delivery by checking pane content"),
+      force: z.boolean().optional().describe("Send even if target appears mid-task"),
+    },
+    async ({ session, text, verify, force }) => {
+      try {
+        const res = await client.post("/api/transport/send", { session, text, verify, force });
+        return mapResult(res);
+      } catch (err) {
+        return { content: [{ type: "text" as const, text: (err as Error).message }], isError: true as const };
+      }
+    },
+  );
+
+  // 15. rigged_capture — capture terminal output from agent session
+  server.tool(
+    "rigged_capture",
+    "Capture terminal output from an agent session",
+    {
+      session: z.string().optional().describe("Session name (omit for multi-target with rig/pod)"),
+      rig: z.string().optional().describe("Capture all sessions in a rig"),
+      pod: z.string().optional().describe("Capture all sessions in a pod"),
+      lines: z.number().optional().describe("Number of lines to capture (default: 20)"),
+    },
+    async ({ session, rig, pod, lines }) => {
+      try {
+        const body: Record<string, unknown> = {};
+        if (session) body.session = session;
+        if (rig) body.rig = rig;
+        if (pod) body.pod = pod;
+        if (lines) body.lines = lines;
+        const res = await client.post("/api/transport/capture", body);
+        return mapResult(res);
+      } catch (err) {
+        return { content: [{ type: "text" as const, text: (err as Error).message }], isError: true as const };
+      }
+    },
+  );
+
   return server;
 }

@@ -102,7 +102,7 @@ export function transportRoutes(): Hono {
       ? { pod: body.pod, rig: body.rig }
       : body.rig
         ? { rig: body.rig }
-        : { rig: "" }; // Will fail in resolution with clear error
+        : { global: true };
 
     const result = await transport.broadcast(target, body.text, {
       verify: body.verify,

@@ -238,7 +238,23 @@ describe("SessionTransport", () => {
     }
   });
 
-  // Test 12: resolveSessions by pod filters by logicalId prefix
+  // Test 12: resolveSessions global returns all running sessions across all rigs
+  it("resolveSessions global returns all running sessions across all rigs", async () => {
+    seedCanonicalRig(); // rig "my-rig" with dev-impl@my-rig
+    seedLegacyRig();    // rig "r00-legacy" with r00-legacy-worker-a
+    const transport = createTransport();
+
+    const result = await transport.resolveSessions({ global: true });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.sessions.length).toBe(2);
+      const names = result.sessions.map((s) => s.sessionName).sort();
+      expect(names).toContain("dev-impl@my-rig");
+      expect(names).toContain("r00-legacy-worker-a");
+    }
+  });
+
+  // Test 13: resolveSessions by pod filters by logicalId prefix
   it("resolveSessions by pod filters by logicalId prefix", async () => {
     const rig = rigRepo.createRig("multi-rig");
     // dev pod

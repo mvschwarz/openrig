@@ -24,7 +24,8 @@ function delay(ms: number): Promise<void> {
 export type TargetSpec =
   | { session: string }
   | { rig: string }
-  | { pod: string; rig?: string };
+  | { pod: string; rig?: string }
+  | { global: true };
 
 export type ResolveResult =
   | { ok: true; sessions: Array<{ sessionName: string; rigName: string; nodeLogicalId: string }> }
@@ -89,7 +90,42 @@ export class SessionTransport {
     if ("pod" in target) {
       return this.resolveByPod(target.pod, target.rig);
     }
+    if ("global" in target) {
+      return this.resolveGlobal();
+    }
     return this.resolveByRig(target.rig);
+  }
+
+  private resolveGlobal(): ResolveResult {
+    const allRigs = this.rigRepo.listRigs();
+    if (allRigs.length === 0) {
+      return { ok: false, code: "not_found", error: "No rigs found. Check status with: rigged ps" };
+    }
+    const sessions: Array<{ sessionName: string; rigName: string; nodeLogicalId: string }> = [];
+    const seenRigIds = new Set<string>();
+    for (const rig of allRigs) {
+      if (seenRigIds.has(rig.id)) continue;
+      seenRigIds.add(rig.id);
+      const rigSessions = this.sessionRegistry.getSessionsForRig(rig.id);
+      const latestByNode = new Map<string, typeof rigSessions[0]>();
+      for (const s of rigSessions) {
+        const existing = latestByNode.get(s.nodeId);
+        if (!existing || s.id > existing.id) latestByNode.set(s.nodeId, s);
+      }
+      for (const s of latestByNode.values()) {
+        if (s.status !== "running") continue;
+        const binding = this.sessionRegistry.getBindingForNode(s.nodeId);
+        if (!binding?.tmuxSession) continue;
+        const nodeRow = this.db
+          .prepare("SELECT logical_id FROM nodes WHERE id = ?")
+          .get(s.nodeId) as { logical_id: string } | undefined;
+        sessions.push({ sessionName: s.sessionName, rigName: rig.name, nodeLogicalId: nodeRow?.logical_id ?? s.nodeId });
+      }
+    }
+    if (sessions.length === 0) {
+      return { ok: false, code: "not_found", error: "No running sessions found. Check status with: rigged ps" };
+    }
+    return { ok: true, sessions };
   }
 
   private resolveBySessionName(sessionName: string): ResolveResult {

@@ -159,6 +159,23 @@ describe("transport routes", () => {
     expect(body.results.every((r: { ok: boolean }) => r.ok)).toBe(true);
   });
 
+  it("POST /broadcast without rig/pod broadcasts globally to all running sessions", async () => {
+    seedRig(); // creates my-rig with dev-impl@my-rig and dev-qa@my-rig
+    const tmux = mockTmux();
+    const transport = new SessionTransport({ db, rigRepo, sessionRegistry, tmuxAdapter: tmux });
+    const app = createApp({ sessionTransport: transport });
+
+    const res = await app.request("/api/transport/broadcast", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: "global message", force: true }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.total).toBe(2);
+    expect(body.sent).toBe(2);
+  });
+
   it("POST /broadcast with partial failure returns honest per-target outcomes", async () => {
     seedRig();
     let callCount = 0;
