@@ -10,7 +10,7 @@ import { queryClient } from "./lib/query-client.js";
 import { AppShell } from "./components/AppShell.js";
 import { Dashboard } from "./components/Dashboard.js";
 import { RigGraph } from "./components/RigGraph.js";
-import { SnapshotPanel } from "./components/SnapshotPanel.js";
+import { shortId } from "./lib/display-id.js";
 import { ImportFlow } from "./components/ImportFlow.js";
 import { PackageList } from "./components/PackageList.js";
 import { PackageInstallFlow } from "./components/PackageInstallFlow.js";
@@ -61,15 +61,12 @@ function RigDetail() {
           &larr; RIGS
         </Link>
         <span className="text-foreground/20">/</span>
-        <span className="text-label-lg font-bold uppercase">{rigName ?? rigId.slice(0, 8)}</span>
+        <span className="text-label-lg font-bold uppercase">{rigName ?? shortId(rigId, 8)}</span>
       </div>
 
-      {/* Graph + Snapshots: side-by-side on wide, stacked on narrow */}
-      <div className="flex flex-col lg:flex-row flex-1 min-h-0">
-        <div className="flex-1 min-h-[400px] relative">
-          <RigGraph rigId={rigId} showDiscovered={false} />
-        </div>
-        <SnapshotPanel rigId={rigId} />
+      {/* Graph fills the full width — snapshots are in the rig drawer */}
+      <div className="flex-1 min-h-[400px] relative">
+        <RigGraph rigId={rigId} showDiscovered={false} />
       </div>
     </div>
   );

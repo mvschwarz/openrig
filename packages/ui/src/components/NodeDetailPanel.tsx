@@ -1,4 +1,5 @@
 import { useNodeDetail } from "../hooks/useNodeDetail.js";
+import { getRestoreStatusColorClass } from "../lib/restore-status-colors.js";
 
 interface NodeDetailPanelProps {
   rigId: string;
@@ -72,10 +73,30 @@ export function NodeDetailPanel({ rigId, logicalId, onClose }: NodeDetailPanelPr
                 <span className="text-stone-500">Startup</span>
                 <span className={statusColor(data.startupStatus)} data-testid="detail-startup-status">{data.startupStatus ?? "stopped"}</span>
               </div>
-              <div className="flex justify-between"><span className="text-stone-500">Restore</span><span className="text-stone-900">{data.restoreOutcome}</span></div>
-              {data.latestError && (
-                <div className="mt-1 p-2 bg-red-50 border border-red-200 font-mono text-[9px] text-red-700" data-testid="detail-error">
-                  {data.latestError}
+              {/* Restore outcome — prominent */}
+              <div className="flex justify-between items-center">
+                <span className="text-stone-500">Restore</span>
+                <span
+                  className={`font-bold text-xs ${getRestoreStatusColorClass(data.restoreOutcome)}`}
+                  data-testid="detail-restore-outcome"
+                >
+                  {data.restoreOutcome}
+                </span>
+              </div>
+              {/* Failure banner with actionable guidance */}
+              {(data.startupStatus === "failed" || data.latestError) && (
+                <div className="mt-2 p-2 bg-red-50 border border-red-200" data-testid="detail-failure-banner">
+                  <div className="font-mono text-[9px] text-red-700 font-bold mb-1">
+                    {data.startupStatus === "failed" ? "Startup Failed" : "Error"}
+                  </div>
+                  {data.latestError && (
+                    <div className="font-mono text-[9px] text-red-600 mb-1">{data.latestError}</div>
+                  )}
+                  <div className="font-mono text-[8px] text-stone-500">
+                    {data.startupStatus === "failed"
+                      ? "Check logs with: rigged ps --nodes, or restart with: rigged up"
+                      : "Try: rigged restore <snapshotId>"}
+                  </div>
                 </div>
               )}
             </div>

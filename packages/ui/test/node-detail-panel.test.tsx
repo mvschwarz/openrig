@@ -137,8 +137,30 @@ describe("NodeDetailPanel", () => {
     mockDetail(FAILED_DETAIL);
     renderPanel();
     await waitFor(() => {
-      expect(screen.getByTestId("detail-error")).toBeDefined();
+      expect(screen.getByTestId("detail-failure-banner")).toBeDefined();
       expect(screen.getByText("harness launch timeout after 30s")).toBeDefined();
+    });
+  });
+
+  // Test PNS-T10: restoreOutcome is prominently displayed
+  it("shows restoreOutcome prominently with color class", async () => {
+    mockDetail({ ...AGENT_DETAIL, restoreOutcome: "resumed" });
+    renderPanel();
+    await waitFor(() => {
+      const el = screen.getByTestId("detail-restore-outcome");
+      expect(el).toBeDefined();
+      expect(el.textContent).toBe("resumed");
+      expect(el.className).toContain("text-success");
+    });
+  });
+
+  // Test PNS-T10: failure banner includes actionable guidance
+  it("failure banner includes actionable next-step guidance", async () => {
+    mockDetail(FAILED_DETAIL);
+    renderPanel();
+    await waitFor(() => {
+      const banner = screen.getByTestId("detail-failure-banner");
+      expect(banner.textContent).toContain("rigged ps");
     });
   });
 

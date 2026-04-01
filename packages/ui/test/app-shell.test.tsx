@@ -106,13 +106,16 @@ describe("App Shell + Routing", () => {
     });
   });
 
-  it("/rigs/:rigId renders SnapshotPanel with correct rigId", async () => {
+  it("/rigs/:rigId renders without standalone SnapshotPanel", async () => {
     mockAllApis();
     await renderRealAppAt("/rigs/r1");
 
+    // Wait for route to render
     await waitFor(() => {
-      expect(screen.getByTestId("snapshot-panel")).toBeDefined();
+      expect(screen.getByTestId("content-area")).toBeDefined();
     });
+    // SnapshotPanel should NOT be in the route (moved to rig drawer)
+    expect(screen.queryByTestId("snapshot-panel")).toBeNull();
   });
 
   it("/import renders import flow", async () => {
@@ -161,12 +164,13 @@ describe("App Shell + Routing", () => {
     });
   });
 
-  it("rig detail route mounts SnapshotPanel alongside graph", async () => {
+  it("rig detail route renders full-width without snapshot panel", async () => {
     mockAllApis();
     await renderRealAppAt("/rigs/r1");
 
     await waitFor(() => {
-      expect(screen.getByTestId("snapshot-panel")).toBeDefined();
+      expect(screen.getByTestId("content-area")).toBeDefined();
     });
+    expect(screen.queryByTestId("snapshot-panel")).toBeNull();
   });
 });
