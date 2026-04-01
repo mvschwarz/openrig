@@ -496,6 +496,7 @@ export class RestoreOrchestrator {
           try {
             const { StartupOrchestrator } = await import("./startup-orchestrator.js");
             const startupOrch = new StartupOrchestrator({ db: this.db, sessionRegistry: this.sessionRegistry, eventBus: this.eventBus, tmuxAdapter: this.tmuxAdapter });
+            const replayAsRestore = baseStatus !== "fresh";
             const startupResult = await startupOrch.startNode({
               rigId,
               nodeId: node.id,
@@ -505,7 +506,7 @@ export class RestoreOrchestrator {
               plan,
               resolvedStartupFiles: filteredFiles,
               startupActions: startupCtx.startupActions,
-              isRestore: true,
+              isRestore: replayAsRestore,
               skipHarnessLaunch: !isPodAware, // Pod-aware: use launchHarness with resumeToken. Legacy: old helpers already handled.
               resumeToken: (isPodAware && resumeRequested) ? resumeToken ?? undefined : undefined,
               sessionName: sessionName,

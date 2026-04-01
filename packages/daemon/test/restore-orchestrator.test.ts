@@ -1015,6 +1015,57 @@ describe("RestoreOrchestrator", () => {
     }
   });
 
+  it("fallback fresh launch during restore replays fresh_start startup actions", async () => {
+    const rig = rigRepo.createRig("test-rig");
+    db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-4", rig.id, "Infra");
+    const node = rigRepo.addNode(rig.id, "infra.ui", { runtime: "builtin:terminal", podId: "pod-4", cwd: "." });
+    const session = sessionRegistry.registerSession(node.id, "infra-ui@test-rig");
+    sessionRegistry.updateStatus(session.id, "running");
+    db.prepare(
+      "INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, ?, ?, ?)"
+    ).run(
+      node.id,
+      "[]",
+      "[]",
+      JSON.stringify([
+        {
+          type: "send_text",
+          value: "npm run dev",
+          phase: "after_ready",
+          appliesOn: ["fresh_start"],
+          idempotent: false,
+        },
+      ]),
+      "builtin:terminal",
+    );
+    const snap = snapshotCapture.captureSnapshot(rig.id, "test");
+    sessionRegistry.updateStatus(session.id, "exited");
+    db.prepare("DELETE FROM bindings WHERE node_id = ?").run(node.id);
+
+    const tmux = mockTmux({
+      sendText: vi.fn(async () => ({ ok: true as const })),
+      sendKeys: vi.fn(async () => ({ ok: true as const })),
+    });
+    const mockAdapter = {
+      runtime: "builtin:terminal",
+      listInstalled: vi.fn(async () => []),
+      project: vi.fn(async () => ({ projected: [], skipped: [], failed: [] })),
+      deliverStartup: vi.fn(async () => ({ delivered: 0, failed: [] })),
+      checkReady: vi.fn(async () => ({ ready: true })),
+      launchHarness: vi.fn(async () => ({ ok: true as const })),
+    };
+
+    const orch = createOrchestrator({ tmux });
+    const result = await orch.restore(snap.id, { adapters: { "builtin:terminal": mockAdapter } });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      const nodeResult = result.result.nodes.find((n) => n.nodeId === node.id);
+      expect(nodeResult!.status).toBe("fresh");
+      expect(tmux.sendText).toHaveBeenCalledWith("infra-ui@test-rig", "npm run dev");
+    }
+  });
+
   it("restore propagates launch warnings and writes transcript boundary marker with snapshot ID", async () => {
     const snap = seedRigAndSnapshot();
 
