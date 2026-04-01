@@ -15,3 +15,6 @@ docs/*
 *.sqlite-shm
 *.sqlite-wal
 *.sqlite.pre-reboot-backup
+
+# Local demo proof artifacts
+demo/proof/

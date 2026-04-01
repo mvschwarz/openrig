@@ -389,6 +389,20 @@ describe("StartupOrchestrator", () => {
     expect(session!.resumeType).toBe("claude_id");
   });
 
+  it("launchHarness does not persist empty resume token as restoreable state", async () => {
+    const seed = seedSession();
+    const adapter = mockAdapter({
+      launchHarness: vi.fn(async () => ({ ok: true as const, resumeToken: "", resumeType: "claude_id" })),
+    });
+    const orch = createOrchestrator();
+    await orch.startNode(makeInput(seed, { adapter }));
+
+    const sessions = sessionRegistry.getSessionsForRig(seed.rigId);
+    const session = sessions.find((s) => s.id === seed.sessionId);
+    expect(session!.resumeToken).toBeNull();
+    expect(session!.resumeType).toBeNull();
+  });
+
   // NS-T05: readiness retry loop
   it("readiness retries until ready", async () => {
     const seed = seedSession();

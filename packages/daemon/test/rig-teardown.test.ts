@@ -152,6 +152,22 @@ describe("RigTeardownOrchestrator", () => {
     expect(result.snapshotId).toBe("snap-1");
   });
 
+  it("refreshes resume metadata before snapshot capture", async () => {
+    const { rigId } = seedRig();
+    const refresh = vi.fn(async () => {});
+    const td = new RigTeardownOrchestrator({
+      db, rigRepo, sessionRegistry,
+      tmuxAdapter: mockTmux(),
+      snapshotCapture: mockSnapshotCapture(db),
+      eventBus,
+      resumeMetadataRefresher: { refresh } as unknown as import("../src/domain/resume-metadata-refresher.js").ResumeMetadataRefresher,
+    });
+
+    await td.teardown(rigId);
+
+    expect(refresh).toHaveBeenCalledTimes(1);
+  });
+
   // T7: --force (same as default in v1)
   it("--force kills sessions", async () => {
     const { rigId } = seedRig();

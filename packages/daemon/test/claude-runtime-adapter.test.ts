@@ -147,13 +147,24 @@ describe("Claude Code runtime adapter", () => {
   // NS-T04: launchHarness tests
   it("launchHarness sends correct fresh launch command", async () => {
     const tmux = mockTmux();
-    const adapter = new ClaudeCodeAdapter({ tmux, fsOps: mockFs() });
+    const adapter = new ClaudeCodeAdapter({
+      tmux,
+      fsOps: mockFs(),
+      sessionIdFactory: () => "11111111-1111-4111-8111-111111111111",
+    });
 
     const result = await adapter.launchHarness(makeBinding(), { name: "dev-impl@test-rig" });
 
     expect(result.ok).toBe(true);
     const sendText = tmux.sendText as ReturnType<typeof vi.fn>;
-    expect(sendText).toHaveBeenCalledWith("r01-impl", "claude --name dev-impl@test-rig");
+    expect(sendText).toHaveBeenCalledWith(
+      "r01-impl",
+      "claude --session-id 11111111-1111-4111-8111-111111111111 --name dev-impl@test-rig"
+    );
+    if (result.ok) {
+      expect(result.resumeToken).toBe("11111111-1111-4111-8111-111111111111");
+      expect(result.resumeType).toBe("claude_id");
+    }
   });
 
   it("launchHarness sends correct resume command with token", async () => {

@@ -94,9 +94,11 @@ export class NodeLauncher {
 
     // 4. DB transaction: session + binding + event (atomic)
     let persistedEvent: PersistedEvent;
+    let createdSessionId: string | null = null;
     try {
       const txn = this.db.transaction(() => {
         const session = this.sessionRegistry.registerSession(node.id, sessionName);
+        createdSessionId = session.id;
         this.sessionRegistry.updateStatus(session.id, "running");
         this.sessionRegistry.updateBinding(node.id, { tmuxSession: sessionName });
         return this.eventBus.persistWithinTransaction({
@@ -123,7 +125,7 @@ export class NodeLauncher {
 
     // 6. Fetch the created session + binding for the caller
     const sessions = this.sessionRegistry.getSessionsForRig(rigId);
-    const session = sessions.find((s) => s.nodeId === node.id);
+    const session = sessions.find((s) => s.id === createdSessionId);
     const binding = this.sessionRegistry.getBindingForNode(node.id);
 
     return {

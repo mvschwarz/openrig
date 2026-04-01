@@ -1,7 +1,10 @@
+import fs from "node:fs";
+import os from "node:os";
+import nodePath from "node:path";
+import Database from "better-sqlite3";
 import { describe, it, expect, vi } from "vitest";
 import { CodexRuntimeAdapter, type CodexAdapterFsOps } from "../src/adapters/codex-runtime-adapter.js";
 import type { NodeBinding, ResolvedStartupFile } from "../src/domain/runtime-adapter.js";
-import type { ProjectionPlan, ProjectionEntry } from "../src/domain/projection-planner.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 
 function mockTmux(overrides?: Partial<TmuxAdapter>): TmuxAdapter {
@@ -14,6 +17,7 @@ function mockTmux(overrides?: Partial<TmuxAdapter>): TmuxAdapter {
     listWindows: vi.fn(async () => []),
     listPanes: vi.fn(async () => []),
     sendKeys: vi.fn(async () => ({ ok: true as const })),
+    getPanePid: vi.fn(async () => null),
     ...overrides,
   } as unknown as TmuxAdapter;
 }
@@ -35,6 +39,33 @@ function makeBinding(cwd = "/project"): NodeBinding {
     id: "b1", nodeId: "n1", tmuxSession: "r01-qa", tmuxWindow: null, tmuxPane: null,
     cmuxWorkspace: null, cmuxSurface: null, updatedAt: "", cwd,
   };
+}
+
+function createCodexLogsDb(homeDir: string, pid: number, threadId: string): void {
+  const codexDir = nodePath.join(homeDir, ".codex");
+  fs.mkdirSync(codexDir, { recursive: true });
+  const db = new Database(nodePath.join(codexDir, "logs_1.sqlite"));
+  try {
+    db.exec(`
+      CREATE TABLE logs (
+        id INTEGER PRIMARY KEY,
+        ts INTEGER NOT NULL,
+        ts_nanos INTEGER NOT NULL,
+        process_uuid TEXT NOT NULL,
+        thread_id TEXT
+      );
+    `);
+    db.prepare(
+      "INSERT INTO logs (ts, ts_nanos, process_uuid, thread_id) VALUES (?, ?, ?, ?)"
+    ).run(
+      1,
+      1,
+      `pid:${pid}:test-process`,
+      threadId
+    );
+  } finally {
+    db.close();
+  }
 }
 
 describe("Codex runtime adapter", () => {
@@ -120,13 +151,77 @@ describe("Codex runtime adapter", () => {
   // NS-T04: launchHarness tests
   it("launchHarness sends correct fresh launch command", async () => {
     const tmux = mockTmux();
-    const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs() });
+    const adapter = new CodexRuntimeAdapter({
+      tmux,
+      fsOps: mockFs(),
+      listProcesses: () => [],
+      sleep: async () => {},
+    });
 
     const result = await adapter.launchHarness(makeBinding(), { name: "dev-qa@test-rig" });
 
     expect(result.ok).toBe(true);
     const sendText = tmux.sendText as ReturnType<typeof vi.fn>;
     expect(sendText).toHaveBeenCalledWith("r01-qa", "codex");
+  });
+
+  it("launchHarness captures a fresh Codex thread id from the live child process", async () => {
+    const tmux = mockTmux({
+      getPanePid: vi.fn(async () => 900),
+    });
+    const adapter = new CodexRuntimeAdapter({
+      tmux,
+      fsOps: mockFs(),
+      listProcesses: () => [
+        { pid: 900, ppid: 1, command: "-zsh" },
+        { pid: 901, ppid: 900, command: "codex" },
+      ],
+      readThreadIdByPid: (pid) => pid === 901 ? "019d45bc-117d-78a3-a4ad-6fb186e5a86d" : undefined,
+      sleep: async () => {},
+    });
+
+    const result = await adapter.launchHarness(makeBinding(), { name: "dev-qa@test-rig" });
+
+    expect(result).toEqual({
+      ok: true,
+      resumeToken: "019d45bc-117d-78a3-a4ad-6fb186e5a86d",
+      resumeType: "codex_id",
+    });
+  });
+
+  it("launchHarness captures a fresh Codex thread id from the child process home directory", async () => {
+    const tempRoot = fs.mkdtempSync(nodePath.join(os.tmpdir(), "rigged-codex-home-"));
+    const actualHome = nodePath.join(tempRoot, "actual-home");
+    createCodexLogsDb(actualHome, 901, "019d45bc-117d-78a3-a4ad-6fb186e5a86d");
+
+    const tmux = mockTmux({
+      getPanePid: vi.fn(async () => 900),
+    });
+    const adapter = new CodexRuntimeAdapter({
+      tmux,
+      fsOps: {
+        readFile: (p: string) => fs.readFileSync(p, "utf-8"),
+        writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"),
+        exists: (p: string) => fs.existsSync(p),
+        mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }),
+        listFiles: (dir: string) => fs.readdirSync(dir),
+        homedir: "/wrong-home",
+      },
+      listProcesses: () => [
+        { pid: 900, ppid: 1, command: "-zsh" },
+        { pid: 901, ppid: 900, command: "codex" },
+      ],
+      resolveHomeDirByPid: (pid) => pid === 901 ? actualHome : undefined,
+      sleep: async () => {},
+    });
+
+    const result = await adapter.launchHarness(makeBinding(), { name: "dev-qa@test-rig" });
+
+    expect(result).toEqual({
+      ok: true,
+      resumeToken: "019d45bc-117d-78a3-a4ad-6fb186e5a86d",
+      resumeType: "codex_id",
+    });
   });
 
   it("launchHarness sends correct resume command", async () => {

@@ -308,6 +308,25 @@ describe("NodeLauncher", () => {
     expect(sessions[0]!.sessionName).toBe("r01-dev1-impl");
   });
 
+  it("returns the newly created session when older sessions already exist for the node", async () => {
+    const { rig, node } = seedRigWithNode();
+    const older = sessionRegistry.registerSession(node.id, "r01-dev1-impl");
+    sessionRegistry.updateStatus(older.id, "exited");
+
+    const launcher = createLauncher();
+    const result = await launcher.launchNode(rig.id, "dev1-impl");
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    expect(result.session.id).not.toBe(older.id);
+    expect(result.session.status).toBe("running");
+
+    const sessions = sessionRegistry.getSessionsForRig(rig.id).filter((s) => s.nodeId === node.id);
+    const newest = sessions.reduce((latest, session) => (session.id > latest.id ? session : latest));
+    expect(result.session.id).toBe(newest.id);
+  });
+
   it("exactly 1 event row and exactly 1 subscriber notification (no duplication)", async () => {
     const { rig } = seedRigWithNode();
     const notifications: PersistedEvent[] = [];

@@ -1,5 +1,5 @@
 import nodePath from "node:path";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { TmuxAdapter } from "./tmux.js";
 import type {
   RuntimeAdapter, NodeBinding, ResolvedStartupFile,
@@ -33,10 +33,12 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   readonly runtime = "claude-code";
   private tmux: TmuxAdapter;
   private fs: ClaudeAdapterFsOps;
+  private sessionIdFactory: () => string;
 
-  constructor(deps: { tmux: TmuxAdapter; fsOps: ClaudeAdapterFsOps }) {
+  constructor(deps: { tmux: TmuxAdapter; fsOps: ClaudeAdapterFsOps; sessionIdFactory?: () => string }) {
     this.tmux = deps.tmux;
     this.fs = deps.fsOps;
+    this.sessionIdFactory = deps.sessionIdFactory ?? randomUUID;
   }
 
   async listInstalled(binding: NodeBinding): Promise<InstalledResource[]> {
@@ -116,9 +118,10 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       return { ok: false, error: "No tmux session bound — cannot launch Claude Code harness" };
     }
 
+    const generatedSessionId = opts.resumeToken ? null : this.sessionIdFactory();
     const cmd = opts.resumeToken
       ? `claude --resume ${opts.resumeToken} --name ${opts.name}`
-      : `claude --name ${opts.name}`;
+      : `claude --session-id ${generatedSessionId} --name ${opts.name}`;
 
     const textResult = await this.tmux.sendText(binding.tmuxSession, cmd);
     if (!textResult.ok) {
@@ -130,11 +133,14 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       return { ok: false, error: `Failed to send Enter: ${enterResult.message}` };
     }
 
-    // Token capture: read ~/.claude/sessions/ and find the session by name
+    if (opts.resumeToken) {
+      return { ok: true, resumeToken: opts.resumeToken, resumeType: "claude_id" };
+    }
+
+    // Belt-and-suspenders: prefer an immediately discoverable persisted session,
+    // but fall back to the UUID we assigned explicitly at launch time.
     const token = this.captureResumeToken(opts.name);
-    return token
-      ? { ok: true, resumeToken: token, resumeType: "claude_id" }
-      : { ok: true, resumeType: "claude_id" }; // Best-effort — token may not be available yet
+    return { ok: true, resumeToken: token ?? generatedSessionId ?? undefined, resumeType: "claude_id" };
   }
 
   async checkReady(binding: NodeBinding): Promise<ReadinessResult> {

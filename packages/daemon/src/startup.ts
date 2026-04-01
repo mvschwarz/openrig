@@ -49,6 +49,7 @@ import { PodBundleSourceResolver } from "./domain/bundle-source-resolver.js";
 import { PsProjectionService } from "./domain/ps-projection.js";
 import { UpCommandRouter } from "./domain/up-command-router.js";
 import { RigTeardownOrchestrator } from "./domain/rig-teardown.js";
+import { ResumeMetadataRefresher } from "./domain/resume-metadata-refresher.js";
 import { createApp, type AppDeps } from "./server.js";
 import fs from "node:fs";
 import os from "node:os";
@@ -218,6 +219,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     scanner: tmuxScanner, fingerprinter: sessionFingerprinter, enricher: sessionEnricher,
     discoveryRepo, sessionRegistry, eventBus,
   });
+  const resumeMetadataRefresher = new ResumeMetadataRefresher({ sessionRegistry, tmuxAdapter });
   const claimService = new ClaimService({ db, rigRepo, sessionRegistry, discoveryRepo, eventBus });
 
   const deps: AppDeps = {
@@ -251,7 +253,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       },
     }),
     teardownOrchestrator: new RigTeardownOrchestrator({
-      db, rigRepo, sessionRegistry, tmuxAdapter, snapshotCapture, eventBus,
+      db, rigRepo, sessionRegistry, tmuxAdapter, snapshotCapture, eventBus, resumeMetadataRefresher,
     }),
     podInstantiator,
     podBundleSourceResolver,

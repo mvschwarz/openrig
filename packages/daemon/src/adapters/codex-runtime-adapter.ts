@@ -1,5 +1,8 @@
 import nodePath from "node:path";
 import { createHash } from "node:crypto";
+import os from "node:os";
+import { execFileSync } from "node:child_process";
+import Database from "better-sqlite3";
 import type { TmuxAdapter } from "./tmux.js";
 import type {
   RuntimeAdapter, NodeBinding, ResolvedStartupFile,
@@ -8,6 +11,11 @@ import type {
 } from "../domain/runtime-adapter.js";
 import { resolveConcreteHint } from "../domain/runtime-adapter.js";
 import type { ProjectionPlan, ProjectionEntry } from "../domain/projection-planner.js";
+import {
+  defaultResolveHomeDirByPid,
+  readCodexThreadIdFromCandidateHomes,
+  type ResolveHomeDirByPid,
+} from "../domain/codex-thread-id.js";
 
 export interface CodexAdapterFsOps {
   readFile(path: string): string;
@@ -15,6 +23,7 @@ export interface CodexAdapterFsOps {
   exists(path: string): boolean;
   mkdirp(path: string): void;
   listFiles?(dirPath: string): string[];
+  homedir?: string;
 }
 
 const MANAGED_BLOCK_START = (id: string) => `<!-- BEGIN RIGGED MANAGED BLOCK: ${id} -->`;
@@ -28,10 +37,25 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   readonly runtime = "codex";
   private tmux: TmuxAdapter;
   private fs: CodexAdapterFsOps;
+  private listProcesses: () => Array<{ pid: number; ppid: number; command: string }>;
+  private readThreadIdByPid: (pid: number) => string | undefined;
+  private sleep: (ms: number) => Promise<void>;
+  private resolveHomeDirByPid: ResolveHomeDirByPid;
 
-  constructor(deps: { tmux: TmuxAdapter; fsOps: CodexAdapterFsOps }) {
+  constructor(deps: {
+    tmux: TmuxAdapter;
+    fsOps: CodexAdapterFsOps;
+    listProcesses?: () => Array<{ pid: number; ppid: number; command: string }>;
+    readThreadIdByPid?: (pid: number) => string | undefined;
+    resolveHomeDirByPid?: ResolveHomeDirByPid;
+    sleep?: (ms: number) => Promise<void>;
+  }) {
     this.tmux = deps.tmux;
     this.fs = deps.fsOps;
+    this.listProcesses = deps.listProcesses ?? defaultListProcesses;
+    this.readThreadIdByPid = deps.readThreadIdByPid ?? ((pid) => this.readThreadIdFromLogs(pid));
+    this.resolveHomeDirByPid = deps.resolveHomeDirByPid ?? defaultResolveHomeDirByPid;
+    this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
   }
 
   async listInstalled(binding: NodeBinding): Promise<InstalledResource[]> {
@@ -124,8 +148,15 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       return { ok: false, error: `Failed to send Enter: ${enterResult.message}` };
     }
 
-    // Codex token: not available until first exchange (per spike).
-    // Fresh launch returns without token. Resume returns without new token.
+    if (opts.resumeToken) {
+      return { ok: true, resumeToken: opts.resumeToken, resumeType: "codex_id" };
+    }
+
+    const threadId = await this.captureFreshThreadId(binding);
+    if (threadId) {
+      return { ok: true, resumeToken: threadId, resumeType: "codex_id" };
+    }
+
     return { ok: true };
   }
 
@@ -201,6 +232,39 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   private detectDeliveryHint(path: string, content: string): "guidance_merge" | "skill_install" | "send_text" {
     return resolveConcreteHint(path, content);
   }
+
+  private async captureFreshThreadId(binding: NodeBinding): Promise<string | undefined> {
+    const target = binding.tmuxPane ?? binding.tmuxSession;
+    if (!target || !this.tmux.getPanePid) return undefined;
+
+    for (let attempt = 0; attempt < 20; attempt++) {
+      const shellPid = await this.tmux.getPanePid(target);
+      if (shellPid) {
+        const codexPid = this.findCodexChildPid(shellPid);
+        if (codexPid) {
+          const threadId = this.readThreadIdByPid(codexPid);
+          if (threadId) return threadId;
+        }
+      }
+      await this.sleep(250);
+    }
+
+    return undefined;
+  }
+
+  private findCodexChildPid(parentPid: number): number | undefined {
+    const processes = this.listProcesses();
+    const child = processes.find((proc) => proc.ppid === parentPid && commandLooksLikeCodex(proc.command));
+    return child?.pid;
+  }
+
+  private readThreadIdFromLogs(pid: number): string | undefined {
+    return readCodexThreadIdFromCandidateHomes(
+      pid,
+      [this.resolveHomeDirByPid(pid), this.fs.homedir, os.homedir()],
+      (path) => this.fs.exists(path)
+    );
+  }
 }
 
 function hashContent(content: string): string {
@@ -209,4 +273,32 @@ function hashContent(content: string): string {
 
 function escapeRegex(str: string): string {
   return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function defaultListProcesses(): Array<{ pid: number; ppid: number; command: string }> {
+  try {
+    const output = execFileSync("ps", ["-Ao", "pid,ppid,command"], { encoding: "utf-8" });
+    return output
+      .split("\n")
+      .slice(1)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => {
+        const match = line.match(/^(\d+)\s+(\d+)\s+(.*)$/);
+        if (!match) return null;
+        return {
+          pid: Number(match[1]),
+          ppid: Number(match[2]),
+          command: match[3] ?? "",
+        };
+      })
+      .filter((row): row is { pid: number; ppid: number; command: string } => row !== null);
+  } catch {
+    return [];
+  }
+}
+
+function commandLooksLikeCodex(command: string): boolean {
+  const trimmed = command.trim();
+  return trimmed === "codex" || trimmed.startsWith("codex ");
 }

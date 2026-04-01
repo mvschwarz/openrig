@@ -150,9 +150,10 @@ export class StartupOrchestrator {
           return this.fail(input, errors);
         }
         // Persist resume metadata if returned (either token or type)
-        if (launchResult.resumeToken || launchResult.resumeType) {
+        const normalizedResumeToken = launchResult.resumeToken?.trim();
+        if (normalizedResumeToken) {
           try {
-            this.sessionRegistry.updateResumeToken(input.sessionId, launchResult.resumeType ?? "", launchResult.resumeToken ?? "");
+            this.sessionRegistry.updateResumeToken(input.sessionId, launchResult.resumeType ?? "", normalizedResumeToken);
           } catch { /* best-effort */ }
         }
       } catch (err) {
