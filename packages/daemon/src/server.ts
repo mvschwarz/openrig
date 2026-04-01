@@ -38,6 +38,8 @@ import type { UpCommandRouter } from "./domain/up-command-router.js";
 import type { RigTeardownOrchestrator } from "./domain/rig-teardown.js";
 import { upRoutes } from "./routes/up.js";
 import { downRoutes } from "./routes/down.js";
+import type { TranscriptStore } from "./domain/transcript-store.js";
+import { transcriptRoutes } from "./routes/transcripts.js";
 
 export interface AppDeps {
   rigRepo: RigRepository;
@@ -67,6 +69,7 @@ export interface AppDeps {
   podInstantiator: PodRigInstantiator;
   podBundleSourceResolver: PodBundleSourceResolver | null;
   runtimeAdapters?: Record<string, import("./domain/runtime-adapter.js").RuntimeAdapter>;
+  transcriptStore?: TranscriptStore;
 }
 
 export function createApp(deps: AppDeps): Hono {
@@ -151,6 +154,8 @@ export function createApp(deps: AppDeps): Hono {
     c.set("podInstantiator" as never, deps.podInstantiator);
     c.set("podBundleSourceResolver" as never, deps.podBundleSourceResolver);
     c.set("runtimeAdapters" as never, deps.runtimeAdapters ?? {});
+    c.set("transcriptStore" as never, deps.transcriptStore);
+    c.set("db" as never, deps.rigRepo.db);
     await next();
   });
 
@@ -176,6 +181,7 @@ export function createApp(deps: AppDeps): Hono {
   app.route("/api/ps", psRoutes);
   app.route("/api/up", upRoutes);
   app.route("/api/down", downRoutes);
+  app.route("/api/transcripts", transcriptRoutes());
 
   return app;
 }
