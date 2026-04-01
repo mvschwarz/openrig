@@ -1,13 +1,15 @@
-/**
- * Client-side tree layout for React Flow graphs.
- * Takes the flat vertical column from the daemon and arranges
- * nodes in a hierarchical tree based on edge relationships.
- */
+import type { CSSProperties } from "react";
+import dagre from "dagre";
 
 interface LayoutNode {
   id: string;
+  type?: string;
+  parentId?: string;
   position: { x: number; y: number };
   data?: { logicalId?: string };
+  style?: CSSProperties;
+  initialWidth?: number;
+  initialHeight?: number;
   [key: string]: unknown;
 }
 
@@ -20,132 +22,289 @@ interface LayoutEdge {
   [key: string]: unknown;
 }
 
+interface LayoutEntity {
+  id: string;
+  kind: "group" | "standalone";
+  node: LayoutNode;
+  width: number;
+  height: number;
+  members: LayoutNode[];
+}
+
 const NODE_WIDTH = 240;
 const NODE_HEIGHT = 160;
-const H_SPACING = 300;
-const V_SPACING = 240;
+const MAX_POD_COLUMNS = 3;
+const POD_MEMBER_GAP_X = 36;
+const POD_MEMBER_GAP_Y = 32;
+const POD_PADDING_X = 28;
+const POD_PADDING_TOP = 52;
+const POD_PADDING_BOTTOM = 28;
+const ENTITY_GAP_X = 96;
+const ENTITY_GAP_Y = 150;
+const DISCONNECTED_ROW_COLUMNS = 2;
+const HIERARCHY_EDGE_KINDS = new Set(["delegates_to", "spawned_by"]);
 
 export function applyTreeLayout(
   nodes: LayoutNode[],
   edges: LayoutEdge[]
 ): LayoutNode[] {
-  if (nodes.length <= 1) return nodes;
-
-  // Build adjacency: parent → children (delegates_to, spawned_by edges)
-  const children = new Map<string, string[]>();
-  const hasParent = new Set<string>();
-
-  for (const edge of edges) {
-    const kind = edge.data?.kind ?? edge.label ?? "";
-    if (kind === "delegates_to" || kind === "spawned_by") {
-      if (!children.has(edge.source)) children.set(edge.source, []);
-      children.get(edge.source)!.push(edge.target);
-      hasParent.add(edge.target);
-    }
+  if (nodes.length <= 1) {
+    return nodes;
   }
 
-  // Find roots (nodes with no parent in the delegation tree)
-  const roots = nodes.filter((n) => !hasParent.has(n.id));
-  if (roots.length === 0) {
-    // Cycle or no hierarchy — fall back to grid
-    return applyGridLayout(nodes);
-  }
+  const groupedNodeIds = new Set(
+    nodes
+      .filter((node) => node.type === "group")
+      .map((node) => node.id)
+  );
 
-  // BFS to assign layers
-  const layer = new Map<string, number>();
-  const queue: string[] = [];
-
-  for (const root of roots) {
-    layer.set(root.id, 0);
-    queue.push(root.id);
-  }
-
-  while (queue.length > 0) {
-    const nodeId = queue.shift()!;
-    const currentLayer = layer.get(nodeId) ?? 0;
-    for (const childId of children.get(nodeId) ?? []) {
-      if (!layer.has(childId)) {
-        layer.set(childId, currentLayer + 1);
-        queue.push(childId);
-      }
-    }
-  }
-
-  // Assign any unvisited nodes
+  const membersByGroup = new Map<string, LayoutNode[]>();
   for (const node of nodes) {
-    if (!layer.has(node.id)) {
-      layer.set(node.id, 0);
+    if (typeof node.parentId !== "string" || !groupedNodeIds.has(node.parentId)) {
+      continue;
     }
+
+    if (!membersByGroup.has(node.parentId)) {
+      membersByGroup.set(node.parentId, []);
+    }
+    membersByGroup.get(node.parentId)!.push(node);
   }
 
-  // Group by layer
-  const layers = new Map<number, LayoutNode[]>();
+  const entities: LayoutEntity[] = [];
+  const containerByNodeId = new Map<string, string>();
+
   for (const node of nodes) {
-    const l = layer.get(node.id) ?? 0;
-    if (!layers.has(l)) layers.set(l, []);
-    layers.get(l)!.push(node);
-  }
-
-  // Position: center each layer horizontally
-  const maxLayer = Math.max(...Array.from(layers.keys()));
-  const result: LayoutNode[] = [];
-
-  for (let l = 0; l <= maxLayer; l++) {
-    const layerNodes = layers.get(l) ?? [];
-    const layerWidth = layerNodes.length * H_SPACING;
-    const startX = -layerWidth / 2 + H_SPACING / 2;
-
-    for (let i = 0; i < layerNodes.length; i++) {
-      result.push({
-        ...layerNodes[i]!,
-        position: {
-          x: startX + i * H_SPACING,
-          y: l * V_SPACING,
-        },
+    if (node.type === "group") {
+      const members = membersByGroup.get(node.id) ?? [];
+      const { width, height } = measureGroup(members.length);
+      entities.push({
+        id: node.id,
+        kind: "group",
+        node,
+        width,
+        height,
+        members,
       });
-    }
-  }
 
-  // Size group nodes to contain their children with padding
-  const GROUP_PADDING = 40;
-  for (const node of result) {
-    if ((node as any).type === "group") {
-      const children = result.filter((n) => (n as any).parentId === node.id);
-      if (children.length > 0) {
-        const minX = Math.min(...children.map((c) => c.position.x));
-        const maxX = Math.max(...children.map((c) => c.position.x + NODE_WIDTH));
-        const minY = Math.min(...children.map((c) => c.position.y));
-        const maxY = Math.max(...children.map((c) => c.position.y + NODE_HEIGHT));
-        const width = maxX - minX + GROUP_PADDING * 2;
-        const height = maxY - minY + GROUP_PADDING * 2;
-        node.position = { x: minX - GROUP_PADDING, y: minY - GROUP_PADDING };
-        (node as any).initialWidth = width;
-        (node as any).initialHeight = height;
-        (node as any).style = {
-          width,
-          height,
-        };
-        // Adjust children to be relative to group
-        for (const child of children) {
-          child.position = {
-            x: child.position.x - node.position.x,
-            y: child.position.y - node.position.y,
-          };
-        }
+      containerByNodeId.set(node.id, node.id);
+      for (const member of members) {
+        containerByNodeId.set(member.id, node.id);
       }
+      continue;
+    }
+
+    if (typeof node.parentId === "string" && groupedNodeIds.has(node.parentId)) {
+      continue;
+    }
+
+    entities.push({
+      id: node.id,
+      kind: "standalone",
+      node,
+      width: NODE_WIDTH,
+      height: NODE_HEIGHT,
+      members: [],
+    });
+    containerByNodeId.set(node.id, node.id);
+  }
+
+  if (entities.length === 0) {
+    return nodes;
+  }
+
+  const layoutGraph = new dagre.graphlib.Graph();
+  layoutGraph.setDefaultEdgeLabel(() => ({}));
+  layoutGraph.setGraph({
+    rankdir: "TB",
+    align: "UL",
+    nodesep: ENTITY_GAP_X,
+    ranksep: ENTITY_GAP_Y,
+    marginx: 0,
+    marginy: 0,
+  });
+
+  for (const entity of entities) {
+    layoutGraph.setNode(entity.id, { width: entity.width, height: entity.height });
+  }
+
+  const layoutEdges = selectLayoutEdges(edges, containerByNodeId);
+  for (const edge of layoutEdges) {
+    layoutGraph.setEdge(edge.source, edge.target);
+  }
+
+  dagre.layout(layoutGraph);
+  const entityPositions = new Map<string, { x: number; y: number }>();
+  for (const entity of entities) {
+    const positioned = layoutGraph.node(entity.id);
+    if (!positioned) {
+      continue;
+    }
+
+    entityPositions.set(entity.id, {
+      x: positioned.x - entity.width / 2,
+      y: positioned.y - entity.height / 2,
+    });
+  }
+
+  repositionDisconnectedEntities(entities, layoutEdges, entityPositions);
+
+  const laidOutById = new Map<string, LayoutNode>();
+  for (const node of nodes) {
+    laidOutById.set(node.id, { ...node });
+  }
+
+  for (const entity of entities) {
+    const positioned = entityPositions.get(entity.id);
+    if (!positioned) {
+      continue;
+    }
+
+    if (entity.kind === "standalone") {
+      const standalone = laidOutById.get(entity.node.id)!;
+      standalone.position = { x: positioned.x, y: positioned.y };
+      continue;
+    }
+
+    const groupNode = laidOutById.get(entity.node.id)!;
+    groupNode.position = { x: positioned.x, y: positioned.y };
+    groupNode.initialWidth = entity.width;
+    groupNode.initialHeight = entity.height;
+    groupNode.style = {
+      ...(groupNode.style ?? {}),
+      width: entity.width,
+      height: entity.height,
+    };
+
+    for (let index = 0; index < entity.members.length; index += 1) {
+      const member = entity.members[index]!;
+      const laidOutMember = laidOutById.get(member.id)!;
+      laidOutMember.position = getMemberPosition(index);
     }
   }
 
-  return result;
+  return nodes.map((node) => laidOutById.get(node.id) ?? node);
 }
 
-function applyGridLayout(nodes: LayoutNode[]): LayoutNode[] {
-  const cols = Math.ceil(Math.sqrt(nodes.length));
-  return nodes.map((node, i) => ({
-    ...node,
-    position: {
-      x: (i % cols) * H_SPACING,
-      y: Math.floor(i / cols) * V_SPACING,
-    },
-  }));
+function selectLayoutEdges(
+  edges: LayoutEdge[],
+  containerByNodeId: Map<string, string>
+): Array<{ source: string; target: string }> {
+  const hierarchyEdges = buildContainerEdges(
+    edges.filter((edge) => HIERARCHY_EDGE_KINDS.has(getEdgeKind(edge))),
+    containerByNodeId
+  );
+
+  if (hierarchyEdges.length > 0) {
+    return hierarchyEdges;
+  }
+
+  return buildContainerEdges(edges, containerByNodeId);
+}
+
+function buildContainerEdges(
+  edges: LayoutEdge[],
+  containerByNodeId: Map<string, string>
+): Array<{ source: string; target: string }> {
+  const uniqueEdges = new Map<string, { source: string; target: string }>();
+
+  for (const edge of edges) {
+    const source = containerByNodeId.get(edge.source);
+    const target = containerByNodeId.get(edge.target);
+
+    if (!source || !target || source === target) {
+      continue;
+    }
+
+    const key = `${source}->${target}`;
+    if (!uniqueEdges.has(key)) {
+      uniqueEdges.set(key, { source, target });
+    }
+  }
+
+  return Array.from(uniqueEdges.values());
+}
+
+function measureGroup(memberCount: number): { width: number; height: number } {
+  const count = Math.max(memberCount, 1);
+  const columns = Math.min(count, MAX_POD_COLUMNS);
+  const rows = Math.ceil(count / MAX_POD_COLUMNS);
+  const contentWidth = columns * NODE_WIDTH + Math.max(columns - 1, 0) * POD_MEMBER_GAP_X;
+  const contentHeight = rows * NODE_HEIGHT + Math.max(rows - 1, 0) * POD_MEMBER_GAP_Y;
+
+  return {
+    width: contentWidth + POD_PADDING_X * 2,
+    height: contentHeight + POD_PADDING_TOP + POD_PADDING_BOTTOM,
+  };
+}
+
+function getMemberPosition(index: number): { x: number; y: number } {
+  const column = index % MAX_POD_COLUMNS;
+  const row = Math.floor(index / MAX_POD_COLUMNS);
+
+  return {
+    x: POD_PADDING_X + column * (NODE_WIDTH + POD_MEMBER_GAP_X),
+    y: POD_PADDING_TOP + row * (NODE_HEIGHT + POD_MEMBER_GAP_Y),
+  };
+}
+
+function getEdgeKind(edge: LayoutEdge): string {
+  return edge.data?.kind ?? edge.label ?? "";
+}
+
+function repositionDisconnectedEntities(
+  entities: LayoutEntity[],
+  edges: Array<{ source: string; target: string }>,
+  entityPositions: Map<string, { x: number; y: number }>
+): void {
+  const connected = new Set<string>();
+  for (const edge of edges) {
+    connected.add(edge.source);
+    connected.add(edge.target);
+  }
+
+  if (connected.size === 0) {
+    return;
+  }
+
+  const disconnected = entities.filter((entity) => !connected.has(entity.id));
+  if (disconnected.length === 0) {
+    return;
+  }
+
+  const connectedEntities = entities.filter((entity) => connected.has(entity.id));
+  const connectedBottom = Math.max(
+    ...connectedEntities.map((entity) => {
+      const position = entityPositions.get(entity.id)!;
+      return position.y + entity.height;
+    })
+  );
+  const connectedCenter = average(
+    connectedEntities.map((entity) => {
+      const position = entityPositions.get(entity.id)!;
+      return position.x + entity.width / 2;
+    })
+  );
+
+  let nextTop = connectedBottom + ENTITY_GAP_Y;
+  for (let index = 0; index < disconnected.length; index += DISCONNECTED_ROW_COLUMNS) {
+    const row = disconnected.slice(index, index + DISCONNECTED_ROW_COLUMNS);
+    const rowWidth = row.reduce((sum, entity) => sum + entity.width, 0) +
+      Math.max(row.length - 1, 0) * ENTITY_GAP_X;
+    const rowHeight = Math.max(...row.map((entity) => entity.height));
+    let currentLeft = connectedCenter - rowWidth / 2;
+
+    for (const entity of row) {
+      entityPositions.set(entity.id, {
+        x: currentLeft,
+        y: nextTop,
+      });
+      currentLeft += entity.width + ENTITY_GAP_X;
+    }
+
+    nextTop += rowHeight + ENTITY_GAP_Y;
+  }
+}
+
+function average(values: number[]): number {
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
 }
