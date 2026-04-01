@@ -24,6 +24,7 @@ export interface ClaudeAdapterFsOps {
 
 const MANAGED_BLOCK_START = (id: string) => `<!-- BEGIN RIGGED MANAGED BLOCK: ${id} -->`;
 const MANAGED_BLOCK_END = (id: string) => `<!-- END RIGGED MANAGED BLOCK: ${id} -->`;
+const SHELL_COMMANDS = new Set(["bash", "fish", "nu", "sh", "tmux", "zsh"]);
 
 /**
  * Claude Code runtime adapter. Projects resources to .claude/ targets
@@ -140,6 +141,8 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     }
 
     if (opts.resumeToken) {
+      const verification = await this.verifyResumeLaunch(binding.tmuxSession);
+      if (!verification.ok) return verification;
       return { ok: true, resumeToken: opts.resumeToken, resumeType: "claude_id" };
     }
 
@@ -158,6 +161,34 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   }
 
   // -- Private helpers --
+
+  private async verifyResumeLaunch(tmuxSession: string): Promise<HarnessLaunchResult> {
+    const attempts = 16;
+
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      const paneCommand = await this.tmux.getPaneCommand(tmuxSession);
+      const paneContent = (await this.tmux.capturePaneContent(tmuxSession, 40)) ?? "";
+
+      if (paneContent.includes("No conversation found")) {
+        return { ok: false, error: "Claude resume failed: no conversation found for the requested session" };
+      }
+
+      if (paneCommand === "claude") {
+        return { ok: true };
+      }
+
+      if (attempt < attempts - 1) {
+        await this.sleep(200);
+      }
+    }
+
+    const finalCommand = await this.tmux.getPaneCommand(tmuxSession);
+    if (finalCommand && SHELL_COMMANDS.has(finalCommand)) {
+      return { ok: false, error: "Claude resume failed: pane returned to shell instead of entering Claude" };
+    }
+
+    return { ok: false, error: "Claude resume failed: timed out waiting for Claude to become active" };
+  }
 
   private projectEntry(entry: ProjectionEntry, cwd: string): void {
     if (entry.category === "guidance" && entry.mergeStrategy === "managed_block") {

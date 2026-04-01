@@ -18,6 +18,7 @@ interface AskResult {
   evidence: {
     backend: string;
     excerpts: string[];
+    chatExcerpts?: string[];
   };
   insufficient: boolean;
   guidance?: string;
@@ -93,7 +94,23 @@ Exit codes:
       for (const excerpt of result.evidence.excerpts) {
         console.log(`  ${excerpt}`);
       }
-    } else if (!result.guidance) {
+    }
+
+    if (result.evidence.chatExcerpts && result.evidence.chatExcerpts.length > 0) {
+      if (result.evidence.excerpts.length > 0) {
+        console.log("");
+      }
+      console.log(`Chat Evidence (${result.evidence.chatExcerpts.length} matches):`);
+      for (const excerpt of result.evidence.chatExcerpts) {
+        console.log(`  ${excerpt}`);
+      }
+    }
+
+    if (
+      result.evidence.excerpts.length === 0 &&
+      (!result.evidence.chatExcerpts || result.evidence.chatExcerpts.length === 0) &&
+      !result.guidance
+    ) {
       console.log("No transcript evidence found.");
     }
   });

@@ -67,6 +67,13 @@ const INSUFFICIENT_RESULT = {
   guidance: "No useful keywords could be extracted from the question. Try a more specific question.",
 };
 
+const CHAT_ONLY_RESULT = {
+  question: "what did chat say about deployment?",
+  rig: { name: "my-rig", status: "running", nodeCount: 2, runningCount: 2, uptime: "1h 30m" },
+  evidence: { backend: "rg", excerpts: [], chatExcerpts: ["[cli] deployment checkpoint shared in chat"] },
+  insufficient: false,
+};
+
 describe("Ask CLI", () => {
   let server: http.Server;
   let port: number;
@@ -82,7 +89,10 @@ describe("Ask CLI", () => {
           return;
         }
         const parsed = JSON.parse(body);
-        if (parsed.rig === "my-rig" && parsed.question.includes("deployment")) {
+        if (parsed.rig === "my-rig" && parsed.question === "what did chat say about deployment?") {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify(CHAT_ONLY_RESULT));
+        } else if (parsed.rig === "my-rig" && parsed.question.includes("deployment")) {
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify(EVIDENCE_RESULT));
         } else if (parsed.rig === "my-rig" && parsed.question === "what is the") {
@@ -151,5 +161,15 @@ describe("Ask CLI", () => {
     });
     const output = logs.join("\n");
     expect(output).toContain("No useful keywords");
+  });
+
+  it("human output shows chat evidence when transcript excerpts are empty", async () => {
+    const { logs } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rigged", "ask", "my-rig", "what did chat say about deployment?"]);
+    });
+    const output = logs.join("\n");
+    expect(output).toContain("Chat Evidence");
+    expect(output).toContain("deployment checkpoint shared in chat");
+    expect(output).not.toContain("No transcript evidence found.");
   });
 });

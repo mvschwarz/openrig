@@ -12,6 +12,8 @@ const MID_WORK_PATTERNS = [
   /…$/m,       // lines ending in …
 ];
 
+const IDLE_TERMINAL_COMMANDS = new Set(["zsh", "bash", "sh", "fish", "nu", "tmux"]);
+
 function looksLikeMidWork(paneContent: string): boolean {
   const lastLines = paneContent.split("\n").slice(-5).join("\n");
   return MID_WORK_PATTERNS.some((p) => p.test(lastLines));
@@ -82,6 +84,7 @@ interface SessionTransportDeps {
 
 interface SessionRow { node_id: string; session_name: string; }
 interface NodeRow { rig_id: string; logical_id: string; }
+interface RuntimeRow { runtime: string | null; }
 
 export class SessionTransport {
   readonly db: Database.Database;
@@ -299,6 +302,15 @@ export class SessionTransport {
 
   async send(sessionName: string, text: string, opts?: SendOpts): Promise<SendResult> {
     let preVerifyContent: string | null = null;
+    const runtimeRow = this.db.prepare(`
+      SELECT n.runtime AS runtime
+      FROM sessions s
+      JOIN nodes n ON s.node_id = n.id
+      WHERE s.session_name = ?
+      ORDER BY s.id DESC
+      LIMIT 1
+    `).get(sessionName) as RuntimeRow | undefined;
+    const runtime = runtimeRow?.runtime ?? null;
 
     // 1. Check session exists / tmux available
     try {
@@ -323,6 +335,17 @@ export class SessionTransport {
     // 2. Mid-work check (unless force)
     if (!opts?.force) {
       try {
+        if (runtime === "terminal") {
+          const paneCommand = await this.tmuxAdapter.getPaneCommand(sessionName);
+          if (paneCommand && !IDLE_TERMINAL_COMMANDS.has(paneCommand)) {
+            return {
+              ok: false,
+              sessionName,
+              reason: "mid_work",
+              error: `Target pane appears mid-task. Use force: true to send anyway, or wait for the task to settle.`,
+            };
+          }
+        }
         const paneContent = await this.tmuxAdapter.capturePaneContent(sessionName, 5);
         if (paneContent && looksLikeMidWork(paneContent)) {
           return {

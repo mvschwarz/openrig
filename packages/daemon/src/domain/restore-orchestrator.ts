@@ -514,8 +514,24 @@ export class RestoreOrchestrator {
               const finalStatus = (isPodAware && resumeToken) ? "resumed" : baseStatus;
               return { nodeId: node.id, logicalId: node.logicalId, status: finalStatus };
             }
+            if (isPodAware && resumeToken) {
+              return {
+                nodeId: node.id,
+                logicalId: node.logicalId,
+                status: "failed",
+                error: startupResult.errors.join("; "),
+              };
+            }
             warnings?.push(`Restore startup failed for ${node.logicalId}: ${startupResult.errors.join("; ")}`);
           } catch (err) {
+            if (isPodAware && resumeToken) {
+              return {
+                nodeId: node.id,
+                logicalId: node.logicalId,
+                status: "failed",
+                error: `Restore startup error: ${(err as Error).message}`,
+              };
+            }
             warnings?.push(`Restore startup error for ${node.logicalId}: ${(err as Error).message}`);
           }
         }

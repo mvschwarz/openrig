@@ -8,6 +8,8 @@ function mockTmux(): TmuxAdapter {
   return {
     sendText: vi.fn(async () => ({ ok: true as const })),
     hasSession: vi.fn(async () => true),
+    getPaneCommand: vi.fn(async () => "claude"),
+    capturePaneContent: vi.fn(async () => ""),
     createSession: vi.fn(async () => ({ ok: true as const })),
     killSession: vi.fn(async () => ({ ok: true as const })),
     listSessions: vi.fn(async () => []),
@@ -177,6 +179,22 @@ describe("Claude Code runtime adapter", () => {
     expect(result.ok).toBe(true);
     const sendText = tmux.sendText as ReturnType<typeof vi.fn>;
     expect(sendText).toHaveBeenCalledWith("r01-impl", "claude --resume abc-123 --name dev-impl@test-rig");
+  });
+
+  it("launchHarness fails honestly when resume drops back to shell with no conversation found", async () => {
+    const tmux = mockTmux();
+    (tmux.getPaneCommand as ReturnType<typeof vi.fn>).mockResolvedValue("zsh");
+    (tmux.capturePaneContent as ReturnType<typeof vi.fn>).mockResolvedValue(
+      "No conversation found with session ID: abc-123\nmschwarz@host %"
+    );
+    const adapter = new ClaudeCodeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {} });
+
+    const result = await adapter.launchHarness(makeBinding(), { name: "dev-impl@test-rig", resumeToken: "abc-123" });
+
+    expect(result).toEqual({
+      ok: false,
+      error: "Claude resume failed: no conversation found for the requested session",
+    });
   });
 
   it("launchHarness captures resume token from session file", async () => {

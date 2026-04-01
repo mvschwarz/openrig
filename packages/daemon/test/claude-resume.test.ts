@@ -5,10 +5,14 @@ import type { TmuxAdapter, TmuxResult } from "../src/adapters/tmux.js";
 function mockTmux(overrides?: {
   sendText?: (target: string, text: string) => Promise<TmuxResult>;
   sendKeys?: (target: string, keys: string[]) => Promise<TmuxResult>;
+  getPaneCommand?: (target: string) => Promise<string | null>;
+  capturePaneContent?: (target: string, lines?: number) => Promise<string | null>;
 }) {
   return {
     sendText: overrides?.sendText ?? vi.fn(async () => ({ ok: true as const })),
     sendKeys: overrides?.sendKeys ?? vi.fn(async () => ({ ok: true as const })),
+    getPaneCommand: overrides?.getPaneCommand ?? vi.fn(async () => "claude"),
+    capturePaneContent: overrides?.capturePaneContent ?? vi.fn(async () => ""),
     createSession: async () => ({ ok: true as const }),
     killSession: async () => ({ ok: true as const }),
     listSessions: async () => [],
@@ -128,6 +132,40 @@ describe("ClaudeResumeAdapter", () => {
 
       // sendKeys should NOT have been called at all (no Enter, no C-c)
       expect(sendKeys).not.toHaveBeenCalled();
+    });
+
+    it("returns resume_failed when Claude prints no conversation found and drops back to shell", async () => {
+      const getPaneCommand = vi.fn(async () => "zsh");
+      const capturePaneContent = vi.fn(async () => "No conversation found with session ID: abc123\nmschwarz@host %");
+      const adapter = new ClaudeResumeAdapter(
+        mockTmux({ getPaneCommand, capturePaneContent }),
+        { pollMs: 0, maxWaitMs: 0, sleep: async () => {} }
+      );
+
+      const result = await adapter.resume("r99-demo1-lead", "claude_name", "missing-session", "/repo");
+
+      expect(result).toEqual({
+        ok: false,
+        code: "resume_failed",
+        message: "Claude resume failed: no conversation found for the requested session",
+      });
+    });
+
+    it("waits for Claude to become the foreground command before succeeding", async () => {
+      const getPaneCommand = vi
+        .fn<(_: string) => Promise<string | null>>()
+        .mockResolvedValueOnce("zsh")
+        .mockResolvedValueOnce("claude");
+      const capturePaneContent = vi.fn(async () => "");
+      const adapter = new ClaudeResumeAdapter(
+        mockTmux({ getPaneCommand, capturePaneContent }),
+        { pollMs: 0, maxWaitMs: 1, sleep: async () => {} }
+      );
+
+      const result = await adapter.resume("r99-demo1-lead", "claude_name", "my-session", "/repo");
+
+      expect(result).toEqual({ ok: true });
+      expect(getPaneCommand).toHaveBeenCalledTimes(2);
     });
   });
 });

@@ -26,6 +26,7 @@ function mockTmux(overrides?: Partial<{
   sendText: (target: string, text: string) => Promise<TmuxResult>;
   sendKeys: (target: string, keys: string[]) => Promise<TmuxResult>;
   capturePaneContent: (paneId: string, lines?: number) => Promise<string | null>;
+  getPaneCommand: (paneId: string) => Promise<string | null>;
 }>): TmuxAdapter {
   return {
     hasSession: overrides?.hasSession ?? (async () => true),
@@ -40,7 +41,7 @@ function mockTmux(overrides?: Partial<{
     startPipePane: async () => ({ ok: true as const }),
     stopPipePane: async () => ({ ok: true as const }),
     getPanePid: async () => null,
-    getPaneCommand: async () => null,
+    getPaneCommand: overrides?.getPaneCommand ?? (async () => null),
   } as unknown as TmuxAdapter;
 }
 
@@ -214,6 +215,30 @@ describe("SessionTransport", () => {
     const result = await transport.send("dev-impl@my-rig", "hello", { force: true });
     expect(result.ok).toBe(true);
     expect(sendTextSpy).toHaveBeenCalled();
+  });
+
+  it("send to terminal session with foreground non-shell command refuses with mid_work", async () => {
+    const rig = rigRepo.createRig("term-rig");
+    const node = rigRepo.addNode(rig.id, "infra.ui", {
+      role: "ui", runtime: "terminal",
+    });
+    const session = sessionRegistry.registerSession(node.id, "infra-ui@term-rig");
+    sessionRegistry.updateStatus(session.id, "running");
+    sessionRegistry.updateBinding(node.id, { tmuxSession: "infra-ui@term-rig" });
+
+    const sendTextSpy = vi.fn(async () => ({ ok: true as const }));
+    const tmux = mockTmux({
+      capturePaneContent: async () => "VITE ready\npress h + enter to show help",
+      getPaneCommand: async () => "node",
+      sendText: sendTextSpy,
+    });
+    const transport = createTransport(tmux);
+
+    const result = await transport.send("infra-ui@term-rig", "printf 'hello\\n'");
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe("mid_work");
+    expect(result.error).toContain("mid-task");
+    expect(sendTextSpy).not.toHaveBeenCalled();
   });
 
   // Test 9: send when tmux unavailable → guided error

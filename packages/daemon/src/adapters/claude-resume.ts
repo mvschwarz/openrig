@@ -1,3 +1,4 @@
+import { setTimeout as sleep } from "node:timers/promises";
 import type { TmuxAdapter } from "./tmux.js";
 import { shellQuote } from "./shell-quote.js";
 
@@ -6,9 +7,19 @@ export type ResumeResult =
   | { ok: false; code: string; message: string };
 
 const CLAUDE_TYPES = new Set(["claude_name", "claude_id"]);
+const SHELL_COMMANDS = new Set(["bash", "fish", "nu", "sh", "tmux", "zsh"]);
+
+interface ClaudeResumeOptions {
+  pollMs?: number;
+  maxWaitMs?: number;
+  sleep?: (ms: number) => Promise<void>;
+}
 
 export class ClaudeResumeAdapter {
-  constructor(private tmux: TmuxAdapter) {}
+  constructor(
+    private tmux: TmuxAdapter,
+    private options: ClaudeResumeOptions = {}
+  ) {}
 
   canResume(resumeType: string | null, resumeToken: string | null): boolean {
     if (!resumeType || !CLAUDE_TYPES.has(resumeType)) return false;
@@ -16,11 +27,6 @@ export class ClaudeResumeAdapter {
     return true;
   }
 
-  // NOTE: Resume success is fire-and-forget. sendText succeeding means the
-  // command was typed into the tmux pane, NOT that the harness actually resumed.
-  // Verifying actual harness resume state requires polling or harness-specific
-  // status detection, which is a Phase 3 concern.
-  // TODO(Phase 3): Add resume verification (e.g., poll harness status endpoint).
   async resume(
     tmuxSessionName: string,
     resumeType: string | null,
@@ -47,6 +53,49 @@ export class ClaudeResumeAdapter {
       return { ok: false, code: "resume_failed", message: keyResult.message };
     }
 
-    return { ok: true };
+    return this.verifyResume(tmuxSessionName);
+  }
+
+  private async verifyResume(tmuxSessionName: string): Promise<ResumeResult> {
+    const pollMs = this.options.pollMs ?? 200;
+    const maxWaitMs = this.options.maxWaitMs ?? 3_000;
+    const sleepFn = this.options.sleep ?? sleep;
+    const attempts = Math.max(1, Math.floor(maxWaitMs / Math.max(pollMs, 1)) + 1);
+
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      const paneCommand = await this.tmux.getPaneCommand(tmuxSessionName);
+      const paneContent = (await this.tmux.capturePaneContent(tmuxSessionName, 40)) ?? "";
+
+      if (paneContent.includes("No conversation found")) {
+        return {
+          ok: false,
+          code: "resume_failed",
+          message: "Claude resume failed: no conversation found for the requested session",
+        };
+      }
+
+      if (paneCommand === "claude") {
+        return { ok: true };
+      }
+
+      if (attempt < attempts - 1) {
+        await sleepFn(pollMs);
+      }
+    }
+
+    const finalCommand = await this.tmux.getPaneCommand(tmuxSessionName);
+    if (finalCommand && SHELL_COMMANDS.has(finalCommand)) {
+      return {
+        ok: false,
+        code: "resume_failed",
+        message: "Claude resume failed: pane returned to shell instead of entering Claude",
+      };
+    }
+
+    return {
+      ok: false,
+      code: "resume_failed",
+      message: "Claude resume failed: timed out waiting for Claude to become active",
+    };
   }
 }

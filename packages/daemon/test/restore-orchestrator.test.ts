@@ -22,8 +22,8 @@ import { CheckpointStore } from "../src/domain/checkpoint-store.js";
 import { SnapshotCapture } from "../src/domain/snapshot-capture.js";
 import { NodeLauncher } from "../src/domain/node-launcher.js";
 import { RestoreOrchestrator } from "../src/domain/restore-orchestrator.js";
+import { ClaudeResumeAdapter } from "../src/adapters/claude-resume.js";
 import type { TmuxAdapter, TmuxResult } from "../src/adapters/tmux.js";
-import type { ClaudeResumeAdapter } from "../src/adapters/claude-resume.js";
 import type { CodexResumeAdapter } from "../src/adapters/codex-resume.js";
 import type { ResumeResult } from "../src/adapters/claude-resume.js";
 import type { PersistedEvent, Snapshot } from "../src/domain/types.js";
@@ -40,6 +40,8 @@ function mockTmux(): TmuxAdapter {
     killSession: vi.fn(async () => ({ ok: true as const })),
     sendText: vi.fn(async () => ({ ok: true as const })),
     sendKeys: vi.fn(async () => ({ ok: true as const })),
+    getPaneCommand: vi.fn(async () => "claude"),
+    capturePaneContent: vi.fn(async () => ""),
     listSessions: async () => [],
     listWindows: async () => [],
     listPanes: async () => [],
@@ -538,6 +540,27 @@ describe("RestoreOrchestrator", () => {
     fs.rmSync(tmpDir, { recursive: true });
   });
 
+  it("legacy Claude resume verification failure -> status 'failed'", async () => {
+    const snap = seedRigAndSnapshot({
+      nodes: [{ logicalId: "worker", role: "worker", runtime: "claude-code" }],
+      edges: [],
+      resumeType: "claude_name",
+      resumeToken: "missing-session",
+    });
+    const tmux = mockTmux();
+    (tmux.getPaneCommand as ReturnType<typeof vi.fn>).mockResolvedValue("zsh");
+    (tmux.capturePaneContent as ReturnType<typeof vi.fn>).mockResolvedValue(
+      "No conversation found with session ID: missing-session\nmschwarz@host %"
+    );
+    const claude = new ClaudeResumeAdapter(tmux, { pollMs: 0, maxWaitMs: 0, sleep: async () => {} });
+    const orch = createOrchestrator({ tmux, claude });
+
+    const result = await orch.restore(snap.id);
+
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.result.nodes[0]!.status).toBe("failed");
+  });
+
   it("restore_policy=relaunch_fresh -> resume NOT attempted", async () => {
     const snap = seedRigAndSnapshot({
       nodes: [{ logicalId: "worker", role: "worker", runtime: "claude-code" }],
@@ -869,6 +892,39 @@ describe("RestoreOrchestrator", () => {
       expect(claudeResumeSpy).not.toHaveBeenCalled();
       // Node should be "resumed"
       expect(result.result.nodes[0]!.status).toBe("resumed");
+    }
+  });
+
+  it("pod-aware resume failure -> status 'failed' with startup error", async () => {
+    const rig = rigRepo.createRig("test-rig");
+    db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-fail", rig.id, "Dev");
+    const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code", podId: "pod-fail" });
+    const session = sessionRegistry.registerSession(node.id, "dev-impl@test-rig");
+    sessionRegistry.updateStatus(session.id, "running");
+    sessionRegistry.updateResumeToken(session.id, "claude_id", "bad-token");
+    db.prepare(
+      "INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, ?, ?, ?)"
+    ).run(node.id, "[]", "[]", "[]", "claude-code");
+    const snap = snapshotCapture.captureSnapshot(rig.id, "test");
+    sessionRegistry.updateStatus(session.id, "exited");
+    db.prepare("DELETE FROM bindings WHERE node_id = ?").run(node.id);
+
+    const mockAdapter = {
+      runtime: "claude-code",
+      listInstalled: vi.fn(async () => []),
+      project: vi.fn(async () => ({ projected: [], skipped: [], failed: [] })),
+      deliverStartup: vi.fn(async () => ({ delivered: 0, failed: [] })),
+      checkReady: vi.fn(async () => ({ ready: true })),
+      launchHarness: vi.fn(async () => ({ ok: false as const, error: "Claude resume failed: no conversation found" })),
+    };
+
+    const orch = createOrchestrator();
+    const result = await orch.restore(snap.id, { adapters: { "claude-code": mockAdapter } });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.result.nodes[0]!.status).toBe("failed");
+      expect(result.result.nodes[0]!.error).toContain("Claude resume failed");
     }
   });
 

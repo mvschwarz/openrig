@@ -64,6 +64,9 @@ export function projectRigToGraph(input: RigGraphInput, inventoryOverlay?: Inven
       : null;
 
     const overlay = overlayMap.get(node.logicalId);
+    const effectiveStartupStatus = latestSession?.status === "running"
+      ? (overlay?.startupStatus ?? (latestSession.startupStatus as RFNodeData["startupStatus"]) ?? null)
+      : null;
 
     // Track pods
     if (node.podId) {
@@ -85,7 +88,7 @@ export function projectRigToGraph(input: RigGraphInput, inventoryOverlay?: Inven
         status: latestSession ? latestSession.status : null,
         binding: node.binding,
         nodeKind: node.runtime === "terminal" ? "infrastructure" : "agent",
-        startupStatus: overlay?.startupStatus ?? (latestSession?.startupStatus as RFNodeData["startupStatus"]) ?? null,
+        startupStatus: effectiveStartupStatus,
         canonicalSessionName: overlay?.canonicalSessionName ?? latestSession?.sessionName ?? null,
         podId: node.podId ?? null,
         restoreOutcome: overlay?.restoreOutcome ?? "n-a",

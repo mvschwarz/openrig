@@ -188,11 +188,29 @@ describe("projectRigToGraph", () => {
     expect(result.nodes[0]!.data.status).toBeNull();
   });
 
+  it("non-running latest session clears startupStatus so graph does not show stale READY", () => {
+    const input = makeRig(
+      [{ id: "n1", logicalId: "worker", runtime: "claude-code" }],
+      [],
+      [makeSession("n1", "exited", "2026-03-23T02:00:00")]
+    );
+
+    const overlay = [
+      { logicalId: "worker", startupStatus: "ready" as const, canonicalSessionName: "worker@test-rig", restoreOutcome: "n-a" },
+    ];
+
+    const result = projectRigToGraph(input, overlay);
+    expect(result.nodes[0]!.data.status).toBe("exited");
+    expect(result.nodes[0]!.data.startupStatus).toBeNull();
+  });
+
   // NS-T12: enriched fields
   it("enriched fields include startupStatus, canonicalSessionName, podId, restoreOutcome from overlay", () => {
-    const input = makeRig([
-      { id: "n1", logicalId: "dev.impl", runtime: "claude-code" },
-    ]);
+    const input = makeRig(
+      [{ id: "n1", logicalId: "dev.impl", runtime: "claude-code" }],
+      [],
+      [makeSession("n1", "running", "2026-03-23T03:00:00")]
+    );
 
     const overlay = [
       { logicalId: "dev.impl", startupStatus: "ready" as const, canonicalSessionName: "dev-impl@test-rig", restoreOutcome: "resumed" },
