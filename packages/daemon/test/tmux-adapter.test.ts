@@ -473,4 +473,62 @@ describe("TmuxAdapter", () => {
       expect(exec).toHaveBeenCalledWith("tmux capture-pane -p -t '%5' -S -50");
     });
   });
+
+  describe("startPipePane", () => {
+    it("constructs shell-safe command with quoted session name and path", async () => {
+      const exec: ExecFn = vi.fn(async () => "") as unknown as ExecFn;
+      const adapter = new TmuxAdapter(exec);
+
+      await adapter.startPipePane("dev-impl@my-rig", "/home/user/.rigged/transcripts/my-rig/dev-impl@my-rig.log");
+
+      // The command is: tmux pipe-pane -t <quoted session> <quoted 'cat >> <quoted path>'>
+      const cmd = (exec as ReturnType<typeof vi.fn>).mock.calls[0]![0] as string;
+      expect(cmd).toContain("tmux pipe-pane -t 'dev-impl@my-rig'");
+      expect(cmd).toContain("cat >>");
+      expect(cmd).toContain("dev-impl@my-rig.log");
+    });
+
+    it("quotes path with spaces safely inside pipe command", async () => {
+      const exec: ExecFn = vi.fn(async () => "") as unknown as ExecFn;
+      const adapter = new TmuxAdapter(exec);
+
+      await adapter.startPipePane("dev@rig", "/path/with spaces/transcript.log");
+
+      const cmd = (exec as ReturnType<typeof vi.fn>).mock.calls[0]![0] as string;
+      expect(cmd).toContain("tmux pipe-pane -t 'dev@rig'");
+      expect(cmd).toContain("cat >>");
+      expect(cmd).toContain("with spaces");
+    });
+
+    it("handles apostrophes in path safely", async () => {
+      const exec: ExecFn = vi.fn(async () => "") as unknown as ExecFn;
+      const adapter = new TmuxAdapter(exec);
+
+      await adapter.startPipePane("dev@rig", "/path/it's/transcript.log");
+
+      const cmd = (exec as ReturnType<typeof vi.fn>).mock.calls[0]![0] as string;
+      expect(cmd).toContain("tmux pipe-pane -t 'dev@rig'");
+      // The apostrophe should be escaped, not left raw
+      expect(cmd).not.toContain("it's/");
+    });
+
+    it("returns { ok: false } on session not found error", async () => {
+      const exec: ExecFn = vi.fn(async () => { throw new Error("can't find session: dev@rig"); }) as unknown as ExecFn;
+      const adapter = new TmuxAdapter(exec);
+
+      const result = await adapter.startPipePane("dev@rig", "/tmp/test.log");
+      expect(result).toEqual({ ok: false, code: "session_not_found", message: "can't find session: dev@rig" });
+    });
+  });
+
+  describe("stopPipePane", () => {
+    it("constructs correct empty pipe-pane command", async () => {
+      const exec: ExecFn = vi.fn(async () => "") as unknown as ExecFn;
+      const adapter = new TmuxAdapter(exec);
+
+      await adapter.stopPipePane("dev-impl@my-rig");
+
+      expect(exec).toHaveBeenCalledWith("tmux pipe-pane -t 'dev-impl@my-rig'");
+    });
+  });
 });

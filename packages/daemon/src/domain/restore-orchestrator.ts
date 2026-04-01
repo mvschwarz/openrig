@@ -11,6 +11,7 @@ import type { NodeLauncher } from "./node-launcher.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import type { ClaudeResumeAdapter } from "../adapters/claude-resume.js";
 import type { CodexResumeAdapter } from "../adapters/codex-resume.js";
+import type { TranscriptStore } from "./transcript-store.js";
 import type {
   RestoreOutcome,
   RestoreResult,
@@ -37,6 +38,7 @@ interface RestoreOrchestratorDeps {
   tmuxAdapter: TmuxAdapter;
   claudeResume: ClaudeResumeAdapter;
   codexResume: CodexResumeAdapter;
+  transcriptStore?: TranscriptStore;
 }
 
 export class RestoreOrchestrator {
@@ -51,6 +53,7 @@ export class RestoreOrchestrator {
   private tmuxAdapter: TmuxAdapter;
   private claudeResume: ClaudeResumeAdapter;
   private codexResume: CodexResumeAdapter;
+  private transcriptStore: TranscriptStore | null;
 
   constructor(deps: RestoreOrchestratorDeps) {
     if (deps.db !== deps.rigRepo.db) {
@@ -85,6 +88,7 @@ export class RestoreOrchestrator {
     this.tmuxAdapter = deps.tmuxAdapter;
     this.claudeResume = deps.claudeResume;
     this.codexResume = deps.codexResume;
+    this.transcriptStore = deps.transcriptStore ?? null;
   }
 
   async restore(snapshotId: string, opts?: {
@@ -127,7 +131,7 @@ export class RestoreOrchestrator {
       const nodeResults: RestoreNodeResult[] = [];
       const restoreWarnings: string[] = [];
       for (const entry of plan) {
-        const result = await this.restoreNodeWithCompensation(entry, rigId, snapshot.data, opts, restoreWarnings);
+        const result = await this.restoreNodeWithCompensation(entry, rigId, snapshotId, snapshot.data, opts, restoreWarnings);
         nodeResults.push(result);
       }
 
@@ -280,6 +284,7 @@ export class RestoreOrchestrator {
   private async restoreNodeWithCompensation(
     entry: PlanEntry,
     rigId: string,
+    snapshotId: string,
     data: SnapshotData,
     opts?: { adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>; fsOps?: { exists(path: string): boolean } },
     warnings?: string[],
@@ -312,14 +317,34 @@ export class RestoreOrchestrator {
     // Derive canonical session name for pod-aware nodes
     const rig = this.rigRepo.getRig(rigId);
     let launchOpts: { sessionName?: string } | undefined;
+    let expectedSessionName: string | undefined;
     if (node.podId && rig) {
       // Pod-aware: derive {pod}-{member}@{rigName} from node identity
       const parts = node.logicalId.split(".");
       if (parts.length >= 2) {
         const podPart = parts[0]!;
         const memberPart = parts.slice(1).join(".");
-        const { deriveCanonicalSessionName } = await import("./session-name.js");
-        launchOpts = { sessionName: deriveCanonicalSessionName(podPart, memberPart, rig.rig.name) };
+        const { deriveCanonicalSessionName, deriveSessionName } = await import("./session-name.js");
+        expectedSessionName = deriveCanonicalSessionName(podPart, memberPart, rig.rig.name);
+        launchOpts = { sessionName: expectedSessionName };
+      }
+    }
+    if (!expectedSessionName && rig) {
+      const { deriveSessionName } = await import("./session-name.js");
+      expectedSessionName = deriveSessionName(rig.rig.name, node.logicalId);
+    }
+
+    // Write transcript boundary marker BEFORE launch (before pipe-pane attaches)
+    // so the marker appears before any post-restore terminal output.
+    // Uses "restore attempt" language — honest even if launch subsequently fails.
+    if (this.transcriptStore?.enabled && rig && expectedSessionName) {
+      const markerOk = this.transcriptStore.writeBoundaryMarker(
+        rig.rig.name,
+        expectedSessionName,
+        `restore attempt from snapshot ${snapshotId}`,
+      );
+      if (!markerOk) {
+        warnings?.push(`Transcript boundary marker failed for ${expectedSessionName}`);
       }
     }
 
@@ -338,6 +363,12 @@ export class RestoreOrchestrator {
 
     // Launch succeeded — do NOT compensate on post-launch failures
     // (the new session/binding are now the current state)
+
+    // Propagate launch warnings (includes transcript attach failures)
+    if (launchResult.warnings?.length) {
+      warnings?.push(...launchResult.warnings);
+    }
+
     return this.postLaunchRestore(entry, rigId, data, launchResult.sessionName, launchResult, opts, warnings);
   }
 

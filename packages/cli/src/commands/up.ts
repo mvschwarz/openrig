@@ -116,6 +116,12 @@ export function upCommand(depsOverride?: StatusDeps & { lifecycleDeps?: Lifecycl
         }
         console.log(`Status: ${resStatus}`);
 
+        // Surface warnings (e.g. transcript attach failures)
+        const warnings = (res.data["warnings"] as string[]) ?? [];
+        for (const w of warnings) {
+          console.error(`  warning: ${w}`);
+        }
+
         // Attach command from server response
         const attachCommand = res.data["attachCommand"] as string | undefined;
         if (attachCommand) {

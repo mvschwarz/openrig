@@ -525,4 +525,30 @@ describe("RigInstantiator", () => {
     const events = db.prepare("SELECT * FROM events WHERE type = 'rig.imported'").all();
     expect(events).toHaveLength(0);
   });
+
+  it("launch warnings propagate into InstantiateResult.warnings", async () => {
+    const tmux = mockTmux();
+    // Mock launchNode to return warnings via NodeLauncher transcript integration
+    const nodeLauncher = new NodeLauncher({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux });
+    // Override launchNode to simulate transcript warning
+    const originalLaunch = nodeLauncher.launchNode.bind(nodeLauncher);
+    vi.spyOn(nodeLauncher, "launchNode").mockImplementation(async (...args) => {
+      const result = await originalLaunch(...args);
+      if (result.ok) {
+        return { ...result, warnings: ["Transcript capture failed for test-session: pipe-pane failed"] };
+      }
+      return result;
+    });
+
+    const preflight = new RigSpecPreflight({ rigRepo, tmuxAdapter: tmux, exec: async () => "", cmuxExec: async () => "" });
+    const inst = new RigInstantiator({ db, rigRepo, sessionRegistry, eventBus, nodeLauncher, preflight });
+    const result = await inst.instantiate(validSpec());
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.result.warnings).toBeDefined();
+      expect(result.result.warnings!.length).toBeGreaterThan(0);
+      expect(result.result.warnings![0]).toContain("Transcript capture failed");
+    }
+  });
 });

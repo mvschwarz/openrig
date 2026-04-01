@@ -438,4 +438,5 @@ export interface InstantiateResult {
   specName: string;
   specVersion: string;
   nodes: { logicalId: string; status: "launched" | "failed"; error?: string }[];
+  warnings?: string[];
 }

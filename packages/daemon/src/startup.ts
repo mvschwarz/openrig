@@ -50,6 +50,7 @@ import { PsProjectionService } from "./domain/ps-projection.js";
 import { UpCommandRouter } from "./domain/up-command-router.js";
 import { RigTeardownOrchestrator } from "./domain/rig-teardown.js";
 import { ResumeMetadataRefresher } from "./domain/resume-metadata-refresher.js";
+import { TranscriptStore } from "./domain/transcript-store.js";
 import { createApp, type AppDeps } from "./server.js";
 import fs from "node:fs";
 import os from "node:os";
@@ -99,12 +100,16 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     { timeoutMs: opts?.cmuxTimeoutMs ?? 5000 }
   );
 
+  // PNS-T02 will wire resolved config (transcripts.path, transcripts.enabled) here
+  const transcriptStore = new TranscriptStore();
+
   const nodeLauncher = new NodeLauncher({
     db,
     rigRepo,
     sessionRegistry,
     eventBus,
     tmuxAdapter,
+    transcriptStore,
   });
 
   const snapshotRepo = new SnapshotRepository(db);
@@ -115,6 +120,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const restoreOrchestrator = new RestoreOrchestrator({
     db, rigRepo, sessionRegistry, eventBus, snapshotRepo, snapshotCapture,
     checkpointStore, nodeLauncher, tmuxAdapter, claudeResume, codexResume,
+    transcriptStore,
   });
 
   // Connect to cmux at startup — degrades gracefully if absent

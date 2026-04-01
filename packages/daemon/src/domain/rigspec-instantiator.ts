@@ -127,12 +127,16 @@ export class RigInstantiator {
     // 5. Launch nodes in topological order
     const nodeResults: { logicalId: string; status: "launched" | "failed"; error?: string }[] = [];
     const launchedSessionNames: string[] = [];
+    const instantiateWarnings: string[] = [];
 
     for (const logicalId of launchOrder) {
       const result = await this.nodeLauncher.launchNode(rigId!, logicalId);
       if (result.ok) {
         nodeResults.push({ logicalId, status: "launched" });
         launchedSessionNames.push(result.sessionName);
+        if (result.warnings?.length) {
+          instantiateWarnings.push(...result.warnings);
+        }
       } else {
         nodeResults.push({ logicalId, status: "failed", error: result.message });
       }
@@ -194,6 +198,7 @@ export class RigInstantiator {
         specName: spec.name,
         specVersion: spec.version,
         nodes: nodeResults,
+        warnings: instantiateWarnings.length > 0 ? instantiateWarnings : undefined,
       },
     };
   }
@@ -356,6 +361,7 @@ export class PodRigInstantiator {
     const nodeResults: { logicalId: string; status: "launched" | "failed"; error?: string }[] = [];
     const nodeIdMap: Record<string, string> = {}; // "pod.member" -> node DB id
     const launchedSessionNames: string[] = []; // Track for orphan cleanup on total failure
+    const podInstantiateWarnings: string[] = [];
     // Store per-member context for deferred launch
     const memberContext = new Map<string, { pod: typeof rigSpec.pods[0]; member: typeof rigSpec.pods[0]["members"][0]; podId: string; nodeId: string; resolveResult: any; configResult: any }>();
 
@@ -391,7 +397,7 @@ export class PodRigInstantiator {
         // Terminal fast-path: skip agent resolution and profile resolution
         if (member.agentRef === "builtin:terminal") {
           const termResult = await this.processTerminalMember(
-            rigId, rigSpec, rigRoot, pod, member, podId, qualifiedId, nodeIdMap, launchedSessionNames,
+            rigId, rigSpec, rigRoot, pod, member, podId, qualifiedId, nodeIdMap, launchedSessionNames, podInstantiateWarnings,
           );
           nodeResults.push(termResult);
           continue;
@@ -460,6 +466,9 @@ export class PodRigInstantiator {
           continue;
         }
         launchedSessionNames.push(canonicalSessionName);
+        if (launchResult.warnings?.length) {
+          podInstantiateWarnings.push(...launchResult.warnings);
+        }
 
         // Propagate narrowed restorePolicy to session row (restore-orchestrator reads it)
         try {
@@ -571,7 +580,7 @@ export class PodRigInstantiator {
 
     return {
       ok: true,
-      result: { rigId, specName: rigSpec.name, specVersion: rigSpec.version, nodes: nodeResults },
+      result: { rigId, specName: rigSpec.name, specVersion: rigSpec.version, nodes: nodeResults, warnings: podInstantiateWarnings.length > 0 ? podInstantiateWarnings : undefined },
     };
   }
 
@@ -644,6 +653,7 @@ export class PodRigInstantiator {
     qualifiedId: string,
     nodeIdMap: Record<string, string>,
     launchedSessionNames: string[],
+    warnings: string[],
   ): Promise<{ logicalId: string; status: "launched" | "failed"; error?: string }> {
     // Create node with sentinel values
     let nodeId: string;
@@ -677,6 +687,9 @@ export class PodRigInstantiator {
       return { logicalId: qualifiedId, status: "failed", error: launchResult.message };
     }
     launchedSessionNames.push(canonicalSessionName);
+    if (launchResult.warnings?.length) {
+      warnings.push(...launchResult.warnings);
+    }
 
     // Propagate restore_policy to session row (restore-orchestrator reads session.restorePolicy)
     try {

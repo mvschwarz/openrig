@@ -521,6 +521,9 @@ export class BootstrapOrchestrator {
     }
 
     stages.push({ stage: "import_rig", status: "ok", detail: instantiateOutcome.result });
+    if (instantiateOutcome.result.warnings?.length) {
+      warnings.push(...instantiateOutcome.result.warnings);
+    }
 
     // --- DONE ---
     const finalStatus: BootstrapStatus = hasExecFailures || packageInstallFailed ? "partial" : "completed";
@@ -612,6 +615,9 @@ export class BootstrapOrchestrator {
       status: anyFailed ? "failed" : "ok",
       detail: { rigId: result.rigId, specName: result.specName, nodes: result.nodes },
     });
+    if (result.warnings?.length) {
+      warnings.push(...result.warnings);
+    }
 
     this.deps.bootstrapRepo.updateRunStatus(run.id, finalStatus);
     return {

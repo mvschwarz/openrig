@@ -198,4 +198,36 @@ describe("Up CLI", () => {
     expect(output).toContain("Attach:");
     expect(output).toContain("tmux attach -t dev-impl@test-rig");
   });
+
+  // PNS-T06: fresh boot warnings (e.g. transcript attach failures) surface to stderr
+  it("fresh boot success prints warnings when present", async () => {
+    const origListeners = server.listeners("request");
+    server.removeAllListeners("request");
+    server.on("request", (req: http.IncomingMessage, res: http.ServerResponse) => {
+      let body = "";
+      req.on("data", (chunk: Buffer) => { body += chunk; });
+      req.on("end", () => {
+        if (req.url === "/api/up" && req.method === "POST") {
+          res.writeHead(201, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({
+            status: "completed", runId: "run-3", rigId: "rig-2",
+            stages: [{ stage: "import_rig", status: "ok" }],
+            errors: [],
+            warnings: ["Transcript capture failed for dev-impl@test-rig: pipe-pane failed"],
+          }));
+        } else {
+          res.writeHead(404).end();
+        }
+      });
+    });
+
+    const { logs } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rigged", "up", "/tmp/test.yaml"]);
+    });
+    const output = logs.join("\n");
+    expect(output).toContain("warning: Transcript capture failed");
+
+    server.removeAllListeners("request");
+    for (const l of origListeners) server.on("request", l as (...args: unknown[]) => void);
+  });
 });

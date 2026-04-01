@@ -383,4 +383,58 @@ describe("NodeLauncher", () => {
 
     otherDb.close();
   });
+
+  describe("transcript integration", () => {
+    it("calls startPipePane on successful launch when TranscriptStore is enabled", async () => {
+      const { rig } = seedRigWithNode();
+      const pipePaneSpy = vi.fn<(name: string, path: string) => Promise<TmuxResult>>()
+        .mockResolvedValue({ ok: true });
+      const tmux = mockTmuxAdapter({
+        createSession: async () => ({ ok: true as const }),
+      });
+      (tmux as unknown as Record<string, unknown>).startPipePane = pipePaneSpy;
+
+      const { TranscriptStore } = await import("../src/domain/transcript-store.js");
+      const transcriptStore = new TranscriptStore({ transcriptsRoot: "/tmp/test-transcripts", enabled: true });
+      vi.spyOn(transcriptStore, "ensureTranscriptDir").mockReturnValue(true);
+
+      const launcher = new NodeLauncher({
+        db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux, transcriptStore,
+      });
+
+      const result = await launcher.launchNode(rig.id, "dev1-impl");
+      expect(result.ok).toBe(true);
+      expect(pipePaneSpy).toHaveBeenCalledOnce();
+      expect(pipePaneSpy.mock.calls[0]![1]).toContain("dev1-impl");
+      if (result.ok) {
+        expect(result.warnings).toBeUndefined();
+      }
+    });
+
+    it("adds warning to LaunchResult.warnings on pipe-pane failure but launch still succeeds", async () => {
+      const { rig } = seedRigWithNode();
+      const pipePaneSpy = vi.fn<(name: string, path: string) => Promise<TmuxResult>>()
+        .mockResolvedValue({ ok: false, code: "unknown", message: "pipe-pane failed" });
+      const tmux = mockTmuxAdapter({
+        createSession: async () => ({ ok: true as const }),
+      });
+      (tmux as unknown as Record<string, unknown>).startPipePane = pipePaneSpy;
+
+      const { TranscriptStore } = await import("../src/domain/transcript-store.js");
+      const transcriptStore = new TranscriptStore({ transcriptsRoot: "/tmp/test-transcripts", enabled: true });
+      vi.spyOn(transcriptStore, "ensureTranscriptDir").mockReturnValue(true);
+
+      const launcher = new NodeLauncher({
+        db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux, transcriptStore,
+      });
+
+      const result = await launcher.launchNode(rig.id, "dev1-impl");
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.warnings).toBeDefined();
+        expect(result.warnings!.length).toBe(1);
+        expect(result.warnings![0]).toContain("Transcript capture failed");
+      }
+    });
+  });
 });

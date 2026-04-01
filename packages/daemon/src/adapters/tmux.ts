@@ -208,6 +208,31 @@ export class TmuxAdapter {
     }
   }
 
+  /** Start pipe-pane to capture terminal output to a file. */
+  async startPipePane(sessionName: string, outputPath: string): Promise<TmuxResult> {
+    // Shell-quote the path for safe injection into the pipe-pane command.
+    // The entire pipe command is passed as a single argument to tmux,
+    // which executes it via sh -c. We use shellQuote on the path.
+    const cmd = `tmux pipe-pane -t ${shellQuote(sessionName)} ${shellQuote("cat >> " + shellQuote(outputPath))}`;
+    try {
+      await this.exec(cmd);
+      return { ok: true };
+    } catch (err) {
+      return classifyWriteError(err);
+    }
+  }
+
+  /** Stop pipe-pane on a session. */
+  async stopPipePane(sessionName: string): Promise<TmuxResult> {
+    const cmd = `tmux pipe-pane -t ${shellQuote(sessionName)}`;
+    try {
+      await this.exec(cmd);
+      return { ok: true };
+    } catch (err) {
+      return classifyWriteError(err);
+    }
+  }
+
   /** Capture pane content (last N lines). Returns null if unavailable. */
   async capturePaneContent(paneId: string, lines: number = 20): Promise<string | null> {
     try {

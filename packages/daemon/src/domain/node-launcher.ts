@@ -3,13 +3,14 @@ import type { RigRepository } from "./rig-repository.js";
 import type { SessionRegistry } from "./session-registry.js";
 import type { EventBus } from "./event-bus.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
+import type { TranscriptStore } from "./transcript-store.js";
 import type { PersistedEvent } from "./types.js";
 import { validateSessionName, deriveSessionName } from "./session-name.js";
 
 import type { Session, Binding } from "./types.js";
 
 export type LaunchResult =
-  | { ok: true; sessionName: string; session: Session; binding: Binding }
+  | { ok: true; sessionName: string; session: Session; binding: Binding; warnings?: string[] }
   | { ok: false; code: string; message: string };
 
 interface LaunchOpts {
@@ -23,6 +24,7 @@ interface NodeLauncherDeps {
   sessionRegistry: SessionRegistry;
   eventBus: EventBus;
   tmuxAdapter: TmuxAdapter;
+  transcriptStore?: TranscriptStore;
 }
 
 export class NodeLauncher {
@@ -31,6 +33,7 @@ export class NodeLauncher {
   private sessionRegistry: SessionRegistry;
   private eventBus: EventBus;
   private tmuxAdapter: TmuxAdapter;
+  private transcriptStore: TranscriptStore | null;
 
   constructor(deps: NodeLauncherDeps) {
     // Hard runtime invariant: all domain services must share the same db handle.
@@ -50,6 +53,7 @@ export class NodeLauncher {
     this.sessionRegistry = deps.sessionRegistry;
     this.eventBus = deps.eventBus;
     this.tmuxAdapter = deps.tmuxAdapter;
+    this.transcriptStore = deps.transcriptStore ?? null;
   }
 
   async launchNode(
@@ -90,6 +94,21 @@ export class NodeLauncher {
     }
     if (!tmuxResult.ok) {
       return { ok: false, code: tmuxResult.code, message: tmuxResult.message };
+    }
+
+    // 3b. Start transcript piping (best-effort — failure warns, doesn't block launch)
+    const launchWarnings: string[] = [];
+    if (this.transcriptStore?.enabled) {
+      const dirOk = this.transcriptStore.ensureTranscriptDir(rig.rig.name);
+      if (dirOk) {
+        const transcriptPath = this.transcriptStore.getTranscriptPath(rig.rig.name, sessionName);
+        const pipeResult = await this.tmuxAdapter.startPipePane(sessionName, transcriptPath);
+        if (!pipeResult.ok) {
+          launchWarnings.push(`Transcript capture failed for ${sessionName}: ${pipeResult.message}`);
+        }
+      } else {
+        launchWarnings.push(`Transcript directory creation failed for rig ${rig.rig.name}`);
+      }
     }
 
     // 4. DB transaction: session + binding + event (atomic)
@@ -133,6 +152,7 @@ export class NodeLauncher {
       sessionName,
       session: session!,
       binding: binding!,
+      warnings: launchWarnings.length > 0 ? launchWarnings : undefined,
     };
   }
 }

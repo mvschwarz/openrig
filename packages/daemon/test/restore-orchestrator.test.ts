@@ -929,4 +929,45 @@ describe("RestoreOrchestrator", () => {
       expect(result.result.warnings.some((w: string) => w.includes("no resume token"))).toBe(true);
     }
   });
+
+  it("restore propagates launch warnings and writes transcript boundary marker with snapshot ID", async () => {
+    const snap = seedRigAndSnapshot();
+
+    const { TranscriptStore } = await import("../src/domain/transcript-store.js");
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "restore-transcript-"));
+    const transcriptStore = new TranscriptStore({ transcriptsRoot: tmpDir, enabled: true });
+
+    const tmux = mockTmux();
+    // startPipePane fails → warning propagates, but boundary marker still written
+    (tmux as unknown as Record<string, unknown>).startPipePane = vi.fn(async () => ({ ok: false, code: "unknown", message: "pipe-pane failed" }));
+
+    const nodeLauncher = new NodeLauncher({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux, transcriptStore });
+    const orch = new RestoreOrchestrator({
+      db, rigRepo, sessionRegistry, eventBus, snapshotRepo, snapshotCapture,
+      checkpointStore, nodeLauncher, tmuxAdapter: tmux,
+      claudeResume: mockClaudeResume(),
+      codexResume: mockCodexResume(),
+      transcriptStore,
+    });
+
+    const result = await orch.restore(snap.id);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      // Launch warnings propagate (transcript capture failed)
+      expect(result.result.warnings.some((w: string) => w.includes("Transcript capture failed"))).toBe(true);
+
+      // Boundary markers were actually written to transcript files
+      const rigDir = path.join(tmpDir, "r99");
+      expect(fs.existsSync(rigDir)).toBe(true);
+
+      // Check that at least one transcript file has a boundary marker with the snapshot ID
+      const transcriptFiles = fs.readdirSync(rigDir).filter((f) => f.endsWith(".log"));
+      expect(transcriptFiles.length).toBeGreaterThan(0);
+      const firstContent = fs.readFileSync(path.join(rigDir, transcriptFiles[0]!), "utf-8");
+      expect(firstContent).toContain("--- SESSION BOUNDARY:");
+      expect(firstContent).toContain(`restore attempt from snapshot ${snap.id}`);
+    }
+
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
 });
