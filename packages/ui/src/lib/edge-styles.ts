@@ -5,6 +5,7 @@ export interface EdgeStyleResult {
   style: CSSProperties;
   animated: boolean;
   type: string;
+  pathOptions?: { borderRadius?: number; offset?: number };
   markerEnd: { type: MarkerType; color: string; width: number; height: number };
   label?: undefined;
 }
@@ -24,6 +25,7 @@ export function getEdgeStyle(kind: string): EdgeStyleResult {
         style: { stroke: EDGE_COLOR, strokeWidth: 1.5 },
         animated: false,
         type: "smoothstep",
+        pathOptions: { borderRadius: 18, offset: 20 },
         markerEnd: ARROW,
         label: undefined,
       };
@@ -32,6 +34,7 @@ export function getEdgeStyle(kind: string): EdgeStyleResult {
         style: { stroke: EDGE_COLOR, strokeWidth: 1.5, strokeDasharray: "6 3" },
         animated: false,
         type: "smoothstep",
+        pathOptions: { borderRadius: 18, offset: 20 },
         markerEnd: ARROW,
         label: undefined,
       };
@@ -40,6 +43,7 @@ export function getEdgeStyle(kind: string): EdgeStyleResult {
         style: { stroke: EDGE_COLOR, strokeWidth: 1, strokeDasharray: "4 2" },
         animated: false,
         type: "smoothstep",
+        pathOptions: { borderRadius: 18, offset: 20 },
         markerEnd: ARROW,
         label: undefined,
       };
@@ -48,6 +52,7 @@ export function getEdgeStyle(kind: string): EdgeStyleResult {
         style: { stroke: EDGE_COLOR, strokeWidth: 1, strokeDasharray: "2 2" },
         animated: false,
         type: "smoothstep",
+        pathOptions: { borderRadius: 18, offset: 20 },
         markerEnd: ARROW,
         label: undefined,
       };
@@ -56,6 +61,7 @@ export function getEdgeStyle(kind: string): EdgeStyleResult {
         style: { stroke: EDGE_COLOR, strokeWidth: 1 },
         animated: false,
         type: "smoothstep",
+        pathOptions: { borderRadius: 18, offset: 20 },
         markerEnd: ARROW,
         label: undefined,
       };

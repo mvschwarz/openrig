@@ -37,11 +37,11 @@ const MAX_POD_COLUMNS = 3;
 const POD_MEMBER_GAP_X = 36;
 const POD_MEMBER_GAP_Y = 32;
 const POD_PADDING_X = 28;
-const POD_PADDING_TOP = 52;
+const POD_PADDING_TOP = 44;
 const POD_PADDING_BOTTOM = 28;
-const ENTITY_GAP_X = 96;
-const ENTITY_GAP_Y = 150;
-const DISCONNECTED_ROW_COLUMNS = 2;
+const ENTITY_GAP_X = 72;
+const ENTITY_GAP_Y = 120;
+const DISCONNECTED_ROW_COLUMNS = 3;
 const HIERARCHY_EDGE_KINDS = new Set(["delegates_to", "spawned_by"]);
 
 export function applyTreeLayout(
@@ -173,6 +173,10 @@ export function applyTreeLayout(
       ...(groupNode.style ?? {}),
       width: entity.width,
       height: entity.height,
+      background:
+        "linear-gradient(180deg, rgba(84, 96, 115, 0.08) 0px, rgba(84, 96, 115, 0.08) 32px, rgba(255, 255, 255, 0.22) 32px, rgba(255, 255, 255, 0.22) 100%)",
+      border: "1px dashed rgba(84, 96, 115, 0.45)",
+      boxShadow: "0 0 0 1px rgba(84, 96, 115, 0.10)",
     };
 
     for (let index = 0; index < entity.members.length; index += 1) {

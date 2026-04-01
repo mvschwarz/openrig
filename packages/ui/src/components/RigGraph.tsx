@@ -253,7 +253,7 @@ export function RigGraph({ rigId, showDiscovered = true }: { rigId: string | nul
         nodeTypes={nodeTypes}
         onNodeClick={onNodeClick}
         fitView
-        fitViewOptions={{ padding: 0.3, maxZoom: 1.0 }}
+        fitViewOptions={{ padding: 0.16, maxZoom: 1.15 }}
         className="relative z-10"
         proOptions={{ hideAttribution: true }}
         minZoom={0.3}
