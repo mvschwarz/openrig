@@ -1,5 +1,4 @@
 import { useState } from "react";
-import { useNavigate } from "@tanstack/react-router";
 import { useImportRig, ImportError } from "../hooks/mutations.js";
 import { getInstantiateStatusColorClass } from "@/lib/instantiate-status-colors";
 import { Button } from "@/components/ui/button";
@@ -95,8 +94,6 @@ function StepIndicator({ currentStep, errorAtStep }: { currentStep: Step; errorA
 }
 
 export function ImportFlow({ onBack }: ImportFlowProps = {}) {
-  const navigate = useNavigate();
-  const handleBack = onBack ?? (() => navigate({ to: "/specs" }));
   const importRig = useImportRig();
   const [yaml, setYaml] = useState("");
   const [rigRoot, setRigRoot] = useState("");
@@ -193,9 +190,6 @@ export function ImportFlow({ onBack }: ImportFlowProps = {}) {
             Instantiate a topology from YAML spec
           </p>
         </div>
-        <Button variant="ghost" onClick={handleBack}>
-          &larr; Specs
-        </Button>
       </div>
 
       {/* Step indicator */}
@@ -312,11 +306,13 @@ export function ImportFlow({ onBack }: ImportFlowProps = {}) {
             </TableBody>
           </Table>
 
-          <div className="mt-spacing-6">
-            <Button variant="ghost" onClick={handleBack}>
-              ← Back to Specs
-            </Button>
-          </div>
+          {onBack ? (
+            <div className="mt-spacing-6">
+              <Button variant="ghost" onClick={onBack}>
+                Close
+              </Button>
+            </div>
+          ) : null}
         </div>
       )}
 

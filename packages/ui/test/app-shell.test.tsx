@@ -20,7 +20,22 @@ beforeEach(async () => {
 afterEach(() => {
   if (OriginalEventSource) globalThis.EventSource = OriginalEventSource;
   cleanup();
+  Object.defineProperty(window, "innerWidth", {
+    configurable: true,
+    value: 1024,
+    writable: true,
+  });
+  window.dispatchEvent(new Event("resize"));
 });
+
+function setViewportWidth(width: number) {
+  Object.defineProperty(window, "innerWidth", {
+    configurable: true,
+    value: width,
+    writable: true,
+  });
+  window.dispatchEvent(new Event("resize"));
+}
 
 function mockAllApis() {
   mockFetch.mockImplementation((url: string) => {
@@ -172,8 +187,9 @@ describe("App Shell + Routing", () => {
     });
   });
 
-  it("specs drawer actions navigate to review flows and close the drawer", async () => {
+  it("wide layouts keep the specs drawer open across navigation", async () => {
     mockAllApis();
+    setViewportWidth(1280);
     await renderRealAppAt("/specs");
 
     await waitFor(() => {
@@ -185,12 +201,13 @@ describe("App Shell + Routing", () => {
 
     await waitFor(() => {
       expect(screen.getByTestId("import-flow")).toBeDefined();
-      expect(screen.queryByTestId("specs-panel")).toBeNull();
+      expect(screen.getByTestId("specs-panel")).toBeDefined();
     });
   });
 
-  it("validate agent route can be launched from specs without leaving the drawer open", async () => {
+  it("wide layouts keep specs open when launching validate agent", async () => {
     mockAllApis();
+    setViewportWidth(1280);
     await renderRealAppAt("/specs");
 
     await waitFor(() => {
@@ -202,6 +219,24 @@ describe("App Shell + Routing", () => {
 
     await waitFor(() => {
       expect(screen.getByTestId("agent-spec-validate-flow")).toBeDefined();
+      expect(screen.getByTestId("specs-panel")).toBeDefined();
+    });
+  });
+
+  it("compact layouts clear the specs drawer on navigation to a workspace page", async () => {
+    mockAllApis();
+    setViewportWidth(768);
+    await renderRealAppAt("/specs");
+
+    await waitFor(() => {
+      expect(screen.getByTestId("specs-panel")).toBeDefined();
+      expect(screen.getByText("Import RigSpec")).toBeDefined();
+    });
+
+    fireEvent.click(screen.getByText("Import RigSpec"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("import-flow")).toBeDefined();
       expect(screen.queryByTestId("specs-panel")).toBeNull();
     });
   });

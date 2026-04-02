@@ -241,16 +241,13 @@ export function PackageInstallFlow() {
     <WorkspacePage>
     <div data-testid="install-flow">
       {/* Header */}
-      <div className="flex items-center justify-between mb-spacing-8">
+      <div className="mb-spacing-8">
         <div>
           <h2 className="text-headline-lg uppercase tracking-[0.06em]">INSTALL PACKAGE (Legacy)</h2>
           <p className="text-label-md text-foreground-muted font-grotesk mt-spacing-1">
             Validate, configure, and apply an agent package
           </p>
         </div>
-        <Button variant="ghost" onClick={() => navigate({ to: "/packages" })}>
-          &larr; Packages
-        </Button>
       </div>
 
       <StepIndicator currentStep={step} errorAtStep={errorAtStep} />
@@ -477,9 +474,6 @@ export function PackageInstallFlow() {
           </div>
 
           <div className="flex gap-spacing-3">
-            <Button variant="ghost" onClick={() => navigate({ to: "/packages" })}>
-              &larr; Back to Packages
-            </Button>
             <Button
               variant="tactical"
               data-testid="detail-link"

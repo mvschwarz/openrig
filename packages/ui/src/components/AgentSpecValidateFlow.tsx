@@ -1,12 +1,10 @@
 import { useState } from "react";
-import { useNavigate } from "@tanstack/react-router";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { WorkspacePage } from "./WorkspacePage.js";
 
 export function AgentSpecValidateFlow() {
-  const navigate = useNavigate();
   const [yaml, setYaml] = useState("");
   const [status, setStatus] = useState<"idle" | "pending" | "valid" | "invalid" | "error">("idle");
   const [errors, setErrors] = useState<string[]>([]);
@@ -43,9 +41,6 @@ export function AgentSpecValidateFlow() {
             Check an AgentSpec before you use it in a rig.
           </p>
         </div>
-        <Button variant="ghost" onClick={() => navigate({ to: "/specs" })}>
-          &larr; Specs
-        </Button>
       </div>
 
       <Textarea

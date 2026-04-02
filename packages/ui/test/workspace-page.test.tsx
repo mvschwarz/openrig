@@ -16,6 +16,7 @@ describe("WorkspacePage", () => {
     expect(page.className).toContain("flex-1");
     expect(page.className).toContain("overflow-y-auto");
     expect(page.className).toContain("lg:pl-[var(--workspace-left-offset,0px)]");
+    expect(page.className).toContain("lg:pr-[var(--workspace-right-offset,0px)]");
     expect(inner.className).toContain("mx-auto");
     expect(inner.className).toContain("max-w-[960px]");
     expect(screen.getByTestId("workspace-child").textContent).toBe("content");

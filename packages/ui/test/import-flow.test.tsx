@@ -161,27 +161,10 @@ describe("ImportFlow", () => {
     });
   });
 
-  // Test 7: Back to specs via router
-  it("back button navigates to specs", async () => {
-    mockFetch.mockImplementation((url: string) => {
-      if (url === "/api/rigs/summary") return Promise.resolve({ ok: true, json: async () => [] });
-      return Promise.resolve({ ok: true, json: async () => ({}) });
-    });
+  it("does not render a page-local Specs back button", async () => {
+    await renderImportFlow();
 
-    render(createAppTestRouter({
-      routes: [
-        { path: "/specs", component: () => <div data-testid="specs-page">Specs</div> },
-        { path: "/import", component: ImportFlow },
-      ],
-      initialPath: "/import",
-    }));
-
-    await waitFor(() => expect(screen.getByTestId("import-flow")).toBeDefined());
-    fireEvent.click(screen.getByText("← Specs"));
-
-    await waitFor(() => {
-      expect(screen.getByTestId("specs-page")).toBeDefined();
-    });
+    expect(screen.queryByText("← Specs")).toBeNull();
   });
 
   // Test 8: After validation succeeds, step 1 completed (checkmark), step 2 active

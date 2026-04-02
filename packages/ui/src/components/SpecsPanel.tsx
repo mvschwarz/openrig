@@ -31,7 +31,6 @@ export function SpecsPanel({ onClose }: SpecsPanelProps) {
 
   const openSurface = async (to: "/import" | "/bootstrap" | "/agents/validate") => {
     await navigate({ to });
-    onClose();
   };
 
   return (

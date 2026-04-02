@@ -88,17 +88,13 @@ describe("AgentSpecValidateFlow", () => {
     });
   });
 
-  it("back button returns to the specs surface", async () => {
+  it("does not render a page-local Specs back button", async () => {
     renderFlow();
 
     await waitFor(() => {
       expect(screen.getByTestId("agent-spec-validate-flow")).toBeDefined();
     });
 
-    fireEvent.click(screen.getByText("← Specs"));
-
-    await waitFor(() => {
-      expect(screen.getByTestId("specs-page")).toBeDefined();
-    });
+    expect(screen.queryByText("← Specs")).toBeNull();
   });
 });

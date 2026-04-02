@@ -74,6 +74,8 @@ interface AppShellProps {
   children: ReactNode;
 }
 
+const WIDE_LAYOUT_BREAKPOINT = 1024;
+
 function parseCurrentRigId(pathname: string): string | null {
   const match = pathname.match(/^\/rigs\/([^/]+)/);
   return match?.[1] ?? null;
@@ -102,16 +104,31 @@ export function AppShell({ children }: AppShellProps) {
   const { data: rigs } = useRigSummary();
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [desktopExplorerOpen, setDesktopExplorerOpen] = useState(true);
+  const [isWideLayout, setIsWideLayout] = useState(() => {
+    if (typeof window === "undefined") return true;
+    return window.innerWidth >= WIDE_LAYOUT_BREAKPOINT;
+  });
   const { events } = useActivityFeed();
-  const [selection, setSelection] = useState<DrawerSelection>(null);
+  const [selectionState, setSelectionState] = useState<DrawerSelection>(null);
   const [selectedDiscoveredId, setSelectedDiscoveredIdState] = useState<string | null>(null);
   const [placementTarget, setPlacementTargetState] = useState<DiscoveryPlacementTarget>(null);
   const currentRigName = currentRigId ? (rigs?.find((rig) => rig.id === currentRigId)?.name ?? null) : null;
   const surfaceTitle = resolveSurfaceTitle(pathname, currentRigId, currentRigName);
-  const openExplorer = () => {
+  const setSelection = useCallback((next: DrawerSelection) => {
+    setSelectionState(next);
+    if (!isWideLayout && next) {
+      setSidebarOpen(false);
+    }
+  }, [isWideLayout]);
+  const openExplorer = useCallback(() => {
     setDesktopExplorerOpen(true);
+    if (!isWideLayout) {
+      setSelectionState(null);
+      setSidebarOpen(true);
+      return;
+    }
     setSidebarOpen(true);
-  };
+  }, [isWideLayout]);
   const clearPlacement = useCallback(() => {
     setSelectedDiscoveredIdState(null);
     setPlacementTargetState(null);
@@ -122,30 +139,49 @@ export function AppShell({ children }: AppShellProps) {
   }, []);
 
   useEffect(() => {
-    if (selection?.type !== "discovery") {
+    if (selectionState?.type !== "discovery") {
       clearPlacement();
     }
-  }, [selection, clearPlacement]);
+  }, [selectionState, clearPlacement]);
 
   useEffect(() => {
     if (
-      selection?.type === "discovery" &&
+      selectionState?.type === "discovery" &&
       placementTarget &&
       currentRigId !== placementTarget.rigId
     ) {
       setPlacementTargetState(null);
     }
-  }, [currentRigId, placementTarget, selection]);
+  }, [currentRigId, placementTarget, selectionState]);
+
+  useEffect(() => {
+    const handleResize = () => {
+      setIsWideLayout(window.innerWidth >= WIDE_LAYOUT_BREAKPOINT);
+    };
+
+    handleResize();
+    window.addEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
+  }, []);
+
+  useEffect(() => {
+    const isDrawerBridgeRoute = pathname === "/specs" || pathname === "/discovery";
+    if (!isWideLayout && !isDrawerBridgeRoute) {
+      setSelectionState(null);
+      setSidebarOpen(false);
+    }
+  }, [isWideLayout, pathname]);
 
   // Mount global SSE event listener
   useGlobalEvents();
 
   const workspaceStyle = {
-    "--workspace-left-offset": desktopExplorerOpen ? "18rem" : "3rem",
+    "--workspace-left-offset": isWideLayout ? (desktopExplorerOpen ? "18rem" : "3rem") : "0rem",
+    "--workspace-right-offset": isWideLayout && selectionState ? "20rem" : "0rem",
   } as CSSProperties;
 
   return (
-    <DrawerSelectionContext.Provider value={{ selection, setSelection }}>
+    <DrawerSelectionContext.Provider value={{ selection: selectionState, setSelection }}>
       <DiscoveryPlacementContext.Provider
         value={{
           selectedDiscoveredId,
@@ -177,7 +213,12 @@ export function AppShell({ children }: AppShellProps) {
             {/* Hamburger — narrow viewports only */}
             <button
               data-testid="sidebar-toggle"
-              onClick={() => setSidebarOpen(!sidebarOpen)}
+              onClick={() => {
+                if (!sidebarOpen) {
+                  setSelectionState(null);
+                }
+                setSidebarOpen(!sidebarOpen);
+              }}
               className="flex flex-col gap-[3px] p-1 lg:hidden"
               aria-label="Toggle navigation"
             >
@@ -201,42 +242,42 @@ export function AppShell({ children }: AppShellProps) {
             <button
               type="button"
               data-testid="discovery-toggle"
-              onClick={() => setSelection(selection?.type === "discovery" ? null : { type: "discovery" })}
+              onClick={() => setSelection(selectionState?.type === "discovery" ? null : { type: "discovery" })}
               className={`inline-flex h-8 w-8 items-center justify-center text-stone-700 transition-colors ${
-                selection?.type === "discovery"
+                selectionState?.type === "discovery"
                   ? "text-stone-950"
                   : "hover:text-stone-950"
               }`}
-              aria-label={selection?.type === "discovery" ? "Close discovery drawer" : "Open discovery drawer"}
-              title={selection?.type === "discovery" ? "Close discovery drawer" : "Open discovery drawer"}
+              aria-label={selectionState?.type === "discovery" ? "Close discovery drawer" : "Open discovery drawer"}
+              title={selectionState?.type === "discovery" ? "Close discovery drawer" : "Open discovery drawer"}
             >
               <SquarePlus className="h-4 w-4" />
             </button>
             <button
               type="button"
               data-testid="specs-toggle"
-              onClick={() => setSelection(selection?.type === "specs" ? null : { type: "specs" })}
+              onClick={() => setSelection(selectionState?.type === "specs" ? null : { type: "specs" })}
               className={`inline-flex h-8 w-8 items-center justify-center text-stone-700 transition-colors ${
-                selection?.type === "specs"
+                selectionState?.type === "specs"
                   ? "text-stone-950"
                   : "hover:text-stone-950"
               }`}
-              aria-label={selection?.type === "specs" ? "Close specs drawer" : "Open specs drawer"}
-              title={selection?.type === "specs" ? "Close specs drawer" : "Open specs drawer"}
+              aria-label={selectionState?.type === "specs" ? "Close specs drawer" : "Open specs drawer"}
+              title={selectionState?.type === "specs" ? "Close specs drawer" : "Open specs drawer"}
             >
               <FileText className="h-4 w-4" />
             </button>
             <button
               type="button"
               data-testid="system-toggle"
-              onClick={() => setSelection(selection?.type === "system" ? null : { type: "system", tab: "log" })}
+              onClick={() => setSelection(selectionState?.type === "system" ? null : { type: "system", tab: "log" })}
               className={`inline-flex h-8 w-8 items-center justify-center text-stone-700 transition-colors ${
-                selection?.type === "system"
+                selectionState?.type === "system"
                   ? "text-stone-950"
                   : "hover:text-stone-950"
               }`}
-              aria-label={selection?.type === "system" ? "Close system drawer" : "Open system drawer"}
-              title={selection?.type === "system" ? "Close system drawer" : "Open system drawer"}
+              aria-label={selectionState?.type === "system" ? "Close system drawer" : "Open system drawer"}
+              title={selectionState?.type === "system" ? "Close system drawer" : "Open system drawer"}
             >
               <Cog className="h-4 w-4" />
             </button>
@@ -256,7 +297,7 @@ export function AppShell({ children }: AppShellProps) {
           <Explorer
             open={sidebarOpen}
             onClose={() => setSidebarOpen(false)}
-            selection={selection}
+            selection={selectionState}
             onSelect={setSelection}
             desktopMode={desktopExplorerOpen ? "full" : "hidden"}
             onDesktopToggle={() => setDesktopExplorerOpen((open) => !open)}
@@ -268,7 +309,7 @@ export function AppShell({ children }: AppShellProps) {
 
           {/* Detail drawer — visible when a rig or node is selected */}
           <SharedDetailDrawer
-            selection={selection}
+            selection={selectionState}
             onClose={() => setSelection(null)}
             events={events}
             selectedDiscoveredId={selectedDiscoveredId}

@@ -12,7 +12,7 @@ export function WorkspacePage({ children, className, innerClassName }: Workspace
     <div
       data-testid="workspace-page"
       className={cn(
-        "w-full flex-1 overflow-y-auto lg:pl-[var(--workspace-left-offset,0px)]",
+        "w-full flex-1 overflow-y-auto lg:pl-[var(--workspace-left-offset,0px)] lg:pr-[var(--workspace-right-offset,0px)]",
         className,
       )}
     >

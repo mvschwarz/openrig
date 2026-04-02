@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useParams, useNavigate } from "@tanstack/react-router";
+import { useParams } from "@tanstack/react-router";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import {
@@ -160,7 +160,6 @@ function InstallRow({
 
 export function PackageDetail() {
   const { packageId } = useParams({ strict: false }) as { packageId: string };
-  const navigate = useNavigate();
   const { data: pkg, isPending: pkgPending, error: pkgError } = usePackageInfo(packageId);
   const { data: installs, isPending: installsPending, error: installsError } = useInstallHistory(packageId);
   const rollbackMutation = useRollbackInstall(packageId);
@@ -226,15 +225,6 @@ export function PackageDetail() {
   return (
     <WorkspacePage>
     <div>
-      {/* Back link */}
-      <button
-        data-testid="back-link"
-        className="text-label-md text-foreground-muted hover:text-foreground transition-colors mb-spacing-4 block"
-        onClick={() => navigate({ to: "/packages" })}
-      >
-        &larr; PACKAGES
-      </button>
-
       {/* Package header */}
       {pkg && (
         <div className="card-dark p-spacing-6 mb-spacing-6" data-testid="package-header">
