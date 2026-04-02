@@ -2,6 +2,7 @@ import { RigDetailPanel } from "./RigDetailPanel.js";
 import { NodeDetailPanel } from "./NodeDetailPanel.js";
 import { SystemPanel } from "./SystemPanel.js";
 import { DiscoveryPanel, type DiscoveryPlacementTarget } from "./DiscoveryPanel.js";
+import { SpecsPanel } from "./SpecsPanel.js";
 import type { ActivityEvent } from "../hooks/useActivityFeed.js";
 
 export type DrawerSelection =
@@ -9,6 +10,7 @@ export type DrawerSelection =
   | { type: "node"; rigId: string; logicalId: string }
   | { type: "system"; tab?: "log" | "status" }
   | { type: "discovery" }
+  | { type: "specs" }
   | null;
 
 interface SharedDetailDrawerProps {
@@ -60,6 +62,10 @@ export function SharedDetailDrawer({
         onClearPlacement={onClearPlacement}
       />
     );
+  }
+
+  if (selection.type === "specs") {
+    return <SpecsPanel onClose={onClose} />;
   }
 
   return null;

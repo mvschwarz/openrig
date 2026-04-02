@@ -17,6 +17,7 @@ import {
   useRollbackInstall,
   type InstallSummary,
 } from "../hooks/usePackageDetail.js";
+import { WorkspacePage } from "./WorkspacePage.js";
 
 function statusBadgeColor(status: string): string {
   switch (status) {
@@ -186,30 +187,36 @@ export function PackageDetail() {
   // Loading
   if (pkgPending || installsPending) {
     return (
-      <div className="p-spacing-6" data-testid="detail-loading">
+      <WorkspacePage>
+      <div data-testid="detail-loading">
         <div className="h-8 w-48 shimmer mb-spacing-4" />
         <div className="card-dark p-spacing-6 mb-spacing-4">
           <div className="h-6 w-64 shimmer-dark mb-spacing-3" />
           <div className="h-4 w-full shimmer-dark" />
         </div>
       </div>
+      </WorkspacePage>
     );
   }
 
   // Error
   if (pkgError) {
     return (
-      <div className="p-spacing-6" data-testid="detail-error">
+      <WorkspacePage>
+      <div data-testid="detail-error">
         <p className="text-destructive">{pkgError.message}</p>
       </div>
+      </WorkspacePage>
     );
   }
 
   if (installsError) {
     return (
-      <div className="p-spacing-6" data-testid="installs-error">
+      <WorkspacePage>
+      <div data-testid="installs-error">
         <p className="text-destructive">Failed to load install history</p>
       </div>
+      </WorkspacePage>
     );
   }
 
@@ -217,7 +224,8 @@ export function PackageDetail() {
   const sortedInstalls = installs ?? [];
 
   return (
-    <div className="p-spacing-6 max-w-[800px]">
+    <WorkspacePage>
+    <div>
       {/* Back link */}
       <button
         data-testid="back-link"
@@ -303,5 +311,6 @@ export function PackageDetail() {
         </DialogContent>
       </Dialog>
     </div>
+    </WorkspacePage>
   );
 }

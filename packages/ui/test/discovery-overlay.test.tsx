@@ -80,6 +80,16 @@ function mockFetchSessions(sessions: DiscoveredSession[] = MOCK_SESSIONS) {
 }
 
 describe("DiscoveryOverlay", () => {
+  it("renders inside the shared workspace page shell", async () => {
+    mockFetchSessions();
+    render(createTestRouter({ component: DiscoveryOverlay, path: "/discovery", initialPath: "/discovery" }));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("workspace-page")).toBeDefined();
+      expect(screen.getByTestId("workspace-page-inner")).toBeDefined();
+    });
+  });
+
   // T1: Discovered nodes render with dashed border
   it("discovered nodes have dashed border", async () => {
     mockFetchSessions();

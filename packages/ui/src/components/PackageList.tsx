@@ -3,6 +3,7 @@ import { usePackages, type PackageSummary } from "../hooks/usePackages.js";
 import { Button } from "@/components/ui/button";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { cn } from "@/lib/utils";
+import { WorkspacePage } from "./WorkspacePage.js";
 
 function statusColor(status: string | null): string {
   switch (status) {
@@ -73,7 +74,8 @@ export function PackageList() {
   // Loading state
   if (isPending) {
     return (
-      <div className="p-spacing-6" data-testid="packages-loading">
+      <WorkspacePage>
+      <div data-testid="packages-loading">
         <div className="flex justify-between mb-spacing-6">
           <div className="h-8 w-32 shimmer" />
           <div className="h-8 w-28 shimmer" />
@@ -86,26 +88,32 @@ export function PackageList() {
           </div>
         ))}
       </div>
+      </WorkspacePage>
     );
   }
 
   // Error state
   if (error) {
     return (
-      <div className="p-spacing-6">
+      <WorkspacePage>
+      <div>
         <Alert data-testid="packages-error">
           <AlertDescription>{error.message}</AlertDescription>
         </Alert>
       </div>
+      </WorkspacePage>
     );
   }
 
   // Empty state
   if (sortedPackages.length === 0) {
     return (
+      <WorkspacePage>
       <div className="flex flex-col items-center justify-center min-h-[60vh]" data-testid="packages-empty">
-        <h2 className="text-display-lg text-foreground mb-spacing-4">NO SPECS</h2>
-        <p className="text-body-md text-foreground-muted mb-spacing-8">Import a RigSpec or validate an AgentSpec to get started</p>
+        <h2 className="text-display-lg text-foreground mb-spacing-4">NO LEGACY PACKAGE INSTALLS</h2>
+        <p className="text-body-md text-foreground-muted mb-spacing-8">
+          Legacy package tools remain available for bootstrap internals while Specs becomes the main authoring surface.
+        </p>
         <div className="flex flex-col items-center gap-spacing-3">
           <Button
             variant="default"
@@ -123,27 +131,21 @@ export function PackageList() {
           >
             BOOTSTRAP
           </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            data-testid="empty-install-btn"
-            onClick={() => navigate({ to: "/packages/install" })}
-          >
-            INSTALL PACKAGE
-          </Button>
         </div>
       </div>
+      </WorkspacePage>
     );
   }
 
   return (
-    <div className="p-spacing-6 max-w-[800px]">
+    <WorkspacePage>
+    <div>
       {/* Page header */}
       <div className="flex justify-between items-baseline mb-spacing-6">
         <div>
-          <h2 className="text-headline-lg uppercase">SPECS</h2>
+          <h2 className="text-headline-lg uppercase">LEGACY PACKAGE TOOLS</h2>
           <p className="text-label-md text-foreground-muted font-grotesk mt-spacing-1">
-            {sortedPackages.length} installed package{sortedPackages.length !== 1 ? "s" : ""} and authoring tools
+            {sortedPackages.length} legacy package install{sortedPackages.length !== 1 ? "s" : ""} retained for bootstrap internals
           </p>
         </div>
         <div className="flex flex-col items-end gap-spacing-2">
@@ -163,14 +165,6 @@ export function PackageList() {
           >
             BOOTSTRAP
           </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            data-testid="header-install-btn"
-            onClick={() => navigate({ to: "/packages/install" })}
-          >
-            INSTALL PACKAGE
-          </Button>
         </div>
       </div>
 
@@ -182,5 +176,6 @@ export function PackageList() {
         />
       ))}
     </div>
+    </WorkspacePage>
   );
 }

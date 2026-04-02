@@ -3,6 +3,7 @@ import { useNavigate } from "@tanstack/react-router";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import { WorkspacePage } from "./WorkspacePage.js";
 import {
   Table,
   TableHeader,
@@ -237,7 +238,8 @@ export function PackageInstallFlow() {
   const hasConflicts = (planResult?.conflicts ?? 0) > 0;
 
   return (
-    <div data-testid="install-flow" className="p-spacing-8 max-w-3xl">
+    <WorkspacePage>
+    <div data-testid="install-flow">
       {/* Header */}
       <div className="flex items-center justify-between mb-spacing-8">
         <div>
@@ -515,5 +517,6 @@ export function PackageInstallFlow() {
         </div>
       )}
     </div>
+    </WorkspacePage>
   );
 }

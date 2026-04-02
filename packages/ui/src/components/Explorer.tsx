@@ -74,47 +74,6 @@ function TreeToggle({
   );
 }
 
-function ExplorerActionButton({
-  label,
-  onClose,
-  to,
-  onAction,
-  testId,
-}: {
-  label: string;
-  onClose: () => void;
-  to?: string;
-  onAction?: () => void;
-  testId?: string;
-}) {
-  if (to) {
-    return (
-      <Link
-        to={to}
-        data-testid={testId}
-        onClick={onClose}
-        className="block w-full border-t border-stone-200 px-4 py-3 text-left font-mono text-[10px] uppercase tracking-[0.16em] text-stone-700 transition-colors hover:bg-stone-100"
-      >
-        {label}
-      </Link>
-    );
-  }
-
-  return (
-    <button
-      type="button"
-      data-testid={testId}
-      onClick={() => {
-        onAction?.();
-        onClose();
-      }}
-      className="block w-full border-t border-stone-200 px-4 py-3 text-left font-mono text-[10px] uppercase tracking-[0.16em] text-stone-700 transition-colors hover:bg-stone-100"
-    >
-      {label}
-    </button>
-  );
-}
-
 function ExplorerKindIcon({
   kind,
   statusClass,
@@ -424,12 +383,6 @@ function FullExplorerContents({
           onClose={onClose}
           currentRigId={currentRigId}
         />
-      </div>
-
-      <div className="mt-auto border-t border-stone-200">
-        <div data-testid="explorer-action-stack" className="flex flex-col">
-          <ExplorerActionButton to="/packages" label="Specs" onClose={onClose} testId="explorer-action-specs" />
-        </div>
       </div>
     </>
   );

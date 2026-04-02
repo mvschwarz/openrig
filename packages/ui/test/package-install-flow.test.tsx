@@ -120,6 +120,15 @@ async function advanceToStep(target: "validated" | "configure" | "planned" | "do
 }
 
 describe("PackageInstallFlow", () => {
+  it("renders inside the shared workspace page shell", async () => {
+    renderFlow();
+
+    await waitFor(() => {
+      expect(screen.getByTestId("workspace-page")).toBeDefined();
+      expect(screen.getByTestId("workspace-page-inner")).toBeDefined();
+    });
+  });
+
   // T5-AS-T14: Heading contains "(Legacy)"
   it("heading contains (Legacy)", async () => {
     renderFlow();

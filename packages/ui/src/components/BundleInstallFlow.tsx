@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { Button } from "@/components/ui/button";
 import { useBundleInstall, type BundleInstallResult } from "../hooks/useBundles.js";
+import { WorkspacePage } from "./WorkspacePage.js";
 
 type Step = "enter" | "planning" | "planned" | "applying" | "done" | "error";
 
@@ -48,7 +49,8 @@ export function BundleInstallFlow() {
   };
 
   return (
-    <div className="p-spacing-6 max-w-[800px]" data-testid="bundle-install-flow">
+    <WorkspacePage>
+    <div data-testid="bundle-install-flow">
       <h2 className="text-headline-lg uppercase mb-spacing-4">INSTALL BUNDLE</h2>
 
       {step === "enter" && (
@@ -112,5 +114,6 @@ export function BundleInstallFlow() {
         </div>
       )}
     </div>
+    </WorkspacePage>
   );
 }

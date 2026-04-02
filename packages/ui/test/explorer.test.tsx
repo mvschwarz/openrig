@@ -64,13 +64,13 @@ describe("Explorer sidebar", () => {
       expect(screen.getByText("auth-feats")).toBeDefined();
     });
     expect(screen.getByText("env: local")).toBeDefined();
-    expect(screen.getByText("Specs")).toBeDefined();
+    expect(screen.queryByText("Specs")).toBeNull();
     expect(screen.queryByText("Import")).toBeNull();
     expect(screen.getByTestId("environment-icon-local")).toBeDefined();
     expect(screen.getByTestId("rig-icon-auth-feats")).toBeDefined();
   });
 
-  it("renders only Specs in the explorer footer", async () => {
+  it("does not render specs footer actions", async () => {
     mockFetch.mockImplementation(async (url: string) => {
       if (url.includes("/api/rigs/summary")) {
         return { ok: true, json: async () => [{ id: "rig-1", name: "auth-feats", nodeCount: 2, latestSnapshotAt: null, latestSnapshotId: null }] };
@@ -87,12 +87,8 @@ describe("Explorer sidebar", () => {
       expect(screen.getByText("auth-feats")).toBeDefined();
     });
 
-    const stack = screen.getByTestId("explorer-action-stack");
-    expect(stack.className).toContain("flex-col");
-
-    const specs = screen.getByTestId("explorer-action-specs");
-    expect(specs.className).toContain("w-full");
-    expect(specs.className).toContain("border-t");
+    expect(screen.queryByTestId("explorer-action-stack")).toBeNull();
+    expect(screen.queryByTestId("explorer-action-specs")).toBeNull();
     expect(screen.queryByTestId("explorer-action-discovery")).toBeNull();
     expect(screen.queryByTestId("explorer-action-import")).toBeNull();
   });

@@ -18,6 +18,7 @@ import {
   type DiscoveredSession,
 } from "../hooks/useDiscovery.js";
 import { useRigSummary } from "../hooks/useRigSummary.js";
+import { WorkspacePage } from "./WorkspacePage.js";
 
 function runtimeAccent(hint: string): string {
   switch (hint) {
@@ -288,8 +289,9 @@ export function DiscoveryOverlay() {
   const adoptPending = bindMutation.isPending || claimMutation.isPending;
 
   return (
-    <div className="p-spacing-6" data-testid="discovery-overlay">
-        <div className="mx-auto max-w-[920px]">
+    <WorkspacePage>
+    <div data-testid="discovery-overlay">
+        <div>
         <div className="flex flex-col gap-spacing-4 border-b border-foreground/10 pb-spacing-5 sm:flex-row sm:items-end sm:justify-between">
           <div className="max-w-[620px]">
             <h2 className="text-headline-lg uppercase">DISCOVERY</h2>
@@ -390,5 +392,6 @@ export function DiscoveryOverlay() {
         </DialogContent>
       </Dialog>
     </div>
+    </WorkspacePage>
   );
 }

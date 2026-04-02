@@ -5,6 +5,7 @@ import { getInstantiateStatusColorClass } from "@/lib/instantiate-status-colors"
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import { WorkspacePage } from "./WorkspacePage.js";
 import {
   Table,
   TableHeader,
@@ -95,7 +96,7 @@ function StepIndicator({ currentStep, errorAtStep }: { currentStep: Step; errorA
 
 export function ImportFlow({ onBack }: ImportFlowProps = {}) {
   const navigate = useNavigate();
-  const handleBack = onBack ?? (() => navigate({ to: "/packages" }));
+  const handleBack = onBack ?? (() => navigate({ to: "/specs" }));
   const importRig = useImportRig();
   const [yaml, setYaml] = useState("");
   const [rigRoot, setRigRoot] = useState("");
@@ -182,7 +183,8 @@ export function ImportFlow({ onBack }: ImportFlowProps = {}) {
   };
 
   return (
-    <div data-testid="import-flow" className="p-spacing-8 max-w-3xl">
+    <WorkspacePage>
+    <div data-testid="import-flow">
       {/* Header */}
       <div className="flex items-center justify-between mb-spacing-8">
         <div>
@@ -344,5 +346,6 @@ export function ImportFlow({ onBack }: ImportFlowProps = {}) {
         </div>
       )}
     </div>
+    </WorkspacePage>
   );
 }

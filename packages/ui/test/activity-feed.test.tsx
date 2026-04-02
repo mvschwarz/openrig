@@ -63,13 +63,13 @@ function renderFeedWithRouter(props: {
     component: () => <div data-testid="rig-page">Rig Detail</div>,
   });
 
-  const packagesRoute = createRoute({
+  const bootstrapRoute = createRoute({
     getParentRoute: () => rootRoute,
-    path: "/packages",
-    component: () => <div data-testid="packages-page">Packages</div>,
+    path: "/bootstrap",
+    component: () => <div data-testid="bootstrap-page">Bootstrap</div>,
   });
 
-  const routeTree = rootRoute.addChildren([indexRoute, rigRoute, packagesRoute]);
+  const routeTree = rootRoute.addChildren([indexRoute, rigRoute, bootstrapRoute]);
   const router = createRouter({
     routeTree,
     history: createMemoryHistory({ initialEntries: ["/"] }),
@@ -328,8 +328,8 @@ describe("Activity Feed", () => {
     });
   });
 
-  // Test 10: Package entries navigate to /packages (wired in PUX-T02)
-  it("package.installed entry navigates to /packages on click", async () => {
+  // Test 10: Package entries navigate to /bootstrap because package installs are bootstrap-adjacent legacy tools
+  it("package.installed entry navigates to /bootstrap on click", async () => {
     const events = [
       makeEvent({ type: "package.installed", payload: { packageName: "p", packageVersion: "1", applied: 1, deferred: 0 } }),
     ];
@@ -347,7 +347,7 @@ describe("Activity Feed", () => {
     });
 
     await waitFor(() => {
-      expect(screen.getByTestId("packages-page")).toBeTruthy();
+      expect(screen.getByTestId("bootstrap-page")).toBeTruthy();
     });
   });
 
@@ -408,10 +408,10 @@ describe("Activity Feed", () => {
 });
 
 describe("eventRoute", () => {
-  it("returns /packages for package events", () => {
-    expect(eventRoute(makeEvent({ type: "package.installed", payload: {} }))).toBe("/packages");
-    expect(eventRoute(makeEvent({ type: "package.install_failed", payload: {} }))).toBe("/packages");
-    expect(eventRoute(makeEvent({ type: "package.rolledback", payload: {} }))).toBe("/packages");
+  it("returns /bootstrap for package events", () => {
+    expect(eventRoute(makeEvent({ type: "package.installed", payload: {} }))).toBe("/bootstrap");
+    expect(eventRoute(makeEvent({ type: "package.install_failed", payload: {} }))).toBe("/bootstrap");
+    expect(eventRoute(makeEvent({ type: "package.rolledback", payload: {} }))).toBe("/bootstrap");
   });
 
   it("returns /rigs/{rigId} for rig-scoped events", () => {

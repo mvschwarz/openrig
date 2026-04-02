@@ -1,4 +1,3 @@
-import { Link } from "@tanstack/react-router";
 import { useDrawerSelection, useExplorerVisibility } from "./AppShell.js";
 
 export function WorkspaceHome() {
@@ -30,12 +29,14 @@ export function WorkspaceHome() {
           >
             Explore
           </button>
-          <Link
-            to="/packages"
+          <button
+            type="button"
+            data-testid="workspace-open-specs"
+            onClick={() => setSelection({ type: "specs" })}
             className="border border-stone-300 px-4 py-2 font-mono text-[10px] uppercase tracking-[0.14em] text-stone-700 transition-colors hover:bg-stone-100"
           >
             Open Specs
-          </Link>
+          </button>
           <button
             type="button"
             data-testid="workspace-open-discovery"

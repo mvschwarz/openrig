@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { Button } from "@/components/ui/button";
 import { RequirementsPanel, type RequirementResult } from "./RequirementsPanel.js";
+import { WorkspacePage } from "./WorkspacePage.js";
 import { useBootstrapPlan, useBootstrapApply, type BootstrapPlanResult } from "../hooks/useBootstrap.js";
 
 type Step = "enter" | "planning" | "planned" | "applying" | "done" | "error";
@@ -109,10 +110,11 @@ export function BootstrapWizard() {
   const noneSelected = hasActionableInstalls && selectedKeys.size === 0 && !autoApprove;
 
   return (
-    <div className="p-spacing-6 max-w-[800px]" data-testid="bootstrap-wizard">
+    <WorkspacePage>
+    <div data-testid="bootstrap-wizard">
       <div className="mb-spacing-4 flex items-center justify-between gap-spacing-4">
         <h2 className="text-headline-lg uppercase">BOOTSTRAP</h2>
-        <Button variant="ghost" onClick={() => navigate({ to: "/packages" })}>
+        <Button variant="ghost" onClick={() => navigate({ to: "/specs" })}>
           &larr; Specs
         </Button>
       </div>
@@ -304,5 +306,6 @@ export function BootstrapWizard() {
         </div>
       )}
     </div>
+    </WorkspacePage>
   );
 }

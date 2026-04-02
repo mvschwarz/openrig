@@ -2,7 +2,6 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, waitFor, cleanup, fireEvent, act } from "@testing-library/react";
 import { createAppTestRouter } from "./helpers/test-router.js";
 import { PackageList } from "../src/components/PackageList.js";
-import { Sidebar } from "../src/components/Sidebar.js";
 import type { PackageSummary } from "../src/hooks/usePackages.js";
 
 const MOCK_PACKAGES: PackageSummary[] = [
@@ -75,12 +74,12 @@ function renderPackageList() {
 }
 
 describe("PackageList", () => {
-  it("heading shows SPECS", async () => {
+  it("heading shows legacy package tools labeling", async () => {
     mockFetchPackages(MOCK_PACKAGES);
     renderPackageList();
 
     await waitFor(() => {
-      expect(screen.getByText("SPECS")).toBeTruthy();
+      expect(screen.getByText("LEGACY PACKAGE TOOLS")).toBeTruthy();
     });
   });
 
@@ -131,7 +130,7 @@ describe("PackageList", () => {
     expect(statuses[1]!.textContent).toBe("APPLIED");
   });
 
-  it("empty state exposes import and bootstrap entry points", async () => {
+  it("empty state exposes import and bootstrap entry points without install-package CTA", async () => {
     mockFetchPackages([]);
     renderPackageList();
 
@@ -143,6 +142,7 @@ describe("PackageList", () => {
     const bootstrapBtn = screen.getByTestId("empty-bootstrap-btn");
     expect(importBtn.textContent).toContain("IMPORT RIGSPEC");
     expect(bootstrapBtn.textContent).toContain("BOOTSTRAP");
+    expect(screen.queryByTestId("empty-install-btn")).toBeNull();
 
     act(() => { fireEvent.click(importBtn); });
 
@@ -187,30 +187,6 @@ describe("PackageList", () => {
     });
   });
 
-  // Test 6: Sidebar nav PACKAGES with active state
-  it("sidebar shows PACKAGES nav with active state", async () => {
-    mockFetchPackages([]);
-
-    function SidebarHarness() {
-      return <Sidebar open={true} onClose={() => {}} />;
-    }
-
-    render(
-      createAppTestRouter({
-        routes: [
-          { path: "/packages", component: () => <><SidebarHarness /><PackageList /></> },
-        ],
-        initialPath: "/packages",
-      })
-    );
-
-    await waitFor(() => {
-      const navItem = screen.getByTestId("nav-specs");
-      expect(navItem).toBeTruthy();
-      expect(navItem.getAttribute("aria-current")).toBe("page");
-    });
-  });
-
   it("header import button navigates to import flow", async () => {
     mockFetchPackages(MOCK_PACKAGES);
     renderPackageList();
@@ -240,22 +216,6 @@ describe("PackageList", () => {
 
     await waitFor(() => {
       expect(screen.getByTestId("bootstrap-page")).toBeTruthy();
-    });
-  });
-
-  it("header install button still navigates to install flow", async () => {
-    mockFetchPackages(MOCK_PACKAGES);
-    renderPackageList();
-
-    await waitFor(() => {
-      const btn = screen.getByTestId("header-install-btn");
-      expect(btn).toHaveProperty("disabled", false);
-    });
-
-    act(() => { fireEvent.click(screen.getByTestId("header-install-btn")); });
-
-    await waitFor(() => {
-      expect(screen.getByTestId("install-flow-page")).toBeTruthy();
     });
   });
 

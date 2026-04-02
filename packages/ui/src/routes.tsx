@@ -15,6 +15,7 @@ import { PackageList } from "./components/PackageList.js";
 import { PackageInstallFlow } from "./components/PackageInstallFlow.js";
 import { PackageDetail } from "./components/PackageDetail.js";
 import { BootstrapWizard } from "./components/BootstrapWizard.js";
+import { AgentSpecValidateFlow } from "./components/AgentSpecValidateFlow.js";
 import { BundleInspector } from "./components/BundleInspector.js";
 import { BundleInstallFlow } from "./components/BundleInstallFlow.js";
 import { DiscoveryOverlay } from "./components/DiscoveryOverlay.js";
@@ -88,6 +89,12 @@ const bootstrapRoute = createRoute({
   component: BootstrapWizard,
 });
 
+const agentValidateRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/agents/validate",
+  component: AgentSpecValidateFlow,
+});
+
 function DiscoveryRouteBridge() {
   const { setSelection } = useDrawerSelection();
 
@@ -98,11 +105,27 @@ function DiscoveryRouteBridge() {
   return <WorkspaceHome />;
 }
 
+function SpecsRouteBridge() {
+  const { setSelection } = useDrawerSelection();
+
+  useEffect(() => {
+    setSelection({ type: "specs" });
+  }, [setSelection]);
+
+  return <WorkspaceHome />;
+}
+
 // Discovery route
 const discoveryRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/discovery",
   component: DiscoveryRouteBridge,
+});
+
+const specsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/specs",
+  component: SpecsRouteBridge,
 });
 
 const discoveryInventoryRoute = createRoute({
@@ -132,7 +155,21 @@ const packageDetailRoute = createRoute({
 });
 
 // Route tree
-const routeTree = rootRoute.addChildren([indexRoute, rigDetailRoute, importRoute, packagesRoute, packageInstallRoute, packageDetailRoute, bootstrapRoute, discoveryRoute, discoveryInventoryRoute, bundleInspectRoute, bundleInstallRoute]);
+const routeTree = rootRoute.addChildren([
+  indexRoute,
+  rigDetailRoute,
+  importRoute,
+  packagesRoute,
+  packageInstallRoute,
+  packageDetailRoute,
+  bootstrapRoute,
+  agentValidateRoute,
+  specsRoute,
+  discoveryRoute,
+  discoveryInventoryRoute,
+  bundleInspectRoute,
+  bundleInstallRoute,
+]);
 
 // Router
 export const router = createRouter({ routeTree });

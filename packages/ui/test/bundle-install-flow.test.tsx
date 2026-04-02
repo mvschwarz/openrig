@@ -28,6 +28,15 @@ function renderFlow() {
 }
 
 describe("BundleInstallFlow", () => {
+  it("renders inside the shared workspace page shell", async () => {
+    renderFlow();
+
+    await waitFor(() => {
+      expect(screen.getByTestId("workspace-page")).toBeDefined();
+      expect(screen.getByTestId("workspace-page-inner")).toBeDefined();
+    });
+  });
+
   // T10-AS-T14: Shows "Pod-aware" label when resolve_spec detail.source === "pod_bundle"
   it("shows Pod-aware label when stage detail source is pod_bundle", async () => {
     // Plan mock

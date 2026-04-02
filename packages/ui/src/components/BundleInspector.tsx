@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { useBundleInspect, type InspectResult } from "../hooks/useBundles.js";
 import { cn } from "@/lib/utils";
+import { WorkspacePage } from "./WorkspacePage.js";
 
 export function BundleInspector() {
   const [bundlePath, setBundlePath] = useState("");
@@ -15,7 +16,8 @@ export function BundleInspector() {
   const result = inspectMutation.data;
 
   return (
-    <div className="p-spacing-6 max-w-[800px]" data-testid="bundle-inspector">
+    <WorkspacePage>
+    <div data-testid="bundle-inspector">
       <h2 className="text-headline-lg uppercase mb-spacing-4">INSPECT BUNDLE</h2>
 
       <div className="mb-spacing-4">
@@ -121,5 +123,6 @@ export function BundleInspector() {
         </div>
       )}
     </div>
+    </WorkspacePage>
   );
 }

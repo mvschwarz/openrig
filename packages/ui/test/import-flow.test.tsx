@@ -3,7 +3,6 @@ import { render, screen, waitFor, cleanup, fireEvent } from "@testing-library/re
 import { ImportFlow } from "../src/components/ImportFlow.js";
 import { createMockEventSourceClass } from "./helpers/mock-event-source.js";
 import { createTestRouter, createAppTestRouter } from "./helpers/test-router.js";
-import { PackageList } from "../src/components/PackageList.js";
 
 const mockFetch = vi.fn();
 globalThis.fetch = mockFetch;
@@ -34,6 +33,13 @@ async function renderImportFlow() {
 }
 
 describe("ImportFlow", () => {
+  it("renders inside the shared workspace page shell", async () => {
+    await renderImportFlow();
+
+    expect(screen.getByTestId("workspace-page")).toBeDefined();
+    expect(screen.getByTestId("workspace-page-inner")).toBeDefined();
+  });
+
   // Test 1: Step indicator shows step 1 active on validate screen
   it("step indicator shows step 1 active on input screen", async () => {
     await renderImportFlow();
@@ -159,13 +165,12 @@ describe("ImportFlow", () => {
   it("back button navigates to specs", async () => {
     mockFetch.mockImplementation((url: string) => {
       if (url === "/api/rigs/summary") return Promise.resolve({ ok: true, json: async () => [] });
-      if (url === "/api/packages/summary") return Promise.resolve({ ok: true, json: async () => [] });
       return Promise.resolve({ ok: true, json: async () => ({}) });
     });
 
     render(createAppTestRouter({
       routes: [
-        { path: "/packages", component: PackageList },
+        { path: "/specs", component: () => <div data-testid="specs-page">Specs</div> },
         { path: "/import", component: ImportFlow },
       ],
       initialPath: "/import",
@@ -175,7 +180,7 @@ describe("ImportFlow", () => {
     fireEvent.click(screen.getByText("← Specs"));
 
     await waitFor(() => {
-      expect(screen.queryByTestId("import-flow")).toBeNull();
+      expect(screen.getByTestId("specs-page")).toBeDefined();
     });
   });
 
@@ -233,13 +238,12 @@ describe("ImportFlow", () => {
   // Test 11: Import view renders via router (preserved)
   it("import view renders via router", async () => {
     mockFetch.mockImplementation((url: string) => {
-      if (url === "/api/packages/summary") return Promise.resolve({ ok: true, json: async () => [] });
       return Promise.resolve({ ok: true, json: async () => ({}) });
     });
 
     render(createAppTestRouter({
       routes: [
-        { path: "/packages", component: PackageList },
+        { path: "/specs", component: () => <div data-testid="specs-page">Specs</div> },
         { path: "/import", component: () => <ImportFlow /> },
       ],
       initialPath: "/import",

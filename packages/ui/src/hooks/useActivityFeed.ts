@@ -216,8 +216,8 @@ export function eventRoute(event: ActivityEvent): string | null {
   // Bootstrap events navigate to /bootstrap
   if (event.type.startsWith("bootstrap.")) return "/bootstrap";
 
-  // Package events navigate to /packages
-  if (event.type.startsWith("package.")) return "/packages";
+  // Package events remain bootstrap-adjacent in the product UX
+  if (event.type.startsWith("package.")) return "/bootstrap";
 
   // Rig-scoped events
   if (rigId) {

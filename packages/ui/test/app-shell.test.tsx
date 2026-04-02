@@ -129,6 +129,7 @@ describe("App Shell + Routing", () => {
       expect(screen.getByTestId("app-header")).toBeDefined();
       expect(screen.getByTestId("explorer")).toBeDefined();
       expect(screen.getByTestId("content-area")).toBeDefined();
+      expect(screen.getByTestId("specs-toggle")).toBeDefined();
       expect(screen.getByTestId("system-toggle")).toBeDefined();
     });
   });
@@ -140,6 +141,7 @@ describe("App Shell + Routing", () => {
     await waitFor(() => {
       expect(screen.getByTestId("brand-home-link")).toBeDefined();
       expect(screen.getByTestId("discovery-toggle")).toBeDefined();
+      expect(screen.getByTestId("specs-toggle")).toBeDefined();
       expect(screen.getByTestId("system-toggle")).toBeDefined();
     });
 
@@ -150,6 +152,58 @@ describe("App Shell + Routing", () => {
     const gear = screen.getByTestId("system-toggle");
     expect(gear.className).not.toContain("border");
     expect(gear.className).not.toContain("bg-white");
+  });
+
+  it("header specs button opens the specs drawer", async () => {
+    mockAllApis();
+    await renderRealAppAt("/rigs/r1");
+
+    await waitFor(() => {
+      expect(screen.getByTestId("specs-toggle")).toBeDefined();
+    });
+
+    fireEvent.click(screen.getByTestId("specs-toggle"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("specs-panel")).toBeDefined();
+      expect(screen.getByText("Import RigSpec")).toBeDefined();
+      expect(screen.getByText("Bootstrap")).toBeDefined();
+      expect(screen.getByText("Validate AgentSpec")).toBeDefined();
+    });
+  });
+
+  it("specs drawer actions navigate to review flows and close the drawer", async () => {
+    mockAllApis();
+    await renderRealAppAt("/specs");
+
+    await waitFor(() => {
+      expect(screen.getByTestId("specs-panel")).toBeDefined();
+      expect(screen.getByText("Import RigSpec")).toBeDefined();
+    });
+
+    fireEvent.click(screen.getByText("Import RigSpec"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("import-flow")).toBeDefined();
+      expect(screen.queryByTestId("specs-panel")).toBeNull();
+    });
+  });
+
+  it("validate agent route can be launched from specs without leaving the drawer open", async () => {
+    mockAllApis();
+    await renderRealAppAt("/specs");
+
+    await waitFor(() => {
+      expect(screen.getByTestId("specs-panel")).toBeDefined();
+      expect(screen.getByText("Validate AgentSpec")).toBeDefined();
+    });
+
+    fireEvent.click(screen.getByText("Validate AgentSpec"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("agent-spec-validate-flow")).toBeDefined();
+      expect(screen.queryByTestId("specs-panel")).toBeNull();
+    });
   });
 
   it("header discovery button opens the discovery drawer", async () => {
@@ -253,6 +307,21 @@ describe("App Shell + Routing", () => {
     });
   });
 
+  it("workspace specs button opens the specs drawer instead of routing away", async () => {
+    mockAllApis();
+    await renderRealAppAt("/");
+
+    await waitFor(() => {
+      expect(screen.getByTestId("workspace-open-specs")).toBeDefined();
+    });
+
+    fireEvent.click(screen.getByTestId("workspace-open-specs"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("specs-panel")).toBeDefined();
+    });
+  });
+
   it("/rigs/:rigId renders without standalone SnapshotPanel", async () => {
     mockAllApis();
     await renderRealAppAt("/rigs/r1");
@@ -271,6 +340,34 @@ describe("App Shell + Routing", () => {
 
     await waitFor(() => {
       expect(screen.getByTestId("import-flow")).toBeDefined();
+      expect(screen.getByTestId("header-surface-title").textContent).toBe("Specs");
+    });
+  });
+
+  it("/agents/validate renders the agent validation flow with a Specs title", async () => {
+    mockAllApis();
+    mockFetch.mockImplementation((url: string) => {
+      if (url === "/api/rigs/summary") {
+        return Promise.resolve({
+          ok: true,
+          json: async () => [{ id: "r1", name: "alpha", nodeCount: 3, latestSnapshotAt: null, latestSnapshotId: null }],
+        });
+      }
+      if (url === "/api/ps") {
+        return Promise.resolve({
+          ok: true,
+          json: async () => [{ rigId: "r1", name: "alpha", nodeCount: 3, runningCount: 3, status: "running", uptime: "1h", latestSnapshot: null }],
+        });
+      }
+      if (url === "/healthz") return Promise.resolve({ ok: true, json: async () => ({ status: "ok" }) });
+      if (url === "/api/adapters/cmux/status") return Promise.resolve({ ok: true, json: async () => ({ available: true }) });
+      return Promise.resolve({ ok: true, json: async () => ({}) });
+    });
+
+    await renderRealAppAt("/agents/validate");
+
+    await waitFor(() => {
+      expect(screen.getByTestId("agent-spec-validate-flow")).toBeDefined();
       expect(screen.getByTestId("header-surface-title").textContent).toBe("Specs");
     });
   });
