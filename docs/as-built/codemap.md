@@ -3,10 +3,10 @@
 Source-driven map of every file under `packages/daemon/src`, `packages/cli/src`, and `packages/ui/src` at current `HEAD`.
 
 Current footprint:
-- daemon: 109 source files
-- CLI: 23 source files
-- UI: 53 source files total (`52` TS/TSX + `globals.css`)
-- total: 185 source files
+- daemon: 126 source files (76 domain, 18 routes, 10 adapters, 16 migrations, 6 other)
+- CLI: 33 source files
+- UI: 68 source files
+- total: 227 source files
 
 How to use this doc:
 - `Exports` lists the public symbols defined by the file.
@@ -17,9 +17,17 @@ Fast lookup:
 - Daemon app wiring and mounted HTTP surface: `packages/daemon/src/startup.ts`, `packages/daemon/src/server.ts`, `packages/daemon/src/routes/*`
 - AgentSpec / pod-aware engine: `packages/daemon/src/domain/agent-*`, `profile-resolver.ts`, `projection-planner.ts`, `startup-*`, `rigspec-*`, `pod-repository.ts`
 - Snapshot / restore / continuity: `packages/daemon/src/domain/snapshot-*`, `checkpoint-store.ts`, `restore-orchestrator.ts`
+- Transport / communication: `packages/daemon/src/domain/session-transport.ts`, `packages/daemon/src/routes/transport.ts`
+- Transcripts / persistence: `packages/daemon/src/domain/transcript-store.ts`, `packages/daemon/src/domain/history-query.ts`, `packages/daemon/src/routes/transcripts.ts`
+- Ask / context packs: `packages/daemon/src/domain/ask-service.ts`, `packages/daemon/src/routes/ask.ts`
+- Chat: `packages/daemon/src/domain/chat-repository.ts`, `packages/daemon/src/routes/chat.ts`
+- Node inventory: `packages/daemon/src/domain/node-inventory.ts`
+- Resume honesty: `packages/daemon/src/domain/native-resume-probe.ts`, `resume-metadata-refresher.ts`, `codex-thread-id.ts`
 - Package / bootstrap / bundle flows: `packages/daemon/src/domain/package-*`, `install-*`, `bootstrap-*`, `bundle-*`
-- CLI command surface: `packages/cli/src/index.ts`, `packages/cli/src/commands/*`
-- UI route tree and shell: `packages/ui/src/routes.tsx`, `packages/ui/src/App.tsx`, `packages/ui/src/components/AppShell.tsx`
+- CLI command surface: `packages/cli/src/index.ts`, `packages/cli/src/commands/*` (27 groups)
+- CLI infrastructure: `packages/cli/src/config-store.ts`, `packages/cli/src/system-preflight.ts`
+- UI workspace and navigation: `packages/ui/src/components/Explorer.tsx`, `packages/ui/src/components/WorkspaceHome.tsx`, `packages/ui/src/components/AppShell.tsx`
+- UI shared drawer: `packages/ui/src/components/SharedDetailDrawer.tsx`, `RigDetailPanel.tsx`, `NodeDetailPanel.tsx`, `RigChatPanel.tsx`
 - UI data layer: `packages/ui/src/hooks/*`
 
 ## Daemon
@@ -28,7 +36,7 @@ Fast lookup:
 - `packages/daemon/src/index.ts`: CLI entrypoint for starting the daemon HTTP server. Exports: startServer. Related: `packages/daemon/src/startup.js`.
 - `packages/daemon/src/seed.ts`: Development/test seed entrypoint for populating sample daemon state. Exports: none. Related: `packages/daemon/src/db/connection.js`, `packages/daemon/src/db/migrate.js`, `packages/daemon/src/db/migrations/001_core_schema.js`, `packages/daemon/src/db/migrations/002_bindings_sessions.js`, +3 more.
 - `packages/daemon/src/server.ts`: Defines `AppDeps`, enforces shared-DB invariants, and mounts the full public Hono route tree including `/api/agents`, dual-format rigspec import/export, bundles, `/api/up`, and `/api/down`. Exports: AppDeps, createApp. Related: `packages/daemon/src/adapters/cmux.js`, `packages/daemon/src/adapters/tmux.js`, `packages/daemon/src/domain/bootstrap-orchestrator.js`, `packages/daemon/src/domain/bootstrap-repository.js`, +33 more.
-- `packages/daemon/src/startup.ts`: Constructs the daemon dependency graph, runs all 15 migrations, wires legacy and rebooted services together, and returns `{ app, db, deps }`. Exports: createDaemon. Related: `packages/daemon/src/adapters/claude-resume.js`, `packages/daemon/src/adapters/cmux-transport.js`, `packages/daemon/src/adapters/cmux.js`, `packages/daemon/src/adapters/codex-resume.js`, +53 more.
+- `packages/daemon/src/startup.ts`: Constructs the daemon dependency graph, runs all 16 migrations, wires legacy and rebooted services together, and returns `{ app, db, deps }`. Exports: createDaemon. Related: `packages/daemon/src/adapters/claude-resume.js`, `packages/daemon/src/adapters/cmux-transport.js`, `packages/daemon/src/adapters/cmux.js`, `packages/daemon/src/adapters/codex-resume.js`, +53 more.
 
 ### Adapters
 - `packages/daemon/src/adapters/claude-code-adapter.ts`: Adapter implementation for claude code integration. Exports: ClaudeAdapterFsOps, ClaudeCodeAdapter. Related: `packages/daemon/src/adapters/tmux.js`, `packages/daemon/src/domain/projection-planner.js`, `packages/daemon/src/domain/runtime-adapter.js`.
@@ -37,6 +45,7 @@ Fast lookup:
 - `packages/daemon/src/adapters/cmux.ts`: Adapter/util module for cmux integration. Exports: CmuxAdapter, CmuxResult, CmuxStatus, CmuxSurface, CmuxTransport, CmuxTransportFactory, CmuxWorkspace. Related: none.
 - `packages/daemon/src/adapters/codex-resume.ts`: Resume adapter for codex sessions. Exports: CodexResumeAdapter, ResumeResult. Related: `packages/daemon/src/adapters/claude-resume.js`, `packages/daemon/src/adapters/shell-quote.js`, `packages/daemon/src/adapters/tmux.js`.
 - `packages/daemon/src/adapters/codex-runtime-adapter.ts`: Adapter implementation for codex runtime integration. Exports: CodexAdapterFsOps, CodexRuntimeAdapter. Related: `packages/daemon/src/adapters/tmux.js`, `packages/daemon/src/domain/projection-planner.js`, `packages/daemon/src/domain/runtime-adapter.js`.
+- `packages/daemon/src/adapters/terminal-adapter.ts`: Infrastructure runtime adapter for terminal/shell nodes. No-op project/deliver/launch, immediate readiness. Exports: TerminalAdapter. Related: `packages/daemon/src/domain/runtime-adapter.js`.
 - `packages/daemon/src/adapters/shell-quote.ts`: Adapter/util module for shell quote integration. Exports: shellQuote. Related: none.
 - `packages/daemon/src/adapters/tmux-exec.ts`: Adapter/util module for tmux exec integration. Exports: execCommand. Related: `packages/daemon/src/adapters/tmux.js`.
 - `packages/daemon/src/adapters/tmux.ts`: Adapter/util module for tmux integration. Exports: ExecFn, TmuxAdapter, TmuxPane, TmuxResult, TmuxSession, TmuxWindow. Related: none.
@@ -61,6 +70,7 @@ Fast lookup:
 - `packages/daemon/src/db/migrations/013_discovery_fk_fix.ts`: Database migration for discovery fk fix. Exports: discoveryFkFix. Related: `packages/daemon/src/db/migrate.js`.
 - `packages/daemon/src/db/migrations/014_agentspec_reboot.ts`: Database migration for agentspec reboot. Exports: agentspecRebootSchema. Related: `packages/daemon/src/db/migrate.js`.
 - `packages/daemon/src/db/migrations/015_startup_context.ts`: Database migration for startup context. Exports: startupContextSchema. Related: `packages/daemon/src/db/migrate.js`.
+- `packages/daemon/src/db/migrations/016_chat_messages.ts`: Database migration for durable rig-scoped chat messages. Exports: chatMessagesSchema. Related: `packages/daemon/src/db/migrate.js`.
 
 ### Domain: Core Runtime
 - `packages/daemon/src/domain/errors.ts`: Domain-specific error types, currently including `RigNotFoundError`. Exports: RigNotFoundError. Related: none.
@@ -137,6 +147,21 @@ Fast lookup:
 - `packages/daemon/src/domain/session-fingerprinter.ts`: Infers runtime/session identity from tmux, cmux, process, and pane evidence. Exports: FingerprintEvidence, FingerprintResult, SessionFingerprinter. Related: `packages/daemon/src/adapters/cmux.js`, `packages/daemon/src/adapters/tmux.js`, `packages/daemon/src/domain/discovery-types.js`, `packages/daemon/src/domain/tmux-discovery-scanner.js`.
 - `packages/daemon/src/domain/tmux-discovery-scanner.ts`: Low-level tmux scanner that enumerates panes/sessions for discovery. Exports: ScanResult, ScannedPane, TmuxDiscoveryScanner. Related: `packages/daemon/src/adapters/tmux.js`.
 
+### Domain: North Star Operator Layer
+- `packages/daemon/src/domain/node-inventory.ts`: Universal node-level projection consumed by CLI, UI, and MCP. Core fields (session name, status, startup status, restore outcome, attach command) plus extended fields (model, agent ref, startup files, installed resources). Exports: NodeInventoryService. Related: `packages/daemon/src/domain/types.js`, `packages/daemon/src/domain/runtime-adapter.js`.
+- `packages/daemon/src/domain/demo-rig-selector.ts`: Helper for existing-rig power-on — finds the right rig by name from ps summary entries. Exports: selectCurrentRigSummary. Related: none.
+- `packages/daemon/src/domain/draft-rig-generator.ts`: Synthesizes a candidate RigSpec YAML from discovered sessions — groups by CWD, suggests pods, sanitizes IDs. Exports: generateDraftRig. Related: `packages/daemon/src/domain/discovery-types.js`, `packages/daemon/src/domain/rigspec-codec.js`, `packages/daemon/src/domain/types.js`.
+- `packages/daemon/src/domain/native-resume-probe.ts`: Honest assessment of whether a harness actually resumed vs fresh-launched — probes pane command and content for runtime-specific indicators. Exports: NativeResumeProbeResult, assessNativeResumeProbe, buildNativeResumeCommand, isProbeShellReady. Related: `packages/daemon/src/adapters/shell-quote.js`.
+- `packages/daemon/src/domain/resume-metadata-refresher.ts`: Post-launch resume token capture — reads Claude conversation IDs from state files and Codex thread IDs from SQLite. Exports: ResumeMetadataRefresher. Related: `packages/daemon/src/domain/codex-thread-id.js`, `packages/daemon/src/domain/native-resume-probe.js`, `packages/daemon/src/domain/session-registry.js`, `packages/daemon/src/adapters/tmux.js`.
+- `packages/daemon/src/domain/codex-thread-id.ts`: Codex-specific thread ID extraction from the Codex SQLite state database. Exports: defaultResolveHomeDirByPid, readCodexThreadIdFromCandidateHomes, ResolveHomeDirByPid. Related: none.
+
+### Domain: Post-North-Star Transport and History
+- `packages/daemon/src/domain/session-transport.ts`: Communication primitives — send/capture/broadcast with session resolution (canonical + legacy names), mid-work detection via pane content heuristics, honest error reporting, pod/rig/global targeting. Exports: SessionTransport, TargetSpec, SendResult, CaptureResult, BroadcastResult, SendOpts. Related: `packages/daemon/src/domain/rig-repository.js`, `packages/daemon/src/domain/session-registry.js`, `packages/daemon/src/adapters/tmux.js`.
+- `packages/daemon/src/domain/transcript-store.ts`: Pipe-pane transcript management — ANSI stripping on read (preserves raw on disk), boundary markers for session lifecycle events, readTail, grep. Filesystem-backed, not SQLite. Exports: TranscriptStore, TranscriptStoreOpts. Related: none (filesystem-only).
+- `packages/daemon/src/domain/history-query.ts`: Unified transcript + chat search — prefers `rg` when available, falls back to `grep -E`, surfaces which backend was used. Exports: HistoryQuery, SearchResult, ChatSearchResult, ExecDep. Related: `packages/daemon/src/domain/transcript-store.js`.
+- `packages/daemon/src/domain/ask-service.ts`: Context engineering evidence pack — gathers topology snapshot, transcript excerpts, chat history excerpts, restore metadata. Returns structured context for the agent to reason about. Does NOT call an external LLM. Exports: AskService, AskDeps. Related: `packages/daemon/src/domain/ps-projection.js`, `packages/daemon/src/domain/rig-repository.js`, `packages/daemon/src/domain/history-query.js`.
+- `packages/daemon/src/domain/chat-repository.ts`: Durable rig-scoped chat messages — CRUD for chat_messages table, monotonic ULID IDs, rig-scoped queries. Exports: ChatRepository, ChatMessage. Related: none (SQLite-only).
+
 ### Routes
 - `packages/daemon/src/routes/adapters.ts`: Hono route module for adapters API endpoints. Exports: adaptersRoutes. Related: `packages/daemon/src/adapters/cmux.js`, `packages/daemon/src/adapters/tmux.js`.
 - `packages/daemon/src/routes/agents.ts`: Hono route module for AgentSpec validation. POST `/api/agents/validate` using `validateAgentSpecFromYaml`. Exports: agentsRoutes. Related: `packages/daemon/src/domain/spec-validation-service.js`.
@@ -151,7 +176,11 @@ Fast lookup:
 - `packages/daemon/src/routes/rigspec.ts`: Hono route module for dual-format RigSpec import, validate, preflight, and export. Pod-aware import/preflight require `X-Rig-Root`; export emits v0.2 pod-aware YAML/JSON when the live rig has pods. Exports: handleExportJson, handleExportYaml, rigspecImportRoutes. Related: `packages/daemon/src/domain/errors.js`, `packages/daemon/src/domain/rigspec-codec.js`, `packages/daemon/src/domain/rigspec-exporter.js`, `packages/daemon/src/domain/rigspec-instantiator.js`, +2 more.
 - `packages/daemon/src/routes/sessions.ts`: Hono route module for sessions API endpoints. Exports: nodesRoutes, sessionsRoutes. Related: `packages/daemon/src/adapters/cmux.js`, `packages/daemon/src/domain/node-launcher.js`, `packages/daemon/src/domain/rig-repository.js`, `packages/daemon/src/domain/session-registry.js`.
 - `packages/daemon/src/routes/snapshots.ts`: Hono route module for snapshots API endpoints. Exports: restoreRoutes, snapshotsRoutes. Related: `packages/daemon/src/domain/errors.js`, `packages/daemon/src/domain/restore-orchestrator.js`, `packages/daemon/src/domain/snapshot-capture.js`, `packages/daemon/src/domain/snapshot-repository.js`.
-- `packages/daemon/src/routes/up.ts`: Hono route module for `/api/up`, routing direct rig specs and bundles into the staged bootstrap flow with pod-aware diagnostic mapping. Exports: upRoutes. Related: `packages/daemon/src/domain/bootstrap-orchestrator.js`, `packages/daemon/src/domain/bootstrap-repository.js`, `packages/daemon/src/domain/event-bus.js`, `packages/daemon/src/domain/up-command-router.js`.
+- `packages/daemon/src/routes/transport.ts`: Hono route module for communication primitives (`POST /send`, `/capture`, `/broadcast`). Resolves session targets, delegates to SessionTransport. Exports: transportRoutes. Related: `packages/daemon/src/domain/session-transport.js`.
+- `packages/daemon/src/routes/transcripts.ts`: Hono route module for transcript access (`GET /:session/tail`, `/:session/grep`). Resolves session to rig/node, delegates to TranscriptStore. Exports: transcriptRoutes. Related: `packages/daemon/src/domain/transcript-store.js`, `packages/daemon/src/domain/rig-repository.js`.
+- `packages/daemon/src/routes/ask.ts`: Hono route module for context evidence packs (`POST /`). Delegates to AskService. Exports: askRoutes. Related: `packages/daemon/src/domain/ask-service.js`.
+- `packages/daemon/src/routes/chat.ts`: Hono route module for durable rig chat (`GET /` SSE stream, `POST /send`, `GET /history`). Delegates to ChatRepository, streams via SSE. Exports: chatRoutes. Related: `packages/daemon/src/domain/chat-repository.js`, `packages/daemon/src/domain/event-bus.js`.
+- `packages/daemon/src/routes/up.ts`: Hono route module for `/api/up`, routing direct rig specs, bundles, and rig-name restore into the staged bootstrap flow. Exports: upRoutes. Related: `packages/daemon/src/domain/bootstrap-orchestrator.js`, `packages/daemon/src/domain/bootstrap-repository.js`, `packages/daemon/src/domain/event-bus.js`, `packages/daemon/src/domain/up-command-router.js`.
 
 ## CLI
 
@@ -159,7 +188,7 @@ Fast lookup:
 - `packages/cli/src/client.ts`: Shared HTTP client for talking to the daemon API, including raw JSON posts and text-body posts with optional extra headers such as `X-Rig-Root`. Exports: DaemonClient, DaemonConnectionError, DaemonResponse. Related: none.
 - `packages/cli/src/daemon-lifecycle.ts`: Starts, stops, inspects, and tails the local daemon process. Spawns the daemon with `process.execPath` and bypasses local `daemon.json` gating when `RIGGED_URL` is set by probing remote `/healthz` directly. Exports: DaemonState, DaemonStatus, LOG_FILE, LifecycleDeps, RIGGED_DIR, STATE_FILE, StartOptions, getDaemonPath, getDaemonStatus, readLogs, startDaemon, stopDaemon, tailLogs. Related: none.
 - `packages/cli/src/index.ts`: Commander entrypoint that assembles the full `rigged` CLI program. Exports: ProgramDeps, createProgram. Related: `packages/cli/src/commands/bootstrap.js`, `packages/cli/src/commands/bundle.js`, `packages/cli/src/commands/claim.js`, `packages/cli/src/commands/daemon.js`, +14 more.
-- `packages/cli/src/mcp-server.ts`: Implements the CLI-hosted MCP server over stdio, wrapping 12 daemon-backed tools including rebooted AgentSpec and RigSpec validation. Exports: createMcpServer. Related: `packages/cli/src/client.js`.
+- `packages/cli/src/mcp-server.ts`: Implements the CLI-hosted MCP server over stdio, wrapping 17 daemon-backed tools including node inventory, send/capture, transcript, ask, and chatroom. Exports: createMcpServer. Related: `packages/cli/src/client.js`.
 
 ### Commands
 - `packages/cli/src/commands/agent.ts`: Commander command module for `agent`. Subcommands: `validate` (POST `/api/agents/validate`). Supports `--json`. Exports: AgentDeps, agentCommand. Related: `packages/cli/src/client.js`, `packages/cli/src/daemon-lifecycle.js`.
@@ -180,7 +209,21 @@ Fast lookup:
 - `packages/cli/src/commands/snapshot.ts`: Commander command module for `snapshot`. Exports: snapshotCommand. Related: `packages/cli/src/client.js`, `packages/cli/src/commands/daemon.js`, `packages/cli/src/commands/status.js`, `packages/cli/src/daemon-lifecycle.js`.
 - `packages/cli/src/commands/status.ts`: Commander command module for `status`. Exports: StatusDeps, statusCommand. Related: `packages/cli/src/client.js`, `packages/cli/src/commands/daemon.js`, `packages/cli/src/daemon-lifecycle.js`.
 - `packages/cli/src/commands/ui.ts`: Commander command module for `ui`. Exports: UiDeps, uiCommand. Related: `packages/cli/src/commands/daemon.js`, `packages/cli/src/daemon-lifecycle.js`.
-- `packages/cli/src/commands/up.ts`: Commander command module for `up`. Exports: upCommand. Related: `packages/cli/src/client.js`, `packages/cli/src/commands/daemon.js`, `packages/cli/src/commands/status.js`, `packages/cli/src/daemon-lifecycle.js`.
+- `packages/cli/src/commands/up.ts`: Commander command module for `up`. Supports spec paths, bundle paths, and rig-name restore. Auto-preflight, auto-daemon-start, post-command handoff with attach commands. Exports: upCommand. Related: `packages/cli/src/client.js`, `packages/cli/src/commands/daemon.js`, `packages/cli/src/daemon-lifecycle.js`, `packages/cli/src/system-preflight.js`.
+
+### Commands: Post-North-Star Additions
+- `packages/cli/src/commands/send.ts`: Commander command module for `send` — send message to agent terminal via reliable tmux two-step. Supports `--verify` and `--force`. Exports: sendCommand. Related: `packages/cli/src/client.js`, `packages/cli/src/daemon-lifecycle.js`.
+- `packages/cli/src/commands/capture.ts`: Commander command module for `capture` — capture agent pane content. Supports `--lines N` and `--json`. Exports: captureCommand. Related: `packages/cli/src/client.js`, `packages/cli/src/daemon-lifecycle.js`.
+- `packages/cli/src/commands/broadcast.ts`: Commander command module for `broadcast` — send to all agents in a rig or pod. Reports per-session delivery status. Exports: broadcastCommand. Related: `packages/cli/src/client.js`, `packages/cli/src/daemon-lifecycle.js`.
+- `packages/cli/src/commands/transcript.ts`: Commander command module for `transcript` — composable transcript access via `--tail N` and `--grep "pattern"`. Exports: transcriptCommand. Related: `packages/cli/src/client.js`, `packages/cli/src/daemon-lifecycle.js`.
+- `packages/cli/src/commands/config.ts`: Commander command module for `config` — read/write/reset config keys. Supports `--json`. Exports: configCommand. Related: `packages/cli/src/config-store.js`.
+- `packages/cli/src/commands/preflight.ts`: Commander command module for `preflight` — system readiness checks. Supports `--json`. Exports: preflightCommand. Related: `packages/cli/src/system-preflight.js`, `packages/cli/src/config-store.js`.
+- `packages/cli/src/commands/ask.ts`: Commander command module for `ask` — context evidence pack over transcripts + topology + chat. Supports `--json`. Exports: askCommand. Related: `packages/cli/src/client.js`, `packages/cli/src/daemon-lifecycle.js`.
+- `packages/cli/src/commands/chatroom.ts`: Commander command module for `chatroom` — durable group chat with subcommands `send`, `watch`, `history`. Exports: chatroomCommand. Related: `packages/cli/src/client.js`, `packages/cli/src/daemon-lifecycle.js`.
+
+### CLI Infrastructure: Post-North-Star Additions
+- `packages/cli/src/config-store.ts`: Config file management at `~/.rigged/config.json`. 5 locked keys with env var overrides. Precedence: CLI flag > env var > config file > default. Exports: ConfigStore, RiggedConfig. Related: none (filesystem-only).
+- `packages/cli/src/system-preflight.ts`: System readiness checks: Node.js version, tmux availability, writable directories, port availability. Every error follows the 3-part pattern (what + why + fix). Exports: SystemPreflight, PreflightCheck, PreflightResult. Related: `packages/cli/src/config-store.js`, `packages/cli/src/daemon-lifecycle.js`.
 
 ## UI
 
@@ -210,6 +253,15 @@ Fast lookup:
 - `packages/ui/src/components/SnapshotPanel.tsx`: Snapshot list/create/restore panel shown beside rig graphs. Exports: SnapshotPanel. Related: `packages/ui/src/hooks/mutations.js`, `packages/ui/src/hooks/useSnapshots.js`.
 - `packages/ui/src/components/StatusBar.tsx`: Footer/status surface for daemon health and summary telemetry. Exports: StatusBar. Related: `packages/ui/src/hooks/useRigSummary.js`.
 
+### Components: North Star + Post-North-Star Additions
+- `packages/ui/src/components/Explorer.tsx`: Hierarchical tree navigator — rigs → pods → agents with status indicators. Primary navigation surface. Click rig loads graph, click node opens detail drawer. Exports: Explorer. Related: `packages/ui/src/hooks/useRigSummary.js`, `packages/ui/src/hooks/usePsEntries.js`, `packages/ui/src/hooks/useNodeInventory.js`.
+- `packages/ui/src/components/SharedDetailDrawer.tsx`: Unified rig/node detail drawer with shared selection model. Type discriminator routes to RigDetailPanel, NodeDetailPanel, or SystemPanel. Exports: SharedDetailDrawer. Related: `packages/ui/src/components/RigDetailPanel.js`, `packages/ui/src/components/NodeDetailPanel.js`.
+- `packages/ui/src/components/RigDetailPanel.tsx`: Rig detail: identity, node summary, snapshots (relocated from standalone panel), Turn On/Off/Export/Snapshot actions, chat room tab. Exports: RigDetailPanel. Related: `packages/ui/src/hooks/useRigSummary.js`, `packages/ui/src/hooks/useSnapshots.js`, `packages/ui/src/hooks/useNodeInventory.js`.
+- `packages/ui/src/components/NodeDetailPanel.tsx`: Node detail: identity, status (with restore outcome: resumed/rebuilt/fresh), 3-button actions (Copy tmux attach, Open in cmux, Copy resume command), startup files, skills, recent events. Infrastructure nodes show startup command. Failed nodes show error + recovery options. Exports: NodeDetailPanel. Related: `packages/ui/src/hooks/useNodeDetail.js`, `packages/ui/src/lib/copy-text.js`, `packages/ui/src/lib/display-name.js`.
+- `packages/ui/src/components/NodeDetailPlaceholder.tsx`: Empty state for node detail when no node is selected. Exports: NodeDetailPlaceholder. Related: none.
+- `packages/ui/src/components/RigChatPanel.tsx`: Chat room tab in rig drawer — send messages, watch live stream, view history. Exports: RigChatPanel. Related: `packages/ui/src/hooks/useRigChat.js`.
+- `packages/ui/src/components/WorkspaceHome.tsx`: Landing page when no rig is selected. Entry point for explorer-first workflow. Exports: WorkspaceHome. Related: `packages/ui/src/components/AppShell.js`.
+
 ### Components: UI Primitives
 - `packages/ui/src/components/ui/alert.tsx`: Wrapped/customized shadcn-style UI primitive for alert. Exports: Alert, AlertDescription, AlertTitle. Related: none.
 - `packages/ui/src/components/ui/badge.tsx`: Wrapped/customized shadcn-style UI primitive for badge. Exports: Badge, BadgeProps, badgeVariants. Related: none.
@@ -238,6 +290,12 @@ Fast lookup:
 - `packages/ui/src/hooks/useRigSummary.ts`: Rig summary list hook used across dashboard and shell surfaces. Exports: RigSummary, useRigSummary. Related: none.
 - `packages/ui/src/hooks/useSnapshots.ts`: Snapshot list hook for one rig. Exports: Snapshot, useSnapshots. Related: none.
 
+### Hooks: North Star + Post-North-Star Additions
+- `packages/ui/src/hooks/useNodeInventory.ts`: Fetches node inventory for a rig from the canonical `GET /api/rigs/:rigId/nodes` endpoint. Exports: useNodeInventory. Related: none.
+- `packages/ui/src/hooks/useNodeDetail.ts`: Fetches extended node detail from `GET /api/rigs/:rigId/nodes/:logicalId`. Exports: useNodeDetail. Related: none.
+- `packages/ui/src/hooks/useRigChat.ts`: Chat send/watch/history hooks for the rig chat panel. Exports: useRigChat. Related: none.
+- `packages/ui/src/hooks/useGlobalEvents.ts`: Global SSE subscription for explorer status updates. Exports: useGlobalEvents. Related: none.
+
 ### Lib Utilities
 - `packages/ui/src/lib/edge-styles.ts`: Edge-style resolver for graph links. Exports: EdgeStyleResult, getEdgeStyle. Related: none.
 - `packages/ui/src/lib/graph-layout.ts`: Tree-layout helper for rig graph positioning. Exports: applyTreeLayout. Related: none.
@@ -246,3 +304,8 @@ Fast lookup:
 - `packages/ui/src/lib/restore-status-colors.ts`: Color-class lookup for restore states. Exports: getRestoreStatusColorClass. Related: none.
 - `packages/ui/src/lib/status-colors.ts`: Generic rig/session status color mapping. Exports: getStatusColorClass. Related: none.
 - `packages/ui/src/lib/utils.ts`: Shared UI utility helpers, currently `cn` class merging. Exports: cn. Related: none.
+
+### Lib Utilities: North Star + Post-North-Star Additions
+- `packages/ui/src/lib/display-id.ts`: Short ULID display utility — uses ULID tail (not head) for better uniqueness in same-view contexts. UI-only, no backend changes. Exports: shortId. Related: none.
+- `packages/ui/src/lib/display-name.ts`: Pod name extraction from qualified logical IDs (e.g., "dev1" from "dev1.impl"). Exports: displayPodName, inferPodName. Related: none.
+- `packages/ui/src/lib/copy-text.ts`: Clipboard copy utility for the "Copy tmux attach" and "Copy resume command" buttons. Exports: copyText. Related: none.
