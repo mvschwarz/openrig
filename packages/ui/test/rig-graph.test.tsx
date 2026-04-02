@@ -305,6 +305,16 @@ describe("RigGraph", () => {
     });
   });
 
+  it("prefers the human rig name for the watermark stamp", async () => {
+    mockFetch.mockResolvedValueOnce(mockGraphResponse(sampleNodes(), sampleEdges()));
+
+    render(<QueryWrapper><RigGraph showDiscovered={false} rigId="rig-1" rigName="demo-rig" /></QueryWrapper>);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("rig-stamp-watermark").textContent).toBe("demo-rig");
+    });
+  });
+
   it("renders custom RigNode content via nodeTypes registration", async () => {
     mockFetch.mockResolvedValueOnce(mockGraphResponse(sampleNodes(), sampleEdges()));
 

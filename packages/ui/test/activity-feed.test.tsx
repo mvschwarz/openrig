@@ -5,7 +5,7 @@ import { createMemoryHistory, createRootRoute, createRoute, createRouter, Router
 import { ActivityFeed } from "../src/components/ActivityFeed.js";
 import {
   useActivityFeed,
-  formatRelativeTime,
+  formatLogTime,
   eventColor,
   eventSummary,
   eventRoute,
@@ -172,10 +172,7 @@ describe("Activity Feed", () => {
 
     await waitFor(() => {
       const summary = screen.getByTestId("feed-summary");
-      expect(summary.textContent).toContain("acme-tools");
-      expect(summary.textContent).toContain("v2.0.0");
-      expect(summary.textContent).toContain("3 applied");
-      expect(summary.textContent).toContain("1 deferred");
+      expect(summary.textContent).toBe("package acme-tools@2.0.0 3 applied 1 deferred");
     });
   });
 
@@ -260,23 +257,22 @@ describe("Activity Feed", () => {
       </div>
     );
 
-    expect(screen.getByTestId("activity-feed")).toBeTruthy();
+    const feed = screen.getByTestId("activity-feed");
+    expect(feed).toBeTruthy();
+    expect(feed.className).toContain("fixed");
+    expect(feed.className).not.toContain("relative");
+    expect(feed.className).toContain("backdrop-blur-[14px]");
+    expect(feed.className).not.toContain("bg-surface-dark");
     expect(screen.getAllByTestId("feed-entry")).toHaveLength(1);
   });
 
-  // Test 7a: formatRelativeTime pure function
-  it("formatRelativeTime produces correct strings", () => {
-    const now = 1711400000000;
-    expect(formatRelativeTime(now, now + 3000)).toBe("just now");
-    expect(formatRelativeTime(now, now + 15000)).toBe("15s ago");
-    expect(formatRelativeTime(now, now + 90000)).toBe("1m ago");
-    expect(formatRelativeTime(now, now + 7200000)).toBe("2h ago");
+  // Test 7a: terminal log time format
+  it("formatLogTime produces HH:MM:SS", () => {
+    expect(formatLogTime("2026-04-01T16:48:20")).toBe("16:48:20");
   });
 
-  // Test 7b: Live hook tick re-renders, updating rendered timestamp in full integration
-  it("rendered timestamp updates on tick interval via hook", async () => {
-    vi.useFakeTimers({ shouldAdvanceTime: true });
-
+  // Test 7b: rendered timestamp uses compact wall-clock time
+  it("rendered timestamp uses compact wall-clock time", async () => {
     // Harness that uses the real hook and renders ActivityFeed
     function LiveFeedHarness() {
       const feed = useActivityFeed();
@@ -303,26 +299,14 @@ describe("Activity Feed", () => {
     await waitFor(() => expect(instances).toHaveLength(1));
     const es = getLastInstance();
 
-    // Send an event with createdAt = now
-    const now = new Date().toISOString();
+    // Send an event with a fixed local timestamp
     act(() => {
-      es.simulateMessage(JSON.stringify({ type: "rig.created", rigId: "r1", seq: 1, createdAt: now }));
+      es.simulateMessage(JSON.stringify({ type: "rig.created", rigId: "r1", seq: 1, createdAt: "2026-04-01T16:48:20" }));
     });
 
     await waitFor(() => {
-      expect(screen.getByTestId("feed-time").textContent).toBe("just now");
+      expect(screen.getByTestId("feed-time").textContent).toBe("16:48:20");
     });
-
-    // Advance 90 seconds (6 ticks of 15s interval)
-    act(() => {
-      vi.advanceTimersByTime(90_000);
-    });
-
-    await waitFor(() => {
-      expect(screen.getByTestId("feed-time").textContent).toBe("1m ago");
-    });
-
-    vi.useRealTimers();
   });
 
   // Test 8: Empty state
@@ -460,7 +444,49 @@ describe("eventRoute", () => {
           payload: { nodeId: "dev", sessionName: "r00-dogfood-dev" },
         })
       )
-    ).toBe("dev \u2192 launched in r00-dogfood-dev");
+    ).toBe("startup dev launched");
+  });
+
+  it("tails rig and snapshot IDs in restore and snapshot summaries", () => {
+    expect(
+      eventSummary(
+        makeEvent({
+          type: "restore.completed",
+          payload: {
+            rigId: "01KN5DX669Z02VTZEZK7RGT7NK",
+            snapshotId: "01KN5E0BAW8SD3HQY72W58RWDP",
+            result: { nodes: [{}, {}, {}] },
+          },
+        })
+      )
+    ).toBe("restore rig#RGT7NK 3 nodes restored");
+
+    expect(
+      eventSummary(
+        makeEvent({
+          type: "snapshot.created",
+          payload: {
+            rigId: "01KN5DX669Z02VTZEZK7RGT7NK",
+            snapshotId: "01KN5E0BAW8SD3HQY72W58RWDP",
+            kind: "pre_restore",
+          },
+        })
+      )
+    ).toBe("snapshot rig#RGT7NK pre_restore snap#58RWDP");
+  });
+
+  it("formats chat messages as compact operator log lines", () => {
+    expect(
+      eventSummary(
+        makeEvent({
+          type: "chat.message",
+          payload: {
+            sender: "orch.lead",
+            body: "review the restore path",
+          },
+        })
+      )
+    ).toBe("chat orch.lead: review the restore path");
   });
 
   // Bundle event

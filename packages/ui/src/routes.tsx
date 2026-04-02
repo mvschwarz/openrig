@@ -73,7 +73,7 @@ function RigDetail() {
 
       {/* Graph fills the full width — snapshots are in the rig drawer */}
       <div className="flex-1 min-h-[400px] relative">
-        <RigGraph rigId={rigId} showDiscovered={false} />
+        <RigGraph rigId={rigId} rigName={rigName ?? null} showDiscovered={false} />
       </div>
     </div>
   );

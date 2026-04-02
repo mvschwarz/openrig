@@ -2,7 +2,6 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 
 const MAX_EVENTS = 30;
-const TICK_INTERVAL_MS = 15_000;
 
 export interface ActivityEvent {
   seq: number;
@@ -25,13 +24,6 @@ export function useActivityFeed(): UseActivityFeedResult {
   const [connected, setConnected] = useState(false);
   const [feedOpen, setFeedOpen] = useState(false);
   const hasErroredRef = useRef(false);
-  // Force re-render for relative timestamps
-  const [, setTick] = useState(0);
-
-  useEffect(() => {
-    const interval = setInterval(() => setTick((t) => t + 1), TICK_INTERVAL_MS);
-    return () => clearInterval(interval);
-  }, []);
 
   const addEvent = useCallback((data: string) => {
     try {
@@ -97,13 +89,25 @@ export function useActivityFeed(): UseActivityFeedResult {
   return { events, connected, feedOpen, setFeedOpen };
 }
 
-export function formatRelativeTime(receivedAt: number, now?: number): string {
-  const elapsed = ((now ?? Date.now()) - receivedAt) / 1000;
-  if (elapsed < 10) return "just now";
-  if (elapsed < 60) return `${Math.floor(elapsed)}s ago`;
-  if (elapsed < 3600) return `${Math.floor(elapsed / 60)}m ago`;
-  if (elapsed < 86400) return `${Math.floor(elapsed / 3600)}h ago`;
-  return new Date(receivedAt).toLocaleDateString();
+function pad2(value: number): string {
+  return String(value).padStart(2, "0");
+}
+
+function tailId(value: unknown, length = 6): string | null {
+  if (typeof value !== "string" || value.length === 0) return null;
+  return value.slice(-length);
+}
+
+function normalizeText(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const normalized = value.replace(/\s+/g, " ").trim();
+  return normalized.length > 0 ? normalized : null;
+}
+
+export function formatLogTime(timestamp: string | number | Date): string {
+  const date = timestamp instanceof Date ? timestamp : new Date(timestamp);
+  if (Number.isNaN(date.getTime())) return "??:??:??";
+  return `${pad2(date.getHours())}:${pad2(date.getMinutes())}:${pad2(date.getSeconds())}`;
 }
 
 /** Maps event type to a CSS color class for the status dot */
@@ -114,6 +118,10 @@ export function eventColor(type: string): string {
   if (type.startsWith("rig.")) return "bg-accent";
   if (type.startsWith("snapshot.")) return "bg-primary";
   if (type.startsWith("restore.")) return "bg-warning";
+  if (type === "chat.message") return "bg-primary";
+  if (type === "node.startup_ready") return "bg-green-500";
+  if (type === "node.startup_pending") return "bg-amber-400";
+  if (type === "node.startup_failed") return "bg-destructive";
   if (type === "session.detached") return "bg-destructive";
   if (type === "session.discovered") return "bg-accent";
   if (type === "session.vanished") return "bg-destructive";
@@ -125,53 +133,69 @@ export function eventColor(type: string): string {
 /** Maps event to a one-line summary string */
 export function eventSummary(event: ActivityEvent): string {
   const p = event.payload;
+  const rigTail = tailId(p["rigId"]);
+  const snapTail = tailId(p["snapshotId"]);
+  const installTail = tailId(p["installId"]);
+  const nodeTail = tailId(p["nodeId"]);
+  const logicalId = normalizeText(p["logicalId"]);
+  const sender = normalizeText(p["sender"]);
+  const body = normalizeText(p["body"]);
+
   switch (event.type) {
     case "bootstrap.planned":
-      return `bootstrap planned: ${p["sourceRef"]}`;
+      return `bootstrap planned ${p["sourceRef"]}`;
     case "bootstrap.started":
-      return `bootstrap started: ${p["sourceRef"]}`;
+      return `bootstrap started ${p["sourceRef"]}`;
     case "bootstrap.completed":
-      return `bootstrap completed \u2192 rig ${p["rigId"]}`;
+      return rigTail ? `bootstrap rig#${rigTail} completed` : `bootstrap completed`;
     case "bootstrap.partial":
-      return `bootstrap partial: ${p["completed"]} ok, ${p["failed"]} failed`;
+      return `bootstrap partial ${p["completed"]} ok ${p["failed"]} failed`;
     case "bootstrap.failed":
-      return `bootstrap failed: ${p["error"]}`;
+      return `error bootstrap ${p["error"]}`;
     case "package.validated":
-      return `${p["packageName"]} validated`;
+      return `package ${p["packageName"]} validated`;
     case "package.planned":
-      return `${p["packageName"]} planned: ${p["actionable"]} actionable, ${p["deferred"]} deferred`;
+      return `package ${p["packageName"]} planned ${p["actionable"]} actionable ${p["deferred"]} deferred`;
     case "package.installed":
-      return `${p["packageName"]} v${p["packageVersion"]} \u2192 ${p["applied"]} applied, ${p["deferred"]} deferred`;
+      return `package ${p["packageName"]}@${p["packageVersion"]} ${p["applied"]} applied ${p["deferred"]} deferred`;
     case "package.rolledback":
-      return `Install ${p["installId"]} \u2192 ${p["restored"]} files restored`;
+      return installTail ? `rollback install#${installTail} restored ${p["restored"]}` : `rollback restored ${p["restored"]}`;
     case "package.install_failed":
-      return `${p["packageName"]} failed: ${p["message"]}`;
+      return `error package ${p["packageName"]} ${p["message"]}`;
     case "rig.created":
-      return `${p["rigId"]} \u2192 rig created`;
+      return rigTail ? `rig rig#${rigTail} created` : "rig created";
     case "rig.deleted":
-      return `${p["rigId"]} \u2192 rig deleted`;
+      return rigTail ? `rig rig#${rigTail} deleted` : "rig deleted";
     case "rig.imported":
-      return `${p["specName"]} \u2192 rig created`;
+      return rigTail ? `import ${p["specName"]} rig#${rigTail} created` : `import ${p["specName"]} created`;
     case "snapshot.created":
-      return `${p["rigId"]} \u2192 ${p["kind"]} snapshot`;
+      return rigTail && snapTail ? `snapshot rig#${rigTail} ${p["kind"]} snap#${snapTail}` : `snapshot ${p["kind"]}`;
     case "restore.started":
-      return `${p["rigId"]} \u2192 restore started`;
+      return rigTail ? `restore rig#${rigTail} started` : "restore started";
     case "restore.completed": {
       const nodes = Array.isArray(p["result"]) ? p["result"] : ((p["result"] as Record<string, unknown>)?.["nodes"] as unknown[]) ?? [];
-      return `${p["rigId"]} \u2192 ${nodes.length} nodes restored`;
+      return rigTail ? `restore rig#${rigTail} ${nodes.length} nodes restored` : `restore ${nodes.length} nodes restored`;
     }
     case "node.launched":
-      return `${String(p["logicalId"] ?? p["nodeId"] ?? "unknown")} \u2192 launched in ${p["sessionName"]}`;
+      return `startup ${logicalId ?? normalizeText(p["nodeId"]) ?? "unknown"} launched`;
+    case "node.startup_pending":
+      return nodeTail ? `startup node#${nodeTail} pending` : "startup pending";
+    case "node.startup_ready":
+      return nodeTail ? `startup node#${nodeTail} ready` : "startup ready";
+    case "node.startup_failed":
+      return nodeTail ? `error startup node#${nodeTail} ${p["error"]}` : `error startup ${p["error"]}`;
     case "session.detached":
-      return `${p["sessionName"]} \u2192 session lost`;
+      return `error session ${p["sessionName"]} lost`;
     case "bundle.created":
-      return `${p["bundleName"]} v${p["bundleVersion"]} bundled`;
+      return `bundle ${p["bundleName"]} v${p["bundleVersion"]} bundled`;
     case "session.discovered":
-      return `${p["tmuxSession"]}:${p["tmuxPane"]} \u2192 discovered (${p["runtimeHint"]})`;
+      return `discover ${p["tmuxSession"]}:${p["tmuxPane"]} ${p["runtimeHint"]}`;
     case "session.vanished":
-      return `${p["tmuxSession"]}:${p["tmuxPane"]} \u2192 vanished`;
+      return `error ${p["tmuxSession"]}:${p["tmuxPane"]} vanished`;
     case "node.claimed":
-      return `${p["logicalId"]} \u2192 claimed into rig`;
+      return rigTail ? `claim ${p["logicalId"]} rig#${rigTail}` : `claim ${p["logicalId"]}`;
+    case "chat.message":
+      return `chat ${sender ?? "unknown"}: ${body ?? ""}`.trim();
     default:
       return event.type;
   }

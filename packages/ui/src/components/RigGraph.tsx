@@ -73,7 +73,15 @@ interface FocusMessage {
   type: "success" | "error" | "info";
 }
 
-export function RigGraph({ rigId, showDiscovered = true }: { rigId: string | null; showDiscovered?: boolean }) {
+export function RigGraph({
+  rigId,
+  rigName = null,
+  showDiscovered = true,
+}: {
+  rigId: string | null;
+  rigName?: string | null;
+  showDiscovered?: boolean;
+}) {
   const { data, isPending: loading, error: queryError } = useRigGraph(rigId ?? "");
   const discoveredSessions = useDiscoveredSessionsConditional(showDiscovered);
   const rawNodes = data?.nodes ?? [];
@@ -178,6 +186,7 @@ export function RigGraph({ rigId, showDiscovered = true }: { rigId: string | nul
 
   const { setSelectedNode } = useNodeSelection();
   const { setSelection } = useDrawerSelection();
+  const rigStamp = rigName?.trim() ? rigName : (rigId ? shortId(rigId) : null);
 
   const onNodeClick: NodeMouseHandler = useCallback(
     async (_event, node) => {
@@ -268,9 +277,9 @@ export function RigGraph({ rigId, showDiscovered = true }: { rigId: string | nul
       <div className="absolute bottom-4 right-4 w-3 h-3"><div className="reg-br" /></div>
 
       {/* Ambient rig stamp watermark */}
-      {rigId && (
-        <div className="stamp-watermark text-3xl left-[20%] top-[35%]">
-          {shortId(rigId)}
+      {rigStamp && (
+        <div data-testid="rig-stamp-watermark" className="stamp-watermark text-3xl left-[20%] top-[35%]">
+          {rigStamp}
         </div>
       )}
 
