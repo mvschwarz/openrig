@@ -1,5 +1,5 @@
 import { type ReactNode, useState, createContext, useContext } from "react";
-import { useRouterState } from "@tanstack/react-router";
+import { Link, useRouterState } from "@tanstack/react-router";
 import { Cog } from "lucide-react";
 import { Explorer } from "./Explorer.js";
 import { SharedDetailDrawer, type DrawerSelection } from "./SharedDetailDrawer.js";
@@ -120,10 +120,13 @@ export function AppShell({ children }: AppShellProps) {
               <span className="block w-3 h-[1.5px] bg-stone-900" />
             </button>
 
-            {/* Case ID block */}
-            <div className="font-mono text-base font-bold tracking-tighter text-stone-900 border-x border-stone-300 px-3 py-0.5">
+            <Link
+              to="/"
+              data-testid="brand-home-link"
+              className="inline-flex items-center bg-stone-950 px-3 py-1 font-mono text-sm font-bold uppercase tracking-[0.08em] text-stone-50 transition-colors hover:bg-stone-800"
+            >
               RIGGED
-            </div>
+            </Link>
           </div>
 
           <div className="flex-1" />
@@ -132,10 +135,10 @@ export function AppShell({ children }: AppShellProps) {
             type="button"
             data-testid="system-toggle"
             onClick={() => setSelection(selection?.type === "system" ? null : { type: "system", tab: "log" })}
-            className={`inline-flex h-8 w-8 items-center justify-center rounded-md border transition-colors ${
+            className={`inline-flex h-8 w-8 items-center justify-center text-stone-700 transition-colors ${
               selection?.type === "system"
-                ? "border-stone-900 bg-stone-900 text-white"
-                : "border-stone-300 bg-white/70 text-stone-700 hover:bg-stone-100"
+                ? "text-stone-950"
+                : "hover:text-stone-950"
             }`}
             aria-label={selection?.type === "system" ? "Close system drawer" : "Open system drawer"}
             title={selection?.type === "system" ? "Close system drawer" : "Open system drawer"}

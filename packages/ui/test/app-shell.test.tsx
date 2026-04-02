@@ -133,6 +133,24 @@ describe("App Shell + Routing", () => {
     });
   });
 
+  it("header brand links back to home and the gear is borderless", async () => {
+    mockAllApis();
+    await renderRealAppAt("/rigs/r1");
+
+    await waitFor(() => {
+      expect(screen.getByTestId("brand-home-link")).toBeDefined();
+      expect(screen.getByTestId("system-toggle")).toBeDefined();
+    });
+
+    const brand = screen.getByTestId("brand-home-link");
+    expect(brand.getAttribute("href")).toBe("/");
+    expect(brand.className).toContain("bg-stone-950");
+
+    const gear = screen.getByTestId("system-toggle");
+    expect(gear.className).not.toContain("border");
+    expect(gear.className).not.toContain("bg-white");
+  });
+
   it("header no longer renders top navigation links", async () => {
     mockAllApis();
     await renderRealAppAt("/");
