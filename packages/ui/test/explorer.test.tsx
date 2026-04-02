@@ -66,10 +66,10 @@ describe("Explorer sidebar", () => {
     expect(screen.getByText("Local")).toBeDefined();
     expect(screen.getByText("Discovery")).toBeDefined();
     expect(screen.getByText("Specs")).toBeDefined();
-    expect(screen.getByText("Import")).toBeDefined();
+    expect(screen.queryByText("Import")).toBeNull();
   });
 
-  it("renders footer actions as stacked full-width rows", async () => {
+  it("renders footer actions as full-width list rows", async () => {
     mockFetch.mockImplementation(async (url: string) => {
       if (url.includes("/api/rigs/summary")) {
         return { ok: true, json: async () => [{ id: "rig-1", name: "auth-feats", nodeCount: 2, latestSnapshotAt: null, latestSnapshotId: null }] };
@@ -91,14 +91,15 @@ describe("Explorer sidebar", () => {
 
     const discovery = screen.getByTestId("explorer-action-discovery");
     const specs = screen.getByTestId("explorer-action-specs");
-    const importButton = screen.getByTestId("explorer-action-import");
     expect(discovery.className).toContain("w-full");
     expect(specs.className).toContain("w-full");
-    expect(importButton.className).toContain("w-full");
+    expect(discovery.className).toContain("border-t");
+    expect(specs.className).toContain("border-t");
+    expect(screen.queryByTestId("explorer-action-import")).toBeNull();
   });
 
-  // Test 2: Active/default rig is expanded and shows node inventory
-  it("shows node inventory for the default expanded rig", async () => {
+  // Test 2: Home view shows local expanded with rigs collapsed by default
+  it("shows rigs collapsed by default on the home view", async () => {
     mockFetch.mockImplementation(async (url: string) => {
       if (url.includes("/api/rigs/summary")) {
         return { ok: true, json: async () => [{ id: "rig-1", name: "test-rig", nodeCount: 1, latestSnapshotAt: null, latestSnapshotId: null }] };
@@ -116,8 +117,12 @@ describe("Explorer sidebar", () => {
 
     renderExplorer();
 
-    // Wait for rig to appear
     await waitFor(() => expect(screen.getByText("test-rig")).toBeDefined());
+    expect(screen.getByText("Local")).toBeDefined();
+    expect(screen.queryByText("dev")).toBeNull();
+    expect(screen.queryByText("impl")).toBeNull();
+
+    fireEvent.click(screen.getByLabelText("Expand rig test-rig"));
 
     await waitFor(() => {
       expect(screen.getByText("dev")).toBeDefined();
@@ -145,6 +150,8 @@ describe("Explorer sidebar", () => {
 
     renderExplorer({ onSelect });
 
+    await waitFor(() => expect(screen.getByLabelText("Expand rig test-rig")).toBeDefined());
+    fireEvent.click(screen.getByLabelText("Expand rig test-rig"));
     await waitFor(() => expect(screen.getByText("impl")).toBeDefined());
 
     const nodeBtn = screen.getByTestId("node-dev.impl");
@@ -194,6 +201,7 @@ describe("Explorer sidebar", () => {
     renderExplorer();
 
     await waitFor(() => expect(screen.getAllByTestId("rig-tree-test-rig").length).toBeGreaterThan(0));
+    fireEvent.click(screen.getByLabelText("Expand rig test-rig"));
     await waitFor(() => {
       expect(screen.getByText("INFRA")).toBeDefined();
     });
@@ -239,6 +247,8 @@ describe("Explorer sidebar", () => {
     });
 
     renderExplorer();
+    await waitFor(() => expect(screen.getByLabelText("Expand rig test-rig")).toBeDefined());
+    fireEvent.click(screen.getByLabelText("Expand rig test-rig"));
     await waitFor(() => expect(screen.getByTestId("turn-off")).toBeDefined());
 
     fireEvent.click(screen.getByTestId("turn-off"));
@@ -271,6 +281,7 @@ describe("Explorer sidebar", () => {
 
     renderExplorer();
     await waitFor(() => expect(screen.getByText("stopped-rig")).toBeDefined());
+    fireEvent.click(screen.getByLabelText("Expand rig stopped-rig"));
     await waitFor(() => expect(screen.getByTestId("turn-on")).toBeDefined());
 
     fireEvent.click(screen.getByTestId("turn-on"));

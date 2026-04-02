@@ -110,7 +110,12 @@ export function BootstrapWizard() {
 
   return (
     <div className="p-spacing-6 max-w-[800px]" data-testid="bootstrap-wizard">
-      <h2 className="text-headline-lg uppercase mb-spacing-4">BOOTSTRAP</h2>
+      <div className="mb-spacing-4 flex items-center justify-between gap-spacing-4">
+        <h2 className="text-headline-lg uppercase">BOOTSTRAP</h2>
+        <Button variant="ghost" onClick={() => navigate({ to: "/packages" })}>
+          &larr; Specs
+        </Button>
+      </div>
       <StepIndicator current={currentStepNumber(step)} />
 
       {/* Step 1: Enter */}

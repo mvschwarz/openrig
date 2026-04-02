@@ -3,7 +3,7 @@ import { useRigSummary, type RigSummary } from "../hooks/useRigSummary.js";
 import { usePsEntries, type PsEntry } from "../hooks/usePsEntries.js";
 import { useNodeInventory } from "../hooks/useNodeInventory.js";
 import { useSnapshots } from "../hooks/useSnapshots.js";
-import { RestoreError, useCreateSnapshot, useRestoreSnapshot } from "../hooks/mutations.js";
+import { RestoreError, useCreateSnapshot, useRestoreSnapshot, useTeardownRig } from "../hooks/mutations.js";
 import { getRestoreStatusColorClass } from "../lib/restore-status-colors.js";
 import { shortId } from "../lib/display-id.js";
 import { displayAgentName, displayPodName, inferPodName } from "../lib/display-name.js";
@@ -56,11 +56,14 @@ export function RigDetailPanel({ rigId, onClose }: RigDetailPanelProps) {
   const { data: snapshots = [], isPending: snapshotsLoading, error: snapshotsFetchError } = useSnapshots(rigId);
   const createSnapshot = useCreateSnapshot(rigId);
   const restoreSnapshot = useRestoreSnapshot(rigId);
+  const teardownRig = useTeardownRig(rigId);
 
   const [activeTab, setActiveTab] = useState<"info" | "chat">("info");
   const [confirmRestore, setConfirmRestore] = useState<string | null>(null);
+  const [confirmDown, setConfirmDown] = useState(false);
   const [restoreResult, setRestoreResult] = useState<RestoreNodeResult[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   const summary: RigSummary | undefined = summaries?.find((s) => s.id === rigId);
   const ps: PsEntry | undefined = psEntries?.find((p) => p.rigId === rigId);
@@ -97,23 +100,53 @@ export function RigDetailPanel({ rigId, onClose }: RigDetailPanelProps) {
     });
   };
 
+  const handleExport = async () => {
+    setActionError(null);
+    try {
+      const res = await fetch(`/api/rigs/${encodeURIComponent(rigId)}/spec`);
+      if (!res.ok) {
+        setActionError(`Export failed (HTTP ${res.status})`);
+        return;
+      }
+
+      const yaml = await res.text();
+      const blob = new Blob([yaml], { type: "text/yaml" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `${summary?.name ?? rigId}.yaml`;
+      link.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : "Export failed");
+    }
+  };
+
+  const handleTeardown = () => {
+    setActionError(null);
+    teardownRig.mutate(undefined, {
+      onSuccess: () => setConfirmDown(false),
+      onError: (err) => setActionError(err.message),
+    });
+  };
+
   return (
     <aside
       data-testid="rig-detail-panel"
-      className="w-80 shrink-0 border-l border-stone-300 bg-background overflow-y-auto"
+      className="w-80 border-l border-stone-300 bg-stone-50 flex flex-col shrink-0 overflow-y-auto"
     >
       {/* Header */}
-      <div className="flex items-center justify-between p-4 border-b border-stone-200">
+      <div className="flex justify-between items-center px-4 py-3 border-b border-stone-200">
         <div className="min-w-0">
-          <h2 className="font-headline font-bold text-base truncate">
+          <h2 className="font-mono text-xs font-bold text-stone-900 truncate">
             {summary?.name ?? rigId}
           </h2>
-          <p data-testid="rig-full-id" className="text-xs text-stone-500 font-mono truncate">{rigId}</p>
+          <p data-testid="rig-full-id" className="text-[10px] text-stone-500 font-mono truncate">{rigId}</p>
         </div>
         <button
           data-testid="close-drawer"
           onClick={onClose}
-          className="p-1 hover:bg-stone-200 transition-colors text-stone-400 shrink-0"
+          className="text-stone-400 hover:text-stone-900 text-sm"
           aria-label="Close"
         >
           ✕
@@ -143,45 +176,54 @@ export function RigDetailPanel({ rigId, onClose }: RigDetailPanelProps) {
       ) : (
       <>
       {/* Identity */}
-      <div className="p-4 space-y-3 border-b border-stone-200">
+      <section className="px-4 py-3 border-b border-stone-100">
         <div>
-          <div className="text-xs font-bold uppercase text-stone-500 mb-1">Identity</div>
-          <div className="space-y-1 font-mono text-sm">
+          <div className="font-mono text-[8px] text-stone-400 uppercase tracking-wider mb-2">Identity</div>
+          <div className="space-y-1 font-mono text-[10px]">
             <div className="flex justify-between"><span className="text-stone-500">ID</span><span>{shortId(rigId)}</span></div>
-            <div className="flex justify-between gap-2"><span className="text-stone-500">Full ID</span><span className="truncate text-xs text-stone-500">{rigId}</span></div>
+            <div className="flex justify-between gap-2"><span className="text-stone-500">Full ID</span><span className="truncate text-stone-500">{rigId}</span></div>
           </div>
         </div>
-      </div>
+      </section>
 
       {/* Status */}
-      <div className="p-4 space-y-3 border-b border-stone-200">
+      <section className="px-4 py-3 border-b border-stone-100">
         <div>
-          <div className="text-xs font-bold uppercase text-stone-500 mb-1">Status</div>
-          <div className="font-mono text-sm">{ps?.status ?? "unknown"}</div>
-        </div>
-
-        <div>
-          <div className="text-xs font-bold uppercase text-stone-500 mb-1">Nodes</div>
-          <div className="font-mono text-sm">
-            {ps ? `${ps.runningCount}/${ps.nodeCount} running` : `${summary?.nodeCount ?? 0} total`}
+          <div className="font-mono text-[8px] text-stone-400 uppercase tracking-wider mb-2">Status</div>
+          <div className="space-y-1 font-mono text-[10px]">
+            <div className="flex justify-between"><span className="text-stone-500">State</span><span>{ps?.status ?? "unknown"}</span></div>
+            <div className="flex justify-between"><span className="text-stone-500">Nodes</span><span>{ps ? `${ps.runningCount}/${ps.nodeCount} running` : `${summary?.nodeCount ?? 0} total`}</span></div>
+            <div className="flex justify-between"><span className="text-stone-500">Uptime</span><span data-testid="rig-uptime">{ps?.uptime ?? "—"}</span></div>
+            <div className="flex justify-between"><span className="text-stone-500">Latest Snapshot</span><span>{formatSnapshotAge(summary?.latestSnapshotAt ?? null)}</span></div>
           </div>
         </div>
+      </section>
 
-        <div>
-          <div className="text-xs font-bold uppercase text-stone-500 mb-1">Latest Snapshot</div>
-          <div className="font-mono text-sm">
-            {formatSnapshotAge(summary?.latestSnapshotAt ?? null)}
-          </div>
+      {/* Actions */}
+      <section className="px-4 py-3 border-b border-stone-100">
+        <div className="font-mono text-[8px] text-stone-400 uppercase tracking-wider mb-2">Actions</div>
+        <div className="flex flex-col gap-1">
+          <button onClick={handleExport} data-testid="rig-export-spec" className="px-2 py-1 border border-stone-300 font-mono text-[8px] uppercase hover:bg-stone-200 text-left">
+            Export spec
+          </button>
+          <button onClick={() => setConfirmDown(true)} data-testid="rig-teardown" className="px-2 py-1 border border-stone-300 font-mono text-[8px] uppercase hover:bg-stone-200 text-left">
+            Tear down
+          </button>
         </div>
-      </div>
+        {actionError && (
+          <div data-testid="rig-action-error" className="mt-2 font-mono text-[9px] text-red-700">
+            {actionError}
+          </div>
+        )}
+      </section>
 
       {/* Pods */}
-      <div className="p-4 border-b border-stone-200">
-        <div className="text-xs font-bold uppercase text-stone-500 mb-3">Pods</div>
+      <section className="px-4 py-3 border-b border-stone-100">
+        <div className="font-mono text-[8px] text-stone-400 uppercase tracking-wider mb-2">Pods</div>
         {nodesLoading ? (
-          <div className="font-mono text-[10px] text-stone-400">Loading pods...</div>
+          <div className="font-mono text-[9px] text-stone-400">Loading pods...</div>
         ) : pods.length === 0 ? (
-          <div className="font-mono text-[10px] text-stone-400">No nodes yet</div>
+          <div className="font-mono text-[9px] text-stone-400">No nodes yet</div>
         ) : (
           <div className="space-y-2">
             {pods.map(([podId, members]) => (
@@ -201,12 +243,12 @@ export function RigDetailPanel({ rigId, onClose }: RigDetailPanelProps) {
             ))}
           </div>
         )}
-      </div>
+      </section>
 
       {/* Snapshots */}
-      <div className="p-4">
+      <section className="px-4 py-3">
         <div className="flex justify-between items-center mb-3">
-          <div className="text-xs font-bold uppercase text-stone-500">
+          <div className="font-mono text-[8px] text-stone-400 uppercase tracking-wider">
             Snapshots ({snapshots.length})
           </div>
           <button
@@ -283,7 +325,7 @@ export function RigDetailPanel({ rigId, onClose }: RigDetailPanelProps) {
             ))}
           </div>
         )}
-      </div>
+      </section>
 
       {/* Restore confirmation dialog */}
       <Dialog open={confirmRestore !== null} onOpenChange={(open) => { if (!open) setConfirmRestore(null); }}>
@@ -302,6 +344,28 @@ export function RigDetailPanel({ rigId, onClose }: RigDetailPanelProps) {
               onClick={() => confirmRestore && handleRestore(confirmRestore)}
             >
               Confirm Restore
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={confirmDown} onOpenChange={(open) => { if (!open) setConfirmDown(false); }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle className="font-headline text-lg font-bold uppercase">Tear Down Rig</DialogTitle>
+            <DialogDescription className="text-sm text-stone-500">
+              Stop all running sessions for {summary?.name ?? rigId}?
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => setConfirmDown(false)}>Cancel</Button>
+            <Button
+              variant="default"
+              data-testid="confirm-rig-down"
+              disabled={teardownRig.isPending}
+              onClick={handleTeardown}
+            >
+              {teardownRig.isPending ? "Stopping..." : "Confirm"}
             </Button>
           </DialogFooter>
         </DialogContent>

@@ -3,7 +3,7 @@ import { render, screen, waitFor, cleanup, fireEvent } from "@testing-library/re
 import { ImportFlow } from "../src/components/ImportFlow.js";
 import { createMockEventSourceClass } from "./helpers/mock-event-source.js";
 import { createTestRouter, createAppTestRouter } from "./helpers/test-router.js";
-import { Dashboard } from "../src/components/Dashboard.js";
+import { PackageList } from "../src/components/PackageList.js";
 
 const mockFetch = vi.fn();
 globalThis.fetch = mockFetch;
@@ -155,23 +155,24 @@ describe("ImportFlow", () => {
     });
   });
 
-  // Test 7: Back to dashboard via router
-  it("back button navigates to dashboard", async () => {
+  // Test 7: Back to specs via router
+  it("back button navigates to specs", async () => {
     mockFetch.mockImplementation((url: string) => {
       if (url === "/api/rigs/summary") return Promise.resolve({ ok: true, json: async () => [] });
+      if (url === "/api/packages/summary") return Promise.resolve({ ok: true, json: async () => [] });
       return Promise.resolve({ ok: true, json: async () => ({}) });
     });
 
     render(createAppTestRouter({
       routes: [
-        { path: "/", component: Dashboard },
+        { path: "/packages", component: PackageList },
         { path: "/import", component: ImportFlow },
       ],
       initialPath: "/import",
     }));
 
     await waitFor(() => expect(screen.getByTestId("import-flow")).toBeDefined());
-    fireEvent.click(screen.getByText("← Dashboard"));
+    fireEvent.click(screen.getByText("← Specs"));
 
     await waitFor(() => {
       expect(screen.queryByTestId("import-flow")).toBeNull();
@@ -232,13 +233,13 @@ describe("ImportFlow", () => {
   // Test 11: Import view renders via router (preserved)
   it("import view renders via router", async () => {
     mockFetch.mockImplementation((url: string) => {
-      if (url === "/api/rigs/summary") return Promise.resolve({ ok: true, json: async () => [] });
+      if (url === "/api/packages/summary") return Promise.resolve({ ok: true, json: async () => [] });
       return Promise.resolve({ ok: true, json: async () => ({}) });
     });
 
     render(createAppTestRouter({
       routes: [
-        { path: "/", component: Dashboard },
+        { path: "/packages", component: PackageList },
         { path: "/import", component: () => <ImportFlow /> },
       ],
       initialPath: "/import",

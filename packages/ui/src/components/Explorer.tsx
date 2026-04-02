@@ -87,7 +87,7 @@ function ExplorerActionButton({
       to={to}
       data-testid={testId}
       onClick={onClose}
-      className="w-full rounded-sm border border-stone-300 px-4 py-2.5 text-left font-mono text-[10px] uppercase tracking-[0.16em] text-stone-700 transition-colors hover:bg-stone-200"
+      className="block w-full border-t border-stone-200 px-4 py-3 text-left font-mono text-[10px] uppercase tracking-[0.16em] text-stone-700 transition-colors hover:bg-stone-100"
     >
       {label}
     </Link>
@@ -282,7 +282,13 @@ function RigBranch({
                 nodes={podNodes}
                 selection={selection}
                 onSelect={onSelect}
-                autoExpand
+                autoExpand={
+                  expanded || (
+                    selection?.type === "node" &&
+                    selection.rigId === rig.id &&
+                    podNodes.some((node) => node.logicalId === selection.logicalId)
+                  )
+                }
               />
             )
           ))}
@@ -336,7 +342,7 @@ function EnvironmentBranch({
                 selection={selection}
                 onSelect={onSelect}
                 onClose={onClose}
-                autoExpand={rig.id === currentRigId || rigs.length === 1 || index === 0}
+                autoExpand={rig.id === currentRigId}
               />
             ))
           )}
@@ -374,11 +380,10 @@ function FullExplorerContents({
         />
       </div>
 
-      <div className="border-t border-stone-200 p-3">
-        <div data-testid="explorer-action-stack" className="flex flex-col gap-2">
+      <div className="mt-auto border-t border-stone-200">
+        <div data-testid="explorer-action-stack" className="flex flex-col">
           <ExplorerActionButton to="/discovery" label="Discovery" onClose={onClose} testId="explorer-action-discovery" />
           <ExplorerActionButton to="/packages" label="Specs" onClose={onClose} testId="explorer-action-specs" />
-          <ExplorerActionButton to="/import" label="Import" onClose={onClose} testId="explorer-action-import" />
         </div>
       </div>
     </>

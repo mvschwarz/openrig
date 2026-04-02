@@ -95,7 +95,7 @@ function StepIndicator({ currentStep, errorAtStep }: { currentStep: Step; errorA
 
 export function ImportFlow({ onBack }: ImportFlowProps = {}) {
   const navigate = useNavigate();
-  const handleBack = onBack ?? (() => navigate({ to: "/" }));
+  const handleBack = onBack ?? (() => navigate({ to: "/packages" }));
   const importRig = useImportRig();
   const [yaml, setYaml] = useState("");
   const [rigRoot, setRigRoot] = useState("");
@@ -192,7 +192,7 @@ export function ImportFlow({ onBack }: ImportFlowProps = {}) {
           </p>
         </div>
         <Button variant="ghost" onClick={handleBack}>
-          &larr; Dashboard
+          &larr; Specs
         </Button>
       </div>
 
@@ -312,7 +312,7 @@ export function ImportFlow({ onBack }: ImportFlowProps = {}) {
 
           <div className="mt-spacing-6">
             <Button variant="ghost" onClick={handleBack}>
-              ← Back to Dashboard
+              ← Back to Specs
             </Button>
           </div>
         </div>

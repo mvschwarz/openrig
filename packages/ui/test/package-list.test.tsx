@@ -66,6 +66,7 @@ function renderPackageList() {
       routes: [
         { path: "/packages", component: PackageList },
         { path: "/packages/install", component: () => <div data-testid="install-flow-page">Install Flow</div> },
+        { path: "/bootstrap", component: () => <div data-testid="bootstrap-page">Bootstrap</div> },
         { path: "/import", component: () => <div data-testid="import-page">Import Flow</div> },
       ],
       initialPath: "/packages",
@@ -74,13 +75,12 @@ function renderPackageList() {
 }
 
 describe("PackageList", () => {
-  // T5-AS-T14: Heading contains "(Legacy)"
-  it("heading contains (Legacy)", async () => {
+  it("heading shows SPECS", async () => {
     mockFetchPackages(MOCK_PACKAGES);
     renderPackageList();
 
     await waitFor(() => {
-      expect(screen.getByText(/PACKAGES \(Legacy\)/)).toBeTruthy();
+      expect(screen.getByText("SPECS")).toBeTruthy();
     });
   });
 
@@ -131,8 +131,7 @@ describe("PackageList", () => {
     expect(statuses[1]!.textContent).toBe("APPLIED");
   });
 
-  // Test 3: Empty state CTA navigates to /import
-  it("empty state CTA navigates to install flow", async () => {
+  it("empty state exposes import and bootstrap entry points", async () => {
     mockFetchPackages([]);
     renderPackageList();
 
@@ -140,14 +139,30 @@ describe("PackageList", () => {
       expect(screen.getByTestId("packages-empty")).toBeTruthy();
     });
 
-    const btn = screen.getByTestId("empty-install-btn");
-    expect(btn.textContent).toContain("IMPORT RIGSPEC");
-    expect(btn).toHaveProperty("disabled", false);
+    const importBtn = screen.getByTestId("empty-import-btn");
+    const bootstrapBtn = screen.getByTestId("empty-bootstrap-btn");
+    expect(importBtn.textContent).toContain("IMPORT RIGSPEC");
+    expect(bootstrapBtn.textContent).toContain("BOOTSTRAP");
 
-    act(() => { fireEvent.click(btn); });
+    act(() => { fireEvent.click(importBtn); });
 
     await waitFor(() => {
       expect(screen.getByTestId("import-page")).toBeTruthy();
+    });
+  });
+
+  it("empty state bootstrap CTA navigates to bootstrap flow", async () => {
+    mockFetchPackages([]);
+    renderPackageList();
+
+    await waitFor(() => {
+      expect(screen.getByTestId("packages-empty")).toBeTruthy();
+    });
+
+    act(() => { fireEvent.click(screen.getByTestId("empty-bootstrap-btn")); });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("bootstrap-page")).toBeTruthy();
     });
   });
 
@@ -196,8 +211,39 @@ describe("PackageList", () => {
     });
   });
 
-  // Test 7: Header install button navigates to /packages/install
-  it("header install button navigates to install flow", async () => {
+  it("header import button navigates to import flow", async () => {
+    mockFetchPackages(MOCK_PACKAGES);
+    renderPackageList();
+
+    await waitFor(() => {
+      const btn = screen.getByTestId("header-import-btn");
+      expect(btn).toHaveProperty("disabled", false);
+    });
+
+    act(() => { fireEvent.click(screen.getByTestId("header-import-btn")); });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("import-page")).toBeTruthy();
+    });
+  });
+
+  it("header bootstrap button navigates to bootstrap flow", async () => {
+    mockFetchPackages(MOCK_PACKAGES);
+    renderPackageList();
+
+    await waitFor(() => {
+      const btn = screen.getByTestId("header-bootstrap-btn");
+      expect(btn).toHaveProperty("disabled", false);
+    });
+
+    act(() => { fireEvent.click(screen.getByTestId("header-bootstrap-btn")); });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("bootstrap-page")).toBeTruthy();
+    });
+  });
+
+  it("header install button still navigates to install flow", async () => {
     mockFetchPackages(MOCK_PACKAGES);
     renderPackageList();
 

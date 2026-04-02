@@ -171,12 +171,13 @@ describe("App Shell + Routing", () => {
     });
   });
 
-  it("/ renders dashboard content", async () => {
+  it("/ renders the explorer-first workspace home", async () => {
     mockAllApis();
     await renderRealAppAt("/");
 
     await waitFor(() => {
-      expect(screen.getAllByText("alpha").length).toBeGreaterThan(0);
+      expect(screen.getByTestId("workspace-home")).toBeDefined();
+      expect(screen.getByText(/Select a rig from the explorer/i)).toBeDefined();
     });
   });
 

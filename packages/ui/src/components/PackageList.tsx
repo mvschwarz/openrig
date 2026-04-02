@@ -106,14 +106,32 @@ export function PackageList() {
       <div className="flex flex-col items-center justify-center min-h-[60vh]" data-testid="packages-empty">
         <h2 className="text-display-lg text-foreground mb-spacing-4">NO SPECS</h2>
         <p className="text-body-md text-foreground-muted mb-spacing-8">Import a RigSpec or validate an AgentSpec to get started</p>
-        <Button
-          variant="default"
-          size="lg"
-          data-testid="empty-install-btn"
-          onClick={() => navigate({ to: "/import" })}
-        >
-          IMPORT RIGSPEC
-        </Button>
+        <div className="flex flex-col items-center gap-spacing-3">
+          <Button
+            variant="default"
+            size="lg"
+            data-testid="empty-import-btn"
+            onClick={() => navigate({ to: "/import" })}
+          >
+            IMPORT RIGSPEC
+          </Button>
+          <Button
+            variant="ghost"
+            size="lg"
+            data-testid="empty-bootstrap-btn"
+            onClick={() => navigate({ to: "/bootstrap" })}
+          >
+            BOOTSTRAP
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            data-testid="empty-install-btn"
+            onClick={() => navigate({ to: "/packages/install" })}
+          >
+            INSTALL PACKAGE
+          </Button>
+        </div>
       </div>
     );
   }
@@ -123,19 +141,37 @@ export function PackageList() {
       {/* Page header */}
       <div className="flex justify-between items-baseline mb-spacing-6">
         <div>
-          <h2 className="text-headline-lg uppercase">PACKAGES (Legacy)</h2>
+          <h2 className="text-headline-lg uppercase">SPECS</h2>
           <p className="text-label-md text-foreground-muted font-grotesk mt-spacing-1">
-            {sortedPackages.length} installed package{sortedPackages.length !== 1 ? "s" : ""}
+            {sortedPackages.length} installed package{sortedPackages.length !== 1 ? "s" : ""} and authoring tools
           </p>
         </div>
-        <Button
-          variant="default"
-          size="sm"
-          data-testid="header-install-btn"
-          onClick={() => navigate({ to: "/packages/install" })}
-        >
-          INSTALL
-        </Button>
+        <div className="flex flex-col items-end gap-spacing-2">
+          <Button
+            variant="default"
+            size="sm"
+            data-testid="header-import-btn"
+            onClick={() => navigate({ to: "/import" })}
+          >
+            IMPORT RIGSPEC
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            data-testid="header-bootstrap-btn"
+            onClick={() => navigate({ to: "/bootstrap" })}
+          >
+            BOOTSTRAP
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            data-testid="header-install-btn"
+            onClick={() => navigate({ to: "/packages/install" })}
+          >
+            INSTALL PACKAGE
+          </Button>
+        </div>
       </div>
 
       {sortedPackages.map((pkg) => (

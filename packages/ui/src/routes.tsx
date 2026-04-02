@@ -8,8 +8,8 @@ import {
 import { QueryClientProvider, useQuery } from "@tanstack/react-query";
 import { queryClient } from "./lib/query-client.js";
 import { AppShell, useDrawerSelection } from "./components/AppShell.js";
-import { Dashboard } from "./components/Dashboard.js";
 import { RigGraph } from "./components/RigGraph.js";
+import { WorkspaceHome } from "./components/WorkspaceHome.js";
 import { shortId } from "./lib/display-id.js";
 import { ImportFlow } from "./components/ImportFlow.js";
 import { PackageList } from "./components/PackageList.js";
@@ -35,7 +35,7 @@ const rootRoute = createRootRoute({
 const indexRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/",
-  component: Dashboard,
+  component: WorkspaceHome,
 });
 
 // Rig detail route — Graph + SnapshotPanel

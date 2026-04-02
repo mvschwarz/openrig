@@ -65,6 +65,14 @@ describe("RigDetailPanel", () => {
     renderPanel("rig-1");
     expect(await screen.findByText("running")).toBeTruthy();
     expect(screen.getByText("2/3 running")).toBeTruthy();
+    expect(screen.getByTestId("rig-uptime").textContent).toBe("1h");
+  });
+
+  it("exposes export and teardown actions in the rig drawer", async () => {
+    renderPanel("rig-1");
+    await screen.findByText("my-rig");
+    expect(screen.getByTestId("rig-export-spec")).toBeDefined();
+    expect(screen.getByTestId("rig-teardown")).toBeDefined();
   });
 
   it("renders snapshot list with short IDs and full IDs accessible", async () => {
