@@ -376,7 +376,7 @@ function EnvironmentBranch({
         />
         <ExplorerKindIcon kind="environment" statusClass="text-stone-500" testId="environment-icon-local" />
         <span className="font-mono text-[11px] font-semibold uppercase tracking-[0.12em] text-stone-700">
-          Environment: Local
+          env: local
         </span>
       </div>
 
@@ -461,11 +461,12 @@ export function Explorer({
     <aside
       data-testid="explorer"
       className={cn(
-        "bg-stone-50 border-r border-stone-300 flex shrink-0 z-20 overflow-hidden",
+        "border-r border-stone-300/25 flex z-20 overflow-hidden",
+        "bg-[rgba(250,249,245,0.035)] supports-[backdrop-filter]:bg-[rgba(250,249,245,0.018)] backdrop-blur-[14px] backdrop-saturate-75 shadow-[6px_0_14px_rgba(46,52,46,0.04)]",
         "fixed top-14 bottom-0 left-0 transition-transform duration-200 ease-tactical w-72 max-w-[80vw]",
         open ? "translate-x-0" : "-translate-x-full",
-        desktopMode === "full" && "lg:relative lg:top-0 lg:w-72 lg:max-w-none lg:translate-x-0",
-        desktopMode === "hidden" && "lg:relative lg:top-0 lg:w-12 lg:max-w-none lg:translate-x-0"
+        desktopMode === "full" && "lg:absolute lg:top-0 lg:bottom-0 lg:left-0 lg:w-72 lg:max-w-none lg:translate-x-0",
+        desktopMode === "hidden" && "lg:absolute lg:top-0 lg:bottom-0 lg:left-0 lg:w-12 lg:max-w-none lg:translate-x-0"
       )}
     >
       <div className="relative flex h-full w-full flex-col">

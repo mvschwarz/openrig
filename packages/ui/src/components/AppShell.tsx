@@ -1,9 +1,8 @@
 import { type ReactNode, useState, createContext, useContext } from "react";
 import { useRouterState } from "@tanstack/react-router";
+import { Settings2 } from "lucide-react";
 import { Explorer } from "./Explorer.js";
 import { SharedDetailDrawer, type DrawerSelection } from "./SharedDetailDrawer.js";
-import { StatusBar } from "./StatusBar.js";
-import { ActivityFeed } from "./ActivityFeed.js";
 import { useActivityFeed } from "../hooks/useActivityFeed.js";
 import { useGlobalEvents } from "../hooks/useGlobalEvents.js";
 
@@ -57,7 +56,7 @@ export function AppShell({ children }: AppShellProps) {
   const pathname = routerState.location.pathname;
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [desktopExplorerOpen, setDesktopExplorerOpen] = useState(true);
-  const { events, feedOpen, setFeedOpen } = useActivityFeed();
+  const { events } = useActivityFeed();
   const [selection, setSelection] = useState<DrawerSelection>(null);
   const openExplorer = () => {
     setDesktopExplorerOpen(true);
@@ -97,16 +96,20 @@ export function AppShell({ children }: AppShellProps) {
 
           <div className="flex-1" />
 
-          {/* Right side — icons */}
-          <div className="flex items-center gap-spacing-2">
-            <button
-              onClick={() => setFeedOpen(!feedOpen)}
-              className="p-2 hover:bg-stone-200 transition-colors font-mono text-xs text-stone-500"
-              aria-label="Activity"
-            >
-              {events.length > 0 ? `${events.length}` : ""}
-            </button>
-          </div>
+          <button
+            type="button"
+            data-testid="system-toggle"
+            onClick={() => setSelection(selection?.type === "system" ? null : { type: "system", tab: "log" })}
+            className={`inline-flex h-8 w-8 items-center justify-center rounded-md border transition-colors ${
+              selection?.type === "system"
+                ? "border-stone-900 bg-stone-900 text-white"
+                : "border-stone-300 bg-white/70 text-stone-700 hover:bg-stone-100"
+            }`}
+            aria-label={selection?.type === "system" ? "Close system drawer" : "Open system drawer"}
+            title={selection?.type === "system" ? "Close system drawer" : "Open system drawer"}
+          >
+            <Settings2 className="h-4 w-4" />
+          </button>
         </header>
 
         {/* Main: Explorer + Content + Detail Panel */}
@@ -136,14 +139,9 @@ export function AppShell({ children }: AppShellProps) {
           <SharedDetailDrawer
             selection={selection}
             onClose={() => setSelection(null)}
+            events={events}
           />
         </div>
-
-        {/* Activity Feed */}
-        <ActivityFeed events={events} open={feedOpen} onClose={() => setFeedOpen(false)} />
-
-        {/* Status Bar */}
-        <StatusBar onToggleFeed={() => setFeedOpen(!feedOpen)} feedOpen={feedOpen} eventCount={events.length} />
       </div>
       </ExplorerVisibilityContext.Provider>
     </DrawerSelectionContext.Provider>

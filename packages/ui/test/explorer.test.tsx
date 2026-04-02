@@ -63,7 +63,7 @@ describe("Explorer sidebar", () => {
     await waitFor(() => {
       expect(screen.getByText("auth-feats")).toBeDefined();
     });
-    expect(screen.getByText("Environment: Local")).toBeDefined();
+    expect(screen.getByText("env: local")).toBeDefined();
     expect(screen.getByText("Discovery")).toBeDefined();
     expect(screen.getByText("Specs")).toBeDefined();
     expect(screen.queryByText("Import")).toBeNull();
@@ -120,7 +120,7 @@ describe("Explorer sidebar", () => {
     renderExplorer();
 
     await waitFor(() => expect(screen.getByText("test-rig")).toBeDefined());
-    expect(screen.getByText("Environment: Local")).toBeDefined();
+    expect(screen.getByText("env: local")).toBeDefined();
     expect(screen.queryByText("dev")).toBeNull();
     expect(screen.queryByText("impl")).toBeNull();
 

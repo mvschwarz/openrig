@@ -316,14 +316,6 @@ export function RigGraph({
       >
         <Controls />
       </ReactFlow>
-
-      {/* Footer status pills */}
-      <div className="absolute bottom-4 left-4 z-20 flex gap-spacing-2">
-        <div className="bg-white/90 border border-stone-900 px-3 py-1 font-mono text-[10px] flex items-center gap-2">
-          <div className="w-1.5 h-1.5 rounded-full bg-success animate-pulse" />
-          TOPOLOGY_ACTIVE
-        </div>
-      </div>
     </div>
   );
 }

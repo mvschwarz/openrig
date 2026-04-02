@@ -129,7 +129,7 @@ describe("App Shell + Routing", () => {
       expect(screen.getByTestId("app-header")).toBeDefined();
       expect(screen.getByTestId("explorer")).toBeDefined();
       expect(screen.getByTestId("content-area")).toBeDefined();
-      expect(screen.getByTestId("status-bar")).toBeDefined();
+      expect(screen.getByTestId("system-toggle")).toBeDefined();
     });
   });
 
@@ -232,33 +232,40 @@ describe("App Shell + Routing", () => {
     await waitFor(() => expect(screen.getByTestId("explorer")).toBeDefined());
   });
 
-  it("status bar shows CONNECTED when daemon responds", async () => {
+  it("system gear opens the system drawer on the log tab by default", async () => {
     mockAllApis();
     await renderRealAppAt("/");
 
     await waitFor(() => {
-      expect(screen.getByTestId("health-text").textContent).toBe("SYSTEM_STABLE");
+      expect(screen.getByTestId("system-toggle")).toBeDefined();
+    });
+
+    fireEvent.click(screen.getByTestId("system-toggle"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("system-panel")).toBeDefined();
+      expect(screen.getByTestId("system-log-tab")).toBeDefined();
+      expect(screen.getByTestId("system-tab-log").className).toContain("font-bold");
     });
   });
 
-  it("status bar shows rig count and cmux status", async () => {
+  it("system status tab spells out daemon and cmux state", async () => {
     mockAllApis();
     await renderRealAppAt("/");
 
     await waitFor(() => {
-      expect(screen.getByTestId("rig-count").textContent).toContain("1");
-      expect(screen.getByTestId("cmux-status").textContent).toContain("OK");
+      expect(screen.getByTestId("system-toggle")).toBeDefined();
     });
-  });
 
-  it("status bar shows DISCONNECTED with dashes when daemon unreachable", async () => {
-    mockApisFailing();
-    await renderRealAppAt("/");
+    fireEvent.click(screen.getByTestId("system-toggle"));
+    await waitFor(() => {
+      expect(screen.getByTestId("system-panel")).toBeDefined();
+    });
+    fireEvent.click(screen.getByTestId("system-tab-status"));
 
     await waitFor(() => {
-      expect(screen.getByTestId("health-text").textContent).toBe("DISCONNECTED");
-      expect(screen.getByTestId("rig-count").textContent).toContain("—");
-      expect(screen.getByTestId("cmux-status").textContent).toContain("—");
+      expect(screen.getByTestId("system-daemon-status").textContent).toBe("connected");
+      expect(screen.getByTestId("system-cmux-status").textContent).toBe("available");
     });
   });
 

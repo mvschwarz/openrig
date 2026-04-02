@@ -310,11 +310,11 @@ describe("Activity Feed", () => {
   });
 
   // Test 8: Empty state
-  it("empty state shows 'No recent activity'", async () => {
+  it("empty state shows 'No recent log entries'", async () => {
     renderFeedWithRouter({ events: [], open: true });
 
     await waitFor(() => {
-      expect(screen.getByTestId("feed-empty").textContent).toContain("No recent activity");
+      expect(screen.getByTestId("feed-empty").textContent).toContain("No recent log entries");
     });
   });
 

@@ -37,12 +37,12 @@ export function NodeDetailPanel({ rigId, logicalId, onClose }: NodeDetailPanelPr
   };
 
   return (
-    <div
+    <aside
       data-testid="node-detail-panel"
-      className="w-80 border-l border-stone-300 bg-stone-50 flex flex-col shrink-0 overflow-y-auto"
+      className="absolute inset-y-0 right-0 z-20 w-80 border-l border-stone-300/25 bg-[rgba(250,249,245,0.035)] supports-[backdrop-filter]:bg-[rgba(250,249,245,0.018)] backdrop-blur-[14px] backdrop-saturate-75 shadow-[-6px_0_14px_rgba(46,52,46,0.04)] flex flex-col overflow-hidden"
     >
       {/* Header */}
-      <div className="flex justify-between items-center px-4 py-3 border-b border-stone-200">
+      <div className="flex justify-between items-center px-4 py-3 border-b border-stone-300/35 shrink-0">
         <span className="font-mono text-xs font-bold text-stone-900 truncate">{headerName}</span>
         <button onClick={onClose} className="text-stone-400 hover:text-stone-900 text-sm" data-testid="detail-close">&times;</button>
       </div>
@@ -51,7 +51,7 @@ export function NodeDetailPanel({ rigId, logicalId, onClose }: NodeDetailPanelPr
       {error && <div className="p-4 font-mono text-[9px] text-red-500">Failed to load node detail</div>}
 
       {data && (
-        <div className="flex flex-col gap-0">
+        <div className="flex-1 overflow-y-auto flex flex-col gap-0">
           {/* Identity */}
           <section className="px-4 py-3 border-b border-stone-100">
             <div className="font-mono text-[8px] text-stone-400 uppercase tracking-wider mb-2">Identity</div>
@@ -162,6 +162,6 @@ export function NodeDetailPanel({ rigId, logicalId, onClose }: NodeDetailPanelPr
           )}
         </div>
       )}
-    </div>
+    </aside>
   );
 }
