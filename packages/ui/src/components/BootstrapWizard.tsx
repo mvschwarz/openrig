@@ -1,33 +1,17 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { RequirementsPanel, type RequirementResult } from "./RequirementsPanel.js";
 import { WorkspacePage } from "./WorkspacePage.js";
 import { useBootstrapPlan, useBootstrapApply, type BootstrapPlanResult } from "../hooks/useBootstrap.js";
+import { useSpecsWorkspace } from "./SpecsWorkspace.js";
+import { WorkflowHeader, WorkflowSection, WorkflowStepIndicator } from "./WorkflowScaffold.js";
 
 type Step = "enter" | "planning" | "planned" | "applying" | "done" | "error";
 
 const STEP_LABELS = ["ENTER", "PLAN", "REVIEW", "APPLY"] as const;
-
-function StepIndicator({ current }: { current: number }) {
-  return (
-    <div className="flex items-center gap-spacing-2 mb-spacing-6 text-label-sm font-mono" data-testid="step-indicator">
-      {STEP_LABELS.map((label, i) => {
-        const stepNum = i + 1;
-        const isActive = stepNum === current;
-        const isDone = stepNum < current;
-        return (
-          <span
-            key={label}
-            className={isActive ? "text-primary" : isDone ? "text-foreground-muted" : "text-foreground-muted/40"}
-          >
-            [ {stepNum} {label} ]{i < STEP_LABELS.length - 1 ? " →" : ""}
-          </span>
-        );
-      })}
-    </div>
-  );
-}
+const STEPS = STEP_LABELS.map((label, index) => ({ num: index + 1, label }));
 
 function currentStepNumber(step: Step): number {
   switch (step) {
@@ -42,8 +26,9 @@ function currentStepNumber(step: Step): number {
 
 export function BootstrapWizard() {
   const navigate = useNavigate();
+  const { bootstrapSourceRef, setBootstrapSourceRef } = useSpecsWorkspace();
   const [step, setStep] = useState<Step>("enter");
-  const [sourceRef, setSourceRef] = useState("");
+  const [sourceRef, setSourceRef] = useState(() => bootstrapSourceRef);
   const [planResult, setPlanResult] = useState<BootstrapPlanResult | null>(null);
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
   const [autoApprove, setAutoApprove] = useState(false);
@@ -51,6 +36,10 @@ export function BootstrapWizard() {
 
   const planMutation = useBootstrapPlan();
   const applyMutation = useBootstrapApply();
+
+  useEffect(() => {
+    setBootstrapSourceRef(sourceRef);
+  }, [setBootstrapSourceRef, sourceRef]);
 
   const handlePlan = async () => {
     if (!sourceRef.trim()) return;
@@ -111,23 +100,29 @@ export function BootstrapWizard() {
 
   return (
     <WorkspacePage>
-    <div data-testid="bootstrap-wizard">
-      <div className="mb-spacing-4">
-        <h2 className="text-headline-lg uppercase">BOOTSTRAP</h2>
-      </div>
-      <StepIndicator current={currentStepNumber(step)} />
+      <div data-testid="bootstrap-wizard" className="space-y-8">
+      <WorkflowHeader
+        eyebrow="Bootstrap"
+        title="Bootstrap"
+        description="Plan environment requirements, approve install actions, then import the rig into a running topology."
+      />
+      <WorkflowStepIndicator data-testid="step-indicator" steps={STEPS} currentStep={currentStepNumber(step)} />
 
       {/* Step 1: Enter */}
       {step === "enter" && (
+        <WorkflowSection
+          title="Source"
+          description="Provide a rig spec or bundle path. Bootstrap will inspect requirements before it imports anything."
+        >
         <div data-testid="step-enter">
           <label className="text-label-md uppercase block mb-spacing-2">SPEC OR BUNDLE PATH</label>
-          <input
+          <Input
             data-testid="spec-input"
             type="text"
             value={sourceRef}
             onChange={(e) => setSourceRef(e.target.value)}
             placeholder="/path/to/rig.yaml or /path/to/bundle.rigbundle"
-            className="w-full bg-transparent border-b border-foreground/20 py-spacing-2 text-body-md font-mono focus:outline-none focus:border-primary"
+            className="font-mono text-body-md"
           />
           <p className="text-label-sm text-foreground-muted mt-spacing-1">
             Accepts .yaml rig specs or .rigbundle archives.{" "}
@@ -148,6 +143,7 @@ export function BootstrapWizard() {
             </Button>
           </div>
         </div>
+        </WorkflowSection>
       )}
 
       {/* Step 2: Planning */}
@@ -159,6 +155,10 @@ export function BootstrapWizard() {
 
       {/* Step 3: Planned / Review */}
       {step === "planned" && planResult && (
+        <WorkflowSection
+          title="Plan Review"
+          description="Review requirement probe results and approve the install actions that bootstrap should execute."
+        >
         <div data-testid="step-planned">
           {/* Stages */}
           <h3 className="text-headline-md uppercase mb-spacing-3">STAGES</h3>
@@ -239,10 +239,15 @@ export function BootstrapWizard() {
             APPLY
           </Button>
         </div>
+        </WorkflowSection>
       )}
 
       {/* Step 4: Applying — show stage checklist from plan */}
       {step === "applying" && planResult && (
+        <WorkflowSection
+          title="Applying"
+          description="Bootstrap is executing the approved actions and importing the rig."
+        >
         <div data-testid="step-applying">
           <h3 className="text-headline-md uppercase mb-spacing-3">APPLYING</h3>
           <div className="space-y-spacing-1 mb-spacing-4" data-testid="applying-checklist">
@@ -267,10 +272,15 @@ export function BootstrapWizard() {
           </div>
           <p className="text-body-sm text-foreground-muted">Bootstrapping...</p>
         </div>
+        </WorkflowSection>
       )}
 
       {/* Step 5: Done */}
       {step === "done" && planResult && (
+        <WorkflowSection
+          title="Result"
+          description="Bootstrap finished and returned the managed rig identity."
+        >
         <div data-testid="step-done">
           <h3 className="text-headline-md uppercase mb-spacing-3">
             {planResult.status === "completed" ? "BOOTSTRAP COMPLETE" : "BOOTSTRAP PARTIAL"}
@@ -291,18 +301,24 @@ export function BootstrapWizard() {
             </Button>
           )}
         </div>
+        </WorkflowSection>
       )}
 
       {/* Error */}
       {step === "error" && (
+        <WorkflowSection
+          title="Bootstrap Error"
+          description="Bootstrap could not complete. Fix the issue and retry the plan."
+        >
         <div data-testid="step-error">
           <p className="text-destructive text-body-md mb-spacing-4">{errorMessage}</p>
           <Button variant="tactical" onClick={handleReset} data-testid="try-again-btn">
             TRY AGAIN
           </Button>
         </div>
+        </WorkflowSection>
       )}
-    </div>
+      </div>
     </WorkspacePage>
   );
 }

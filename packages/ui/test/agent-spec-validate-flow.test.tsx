@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, waitFor, cleanup } from "@testing-library/react";
 import { createAppTestRouter } from "./helpers/test-router.js";
 import { AgentSpecValidateFlow } from "../src/components/AgentSpecValidateFlow.js";
+import { SpecsWorkspaceProvider, SPECS_WORKSPACE_STORAGE_KEYS } from "../src/components/SpecsWorkspace.js";
 
 const mockFetch = vi.fn();
 globalThis.fetch = mockFetch;
@@ -14,6 +15,7 @@ function renderFlow() {
         { path: "/specs", component: () => <div data-testid="specs-page">specs</div> },
       ],
       initialPath: "/agents/validate",
+      rootComponent: ({ children }) => <SpecsWorkspaceProvider>{children}</SpecsWorkspaceProvider>,
     })
   );
 }
@@ -24,6 +26,7 @@ describe("AgentSpecValidateFlow", () => {
   });
 
   afterEach(() => {
+    window.localStorage.clear();
     cleanup();
   });
 
@@ -37,6 +40,22 @@ describe("AgentSpecValidateFlow", () => {
     expect(screen.getByText("VALIDATE AGENT")).toBeDefined();
     expect(screen.getByTestId("agent-spec-yaml-input")).toBeDefined();
     expect(screen.getByTestId("agent-spec-validate-btn")).toBeDefined();
+  });
+
+  it("hydrates the editor from the current Specs agent draft", async () => {
+    window.localStorage.setItem(SPECS_WORKSPACE_STORAGE_KEYS.currentAgentDraft, JSON.stringify({
+      id: "agent-current",
+      kind: "agent",
+      label: "helper",
+      yaml: "name: helper\nruntime: codex\n",
+      updatedAt: Date.now(),
+    }));
+
+    renderFlow();
+
+    await waitFor(() => {
+      expect((screen.getByTestId("agent-spec-yaml-input") as HTMLTextAreaElement).value).toBe("name: helper\nruntime: codex\n");
+    });
   });
 
   it("posts yaml to the agents validate route and shows success", async () => {

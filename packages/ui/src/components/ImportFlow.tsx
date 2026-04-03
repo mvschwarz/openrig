@@ -1,7 +1,8 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useImportRig, ImportError } from "../hooks/mutations.js";
 import { getInstantiateStatusColorClass } from "@/lib/instantiate-status-colors";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { WorkspacePage } from "./WorkspacePage.js";
@@ -13,6 +14,8 @@ import {
   TableHead,
   TableCell,
 } from "@/components/ui/table";
+import { useSpecsWorkspace } from "./SpecsWorkspace.js";
+import { WorkflowHeader, WorkflowSection, WorkflowStepIndicator } from "./WorkflowScaffold.js";
 
 type Step = "input" | "validating" | "valid" | "preflight" | "preflight_done" | "instantiating" | "done" | "error";
 
@@ -61,41 +64,16 @@ function getStepNumber(step: Step): number {
   }
 }
 
-function StepIndicator({ currentStep, errorAtStep }: { currentStep: Step; errorAtStep: number }) {
-  const activeNum = currentStep === "error" ? errorAtStep : getStepNumber(currentStep);
-
-  return (
-    <div className="flex items-center gap-spacing-2 mb-spacing-8 p-spacing-4 inset-light" data-testid="step-indicator">
-      {STEPS.map((s, i) => {
-        const isCompleted = activeNum > s.num;
-        const isActive = activeNum === s.num;
-        const isPending = activeNum < s.num;
-
-        return (
-          <div key={s.num} className="flex items-center gap-spacing-2">
-            {i > 0 && (
-              <div className={`w-8 h-px mx-spacing-1 ${isCompleted ? "bg-primary/40" : "bg-foreground-muted/20"}`} />
-            )}
-            <span
-              data-testid={`step-${s.num}`}
-              className={`text-label-md uppercase tracking-[0.04em] font-mono px-spacing-2 py-spacing-1 transition-colors ${
-                isCompleted ? "text-foreground-muted" :
-                isActive ? "text-foreground bg-foreground/10" :
-                isPending ? "text-foreground-muted/30" : ""
-              }`}
-            >
-              {isCompleted ? "\u2713" : ""} [ {s.num} {s.label} ]
-            </span>
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
 export function ImportFlow({ onBack }: ImportFlowProps = {}) {
   const importRig = useImportRig();
-  const [yaml, setYaml] = useState("");
+  const {
+    currentRigDraft,
+    selectedRigDraft,
+    saveRigDraft,
+    rememberRigDraft,
+    clearSelectedRigDraft,
+  } = useSpecsWorkspace();
+  const [yaml, setYaml] = useState(() => selectedRigDraft?.yaml ?? currentRigDraft?.yaml ?? "");
   const [rigRoot, setRigRoot] = useState("");
   const [step, setStep] = useState<Step>("input");
   const [errorAtStep, setErrorAtStep] = useState<number>(0);
@@ -103,7 +81,18 @@ export function ImportFlow({ onBack }: ImportFlowProps = {}) {
   const [warnings, setWarnings] = useState<string[]>([]);
   const [result, setResult] = useState<InstantiateResult | null>(null);
 
+  useEffect(() => {
+    saveRigDraft(yaml);
+  }, [saveRigDraft, yaml]);
+
+  useEffect(() => {
+    if (!selectedRigDraft) return;
+    setYaml(selectedRigDraft.yaml);
+    clearSelectedRigDraft();
+  }, [clearSelectedRigDraft, selectedRigDraft]);
+
   const handleValidate = async () => {
+    rememberRigDraft(yaml);
     setStep("validating");
     setErrors([]);
     try {
@@ -181,40 +170,40 @@ export function ImportFlow({ onBack }: ImportFlowProps = {}) {
 
   return (
     <WorkspacePage>
-    <div data-testid="import-flow">
-      {/* Header */}
-      <div className="flex items-center justify-between mb-spacing-8">
-        <div>
-          <h2 className="text-headline-lg uppercase tracking-[0.06em]">IMPORT RIG</h2>
-          <p className="text-label-md text-foreground-muted font-grotesk mt-spacing-1">
-            Instantiate a topology from YAML spec
-          </p>
-        </div>
-      </div>
+      <div data-testid="import-flow" className="space-y-8">
+      <WorkflowHeader
+        eyebrow="Rig Import"
+        title="Import Rig"
+        description="Validate a RigSpec, run preflight checks, then instantiate a topology from YAML."
+      />
 
-      {/* Step indicator */}
-      <StepIndicator currentStep={step} errorAtStep={errorAtStep} />
+      <WorkflowStepIndicator
+        data-testid="step-indicator"
+        steps={STEPS}
+        currentStep={getStepNumber(step)}
+        errorAtStep={step === "error" ? errorAtStep : 0}
+      />
 
       {/* Step 1: Input */}
       {step === "input" && (
-        <div>
+        <WorkflowSection title="Rig YAML" description="Paste a rig spec and optionally provide a rig root to anchor relative references during import.">
           <Textarea
             data-testid="yaml-input"
             value={yaml}
             onChange={(e) => setYaml(e.target.value)}
             placeholder="Paste YAML rig spec here..."
             rows={14}
-            className="bg-background font-mono text-body-sm mb-spacing-4"
+            className="font-mono text-body-sm mb-spacing-4"
           />
           <div className="mb-spacing-4">
             <label className="text-label-sm text-foreground-muted uppercase tracking-[0.04em] block mb-spacing-1">RIG ROOT (OPTIONAL)</label>
-            <input
+            <Input
               data-testid="rig-root-input"
               type="text"
               value={rigRoot}
               onChange={(e) => setRigRoot(e.target.value)}
               placeholder="/path/to/rig/root"
-              className="w-full bg-transparent border-b border-foreground/20 focus:border-foreground px-0 py-spacing-2 text-body-sm font-mono outline-none transition-colors"
+              className="font-mono text-body-sm"
             />
           </div>
           <Button
@@ -225,7 +214,7 @@ export function ImportFlow({ onBack }: ImportFlowProps = {}) {
           >
             VALIDATE RIGSPEC
           </Button>
-        </div>
+        </WorkflowSection>
       )}
 
       {/* Validating */}
@@ -235,14 +224,14 @@ export function ImportFlow({ onBack }: ImportFlowProps = {}) {
 
       {/* Step 2: Valid -> Preflight */}
       {step === "valid" && (
-        <div>
+        <WorkflowSection title="Validation Passed" description="The RigSpec is valid. Run preflight checks before you instantiate it.">
           <Alert className="mb-spacing-4" data-testid="valid-message">
             <AlertDescription className="text-primary">RigSpec valid. Run preflight checks?</AlertDescription>
           </Alert>
           <Button variant="tactical" data-testid="preflight-btn" onClick={handlePreflight}>
             RUN PREFLIGHT
           </Button>
-        </div>
+        </WorkflowSection>
       )}
 
       {/* Running preflight */}
@@ -252,7 +241,7 @@ export function ImportFlow({ onBack }: ImportFlowProps = {}) {
 
       {/* Step 3: Preflight done -> Instantiate */}
       {step === "preflight_done" && (
-        <div>
+        <WorkflowSection title="Preflight Results" description="Review warnings before you instantiate the rig into live runtime sessions.">
           {warnings.length > 0 && (
             <Alert className="mb-spacing-4" data-testid="preflight-warnings">
               <AlertDescription className="text-warning">
@@ -267,7 +256,7 @@ export function ImportFlow({ onBack }: ImportFlowProps = {}) {
           <Button variant="tactical" data-testid="instantiate-btn" onClick={handleInstantiate}>
             INSTANTIATE
           </Button>
-        </div>
+        </WorkflowSection>
       )}
 
       {/* Instantiating */}
@@ -277,6 +266,11 @@ export function ImportFlow({ onBack }: ImportFlowProps = {}) {
 
       {/* Done: Results */}
       {step === "done" && result && (
+        <WorkflowSection
+          title="Instantiate Result"
+          description="The daemon returned per-node launch status for the imported topology."
+          className="space-y-4"
+        >
         <div data-testid="import-result">
           <Alert className="mb-spacing-4">
             <AlertDescription>
@@ -314,10 +308,12 @@ export function ImportFlow({ onBack }: ImportFlowProps = {}) {
             </div>
           ) : null}
         </div>
+        </WorkflowSection>
       )}
 
       {/* Error state */}
       {step === "error" && (
+        <WorkflowSection title="Import Errors" description="Fix the reported issues, then retry the import flow.">
         <div data-testid="import-errors">
           {warnings.length > 0 && (
             <Alert className="mb-spacing-2" data-testid="error-warnings">
@@ -340,8 +336,9 @@ export function ImportFlow({ onBack }: ImportFlowProps = {}) {
             TRY AGAIN
           </Button>
         </div>
+        </WorkflowSection>
       )}
-    </div>
+      </div>
     </WorkspacePage>
   );
 }

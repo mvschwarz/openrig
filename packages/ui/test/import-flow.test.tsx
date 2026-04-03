@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, waitFor, cleanup, fireEvent } from "@testing-library/react";
 import { ImportFlow } from "../src/components/ImportFlow.js";
+import { SpecsWorkspaceProvider, SPECS_WORKSPACE_STORAGE_KEYS } from "../src/components/SpecsWorkspace.js";
 import { createMockEventSourceClass } from "./helpers/mock-event-source.js";
 import { createTestRouter, createAppTestRouter } from "./helpers/test-router.js";
 
@@ -16,6 +17,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  window.localStorage.clear();
   if (OriginalEventSource) globalThis.EventSource = OriginalEventSource;
   cleanup();
 });
@@ -40,14 +42,33 @@ describe("ImportFlow", () => {
     expect(screen.getByTestId("workspace-page-inner")).toBeDefined();
   });
 
+  it("hydrates the yaml editor from the current Specs rig draft", async () => {
+    window.localStorage.setItem(SPECS_WORKSPACE_STORAGE_KEYS.currentRigDraft, JSON.stringify({
+      id: "rig-current",
+      kind: "rig",
+      label: "demo-rig",
+      yaml: VALID_YAML,
+      updatedAt: Date.now(),
+    }));
+
+    render(createAppTestRouter({
+      routes: [{ path: "/import", component: () => <ImportFlow /> }],
+      initialPath: "/import",
+      rootComponent: ({ children }) => <SpecsWorkspaceProvider>{children}</SpecsWorkspaceProvider>,
+    }));
+
+    await waitFor(() => {
+      expect((screen.getByTestId("yaml-input") as HTMLTextAreaElement).value).toBe(VALID_YAML);
+    });
+  });
+
   // Test 1: Step indicator shows step 1 active on validate screen
   it("step indicator shows step 1 active on input screen", async () => {
     await renderImportFlow();
     const step1 = screen.getByTestId("step-1");
-    expect(step1.className).toContain("text-foreground");
-    expect(step1.className).toContain("bg-foreground/10");
+    expect(step1.getAttribute("data-step-state")).toBe("active");
     const step2 = screen.getByTestId("step-2");
-    expect(step2.className).toContain("text-foreground-muted");
+    expect(step2.getAttribute("data-step-state")).toBe("upcoming");
   });
 
   // Test 2: Validate sends to daemon, shows Alert
@@ -82,7 +103,7 @@ describe("ImportFlow", () => {
       expect(errEl.textContent).toContain("no nodes");
       // Step 1 should still be active (error occurred at step 1)
       const step1 = screen.getByTestId("step-1");
-      expect(step1.className).toContain("text-foreground");
+      expect(step1.getAttribute("data-step-state")).toBe("active");
     });
     expect(screen.queryByTestId("preflight-btn")).toBeNull();
   });
@@ -178,9 +199,9 @@ describe("ImportFlow", () => {
     await waitFor(() => {
       const step1 = screen.getByTestId("step-1");
       expect(step1.textContent).toContain("✓");
+      expect(step1.getAttribute("data-step-state")).toBe("done");
       const step2 = screen.getByTestId("step-2");
-      expect(step2.className).toContain("text-foreground");
-      expect(step2.className).toContain("bg-foreground/10");
+      expect(step2.getAttribute("data-step-state")).toBe("active");
     });
   });
 

@@ -3,6 +3,7 @@ import { render, screen, waitFor, cleanup, fireEvent, act } from "@testing-libra
 import { createAppTestRouter } from "./helpers/test-router.js";
 import { BootstrapWizard } from "../src/components/BootstrapWizard.js";
 import { RequirementsPanel, type RequirementResult } from "../src/components/RequirementsPanel.js";
+import { SpecsWorkspaceProvider, SPECS_WORKSPACE_STORAGE_KEYS } from "../src/components/SpecsWorkspace.js";
 
 let fetchMock: ReturnType<typeof vi.fn>;
 
@@ -12,6 +13,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  window.localStorage.clear();
   cleanup();
   vi.restoreAllMocks();
 });
@@ -24,6 +26,7 @@ function renderWizard() {
         { path: "/rigs/$rigId", component: () => <div data-testid="rig-page">Rig</div> },
       ],
       initialPath: "/bootstrap",
+      rootComponent: ({ children }) => <SpecsWorkspaceProvider>{children}</SpecsWorkspaceProvider>,
     })
   );
 }
@@ -71,6 +74,19 @@ describe("BootstrapWizard", () => {
     });
   });
 
+  it("hydrates the source input from the Specs workspace", async () => {
+    window.localStorage.setItem(
+      SPECS_WORKSPACE_STORAGE_KEYS.bootstrapSourceRef,
+      JSON.stringify("/tmp/captured-dev-pod/rig.yaml"),
+    );
+
+    renderWizard();
+
+    await waitFor(() => {
+      expect((screen.getByTestId("spec-input") as HTMLInputElement).value).toBe("/tmp/captured-dev-pod/rig.yaml");
+    });
+  });
+
   // T2: plan shows stages
   it("plan shows stages with status", async () => {
     fetchMock.mockResolvedValueOnce({ ok: true, json: async () => PLAN_RESPONSE });
@@ -89,9 +105,8 @@ describe("BootstrapWizard", () => {
     const rows = screen.getAllByTestId("stage-row");
     expect(rows.length).toBeGreaterThanOrEqual(2);
 
-    // Step indicator should show REVIEW (step 3), not PLAN (step 2)
-    const indicator = screen.getByTestId("step-indicator");
-    expect(indicator.textContent).toContain("3 REVIEW");
+    expect(screen.getByTestId("step-2").getAttribute("data-step-state")).toBe("done");
+    expect(screen.getByTestId("step-3").getAttribute("data-step-state")).toBe("active");
   });
 
   // T3: requirements panel shows all 4 statuses with correct colors

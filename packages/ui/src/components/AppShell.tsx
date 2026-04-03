@@ -4,6 +4,7 @@ import { Cog, FileText, SquarePlus } from "lucide-react";
 import { Explorer } from "./Explorer.js";
 import { SharedDetailDrawer, type DrawerSelection } from "./SharedDetailDrawer.js";
 import type { DiscoveryPlacementTarget } from "./DiscoveryPanel.js";
+import { SpecsWorkspaceProvider } from "./SpecsWorkspace.js";
 import { useActivityFeed } from "../hooks/useActivityFeed.js";
 import { useGlobalEvents } from "../hooks/useGlobalEvents.js";
 import { useRigSummary } from "../hooks/useRigSummary.js";
@@ -87,6 +88,7 @@ function resolveSurfaceTitle(pathname: string, rigId: string | null, rigName: st
   if (pathname.startsWith("/discovery")) return "Discovery";
   if (
     pathname === "/specs" ||
+    pathname.startsWith("/specs/") ||
     pathname.startsWith("/packages") ||
     pathname === "/import" ||
     pathname === "/bootstrap" ||
@@ -181,18 +183,19 @@ export function AppShell({ children }: AppShellProps) {
   } as CSSProperties;
 
   return (
-    <DrawerSelectionContext.Provider value={{ selection: selectionState, setSelection }}>
-      <DiscoveryPlacementContext.Provider
-        value={{
-          selectedDiscoveredId,
-          setSelectedDiscoveredId,
-          placementTarget,
-          setPlacementTarget: setPlacementTargetState,
-          clearPlacement,
-        }}
-      >
-      <ExplorerVisibilityContext.Provider value={{ openExplorer }}>
-      <div className="h-screen flex flex-col">
+    <SpecsWorkspaceProvider>
+      <DrawerSelectionContext.Provider value={{ selection: selectionState, setSelection }}>
+        <DiscoveryPlacementContext.Provider
+          value={{
+            selectedDiscoveredId,
+            setSelectedDiscoveredId,
+            placementTarget,
+            setPlacementTarget: setPlacementTargetState,
+            clearPlacement,
+          }}
+        >
+        <ExplorerVisibilityContext.Provider value={{ openExplorer }}>
+        <div className="h-screen flex flex-col">
         {/* Header — paper with thick bottom border */}
         <header
           data-testid="app-header"
@@ -318,9 +321,10 @@ export function AppShell({ children }: AppShellProps) {
             onClearPlacement={clearPlacement}
           />
         </div>
-      </div>
-      </ExplorerVisibilityContext.Provider>
-      </DiscoveryPlacementContext.Provider>
-    </DrawerSelectionContext.Provider>
+        </div>
+        </ExplorerVisibilityContext.Provider>
+        </DiscoveryPlacementContext.Provider>
+      </DrawerSelectionContext.Provider>
+    </SpecsWorkspaceProvider>
   );
 }

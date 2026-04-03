@@ -73,14 +73,24 @@ describe("shadcn components", () => {
     expect(btn.className).toContain("text-white");
   });
 
-  // Test 4: Input has bottom-border styling
-  it("Input has border-b (bottom-border) styling", async () => {
+  // Test 4: Input and textarea use framed field styling
+  it("Input and Textarea use full bordered field styling", async () => {
     const { Input } = await import("../src/components/ui/input.js");
+    const { Textarea } = await import("../src/components/ui/textarea.js");
 
-    render(<Input data-testid="inp" />);
+    render(
+      <div>
+        <Input data-testid="inp" />
+        <Textarea data-testid="ta" />
+      </div>
+    );
 
     const inp = screen.getByTestId("inp");
-    expect(inp.className).toContain("border-b");
+    const ta = screen.getByTestId("ta");
+    expect(inp.className).toContain("border");
+    expect(inp.className).not.toContain("border-b");
+    expect(ta.className).toContain("border");
+    expect(ta.className).not.toContain("border-b");
   });
 
   // Test 5: Card uses white bg with hard-shadow (vellum theme)

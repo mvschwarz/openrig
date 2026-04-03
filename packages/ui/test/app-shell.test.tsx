@@ -19,6 +19,7 @@ beforeEach(async () => {
 
 afterEach(() => {
   if (OriginalEventSource) globalThis.EventSource = OriginalEventSource;
+  window.localStorage.clear();
   cleanup();
   Object.defineProperty(window, "innerWidth", {
     configurable: true,
@@ -219,6 +220,62 @@ describe("App Shell + Routing", () => {
 
     await waitFor(() => {
       expect(screen.getByTestId("agent-spec-validate-flow")).toBeDefined();
+      expect(screen.getByTestId("specs-panel")).toBeDefined();
+    });
+  });
+
+  it("wide layouts keep specs open when opening a rig draft review from the drawer", async () => {
+    window.localStorage.setItem("rigged.specs.recent-rig-drafts", JSON.stringify([
+      {
+        id: "rig-review",
+        kind: "rig",
+        label: "review-target",
+        yaml: "name: review-target\npods: []\n",
+        updatedAt: Date.now(),
+      },
+    ]));
+
+    mockAllApis();
+    setViewportWidth(1280);
+    await renderRealAppAt("/specs");
+
+    await waitFor(() => {
+      expect(screen.getByTestId("specs-panel")).toBeDefined();
+      expect(screen.getByText("review-target")).toBeDefined();
+    });
+
+    fireEvent.click(screen.getByText("review-target"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("rig-spec-review")).toBeDefined();
+      expect(screen.getByTestId("specs-panel")).toBeDefined();
+    });
+  });
+
+  it("wide layouts keep specs open when opening an agent draft review from the drawer", async () => {
+    window.localStorage.setItem("rigged.specs.recent-agent-drafts", JSON.stringify([
+      {
+        id: "agent-review",
+        kind: "agent",
+        label: "qa",
+        yaml: "name: qa\nprofiles:\n  default:\n",
+        updatedAt: Date.now(),
+      },
+    ]));
+
+    mockAllApis();
+    setViewportWidth(1280);
+    await renderRealAppAt("/specs");
+
+    await waitFor(() => {
+      expect(screen.getByTestId("specs-panel")).toBeDefined();
+      expect(screen.getByText("qa")).toBeDefined();
+    });
+
+    fireEvent.click(screen.getByText("qa"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("agent-spec-review")).toBeDefined();
       expect(screen.getByTestId("specs-panel")).toBeDefined();
     });
   });

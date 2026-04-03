@@ -16,6 +16,8 @@ import { PackageInstallFlow } from "./components/PackageInstallFlow.js";
 import { PackageDetail } from "./components/PackageDetail.js";
 import { BootstrapWizard } from "./components/BootstrapWizard.js";
 import { AgentSpecValidateFlow } from "./components/AgentSpecValidateFlow.js";
+import { RigSpecReview } from "./components/RigSpecReview.js";
+import { AgentSpecReview } from "./components/AgentSpecReview.js";
 import { BundleInspector } from "./components/BundleInspector.js";
 import { BundleInstallFlow } from "./components/BundleInstallFlow.js";
 import { DiscoveryOverlay } from "./components/DiscoveryOverlay.js";
@@ -115,6 +117,26 @@ function SpecsRouteBridge() {
   return <WorkspaceHome />;
 }
 
+function RigSpecReviewRoute() {
+  const { setSelection } = useDrawerSelection();
+
+  useEffect(() => {
+    setSelection({ type: "specs" });
+  }, [setSelection]);
+
+  return <RigSpecReview />;
+}
+
+function AgentSpecReviewRoute() {
+  const { setSelection } = useDrawerSelection();
+
+  useEffect(() => {
+    setSelection({ type: "specs" });
+  }, [setSelection]);
+
+  return <AgentSpecReview />;
+}
+
 // Discovery route
 const discoveryRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -126,6 +148,18 @@ const specsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/specs",
   component: SpecsRouteBridge,
+});
+
+const rigSpecReviewRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/specs/rig",
+  component: RigSpecReviewRoute,
+});
+
+const agentSpecReviewRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/specs/agent",
+  component: AgentSpecReviewRoute,
 });
 
 const discoveryInventoryRoute = createRoute({
@@ -165,6 +199,8 @@ const routeTree = rootRoute.addChildren([
   bootstrapRoute,
   agentValidateRoute,
   specsRoute,
+  rigSpecReviewRoute,
+  agentSpecReviewRoute,
   discoveryRoute,
   discoveryInventoryRoute,
   bundleInspectRoute,

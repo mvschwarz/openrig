@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { Button } from "@/components/ui/button";
+import { useSpecsWorkspace, type SpecsDraft } from "./SpecsWorkspace.js";
 
 interface SpecsPanelProps {
   onClose: () => void;
@@ -26,12 +27,69 @@ function Section({
   );
 }
 
+function DraftList({
+  title,
+  drafts,
+  onSelect,
+}: {
+  title: string;
+  drafts: SpecsDraft[];
+  onSelect: (draftId: string) => void;
+}) {
+  if (drafts.length === 0) return null;
+
+  return (
+    <div className="mt-3 w-full space-y-2">
+      <div className="font-mono text-[8px] uppercase tracking-[0.16em] text-stone-500">{title}</div>
+      <div className="w-full space-y-1">
+        {drafts.map((draft) => (
+          <button
+            key={draft.id}
+            type="button"
+            onClick={() => onSelect(draft.id)}
+            className="flex w-full items-center justify-between border border-stone-300/28 bg-white/5 px-2 py-2 text-left transition-colors hover:border-stone-900/25 hover:bg-white/10"
+          >
+            <span className="min-w-0 truncate text-[11px] text-stone-800">{draft.label}</span>
+            <span className="ml-3 shrink-0 font-mono text-[8px] uppercase tracking-[0.16em] text-stone-500">
+              {new Date(draft.updatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+            </span>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export function SpecsPanel({ onClose }: SpecsPanelProps) {
   const navigate = useNavigate();
+  const {
+    activeTask,
+    currentRigDraft,
+    currentAgentDraft,
+    recentRigDrafts,
+    recentAgentDrafts,
+    selectRigDraft,
+    selectAgentDraft,
+  } = useSpecsWorkspace();
 
-  const openSurface = async (to: "/import" | "/bootstrap" | "/agents/validate") => {
+  const openSurface = async (
+    to: "/import" | "/bootstrap" | "/agents/validate" | "/specs/rig" | "/specs/agent"
+  ) => {
     await navigate({ to });
   };
+
+  const openRigDraft = async (draftId: string) => {
+    selectRigDraft(draftId);
+    await openSurface("/specs/rig");
+  };
+
+  const openAgentDraft = async (draftId: string) => {
+    selectAgentDraft(draftId);
+    await openSurface("/specs/agent");
+  };
+
+  const rigDraftHistory = recentRigDrafts.filter((draft) => draft.id !== currentRigDraft?.id);
+  const agentDraftHistory = recentAgentDrafts.filter((draft) => draft.id !== currentAgentDraft?.id);
 
   return (
     <aside
@@ -51,6 +109,17 @@ export function SpecsPanel({ onClose }: SpecsPanelProps) {
       </div>
 
       <div className="flex-1 space-y-4 overflow-y-auto px-4 py-3">
+        {activeTask && (
+          <Section
+            title="Current Task"
+            description={activeTask.summary}
+          >
+            <Button variant="outline" size="sm" onClick={() => openSurface(activeTask.route)}>
+              Resume {activeTask.label}
+            </Button>
+          </Section>
+        )}
+
         <Section
           title="Rig Specs"
           description="Import a rig spec, review it in the workspace, then instantiate or bootstrap it."
@@ -61,6 +130,10 @@ export function SpecsPanel({ onClose }: SpecsPanelProps) {
           <Button variant="outline" size="sm" onClick={() => openSurface("/bootstrap")}>
             Bootstrap
           </Button>
+          {currentRigDraft && (
+            <DraftList title="Current Draft" drafts={[currentRigDraft]} onSelect={openRigDraft} />
+          )}
+          <DraftList title="Recent Drafts" drafts={rigDraftHistory} onSelect={openRigDraft} />
         </Section>
 
         <Section
@@ -70,6 +143,10 @@ export function SpecsPanel({ onClose }: SpecsPanelProps) {
           <Button variant="outline" size="sm" onClick={() => openSurface("/agents/validate")}>
             Validate AgentSpec
           </Button>
+          {currentAgentDraft && (
+            <DraftList title="Current Draft" drafts={[currentAgentDraft]} onSelect={openAgentDraft} />
+          )}
+          <DraftList title="Recent Drafts" drafts={agentDraftHistory} onSelect={openAgentDraft} />
         </Section>
       </div>
     </aside>
