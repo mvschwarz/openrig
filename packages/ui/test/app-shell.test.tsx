@@ -108,6 +108,9 @@ function mockAllApis() {
     if (typeof url === "string" && url.includes("/snapshots")) {
       return Promise.resolve({ ok: true, json: async () => [] });
     }
+    if (typeof url === "string" && url.includes("/api/specs/library")) {
+      return Promise.resolve({ ok: true, json: async () => [] });
+    }
     return Promise.resolve({ ok: true, json: async () => ({}) });
   });
 }

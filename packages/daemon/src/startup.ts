@@ -56,6 +56,7 @@ import { HistoryQuery } from "./domain/history-query.js";
 import { AskService } from "./domain/ask-service.js";
 import { ChatRepository } from "./domain/chat-repository.js";
 import { SpecReviewService } from "./domain/spec-review-service.js";
+import { SpecLibraryService } from "./domain/spec-library-service.js";
 import { createApp, type AppDeps } from "./server.js";
 import { execFile } from "node:child_process";
 import fs from "node:fs";
@@ -241,6 +242,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const resumeMetadataRefresher = new ResumeMetadataRefresher({ sessionRegistry, tmuxAdapter });
   const claimService = new ClaimService({ db, rigRepo, sessionRegistry, discoveryRepo, eventBus });
 
+  const specReviewService = new SpecReviewService();
+
   const deps: AppDeps = {
     rigRepo,
     sessionRegistry,
@@ -313,7 +316,23 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
         transcriptsEnabled: transcriptStore.enabled,
       });
     })(),
-    specReviewService: new SpecReviewService(),
+    specReviewService,
+    specLibraryService: (() => {
+      const userSpecsRoot = nodePath.join(os.homedir(), ".rigged", "specs");
+      try { fs.mkdirSync(userSpecsRoot, { recursive: true }); } catch { /* best-effort */ }
+      // From src/ or dist/, ../specs points to packages/daemon/specs/
+      const builtinSpecsRoot = nodePath.resolve(import.meta.dirname, "../specs");
+      const roots: Array<{ path: string; sourceType: "builtin" | "user_file" }> = [
+        { path: userSpecsRoot, sourceType: "user_file" },
+      ];
+      // Only add builtin root if it exists
+      if (fs.existsSync(builtinSpecsRoot)) {
+        roots.unshift({ path: builtinSpecsRoot, sourceType: "builtin" });
+      }
+      const lib = new SpecLibraryService({ roots, specReviewService });
+      lib.scan();
+      return lib;
+    })(),
   };
 
   const app = createApp(deps);

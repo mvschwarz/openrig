@@ -20,6 +20,7 @@ import { RigSpecReview } from "./components/RigSpecReview.js";
 import { AgentSpecReview } from "./components/AgentSpecReview.js";
 import { BundleInspector } from "./components/BundleInspector.js";
 import { BundleInstallFlow } from "./components/BundleInstallFlow.js";
+import { LibraryReview } from "./components/LibraryReview.js";
 import { DiscoveryOverlay } from "./components/DiscoveryOverlay.js";
 import { useRigSummary } from "./hooks/useRigSummary.js";
 import { useDrawerSelection } from "./components/AppShell.js";
@@ -162,6 +163,23 @@ const agentSpecReviewRoute = createRoute({
   component: AgentSpecReviewRoute,
 });
 
+function LibraryReviewRoute() {
+  const { entryId } = libraryReviewRoute.useParams();
+  const { setSelection } = useDrawerSelection();
+
+  useEffect(() => {
+    setSelection({ type: "specs" });
+  }, [setSelection]);
+
+  return <LibraryReview entryId={entryId} />;
+}
+
+const libraryReviewRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/specs/library/$entryId",
+  component: LibraryReviewRoute,
+});
+
 const discoveryInventoryRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/discovery/inventory",
@@ -201,6 +219,7 @@ const routeTree = rootRoute.addChildren([
   specsRoute,
   rigSpecReviewRoute,
   agentSpecReviewRoute,
+  libraryReviewRoute,
   discoveryRoute,
   discoveryInventoryRoute,
   bundleInspectRoute,

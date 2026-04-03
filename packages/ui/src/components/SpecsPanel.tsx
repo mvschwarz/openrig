@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { Button } from "@/components/ui/button";
 import { useSpecsWorkspace, type SpecsDraft } from "./SpecsWorkspace.js";
+import { useSpecLibrary, type SpecLibraryEntry } from "../hooks/useSpecLibrary.js";
 
 interface SpecsPanelProps {
   onClose: () => void;
@@ -60,6 +61,40 @@ function DraftList({
   );
 }
 
+function LibraryList({
+  title,
+  entries,
+  onSelect,
+}: {
+  title: string;
+  entries: SpecLibraryEntry[];
+  onSelect: (id: string) => void;
+}) {
+  if (entries.length === 0) return null;
+
+  return (
+    <div className="mt-3 w-full space-y-2">
+      <div className="font-mono text-[8px] uppercase tracking-[0.16em] text-stone-500">{title}</div>
+      <div className="w-full space-y-1">
+        {entries.map((entry) => (
+          <button
+            key={entry.id}
+            type="button"
+            data-testid={`library-entry-${entry.id}`}
+            onClick={() => onSelect(entry.id)}
+            className="flex w-full items-center justify-between border border-stone-300/28 bg-white/5 px-2 py-2 text-left transition-colors hover:border-stone-900/25 hover:bg-white/10"
+          >
+            <span className="min-w-0 truncate text-[11px] text-stone-800">{entry.name}</span>
+            <span className="ml-3 shrink-0 font-mono text-[8px] uppercase tracking-[0.16em] text-stone-500">
+              {entry.sourceType === "builtin" ? "built-in" : entry.version}
+            </span>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export function SpecsPanel({ onClose }: SpecsPanelProps) {
   const navigate = useNavigate();
   const {
@@ -86,6 +121,13 @@ export function SpecsPanel({ onClose }: SpecsPanelProps) {
   const openAgentDraft = async (draftId: string) => {
     selectAgentDraft(draftId);
     await openSurface("/specs/agent");
+  };
+
+  const { data: rigLibrary = [] } = useSpecLibrary("rig");
+  const { data: agentLibrary = [] } = useSpecLibrary("agent");
+
+  const openLibraryEntry = async (id: string) => {
+    await navigate({ to: `/specs/library/${id}` as "/specs" });
   };
 
   const rigDraftHistory = recentRigDrafts.filter((draft) => draft.id !== currentRigDraft?.id);
@@ -130,6 +172,7 @@ export function SpecsPanel({ onClose }: SpecsPanelProps) {
           <Button variant="outline" size="sm" onClick={() => openSurface("/bootstrap")}>
             Bootstrap
           </Button>
+          <LibraryList title="Library" entries={rigLibrary} onSelect={openLibraryEntry} />
           {currentRigDraft && (
             <DraftList title="Current Draft" drafts={[currentRigDraft]} onSelect={openRigDraft} />
           )}
@@ -143,6 +186,7 @@ export function SpecsPanel({ onClose }: SpecsPanelProps) {
           <Button variant="outline" size="sm" onClick={() => openSurface("/agents/validate")}>
             Validate AgentSpec
           </Button>
+          <LibraryList title="Library" entries={agentLibrary} onSelect={openLibraryEntry} />
           {currentAgentDraft && (
             <DraftList title="Current Draft" drafts={[currentAgentDraft]} onSelect={openAgentDraft} />
           )}

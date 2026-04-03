@@ -48,7 +48,9 @@ import { transportRoutes } from "./routes/transport.js";
 import { askRoutes } from "./routes/ask.js";
 import type { AskService } from "./domain/ask-service.js";
 import { specReviewRoutes } from "./routes/spec-review.js";
+import { specLibraryRoutes } from "./routes/spec-library.js";
 import type { SpecReviewService } from "./domain/spec-review-service.js";
+import type { SpecLibraryService } from "./domain/spec-library-service.js";
 import type { ChatRepository } from "./domain/chat-repository.js";
 import { chatRoutes } from "./routes/chat.js";
 
@@ -85,6 +87,7 @@ export interface AppDeps {
   askService?: AskService;
   chatRepo?: ChatRepository;
   specReviewService?: SpecReviewService;
+  specLibraryService?: SpecLibraryService;
   uiDistDir?: string | null;
 }
 
@@ -211,6 +214,7 @@ export function createApp(deps: AppDeps): Hono {
     c.set("askService" as never, deps.askService);
     c.set("chatRepo" as never, deps.chatRepo);
     c.set("specReviewService" as never, deps.specReviewService);
+    c.set("specLibraryService" as never, deps.specLibraryService);
     c.set("db" as never, deps.rigRepo.db);
     await next();
   });
@@ -241,6 +245,7 @@ export function createApp(deps: AppDeps): Hono {
   app.route("/api/transport", transportRoutes());
   app.route("/api/ask", askRoutes);
   app.route("/api/specs/review", specReviewRoutes());
+  app.route("/api/specs/library", specLibraryRoutes());
   app.route("/api/rigs/:rigId/chat", chatRoutes());
 
   const uiDistDir = deps.uiDistDir ?? resolveDefaultUiDistDir();
