@@ -373,4 +373,34 @@ describe("Up CLI", () => {
     expect(spawnedPort).toBe("7461");
     expect(clientBaseUrl).toBe("http://127.0.0.1:7461");
   });
+
+  it("up with library name matching existing rig shows ambiguity error", async () => {
+    // Mock server that has both a library spec and an existing rig named "my-rig"
+    const origListeners = server.listeners("request");
+    server.removeAllListeners("request");
+    server.on("request", (req: http.IncomingMessage, res: http.ServerResponse) => {
+      const url = decodeURIComponent(req.url ?? "");
+      if (url.startsWith("/api/specs/library")) {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify([{ id: "lib1", name: "alpha", sourcePath: "/specs/alpha.yaml" }]));
+      } else if (url === "/api/rigs/summary") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify([{ id: "r1", name: "alpha", nodeCount: 1 }]));
+      } else {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({}));
+      }
+    });
+
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rigged", "up", "alpha"]);
+    });
+
+    server.removeAllListeners("request");
+    for (const l of origListeners) server.on("request", l as (...args: unknown[]) => void);
+
+    expect(logs.join("\n")).toContain("ambiguous");
+    expect(logs.join("\n")).toContain("/specs/alpha.yaml");
+    expect(exitCode).toBe(1);
+  });
 });

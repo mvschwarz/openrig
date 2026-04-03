@@ -81,7 +81,36 @@ export function upCommand(depsOverride?: StatusDeps & { lifecycleDeps?: Lifecycl
 
       // Detect rig name vs file path: names don't contain / and don't end in .yaml/.yml/.rigbundle
       const isRigName = !source.includes("/") && !source.match(/\.(ya?ml|rigbundle)$/i);
-      const sourceRef = isRigName ? source : nodePath.resolve(source);
+      let sourceRef = isRigName ? source : nodePath.resolve(source);
+
+      // If it looks like a name, check for library spec match
+      if (isRigName) {
+        try {
+          const { resolveLibrarySpec } = await import("./specs.js");
+          const entry = await resolveLibrarySpec(client, source);
+          // Library match found — check for existing-rig collision
+          // Use /api/rigs/summary which mirrors findRigsByName (includes stopped rigs)
+          const rigRes = await client.get<Array<{ id: string; name: string }>>("/api/rigs/summary");
+          const rigMatches = (rigRes.data ?? []).filter((r) => r.name === source);
+          if (rigMatches.length > 0) {
+            console.error(`'${source}' is ambiguous — it matches both an existing rig and a library spec.`);
+            console.error(`  To launch the library spec: rigged up ${entry.sourcePath}`);
+            console.error(`  To power on the existing rig: rename or remove the library spec first, then retry.`);
+            process.exitCode = 1;
+            return;
+          }
+          sourceRef = entry.sourcePath;
+        } catch (resolveErr) {
+          // Ambiguity within library — surface it
+          if ((resolveErr as Error).message?.includes("ambiguous")) {
+            console.error((resolveErr as Error).message);
+            process.exitCode = 1;
+            return;
+          }
+          // Not found or other error — proceed with existing rig-name behavior
+        }
+      }
+
       const isRigBundle = !isRigName && /\.rigbundle$/i.test(sourceRef);
       const targetRoot = opts.target ?? (isRigBundle ? process.cwd() : undefined);
 

@@ -31,6 +31,7 @@ import { configCommand } from "./commands/config.js";
 import { preflightCommand } from "./commands/preflight.js";
 import { askCommand } from "./commands/ask.js";
 import { chatroomCommand } from "./commands/chatroom.js";
+import { specsCommand } from "./commands/specs.js";
 import type { LifecycleDeps } from "./daemon-lifecycle.js";
 
 export interface ProgramDeps {
@@ -61,6 +62,7 @@ export interface ProgramDeps {
   broadcastDeps?: StatusDeps;
   askDeps?: StatusDeps;
   chatroomDeps?: StatusDeps;
+  specsDeps?: StatusDeps;
   configPath?: string;
 }
 
@@ -99,6 +101,7 @@ export function createProgram(depsOverride?: ProgramDeps): Command {
   program.addCommand(broadcastCommand(depsOverride?.broadcastDeps));
   program.addCommand(askCommand(depsOverride?.askDeps));
   program.addCommand(chatroomCommand(depsOverride?.chatroomDeps));
+  program.addCommand(specsCommand(depsOverride?.specsDeps));
   program.addCommand(configCommand(depsOverride?.configPath));
   program.addCommand(preflightCommand());
 

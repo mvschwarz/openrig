@@ -43,9 +43,27 @@ export function bootstrapCommand(depsOverride?: StatusDeps): Command {
       const client = await getClient(deps);
       if (!client) { process.exitCode = 1; return; }
 
+      // Library name resolution: if spec looks like a name (not a path), check library
+      let sourceRef = spec;
+      const isPath = spec.includes("/") || /\.(ya?ml|rigbundle)$/i.test(spec);
+      if (!isPath) {
+        try {
+          const { resolveLibrarySpec } = await import("./specs.js");
+          const entry = await resolveLibrarySpec(client, spec);
+          sourceRef = entry.sourcePath;
+        } catch (resolveErr) {
+          if ((resolveErr as Error).message?.includes("ambiguous")) {
+            console.error((resolveErr as Error).message);
+            process.exitCode = 1;
+            return;
+          }
+          // Not found — fall through to use spec as-is (existing behavior)
+        }
+      }
+
       if (opts.plan) {
         // Plan mode
-        const res = await client.post<Record<string, unknown>>("/api/bootstrap/plan", { sourceRef: spec });
+        const res = await client.post<Record<string, unknown>>("/api/bootstrap/plan", { sourceRef });
 
         if (opts.json) {
           console.log(JSON.stringify(res.data));
@@ -81,7 +99,7 @@ export function bootstrapCommand(depsOverride?: StatusDeps): Command {
 
       // Apply mode
       const res = await client.post<Record<string, unknown>>("/api/bootstrap/apply", {
-        sourceRef: spec,
+        sourceRef,
         autoApprove: opts.yes ?? false,
       });
 

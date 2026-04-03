@@ -291,4 +291,42 @@ describe("Bootstrap CLI", () => {
     expect(logs.some((l) => l.includes("tmux session already exists"))).toBe(true);
     failedApplyServer.close();
   });
+
+  it("bootstrap resolves library name to file path in request body", async () => {
+    let capturedSourceRef: string | undefined;
+    const libServer = http.createServer((req, res) => {
+      const url = decodeURIComponent(req.url ?? "");
+      let body = "";
+      req.on("data", (chunk: Buffer) => { body += chunk; });
+      req.on("end", () => {
+        if (url === "/api/specs/library") {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify([{ id: "lib1", name: "my-lib-rig", sourcePath: "/specs/my-lib-rig.yaml", kind: "rig", version: "0.2", sourceType: "user_file" }]));
+        } else if (url.includes("/api/bootstrap")) {
+          const parsed = JSON.parse(body);
+          capturedSourceRef = parsed.sourceRef;
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ status: "completed", runId: "run-1", stages: [], errors: [], warnings: [] }));
+        } else {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({}));
+        }
+      });
+    });
+    await new Promise<void>((resolve) => { libServer.listen(0, resolve); });
+    const libPort = (libServer.address() as { port: number }).port;
+
+    const prog = new Command();
+    prog.exitOverride();
+    prog.addCommand(bootstrapCommand(runningDeps(libPort)));
+
+    await captureLogs(async () => {
+      await prog.parseAsync(["node", "rigged", "bootstrap", "my-lib-rig", "--yes"]);
+    });
+
+    libServer.close();
+
+    // The resolved sourceRef must be the library file path, not the raw name
+    expect(capturedSourceRef).toBe("/specs/my-lib-rig.yaml");
+  });
 });
