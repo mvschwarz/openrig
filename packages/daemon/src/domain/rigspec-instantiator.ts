@@ -1060,7 +1060,9 @@ export class PodRigInstantiator {
       input.resolvedSpecName ? `- agent_spec: ${input.resolvedSpecName}` : null,
       `- runtime: ${input.runtime}`,
       `- session: ${input.sessionName}`,
-      "Use this as ground-truth identity when asked who you are in the topology.",
+      "This is your startup identity hint. For durable identity recovery after compaction, run:",
+      "  rigged whoami --json",
+      "That command returns your full topology context: rig, pod, peers, edges, and transcript path.",
     ].filter((line): line is string => Boolean(line));
 
     return {

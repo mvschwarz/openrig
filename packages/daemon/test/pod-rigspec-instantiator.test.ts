@@ -136,11 +136,14 @@ describe("PodRigInstantiator", () => {
 
     expect(identityCall).toBeDefined();
     expect(identityCall?.[0]).toBe("dev-impl@test-rig");
+    // Identity fields preserved
     expect(identityCall?.[1]).toContain("- rig: test-rig");
     expect(identityCall?.[1]).toContain("- pod: dev");
     expect(identityCall?.[1]).toContain("- member: impl");
     expect(identityCall?.[1]).toContain("- logical_id: dev.impl");
     expect(identityCall?.[1]).toContain("- session: dev-impl@test-rig");
+    // Whoami pointer
+    expect(identityCall?.[1]).toContain("rigged whoami --json");
 
     db.close();
   });
