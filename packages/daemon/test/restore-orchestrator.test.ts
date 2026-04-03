@@ -1106,4 +1106,32 @@ describe("RestoreOrchestrator", () => {
 
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
+
+  it("restored sessions inherit RIGGED_NODE_ID and RIGGED_SESSION_NAME env vars", async () => {
+    const snap = seedRigAndSnapshot();
+    const createSessionSpy = vi.fn<(name: string, cwd?: string, env?: Record<string, string>) => Promise<{ ok: true }>>()
+      .mockResolvedValue({ ok: true });
+    const tmux = mockTmux();
+    (tmux as unknown as Record<string, unknown>).createSession = createSessionSpy;
+
+    const nodeLauncher = new NodeLauncher({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux });
+    const orch = new RestoreOrchestrator({
+      db, rigRepo, sessionRegistry, eventBus, snapshotRepo, snapshotCapture,
+      checkpointStore, nodeLauncher, tmuxAdapter: tmux,
+      claudeResume: mockClaudeResume(),
+      codexResume: mockCodexResume(),
+    });
+
+    const result = await orch.restore(snap.id);
+    expect(result.ok).toBe(true);
+
+    // Every createSession call should have received env vars
+    expect(createSessionSpy.mock.calls.length).toBeGreaterThan(0);
+    for (const call of createSessionSpy.mock.calls) {
+      const env = call[2];
+      expect(env).toBeDefined();
+      expect(env!.RIGGED_NODE_ID).toBeTruthy();
+      expect(env!.RIGGED_SESSION_NAME).toBeTruthy();
+    }
+  });
 });

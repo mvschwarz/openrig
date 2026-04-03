@@ -22,7 +22,7 @@ function setupDb(): Database.Database {
 }
 
 function mockTmuxAdapter(overrides?: {
-  createSession?: (name: string, cwd?: string) => Promise<TmuxResult>;
+  createSession?: (name: string, cwd?: string, env?: Record<string, string>) => Promise<TmuxResult>;
   killSession?: (name: string) => Promise<TmuxResult>;
 }): TmuxAdapter {
   return {
@@ -435,6 +435,25 @@ describe("NodeLauncher", () => {
         expect(result.warnings!.length).toBe(1);
         expect(result.warnings![0]).toContain("Transcript capture failed");
       }
+    });
+  });
+
+  describe("env var projection", () => {
+    it("passes RIGGED_NODE_ID and RIGGED_SESSION_NAME to createSession", async () => {
+      const { rig, node } = seedRigWithNode();
+      const createSpy = vi.fn<(name: string, cwd?: string, env?: Record<string, string>) => Promise<TmuxResult>>()
+        .mockResolvedValue({ ok: true });
+      const tmux = mockTmuxAdapter({ createSession: createSpy });
+      const launcher = new NodeLauncher({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux });
+
+      const result = await launcher.launchNode(rig.id, "dev1-impl");
+      expect(result.ok).toBe(true);
+      expect(createSpy).toHaveBeenCalledOnce();
+
+      const envArg = createSpy.mock.calls[0]![2];
+      expect(envArg).toBeDefined();
+      expect(envArg!.RIGGED_NODE_ID).toBe(node.id);
+      expect(envArg!.RIGGED_SESSION_NAME).toContain("dev1-impl");
     });
   });
 });

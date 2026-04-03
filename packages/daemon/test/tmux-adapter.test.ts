@@ -231,6 +231,33 @@ describe("TmuxAdapter", () => {
       expect(result).toEqual({ ok: true });
     });
 
+    it("with env map constructs -e flags for each key=value", async () => {
+      const exec = vi.fn<ExecFn>().mockResolvedValue("");
+      const adapter = new TmuxAdapter(exec);
+
+      await adapter.createSession("dev-impl@rig", "/tmp", {
+        RIGGED_NODE_ID: "node123",
+        RIGGED_SESSION_NAME: "dev-impl@rig",
+      });
+
+      const cmd = exec.mock.calls[0]![0] as string;
+      expect(cmd).toContain("-e 'RIGGED_NODE_ID=node123'");
+      expect(cmd).toContain("-e 'RIGGED_SESSION_NAME=dev-impl@rig'");
+      expect(cmd).toContain("-s 'dev-impl@rig'");
+      expect(cmd).toContain("-c '/tmp'");
+    });
+
+    it("without env still works as before", async () => {
+      const exec = vi.fn<ExecFn>().mockResolvedValue("");
+      const adapter = new TmuxAdapter(exec);
+
+      await adapter.createSession("r01-test", "/tmp");
+
+      const cmd = exec.mock.calls[0]![0] as string;
+      expect(cmd).not.toContain("-e ");
+      expect(cmd).toBe("tmux new-session -d -s 'r01-test' -c '/tmp'");
+    });
+
     it("returns { ok: false, code: 'duplicate_session' } on duplicate", async () => {
       const err = new Error("duplicate session: r01-dev1-impl");
       const adapter = new TmuxAdapter(mockExec({ "new-session": { error: err } }));

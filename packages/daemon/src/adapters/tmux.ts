@@ -144,9 +144,12 @@ export class TmuxAdapter {
     return sessions.some((s) => s.name === name);
   }
 
-  async createSession(name: string, cwd?: string): Promise<TmuxResult> {
+  async createSession(name: string, cwd?: string, env?: Record<string, string>): Promise<TmuxResult> {
     const cwdFlag = cwd != null ? ` -c ${shellQuote(cwd)}` : "";
-    const cmd = `tmux new-session -d -s ${shellQuote(name)}${cwdFlag}`;
+    const envFlags = env
+      ? Object.entries(env).map(([k, v]) => ` -e ${shellQuote(`${k}=${v}`)}`).join("")
+      : "";
+    const cmd = `tmux new-session -d -s ${shellQuote(name)}${cwdFlag}${envFlags}`;
     try {
       await this.exec(cmd);
       return { ok: true };
