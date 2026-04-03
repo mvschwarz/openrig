@@ -57,6 +57,7 @@ import { AskService } from "./domain/ask-service.js";
 import { ChatRepository } from "./domain/chat-repository.js";
 import { SpecReviewService } from "./domain/spec-review-service.js";
 import { SpecLibraryService } from "./domain/spec-library-service.js";
+import { WhoamiService } from "./domain/whoami-service.js";
 import { createApp, type AppDeps } from "./server.js";
 import { execFile } from "node:child_process";
 import fs from "node:fs";
@@ -316,6 +317,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
         transcriptsEnabled: transcriptStore.enabled,
       });
     })(),
+    whoamiService: new WhoamiService({ db, rigRepo, sessionRegistry, transcriptStore }),
     specReviewService,
     specLibraryService: (() => {
       const userSpecsRoot = nodePath.join(os.homedir(), ".rigged", "specs");
