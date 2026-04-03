@@ -179,13 +179,13 @@ discoveryRoutes.post("/:id/adopt", async (c) => {
 
   if (kind === "pod") {
     const podId = typeof target["podId"] === "string" ? target["podId"] : "";
-    const podPrefix = typeof target["podPrefix"] === "string" ? target["podPrefix"] : "";
+    const podNamespace = typeof target["podNamespace"] === "string" ? target["podNamespace"] : "";
     const memberName = typeof target["memberName"] === "string" ? target["memberName"] : "";
     if (!podId) {
       return c.json({ error: "target.podId is required" }, 400);
     }
-    if (!podPrefix) {
-      return c.json({ error: "target.podPrefix is required" }, 400);
+    if (!podNamespace) {
+      return c.json({ error: "target.podNamespace is required" }, 400);
     }
     if (!memberName) {
       return c.json({ error: "target.memberName is required" }, 400);
@@ -195,11 +195,11 @@ discoveryRoutes.post("/:id/adopt", async (c) => {
       discoveredId: id,
       rigId,
       podId,
-      podPrefix,
+      podNamespace,
       memberName,
     });
     if (result.ok) {
-      return c.json({ ...result, action: "create_and_bind", logicalId: `${podPrefix}.${memberName}` }, 201);
+      return c.json({ ...result, action: "create_and_bind", logicalId: `${podNamespace}.${memberName}` }, 201);
     }
 
     switch (result.code) {
@@ -210,7 +210,7 @@ discoveryRoutes.post("/:id/adopt", async (c) => {
       case "not_active":
       case "duplicate_logical_id":
       case "invalid_member_name":
-      case "invalid_pod_prefix":
+      case "invalid_pod_namespace":
         return c.json(result, 409);
       default:
         return c.json(result, 500);

@@ -19,11 +19,12 @@ function PodGroupNode({
     podLabel?: string | null;
     logicalId?: string | null;
     podId?: string | null;
+    podNamespace?: string | null;
     podDisplayName?: string | null;
     placementState?: "available" | "selected" | null;
   };
 }) {
-  const label = data.podDisplayName ?? inferPodName(data.logicalId) ?? displayPodName(data.podId ?? data.logicalId);
+  const label = data.podDisplayName ?? data.podNamespace ?? inferPodName(data.logicalId) ?? displayPodName(data.podId ?? data.logicalId);
 
   return (
     <div
@@ -153,22 +154,22 @@ export function RigGraph({
 
   // Apply tree layout + entrance animation to nodes
   const podMetaById = useMemo(() => {
-    const meta = new Map<string, { displayName: string | null; prefix: string | null }>();
+    const meta = new Map<string, { displayName: string | null; namespace: string | null }>();
     for (const node of rawNodes as Node[]) {
-      const nodeData = node.data as { logicalId?: string | null; podId?: string | null; podLabel?: string | null } | undefined;
+      const nodeData = node.data as { logicalId?: string | null; podId?: string | null; podLabel?: string | null; podNamespace?: string | null } | undefined;
       if ((node.type === "podGroup" || node.type === "group") && nodeData?.podId) {
         meta.set(nodeData.podId, {
-          displayName: nodeData.podLabel ?? inferPodName(nodeData.logicalId) ?? displayPodName(nodeData.podId),
-          prefix: inferPodName(nodeData.logicalId) ?? nodeData.logicalId ?? null,
+          displayName: nodeData.podLabel ?? nodeData.podNamespace ?? inferPodName(nodeData.logicalId) ?? displayPodName(nodeData.podId),
+          namespace: nodeData.podNamespace ?? nodeData.logicalId ?? null,
         });
         continue;
       }
       const podId = nodeData?.podId ?? null;
       if (!podId) continue;
-      const prefix = inferPodName(nodeData?.logicalId) ?? null;
-      const displayName = prefix ?? displayPodName(podId);
+      const namespace = nodeData?.podNamespace ?? inferPodName(nodeData?.logicalId) ?? null;
+      const displayName = nodeData?.podLabel ?? namespace ?? displayPodName(podId);
       if (!meta.has(podId)) {
-        meta.set(podId, { displayName, prefix });
+        meta.set(podId, { displayName, namespace });
       }
     }
     return meta;
@@ -266,12 +267,12 @@ export function RigGraph({
           const podData = node.data as { podId?: string | null };
           const podId = podData?.podId ?? null;
           const podMeta = podId ? podMetaById.get(podId) : null;
-          const eligible = Boolean(podId && podMeta?.prefix);
+          const eligible = Boolean(podId && podMeta?.namespace);
           setPlacementTarget({
             kind: "pod",
             rigId,
             podId: podId ?? "",
-            podPrefix: podMeta?.prefix ?? null,
+            podNamespace: podMeta?.namespace ?? null,
             podLabel: podMeta?.displayName ?? null,
             eligible,
             ...(eligible ? {} : { reason: "This pod cannot receive a new node yet." }),

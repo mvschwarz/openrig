@@ -9,6 +9,7 @@ import { resumeMetadataSchema } from "../src/db/migrations/006_resume_metadata.j
 import { nodeSpecFieldsSchema } from "../src/db/migrations/007_node_spec_fields.js";
 import { checkpointsSchema } from "../src/db/migrations/005_checkpoints.js";
 import { agentspecRebootSchema } from "../src/db/migrations/014_agentspec_reboot.js";
+import { podNamespaceSchema } from "../src/db/migrations/017_pod_namespace.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { RigSpecExporter } from "../src/domain/rigspec-exporter.js";
@@ -21,7 +22,7 @@ import { RigNotFoundError } from "../src/domain/errors.js";
 
 function setupDb(): Database.Database {
   const db = createDb();
-  migrate(db, [coreSchema, bindingsSessionsSchema, eventsSchema, resumeMetadataSchema, checkpointsSchema, nodeSpecFieldsSchema, agentspecRebootSchema]);
+  migrate(db, [coreSchema, bindingsSessionsSchema, eventsSchema, resumeMetadataSchema, checkpointsSchema, nodeSpecFieldsSchema, agentspecRebootSchema, podNamespaceSchema]);
   return db;
 }
 
@@ -268,8 +269,8 @@ describe("RigSpecExporter (pod-aware)", () => {
 
   function seedPodRig() {
     const rig = rigRepo.createRig("pod-test");
-    const devPod = podRepo.createPod(rig.id, "Dev", { summary: "dev pod" });
-    const archPod = podRepo.createPod(rig.id, "Arch", { summary: "arch pod" });
+    const devPod = podRepo.createPod(rig.id, "dev", "Dev", { summary: "dev pod" });
+    const archPod = podRepo.createPod(rig.id, "arch", "Arch", { summary: "arch pod" });
     const n1 = rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code", podId: devPod.id, agentRef: "local:agents/impl", profile: "tdd", cwd: "." });
     const n2 = rigRepo.addNode(rig.id, "dev.qa", { runtime: "codex", podId: devPod.id, agentRef: "local:agents/qa", profile: "default", cwd: "." });
     const n3 = rigRepo.addNode(rig.id, "arch.reviewer", { runtime: "claude-code", podId: archPod.id, agentRef: "local:agents/reviewer", profile: "default", cwd: "." });
@@ -305,6 +306,16 @@ describe("RigSpecExporter (pod-aware)", () => {
     expect(spec.edges).toHaveLength(1);
     expect(spec.edges[0]!.from).toBe("dev.impl");
     expect(spec.edges[0]!.to).toBe("arch.reviewer");
+  });
+
+  it("exports empty pods using persisted pod namespace instead of pod ULID", () => {
+    const rig = rigRepo.createRig("empty-pod-test");
+    const pod = podRepo.createPod(rig.id, "research", "Research", { summary: "empty pod" });
+
+    const spec = exporter.exportRig(rig.id) as import("../src/domain/types.js").RigSpec;
+    expect(spec.pods).toHaveLength(1);
+    expect(spec.pods[0]!.id).toBe("research");
+    expect(spec.pods[0]!.id).not.toBe(pod.id);
   });
 
   it("round-trip: export -> serialize -> parse -> validate passes", () => {

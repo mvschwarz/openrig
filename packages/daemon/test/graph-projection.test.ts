@@ -233,6 +233,7 @@ describe("projectRigToGraph", () => {
     ], [], [], [
       {
         id: "dev",
+        namespace: "dev",
         rigId: "rig-1",
         label: "Implementation",
         summary: null,
@@ -249,11 +250,14 @@ describe("projectRigToGraph", () => {
     expect(groupNode).toBeDefined();
     expect(groupNode!.type).toBe("podGroup");
     expect(groupNode!.data.podLabel).toBe("Implementation");
+    expect(groupNode!.data.podNamespace).toBe("dev");
+    expect(groupNode!.data.logicalId).toBe("dev");
 
     // Child nodes should have parentId and podId in data
     const childNodes = result.nodes.filter((n) => n.parentId === "pod-dev");
     expect(childNodes).toHaveLength(2);
     expect(childNodes[0]!.data.podId).toBe("dev");
+    expect(childNodes[0]!.data.podNamespace).toBe("dev");
   });
 
   // NS-T03: nodeKind derived from runtime

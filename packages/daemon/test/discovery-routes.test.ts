@@ -16,12 +16,13 @@ import { bootstrapSchema } from "../src/db/migrations/011_bootstrap.js";
 import { discoverySchema } from "../src/db/migrations/012_discovery.js";
 import { discoveryFkFix } from "../src/db/migrations/013_discovery_fk_fix.js";
 import { agentspecRebootSchema } from "../src/db/migrations/014_agentspec_reboot.js";
+import { podNamespaceSchema } from "../src/db/migrations/017_pod_namespace.js";
 import { createTestApp } from "./helpers/test-app.js";
 
 const ALL_MIGRATIONS = [
   coreSchema, bindingsSessionsSchema, eventsSchema, snapshotsSchema,
   checkpointsSchema, resumeMetadataSchema, nodeSpecFieldsSchema,
-  packagesSchema, installJournalSchema, journalSeqSchema, bootstrapSchema, discoverySchema, discoveryFkFix, agentspecRebootSchema,
+  packagesSchema, installJournalSchema, journalSeqSchema, bootstrapSchema, discoverySchema, discoveryFkFix, agentspecRebootSchema, podNamespaceSchema,
 ];
 
 function getEvents(database: Database.Database): Array<{ type: string; payload: string }> {
@@ -176,7 +177,7 @@ describe("Discovery API routes", () => {
   it("POST /api/discovery/:id/adopt creates a new node inside a pod target and binds it", async () => {
     const id = seedDiscovery("research-scout", "%2");
     const rig = seedRig();
-    db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-research", rig.id, "Research");
+    db.prepare("INSERT INTO pods (id, rig_id, namespace, label) VALUES (?, ?, ?, ?)").run("pod-research", rig.id, "research", "Research");
     setup.rigRepo.addNode(rig.id, "research.mapper", { runtime: "claude-code", podId: "pod-research" });
 
     const res = await app.request(`/api/discovery/${id}/adopt`, {
@@ -184,7 +185,7 @@ describe("Discovery API routes", () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         rigId: rig.id,
-        target: { kind: "pod", podId: "pod-research", podPrefix: "research", memberName: "scout" },
+        target: { kind: "pod", podId: "pod-research", podNamespace: "research", memberName: "scout" },
       }),
     });
 

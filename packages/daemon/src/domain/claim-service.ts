@@ -32,7 +32,7 @@ interface CreateAndBindToPodOptions {
   discoveredId: string;
   rigId: string;
   podId: string;
-  podPrefix: string;
+  podNamespace: string;
   memberName: string;
 }
 
@@ -231,22 +231,25 @@ export class ClaimService {
     }
 
     const podRow = this.db
-      .prepare("SELECT rig_id FROM pods WHERE id = ?")
-      .get(opts.podId) as { rig_id: string } | undefined;
+      .prepare("SELECT rig_id, namespace FROM pods WHERE id = ?")
+      .get(opts.podId) as { rig_id: string; namespace: string } | undefined;
     if (!podRow || podRow.rig_id !== opts.rigId) {
       return { ok: false, code: "pod_not_found", error: "Target pod not found in rig" };
     }
 
     const memberName = opts.memberName.trim();
-    const podPrefix = opts.podPrefix.trim();
+    const podNamespace = opts.podNamespace.trim();
     if (!memberName) {
       return { ok: false, code: "invalid_member_name", error: "memberName is required" };
     }
-    if (!podPrefix) {
-      return { ok: false, code: "invalid_pod_prefix", error: "podPrefix is required" };
+    if (!podNamespace) {
+      return { ok: false, code: "invalid_pod_namespace", error: "podNamespace is required" };
+    }
+    if (podRow.namespace !== podNamespace) {
+      return { ok: false, code: "invalid_pod_namespace", error: "podNamespace does not match target pod" };
     }
 
-    const logicalId = `${podPrefix}.${memberName}`;
+    const logicalId = `${podNamespace}.${memberName}`;
     if (rig.nodes.some((n) => n.logicalId === logicalId)) {
       return { ok: false, code: "duplicate_logical_id", error: `Logical ID '${logicalId}' already exists in rig` };
     }

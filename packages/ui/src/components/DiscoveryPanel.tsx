@@ -25,7 +25,7 @@ export type DiscoveryPlacementTarget =
       kind: "pod";
       rigId: string;
       podId: string;
-      podPrefix: string | null;
+      podNamespace: string | null;
       podLabel: string | null;
       eligible: boolean;
       reason?: string | null;
@@ -85,7 +85,7 @@ function targetNodeLabel(logicalId: string): string {
 }
 
 function targetPodLabel(target: Extract<DiscoveryPlacementTarget, { kind: "pod" }>): string {
-  return target.podLabel ?? target.podPrefix ?? shortId(target.podId);
+  return target.podLabel ?? target.podNamespace ?? shortId(target.podId);
 }
 
 function CopyActionButton({
@@ -196,11 +196,11 @@ export function DiscoveryPanel({
     if (placementTarget.kind === "node") {
       target = { kind: "node", logicalId: placementTarget.logicalId };
     } else {
-      if (!placementTarget.podPrefix) return;
+      if (!placementTarget.podNamespace) return;
       target = {
         kind: "pod",
         podId: placementTarget.podId,
-        podPrefix: placementTarget.podPrefix,
+        podNamespace: placementTarget.podNamespace,
         memberName: memberName.trim(),
       };
     }

@@ -8,6 +8,7 @@ export interface RigGraphInput extends RigWithRelations {
 interface RFNodeData {
   logicalId: string;
   podLabel?: string | null;
+  podNamespace?: string | null;
   rigId: string;
   role: string | null;
   runtime: string | null;
@@ -55,6 +56,7 @@ export function projectRigToGraph(input: RigGraphInput, inventoryOverlay?: Inven
   const { nodes: rigNodes, edges: rigEdges, sessions, pods = [] } = input;
   const overlayMap = new Map((inventoryOverlay ?? []).map((o) => [o.logicalId, o]));
   const podLabelById = new Map(pods.map((pod) => [pod.id, pod.label]));
+  const podNamespaceById = new Map(pods.map((pod) => [pod.id, pod.namespace]));
 
   // Collect unique pods for group nodes
   const podNodes = new Map<string, string[]>(); // podId → node IDs
@@ -85,6 +87,7 @@ export function projectRigToGraph(input: RigGraphInput, inventoryOverlay?: Inven
       data: {
         logicalId: node.logicalId,
         podLabel: node.podId ? (podLabelById.get(node.podId) ?? null) : null,
+        podNamespace: node.podId ? (podNamespaceById.get(node.podId) ?? null) : null,
         rigId: node.rigId,
         role: node.role,
         runtime: node.runtime,
@@ -109,8 +112,9 @@ export function projectRigToGraph(input: RigGraphInput, inventoryOverlay?: Inven
       type: "podGroup",
       position: { x: 0, y: 0 },
       data: {
-        logicalId: podId,
+        logicalId: podNamespaceById.get(podId) ?? podId,
         podLabel: podLabelById.get(podId) ?? podId,
+        podNamespace: podNamespaceById.get(podId) ?? podId,
         rigId: input.rig.id,
         role: null,
         runtime: null,

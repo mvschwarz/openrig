@@ -38,8 +38,8 @@ export class RigSpecExporter {
       throw new RigNotFoundError(rigId);
     }
 
-    // Detect pod-aware: any node has a non-null podId
-    const isPodAware = rig.nodes.some((n) => n.podId != null);
+    // Detect pod-aware: any node has a non-null podId, or pods exist explicitly.
+    const isPodAware = rig.nodes.some((n) => n.podId != null) || (this.podRepo?.getPodsForRig(rigId).length ?? 0) > 0;
 
     if (isPodAware && this.podRepo) {
       return this.exportPodAware(rigId, rig);
@@ -172,9 +172,7 @@ export class RigSpecExporter {
         }));
 
       // Derive pod spec id from the first member's logicalId prefix (e.g., "dev" from "dev.impl")
-      const podSpecId = podNodes.length > 0 && podNodes[0]!.logicalId.includes(".")
-        ? podNodes[0]!.logicalId.split(".")[0]!
-        : pod.id;
+      const podSpecId = pod.namespace;
       const podSpec: RigSpecPod = {
         id: podSpecId,
         label: pod.label,

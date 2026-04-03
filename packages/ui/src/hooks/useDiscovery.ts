@@ -27,7 +27,7 @@ export interface DiscoveryQuery {
 
 export type DiscoveryAdoptTarget =
   | { kind: "node"; logicalId: string }
-  | { kind: "pod"; podId: string; podPrefix: string; memberName: string };
+  | { kind: "pod"; podId: string; podNamespace: string; memberName: string };
 
 /** Trigger a discovery scan. On success, invalidates discovery list queries. */
 export function useDiscoveryScan() {

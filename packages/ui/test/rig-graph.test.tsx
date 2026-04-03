@@ -361,7 +361,7 @@ describe("RigGraph", () => {
       kind: "pod",
       rigId: "rig-1",
       podId: "dev",
-      podPrefix: "dev",
+      podNamespace: "dev",
       podLabel: "Development",
       eligible: true,
     });

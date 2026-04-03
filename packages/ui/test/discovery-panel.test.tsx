@@ -90,7 +90,7 @@ describe("DiscoveryPanel", () => {
         kind: "pod",
         rigId: "rig-1",
         podId: "intake",
-        podPrefix: "intake",
+        podNamespace: "intake",
         podLabel: "intake",
         eligible: true,
       },
