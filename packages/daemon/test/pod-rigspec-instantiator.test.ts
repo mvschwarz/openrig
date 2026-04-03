@@ -122,6 +122,29 @@ describe("PodRigInstantiator", () => {
     db.close();
   });
 
+  it("injects rig identity context into launched agent startup actions", async () => {
+    const { db, inst, tmux } = setup();
+    const yaml = RigSpecCodec.serialize(makeRigSpec());
+    const result = await inst.instantiate(yaml, RIG_ROOT);
+
+    expect(result.ok).toBe(true);
+
+    const sendText = tmux.sendText as ReturnType<typeof vi.fn>;
+    const identityCall = sendText.mock.calls.find(([, text]) =>
+      typeof text === "string" && text.includes("Rigged session identity:"),
+    );
+
+    expect(identityCall).toBeDefined();
+    expect(identityCall?.[0]).toBe("dev-impl@test-rig");
+    expect(identityCall?.[1]).toContain("- rig: test-rig");
+    expect(identityCall?.[1]).toContain("- pod: dev");
+    expect(identityCall?.[1]).toContain("- member: impl");
+    expect(identityCall?.[1]).toContain("- logical_id: dev.impl");
+    expect(identityCall?.[1]).toContain("- session: dev-impl@test-rig");
+
+    db.close();
+  });
+
   // T4: partial failure — one node startup fails, other succeeds
   it("partial node startup failure does not corrupt other nodes", async () => {
     const files = {

@@ -285,7 +285,7 @@ import { resolveStartup } from "./startup-resolver.js";
 import { planProjection } from "./projection-planner.js";
 import { StartupOrchestrator } from "./startup-orchestrator.js";
 import { PodRepository } from "./pod-repository.js";
-import type { RigSpec as PodRigSpec, RigSpecPod, RigSpecPodMember, StartupFile } from "./types.js";
+import type { RigSpec as PodRigSpec, RigSpecPod, RigSpecPodMember, StartupAction, StartupFile } from "./types.js";
 import type { RuntimeAdapter, NodeBinding, ResolvedStartupFile } from "./runtime-adapter.js";
 import { resolveConcreteHint } from "./runtime-adapter.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
@@ -698,7 +698,17 @@ export class PodRigInstantiator {
           adapter,
           plan: planResult.plan,
           resolvedStartupFiles: resolvedFiles,
-          startupActions: configResult.config.startup.actions,
+          startupActions: [
+            ...configResult.config.startup.actions,
+            this.buildSessionIdentityAction({
+              rigName: rigSpec.name,
+              pod,
+              member,
+              runtime: member.runtime,
+              sessionName: canonicalSessionName,
+              resolvedSpecName: configResult.config.resolvedSpecName,
+            }),
+          ],
           isRestore: false,
         });
 
@@ -1029,6 +1039,37 @@ export class PodRigInstantiator {
     }
 
     return this.resolveAutoHints(files);
+  }
+
+  private buildSessionIdentityAction(input: {
+    rigName: string;
+    pod: RigSpecPod;
+    member: RigSpecPodMember;
+    runtime: string;
+    sessionName: string;
+    resolvedSpecName?: string | null;
+  }): StartupAction {
+    const lines = [
+      "Rigged session identity:",
+      `- rig: ${input.rigName}`,
+      `- pod: ${input.pod.id}`,
+      `- pod_label: ${input.pod.label}`,
+      `- member: ${input.member.id}`,
+      input.member.label ? `- member_label: ${input.member.label}` : null,
+      `- logical_id: ${input.pod.id}.${input.member.id}`,
+      input.resolvedSpecName ? `- agent_spec: ${input.resolvedSpecName}` : null,
+      `- runtime: ${input.runtime}`,
+      `- session: ${input.sessionName}`,
+      "Use this as ground-truth identity when asked who you are in the topology.",
+    ].filter((line): line is string => Boolean(line));
+
+    return {
+      type: "send_text",
+      value: lines.join("\n"),
+      phase: "after_ready",
+      appliesOn: ["fresh_start", "restore"],
+      idempotent: true,
+    };
   }
 
   /**

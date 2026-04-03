@@ -127,7 +127,7 @@ export function SpecsPanel({ onClose }: SpecsPanelProps) {
   const { data: agentLibrary = [] } = useSpecLibrary("agent");
 
   const openLibraryEntry = async (id: string) => {
-    await navigate({ to: `/specs/library/${id}` as "/specs" });
+    await navigate({ to: "/specs/library/$entryId", params: { entryId: id } });
   };
 
   const rigDraftHistory = recentRigDrafts.filter((draft) => draft.id !== currentRigDraft?.id);

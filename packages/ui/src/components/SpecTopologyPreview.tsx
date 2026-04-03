@@ -10,7 +10,7 @@ import "@xyflow/react/dist/style.css";
 import type { SpecGraphData } from "../hooks/useSpecReview.js";
 
 interface SpecTopologyPreviewProps {
-  graph: SpecGraphData;
+  graph?: SpecGraphData | null;
   testId?: string;
 }
 
@@ -62,11 +62,12 @@ function layoutNodes(graphNodes: SpecGraphData["nodes"]): Array<{ id: string; x:
 }
 
 export function SpecTopologyPreview({ graph, testId }: SpecTopologyPreviewProps) {
+  const safeGraph = graph ?? { nodes: [], edges: [] };
   const { nodes, edges } = useMemo(() => {
-    const positions = layoutNodes(graph.nodes);
+    const positions = layoutNodes(safeGraph.nodes);
     const posMap = new Map(positions.map((p) => [p.id, p]));
 
-    const rfNodes: Node[] = graph.nodes.map((n) => {
+    const rfNodes: Node[] = safeGraph.nodes.map((n) => {
       const pos = posMap.get(n.id) ?? { x: 0, y: 0 };
       return {
         id: n.id,
@@ -84,7 +85,7 @@ export function SpecTopologyPreview({ graph, testId }: SpecTopologyPreviewProps)
       };
     });
 
-    const rfEdges: Edge[] = graph.edges.map((e, i) => ({
+    const rfEdges: Edge[] = safeGraph.edges.map((e, i) => ({
       id: `e-${i}`,
       source: e.source,
       target: e.target,
@@ -94,7 +95,7 @@ export function SpecTopologyPreview({ graph, testId }: SpecTopologyPreviewProps)
     }));
 
     return { nodes: rfNodes, edges: rfEdges };
-  }, [graph]);
+  }, [safeGraph]);
 
   return (
     <div data-testid={testId ?? "spec-topology-preview"} className="w-full h-[400px] bg-stone-50 border border-stone-200">

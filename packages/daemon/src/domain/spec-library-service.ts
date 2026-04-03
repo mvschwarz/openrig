@@ -1,7 +1,7 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 import { createHash } from "node:crypto";
-import { SpecReviewService, SpecReviewError, type SourceState } from "./spec-review-service.js";
+import { SpecReviewService } from "./spec-review-service.js";
 
 export interface SpecLibraryEntry {
   id: string;
@@ -31,6 +31,35 @@ function isYamlFile(filename: string): boolean {
   return filename.endsWith(".yaml") || filename.endsWith(".yml");
 }
 
+function walkYamlFiles(rootPath: string): string[] {
+  const files: string[] = [];
+  const stack = [rootPath];
+
+  while (stack.length > 0) {
+    const current = stack.pop()!;
+    let entries: Array<import("node:fs").Dirent>;
+    try {
+      entries = readdirSync(current, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+
+    for (const entry of entries) {
+      const absPath = join(current, entry.name);
+      if (entry.isDirectory()) {
+        stack.push(absPath);
+        continue;
+      }
+      if (entry.isFile() && isYamlFile(entry.name)) {
+        files.push(absPath);
+      }
+    }
+  }
+
+  files.sort();
+  return files;
+}
+
 export class SpecLibraryService {
   private entries = new Map<string, SpecLibraryEntry>();
   private readonly roots: SpecLibraryOpts["roots"];
@@ -45,18 +74,12 @@ export class SpecLibraryService {
     const newEntries = new Map<string, SpecLibraryEntry>();
 
     for (const root of this.roots) {
-      let files: string[];
-      try {
-        files = readdirSync(root.path).filter(isYamlFile);
-      } catch {
-        // Root doesn't exist or isn't readable — skip
+      const files = walkYamlFiles(root.path);
+      if (files.length === 0) {
         continue;
       }
 
-      const sourceState: SourceState = root.sourceType === "builtin" ? "library_item" : "library_item";
-
-      for (const filename of files) {
-        const absPath = join(root.path, filename);
+      for (const absPath of files) {
         const relPath = relative(root.path, absPath);
 
         let yaml: string;

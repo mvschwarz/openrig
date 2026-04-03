@@ -20,6 +20,9 @@ export function RigSpecReview() {
   const draft = selectedRigDraft ?? currentRigDraft;
   const [activeTab, setActiveTab] = useState<Tab>("topology");
   const { data: review, isLoading, error } = useRigSpecReview(draft?.yaml ?? null);
+  const reviewPods = review?.pods ?? [];
+  const reviewNodes = review?.nodes ?? [];
+  const reviewEdges = review?.edges ?? [];
 
   if (!draft) {
     return (
@@ -67,20 +70,20 @@ export function RigSpecReview() {
             />
             <WorkflowSummaryCard
               label={review.format === "pod_aware" ? "Pods" : "Nodes"}
-              value={review.format === "pod_aware" ? review.pods?.length ?? 0 : review.nodes?.length ?? 0}
+              value={review.format === "pod_aware" ? reviewPods.length : reviewNodes.length}
               testId="rig-spec-summary-pods"
             />
             <WorkflowSummaryCard
               label="Members"
               value={review.format === "pod_aware"
-                ? review.pods?.reduce((sum, p) => sum + p.members.length, 0) ?? 0
-                : review.nodes?.length ?? 0}
+                ? reviewPods.reduce((sum, p) => sum + p.members.length, 0)
+                : reviewNodes.length}
               testId="rig-spec-summary-members"
             />
             <WorkflowSummaryCard
               label="Edges"
-              value={review.edges.length + (review.format === "pod_aware"
-                ? review.pods?.reduce((sum, p) => sum + (p.edges?.length ?? 0), 0) ?? 0
+              value={reviewEdges.length + (review.format === "pod_aware"
+                ? reviewPods.reduce((sum, p) => sum + (p.edges?.length ?? 0), 0)
                 : 0)}
               testId="rig-spec-summary-edges"
             />
@@ -120,7 +123,7 @@ export function RigSpecReview() {
 
         {review && activeTab === "configuration" && (
           <div data-testid="rig-config-tables" className="space-y-4">
-            {review.format === "pod_aware" && review.pods?.map((pod) => (
+            {review.format === "pod_aware" && reviewPods.map((pod) => (
               <div key={pod.id} className="border border-stone-200 p-3">
                 <div className="font-mono text-xs font-bold mb-2">{pod.label ?? pod.id}</div>
                 <table className="w-full font-mono text-[10px]">
@@ -146,7 +149,7 @@ export function RigSpecReview() {
               </div>
             ))}
 
-            {review.format === "legacy" && review.nodes && (
+            {review.format === "legacy" && reviewNodes.length > 0 && (
               <div className="border border-stone-200 p-3">
                 <div className="font-mono text-xs font-bold mb-2">Nodes</div>
                 <table className="w-full font-mono text-[10px]">
@@ -158,7 +161,7 @@ export function RigSpecReview() {
                     </tr>
                   </thead>
                   <tbody>
-                    {review.nodes.map((n) => (
+                    {reviewNodes.map((n) => (
                       <tr key={n.id} className="border-b border-stone-100">
                         <td className="py-1">{n.id}</td>
                         <td className="py-1">{n.runtime}</td>
@@ -170,7 +173,7 @@ export function RigSpecReview() {
               </div>
             )}
 
-            {review.edges.length > 0 && (
+            {reviewEdges.length > 0 && (
               <div className="border border-stone-200 p-3">
                 <div className="font-mono text-xs font-bold mb-2">
                   {review.format === "pod_aware" ? "Cross-Pod Edges" : "Edges"}
@@ -184,7 +187,7 @@ export function RigSpecReview() {
                     </tr>
                   </thead>
                   <tbody>
-                    {review.edges.map((e, i) => (
+                    {reviewEdges.map((e, i) => (
                       <tr key={i} className="border-b border-stone-100">
                         <td className="py-1">{e.from}</td>
                         <td className="py-1">{e.to}</td>

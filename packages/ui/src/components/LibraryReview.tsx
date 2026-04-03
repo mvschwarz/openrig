@@ -2,7 +2,7 @@ import { useNavigate } from "@tanstack/react-router";
 import { Button } from "@/components/ui/button";
 import { WorkspacePage } from "./WorkspacePage.js";
 import { SpecTopologyPreview } from "./SpecTopologyPreview.js";
-import { useLibraryReview, type LibraryRigReview, type LibraryAgentReview } from "../hooks/useSpecLibrary.js";
+import { useLibraryReview, useSpecLibrary, type LibraryRigReview, type LibraryAgentReview } from "../hooks/useSpecLibrary.js";
 import {
   WorkflowCodePreview,
   WorkflowHeader,
@@ -27,6 +27,14 @@ function ProvenanceBadge({ sourcePath, sourceState }: { sourcePath: string; sour
 
 function LibraryAgentReview({ review }: { review: LibraryAgentReview }) {
   const navigate = useNavigate();
+  const profiles = review.profiles ?? [];
+  const resources = review.resources ?? {
+    skills: [],
+    guidance: [],
+    hooks: [],
+    subagents: [],
+  };
+  const startup = review.startup ?? { files: [], actions: [] };
 
   return (
     <WorkspacePage>
@@ -42,16 +50,16 @@ function LibraryAgentReview({ review }: { review: LibraryAgentReview }) {
         <WorkflowSummaryGrid>
           <WorkflowSummaryCard label="Format" value="AgentSpec" testId="lib-agent-format" />
           <WorkflowSummaryCard label="Version" value={review.version} testId="lib-agent-version" />
-          <WorkflowSummaryCard label="Profiles" value={review.profiles.length} testId="lib-agent-profiles" />
-          <WorkflowSummaryCard label="Skills" value={review.resources.skills.length} testId="lib-agent-skills" />
+          <WorkflowSummaryCard label="Profiles" value={profiles.length} testId="lib-agent-profiles" />
+          <WorkflowSummaryCard label="Skills" value={resources.skills.length} testId="lib-agent-skills" />
         </WorkflowSummaryGrid>
 
         {/* Profiles */}
-        {review.profiles.length > 0 && (
+        {profiles.length > 0 && (
           <div data-testid="lib-agent-profiles-section" className="border border-stone-200 p-3">
             <div className="font-mono text-xs font-bold mb-2">Profiles</div>
             <div className="space-y-1">
-              {review.profiles.map((p) => (
+              {profiles.map((p) => (
                 <div key={p.name} className="font-mono text-[10px] flex justify-between">
                   <span className="font-bold">{p.name}</span>
                   {p.description && <span className="text-stone-500">{p.description}</span>}
@@ -65,40 +73,40 @@ function LibraryAgentReview({ review }: { review: LibraryAgentReview }) {
         <div data-testid="lib-agent-resources-section" className="border border-stone-200 p-3">
           <div className="font-mono text-xs font-bold mb-2">Resources</div>
           <div className="space-y-2 font-mono text-[10px]">
-            {review.resources.skills.length > 0 && (
-              <div><span className="text-stone-500">Skills:</span> {review.resources.skills.map((s, i) => (
+            {resources.skills.length > 0 && (
+              <div><span className="text-stone-500">Skills:</span> {resources.skills.map((s, i) => (
                 <span key={i} className="inline-block bg-stone-100 px-1.5 py-0.5 mr-1 mb-0.5">{s}</span>
               ))}</div>
             )}
-            {review.resources.guidance.length > 0 && (
-              <div><span className="text-stone-500">Guidance:</span> {review.resources.guidance.map((g, i) => (
+            {resources.guidance.length > 0 && (
+              <div><span className="text-stone-500">Guidance:</span> {resources.guidance.map((g, i) => (
                 <span key={i} className="inline-block bg-stone-100 px-1.5 py-0.5 mr-1 mb-0.5">{g}</span>
               ))}</div>
             )}
-            {review.resources.hooks.length > 0 && (
-              <div><span className="text-stone-500">Hooks:</span> {review.resources.hooks.join(", ")}</div>
+            {resources.hooks.length > 0 && (
+              <div><span className="text-stone-500">Hooks:</span> {resources.hooks.join(", ")}</div>
             )}
           </div>
         </div>
 
         {/* Startup */}
-        {(review.startup.files.length > 0 || review.startup.actions.length > 0) && (
+        {(startup.files.length > 0 || startup.actions.length > 0) && (
           <div data-testid="lib-agent-startup-section" className="border border-stone-200 p-3">
             <div className="font-mono text-xs font-bold mb-2">Startup</div>
-            {review.startup.files.length > 0 && (
+            {startup.files.length > 0 && (
               <div className="mb-2">
                 <div className="font-mono text-[9px] text-stone-500 uppercase mb-1">Files</div>
-                {review.startup.files.map((f, i) => (
+                {startup.files.map((f, i) => (
                   <div key={i} className="font-mono text-[10px]">
                     {f.path} {f.required && <span className="text-red-500 text-[8px]">REQUIRED</span>}
                   </div>
                 ))}
               </div>
             )}
-            {review.startup.actions.length > 0 && (
+            {startup.actions.length > 0 && (
               <div>
                 <div className="font-mono text-[9px] text-stone-500 uppercase mb-1">Actions</div>
-                {review.startup.actions.map((a, i) => (
+                {startup.actions.map((a, i) => (
                   <div key={i} className="font-mono text-[10px]">
                     <span className="text-stone-500">{a.type}:</span> {a.value}
                   </div>
@@ -117,6 +125,17 @@ function LibraryAgentReview({ review }: { review: LibraryAgentReview }) {
 function LibraryRigReviewContent({ review }: { review: LibraryRigReview }) {
   const navigate = useNavigate();
   const [activeTab, setActiveTab] = useState<RigTab>("topology");
+  const { data: agentEntries = [] } = useSpecLibrary("agent");
+  const agentEntryByName = new Map(agentEntries.map((entry) => [entry.name, entry]));
+  const reviewPods = review.pods ?? [];
+  const reviewNodes = review.nodes ?? [];
+  const reviewEdges = review.edges ?? [];
+
+  const openMemberAgentSpec = (agentRef: string) => {
+    const match = agentRef.match(/^local:agents\/([^/]+)$/);
+    if (!match?.[1]) return null;
+    return agentEntryByName.get(match[1]) ?? null;
+  };
 
   return (
     <WorkspacePage>
@@ -133,20 +152,20 @@ function LibraryRigReviewContent({ review }: { review: LibraryRigReview }) {
           <WorkflowSummaryCard label="Format" value={review.format === "pod_aware" ? "Pod-Aware" : "Legacy"} testId="lib-rig-format" />
           <WorkflowSummaryCard
             label={review.format === "pod_aware" ? "Pods" : "Nodes"}
-            value={review.format === "pod_aware" ? review.pods?.length ?? 0 : review.nodes?.length ?? 0}
+            value={review.format === "pod_aware" ? reviewPods.length : reviewNodes.length}
             testId="lib-rig-pods"
           />
           <WorkflowSummaryCard
             label="Members"
             value={review.format === "pod_aware"
-              ? review.pods?.reduce((sum, p) => sum + p.members.length, 0) ?? 0
-              : review.nodes?.length ?? 0}
+              ? reviewPods.reduce((sum, p) => sum + p.members.length, 0)
+              : reviewNodes.length}
             testId="lib-rig-members"
           />
           <WorkflowSummaryCard
             label="Edges"
-            value={review.edges.length + (review.format === "pod_aware"
-              ? review.pods?.reduce((sum, p) => sum + (p.edges?.length ?? 0), 0) ?? 0
+            value={reviewEdges.length + (review.format === "pod_aware"
+              ? reviewPods.reduce((sum, p) => sum + (p.edges?.length ?? 0), 0)
               : 0)}
             testId="lib-rig-edges"
           />
@@ -178,7 +197,7 @@ function LibraryRigReviewContent({ review }: { review: LibraryRigReview }) {
         {/* Configuration — full structured tables */}
         {activeTab === "configuration" && (
           <div data-testid="lib-config-tables" className="space-y-4">
-            {review.format === "pod_aware" && review.pods?.map((pod) => (
+            {review.format === "pod_aware" && reviewPods.map((pod) => (
               <div key={pod.id} className="border border-stone-200 p-3">
                 <div className="font-mono text-xs font-bold mb-2">{pod.label ?? pod.id}</div>
                 <table className="w-full font-mono text-[10px]">
@@ -191,20 +210,40 @@ function LibraryRigReviewContent({ review }: { review: LibraryRigReview }) {
                     </tr>
                   </thead>
                   <tbody>
-                    {pod.members.map((m) => (
+                    {pod.members.map((m) => {
+                      const agentEntry = openMemberAgentSpec(m.agentRef);
+
+                      return (
                       <tr key={m.id} className="border-b border-stone-100">
-                        <td className="py-1">{m.id}</td>
+                        <td className="py-1">
+                          <div className="flex items-center gap-2">
+                            <span>{m.id}</span>
+                            {agentEntry && (
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                data-testid={`lib-member-open-agent-${pod.id}-${m.id}`}
+                                className="h-6 px-2 font-mono text-[9px] uppercase tracking-[0.12em]"
+                                onClick={() => {
+                                  void navigate({ to: "/specs/library/$entryId", params: { entryId: agentEntry.id } });
+                                }}
+                              >
+                                Agent Spec
+                              </Button>
+                            )}
+                          </div>
+                        </td>
                         <td className="py-1 text-stone-600">{m.agentRef}</td>
                         <td className="py-1">{m.runtime}</td>
                         <td className="py-1 text-stone-500">{m.profile ?? "—"}</td>
                       </tr>
-                    ))}
+                    )})}
                   </tbody>
                 </table>
               </div>
             ))}
 
-            {review.format === "legacy" && review.nodes && (
+            {review.format === "legacy" && reviewNodes.length > 0 && (
               <div className="border border-stone-200 p-3">
                 <div className="font-mono text-xs font-bold mb-2">Nodes</div>
                 <table className="w-full font-mono text-[10px]">
@@ -216,7 +255,7 @@ function LibraryRigReviewContent({ review }: { review: LibraryRigReview }) {
                     </tr>
                   </thead>
                   <tbody>
-                    {review.nodes.map((n) => (
+                    {reviewNodes.map((n) => (
                       <tr key={n.id} className="border-b border-stone-100">
                         <td className="py-1">{n.id}</td>
                         <td className="py-1">{n.runtime}</td>
@@ -228,7 +267,7 @@ function LibraryRigReviewContent({ review }: { review: LibraryRigReview }) {
               </div>
             )}
 
-            {review.edges.length > 0 && (
+            {reviewEdges.length > 0 && (
               <div className="border border-stone-200 p-3">
                 <div className="font-mono text-xs font-bold mb-2">
                   {review.format === "pod_aware" ? "Cross-Pod Edges" : "Edges"}
@@ -242,7 +281,7 @@ function LibraryRigReviewContent({ review }: { review: LibraryRigReview }) {
                     </tr>
                   </thead>
                   <tbody>
-                    {review.edges.map((e, i) => (
+                    {reviewEdges.map((e, i) => (
                       <tr key={i} className="border-b border-stone-100">
                         <td className="py-1">{e.from}</td>
                         <td className="py-1">{e.to}</td>

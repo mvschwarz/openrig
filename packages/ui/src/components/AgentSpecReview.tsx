@@ -15,6 +15,14 @@ export function AgentSpecReview() {
   const { selectedAgentDraft, currentAgentDraft } = useSpecsWorkspace();
   const draft = selectedAgentDraft ?? currentAgentDraft;
   const { data: review, isLoading, error } = useAgentSpecReview(draft?.yaml ?? null);
+  const profiles = review?.profiles ?? [];
+  const resources = review?.resources ?? {
+    skills: [],
+    guidance: [],
+    hooks: [],
+    subagents: [],
+  };
+  const startup = review?.startup ?? { files: [], actions: [] };
 
   if (!draft) {
     return (
@@ -52,10 +60,10 @@ export function AgentSpecReview() {
           <WorkflowSummaryGrid>
             <WorkflowSummaryCard label="Format" value="AgentSpec" testId="agent-spec-summary-format" />
             <WorkflowSummaryCard label="Version" value={review.version} testId="agent-spec-summary-version" />
-            <WorkflowSummaryCard label="Profiles" value={review.profiles.length} testId="agent-spec-summary-profiles" />
+            <WorkflowSummaryCard label="Profiles" value={profiles.length} testId="agent-spec-summary-profiles" />
             <WorkflowSummaryCard
               label="Skills"
-              value={review.resources.skills.length}
+              value={resources.skills.length}
               testId="agent-spec-summary-skills"
             />
           </WorkflowSummaryGrid>
@@ -70,11 +78,11 @@ export function AgentSpecReview() {
         )}
 
         {/* Profiles */}
-        {review && review.profiles.length > 0 && (
+        {review && profiles.length > 0 && (
           <div data-testid="agent-profiles-section" className="border border-stone-200 p-3">
             <div className="font-mono text-xs font-bold mb-2">Profiles</div>
             <div className="space-y-1">
-              {review.profiles.map((p) => (
+              {profiles.map((p) => (
                 <div key={p.name} className="font-mono text-[10px] flex justify-between">
                   <span className="font-bold">{p.name}</span>
                   {p.description && <span className="text-stone-500">{p.description}</span>}
@@ -89,25 +97,25 @@ export function AgentSpecReview() {
           <div data-testid="agent-resources-section" className="border border-stone-200 p-3">
             <div className="font-mono text-xs font-bold mb-2">Resources</div>
             <div className="space-y-2 font-mono text-[10px]">
-              {review.resources.skills.length > 0 && (
+              {resources.skills.length > 0 && (
                 <div>
                   <span className="text-stone-500">Skills:</span>{" "}
-                  {review.resources.skills.map((s, i) => (
+                  {resources.skills.map((s, i) => (
                     <span key={i} className="inline-block bg-stone-100 px-1.5 py-0.5 mr-1 mb-0.5">{s}</span>
                   ))}
                 </div>
               )}
-              {review.resources.guidance.length > 0 && (
+              {resources.guidance.length > 0 && (
                 <div>
                   <span className="text-stone-500">Guidance:</span>{" "}
-                  {review.resources.guidance.map((g, i) => (
+                  {resources.guidance.map((g, i) => (
                     <span key={i} className="inline-block bg-stone-100 px-1.5 py-0.5 mr-1 mb-0.5">{g}</span>
                   ))}
                 </div>
               )}
-              {review.resources.hooks.length > 0 && (
+              {resources.hooks.length > 0 && (
                 <div>
-                  <span className="text-stone-500">Hooks:</span> {review.resources.hooks.join(", ")}
+                  <span className="text-stone-500">Hooks:</span> {resources.hooks.join(", ")}
                 </div>
               )}
             </div>
@@ -115,23 +123,23 @@ export function AgentSpecReview() {
         )}
 
         {/* Startup */}
-        {review && (review.startup.files.length > 0 || review.startup.actions.length > 0) && (
+        {review && (startup.files.length > 0 || startup.actions.length > 0) && (
           <div data-testid="agent-startup-section" className="border border-stone-200 p-3">
             <div className="font-mono text-xs font-bold mb-2">Startup</div>
-            {review.startup.files.length > 0 && (
+            {startup.files.length > 0 && (
               <div className="mb-2">
                 <div className="font-mono text-[9px] text-stone-500 uppercase mb-1">Files</div>
-                {review.startup.files.map((f, i) => (
+                {startup.files.map((f, i) => (
                   <div key={i} className="font-mono text-[10px]">
                     {f.path} {f.required && <span className="text-red-500 text-[8px]">REQUIRED</span>}
                   </div>
                 ))}
               </div>
             )}
-            {review.startup.actions.length > 0 && (
+            {startup.actions.length > 0 && (
               <div>
                 <div className="font-mono text-[9px] text-stone-500 uppercase mb-1">Actions</div>
-                {review.startup.actions.map((a, i) => (
+                {startup.actions.map((a, i) => (
                   <div key={i} className="font-mono text-[10px]">
                     <span className="text-stone-500">{a.type}:</span> {a.value}
                   </div>
