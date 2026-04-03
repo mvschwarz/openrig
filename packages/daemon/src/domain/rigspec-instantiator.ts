@@ -1038,6 +1038,17 @@ export class PodRigInstantiator {
       }
     }
 
+    // 7. Built-in Rigged onboarding overlay (appended last, does not replace agent guidance)
+    const onboardingPath = nodePath.resolve(import.meta.dirname, "../../assets/guidance/using-rigged.md");
+    files.push({
+      path: "using-rigged.md",
+      absolutePath: onboardingPath,
+      ownerRoot: nodePath.resolve(import.meta.dirname, "../../assets"),
+      deliveryHint: "guidance_merge",
+      required: false,
+      appliesOn: ["fresh_start", "restore"],
+    });
+
     return this.resolveAutoHints(files);
   }
 

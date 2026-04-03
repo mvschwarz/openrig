@@ -450,4 +450,42 @@ describe("StartupOrchestrator", () => {
       expect(result.errors.some((e) => e.includes("timeout") || e.includes("Readiness timeout"))).toBe(true);
     }
   });
+
+  it("delivers using-rigged.md overlay alongside agent role guidance (append, not replace)", async () => {
+    const seed = seedSession();
+    const deliveredFiles: string[] = [];
+    const adapter = mockAdapter({
+      deliverStartup: vi.fn(async (files) => {
+        for (const f of files) deliveredFiles.push(f.path);
+        return { delivered: files.length, failed: [] };
+      }),
+    });
+    const roleFile: ResolvedStartupFile = {
+      path: "guidance/role.md",
+      absolutePath: "/agents/impl/guidance/role.md",
+      ownerRoot: "/agents/impl",
+      deliveryHint: "guidance_merge",
+      required: true,
+      appliesOn: ["fresh_start", "restore"],
+    };
+    const onboardingFile: ResolvedStartupFile = {
+      path: "using-rigged.md",
+      absolutePath: "/assets/guidance/using-rigged.md",
+      ownerRoot: "/assets",
+      deliveryHint: "guidance_merge",
+      required: false,
+      appliesOn: ["fresh_start", "restore"],
+    };
+
+    const orch = createOrchestrator();
+    const result = await orch.startNode(makeInput(seed, {
+      adapter,
+      resolvedStartupFiles: [roleFile, onboardingFile],
+    }));
+
+    expect(result.ok).toBe(true);
+    // Both files were delivered — overlay appended, not replacing role guidance
+    expect(deliveredFiles).toContain("guidance/role.md");
+    expect(deliveredFiles).toContain("using-rigged.md");
+  });
 });

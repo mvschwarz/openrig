@@ -148,6 +148,29 @@ describe("PodRigInstantiator", () => {
     db.close();
   });
 
+  it("includes using-rigged.md onboarding overlay in resolved startup files", async () => {
+    const { db, inst } = setup();
+    const yaml = RigSpecCodec.serialize(makeRigSpec());
+    const result = await inst.instantiate(yaml, RIG_ROOT);
+    expect(result.ok).toBe(true);
+
+    // Check startup context for using-rigged.md
+    const ctxRows = db.prepare("SELECT * FROM node_startup_context").all() as Array<{ resolved_files_json: string }>;
+    expect(ctxRows.length).toBeGreaterThan(0);
+    const allFiles = ctxRows.flatMap((r) => JSON.parse(r.resolved_files_json) as Array<{ path: string }>);
+    const onboarding = allFiles.find((f) => f.path === "using-rigged.md");
+    expect(onboarding).toBeDefined();
+
+    db.close();
+  });
+
+  it("using-rigged.md asset exists on disk", () => {
+    const { existsSync } = require("node:fs");
+    const { resolve } = require("node:path");
+    const assetPath = resolve(import.meta.dirname, "../src/domain/../../assets/guidance/using-rigged.md");
+    expect(existsSync(assetPath)).toBe(true);
+  });
+
   // T4: partial failure — one node startup fails, other succeeds
   it("partial node startup failure does not corrupt other nodes", async () => {
     const files = {
