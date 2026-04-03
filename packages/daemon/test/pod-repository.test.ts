@@ -22,13 +22,14 @@ describe("PodRepository + RigRepository evolution (AS-T08a)", () => {
   // T1: pod record persists and loads correctly
   it("pod record persists and loads correctly", () => {
     const rig = rigRepo.createRig("test-rig");
-    const pod = podRepo.createPod(rig.id, "Development", {
+    const pod = podRepo.createPod(rig.id, "dev", "Development", {
       summary: "Dev pod",
       continuityPolicyJson: JSON.stringify({ enabled: true, sync_triggers: ["manual"] }),
     });
 
     expect(pod.id).toBeDefined();
     expect(pod.rigId).toBe(rig.id);
+    expect(pod.namespace).toBe("dev");
     expect(pod.label).toBe("Development");
     expect(pod.summary).toBe("Dev pod");
     expect(pod.continuityPolicyJson).toContain("enabled");
@@ -37,6 +38,7 @@ describe("PodRepository + RigRepository evolution (AS-T08a)", () => {
     // Round-trip via getPod
     const loaded = podRepo.getPod(pod.id);
     expect(loaded).not.toBeNull();
+    expect(loaded!.namespace).toBe("dev");
     expect(loaded!.label).toBe("Development");
     expect(loaded!.summary).toBe("Dev pod");
 
@@ -49,7 +51,7 @@ describe("PodRepository + RigRepository evolution (AS-T08a)", () => {
   // T2: node creation persists agent_ref, profile, and pod_id
   it("node creation persists agent_ref, profile, and pod_id", () => {
     const rig = rigRepo.createRig("test-rig");
-    const pod = podRepo.createPod(rig.id, "Dev");
+    const pod = podRepo.createPod(rig.id, "dev", "Dev");
 
     const node = rigRepo.addNode(rig.id, "impl", {
       runtime: "claude-code",
@@ -98,12 +100,12 @@ describe("PodRepository + RigRepository evolution (AS-T08a)", () => {
   // T4: FK behavior between rig/pod/node matches design
   it("FK behavior: pod with nonexistent rig throws, cross-rig pod_id throws, same-rig succeeds", () => {
     // Pod FK on rig: nonexistent rig_id throws
-    expect(() => podRepo.createPod("nonexistent-rig", "Bad")).toThrow();
+    expect(() => podRepo.createPod("nonexistent-rig", "bad", "Bad")).toThrow();
 
     // Create two rigs and a pod on rig A
     const rigA = rigRepo.createRig("rig-a");
     const rigB = rigRepo.createRig("rig-b");
-    const podA = podRepo.createPod(rigA.id, "Pod A");
+    const podA = podRepo.createPod(rigA.id, "pod-a", "Pod A");
 
     // Cross-rig pod_id: node on rig B with pod from rig A -> throws
     expect(() => {
@@ -118,7 +120,7 @@ describe("PodRepository + RigRepository evolution (AS-T08a)", () => {
   // T5: deleting a pod or rig behaves correctly for member nodes
   it("delete pod -> node.pod_id NULL; delete rig -> cascades pods + nodes", () => {
     const rig = rigRepo.createRig("test-rig");
-    const pod = podRepo.createPod(rig.id, "Dev");
+    const pod = podRepo.createPod(rig.id, "dev", "Dev");
     const node = rigRepo.addNode(rig.id, "impl", { podId: pod.id, runtime: "claude-code" });
 
     // Delete pod -> node.pod_id becomes NULL
@@ -130,7 +132,7 @@ describe("PodRepository + RigRepository evolution (AS-T08a)", () => {
     expect(loadedNode!.podId).toBeNull();
 
     // Delete rig -> cascades pods and nodes
-    const pod2 = podRepo.createPod(rig.id, "Arch");
+    const pod2 = podRepo.createPod(rig.id, "arch", "Arch");
     rigRepo.deleteRig(rig.id);
     expect(podRepo.getPodsForRig(rig.id)).toHaveLength(0);
     expect(rigRepo.getRig(rig.id)).toBeNull();

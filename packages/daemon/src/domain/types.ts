@@ -8,6 +8,7 @@ export interface Rig {
 export interface Pod {
   id: string;
   rigId: string;
+  namespace: string;
   label: string;
   summary: string | null;
   continuityPolicyJson: string | null;
@@ -116,7 +117,7 @@ export type RigEvent =
   // Teardown events
   | { type: "rig.stopped"; rigId: string }
   // AgentSpec reboot events — pods + startup + continuity
-  | { type: "pod.created"; rigId: string; podId: string; label: string }
+  | { type: "pod.created"; rigId: string; podId: string; namespace: string; label: string }
   | { type: "pod.deleted"; rigId: string; podId: string }
   | { type: "node.startup_pending"; rigId: string; nodeId: string }
   | { type: "node.startup_ready"; rigId: string; nodeId: string }

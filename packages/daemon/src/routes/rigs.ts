@@ -58,8 +58,8 @@ rigsRoutes.get("/:id/graph", (c) => {
   // Overlay inventory data for enriched graph fields
   const inventory = getNodeInventory(getRepo(c).db, rigId);
   const pods = getRepo(c).db
-    .prepare("SELECT id, rig_id, label, summary, continuity_policy_json, created_at FROM pods WHERE rig_id = ? ORDER BY created_at")
-    .all(rigId) as Array<{ id: string; rig_id: string; label: string; summary: string | null; continuity_policy_json: string | null; created_at: string }>;
+    .prepare("SELECT id, rig_id, namespace, label, summary, continuity_policy_json, created_at FROM pods WHERE rig_id = ? ORDER BY created_at")
+    .all(rigId) as Array<{ id: string; rig_id: string; namespace: string; label: string; summary: string | null; continuity_policy_json: string | null; created_at: string }>;
   const overlay: InventoryOverlay[] = inventory.map((n) => ({
     logicalId: n.logicalId,
     startupStatus: n.startupStatus,
@@ -69,6 +69,7 @@ rigsRoutes.get("/:id/graph", (c) => {
   const projectedPods: Pod[] = pods.map((pod) => ({
     id: pod.id,
     rigId: pod.rig_id,
+    namespace: pod.namespace,
     label: pod.label,
     summary: pod.summary,
     continuityPolicyJson: pod.continuity_policy_json,

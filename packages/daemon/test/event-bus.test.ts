@@ -191,7 +191,7 @@ describe("EventBus", () => {
   // T12: AgentSpec reboot event types persist and round-trip
   it("new AgentSpec reboot event types persist via EventBus", () => {
     const events: RigEvent[] = [
-      { type: "pod.created", rigId: "rig-1", podId: "p1", label: "Dev" },
+      { type: "pod.created", rigId: "rig-1", podId: "p1", namespace: "dev", label: "Dev" },
       { type: "pod.deleted", rigId: "rig-1", podId: "p1" },
       { type: "node.startup_pending", rigId: "rig-1", nodeId: "n1" },
       { type: "node.startup_ready", rigId: "rig-1", nodeId: "n1" },

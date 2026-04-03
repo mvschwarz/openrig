@@ -405,7 +405,7 @@ export class PodRigInstantiator {
 
         const podIdMap: Record<string, string> = {};
         for (const pod of rigSpec.pods) {
-          const podRecord = this.deps.podRepo.createPod(materializedRigId, pod.label, {
+          const podRecord = this.deps.podRepo.createPod(materializedRigId, pod.id, pod.label, {
             summary: pod.summary,
             continuityPolicyJson: pod.continuityPolicy ? JSON.stringify(pod.continuityPolicy) : undefined,
           });
@@ -414,6 +414,7 @@ export class PodRigInstantiator {
             type: "pod.created",
             rigId: materializedRigId,
             podId: podRecord.id,
+            namespace: podRecord.namespace,
             label: pod.label,
           }));
 
@@ -545,7 +546,7 @@ export class PodRigInstantiator {
     for (const pod of rigSpec.pods) {
       let podId: string;
       try {
-        const podRecord = this.deps.podRepo.createPod(rigId, pod.label, {
+        const podRecord = this.deps.podRepo.createPod(rigId, pod.id, pod.label, {
           summary: pod.summary,
           continuityPolicyJson: pod.continuityPolicy ? JSON.stringify(pod.continuityPolicy) : undefined,
         });

@@ -65,7 +65,7 @@ export class SnapshotCapture {
 
     // 4. Get pods + continuity state + startup context
     const podRows = this.db.prepare("SELECT * FROM pods WHERE rig_id = ?")
-      .all(rigId) as Array<{ id: string; rig_id: string; label: string; summary: string | null; continuity_policy_json: string | null; created_at: string }>;
+      .all(rigId) as Array<{ id: string; rig_id: string; namespace: string; label: string; summary: string | null; continuity_policy_json: string | null; created_at: string }>;
     const podIds = podRows.map((p) => p.id);
     const continuityRows = podIds.length > 0
       ? this.db.prepare(`SELECT * FROM continuity_state WHERE pod_id IN (${podIds.map(() => "?").join(",")})`)
@@ -91,7 +91,7 @@ export class SnapshotCapture {
       edges: rig.edges,
       sessions,
       checkpoints,
-      pods: podRows.map((p) => ({ id: p.id, rigId: p.rig_id, label: p.label, summary: p.summary, continuityPolicyJson: p.continuity_policy_json, createdAt: p.created_at })),
+      pods: podRows.map((p) => ({ id: p.id, rigId: p.rig_id, namespace: p.namespace, label: p.label, summary: p.summary, continuityPolicyJson: p.continuity_policy_json, createdAt: p.created_at })),
       continuityStates: continuityRows.map((r) => ({ podId: r.pod_id, nodeId: r.node_id, status: r.status as "healthy" | "degraded" | "restoring", artifactsJson: r.artifacts_json, lastSyncAt: r.last_sync_at, updatedAt: r.updated_at })),
       nodeStartupContext,
     };

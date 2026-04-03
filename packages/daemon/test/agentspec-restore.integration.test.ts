@@ -24,7 +24,7 @@ describe("AS-T09: Continuity + snapshot/restore evolution", () => {
 
   function seedRigWithPod(ctx: ReturnType<typeof setup>) {
     const rig = ctx.rigRepo.createRig("test-rig");
-    const pod = ctx.podRepo.createPod(rig.id, "Dev", { summary: "dev pod", continuityPolicyJson: JSON.stringify({ enabled: true }) });
+    const pod = ctx.podRepo.createPod(rig.id, "dev", "Dev", { summary: "dev pod", continuityPolicyJson: JSON.stringify({ enabled: true }) });
     const node = ctx.rigRepo.addNode(rig.id, "impl", { runtime: "claude-code", podId: pod.id, agentRef: "local:agents/impl", profile: "default", resolvedSpecName: "impl-spec", resolvedSpecVersion: "1.0.0", resolvedSpecHash: "sha256:abc" });
     const session = ctx.sessionRegistry.registerSession(node.id, "r01-impl");
     ctx.sessionRegistry.updateStatus(session.id, "running");

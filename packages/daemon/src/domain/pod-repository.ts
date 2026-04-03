@@ -10,6 +10,7 @@ interface PodOptions {
 interface PodRow {
   id: string;
   rig_id: string;
+  namespace: string;
   label: string;
   summary: string | null;
   continuity_policy_json: string | null;
@@ -34,13 +35,13 @@ export class PodRepository {
    * @param opts - optional summary and continuity policy JSON
    * @returns the created Pod
    */
-  createPod(rigId: string, label: string, opts?: PodOptions): Pod {
+  createPod(rigId: string, namespace: string, label: string, opts?: PodOptions): Pod {
     const id = ulid();
     this.db
       .prepare(
-        "INSERT INTO pods (id, rig_id, label, summary, continuity_policy_json) VALUES (?, ?, ?, ?, ?)"
+        "INSERT INTO pods (id, rig_id, namespace, label, summary, continuity_policy_json) VALUES (?, ?, ?, ?, ?, ?)"
       )
-      .run(id, rigId, label, opts?.summary ?? null, opts?.continuityPolicyJson ?? null);
+      .run(id, rigId, namespace, label, opts?.summary ?? null, opts?.continuityPolicyJson ?? null);
 
     return this.rowToPod(
       this.db.prepare("SELECT * FROM pods WHERE id = ?").get(id) as PodRow
@@ -108,6 +109,7 @@ export class PodRepository {
     return {
       id: row.id,
       rigId: row.rig_id,
+      namespace: row.namespace,
       label: row.label,
       summary: row.summary,
       continuityPolicyJson: row.continuity_policy_json,
