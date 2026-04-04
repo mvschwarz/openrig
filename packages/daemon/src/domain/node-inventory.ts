@@ -1,5 +1,5 @@
 import type Database from "better-sqlite3";
-import type { NodeInventoryEntry, NodeDetailEntry, NodeRestoreOutcome, Binding, RestoreResult } from "./types.js";
+import type { NodeInventoryEntry, NodeDetailEntry, NodeDetailPeer, NodeDetailEdge, NodeDetailCompactSpec, NodeRestoreOutcome, Binding, RestoreResult } from "./types.js";
 import type { RuntimeAdapter } from "./runtime-adapter.js";
 
 // -- Row types for SQL results --
@@ -297,6 +297,45 @@ export function getNodeDetail(
     }
   }
 
+  // Peers: other nodes in the same rig
+  const peers: NodeDetailPeer[] = allEntries
+    .filter((e) => e.logicalId !== logicalId)
+    .map((e) => ({
+      logicalId: e.logicalId,
+      canonicalSessionName: e.canonicalSessionName,
+      runtime: e.runtime,
+    }));
+
+  // Edges: outgoing and incoming for this node
+  const edgeRows = db.prepare(
+    "SELECT e.kind, e.source_id, e.target_id, src.logical_id as src_logical, tgt.logical_id as tgt_logical " +
+    "FROM edges e " +
+    "JOIN nodes src ON src.id = e.source_id " +
+    "JOIN nodes tgt ON tgt.id = e.target_id " +
+    "WHERE e.rig_id = ? AND (e.source_id = ? OR e.target_id = ?)"
+  ).all(rigId, nodeId, nodeId) as Array<{ kind: string; source_id: string; target_id: string; src_logical: string; tgt_logical: string }>;
+
+  const nodeSessionMap = new Map(allEntries.map((e) => [e.logicalId, e.canonicalSessionName]));
+  const outgoing: NodeDetailEdge[] = [];
+  const incoming: NodeDetailEdge[] = [];
+  for (const row of edgeRows) {
+    if (row.source_id === nodeId) {
+      outgoing.push({ kind: row.kind, to: { logicalId: row.tgt_logical, sessionName: nodeSessionMap.get(row.tgt_logical) ?? null } });
+    }
+    if (row.target_id === nodeId) {
+      incoming.push({ kind: row.kind, from: { logicalId: row.src_logical, sessionName: nodeSessionMap.get(row.src_logical) ?? null } });
+    }
+  }
+
+  // Compact spec summary
+  const compactSpec: NodeDetailCompactSpec = {
+    name: entry.resolvedSpecName,
+    version: entry.resolvedSpecVersion,
+    profile: entry.profile,
+    skillCount: installedResources.filter((r) => r.category === "skill" || r.category === "skills").length,
+    guidanceCount: installedResources.filter((r) => r.category === "guidance" || r.category === "guidance_merge").length,
+  };
+
   return {
     ...entry,
     binding,
@@ -305,5 +344,9 @@ export function getNodeDetail(
     installedResources,
     recentEvents,
     infrastructureStartupCommand,
+    peers,
+    edges: { outgoing, incoming },
+    transcript: { enabled: false, path: null, tailCommand: null }, // populated by route handler
+    compactSpec,
   };
 }

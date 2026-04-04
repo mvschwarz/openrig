@@ -214,4 +214,108 @@ describe("Session routes", () => {
     const body = await res.json();
     expect(body.error).toContain("not found");
   });
+
+  // Task 5: node detail returns peers, edges, transcript, compactSpec
+  it("node detail returns peers for other nodes in same rig", async () => {
+    const { app, rigRepo, sessionRegistry } = createTestApp(db);
+    const rig = rigRepo.createRig("test-rig");
+    const n1 = rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code" });
+    const n2 = rigRepo.addNode(rig.id, "dev.qa", { runtime: "codex" });
+    sessionRegistry.registerSession(n1.id, "dev-impl@test");
+    sessionRegistry.registerSession(n2.id, "dev-qa@test");
+
+    const res = await app.request(`/api/rigs/${rig.id}/nodes/${encodeURIComponent("dev.impl")}`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.peers).toHaveLength(1);
+    expect(body.peers[0].logicalId).toBe("dev.qa");
+    expect(body.peers[0].canonicalSessionName).toBe("dev-qa@test");
+    expect(body.peers[0].runtime).toBe("codex");
+  });
+
+  it("node detail returns outgoing and incoming edges", async () => {
+    const { app, rigRepo, sessionRegistry } = createTestApp(db);
+    const rig = rigRepo.createRig("test-rig");
+    const n1 = rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code" });
+    const n2 = rigRepo.addNode(rig.id, "dev.qa", { runtime: "codex" });
+    sessionRegistry.registerSession(n1.id, "dev-impl@test");
+    sessionRegistry.registerSession(n2.id, "dev-qa@test");
+    rigRepo.addEdge(rig.id, n1.id, n2.id, "delegates_to");
+
+    const res = await app.request(`/api/rigs/${rig.id}/nodes/${encodeURIComponent("dev.impl")}`);
+    const body = await res.json();
+    expect(body.edges.outgoing).toHaveLength(1);
+    expect(body.edges.outgoing[0].kind).toBe("delegates_to");
+    expect(body.edges.outgoing[0].to.logicalId).toBe("dev.qa");
+    expect(body.edges.incoming).toHaveLength(0);
+
+    // Check from qa perspective
+    const res2 = await app.request(`/api/rigs/${rig.id}/nodes/${encodeURIComponent("dev.qa")}`);
+    const body2 = await res2.json();
+    expect(body2.edges.incoming).toHaveLength(1);
+    expect(body2.edges.incoming[0].from.logicalId).toBe("dev.impl");
+    expect(body2.edges.outgoing).toHaveLength(0);
+  });
+
+  it("node detail returns compact spec summary", async () => {
+    const { app, rigRepo, sessionRegistry } = createTestApp(db);
+    const rig = rigRepo.createRig("test-rig");
+    const n1 = rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code", profile: "default" });
+    // Set resolved spec fields
+    db.prepare("UPDATE nodes SET resolved_spec_name = ?, resolved_spec_version = ? WHERE id = ?")
+      .run("impl-agent", "1.0.0", n1.id);
+    sessionRegistry.registerSession(n1.id, "dev-impl@test");
+
+    const res = await app.request(`/api/rigs/${rig.id}/nodes/${encodeURIComponent("dev.impl")}`);
+    const body = await res.json();
+    expect(body.compactSpec).toBeDefined();
+    expect(body.compactSpec.name).toBe("impl-agent");
+    expect(body.compactSpec.version).toBe("1.0.0");
+    expect(body.compactSpec.profile).toBe("default");
+    expect(typeof body.compactSpec.skillCount).toBe("number");
+    expect(typeof body.compactSpec.guidanceCount).toBe("number");
+  });
+
+  it("node detail returns transcript info (defaults to disabled without TranscriptStore)", async () => {
+    const { app, rigRepo, sessionRegistry } = createTestApp(db);
+    const rig = rigRepo.createRig("test-rig");
+    const n1 = rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code" });
+    sessionRegistry.registerSession(n1.id, "dev-impl@test");
+
+    const res = await app.request(`/api/rigs/${rig.id}/nodes/${encodeURIComponent("dev.impl")}`);
+    const body = await res.json();
+    expect(body.transcript).toBeDefined();
+    expect(body.transcript.enabled).toBe(false);
+    expect(body.transcript.path).toBeNull();
+    expect(body.transcript.tailCommand).toBeNull();
+  });
+
+  it("node detail returns enriched transcript info when TranscriptStore is enabled", async () => {
+    const { TranscriptStore } = await import("../src/domain/transcript-store.js");
+    const os = await import("node:os");
+    const path = await import("node:path");
+    const fs = await import("node:fs");
+    const tmpDir = path.join(os.tmpdir(), `rigged-test-transcript-${Date.now()}`);
+    fs.mkdirSync(tmpDir, { recursive: true });
+
+    const transcriptStore = new TranscriptStore(tmpDir);
+    const { createApp } = await import("../src/server.js");
+    const setup = createTestApp(db);
+    const rig = setup.rigRepo.createRig("test-rig");
+    const n1 = setup.rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code" });
+    setup.sessionRegistry.registerSession(n1.id, "dev-impl@test-rig");
+
+    // Build a minimal app with TranscriptStore wired
+    const appWithTranscript = createApp({ ...setup, transcriptStore });
+
+    const res = await appWithTranscript.request(`/api/rigs/${rig.id}/nodes/${encodeURIComponent("dev.impl")}`);
+    const body = await res.json();
+    expect(body.transcript.enabled).toBe(true);
+    expect(body.transcript.path).toContain("test-rig");
+    expect(body.transcript.path).toContain("dev-impl@test-rig");
+    expect(body.transcript.tailCommand).toBe("rigged transcript dev-impl@test-rig --tail 100");
+
+    // Cleanup
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
 });

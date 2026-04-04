@@ -2,6 +2,7 @@ import { useNodeDetail } from "../hooks/useNodeDetail.js";
 import { getRestoreStatusColorClass } from "../lib/restore-status-colors.js";
 import { copyText } from "../lib/copy-text.js";
 import { displayPodName, inferPodName } from "../lib/display-name.js";
+import { LiveIdentityDisplay } from "./LiveIdentityDisplay.js";
 
 interface NodeDetailPanelProps {
   rigId: string;
@@ -56,16 +57,26 @@ export function NodeDetailPanel({ rigId, logicalId, onClose }: NodeDetailPanelPr
           <section className="px-4 py-3 border-b border-stone-100">
             <div className="font-mono text-[8px] text-stone-400 uppercase tracking-wider mb-2">Identity</div>
             <div className="space-y-1 font-mono text-[10px]">
+              <div className="flex justify-between"><span className="text-stone-500">Rig</span><span className="text-stone-900">{data.rigName}</span></div>
+              <div className="flex justify-between"><span className="text-stone-500">Logical ID</span><span className="text-stone-900">{logicalId}</span></div>
               <div className="flex justify-between"><span className="text-stone-500">Pod</span><span className="text-stone-900">{inferPodName(logicalId) ?? displayPodName(data.podId)}</span></div>
+              <div className="flex justify-between"><span className="text-stone-500">Session</span><span className="text-stone-900 truncate ml-2">{data.canonicalSessionName ?? "—"}</span></div>
               <div className="flex justify-between"><span className="text-stone-500">Runtime</span><span className="text-stone-900">{data.runtime ?? "—"}</span></div>
-              {data.nodeKind !== "infrastructure" && (
-                <>
-                  <div className="flex justify-between"><span className="text-stone-500">Agent Spec</span><span className="text-stone-900">{data.resolvedSpecName ?? "—"}</span></div>
-                  <div className="flex justify-between"><span className="text-stone-500">Profile</span><span className="text-stone-900">{data.profile ?? "—"}</span></div>
-                </>
+              {data.cwd && (
+                <div className="flex justify-between"><span className="text-stone-500">CWD</span><span className="text-stone-900 truncate ml-2">{data.cwd}</span></div>
               )}
             </div>
           </section>
+
+          {/* Edges, Peers, Transcript, Compact Spec */}
+          {data.peers && (
+            <LiveIdentityDisplay
+              peers={data.peers}
+              edges={data.edges}
+              transcript={data.transcript}
+              compactSpec={data.compactSpec}
+            />
+          )}
 
           {/* Status */}
           <section className="px-4 py-3 border-b border-stone-100">

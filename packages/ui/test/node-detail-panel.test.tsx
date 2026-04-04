@@ -30,11 +30,18 @@ const AGENT_DETAIL = {
   sessionStatus: "running", startupStatus: "ready", restoreOutcome: "n-a",
   tmuxAttachCommand: "tmux attach -t dev-impl@test-rig", resumeCommand: "claude --resume abc-123",
   latestError: null, model: "opus", agentRef: "local:agents/impl", profile: "default",
-  resolvedSpecName: "impl", resolvedSpecVersion: "1.0.0",
+  resolvedSpecName: "impl", resolvedSpecVersion: "1.0.0", cwd: "/workspace",
   startupFiles: [{ path: "role.md", deliveryHint: "guidance_merge", required: true }],
   startupActions: [], recentEvents: [{ type: "node.startup_ready", createdAt: "2026-03-31T00:00:00Z" }],
   infrastructureStartupCommand: null,
   binding: { tmuxSession: "dev-impl@test-rig" },
+  peers: [{ logicalId: "dev.qa", canonicalSessionName: "dev-qa@test-rig", runtime: "codex" }],
+  edges: {
+    outgoing: [{ kind: "delegates_to", to: { logicalId: "dev.qa", sessionName: "dev-qa@test-rig" } }],
+    incoming: [],
+  },
+  transcript: { enabled: true, path: "/tmp/transcripts/test-rig/dev-impl@test-rig.log", tailCommand: "rigged transcript dev-impl@test-rig --tail 100" },
+  compactSpec: { name: "impl", version: "1.0.0", profile: "default", skillCount: 2, guidanceCount: 1 },
 };
 
 const INFRA_DETAIL = {
@@ -43,6 +50,7 @@ const INFRA_DETAIL = {
   infrastructureStartupCommand: "npm run dev",
   canonicalSessionName: "infra-server@test-rig",
   tmuxAttachCommand: "tmux attach -t infra-server@test-rig",
+  compactSpec: { name: null, version: null, profile: null, skillCount: 0, guidanceCount: 0 },
 };
 
 const FAILED_DETAIL = {
@@ -89,7 +97,7 @@ describe("NodeDetailPanel integration with AppShell selection", () => {
     // Panel should mount and fetch detail data
     await waitFor(() => {
       expect(screen.getByTestId("node-detail-panel")).toBeDefined();
-      expect(screen.getByText("dev-impl@test-rig")).toBeDefined();
+      expect(screen.getAllByText("dev-impl@test-rig").length).toBeGreaterThan(0);
     });
 
     expect(mockFetch).toHaveBeenCalledWith(expect.stringContaining("/nodes/dev.impl"));
@@ -109,8 +117,7 @@ describe("NodeDetailPanel", () => {
     mockDetail(AGENT_DETAIL);
     renderPanel();
     await waitFor(() => {
-      expect(screen.getByText("dev-impl@test-rig")).toBeDefined();
-      expect(screen.getByText("dev-impl@test-rig")).toBeDefined();
+      expect(screen.getAllByText("dev-impl@test-rig").length).toBeGreaterThan(0);
       expect(screen.getByText("claude-code")).toBeDefined();
       expect(screen.getAllByText("impl").length).toBeGreaterThan(0);
     });
@@ -204,6 +211,44 @@ describe("NodeDetailPanel", () => {
     renderPanel();
     await waitFor(() => {
       expect(screen.getByText(/role\.md/)).toBeDefined();
+    });
+  });
+
+  // Task 5: New drawer sections
+  it("shows peers section from node detail", async () => {
+    mockDetail(AGENT_DETAIL);
+    renderPanel();
+    await waitFor(() => {
+      expect(screen.getByTestId("detail-peers")).toBeDefined();
+      expect(screen.getAllByText("dev.qa").length).toBeGreaterThan(0);
+      expect(screen.getByText("codex")).toBeDefined();
+      expect(screen.getByText("dev-qa@test-rig")).toBeDefined();
+    });
+  });
+
+  it("shows edges section from node detail", async () => {
+    mockDetail(AGENT_DETAIL);
+    renderPanel();
+    await waitFor(() => {
+      expect(screen.getByTestId("detail-edges")).toBeDefined();
+      expect(screen.getByText("delegates_to")).toBeDefined();
+    });
+  });
+
+  it("shows transcript section with tail command", async () => {
+    mockDetail(AGENT_DETAIL);
+    renderPanel();
+    await waitFor(() => {
+      expect(screen.getByTestId("detail-transcript")).toBeDefined();
+      expect(screen.getByText("Copy tail command")).toBeDefined();
+    });
+  });
+
+  it("shows compact spec section from node detail", async () => {
+    mockDetail(AGENT_DETAIL);
+    renderPanel();
+    await waitFor(() => {
+      expect(screen.getByTestId("detail-compact-spec")).toBeDefined();
     });
   });
 });

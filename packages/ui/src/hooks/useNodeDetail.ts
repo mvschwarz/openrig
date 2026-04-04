@@ -1,5 +1,31 @@
 import { useQuery } from "@tanstack/react-query";
 
+export interface NodeDetailPeer {
+  logicalId: string;
+  canonicalSessionName: string | null;
+  runtime: string | null;
+}
+
+export interface NodeDetailEdge {
+  kind: string;
+  to?: { logicalId: string; sessionName: string | null };
+  from?: { logicalId: string; sessionName: string | null };
+}
+
+export interface NodeDetailTranscript {
+  enabled: boolean;
+  path: string | null;
+  tailCommand: string | null;
+}
+
+export interface NodeDetailCompactSpec {
+  name: string | null;
+  version: string | null;
+  profile: string | null;
+  skillCount: number;
+  guidanceCount: number;
+}
+
 export interface NodeDetailData {
   rigId: string;
   rigName: string;
@@ -19,10 +45,15 @@ export interface NodeDetailData {
   profile: string | null;
   resolvedSpecName: string | null;
   resolvedSpecVersion: string | null;
+  cwd: string | null;
   startupFiles: Array<{ path: string; deliveryHint: string; required: boolean }>;
   startupActions: Array<{ type: string; value: string }>;
   recentEvents: Array<{ type: string; createdAt: string }>;
   infrastructureStartupCommand: string | null;
+  peers: NodeDetailPeer[];
+  edges: { outgoing: NodeDetailEdge[]; incoming: NodeDetailEdge[] };
+  transcript: NodeDetailTranscript;
+  compactSpec: NodeDetailCompactSpec;
 }
 
 async function fetchNodeDetail(rigId: string, logicalId: string): Promise<NodeDetailData> {

@@ -251,6 +251,32 @@ export interface NodeInventoryEntry {
   startupCompletedAt: string | null;
 }
 
+export interface NodeDetailPeer {
+  logicalId: string;
+  canonicalSessionName: string | null;
+  runtime: string | null;
+}
+
+export interface NodeDetailEdge {
+  kind: string;
+  to?: { logicalId: string; sessionName: string | null };
+  from?: { logicalId: string; sessionName: string | null };
+}
+
+export interface NodeDetailTranscript {
+  enabled: boolean;
+  path: string | null;
+  tailCommand: string | null;
+}
+
+export interface NodeDetailCompactSpec {
+  name: string | null;
+  version: string | null;
+  profile: string | null;
+  skillCount: number;
+  guidanceCount: number;
+}
+
 export interface NodeDetailEntry extends NodeInventoryEntry {
   binding: Binding | null;
   startupFiles: Array<{ path: string; deliveryHint: string; required: boolean }>;
@@ -258,6 +284,10 @@ export interface NodeDetailEntry extends NodeInventoryEntry {
   installedResources: Array<{ id: string; category: string; targetPath: string }>;
   recentEvents: Array<{ type: string; createdAt: string; payload: Record<string, unknown> }>;
   infrastructureStartupCommand: string | null;
+  peers: NodeDetailPeer[];
+  edges: { outgoing: NodeDetailEdge[]; incoming: NodeDetailEdge[] };
+  transcript: NodeDetailTranscript;
+  compactSpec: NodeDetailCompactSpec;
 }
 
 // -- AgentSpec types (AgentSpec reboot) --

@@ -3,6 +3,7 @@ import type { RigRepository } from "../domain/rig-repository.js";
 import type { SessionRegistry } from "../domain/session-registry.js";
 import type { NodeLauncher } from "../domain/node-launcher.js";
 import type { CmuxAdapter } from "../adapters/cmux.js";
+import type { TranscriptStore } from "../domain/transcript-store.js";
 import { getNodeInventory, getNodeDetail } from "../domain/node-inventory.js";
 
 export const sessionsRoutes = new Hono();
@@ -43,6 +44,18 @@ nodesRoutes.get("/:logicalId", (c) => {
   if (!rig) return c.json({ error: `Rig "${rigId}" not found. List rigs with: rigged ps` }, 404);
   const detail = getNodeDetail(deps.rigRepo.db, rigId, logicalId);
   if (!detail) return c.json({ error: `Node "${logicalId}" not found in rig "${rigId}". Check node IDs with: rigged ps --nodes` }, 404);
+
+  // Enrich transcript info from TranscriptStore (not available to pure DB helper)
+  const transcriptStore = c.get("transcriptStore" as never) as TranscriptStore | undefined;
+  if (transcriptStore?.enabled && detail.canonicalSessionName) {
+    const path = transcriptStore.getTranscriptPath(rig.rig.name, detail.canonicalSessionName);
+    detail.transcript = {
+      enabled: true,
+      path,
+      tailCommand: `rigged transcript ${detail.canonicalSessionName} --tail 100`,
+    };
+  }
+
   return c.json(detail);
 });
 
