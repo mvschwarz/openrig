@@ -40,6 +40,8 @@ describe("ClaimService", () => {
   let claimService: ClaimService;
   let mockTmux: TmuxAdapter;
   let setSessionOptionSpy: ReturnType<typeof vi.fn>;
+  let sendTextSpy: ReturnType<typeof vi.fn>;
+  let sendKeysSpy: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     db = createDb();
@@ -49,7 +51,14 @@ describe("ClaimService", () => {
     eventBus = new EventBus(db);
     discoveryRepo = new DiscoveryRepository(db);
     setSessionOptionSpy = vi.fn(async () => ({ ok: true as const }));
-    mockTmux = { setSessionOption: setSessionOptionSpy, getSessionOption: vi.fn(async () => null) } as unknown as TmuxAdapter;
+    sendTextSpy = vi.fn(async () => ({ ok: true as const }));
+    sendKeysSpy = vi.fn(async () => ({ ok: true as const }));
+    mockTmux = {
+      setSessionOption: setSessionOptionSpy,
+      getSessionOption: vi.fn(async () => null),
+      sendText: sendTextSpy,
+      sendKeys: sendKeysSpy,
+    } as unknown as TmuxAdapter;
     claimService = new ClaimService({ db, rigRepo, sessionRegistry, discoveryRepo, eventBus, tmuxAdapter: mockTmux });
   });
 
@@ -358,5 +367,95 @@ describe("ClaimService", () => {
     expect(metaMap.get("@rigged_rig_id")).toBe(rig.id);
     expect(metaMap.get("@rigged_rig_name")).toBe("test-rig");
     expect(metaMap.get("@rigged_logical_id")).toBe("dev.coder");
+  });
+
+  // T17: claim delivers post-claim identity hint via sendText + sendKeys C-m
+  it("claim delivers post-claim identity hint via sendText + sendKeys", async () => {
+    const rig = seedRig();
+    const discovered = seedDiscovery({ tmuxSession: "adopted-sess" });
+
+    await claimService.claim({ discoveredId: discovered.id, rigId: rig.id });
+
+    expect(sendTextSpy).toHaveBeenCalled();
+    const textCall = sendTextSpy.mock.calls[0] as [string, string];
+    expect(textCall[0]).toBe("adopted-sess");
+    expect(textCall[1]).toContain("test-rig");
+    expect(textCall[1]).toContain("adopted-sess"); // logicalId defaults to tmux session
+    expect(textCall[1]).toContain("rigged whoami --json");
+
+    // Must also submit with C-m
+    expect(sendKeysSpy).toHaveBeenCalled();
+    const keysCall = sendKeysSpy.mock.calls[0] as [string, string[]];
+    expect(keysCall[0]).toBe("adopted-sess");
+    expect(keysCall[1]).toContain("C-m");
+  });
+
+  // T18: bind delivers post-claim identity hint
+  it("bind delivers post-claim identity hint via sendText + sendKeys", async () => {
+    const rig = seedRig();
+    rigRepo.addNode(rig.id, "orch.lead", { runtime: "claude-code", cwd: "/projects/myapp" });
+    const discovered = seedDiscovery({ tmuxSession: "orch-lead@host" });
+
+    await claimService.bind({ discoveredId: discovered.id, rigId: rig.id, logicalId: "orch.lead" });
+
+    expect(sendTextSpy).toHaveBeenCalled();
+    const textCall = sendTextSpy.mock.calls[0] as [string, string];
+    expect(textCall[0]).toBe("orch-lead@host");
+    expect(textCall[1]).toContain("test-rig");
+    expect(textCall[1]).toContain("orch.lead");
+
+    expect(sendKeysSpy).toHaveBeenCalled();
+    const keysCall = sendKeysSpy.mock.calls[0] as [string, string[]];
+    expect(keysCall[1]).toContain("C-m");
+  });
+
+  // T19: createAndBindToPod delivers post-claim identity hint
+  it("createAndBindToPod delivers post-claim identity hint via sendText + sendKeys", async () => {
+    const rig = seedRig();
+    db.prepare("INSERT INTO pods (id, rig_id, namespace, label) VALUES (?, ?, ?, ?)").run("pod-dev2", rig.id, "dev", "Dev");
+    const discovered = seedDiscovery({ tmuxSession: "dev-coder2@host" });
+
+    await claimService.createAndBindToPod({
+      discoveredId: discovered.id, rigId: rig.id,
+      podId: "pod-dev2", podNamespace: "dev", memberName: "coder",
+    });
+
+    expect(sendTextSpy).toHaveBeenCalled();
+    const textCall = sendTextSpy.mock.calls[0] as [string, string];
+    expect(textCall[0]).toBe("dev-coder2@host");
+    expect(textCall[1]).toContain("dev.coder");
+
+    expect(sendKeysSpy).toHaveBeenCalled();
+    const keysCall = sendKeysSpy.mock.calls[0] as [string, string[]];
+    expect(keysCall[1]).toContain("C-m");
+  });
+
+  // T20: hint text contains required identity fields
+  it("hint text contains rig name, logicalId, and whoami reference", async () => {
+    const rig = seedRig();
+    const discovered = seedDiscovery({ tmuxSession: "my-session" });
+
+    await claimService.claim({ discoveredId: discovered.id, rigId: rig.id, logicalId: "custom.id" });
+
+    const textCall = sendTextSpy.mock.calls[0] as [string, string];
+    const hint = textCall[1];
+    expect(hint).toContain("test-rig");
+    expect(hint).toContain("custom.id");
+    expect(hint).toContain("rigged whoami --json");
+  });
+
+  // T21: hint delivery failure does not fail claim
+  it("claim succeeds even if hint delivery fails", async () => {
+    const rig = seedRig();
+    const discovered = seedDiscovery();
+
+    sendTextSpy.mockImplementation(async () => { throw new Error("tmux not available"); });
+
+    const result = await claimService.claim({ discoveredId: discovered.id, rigId: rig.id });
+    expect(result.ok).toBe(true);
+
+    // DB writes should still have succeeded
+    const updatedRig = rigRepo.getRig(rig.id);
+    expect(updatedRig!.nodes).toHaveLength(1);
   });
 });

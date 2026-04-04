@@ -81,6 +81,16 @@ export class ClaimService {
     }
   }
 
+  /** Best-effort: send a short identity hint into the adopted session after claim. */
+  private async deliverClaimHint(tmuxSession: string, meta: {
+    rigName: string; logicalId: string;
+  }): Promise<void> {
+    if (!this.tmuxAdapter) return;
+    const hint = `--- Rigged: You have been adopted into rig "${meta.rigName}" as ${meta.logicalId}. Run: rigged whoami --json ---`;
+    await this.tmuxAdapter.sendText(tmuxSession, hint);
+    await this.tmuxAdapter.sendKeys(tmuxSession, ["C-m"]);
+  }
+
   async claim(opts: ClaimOptions): Promise<ClaimResult> {
     // Validate discovery record
     const discovered = this.discoveryRepo.getDiscoveredSession(opts.discoveredId);
@@ -162,6 +172,10 @@ export class ClaimService {
           nodeId, sessionName: discovered.tmuxSession,
           rigId: opts.rigId, rigName: rig!.rig.name, logicalId,
         });
+      } catch { /* best-effort */ }
+      // Best-effort: send post-claim identity hint
+      try {
+        await this.deliverClaimHint(discovered.tmuxSession, { rigName: rig!.rig.name, logicalId });
       } catch { /* best-effort */ }
 
       return { ok: true, nodeId, sessionId };
@@ -245,6 +259,10 @@ export class ClaimService {
           nodeId, sessionName: discovered.tmuxSession,
           rigId: opts.rigId, rigName: rig!.rig.name, logicalId: opts.logicalId,
         });
+      } catch { /* best-effort */ }
+      // Best-effort: send post-claim identity hint
+      try {
+        await this.deliverClaimHint(discovered.tmuxSession, { rigName: rig!.rig.name, logicalId: opts.logicalId });
       } catch { /* best-effort */ }
 
       return { ok: true, nodeId, sessionId };
@@ -340,6 +358,10 @@ export class ClaimService {
           nodeId, sessionName: discovered.tmuxSession,
           rigId: opts.rigId, rigName: rig!.rig.name, logicalId,
         });
+      } catch { /* best-effort */ }
+      // Best-effort: send post-claim identity hint
+      try {
+        await this.deliverClaimHint(discovered.tmuxSession, { rigName: rig!.rig.name, logicalId });
       } catch { /* best-effort */ }
 
       return { ok: true, nodeId, sessionId };
