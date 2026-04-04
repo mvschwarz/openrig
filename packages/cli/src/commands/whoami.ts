@@ -44,8 +44,10 @@ const defaultTmuxExec: TmuxExecFn = (cmd: string) => execSync(cmd, { encoding: "
  * 2. --session flag
  * 3. RIGGED_NODE_ID env
  * 4. RIGGED_SESSION_NAME env
- * 5. TMUX_PANE → tmux display-message
- * 6. fail
+ * 5. TMUX_PANE → @rigged_node_id tmux metadata
+ * 6. TMUX_PANE → @rigged_session_name tmux metadata
+ * 7. TMUX_PANE → tmux display-message (raw session name)
+ * 8. fail
  */
 export function resolveIdentitySource(
   opts: { nodeId?: string; session?: string },
@@ -60,9 +62,22 @@ export function resolveIdentitySource(
   const envSessionName = process.env["RIGGED_SESSION_NAME"];
   if (envSessionName) return { sessionName: envSessionName };
 
-  // TMUX_PANE fallback
+  // TMUX_PANE fallback — try Rigged metadata first, then raw session name
   const tmuxPane = process.env["TMUX_PANE"];
   if (tmuxPane) {
+    // Step 5: @rigged_node_id metadata (strongest adopted-session anchor)
+    try {
+      const nodeId = tmuxExec(`tmux show-option -v -t ${JSON.stringify(tmuxPane)} @rigged_node_id`);
+      if (nodeId) return { nodeId };
+    } catch { /* metadata not set — continue */ }
+
+    // Step 6: @rigged_session_name metadata
+    try {
+      const sessionName = tmuxExec(`tmux show-option -v -t ${JSON.stringify(tmuxPane)} @rigged_session_name`);
+      if (sessionName) return { sessionName };
+    } catch { /* metadata not set — continue */ }
+
+    // Step 7: raw tmux session name (weakest fallback)
     try {
       const sessionName = tmuxExec(`tmux display-message -p -t ${JSON.stringify(tmuxPane)} "#{session_name}"`);
       if (sessionName) return { sessionName };

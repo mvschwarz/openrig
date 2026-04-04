@@ -128,15 +128,19 @@ describe("Whoami CLI", () => {
     expect(logs.join("\n")).toContain("my-rig");
   });
 
-  it("TMUX_PANE resolves via tmux display-message to exact session name", () => {
+  it("TMUX_PANE resolves via tmux display-message to exact session name (no metadata set)", () => {
     // Test the resolution function directly with a controlled tmux mock
     process.env["TMUX_PANE"] = "%42";
-    const mockTmuxExec = vi.fn(() => "dev-impl@my-rig");
+    const mockTmuxExec = vi.fn((cmd: string) => {
+      if (cmd.includes("show-option")) throw new Error("unknown option");
+      return "dev-impl@my-rig";
+    });
 
     const result = resolveIdentitySource({}, mockTmuxExec);
 
-    expect(mockTmuxExec).toHaveBeenCalledOnce();
-    expect(mockTmuxExec.mock.calls[0]![0]).toContain("%42");
+    const displayCalls = mockTmuxExec.mock.calls.filter((c) => (c[0] as string).includes("display-message"));
+    expect(displayCalls).toHaveLength(1);
+    expect(displayCalls[0]![0]).toContain("%42");
     expect(result).toEqual({ sessionName: "dev-impl@my-rig" });
   });
 
@@ -174,6 +178,68 @@ describe("Whoami CLI", () => {
     });
     expect(exitCode).toBe(1);
     expect(logs.join("\n")).toContain("ambiguous");
+  });
+
+  // Adopted-session parity: tmux metadata resolution
+  it("TMUX_PANE with @rigged_node_id metadata resolves nodeId (takes precedence over display-message)", () => {
+    process.env["TMUX_PANE"] = "%42";
+    // Mock: @rigged_node_id returns a value, display-message would return a DIFFERENT session name
+    const mockTmuxExec = vi.fn((cmd: string) => {
+      if (cmd.includes("show-option") && cmd.includes("@rigged_node_id")) return "node-claimed-123";
+      if (cmd.includes("display-message")) return "fallback-session-name";
+      throw new Error("unexpected tmux call");
+    });
+
+    const result = resolveIdentitySource({}, mockTmuxExec);
+
+    expect(result).toEqual({ nodeId: "node-claimed-123" });
+    // display-message should NOT have been called — metadata took precedence
+    const displayCalls = mockTmuxExec.mock.calls.filter((c) => (c[0] as string).includes("display-message"));
+    expect(displayCalls).toHaveLength(0);
+  });
+
+  it("TMUX_PANE with @rigged_session_name (no node_id) resolves sessionName (takes precedence over display-message)", () => {
+    process.env["TMUX_PANE"] = "%42";
+    const mockTmuxExec = vi.fn((cmd: string) => {
+      if (cmd.includes("show-option") && cmd.includes("@rigged_node_id")) throw new Error("unknown option");
+      if (cmd.includes("show-option") && cmd.includes("@rigged_session_name")) return "claimed-session@rig";
+      if (cmd.includes("display-message")) return "different-raw-session";
+      throw new Error("unexpected tmux call");
+    });
+
+    const result = resolveIdentitySource({}, mockTmuxExec);
+
+    expect(result).toEqual({ sessionName: "claimed-session@rig" });
+    const displayCalls = mockTmuxExec.mock.calls.filter((c) => (c[0] as string).includes("display-message"));
+    expect(displayCalls).toHaveLength(0);
+  });
+
+  it("TMUX_PANE with no metadata falls back to display-message", () => {
+    process.env["TMUX_PANE"] = "%42";
+    const mockTmuxExec = vi.fn((cmd: string) => {
+      if (cmd.includes("show-option")) throw new Error("unknown option");
+      if (cmd.includes("display-message")) return "raw-session-name";
+      throw new Error("unexpected tmux call");
+    });
+
+    const result = resolveIdentitySource({}, mockTmuxExec);
+
+    expect(result).toEqual({ sessionName: "raw-session-name" });
+  });
+
+  it("TMUX_PANE with metadata error falls through gracefully to display-message", () => {
+    process.env["TMUX_PANE"] = "%42";
+    let callCount = 0;
+    const mockTmuxExec = vi.fn((cmd: string) => {
+      callCount++;
+      if (cmd.includes("show-option")) throw new Error("tmux not available");
+      if (cmd.includes("display-message")) return "fallback-session";
+      throw new Error("unexpected");
+    });
+
+    const result = resolveIdentitySource({}, mockTmuxExec);
+
+    expect(result).toEqual({ sessionName: "fallback-session" });
   });
 
   it("human output includes rig, pod, session, peers, edges, transcript", async () => {
