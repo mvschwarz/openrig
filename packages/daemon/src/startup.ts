@@ -241,7 +241,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     discoveryRepo, sessionRegistry, eventBus,
   });
   const resumeMetadataRefresher = new ResumeMetadataRefresher({ sessionRegistry, tmuxAdapter });
-  const claimService = new ClaimService({ db, rigRepo, sessionRegistry, discoveryRepo, eventBus });
+  const claimService = new ClaimService({ db, rigRepo, sessionRegistry, discoveryRepo, eventBus, tmuxAdapter });
 
   const specReviewService = new SpecReviewService();
 

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type Database from "better-sqlite3";
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
@@ -373,5 +373,35 @@ describe("Discovery API routes", () => {
     expect(events).toHaveLength(1);
     const payload = JSON.parse(events[0]!.payload);
     expect(payload.rigId).toBe(rig.id);
+  });
+
+  // T13: POST /:id/claim sets @rigged_* tmux metadata through the async HTTP path
+  it("POST /:id/claim sets tmux metadata on the adopted session", async () => {
+    const id = seedDiscovery("claimed-target", "%0");
+    const rig = seedRig();
+
+    const res = await app.request(`/api/discovery/${id}/claim`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ rigId: rig.id }),
+    });
+
+    expect(res.status).toBe(201);
+    const body = await res.json();
+    expect(body.ok).toBe(true);
+
+    const setOpt = setup.tmuxAdapter.setSessionOption as ReturnType<typeof import("vitest").vi.fn>;
+    expect(setOpt).toHaveBeenCalled();
+    const calls = setOpt.mock.calls as [string, string, string][];
+    // All metadata writes target the discovered tmux session
+    for (const call of calls) {
+      expect(call[0]).toBe("claimed-target");
+    }
+    const metaMap = new Map(calls.map((c: [string, string, string]) => [c[1], c[2]]));
+    expect(metaMap.get("@rigged_node_id")).toBe(body.nodeId);
+    expect(metaMap.get("@rigged_session_name")).toBe("claimed-target");
+    expect(metaMap.get("@rigged_rig_id")).toBe(rig.id);
+    expect(metaMap.get("@rigged_rig_name")).toBe("test-rig");
+    expect(metaMap.get("@rigged_logical_id")).toBe("claimed-target");
   });
 });

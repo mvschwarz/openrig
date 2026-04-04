@@ -395,6 +395,62 @@ describe("TmuxAdapter", () => {
     });
   });
 
+  describe("setSessionOption", () => {
+    it("calls exec with exact tmux set-option command (session and key/value quoted)", async () => {
+      const exec = vi.fn<ExecFn>().mockResolvedValue("");
+      const adapter = new TmuxAdapter(exec);
+
+      await adapter.setSessionOption("organic-session", "@rigged_node_id", "node-abc123");
+
+      expect(exec).toHaveBeenCalledOnce();
+      expect(exec.mock.calls[0]![0]).toBe(
+        "tmux set-option -t 'organic-session' '@rigged_node_id' 'node-abc123'"
+      );
+    });
+
+    it("returns { ok: true } on success", async () => {
+      const adapter = new TmuxAdapter(mockExec({ "set-option": { stdout: "" } }));
+      const result = await adapter.setSessionOption("s", "@k", "v");
+      expect(result).toEqual({ ok: true });
+    });
+
+    it("returns { ok: false, code: 'session_not_found' } on missing session", async () => {
+      const err = new Error("can't find session: ghost");
+      const adapter = new TmuxAdapter(mockExec({ "set-option": { error: err } }));
+      const result = await adapter.setSessionOption("ghost", "@k", "v");
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.code).toBe("session_not_found");
+    });
+  });
+
+  describe("getSessionOption", () => {
+    it("calls exec with exact tmux show-option -v command", async () => {
+      const exec = vi.fn<ExecFn>().mockResolvedValue("node-abc123\n");
+      const adapter = new TmuxAdapter(exec);
+
+      const val = await adapter.getSessionOption("organic-session", "@rigged_node_id");
+
+      expect(exec).toHaveBeenCalledOnce();
+      expect(exec.mock.calls[0]![0]).toBe(
+        "tmux show-option -v -t 'organic-session' '@rigged_node_id'"
+      );
+      expect(val).toBe("node-abc123");
+    });
+
+    it("returns null on error (session not found, no server, etc.)", async () => {
+      const err = new Error("can't find session: ghost");
+      const adapter = new TmuxAdapter(mockExec({ "show-option": { error: err } }));
+      const val = await adapter.getSessionOption("ghost", "@rigged_node_id");
+      expect(val).toBeNull();
+    });
+
+    it("returns null on empty output", async () => {
+      const adapter = new TmuxAdapter(mockExec({ "show-option": { stdout: "\n" } }));
+      const val = await adapter.getSessionOption("s", "@k");
+      expect(val).toBeNull();
+    });
+  });
+
   describe("canonical session names with @", () => {
     it("createSession + sendKeys with @ in name produce correct quoted commands", async () => {
       const exec = vi.fn<ExecFn>().mockResolvedValue("");

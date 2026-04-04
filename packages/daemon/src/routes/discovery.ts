@@ -85,7 +85,7 @@ discoveryRoutes.post("/:id/claim", async (c) => {
     return c.json({ error: "rigId is required" }, 400);
   }
 
-  const result = claimService.claim({ discoveredId: id, rigId, logicalId });
+  const result = await claimService.claim({ discoveredId: id, rigId, logicalId });
 
   if (result.ok) {
     return c.json(result, 201);
@@ -118,7 +118,7 @@ discoveryRoutes.post("/:id/bind", async (c) => {
     return c.json({ error: "logicalId is required" }, 400);
   }
 
-  const result = claimService.bind({ discoveredId: id, rigId, logicalId });
+  const result = await claimService.bind({ discoveredId: id, rigId, logicalId });
   if (result.ok) {
     return c.json(result, 201);
   }
@@ -158,7 +158,7 @@ discoveryRoutes.post("/:id/adopt", async (c) => {
     if (!logicalId) {
       return c.json({ error: "target.logicalId is required" }, 400);
     }
-    const result = claimService.bind({ discoveredId: id, rigId, logicalId });
+    const result = await claimService.bind({ discoveredId: id, rigId, logicalId });
     if (result.ok) {
       return c.json({ ...result, action: "bind", logicalId }, 201);
     }
@@ -191,7 +191,7 @@ discoveryRoutes.post("/:id/adopt", async (c) => {
       return c.json({ error: "target.memberName is required" }, 400);
     }
 
-    const result = claimService.createAndBindToPod({
+    const result = await claimService.createAndBindToPod({
       discoveredId: id,
       rigId,
       podId,

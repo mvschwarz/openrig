@@ -77,6 +77,8 @@ export function mockTmuxAdapter(): TmuxAdapter {
     hasSession: vi.fn(async () => false),
     sendText: vi.fn(async () => ({ ok: true as const })),
     sendKeys: vi.fn(async () => ({ ok: true as const })),
+    setSessionOption: vi.fn(async () => ({ ok: true as const })),
+    getSessionOption: vi.fn(async () => null),
   } as unknown as TmuxAdapter;
 }
 
@@ -172,7 +174,7 @@ export function createTestApp(db: Database.Database, opts?: { cmux?: CmuxAdapter
   const discoveryCoordinator = new DiscoveryCoordinator({
     scanner: tmuxScanner, fingerprinter, enricher, discoveryRepo, sessionRegistry, eventBus,
   });
-  const claimService = new ClaimService({ db, rigRepo, sessionRegistry, discoveryRepo, eventBus });
+  const claimService = new ClaimService({ db, rigRepo, sessionRegistry, discoveryRepo, eventBus, tmuxAdapter: tmux });
 
   const podBundleSourceResolver = new PodBundleSourceResolver();
 
@@ -199,6 +201,6 @@ export function createTestApp(db: Database.Database, opts?: { cmux?: CmuxAdapter
     psProjectionService: new PsProjectionService({ db }),
     upRouter: new UpCommandRouter({ fsOps: { exists: () => false, readFile: () => "", readHead: () => Buffer.alloc(0) } }),
     teardownOrchestrator: new RigTeardownOrchestrator({ db, rigRepo, sessionRegistry, tmuxAdapter: tmux, snapshotCapture, eventBus }),
-    podInstantiator, podBundleSourceResolver, db,
+    podInstantiator, podBundleSourceResolver, db, tmuxAdapter: tmux,
   };
 }

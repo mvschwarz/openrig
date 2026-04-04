@@ -245,4 +245,25 @@ export class TmuxAdapter {
       return null;
     }
   }
+
+  /** Set a session-scoped user option (@-prefixed key). */
+  async setSessionOption(sessionName: string, key: string, value: string): Promise<TmuxResult> {
+    const cmd = `tmux set-option -t ${shellQuote(sessionName)} ${shellQuote(key)} ${shellQuote(value)}`;
+    try {
+      await this.exec(cmd);
+      return { ok: true };
+    } catch (err) {
+      return classifyWriteError(err);
+    }
+  }
+
+  /** Get a session-scoped user option value. Returns null if not set or error. */
+  async getSessionOption(sessionName: string, key: string): Promise<string | null> {
+    try {
+      const output = await this.exec(`tmux show-option -v -t ${shellQuote(sessionName)} ${shellQuote(key)}`);
+      return output.trim() || null;
+    } catch {
+      return null;
+    }
+  }
 }

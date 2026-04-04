@@ -3,6 +3,7 @@ import type { RigRepository } from "./rig-repository.js";
 import type { SessionRegistry } from "./session-registry.js";
 import type { DiscoveryRepository } from "./discovery-repository.js";
 import type { EventBus } from "./event-bus.js";
+import type { TmuxAdapter } from "../adapters/tmux.js";
 
 export type ClaimResult =
   | { ok: true; nodeId: string; sessionId: string }
@@ -14,6 +15,7 @@ interface ClaimServiceDeps {
   sessionRegistry: SessionRegistry;
   discoveryRepo: DiscoveryRepository;
   eventBus: EventBus;
+  tmuxAdapter?: TmuxAdapter;
 }
 
 interface ClaimOptions {
@@ -47,6 +49,7 @@ export class ClaimService {
   private sessionRegistry: SessionRegistry;
   private discoveryRepo: DiscoveryRepository;
   private eventBus: EventBus;
+  private tmuxAdapter: TmuxAdapter | null;
 
   constructor(deps: ClaimServiceDeps) {
     if (deps.db !== deps.rigRepo.db) throw new Error("ClaimService: rigRepo must share the same db handle");
@@ -58,9 +61,27 @@ export class ClaimService {
     this.sessionRegistry = deps.sessionRegistry;
     this.discoveryRepo = deps.discoveryRepo;
     this.eventBus = deps.eventBus;
+    this.tmuxAdapter = deps.tmuxAdapter ?? null;
   }
 
-  claim(opts: ClaimOptions): ClaimResult {
+  /** Best-effort: set Rigged-owned tmux metadata on an adopted session. */
+  private async setRiggedMetadata(tmuxSession: string, meta: {
+    nodeId: string; sessionName: string; rigId: string; rigName: string; logicalId: string;
+  }): Promise<void> {
+    if (!this.tmuxAdapter) return;
+    const entries: [string, string][] = [
+      ["@rigged_node_id", meta.nodeId],
+      ["@rigged_session_name", meta.sessionName],
+      ["@rigged_rig_id", meta.rigId],
+      ["@rigged_rig_name", meta.rigName],
+      ["@rigged_logical_id", meta.logicalId],
+    ];
+    for (const [key, value] of entries) {
+      await this.tmuxAdapter.setSessionOption(tmuxSession, key, value);
+    }
+  }
+
+  async claim(opts: ClaimOptions): Promise<ClaimResult> {
     // Validate discovery record
     const discovered = this.discoveryRepo.getDiscoveredSession(opts.discoveredId);
     if (!discovered) {
@@ -135,13 +156,21 @@ export class ClaimService {
           createdAt: event.created_at,
         });
       }
+      // Best-effort: set Rigged-owned tmux metadata on the adopted session
+      try {
+        await this.setRiggedMetadata(discovered.tmuxSession, {
+          nodeId, sessionName: discovered.tmuxSession,
+          rigId: opts.rigId, rigName: rig!.rig.name, logicalId,
+        });
+      } catch { /* best-effort */ }
+
       return { ok: true, nodeId, sessionId };
     } catch (err) {
       return { ok: false, code: "claim_error", error: (err as Error).message };
     }
   }
 
-  bind(opts: BindOptions): ClaimResult {
+  async bind(opts: BindOptions): Promise<ClaimResult> {
     const discovered = this.discoveryRepo.getDiscoveredSession(opts.discoveredId);
     if (!discovered) {
       return { ok: false, code: "not_found", error: "Discovery record not found" };
@@ -210,13 +239,21 @@ export class ClaimService {
           createdAt: event.created_at,
         });
       }
+      // Best-effort: set Rigged-owned tmux metadata
+      try {
+        await this.setRiggedMetadata(discovered.tmuxSession, {
+          nodeId, sessionName: discovered.tmuxSession,
+          rigId: opts.rigId, rigName: rig!.rig.name, logicalId: opts.logicalId,
+        });
+      } catch { /* best-effort */ }
+
       return { ok: true, nodeId, sessionId };
     } catch (err) {
       return { ok: false, code: "claim_error", error: (err as Error).message };
     }
   }
 
-  createAndBindToPod(opts: CreateAndBindToPodOptions): ClaimResult {
+  async createAndBindToPod(opts: CreateAndBindToPodOptions): Promise<ClaimResult> {
     const discovered = this.discoveryRepo.getDiscoveredSession(opts.discoveredId);
     if (!discovered) {
       return { ok: false, code: "not_found", error: "Discovery record not found" };
@@ -297,6 +334,14 @@ export class ClaimService {
           createdAt: event.created_at,
         });
       }
+      // Best-effort: set Rigged-owned tmux metadata
+      try {
+        await this.setRiggedMetadata(discovered.tmuxSession, {
+          nodeId, sessionName: discovered.tmuxSession,
+          rigId: opts.rigId, rigName: rig!.rig.name, logicalId,
+        });
+      } catch { /* best-effort */ }
+
       return { ok: true, nodeId, sessionId };
     } catch (err) {
       return { ok: false, code: "claim_error", error: (err as Error).message };
