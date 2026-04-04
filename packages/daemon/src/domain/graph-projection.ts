@@ -21,6 +21,9 @@ interface RFNodeData {
   podId: string | null;
   restoreOutcome: string;
   resumeToken?: string | null;
+  resolvedSpecName: string | null;
+  profile: string | null;
+  edgeCount: number;
 }
 
 interface RFNode {
@@ -100,6 +103,9 @@ export function projectRigToGraph(input: RigGraphInput, inventoryOverlay?: Inven
         podId: node.podId ?? null,
         restoreOutcome: overlay?.restoreOutcome ?? "n-a",
         resumeToken: latestSession?.resumeToken ?? null,
+        resolvedSpecName: node.resolvedSpecName ?? null,
+        profile: node.profile ?? null,
+        edgeCount: rigEdges.filter((e) => e.sourceId === node.id || e.targetId === node.id).length,
       },
     };
   });
@@ -127,6 +133,9 @@ export function projectRigToGraph(input: RigGraphInput, inventoryOverlay?: Inven
         podId,
         restoreOutcome: "n-a",
         resumeToken: null,
+        resolvedSpecName: null,
+        profile: null,
+        edgeCount: 0,
       },
     });
   }

@@ -17,6 +17,9 @@ interface RigNodeData {
   podId?: string | null;
   restoreOutcome?: string;
   resumeToken?: string | null;
+  resolvedSpecName?: string | null;
+  profile?: string | null;
+  edgeCount?: number;
   binding: {
     tmuxSession?: string | null;
     cmuxSurface?: string | null;
@@ -167,6 +170,13 @@ export function RigNode({ data }: { data: RigNodeData }) {
         {runtimeModel && (
           <div className="font-mono text-[8px] text-stone-500">
             RUNTIME: {runtimeModel}
+          </div>
+        )}
+
+        {/* Spec hint */}
+        {data.resolvedSpecName && (
+          <div className="font-mono text-[8px] text-stone-400" data-testid="spec-hint">
+            {data.resolvedSpecName}{data.profile ? ` · ${data.profile}` : ""}
           </div>
         )}
 

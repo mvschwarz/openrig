@@ -273,4 +273,84 @@ describe("projectRigToGraph", () => {
     expect(result.nodes[1]!.data.nodeKind).toBe("infrastructure");
     expect(result.nodes[2]!.data.nodeKind).toBe("agent");
   });
+
+  // Task 7: graph projection includes spec hint fields
+  it("node data includes resolvedSpecName and profile from node", () => {
+    const input = makeRig([
+      { id: "n1", logicalId: "impl", runtime: "claude-code" },
+    ]);
+    // Manually set spec fields on the node (makeRig doesn't include them)
+    (input.nodes[0] as Record<string, unknown>).resolvedSpecName = "impl-agent";
+    (input.nodes[0] as Record<string, unknown>).profile = "default";
+
+    const result = projectRigToGraph(input);
+    expect(result.nodes[0]!.data.resolvedSpecName).toBe("impl-agent");
+    expect(result.nodes[0]!.data.profile).toBe("default");
+  });
+
+  it("node data includes edgeCount reflecting connected edges", () => {
+    const input = makeRig(
+      [
+        { id: "n1", logicalId: "impl" },
+        { id: "n2", logicalId: "qa" },
+        { id: "n3", logicalId: "lead" },
+      ],
+      [
+        { id: "e1", sourceId: "n1", targetId: "n2", kind: "delegates_to" },
+        { id: "e2", sourceId: "n3", targetId: "n1", kind: "reports_to" },
+      ],
+    );
+
+    const result = projectRigToGraph(input);
+    const implNode = result.nodes.find((n) => n.data.logicalId === "impl")!;
+    const qaNode = result.nodes.find((n) => n.data.logicalId === "qa")!;
+    const leadNode = result.nodes.find((n) => n.data.logicalId === "lead")!;
+
+    expect(implNode.data.edgeCount).toBe(2); // source of e1, target of e2
+    expect(qaNode.data.edgeCount).toBe(1);   // target of e1
+    expect(leadNode.data.edgeCount).toBe(1);  // source of e2
+  });
+
+  it("node data defaults resolvedSpecName/profile to null when not set", () => {
+    const input = makeRig([{ id: "n1", logicalId: "impl" }]);
+
+    const result = projectRigToGraph(input);
+    expect(result.nodes[0]!.data.resolvedSpecName).toBeNull();
+    expect(result.nodes[0]!.data.profile).toBeNull();
+    expect(result.nodes[0]!.data.edgeCount).toBe(0);
+  });
+
+  // Task 7: canonicalSessionName uses overlay (binding) first, then newest session by ULID
+  it("canonicalSessionName prefers overlay over newest session", () => {
+    const input = makeRig(
+      [{ id: "n1", logicalId: "impl", bindingTmux: "impl@rig" }],
+      [],
+      [
+        makeSession("n1", "running", "2026-04-01T00:00:00Z"),
+        makeSession("n1", "running", "2026-04-02T00:00:00Z"),
+      ],
+    );
+
+    // Overlay provides the canonical name (from binding tmuxSession)
+    const overlay = [{ logicalId: "impl", startupStatus: "ready" as const, canonicalSessionName: "impl@rig-overlay", restoreOutcome: "n-a" }];
+    const result = projectRigToGraph(input, overlay);
+
+    expect(result.nodes[0]!.data.canonicalSessionName).toBe("impl@rig-overlay");
+  });
+
+  it("canonicalSessionName falls back to newest session when no overlay", () => {
+    const input = makeRig(
+      [{ id: "n1", logicalId: "impl" }],
+      [],
+      [
+        makeSession("n1", "running", "2026-04-01T00:00:00Z"),
+        // Higher ULID-like ID (later date → higher string sort)
+        { id: "sess-n1-2026-04-02", nodeId: "n1", sessionName: "r01-impl-latest", status: "running", lastSeenAt: null, createdAt: "2026-04-02" },
+      ],
+    );
+
+    const result = projectRigToGraph(input);
+    // Falls back to latest session by ULID (highest id string)
+    expect(result.nodes[0]!.data.canonicalSessionName).toBe("r01-impl-latest");
+  });
 });

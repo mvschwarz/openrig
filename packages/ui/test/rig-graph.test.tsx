@@ -1308,3 +1308,51 @@ describe("RigGraph node selection", () => {
     });
   });
 });
+
+// Task 7: RigNode spec hint rendering
+describe("RigNode spec hint", () => {
+  afterEach(() => cleanup());
+
+  it("renders spec hint when resolvedSpecName is set", () => {
+    render(
+      <ReactFlowProvider>
+        <RigNode data={{
+          logicalId: "dev.impl",
+          role: "worker",
+          runtime: "claude-code",
+          model: null,
+          status: "running",
+          binding: null,
+          resolvedSpecName: "impl-agent",
+          profile: "default",
+          edgeCount: 2,
+        }} />
+      </ReactFlowProvider>
+    );
+
+    const hint = screen.getByTestId("spec-hint");
+    expect(hint).toBeDefined();
+    expect(hint.textContent).toContain("impl-agent");
+    expect(hint.textContent).toContain("default");
+  });
+
+  it("does not render spec hint when resolvedSpecName is null", () => {
+    render(
+      <ReactFlowProvider>
+        <RigNode data={{
+          logicalId: "dev.impl",
+          role: "worker",
+          runtime: "claude-code",
+          model: null,
+          status: "running",
+          binding: null,
+          resolvedSpecName: null,
+          profile: null,
+          edgeCount: 0,
+        }} />
+      </ReactFlowProvider>
+    );
+
+    expect(screen.queryByTestId("spec-hint")).toBeNull();
+  });
+});
