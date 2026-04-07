@@ -18,6 +18,7 @@ import { discoveryFkFix } from "../../src/db/migrations/013_discovery_fk_fix.js"
 import { agentspecRebootSchema } from "../../src/db/migrations/014_agentspec_reboot.js";
 import { startupContextSchema } from "../../src/db/migrations/015_startup_context.js";
 import { podNamespaceSchema } from "../../src/db/migrations/017_pod_namespace.js";
+import { contextUsageSchema } from "../../src/db/migrations/018_context_usage.js";
 import { BootstrapRepository } from "../../src/domain/bootstrap-repository.js";
 import { RuntimeVerifier } from "../../src/domain/runtime-verifier.js";
 import { RequirementsProbeRegistry } from "../../src/domain/requirements-probe.js";
@@ -35,6 +36,9 @@ import { RigTeardownOrchestrator } from "../../src/domain/rig-teardown.js";
 import { DiscoveryCoordinator } from "../../src/domain/discovery-coordinator.js";
 import { ClaimService } from "../../src/domain/claim-service.js";
 import { RigExpansionService } from "../../src/domain/rig-expansion-service.js";
+import { ContextUsageStore } from "../../src/domain/context-usage-store.js";
+import { WhoamiService } from "../../src/domain/whoami-service.js";
+import { TranscriptStore } from "../../src/domain/transcript-store.js";
 import { RigLifecycleService } from "../../src/domain/rig-lifecycle-service.js";
 import { RigRepository } from "../../src/domain/rig-repository.js";
 import { SessionRegistry } from "../../src/domain/session-registry.js";
@@ -66,7 +70,7 @@ import fs from "node:fs";
 
 export function createFullTestDb(): Database.Database {
   const db = createDb();
-  migrate(db, [coreSchema, bindingsSessionsSchema, eventsSchema, snapshotsSchema, checkpointsSchema, resumeMetadataSchema, nodeSpecFieldsSchema, packagesSchema, installJournalSchema, journalSeqSchema, bootstrapSchema, discoverySchema, discoveryFkFix, agentspecRebootSchema, startupContextSchema, podNamespaceSchema]);
+  migrate(db, [coreSchema, bindingsSessionsSchema, eventsSchema, snapshotsSchema, checkpointsSchema, resumeMetadataSchema, nodeSpecFieldsSchema, packagesSchema, installJournalSchema, journalSeqSchema, bootstrapSchema, discoverySchema, discoveryFkFix, agentspecRebootSchema, startupContextSchema, podNamespaceSchema, contextUsageSchema]);
   return db;
 }
 
@@ -193,6 +197,9 @@ export function createTestApp(
   const claimService = new ClaimService({ db, rigRepo, sessionRegistry, discoveryRepo, eventBus, tmuxAdapter: tmux });
   const rigExpansionService = new RigExpansionService({ db, rigRepo, eventBus, nodeLauncher, podInstantiator, sessionRegistry });
   const rigLifecycleService = new RigLifecycleService({ db, rigRepo, sessionRegistry, discoveryRepo, eventBus, tmuxAdapter: tmux });
+  const contextUsageStore = new ContextUsageStore(db, { stateDir: "/tmp/openrig-test" });
+  const transcriptStore = new TranscriptStore("/tmp/openrig-test-transcripts");
+  const whoamiService = new WhoamiService({ db, rigRepo, sessionRegistry, transcriptStore, contextUsageStore });
 
   const podBundleSourceResolver = new PodBundleSourceResolver();
 
@@ -209,6 +216,8 @@ export function createTestApp(
     teardownOrchestrator: new RigTeardownOrchestrator({ db, rigRepo, sessionRegistry, tmuxAdapter: tmux, snapshotCapture, eventBus }),
     podInstantiator,
     podBundleSourceResolver,
+    contextUsageStore,
+    whoamiService,
   });
   return {
     app, rigRepo, sessionRegistry, eventBus, nodeLauncher, snapshotRepo,

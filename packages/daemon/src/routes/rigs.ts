@@ -5,7 +5,8 @@ import type { EventBus } from "../domain/event-bus.js";
 import type { SnapshotRepository } from "../domain/snapshot-repository.js";
 import type { RestoreOrchestrator } from "../domain/restore-orchestrator.js";
 import { projectRigToGraph, type InventoryOverlay } from "../domain/graph-projection.js";
-import { getNodeInventory } from "../domain/node-inventory.js";
+import { getNodeInventory, getNodeInventoryWithContext } from "../domain/node-inventory.js";
+import type { ContextUsageStore } from "../domain/context-usage-store.js";
 import type { Pod, ExpansionPodFragment } from "../domain/types.js";
 import type { RigExpansionService } from "../domain/rig-expansion-service.js";
 import type { RigLifecycleService } from "../domain/rig-lifecycle-service.js";
@@ -105,7 +106,10 @@ rigsRoutes.get("/:id/graph", (c) => {
   const rigId = c.req.param("id");
   const sessions = getSessionRegistry(c).getSessionsForRig(rigId);
   // Overlay inventory data for enriched graph fields
-  const inventory = getNodeInventory(getRepo(c).db, rigId);
+  const ctxStore = c.get("contextUsageStore" as never) as ContextUsageStore | undefined;
+  const inventory = ctxStore
+    ? getNodeInventoryWithContext(getRepo(c).db, rigId, ctxStore)
+    : getNodeInventory(getRepo(c).db, rigId);
   const pods = getRepo(c).db
     .prepare("SELECT id, rig_id, namespace, label, summary, continuity_policy_json, created_at FROM pods WHERE rig_id = ? ORDER BY created_at")
     .all(rigId) as Array<{ id: string; rig_id: string; namespace: string; label: string; summary: string | null; continuity_policy_json: string | null; created_at: string }>;
@@ -114,6 +118,9 @@ rigsRoutes.get("/:id/graph", (c) => {
     startupStatus: n.startupStatus,
     canonicalSessionName: n.canonicalSessionName,
     restoreOutcome: n.restoreOutcome,
+    contextUsedPercentage: n.contextUsage?.usedPercentage ?? null,
+    contextFresh: n.contextUsage?.fresh ?? false,
+    contextAvailability: n.contextUsage?.availability ?? "unknown",
   }));
   const projectedPods: Pod[] = pods.map((pod) => ({
     id: pod.id,

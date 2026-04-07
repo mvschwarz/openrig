@@ -4,7 +4,8 @@ import type { SessionRegistry } from "../domain/session-registry.js";
 import type { NodeLauncher } from "../domain/node-launcher.js";
 import type { CmuxAdapter } from "../adapters/cmux.js";
 import type { TranscriptStore } from "../domain/transcript-store.js";
-import { getNodeInventory, getNodeDetail } from "../domain/node-inventory.js";
+import { getNodeInventory, getNodeDetail, getNodeInventoryWithContext, getNodeDetailWithContext } from "../domain/node-inventory.js";
+import type { ContextUsageStore } from "../domain/context-usage-store.js";
 import type { RigLifecycleService } from "../domain/rig-lifecycle-service.js";
 
 export const sessionsRoutes = new Hono();
@@ -34,7 +35,10 @@ nodesRoutes.get("/", (c) => {
   const deps = getDeps(c);
   const rig = deps.rigRepo.getRig(rigId);
   if (!rig) return c.json({ error: `Rig "${rigId}" not found. List rigs with: rig ps` }, 404);
-  const inventory = getNodeInventory(deps.rigRepo.db, rigId);
+  const contextUsageStore = c.get("contextUsageStore" as never) as ContextUsageStore | undefined;
+  const inventory = contextUsageStore
+    ? getNodeInventoryWithContext(deps.rigRepo.db, rigId, contextUsageStore)
+    : getNodeInventory(deps.rigRepo.db, rigId);
   return c.json(inventory);
 });
 
@@ -45,7 +49,10 @@ nodesRoutes.get("/:logicalId", (c) => {
   const deps = getDeps(c);
   const rig = deps.rigRepo.getRig(rigId);
   if (!rig) return c.json({ error: `Rig "${rigId}" not found. List rigs with: rig ps` }, 404);
-  const detail = getNodeDetail(deps.rigRepo.db, rigId, logicalId);
+  const contextUsageStore = c.get("contextUsageStore" as never) as ContextUsageStore | undefined;
+  const detail = contextUsageStore
+    ? getNodeDetailWithContext(deps.rigRepo.db, rigId, logicalId, contextUsageStore)
+    : getNodeDetail(deps.rigRepo.db, rigId, logicalId);
   if (!detail) return c.json({ error: `Node "${logicalId}" not found in rig "${rigId}". Check node IDs with: rig ps --nodes` }, 404);
 
   // Enrich transcript info from TranscriptStore (not available to pure DB helper)

@@ -251,6 +251,7 @@ export interface NodeInventoryEntry {
   resumeType: string | null;
   resumeToken: string | null;
   startupCompletedAt: string | null;
+  contextUsage?: ContextUsage;
 }
 
 export interface NodeDetailPeer {

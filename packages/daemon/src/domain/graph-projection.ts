@@ -24,6 +24,9 @@ interface RFNodeData {
   resolvedSpecName: string | null;
   profile: string | null;
   edgeCount: number;
+  contextUsedPercentage: number | null;
+  contextFresh: boolean;
+  contextAvailability: string;
 }
 
 interface RFNode {
@@ -53,6 +56,9 @@ export interface InventoryOverlay {
   startupStatus: "pending" | "ready" | "failed" | null;
   canonicalSessionName: string | null;
   restoreOutcome: string;
+  contextUsedPercentage?: number | null;
+  contextFresh?: boolean;
+  contextAvailability?: string;
 }
 
 export function projectRigToGraph(input: RigGraphInput, inventoryOverlay?: InventoryOverlay[]): ReactFlowGraph {
@@ -106,6 +112,9 @@ export function projectRigToGraph(input: RigGraphInput, inventoryOverlay?: Inven
         resolvedSpecName: node.resolvedSpecName ?? null,
         profile: node.profile ?? null,
         edgeCount: rigEdges.filter((e) => e.sourceId === node.id || e.targetId === node.id).length,
+        contextUsedPercentage: overlay?.contextUsedPercentage ?? null,
+        contextFresh: overlay?.contextFresh ?? false,
+        contextAvailability: overlay?.contextAvailability ?? "unknown",
       },
     };
   });
@@ -136,6 +145,9 @@ export function projectRigToGraph(input: RigGraphInput, inventoryOverlay?: Inven
         resolvedSpecName: null,
         profile: null,
         edgeCount: 0,
+        contextUsedPercentage: null,
+        contextFresh: false,
+        contextAvailability: "unknown",
       },
     });
   }

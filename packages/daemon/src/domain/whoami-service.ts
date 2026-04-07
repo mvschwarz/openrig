@@ -43,6 +43,7 @@ export interface WhoamiResult {
     sendExamples: string[];
     captureExamples: string[];
   };
+  contextUsage?: import("./types.js").ContextUsage;
 }
 
 export class WhoamiAmbiguousError extends Error {
@@ -91,6 +92,7 @@ interface WhoamiDeps {
   rigRepo: RigRepository;
   sessionRegistry: SessionRegistry;
   transcriptStore: TranscriptStore;
+  contextUsageStore?: import("./context-usage-store.js").ContextUsageStore;
 }
 
 export class WhoamiService {
@@ -98,12 +100,14 @@ export class WhoamiService {
   private rigRepo: RigRepository;
   private sessionRegistry: SessionRegistry;
   private transcriptStore: TranscriptStore;
+  private contextUsageStore: import("./context-usage-store.js").ContextUsageStore | null;
 
   constructor(deps: WhoamiDeps) {
     this.db = deps.db;
     this.rigRepo = deps.rigRepo;
     this.sessionRegistry = deps.sessionRegistry;
     this.transcriptStore = deps.transcriptStore;
+    this.contextUsageStore = deps.contextUsageStore ?? null;
   }
 
   resolve(query: { nodeId?: string; sessionName?: string }): WhoamiResult | null {
@@ -250,6 +254,11 @@ export class WhoamiService {
     const sendExamples = peers.slice(0, 3).map((p) => `rig send ${p.sessionName} 'message' --verify`);
     const captureExamples = peers.slice(0, 3).map((p) => `rig capture ${p.sessionName}`);
 
+    // Context usage
+    const contextUsage = this.contextUsageStore
+      ? this.contextUsageStore.getForNode(nodeRow.id, currentSessionName!)
+      : undefined;
+
     return {
       resolvedBy,
       identity,
@@ -257,6 +266,7 @@ export class WhoamiService {
       edges: { outgoing, incoming },
       transcript,
       commands: { sendExamples, captureExamples },
+      contextUsage,
     };
   }
 

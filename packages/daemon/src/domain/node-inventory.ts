@@ -1,6 +1,7 @@
 import type Database from "better-sqlite3";
 import type { NodeInventoryEntry, NodeDetailEntry, NodeDetailPeer, NodeDetailEdge, NodeDetailCompactSpec, NodeRestoreOutcome, Binding, RestoreResult } from "./types.js";
 import type { RuntimeAdapter } from "./runtime-adapter.js";
+import type { ContextUsageStore } from "./context-usage-store.js";
 
 // -- Row types for SQL results --
 
@@ -349,4 +350,60 @@ export function getNodeDetail(
     transcript: { enabled: false, path: null, tailCommand: null }, // populated by route handler
     compactSpec,
   };
+}
+
+/**
+ * Context-aware wrapper: returns inventory with context usage attached.
+ * Uses one daemon-owned ContextUsageStore for all reads.
+ */
+export function getNodeInventoryWithContext(
+  db: Database.Database,
+  rigId: string,
+  contextUsageStore: ContextUsageStore,
+): NodeInventoryEntry[] {
+  const entries = getNodeInventory(db, rigId);
+
+  // Find node IDs for batch read
+  const nodeRows = db.prepare(
+    "SELECT id, logical_id FROM nodes WHERE rig_id = ?"
+  ).all(rigId) as Array<{ id: string; logical_id: string }>;
+  const nodeIdByLogicalId = new Map(nodeRows.map((r) => [r.logical_id, r.id]));
+
+  const contextEntries = entries.map((e) => ({
+    nodeId: nodeIdByLogicalId.get(e.logicalId) ?? "",
+    currentSessionName: e.canonicalSessionName,
+  }));
+
+  const contextMap = contextUsageStore.getForNodes(contextEntries);
+
+  return entries.map((e) => {
+    const nodeId = nodeIdByLogicalId.get(e.logicalId) ?? "";
+    return { ...e, contextUsage: contextMap.get(nodeId) ?? contextUsageStore.unknownUsage("no_data") };
+  });
+}
+
+/**
+ * Context-aware wrapper: returns node detail with context usage attached.
+ */
+export function getNodeDetailWithContext(
+  db: Database.Database,
+  rigId: string,
+  logicalId: string,
+  contextUsageStore: ContextUsageStore,
+  opts?: Parameters<typeof getNodeDetail>[3],
+): NodeDetailEntry | null {
+  const detail = getNodeDetail(db, rigId, logicalId, opts);
+  if (!detail) return null;
+
+  const nodeRow = db.prepare(
+    "SELECT id FROM nodes WHERE rig_id = ? AND logical_id = ?"
+  ).get(rigId, logicalId) as { id: string } | undefined;
+
+  if (nodeRow) {
+    detail.contextUsage = contextUsageStore.getForNode(nodeRow.id, detail.canonicalSessionName);
+  } else {
+    detail.contextUsage = contextUsageStore.unknownUsage("no_data");
+  }
+
+  return detail;
 }

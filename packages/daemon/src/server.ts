@@ -94,6 +94,7 @@ export interface AppDeps {
   specReviewService?: SpecReviewService;
   specLibraryService?: SpecLibraryService;
   whoamiService?: WhoamiService;
+  contextUsageStore?: import("./domain/context-usage-store.js").ContextUsageStore;
   uiDistDir?: string | null;
 }
 
@@ -224,6 +225,7 @@ export function createApp(deps: AppDeps): Hono {
     c.set("specReviewService" as never, deps.specReviewService);
     c.set("specLibraryService" as never, deps.specLibraryService);
     c.set("whoamiService" as never, deps.whoamiService);
+    c.set("contextUsageStore" as never, deps.contextUsageStore);
     c.set("db" as never, deps.rigRepo.db);
     await next();
   });

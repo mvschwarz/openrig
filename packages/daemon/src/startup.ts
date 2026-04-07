@@ -257,6 +257,10 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
 
   const specReviewService = new SpecReviewService();
 
+  // Context usage store — created before deps so it can be threaded through WhoamiService + routes
+  const { ContextUsageStore } = await import("./domain/context-usage-store.js");
+  const contextUsageStore = new ContextUsageStore(db, { stateDir: OPENRIG_HOME });
+
   const deps: AppDeps = {
     rigRepo,
     sessionRegistry,
@@ -331,7 +335,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
         transcriptsEnabled: transcriptStore.enabled,
       });
     })(),
-    whoamiService: new WhoamiService({ db, rigRepo, sessionRegistry, transcriptStore }),
+    whoamiService: new WhoamiService({ db, rigRepo, sessionRegistry, transcriptStore, contextUsageStore }),
+    contextUsageStore,
     specReviewService,
     specLibraryService: (() => {
       const userSpecsRoot = getDefaultOpenRigPath("specs");
@@ -358,9 +363,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const app = createApp(deps);
 
   // Context monitor — caller (index.ts) starts polling after listen
-  const { ContextUsageStore } = await import("./domain/context-usage-store.js");
   const { ContextMonitor } = await import("./domain/context-monitor.js");
-  const contextUsageStore = new ContextUsageStore(db, { stateDir: OPENRIG_HOME });
   const contextMonitor = new ContextMonitor(db, contextUsageStore);
 
   return { app, db, deps, contextMonitor };
