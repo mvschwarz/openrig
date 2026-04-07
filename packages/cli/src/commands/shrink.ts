@@ -4,6 +4,24 @@ import { getDaemonStatus, getDaemonUrl } from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 
+type ShrinkResponse = {
+  ok: boolean;
+  status?: "ok" | "partial";
+  rigId?: string;
+  podId?: string;
+  namespace?: string;
+  removedLogicalIds?: string[];
+  sessionsKilled?: number;
+  nodes?: Array<{
+    logicalId: string;
+    nodeId: string;
+    status: "removed" | "failed";
+    sessionsKilled: number;
+    error?: string;
+  }>;
+  error?: string;
+};
+
 export function shrinkCommand(depsOverride?: StatusDeps): Command {
   const cmd = new Command("shrink").description("Remove an entire pod from a running rig");
   const getDeps = () => depsOverride ?? { lifecycleDeps: realDeps(), clientFactory: (url: string) => new DaemonClient(url) };
@@ -29,10 +47,10 @@ export function shrinkCommand(depsOverride?: StatusDeps): Command {
         return;
       }
 
-      const res = await client.delete<Record<string, unknown>>(`/api/rigs/${encodeURIComponent(rigId)}/pods/${encodeURIComponent(podRef)}`);
+      const res = await client.delete<ShrinkResponse>(`/api/rigs/${encodeURIComponent(rigId)}/pods/${encodeURIComponent(podRef)}`);
       if (opts.json) {
         console.log(JSON.stringify(res.data, null, 2));
-        if (res.status >= 400) process.exitCode = 1;
+        if (res.status >= 400 || (res.data.ok && res.data.status !== "ok")) process.exitCode = 1;
         return;
       }
 
@@ -42,8 +60,21 @@ export function shrinkCommand(depsOverride?: StatusDeps): Command {
         return;
       }
 
+      if (res.data.status === "partial") {
+        console.log(
+          `Partially removed pod ${res.data.namespace} from rig ${res.data.rigId} (${res.data.removedLogicalIds?.length ?? 0} node(s), ${res.data.sessionsKilled} session killed)`
+        );
+        for (const node of res.data.nodes ?? []) {
+          const icon = node.status === "removed" ? "OK" : "FAIL";
+          const error = node.error ? ` — ${node.error}` : "";
+          console.log(`  [${icon}] ${node.logicalId}${error}`);
+        }
+        process.exitCode = 1;
+        return;
+      }
+
       console.log(
-        `Removed pod ${res.data["namespace"]} from rig ${res.data["rigId"]} (${(res.data["removedLogicalIds"] as unknown[] | undefined)?.length ?? 0} node(s), ${res.data["sessionsKilled"]} session killed)`
+        `Removed pod ${res.data.namespace} from rig ${res.data.rigId} (${res.data.removedLogicalIds?.length ?? 0} node(s), ${res.data.sessionsKilled} session killed)`
       );
     });
 

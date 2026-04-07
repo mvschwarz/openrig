@@ -36,6 +36,7 @@ import { chatroomCommand } from "./commands/chatroom.js";
 import { specsCommand } from "./commands/specs.js";
 import { whoamiCommand } from "./commands/whoami.js";
 import { unclaimCommand } from "./commands/unclaim.js";
+import { launchCommand } from "./commands/launch.js";
 import { removeCommand } from "./commands/remove.js";
 import { shrinkCommand } from "./commands/shrink.js";
 import type { LifecycleDeps } from "./daemon-lifecycle.js";
@@ -72,6 +73,7 @@ export interface ProgramDeps {
   whoamiDeps?: StatusDeps;
   expandDeps?: StatusDeps;
   unclaimDeps?: StatusDeps;
+  launchDeps?: StatusDeps;
   removeDeps?: StatusDeps;
   shrinkDeps?: StatusDeps;
   configPath?: string;
@@ -119,6 +121,7 @@ export function createProgram(depsOverride?: ProgramDeps): Command {
   program.addCommand(doctorCommand());
   program.addCommand(expandCommand(depsOverride?.expandDeps));
   program.addCommand(unclaimCommand(depsOverride?.unclaimDeps));
+  program.addCommand(launchCommand(depsOverride?.launchDeps));
   program.addCommand(removeCommand(depsOverride?.removeDeps));
   program.addCommand(shrinkCommand(depsOverride?.shrinkDeps));
 

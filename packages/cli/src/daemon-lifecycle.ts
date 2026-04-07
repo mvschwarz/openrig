@@ -61,11 +61,16 @@ const DEFAULT_DB = "openrig.sqlite";
 const HEALTHZ_RETRIES = 20;
 const HEALTHZ_DELAY_MS = 250;
 
+export function resolveCliBaseDir(baseDir: string): string {
+  return path.basename(baseDir) === "commands" ? path.resolve(baseDir, "..") : baseDir;
+}
+
 /** Pure resolver: prefers bundled daemon (npm install layout), falls back to monorepo. */
 export function resolveDaemonPath(baseDir: string, exists: (p: string) => boolean): string {
-  const bundled = path.resolve(baseDir, "../daemon");
+  const cliBaseDir = resolveCliBaseDir(baseDir);
+  const bundled = path.resolve(cliBaseDir, "../daemon");
   if (exists(path.join(bundled, "dist/index.js"))) return bundled;
-  return path.resolve(baseDir, "../../daemon");
+  return path.resolve(cliBaseDir, "../../daemon");
 }
 
 export function getDaemonPath(): string {

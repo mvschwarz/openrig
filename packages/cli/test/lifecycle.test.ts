@@ -6,6 +6,7 @@ import { STATE_FILE, type LifecycleDeps, type DaemonState } from "../src/daemon-
 import { createProgram } from "../src/index.js";
 import { unclaimCommand } from "../src/commands/unclaim.js";
 import { removeCommand } from "../src/commands/remove.js";
+import { launchCommand } from "../src/commands/launch.js";
 import { shrinkCommand } from "../src/commands/shrink.js";
 import type { StatusDeps } from "../src/commands/status.js";
 
@@ -89,6 +90,35 @@ describe("Lifecycle CLI commands", () => {
         return;
       }
 
+      if (req.method === "DELETE" && req.url === "/api/rigs/rig-1/pods/dev-partial") {
+        res.writeHead(207, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({
+          ok: true,
+          status: "partial",
+          rigId: "rig-1",
+          podId: "pod-1",
+          namespace: "dev",
+          removedLogicalIds: ["dev.impl"],
+          sessionsKilled: 1,
+          nodes: [
+            { logicalId: "dev.impl", nodeId: "node-1", status: "removed", sessionsKilled: 1 },
+            { logicalId: "dev.qa", nodeId: "node-2", status: "failed", sessionsKilled: 0, error: "tmux timeout" },
+          ],
+        }));
+        return;
+      }
+
+      if (req.method === "POST" && req.url === "/api/rigs/rig-1/nodes/dev.qa/launch") {
+        res.writeHead(201, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({
+          ok: true,
+          nodeId: "node-2",
+          logicalId: "dev.qa",
+          sessionName: "dev-qa@test",
+        }));
+        return;
+      }
+
       if (req.method === "POST" && req.url === "/api/sessions/missing/unclaim") {
         res.writeHead(404, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ ok: false, error: "Claimed session 'missing' not found." }));
@@ -164,6 +194,37 @@ describe("Lifecycle CLI commands", () => {
     expect(logs.join("\n")).toContain("2 node(s)");
   });
 
+  it("shrink prints partial pod removal honestly and exits non-zero", async () => {
+    const program = new Command();
+    program.exitOverride();
+    program.addCommand(shrinkCommand(runningDeps()));
+
+    const { logs, exitCode } = await captureLogs(async () => {
+      await program.parseAsync(["node", "rig", "shrink", "rig-1", "dev-partial"]);
+    });
+
+    const output = logs.join("\n");
+    expect(output).toContain("Partially removed pod dev");
+    expect(output).toContain("dev.impl");
+    expect(output).toContain("dev.qa");
+    expect(output).toContain("tmux timeout");
+    expect(exitCode).toBe(1);
+  });
+
+  it("launch prints relaunched node details", async () => {
+    const program = new Command();
+    program.exitOverride();
+    program.addCommand(launchCommand(runningDeps()));
+
+    const { logs, exitCode } = await captureLogs(async () => {
+      await program.parseAsync(["node", "rig", "launch", "rig-1", "dev.qa"]);
+    });
+
+    expect(exitCode).toBeUndefined();
+    expect(logs.join("\n")).toContain("Launched node dev.qa in rig rig-1");
+    expect(logs.join("\n")).toContain("dev-qa@test");
+  });
+
   it("--json prints raw unclaim payload", async () => {
     const program = new Command();
     program.exitOverride();
@@ -194,6 +255,7 @@ describe("Lifecycle CLI commands", () => {
 
   it("createProgram wires unclaim, remove, and shrink", async () => {
     const program = createProgram();
+    expect(program.commands.find((c) => c.name() === "launch")).toBeDefined();
     expect(program.commands.find((c) => c.name() === "unclaim")).toBeDefined();
     expect(program.commands.find((c) => c.name() === "remove")).toBeDefined();
     expect(program.commands.find((c) => c.name() === "shrink")).toBeDefined();

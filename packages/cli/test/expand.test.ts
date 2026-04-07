@@ -165,8 +165,20 @@ describe("rig expand", () => {
     const output = logs.join("\n");
     expect(output).toContain("FAIL");
     expect(output).toContain("dev.qa");
-    expect(output).toContain("/launch");
+    expect(output).toContain("rig launch rig-123 dev.qa");
     expect(exitCode).toBe(1);
+  });
+
+  it("partial output does not leak raw API relaunch routes", async () => {
+    writeFileSync(fragmentPath, `id: partial-pod\nlabel: Dev\nmembers:\n  - id: impl\n    runtime: claude-code\n  - id: qa\n    runtime: codex\nedges: []\n`);
+
+    const { logs } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "expand", "rig-123", fragmentPath]);
+    });
+
+    const output = logs.join("\n");
+    expect(output).not.toContain("/api/rigs/");
+    expect(output).not.toContain("/launch");
   });
 
   // T3b: Human output never suggests 'rig up' or 'rerun expand'

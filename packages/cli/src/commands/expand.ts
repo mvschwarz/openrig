@@ -105,9 +105,9 @@ export function expandCommand(depsOverride?: StatusDeps): Command {
       // Honest retry guidance for failed nodes
       if (data.retryTargets && data.retryTargets.length > 0) {
         console.log("");
-        console.log("  Failed nodes can be relaunched via the dashboard or API:");
+        console.log("  Failed nodes can be relaunched via the dashboard or CLI:");
         for (const target of data.retryTargets) {
-          console.log(`    POST /api/rigs/${rigId}/nodes/${encodeURIComponent(target)}/launch`);
+          console.log(`    rig launch ${rigId} ${target}`);
         }
       }
 

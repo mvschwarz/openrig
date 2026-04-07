@@ -22,6 +22,19 @@ function makeDeps(overrides?: Partial<DoctorDeps>): DoctorDeps {
 }
 
 describe("runDoctorChecks", () => {
+  it("monorepo command-dir base resolves via the same daemon root seam as daemon start", () => {
+    const deps = makeDeps({
+      baseDir: "/Users/mschwarz/code/rigged/packages/cli/src/commands",
+      exists: (p) =>
+        p === "/Users/mschwarz/code/rigged/packages/daemon/dist/index.js"
+        || p === "/Users/mschwarz/code/rigged/packages/ui/dist/index.html",
+    });
+
+    const { checks } = runDoctorChecks(deps);
+    expect(checks.find((c) => c.name === "daemon_dist")?.status).toBe("pass");
+    expect(checks.find((c) => c.name === "ui_dist")?.status).toBe("pass");
+  });
+
   it("daemon dist found -> pass", () => {
     const deps = makeDeps({ exists: (p) => p.endsWith("dist/index.js") || p.endsWith("index.html") });
     const { checks } = runDoctorChecks(deps);
