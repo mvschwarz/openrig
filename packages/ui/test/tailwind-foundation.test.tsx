@@ -55,8 +55,7 @@ describe("Tailwind Foundation", () => {
     expect(cn("p-4", "p-8")).toBe("p-8");
   });
 
-  // Test 4: Production build emits bg-background utility
-  // App.tsx uses bg-background class (in src/, scanned by Tailwind)
+  // Test 4: Production build emits current scanned background utility contract.
   it("production build emits .bg-background utility rule", { timeout: 60000 }, () => {
     const uiRoot = resolve(__dirname, "..");
     try {
@@ -81,8 +80,9 @@ describe("Tailwind Foundation", () => {
     expect(cssContent).toMatch(/\.bg-background\b/);
     expect(cssContent).toContain("hsl(var(--background))");
 
-    // bg-card should be in the build (used by Card, etc.)
-    expect(cssContent).toMatch(/\.bg-card\b/);
+    // The card token still ships in globals.css even though bg-card is not used
+    // by any current source file and is therefore correctly purged from utilities.
+    expect(cssContent).toMatch(/--card:\s*var\(--surface-container-lowest\)/);
   });
 
   // Test 5: main.tsx imports globals.css (source code verification)
