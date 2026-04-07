@@ -139,3 +139,39 @@ export function useImportRig() {
     },
   });
 }
+
+export interface ExpandRigResult {
+  ok: boolean;
+  status?: "ok" | "partial" | "failed";
+  podId?: string;
+  podNamespace?: string;
+  nodes?: Array<{ logicalId: string; nodeId: string; status: string; error?: string; sessionName?: string }>;
+  warnings?: string[];
+  retryTargets?: string[];
+  code?: string;
+  error?: string;
+}
+
+export function useExpandRig() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ rigId, pod, crossPodEdges }: { rigId: string; pod: Record<string, unknown>; crossPodEdges?: unknown[] }) => {
+      const res = await fetch(`/api/rigs/${encodeURIComponent(rigId)}/expand`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pod, crossPodEdges }),
+      });
+      const data = await res.json() as ExpandRigResult;
+      if (res.status >= 400 || !data.ok) {
+        throw new Error(data.error ?? `Expansion failed (HTTP ${res.status})`);
+      }
+      return data;
+    },
+    onSuccess: (_data, variables) => {
+      queryClient.invalidateQueries({ queryKey: ["rigs", "summary"] });
+      queryClient.invalidateQueries({ queryKey: ["ps"] });
+      queryClient.invalidateQueries({ queryKey: ["rig", variables.rigId, "nodes"] });
+      queryClient.invalidateQueries({ queryKey: ["rig", variables.rigId, "graph"] });
+    },
+  });
+}

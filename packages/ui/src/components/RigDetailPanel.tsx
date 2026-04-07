@@ -3,7 +3,7 @@ import { useRigSummary, type RigSummary } from "../hooks/useRigSummary.js";
 import { usePsEntries, type PsEntry } from "../hooks/usePsEntries.js";
 import { useNodeInventory } from "../hooks/useNodeInventory.js";
 import { useSnapshots } from "../hooks/useSnapshots.js";
-import { RestoreError, useCreateSnapshot, useRestoreSnapshot, useStartRig, useTeardownRig } from "../hooks/mutations.js";
+import { RestoreError, useCreateSnapshot, useRestoreSnapshot, useStartRig, useTeardownRig, useExpandRig, type ExpandRigResult } from "../hooks/mutations.js";
 import { getRestoreStatusColorClass } from "../lib/restore-status-colors.js";
 import { shortId } from "../lib/display-id.js";
 import { displayAgentName, displayPodName, inferPodName } from "../lib/display-name.js";
@@ -17,6 +17,7 @@ import {
   DialogFooter,
 } from "@/components/ui/dialog";
 import { RigChatPanel } from "./RigChatPanel.js";
+import { ExpansionOutcome } from "./ExpansionOutcome.js";
 
 interface RestoreNodeResult {
   nodeId: string;
@@ -74,6 +75,10 @@ export function RigDetailPanel({ rigId, onClose }: RigDetailPanelProps) {
   const [restoreResult, setRestoreResult] = useState<RestoreNodeResult[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [showAddPod, setShowAddPod] = useState(false);
+  const [podYaml, setPodYaml] = useState("");
+  const [expandResult, setExpandResult] = useState<ExpandRigResult | null>(null);
+  const expandRig = useExpandRig();
 
   const summary: RigSummary | undefined = summaries?.find((s) => s.id === rigId);
   const ps: PsEntry | undefined = psEntries?.find((p) => p.rigId === rigId);
@@ -246,6 +251,13 @@ export function RigDetailPanel({ rigId, onClose }: RigDetailPanelProps) {
               {startRig.isPending ? "Starting..." : "Turn on"}
             </button>
           )}
+          <button
+            onClick={() => { setShowAddPod(!showAddPod); setExpandResult(null); }}
+            data-testid="rig-add-pod"
+            className="px-2 py-1 border border-stone-300 font-mono text-[8px] uppercase hover:bg-stone-200 text-left"
+          >
+            Add pod
+          </button>
         </div>
         {actionError && (
           <div data-testid="rig-action-error" className="mt-2 font-mono text-[9px] text-red-700">
@@ -253,6 +265,41 @@ export function RigDetailPanel({ rigId, onClose }: RigDetailPanelProps) {
           </div>
         )}
       </section>
+
+      {/* Add Pod form */}
+      {showAddPod && (
+        <section data-testid="add-pod-form" className="px-4 py-3 border-b border-stone-100">
+          <div className="font-mono text-[8px] text-stone-400 uppercase tracking-wider mb-2">Add Pod — YAML Fragment</div>
+          <textarea
+            data-testid="add-pod-yaml"
+            className="w-full h-24 font-mono text-[9px] p-2 border border-stone-300 bg-white"
+            value={podYaml}
+            onChange={(e) => setPodYaml(e.target.value)}
+            placeholder={"id: my-pod\nlabel: My Pod\nmembers:\n  - id: worker\n    runtime: terminal\n    agent_ref: \"builtin:terminal\"\nedges: []"}
+          />
+          <button
+            data-testid="add-pod-submit"
+            disabled={expandRig.isPending || !podYaml.trim()}
+            onClick={async () => {
+              setExpandResult(null);
+              setActionError(null);
+              try {
+                const { parse } = await import("yaml");
+                const pod = parse(podYaml);
+                const result = await expandRig.mutateAsync({ rigId, pod });
+                setExpandResult(result);
+                if (result.status === "ok") { setShowAddPod(false); setPodYaml(""); }
+              } catch (err) {
+                setActionError((err as Error).message);
+              }
+            }}
+            className="mt-1 px-2 py-1 border border-stone-300 font-mono text-[8px] uppercase hover:bg-stone-200 disabled:opacity-50"
+          >
+            {expandRig.isPending ? "Expanding..." : "Expand"}
+          </button>
+          {expandResult && <ExpansionOutcome result={expandResult} />}
+        </section>
+      )}
 
       {/* Pods */}
       <section className="px-4 py-3 border-b border-stone-100">
