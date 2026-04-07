@@ -77,6 +77,9 @@ describe("Discover + Claim CLI", () => {
             { id: "ds-1", tmuxSession: "organic", tmuxPane: "%0", runtimeHint: "claude-code", confidence: "high", cwd: "/projects" },
           ],
         }));
+      } else if (req.url === "/api/discovery/draft-rig" && req.method === "POST") {
+        res.writeHead(200, { "Content-Type": "text/yaml" });
+        res.end("# WARNING: Excluded session 'unknown': runtime could not be determined.\nname: draft-rig\n");
       } else if (req.url?.match(/\/api\/discovery\/ds-1\/bind/) && req.method === "POST") {
         res.writeHead(201, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ ok: true, nodeId: "node-1", sessionId: "sess-1" }));
@@ -125,6 +128,21 @@ describe("Discover + Claim CLI", () => {
     const parsed = JSON.parse(logs.join(""));
     expect(parsed.sessions).toHaveLength(1);
     expect(parsed.sessions[0].id).toBe("ds-1");
+  });
+
+  it("discover --draft prints raw YAML response", async () => {
+    const prog = new Command();
+    prog.exitOverride();
+    prog.addCommand(discoverCommand(runningDeps(port)));
+
+    const { logs, exitCode } = await captureLogs(async () => {
+      await prog.parseAsync(["node", "rig", "discover", "--draft"]);
+    });
+
+    const output = logs.join("\n");
+    expect(exitCode).toBeUndefined();
+    expect(output).toContain("# WARNING: Excluded session 'unknown'");
+    expect(output).toContain("name: draft-rig");
   });
 
   // T10: claim success

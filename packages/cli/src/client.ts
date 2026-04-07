@@ -37,9 +37,7 @@ export class DaemonClient {
   }
 
   async getText(path: string): Promise<DaemonResponse<string>> {
-    const res = await this.fetch(path, { method: "GET" });
-    const data = await res.text();
-    return { status: res.status, data };
+    return this.requestText(path, { method: "GET" });
   }
 
   async post<T = unknown>(path: string, body?: unknown): Promise<DaemonResponse<T>> {
@@ -58,6 +56,14 @@ export class DaemonClient {
     });
   }
 
+  async postExpectText(path: string, body?: unknown): Promise<DaemonResponse<string>> {
+    return this.requestText(path, {
+      method: "POST",
+      headers: body !== undefined ? { "Content-Type": "application/json" } : undefined,
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    });
+  }
+
   private async fetch(path: string, init: RequestInit): Promise<Response> {
     try {
       return await fetch(`${this.baseUrl}${path}`, init);
@@ -70,6 +76,12 @@ export class DaemonClient {
   private async requestJson<T>(path: string, init: RequestInit): Promise<DaemonResponse<T>> {
     const res = await this.fetch(path, init);
     const data = (await res.json()) as T;
+    return { status: res.status, data };
+  }
+
+  private async requestText(path: string, init: RequestInit): Promise<DaemonResponse<string>> {
+    const res = await this.fetch(path, init);
+    const data = await res.text();
     return { status: res.status, data };
   }
 }

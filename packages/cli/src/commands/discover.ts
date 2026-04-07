@@ -34,16 +34,13 @@ export function discoverCommand(depsOverride?: StatusDeps): Command {
       }
 
       if (opts.draft) {
-        // Generate draft rig spec — use postText to get text/yaml back
-        const draftRes = await client.post<string>("/api/discovery/draft-rig", {});
+        const draftRes = await client.postExpectText("/api/discovery/draft-rig", {});
         if (draftRes.status >= 400) {
           console.error(`Draft generation failed (HTTP ${draftRes.status}). Run a scan first with: rig discover`);
           process.exitCode = 1;
           return;
         }
-        // The response may be parsed as JSON string or raw text
-        const yaml = typeof draftRes.data === "string" ? draftRes.data : JSON.stringify(draftRes.data);
-        console.log(yaml);
+        console.log(draftRes.data);
         return;
       }
 
