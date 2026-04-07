@@ -174,7 +174,7 @@ function createMockDaemon() {
   };
 }
 
-describe("rigged snapshot + restore", () => {
+describe("rig snapshot + restore", () => {
   let srv: ReturnType<typeof createMockDaemon>;
   let port: number;
 
@@ -188,19 +188,19 @@ describe("rigged snapshot + restore", () => {
   it("snapshot create: prints snapshot ID", async () => {
     const program = new Command();
     program.addCommand(snapshotCommand(runningDeps(port)));
-    const logs = await captureLogs(() => program.parseAsync(["node", "rigged", "snapshot", "rig-1"]));
+    const logs = await captureLogs(() => program.parseAsync(["node", "rig", "snapshot", "rig-1"]));
     const output = logs.join("\n");
     expect(output).toContain("snap-new-123");
     // NS-T14: handoff includes restore instruction
     expect(output).toContain("To restore:");
-    expect(output).toContain("rigged restore snap-new-123 --rig rig-1");
+    expect(output).toContain("rig restore snap-new-123 --rig rig-1");
   });
 
   // Test 2: snapshot create 404
   it("snapshot create: rig not found (404) -> error", async () => {
     const program = new Command();
     program.addCommand(snapshotCommand(runningDeps(port)));
-    const logs = await captureLogs(() => program.parseAsync(["node", "rigged", "snapshot", "missing"]));
+    const logs = await captureLogs(() => program.parseAsync(["node", "rig", "snapshot", "missing"]));
     expect(logs.join("\n")).toMatch(/not found/i);
   });
 
@@ -208,7 +208,7 @@ describe("rigged snapshot + restore", () => {
   it("snapshot list: formatted table output", async () => {
     const program = new Command();
     program.addCommand(snapshotCommand(runningDeps(port)));
-    const logs = await captureLogs(() => program.parseAsync(["node", "rigged", "snapshot", "list", "rig-1"]));
+    const logs = await captureLogs(() => program.parseAsync(["node", "rig", "snapshot", "list", "rig-1"]));
     const output = logs.join("\n");
     expect(output).toContain("snap-1");
     expect(output).toContain("snap-2");
@@ -220,7 +220,7 @@ describe("rigged snapshot + restore", () => {
   it("restore: prints per-node status", async () => {
     const program = new Command();
     program.addCommand(restoreCommand(runningDeps(port)));
-    const logs = await captureLogs(() => program.parseAsync(["node", "rigged", "restore", "snap-1", "--rig", "rig-1"]));
+    const logs = await captureLogs(() => program.parseAsync(["node", "rig", "restore", "snap-1", "--rig", "rig-1"]));
     const output = logs.join("\n");
     expect(output).toContain("orchestrator");
     expect(output).toContain("resumed");
@@ -238,7 +238,7 @@ describe("rigged snapshot + restore", () => {
 
     const program = new Command();
     program.addCommand(restoreCommand(runningDeps(port)));
-    const logs = await captureLogs(() => program.parseAsync(["node", "rigged", "restore", "failed-node", "--rig", "rig-1"]));
+    const logs = await captureLogs(() => program.parseAsync(["node", "rig", "restore", "failed-node", "--rig", "rig-1"]));
 
     expect(logs.join("\n")).toContain("worker");
     expect(logs.join("\n")).toContain("failed");
@@ -251,7 +251,7 @@ describe("rigged snapshot + restore", () => {
   it("restore: snapshot not found (404) -> error", async () => {
     const program = new Command();
     program.addCommand(restoreCommand(runningDeps(port)));
-    const logs = await captureLogs(() => program.parseAsync(["node", "rigged", "restore", "missing", "--rig", "rig-1"]));
+    const logs = await captureLogs(() => program.parseAsync(["node", "rig", "restore", "missing", "--rig", "rig-1"]));
     expect(logs.join("\n")).toMatch(/not found/i);
   });
 
@@ -259,14 +259,14 @@ describe("rigged snapshot + restore", () => {
   it("restore: in progress (409) -> error", async () => {
     const program = new Command();
     program.addCommand(restoreCommand(runningDeps(port)));
-    const logs = await captureLogs(() => program.parseAsync(["node", "rigged", "restore", "locked", "--rig", "rig-1"]));
+    const logs = await captureLogs(() => program.parseAsync(["node", "rig", "restore", "locked", "--rig", "rig-1"]));
     expect(logs.join("\n")).toMatch(/in progress/i);
   });
 
   it("restore: running rig conflict (409) -> prints server message", async () => {
     const program = new Command();
     program.addCommand(restoreCommand(runningDeps(port)));
-    const logs = await captureLogs(() => program.parseAsync(["node", "rigged", "restore", "running", "--rig", "rig-1"]));
+    const logs = await captureLogs(() => program.parseAsync(["node", "rig", "restore", "running", "--rig", "rig-1"]));
     expect(logs.join("\n")).toMatch(/stopped before restore/i);
   });
 
@@ -275,7 +275,7 @@ describe("rigged snapshot + restore", () => {
     const deps = stoppedDeps();
     const program = new Command();
     program.addCommand(snapshotCommand(deps));
-    const logs = await captureLogs(() => program.parseAsync(["node", "rigged", "snapshot", "rig-1"]));
+    const logs = await captureLogs(() => program.parseAsync(["node", "rig", "snapshot", "rig-1"]));
     expect(logs.join("\n")).toMatch(/not running/i);
     expect(deps.clientFactory).not.toHaveBeenCalled();
   });
@@ -285,7 +285,7 @@ describe("rigged snapshot + restore", () => {
     const deps = unhealthyDeps();
     const program = new Command();
     program.addCommand(restoreCommand(deps));
-    const logs = await captureLogs(() => program.parseAsync(["node", "rigged", "restore", "snap-1", "--rig", "rig-1"]));
+    const logs = await captureLogs(() => program.parseAsync(["node", "rig", "restore", "snap-1", "--rig", "rig-1"]));
     expect(logs.join("\n")).toMatch(/unhealthy/i);
     expect(deps.clientFactory).not.toHaveBeenCalled();
   });
@@ -310,7 +310,7 @@ describe("rigged snapshot + restore", () => {
 
     const program = new Command();
     program.addCommand(snapshotCommand(deps));
-    await captureLogs(() => program.parseAsync(["node", "rigged", "snapshot", "rig-1"]));
+    await captureLogs(() => program.parseAsync(["node", "rig", "snapshot", "rig-1"]));
 
     expect(usedUrls[0]).toBe(`http://127.0.0.1:${port}`);
   });
@@ -322,12 +322,12 @@ describe("rigged snapshot + restore", () => {
     const program = createProgram({ snapshotDeps: deps, restoreDeps: deps });
 
     // Prove snapshot is mounted
-    const snapLogs = await captureLogs(() => program.parseAsync(["node", "rigged", "snapshot", "x"]));
+    const snapLogs = await captureLogs(() => program.parseAsync(["node", "rig", "snapshot", "x"]));
     expect(snapLogs.join("\n")).toMatch(/not running/i);
 
     // Prove restore is mounted (re-create program since Commander consumes parseAsync)
     const program2 = createProgram({ snapshotDeps: deps, restoreDeps: deps });
-    const restoreLogs = await captureLogs(() => program2.parseAsync(["node", "rigged", "restore", "snap-1", "--rig", "x"]));
+    const restoreLogs = await captureLogs(() => program2.parseAsync(["node", "rig", "restore", "snap-1", "--rig", "x"]));
     expect(restoreLogs.join("\n")).toMatch(/not running/i);
   });
 
@@ -335,7 +335,7 @@ describe("rigged snapshot + restore", () => {
   it("snapshot: 500 -> generic error message", async () => {
     const program = new Command();
     program.addCommand(snapshotCommand(runningDeps(port)));
-    const logs = await captureLogs(() => program.parseAsync(["node", "rigged", "snapshot", "broken"]));
+    const logs = await captureLogs(() => program.parseAsync(["node", "rig", "snapshot", "broken"]));
     expect(logs.join("\n")).toMatch(/failed|error/i);
   });
 
@@ -344,7 +344,7 @@ describe("rigged snapshot + restore", () => {
     const deps = stoppedDeps();
     const program = new Command();
     program.addCommand(restoreCommand(deps));
-    const logs = await captureLogs(() => program.parseAsync(["node", "rigged", "restore", "snap-1", "--rig", "rig-1"]));
+    const logs = await captureLogs(() => program.parseAsync(["node", "rig", "restore", "snap-1", "--rig", "rig-1"]));
     expect(logs.join("\n")).toMatch(/not running/i);
     expect(deps.clientFactory).not.toHaveBeenCalled();
   });

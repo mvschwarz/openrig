@@ -43,9 +43,9 @@ export function agentCommand(depsOverride?: AgentDeps): Command {
       const status = await getDaemonStatus(deps.lifecycleDeps);
       if (status.state !== "running" || status.healthy === false) {
         if (status.state === "running" && status.healthy === false) {
-          console.error("Daemon unhealthy — healthz check failed. Restart with: rigged daemon start");
+          console.error("Daemon unhealthy — healthz check failed. Restart with: rig daemon start");
         } else {
-          console.error("Daemon not running. Start it with: rigged daemon start");
+          console.error("Daemon not running. Start it with: rig daemon start");
         }
         process.exitCode = 1;
         return;

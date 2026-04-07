@@ -139,7 +139,7 @@ describe("SessionTransport", () => {
     expect(result.ok).toBe(false);
     expect(result.reason).toBe("session_missing");
     expect(result.error).toContain("not found");
-    expect(result.error).toContain("rigged ps");
+    expect(result.error).toContain("rig ps");
   });
 
   // Test 5: send where sendKeys C-m fails returns "text visible but not submitted"

@@ -43,7 +43,7 @@ describe("Demo fixture validation", () => {
     expect(totalMembers).toBe(8);
   });
 
-  it("demo infra.ui startup binds the dev server to 127.0.0.1 for rigged ui open", () => {
+  it("demo infra.ui startup binds the dev server to 127.0.0.1 for rig ui open", () => {
     const yaml = fs.readFileSync(path.join(DEMO_ROOT, "rig.yaml"), "utf-8");
     const raw = RigSpecCodec.parse(yaml);
     const spec = RigSpecSchema.normalize(raw as Record<string, unknown>);

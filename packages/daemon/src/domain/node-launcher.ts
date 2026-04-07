@@ -82,20 +82,20 @@ export class NodeLauncher {
       return {
         ok: false,
         code: "invalid_session_name",
-        message: `Derived session name "${sessionName}" does not match Rigged naming pattern`,
+        message: `Derived session name "${sessionName}" does not match OpenRig naming pattern`,
       };
     }
 
-    // 3. Create tmux session with Rigged identity env vars (handle stale duplicate by killing and retrying)
-    const riggedEnv = {
-      RIGGED_NODE_ID: node.id,
-      RIGGED_SESSION_NAME: sessionName,
+    // 3. Create tmux session with OpenRig identity env vars (handle stale duplicate by killing and retrying)
+    const openRigEnv = {
+      OPENRIG_NODE_ID: node.id,
+      OPENRIG_SESSION_NAME: sessionName,
     };
     const sessionCwd = opts?.cwd ?? node.cwd ?? undefined;
-    let tmuxResult = await this.tmuxAdapter.createSession(sessionName, sessionCwd, riggedEnv);
+    let tmuxResult = await this.tmuxAdapter.createSession(sessionName, sessionCwd, openRigEnv);
     if (!tmuxResult.ok && tmuxResult.code === "duplicate_session") {
       await this.tmuxAdapter.killSession(sessionName);
-      tmuxResult = await this.tmuxAdapter.createSession(sessionName, sessionCwd, riggedEnv);
+      tmuxResult = await this.tmuxAdapter.createSession(sessionName, sessionCwd, openRigEnv);
     }
     if (!tmuxResult.ok) {
       return { ok: false, code: tmuxResult.code, message: tmuxResult.message };

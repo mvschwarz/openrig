@@ -1,4 +1,5 @@
 import { ConfigStore } from "./config-store.js";
+import { readOpenRigEnv } from "./openrig-compat.js";
 
 export class DaemonConnectionError extends Error {
   constructor(message: string) {
@@ -18,9 +19,13 @@ export class DaemonClient {
   constructor(baseUrl?: string) {
     if (baseUrl) {
       this.baseUrl = baseUrl;
-    } else if (process.env["RIGGED_URL"]) {
-      this.baseUrl = process.env["RIGGED_URL"];
     } else {
+      const envUrl = readOpenRigEnv("OPENRIG_URL", "RIGGED_URL");
+      if (envUrl) {
+        this.baseUrl = envUrl;
+        return;
+      }
+
       // Resolve from config (env > file > defaults)
       const config = new ConfigStore().resolve();
       this.baseUrl = `http://${config.daemon.host}:${config.daemon.port}`;
@@ -58,7 +63,7 @@ export class DaemonClient {
       return await fetch(`${this.baseUrl}${path}`, init);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      throw new DaemonConnectionError(`Cannot connect to daemon at ${this.baseUrl}: ${msg}`);
+      throw new DaemonConnectionError(`Cannot connect to the OpenRig daemon at ${this.baseUrl}: ${msg}`);
     }
   }
 

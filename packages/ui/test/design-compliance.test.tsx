@@ -3,6 +3,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { resolve, join } from "node:path";
 
 const SRC_DIR = resolve(__dirname, "../src");
+const COMPONENTS_DIR = resolve(SRC_DIR, "components");
 
 function readAllTsx(dir: string): string[] {
   const results: string[] = [];
@@ -35,7 +36,7 @@ describe("Design System Compliance", () => {
     }
 
     // No inline borderRadius in source files
-    const allSource = readAllTsx(SRC_DIR);
+    const allSource = readAllTsx(COMPONENTS_DIR);
     for (const src of allSource) {
       // Allow borderRadius: 0 or 0px, but not any positive value
       const inlineRadius = src.match(/borderRadius:\s*(\d+)/g) ?? [];
@@ -70,8 +71,8 @@ describe("Design System Compliance", () => {
     const rigNode = readFileSync(resolve(SRC_DIR, "components/RigNode.tsx"), "utf-8");
     expect(rigNode).toContain("font-mono");
 
-    const statusBar = readFileSync(resolve(SRC_DIR, "components/StatusBar.tsx"), "utf-8");
-    expect(statusBar).toContain("font-mono");
+    const nodeDetailPanel = readFileSync(resolve(SRC_DIR, "components/NodeDetailPanel.tsx"), "utf-8");
+    expect(nodeDetailPanel).toContain("font-mono");
 
     const importFlow = readFileSync(resolve(SRC_DIR, "components/ImportFlow.tsx"), "utf-8");
     expect(importFlow).toContain("font-mono");

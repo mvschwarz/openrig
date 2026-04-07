@@ -175,7 +175,7 @@ function createMockDaemon() {
   };
 }
 
-describe("rigged export + import", () => {
+describe("rig export + import", () => {
   let srv: ReturnType<typeof createMockDaemon>;
   let port: number;
 
@@ -209,7 +209,7 @@ describe("rigged export + import", () => {
     const deps = exportDeps({ writeFile });
     const program = new Command();
     program.addCommand(exportCommand(deps));
-    const logs = await captureLogs(() => program.parseAsync(["node", "rigged", "export", "rig-1", "-o", "out.yaml"]));
+    const logs = await captureLogs(() => program.parseAsync(["node", "rig", "export", "rig-1", "-o", "out.yaml"]));
     expect(writeFile).toHaveBeenCalledWith("out.yaml", "schema_version: 1\nname: test-rig\nnodes: []\n");
     expect(logs.join("\n")).toContain("out.yaml");
   });
@@ -220,7 +220,7 @@ describe("rigged export + import", () => {
     const deps = exportDeps({ writeFile });
     const program = new Command();
     program.addCommand(exportCommand(deps));
-    await captureLogs(() => program.parseAsync(["node", "rigged", "export", "rig-1"]));
+    await captureLogs(() => program.parseAsync(["node", "rig", "export", "rig-1"]));
     expect(writeFile).toHaveBeenCalledWith("rig.yaml", expect.any(String));
   });
 
@@ -229,7 +229,7 @@ describe("rigged export + import", () => {
     const deps = exportDeps();
     const program = new Command();
     program.addCommand(exportCommand(deps));
-    const logs = await captureLogs(() => program.parseAsync(["node", "rigged", "export", "missing"]));
+    const logs = await captureLogs(() => program.parseAsync(["node", "rig", "export", "missing"]));
     expect(logs.join("\n")).toMatch(/not found/i);
   });
 
@@ -238,7 +238,7 @@ describe("rigged export + import", () => {
     const deps = importDeps("schema_version: 1\nname: test\n");
     const program = new Command();
     program.addCommand(importCommand(deps));
-    const logs = await captureLogs(() => program.parseAsync(["node", "rigged", "import", "rig.yaml"]));
+    const logs = await captureLogs(() => program.parseAsync(["node", "rig", "import", "rig.yaml"]));
     expect(logs.join("\n")).toMatch(/valid/i);
   });
 
@@ -247,7 +247,7 @@ describe("rigged export + import", () => {
     const deps = importDeps("INVALID");
     const program = new Command();
     program.addCommand(importCommand(deps));
-    const logs = await captureLogs(() => program.parseAsync(["node", "rigged", "import", "rig.yaml"]));
+    const logs = await captureLogs(() => program.parseAsync(["node", "rig", "import", "rig.yaml"]));
     expect(logs.join("\n")).toMatch(/bad yaml|invalid/i);
   });
 
@@ -256,7 +256,7 @@ describe("rigged export + import", () => {
     const deps = importDeps("schema_version: 1\nname: test\n");
     const program = new Command();
     program.addCommand(importCommand(deps));
-    const logs = await captureLogs(() => program.parseAsync(["node", "rigged", "import", "rig.yaml", "--instantiate"]));
+    const logs = await captureLogs(() => program.parseAsync(["node", "rig", "import", "rig.yaml", "--instantiate"]));
     const output = logs.join("\n");
     expect(output).toContain("imported-rig");
     expect(output).toContain("orchestrator");
@@ -271,7 +271,7 @@ describe("rigged export + import", () => {
     const deps = importDeps("schema_version: 1\nname: test\n");
     const program = new Command();
     program.addCommand(importCommand(deps));
-    const logs = await captureLogs(() => program.parseAsync(["node", "rigged", "import", "rig.yaml", "--preflight"]));
+    const logs = await captureLogs(() => program.parseAsync(["node", "rig", "import", "rig.yaml", "--preflight"]));
     const output = logs.join("\n");
     expect(output).toContain("cmux unavailable");
     expect(output).toContain("rig name exists");
@@ -281,7 +281,7 @@ describe("rigged export + import", () => {
     const deps = importDeps(`version: "0.2"\nname: test\npods: []\n`);
     const program = new Command();
     program.addCommand(importCommand(deps));
-    const logs = await captureLogs(() => program.parseAsync(["node", "rigged", "import", "rig.yaml", "--materialize-only", "--rig-root", "/tmp"]));
+    const logs = await captureLogs(() => program.parseAsync(["node", "rig", "import", "rig.yaml", "--materialize-only", "--rig-root", "/tmp"]));
     const output = logs.join("\n");
     expect(output).toContain("imported-rig");
     expect(output).toMatch(/research\.scout: materialized/);
@@ -291,7 +291,7 @@ describe("rigged export + import", () => {
     const deps = importDeps(`version: "0.2"\nname: test\npods: []\n`);
     const program = new Command();
     program.addCommand(importCommand(deps));
-    await captureLogs(() => program.parseAsync(["node", "rigged", "import", "rig.yaml", "--materialize-only", "--target-rig", "rig-123", "--rig-root", "/tmp"]));
+    await captureLogs(() => program.parseAsync(["node", "rig", "import", "rig.yaml", "--materialize-only", "--target-rig", "rig-123", "--rig-root", "/tmp"]));
     expect(capturedImportHeaders["x-target-rig-id"]).toBe("rig-123");
   });
 
@@ -300,7 +300,7 @@ describe("rigged export + import", () => {
     const deps = importDeps("CONFLICT");
     const program = new Command();
     program.addCommand(importCommand(deps));
-    const logs = await captureLogs(() => program.parseAsync(["node", "rigged", "import", "rig.yaml", "--instantiate"]));
+    const logs = await captureLogs(() => program.parseAsync(["node", "rig", "import", "rig.yaml", "--instantiate"]));
     expect(logs.join("\n")).toMatch(/conflict|failed/i);
   });
 
@@ -314,7 +314,7 @@ describe("rigged export + import", () => {
     };
     const program = new Command();
     program.addCommand(exportCommand(deps));
-    const logs = await captureLogs(() => program.parseAsync(["node", "rigged", "export", "rig-1"]));
+    const logs = await captureLogs(() => program.parseAsync(["node", "rig", "export", "rig-1"]));
     expect(logs.join("\n")).toMatch(/not running/i);
     expect(clientFactory).not.toHaveBeenCalled();
   });
@@ -329,7 +329,7 @@ describe("rigged export + import", () => {
     };
     const program = new Command();
     program.addCommand(importCommand(deps));
-    await captureLogs(() => program.parseAsync(["node", "rigged", "import", "rig.yaml"]));
+    await captureLogs(() => program.parseAsync(["node", "rig", "import", "rig.yaml"]));
     expect(usedUrls[0]).toBe(`http://127.0.0.1:${port}`);
   });
 
@@ -343,12 +343,12 @@ describe("rigged export + import", () => {
 
     // export mounted
     const p1 = createProgram({ exportDeps: exportD });
-    const logs1 = await captureLogs(() => p1.parseAsync(["node", "rigged", "export", "x"]));
+    const logs1 = await captureLogs(() => p1.parseAsync(["node", "rig", "export", "x"]));
     expect(logs1.join("\n")).toMatch(/not running/i);
 
     // import mounted
     const p2 = createProgram({ importDeps: importD });
-    const logs2 = await captureLogs(() => p2.parseAsync(["node", "rigged", "import", "x.yaml"]));
+    const logs2 = await captureLogs(() => p2.parseAsync(["node", "rig", "import", "x.yaml"]));
     // Will hit "cannot read file" or "not running" — either proves it's mounted
     expect(logs2.join("\n").length).toBeGreaterThan(0);
   });
@@ -363,7 +363,7 @@ describe("rigged export + import", () => {
     };
     const program = new Command();
     program.addCommand(exportCommand(deps));
-    const logs = await captureLogs(() => program.parseAsync(["node", "rigged", "export", "rig-1"]));
+    const logs = await captureLogs(() => program.parseAsync(["node", "rig", "export", "rig-1"]));
     expect(logs.join("\n")).toMatch(/unhealthy/i);
     expect(clientFactory).not.toHaveBeenCalled();
   });
@@ -378,7 +378,7 @@ describe("rigged export + import", () => {
     };
     const program = new Command();
     program.addCommand(importCommand(deps));
-    const logs = await captureLogs(() => program.parseAsync(["node", "rigged", "import", "rig.yaml"]));
+    const logs = await captureLogs(() => program.parseAsync(["node", "rig", "import", "rig.yaml"]));
     expect(logs.join("\n")).toMatch(/not running/i);
     expect(clientFactory).not.toHaveBeenCalled();
   });
@@ -393,7 +393,7 @@ describe("rigged export + import", () => {
     };
     const program = new Command();
     program.addCommand(importCommand(deps));
-    const logs = await captureLogs(() => program.parseAsync(["node", "rigged", "import", "missing.yaml"]));
+    const logs = await captureLogs(() => program.parseAsync(["node", "rig", "import", "missing.yaml"]));
     expect(logs.join("\n")).toMatch(/cannot read/i);
     expect(clientFactory).not.toHaveBeenCalled();
   });
@@ -403,7 +403,7 @@ describe("rigged export + import", () => {
     const deps = exportDeps();
     const program = new Command();
     program.addCommand(exportCommand(deps));
-    const logs = await captureLogs(() => program.parseAsync(["node", "rigged", "export", "broken"]));
+    const logs = await captureLogs(() => program.parseAsync(["node", "rig", "export", "broken"]));
     expect(logs.join("\n")).toMatch(/failed|error/i);
   });
 
@@ -413,7 +413,7 @@ describe("rigged export + import", () => {
     const deps = importDeps("schema_version: 1\nname: test\npods:\n  - name: pod-a\n");
     const program = new Command();
     program.addCommand(importCommand(deps));
-    const logs = await captureLogs(() => program.parseAsync(["node", "rigged", "import", "rig.yaml", "--instantiate", "--rig-root", "/my/project"]));
+    const logs = await captureLogs(() => program.parseAsync(["node", "rig", "import", "rig.yaml", "--instantiate", "--rig-root", "/my/project"]));
     const output = logs.join("\n");
     expect(output).toContain("imported-rig");
     // Verify X-Rig-Root header was sent
@@ -429,7 +429,7 @@ describe("rigged export + import", () => {
     };
     const program = new Command();
     program.addCommand(importCommand(deps));
-    const logs = await captureLogs(() => program.parseAsync(["node", "rigged", "import", "rig.yaml", "--instantiate"]));
+    const logs = await captureLogs(() => program.parseAsync(["node", "rig", "import", "rig.yaml", "--instantiate"]));
     const output = logs.join("\n");
     expect(output).toContain("Attach:");
     expect(output).toContain("tmux attach -t orch-lead@imported-rig");

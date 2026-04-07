@@ -32,7 +32,7 @@ async function restoreByRigId(rigId: string, rigName: string | null, deps: Retur
 
   const snapshot = snapshotRepo.findLatestAutoPreDown(rigId);
   if (!snapshot) {
-    return c.json({ error: `Rig exists but has no auto-pre-down snapshot. Start fresh with: rigged up <spec-path>`, code: "no_snapshot" }, 404);
+    return c.json({ error: `Rig exists but has no auto-pre-down snapshot. Start fresh with: rig up <spec-path>`, code: "no_snapshot" }, 404);
   }
 
   if (!restoreOrchestrator) {
@@ -94,7 +94,7 @@ upRoutes.post("/", async (c) => {
       }
       if (rigs.length > 1) {
         const ids = rigs.map((r) => r.id).join(", ");
-        return c.json({ error: `Multiple rigs named "${sourceRef}" found (IDs: ${ids}). Use rigged restore --rig <rigId> with a specific rig ID.`, code: "ambiguous_name" }, 409);
+        return c.json({ error: `Multiple rigs named "${sourceRef}" found (IDs: ${ids}). Use rig restore --rig <rigId> with a specific rig ID.`, code: "ambiguous_name" }, 409);
       }
       return restoreByRigId(rigs[0]!.id, sourceRef, getDeps(c), c) as any;
     }

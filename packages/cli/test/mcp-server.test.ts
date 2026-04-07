@@ -47,29 +47,29 @@ describe("MCP Server", () => {
     const result = await mcpClient.listTools();
     const names = result.tools.map((t) => t.name).sort();
     expect(names).toEqual([
-      "rigged_agent_validate",
-      "rigged_bundle_inspect",
-      "rigged_capture",
-      "rigged_chatroom_send",
-      "rigged_chatroom_watch",
-      "rigged_claim",
-      "rigged_discover",
-      "rigged_down",
-      "rigged_ps",
-      "rigged_restore",
-      "rigged_rig_nodes",
-      "rigged_rig_validate",
-      "rigged_send",
-      "rigged_snapshot_create",
-      "rigged_snapshot_list",
-      "rigged_status",
-      "rigged_up",
+      "rig_agent_validate",
+      "rig_bundle_inspect",
+      "rig_capture",
+      "rig_chatroom_send",
+      "rig_chatroom_watch",
+      "rig_claim",
+      "rig_discover",
+      "rig_down",
+      "rig_ps",
+      "rig_restore",
+      "rig_rig_nodes",
+      "rig_rig_validate",
+      "rig_send",
+      "rig_snapshot_create",
+      "rig_snapshot_list",
+      "rig_status",
+      "rig_up",
     ]);
     await cleanup();
   });
 
-  // T2: rigged_up calls POST /api/up
-  it("rigged_up calls POST /api/up with correct params", async () => {
+  // T2: rig_up calls POST /api/up
+  it("rig_up calls POST /api/up with correct params", async () => {
     const postFn = vi.fn(async () => ({
       status: 201,
       data: { runId: "run-1", status: "completed", rigId: "rig-1", stages: [], errors: [] },
@@ -77,7 +77,7 @@ describe("MCP Server", () => {
     await setup({ post: postFn });
 
     const result = await mcpClient.callTool({
-      name: "rigged_up",
+      name: "rig_up",
       arguments: { sourceRef: "/tmp/rig.yaml", plan: false, autoApprove: true },
     });
 
@@ -94,8 +94,8 @@ describe("MCP Server", () => {
     await cleanup();
   });
 
-  // T3: rigged_down calls POST /api/down
-  it("rigged_down calls POST /api/down with correct params", async () => {
+  // T3: rig_down calls POST /api/down
+  it("rig_down calls POST /api/down with correct params", async () => {
     const postFn = vi.fn(async () => ({
       status: 200,
       data: { rigId: "rig-1", sessionsKilled: 2, deleted: false, deleteBlocked: false, alreadyStopped: false, errors: [] },
@@ -103,7 +103,7 @@ describe("MCP Server", () => {
     await setup({ post: postFn });
 
     const result = await mcpClient.callTool({
-      name: "rigged_down",
+      name: "rig_down",
       arguments: { rigId: "rig-1", delete: true, force: false, snapshot: false },
     });
 
@@ -120,15 +120,15 @@ describe("MCP Server", () => {
     await cleanup();
   });
 
-  // T4: rigged_ps calls GET /api/ps
-  it("rigged_ps calls GET /api/ps and returns entries", async () => {
+  // T4: rig_ps calls GET /api/ps
+  it("rig_ps calls GET /api/ps and returns entries", async () => {
     const getFn = vi.fn(async () => ({
       status: 200,
       data: [{ rigId: "rig-1", name: "test", nodeCount: 2, runningCount: 2, status: "running", uptime: "1h", latestSnapshot: null }],
     }));
     await setup({ get: getFn });
 
-    const result = await mcpClient.callTool({ name: "rigged_ps", arguments: {} });
+    const result = await mcpClient.callTool({ name: "rig_ps", arguments: {} });
 
     expect(getFn).toHaveBeenCalledWith("/api/ps");
     const content = result.content as Array<{ type: string; text: string }>;
@@ -144,15 +144,15 @@ describe("MCP Server", () => {
     await setup();
     const result = await mcpClient.listTools();
 
-    const upTool = result.tools.find((t) => t.name === "rigged_up")!;
+    const upTool = result.tools.find((t) => t.name === "rig_up")!;
     expect(upTool.inputSchema.required).toContain("sourceRef");
     expect(upTool.inputSchema.properties).toHaveProperty("plan");
     expect(upTool.inputSchema.properties).toHaveProperty("autoApprove");
 
-    const downTool = result.tools.find((t) => t.name === "rigged_down")!;
+    const downTool = result.tools.find((t) => t.name === "rig_down")!;
     expect(downTool.inputSchema.required).toContain("rigId");
 
-    const restoreTool = result.tools.find((t) => t.name === "rigged_restore")!;
+    const restoreTool = result.tools.find((t) => t.name === "rig_restore")!;
     expect(restoreTool.inputSchema.required).toContain("rigId");
     expect(restoreTool.inputSchema.required).toContain("snapshotId");
 
@@ -168,7 +168,7 @@ describe("MCP Server", () => {
     await setup({ post: postFn });
 
     const result = await mcpClient.callTool({
-      name: "rigged_down",
+      name: "rig_down",
       arguments: { rigId: "missing" },
     });
 
@@ -188,7 +188,7 @@ describe("MCP Server", () => {
     await setup({ post: postFn });
 
     const result = await mcpClient.callTool({
-      name: "rigged_down",
+      name: "rig_down",
       arguments: { rigId: "rig-1" },
     });
 
@@ -235,7 +235,7 @@ describe("MCP Server", () => {
     await setup({ post: postFn });
 
     const result = await mcpClient.callTool({
-      name: "rigged_bundle_inspect",
+      name: "rig_bundle_inspect",
       arguments: { bundlePath: "/tmp/test.rigbundle" },
     });
 
@@ -246,25 +246,25 @@ describe("MCP Server", () => {
     await cleanup();
   });
 
-  // T10: MCP server lists rigged_agent_validate + rigged_rig_validate tools
-  it("rigged_agent_validate and rigged_rig_validate tools are registered", async () => {
+  // T10: MCP server lists rig_agent_validate + rig_rig_validate tools
+  it("rig_agent_validate and rig_rig_validate tools are registered", async () => {
     await setup();
     const result = await mcpClient.listTools();
     const names = result.tools.map((t) => t.name);
-    expect(names).toContain("rigged_agent_validate");
-    expect(names).toContain("rigged_rig_validate");
+    expect(names).toContain("rig_agent_validate");
+    expect(names).toContain("rig_rig_validate");
 
     // Verify schema: both have required "yaml" input
-    const agentTool = result.tools.find((t) => t.name === "rigged_agent_validate")!;
+    const agentTool = result.tools.find((t) => t.name === "rig_agent_validate")!;
     expect(agentTool.inputSchema.required).toContain("yaml");
-    const rigTool = result.tools.find((t) => t.name === "rigged_rig_validate")!;
+    const rigTool = result.tools.find((t) => t.name === "rig_rig_validate")!;
     expect(rigTool.inputSchema.required).toContain("yaml");
 
     await cleanup();
   });
 
-  // T10b: rigged_agent_validate calls postText with correct path
-  it("rigged_agent_validate calls postText on /api/agents/validate", async () => {
+  // T10b: rig_agent_validate calls postText with correct path
+  it("rig_agent_validate calls postText on /api/agents/validate", async () => {
     const postTextFn = vi.fn(async () => ({
       status: 200,
       data: { valid: true, errors: [] },
@@ -272,7 +272,7 @@ describe("MCP Server", () => {
     await setup({ postText: postTextFn });
 
     const result = await mcpClient.callTool({
-      name: "rigged_agent_validate",
+      name: "rig_agent_validate",
       arguments: { yaml: "name: my-agent\nversion: 1.0.0\n" },
     });
 
@@ -290,7 +290,7 @@ describe("MCP Server", () => {
     await setup({ post: postFn });
 
     await mcpClient.callTool({
-      name: "rigged_snapshot_create",
+      name: "rig_snapshot_create",
       arguments: { rigId: "rig/with/slashes" },
     });
 
@@ -300,8 +300,8 @@ describe("MCP Server", () => {
     await cleanup();
   });
 
-  // NS-T09: rigged_rig_nodes calls GET /api/rigs/:rigId/nodes
-  it("rigged_rig_nodes returns node inventory", async () => {
+  // NS-T09: rig_rig_nodes calls GET /api/rigs/:rigId/nodes
+  it("rig_rig_nodes returns node inventory", async () => {
     const getFn = vi.fn(async (path: string) => {
       if (path.includes("/nodes")) {
         return {
@@ -316,7 +316,7 @@ describe("MCP Server", () => {
     await setup({ get: getFn });
 
     const result = await mcpClient.callTool({
-      name: "rigged_rig_nodes",
+      name: "rig_rig_nodes",
       arguments: { rigId: "rig-1" },
     });
 
@@ -330,8 +330,8 @@ describe("MCP Server", () => {
     await cleanup();
   });
 
-  // T14: rigged_send returns structured result
-  it("rigged_send returns structured result", async () => {
+  // T14: rig_send returns structured result
+  it("rig_send returns structured result", async () => {
     const postFn = vi.fn(async () => ({
       status: 200,
       data: { ok: true, sessionName: "dev-impl@my-rig" },
@@ -339,7 +339,7 @@ describe("MCP Server", () => {
     await setup({ post: postFn });
 
     const result = await mcpClient.callTool({
-      name: "rigged_send",
+      name: "rig_send",
       arguments: { session: "dev-impl@my-rig", text: "hello" },
     });
 
@@ -351,8 +351,8 @@ describe("MCP Server", () => {
     await cleanup();
   });
 
-  // T-chatroom-send: rigged_chatroom_send returns result
-  it("rigged_chatroom_send returns result", async () => {
+  // T-chatroom-send: rig_chatroom_send returns result
+  it("rig_chatroom_send returns result", async () => {
     const getFn = vi.fn(async () => ({
       status: 200,
       data: [{ id: "rig-1", name: "my-rig", nodeCount: 2 }],
@@ -364,7 +364,7 @@ describe("MCP Server", () => {
     await setup({ get: getFn, post: postFn });
 
     const result = await mcpClient.callTool({
-      name: "rigged_chatroom_send",
+      name: "rig_chatroom_send",
       arguments: { rigName: "my-rig", body: "hello" },
     });
 
@@ -375,8 +375,8 @@ describe("MCP Server", () => {
     await cleanup();
   });
 
-  // T-chatroom-watch: rigged_chatroom_watch returns recent history
-  it("rigged_chatroom_watch returns recent history", async () => {
+  // T-chatroom-watch: rig_chatroom_watch returns recent history
+  it("rig_chatroom_watch returns recent history", async () => {
     const getFn = vi.fn(async (path: string) => {
       if (path === "/api/rigs/summary") {
         return {
@@ -397,7 +397,7 @@ describe("MCP Server", () => {
     await setup({ get: getFn });
 
     const result = await mcpClient.callTool({
-      name: "rigged_chatroom_watch",
+      name: "rig_chatroom_watch",
       arguments: { rigName: "my-rig" },
     });
 
@@ -408,8 +408,8 @@ describe("MCP Server", () => {
     await cleanup();
   });
 
-  // T-chatroom-ambiguous: MCP rigged_chatroom_send with ambiguous rig name -> error
-  it("rigged_chatroom_send with ambiguous rig name returns error", async () => {
+  // T-chatroom-ambiguous: MCP rig_chatroom_send with ambiguous rig name -> error
+  it("rig_chatroom_send with ambiguous rig name returns error", async () => {
     const getFn = vi.fn(async () => ({
       status: 200,
       data: [
@@ -420,7 +420,7 @@ describe("MCP Server", () => {
     await setup({ get: getFn });
 
     const result = await mcpClient.callTool({
-      name: "rigged_chatroom_send",
+      name: "rig_chatroom_send",
       arguments: { rigName: "my-rig", body: "hello" },
     });
 
@@ -430,8 +430,8 @@ describe("MCP Server", () => {
     await cleanup();
   });
 
-  // T15: rigged_capture returns structured result
-  it("rigged_capture returns structured result", async () => {
+  // T15: rig_capture returns structured result
+  it("rig_capture returns structured result", async () => {
     const postFn = vi.fn(async () => ({
       status: 200,
       data: { ok: true, sessionName: "dev-impl@my-rig", content: "pane output", lines: 20 },
@@ -439,7 +439,7 @@ describe("MCP Server", () => {
     await setup({ post: postFn });
 
     const result = await mcpClient.callTool({
-      name: "rigged_capture",
+      name: "rig_capture",
       arguments: { session: "dev-impl@my-rig" },
     });
 

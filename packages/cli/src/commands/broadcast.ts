@@ -19,10 +19,10 @@ export function broadcastCommand(depsOverride?: StatusDeps): Command {
     .option("--json", "JSON output for agents")
     .addHelpText("after", `
 Examples:
-  rigged broadcast --rig my-rig "Checkpoint review complete. Resume work."
-  rigged broadcast --pod dev "New task spec at docs/planning/next-task.md"
-  rigged broadcast "System maintenance in 5 minutes."
-  rigged broadcast --rig my-rig "message" --json
+  rig broadcast --rig my-rig "Checkpoint review complete. Resume work."
+  rig broadcast --pod dev "New task spec at docs/planning/next-task.md"
+  rig broadcast "System maintenance in 5 minutes."
+  rig broadcast --rig my-rig "message" --json
 
 Without --rig or --pod, broadcasts to ALL running sessions across all rigs.`)
     .action(async (text: string, opts: { rig?: string; pod?: string; force?: boolean; json?: boolean }) => {
@@ -30,7 +30,7 @@ Without --rig or --pod, broadcasts to ALL running sessions across all rigs.`)
       const status = await getDaemonStatus(deps.lifecycleDeps);
 
       if (status.state !== "running" || status.healthy === false) {
-        console.error("Daemon not running. Start it with: rigged daemon start");
+        console.error("Daemon not running. Start it with: rig daemon start");
         process.exitCode = 1;
         return;
       }

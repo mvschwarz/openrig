@@ -64,7 +64,7 @@ export class ClaimService {
     this.tmuxAdapter = deps.tmuxAdapter ?? null;
   }
 
-  /** Best-effort: set Rigged-owned tmux metadata on an adopted session. */
+  /** Best-effort: set OpenRig-owned tmux metadata on an adopted session. */
   private async setRiggedMetadata(tmuxSession: string, meta: {
     nodeId: string; sessionName: string; rigId: string; rigName: string; logicalId: string;
   }): Promise<void> {
@@ -86,7 +86,7 @@ export class ClaimService {
     rigName: string; logicalId: string;
   }): Promise<void> {
     if (!this.tmuxAdapter) return;
-    const hint = `--- Rigged: You have been adopted into rig "${meta.rigName}" as ${meta.logicalId}. Run: rigged whoami --json ---`;
+    const hint = `--- OpenRig: You have been adopted into rig "${meta.rigName}" as ${meta.logicalId}. Run: rig whoami --json ---`;
     await this.tmuxAdapter.sendText(tmuxSession, hint);
     await this.tmuxAdapter.sendKeys(tmuxSession, ["C-m"]);
   }
@@ -166,7 +166,7 @@ export class ClaimService {
           createdAt: event.created_at,
         });
       }
-      // Best-effort: set Rigged-owned tmux metadata on the adopted session
+      // Best-effort: set OpenRig-owned tmux metadata on the adopted session
       try {
         await this.setRiggedMetadata(discovered.tmuxSession, {
           nodeId, sessionName: discovered.tmuxSession,
@@ -253,7 +253,7 @@ export class ClaimService {
           createdAt: event.created_at,
         });
       }
-      // Best-effort: set Rigged-owned tmux metadata
+      // Best-effort: set OpenRig-owned tmux metadata
       try {
         await this.setRiggedMetadata(discovered.tmuxSession, {
           nodeId, sessionName: discovered.tmuxSession,
@@ -352,7 +352,7 @@ export class ClaimService {
           createdAt: event.created_at,
         });
       }
-      // Best-effort: set Rigged-owned tmux metadata
+      // Best-effort: set OpenRig-owned tmux metadata
       try {
         await this.setRiggedMetadata(discovered.tmuxSession, {
           nodeId, sessionName: discovered.tmuxSession,

@@ -114,12 +114,12 @@ rigsRoutes.post("/:id/up", async (c) => {
   const rigId = c.req.param("id")!;
   const repo = getRepo(c);
   const rig = repo.getRig(rigId);
-  if (!rig) return c.json({ error: `Rig "${rigId}" not found. List rigs with: rigged ps` }, 404);
+  if (!rig) return c.json({ error: `Rig "${rigId}" not found. List rigs with: rig ps` }, 404);
 
   const snapshotRepo = c.get("snapshotRepo" as never) as SnapshotRepository;
   const snapshot = snapshotRepo.findLatestAutoPreDown(rigId);
   if (!snapshot) {
-    return c.json({ error: `Rig "${rig.rig.name}" exists but has no auto-pre-down snapshot. Start fresh with: rigged up <spec-path>`, code: "no_snapshot" }, 404);
+    return c.json({ error: `Rig "${rig.rig.name}" exists but has no auto-pre-down snapshot. Start fresh with: rig up <spec-path>`, code: "no_snapshot" }, 404);
   }
 
   const restoreOrch = c.get("restoreOrchestrator" as never) as RestoreOrchestrator | undefined;

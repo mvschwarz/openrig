@@ -242,13 +242,13 @@ export class WhoamiService {
     const transcript: WhoamiResult["transcript"] = {
       enabled: transcriptEnabled,
       path: transcriptPath,
-      tailCommand: transcriptEnabled ? `rigged transcript ${currentSessionName!} --tail 100` : null,
-      grepCommand: transcriptEnabled ? `rigged transcript ${currentSessionName!} --grep <pattern>` : null,
+      tailCommand: transcriptEnabled ? `rig transcript ${currentSessionName!} --tail 100` : null,
+      grepCommand: transcriptEnabled ? `rig transcript ${currentSessionName!} --grep <pattern>` : null,
     };
 
     // Build command examples from peers
-    const sendExamples = peers.slice(0, 3).map((p) => `rigged send ${p.sessionName} 'message' --verify`);
-    const captureExamples = peers.slice(0, 3).map((p) => `rigged capture ${p.sessionName}`);
+    const sendExamples = peers.slice(0, 3).map((p) => `rig send ${p.sessionName} 'message' --verify`);
+    const captureExamples = peers.slice(0, 3).map((p) => `rig capture ${p.sessionName}`);
 
     return {
       resolvedBy,

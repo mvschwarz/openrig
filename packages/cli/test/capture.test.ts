@@ -61,14 +61,14 @@ describe("Capture CLI", () => {
 
   it("capture prints pane content", async () => {
     const { logs } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "capture", "dev-impl@my-rig"]);
+      await makeCmd().parseAsync(["node", "rig", "capture", "dev-impl@my-rig"]);
     });
     expect(logs.join("\n")).toContain("line1");
   });
 
   it("capture --rig prints multi-session results with headers", async () => {
     const { logs } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "capture", "--rig", "my-rig"]);
+      await makeCmd().parseAsync(["node", "rig", "capture", "--rig", "my-rig"]);
     });
     const output = logs.join("\n");
     expect(output).toContain("--- dev-impl@my-rig ---");
@@ -78,7 +78,7 @@ describe("Capture CLI", () => {
 
   it("capture --json prints raw JSON", async () => {
     const { logs } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "capture", "dev-impl@my-rig", "--json"]);
+      await makeCmd().parseAsync(["node", "rig", "capture", "dev-impl@my-rig", "--json"]);
     });
     const parsed = JSON.parse(logs.join("\n"));
     expect(parsed.ok).toBe(true);

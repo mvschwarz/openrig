@@ -43,7 +43,7 @@ function formatSnapshotAge(timestamp: string | null): string {
 
 function formatRestoreError(err: Error, rigName: string): string {
   if (err instanceof RestoreError && err.code === "rig_not_stopped") {
-    return `Stop ${rigName} before restoring. Run rigged down ${rigName} and retry.`;
+    return `Stop ${rigName} before restoring. Run rig down ${rigName} and retry.`;
   }
 
   return err.message;

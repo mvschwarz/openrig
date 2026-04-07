@@ -122,14 +122,14 @@ describe("Chatroom CLI", () => {
 
   it("chatroom send sends message", async () => {
     const { logs } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "chatroom", "send", "my-rig", "hello world"]);
+      await makeCmd().parseAsync(["node", "rig", "chatroom", "send", "my-rig", "hello world"]);
     });
     expect(logs.join("\n")).toContain("[cli] hello world");
   });
 
   it("chatroom history prints chronological", async () => {
     const { logs } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "chatroom", "history", "my-rig"]);
+      await makeCmd().parseAsync(["node", "rig", "chatroom", "history", "my-rig"]);
     });
     const output = logs.join("\n");
     expect(output).toContain("[alice] hello");
@@ -138,7 +138,7 @@ describe("Chatroom CLI", () => {
 
   it("chatroom history --json prints JSON", async () => {
     const { logs } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "chatroom", "history", "my-rig", "--json"]);
+      await makeCmd().parseAsync(["node", "rig", "chatroom", "history", "my-rig", "--json"]);
     });
     const parsed = JSON.parse(logs.join("\n"));
     expect(Array.isArray(parsed)).toBe(true);
@@ -147,14 +147,14 @@ describe("Chatroom CLI", () => {
 
   it("chatroom topic creates marker", async () => {
     const { logs } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "chatroom", "topic", "my-rig", "standup"]);
+      await makeCmd().parseAsync(["node", "rig", "chatroom", "topic", "my-rig", "standup"]);
     });
     expect(logs.join("\n")).toContain("--- topic: standup ---");
   });
 
   it("chatroom watch prints streamed messages", async () => {
     const { logs } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "chatroom", "watch", "my-rig"]);
+      await makeCmd().parseAsync(["node", "rig", "chatroom", "watch", "my-rig"]);
     });
     expect(logs.join("\n")).toContain("[alice] streamed");
   });
@@ -190,7 +190,7 @@ describe("Chatroom CLI", () => {
     ambiguousCmd.addCommand(chatroomCommand(runningDeps(ambiguousPort)));
 
     const { logs, exitCode } = await captureLogs(async () => {
-      await ambiguousCmd.parseAsync(["node", "rigged", "chatroom", "send", "my-rig", "hello"]);
+      await ambiguousCmd.parseAsync(["node", "rig", "chatroom", "send", "my-rig", "hello"]);
     });
 
     ambiguousServer.close();
@@ -198,7 +198,7 @@ describe("Chatroom CLI", () => {
     expect(exitCode).toBe(1);
   });
 
-  it("chatroom watch --tmux spawns rigged chatroom watch as the session command", async () => {
+  it("chatroom watch --tmux spawns rig chatroom watch as the session command", async () => {
     // Mock execSync to verify the tmux command
     const origExecSync = (await import("node:child_process")).execSync;
     let capturedCmd = "";
@@ -208,7 +208,7 @@ describe("Chatroom CLI", () => {
     // option prints the expected output when the tmux command fails (which it will
     // in CI since there's no tmux server)
     const { logs, exitCode } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "chatroom", "watch", "my-rig", "--tmux"]);
+      await makeCmd().parseAsync(["node", "rig", "chatroom", "watch", "my-rig", "--tmux"]);
     });
 
     const output = logs.join("\n");

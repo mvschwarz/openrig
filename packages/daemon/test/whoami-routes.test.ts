@@ -101,7 +101,7 @@ describe("whoami routes", () => {
     expect(res.status).toBe(404);
     const body = await res.json();
     expect(body.error).toContain("not found");
-    expect(body.error).toContain("rigged ps");
+    expect(body.error).toContain("rig ps");
   });
 
   it("GET /api/whoami?sessionName=ambiguous returns 409", async () => {

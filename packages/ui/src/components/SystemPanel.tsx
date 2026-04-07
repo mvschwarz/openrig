@@ -106,7 +106,7 @@ export function SystemPanel({ onClose, events, initialTab = "log" }: SystemPanel
                   <div data-testid="system-daemon-status" className={statusTone(daemonConnected)}>
                     {statusLabel(daemonConnected, "connected", "unavailable")}
                   </div>
-                  <div className="text-stone-500">Controls the local rigged daemon connection.</div>
+                  <div className="text-stone-500">Controls the local OpenRig daemon connection.</div>
                 </div>
               </div>
 

@@ -45,12 +45,20 @@ interface SpecsWorkspaceValue {
 }
 
 export const SPECS_WORKSPACE_STORAGE_KEYS = {
+  currentRigDraft: "openrig.specs.current-rig-draft",
+  currentAgentDraft: "openrig.specs.current-agent-draft",
+  recentRigDrafts: "openrig.specs.recent-rig-drafts",
+  recentAgentDrafts: "openrig.specs.recent-agent-drafts",
+  bootstrapSourceRef: "openrig.specs.bootstrap-source-ref",
+} as const;
+
+const LEGACY_SPECS_WORKSPACE_STORAGE_KEYS: Record<keyof typeof SPECS_WORKSPACE_STORAGE_KEYS, string> = {
   currentRigDraft: "rigged.specs.current-rig-draft",
   currentAgentDraft: "rigged.specs.current-agent-draft",
   recentRigDrafts: "rigged.specs.recent-rig-drafts",
   recentAgentDrafts: "rigged.specs.recent-agent-drafts",
   bootstrapSourceRef: "rigged.specs.bootstrap-source-ref",
-} as const;
+};
 
 const DEFAULT_SPECS_WORKSPACE: SpecsWorkspaceValue = {
   activeTask: null,
@@ -78,7 +86,23 @@ function loadStoredValue<T>(key: string, fallback: T): T {
   if (typeof window === "undefined") return fallback;
   try {
     const raw = window.localStorage.getItem(key);
-    return raw ? (JSON.parse(raw) as T) : fallback;
+    if (raw) return JSON.parse(raw) as T;
+
+    const legacyKey = (
+      Object.entries(SPECS_WORKSPACE_STORAGE_KEYS).find(([, currentKey]) => currentKey === key)?.[0]
+      ?? null
+    ) as keyof typeof LEGACY_SPECS_WORKSPACE_STORAGE_KEYS | null;
+    if (!legacyKey) return fallback;
+
+    const legacyStorageKey = LEGACY_SPECS_WORKSPACE_STORAGE_KEYS[legacyKey];
+    if (!legacyStorageKey) return fallback;
+    const legacyRaw = window.localStorage.getItem(legacyStorageKey);
+    if (!legacyRaw) return fallback;
+
+    const parsed = JSON.parse(legacyRaw) as T;
+    window.localStorage.setItem(key, JSON.stringify(parsed));
+    window.localStorage.removeItem(legacyStorageKey);
+    return parsed;
   } catch {
     return fallback;
   }

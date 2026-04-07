@@ -32,7 +32,7 @@ interface NodeEntry {
 }
 
 /**
- * `rigged ps` — list running rigs and optionally their nodes.
+ * `rig ps` — list running rigs and optionally their nodes.
  * @param depsOverride - injectable deps for testing
  * @returns Commander command
  */
@@ -41,10 +41,10 @@ export function psCommand(depsOverride?: StatusDeps): Command {
     .description("List rigs and their status")
     .addHelpText("after", `
 Examples:
-  rigged ps                    Show all rigs with status
-  rigged ps --json             JSON output for piping/parsing
-  rigged ps --nodes            Show per-node detail for all rigs
-  rigged ps --nodes --json     Node inventory as JSON array
+  rig ps                    Show all rigs with status
+  rig ps --json             JSON output for piping/parsing
+  rig ps --nodes            Show per-node detail for all rigs
+  rig ps --nodes --json     Node inventory as JSON array
 
 Exit codes:
   0  Success
@@ -60,7 +60,7 @@ Exit codes:
 
       const status = await getDaemonStatus(deps.lifecycleDeps);
       if (status.state !== "running" || status.healthy === false) {
-        console.error("Daemon not running. Start it with: rigged daemon start");
+        console.error("Daemon not running. Start it with: rig daemon start");
         process.exitCode = 1;
         return;
       }
@@ -75,7 +75,7 @@ Exit codes:
       const res = await client.get<PsEntry[]>("/api/ps");
 
       if (res.status >= 400) {
-        console.error(`Failed to fetch rig list from daemon (HTTP ${res.status}). Check daemon status with: rigged status`);
+        console.error(`Failed to fetch rig list from daemon (HTTP ${res.status}). Check daemon status with: rig status`);
         process.exitCode = 2;
         return;
       }
@@ -114,7 +114,7 @@ async function handleNodes(client: DaemonClient, json: boolean): Promise<void> {
   // Fetch rig list first
   const rigRes = await client.get<PsEntry[]>("/api/ps");
   if (rigRes.status >= 400) {
-    console.error(`Failed to fetch rig list from daemon (HTTP ${rigRes.status}). Check daemon status with: rigged status`);
+    console.error(`Failed to fetch rig list from daemon (HTTP ${rigRes.status}). Check daemon status with: rig status`);
     process.exitCode = 2;
     return;
   }
@@ -123,7 +123,7 @@ async function handleNodes(client: DaemonClient, json: boolean): Promise<void> {
   for (const rig of rigRes.data) {
     const nodesRes = await client.get<NodeEntry[]>(`/api/rigs/${encodeURIComponent(rig.rigId)}/nodes`);
     if (nodesRes.status >= 400) {
-      console.error(`Warning: failed to fetch nodes for rig "${rig.name}" (HTTP ${nodesRes.status}). List rigs with: rigged ps`);
+      console.error(`Warning: failed to fetch nodes for rig "${rig.name}" (HTTP ${nodesRes.status}). List rigs with: rig ps`);
       continue;
     }
     allNodes.push(...nodesRes.data);

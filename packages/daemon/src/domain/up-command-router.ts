@@ -76,10 +76,10 @@ export class UpCommandRouter {
       const obj = raw as Record<string, unknown> | null;
       if (obj && typeof obj === "object") {
         if ("packages" in obj && ("integrity" in obj || "rig_spec" in obj)) {
-          throw new Error(`Source appears to be a bundle manifest (bundle.yaml), not a rig spec. Use 'rigged bundle install' instead.`);
+          throw new Error(`Source appears to be a bundle manifest (bundle.yaml), not a rig spec. Use 'rig bundle install' instead.`);
         }
         if ("exports" in obj || "compatibility" in obj) {
-          throw new Error(`Source appears to be a package manifest (package.yaml), not a rig spec. Use 'rigged package install' instead.`);
+          throw new Error(`Source appears to be a package manifest (package.yaml), not a rig spec. Use 'rig package install' instead.`);
         }
       }
 
@@ -125,10 +125,10 @@ export class UpCommandRouter {
       const obj = raw as Record<string, unknown> | null;
       if (obj && typeof obj === "object") {
         if ("packages" in obj && "integrity" in obj) {
-          throw new Error(`Source appears to be a bundle manifest (bundle.yaml), not a rig spec. Use 'rigged bundle install' instead.`);
+          throw new Error(`Source appears to be a bundle manifest (bundle.yaml), not a rig spec. Use 'rig bundle install' instead.`);
         }
         if ("exports" in obj || "compatibility" in obj) {
-          throw new Error(`Source appears to be a package manifest (package.yaml), not a rig spec. Use 'rigged package install' instead.`);
+          throw new Error(`Source appears to be a package manifest (package.yaml), not a rig spec. Use 'rig package install' instead.`);
         }
       }
 

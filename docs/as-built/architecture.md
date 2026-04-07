@@ -1,4 +1,4 @@
-# Rigged — As-Built Architecture
+# OpenRig — As-Built Architecture
 ## Final Stretch 1 Snapshot (as of 2026-04-05)
 
 Status:
@@ -12,17 +12,17 @@ Status:
   - CLI: `29/29` files, `275/275` passing
   - UI: `35` files, `361/364` passing (`3` known design/foundation failures)
 
-Packages: `@rigged/daemon`, `@rigged/cli`, `@rigged/ui`
+Packages: `@openrig/daemon`, `@openrig/cli`, `@openrig/ui`
 
 ---
 
 ## 1. System Overview
 
-Rigged is a local control plane for multi-agent coding topologies. The system currently has four architectural layers:
+OpenRig is a local control plane for multi-agent coding topologies. The system currently has four architectural layers:
 
 1. **AgentSpec / pod-aware core**: spec parsing, resolution, precedence, startup orchestration, snapshot/restore, bundles.
 2. **North Star operator layer**: harness auto-launch, node inventory, session naming, infrastructure nodes, explorer UI, existing-rig power-on, auto-snapshot, post-command handoff.
-3. **Post-North-Star transport/history layer**: transcript capture (pipe-pane), communication primitives (send/capture/broadcast), config/preflight, `rigged ask` context packs, durable rig chat.
+3. **Post-North-Star transport/history layer**: transcript capture (pipe-pane), communication primitives (send/capture/broadcast), config/preflight, `rig ask` context packs, durable rig chat.
 4. **Final Stretch 1 authoring/identity layer**: spec review + spec library, `whoami`, adopted-session tmux-metadata parity, bind/materialize/adopt workflows, specs/discovery drawers, reusable spec display components, live-node full-details workspace routes, and graph hover/runtime hints.
 
 Legacy flat-node/package flows remain for backward compatibility.
@@ -111,27 +111,27 @@ Important route behaviors:
 `index.ts` currently mounts 31 command groups. Reboot-era commands plus:
 
 **North Star additions:**
-- `rigged up <rig-name>` — existing-rig restore by name (auto-finds latest snapshot)
-- `rigged down` — auto-snapshots before teardown, handoff includes restore command
-- `rigged discover --draft` — generate candidate rig spec from discovered sessions
-- Changed: `rigged ps --nodes` shows per-node detail with session names, status, startup status
+- `rig up <rig-name>` — existing-rig restore by name (auto-finds latest snapshot)
+- `rig down` — auto-snapshots before teardown, handoff includes restore command
+- `rig discover --draft` — generate candidate rig spec from discovered sessions
+- Changed: `rig ps --nodes` shows per-node detail with session names, status, startup status
 
 **Final Stretch 1 additions:**
-- `rigged specs ls/show/preview/add/sync` — agent-facing spec library browse/review workflow
-- `rigged whoami --json` — daemon-backed runtime identity with peers, edges, transcript helpers, and command hints
-- `rigged bind <discoveredId> <rigId> <logicalId>` — bind discovered session to an existing node
-- `rigged adopt <file> --bind logicalId=session` — materialize then bind live sessions into a rig
-- Changed: `rigged up <source>` and `rigged bootstrap <source>` now resolve spec-library names and fail loudly on rig-name vs library-name ambiguity
+- `rig specs ls/show/preview/add/sync` — agent-facing spec library browse/review workflow
+- `rig whoami --json` — daemon-backed runtime identity with peers, edges, transcript helpers, and command hints
+- `rig bind <discoveredId> <rigId> <logicalId>` — bind discovered session to an existing node
+- `rig adopt <file> --bind logicalId=session` — materialize then bind live sessions into a rig
+- Changed: `rig up <source>` and `rig bootstrap <source>` now resolve spec-library names and fail loudly on rig-name vs library-name ambiguity
 
 **Post-North-Star additions (8 new command groups):**
-- `rigged send <session> "message" [--verify] [--force]` — send to agent terminal
-- `rigged capture <session> [--lines N] [--json]` — capture agent pane content
-- `rigged broadcast --rig <name> "message"` — multi-agent broadcast
-- `rigged transcript <session> --tail N / --grep "pattern" [--json]` — transcript access
-- `rigged config [get <key> / set <key> <value> / reset <key>] [--json]` — configuration surface
-- `rigged preflight [--json]` — system readiness check (Node, tmux, writable dirs, port)
-- `rigged ask <rig> "question" [--json]` — context evidence pack over rig summary + transcripts + chat
-- `rigged chatroom send/watch/history/topic` — durable group chat
+- `rig send <session> "message" [--verify] [--force]` — send to agent terminal
+- `rig capture <session> [--lines N] [--json]` — capture agent pane content
+- `rig broadcast --rig <name> "message"` — multi-agent broadcast
+- `rig transcript <session> --tail N / --grep "pattern" [--json]` — transcript access
+- `rig config [get <key> / set <key> <value> / reset <key>] [--json]` — configuration surface
+- `rig preflight [--json]` — system readiness check (Node, tmux, writable dirs, port)
+- `rig ask <rig> "question" [--json]` — context evidence pack over rig summary + transcripts + chat
+- `rig chatroom send/watch/history/topic` — durable group chat
 
 ### MCP tools
 
@@ -438,7 +438,7 @@ Three runtime adapters implement the five-method contract: projection, startup d
 
 - `node-inventory.ts`: universal node-level projection. The single source of truth for node state consumed by CLI (`ps --nodes`), UI (explorer + graph + drawer), and MCP (`rigged_rig_nodes`). Core + extended field tiers.
 - `demo-rig-selector.ts`: existing-rig power-on helper — finds the right rig by name from ps summary
-- `whoami-service.ts`: daemon-backed runtime identity projection used by `rigged whoami` and adopted-session parity flows
+- `whoami-service.ts`: daemon-backed runtime identity projection used by `rig whoami` and adopted-session parity flows
 
 ### Transport and communication (Post-North-Star)
 
@@ -553,14 +553,14 @@ Restore now:
 
 ### Auto-snapshot + existing-rig power-on (North Star)
 
-- `rigged down <rigId>` auto-captures an `auto-pre-down` snapshot before teardown
-- `rigged up <rig-name>` (no file extension) searches for existing rig by name, restores from latest auto-pre-down snapshot
+- `rig down <rigId>` auto-captures an `auto-pre-down` snapshot before teardown
+- `rig up <rig-name>` (no file extension) searches for existing rig by name, restores from latest auto-pre-down snapshot
 - If no snapshot: error with guidance ("No saved snapshot for rig 'X'. Boot from a spec or bundle path.")
 - Post-command handoff: down output includes snapshot ID + restore command; up output includes node statuses + attach command
 
 ### Communication flow (Post-North-Star)
 
-`rigged send <session> "message"` → CLI → `POST /api/transport/send` → `SessionTransport`:
+`rig send <session> "message"` → CLI → `POST /api/transport/send` → `SessionTransport`:
 1. Resolve session name (canonical or legacy, by session/rig/pod/global)
 2. Check mid-work state (unless `--force`)
 3. Two-step tmux send: `send-keys -l` → 200ms delay → `C-m`
@@ -570,15 +570,15 @@ Restore now:
 ### Transcript flow (Post-North-Star)
 
 1. `NodeLauncher` starts `pipe-pane` immediately after tmux session creation (before harness boot)
-2. Raw terminal output streams to `~/.rigged/transcripts/{rig-name}/{session-name}.log`
+2. Raw terminal output streams to `~/.openrig/transcripts/{rig-name}/{session-name}.log`
 3. `TranscriptStore` owns path convention, ANSI stripping on read, boundary markers, readTail, grep
-4. `rigged transcript <session> --tail N / --grep "pattern"` provides agent-facing access
+4. `rig transcript <session> --tail N / --grep "pattern"` provides agent-facing access
 5. On restore: boundary marker written before re-launch. Pipe-pane reconnects to same file (append).
-6. `rigged ask` gathers rig summary plus transcript excerpts, chat excerpts, insufficiency state, and guidance
+6. `rig ask` gathers rig summary plus transcript excerpts, chat excerpts, insufficiency state, and guidance
 
 ### Chat flow (Post-North-Star)
 
-1. `rigged chatroom send <rig> "message"` → `POST /api/rigs/:rigId/chat/send` → `ChatRepository.addMessage()`
+1. `rig chatroom send <rig> "message"` → `POST /api/rigs/:rigId/chat/send` → `ChatRepository.addMessage()`
 2. SSE stream: `GET /api/rigs/:rigId/chat/watch` delivers real-time messages
 3. History: `GET /api/rigs/:rigId/chat/history` returns full channel history; `POST /api/rigs/:rigId/chat/topic` persists topic markers
 4. UI: chat room tab in the rig drawer
@@ -587,15 +587,15 @@ Restore now:
 
 ### Config + preflight flow (Post-North-Star)
 
-- `rigged config` reads/writes `~/.rigged/config.json`. 5 locked keys: `daemon.port`, `daemon.host`, `db.path`, `transcripts.enabled`, `transcripts.path`
+- `rig config` reads/writes `~/.openrig/config.json` with legacy fallback from `~/.rigged/config.json`. 5 locked keys: `daemon.port`, `daemon.host`, `db.path`, `transcripts.enabled`, `transcripts.path`
 - Precedence: CLI flag > env var > config file > default
-- `rigged preflight` checks: Node.js ≥ 20, tmux available, writable home/db/transcript dirs, port available
-- Auto-preflight runs on `rigged up` and daemon start
+- `rig preflight` checks: Node.js ≥ 20, tmux available, writable home/db/transcript dirs, port available
+- Auto-preflight runs on `rig up` and daemon start
 - Every preflight error: what failed + why it matters + what to do (3-part pattern)
 
 ### Discovery-to-draft-rig flow (North Star)
 
-`rigged discover --draft` → scan tmux sessions → group by CWD → suggest pod structure → generate candidate RigSpec YAML → output to stdout or file
+`rig discover --draft` → scan tmux sessions → group by CWD → suggest pod structure → generate candidate RigSpec YAML → output to stdout or file
 
 ### Spec review and spec library flow (Final Stretch 1)
 
@@ -604,23 +604,23 @@ Restore now:
    - `SpecReviewService` parses, validates, and returns structured review models
    - UI renders them through `RigSpecDisplay` / `AgentSpecDisplay`
 2. Filesystem-backed library:
-   - `SpecLibraryService` scans builtin + user roots (`packages/daemon/specs`, `~/.rigged/specs`)
+   - `SpecLibraryService` scans builtin + user roots (`packages/daemon/specs`, `~/.openrig/specs`) with legacy fallback from `~/.rigged/specs`
    - each YAML file is classified via structured review
    - `/api/specs/library` serves list/get/review/sync
 3. CLI:
-   - `rigged specs ls/show/preview/add/sync`
-   - `rigged up` / `rigged bootstrap` resolve library names before falling back to other source kinds
+   - `rig specs ls/show/preview/add/sync`
+   - `rig up` / `rig bootstrap` resolve library names before falling back to other source kinds
 
 ### Whoami and adopted-session parity flow (Final Stretch 1)
 
-1. Managed sessions still prefer projected `RIGGED_NODE_ID` / `RIGGED_SESSION_NAME`.
+1. Managed sessions still prefer projected `OPENRIG_NODE_ID` / `OPENRIG_SESSION_NAME`.
 2. Adopted sessions use tmux-owned metadata written at claim/bind time:
    - `@rigged_node_id`
    - `@rigged_session_name`
    - `@rigged_rig_id`
    - `@rigged_rig_name`
    - `@rigged_logical_id`
-3. `rigged whoami` resolves identity in this order:
+3. `rig whoami` resolves identity in this order:
    - explicit `--node-id`
    - explicit `--session`
    - env vars
@@ -636,8 +636,8 @@ Restore now:
    - bind to existing node
    - or create a new member inside a target pod and bind immediately
 4. CLI mirrors those surfaces:
-   - `rigged bind`
-   - `rigged adopt`
+   - `rig bind`
+   - `rig adopt`
 5. Authored pod namespace is preserved through adoption so logical ids stay `${podNamespace}.${memberName}`.
 
 ### Live identity / specs UI flow (Final Stretch 1)
@@ -691,9 +691,9 @@ Restore now:
 17. Session naming: `{pod}-{member}@{rig}` — human-authored, system-validated. No generation, no slugification.
 18. Communication: tmux is transport, not truth. `send/capture/broadcast` wrap tmux reliably with honest errors.
 19. Transcripts: raw capture via pipe-pane, ANSI strip on read. `rg` preferred, `grep -E` fallback.
-20. Config precedence: CLI flag > env var > config file (`~/.rigged/config.json`) > default.
+20. Config precedence: CLI flag > env var > config file (`~/.openrig/config.json`, with legacy fallback from `~/.rigged/config.json`) > default.
 21. Semi-deterministic calibration: build what agents use constantly. Agent handles edge cases from error messages.
-22. `rigged ask` is context engineering: gathers evidence, does NOT call an external LLM. The agent IS the LLM.
+22. `rig ask` is context engineering: gathers evidence, does NOT call an external LLM. The agent IS the LLM.
 23. Spec library truth is YAML on disk; daemon owns the structured review/index/cache layer.
 24. Adopted-session parity is tmux-metadata parity, not fake env-var parity.
 25. Human-readable IDs are UI-only presentation helpers. CLI/API/MCP/backend keep full canonical ids.
@@ -808,15 +808,15 @@ In addition to reboot-era coverage:
 
 Post-North-Star + Final Stretch 1 dogfood verified:
 
-- Full product loop: `rigged up demo/rig.yaml` → harnesses launch → `rigged ps --nodes` → `rigged down` → `rigged up demo-rig` (restore by name) → agents resume
-- Communication: `rigged send`, `rigged capture`, `rigged broadcast` across running rig
-- Transcripts: `rigged transcript <session> --tail / --grep` against live pipe-pane output
-- Config/preflight: `rigged config`, `rigged preflight` with honest errors
-- Chat: `rigged chatroom send/watch/history/topic`
-- Ask: `rigged ask <rig> "question"` returns context evidence
+- Full product loop: `rig up demo/rig.yaml` → harnesses launch → `rig ps --nodes` → `rig down` → `rig up demo-rig` (restore by name) → agents resume
+- Communication: `rig send`, `rig capture`, `rig broadcast` across running rig
+- Transcripts: `rig transcript <session> --tail / --grep` against live pipe-pane output
+- Config/preflight: `rig config`, `rig preflight` with honest errors
+- Chat: `rig chatroom send/watch/history/topic`
+- Ask: `rig ask <rig> "question"` returns context evidence
 - UI: explorer tree → graph → node detail drawer → `Open Full Details` → specs/library review surfaces
-- Identity: `rigged whoami --json` inside managed and adopted sessions
-- Authoring/library: `rigged specs ls/show/preview/add/sync`
+- Identity: `rig whoami --json` inside managed and adopted sessions
+- Authoring/library: `rig specs ls/show/preview/add/sync`
 - Adoption: materialize + bind/adopt flows from discovery/specs workflows
 - MCP: all 17 tools verified
 
@@ -829,10 +829,10 @@ These are the main intentional limits that still describe the shipped system:
 1. Remote `agent_ref` imports remain unsupported.
 2. Startup actions remain intentionally constrained (`slash_command`, `send_text`).
 3. Legacy compatibility seams still ship for pre-reboot data and v1 artifacts.
-4. `rigged ask` gathers context only — does not call an external LLM. The agent reasons about the gathered evidence.
+4. `rig ask` gathers context only — does not call an external LLM. The agent reasons about the gathered evidence.
 5. Transcript search prefers `rg` but falls back to `grep -E`. Search quality/performance varies by backend.
 6. Chat is rig-scoped only — no cross-rig channels or DMs.
-7. `--verify` on `rigged send` checks pane content for message visibility but can produce false positives from pre-existing matching content. Known limitation.
+7. `--verify` on `rig send` checks pane content for message visibility but can produce false positives from pre-existing matching content. Known limitation.
 8. Terminal node readiness is shell-ready only — no service health probes.
 
 ---

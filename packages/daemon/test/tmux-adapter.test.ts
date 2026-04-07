@@ -236,13 +236,13 @@ describe("TmuxAdapter", () => {
       const adapter = new TmuxAdapter(exec);
 
       await adapter.createSession("dev-impl@rig", "/tmp", {
-        RIGGED_NODE_ID: "node123",
-        RIGGED_SESSION_NAME: "dev-impl@rig",
+        OPENRIG_NODE_ID: "node123",
+        OPENRIG_SESSION_NAME: "dev-impl@rig",
       });
 
       const cmd = exec.mock.calls[0]![0] as string;
-      expect(cmd).toContain("-e 'RIGGED_NODE_ID=node123'");
-      expect(cmd).toContain("-e 'RIGGED_SESSION_NAME=dev-impl@rig'");
+      expect(cmd).toContain("-e 'OPENRIG_NODE_ID=node123'");
+      expect(cmd).toContain("-e 'OPENRIG_SESSION_NAME=dev-impl@rig'");
       expect(cmd).toContain("-s 'dev-impl@rig'");
       expect(cmd).toContain("-c '/tmp'");
     });
@@ -562,7 +562,7 @@ describe("TmuxAdapter", () => {
       const exec: ExecFn = vi.fn(async () => "") as unknown as ExecFn;
       const adapter = new TmuxAdapter(exec);
 
-      await adapter.startPipePane("dev-impl@my-rig", "/home/user/.rigged/transcripts/my-rig/dev-impl@my-rig.log");
+      await adapter.startPipePane("dev-impl@my-rig", "/home/user/.openrig/transcripts/my-rig/dev-impl@my-rig.log");
 
       // The command is: tmux pipe-pane -t <quoted session> <quoted 'cat >> <quoted path>'>
       const cmd = (exec as ReturnType<typeof vi.fn>).mock.calls[0]![0] as string;

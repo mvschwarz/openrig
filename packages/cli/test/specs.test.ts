@@ -25,7 +25,7 @@ function runningDeps(port: number): StatusDeps {
 
 const LIBRARY_ENTRIES = [
   { id: "abc123", kind: "rig", name: "review-rig", version: "0.2", sourceType: "builtin", sourcePath: "/builtin/review-rig.yaml", relativePath: "review-rig.yaml", updatedAt: "2026-04-01T00:00:00Z", summary: "A review rig" },
-  { id: "def456", kind: "agent", name: "impl-agent", version: "1.0", sourceType: "user_file", sourcePath: "/home/user/.rigged/specs/impl-agent.yaml", relativePath: "impl-agent.yaml", updatedAt: "2026-04-01T00:00:00Z" },
+  { id: "def456", kind: "agent", name: "impl-agent", version: "1.0", sourceType: "user_file", sourcePath: "/home/user/.openrig/specs/impl-agent.yaml", relativePath: "impl-agent.yaml", updatedAt: "2026-04-01T00:00:00Z" },
 ];
 
 const RIG_REVIEW = {
@@ -75,7 +75,7 @@ describe("Specs CLI", () => {
 
   it("specs ls prints library entries", async () => {
     const { logs } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "specs", "ls"]);
+      await makeCmd().parseAsync(["node", "rig", "specs", "ls"]);
     });
     const output = logs.join("\n");
     expect(output).toContain("review-rig");
@@ -84,7 +84,7 @@ describe("Specs CLI", () => {
 
   it("specs ls --json prints raw JSON array", async () => {
     const { logs } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "specs", "ls", "--json"]);
+      await makeCmd().parseAsync(["node", "rig", "specs", "ls", "--json"]);
     });
     const parsed = JSON.parse(logs.join("\n"));
     expect(Array.isArray(parsed)).toBe(true);
@@ -93,7 +93,7 @@ describe("Specs CLI", () => {
 
   it("specs show resolves by name and prints metadata", async () => {
     const { logs } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "specs", "show", "review-rig"]);
+      await makeCmd().parseAsync(["node", "rig", "specs", "show", "review-rig"]);
     });
     const output = logs.join("\n");
     expect(output).toContain("review-rig");
@@ -117,7 +117,7 @@ describe("Specs CLI", () => {
     prog.addCommand(specsCommand(runningDeps(dupPort)));
 
     const { logs, exitCode } = await captureLogs(async () => {
-      await prog.parseAsync(["node", "rigged", "specs", "show", "review-rig"]);
+      await prog.parseAsync(["node", "rig", "specs", "show", "review-rig"]);
     });
     dupServer.close();
 
@@ -127,7 +127,7 @@ describe("Specs CLI", () => {
 
   it("specs preview --json returns structured review", async () => {
     const { logs } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "specs", "preview", "review-rig", "--json"]);
+      await makeCmd().parseAsync(["node", "rig", "specs", "preview", "review-rig", "--json"]);
     });
     const parsed = JSON.parse(logs.join("\n"));
     expect(parsed.kind).toBe("rig");
@@ -137,7 +137,7 @@ describe("Specs CLI", () => {
 
   it("specs sync reports updated count", async () => {
     const { logs } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "specs", "sync"]);
+      await makeCmd().parseAsync(["node", "rig", "specs", "sync"]);
     });
     expect(logs.join("\n")).toContain("2");
   });
@@ -147,7 +147,7 @@ describe("Specs CLI", () => {
     const { join } = await import("node:path");
     const { tmpdir } = await import("node:os");
 
-    // Use temp dir as HOME to avoid polluting real ~/.rigged/specs/
+    // Use temp dir as HOME to avoid polluting real ~/.openrig/specs/
     const tmpDir = mkdtempSync(join(tmpdir(), "specs-add-"));
     const specPath = join(tmpDir, "test-spec.yaml");
     writeFileSync(specPath, 'name: test-spec\nversion: "0.2"\npods: []\nedges: []\n');
@@ -164,7 +164,7 @@ describe("Specs CLI", () => {
           res.end(JSON.stringify({ kind: "rig", name: "test-spec" }));
         } else if (url === "/api/specs/library/sync" && req.method === "POST") {
           res.writeHead(200, { "Content-Type": "application/json" });
-          res.end(JSON.stringify([{ id: "new-id", kind: "rig", name: "test-spec", sourcePath: join(tmpDir, ".rigged", "specs", "test-spec.yaml") }]));
+          res.end(JSON.stringify([{ id: "new-id", kind: "rig", name: "test-spec", sourcePath: join(tmpDir, ".openrig", "specs", "test-spec.yaml") }]));
         } else if (url === "/api/specs/library") {
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify([]));
@@ -181,13 +181,13 @@ describe("Specs CLI", () => {
     prog.addCommand(specsCommand(runningDeps(addPort)));
 
     const { logs } = await captureLogs(async () => {
-      await prog.parseAsync(["node", "rigged", "specs", "add", specPath]);
+      await prog.parseAsync(["node", "rig", "specs", "add", specPath]);
     });
 
     addServer.close();
 
     // Verify it copied to temp HOME, not real HOME
-    expect(existsSync(join(tmpDir, ".rigged", "specs", "test-spec.yaml"))).toBe(true);
+    expect(existsSync(join(tmpDir, ".openrig", "specs", "test-spec.yaml"))).toBe(true);
 
     process.env["HOME"] = savedHome;
     rmSync(tmpDir, { recursive: true, force: true });

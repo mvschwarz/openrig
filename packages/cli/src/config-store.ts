@@ -1,6 +1,10 @@
 import { readFileSync, writeFileSync, mkdirSync, unlinkSync, existsSync } from "node:fs";
 import { join, dirname } from "node:path";
-import { homedir } from "node:os";
+import {
+  getCompatibleOpenRigPath,
+  getDefaultOpenRigPath,
+  readOpenRigEnv,
+} from "./openrig-compat.js";
 
 export interface RiggedConfig {
   daemon: { port: number; host: string };
@@ -8,12 +12,10 @@ export interface RiggedConfig {
   transcripts: { enabled: boolean; path: string };
 }
 
-const RIGGED_HOME = join(homedir(), ".rigged");
-
 const DEFAULTS: RiggedConfig = {
   daemon: { port: 7433, host: "127.0.0.1" },
-  db: { path: join(RIGGED_HOME, "rigged.sqlite") },
-  transcripts: { enabled: true, path: join(RIGGED_HOME, "transcripts") },
+  db: { path: getDefaultOpenRigPath("openrig.sqlite") },
+  transcripts: { enabled: true, path: getDefaultOpenRigPath("transcripts") },
 };
 
 const VALID_KEYS = [
@@ -26,12 +28,12 @@ const VALID_KEYS = [
 
 type ValidKey = typeof VALID_KEYS[number];
 
-const ENV_MAP: Record<ValidKey, string> = {
-  "daemon.port": "RIGGED_PORT",
-  "daemon.host": "RIGGED_HOST",
-  "db.path": "RIGGED_DB",
-  "transcripts.enabled": "RIGGED_TRANSCRIPTS_ENABLED",
-  "transcripts.path": "RIGGED_TRANSCRIPTS_PATH",
+const ENV_MAP: Record<ValidKey, { primary: string; legacy: string }> = {
+  "daemon.port": { primary: "OPENRIG_PORT", legacy: "RIGGED_PORT" },
+  "daemon.host": { primary: "OPENRIG_HOST", legacy: "RIGGED_HOST" },
+  "db.path": { primary: "OPENRIG_DB", legacy: "RIGGED_DB" },
+  "transcripts.enabled": { primary: "OPENRIG_TRANSCRIPTS_ENABLED", legacy: "RIGGED_TRANSCRIPTS_ENABLED" },
+  "transcripts.path": { primary: "OPENRIG_TRANSCRIPTS_PATH", legacy: "RIGGED_TRANSCRIPTS_PATH" },
 };
 
 function isValidKey(key: string): key is ValidKey {
@@ -84,7 +86,7 @@ export class ConfigStore {
   readonly configPath: string;
 
   constructor(configPath?: string) {
-    this.configPath = configPath ?? join(RIGGED_HOME, "config.json");
+    this.configPath = configPath ?? getCompatibleOpenRigPath("config.json");
   }
 
   resolve(): RiggedConfig {
@@ -92,8 +94,7 @@ export class ConfigStore {
 
     const resolveKey = (key: ValidKey): string | number | boolean => {
       // 1. Environment variable
-      const envVar = ENV_MAP[key];
-      const envVal = process.env[envVar];
+      const envVal = readOpenRigEnv(ENV_MAP[key].primary, ENV_MAP[key].legacy);
       if (envVal !== undefined && envVal !== "") {
         return coerceValue(key, envVal);
       }
@@ -156,7 +157,7 @@ export class ConfigStore {
       return JSON.parse(raw) as Record<string, unknown>;
     } catch {
       throw new Error(
-        `Config file at ${this.configPath} is malformed. Fix the JSON or reset with: rigged config reset`
+        `Config file at ${this.configPath} is malformed. Fix the JSON or reset with: rig config reset`
       );
     }
   }

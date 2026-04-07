@@ -15,7 +15,7 @@ interface TeardownResult {
 }
 
 /**
- * `rigged down <rigId>` — tear down a rig.
+ * `rig down <rigId>` — tear down a rig.
  * @param depsOverride - injectable deps for testing
  * @returns Commander command
  */
@@ -34,7 +34,7 @@ export function downCommand(depsOverride?: StatusDeps): Command {
 
       const status = await getDaemonStatus(deps.lifecycleDeps);
       if (status.state !== "running" || status.healthy === false) {
-        console.error("Daemon not running. Start it with: rigged daemon start");
+        console.error("Daemon not running. Start it with: rig daemon start");
         process.exitCode = 1;
         return;
       }
@@ -63,7 +63,7 @@ export function downCommand(depsOverride?: StatusDeps): Command {
       // HTTP error
       if (res.status >= 400) {
         const errMsg = (res.data as { error: string }).error ?? "unknown error";
-        console.error(`Down failed: ${errMsg} (HTTP ${res.status}). Check rig ID with: rigged ps`);
+        console.error(`Down failed: ${errMsg} (HTTP ${res.status}). Check rig ID with: rig ps`);
         process.exitCode = 2;
         return;
       }
@@ -100,9 +100,9 @@ export function downCommand(depsOverride?: StatusDeps): Command {
         const rigName = (res.data as Record<string, unknown>)["rigName"] as string | undefined;
         const isUniqueName = (res.data as Record<string, unknown>)["isUniqueName"] as boolean | undefined;
         if (rigName && isUniqueName !== false) {
-          console.log(`To restore: rigged up ${rigName}`);
+          console.log(`To restore: rig up ${rigName}`);
         } else {
-          console.log(`To restore: rigged restore ${result.snapshotId} --rig ${rigId}`);
+          console.log(`To restore: rig restore ${result.snapshotId} --rig ${rigId}`);
         }
       }
     });

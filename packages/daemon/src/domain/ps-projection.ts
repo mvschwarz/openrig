@@ -11,7 +11,7 @@ export interface PsEntry {
 }
 
 /**
- * Projects rig/run summary for `rigged ps`.
+ * Projects rig/run summary for `rig ps`.
  * Aggregates across all rigs: node counts, running counts, status, uptime, snapshot age.
  */
 export class PsProjectionService {

@@ -99,7 +99,7 @@ export function adoptCommand(depsOverride?: AdoptDeps): Command {
 
       const status = await getDaemonStatus(deps.lifecycleDeps);
       if (status.state !== "running" || status.healthy === false) {
-        console.error(status.state === "running" ? "Daemon unhealthy — healthz check failed. Restart with: rigged daemon start" : "Daemon not running. Start it with: rigged daemon start");
+        console.error(status.state === "running" ? "Daemon unhealthy — healthz check failed. Restart with: rig daemon start" : "Daemon not running. Start it with: rig daemon start");
         process.exitCode = 1;
         return;
       }
@@ -147,7 +147,7 @@ export function adoptCommand(depsOverride?: AdoptDeps): Command {
 
       const discoveryRes = await client.get<DiscoveredSessionLike[]>("/api/discovery?status=active");
       if (discoveryRes.status >= 400) {
-        console.error(`Failed to read discovery inventory (HTTP ${discoveryRes.status}). Run rigged discover and retry.`);
+        console.error(`Failed to read discovery inventory (HTTP ${discoveryRes.status}). Run rig discover and retry.`);
         process.exitCode = 1;
         return;
       }
@@ -219,7 +219,7 @@ export function adoptCommand(depsOverride?: AdoptDeps): Command {
 
       if (results.some((result) => !result.ok)) {
         if (!opts.json) {
-          console.error("Adopt completed with errors. Fix: run rigged discover --json, correct the mappings, and retry failed bindings.");
+          console.error("Adopt completed with errors. Fix: run rig discover --json, correct the mappings, and retry failed bindings.");
         }
         process.exitCode = 1;
       }

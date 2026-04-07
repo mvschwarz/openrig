@@ -18,15 +18,15 @@ export function transcriptCommand(depsOverride?: StatusDeps): Command {
     .option("--json", "JSON output for agents")
     .addHelpText("after", `
 Examples:
-  rigged transcript dev-impl@my-rig --tail 100
-  rigged transcript dev-impl@my-rig --grep "decision|architecture"
-  rigged transcript dev-impl@my-rig --json`)
+  rig transcript dev-impl@my-rig --tail 100
+  rig transcript dev-impl@my-rig --grep "decision|architecture"
+  rig transcript dev-impl@my-rig --json`)
     .action(async (session: string, opts: { tail?: string; grep?: string; json?: boolean }) => {
       const deps = getDeps();
       const status = await getDaemonStatus(deps.lifecycleDeps);
 
       if (status.state !== "running" || status.healthy === false) {
-        console.error("Daemon not running. Start it with: rigged daemon start");
+        console.error("Daemon not running. Start it with: rig daemon start");
         process.exitCode = 1;
         return;
       }

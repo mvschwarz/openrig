@@ -1,8 +1,8 @@
 # North Star Demo
 
-A complete multi-agent topology demonstrating Rigged's core capabilities.
+A complete multi-agent topology demonstrating OpenRig's core capabilities.
 
-This directory is the canonical authoring example for Rigged. It is meant to be
+This directory is the canonical authoring example for OpenRig. It is meant to be
 read by both humans and coding agents as the reference layout for a real rig:
 
 - `rig.yaml` — the topology source of truth
@@ -13,10 +13,10 @@ read by both humans and coding agents as the reference layout for a real rig:
 The same tree is also the golden source for same-checkout bundle tests:
 
 ```bash
-rigged bundle create demo/rig.yaml --rig-root demo -o /tmp/demo.rigbundle
-rigged bundle inspect /tmp/demo.rigbundle
-rigged bundle install /tmp/demo.rigbundle --yes --target /tmp/demo-install
-rigged up /tmp/demo.rigbundle
+rig bundle create demo/rig.yaml --rig-root demo -o /tmp/demo.rigbundle
+rig bundle inspect /tmp/demo.rigbundle
+rig bundle install /tmp/demo.rigbundle --yes --target /tmp/demo-install
+rig up /tmp/demo.rigbundle
 ```
 
 ## Topology
@@ -33,7 +33,7 @@ rigged up /tmp/demo.rigbundle
 
 - Node.js 22+
 - tmux 3+
-- Rigged built: `npm run build` from repo root
+- OpenRig built: `npm run build` from repo root
 - Claude Code and/or Codex CLI installed
 
 ## Quick Start
@@ -65,7 +65,7 @@ for the currently observed runtime caveats.
 Current known-good rule on macOS:
 
 - fresh Codex sessions in this demo are resumable immediately
-- fresh Claude sessions are not snapshot-safe immediately after `rigged up`
+- fresh Claude sessions are not snapshot-safe immediately after `rig up`
 - one completed warmup turn is enough to make the current stored Claude IDs
   resumable on this fixture
 
@@ -79,8 +79,8 @@ This produces automated proof artifacts in `demo/proof/`:
 
 | Artifact | Source | Type |
 |----------|--------|------|
-| `up-transcript.txt` | `rigged up demo/rig.yaml` output | Automatic |
-| `ps-nodes.txt` | `rigged ps --nodes` after boot | Automatic |
+| `up-transcript.txt` | `rig up demo/rig.yaml` output | Automatic |
+| `ps-nodes.txt` | `rig ps --nodes` after boot | Automatic |
 | `health-after-boot.json` | `check-demo-health.ts` after boot | Automatic |
 | `native-resume-after-boot.txt` | immediate native probe after boot | Automatic |
 | `native-resume-after-boot.json` | immediate native probe machine output | Automatic |
@@ -88,10 +88,10 @@ This produces automated proof artifacts in `demo/proof/`:
 | `seed-resume-baseline.json` | baseline seeding machine output | Automatic, only if seeding was needed |
 | `native-resume-before-down.txt` | native Claude/Codex probe before down | Automatic |
 | `native-resume-before-down.json` | native probe machine output | Automatic |
-| `down-transcript.txt` | `rigged down` output | Automatic |
+| `down-transcript.txt` | `rig down` output | Automatic |
 | `tmux-check.txt` | `tmux ls` after teardown | Automatic |
-| `restore-transcript.txt` | `rigged restore <snapshotId> --rig <rigId>` output | Automatic |
-| `ps-restored.txt` | `rigged ps --nodes` after restore | Automatic |
+| `restore-transcript.txt` | `rig restore <snapshotId> --rig <rigId>` output | Automatic |
+| `ps-restored.txt` | `rig ps --nodes` after restore | Automatic |
 | `browser-screenshot.png` | Explorer + Graph + Detail Panel | **Manual** |
 | `resume-test.txt` | Post-restore agent context check | **Manual** |
 
@@ -124,7 +124,7 @@ infra-ui@demo-rig
 ## Restore Notes
 
 - For exact proof and repeated local testing, prefer explicit restore:
-  `rigged restore <snapshotId> --rig <rigId>`
-- `rigged up demo-rig` is only safe as a restore shortcut while there is a
+  `rig restore <snapshotId> --rig <rigId>`
+- `rig up demo-rig` is only safe as a restore shortcut while there is a
   single stopped historical rig with that name. Once multiple historical
-  `demo-rig` instances exist, Rigged correctly returns an ambiguity error.
+  `demo-rig` instances exist, OpenRig correctly returns an ambiguity error.

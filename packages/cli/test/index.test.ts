@@ -9,7 +9,7 @@ describe("CLI entrypoint direct-run detection", () => {
   it("treats a symlinked bin path as direct execution", () => {
     const actualPath = fileURLToPath(new URL("../src/index.ts", import.meta.url));
     const tmpDir = mkdtempSync(join(tmpdir(), "rigged-index-"));
-    const symlinkPath = join(tmpDir, "rigged");
+    const symlinkPath = join(tmpDir, "rig");
     symlinkSync(actualPath, symlinkPath);
 
     expect(isDirectRun(symlinkPath, pathToFileURL(actualPath).href)).toBe(true);

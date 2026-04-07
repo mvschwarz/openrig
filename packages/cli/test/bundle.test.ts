@@ -123,7 +123,7 @@ describe("Bundle CLI", () => {
   // T11: create produces output
   it("bundle create prints confirmation", async () => {
     const { logs } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "bundle", "create", "/tmp/rig.yaml", "-o", "/tmp/test.rigbundle"]);
+      await makeCmd().parseAsync(["node", "rig", "bundle", "create", "/tmp/rig.yaml", "-o", "/tmp/test.rigbundle"]);
     });
     expect(logs.some((l) => l.includes("Bundle created"))).toBe(true);
     expect(logs.some((l) => l.includes("abc123"))).toBe(true);
@@ -133,7 +133,7 @@ describe("Bundle CLI", () => {
     const { logs } = await captureLogs(async () => {
       await makeCmd().parseAsync([
         "node",
-        "rigged",
+        "rig",
         "bundle",
         "create",
         "/tmp/rig.yaml",
@@ -149,7 +149,7 @@ describe("Bundle CLI", () => {
   // T12: inspect prints summary
   it("bundle inspect prints summary", async () => {
     const { logs } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "bundle", "inspect", "/tmp/test.rigbundle"]);
+      await makeCmd().parseAsync(["node", "rig", "bundle", "inspect", "/tmp/test.rigbundle"]);
     });
     expect(logs.some((l) => l.includes("Bundle:"))).toBe(true);
     expect(logs.some((l) => l.includes("Integrity: PASS"))).toBe(true);
@@ -158,7 +158,7 @@ describe("Bundle CLI", () => {
   // T13: install runs bootstrap
   it("bundle install prints status", async () => {
     const { logs } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "bundle", "install", "/tmp/test.rigbundle", "--yes", "--target", "/tmp/target"]);
+      await makeCmd().parseAsync(["node", "rig", "bundle", "install", "/tmp/test.rigbundle", "--yes", "--target", "/tmp/target"]);
     });
     expect(logs.some((l) => l.includes("completed"))).toBe(true);
     expect(logs.some((l) => l.includes("rig-1"))).toBe(true);
@@ -167,7 +167,7 @@ describe("Bundle CLI", () => {
   // T14: --json output
   it("bundle inspect --json outputs parseable JSON", async () => {
     const { logs } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "bundle", "inspect", "/tmp/test.rigbundle", "--json"]);
+      await makeCmd().parseAsync(["node", "rig", "bundle", "inspect", "/tmp/test.rigbundle", "--json"]);
     });
     const parsed = JSON.parse(logs.join(""));
     expect(parsed.manifest.name).toBe("test");
@@ -176,14 +176,14 @@ describe("Bundle CLI", () => {
   // T15: --plan shows plan
   it("bundle install --plan shows planned status", async () => {
     const { logs } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "bundle", "install", "/tmp/test.rigbundle", "--plan"]);
+      await makeCmd().parseAsync(["node", "rig", "bundle", "install", "/tmp/test.rigbundle", "--plan"]);
     });
     expect(logs.some((l) => l.includes("planned"))).toBe(true);
   });
 
   it("bundle create --json preserves failure exit code", async () => {
     const { logs, exitCode } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "bundle", "create", "/tmp/missing.rig.yaml", "-o", "/tmp/test.rigbundle", "--json"]);
+      await makeCmd().parseAsync(["node", "rig", "bundle", "create", "/tmp/missing.rig.yaml", "-o", "/tmp/test.rigbundle", "--json"]);
     });
     expect(JSON.parse(logs.join("")).error).toBe("Missing package");
     expect(exitCode).toBe(2);
@@ -191,7 +191,7 @@ describe("Bundle CLI", () => {
 
   it("bundle install --json preserves blocked exit code", async () => {
     const { logs, exitCode } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "bundle", "install", "/tmp/blocked.rigbundle", "--json"]);
+      await makeCmd().parseAsync(["node", "rig", "bundle", "install", "/tmp/blocked.rigbundle", "--json"]);
     });
     expect(JSON.parse(logs.join("")).error).toBe("blocked");
     expect(exitCode).toBe(1);
@@ -202,7 +202,7 @@ describe("Bundle CLI", () => {
     capturedCreateBodies = [];
     await captureLogs(async () => {
       await makeCmd().parseAsync([
-        "node", "rigged", "bundle", "create", "/tmp/rig.yaml",
+        "node", "rig", "bundle", "create", "/tmp/rig.yaml",
         "-o", "/tmp/test.rigbundle",
         "--rig-root", "/my/project",
       ]);

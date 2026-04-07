@@ -2,6 +2,7 @@ import { Command } from "commander";
 import { execSync } from "node:child_process";
 import { DaemonClient } from "../client.js";
 import { getDaemonStatus, getDaemonUrl } from "../daemon-lifecycle.js";
+import { readOpenRigEnv } from "../openrig-compat.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 
@@ -42,8 +43,8 @@ const defaultTmuxExec: TmuxExecFn = (cmd: string) => execSync(cmd, { encoding: "
  * Resolve the current session identity using the approved resolution chain:
  * 1. --node-id flag
  * 2. --session flag
- * 3. RIGGED_NODE_ID env
- * 4. RIGGED_SESSION_NAME env
+ * 3. OPENRIG_NODE_ID env
+ * 4. OPENRIG_SESSION_NAME env
  * 5. TMUX_PANE → @rigged_node_id tmux metadata
  * 6. TMUX_PANE → @rigged_session_name tmux metadata
  * 7. TMUX_PANE → tmux display-message (raw session name)
@@ -56,13 +57,13 @@ export function resolveIdentitySource(
   if (opts.nodeId) return { nodeId: opts.nodeId };
   if (opts.session) return { sessionName: opts.session };
 
-  const envNodeId = process.env["RIGGED_NODE_ID"];
+  const envNodeId = readOpenRigEnv("OPENRIG_NODE_ID", "RIGGED_NODE_ID");
   if (envNodeId) return { nodeId: envNodeId };
 
-  const envSessionName = process.env["RIGGED_SESSION_NAME"];
+  const envSessionName = readOpenRigEnv("OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME");
   if (envSessionName) return { sessionName: envSessionName };
 
-  // TMUX_PANE fallback — try Rigged metadata first, then raw session name
+  // TMUX_PANE fallback — try OpenRig metadata first, then raw session name
   const tmuxPane = process.env["TMUX_PANE"];
   if (tmuxPane) {
     // Step 5: @rigged_node_id metadata (strongest adopted-session anchor)
@@ -90,7 +91,7 @@ export function resolveIdentitySource(
 }
 
 export function whoamiCommand(depsOverride?: StatusDeps): Command {
-  const cmd = new Command("whoami").description("Show current managed identity in a Rigged topology");
+  const cmd = new Command("whoami").description("Show current managed identity in an OpenRig topology");
   const getDeps = (): StatusDeps => depsOverride ?? {
     lifecycleDeps: realDeps(),
     clientFactory: (url: string) => new DaemonClient(url),
@@ -103,7 +104,7 @@ export function whoamiCommand(depsOverride?: StatusDeps): Command {
     .action(async (opts: { nodeId?: string; session?: string; json?: boolean }) => {
       const source = resolveIdentitySource(opts);
       if (!source) {
-        console.error("Cannot determine identity. Run inside a Rigged-managed session, or use --session or --node-id.");
+        console.error("Cannot determine identity. Run inside an OpenRig-managed session, or use --session or --node-id.");
         process.exitCode = 1;
         return;
       }
@@ -111,7 +112,7 @@ export function whoamiCommand(depsOverride?: StatusDeps): Command {
       const deps = getDeps();
       const status = await getDaemonStatus(deps.lifecycleDeps);
       if (status.state !== "running" || status.healthy === false) {
-        console.error("Daemon not running. Start it with: rigged daemon start");
+        console.error("Daemon not running. Start it with: rig daemon start");
         process.exitCode = 1;
         return;
       }
@@ -131,7 +132,7 @@ export function whoamiCommand(depsOverride?: StatusDeps): Command {
 
       if (res.status === 404) {
         const error = (res.data as Record<string, unknown>)["error"] as string | undefined;
-        console.error(error ?? "Session not found in any managed rig. Check: rigged ps --nodes");
+        console.error(error ?? "Session not found in any managed rig. Check: rig ps --nodes");
         process.exitCode = 1;
         return;
       }

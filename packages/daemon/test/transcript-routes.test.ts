@@ -90,7 +90,7 @@ describe("transcript routes", () => {
     expect(res.status).toBe(404);
     const body = await res.json();
     expect(body.error).toContain("not found");
-    expect(body.error).toContain("rigged ps");
+    expect(body.error).toContain("rig ps");
   });
 
   it("GET /tail with known session but no transcript file returns 404 with guidance", async () => {
@@ -106,7 +106,7 @@ describe("transcript routes", () => {
     expect(res.status).toBe(404);
     const body = await res.json();
     expect(body.error).toContain("No transcript");
-    expect(body.error).toContain("rigged up");
+    expect(body.error).toContain("rig up");
   });
 
   it("GET /tail with non-positive lines normalizes to default", async () => {

@@ -16,7 +16,7 @@ export type ActionStatus = "planned" | "approved" | "skipped" | "running" | "com
 /** Runtime verification status */
 export type RuntimeStatus = "verified" | "not_found" | "degraded" | "error";
 
-/** A bootstrap run — one execution of `rigged bootstrap <spec>` */
+/** A bootstrap run — one execution of `rig bootstrap <spec>` */
 export interface BootstrapRun {
   id: string;
   sourceKind: string;

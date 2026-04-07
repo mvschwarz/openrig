@@ -72,8 +72,8 @@ export function createProgram(depsOverride?: ProgramDeps): Command {
   const program = new Command();
 
   program
-    .name("rigged")
-    .description("CLI for the Rigged local control plane")
+    .name("rig")
+    .description("CLI for the OpenRig local control plane")
     .version("0.1.0");
 
   program.addCommand(daemonCommand(depsOverride?.daemonDeps));

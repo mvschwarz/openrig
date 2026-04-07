@@ -43,7 +43,7 @@ describe("SystemPreflight", () => {
     const configPath = join(tmpDir, "config.json");
     const config = new ConfigStore(configPath);
     // Point writable paths to tmpDir
-    const homeDir = join(tmpDir, ".rigged");
+    const homeDir = join(tmpDir, ".openrig");
     mkdirSync(homeDir, { recursive: true });
 
     return new SystemPreflight({
@@ -87,7 +87,7 @@ describe("SystemPreflight", () => {
   });
 
   // Test 4
-  it("Rigged home not writable → ready: false with guidance", async () => {
+  it("OpenRig home not writable → ready: false with guidance", async () => {
     const readonlyDir = join(tmpDir, "readonly-home");
     mkdirSync(readonlyDir);
     chmodSync(readonlyDir, 0o444);
@@ -121,7 +121,7 @@ describe("SystemPreflight", () => {
     const portCheck = result.checks.find((c) => c.name === "port_available");
     expect(portCheck!.ok).toBe(false);
     expect(portCheck!.error).toContain(String(port));
-    expect(portCheck!.fix).toContain("rigged config set daemon.port");
+    expect(portCheck!.fix).toContain("rig config set daemon.port");
   });
 
   // Test 6
@@ -196,8 +196,8 @@ describe("Preflight CLI", () => {
   });
 
   // Test 9 (--json)
-  it("rigged preflight --json prints structured result", async () => {
-    const homeDir = join(tmpDir, ".rigged");
+  it("rig preflight --json prints structured result", async () => {
+    const homeDir = join(tmpDir, ".openrig");
     mkdirSync(homeDir, { recursive: true });
     // Set port to 0 to avoid collisions
     const configPath = join(tmpDir, "config.json");
@@ -214,7 +214,7 @@ describe("Preflight CLI", () => {
     prog.addCommand(cmd);
 
     const { logs } = await captureLogs(async () => {
-      await prog.parseAsync(["node", "rigged", "preflight", "--json"]);
+      await prog.parseAsync(["node", "rig", "preflight", "--json"]);
     });
     const parsed = JSON.parse(logs.join("\n"));
     expect(parsed.ready).toBe(true);
@@ -222,8 +222,8 @@ describe("Preflight CLI", () => {
   });
 
   // Test 11
-  it("rigged preflight prints check marks and exits 0 on pass", async () => {
-    const homeDir = join(tmpDir, ".rigged");
+  it("rig preflight prints check marks and exits 0 on pass", async () => {
+    const homeDir = join(tmpDir, ".openrig");
     mkdirSync(homeDir, { recursive: true });
     const configPath2 = join(tmpDir, "config2.json");
     const { writeFileSync: wf } = await import("node:fs");
@@ -239,7 +239,7 @@ describe("Preflight CLI", () => {
     prog.addCommand(cmd);
 
     const { logs, exitCode } = await captureLogs(async () => {
-      await prog.parseAsync(["node", "rigged", "preflight"]);
+      await prog.parseAsync(["node", "rig", "preflight"]);
     });
     const output = logs.join("\n");
     expect(output).toContain("✓");
@@ -247,11 +247,11 @@ describe("Preflight CLI", () => {
     expect(exitCode).toBeUndefined(); // 0 / not set
   });
 
-  // Test 12: simulates daemon start / rigged up aborting on preflight failure
+  // Test 12: simulates daemon start / rig up aborting on preflight failure
   // The actual daemon.ts and up.ts commands run the same SystemPreflight.run() check
   // and abort on !result.ready — this test proves that flow via the preflight command
   it("preflight failure causes abort with exit code 1 (same flow as daemon start/up)", async () => {
-    const homeDir = join(tmpDir, ".rigged");
+    const homeDir = join(tmpDir, ".openrig");
     mkdirSync(homeDir, { recursive: true });
     // Create a server on a known port to trigger port-in-use
     const server = (await import("node:net")).createServer();
@@ -272,7 +272,7 @@ describe("Preflight CLI", () => {
     prog.addCommand(cmd);
 
     const { logs, exitCode } = await captureLogs(async () => {
-      await prog.parseAsync(["node", "rigged", "preflight"]);
+      await prog.parseAsync(["node", "rig", "preflight"]);
     });
     server.close();
     const output = logs.join("\n");
@@ -282,8 +282,8 @@ describe("Preflight CLI", () => {
   });
 
   // Test 13
-  it("rigged preflight with failure prints three-part error and exits 1", async () => {
-    const homeDir = join(tmpDir, ".rigged");
+  it("rig preflight with failure prints three-part error and exits 1", async () => {
+    const homeDir = join(tmpDir, ".openrig");
     mkdirSync(homeDir, { recursive: true });
     const cmd = preflightCommand({
       exec: makeExec(false), // tmux missing
@@ -296,7 +296,7 @@ describe("Preflight CLI", () => {
     prog.addCommand(cmd);
 
     const { logs, exitCode } = await captureLogs(async () => {
-      await prog.parseAsync(["node", "rigged", "preflight"]);
+      await prog.parseAsync(["node", "rig", "preflight"]);
     });
     const output = logs.join("\n");
     expect(output).toContain("✗");

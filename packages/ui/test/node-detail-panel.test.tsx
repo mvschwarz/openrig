@@ -40,7 +40,7 @@ const AGENT_DETAIL = {
     outgoing: [{ kind: "delegates_to", to: { logicalId: "dev.qa", sessionName: "dev-qa@test-rig" } }],
     incoming: [],
   },
-  transcript: { enabled: true, path: "/tmp/transcripts/test-rig/dev-impl@test-rig.log", tailCommand: "rigged transcript dev-impl@test-rig --tail 100" },
+  transcript: { enabled: true, path: "/tmp/transcripts/test-rig/dev-impl@test-rig.log", tailCommand: "rig transcript dev-impl@test-rig --tail 100" },
   compactSpec: { name: "impl", version: "1.0.0", profile: "default", skillCount: 2, guidanceCount: 1 },
 };
 
@@ -171,7 +171,7 @@ describe("NodeDetailPanel", () => {
     renderPanel();
     await waitFor(() => {
       const banner = screen.getByTestId("detail-failure-banner");
-      expect(banner.textContent).toContain("rigged ps");
+      expect(banner.textContent).toContain("rig ps");
     });
   });
 

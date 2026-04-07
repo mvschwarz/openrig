@@ -21,7 +21,8 @@ interface PreflightDeps {
   exec: (cmd: string) => Promise<string>;
   configStore: ConfigStore;
   getDaemonStatus: () => Promise<DaemonStatus>;
-  riggedHome: string;
+  openrigHome?: string;
+  riggedHome?: string;
 }
 
 interface RunOverrides {
@@ -69,6 +70,7 @@ export class SystemPreflight {
     const config = this.deps.configStore.resolve();
     const effectivePort = overrides?.port ?? config.daemon.port;
     const effectiveHost = overrides?.host ?? config.daemon.host;
+    const openrigHome = this.deps.openrigHome ?? this.deps.riggedHome ?? "";
 
     // 1. Node version
     const major = parseNodeMajor(process.version);
@@ -79,7 +81,7 @@ export class SystemPreflight {
         name: "node_version",
         ok: false,
         error: `Node.js ${process.version} is below the minimum (v${MIN_NODE_MAJOR}.0.0).`,
-        reason: "Rigged requires Node 20+ for built-in fetch, ESM, and stable API support.",
+        reason: "OpenRig requires Node 20+ for built-in fetch, ESM, and stable API support.",
         fix: "Install Node 20+ via nvm, fnm, or your package manager.",
       });
     }
@@ -93,23 +95,23 @@ export class SystemPreflight {
         name: "tmux",
         ok: false,
         error: "tmux was not found in PATH.",
-        reason: "Rigged uses tmux to create and control agent sessions.",
+        reason: "OpenRig uses tmux to create and control agent sessions.",
         fix: "Install tmux (brew install tmux on macOS, apt install tmux on Debian/Ubuntu).",
       });
     }
 
-    // 3. Writable Rigged home + transcript path
+    // 3. Writable OpenRig home + transcript path
     const pathsToCheck = [
-      { path: this.deps.riggedHome, label: "Rigged home" },
+      { path: openrigHome, label: "OpenRig home" },
     ];
     // Check DB directory if different from home
     const dbDir = dirname(config.db.path);
-    if (dbDir && dbDir !== this.deps.riggedHome && !dbDir.startsWith(this.deps.riggedHome + "/")) {
+    if (dbDir && dbDir !== openrigHome && !dbDir.startsWith(openrigHome + "/")) {
       pathsToCheck.push({ path: dbDir, label: "Database directory" });
     }
     // Check transcript path if different from home
     const transcriptPath = config.transcripts.path;
-    if (transcriptPath && transcriptPath !== this.deps.riggedHome && !transcriptPath.startsWith(this.deps.riggedHome + "/")) {
+    if (transcriptPath && transcriptPath !== openrigHome && !transcriptPath.startsWith(openrigHome + "/")) {
       pathsToCheck.push({ path: transcriptPath, label: "Transcript directory" });
     }
     let writableOk = true;
@@ -130,8 +132,8 @@ export class SystemPreflight {
         name: "writable_home",
         ok: false,
         error: writableErrors.join(" "),
-        reason: "Rigged stores database, config, and transcripts in these directories.",
-        fix: `Fix directory permissions, or change paths with rigged config set db.path / transcripts.path.`,
+        reason: "OpenRig stores database, config, and transcripts in these directories.",
+        fix: `Fix directory permissions, or change paths with rig config set db.path / transcripts.path.`,
       });
     }
 
@@ -155,7 +157,7 @@ export class SystemPreflight {
           ok: false,
           error: `Port ${effectivePort} is already in use on ${effectiveHost}.`,
           reason: "The daemon cannot bind to a port that is already occupied.",
-          fix: `Run rigged config set daemon.port ${effectivePort + 1} and retry, or find the existing process with lsof -nP -iTCP:${effectivePort} -sTCP:LISTEN.`,
+          fix: `Run rig config set daemon.port ${effectivePort + 1} and retry, or find the existing process with lsof -nP -iTCP:${effectivePort} -sTCP:LISTEN.`,
         });
       }
     }

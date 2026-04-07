@@ -109,7 +109,7 @@ describe("Requirements CLI", () => {
   // T9: requirements prints status table
   it("requirements prints per-requirement status table", async () => {
     const { logs } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "requirements", "/tmp/rig.yaml"]);
+      await makeCmd().parseAsync(["node", "rig", "requirements", "/tmp/rig.yaml"]);
     });
     expect(logs.some((l) => l.includes("REQUIREMENTS"))).toBe(true);
     expect(logs.some((l) => l.includes("OK") && l.includes("git"))).toBe(true);
@@ -128,7 +128,7 @@ describe("Requirements CLI", () => {
     ];
 
     const { exitCode } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "requirements", "/tmp/rig.yaml"]);
+      await makeCmd().parseAsync(["node", "rig", "requirements", "/tmp/rig.yaml"]);
     });
     expect(exitCode).toBeUndefined(); // no exitCode set = 0
 
@@ -138,7 +138,7 @@ describe("Requirements CLI", () => {
   // T11: some missing -> exit 1
   it("some requirements missing returns exit 1", async () => {
     const { exitCode } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "requirements", "/tmp/rig.yaml"]);
+      await makeCmd().parseAsync(["node", "rig", "requirements", "/tmp/rig.yaml"]);
     });
     expect(exitCode).toBe(1);
   });
@@ -146,7 +146,7 @@ describe("Requirements CLI", () => {
   // T12a: --json with missing requirement -> exit 1
   it("--json with missing requirement returns exit 1", async () => {
     const { exitCode, logs } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "requirements", "/tmp/rig.yaml", "--json"]);
+      await makeCmd().parseAsync(["node", "rig", "requirements", "/tmp/rig.yaml", "--json"]);
     });
     expect(exitCode).toBe(1);
     // Should still output JSON
@@ -168,7 +168,7 @@ describe("Requirements CLI", () => {
     });
 
     await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "requirements", "/my/spec.yaml"]);
+      await makeCmd().parseAsync(["node", "rig", "requirements", "/my/spec.yaml"]);
     });
 
     const parsed = JSON.parse(capturedBody);

@@ -12,7 +12,7 @@ interface PreflightCommandDeps {
 }
 
 export function preflightCommand(depsOverride?: PreflightCommandDeps): Command {
-  const cmd = new Command("preflight").description("Check system readiness for Rigged");
+  const cmd = new Command("preflight").description("Check system readiness for OpenRig");
 
   cmd
     .option("--json", "JSON output for agents")
@@ -54,7 +54,7 @@ export function preflightCommand(depsOverride?: PreflightCommandDeps): Command {
         console.log("\nAll checks passed. Ready to run.");
       } else {
         const failCount = result.checks.filter((c) => !c.ok).length;
-        console.log(`\n${failCount} check(s) failed. Fix the issues above and run rigged preflight again.`);
+        console.log(`\n${failCount} check(s) failed. Fix the issues above and run rig preflight again.`);
         process.exitCode = 1;
       }
     });

@@ -17,9 +17,9 @@ export function restoreCommand(depsOverride?: StatusDeps): Command {
 
       if (status.state !== "running" || status.healthy === false) {
         if (status.state === "running" && status.healthy === false) {
-          console.error("Daemon unhealthy — healthz check failed. Restart with: rigged daemon start");
+          console.error("Daemon unhealthy — healthz check failed. Restart with: rig daemon start");
         } else {
-          console.error("Daemon not running. Start it with: rigged daemon start");
+          console.error("Daemon not running. Start it with: rig daemon start");
         }
         process.exitCode = 1;
         return;
@@ -31,10 +31,10 @@ export function restoreCommand(depsOverride?: StatusDeps): Command {
       const res = await client.post<{ nodes?: Array<{ nodeId: string; logicalId: string; status: string; error?: string }>; attachCommand?: string }>(`/api/rigs/${encodeURIComponent(rigId)}/restore/${encodeURIComponent(snapshotId)}`);
 
       if (res.status === 404) {
-        console.error(`Snapshot "${snapshotId}" or rig "${rigId}" not found. List snapshots with: rigged snapshot list --rig ${rigId}`);
+        console.error(`Snapshot "${snapshotId}" or rig "${rigId}" not found. List snapshots with: rig snapshot list --rig ${rigId}`);
         process.exitCode = 1;
       } else if (res.status === 409) {
-        console.error(`Restore conflict: ${(res.data as { error?: string }).error ?? "rig may still be running"}. Stop the rig first with: rigged down ${rigId}`);
+        console.error(`Restore conflict: ${(res.data as { error?: string }).error ?? "rig may still be running"}. Stop the rig first with: rig down ${rigId}`);
         process.exitCode = 1;
       } else if (res.status >= 400) {
         console.error(`Restore failed: ${(res.data as { error?: string }).error ?? "unknown error"} (HTTP ${res.status}). Check daemon logs or try a different snapshot.`);

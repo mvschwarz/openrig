@@ -313,7 +313,7 @@ describe("Session routes", () => {
     expect(body.transcript.enabled).toBe(true);
     expect(body.transcript.path).toContain("test-rig");
     expect(body.transcript.path).toContain("dev-impl@test-rig");
-    expect(body.transcript.tailCommand).toBe("rigged transcript dev-impl@test-rig --tail 100");
+    expect(body.transcript.tailCommand).toBe("rig transcript dev-impl@test-rig --tail 100");
 
     // Cleanup
     fs.rmSync(tmpDir, { recursive: true, force: true });

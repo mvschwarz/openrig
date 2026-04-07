@@ -10,7 +10,7 @@ import {
   getDaemonPath,
   STATE_FILE,
   LOG_FILE,
-  RIGGED_DIR,
+  OPENRIG_DIR,
   type LifecycleDeps,
   type DaemonState,
 } from "../src/daemon-lifecycle.js";
@@ -55,7 +55,7 @@ describe("Daemon Lifecycle", () => {
   // Test 2: start constructs exact spawn command with correct env/redirect
   it("start: constructs spawn with node, daemon entry, env, and log redirect", async () => {
     const deps = mockDeps();
-    await startDaemon({ port: 7433, db: "rigged.sqlite" }, deps);
+    await startDaemon({ port: 7433, db: "openrig.sqlite" }, deps);
 
     const spawnMock = deps.spawn as ReturnType<typeof vi.fn>;
     expect(spawnMock).toHaveBeenCalledOnce();
@@ -65,8 +65,8 @@ describe("Daemon Lifecycle", () => {
     expect(args[0]).toContain("packages/daemon");
     expect(args[0]).toContain("dist/index.js");
     expect(opts.env).toMatchObject({
-      RIGGED_PORT: "7433",
-      RIGGED_DB: "rigged.sqlite",
+      OPENRIG_PORT: "7433",
+      OPENRIG_DB: "openrig.sqlite",
     });
     expect(opts.detached).toBe(true);
   });
@@ -104,7 +104,7 @@ describe("Daemon Lifecycle", () => {
 
   // Test 5: stop reads pid from daemon.json, sends SIGTERM, removes daemon.json
   it("stop: reads pid, sends SIGTERM, removes daemon.json", async () => {
-    const state: DaemonState = { pid: 555, port: 7433, db: "rigged.sqlite", startedAt: "2026-01-01T00:00:00Z" };
+    const state: DaemonState = { pid: 555, port: 7433, db: "openrig.sqlite", startedAt: "2026-01-01T00:00:00Z" };
     const deps = mockDeps({
       exists: vi.fn((p: string) => p === STATE_FILE),
       readFile: vi.fn((p: string) => {
@@ -190,7 +190,7 @@ describe("Daemon Lifecycle", () => {
 
     const spawnMock = deps.spawn as ReturnType<typeof vi.fn>;
     const env = spawnMock.mock.calls[0]![2].env;
-    expect(env.RIGGED_PORT).toBe("9999");
+    expect(env.OPENRIG_PORT).toBe("9999");
   });
 
   // Test 11: start invoked from different cwd -> still resolves correct daemon path
@@ -244,7 +244,7 @@ describe("Daemon Lifecycle", () => {
     console.log = (...args: unknown[]) => logs.push(args.join(" "));
 
     try {
-      await program.parseAsync(["node", "rigged", "daemon", "status"]);
+      await program.parseAsync(["node", "rig", "daemon", "status"]);
     } finally {
       console.log = origLog;
     }
@@ -255,12 +255,12 @@ describe("Daemon Lifecycle", () => {
     expect(logs.join("\n")).toMatch(/stopped/i);
   });
 
-  // Test 15: start creates ~/.rigged directory if missing
-  it("start: creates RIGGED_DIR if missing", async () => {
+  // Test 15: start creates ~/.openrig directory if missing
+  it("start: creates OPENRIG_DIR if missing", async () => {
     const deps = mockDeps();
     await startDaemon({ port: 7433 }, deps);
 
-    expect(deps.mkdirp).toHaveBeenCalledWith(RIGGED_DIR);
+    expect(deps.mkdirp).toHaveBeenCalledWith(OPENRIG_DIR);
   });
 
   // Test 16: logs --follow passes follow flag to tailLogs
@@ -322,7 +322,7 @@ describe("Daemon Lifecycle", () => {
   });
 
   // Test 19: start with stale PID (pid alive but healthz fails) -> allows start (PID reuse safety)
-  it("start: stale PID (alive but not rigged) -> proceeds to start new daemon", async () => {
+  it("start: stale PID (alive but not rig) -> proceeds to start new daemon", async () => {
     const state: DaemonState = { pid: 999, port: 7433, db: "x.db", startedAt: "2026-01-01T00:00:00Z" };
     let fetchCount = 0;
     const deps = mockDeps({
@@ -345,8 +345,8 @@ describe("Daemon Lifecycle", () => {
     expect(result.pid).toBe(12345); // new daemon spawned
   });
 
-  // Test 20: stop with stale PID (alive but not rigged) -> cleans up state, no SIGTERM
-  it("stop: stale PID (alive but not rigged) -> removes state, does not kill", async () => {
+  // Test 20: stop with stale PID (alive but not rig) -> cleans up state, no SIGTERM
+  it("stop: stale PID (alive but not rig) -> removes state, does not kill", async () => {
     const state: DaemonState = { pid: 999, port: 7433, db: "x.db", startedAt: "2026-01-01T00:00:00Z" };
     const deps = mockDeps({
       exists: vi.fn((p: string) => p === STATE_FILE),
@@ -391,8 +391,8 @@ describe("Daemon Lifecycle", () => {
     expect(result.pid).toBe(12345);
   });
 
-  // Test 23: start with unhealthy rigged daemon (healthz responds non-ok) -> blocks start
-  it("start: unhealthy rigged daemon (healthz responds) -> throws already running", async () => {
+  // Test 23: start with unhealthy rig daemon (healthz responds non-ok) -> blocks start
+  it("start: unhealthy rig daemon (healthz responds) -> throws already running", async () => {
     const state: DaemonState = { pid: 999, port: 7433, db: "x.db", startedAt: "2026-01-01T00:00:00Z" };
     const deps = mockDeps({
       exists: vi.fn((p: string) => p === STATE_FILE),
@@ -401,15 +401,15 @@ describe("Daemon Lifecycle", () => {
         return null;
       }),
       isProcessAlive: vi.fn(() => true),
-      // healthz responds (even if not ok) → port is ours → rigged
+      // healthz responds (even if not ok) → port is ours → rig
       fetch: vi.fn(async () => ({ ok: false })),
     });
 
     await expect(startDaemon({ port: 7433 }, deps)).rejects.toThrow(/already running/i);
   });
 
-  // Test 24: stop with unhealthy rigged daemon -> still sends SIGTERM (it's our process)
-  it("stop: unhealthy rigged daemon -> sends SIGTERM", async () => {
+  // Test 24: stop with unhealthy rig daemon -> still sends SIGTERM (it's our process)
+  it("stop: unhealthy rig daemon -> sends SIGTERM", async () => {
     const state: DaemonState = { pid: 999, port: 7433, db: "x.db", startedAt: "2026-01-01T00:00:00Z" };
     const deps = mockDeps({
       exists: vi.fn((p: string) => p === STATE_FILE),
@@ -420,7 +420,7 @@ describe("Daemon Lifecycle", () => {
       isProcessAlive: vi.fn()
         .mockReturnValueOnce(true)  // checkPid: alive
         .mockReturnValueOnce(false), // after kill: dead
-      // healthz responds (non-ok) → still rigged
+      // healthz responds (non-ok) → still rig
       fetch: vi.fn(async () => ({ ok: false })),
     });
 
@@ -432,17 +432,17 @@ describe("Daemon Lifecycle", () => {
   // Test 25: start spawns process.execPath, not bare "node"
   it("start: spawns process.execPath as the Node binary", async () => {
     const deps = mockDeps();
-    await startDaemon({ port: 7433, db: "rigged.sqlite" }, deps);
+    await startDaemon({ port: 7433, db: "openrig.sqlite" }, deps);
 
     const spawnMock = deps.spawn as ReturnType<typeof vi.fn>;
     const [cmd] = spawnMock.mock.calls[0]!;
     expect(cmd).toBe(process.execPath);
   });
 
-  // Test 26: RIGGED_URL set → getDaemonStatus bypasses daemon.json
-  it("status: RIGGED_URL set → probes URL directly, ignores daemon.json", async () => {
-    const prev = process.env["RIGGED_URL"];
-    process.env["RIGGED_URL"] = "http://127.0.0.1:7455";
+  // Test 26: OPENRIG_URL set → getDaemonStatus bypasses daemon.json
+  it("status: OPENRIG_URL set → probes URL directly, ignores daemon.json", async () => {
+    const prev = process.env["OPENRIG_URL"];
+    process.env["OPENRIG_URL"] = "http://127.0.0.1:7455";
     try {
       const deps = mockDeps({
         exists: vi.fn(() => false),
@@ -457,15 +457,15 @@ describe("Daemon Lifecycle", () => {
       // daemon.json was never read
       expect(deps.readFile).not.toHaveBeenCalled();
     } finally {
-      if (prev === undefined) delete process.env["RIGGED_URL"];
-      else process.env["RIGGED_URL"] = prev;
+      if (prev === undefined) delete process.env["OPENRIG_URL"];
+      else process.env["OPENRIG_URL"] = prev;
     }
   });
 
-  // Test 27: RIGGED_URL set but unreachable → stopped
-  it("status: RIGGED_URL set but unreachable → stopped", async () => {
-    const prev = process.env["RIGGED_URL"];
-    process.env["RIGGED_URL"] = "http://127.0.0.1:9999";
+  // Test 27: OPENRIG_URL set but unreachable → stopped
+  it("status: OPENRIG_URL set but unreachable → stopped", async () => {
+    const prev = process.env["OPENRIG_URL"];
+    process.env["OPENRIG_URL"] = "http://127.0.0.1:9999";
     try {
       const deps = mockDeps({
         exists: vi.fn(() => false),
@@ -476,8 +476,8 @@ describe("Daemon Lifecycle", () => {
       const status = await getDaemonStatus(deps);
       expect(status.state).toBe("stopped");
     } finally {
-      if (prev === undefined) delete process.env["RIGGED_URL"];
-      else process.env["RIGGED_URL"] = prev;
+      if (prev === undefined) delete process.env["OPENRIG_URL"];
+      else process.env["OPENRIG_URL"] = prev;
     }
   });
 });

@@ -18,7 +18,7 @@ export function bundleCommand(depsOverride?: StatusDeps): Command {
     return deps.clientFactory(getDaemonUrl(status));
   }
 
-  // rigged bundle create <spec> -o <path>
+  // rig bundle create <spec> -o <path>
   cmd.command("create <spec>")
     .description("Create a .rigbundle from a rig spec")
     .requiredOption("-o, --output <path>", "Output path for .rigbundle")
@@ -49,7 +49,7 @@ export function bundleCommand(depsOverride?: StatusDeps): Command {
       console.log(`  Hash: ${res.data["archiveHash"]}`);
     });
 
-  // rigged bundle inspect <path>
+  // rig bundle inspect <path>
   cmd.command("inspect <path>")
     .description("Inspect a .rigbundle")
     .option("--json", "JSON output")
@@ -86,7 +86,7 @@ export function bundleCommand(depsOverride?: StatusDeps): Command {
       if (!digestValid || !integrityPassed) process.exitCode = 2;
     });
 
-  // rigged bundle install <path>
+  // rig bundle install <path>
   cmd.command("install <path>")
     .description("Install a .rigbundle (bootstrap from bundle)")
     .option("--plan", "Plan mode")

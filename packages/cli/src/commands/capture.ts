@@ -19,17 +19,17 @@ export function captureCommand(depsOverride?: StatusDeps): Command {
     .option("--json", "JSON output for agents")
     .addHelpText("after", `
 Examples:
-  rigged capture dev-impl@my-rig
-  rigged capture dev-impl@my-rig --lines 50
-  rigged capture --rig my-rig
-  rigged capture --pod dev --rig my-rig
-  rigged capture --rig my-rig --json`)
+  rig capture dev-impl@my-rig
+  rig capture dev-impl@my-rig --lines 50
+  rig capture --rig my-rig
+  rig capture --pod dev --rig my-rig
+  rig capture --rig my-rig --json`)
     .action(async (session: string | undefined, opts: { rig?: string; pod?: string; lines?: string; json?: boolean }) => {
       const deps = getDeps();
       const status = await getDaemonStatus(deps.lifecycleDeps);
 
       if (status.state !== "running" || status.healthy === false) {
-        console.error("Daemon not running. Start it with: rigged daemon start");
+        console.error("Daemon not running. Start it with: rig daemon start");
         process.exitCode = 1;
         return;
       }

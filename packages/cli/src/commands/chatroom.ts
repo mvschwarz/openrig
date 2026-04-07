@@ -16,7 +16,7 @@ async function resolveRigId(client: DaemonClient, rigName: string): Promise<stri
   const matches = res.data.filter((r) => r.name === rigName);
 
   if (matches.length === 0) {
-    throw new Error(`Rig '${rigName}' not found. List rigs with: rigged ps`);
+    throw new Error(`Rig '${rigName}' not found. List rigs with: rig ps`);
   }
   if (matches.length > 1) {
     throw new Error(`Rig '${rigName}' is ambiguous — ${matches.length} rigs share that name. Use a unique name or remove duplicates.`);
@@ -36,7 +36,7 @@ export function chatroomCommand(depsOverride?: StatusDeps): Command {
     const deps = getDeps();
     const status = await getDaemonStatus(deps.lifecycleDeps);
     if (status.state !== "running" || status.healthy === false) {
-      console.error("Daemon not running. Start it with: rigged daemon start");
+      console.error("Daemon not running. Start it with: rig daemon start");
       process.exitCode = 1;
       return null;
     }
@@ -147,7 +147,7 @@ export function chatroomCommand(depsOverride?: StatusDeps): Command {
       if (opts.tmux) {
         const sessionName = `chatroom@${rig}`;
         try {
-          execSync(`tmux new-session -d -s ${JSON.stringify(sessionName)} "rigged chatroom watch ${JSON.stringify(rig)}"`, { stdio: "ignore" });
+          execSync(`tmux new-session -d -s ${JSON.stringify(sessionName)} "rig chatroom watch ${JSON.stringify(rig)}"`, { stdio: "ignore" });
           console.log(`Started watch in tmux session: ${sessionName}`);
           console.log(`Attach with: tmux attach -t ${sessionName}`);
         } catch {

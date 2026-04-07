@@ -7,7 +7,7 @@ import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 
 /**
- * `rigged mcp serve` — start MCP server wrapping the daemon API.
+ * `rig mcp serve` — start MCP server wrapping the daemon API.
  * @param depsOverride - injectable deps for testing
  * @returns Commander command
  */
@@ -33,7 +33,7 @@ export function mcpCommand(depsOverride?: StatusDeps): Command {
       } else {
         const status = await getDaemonStatus(deps.lifecycleDeps);
         if (status.state !== "running" || status.healthy === false) {
-          console.error("Daemon not running. Start with: rigged daemon start");
+          console.error("Daemon not running. Start with: rig daemon start");
           process.exitCode = 1;
           return;
         }

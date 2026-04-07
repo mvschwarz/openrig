@@ -11,14 +11,14 @@ export interface RigDeps extends StatusDeps {
 }
 
 export function rigCommand(depsOverride?: RigDeps): Command {
-  const cmd = new Command("rig").description("Manage rig specs");
+  const cmd = new Command("spec").description("Manage rig specs");
   const getDeps = (): RigDeps => depsOverride ?? {
     lifecycleDeps: realDeps(),
     clientFactory: (url: string) => new DaemonClient(url),
     readFile: (p) => fs.readFileSync(p, "utf-8"),
   };
 
-  // rigged rig validate <path>
+  // rig spec validate <path>
   cmd
     .command("validate <path>")
     .description("Validate a rig spec (pure schema validation)")
@@ -38,9 +38,9 @@ export function rigCommand(depsOverride?: RigDeps): Command {
       const status = await getDaemonStatus(deps.lifecycleDeps);
       if (status.state !== "running" || status.healthy === false) {
         if (status.state === "running" && status.healthy === false) {
-          console.error("Daemon unhealthy — healthz check failed. Restart with: rigged daemon start");
+          console.error("Daemon unhealthy — healthz check failed. Restart with: rig daemon start");
         } else {
-          console.error("Daemon not running. Start it with: rigged daemon start");
+          console.error("Daemon not running. Start it with: rig daemon start");
         }
         process.exitCode = 1;
         return;
@@ -80,7 +80,7 @@ export function rigCommand(depsOverride?: RigDeps): Command {
       }
     });
 
-  // rigged rig preflight <path>
+  // rig spec preflight <path>
   cmd
     .command("preflight <path>")
     .description("Run preflight diagnostics on a rig spec")
@@ -101,9 +101,9 @@ export function rigCommand(depsOverride?: RigDeps): Command {
       const status = await getDaemonStatus(deps.lifecycleDeps);
       if (status.state !== "running" || status.healthy === false) {
         if (status.state === "running" && status.healthy === false) {
-          console.error("Daemon unhealthy — healthz check failed. Restart with: rigged daemon start");
+          console.error("Daemon unhealthy — healthz check failed. Restart with: rig daemon start");
         } else {
-          console.error("Daemon not running. Start it with: rigged daemon start");
+          console.error("Daemon not running. Start it with: rig daemon start");
         }
         process.exitCode = 1;
         return;

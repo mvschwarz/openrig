@@ -77,6 +77,11 @@ import { agentspecRebootSchema } from "./db/migrations/014_agentspec_reboot.js";
 import { startupContextSchema } from "./db/migrations/015_startup_context.js";
 import { chatMessagesSchema } from "./db/migrations/016_chat_messages.js";
 import { podNamespaceSchema } from "./db/migrations/017_pod_namespace.js";
+import {
+  getCompatibleOpenRigPath,
+  getDefaultOpenRigPath,
+  readOpenRigEnv,
+} from "./openrig-compat.js";
 
 interface DaemonOptions {
   dbPath?: string;
@@ -111,8 +116,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   );
 
   // Read transcript config from env (passed by CLI via PNS-T02 config surface)
-  const transcriptsEnabled = process.env["RIGGED_TRANSCRIPTS_ENABLED"] !== "false";
-  const transcriptsPath = process.env["RIGGED_TRANSCRIPTS_PATH"] || undefined;
+  const transcriptsEnabled = readOpenRigEnv("OPENRIG_TRANSCRIPTS_ENABLED", "RIGGED_TRANSCRIPTS_ENABLED") !== "false";
+  const transcriptsPath = readOpenRigEnv("OPENRIG_TRANSCRIPTS_PATH", "RIGGED_TRANSCRIPTS_PATH") || undefined;
   const transcriptStore = new TranscriptStore({
     enabled: transcriptsEnabled,
     transcriptsRoot: transcriptsPath,
@@ -300,8 +305,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       const chatRepoForAsk = new ChatRepository(db);
       const historyQuery = new HistoryQuery({
         transcriptsRoot: transcriptStore.enabled
-          ? (transcriptsPath ?? nodePath.join(os.homedir(), ".rigged", "transcripts"))
-          : nodePath.join(os.homedir(), ".rigged", "transcripts"),
+          ? (transcriptsPath ?? getCompatibleOpenRigPath("transcripts"))
+          : getCompatibleOpenRigPath("transcripts"),
         exec: execDep,
         chatSearchFn: (rigId: string, pattern: string) =>
           chatRepoForAsk.searchChat(rigId, pattern).map((m) => ({
@@ -320,13 +325,17 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     whoamiService: new WhoamiService({ db, rigRepo, sessionRegistry, transcriptStore }),
     specReviewService,
     specLibraryService: (() => {
-      const userSpecsRoot = nodePath.join(os.homedir(), ".rigged", "specs");
+      const userSpecsRoot = getDefaultOpenRigPath("specs");
+      const legacySpecsRoot = getCompatibleOpenRigPath("specs");
       try { fs.mkdirSync(userSpecsRoot, { recursive: true }); } catch { /* best-effort */ }
       // From src/ or dist/, ../specs points to packages/daemon/specs/
       const builtinSpecsRoot = nodePath.resolve(import.meta.dirname, "../specs");
       const roots: Array<{ path: string; sourceType: "builtin" | "user_file" }> = [
         { path: userSpecsRoot, sourceType: "user_file" },
       ];
+      if (legacySpecsRoot !== userSpecsRoot && fs.existsSync(legacySpecsRoot)) {
+        roots.push({ path: legacySpecsRoot, sourceType: "user_file" });
+      }
       // Only add builtin root if it exists
       if (fs.existsSync(builtinSpecsRoot)) {
         roots.unshift({ path: builtinSpecsRoot, sourceType: "builtin" });

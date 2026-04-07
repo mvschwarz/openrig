@@ -439,7 +439,7 @@ describe("NodeLauncher", () => {
   });
 
   describe("env var projection", () => {
-    it("passes RIGGED_NODE_ID and RIGGED_SESSION_NAME to createSession", async () => {
+    it("passes OPENRIG_NODE_ID and OPENRIG_SESSION_NAME to createSession", async () => {
       const { rig, node } = seedRigWithNode();
       const createSpy = vi.fn<(name: string, cwd?: string, env?: Record<string, string>) => Promise<TmuxResult>>()
         .mockResolvedValue({ ok: true });
@@ -452,8 +452,8 @@ describe("NodeLauncher", () => {
 
       const envArg = createSpy.mock.calls[0]![2];
       expect(envArg).toBeDefined();
-      expect(envArg!.RIGGED_NODE_ID).toBe(node.id);
-      expect(envArg!.RIGGED_SESSION_NAME).toContain("dev1-impl");
+      expect(envArg!.OPENRIG_NODE_ID).toBe(node.id);
+      expect(envArg!.OPENRIG_SESSION_NAME).toContain("dev1-impl");
     });
   });
 });

@@ -115,7 +115,7 @@ export class SessionTransport {
   private resolveGlobal(): ResolveResult {
     const allRigs = this.rigRepo.listRigs();
     if (allRigs.length === 0) {
-      return { ok: false, code: "not_found", error: "No rigs found. Check status with: rigged ps" };
+      return { ok: false, code: "not_found", error: "No rigs found. Check status with: rig ps" };
     }
     const sessions: Array<{ sessionName: string; rigName: string; nodeLogicalId: string }> = [];
     const seenRigIds = new Set<string>();
@@ -139,7 +139,7 @@ export class SessionTransport {
       }
     }
     if (sessions.length === 0) {
-      return { ok: false, code: "not_found", error: "No running sessions found. Check status with: rigged ps" };
+      return { ok: false, code: "not_found", error: "No running sessions found. Check status with: rig ps" };
     }
     return { ok: true, sessions };
   }
@@ -153,7 +153,7 @@ export class SessionTransport {
       return {
         ok: false,
         code: "not_found",
-        error: `Session '${sessionName}' not found. Check session names with: rigged ps --nodes`,
+        error: `Session '${sessionName}' not found. Check session names with: rig ps --nodes`,
       };
     }
 
@@ -175,7 +175,7 @@ export class SessionTransport {
       return {
         ok: false,
         code: "not_found",
-        error: `Session '${sessionName}' not found. Check session names with: rigged ps --nodes`,
+        error: `Session '${sessionName}' not found. Check session names with: rig ps --nodes`,
       };
     }
 
@@ -201,7 +201,7 @@ export class SessionTransport {
       return {
         ok: false,
         code: "not_found",
-        error: `No rig named '${rigName}' found. Check available rigs with: rigged ps`,
+        error: `No rig named '${rigName}' found. Check available rigs with: rig ps`,
       };
     }
 
@@ -237,7 +237,7 @@ export class SessionTransport {
       return {
         ok: false,
         code: "not_found",
-        error: `No running sessions found for rig '${rigName}'. Check rig status with: rigged ps`,
+        error: `No running sessions found for rig '${rigName}'. Check rig status with: rig ps`,
       };
     }
 
@@ -255,8 +255,8 @@ export class SessionTransport {
         ok: false,
         code: "not_found",
         error: rigName
-          ? `No rig named '${rigName}' found. Check available rigs with: rigged ps`
-          : `No rigs found. Check status with: rigged ps`,
+          ? `No rig named '${rigName}' found. Check available rigs with: rig ps`
+          : `No rigs found. Check status with: rig ps`,
       };
     }
 
@@ -293,7 +293,7 @@ export class SessionTransport {
       return {
         ok: false,
         code: "not_found",
-        error: `No running sessions found for pod '${podName}'${rigName ? ` in rig '${rigName}'` : ""}. Check available pods with: rigged ps --nodes`,
+        error: `No running sessions found for pod '${podName}'${rigName ? ` in rig '${rigName}'` : ""}. Check available pods with: rig ps --nodes`,
       };
     }
 
@@ -320,7 +320,7 @@ export class SessionTransport {
           ok: false,
           sessionName,
           reason: "session_missing",
-          error: `Session '${sessionName}' not found. Check available sessions with: rigged ps --nodes`,
+          error: `Session '${sessionName}' not found. Check available sessions with: rig ps --nodes`,
         };
       }
     } catch {
@@ -418,7 +418,7 @@ export class SessionTransport {
         return {
           ok: false,
           sessionName,
-          error: `Session '${sessionName}' not found. Check available sessions with: rigged ps --nodes`,
+          error: `Session '${sessionName}' not found. Check available sessions with: rig ps --nodes`,
         };
       }
     } catch {

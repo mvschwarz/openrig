@@ -52,14 +52,14 @@ function runningDeps(port: number, execFn?: UiDeps["exec"]): UiDeps {
   };
 }
 
-describe("rigged ui open", () => {
+describe("rig ui open", () => {
   // Test 1: Daemon up -> exec open with UI URL AND prints URL
   it("daemon up -> exec open with UI URL and prints URL", async () => {
     const execFn = vi.fn(async () => {});
     const deps = runningDeps(8888, execFn);
     const program = new Command();
     program.addCommand(uiCommand(deps));
-    const logs = await captureLogs(() => program.parseAsync(["node", "rigged", "ui", "open"]));
+    const logs = await captureLogs(() => program.parseAsync(["node", "rig", "ui", "open"]));
 
     expect(execFn).toHaveBeenCalledWith("open", ["http://127.0.0.1:5173"]);
     expect(logs.join("\n")).toContain("http://127.0.0.1:5173");
@@ -74,7 +74,7 @@ describe("rigged ui open", () => {
     };
     const program = new Command();
     program.addCommand(uiCommand(deps));
-    const logs = await captureLogs(() => program.parseAsync(["node", "rigged", "ui", "open"]));
+    const logs = await captureLogs(() => program.parseAsync(["node", "rig", "ui", "open"]));
 
     expect(logs.join("\n")).toMatch(/not running/i);
     expect(execFn).not.toHaveBeenCalled();
@@ -86,7 +86,7 @@ describe("rigged ui open", () => {
     const deps = runningDeps(9999, execFn);
     const program = new Command();
     program.addCommand(uiCommand(deps));
-    const logs = await captureLogs(() => program.parseAsync(["node", "rigged", "ui", "open"]));
+    const logs = await captureLogs(() => program.parseAsync(["node", "rig", "ui", "open"]));
 
     expect(execFn).toHaveBeenCalledWith("open", ["http://127.0.0.1:5173"]);
     expect(logs.join("\n")).toContain("http://127.0.0.1:5173");
@@ -109,14 +109,14 @@ describe("rigged ui open", () => {
     };
     const program = new Command();
     program.addCommand(uiCommand(deps));
-    const logs = await captureLogs(() => program.parseAsync(["node", "rigged", "ui", "open"]));
+    const logs = await captureLogs(() => program.parseAsync(["node", "rig", "ui", "open"]));
 
     expect(logs.join("\n")).toMatch(/unhealthy/i);
     expect(execFn).not.toHaveBeenCalled();
   });
 
-  // Test 5: createProgram: rigged ui open mounted
-  it("rigged ui open is wired via createProgram", async () => {
+  // Test 5: createProgram: rig ui open mounted
+  it("rig ui open is wired via createProgram", async () => {
     const { createProgram } = await import("../src/index.js");
     const execFn = vi.fn(async () => {});
     const deps: UiDeps = {
@@ -124,7 +124,7 @@ describe("rigged ui open", () => {
       exec: execFn,
     };
     const program = createProgram({ uiDeps: deps });
-    const logs = await captureLogs(() => program.parseAsync(["node", "rigged", "ui", "open"]));
+    const logs = await captureLogs(() => program.parseAsync(["node", "rig", "ui", "open"]));
     expect(logs.join("\n")).toMatch(/not running/i);
   });
 
@@ -138,7 +138,7 @@ describe("rigged ui open", () => {
     const savedExitCode = process.exitCode;
     process.exitCode = undefined;
 
-    const logs = await captureLogs(() => program.parseAsync(["node", "rigged", "ui", "open"]));
+    const logs = await captureLogs(() => program.parseAsync(["node", "rig", "ui", "open"]));
 
     const output = logs.join("\n");
     // URL must be printed even when open fails
@@ -157,7 +157,7 @@ describe("rigged ui open", () => {
     const deps = runningDeps(5555, execFn);
     const program = new Command();
     program.addCommand(uiCommand(deps));
-    const logs = await captureLogs(() => program.parseAsync(["node", "rigged", "ui", "open"]));
+    const logs = await captureLogs(() => program.parseAsync(["node", "rig", "ui", "open"]));
 
     expect(logs.join("\n")).toContain("http://127.0.0.1:5173");
     expect(execFn).toHaveBeenCalled();

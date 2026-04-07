@@ -1,4 +1,5 @@
 import { Command } from "commander";
+import { getDefaultOpenRigPath } from "../openrig-compat.js";
 import { DaemonClient } from "../client.js";
 import { getDaemonStatus, getDaemonUrl } from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
@@ -43,7 +44,7 @@ export async function resolveLibrarySpec(
   }
 
   throw new Error(
-    `Spec '${nameOrId}' not found in library. Run 'rigged specs ls' to see available specs.`
+        `Spec '${nameOrId}' not found in library. Run 'rig specs ls' to see available specs.`
   );
 }
 
@@ -58,7 +59,7 @@ export function specsCommand(depsOverride?: StatusDeps): Command {
     const deps = getDeps();
     const status = await getDaemonStatus(deps.lifecycleDeps);
     if (status.state !== "running" || status.healthy === false) {
-      throw new Error("Daemon not running. Start it with: rigged daemon start");
+      throw new Error("Daemon not running. Start it with: rig daemon start");
     }
     return deps.clientFactory(getDaemonUrl(status));
   }
@@ -81,7 +82,7 @@ export function specsCommand(depsOverride?: StatusDeps): Command {
         }
 
         if (entries.length === 0) {
-          console.log("No specs in library. Add specs with: rigged specs add <path>");
+          console.log("No specs in library. Add specs with: rig specs add <path>");
           return;
         }
 
@@ -187,7 +188,7 @@ export function specsCommand(depsOverride?: StatusDeps): Command {
         }
 
         // Copy to user library
-        const userRoot = join(homedir(), ".rigged", "specs");
+        const userRoot = getDefaultOpenRigPath("specs");
         const { mkdirSync } = await import("node:fs");
         mkdirSync(userRoot, { recursive: true });
         const dest = join(userRoot, basename(filePath));

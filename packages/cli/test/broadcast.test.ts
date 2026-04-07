@@ -36,7 +36,7 @@ describe("Broadcast CLI", () => {
             res.end(JSON.stringify({
               total: 0, sent: 0, failed: 0,
               results: [
-                { ok: false, sessionName: "", error: "No running sessions found for rig 'empty-rig'. Check rig status with: rigged ps" },
+                { ok: false, sessionName: "", error: "No running sessions found for rig 'empty-rig'. Check rig status with: rig ps" },
               ],
             }));
           } else
@@ -78,7 +78,7 @@ describe("Broadcast CLI", () => {
 
   it("broadcast --rig prints per-target summary", async () => {
     const { logs } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "broadcast", "--rig", "my-rig", "hello"]);
+      await makeCmd().parseAsync(["node", "rig", "broadcast", "--rig", "my-rig", "hello"]);
     });
     const output = logs.join("\n");
     expect(output).toContain("dev-impl@my-rig: sent");
@@ -88,7 +88,7 @@ describe("Broadcast CLI", () => {
 
   it("broadcast without --rig/--pod sends globally", async () => {
     const { logs } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "broadcast", "System maintenance"]);
+      await makeCmd().parseAsync(["node", "rig", "broadcast", "System maintenance"]);
     });
     const output = logs.join("\n");
     expect(output).toContain("2/2 delivered");
@@ -96,7 +96,7 @@ describe("Broadcast CLI", () => {
 
   it("broadcast --json prints raw JSON", async () => {
     const { logs } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "broadcast", "--rig", "my-rig", "hello", "--json"]);
+      await makeCmd().parseAsync(["node", "rig", "broadcast", "--rig", "my-rig", "hello", "--json"]);
     });
     const parsed = JSON.parse(logs.join("\n"));
     expect(parsed.total).toBe(2);
@@ -105,7 +105,7 @@ describe("Broadcast CLI", () => {
 
   it("broadcast exits nonzero when no targets resolve", async () => {
     const { logs, exitCode } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "broadcast", "--rig", "empty-rig", "hello"]);
+      await makeCmd().parseAsync(["node", "rig", "broadcast", "--rig", "empty-rig", "hello"]);
     });
     const output = logs.join("\n");
     expect(output).toContain("No running sessions found");

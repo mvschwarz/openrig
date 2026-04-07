@@ -1,4 +1,4 @@
-# Rigged Source Codemap
+# OpenRig Source Codemap
 
 Source-driven map of every file under `packages/daemon/src`, `packages/cli/src`, and `packages/ui/src` at current `HEAD`.
 
@@ -196,8 +196,8 @@ Fast lookup:
 
 ### Entrypoints And Infrastructure
 - `packages/cli/src/client.ts`: Shared HTTP client for talking to the daemon API, including raw JSON posts and text-body posts with optional extra headers such as `X-Rig-Root`. Exports: DaemonClient, DaemonConnectionError, DaemonResponse. Related: none.
-- `packages/cli/src/daemon-lifecycle.ts`: Starts, stops, inspects, and tails the local daemon process. Spawns the daemon with `process.execPath` and bypasses local `daemon.json` gating when `RIGGED_URL` is set by probing remote `/healthz` directly. Exports: DaemonState, DaemonStatus, LOG_FILE, LifecycleDeps, RIGGED_DIR, STATE_FILE, StartOptions, getDaemonPath, getDaemonStatus, readLogs, startDaemon, stopDaemon, tailLogs. Related: none.
-- `packages/cli/src/index.ts`: Commander entrypoint that assembles the full `rigged` CLI program (31 mounted command groups, including Final Stretch 1 `specs`, `whoami`, `bind`, and `adopt`). Exports: ProgramDeps, createProgram. Related: `packages/cli/src/commands/bootstrap.js`, `packages/cli/src/commands/bundle.js`, `packages/cli/src/commands/claim.js`, `packages/cli/src/commands/daemon.js`, +18 more.
+- `packages/cli/src/daemon-lifecycle.ts`: Starts, stops, inspects, and tails the local daemon process. Spawns the daemon with `process.execPath` and bypasses local `daemon.json` gating when `OPENRIG_URL` is set by probing remote `/healthz` directly. Exports: DaemonState, DaemonStatus, LOG_FILE, LifecycleDeps, OPENRIG_DIR, STATE_FILE, StartOptions, getDaemonPath, getDaemonStatus, readLogs, startDaemon, stopDaemon, tailLogs. Related: none.
+- `packages/cli/src/index.ts`: Commander entrypoint that assembles the full `rig` CLI program (31 mounted command groups, including Final Stretch 1 `specs`, `whoami`, `bind`, and `adopt`). Exports: ProgramDeps, createProgram. Related: `packages/cli/src/commands/bootstrap.js`, `packages/cli/src/commands/bundle.js`, `packages/cli/src/commands/claim.js`, `packages/cli/src/commands/daemon.js`, +18 more.
 - `packages/cli/src/mcp-server.ts`: Implements the CLI-hosted MCP server over stdio, wrapping 17 daemon-backed tools including node inventory, send/capture, bundle/spec validation, and chatroom. Exports: createMcpServer. Related: `packages/cli/src/client.js`.
 
 ### Commands
@@ -236,7 +236,7 @@ Fast lookup:
 - `packages/cli/src/commands/chatroom.ts`: Commander command module for `chatroom` — durable group chat with subcommands `send`, `watch`, `history`, and `topic`. Exports: chatroomCommand. Related: `packages/cli/src/client.js`, `packages/cli/src/daemon-lifecycle.js`.
 
 ### CLI Infrastructure: Post-North-Star Additions
-- `packages/cli/src/config-store.ts`: Config file management at `~/.rigged/config.json`. 5 locked keys with env var overrides. Precedence: CLI flag > env var > config file > default. Exports: ConfigStore, RiggedConfig. Related: none (filesystem-only).
+- `packages/cli/src/config-store.ts`: Config file management at `~/.openrig/config.json` with legacy fallback from `~/.rigged/config.json`. 5 locked keys with env var overrides. Precedence: CLI flag > env var > config file > default. Exports: ConfigStore and config helpers. Related: none (filesystem-only).
 - `packages/cli/src/system-preflight.ts`: System readiness checks: Node.js version, tmux availability, writable directories, port availability. Every error follows the 3-part pattern (what + why + fix). Exports: SystemPreflight, PreflightCheck, PreflightResult. Related: `packages/cli/src/config-store.js`, `packages/cli/src/daemon-lifecycle.js`.
 
 ## UI

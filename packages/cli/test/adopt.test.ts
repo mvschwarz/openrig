@@ -60,7 +60,7 @@ function runningDeps(port: number, fileContent: string): ImportDeps {
   };
 }
 
-describe("rigged adopt", () => {
+describe("rig adopt", () => {
   let server: http.Server;
   let port: number;
   let capturedMaterializeHeaders: Record<string, string | string[] | undefined> = {};
@@ -137,7 +137,7 @@ describe("rigged adopt", () => {
 
     const { logs, exitCode } = await captureLogs(async () => {
       await program.parseAsync([
-        "node", "rigged", "adopt", "rig.yaml",
+        "node", "rig", "adopt", "rig.yaml",
         "--target-rig", "rig-123",
         "--rig-root", "/tmp/captured-dev-pod",
         "--bind", "research.scout=proof-research-scout2",
@@ -165,7 +165,7 @@ describe("rigged adopt", () => {
 
     const { logs, exitCode } = await captureLogs(async () => {
       await program.parseAsync([
-        "node", "rigged", "adopt", "rig.yaml",
+        "node", "rig", "adopt", "rig.yaml",
         "--rig-root", "/tmp/captured-dev-pod",
         "--bind", "research.scout=proof-research-scout2",
         "--bind", "research.synth=missing-session",
@@ -186,7 +186,7 @@ describe("rigged adopt", () => {
 
     const { logs, exitCode } = await captureLogs(async () => {
       await program.parseAsync([
-        "node", "rigged", "adopt", "rig.yaml",
+        "node", "rig", "adopt", "rig.yaml",
         "--rig-root", "/tmp/captured-dev-pod",
         "--bind", "research.scout=proof-research-scout2",
         "--json",

@@ -1,14 +1,14 @@
 import { mkdirSync, appendFileSync, existsSync, openSync, readSync, closeSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { homedir } from "node:os";
 import { StringDecoder } from "node:string_decoder";
+import { getCompatibleOpenRigPath } from "../openrig-compat.js";
 
 export interface TranscriptStoreOpts {
   transcriptsRoot?: string;
   enabled?: boolean;
 }
 
-const DEFAULT_ROOT = join(homedir(), ".rigged", "transcripts");
+const DEFAULT_ROOT = getCompatibleOpenRigPath("transcripts");
 
 function applyBackspaces(text: string): string {
   const chars: string[] = [];

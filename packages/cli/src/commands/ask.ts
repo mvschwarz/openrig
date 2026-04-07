@@ -32,8 +32,8 @@ export function askCommand(depsOverride?: StatusDeps): Command {
     .option("--json", "JSON output for agents")
     .addHelpText("after", `
 Examples:
-  rigged ask my-rig "what decisions were made about deployment?"
-  rigged ask my-rig "error handling strategy" --json
+  rig ask my-rig "what decisions were made about deployment?"
+  rig ask my-rig "error handling strategy" --json
 
 Exit codes:
   0  Success
@@ -50,7 +50,7 @@ Exit codes:
 
     const status = await getDaemonStatus(deps.lifecycleDeps);
     if (status.state !== "running" || status.healthy === false) {
-      console.error("Daemon not running. Start it with: rigged daemon start");
+      console.error("Daemon not running. Start it with: rig daemon start");
       process.exitCode = 1;
       return;
     }
@@ -59,7 +59,7 @@ Exit codes:
     const res = await client.post<AskResult>("/api/ask", { rig, question });
 
     if (res.status >= 400) {
-      console.error(`Failed to query rig (HTTP ${res.status}). Check daemon status with: rigged status`);
+      console.error(`Failed to query rig (HTTP ${res.status}). Check daemon status with: rig status`);
       process.exitCode = 2;
       return;
     }

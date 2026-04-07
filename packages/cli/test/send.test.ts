@@ -94,14 +94,14 @@ describe("Send CLI", () => {
 
   it("send prints success output", async () => {
     const { logs } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "send", "dev-impl@my-rig", "hello world"]);
+      await makeCmd().parseAsync(["node", "rig", "send", "dev-impl@my-rig", "hello world"]);
     });
     expect(logs.join("\n")).toContain("Sent to dev-impl@my-rig");
   });
 
   it("send with 409 mid-work prints error and exits non-zero", async () => {
     const { logs, exitCode } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "send", "busy-session", "hello"]);
+      await makeCmd().parseAsync(["node", "rig", "send", "busy-session", "hello"]);
     });
     expect(logs.join("\n")).toContain("mid-task");
     expect(exitCode).toBe(1);
@@ -109,7 +109,7 @@ describe("Send CLI", () => {
 
   it("send --json prints raw JSON", async () => {
     const { logs } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "send", "dev-impl@my-rig", "hello", "--json"]);
+      await makeCmd().parseAsync(["node", "rig", "send", "dev-impl@my-rig", "hello", "--json"]);
     });
     const parsed = JSON.parse(logs.join("\n"));
     expect(parsed.ok).toBe(true);

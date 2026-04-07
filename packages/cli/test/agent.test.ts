@@ -97,7 +97,7 @@ function createMockDaemon() {
   };
 }
 
-describe("rigged agent", () => {
+describe("rig agent", () => {
   let srv: ReturnType<typeof createMockDaemon>;
   let port: number;
 
@@ -115,12 +115,12 @@ describe("rigged agent", () => {
     };
   }
 
-  // T1: rigged agent validate valid spec -> exit 0, output contains "valid"
+  // T1: rig agent validate valid spec -> exit 0, output contains "valid"
   it("agent validate valid spec: prints valid + name + version", async () => {
     const deps = agentDeps("name: my-agent\nversion: 1.2.0\nruntime: claude-code\n");
     const program = new Command();
     program.addCommand(agentCommand(deps));
-    const { logs, exitCode } = await captureLogs(() => program.parseAsync(["node", "rigged", "agent", "validate", "agent.yaml"]));
+    const { logs, exitCode } = await captureLogs(() => program.parseAsync(["node", "rig", "agent", "validate", "agent.yaml"]));
     const output = logs.join("\n");
     expect(output).toContain("Agent spec valid");
     expect(output).toContain("my-agent");
@@ -128,12 +128,12 @@ describe("rigged agent", () => {
     expect(exitCode).toBeUndefined();
   });
 
-  // T2: rigged agent validate invalid spec -> exit 1, output contains error
+  // T2: rig agent validate invalid spec -> exit 1, output contains error
   it("agent validate invalid spec: prints errors, exitCode 1", async () => {
     const deps = agentDeps("INVALID");
     const program = new Command();
     program.addCommand(agentCommand(deps));
-    const { logs, exitCode } = await captureLogs(() => program.parseAsync(["node", "rigged", "agent", "validate", "agent.yaml"]));
+    const { logs, exitCode } = await captureLogs(() => program.parseAsync(["node", "rig", "agent", "validate", "agent.yaml"]));
     const output = logs.join("\n");
     expect(output).toContain("name is required");
     expect(output).toContain("missing runtime");

@@ -115,7 +115,7 @@ describe("Bootstrap CLI", () => {
   // T1: bootstrap --plan prints plan stages
   it("bootstrap --plan prints plan stages", async () => {
     const { logs } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "bootstrap", "/tmp/rig.yaml", "--plan"]);
+      await makeCmd().parseAsync(["node", "rig", "bootstrap", "/tmp/rig.yaml", "--plan"]);
     });
     expect(logs.some((l) => l.includes("BOOTSTRAP PLAN"))).toBe(true);
     expect(logs.some((l) => l.includes("resolve_spec"))).toBe(true);
@@ -124,7 +124,7 @@ describe("Bootstrap CLI", () => {
   // T2: bootstrap apply prints result
   it("bootstrap apply prints result with rigId", async () => {
     const { logs } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "bootstrap", "/tmp/rig.yaml", "--yes"]);
+      await makeCmd().parseAsync(["node", "rig", "bootstrap", "/tmp/rig.yaml", "--yes"]);
     });
     expect(logs.some((l) => l.includes("Rig: rig-1"))).toBe(true);
     expect(logs.some((l) => l.includes("completed"))).toBe(true);
@@ -133,7 +133,7 @@ describe("Bootstrap CLI", () => {
   // T3: bootstrap --yes sends autoApprove=true
   it("bootstrap --yes sends autoApprove=true in body", async () => {
     await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "bootstrap", "/tmp/rig.yaml", "--yes"]);
+      await makeCmd().parseAsync(["node", "rig", "bootstrap", "/tmp/rig.yaml", "--yes"]);
     });
     const body = JSON.parse(lastReq.body);
     expect(body.autoApprove).toBe(true);
@@ -142,7 +142,7 @@ describe("Bootstrap CLI", () => {
   // T4: bootstrap blocked -> exit 1
   it("bootstrap blocked returns exit code 1", async () => {
     const { exitCode } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "bootstrap", "/tmp/rig.yaml"]);
+      await makeCmd().parseAsync(["node", "rig", "bootstrap", "/tmp/rig.yaml"]);
     });
     expect(exitCode).toBe(1);
   });
@@ -150,7 +150,7 @@ describe("Bootstrap CLI", () => {
   // T5: --json outputs parseable JSON
   it("--json outputs parseable JSON", async () => {
     const { logs } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "bootstrap", "/tmp/rig.yaml", "--plan", "--json"]);
+      await makeCmd().parseAsync(["node", "rig", "bootstrap", "/tmp/rig.yaml", "--plan", "--json"]);
     });
     const parsed = JSON.parse(logs.join(""));
     expect(parsed.status).toBe("planned");
@@ -172,7 +172,7 @@ describe("Bootstrap CLI", () => {
     prog.addCommand(bootstrapCommand(runningDeps(failPort)));
 
     const { exitCode } = await captureLogs(async () => {
-      await prog.parseAsync(["node", "rigged", "bootstrap", "/tmp/rig.yaml", "--yes"]);
+      await prog.parseAsync(["node", "rig", "bootstrap", "/tmp/rig.yaml", "--yes"]);
     });
 
     expect(exitCode).toBe(2);
@@ -190,7 +190,7 @@ describe("Bootstrap CLI", () => {
     prog.addCommand(bootstrapCommand(stoppedDeps));
 
     const { logs, exitCode } = await captureLogs(async () => {
-      await prog.parseAsync(["node", "rigged", "bootstrap", "/tmp/rig.yaml", "--plan"]);
+      await prog.parseAsync(["node", "rig", "bootstrap", "/tmp/rig.yaml", "--plan"]);
     });
     expect(exitCode).toBe(1);
     expect(logs.some((l) => l.includes("Daemon not running"))).toBe(true);
@@ -199,7 +199,7 @@ describe("Bootstrap CLI", () => {
   // T8: no flags sends autoApprove=false
   it("bootstrap without --yes sends autoApprove=false", async () => {
     await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "bootstrap", "/tmp/rig.yaml"]);
+      await makeCmd().parseAsync(["node", "rig", "bootstrap", "/tmp/rig.yaml"]);
     });
     const body = JSON.parse(lastReq.body);
     expect(body.autoApprove).toBe(false);
@@ -223,7 +223,7 @@ describe("Bootstrap CLI", () => {
     prog.addCommand(bootstrapCommand(runningDeps(partialPort)));
 
     const { exitCode } = await captureLogs(async () => {
-      await prog.parseAsync(["node", "rigged", "bootstrap", "/tmp/rig.yaml", "--yes"]);
+      await prog.parseAsync(["node", "rig", "bootstrap", "/tmp/rig.yaml", "--yes"]);
     });
 
     expect(exitCode).toBe(1);
@@ -249,7 +249,7 @@ describe("Bootstrap CLI", () => {
     prog.addCommand(bootstrapCommand(runningDeps(invalidPort)));
 
     const { logs, exitCode } = await captureLogs(async () => {
-      await prog.parseAsync(["node", "rigged", "bootstrap", "/tmp/bad.yaml", "--plan"]);
+      await prog.parseAsync(["node", "rig", "bootstrap", "/tmp/bad.yaml", "--plan"]);
     });
 
     expect(exitCode).toBe(2);
@@ -283,7 +283,7 @@ describe("Bootstrap CLI", () => {
     prog.addCommand(bootstrapCommand(runningDeps(failedPort)));
 
     const { logs, exitCode } = await captureLogs(async () => {
-      await prog.parseAsync(["node", "rigged", "bootstrap", "/tmp/rig.yaml", "--yes"]);
+      await prog.parseAsync(["node", "rig", "bootstrap", "/tmp/rig.yaml", "--yes"]);
     });
 
     expect(exitCode).toBe(2);
@@ -321,7 +321,7 @@ describe("Bootstrap CLI", () => {
     prog.addCommand(bootstrapCommand(runningDeps(libPort)));
 
     await captureLogs(async () => {
-      await prog.parseAsync(["node", "rigged", "bootstrap", "my-lib-rig", "--yes"]);
+      await prog.parseAsync(["node", "rig", "bootstrap", "my-lib-rig", "--yes"]);
     });
 
     libServer.close();

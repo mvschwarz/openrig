@@ -99,7 +99,7 @@ describe("Ps CLI", () => {
       { rigId: "rig-2", name: "dev-rig", nodeCount: 2, runningCount: 0, status: "stopped", uptime: null, latestSnapshot: "1d ago" },
     ];
     const { logs, exitCode } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "ps"]);
+      await makeCmd().parseAsync(["node", "rig", "ps"]);
     });
     const output = logs.join("\n");
     expect(output).toContain("RIG");
@@ -119,7 +119,7 @@ describe("Ps CLI", () => {
       { rigId: "rig-1", name: "test", nodeCount: 1, runningCount: 1, status: "running", uptime: "1m", latestSnapshot: null },
     ];
     const { logs } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "ps", "--json"]);
+      await makeCmd().parseAsync(["node", "rig", "ps", "--json"]);
     });
     const parsed = JSON.parse(logs.join(""));
     expect(Array.isArray(parsed)).toBe(true);
@@ -130,7 +130,7 @@ describe("Ps CLI", () => {
   it("ps with no rigs prints No rigs", async () => {
     psData = [];
     const { logs } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "ps"]);
+      await makeCmd().parseAsync(["node", "rig", "ps"]);
     });
     expect(logs.some((l) => l.includes("No rigs"))).toBe(true);
   });
@@ -156,7 +156,7 @@ describe("Ps CLI", () => {
       },
     ];
     const { logs } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "ps", "--nodes"]);
+      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes"]);
     });
     const output = logs.join("\n");
     expect(output).toContain("RIG");
@@ -192,7 +192,7 @@ describe("Ps CLI", () => {
       },
     ];
     const { logs } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "ps", "--nodes"]);
+      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes"]);
     });
     const output = logs.join("\n");
     expect(output).toContain("demo-rig#rig-old");
@@ -212,7 +212,7 @@ describe("Ps CLI", () => {
       },
     ];
     const { logs } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "ps", "--nodes", "--json"]);
+      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "--json"]);
     });
     const parsed = JSON.parse(logs.join(""));
     expect(Array.isArray(parsed)).toBe(true);
@@ -233,7 +233,7 @@ describe("Ps CLI", () => {
       },
     ];
     const { logs } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "ps", "--nodes"]);
+      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes"]);
     });
     const output = logs.join("\n");
     expect(output).toContain("infra");
@@ -245,7 +245,7 @@ describe("Ps CLI", () => {
       { rigId: "rig-1", name: "compat-rig", nodeCount: 1, runningCount: 1, status: "running", uptime: "5m", latestSnapshot: null },
     ];
     const { logs, exitCode } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "ps"]);
+      await makeCmd().parseAsync(["node", "rig", "ps"]);
     });
     const output = logs.join("\n");
     expect(output).toContain("compat-rig");
@@ -258,7 +258,7 @@ describe("Ps CLI", () => {
     let helpOutput = "";
     psCmd.configureOutput({ writeOut: (s) => { helpOutput += s; } });
     psCmd.outputHelp();
-    expect(helpOutput).toContain("rigged ps --nodes");
+    expect(helpOutput).toContain("rig ps --nodes");
     expect(helpOutput).toContain("Exit codes");
   });
 
@@ -268,7 +268,7 @@ describe("Ps CLI", () => {
     ];
     nodesData = {}; // no nodes data → server returns 404
     const { logs } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "ps", "--nodes"]);
+      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes"]);
     });
     const output = logs.join("\n");
     expect(output).toContain("Warning");
@@ -284,9 +284,9 @@ describe("Ps CLI", () => {
     prog.exitOverride();
     prog.addCommand(psCommand(stoppedDeps));
     const { logs, exitCode } = await captureLogs(async () => {
-      await prog.parseAsync(["node", "rigged", "ps"]);
+      await prog.parseAsync(["node", "rig", "ps"]);
     });
-    expect(logs.some((l) => l.includes("rigged daemon start"))).toBe(true);
+    expect(logs.some((l) => l.includes("rig daemon start"))).toBe(true);
     expect(exitCode).toBe(1);
   });
 });

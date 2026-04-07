@@ -85,7 +85,7 @@ function runningState(port: number): DaemonState {
   return { pid: 123, port, db: "test.sqlite", startedAt: "2026-03-24T00:00:00Z" };
 }
 
-describe("rigged status", () => {
+describe("rig status", () => {
   // Test 1: Running daemon with rigs -> formatted summary
   describe("with running daemon and rigs", () => {
     let srv: ReturnType<typeof createDaemonServer>;
@@ -118,7 +118,7 @@ describe("rigged status", () => {
 
       const program = new Command();
       program.addCommand(statusCommand(deps));
-      const logs = await captureLogs(() => program.parseAsync(["node", "rigged", "status"]));
+      const logs = await captureLogs(() => program.parseAsync(["node", "rig", "status"]));
       const output = logs.join("\n");
 
       expect(output).toContain("alpha");
@@ -156,7 +156,7 @@ describe("rigged status", () => {
 
       const program = new Command();
       program.addCommand(statusCommand(deps));
-      const logs = await captureLogs(() => program.parseAsync(["node", "rigged", "status"]));
+      const logs = await captureLogs(() => program.parseAsync(["node", "rig", "status"]));
 
       expect(logs.join("\n")).toMatch(/no rigs/i);
     });
@@ -176,7 +176,7 @@ describe("rigged status", () => {
 
     const program = new Command();
     program.addCommand(statusCommand(deps));
-    const logs = await captureLogs(() => program.parseAsync(["node", "rigged", "status"]));
+    const logs = await captureLogs(() => program.parseAsync(["node", "rig", "status"]));
 
     expect(logs.join("\n")).toMatch(/not running/i);
     expect(clientFactory).not.toHaveBeenCalled();
@@ -199,7 +199,7 @@ describe("rigged status", () => {
 
     const program = new Command();
     program.addCommand(statusCommand(deps));
-    const logs = await captureLogs(() => program.parseAsync(["node", "rigged", "status"]));
+    const logs = await captureLogs(() => program.parseAsync(["node", "rig", "status"]));
 
     expect(logs.join("\n")).toMatch(/not running/i);
     expect(clientFactory).not.toHaveBeenCalled();
@@ -234,7 +234,7 @@ describe("rigged status", () => {
 
       const program = new Command();
       program.addCommand(statusCommand(deps));
-      const logs = await captureLogs(() => program.parseAsync(["node", "rigged", "status"]));
+      const logs = await captureLogs(() => program.parseAsync(["node", "rig", "status"]));
 
       expect(logs.join("\n")).toMatch(/cmux/i);
     });
@@ -270,7 +270,7 @@ describe("rigged status", () => {
 
       const program = new Command();
       program.addCommand(statusCommand(deps));
-      await captureLogs(() => program.parseAsync(["node", "rigged", "status"]));
+      await captureLogs(() => program.parseAsync(["node", "rig", "status"]));
 
       expect(usedUrls[0]).toBe(`http://127.0.0.1:${port}`);
       expect(usedUrls[0]).not.toBe("http://127.0.0.1:7433");
@@ -295,14 +295,14 @@ describe("rigged status", () => {
 
     const program = new Command();
     program.addCommand(statusCommand(deps));
-    const logs = await captureLogs(() => program.parseAsync(["node", "rigged", "status"]));
+    const logs = await captureLogs(() => program.parseAsync(["node", "rig", "status"]));
 
     expect(logs.join("\n")).toMatch(/unhealthy|healthz failed/i);
     expect(clientFactory).not.toHaveBeenCalled();
   });
 
-  // Test 8: root-level rigged status is mounted (uses real createProgram from index.ts)
-  it("rigged status is wired via createProgram (real index.ts wiring)", async () => {
+  // Test 8: root-level rig status is mounted (uses real createProgram from index.ts)
+  it("rig status is wired via createProgram (real index.ts wiring)", async () => {
     const { createProgram } = await import("../src/index.js");
 
     const statusDeps: StatusDeps = {
@@ -312,7 +312,7 @@ describe("rigged status", () => {
 
     const program = createProgram({ statusDeps });
 
-    const logs = await captureLogs(() => program.parseAsync(["node", "rigged", "status"]));
+    const logs = await captureLogs(() => program.parseAsync(["node", "rig", "status"]));
 
     // Should have output (not crash or "unknown command")
     expect(logs.join("\n")).toMatch(/not running/i);
@@ -369,7 +369,7 @@ describe("rigged status", () => {
 
       const program = new Command();
       program.addCommand(statusCommand(deps));
-      const logs = await captureLogs(() => program.parseAsync(["node", "rigged", "status"]));
+      const logs = await captureLogs(() => program.parseAsync(["node", "rig", "status"]));
 
       expect(logs.join("\n")).toMatch(/failed.*summary|HTTP 500/i);
     });

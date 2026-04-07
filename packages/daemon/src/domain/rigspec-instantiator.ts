@@ -1038,10 +1038,10 @@ export class PodRigInstantiator {
       }
     }
 
-    // 7. Built-in Rigged onboarding overlay (appended last, does not replace agent guidance)
-    const onboardingPath = nodePath.resolve(import.meta.dirname, "../../assets/guidance/using-rigged.md");
+    // 7. Built-in OpenRig onboarding overlay (appended last, does not replace agent guidance)
+    const onboardingPath = nodePath.resolve(import.meta.dirname, "../../assets/guidance/using-openrig.md");
     files.push({
-      path: "using-rigged.md",
+      path: "using-openrig.md",
       absolutePath: onboardingPath,
       ownerRoot: nodePath.resolve(import.meta.dirname, "../../assets"),
       deliveryHint: "guidance_merge",
@@ -1061,7 +1061,7 @@ export class PodRigInstantiator {
     resolvedSpecName?: string | null;
   }): StartupAction {
     const lines = [
-      "Rigged session identity:",
+      "OpenRig session identity:",
       `- rig: ${input.rigName}`,
       `- pod: ${input.pod.id}`,
       `- pod_label: ${input.pod.label}`,
@@ -1072,7 +1072,7 @@ export class PodRigInstantiator {
       `- runtime: ${input.runtime}`,
       `- session: ${input.sessionName}`,
       "This is your startup identity hint. For durable identity recovery after compaction, run:",
-      "  rigged whoami --json",
+      "  rig whoami --json",
       "That command returns your full topology context: rig, pod, peers, edges, and transcript path.",
     ].filter((line): line is string => Boolean(line));
 

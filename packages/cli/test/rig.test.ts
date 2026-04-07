@@ -122,7 +122,7 @@ function createMockDaemon() {
   };
 }
 
-describe("rigged rig", () => {
+describe("rig spec", () => {
   let srv: ReturnType<typeof createMockDaemon>;
   let port: number;
 
@@ -140,48 +140,48 @@ describe("rigged rig", () => {
     };
   }
 
-  // T3: rigged rig validate invalid rig -> exit 1, output contains errors
-  it("rig validate invalid: prints errors, exitCode 1", async () => {
+  // T3: rig spec validate invalid rig -> exit 1, output contains errors
+  it("rig spec validate invalid: prints errors, exitCode 1", async () => {
     const deps = rigDeps("INVALID");
     const program = new Command();
     program.addCommand(rigCommand(deps));
-    const { logs, exitCode } = await captureLogs(() => program.parseAsync(["node", "rigged", "rig", "validate", "rig.yaml"]));
+    const { logs, exitCode } = await captureLogs(() => program.parseAsync(["node", "rig", "spec", "validate", "rig.yaml"]));
     const output = logs.join("\n");
     expect(output).toContain("missing schema_version");
     expect(output).toContain("name is required");
     expect(exitCode).toBe(1);
   });
 
-  // T4: rigged rig preflight -> exit 0, output contains "ready" + warnings
-  it("rig preflight ready: prints ready + warnings", async () => {
+  // T4: rig spec preflight -> exit 0, output contains "ready" + warnings
+  it("rig spec preflight ready: prints ready + warnings", async () => {
     const deps = rigDeps("schema_version: 1\nname: test-rig\nnodes: []\n");
     const program = new Command();
     program.addCommand(rigCommand(deps));
-    const { logs, exitCode } = await captureLogs(() => program.parseAsync(["node", "rigged", "rig", "preflight", "/tmp/rig.yaml"]));
+    const { logs, exitCode } = await captureLogs(() => program.parseAsync(["node", "rig", "spec", "preflight", "/tmp/rig.yaml"]));
     const output = logs.join("\n");
     expect(output).toContain("Preflight ready");
     expect(output).toContain("cmux unavailable");
     expect(exitCode).toBeUndefined();
   });
 
-  // T7: rigged rig preflight with collision warnings -> output shows warnings
-  it("rig preflight with collision warnings: shows warnings", async () => {
+  // T7: rig spec preflight with collision warnings -> output shows warnings
+  it("rig spec preflight with collision warnings: shows warnings", async () => {
     const deps = rigDeps("schema_version: 1\nname: test-rig\nCOLLISION\nnodes: []\n");
     const program = new Command();
     program.addCommand(rigCommand(deps));
-    const { logs, exitCode } = await captureLogs(() => program.parseAsync(["node", "rigged", "rig", "preflight", "/tmp/rig.yaml"]));
+    const { logs, exitCode } = await captureLogs(() => program.parseAsync(["node", "rig", "spec", "preflight", "/tmp/rig.yaml"]));
     const output = logs.join("\n");
     expect(output).toContain("node name collision");
     expect(output).toContain("not ready");
     expect(exitCode).toBe(1);
   });
 
-  // T8: rigged rig preflight with ambiguous collision -> exit 1, output shows error
-  it("rig preflight with ambiguous collision: exit 1, shows error", async () => {
+  // T8: rig spec preflight with ambiguous collision -> exit 1, output shows error
+  it("rig spec preflight with ambiguous collision: exit 1, shows error", async () => {
     const deps = rigDeps("schema_version: 1\nname: test-rig\nAMBIGUOUS\nnodes: []\n");
     const program = new Command();
     program.addCommand(rigCommand(deps));
-    const { logs, exitCode } = await captureLogs(() => program.parseAsync(["node", "rigged", "rig", "preflight", "/tmp/rig.yaml"]));
+    const { logs, exitCode } = await captureLogs(() => program.parseAsync(["node", "rig", "spec", "preflight", "/tmp/rig.yaml"]));
     const output = logs.join("\n");
     expect(output).toContain("ambiguous node collision");
     expect(output).toContain("not ready");

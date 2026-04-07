@@ -8,7 +8,7 @@ export type ResolveHomeDirByPid = (pid: number) => string | undefined;
 export function defaultResolveHomeDirByPid(pid: number): string | undefined {
   try {
     // BSD/macOS `ps` supports `eww` to expose the full process environment.
-    // If Rigged grows a Linux daemon target, this likely needs a /proc-based path.
+    // If OpenRig grows a Linux daemon target, this likely needs a /proc-based path.
     const output = execFileSync("ps", ["eww", "-p", String(pid), "-o", "command="], { encoding: "utf-8" }).trim();
     if (!output) return undefined;
     const match = output.match(/(?:^|\s)HOME=([^\s]+)/);

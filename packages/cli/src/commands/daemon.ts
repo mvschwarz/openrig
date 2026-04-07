@@ -8,7 +8,7 @@ import {
   readLogs,
   tailLogs,
   type LifecycleDeps,
-  RIGGED_DIR,
+  OPENRIG_DIR,
 } from "../daemon-lifecycle.js";
 
 export function realDeps(): LifecycleDeps {
@@ -31,7 +31,7 @@ export function realDeps(): LifecycleDeps {
 
 export function daemonCommand(depsOverride?: LifecycleDeps): Command {
   const getDeps = () => depsOverride ?? realDeps();
-  const cmd = new Command("daemon").description("Manage the rigged daemon");
+  const cmd = new Command("daemon").description("Manage the OpenRig daemon");
 
   cmd
     .command("start")
@@ -50,12 +50,12 @@ export function daemonCommand(depsOverride?: LifecycleDeps): Command {
         const effectiveHost = opts.host ?? config.daemon.host;
 
         // Run preflight before starting
-        const preflight = new SystemPreflight({
-          exec: async (cmd) => execSync(cmd, { encoding: "utf-8" }),
-          configStore,
-          getDaemonStatus: () => getDaemonStatus(getDeps()),
-          riggedHome: RIGGED_DIR,
-        });
+          const preflight = new SystemPreflight({
+            exec: async (cmd) => execSync(cmd, { encoding: "utf-8" }),
+            configStore,
+            getDaemonStatus: () => getDaemonStatus(getDeps()),
+            openrigHome: OPENRIG_DIR,
+          });
         const preflightResult = await preflight.run({ port: effectivePort, host: effectiveHost });
         if (!preflightResult.ready) {
           for (const check of preflightResult.checks.filter((c) => !c.ok)) {

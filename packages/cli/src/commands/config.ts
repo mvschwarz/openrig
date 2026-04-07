@@ -2,18 +2,18 @@ import { Command } from "commander";
 import { ConfigStore } from "../config-store.js";
 
 export function configCommand(configPath?: string): Command {
-  const cmd = new Command("config").description("Inspect and change Rigged configuration");
+  const cmd = new Command("config").description("Inspect and change OpenRig configuration");
   const store = new ConfigStore(configPath);
 
   cmd
     .option("--json", "JSON output for agents")
     .addHelpText("after", `
 Examples:
-  rigged config                           # show all resolved config
-  rigged config --json                    # JSON output
-  rigged config get daemon.port           # read a single key
-  rigged config set daemon.port 7434      # change a value
-  rigged config reset                     # delete config file, revert to defaults
+  rig config                           # show all resolved config
+  rig config --json                    # JSON output
+  rig config get daemon.port           # read a single key
+  rig config set daemon.port 7434      # change a value
+  rig config reset                     # delete config file, revert to defaults
 
 Keys: daemon.port, daemon.host, db.path, transcripts.enabled, transcripts.path
 Precedence: CLI flag > environment variable > config file > default`)

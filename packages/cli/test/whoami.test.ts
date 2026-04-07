@@ -36,8 +36,8 @@ const WHOAMI_RESPONSE = {
     outgoing: [{ kind: "delegates_to", to: { logicalId: "dev.qa", sessionName: "dev-qa@my-rig" } }],
     incoming: [],
   },
-  transcript: { enabled: true, path: "/tmp/transcripts/my-rig/dev-impl@my-rig.log", tailCommand: "rigged transcript dev-impl@my-rig --tail 100", grepCommand: null },
-  commands: { sendExamples: ["rigged send dev-qa@my-rig 'message' --verify"], captureExamples: ["rigged capture dev-qa@my-rig"] },
+  transcript: { enabled: true, path: "/tmp/transcripts/my-rig/dev-impl@my-rig.log", tailCommand: "rig transcript dev-impl@my-rig --tail 100", grepCommand: null },
+  commands: { sendExamples: ["rig send dev-qa@my-rig 'message' --verify"], captureExamples: ["rig capture dev-qa@my-rig"] },
 };
 
 describe("Whoami CLI", () => {
@@ -56,7 +56,7 @@ describe("Whoami CLI", () => {
         res.end(JSON.stringify({ ...WHOAMI_RESPONSE, resolvedBy: "session_name" }));
       } else if (url.includes("/api/whoami") && url.includes("sessionName=unknown")) {
         res.writeHead(404, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: "Session not found in any managed rig. Check: rigged ps --nodes" }));
+        res.end(JSON.stringify({ error: "Session not found in any managed rig. Check: rig ps --nodes" }));
       } else if (url.includes("/api/whoami") && url.includes("sessionName=ambiguous")) {
         res.writeHead(409, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "Session 'ambiguous' is ambiguous — found in 2 rigs." }));
@@ -73,12 +73,12 @@ describe("Whoami CLI", () => {
 
   beforeEach(() => {
     savedEnv = {
-      RIGGED_NODE_ID: process.env["RIGGED_NODE_ID"],
-      RIGGED_SESSION_NAME: process.env["RIGGED_SESSION_NAME"],
+      OPENRIG_NODE_ID: process.env["OPENRIG_NODE_ID"],
+      OPENRIG_SESSION_NAME: process.env["OPENRIG_SESSION_NAME"],
       TMUX_PANE: process.env["TMUX_PANE"],
     };
-    delete process.env["RIGGED_NODE_ID"];
-    delete process.env["RIGGED_SESSION_NAME"];
+    delete process.env["OPENRIG_NODE_ID"];
+    delete process.env["OPENRIG_SESSION_NAME"];
     delete process.env["TMUX_PANE"];
   });
 
@@ -98,7 +98,7 @@ describe("Whoami CLI", () => {
 
   it("--node-id flag resolves and prints identity", async () => {
     const { logs } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "whoami", "--node-id", "node-1"]);
+      await makeCmd().parseAsync(["node", "rig", "whoami", "--node-id", "node-1"]);
     });
     const output = logs.join("\n");
     expect(output).toContain("my-rig");
@@ -107,23 +107,23 @@ describe("Whoami CLI", () => {
 
   it("--session flag resolves and prints identity", async () => {
     const { logs } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "whoami", "--session", "dev-impl@my-rig"]);
+      await makeCmd().parseAsync(["node", "rig", "whoami", "--session", "dev-impl@my-rig"]);
     });
     expect(logs.join("\n")).toContain("my-rig");
   });
 
-  it("RIGGED_NODE_ID env var resolves when no flags given", async () => {
-    process.env["RIGGED_NODE_ID"] = "node-1";
+  it("OPENRIG_NODE_ID env var resolves when no flags given", async () => {
+    process.env["OPENRIG_NODE_ID"] = "node-1";
     const { logs } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "whoami"]);
+      await makeCmd().parseAsync(["node", "rig", "whoami"]);
     });
     expect(logs.join("\n")).toContain("my-rig");
   });
 
-  it("RIGGED_SESSION_NAME env var resolves when no node-id env", async () => {
-    process.env["RIGGED_SESSION_NAME"] = "dev-impl@my-rig";
+  it("OPENRIG_SESSION_NAME env var resolves when no node-id env", async () => {
+    process.env["OPENRIG_SESSION_NAME"] = "dev-impl@my-rig";
     const { logs } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "whoami"]);
+      await makeCmd().parseAsync(["node", "rig", "whoami"]);
     });
     expect(logs.join("\n")).toContain("my-rig");
   });
@@ -145,9 +145,9 @@ describe("Whoami CLI", () => {
   });
 
   it("--json prints raw daemon JSON response", async () => {
-    process.env["RIGGED_NODE_ID"] = "node-1";
+    process.env["OPENRIG_NODE_ID"] = "node-1";
     const { logs } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "whoami", "--json"]);
+      await makeCmd().parseAsync(["node", "rig", "whoami", "--json"]);
     });
     const parsed = JSON.parse(logs.join("\n"));
     expect(parsed.resolvedBy).toBe("node_id");
@@ -158,7 +158,7 @@ describe("Whoami CLI", () => {
 
   it("no resolution source → exit 1 with guidance", async () => {
     const { logs, exitCode } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "whoami"]);
+      await makeCmd().parseAsync(["node", "rig", "whoami"]);
     });
     expect(exitCode).toBe(1);
     expect(logs.join("\n")).toContain("Cannot determine identity");
@@ -166,7 +166,7 @@ describe("Whoami CLI", () => {
 
   it("daemon 404 → exit 1 with not-found guidance", async () => {
     const { logs, exitCode } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "whoami", "--session", "unknown"]);
+      await makeCmd().parseAsync(["node", "rig", "whoami", "--session", "unknown"]);
     });
     expect(exitCode).toBe(1);
     expect(logs.join("\n")).toContain("not found");
@@ -174,7 +174,7 @@ describe("Whoami CLI", () => {
 
   it("daemon 409 → exit 1 with ambiguity message", async () => {
     const { logs, exitCode } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "whoami", "--session", "ambiguous"]);
+      await makeCmd().parseAsync(["node", "rig", "whoami", "--session", "ambiguous"]);
     });
     expect(exitCode).toBe(1);
     expect(logs.join("\n")).toContain("ambiguous");
@@ -243,9 +243,9 @@ describe("Whoami CLI", () => {
   });
 
   it("human output includes rig, pod, session, peers, edges, transcript", async () => {
-    process.env["RIGGED_NODE_ID"] = "node-1";
+    process.env["OPENRIG_NODE_ID"] = "node-1";
     const { logs } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "whoami"]);
+      await makeCmd().parseAsync(["node", "rig", "whoami"]);
     });
     const output = logs.join("\n");
     expect(output).toContain("Rig:");

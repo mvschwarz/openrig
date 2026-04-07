@@ -30,7 +30,7 @@ nodesRoutes.get("/", (c) => {
   const rigId = c.req.param("rigId")!;
   const deps = getDeps(c);
   const rig = deps.rigRepo.getRig(rigId);
-  if (!rig) return c.json({ error: `Rig "${rigId}" not found. List rigs with: rigged ps` }, 404);
+  if (!rig) return c.json({ error: `Rig "${rigId}" not found. List rigs with: rig ps` }, 404);
   const inventory = getNodeInventory(deps.rigRepo.db, rigId);
   return c.json(inventory);
 });
@@ -41,9 +41,9 @@ nodesRoutes.get("/:logicalId", (c) => {
   const logicalId = decodeURIComponent(c.req.param("logicalId")!);
   const deps = getDeps(c);
   const rig = deps.rigRepo.getRig(rigId);
-  if (!rig) return c.json({ error: `Rig "${rigId}" not found. List rigs with: rigged ps` }, 404);
+  if (!rig) return c.json({ error: `Rig "${rigId}" not found. List rigs with: rig ps` }, 404);
   const detail = getNodeDetail(deps.rigRepo.db, rigId, logicalId);
-  if (!detail) return c.json({ error: `Node "${logicalId}" not found in rig "${rigId}". Check node IDs with: rigged ps --nodes` }, 404);
+  if (!detail) return c.json({ error: `Node "${logicalId}" not found in rig "${rigId}". Check node IDs with: rig ps --nodes` }, 404);
 
   // Enrich transcript info from TranscriptStore (not available to pure DB helper)
   const transcriptStore = c.get("transcriptStore" as never) as TranscriptStore | undefined;
@@ -52,7 +52,7 @@ nodesRoutes.get("/:logicalId", (c) => {
     detail.transcript = {
       enabled: true,
       path,
-      tailCommand: `rigged transcript ${detail.canonicalSessionName} --tail 100`,
+      tailCommand: `rig transcript ${detail.canonicalSessionName} --tail 100`,
     };
   }
 

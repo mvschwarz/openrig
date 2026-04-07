@@ -2,7 +2,7 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import path from "node:path";
 
-const daemonUrl = process.env.RIGGED_URL ?? "http://localhost:7433";
+const daemonUrl = process.env.OPENRIG_URL ?? process.env.RIGGED_URL ?? "http://localhost:7433";
 
 export default defineConfig({
   plugins: [react()],

@@ -109,8 +109,8 @@ export function NodeDetailPanel({ rigId, logicalId, onClose }: NodeDetailPanelPr
                   )}
                   <div className="font-mono text-[8px] text-stone-500">
                     {data.startupStatus === "failed"
-                      ? "Check logs with: rigged ps --nodes, or restart with: rigged up"
-                      : "Try: rigged restore <snapshotId>"}
+                      ? "Check logs with: rig ps --nodes, or restart with: rig up"
+                      : "Try: rig restore <snapshotId>"}
                   </div>
                 </div>
               )}

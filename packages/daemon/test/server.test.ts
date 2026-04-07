@@ -90,8 +90,8 @@ function buildFullDeps(db: ReturnType<typeof createFullTestDb>, overrides?: { sn
 function createTempUiDist() {
   const dir = fs.mkdtempSync(nodePath.join(os.tmpdir(), "rigged-ui-dist-"));
   fs.mkdirSync(nodePath.join(dir, "assets"), { recursive: true });
-  fs.writeFileSync(nodePath.join(dir, "index.html"), "<!doctype html><html><body><div id=\"root\">Rigged UI</div></body></html>", "utf-8");
-  fs.writeFileSync(nodePath.join(dir, "assets", "app.js"), "console.log('rigged');", "utf-8");
+  fs.writeFileSync(nodePath.join(dir, "index.html"), "<!doctype html><html><body><div id=\"root\">OpenRig UI</div></body></html>", "utf-8");
+  fs.writeFileSync(nodePath.join(dir, "assets", "app.js"), "console.log('rig');", "utf-8");
   return dir;
 }
 
@@ -155,12 +155,12 @@ describe("Hono server (production app)", () => {
     const rootRes = await app.request("/");
     expect(rootRes.status).toBe(200);
     expect(rootRes.headers.get("content-type")).toContain("text/html");
-    expect(await rootRes.text()).toContain("Rigged UI");
+    expect(await rootRes.text()).toContain("OpenRig UI");
 
     const deepLinkRes = await app.request("/specs");
     expect(deepLinkRes.status).toBe(200);
     expect(deepLinkRes.headers.get("content-type")).toContain("text/html");
-    expect(await deepLinkRes.text()).toContain("Rigged UI");
+    expect(await deepLinkRes.text()).toContain("OpenRig UI");
 
     fs.rmSync(uiDistDir, { recursive: true, force: true });
     db.close();
@@ -174,7 +174,7 @@ describe("Hono server (production app)", () => {
     const res = await app.request("/assets/app.js");
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toContain("text/javascript");
-    expect(await res.text()).toContain("console.log('rigged');");
+    expect(await res.text()).toContain("console.log('rig');");
 
     fs.rmSync(uiDistDir, { recursive: true, force: true });
     db.close();

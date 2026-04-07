@@ -404,13 +404,13 @@ export class RestoreOrchestrator {
     if (resumeRequested && !isPodAware) {
       // Legacy resume path
       if (!resumeToken) {
-        return { nodeId: node.id, logicalId: node.logicalId, status: "failed", error: `Resume requested but no token available. Restore the node manually or launch fresh with: rigged up` };
+        return { nodeId: node.id, logicalId: node.logicalId, status: "failed", error: `Resume requested but no token available. Restore the node manually or launch fresh with: rig up` };
       }
       const resumed = await this.attemptResume(sessionName, resumeType, resumeToken, node.cwd ?? "/");
       if (resumed) {
         baseStatus = "resumed";
       } else {
-        return { nodeId: node.id, logicalId: node.logicalId, status: "failed", error: `Resume attempted but failed. Check the harness state manually or launch fresh with: rigged up` };
+        return { nodeId: node.id, logicalId: node.logicalId, status: "failed", error: `Resume attempted but failed. Check the harness state manually or launch fresh with: rig up` };
       }
     } else if (resumeRequested && isPodAware) {
       // Pod-aware restore must preserve the same honesty contract as legacy restore:
@@ -421,7 +421,7 @@ export class RestoreOrchestrator {
           nodeId: node.id,
           logicalId: node.logicalId,
           status: "failed",
-          error: "Resume requested but no token available. Restore the node manually or launch fresh with: rigged up",
+          error: "Resume requested but no token available. Restore the node manually or launch fresh with: rig up",
         };
       }
     }
@@ -566,7 +566,7 @@ export class RestoreOrchestrator {
     try {
       const filePath = join(cwd, ".rigged-checkpoint.md");
       const content = [
-        "# Rigged Checkpoint",
+        "# OpenRig Checkpoint",
         "",
         `## Summary`,
         checkpoint.summary,

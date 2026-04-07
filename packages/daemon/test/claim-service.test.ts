@@ -381,7 +381,7 @@ describe("ClaimService", () => {
     expect(textCall[0]).toBe("adopted-sess");
     expect(textCall[1]).toContain("test-rig");
     expect(textCall[1]).toContain("adopted-sess"); // logicalId defaults to tmux session
-    expect(textCall[1]).toContain("rigged whoami --json");
+    expect(textCall[1]).toContain("rig whoami --json");
 
     // Must also submit with C-m
     expect(sendKeysSpy).toHaveBeenCalled();
@@ -441,7 +441,7 @@ describe("ClaimService", () => {
     const hint = textCall[1];
     expect(hint).toContain("test-rig");
     expect(hint).toContain("custom.id");
-    expect(hint).toContain("rigged whoami --json");
+    expect(hint).toContain("rig whoami --json");
   });
 
   // T21: hint delivery failure does not fail claim

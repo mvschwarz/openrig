@@ -177,7 +177,7 @@ describe("RigDetailPanel", () => {
     await screen.findByText("Confirm Restore");
     fireEvent.click(screen.getByTestId("confirm-restore-01HXYZ123456SNAP01"));
 
-    expect((await screen.findByTestId("snapshot-error")).textContent).toContain("rigged down my-rig");
+    expect((await screen.findByTestId("snapshot-error")).textContent).toContain("rig down my-rig");
   });
 
   it("drawer shows Info | Chat Room tabs", async () => {

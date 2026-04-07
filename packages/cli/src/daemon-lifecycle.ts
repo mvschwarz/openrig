@@ -1,5 +1,6 @@
 import path from "node:path";
 import type { ChildProcess } from "node:child_process";
+import { OPENRIG_HOME, LEGACY_RIGGED_HOME, readOpenRigEnv } from "./openrig-compat.js";
 
 export interface DaemonState {
   pid: number;
@@ -47,12 +48,15 @@ export interface LifecycleDeps {
   isProcessAlive: (pid: number) => boolean;
 }
 
-export const RIGGED_DIR = path.join(process.env["HOME"] ?? "~", ".rigged");
-export const STATE_FILE = path.join(RIGGED_DIR, "daemon.json");
-export const LOG_FILE = path.join(RIGGED_DIR, "daemon.log");
+export const OPENRIG_DIR = OPENRIG_HOME;
+export const RIGGED_DIR = OPENRIG_DIR;
+export const STATE_FILE = path.join(OPENRIG_DIR, "daemon.json");
+export const LOG_FILE = path.join(OPENRIG_DIR, "daemon.log");
+export const LEGACY_STATE_FILE = path.join(LEGACY_RIGGED_HOME, "daemon.json");
+export const LEGACY_LOG_FILE = path.join(LEGACY_RIGGED_HOME, "daemon.log");
 
 const DEFAULT_PORT = 7433;
-const DEFAULT_DB = "rigged.sqlite";
+const DEFAULT_DB = "openrig.sqlite";
 const HEALTHZ_RETRIES = 20;
 const HEALTHZ_DELAY_MS = 250;
 
@@ -61,8 +65,9 @@ export function getDaemonPath(): string {
 }
 
 function readState(deps: LifecycleDeps): DaemonState | null {
-  if (!deps.exists(STATE_FILE)) return null;
-  const raw = deps.readFile(STATE_FILE);
+  const stateFile = resolveLifecycleFile(deps, "daemon.json");
+  if (!deps.exists(stateFile)) return null;
+  const raw = deps.readFile(stateFile);
   if (!raw) return null;
   try {
     return JSON.parse(raw) as DaemonState;
@@ -73,20 +78,30 @@ function readState(deps: LifecycleDeps): DaemonState | null {
   }
 }
 
-/** Check if a PID is a rigged daemon. Returns:
- *  - "rigged" — healthz responded (ok or not) → this is our daemon
- *  - "not_rigged" — connection refused → PID is alive but not listening on our port
+function resolveLifecycleFile(deps: LifecycleDeps, filename: "daemon.json" | "daemon.log"): string {
+  const primary = filename === "daemon.json" ? STATE_FILE : LOG_FILE;
+  if (deps.exists(primary)) return primary;
+
+  const legacy = filename === "daemon.json" ? LEGACY_STATE_FILE : LEGACY_LOG_FILE;
+  if (deps.exists(legacy)) return legacy;
+
+  return primary;
+}
+
+/** Check if a PID is an OpenRig daemon. Returns:
+ *  - "openrig" — healthz responded (ok or not) → this is our daemon
+ *  - "not_openrig" — connection refused → PID is alive but not listening on our port
  *  - "dead" — PID not alive */
-async function checkPid(state: DaemonState, deps: LifecycleDeps): Promise<"rigged" | "not_rigged" | "dead"> {
+async function checkPid(state: DaemonState, deps: LifecycleDeps): Promise<"openrig" | "not_openrig" | "dead"> {
   if (!deps.isProcessAlive(state.pid)) return "dead";
   const host = state.host ?? "127.0.0.1";
   try {
     await deps.fetch(`http://${host}:${state.port}/healthz`);
-    // Any response (ok or not) means something is listening on our port → rigged
-    return "rigged";
+    // Any response (ok or not) means something is listening on our port → OpenRig
+    return "openrig";
   } catch {
     // Connection refused → PID alive but not our daemon
-    return "not_rigged";
+    return "not_openrig";
   }
 }
 
@@ -95,7 +110,7 @@ export async function startDaemon(opts: StartOptions, deps: LifecycleDeps): Prom
   const existing = readState(deps);
   if (existing) {
     const pidState = await checkPid(existing, deps);
-    if (pidState === "rigged") {
+    if (pidState === "openrig") {
       // Our daemon is running (possibly unhealthy, but alive on our port)
       throw new Error(`Daemon already running (pid ${existing.pid} on port ${existing.port})`);
     }
@@ -107,19 +122,18 @@ export async function startDaemon(opts: StartOptions, deps: LifecycleDeps): Prom
   const db = opts.db ?? DEFAULT_DB;
   const daemonEntry = path.join(getDaemonPath(), "dist/index.js");
 
-  // Ensure ~/.rigged exists
-  deps.mkdirp(RIGGED_DIR);
+  deps.mkdirp(OPENRIG_DIR);
 
   const logFd = deps.openForAppend(LOG_FILE);
 
   const child = deps.spawn(process.execPath, [daemonEntry], {
     env: {
       ...process.env as Record<string, string>,
-      RIGGED_PORT: String(port),
-      RIGGED_HOST: host,
-      RIGGED_DB: db,
-      ...(opts.transcriptsEnabled !== undefined ? { RIGGED_TRANSCRIPTS_ENABLED: String(opts.transcriptsEnabled) } : {}),
-      ...(opts.transcriptsPath ? { RIGGED_TRANSCRIPTS_PATH: opts.transcriptsPath } : {}),
+      OPENRIG_PORT: String(port),
+      OPENRIG_HOST: host,
+      OPENRIG_DB: db,
+      ...(opts.transcriptsEnabled !== undefined ? { OPENRIG_TRANSCRIPTS_ENABLED: String(opts.transcriptsEnabled) } : {}),
+      ...(opts.transcriptsPath ? { OPENRIG_TRANSCRIPTS_PATH: opts.transcriptsPath } : {}),
     },
     stdio: ["ignore", logFd, logFd],
     detached: true,
@@ -165,20 +179,21 @@ export async function startDaemon(opts: StartOptions, deps: LifecycleDeps): Prom
 export async function stopDaemon(deps: LifecycleDeps): Promise<void> {
   const state = readState(deps);
   if (!state) return; // Not running — clean exit
+  const stateFile = resolveLifecycleFile(deps, "daemon.json");
 
   const pidState = await checkPid(state, deps);
   if (pidState === "dead") {
     // Already dead — clean up stale state
-    deps.removeFile(STATE_FILE);
+    deps.removeFile(stateFile);
     return;
   }
-  if (pidState === "not_rigged") {
+  if (pidState === "not_openrig") {
     // PID alive but not our daemon (reused PID) — clean up state, don't kill
-    deps.removeFile(STATE_FILE);
+    deps.removeFile(stateFile);
     return;
   }
 
-  // pidState === "rigged" — safe to SIGTERM
+  // pidState === "openrig" — safe to SIGTERM
   deps.kill(state.pid, "SIGTERM");
 
   // Wait briefly for process to exit
@@ -192,19 +207,19 @@ export async function stopDaemon(deps: LifecycleDeps): Promise<void> {
   }
 
   if (exited) {
-    deps.removeFile(STATE_FILE);
+    deps.removeFile(stateFile);
   } else {
     throw new Error(`Daemon (pid ${state.pid}) did not exit after SIGTERM — state file preserved`);
   }
 }
 
 export async function getDaemonStatus(deps: LifecycleDeps): Promise<DaemonStatus> {
-  // If RIGGED_URL is set, bypass daemon.json and probe that URL directly
-  const riggedUrl = process.env["RIGGED_URL"];
-  if (riggedUrl) {
+  // If OPENRIG_URL is set, bypass daemon.json and probe that URL directly
+  const openrigUrl = readOpenRigEnv("OPENRIG_URL", "RIGGED_URL");
+  if (openrigUrl) {
     try {
-      const res = await deps.fetch(`${riggedUrl}/healthz`);
-      const url = new URL(riggedUrl);
+      const res = await deps.fetch(`${openrigUrl}/healthz`);
+      const url = new URL(openrigUrl);
       return { state: "running", port: Number(url.port) || 7433, host: url.hostname || "127.0.0.1", healthy: res.ok };
     } catch {
       return { state: "stopped" };
@@ -216,7 +231,7 @@ export async function getDaemonStatus(deps: LifecycleDeps): Promise<DaemonStatus
 
   if (!deps.isProcessAlive(state.pid)) {
     // Process dead — stale state
-    deps.removeFile(STATE_FILE);
+    deps.removeFile(resolveLifecycleFile(deps, "daemon.json"));
     return { state: "stale" };
   }
 
@@ -235,14 +250,16 @@ export async function getDaemonStatus(deps: LifecycleDeps): Promise<DaemonStatus
 }
 
 export function readLogs(deps: LifecycleDeps): string | null {
-  if (!deps.exists(LOG_FILE)) return null;
-  return deps.readFile(LOG_FILE);
+  const logFile = resolveLifecycleFile(deps, "daemon.log");
+  if (!deps.exists(logFile)) return null;
+  return deps.readFile(logFile);
 }
 
 export function tailLogs(deps: LifecycleDeps, opts: { follow: boolean }): void {
-  if (!deps.exists(LOG_FILE)) return;
+  const logFile = resolveLifecycleFile(deps, "daemon.log");
+  if (!deps.exists(logFile)) return;
 
-  const args = opts.follow ? ["-f", LOG_FILE] : [LOG_FILE];
+  const args = opts.follow ? ["-f", logFile] : [logFile];
   const child = deps.spawn("tail", args, {
     env: process.env as Record<string, string>,
     stdio: "inherit" as unknown,

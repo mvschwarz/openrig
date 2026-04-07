@@ -1,5 +1,5 @@
 {
-  "name": "@rigged/cli",
+  "name": "@openrig/cli",
   "version": "0.1.0",
   "type": "module",
   "description": "Local control plane for multi-agent coding topologies",
@@ -15,10 +15,10 @@
     "rig",
     "agentspec"
   ],
-  "homepage": "https://rigged.sh",
+  "homepage": "https://openrig.dev",
   "repository": {
     "type": "git",
-    "url": "https://github.com/mvschwarz/rigged"
+    "url": "https://github.com/mvschwarz/openrig"
   },
   "license": "Apache-2.0",
   "author": {
@@ -26,7 +26,7 @@
     "url": "https://esoteric.run"
   },
   "bin": {
-    "rigged": "dist/index.js"
+    "rig": "dist/index.js"
   },
   "files": [
     "dist"

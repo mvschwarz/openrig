@@ -23,7 +23,7 @@ function resolveSessionToRig(
 
   if (sessionRows.length === 0) {
     return {
-      error: `Session '${sessionName}' not found. Check session names with: rigged ps --nodes`,
+      error: `Session '${sessionName}' not found. Check session names with: rig ps --nodes`,
       status: 404,
     };
   }
@@ -42,7 +42,7 @@ function resolveSessionToRig(
 
   if (rigNames.size === 0) {
     return {
-      error: `Session '${sessionName}' not found. Check session names with: rigged ps --nodes`,
+      error: `Session '${sessionName}' not found. Check session names with: rig ps --nodes`,
       status: 404,
     };
   }
@@ -71,7 +71,7 @@ export function transcriptRoutes(): Hono {
 
     if (!transcriptStore?.enabled) {
       return c.json(
-        { error: "Transcripts are disabled. Enable with: rigged config set transcripts.enabled true" },
+        { error: "Transcripts are disabled. Enable with: rig config set transcripts.enabled true" },
         404,
       );
     }
@@ -84,7 +84,7 @@ export function transcriptRoutes(): Hono {
     const content = transcriptStore.readTail(resolution.rigName, sessionName, lines);
     if (content === null) {
       return c.json(
-        { error: `No transcript for '${sessionName}'. Transcripts start automatically on next rigged up.` },
+        { error: `No transcript for '${sessionName}'. Transcripts start automatically on next rig up.` },
         404,
       );
     }
@@ -115,7 +115,7 @@ export function transcriptRoutes(): Hono {
 
     if (!transcriptStore?.enabled) {
       return c.json(
-        { error: "Transcripts are disabled. Enable with: rigged config set transcripts.enabled true" },
+        { error: "Transcripts are disabled. Enable with: rig config set transcripts.enabled true" },
         404,
       );
     }
@@ -128,7 +128,7 @@ export function transcriptRoutes(): Hono {
     const matches = transcriptStore.grep(resolution.rigName, sessionName, pattern);
     if (matches === null) {
       return c.json(
-        { error: `No transcript for '${sessionName}'. Transcripts start automatically on next rigged up.` },
+        { error: `No transcript for '${sessionName}'. Transcripts start automatically on next rig up.` },
         404,
       );
     }

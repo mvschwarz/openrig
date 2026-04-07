@@ -10,7 +10,7 @@ import { eventsSchema } from "./db/migrations/003_events.js";
 import { RigRepository } from "./domain/rig-repository.js";
 import { SessionRegistry } from "./domain/session-registry.js";
 
-const dbPath = process.argv[2] ?? "rigged.sqlite";
+const dbPath = process.argv[2] ?? "openrig.sqlite";
 
 console.log(`Seeding database: ${dbPath}`);
 
@@ -48,4 +48,4 @@ sessionRegistry.updateBinding(orch.id, {
 console.log("Added cmuxSurface binding to orch1-lead (surface-orch-1)");
 
 db.close();
-console.log("Done. Start daemon with: RIGGED_DB=" + dbPath + " npx tsx packages/daemon/src/index.ts");
+console.log("Done. Start daemon with: OPENRIG_DB=" + dbPath + " npx tsx packages/daemon/src/index.ts");

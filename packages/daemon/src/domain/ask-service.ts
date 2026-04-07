@@ -51,7 +51,7 @@ export class AskService {
         rig: null,
         evidence: { backend: "rg", excerpts: [] },
         insufficient: true,
-        guidance: `Rig '${rigName}' not found. List rigs with: rigged ps`,
+        guidance: `Rig '${rigName}' not found. List rigs with: rig ps`,
       };
     }
 
@@ -79,7 +79,7 @@ export class AskService {
         rig: rigInfo,
         evidence: { backend: "rg", excerpts: [] },
         insufficient: true,
-        guidance: "Transcripts are disabled. Enable with: rigged config set transcripts.enabled true",
+        guidance: "Transcripts are disabled. Enable with: rig config set transcripts.enabled true",
       };
     }
 
@@ -100,7 +100,7 @@ export class AskService {
 
     if (isInsufficient) {
       if (searchResult.noTranscriptDir) {
-        guidance = `No transcript directory for rig '${rigName}'. Transcripts start automatically on next rigged up.`;
+        guidance = `No transcript directory for rig '${rigName}'. Transcripts start automatically on next rig up.`;
       } else if (searchResult.error) {
         // Backend failure
         guidance = searchResult.error;

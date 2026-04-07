@@ -18,18 +18,18 @@ describe("ConfigStore", () => {
     tmpDir = mkdtempSync(join(tmpdir(), "config-test-"));
     // Save env vars we'll modify
     savedEnv = {
-      RIGGED_PORT: process.env["RIGGED_PORT"],
-      RIGGED_HOST: process.env["RIGGED_HOST"],
-      RIGGED_DB: process.env["RIGGED_DB"],
-      RIGGED_TRANSCRIPTS_ENABLED: process.env["RIGGED_TRANSCRIPTS_ENABLED"],
-      RIGGED_TRANSCRIPTS_PATH: process.env["RIGGED_TRANSCRIPTS_PATH"],
+      OPENRIG_PORT: process.env["OPENRIG_PORT"],
+      OPENRIG_HOST: process.env["OPENRIG_HOST"],
+      OPENRIG_DB: process.env["OPENRIG_DB"],
+      OPENRIG_TRANSCRIPTS_ENABLED: process.env["OPENRIG_TRANSCRIPTS_ENABLED"],
+      OPENRIG_TRANSCRIPTS_PATH: process.env["OPENRIG_TRANSCRIPTS_PATH"],
     };
     // Clear env vars for clean tests
-    delete process.env["RIGGED_PORT"];
-    delete process.env["RIGGED_HOST"];
-    delete process.env["RIGGED_DB"];
-    delete process.env["RIGGED_TRANSCRIPTS_ENABLED"];
-    delete process.env["RIGGED_TRANSCRIPTS_PATH"];
+    delete process.env["OPENRIG_PORT"];
+    delete process.env["OPENRIG_HOST"];
+    delete process.env["OPENRIG_DB"];
+    delete process.env["OPENRIG_TRANSCRIPTS_ENABLED"];
+    delete process.env["OPENRIG_TRANSCRIPTS_PATH"];
   });
 
   afterEach(() => {
@@ -47,9 +47,9 @@ describe("ConfigStore", () => {
     const config = store.resolve();
     expect(config.daemon.port).toBe(7433);
     expect(config.daemon.host).toBe("127.0.0.1");
-    expect(config.db.path).toContain(".rigged/rigged.sqlite");
+    expect(config.db.path).toContain(".openrig/openrig.sqlite");
     expect(config.transcripts.enabled).toBe(true);
-    expect(config.transcripts.path).toContain(".rigged/transcripts");
+    expect(config.transcripts.path).toContain(".openrig/transcripts");
   });
 
   // Test 2
@@ -68,7 +68,7 @@ describe("ConfigStore", () => {
   it("resolve() env vars override config file", () => {
     const configPath = join(tmpDir, "config.json");
     writeFileSync(configPath, JSON.stringify({ daemon: { port: 8888 } }));
-    process.env["RIGGED_PORT"] = "9999";
+    process.env["OPENRIG_PORT"] = "9999";
     const store = new ConfigStore(configPath);
     const config = store.resolve();
     expect(config.daemon.port).toBe(9999);
@@ -132,33 +132,33 @@ describe("DaemonClient config integration", () => {
 describe("DaemonClient config-aware baseUrl", () => {
   it("new DaemonClient() without args resolves baseUrl from config env vars", async () => {
     const saved = {
-      RIGGED_URL: process.env["RIGGED_URL"],
-      RIGGED_PORT: process.env["RIGGED_PORT"],
-      RIGGED_HOST: process.env["RIGGED_HOST"],
+      OPENRIG_URL: process.env["OPENRIG_URL"],
+      OPENRIG_PORT: process.env["OPENRIG_PORT"],
+      OPENRIG_HOST: process.env["OPENRIG_HOST"],
     };
-    delete process.env["RIGGED_URL"];
-    process.env["RIGGED_PORT"] = "9999";
-    process.env["RIGGED_HOST"] = "10.0.0.5";
+    delete process.env["OPENRIG_URL"];
+    process.env["OPENRIG_PORT"] = "9999";
+    process.env["OPENRIG_HOST"] = "10.0.0.5";
     try {
       const { DaemonClient } = await import("../src/client.js");
       const client = new DaemonClient();
       expect(client.baseUrl).toBe("http://10.0.0.5:9999");
     } finally {
-      if (saved.RIGGED_URL !== undefined) process.env["RIGGED_URL"] = saved.RIGGED_URL;
-      else delete process.env["RIGGED_URL"];
-      if (saved.RIGGED_PORT !== undefined) process.env["RIGGED_PORT"] = saved.RIGGED_PORT;
-      else delete process.env["RIGGED_PORT"];
-      if (saved.RIGGED_HOST !== undefined) process.env["RIGGED_HOST"] = saved.RIGGED_HOST;
-      else delete process.env["RIGGED_HOST"];
+      if (saved.OPENRIG_URL !== undefined) process.env["OPENRIG_URL"] = saved.OPENRIG_URL;
+      else delete process.env["OPENRIG_URL"];
+      if (saved.OPENRIG_PORT !== undefined) process.env["OPENRIG_PORT"] = saved.OPENRIG_PORT;
+      else delete process.env["OPENRIG_PORT"];
+      if (saved.OPENRIG_HOST !== undefined) process.env["OPENRIG_HOST"] = saved.OPENRIG_HOST;
+      else delete process.env["OPENRIG_HOST"];
     }
   });
 });
 
 describe("getDaemonStatus host preservation", () => {
-  it("preserves non-localhost host from RIGGED_URL", async () => {
+  it("preserves non-localhost host from OPENRIG_URL", async () => {
     const { getDaemonStatus } = await import("../src/daemon-lifecycle.js");
-    const savedUrl = process.env["RIGGED_URL"];
-    process.env["RIGGED_URL"] = "http://10.0.0.5:8080";
+    const savedUrl = process.env["OPENRIG_URL"];
+    process.env["OPENRIG_URL"] = "http://10.0.0.5:8080";
     try {
       const mockDeps = {
         spawn: vi.fn(() => ({ pid: 1, unref: vi.fn() }) as never),
@@ -176,8 +176,8 @@ describe("getDaemonStatus host preservation", () => {
       expect(status.host).toBe("10.0.0.5");
       expect(status.port).toBe(8080);
     } finally {
-      if (savedUrl !== undefined) process.env["RIGGED_URL"] = savedUrl;
-      else delete process.env["RIGGED_URL"];
+      if (savedUrl !== undefined) process.env["OPENRIG_URL"] = savedUrl;
+      else delete process.env["OPENRIG_URL"];
     }
   });
 });
@@ -238,14 +238,14 @@ describe("Config CLI", () => {
   });
 
   // Test 8
-  it("rigged config --json prints full resolved config", async () => {
+  it("rig config --json prints full resolved config", async () => {
     const cmd = configCommand(join(tmpDir, "config.json"));
     const prog = new Command();
     prog.exitOverride();
     prog.addCommand(cmd);
 
     const { logs } = await captureLogs(async () => {
-      await prog.parseAsync(["node", "rigged", "config", "--json"]);
+      await prog.parseAsync(["node", "rig", "config", "--json"]);
     });
     const parsed = JSON.parse(logs.join("\n"));
     expect(parsed.daemon).toBeDefined();
@@ -254,20 +254,20 @@ describe("Config CLI", () => {
   });
 
   // Test 9
-  it("rigged config get transcripts.path prints resolved path", async () => {
+  it("rig config get transcripts.path prints resolved path", async () => {
     const cmd = configCommand(join(tmpDir, "config.json"));
     const prog = new Command();
     prog.exitOverride();
     prog.addCommand(cmd);
 
     const { logs } = await captureLogs(async () => {
-      await prog.parseAsync(["node", "rigged", "config", "get", "transcripts.path"]);
+      await prog.parseAsync(["node", "rig", "config", "get", "transcripts.path"]);
     });
     expect(logs.join("\n")).toContain("transcripts");
   });
 
   // Test 10
-  it("rigged config --help includes subcommands and examples", () => {
+  it("rig config --help includes subcommands and examples", () => {
     const cmd = configCommand(join(tmpDir, "config.json"));
     // helpInformation() returns the core help; addHelpText appends at display time
     const coreHelp = cmd.helpInformation();

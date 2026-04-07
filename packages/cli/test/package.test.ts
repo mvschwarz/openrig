@@ -275,7 +275,7 @@ function createMockDaemon() {
   };
 }
 
-describe("rigged package", () => {
+describe("rig package", () => {
   let srv: ReturnType<typeof createMockDaemon>;
   let port: number;
 
@@ -293,7 +293,7 @@ describe("rigged package", () => {
 
   // Test 1: validate valid → prints name + version + export counts
   it("validate valid: prints manifest summary", async () => {
-    const { logs } = await captureLogs(() => makeProgram().parseAsync(["node", "rigged", "package", "validate", "/valid/path"]));
+    const { logs } = await captureLogs(() => makeProgram().parseAsync(["node", "rig", "package", "validate", "/valid/path"]));
     const output = logs.join("\n");
     expect(output).toContain("test-pkg");
     expect(output).toContain("1.0.0");
@@ -303,7 +303,7 @@ describe("rigged package", () => {
 
   // Test 2: validate invalid manifest → errors[] + exitCode 1
   it("validate invalid manifest: prints errors, exitCode 1", async () => {
-    const { logs, exitCode } = await captureLogs(() => makeProgram().parseAsync(["node", "rigged", "package", "validate", "/invalid/path"]));
+    const { logs, exitCode } = await captureLogs(() => makeProgram().parseAsync(["node", "rig", "package", "validate", "/invalid/path"]));
     const output = logs.join("\n");
     expect(output).toContain("name is required");
     expect(output).toContain("version is required");
@@ -312,7 +312,7 @@ describe("rigged package", () => {
 
   // Test 3: validate missing package.yaml → error + exitCode 1
   it("validate missing: prints error, exitCode 1", async () => {
-    const { logs, exitCode } = await captureLogs(() => makeProgram().parseAsync(["node", "rigged", "package", "validate", "/missing/path"]));
+    const { logs, exitCode } = await captureLogs(() => makeProgram().parseAsync(["node", "rig", "package", "validate", "/missing/path"]));
     const output = logs.join("\n");
     expect(output).toContain("No package.yaml found");
     expect(exitCode).toBe(1);
@@ -320,7 +320,7 @@ describe("rigged package", () => {
 
   // Test 4: plan clean → classified entries table
   it("plan clean: prints classified entries", async () => {
-    const { logs } = await captureLogs(() => makeProgram().parseAsync(["node", "rigged", "package", "plan", "/valid/path", "--target", "/repo"]));
+    const { logs } = await captureLogs(() => makeProgram().parseAsync(["node", "rig", "package", "plan", "/valid/path", "--target", "/repo"]));
     const output = logs.join("\n");
     expect(output).toContain("test-pkg");
     expect(output).toContain("helper");
@@ -331,7 +331,7 @@ describe("rigged package", () => {
 
   // Test 5: plan with conflicts → conflict info
   it("plan with conflicts: prints conflict info", async () => {
-    const { logs } = await captureLogs(() => makeProgram().parseAsync(["node", "rigged", "package", "plan", "/conflict/path", "--target", "/repo"]));
+    const { logs } = await captureLogs(() => makeProgram().parseAsync(["node", "rig", "package", "plan", "/conflict/path", "--target", "/repo"]));
     const output = logs.join("\n");
     expect(output).toContain("helper");
     expect(output).toContain("already exists");
@@ -340,7 +340,7 @@ describe("rigged package", () => {
 
   // Test 6: install clean → applied + deferred items
   it("install clean: prints applied entries + deferred items", async () => {
-    const { logs } = await captureLogs(() => makeProgram().parseAsync(["node", "rigged", "package", "install", "/valid/path", "--target", "/repo"]));
+    const { logs } = await captureLogs(() => makeProgram().parseAsync(["node", "rig", "package", "install", "/valid/path", "--target", "/repo"]));
     const output = logs.join("\n");
     // Applied — journal entries have targetPath, not exportName
     expect(output).toContain("skill");
@@ -355,7 +355,7 @@ describe("rigged package", () => {
 
   // Test 7: install --allow-merge → merged guidance
   it("install --allow-merge: prints merged guidance entries", async () => {
-    const { logs } = await captureLogs(() => makeProgram().parseAsync(["node", "rigged", "package", "install", "/merge/path", "--target", "/repo", "--allow-merge"]));
+    const { logs } = await captureLogs(() => makeProgram().parseAsync(["node", "rig", "package", "install", "/merge/path", "--target", "/repo", "--allow-merge"]));
     const output = logs.join("\n");
     // Journal entries: exportType + action + targetPath (no exportName)
     expect(output).toContain("guidance");
@@ -366,7 +366,7 @@ describe("rigged package", () => {
 
   // Test 8: install conflicts (409) → exitCode 1
   it("install conflicts: prints conflicts, exitCode 1", async () => {
-    const { logs, exitCode } = await captureLogs(() => makeProgram().parseAsync(["node", "rigged", "package", "install", "/conflict/path", "--target", "/repo"]));
+    const { logs, exitCode } = await captureLogs(() => makeProgram().parseAsync(["node", "rig", "package", "install", "/conflict/path", "--target", "/repo"]));
     const output = logs.join("\n");
     expect(output).toContain("conflict");
     expect(output).toContain("already exists");
@@ -375,7 +375,7 @@ describe("rigged package", () => {
 
   // Test 9: install apply_error (500) → exitCode 2
   it("install apply_error: exitCode 2", async () => {
-    const { logs, exitCode } = await captureLogs(() => makeProgram().parseAsync(["node", "rigged", "package", "install", "/apply-error/path", "--target", "/repo"]));
+    const { logs, exitCode } = await captureLogs(() => makeProgram().parseAsync(["node", "rig", "package", "install", "/apply-error/path", "--target", "/repo"]));
     const output = logs.join("\n");
     expect(output).toContain("Disk full");
     expect(exitCode).toBe(2);
@@ -383,7 +383,7 @@ describe("rigged package", () => {
 
   // Test 10: install verification_failed (500) → exitCode 2
   it("install verification_failed: exitCode 2", async () => {
-    const { logs, exitCode } = await captureLogs(() => makeProgram().parseAsync(["node", "rigged", "package", "install", "/verify-fail/path", "--target", "/repo"]));
+    const { logs, exitCode } = await captureLogs(() => makeProgram().parseAsync(["node", "rig", "package", "install", "/verify-fail/path", "--target", "/repo"]));
     const output = logs.join("\n");
     expect(output).toMatch(/verification failed/i);
     expect(exitCode).toBe(2);
@@ -391,7 +391,7 @@ describe("rigged package", () => {
 
   // Test 11: install policy_rejected (422) → exitCode 1
   it("install policy_rejected: prints rejected, exitCode 1", async () => {
-    const { logs, exitCode } = await captureLogs(() => makeProgram().parseAsync(["node", "rigged", "package", "install", "/policy-reject/path", "--target", "/repo"]));
+    const { logs, exitCode } = await captureLogs(() => makeProgram().parseAsync(["node", "rig", "package", "install", "/policy-reject/path", "--target", "/repo"]));
     const output = logs.join("\n");
     expect(output).toContain("Policy rejected");
     expect(output).toContain("allowMerge");
@@ -400,7 +400,7 @@ describe("rigged package", () => {
 
   // Test 12: rollback → prints restored/deleted
   it("rollback: prints restored and deleted", async () => {
-    const { logs } = await captureLogs(() => makeProgram().parseAsync(["node", "rigged", "package", "rollback", "inst-1"]));
+    const { logs } = await captureLogs(() => makeProgram().parseAsync(["node", "rig", "package", "rollback", "inst-1"]));
     const output = logs.join("\n");
     expect(output).toContain("inst-1");
     expect(output).toContain("1 restored");
@@ -409,7 +409,7 @@ describe("rigged package", () => {
 
   // Test 13: rollback not found (404) → exitCode 1
   it("rollback not found: exitCode 1", async () => {
-    const { logs, exitCode } = await captureLogs(() => makeProgram().parseAsync(["node", "rigged", "package", "rollback", "missing"]));
+    const { logs, exitCode } = await captureLogs(() => makeProgram().parseAsync(["node", "rig", "package", "rollback", "missing"]));
     const output = logs.join("\n");
     expect(output).toMatch(/not found/i);
     expect(exitCode).toBe(1);
@@ -417,7 +417,7 @@ describe("rigged package", () => {
 
   // Test 14: list → formatted table
   it("list: formatted table", async () => {
-    const { logs } = await captureLogs(() => makeProgram().parseAsync(["node", "rigged", "package", "list"]));
+    const { logs } = await captureLogs(() => makeProgram().parseAsync(["node", "rig", "package", "list"]));
     const output = logs.join("\n");
     expect(output).toContain("test-pkg");
     expect(output).toContain("1.0.0");
@@ -431,7 +431,7 @@ describe("rigged package", () => {
     const { logs } = await captureLogs(() => {
       const program = new Command();
       program.addCommand(packageCommand(deps));
-      return program.parseAsync(["node", "rigged", "package", "validate", "/any"]);
+      return program.parseAsync(["node", "rig", "package", "validate", "/any"]);
     });
     expect(logs.join("\n")).toMatch(/not running/i);
     expect(deps.clientFactory).not.toHaveBeenCalled();
@@ -449,7 +449,7 @@ describe("rigged package", () => {
   it("install sends correct request body fields", async () => {
     capturedBodies = [];
     await captureLogs(() => makeProgram().parseAsync([
-      "node", "rigged", "package", "install", "/valid/path",
+      "node", "rig", "package", "install", "/valid/path",
       "--target", "/my-repo",
       "--runtime", "codex",
       "--role", "worker",

@@ -21,7 +21,7 @@ const NODE_DETAIL = {
     outgoing: [{ kind: "delegates_to", to: { logicalId: "dev.qa", sessionName: "dev-qa@test-rig" } }],
     incoming: [],
   },
-  transcript: { enabled: true, path: "/tmp/test.log", tailCommand: "rigged transcript dev-impl --tail 100" },
+  transcript: { enabled: true, path: "/tmp/test.log", tailCommand: "rig transcript dev-impl --tail 100" },
   compactSpec: { name: "impl", version: "1.0.0", profile: "default", skillCount: 2, guidanceCount: 1 },
 };
 

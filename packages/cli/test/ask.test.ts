@@ -105,7 +105,7 @@ describe("Ask CLI", () => {
             rig: null,
             evidence: { backend: "rg", excerpts: [] },
             insufficient: true,
-            guidance: `Rig '${parsed.rig}' not found. List rigs with: rigged ps`,
+            guidance: `Rig '${parsed.rig}' not found. List rigs with: rig ps`,
           }));
         }
       });
@@ -125,7 +125,7 @@ describe("Ask CLI", () => {
 
   it("human output shows question, rig status, and excerpts", async () => {
     const { logs } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "ask", "my-rig", "what about deployment?"]);
+      await makeCmd().parseAsync(["node", "rig", "ask", "my-rig", "what about deployment?"]);
     });
     const output = logs.join("\n");
     expect(output).toContain("what about deployment?");
@@ -137,7 +137,7 @@ describe("Ask CLI", () => {
 
   it("--json prints raw structured result", async () => {
     const { logs } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "ask", "my-rig", "what about deployment?", "--json"]);
+      await makeCmd().parseAsync(["node", "rig", "ask", "my-rig", "what about deployment?", "--json"]);
     });
     const output = logs.join("\n");
     const parsed = JSON.parse(output);
@@ -148,16 +148,16 @@ describe("Ask CLI", () => {
 
   it("shows guidance when no data available", async () => {
     const { logs } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "ask", "nonexistent-rig", "some question"]);
+      await makeCmd().parseAsync(["node", "rig", "ask", "nonexistent-rig", "some question"]);
     });
     const output = logs.join("\n");
     expect(output).toContain("not found");
-    expect(output).toContain("rigged ps");
+    expect(output).toContain("rig ps");
   });
 
   it("shows insufficient message when keywords empty", async () => {
     const { logs } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "ask", "my-rig", "what is the"]);
+      await makeCmd().parseAsync(["node", "rig", "ask", "my-rig", "what is the"]);
     });
     const output = logs.join("\n");
     expect(output).toContain("No useful keywords");
@@ -165,7 +165,7 @@ describe("Ask CLI", () => {
 
   it("human output shows chat evidence when transcript excerpts are empty", async () => {
     const { logs } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "ask", "my-rig", "what did chat say about deployment?"]);
+      await makeCmd().parseAsync(["node", "rig", "ask", "my-rig", "what did chat say about deployment?"]);
     });
     const output = logs.join("\n");
     expect(output).toContain("Chat Evidence");

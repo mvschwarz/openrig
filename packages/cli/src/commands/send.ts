@@ -19,10 +19,10 @@ export function sendCommand(depsOverride?: StatusDeps): Command {
     .option("--json", "JSON output for agents")
     .addHelpText("after", `
 Examples:
-  rigged send dev-impl@my-rig "Context update: QA approved. Proceed."
-  rigged send dev-impl@my-rig "message" --verify
-  rigged send dev-impl@my-rig "Stop and read the spec." --force
-  rigged send dev-impl@my-rig "message" --json
+  rig send dev-impl@my-rig "Context update: QA approved. Proceed."
+  rig send dev-impl@my-rig "message" --verify
+  rig send dev-impl@my-rig "Stop and read the spec." --force
+  rig send dev-impl@my-rig "message" --json
 
 The two-step send pattern (paste text, wait, submit Enter) is handled
 automatically. Use --verify to confirm the message appeared in the pane.
@@ -32,7 +32,7 @@ Use --force to override mid-task safety checks.`)
       const status = await getDaemonStatus(deps.lifecycleDeps);
 
       if (status.state !== "running" || status.healthy === false) {
-        console.error("Daemon not running. Start it with: rigged daemon start");
+        console.error("Daemon not running. Start it with: rig daemon start");
         process.exitCode = 1;
         return;
       }

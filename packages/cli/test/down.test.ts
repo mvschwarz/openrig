@@ -101,7 +101,7 @@ describe("Down CLI", () => {
   it("down success prints summary and exits 0", async () => {
     responseOverride = null;
     const { logs, exitCode } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "down", "rig-1"]);
+      await makeCmd().parseAsync(["node", "rig", "down", "rig-1"]);
     });
     expect(logs.some((l) => l.includes("stopped"))).toBe(true);
     expect(logs.some((l) => l.includes("2 session(s) killed"))).toBe(true);
@@ -115,7 +115,7 @@ describe("Down CLI", () => {
       body: { rigId: "rig-1", sessionsKilled: 0, snapshotId: null, deleted: false, deleteBlocked: false, alreadyStopped: true, errors: [] },
     };
     const { logs, exitCode } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "down", "rig-1"]);
+      await makeCmd().parseAsync(["node", "rig", "down", "rig-1"]);
     });
     expect(logs.some((l) => l.includes("already stopped"))).toBe(true);
     expect(exitCode).toBe(1);
@@ -128,7 +128,7 @@ describe("Down CLI", () => {
       body: { rigId: "rig-1", sessionsKilled: 0, snapshotId: null, deleted: true, deleteBlocked: false, alreadyStopped: true, errors: [] },
     };
     const { logs, exitCode } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "down", "rig-1"]);
+      await makeCmd().parseAsync(["node", "rig", "down", "rig-1"]);
     });
     expect(logs.some((l) => l.includes("deleted"))).toBe(true);
     expect(exitCode).toBeUndefined(); // 0
@@ -141,7 +141,7 @@ describe("Down CLI", () => {
       body: { rigId: "rig-1", sessionsKilled: 2, snapshotId: null, deleted: true, deleteBlocked: false, alreadyStopped: false, errors: ["Snapshot failed: disk full"] },
     };
     const { logs, exitCode } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "down", "rig-1"]);
+      await makeCmd().parseAsync(["node", "rig", "down", "rig-1"]);
     });
     expect(logs.some((l) => l.includes("warning"))).toBe(true);
     expect(exitCode).toBe(2);
@@ -154,7 +154,7 @@ describe("Down CLI", () => {
       body: { rigId: "rig-1", sessionsKilled: 1, snapshotId: null, deleted: false, deleteBlocked: true, alreadyStopped: false, errors: ["Kill failed for session 'r01-x': timeout"] },
     };
     const { logs, exitCode } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "down", "rig-1"]);
+      await makeCmd().parseAsync(["node", "rig", "down", "rig-1"]);
     });
     expect(exitCode).toBe(2);
   });
@@ -166,7 +166,7 @@ describe("Down CLI", () => {
       body: { rigId: "rig-1", sessionsKilled: 2, snapshotId: null, deleted: true, deleteBlocked: false, alreadyStopped: false, errors: [] },
     };
     await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "down", "rig-1", "--delete"]);
+      await makeCmd().parseAsync(["node", "rig", "down", "rig-1", "--delete"]);
     });
     expect(lastBody["delete"]).toBe(true);
   });
@@ -175,7 +175,7 @@ describe("Down CLI", () => {
   it("down --snapshot sends snapshot flag", async () => {
     responseOverride = null;
     await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "down", "rig-1", "--snapshot"]);
+      await makeCmd().parseAsync(["node", "rig", "down", "rig-1", "--snapshot"]);
     });
     expect(lastBody["snapshot"]).toBe(true);
   });
@@ -184,7 +184,7 @@ describe("Down CLI", () => {
   it("down --force sends force flag", async () => {
     responseOverride = null;
     await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "down", "rig-1", "--force"]);
+      await makeCmd().parseAsync(["node", "rig", "down", "rig-1", "--force"]);
     });
     expect(lastBody["force"]).toBe(true);
   });
@@ -193,7 +193,7 @@ describe("Down CLI", () => {
   it("down --json outputs raw JSON", async () => {
     responseOverride = null;
     const { logs } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "down", "rig-1", "--json"]);
+      await makeCmd().parseAsync(["node", "rig", "down", "rig-1", "--json"]);
     });
     const parsed = JSON.parse(logs.join(""));
     expect(parsed.rigId).toBe("rig-1");
@@ -204,7 +204,7 @@ describe("Down CLI", () => {
   it("down with 404 exits 2", async () => {
     responseOverride = { status: 404, body: { error: "Rig not found: missing" } };
     const { exitCode } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "down", "missing"]);
+      await makeCmd().parseAsync(["node", "rig", "down", "missing"]);
     });
     expect(exitCode).toBe(2);
   });
@@ -216,7 +216,7 @@ describe("Down CLI", () => {
       body: { rigId: "rig-1", sessionsKilled: 0, snapshotId: null, deleted: false, deleteBlocked: false, alreadyStopped: true, errors: [] },
     };
     const { exitCode } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "down", "rig-1", "--json"]);
+      await makeCmd().parseAsync(["node", "rig", "down", "rig-1", "--json"]);
     });
     expect(exitCode).toBe(1);
   });
@@ -228,7 +228,7 @@ describe("Down CLI", () => {
       body: { rigId: "rig-1", sessionsKilled: 2, snapshotId: null, deleted: true, deleteBlocked: false, alreadyStopped: false, errors: ["Snapshot failed: disk full"] },
     };
     const { exitCode } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "down", "rig-1", "--json"]);
+      await makeCmd().parseAsync(["node", "rig", "down", "rig-1", "--json"]);
     });
     expect(exitCode).toBe(2);
   });

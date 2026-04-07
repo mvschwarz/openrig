@@ -41,9 +41,9 @@ export function importCommand(depsOverride?: ImportDeps): Command {
       const status = await getDaemonStatus(deps.lifecycleDeps);
       if (status.state !== "running" || status.healthy === false) {
         if (status.state === "running" && status.healthy === false) {
-          console.error("Daemon unhealthy — healthz check failed. Restart with: rigged daemon start");
+          console.error("Daemon unhealthy — healthz check failed. Restart with: rig daemon start");
         } else {
-          console.error("Daemon not running. Start it with: rigged daemon start");
+          console.error("Daemon not running. Start it with: rig daemon start");
         }
         process.exitCode = 1;
         return;
@@ -124,7 +124,7 @@ export function importCommand(depsOverride?: ImportDeps): Command {
         if (res.status === 409 || res.status === 400) {
           const data = res.data as { ok: false; code: string; errors?: string[]; message?: string };
           const detail = data.errors?.join("\n  ") ?? data.message ?? `status ${res.status}`;
-          console.error(`Import failed:\n  ${detail}\nFix: check your rig spec and retry. Validate first with: rigged rig validate <path>`);
+          console.error(`Import failed:\n  ${detail}\nFix: check your rig spec and retry. Validate first with: rig spec validate <path>`);
           process.exitCode = 1;
         } else if (res.status >= 400) {
           console.error(`Import failed (HTTP ${res.status}). Check spec and daemon logs.`);
@@ -153,7 +153,7 @@ export function importCommand(depsOverride?: ImportDeps): Command {
       if (data.valid) {
         console.log("Valid");
       } else {
-        console.error(`Rig spec invalid:\n${(data.errors ?? []).map((e) => `  ${e}`).join("\n")}\nFix: update your spec and re-validate with: rigged rig validate <path>`);
+        console.error(`Rig spec invalid:\n${(data.errors ?? []).map((e) => `  ${e}`).join("\n")}\nFix: update your spec and re-validate with: rig spec validate <path>`);
         process.exitCode = 1;
       }
     });

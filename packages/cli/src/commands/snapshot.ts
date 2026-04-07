@@ -21,7 +21,7 @@ export function snapshotCommand(depsOverride?: StatusDeps): Command {
     return deps.clientFactory(getDaemonUrl(status));
   }
 
-  // rigged snapshot <rigId> — default action creates a snapshot
+  // rig snapshot <rigId> — default action creates a snapshot
   cmd
     .argument("<rigId>", "Rig ID to snapshot")
     .action(async (rigId: string) => {
@@ -38,11 +38,11 @@ export function snapshotCommand(depsOverride?: StatusDeps): Command {
         process.exitCode = 1;
       } else {
         console.log(`Snapshot created: ${res.data.id}`);
-        console.log(`To restore: rigged restore ${res.data.id} --rig ${rigId}`);
+        console.log(`To restore: rig restore ${res.data.id} --rig ${rigId}`);
       }
     });
 
-  // rigged snapshot list <rigId>
+  // rig snapshot list <rigId>
   cmd
     .command("list <rigId>")
     .description("List snapshots for a rig")

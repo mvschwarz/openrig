@@ -30,14 +30,14 @@ export function upCommand(depsOverride?: StatusDeps & { lifecycleDeps?: Lifecycl
           const { ConfigStore } = await import("../config-store.js");
           const { SystemPreflight } = await import("../system-preflight.js");
           const { execSync } = await import("node:child_process");
-          const { RIGGED_DIR } = await import("../daemon-lifecycle.js");
+          const { OPENRIG_DIR } = await import("../daemon-lifecycle.js");
           const configStore = new ConfigStore();
           resolvedConfig = configStore.resolve();
           const preflight = new SystemPreflight({
             exec: async (cmd) => execSync(cmd, { encoding: "utf-8" }),
             configStore,
             getDaemonStatus: () => getDaemonStatus(deps.lifecycleDeps),
-            riggedHome: RIGGED_DIR,
+            openrigHome: OPENRIG_DIR,
           });
           const preflightResult = await preflight.run();
           if (!preflightResult.ready) {
@@ -65,14 +65,14 @@ export function upCommand(depsOverride?: StatusDeps & { lifecycleDeps?: Lifecycl
           }, deps.lifecycleDeps);
           status = await getDaemonStatus(deps.lifecycleDeps);
         } catch {
-          console.error("Failed to auto-start daemon. Start manually with: rigged daemon start");
+          console.error("Failed to auto-start daemon. Start manually with: rig daemon start");
           process.exitCode = 2;
           return;
         }
       }
 
       if (status.state !== "running" || status.healthy === false) {
-        console.error("Daemon not running. Start it with: rigged daemon start");
+        console.error("Daemon not running. Start it with: rig daemon start");
         process.exitCode = 1;
         return;
       }
@@ -94,7 +94,7 @@ export function upCommand(depsOverride?: StatusDeps & { lifecycleDeps?: Lifecycl
           const rigMatches = (rigRes.data ?? []).filter((r) => r.name === source);
           if (rigMatches.length > 0) {
             console.error(`'${source}' is ambiguous — it matches both an existing rig and a library spec.`);
-            console.error(`  To launch the library spec: rigged up ${entry.sourcePath}`);
+            console.error(`  To launch the library spec: rig up ${entry.sourcePath}`);
             console.error(`  To power on the existing rig: rename or remove the library spec first, then retry.`);
             process.exitCode = 1;
             return;
@@ -138,7 +138,7 @@ export function upCommand(depsOverride?: StatusDeps & { lifecycleDeps?: Lifecycl
           const errors = (res.data["errors"] as string[]) ?? [];
           console.error(`Preflight check failed:\n${errors.map((e) => `  ${e}`).join("\n")}\nFix: resolve the issues above and retry.`);
         } else {
-          console.error(`Up failed: ${res.data["error"] ?? "unknown error"} (HTTP ${res.status}). Check daemon logs or validate your spec with: rigged rig validate <path>`);
+          console.error(`Up failed: ${res.data["error"] ?? "unknown error"} (HTTP ${res.status}). Check daemon logs or validate your spec with: rig spec validate <path>`);
         }
         const stages = (res.data["stages"] as Array<{ stage: string; status: string }>) ?? [];
         for (const s of stages) {
@@ -182,8 +182,8 @@ export function upCommand(depsOverride?: StatusDeps & { lifecycleDeps?: Lifecycl
         const rigId = res.data["rigId"] as string | undefined;
         if (rigId) {
           console.log(`\nRig: ${rigId}`);
-          // Dashboard — use rigged ui open (knows the real UI URL)
-          console.log(`Dashboard: rigged ui open`);
+          // Dashboard — use rig ui open (knows the real UI URL)
+          console.log(`Dashboard: rig ui open`);
         }
         console.log(`Status: ${resStatus}`);
 

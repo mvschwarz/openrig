@@ -47,13 +47,13 @@ function mapResult(
  */
 export function createMcpServer(client: DaemonClient): McpServer {
   const server = new McpServer({
-    name: "rigged",
+    name: "openrig",
     version: "0.1.0",
   });
 
-  // 1. rigged_up — bootstrap/bundle install
+  // 1. rig_up — bootstrap/bundle install
   server.tool(
-    "rigged_up",
+    "rig_up",
     "Bootstrap a rig from a spec or bundle",
     {
       sourceRef: z.string().describe("Path to .yaml rig spec or .rigbundle"),
@@ -71,9 +71,9 @@ export function createMcpServer(client: DaemonClient): McpServer {
     },
   );
 
-  // 2. rigged_down — rig teardown
+  // 2. rig_down — rig teardown
   server.tool(
-    "rigged_down",
+    "rig_down",
     "Tear down a rig",
     {
       rigId: z.string().describe("Rig identifier to tear down"),
@@ -96,9 +96,9 @@ export function createMcpServer(client: DaemonClient): McpServer {
     },
   );
 
-  // 3. rigged_ps — list running rigs
+  // 3. rig_ps — list running rigs
   server.tool(
-    "rigged_ps",
+    "rig_ps",
     "List rigs and their status",
     {},
     async () => {
@@ -111,9 +111,9 @@ export function createMcpServer(client: DaemonClient): McpServer {
     },
   );
 
-  // 4. rigged_status — daemon health
+  // 4. rig_status — daemon health
   server.tool(
-    "rigged_status",
+    "rig_status",
     "Check daemon health",
     {},
     async () => {
@@ -126,9 +126,9 @@ export function createMcpServer(client: DaemonClient): McpServer {
     },
   );
 
-  // 5. rigged_snapshot_create — create snapshot
+  // 5. rig_snapshot_create — create snapshot
   server.tool(
-    "rigged_snapshot_create",
+    "rig_snapshot_create",
     "Create a snapshot for a rig",
     {
       rigId: z.string().describe("Rig identifier"),
@@ -143,9 +143,9 @@ export function createMcpServer(client: DaemonClient): McpServer {
     },
   );
 
-  // 6. rigged_snapshot_list — list snapshots
+  // 6. rig_snapshot_list — list snapshots
   server.tool(
-    "rigged_snapshot_list",
+    "rig_snapshot_list",
     "List snapshots for a rig",
     {
       rigId: z.string().describe("Rig identifier"),
@@ -160,9 +160,9 @@ export function createMcpServer(client: DaemonClient): McpServer {
     },
   );
 
-  // 7. rigged_restore — restore from snapshot
+  // 7. rig_restore — restore from snapshot
   server.tool(
-    "rigged_restore",
+    "rig_restore",
     "Restore a rig from a snapshot",
     {
       rigId: z.string().describe("Rig identifier"),
@@ -178,9 +178,9 @@ export function createMcpServer(client: DaemonClient): McpServer {
     },
   );
 
-  // 8. rigged_discover — scan for sessions
+  // 8. rig_discover — scan for sessions
   server.tool(
-    "rigged_discover",
+    "rig_discover",
     "Scan for tmux sessions to discover",
     {},
     async () => {
@@ -193,9 +193,9 @@ export function createMcpServer(client: DaemonClient): McpServer {
     },
   );
 
-  // 9. rigged_claim — claim discovered session
+  // 9. rig_claim — claim discovered session
   server.tool(
-    "rigged_claim",
+    "rig_claim",
     "Claim a discovered session into a rig",
     {
       discoveryId: z.string().describe("Discovery session identifier"),
@@ -212,9 +212,9 @@ export function createMcpServer(client: DaemonClient): McpServer {
     },
   );
 
-  // 10. rigged_bundle_inspect — inspect a bundle
+  // 10. rig_bundle_inspect — inspect a bundle
   server.tool(
-    "rigged_bundle_inspect",
+    "rig_bundle_inspect",
     "Inspect a .rigbundle file",
     {
       bundlePath: z.string().describe("Path to .rigbundle file"),
@@ -235,9 +235,9 @@ export function createMcpServer(client: DaemonClient): McpServer {
     },
   );
 
-  // 11. rigged_agent_validate — validate an AgentSpec
+  // 11. rig_agent_validate — validate an AgentSpec
   server.tool(
-    "rigged_agent_validate",
+    "rig_agent_validate",
     "Validate an AgentSpec (agent.yaml) from YAML text",
     {
       yaml: z.string().describe("YAML text of the agent spec"),
@@ -252,9 +252,9 @@ export function createMcpServer(client: DaemonClient): McpServer {
     },
   );
 
-  // 12. rigged_rig_validate — validate a RigSpec
+  // 12. rig_rig_validate — validate a RigSpec
   server.tool(
-    "rigged_rig_validate",
+    "rig_rig_validate",
     "Validate a RigSpec (rig.yaml) from YAML text",
     {
       yaml: z.string().describe("YAML text of the rig spec"),
@@ -269,9 +269,9 @@ export function createMcpServer(client: DaemonClient): McpServer {
     },
   );
 
-  // 13. rigged_rig_nodes — node inventory for a rig
+  // 13. rig_rig_nodes — node inventory for a rig
   server.tool(
-    "rigged_rig_nodes",
+    "rig_rig_nodes",
     "Get node inventory for a rig — session names, status, attach commands, resume commands",
     {
       rigId: z.string().describe("Rig identifier"),
@@ -286,9 +286,9 @@ export function createMcpServer(client: DaemonClient): McpServer {
     },
   );
 
-  // 14. rigged_send — send message to agent session
+  // 14. rig_send — send message to agent session
   server.tool(
-    "rigged_send",
+    "rig_send",
     "Send a message to an agent's terminal using reliable two-step send",
     {
       session: z.string().describe("Target session name (e.g. dev-impl@my-rig)"),
@@ -306,9 +306,9 @@ export function createMcpServer(client: DaemonClient): McpServer {
     },
   );
 
-  // 15. rigged_capture — capture terminal output from agent session
+  // 15. rig_capture — capture terminal output from agent session
   server.tool(
-    "rigged_capture",
+    "rig_capture",
     "Capture terminal output from an agent session",
     {
       session: z.string().optional().describe("Session name (omit for multi-target with rig/pod)"),
@@ -331,9 +331,9 @@ export function createMcpServer(client: DaemonClient): McpServer {
     },
   );
 
-  // 16. rigged_chatroom_send — send message to rig chatroom
+  // 16. rig_chatroom_send — send message to rig chatroom
   server.tool(
-    "rigged_chatroom_send",
+    "rig_chatroom_send",
     "Send a message to a rig's chatroom",
     {
       rigName: z.string().describe("Rig name to send message to"),
@@ -365,9 +365,9 @@ export function createMcpServer(client: DaemonClient): McpServer {
     },
   );
 
-  // 17. rigged_chatroom_watch — get recent chatroom history for a rig
+  // 17. rig_chatroom_watch — get recent chatroom history for a rig
   server.tool(
-    "rigged_chatroom_watch",
+    "rig_chatroom_watch",
     "Get recent chatroom messages for a rig (MCP returns history, not streaming)",
     {
       rigName: z.string().describe("Rig name"),

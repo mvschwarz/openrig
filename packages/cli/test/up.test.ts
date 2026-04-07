@@ -91,7 +91,7 @@ describe("Up CLI", () => {
   // T7: up from .yaml -> stages + rig ID
   it("up prints stages and rig ID", async () => {
     const { logs } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "up", "/tmp/rig.yaml"]);
+      await makeCmd().parseAsync(["node", "rig", "up", "/tmp/rig.yaml"]);
     });
     expect(logs.some((l) => l.includes("resolve_spec"))).toBe(true);
     expect(logs.some((l) => l.includes("rig-1"))).toBe(true);
@@ -101,7 +101,7 @@ describe("Up CLI", () => {
   // T8: up --plan
   it("up --plan prints planned status", async () => {
     const { logs } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "up", "/tmp/rig.yaml", "--plan"]);
+      await makeCmd().parseAsync(["node", "rig", "up", "/tmp/rig.yaml", "--plan"]);
     });
     expect(logs.some((l) => l.includes("planned"))).toBe(true);
   });
@@ -122,7 +122,7 @@ describe("Up CLI", () => {
     });
 
     await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "up", "/tmp/rig.yaml", "--yes"]);
+      await makeCmd().parseAsync(["node", "rig", "up", "/tmp/rig.yaml", "--yes"]);
     });
 
     expect(lastBody.autoApprove).toBe(true);
@@ -134,7 +134,7 @@ describe("Up CLI", () => {
   // T10: --json
   it("up --json outputs parseable JSON", async () => {
     const { logs } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "up", "/tmp/rig.yaml", "--json"]);
+      await makeCmd().parseAsync(["node", "rig", "up", "/tmp/rig.yaml", "--json"]);
     });
     const parsed = JSON.parse(logs.join(""));
     expect(parsed.status).toBe("completed");
@@ -154,7 +154,7 @@ describe("Up CLI", () => {
     prog.addCommand(upCommand(runningDeps(failPort)));
 
     const { exitCode } = await captureLogs(async () => {
-      await prog.parseAsync(["node", "rigged", "up", "/tmp/rig.yaml"]);
+      await prog.parseAsync(["node", "rig", "up", "/tmp/rig.yaml"]);
     });
 
     expect(exitCode).toBe(2);
@@ -177,7 +177,7 @@ describe("Up CLI", () => {
     });
 
     await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "up", "relative/spec.yaml"]);
+      await makeCmd().parseAsync(["node", "rig", "up", "relative/spec.yaml"]);
     });
 
     // sourceRef must be an absolute path, not the raw relative input
@@ -203,7 +203,7 @@ describe("Up CLI", () => {
     });
 
     await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "up", "/tmp/demo.rigbundle"]);
+      await makeCmd().parseAsync(["node", "rig", "up", "/tmp/demo.rigbundle"]);
     });
 
     expect(lastBody.sourceRef).toBe("/tmp/demo.rigbundle");
@@ -228,7 +228,7 @@ describe("Up CLI", () => {
     });
 
     await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "up", "/tmp/demo.rigbundle", "--target", "/tmp/custom-root"]);
+      await makeCmd().parseAsync(["node", "rig", "up", "/tmp/demo.rigbundle", "--target", "/tmp/custom-root"]);
     });
 
     expect(lastBody.targetRoot).toBe("/tmp/custom-root");
@@ -240,10 +240,10 @@ describe("Up CLI", () => {
   // NS-T14: fresh boot handoff includes dashboard URL + attach command
   it("fresh boot success shows dashboard URL and attach command", async () => {
     const { logs } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "up", "/tmp/test.yaml"]);
+      await makeCmd().parseAsync(["node", "rig", "up", "/tmp/test.yaml"]);
     });
     const output = logs.join("\n");
-    expect(output).toContain("Dashboard: rigged ui open");
+    expect(output).toContain("Dashboard: rig ui open");
     expect(output).toContain("Attach:");
     expect(output).toContain("tmux attach -t dev-impl@test-rig");
   });
@@ -271,7 +271,7 @@ describe("Up CLI", () => {
     });
 
     const { logs } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "up", "/tmp/test.yaml"]);
+      await makeCmd().parseAsync(["node", "rig", "up", "/tmp/test.yaml"]);
     });
     const output = logs.join("\n");
     expect(output).toContain("warning: Transcript capture failed");
@@ -280,7 +280,7 @@ describe("Up CLI", () => {
     for (const l of origListeners) server.on("request", l as (...args: unknown[]) => void);
   });
 
-  // PNS-T03: rigged up aborts on preflight failure (daemon not running, port in use)
+  // PNS-T03: rig up aborts on preflight failure (daemon not running, port in use)
   it("up aborts with preflight error when daemon not running and port in use", async () => {
     // Start a TCP server on a port to trigger port-in-use
     const net = await import("node:net");
@@ -299,9 +299,9 @@ describe("Up CLI", () => {
       clientFactory: (baseUrl) => new DaemonClient(baseUrl),
     };
 
-    // Set RIGGED_PORT to the blocked port so preflight detects collision
-    const savedPort = process.env["RIGGED_PORT"];
-    process.env["RIGGED_PORT"] = String(blockedPort);
+    // Set OPENRIG_PORT to the blocked port so preflight detects collision
+    const savedPort = process.env["OPENRIG_PORT"];
+    process.env["OPENRIG_PORT"] = String(blockedPort);
 
     const prog = new Command();
     prog.exitOverride();
@@ -309,12 +309,12 @@ describe("Up CLI", () => {
 
     const { logs, exitCode } = await captureLogs(async () => {
       try {
-        await prog.parseAsync(["node", "rigged", "up", "/tmp/test.yaml"]);
+        await prog.parseAsync(["node", "rig", "up", "/tmp/test.yaml"]);
       } catch { /* commander may throw on exitOverride */ }
     });
     blockingServer.close();
-    if (savedPort !== undefined) process.env["RIGGED_PORT"] = savedPort;
-    else delete process.env["RIGGED_PORT"];
+    if (savedPort !== undefined) process.env["OPENRIG_PORT"] = savedPort;
+    else delete process.env["OPENRIG_PORT"];
 
     const output = logs.join("\n");
     expect(output).toContain("port");
@@ -322,8 +322,8 @@ describe("Up CLI", () => {
   });
 
   it("auto-start uses resolved daemon port instead of default 7433", async () => {
-    const savedPort = process.env["RIGGED_PORT"];
-    process.env["RIGGED_PORT"] = "7461";
+    const savedPort = process.env["OPENRIG_PORT"];
+    process.env["OPENRIG_PORT"] = "7461";
 
     let daemonState: DaemonState | null = null;
     let spawnedPort: string | undefined;
@@ -340,7 +340,7 @@ describe("Up CLI", () => {
         openForAppend: vi.fn(() => 3),
         mkdirp: vi.fn(),
         spawn: vi.fn((cmd, args, opts) => {
-          spawnedPort = opts.env["RIGGED_PORT"];
+          spawnedPort = opts.env["OPENRIG_PORT"];
           return { pid: 321, unref: vi.fn() } as never;
         }),
         fetch: vi.fn(async (url: string) => ({
@@ -363,11 +363,11 @@ describe("Up CLI", () => {
     prog.addCommand(upCommand(deps));
 
     const { exitCode } = await captureLogs(async () => {
-      await prog.parseAsync(["node", "rigged", "up", "/tmp/test.yaml"]);
+      await prog.parseAsync(["node", "rig", "up", "/tmp/test.yaml"]);
     });
 
-    if (savedPort !== undefined) process.env["RIGGED_PORT"] = savedPort;
-    else delete process.env["RIGGED_PORT"];
+    if (savedPort !== undefined) process.env["OPENRIG_PORT"] = savedPort;
+    else delete process.env["OPENRIG_PORT"];
 
     expect(exitCode).toBeUndefined();
     expect(spawnedPort).toBe("7461");
@@ -393,7 +393,7 @@ describe("Up CLI", () => {
     });
 
     const { logs, exitCode } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rigged", "up", "alpha"]);
+      await makeCmd().parseAsync(["node", "rig", "up", "alpha"]);
     });
 
     server.removeAllListeners("request");

@@ -21,7 +21,7 @@ export function packageCommand(depsOverride?: StatusDeps): Command {
     return deps.clientFactory(getDaemonUrl(status));
   }
 
-  // rigged package validate <path>
+  // rig package validate <path>
   cmd
     .command("validate <path>")
     .description("Validate a package manifest")
@@ -58,7 +58,7 @@ export function packageCommand(depsOverride?: StatusDeps): Command {
       console.log(`  Exports: skills: ${ec.skills}, guidance: ${ec.guidance}, agents: ${ec.agents}, hooks: ${ec.hooks}, mcp: ${ec.mcp}`);
     });
 
-  // rigged package plan <path>
+  // rig package plan <path>
   cmd
     .command("plan <path>")
     .description("Preview install plan (dry run)")
@@ -120,7 +120,7 @@ export function packageCommand(depsOverride?: StatusDeps): Command {
       }
     });
 
-  // rigged package install <path>
+  // rig package install <path>
   cmd
     .command("install <path>")
     .description("Install a package")
@@ -210,7 +210,7 @@ export function packageCommand(depsOverride?: StatusDeps): Command {
       }
     });
 
-  // rigged package rollback <installId>
+  // rig package rollback <installId>
   cmd
     .command("rollback <installId>")
     .description("Rollback an install")
@@ -247,7 +247,7 @@ export function packageCommand(depsOverride?: StatusDeps): Command {
       }
     });
 
-  // rigged package list
+  // rig package list
   cmd
     .command("list")
     .description("List installed packages")

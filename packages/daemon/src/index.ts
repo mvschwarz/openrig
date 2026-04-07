@@ -1,16 +1,17 @@
 import { serve } from "@hono/node-server";
+import { readOpenRigEnv } from "./openrig-compat.js";
 import { createDaemon } from "./startup.js";
 
 export async function startServer(port?: number) {
-  const p = port ?? parseInt(process.env["RIGGED_PORT"] ?? "7433", 10);
-  const dbPath = process.env["RIGGED_DB"] ?? "rigged.sqlite";
+  const p = port ?? parseInt(readOpenRigEnv("OPENRIG_PORT", "RIGGED_PORT") ?? "7433", 10);
+  const dbPath = readOpenRigEnv("OPENRIG_DB", "RIGGED_DB") ?? "openrig.sqlite";
 
   const { app } = await createDaemon({ dbPath });
 
-  const h = process.env["RIGGED_HOST"] ?? "127.0.0.1";
+  const h = readOpenRigEnv("OPENRIG_HOST", "RIGGED_HOST") ?? "127.0.0.1";
 
   return serve({ fetch: app.fetch, port: p, hostname: h }, (info) => {
-    console.log(`rigged daemon listening on http://localhost:${info.port}`);
+    console.log(`OpenRig daemon listening on http://localhost:${info.port}`);
   });
 }
 

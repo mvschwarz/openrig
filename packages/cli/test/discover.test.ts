@@ -104,7 +104,7 @@ describe("Discover + Claim CLI", () => {
     prog.addCommand(discoverCommand(runningDeps(port)));
 
     const { logs } = await captureLogs(async () => {
-      await prog.parseAsync(["node", "rigged", "discover"]);
+      await prog.parseAsync(["node", "rig", "discover"]);
     });
 
     expect(logs.some((l) => l.includes("DISCOVERED SESSIONS"))).toBe(true);
@@ -119,7 +119,7 @@ describe("Discover + Claim CLI", () => {
     prog.addCommand(discoverCommand(runningDeps(port)));
 
     const { logs } = await captureLogs(async () => {
-      await prog.parseAsync(["node", "rigged", "discover", "--json"]);
+      await prog.parseAsync(["node", "rig", "discover", "--json"]);
     });
 
     const parsed = JSON.parse(logs.join(""));
@@ -134,7 +134,7 @@ describe("Discover + Claim CLI", () => {
     prog.addCommand(claimCommand(runningDeps(port)));
 
     const { logs } = await captureLogs(async () => {
-      await prog.parseAsync(["node", "rigged", "claim", "ds-1", "--rig", "rig-1"]);
+      await prog.parseAsync(["node", "rig", "claim", "ds-1", "--rig", "rig-1"]);
     });
 
     expect(logs.some((l) => l.includes("Claimed as node"))).toBe(true);
@@ -155,7 +155,7 @@ describe("Discover + Claim CLI", () => {
     prog.addCommand(discoverCommand(runningDeps(failPort)));
 
     const { logs, exitCode } = await captureLogs(async () => {
-      await prog.parseAsync(["node", "rigged", "discover"]);
+      await prog.parseAsync(["node", "rig", "discover"]);
     });
 
     expect(exitCode).toBe(1);
@@ -171,7 +171,7 @@ describe("Discover + Claim CLI", () => {
     prog.addCommand(claimCommand(runningDeps(port)));
 
     const { exitCode, logs } = await captureLogs(async () => {
-      await prog.parseAsync(["node", "rigged", "claim", "nonexistent", "--rig", "rig-1"]);
+      await prog.parseAsync(["node", "rig", "claim", "nonexistent", "--rig", "rig-1"]);
     });
 
     expect(exitCode).toBe(1);
@@ -184,7 +184,7 @@ describe("Discover + Claim CLI", () => {
     prog.addCommand(bindCommand(runningDeps(port)));
 
     const { logs } = await captureLogs(async () => {
-      await prog.parseAsync(["node", "rigged", "bind", "ds-1", "--rig", "rig-1", "--node", "orch.lead"]);
+      await prog.parseAsync(["node", "rig", "bind", "ds-1", "--rig", "rig-1", "--node", "orch.lead"]);
     });
 
     expect(logs.some((l) => l.includes("Bound discovery"))).toBe(true);
