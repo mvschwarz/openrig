@@ -1,0 +1,36 @@
+=== PHASE 2.8 DEV WORKFLOW PROOF ===
+Date: Tue Apr  7 09:03:03 UTC 2026
+
+--- Step 1: Remove bundled artifacts ---
+packages/cli/daemon exists: NO
+packages/cli/ui exists: NO
+
+--- Step 2: Verify getDaemonPath resolves to monorepo ---
+getDaemonPath(): /Users/mschwarz/code/rigged/packages/daemon
+
+--- Step 3: rig daemon start (monorepo path) ---
+Daemon started on port 7433 (pid 7418)
+
+--- Step 4: Verify Vite dev server on :5173 ---
+HTTP/1.1 200 OK
+Vary: Origin
+Content-Type: text/html
+
+--- Step 5: OPENRIG_UI_URL override ---
+http://127.0.0.1:5173
+
+--- Step 6: Vite -> daemon API proxy ---
+Request: curl http://127.0.0.1:5173/api/ps
+Response: [{"rigId":"01KNKESZFQGVWSBSGMC6WXDS2H","name":"adversarial-review","nodeCount":3,"runningCount":3,"status":"running","uptime":"1h 11m","latestSnapshot":null},{"rigId":"01KNKEJ21SANH9SZCHKJ9MS7KJ",...}]
+Result: Daemon-backed data returned through Vite proxy on :5173/api/ps. Proxy works.
+
+Note: /api/healthz returns 404 through Vite because Vite proxies /healthz (not /api/healthz) separately. The /api/ps success proves the /api proxy path.
+
+--- Step 7: Restore bundled artifacts ---
+Daemon assets:   1 files
+Daemon specs:    15 files
+UI dist:         67 files
+
+Ready to publish: cd packages/cli && npm publish --access public
+
+=== DEV WORKFLOW PROOF COMPLETE ===
