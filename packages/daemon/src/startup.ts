@@ -79,6 +79,7 @@ import { agentspecRebootSchema } from "./db/migrations/014_agentspec_reboot.js";
 import { startupContextSchema } from "./db/migrations/015_startup_context.js";
 import { chatMessagesSchema } from "./db/migrations/016_chat_messages.js";
 import { podNamespaceSchema } from "./db/migrations/017_pod_namespace.js";
+import { contextUsageSchema } from "./db/migrations/018_context_usage.js";
 import {
   getCompatibleOpenRigPath,
   getDefaultOpenRigPath,
@@ -102,7 +103,7 @@ interface DaemonResult {
 export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> {
   const dbPath = opts?.dbPath ?? ":memory:";
   const db = createDb(dbPath);
-  migrate(db, [coreSchema, bindingsSessionsSchema, eventsSchema, snapshotsSchema, checkpointsSchema, resumeMetadataSchema, nodeSpecFieldsSchema, packagesSchema, installJournalSchema, journalSeqSchema, bootstrapSchema, discoverySchema, discoveryFkFix, agentspecRebootSchema, startupContextSchema, chatMessagesSchema, podNamespaceSchema]);
+  migrate(db, [coreSchema, bindingsSessionsSchema, eventsSchema, snapshotsSchema, checkpointsSchema, resumeMetadataSchema, nodeSpecFieldsSchema, packagesSchema, installJournalSchema, journalSeqSchema, bootstrapSchema, discoverySchema, discoveryFkFix, agentspecRebootSchema, startupContextSchema, chatMessagesSchema, podNamespaceSchema, contextUsageSchema]);
 
   const rigRepo = new RigRepository(db);
   const sessionRegistry = new SessionRegistry(db);

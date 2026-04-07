@@ -513,3 +513,33 @@ export interface ExpansionNodeOutcome {
 export type ExpansionResult =
   | { ok: true; status: "ok" | "partial" | "failed"; podId: string; podNamespace: string; nodes: ExpansionNodeOutcome[]; warnings: string[]; retryTargets: string[] }
   | { ok: false; code: string; error: string };
+
+// -- Context usage types --
+
+export type ContextAvailability = "known" | "unknown";
+
+export type ContextUnknownReason =
+  | "unsupported_runtime"
+  | "not_managed"
+  | "missing_sidecar"
+  | "parse_error"
+  | "stale"
+  | "session_mismatch"
+  | "no_data";
+
+export interface ContextUsage {
+  availability: ContextAvailability;
+  reason: ContextUnknownReason | null;
+  source: "claude_statusline_json" | null;
+  usedPercentage: number | null;
+  remainingPercentage: number | null;
+  contextWindowSize: number | null;
+  totalInputTokens: number | null;
+  totalOutputTokens: number | null;
+  currentUsage: string | null;
+  transcriptPath: string | null;
+  sessionId: string | null;
+  sessionName: string | null;
+  sampledAt: string | null;
+  fresh: boolean;
+}
