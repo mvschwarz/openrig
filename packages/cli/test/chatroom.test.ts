@@ -65,9 +65,12 @@ describe("Chatroom CLI", () => {
     { id: "msg-2", rigId: "rig-1", sender: "bob", kind: "message", body: "world", topic: null, createdAt: "2026-03-31T10:01:00Z" },
   ];
 
+  const capturedUrls: string[] = [];
+
   beforeAll(async () => {
     server = http.createServer((req, res) => {
       const url = req.url ?? "";
+      capturedUrls.push(url);
       let body = "";
       req.on("data", (chunk: Buffer) => { body += chunk; });
       req.on("end", () => {
@@ -86,7 +89,14 @@ describe("Chatroom CLI", () => {
 
         if (url.includes("/chat/history")) {
           res.writeHead(200, { "Content-Type": "application/json" });
-          res.end(JSON.stringify(chatMessages));
+          // Check for sender filter
+          const urlObj = new URL(url, `http://localhost:${port}`);
+          const senderFilter = urlObj.searchParams.get("sender");
+          if (senderFilter) {
+            res.end(JSON.stringify(chatMessages.filter(m => m.sender === senderFilter)));
+          } else {
+            res.end(JSON.stringify(chatMessages));
+          }
           return;
         }
 
@@ -221,6 +231,47 @@ describe("Chatroom CLI", () => {
     // Either it created the session or it reported an error about an existing session
     const tmuxSucceeded = output.includes("chatroom@my-rig");
     expect(tmuxSucceeded).toBe(true);
+  });
+
+  it("chatroom history --sender filters messages", async () => {
+    const { logs } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "chatroom", "history", "my-rig", "--sender", "alice"]);
+    });
+
+    const output = logs.join("\n");
+    expect(output).toContain("alice");
+    expect(output).not.toContain("bob");
+  });
+
+  it("chatroom history --since forwards since param to API", async () => {
+    capturedUrls.length = 0;
+    await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "chatroom", "history", "my-rig", "--since", "2026-04-01T00:00:00Z"]);
+    });
+
+    const historyUrl = capturedUrls.find(u => u.includes("/chat/history"));
+    expect(historyUrl).toContain("since=");
+    expect(historyUrl).toContain("2026-04-01");
+  });
+
+  it("chatroom history --after forwards after param to API", async () => {
+    capturedUrls.length = 0;
+    await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "chatroom", "history", "my-rig", "--after", "msg-cursor-123"]);
+    });
+
+    const historyUrl = capturedUrls.find(u => u.includes("/chat/history"));
+    expect(historyUrl).toContain("after=msg-cursor-123");
+  });
+
+  it("chatroom history --sender --json returns filtered JSON", async () => {
+    const { logs } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "chatroom", "history", "my-rig", "--sender", "alice", "--json"]);
+    });
+
+    const parsed = JSON.parse(logs.join(""));
+    expect(parsed).toHaveLength(1);
+    expect(parsed[0].sender).toBe("alice");
   });
 
   it("chatroom clear prints deleted count", async () => {

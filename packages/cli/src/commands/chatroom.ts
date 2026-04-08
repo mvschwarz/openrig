@@ -81,9 +81,12 @@ export function chatroomCommand(depsOverride?: StatusDeps): Command {
     .command("history")
     .argument("<rig>", "Rig name")
     .option("--topic <name>", "Filter by topic")
+    .option("--after <id>", "Messages after this message ID")
+    .option("--since <timestamp>", "Messages since this timestamp")
+    .option("--sender <name>", "Messages from this sender")
     .option("--limit <n>", "Limit results", "50")
     .option("--json", "JSON output")
-    .action(async (rig: string, opts: { topic?: string; limit?: string; json?: boolean }) => {
+    .action(async (rig: string, opts: { topic?: string; after?: string; since?: string; sender?: string; limit?: string; json?: boolean }) => {
       const client = await getClient();
       if (!client) return;
 
@@ -98,6 +101,9 @@ export function chatroomCommand(depsOverride?: StatusDeps): Command {
 
       const params = new URLSearchParams();
       if (opts.topic) params.set("topic", opts.topic);
+      if (opts.after) params.set("after", opts.after);
+      if (opts.since) params.set("since", opts.since);
+      if (opts.sender) params.set("sender", opts.sender);
       if (opts.limit) params.set("limit", opts.limit);
 
       const qs = params.toString();

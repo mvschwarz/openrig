@@ -106,4 +106,61 @@ describe("ChatRepository", () => {
     expect(chatRepo.history(otherRigId)).toHaveLength(1);
     expect(chatRepo.history(otherRigId)[0]!.body).toBe("other rig msg");
   });
+
+  // History filter tests
+  it("history --sender returns only matching sender", () => {
+    chatRepo.send(rigId, "alice", "alice msg 1");
+    chatRepo.send(rigId, "bob", "bob msg 1");
+    chatRepo.send(rigId, "alice", "alice msg 2");
+
+    const result = chatRepo.history(rigId, { sender: "alice" });
+    expect(result).toHaveLength(2);
+    expect(result.every((m) => m.sender === "alice")).toBe(true);
+  });
+
+  it("history --since returns only newer messages", () => {
+    // Use a past timestamp to ensure messages created "now" are after it
+    const pastCutoff = "2020-01-01T00:00:00Z";
+    chatRepo.send(rigId, "alice", "msg after cutoff");
+    chatRepo.send(rigId, "bob", "also after cutoff");
+
+    const result = chatRepo.history(rigId, { since: pastCutoff });
+    expect(result).toHaveLength(2);
+
+    // Use a future timestamp to ensure nothing matches
+    const futureCutoff = "2099-01-01T00:00:00Z";
+    const futureResult = chatRepo.history(rigId, { since: futureCutoff });
+    expect(futureResult).toHaveLength(0);
+  });
+
+  it("combined --sender + --after works", () => {
+    const m1 = chatRepo.send(rigId, "alice", "alice before");
+    chatRepo.send(rigId, "bob", "bob after");
+    chatRepo.send(rigId, "alice", "alice after");
+
+    const result = chatRepo.history(rigId, { after: m1.id, sender: "alice" });
+    expect(result).toHaveLength(1);
+    expect(result[0]!.body).toBe("alice after");
+  });
+
+  it("--topic + --after composable within topic window", () => {
+    chatRepo.sendTopic(rigId, "host", "review");
+    const m1 = chatRepo.send(rigId, "alice", "first review msg");
+    chatRepo.send(rigId, "bob", "second review msg");
+
+    const result = chatRepo.history(rigId, { topic: "review", after: m1.id });
+    expect(result).toHaveLength(1);
+    expect(result[0]!.body).toBe("second review msg");
+  });
+
+  it("--topic + --sender composable within topic window", () => {
+    chatRepo.send(rigId, "alice", "before topic");
+    chatRepo.sendTopic(rigId, "host", "review");
+    chatRepo.send(rigId, "alice", "alice review msg");
+    chatRepo.send(rigId, "bob", "bob review msg");
+
+    const result = chatRepo.history(rigId, { topic: "review", sender: "alice" });
+    expect(result).toHaveLength(1);
+    expect(result[0]!.body).toBe("alice review msg");
+  });
 });

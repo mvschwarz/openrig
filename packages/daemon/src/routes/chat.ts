@@ -48,10 +48,12 @@ export function chatRoutes(): Hono {
     const topic = c.req.query("topic");
     const limitStr = c.req.query("limit");
     const after = c.req.query("after");
+    const since = c.req.query("since");
+    const sender = c.req.query("sender");
     const limit = limitStr ? parseInt(limitStr, 10) : undefined;
 
     const chatRepo = getChatRepo(c);
-    const messages = chatRepo.history(rigId, { topic, limit, after });
+    const messages = chatRepo.history(rigId, { topic, limit, after, since, sender });
 
     return c.json(messages);
   });

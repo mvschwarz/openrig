@@ -27,6 +27,8 @@ export interface HistoryOptions {
   topic?: string;
   limit?: number;
   after?: string;
+  since?: string;
+  sender?: string;
 }
 
 export class ChatRepository {
@@ -66,9 +68,15 @@ export class ChatRepository {
     const limit = opts?.limit ?? 100;
     const after = opts?.after;
     const topic = opts?.topic;
+    const since = opts?.since;
+    const sender = opts?.sender;
 
+    // Build composable WHERE clauses
+    const conditions: string[] = ["rig_id = ?"];
+    const params: unknown[] = [rigId];
+
+    // Topic windowing: find the topic marker and constrain to its window
     if (topic) {
-      // Find the latest topic marker matching the topic name (by ULID for sub-second correctness)
       const topicMarker = this.db
         .prepare(
           "SELECT id FROM chat_messages WHERE rig_id = ? AND kind = 'topic' AND topic = ? ORDER BY id DESC LIMIT 1"
@@ -77,44 +85,42 @@ export class ChatRepository {
 
       if (!topicMarker) return [];
 
-      // Find the next topic marker after this one (any topic) by ULID ordering
       const nextMarker = this.db
         .prepare(
           "SELECT id FROM chat_messages WHERE rig_id = ? AND kind = 'topic' AND id > ? ORDER BY id ASC LIMIT 1"
         )
         .get(rigId, topicMarker.id) as { id: string } | undefined;
 
-      const rows = nextMarker
-        ? this.db
-            .prepare(
-              "SELECT * FROM chat_messages WHERE rig_id = ? AND id >= ? AND id < ? ORDER BY id ASC LIMIT ?"
-            )
-            .all(rigId, topicMarker.id, nextMarker.id, limit) as ChatMessageRow[]
-        : this.db
-            .prepare(
-              "SELECT * FROM chat_messages WHERE rig_id = ? AND id >= ? ORDER BY id ASC LIMIT ?"
-            )
-            .all(rigId, topicMarker.id, limit) as ChatMessageRow[];
+      conditions.push("id >= ?");
+      params.push(topicMarker.id);
 
-      return rows.map((r) => this.rowToMessage(r));
+      if (nextMarker) {
+        conditions.push("id < ?");
+        params.push(nextMarker.id);
+      }
     }
 
+    // Cursor-based pagination
     if (after) {
-      const rows = this.db
-        .prepare(
-          "SELECT * FROM chat_messages WHERE rig_id = ? AND id > ? ORDER BY id ASC LIMIT ?"
-        )
-        .all(rigId, after, limit) as ChatMessageRow[];
-
-      return rows.map((r) => this.rowToMessage(r));
+      conditions.push("id > ?");
+      params.push(after);
     }
 
-    const rows = this.db
-      .prepare(
-        "SELECT * FROM chat_messages WHERE rig_id = ? ORDER BY id ASC LIMIT ?"
-      )
-      .all(rigId, limit) as ChatMessageRow[];
+    // Timestamp filter
+    if (since) {
+      conditions.push("created_at >= ?");
+      params.push(since);
+    }
 
+    // Sender filter
+    if (sender) {
+      conditions.push("sender = ?");
+      params.push(sender);
+    }
+
+    params.push(limit);
+    const sql = `SELECT * FROM chat_messages WHERE ${conditions.join(" AND ")} ORDER BY id ASC LIMIT ?`;
+    const rows = this.db.prepare(sql).all(...params) as ChatMessageRow[];
     return rows.map((r) => this.rowToMessage(r));
   }
 

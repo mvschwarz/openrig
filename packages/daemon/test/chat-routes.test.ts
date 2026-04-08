@@ -133,6 +133,33 @@ describe("chat routes", () => {
     reader.cancel();
   });
 
+  it("GET /history?sender=X filters by sender", async () => {
+    chatRepo.send(rigId, "alice", "alice msg");
+    chatRepo.send(rigId, "bob", "bob msg");
+
+    const res = await app.request(`/api/rigs/${rigId}/chat/history?sender=alice`);
+    expect(res.status).toBe(200);
+    const data = await res.json();
+    expect(data).toHaveLength(1);
+    expect(data[0].sender).toBe("alice");
+  });
+
+  it("GET /history?since=X filters by timestamp", async () => {
+    chatRepo.send(rigId, "alice", "msg1");
+    chatRepo.send(rigId, "bob", "msg2");
+
+    // Future cutoff — no messages
+    const res = await app.request(`/api/rigs/${rigId}/chat/history?since=${encodeURIComponent("2099-01-01T00:00:00Z")}`);
+    expect(res.status).toBe(200);
+    const data = await res.json();
+    expect(data).toHaveLength(0);
+
+    // Past cutoff — all messages
+    const res2 = await app.request(`/api/rigs/${rigId}/chat/history?since=${encodeURIComponent("2020-01-01T00:00:00Z")}`);
+    const data2 = await res2.json();
+    expect(data2).toHaveLength(2);
+  });
+
   it("POST /clear removes messages and returns count", async () => {
     chatRepo.send(rigId, "alice", "msg1");
     chatRepo.send(rigId, "bob", "msg2");
