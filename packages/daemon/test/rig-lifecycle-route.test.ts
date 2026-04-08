@@ -56,6 +56,80 @@ describe("Rig lifecycle routes", () => {
     expect(rediscovered?.claimedNodeId).toBeNull();
   });
 
+  it("POST /api/rigs/:rigId/release releases claimed sessions without killing tmux and deletes the rig", async () => {
+    const rig = setup.rigRepo.createRig("release-rig");
+    const discoveredA = setup.discoveryRepo.upsertDiscoveredSession({
+      tmuxSession: "manual-release-a",
+      tmuxPane: "%11",
+      cwd: "/tmp",
+      activeCommand: "codex",
+      runtimeHint: "codex",
+      confidence: "high",
+    });
+    const discoveredB = setup.discoveryRepo.upsertDiscoveredSession({
+      tmuxSession: "manual-release-b",
+      tmuxPane: "%12",
+      cwd: "/tmp",
+      activeCommand: "codex",
+      runtimeHint: "codex",
+      confidence: "high",
+    });
+
+    setup.rigRepo.addNode(rig.id, "external.a", { runtime: "codex" });
+    setup.rigRepo.addNode(rig.id, "external.b", { runtime: "codex" });
+
+    const boundA = await setup.claimService.bind({
+      discoveredId: discoveredA.id,
+      rigId: rig.id,
+      logicalId: "external.a",
+    });
+    const boundB = await setup.claimService.bind({
+      discoveredId: discoveredB.id,
+      rigId: rig.id,
+      logicalId: "external.b",
+    });
+    expect(boundA.ok).toBe(true);
+    expect(boundB.ok).toBe(true);
+
+    const res = await setup.app.request(`/api/rigs/${rig.id}/release`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ delete: true }),
+    });
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.ok).toBe(true);
+    expect(body.deleted).toBe(true);
+    expect(body.status).toBe("ok");
+    expect(body.released).toHaveLength(2);
+    expect(setup.rigRepo.getRig(rig.id)).toBeNull();
+    expect(setup.discoveryRepo.getDiscoveredSession(discoveredA.id)?.status).toBe("active");
+    expect(setup.discoveryRepo.getDiscoveredSession(discoveredB.id)?.status).toBe("active");
+
+    const killSession = setup.tmuxAdapter.killSession as ReturnType<typeof import("vitest").vi.fn>;
+    expect(killSession).not.toHaveBeenCalled();
+  });
+
+  it("POST /api/rigs/:rigId/release refuses rigs containing launched nodes", async () => {
+    const rig = setup.rigRepo.createRig("release-mixed-rig");
+    const launchedNode = setup.rigRepo.addNode(rig.id, "dev.impl", { runtime: "codex" });
+    setup.sessionRegistry.registerSession(launchedNode.id, "dev-impl@release-mixed-rig");
+
+    const res = await setup.app.request(`/api/rigs/${rig.id}/release`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ delete: true }),
+    });
+
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body.ok).toBe(false);
+    expect(body.code).toBe("contains_launched_nodes");
+    expect(body.launchedLogicalIds).toEqual(["dev.impl"]);
+    expect(setup.rigRepo.getRig(rig.id)).not.toBeNull();
+  });
+
   it("DELETE /api/rigs/:rigId/nodes/:nodeRef kills the session and removes the node", async () => {
     const rig = setup.rigRepo.createRig("remove-rig");
     const expanded = await setup.rigExpansionService.expand({

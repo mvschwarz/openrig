@@ -68,6 +68,10 @@ function getSessionRegistry(c: { get: (key: string) => unknown }): SessionRegist
   return c.get("sessionRegistry" as never) as SessionRegistry;
 }
 
+function getRigLifecycleService(c: { get: (key: string) => unknown }): RigLifecycleService | undefined {
+  return c.get("rigLifecycleService" as never) as RigLifecycleService | undefined;
+}
+
 // GET /api/rigs/summary — MUST be registered before /:id to avoid Hono resolving "summary" as a rig ID
 rigsRoutes.get("/summary", (c) => {
   const repo = getRepo(c);
@@ -162,6 +166,33 @@ rigsRoutes.delete("/:id", (c) => {
     return c.body(null, 204);
   } catch (err) {
     return c.json({ error: "delete failed" }, 500);
+  }
+});
+
+// POST /api/rigs/:id/release — non-destructive release of claimed sessions
+rigsRoutes.post("/:id/release", async (c) => {
+  const rigId = c.req.param("id")!;
+  const rigLifecycleService = getRigLifecycleService(c);
+  if (!rigLifecycleService) {
+    return c.json({ error: "Rig lifecycle service not available" }, 500);
+  }
+
+  const body: Record<string, unknown> = await c.req.json().catch(() => ({}));
+  const result = await rigLifecycleService.releaseRig(rigId, {
+    delete: body["delete"] === true,
+  });
+
+  if (result.ok) {
+    return c.json(result, result.status === "partial" ? 207 : 200);
+  }
+
+  switch (result.code) {
+    case "rig_not_found":
+      return c.json(result, 404);
+    case "contains_launched_nodes":
+      return c.json(result, 409);
+    default:
+      return c.json(result, 500);
   }
 });
 

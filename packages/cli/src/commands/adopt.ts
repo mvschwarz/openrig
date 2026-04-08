@@ -17,6 +17,10 @@ interface BindingMapping {
   selector: string;
 }
 
+interface BindingsFileShape {
+  bindings?: Record<string, unknown>;
+}
+
 interface AdoptBindingResult {
   logicalId: string;
   selector: string;
@@ -43,6 +47,31 @@ function parseBinding(value: string): BindingMapping {
   };
 }
 
+function parseBindingsFile(yaml: string): BindingMapping[] {
+  let parsed: unknown;
+  try {
+    parsed = parseYaml(yaml);
+  } catch {
+    throw new Error("Bindings file must be valid YAML. Fix: repair the file and retry.");
+  }
+
+  if (!parsed || typeof parsed !== "object") {
+    throw new Error("Bindings file must be an object with a top-level 'bindings' map.");
+  }
+
+  const bindings = (parsed as BindingsFileShape).bindings;
+  if (!bindings || typeof bindings !== "object" || Array.isArray(bindings)) {
+    throw new Error("Bindings file must define 'bindings' as a map of logicalId: tmuxSessionOrDiscoveryId.");
+  }
+
+  return Object.entries(bindings).map(([logicalId, selector]) => {
+    if (typeof selector !== "string" || !selector.trim()) {
+      throw new Error(`Bindings file entry '${logicalId}' must map to a non-empty session selector.`);
+    }
+    return { logicalId: logicalId.trim(), selector: selector.trim() };
+  });
+}
+
 function findDiscoveredSession(sessions: DiscoveredSessionLike[], selector: string): DiscoveredSessionLike | undefined {
   return sessions.find((session) => session.id === selector || session.tmuxSession === selector);
 }
@@ -57,11 +86,12 @@ export function adoptCommand(depsOverride?: AdoptDeps): Command {
 
   cmd
     .argument("<path>", "Path to pod-aware RigSpec or fragment")
-    .requiredOption("--bind <logicalId=tmuxSessionOrDiscoveryId>", "Bind a logical node to a discovered tmux session or discovery ID", collectOption, [])
+    .option("--bind <logicalId=tmuxSessionOrDiscoveryId>", "Bind a logical node to a discovered tmux session or discovery ID", collectOption, [])
+    .option("--bindings-file <path>", "Load logicalId -> tmux session/discovery ID mappings from YAML")
     .option("--target-rig <rigId>", "Target existing rig for additive materialization")
     .option("--rig-root <root>", "Root directory for pod-aware resolution")
     .option("--json", "Output machine-readable JSON")
-    .action(async (filePath: string, opts: { bind: string[]; targetRig?: string; rigRoot?: string; json?: boolean }) => {
+    .action(async (filePath: string, opts: { bind?: string[]; bindingsFile?: string; targetRig?: string; rigRoot?: string; json?: boolean }) => {
       const deps = getDeps();
 
       let yaml: string;
@@ -88,9 +118,25 @@ export function adoptCommand(depsOverride?: AdoptDeps): Command {
         return;
       }
 
+      const inlineBindings = opts.bind ?? [];
+      if (inlineBindings.length > 0 && opts.bindingsFile) {
+        console.error("Use either --bind or --bindings-file, not both.");
+        process.exitCode = 1;
+        return;
+      }
+      if (inlineBindings.length === 0 && !opts.bindingsFile) {
+        console.error("Adopt requires at least one binding. Use --bind or --bindings-file.");
+        process.exitCode = 1;
+        return;
+      }
+
       let bindings: BindingMapping[];
       try {
-        bindings = opts.bind.map(parseBinding);
+        if (opts.bindingsFile) {
+          bindings = parseBindingsFile(deps.readFile(opts.bindingsFile));
+        } else {
+          bindings = inlineBindings.map(parseBinding);
+        }
       } catch (err) {
         console.error(err instanceof Error ? err.message : String(err));
         process.exitCode = 1;

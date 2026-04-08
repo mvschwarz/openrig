@@ -45,7 +45,7 @@ function runningState(port: number): DaemonState {
   return { pid: 123, port, db: "test.sqlite", startedAt: "2026-04-02T00:00:00Z" };
 }
 
-function runningDeps(port: number, fileContent: string): ImportDeps {
+function runningDeps(port: number, fileContent: string | Record<string, string>): ImportDeps {
   return {
     lifecycleDeps: mockLifecycleDeps({
       exists: vi.fn((p: string) => p === STATE_FILE),
@@ -56,7 +56,12 @@ function runningDeps(port: number, fileContent: string): ImportDeps {
       fetch: vi.fn(async () => ({ ok: true })),
     }),
     clientFactory: (baseUrl: string) => new DaemonClient(baseUrl),
-    readFile: vi.fn(() => fileContent),
+    readFile: vi.fn((p: string) => {
+      if (typeof fileContent === "string") return fileContent;
+      const value = fileContent[p];
+      if (value == null) throw new Error(`missing file: ${p}`);
+      return value;
+    }),
   };
 }
 
@@ -202,5 +207,49 @@ describe("rig adopt", () => {
       sessionName: "proof-research-scout2",
       ok: true,
     });
+  });
+
+  it("loads bindings from a bindings file", async () => {
+    bindRequests.length = 0;
+    const program = new Command();
+    program.exitOverride();
+    program.addCommand(adoptCommand(runningDeps(port, {
+      "rig.yaml": `version: "0.2"\nname: captured-dev-pod\npods: []\n`,
+      "bindings.yaml": `bindings:\n  research.scout: proof-research-scout2\n  research.mapper: ds-mapper\n`,
+    })));
+
+    const { exitCode } = await captureLogs(async () => {
+      await program.parseAsync([
+        "node", "rig", "adopt", "rig.yaml",
+        "--bindings-file", "bindings.yaml",
+      ]);
+    });
+
+    expect(exitCode).toBeUndefined();
+    expect(bindRequests).toHaveLength(2);
+    expect(bindRequests[0]!.body).toEqual({ rigId: "rig-new", logicalId: "research.scout" });
+    expect(bindRequests[1]!.body).toEqual({ rigId: "rig-new", logicalId: "research.mapper" });
+  });
+
+  it("fails when both --bind and --bindings-file are supplied", async () => {
+    bindRequests.length = 0;
+    const program = new Command();
+    program.exitOverride();
+    program.addCommand(adoptCommand(runningDeps(port, {
+      "rig.yaml": `version: "0.2"\nname: captured-dev-pod\npods: []\n`,
+      "bindings.yaml": `bindings:\n  research.scout: proof-research-scout2\n`,
+    })));
+
+    const { logs, exitCode } = await captureLogs(async () => {
+      await program.parseAsync([
+        "node", "rig", "adopt", "rig.yaml",
+        "--bind", "research.mapper=proof-research-mapper2",
+        "--bindings-file", "bindings.yaml",
+      ]);
+    });
+
+    expect(exitCode).toBe(1);
+    expect(bindRequests).toHaveLength(0);
+    expect(logs.join("\n")).toContain("Use either --bind or --bindings-file");
   });
 });

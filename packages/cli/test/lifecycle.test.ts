@@ -5,6 +5,7 @@ import { DaemonClient } from "../src/client.js";
 import { STATE_FILE, type LifecycleDeps, type DaemonState } from "../src/daemon-lifecycle.js";
 import { createProgram } from "../src/index.js";
 import { unclaimCommand } from "../src/commands/unclaim.js";
+import { releaseCommand } from "../src/commands/release.js";
 import { removeCommand } from "../src/commands/remove.js";
 import { launchCommand } from "../src/commands/launch.js";
 import { shrinkCommand } from "../src/commands/shrink.js";
@@ -61,6 +62,33 @@ describe("Lifecycle CLI commands", () => {
           logicalId: "external.helper",
           sessionId: "session-123",
           sessionName: "manual-helper",
+        }));
+        return;
+      }
+
+      if (req.method === "POST" && req.url === "/api/rigs/rig-1/release") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({
+          ok: true,
+          status: "ok",
+          rigId: "rig-1",
+          deleted: true,
+          released: [
+            { nodeId: "node-1", logicalId: "external.helper", sessionId: "session-123", sessionName: "manual-helper" },
+            { nodeId: "node-2", logicalId: "external.qa", sessionId: "session-456", sessionName: "manual-qa" },
+          ],
+          failed: [],
+        }));
+        return;
+      }
+
+      if (req.method === "POST" && req.url === "/api/rigs/rig-launched/release") {
+        res.writeHead(409, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({
+          ok: false,
+          code: "contains_launched_nodes",
+          error: "Rig contains launched nodes and cannot be released safely.",
+          launchedLogicalIds: ["dev.impl"],
         }));
         return;
       }
@@ -180,6 +208,22 @@ describe("Lifecycle CLI commands", () => {
     expect(logs.join("\n")).toContain("Removed node dev.impl from rig rig-1");
   });
 
+  it("release prints released rig summary", async () => {
+    const program = new Command();
+    program.exitOverride();
+    program.addCommand(releaseCommand(runningDeps()));
+
+    const { logs, exitCode } = await captureLogs(async () => {
+      await program.parseAsync(["node", "rig", "release", "rig-1", "--delete"]);
+    });
+
+    expect(exitCode).toBeUndefined();
+    const output = logs.join("\n");
+    expect(output).toContain("Released 2 claimed session(s) from rig rig-1");
+    expect(output).toContain("manual-helper");
+    expect(output).toContain("deleted the rig record");
+  });
+
   it("shrink prints removed pod summary", async () => {
     const program = new Command();
     program.exitOverride();
@@ -253,10 +297,25 @@ describe("Lifecycle CLI commands", () => {
     expect(logs.join("\n")).toContain("not found");
   });
 
-  it("createProgram wires unclaim, remove, and shrink", async () => {
+  it("release exits non-zero when the rig contains launched nodes", async () => {
+    const program = new Command();
+    program.exitOverride();
+    program.addCommand(releaseCommand(runningDeps()));
+
+    const { logs, exitCode } = await captureLogs(async () => {
+      await program.parseAsync(["node", "rig", "release", "rig-launched", "--delete"]);
+    });
+
+    expect(exitCode).toBe(1);
+    expect(logs.join("\n")).toContain("cannot be released safely");
+    expect(logs.join("\n")).toContain("dev.impl");
+  });
+
+  it("createProgram wires unclaim, release, remove, and shrink", async () => {
     const program = createProgram();
     expect(program.commands.find((c) => c.name() === "launch")).toBeDefined();
     expect(program.commands.find((c) => c.name() === "unclaim")).toBeDefined();
+    expect(program.commands.find((c) => c.name() === "release")).toBeDefined();
     expect(program.commands.find((c) => c.name() === "remove")).toBeDefined();
     expect(program.commands.find((c) => c.name() === "shrink")).toBeDefined();
   });

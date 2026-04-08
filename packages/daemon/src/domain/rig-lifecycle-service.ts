@@ -25,6 +25,14 @@ type NodeLifecycleRow = {
   latest_session_status: string | null;
 };
 
+type RigReleaseRow = {
+  node_id: string;
+  logical_id: string;
+  session_id: string | null;
+  session_name: string | null;
+  session_origin: string | null;
+};
+
 export type UnclaimSessionResult =
   | {
       ok: true;
@@ -52,6 +60,33 @@ export type RemoveNodeResult =
       ok: false;
       code: "rig_not_found" | "node_not_found" | "kill_failed";
       error: string;
+    };
+
+export type ReleaseRigResult =
+  | {
+      ok: true;
+      status: "ok" | "partial";
+      rigId: string;
+      deleted: boolean;
+      released: Array<{
+        nodeId: string;
+        logicalId: string;
+        sessionId: string;
+        sessionName: string;
+      }>;
+      failed: Array<{
+        nodeId: string;
+        logicalId: string;
+        sessionId: string | null;
+        sessionName: string | null;
+        error: string;
+      }>;
+    }
+  | {
+      ok: false;
+      code: "rig_not_found" | "contains_launched_nodes";
+      error: string;
+      launchedLogicalIds?: string[];
     };
 
 export type ShrinkPodResult =
@@ -194,6 +229,112 @@ export class RigLifecycleService {
       logicalId: session.logical_id,
       sessionId: session.session_id,
       sessionName: session.session_name,
+    };
+  }
+
+  async releaseRig(rigId: string, opts?: { delete?: boolean }): Promise<ReleaseRigResult> {
+    const rig = this.rigRepo.getRig(rigId);
+    if (!rig) {
+      return { ok: false, code: "rig_not_found", error: `Rig '${rigId}' not found.` };
+    }
+
+    const rows = this.db.prepare(`
+      SELECT
+        n.id AS node_id,
+        n.logical_id,
+        s.id AS session_id,
+        s.session_name,
+        s.origin AS session_origin
+      FROM nodes n
+      LEFT JOIN sessions s ON s.id = (
+        SELECT s2.id
+        FROM sessions s2
+        WHERE s2.node_id = n.id
+        ORDER BY s2.created_at DESC, s2.id DESC
+        LIMIT 1
+      )
+      WHERE n.rig_id = ?
+      ORDER BY n.logical_id
+    `).all(rigId) as RigReleaseRow[];
+
+    const launchedLogicalIds = rows
+      .filter((row) => row.session_id && row.session_origin === "launched")
+      .map((row) => row.logical_id);
+    if (launchedLogicalIds.length > 0) {
+      return {
+        ok: false,
+        code: "contains_launched_nodes",
+        error: "Rig contains launched nodes and cannot be released safely. Use rig down for OpenRig-launched rigs.",
+        launchedLogicalIds,
+      };
+    }
+
+    const released: Array<{
+      nodeId: string;
+      logicalId: string;
+      sessionId: string;
+      sessionName: string;
+    }> = [];
+    const failed: Array<{
+      nodeId: string;
+      logicalId: string;
+      sessionId: string | null;
+      sessionName: string | null;
+      error: string;
+    }> = [];
+
+    for (const row of rows) {
+      if (!row.session_id || row.session_origin !== "claimed") continue;
+      const result = await this.unclaimSession(row.session_id);
+      if (result.ok) {
+        released.push({
+          nodeId: result.nodeId,
+          logicalId: result.logicalId,
+          sessionId: result.sessionId,
+          sessionName: result.sessionName,
+        });
+      } else {
+        failed.push({
+          nodeId: row.node_id,
+          logicalId: row.logical_id,
+          sessionId: row.session_id,
+          sessionName: row.session_name,
+          error: result.error,
+        });
+      }
+    }
+
+    let deleted = false;
+    if (failed.length === 0 && opts?.delete) {
+      let persistedSeq = 0;
+      let persistedAt = "";
+      const tx = this.db.transaction(() => {
+        const event = this.eventBus.persistWithinTransaction({
+          type: "rig.deleted",
+          rigId,
+        });
+        persistedSeq = event.seq;
+        persistedAt = event.createdAt;
+        this.rigRepo.deleteRig(rigId);
+      });
+      tx();
+
+      this.eventBus.notifySubscribers({
+        type: "rig.deleted",
+        rigId,
+        seq: persistedSeq,
+        createdAt: persistedAt,
+      });
+      deleted = true;
+    }
+
+    return {
+      ok: true,
+      status: failed.length > 0 ? "partial" : "ok",
+      rigId,
+      deleted,
+      released,
+      failed,
     };
   }
 
