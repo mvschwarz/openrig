@@ -352,6 +352,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     const collectorCmd = `node ${collectorDest} ${contextDir}`;
     existing["statusLine"] = {
       ...(typeof existing["statusLine"] === "object" && existing["statusLine"] !== null ? existing["statusLine"] as Record<string, unknown> : {}),
+      type: "command",
       command: collectorCmd,
     };
 

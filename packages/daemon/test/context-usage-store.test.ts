@@ -67,6 +67,19 @@ describe("ContextUsageStore", () => {
     sampled_at: new Date().toISOString(),
   };
 
+  const VALID_SIDECAR_WITH_OBJECT_USAGE = {
+    ...VALID_SIDECAR,
+    context_window: {
+      ...VALID_SIDECAR.context_window,
+      current_usage: {
+        input_tokens: 3,
+        output_tokens: 129,
+        cache_creation_input_tokens: 79,
+        cache_read_input_tokens: 251672,
+      },
+    },
+  };
+
   // T1: Valid sidecar normalizes into known ContextUsage
   it("valid sidecar JSON normalizes into known ContextUsage", () => {
     const usage = store.normalizeSample(VALID_SIDECAR);
@@ -83,6 +96,14 @@ describe("ContextUsageStore", () => {
     expect(usage.sessionName).toBe("dev-impl@test-rig");
     expect(usage.transcriptPath).toBe("/tmp/transcripts/test.log");
     expect(usage.fresh).toBe(true);
+  });
+
+  it("object-shaped current_usage is preserved as JSON text", () => {
+    const usage = store.normalizeSample(VALID_SIDECAR_WITH_OBJECT_USAGE);
+    expect(usage.availability).toBe("known");
+    expect(usage.currentUsage).toBe(
+      JSON.stringify(VALID_SIDECAR_WITH_OBJECT_USAGE.context_window.current_usage),
+    );
   });
 
   // T2: Missing sidecar -> unknown with reason

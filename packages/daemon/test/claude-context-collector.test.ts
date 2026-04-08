@@ -139,6 +139,7 @@ describe("ClaudeCodeAdapter Context Collector Provisioning", () => {
     expect(written[settingsPath]).toBeDefined();
     const settings = JSON.parse(written[settingsPath]!);
     expect(settings.statusLine).toBeDefined();
+    expect(settings.statusLine.type).toBe("command");
     expect(settings.statusLine.command).toContain("context-collector.cjs");
     expect(settings.statusLine.command).toContain(join(tmpDir, "context"));
   });
@@ -210,6 +211,7 @@ describe("ClaudeCodeAdapter Context Collector Provisioning", () => {
     expect(settings.customSetting).toBe(true);
     expect(settings.theme).toBe("dark");
     expect(settings.statusLine).toBeDefined();
+    expect(settings.statusLine.type).toBe("command");
     expect(settings.statusLine.command).toContain("context-collector.cjs");
   });
 
@@ -224,6 +226,7 @@ describe("ClaudeCodeAdapter Context Collector Provisioning", () => {
     adapter.ensureContextCollector({ cwd: "/project", tmuxSession: "dev-impl@test" } as any);
 
     const settings = JSON.parse(written["/project/.claude/settings.local.json"]!);
+    expect(settings.statusLine.type).toBe("command");
     expect(settings.statusLine.command).toContain(join(tmpDir, "context"));
     expect(written["/project/.openrig/context-collector.cjs"]).toBe("copied:/fake/collector.js");
   });

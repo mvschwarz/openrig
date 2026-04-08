@@ -17,7 +17,7 @@ interface SidecarRaw {
     remaining_percentage?: number;
     total_input_tokens?: number;
     total_output_tokens?: number;
-    current_usage?: string;
+    current_usage?: unknown;
   };
   session_id?: string;
   session_name?: string;
@@ -102,7 +102,7 @@ export class ContextUsageStore {
       contextWindowSize: cw.context_window_size ?? null,
       totalInputTokens: cw.total_input_tokens ?? null,
       totalOutputTokens: cw.total_output_tokens ?? null,
-      currentUsage: cw.current_usage ?? null,
+      currentUsage: this.normalizeCurrentUsage(cw.current_usage),
       transcriptPath: raw.transcript_path ?? null,
       sessionId: raw.session_id ?? null,
       sessionName: raw.session_name ?? null,
@@ -254,5 +254,15 @@ export class ContextUsageStore {
       sampledAt: row.sampled_at,
       fresh,
     };
+  }
+
+  private normalizeCurrentUsage(value: unknown): string | null {
+    if (value == null) return null;
+    if (typeof value === "string") return value;
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return String(value);
+    }
   }
 }
