@@ -1,0 +1,90 @@
+version: "0.2"
+name: product-team
+summary: >
+  A full product squad modeled on the rig that built OpenRig:
+  two orchestrators, a development pod with implementation, QA,
+  and design, plus two independent reviewers. This is the happy-path
+  starter for building and shipping a product with a coordinated team.
+
+pods:
+  - id: orch1
+    label: Orchestration
+    members:
+      - id: lead
+        agent_ref: "local:agents/lead"
+        runtime: claude-code
+        profile: default
+        cwd: "."
+      - id: peer
+        agent_ref: "local:agents/lead"
+        runtime: codex
+        profile: default
+        cwd: "."
+    edges: []
+
+  - id: dev1
+    label: Development
+    members:
+      - id: impl
+        agent_ref: "local:agents/impl"
+        runtime: claude-code
+        profile: default
+        cwd: "."
+      - id: qa
+        agent_ref: "local:agents/qa"
+        runtime: codex
+        profile: default
+        cwd: "."
+      - id: design
+        agent_ref: "local:agents/design"
+        runtime: claude-code
+        profile: default
+        cwd: "."
+    edges:
+      - kind: delegates_to
+        from: impl
+        to: qa
+
+  - id: rev1
+    label: Review
+    members:
+      - id: r1
+        agent_ref: "local:agents/reviewer"
+        runtime: claude-code
+        profile: default
+        cwd: "."
+      - id: r2
+        agent_ref: "local:agents/reviewer"
+        runtime: codex
+        profile: default
+        cwd: "."
+    edges: []
+
+edges:
+  - kind: delegates_to
+    from: orch1.lead
+    to: dev1.impl
+  - kind: delegates_to
+    from: orch1.lead
+    to: dev1.design
+  - kind: delegates_to
+    from: orch1.lead
+    to: rev1.r1
+  - kind: delegates_to
+    from: orch1.peer
+    to: dev1.qa
+  - kind: delegates_to
+    from: orch1.peer
+    to: rev1.r2
+  - kind: can_observe
+    from: rev1.r1
+    to: dev1.impl
+  - kind: can_observe
+    from: rev1.r1
+    to: dev1.design
+  - kind: can_observe
+    from: rev1.r2
+    to: dev1.impl
+  - kind: can_observe
+    from: rev1.r2
+    to: dev1.qa

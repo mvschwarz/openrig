@@ -12,9 +12,11 @@ const RIG_SPECS = [
   "implementation-pair.yaml",
   "adversarial-review.yaml",
   "research-team.yaml",
+  "product-team.yaml",
 ];
 
 const AGENT_SPECS = [
+  "agents/design/agent.yaml",
   "agents/impl/agent.yaml",
   "agents/qa/agent.yaml",
   "agents/reviewer/agent.yaml",
@@ -45,7 +47,7 @@ describe("Starter specs", () => {
     }
   });
 
-  it("built-in library scan discovers all three rig specs", () => {
+  it("built-in library scan discovers all bundled rig specs", () => {
     const lib = new SpecLibraryService({
       roots: [{ path: SPECS_ROOT, sourceType: "builtin" }],
       specReviewService,
@@ -53,11 +55,12 @@ describe("Starter specs", () => {
     lib.scan();
 
     const rigs = lib.list({ kind: "rig" });
-    expect(rigs.length).toBeGreaterThanOrEqual(3);
+    expect(rigs.length).toBeGreaterThanOrEqual(4);
     const names = rigs.map((e) => e.name);
     expect(names).toContain("implementation-pair");
     expect(names).toContain("adversarial-review");
     expect(names).toContain("research-team");
+    expect(names).toContain("product-team");
   });
 
   it("all rig specs pass canonical rigPreflight with rigRoot", () => {

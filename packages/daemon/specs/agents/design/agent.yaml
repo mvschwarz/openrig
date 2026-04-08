@@ -1,0 +1,21 @@
+name: design
+version: "1.0"
+description: Product designer — shapes UX, interaction flows, and design-system coherence
+
+defaults:
+  runtime: claude-code
+
+profiles:
+  default:
+    uses: []
+
+resources:
+  guidance:
+    - id: role
+      path: guidance/role.md
+
+startup:
+  files:
+    - path: guidance/role.md
+      required: true
+  actions: []
