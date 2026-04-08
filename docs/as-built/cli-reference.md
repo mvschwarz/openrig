@@ -462,12 +462,17 @@ Usage: `rig chatroom <subcommand>`
 
 Subcommands:
 - `send <rig> <message> [--sender <name>]`
-- `history <rig> [--topic <name>] [--limit <n>] [--json]`
-- `watch <rig> [--tmux]`
+- `history <rig> [--topic <name>] [--after <id>] [--since <ts>] [--sender <name>] [--limit <n>] [--json]`
+- `wait <rig> [--after <id>] [--topic <name>] [--sender <name>] [--timeout <seconds>] [--json]`
+- `clear <rig>`
 - `topic <rig> <topic-name> [--body <text>] [--sender <name>]`
+- `watch <rig> [--tmux]`
 
 Notes:
 - All chatroom subcommands take the rig name as a positional argument.
+- `history` filters are composable: `--sender`, `--since`, `--after`, `--topic` can be combined.
+- `wait` blocks until new matching messages arrive or times out (exit 1). Same filter semantics as `history`.
+- `clear` is destructive and rig-scoped. Removes all messages for that rig.
 - `watch --tmux` starts a dedicated tmux watcher session.
 
 ## Commands Not Present
