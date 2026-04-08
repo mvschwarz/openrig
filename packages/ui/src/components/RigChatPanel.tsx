@@ -20,20 +20,29 @@ export function RigChatPanel({ rigId }: RigChatPanelProps) {
   return (
     <div data-testid="rig-chat-panel" className="flex flex-col h-full">
       {/* Messages */}
-      <div className="flex-1 overflow-y-auto p-3 space-y-1.5">
+      <div className="flex-1 overflow-y-auto p-3 space-y-3">
         {isLoading ? (
           <div className="font-mono text-[10px] text-stone-400 text-center">Loading messages...</div>
         ) : messages.length === 0 ? (
           <div className="font-mono text-[10px] text-stone-400 text-center italic">No messages yet</div>
         ) : (
           messages.map((msg) => (
-            <div key={msg.id} data-testid={`chat-msg-${msg.id}`} className="font-mono text-[10px] leading-4">
+            <div key={msg.id} data-testid={`chat-msg-${msg.id}`}>
               {msg.kind === "topic" ? (
-                <div className="text-stone-400 text-center text-[9px]">--- topic: {msg.topic} ---</div>
+                <div
+                  data-testid={`chat-topic-${msg.id}`}
+                  className="border-t border-b border-stone-300 bg-stone-50 px-2 py-1.5 text-center font-mono text-[9px] uppercase tracking-wider text-stone-500"
+                >
+                  {msg.topic}
+                </div>
               ) : (
-                <div>
-                  <span data-testid={`chat-sender-${msg.id}`} className="font-semibold text-stone-600">[{msg.sender}]</span>{" "}
-                  <span>{msg.body}</span>
+                <div className="border-l-2 border-stone-200 pl-2">
+                  <div data-testid={`chat-sender-${msg.id}`} className="font-mono text-[9px] font-bold text-stone-500">
+                    {msg.sender}
+                  </div>
+                  <div className="font-mono text-[10px] leading-relaxed text-stone-800 whitespace-pre-wrap">
+                    {msg.body}
+                  </div>
                 </div>
               )}
             </div>

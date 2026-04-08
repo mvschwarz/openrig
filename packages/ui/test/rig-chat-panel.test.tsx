@@ -59,10 +59,10 @@ describe("RigChatPanel", () => {
 
     renderPanel("rig-1");
 
-    // Wait for messages to render
-    expect(await screen.findByText("[alice]")).toBeTruthy();
+    // Wait for messages to render — sender is now on its own line
+    expect(await screen.findByText("alice")).toBeTruthy();
     expect(screen.getByText("hello")).toBeTruthy();
-    expect(screen.getByText("[bob]")).toBeTruthy();
+    expect(screen.getByText("bob")).toBeTruthy();
     expect(screen.getByText("world")).toBeTruthy();
   });
 
@@ -104,6 +104,45 @@ describe("RigChatPanel", () => {
     });
   });
 
+  it("renders topic markers as visually distinct blocks", async () => {
+    const messagesWithTopic = [
+      { id: "msg-t1", rigId: "rig-1", sender: "host", kind: "topic", body: "", topic: "review", createdAt: "2026-03-31T10:00:00Z" },
+      { id: "msg-1", rigId: "rig-1", sender: "alice", kind: "message", body: "review comment", topic: null, createdAt: "2026-03-31T10:01:00Z" },
+    ];
+    mockFetch.mockImplementation((url: string) => {
+      if (typeof url === "string" && url.includes("/chat/history")) {
+        return Promise.resolve({ ok: true, json: async () => messagesWithTopic });
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) });
+    });
+
+    renderPanel("rig-1");
+
+    // Topic marker should render with distinct testId
+    const topicEl = await screen.findByTestId("chat-topic-msg-t1");
+    expect(topicEl.textContent).toContain("review");
+    // Regular message should have sender header
+    expect(screen.getByText("alice")).toBeTruthy();
+    expect(screen.getByText("review comment")).toBeTruthy();
+  });
+
+  it("renders sender as header separated from body", async () => {
+    mockFetch.mockImplementation((url: string) => {
+      if (typeof url === "string" && url.includes("/chat/history")) {
+        return Promise.resolve({ ok: true, json: async () => chatMessages });
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) });
+    });
+
+    renderPanel("rig-1");
+
+    // Sender should be in its own element, not inline with body
+    const senderEl = await screen.findByTestId("chat-sender-msg-1");
+    expect(senderEl.textContent).toBe("alice");
+    // Body should be in a separate element
+    expect(screen.getByText("hello")).toBeTruthy();
+  });
+
   it("updates when new message event arrives", async () => {
     let callCount = 0;
     mockFetch.mockImplementation((url: string) => {
@@ -130,7 +169,7 @@ describe("RigChatPanel", () => {
     renderPanel("rig-1");
 
     // Wait for initial render
-    await screen.findByText("[alice]");
+    await screen.findByText("alice");
 
     // Simulate SSE message event
     const esInstance = instances[0]!;
