@@ -233,10 +233,16 @@ profiles:
   });
 
   it("openrig-start.md asset exists on disk", () => {
-    const { existsSync } = require("node:fs");
+    const { existsSync, readFileSync } = require("node:fs");
     const { resolve } = require("node:path");
     const assetPath = resolve(import.meta.dirname, "../src/domain/../../assets/guidance/openrig-start.md");
     expect(existsSync(assetPath)).toBe(true);
+    const content = readFileSync(assetPath, "utf8");
+    expect(content).toContain("thin bootstrap overlay");
+    expect(content).toContain("openrig-user");
+    expect(content).toContain("current project or workspace");
+    expect(content).toContain("usually sees it under `.claude/skills/openrig-user/SKILL.md`");
+    expect(content).toContain("usually sees it under `.agents/skills/openrig-user/SKILL.md`");
   });
 
   // T4: partial failure — one node startup fails, other succeeds
