@@ -1271,9 +1271,9 @@ export class PodRigInstantiator {
     }
 
     // 7. Built-in OpenRig onboarding overlay (appended last, does not replace agent guidance)
-    const onboardingPath = nodePath.resolve(import.meta.dirname, "../../assets/guidance/using-openrig.md");
+    const onboardingPath = nodePath.resolve(import.meta.dirname, "../../assets/guidance/openrig-start.md");
     files.push({
-      path: "using-openrig.md",
+      path: "openrig-start.md",
       absolutePath: onboardingPath,
       ownerRoot: nodePath.resolve(import.meta.dirname, "../../assets"),
       deliveryHint: "guidance_merge",

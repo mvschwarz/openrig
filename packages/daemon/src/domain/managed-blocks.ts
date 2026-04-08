@@ -14,11 +14,16 @@ export interface ManagedBlockCleanupFsOps extends ManagedBlockMergeFsOps {
   deleteFile(path: string): void;
 }
 
+export interface MergeManagedBlockOptions {
+  replaceBlockIds?: string[];
+}
+
 export function mergeManagedBlock(
   fs: ManagedBlockMergeFsOps,
   targetPath: string,
   blockId: string,
   content: string,
+  options?: MergeManagedBlockOptions,
 ): void {
   const begin = MANAGED_BLOCK_START(blockId);
   const end = MANAGED_BLOCK_END(blockId);
@@ -31,9 +36,25 @@ export function mergeManagedBlock(
   }
 
   const existing = fs.readFile(targetPath);
-  if (existing.includes(begin) && existing.includes(end)) {
-    const regex = new RegExp(`${escapeRegex(begin)}[\\s\\S]*?${escapeRegex(end)}`, "g");
-    fs.writeFile(targetPath, existing.replace(regex, block));
+  const allReplaceIds = Array.from(new Set([blockId, ...(options?.replaceBlockIds ?? [])]));
+  const replaceableIds = allReplaceIds.filter((id) => {
+    const candidateBegin = MANAGED_BLOCK_START(id);
+    const candidateEnd = MANAGED_BLOCK_END(id);
+    return existing.includes(candidateBegin) && existing.includes(candidateEnd);
+  });
+
+  if (replaceableIds.length > 0) {
+    let updated = existing;
+    for (const id of replaceableIds) {
+      const candidateBegin = MANAGED_BLOCK_START(id);
+      const candidateEnd = MANAGED_BLOCK_END(id);
+      const regex = new RegExp(`${escapeRegex(candidateBegin)}[\\s\\S]*?${escapeRegex(candidateEnd)}`, "g");
+      updated = updated.replace(regex, id === blockId ? block : "");
+    }
+    if (!updated.includes(begin) || !updated.includes(end)) {
+      updated = `${updated.trim()}\n\n${block}`.trim();
+    }
+    fs.writeFile(targetPath, `${updated}\n`);
     return;
   }
 

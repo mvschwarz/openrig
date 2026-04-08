@@ -216,26 +216,26 @@ profiles:
     db.close();
   });
 
-  it("includes using-openrig.md onboarding overlay in resolved startup files", async () => {
+  it("includes openrig-start.md onboarding overlay in resolved startup files", async () => {
     const { db, inst } = setup();
     const yaml = RigSpecCodec.serialize(makeRigSpec());
     const result = await inst.instantiate(yaml, RIG_ROOT);
     expect(result.ok).toBe(true);
 
-    // Check startup context for using-openrig.md
+    // Check startup context for openrig-start.md
     const ctxRows = db.prepare("SELECT * FROM node_startup_context").all() as Array<{ resolved_files_json: string }>;
     expect(ctxRows.length).toBeGreaterThan(0);
     const allFiles = ctxRows.flatMap((r) => JSON.parse(r.resolved_files_json) as Array<{ path: string }>);
-    const onboarding = allFiles.find((f) => f.path === "using-openrig.md");
+    const onboarding = allFiles.find((f) => f.path === "openrig-start.md");
     expect(onboarding).toBeDefined();
 
     db.close();
   });
 
-  it("using-openrig.md asset exists on disk", () => {
+  it("openrig-start.md asset exists on disk", () => {
     const { existsSync } = require("node:fs");
     const { resolve } = require("node:path");
-    const assetPath = resolve(import.meta.dirname, "../src/domain/../../assets/guidance/using-openrig.md");
+    const assetPath = resolve(import.meta.dirname, "../src/domain/../../assets/guidance/openrig-start.md");
     expect(existsSync(assetPath)).toBe(true);
   });
 

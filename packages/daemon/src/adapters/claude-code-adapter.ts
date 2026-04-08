@@ -273,7 +273,9 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   }
 
   private mergeGuidance(targetPath: string, blockId: string, content: string): void {
-    mergeManagedBlock(this.fs, targetPath, blockId, content);
+    mergeManagedBlock(this.fs, targetPath, blockId, content, {
+      replaceBlockIds: blockId === "openrig-start.md" ? ["using-openrig.md"] : [],
+    });
   }
 
   /**

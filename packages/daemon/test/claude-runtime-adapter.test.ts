@@ -72,6 +72,35 @@ describe("Claude Code runtime adapter", () => {
     expect(store["/project/CLAUDE.md"]).toContain("Guide content");
   });
 
+  it("replaces legacy using-openrig managed block when delivering openrig-start guidance", async () => {
+    const fs = mockFs({
+      "/rig/openrig-start.md": "# OpenRig Start\n\nNew guidance",
+      "/project/CLAUDE.md": [
+        "<!-- BEGIN RIGGED MANAGED BLOCK: using-openrig.md -->",
+        "# Using OpenRig",
+        "Old guidance",
+        "<!-- END RIGGED MANAGED BLOCK: using-openrig.md -->",
+      ].join("\n"),
+    });
+    const adapter = new ClaudeCodeAdapter({ tmux: mockTmux(), fsOps: fs });
+    const file: ResolvedStartupFile = {
+      path: "openrig-start.md",
+      absolutePath: "/rig/openrig-start.md",
+      ownerRoot: "/rig",
+      deliveryHint: "guidance_merge",
+      required: true,
+      appliesOn: ["fresh_start", "restore"],
+    };
+
+    await adapter.deliverStartup([file], makeBinding());
+
+    const store = (fs as unknown as { _store: Record<string, string> })._store;
+    const content = store["/project/CLAUDE.md"]!;
+    expect(content).toContain("BEGIN RIGGED MANAGED BLOCK: openrig-start.md");
+    expect(content).not.toContain("BEGIN RIGGED MANAGED BLOCK: using-openrig.md");
+    expect(content).toContain("New guidance");
+  });
+
   // T4: auto skill install for SKILL.md
   it("auto chooses skill_install for SKILL.md content", async () => {
     const fs = mockFs({ "/rig/skills/deep/SKILL.md": "# SKILL Deep PR Review" });

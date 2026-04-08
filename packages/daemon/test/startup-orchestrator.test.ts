@@ -451,7 +451,7 @@ describe("StartupOrchestrator", () => {
     }
   });
 
-  it("delivers using-openrig.md overlay alongside agent role guidance (append, not replace)", async () => {
+  it("delivers openrig-start.md overlay alongside agent role guidance (append, not replace)", async () => {
     const seed = seedSession();
     const deliveredFiles: string[] = [];
     const adapter = mockAdapter({
@@ -469,8 +469,8 @@ describe("StartupOrchestrator", () => {
       appliesOn: ["fresh_start", "restore"],
     };
     const onboardingFile: ResolvedStartupFile = {
-      path: "using-openrig.md",
-      absolutePath: "/assets/guidance/using-openrig.md",
+      path: "openrig-start.md",
+      absolutePath: "/assets/guidance/openrig-start.md",
       ownerRoot: "/assets",
       deliveryHint: "guidance_merge",
       required: false,
@@ -486,6 +486,6 @@ describe("StartupOrchestrator", () => {
     expect(result.ok).toBe(true);
     // Both files were delivered — overlay appended, not replacing role guidance
     expect(deliveredFiles).toContain("guidance/role.md");
-    expect(deliveredFiles).toContain("using-openrig.md");
+    expect(deliveredFiles).toContain("openrig-start.md");
   });
 });

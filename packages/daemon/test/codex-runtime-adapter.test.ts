@@ -114,6 +114,35 @@ describe("Codex runtime adapter", () => {
     expect(tmux.sendText).not.toHaveBeenCalled();
   });
 
+  it("replaces legacy using-openrig managed block when delivering openrig-start guidance", async () => {
+    const fs = mockFs({
+      "/rig/openrig-start.md": "# OpenRig Start\n\nNew guidance",
+      "/project/AGENTS.md": [
+        "<!-- BEGIN RIGGED MANAGED BLOCK: using-openrig.md -->",
+        "# Using OpenRig",
+        "Old guidance",
+        "<!-- END RIGGED MANAGED BLOCK: using-openrig.md -->",
+      ].join("\n"),
+    });
+    const adapter = new CodexRuntimeAdapter({ tmux: mockTmux(), fsOps: fs });
+    const file: ResolvedStartupFile = {
+      path: "openrig-start.md",
+      absolutePath: "/rig/openrig-start.md",
+      ownerRoot: "/rig",
+      deliveryHint: "guidance_merge",
+      required: true,
+      appliesOn: ["fresh_start", "restore"],
+    };
+
+    await adapter.deliverStartup([file], makeBinding());
+
+    const store = (fs as unknown as { _store: Record<string, string> })._store;
+    const content = store["/project/AGENTS.md"]!;
+    expect(content).toContain("BEGIN RIGGED MANAGED BLOCK: openrig-start.md");
+    expect(content).not.toContain("BEGIN RIGGED MANAGED BLOCK: using-openrig.md");
+    expect(content).toContain("New guidance");
+  });
+
   // T11: structured failure on delivery error
   it("returns structured failure when delivery fails", async () => {
     const fs = mockFs({}); // empty — file not found
