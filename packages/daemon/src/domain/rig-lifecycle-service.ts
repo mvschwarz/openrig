@@ -23,6 +23,7 @@ type NodeLifecycleRow = {
   latest_session_id: string | null;
   latest_session_name: string | null;
   latest_session_status: string | null;
+  latest_session_origin: string | null;
 };
 
 type RigReleaseRow = {
@@ -349,8 +350,10 @@ export class RigLifecycleService {
       return { ok: false, code: "node_not_found", error: `Node '${nodeRef}' not found in rig '${rigId}'.` };
     }
 
+    const preserveDetachedClaimedSession = node.latest_session_origin === "claimed" && node.latest_session_status === "detached";
+
     let sessionsKilled = 0;
-    if (node.latest_session_name) {
+    if (node.latest_session_name && !preserveDetachedClaimedSession) {
       const kill = await this.tmuxAdapter?.killSession(node.latest_session_name);
       if (kill && !kill.ok && kill.code !== "session_not_found") {
         return {
@@ -364,7 +367,7 @@ export class RigLifecycleService {
 
     const persisted: Array<{ type: "session.detached" | "node.removed"; seq: number; createdAt: string }> = [];
     const tx = this.db.transaction(() => {
-      if (node.latest_session_name) {
+      if (node.latest_session_name && !preserveDetachedClaimedSession) {
         const detached = this.eventBus.persistWithinTransaction({
           type: "session.detached",
           rigId,
@@ -537,7 +540,8 @@ export class RigLifecycleService {
       SELECT n.id AS node_id, n.rig_id, n.logical_id, n.pod_id, b.tmux_session,
         s.id AS latest_session_id,
         s.session_name AS latest_session_name,
-        s.status AS latest_session_status
+        s.status AS latest_session_status,
+        s.origin AS latest_session_origin
       FROM nodes n
       LEFT JOIN bindings b ON b.node_id = n.id
       LEFT JOIN sessions s ON s.id = (
@@ -552,7 +556,8 @@ export class RigLifecycleService {
       SELECT n.id AS node_id, n.rig_id, n.logical_id, n.pod_id, b.tmux_session,
         s.id AS latest_session_id,
         s.session_name AS latest_session_name,
-        s.status AS latest_session_status
+        s.status AS latest_session_status,
+        s.origin AS latest_session_origin
       FROM nodes n
       LEFT JOIN bindings b ON b.node_id = n.id
       LEFT JOIN sessions s ON s.id = (

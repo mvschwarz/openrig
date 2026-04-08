@@ -86,6 +86,7 @@ interface SessionTransportDeps {
 interface SessionRow { node_id: string; session_name: string; }
 interface NodeRow { rig_id: string; logical_id: string; }
 interface SessionMetaRow { runtime: string | null; attachment_type: string | null; }
+interface ResolvedTarget { sessionName: string; rigName: string; nodeLogicalId: string; }
 
 export class SessionTransport {
   readonly db: Database.Database;
@@ -137,26 +138,12 @@ export class SessionTransport {
     if (allRigs.length === 0) {
       return { ok: false, code: "not_found", error: "No rigs found. Check status with: rig ps" };
     }
-    const sessions: Array<{ sessionName: string; rigName: string; nodeLogicalId: string }> = [];
+    const sessions: ResolvedTarget[] = [];
     const seenRigIds = new Set<string>();
     for (const rig of allRigs) {
       if (seenRigIds.has(rig.id)) continue;
       seenRigIds.add(rig.id);
-      const rigSessions = this.sessionRegistry.getSessionsForRig(rig.id);
-      const latestByNode = new Map<string, typeof rigSessions[0]>();
-      for (const s of rigSessions) {
-        const existing = latestByNode.get(s.nodeId);
-        if (!existing || s.id > existing.id) latestByNode.set(s.nodeId, s);
-      }
-      for (const s of latestByNode.values()) {
-        if (s.status !== "running") continue;
-        const binding = this.sessionRegistry.getBindingForNode(s.nodeId);
-        if (!binding?.tmuxSession) continue;
-        const nodeRow = this.db
-          .prepare("SELECT logical_id FROM nodes WHERE id = ?")
-          .get(s.nodeId) as { logical_id: string } | undefined;
-        sessions.push({ sessionName: s.sessionName, rigName: rig.name, nodeLogicalId: nodeRow?.logical_id ?? s.nodeId });
-      }
+      sessions.push(...this.collectTransportTargetsForRig(rig.id, rig.name));
     }
     if (sessions.length === 0) {
       return { ok: false, code: "not_found", error: "No running sessions found. Check status with: rig ps" };
@@ -225,32 +212,9 @@ export class SessionTransport {
       };
     }
 
-    const sessions: Array<{ sessionName: string; rigName: string; nodeLogicalId: string }> = [];
+    const sessions: ResolvedTarget[] = [];
     for (const rig of rigs) {
-      const rigSessions = this.sessionRegistry.getSessionsForRig(rig.id);
-      // Group by nodeId, take latest per node
-      const latestByNode = new Map<string, typeof rigSessions[0]>();
-      for (const s of rigSessions) {
-        const existing = latestByNode.get(s.nodeId);
-        if (!existing || s.id > existing.id) {
-          latestByNode.set(s.nodeId, s);
-        }
-      }
-      // Filter to running with tmux binding
-      for (const s of latestByNode.values()) {
-        if (s.status !== "running") continue;
-        const binding = this.sessionRegistry.getBindingForNode(s.nodeId);
-        if (!binding?.tmuxSession) continue;
-        // Look up logical ID
-        const nodeRow = this.db
-          .prepare("SELECT logical_id FROM nodes WHERE id = ?")
-          .get(s.nodeId) as { logical_id: string } | undefined;
-        sessions.push({
-          sessionName: s.sessionName,
-          rigName: rig.name,
-          nodeLogicalId: nodeRow?.logical_id ?? s.nodeId,
-        });
-      }
+      sessions.push(...this.collectTransportTargetsForRig(rig.id, rig.name));
     }
 
     if (sessions.length === 0) {
@@ -281,30 +245,16 @@ export class SessionTransport {
     }
 
     // Collect running sessions across all matching rigs, deduplicated by rig ID
-    const sessions: Array<{ sessionName: string; rigName: string; nodeLogicalId: string }> = [];
+    const sessions: ResolvedTarget[] = [];
     const seenRigIds = new Set<string>();
     for (const rig of rigs) {
       if (seenRigIds.has(rig.id)) continue;
       seenRigIds.add(rig.id);
 
-      const rigSessions = this.sessionRegistry.getSessionsForRig(rig.id);
-      const latestByNode = new Map<string, typeof rigSessions[0]>();
-      for (const s of rigSessions) {
-        const existing = latestByNode.get(s.nodeId);
-        if (!existing || s.id > existing.id) latestByNode.set(s.nodeId, s);
-      }
-      for (const s of latestByNode.values()) {
-        if (s.status !== "running") continue;
-        const binding = this.sessionRegistry.getBindingForNode(s.nodeId);
-        if (!binding?.tmuxSession) continue;
-        const nodeRow = this.db
-          .prepare("SELECT logical_id FROM nodes WHERE id = ?")
-          .get(s.nodeId) as { logical_id: string } | undefined;
-        const logicalId = nodeRow?.logical_id ?? s.nodeId;
-        // Filter by pod name from logicalId
-        const podPart = logicalId.split(".")[0];
+      for (const target of this.collectTransportTargetsForRig(rig.id, rig.name)) {
+        const podPart = target.nodeLogicalId.split(".")[0];
         if (podPart === podName) {
-          sessions.push({ sessionName: s.sessionName, rigName: rig.name, nodeLogicalId: logicalId });
+          sessions.push(target);
         }
       }
     }
@@ -318,6 +268,45 @@ export class SessionTransport {
     }
 
     return { ok: true, sessions };
+  }
+
+  private collectTransportTargetsForRig(rigId: string, rigName: string): ResolvedTarget[] {
+    const rigSessions = this.sessionRegistry.getSessionsForRig(rigId);
+    const latestByNode = new Map<string, typeof rigSessions[0]>();
+    for (const session of rigSessions) {
+      const existing = latestByNode.get(session.nodeId);
+      if (!existing || session.id > existing.id) {
+        latestByNode.set(session.nodeId, session);
+      }
+    }
+
+    const rig = this.rigRepo.getRig(rigId);
+    if (!rig) return [];
+
+    const targets: ResolvedTarget[] = [];
+    for (const node of rig.nodes) {
+      const binding = this.sessionRegistry.getBindingForNode(node.id);
+      const latestSession = latestByNode.get(node.id);
+
+      if (binding?.attachmentType === "external_cli" && binding.externalSessionName) {
+        targets.push({
+          sessionName: binding.externalSessionName,
+          rigName,
+          nodeLogicalId: node.logicalId,
+        });
+        continue;
+      }
+
+      if (latestSession?.status === "running" && binding?.tmuxSession) {
+        targets.push({
+          sessionName: binding.tmuxSession,
+          rigName,
+          nodeLogicalId: node.logicalId,
+        });
+      }
+    }
+
+    return targets;
   }
 
   async send(sessionName: string, text: string, opts?: SendOpts): Promise<SendResult> {

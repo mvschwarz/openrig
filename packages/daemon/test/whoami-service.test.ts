@@ -18,11 +18,10 @@ import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { TranscriptStore } from "../src/domain/transcript-store.js";
 import { WhoamiService } from "../src/domain/whoami-service.js";
+import { createFullTestDb } from "./helpers/test-app.js";
 
 function setupDb(): Database.Database {
-  const db = createDb();
-  migrate(db, [coreSchema, bindingsSessionsSchema, eventsSchema, snapshotsSchema, checkpointsSchema, resumeMetadataSchema, nodeSpecFieldsSchema, discoverySchema, discoveryFkFix, agentspecRebootSchema, podNamespaceSchema, externalCliAttachmentSchema]);
-  return db;
+  return createFullTestDb();
 }
 
 describe("WhoamiService", () => {
@@ -140,5 +139,24 @@ describe("WhoamiService", () => {
     expect(result).not.toBeNull();
     expect(result!.identity.attachmentType).toBe("external_cli");
     expect(result!.identity.sessionName).toBe("orch1-lead@rigged-buildout");
+  });
+
+  it("resolve returns null session and no transcript affordances for an unbound node", () => {
+    const rig = rigRepo.createRig("my-rig");
+    const node = rigRepo.addNode(rig.id, "dev.impl", {
+      role: "worker",
+      runtime: "claude-code",
+    });
+
+    const result = svc.resolve({ nodeId: node.id });
+
+    expect(result).not.toBeNull();
+    expect(result!.identity.sessionName).toBeNull();
+    expect(result!.transcript.enabled).toBe(false);
+    expect(result!.transcript.path).toBeNull();
+    expect(result!.transcript.tailCommand).toBeNull();
+    expect(result!.transcript.grepCommand).toBeNull();
+    expect(result!.commands.sendExamples).toEqual([]);
+    expect(result!.commands.captureExamples).toEqual([]);
   });
 });

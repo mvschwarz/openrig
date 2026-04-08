@@ -20,6 +20,10 @@ export function unclaimCommand(depsOverride?: StatusDeps): Command {
   cmd
     .argument("<sessionRef>", "Claimed session ID or session name")
     .option("--json", "JSON output")
+    .addHelpText("after", `
+Notes:
+  - Use rig release <rigId> to release all claimed sessions from one rig.
+  - Unclaim preserves the live session; it only removes OpenRig management for that node.`)
     .action(async (sessionRef: string, opts: { json?: boolean }) => {
       const deps = getDeps();
       const client = await getClient(deps);

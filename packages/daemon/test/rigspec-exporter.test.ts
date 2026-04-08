@@ -19,11 +19,10 @@ import { RigSpecSchema as PodRigSpecSchema } from "../src/domain/rigspec-schema.
 import { RigSpecCodec as PodRigSpecCodec } from "../src/domain/rigspec-codec.js";
 import { PodRepository } from "../src/domain/pod-repository.js";
 import { RigNotFoundError } from "../src/domain/errors.js";
+import { createFullTestDb } from "./helpers/test-app.js";
 
 function setupDb(): Database.Database {
-  const db = createDb();
-  migrate(db, [coreSchema, bindingsSessionsSchema, eventsSchema, resumeMetadataSchema, checkpointsSchema, nodeSpecFieldsSchema, agentspecRebootSchema, podNamespaceSchema]);
-  return db;
+  return createFullTestDb();
 }
 
 describe("RigSpecExporter", () => {

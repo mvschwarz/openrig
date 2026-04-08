@@ -18,11 +18,10 @@ import { SnapshotRepository } from "../src/domain/snapshot-repository.js";
 import { CheckpointStore } from "../src/domain/checkpoint-store.js";
 import { SnapshotCapture } from "../src/domain/snapshot-capture.js";
 import type { PersistedEvent } from "../src/domain/types.js";
+import { createFullTestDb } from "./helpers/test-app.js";
 
 function setupDb(): Database.Database {
-  const db = createDb();
-  migrate(db, [coreSchema, bindingsSessionsSchema, eventsSchema, snapshotsSchema, checkpointsSchema, resumeMetadataSchema, nodeSpecFieldsSchema, agentspecRebootSchema, startupContextSchema]);
-  return db;
+  return createFullTestDb();
 }
 
 describe("SnapshotCapture", () => {

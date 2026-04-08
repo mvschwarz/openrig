@@ -14,11 +14,10 @@ import { EventBus } from "../src/domain/event-bus.js";
 import { Reconciler } from "../src/domain/reconciler.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import type { PersistedEvent } from "../src/domain/types.js";
+import { createFullTestDb } from "./helpers/test-app.js";
 
 function setupDb(): Database.Database {
-  const db = createDb();
-  migrate(db, [coreSchema, bindingsSessionsSchema, eventsSchema, nodeSpecFieldsSchema, checkpointsSchema, agentspecRebootSchema]);
-  return db;
+  return createFullTestDb();
 }
 
 function mockTmuxAdapter(

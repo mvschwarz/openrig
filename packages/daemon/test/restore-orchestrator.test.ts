@@ -27,11 +27,10 @@ import type { TmuxAdapter, TmuxResult } from "../src/adapters/tmux.js";
 import type { CodexResumeAdapter } from "../src/adapters/codex-resume.js";
 import type { ResumeResult } from "../src/adapters/claude-resume.js";
 import type { PersistedEvent, Snapshot } from "../src/domain/types.js";
+import { createFullTestDb } from "./helpers/test-app.js";
 
 function setupDb(): Database.Database {
-  const db = createDb();
-  migrate(db, [coreSchema, bindingsSessionsSchema, eventsSchema, snapshotsSchema, checkpointsSchema, resumeMetadataSchema, nodeSpecFieldsSchema, agentspecRebootSchema, startupContextSchema]);
-  return db;
+  return createFullTestDb();
 }
 
 function mockTmux(): TmuxAdapter {

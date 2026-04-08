@@ -13,21 +13,21 @@ interface WhoamiIdentity {
   podId: string | null;
   podNamespace?: string | null;
   memberId: string;
-  sessionName: string;
+  sessionName: string | null;
   runtime: string;
 }
 
 interface WhoamiPeer {
   logicalId: string;
-  sessionName: string;
+  sessionName: string | null;
   runtime: string;
   podNamespace?: string | null;
 }
 
 interface WhoamiEdge {
   kind: string;
-  to?: { logicalId: string; sessionName: string };
-  from?: { logicalId: string; sessionName: string };
+  to?: { logicalId: string; sessionName: string | null };
+  from?: { logicalId: string; sessionName: string | null };
 }
 
 interface WhoamiResult {
@@ -208,7 +208,7 @@ export function whoamiCommand(depsOverride?: StatusDeps): Command {
       console.log(`Rig:        ${id.rigName}`);
       console.log(`Logical ID: ${id.logicalId}`);
       console.log(`Pod:        ${(id.podNamespace ?? id.podId) ?? "—"} / ${id.memberId}`);
-      console.log(`Session:    ${id.sessionName}`);
+      console.log(`Session:    ${id.sessionName ?? "—"}`);
       console.log(`Runtime:    ${id.runtime}`);
       console.log(`Transport:  ${id.attachmentType === "external_cli" ? "external_cli (outbound only)" : id.attachmentType}`);
       console.log(`Resolved:   via ${data.resolvedBy.replace(/_/g, " ")}`);
@@ -217,7 +217,7 @@ export function whoamiCommand(depsOverride?: StatusDeps): Command {
         console.log("");
         console.log("Peers:");
         for (const peer of data.peers) {
-          console.log(`  ${peer.logicalId.padEnd(20)} ${peer.sessionName.padEnd(30)} ${peer.runtime}`);
+          console.log(`  ${peer.logicalId.padEnd(20)} ${(peer.sessionName ?? "—").padEnd(30)} ${peer.runtime}`);
         }
       }
 

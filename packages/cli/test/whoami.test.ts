@@ -48,6 +48,16 @@ const WHOAMI_RESPONSE = {
   commands: { sendExamples: ["rig send dev-qa@my-rig 'message' --verify"], captureExamples: ["rig capture dev-qa@my-rig"] },
 };
 
+const UNBOUND_WHOAMI_RESPONSE = {
+  ...WHOAMI_RESPONSE,
+  identity: {
+    ...WHOAMI_RESPONSE.identity,
+    sessionName: null,
+  },
+  transcript: { enabled: false, path: null, tailCommand: null, grepCommand: null },
+  commands: { sendExamples: [], captureExamples: [] },
+};
+
 describe("Whoami CLI", () => {
   let server: http.Server;
   let port: number;
@@ -59,6 +69,9 @@ describe("Whoami CLI", () => {
       if (url.includes("/api/whoami") && url.includes("nodeId=node-1")) {
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify(WHOAMI_RESPONSE));
+      } else if (url.includes("/api/whoami") && url.includes("nodeId=node-2")) {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(UNBOUND_WHOAMI_RESPONSE));
       } else if (url.includes("/api/whoami") && url.includes("sessionName=dev-impl")) {
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ ...WHOAMI_RESPONSE, resolvedBy: "session_name" }));
@@ -270,6 +283,15 @@ describe("Whoami CLI", () => {
     expect(output).toContain("Edges:");
     expect(output).toContain("delegates_to");
     expect(output).toContain("Transcript:");
+  });
+
+  it("human output shows missing session honestly and omits transcript section for unbound nodes", async () => {
+    const { logs } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "whoami", "--node-id", "node-2"]);
+    });
+    const output = logs.join("\n");
+    expect(output).toContain("Session:    —");
+    expect(output).not.toContain("Transcript:");
   });
 
   it("daemon down with OPENRIG_NODE_ID env returns partial JSON instead of hard-failing", async () => {

@@ -24,7 +24,8 @@ Examples:
   rig broadcast "System maintenance in 5 minutes."
   rig broadcast --rig my-rig "message" --json
 
-Without --rig or --pod, broadcasts to ALL running sessions across all rigs.`)
+Without --rig or --pod, broadcasts to ALL running tmux sessions plus any attached external_cli nodes across all rigs.
+Unsupported external_cli targets are returned as explicit per-target failures in the result.`)
     .action(async (text: string, opts: { rig?: string; pod?: string; force?: boolean; json?: boolean }) => {
       const deps = getDeps();
       const status = await getDaemonStatus(deps.lifecycleDeps);

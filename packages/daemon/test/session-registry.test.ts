@@ -8,11 +8,10 @@ import { resumeMetadataSchema } from "../src/db/migrations/006_resume_metadata.j
 import { nodeSpecFieldsSchema } from "../src/db/migrations/007_node_spec_fields.js";
 import { externalCliAttachmentSchema } from "../src/db/migrations/019_external_cli_attachment.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
+import { createFullTestDb } from "./helpers/test-app.js";
 
 function setupDb(): Database.Database {
-  const db = createDb();
-  migrate(db, [coreSchema, bindingsSessionsSchema, resumeMetadataSchema, nodeSpecFieldsSchema, externalCliAttachmentSchema]);
-  return db;
+  return createFullTestDb();
 }
 
 function seedRig(db: Database.Database) {

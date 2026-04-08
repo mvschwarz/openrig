@@ -19,11 +19,10 @@ import { SessionRegistry } from "../src/domain/session-registry.js";
 import { SessionTransport } from "../src/domain/session-transport.js";
 import type { TmuxAdapter, TmuxResult } from "../src/adapters/tmux.js";
 import { transportRoutes } from "../src/routes/transport.js";
+import { createFullTestDb } from "./helpers/test-app.js";
 
 function setupDb(): Database.Database {
-  const db = createDb();
-  migrate(db, [coreSchema, bindingsSessionsSchema, eventsSchema, snapshotsSchema, checkpointsSchema, resumeMetadataSchema, nodeSpecFieldsSchema, discoverySchema, discoveryFkFix, agentspecRebootSchema, externalCliAttachmentSchema]);
-  return db;
+  return createFullTestDb();
 }
 
 function mockTmux(): TmuxAdapter {
@@ -190,6 +189,25 @@ describe("transport routes", () => {
     expect(body.results.every((r: { ok: boolean }) => r.ok)).toBe(true);
   });
 
+  it("POST /capture with rig targeting includes external_cli targets as explicit failures", async () => {
+    seedRig();
+    seedExternalCliRig();
+    const tmux = mockTmux();
+    const transport = new SessionTransport({ db, rigRepo, sessionRegistry, tmuxAdapter: tmux });
+    const app = createApp({ sessionTransport: transport });
+
+    const res = await app.request("/api/transport/capture", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ rig: "rigged-buildout" }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.results).toHaveLength(1);
+    expect(body.results[0]!.ok).toBe(false);
+    expect(body.results[0]!.reason).toBe("transport_unavailable");
+  });
+
   it("POST /capture for external_cli target returns 409 with honest transport guidance", async () => {
     seedExternalCliRig();
     const tmux = mockTmux();
@@ -251,5 +269,24 @@ describe("transport routes", () => {
     expect(body.total).toBe(2);
     expect(body.sent).toBe(1);
     expect(body.failed).toBe(1);
+  });
+
+  it("POST /broadcast includes external_cli targets as explicit transport_unavailable failures", async () => {
+    seedExternalCliRig();
+    const tmux = mockTmux();
+    const transport = new SessionTransport({ db, rigRepo, sessionRegistry, tmuxAdapter: tmux });
+    const app = createApp({ sessionTransport: transport });
+
+    const res = await app.request("/api/transport/broadcast", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ rig: "rigged-buildout", text: "broadcast message", force: true }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.total).toBe(1);
+    expect(body.sent).toBe(0);
+    expect(body.failed).toBe(1);
+    expect(body.results[0]!.reason).toBe("transport_unavailable");
   });
 });

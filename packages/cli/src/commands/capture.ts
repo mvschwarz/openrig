@@ -23,7 +23,11 @@ Examples:
   rig capture dev-impl@my-rig --lines 50
   rig capture --rig my-rig
   rig capture --pod dev --rig my-rig
-  rig capture --rig my-rig --json`)
+  rig capture --rig my-rig --json
+
+Supported notes:
+  - Multi-target capture reports unsupported external_cli nodes as explicit per-target failures.
+  - For outbound-only external_cli nodes, use rig whoami/rig ps instead of rig capture.`)
     .action(async (session: string | undefined, opts: { rig?: string; pod?: string; lines?: string; json?: boolean }) => {
       const deps = getDeps();
       const status = await getDaemonStatus(deps.lifecycleDeps);

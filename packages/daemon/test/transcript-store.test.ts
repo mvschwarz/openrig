@@ -179,6 +179,20 @@ describe("TranscriptStore", () => {
       expect(result).toBe("echo OPS_SHELL_READY\necho RIG_BROADCAST_OK\nRIG_BROADCAST_OK\n");
     });
 
+    it("preserves terse legitimate output lines during tail cleanup", () => {
+      const store = new TranscriptStore({ transcriptsRoot: tmpDir });
+      store.ensureTranscriptDir("my-rig");
+      const filePath = store.getTranscriptPath("my-rig", "dev@my-rig");
+      writeFileSync(
+        filePath,
+        "mschwarz@mike-air rigged % echo ACK\nACK\nmschwarz@mike-air rigged % \n",
+      );
+
+      const result = store.readTail("my-rig", "dev@my-rig", 5);
+
+      expect(result).toBe("echo ACK\nACK\n");
+    });
+
     it("normalizes carriage-return prompt redraws before filtering shell prompt lines", () => {
       const store = new TranscriptStore({ transcriptsRoot: tmpDir });
       store.ensureTranscriptDir("my-rig");

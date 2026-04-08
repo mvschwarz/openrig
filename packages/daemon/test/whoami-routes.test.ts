@@ -17,11 +17,10 @@ import { SessionRegistry } from "../src/domain/session-registry.js";
 import { TranscriptStore } from "../src/domain/transcript-store.js";
 import { WhoamiService } from "../src/domain/whoami-service.js";
 import { whoamiRoutes } from "../src/routes/whoami.js";
+import { createFullTestDb } from "./helpers/test-app.js";
 
 function setupDb(): Database.Database {
-  const db = createDb();
-  migrate(db, [coreSchema, bindingsSessionsSchema, eventsSchema, snapshotsSchema, checkpointsSchema, resumeMetadataSchema, nodeSpecFieldsSchema, agentspecRebootSchema, podNamespaceSchema]);
-  return db;
+  return createFullTestDb();
 }
 
 describe("whoami routes", () => {

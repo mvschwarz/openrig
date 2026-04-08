@@ -37,6 +37,12 @@ export interface AskResult {
   guidance?: string;
 }
 
+interface StructuredAnswer {
+  excerpts: string[];
+  insufficient: boolean;
+  guidance?: string;
+}
+
 export class AskService {
   private readonly deps: AskDeps;
 
@@ -82,9 +88,10 @@ export class AskService {
         rig: rigInfo,
         evidence: {
           backend: "structured",
-          excerpts: structured,
+          excerpts: structured.excerpts,
         },
-        insufficient: false,
+        insufficient: structured.insufficient,
+        guidance: structured.guidance,
       };
     }
 
@@ -147,23 +154,23 @@ export class AskService {
     rigName: string,
     question: string,
     context?: { nodeId?: string; sessionName?: string },
-  ): string[] | null {
+  ): StructuredAnswer | null {
     const normalized = question.trim().toLowerCase();
     if (!normalized) return null;
 
     if (this.looksLikePeerQuestion(normalized)) {
       const identity = this.resolveIdentity(context);
       if (identity && identity.identity.rigId === rigId) {
-        return identity.peers.map((peer) => this.formatPeerLine(peer.logicalId, peer.sessionName, peer.runtime, peer.podNamespace));
+        return {
+          excerpts: identity.peers.map((peer) => this.formatPeerLine(peer.logicalId, peer.sessionName, peer.runtime, peer.podNamespace)),
+          insufficient: false,
+        };
       }
-      const rig = this.deps.rigRepo.getRig(rigId);
-      if (!rig) return null;
-      return rig.nodes.map((node) => {
-        const parts = node.logicalId.split(".");
-        const podNamespace = parts.length > 1 ? parts[0]! : null;
-        const sessionName = node.binding?.tmuxSession ?? node.binding?.externalSessionName ?? "—";
-        return this.formatPeerLine(node.logicalId, sessionName, node.runtime ?? "unknown", podNamespace);
-      });
+      return {
+        excerpts: [],
+        insufficient: true,
+        guidance: "Cannot determine the current node identity for a peer-relative question. Run rig whoami --json from the target session or retry from an attached managed node.",
+      };
     }
 
     return null;
@@ -180,10 +187,10 @@ export class AskService {
 
   private formatPeerLine(
     logicalId: string,
-    sessionName: string,
+    sessionName: string | null,
     runtime: string,
     podNamespace: string | null,
   ): string {
-    return `${logicalId}  session=${sessionName}  runtime=${runtime}  pod=${podNamespace ?? "—"}`;
+    return `${logicalId}  session=${sessionName ?? "unbound"}  runtime=${runtime}  pod=${podNamespace ?? "—"}`;
   }
 }

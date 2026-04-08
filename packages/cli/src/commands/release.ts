@@ -21,6 +21,10 @@ export function releaseCommand(depsOverride?: StatusDeps): Command {
     .argument("<rigId>", "Rig identifier")
     .option("--delete", "Delete the rig record after a clean release")
     .option("--json", "JSON output")
+    .addHelpText("after", `
+Notes:
+  - Use rig unclaim <sessionRef> to release a single claimed session.
+  - Release only covers claimed/adopted sessions; OpenRig-launched nodes still require rig down.`)
     .action(async (rigId: string, opts: { delete?: boolean; json?: boolean }) => {
       const deps = getDeps();
       const client = await getClient(deps);

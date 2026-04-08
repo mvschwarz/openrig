@@ -6,10 +6,10 @@ import { coreSchema } from "../src/db/migrations/001_core_schema.js";
 import { eventsSchema } from "../src/db/migrations/003_events.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import type { RigEvent, PersistedEvent } from "../src/domain/types.js";
+import { createFullTestDb } from "./helpers/test-app.js";
 
 function setupDb(): Database.Database {
-  const db = createDb();
-  migrate(db, [coreSchema, eventsSchema]);
+  const db = createFullTestDb();
   db.prepare("INSERT INTO rigs (id, name) VALUES (?, ?)").run(
     "rig-1",
     "test-rig"

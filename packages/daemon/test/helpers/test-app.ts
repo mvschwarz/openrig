@@ -17,6 +17,7 @@ import { discoverySchema } from "../../src/db/migrations/012_discovery.js";
 import { discoveryFkFix } from "../../src/db/migrations/013_discovery_fk_fix.js";
 import { agentspecRebootSchema } from "../../src/db/migrations/014_agentspec_reboot.js";
 import { startupContextSchema } from "../../src/db/migrations/015_startup_context.js";
+import { chatMessagesSchema } from "../../src/db/migrations/016_chat_messages.js";
 import { podNamespaceSchema } from "../../src/db/migrations/017_pod_namespace.js";
 import { contextUsageSchema } from "../../src/db/migrations/018_context_usage.js";
 import { externalCliAttachmentSchema } from "../../src/db/migrations/019_external_cli_attachment.js";
@@ -72,7 +73,7 @@ import fs from "node:fs";
 
 export function createFullTestDb(): Database.Database {
   const db = createDb();
-  migrate(db, [coreSchema, bindingsSessionsSchema, eventsSchema, snapshotsSchema, checkpointsSchema, resumeMetadataSchema, nodeSpecFieldsSchema, packagesSchema, installJournalSchema, journalSeqSchema, bootstrapSchema, discoverySchema, discoveryFkFix, agentspecRebootSchema, startupContextSchema, podNamespaceSchema, contextUsageSchema, externalCliAttachmentSchema]);
+  migrate(db, [coreSchema, bindingsSessionsSchema, eventsSchema, snapshotsSchema, checkpointsSchema, resumeMetadataSchema, nodeSpecFieldsSchema, packagesSchema, installJournalSchema, journalSeqSchema, bootstrapSchema, discoverySchema, discoveryFkFix, agentspecRebootSchema, startupContextSchema, chatMessagesSchema, podNamespaceSchema, contextUsageSchema, externalCliAttachmentSchema]);
   return db;
 }
 

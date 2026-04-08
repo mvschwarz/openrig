@@ -18,11 +18,10 @@ import { RigInstantiator } from "../src/domain/rigspec-instantiator.js";
 import type { TmuxAdapter, TmuxResult } from "../src/adapters/tmux.js";
 import type { ExecFn } from "../src/adapters/tmux.js";
 import type { LegacyRigSpec as RigSpec, PersistedEvent } from "../src/domain/types.js"; // TODO: AS-T08b — migrate to pod-aware RigSpec
+import { createFullTestDb } from "./helpers/test-app.js";
 
 function setupDb(): Database.Database {
-  const db = createDb();
-  migrate(db, [coreSchema, bindingsSessionsSchema, eventsSchema, resumeMetadataSchema, checkpointsSchema, nodeSpecFieldsSchema, agentspecRebootSchema]);
-  return db;
+  return createFullTestDb();
 }
 
 function mockTmux(): TmuxAdapter {

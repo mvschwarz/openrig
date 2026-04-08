@@ -13,6 +13,11 @@ if (!outputTarget) {
   process.exit(0); // No output path — silently exit
 }
 
+function logFailure(message, error) {
+  const suffix = error && error.message ? `: ${error.message}` : "";
+  console.error(`[openrig][collector] ${message}${suffix}`);
+}
+
 let input = "";
 process.stdin.setEncoding("utf-8");
 process.stdin.on("data", (chunk) => { input += chunk; });
@@ -21,7 +26,8 @@ process.stdin.on("end", () => {
     const raw = JSON.parse(input);
     const contextWindow = raw.context_window;
     if (!contextWindow) {
-      process.exit(0); // No context_window in payload — skip
+      logFailure("missing context_window in Claude status line payload");
+      process.exit(0);
     }
 
     const sample = {
@@ -41,6 +47,7 @@ process.stdin.on("end", () => {
 
     const outputPath = resolveOutputPath(outputTarget, raw);
     if (!outputPath) {
+      logFailure("could not resolve output path from Claude status line payload");
       process.exit(0);
     }
 
@@ -52,8 +59,8 @@ process.stdin.on("end", () => {
     }
     fs.writeFileSync(tmpPath, JSON.stringify(sample), "utf-8");
     fs.renameSync(tmpPath, outputPath);
-  } catch {
-    // Silently exit on any error — best-effort collector
+  } catch (error) {
+    logFailure("failed to collect Claude context status line", error);
     process.exit(0);
   }
 });

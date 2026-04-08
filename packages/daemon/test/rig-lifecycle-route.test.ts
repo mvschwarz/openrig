@@ -159,7 +159,7 @@ describe("Rig lifecycle routes", () => {
     expect(events).toHaveLength(1);
   });
 
-  it("DELETE /api/rigs/:rigId/nodes/:nodeRef kills a detached claimed session before removing the node", async () => {
+  it("DELETE /api/rigs/:rigId/nodes/:nodeRef preserves a previously detached claimed session while removing the node", async () => {
     const rig = setup.rigRepo.createRig("remove-detached-rig");
     const discovered = setup.discoveryRepo.upsertDiscoveredSession({
       tmuxSession: "phase4-detached-remove",
@@ -191,10 +191,10 @@ describe("Rig lifecycle routes", () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.ok).toBe(true);
-    expect(body.sessionsKilled).toBe(1);
+    expect(body.sessionsKilled).toBe(0);
 
     const killSession = setup.tmuxAdapter.killSession as ReturnType<typeof import("vitest").vi.fn>;
-    expect(killSession).toHaveBeenCalledWith("phase4-detached-remove");
+    expect(killSession).not.toHaveBeenCalled();
     expect(setup.rigRepo.getRig(rig.id)?.nodes.find((candidate) => candidate.logicalId === "external.helper")).toBeUndefined();
   });
 

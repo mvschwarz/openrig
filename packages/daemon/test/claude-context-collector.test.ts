@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { execSync } from "node:child_process";
+import { execSync, spawnSync } from "node:child_process";
 import { ClaudeCodeAdapter } from "../src/adapters/claude-code-adapter.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 
@@ -61,8 +61,13 @@ describe("Claude Status Line Collector Script", () => {
   // T3: Malformed stdin — graceful exit, no output
   it("handles malformed stdin gracefully — no output file created", () => {
     const outputPath = join(tmpDir, "context", "bad.json");
-    execSync(`echo 'not json {{' | node ${collectorPath} ${outputPath}`, { encoding: "utf-8" });
+    const result = spawnSync("node", [collectorPath, outputPath], {
+      encoding: "utf-8",
+      input: "not json {{",
+    });
 
+    expect(result.status).toBe(0);
+    expect(result.stderr).toContain("[openrig][collector]");
     expect(existsSync(outputPath)).toBe(false);
   });
 
@@ -81,6 +86,17 @@ describe("Claude Status Line Collector Script", () => {
   it("silently exits with no output path argument", () => {
     // Should not throw
     execSync(`echo '${VALID_STATUS_LINE}' | node ${collectorPath}`, { encoding: "utf-8" });
+  });
+
+  it("logs a shape error when a directory target cannot be resolved to a session sidecar", () => {
+    const outputDir = join(tmpDir, "context");
+    const result = spawnSync("node", [collectorPath, outputDir], {
+      encoding: "utf-8",
+      input: JSON.stringify({ context_window: { used_percentage: 10 } }),
+    });
+
+    expect(result.status).toBe(0);
+    expect(result.stderr).toContain("could not resolve output path");
   });
 });
 

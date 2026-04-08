@@ -16,6 +16,11 @@ import { bootstrapSchema } from "../src/db/migrations/011_bootstrap.js";
 import { discoverySchema } from "../src/db/migrations/012_discovery.js";
 import { discoveryFkFix } from "../src/db/migrations/013_discovery_fk_fix.js";
 import { agentspecRebootSchema } from "../src/db/migrations/014_agentspec_reboot.js";
+import { startupContextSchema } from "../src/db/migrations/015_startup_context.js";
+import { chatMessagesSchema } from "../src/db/migrations/016_chat_messages.js";
+import { podNamespaceSchema } from "../src/db/migrations/017_pod_namespace.js";
+import { contextUsageSchema } from "../src/db/migrations/018_context_usage.js";
+import { externalCliAttachmentSchema } from "../src/db/migrations/019_external_cli_attachment.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { EventBus } from "../src/domain/event-bus.js";
@@ -28,6 +33,7 @@ const ALL_MIGRATIONS = [
   checkpointsSchema, resumeMetadataSchema, nodeSpecFieldsSchema,
   packagesSchema, installJournalSchema, journalSeqSchema, bootstrapSchema,
   discoverySchema, discoveryFkFix, agentspecRebootSchema,
+  startupContextSchema, chatMessagesSchema, podNamespaceSchema, contextUsageSchema, externalCliAttachmentSchema,
 ];
 
 function mockTmux(killResult?: { ok: boolean; code?: string; message?: string }): TmuxAdapter {

@@ -16,7 +16,7 @@ export interface WhoamiResult {
     podLabel: string | null;
     memberId: string;
     memberLabel: string | null;
-    sessionName: string;
+    sessionName: string | null;
     runtime: string;
     cwd: string | null;
     agentRef: string | null;
@@ -26,15 +26,15 @@ export interface WhoamiResult {
   };
   peers: Array<{
     logicalId: string;
-    sessionName: string;
+    sessionName: string | null;
     runtime: string;
     podId: string | null;
     podNamespace: string | null;
     memberId: string;
   }>;
   edges: {
-    outgoing: Array<{ kind: string; to: { logicalId: string; sessionName: string } }>;
-    incoming: Array<{ kind: string; from: { logicalId: string; sessionName: string } }>;
+    outgoing: Array<{ kind: string; to: { logicalId: string; sessionName: string | null } }>;
+    incoming: Array<{ kind: string; from: { logicalId: string; sessionName: string | null } }>;
   };
   transcript: {
     enabled: boolean;
@@ -122,7 +122,7 @@ export class WhoamiService {
   resolve(query: { nodeId?: string; sessionName?: string }): WhoamiResult | null {
     let nodeRow: NodeRow | undefined;
     let resolvedBy: "node_id" | "session_name";
-    let currentSessionName: string;
+    let currentSessionName: string | null;
 
     if (query.nodeId) {
       nodeRow = this.db.prepare("SELECT * FROM nodes WHERE id = ?").get(query.nodeId) as NodeRow | undefined;
@@ -197,7 +197,7 @@ export class WhoamiService {
       podLabel,
       memberId,
       memberLabel: nodeRow.label,
-      sessionName: currentSessionName!,
+      sessionName: currentSessionName,
       runtime: nodeRow.runtime ?? "unknown",
       cwd: nodeRow.cwd,
       agentRef: nodeRow.agent_ref,
@@ -238,7 +238,7 @@ export class WhoamiService {
       .all(nodeRow.rig_id) as EdgeRow[];
 
     // Build node ID → logicalId + sessionName map
-    const nodeMap = new Map<string, { logicalId: string; sessionName: string }>();
+    const nodeMap = new Map<string, { logicalId: string; sessionName: string | null }>();
     for (const n of rig.nodes) {
       nodeMap.set(n.id, {
         logicalId: n.logicalId,
@@ -261,25 +261,26 @@ export class WhoamiService {
     }
 
     // Build transcript info
-    const transcriptEnabled = this.transcriptStore.enabled;
-    const transcriptPath = transcriptEnabled
-      ? this.transcriptStore.getTranscriptPath(rig.rig.name, currentSessionName!)
+    const transcriptEnabled = this.transcriptStore.enabled && currentSessionName !== null;
+    const transcriptPath = currentSessionName && transcriptEnabled
+      ? this.transcriptStore.getTranscriptPath(rig.rig.name, currentSessionName)
       : null;
 
     const transcript: WhoamiResult["transcript"] = {
       enabled: transcriptEnabled,
       path: transcriptPath,
-      tailCommand: transcriptEnabled ? `rig transcript ${currentSessionName!} --tail 100` : null,
-      grepCommand: transcriptEnabled ? `rig transcript ${currentSessionName!} --grep <pattern>` : null,
+      tailCommand: transcriptEnabled ? `rig transcript ${currentSessionName} --tail 100` : null,
+      grepCommand: transcriptEnabled ? `rig transcript ${currentSessionName} --grep <pattern>` : null,
     };
 
     // Build command examples from peers
-    const sendExamples = peers.slice(0, 3).map((p) => `rig send ${p.sessionName} 'message' --verify`);
-    const captureExamples = peers.slice(0, 3).map((p) => `rig capture ${p.sessionName}`);
+    const reachablePeers = peers.filter((p) => p.sessionName !== null);
+    const sendExamples = reachablePeers.slice(0, 3).map((p) => `rig send ${p.sessionName} 'message' --verify`);
+    const captureExamples = reachablePeers.slice(0, 3).map((p) => `rig capture ${p.sessionName}`);
 
     // Context usage
-    const contextUsage = this.contextUsageStore
-      ? this.contextUsageStore.getForNode(nodeRow.id, currentSessionName!)
+    const contextUsage = this.contextUsageStore && currentSessionName
+      ? this.contextUsageStore.getForNode(nodeRow.id, currentSessionName)
       : undefined;
 
     return {
@@ -293,7 +294,7 @@ export class WhoamiService {
     };
   }
 
-  private getCurrentSessionName(nodeId: string, rigId: string): string {
+  private getCurrentSessionName(nodeId: string, rigId: string): string | null {
     // Prefer binding's current transport/session anchor
     const binding = this.db
       .prepare("SELECT tmux_session, external_session_name FROM bindings WHERE node_id = ?")
@@ -306,6 +307,6 @@ export class WhoamiService {
       .prepare("SELECT session_name FROM sessions WHERE node_id = ? ORDER BY id DESC LIMIT 1")
       .get(nodeId) as { session_name: string } | undefined;
 
-    return sess?.session_name ?? `unknown-${nodeId.slice(-6)}`;
+    return sess?.session_name ?? null;
   }
 }

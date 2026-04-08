@@ -17,11 +17,10 @@ import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { SessionTransport } from "../src/domain/session-transport.js";
 import type { TmuxAdapter, TmuxResult } from "../src/adapters/tmux.js";
+import { createFullTestDb } from "./helpers/test-app.js";
 
 function setupDb(): Database.Database {
-  const db = createDb();
-  migrate(db, [coreSchema, bindingsSessionsSchema, eventsSchema, snapshotsSchema, checkpointsSchema, resumeMetadataSchema, nodeSpecFieldsSchema, discoverySchema, discoveryFkFix, agentspecRebootSchema, externalCliAttachmentSchema]);
-  return db;
+  return createFullTestDb();
 }
 
 function mockTmux(overrides?: Partial<{
@@ -326,15 +325,17 @@ describe("SessionTransport", () => {
   it("resolveSessions global returns all running sessions across all rigs", async () => {
     seedCanonicalRig(); // rig "my-rig" with dev-impl@my-rig
     seedLegacyRig();    // rig "r00-legacy" with r00-legacy-worker-a
+    seedExternalCliRig();
     const transport = createTransport();
 
     const result = await transport.resolveSessions({ global: true });
     expect(result.ok).toBe(true);
     if (result.ok) {
-      expect(result.sessions.length).toBe(2);
+      expect(result.sessions.length).toBe(3);
       const names = result.sessions.map((s) => s.sessionName).sort();
       expect(names).toContain("dev-impl@my-rig");
       expect(names).toContain("r00-legacy-worker-a");
+      expect(names).toContain("orch1-lead@rigged-buildout");
     }
   });
 
@@ -359,5 +360,26 @@ describe("SessionTransport", () => {
       expect(result.sessions.length).toBe(1);
       expect(result.sessions[0]!.sessionName).toBe("dev-impl@multi-rig");
     }
+  });
+
+  it("broadcast includes external_cli targets as explicit transport_unavailable failures", async () => {
+    seedCanonicalRig();
+    seedExternalCliRig();
+    const transport = createTransport();
+
+    const result = await transport.broadcast({ global: true }, "hello", { force: true });
+
+    expect(result.total).toBe(2);
+    expect(result.sent).toBe(1);
+    expect(result.failed).toBe(1);
+    expect(result.results).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          sessionName: "orch1-lead@rigged-buildout",
+          ok: false,
+          reason: "transport_unavailable",
+        }),
+      ]),
+    );
   });
 });
