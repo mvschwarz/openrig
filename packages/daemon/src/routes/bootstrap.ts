@@ -21,7 +21,7 @@ function planFailureStatus(result: { stages: Array<{ stage: string; status: stri
 
   if (failedStage.stage === "resolve_spec") {
     const detail = failedStage.detail as { code?: string } | undefined;
-    if (detail?.code === "file_not_found" || detail?.code === "parse_error" || detail?.code === "validation_failed") {
+    if (detail?.code === "file_not_found" || detail?.code === "parse_error" || detail?.code === "validation_failed" || detail?.code === "invalid_cwd") {
       return 400;
     }
     return 500;
@@ -36,6 +36,7 @@ bootstrapRoutes.post("/plan", async (c) => {
   const { bootstrapOrchestrator, eventBus } = getDeps(c);
   const body: Record<string, unknown> = await c.req.json().catch(() => ({}));
   const sourceRef = typeof body["sourceRef"] === "string" ? body["sourceRef"] : "";
+  const cwdOverride = typeof body["cwdOverride"] === "string" ? body["cwdOverride"] : undefined;
 
   if (!sourceRef) {
     return c.json({ error: "sourceRef is required" }, 400);
@@ -50,6 +51,7 @@ bootstrapRoutes.post("/plan", async (c) => {
     const result = await bootstrapOrchestrator.bootstrap({
       mode: "plan",
       sourceRef,
+      cwdOverride,
       sourceKind: typeof body["sourceKind"] === "string" ? body["sourceKind"] : undefined,
     });
 
@@ -88,6 +90,7 @@ bootstrapRoutes.post("/apply", async (c) => {
 
   const sourceKind = typeof body["sourceKind"] === "string" ? body["sourceKind"] : "rig_spec";
   const autoApprove = body["autoApprove"] === true;
+  const cwdOverride = typeof body["cwdOverride"] === "string" ? body["cwdOverride"] : undefined;
   const approvedActionKeys = Array.isArray(body["approvedActionKeys"]) ? body["approvedActionKeys"] as string[] : undefined;
 
   try {
@@ -102,6 +105,7 @@ bootstrapRoutes.post("/apply", async (c) => {
         mode: "apply",
         sourceRef,
         sourceKind,
+        cwdOverride,
         autoApprove,
         approvedActionKeys,
         runId: run.id,
@@ -127,7 +131,12 @@ bootstrapRoutes.post("/apply", async (c) => {
       const errorMsg = result.errors[0] ?? "bootstrap failed";
       eventBus.emit({ type: "bootstrap.failed", runId: result.runId, sourceRef, error: errorMsg });
       const hasBlocked = result.stages.some((s) => s.status === "blocked");
-      return c.json(result, hasBlocked ? 409 : 500);
+      const hasBadRequest = result.stages.some((s) => {
+        if (s.stage !== "resolve_spec") return false;
+        const detail = s.detail as { code?: string } | undefined;
+        return detail?.code === "file_not_found" || detail?.code === "parse_error" || detail?.code === "validation_failed" || detail?.code === "invalid_cwd";
+      });
+      return c.json(result, hasBlocked ? 409 : hasBadRequest ? 400 : 500);
     }
   } finally {
     bootstrapOrchestrator.release(sourceRef);

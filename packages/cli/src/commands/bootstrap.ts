@@ -1,3 +1,4 @@
+import nodePath from "node:path";
 import { Command } from "commander";
 import { DaemonClient } from "../client.js";
 import { getDaemonStatus, getDaemonUrl } from "../daemon-lifecycle.js";
@@ -37,8 +38,9 @@ export function bootstrapCommand(depsOverride?: StatusDeps): Command {
     .argument("<spec>", "Path to rig spec YAML file")
     .option("--plan", "Plan mode — show reviewed plan without executing")
     .option("--yes", "Auto-approve trusted deterministic actions")
+    .option("--cwd <path>", "Override launch working directory for all members for this run only")
     .option("--json", "Output as parseable JSON")
-    .action(async (spec: string, opts: { plan?: boolean; yes?: boolean; json?: boolean }) => {
+    .action(async (spec: string, opts: { plan?: boolean; yes?: boolean; cwd?: string; json?: boolean }) => {
       const deps = getDeps();
       const client = await getClient(deps);
       if (!client) { process.exitCode = 1; return; }
@@ -63,7 +65,10 @@ export function bootstrapCommand(depsOverride?: StatusDeps): Command {
 
       if (opts.plan) {
         // Plan mode
-        const res = await client.post<Record<string, unknown>>("/api/bootstrap/plan", { sourceRef });
+        const res = await client.post<Record<string, unknown>>("/api/bootstrap/plan", {
+          sourceRef,
+          cwdOverride: opts.cwd ? nodePath.resolve(opts.cwd) : undefined,
+        });
 
         if (opts.json) {
           console.log(JSON.stringify(res.data));
@@ -100,6 +105,7 @@ export function bootstrapCommand(depsOverride?: StatusDeps): Command {
       // Apply mode
       const res = await client.post<Record<string, unknown>>("/api/bootstrap/apply", {
         sourceRef,
+        cwdOverride: opts.cwd ? nodePath.resolve(opts.cwd) : undefined,
         autoApprove: opts.yes ?? false,
       });
 

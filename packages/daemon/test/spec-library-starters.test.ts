@@ -63,7 +63,7 @@ describe("Starter specs", () => {
     expect(names).toContain("product-team");
   });
 
-  it("all rig specs pass canonical rigPreflight with rigRoot", () => {
+  it("all rig specs pass canonical rigPreflight with explicit cwdOverride", () => {
     const fsOps = {
       readFile: (p: string) => readFileSync(p, "utf-8"),
       exists: (p: string) => existsSync(p),
@@ -74,6 +74,7 @@ describe("Starter specs", () => {
       const input: RigPreflightInput = {
         rigSpecYaml: yaml,
         rigRoot: SPECS_ROOT,
+        cwdOverride: "/workspace/project",
         fsOps,
       };
 

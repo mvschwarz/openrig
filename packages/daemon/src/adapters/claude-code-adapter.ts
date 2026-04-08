@@ -9,6 +9,7 @@ import type {
 import { resolveConcreteHint } from "../domain/runtime-adapter.js";
 import type { ProjectionPlan, ProjectionEntry } from "../domain/projection-planner.js";
 import { assessNativeResumeProbe } from "../domain/native-resume-probe.js";
+import { mergeManagedBlock } from "../domain/managed-blocks.js";
 
 export interface ClaudeAdapterFsOps {
   readFile(path: string): string;
@@ -23,8 +24,6 @@ export interface ClaudeAdapterFsOps {
   homedir?: string;
 }
 
-const MANAGED_BLOCK_START = (id: string) => `<!-- BEGIN RIGGED MANAGED BLOCK: ${id} -->`;
-const MANAGED_BLOCK_END = (id: string) => `<!-- END RIGGED MANAGED BLOCK: ${id} -->`;
 const SHELL_COMMANDS = new Set(["bash", "fish", "nu", "sh", "tmux", "zsh"]);
 
 /**
@@ -274,24 +273,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   }
 
   private mergeGuidance(targetPath: string, blockId: string, content: string): void {
-    const begin = MANAGED_BLOCK_START(blockId);
-    const end = MANAGED_BLOCK_END(blockId);
-    const block = `${begin}\n${content}\n${end}`;
-
-    if (this.fs.exists(targetPath)) {
-      const existing = this.fs.readFile(targetPath);
-      if (existing.includes(begin) && existing.includes(end)) {
-        // Replace existing block
-        const regex = new RegExp(`${escapeRegex(begin)}[\\s\\S]*?${escapeRegex(end)}`, "g");
-        this.fs.writeFile(targetPath, existing.replace(regex, block));
-      } else {
-        // Append
-        this.fs.writeFile(targetPath, `${existing}\n\n${block}`);
-      }
-    } else {
-      this.fs.mkdirp(nodePath.dirname(targetPath));
-      this.fs.writeFile(targetPath, block);
-    }
+    mergeManagedBlock(this.fs, targetPath, blockId, content);
   }
 
   /**
@@ -362,8 +344,4 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
 
 function hashContent(content: string): string {
   return createHash("sha256").update(content).digest("hex");
-}
-
-function escapeRegex(str: string): string {
-  return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }

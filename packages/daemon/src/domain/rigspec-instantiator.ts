@@ -9,6 +9,7 @@ import { deriveCanonicalSessionName, validateSessionComponents } from "./session
 import { LegacyRigSpecSchema as RigSpecSchema } from "./rigspec-schema.js"; // TODO: AS-T08b — migrate to pod-aware RigSpec
 import { LegacyRigSpecCodec as RigSpecCodec } from "./rigspec-codec.js"; // TODO: AS-T08b — migrate to pod-aware RigSpec
 import type { LegacyRigSpec as RigSpec, LegacyRigSpecEdge as RigSpecEdge, InstantiateOutcome, InstantiateResult } from "./types.js"; // TODO: AS-T08b — migrate to pod-aware RigSpec
+import { resolveLaunchCwd } from "./cwd-resolution.js";
 
 // Only these edge kinds constrain launch order
 const LAUNCH_DEPENDENCY_KINDS = new Set(["delegates_to", "spawned_by"]);
@@ -282,7 +283,7 @@ import { rigPreflight } from "./rigspec-preflight.js";
 import { resolveAgentRef, type AgentResolverFsOps } from "./agent-resolver.js";
 import { resolveNodeConfig } from "./profile-resolver.js";
 import { resolveStartup } from "./startup-resolver.js";
-import { planProjection } from "./projection-planner.js";
+import { planProjection, type ProjectionPlan } from "./projection-planner.js";
 import { StartupOrchestrator } from "./startup-orchestrator.js";
 import { PodRepository } from "./pod-repository.js";
 import type { RigSpec as PodRigSpec, RigSpecPod, RigSpecPodMember, StartupAction, StartupFile } from "./types.js";
@@ -603,7 +604,7 @@ export class PodRigInstantiator {
     };
   }
 
-  async instantiate(rigSpecYaml: string, rigRoot: string): Promise<InstantiateOutcome> {
+  async instantiate(rigSpecYaml: string, rigRoot: string, opts?: { cwdOverride?: string }): Promise<InstantiateOutcome> {
     // 1. Parse + validate
     let rigSpec: PodRigSpec;
     try {
@@ -618,7 +619,7 @@ export class PodRigInstantiator {
     }
 
     // 2. Preflight
-    const preflight = rigPreflight({ rigSpecYaml, rigRoot, fsOps: this.deps.fsOps });
+    const preflight = rigPreflight({ rigSpecYaml, rigRoot, cwdOverride: opts?.cwdOverride, fsOps: this.deps.fsOps });
     if (!preflight.ready) {
       return { ok: false, code: "preflight_failed", errors: preflight.errors, warnings: preflight.warnings };
     }
@@ -680,7 +681,7 @@ export class PodRigInstantiator {
         // Terminal fast-path: skip agent resolution and profile resolution
         if (member.agentRef === "builtin:terminal") {
           const termResult = await this.processTerminalMember(
-            rigId, rigSpec, rigRoot, pod, member, podId, qualifiedId, nodeIdMap, launchedSessionNames, podInstantiateWarnings,
+            rigId, rigSpec, rigRoot, pod, member, podId, qualifiedId, nodeIdMap, launchedSessionNames, podInstantiateWarnings, opts?.cwdOverride,
           );
           nodeResults.push(termResult);
           continue;
@@ -702,6 +703,8 @@ export class PodRigInstantiator {
           importedSpecs: resolveResult.imports,
           collisions: resolveResult.collisions,
           profileName: member.profile,
+          specRoot: rigRoot,
+          cwdOverride: opts?.cwdOverride,
           member,
           pod,
           rig: rigSpec,
@@ -717,7 +720,7 @@ export class PodRigInstantiator {
           const node = this.deps.rigRepo.addNode(rigId, qualifiedId, {
             runtime: member.runtime,
             model: member.model,
-            cwd: member.cwd,
+            cwd: configResult.config.cwd,
             restorePolicy: configResult.config.restorePolicy,
             podId,
             agentRef: member.agentRef,
@@ -738,6 +741,7 @@ export class PodRigInstantiator {
           rigId,
           rigSpec,
           rigRoot,
+          cwdOverride: opts?.cwdOverride,
           pod,
           member,
           qualifiedId,
@@ -880,14 +884,16 @@ export class PodRigInstantiator {
     nodeIdMap: Record<string, string>,
     launchedSessionNames: string[],
     warnings: string[],
+    cwdOverride?: string,
   ): Promise<{ logicalId: string; status: "launched" | "failed"; error?: string }> {
+    const effectiveCwd = resolveLaunchCwd(member.cwd, rigRoot, cwdOverride);
     // Create node with sentinel values
     let nodeId: string;
     try {
       const node = this.deps.rigRepo.addNode(rigId, qualifiedId, {
         runtime: member.runtime,
         model: member.model,
-        cwd: member.cwd,
+        cwd: effectiveCwd,
         restorePolicy: "checkpoint_only",
         podId,
         agentRef: member.agentRef,
@@ -904,6 +910,7 @@ export class PodRigInstantiator {
       rigId,
       rigSpec,
       rigRoot,
+      cwdOverride,
       pod,
       member,
       qualifiedId,
@@ -941,6 +948,7 @@ export class PodRigInstantiator {
     member: RigSpecPodMember;
     qualifiedId: string;
     nodeId: string;
+    cwdOverride?: string;
     resolveResult?: ReturnType<typeof resolveAgentRef> extends infer T ? T : never;
     configResult?: ReturnType<typeof resolveNodeConfig> extends infer T ? T : never;
   }): Promise<{ status: "launched" | "failed"; error?: string; sessionName?: string; warnings?: string[] }> {
@@ -957,6 +965,8 @@ export class PodRigInstantiator {
       importedSpecs: resolveResult.imports,
       collisions: resolveResult.collisions,
       profileName: input.member.profile,
+      specRoot: input.rigRoot,
+      cwdOverride: input.cwdOverride,
       member: input.member,
       pod: input.pod,
       rig: input.rigSpec,
@@ -1006,6 +1016,7 @@ export class PodRigInstantiator {
       input.pod,
       input.member,
     );
+    const dedupedResolvedFiles = this.dedupeProjectedManagedStartupFiles(planResult.plan, resolvedFiles);
 
     const binding: NodeBinding = {
       id: launchResult.binding.id,
@@ -1016,7 +1027,7 @@ export class PodRigInstantiator {
       cmuxWorkspace: null,
       cmuxSurface: null,
       updatedAt: "",
-      cwd: input.member.cwd ? (nodePath.isAbsolute(input.member.cwd) ? input.member.cwd : nodePath.resolve(input.rigRoot, input.member.cwd)) : input.rigRoot,
+      cwd: configResult.config.cwd,
     };
 
     const startupResult = await this.deps.startupOrchestrator.startNode({
@@ -1026,7 +1037,7 @@ export class PodRigInstantiator {
       binding,
       adapter,
       plan: planResult.plan,
-      resolvedStartupFiles: resolvedFiles,
+      resolvedStartupFiles: dedupedResolvedFiles,
       startupActions: [
         ...configResult.config.startup.actions,
         this.buildSessionIdentityAction({
@@ -1057,7 +1068,9 @@ export class PodRigInstantiator {
     member: RigSpecPodMember;
     qualifiedId: string;
     nodeId: string;
+    cwdOverride?: string;
   }): Promise<{ status: "launched" | "failed"; error?: string; sessionName?: string; warnings?: string[] }> {
+    const effectiveCwd = resolveLaunchCwd(input.member.cwd, input.rigRoot, input.cwdOverride);
     const sessionNameErrors = validateSessionComponents(input.pod.id, input.member.id, input.rigSpec.name);
     if (sessionNameErrors.length > 0) {
       return { status: "failed", error: sessionNameErrors.join("; ") };
@@ -1098,7 +1111,7 @@ export class PodRigInstantiator {
       cmuxWorkspace: null,
       cmuxSurface: null,
       updatedAt: "",
-      cwd: input.member.cwd ? (nodePath.isAbsolute(input.member.cwd) ? input.member.cwd : nodePath.resolve(input.rigRoot, input.member.cwd)) : input.rigRoot,
+      cwd: effectiveCwd,
     };
     const adapter = this.deps.adapters["terminal"];
     if (!adapter) {
@@ -1111,7 +1124,7 @@ export class PodRigInstantiator {
       conflicts: [],
       noOps: [],
       runtime: "terminal",
-      cwd: input.member.cwd ? (nodePath.isAbsolute(input.member.cwd) ? input.member.cwd : nodePath.resolve(input.rigRoot, input.member.cwd)) : input.rigRoot,
+      cwd: effectiveCwd,
     };
 
     const startupResult = await this.deps.startupOrchestrator.startNode({
@@ -1269,6 +1282,23 @@ export class PodRigInstantiator {
     });
 
     return this.resolveAutoHints(files);
+  }
+
+  private dedupeProjectedManagedStartupFiles(
+    plan: ProjectionPlan,
+    files: ResolvedStartupFile[],
+  ): ResolvedStartupFile[] {
+    const projectedManagedGuidancePaths = new Set(
+      plan.entries
+        .filter((entry) => entry.category === "guidance" && entry.mergeStrategy === "managed_block")
+        .map((entry) => entry.absolutePath),
+    );
+    return files.filter((file) => {
+      if (file.deliveryHint !== "guidance_merge") {
+        return true;
+      }
+      return !projectedManagedGuidancePaths.has(file.absolutePath);
+    });
   }
 
   private buildSessionIdentityAction(input: {

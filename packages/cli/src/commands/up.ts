@@ -13,9 +13,10 @@ export function upCommand(depsOverride?: StatusDeps & { lifecycleDeps?: Lifecycl
     .argument("<source>", "Path to .yaml rig spec or .rigbundle")
     .option("--plan", "Plan mode — preview without executing")
     .option("--yes", "Auto-approve trusted actions")
+    .option("--cwd <path>", "Override launch working directory for all members for this run only")
     .option("--target <root>", "Target root directory for package installation (.rigbundle only; does not change agent cwd)")
     .option("--json", "JSON output for agents")
-    .action(async (source: string, opts: { plan?: boolean; yes?: boolean; target?: string; json?: boolean }) => {
+    .action(async (source: string, opts: { plan?: boolean; yes?: boolean; cwd?: string; target?: string; json?: boolean }) => {
       const deps = getDepsF();
 
       // Run preflight before auto-start
@@ -119,6 +120,7 @@ export function upCommand(depsOverride?: StatusDeps & { lifecycleDeps?: Lifecycl
         sourceRef,
         plan: opts.plan ?? false,
         autoApprove: opts.yes ?? false,
+        cwdOverride: opts.cwd ? nodePath.resolve(opts.cwd) : undefined,
         targetRoot,
       });
 

@@ -122,6 +122,74 @@ describe("PodRigInstantiator", () => {
     db.close();
   });
 
+  it("uses cwdOverride for launched nodes without changing spec-relative agent resolution", async () => {
+    const { db, rigRepo, sessionRegistry, inst, adapter } = setup();
+    const yaml = RigSpecCodec.serialize(makeRigSpec());
+    const result = await inst.instantiate(yaml, RIG_ROOT, { cwdOverride: "/workspace/project" });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      const rig = rigRepo.getRig(result.result.rigId)!;
+      expect(rig.nodes[0]!.cwd).toBe("/workspace/project");
+      const sessions = sessionRegistry.getSessionsForRig(result.result.rigId);
+      expect(sessions[0]!.startupStatus).toBe("ready");
+      const planArg = (adapter.project as ReturnType<typeof vi.fn>).mock.calls[0]?.[0];
+      expect(planArg.cwd).toBe("/workspace/project");
+    }
+    db.close();
+  });
+
+  it("dedupes role guidance when the same file is referenced by resources.guidance and startup.files", async () => {
+    const db = createFullTestDb();
+    const rigRepo = new RigRepository(db);
+    const podRepo = new PodRepository(db);
+    const sessionRegistry = new SessionRegistry(db);
+    const eventBus = new EventBus(db);
+    const tmux = mockTmux();
+    const nodeLauncher = new NodeLauncher({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux });
+    const startupOrch = new StartupOrchestrator({ db, sessionRegistry, eventBus, tmuxAdapter: tmux });
+    const adapter = mockAdapter();
+    const fsOps = mockFs({
+      [`${RIG_ROOT}/agents/impl/agent.yaml`]: `
+name: impl
+version: "1.0.0"
+resources:
+  skills: []
+  guidance:
+    - id: role
+      path: guidance/role.md
+      target: claude_md
+      merge: managed_block
+startup:
+  files:
+    - path: guidance/role.md
+      delivery_hint: guidance_merge
+profiles:
+  default:
+    uses:
+      skills: []
+      guidance: [role]
+      subagents: []
+      hooks: []
+      runtime_resources: []
+`.trim(),
+      [`${RIG_ROOT}/agents/impl/guidance/role.md`]: "# role",
+    });
+
+    const inst = new PodRigInstantiator({
+      db, rigRepo, podRepo, sessionRegistry, eventBus, nodeLauncher, startupOrchestrator: startupOrch,
+      fsOps, adapters: { "claude-code": adapter, codex: mockAdapter(), terminal: mockAdapter() },
+      tmuxAdapter: tmux,
+    });
+
+    const result = await inst.instantiate(RigSpecCodec.serialize(makeRigSpec()), RIG_ROOT);
+    expect(result.ok).toBe(true);
+    const deliveredFiles = (adapter.deliverStartup as ReturnType<typeof vi.fn>).mock.calls.flatMap((call) => call[0] as Array<{ path: string }>);
+    expect(deliveredFiles.some((f) => f.path === "guidance/role.md")).toBe(false);
+    const projectedPlan = (adapter.project as ReturnType<typeof vi.fn>).mock.calls[0]?.[0];
+    expect(projectedPlan.entries.some((entry: { category: string; effectiveId: string }) => entry.category === "guidance" && entry.effectiveId === "role")).toBe(true);
+    db.close();
+  });
+
   it("injects rig identity context into launched agent startup actions", async () => {
     const { db, inst, tmux } = setup();
     const yaml = RigSpecCodec.serialize(makeRigSpec());

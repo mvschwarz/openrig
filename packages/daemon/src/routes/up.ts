@@ -72,6 +72,7 @@ upRoutes.post("/", async (c) => {
   const sourceRef = typeof body["sourceRef"] === "string" ? body["sourceRef"] : "";
   const plan = body["plan"] === true;
   const autoApprove = body["autoApprove"] === true;
+  const cwdOverride = typeof body["cwdOverride"] === "string" ? body["cwdOverride"] : undefined;
   const targetRoot = typeof body["targetRoot"] === "string" ? body["targetRoot"] : undefined;
 
   if (!sourceRef) {
@@ -122,6 +123,7 @@ upRoutes.post("/", async (c) => {
         mode: "plan",
         sourceRef: resolvedSourceRef,
         sourceKind,
+        cwdOverride,
         targetRoot,
       });
 
@@ -136,7 +138,7 @@ upRoutes.post("/", async (c) => {
       if (failedStage?.status === "blocked") httpStatus = 409;
       else if (failedStage?.stage === "resolve_spec") {
         const detail = failedStage.detail as { code?: string } | undefined;
-        if (detail?.code === "file_not_found" || detail?.code === "parse_error" || detail?.code === "validation_failed" || detail?.code === "bundle_error" || detail?.code === "cycle_error") httpStatus = 400;
+        if (detail?.code === "file_not_found" || detail?.code === "parse_error" || detail?.code === "validation_failed" || detail?.code === "bundle_error" || detail?.code === "cycle_error" || detail?.code === "invalid_cwd") httpStatus = 400;
       }
       return c.json(result, httpStatus);
     }
@@ -152,6 +154,7 @@ upRoutes.post("/", async (c) => {
         sourceRef: resolvedSourceRef,
         sourceKind,
         autoApprove,
+        cwdOverride,
         targetRoot,
         runId: run.id,
       });
@@ -188,7 +191,12 @@ upRoutes.post("/", async (c) => {
       }
       eventBus.emit({ type: "bootstrap.failed", runId: result.runId, sourceRef, error: result.errors[0] ?? "failed" });
       const hasBlocked = result.stages.some((s) => s.status === "blocked");
-      return c.json(result, hasBlocked ? 409 : 500);
+      const hasBadRequest = result.stages.some((s) => {
+        if (s.stage !== "resolve_spec") return false;
+        const detail = s.detail as { code?: string } | undefined;
+        return detail?.code === "file_not_found" || detail?.code === "parse_error" || detail?.code === "validation_failed" || detail?.code === "bundle_error" || detail?.code === "cycle_error" || detail?.code === "invalid_cwd";
+      });
+      return c.json(result, hasBlocked ? 409 : hasBadRequest ? 400 : 500);
     } catch (err) {
       bootstrapRepo.updateRunStatus(run.id, "failed");
       eventBus.emit({ type: "bootstrap.failed", runId: run.id, sourceRef, error: (err as Error).message });

@@ -191,12 +191,36 @@ describe("Profile resolver + precedence engine", () => {
   // T6: rig member cwd is authoritative
   it("rig member cwd is authoritative", () => {
     const ctx = makeCtx({
+      specRoot: "/workspace/spec-root",
       member: makeMember({ cwd: "/custom/workdir" }),
     });
 
     const result = resolveNodeConfig(ctx);
     expect(result.ok).toBe(true);
     if (result.ok) expect(result.config.cwd).toBe("/custom/workdir");
+  });
+
+  it("resolves relative member cwd against specRoot", () => {
+    const ctx = makeCtx({
+      specRoot: "/workspace/spec-root",
+      member: makeMember({ cwd: "." }),
+    });
+
+    const result = resolveNodeConfig(ctx);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.config.cwd).toBe("/workspace/spec-root");
+  });
+
+  it("explicit cwdOverride overrides even authored absolute cwd", () => {
+    const ctx = makeCtx({
+      specRoot: "/workspace/spec-root",
+      cwdOverride: "/override/project",
+      member: makeMember({ cwd: "/authored/absolute" }),
+    });
+
+    const result = resolveNodeConfig(ctx);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.config.cwd).toBe("/override/project");
   });
 
   // T7: resume_if_possible -> relaunch_fresh narrowing allowed

@@ -20,6 +20,7 @@ import { unpack } from "./bundle-archive.js";
 import { parsePodBundleManifest } from "./bundle-types.js";
 import os from "node:os";
 import fs from "node:fs";
+import { getOpenRigInstallCwdError, resolveLaunchCwd } from "./cwd-resolution.js";
 
 /** Bootstrap mode */
 export type BootstrapMode = "plan" | "apply";
@@ -29,6 +30,7 @@ export interface BootstrapOptions {
   mode: BootstrapMode;
   sourceRef: string;
   sourceKind?: string;
+  cwdOverride?: string;
   autoApprove?: boolean;
   approvedActionKeys?: string[];
   /** Pre-created run ID (route creates run for real-time started event) */
@@ -182,7 +184,7 @@ export class BootstrapOrchestrator {
           this.deps.bootstrapRepo.updateRunStatus(run.id, "failed");
           return { runId: run.id, status: "failed", stages, errors: validation.errors, warnings };
         }
-        spec = RigSpecSchema.normalize(raw);
+        spec = this.resolveLegacyNodeCwds(RigSpecSchema.normalize(raw), specDir, opts.cwdOverride);
         stages.push({ stage: "resolve_spec", status: "ok", detail: { specName: spec.name, specVersion: spec.schemaVersion, source: "rig_bundle" } });
       } catch (err) {
         const msg = (err as Error).message;
@@ -210,7 +212,15 @@ export class BootstrapOrchestrator {
           this.deps.bootstrapRepo.updateRunStatus(run.id, "failed");
           return { runId: run.id, status: "failed", stages, errors: validation.errors, warnings };
         }
-        spec = RigSpecSchema.normalize(raw);
+        spec = this.resolveLegacyNodeCwds(RigSpecSchema.normalize(raw), specDir, opts.cwdOverride);
+        const cwdError = spec.nodes
+          .map((node) => getOpenRigInstallCwdError(node.cwd ?? specDir, opts.cwdOverride))
+          .find((error): error is string => Boolean(error));
+        if (cwdError) {
+          stages.push({ stage: "resolve_spec", status: "failed", detail: { code: "invalid_cwd", error: cwdError } });
+          this.deps.bootstrapRepo.updateRunStatus(run.id, "failed");
+          return { runId: run.id, status: "failed", stages, errors: [cwdError], warnings };
+        }
         stages.push({ stage: "resolve_spec", status: "ok", detail: { specName: spec.name, specVersion: spec.schemaVersion } });
       } catch (err) {
         const msg = (err as Error).message;
@@ -571,7 +581,7 @@ export class BootstrapOrchestrator {
         const spec = PodSchema.normalize(raw as Record<string, unknown>);
         stages.push({ stage: "resolve_spec", status: "ok", detail: { specName: spec.name, specVersion: spec.version } });
 
-        const preflight = rigPreflight({ rigSpecYaml, rigRoot, fsOps: podInstantiator["deps"].fsOps });
+        const preflight = rigPreflight({ rigSpecYaml, rigRoot, cwdOverride: opts.cwdOverride, fsOps: podInstantiator["deps"].fsOps });
         stages.push({
           stage: "preflight",
           status: preflight.ready ? "ok" : "blocked",
@@ -594,7 +604,7 @@ export class BootstrapOrchestrator {
     }
 
     // Apply mode: full instantiation via PodRigInstantiator
-    const outcome = await podInstantiator.instantiate(rigSpecYaml, rigRoot);
+    const outcome = await podInstantiator.instantiate(rigSpecYaml, rigRoot, { cwdOverride: opts.cwdOverride });
 
     if (!outcome.ok) {
       const outErrors = outcome.code === "validation_failed" || outcome.code === "preflight_failed"
@@ -627,6 +637,16 @@ export class BootstrapOrchestrator {
       rigId: result.rigId,
       errors: result.nodes.filter((n) => n.error).map((n) => n.error!),
       warnings,
+    };
+  }
+
+  private resolveLegacyNodeCwds(spec: RigSpec, specRoot: string, cwdOverride?: string): RigSpec {
+    return {
+      ...spec,
+      nodes: spec.nodes.map((node) => ({
+        ...node,
+        cwd: resolveLaunchCwd(node.cwd, specRoot, cwdOverride),
+      })),
     };
   }
 }

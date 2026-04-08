@@ -16,6 +16,7 @@ import {
   readCodexThreadIdFromCandidateHomes,
   type ResolveHomeDirByPid,
 } from "../domain/codex-thread-id.js";
+import { mergeManagedBlock } from "../domain/managed-blocks.js";
 
 export interface CodexAdapterFsOps {
   readFile(path: string): string;
@@ -25,9 +26,6 @@ export interface CodexAdapterFsOps {
   listFiles?(dirPath: string): string[];
   homedir?: string;
 }
-
-const MANAGED_BLOCK_START = (id: string) => `<!-- BEGIN RIGGED MANAGED BLOCK: ${id} -->`;
-const MANAGED_BLOCK_END = (id: string) => `<!-- END RIGGED MANAGED BLOCK: ${id} -->`;
 
 /**
  * Codex runtime adapter. Projects resources to .agents/ targets (preserving
@@ -215,22 +213,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   }
 
   private mergeGuidance(targetPath: string, blockId: string, content: string): void {
-    const begin = MANAGED_BLOCK_START(blockId);
-    const end = MANAGED_BLOCK_END(blockId);
-    const block = `${begin}\n${content}\n${end}`;
-
-    if (this.fs.exists(targetPath)) {
-      const existing = this.fs.readFile(targetPath);
-      if (existing.includes(begin) && existing.includes(end)) {
-        const regex = new RegExp(`${escapeRegex(begin)}[\\s\\S]*?${escapeRegex(end)}`, "g");
-        this.fs.writeFile(targetPath, existing.replace(regex, block));
-      } else {
-        this.fs.writeFile(targetPath, `${existing}\n\n${block}`);
-      }
-    } else {
-      this.fs.mkdirp(nodePath.dirname(targetPath));
-      this.fs.writeFile(targetPath, block);
-    }
+    mergeManagedBlock(this.fs, targetPath, blockId, content);
   }
 
   private detectDeliveryHint(path: string, content: string): "guidance_merge" | "skill_install" | "send_text" {
@@ -275,9 +258,6 @@ function hashContent(content: string): string {
   return createHash("sha256").update(content).digest("hex");
 }
 
-function escapeRegex(str: string): string {
-  return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
 
 function defaultListProcesses(): Array<{ pid: number; ppid: number; command: string }> {
   try {

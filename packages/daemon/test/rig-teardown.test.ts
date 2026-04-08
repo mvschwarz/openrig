@@ -27,6 +27,9 @@ import { EventBus } from "../src/domain/event-bus.js";
 import { RigTeardownOrchestrator } from "../src/domain/rig-teardown.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import type { SnapshotCapture } from "../src/domain/snapshot-capture.js";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 const ALL_MIGRATIONS = [
   coreSchema, bindingsSessionsSchema, eventsSchema, snapshotsSchema,
@@ -64,6 +67,7 @@ describe("RigTeardownOrchestrator", () => {
   let rigRepo: RigRepository;
   let sessionRegistry: SessionRegistry;
   let eventBus: EventBus;
+  let tmpDir: string;
 
   beforeEach(() => {
     db = createDb();
@@ -71,15 +75,27 @@ describe("RigTeardownOrchestrator", () => {
     rigRepo = new RigRepository(db);
     sessionRegistry = new SessionRegistry(db);
     eventBus = new EventBus(db);
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "rig-teardown-"));
   });
 
-  afterEach(() => { db.close(); });
+  afterEach(() => {
+    db.close();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
 
   function seedRig(): { rigId: string; nodeId: string; sessionId: string } {
     const rig = rigRepo.createRig("test-rig");
     const node = rigRepo.addNode(rig.id, "dev");
     const session = sessionRegistry.registerSession(node.id, "r01-dev");
     sessionRegistry.updateStatus(session.id, "running");
+    return { rigId: rig.id, nodeId: node.id, sessionId: session.id };
+  }
+
+  function seedRigWithNode(opts: { runtime: string; cwd: string; sessionStatus?: string }): { rigId: string; nodeId: string; sessionId: string } {
+    const rig = rigRepo.createRig("test-rig");
+    const node = rigRepo.addNode(rig.id, "dev", { runtime: opts.runtime, cwd: opts.cwd });
+    const session = sessionRegistry.registerSession(node.id, "r01-dev");
+    sessionRegistry.updateStatus(session.id, opts.sessionStatus ?? "running");
     return { rigId: rig.id, nodeId: node.id, sessionId: session.id };
   }
 
@@ -263,6 +279,50 @@ describe("RigTeardownOrchestrator", () => {
     expect(result.sessionsKilled).toBe(1);
     expect(result.deleted).toBe(true);
     expect(result.errors).toHaveLength(0);
+  });
+
+  it("removes only OpenRig-managed blocks and preserves user + third-party content", async () => {
+    const cwd = path.join(tmpDir, "claude-project");
+    fs.mkdirSync(cwd, { recursive: true });
+    const claudeMd = path.join(cwd, "CLAUDE.md");
+    fs.writeFileSync(claudeMd, [
+      "# User intro",
+      "<!-- BEGIN RIGGED MANAGED BLOCK: role -->",
+      "managed role",
+      "<!-- END RIGGED MANAGED BLOCK: role -->",
+      "<!-- BEGIN THIRD PARTY BLOCK -->",
+      "third party",
+      "<!-- END THIRD PARTY BLOCK -->",
+      "tail",
+    ].join("\n\n"));
+    const { rigId } = seedRigWithNode({ runtime: "claude-code", cwd });
+    const td = buildTeardown();
+
+    await td.teardown(rigId);
+
+    const content = fs.readFileSync(claudeMd, "utf-8");
+    expect(content).toContain("# User intro");
+    expect(content).toContain("third party");
+    expect(content).toContain("tail");
+    expect(content).not.toContain("BEGIN RIGGED MANAGED BLOCK");
+  });
+
+  it("deletes guidance file if only OpenRig-managed content remains after teardown", async () => {
+    const cwd = path.join(tmpDir, "codex-project");
+    fs.mkdirSync(cwd, { recursive: true });
+    const agentsMd = path.join(cwd, "AGENTS.md");
+    fs.writeFileSync(agentsMd, [
+      "<!-- BEGIN RIGGED MANAGED BLOCK: role -->",
+      "managed role",
+      "<!-- END RIGGED MANAGED BLOCK: role -->",
+    ].join("\n"));
+    const { rigId } = seedRigWithNode({ runtime: "codex", cwd, sessionStatus: "exited" });
+    const td = buildTeardown();
+
+    const result = await td.teardown(rigId);
+
+    expect(result.alreadyStopped).toBe(true);
+    expect(fs.existsSync(agentsMd)).toBe(false);
   });
 
   // T14: Per-node cleanup is atomic (status + binding together)

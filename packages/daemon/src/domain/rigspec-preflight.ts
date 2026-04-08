@@ -120,12 +120,14 @@ import { RigSpecCodec } from "./rigspec-codec.js";
 import { RigSpecSchema } from "./rigspec-schema.js";
 import { resolveAgentRef, type AgentResolverFsOps } from "./agent-resolver.js";
 import { resolveNodeConfig, type ResolutionContext } from "./profile-resolver.js";
+import { getOpenRigInstallCwdError, resolveLaunchCwd } from "./cwd-resolution.js";
 
 const SUPPORTED_RUNTIMES = new Set(["claude-code", "codex", "terminal"]);
 
 export interface RigPreflightInput {
   rigSpecYaml: string;
   rigRoot: string;
+  cwdOverride?: string;
   fsOps: AgentResolverFsOps;
   rigNameOverride?: string;
   externalQualifiedIds?: Iterable<string>;
@@ -178,6 +180,11 @@ export function rigPreflight(input: RigPreflightInput): PreflightResult {
         if (!member.cwd) {
           errors.push(`${pod.id}.${member.id}: cwd is required`);
         }
+        const terminalCwd = resolveLaunchCwd(member.cwd, input.rigRoot, input.cwdOverride);
+        const terminalCwdError = getOpenRigInstallCwdError(terminalCwd, input.cwdOverride);
+        if (terminalCwdError) {
+          errors.push(`${pod.id}.${member.id}: ${terminalCwdError}`);
+        }
         continue;
       }
 
@@ -208,6 +215,8 @@ export function rigPreflight(input: RigPreflightInput): PreflightResult {
         importedSpecs: resolveResult.imports,
         collisions: resolveResult.collisions,
         profileName: member.profile,
+        specRoot: input.rigRoot,
+        cwdOverride: input.cwdOverride,
         member,
         pod,
         rig: rigSpec,
@@ -228,6 +237,10 @@ export function rigPreflight(input: RigPreflightInput): PreflightResult {
       // Check cwd (required, already validated by RigSpec schema, but double-check)
       if (!member.cwd) {
         errors.push(`${pod.id}.${member.id}: cwd is required`);
+      }
+      const cwdError = getOpenRigInstallCwdError(configResult.config.cwd, input.cwdOverride);
+      if (cwdError) {
+        errors.push(`${pod.id}.${member.id}: ${cwdError}`);
       }
     }
   }

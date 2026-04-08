@@ -92,6 +92,7 @@ describe("Up CLI", () => {
     const help = makeCmd().commands.find((c) => c.name() === "up")!.helpInformation();
     expect(help).toContain("Target root directory for package installation");
     expect(help).toContain("does not change agent cwd");
+    expect(help).toContain("--cwd <path>");
   });
 
   // T7: up from .yaml -> stages + rig ID
@@ -266,6 +267,31 @@ describe("Up CLI", () => {
     });
 
     expect(lastBody.targetRoot).toBe("/tmp/custom-root");
+
+    server.removeAllListeners("request");
+    for (const l of origListeners) server.on("request", l as (...args: unknown[]) => void);
+  });
+
+  it("up --cwd sends absolute cwdOverride", async () => {
+    let lastBody: Record<string, unknown> = {};
+    const origListeners = server.listeners("request");
+    server.removeAllListeners("request");
+    server.on("request", async (req: http.IncomingMessage, res: http.ServerResponse) => {
+      let body = "";
+      for await (const chunk of req) body += chunk;
+      if (req.url === "/api/up") {
+        lastBody = JSON.parse(body);
+        res.writeHead(201, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ status: "completed", runId: "r", rigId: "g", stages: [], errors: [] }));
+      }
+    });
+
+    await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "up", "/tmp/rig.yaml", "--cwd", "relative/project"]);
+    });
+
+    expect(lastBody.cwdOverride).toMatch(/^\//);
+    expect((lastBody.cwdOverride as string).endsWith("relative/project")).toBe(true);
 
     server.removeAllListeners("request");
     for (const l of origListeners) server.on("request", l as (...args: unknown[]) => void);

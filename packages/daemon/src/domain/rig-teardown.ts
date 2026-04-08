@@ -6,6 +6,9 @@ import type { SnapshotCapture } from "./snapshot-capture.js";
 import type { EventBus } from "./event-bus.js";
 import { RigNotFoundError } from "./errors.js";
 import type { ResumeMetadataRefresher } from "./resume-metadata-refresher.js";
+import fs from "node:fs";
+import nodePath from "node:path";
+import { removeManagedBlocksFromFile } from "./managed-blocks.js";
 
 export interface TeardownResult {
   rigId: string;
@@ -79,6 +82,7 @@ export class RigTeardownOrchestrator {
 
     // 3. Check if already stopped
     if (liveSessions.length === 0) {
+      this.cleanupManagedGuidanceFiles(rigId);
       result.alreadyStopped = true;
       // Skip to delete if requested
       if (opts?.delete) {
@@ -110,6 +114,7 @@ export class RigTeardownOrchestrator {
       if (killResult.ok || (killResult as { code?: string }).code === "session_not_found") {
         // Success or already gone — update DB atomically
         this.atomicNodeCleanup(session);
+        this.cleanupManagedGuidanceFileForNode(session.runtime, session.cwd);
         result.sessionsKilled++;
       } else {
         // Real kill failure — don't update this node
@@ -117,6 +122,7 @@ export class RigTeardownOrchestrator {
         killFailures++;
       }
     }
+    this.cleanupManagedGuidanceFiles(rigId);
 
     // 6. Delete if requested (blocked by kill failures)
     if (opts?.delete) {
@@ -187,5 +193,36 @@ export class RigTeardownOrchestrator {
       resumeToken: r.resume_token,
       cwd: r.cwd,
     }));
+  }
+
+  private cleanupManagedGuidanceFiles(rigId: string): void {
+    const rows = this.db.prepare(`
+      SELECT DISTINCT runtime, cwd
+      FROM nodes
+      WHERE rig_id = ?
+    `).all(rigId) as Array<{ runtime: string | null; cwd: string | null }>;
+    for (const row of rows) {
+      this.cleanupManagedGuidanceFileForNode(row.runtime, row.cwd);
+    }
+  }
+
+  private cleanupManagedGuidanceFileForNode(runtime: string | null, cwd: string | null): void {
+    if (!runtime || !cwd) {
+      return;
+    }
+    const targetPath = runtime === "claude-code"
+      ? nodePath.join(cwd, "CLAUDE.md")
+      : runtime === "codex"
+        ? nodePath.join(cwd, "AGENTS.md")
+        : null;
+    if (!targetPath) {
+      return;
+    }
+    removeManagedBlocksFromFile({
+      exists: (path) => fs.existsSync(path),
+      readFile: (path) => fs.readFileSync(path, "utf-8"),
+      writeFile: (path, content) => fs.writeFileSync(path, content, "utf-8"),
+      deleteFile: (path) => fs.unlinkSync(path),
+    }, targetPath);
   }
 }

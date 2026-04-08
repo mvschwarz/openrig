@@ -1,3 +1,4 @@
+import nodePath from "node:path";
 import type {
   AgentSpec, AgentResources, ProfileSpec, LifecycleDefaults,
   RigSpec, RigSpecPod, RigSpecPodMember, StartupBlock,
@@ -41,6 +42,8 @@ export interface ResolutionContext {
   importedSpecs: ResolvedAgentSpec[];
   collisions: ResourceCollision[];
   profileName: string;
+  specRoot?: string;
+  cwdOverride?: string;
   member: RigSpecPodMember;
   pod: RigSpecPod;
   rig: RigSpec;
@@ -110,7 +113,11 @@ export function resolveNodeConfig(ctx: ResolutionContext): ResolutionResult {
     ?? spec.defaults?.model;
 
   // 6. Resolve cwd (member authoritative, required)
-  const cwd = member.cwd;
+  const cwd = ctx.cwdOverride
+    ? nodePath.resolve(ctx.cwdOverride)
+    : ctx.specRoot
+      ? (nodePath.isAbsolute(member.cwd) ? member.cwd : nodePath.resolve(ctx.specRoot, member.cwd))
+      : member.cwd;
 
   // 7. Resolve restorePolicy with narrowing
   const restorePolicyResult = resolveRestorePolicy(spec, profile, member);

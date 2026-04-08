@@ -205,6 +205,15 @@ describe("Bootstrap CLI", () => {
     expect(body.autoApprove).toBe(false);
   });
 
+  it("bootstrap --cwd sends absolute cwdOverride", async () => {
+    await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "bootstrap", "/tmp/rig.yaml", "--yes", "--cwd", "relative/project"]);
+    });
+    const body = JSON.parse(lastReq.body);
+    expect(body.cwdOverride).toMatch(/^\//);
+    expect((body.cwdOverride as string).endsWith("relative/project")).toBe(true);
+  });
+
   // T9: partial status -> exit 1 (R2-M1)
   it("partial result returns exit code 1", async () => {
     const partialServer = http.createServer((_, res) => {

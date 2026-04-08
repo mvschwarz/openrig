@@ -147,9 +147,9 @@ describe("Bootstrap API routes", () => {
     expect(body.error).toContain("sourceRef");
   });
 
-  // T6: POST /apply with blocked stages -> 409
-  it("POST /api/bootstrap/apply with blocked stages returns 409", async () => {
-    // Invalid spec that will fail resolution
+  // T6: POST /apply with invalid sourceRef -> 400 failed response
+  it("POST /api/bootstrap/apply with invalid sourceRef returns 400", async () => {
+    // Invalid spec that will fail resolution during resolve_spec
     const specPath = path.join(tmpDir, "nonexistent.yaml");
 
     const res = await app.request("/api/bootstrap/apply", {
@@ -158,10 +158,13 @@ describe("Bootstrap API routes", () => {
       body: JSON.stringify({ sourceRef: specPath, autoApprove: true }),
     });
 
-    // Should be 500 (error, not blocked) since spec doesn't exist
-    expect(res.status).toBe(500);
+    expect(res.status).toBe(400);
     const body = await res.json();
     expect(body.status).toBe("failed");
+    expect(typeof body.errors[0]).toBe("string");
+    expect(body.stages.some((stage: { stage: string; status: string; detail?: { code?: string } }) =>
+      stage.stage === "resolve_spec" && stage.status === "failed" && stage.detail?.code === "file_not_found"
+    )).toBe(true);
   });
 
   // T7: bootstrap.planned event emitted after plan

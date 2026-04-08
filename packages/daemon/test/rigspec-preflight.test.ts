@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import nodePath from "node:path";
 import fs from "node:fs";
 import type Database from "better-sqlite3";
 import { createDb } from "../src/db/connection.js";
@@ -381,5 +382,30 @@ describe("Rebooted rig preflight", () => {
     const result = rigPreflight({ rigSpecYaml: makeRigYaml(), rigRoot: RIG_ROOT, fsOps: mockFs(files) });
     expect(result.ready).toBe(true);
     expect(result.warnings.some((w) => w.includes("collision"))).toBe(true);
+  });
+
+  it("fails honestly when builtin/library cwd resolves inside the OpenRig install without --cwd", () => {
+    const builtinRoot = nodePath.resolve(import.meta.dirname, "../src/../specs");
+    const files: Record<string, string> = {
+      [`${builtinRoot}/agents/impl/agent.yaml`]: validAgentYaml("impl"),
+    };
+    const result = rigPreflight({ rigSpecYaml: makeRigYaml(), rigRoot: builtinRoot, fsOps: mockFs(files) });
+    expect(result.ready).toBe(false);
+    expect(result.errors.some((e) => e.includes("inside the OpenRig installation"))).toBe(true);
+    expect(result.errors.some((e) => e.includes("--cwd"))).toBe(true);
+  });
+
+  it("accepts builtin/library specs when cwdOverride is provided", () => {
+    const builtinRoot = nodePath.resolve(import.meta.dirname, "../src/../specs");
+    const files: Record<string, string> = {
+      [`${builtinRoot}/agents/impl/agent.yaml`]: validAgentYaml("impl"),
+    };
+    const result = rigPreflight({
+      rigSpecYaml: makeRigYaml(),
+      rigRoot: builtinRoot,
+      cwdOverride: "/workspace/project",
+      fsOps: mockFs(files),
+    });
+    expect(result.ready).toBe(true);
   });
 });
