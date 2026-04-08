@@ -246,6 +246,77 @@ export function chatroomCommand(depsOverride?: StatusDeps): Command {
       console.log(`--- topic: ${topicName} ---`);
     });
 
+  // chatroom wait <rig>
+  cmd
+    .command("wait")
+    .argument("<rig>", "Rig name")
+    .option("--after <id>", "Only messages after this ID")
+    .option("--topic <name>", "Filter by topic")
+    .option("--sender <name>", "Filter by sender")
+    .option("--timeout <seconds>", "Timeout in seconds", "120")
+    .option("--json", "JSON output")
+    .action(async (rig: string, opts: { after?: string; topic?: string; sender?: string; timeout: string; json?: boolean }) => {
+      const client = await getClient();
+      if (!client) return;
+
+      let rigId: string;
+      try {
+        rigId = await resolveRigId(client, rig);
+      } catch (err) {
+        console.error((err as Error).message);
+        process.exitCode = 1;
+        return;
+      }
+
+      const timeoutMs = parseInt(opts.timeout, 10) * 1000;
+      const pollIntervalMs = 3000;
+
+      // Bootstrap cursor: use --after if provided, otherwise generate a ULID at start time
+      // as a practical time-based baseline. Messages with IDs after this point are considered new.
+      let cursor = opts.after ?? "";
+      if (!cursor) {
+        const { monotonicFactory } = await import("ulid");
+        cursor = monotonicFactory()();
+      }
+
+      // Build filter params
+      const filterParams = new URLSearchParams();
+      if (opts.topic) filterParams.set("topic", opts.topic);
+      if (opts.sender) filterParams.set("sender", opts.sender);
+
+      const start = Date.now();
+      while (true) {
+        // Check timeout BEFORE polling
+        if (Date.now() - start >= timeoutMs) break;
+
+        const params = new URLSearchParams(filterParams);
+        if (cursor) params.set("after", cursor);
+
+        const res = await client.get<Array<Record<string, unknown>>>(
+          `/api/rigs/${encodeURIComponent(rigId)}/chat/history?${params}`,
+        );
+
+        if (res.data && res.data.length > 0) {
+          if (opts.json) {
+            console.log(JSON.stringify(res.data));
+          } else {
+            for (const msg of res.data) {
+              console.log(`[${msg["sender"]}] ${msg["body"]}`);
+            }
+          }
+          return;
+        }
+
+        // Sleep with remaining timeout awareness
+        const remaining = timeoutMs - (Date.now() - start);
+        if (remaining <= 0) break;
+        await new Promise((resolve) => setTimeout(resolve, Math.min(pollIntervalMs, remaining)));
+      }
+
+      console.error(`Timed out after ${opts.timeout} seconds — no new messages matching filters.`);
+      process.exitCode = 1;
+    });
+
   // chatroom clear <rig>
   cmd
     .command("clear")

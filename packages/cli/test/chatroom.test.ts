@@ -60,12 +60,15 @@ describe("Chatroom CLI", () => {
     { id: "rig-1", name: "my-rig", nodeCount: 2 },
   ];
 
+  // Use ULID-like IDs (time-ordered, all starting with 01KN — well before any current ULID)
   const chatMessages = [
-    { id: "msg-1", rigId: "rig-1", sender: "alice", kind: "message", body: "hello", topic: null, createdAt: "2026-03-31T10:00:00Z" },
-    { id: "msg-2", rigId: "rig-1", sender: "bob", kind: "message", body: "world", topic: null, createdAt: "2026-03-31T10:01:00Z" },
+    { id: "01KN000000AA00000000000001", rigId: "rig-1", sender: "alice", kind: "message", body: "hello", topic: null, createdAt: "2026-03-31T10:00:00Z" },
+    { id: "01KN000000AA00000000000002", rigId: "rig-1", sender: "bob", kind: "message", body: "world", topic: null, createdAt: "2026-03-31T10:01:00Z" },
   ];
 
   const capturedUrls: string[] = [];
+  // Mutable list for dynamic injection during wait tests
+  const dynamicMessages: Array<typeof chatMessages[0]> = [];
 
   beforeAll(async () => {
     server = http.createServer((req, res) => {
@@ -89,14 +92,17 @@ describe("Chatroom CLI", () => {
 
         if (url.includes("/chat/history")) {
           res.writeHead(200, { "Content-Type": "application/json" });
-          // Check for sender filter
           const urlObj = new URL(url, `http://localhost:${port}`);
           const senderFilter = urlObj.searchParams.get("sender");
-          if (senderFilter) {
-            res.end(JSON.stringify(chatMessages.filter(m => m.sender === senderFilter)));
-          } else {
-            res.end(JSON.stringify(chatMessages));
+          const afterFilter = urlObj.searchParams.get("after");
+          let filtered = [...chatMessages, ...dynamicMessages];
+          if (afterFilter) {
+            filtered = filtered.filter(m => m.id > afterFilter);
           }
+          if (senderFilter) {
+            filtered = filtered.filter(m => m.sender === senderFilter);
+          }
+          res.end(JSON.stringify(filtered));
           return;
         }
 
@@ -272,6 +278,79 @@ describe("Chatroom CLI", () => {
     const parsed = JSON.parse(logs.join(""));
     expect(parsed).toHaveLength(1);
     expect(parsed[0].sender).toBe("alice");
+  });
+
+  it("chatroom wait with explicit --after returns new messages immediately", async () => {
+    // --after "000" is before existing messages, so they satisfy the wait
+    const { logs } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "chatroom", "wait", "my-rig", "--after", "000", "--timeout", "2"]);
+    });
+
+    const output = logs.join("\n");
+    expect(output).toContain("[alice]");
+    expect(output).toContain("hello");
+  });
+
+  it("chatroom wait without --after does not return existing room traffic", async () => {
+    // No --after: bootstrap ULID is generated at wait-start time (> all existing fixture IDs).
+    // Since no new messages arrive after that, wait should timeout.
+    const { exitCode, logs } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "chatroom", "wait", "my-rig", "--timeout", "1"]);
+    });
+
+    expect(exitCode).toBe(1);
+    expect(logs.join("\n")).toContain("Timed out");
+  });
+
+  it("chatroom wait detects a newly arriving post-start message", { timeout: 15000 }, async () => {
+    // Clear dynamic messages and inject one after a delay
+    dynamicMessages.length = 0;
+    // Inject a new message after 1s (will appear on second poll)
+    const injectionTimer = setTimeout(() => {
+      dynamicMessages.push({
+        id: "01KNZZZZZZZZZZZZZZZZZZZZZZ", // ULID > any current ULID baseline
+        rigId: "rig-1",
+        sender: "new-peer",
+        kind: "message",
+        body: "post-start arrival",
+        topic: null,
+        createdAt: new Date().toISOString(),
+      });
+    }, 1000);
+
+    try {
+      const { logs } = await captureLogs(async () => {
+        // No --after: ULID baseline generated at start, existing messages filtered out.
+        // The dynamically injected message has a very high ULID, so it will be > baseline.
+        await makeCmd().parseAsync(["node", "rig", "chatroom", "wait", "my-rig", "--timeout", "10"]);
+      });
+
+      const output = logs.join("\n");
+      expect(output).toContain("[new-peer]");
+      expect(output).toContain("post-start arrival");
+    } finally {
+      clearTimeout(injectionTimer);
+      dynamicMessages.length = 0;
+    }
+  });
+
+  it("chatroom wait times out with exit 1 when no new messages match filter", async () => {
+    const { exitCode, logs } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "chatroom", "wait", "my-rig", "--after", "zzzzzzzzzzzzzzzzzzzzzzzzz", "--timeout", "1"]);
+    });
+
+    expect(exitCode).toBe(1);
+    expect(logs.join("\n")).toContain("Timed out");
+  });
+
+  it("chatroom wait --json returns messages as JSON", async () => {
+    const { logs } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "chatroom", "wait", "my-rig", "--after", "000", "--timeout", "2", "--json"]);
+    });
+
+    const parsed = JSON.parse(logs.join(""));
+    expect(Array.isArray(parsed)).toBe(true);
+    expect(parsed.length).toBeGreaterThan(0);
   });
 
   it("chatroom clear prints deleted count", async () => {
