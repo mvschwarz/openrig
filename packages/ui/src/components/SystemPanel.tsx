@@ -79,7 +79,7 @@ export function SystemPanel({ onClose, events, initialTab = "log" }: SystemPanel
           onClick={() => setActiveTab("log")}
           className={`flex-1 py-2 text-xs font-mono uppercase text-center ${activeTab === "log" ? "border-b-2 border-stone-800 font-bold text-stone-900" : "text-stone-400"}`}
         >
-          Log
+          Recent Log
         </button>
         <button
           data-testid="system-tab-status"
@@ -91,7 +91,7 @@ export function SystemPanel({ onClose, events, initialTab = "log" }: SystemPanel
       </div>
 
       {activeTab === "log" ? (
-        <div className="flex-1 min-h-0" data-testid="system-log-tab">
+        <div className="flex flex-1 min-h-0 flex-col overflow-hidden" data-testid="system-log-tab">
           <LogFeedList events={events} />
         </div>
       ) : (

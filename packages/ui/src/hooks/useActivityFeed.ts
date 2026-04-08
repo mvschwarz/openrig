@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 
-const MAX_EVENTS = 30;
+export const MAX_ACTIVITY_EVENTS = 100;
 
 export interface ActivityEvent {
   seq: number;
@@ -35,7 +35,7 @@ export function useActivityFeed(): UseActivityFeedResult {
         createdAt: (parsed["createdAt"] as string) ?? new Date().toISOString(),
         receivedAt: Date.now(),
       };
-      setEvents((prev) => [event, ...prev].slice(0, MAX_EVENTS));
+      setEvents((prev) => [event, ...prev].slice(0, MAX_ACTIVITY_EVENTS));
 
       // Invalidate package queries on package mutation events
       if (event.type === "package.installed" || event.type === "package.rolledback") {

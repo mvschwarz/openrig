@@ -217,22 +217,37 @@ describe("Activity Feed", () => {
     });
   });
 
-  // Test 5: Feed bounded at 30 entries
-  it("feed bounded at 30 entries", async () => {
+  // Test 5: Feed bounded at 100 entries
+  it("feed bounded at 100 entries", async () => {
     renderHookHarness();
 
     await waitFor(() => expect(instances).toHaveLength(1));
     const es = getLastInstance();
 
-    // Send 35 events
+    // Send 105 events
     act(() => {
-      for (let i = 0; i < 35; i++) {
+      for (let i = 0; i < 105; i++) {
         es.simulateMessage(JSON.stringify({ type: "rig.created", rigId: `r-${i}`, seq: i, createdAt: new Date().toISOString() }));
       }
     });
 
     await waitFor(() => {
-      expect(screen.getByTestId("event-count").textContent).toBe("30");
+      expect(screen.getByTestId("event-count").textContent).toBe("100");
+    });
+  });
+
+  it("shows recent-log disclosure copy and capped-history footer", async () => {
+    const events = Array.from({ length: 100 }, (_, i) =>
+      makeEvent({ type: "rig.created", seq: i + 1, payload: { rigId: `r-${i}` } })
+    );
+
+    renderFeedWithRouter({ events, open: true });
+
+    await waitFor(() => {
+      expect(screen.getByText("RECENT LOG")).toBeTruthy();
+      expect(screen.getByTestId("feed-disclosure").textContent).toContain("Showing last 100 live events");
+      expect(screen.getByTestId("feed-scroll-region").className).toContain("overflow-y-auto");
+      expect(screen.getByTestId("feed-end-of-history").textContent).toContain("Older events are not loaded in this panel yet");
     });
   });
 

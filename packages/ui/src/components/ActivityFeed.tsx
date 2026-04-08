@@ -2,6 +2,7 @@ import { useNavigate } from "@tanstack/react-router";
 import { cn } from "@/lib/utils";
 import {
   type ActivityEvent,
+  MAX_ACTIVITY_EVENTS,
   formatLogTime,
   eventColor,
   eventSummary,
@@ -16,52 +17,72 @@ interface ActivityFeedProps {
 
 export function LogFeedList({ events }: { events: ActivityEvent[] }) {
   const navigate = useNavigate();
+  const isCapped = events.length >= MAX_ACTIVITY_EVENTS;
 
   return (
-    <div className="relative z-10 overflow-y-auto flex-1 min-h-0">
+    <div
+      data-testid="feed-scroll-region"
+      className="relative z-10 overflow-y-auto flex-1 min-h-0"
+    >
+      <div
+        data-testid="feed-disclosure"
+        className="px-spacing-3 py-2 border-b border-stone-300/20 font-mono text-[9px] uppercase tracking-[0.06em] text-stone-500"
+      >
+        Showing last {MAX_ACTIVITY_EVENTS} live events in this panel.
+      </div>
       {events.length === 0 ? (
         <div data-testid="feed-empty" className="px-spacing-3 py-spacing-4 font-mono text-[10px] text-stone-500 text-center">
           No recent log entries
         </div>
       ) : (
-        events.map((event) => {
-          const route = eventRoute(event);
-          const isNavigable = route !== null;
+        <>
+          {events.map((event) => {
+            const route = eventRoute(event);
+            const isNavigable = route !== null;
 
-          return (
+            return (
+              <div
+                key={event.seq}
+                data-testid="feed-entry"
+                data-event-type={event.type}
+                role={isNavigable ? "link" : undefined}
+                tabIndex={isNavigable ? 0 : undefined}
+                onClick={isNavigable ? () => navigate({ to: route }) : undefined}
+                onKeyDown={isNavigable ? (e) => { if (e.key === "Enter") navigate({ to: route }); } : undefined}
+                className={cn(
+                  "flex items-center gap-2 px-spacing-3 py-1.5 border-b border-stone-300/20 transition-colors duration-150 ease-tactical font-mono text-[10px] leading-4",
+                  isNavigable && "cursor-pointer hover:bg-white/24"
+                )}
+              >
+                <span
+                  data-testid="feed-dot"
+                  className={cn("inline-block h-[6px] w-[6px] shrink-0", eventColor(event.type))}
+                />
+
+                <span
+                  data-testid="feed-time"
+                  className="shrink-0 text-[9px] text-stone-500 tabular-nums"
+                >
+                  {formatLogTime(event.createdAt)}
+                </span>
+                <span
+                  data-testid="feed-summary"
+                  className="min-w-0 flex-1 truncate text-stone-900"
+                >
+                  {eventSummary(event)}
+                </span>
+              </div>
+            );
+          })}
+          {isCapped ? (
             <div
-              key={event.seq}
-              data-testid="feed-entry"
-              data-event-type={event.type}
-              role={isNavigable ? "link" : undefined}
-              tabIndex={isNavigable ? 0 : undefined}
-              onClick={isNavigable ? () => navigate({ to: route }) : undefined}
-              onKeyDown={isNavigable ? (e) => { if (e.key === "Enter") navigate({ to: route }); } : undefined}
-              className={cn(
-                "flex items-center gap-2 px-spacing-3 py-1.5 border-b border-stone-300/20 transition-colors duration-150 ease-tactical font-mono text-[10px] leading-4",
-                isNavigable && "cursor-pointer hover:bg-white/24"
-              )}
+              data-testid="feed-end-of-history"
+              className="px-spacing-3 py-2 font-mono text-[9px] uppercase tracking-[0.06em] text-stone-400 text-center"
             >
-              <span
-                data-testid="feed-dot"
-                className={cn("inline-block h-[6px] w-[6px] shrink-0", eventColor(event.type))}
-              />
-
-              <span
-                data-testid="feed-time"
-                className="shrink-0 text-[9px] text-stone-500 tabular-nums"
-              >
-                {formatLogTime(event.createdAt)}
-              </span>
-              <span
-                data-testid="feed-summary"
-                className="min-w-0 flex-1 truncate text-stone-900"
-              >
-                {eventSummary(event)}
-              </span>
+              Older events are not loaded in this panel yet.
             </div>
-          );
-        })
+          ) : null}
+        </>
       )}
     </div>
   );
@@ -86,7 +107,7 @@ export function ActivityFeed({ events, open, onClose }: ActivityFeedProps) {
         {/* Header */}
         <div className="relative z-10 flex items-center justify-between px-spacing-3 py-spacing-2 border-b border-stone-300/35 shrink-0">
           <span className="text-label-sm uppercase tracking-[0.06em] text-stone-700">
-            LOG
+            RECENT LOG
           </span>
           <button
             data-testid="feed-close"

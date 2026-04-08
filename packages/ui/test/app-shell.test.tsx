@@ -488,6 +488,9 @@ describe("App Shell + Routing", () => {
       expect(screen.getByTestId("system-panel")).toBeDefined();
       expect(screen.getByTestId("system-log-tab")).toBeDefined();
       expect(screen.getByTestId("system-tab-log").className).toContain("font-bold");
+      expect(screen.getByTestId("system-log-tab").className).toContain("flex");
+      expect(screen.getByTestId("system-log-tab").className).toContain("flex-col");
+      expect(screen.getByTestId("system-log-tab").className).toContain("overflow-hidden");
     });
   });
 
