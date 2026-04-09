@@ -84,6 +84,15 @@ export class SnapshotCapture {
       } : null;
     }
 
+    // 4b. Get env receipt from services record if services exist
+    const servicesRecord = this.rigRepo.getServicesRecord(rigId);
+    let envReceipt: import("./types.js").EnvReceipt | null = null;
+    if (servicesRecord?.latestReceiptJson) {
+      try {
+        envReceipt = JSON.parse(servicesRecord.latestReceiptJson);
+      } catch { /* receipt_only — no checkpoint available */ }
+    }
+
     // 5. Assemble SnapshotData
     const data: SnapshotData = {
       rig: rig.rig,
@@ -94,6 +103,7 @@ export class SnapshotCapture {
       pods: podRows.map((p) => ({ id: p.id, rigId: p.rig_id, namespace: p.namespace, label: p.label, summary: p.summary, continuityPolicyJson: p.continuity_policy_json, createdAt: p.created_at })),
       continuityStates: continuityRows.map((r) => ({ podId: r.pod_id, nodeId: r.node_id, status: r.status as "healthy" | "degraded" | "restoring", artifactsJson: r.artifacts_json, lastSyncAt: r.last_sync_at, updatedAt: r.updated_at })),
       nodeStartupContext,
+      envReceipt,
     };
 
     // 5. Atomic: persist snapshot + event in one transaction

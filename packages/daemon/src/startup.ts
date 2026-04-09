@@ -313,7 +313,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       },
     }),
     teardownOrchestrator: new RigTeardownOrchestrator({
-      db, rigRepo, sessionRegistry, tmuxAdapter, snapshotCapture, eventBus, resumeMetadataRefresher,
+      db, rigRepo, sessionRegistry, tmuxAdapter, snapshotCapture, eventBus, resumeMetadataRefresher, serviceOrchestrator,
     }),
     podInstantiator,
     podBundleSourceResolver,

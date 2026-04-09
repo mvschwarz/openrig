@@ -175,6 +175,7 @@ export interface SnapshotData {
   pods?: Pod[];
   continuityStates?: ContinuityState[];
   nodeStartupContext?: Record<string, NodeStartupSnapshot | null>;
+  envReceipt?: EnvReceipt | null;
 }
 
 export interface Snapshot {

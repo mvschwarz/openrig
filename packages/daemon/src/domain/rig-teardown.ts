@@ -36,6 +36,7 @@ interface TeardownDeps {
   snapshotCapture: SnapshotCapture;
   eventBus: EventBus;
   resumeMetadataRefresher?: ResumeMetadataRefresher;
+  serviceOrchestrator?: import("./service-orchestrator.js").ServiceOrchestrator;
 }
 
 interface LatestNodeSession {
@@ -84,6 +85,10 @@ export class RigTeardownOrchestrator {
     if (liveSessions.length === 0) {
       this.cleanupManagedGuidanceFiles(rigId);
       result.alreadyStopped = true;
+      // Still tear down services even if no agent sessions are running
+      if (this.deps.serviceOrchestrator) {
+        try { await this.deps.serviceOrchestrator.teardown(rigId); } catch { /* best-effort */ }
+      }
       // Skip to delete if requested
       if (opts?.delete) {
         this.atomicDelete(rigId);
@@ -123,6 +128,16 @@ export class RigTeardownOrchestrator {
       }
     }
     this.cleanupManagedGuidanceFiles(rigId);
+
+    // 5b. Tear down services if they exist
+    if (this.deps.serviceOrchestrator) {
+      try {
+        await this.deps.serviceOrchestrator.teardown(rigId);
+      } catch (err) {
+        result.errors.push(`Service teardown warning: ${(err as Error).message}`);
+        // Best-effort — rig teardown continues
+      }
+    }
 
     // 6. Delete if requested (blocked by kill failures)
     if (opts?.delete) {
