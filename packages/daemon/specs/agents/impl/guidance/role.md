@@ -10,6 +10,8 @@ Load these packaged skills now before editing:
 - `development-team`
 - `test-driven-development`
 - `systematic-debugging`
+- `writing-plans`
+- `executing-plans`
 - `verification-before-completion`
 
 Then run `rig whoami --json` and wait for the orchestrator + QA loop before making changes.

@@ -8,6 +8,9 @@ Load these packaged skills now before giving product direction:
 - `using-superpowers`
 - `openrig-user`
 - `development-team`
+- `frontend-design`
+- `brainstorming`
+- `writing-plans`
 - `verification-before-completion`
 
 Then run `rig whoami --json` and look for the first ambiguity the development pod should not have to guess through.

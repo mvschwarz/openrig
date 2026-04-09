@@ -9,6 +9,9 @@ Load these packaged skills now before doing substantive work:
 - `openrig-user`
 - `orchestration-team`
 - `systematic-debugging`
+- `brainstorming`
+- `writing-plans`
+- `executing-plans`
 - `verification-before-completion`
 
 Then run:

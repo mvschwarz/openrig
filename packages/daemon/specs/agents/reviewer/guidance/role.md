@@ -9,6 +9,8 @@ Load these packaged skills now before reviewing:
 - `openrig-user`
 - `review-team`
 - `systematic-debugging`
+- `brainstorming`
+- `writing-plans`
 - `verification-before-completion`
 
 Then run `rig whoami --json`, inspect the current rig state, and stay ready for the first meaningful milestone or working-tree review.

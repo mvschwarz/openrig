@@ -27,6 +27,13 @@ const AGENT_SPECS = [
 ];
 
 const SHARED_AGENT_SPEC = "agents/shared/agent.yaml";
+const STARTER_AGENT_SPECS = [
+  "agents/design/agent.yaml",
+  "agents/impl/agent.yaml",
+  "agents/qa/agent.yaml",
+  "agents/reviewer/agent.yaml",
+  "agents/lead/agent.yaml",
+];
 
 describe("Starter specs", () => {
   const specReviewService = new SpecReviewService();
@@ -162,10 +169,21 @@ describe("Starter specs", () => {
     const sharedResources = (sharedRaw["resources"] ?? {}) as Record<string, unknown>;
     const sharedSkills = (sharedResources["skills"] as Array<{ id: string; path: string }>) ?? [];
     const expectedSharedSkills = [
+      "agent-browser",
+      "brainstorming",
+      "containerized-e2e",
+      "dogfood",
+      "executing-plans",
+      "frontend-design",
       "openrig-user",
       "orchestration-team",
       "development-team",
       "review-team",
+      "systematic-debugging",
+      "test-driven-development",
+      "using-superpowers",
+      "verification-before-completion",
+      "writing-plans",
     ];
 
     for (const skillId of expectedSharedSkills) {
@@ -175,11 +193,26 @@ describe("Starter specs", () => {
     }
 
     const expectedAgentSkills = new Map<string, string[]>([
-      ["agents/design/agent.yaml", ["openrig-user", "development-team"]],
-      ["agents/impl/agent.yaml", ["openrig-user", "development-team"]],
-      ["agents/qa/agent.yaml", ["openrig-user", "development-team"]],
-      ["agents/reviewer/agent.yaml", ["openrig-user", "review-team"]],
-      ["agents/lead/agent.yaml", ["openrig-user", "orchestration-team"]],
+      [
+        "agents/design/agent.yaml",
+        ["using-superpowers", "openrig-user", "development-team", "frontend-design", "brainstorming", "writing-plans", "verification-before-completion"],
+      ],
+      [
+        "agents/impl/agent.yaml",
+        ["using-superpowers", "openrig-user", "development-team", "test-driven-development", "systematic-debugging", "writing-plans", "executing-plans", "verification-before-completion"],
+      ],
+      [
+        "agents/qa/agent.yaml",
+        ["using-superpowers", "openrig-user", "development-team", "systematic-debugging", "agent-browser", "dogfood", "writing-plans", "executing-plans", "verification-before-completion"],
+      ],
+      [
+        "agents/reviewer/agent.yaml",
+        ["using-superpowers", "openrig-user", "review-team", "systematic-debugging", "brainstorming", "writing-plans", "verification-before-completion"],
+      ],
+      [
+        "agents/lead/agent.yaml",
+        ["using-superpowers", "openrig-user", "orchestration-team", "systematic-debugging", "brainstorming", "writing-plans", "executing-plans", "verification-before-completion"],
+      ],
     ]);
 
     for (const file of AGENT_SPECS) {
@@ -194,6 +227,23 @@ describe("Starter specs", () => {
       const skills = (uses["skills"] as string[] | undefined) ?? [];
       for (const skillId of expectedAgentSkills.get(file) ?? ["openrig-user"]) {
         expect(skills).toContain(skillId);
+      }
+    }
+  });
+
+  it("starter role guidance explicitly names every packaged default skill it expects agents to load", () => {
+    for (const file of STARTER_AGENT_SPECS) {
+      const yaml = readFileSync(join(SPECS_ROOT, file), "utf-8");
+      const raw = parseAgentSpec(yaml) as Record<string, unknown>;
+      const profiles = (raw["profiles"] as Record<string, Record<string, unknown>> | undefined) ?? {};
+      const defaultProfile = profiles["default"] ?? {};
+      const uses = (defaultProfile["uses"] as Record<string, unknown> | undefined) ?? {};
+      const skills = (uses["skills"] as string[] | undefined) ?? [];
+      const rolePath = join(SPECS_ROOT, file.replace("/agent.yaml", ""), "guidance/role.md");
+      const content = readFileSync(rolePath, "utf-8");
+
+      for (const skillId of skills) {
+        expect(content).toContain(`\`${skillId}\``);
       }
     }
   });
