@@ -77,6 +77,23 @@ describe("Starter specs", () => {
     expect(names).toContain("secrets-manager");
   });
 
+  it("service-backed rigs expose hasServices, non-service rigs do not", () => {
+    const lib = new SpecLibraryService({
+      roots: [{ path: SPECS_ROOT, sourceType: "builtin" }],
+      specReviewService,
+    });
+    lib.scan();
+
+    const rigs = lib.list({ kind: "rig" });
+    const secretsManager = rigs.find((entry) => entry.name === "secrets-manager");
+    const demo = rigs.find((entry) => entry.name === "demo");
+
+    expect(secretsManager).toBeDefined();
+    expect(secretsManager!.hasServices).toBe(true);
+    expect(demo).toBeDefined();
+    expect(demo!.hasServices).toBeFalsy();
+  });
+
   it("starter summaries position implementation-pair as the first success, demo as the launch-grade starter, and product-team as the advanced preview", () => {
     const lib = new SpecLibraryService({
       roots: [{ path: SPECS_ROOT, sourceType: "builtin" }],
