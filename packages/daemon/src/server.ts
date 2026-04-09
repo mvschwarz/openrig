@@ -56,6 +56,7 @@ import type { ChatRepository } from "./domain/chat-repository.js";
 import { whoamiRoutes } from "./routes/whoami.js";
 import type { WhoamiService } from "./domain/whoami-service.js";
 import { chatRoutes } from "./routes/chat.js";
+import { envRoutes } from "./routes/env.js";
 import type { RigLifecycleService } from "./domain/rig-lifecycle-service.js";
 
 export interface AppDeps {
@@ -97,6 +98,8 @@ export interface AppDeps {
   specLibraryService?: SpecLibraryService;
   whoamiService?: WhoamiService;
   contextUsageStore?: import("./domain/context-usage-store.js").ContextUsageStore;
+  serviceOrchestrator?: import("./domain/service-orchestrator.js").ServiceOrchestrator;
+  composeAdapter?: import("./adapters/compose-services-adapter.js").ComposeServicesAdapter;
   uiDistDir?: string | null;
 }
 
@@ -232,6 +235,8 @@ export function createApp(deps: AppDeps): Hono {
     c.set("specLibraryService" as never, deps.specLibraryService);
     c.set("whoamiService" as never, deps.whoamiService);
     c.set("contextUsageStore" as never, deps.contextUsageStore);
+    c.set("serviceOrchestrator" as never, deps.serviceOrchestrator);
+    c.set("composeAdapter" as never, deps.composeAdapter);
     c.set("db" as never, deps.rigRepo.db);
     await next();
   });
@@ -266,6 +271,7 @@ export function createApp(deps: AppDeps): Hono {
   app.route("/api/specs/library", specLibraryRoutes());
   app.route("/api/whoami", whoamiRoutes());
   app.route("/api/rigs/:rigId/chat", chatRoutes());
+  app.route("/api/rigs/:rigId/env", envRoutes());
 
   const uiDistDir = deps.uiDistDir ?? resolveDefaultUiDistDir();
   const uiIndexPath = nodePath.join(uiDistDir, "index.html");

@@ -31,6 +31,7 @@ import { configCommand } from "./commands/config.js";
 import { preflightCommand } from "./commands/preflight.js";
 import { doctorCommand } from "./commands/doctor.js";
 import { expandCommand } from "./commands/expand.js";
+import { envCommand } from "./commands/env.js";
 import { askCommand } from "./commands/ask.js";
 import { chatroomCommand } from "./commands/chatroom.js";
 import { specsCommand } from "./commands/specs.js";
@@ -74,6 +75,7 @@ export interface ProgramDeps {
   specsDeps?: StatusDeps;
   whoamiDeps?: StatusDeps;
   expandDeps?: StatusDeps;
+  envDeps?: StatusDeps;
   unclaimDeps?: StatusDeps;
   releaseDeps?: StatusDeps;
   launchDeps?: StatusDeps;
@@ -123,6 +125,7 @@ export function createProgram(depsOverride?: ProgramDeps): Command {
   program.addCommand(preflightCommand());
   program.addCommand(doctorCommand());
   program.addCommand(expandCommand(depsOverride?.expandDeps));
+  program.addCommand(envCommand(depsOverride?.envDeps));
   program.addCommand(unclaimCommand(depsOverride?.unclaimDeps));
   program.addCommand(releaseCommand(depsOverride?.releaseDeps));
   program.addCommand(launchCommand(depsOverride?.launchDeps));
