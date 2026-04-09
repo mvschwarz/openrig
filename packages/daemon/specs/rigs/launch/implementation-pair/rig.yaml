@@ -10,12 +10,12 @@ pods:
     label: Development Pair
     members:
       - id: impl
-        agent_ref: "local:agents/impl"
+        agent_ref: "local:../../../agents/development/implementer"
         runtime: claude-code
         profile: default
         cwd: "."
       - id: qa
-        agent_ref: "local:agents/qa"
+        agent_ref: "local:../../../agents/development/qa"
         runtime: codex
         profile: default
         cwd: "."

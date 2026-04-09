@@ -1,17 +1,17 @@
-name: impl
+name: orchestrator
 version: "1.0"
-description: Implementation agent — writes code following TDD discipline
+description: Orchestrator lead — coordinates agents, monitors progress, bridges communication
 
 defaults:
   runtime: claude-code
 
 imports:
-  - ref: local:../shared
+  - ref: local:../../shared
 
 profiles:
   default:
     uses:
-      skills: [using-superpowers, openrig-user, development-team, test-driven-development, systematic-debugging, verification-before-completion, writing-plans, executing-plans]
+      skills: [using-superpowers, openrig-user, orchestration-team, systematic-debugging, verification-before-completion, writing-plans, executing-plans, brainstorming]
       guidance: []
       subagents: []
       hooks: []

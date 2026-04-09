@@ -1,17 +1,17 @@
-name: synthesizer
+name: qa
 version: "1.0"
-description: Research synthesizer — consolidates findings into actionable summaries
+description: QA agent — gates every edit with adversarial but cooperative review
 
 defaults:
   runtime: codex
 
 imports:
-  - ref: local:../shared
+  - ref: local:../../shared
 
 profiles:
   default:
     uses:
-      skills: [openrig-user]
+      skills: [using-superpowers, openrig-user, development-team, systematic-debugging, verification-before-completion, agent-browser, dogfood, writing-plans, executing-plans]
       guidance: []
       subagents: []
       hooks: []

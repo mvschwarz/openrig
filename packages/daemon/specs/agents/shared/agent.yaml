@@ -5,34 +5,34 @@ description: Shared builtin OpenRig resources for packaged starter agents
 resources:
   skills:
     - id: agent-browser
-      path: skills/agent-browser
+      path: skills/process/agent-browser
     - id: brainstorming
-      path: skills/brainstorming
+      path: skills/process/brainstorming
     - id: containerized-e2e
-      path: skills/containerized-e2e
+      path: skills/process/containerized-e2e
     - id: dogfood
-      path: skills/dogfood
+      path: skills/process/dogfood
     - id: executing-plans
-      path: skills/executing-plans
+      path: skills/process/executing-plans
     - id: frontend-design
-      path: skills/frontend-design
+      path: skills/process/frontend-design
     - id: using-superpowers
-      path: skills/using-superpowers
+      path: skills/process/using-superpowers
     - id: openrig-user
-      path: skills/openrig-user
+      path: skills/core/openrig-user
     - id: systematic-debugging
-      path: skills/systematic-debugging
+      path: skills/process/systematic-debugging
     - id: test-driven-development
-      path: skills/test-driven-development
+      path: skills/process/test-driven-development
     - id: verification-before-completion
-      path: skills/verification-before-completion
+      path: skills/process/verification-before-completion
     - id: writing-plans
-      path: skills/writing-plans
+      path: skills/process/writing-plans
     - id: orchestration-team
-      path: skills/orchestration-team
+      path: skills/pods/orchestration-team
     - id: development-team
-      path: skills/development-team
+      path: skills/pods/development-team
     - id: review-team
-      path: skills/review-team
+      path: skills/pods/review-team
 
 profiles: {}
