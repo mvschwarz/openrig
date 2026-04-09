@@ -149,12 +149,13 @@ export class RigRepository {
     return rows.map((r) => this.rowToRig(r));
   }
 
-  getRigSummaries(): Array<{ id: string; name: string; nodeCount: number; latestSnapshotAt: string | null; latestSnapshotId: string | null }> {
+  getRigSummaries(): Array<{ id: string; name: string; nodeCount: number; latestSnapshotAt: string | null; latestSnapshotId: string | null; hasServices: boolean }> {
     const rows = this.db.prepare(`
       SELECT
         r.id,
         r.name,
         (SELECT COUNT(*) FROM nodes n WHERE n.rig_id = r.id) AS node_count,
+        EXISTS(SELECT 1 FROM rig_services rs WHERE rs.rig_id = r.id) AS has_services,
         ls.id AS latest_snapshot_id,
         ls.created_at AS latest_snapshot_at
       FROM rigs r
@@ -165,12 +166,13 @@ export class RigRepository {
         LIMIT 1
       )
       ORDER BY r.created_at
-    `).all() as Array<{ id: string; name: string; node_count: number; latest_snapshot_id: string | null; latest_snapshot_at: string | null }>;
+    `).all() as Array<{ id: string; name: string; node_count: number; has_services: number; latest_snapshot_id: string | null; latest_snapshot_at: string | null }>;
 
     return rows.map((r) => ({
       id: r.id,
       name: r.name,
       nodeCount: r.node_count,
+      hasServices: r.has_services === 1,
       latestSnapshotAt: r.latest_snapshot_at,
       latestSnapshotId: r.latest_snapshot_id,
     }));

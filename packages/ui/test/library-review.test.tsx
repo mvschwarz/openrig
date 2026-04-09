@@ -98,6 +98,7 @@ describe("LibraryReview", () => {
     await waitFor(() => {
       expect(clipboardMock.writeText).toHaveBeenCalledTimes(1);
     });
+    expect(screen.getByTestId("copy-setup-prompt").textContent).toContain("Copied");
 
     // Copied text includes app name, summary, and source reference
     expect(copiedText).toContain("secrets-manager");

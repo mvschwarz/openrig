@@ -335,4 +335,38 @@ describe("RigDetailPanel", () => {
     expect(screen.getByTestId("tab-chat")).toBeDefined();
     expect(screen.queryByTestId("tab-env")).toBeNull();
   });
+
+  it("keeps Env tab visible for service-backed rigs while env status is still loading", async () => {
+    mockFetch.mockImplementation((url: string) => {
+      if (url === "/api/rigs/summary") {
+        return Promise.resolve({
+          ok: true,
+          json: async () => [{ id: "rig-1", name: "my-rig", nodeCount: 1, latestSnapshotAt: null, latestSnapshotId: null, hasServices: true }],
+        });
+      }
+      if (url === "/api/ps") {
+        return Promise.resolve({
+          ok: true,
+          json: async () => [{ rigId: "rig-1", name: "my-rig", nodeCount: 1, runningCount: 1, status: "running", uptime: "5m" }],
+        });
+      }
+      if (url === "/api/rigs/rig-1/nodes") {
+        return Promise.resolve({ ok: true, json: async () => [] });
+      }
+      if (url.includes("/snapshots")) {
+        return Promise.resolve({ ok: true, json: async () => [] });
+      }
+      if (url === "/api/rigs/rig-1/env") {
+        return new Promise(() => {}) as Promise<Response>;
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) });
+    });
+
+    renderPanel("rig-1");
+    await screen.findByText("my-rig");
+
+    expect(screen.getByTestId("tab-info")).toBeDefined();
+    expect(screen.getByTestId("tab-chat")).toBeDefined();
+    expect(screen.getByTestId("tab-env")).toBeDefined();
+  });
 });

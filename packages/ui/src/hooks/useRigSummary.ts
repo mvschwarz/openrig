@@ -4,6 +4,7 @@ export interface RigSummary {
   id: string;
   name: string;
   nodeCount: number;
+  hasServices?: boolean;
   latestSnapshotAt: string | null;
   latestSnapshotId: string | null;
 }

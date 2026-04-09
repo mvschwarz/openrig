@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { Button } from "@/components/ui/button";
 import { WorkspacePage } from "./WorkspacePage.js";
@@ -55,6 +56,7 @@ function LibraryAgentReviewPage({ review }: { review: LibraryAgentReview }) {
 
 function LibraryRigReviewContent({ review }: { review: LibraryRigReview }) {
   const navigate = useNavigate();
+  const [setupPromptCopied, setSetupPromptCopied] = useState(false);
   const { data: agentEntries = [] } = useSpecLibrary("agent");
   const agentEntryByName = new Map(agentEntries.map((entry) => [entry.name, entry]));
   const reviewPods = review.pods ?? [];
@@ -81,13 +83,18 @@ function LibraryRigReviewContent({ review }: { review: LibraryRigReview }) {
                   variant="outline"
                   size="sm"
                   data-testid="copy-setup-prompt"
-                  onClick={() => void copyText(buildSetupPrompt({
-                    name: review.name,
-                    summary: review.summary,
-                    sourcePath: review.sourcePath,
-                  }))}
+                  onClick={() => void (async () => {
+                    const copied = await copyText(buildSetupPrompt({
+                      name: review.name,
+                      summary: review.summary,
+                      sourcePath: review.sourcePath,
+                    }));
+                    if (!copied) return;
+                    setSetupPromptCopied(true);
+                    window.setTimeout(() => setSetupPromptCopied(false), 2000);
+                  })()}
                 >
-                  Copy Setup Prompt
+                  {setupPromptCopied ? "Copied" : "Copy Setup Prompt"}
                 </Button>
               )}
               <Button variant="outline" size="sm" onClick={() => navigate({ to: "/import" })}>Import</Button>

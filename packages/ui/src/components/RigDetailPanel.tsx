@@ -70,8 +70,7 @@ export function RigDetailPanel({ rigId, onClose }: RigDetailPanelProps) {
   const startRig = useStartRig(rigId);
   const teardownRig = useTeardownRig(rigId);
 
-  const { data: envData } = useRigEnv(rigId);
-  const hasEnv = envData?.hasServices === true;
+  const { data: envData, isPending: envLoading, error: envError } = useRigEnv(rigId);
 
   const [activeTab, setActiveTab] = useState<"info" | "env" | "chat">("info");
   const [confirmRestore, setConfirmRestore] = useState<string | null>(null);
@@ -86,6 +85,7 @@ export function RigDetailPanel({ rigId, onClose }: RigDetailPanelProps) {
   const expandRig = useExpandRig();
 
   const summary: RigSummary | undefined = summaries?.find((s) => s.id === rigId);
+  const hasEnv = summary?.hasServices === true || envData?.hasServices === true;
   const ps: PsEntry | undefined = psEntries?.find((p) => p.rigId === rigId);
   const nodeInventory = Array.isArray(rawNodeInventory) ? rawNodeInventory : [];
   const pods = Array.from(
@@ -212,8 +212,19 @@ export function RigDetailPanel({ rigId, onClose }: RigDetailPanelProps) {
 
       {activeTab === "chat" ? (
         <RigChatPanel rigId={rigId} />
-      ) : activeTab === "env" && hasEnv && envData ? (
-        <RigEnvPanel rigId={rigId} envData={envData} />
+      ) : activeTab === "env" && hasEnv ? (
+        envData ? (
+          <RigEnvPanel rigId={rigId} envData={envData} />
+        ) : (
+          <div className="flex-1 overflow-y-auto">
+            <section className="px-4 py-3 border-b border-stone-100">
+              <div className="font-mono text-[8px] text-stone-400 uppercase tracking-wider mb-2">Environment</div>
+              <div className="font-mono text-[10px] text-stone-600">
+                {envLoading ? "Loading environment status..." : envError ? "Environment status unavailable." : "Waiting for environment status..."}
+              </div>
+            </section>
+          </div>
+        )
       ) : (
       <div className="flex-1 overflow-y-auto">
       {/* Identity */}

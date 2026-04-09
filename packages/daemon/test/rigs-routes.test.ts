@@ -371,6 +371,31 @@ describe("Rig CRUD routes", () => {
     expect(beta.nodeCount).toBe(1);
   });
 
+  it("GET /api/rigs/summary -> includes hasServices from persisted rig services metadata", async () => {
+    const rig1 = repo.createRig("svc-rig");
+    repo.addNode(rig1.id, "worker", { runtime: "claude-code" });
+    repo.setServicesRecord(rig1.id, {
+      kind: "compose",
+      specJson: JSON.stringify({ services: { kind: "compose", compose_file: "svc.compose.yaml" } }),
+      rigRoot: "/tmp",
+      composeFile: "svc.compose.yaml",
+      projectName: "svc-rig",
+      latestReceiptJson: null,
+    });
+
+    const rig2 = repo.createRig("plain-rig");
+    repo.addNode(rig2.id, "worker", { runtime: "claude-code" });
+
+    const res = await app.request("/api/rigs/summary");
+    expect(res.status).toBe(200);
+    const body = await res.json();
+
+    const svcRig = body.find((r: { name: string }) => r.name === "svc-rig");
+    const plainRig = body.find((r: { name: string }) => r.name === "plain-rig");
+    expect(svcRig.hasServices).toBe(true);
+    expect(plainRig.hasServices).toBe(false);
+  });
+
   it("GET /api/rigs/summary -> multiple snapshots with explicit timestamps, newest wins", async () => {
     const rig = repo.createRig("gamma");
     repo.addNode(rig.id, "worker", { runtime: "codex" });
