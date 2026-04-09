@@ -26,6 +26,7 @@ const AGENT_SPECS = [
   "agents/orchestration/orchestrator/agent.yaml",
   "agents/research/analyst/agent.yaml",
   "agents/research/synthesizer/agent.yaml",
+  "agents/apps/vault-specialist/agent.yaml",
 ];
 
 const SHARED_AGENT_SPEC = "agents/shared/agent.yaml";
@@ -289,6 +290,65 @@ describe("Starter specs", () => {
         expect(content).toContain(`\`${skillId}\``);
       }
     }
+  });
+
+  it("built-in library scan discovers vault-specialist agent", () => {
+    const lib = new SpecLibraryService({
+      roots: [{ path: SPECS_ROOT, sourceType: "builtin" }],
+      specReviewService,
+    });
+    lib.scan();
+
+    const agents = lib.list({ kind: "agent" });
+    const names = agents.map((e) => e.name);
+    expect(names).toContain("vault-specialist");
+  });
+
+  it("vault-specialist agent has correct profile, startup, guidance, and skill files", () => {
+    const specPath = "agents/apps/vault-specialist/agent.yaml";
+    const agentDir = join(SPECS_ROOT, "agents/apps/vault-specialist");
+    const yaml = readFileSync(join(SPECS_ROOT, specPath), "utf-8");
+    const raw = parseAgentSpec(yaml) as Record<string, unknown>;
+    const result = validateAgentSpec(raw);
+    expect(result.valid).toBe(true);
+
+    // Default profile includes vault-user skill
+    const profiles = (raw["profiles"] as Record<string, Record<string, unknown>>) ?? {};
+    const defaultProfile = profiles["default"] ?? {};
+    const uses = (defaultProfile["uses"] as Record<string, unknown>) ?? {};
+    const skills = (uses["skills"] as string[]) ?? [];
+    expect(skills).toContain("vault-user");
+
+    // Startup includes guidance/role.md and startup/context.md
+    const startup = (raw["startup"] ?? {}) as Record<string, unknown>;
+    const startupFiles = (startup["files"] as Array<{ path: string; required?: boolean; delivery_hint?: string }>) ?? [];
+    const roleStartup = startupFiles.find((f) => f.path.includes("role.md"));
+    expect(roleStartup).toBeDefined();
+    expect(roleStartup!.required).toBe(true);
+    expect(roleStartup!.delivery_hint).toBe("send_text");
+    const contextStartup = startupFiles.find((f) => f.path.includes("context.md"));
+    expect(contextStartup).toBeDefined();
+    expect(contextStartup!.required).toBe(true);
+    expect(contextStartup!.delivery_hint).toBe("send_text");
+
+    // Guidance references role.md
+    const resources = (raw["resources"] ?? {}) as Record<string, unknown>;
+    const guidance = resources["guidance"] as Array<{ path: string }> | undefined;
+    expect(guidance).toBeDefined();
+    const roleGuidance = guidance!.find((g) => g.path.includes("role.md"));
+    expect(roleGuidance).toBeDefined();
+
+    // Files exist on disk
+    expect(existsSync(join(agentDir, "guidance/role.md"))).toBe(true);
+    expect(existsSync(join(agentDir, "startup/context.md"))).toBe(true);
+    expect(existsSync(join(agentDir, "skills/vault-user/SKILL.md"))).toBe(true);
+
+    // Role guidance is substantive
+    const roleContent = readFileSync(join(agentDir, "guidance/role.md"), "utf-8");
+    expect(roleContent).toContain("# Role:");
+    expect(roleContent.length).toBeGreaterThan(200);
+    expect(roleContent.toLowerCase()).toContain("responsibilities");
+    expect(roleContent.toLowerCase()).toContain("principles");
   });
 
   it("demo culture and orchestration skill require full topology settlement before dispatch", () => {
