@@ -189,7 +189,7 @@ export function getNodeInventory(db: Database.Database, rigId: string): NodeInve
     restoreOutcome: deriveRestoreOutcome(db, rigId, row.node_id),
     tmuxAttachCommand: row.binding_attachment_type === "tmux" && row.session_name ? `tmux attach -t ${row.session_name}` : null,
     resumeCommand: computeResumeCommand(row.runtime, row.resume_token),
-    latestError: getLatestError(db, rigId, row.node_id),
+    latestError: row.startup_status === "ready" ? null : getLatestError(db, rigId, row.node_id),
     // Extended fields
     model: row.model,
     agentRef: row.agent_ref,

@@ -8,6 +8,7 @@ Load these packaged skills now before doing substantive work:
 - `using-superpowers`
 - `openrig-user`
 - `orchestration-team`
+- `mental-model-ha`
 - `systematic-debugging`
 - `brainstorming`
 - `writing-plans`

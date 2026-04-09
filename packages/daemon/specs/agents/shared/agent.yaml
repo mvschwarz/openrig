@@ -20,6 +20,8 @@ resources:
       path: skills/process/using-superpowers
     - id: openrig-user
       path: skills/core/openrig-user
+    - id: mental-model-ha
+      path: skills/mental-model-ha
     - id: systematic-debugging
       path: skills/process/systematic-debugging
     - id: test-driven-development

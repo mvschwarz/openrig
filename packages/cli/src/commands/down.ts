@@ -14,6 +14,8 @@ interface TeardownResult {
   errors: string[];
 }
 
+const LONG_RUNNING_TIMEOUT_MS = 45_000;
+
 /**
  * `rig down <rigId>` — tear down a rig.
  * @param depsOverride - injectable deps for testing
@@ -46,7 +48,7 @@ export function downCommand(depsOverride?: StatusDeps): Command {
         delete: opts.delete ?? false,
         force: opts.force ?? false,
         snapshot: opts.snapshot ?? false,
-      });
+      }, { timeoutMs: LONG_RUNNING_TIMEOUT_MS });
 
       if (opts.json) {
         console.log(JSON.stringify(res.data));

@@ -4,6 +4,8 @@ import { getDaemonStatus, getDaemonUrl } from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 
+const LONG_RUNNING_TIMEOUT_MS = 45_000;
+
 export function envCommand(depsOverride?: StatusDeps): Command {
   const cmd = new Command("env").description("Manage rig environment services");
   const getDeps = () => depsOverride ?? { lifecycleDeps: realDeps(), clientFactory: (url: string) => new DaemonClient(url) };
@@ -117,6 +119,7 @@ export function envCommand(depsOverride?: StatusDeps): Command {
       const res = await client.post<{ ok: boolean; error?: string }>(
         `/api/rigs/${encodeURIComponent(rigId)}/env/down`,
         { volumes: opts.volumes ?? false },
+        { timeoutMs: LONG_RUNNING_TIMEOUT_MS },
       );
 
       if (res.status >= 400 || !res.data.ok) {

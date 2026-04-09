@@ -107,13 +107,38 @@ describe("ComposeServicesAdapter", () => {
   });
 
   it("status returns an honest error for unparseable non-empty output", async () => {
-    const exec = vi.fn<ExecFn>().mockResolvedValue("not-json");
+    const exec = vi.fn<ExecFn>().mockResolvedValue("{not-json");
     const adapter = new ComposeServicesAdapter(exec);
 
     const result = await adapter.status({ composeFile: "/tmp/dc.yml", projectName: "rig" });
 
     expect(result.ok).toBe(false);
     expect(result.error).toContain("unparseable");
+  });
+
+  it("status ignores warning-only output and returns an empty service list", async () => {
+    const exec = vi.fn<ExecFn>().mockResolvedValue(
+      'time="2026-04-09T06:06:45-07:00" level=warning msg="compose warning"',
+    );
+    const adapter = new ComposeServicesAdapter(exec);
+
+    const result = await adapter.status({ composeFile: "/tmp/dc.yml", projectName: "rig" });
+
+    expect(result.ok).toBe(true);
+    expect(result.services).toEqual([]);
+  });
+
+  it("status ignores warning lines before JSON payload", async () => {
+    const exec = vi.fn<ExecFn>().mockResolvedValue(
+      'time="2026-04-09T06:06:45-07:00" level=warning msg="compose warning"\n'
+        + COMPOSE_PS_LINE,
+    );
+    const adapter = new ComposeServicesAdapter(exec);
+
+    const result = await adapter.status({ composeFile: "/tmp/dc.yml", projectName: "rig" });
+
+    expect(result.ok).toBe(true);
+    expect(result.services[0]!.name).toBe("vault");
   });
 
   it("logs calls docker compose logs with service filter", async () => {
@@ -137,6 +162,22 @@ describe("ComposeServicesAdapter", () => {
     expect(result.services[0]!.name).toBe("vault");
     expect(result.services[0]!.state).toBe("running");
     expect(result.services[0]!.health).toBe("healthy");
+  });
+
+  it("up surfaces underlying compose output on failure", async () => {
+    const exec = vi.fn<ExecFn>().mockRejectedValue(
+      Object.assign(new Error("Command failed: docker compose up -d"), {
+        stdout: "unknown shorthand flag: 'f' in -f",
+        stderr: "",
+      }),
+    );
+    const adapter = new ComposeServicesAdapter(exec);
+
+    const result = await adapter.up({ composeFile: "/tmp/docker-compose.yml", projectName: "my-rig" });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.message).toContain("unknown shorthand flag");
   });
 });
 

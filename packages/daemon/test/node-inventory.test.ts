@@ -233,6 +233,20 @@ describe("Node Inventory Projection", () => {
     expect(entry?.latestError).toBe("harness launch timeout after 30s");
   });
 
+  it("clears stale latestError when the newest session is ready", () => {
+    seedPodAwareRig(db);
+    seedSession(db, "node-1", "dev-impl@test-rig", { startupStatus: "ready" });
+    seedEvent(db, "rig-1", "node-1", "node.startup_failed", {
+      rigId: "rig-1",
+      nodeId: "node-1",
+      error: "old startup failure",
+    });
+
+    const entries = getNodeInventory(db, "rig-1");
+    const entry = entries.find((e) => e.logicalId === "dev.impl");
+    expect(entry?.latestError).toBeNull();
+  });
+
   // Test 10: Legacy rigs produce inventory with legacy session names
   it("legacy rigs produce inventory with legacy session names", () => {
     db.prepare("INSERT INTO rigs (id, name) VALUES (?, ?)").run("rig-leg", "r01");

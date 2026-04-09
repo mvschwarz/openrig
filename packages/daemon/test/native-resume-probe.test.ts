@@ -113,6 +113,27 @@ describe("native resume probe", () => {
     });
   });
 
+  it("classifies the current Claude edit-approval footer as resumed", () => {
+    expect(
+      assessNativeResumeProbe({
+        runtime: "claude-code",
+        paneCommand: "2.x",
+        paneContent: [
+          "Loading startup skills and recovering identity.",
+          "",
+          "────────────────────────────────────────────────────────────────────────────────",
+          "❯ ",
+          "────────────────────────────────────────────────────────────────────────────────",
+          "  ⏵⏵ accept edits on (shift+tab to cycle)                     ● high · /effort",
+        ].join("\n"),
+      })
+    ).toEqual({
+      status: "resumed",
+      code: "active_runtime",
+      detail: "Claude is running with an active interactive TUI in the probe pane.",
+    });
+  });
+
   it("classifies Codex missing-session output as failed", () => {
     expect(
       assessNativeResumeProbe({

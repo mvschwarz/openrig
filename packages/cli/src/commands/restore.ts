@@ -4,6 +4,8 @@ import { getDaemonStatus, getDaemonUrl, type LifecycleDeps } from "../daemon-lif
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 
+const LONG_RUNNING_TIMEOUT_MS = 45_000;
+
 export function restoreCommand(depsOverride?: StatusDeps): Command {
   const cmd = new Command("restore").description("Restore a rig from a snapshot");
   const getDeps = () => depsOverride ?? { lifecycleDeps: realDeps(), clientFactory: (url: string) => new DaemonClient(url) };
@@ -28,7 +30,11 @@ export function restoreCommand(depsOverride?: StatusDeps): Command {
       const client = deps.clientFactory(getDaemonUrl(status));
       const rigId = opts.rig;
 
-      const res = await client.post<{ nodes?: Array<{ nodeId: string; logicalId: string; status: string; error?: string }>; attachCommand?: string }>(`/api/rigs/${encodeURIComponent(rigId)}/restore/${encodeURIComponent(snapshotId)}`);
+      const res = await client.post<{ nodes?: Array<{ nodeId: string; logicalId: string; status: string; error?: string }>; attachCommand?: string }>(
+        `/api/rigs/${encodeURIComponent(rigId)}/restore/${encodeURIComponent(snapshotId)}`,
+        undefined,
+        { timeoutMs: LONG_RUNNING_TIMEOUT_MS },
+      );
 
       if (res.status === 404) {
         console.error(`Snapshot "${snapshotId}" or rig "${rigId}" not found. List snapshots with: rig snapshot list --rig ${rigId}`);

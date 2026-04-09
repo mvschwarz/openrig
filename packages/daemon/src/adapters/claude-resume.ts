@@ -59,7 +59,7 @@ export class ClaudeResumeAdapter {
 
   private async verifyResume(tmuxSessionName: string): Promise<ResumeResult> {
     const pollMs = this.options.pollMs ?? 200;
-    const maxWaitMs = this.options.maxWaitMs ?? 3_000;
+    const maxWaitMs = this.options.maxWaitMs ?? 5_000;
     const sleepFn = this.options.sleep ?? sleep;
     const attempts = Math.max(1, Math.floor(maxWaitMs / Math.max(pollMs, 1)) + 1);
 

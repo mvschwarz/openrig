@@ -15,6 +15,9 @@ const RIG_SPECS = [
   "rigs/launch/demo/rig.yaml",
   "rigs/preview/product-team/rig.yaml",
 ];
+const PROOF_RIG_SPECS = [
+  "secrets-manager.yaml",
+];
 
 const AGENT_SPECS = [
   "agents/design/product-designer/agent.yaml",
@@ -110,6 +113,29 @@ describe("Starter specs", () => {
 
       const result = rigPreflight(input);
       // Should be ready with no blocking errors (warnings are acceptable)
+      expect(result.ready).toBe(true);
+      if (result.errors.length > 0) {
+        throw new Error(`Preflight failed for ${file}: ${result.errors.join("; ")}`);
+      }
+    }
+  });
+
+  it("service-backed proof rigs pass canonical rigPreflight with explicit cwdOverride", () => {
+    const fsOps = {
+      readFile: (p: string) => readFileSync(p, "utf-8"),
+      exists: (p: string) => existsSync(p),
+    };
+
+    for (const file of PROOF_RIG_SPECS) {
+      const yaml = readFileSync(join(SPECS_ROOT, file), "utf-8");
+      const input: RigPreflightInput = {
+        rigSpecYaml: yaml,
+        rigRoot: dirname(join(SPECS_ROOT, file)),
+        cwdOverride: "/workspace/project",
+        fsOps,
+      };
+
+      const result = rigPreflight(input);
       expect(result.ready).toBe(true);
       if (result.errors.length > 0) {
         throw new Error(`Preflight failed for ${file}: ${result.errors.join("; ")}`);

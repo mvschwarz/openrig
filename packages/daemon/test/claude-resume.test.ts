@@ -193,5 +193,31 @@ describe("ClaudeResumeAdapter", () => {
 
       expect(result).toEqual({ ok: true });
     });
+
+    it("treats the edit-approval footer as a live Claude TUI during resume verification", async () => {
+      const getPaneCommand = vi
+        .fn<(_: string) => Promise<string | null>>()
+        .mockResolvedValueOnce("2.1.89");
+      const capturePaneContent = vi
+        .fn<(_: string, __?: number) => Promise<string | null>>()
+        .mockResolvedValueOnce(
+          [
+            "Loading startup skills and recovering identity.",
+            "",
+            "────────────────────────────────────────────────────────────────────────────────",
+            "❯ ",
+            "────────────────────────────────────────────────────────────────────────────────",
+            "  ⏵⏵ accept edits on (shift+tab to cycle)                     ● high · /effort",
+          ].join("\n")
+        );
+      const adapter = new ClaudeResumeAdapter(
+        mockTmux({ getPaneCommand, capturePaneContent }),
+        { pollMs: 0, maxWaitMs: 1, sleep: async () => {} }
+      );
+
+      const result = await adapter.resume("r99-demo1-lead", "claude_name", "my-session", "/repo");
+
+      expect(result).toEqual({ ok: true });
+    });
   });
 });

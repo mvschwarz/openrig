@@ -2,7 +2,11 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+const warnedKeys = new Set<string>();
+
 export function getOpenRigHome(): string {
+  const configured = readOpenRigEnv("OPENRIG_HOME", "RIGGED_HOME");
+  if (configured !== undefined) return configured;
   return join(homedir(), ".openrig");
 }
 
@@ -12,8 +16,6 @@ export function getLegacyRiggedHome(): string {
 
 export const OPENRIG_HOME = getOpenRigHome();
 export const LEGACY_RIGGED_HOME = getLegacyRiggedHome();
-
-const warnedKeys = new Set<string>();
 
 function warnOnce(key: string, message: string): void {
   if (warnedKeys.has(key)) return;

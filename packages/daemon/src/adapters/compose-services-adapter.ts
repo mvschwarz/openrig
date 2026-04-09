@@ -30,6 +30,24 @@ function sq(s: string): string {
   return "'" + s.replace(/'/g, "'\"'\"'") + "'";
 }
 
+function formatExecError(err: unknown): string {
+  if (err instanceof Error) {
+    const execErr = err as Error & { stdout?: unknown; stderr?: unknown };
+    const stdout = typeof execErr.stdout === "string"
+      ? execErr.stdout.trim()
+      : "";
+    const stderr = typeof execErr.stderr === "string"
+      ? execErr.stderr.trim()
+      : "";
+    const details = [stdout, stderr].filter(Boolean).join("\n");
+    if (details && !err.message.includes(details)) {
+      return `${err.message}\n${details}`;
+    }
+    return err.message;
+  }
+  return String(err);
+}
+
 // -- Adapter --
 
 /**
@@ -55,7 +73,7 @@ export class ComposeServicesAdapter {
       await this.exec(cmd);
       return { ok: true };
     } catch (err) {
-      return { ok: false, code: "compose_up_failed", message: (err as Error).message };
+      return { ok: false, code: "compose_up_failed", message: formatExecError(err) };
     }
   }
 
@@ -77,7 +95,7 @@ export class ComposeServicesAdapter {
       await this.exec(cmd);
       return { ok: true };
     } catch (err) {
-      return { ok: false, code: "compose_down_failed", message: (err as Error).message };
+      return { ok: false, code: "compose_down_failed", message: formatExecError(err) };
     }
   }
 
@@ -91,13 +109,14 @@ export class ComposeServicesAdapter {
     const cmd = `docker compose ${args} ps --format json 2>&1`;
     try {
       const output = await this.exec(cmd);
-      const services = this.parseComposePs(output);
-      if (output.trim() !== "" && services.length === 0) {
+      const parseInput = this.extractComposePsPayload(output);
+      const services = this.parseComposePs(parseInput);
+      if (parseInput !== "" && services.length === 0) {
         return { ok: false, services: [], error: "docker compose ps returned unparseable JSON output" };
       }
       return { ok: true, services };
     } catch (err) {
-      return { ok: false, services: [], error: (err as Error).message };
+      return { ok: false, services: [], error: formatExecError(err) };
     }
   }
 
@@ -117,7 +136,7 @@ export class ComposeServicesAdapter {
       const output = await this.exec(cmd);
       return { ok: true, output };
     } catch (err) {
-      return { ok: false, output: "", error: (err as Error).message };
+      return { ok: false, output: "", error: formatExecError(err) };
     }
   }
 
@@ -127,7 +146,7 @@ export class ComposeServicesAdapter {
       await this.exec(command);
       return { ok: true };
     } catch (err) {
-      return { ok: false, code: "checkpoint_export_failed", message: (err as Error).message };
+      return { ok: false, code: "checkpoint_export_failed", message: formatExecError(err) };
     }
   }
 
@@ -137,7 +156,7 @@ export class ComposeServicesAdapter {
       await this.exec(command);
       return { ok: true };
     } catch (err) {
-      return { ok: false, code: "checkpoint_import_failed", message: (err as Error).message };
+      return { ok: false, code: "checkpoint_import_failed", message: formatExecError(err) };
     }
   }
 
@@ -176,6 +195,19 @@ export class ComposeServicesAdapter {
       }
     }
     return parts.join(" ");
+  }
+
+  private extractComposePsPayload(output: string): string {
+    const trimmed = output.trim();
+    if (!trimmed) return "";
+    if (trimmed.startsWith("{") || trimmed.startsWith("[")) return trimmed;
+
+    const jsonLines = trimmed
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.startsWith("{") || line.startsWith("["));
+
+    return jsonLines.join("\n");
   }
 
   /** Parse docker compose ps --format json. Handles both one-object-per-line and JSON array formats. */

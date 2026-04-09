@@ -151,8 +151,13 @@ export function isProbeShellReady(input: ProbeShellReadyInput): boolean {
 }
 
 function looksLikeClaudeTui(paneContent: string): boolean {
-  return paneContent.includes("Claude Code v")
-    && (paneContent.includes("? for shortcuts") || /(^|\n)\s*❯/.test(paneContent));
+  const hasPrompt = /(^|\n)\s*❯/.test(paneContent);
+  if (!hasPrompt) return false;
+
+  return (
+    paneContent.includes("Claude Code v")
+    || paneContent.includes("accept edits on")
+  );
 }
 
 function looksLikeClaudeTrustPrompt(paneContent: string): boolean {
