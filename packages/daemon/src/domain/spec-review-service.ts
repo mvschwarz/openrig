@@ -14,6 +14,26 @@ export interface SpecGraphData {
 
 // -- RigSpec review --
 
+export interface RigSpecServicesReview {
+  kind: "compose";
+  composeFile: string;
+  projectName?: string;
+  downPolicy?: string;
+  waitFor: Array<{
+    service?: string;
+    url?: string;
+    tcp?: string;
+    condition?: "healthy";
+  }>;
+  surfaces?: {
+    urls?: Array<{ name: string; url: string }>;
+    commands?: Array<{ name: string; command: string }>;
+  };
+  composePreview?: {
+    services: Array<{ name: string; image?: string }>;
+  };
+}
+
 interface RigSpecReviewBase {
   sourceState: SourceState;
   kind: "rig";
@@ -21,6 +41,7 @@ interface RigSpecReviewBase {
   version: string;
   summary?: string;
   cultureFile?: string;
+  services?: RigSpecServicesReview;
   graph: SpecGraphData;
   raw: string;
 }
@@ -177,6 +198,33 @@ export class SpecReviewService {
       graphEdges.push({ source: edge.from, target: edge.to, kind: edge.kind });
     }
 
+    // Extract services metadata if present
+    let services: RigSpecServicesReview | undefined;
+    const rawServices = obj["services"] as Record<string, unknown> | undefined;
+    if (rawServices && typeof rawServices === "object" && rawServices["kind"] === "compose") {
+      const rawWaitFor = (rawServices["wait_for"] as Array<Record<string, unknown>>) ?? [];
+      const rawSurfaces = rawServices["surfaces"] as Record<string, unknown> | undefined;
+
+      services = {
+        kind: "compose",
+        composeFile: rawServices["compose_file"] as string,
+        projectName: rawServices["project_name"] as string | undefined,
+        downPolicy: rawServices["down_policy"] as string | undefined,
+        waitFor: rawWaitFor.map((w) => ({
+          service: w["service"] as string | undefined,
+          url: w["url"] as string | undefined,
+          tcp: w["tcp"] as string | undefined,
+          condition: w["condition"] as "healthy" | undefined,
+        })),
+        ...(rawSurfaces ? {
+          surfaces: {
+            urls: (rawSurfaces["urls"] as Array<{ name: string; url: string }>) ?? undefined,
+            commands: (rawSurfaces["commands"] as Array<{ name: string; command: string }>) ?? undefined,
+          },
+        } : {}),
+      };
+    }
+
     return {
       sourceState,
       kind: "rig",
@@ -184,6 +232,7 @@ export class SpecReviewService {
       version,
       summary,
       cultureFile,
+      ...(services ? { services } : {}),
       format: "pod_aware",
       pods,
       edges: crossPodEdges,

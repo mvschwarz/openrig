@@ -81,6 +81,42 @@ startup:
       idempotent: true
 `;
 
+const SERVICE_RIG_YAML = `
+version: "0.2"
+name: service-rig
+summary: A rig with services
+
+services:
+  kind: compose
+  compose_file: my-compose.yaml
+  project_name: test-project
+  down_policy: down
+  wait_for:
+    - url: http://127.0.0.1:8200/v1/sys/health
+  surfaces:
+    urls:
+      - name: Web UI
+        url: http://127.0.0.1:8200/ui
+      - name: API
+        url: http://127.0.0.1:8200/v1
+    commands:
+      - name: Status
+        command: "vault status"
+
+pods:
+  - id: dev
+    label: Development
+    members:
+      - id: impl
+        agent_ref: "local:agents/impl"
+        runtime: claude-code
+        profile: default
+        cwd: .
+    edges: []
+
+edges: []
+`;
+
 describe("SpecReviewService", () => {
   const svc = new SpecReviewService();
 
@@ -150,5 +186,81 @@ describe("SpecReviewService", () => {
 
   it("reviewAgentSpec invalid YAML throws with validation errors", () => {
     expect(() => svc.reviewAgentSpec("foo: bar\n", "draft")).toThrow();
+  });
+
+  it("reviewRigSpec returns structured services for service-backed rigs", () => {
+    const result = svc.reviewRigSpec(SERVICE_RIG_YAML, "library_item");
+
+    expect(result.format).toBe("pod_aware");
+    const services = (result as Record<string, unknown>)["services"] as Record<string, unknown> | undefined;
+    expect(services).toBeDefined();
+    expect(services!["kind"]).toBe("compose");
+    expect(services!["composeFile"]).toBe("my-compose.yaml");
+    expect(services!["projectName"]).toBe("test-project");
+    expect(services!["downPolicy"]).toBe("down");
+
+    const waitFor = services!["waitFor"] as Array<Record<string, unknown>>;
+    expect(waitFor).toHaveLength(1);
+    expect(waitFor[0]!["url"]).toBe("http://127.0.0.1:8200/v1/sys/health");
+
+    const surfaces = services!["surfaces"] as Record<string, unknown>;
+    expect(surfaces).toBeDefined();
+    const urls = surfaces["urls"] as Array<Record<string, unknown>>;
+    expect(urls).toHaveLength(2);
+    expect(urls[0]!["name"]).toBe("Web UI");
+    expect(urls[0]!["url"]).toBe("http://127.0.0.1:8200/ui");
+    const commands = surfaces["commands"] as Array<Record<string, unknown>>;
+    expect(commands).toHaveLength(1);
+    expect(commands[0]!["name"]).toBe("Status");
+  });
+
+  it("reviewRigSpec preserves tcp and service+condition wait targets from real contract", () => {
+    const yaml = `
+version: "0.2"
+name: multi-wait-rig
+summary: Rig with diverse wait targets
+services:
+  kind: compose
+  compose_file: compose.yaml
+  wait_for:
+    - url: http://127.0.0.1:8080/health
+    - tcp: "127.0.0.1:5432"
+    - service: db
+      condition: healthy
+pods:
+  - id: dev
+    label: Dev
+    members:
+      - id: impl
+        agent_ref: "local:agents/impl"
+        runtime: claude-code
+        profile: default
+        cwd: .
+    edges: []
+edges: []
+`;
+    const result = svc.reviewRigSpec(yaml, "library_item");
+    const services = (result as Record<string, unknown>)["services"] as Record<string, unknown>;
+    expect(services).toBeDefined();
+
+    const waitFor = services["waitFor"] as Array<Record<string, unknown>>;
+    expect(waitFor).toHaveLength(3);
+
+    // url target
+    expect(waitFor[0]!["url"]).toBe("http://127.0.0.1:8080/health");
+
+    // tcp target — must be a string, not { host, port }
+    expect(waitFor[1]!["tcp"]).toBe("127.0.0.1:5432");
+    expect(typeof waitFor[1]!["tcp"]).toBe("string");
+
+    // service + condition target
+    expect(waitFor[2]!["service"]).toBe("db");
+    expect(waitFor[2]!["condition"]).toBe("healthy");
+  });
+
+  it("reviewRigSpec returns no services for non-service rigs", () => {
+    const result = svc.reviewRigSpec(POD_AWARE_YAML, "draft");
+    const services = (result as Record<string, unknown>)["services"];
+    expect(services).toBeUndefined();
   });
 });

@@ -20,6 +20,26 @@ interface NodeReview {
   model?: string;
 }
 
+export interface RigSpecServicesReview {
+  kind: "compose";
+  composeFile: string;
+  projectName?: string;
+  downPolicy?: string;
+  waitFor: Array<{
+    service?: string;
+    url?: string;
+    tcp?: string;
+    condition?: "healthy";
+  }>;
+  surfaces?: {
+    urls?: Array<{ name: string; url: string }>;
+    commands?: Array<{ name: string; command: string }>;
+  };
+  composePreview?: {
+    services: Array<{ name: string; image?: string }>;
+  };
+}
+
 export interface RigSpecReview {
   sourceState: string;
   kind: "rig";
@@ -27,6 +47,7 @@ export interface RigSpecReview {
   version: string;
   summary?: string;
   cultureFile?: string;
+  services?: RigSpecServicesReview;
   format: "pod_aware" | "legacy";
   pods?: PodReview[];
   nodes?: NodeReview[];

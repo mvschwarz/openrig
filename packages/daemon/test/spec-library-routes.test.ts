@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { Hono } from "hono";
-import { mkdtempSync, writeFileSync, rmSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { SpecLibraryService } from "../src/domain/spec-library-service.js";
@@ -136,5 +136,84 @@ describe("spec library routes", () => {
 
     const yaml = readFileSync(entries[0]!.sourcePath, "utf-8");
     expect(yaml).toContain("name: renamed-rig");
+  });
+
+  it("GET /api/specs/library/:id/review returns composePreview for service-backed rigs", async () => {
+    const svcDir = join(tmpDir, "rigs", "launch", "svc-rig");
+    mkdirSync(svcDir, { recursive: true });
+    writeFileSync(join(svcDir, "rig.yaml"), `
+version: "0.2"
+name: svc-rig
+summary: A service rig
+
+services:
+  kind: compose
+  compose_file: svc.compose.yaml
+  project_name: svc-test
+  down_policy: down
+  wait_for:
+    - url: http://127.0.0.1:8200/health
+
+pods:
+  - id: dev
+    label: Dev
+    members:
+      - id: impl
+        agent_ref: "local:agents/impl"
+        runtime: claude-code
+        profile: default
+        cwd: /tmp
+    edges: []
+edges: []
+`);
+    writeFileSync(join(svcDir, "svc.compose.yaml"), `
+version: "3.8"
+services:
+  vault:
+    image: hashicorp/vault:1.15
+    ports:
+      - "8200:8200"
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+`);
+
+    const svc = new SpecReviewService();
+    const svcLib = new SpecLibraryService({
+      roots: [{ path: tmpDir, sourceType: "user_file" }],
+      specReviewService: svc,
+    });
+    svcLib.scan();
+
+    const app = new Hono();
+    app.use("*", async (c, next) => {
+      c.set("specLibraryService" as never, svcLib);
+      c.set("specReviewService" as never, svc);
+      await next();
+    });
+    app.route("/api/specs/library", specLibraryRoutes());
+
+    const entries = svcLib.list({ kind: "rig" });
+    const svcEntry = entries.find((e) => e.name === "svc-rig");
+    expect(svcEntry).toBeDefined();
+
+    const res = await app.request(`/api/specs/library/${svcEntry!.id}/review`);
+    expect(res.status).toBe(200);
+    const body = await res.json() as Record<string, unknown>;
+    expect(body["name"]).toBe("svc-rig");
+
+    const services = body["services"] as Record<string, unknown>;
+    expect(services).toBeDefined();
+    expect(services["kind"]).toBe("compose");
+
+    const preview = services["composePreview"] as { services: Array<{ name: string; image?: string }> };
+    expect(preview).toBeDefined();
+    expect(preview.services).toHaveLength(2);
+    const names = preview.services.map((s) => s.name);
+    expect(names).toContain("vault");
+    expect(names).toContain("redis");
+    const vaultSvc = preview.services.find((s) => s.name === "vault");
+    expect(vaultSvc!.image).toBe("hashicorp/vault:1.15");
   });
 });

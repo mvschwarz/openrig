@@ -1,4 +1,7 @@
 import { Hono } from "hono";
+import { readFileSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { parse as parseYaml } from "yaml";
 import type { SpecLibraryService } from "../domain/spec-library-service.js";
 import { SpecReviewService, SpecReviewError } from "../domain/spec-review-service.js";
 
@@ -45,6 +48,24 @@ export function specLibraryRoutes(): Hono {
         review = svc.reviewRigSpec(result.yaml, "library_item") as unknown as Record<string, unknown>;
       } else {
         review = svc.reviewAgentSpec(result.yaml, "library_item") as unknown as Record<string, unknown>;
+      }
+
+      // Enrich service-backed rigs with composePreview (best-effort)
+      const services = review["services"] as Record<string, unknown> | undefined;
+      if (services && services["composeFile"]) {
+        try {
+          const composeFilePath = join(dirname(result.entry.sourcePath), services["composeFile"] as string);
+          const composeYaml = readFileSync(composeFilePath, "utf-8");
+          const composeDoc = parseYaml(composeYaml) as Record<string, unknown>;
+          const composeServices = composeDoc["services"] as Record<string, Record<string, unknown>> | undefined;
+          if (composeServices && typeof composeServices === "object") {
+            const preview = Object.entries(composeServices).map(([name, svc]) => ({
+              name,
+              image: (svc["image"] as string) ?? undefined,
+            }));
+            services["composePreview"] = { services: preview };
+          }
+        } catch { /* best-effort: missing compose file = no preview */ }
       }
 
       // Add library provenance
