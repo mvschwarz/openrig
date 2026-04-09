@@ -104,7 +104,7 @@ describe("Explorer sidebar", () => {
       }
       if (url.includes("/nodes")) {
         return { ok: true, json: async () => [
-          { rigId: "rig-1", rigName: "test-rig", logicalId: "dev.impl", podId: "dev", nodeKind: "agent", runtime: "claude-code", startupStatus: "ready", canonicalSessionName: "dev-impl@test-rig" },
+          { rigId: "rig-1", rigName: "test-rig", logicalId: "dev.impl", podId: "dev", nodeKind: "agent", runtime: "claude-code", startupStatus: "ready", canonicalSessionName: "dev.impl@test-rig" },
         ]};
       }
       return { ok: true, json: async () => [] };
@@ -137,7 +137,7 @@ describe("Explorer sidebar", () => {
       }
       if (url.includes("/nodes")) {
         return { ok: true, json: async () => [
-          { rigId: "rig-1", rigName: "test-rig", logicalId: "dev.impl", podId: "dev", nodeKind: "agent", runtime: "claude-code", startupStatus: "ready", canonicalSessionName: "dev-impl@test-rig" },
+          { rigId: "rig-1", rigName: "test-rig", logicalId: "dev.impl", podId: "dev", nodeKind: "agent", runtime: "claude-code", startupStatus: "ready", canonicalSessionName: "dev.impl@test-rig" },
         ]};
       }
       return { ok: true, json: async () => [] };

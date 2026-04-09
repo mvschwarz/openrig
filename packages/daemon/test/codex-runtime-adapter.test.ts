@@ -251,7 +251,7 @@ describe("Codex runtime adapter", () => {
       sleep: async () => {},
     });
 
-    const result = await adapter.launchHarness(makeBinding(), { name: "dev-qa@test-rig" });
+    const result = await adapter.launchHarness(makeBinding(), { name: "dev.qa@test-rig" });
 
     expect(result.ok).toBe(true);
     const sendText = tmux.sendText as ReturnType<typeof vi.fn>;
@@ -273,7 +273,7 @@ describe("Codex runtime adapter", () => {
       sleep: async () => {},
     });
 
-    const result = await adapter.launchHarness(makeBinding(), { name: "dev-qa@test-rig" });
+    const result = await adapter.launchHarness(makeBinding(), { name: "dev.qa@test-rig" });
 
     expect(result).toEqual({
       ok: true,
@@ -308,7 +308,7 @@ describe("Codex runtime adapter", () => {
       sleep: async () => {},
     });
 
-    const result = await adapter.launchHarness(makeBinding(), { name: "dev-qa@test-rig" });
+    const result = await adapter.launchHarness(makeBinding(), { name: "dev.qa@test-rig" });
 
     expect(result).toEqual({
       ok: true,
@@ -321,7 +321,7 @@ describe("Codex runtime adapter", () => {
     const tmux = mockTmux();
     const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs() });
 
-    const result = await adapter.launchHarness(makeBinding(), { name: "dev-qa@test-rig", resumeToken: "sess-456" });
+    const result = await adapter.launchHarness(makeBinding(), { name: "dev.qa@test-rig", resumeToken: "sess-456" });
 
     expect(result.ok).toBe(true);
     const sendText = tmux.sendText as ReturnType<typeof vi.fn>;

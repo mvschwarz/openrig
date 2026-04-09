@@ -12,15 +12,15 @@ export function transcriptCommand(depsOverride?: StatusDeps): Command {
   };
 
   cmd
-    .argument("<session>", "Session name (e.g. dev-impl@my-rig)")
+    .argument("<session>", "Session name (e.g. dev.impl@my-rig)")
     .option("--tail <lines>", "Show last N lines (default: 50)", "50")
     .option("--grep <pattern>", "Search for lines matching pattern (regex)")
     .option("--json", "JSON output for agents")
     .addHelpText("after", `
 Examples:
-  rig transcript dev-impl@my-rig --tail 100
-  rig transcript dev-impl@my-rig --grep "decision|architecture"
-  rig transcript dev-impl@my-rig --json`)
+  rig transcript dev.impl@my-rig --tail 100
+  rig transcript dev.impl@my-rig --grep "decision|architecture"
+  rig transcript dev.impl@my-rig --json`)
     .action(async (session: string, opts: { tail?: string; grep?: string; json?: boolean }) => {
       const deps = getDeps();
       const status = await getDaemonStatus(deps.lifecycleDeps);

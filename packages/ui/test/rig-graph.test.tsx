@@ -321,10 +321,10 @@ describe("RigGraph", () => {
           runtime: "claude-code",
           model: null,
           status: "running",
-          binding: { tmuxSession: "dev-impl@test-rig", cmuxSurface: null },
+          binding: { tmuxSession: "dev.impl@test-rig", cmuxSurface: null },
           nodeKind: "agent",
           startupStatus: "ready",
-          canonicalSessionName: "dev-impl@test-rig",
+          canonicalSessionName: "dev.impl@test-rig",
           podId: "dev",
           restoreOutcome: "n-a",
           resumeToken: null,
@@ -553,8 +553,8 @@ describe("RigNode", () => {
       model: null,
       status: "running",
       startupStatus: "ready" as const,
-      canonicalSessionName: "dev-impl@test-rig",
-      binding: { tmuxSession: "dev-impl@test-rig", cmuxSurface: "s1" },
+      canonicalSessionName: "dev.impl@test-rig",
+      binding: { tmuxSession: "dev.impl@test-rig", cmuxSurface: "s1" },
       resumeToken: "abc-123",
     };
 
@@ -607,8 +607,8 @@ describe("RigNode", () => {
       model: null,
       status: "running",
       startupStatus: "ready" as const,
-      canonicalSessionName: "dev-impl@test-rig",
-      binding: { tmuxSession: "dev-impl@test-rig", cmuxSurface: null },
+      canonicalSessionName: "dev.impl@test-rig",
+      binding: { tmuxSession: "dev.impl@test-rig", cmuxSurface: null },
       resumeToken: "abc-123",
     };
 
@@ -620,7 +620,7 @@ describe("RigNode", () => {
 
     fireEvent.click(screen.getByTestId("toolbar-copy-attach"));
 
-    expect(writeText).toHaveBeenCalledWith("tmux attach -t dev-impl@test-rig");
+    expect(writeText).toHaveBeenCalledWith("tmux attach -t dev.impl@test-rig");
     await waitFor(() => {
       expect(screen.getByTestId("toolbar-copy-attach").textContent?.toLowerCase()).toContain("copied");
     });
@@ -641,8 +641,8 @@ describe("RigNode", () => {
       model: null,
       status: "running",
       startupStatus: "ready" as const,
-      canonicalSessionName: "dev-impl@test-rig",
-      binding: { tmuxSession: "dev-impl@test-rig", cmuxSurface: null },
+      canonicalSessionName: "dev.impl@test-rig",
+      binding: { tmuxSession: "dev.impl@test-rig", cmuxSurface: null },
       resumeToken: "abc-123",
     };
 
@@ -654,7 +654,7 @@ describe("RigNode", () => {
 
     fireEvent.click(screen.getByTestId("toolbar-copy-attach"));
 
-    expect(writeText).toHaveBeenCalledWith("tmux attach -t dev-impl@test-rig");
+    expect(writeText).toHaveBeenCalledWith("tmux attach -t dev.impl@test-rig");
   });
 
   it("clicking the resume action copies the resume command", async () => {
@@ -672,8 +672,8 @@ describe("RigNode", () => {
       model: null,
       status: "running",
       startupStatus: "ready" as const,
-      canonicalSessionName: "dev-impl@test-rig",
-      binding: { tmuxSession: "dev-impl@test-rig", cmuxSurface: null },
+      canonicalSessionName: "dev.impl@test-rig",
+      binding: { tmuxSession: "dev.impl@test-rig", cmuxSurface: null },
       resumeToken: "abc-123",
     };
 
@@ -697,8 +697,8 @@ describe("RigNode", () => {
       model: null,
       status: "running",
       startupStatus: "ready" as const,
-      canonicalSessionName: "dev-impl@test-rig",
-      binding: { tmuxSession: "dev-impl@test-rig", cmuxSurface: null },
+      canonicalSessionName: "dev.impl@test-rig",
+      binding: { tmuxSession: "dev.impl@test-rig", cmuxSurface: null },
       resumeToken: null,
     };
 
@@ -1366,7 +1366,7 @@ describe("RigNode spec hint", () => {
           runtime: "claude-code",
           model: "opus",
           status: "running",
-          canonicalSessionName: "dev-impl@test-rig",
+          canonicalSessionName: "dev.impl@test-rig",
           binding: null,
           resolvedSpecName: "impl-agent",
           profile: "default",
@@ -1376,7 +1376,7 @@ describe("RigNode spec hint", () => {
     );
 
     const node = screen.getByTestId("rig-node");
-    expect(node.getAttribute("title")).toContain("Session: dev-impl@test-rig");
+    expect(node.getAttribute("title")).toContain("Session: dev.impl@test-rig");
     expect(node.getAttribute("title")).toContain("Spec: impl-agent");
     expect(node.getAttribute("title")).toContain("Profile: default");
     expect(node.getAttribute("title")).toContain("Edges: 2");

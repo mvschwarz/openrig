@@ -29,7 +29,7 @@ describe("Context Usage Projection", () => {
     currentUsage: "67% used",
     transcriptPath: "/tmp/test.log",
     sessionId: "sess-123",
-    sessionName: "dev-impl@test-rig",
+    sessionName: "dev.impl@test-rig",
     sampledAt: new Date().toISOString(),
     fresh: true,
   };
@@ -38,7 +38,7 @@ describe("Context Usage Projection", () => {
   it("getNodeInventoryWithContext includes known contextUsage", () => {
     const rig = setup.rigRepo.createRig("test-rig");
     const node = setup.rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code" });
-    setup.sessionRegistry.registerSession(node.id, "dev-impl@test-rig");
+    setup.sessionRegistry.registerSession(node.id, "dev.impl@test-rig");
     store.persist(node.id, KNOWN_USAGE);
 
     const inventory = getNodeInventoryWithContext(db, rig.id, store);
@@ -53,7 +53,7 @@ describe("Context Usage Projection", () => {
   it("getNodeInventoryWithContext returns unknown for non-Claude node", () => {
     const rig = setup.rigRepo.createRig("test-rig");
     const node = setup.rigRepo.addNode(rig.id, "dev.qa", { runtime: "codex" });
-    setup.sessionRegistry.registerSession(node.id, "dev-qa@test-rig");
+    setup.sessionRegistry.registerSession(node.id, "dev.qa@test-rig");
 
     const inventory = getNodeInventoryWithContext(db, rig.id, store);
     const entry = inventory.find((e) => e.logicalId === "dev.qa");
@@ -65,7 +65,7 @@ describe("Context Usage Projection", () => {
   it("getNodeDetailWithContext includes full contextUsage", () => {
     const rig = setup.rigRepo.createRig("test-rig");
     const node = setup.rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code" });
-    setup.sessionRegistry.registerSession(node.id, "dev-impl@test-rig");
+    setup.sessionRegistry.registerSession(node.id, "dev.impl@test-rig");
     store.persist(node.id, KNOWN_USAGE);
 
     const detail = getNodeDetailWithContext(db, rig.id, "dev.impl", store);
@@ -78,7 +78,7 @@ describe("Context Usage Projection", () => {
   it("graph overlay includes compact context data from inventory", async () => {
     const rig = setup.rigRepo.createRig("test-rig");
     const node = setup.rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code" });
-    setup.sessionRegistry.registerSession(node.id, "dev-impl@test-rig");
+    setup.sessionRegistry.registerSession(node.id, "dev.impl@test-rig");
     store.persist(node.id, KNOWN_USAGE);
 
     // Test via HTTP route which uses context-aware inventory
@@ -94,7 +94,7 @@ describe("Context Usage Projection", () => {
   it("whoami includes contextUsage for Claude node", async () => {
     const rig = setup.rigRepo.createRig("test-rig");
     const node = setup.rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code" });
-    setup.sessionRegistry.registerSession(node.id, "dev-impl@test-rig");
+    setup.sessionRegistry.registerSession(node.id, "dev.impl@test-rig");
     store.persist(node.id, KNOWN_USAGE);
 
     const res = await setup.app.request(`/api/whoami?nodeId=${node.id}`);
@@ -109,7 +109,7 @@ describe("Context Usage Projection", () => {
   it("whoami returns unknown contextUsage for codex node", async () => {
     const rig = setup.rigRepo.createRig("test-rig");
     const node = setup.rigRepo.addNode(rig.id, "dev.qa", { runtime: "codex" });
-    setup.sessionRegistry.registerSession(node.id, "dev-qa@test-rig");
+    setup.sessionRegistry.registerSession(node.id, "dev.qa@test-rig");
 
     const res = await setup.app.request(`/api/whoami?nodeId=${node.id}`);
     expect(res.status).toBe(200);
@@ -122,7 +122,7 @@ describe("Context Usage Projection", () => {
   it("node detail route includes contextUsage", async () => {
     const rig = setup.rigRepo.createRig("test-rig");
     const node = setup.rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code" });
-    setup.sessionRegistry.registerSession(node.id, "dev-impl@test-rig");
+    setup.sessionRegistry.registerSession(node.id, "dev.impl@test-rig");
     store.persist(node.id, KNOWN_USAGE);
 
     const res = await setup.app.request(`/api/rigs/${rig.id}/nodes/${encodeURIComponent("dev.impl")}`);

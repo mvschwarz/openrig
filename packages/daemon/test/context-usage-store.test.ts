@@ -62,7 +62,7 @@ describe("ContextUsageStore", () => {
       current_usage: "67% used",
     },
     session_id: "sess-123",
-    session_name: "dev-impl@test-rig",
+    session_name: "dev.impl@test-rig",
     transcript_path: "/tmp/transcripts/test.log",
     sampled_at: new Date().toISOString(),
   };
@@ -93,7 +93,7 @@ describe("ContextUsageStore", () => {
     expect(usage.totalOutputTokens).toBe(14000);
     expect(usage.currentUsage).toBe("67% used");
     expect(usage.sessionId).toBe("sess-123");
-    expect(usage.sessionName).toBe("dev-impl@test-rig");
+    expect(usage.sessionName).toBe("dev.impl@test-rig");
     expect(usage.transcriptPath).toBe("/tmp/transcripts/test.log");
     expect(usage.fresh).toBe(true);
   });
@@ -140,10 +140,10 @@ describe("ContextUsageStore", () => {
     const usage = store.normalizeSample(VALID_SIDECAR);
     store.persist(node.id, usage);
 
-    const retrieved = store.getForNode(node.id, "dev-impl@test-rig");
+    const retrieved = store.getForNode(node.id, "dev.impl@test-rig");
     expect(retrieved.availability).toBe("known");
     expect(retrieved.usedPercentage).toBe(67);
-    expect(retrieved.sessionName).toBe("dev-impl@test-rig");
+    expect(retrieved.sessionName).toBe("dev.impl@test-rig");
   });
 
   // T6: getForNode on nonexistent node -> unknown
@@ -165,9 +165,9 @@ describe("ContextUsageStore", () => {
 
   // T8: getSidecarPath returns path under stateDir/context/
   it("getSidecarPath returns path under stateDir/context/", () => {
-    const path = store.getSidecarPath("dev-impl@test-rig");
+    const path = store.getSidecarPath("dev.impl@test-rig");
     expect(path).toContain("context");
-    expect(path).toContain("dev-impl@test-rig");
+    expect(path).toContain("dev.impl@test-rig");
     expect(path.endsWith(".json")).toBe(true);
   });
 
@@ -281,7 +281,7 @@ describe("ContextUsageStore", () => {
     store.persist(node.id, usage);
 
     const results = store.getForNodes([
-      { nodeId: node.id, currentSessionName: "dev-impl@test-rig" },
+      { nodeId: node.id, currentSessionName: "dev.impl@test-rig" },
     ]);
 
     expect(results.get(node.id)?.availability).toBe("known");

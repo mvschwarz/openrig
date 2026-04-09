@@ -123,7 +123,7 @@ describe("Demo fixture validation", () => {
     // Create a rig with a session (simulating demo state)
     const rig = rigRepo.createRig("demo-rig");
     const node = rigRepo.addNode(rig.id, "orch.lead", { runtime: "claude-code" });
-    const session = sessionRegistry.registerSession(node.id, "orch-lead@demo-rig");
+    const session = sessionRegistry.registerSession(node.id, "orch.lead@demo-rig");
     sessionRegistry.updateStatus(session.id, "running");
 
     const tmux = {

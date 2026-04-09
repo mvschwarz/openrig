@@ -298,7 +298,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
     "rig_send",
     "Send a message to an agent's terminal using reliable two-step send",
     {
-      session: z.string().describe("Target session name (e.g. dev-impl@my-rig)"),
+      session: z.string().describe("Target session name (e.g. dev.impl@my-rig)"),
       text: z.string().describe("Message text to send"),
       verify: z.boolean().optional().describe("Verify delivery by checking pane content"),
       force: z.boolean().optional().describe("Send even if target appears mid-task"),

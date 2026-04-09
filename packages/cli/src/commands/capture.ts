@@ -19,8 +19,8 @@ export function captureCommand(depsOverride?: StatusDeps): Command {
     .option("--json", "JSON output for agents")
     .addHelpText("after", `
 Examples:
-  rig capture dev-impl@my-rig
-  rig capture dev-impl@my-rig --lines 50
+  rig capture dev.impl@my-rig
+  rig capture dev.impl@my-rig --lines 50
   rig capture --rig my-rig
   rig capture --pod dev --rig my-rig
   rig capture --rig my-rig --json

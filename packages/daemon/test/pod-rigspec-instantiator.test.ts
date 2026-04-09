@@ -203,13 +203,13 @@ profiles:
     );
 
     expect(identityCall).toBeDefined();
-    expect(identityCall?.[0]).toBe("dev-impl@test-rig");
+    expect(identityCall?.[0]).toBe("dev.impl@test-rig");
     // Identity fields preserved
     expect(identityCall?.[1]).toContain("- rig: test-rig");
     expect(identityCall?.[1]).toContain("- pod: dev");
     expect(identityCall?.[1]).toContain("- member: impl");
     expect(identityCall?.[1]).toContain("- logical_id: dev.impl");
-    expect(identityCall?.[1]).toContain("- session: dev-impl@test-rig");
+    expect(identityCall?.[1]).toContain("- session: dev.impl@test-rig");
     // Whoami pointer
     expect(identityCall?.[1]).toContain("rig whoami --json");
 
@@ -421,7 +421,7 @@ profiles:
     db.close();
   });
 
-  // NS-T01: canonical session name {pod}-{member}@{rig}
+  // NS-T01: canonical session name {pod}.{member}@{rig}
   it("launches nodes with canonical session names", async () => {
     const { db, tmux, inst } = setup();
     const yaml = RigSpecCodec.serialize(makeRigSpec());
@@ -430,7 +430,7 @@ profiles:
     // tmux createSession was called with canonical name
     const createSession = tmux.createSession as ReturnType<typeof vi.fn>;
     expect(createSession).toHaveBeenCalledOnce();
-    expect(createSession.mock.calls[0]![0]).toBe("dev-impl@test-rig");
+    expect(createSession.mock.calls[0]![0]).toBe("dev.impl@test-rig");
     db.close();
   });
 
@@ -489,7 +489,7 @@ profiles:
       // Terminal node was launched with canonical name
       const createSession = tmux.createSession as ReturnType<typeof vi.fn>;
       const sessionNames = createSession.mock.calls.map((c: string[]) => c[0]);
-      expect(sessionNames).toContain("infra-server@test-rig");
+      expect(sessionNames).toContain("infra.server@test-rig");
     }
     db.close();
   });

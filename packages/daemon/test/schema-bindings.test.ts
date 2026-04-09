@@ -95,14 +95,14 @@ describe("002_bindings_sessions", () => {
       seedRigWithNode(db);
       db.prepare(
         "INSERT INTO bindings (id, node_id, attachment_type, external_session_name) VALUES (?, ?, ?, ?)"
-      ).run("bind-1", "node-1", "external_cli", "orch-lead@host");
+      ).run("bind-1", "node-1", "external_cli", "orch.lead@host");
 
       const binding = db
         .prepare("SELECT attachment_type, tmux_session, external_session_name FROM bindings WHERE node_id = ?")
         .get("node-1") as { attachment_type: string; tmux_session: string | null; external_session_name: string | null };
       expect(binding.attachment_type).toBe("external_cli");
       expect(binding.tmux_session).toBeNull();
-      expect(binding.external_session_name).toBe("orch-lead@host");
+      expect(binding.external_session_name).toBe("orch.lead@host");
     });
 
     it("cascades on node delete", () => {

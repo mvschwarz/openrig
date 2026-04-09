@@ -352,16 +352,16 @@ describe("NodeLauncher", () => {
     const launcher = createLauncher(mockTmuxAdapter({ createSession: createSpy }));
 
     const result = await launcher.launchNode(rig.id, "dev.impl", {
-      sessionName: "dev-impl@auth-feats",
+      sessionName: "dev.impl@auth-feats",
     });
 
     expect(result.ok).toBe(true);
-    expect(createSpy.mock.calls[0]![0]).toBe("dev-impl@auth-feats");
+    expect(createSpy.mock.calls[0]![0]).toBe("dev.impl@auth-feats");
 
     // Session persisted with canonical name
     const sessions = sessionRegistry.getSessionsForRig(rig.id);
     expect(sessions).toHaveLength(1);
-    expect(sessions[0]!.sessionName).toBe("dev-impl@auth-feats");
+    expect(sessions[0]!.sessionName).toBe("dev.impl@auth-feats");
   });
 
   it("constructor throws if services use mismatched db handles", () => {

@@ -80,8 +80,8 @@ const STRUCTURED_PEERS_RESULT = {
   evidence: {
     backend: "structured",
     excerpts: [
-      "dev.qa  session=dev-qa@my-rig  runtime=codex  pod=dev",
-      "rev1.r1  session=rev1-r1@my-rig  runtime=claude-code  pod=rev1",
+      "dev.qa  session=dev.qa@my-rig  runtime=codex  pod=dev",
+      "rev1.r1  session=rev1.r1@my-rig  runtime=claude-code  pod=rev1",
     ],
   },
   insufficient: false,
@@ -196,7 +196,7 @@ describe("Ask CLI", () => {
     const prevNodeId = process.env.OPENRIG_NODE_ID;
     const prevSessionName = process.env.OPENRIG_SESSION_NAME;
     process.env.OPENRIG_NODE_ID = "node-123";
-    process.env.OPENRIG_SESSION_NAME = "dev-impl@my-rig";
+    process.env.OPENRIG_SESSION_NAME = "dev.impl@my-rig";
     try {
       const { logs } = await captureLogs(async () => {
         await makeCmd().parseAsync(["node", "rig", "ask", "my-rig", "who are my peers?"]);
@@ -206,7 +206,7 @@ describe("Ask CLI", () => {
       expect(output).toContain("dev.qa");
       expect(output).toContain("rev1.r1");
       expect(lastBody?.nodeId).toBe("node-123");
-      expect(lastBody?.sessionName).toBe("dev-impl@my-rig");
+      expect(lastBody?.sessionName).toBe("dev.impl@my-rig");
     } finally {
       if (prevNodeId === undefined) delete process.env.OPENRIG_NODE_ID;
       else process.env.OPENRIG_NODE_ID = prevNodeId;
@@ -219,7 +219,7 @@ describe("Ask CLI", () => {
     const deps = runningDeps(port) as StatusDeps & {
       identityResolver: () => { sessionName: string };
     };
-    deps.identityResolver = () => ({ sessionName: "dev-impl@my-rig" });
+    deps.identityResolver = () => ({ sessionName: "dev.impl@my-rig" });
     const prog = new Command();
     prog.exitOverride();
     prog.addCommand(askCommand(deps));
@@ -233,7 +233,7 @@ describe("Ask CLI", () => {
         await prog.parseAsync(["node", "rig", "ask", "my-rig", "who are my peers?"]);
       });
       expect(lastBody?.nodeId).toBeUndefined();
-      expect(lastBody?.sessionName).toBe("dev-impl@my-rig");
+      expect(lastBody?.sessionName).toBe("dev.impl@my-rig");
     } finally {
       if (prevNodeId === undefined) delete process.env.OPENRIG_NODE_ID;
       else process.env.OPENRIG_NODE_ID = prevNodeId;

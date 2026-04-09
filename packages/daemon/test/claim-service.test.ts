@@ -103,7 +103,7 @@ describe("ClaimService", () => {
   it("bind attaches a discovered session to an existing node", async () => {
     const rig = seedRig();
     const node = rigRepo.addNode(rig.id, "orch.lead", { runtime: "claude-code", cwd: "/projects/myapp" });
-    const discovered = seedDiscovery({ tmuxSession: "orch-lead@host" });
+    const discovered = seedDiscovery({ tmuxSession: "orch.lead@host" });
 
     const result = await claimService.bind({ discoveredId: discovered.id, rigId: rig.id, logicalId: "orch.lead" });
 
@@ -112,7 +112,7 @@ describe("ClaimService", () => {
 
     expect(result.nodeId).toBe(node.id);
     const binding = sessionRegistry.getBindingForNode(node.id);
-    expect(binding?.tmuxSession).toBe("orch-lead@host");
+    expect(binding?.tmuxSession).toBe("orch.lead@host");
 
     const sessions = sessionRegistry.getSessionsForRig(rig.id).filter((s) => s.nodeId === node.id);
     expect(sessions).toHaveLength(1);
@@ -139,7 +139,7 @@ describe("ClaimService", () => {
   it("bind sets @rigged_* tmux metadata on the adopted session", async () => {
     const rig = seedRig();
     const node = rigRepo.addNode(rig.id, "orch.lead", { runtime: "claude-code", cwd: "/projects/myapp" });
-    const discovered = seedDiscovery({ tmuxSession: "orch-lead@host" });
+    const discovered = seedDiscovery({ tmuxSession: "orch.lead@host" });
 
     const result = await claimService.bind({ discoveredId: discovered.id, rigId: rig.id, logicalId: "orch.lead" });
     expect(result.ok).toBe(true);
@@ -148,7 +148,7 @@ describe("ClaimService", () => {
     const calls = setSessionOptionSpy.mock.calls as [string, string, string][];
     const metaMap = new Map(calls.map((c) => [c[1], c[2]]));
     expect(metaMap.get("@rigged_node_id")).toBe(node.id);
-    expect(metaMap.get("@rigged_session_name")).toBe("orch-lead@host");
+    expect(metaMap.get("@rigged_session_name")).toBe("orch.lead@host");
     expect(metaMap.get("@rigged_rig_id")).toBe(rig.id);
     expect(metaMap.get("@rigged_rig_name")).toBe("test-rig");
     expect(metaMap.get("@rigged_logical_id")).toBe("orch.lead");
@@ -203,13 +203,13 @@ describe("ClaimService", () => {
   it("bind delivers post-claim identity hint via sendText + sendKeys", async () => {
     const rig = seedRig();
     rigRepo.addNode(rig.id, "orch.lead", { runtime: "claude-code", cwd: "/projects/myapp" });
-    const discovered = seedDiscovery({ tmuxSession: "orch-lead@host" });
+    const discovered = seedDiscovery({ tmuxSession: "orch.lead@host" });
 
     await claimService.bind({ discoveredId: discovered.id, rigId: rig.id, logicalId: "orch.lead" });
 
     expect(sendTextSpy).toHaveBeenCalled();
     const textCall = sendTextSpy.mock.calls[0] as [string, string];
-    expect(textCall[0]).toBe("orch-lead@host");
+    expect(textCall[0]).toBe("orch.lead@host");
     expect(textCall[1]).toContain("test-rig");
     expect(textCall[1]).toContain("orch.lead");
 
@@ -269,29 +269,29 @@ describe("ClaimService", () => {
   it("bind starts transcript capture for an adopted tmux session", async () => {
     const rig = seedRig();
     rigRepo.addNode(rig.id, "orch.lead", { runtime: "claude-code", cwd: "/projects/myapp" });
-    const discovered = seedDiscovery({ tmuxSession: "orch-lead@host" });
+    const discovered = seedDiscovery({ tmuxSession: "orch.lead@host" });
     vi.spyOn(transcriptStore, "ensureTranscriptDir").mockReturnValue(true);
 
     const result = await claimService.bind({ discoveredId: discovered.id, rigId: rig.id, logicalId: "orch.lead" });
 
     expect(result.ok).toBe(true);
     expect(startPipePaneSpy).toHaveBeenCalledWith(
-      "orch-lead@host",
-      transcriptStore.getTranscriptPath("test-rig", "orch-lead@host"),
+      "orch.lead@host",
+      transcriptStore.getTranscriptPath("test-rig", "orch.lead@host"),
     );
   });
 
   it("bind provisions Claude context collection for adopted tmux sessions", async () => {
     const rig = seedRig();
     rigRepo.addNode(rig.id, "orch.lead", { runtime: "claude-code", cwd: "/projects/myapp" });
-    const discovered = seedDiscovery({ tmuxSession: "orch-lead@host" });
+    const discovered = seedDiscovery({ tmuxSession: "orch.lead@host" });
 
     const result = await claimService.bind({ discoveredId: discovered.id, rigId: rig.id, logicalId: "orch.lead" });
 
     expect(result.ok).toBe(true);
     expect(ensureContextCollectorSpy).toHaveBeenCalledWith({
       cwd: "/projects/myapp",
-      tmuxSession: "orch-lead@host",
+      tmuxSession: "orch.lead@host",
     });
   });
 });

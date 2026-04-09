@@ -16,7 +16,7 @@ const VALID_STATUS_LINE = JSON.stringify({
     current_usage: "67% used",
   },
   session_id: "sess-123",
-  session_name: "dev-impl@test",
+  session_name: "dev.impl@test",
   transcript_path: "/tmp/transcripts/test.log",
 });
 
@@ -44,7 +44,7 @@ describe("Claude Status Line Collector Script", () => {
     expect(content.context_window.used_percentage).toBe(67);
     expect(content.context_window.context_window_size).toBe(200000);
     expect(content.session_id).toBe("sess-123");
-    expect(content.session_name).toBe("dev-impl@test");
+    expect(content.session_name).toBe("dev.impl@test");
     expect(content.transcript_path).toBe("/tmp/transcripts/test.log");
     expect(content.sampled_at).toBeTruthy();
   });
@@ -75,10 +75,10 @@ describe("Claude Status Line Collector Script", () => {
     const outputDir = join(tmpDir, "context");
     execSync(`echo '${VALID_STATUS_LINE}' | node ${collectorPath} ${outputDir}`, { encoding: "utf-8" });
 
-    const sessionSidecar = join(outputDir, "dev-impl@test.json");
+    const sessionSidecar = join(outputDir, "dev.impl@test.json");
     expect(existsSync(sessionSidecar)).toBe(true);
     const content = JSON.parse(readFileSync(sessionSidecar, "utf-8"));
-    expect(content.session_name).toBe("dev-impl@test");
+    expect(content.session_name).toBe("dev.impl@test");
     expect(content.context_window.used_percentage).toBe(67);
   });
 
@@ -150,7 +150,7 @@ describe("ClaudeCodeAdapter Context Collector Provisioning", () => {
       collectorAssetPath: "/fake/collector.js",
     });
 
-    await adapter.deliverStartup([], { cwd: "/project", tmuxSession: "dev-impl@test", nodeId: "n1" } as any);
+    await adapter.deliverStartup([], { cwd: "/project", tmuxSession: "dev.impl@test", nodeId: "n1" } as any);
 
     const settingsPath = "/project/.claude/settings.local.json";
     expect(written[settingsPath]).toBeDefined();
@@ -240,7 +240,7 @@ describe("ClaudeCodeAdapter Context Collector Provisioning", () => {
       collectorAssetPath: "/fake/collector.js",
     });
 
-    adapter.ensureContextCollector({ cwd: "/project", tmuxSession: "dev-impl@test" } as any);
+    adapter.ensureContextCollector({ cwd: "/project", tmuxSession: "dev.impl@test" } as any);
 
     const settings = JSON.parse(written["/project/.claude/settings.local.json"]!);
     expect(settings.statusLine.type).toBe("command");
@@ -256,7 +256,7 @@ describe("ClaudeCodeAdapter Context Collector Provisioning", () => {
       collectorAssetPath: "/fake/collector.js",
     });
 
-    await adapter.deliverStartup([], { cwd: "/project", tmuxSession: "dev-impl@test", nodeId: "n1" } as any);
+    await adapter.deliverStartup([], { cwd: "/project", tmuxSession: "dev.impl@test", nodeId: "n1" } as any);
 
     const settingsPath = "/home/tester/.claude/settings.json";
     expect(written[settingsPath]).toBeDefined();
@@ -272,7 +272,7 @@ describe("ClaudeCodeAdapter Context Collector Provisioning", () => {
       collectorAssetPath: "/fake/collector.js",
     });
 
-    await adapter.deliverStartup([], { cwd: "/project", tmuxSession: "dev-impl@test", nodeId: "n1" } as any);
+    await adapter.deliverStartup([], { cwd: "/project", tmuxSession: "dev.impl@test", nodeId: "n1" } as any);
 
     const statePath = "/home/tester/.claude.json";
     expect(written[statePath]).toBeDefined();

@@ -68,7 +68,7 @@ describe("Up CLI", () => {
           res.end(JSON.stringify({ status: "planned", runId: "run-1", stages: [{ stage: "resolve_spec", status: "ok" }], errors: [], warnings: [] }));
         } else {
           res.writeHead(201, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ status: "completed", runId: "run-2", rigId: "rig-1", stages: [{ stage: "resolve_spec", status: "ok" }, { stage: "import_rig", status: "ok" }], errors: [], warnings: [], attachCommand: "tmux attach -t dev-impl@test-rig" }));
+          res.end(JSON.stringify({ status: "completed", runId: "run-2", rigId: "rig-1", stages: [{ stage: "resolve_spec", status: "ok" }, { stage: "import_rig", status: "ok" }], errors: [], warnings: [], attachCommand: "tmux attach -t dev.impl@test-rig" }));
         }
       } else {
         res.writeHead(404, { "Content-Type": "application/json" });
@@ -305,7 +305,7 @@ describe("Up CLI", () => {
     const output = logs.join("\n");
     expect(output).toContain("Dashboard: rig ui open");
     expect(output).toContain("Attach:");
-    expect(output).toContain("tmux attach -t dev-impl@test-rig");
+    expect(output).toContain("tmux attach -t dev.impl@test-rig");
   });
 
   // PNS-T06: fresh boot warnings (e.g. transcript attach failures) surface to stderr
@@ -322,7 +322,7 @@ describe("Up CLI", () => {
             status: "completed", runId: "run-3", rigId: "rig-2",
             stages: [{ stage: "import_rig", status: "ok" }],
             errors: [],
-            warnings: ["Transcript capture failed for dev-impl@test-rig: pipe-pane failed"],
+            warnings: ["Transcript capture failed for dev.impl@test-rig: pipe-pane failed"],
           }));
         } else {
           res.writeHead(404).end();

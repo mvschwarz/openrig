@@ -73,7 +73,7 @@ describe("ResumeMetadataRefresher", () => {
     await refresher.refresh([
       {
         sessionId: "sess-1",
-        sessionName: "dev-qa@demo-rig",
+        sessionName: "dev.qa@demo-rig",
         runtime: "codex",
         resumeType: null,
         resumeToken: null,
@@ -113,7 +113,7 @@ describe("ResumeMetadataRefresher", () => {
     await refresher.refresh([
       {
         sessionId: "sess-1",
-        sessionName: "dev-qa@demo-rig",
+        sessionName: "dev.qa@demo-rig",
         runtime: "codex",
         resumeType: null,
         resumeToken: null,
@@ -141,7 +141,7 @@ describe("ResumeMetadataRefresher", () => {
     await refresher.refresh([
       {
         sessionId: "sess-1",
-        sessionName: "dev-qa@demo-rig",
+        sessionName: "dev.qa@demo-rig",
         runtime: "codex",
         resumeType: "codex_id",
         resumeToken: "existing-token",
@@ -167,7 +167,7 @@ describe("ResumeMetadataRefresher", () => {
     await refresher.refresh([
       {
         sessionId: "sess-1",
-        sessionName: "dev-design@demo-rig",
+        sessionName: "dev.design@demo-rig",
         runtime: "claude-code",
         resumeType: "claude_id",
         resumeToken: "abc-123",
@@ -175,7 +175,7 @@ describe("ResumeMetadataRefresher", () => {
       },
     ]);
 
-    expect(probeClaudeResume).toHaveBeenCalledWith("dev-design@demo-rig", "abc-123", "/repo");
+    expect(probeClaudeResume).toHaveBeenCalledWith("dev.design@demo-rig", "abc-123", "/repo");
     expect(sessionRegistry.clearResumeToken).toHaveBeenCalledWith("sess-1");
     expect(sessionRegistry.updateResumeToken).not.toHaveBeenCalled();
   });

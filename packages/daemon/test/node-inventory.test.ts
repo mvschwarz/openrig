@@ -92,8 +92,8 @@ describe("Node Inventory Projection", () => {
   // Test 1: Inventory includes all nodes for a pod-aware rig
   it("includes all nodes for a pod-aware rig", () => {
     seedPodAwareRig(db);
-    seedSession(db, "node-1", "dev-impl@test-rig");
-    seedSession(db, "node-2", "infra-server@test-rig");
+    seedSession(db, "node-1", "dev.impl@test-rig");
+    seedSession(db, "node-2", "infra.server@test-rig");
 
     const entries = getNodeInventory(db, "rig-1");
     expect(entries).toHaveLength(2);
@@ -104,18 +104,18 @@ describe("Node Inventory Projection", () => {
   // Test 2: Inventory includes correct canonical session names
   it("includes correct canonical session names", () => {
     seedPodAwareRig(db);
-    seedSession(db, "node-1", "dev-impl@test-rig");
+    seedSession(db, "node-1", "dev.impl@test-rig");
 
     const entries = getNodeInventory(db, "rig-1");
     const agentEntry = entries.find((e) => e.logicalId === "dev.impl");
-    expect(agentEntry?.canonicalSessionName).toBe("dev-impl@test-rig");
+    expect(agentEntry?.canonicalSessionName).toBe("dev.impl@test-rig");
   });
 
   // Test 3: nodeKind is 'agent' for claude-code/codex, 'infrastructure' for terminal
   it("nodeKind distinguishes agent from infrastructure", () => {
     seedPodAwareRig(db);
-    seedSession(db, "node-1", "dev-impl@test-rig");
-    seedSession(db, "node-2", "infra-server@test-rig");
+    seedSession(db, "node-1", "dev.impl@test-rig");
+    seedSession(db, "node-2", "infra.server@test-rig");
 
     const entries = getNodeInventory(db, "rig-1");
     const agent = entries.find((e) => e.logicalId === "dev.impl");
@@ -127,17 +127,17 @@ describe("Node Inventory Projection", () => {
   // Test 4: tmuxAttachCommand computed correctly
   it("tmuxAttachCommand computed from session name", () => {
     seedPodAwareRig(db);
-    seedSession(db, "node-1", "dev-impl@test-rig");
+    seedSession(db, "node-1", "dev.impl@test-rig");
 
     const entries = getNodeInventory(db, "rig-1");
     const entry = entries.find((e) => e.logicalId === "dev.impl");
-    expect(entry?.tmuxAttachCommand).toBe("tmux attach -t dev-impl@test-rig");
+    expect(entry?.tmuxAttachCommand).toBe("tmux attach -t dev.impl@test-rig");
   });
 
   // Test 5: resumeCommand uses correct runtime syntax
   it("resumeCommand uses correct runtime syntax", () => {
     seedPodAwareRig(db);
-    seedSession(db, "node-1", "dev-impl@test-rig", {
+    seedSession(db, "node-1", "dev.impl@test-rig", {
       resumeType: "claude",
       resumeToken: "abc-123-def",
     });
@@ -150,7 +150,7 @@ describe("Node Inventory Projection", () => {
   // Test 6: resumeCommand is null when no resume token
   it("resumeCommand is null when no resume token", () => {
     seedPodAwareRig(db);
-    seedSession(db, "node-1", "dev-impl@test-rig");
+    seedSession(db, "node-1", "dev.impl@test-rig");
 
     const entries = getNodeInventory(db, "rig-1");
     const entry = entries.find((e) => e.logicalId === "dev.impl");
@@ -160,7 +160,7 @@ describe("Node Inventory Projection", () => {
   // Test 7: startupStatus reflects session startup_status column
   it("startupStatus reflects session startup_status", () => {
     seedPodAwareRig(db);
-    seedSession(db, "node-1", "dev-impl@test-rig", { startupStatus: "failed" });
+    seedSession(db, "node-1", "dev.impl@test-rig", { startupStatus: "failed" });
 
     const entries = getNodeInventory(db, "rig-1");
     const entry = entries.find((e) => e.logicalId === "dev.impl");
@@ -170,7 +170,7 @@ describe("Node Inventory Projection", () => {
   // Test 8: restoreOutcome populated from restore.completed event
   it("restoreOutcome = 'resumed' from restore.completed event", () => {
     seedPodAwareRig(db);
-    seedSession(db, "node-1", "dev-impl@test-rig");
+    seedSession(db, "node-1", "dev.impl@test-rig");
     seedEvent(db, "rig-1", "node-1", "restore.completed", {
       rigId: "rig-1",
       snapshotId: "snap-1",
@@ -195,8 +195,8 @@ describe("Node Inventory Projection", () => {
   // Resume state naming: rebuilt and fresh outcomes from inventory
   it("restoreOutcome maps checkpoint_written to 'rebuilt' and fresh_no_checkpoint to 'fresh'", () => {
     seedPodAwareRig(db);
-    seedSession(db, "node-1", "dev-impl@test-rig");
-    seedSession(db, "node-2", "infra-server@test-rig");
+    seedSession(db, "node-1", "dev.impl@test-rig");
+    seedSession(db, "node-2", "infra.server@test-rig");
     seedEvent(db, "rig-1", "node-1", "restore.completed", {
       rigId: "rig-1",
       snapshotId: "snap-1",
@@ -221,7 +221,7 @@ describe("Node Inventory Projection", () => {
   // Test 9: latestError populated from startup_failed events
   it("latestError from startup_failed event", () => {
     seedPodAwareRig(db);
-    seedSession(db, "node-1", "dev-impl@test-rig", { startupStatus: "failed" });
+    seedSession(db, "node-1", "dev.impl@test-rig", { startupStatus: "failed" });
     seedEvent(db, "rig-1", "node-1", "node.startup_failed", {
       rigId: "rig-1",
       nodeId: "node-1",
@@ -251,7 +251,7 @@ describe("Node Inventory Projection", () => {
   // Test 11: getNodeDetail returns startupFiles from node_startup_context
   it("getNodeDetail returns startupFiles from node_startup_context", () => {
     seedPodAwareRig(db);
-    seedSession(db, "node-1", "dev-impl@test-rig");
+    seedSession(db, "node-1", "dev.impl@test-rig");
     seedStartupContext(db, "node-1", {
       files: [
         { path: "role.md", deliveryHint: "send_text", required: true },
@@ -271,7 +271,7 @@ describe("Node Inventory Projection", () => {
   // Test 12: getNodeDetail returns recentEvents using events.node_id
   it("getNodeDetail returns recentEvents for the node", () => {
     seedPodAwareRig(db);
-    seedSession(db, "node-1", "dev-impl@test-rig");
+    seedSession(db, "node-1", "dev.impl@test-rig");
     seedEvent(db, "rig-1", "node-1", "node.startup_pending", { rigId: "rig-1", nodeId: "node-1" });
     seedEvent(db, "rig-1", "node-1", "node.startup_ready", { rigId: "rig-1", nodeId: "node-1" });
     // Event for a different node — should not appear
@@ -286,7 +286,7 @@ describe("Node Inventory Projection", () => {
   // Test 13: getNodeDetail installedResources fallback from startup context projection
   it("getNodeDetail installedResources from startup context projection fallback", () => {
     seedPodAwareRig(db);
-    seedSession(db, "node-1", "dev-impl@test-rig");
+    seedSession(db, "node-1", "dev.impl@test-rig");
     seedStartupContext(db, "node-1", {
       // Use real persisted shape from startup-orchestrator.ts line 139
       projectionEntries: [
@@ -305,7 +305,7 @@ describe("Node Inventory Projection", () => {
   // Test 14: getNodeDetail infrastructureStartupCommand from terminal send_text
   it("getNodeDetail infrastructureStartupCommand for terminal node", () => {
     seedPodAwareRig(db);
-    seedSession(db, "node-2", "infra-server@test-rig");
+    seedSession(db, "node-2", "infra.server@test-rig");
     seedStartupContext(db, "node-2", {
       actions: [
         { type: "send_text", value: "npm run dev" },
@@ -323,7 +323,7 @@ describe("Node Inventory Projection", () => {
   // Test 15: getNodeDetail installedResources adapter-backed path
   it("getNodeDetail installedResources via adapter listInstalled", () => {
     seedPodAwareRig(db);
-    seedSession(db, "node-1", "dev-impl@test-rig");
+    seedSession(db, "node-1", "dev.impl@test-rig");
     const adapter = mockAdapter({
       listInstalled: vi.fn(() => [
         { effectiveId: "live-skill", category: "skills", installedPath: ".claude/skills/live" },

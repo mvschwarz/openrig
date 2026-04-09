@@ -142,7 +142,7 @@ describe("Lifecycle CLI commands", () => {
           ok: true,
           nodeId: "node-2",
           logicalId: "dev.qa",
-          sessionName: "dev-qa@test",
+          sessionName: "dev.qa@test",
         }));
         return;
       }
@@ -266,7 +266,7 @@ describe("Lifecycle CLI commands", () => {
 
     expect(exitCode).toBeUndefined();
     expect(logs.join("\n")).toContain("Launched node dev.qa in rig rig-1");
-    expect(logs.join("\n")).toContain("dev-qa@test");
+    expect(logs.join("\n")).toContain("dev.qa@test");
   });
 
   it("--json prints raw unclaim payload", async () => {

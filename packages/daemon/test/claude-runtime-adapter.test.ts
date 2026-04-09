@@ -224,13 +224,13 @@ describe("Claude Code runtime adapter", () => {
       sessionIdFactory: () => "11111111-1111-4111-8111-111111111111",
     });
 
-    const result = await adapter.launchHarness(makeBinding(), { name: "dev-impl@test-rig" });
+    const result = await adapter.launchHarness(makeBinding(), { name: "dev.impl@test-rig" });
 
     expect(result.ok).toBe(true);
     const sendText = tmux.sendText as ReturnType<typeof vi.fn>;
     expect(sendText).toHaveBeenCalledWith(
       "r01-impl",
-      "claude --permission-mode acceptEdits --session-id 11111111-1111-4111-8111-111111111111 --name dev-impl@test-rig"
+      "claude --permission-mode acceptEdits --session-id 11111111-1111-4111-8111-111111111111 --name dev.impl@test-rig"
     );
     if (result.ok) {
       expect(result.resumeToken).toBe("11111111-1111-4111-8111-111111111111");
@@ -242,13 +242,13 @@ describe("Claude Code runtime adapter", () => {
     const tmux = mockTmux();
     const adapter = new ClaudeCodeAdapter({ tmux, fsOps: mockFs() });
 
-    const result = await adapter.launchHarness(makeBinding(), { name: "dev-impl@test-rig", resumeToken: "abc-123" });
+    const result = await adapter.launchHarness(makeBinding(), { name: "dev.impl@test-rig", resumeToken: "abc-123" });
 
     expect(result.ok).toBe(true);
     const sendText = tmux.sendText as ReturnType<typeof vi.fn>;
     expect(sendText).toHaveBeenCalledWith(
       "r01-impl",
-      "claude --permission-mode acceptEdits --resume abc-123 --name dev-impl@test-rig"
+      "claude --permission-mode acceptEdits --resume abc-123 --name dev.impl@test-rig"
     );
   });
 
@@ -260,7 +260,7 @@ describe("Claude Code runtime adapter", () => {
     );
     const adapter = new ClaudeCodeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {} });
 
-    const result = await adapter.launchHarness(makeBinding(), { name: "dev-impl@test-rig", resumeToken: "abc-123" });
+    const result = await adapter.launchHarness(makeBinding(), { name: "dev.impl@test-rig", resumeToken: "abc-123" });
 
     expect(result).toEqual({
       ok: false,
@@ -286,7 +286,7 @@ describe("Claude Code runtime adapter", () => {
     const adapter = new ClaudeCodeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {} });
 
     const result = await adapter.launchHarness(makeBinding(), {
-      name: "dev-impl@test-rig",
+      name: "dev.impl@test-rig",
       resumeToken: "abc-123",
     });
 
@@ -299,7 +299,7 @@ describe("Claude Code runtime adapter", () => {
 
   it("launchHarness captures resume token from session file", async () => {
     const tmux = mockTmux();
-    const sessionData = JSON.stringify({ pid: 12345, sessionId: "abc-session-id", name: "dev-impl@test-rig" });
+    const sessionData = JSON.stringify({ pid: 12345, sessionId: "abc-session-id", name: "dev.impl@test-rig" });
     const fs = mockFs({});
     // Add readdir + homedir capabilities
     const fsWithDir = {
@@ -314,7 +314,7 @@ describe("Claude Code runtime adapter", () => {
     };
     const adapter = new ClaudeCodeAdapter({ tmux, fsOps: fsWithDir });
 
-    const result = await adapter.launchHarness(makeBinding(), { name: "dev-impl@test-rig" });
+    const result = await adapter.launchHarness(makeBinding(), { name: "dev.impl@test-rig" });
 
     expect(result.ok).toBe(true);
     if (result.ok) {

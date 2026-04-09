@@ -48,7 +48,7 @@ const OK_RESPONSE = {
   status: "ok",
   podId: "pod-123",
   podNamespace: "infra",
-  nodes: [{ logicalId: "infra.server", nodeId: "n1", status: "launched", sessionName: "infra-server@test" }],
+  nodes: [{ logicalId: "infra.server", nodeId: "n1", status: "launched", sessionName: "infra.server@test" }],
   warnings: [],
   retryTargets: [],
 };
@@ -59,7 +59,7 @@ const PARTIAL_RESPONSE = {
   podId: "pod-123",
   podNamespace: "dev",
   nodes: [
-    { logicalId: "dev.impl", nodeId: "n1", status: "launched", sessionName: "dev-impl@test" },
+    { logicalId: "dev.impl", nodeId: "n1", status: "launched", sessionName: "dev.impl@test" },
     { logicalId: "dev.qa", nodeId: "n2", status: "failed", error: "tmux unavailable" },
   ],
   warnings: [],
@@ -238,6 +238,6 @@ describe("rig expand", () => {
     const output = logs.join("\n");
     expect(output).toContain("[OK]");
     expect(output).toContain("infra.server");
-    expect(output).toContain("infra-server@test");
+    expect(output).toContain("infra.server@test");
   });
 });

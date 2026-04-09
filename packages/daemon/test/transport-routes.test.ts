@@ -71,24 +71,24 @@ describe("transport routes", () => {
   function seedRig() {
     const rig = rigRepo.createRig("my-rig");
     const node1 = rigRepo.addNode(rig.id, "dev.impl", { role: "worker", runtime: "claude-code" });
-    const sess1 = sessionRegistry.registerSession(node1.id, "dev-impl@my-rig");
+    const sess1 = sessionRegistry.registerSession(node1.id, "dev.impl@my-rig");
     sessionRegistry.updateStatus(sess1.id, "running");
-    sessionRegistry.updateBinding(node1.id, { tmuxSession: "dev-impl@my-rig" });
+    sessionRegistry.updateBinding(node1.id, { tmuxSession: "dev.impl@my-rig" });
 
     const node2 = rigRepo.addNode(rig.id, "dev.qa", { role: "worker", runtime: "codex" });
-    const sess2 = sessionRegistry.registerSession(node2.id, "dev-qa@my-rig");
+    const sess2 = sessionRegistry.registerSession(node2.id, "dev.qa@my-rig");
     sessionRegistry.updateStatus(sess2.id, "running");
-    sessionRegistry.updateBinding(node2.id, { tmuxSession: "dev-qa@my-rig" });
+    sessionRegistry.updateBinding(node2.id, { tmuxSession: "dev.qa@my-rig" });
     return { rig, node1, node2 };
   }
 
   function seedExternalCliRig() {
     const rig = rigRepo.createRig("rigged-buildout");
     const node = rigRepo.addNode(rig.id, "orch1.lead", { role: "orchestrator", runtime: "claude-code" });
-    const session = sessionRegistry.registerClaimedSession(node.id, "orch1-lead@rigged-buildout");
+    const session = sessionRegistry.registerClaimedSession(node.id, "orch1.lead@rigged-buildout");
     sessionRegistry.updateBinding(node.id, {
       attachmentType: "external_cli",
-      externalSessionName: "orch1-lead@rigged-buildout",
+      externalSessionName: "orch1.lead@rigged-buildout",
     });
     return { rig, node, session };
   }
@@ -102,12 +102,12 @@ describe("transport routes", () => {
     const res = await app.request("/api/transport/send", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ session: "dev-impl@my-rig", text: "hello" }),
+      body: JSON.stringify({ session: "dev.impl@my-rig", text: "hello" }),
     });
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.ok).toBe(true);
-    expect(body.sessionName).toBe("dev-impl@my-rig");
+    expect(body.sessionName).toBe("dev.impl@my-rig");
   });
 
   it("POST /send with mid-work refusal returns 409", async () => {
@@ -122,7 +122,7 @@ describe("transport routes", () => {
     const res = await app.request("/api/transport/send", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ session: "dev-impl@my-rig", text: "hello" }),
+      body: JSON.stringify({ session: "dev.impl@my-rig", text: "hello" }),
     });
     expect(res.status).toBe(409);
     const body = await res.json();
@@ -134,11 +134,11 @@ describe("transport routes", () => {
     // Create two rigs, both with same canonical session name
     const rig1 = rigRepo.createRig("rig-a");
     const node1 = rigRepo.addNode(rig1.id, "dev.impl", { role: "worker", runtime: "claude-code" });
-    sessionRegistry.registerSession(node1.id, "dev-impl@shared");
+    sessionRegistry.registerSession(node1.id, "dev.impl@shared");
 
     const rig2 = rigRepo.createRig("rig-b");
     const node2 = rigRepo.addNode(rig2.id, "dev.impl", { role: "worker", runtime: "claude-code" });
-    sessionRegistry.registerSession(node2.id, "dev-impl@shared");
+    sessionRegistry.registerSession(node2.id, "dev.impl@shared");
 
     const tmux = mockTmux();
     const transport = new SessionTransport({ db, rigRepo, sessionRegistry, tmuxAdapter: tmux });
@@ -147,7 +147,7 @@ describe("transport routes", () => {
     const res = await app.request("/api/transport/send", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ session: "dev-impl@shared", text: "hello" }),
+      body: JSON.stringify({ session: "dev.impl@shared", text: "hello" }),
     });
     expect(res.status).toBe(409);
     const body = await res.json();
@@ -163,7 +163,7 @@ describe("transport routes", () => {
     const res = await app.request("/api/transport/send", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ session: "orch1-lead@rigged-buildout", text: "hello" }),
+      body: JSON.stringify({ session: "orch1.lead@rigged-buildout", text: "hello" }),
     });
     expect(res.status).toBe(409);
     const body = await res.json();
@@ -217,7 +217,7 @@ describe("transport routes", () => {
     const res = await app.request("/api/transport/capture", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ session: "orch1-lead@rigged-buildout" }),
+      body: JSON.stringify({ session: "orch1.lead@rigged-buildout" }),
     });
     expect(res.status).toBe(409);
     const body = await res.json();
@@ -226,7 +226,7 @@ describe("transport routes", () => {
   });
 
   it("POST /broadcast without rig/pod broadcasts globally to all running sessions", async () => {
-    seedRig(); // creates my-rig with dev-impl@my-rig and dev-qa@my-rig
+    seedRig(); // creates my-rig with dev.impl@my-rig and dev.qa@my-rig
     const tmux = mockTmux();
     const transport = new SessionTransport({ db, rigRepo, sessionRegistry, tmuxAdapter: tmux });
     const app = createApp({ sessionTransport: transport });

@@ -170,7 +170,7 @@ describe("Session routes", () => {
     const { app, rigRepo, sessionRegistry } = createTestApp(db);
     const rig = rigRepo.createRig("test-rig");
     const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code" });
-    sessionRegistry.registerSession(node.id, "dev-impl@test-rig");
+    sessionRegistry.registerSession(node.id, "dev.impl@test-rig");
 
     const res = await app.request(`/api/rigs/${rig.id}/nodes`);
     expect(res.status).toBe(200);
@@ -179,7 +179,7 @@ describe("Session routes", () => {
     expect(body).toHaveLength(1);
     expect(body[0].logicalId).toBe("dev.impl");
     expect(body[0].nodeKind).toBe("agent");
-    expect(body[0].canonicalSessionName).toBe("dev-impl@test-rig");
+    expect(body[0].canonicalSessionName).toBe("dev.impl@test-rig");
   });
 
   it("GET /api/rigs/:rigId/nodes -> 404 for unknown rig", async () => {
@@ -195,7 +195,7 @@ describe("Session routes", () => {
     const { app, rigRepo, sessionRegistry } = createTestApp(db);
     const rig = rigRepo.createRig("test-rig");
     const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code" });
-    sessionRegistry.registerSession(node.id, "dev-impl@test-rig");
+    sessionRegistry.registerSession(node.id, "dev.impl@test-rig");
 
     const res = await app.request(`/api/rigs/${rig.id}/nodes/${encodeURIComponent("dev.impl")}`);
     expect(res.status).toBe(200);
@@ -221,15 +221,15 @@ describe("Session routes", () => {
     const rig = rigRepo.createRig("test-rig");
     const n1 = rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code" });
     const n2 = rigRepo.addNode(rig.id, "dev.qa", { runtime: "codex" });
-    sessionRegistry.registerSession(n1.id, "dev-impl@test");
-    sessionRegistry.registerSession(n2.id, "dev-qa@test");
+    sessionRegistry.registerSession(n1.id, "dev.impl@test");
+    sessionRegistry.registerSession(n2.id, "dev.qa@test");
 
     const res = await app.request(`/api/rigs/${rig.id}/nodes/${encodeURIComponent("dev.impl")}`);
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.peers).toHaveLength(1);
     expect(body.peers[0].logicalId).toBe("dev.qa");
-    expect(body.peers[0].canonicalSessionName).toBe("dev-qa@test");
+    expect(body.peers[0].canonicalSessionName).toBe("dev.qa@test");
     expect(body.peers[0].runtime).toBe("codex");
   });
 
@@ -238,8 +238,8 @@ describe("Session routes", () => {
     const rig = rigRepo.createRig("test-rig");
     const n1 = rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code" });
     const n2 = rigRepo.addNode(rig.id, "dev.qa", { runtime: "codex" });
-    sessionRegistry.registerSession(n1.id, "dev-impl@test");
-    sessionRegistry.registerSession(n2.id, "dev-qa@test");
+    sessionRegistry.registerSession(n1.id, "dev.impl@test");
+    sessionRegistry.registerSession(n2.id, "dev.qa@test");
     rigRepo.addEdge(rig.id, n1.id, n2.id, "delegates_to");
 
     const res = await app.request(`/api/rigs/${rig.id}/nodes/${encodeURIComponent("dev.impl")}`);
@@ -264,7 +264,7 @@ describe("Session routes", () => {
     // Set resolved spec fields
     db.prepare("UPDATE nodes SET resolved_spec_name = ?, resolved_spec_version = ? WHERE id = ?")
       .run("impl-agent", "1.0.0", n1.id);
-    sessionRegistry.registerSession(n1.id, "dev-impl@test");
+    sessionRegistry.registerSession(n1.id, "dev.impl@test");
 
     const res = await app.request(`/api/rigs/${rig.id}/nodes/${encodeURIComponent("dev.impl")}`);
     const body = await res.json();
@@ -280,7 +280,7 @@ describe("Session routes", () => {
     const { app, rigRepo, sessionRegistry } = createTestApp(db);
     const rig = rigRepo.createRig("test-rig");
     const n1 = rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code" });
-    sessionRegistry.registerSession(n1.id, "dev-impl@test");
+    sessionRegistry.registerSession(n1.id, "dev.impl@test");
 
     const res = await app.request(`/api/rigs/${rig.id}/nodes/${encodeURIComponent("dev.impl")}`);
     const body = await res.json();
@@ -303,7 +303,7 @@ describe("Session routes", () => {
     const setup = createTestApp(db);
     const rig = setup.rigRepo.createRig("test-rig");
     const n1 = setup.rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code" });
-    setup.sessionRegistry.registerSession(n1.id, "dev-impl@test-rig");
+    setup.sessionRegistry.registerSession(n1.id, "dev.impl@test-rig");
 
     // Build a minimal app with TranscriptStore wired
     const appWithTranscript = createApp({ ...setup, transcriptStore });
@@ -312,8 +312,8 @@ describe("Session routes", () => {
     const body = await res.json();
     expect(body.transcript.enabled).toBe(true);
     expect(body.transcript.path).toContain("test-rig");
-    expect(body.transcript.path).toContain("dev-impl@test-rig");
-    expect(body.transcript.tailCommand).toBe("rig transcript dev-impl@test-rig --tail 100");
+    expect(body.transcript.path).toContain("dev.impl@test-rig");
+    expect(body.transcript.tailCommand).toBe("rig transcript dev.impl@test-rig --tail 100");
 
     // Cleanup
     fs.rmSync(tmpDir, { recursive: true, force: true });

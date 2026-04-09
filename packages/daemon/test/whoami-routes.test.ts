@@ -51,9 +51,9 @@ describe("whoami routes", () => {
   function seedRig() {
     const rig = rigRepo.createRig("my-rig");
     const node = rigRepo.addNode(rig.id, "dev.impl", { role: "worker", runtime: "claude-code" });
-    const sess = sessionRegistry.registerSession(node.id, "dev-impl@my-rig");
+    const sess = sessionRegistry.registerSession(node.id, "dev.impl@my-rig");
     sessionRegistry.updateStatus(sess.id, "running");
-    sessionRegistry.updateBinding(node.id, { tmuxSession: "dev-impl@my-rig" });
+    sessionRegistry.updateBinding(node.id, { tmuxSession: "dev.impl@my-rig" });
     return { rig, node, sess };
   }
 
@@ -66,7 +66,7 @@ describe("whoami routes", () => {
     const body = await res.json();
     expect(body.resolvedBy).toBe("node_id");
     expect(body.identity.logicalId).toBe("dev.impl");
-    expect(body.identity.sessionName).toBe("dev-impl@my-rig");
+    expect(body.identity.sessionName).toBe("dev.impl@my-rig");
     expect(body.transcript).toBeDefined();
     expect(body.commands).toBeDefined();
   });
@@ -74,7 +74,7 @@ describe("whoami routes", () => {
   it("GET /api/whoami?sessionName=... returns 200", async () => {
     seedRig();
     const app = createApp();
-    const res = await app.request("/api/whoami?sessionName=dev-impl@my-rig");
+    const res = await app.request("/api/whoami?sessionName=dev.impl@my-rig");
 
     expect(res.status).toBe(200);
     const body = await res.json();
@@ -107,14 +107,14 @@ describe("whoami routes", () => {
     // Two rigs with same session name
     const rig1 = rigRepo.createRig("rig-a");
     const node1 = rigRepo.addNode(rig1.id, "dev.impl", { role: "worker", runtime: "claude-code" });
-    sessionRegistry.registerSession(node1.id, "dev-impl@shared");
+    sessionRegistry.registerSession(node1.id, "dev.impl@shared");
 
     const rig2 = rigRepo.createRig("rig-b");
     const node2 = rigRepo.addNode(rig2.id, "dev.impl", { role: "worker", runtime: "claude-code" });
-    sessionRegistry.registerSession(node2.id, "dev-impl@shared");
+    sessionRegistry.registerSession(node2.id, "dev.impl@shared");
 
     const app = createApp();
-    const res = await app.request("/api/whoami?sessionName=dev-impl@shared");
+    const res = await app.request("/api/whoami?sessionName=dev.impl@shared");
 
     expect(res.status).toBe(409);
     const body = await res.json();

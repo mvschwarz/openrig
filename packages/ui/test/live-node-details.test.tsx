@@ -7,18 +7,18 @@ const mockFetch = vi.fn();
 
 const NODE_DETAIL = {
   rigId: "rig-1", rigName: "test-rig", logicalId: "dev.impl", podId: "dev",
-  canonicalSessionName: "dev-impl@test-rig", nodeKind: "agent", runtime: "claude-code",
+  canonicalSessionName: "dev.impl@test-rig", nodeKind: "agent", runtime: "claude-code",
   sessionStatus: "running", startupStatus: "ready", restoreOutcome: "n-a",
-  tmuxAttachCommand: "tmux attach -t dev-impl@test-rig", resumeCommand: null,
+  tmuxAttachCommand: "tmux attach -t dev.impl@test-rig", resumeCommand: null,
   latestError: null, model: "opus", agentRef: "local:agents/impl", profile: "default",
   resolvedSpecName: "impl", resolvedSpecVersion: "1.0.0", cwd: "/workspace",
   startupFiles: [{ path: "role.md", deliveryHint: "guidance_merge", required: true }],
   startupActions: [], recentEvents: [],
   infrastructureStartupCommand: null,
-  binding: { tmuxSession: "dev-impl@test-rig" },
-  peers: [{ logicalId: "dev.qa", canonicalSessionName: "dev-qa@test-rig", runtime: "codex" }],
+  binding: { tmuxSession: "dev.impl@test-rig" },
+  peers: [{ logicalId: "dev.qa", canonicalSessionName: "dev.qa@test-rig", runtime: "codex" }],
   edges: {
-    outgoing: [{ kind: "delegates_to", to: { logicalId: "dev.qa", sessionName: "dev-qa@test-rig" } }],
+    outgoing: [{ kind: "delegates_to", to: { logicalId: "dev.qa", sessionName: "dev.qa@test-rig" } }],
     incoming: [],
   },
   transcript: { enabled: true, path: "/tmp/test.log", tailCommand: "rig transcript dev-impl --tail 100" },

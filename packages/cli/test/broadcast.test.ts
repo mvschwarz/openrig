@@ -46,8 +46,8 @@ describe("Broadcast CLI", () => {
             res.end(JSON.stringify({
               total: 2, sent: 1, failed: 1,
               results: [
-                { ok: true, sessionName: "dev-impl@fail-rig" },
-                { ok: false, sessionName: "dev-qa@fail-rig", error: "send failed" },
+                { ok: true, sessionName: "dev.impl@fail-rig" },
+                { ok: false, sessionName: "dev.qa@fail-rig", error: "send failed" },
               ],
             }));
           } else {
@@ -56,8 +56,8 @@ describe("Broadcast CLI", () => {
             res.end(JSON.stringify({
               total: 2, sent: 2, failed: 0,
               results: [
-                { ok: true, sessionName: "dev-impl@my-rig" },
-                { ok: true, sessionName: "dev-qa@my-rig" },
+                { ok: true, sessionName: "dev.impl@my-rig" },
+                { ok: true, sessionName: "dev.qa@my-rig" },
               ],
             }));
           }
@@ -81,8 +81,8 @@ describe("Broadcast CLI", () => {
       await makeCmd().parseAsync(["node", "rig", "broadcast", "--rig", "my-rig", "hello"]);
     });
     const output = logs.join("\n");
-    expect(output).toContain("dev-impl@my-rig: sent");
-    expect(output).toContain("dev-qa@my-rig: sent");
+    expect(output).toContain("dev.impl@my-rig: sent");
+    expect(output).toContain("dev.qa@my-rig: sent");
     expect(output).toContain("2/2 delivered");
   });
 

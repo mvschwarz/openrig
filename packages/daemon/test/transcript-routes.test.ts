@@ -69,12 +69,12 @@ describe("transcript routes", () => {
   function seedRigWithTranscript(content: string) {
     const rig = rigRepo.createRig("my-rig");
     const node = rigRepo.addNode(rig.id, "dev-impl", { role: "worker", runtime: "claude-code" });
-    const session = sessionRegistry.registerSession(node.id, "dev-impl@my-rig");
+    const session = sessionRegistry.registerSession(node.id, "dev.impl@my-rig");
     sessionRegistry.updateStatus(session.id, "running");
 
     const store = new TranscriptStore({ transcriptsRoot: tmpDir, enabled: true });
     store.ensureTranscriptDir("my-rig");
-    const filePath = store.getTranscriptPath("my-rig", "dev-impl@my-rig");
+    const filePath = store.getTranscriptPath("my-rig", "dev.impl@my-rig");
     writeFileSync(filePath, content);
 
     return { rig, node, session, store };
@@ -84,10 +84,10 @@ describe("transcript routes", () => {
     const { store } = seedRigWithTranscript("line1\n\x1b[1mline2\x1b[0m\nline3\n");
     const app = createApp({ db, rigRepo, sessionRegistry, transcriptStore: store });
 
-    const res = await app.request("/api/transcripts/dev-impl@my-rig/tail?lines=10");
+    const res = await app.request("/api/transcripts/dev.impl@my-rig/tail?lines=10");
     expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body.session).toBe("dev-impl@my-rig");
+    expect(body.session).toBe("dev.impl@my-rig");
     expect(body.content).toContain("line2"); // ANSI stripped
     expect(body.content).not.toContain("\x1b[");
   });
@@ -107,12 +107,12 @@ describe("transcript routes", () => {
     // Create rig + session but NO transcript file
     const rig = rigRepo.createRig("my-rig");
     const node = rigRepo.addNode(rig.id, "dev-impl", { role: "worker", runtime: "claude-code" });
-    sessionRegistry.registerSession(node.id, "dev-impl@my-rig");
+    sessionRegistry.registerSession(node.id, "dev.impl@my-rig");
 
     const store = new TranscriptStore({ transcriptsRoot: tmpDir, enabled: true });
     const app = createApp({ db, rigRepo, sessionRegistry, transcriptStore: store });
 
-    const res = await app.request("/api/transcripts/dev-impl@my-rig/tail");
+    const res = await app.request("/api/transcripts/dev.impl@my-rig/tail");
     expect(res.status).toBe(404);
     const body = await res.json();
     expect(body.error).toContain("No transcript");
@@ -122,8 +122,8 @@ describe("transcript routes", () => {
   it("GET /tail starts transcript capture for a tmux-bound session with no transcript file", async () => {
     const rig = rigRepo.createRig("my-rig");
     const node = rigRepo.addNode(rig.id, "dev-impl", { role: "worker", runtime: "claude-code" });
-    sessionRegistry.registerSession(node.id, "dev-impl@my-rig");
-    sessionRegistry.updateBinding(node.id, { tmuxSession: "dev-impl@my-rig" });
+    sessionRegistry.registerSession(node.id, "dev.impl@my-rig");
+    sessionRegistry.updateBinding(node.id, { tmuxSession: "dev.impl@my-rig" });
 
     const store = new TranscriptStore({ transcriptsRoot: tmpDir, enabled: true });
     vi.spyOn(store, "ensureTranscriptDir").mockReturnValue(true);
@@ -136,21 +136,21 @@ describe("transcript routes", () => {
       tmuxAdapter: { startPipePane: startPipePaneSpy } as unknown as TmuxAdapter,
     });
 
-    const res = await app.request("/api/transcripts/dev-impl@my-rig/tail");
+    const res = await app.request("/api/transcripts/dev.impl@my-rig/tail");
     expect(res.status).toBe(404);
     const body = await res.json();
     expect(body.error).toContain("started now");
     expect(startPipePaneSpy).toHaveBeenCalledWith(
-      "dev-impl@my-rig",
-      store.getTranscriptPath("my-rig", "dev-impl@my-rig"),
+      "dev.impl@my-rig",
+      store.getTranscriptPath("my-rig", "dev.impl@my-rig"),
     );
   });
 
   it("GET /tail returns warmed content after lazy-start capture when output appears quickly", async () => {
     const rig = rigRepo.createRig("my-rig");
     const node = rigRepo.addNode(rig.id, "dev-impl", { role: "worker", runtime: "claude-code" });
-    sessionRegistry.registerSession(node.id, "dev-impl@my-rig");
-    sessionRegistry.updateBinding(node.id, { tmuxSession: "dev-impl@my-rig" });
+    sessionRegistry.registerSession(node.id, "dev.impl@my-rig");
+    sessionRegistry.updateBinding(node.id, { tmuxSession: "dev.impl@my-rig" });
 
     const store = new TranscriptStore({ transcriptsRoot: tmpDir, enabled: true });
     const readTailSpy = vi.spyOn(store, "readTail")
@@ -166,7 +166,7 @@ describe("transcript routes", () => {
       tmuxAdapter: { startPipePane: startPipePaneSpy } as unknown as TmuxAdapter,
     });
 
-    const res = await app.request("/api/transcripts/dev-impl@my-rig/tail");
+    const res = await app.request("/api/transcripts/dev.impl@my-rig/tail");
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.content).toBe("READY\n");
@@ -178,7 +178,7 @@ describe("transcript routes", () => {
     const { store } = seedRigWithTranscript("line1\nline2\nline3\n");
     const app = createApp({ db, rigRepo, sessionRegistry, transcriptStore: store });
 
-    const res = await app.request("/api/transcripts/dev-impl@my-rig/tail?lines=-5");
+    const res = await app.request("/api/transcripts/dev.impl@my-rig/tail?lines=-5");
     expect(res.status).toBe(200);
     const body = await res.json();
     // Normalized to default 50, response includes the normalized value
@@ -190,7 +190,7 @@ describe("transcript routes", () => {
     const disabledStore = new TranscriptStore({ transcriptsRoot: tmpDir, enabled: false });
     const app = createApp({ db, rigRepo, sessionRegistry, transcriptStore: disabledStore });
 
-    const res = await app.request("/api/transcripts/dev-impl@my-rig/tail");
+    const res = await app.request("/api/transcripts/dev.impl@my-rig/tail");
     expect(res.status).toBe(404);
     const body = await res.json();
     expect(body.error).toContain("disabled");
@@ -200,10 +200,10 @@ describe("transcript routes", () => {
     const { store } = seedRigWithTranscript("hello world\ndecision made\nfoo bar\ndecision final\n");
     const app = createApp({ db, rigRepo, sessionRegistry, transcriptStore: store });
 
-    const res = await app.request("/api/transcripts/dev-impl@my-rig/grep?pattern=decision");
+    const res = await app.request("/api/transcripts/dev.impl@my-rig/grep?pattern=decision");
     expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body.session).toBe("dev-impl@my-rig");
+    expect(body.session).toBe("dev.impl@my-rig");
     expect(body.matches).toHaveLength(2);
     expect(body.matches[0]).toBe("decision made");
     expect(body.matches[1]).toBe("decision final");
@@ -213,7 +213,7 @@ describe("transcript routes", () => {
     const { store } = seedRigWithTranscript("content");
     const app = createApp({ db, rigRepo, sessionRegistry, transcriptStore: store });
 
-    const res = await app.request("/api/transcripts/dev-impl@my-rig/grep");
+    const res = await app.request("/api/transcripts/dev.impl@my-rig/grep");
     expect(res.status).toBe(400);
     const body = await res.json();
     expect(body.error).toContain("pattern");
@@ -223,16 +223,16 @@ describe("transcript routes", () => {
     // Create two rigs with same name and same session name
     const rig1 = rigRepo.createRig("my-rig");
     const node1 = rigRepo.addNode(rig1.id, "dev-impl", { role: "worker", runtime: "claude-code" });
-    sessionRegistry.registerSession(node1.id, "dev-impl@my-rig");
+    sessionRegistry.registerSession(node1.id, "dev.impl@my-rig");
 
     const rig2 = rigRepo.createRig("other-rig");
     const node2 = rigRepo.addNode(rig2.id, "dev-impl2", { role: "worker", runtime: "claude-code" });
-    sessionRegistry.registerSession(node2.id, "dev-impl@my-rig");
+    sessionRegistry.registerSession(node2.id, "dev.impl@my-rig");
 
     const store = new TranscriptStore({ transcriptsRoot: tmpDir, enabled: true });
     const app = createApp({ db, rigRepo, sessionRegistry, transcriptStore: store });
 
-    const res = await app.request("/api/transcripts/dev-impl@my-rig/tail");
+    const res = await app.request("/api/transcripts/dev.impl@my-rig/tail");
     expect(res.status).toBe(409);
     const body = await res.json();
     expect(body.error).toContain("ambiguous");
@@ -242,7 +242,7 @@ describe("transcript routes", () => {
     const { store } = seedRigWithTranscript("content");
     const app = createApp({ db, rigRepo, sessionRegistry, transcriptStore: store });
 
-    const res = await app.request("/api/transcripts/dev-impl@my-rig/grep?pattern=[invalid");
+    const res = await app.request("/api/transcripts/dev.impl@my-rig/grep?pattern=[invalid");
     expect(res.status).toBe(400);
     const body = await res.json();
     expect(body.error).toContain("Invalid grep pattern");

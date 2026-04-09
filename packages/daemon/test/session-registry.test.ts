@@ -107,8 +107,8 @@ describe("SessionRegistry", () => {
   });
 
   it("registerSession accepts canonical session name with @", () => {
-    const session = registry.registerSession("node-1", "dev-impl@auth-feats");
-    expect(session.sessionName).toBe("dev-impl@auth-feats");
+    const session = registry.registerSession("node-1", "dev.impl@auth-feats");
+    expect(session.sessionName).toBe("dev.impl@auth-feats");
     expect(session.nodeId).toBe("node-1");
   });
 

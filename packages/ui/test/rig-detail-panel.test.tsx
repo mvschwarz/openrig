@@ -223,9 +223,9 @@ describe("RigDetailPanel", () => {
         return Promise.resolve({
           ok: true,
           json: async () => [
-            { rigId: "rig-1", rigName: "my-rig", logicalId: "orch.lead", podId: "orch", nodeKind: "agent", runtime: "claude-code", startupStatus: "ready", canonicalSessionName: "orch-lead@my-rig" },
-            { rigId: "rig-1", rigName: "my-rig", logicalId: "dev.impl", podId: "dev", nodeKind: "agent", runtime: "claude-code", startupStatus: "ready", canonicalSessionName: "dev-impl@my-rig" },
-            { rigId: "rig-1", rigName: "my-rig", logicalId: "dev.qa", podId: "dev", nodeKind: "agent", runtime: "codex", startupStatus: "pending", canonicalSessionName: "dev-qa@my-rig" },
+            { rigId: "rig-1", rigName: "my-rig", logicalId: "orch.lead", podId: "orch", nodeKind: "agent", runtime: "claude-code", startupStatus: "ready", canonicalSessionName: "orch.lead@my-rig" },
+            { rigId: "rig-1", rigName: "my-rig", logicalId: "dev.impl", podId: "dev", nodeKind: "agent", runtime: "claude-code", startupStatus: "ready", canonicalSessionName: "dev.impl@my-rig" },
+            { rigId: "rig-1", rigName: "my-rig", logicalId: "dev.qa", podId: "dev", nodeKind: "agent", runtime: "codex", startupStatus: "pending", canonicalSessionName: "dev.qa@my-rig" },
           ],
         });
       }

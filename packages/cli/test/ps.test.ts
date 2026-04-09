@@ -144,15 +144,15 @@ describe("Ps CLI", () => {
     nodesData["rig-1"] = [
       {
         rigId: "rig-1", rigName: "test-rig", logicalId: "dev.impl", podId: "pod-1", podNamespace: "dev",
-        canonicalSessionName: "dev-impl@test-rig", nodeKind: "agent", runtime: "claude-code",
+        canonicalSessionName: "dev.impl@test-rig", nodeKind: "agent", runtime: "claude-code",
         sessionStatus: "running", startupStatus: "ready", restoreOutcome: "n-a",
-        tmuxAttachCommand: "tmux attach -t dev-impl@test-rig", resumeCommand: null, latestError: null,
+        tmuxAttachCommand: "tmux attach -t dev.impl@test-rig", resumeCommand: null, latestError: null,
       },
       {
         rigId: "rig-1", rigName: "test-rig", logicalId: "infra.server", podId: "pod-1", podNamespace: "dev",
-        canonicalSessionName: "infra-server@test-rig", nodeKind: "infrastructure", runtime: "terminal",
+        canonicalSessionName: "infra.server@test-rig", nodeKind: "infrastructure", runtime: "terminal",
         sessionStatus: "running", startupStatus: "ready", restoreOutcome: "n-a",
-        tmuxAttachCommand: "tmux attach -t infra-server@test-rig", resumeCommand: null, latestError: null,
+        tmuxAttachCommand: "tmux attach -t infra.server@test-rig", resumeCommand: null, latestError: null,
       },
     ];
     const { logs } = await captureLogs(async () => {
@@ -166,7 +166,7 @@ describe("Ps CLI", () => {
     expect(output).toContain("RUNTIME");
     expect(output).toContain("RESTORE");
     expect(output).toContain("test-rig#rig-1");
-    expect(output).toContain("dev-impl@test-rig");
+    expect(output).toContain("dev.impl@test-rig");
     expect(output).toContain("terminal");
   });
 
@@ -178,7 +178,7 @@ describe("Ps CLI", () => {
     nodesData["rig-old"] = [
       {
         rigId: "rig-old", rigName: "demo-rig", logicalId: "dev.impl", podId: "pod-1", podNamespace: "dev",
-        canonicalSessionName: "dev-impl@demo-rig", nodeKind: "agent", runtime: "claude-code",
+        canonicalSessionName: "dev.impl@demo-rig", nodeKind: "agent", runtime: "claude-code",
         sessionStatus: "exited", startupStatus: "failed", restoreOutcome: "failed",
         tmuxAttachCommand: null, resumeCommand: null, latestError: "old restore failed",
       },
@@ -186,7 +186,7 @@ describe("Ps CLI", () => {
     nodesData["rig-new"] = [
       {
         rigId: "rig-new", rigName: "demo-rig", logicalId: "dev.impl", podId: "pod-2", podNamespace: "dev",
-        canonicalSessionName: "dev-impl@demo-rig", nodeKind: "agent", runtime: "claude-code",
+        canonicalSessionName: "dev.impl@demo-rig", nodeKind: "agent", runtime: "claude-code",
         sessionStatus: "running", startupStatus: "ready", restoreOutcome: "n-a",
         tmuxAttachCommand: null, resumeCommand: null, latestError: null,
       },
@@ -206,7 +206,7 @@ describe("Ps CLI", () => {
     nodesData["rig-1"] = [
       {
         rigId: "rig-1", rigName: "test-rig", logicalId: "dev.impl", podId: "pod-1", podNamespace: "dev",
-        canonicalSessionName: "dev-impl@test-rig", nodeKind: "agent", runtime: "claude-code",
+        canonicalSessionName: "dev.impl@test-rig", nodeKind: "agent", runtime: "claude-code",
         sessionStatus: "running", startupStatus: "ready", restoreOutcome: "resumed",
         tmuxAttachCommand: null, resumeCommand: null, latestError: null,
       },
@@ -228,7 +228,7 @@ describe("Ps CLI", () => {
     nodesData["rig-1"] = [
       {
         rigId: "rig-1", rigName: "test-rig", logicalId: "infra.daemon", podId: "pod-1", podNamespace: "infra",
-        canonicalSessionName: "infra-daemon@test-rig", nodeKind: "infrastructure", runtime: "terminal",
+        canonicalSessionName: "infra.daemon@test-rig", nodeKind: "infrastructure", runtime: "terminal",
         sessionStatus: "running", startupStatus: "ready", restoreOutcome: "n-a",
         tmuxAttachCommand: null, resumeCommand: null, latestError: null,
       },
@@ -260,7 +260,7 @@ describe("Ps CLI", () => {
         logicalId: "research1.analyst",
         podId: "pod-research",
         podNamespace: "research1",
-        canonicalSessionName: "research1-analyst-with-an-extremely-long-session-name@rigged-buildout-with-an-extremely-long-name",
+        canonicalSessionName: "research1.analyst-with-an-extremely-long-session-name@rigged-buildout-with-an-extremely-long-name",
         nodeKind: "agent",
         runtime: "claude-code",
         sessionStatus: "running",

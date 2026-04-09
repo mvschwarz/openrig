@@ -35,17 +35,17 @@ const WHOAMI_RESPONSE = {
     rigId: "rig-1", rigName: "my-rig", nodeId: "node-1", logicalId: "dev.impl",
     attachmentType: "tmux",
     podId: "pod-dev-123", podNamespace: "dev", podLabel: "Development", memberId: "impl", memberLabel: "Implementer",
-    sessionName: "dev-impl@my-rig", runtime: "claude-code", cwd: "/tmp",
+    sessionName: "dev.impl@my-rig", runtime: "claude-code", cwd: "/tmp",
     agentRef: "local:agents/impl", profile: "default",
     resolvedSpecName: "impl", resolvedSpecVersion: "1.0",
   },
-  peers: [{ logicalId: "dev.qa", sessionName: "dev-qa@my-rig", runtime: "codex", podId: "pod-dev-123", podNamespace: "dev", memberId: "qa" }],
+  peers: [{ logicalId: "dev.qa", sessionName: "dev.qa@my-rig", runtime: "codex", podId: "pod-dev-123", podNamespace: "dev", memberId: "qa" }],
   edges: {
-    outgoing: [{ kind: "delegates_to", to: { logicalId: "dev.qa", sessionName: "dev-qa@my-rig" } }],
+    outgoing: [{ kind: "delegates_to", to: { logicalId: "dev.qa", sessionName: "dev.qa@my-rig" } }],
     incoming: [],
   },
-  transcript: { enabled: true, path: "/tmp/transcripts/my-rig/dev-impl@my-rig.log", tailCommand: "rig transcript dev-impl@my-rig --tail 100", grepCommand: null },
-  commands: { sendExamples: ["rig send dev-qa@my-rig 'message' --verify"], captureExamples: ["rig capture dev-qa@my-rig"] },
+  transcript: { enabled: true, path: "/tmp/transcripts/my-rig/dev.impl@my-rig.log", tailCommand: "rig transcript dev.impl@my-rig --tail 100", grepCommand: null },
+  commands: { sendExamples: ["rig send dev.qa@my-rig 'message' --verify"], captureExamples: ["rig capture dev.qa@my-rig"] },
 };
 
 const UNBOUND_WHOAMI_RESPONSE = {
@@ -72,7 +72,7 @@ describe("Whoami CLI", () => {
       } else if (url.includes("/api/whoami") && url.includes("nodeId=node-2")) {
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify(UNBOUND_WHOAMI_RESPONSE));
-      } else if (url.includes("/api/whoami") && url.includes("sessionName=dev-impl")) {
+      } else if (url.includes("/api/whoami") && url.includes("sessionName=dev.impl")) {
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ ...WHOAMI_RESPONSE, resolvedBy: "session_name" }));
       } else if (url.includes("/api/whoami") && url.includes("sessionName=unknown")) {
@@ -123,12 +123,12 @@ describe("Whoami CLI", () => {
     });
     const output = logs.join("\n");
     expect(output).toContain("my-rig");
-    expect(output).toContain("dev-impl@my-rig");
+    expect(output).toContain("dev.impl@my-rig");
   });
 
   it("--session flag resolves and prints identity", async () => {
     const { logs } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rig", "whoami", "--session", "dev-impl@my-rig"]);
+      await makeCmd().parseAsync(["node", "rig", "whoami", "--session", "dev.impl@my-rig"]);
     });
     expect(logs.join("\n")).toContain("my-rig");
   });
@@ -142,7 +142,7 @@ describe("Whoami CLI", () => {
   });
 
   it("OPENRIG_SESSION_NAME env var resolves when no node-id env", async () => {
-    process.env["OPENRIG_SESSION_NAME"] = "dev-impl@my-rig";
+    process.env["OPENRIG_SESSION_NAME"] = "dev.impl@my-rig";
     const { logs } = await captureLogs(async () => {
       await makeCmd().parseAsync(["node", "rig", "whoami"]);
     });
@@ -154,7 +154,7 @@ describe("Whoami CLI", () => {
     process.env["TMUX_PANE"] = "%42";
     const mockTmuxExec = vi.fn((cmd: string) => {
       if (cmd.includes("show-option")) throw new Error("unknown option");
-      return "dev-impl@my-rig";
+      return "dev.impl@my-rig";
     });
 
     const result = resolveIdentitySource({}, mockTmuxExec);
@@ -162,7 +162,7 @@ describe("Whoami CLI", () => {
     const displayCalls = mockTmuxExec.mock.calls.filter((c) => (c[0] as string).includes("display-message"));
     expect(displayCalls).toHaveLength(1);
     expect(displayCalls[0]![0]).toContain("%42");
-    expect(result).toEqual({ sessionName: "dev-impl@my-rig" });
+    expect(result).toEqual({ sessionName: "dev.impl@my-rig" });
   });
 
   it("--json prints raw daemon JSON response", async () => {
@@ -277,7 +277,7 @@ describe("Whoami CLI", () => {
     expect(output).toContain("dev.impl");
     expect(output).toContain("Pod:");
     expect(output).toContain("Session:");
-    expect(output).toContain("dev-impl@my-rig");
+    expect(output).toContain("dev.impl@my-rig");
     expect(output).toContain("Peers:");
     expect(output).toContain("dev.qa");
     expect(output).toContain("Edges:");
@@ -313,7 +313,7 @@ describe("Whoami CLI", () => {
 
   it("daemon down preserves OPENRIG_SESSION_NAME alongside OPENRIG_NODE_ID in partial JSON", async () => {
     process.env["OPENRIG_NODE_ID"] = "node-1";
-    process.env["OPENRIG_SESSION_NAME"] = "dev-impl@my-rig";
+    process.env["OPENRIG_SESSION_NAME"] = "dev.impl@my-rig";
     const program = new Command();
     program.exitOverride();
     program.addCommand(whoamiCommand(stoppedDeps()));
@@ -325,12 +325,12 @@ describe("Whoami CLI", () => {
     const parsed = JSON.parse(logs.join("\n"));
     expect(parsed.partial).toBe(true);
     expect(parsed.identity.nodeId).toBe("node-1");
-    expect(parsed.identity.sessionName).toBe("dev-impl@my-rig");
+    expect(parsed.identity.sessionName).toBe("dev.impl@my-rig");
     expect(exitCode).toBeUndefined();
   });
 
   it("daemon down with OPENRIG_SESSION_NAME env prints partial human output", async () => {
-    process.env["OPENRIG_SESSION_NAME"] = "dev-impl@my-rig";
+    process.env["OPENRIG_SESSION_NAME"] = "dev.impl@my-rig";
     const program = new Command();
     program.exitOverride();
     program.addCommand(whoamiCommand(stoppedDeps()));
@@ -341,7 +341,7 @@ describe("Whoami CLI", () => {
 
     const output = logs.join("\n");
     expect(output).toContain("daemon unreachable — topology and peer info unavailable.");
-    expect(output).toContain("dev-impl@my-rig");
+    expect(output).toContain("dev.impl@my-rig");
     expect(exitCode).toBeUndefined();
   });
 });
