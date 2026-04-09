@@ -297,6 +297,32 @@ describe("Up CLI", () => {
     for (const l of origListeners) server.on("request", l as (...args: unknown[]) => void);
   });
 
+  it("up apply uses a long-running daemon timeout budget", async () => {
+    let timeoutMs: number | undefined;
+    const post = vi.fn(async (_path: string, _body: unknown, options?: { timeoutMs?: number }) => {
+      timeoutMs = options?.timeoutMs;
+      return {
+        status: 201,
+        data: { status: "completed", runId: "r", rigId: "g", stages: [], errors: [], warnings: [] },
+      };
+    });
+
+    const deps: StatusDeps = {
+      lifecycleDeps: runningDeps(port).lifecycleDeps,
+      clientFactory: () => ({ post } as unknown as DaemonClient),
+    };
+
+    const prog = new Command();
+    prog.exitOverride();
+    prog.addCommand(upCommand(deps));
+
+    await captureLogs(async () => {
+      await prog.parseAsync(["node", "rig", "up", "/tmp/rig.yaml"]);
+    });
+
+    expect(timeoutMs).toBe(45_000);
+  });
+
   // NS-T14: fresh boot handoff includes dashboard URL + attach command
   it("fresh boot success shows dashboard URL and attach command", async () => {
     const { logs } = await captureLogs(async () => {

@@ -65,6 +65,15 @@ function walkYamlFiles(rootPath: string): string[] {
   return files;
 }
 
+function shouldIndexRelativePath(sourceType: "builtin" | "user_file", relPath: string): boolean {
+  if (sourceType !== "builtin") {
+    return true;
+  }
+
+  const normalized = relPath.replaceAll("\\", "/");
+  return normalized.startsWith("rigs/") ? normalized.endsWith("/rig.yaml") : normalized.endsWith("/agent.yaml");
+}
+
 export class SpecLibraryService {
   private entries = new Map<string, SpecLibraryEntry>();
   private readonly roots: SpecLibraryOpts["roots"];
@@ -86,6 +95,9 @@ export class SpecLibraryService {
 
       for (const absPath of files) {
         const relPath = relative(root.path, absPath);
+        if (!shouldIndexRelativePath(root.sourceType, relPath)) {
+          continue;
+        }
 
         let yaml: string;
         try {

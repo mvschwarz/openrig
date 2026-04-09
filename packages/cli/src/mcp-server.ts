@@ -3,6 +3,8 @@ import { z } from "zod";
 import type { DaemonClient, DaemonResponse } from "./client.js";
 import { CLI_VERSION } from "./version.js";
 
+const LONG_RUNNING_UP_TIMEOUT_MS = 45_000;
+
 type TextResult = {
   content: Array<{ type: "text"; text: string }>;
   isError?: true;
@@ -64,7 +66,11 @@ export function createMcpServer(client: DaemonClient): McpServer {
     },
     async ({ sourceRef, plan, autoApprove, targetRoot }) => {
       try {
-        const res = await client.post("/api/up", { sourceRef, plan: plan ?? false, autoApprove: autoApprove ?? false, targetRoot });
+        const res = await client.post(
+          "/api/up",
+          { sourceRef, plan: plan ?? false, autoApprove: autoApprove ?? false, targetRoot },
+          plan ? undefined : { timeoutMs: LONG_RUNNING_UP_TIMEOUT_MS },
+        );
         return mapResult(res);
       } catch (err) {
         return { content: [{ type: "text" as const, text: (err as Error).message }], isError: true as const };
