@@ -1,5 +1,5 @@
 // Session naming: canonical pod-aware format + legacy flat-node format.
-// Canonical: {pod}.{member}@{rig} — human-authored, system-validated.
+// Canonical: {pod}-{member}@{rig} — human-authored, system-validated.
 // Legacy: r{NN}-{suffix} — for flat rigs without pods.
 
 const LEGACY_SESSION_NAME_PATTERN = /^r\d{2}-.+$/;
@@ -15,7 +15,7 @@ export function deriveCanonicalSessionName(
   memberName: string,
   rigName: string
 ): string {
-  return `${podName}.${memberName}@${rigName}`;
+  return `${podName}-${memberName}@${rigName}`;
 }
 
 /**

@@ -155,7 +155,7 @@ describe("Rig CRUD routes", () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         logicalId: "orch1.lead",
-        displayName: "orch1.lead@rigged-buildout",
+        displayName: "orch1-lead@rigged-buildout",
         cwd: "/Users/mschwarz/code/rigged",
       }),
     });
@@ -166,7 +166,7 @@ describe("Rig CRUD routes", () => {
     expect(body.nodeId).toBe(node.id);
     expect(body.attachmentType).toBe("external_cli");
     expect(body.env.OPENRIG_NODE_ID).toBe(node.id);
-    expect(body.env.OPENRIG_SESSION_NAME).toBe("orch1.lead@rigged-buildout");
+    expect(body.env.OPENRIG_SESSION_NAME).toBe("orch1-lead@rigged-buildout");
   });
 
   it("POST /api/rigs/:id/attach-self can self-attach a tmux-backed shell without discovery", async () => {
@@ -179,7 +179,7 @@ describe("Rig CRUD routes", () => {
       body: JSON.stringify({
         logicalId: "dev1.impl2",
         attachmentType: "tmux",
-        tmuxSession: "dev1.impl2@rigged-buildout",
+        tmuxSession: "dev1-impl2@rigged-buildout",
         tmuxWindow: "@12",
         tmuxPane: "%34",
       }),
@@ -191,12 +191,12 @@ describe("Rig CRUD routes", () => {
     expect(body.nodeId).toBe(node.id);
     expect(body.attachmentType).toBe("tmux");
     expect(body.env.OPENRIG_NODE_ID).toBe(node.id);
-    expect(body.env.OPENRIG_SESSION_NAME).toBe("dev1.impl2@rigged-buildout");
+    expect(body.env.OPENRIG_SESSION_NAME).toBe("dev1-impl2@rigged-buildout");
 
     const rigAfter = repo.getRig(rig.id);
     const attached = rigAfter?.nodes.find((candidate) => candidate.logicalId === "dev1.impl2");
     expect(attached?.binding?.attachmentType).toBe("tmux");
-    expect(attached?.binding?.tmuxSession).toBe("dev1.impl2@rigged-buildout");
+    expect(attached?.binding?.tmuxSession).toBe("dev1-impl2@rigged-buildout");
     expect(attached?.binding?.tmuxWindow).toBe("@12");
     expect(attached?.binding?.tmuxPane).toBe("%34");
     expect(attached?.binding?.externalSessionName).toBeNull();
@@ -213,7 +213,7 @@ describe("Rig CRUD routes", () => {
         podNamespace: "orch1",
         memberName: "lead",
         runtime: "claude-code",
-        displayName: "orch1.lead@rigged-buildout",
+        displayName: "orch1-lead@rigged-buildout",
       }),
     });
 
@@ -252,16 +252,16 @@ describe("Rig CRUD routes", () => {
     const node = repo.addNode(rig.id, "orch1.lead", { runtime: "claude-code" });
     sessionRegistry.updateBinding(node.id, {
       attachmentType: "tmux",
-      tmuxSession: "orch1.lead@rigged-buildout",
+      tmuxSession: "orch1-lead@rigged-buildout",
     });
-    sessionRegistry.registerClaimedSession(node.id, "orch1.lead@rigged-buildout");
+    sessionRegistry.registerClaimedSession(node.id, "orch1-lead@rigged-buildout");
 
     const res = await app.request(`/api/rigs/${rig.id}/attach-self`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         logicalId: "orch1.lead",
-        displayName: "orch1.lead@rigged-buildout",
+        displayName: "orch1-lead@rigged-buildout",
       }),
     });
 
@@ -456,7 +456,7 @@ describe("Rig CRUD routes", () => {
     const rig = repo.createRig("test-rig");
     db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-1", rig.id, "Dev");
     const node = repo.addNode(rig.id, "dev.impl", { runtime: "claude-code", podId: "pod-1" });
-    const session = sessionRegistry.registerSession(node.id, "dev.impl@test-rig");
+    const session = sessionRegistry.registerSession(node.id, "dev-impl@test-rig");
     sessionRegistry.updateStatus(session.id, "running");
     sessionRegistry.updateStartupStatus(session.id, "ready");
 
@@ -468,7 +468,7 @@ describe("Rig CRUD routes", () => {
     expect(graphNode).toBeDefined();
     expect(graphNode.data.startupStatus).toBe("ready");
     expect(graphNode.data.podId).toBe("pod-1");
-    expect(graphNode.data.canonicalSessionName).toBe("dev.impl@test-rig");
+    expect(graphNode.data.canonicalSessionName).toBe("dev-impl@test-rig");
     expect(graphNode.data.restoreOutcome).toBe("n-a");
     expect(graphNode.data.rigId).toBeDefined();
     // Group node for pod

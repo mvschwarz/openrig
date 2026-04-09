@@ -307,7 +307,7 @@ describe("MCP Server", () => {
         return {
           status: 200,
           data: [
-            { rigId: "rig-1", rigName: "test", logicalId: "dev.impl", nodeKind: "agent", runtime: "claude-code", sessionStatus: "running", tmuxAttachCommand: "tmux attach -t dev.impl@test" },
+            { rigId: "rig-1", rigName: "test", logicalId: "dev.impl", nodeKind: "agent", runtime: "claude-code", sessionStatus: "running", tmuxAttachCommand: "tmux attach -t dev-impl@test" },
           ],
         };
       }
@@ -334,20 +334,20 @@ describe("MCP Server", () => {
   it("rig_send returns structured result", async () => {
     const postFn = vi.fn(async () => ({
       status: 200,
-      data: { ok: true, sessionName: "dev.impl@my-rig" },
+      data: { ok: true, sessionName: "dev-impl@my-rig" },
     }));
     await setup({ post: postFn });
 
     const result = await mcpClient.callTool({
       name: "rig_send",
-      arguments: { session: "dev.impl@my-rig", text: "hello" },
+      arguments: { session: "dev-impl@my-rig", text: "hello" },
     });
 
     expect(postFn).toHaveBeenCalled();
     expect(result.isError).toBeUndefined();
     const parsed = JSON.parse((result.content as Array<{ text: string }>)[0]!.text);
     expect(parsed.ok).toBe(true);
-    expect(parsed.sessionName).toBe("dev.impl@my-rig");
+    expect(parsed.sessionName).toBe("dev-impl@my-rig");
     await cleanup();
   });
 
@@ -434,13 +434,13 @@ describe("MCP Server", () => {
   it("rig_capture returns structured result", async () => {
     const postFn = vi.fn(async () => ({
       status: 200,
-      data: { ok: true, sessionName: "dev.impl@my-rig", content: "pane output", lines: 20 },
+      data: { ok: true, sessionName: "dev-impl@my-rig", content: "pane output", lines: 20 },
     }));
     await setup({ post: postFn });
 
     const result = await mcpClient.callTool({
       name: "rig_capture",
-      arguments: { session: "dev.impl@my-rig" },
+      arguments: { session: "dev-impl@my-rig" },
     });
 
     expect(postFn).toHaveBeenCalled();

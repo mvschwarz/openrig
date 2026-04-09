@@ -688,7 +688,7 @@ Restore now:
 14. Resume states are locked: `resumed` / `rebuilt` / `fresh`. `rebuilt` = new process assembled from artifacts.
 15. Restore honesty: failed resume is FAILED loudly. No automatic fresh fallback. Fresh launch is explicit follow-up only.
 16. Post-command handoff required on `up`, `down`, `restore`, `snapshot create`: what happened + current state + next action.
-17. Session naming: `{pod}.{member}@{rig}` — human-authored, system-validated. No generation, no slugification.
+17. Session naming: `{pod}-{member}@{rig}` — human-authored, system-validated. No generation, no slugification.
 18. Communication: tmux is transport, not truth. `send/capture/broadcast` wrap tmux reliably with honest errors.
 19. Transcripts: raw capture via pipe-pane, ANSI strip on read. `rg` preferred, `grep -E` fallback.
 20. Config precedence: CLI flag > env var > config file (`~/.openrig/config.json`, with legacy fallback from `~/.rigged/config.json`) > default.

@@ -12,17 +12,17 @@ export function sendCommand(depsOverride?: StatusDeps): Command {
   };
 
   cmd
-    .argument("<session>", "Target session name (e.g. dev.impl@my-rig)")
+    .argument("<session>", "Target session name (e.g. dev-impl@my-rig)")
     .argument("<text>", "Message text to send")
     .option("--verify", "Verify delivery by checking pane content after send")
     .option("--force", "Send even if target pane appears mid-task")
     .option("--json", "JSON output for agents")
     .addHelpText("after", `
 Examples:
-  rig send dev.impl@my-rig "Context update: QA approved. Proceed."
-  rig send dev.impl@my-rig "message" --verify
-  rig send dev.impl@my-rig "Stop and read the spec." --force
-  rig send dev.impl@my-rig "message" --json
+  rig send dev-impl@my-rig "Context update: QA approved. Proceed."
+  rig send dev-impl@my-rig "message" --verify
+  rig send dev-impl@my-rig "Stop and read the spec." --force
+  rig send dev-impl@my-rig "message" --json
 
 The two-step send pattern (paste text, wait, submit Enter) is handled
 automatically. Use --verify to confirm the message appeared in the pane.

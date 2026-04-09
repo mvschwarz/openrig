@@ -18,8 +18,8 @@ describe("TranscriptStore", () => {
   describe("getTranscriptPath", () => {
     it("returns deterministic {root}/{rigName}/{sessionName}.log", () => {
       const store = new TranscriptStore({ transcriptsRoot: tmpDir });
-      const path = store.getTranscriptPath("my-rig", "dev.impl@my-rig");
-      expect(path).toBe(join(tmpDir, "my-rig", "dev.impl@my-rig.log"));
+      const path = store.getTranscriptPath("my-rig", "dev-impl@my-rig");
+      expect(path).toBe(join(tmpDir, "my-rig", "dev-impl@my-rig.log"));
     });
   });
 
@@ -48,10 +48,10 @@ describe("TranscriptStore", () => {
       const store = new TranscriptStore({ transcriptsRoot: tmpDir });
       store.ensureTranscriptDir("my-rig");
       // Create an existing transcript file with prior content
-      const filePath = store.getTranscriptPath("my-rig", "dev.impl@my-rig");
+      const filePath = store.getTranscriptPath("my-rig", "dev-impl@my-rig");
       writeFileSync(filePath, "prior content\n");
 
-      const result = store.writeBoundaryMarker("my-rig", "dev.impl@my-rig", "restored from snapshot abc123");
+      const result = store.writeBoundaryMarker("my-rig", "dev-impl@my-rig", "restored from snapshot abc123");
       expect(result).toBe(true);
 
       const content = readFileSync(filePath, "utf-8");
@@ -63,7 +63,7 @@ describe("TranscriptStore", () => {
     it("returns false on filesystem error without throwing", () => {
       const store = new TranscriptStore({ transcriptsRoot: join(tmpDir, "nonexistent", "deep") });
       // Directory doesn't exist, write will fail
-      const result = store.writeBoundaryMarker("my-rig", "dev.impl@my-rig", "test");
+      const result = store.writeBoundaryMarker("my-rig", "dev-impl@my-rig", "test");
       expect(result).toBe(false);
     });
   });
@@ -216,10 +216,10 @@ describe("TranscriptStore", () => {
         [
           "❯",
           "  ? for shortcuts",
-          "  Round 2 drill from dev1.impl2@rigged-buildout",
-          "❯ Round 2 drill from dev1.impl2@rigged-buildout",
+          "  Round 2 drill from dev1-impl2@rigged-buildout",
+          "❯ Round 2 drill from dev1-impl2@rigged-buildout",
           "· Quantumizing…",
-          "───────────────────────────────────────────────────────────── rev1.r1@rigged-buildout ──",
+          "───────────────────────────────────────────────────────────── rev1-r1@rigged-buildout ──",
           "  esc to interrupt",
           "✢",
           "✳",
@@ -246,12 +246,12 @@ describe("TranscriptStore", () => {
 
       const result = store.readTail("my-rig", "dev@my-rig", 20);
 
-      expect(result).toContain("Round 2 drill from dev1.impl2@rigged-buildout");
+      expect(result).toContain("Round 2 drill from dev1-impl2@rigged-buildout");
       expect(result).toContain("Quantumizing…");
       expect(result).toContain("Acknowledged. I see impl2's round 2 drill is running");
       expect(result).not.toContain("? for shortcuts");
       expect(result).not.toContain("esc to interrupt");
-      expect(result).not.toContain("rev1.r1@rigged-buildout ──");
+      expect(result).not.toContain("rev1-r1@rigged-buildout ──");
       expect(result).not.toContain("\n✢\n");
       expect(result).not.toContain("Q  n");
       expect(result).not.toContain("u  z");
@@ -331,11 +331,11 @@ describe("TranscriptStore", () => {
     it("readTail handles multibyte UTF-8 characters at chunk boundaries", () => {
       const store = new TranscriptStore({ transcriptsRoot: tmpDir });
       store.ensureTranscriptDir("utf8-rig");
-      const filePath = store.getTranscriptPath("utf8-rig", "dev.tail@utf8-rig");
+      const filePath = store.getTranscriptPath("utf8-rig", "dev-tail@utf8-rig");
       // Write enough padding to push the multibyte char near a chunk boundary
       const padding = "X".repeat(16 * 1024 - 5); // just before 16KB boundary
       writeFileSync(filePath, padding + "\ncafé résumé\nlast line\n");
-      const result = store.readTail("utf8-rig", "dev.tail@utf8-rig", 2);
+      const result = store.readTail("utf8-rig", "dev-tail@utf8-rig", 2);
       expect(result).not.toBeNull();
       expect(result).toContain("café");
       expect(result).toContain("last line");

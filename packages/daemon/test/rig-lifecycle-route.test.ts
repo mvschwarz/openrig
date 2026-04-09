@@ -114,7 +114,7 @@ describe("Rig lifecycle routes", () => {
   it("POST /api/rigs/:rigId/release refuses rigs containing launched nodes", async () => {
     const rig = setup.rigRepo.createRig("release-mixed-rig");
     const launchedNode = setup.rigRepo.addNode(rig.id, "dev.impl", { runtime: "codex" });
-    setup.sessionRegistry.registerSession(launchedNode.id, "dev.impl@release-mixed-rig");
+    setup.sessionRegistry.registerSession(launchedNode.id, "dev-impl@release-mixed-rig");
 
     const res = await setup.app.request(`/api/rigs/${rig.id}/release`, {
       method: "POST",

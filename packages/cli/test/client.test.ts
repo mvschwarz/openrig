@@ -152,8 +152,8 @@ describe("DaemonClient", () => {
     const execFileAsync = promisify(execFile);
     const { resolve } = await import("node:path");
 
-    const cliEntry = resolve(import.meta.dirname, "../dist/index.js");
-    const result = await execFileAsync("node", [cliEntry, "--version"], {
+    const cliEntry = resolve(import.meta.dirname, "../src/index.ts");
+    const result = await execFileAsync("npx", ["tsx", cliEntry, "--version"], {
       cwd: resolve(import.meta.dirname, ".."),
     });
 

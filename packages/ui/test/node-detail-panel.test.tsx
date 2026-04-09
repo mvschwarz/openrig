@@ -26,21 +26,21 @@ function renderPanel(props?: { rigId?: string; logicalId?: string }) {
 
 const AGENT_DETAIL = {
   rigId: "rig-1", rigName: "test-rig", logicalId: "dev.impl", podId: "dev",
-  canonicalSessionName: "dev.impl@test-rig", nodeKind: "agent", runtime: "claude-code",
+  canonicalSessionName: "dev-impl@test-rig", nodeKind: "agent", runtime: "claude-code",
   sessionStatus: "running", startupStatus: "ready", restoreOutcome: "n-a",
-  tmuxAttachCommand: "tmux attach -t dev.impl@test-rig", resumeCommand: "claude --resume abc-123",
+  tmuxAttachCommand: "tmux attach -t dev-impl@test-rig", resumeCommand: "claude --resume abc-123",
   latestError: null, model: "opus", agentRef: "local:agents/impl", profile: "default",
   resolvedSpecName: "impl", resolvedSpecVersion: "1.0.0", cwd: "/workspace",
   startupFiles: [{ path: "role.md", deliveryHint: "guidance_merge", required: true }],
   startupActions: [], recentEvents: [{ type: "node.startup_ready", createdAt: "2026-03-31T00:00:00Z" }],
   infrastructureStartupCommand: null,
-  binding: { tmuxSession: "dev.impl@test-rig" },
-  peers: [{ logicalId: "dev.qa", canonicalSessionName: "dev.qa@test-rig", runtime: "codex" }],
+  binding: { tmuxSession: "dev-impl@test-rig" },
+  peers: [{ logicalId: "dev.qa", canonicalSessionName: "dev-qa@test-rig", runtime: "codex" }],
   edges: {
-    outgoing: [{ kind: "delegates_to", to: { logicalId: "dev.qa", sessionName: "dev.qa@test-rig" } }],
+    outgoing: [{ kind: "delegates_to", to: { logicalId: "dev.qa", sessionName: "dev-qa@test-rig" } }],
     incoming: [],
   },
-  transcript: { enabled: true, path: "/tmp/transcripts/test-rig/dev.impl@test-rig.log", tailCommand: "rig transcript dev.impl@test-rig --tail 100" },
+  transcript: { enabled: true, path: "/tmp/transcripts/test-rig/dev-impl@test-rig.log", tailCommand: "rig transcript dev-impl@test-rig --tail 100" },
   compactSpec: { name: "impl", version: "1.0.0", profile: "default", skillCount: 2, guidanceCount: 1 },
 };
 
@@ -48,8 +48,8 @@ const INFRA_DETAIL = {
   ...AGENT_DETAIL, logicalId: "infra.server", nodeKind: "infrastructure", runtime: "terminal",
   profile: "none", agentRef: "builtin:terminal", resumeCommand: null,
   infrastructureStartupCommand: "npm run dev",
-  canonicalSessionName: "infra.server@test-rig",
-  tmuxAttachCommand: "tmux attach -t infra.server@test-rig",
+  canonicalSessionName: "infra-server@test-rig",
+  tmuxAttachCommand: "tmux attach -t infra-server@test-rig",
   compactSpec: { name: null, version: null, profile: null, skillCount: 0, guidanceCount: 0 },
 };
 
@@ -97,7 +97,7 @@ describe("NodeDetailPanel integration with AppShell selection", () => {
     // Panel should mount and fetch detail data
     await waitFor(() => {
       expect(screen.getByTestId("node-detail-panel")).toBeDefined();
-      expect(screen.getAllByText("dev.impl@test-rig").length).toBeGreaterThan(0);
+      expect(screen.getAllByText("dev-impl@test-rig").length).toBeGreaterThan(0);
     });
 
     expect(mockFetch).toHaveBeenCalledWith(expect.stringContaining("/nodes/dev.impl"));
@@ -117,7 +117,7 @@ describe("NodeDetailPanel", () => {
     mockDetail(AGENT_DETAIL);
     renderPanel();
     await waitFor(() => {
-      expect(screen.getAllByText("dev.impl@test-rig").length).toBeGreaterThan(0);
+      expect(screen.getAllByText("dev-impl@test-rig").length).toBeGreaterThan(0);
       expect(screen.getByText("claude-code")).toBeDefined();
       expect(screen.getAllByText("impl").length).toBeGreaterThan(0);
     });
@@ -222,7 +222,7 @@ describe("NodeDetailPanel", () => {
       expect(screen.getByTestId("detail-peers")).toBeDefined();
       expect(screen.getAllByText("dev.qa").length).toBeGreaterThan(0);
       expect(screen.getByText("codex")).toBeDefined();
-      expect(screen.getByText("dev.qa@test-rig")).toBeDefined();
+      expect(screen.getByText("dev-qa@test-rig")).toBeDefined();
     });
   });
 

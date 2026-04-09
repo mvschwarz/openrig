@@ -189,7 +189,7 @@ describe("AskService", () => {
             podLabel: "Development",
             memberId: "impl",
             memberLabel: "Implementer",
-            sessionName: "dev.impl@my-rig",
+            sessionName: "dev-impl@my-rig",
             runtime: "claude-code",
             cwd: "/tmp",
             agentRef: null,
@@ -200,7 +200,7 @@ describe("AskService", () => {
           peers: [
             {
               logicalId: "dev.qa",
-              sessionName: "dev.qa@my-rig",
+              sessionName: "dev-qa@my-rig",
               runtime: "codex",
               podId: "pod-dev",
               podNamespace: "dev",
@@ -215,11 +215,11 @@ describe("AskService", () => {
     });
     const svc = new AskService(deps);
 
-    const result = await svc.ask("my-rig", "who are my peers?", { sessionName: "dev.impl@my-rig" });
+    const result = await svc.ask("my-rig", "who are my peers?", { sessionName: "dev-impl@my-rig" });
 
     expect(result.evidence.backend).toBe("structured");
     expect(result.evidence.excerpts[0]).toContain("dev.qa");
-    expect(result.evidence.excerpts[0]).toContain("dev.qa@my-rig");
+    expect(result.evidence.excerpts[0]).toContain("dev-qa@my-rig");
     expect(result.evidence.excerpts.join("\n")).not.toContain("dev.impl");
     expect(result.insufficient).toBe(false);
     expect(searchSpy).not.toHaveBeenCalled();
@@ -243,8 +243,8 @@ describe("AskService", () => {
         getRig: vi.fn(() => ({
           rig: { id: "rig-1", name: "my-rig", createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z" },
           nodes: [
-            { id: "node-1", logicalId: "dev.impl", runtime: "claude-code", podId: "pod-dev", binding: { tmuxSession: "dev.impl@my-rig" } },
-            { id: "node-2", logicalId: "dev.qa", runtime: "codex", podId: "pod-dev", binding: { tmuxSession: "dev.qa@my-rig" } },
+            { id: "node-1", logicalId: "dev.impl", runtime: "claude-code", podId: "pod-dev", binding: { tmuxSession: "dev-impl@my-rig" } },
+            { id: "node-2", logicalId: "dev.qa", runtime: "codex", podId: "pod-dev", binding: { tmuxSession: "dev-qa@my-rig" } },
           ],
           edges: [],
         }) as never),

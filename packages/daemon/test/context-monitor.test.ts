@@ -64,7 +64,7 @@ describe("ContextMonitor", () => {
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  function seedClaudeNode(logicalId = "dev.impl", sessionName = "dev.impl@test") {
+  function seedClaudeNode(logicalId = "dev.impl", sessionName = "dev-impl@test") {
     const rig = rigRepo.createRig("test-rig");
     const node = rigRepo.addNode(rig.id, logicalId, { runtime: "claude-code" });
     const session = sessionRegistry.registerSession(node.id, sessionName);
@@ -76,7 +76,7 @@ describe("ContextMonitor", () => {
   function seedCodexNode() {
     const rig = rigRepo.createRig("test-rig-2");
     const node = rigRepo.addNode(rig.id, "dev.qa", { runtime: "codex" });
-    sessionRegistry.registerSession(node.id, "dev.qa@test");
+    sessionRegistry.registerSession(node.id, "dev-qa@test");
     return { rig, node };
   }
 
@@ -92,9 +92,9 @@ describe("ContextMonitor", () => {
   function seedExternalCliClaudeNode() {
     const rig = rigRepo.createRig("test-rig-4");
     const node = rigRepo.addNode(rig.id, "orch.lead", { runtime: "claude-code" });
-    const session = sessionRegistry.registerClaimedSession(node.id, "orch.lead@test");
+    const session = sessionRegistry.registerClaimedSession(node.id, "orch-lead@test");
     db.prepare("UPDATE sessions SET status = 'running' WHERE id = ?").run(session.id);
-    sessionRegistry.updateBinding(node.id, { attachmentType: "external_cli", externalSessionName: "orch.lead@test" });
+    sessionRegistry.updateBinding(node.id, { attachmentType: "external_cli", externalSessionName: "orch-lead@test" });
     return { rig, node };
   }
 
@@ -113,7 +113,7 @@ describe("ContextMonitor", () => {
       current_usage: "67% used",
     },
     session_id: "sess-123",
-    session_name: "dev.impl@test",
+    session_name: "dev-impl@test",
     transcript_path: "/tmp/test.log",
     sampled_at: new Date().toISOString(),
   };
@@ -140,7 +140,7 @@ describe("ContextMonitor", () => {
 
     monitor.pollOnce();
 
-    const usage = store.getForNode(codexNode.id, "dev.qa@test");
+    const usage = store.getForNode(codexNode.id, "dev-qa@test");
     expect(usage.availability).toBe("unknown");
     expect(usage.reason).toBe("no_data");
   });
@@ -225,11 +225,11 @@ describe("ContextMonitor", () => {
 
   it("external_cli Claude sessions are not polled", () => {
     const { node } = seedExternalCliClaudeNode();
-    writeSidecar("orch.lead@test", VALID_SIDECAR);
+    writeSidecar("orch-lead@test", VALID_SIDECAR);
 
     monitor.pollOnce();
 
-    const usage = store.getForNode(node.id, "orch.lead@test");
+    const usage = store.getForNode(node.id, "orch-lead@test");
     expect(usage.availability).toBe("unknown");
     expect(usage.reason).toBe("no_data");
   });

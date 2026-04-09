@@ -37,8 +37,8 @@ describe("Capture CLI", () => {
           } else if (parsed.rig) {
             res.writeHead(200, { "Content-Type": "application/json" });
             res.end(JSON.stringify({ results: [
-              { ok: true, sessionName: "dev.impl@my-rig", content: "impl output", lines: 20 },
-              { ok: true, sessionName: "dev.qa@my-rig", content: "qa output", lines: 20 },
+              { ok: true, sessionName: "dev-impl@my-rig", content: "impl output", lines: 20 },
+              { ok: true, sessionName: "dev-qa@my-rig", content: "qa output", lines: 20 },
             ]}));
           } else {
             res.writeHead(400, { "Content-Type": "application/json" });
@@ -61,7 +61,7 @@ describe("Capture CLI", () => {
 
   it("capture prints pane content", async () => {
     const { logs } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rig", "capture", "dev.impl@my-rig"]);
+      await makeCmd().parseAsync(["node", "rig", "capture", "dev-impl@my-rig"]);
     });
     expect(logs.join("\n")).toContain("line1");
   });
@@ -71,14 +71,14 @@ describe("Capture CLI", () => {
       await makeCmd().parseAsync(["node", "rig", "capture", "--rig", "my-rig"]);
     });
     const output = logs.join("\n");
-    expect(output).toContain("--- dev.impl@my-rig ---");
+    expect(output).toContain("--- dev-impl@my-rig ---");
     expect(output).toContain("impl output");
-    expect(output).toContain("--- dev.qa@my-rig ---");
+    expect(output).toContain("--- dev-qa@my-rig ---");
   });
 
   it("capture --json prints raw JSON", async () => {
     const { logs } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rig", "capture", "dev.impl@my-rig", "--json"]);
+      await makeCmd().parseAsync(["node", "rig", "capture", "dev-impl@my-rig", "--json"]);
     });
     const parsed = JSON.parse(logs.join("\n"));
     expect(parsed.ok).toBe(true);

@@ -130,7 +130,7 @@ function createMockDaemon() {
           res.end(JSON.stringify({ ok: false, code: "preflight_failed", message: "conflict" }));
         } else {
           res.writeHead(201, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ rigId: "rig-new", specName: "imported-rig", specVersion: "0.1.0", nodes: [{ logicalId: "orchestrator", status: "launched" }, { logicalId: "worker", status: "launched" }], attachCommand: "tmux attach -t orch.lead@imported-rig" }));
+          res.end(JSON.stringify({ rigId: "rig-new", specName: "imported-rig", specVersion: "0.1.0", nodes: [{ logicalId: "orchestrator", status: "launched" }, { logicalId: "worker", status: "launched" }], attachCommand: "tmux attach -t orch-lead@imported-rig" }));
         }
       });
       return;
@@ -432,6 +432,6 @@ describe("rig export + import", () => {
     const logs = await captureLogs(() => program.parseAsync(["node", "rig", "import", "rig.yaml", "--instantiate"]));
     const output = logs.join("\n");
     expect(output).toContain("Attach:");
-    expect(output).toContain("tmux attach -t orch.lead@imported-rig");
+    expect(output).toContain("tmux attach -t orch-lead@imported-rig");
   });
 });

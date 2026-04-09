@@ -5,7 +5,7 @@ import type { NodeBinding } from "../src/domain/runtime-adapter.js";
 const MOCK_BINDING: NodeBinding = {
   id: "bind-1",
   nodeId: "node-1",
-  tmuxSession: "infra.server@test-rig",
+  tmuxSession: "infra-server@test-rig",
   tmuxWindow: null,
   tmuxPane: null,
   cmuxWorkspace: null,
@@ -49,7 +49,7 @@ describe("TerminalAdapter", () => {
 
   // NS-T04
   it("launchHarness is no-op returning ok", async () => {
-    const result = await adapter.launchHarness(MOCK_BINDING, { name: "infra.server@test-rig" });
+    const result = await adapter.launchHarness(MOCK_BINDING, { name: "infra-server@test-rig" });
     expect(result).toEqual({ ok: true });
   });
 });

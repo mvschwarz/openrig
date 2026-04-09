@@ -75,11 +75,11 @@ describe("Attach CLI", () => {
           nodeId: "node-1",
           logicalId,
           sessionId: "sess-1",
-          sessionName: "orch1.lead@rigged-buildout",
+          sessionName: "orch1-lead@rigged-buildout",
           attachmentType: "external_cli",
           env: {
             OPENRIG_NODE_ID: "node-1",
-            OPENRIG_SESSION_NAME: "orch1.lead@rigged-buildout",
+            OPENRIG_SESSION_NAME: "orch1-lead@rigged-buildout",
           },
         }));
         return;
@@ -127,7 +127,7 @@ describe("Attach CLI", () => {
     expect(exitCode).toBeUndefined();
     expect(logs).toEqual([
       "export OPENRIG_NODE_ID='node-1'",
-      "export OPENRIG_SESSION_NAME='orch1.lead@rigged-buildout'",
+      "export OPENRIG_SESSION_NAME='orch1-lead@rigged-buildout'",
     ]);
   });
 
@@ -152,7 +152,7 @@ describe("Attach CLI", () => {
   it("resolveAttachContext detects tmux session metadata when TMUX_PANE is set", () => {
     const savedPane = process.env["TMUX_PANE"];
     process.env["TMUX_PANE"] = "%42";
-    const mockTmuxExec = vi.fn(() => "dev1.impl2@rigged-buildout\n@12\n%42");
+    const mockTmuxExec = vi.fn(() => "dev1-impl2@rigged-buildout\n@12\n%42");
 
     const result = resolveAttachContext(mockTmuxExec);
 
@@ -161,7 +161,7 @@ describe("Attach CLI", () => {
 
     expect(result).toEqual({
       attachmentType: "tmux",
-      tmuxSession: "dev1.impl2@rigged-buildout",
+      tmuxSession: "dev1-impl2@rigged-buildout",
       tmuxWindow: "@12",
       tmuxPane: "%42",
     });

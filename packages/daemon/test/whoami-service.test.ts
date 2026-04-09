@@ -48,13 +48,13 @@ describe("WhoamiService", () => {
     const nodeB = rigRepo.addNode(rig.id, "dev.qa", { role: "reviewer", runtime: "codex", label: "QA", podId: "pod-dev" });
     rigRepo.addEdge(rig.id, nodeA.id, nodeB.id, "delegates_to");
 
-    const sessA = sessionRegistry.registerSession(nodeA.id, "dev.impl@my-rig");
+    const sessA = sessionRegistry.registerSession(nodeA.id, "dev-impl@my-rig");
     sessionRegistry.updateStatus(sessA.id, "running");
-    sessionRegistry.updateBinding(nodeA.id, { tmuxSession: "dev.impl@my-rig" });
+    sessionRegistry.updateBinding(nodeA.id, { tmuxSession: "dev-impl@my-rig" });
 
-    const sessB = sessionRegistry.registerSession(nodeB.id, "dev.qa@my-rig");
+    const sessB = sessionRegistry.registerSession(nodeB.id, "dev-qa@my-rig");
     sessionRegistry.updateStatus(sessB.id, "running");
-    sessionRegistry.updateBinding(nodeB.id, { tmuxSession: "dev.qa@my-rig" });
+    sessionRegistry.updateBinding(nodeB.id, { tmuxSession: "dev-qa@my-rig" });
 
     return { rig, nodeA, nodeB, sessA, sessB };
   }
@@ -69,14 +69,14 @@ describe("WhoamiService", () => {
     expect(result!.identity.memberId).toBe("impl");
     expect(result!.identity.memberLabel).toBe("Implementer");
     expect(result!.identity.podNamespace).toBe("dev");
-    expect(result!.identity.sessionName).toBe("dev.impl@my-rig");
+    expect(result!.identity.sessionName).toBe("dev-impl@my-rig");
     expect(result!.identity.runtime).toBe("claude-code");
     expect(result!.identity.rigName).toBe("my-rig");
   });
 
   it("resolve by sessionName returns same result", () => {
     seedRig();
-    const result = svc.resolve({ sessionName: "dev.impl@my-rig" });
+    const result = svc.resolve({ sessionName: "dev-impl@my-rig" });
 
     expect(result).not.toBeNull();
     expect(result!.resolvedBy).toBe("session_name");
@@ -100,7 +100,7 @@ describe("WhoamiService", () => {
 
     expect(result!.peers).toHaveLength(1);
     expect(result!.peers[0]!.logicalId).toBe("dev.qa");
-    expect(result!.peers[0]!.sessionName).toBe("dev.qa@my-rig");
+    expect(result!.peers[0]!.sessionName).toBe("dev-qa@my-rig");
     expect(result!.peers[0]!.podNamespace).toBe("dev");
     // Should NOT include self
     expect(result!.peers.find((p) => p.logicalId === "dev.impl")).toBeUndefined();
@@ -116,29 +116,29 @@ describe("WhoamiService", () => {
     // Create two rigs with same session name
     const rig1 = rigRepo.createRig("rig-a");
     const node1 = rigRepo.addNode(rig1.id, "dev.impl", { role: "worker", runtime: "claude-code" });
-    sessionRegistry.registerSession(node1.id, "dev.impl@shared");
+    sessionRegistry.registerSession(node1.id, "dev-impl@shared");
 
     const rig2 = rigRepo.createRig("rig-b");
     const node2 = rigRepo.addNode(rig2.id, "dev.impl", { role: "worker", runtime: "claude-code" });
-    sessionRegistry.registerSession(node2.id, "dev.impl@shared");
+    sessionRegistry.registerSession(node2.id, "dev-impl@shared");
 
-    expect(() => svc.resolve({ sessionName: "dev.impl@shared" })).toThrow(/ambiguous/i);
+    expect(() => svc.resolve({ sessionName: "dev-impl@shared" })).toThrow(/ambiguous/i);
   });
 
   it("resolve surfaces external_cli attachment type and external session name", () => {
     const rig = rigRepo.createRig("rigged-buildout");
     const node = rigRepo.addNode(rig.id, "orch1.lead", { role: "orchestrator", runtime: "claude-code" });
-    sessionRegistry.registerClaimedSession(node.id, "orch1.lead@rigged-buildout");
+    sessionRegistry.registerClaimedSession(node.id, "orch1-lead@rigged-buildout");
     sessionRegistry.updateBinding(node.id, {
       attachmentType: "external_cli",
-      externalSessionName: "orch1.lead@rigged-buildout",
+      externalSessionName: "orch1-lead@rigged-buildout",
     });
 
     const result = svc.resolve({ nodeId: node.id });
 
     expect(result).not.toBeNull();
     expect(result!.identity.attachmentType).toBe("external_cli");
-    expect(result!.identity.sessionName).toBe("orch1.lead@rigged-buildout");
+    expect(result!.identity.sessionName).toBe("orch1-lead@rigged-buildout");
   });
 
   it("resolve returns null session and no transcript affordances for an unbound node", () => {

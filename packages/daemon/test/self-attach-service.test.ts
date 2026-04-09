@@ -98,7 +98,7 @@ describe("SelfAttachService", () => {
     const result = await selfAttachService.attachToNode({
       rigId: rig.id,
       logicalId: "orch1.lead",
-      displayName: "orch1.lead@rigged-buildout",
+      displayName: "orch1-lead@rigged-buildout",
       cwd: "/Users/mschwarz/code/rigged",
     });
 
@@ -107,20 +107,20 @@ describe("SelfAttachService", () => {
 
     expect(result.nodeId).toBe(node.id);
     expect(result.logicalId).toBe("orch1.lead");
-    expect(result.sessionName).toBe("orch1.lead@rigged-buildout");
+    expect(result.sessionName).toBe("orch1-lead@rigged-buildout");
     expect(result.attachmentType).toBe("external_cli");
     expect(result.env.OPENRIG_NODE_ID).toBe(node.id);
-    expect(result.env.OPENRIG_SESSION_NAME).toBe("orch1.lead@rigged-buildout");
+    expect(result.env.OPENRIG_SESSION_NAME).toBe("orch1-lead@rigged-buildout");
 
     const binding = sessionRegistry.getBindingForNode(node.id);
     expect(binding?.attachmentType).toBe("external_cli");
-    expect(binding?.externalSessionName).toBe("orch1.lead@rigged-buildout");
+    expect(binding?.externalSessionName).toBe("orch1-lead@rigged-buildout");
     expect(binding?.tmuxSession).toBeNull();
 
     const sessions = sessionRegistry.getSessionsForRig(rig.id).filter((session) => session.nodeId === node.id);
     expect(sessions).toHaveLength(1);
     expect(sessions[0]?.origin).toBe("claimed");
-    expect(sessions[0]?.sessionName).toBe("orch1.lead@rigged-buildout");
+    expect(sessions[0]?.sessionName).toBe("orch1-lead@rigged-buildout");
   });
 
   it("attachToNode rejects runtime mismatch for an existing node", async () => {
@@ -147,7 +147,7 @@ describe("SelfAttachService", () => {
       podNamespace: pod.namespace,
       memberName: "lead",
       runtime: "claude-code",
-      displayName: "orch1.lead@rigged-buildout",
+      displayName: "orch1-lead@rigged-buildout",
       cwd: "/Users/mschwarz/code/rigged",
     });
 
@@ -162,7 +162,7 @@ describe("SelfAttachService", () => {
 
     const binding = sessionRegistry.getBindingForNode(result.nodeId);
     expect(binding?.attachmentType).toBe("external_cli");
-    expect(binding?.externalSessionName).toBe("orch1.lead@rigged-buildout");
+    expect(binding?.externalSessionName).toBe("orch1-lead@rigged-buildout");
   });
 
   it("attachToNode can self-attach from tmux without discovery", async () => {
@@ -176,7 +176,7 @@ describe("SelfAttachService", () => {
       logicalId: "dev1.impl2",
       context: {
         attachmentType: "tmux",
-        tmuxSession: "dev1.impl2@rigged-buildout",
+        tmuxSession: "dev1-impl2@rigged-buildout",
         tmuxWindow: "@12",
         tmuxPane: "%34",
       },
@@ -186,11 +186,11 @@ describe("SelfAttachService", () => {
     if (!result.ok) return;
 
     expect(result.attachmentType).toBe("tmux");
-    expect(result.sessionName).toBe("dev1.impl2@rigged-buildout");
+    expect(result.sessionName).toBe("dev1-impl2@rigged-buildout");
 
     const binding = sessionRegistry.getBindingForNode(node.id);
     expect(binding?.attachmentType).toBe("tmux");
-    expect(binding?.tmuxSession).toBe("dev1.impl2@rigged-buildout");
+    expect(binding?.tmuxSession).toBe("dev1-impl2@rigged-buildout");
     expect(binding?.tmuxWindow).toBe("@12");
     expect(binding?.tmuxPane).toBe("%34");
     expect(binding?.externalSessionName).toBeNull();
@@ -208,7 +208,7 @@ describe("SelfAttachService", () => {
       logicalId: "dev1.impl2",
       context: {
         attachmentType: "tmux",
-        tmuxSession: "dev1.impl2@rigged-buildout",
+        tmuxSession: "dev1-impl2@rigged-buildout",
         tmuxWindow: "@12",
         tmuxPane: "%34",
       },
@@ -216,8 +216,8 @@ describe("SelfAttachService", () => {
 
     expect(result.ok).toBe(true);
     expect(startPipePaneSpy).toHaveBeenCalledWith(
-      "dev1.impl2@rigged-buildout",
-      transcriptStore.getTranscriptPath("rigged-buildout", "dev1.impl2@rigged-buildout"),
+      "dev1-impl2@rigged-buildout",
+      transcriptStore.getTranscriptPath("rigged-buildout", "dev1-impl2@rigged-buildout"),
     );
   });
 
@@ -233,14 +233,14 @@ describe("SelfAttachService", () => {
       logicalId: "dev1.impl2",
       context: {
         attachmentType: "tmux",
-        tmuxSession: "dev1.impl2@rigged-buildout",
+        tmuxSession: "dev1-impl2@rigged-buildout",
       },
     });
 
     expect(result.ok).toBe(true);
     expect(ensureContextCollectorSpy).toHaveBeenCalledWith({
       cwd: "/Users/mschwarz/code/rigged",
-      tmuxSession: "dev1.impl2@rigged-buildout",
+      tmuxSession: "dev1-impl2@rigged-buildout",
     });
   });
 });

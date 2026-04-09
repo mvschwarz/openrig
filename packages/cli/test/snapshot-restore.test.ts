@@ -146,7 +146,7 @@ function createMockDaemon() {
           { nodeId: "n1", logicalId: "orchestrator", status: "resumed" },
           { nodeId: "n2", logicalId: "worker", status: "rebuilt" },
         ],
-        attachCommand: "tmux attach -t orch.lead@test-rig",
+        attachCommand: "tmux attach -t orch-lead@test-rig",
       }));
       return;
     }
@@ -228,7 +228,7 @@ describe("rig snapshot + restore", () => {
     expect(output).toContain("rebuilt");
     // NS-T14: handoff includes attach command
     expect(output).toContain("Attach:");
-    expect(output).toContain("tmux attach -t orch.lead@test-rig");
+    expect(output).toContain("tmux attach -t orch-lead@test-rig");
   });
 
   // Test 5: restore with failed node -> non-zero exit

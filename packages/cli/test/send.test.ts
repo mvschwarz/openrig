@@ -64,9 +64,9 @@ describe("Send CLI", () => {
       req.on("end", () => {
         if (req.method === "POST" && url === "/api/transport/send") {
           const parsed = JSON.parse(body);
-          if (parsed.session === "dev.impl@my-rig") {
+          if (parsed.session === "dev-impl@my-rig") {
             res.writeHead(200, { "Content-Type": "application/json" });
-            res.end(JSON.stringify({ ok: true, sessionName: "dev.impl@my-rig" }));
+            res.end(JSON.stringify({ ok: true, sessionName: "dev-impl@my-rig" }));
           } else if (parsed.session === "busy-session") {
             res.writeHead(409, { "Content-Type": "application/json" });
             res.end(JSON.stringify({ ok: false, sessionName: "busy-session", reason: "mid_work", error: "Target pane appears mid-task. Use force: true to send anyway." }));
@@ -94,9 +94,9 @@ describe("Send CLI", () => {
 
   it("send prints success output", async () => {
     const { logs } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rig", "send", "dev.impl@my-rig", "hello world"]);
+      await makeCmd().parseAsync(["node", "rig", "send", "dev-impl@my-rig", "hello world"]);
     });
-    expect(logs.join("\n")).toContain("Sent to dev.impl@my-rig");
+    expect(logs.join("\n")).toContain("Sent to dev-impl@my-rig");
   });
 
   it("send with 409 mid-work prints error and exits non-zero", async () => {
@@ -109,11 +109,11 @@ describe("Send CLI", () => {
 
   it("send --json prints raw JSON", async () => {
     const { logs } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rig", "send", "dev.impl@my-rig", "hello", "--json"]);
+      await makeCmd().parseAsync(["node", "rig", "send", "dev-impl@my-rig", "hello", "--json"]);
     });
     const parsed = JSON.parse(logs.join("\n"));
     expect(parsed.ok).toBe(true);
-    expect(parsed.sessionName).toBe("dev.impl@my-rig");
+    expect(parsed.sessionName).toBe("dev-impl@my-rig");
   });
 
   it("send --help includes rediscovery examples", () => {
@@ -121,6 +121,6 @@ describe("Send CLI", () => {
     const helpText = cmd.helpInformation();
     expect(helpText).toContain("--verify");
     expect(helpText).toContain("--force");
-    expect(helpText).toContain("dev.impl@my-rig");
+    expect(helpText).toContain("dev-impl@my-rig");
   });
 });

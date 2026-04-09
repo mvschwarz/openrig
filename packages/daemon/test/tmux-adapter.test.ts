@@ -235,15 +235,15 @@ describe("TmuxAdapter", () => {
       const exec = vi.fn<ExecFn>().mockResolvedValue("");
       const adapter = new TmuxAdapter(exec);
 
-      await adapter.createSession("dev.impl@rig", "/tmp", {
+      await adapter.createSession("dev-impl@rig", "/tmp", {
         OPENRIG_NODE_ID: "node123",
-        OPENRIG_SESSION_NAME: "dev.impl@rig",
+        OPENRIG_SESSION_NAME: "dev-impl@rig",
       });
 
       const cmd = exec.mock.calls[0]![0] as string;
       expect(cmd).toContain("-e 'OPENRIG_NODE_ID=node123'");
-      expect(cmd).toContain("-e 'OPENRIG_SESSION_NAME=dev.impl@rig'");
-      expect(cmd).toContain("-s 'dev.impl@rig'");
+      expect(cmd).toContain("-e 'OPENRIG_SESSION_NAME=dev-impl@rig'");
+      expect(cmd).toContain("-s 'dev-impl@rig'");
       expect(cmd).toContain("-c '/tmp'");
     });
 
@@ -457,21 +457,21 @@ describe("TmuxAdapter", () => {
       const adapter = new TmuxAdapter(exec);
 
       // createSession with canonical name
-      await adapter.createSession("dev.impl@auth-feats", "/home/user/code");
+      await adapter.createSession("dev-impl@auth-feats", "/home/user/code");
       expect(exec.mock.calls[0]![0]).toBe(
-        "tmux new-session -d -s 'dev.impl@auth-feats' -c '/home/user/code'"
+        "tmux new-session -d -s 'dev-impl@auth-feats' -c '/home/user/code'"
       );
 
       // sendKeys targeting canonical name
-      await adapter.sendKeys("dev.impl@auth-feats", ["Enter"]);
+      await adapter.sendKeys("dev-impl@auth-feats", ["Enter"]);
       expect(exec.mock.calls[1]![0]).toBe(
-        "tmux send-keys -t 'dev.impl@auth-feats' 'Enter'"
+        "tmux send-keys -t 'dev-impl@auth-feats' 'Enter'"
       );
 
       // sendText targeting canonical name
-      await adapter.sendText("dev.impl@auth-feats", "hello");
+      await adapter.sendText("dev-impl@auth-feats", "hello");
       expect(exec.mock.calls[2]![0]).toBe(
-        "tmux send-keys -t 'dev.impl@auth-feats' -l 'hello'"
+        "tmux send-keys -t 'dev-impl@auth-feats' -l 'hello'"
       );
     });
   });
@@ -562,13 +562,13 @@ describe("TmuxAdapter", () => {
       const exec: ExecFn = vi.fn(async () => "") as unknown as ExecFn;
       const adapter = new TmuxAdapter(exec);
 
-      await adapter.startPipePane("dev.impl@my-rig", "/home/user/.openrig/transcripts/my-rig/dev.impl@my-rig.log");
+      await adapter.startPipePane("dev-impl@my-rig", "/home/user/.openrig/transcripts/my-rig/dev-impl@my-rig.log");
 
       // The command is: tmux pipe-pane -t <quoted session> <quoted 'cat >> <quoted path>'>
       const cmd = (exec as ReturnType<typeof vi.fn>).mock.calls[0]![0] as string;
-      expect(cmd).toContain("tmux pipe-pane -t 'dev.impl@my-rig'");
+      expect(cmd).toContain("tmux pipe-pane -t 'dev-impl@my-rig'");
       expect(cmd).toContain("cat >>");
-      expect(cmd).toContain("dev.impl@my-rig.log");
+      expect(cmd).toContain("dev-impl@my-rig.log");
     });
 
     it("quotes path with spaces safely inside pipe command", async () => {
@@ -609,9 +609,9 @@ describe("TmuxAdapter", () => {
       const exec: ExecFn = vi.fn(async () => "") as unknown as ExecFn;
       const adapter = new TmuxAdapter(exec);
 
-      await adapter.stopPipePane("dev.impl@my-rig");
+      await adapter.stopPipePane("dev-impl@my-rig");
 
-      expect(exec).toHaveBeenCalledWith("tmux pipe-pane -t 'dev.impl@my-rig'");
+      expect(exec).toHaveBeenCalledWith("tmux pipe-pane -t 'dev-impl@my-rig'");
     });
   });
 });

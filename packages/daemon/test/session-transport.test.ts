@@ -76,9 +76,9 @@ describe("SessionTransport", () => {
     const node = rigRepo.addNode(rig.id, "dev.impl", {
       role: "worker", runtime: "claude-code",
     });
-    const session = sessionRegistry.registerSession(node.id, "dev.impl@my-rig");
+    const session = sessionRegistry.registerSession(node.id, "dev-impl@my-rig");
     sessionRegistry.updateStatus(session.id, "running");
-    sessionRegistry.updateBinding(node.id, { tmuxSession: "dev.impl@my-rig" });
+    sessionRegistry.updateBinding(node.id, { tmuxSession: "dev-impl@my-rig" });
     return { rig, node, session };
   }
 
@@ -99,10 +99,10 @@ describe("SessionTransport", () => {
       role: "orchestrator",
       runtime: "claude-code",
     });
-    const session = sessionRegistry.registerClaimedSession(node.id, "orch1.lead@rigged-buildout");
+    const session = sessionRegistry.registerClaimedSession(node.id, "orch1-lead@rigged-buildout");
     sessionRegistry.updateBinding(node.id, {
       attachmentType: "external_cli",
-      externalSessionName: "orch1.lead@rigged-buildout",
+      externalSessionName: "orch1-lead@rigged-buildout",
     });
     return { rig, node, session };
   }
@@ -117,7 +117,7 @@ describe("SessionTransport", () => {
     });
     const transport = createTransport(tmux);
 
-    const result = await transport.send("dev.impl@my-rig", "hello");
+    const result = await transport.send("dev-impl@my-rig", "hello");
     expect(result.ok).toBe(true);
     expect(callOrder).toEqual(["sendText", "sendKeys:C-m"]);
   });
@@ -129,9 +129,9 @@ describe("SessionTransport", () => {
     const tmux = mockTmux({ sendText: sendTextSpy });
     const transport = createTransport(tmux);
 
-    const result = await transport.send("dev.impl@my-rig", "message");
+    const result = await transport.send("dev-impl@my-rig", "message");
     expect(result.ok).toBe(true);
-    expect(sendTextSpy).toHaveBeenCalledWith("dev.impl@my-rig", "message");
+    expect(sendTextSpy).toHaveBeenCalledWith("dev-impl@my-rig", "message");
   });
 
   // Test 3: send to legacy session name resolves correctly
@@ -166,7 +166,7 @@ describe("SessionTransport", () => {
     });
     const transport = createTransport(tmux);
 
-    const result = await transport.send("dev.impl@my-rig", "hello");
+    const result = await transport.send("dev-impl@my-rig", "hello");
     expect(result.ok).toBe(false);
     expect(result.reason).toBe("submit_failed");
     expect(result.error).toContain("visible");
@@ -185,7 +185,7 @@ describe("SessionTransport", () => {
     });
     const transport = createTransport(tmux);
 
-    const result = await transport.send("dev.impl@my-rig", "hello", { verify: true });
+    const result = await transport.send("dev-impl@my-rig", "hello", { verify: true });
     expect(result.ok).toBe(true);
     expect(result.verified).toBe(true);
   });
@@ -197,7 +197,7 @@ describe("SessionTransport", () => {
     });
     const transport = createTransport(tmux);
 
-    const result = await transport.send("dev.impl@my-rig", "hello", { verify: true });
+    const result = await transport.send("dev-impl@my-rig", "hello", { verify: true });
 
     expect(result.ok).toBe(true);
     expect(result.verified).toBe(false);
@@ -211,7 +211,7 @@ describe("SessionTransport", () => {
     });
     const transport = createTransport(tmux);
 
-    const result = await transport.send("dev.impl@my-rig", "hello");
+    const result = await transport.send("dev-impl@my-rig", "hello");
     expect(result.ok).toBe(false);
     expect(result.reason).toBe("mid_work");
     expect(result.error).toContain("mid-task");
@@ -228,7 +228,7 @@ describe("SessionTransport", () => {
     });
     const transport = createTransport(tmux);
 
-    const result = await transport.send("dev.impl@my-rig", "hello", { force: true });
+    const result = await transport.send("dev-impl@my-rig", "hello", { force: true });
     expect(result.ok).toBe(true);
     expect(sendTextSpy).toHaveBeenCalled();
   });
@@ -238,9 +238,9 @@ describe("SessionTransport", () => {
     const node = rigRepo.addNode(rig.id, "infra.ui", {
       role: "ui", runtime: "terminal",
     });
-    const session = sessionRegistry.registerSession(node.id, "infra.ui@term-rig");
+    const session = sessionRegistry.registerSession(node.id, "infra-ui@term-rig");
     sessionRegistry.updateStatus(session.id, "running");
-    sessionRegistry.updateBinding(node.id, { tmuxSession: "infra.ui@term-rig" });
+    sessionRegistry.updateBinding(node.id, { tmuxSession: "infra-ui@term-rig" });
 
     const sendTextSpy = vi.fn(async () => ({ ok: true as const }));
     const tmux = mockTmux({
@@ -250,7 +250,7 @@ describe("SessionTransport", () => {
     });
     const transport = createTransport(tmux);
 
-    const result = await transport.send("infra.ui@term-rig", "printf 'hello\\n'");
+    const result = await transport.send("infra-ui@term-rig", "printf 'hello\\n'");
     expect(result.ok).toBe(false);
     expect(result.reason).toBe("mid_work");
     expect(result.error).toContain("mid-task");
@@ -264,7 +264,7 @@ describe("SessionTransport", () => {
     });
     const transport = createTransport(tmux);
 
-    const result = await transport.send("dev.impl@my-rig", "hello");
+    const result = await transport.send("dev-impl@my-rig", "hello");
     expect(result.ok).toBe(false);
     expect(result.reason).toBe("tmux_unavailable");
     expect(result.error).toContain("tmux");
@@ -275,7 +275,7 @@ describe("SessionTransport", () => {
     const hasSessionSpy = vi.fn(async () => true);
     const transport = createTransport(mockTmux({ hasSession: hasSessionSpy }));
 
-    const result = await transport.send("orch1.lead@rigged-buildout", "hello");
+    const result = await transport.send("orch1-lead@rigged-buildout", "hello");
 
     expect(result.ok).toBe(false);
     expect(result.reason).toBe("transport_unavailable");
@@ -291,7 +291,7 @@ describe("SessionTransport", () => {
     });
     const transport = createTransport(tmux);
 
-    const result = await transport.capture("dev.impl@my-rig");
+    const result = await transport.capture("dev-impl@my-rig");
     expect(result.ok).toBe(true);
     expect(result.content).toContain("line1");
   });
@@ -301,7 +301,7 @@ describe("SessionTransport", () => {
     const hasSessionSpy = vi.fn(async () => true);
     const transport = createTransport(mockTmux({ hasSession: hasSessionSpy }));
 
-    const result = await transport.capture("orch1.lead@rigged-buildout");
+    const result = await transport.capture("orch1-lead@rigged-buildout");
 
     expect(result.ok).toBe(false);
     expect(result.error).toContain("external CLI");
@@ -317,13 +317,13 @@ describe("SessionTransport", () => {
     expect(result.ok).toBe(true);
     if (result.ok) {
       expect(result.sessions.length).toBe(1);
-      expect(result.sessions[0]!.sessionName).toBe("dev.impl@my-rig");
+      expect(result.sessions[0]!.sessionName).toBe("dev-impl@my-rig");
     }
   });
 
   // Test 12: resolveSessions global returns all running sessions across all rigs
   it("resolveSessions global returns all running sessions across all rigs", async () => {
-    seedCanonicalRig(); // rig "my-rig" with dev.impl@my-rig
+    seedCanonicalRig(); // rig "my-rig" with dev-impl@my-rig
     seedLegacyRig();    // rig "r00-legacy" with r00-legacy-worker-a
     seedExternalCliRig();
     const transport = createTransport();
@@ -333,9 +333,9 @@ describe("SessionTransport", () => {
     if (result.ok) {
       expect(result.sessions.length).toBe(3);
       const names = result.sessions.map((s) => s.sessionName).sort();
-      expect(names).toContain("dev.impl@my-rig");
+      expect(names).toContain("dev-impl@my-rig");
       expect(names).toContain("r00-legacy-worker-a");
-      expect(names).toContain("orch1.lead@rigged-buildout");
+      expect(names).toContain("orch1-lead@rigged-buildout");
     }
   });
 
@@ -344,21 +344,21 @@ describe("SessionTransport", () => {
     const rig = rigRepo.createRig("multi-rig");
     // dev pod
     const devNode = rigRepo.addNode(rig.id, "dev.impl", { role: "worker", runtime: "claude-code" });
-    const devSess = sessionRegistry.registerSession(devNode.id, "dev.impl@multi-rig");
+    const devSess = sessionRegistry.registerSession(devNode.id, "dev-impl@multi-rig");
     sessionRegistry.updateStatus(devSess.id, "running");
-    sessionRegistry.updateBinding(devNode.id, { tmuxSession: "dev.impl@multi-rig" });
+    sessionRegistry.updateBinding(devNode.id, { tmuxSession: "dev-impl@multi-rig" });
     // orch pod
     const orchNode = rigRepo.addNode(rig.id, "orch.lead", { role: "orchestrator", runtime: "claude-code" });
-    const orchSess = sessionRegistry.registerSession(orchNode.id, "orch.lead@multi-rig");
+    const orchSess = sessionRegistry.registerSession(orchNode.id, "orch-lead@multi-rig");
     sessionRegistry.updateStatus(orchSess.id, "running");
-    sessionRegistry.updateBinding(orchNode.id, { tmuxSession: "orch.lead@multi-rig" });
+    sessionRegistry.updateBinding(orchNode.id, { tmuxSession: "orch-lead@multi-rig" });
 
     const transport = createTransport();
     const result = await transport.resolveSessions({ pod: "dev", rig: "multi-rig" });
     expect(result.ok).toBe(true);
     if (result.ok) {
       expect(result.sessions.length).toBe(1);
-      expect(result.sessions[0]!.sessionName).toBe("dev.impl@multi-rig");
+      expect(result.sessions[0]!.sessionName).toBe("dev-impl@multi-rig");
     }
   });
 
@@ -375,7 +375,7 @@ describe("SessionTransport", () => {
     expect(result.results).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
-          sessionName: "orch1.lead@rigged-buildout",
+          sessionName: "orch1-lead@rigged-buildout",
           ok: false,
           reason: "transport_unavailable",
         }),

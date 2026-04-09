@@ -101,20 +101,20 @@ After `run-proof.sh` completes:
 
 1. **Browser screenshot:** Open `http://localhost:5173` → screenshot showing Explorer with all pods, Graph with pod grouping, Node Detail Panel open. Save to `demo/proof/browser-screenshot.png`.
 
-2. **Resume test:** Run `tmux attach -t orch.lead@demo-rig` → ask "What were you working on?" → copy response to `demo/proof/resume-test.txt`.
+2. **Resume test:** Run `tmux attach -t orch-lead@demo-rig` → ask "What were you working on?" → copy response to `demo/proof/resume-test.txt`.
 
 ## Expected Session Names
 
 After boot, `tmux list-sessions` should show:
 ```
-orch.lead@demo-rig
-dev.impl@demo-rig
-dev.qa@demo-rig
-dev.design@demo-rig
-rev.r1@demo-rig
+orch-lead@demo-rig
+dev-impl@demo-rig
+dev-qa@demo-rig
+dev-design@demo-rig
+rev-r1@demo-rig
 rev-r2@demo-rig
-infra.daemon@demo-rig
-infra.ui@demo-rig
+infra-daemon@demo-rig
+infra-ui@demo-rig
 ```
 
 ## Expected Boot Time

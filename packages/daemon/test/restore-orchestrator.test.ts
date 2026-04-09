@@ -853,7 +853,7 @@ describe("RestoreOrchestrator", () => {
     const rig = rigRepo.createRig("test-rig");
     db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-1", rig.id, "Dev");
     const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code", podId: "pod-1" });
-    const session = sessionRegistry.registerSession(node.id, "dev.impl@test-rig");
+    const session = sessionRegistry.registerSession(node.id, "dev-impl@test-rig");
     sessionRegistry.updateStatus(session.id, "running");
     // Set resume token
     sessionRegistry.updateResumeToken(session.id, "claude_id", "resume-token-123");
@@ -898,7 +898,7 @@ describe("RestoreOrchestrator", () => {
     const rig = rigRepo.createRig("test-rig");
     db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-fail", rig.id, "Dev");
     const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code", podId: "pod-fail" });
-    const session = sessionRegistry.registerSession(node.id, "dev.impl@test-rig");
+    const session = sessionRegistry.registerSession(node.id, "dev-impl@test-rig");
     sessionRegistry.updateStatus(session.id, "running");
     sessionRegistry.updateResumeToken(session.id, "claude_id", "bad-token");
     db.prepare(
@@ -964,7 +964,7 @@ describe("RestoreOrchestrator", () => {
     const rig = rigRepo.createRig("test-rig");
     db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-2", rig.id, "Dev");
     const node = rigRepo.addNode(rig.id, "dev.qa", { runtime: "claude-code", podId: "pod-2" });
-    const session = sessionRegistry.registerSession(node.id, "dev.qa@test-rig");
+    const session = sessionRegistry.registerSession(node.id, "dev-qa@test-rig");
     sessionRegistry.updateStatus(session.id, "running");
     // Set resumeType but NO resumeToken
     db.prepare("UPDATE sessions SET resume_type = ? WHERE id = ?").run("claude_id", session.id);
@@ -988,7 +988,7 @@ describe("RestoreOrchestrator", () => {
     const rig = rigRepo.createRig("test-rig");
     db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-3", rig.id, "Dev");
     const node = rigRepo.addNode(rig.id, "dev.design", { runtime: "claude-code", podId: "pod-3" });
-    const session = sessionRegistry.registerSession(node.id, "dev.design@test-rig");
+    const session = sessionRegistry.registerSession(node.id, "dev-design@test-rig");
     sessionRegistry.updateStatus(session.id, "running");
     db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, ?, ?, ?)").run(node.id, "[]", "[]", "[]", "claude-code");
     const snap = snapshotCapture.captureSnapshot(rig.id, "test");
@@ -1018,7 +1018,7 @@ describe("RestoreOrchestrator", () => {
     const rig = rigRepo.createRig("test-rig");
     db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-4", rig.id, "Infra");
     const node = rigRepo.addNode(rig.id, "infra.ui", { runtime: "builtin:terminal", podId: "pod-4", cwd: "." });
-    const session = sessionRegistry.registerSession(node.id, "infra.ui@test-rig");
+    const session = sessionRegistry.registerSession(node.id, "infra-ui@test-rig");
     sessionRegistry.updateStatus(session.id, "running");
     db.prepare(
       "INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, ?, ?, ?)"
@@ -1061,7 +1061,7 @@ describe("RestoreOrchestrator", () => {
     if (result.ok) {
       const nodeResult = result.result.nodes.find((n) => n.nodeId === node.id);
       expect(nodeResult!.status).toBe("fresh");
-      expect(tmux.sendText).toHaveBeenCalledWith("infra.ui@test-rig", "npm run dev");
+      expect(tmux.sendText).toHaveBeenCalledWith("infra-ui@test-rig", "npm run dev");
     }
   });
 

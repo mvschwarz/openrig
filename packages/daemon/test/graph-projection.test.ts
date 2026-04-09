@@ -214,14 +214,14 @@ describe("projectRigToGraph", () => {
     );
 
     const overlay = [
-      { logicalId: "dev.impl", startupStatus: "ready" as const, canonicalSessionName: "dev.impl@test-rig", restoreOutcome: "resumed" },
+      { logicalId: "dev.impl", startupStatus: "ready" as const, canonicalSessionName: "dev-impl@test-rig", restoreOutcome: "resumed" },
     ];
 
     const result = projectRigToGraph(input, overlay);
     const node = result.nodes.find((n) => n.data.logicalId === "dev.impl");
     expect(node).toBeDefined();
     expect(node!.data.startupStatus).toBe("ready");
-    expect(node!.data.canonicalSessionName).toBe("dev.impl@test-rig");
+    expect(node!.data.canonicalSessionName).toBe("dev-impl@test-rig");
     expect(node!.data.restoreOutcome).toBe("resumed");
   });
 

@@ -75,13 +75,13 @@ function mockAllApis() {
           rigName: "alpha",
           logicalId: "orch.lead",
           podId: "orch",
-          canonicalSessionName: "orch.lead@alpha",
+          canonicalSessionName: "orch-lead@alpha",
           nodeKind: "agent",
           runtime: "claude-code",
           sessionStatus: "running",
           startupStatus: "ready",
           restoreOutcome: "resumed",
-          tmuxAttachCommand: "tmux attach -t orch.lead@alpha",
+          tmuxAttachCommand: "tmux attach -t orch-lead@alpha",
           resumeCommand: "claude --resume abc-123",
           latestError: null,
           model: "opus",
@@ -93,7 +93,7 @@ function mockAllApis() {
           startupActions: [],
           recentEvents: [],
           infrastructureStartupCommand: null,
-          binding: { tmuxSession: "orch.lead@alpha" },
+          binding: { tmuxSession: "orch-lead@alpha" },
         }),
       });
     }
@@ -101,7 +101,7 @@ function mockAllApis() {
       return Promise.resolve({
         ok: true,
         json: async () => [
-          { rigId: "r1", rigName: "alpha", logicalId: "orch.lead", podId: "orch", nodeKind: "agent", runtime: "claude-code", startupStatus: "ready", canonicalSessionName: "orch.lead@alpha" },
+          { rigId: "r1", rigName: "alpha", logicalId: "orch.lead", podId: "orch", nodeKind: "agent", runtime: "claude-code", startupStatus: "ready", canonicalSessionName: "orch-lead@alpha" },
         ],
       });
     }
