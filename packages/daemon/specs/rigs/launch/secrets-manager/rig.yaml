@@ -1,9 +1,10 @@
 version: "0.2"
 name: secrets-manager
 summary: >
-  A rig backed by HashiCorp Vault in dev mode. Proves the services
-  substrate: Vault boots before agents, health is gated, and the env
-  receipt is captured. Agents can read secrets via the Vault HTTP API.
+  HashiCorp Vault in dev mode with a dedicated Vault specialist agent.
+  Vault boots before the specialist launches, health is gated, and the
+  env receipt is captured. The specialist can read, write, list, and
+  delete secrets via the Vault HTTP API.
 
 services:
   kind: compose
@@ -23,11 +24,11 @@ services:
         command: "vault status -address=http://127.0.0.1:8200"
 
 pods:
-  - id: dev
-    label: Development
+  - id: vault
+    label: Vault
     members:
-      - id: impl
-        agent_ref: "local:../../../agents/development/implementer"
+      - id: specialist
+        agent_ref: "local:../../../agents/apps/vault-specialist"
         runtime: claude-code
         profile: default
         cwd: "."

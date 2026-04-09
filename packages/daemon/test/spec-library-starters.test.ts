@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync, existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { parse as parseYaml } from "yaml";
 import { SpecReviewService } from "../src/domain/spec-review-service.js";
 import { SpecLibraryService } from "../src/domain/spec-library-service.js";
 import { rigPreflight, type RigPreflightInput } from "../src/domain/rigspec-preflight.js";
@@ -93,6 +94,26 @@ describe("Starter specs", () => {
     expect(secretsManager!.hasServices).toBe(true);
     expect(demo).toBeDefined();
     expect(demo!.hasServices).toBeFalsy();
+  });
+
+  it("secrets-manager rig uses canonical vault.specialist topology", () => {
+    const yaml = readFileSync(join(SPECS_ROOT, "rigs/launch/secrets-manager/rig.yaml"), "utf-8");
+    const parsed = parseYaml(yaml) as Record<string, unknown>;
+    const pods = parsed["pods"] as Array<Record<string, unknown>>;
+    expect(pods).toHaveLength(1);
+
+    const pod = pods[0]!;
+    expect(pod["id"]).toBe("vault");
+    expect(pod["label"]).toBeDefined();
+
+    const members = pod["members"] as Array<Record<string, unknown>>;
+    expect(members).toHaveLength(1);
+    expect(members[0]!["id"]).toBe("specialist");
+    expect(members[0]!["agent_ref"]).toContain("vault-specialist");
+
+    // Summary must explicitly mention the specialist
+    const summary = (parsed["summary"] as string).toLowerCase();
+    expect(summary).toContain("specialist");
   });
 
   it("starter summaries position implementation-pair as the first success, demo as the launch-grade starter, and product-team as the advanced preview", () => {
