@@ -17,7 +17,9 @@ import {
   DialogFooter,
 } from "@/components/ui/dialog";
 import { RigChatPanel } from "./RigChatPanel.js";
+import { RigEnvPanel } from "./RigEnvPanel.js";
 import { ExpansionOutcome } from "./ExpansionOutcome.js";
+import { useRigEnv } from "../hooks/useRigEnv.js";
 
 interface RestoreNodeResult {
   nodeId: string;
@@ -68,7 +70,10 @@ export function RigDetailPanel({ rigId, onClose }: RigDetailPanelProps) {
   const startRig = useStartRig(rigId);
   const teardownRig = useTeardownRig(rigId);
 
-  const [activeTab, setActiveTab] = useState<"info" | "chat">("info");
+  const { data: envData } = useRigEnv(rigId);
+  const hasEnv = envData?.hasServices === true;
+
+  const [activeTab, setActiveTab] = useState<"info" | "env" | "chat">("info");
   const [confirmRestore, setConfirmRestore] = useState<string | null>(null);
   const [confirmDown, setConfirmDown] = useState(false);
   const [showSnapshotHistory, setShowSnapshotHistory] = useState(false);
@@ -187,6 +192,15 @@ export function RigDetailPanel({ rigId, onClose }: RigDetailPanelProps) {
         >
           Info
         </button>
+        {hasEnv && (
+          <button
+            data-testid="tab-env"
+            onClick={() => setActiveTab("env")}
+            className={`flex-1 py-2 text-xs font-mono uppercase text-center ${activeTab === "env" ? "border-b-2 border-stone-800 font-bold" : "text-stone-400"}`}
+          >
+            Env
+          </button>
+        )}
         <button
           data-testid="tab-chat"
           onClick={() => setActiveTab("chat")}
@@ -198,6 +212,8 @@ export function RigDetailPanel({ rigId, onClose }: RigDetailPanelProps) {
 
       {activeTab === "chat" ? (
         <RigChatPanel rigId={rigId} />
+      ) : activeTab === "env" && hasEnv && envData ? (
+        <RigEnvPanel rigId={rigId} envData={envData} />
       ) : (
       <div className="flex-1 overflow-y-auto">
       {/* Identity */}
