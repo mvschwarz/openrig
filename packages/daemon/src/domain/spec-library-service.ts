@@ -14,6 +14,7 @@ export interface SpecLibraryEntry {
   relativePath: string;
   updatedAt: string;
   summary?: string;
+  hasServices?: boolean;
 }
 
 export interface SpecLibraryOpts {
@@ -218,6 +219,11 @@ export class SpecLibraryService {
     // Try rig first
     try {
       const review = this.specReviewService.reviewRigSpec(yaml, "library_item");
+      let hasServices = false;
+      try {
+        const raw = parseYaml(yaml) as Record<string, unknown>;
+        hasServices = !!(raw["services"] && typeof raw["services"] === "object");
+      } catch { /* safe default */ }
       return {
         id: makeId(sourceType, relPath),
         kind: "rig",
@@ -228,6 +234,7 @@ export class SpecLibraryService {
         relativePath: relPath,
         updatedAt: new Date(mtimeMs).toISOString(),
         summary: review.summary,
+        ...(hasServices ? { hasServices } : {}),
       };
     } catch {
       // Not a valid rig spec

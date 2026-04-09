@@ -11,6 +11,7 @@ export interface SpecLibraryEntry {
   relativePath: string;
   updatedAt: string;
   summary?: string;
+  hasServices?: boolean;
 }
 
 export interface LibraryReview {
