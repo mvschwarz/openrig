@@ -604,7 +604,7 @@ export class PodRigInstantiator {
     };
   }
 
-  async instantiate(rigSpecYaml: string, rigRoot: string, opts?: { cwdOverride?: string }): Promise<InstantiateOutcome> {
+  async instantiate(rigSpecYaml: string, rigRoot: string, opts?: { cwdOverride?: string; prelaunchHook?: (rigId: string) => Promise<{ ok: true } | { ok: false; code: string; message: string }> }): Promise<InstantiateOutcome> {
     // 1. Parse + validate
     let rigSpec: PodRigSpec;
     try {
@@ -674,6 +674,14 @@ export class PodRigInstantiator {
     // Sort members by topological launch order
     const orderMap = new Map(launchOrder.map((id, i) => [id, i]));
     memberEntries.sort((a, b) => (orderMap.get(a.qualifiedId) ?? 999) - (orderMap.get(b.qualifiedId) ?? 999));
+
+    // Prelaunch hook: service gate runs after topology setup, before any node launch
+    if (opts?.prelaunchHook) {
+      const hookResult = await opts.prelaunchHook(rigId);
+      if (!hookResult.ok) {
+        return { ok: false, code: "service_boot_failed", message: hookResult.message };
+      }
+    }
 
     // Phase 2: Process members in launch order
     for (const { pod, member, podId, qualifiedId } of memberEntries) {

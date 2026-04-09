@@ -73,6 +73,8 @@ interface BootstrapOrchestratorDeps {
   bundleSourceResolver: BundleSourceResolver | null;
   podInstantiator?: PodRigInstantiator;
   podBundleSourceResolver?: PodBundleSourceResolver;
+  serviceOrchestrator?: import("./service-orchestrator.js").ServiceOrchestrator;
+  rigRepo?: import("./rig-repository.js").RigRepository;
 }
 
 /** Generates a deterministic action key for plan->apply identity */
@@ -604,7 +606,9 @@ export class BootstrapOrchestrator {
     }
 
     // Apply mode: full instantiation via PodRigInstantiator
-    const outcome = await podInstantiator.instantiate(rigSpecYaml, rigRoot, { cwdOverride: opts.cwdOverride });
+    // If services exist, the prelaunch hook boots them between topology creation and node launch
+    const prelaunchHook = await this.buildServicePrelaunchHook(rigSpecYaml, rigRoot, stages, errors);
+    const outcome = await podInstantiator.instantiate(rigSpecYaml, rigRoot, { cwdOverride: opts.cwdOverride, prelaunchHook });
 
     if (!outcome.ok) {
       const outErrors = outcome.code === "validation_failed" || outcome.code === "preflight_failed"
@@ -637,6 +641,74 @@ export class BootstrapOrchestrator {
       rigId: result.rigId,
       errors: result.nodes.filter((n) => n.error).map((n) => n.error!),
       warnings,
+    };
+  }
+
+  /**
+   * Build a prelaunch hook for the service gate. Returns undefined if no services
+   * are configured or no ServiceOrchestrator is available.
+   */
+  private async buildServicePrelaunchHook(
+    rigSpecYaml: string,
+    rigRoot: string,
+    stages: BootstrapStageResult[],
+    errors: string[],
+  ): Promise<((rigId: string) => Promise<{ ok: true } | { ok: false; code: string; message: string }>) | undefined> {
+    if (!this.deps.serviceOrchestrator || !this.deps.rigRepo) return undefined;
+
+    // Parse and normalize via the canonical pod-aware codec/schema path
+    let normalizedSpec: import("./types.js").RigSpec;
+    try {
+      const { RigSpecCodec: PodCodec } = await import("./rigspec-codec.js");
+      const { RigSpecSchema: PodSchema } = await import("./rigspec-schema.js");
+      const raw = PodCodec.parse(rigSpecYaml);
+      const validation = PodSchema.validate(raw);
+      if (!validation.valid) return undefined;
+      normalizedSpec = PodSchema.normalize(raw as Record<string, unknown>);
+    } catch {
+      return undefined;
+    }
+
+    if (!normalizedSpec.services || normalizedSpec.services.kind !== "compose") return undefined;
+
+    const serviceOrch = this.deps.serviceOrchestrator;
+    const rigRepo = this.deps.rigRepo;
+    const services = normalizedSpec.services;
+    const rigName = normalizedSpec.name;
+
+    return async (rigId: string) => {
+      // Persist services record for the now-created rig
+      const { deriveComposeProjectName } = await import("./compose-project-name.js");
+      const composeFile = nodePath.resolve(rigRoot, services.composeFile);
+      const projectName = services.projectName ?? deriveComposeProjectName(rigName);
+
+      rigRepo.setServicesRecord(rigId, {
+        kind: "compose",
+        specJson: JSON.stringify(services),
+        rigRoot,
+        composeFile,
+        projectName,
+      });
+
+      // Boot services — strict health gate before any agent launch
+      const bootResult = await serviceOrch.boot(rigId);
+
+      if (!bootResult.ok) {
+        errors.push(`Service boot failed: ${bootResult.error}`);
+        stages.push({
+          stage: "service_boot",
+          status: "failed",
+          detail: { code: bootResult.code, error: bootResult.error, receipt: bootResult.receipt },
+        });
+        return { ok: false, code: "service_boot_failed", message: `Service boot failed: ${bootResult.error}` };
+      }
+
+      stages.push({
+        stage: "service_boot",
+        status: "ok",
+        detail: { receipt: bootResult.receipt, health: bootResult.health },
+      });
+      return { ok: true };
     };
   }
 

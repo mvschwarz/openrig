@@ -145,10 +145,16 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const snapshotCapture = new SnapshotCapture({ db, rigRepo, sessionRegistry, eventBus, snapshotRepo, checkpointStore });
   const claudeResume = new ClaudeResumeAdapter(tmuxAdapter);
   const codexResume = new CodexResumeAdapter(tmuxAdapter);
+  // Services infrastructure (RigEnv) — created early so restore/bootstrap can use it
+  const { ComposeServicesAdapter } = await import("./adapters/compose-services-adapter.js");
+  const { ServiceOrchestrator } = await import("./domain/service-orchestrator.js");
+  const composeAdapter = new ComposeServicesAdapter(opts?.tmuxExec ?? execCommand);
+  const serviceOrchestrator = new ServiceOrchestrator({ rigRepo, composeAdapter });
+
   const restoreOrchestrator = new RestoreOrchestrator({
     db, rigRepo, sessionRegistry, eventBus, snapshotRepo, snapshotCapture,
     checkpointStore, nodeLauncher, tmuxAdapter, claudeResume, codexResume,
-    transcriptStore,
+    transcriptStore, serviceOrchestrator,
   });
 
   // Connect to cmux at startup — degrades gracefully if absent
@@ -237,6 +243,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     installPlanner: externalInstallPlanner, installExecutor: externalInstallExecutor,
     packageInstallService, rigInstantiator, fsOps: resolverFsOps,
     bundleSourceResolver, podInstantiator, podBundleSourceResolver,
+    serviceOrchestrator, rigRepo,
   });
 
   // Discovery services

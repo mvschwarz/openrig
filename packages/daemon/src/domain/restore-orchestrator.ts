@@ -39,6 +39,7 @@ interface RestoreOrchestratorDeps {
   claudeResume: ClaudeResumeAdapter;
   codexResume: CodexResumeAdapter;
   transcriptStore?: TranscriptStore;
+  serviceOrchestrator?: import("./service-orchestrator.js").ServiceOrchestrator;
 }
 
 export class RestoreOrchestrator {
@@ -54,6 +55,7 @@ export class RestoreOrchestrator {
   private claudeResume: ClaudeResumeAdapter;
   private codexResume: CodexResumeAdapter;
   private transcriptStore: TranscriptStore | null;
+  private serviceOrchestrator: import("./service-orchestrator.js").ServiceOrchestrator | null;
 
   constructor(deps: RestoreOrchestratorDeps) {
     if (deps.db !== deps.rigRepo.db) {
@@ -89,6 +91,7 @@ export class RestoreOrchestrator {
     this.claudeResume = deps.claudeResume;
     this.codexResume = deps.codexResume;
     this.transcriptStore = deps.transcriptStore ?? null;
+    this.serviceOrchestrator = deps.serviceOrchestrator ?? null;
   }
 
   async restore(snapshotId: string, opts?: {
@@ -123,6 +126,18 @@ export class RestoreOrchestrator {
 
       // 3. Emit restore.started
       this.eventBus.emit({ type: "restore.started", rigId, snapshotId });
+
+      // 3b. Service gate: boot services before agent restore if this rig has services
+      if (this.serviceOrchestrator) {
+        const svcRecord = this.rigRepo.getServicesRecord(rigId);
+        if (svcRecord) {
+          const bootResult = await this.serviceOrchestrator.boot(rigId);
+          if (!bootResult.ok) {
+            this.eventBus.emit({ type: "restore.completed", rigId, snapshotId, result: { snapshotId, preRestoreSnapshotId: preRestoreSnapshot.id, nodes: [], warnings: [`Service boot failed: ${bootResult.error}`] } });
+            return { ok: false, code: "service_boot_failed", message: `Service boot failed before agent restore: ${bootResult.error}` };
+          }
+        }
+      }
 
       // 4. Compute restore plan
       const plan = this.computeRestorePlan(snapshot.data);

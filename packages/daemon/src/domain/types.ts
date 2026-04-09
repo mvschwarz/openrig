@@ -221,7 +221,8 @@ export type RestoreOutcome =
   | { ok: false; code: "rig_not_found"; message: string }
   | { ok: false; code: "rig_not_stopped"; message: string }
   | { ok: false; code: "restore_error"; message: string }
-  | { ok: false; code: "restore_in_progress"; message: string };
+  | { ok: false; code: "restore_in_progress"; message: string }
+  | { ok: false; code: "service_boot_failed"; message: string };
 
 // -- Node inventory projection (NS-T02) --
 
@@ -548,7 +549,8 @@ export type InstantiateOutcome =
   | { ok: false; code: "validation_failed"; errors: string[] }
   | { ok: false; code: "preflight_failed"; errors: string[]; warnings: string[] }
   | { ok: false; code: "instantiate_error"; message: string }
-  | { ok: false; code: "cycle_error"; message: string };
+  | { ok: false; code: "cycle_error"; message: string }
+  | { ok: false; code: "service_boot_failed"; message: string };
 
 export interface InstantiateResult {
   rigId: string;
