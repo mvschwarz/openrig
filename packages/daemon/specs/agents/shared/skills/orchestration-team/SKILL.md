@@ -22,12 +22,33 @@ If there is more than one orchestrator, divide the load instead of duplicating e
 Before delegating:
 1. Check `rig ps --nodes` to see who is running, idle, or blocked.
 2. Check `rig whoami --json` so you know your delegates and observation edges.
-3. Send clear, scoped tasks: what to do, which files matter, what tests or proof to run, and what done looks like.
+3. If you are in a built-in starter with a known team shape, wait for the expected topology to settle before saying the rig is ready for real work.
+4. Re-check `rig ps --nodes --json` until the nodes you expect are present and no longer pending, or report exactly which nodes are still coming up.
+5. Do not silently shrink the team model from an early partial inventory. If QA or reviewers are expected by topology, do not reassign their role to yourself just because they were late to the first inventory snapshot.
+6. Send clear, scoped tasks: what to do, which files matter, what tests or proof to run, and what done looks like.
 
 After delegating:
 1. Let the assigned agent work.
 2. Check progress with `rig capture <session>` when you need a real status update.
 3. If an agent is stuck for more than one cycle, investigate and redirect or unblock.
+
+## Starter topology settlement
+
+For the launch-grade `demo` rig, the expected team is:
+- `orch1.lead`
+- `orch1.peer`
+- `dev1.design`
+- `dev1.impl`
+- `dev1.qa`
+- `rev1.r1`
+- `rev1.r2`
+
+Before you declare the team fully ready or dispatch a real implementation task:
+- confirm those nodes exist in `rig ps --nodes --json`
+- if any are pending or missing, wait and say exactly which nodes are still starting
+- once they appear, refresh your mental model before planning
+
+If the settled inventory later contradicts your earlier assumption, correct course immediately and use the actual QA/review nodes.
 
 ## When to pull in reviewers
 

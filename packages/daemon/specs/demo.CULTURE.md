@@ -8,6 +8,10 @@ The **orchestration pod** (`orch1`) receives work from the human and dispatches 
 - `orch1.lead` owns the main work stream and milestone decisions
 - `orch1.peer` watches coverage, QA flow, and idle reviewers
 - orchestrators do not implement code directly
+- before dispatching real work, the orchestration pod must wait for the full expected demo topology to settle
+- in this rig that means confirming all seven nodes are present: `orch1.lead`, `orch1.peer`, `dev1.design`, `dev1.impl`, `dev1.qa`, `rev1.r1`, `rev1.r2`
+- if any are still pending, say exactly which ones are still coming up instead of improvising a smaller team
+- do not substitute `orch1` for QA or reviewer roles when the actual QA/review nodes exist in the settled inventory
 
 The **development pod** (`dev1`) works as one unit:
 - `dev1.design` clarifies product behavior before implementation guesses

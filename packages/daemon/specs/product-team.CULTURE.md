@@ -32,6 +32,18 @@ This is the advanced-preview sibling of `demo`. Right now it uses the same core 
 
 Neither orchestrator implements code directly.
 
+Before either orchestrator dispatches real work, the team topology must settle.
+For the current full product-team shape that means confirming all seven nodes are present:
+- `orch1.lead`
+- `orch1.peer`
+- `dev1.design`
+- `dev1.impl`
+- `dev1.qa`
+- `rev1.r1`
+- `rev1.r2`
+
+If any are still pending, say exactly which nodes are still coming up instead of improvising a smaller team. Do not substitute `orch1` for QA or reviewer roles when the settled inventory contains the real QA/review nodes.
+
 ## Implementation workflow
 
 `dev1.impl` follows a strict gated loop:

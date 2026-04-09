@@ -25,5 +25,6 @@ resources:
 startup:
   files:
     - path: guidance/role.md
+      delivery_hint: send_text
       required: true
   actions: []

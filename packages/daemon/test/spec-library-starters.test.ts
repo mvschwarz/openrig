@@ -131,10 +131,11 @@ describe("Starter specs", () => {
 
       // Check guidance/role.md is also wired through startup.files as required
       const startup = (raw["startup"] ?? {}) as Record<string, unknown>;
-      const startupFiles = (startup["files"] as Array<{ path: string; required?: boolean }>) ?? [];
+      const startupFiles = (startup["files"] as Array<{ path: string; required?: boolean; delivery_hint?: string }>) ?? [];
       const startupRoleEntry = startupFiles.find((f) => f.path.includes("role.md"));
       expect(startupRoleEntry).toBeDefined();
       expect(startupRoleEntry!.required).toBe(true);
+      expect(startupRoleEntry!.delivery_hint).toBe("send_text");
     }
   });
 
@@ -195,5 +196,24 @@ describe("Starter specs", () => {
         expect(skills).toContain(skillId);
       }
     }
+  });
+
+  it("demo culture and orchestration skill require full topology settlement before dispatch", () => {
+    const demoCulture = readFileSync(join(SPECS_ROOT, "demo.CULTURE.md"), "utf-8");
+    const orchestrationSkill = readFileSync(
+      join(SPECS_ROOT, "agents/shared/skills/orchestration-team/SKILL.md"),
+      "utf-8",
+    );
+
+    expect(demoCulture).toContain("full expected demo topology");
+    expect(demoCulture).toContain("dev1.qa");
+    expect(demoCulture).toContain("rev1.r1");
+    expect(demoCulture).toContain("rev1.r2");
+    expect(orchestrationSkill).toContain("wait for the expected topology to settle");
+    expect(orchestrationSkill).toContain("Do not silently shrink the team model");
+    expect(orchestrationSkill).toContain("orch1.lead");
+    expect(orchestrationSkill).toContain("dev1.qa");
+    expect(orchestrationSkill).toContain("rev1.r1");
+    expect(orchestrationSkill).toContain("rev1.r2");
   });
 });
