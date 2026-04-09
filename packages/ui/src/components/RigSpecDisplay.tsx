@@ -4,7 +4,7 @@ import { SpecTopologyPreview } from "./SpecTopologyPreview.js";
 import { WorkflowCodePreview } from "./WorkflowScaffold.js";
 import type { RigSpecReview } from "../hooks/useSpecReview.js";
 
-type Tab = "topology" | "configuration" | "yaml";
+type Tab = "topology" | "configuration" | "environment" | "yaml";
 
 interface MemberInfo {
   id: string;
@@ -18,10 +18,15 @@ interface RigSpecDisplayProps {
   yaml: string;
   testIdPrefix?: string;
   yamlTestId?: string;
+  showEnvironmentTab?: boolean;
   onMemberClick?: (podId: string, member: MemberInfo) => void;
 }
 
-export function RigSpecDisplay({ review, yaml, testIdPrefix = "", yamlTestId, onMemberClick }: RigSpecDisplayProps) {
+export function RigSpecDisplay({ review, yaml, testIdPrefix = "", yamlTestId, showEnvironmentTab, onMemberClick }: RigSpecDisplayProps) {
+  const showEnv = showEnvironmentTab && !!review?.services;
+  const tabs: Tab[] = showEnv
+    ? ["topology", "configuration", "environment", "yaml"]
+    : ["topology", "configuration", "yaml"];
   const [activeTab, setActiveTab] = useState<Tab>("topology");
   const reviewPods = review?.pods ?? [];
   const reviewNodes = review?.nodes ?? [];
@@ -32,7 +37,7 @@ export function RigSpecDisplay({ review, yaml, testIdPrefix = "", yamlTestId, on
     <>
       {/* Tabs */}
       <div className="flex gap-1 border-b border-stone-200">
-        {(["topology", "configuration", "yaml"] as Tab[]).map((tab) => (
+        {tabs.map((tab) => (
           <button
             key={tab}
             data-testid={`${prefix}tab-${tab}`}
@@ -143,6 +148,51 @@ export function RigSpecDisplay({ review, yaml, testIdPrefix = "", yamlTestId, on
                   ))}
                 </tbody>
               </table>
+            </div>
+          )}
+        </div>
+      )}
+
+      {activeTab === "environment" && showEnv && review?.services && (
+        <div className="space-y-4" data-testid={`${prefix}env-details`}>
+          <div className="space-y-2">
+            <div className="font-mono text-[8px] uppercase tracking-[0.16em] text-stone-500">Services</div>
+            {review.services.composePreview?.services.map((svc) => (
+              <div key={svc.name} className="flex items-center justify-between border border-stone-200 px-3 py-2">
+                <span className="font-mono text-[11px] text-stone-800">{svc.name}</span>
+                {svc.image && <span className="font-mono text-[9px] text-stone-500">{svc.image}</span>}
+              </div>
+            ))}
+          </div>
+
+          {review.services.waitFor.length > 0 && (
+            <div className="space-y-2">
+              <div className="font-mono text-[8px] uppercase tracking-[0.16em] text-stone-500">Health Gates</div>
+              {review.services.waitFor.map((w, i) => (
+                <div key={i} className="font-mono text-[10px] text-stone-600 border border-stone-200 px-3 py-2">
+                  {w.url && <span>{w.url}</span>}
+                  {w.tcp && <span>tcp: {w.tcp}</span>}
+                  {w.service && <span>service: {w.service}{w.condition ? ` (${w.condition})` : ""}</span>}
+                </div>
+              ))}
+            </div>
+          )}
+
+          {review.services.surfaces && (
+            <div className="space-y-2">
+              <div className="font-mono text-[8px] uppercase tracking-[0.16em] text-stone-500">Surfaces</div>
+              {review.services.surfaces.urls?.map((u) => (
+                <div key={u.name} className="flex items-center justify-between border border-stone-200 px-3 py-2">
+                  <span className="text-[11px] text-stone-800">{u.name}</span>
+                  <span className="font-mono text-[9px] text-stone-500">{u.url}</span>
+                </div>
+              ))}
+              {review.services.surfaces.commands?.map((cmd) => (
+                <div key={cmd.name} className="flex items-center justify-between border border-stone-200 px-3 py-2">
+                  <span className="text-[11px] text-stone-800">{cmd.name}</span>
+                  <span className="font-mono text-[9px] text-stone-500">{cmd.command}</span>
+                </div>
+              ))}
             </div>
           )}
         </div>

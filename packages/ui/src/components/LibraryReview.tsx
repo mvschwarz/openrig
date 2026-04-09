@@ -9,6 +9,8 @@ import {
 } from "./WorkflowScaffold.js";
 import { AgentSpecDisplay } from "./AgentSpecDisplay.js";
 import { RigSpecDisplay } from "./RigSpecDisplay.js";
+import { buildSetupPrompt } from "../lib/build-setup-prompt.js";
+import { copyText } from "../lib/copy-text.js";
 
 interface LibraryReviewProps {
   entryId: string;
@@ -69,15 +71,36 @@ function LibraryRigReviewContent({ review }: { review: LibraryRigReview }) {
     <WorkspacePage>
       <div data-testid="library-review-rig" className="space-y-6">
         <WorkflowHeader
-          eyebrow="Library — Rig Spec"
+          eyebrow={review.services ? "Library — Managed App" : "Library — Rig Spec"}
           title={review.name}
           description={review.summary ?? "Rig spec from library."}
-          actions={<Button variant="outline" size="sm" onClick={() => navigate({ to: "/import" })}>Import</Button>}
+          actions={
+            <div className="flex gap-2">
+              {review.services && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  data-testid="copy-setup-prompt"
+                  onClick={() => void copyText(buildSetupPrompt({
+                    name: review.name,
+                    summary: review.summary,
+                    sourcePath: review.sourcePath,
+                  }))}
+                >
+                  Copy Setup Prompt
+                </Button>
+              )}
+              <Button variant="outline" size="sm" onClick={() => navigate({ to: "/import" })}>Import</Button>
+            </div>
+          }
         />
         <ProvenanceBadge sourcePath={review.sourcePath} sourceState={review.sourceState} />
 
         <WorkflowSummaryGrid>
           <WorkflowSummaryCard label="Format" value={review.format === "pod_aware" ? "Pod-Aware" : "Legacy"} testId="lib-rig-format" />
+          {review.services && (
+            <WorkflowSummaryCard label="Type" value="Agent-Managed App" testId="lib-rig-type" />
+          )}
           <WorkflowSummaryCard
             label={review.format === "pod_aware" ? "Pods" : "Nodes"}
             value={review.format === "pod_aware" ? reviewPods.length : reviewNodes.length}
@@ -104,6 +127,7 @@ function LibraryRigReviewContent({ review }: { review: LibraryRigReview }) {
           yaml={review.raw}
           testIdPrefix="lib"
           yamlTestId="lib-rig-yaml"
+          showEnvironmentTab={!!review.services}
           onMemberClick={(podId, member) => {
             const agentEntry = resolveMemberAgent(member.agentRef);
             if (agentEntry) {
