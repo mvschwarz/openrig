@@ -82,6 +82,7 @@ import { chatMessagesSchema } from "./db/migrations/016_chat_messages.js";
 import { podNamespaceSchema } from "./db/migrations/017_pod_namespace.js";
 import { contextUsageSchema } from "./db/migrations/018_context_usage.js";
 import { externalCliAttachmentSchema } from "./db/migrations/019_external_cli_attachment.js";
+import { rigServicesSchema } from "./db/migrations/020_rig_services.js";
 import { OPENRIG_HOME } from "./openrig-compat.js";
 import {
   getCompatibleOpenRigPath,
@@ -107,7 +108,7 @@ interface DaemonResult {
 export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> {
   const dbPath = opts?.dbPath ?? ":memory:";
   const db = createDb(dbPath);
-  migrate(db, [coreSchema, bindingsSessionsSchema, eventsSchema, snapshotsSchema, checkpointsSchema, resumeMetadataSchema, nodeSpecFieldsSchema, packagesSchema, installJournalSchema, journalSeqSchema, bootstrapSchema, discoverySchema, discoveryFkFix, agentspecRebootSchema, startupContextSchema, chatMessagesSchema, podNamespaceSchema, contextUsageSchema, externalCliAttachmentSchema]);
+  migrate(db, [coreSchema, bindingsSessionsSchema, eventsSchema, snapshotsSchema, checkpointsSchema, resumeMetadataSchema, nodeSpecFieldsSchema, packagesSchema, installJournalSchema, journalSeqSchema, bootstrapSchema, discoverySchema, discoveryFkFix, agentspecRebootSchema, startupContextSchema, chatMessagesSchema, podNamespaceSchema, contextUsageSchema, externalCliAttachmentSchema, rigServicesSchema]);
 
   const rigRepo = new RigRepository(db);
   const sessionRegistry = new SessionRegistry(db);

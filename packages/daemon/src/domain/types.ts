@@ -452,8 +452,84 @@ export interface RigSpec {
   summary?: string;
   cultureFile?: string;
   startup?: StartupBlock;
+  services?: RigServicesSpec;
   pods: RigSpecPod[];
   edges: RigSpecCrossPodEdge[];
+}
+
+export interface RigServicesWaitTarget {
+  service?: string;
+  condition?: "healthy";
+  url?: string;
+  tcp?: string;
+}
+
+export interface RigServicesSurfaceUrl {
+  name: string;
+  url: string;
+}
+
+export interface RigServicesSurfaceCommand {
+  name: string;
+  command: string;
+}
+
+export interface RigServicesSurface {
+  urls?: RigServicesSurfaceUrl[];
+  commands?: RigServicesSurfaceCommand[];
+}
+
+export interface RigServicesCheckpointHook {
+  id: string;
+  exportCommand: string;
+  importCommand?: string;
+}
+
+export interface RigServicesSpec {
+  kind: "compose";
+  composeFile: string;
+  projectName?: string;
+  profiles?: string[];
+  downPolicy?: "leave_running" | "down" | "down_and_volumes";
+  waitFor?: RigServicesWaitTarget[];
+  surfaces?: RigServicesSurface;
+  checkpoints?: RigServicesCheckpointHook[];
+}
+
+export interface EnvReceipt {
+  kind: "compose";
+  composeFile: string;
+  projectName: string;
+  services: Array<{ name: string; status: string; health?: string | null }>;
+  waitFor: Array<{ target: RigServicesWaitTarget; status: "healthy" | "unhealthy" | "pending"; detail?: string | null }>;
+  capturedAt: string;
+}
+
+export interface EnvCheckpoint {
+  kind: "compose";
+  capturedAt: string;
+  artifactsJson: string;
+}
+
+export interface RigServicesRecordInput {
+  kind: "compose";
+  specJson: string;
+  rigRoot: string;
+  composeFile: string;
+  projectName?: string;
+  latestReceiptJson?: string | null;
+}
+
+export interface RigServicesRecord {
+  rigId: string;
+  kind: "compose";
+  specJson: string;
+  rigRoot: string;
+  composeFile: string;
+  projectName: string;
+  latestReceiptJson: string | null;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface ValidationResult {

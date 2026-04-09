@@ -1,5 +1,7 @@
 import type Database from "better-sqlite3";
+import { resolve } from "node:path";
 import { ulid } from "ulid";
+import { deriveComposeProjectName } from "./compose-project-name.js";
 import type {
   Rig,
   Node,
@@ -7,6 +9,8 @@ import type {
   Binding,
   NodeWithBinding,
   RigWithRelations,
+  RigServicesRecord,
+  RigServicesRecordInput,
 } from "./types.js";
 
 interface NodeOptions {
@@ -180,6 +184,66 @@ export class RigRepository {
     this.db.prepare("DELETE FROM nodes WHERE id = ?").run(nodeId);
   }
 
+  setServicesRecord(rigId: string, record: RigServicesRecordInput): RigServicesRecord {
+    const now = new Date().toISOString();
+    const composeFile = resolve(record.rigRoot, record.composeFile);
+    const rig = this.db.prepare("SELECT name FROM rigs WHERE id = ?").get(rigId) as { name: string } | undefined;
+    if (!rig) throw new Error(`Rig not found: ${rigId}`);
+    const projectName = record.projectName ?? deriveComposeProjectName(rig.name);
+    this.db.prepare(`
+      INSERT INTO rig_services (
+        rig_id,
+        kind,
+        spec_json,
+        rig_root,
+        compose_file,
+        project_name,
+        latest_receipt_json,
+        created_at,
+        updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(rig_id) DO UPDATE SET
+        kind = excluded.kind,
+        spec_json = excluded.spec_json,
+        rig_root = excluded.rig_root,
+        compose_file = excluded.compose_file,
+        project_name = excluded.project_name,
+        latest_receipt_json = excluded.latest_receipt_json,
+        updated_at = excluded.updated_at
+    `).run(
+      rigId,
+      record.kind,
+      record.specJson,
+      record.rigRoot,
+      composeFile,
+      projectName,
+      record.latestReceiptJson ?? null,
+      now,
+      now,
+    );
+
+    const stored = this.db.prepare("SELECT * FROM rig_services WHERE rig_id = ?").get(rigId) as RigServicesRow | undefined;
+    if (!stored) throw new Error(`Failed to persist services record for rig ${rigId}`);
+    return this.rowToServicesRecord(stored);
+  }
+
+  getServicesRecord(rigId: string): RigServicesRecord | null {
+    const row = this.db.prepare("SELECT * FROM rig_services WHERE rig_id = ?").get(rigId) as RigServicesRow | undefined;
+    return row ? this.rowToServicesRecord(row) : null;
+  }
+
+  updateServicesReceipt(rigId: string, latestReceiptJson: string | null): RigServicesRecord | null {
+    const now = new Date().toISOString();
+    const result = this.db.prepare(`
+      UPDATE rig_services
+      SET latest_receipt_json = ?, updated_at = ?
+      WHERE rig_id = ?
+    `).run(latestReceiptJson, now, rigId);
+
+    if (result.changes === 0) return null;
+    return this.getServicesRecord(rigId);
+  }
+
   // -- Row-to-domain mappers --
 
   private rowToRig(row: RigRow): Rig {
@@ -240,6 +304,20 @@ export class RigRepository {
       updatedAt: row.updated_at,
     };
   }
+
+  private rowToServicesRecord(row: RigServicesRow): RigServicesRecord {
+    return {
+      rigId: row.rig_id,
+      kind: row.kind as "compose",
+      specJson: row.spec_json,
+      rigRoot: row.rig_root,
+      composeFile: row.compose_file,
+      projectName: row.project_name,
+      latestReceiptJson: row.latest_receipt_json ?? null,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
 }
 
 // -- Raw DB row types (snake_case) --
@@ -292,5 +370,17 @@ interface BindingRow {
   external_session_name: string | null;
   cmux_workspace: string | null;
   cmux_surface: string | null;
+  updated_at: string;
+}
+
+interface RigServicesRow {
+  rig_id: string;
+  kind: string;
+  spec_json: string;
+  rig_root: string;
+  compose_file: string;
+  project_name: string;
+  latest_receipt_json: string | null;
+  created_at: string;
   updated_at: string;
 }

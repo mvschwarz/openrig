@@ -1,6 +1,18 @@
-import type { LegacyRigSpec, LegacyRigSpecNode, LegacyRigSpecEdge, RigSpec, RigSpecPod, ValidationResult } from "./types.js";
+import type {
+  LegacyRigSpec,
+  LegacyRigSpecNode,
+  LegacyRigSpecEdge,
+  RigSpec,
+  RigSpecPod,
+  RigServicesSpec,
+  RigServicesWaitTarget,
+  RigServicesSurface,
+  RigServicesCheckpointHook,
+  ValidationResult,
+} from "./types.js";
 import { validateSafePath } from "./path-safety.js";
 import { validateStartupBlock, normalizeStartupBlock } from "./startup-validation.js";
+import { COMPOSE_PROJECT_NAME_PATTERN, deriveComposeProjectName } from "./compose-project-name.js";
 
 // -- Canonical pod-aware RigSpec validation (AgentSpec reboot) --
 
@@ -8,6 +20,9 @@ const VALID_EDGE_KINDS = new Set(["delegates_to", "spawned_by", "can_observe", "
 const VALID_SYNC_TRIGGERS = new Set(["pre_compaction", "pre_shutdown", "manual", "milestone"]);
 const VALID_RESTORE_POLICIES = new Set(["resume_if_possible", "relaunch_fresh", "checkpoint_only"]);
 const VALID_IMPORT_PREFIXES = ["local:", "path:"];
+const VALID_SERVICES_KIND = new Set(["compose"]);
+const VALID_DOWN_POLICIES = new Set(["leave_running", "down", "down_and_volumes"]);
+const VALID_WAIT_TARGET_CONDITIONS = new Set(["healthy"]);
 
 /**
  * Pod-aware RigSpec validator. Canonical contract for the AgentSpec reboot.
@@ -44,6 +59,11 @@ export class RigSpecSchema {
     // rig-level startup
     if (obj["startup"] !== undefined) {
       errors.push(...validateStartupBlock(obj["startup"], "startup"));
+    }
+
+    // services: optional top-level sibling of pods
+    if (obj["services"] !== undefined) {
+      errors.push(...validateServicesBlock(obj["services"], "services"));
     }
 
     // pods: required array
@@ -107,6 +127,7 @@ export class RigSpecSchema {
       summary: raw["summary"] as string | undefined,
       cultureFile: raw["culture_file"] as string | undefined,
       startup: raw["startup"] ? normalizeStartupBlock(raw["startup"]) : undefined,
+      services: raw["services"] ? normalizeServicesBlock(raw["services"], raw["name"] as string) : undefined,
       pods,
       edges,
     };
@@ -312,6 +333,209 @@ function validateCrossPodEdge(edge: Record<string, unknown>, index: number, allQ
   }
 
   return errors;
+}
+
+function validateServicesBlock(raw: unknown, prefix: string): string[] {
+  if (!raw || typeof raw !== "object") return [`${prefix}: must be an object`];
+
+  const obj = raw as Record<string, unknown>;
+  const errors: string[] = [];
+
+  if (!obj["kind"] || typeof obj["kind"] !== "string" || !VALID_SERVICES_KIND.has(obj["kind"] as string)) {
+    errors.push(`${prefix}.kind: must be one of ${[...VALID_SERVICES_KIND].join(", ")} (got "${obj["kind"]}")`);
+  }
+
+  if (!obj["compose_file"] || typeof obj["compose_file"] !== "string") {
+    errors.push(`${prefix}.compose_file: required non-empty string`);
+  } else {
+    const pathErr = validateSafePath(obj["compose_file"] as string, `${prefix}.compose_file`);
+    if (pathErr) errors.push(pathErr);
+  }
+
+  if (obj["project_name"] !== undefined) {
+    if (typeof obj["project_name"] !== "string") {
+      errors.push(`${prefix}.project_name: must be a string`);
+    } else if (!COMPOSE_PROJECT_NAME_PATTERN.test(obj["project_name"] as string)) {
+      errors.push(`${prefix}.project_name: must match ${COMPOSE_PROJECT_NAME_PATTERN.source} (got "${obj["project_name"]}")`);
+    }
+  }
+
+  if (obj["profiles"] !== undefined) {
+    if (!Array.isArray(obj["profiles"])) {
+      errors.push(`${prefix}.profiles: must be an array`);
+    } else {
+      obj["profiles"].forEach((p, index) => {
+        if (typeof p !== "string" || !p) errors.push(`${prefix}.profiles[${index}]: must be a non-empty string`);
+      });
+    }
+  }
+
+  if (obj["down_policy"] !== undefined && !VALID_DOWN_POLICIES.has(obj["down_policy"] as string)) {
+    errors.push(`${prefix}.down_policy: must be one of ${[...VALID_DOWN_POLICIES].join(", ")} (got "${obj["down_policy"]}")`);
+  }
+
+  if (obj["wait_for"] !== undefined) {
+    if (!Array.isArray(obj["wait_for"])) {
+      errors.push(`${prefix}.wait_for: must be an array`);
+    } else {
+      for (let i = 0; i < (obj["wait_for"] as unknown[]).length; i++) {
+        errors.push(...validateWaitTarget((obj["wait_for"] as Record<string, unknown>[])[i]!, i, prefix));
+      }
+    }
+  }
+
+  if (obj["surfaces"] !== undefined) {
+    errors.push(...validateSurfaces(obj["surfaces"], prefix));
+  }
+
+  if (obj["checkpoints"] !== undefined) {
+    errors.push(...validateCheckpointHooks(obj["checkpoints"], prefix));
+  }
+
+  return errors;
+}
+
+function validateWaitTarget(raw: Record<string, unknown>, index: number, prefix: string): string[] {
+  const errors: string[] = [];
+  const targetPrefix = `${prefix}.wait_for[${index}]`;
+  const hasService = typeof raw["service"] === "string" && raw["service"];
+  const hasUrl = typeof raw["url"] === "string" && raw["url"];
+  const hasTcp = typeof raw["tcp"] === "string" && raw["tcp"];
+  const targetCount = [hasService, hasUrl, hasTcp].filter(Boolean).length;
+
+  if (targetCount === 0) {
+    errors.push(`${targetPrefix}: must define exactly one of service, url, or tcp`);
+  } else if (targetCount > 1) {
+    errors.push(`${targetPrefix}: must define exactly one of service, url, or tcp`);
+  }
+
+  if (hasService) {
+    if (!raw["condition"] || raw["condition"] !== "healthy") {
+      errors.push(`${targetPrefix}.condition: service targets must use condition "healthy"`);
+    }
+  }
+
+  if (raw["condition"] !== undefined && !VALID_WAIT_TARGET_CONDITIONS.has(raw["condition"] as string)) {
+    errors.push(`${targetPrefix}.condition: must be one of ${[...VALID_WAIT_TARGET_CONDITIONS].join(", ")} (got "${raw["condition"]}")`);
+  } else if (!hasService && raw["condition"] !== undefined) {
+    errors.push(`${targetPrefix}.condition: only service targets may specify condition`);
+  }
+
+  return errors;
+}
+
+function validateSurfaces(raw: unknown, prefix: string): string[] {
+  if (!raw || typeof raw !== "object") return [`${prefix}.surfaces: must be an object`];
+  const obj = raw as Record<string, unknown>;
+  const errors: string[] = [];
+
+  if (obj["urls"] !== undefined) {
+    if (!Array.isArray(obj["urls"])) {
+      errors.push(`${prefix}.surfaces.urls: must be an array`);
+    } else {
+      for (let i = 0; i < (obj["urls"] as unknown[]).length; i++) {
+        const url = (obj["urls"] as Record<string, unknown>[])[i]!;
+        if (!url["name"] || typeof url["name"] !== "string") {
+          errors.push(`${prefix}.surfaces.urls[${i}].name: required non-empty string`);
+        }
+        if (!url["url"] || typeof url["url"] !== "string") {
+          errors.push(`${prefix}.surfaces.urls[${i}].url: required non-empty string`);
+        }
+      }
+    }
+  }
+
+  if (obj["commands"] !== undefined) {
+    if (!Array.isArray(obj["commands"])) {
+      errors.push(`${prefix}.surfaces.commands: must be an array`);
+    } else {
+      for (let i = 0; i < (obj["commands"] as unknown[]).length; i++) {
+        const command = (obj["commands"] as Record<string, unknown>[])[i]!;
+        if (!command["name"] || typeof command["name"] !== "string") {
+          errors.push(`${prefix}.surfaces.commands[${i}].name: required non-empty string`);
+        }
+        if (!command["command"] || typeof command["command"] !== "string") {
+          errors.push(`${prefix}.surfaces.commands[${i}].command: required non-empty string`);
+        }
+      }
+    }
+  }
+
+  return errors;
+}
+
+function validateCheckpointHooks(raw: unknown, prefix: string): string[] {
+  if (!raw || typeof raw !== "object") return [`${prefix}.checkpoints: must be an array`];
+  if (!Array.isArray(raw)) return [`${prefix}.checkpoints: must be an array`];
+
+  const errors: string[] = [];
+  for (let i = 0; i < raw.length; i++) {
+    const hook = raw[i] as Record<string, unknown>;
+    if (!hook["id"] || typeof hook["id"] !== "string") {
+      errors.push(`${prefix}.checkpoints[${i}].id: required non-empty string`);
+    }
+    if (!hook["export"] || typeof hook["export"] !== "string") {
+      errors.push(`${prefix}.checkpoints[${i}].export: required non-empty string`);
+    }
+    if (hook["import"] !== undefined && typeof hook["import"] !== "string") {
+      errors.push(`${prefix}.checkpoints[${i}].import: must be a string`);
+    }
+  }
+
+  return errors;
+}
+
+function normalizeServicesBlock(raw: unknown, rigName: string): RigServicesSpec | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const obj = raw as Record<string, unknown>;
+  const waitFor = Array.isArray(obj["wait_for"])
+    ? (obj["wait_for"] as Record<string, unknown>[]).map((target) => normalizeWaitTarget(target))
+    : undefined;
+  const surfaces = obj["surfaces"] ? normalizeSurfaces(obj["surfaces"]) : undefined;
+  const checkpoints = Array.isArray(obj["checkpoints"])
+    ? (obj["checkpoints"] as Record<string, unknown>[]).map((hook) => normalizeCheckpointHook(hook))
+    : undefined;
+
+  return {
+    kind: obj["kind"] as "compose",
+    composeFile: obj["compose_file"] as string,
+    projectName: obj["project_name"] as string | undefined ?? deriveComposeProjectName(rigName),
+    profiles: Array.isArray(obj["profiles"]) ? (obj["profiles"] as string[]) : undefined,
+    downPolicy: obj["down_policy"] as RigServicesSpec["downPolicy"] | undefined,
+    waitFor,
+    surfaces,
+    checkpoints,
+  };
+}
+
+function normalizeWaitTarget(raw: Record<string, unknown>): RigServicesWaitTarget {
+  return {
+    service: raw["service"] as string | undefined,
+    condition: raw["condition"] as RigServicesWaitTarget["condition"] | undefined,
+    url: raw["url"] as string | undefined,
+    tcp: raw["tcp"] as string | undefined,
+  };
+}
+
+function normalizeSurfaces(raw: unknown): RigServicesSurface | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const obj = raw as Record<string, unknown>;
+  return {
+    urls: Array.isArray(obj["urls"])
+      ? (obj["urls"] as Record<string, unknown>[]).map((u) => ({ name: u["name"] as string, url: u["url"] as string }))
+      : undefined,
+    commands: Array.isArray(obj["commands"])
+      ? (obj["commands"] as Record<string, unknown>[]).map((c) => ({ name: c["name"] as string, command: c["command"] as string }))
+      : undefined,
+  };
+}
+
+function normalizeCheckpointHook(raw: Record<string, unknown>): RigServicesCheckpointHook {
+  return {
+    id: raw["id"] as string,
+    exportCommand: raw["export"] as string,
+    importCommand: raw["import"] as string | undefined,
+  };
 }
 
 function validateContinuityPolicy(raw: unknown, prefix: string): string[] {
