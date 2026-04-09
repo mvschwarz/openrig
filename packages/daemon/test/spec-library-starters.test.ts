@@ -14,10 +14,9 @@ const RIG_SPECS = [
   "rigs/focused/research-team/rig.yaml",
   "rigs/launch/demo/rig.yaml",
   "rigs/preview/product-team/rig.yaml",
+  "rigs/launch/secrets-manager/rig.yaml",
 ];
-const PROOF_RIG_SPECS = [
-  "secrets-manager.yaml",
-];
+const PROOF_RIG_SPECS: string[] = [];
 
 const AGENT_SPECS = [
   "agents/design/product-designer/agent.yaml",
@@ -68,13 +67,14 @@ describe("Starter specs", () => {
     lib.scan();
 
     const rigs = lib.list({ kind: "rig" });
-    expect(rigs.length).toBeGreaterThanOrEqual(5);
+    expect(rigs.length).toBeGreaterThanOrEqual(6);
     const names = rigs.map((e) => e.name);
     expect(names).toContain("implementation-pair");
     expect(names).toContain("adversarial-review");
     expect(names).toContain("research-team");
     expect(names).toContain("demo");
     expect(names).toContain("product-team");
+    expect(names).toContain("secrets-manager");
   });
 
   it("starter summaries position implementation-pair as the first success, demo as the launch-grade starter, and product-team as the advanced preview", () => {
