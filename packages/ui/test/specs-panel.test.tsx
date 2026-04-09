@@ -1,8 +1,11 @@
-import { describe, it, expect, vi, afterEach } from "vitest";
+import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import { render, screen, fireEvent, cleanup, waitFor } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { createAppTestRouter } from "./helpers/test-router.js";
 import { SpecsPanel } from "../src/components/SpecsPanel.js";
 import { SpecsWorkspaceProvider, SPECS_WORKSPACE_STORAGE_KEYS } from "../src/components/SpecsWorkspace.js";
+
+const mockFetch = vi.fn();
 
 function renderPanel(initialPath = "/") {
   const onClose = vi.fn();
@@ -142,6 +145,139 @@ describe("SpecsPanel", () => {
 
     await waitFor(() => {
       expect(screen.getByTestId("agent-review-route")).toBeDefined();
+    });
+  });
+});
+
+describe("SpecsPanel filter chips and richer rows", () => {
+  const origFetch = globalThis.fetch;
+
+  beforeEach(() => {
+    globalThis.fetch = mockFetch as unknown as typeof fetch;
+    mockFetch.mockImplementation(async (url: string) => {
+      // Only the all-entries path (no ?kind=) returns data.
+      // kind-specific queries return empty to prove the unified list
+      // uses a single useSpecLibrary() call, not separate kind queries.
+      if (typeof url === "string" && url.includes("/api/specs/library")) {
+        if (url.includes("kind=")) {
+          return { ok: true, json: async () => [] };
+        }
+        return {
+          ok: true,
+          json: async () => [
+            {
+              id: "app-1",
+              kind: "rig",
+              name: "secrets-manager",
+              version: "0.2",
+              sourceType: "builtin",
+              sourcePath: "/specs/rigs/launch/secrets-manager/rig.yaml",
+              relativePath: "rigs/launch/secrets-manager/rig.yaml",
+              updatedAt: "2026-04-09T00:00:00Z",
+              summary: "HashiCorp Vault in dev mode",
+              hasServices: true,
+            },
+            {
+              id: "rig-1",
+              kind: "rig",
+              name: "demo",
+              version: "0.2",
+              sourceType: "builtin",
+              sourcePath: "/specs/rigs/launch/demo/rig.yaml",
+              relativePath: "rigs/launch/demo/rig.yaml",
+              updatedAt: "2026-04-09T00:00:00Z",
+              summary: "Stable full-team starter",
+            },
+            {
+              id: "agent-1",
+              kind: "agent",
+              name: "implementer",
+              version: "1.0",
+              sourceType: "builtin",
+              sourcePath: "/specs/agents/development/implementer/agent.yaml",
+              relativePath: "agents/development/implementer/agent.yaml",
+              updatedAt: "2026-04-09T00:00:00Z",
+              summary: "Implementation agent",
+            },
+          ],
+        };
+      }
+      return { ok: true, json: async () => [] };
+    });
+  });
+
+  afterEach(() => {
+    globalThis.fetch = origFetch;
+    window.localStorage.clear();
+    cleanup();
+  });
+
+  function renderFilterPanel() {
+    const onClose = vi.fn();
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+    return render(
+      <QueryClientProvider client={qc}>
+        {createAppTestRouter({
+          initialPath: "/",
+          routes: [
+            { path: "/", component: () => <div>home</div> },
+            { path: "/specs/library/$entryId", component: () => <div data-testid="library-review">review</div> },
+          ],
+          rootComponent: ({ children }) => (
+            <SpecsWorkspaceProvider>
+              <SpecsPanel onClose={onClose} />
+              {children}
+            </SpecsWorkspaceProvider>
+          ),
+        })}
+      </QueryClientProvider>
+    );
+  }
+
+  it("shows all entries in merged list under default All filter with type and stability badges", async () => {
+    renderFilterPanel();
+
+    // Wait for library data to load
+    await waitFor(() => {
+      expect(screen.getByText("secrets-manager")).toBeDefined();
+    });
+
+    // All three entries visible under All filter
+    expect(screen.getByText("secrets-manager")).toBeDefined();
+    expect(screen.getByText("demo")).toBeDefined();
+    expect(screen.getByText("implementer")).toBeDefined();
+
+    // Filter chips exist
+    expect(screen.getByTestId("filter-all")).toBeDefined();
+    expect(screen.getByTestId("filter-apps")).toBeDefined();
+    expect(screen.getByTestId("filter-rigs")).toBeDefined();
+    expect(screen.getByTestId("filter-agents")).toBeDefined();
+
+    // Service-backed rig shows APP badge and summary
+    const appRow = screen.getByTestId("library-entry-app-1");
+    expect(appRow.textContent).toContain("APP");
+    expect(screen.getByText("HashiCorp Vault in dev mode")).toBeDefined();
+
+    // Builtin launch-path rig shows Stable badge
+    const rigRow = screen.getByTestId("library-entry-rig-1");
+    expect(rigRow.textContent).toContain("Stable");
+  });
+
+  it("clicking Apps filter shows only service-backed rigs", async () => {
+    renderFilterPanel();
+
+    await waitFor(() => {
+      expect(screen.getByText("secrets-manager")).toBeDefined();
+    });
+
+    // Click Apps filter
+    fireEvent.click(screen.getByTestId("filter-apps"));
+
+    // Only the app entry should be visible
+    await waitFor(() => {
+      expect(screen.getByText("secrets-manager")).toBeDefined();
+      expect(screen.queryByText("demo")).toBeNull();
+      expect(screen.queryByText("implementer")).toBeNull();
     });
   });
 });

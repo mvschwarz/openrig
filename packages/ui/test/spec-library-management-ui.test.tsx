@@ -55,11 +55,11 @@ describe("Specs drawer library management", () => {
 
     fetchMock.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-      if (url.includes("/api/specs/library?kind=rig")) {
-        return { ok: true, json: async () => state.rigEntries };
-      }
-      if (url.includes("/api/specs/library?kind=agent")) {
-        return { ok: true, json: async () => state.agentEntries };
+      if (url.includes("/api/specs/library") && !url.includes("/rename") && !url.includes("/user-rig-1") && !init?.method) {
+        // Unified all-entries query — return merged list
+        if (url.includes("kind=rig")) return { ok: true, json: async () => state.rigEntries };
+        if (url.includes("kind=agent")) return { ok: true, json: async () => state.agentEntries };
+        return { ok: true, json: async () => [...state.rigEntries, ...state.agentEntries] };
       }
       if (url.includes("/api/specs/library/user-rig-1/rename") && init?.method === "POST") {
         const body = JSON.parse(String(init.body ?? "{}")) as { name: string };

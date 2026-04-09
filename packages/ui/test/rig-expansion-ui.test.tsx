@@ -165,17 +165,6 @@ describe("RigDetailPanel Add Pod", () => {
 describe("SpecsPanel Add to Rig", () => {
   function mockSpecsData() {
     mockFetch.mockImplementation(async (url: string, opts?: RequestInit) => {
-      if (typeof url === "string" && url.includes("/api/specs/library?kind=rig")) {
-        return {
-          ok: true,
-          json: async () => [
-            { id: "lib-1", name: "research-team", kind: "rig", version: "0.2", sourceType: "builtin" },
-          ],
-        };
-      }
-      if (typeof url === "string" && url.includes("/api/specs/library?kind=agent")) {
-        return { ok: true, json: async () => [] };
-      }
       if (typeof url === "string" && url.includes("/api/specs/library/lib-1/review")) {
         return {
           ok: true,
@@ -187,6 +176,14 @@ describe("SpecsPanel Add to Rig", () => {
             edges: [],
             raw: "",
           }),
+        };
+      }
+      if (typeof url === "string" && url.includes("/api/specs/library") && !url.includes("/review")) {
+        return {
+          ok: true,
+          json: async () => [
+            { id: "lib-1", name: "research-team", kind: "rig", version: "0.2", sourceType: "builtin" },
+          ],
         };
       }
       if (typeof url === "string" && url.includes("/api/ps")) {
@@ -268,14 +265,11 @@ describe("SpecsPanel Add to Rig", () => {
 
   it("shows 'No pods available' for specs without pods", async () => {
     mockFetch.mockImplementation(async (url: string) => {
-      if (typeof url === "string" && url.includes("/api/specs/library?kind=rig")) {
-        return { ok: true, json: async () => [{ id: "lib-2", name: "empty-rig", kind: "rig", version: "0.2", sourceType: "builtin" }] };
-      }
-      if (typeof url === "string" && url.includes("/api/specs/library?kind=agent")) {
-        return { ok: true, json: async () => [] };
-      }
       if (typeof url === "string" && url.includes("/api/specs/library/lib-2/review")) {
         return { ok: true, json: async () => ({ kind: "rig", name: "empty-rig", format: "pod_aware", pods: [], edges: [], raw: "" }) };
+      }
+      if (typeof url === "string" && url.includes("/api/specs/library") && !url.includes("/review")) {
+        return { ok: true, json: async () => [{ id: "lib-2", name: "empty-rig", kind: "rig", version: "0.2", sourceType: "builtin" }] };
       }
       return { ok: true, json: async () => [] };
     });
