@@ -108,6 +108,17 @@ function LibraryRigReviewContent({ review }: { review: LibraryRigReview }) {
           {review.services && (
             <WorkflowSummaryCard label="Type" value="Agent-Managed App" testId="lib-rig-type" />
           )}
+          {review.services && reviewPods.length > 0 && (() => {
+            const specialistPod = reviewPods.find((p) => p.members.some((m) => m.id === "specialist"));
+            if (!specialistPod) return null;
+            return (
+              <WorkflowSummaryCard
+                label="Specialist Agent"
+                value={`${specialistPod.id}.specialist`}
+                testId="lib-rig-specialist"
+              />
+            );
+          })()}
           <WorkflowSummaryCard
             label={review.format === "pod_aware" ? "Pods" : "Nodes"}
             value={review.format === "pod_aware" ? reviewPods.length : reviewNodes.length}

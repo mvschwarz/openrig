@@ -27,9 +27,9 @@ describe("LibraryReview", () => {
           kind: "rig",
           name: "secrets-manager",
           version: "0.2",
-          summary: "HashiCorp Vault in dev mode",
+          summary: "HashiCorp Vault in dev mode with a dedicated Vault specialist agent",
           format: "pod_aware",
-          pods: [{ id: "dev", label: "Dev", members: [{ id: "impl", agentRef: "local:agents/impl", runtime: "claude-code" }], edges: [] }],
+          pods: [{ id: "vault", label: "Vault", members: [{ id: "specialist", agentRef: "local:agents/apps/vault-specialist", runtime: "claude-code" }], edges: [] }],
           edges: [],
           graph: { nodes: [], edges: [] },
           raw: "name: secrets-manager\n",
@@ -67,6 +67,11 @@ describe("LibraryReview", () => {
     await waitFor(() => {
       expect(screen.getByTestId("library-review-rig")).toBeDefined();
     });
+
+    // Specialist card shows canonical identity
+    const specialistCard = screen.getByTestId("lib-rig-specialist");
+    expect(specialistCard).toBeDefined();
+    expect(specialistCard.textContent).toContain("vault.specialist");
 
     // Environment tab exists
     expect(screen.getByTestId("lib-tab-environment")).toBeDefined();
@@ -150,6 +155,8 @@ describe("LibraryReview", () => {
     expect(screen.queryByTestId("lib-tab-environment")).toBeNull();
     // No setup prompt button
     expect(screen.queryByTestId("copy-setup-prompt")).toBeNull();
+    // No specialist card
+    expect(screen.queryByTestId("lib-rig-specialist")).toBeNull();
   });
 
   it("opens the matching agent spec from a rig member row", async () => {

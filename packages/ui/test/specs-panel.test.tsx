@@ -174,7 +174,7 @@ describe("SpecsPanel filter chips and richer rows", () => {
               sourcePath: "/specs/rigs/launch/secrets-manager/rig.yaml",
               relativePath: "rigs/launch/secrets-manager/rig.yaml",
               updatedAt: "2026-04-09T00:00:00Z",
-              summary: "HashiCorp Vault in dev mode",
+              summary: "HashiCorp Vault in dev mode with a dedicated Vault specialist agent",
               hasServices: true,
             },
             {
@@ -253,10 +253,10 @@ describe("SpecsPanel filter chips and richer rows", () => {
     expect(screen.getByTestId("filter-rigs")).toBeDefined();
     expect(screen.getByTestId("filter-agents")).toBeDefined();
 
-    // Service-backed rig shows APP badge and summary
+    // Service-backed rig shows APP badge and summary mentioning specialist
     const appRow = screen.getByTestId("library-entry-app-1");
     expect(appRow.textContent).toContain("APP");
-    expect(screen.getByText("HashiCorp Vault in dev mode")).toBeDefined();
+    expect(appRow.textContent).toContain("specialist");
 
     // Builtin launch-path rig shows Stable badge
     const rigRow = screen.getByTestId("library-entry-rig-1");
