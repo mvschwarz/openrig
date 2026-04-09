@@ -1,0 +1,40 @@
+version: "0.2"
+name: control-plane-test
+summary: >
+  Multi-pod terminal-only topology for containerized control-plane testing.
+  Exercises pods, cross-pod edges, expansion targets, and snapshot/restore
+  without requiring live coding runtimes.
+
+pods:
+  - id: backend
+    label: Backend Team
+    members:
+      - id: api
+        runtime: terminal
+        agent_ref: "builtin:terminal"
+        profile: none
+        cwd: /tmp
+      - id: db
+        runtime: terminal
+        agent_ref: "builtin:terminal"
+        profile: none
+        cwd: /tmp
+    edges:
+      - kind: delegates_to
+        from: api
+        to: db
+
+  - id: frontend
+    label: Frontend Team
+    members:
+      - id: ui
+        runtime: terminal
+        agent_ref: "builtin:terminal"
+        profile: none
+        cwd: /tmp
+    edges: []
+
+edges:
+  - kind: delegates_to
+    from: frontend.ui
+    to: backend.api

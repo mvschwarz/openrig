@@ -1,0 +1,14 @@
+pod:
+  id: ops
+  label: Operations
+  members:
+    - id: monitor
+      runtime: terminal
+      agent_ref: "builtin:terminal"
+      profile: none
+      cwd: /tmp
+  edges: []
+crossPodEdges:
+  - kind: delegates_to
+    from: ops.monitor
+    to: backend.api
