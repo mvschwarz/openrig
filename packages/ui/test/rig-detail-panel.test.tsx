@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, cleanup } from "@testing-library/react";
+import { render, screen, cleanup, fireEvent, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { RigDetailPanel } from "../src/components/RigDetailPanel.js";
 
@@ -246,5 +246,93 @@ describe("RigDetailPanel", () => {
     expect(screen.getByText("dev")).toBeTruthy();
     expect(screen.getByText("impl")).toBeTruthy();
     expect(screen.getByText("qa")).toBeTruthy();
+  });
+
+  it("shows Env tab for service-backed rigs with service health and surfaces", async () => {
+    mockFetch.mockImplementation((url: string) => {
+      if (url === "/api/rigs/summary") {
+        return Promise.resolve({ ok: true, json: async () => [{ id: "rig-1", name: "my-rig", nodeCount: 1, latestSnapshotAt: null, latestSnapshotId: null }] });
+      }
+      if (url === "/api/ps") {
+        return Promise.resolve({ ok: true, json: async () => [{ rigId: "rig-1", name: "my-rig", nodeCount: 1, runningCount: 1, status: "running", uptime: "5m" }] });
+      }
+      if (url === "/api/rigs/rig-1/nodes") {
+        return Promise.resolve({ ok: true, json: async () => [] });
+      }
+      if (url.includes("/snapshots")) {
+        return Promise.resolve({ ok: true, json: async () => [] });
+      }
+      if (url === "/api/rigs/rig-1/env") {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            ok: true,
+            hasServices: true,
+            kind: "compose",
+            composeFile: "/tmp/svc.compose.yaml",
+            projectName: "test-svc",
+            receipt: {
+              kind: "compose",
+              composeFile: "/tmp/svc.compose.yaml",
+              projectName: "test-svc",
+              services: [{ name: "vault", status: "running", health: "healthy" }],
+              waitFor: [{ target: { url: "http://127.0.0.1:8200/health" }, status: "healthy" }],
+              capturedAt: "2026-04-09T12:00:00Z",
+            },
+            surfaces: {
+              urls: [{ name: "Vault UI", url: "http://127.0.0.1:8200/ui" }],
+            },
+          }),
+        });
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) });
+    });
+
+    renderPanel("rig-1");
+    await screen.findByText("my-rig");
+
+    // Env tab should exist between Info and Chat
+    expect(screen.getByTestId("tab-env")).toBeDefined();
+    expect(screen.getByTestId("tab-info")).toBeDefined();
+    expect(screen.getByTestId("tab-chat")).toBeDefined();
+
+    // Click Env tab
+    fireEvent.click(screen.getByTestId("tab-env"));
+
+    await waitFor(() => {
+      // Overall env state
+      const envState = screen.getByTestId("env-state");
+      expect(envState).toBeDefined();
+      expect(envState.textContent).toContain("Healthy");
+      // Service health
+      expect(screen.getByText("vault")).toBeDefined();
+      // Surface URL
+      expect(screen.getByText("Vault UI")).toBeDefined();
+    });
+  });
+
+  it("does not show Env tab for non-service rigs", async () => {
+    mockFetch.mockImplementation((url: string) => {
+      if (url === "/api/rigs/summary") {
+        return Promise.resolve({ ok: true, json: async () => [{ id: "rig-2", name: "plain-rig", nodeCount: 1, latestSnapshotAt: null, latestSnapshotId: null }] });
+      }
+      if (url === "/api/ps") {
+        return Promise.resolve({ ok: true, json: async () => [{ rigId: "rig-2", name: "plain-rig", nodeCount: 1, runningCount: 1, status: "running", uptime: "5m" }] });
+      }
+      if (url === "/api/rigs/rig-2/env") {
+        return Promise.resolve({ ok: true, json: async () => ({ ok: true, hasServices: false }) });
+      }
+      if (url.includes("/snapshots")) {
+        return Promise.resolve({ ok: true, json: async () => [] });
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) });
+    });
+
+    renderPanel("rig-2");
+    await screen.findByText("plain-rig");
+
+    expect(screen.getByTestId("tab-info")).toBeDefined();
+    expect(screen.getByTestId("tab-chat")).toBeDefined();
+    expect(screen.queryByTestId("tab-env")).toBeNull();
   });
 });

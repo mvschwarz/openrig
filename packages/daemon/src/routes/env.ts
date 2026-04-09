@@ -34,6 +34,13 @@ export function envRoutes(): Hono {
       } catch { /* use cached */ }
     }
 
+    // Parse surfaces from specJson (best-effort)
+    let surfaces: unknown = undefined;
+    try {
+      const spec = JSON.parse(record.specJson) as Record<string, unknown>;
+      if (spec["surfaces"]) surfaces = spec["surfaces"];
+    } catch { /* safe default */ }
+
     return c.json({
       ok: true,
       hasServices: true,
@@ -41,6 +48,7 @@ export function envRoutes(): Hono {
       composeFile: record.composeFile,
       projectName: record.projectName,
       receipt,
+      ...(surfaces ? { surfaces } : {}),
     });
   });
 
