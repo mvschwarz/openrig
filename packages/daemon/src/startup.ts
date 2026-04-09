@@ -357,6 +357,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     })(),
     whoamiService,
     contextUsageStore,
+    serviceOrchestrator,
+    composeAdapter,
     specReviewService,
     specLibraryService: (() => {
       const userSpecsRoot = getDefaultOpenRigPath("specs");
