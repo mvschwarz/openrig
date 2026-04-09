@@ -1,0 +1,36 @@
+name: vault-specialist
+version: "1.0"
+description: Vault specialist agent — manages HashiCorp Vault for this managed app
+
+defaults:
+  runtime: claude-code
+
+imports:
+  - ref: local:../../shared
+
+profiles:
+  default:
+    uses:
+      skills: [using-superpowers, openrig-user, mental-model-ha, systematic-debugging, verification-before-completion, vault-user]
+      guidance: []
+      subagents: []
+      hooks: []
+      runtime_resources: []
+
+resources:
+  guidance:
+    - id: role
+      path: guidance/role.md
+  skills:
+    - id: vault-user
+      path: skills/vault-user
+
+startup:
+  files:
+    - path: guidance/role.md
+      delivery_hint: send_text
+      required: true
+    - path: startup/context.md
+      delivery_hint: send_text
+      required: true
+  actions: []
