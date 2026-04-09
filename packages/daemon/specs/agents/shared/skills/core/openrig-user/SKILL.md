@@ -309,8 +309,8 @@ A bindings file is the durable map from authored logical IDs to live sessions. S
 
 ```yaml
 bindings:
-  dev1.impl2: dev1-impl2@rigged-buildout
-  dev1.qa: dev1-qa@rigged-buildout
+  dev1.impl2: dev1.impl2@rigged-buildout
+  dev1.qa: dev1.qa@rigged-buildout
 ```
 
 Spec + bindings is the proven recovery pair for adopted rigs.

@@ -1,23 +1,23 @@
 version: "0.2"
-name: demo
+name: product-team
+culture_file: CULTURE.md
 summary: >
-  Launch-grade starter: a stable full product squad with two
-  orchestrators, implementation, QA, design, and two independent
-  reviewers. This is the release-gated showcase rig.
-
-culture_file: demo.CULTURE.md
+  Advanced preview: the experimental sibling of demo, with the same full
+  product-squad topology: two orchestrators, implementation, QA, design,
+  and two independent reviewers. Use this when you want the richer lane,
+  not the release gate.
 
 pods:
   - id: orch1
     label: Orchestration
     members:
       - id: lead
-        agent_ref: "local:agents/lead"
+        agent_ref: "local:../../../agents/orchestration/orchestrator"
         runtime: claude-code
         profile: default
         cwd: "."
       - id: peer
-        agent_ref: "local:agents/lead"
+        agent_ref: "local:../../../agents/orchestration/orchestrator"
         runtime: codex
         profile: default
         cwd: "."
@@ -27,17 +27,17 @@ pods:
     label: Development
     members:
       - id: impl
-        agent_ref: "local:agents/impl"
+        agent_ref: "local:../../../agents/development/implementer"
         runtime: claude-code
         profile: default
         cwd: "."
       - id: qa
-        agent_ref: "local:agents/qa"
+        agent_ref: "local:../../../agents/development/qa"
         runtime: codex
         profile: default
         cwd: "."
       - id: design
-        agent_ref: "local:agents/design"
+        agent_ref: "local:../../../agents/design/product-designer"
         runtime: claude-code
         profile: default
         cwd: "."
@@ -50,12 +50,12 @@ pods:
     label: Review
     members:
       - id: r1
-        agent_ref: "local:agents/reviewer"
+        agent_ref: "local:../../../agents/review/independent-reviewer"
         runtime: claude-code
         profile: default
         cwd: "."
       - id: r2
-        agent_ref: "local:agents/reviewer"
+        agent_ref: "local:../../../agents/review/independent-reviewer"
         runtime: codex
         profile: default
         cwd: "."

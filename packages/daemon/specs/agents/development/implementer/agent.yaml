@@ -1,17 +1,17 @@
-name: analyst
+name: implementer
 version: "1.0"
-description: Research analyst — deep-dive investigation and evidence gathering
+description: Implementation agent — writes code following TDD discipline
 
 defaults:
   runtime: claude-code
 
 imports:
-  - ref: local:../shared
+  - ref: local:../../shared
 
 profiles:
   default:
     uses:
-      skills: [openrig-user]
+      skills: [using-superpowers, openrig-user, development-team, test-driven-development, systematic-debugging, verification-before-completion, writing-plans, executing-plans]
       guidance: []
       subagents: []
       hooks: []

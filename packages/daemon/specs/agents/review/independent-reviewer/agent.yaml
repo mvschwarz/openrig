@@ -1,4 +1,4 @@
-name: reviewer
+name: independent-reviewer
 version: "1.0"
 description: Independent code reviewer — analyzes code and writes findings
 
@@ -6,7 +6,7 @@ defaults:
   runtime: claude-code
 
 imports:
-  - ref: local:../shared
+  - ref: local:../../shared
 
 profiles:
   default:

@@ -138,8 +138,8 @@ describe("SpecLibraryService", () => {
   });
 
   it("scan discovers nested specs and preserves relative paths in IDs", () => {
-    mkdirSync(join(tmpDir, "agents", "impl"), { recursive: true });
-    writeFileSync(join(tmpDir, "agents", "impl", "agent.yaml"), VALID_AGENT_YAML);
+    mkdirSync(join(tmpDir, "agents", "development", "implementer"), { recursive: true });
+    writeFileSync(join(tmpDir, "agents", "development", "implementer", "agent.yaml"), VALID_AGENT_YAML);
 
     const lib = createLibrary([{ path: tmpDir, sourceType: "builtin" }]);
     lib.scan();
@@ -147,7 +147,7 @@ describe("SpecLibraryService", () => {
     const entries = lib.list({ kind: "agent" });
     expect(entries).toHaveLength(1);
     expect(entries[0]!.name).toBe("test-agent");
-    expect(entries[0]!.relativePath).toBe("agents/impl/agent.yaml");
+    expect(entries[0]!.relativePath).toBe("agents/development/implementer/agent.yaml");
 
     lib.scan();
     expect(lib.list({ kind: "agent" })[0]!.id).toBe(entries[0]!.id);

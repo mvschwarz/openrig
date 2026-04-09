@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync, existsSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { SpecReviewService } from "../src/domain/spec-review-service.js";
 import { SpecLibraryService } from "../src/domain/spec-library-service.js";
 import { rigPreflight, type RigPreflightInput } from "../src/domain/rigspec-preflight.js";
@@ -9,30 +9,30 @@ import { parseAgentSpec, validateAgentSpec } from "../src/domain/agent-manifest.
 const SPECS_ROOT = resolve(import.meta.dirname, "../specs");
 
 const RIG_SPECS = [
-  "implementation-pair.yaml",
-  "adversarial-review.yaml",
-  "research-team.yaml",
-  "demo.yaml",
-  "product-team.yaml",
+  "rigs/launch/implementation-pair/rig.yaml",
+  "rigs/focused/adversarial-review/rig.yaml",
+  "rigs/focused/research-team/rig.yaml",
+  "rigs/launch/demo/rig.yaml",
+  "rigs/preview/product-team/rig.yaml",
 ];
 
 const AGENT_SPECS = [
-  "agents/design/agent.yaml",
-  "agents/impl/agent.yaml",
-  "agents/qa/agent.yaml",
-  "agents/reviewer/agent.yaml",
-  "agents/lead/agent.yaml",
-  "agents/analyst/agent.yaml",
-  "agents/synthesizer/agent.yaml",
+  "agents/design/product-designer/agent.yaml",
+  "agents/development/implementer/agent.yaml",
+  "agents/development/qa/agent.yaml",
+  "agents/review/independent-reviewer/agent.yaml",
+  "agents/orchestration/orchestrator/agent.yaml",
+  "agents/research/analyst/agent.yaml",
+  "agents/research/synthesizer/agent.yaml",
 ];
 
 const SHARED_AGENT_SPEC = "agents/shared/agent.yaml";
 const STARTER_AGENT_SPECS = [
-  "agents/design/agent.yaml",
-  "agents/impl/agent.yaml",
-  "agents/qa/agent.yaml",
-  "agents/reviewer/agent.yaml",
-  "agents/lead/agent.yaml",
+  "agents/design/product-designer/agent.yaml",
+  "agents/development/implementer/agent.yaml",
+  "agents/development/qa/agent.yaml",
+  "agents/review/independent-reviewer/agent.yaml",
+  "agents/orchestration/orchestrator/agent.yaml",
 ];
 
 describe("Starter specs", () => {
@@ -103,7 +103,7 @@ describe("Starter specs", () => {
       const yaml = readFileSync(join(SPECS_ROOT, file), "utf-8");
       const input: RigPreflightInput = {
         rigSpecYaml: yaml,
-        rigRoot: SPECS_ROOT,
+        rigRoot: dirname(join(SPECS_ROOT, file)),
         cwdOverride: "/workspace/project",
         fsOps,
       };
@@ -194,23 +194,23 @@ describe("Starter specs", () => {
 
     const expectedAgentSkills = new Map<string, string[]>([
       [
-        "agents/design/agent.yaml",
+        "agents/design/product-designer/agent.yaml",
         ["using-superpowers", "openrig-user", "development-team", "frontend-design", "brainstorming", "writing-plans", "verification-before-completion"],
       ],
       [
-        "agents/impl/agent.yaml",
+        "agents/development/implementer/agent.yaml",
         ["using-superpowers", "openrig-user", "development-team", "test-driven-development", "systematic-debugging", "writing-plans", "executing-plans", "verification-before-completion"],
       ],
       [
-        "agents/qa/agent.yaml",
+        "agents/development/qa/agent.yaml",
         ["using-superpowers", "openrig-user", "development-team", "systematic-debugging", "agent-browser", "dogfood", "writing-plans", "executing-plans", "verification-before-completion"],
       ],
       [
-        "agents/reviewer/agent.yaml",
+        "agents/review/independent-reviewer/agent.yaml",
         ["using-superpowers", "openrig-user", "review-team", "systematic-debugging", "brainstorming", "writing-plans", "verification-before-completion"],
       ],
       [
-        "agents/lead/agent.yaml",
+        "agents/orchestration/orchestrator/agent.yaml",
         ["using-superpowers", "openrig-user", "orchestration-team", "systematic-debugging", "brainstorming", "writing-plans", "executing-plans", "verification-before-completion"],
       ],
     ]);
@@ -219,7 +219,7 @@ describe("Starter specs", () => {
       const yaml = readFileSync(join(SPECS_ROOT, file), "utf-8");
       const raw = parseAgentSpec(yaml) as Record<string, unknown>;
       const imports = (raw["imports"] as Array<{ ref: string }> | undefined) ?? [];
-      expect(imports.some((imp) => imp.ref === "local:../shared")).toBe(true);
+      expect(imports.some((imp) => imp.ref === "local:../../shared")).toBe(true);
 
       const profiles = (raw["profiles"] as Record<string, Record<string, unknown>> | undefined) ?? {};
       const defaultProfile = profiles["default"] ?? {};
@@ -249,9 +249,9 @@ describe("Starter specs", () => {
   });
 
   it("demo culture and orchestration skill require full topology settlement before dispatch", () => {
-    const demoCulture = readFileSync(join(SPECS_ROOT, "demo.CULTURE.md"), "utf-8");
+    const demoCulture = readFileSync(join(SPECS_ROOT, "rigs/launch/demo/CULTURE.md"), "utf-8");
     const orchestrationSkill = readFileSync(
-      join(SPECS_ROOT, "agents/shared/skills/orchestration-team/SKILL.md"),
+      join(SPECS_ROOT, "agents/shared/skills/pods/orchestration-team/SKILL.md"),
       "utf-8",
     );
 

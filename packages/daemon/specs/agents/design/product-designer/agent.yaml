@@ -1,17 +1,17 @@
-name: lead
+name: product-designer
 version: "1.0"
-description: Orchestrator lead — coordinates agents, monitors progress, bridges communication
+description: Product designer — shapes UX, interaction flows, and design-system coherence
 
 defaults:
   runtime: claude-code
 
 imports:
-  - ref: local:../shared
+  - ref: local:../../shared
 
 profiles:
   default:
     uses:
-      skills: [using-superpowers, openrig-user, orchestration-team, systematic-debugging, verification-before-completion, writing-plans, executing-plans, brainstorming]
+      skills: [using-superpowers, openrig-user, development-team, frontend-design, verification-before-completion, writing-plans, brainstorming]
       guidance: []
       subagents: []
       hooks: []

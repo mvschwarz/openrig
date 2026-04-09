@@ -10,7 +10,7 @@ pods:
     label: Orchestration
     members:
       - id: lead
-        agent_ref: "local:agents/lead"
+        agent_ref: "local:../../../agents/orchestration/orchestrator"
         runtime: claude-code
         profile: default
         cwd: "."
@@ -20,12 +20,12 @@ pods:
     label: Research Pod
     members:
       - id: analyst
-        agent_ref: "local:agents/analyst"
+        agent_ref: "local:../../../agents/research/analyst"
         runtime: claude-code
         profile: default
         cwd: "."
       - id: synthesizer
-        agent_ref: "local:agents/synthesizer"
+        agent_ref: "local:../../../agents/research/synthesizer"
         runtime: codex
         profile: default
         cwd: "."
