@@ -5,6 +5,8 @@ import { getDaemonStatus, getDaemonUrl } from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 
+const LONG_RUNNING_BOOTSTRAP_TIMEOUT_MS = 45_000;
+
 function logStageDetailErrors(data: Record<string, unknown>) {
   const stages = (data["stages"] as Array<{ stage: string; status: string; detail?: unknown }>) ?? [];
   for (const stage of stages) {
@@ -107,7 +109,7 @@ export function bootstrapCommand(depsOverride?: StatusDeps): Command {
         sourceRef,
         cwdOverride: opts.cwd ? nodePath.resolve(opts.cwd) : undefined,
         autoApprove: opts.yes ?? false,
-      });
+      }, { timeoutMs: LONG_RUNNING_BOOTSTRAP_TIMEOUT_MS });
 
       if (opts.json) {
         console.log(JSON.stringify(res.data));

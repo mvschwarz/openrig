@@ -14,6 +14,10 @@ export interface DaemonResponse<T = unknown> {
   data: T;
 }
 
+interface DaemonRequestOptions {
+  timeoutMs?: number;
+}
+
 interface DaemonClientOptions {
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
@@ -42,51 +46,52 @@ export class DaemonClient {
     this.timeoutMs = options?.timeoutMs ?? 5_000;
   }
 
-  async get<T = unknown>(path: string): Promise<DaemonResponse<T>> {
-    return this.requestJson<T>(path, { method: "GET" });
+  async get<T = unknown>(path: string, options?: DaemonRequestOptions): Promise<DaemonResponse<T>> {
+    return this.requestJson<T>(path, { method: "GET" }, options);
   }
 
-  async getText(path: string): Promise<DaemonResponse<string>> {
-    return this.requestText(path, { method: "GET" });
+  async getText(path: string, options?: DaemonRequestOptions): Promise<DaemonResponse<string>> {
+    return this.requestText(path, { method: "GET" }, options);
   }
 
-  async post<T = unknown>(path: string, body?: unknown): Promise<DaemonResponse<T>> {
+  async post<T = unknown>(path: string, body?: unknown, options?: DaemonRequestOptions): Promise<DaemonResponse<T>> {
     return this.requestJson<T>(path, {
       method: "POST",
       headers: body !== undefined ? { "Content-Type": "application/json" } : undefined,
       body: body !== undefined ? JSON.stringify(body) : undefined,
-    });
+    }, options);
   }
 
-  async postText<T = unknown>(path: string, text: string, contentType = "text/yaml", extraHeaders?: Record<string, string>): Promise<DaemonResponse<T>> {
+  async postText<T = unknown>(path: string, text: string, contentType = "text/yaml", extraHeaders?: Record<string, string>, options?: DaemonRequestOptions): Promise<DaemonResponse<T>> {
     return this.requestJson<T>(path, {
       method: "POST",
       headers: { "Content-Type": contentType, ...extraHeaders },
       body: text,
-    });
+    }, options);
   }
 
-  async postExpectText(path: string, body?: unknown): Promise<DaemonResponse<string>> {
+  async postExpectText(path: string, body?: unknown, options?: DaemonRequestOptions): Promise<DaemonResponse<string>> {
     return this.requestText(path, {
       method: "POST",
       headers: body !== undefined ? { "Content-Type": "application/json" } : undefined,
       body: body !== undefined ? JSON.stringify(body) : undefined,
-    });
+    }, options);
   }
 
-  async delete<T = unknown>(path: string): Promise<DaemonResponse<T>> {
-    return this.requestJson<T>(path, { method: "DELETE" });
+  async delete<T = unknown>(path: string, options?: DaemonRequestOptions): Promise<DaemonResponse<T>> {
+    return this.requestJson<T>(path, { method: "DELETE" }, options);
   }
 
-  private async fetch(path: string, init: RequestInit): Promise<Response> {
+  private async fetch(path: string, init: RequestInit, options?: DaemonRequestOptions): Promise<Response> {
+    const timeoutMs = options?.timeoutMs ?? this.timeoutMs;
     try {
       return await fetchWithTimeout(
         this.fetchImpl,
         `${this.baseUrl}${path}`,
         init,
         {
-          timeoutMs: this.timeoutMs,
-          timeoutMessage: `Request to ${this.baseUrl}${path} timed out after ${this.timeoutMs}ms`,
+          timeoutMs,
+          timeoutMessage: `Request to ${this.baseUrl}${path} timed out after ${timeoutMs}ms`,
         },
       );
     } catch (err) {
@@ -95,14 +100,14 @@ export class DaemonClient {
     }
   }
 
-  private async requestJson<T>(path: string, init: RequestInit): Promise<DaemonResponse<T>> {
-    const res = await this.fetch(path, init);
+  private async requestJson<T>(path: string, init: RequestInit, options?: DaemonRequestOptions): Promise<DaemonResponse<T>> {
+    const res = await this.fetch(path, init, options);
     const data = (await res.json()) as T;
     return { status: res.status, data };
   }
 
-  private async requestText(path: string, init: RequestInit): Promise<DaemonResponse<string>> {
-    const res = await this.fetch(path, init);
+  private async requestText(path: string, init: RequestInit, options?: DaemonRequestOptions): Promise<DaemonResponse<string>> {
+    const res = await this.fetch(path, init, options);
     const data = await res.text();
     return { status: res.status, data };
   }

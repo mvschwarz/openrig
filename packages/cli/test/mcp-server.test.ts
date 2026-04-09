@@ -81,12 +81,16 @@ describe("MCP Server", () => {
       arguments: { sourceRef: "/tmp/rig.yaml", plan: false, autoApprove: true },
     });
 
-    expect(postFn).toHaveBeenCalledWith("/api/up", {
-      sourceRef: "/tmp/rig.yaml",
-      plan: false,
-      autoApprove: true,
-      targetRoot: undefined,
-    });
+    expect(postFn).toHaveBeenCalledWith(
+      "/api/up",
+      {
+        sourceRef: "/tmp/rig.yaml",
+        plan: false,
+        autoApprove: true,
+        targetRoot: undefined,
+      },
+      { timeoutMs: 45_000 },
+    );
     const content = result.content as Array<{ type: string; text: string }>;
     const parsed = JSON.parse(content[0].text);
     expect(parsed.status).toBe("completed");

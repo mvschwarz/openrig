@@ -152,4 +152,21 @@ describe("SpecLibraryService", () => {
     lib.scan();
     expect(lib.list({ kind: "agent" })[0]!.id).toBe(entries[0]!.id);
   });
+
+  it("builtin scan ignores nested template yaml that is not a rig or agent entrypoint", () => {
+    mkdirSync(join(tmpDir, "rigs", "launch", "demo"), { recursive: true });
+    mkdirSync(join(tmpDir, "agents", "shared", "skills", "process", "containerized-e2e", "templates"), { recursive: true });
+    writeFileSync(join(tmpDir, "rigs", "launch", "demo", "rig.yaml"), VALID_RIG_YAML);
+    writeFileSync(
+      join(tmpDir, "agents", "shared", "skills", "process", "containerized-e2e", "templates", "control-plane-test.yaml"),
+      VALID_RIG_YAML,
+    );
+
+    const lib = createLibrary([{ path: tmpDir, sourceType: "builtin" }]);
+    lib.scan();
+
+    const rigs = lib.list({ kind: "rig" });
+    expect(rigs).toHaveLength(1);
+    expect(rigs[0]!.relativePath).toBe("rigs/launch/demo/rig.yaml");
+  });
 });

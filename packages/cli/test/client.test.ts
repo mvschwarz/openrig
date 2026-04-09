@@ -124,6 +124,29 @@ describe("DaemonClient", () => {
     await expect(client.get("/api/rigs")).rejects.toThrow(/timed out/i);
   });
 
+  it("per-request timeout override can extend a long-running call", async () => {
+    const delayedFetch: typeof fetch = ((url: string | URL | Request, init?: RequestInit) => new Promise<Response>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        resolve(new Response(JSON.stringify({ ok: true, url: String(url) }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }));
+      }, 40);
+      init?.signal?.addEventListener("abort", () => {
+        clearTimeout(timer);
+        reject(init.signal?.reason ?? new Error("aborted"));
+      }, { once: true });
+    })) as typeof fetch;
+    const client = new DaemonClient("http://localhost:9999", { fetchImpl: delayedFetch, timeoutMs: 20 });
+
+    await expect(client.get("/api/rigs")).rejects.toThrow(/timed out/i);
+
+    const res = await client.get<{ ok: boolean; url: string }>("/api/rigs", { timeoutMs: 100 });
+    expect(res.status).toBe(200);
+    expect(res.data.ok).toBe(true);
+    expect(res.data.url).toContain("/api/rigs");
+  });
+
   // Test 5: Client uses OPENRIG_URL env, falls back to http://127.0.0.1:7433
   it("uses OPENRIG_URL env when set, falls back to http://127.0.0.1:7433", () => {
     // Default (no env)
@@ -152,8 +175,8 @@ describe("DaemonClient", () => {
     const execFileAsync = promisify(execFile);
     const { resolve } = await import("node:path");
 
-    const cliEntry = resolve(import.meta.dirname, "../src/index.ts");
-    const result = await execFileAsync("npx", ["tsx", cliEntry, "--version"], {
+    const cliEntry = resolve(import.meta.dirname, "../dist/index.js");
+    const result = await execFileAsync("node", [cliEntry, "--version"], {
       cwd: resolve(import.meta.dirname, ".."),
     });
 

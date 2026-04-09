@@ -5,6 +5,8 @@ import { getDaemonStatus, getDaemonUrl, startDaemon, type LifecycleDeps } from "
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 
+const LONG_RUNNING_UP_TIMEOUT_MS = 45_000;
+
 export function upCommand(depsOverride?: StatusDeps & { lifecycleDeps?: LifecycleDeps }): Command {
   const cmd = new Command("up").description("Bootstrap a rig from a spec or bundle");
   const getDepsF = () => depsOverride ?? { lifecycleDeps: realDeps(), clientFactory: (url: string) => new DaemonClient(url) };
@@ -122,7 +124,7 @@ export function upCommand(depsOverride?: StatusDeps & { lifecycleDeps?: Lifecycl
         autoApprove: opts.yes ?? false,
         cwdOverride: opts.cwd ? nodePath.resolve(opts.cwd) : undefined,
         targetRoot,
-      });
+      }, opts.plan ? undefined : { timeoutMs: LONG_RUNNING_UP_TIMEOUT_MS });
 
       if (opts.json) {
         console.log(JSON.stringify(res.data));

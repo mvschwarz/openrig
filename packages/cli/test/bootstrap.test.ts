@@ -214,6 +214,32 @@ describe("Bootstrap CLI", () => {
     expect((body.cwdOverride as string).endsWith("relative/project")).toBe(true);
   });
 
+  it("bootstrap apply uses a long-running daemon timeout budget", async () => {
+    let timeoutMs: number | undefined;
+    const post = vi.fn(async (_path: string, _body: unknown, options?: { timeoutMs?: number }) => {
+      timeoutMs = options?.timeoutMs;
+      return {
+        status: 201,
+        data: { runId: "run-2", status: "completed", rigId: "rig-1", stages: [], errors: [], warnings: [] },
+      };
+    });
+
+    const deps: StatusDeps = {
+      lifecycleDeps: runningDeps(port).lifecycleDeps,
+      clientFactory: () => ({ post } as unknown as DaemonClient),
+    };
+
+    const prog = new Command();
+    prog.exitOverride();
+    prog.addCommand(bootstrapCommand(deps));
+
+    await captureLogs(async () => {
+      await prog.parseAsync(["node", "rig", "bootstrap", "/tmp/rig.yaml", "--yes"]);
+    });
+
+    expect(timeoutMs).toBe(45_000);
+  });
+
   // T9: partial status -> exit 1 (R2-M1)
   it("partial result returns exit code 1", async () => {
     const partialServer = http.createServer((_, res) => {
