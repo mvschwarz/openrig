@@ -5,18 +5,18 @@ description: Use when operating OpenRig with the `rig` CLI and you need the ship
 
 # OpenRig User
 
-Use this skill when you are working inside an OpenRig-managed topology or operating OpenRig as an agent.
-Treat `rig ... --help` and current code as ground truth if anything here ever conflicts with older notes.
+This is an as-built guide to the shipped `rig` CLI.
+Use current code and `rig ... --help` as ground truth if anything here ever conflicts with older planning docs.
 
 ## Core Loop
 
-Most OpenRig work reduces to:
+Most work in OpenRig reduces to this loop:
 - recover identity: `rig whoami --json`
-- inspect state: `rig ps --nodes --json`
+- inspect inventory: `rig ps --nodes --json`
 - read context: `rig transcript ...`, `rig ask ...`, `rig chatroom history ...`
 - act: `rig send`, `rig capture`, `rig broadcast`, lifecycle commands
 
-## Identity
+## Identity and Recovery
 
 Start here after launch, compaction, or confusion:
 
@@ -24,32 +24,50 @@ Start here after launch, compaction, or confusion:
 rig whoami --json
 ```
 
-This returns your rig, logical ID, pod/member, session name, runtime, peers, transcript info, and `contextUsage` when available.
+What it gives you today:
+- identity: rig, logical ID, pod/member, session name, runtime
+- peers and directional edges
+- transcript info
+- `contextUsage` when available
 
-Useful targeting flags:
-
+Flags:
 ```bash
 rig whoami --session <name>
 rig whoami --node-id <id>
 ```
 
-## Inventory and Health
+If the daemon is unreachable but identity can still be inferred, `--json` may return a partial result instead of crashing.
+
+## Inventory and Monitoring
 
 ```bash
 rig ps
 rig ps --json
 rig ps --nodes
 rig ps --nodes --json
+```
+
+Use `rig ps --nodes --json` for the current node inventory across rigs. It is the best machine-readable operator surface for:
+- session name
+- runtime
+- session/startup status
+- restore outcome
+- attach/resume commands
+- latest error
+
+Other health surfaces:
+
+```bash
 rig status
 rig daemon status
+rig config
+rig preflight
 rig doctor
 ```
 
-Use `rig ps --nodes --json` as the main machine-readable operator surface.
+## Transcript and Communication
 
-## Communication
-
-### Transcript
+### Transcript access
 
 ```bash
 rig transcript <session> --tail 100
@@ -57,13 +75,16 @@ rig transcript <session> --grep "pattern"
 rig transcript <session> --json
 ```
 
-### Send to one peer
+### Send to one session
 
 ```bash
 rig send <session> "message"
 rig send <session> "message" --verify
+rig send <session> "message" --force
 rig send <session> "message" --json
 ```
+
+Use `--verify` when you want delivery evidence. Use `--force` only when you intentionally want to bypass activity-risk checks.
 
 ### Capture terminal output
 
@@ -84,7 +105,7 @@ rig broadcast "message"
 rig broadcast --rig <name> "message" --json
 ```
 
-Aggregate transport commands report `transport_unavailable` honestly for nodes such as `external_cli` that cannot receive inbound tmux transport.
+Without `--rig` or `--pod`, broadcast targets all running sessions.
 
 ### Chatroom
 
@@ -97,33 +118,49 @@ rig chatroom topic <rig> <topic-name> [--body <text>] [--sender <name>]
 rig chatroom watch <rig> [--tmux]
 ```
 
-Roundtable loop:
-1. inspect room: `rig chatroom history my-rig --limit 5`
-2. save if needed: `rig chatroom history my-rig --json > /tmp/old-room.json`
-3. clear if needed: `rig chatroom clear my-rig`
-4. set topic: `rig chatroom topic my-rig "ROUND START"`
-5. post: `rig chatroom send my-rig "position..." --sender <session>`
-6. monitor: `rig chatroom wait my-rig --timeout 120`
-7. close: `rig chatroom topic my-rig "ROUND CLOSED"`
+**Key commands:**
+- `send` — post a message
+- `history` — retrieve with composable filters (sender, since, after, topic)
+- `wait` — block until new matching messages arrive (polls history, times out honestly)
+- `clear` — delete all messages for the rig (destructive, rig-scoped)
+- `topic` — set a topic marker
+- `watch` — SSE or tmux-based live stream
 
-## `rig ask`
+**Roundtable protocol:**
+1. Inspect old room: `rig chatroom history my-rig --limit 5`
+2. Save if needed: `rig chatroom history my-rig --json > /tmp/old-room.json`
+3. Clear if needed: `rig chatroom clear my-rig`
+4. Set topic: `rig chatroom topic my-rig "ROUND START"`
+5. Post: `rig chatroom send my-rig "position..." --sender <session>`
+6. Monitor: `rig chatroom wait my-rig --timeout 120`
+7. Close: `rig chatroom topic my-rig "ROUND CLOSED"`
+
+See `docs/planning/roadmaps/chatroom-roundtable-protocol.md` for the full protocol.
+
+### `rig ask`
 
 ```bash
 rig ask <rig> "question"
 rig ask <rig> "question" --json
 ```
 
-`rig ask` is an evidence/context command. It uses structured rig state plus transcript/chat evidence. It is not a hidden second-LLM call.
+Current shipped behavior:
+- queries the daemon for evidence
+- returns rig summary
+- returns transcript excerpts
+- may return chat excerpts
+- returns insufficiency state and optional guidance
+
+This is an evidence/context command. It is not a hidden second-LLM call.
 
 ## Lifecycle
 
-### Launch or restore a rig
+### Bring a rig up
 
 ```bash
 rig up <source>
 rig up <source> --plan
 rig up <source> --yes
-rig up <source> --cwd <path>
 rig up <source> --json
 ```
 
@@ -132,16 +169,21 @@ rig up <source> --json
 - a `.rigbundle` path
 - a bare name
 
-Current behavior notes:
-- `--cwd <path>` is the launch-time cwd override for all members in the rig
-- `--target <root>` is only for bundle/package installation; it does not change agent cwd
-- `local:` `agent_ref` values resolve relative to the rig spec directory, not your shell cwd
-- bare names are ambiguous if they match both a library spec and an existing rig name; OpenRig fails loudly instead of guessing
+Bare names are special:
+- if they match a library spec, `rig up` launches from the spec library
+- if they do not match a library spec, `rig up` treats the name as an existing-rig restore/power-on target
+- if both exist, `rig up` fails loudly on ambiguity
 
-Legacy bootstrap surface still ships too:
+Current behavior notes:
+- `--target <root>` is only for `.rigbundle` / package installation. It does not change agent cwd.
+- `local:` `agent_ref` values resolve relative to the rig spec directory, not your shell cwd.
+- if you copy a built-in spec elsewhere, keep its `agents/` tree beside the YAML or rewrite those refs to `path:/absolute/path`
+- there is no shipped `rig up --cwd` override yet
+
+Legacy/spec-specific surfaces still ship too:
 
 ```bash
-rig bootstrap <spec> [--plan] [--yes] [--cwd <path>] [--json]
+rig bootstrap <spec> [--plan] [--yes] [--json]
 rig requirements <spec> [--json]
 ```
 
@@ -155,9 +197,9 @@ rig down <rigId> --force
 rig down <rigId> --json
 ```
 
-`rig down` now cleans only OpenRig-managed blocks from `CLAUDE.md` and `AGENTS.md`, preserving user and third-party content.
+If `--snapshot` succeeds, human output includes the restore hint.
 
-### Release claimed/adopted rigs without killing live sessions
+### Release management without killing live claimed sessions
 
 ```bash
 rig release <rigId>
@@ -165,10 +207,11 @@ rig release <rigId> --delete
 rig release <rigId> --json
 ```
 
-Use `rig release` for adopted/claimed-session rigs when the external tmux sessions should stay alive.
-If a rig contains OpenRig-launched nodes, `rig release` fails loudly with `contains_launched_nodes`.
+Use `rig release` for adopted/claimed-session rigs when you want OpenRig to stop managing the rig but leave the tmux sessions alive.
+This is the safe recovery/reset surface for the "sessions still exist, management is broken or stale" case.
+If the rig contains OpenRig-launched nodes, `rig release` refuses loudly instead of pretending the mixed rig is safe to detach.
 
-### Snapshot and restore
+### Snapshots and restore
 
 ```bash
 rig snapshot <rigId>
@@ -176,7 +219,34 @@ rig snapshot list <rigId>
 rig restore <snapshotId> --rig <rigId>
 ```
 
-## Discovery, Binding, and Attach
+`rig restore` requires `--rig <rigId>`.
+
+Claude Code autonomy note:
+- unattended `rig whoami` on boot may require the local permission allow list to include `Bash(rig:*)`
+
+### Import/export and bundles
+
+```bash
+rig export <rigId> -o rig.yaml
+rig import <path> [--instantiate] [--materialize-only] [--preflight] [--target-rig <rigId>] [--rig-root <root>]
+rig bundle create <spec> -o out.rigbundle
+rig bundle inspect <bundle>
+rig bundle install <bundle> [--plan] [--yes] [--target <root>] [--json]
+```
+
+### Legacy package surface
+
+This still ships, but is explicitly marked legacy:
+
+```bash
+rig package validate <path>
+rig package plan <path> [--target <dir>] [--runtime <runtime>] [--role <name>]
+rig package install <path> [--target <dir>] [--runtime <runtime>] [--role <name>] [--allow-merge]
+rig package list
+rig package rollback <installId>
+```
+
+## Discovery and Topology Mutation
 
 ### Discover unmanaged tmux sessions
 
@@ -193,7 +263,8 @@ rig bind <discoveredId> --rig <rigId> --node <logicalId>
 rig bind <discoveredId> --rig <rigId> --pod <namespace> --member <name>
 ```
 
-There is no shipped top-level `rig claim` command. The adoption surface is `discover`, `bind`, `adopt`, and `unclaim`.
+There is no shipped top-level `rig claim` command.
+The current adoption surface is `discover`, `bind`, `adopt`, and `unclaim`.
 
 ### Self-attach the current shell or agent
 
@@ -203,22 +274,51 @@ rig attach --self --rig <rigId> --node <logicalId> --print-env
 rig attach --self --rig <rigId> --pod <namespace> --member <name> --runtime <runtime>
 ```
 
-Proven behavior:
-- inside tmux: attaches as a normal tmux-backed node
-- outside tmux: attaches as `external_cli`
-- `--print-env` prints `OPENRIG_NODE_ID` and `OPENRIG_SESSION_NAME`
+Use `rig attach --self` when the current agent should attach itself directly instead of going through `discover` + `bind`.
 
-## Adopt Existing Sessions
+Current proven behavior:
+- inside `tmux`: attaches as a normal tmux-backed node, preserving inbound `rig send` / `rig capture`
+- outside `tmux`: attaches as `external_cli`
+- `--print-env` prints the `OPENRIG_NODE_ID` and `OPENRIG_SESSION_NAME` exports for the current shell
+
+Recommended flow:
 
 ```bash
+rig attach --self --rig <rigId> --node <logicalId> --print-env > /tmp/openrig-self-attach.env
+. /tmp/openrig-self-attach.env
+rig whoami --json
+```
+
+Notes:
+- for tmux-backed self-attach, `rig whoami --json` is the right verification
+- for raw/external self-attach, `rig ps --nodes --json` is currently the more reliable verification surface
+- if the current shell is outside tmux, pass `--display-name <name>` when you want a stable human session label recorded
+
+### Adopt a topology and bind live sessions
+
+```bash
+rig adopt <path> --bind <logicalId=tmuxSessionOrDiscoveryId>
+rig adopt <path> --bind <logicalId=...> --bind <logicalId=...> --json
 rig adopt <path> --bindings-file <bindings.yaml>
-rig adopt <path> --bind <logicalId=liveSession>
-rig adopt <path> --bindings-file <bindings.yaml> --target-rig <rigId>
+rig adopt <path> --bind <logicalId=...> --target-rig <rigId> --rig-root <root>
+```
+
+Use `rig adopt` when the sessions already exist and you want OpenRig to start managing them.
+
+A bindings file is the durable map from authored logical IDs to live sessions. Shape:
+
+```yaml
+bindings:
+  dev1.impl2: dev1-impl2@rigged-buildout
+  dev1.qa: dev1-qa@rigged-buildout
 ```
 
 Spec + bindings is the proven recovery pair for adopted rigs.
+Spec gives OpenRig the intended topology. Bindings tells OpenRig which discovered live session belongs in each logical node.
 
-Proven recovery loop for still-alive sessions:
+### Proven adopted-rig recovery workflow
+
+This workflow is proven for the case where the external tmux sessions are still alive:
 
 ```bash
 rig release <rigId> --delete
@@ -226,11 +326,88 @@ rig discover --json
 rig adopt <spec.yaml> --bindings-file <bindings.yaml>
 ```
 
-Mixed-origin rigs are allowed:
-- adopted nodes and OpenRig-launched nodes can coexist
-- but whole-rig `rig release` only works for claimed/adopted-only rigs
+What this does:
+- removes OpenRig management without killing the sessions
+- re-discovers those same sessions as unmanaged
+- re-attaches them to the topology defined by the spec + bindings
 
-## Specs and Library
+Important limits:
+- this is for `sessions still alive`
+- spec alone is not enough for adopted rigs; you also need bindings
+- this does not yet mean OpenRig can recreate dead external sessions from nothing
+
+### Add unmanaged pods into an existing rig
+
+This is the proven workflow when a rig is already managed, but a new pod was created outside OpenRig and you want to add it later:
+
+```bash
+rig adopt <pod-fragment.yaml> --bindings-file <pod.bindings.yaml> --target-rig <rigId>
+```
+
+Use this when:
+- the target rig already exists
+- the new sessions are live and visible in `rig discover --json`
+- you want additive topology growth, not a full rebuild
+
+What to prepare:
+- a pod fragment spec with only the new pod
+- a bindings file mapping the new logical IDs to the live session names
+
+Verification loop:
+
+```bash
+rig discover --json
+rig adopt <fragment.yaml> --bindings-file <bindings.yaml> --target-rig <rigId>
+rig ps --nodes --json
+rig export <rigId> -o rig.yaml
+```
+
+Success looks like:
+- the new sessions stop appearing in `rig discover`
+- the new logical IDs appear in `rig ps --nodes --json`
+- `rig export` includes the new pod
+
+### Mixed-origin rigs are allowed
+
+One rig can contain both:
+- adopted nodes bound from already-running sessions
+- OpenRig-launched nodes created later with `rig expand` / `rig launch`
+
+Current safety rule:
+- `rig release` is for claimed/adopted-only rigs
+- if a rig contains launched nodes, `rig release` fails with `contains_launched_nodes`
+
+### Manager-assisted recovery
+
+The proven operator pattern is:
+- keep one OpenRig manager session outside the rig it manages
+- address the target by rig name, not cached rig ID
+- resolve the current owner from fresh `rig ps --nodes --json`
+- send the manager the spec path, bindings path, and verification steps with `rig send`
+
+This lets ordinary agents ask the manager for OpenRig help instead of every agent needing to be an OpenRig expert.
+
+### Add/remove running topology parts
+
+```bash
+rig expand <rig-id> <pod-fragment-path> [--rig-root <path>] [--json]
+rig launch <rigId> <nodeRef> [--json]
+rig remove <rigId> <nodeRef> [--json]
+rig shrink <rigId> <podRef> [--json]
+rig unclaim <sessionRef> [--json]
+```
+
+## Specs and Validation
+
+### Validate specs
+
+```bash
+rig spec validate <path> [--json]
+rig spec preflight <path> [--rig-root <root>] [--json]
+rig agent validate <path> [--json]
+```
+
+### Spec library
 
 ```bash
 rig specs ls [--kind <kind>] [--json]
@@ -238,15 +415,42 @@ rig specs show <name-or-id> [--json]
 rig specs preview <name-or-id> [--json]
 rig specs add <path> [--json]
 rig specs sync [--json]
+rig specs remove <name-or-id> [--json]
+rig specs rename <name-or-id> <new-name> [--json]
 ```
 
+## MCP
+
 ```bash
-rig export <rigId> -o rig.yaml
-rig import <path> [--instantiate] [--materialize-only] [--preflight] [--target-rig <rigId>] [--rig-root <root>]
-rig bundle create <spec> -o out.rigbundle
-rig bundle inspect <bundle>
-rig bundle install <bundle> [--plan] [--yes] [--target <root>] [--json]
+rig mcp serve [--port <port>]
 ```
+
+Current shipped MCP tools:
+- `rig_up`
+- `rig_down`
+- `rig_ps`
+- `rig_status`
+- `rig_snapshot_create`
+- `rig_snapshot_list`
+- `rig_restore`
+- `rig_discover`
+- `rig_bind`
+- `rig_bundle_inspect`
+- `rig_agent_validate`
+- `rig_rig_validate`
+- `rig_rig_nodes`
+- `rig_send`
+- `rig_capture`
+- `rig_chatroom_send`
+- `rig_chatroom_watch`
+
+## JSON and Error Posture
+
+Design assumptions that hold in the shipped CLI:
+- many operator commands support `--json`
+- error messages are intended to say what happened, why it matters, and what to do next
+- daemon-backed commands fail loudly when the daemon is stopped or unhealthy
+- restore failure is not something you should silently reinterpret as success
 
 ## After-Compaction Recovery Checklist
 
@@ -257,7 +461,7 @@ rig bundle install <bundle> [--plan] [--yes] [--target <root>] [--json]
 
 ## Commands That Do Not Exist
 
-Do not assume these exist unless `rig --help` starts listing them:
+Do not assume these exist unless the shipped help starts listing them:
 - `rig claim`
 - `rig env`
 - `rig blame`
