@@ -11,7 +11,7 @@ This document reflects the current `rig` surface as shipped. Where live help tex
 ## Overview
 
 - Binary: `rig`
-- Top-level command groups: `39`
+- Top-level command groups: `40`
 - Output mode: human-readable by default; many commands also support `--json`
 - Daemon-backed commands fail when the daemon is stopped or unhealthy; `daemon`, `config`, `preflight`, and `doctor` also have local responsibilities
 - Managed apps are launched through the normal spec/library surfaces; the canonical shipped example is `rig up secrets-manager`
@@ -54,6 +54,7 @@ This document reflects the current `rig` surface as shipped. Where live help tex
 | `config` | Inspect and change OpenRig configuration |
 | `preflight` | Check system readiness for OpenRig |
 | `doctor` | Verify OpenRig install health |
+| `destroy` | Destroy OpenRig local state for recovery |
 | `expand` | Add a pod to a running rig |
 | `unclaim` | Release an adopted session without killing tmux |
 | `release` | Release claimed sessions from a rig |
@@ -132,6 +133,20 @@ Notes:
 - On macOS, also warns when tmux mouse mode appears disabled, gives the current-server fix (`tmux set -g mouse on`), and points to the persistent fix in `~/.tmux.conf`.
 - `cmux` issues are warnings, not hard failures. OpenRig still works without `cmux`; only `Open CMUX` workflows are unavailable.
 - `--json` is suitable for agent use and only exits non-zero on real failures, not warnings.
+
+### `rig destroy`
+
+Usage:
+- `rig destroy --state [--backup] --yes --confirm destroy-openrig-state`
+- `rig destroy --all [--backup] --yes --confirm destroy-openrig-state`
+
+Notes:
+- This is the destructive recovery surface for polluted local OpenRig state.
+- `--state` stops the daemon, clears the active OpenRig listener on the configured port if needed, rotates or deletes the effective state root, and recreates an empty state root.
+- `--all` includes `--state` plus managed tmux session cleanup for sessions that are discoverable from the current OpenRig database.
+- `--backup` moves the state root aside to a collision-safe timestamped path such as `~/.openrig.backup-YYYYMMDD-HHMMSS`.
+- Managed tmux cleanup is intentionally conservative. It only removes sessions that are present in current DB state; unrelated tmux sessions are left alone.
+- Human output prints a compact destroy plan followed by the destroy result.
 
 ### `rig mcp`
 

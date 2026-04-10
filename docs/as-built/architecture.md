@@ -32,7 +32,7 @@ Legacy flat-node/package flows remain for backward compatibility.
 The stack is:
 
 ```text
-CLI (39 command groups) / UI (explorer + workspace + drawer) / MCP (17 tools)
+CLI (40 command groups) / UI (explorer + workspace + drawer) / MCP (17 tools)
       |
       v
 Hono daemon routes (22 route groups + dedicated health/export/static handlers)
@@ -120,7 +120,7 @@ Important route behaviors:
 
 ### CLI commands
 
-`index.ts` currently mounts 39 command groups. Reboot-era commands plus:
+`index.ts` currently mounts 40 command groups. Reboot-era commands plus:
 
 **Operator and topology commands:**
 - `rig up <rig-name>` — existing-rig restore by name (auto-finds latest snapshot)
