@@ -1,132 +1,141 @@
 # OpenRig
 
-OpenRig is a local control plane for multi-agent coding topologies.
+Open source local control plane for coding-agent topologies.
 
-It gives you:
-- a daemon and UI for running, inspecting, and steering rigs of coding agents
-- a CLI designed for both humans and agents
-- tmux-backed node management, transcripts, messaging, and recovery
-- rig environments for service-backed apps
-- agent-managed software, where an app ships with its own specialist agent
+Define your agent team in YAML. Boot it with one command. Claude Code and Codex in the same topology, managed as one system.
 
-## Install
+![OpenRig UI](https://openrig.dev/screenshots/remotion/hero-ui-workspace.png)
 
-OpenRig requires:
-- Node.js 20+
-- `tmux`
-
-Optional but recommended:
-- `cmux` for `Open CMUX` / node surface controls
-- Docker Desktop or Docker Engine for service-backed rigs and managed apps like `secrets-manager`
-
-Install the CLI:
+## Quick Start
 
 ```bash
+# Install
 npm install -g @openrig/cli
-```
 
-## First Run
-
-Start here:
-
-```bash
+# Check system readiness
 rig doctor
-```
 
-`rig doctor` is the host-health and system-administration entry point for OpenRig.
-
-It checks:
-- packaged daemon and UI assets
-- Node version
-- `tmux`
-- optional `cmux` control health
-- writable OpenRig state paths
-- daemon port availability
-
-For agent-friendly output:
-
-```bash
-rig doctor --json
-```
-
-If `cmux` is missing or unavailable, `rig doctor` reports a `WARN`, not a hard failure. OpenRig still works without it; only `Open CMUX` workflows are unavailable.
-
-## Start OpenRig
-
-Start the daemon:
-
-```bash
+# Start the daemon
 rig daemon start
-```
 
-Check status:
+# Boot the demo rig (3 pods, 8 nodes, mixed runtimes)
+rig up demo
 
-```bash
-rig status
-```
+# See what's running
+rig ps --nodes
 
-Open the UI:
-
-```bash
+# Open the UI
 rig ui open
 ```
 
-## Quick Examples
+## What It Does
 
-Launch the shipped managed-app example:
+OpenRig manages the topology that coding agents form when you run them together. Not the agents themselves. The system they create: which sessions are running, how they relate, how to recover after a reboot, and how to stop it from becoming terminal sprawl.
+
+- **Define** topologies in YAML (RigSpec) with pods, edges, and continuity policies
+- **Boot** everything with `rig up` — tmux sessions, harnesses, startup files, readiness checks
+- **See** the topology in a live graph with explorer, node detail, and system log
+- **Discover** existing Claude Code and Codex sessions in tmux and adopt them into a managed rig
+- **Snapshot** the full topology on `rig down`, restore by name with `rig up <name>`
+- **Communicate** across agents with `rig send`, `rig broadcast`, and `rig chatroom`
+- **Evolve** running topologies with `rig expand`, `rig shrink`, `rig launch`, `rig remove`
+
+Every agent runs in a tmux session you can attach to, inspect, and work with directly.
+
+## Demo Rig
+
+OpenRig ships with a demo rig you can boot in seconds:
+
+```bash
+rig specs preview demo
+```
+
+```
+demo (rig, pod_aware)
+  Launch-grade starter: a stable full product squad with two
+  orchestrators, implementation, QA, design, and two independent
+  reviewers.
+
+  Pod: orch1 (2 members)
+    lead — claude-code
+    peer — codex
+  Pod: dev1 (3 members)
+    impl — claude-code
+    qa — codex
+    design — claude-code
+  Pod: rev1 (2 members)
+    r1 — claude-code
+    r2 — codex
+```
+
+Also ships: `implementation-pair`, `adversarial-review`, `research-team`, `product-team`, and `secrets-manager` (HashiCorp Vault managed by a specialist agent).
+
+Browse the library: `rig specs ls`
+
+## How It Works
+
+OpenRig is a local daemon + CLI + MCP server + React UI, built on tmux.
+
+```
+CLI / UI / MCP
+      |
+Hono HTTP daemon
+      |
+  Domain services (52)
+      |
+  SQLite + tmux + runtime adapters
+```
+
+- **CLI**: 36 commands designed for both humans and agents. Every mutating command ends with what happened, current state, and next action.
+- **UI**: Explorer sidebar, topology graph with pod grouping, node detail panel, system log, chatroom.
+- **MCP**: 17 tools so agents can manage their own topology (`rig_up`, `rig_ps`, `rig_send`, `rig_chatroom_send`, etc.)
+- **Runtimes**: Claude Code, Codex, and terminal nodes. Adapters for Pi and OpenHands in development.
+
+## Key Concepts
+
+- **RigSpec**: Declarative multi-agent topology in YAML. Pods, members, edges, continuity policies, culture file.
+- **AgentSpec**: Reusable agent blueprint with skills, guidance, hooks, profiles, and startup contracts.
+- **Pod**: Bounded context group. Agents in a pod share memory and can maintain each other's context.
+- **Discovery**: `rig discover` fingerprints existing tmux sessions. `rig adopt` brings them under management.
+- **Snapshot/Restore**: `rig down --snapshot` captures full state. `rig up <name>` restores from latest snapshot. Restore reports per-node outcomes (resumed, fresh, or failed).
+- **RigBundle**: Portable archive with vendored AgentSpecs and SHA-256 integrity. Share topologies across machines.
+- **Culture**: CULTURE.md sets coordination norms for the group. Research rigs get exploratory culture. Implementation rigs get conservative, trust-but-verify culture.
+
+## Agent-Managed Software
+
+A rig can package actual software alongside the agents that manage it. The shipped example is `secrets-manager`: a HashiCorp Vault instance operated by a specialist agent.
 
 ```bash
 rig up secrets-manager
-```
-
-Inspect service state:
-
-```bash
 rig env status secrets-manager
-```
-
-Talk to the Vault specialist:
-
-```bash
 rig send vault-specialist@secrets-manager "Check Vault health and report status." --verify
 ```
 
-## System Administration
+Requires Docker for service-backed rigs.
 
-Use these commands as the default operational surface:
+## Requirements
 
-```bash
-rig doctor
-rig status
-rig daemon status
-rig daemon logs --follow
-```
+- Node.js 20+
+- tmux
 
-Use `rig doctor` for host and install health.
+Optional:
+- cmux for `Open CMUX` node surface controls
+- Docker for service-backed rigs and managed apps
 
-Use `rig requirements <spec>` for spec-specific requirements:
+## Comparison with Claude Managed Agents
 
-```bash
-rig requirements path/to/rig.yaml
-```
+Anthropic shipped Claude Managed Agents — a cloud-hosted, Claude-only runtime at $0.08/session-hour. OpenRig is the local side: open source, cross-harness, runs on your machine, costs nothing.
 
-That separation matters:
-- `rig doctor` answers: is this machine ready for OpenRig?
-- `rig requirements` answers: is this machine ready for this specific rig or app?
+[Full comparison](https://openrig.dev/compare/claude-managed-agents)
 
-## Open CMUX
+## Links
 
-If `cmux` is installed and controllable, OpenRig can open or focus a CMUX surface for any node from the graph or node detail view.
+- **Website**: [openrig.dev](https://openrig.dev)
+- **Blog**: [Why I Built OpenRig](https://esoteric.run/blog/why-i-built-openrig)
+- **Docs**: [openrig.dev/docs](https://openrig.dev/docs)
+- **Open Specification**: [openrig.dev/specs](https://openrig.dev/specs)
+- **Twitter**: [@_feralmachine](https://twitter.com/_feralmachine)
 
-For tmux-backed nodes, OpenRig opens a CMUX terminal and attaches into the node’s tmux session automatically.
+## License
 
-If `cmux` control is unavailable:
-- OpenRig still runs normally
-- `Open CMUX` actions will not work until `rig doctor` reports `cmux` healthy or warned-understood
-
-## Notes
-
-- `rig` is designed to support both humans and coding agents.
-- Many commands support `--json`.
-- Cross-rig messaging is supported when the target session resolves uniquely.
-- Managed apps are launched through the normal rig/spec surfaces; the current canonical example is `secrets-manager`.
+Apache 2.0
