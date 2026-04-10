@@ -74,10 +74,51 @@ describe("runDoctorChecks", () => {
   });
 
   it("tmux available -> pass", () => {
-    const deps = makeDeps({ exec: () => "tmux 3.4" });
+    const deps = makeDeps({
+      exec: (cmd: string) => {
+        if (cmd === "tmux -V") return "tmux 3.4\n";
+        if (cmd === "tmux show-options -gqv mouse") return "on\n";
+        return "";
+      },
+    });
     const { checks } = runDoctorChecks(deps);
     const tmuxCheck = checks.find((c) => c.name === "tmux");
     expect(tmuxCheck?.status).toBe("pass");
+  });
+
+  it("tmux mouse enabled on macOS -> pass", () => {
+    const deps = makeDeps({
+      exec: (cmd: string) => {
+        if (cmd === "tmux -V") return "tmux 3.4\n";
+        if (cmd === "tmux show-options -gqv mouse") return "on\n";
+        if (cmd === "cmux capabilities --json") return '{"capabilities":["surface.focus"]}\n';
+        if (cmd === "cmux --help") return "cmux help\n";
+        return "";
+      },
+    });
+    const { checks } = runDoctorChecks(deps);
+    const mouseCheck = checks.find((c) => c.name === "tmux_mouse");
+    expect(mouseCheck?.status).toBe("pass");
+    expect(mouseCheck?.message).toContain("enabled");
+  });
+
+  it("tmux mouse disabled on macOS -> warn with exact fix", () => {
+    const deps = makeDeps({
+      exec: (cmd: string) => {
+        if (cmd === "tmux -V") return "tmux 3.4\n";
+        if (cmd === "tmux show-options -gqv mouse") return "off\n";
+        if (cmd === "cmux capabilities --json") return '{"capabilities":["surface.focus"]}\n';
+        if (cmd === "cmux --help") return "cmux help\n";
+        return "";
+      },
+    });
+    const { checks } = runDoctorChecks(deps);
+    const mouseCheck = checks.find((c) => c.name === "tmux_mouse");
+    expect(mouseCheck?.status).toBe("warn");
+    expect(mouseCheck?.message).toContain("disabled");
+    expect(mouseCheck?.fix).toContain("tmux set -g mouse on");
+    expect(mouseCheck?.fix).toContain("~/.tmux.conf");
+    expect(mouseCheck?.fix).toContain("tmux source-file ~/.tmux.conf");
   });
 
   it("tmux missing -> fail with guidance", () => {
@@ -91,6 +132,20 @@ describe("runDoctorChecks", () => {
     const tmuxCheck = checks.find((c) => c.name === "tmux");
     expect(tmuxCheck?.status).toBe("fail");
     expect(tmuxCheck?.fix).toContain("brew");
+  });
+
+  it("tmux mouse check is omitted on non-macOS hosts", () => {
+    const deps = makeDeps({
+      platform: "linux",
+      exec: (cmd: string) => {
+        if (cmd === "tmux -V") return "tmux 3.4\n";
+        if (cmd === "cmux capabilities --json") return '{"capabilities":["surface.focus"]}\n';
+        if (cmd === "cmux --help") return "cmux help\n";
+        return "";
+      },
+    });
+    const { checks } = runDoctorChecks(deps);
+    expect(checks.find((c) => c.name === "tmux_mouse")).toBeUndefined();
   });
 
   it("cmux control available -> pass", () => {
