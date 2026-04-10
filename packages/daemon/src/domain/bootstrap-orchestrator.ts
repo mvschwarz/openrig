@@ -156,7 +156,20 @@ export class BootstrapOrchestrator {
           specDir = nodePath.dirname(podSource.specPath);
           podBundleTempDir = podSource.tempDir;
           stages.push({ stage: "resolve_spec", status: "ok", detail: { specName: podSource.manifest.name, source: "pod_bundle" } });
+
           try {
+            // Reject service-backed bundles — services require a stable source directory
+            try {
+              const parsed = parsePodBundleManifest(rawYaml) as Record<string, unknown>;
+              if (parsed && typeof parsed === "object" && parsed["services"] && typeof parsed["services"] === "object") {
+                const msg = "Service-backed rigs cannot be launched from .rigbundle archives. The services block requires a stable source directory. Use the source directory path instead: rig up <path/to/rig.yaml>";
+                stages.push({ stage: "resolve_spec", status: "failed", detail: { code: "services_unsupported", error: msg } });
+                errors.push(msg);
+                this.deps.bootstrapRepo.updateRunStatus(run.id, "failed");
+                return { runId: run.id, status: "failed" as BootstrapStatus, stages, errors, warnings };
+              }
+            } catch { /* YAML parse failure — let handlePodAwareSpec deal with it */ }
+
             return await this.handlePodAwareSpec(opts, run, rawYaml, specDir, stages, errors, warnings);
           } finally {
             if (podBundleTempDir) this.deps.podBundleSourceResolver.cleanup(podBundleTempDir);

@@ -1097,6 +1097,111 @@ exports:
     expect(run.source_kind).toBe("rig_spec");
   });
 
+  it("rejects service-backed pod-bundle launch with honest error before instantiate", async () => {
+    const { pack } = await import("../src/domain/bundle-archive.js");
+    const { computeIntegrity } = await import("../src/domain/bundle-integrity.js");
+    const { PodBundleSourceResolver } = await import("../src/domain/bundle-source-resolver.js");
+
+    // Build a minimal v2 pod bundle with a service-backed rig spec
+    const staging = path.join(tmpDir, "svc-bundle-staging");
+    fs.mkdirSync(staging, { recursive: true });
+
+    const svcSpecYaml = `
+version: "0.2"
+name: svc-bundle-rig
+summary: A service-backed rig in a bundle
+services:
+  kind: compose
+  compose_file: svc.compose.yaml
+  wait_for:
+    - url: http://127.0.0.1:8200/health
+pods:
+  - id: dev
+    label: Dev
+    members:
+      - id: impl
+        agent_ref: "local:agents/impl"
+        runtime: claude-code
+        profile: default
+        cwd: .
+    edges: []
+edges: []
+`.trim();
+    fs.writeFileSync(path.join(staging, "rig.yaml"), svcSpecYaml);
+    fs.writeFileSync(path.join(staging, "svc.compose.yaml"), "version: '3.8'\nservices:\n  vault:\n    image: hashicorp/vault:1.15\n");
+    // Compute integrity over content files before writing bundle.yaml
+    const integrityFsOps = {
+      readFile: (p: string) => fs.readFileSync(p, "utf-8"),
+      readFileBuffer: (p: string) => fs.readFileSync(p),
+      writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"),
+      exists: (p: string) => fs.existsSync(p),
+      walkFiles: (dir: string) => { const r: string[] = []; function w(d: string, pre: string) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.isDirectory()) w(path.join(d, e.name), pre ? `${pre}/${e.name}` : e.name); else r.push(pre ? `${pre}/${e.name}` : e.name); } } w(dir, ""); return r; },
+    };
+    const integrity = computeIntegrity(staging, integrityFsOps);
+    const integrityYaml = `  algorithm: ${integrity.algorithm}\n  files:\n` +
+      Object.entries(integrity.files).map(([k, v]) => `    ${k}: ${v}`).join("\n");
+
+    fs.writeFileSync(path.join(staging, "bundle.yaml"), `
+schema_version: 2
+name: svc-bundle
+version: "0.1.0"
+created_at: "2026-04-09T00:00:00Z"
+rig_spec: rig.yaml
+agents: []
+integrity:
+${integrityYaml}
+`.trim());
+
+    const bundlePath = path.join(tmpDir, "svc-test.rigbundle");
+    await pack(staging, bundlePath);
+
+    // Record existing podbundle- dirs before test
+    const tmpBase = os.tmpdir();
+    const preExistingDirs = new Set(fs.readdirSync(tmpBase).filter((d) => d.startsWith("podbundle-")));
+
+    const podBundleResolver = new PodBundleSourceResolver();
+    const { LegacyBundleSourceResolver: BundleSourceResolver } = await import("../src/domain/bundle-source-resolver.js");
+    const legacyBundleResolver = new BundleSourceResolver({ fsOps: realFsOps() });
+    const mockPodInstantiator = { db, instantiate: vi.fn() };
+
+    const orch = new BootstrapOrchestrator({
+      db,
+      bootstrapRepo: new BootstrapRepository(db),
+      runtimeVerifier: new RuntimeVerifier({ exec: createMockExec({}), db }),
+      probeRegistry: new RequirementsProbeRegistry(createMockExec({})),
+      installPlanner: new ExternalInstallPlanner(),
+      installExecutor: new ExternalInstallExecutor({ exec: createMockExec({}), db }),
+      packageInstallService: new PackageInstallService({
+        packageRepo: new PackageRepository(db),
+        installRepo: new InstallRepository(db),
+        installEngine: new InstallEngine(new InstallRepository(db), realEngineFsOps()),
+        installVerifier: new InstallVerifier(new InstallRepository(db), new PackageRepository(db), {
+          readFile: (p) => fs.readFileSync(p, "utf-8"), exists: (p) => fs.existsSync(p),
+        }),
+      }),
+      rigInstantiator: createMockInstantiator(db) as any,
+      fsOps: realFsOps(),
+      bundleSourceResolver: legacyBundleResolver,
+      podBundleSourceResolver: podBundleResolver as any,
+      podInstantiator: mockPodInstantiator as any,
+    });
+
+    const result = await orch.bootstrap({ mode: "apply", sourceRef: bundlePath, sourceKind: "rig_bundle" });
+
+    expect(result.status).toBe("failed");
+    expect(result.errors.some((e: string) => e.includes("Service-backed rigs cannot be launched from .rigbundle"))).toBe(true);
+    const resolveStage = result.stages.find((s) => s.stage === "resolve_spec" && s.status === "failed");
+    expect(resolveStage).toBeDefined();
+    expect((resolveStage!.detail as Record<string, unknown>)["code"]).toBe("services_unsupported");
+    // Must NOT have called instantiate
+    expect(mockPodInstantiator.instantiate).not.toHaveBeenCalled();
+    // Temp dir must be cleaned up even on rejection — only check dirs created during this test
+    const postDirs = fs.readdirSync(tmpBase).filter((d) =>
+      d.startsWith("podbundle-") && !preExistingDirs.has(d)
+    );
+    expect(postDirs).toHaveLength(0);
+  });
+
   // AS-T08b: pod-aware rig spec delegates to podInstantiator
   it("pod-aware rig spec delegates to podInstantiator via bootstrap", async () => {
     const podSpecYaml = `
