@@ -113,11 +113,11 @@ export function RigNode({ data }: { data: RigNodeData }) {
     }
   };
 
-  const handleFocusCmux = async (e: React.MouseEvent) => {
+  const handleOpenCmux = async (e: React.MouseEvent) => {
     e.stopPropagation();
-    if (!data.binding?.cmuxSurface || !data.rigId) return;
+    if (!data.rigId) return;
     try {
-      const res = await fetch(`/api/rigs/${encodeURIComponent(data.rigId)}/nodes/${encodeURIComponent(data.logicalId)}/focus`, { method: "POST" });
+      const res = await fetch(`/api/rigs/${encodeURIComponent(data.rigId)}/nodes/${encodeURIComponent(data.logicalId)}/open-cmux`, { method: "POST" });
       if (res.ok) {
         flashFeedback("cmux");
       }
@@ -231,7 +231,7 @@ export function RigNode({ data }: { data: RigNodeData }) {
           </div>
         )}
 
-        {(data.canonicalSessionName ?? data.binding?.tmuxSession ?? data.resumeToken ?? data.binding?.cmuxSurface) && (
+        {(data.canonicalSessionName ?? data.binding?.tmuxSession ?? data.resumeToken ?? data.rigId) && (
           <div
             data-testid="node-toolbar"
             className="flex flex-wrap gap-1 pt-1"
@@ -248,10 +248,10 @@ export function RigNode({ data }: { data: RigNodeData }) {
                 {actionFeedback === "attach" ? "copied" : "tmux"}
               </button>
             )}
-            {data.binding?.cmuxSurface && (
+            {data.rigId && (
               <button
-                onClick={handleFocusCmux}
-                data-testid="toolbar-cmux-focus"
+                onClick={handleOpenCmux}
+                data-testid="toolbar-cmux-open"
                 className={buttonClass("cmux")}
               >
                 {actionFeedback === "cmux" ? "opened" : "cmux"}

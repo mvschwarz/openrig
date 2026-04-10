@@ -565,7 +565,7 @@ describe("RigNode", () => {
     );
 
     expect(screen.getByTestId("toolbar-copy-attach")).toBeDefined();
-    expect(screen.getByTestId("toolbar-cmux-focus")).toBeDefined();
+    expect(screen.getByTestId("toolbar-cmux-open")).toBeDefined();
     expect(screen.getByTestId("toolbar-copy-resume")).toBeDefined();
   });
 
@@ -710,7 +710,86 @@ describe("RigNode", () => {
 
     expect(screen.getByTestId("toolbar-copy-attach")).toBeDefined();
     expect(screen.queryByTestId("toolbar-copy-resume")).toBeNull();
-    expect(screen.queryByTestId("toolbar-cmux-focus")).toBeNull(); // no cmux surface
+    // CMUX button should still be present for unbound nodes (open-or-focus)
+    expect(screen.getByTestId("toolbar-cmux-open")).toBeDefined();
+  });
+
+  it("clicking toolbar cmux on unbound node posts to /open-cmux not /focus", async () => {
+    mockFetch.mockResolvedValue({ ok: true, json: async () => ({ ok: true, action: "created_new" }) });
+
+    const data = {
+      logicalId: "dev.impl",
+      rigId: "rig-1",
+      role: "worker",
+      runtime: "claude-code",
+      model: null,
+      status: "running",
+      startupStatus: "ready" as const,
+      canonicalSessionName: "dev-impl@test-rig",
+      binding: { tmuxSession: "dev-impl@test-rig", cmuxSurface: null },
+      resumeToken: null,
+    };
+
+    render(
+      <ReactFlowProvider>
+        <RigNode data={data} />
+      </ReactFlowProvider>
+    );
+
+    fireEvent.click(screen.getByTestId("toolbar-cmux-open"));
+
+    await waitFor(() => {
+      const openCall = mockFetch.mock.calls.find(
+        (c: unknown[]) => typeof c[0] === "string" && (c[0] as string).includes("/open-cmux")
+      );
+      expect(openCall).toBeDefined();
+      expect(openCall![0]).toBe("/api/rigs/rig-1/nodes/dev.impl/open-cmux");
+      expect(openCall![1]).toEqual(expect.objectContaining({ method: "POST" }));
+    });
+
+    // Must NOT have called /focus
+    const focusCall = mockFetch.mock.calls.find(
+      (c: unknown[]) => typeof c[0] === "string" && (c[0] as string).includes("/focus")
+    );
+    expect(focusCall).toBeUndefined();
+  });
+
+  it("clicking toolbar cmux on bound node posts to /open-cmux and shows feedback", async () => {
+    mockFetch.mockResolvedValue({ ok: true, json: async () => ({ ok: true, action: "focused_existing" }) });
+
+    const data = {
+      logicalId: "dev.impl",
+      rigId: "rig-1",
+      role: "worker",
+      runtime: "claude-code",
+      model: null,
+      status: "running",
+      startupStatus: "ready" as const,
+      canonicalSessionName: "dev-impl@test-rig",
+      binding: { tmuxSession: "dev-impl@test-rig", cmuxSurface: "s1" },
+      resumeToken: null,
+    };
+
+    render(
+      <ReactFlowProvider>
+        <RigNode data={data} />
+      </ReactFlowProvider>
+    );
+
+    fireEvent.click(screen.getByTestId("toolbar-cmux-open"));
+
+    await waitFor(() => {
+      const openCall = mockFetch.mock.calls.find(
+        (c: unknown[]) => typeof c[0] === "string" && (c[0] as string).includes("/open-cmux")
+      );
+      expect(openCall).toBeDefined();
+      expect(openCall![0]).toBe("/api/rigs/rig-1/nodes/dev.impl/open-cmux");
+    });
+
+    // Flash feedback
+    await waitFor(() => {
+      expect(screen.getByTestId("toolbar-cmux-open").textContent).toBe("opened");
+    });
   });
 
   it("treats nodes as non-draggable so the canvas can pan through them", async () => {
