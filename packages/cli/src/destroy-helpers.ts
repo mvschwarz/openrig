@@ -37,14 +37,21 @@ export interface DestroyResult {
   backupPaths: string[];
   daemonStopped: boolean;
   portCleared: boolean;
+  stateRecreated: boolean;
   tmuxKilled: number;
   tmuxMissing: number;
   warnings: string[];
 }
 
+export interface ListenerInspection {
+  kind: "openrig" | "other_http" | "unreachable";
+  healthy?: boolean;
+  detail?: string;
+}
+
 export interface DestroyDeps {
   stopDaemon: () => Promise<void>;
-  probeDaemon: (host: string, port: number) => Promise<boolean>;
+  inspectListener: (host: string, port: number) => Promise<ListenerInspection>;
   findListeningPid: (port: number) => number | null;
   killProcess: (pid: number) => void;
   exists: (path: string) => boolean;
@@ -89,10 +96,19 @@ export function listManagedTmuxSessionsFromDb(dbPath: string): string[] {
   const db = new Database(dbPath, { readonly: true, fileMustExist: true });
   try {
     const rows = db.prepare(`
-      SELECT DISTINCT COALESCE(b.tmux_session, s.session_name) AS session_name
+      SELECT DISTINCT
+        COALESCE(
+          b.tmux_session,
+          (
+            SELECT s2.session_name
+            FROM sessions s2
+            WHERE s2.node_id = n.id
+            ORDER BY datetime(s2.created_at) DESC, s2.rowid DESC
+            LIMIT 1
+          )
+        ) AS session_name
       FROM nodes n
       LEFT JOIN bindings b ON b.node_id = n.id
-      LEFT JOIN sessions s ON s.node_id = n.id
       WHERE COALESCE(b.attachment_type, 'tmux') = 'tmux'
     `).all() as Array<{ session_name: string | null }>;
 
@@ -165,6 +181,7 @@ function isLocalHost(host: string): boolean {
 export async function executeDestroy(plan: DestroyPlan, deps: DestroyDeps): Promise<DestroyResult> {
   const warnings = [...plan.warnings];
   const backupPaths: string[] = [];
+  let stateRecreated = false;
 
   try {
     await deps.stopDaemon();
@@ -172,13 +189,12 @@ export async function executeDestroy(plan: DestroyPlan, deps: DestroyDeps): Prom
     warnings.push(`stopDaemon failed: ${err instanceof Error ? err.message : String(err)}`);
   }
 
-  let daemonStopped = true;
-  let portCleared = true;
+  let daemonStopped = false;
+  let portCleared = false;
 
   if (isLocalHost(plan.daemonHost)) {
-    const probeBefore = await deps.probeDaemon(plan.daemonHost, plan.daemonPort);
-    if (probeBefore) {
-      daemonStopped = false;
+    const before = await deps.inspectListener(plan.daemonHost, plan.daemonPort);
+    if (before.kind === "openrig") {
       const listenerPid = deps.findListeningPid(plan.daemonPort);
       if (listenerPid !== null) {
         try {
@@ -187,17 +203,36 @@ export async function executeDestroy(plan: DestroyPlan, deps: DestroyDeps): Prom
           warnings.push(`Failed to terminate listener pid ${listenerPid}: ${err instanceof Error ? err.message : String(err)}`);
         }
         for (let attempt = 0; attempt < 20; attempt += 1) {
-          if (!(await deps.probeDaemon(plan.daemonHost, plan.daemonPort))) break;
+          if ((await deps.inspectListener(plan.daemonHost, plan.daemonPort)).kind === "unreachable") break;
           await deps.sleep(100);
         }
       } else {
         warnings.push(`OpenRig responded on port ${plan.daemonPort}, but no listener pid was found.`);
       }
+    } else if (before.kind === "other_http") {
+      warnings.push(`Port ${plan.daemonPort} is occupied by a live non-OpenRig HTTP listener. State was left untouched.`);
     }
-    portCleared = !(await deps.probeDaemon(plan.daemonHost, plan.daemonPort));
+
+    const after = await deps.inspectListener(plan.daemonHost, plan.daemonPort);
+    portCleared = after.kind === "unreachable";
     daemonStopped = portCleared;
   } else {
-    warnings.push(`Daemon host ${plan.daemonHost} is not local; port termination was skipped.`);
+    warnings.push(`Daemon host ${plan.daemonHost} is not local. rig destroy only operates on local daemon targets; state was left untouched.`);
+  }
+
+  if (!portCleared) {
+    return {
+      scope: plan.scope,
+      backup: plan.backup,
+      stateRoot: plan.stateRoot,
+      backupPaths,
+      daemonStopped,
+      portCleared,
+      stateRecreated,
+      tmuxKilled: 0,
+      tmuxMissing: 0,
+      warnings,
+    };
   }
 
   let tmuxKilled = 0;
@@ -220,6 +255,7 @@ export async function executeDestroy(plan: DestroyPlan, deps: DestroyDeps): Prom
   }
 
   deps.mkdirp(plan.stateRoot);
+  stateRecreated = true;
 
   return {
     scope: plan.scope,
@@ -228,6 +264,7 @@ export async function executeDestroy(plan: DestroyPlan, deps: DestroyDeps): Prom
     backupPaths,
     daemonStopped,
     portCleared,
+    stateRecreated,
     tmuxKilled,
     tmuxMissing,
     warnings,

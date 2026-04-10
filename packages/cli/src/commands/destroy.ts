@@ -1,8 +1,9 @@
 import { Command } from "commander";
 import { existsSync, mkdirSync, renameSync, rmSync } from "node:fs";
+import { join } from "node:path";
 import { ConfigStore } from "../config-store.js";
 import { realDeps } from "./daemon.js";
-import { readOpenRigEnv, getPreferredOpenRigHome } from "../openrig-compat.js";
+import { getDefaultOpenRigPath, getPreferredOpenRigHome, readOpenRigEnv } from "../openrig-compat.js";
 import {
   DESTROY_CONFIRM_TOKEN,
   buildDestroyPlan,
@@ -11,6 +12,7 @@ import {
   killTmuxSessionWithCli,
   listManagedTmuxSessionsFromDb,
   type DestroyDeps,
+  type ListenerInspection,
   type DestroyRuntimeConfig,
   type DestroyScope,
 } from "../destroy-helpers.js";
@@ -21,43 +23,87 @@ export interface DestroyCommandDeps {
   destroyDeps: DestroyDeps;
 }
 
-function resolveRuntimeConfig(configStore: Pick<ConfigStore, "resolve">): DestroyRuntimeConfig {
-  const config = configStore.resolve();
+interface ResolvedDestroyRuntime {
+  runtimeConfig: DestroyRuntimeConfig;
+  warnings: string[];
+}
+
+function resolveRuntimeConfig(configStore: Pick<ConfigStore, "resolve">): ResolvedDestroyRuntime {
+  const warnings: string[] = [];
+  const stateRoot = getPreferredOpenRigHome();
+  const defaultDbPath = getDefaultOpenRigPath("openrig.sqlite");
+  const defaultTranscriptsPath = getDefaultOpenRigPath("transcripts");
+  const effectiveDefaultDbPath = join(stateRoot, "openrig.sqlite");
+  const effectiveDefaultTranscriptsPath = join(stateRoot, "transcripts");
   const overrideUrl = readOpenRigEnv("OPENRIG_URL", "RIGGED_URL")?.trim();
   if (overrideUrl) {
-    try {
-      const url = new URL(overrideUrl);
-      return {
-        stateRoot: getPreferredOpenRigHome(),
-        dbPath: config.db.path,
-        transcriptsPath: config.transcripts.path,
-        daemonHost: url.hostname || config.daemon.host,
-        daemonPort: Number(url.port) || config.daemon.port,
-      };
-    } catch {
-      // Fall through to config-resolved host/port if env URL is malformed.
-    }
+    warnings.push(`Ignoring ${overrideUrl} from OPENRIG_URL/RIGGED_URL because rig destroy only operates on local state.`);
   }
 
-  return {
-    stateRoot: getPreferredOpenRigHome(),
-    dbPath: config.db.path,
-    transcriptsPath: config.transcripts.path,
-    daemonHost: config.daemon.host,
-    daemonPort: config.daemon.port,
-  };
+  try {
+    const config = configStore.resolve();
+    return {
+      runtimeConfig: {
+        stateRoot,
+        dbPath: config.db.path === defaultDbPath ? effectiveDefaultDbPath : config.db.path,
+        transcriptsPath: config.transcripts.path === defaultTranscriptsPath ? effectiveDefaultTranscriptsPath : config.transcripts.path,
+        daemonHost: config.daemon.host,
+        daemonPort: config.daemon.port,
+      },
+      warnings,
+    };
+  } catch (err) {
+    warnings.push(`Failed to read config; using compatibility defaults instead: ${err instanceof Error ? err.message : String(err)}`);
+    return {
+      runtimeConfig: {
+        stateRoot,
+        dbPath: effectiveDefaultDbPath,
+        transcriptsPath: effectiveDefaultTranscriptsPath,
+        daemonHost: "127.0.0.1",
+        daemonPort: 7433,
+      },
+      warnings,
+    };
+  }
 }
 
 function realDestroyDeps(): DestroyDeps {
   const lifecycleDeps = realDeps();
   return {
     stopDaemon: async () => stopDaemon(lifecycleDeps),
-    probeDaemon: async (host: string, port: number) => {
+    inspectListener: async (host: string, port: number): Promise<ListenerInspection> => {
       try {
         const res = await fetch(`http://${host}:${port}/healthz`);
-        return res.ok;
+        if (!res.ok) {
+          return {
+            kind: "other_http",
+            healthy: false,
+            detail: `HTTP ${res.status}`,
+          };
+        }
+
+        let body: unknown = null;
+        try {
+          body = await res.json();
+        } catch {
+          return {
+            kind: "other_http",
+            healthy: false,
+            detail: "Response body was not valid OpenRig health JSON.",
+          };
+        }
+
+        if (body && typeof body === "object" && (body as Record<string, unknown>).status === "ok") {
+          return { kind: "openrig", healthy: true };
+        }
+
+        return {
+          kind: "other_http",
+          healthy: false,
+          detail: "Response body did not match the OpenRig health contract.",
+        };
       } catch {
-        return false;
+        return { kind: "unreachable" };
       }
     },
     findListeningPid: findListeningPidWithLsof,
@@ -111,7 +157,7 @@ function printResult(result: Awaited<ReturnType<typeof executeDestroy>>): void {
   } else if (result.backup) {
     console.log("  backup: nothing to move");
   }
-  console.log(`  fresh state root: ${result.stateRoot}`);
+  console.log(result.stateRecreated ? `  fresh state root: ${result.stateRoot}` : "  fresh state root: not created (state left untouched)");
   for (const warning of result.warnings) {
     console.log(`  warning: ${warning}`);
   }
@@ -149,9 +195,10 @@ export function destroyCommand(depsOverride?: DestroyCommandDeps): Command {
         destroyDeps: realDestroyDeps(),
       };
 
-      const runtimeConfig = resolveRuntimeConfig(deps.configStore);
+      const { runtimeConfig, warnings } = resolveRuntimeConfig(deps.configStore);
       const plan = buildDestroyPlan(selectedScopes[0]!, Boolean(opts.backup), runtimeConfig, deps.destroyDeps);
-      printPlan(plan.scope, plan.backup, runtimeConfig, plan.managedTmuxSessions, plan.warnings);
+      printPlan(plan.scope, plan.backup, runtimeConfig, plan.managedTmuxSessions, [...warnings, ...plan.warnings]);
+      plan.warnings = [...warnings, ...plan.warnings];
       const result = await executeDestroy(plan, deps.destroyDeps);
       printResult(result);
       if (!result.portCleared) {

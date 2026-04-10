@@ -38,7 +38,7 @@ function captureLogs(fn: () => Promise<void>): Promise<{ logs: string[]; exitCod
 function makeDestroyDeps(overrides?: Partial<DestroyDeps>): DestroyDeps {
   return {
     stopDaemon: vi.fn(async () => {}),
-    probeDaemon: vi.fn(async () => false),
+    inspectListener: vi.fn(async () => ({ kind: "unreachable" as const })),
     findListeningPid: vi.fn(() => null),
     killProcess: vi.fn(),
     exists: vi.fn(() => false),
@@ -116,6 +116,42 @@ describe("destroy helpers", () => {
     expect(listManagedTmuxSessionsFromDb(dbPath)).toEqual(["orch1-lead@demo"]);
   });
 
+  it("listManagedTmuxSessionsFromDb prefers the current session for a node over historical names", () => {
+    const dbPath = join(tmpDir, "openrig-current.sqlite");
+    const db = new Database(dbPath);
+    db.exec(`
+      CREATE TABLE nodes (id TEXT PRIMARY KEY);
+      CREATE TABLE bindings (
+        id TEXT PRIMARY KEY,
+        node_id TEXT NOT NULL,
+        tmux_session TEXT,
+        tmux_window TEXT,
+        tmux_pane TEXT,
+        cmux_workspace TEXT,
+        cmux_surface TEXT,
+        updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+        attachment_type TEXT NOT NULL DEFAULT 'tmux',
+        external_session_name TEXT
+      );
+      CREATE TABLE sessions (
+        id TEXT PRIMARY KEY,
+        node_id TEXT NOT NULL,
+        session_name TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'unknown',
+        last_seen_at TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+    `);
+    db.prepare("INSERT INTO nodes (id) VALUES (?)").run("n1");
+    db.prepare("INSERT INTO sessions (id, node_id, session_name, created_at) VALUES (?, ?, ?, ?)")
+      .run("s1", "n1", "old-name@demo", "2026-04-10T08:00:00Z");
+    db.prepare("INSERT INTO sessions (id, node_id, session_name, created_at) VALUES (?, ?, ?, ?)")
+      .run("s2", "n1", "current-name@demo", "2026-04-10T08:05:00Z");
+    db.close();
+
+    expect(listManagedTmuxSessionsFromDb(dbPath)).toEqual(["current-name@demo"]);
+  });
+
   it("buildDestroyPlan includes external db/transcript targets outside state root", () => {
     const stateRoot = join(tmpDir, ".openrig");
     const externalDb = join(tmpDir, "custom", "openrig.sqlite");
@@ -185,9 +221,10 @@ describe("destroy helpers", () => {
       mkdirp: (path: string) => mkdirSync(path, { recursive: true }),
       listManagedTmuxSessions: listManagedTmuxSessionsFromDb,
       killTmuxSession: (sessionName: string) => sessionName !== "dev1-impl@demo",
-      probeDaemon: vi.fn()
-        .mockResolvedValueOnce(true)
-        .mockResolvedValueOnce(false),
+      inspectListener: vi.fn()
+        .mockResolvedValueOnce({ kind: "openrig" })
+        .mockResolvedValueOnce({ kind: "unreachable" })
+        .mockResolvedValueOnce({ kind: "unreachable" }),
       findListeningPid: () => 1234,
     });
 
@@ -202,11 +239,116 @@ describe("destroy helpers", () => {
     const result = await executeDestroy(plan, deps);
     expect(result.daemonStopped).toBe(true);
     expect(result.portCleared).toBe(true);
+    expect(result.stateRecreated).toBe(true);
     expect(result.tmuxKilled).toBe(1);
     expect(result.tmuxMissing).toBe(1);
     expect(result.backupPaths).toHaveLength(1);
     expect(existsSync(stateRoot)).toBe(true);
     expect(deps.killProcess).toHaveBeenCalledWith(1234);
+  });
+
+  it("executeDestroy leaves state untouched when a local listener is still live but cannot be safely cleared", async () => {
+    const stateRoot = join(tmpDir, ".openrig-live");
+    mkdirSync(stateRoot, { recursive: true });
+    const removePath = vi.fn();
+    const mkdirp = vi.fn();
+    const deps = makeDestroyDeps({
+      exists: () => true,
+      removePath,
+      mkdirp,
+      inspectListener: vi.fn(async () => ({ kind: "openrig" })),
+      findListeningPid: () => null,
+    });
+
+    const result = await executeDestroy({
+      scope: "state",
+      backup: false,
+      stateRoot,
+      daemonHost: "127.0.0.1",
+      daemonPort: 7433,
+      managedTmuxSessions: [],
+      targets: [{ path: stateRoot, kind: "state_root" }],
+      warnings: [],
+    }, deps);
+
+    expect(result.portCleared).toBe(false);
+    expect(result.stateRecreated).toBe(false);
+    expect(removePath).not.toHaveBeenCalled();
+    expect(mkdirp).not.toHaveBeenCalled();
+  });
+
+  it("executeDestroy does not kill a live non-OpenRig HTTP listener", async () => {
+    const killProcess = vi.fn();
+    const deps = makeDestroyDeps({
+      exists: () => true,
+      removePath: vi.fn(),
+      mkdirp: vi.fn(),
+      inspectListener: vi.fn(async () => ({ kind: "other_http", detail: "HTTP 200" })),
+      findListeningPid: () => 7777,
+      killProcess,
+    });
+
+    const result = await executeDestroy({
+      scope: "state",
+      backup: false,
+      stateRoot: join(tmpDir, ".openrig-http"),
+      daemonHost: "127.0.0.1",
+      daemonPort: 7433,
+      managedTmuxSessions: [],
+      targets: [{ path: join(tmpDir, ".openrig-http"), kind: "state_root" }],
+      warnings: [],
+    }, deps);
+
+    expect(result.portCleared).toBe(false);
+    expect(killProcess).not.toHaveBeenCalled();
+  });
+
+  it("executeDestroy does not enumerate or kill tmux sessions for --state", async () => {
+    const stateRoot = join(tmpDir, ".openrig-state-only");
+    mkdirSync(stateRoot, { recursive: true });
+    const listManagedTmuxSessions = vi.fn(() => ["orchestrator@demo"]);
+    const killTmuxSession = vi.fn(() => true);
+    const deps = makeDestroyDeps({
+      exists: () => true,
+      removePath: vi.fn(),
+      mkdirp: vi.fn(),
+      listManagedTmuxSessions,
+      killTmuxSession,
+    });
+
+    const plan = buildDestroyPlan("state", false, {
+      stateRoot,
+      dbPath: join(stateRoot, "openrig.sqlite"),
+      transcriptsPath: join(stateRoot, "transcripts"),
+      daemonHost: "127.0.0.1",
+      daemonPort: 7433,
+    }, deps);
+    await executeDestroy(plan, deps);
+
+    expect(listManagedTmuxSessions).not.toHaveBeenCalled();
+    expect(killTmuxSession).not.toHaveBeenCalled();
+  });
+
+  it("executeDestroy does not report remote daemon targets as cleared", async () => {
+    const deps = makeDestroyDeps({
+      exists: () => false,
+      mkdirp: vi.fn(),
+    });
+
+    const result = await executeDestroy({
+      scope: "state",
+      backup: false,
+      stateRoot: join(tmpDir, ".openrig-remote"),
+      daemonHost: "10.0.0.5",
+      daemonPort: 7433,
+      managedTmuxSessions: [],
+      targets: [],
+      warnings: [],
+    }, deps);
+
+    expect(result.daemonStopped).toBe(false);
+    expect(result.portCleared).toBe(false);
+    expect(result.stateRecreated).toBe(false);
   });
 });
 
@@ -281,5 +423,26 @@ describe("destroy command", () => {
     expect(output).toContain("scope: state");
     expect(output).toContain("DESTROY RESULT");
     expect(output).toContain("fresh state root:");
+  });
+
+  it("falls back to compatibility defaults when config resolution is malformed", async () => {
+    const destroyDeps = makeDestroyDeps({
+      exists: vi.fn(() => false),
+      mkdirp: vi.fn(),
+    });
+    const program = new Command();
+    program.exitOverride();
+    program.addCommand(destroyCommand({
+      configStore: { resolve: () => { throw new Error("bad config json"); } },
+      destroyDeps,
+    }));
+
+    const { logs, exitCode } = await captureLogs(async () => {
+      await program.parseAsync(["node", "rig", "destroy", "--state", "--yes", "--confirm", DESTROY_CONFIRM_TOKEN]);
+    });
+
+    expect(exitCode).toBeUndefined();
+    expect(logs.join("\n")).toContain("DESTROY PLAN");
+    expect(logs.join("\n")).toContain("bad config json");
   });
 });
