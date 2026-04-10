@@ -41,6 +41,7 @@ import { releaseCommand } from "./commands/release.js";
 import { launchCommand } from "./commands/launch.js";
 import { removeCommand } from "./commands/remove.js";
 import { shrinkCommand } from "./commands/shrink.js";
+import { destroyCommand, type DestroyCommandDeps } from "./commands/destroy.js";
 import type { LifecycleDeps } from "./daemon-lifecycle.js";
 import { CLI_VERSION } from "./version.js";
 
@@ -81,6 +82,7 @@ export interface ProgramDeps {
   launchDeps?: StatusDeps;
   removeDeps?: StatusDeps;
   shrinkDeps?: StatusDeps;
+  destroyDeps?: DestroyCommandDeps;
   configPath?: string;
 }
 
@@ -131,6 +133,7 @@ export function createProgram(depsOverride?: ProgramDeps): Command {
   program.addCommand(launchCommand(depsOverride?.launchDeps));
   program.addCommand(removeCommand(depsOverride?.removeDeps));
   program.addCommand(shrinkCommand(depsOverride?.shrinkDeps));
+  program.addCommand(destroyCommand(depsOverride?.destroyDeps));
 
   return program;
 }
