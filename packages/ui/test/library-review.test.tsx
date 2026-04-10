@@ -159,6 +159,80 @@ describe("LibraryReview", () => {
     expect(screen.queryByTestId("lib-rig-specialist")).toBeNull();
   });
 
+  it("opens agent drilldown for relative local: refs resolved against rig source path", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+
+      if (url === "/api/specs/library?kind=agent") {
+        return new Response(JSON.stringify([
+          {
+            id: "agent-vault-specialist",
+            kind: "agent",
+            name: "vault-specialist",
+            version: "1.0",
+            sourceType: "builtin",
+            sourcePath: "/specs/agents/apps/vault-specialist/agent.yaml",
+            relativePath: "agents/apps/vault-specialist/agent.yaml",
+            updatedAt: new Date().toISOString(),
+          },
+        ]), { status: 200 });
+      }
+
+      if (url === "/api/specs/library/svc-rig-2/review") {
+        return new Response(JSON.stringify({
+          sourceState: "library_item",
+          kind: "rig",
+          name: "secrets-manager",
+          version: "0.2",
+          format: "pod_aware",
+          pods: [
+            {
+              id: "vault",
+              label: "Vault",
+              members: [
+                { id: "specialist", agentRef: "local:../../../agents/apps/vault-specialist", runtime: "claude-code", profile: "default" },
+              ],
+              edges: [],
+            },
+          ],
+          edges: [],
+          graph: { nodes: [], edges: [] },
+          raw: "name: secrets-manager\n",
+          libraryEntryId: "svc-rig-2",
+          sourcePath: "/specs/rigs/launch/secrets-manager/rig.yaml",
+        }), { status: 200 });
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(createAppTestRouter({
+      initialPath: "/specs/library/svc-rig-2",
+      routes: [
+        { path: "/specs/library/svc-rig-2", component: () => <LibraryReview entryId="svc-rig-2" /> },
+        { path: "/specs/library/agent-vault-specialist", component: () => <div data-testid="vault-agent-drilldown">vault-agent</div> },
+      ],
+    }));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("library-review-rig")).toBeDefined();
+    });
+
+    fireEvent.click(screen.getByTestId("lib-tab-configuration"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("lib-member-open-agent-vault-specialist")).toBeDefined();
+    });
+
+    fireEvent.click(screen.getByTestId("lib-member-open-agent-vault-specialist"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("vault-agent-drilldown")).toBeDefined();
+    });
+  });
+
   it("opens the matching agent spec from a rig member row", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
