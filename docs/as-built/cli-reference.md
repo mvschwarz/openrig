@@ -1,6 +1,6 @@
 # OpenRig CLI Reference
 
-Verified against the shipped CLI on 2026-04-07 using:
+Verified against the shipped CLI on 2026-04-09 using:
 - `packages/cli/src/index.ts`
 - `packages/cli/src/commands/*.ts`
 - `packages/cli/src/mcp-server.ts`
@@ -11,9 +11,10 @@ This document reflects the current `rig` surface as shipped. Where live help tex
 ## Overview
 
 - Binary: `rig`
-- Top-level command groups: `36`
+- Top-level command groups: `39`
 - Output mode: human-readable by default; many commands also support `--json`
 - Daemon-backed commands fail when the daemon is stopped or unhealthy; `daemon`, `config`, `preflight`, and `doctor` also have local responsibilities
+- Managed apps are launched through the normal spec/library surfaces; the canonical shipped example is `rig up secrets-manager`
 - Legacy surface still shipped: `package`
 
 ## Top-Level Commands
@@ -31,11 +32,13 @@ This document reflects the current `rig` surface as shipped. Where live help tex
 | `bootstrap` | Bootstrap a rig from a spec file |
 | `requirements` | Check requirements for a rig spec |
 | `discover` | Scan for unmanaged tmux sessions |
+| `attach` | Attach the current shell or agent into a rig node |
 | `bind` | Bind a discovered session to a rig node |
 | `adopt` | Materialize topology and bind discovered live sessions |
 | `bundle` | Manage rig bundles |
 | `up` | Bootstrap a rig from a spec or bundle |
 | `down` | Tear down a rig |
+| `env` | Inspect and control rig environment services |
 | `ps` | List rigs and their status |
 | `mcp` | MCP server for agent integration |
 | `agent` | Manage agent specs |
@@ -53,6 +56,7 @@ This document reflects the current `rig` surface as shipped. Where live help tex
 | `doctor` | Verify OpenRig install health |
 | `expand` | Add a pod to a running rig |
 | `unclaim` | Release an adopted session without killing tmux |
+| `release` | Release claimed sessions from a rig |
 | `launch` | Launch or relaunch a node in a running rig |
 | `remove` | Remove a node from a running rig |
 | `shrink` | Remove an entire pod from a running rig |
@@ -159,7 +163,10 @@ Shipped MCP tools:
 Usage: `rig bootstrap <spec> [--plan] [--yes] [--json]`
 
 Arguments:
-- `spec`: path to a rig spec YAML file
+- `spec`: path to a rig spec YAML file or a library name
+
+Notes:
+- Bare names resolve through the spec library before falling back to the raw source value.
 
 ### `rig requirements`
 
@@ -187,6 +194,7 @@ Current behavior notes:
 - `--target <root>` is only for bundle/package installation. It does not override agent working directories.
 - `local:` `agent_ref` values resolve relative to the rig spec directory, not the caller shell cwd.
 - If you copy a built-in spec to a new directory, keep its `agents/` tree beside it or rewrite those refs to `path:/absolute/path`.
+- Managed apps are first-class `up` targets. `rig up secrets-manager` launches the shipped Vault example from the library.
 
 Success modes:
 - fresh boot
@@ -205,6 +213,19 @@ Flags:
 Notes:
 - When `--snapshot` succeeds, human output includes the restore command.
 - If the rig name is uniquely reusable, the handoff prefers `rig up <rigName>`.
+
+### `rig env`
+
+Usage:
+- `rig env status <rig> [--json]`
+- `rig env logs <rig> [service] [--tail <n>]`
+- `rig env down <rig> [--volumes]`
+
+Notes:
+- This surface is only meaningful for service-backed rigs and managed apps.
+- `status` resolves rig names or IDs and returns the persisted env receipt with a best-effort fresh refresh from the daemon.
+- `logs` proxies compose-backed service logs; `[service]` is optional.
+- `down` tears down the rig environment. `--volumes` exists in the CLI surface, but the daemon currently still relies on the stored down policy.
 
 ### `rig ps`
 
@@ -312,9 +333,10 @@ Subcommands:
 - `rename <name-or-id> <new-name> [--json]`
 
 Notes:
-- `specs` is the library surface.
+- `specs` is the library surface for rigs, agents, and managed apps.
 - `preview` returns structured review data from the daemon.
 - `add` validates the file as either RigSpec or AgentSpec before copying it into the user library.
+- `preview secrets-manager` is the canonical managed-app review example.
 
 ## Discovery and Topology Mutation
 
@@ -325,6 +347,18 @@ Usage: `rig discover [--json] [--draft]`
 Notes:
 - Scans unmanaged tmux sessions.
 - `--draft` generates a candidate rig spec from the discovery set.
+
+### `rig attach`
+
+Usage:
+- `rig attach --self --rig <rigId> --node <logicalId> [--cwd <path>] [--display-name <name>] [--print-env] [--json]`
+- `rig attach --self --rig <rigId> --pod <namespace> --member <name> --runtime <runtime> [--cwd <path>] [--display-name <name>] [--print-env] [--json]`
+
+Notes:
+- `--self` is currently required.
+- Node attach and pod-create attach are exclusive modes.
+- In tmux-backed shells, the command records tmux attachment metadata; otherwise it records an `external_cli` attachment.
+- `--print-env` prints shell exports for `OPENRIG_NODE_ID` and `OPENRIG_SESSION_NAME`.
 
 ### `rig bind`
 
@@ -363,6 +397,15 @@ Usage: `rig unclaim <sessionRef> [--json]`
 
 Notes:
 - Releases an adopted session without killing its tmux session.
+
+### `rig release`
+
+Usage: `rig release <rigId> [--delete] [--json]`
+
+Notes:
+- Releases all claimed/adopted sessions from a rig without killing their tmux sessions.
+- `--delete` removes the rig record after a clean release.
+- OpenRig-launched nodes still require `rig down`.
 
 ### `rig launch`
 
@@ -487,6 +530,5 @@ These are not current top-level `rig` commands:
 - `rig claim`
 - `rig blame`
 - `rig replay`
-- `rig env`
 
 If older docs or habits mention them, treat those references as stale.

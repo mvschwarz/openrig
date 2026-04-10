@@ -1,16 +1,16 @@
 # OpenRig — As-Built Architecture
-## Final Stretch 1 Snapshot (as of 2026-04-05)
+## Current Architecture
 
 Status:
-- Four implementation rounds have landed: AgentSpec reboot (16 tasks), North Star (16 tasks), Post-North-Star (11 tasks + dogfood fixes + UI polish), and Final Stretch 1 (spec library, `whoami`, adopted-session parity, specs/discovery drawer workflows, reusable spec display surfaces, live-node full-details route, graph hover/runtime hints).
-- Shipped source footprint: `253` source files across the three packages.
-- Daemon footprint: `133` source files total, including `79` domain files, `21` route files, `10` adapters, and `17` migrations.
-- CLI footprint: `37` source files.
-- UI footprint: `83` source files.
+- OpenRig currently ships a pod-aware multi-agent runtime, rig-scoped environment management, a filesystem-backed spec library, managed-app browsing/review surfaces, and the canonical `secrets-manager` + `vault.specialist` agent-managed app example.
+- Shipped source footprint: `286` source files across the three packages.
+- Daemon footprint: `150` source files total, including `90` domain files, `22` route files, `11` adapters, and `20` migrations.
+- CLI footprint: `49` source files.
+- UI footprint: `87` source files.
 - Current full-suite verification during this refresh:
-  - daemon: `112/112` files, `1461/1461` passing
-  - CLI: `29/29` files, `275/275` passing
-  - UI: `35` files, `361/364` passing (`3` known design/foundation failures)
+  - daemon: `127/127` files, `1668/1668` passing
+  - CLI: `37/37` files, `366/366` passing
+  - UI: `37/37` files, `388/388` passing
 
 Packages: `@openrig/daemon`, `@openrig/cli`, `@openrig/ui`
 
@@ -18,42 +18,47 @@ Packages: `@openrig/daemon`, `@openrig/cli`, `@openrig/ui`
 
 ## 1. System Overview
 
-OpenRig is a local control plane for multi-agent coding topologies. The system currently has four architectural layers:
+OpenRig is a local control plane for multi-agent coding topologies. The system currently has six architectural layers:
 
 1. **AgentSpec / pod-aware core**: spec parsing, resolution, precedence, startup orchestration, snapshot/restore, bundles.
-2. **North Star operator layer**: harness auto-launch, node inventory, session naming, infrastructure nodes, explorer UI, existing-rig power-on, auto-snapshot, post-command handoff.
-3. **Post-North-Star transport/history layer**: transcript capture (pipe-pane), communication primitives (send/capture/broadcast), config/preflight, `rig ask` context packs, durable rig chat.
-4. **Final Stretch 1 authoring/identity layer**: spec review + spec library, `whoami`, adopted-session tmux-metadata parity, bind/materialize/adopt workflows, specs/discovery drawers, reusable spec display components, live-node full-details workspace routes, and graph hover/runtime hints.
+2. **Operator and topology layer**: harness auto-launch, node inventory, session naming, infrastructure nodes, explorer UI, existing-rig power-on, auto-snapshot, post-command handoff.
+3. **Communication and history layer**: transcript capture (pipe-pane), communication primitives (send/capture/broadcast), config/preflight, `rig ask` context packs, durable rig chat.
+4. **Authoring and identity layer**: spec review + spec library, `whoami`, adopted-session tmux-metadata parity, bind/materialize/adopt workflows, specs/discovery drawers, reusable spec display components, live-node full-details workspace routes, and graph hover/runtime hints.
+5. **Rig environment layer**: rig-scoped services records, Compose-backed service orchestration, readiness gates, env snapshot/restore integration, runtime env status/logs/down surfaces.
+6. **Agent-managed software layer**: managed-app classification in the library, app-focused browse/review/runtime UI, managed-app-aware CLI/help surfaces, and the canonical `secrets-manager` + `vault.specialist` example.
 
 Legacy flat-node/package flows remain for backward compatibility.
 
 The stack is:
 
 ```text
-CLI (31 command groups) / UI (explorer + workspace + drawer) / MCP (17 tools)
+CLI (39 command groups) / UI (explorer + workspace + drawer) / MCP (17 tools)
       |
       v
-Hono daemon routes (21 route groups + dedicated health/export/static handlers)
+Hono daemon routes (22 route groups + dedicated health/export/static handlers)
       |
       +-- dual-format route adapters (legacy v1 + rebooted v0.2)
+      +-- env routes (status / logs / down)
       +-- transport routes (send/capture/broadcast)
       +-- transcript routes (tail/grep)
       +-- ask routes (context evidence packs)
       +-- chat routes (durable rig messaging + SSE)
-      +-- spec review/library routes
-      +-- whoami identity route
+      +-- spec review/library routes (managed-app enrichment + compose preview)
+      +-- whoami identity + context-usage route
       |
       v
 Framework-free domain services
       |
-      +-- SQLite state (17 migrations)
+      +-- SQLite state (20 migrations)
       +-- tmux / cmux / resume adapters
       +-- runtime adapters (Claude Code / Codex / Terminal)
+      +-- RigEnv substrate (compose adapter, readiness evaluator, service orchestrator)
       +-- transport layer (SessionTransport)
       +-- transcript store (pipe-pane backed)
       +-- chat repository (SQLite backed)
-      +-- spec review service
-      +-- spec library service
+      +-- spec review service (services metadata + compose preview seam)
+      +-- spec library service (`hasServices` classification)
+      +-- context-usage store / monitor
       +-- whoami identity service
 
 The core product loop:
@@ -66,7 +71,7 @@ The core product loop:
 
 ### HTTP routes
 
-`createApp()` now mounts 21 route groups plus:
+`createApp()` now mounts 22 route groups plus:
 - `GET /healthz`
 - `GET /api/rigs/:rigId/spec`
 - `GET /api/rigs/:rigId/spec.json`
@@ -74,7 +79,7 @@ The core product loop:
 
 In addition to the reboot-era routes:
 
-**North Star additions:**
+**Operator and topology routes:**
 - `GET /api/rigs/:rigId/nodes` — canonical shared node-inventory projection
 - `GET /api/rigs/:rigId/nodes/:logicalId` — rich node-detail payload for the drawer
 - `POST /api/rigs/:rigId/nodes/:logicalId/launch` — manual node launch
@@ -82,7 +87,7 @@ In addition to the reboot-era routes:
 - `POST /api/rigs/:id/up` — existing-rig restore by rig ID
 - `POST /api/discovery/draft-rig` — generate candidate rig spec from discovered sessions
 
-**Final Stretch 1 additions:**
+**Authoring and identity routes:**
 - `POST /api/rigs/import/materialize` — create pod-aware rig topology without launching
 - `POST /api/discovery/:id/bind` — bind discovered session to an existing logical node
 - `POST /api/discovery/:id/adopt` — UI-friendly composite adopt route (`bind` or `create_and_bind`)
@@ -90,7 +95,12 @@ In addition to the reboot-era routes:
 - `/api/specs/library` — list/get/review/sync filesystem-backed library entries
 - `/api/whoami` — daemon-backed runtime identity projection by `nodeId` or `sessionName`
 
-**Post-North-Star additions:**
+**Rig environment routes:**
+- `GET /api/rigs/:rigId/env` — live rig-environment status with best-effort fresh receipt capture
+- `GET /api/rigs/:rigId/env/logs` — service logs from the Compose adapter
+- `POST /api/rigs/:rigId/env/down` — explicit env teardown for service-backed rigs
+
+**Communication and history routes:**
 - `/api/transport` — `POST /send`, `/capture`, `/broadcast` — communication primitives
 - `/api/transcripts` — `GET /:session/tail`, `/:session/grep` — transcript access
 - `/api/ask` — `POST /` — context evidence pack over rig summary + transcripts + chat
@@ -103,27 +113,39 @@ Important route behaviors:
 - `/api/transport/send` classifies target activity before sending and can refuse unless forced
 - `/api/ask` returns context/evidence, not LLM-synthesized answers
 - `/api/rigs/:rigId/chat` streams via SSE for real-time delivery
-- `/api/specs/library/:id/review` returns structured review plus library provenance (`sourcePath`, `sourceState`)
+- `/api/specs/library/:id/review` returns structured review plus library provenance (`sourcePath`, `sourceState`), managed-app services metadata, and best-effort compose preview
 - `/api/whoami` fails honestly on missing/ambiguous identity instead of fabricating “healthy” state
+- `/api/rigs/:rigId/env` returns `{ ok: true, hasServices: false }` honestly when a rig has no service substrate
+- `/api/rigs/:rigId/env/down` currently honors stored down policy; explicit volume-removal override is not fully wired through yet
 
 ### CLI commands
 
-`index.ts` currently mounts 31 command groups. Reboot-era commands plus:
+`index.ts` currently mounts 39 command groups. Reboot-era commands plus:
 
-**North Star additions:**
+**Operator and topology commands:**
 - `rig up <rig-name>` — existing-rig restore by name (auto-finds latest snapshot)
 - `rig down` — auto-snapshots before teardown, handoff includes restore command
 - `rig discover --draft` — generate candidate rig spec from discovered sessions
 - Changed: `rig ps --nodes` shows per-node detail with session names, status, startup status
 
-**Final Stretch 1 additions:**
+**Authoring and identity commands:**
 - `rig specs ls/show/preview/add/sync` — agent-facing spec library browse/review workflow
 - `rig whoami --json` — daemon-backed runtime identity with peers, edges, transcript helpers, and command hints
 - `rig bind <discoveredId> <rigId> <logicalId>` — bind discovered session to an existing node
 - `rig adopt <file> --bind logicalId=session` — materialize then bind live sessions into a rig
 - Changed: `rig up <source>` and `rig bootstrap <source>` now resolve spec-library names and fail loudly on rig-name vs library-name ambiguity
 
-**Post-North-Star additions (8 new command groups):**
+**Rig environment commands:**
+- `rig env status <rig>` — inspect rig-scoped environment status for service-backed rigs and managed apps
+- `rig env logs <rig> [service]` — fetch service logs
+- `rig env down <rig>` — tear down the rig environment
+
+**Managed-app-aware help and copy:**
+- `rig up` help/examples explicitly include library-backed managed apps like `secrets-manager`
+- `rig specs` help/list/preview text now distinguishes rigs, agents, and managed apps
+- `openrig-user` now teaches the shipped managed-app model (`software + specialist`) and cross-rig specialist interaction
+
+**Communication and history commands:**
 - `rig send <session> "message" [--verify] [--force]` — send to agent terminal
 - `rig capture <session> [--lines N] [--json]` — capture agent pane content
 - `rig broadcast --rig <name> "message"` — multi-agent broadcast
@@ -139,7 +161,7 @@ The CLI-hosted MCP server exposes 17 tools:
 
 1-12. Reboot-era: `rigged_up`, `rigged_down`, `rigged_ps`, `rigged_status`, `rigged_snapshot_create`, `rigged_snapshot_list`, `rigged_restore`, `rigged_discover`, `rigged_claim`, `rigged_bundle_inspect`, `rigged_agent_validate`, `rigged_rig_validate`
 
-13-17. Post-North-Star additions:
+13-17. Communication and operator additions:
 - `rigged_rig_nodes` — node inventory for a rig (agents can look up infrastructure sessions)
 - `rigged_send` — send message to agent terminal
 - `rigged_capture` — capture agent pane content
@@ -157,13 +179,21 @@ The UI is now explorer-first, with a shared drawer plus center-workspace route m
 - The shared drawer has five primary surfaces:
   - **Rig drawer:** identity, node summary, snapshots (relocated from standalone panel), Turn On/Off/Export/Snapshot actions, chat room tab
   - **Node drawer:** runtime-first identity, peers, edges, transcript helpers, compact spec summary, status (with restore outcome), startup files, recent events, and `Open Full Details`
-  - **Specs drawer:** library list, draft/spec review routing, and spec authoring entry points
+  - **Specs drawer:** unified library list with `All / Apps / Rigs / Agents` filters, type/stability badges, draft/spec review routing, and spec authoring entry points
   - **Discovery drawer:** placement-first adopt/bind/materialize flow
   - **System drawer:** global event/activity surface replacing the old status-bar role
 - Pod selection opens the rig drawer with pod section expanded (no separate pod drawer)
 - Human-readable IDs are UI-only: pod labels instead of ULIDs in explorer, short ULID tails for glanceability, full IDs in detail views
 - Infrastructure/terminal nodes have distinct visual treatment
 - Graph shows pod grouping via React Flow group nodes, status colors (green=ready, amber=launching, red=failed, gray=stopped), and lightweight hover/runtime hints
+- Service-backed library entries render as `APP` rows instead of generic rigs
+- `LibraryReview` for a managed app shows:
+  - `Library — Managed App`
+  - `Copy Setup Prompt`
+  - a `Specialist Agent` card (canonical example: `vault.specialist`)
+  - a library-only `Environment` tab with compose preview, health gates, and surfaces
+- The rig drawer now has `Info`, `Env`, and `Chat Room` tabs for service-backed rigs
+- `RigEnvPanel` exposes overall env state, per-service health, health gates, surfaces, logs, and explicit env teardown
 - Explicit center-workspace routes now exist for:
   - `/specs`
   - `/specs/rig`
@@ -175,7 +205,7 @@ The UI is now explorer-first, with a shared drawer plus center-workspace route m
 
 ## 3. Database Schema
 
-The daemon now has 17 migrations.
+The daemon now has 20 migrations.
 
 ### Core state tables
 
@@ -199,6 +229,9 @@ The daemon now has 17 migrations.
 
 **bindings**
 - Physical surface attachment: tmux/cmux coordinates.
+- `019_external_cli_attachment.ts` extends this row shape with:
+  - `attachment_type`
+  - `external_session_name`
 
 **sessions**
 - Live execution state.
@@ -240,7 +273,7 @@ These remain active:
   - `label`
   - `summary`
   - serialized continuity policy
-- Final Stretch 1 made `namespace` first-class so adoption, export, and identity surfaces can use authored pod identity instead of leaking pod ULIDs.
+- `namespace` is first-class so adoption, export, and identity surfaces can use authored pod identity instead of leaking pod ULIDs.
 
 **continuity_state** (`014_agentspec_reboot.ts`)
 - Live per-`pod_id` / `node_id` operational continuity state.
@@ -263,11 +296,30 @@ These remain active:
 - Indexed by `(rig_id, created_at)` for fast rig-scoped queries
 - Note: transcript persistence is filesystem-backed (pipe-pane → log files), not SQLite. Chat is SQLite-backed.
 
+**context_usage** (`018_context_usage.ts`)
+- Persisted per-node context usage snapshots for runtime/operator surfaces.
+- Used by the daemon-owned context monitor and `whoami`/inventory projections.
+
+**rig_services** (`020_rig_services.ts`)
+- Persisted rig-scoped environment record for service-backed rigs.
+- Stores:
+  - `rig_id`
+  - `kind`
+  - `spec_json`
+  - `rig_root`
+  - resolved `compose_file`
+  - resolved `project_name`
+  - `latest_receipt_json`
+  - timestamps
+
 Migration boundary:
 - `014_agentspec_reboot.ts` adds the reboot schema shape.
 - `015_startup_context.ts` adds persisted startup replay context.
 - `016_chat_messages.ts` adds durable rig chat.
 - `017_pod_namespace.ts` backfills/persists authored pod namespace for export, adoption, and identity parity.
+- `018_context_usage.ts` adds context-usage persistence.
+- `019_external_cli_attachment.ts` extends binding rows for external CLI attachment.
+- `020_rig_services.ts` adds rig-scoped services persistence.
 
 ---
 
@@ -283,6 +335,17 @@ Migration boundary:
 - Canonical pod-aware rig topology.
 - Uses `version: "0.2"` and `pods[]`.
 - Owns cross-pod `edges[]`, rig-level startup overlays, and `cultureFile`.
+
+**RigServicesSpec**
+- Optional `services` block on a pod-aware `RigSpec`.
+- Current shipped service kind is Compose-backed env management with:
+  - `composeFile`
+  - `projectName?`
+  - `profiles?`
+  - `downPolicy?`
+  - `waitFor?`
+  - `surfaces?`
+  - `checkpoints?`
 
 **RigSpecPod**
 - Pod-local bounded context with `members[]`, pod-local `edges[]`, pod startup, and optional continuity policy.
@@ -329,13 +392,21 @@ Migration boundary:
 - Pre-launch vs interactive delivery split: `guidance_merge`/`skill_install` happen before harness boot (filesystem); `send_text` happens after harness is ready (TUI).
 - Persists replay context including resume token for future restores.
 
-### Operator-layer types (North Star + Post-North-Star)
+**EnvReceipt**
+- RigEnv capture result persisted for service-backed rigs.
+- Carries service status/health plus evaluated wait targets and capture timestamp.
+
+**RigServicesRecord**
+- Persisted database representation of a rig-scoped services substrate.
+- Holds resolved compose path, persisted spec JSON, project name, and latest receipt JSON.
+
+### Operator, identity, and communication
 
 **NodeInventoryEntry**
 - Universal node projection consumed by CLI/UI/MCP: rigId, rigName, logicalId, canonicalSessionName, podId, nodeKind (agent/infrastructure), runtime, sessionStatus, startupStatus, restoreOutcome, tmuxAttachCommand, resumeCommand, latestError.
 
 **NodeDetailEntry**
-- Extended projection for the detail drawer: adds model, agentRef, profile, resolvedSpec identity, binding, cwd, startupFiles, installedResources, recentEvents, infrastructureStartupCommand, plus Final Stretch 1 live-identity fields:
+- Extended projection for the detail drawer: adds model, agentRef, profile, resolvedSpec identity, binding, cwd, startupFiles, installedResources, recentEvents, infrastructureStartupCommand, plus live-identity fields:
   - `peers`
   - directional `edges`
   - transcript helpers/path
@@ -396,7 +467,7 @@ All rebooted services live under `packages/daemon/src/domain/`. The rule remains
 - `startup-validation.ts`: shared startup block validation
 - `path-safety.ts`: shared relative-path safety checks
 - `spec-validation-service.ts`: pure raw-YAML validation helpers
-- `spec-review-service.ts`: daemon-owned structured review model for RigSpec/AgentSpec YAML, including topology preview data and provenance state
+- `spec-review-service.ts`: daemon-owned structured review model for RigSpec/AgentSpec YAML, including topology preview data, provenance state, and managed-app services metadata (`waitFor`, `surfaces`, `composePreview`)
 
 ### Resolution pipeline
 
@@ -415,6 +486,15 @@ All rebooted services live under `packages/daemon/src/domain/`. The rule remains
 - `rigspec-exporter.ts`: dual-format live rig export back to YAML/JSON
 - `pod-repository.ts`: pod CRUD plus live continuity-state CRUD
 
+### Rig environment and agent-managed software
+
+- `compose-services-adapter.ts`: thin Compose-backed adapter for `up`, `ps`, `logs`, and teardown
+- `services-readiness.ts`: shared wait-target evaluator for `url`, `tcp`, and `service + condition: healthy`
+- `service-orchestrator.ts`: rig-scoped env boot, receipt capture, readiness gating, persisted receipt updates, and teardown
+- `rig-repository.ts`: now persists `rig_services` rows and surfaces `hasServices` in rig summaries for runtime/UI gating
+- `spec-library-service.ts`: classifies builtin/user specs and marks service-backed rigs with `hasServices`
+- `spec-review-service.ts`: lifts services metadata into review models; route layer enriches with compose preview
+
 ### Runtime adapters
 
 Three runtime adapters implement the five-method contract: projection, startup delivery, harness launch, readiness, and installed-resource listing.
@@ -429,18 +509,20 @@ Three runtime adapters implement the five-method contract: projection, startup d
 - launches via `codex`, resumes via `codex resume <threadId>`
 - readiness probe: polls for Codex ready indicator
 
-**TerminalAdapter** (North Star)
+**TerminalAdapter**
 - no-op project/deliver/launch (shell IS the harness)
 - immediate readiness (shell is ready as soon as tmux session exists)
 - for infrastructure nodes: servers, log tails, build watchers
 
-### Node inventory and operator surfaces (North Star)
+### Node inventory and operator surfaces
 
 - `node-inventory.ts`: universal node-level projection. The single source of truth for node state consumed by CLI (`ps --nodes`), UI (explorer + graph + drawer), and MCP (`rigged_rig_nodes`). Core + extended field tiers.
 - `demo-rig-selector.ts`: existing-rig power-on helper — finds the right rig by name from ps summary
-- `whoami-service.ts`: daemon-backed runtime identity projection used by `rig whoami` and adopted-session parity flows
+- `context-usage-store.ts`: SQLite + state-dir persistence for per-node context usage
+- `context-monitor.ts`: daemon-owned monitor that records context usage for runtime/operator surfaces
+- `whoami-service.ts`: daemon-backed runtime identity projection used by `rig whoami` and adopted-session parity flows, now with context-usage access
 
-### Transport and communication (Post-North-Star)
+### Transport and communication
 
 - `session-transport.ts`: communication primitives — send/capture/broadcast with session resolution (canonical + legacy names), mid-work detection, honest error reporting, pod/rig/global targeting
 - `transcript-store.ts`: pipe-pane transcript management — ANSI stripping on read, boundary markers, readTail, grep. Filesystem-backed, not SQLite.
@@ -448,29 +530,29 @@ Three runtime adapters implement the five-method contract: projection, startup d
 - `ask-service.ts`: context engineering evidence pack — gathers rig summary plus transcript excerpts, chat excerpts, insufficiency state, and guidance. Does NOT call an external LLM.
 - `chat-repository.ts`: durable rig-scoped chat — CRUD for chat_messages table, SSE-compatible event emission
 
-### Resume honesty (North Star)
+### Resume honesty
 
 - `native-resume-probe.ts`: honest assessment of whether a harness actually resumed vs fresh-launched — probes pane content for runtime-specific indicators
 - `resume-metadata-refresher.ts`: post-launch resume token capture — reads Claude conversation IDs from `.claude/` state, Codex thread IDs from SQLite state files
 - `codex-thread-id.ts`: Codex-specific thread ID extraction from the Codex SQLite database
 
-### Discovery extensions (North Star)
+### Discovery extensions
 
 - `draft-rig-generator.ts`: synthesize a candidate RigSpec YAML from discovered sessions — groups by CWD, suggests pods, sanitizes IDs
 - `claim-service.ts`: adopted-session integration service — claim/bind/create-and-bind flows, tmux metadata writes, and post-claim onboarding hint
 
-### Final Stretch 1 authoring and library surfaces
+### Authoring, library, and identity surfaces
 
-- `spec-library-service.ts`: filesystem-backed library index over builtin/user roots, classified via structured review
-- `spec-review-service.ts`: canonical review model for raw YAML, library entries, and reusable display components
+- `spec-library-service.ts`: filesystem-backed library index over builtin/user roots, classified via structured review and `hasServices`
+- `spec-review-service.ts`: canonical review model for raw YAML, library entries, reusable display components, and managed-app env details
 - `whoami-service.ts`: daemon-side identity surface with peers/edges/transcript helpers
 
 ### Snapshot, restore, and continuity
 
 - `checkpoint-store.ts`: checkpoint persistence with pod/continuity context
-- `snapshot-capture.ts`: captures pods, continuity state, and startup replay context
+- `snapshot-capture.ts`: captures pods, continuity state, startup replay context, and latest env receipt
 - `snapshot-repository.ts`: snapshot CRUD
-- `restore-orchestrator.ts`: resume, checkpoint delivery, startup replay, live continuity consultation, and topology ordering
+- `restore-orchestrator.ts`: resume, checkpoint delivery, startup replay, live continuity consultation, topology ordering, and RigEnv boot gating before agent restore
 
 ### Bundles, bootstrap, and legacy compatibility
 
@@ -551,14 +633,14 @@ Restore now:
 - restore states: `resumed` / `rebuilt` / `fresh` / `failed`
 - failed resume is FAILED loudly — no automatic fresh fallback
 
-### Auto-snapshot + existing-rig power-on (North Star)
+### Auto-snapshot and existing-rig power-on
 
 - `rig down <rigId>` auto-captures an `auto-pre-down` snapshot before teardown
 - `rig up <rig-name>` (no file extension) searches for existing rig by name, restores from latest auto-pre-down snapshot
 - If no snapshot: error with guidance ("No saved snapshot for rig 'X'. Boot from a spec or bundle path.")
 - Post-command handoff: down output includes snapshot ID + restore command; up output includes node statuses + attach command
 
-### Communication flow (Post-North-Star)
+### Communication flow
 
 `rig send <session> "message"` → CLI → `POST /api/transport/send` → `SessionTransport`:
 1. Resolve session name (canonical or legacy, by session/rig/pod/global)
@@ -567,7 +649,7 @@ Restore now:
 4. Optional `--verify`: capture post-send pane, check message visibility
 5. Honest result with reason on failure
 
-### Transcript flow (Post-North-Star)
+### Transcript flow
 
 1. `NodeLauncher` starts `pipe-pane` immediately after tmux session creation (before harness boot)
 2. Raw terminal output streams to `~/.openrig/transcripts/{rig-name}/{session-name}.log`
@@ -576,7 +658,7 @@ Restore now:
 5. On restore: boundary marker written before re-launch. Pipe-pane reconnects to same file (append).
 6. `rig ask` gathers rig summary plus transcript excerpts, chat excerpts, insufficiency state, and guidance
 
-### Chat flow (Post-North-Star)
+### Chat flow
 
 1. `rig chatroom send <rig> "message"` → `POST /api/rigs/:rigId/chat/send` → `ChatRepository.addMessage()`
 2. SSE stream: `GET /api/rigs/:rigId/chat/watch` delivers real-time messages
@@ -585,7 +667,7 @@ Restore now:
 5. MCP: `rigged_chatroom_send` + `rigged_chatroom_watch`
 6. Source of truth: daemon-backed SQLite (`chat_messages` table), not tmux scrollback
 
-### Config + preflight flow (Post-North-Star)
+### Config and preflight flow
 
 - `rig config` reads/writes `~/.openrig/config.json` with legacy fallback from `~/.rigged/config.json`. 5 locked keys: `daemon.port`, `daemon.host`, `db.path`, `transcripts.enabled`, `transcripts.path`
 - Precedence: CLI flag > env var > config file > default
@@ -593,11 +675,11 @@ Restore now:
 - Auto-preflight runs on `rig up` and daemon start
 - Every preflight error: what failed + why it matters + what to do (3-part pattern)
 
-### Discovery-to-draft-rig flow (North Star)
+### Discovery-to-draft-rig flow
 
 `rig discover --draft` → scan tmux sessions → group by CWD → suggest pod structure → generate candidate RigSpec YAML → output to stdout or file
 
-### Spec review and spec library flow (Final Stretch 1)
+### Spec review and spec library flow
 
 1. Raw YAML preview:
    - UI/CLI posts YAML to `/api/specs/review/rig` or `/api/specs/review/agent`
@@ -606,12 +688,17 @@ Restore now:
 2. Filesystem-backed library:
    - `SpecLibraryService` scans builtin + user roots (`packages/daemon/specs`, `~/.openrig/specs`) with legacy fallback from `~/.rigged/specs`
    - each YAML file is classified via structured review
+   - service-backed rigs are marked `hasServices`
    - `/api/specs/library` serves list/get/review/sync
 3. CLI:
    - `rig specs ls/show/preview/add/sync`
    - `rig up` / `rig bootstrap` resolve library names before falling back to other source kinds
+4. UI:
+   - `Specs` drawer presents a unified library list with `All / Apps / Rigs / Agents`
+   - service-backed entries render as `APP`
+   - library review shows specialist identity, setup prompt, and environment details
 
-### Whoami and adopted-session parity flow (Final Stretch 1)
+### Whoami and adopted-session parity flow
 
 1. Managed sessions still prefer projected `OPENRIG_NODE_ID` / `OPENRIG_SESSION_NAME`.
 2. Adopted sessions use tmux-owned metadata written at claim/bind time:
@@ -628,7 +715,7 @@ Restore now:
    - raw tmux session-name fallback
 4. The daemon owns the truth surface through `/api/whoami`; tmux metadata is an adopted-session anchor, not sovereign truth.
 
-### Materialize / bind / adopt flow (Final Stretch 1)
+### Materialize / bind / adopt flow
 
 1. `POST /api/rigs/import/materialize` creates a pod-aware topology without launching sessions.
 2. `POST /api/discovery/:id/bind` attaches a discovered live session to an existing logical node.
@@ -640,7 +727,7 @@ Restore now:
    - `rig adopt`
 5. Authored pod namespace is preserved through adoption so logical ids stay `${podNamespace}.${memberName}`.
 
-### Live identity / specs UI flow (Final Stretch 1)
+### Live identity / specs UI flow
 
 1. Explorer/graph selection opens the shared right drawer.
 2. Node drawer stays runtime-first and now includes:
@@ -655,6 +742,47 @@ Restore now:
    - library review
    - live full-details surfaces
 5. Graph nodes carry lightweight hover/runtime hints without replacing drawer-first operation.
+
+### Rig environment flow
+
+1. Rig instantiation persists a `rig_services` record when a pod-aware `RigSpec` has a `services` block.
+2. `ServiceOrchestrator.boot(...)` runs before agent launch/restore:
+   - Compose `up`
+   - evaluate `waitFor`
+   - persist `EnvReceipt`
+   - fail honestly on timeout or unhealthy waits
+3. `GET /api/rigs/:rigId/env` returns live status:
+   - `hasServices: false` for non-service rigs
+   - otherwise kind, compose identity, receipt, and surfaces
+4. `rig env status/logs/down` and the rig drawer `Env` tab are thin client surfaces over those routes.
+5. Snapshot/restore preserves the latest env receipt and reboots services before agent restore.
+
+### Agent-managed app flow
+
+1. A managed app is a service-backed rig plus a specialist agent.
+2. The canonical shipped example is:
+   - rig: `secrets-manager`
+   - pod: `vault`
+   - member: `specialist`
+   - session: `vault-specialist@secrets-manager`
+3. Specs/UI flow:
+   - browse `secrets-manager` under `Apps`
+   - open library review
+   - inspect specialist identity, env stack, health gates, and surfaces
+   - copy the setup prompt
+4. Runtime flow:
+   - launch the rig
+   - services boot before `vault.specialist`
+   - the rig drawer `Env` tab exposes state, health, surfaces, logs, and teardown
+
+### Specialist interaction flow
+
+1. Other humans or agents address a specialist by session name, e.g. `vault-specialist@secrets-manager`.
+2. Cross-rig communication uses the existing transport seam:
+   - `rig send vault-specialist@secrets-manager "..." --verify`
+3. No new routing primitive exists here:
+   - delegation is currently conventional/social
+   - session transport remains the transport truth
 
 ---
 
@@ -735,7 +863,7 @@ The event log remains append-only and SQLite-backed. The global SSE stream (`/ap
 
 `createDaemon()` now does the following:
 
-1. Open SQLite and run all 17 migrations.
+1. Open SQLite and run all 20 migrations.
 2. Construct core repositories and legacy services.
 3. Construct package/bootstrap/discovery services.
 4. Construct rebooted startup/runtime services:
@@ -743,19 +871,24 @@ The event log remains append-only and SQLite-backed. The global SSE stream (`/ap
    - `ClaudeCodeAdapter`, `CodexRuntimeAdapter`, `TerminalAdapter`
    - `PodRigInstantiator`
    - `PodBundleSourceResolver`
-5. Construct North Star + Post-North-Star services:
+5. Construct rig environment services:
+   - `ComposeServicesAdapter`
+   - `ServiceOrchestrator`
+6. Construct operator, transport, and history services:
    - `TranscriptStore` (with config from env for transcript path/enabled)
    - `SessionTransport`
    - `ChatRepository`
    - `AskService` (with `HistoryQuery`)
-    - `ResumeMetadataRefresher`
-    - `NodeInventory`
-6. Construct Final Stretch 1 services:
+   - `ResumeMetadataRefresher`
+   - `ContextUsageStore`
+   - `ContextMonitor`
+   - `NodeInventory`
+7. Construct authoring, identity, and managed-app services:
    - `SpecReviewService`
    - `SpecLibraryService` (builtin + user roots)
    - `WhoamiService`
-7. Construct `BootstrapOrchestrator` with both legacy and rebooted seams.
-8. Build `AppDeps`, enforce shared-DB invariants in `createApp()`, and mount the full route tree including specs review/library and `whoami`.
+8. Construct `BootstrapOrchestrator` with both legacy and rebooted seams.
+9. Build `AppDeps`, enforce shared-DB invariants in `createApp()`, and mount the full route tree including env, specs review/library, and `whoami`.
 
 ---
 
@@ -763,25 +896,18 @@ The event log remains append-only and SQLite-backed. The global SSE stream (`/ap
 
 ### Test footprint
 
-- daemon: 112 Vitest files / 1,461 tests
-- CLI: 29 Vitest files / 275 tests
-- UI: 35 Vitest files / 364 tests
-- total: 176 files / 2,100 tests
+- daemon: 127 Vitest files / 1,668 tests
+- CLI: 37 Vitest files / 366 tests
+- UI: 37 Vitest files / 388 tests
+- total: 201 files / 2,422 tests
 
 ### Verified during this doc refresh
 
-- daemon: `1461/1461` passing
-- CLI: `275/275` passing
-- UI: `361/364` passing
+- daemon: `1668/1668` passing
+- CLI: `366/366` passing
+- UI: `388/388` passing
 
-Current known UI failures during this refresh:
-- `design-compliance.test.tsx`
-  - non-zero border-radius count still above zero
-  - stale `StatusBar.tsx` file assumption in the mono/data-display assertion
-- `tailwind-foundation.test.tsx`
-  - missing `.bg-card` assertion in generated CSS
-
-### Post-North-Star test suites
+### Communication, identity, and authoring suites
 
 In addition to reboot-era coverage:
 
@@ -804,9 +930,23 @@ In addition to reboot-era coverage:
 - `adopt.test.ts` — CLI materialize/bind adoption flow
 - UI tests for spec review displays, spec library review, specs panel, live node details, and adopted-session node identity
 
+### Rig environment and agent-managed software suites
+
+- `rigspec-services.test.ts` — RigSpec `services` schema and parsing
+- `service-orchestrator.test.ts` — Compose-backed env boot, readiness, receipt capture, teardown
+- `services-up.test.ts` — end-to-end service-backed rig boot
+- `services-snapshot-restore.test.ts` — env receipt capture + restore gating
+- `env-routes.test.ts` — runtime env status/logs/down route contracts
+- `spec-library-starters.test.ts` — builtin `secrets-manager` + `vault-specialist` presence, topology, and `hasServices`
+- `spec-review-service.test.ts` / `spec-library-routes.test.ts` — managed-app services review, wait-target contract, compose preview
+- CLI `env.test.ts` — env status/logs/down command surface
+- UI `specs-panel.test.tsx` — `All / Apps / Rigs / Agents`, type/stability badges
+- UI `library-review.test.tsx` — specialist card, setup prompt, managed-app environment tab
+- UI `rig-detail-panel.test.tsx` — runtime `Env` tab and env-state rendering
+
 ### Dogfood status
 
-Post-North-Star + Final Stretch 1 dogfood verified:
+Core operator, communication, identity, and library flows verified:
 
 - Full product loop: `rig up demo/rig.yaml` → harnesses launch → `rig ps --nodes` → `rig down` → `rig up demo-rig` (restore by name) → agents resume
 - Communication: `rig send`, `rig capture`, `rig broadcast` across running rig
@@ -819,6 +959,25 @@ Post-North-Star + Final Stretch 1 dogfood verified:
 - Authoring/library: `rig specs ls/show/preview/add/sync`
 - Adoption: materialize + bind/adopt flows from discovery/specs workflows
 - MCP: all 17 tools verified
+
+Rig environment and agent-managed software flows additionally verified:
+
+- Managed-app browse flow in the UI:
+  - `Specs` → `Apps` → `secrets-manager`
+  - managed-app review with `vault.specialist`
+- `secrets-manager` launch as a real service-backed rig with a specialist agent
+- Real Vault operations through `vault-specialist@secrets-manager`
+  - health check
+  - write secret
+  - read secret back
+- Cross-rig direct messaging to `vault-specialist@secrets-manager`
+- Runtime `Env` tab:
+  - overall state
+  - health gates
+  - surfaces
+  - logs
+  - explicit teardown
+- Failure honesty when Vault is stopped mid-rig
 
 ---
 
@@ -834,6 +993,9 @@ These are the main intentional limits that still describe the shipped system:
 6. Chat is rig-scoped only — no cross-rig channels or DMs.
 7. `--verify` on `rig send` checks pane content for message visibility but can produce false positives from pre-existing matching content. Known limitation.
 8. Terminal node readiness is shell-ready only — no service health probes.
+9. `rig env down --volumes` exists in the CLI surface, but the explicit daemon-side override is not fully plumbed through yet.
+10. Managed-app service surfaces are descriptive only — OpenRig does not automatically inject service URLs/tokens into agent prompts beyond authored startup/context files.
+11. Specialist delegation is conventional, not automatic — other agents/humans address the specialist by session name or other normal communication surfaces.
 
 ---
 
