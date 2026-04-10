@@ -22,6 +22,39 @@ function connectedCmux() {
   return new CmuxAdapter(factory, { timeoutMs: 1000 });
 }
 
+function failingCmux(failOn: string) {
+  const calls: Array<{ method: string; params?: unknown }> = [];
+  const factory: CmuxTransportFactory = async () => ({
+    request: async (method: string, params?: unknown) => {
+      calls.push({ method, params });
+      if (method === "capabilities") return { capabilities: ["surface.focus", "surface.create", "workspace.current"] };
+      if (method === failOn) throw new Error(`${failOn} failed: connection lost`);
+      if (method === "workspace.current") return { workspace_id: "workspace:1" };
+      if (method === "surface.create") return { created_surface_ref: "surface:99" };
+      return {};
+    },
+    close: () => {},
+  });
+  const adapter = new CmuxAdapter(factory, { timeoutMs: 1000 });
+  return { adapter, calls };
+}
+
+function trackingCmux() {
+  const calls: Array<{ method: string; params?: unknown }> = [];
+  const factory: CmuxTransportFactory = async () => ({
+    request: async (method: string, params?: unknown) => {
+      calls.push({ method, params });
+      if (method === "capabilities") return { capabilities: ["surface.focus", "surface.create", "workspace.current"] };
+      if (method === "workspace.current") return { workspace_id: "workspace:1" };
+      if (method === "surface.create") return { created_surface_ref: "surface:99" };
+      return {};
+    },
+    close: () => {},
+  });
+  const adapter = new CmuxAdapter(factory, { timeoutMs: 1000 });
+  return { adapter, calls };
+}
+
 describe("Session routes", () => {
   let db: Database.Database;
 
@@ -163,6 +196,135 @@ describe("Session routes", () => {
     const body = await res.json();
     expect(body.ok).toBe(false);
     expect(body.code).toBe("unavailable");
+  });
+
+  // -- open-cmux tests --
+
+  it("POST .../open-cmux with existing cmuxSurface -> focused_existing, no create/send side effects", async () => {
+    const { adapter: cmux, calls } = trackingCmux();
+    await cmux.connect();
+    const { app, rigRepo, sessionRegistry } = createTestApp(db, { cmux });
+    const rig = rigRepo.createRig("r01");
+    const node = rigRepo.addNode(rig.id, "dev1-impl");
+    sessionRegistry.registerSession(node.id, "r01-dev1-impl");
+    sessionRegistry.updateBinding(node.id, { cmuxSurface: "surface:42", cmuxWorkspace: "workspace:1" });
+
+    // Clear capability call from connect
+    calls.length = 0;
+
+    const res = await app.request(`/api/rigs/${rig.id}/nodes/dev1-impl/open-cmux`, { method: "POST" });
+    expect(res.status).toBe(200);
+    const body = await res.json() as Record<string, unknown>;
+    expect(body["ok"]).toBe(true);
+    expect(body["action"]).toBe("focused_existing");
+
+    // Only focusSurface should have been called — no create, no send, no workspace.current
+    const methodNames = calls.map((c) => c.method);
+    expect(methodNames).toContain("surface.focus");
+    expect(methodNames).not.toContain("surface.create");
+    expect(methodNames).not.toContain("surface.sendText");
+    expect(methodNames).not.toContain("workspace.current");
+  });
+
+  it("POST .../open-cmux tmux-backed node without cmuxSurface -> created_new, binds workspace+surface, sends tmux attach", async () => {
+    const { adapter: cmux, calls } = trackingCmux();
+    await cmux.connect();
+    const { app, rigRepo, sessionRegistry } = createTestApp(db, { cmux });
+    const rig = rigRepo.createRig("r01");
+    const node = rigRepo.addNode(rig.id, "dev1-impl");
+    sessionRegistry.registerSession(node.id, "r01-dev1-impl");
+    sessionRegistry.updateBinding(node.id, { tmuxSession: "r01-dev1-impl", attachmentType: "tmux" });
+
+    calls.length = 0;
+
+    const res = await app.request(`/api/rigs/${rig.id}/nodes/dev1-impl/open-cmux`, { method: "POST" });
+    expect(res.status).toBe(200);
+    const body = await res.json() as Record<string, unknown>;
+    expect(body["ok"]).toBe(true);
+    expect(body["action"]).toBe("created_new");
+
+    // Must have used currentWorkspace as anchor, NOT created a new workspace
+    const methodNames = calls.map((c) => c.method);
+    expect(methodNames).toContain("workspace.current");
+    expect(methodNames).toContain("surface.create");
+    expect(methodNames).toContain("surface.sendText");
+    expect(methodNames).toContain("surface.focus");
+    expect(methodNames).not.toContain("workspace.create");
+
+    // sendText must contain tmux attach
+    const sendCall = calls.find((c) => c.method === "surface.sendText");
+    expect(sendCall).toBeDefined();
+    const sendParams = sendCall!.params as Record<string, unknown>;
+    expect(String(sendParams["text"])).toContain("tmux attach -t r01-dev1-impl");
+
+    // Binding must be persisted with both workspace and surface
+    const binding = sessionRegistry.getBindingForNode(node.id);
+    expect(binding?.cmuxWorkspace).toBe("workspace:1");
+    expect(binding?.cmuxSurface).toBe("surface:99");
+  });
+
+  it("POST .../open-cmux external-cli node -> created_helper, honest helper text, no tmux attach", async () => {
+    const { adapter: cmux, calls } = trackingCmux();
+    await cmux.connect();
+    const { app, rigRepo, sessionRegistry } = createTestApp(db, { cmux });
+    const rig = rigRepo.createRig("r01");
+    const node = rigRepo.addNode(rig.id, "ext-node");
+    sessionRegistry.registerSession(node.id, "r01-ext-node");
+    sessionRegistry.updateBinding(node.id, { attachmentType: "external_cli", externalSessionName: "r01-ext-node" });
+
+    calls.length = 0;
+
+    const res = await app.request(`/api/rigs/${rig.id}/nodes/ext-node/open-cmux`, { method: "POST" });
+    expect(res.status).toBe(200);
+    const body = await res.json() as Record<string, unknown>;
+    expect(body["ok"]).toBe(true);
+    expect(body["action"]).toBe("created_helper");
+
+    // Helper text must include honest commands, NOT tmux attach
+    const sendCall = calls.find((c) => c.method === "surface.sendText");
+    expect(sendCall).toBeDefined();
+    const text = String((sendCall!.params as Record<string, unknown>)["text"]);
+    expect(text).not.toContain("tmux attach");
+    expect(text).toContain("rig capture r01-ext-node");
+    expect(text).toContain("rig transcript r01-ext-node --tail 100");
+    expect(text).toContain("rig send r01-ext-node");
+    expect(text).toContain("--verify");
+  });
+
+  it("POST .../open-cmux sendText failure -> does not report ok:true, binding still persisted", async () => {
+    const { adapter: cmux } = failingCmux("surface.sendText");
+    await cmux.connect();
+    const { app, rigRepo, sessionRegistry } = createTestApp(db, { cmux });
+    const rig = rigRepo.createRig("r01");
+    const node = rigRepo.addNode(rig.id, "dev1-impl");
+    sessionRegistry.registerSession(node.id, "r01-dev1-impl");
+    sessionRegistry.updateBinding(node.id, { tmuxSession: "r01-dev1-impl", attachmentType: "tmux" });
+
+    const res = await app.request(`/api/rigs/${rig.id}/nodes/dev1-impl/open-cmux`, { method: "POST" });
+    expect(res.status).toBe(200);
+    const body = await res.json() as Record<string, unknown>;
+    expect(body["ok"]).toBe(false);
+    expect(body["error"]).toContain("connection lost");
+
+    // Binding should still be persisted (surface was created before sendText failed)
+    const binding = sessionRegistry.getBindingForNode(node.id);
+    expect(binding?.cmuxSurface).toBe("surface:99");
+  });
+
+  it("POST .../open-cmux focusSurface failure after creation -> does not report ok:true", async () => {
+    const { adapter: cmux } = failingCmux("surface.focus");
+    await cmux.connect();
+    const { app, rigRepo, sessionRegistry } = createTestApp(db, { cmux });
+    const rig = rigRepo.createRig("r01");
+    const node = rigRepo.addNode(rig.id, "dev1-impl");
+    sessionRegistry.registerSession(node.id, "r01-dev1-impl");
+    sessionRegistry.updateBinding(node.id, { tmuxSession: "r01-dev1-impl", attachmentType: "tmux" });
+
+    const res = await app.request(`/api/rigs/${rig.id}/nodes/dev1-impl/open-cmux`, { method: "POST" });
+    expect(res.status).toBe(200);
+    const body = await res.json() as Record<string, unknown>;
+    expect(body["ok"]).toBe(false);
+    expect(body["error"]).toContain("connection lost");
   });
 
   // NS-T08: node inventory route
