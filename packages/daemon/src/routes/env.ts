@@ -25,13 +25,24 @@ export function envRoutes(): Hono {
       return c.json({ ok: true, hasServices: false });
     }
 
-    // Optionally refresh receipt
+    // Refresh receipt with honest probe tracking
     let receipt = record.latestReceiptJson ? JSON.parse(record.latestReceiptJson) : null;
+    let probeStatus: "fresh" | "stale" | "no_orchestrator" = "no_orchestrator";
+    let probeError: string | undefined;
     if (serviceOrchestrator) {
       try {
         const fresh = await serviceOrchestrator.captureReceipt(rigId);
-        if (fresh) receipt = fresh;
-      } catch { /* use cached */ }
+        if (fresh) {
+          receipt = fresh;
+          probeStatus = "fresh";
+        } else {
+          probeStatus = "stale";
+          probeError = "Probe returned no receipt — services record may no longer exist";
+        }
+      } catch (err) {
+        probeStatus = "stale";
+        probeError = (err as Error).message;
+      }
     }
 
     // Parse surfaces from specJson (best-effort)
@@ -48,6 +59,8 @@ export function envRoutes(): Hono {
       composeFile: record.composeFile,
       projectName: record.projectName,
       receipt,
+      probeStatus,
+      ...(probeError ? { probeError } : {}),
       ...(surfaces ? { surfaces } : {}),
     });
   });
