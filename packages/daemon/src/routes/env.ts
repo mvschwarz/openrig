@@ -119,14 +119,9 @@ export function envRoutes(): Hono {
 
     const body = await c.req.json<{ volumes?: boolean }>().catch(() => ({} as { volumes?: boolean }));
 
-    // Override down policy if --volumes requested
-    if (body.volumes) {
-      let spec: { downPolicy?: string } = {};
-      try { spec = JSON.parse(record.specJson); } catch { /* empty */ }
-      // Force down_and_volumes regardless of spec policy
-    }
-
-    const result = await serviceOrchestrator.teardown(rigId);
+    const result = body.volumes
+      ? await serviceOrchestrator.teardown(rigId, { policyOverride: "down_and_volumes" })
+      : await serviceOrchestrator.teardown(rigId);
 
     if (!result.ok) {
       return c.json({ ok: false, error: result.error }, 500);

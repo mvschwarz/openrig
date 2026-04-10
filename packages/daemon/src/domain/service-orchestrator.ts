@@ -137,14 +137,14 @@ export class ServiceOrchestrator {
    * Tear down services for a rig. Called by teardown orchestrator during rig down.
    * Honors down_policy from the persisted spec.
    */
-  async teardown(rigId: string): Promise<ServiceTeardownResult> {
+  async teardown(rigId: string, opts?: { policyOverride?: "down" | "down_and_volumes" | "leave_running" }): Promise<ServiceTeardownResult> {
     const record = this.rigRepo.getServicesRecord(rigId);
     if (!record) {
       return { ok: true }; // No services — nothing to tear down
     }
 
     const spec = this.parseSpec(record);
-    const policy = spec?.downPolicy ?? "down";
+    const policy = opts?.policyOverride ?? spec?.downPolicy ?? "down";
 
     const result = await this.composeAdapter.down({
       composeFile: record.composeFile,

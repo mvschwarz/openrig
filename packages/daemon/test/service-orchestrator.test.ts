@@ -371,6 +371,26 @@ describe("ServiceOrchestrator", () => {
     expect(exec).not.toHaveBeenCalled(); // no docker compose command issued
   });
 
+  it("teardown — policyOverride overrides persisted down_policy", async () => {
+    const spec: RigServicesSpec = {
+      kind: "compose",
+      composeFile: "docker-compose.yml",
+      downPolicy: "down", // persisted policy is plain "down"
+    };
+    const rig = seedRigWithServices(spec);
+
+    const exec = vi.fn<ExecFn>().mockResolvedValue("");
+    const adapter = new ComposeServicesAdapter(exec);
+
+    const orchestrator = new ServiceOrchestrator({ rigRepo, composeAdapter: adapter });
+    const result = await orchestrator.teardown(rig.id, { policyOverride: "down_and_volumes" });
+
+    expect(result.ok).toBe(true);
+    const cmd = exec.mock.calls[0]![0] as string;
+    expect(cmd).toContain("down");
+    expect(cmd).toContain("--volumes"); // override wins over persisted "down"
+  });
+
   it("boot — no services record returns honest error", async () => {
     const rig = rigRepo.createRig("bare-rig");
 

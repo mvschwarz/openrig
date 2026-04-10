@@ -5,11 +5,15 @@ import { envRoutes } from "../src/routes/env.js";
 function createApp(deps: {
   getServicesRecord: (rigId: string) => unknown;
   captureReceipt?: (rigId: string) => unknown;
+  teardown?: (rigId: string, opts?: unknown) => unknown;
 }): Hono {
   const app = new Hono();
   app.use("*", async (c, next) => {
     c.set("rigRepo" as never, { getServicesRecord: deps.getServicesRecord });
-    c.set("serviceOrchestrator" as never, deps.captureReceipt ? { captureReceipt: deps.captureReceipt } : undefined);
+    const orchestrator = (deps.captureReceipt || deps.teardown)
+      ? { captureReceipt: deps.captureReceipt, teardown: deps.teardown }
+      : undefined;
+    c.set("serviceOrchestrator" as never, orchestrator);
     c.set("composeAdapter" as never, undefined);
     await next();
   });
@@ -162,6 +166,47 @@ describe("env routes", () => {
     // Cached receipt preserved
     const receipt = body["receipt"] as Record<string, unknown>;
     expect(receipt["capturedAt"]).toBe("2026-04-09T11:00:00Z");
+  });
+
+  it("POST /env/down with volumes=true passes policyOverride=down_and_volumes to teardown", async () => {
+    let capturedOpts: unknown = undefined;
+    const app = createApp({
+      getServicesRecord: () => SERVICE_RECORD,
+      teardown: (_rigId: string, opts?: unknown) => {
+        capturedOpts = opts;
+        return Promise.resolve({ ok: true });
+      },
+    });
+
+    const res = await app.request("/api/rigs/rig-1/env/down", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ volumes: true }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json() as Record<string, unknown>;
+    expect(body["ok"]).toBe(true);
+    expect(capturedOpts).toBeDefined();
+    expect((capturedOpts as Record<string, unknown>)["policyOverride"]).toBe("down_and_volumes");
+  });
+
+  it("POST /env/down without volumes does not pass policyOverride", async () => {
+    let capturedOpts: unknown = undefined;
+    const app = createApp({
+      getServicesRecord: () => SERVICE_RECORD,
+      teardown: (_rigId: string, opts?: unknown) => {
+        capturedOpts = opts;
+        return Promise.resolve({ ok: true });
+      },
+    });
+
+    const res = await app.request("/api/rigs/rig-1/env/down", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    expect(res.status).toBe(200);
+    expect(capturedOpts).toBeUndefined();
   });
 
   it("GET /env does not include probeStatus when hasServices is false", async () => {
