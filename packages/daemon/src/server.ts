@@ -98,6 +98,7 @@ export interface AppDeps {
   specLibraryService?: SpecLibraryService;
   whoamiService?: WhoamiService;
   contextUsageStore?: import("./domain/context-usage-store.js").ContextUsageStore;
+  nodeCmuxService?: import("./domain/node-cmux-service.js").NodeCmuxService;
   serviceOrchestrator?: import("./domain/service-orchestrator.js").ServiceOrchestrator;
   composeAdapter?: import("./adapters/compose-services-adapter.js").ComposeServicesAdapter;
   uiDistDir?: string | null;
@@ -235,6 +236,7 @@ export function createApp(deps: AppDeps): Hono {
     c.set("specLibraryService" as never, deps.specLibraryService);
     c.set("whoamiService" as never, deps.whoamiService);
     c.set("contextUsageStore" as never, deps.contextUsageStore);
+    c.set("nodeCmuxService" as never, deps.nodeCmuxService);
     c.set("serviceOrchestrator" as never, deps.serviceOrchestrator);
     c.set("composeAdapter" as never, deps.composeAdapter);
     c.set("db" as never, deps.rigRepo.db);

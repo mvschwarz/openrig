@@ -3,6 +3,7 @@ import type { RigRepository } from "../domain/rig-repository.js";
 import type { SessionRegistry } from "../domain/session-registry.js";
 import type { NodeLauncher } from "../domain/node-launcher.js";
 import type { CmuxAdapter } from "../adapters/cmux.js";
+import type { NodeCmuxService } from "../domain/node-cmux-service.js";
 import type { TranscriptStore } from "../domain/transcript-store.js";
 import { getNodeInventory, getNodeDetail, getNodeInventoryWithContext, getNodeDetailWithContext } from "../domain/node-inventory.js";
 import type { ContextUsageStore } from "../domain/context-usage-store.js";
@@ -86,6 +87,23 @@ nodesRoutes.post("/:logicalId/launch", async (c) => {
   }
 
   return c.json(result, 201);
+});
+
+// POST /api/rigs/:rigId/nodes/:logicalId/open-cmux
+nodesRoutes.post("/:logicalId/open-cmux", async (c) => {
+  const rigId = c.req.param("rigId")!;
+  const logicalId = decodeURIComponent(c.req.param("logicalId")!);
+  const nodeCmuxService = c.get("nodeCmuxService" as never) as NodeCmuxService | undefined;
+
+  if (!nodeCmuxService) {
+    return c.json({ ok: false, error: "cmux service not available", code: "unavailable" }, 500);
+  }
+
+  const result = await nodeCmuxService.openOrFocusNodeSurface(rigId, logicalId);
+  if (!result.ok && result.code === "not_found") {
+    return c.json(result, 404);
+  }
+  return c.json(result);
 });
 
 // POST /api/rigs/:rigId/nodes/:logicalId/focus

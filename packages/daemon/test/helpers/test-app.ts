@@ -69,6 +69,7 @@ import { InstallRepository } from "../../src/domain/install-repository.js";
 import { InstallEngine } from "../../src/domain/install-engine.js";
 import { InstallVerifier } from "../../src/domain/install-verifier.js";
 import { PodBundleSourceResolver } from "../../src/domain/bundle-source-resolver.js";
+import { NodeCmuxService } from "../../src/domain/node-cmux-service.js";
 import { createApp } from "../../src/server.js";
 import fs from "node:fs";
 
@@ -206,6 +207,7 @@ export function createTestApp(
   const rigLifecycleService = new RigLifecycleService({ db, rigRepo, sessionRegistry, discoveryRepo, eventBus, tmuxAdapter: tmux });
   const contextUsageStore = new ContextUsageStore(db, { stateDir: "/tmp/openrig-test" });
   const whoamiService = new WhoamiService({ db, rigRepo, sessionRegistry, transcriptStore, contextUsageStore });
+  const nodeCmuxService = new NodeCmuxService(rigRepo, sessionRegistry, cmux);
 
   const podBundleSourceResolver = new PodBundleSourceResolver();
 
@@ -224,6 +226,7 @@ export function createTestApp(
     podBundleSourceResolver,
     contextUsageStore,
     whoamiService,
+    nodeCmuxService,
   });
   return {
     app, rigRepo, sessionRegistry, eventBus, nodeLauncher, snapshotRepo,
