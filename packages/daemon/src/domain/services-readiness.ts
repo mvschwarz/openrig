@@ -9,11 +9,15 @@ export interface WaitTargetResult {
 
 /**
  * Shared readiness evaluator. ONE place for wait-target evaluation and derived
- * env health logic. Called by:
- * - boot-time health gate
- * - background health monitor (future)
- * - rig env status (future)
- * - rig ps env summary (future)
+ * env health logic.
+ *
+ * Shipped consumers:
+ * - boot-time health gate (ServiceOrchestrator.boot)
+ * - on-demand receipt capture (ServiceOrchestrator.captureReceipt → env route)
+ *
+ * Deferred:
+ * - background health monitor (not yet implemented)
+ * - rig ps env summary (not yet implemented)
  */
 export async function evaluateWaitTargets(
   targets: RigServicesWaitTarget[],
