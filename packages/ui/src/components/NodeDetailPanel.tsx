@@ -29,9 +29,9 @@ export function NodeDetailPanel({ rigId, logicalId, onClose }: NodeDetailPanelPr
     if (data?.tmuxAttachCommand) await copyText(data.tmuxAttachCommand);
   };
 
-  const handleFocusCmux = async () => {
+  const handleOpenCmux = async () => {
     try {
-      await fetch(`/api/rigs/${encodeURIComponent(rigId)}/nodes/${encodeURIComponent(logicalId)}/focus`, { method: "POST" });
+      await fetch(`/api/rigs/${encodeURIComponent(rigId)}/nodes/${encodeURIComponent(logicalId)}/open-cmux`, { method: "POST" });
     } catch { /* best-effort */ }
   };
 
@@ -127,8 +127,8 @@ export function NodeDetailPanel({ rigId, logicalId, onClose }: NodeDetailPanelPr
                   Copy tmux attach
                 </button>
               )}
-              <button onClick={handleFocusCmux} data-testid="detail-cmux-focus" className="px-2 py-1 border border-stone-300 font-mono text-[8px] uppercase hover:bg-stone-200 text-left">
-                Open in cmux
+              <button onClick={handleOpenCmux} data-testid="detail-cmux-open" className="px-2 py-1 border border-stone-300 font-mono text-[8px] uppercase hover:bg-stone-200 text-left">
+                Open CMUX
               </button>
               {data.resumeCommand && (
                 <button onClick={handleCopyResume} data-testid="detail-copy-resume" className="px-2 py-1 border border-stone-300 font-mono text-[8px] uppercase hover:bg-stone-200 text-left truncate">

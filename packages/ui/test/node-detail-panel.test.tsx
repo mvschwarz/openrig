@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, waitFor, cleanup } from "@testing-library/react";
+import { render, screen, waitFor, cleanup, fireEvent } from "@testing-library/react";
 import { QueryClientProvider, QueryClient } from "@tanstack/react-query";
 import { NodeDetailPanel } from "../src/components/NodeDetailPanel.js";
 
@@ -258,6 +258,39 @@ describe("NodeDetailPanel", () => {
     await waitFor(() => {
       expect(screen.getByTestId("detail-open-full")).toBeDefined();
       expect(screen.getByText("Open Full Details")).toBeDefined();
+    });
+  });
+
+  it("Open CMUX button is present for unbound nodes, calls /open-cmux not /focus", async () => {
+    // Use unbound node detail (no cmuxSurface in binding)
+    const unboundDetail = { ...AGENT_DETAIL, binding: { tmuxSession: "dev-impl@test-rig" } };
+    mockFetch.mockImplementation(async (url: string, init?: RequestInit) => {
+      const u = typeof url === "string" ? url : "";
+      if (u.includes("/open-cmux") && init?.method === "POST") {
+        return { ok: true, json: async () => ({ ok: true, action: "created_new" }) };
+      }
+      return { ok: true, json: async () => unboundDetail };
+    });
+
+    renderPanel();
+    await waitFor(() => {
+      expect(screen.getByTestId("detail-cmux-open")).toBeDefined();
+    });
+    expect(screen.queryByTestId("detail-cmux-focus")).toBeNull();
+
+    // Button labeled "Open CMUX"
+    expect(screen.getByText("Open CMUX")).toBeDefined();
+
+    // Click and verify fetch target
+    fireEvent.click(screen.getByTestId("detail-cmux-open"));
+
+    await waitFor(() => {
+      const openCmuxCall = (mockFetch as ReturnType<typeof vi.fn>).mock.calls.find(
+        (c: unknown[]) => typeof c[0] === "string" && (c[0] as string).includes("/open-cmux")
+      );
+      expect(openCmuxCall).toBeDefined();
+      expect(openCmuxCall![0]).toContain("/open-cmux");
+      expect(openCmuxCall![0]).not.toContain("/focus");
     });
   });
 });
