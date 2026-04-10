@@ -113,11 +113,11 @@ export function SystemPanel({ onClose, events, initialTab = "log" }: SystemPanel
               <div className="flex items-start gap-3">
                 <PanelsTopLeft className={`mt-[1px] h-3.5 w-3.5 shrink-0 ${statusTone(cmuxAvailable)}`} />
                 <div className="min-w-0">
-                  <div className="text-stone-900">cmux</div>
+                  <div className="text-stone-900">cmux control</div>
                   <div data-testid="system-cmux-status" className={statusTone(cmuxAvailable)}>
                     {statusLabel(cmuxAvailable, "available", "unavailable")}
                   </div>
-                  <div className="text-stone-500">Enables cmux surface focus and transport-aware workflows.</div>
+                  <div className="text-stone-500">OpenRig can control cmux surfaces for node open-or-focus.</div>
                 </div>
               </div>
             </div>

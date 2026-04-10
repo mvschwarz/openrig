@@ -494,6 +494,28 @@ describe("App Shell + Routing", () => {
     });
   });
 
+  it("system panel shows cmux control label with honest description", async () => {
+    mockAllApis();
+    await renderRealAppAt("/");
+
+    await waitFor(() => {
+      expect(screen.getByTestId("system-toggle")).toBeDefined();
+    });
+
+    fireEvent.click(screen.getByTestId("system-toggle"));
+
+    // Switch to status tab
+    await waitFor(() => {
+      expect(screen.getByTestId("system-panel")).toBeDefined();
+    });
+    fireEvent.click(screen.getByTestId("system-tab-status"));
+
+    await waitFor(() => {
+      expect(screen.getByText("cmux control")).toBeDefined();
+      expect(screen.getByText(/OpenRig can control cmux/)).toBeDefined();
+    });
+  });
+
   it("/discovery opens the discovery drawer over the workspace shell", async () => {
     mockAllApis();
     await renderRealAppAt("/discovery");
