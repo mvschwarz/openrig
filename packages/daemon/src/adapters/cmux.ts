@@ -153,6 +153,39 @@ export class CmuxAdapter {
     }
   }
 
+  async currentWorkspace(): Promise<CmuxResult<string>> {
+    if (!this.transport) {
+      return { ok: false, code: "unavailable", message: "cmux is not connected" };
+    }
+    try {
+      const raw = (await this.transport.request("workspace.current")) as Record<string, unknown>;
+      const handle = (raw["workspace_id"] ?? raw["id"]) as string | undefined;
+      if (!handle) {
+        return { ok: false, code: "request_failed", message: "cmux current-workspace returned no workspace handle" };
+      }
+      return { ok: true, data: handle };
+    } catch (err) {
+      return { ok: false, code: "request_failed", message: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  async createTerminalSurface(workspaceId: string): Promise<CmuxResult<string>> {
+    if (!this.transport) {
+      return { ok: false, code: "unavailable", message: "cmux is not connected" };
+    }
+    try {
+      const raw = (await this.transport.request("surface.create", { workspaceId, type: "terminal" })) as Record<string, unknown>;
+      // Normalize: prefer ref-first (cmux default idFormat=refs), then id fallback
+      const handle = (raw["created_surface_ref"] ?? raw["created_surface_id"] ?? raw["surface_ref"] ?? raw["surface_id"] ?? raw["id"]) as string | undefined;
+      if (!handle) {
+        return { ok: false, code: "request_failed", message: "cmux new-surface returned no surface handle" };
+      }
+      return { ok: true, data: handle };
+    } catch (err) {
+      return { ok: false, code: "request_failed", message: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
   /** Query cmux for agent PIDs (sidebar metadata). Returns Map<pid, { runtime, pid }>. */
   async queryAgentPIDs(): Promise<CmuxResult<Map<number, { runtime: string; pid: number }>>> {
     if (!this.transport) {
