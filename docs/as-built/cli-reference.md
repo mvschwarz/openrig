@@ -223,9 +223,10 @@ Usage:
 
 Notes:
 - This surface is only meaningful for service-backed rigs and managed apps.
-- `status` resolves rig names or IDs and returns the persisted env receipt with a best-effort fresh refresh from the daemon.
+- `status` resolves rig names or IDs and returns the env receipt with an honest freshness probe. The response includes `probeStatus` (fresh/stale/no_orchestrator) so operators can distinguish current truth from cached state.
 - `logs` proxies compose-backed service logs; `[service]` is optional.
-- `down` tears down the rig environment. `--volumes` exists in the CLI surface, but the daemon currently still relies on the stored down policy.
+- `down` tears down the rig environment. `--volumes` overrides the stored down policy to force volume removal via `docker compose down --volumes`.
+- Note: `rig ps` does not yet surface env health. Runtime env truth is available through `rig env status` and the rig drawer `Env` tab.
 
 ### `rig ps`
 

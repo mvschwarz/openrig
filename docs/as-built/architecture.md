@@ -756,6 +756,7 @@ Restore now:
    - otherwise kind, compose identity, receipt, and surfaces
 4. `rig env status/logs/down` and the rig drawer `Env` tab are thin client surfaces over those routes.
 5. Snapshot/restore preserves the latest env receipt and reboots services before agent restore.
+6. **Current runtime truth model:** Runtime env truth is provided through boot-time gating (services must be healthy before agents launch) and on-demand inspection via `rig env` / the `Env` tab, which polls with honest `probeStatus` (fresh/stale/no_orchestrator). Background health monitoring and `rig ps` env health summary are deferred.
 
 ### Agent-managed app flow
 
