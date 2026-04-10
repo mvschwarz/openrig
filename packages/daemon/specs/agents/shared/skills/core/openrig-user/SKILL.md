@@ -16,6 +16,40 @@ Most work in OpenRig reduces to this loop:
 - read context: `rig transcript ...`, `rig ask ...`, `rig chatroom history ...`
 - act: `rig send`, `rig capture`, `rig broadcast`, lifecycle commands
 
+## Agent-Managed Apps
+
+An agent-managed app is a deployable OpenRig unit made of:
+- the software or service
+- one specialist agent dedicated to that software
+
+Treat the specialist as the domain delegate for that app.
+The current canonical example is:
+- rig: `secrets-manager`
+- pod: `vault`
+- member: `specialist`
+- logical ID: `vault.specialist`
+- session: `vault-specialist@secrets-manager`
+
+Typical operator loop:
+
+```bash
+rig up secrets-manager --cwd /path/to/project
+rig ps --nodes --json
+rig send vault-specialist@secrets-manager "Check Vault health and report back." --verify
+rig env status secrets-manager
+rig env logs secrets-manager
+```
+
+Cross-rig communication is valid when the target session resolves uniquely.
+Example:
+
+```bash
+rig send vault-specialist@secrets-manager "Read secret/data/dogfood and report the value." --verify
+```
+
+Use the specialist instead of teaching every peer the same app-specific toolchain.
+For Vault, ask `vault.specialist` to do secrets-domain work rather than improvising curl or Vault CLI usage in unrelated agents.
+
 ## Identity and Recovery
 
 Start here after launch, compaction, or confusion:
@@ -63,6 +97,9 @@ rig daemon status
 rig config
 rig preflight
 rig doctor
+rig env status <rig>
+rig env logs <rig>
+rig env down <rig>
 ```
 
 ## Transcript and Communication
@@ -161,6 +198,7 @@ This is an evidence/context command. It is not a hidden second-LLM call.
 rig up <source>
 rig up <source> --plan
 rig up <source> --yes
+rig up <source> --cwd /path/to/project
 rig up <source> --json
 ```
 
@@ -176,9 +214,9 @@ Bare names are special:
 
 Current behavior notes:
 - `--target <root>` is only for `.rigbundle` / package installation. It does not change agent cwd.
+- `rig up --cwd` is shipped. `rig up --cwd <path>` sends a per-run cwd override for all members in that launch.
 - `local:` `agent_ref` values resolve relative to the rig spec directory, not your shell cwd.
 - if you copy a built-in spec elsewhere, keep its `agents/` tree beside the YAML or rewrite those refs to `path:/absolute/path`
-- there is no shipped `rig up --cwd` override yet
 
 Legacy/spec-specific surfaces still ship too:
 
@@ -198,6 +236,20 @@ rig down <rigId> --json
 ```
 
 If `--snapshot` succeeds, human output includes the restore hint.
+
+### Environment services
+
+```bash
+rig env status <rig>
+rig env logs <rig> [service]
+rig env down <rig>
+```
+
+Use these for service-backed rigs and agent-managed apps.
+For `secrets-manager`, these are the fastest CLI surfaces for:
+- confirming whether Vault is healthy
+- reading Vault container logs
+- stopping the Vault env without tearing down the specialist session first
 
 ### Release management without killing live claimed sessions
 
@@ -463,6 +515,5 @@ Design assumptions that hold in the shipped CLI:
 
 Do not assume these exist unless the shipped help starts listing them:
 - `rig claim`
-- `rig env`
 - `rig blame`
 - `rig replay`

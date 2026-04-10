@@ -7,7 +7,14 @@ import type { StatusDeps } from "./status.js";
 const LONG_RUNNING_TIMEOUT_MS = 45_000;
 
 export function envCommand(depsOverride?: StatusDeps): Command {
-  const cmd = new Command("env").description("Manage rig environment services");
+  const cmd = new Command("env")
+    .description("Inspect and control rig environment services for service-backed rigs and managed apps")
+    .addHelpText("after", `
+Examples:
+  rig env status secrets-manager
+  rig env logs secrets-manager vault
+  rig env down secrets-manager
+`);
   const getDeps = () => depsOverride ?? { lifecycleDeps: realDeps(), clientFactory: (url: string) => new DaemonClient(url) };
 
   async function getClient(deps: StatusDeps): Promise<DaemonClient | null> {

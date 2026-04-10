@@ -8,11 +8,18 @@ import type { StatusDeps } from "./status.js";
 const LONG_RUNNING_UP_TIMEOUT_MS = 45_000;
 
 export function upCommand(depsOverride?: StatusDeps & { lifecycleDeps?: LifecycleDeps }): Command {
-  const cmd = new Command("up").description("Bootstrap a rig from a spec or bundle");
+  const cmd = new Command("up")
+    .description("Launch a rig or managed app from a spec, library entry, or bundle")
+    .addHelpText("after", `
+Examples:
+  rig up secrets-manager
+  rig up ./rig.yaml
+  rig up ./demo.rigbundle --target ~/work
+`);
   const getDepsF = () => depsOverride ?? { lifecycleDeps: realDeps(), clientFactory: (url: string) => new DaemonClient(url) };
 
   cmd
-    .argument("<source>", "Path to .yaml rig spec or .rigbundle")
+    .argument("<source>", "Path to a .yaml rig spec or .rigbundle, or a library name such as secrets-manager")
     .option("--plan", "Plan mode — preview without executing")
     .option("--yes", "Auto-approve trusted actions")
     .option("--cwd <path>", "Override launch working directory for all members for this run only")

@@ -118,6 +118,18 @@ describe("rig env", () => {
     return prog;
   }
 
+  it("env help explains managed-app usage", () => {
+    const logs: string[] = [];
+    const cmd = makeCmd().commands.find((c) => c.name() === "env")!;
+    cmd.configureOutput({ writeOut: (str) => logs.push(str), writeErr: (str) => logs.push(str) });
+    cmd.outputHelp();
+    const help = logs.join("");
+    expect(help).toContain("Inspect and control rig environment services");
+    expect(help).toContain("service-backed rigs and managed");
+    expect(help).toContain("rig env status secrets-manager");
+    expect(help).toContain("rig env logs secrets-manager vault");
+  });
+
   it("env status prints service status", async () => {
     const { logs } = await captureLogs(async () => {
       await makeCmd().parseAsync(["node", "rig", "env", "status", "my-rig"]);

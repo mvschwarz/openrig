@@ -82,6 +82,17 @@ describe("Specs CLI", () => {
     return prog;
   }
 
+  it("specs help calls out managed apps in the library", () => {
+    const logs: string[] = [];
+    const cmd = makeCmd().commands.find((c) => c.name() === "specs")!;
+    cmd.configureOutput({ writeOut: (str) => logs.push(str), writeErr: (str) => logs.push(str) });
+    cmd.outputHelp();
+    const help = logs.join("");
+    expect(help).toContain("Browse, preview, and manage the spec library, including managed apps");
+    expect(help).toContain("rig specs ls");
+    expect(help).toContain("rig specs preview secrets-manager");
+  });
+
   it("specs ls prints library entries", async () => {
     const { logs } = await captureLogs(async () => {
       await makeCmd().parseAsync(["node", "rig", "specs", "ls"]);
@@ -131,6 +142,15 @@ describe("Specs CLI", () => {
     dupServer.close();
 
     expect(logs.join("\n")).toContain("ambiguous");
+    expect(exitCode).toBe(1);
+  });
+
+  it("specs show not-found error points people back to managed apps in the library", async () => {
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "specs", "show", "missing-app"]);
+    });
+
+    expect(logs.join("\n")).toContain("Run 'rig specs ls' to see available rigs, agents, and managed apps.");
     expect(exitCode).toBe(1);
   });
 
