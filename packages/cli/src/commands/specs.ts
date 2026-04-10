@@ -44,12 +44,19 @@ export async function resolveLibrarySpec(
   }
 
   throw new Error(
-        `Spec '${nameOrId}' not found in library. Run 'rig specs ls' to see available specs.`
+    `Spec '${nameOrId}' not found in library. Run 'rig specs ls' to see available rigs, agents, and managed apps.`
   );
 }
 
 export function specsCommand(depsOverride?: StatusDeps): Command {
-  const cmd = new Command("specs").description("Browse, preview, and manage the spec library");
+  const cmd = new Command("specs")
+    .description("Browse, preview, and manage the spec library, including managed apps")
+    .addHelpText("after", `
+Examples:
+  rig specs ls
+  rig specs preview secrets-manager
+  rig specs show vault-specialist
+`);
   const getDeps = (): StatusDeps => depsOverride ?? {
     lifecycleDeps: realDeps(),
     clientFactory: (url: string) => new DaemonClient(url),
@@ -66,7 +73,7 @@ export function specsCommand(depsOverride?: StatusDeps): Command {
 
   // specs ls
   cmd.command("ls")
-    .description("List library specs")
+    .description("List library rigs, agents, and managed apps")
     .option("--kind <kind>", "Filter by kind (rig or agent)")
     .option("--json", "JSON output")
     .action(async (opts: { kind?: string; json?: boolean }) => {
@@ -125,7 +132,7 @@ export function specsCommand(depsOverride?: StatusDeps): Command {
   // specs preview
   cmd.command("preview")
     .argument("<name-or-id>", "Spec name or library ID")
-    .description("Show structured spec review")
+    .description("Show structured spec review, including managed app details")
     .option("--json", "JSON output")
     .action(async (nameOrId: string, opts: { json?: boolean }) => {
       try {

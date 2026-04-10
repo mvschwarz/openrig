@@ -88,11 +88,17 @@ describe("Up CLI", () => {
     return prog;
   }
 
-  it("help makes --target scope explicit", () => {
-    const help = makeCmd().commands.find((c) => c.name() === "up")!.helpInformation();
+  it("help positions managed apps as first-class launch targets", () => {
+    const logs: string[] = [];
+    const cmd = makeCmd().commands.find((c) => c.name() === "up")!;
+    cmd.configureOutput({ writeOut: (str) => logs.push(str), writeErr: (str) => logs.push(str) });
+    cmd.outputHelp();
+    const help = logs.join("");
+    expect(help).toContain("Launch a rig or managed app from a spec, library entry, or bundle");
     expect(help).toContain("Target root directory for package installation");
     expect(help).toContain("does not change agent cwd");
     expect(help).toContain("--cwd <path>");
+    expect(help).toContain("rig up secrets-manager");
   });
 
   // T7: up from .yaml -> stages + rig ID

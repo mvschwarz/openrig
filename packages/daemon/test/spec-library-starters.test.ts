@@ -235,6 +235,19 @@ describe("Starter specs", () => {
     expect(context).toContain("before making topology or registration claims");
   });
 
+  it("openrig-user documents agent-managed apps and current cwd/env operation", () => {
+    const content = readFileSync(join(SPECS_ROOT, "agents/shared/skills/core/openrig-user/SKILL.md"), "utf-8");
+
+    expect(content).toContain("agent-managed app");
+    expect(content).toContain("rig up secrets-manager");
+    expect(content).toContain("vault.specialist");
+    expect(content).toContain("rig send vault-specialist@secrets-manager");
+    expect(content).toContain("rig env status secrets-manager");
+    expect(content).toContain("rig env logs secrets-manager");
+    expect(content).toContain("`rig up --cwd`");
+    expect(content).not.toContain("there is no shipped `rig up --cwd` override yet");
+  });
+
   it("shared packaged starter skills exist and builtin agents opt into the right ones", () => {
     const sharedYaml = readFileSync(join(SPECS_ROOT, SHARED_AGENT_SPEC), "utf-8");
     const sharedRaw = parseAgentSpec(sharedYaml) as Record<string, unknown>;
