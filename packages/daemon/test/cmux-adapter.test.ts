@@ -349,6 +349,104 @@ describe("CmuxAdapter", () => {
     });
   });
 
+  describe("currentWorkspace", () => {
+    it("normalizes real cmux workspace_id payload into a handle string", async () => {
+      // Real cmux CLI output: { "workspace_id": "workspace:1" }
+      const factory = surfaceFactory({
+        "workspace.current": { workspace_id: "workspace:1" },
+      });
+      const adapter = new CmuxAdapter(factory, { timeoutMs: 1000 });
+      await adapter.connect();
+
+      const result = await adapter.currentWorkspace();
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.data).toBe("workspace:1");
+      }
+    });
+
+    it("returns { ok: false, code: 'unavailable' } when not connected", async () => {
+      const adapter = new CmuxAdapter(workingFactory(), { timeoutMs: 1000 });
+      const result = await adapter.currentWorkspace();
+      expect(result).toEqual({ ok: false, code: "unavailable", message: "cmux is not connected" });
+    });
+  });
+
+  describe("createTerminalSurface", () => {
+    it("normalizes real cmux created_surface_id payload into a handle string", async () => {
+      // Real cmux CLI output contains created_surface_id / surface_id
+      const requestSpy = vi.fn().mockImplementation(async (method: string) => {
+        if (method === "capabilities") return { capabilities: ["surface.create"] };
+        if (method === "surface.create") return { created_surface_id: "surface:9", workspace_id: "workspace:2", pane_id: "pane:3" };
+        return {};
+      });
+      const factory: CmuxTransportFactory = async () => ({
+        request: requestSpy,
+        close: () => {},
+      });
+      const adapter = new CmuxAdapter(factory, { timeoutMs: 1000 });
+      await adapter.connect();
+
+      const result = await adapter.createTerminalSurface("workspace:2");
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.data).toBe("surface:9");
+      }
+
+      const createCall = requestSpy.mock.calls.find((c: unknown[]) => c[0] === "surface.create");
+      expect(createCall).toBeDefined();
+      expect(createCall![1]).toEqual({ workspaceId: "workspace:2", type: "terminal" });
+    });
+
+    it("prefers created_surface_ref over created_surface_id (refs idFormat default)", async () => {
+      const factory = surfaceFactory({
+        "surface.create": { created_surface_ref: "surface:9", created_surface_id: "abc-uuid-123" },
+      });
+      const adapter = new CmuxAdapter(factory, { timeoutMs: 1000 });
+      await adapter.connect();
+
+      const result = await adapter.createTerminalSurface("workspace:1");
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.data).toBe("surface:9");
+      }
+    });
+
+    it("falls back to surface_ref when created_surface_ref is missing", async () => {
+      const factory = surfaceFactory({
+        "surface.create": { surface_ref: "surface:5" },
+      });
+      const adapter = new CmuxAdapter(factory, { timeoutMs: 1000 });
+      await adapter.connect();
+
+      const result = await adapter.createTerminalSurface("workspace:1");
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.data).toBe("surface:5");
+      }
+    });
+
+    it("falls back through id chain: created_surface_id -> surface_id", async () => {
+      const factory = surfaceFactory({
+        "surface.create": { surface_id: "surface:3" },
+      });
+      const adapter = new CmuxAdapter(factory, { timeoutMs: 1000 });
+      await adapter.connect();
+
+      const result = await adapter.createTerminalSurface("workspace:1");
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.data).toBe("surface:3");
+      }
+    });
+
+    it("returns { ok: false, code: 'unavailable' } when not connected", async () => {
+      const adapter = new CmuxAdapter(workingFactory(), { timeoutMs: 1000 });
+      const result = await adapter.createTerminalSurface("workspace:1");
+      expect(result).toEqual({ ok: false, code: "unavailable", message: "cmux is not connected" });
+    });
+  });
+
   describe("transport request failure", () => {
     it("returns { ok: false, code: 'request_failed' }", async () => {
       const requestSpy = vi.fn().mockImplementation(async (method: string) => {

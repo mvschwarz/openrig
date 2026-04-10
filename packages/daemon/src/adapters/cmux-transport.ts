@@ -25,17 +25,28 @@ function buildCommand(
   const mapped = METHOD_MAP[method];
   if (mapped) return mapped;
 
-  // Parameterized commands
+  // Parameterized commands — modern cmux CLI shape
+  if (method === "workspace.current") {
+    return { cmd: "cmux current-workspace --json", json: true };
+  }
+
+  if (method === "surface.create" && params?.workspaceId) {
+    return {
+      cmd: `cmux new-surface --type ${shellQuote(String(params.type ?? "terminal"))} --workspace ${shellQuote(String(params.workspaceId))} --json`,
+      json: true,
+    };
+  }
+
   if (method === "surface.focus" && params?.surfaceId) {
     return {
-      cmd: `cmux focus-surface ${shellQuote(String(params.surfaceId))}`,
+      cmd: `cmux focus-panel --panel ${shellQuote(String(params.surfaceId))}`,
       json: false,
     };
   }
 
   if (method === "surface.sendText" && params?.surfaceId && params?.text != null) {
     return {
-      cmd: `cmux send-surface ${shellQuote(String(params.surfaceId))} ${shellQuote(String(params.text))}`,
+      cmd: `cmux send --surface ${shellQuote(String(params.surfaceId))} ${shellQuote(String(params.text))}`,
       json: false,
     };
   }
