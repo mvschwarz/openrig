@@ -91,6 +91,24 @@ export function runDoctorChecks(deps: DoctorDeps): { checks: DoctorCheck[]; port
   try {
     const ver = deps.exec("tmux -V").trim();
     checks.push({ name: "tmux", status: "pass", message: ver });
+    if (platform === "darwin") {
+      const mouseMode = readTmuxMouseMode(deps);
+      if (mouseMode === "on") {
+        checks.push({
+          name: "tmux_mouse",
+          status: "pass",
+          message: "tmux mouse mode enabled.",
+        });
+      } else if (mouseMode === "off") {
+        checks.push({
+          name: "tmux_mouse",
+          status: "warn",
+          message: "tmux mouse mode appears disabled.",
+          reason: "On macOS, scrolling and text selection inside tmux panes is much smoother with mouse mode enabled.",
+          fix: "Run `tmux set -g mouse on` for the current tmux server. To keep it enabled, add `set -g mouse on` to `~/.tmux.conf` and reload with `tmux source-file ~/.tmux.conf`.",
+        });
+      }
+    }
   } catch {
     checks.push({
       name: "tmux",
@@ -177,6 +195,16 @@ function readCmuxSocketControlMode(deps: DoctorDeps): string | null {
   try {
     const mode = deps.exec("defaults read com.cmuxterm.app socketControlMode").trim();
     return mode || null;
+  } catch {
+    return null;
+  }
+}
+
+function readTmuxMouseMode(deps: DoctorDeps): "on" | "off" | null {
+  try {
+    const mode = deps.exec("tmux show-options -gqv mouse").trim().toLowerCase();
+    if (mode === "on" || mode === "off") return mode;
+    return null;
   } catch {
     return null;
   }
