@@ -86,6 +86,40 @@ describe("createDaemon startup composition", () => {
     db.close();
   });
 
+  it("createDaemon wires node cmux service for POST /api/rigs/:rigId/nodes/:logicalId/open-cmux", async () => {
+    const cmuxFactory: CmuxTransportFactory = async () => ({
+      request: async (method: string) => {
+        if (method === "capabilities") return { capabilities: ["workspace.current", "surface.create", "surface.focus"] };
+        if (method === "workspace.current") return { workspace_id: "workspace:1" };
+        if (method === "surface.create") return { created_surface_ref: "surface:99" };
+        return {};
+      },
+      close: () => {},
+    });
+    const tmuxExec: ExecFn = async () => "";
+
+    const { app, db, deps } = await createDaemon({ cmuxFactory, tmuxExec });
+    const rig = deps.rigRepo.createRig("r01");
+    const node = deps.rigRepo.addNode(rig.id, "dev1-impl");
+    deps.sessionRegistry.registerSession(node.id, "r01-dev1-impl");
+    deps.sessionRegistry.updateBinding(node.id, {
+      attachmentType: "tmux",
+      tmuxSession: "r01-dev1-impl",
+    });
+
+    const res = await app.request(`/api/rigs/${rig.id}/nodes/dev1-impl/open-cmux`, { method: "POST" });
+    expect(res.status).toBe(200);
+    const body = await res.json() as Record<string, unknown>;
+    expect(body["ok"]).toBe(true);
+    expect(body["action"]).toBe("created_new");
+
+    const binding = deps.sessionRegistry.getBindingForNode(node.id);
+    expect(binding?.cmuxWorkspace).toBe("workspace:1");
+    expect(binding?.cmuxSurface).toBe("surface:99");
+
+    db.close();
+  });
+
   it("createDaemon accepts cmuxExec, connect() issues 'cmux capabilities --json' through it", async () => {
     const cmuxExec = vi.fn<ExecFn>().mockRejectedValue(
       Object.assign(new Error("command not found"), { code: "ENOENT" })

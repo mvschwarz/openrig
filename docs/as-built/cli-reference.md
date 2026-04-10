@@ -128,7 +128,9 @@ Usage: `rig doctor [--json]`
 
 Notes:
 - Verifies install health for packaged/local CLI usage.
-- Checks daemon dist, UI dist, Node version, tmux availability, writable state paths, and daemon port availability.
+- Checks daemon dist, UI dist, Node version, `tmux`, optional `cmux` control health, writable state paths, and daemon port availability.
+- `cmux` issues are warnings, not hard failures. OpenRig still works without `cmux`; only `Open CMUX` workflows are unavailable.
+- `--json` is suitable for agent use and only exits non-zero on real failures, not warnings.
 
 ### `rig mcp`
 
@@ -174,6 +176,10 @@ Usage: `rig requirements <spec> [--json]`
 
 Arguments:
 - `spec`: path to a rig spec YAML file
+
+Notes:
+- `rig requirements` is the spec/app-specific dependency surface.
+- Use `rig doctor` for host-level install health, then `rig requirements <spec>` for rig-specific requirements.
 
 ### `rig up`
 

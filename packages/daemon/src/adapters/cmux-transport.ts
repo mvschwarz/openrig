@@ -38,15 +38,17 @@ function buildCommand(
   }
 
   if (method === "surface.focus" && params?.surfaceId) {
+    const workspaceArg = params.workspaceId ? ` --workspace ${shellQuote(String(params.workspaceId))}` : "";
     return {
-      cmd: `cmux focus-panel --panel ${shellQuote(String(params.surfaceId))}`,
+      cmd: `cmux focus-panel --panel ${shellQuote(String(params.surfaceId))}${workspaceArg}`,
       json: false,
     };
   }
 
   if (method === "surface.sendText" && params?.surfaceId && params?.text != null) {
+    const workspaceArg = params.workspaceId ? ` --workspace ${shellQuote(String(params.workspaceId))}` : "";
     return {
-      cmd: `cmux send --surface ${shellQuote(String(params.surfaceId))} ${shellQuote(String(params.text))}`,
+      cmd: `cmux send --surface ${shellQuote(String(params.surfaceId))}${workspaceArg} ${shellQuote(String(params.text))}`,
       json: false,
     };
   }
@@ -76,6 +78,10 @@ export function createCmuxCliTransport(exec: ExecFn): CmuxTransportFactory {
           try {
             return JSON.parse(output);
           } catch {
+            const legacyFallback = legacyJsonFallback(method, output);
+            if (legacyFallback !== null) {
+              return legacyFallback;
+            }
             throw new Error(
               `Failed to parse JSON from cmux command '${cmd}': ${output.slice(0, 200)}`
             );
@@ -89,4 +95,29 @@ export function createCmuxCliTransport(exec: ExecFn): CmuxTransportFactory {
       },
     };
   };
+}
+
+function legacyJsonFallback(method: string, output: string): unknown | null {
+  const trimmed = output.trim();
+  if (!trimmed) return null;
+
+  // cmux 0.61.x can still return a bare handle for some --json commands.
+  if (method === "workspace.current") {
+    return { workspace_id: trimmed };
+  }
+
+  if (method === "surface.create") {
+    const summary = trimmed.replace(/^OK\s+/, "");
+    const refMatch = summary.match(/(?:^|\s)(surface:[^\s]+)/);
+    if (refMatch) {
+      return { created_surface_ref: refMatch[1] };
+    }
+    const firstToken = summary.split(/\s+/)[0];
+    if (firstToken) {
+      return { created_surface_ref: firstToken };
+    }
+    return null;
+  }
+
+  return null;
 }

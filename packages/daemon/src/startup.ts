@@ -61,6 +61,7 @@ import { ChatRepository } from "./domain/chat-repository.js";
 import { SpecReviewService } from "./domain/spec-review-service.js";
 import { SpecLibraryService } from "./domain/spec-library-service.js";
 import { WhoamiService } from "./domain/whoami-service.js";
+import { NodeCmuxService } from "./domain/node-cmux-service.js";
 import { createApp, type AppDeps } from "./server.js";
 import { execFile } from "node:child_process";
 import fs from "node:fs";
@@ -278,6 +279,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const { ContextUsageStore } = await import("./domain/context-usage-store.js");
   const contextUsageStore = new ContextUsageStore(db, { stateDir: OPENRIG_HOME });
   const whoamiService = new WhoamiService({ db, rigRepo, sessionRegistry, transcriptStore, contextUsageStore });
+  const nodeCmuxService = new NodeCmuxService(rigRepo, sessionRegistry, cmuxAdapter);
 
   const deps: AppDeps = {
     rigRepo,
@@ -356,6 +358,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       });
     })(),
     whoamiService,
+    nodeCmuxService,
     contextUsageStore,
     serviceOrchestrator,
     composeAdapter,

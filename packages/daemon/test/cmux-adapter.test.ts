@@ -62,6 +62,29 @@ describe("CmuxAdapter", () => {
     expect(status.capabilities["surface.focus"]).toBe(true);
   });
 
+  it("connect normalizes capability map payloads from system.capabilities", async () => {
+    const factory: CmuxTransportFactory = async () => ({
+      request: async (method: string) => {
+        if (method === "capabilities") {
+          return {
+            "workspace.list": true,
+            "surface.list": true,
+            "surface.focus": true,
+          };
+        }
+        return {};
+      },
+      close: () => {},
+    });
+    const adapter = new CmuxAdapter(factory, { timeoutMs: 1000 });
+    await adapter.connect();
+
+    expect(adapter.isAvailable()).toBe(true);
+    expect(adapter.getStatus().capabilities["workspace.list"]).toBe(true);
+    expect(adapter.getStatus().capabilities["surface.list"]).toBe(true);
+    expect(adapter.getStatus().capabilities["surface.focus"]).toBe(true);
+  });
+
   it("connect with factory throwing ENOENT: available=false, capabilities={}", async () => {
     const adapter = new CmuxAdapter(failingFactory("ENOENT"), { timeoutMs: 1000 });
     await adapter.connect();
@@ -409,6 +432,20 @@ describe("CmuxAdapter", () => {
       expect(result.ok).toBe(true);
       if (result.ok) {
         expect(result.data).toBe("surface:9");
+      }
+    });
+
+    it("extracts the surface ref from legacy summary strings", async () => {
+      const factory = surfaceFactory({
+        "surface.create": { created_surface_ref: "OK surface:78 pane:2 workspace:1" },
+      });
+      const adapter = new CmuxAdapter(factory, { timeoutMs: 1000 });
+      await adapter.connect();
+
+      const result = await adapter.createTerminalSurface("workspace:1");
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.data).toBe("surface:78");
       }
     });
 

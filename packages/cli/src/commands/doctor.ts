@@ -21,6 +21,7 @@ export interface DoctorDeps {
   exec: (cmd: string) => string;
   checkPort: (port: number) => Promise<boolean>;
   configStore: Pick<ConfigStore, "resolve">;
+  platform?: NodeJS.Platform;
   mkdirp?: (path: string) => void;
   checkWritable?: (path: string) => void;
 }
@@ -41,6 +42,7 @@ function defaultCheckPort(port: number): Promise<boolean> {
 
 export function runDoctorChecks(deps: DoctorDeps): { checks: DoctorCheck[]; portCheck: Promise<DoctorCheck> } {
   const checks: DoctorCheck[] = [];
+  const platform = deps.platform ?? process.platform;
 
   // 1. Daemon dist
   const daemonPath = resolveDaemonPath(deps.baseDir, deps.exists);
@@ -99,7 +101,41 @@ export function runDoctorChecks(deps: DoctorDeps): { checks: DoctorCheck[]; port
     });
   }
 
-  // 5. Writable state paths (shared with preflight)
+  // 5. cmux (optional but recommended for Open CMUX workflows)
+  try {
+    deps.exec("cmux capabilities --json");
+    checks.push({
+      name: "cmux",
+      status: "pass",
+      message: "cmux control available.",
+    });
+  } catch (err) {
+    try {
+      deps.exec("cmux --help");
+      const socketMode = platform === "darwin" ? readCmuxSocketControlMode(deps) : null;
+      const modeHint = socketMode && socketMode !== "allowAll"
+        ? ` Likely cause on macOS: cmux socketControlMode is '${socketMode}'. Tell the user to allow OpenRig/cmux socket control, then rerun 'rig doctor'.`
+        : "";
+      checks.push({
+        name: "cmux",
+        status: "warn",
+        message: "cmux installed, but control unavailable right now.",
+        reason: "OpenRig can run without cmux, but Open CMUX actions and cmux-aware node control will be unavailable until cmux control works.",
+        fix: `Open the cmux app, verify control access/socket sharing is enabled for OpenRig, then rerun 'rig doctor'. If you are running this for someone else, tell the user that cmux is optional but required for Open CMUX. If you do not need cmux features, you can ignore this warning.${modeHint}`,
+      });
+    } catch {
+      checks.push({
+        name: "cmux",
+        status: "warn",
+        message: "cmux not found.",
+        reason: "OpenRig can run without cmux, but Open CMUX actions and surface control will be unavailable.",
+        fix: "Install and launch cmux if you want Open CMUX support. If you are running this for someone else, tell the user that cmux is optional and only needed for Open CMUX workflows.",
+      });
+    }
+    void err;
+  }
+
+  // 6. Writable state paths (shared with preflight)
   const config = deps.configStore.resolve();
   const writableCheck = buildWritableHomeCheck(config, path.dirname(config.db.path), {
     mkdirp: deps.mkdirp,
@@ -113,7 +149,7 @@ export function runDoctorChecks(deps: DoctorDeps): { checks: DoctorCheck[]; port
     fix: writableCheck.fix,
   });
 
-  // 6. Port availability (async) — daemon already running on that port counts as OK
+  // 7. Port availability (async) — daemon already running on that port counts as OK
   const portCheck = deps.checkPort(DEFAULT_PORT).then(async (available): Promise<DoctorCheck> => {
     if (available) {
       return { name: "port", status: "pass", message: `Port ${DEFAULT_PORT} available.` };
@@ -137,6 +173,15 @@ export function runDoctorChecks(deps: DoctorDeps): { checks: DoctorCheck[]; port
   return { checks, portCheck };
 }
 
+function readCmuxSocketControlMode(deps: DoctorDeps): string | null {
+  try {
+    const mode = deps.exec("defaults read com.cmuxterm.app socketControlMode").trim();
+    return mode || null;
+  } catch {
+    return null;
+  }
+}
+
 export function doctorCommand(depsOverride?: DoctorDeps): Command {
   const cmd = new Command("doctor").description("Verify OpenRig install health");
 
@@ -156,11 +201,11 @@ export function doctorCommand(depsOverride?: DoctorDeps): Command {
       const { checks, portCheck } = runDoctorChecks(deps);
       const portResult = await portCheck;
       const allChecks = [...checks, portResult];
-      const allPass = allChecks.every((c) => c.status === "pass");
+      const healthy = allChecks.every((c) => c.status !== "fail");
 
       if (opts.json) {
-        console.log(JSON.stringify({ healthy: allPass, checks: allChecks }, null, 2));
-        if (!allPass) process.exitCode = 1;
+        console.log(JSON.stringify({ healthy, checks: allChecks }, null, 2));
+        if (!healthy) process.exitCode = 1;
         return;
       }
 
@@ -172,8 +217,8 @@ export function doctorCommand(depsOverride?: DoctorDeps): Command {
       }
 
       console.log("");
-      console.log(allPass ? "All checks passed." : "Some checks failed.");
-      if (!allPass) process.exitCode = 1;
+      console.log(healthy ? "System checks look good." : "Some checks failed.");
+      if (!healthy) process.exitCode = 1;
     });
 
   return cmd;

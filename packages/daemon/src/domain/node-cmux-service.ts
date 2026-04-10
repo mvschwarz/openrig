@@ -29,10 +29,25 @@ export class NodeCmuxService {
 
     // Focus existing surface if already bound
     if (binding?.cmuxSurface) {
-      const result = await this.cmuxAdapter.focusSurface(binding.cmuxSurface);
-      if (!result.ok) return { ok: false, error: result.message, code: result.code };
-      return { ok: true, action: "focused_existing" };
+      const result = await this.cmuxAdapter.focusSurface(binding.cmuxSurface, binding.cmuxWorkspace ?? undefined);
+      if (result.ok) return { ok: true, action: "focused_existing" };
+      if (result.code === "unavailable") {
+        return { ok: false, error: result.message, code: result.code };
+      }
     }
+
+    return this.createAndBindSurface(node.id, logicalId, binding);
+  }
+
+  private async createAndBindSurface(
+    nodeId: string,
+    logicalId: string,
+    binding: {
+      attachmentType?: string | null;
+      tmuxSession?: string | null;
+      externalSessionName?: string | null;
+    } | null | undefined,
+  ): Promise<OpenCmuxResult> {
 
     // Get current workspace as creation anchor
     const wsResult = await this.cmuxAdapter.currentWorkspace();
@@ -45,7 +60,7 @@ export class NodeCmuxService {
     const newSurfaceId = createResult.data;
 
     // Persist binding
-    this.sessionRegistry.updateBinding(node.id, {
+    this.sessionRegistry.updateBinding(nodeId, {
       cmuxWorkspace: wsResult.data,
       cmuxSurface: newSurfaceId,
     });
@@ -56,9 +71,9 @@ export class NodeCmuxService {
     // tmux-backed: attach into tmux
     const isTmux = binding?.attachmentType === "tmux" && binding?.tmuxSession;
     if (isTmux) {
-      const sendResult = await this.cmuxAdapter.sendText(newSurfaceId, `tmux attach -t ${binding.tmuxSession}`);
+      const sendResult = await this.cmuxAdapter.sendText(newSurfaceId, `tmux attach -t ${binding.tmuxSession}\n`, wsResult.data);
       if (!sendResult.ok) return { ok: false, error: sendResult.message, code: sendResult.code };
-      const focusResult = await this.cmuxAdapter.focusSurface(newSurfaceId);
+      const focusResult = await this.cmuxAdapter.focusSurface(newSurfaceId, wsResult.data);
       if (!focusResult.ok) return { ok: false, error: focusResult.message, code: focusResult.code };
       return { ok: true, action: "created_new" };
     }
@@ -72,9 +87,9 @@ export class NodeCmuxService {
       `rig transcript ${sessionName} --tail 100`,
       `rig send ${sessionName} "..." --verify`,
     ].join("\n");
-    const sendResult = await this.cmuxAdapter.sendText(newSurfaceId, helperText);
+    const sendResult = await this.cmuxAdapter.sendText(newSurfaceId, helperText, wsResult.data);
     if (!sendResult.ok) return { ok: false, error: sendResult.message, code: sendResult.code };
-    const focusResult = await this.cmuxAdapter.focusSurface(newSurfaceId);
+    const focusResult = await this.cmuxAdapter.focusSurface(newSurfaceId, wsResult.data);
     if (!focusResult.ok) return { ok: false, error: focusResult.message, code: focusResult.code };
     return { ok: true, action: "created_helper" };
   }

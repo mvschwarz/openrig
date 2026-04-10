@@ -55,6 +55,29 @@ function trackingCmux() {
   return { adapter, calls };
 }
 
+function staleBindingCmux() {
+  const calls: Array<{ method: string; params?: unknown }> = [];
+  const factory: CmuxTransportFactory = async () => ({
+    request: async (method: string, params?: unknown) => {
+      calls.push({ method, params });
+      if (method === "capabilities") return { capabilities: ["surface.focus", "surface.create", "workspace.current"] };
+      if (method === "surface.focus") {
+        const surfaceId = String((params as Record<string, unknown> | undefined)?.["surfaceId"] ?? "");
+        if (surfaceId === "OK surface:78 pane:2 workspace:1") {
+          throw new Error("Invalid surface handle: OK surface:78 pane:2 workspace:1");
+        }
+        return {};
+      }
+      if (method === "workspace.current") return { workspace_id: "workspace:1" };
+      if (method === "surface.create") return { created_surface_ref: "surface:99" };
+      return {};
+    },
+    close: () => {},
+  });
+  const adapter = new CmuxAdapter(factory, { timeoutMs: 1000 });
+  return { adapter, calls };
+}
+
 describe("Session routes", () => {
   let db: Database.Database;
 
@@ -226,6 +249,39 @@ describe("Session routes", () => {
     expect(methodNames).not.toContain("workspace.current");
   });
 
+  it("POST .../open-cmux with stale existing cmuxSurface -> recreates, rebinds, and focuses new surface", async () => {
+    const { adapter: cmux, calls } = staleBindingCmux();
+    await cmux.connect();
+    const { app, rigRepo, sessionRegistry } = createTestApp(db, { cmux });
+    const rig = rigRepo.createRig("r01");
+    const node = rigRepo.addNode(rig.id, "dev1-impl");
+    sessionRegistry.registerSession(node.id, "r01-dev1-impl");
+    sessionRegistry.updateBinding(node.id, {
+      attachmentType: "tmux",
+      tmuxSession: "r01-dev1-impl",
+      cmuxWorkspace: "workspace:old",
+      cmuxSurface: "OK surface:78 pane:2 workspace:1",
+    });
+
+    calls.length = 0;
+
+    const res = await app.request(`/api/rigs/${rig.id}/nodes/dev1-impl/open-cmux`, { method: "POST" });
+    expect(res.status).toBe(200);
+    const body = await res.json() as Record<string, unknown>;
+    expect(body["ok"]).toBe(true);
+    expect(body["action"]).toBe("created_new");
+
+    const methodNames = calls.map((c) => c.method);
+    expect(methodNames.filter((name) => name === "surface.focus")).toHaveLength(2);
+    expect(methodNames).toContain("workspace.current");
+    expect(methodNames).toContain("surface.create");
+    expect(methodNames).toContain("surface.sendText");
+
+    const binding = sessionRegistry.getBindingForNode(node.id);
+    expect(binding?.cmuxWorkspace).toBe("workspace:1");
+    expect(binding?.cmuxSurface).toBe("surface:99");
+  });
+
   it("POST .../open-cmux tmux-backed node without cmuxSurface -> created_new, binds workspace+surface, sends tmux attach", async () => {
     const { adapter: cmux, calls } = trackingCmux();
     await cmux.connect();
@@ -255,7 +311,12 @@ describe("Session routes", () => {
     const sendCall = calls.find((c) => c.method === "surface.sendText");
     expect(sendCall).toBeDefined();
     const sendParams = sendCall!.params as Record<string, unknown>;
-    expect(String(sendParams["text"])).toContain("tmux attach -t r01-dev1-impl");
+    expect(String(sendParams["text"])).toBe("tmux attach -t r01-dev1-impl\n");
+    expect(sendParams["workspaceId"]).toBe("workspace:1");
+
+    const focusCalls = calls.filter((c) => c.method === "surface.focus");
+    expect(focusCalls).toHaveLength(1);
+    expect((focusCalls[0]!.params as Record<string, unknown>)["workspaceId"]).toBe("workspace:1");
 
     // Binding must be persisted with both workspace and surface
     const binding = sessionRegistry.getBindingForNode(node.id);

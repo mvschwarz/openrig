@@ -12,9 +12,15 @@ function makeDeps(overrides?: Partial<DoctorDeps>): DoctorDeps {
   return {
     exists: () => true,
     baseDir: "/install/cli/dist",
-    exec: () => "tmux 3.4\n",
+    exec: (cmd: string) => {
+      if (cmd === "tmux -V") return "tmux 3.4\n";
+      if (cmd === "cmux capabilities --json") return '{"capabilities":["surface.focus"]}\n';
+      if (cmd === "cmux --help") return "cmux help\n";
+      return "";
+    },
     checkPort: async () => true,
     configStore: { resolve: () => defaultConfig },
+    platform: "darwin",
     mkdirp: () => {},
     checkWritable: () => {},
     ...overrides,
@@ -75,11 +81,64 @@ describe("runDoctorChecks", () => {
   });
 
   it("tmux missing -> fail with guidance", () => {
-    const deps = makeDeps({ exec: () => { throw new Error("not found"); } });
+    const deps = makeDeps({
+      exec: (cmd: string) => {
+        if (cmd === "tmux -V") throw new Error("not found");
+        return "";
+      },
+    });
     const { checks } = runDoctorChecks(deps);
     const tmuxCheck = checks.find((c) => c.name === "tmux");
     expect(tmuxCheck?.status).toBe("fail");
     expect(tmuxCheck?.fix).toContain("brew");
+  });
+
+  it("cmux control available -> pass", () => {
+    const deps = makeDeps({
+      exec: (cmd: string) => {
+        if (cmd === "tmux -V") return "tmux 3.4\n";
+        if (cmd === "cmux capabilities --json") return '{"capabilities":["surface.focus"]}\n';
+        if (cmd === "cmux --help") return "cmux help\n";
+        return "";
+      },
+    });
+    const { checks } = runDoctorChecks(deps);
+    const cmuxCheck = checks.find((c) => c.name === "cmux");
+    expect(cmuxCheck?.status).toBe("pass");
+  });
+
+  it("cmux installed but control unavailable -> warn with guidance", () => {
+    const deps = makeDeps({
+      exec: (cmd: string) => {
+        if (cmd === "tmux -V") return "tmux 3.4\n";
+        if (cmd === "cmux capabilities --json") {
+          throw new Error("Failed to connect to socket at /tmp/cmux.sock");
+        }
+        if (cmd === "cmux --help") return "cmux help\n";
+        if (cmd === "defaults read com.cmuxterm.app socketControlMode") return "localOnly\n";
+        return "";
+      },
+    });
+    const { checks } = runDoctorChecks(deps);
+    const cmuxCheck = checks.find((c) => c.name === "cmux");
+    expect(cmuxCheck?.status).toBe("warn");
+    expect(cmuxCheck?.message).toContain("control unavailable");
+    expect(cmuxCheck?.fix).toContain("tell the user");
+    expect(cmuxCheck?.fix).toContain("socketControlMode");
+    expect(cmuxCheck?.fix).toContain("localOnly");
+  });
+
+  it("cmux missing -> warn, not fail", () => {
+    const deps = makeDeps({
+      exec: (cmd: string) => {
+        if (cmd === "tmux -V") return "tmux 3.4\n";
+        throw new Error("command not found: cmux");
+      },
+    });
+    const { checks } = runDoctorChecks(deps);
+    const cmuxCheck = checks.find((c) => c.name === "cmux");
+    expect(cmuxCheck?.status).toBe("warn");
+    expect(cmuxCheck?.message).toContain("not found");
   });
 
   it("Node version check passes on current Node", () => {
@@ -172,6 +231,31 @@ describe("rig doctor", () => {
     expect(parsed.healthy).toBe(true);
     expect(Array.isArray(parsed.checks)).toBe(true);
     expect(parsed.checks.length).toBeGreaterThan(0);
+  });
+
+  it("--json stays healthy when cmux is only a warning", async () => {
+    const deps = makeDeps({
+      exec: (cmd: string) => {
+        if (cmd === "tmux -V") return "tmux 3.4\n";
+        if (cmd === "cmux capabilities --json") {
+          throw new Error("Failed to connect to socket at /tmp/cmux.sock");
+        }
+        if (cmd === "cmux --help") return "cmux help\n";
+        return "";
+      },
+    });
+    const program = new Command();
+    program.addCommand(doctorCommand(deps));
+
+    const { logs, exitCode } = await captureLogs(() =>
+      program.parseAsync(["node", "rig", "doctor", "--json"]),
+    );
+
+    const parsed = JSON.parse(logs.join("\n"));
+    const cmuxCheck = parsed.checks.find((check: { name: string }) => check.name === "cmux");
+    expect(parsed.healthy).toBe(true);
+    expect(cmuxCheck.status).toBe("warn");
+    expect(exitCode).toBeUndefined();
   });
 
   it("--json exits non-zero when writable state paths fail", async () => {

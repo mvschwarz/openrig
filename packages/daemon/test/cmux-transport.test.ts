@@ -43,6 +43,16 @@ describe("cmux CLI transport", () => {
     expect(exec).toHaveBeenCalledWith("cmux focus-panel --panel 's-1'");
   });
 
+  it("request('surface.focus') includes --workspace when provided", async () => {
+    const exec = vi.fn<ExecFn>().mockResolvedValue("");
+    const factory = createCmuxCliTransport(exec);
+    const transport = await factory();
+
+    await transport.request("surface.focus", { surfaceId: "surface:7", workspaceId: "workspace:2" });
+
+    expect(exec).toHaveBeenCalledWith("cmux focus-panel --panel 'surface:7' --workspace 'workspace:2'");
+  });
+
   it("request('surface.sendText') -> exact: cmux send --surface 's-1' 'hello'", async () => {
     const exec = vi.fn<ExecFn>().mockResolvedValue("");
     const factory = createCmuxCliTransport(exec);
@@ -51,6 +61,16 @@ describe("cmux CLI transport", () => {
     await transport.request("surface.sendText", { surfaceId: "s-1", text: "hello" });
 
     expect(exec).toHaveBeenCalledWith("cmux send --surface 's-1' 'hello'");
+  });
+
+  it("request('surface.sendText') includes --workspace when provided", async () => {
+    const exec = vi.fn<ExecFn>().mockResolvedValue("");
+    const factory = createCmuxCliTransport(exec);
+    const transport = await factory();
+
+    await transport.request("surface.sendText", { surfaceId: "surface:7", workspaceId: "workspace:2", text: "hello" });
+
+    expect(exec).toHaveBeenCalledWith("cmux send --surface 'surface:7' --workspace 'workspace:2' 'hello'");
   });
 
   it("cmux not found (exec throws) -> factory throws", async () => {
@@ -87,6 +107,18 @@ describe("cmux CLI transport", () => {
     expect(result).toEqual({ workspace_id: "workspace:1" });
   });
 
+  it("request('workspace.current') falls back to bare legacy handle output", async () => {
+    const exec = vi.fn<ExecFn>().mockImplementation(async (cmd: string) => {
+      if (cmd.includes("capabilities")) return '{"capabilities":[]}';
+      return "3FD8CF06-F6FD-451D-AC6B-1DF15BD0BECA\n";
+    });
+    const factory = createCmuxCliTransport(exec);
+    const transport = await factory();
+
+    const result = await transport.request("workspace.current");
+    expect(result).toEqual({ workspace_id: "3FD8CF06-F6FD-451D-AC6B-1DF15BD0BECA" });
+  });
+
   it("request('surface.create') -> exact: cmux new-surface --type terminal --workspace 'workspace:2' --json", async () => {
     const exec = vi.fn<ExecFn>().mockImplementation(async (cmd: string) => {
       if (cmd.includes("capabilities")) return '{"capabilities":[]}';
@@ -102,6 +134,30 @@ describe("cmux CLI transport", () => {
     expect(createCall).toBeDefined();
     expect(createCall![0]).toBe("cmux new-surface --type 'terminal' --workspace 'workspace:2' --json");
     expect(result).toEqual({ created_surface_ref: "surface:9", workspace_id: "workspace:2", pane_id: "pane:3" });
+  });
+
+  it("request('surface.create') falls back to bare legacy handle output", async () => {
+    const exec = vi.fn<ExecFn>().mockImplementation(async (cmd: string) => {
+      if (cmd.includes("capabilities")) return '{"capabilities":[]}';
+      return "surface:9\n";
+    });
+    const factory = createCmuxCliTransport(exec);
+    const transport = await factory();
+
+    const result = await transport.request("surface.create", { workspaceId: "workspace:2", type: "terminal" });
+    expect(result).toEqual({ created_surface_ref: "surface:9" });
+  });
+
+  it("request('surface.create') extracts the surface ref from legacy OK summary output", async () => {
+    const exec = vi.fn<ExecFn>().mockImplementation(async (cmd: string) => {
+      if (cmd.includes("capabilities")) return '{"capabilities":[]}';
+      return "OK surface:78 pane:2 workspace:1\n";
+    });
+    const factory = createCmuxCliTransport(exec);
+    const transport = await factory();
+
+    const result = await transport.request("surface.create", { workspaceId: "workspace:1", type: "terminal" });
+    expect(result).toEqual({ created_surface_ref: "surface:78" });
   });
 
   it("surface.focus uses modern 'cmux focus-panel --panel' not old 'cmux focus-surface'", async () => {

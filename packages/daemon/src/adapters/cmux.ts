@@ -60,16 +60,8 @@ export class CmuxAdapter {
         (async () => {
           holder.transport = await this.factory();
 
-          const result = (await holder.transport.request("capabilities")) as {
-            capabilities?: string[];
-          };
-
-          const caps: Record<string, boolean> = {};
-          if (result.capabilities) {
-            for (const cap of result.capabilities) {
-              caps[cap] = true;
-            }
-          }
+          const result = await holder.transport.request("capabilities");
+          const caps = normalizeCapabilities(result);
 
           return { transport: holder.transport, capabilities: caps };
         })(),
@@ -129,24 +121,24 @@ export class CmuxAdapter {
     }
   }
 
-  async focusSurface(surfaceId: string): Promise<CmuxResult<void>> {
+  async focusSurface(surfaceId: string, workspaceId?: string): Promise<CmuxResult<void>> {
     if (!this.transport) {
       return { ok: false, code: "unavailable", message: "cmux is not connected" };
     }
     try {
-      await this.transport.request("surface.focus", { surfaceId });
+      await this.transport.request("surface.focus", { surfaceId, workspaceId });
       return { ok: true, data: undefined };
     } catch (err) {
       return { ok: false, code: "request_failed", message: err instanceof Error ? err.message : String(err) };
     }
   }
 
-  async sendText(surfaceId: string, text: string): Promise<CmuxResult<void>> {
+  async sendText(surfaceId: string, text: string, workspaceId?: string): Promise<CmuxResult<void>> {
     if (!this.transport) {
       return { ok: false, code: "unavailable", message: "cmux is not connected" };
     }
     try {
-      await this.transport.request("surface.sendText", { surfaceId, text });
+      await this.transport.request("surface.sendText", { surfaceId, text, workspaceId });
       return { ok: true, data: undefined };
     } catch (err) {
       return { ok: false, code: "request_failed", message: err instanceof Error ? err.message : String(err) };
@@ -159,7 +151,7 @@ export class CmuxAdapter {
     }
     try {
       const raw = (await this.transport.request("workspace.current")) as Record<string, unknown>;
-      const handle = (raw["workspace_id"] ?? raw["id"]) as string | undefined;
+      const handle = normalizeHandle("workspace", raw["workspace_id"] ?? raw["id"]);
       if (!handle) {
         return { ok: false, code: "request_failed", message: "cmux current-workspace returned no workspace handle" };
       }
@@ -175,8 +167,15 @@ export class CmuxAdapter {
     }
     try {
       const raw = (await this.transport.request("surface.create", { workspaceId, type: "terminal" })) as Record<string, unknown>;
-      // Normalize: prefer ref-first (cmux default idFormat=refs), then id fallback
-      const handle = (raw["created_surface_ref"] ?? raw["created_surface_id"] ?? raw["surface_ref"] ?? raw["surface_id"] ?? raw["id"]) as string | undefined;
+      const handle = [
+        raw["created_surface_ref"],
+        raw["created_surface_id"],
+        raw["surface_ref"],
+        raw["surface_id"],
+        raw["id"],
+      ]
+        .map((value) => normalizeHandle("surface", value))
+        .find((value): value is string => Boolean(value));
       if (!handle) {
         return { ok: false, code: "request_failed", message: "cmux new-surface returned no surface handle" };
       }
@@ -206,6 +205,55 @@ export class CmuxAdapter {
       return { ok: false, code: "request_failed", message: err instanceof Error ? err.message : String(err) };
     }
   }
+}
+
+function normalizeCapabilities(raw: unknown): Record<string, boolean> {
+  const caps: Record<string, boolean> = {};
+
+  if (Array.isArray(raw)) {
+    for (const cap of raw) {
+      if (typeof cap === "string" && cap.trim() !== "") {
+        caps[cap] = true;
+      }
+    }
+    return caps;
+  }
+
+  if (!raw || typeof raw !== "object") {
+    return caps;
+  }
+
+  const record = raw as Record<string, unknown>;
+  const nested = record["capabilities"];
+  if (Array.isArray(nested)) {
+    for (const cap of nested) {
+      if (typeof cap === "string" && cap.trim() !== "") {
+        caps[cap] = true;
+      }
+    }
+    return caps;
+  }
+
+  for (const [key, value] of Object.entries(record)) {
+    if (value === false || value == null) continue;
+    caps[key] = true;
+  }
+
+  return caps;
+}
+
+function normalizeHandle(kind: "workspace" | "surface", value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+
+  const refPattern = kind === "workspace" ? /(workspace:[^\s]+)/ : /(surface:[^\s]+)/;
+  const refMatch = trimmed.match(refPattern);
+  if (refMatch) return refMatch[1];
+
+  const withoutOK = trimmed.replace(/^OK\s+/, "");
+  const firstToken = withoutOK.split(/\s+/)[0];
+  return firstToken || undefined;
 }
 
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
