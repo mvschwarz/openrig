@@ -237,7 +237,7 @@ describe("Bootstrap CLI", () => {
       await prog.parseAsync(["node", "rig", "bootstrap", "/tmp/rig.yaml", "--yes"]);
     });
 
-    expect(timeoutMs).toBe(45_000);
+    expect(timeoutMs).toBe(120_000);
   });
 
   // T9: partial status -> exit 1 (R2-M1)

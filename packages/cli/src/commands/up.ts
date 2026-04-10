@@ -5,7 +5,7 @@ import { getDaemonStatus, getDaemonUrl, startDaemon, type LifecycleDeps } from "
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 
-const LONG_RUNNING_UP_TIMEOUT_MS = 45_000;
+const LONG_RUNNING_UP_TIMEOUT_MS = 120_000;
 
 export function upCommand(depsOverride?: StatusDeps & { lifecycleDeps?: LifecycleDeps }): Command {
   const cmd = new Command("up")
@@ -94,6 +94,7 @@ Examples:
       let sourceRef = isRigName ? source : nodePath.resolve(source);
 
       // If it looks like a name, check for library spec match
+      let defaultLibraryCwdOverride: string | undefined;
       if (isRigName) {
         try {
           const { resolveLibrarySpec } = await import("./specs.js");
@@ -111,6 +112,9 @@ Examples:
             return;
           }
           sourceRef = entry.sourcePath;
+          if (!opts.cwd && entry.kind === "rig" && entry.sourceType === "builtin") {
+            defaultLibraryCwdOverride = process.cwd();
+          }
         } catch (resolveErr) {
           // Ambiguity within library — surface it
           if ((resolveErr as Error).message?.includes("ambiguous")) {
@@ -129,7 +133,7 @@ Examples:
         sourceRef,
         plan: opts.plan ?? false,
         autoApprove: opts.yes ?? false,
-        cwdOverride: opts.cwd ? nodePath.resolve(opts.cwd) : undefined,
+        cwdOverride: opts.cwd ? nodePath.resolve(opts.cwd) : defaultLibraryCwdOverride,
         targetRoot,
       }, opts.plan ? undefined : { timeoutMs: LONG_RUNNING_UP_TIMEOUT_MS });
 

@@ -1,8 +1,11 @@
 #!/usr/bin/env node
 
 import path from "node:path";
-import { realpathSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
+
+const REEXEC_GUARD_ENV = "OPENRIG_BIN_REEXEC";
 
 export function resolveBinEntry(invokedPath = process.argv[1], moduleUrl = import.meta.url): string {
   const wrapperPath = invokedPath ? realpathSync(invokedPath) : realpathSync(fileURLToPath(moduleUrl));
@@ -19,6 +22,51 @@ export function isDirectRun(argv1 = process.argv[1], moduleUrl = import.meta.url
   }
 }
 
+export function resolveNodeReexecBinary(
+  currentExecPath = process.execPath,
+  invokedPath = process.argv[1],
+  env: NodeJS.ProcessEnv = process.env,
+  exists: (candidate: string) => boolean = existsSync,
+  realpath: (candidate: string) => string = realpathSync,
+): string | null {
+  if (!invokedPath) return null;
+  if (env[REEXEC_GUARD_ENV] === "1") return null;
+
+  try {
+    const binDir = realpath(path.dirname(invokedPath));
+    const siblingNode = path.join(binDir, process.platform === "win32" ? "node.exe" : "node");
+    if (!exists(siblingNode)) return null;
+
+    const normalizedSiblingNode = realpath(siblingNode);
+    const normalizedCurrentExec = realpath(currentExecPath);
+    if (normalizedSiblingNode === normalizedCurrentExec) return null;
+
+    return normalizedSiblingNode;
+  } catch {
+    return null;
+  }
+}
+
+function maybeReexecWithSiblingNode(argv = process.argv): void {
+  const preferredNode = resolveNodeReexecBinary(process.execPath, argv[1], process.env);
+  if (!preferredNode) return;
+
+  const scriptPath = argv[1] ? realpathSync(argv[1]) : fileURLToPath(import.meta.url);
+  const result = spawnSync(preferredNode, [scriptPath, ...argv.slice(2)], {
+    stdio: "inherit",
+    env: {
+      ...process.env,
+      [REEXEC_GUARD_ENV]: "1",
+    },
+  });
+
+  if (result.error) {
+    throw result.error;
+  }
+
+  process.exit(result.status ?? 0);
+}
+
 export async function run(argv = process.argv): Promise<void> {
   const normalizedArgv = [...argv];
   if (normalizedArgv[1]) {
@@ -31,5 +79,6 @@ export async function run(argv = process.argv): Promise<void> {
 }
 
 if (isDirectRun()) {
+  maybeReexecWithSiblingNode(process.argv);
   await run(process.argv);
 }

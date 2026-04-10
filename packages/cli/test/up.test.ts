@@ -278,6 +278,61 @@ describe("Up CLI", () => {
     for (const l of origListeners) server.on("request", l as (...args: unknown[]) => void);
   });
 
+  it("up from a library name defaults cwdOverride to the caller working directory", async () => {
+    let lastBody: Record<string, unknown> = {};
+    const origListeners = server.listeners("request");
+    server.removeAllListeners("request");
+    server.on("request", async (req: http.IncomingMessage, res: http.ServerResponse) => {
+      let body = "";
+      for await (const chunk of req) body += chunk;
+
+      if ((req.url ?? "").startsWith("/api/specs/library") && req.method === "GET") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify([
+          {
+            id: "builtin:rig:demo",
+            kind: "rig",
+            name: "demo",
+            version: "0.0.0",
+            sourceType: "builtin",
+            sourcePath: "/install/@openrig/cli/daemon/specs/rigs/launch/demo/rig.yaml",
+            relativePath: "rigs/launch/demo/rig.yaml",
+            updatedAt: "2026-04-10T00:00:00Z",
+          },
+        ]));
+        return;
+      }
+
+      if (req.url === "/api/rigs/summary" && req.method === "GET") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify([]));
+        return;
+      }
+
+      if (req.url === "/api/up" && req.method === "POST") {
+        lastBody = JSON.parse(body);
+        res.writeHead(201, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ status: "completed", runId: "r", rigId: "g", stages: [], errors: [] }));
+        return;
+      }
+
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "not found" }));
+    });
+
+    try {
+      await captureLogs(async () => {
+        await makeCmd().parseAsync(["node", "rig", "up", "demo"]);
+      });
+
+      expect(lastBody.sourceRef).toBe("/install/@openrig/cli/daemon/specs/rigs/launch/demo/rig.yaml");
+      expect(lastBody.cwdOverride).toBe(process.cwd());
+    } finally {
+      server.removeAllListeners("request");
+      for (const l of origListeners) server.on("request", l as (...args: unknown[]) => void);
+    }
+  });
+
   it("up --cwd sends absolute cwdOverride", async () => {
     let lastBody: Record<string, unknown> = {};
     const origListeners = server.listeners("request");
@@ -326,7 +381,7 @@ describe("Up CLI", () => {
       await prog.parseAsync(["node", "rig", "up", "/tmp/rig.yaml"]);
     });
 
-    expect(timeoutMs).toBe(45_000);
+    expect(timeoutMs).toBe(120_000);
   });
 
   // NS-T14: fresh boot handoff includes dashboard URL + attach command

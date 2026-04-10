@@ -3,7 +3,7 @@ import { z } from "zod";
 import type { DaemonClient, DaemonResponse } from "./client.js";
 import { CLI_VERSION } from "./version.js";
 
-const LONG_RUNNING_UP_TIMEOUT_MS = 45_000;
+const LONG_RUNNING_UP_TIMEOUT_MS = 120_000;
 
 type TextResult = {
   content: Array<{ type: "text"; text: string }>;

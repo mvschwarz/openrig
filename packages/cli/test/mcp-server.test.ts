@@ -89,7 +89,7 @@ describe("MCP Server", () => {
         autoApprove: true,
         targetRoot: undefined,
       },
-      { timeoutMs: 45_000 },
+      { timeoutMs: 120_000 },
     );
     const content = result.content as Array<{ type: string; text: string }>;
     const parsed = JSON.parse(content[0].text);
