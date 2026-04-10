@@ -228,6 +228,13 @@ describe("Starter specs", () => {
     }
   });
 
+  it("vault-specialist startup context grounds identity before topology claims", () => {
+    const context = readFileSync(join(SPECS_ROOT, "agents/apps/vault-specialist/startup/context.md"), "utf-8").toLowerCase();
+
+    expect(context).toContain("rig whoami --json");
+    expect(context).toContain("before making topology or registration claims");
+  });
+
   it("shared packaged starter skills exist and builtin agents opt into the right ones", () => {
     const sharedYaml = readFileSync(join(SPECS_ROOT, SHARED_AGENT_SPEC), "utf-8");
     const sharedRaw = parseAgentSpec(sharedYaml) as Record<string, unknown>;

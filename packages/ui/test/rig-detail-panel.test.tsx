@@ -336,6 +336,69 @@ describe("RigDetailPanel", () => {
     expect(screen.queryByTestId("tab-env")).toBeNull();
   });
 
+  it("shows stopped env state and failed health gate details when services disappear", async () => {
+    mockFetch.mockImplementation((url: string) => {
+      if (url === "/api/rigs/summary") {
+        return Promise.resolve({
+          ok: true,
+          json: async () => [{ id: "rig-1", name: "my-rig", nodeCount: 1, latestSnapshotAt: null, latestSnapshotId: null, hasServices: true }],
+        });
+      }
+      if (url === "/api/ps") {
+        return Promise.resolve({
+          ok: true,
+          json: async () => [{ rigId: "rig-1", name: "my-rig", nodeCount: 1, runningCount: 1, status: "running", uptime: "5m" }],
+        });
+      }
+      if (url === "/api/rigs/rig-1/nodes") {
+        return Promise.resolve({ ok: true, json: async () => [] });
+      }
+      if (url.includes("/snapshots")) {
+        return Promise.resolve({ ok: true, json: async () => [] });
+      }
+      if (url === "/api/rigs/rig-1/env") {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            ok: true,
+            hasServices: true,
+            kind: "compose",
+            composeFile: "/tmp/svc.compose.yaml",
+            projectName: "test-svc",
+            receipt: {
+              kind: "compose",
+              composeFile: "/tmp/svc.compose.yaml",
+              projectName: "test-svc",
+              services: [],
+              waitFor: [{
+                target: { url: "http://127.0.0.1:8200/v1/sys/health" },
+                status: "unhealthy",
+                detail: "HTTP probe failed: http://127.0.0.1:8200/v1/sys/health",
+              }],
+              capturedAt: "2026-04-09T12:00:00Z",
+            },
+            surfaces: {
+              urls: [{ name: "Vault UI", url: "http://127.0.0.1:8200/ui" }],
+            },
+          }),
+        });
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) });
+    });
+
+    renderPanel("rig-1");
+    await screen.findByText("my-rig");
+
+    fireEvent.click(screen.getByTestId("tab-env"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("env-state").textContent).toContain("Stopped");
+      expect(screen.getByText("Health Gates")).toBeDefined();
+      expect(screen.getByText("http://127.0.0.1:8200/v1/sys/health")).toBeDefined();
+      expect(screen.getByText(/HTTP probe failed/)).toBeDefined();
+    });
+  });
+
   it("keeps Env tab visible for service-backed rigs while env status is still loading", async () => {
     mockFetch.mockImplementation((url: string) => {
       if (url === "/api/rigs/summary") {
