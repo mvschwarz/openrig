@@ -27,7 +27,7 @@ Fast lookup:
 - Context usage: `packages/daemon/src/domain/context-usage-store.ts`, `packages/daemon/src/domain/context-monitor.ts`
 - Resume honesty: `packages/daemon/src/domain/native-resume-probe.ts`, `resume-metadata-refresher.ts`, `codex-thread-id.ts`
 - Package / bootstrap / bundle flows: `packages/daemon/src/domain/package-*`, `install-*`, `bootstrap-*`, `bundle-*`
-- CLI command surface: `packages/cli/src/index.ts`, `packages/cli/src/commands/*` (39 groups)
+- CLI command surface: `packages/cli/src/index.ts`, `packages/cli/src/commands/*` (40 groups)
 - CLI infrastructure: `packages/cli/src/config-store.ts`, `packages/cli/src/system-preflight.ts`
 - UI workspace and navigation: `packages/ui/src/components/Explorer.tsx`, `packages/ui/src/components/WorkspaceHome.tsx`, `packages/ui/src/components/AppShell.tsx`
 - UI shared drawer: `packages/ui/src/components/SharedDetailDrawer.tsx`, `RigDetailPanel.tsx`, `NodeDetailPanel.tsx`, `DiscoveryPanel.tsx`, `SpecsPanel.tsx`, `RigChatPanel.tsx`, `SystemPanel.tsx`
@@ -209,7 +209,7 @@ Fast lookup:
 ### Entrypoints And Infrastructure
 - `packages/cli/src/client.ts`: Shared HTTP client for talking to the daemon API, including raw JSON posts and text-body posts with optional extra headers such as `X-Rig-Root`. Exports: DaemonClient, DaemonConnectionError, DaemonResponse. Related: none.
 - `packages/cli/src/daemon-lifecycle.ts`: Starts, stops, inspects, and tails the local daemon process. Spawns the daemon with `process.execPath` and bypasses local `daemon.json` gating when `OPENRIG_URL` is set by probing remote `/healthz` directly. Exports: DaemonState, DaemonStatus, LOG_FILE, LifecycleDeps, OPENRIG_DIR, STATE_FILE, StartOptions, getDaemonPath, getDaemonStatus, readLogs, startDaemon, stopDaemon, tailLogs. Related: none.
-- `packages/cli/src/index.ts`: Commander entrypoint that assembles the full `rig` CLI program (39 mounted command groups, including env status/logs/down plus Final Stretch 1 `specs`, `whoami`, `bind`, and `adopt`). Exports: ProgramDeps, createProgram. Related: `packages/cli/src/commands/bootstrap.js`, `packages/cli/src/commands/bundle.js`, `packages/cli/src/commands/claim.js`, `packages/cli/src/commands/daemon.js`, +18 more.
+- `packages/cli/src/index.ts`: Commander entrypoint that assembles the full `rig` CLI program (40 mounted command groups, including env status/logs/down, `destroy`, and Final Stretch 1 `specs`, `whoami`, `bind`, and `adopt`). Exports: ProgramDeps, createProgram. Related: `packages/cli/src/commands/bootstrap.js`, `packages/cli/src/commands/bundle.js`, `packages/cli/src/commands/claim.js`, `packages/cli/src/commands/daemon.js`, +19 more.
 - `packages/cli/src/mcp-server.ts`: Implements the CLI-hosted MCP server over stdio, wrapping 17 daemon-backed tools including node inventory, send/capture, bundle/spec validation, and chatroom. Exports: createMcpServer. Related: `packages/cli/src/client.js`.
 
 ### Commands
