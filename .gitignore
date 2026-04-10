@@ -16,6 +16,9 @@ docs/*
 *.sqlite-wal
 *.sqlite.pre-reboot-backup
 .openrig/
+.claude
+.agents
+.openrig
 
 # Local demo proof artifacts
 demo/proof/
