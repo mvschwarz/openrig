@@ -64,9 +64,21 @@ function LibraryRigReviewContent({ review }: { review: LibraryRigReview }) {
   const reviewEdges = review.edges ?? [];
 
   const resolveMemberAgent = (agentRef: string) => {
-    const match = agentRef.match(/^local:agents\/([^/]+)$/);
-    if (!match?.[1]) return null;
-    return agentEntryByName.get(match[1]) ?? null;
+    if (!agentRef.startsWith("local:")) return null;
+    const refPath = agentRef.slice("local:".length);
+
+    // Resolve the ref path against the rig's source directory
+    const rigDir = review.sourcePath.replace(/\/[^/]+$/, "");
+    const segments = `${rigDir}/${refPath}`.split("/");
+    const resolved: string[] = [];
+    for (const seg of segments) {
+      if (seg === "..") { resolved.pop(); }
+      else if (seg !== "." && seg !== "") { resolved.push(seg); }
+    }
+    const resolvedDir = "/" + resolved.join("/");
+
+    // Match against library entries by sourcePath prefix (agent dir contains agent.yaml)
+    return agentEntries.find((entry) => entry.sourcePath.startsWith(resolvedDir + "/")) ?? null;
   };
 
   return (
