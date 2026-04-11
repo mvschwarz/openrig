@@ -36,5 +36,7 @@ resources:
       path: skills/pods/development-team
     - id: review-team
       path: skills/pods/review-team
+    - id: rig-architect
+      path: skills/rig-architect
 
 profiles: {}
