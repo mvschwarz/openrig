@@ -12,21 +12,17 @@ Define your agent team in YAML. Boot it with one command. Claude Code and Codex 
 # Install
 npm install -g @openrig/cli
 
-# Check system readiness
-rig doctor
-
-# Start the daemon
-rig daemon start
+# Prepare the machine (attempts tmux, cmux, tmux defaults — reports what worked)
+rig setup
 
 # Boot the demo rig (3 pods, 8 nodes, mixed runtimes)
 rig up demo
 
-# See what's running
-rig ps --nodes
-
 # Open the UI
 rig ui open
 ```
+
+After the demo boots, open the UI and click **orch1.lead** in the topology graph. Use **Open CMUX** to jump into a terminal for that node. If cmux is not available, use the tmux attach command shown in the node detail panel instead.
 
 ## What It Does
 
@@ -86,7 +82,7 @@ Hono HTTP daemon
   SQLite + tmux + runtime adapters
 ```
 
-- **CLI**: 36 commands designed for both humans and agents. Every mutating command ends with what happened, current state, and next action.
+- **CLI**: 40+ commands designed for both humans and agents. Every mutating command ends with what happened, current state, and next action.
 - **UI**: Explorer sidebar, topology graph with pod grouping, node detail panel, system log, chatroom.
 - **MCP**: 17 tools so agents can manage their own topology (`rig_up`, `rig_ps`, `rig_send`, `rig_chatroom_send`, etc.)
 - **Runtimes**: Claude Code, Codex, and terminal nodes. Adapters for Pi and OpenHands in development.
@@ -121,6 +117,16 @@ Requires Docker for service-backed rigs.
 Optional:
 - cmux for `Open CMUX` node surface controls
 - Docker for service-backed rigs and managed apps
+
+## Setup and Troubleshooting
+
+- `rig setup` attempts core machine preparation: tmux, cmux, tmux defaults. It reports what it tried and what actually succeeded. If something fails, it gives the local agent enough context to finish the job.
+- `rig setup --full` attempts a broader operator workstation setup (jq, gh) on top of core.
+- `rig doctor` inspects current system health and helps diagnose problems after setup. Use it when something stops working or after machine changes.
+
+Both commands support `--json` for agent-driven workflows.
+
+**For agents:** Ask the user whether they want core setup (`rig setup`) or the fuller workstation path (`rig setup --full`) before choosing the invocation. Inspect the result with `--json` and use `rig doctor` to finish any remaining machine-specific issues.
 
 ## Comparison with Claude Managed Agents
 
