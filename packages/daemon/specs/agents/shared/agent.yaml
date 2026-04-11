@@ -36,5 +36,20 @@ resources:
       path: skills/pods/development-team
     - id: review-team
       path: skills/pods/review-team
+    # PM skills
+    - id: office-hours
+      path: skills/pm/office-hours
+    - id: context-builder
+      path: skills/pm/context-builder
+    - id: requirements-writer
+      path: skills/pm/requirements-writer
+    - id: ui-mockup
+      path: skills/pm/ui-mockup
+    - id: plan-review
+      path: skills/pm/plan-review
+    - id: exec-summary
+      path: skills/pm/exec-summary
+    - id: backlog-capture
+      path: skills/pm/backlog-capture
 
 profiles: {}

@@ -1,0 +1,51 @@
+version: "0.2"
+name: pm-team
+culture_file: CULTURE.md
+summary: >
+  Product management rig with a PM lead running the 8-step feature flow
+  (validate, context, requirements, mockups, review, exec summary, handoff).
+  Includes a researcher for competitive/regulatory/customer intelligence
+  and a coder for UI mockups and prototypes.
+
+pods:
+  - id: pm
+    label: Product Management
+    members:
+      - id: lead
+        agent_ref: "local:../../../agents/product-management/pm"
+        runtime: claude-code
+        profile: default
+        cwd: "."
+      - id: researcher
+        agent_ref: "local:../../../agents/research/analyst"
+        runtime: codex
+        profile: default
+        cwd: "."
+    edges:
+      - kind: delegates_to
+        from: lead
+        to: researcher
+
+  - id: dev
+    label: Development Support
+    members:
+      - id: coder
+        agent_ref: "local:../../../agents/development/implementer"
+        runtime: claude-code
+        profile: default
+        cwd: "."
+    edges: []
+
+edges:
+  - kind: delegates_to
+    from: pm.lead
+    to: dev.coder
+  - kind: can_observe
+    from: dev.coder
+    to: pm.researcher
+  - kind: escalates_to
+    from: pm.researcher
+    to: pm.lead
+  - kind: escalates_to
+    from: dev.coder
+    to: pm.lead
