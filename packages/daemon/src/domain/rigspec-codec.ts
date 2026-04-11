@@ -16,6 +16,7 @@ export class RigSpecCodec {
     };
     if (spec.summary) doc["summary"] = spec.summary;
     if (spec.cultureFile) doc["culture_file"] = spec.cultureFile;
+    if (spec.docs && spec.docs.length > 0) doc["docs"] = spec.docs.map((d) => ({ path: d.path }));
     if (spec.startup) doc["startup"] = serializeStartupBlock(spec.startup);
 
     doc["pods"] = spec.pods.map((pod) => {

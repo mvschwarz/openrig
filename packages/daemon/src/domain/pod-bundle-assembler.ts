@@ -73,6 +73,13 @@ export class PodBundleAssembler {
       this.collectRigFile(rigSpec.cultureFile, opts.rigRoot, opts.outputDir, collectedFiles);
     }
 
+    // 2b2. Docs files
+    if (rigSpec.docs) {
+      for (const doc of rigSpec.docs) {
+        this.collectRigFile(doc.path, opts.rigRoot, opts.outputDir, collectedFiles);
+      }
+    }
+
     // 2c. Rig startup files
     this.collectStartupFiles(rigSpec.startup, opts.rigRoot, opts.outputDir, collectedFiles);
 
