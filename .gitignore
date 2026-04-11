@@ -3,9 +3,12 @@ dist/
 .DS_Store
 *.log
 
-# All docs are internal except as-built
+# All docs are internal except as-built and reference
 docs/*
 !docs/as-built/
+!docs/reference/
+
+notes/*
 
 # Local environment
 .env

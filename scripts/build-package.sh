@@ -41,8 +41,10 @@ if [ -d "$DAEMON_DIR/specs" ]; then
   cp -r "$DAEMON_DIR/specs" "$CLI_DIR/daemon/specs"
 fi
 
-if [ -d "$DAEMON_DIR/docs" ]; then
-  cp -r "$DAEMON_DIR/docs" "$CLI_DIR/daemon/docs"
+# Reference docs: copy from repo root docs/reference/ into the assembled package
+if [ -d "$REPO_ROOT/docs/reference" ]; then
+  mkdir -p "$CLI_DIR/daemon/docs/reference"
+  cp -r "$REPO_ROOT/docs/reference/"* "$CLI_DIR/daemon/docs/reference/"
 fi
 
 # UI: dist
