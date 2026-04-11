@@ -62,6 +62,7 @@ export class CmuxAdapter {
 
           const result = await holder.transport.request("capabilities");
           const caps = normalizeCapabilities(result);
+          await holder.transport.request("workspace.current");
 
           return { transport: holder.transport, capabilities: caps };
         })(),

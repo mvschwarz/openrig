@@ -670,11 +670,13 @@ describe("startDaemon env sanitization", () => {
       expect(spawnEnv["GHOSTTY_BIN_DIR"]).toBeUndefined();
       expect(spawnEnv["TERM_PROGRAM"]).toBeUndefined();
       expect(spawnEnv["CMUX_WORKSPACE"]).toBeUndefined();
-      expect(spawnEnv["CMUX_PANEL_ID"]).toBeUndefined();
-      expect(spawnEnv["CMUX_BUNDLED_CLI_PATH"]).toBeUndefined();
       expect(spawnEnv["CODEX_CI"]).toBeUndefined();
       expect(spawnEnv["COMMAND_MODE"]).toBeUndefined();
       expect(spawnEnv["__CFBundleIdentifier"]).toBeUndefined();
+
+      // cmux context needed for workspace-bound commands should survive
+      expect(spawnEnv["CMUX_PANEL_ID"]).toBe("panel:7");
+      expect(spawnEnv["CMUX_BUNDLED_CLI_PATH"]).toBe("/Applications/cmux.app/Contents/Resources/bin/cmux");
 
       // Core vars must be present
       expect(spawnEnv["HOME"]).toBeDefined();
@@ -750,14 +752,16 @@ describe("buildDaemonEnv", () => {
     expect(result["XPC_SERVICE_NAME"]).toBeUndefined();
     expect(result["__CFBundleIdentifier"]).toBeUndefined();
     expect(result["__CF_USER_TEXT_ENCODING"]).toBeUndefined();
-    expect(result["CMUX_BUNDLE_ID"]).toBeUndefined();
-    expect(result["CMUX_BUNDLED_CLI_PATH"]).toBeUndefined();
-    expect(result["CMUX_PANEL_ID"]).toBeUndefined();
     expect(result["CMUX_SOCKET_PATH"]).toBeUndefined();
-    expect(result["CMUX_TAB_ID"]).toBeUndefined();
     expect(result["CMUX_WORKSPACE"]).toBeUndefined();
-    expect(result["CMUX_WORKSPACE_ID"]).toBeUndefined();
     expect(result["CMUX_SURFACE_ID"]).toBeUndefined();
+
+    // cmux context needed for workspace-bound commands is preserved
+    expect(result["CMUX_BUNDLE_ID"]).toBe("com.cmuxterm.app");
+    expect(result["CMUX_BUNDLED_CLI_PATH"]).toBe("/Applications/cmux.app/Contents/Resources/bin/cmux");
+    expect(result["CMUX_PANEL_ID"]).toBe("panel:1");
+    expect(result["CMUX_TAB_ID"]).toBe("tab:1");
+    expect(result["CMUX_WORKSPACE_ID"]).toBe("workspace:1");
   });
 
   it("explicit opts override inherited OPENRIG_* from base env", () => {

@@ -162,8 +162,11 @@ async function checkPid(state: DaemonState, deps: LifecycleDeps): Promise<"openr
  * terminal-emulator, GUI-session, and cmux-session variables that can break
  * adapter initialization when the daemon runs detached.
  */
-const ENV_SCRUB_PREFIXES = ["CMUX_", "CODEX_", "GHOSTTY_", "XPC_", "__CF"];
+const ENV_SCRUB_PREFIXES = ["CODEX_", "GHOSTTY_", "XPC_", "__CF"];
 const ENV_SCRUB_EXACT = new Set([
+  "CMUX_SOCKET_PATH",
+  "CMUX_SURFACE_ID",
+  "CMUX_WORKSPACE",
   "COLORTERM",
   "COMMAND_MODE",
   "TERM_PROGRAM",

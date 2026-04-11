@@ -15,6 +15,9 @@ function workingFactory(capabilities: string[] = ["workspace.list", "surface.lis
       if (method === "capabilities") {
         return { capabilities };
       }
+      if (method === "workspace.current") {
+        return { workspace_id: "workspace:1" };
+      }
       return {};
     },
     close: () => {},
@@ -34,6 +37,9 @@ function surfaceFactory(responses: Record<string, unknown>): CmuxTransportFactor
     request: async (method: string) => {
       if (method === "capabilities") {
         return { capabilities: Object.keys(responses) };
+      }
+      if (method === "workspace.current" && !("workspace.current" in responses)) {
+        return { workspace_id: "workspace:1" };
       }
       if (method in responses) {
         return responses[method];
@@ -71,6 +77,9 @@ describe("CmuxAdapter", () => {
             "surface.list": true,
             "surface.focus": true,
           };
+        }
+        if (method === "workspace.current") {
+          return { workspace_id: "workspace:1" };
         }
         return {};
       },
@@ -160,6 +169,29 @@ describe("CmuxAdapter", () => {
     await adapter.connect();
 
     expect(adapter.isAvailable()).toBe(false);
+    expect(closeSpy).toHaveBeenCalledOnce();
+  });
+
+  it("connect reports unavailable when workspace.current fails after capabilities succeed", async () => {
+    const closeSpy = vi.fn();
+    const factory: CmuxTransportFactory = async () => ({
+      request: async (method: string) => {
+        if (method === "capabilities") {
+          return { capabilities: ["workspace.current"] };
+        }
+        if (method === "workspace.current") {
+          throw new Error("Broken pipe, errno 32");
+        }
+        return {};
+      },
+      close: closeSpy,
+    });
+
+    const adapter = new CmuxAdapter(factory, { timeoutMs: 1000 });
+    await adapter.connect();
+
+    expect(adapter.isAvailable()).toBe(false);
+    expect(adapter.getStatus()).toEqual({ available: false, capabilities: {} });
     expect(closeSpy).toHaveBeenCalledOnce();
   });
 
@@ -488,6 +520,7 @@ describe("CmuxAdapter", () => {
     it("returns { ok: false, code: 'request_failed' }", async () => {
       const requestSpy = vi.fn().mockImplementation(async (method: string) => {
         if (method === "capabilities") return { capabilities: ["workspace.list"] };
+        if (method === "workspace.current") return { workspace_id: "workspace:1" };
         throw new Error("socket closed unexpectedly");
       });
       const factory: CmuxTransportFactory = async () => ({
