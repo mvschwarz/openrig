@@ -648,6 +648,10 @@ describe("startDaemon env sanitization", () => {
       GHOSTTY_BIN_DIR: "/bad",
       TERM_PROGRAM: "ghostty",
       CMUX_WORKSPACE: "workspace:1",
+      CMUX_PANEL_ID: "panel:7",
+      CMUX_BUNDLED_CLI_PATH: "/Applications/cmux.app/Contents/Resources/bin/cmux",
+      CODEX_CI: "1",
+      COMMAND_MODE: "unix2003",
       __CFBundleIdentifier: "com.test",
     };
     for (const [k, v] of Object.entries(pollutants)) {
@@ -666,6 +670,10 @@ describe("startDaemon env sanitization", () => {
       expect(spawnEnv["GHOSTTY_BIN_DIR"]).toBeUndefined();
       expect(spawnEnv["TERM_PROGRAM"]).toBeUndefined();
       expect(spawnEnv["CMUX_WORKSPACE"]).toBeUndefined();
+      expect(spawnEnv["CMUX_PANEL_ID"]).toBeUndefined();
+      expect(spawnEnv["CMUX_BUNDLED_CLI_PATH"]).toBeUndefined();
+      expect(spawnEnv["CODEX_CI"]).toBeUndefined();
+      expect(spawnEnv["COMMAND_MODE"]).toBeUndefined();
       expect(spawnEnv["__CFBundleIdentifier"]).toBeUndefined();
 
       // Core vars must be present
@@ -688,6 +696,10 @@ describe("buildDaemonEnv", () => {
       PATH: "/opt/homebrew/bin:/usr/bin:/bin",
       USER: "tester",
       SHELL: "/bin/zsh",
+      COLORTERM: "truecolor",
+      COMMAND_MODE: "unix2003",
+      CODEX_CI: "1",
+      CODEX_THREAD_ID: "thread-123",
       GHOSTTY_BIN_DIR: "/Applications/Ghostty.app/bin",
       GHOSTTY_RESOURCES_DIR: "/Applications/Ghostty.app/resources",
       GHOSTTY_SHELL_FEATURES: "cursor,title",
@@ -698,8 +710,13 @@ describe("buildDaemonEnv", () => {
       XPC_SERVICE_NAME: "0",
       __CFBundleIdentifier: "com.cmuxterm.app",
       __CF_USER_TEXT_ENCODING: "0x1F5:0x0:0x0",
+      CMUX_BUNDLE_ID: "com.cmuxterm.app",
+      CMUX_BUNDLED_CLI_PATH: "/Applications/cmux.app/Contents/Resources/bin/cmux",
+      CMUX_PANEL_ID: "panel:1",
       CMUX_SOCKET_PATH: "/tmp/cmux.sock",
+      CMUX_TAB_ID: "tab:1",
       CMUX_WORKSPACE: "workspace:1",
+      CMUX_WORKSPACE_ID: "workspace:1",
       CMUX_SURFACE_ID: "surface:3",
       LANG: "en_US.UTF-8",
     };
@@ -719,6 +736,10 @@ describe("buildDaemonEnv", () => {
     expect(result["OPENRIG_DB"]).toBe("/tmp/test.db");
 
     // Scrubbed vars absent
+    expect(result["COLORTERM"]).toBeUndefined();
+    expect(result["COMMAND_MODE"]).toBeUndefined();
+    expect(result["CODEX_CI"]).toBeUndefined();
+    expect(result["CODEX_THREAD_ID"]).toBeUndefined();
     expect(result["GHOSTTY_BIN_DIR"]).toBeUndefined();
     expect(result["GHOSTTY_RESOURCES_DIR"]).toBeUndefined();
     expect(result["GHOSTTY_SHELL_FEATURES"]).toBeUndefined();
@@ -729,8 +750,13 @@ describe("buildDaemonEnv", () => {
     expect(result["XPC_SERVICE_NAME"]).toBeUndefined();
     expect(result["__CFBundleIdentifier"]).toBeUndefined();
     expect(result["__CF_USER_TEXT_ENCODING"]).toBeUndefined();
+    expect(result["CMUX_BUNDLE_ID"]).toBeUndefined();
+    expect(result["CMUX_BUNDLED_CLI_PATH"]).toBeUndefined();
+    expect(result["CMUX_PANEL_ID"]).toBeUndefined();
     expect(result["CMUX_SOCKET_PATH"]).toBeUndefined();
+    expect(result["CMUX_TAB_ID"]).toBeUndefined();
     expect(result["CMUX_WORKSPACE"]).toBeUndefined();
+    expect(result["CMUX_WORKSPACE_ID"]).toBeUndefined();
     expect(result["CMUX_SURFACE_ID"]).toBeUndefined();
   });
 
