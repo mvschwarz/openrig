@@ -10,6 +10,10 @@ function makeDeps(overrides?: Partial<SetupDeps>): SetupDeps {
       if (cmd === "tmux -V") return "tmux 3.4\n";
       if (cmd === "cmux capabilities --json") return '{"capabilities":[]}\n';
       if (cmd === "cmux --help") return "cmux help\n";
+      if (cmd === "claude --version") return "2.1.101 (Claude Code)\n";
+      if (cmd === "claude auth status") return "Authenticated\n";
+      if (cmd === "codex --version") return "codex-cli 0.118.0\n";
+      if (cmd === "codex login status") return "Logged in\n";
       if (cmd === "jq --version") return "jq-1.7\n";
       if (cmd === "gh --version") return "gh 2.0\n";
       return "";
@@ -61,6 +65,10 @@ describe("rig setup", () => {
     expect(stepIds).toContain("brew");
     expect(stepIds).toContain("tmux_install");
     expect(stepIds).toContain("cmux_install");
+    expect(stepIds).toContain("claude_install");
+    expect(stepIds).toContain("claude_auth");
+    expect(stepIds).toContain("codex_install");
+    expect(stepIds).toContain("codex_auth");
     expect(stepIds).toContain("tmux_config");
     expect(stepIds).toContain("verify");
     // No full-profile extras
@@ -86,6 +94,10 @@ describe("rig setup", () => {
     expect(stepIds).toContain("brew");
     expect(stepIds).toContain("tmux_install");
     expect(stepIds).toContain("cmux_install");
+    expect(stepIds).toContain("claude_install");
+    expect(stepIds).toContain("claude_auth");
+    expect(stepIds).toContain("codex_install");
+    expect(stepIds).toContain("codex_auth");
     expect(stepIds).toContain("tmux_config");
     expect(stepIds).toContain("verify");
     // Full extras added
@@ -129,6 +141,18 @@ describe("rig setup", () => {
     const cmux = result.steps.find((s) => s.id === "cmux_install");
     expect(cmux?.status).toBe("pass");
 
+    const claudeInstall = result.steps.find((s) => s.id === "claude_install");
+    expect(claudeInstall?.status).toBe("pass");
+
+    const claudeAuth = result.steps.find((s) => s.id === "claude_auth");
+    expect(claudeAuth?.status).toBe("pass");
+
+    const codexInstall = result.steps.find((s) => s.id === "codex_install");
+    expect(codexInstall?.status).toBe("pass");
+
+    const codexAuth = result.steps.find((s) => s.id === "codex_auth");
+    expect(codexAuth?.status).toBe("pass");
+
     const tmuxConfig = result.steps.find((s) => s.id === "tmux_config");
     expect(tmuxConfig?.status).toBe("applied");
 
@@ -153,6 +177,80 @@ describe("rig setup", () => {
     expect(jq?.status).toBe("pass");
     const gh = result.steps.find((s) => s.id === "gh_install");
     expect(gh?.status).toBe("pass");
+  });
+
+  it("installs missing Claude Code with npm and verifies auth", async () => {
+    let claudeInstalled = false;
+    const deps = makeDeps({
+      exec: (cmd: string) => {
+        if (cmd === "brew --version") return "Homebrew 4.0\n";
+        if (cmd === "tmux -V") return "tmux 3.4\n";
+        if (cmd === "cmux capabilities --json") return '{"capabilities":[]}\n';
+        if (cmd === "claude --version") {
+          if (claudeInstalled) return "2.1.101 (Claude Code)\n";
+          throw new Error("command not found: claude");
+        }
+        if (cmd === "npm install -g @anthropic-ai/claude-code") {
+          claudeInstalled = true;
+          return "installed claude\n";
+        }
+        if (cmd === "claude auth status") return "Authenticated\n";
+        if (cmd === "codex --version") return "codex-cli 0.118.0\n";
+        if (cmd === "codex login status") return "Logged in\n";
+        return "";
+      },
+    });
+
+    const result = await runSetup(deps, {});
+
+    const claudeInstall = result.steps.find((s) => s.id === "claude_install");
+    expect(claudeInstall?.status).toBe("applied");
+
+    const claudeAuth = result.steps.find((s) => s.id === "claude_auth");
+    expect(claudeAuth?.status).toBe("pass");
+  });
+
+  it("fails setup honestly when Codex is installed but not logged in", async () => {
+    const deps = makeDeps({
+      exec: (cmd: string) => {
+        if (cmd === "brew --version") return "Homebrew 4.0\n";
+        if (cmd === "tmux -V") return "tmux 3.4\n";
+        if (cmd === "cmux capabilities --json") return '{"capabilities":[]}\n';
+        if (cmd === "claude --version") return "2.1.101 (Claude Code)\n";
+        if (cmd === "claude auth status") return "Authenticated\n";
+        if (cmd === "codex --version") return "codex-cli 0.118.0\n";
+        if (cmd === "codex login status") throw new Error("not logged in");
+        return "";
+      },
+    });
+
+    const result = await runSetup(deps, {});
+
+    const codexAuth = result.steps.find((s) => s.id === "codex_auth");
+    expect(codexAuth?.status).toBe("fail");
+    expect(result.ready).toBe(false);
+  });
+
+  it("does not fail Linux setup just because Homebrew is unavailable", async () => {
+    const deps = makeDeps({
+      platform: "linux",
+      exec: (cmd: string) => {
+        if (cmd === "tmux -V") return "tmux 3.4\n";
+        if (cmd === "cmux capabilities --json") throw new Error("not found");
+        if (cmd === "cmux --help") throw new Error("not found");
+        if (cmd === "claude --version") return "2.1.101 (Claude Code)\n";
+        if (cmd === "claude auth status") return "Authenticated\n";
+        if (cmd === "codex --version") return "codex-cli 0.118.0\n";
+        if (cmd === "codex login status") return "Logged in\n";
+        throw new Error(`unexpected: ${cmd}`);
+      },
+    });
+
+    const result = await runSetup(deps, {});
+
+    const brew = result.steps.find((s) => s.id === "brew");
+    expect(brew?.status).toBe("skipped");
+    expect(result.ready).toBe(true);
   });
 
   it("brew failure does not crash — later brew-dependent steps are skipped honestly", async () => {

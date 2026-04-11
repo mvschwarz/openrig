@@ -134,6 +134,30 @@ describe("native resume probe", () => {
     });
   });
 
+  it("classifies the Claude login-required screen as failed, not resumed", () => {
+    expect(
+      assessNativeResumeProbe({
+        runtime: "claude-code",
+        paneCommand: "2.x",
+        paneContent: [
+          " ▐▛███▜▌   Claude Code v2.1.101",
+          "▝▜█████▛▘  Sonnet 4.6 · API Usage Billing",
+          "  ▘▘ ▝▝    /workspace",
+          "",
+          "────────────────────────────────────────────────────────────────────────────────",
+          "❯ ",
+          "────────────────────────────────────────────────────────────────────────────────",
+          "                                                    Not logged in · Run /login",
+          "  ⏵⏵ accept edits on (shift+tab to cycle)                     ● high · /effort",
+        ].join("\n"),
+      })
+    ).toEqual({
+      status: "failed",
+      code: "login_required",
+      detail: "Claude is running but cannot continue until the user logs in.",
+    });
+  });
+
   it("classifies Codex missing-session output as failed", () => {
     expect(
       assessNativeResumeProbe({

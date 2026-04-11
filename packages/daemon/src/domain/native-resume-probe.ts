@@ -59,6 +59,13 @@ export function assessNativeResumeProbe(
         detail: "Claude is waiting for workspace trust approval before the session can become interactive.",
       };
     }
+    if (looksLikeClaudeLoginPrompt(paneContent)) {
+      return {
+        status: "failed",
+        code: "login_required",
+        detail: "Claude is running but cannot continue until the user logs in.",
+      };
+    }
     if (looksLikeClaudeTui(paneContent)) {
       return {
         status: "resumed",
@@ -163,6 +170,11 @@ function looksLikeClaudeTui(paneContent: string): boolean {
 function looksLikeClaudeTrustPrompt(paneContent: string): boolean {
   return paneContent.includes("Accessing workspace:")
     && paneContent.includes("Yes, I trust this folder");
+}
+
+function looksLikeClaudeLoginPrompt(paneContent: string): boolean {
+  return paneContent.includes("Not logged in")
+    && paneContent.includes("Run /login");
 }
 
 function looksLikeCodexTui(paneContent: string): boolean {

@@ -12,7 +12,7 @@ Define your agent team in YAML. Boot it with one command. Claude Code and Codex 
 # Install
 npm install -g @openrig/cli
 
-# Prepare the machine (attempts tmux, cmux, tmux defaults — reports what worked)
+# Prepare the machine (attempts tmux, cmux, Claude Code, Codex, tmux defaults — reports what worked)
 rig setup
 
 # Boot the demo rig (3 pods, 8 nodes, mixed runtimes)
@@ -120,7 +120,7 @@ Optional:
 
 ## Setup and Troubleshooting
 
-- `rig setup` attempts core machine preparation: tmux, cmux, tmux defaults. It reports what it tried and what actually succeeded. If something fails, it gives the local agent enough context to finish the job.
+- `rig setup` attempts core machine preparation: tmux, cmux, Claude Code, Codex, and tmux defaults. It reports what it tried and what actually succeeded. If something fails, it gives the local agent enough context to finish the job.
 - `rig setup --full` attempts a broader operator workstation setup (jq, gh) on top of core.
 - `rig doctor` inspects current system health and helps diagnose problems after setup. Use it when something stops working or after machine changes.
 

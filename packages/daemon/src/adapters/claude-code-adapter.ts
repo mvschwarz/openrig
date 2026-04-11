@@ -335,6 +335,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   private provisionManagedBootstrap(binding: { cwd?: string | null; tmuxSession?: string | null }): void {
     this.provisionRigPermissions();
     this.provisionWorkspaceTrust(binding.cwd ?? null);
+    this.provisionOnboardingState();
   }
 
   private provisionRigPermissions(): void {
@@ -371,6 +372,16 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     }
 
     state["projects"] = projects;
+    this.fs.writeFile(statePath, JSON.stringify(state, null, 2));
+  }
+
+  private provisionOnboardingState(): void {
+    const home = this.fs.homedir ?? (typeof process !== "undefined" ? process.env.HOME : undefined);
+    if (!home) return;
+
+    const statePath = nodePath.join(home, ".claude.json");
+    const state = this.readJsonObject(statePath);
+    state["hasCompletedOnboarding"] = true;
     this.fs.writeFile(statePath, JSON.stringify(state, null, 2));
   }
 

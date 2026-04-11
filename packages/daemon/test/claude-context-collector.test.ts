@@ -279,4 +279,20 @@ describe("ClaudeCodeAdapter Context Collector Provisioning", () => {
     const state = JSON.parse(written[statePath]!);
     expect(state.projects["/project"].hasTrustDialogAccepted).toBe(true);
   });
+
+  it("deliverStartup marks Claude onboarding complete for fresh managed sessions", async () => {
+    const adapter = new ClaudeCodeAdapter({
+      tmux: mockTmux(),
+      fsOps: mockFsOps(),
+      stateDir: tmpDir,
+      collectorAssetPath: "/fake/collector.js",
+    });
+
+    await adapter.deliverStartup([], { cwd: "/project", tmuxSession: "dev-impl@test", nodeId: "n1" } as any);
+
+    const statePath = "/home/tester/.claude.json";
+    expect(written[statePath]).toBeDefined();
+    const state = JSON.parse(written[statePath]!);
+    expect(state.hasCompletedOnboarding).toBe(true);
+  });
 });

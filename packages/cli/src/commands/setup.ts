@@ -40,7 +40,17 @@ export interface SetupDeps {
   platform?: NodeJS.Platform;
 }
 
-const CORE_STEP_IDS = ["brew", "tmux_install", "cmux_install", "tmux_config", "verify"];
+const CORE_STEP_IDS = [
+  "brew",
+  "tmux_install",
+  "cmux_install",
+  "claude_install",
+  "claude_auth",
+  "codex_install",
+  "codex_auth",
+  "tmux_config",
+  "verify",
+];
 const FULL_EXTRA_STEP_IDS = ["jq_install", "gh_install"];
 
 function defaultDeps(): SetupDeps {
@@ -66,15 +76,29 @@ export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?:
   }
 
   // Core steps
-  // 1. Homebrew
-  try {
-    deps.exec("brew --version");
-    steps.push({ id: "brew", status: "pass", message: "Homebrew available." });
-  } catch {
-    steps.push({ id: "brew", status: "fail", message: "Homebrew not found.", reason: "Homebrew is required to install tmux and cmux on macOS.", fixHint: "Install Homebrew: https://brew.sh" });
+  // 1. Homebrew (macOS-first setup path)
+  let brewOk = false;
+  if (platform !== "darwin") {
+    steps.push({
+      id: "brew",
+      status: "skipped",
+      message: "Skipped: Homebrew setup path is only used on macOS.",
+    });
+  } else {
+    try {
+      deps.exec("brew --version");
+      brewOk = true;
+      steps.push({ id: "brew", status: "pass", message: "Homebrew available." });
+    } catch {
+      steps.push({
+        id: "brew",
+        status: "fail",
+        message: "Homebrew not found.",
+        reason: "Homebrew is required to install tmux and cmux on macOS.",
+        fixHint: "Install Homebrew: https://brew.sh",
+      });
+    }
   }
-
-  const brewOk = steps.find((s) => s.id === "brew")?.status === "pass";
 
   // 2. tmux
   try {
@@ -116,6 +140,97 @@ export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?:
   }
 
   // 4. tmux config
+  // 4. Claude Code runtime
+  let claudeInstalled = false;
+  try {
+    deps.exec("claude --version");
+    claudeInstalled = true;
+    steps.push({ id: "claude_install", status: "pass", message: "Claude Code available." });
+  } catch {
+    try {
+      deps.exec("npm install -g @anthropic-ai/claude-code");
+      deps.exec("claude --version");
+      claudeInstalled = true;
+      steps.push({ id: "claude_install", status: "applied", message: "Installed Claude Code with npm." });
+    } catch (err) {
+      steps.push({
+        id: "claude_install",
+        status: "fail",
+        message: `Failed to install Claude Code: ${(err as Error).message}`,
+        reason: "The demo rig launches Claude Code nodes, so the Claude CLI must be installed on this machine.",
+        fixHint: "Install Claude Code with `npm install -g @anthropic-ai/claude-code`.",
+      });
+    }
+  }
+
+  if (claudeInstalled) {
+    try {
+      deps.exec("claude auth status");
+      steps.push({ id: "claude_auth", status: "pass", message: "Claude Code authentication available." });
+    } catch (err) {
+      steps.push({
+        id: "claude_auth",
+        status: "fail",
+        message: `Claude Code is installed but not ready to launch: ${(err as Error).message}`,
+        reason: "The demo rig cannot launch Claude Code nodes until the Claude CLI is logged in and usable.",
+        fixHint: "Run `claude auth login` or open `claude` once to complete authentication, then rerun `rig setup` or `rig doctor`.",
+      });
+    }
+  } else {
+    steps.push({
+      id: "claude_auth",
+      status: "skipped",
+      message: "Skipped: Claude Code is not installed.",
+      reason: "Authentication cannot be checked until the Claude Code CLI is installed.",
+    });
+  }
+
+  // 5. Codex runtime
+  let codexInstalled = false;
+  try {
+    deps.exec("codex --version");
+    codexInstalled = true;
+    steps.push({ id: "codex_install", status: "pass", message: "Codex available." });
+  } catch {
+    try {
+      deps.exec("npm install -g @openai/codex");
+      deps.exec("codex --version");
+      codexInstalled = true;
+      steps.push({ id: "codex_install", status: "applied", message: "Installed Codex with npm." });
+    } catch (err) {
+      steps.push({
+        id: "codex_install",
+        status: "fail",
+        message: `Failed to install Codex: ${(err as Error).message}`,
+        reason: "The demo rig launches Codex nodes, so the Codex CLI must be installed on this machine.",
+        fixHint: "Install Codex with `npm install -g @openai/codex`.",
+      });
+    }
+  }
+
+  if (codexInstalled) {
+    try {
+      deps.exec("codex login status");
+      steps.push({ id: "codex_auth", status: "pass", message: "Codex authentication available." });
+    } catch (err) {
+      steps.push({
+        id: "codex_auth",
+        status: "fail",
+        message: `Codex is installed but not ready to launch: ${(err as Error).message}`,
+        reason: "The demo rig cannot launch Codex nodes until the Codex CLI is logged in and usable.",
+        fixHint: "Run `codex login` and complete authentication, then rerun `rig setup` or `rig doctor`.",
+      });
+    }
+  } else {
+    steps.push({
+      id: "codex_auth",
+      status: "skipped",
+      message: "Skipped: Codex is not installed.",
+      reason: "Authentication cannot be checked until the Codex CLI is installed.",
+    });
+  }
+
+  // 6. tmux config
   const TMUX_CONF = `${process.env["HOME"] ?? "~"}/.tmux.conf`;
   const MANAGED_MARKER = "# OpenRig managed block";
   const MANAGED_BLOCK = [
@@ -146,7 +261,7 @@ export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?:
     steps.push({ id: "tmux_config", status: "warn", message: `Could not update tmux config: ${(err as Error).message}` });
   }
 
-  // 5. Verify
+  // 7. Verify
   const tmuxOk = steps.some((s) => s.id === "tmux_install" && (s.status === "pass" || s.status === "applied"));
   const anyFail = steps.some((s) => s.status === "fail");
   steps.push({
