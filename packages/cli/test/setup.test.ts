@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { Command } from "commander";
 import { setupCommand, runSetup, type SetupDeps, type SetupResult } from "../src/commands/setup.js";
+import type { DoctorDeps } from "../src/commands/doctor.js";
 
 function makeDeps(overrides?: Partial<SetupDeps>): SetupDeps {
   return {
@@ -104,17 +105,17 @@ describe("rig setup", () => {
     expect(exitCode).toBeUndefined(); // undefined means 0
   });
 
-  it("--dry-run does not make mutating exec calls", () => {
+  it("--dry-run does not make mutating exec calls", async () => {
     const execSpy = vi.fn(() => "");
     const deps = makeDeps({ exec: execSpy });
-    runSetup(deps, { dryRun: true });
+    await runSetup(deps, { dryRun: true });
     expect(execSpy).not.toHaveBeenCalled();
   });
 
-  it("core profile execution with all tools present returns pass/applied steps and ready=true", () => {
+  it("core profile execution with all tools present returns pass/applied steps and ready=true", async () => {
     const writeSpy = vi.fn();
     const deps = makeDeps({ writeFile: writeSpy });
-    const result = runSetup(deps, {});
+    const result = await runSetup(deps, {});
 
     expect(result.profile).toBe("core");
     expect(result.ready).toBe(true);
@@ -135,9 +136,9 @@ describe("rig setup", () => {
     expect(verify?.status).toBe("pass");
   });
 
-  it("full profile extends core with jq_install and gh_install", () => {
+  it("full profile extends core with jq_install and gh_install", async () => {
     const deps = makeDeps();
-    const result = runSetup(deps, { full: true });
+    const result = await runSetup(deps, { full: true });
 
     expect(result.profile).toBe("full");
     const stepIds = result.steps.map((s) => s.id);
@@ -154,7 +155,7 @@ describe("rig setup", () => {
     expect(gh?.status).toBe("pass");
   });
 
-  it("brew failure does not crash — later brew-dependent steps are skipped honestly", () => {
+  it("brew failure does not crash — later brew-dependent steps are skipped honestly", async () => {
     const deps = makeDeps({
       exec: (cmd: string) => {
         if (cmd === "brew --version") throw new Error("command not found: brew");
@@ -164,7 +165,7 @@ describe("rig setup", () => {
         throw new Error(`unexpected: ${cmd}`);
       },
     });
-    const result = runSetup(deps, {});
+    const result = await runSetup(deps, {});
 
     expect(result.ready).toBe(false);
 
@@ -182,7 +183,85 @@ describe("rig setup", () => {
     expect(verify?.status).toBe("warn");
   });
 
-  it("tmux install failure returns structured fail, does not crash setup", () => {
+  it("result includes verification section with real doctor check names including async cmux_daemon", async () => {
+    const deps = makeDeps();
+    const doctorDeps: DoctorDeps = {
+      exists: () => true,
+      baseDir: "/install/cli/dist",
+      exec: (cmd: string) => {
+        if (cmd === "tmux -V") return "tmux 3.4\n";
+        if (cmd === "cmux capabilities --json") return '{"capabilities":["surface.focus"]}\n';
+        if (cmd === "cmux --help") return "cmux help\n";
+        return "";
+      },
+      checkPort: async () => true,
+      configStore: { resolve: () => ({ daemon: { port: 7433, host: "127.0.0.1" }, db: { path: "/tmp/openrig/openrig.sqlite" }, transcripts: { enabled: true, path: "/tmp/openrig/transcripts" } }) },
+      platform: "darwin",
+      mkdirp: () => {},
+      checkWritable: () => {},
+      fetch: async () => { throw new Error("ECONNREFUSED"); },
+    };
+
+    const result = await runSetup(deps, { doctorDeps });
+
+    // verification section must exist
+    expect(result.verification).toBeDefined();
+    expect(Array.isArray(result.verification!.checks)).toBe(true);
+
+    const checkNames = result.verification!.checks.map((c) => c.name);
+    // Must include real doctor check names
+    expect(checkNames).toContain("node_version");
+    expect(checkNames).toContain("tmux");
+    expect(checkNames).toContain("cmux_shell");
+    // Must include async doctor check (cmux_daemon resolved)
+    expect(checkNames).toContain("cmux_daemon");
+
+    // cmux_daemon should be skipped (daemon not reachable)
+    const cmuxDaemon = result.verification!.checks.find((c) => c.name === "cmux_daemon");
+    expect(cmuxDaemon?.status).toBe("skipped");
+
+    // Doctor statuses used as-is, not renamed
+    const nodeCheck = result.verification!.checks.find((c) => c.name === "node_version");
+    expect(["pass", "warn", "fail", "skipped"]).toContain(nodeCheck?.status);
+  });
+
+  it("ready is false only when setup steps or verification checks have fail status", async () => {
+    // All tools present, all doctor checks pass
+    const deps = makeDeps();
+    const doctorDeps: DoctorDeps = {
+      exists: () => true,
+      baseDir: "/install/cli/dist",
+      exec: (cmd: string) => {
+        if (cmd === "tmux -V") return "tmux 3.4\n";
+        if (cmd === "cmux capabilities --json") return '{"capabilities":["surface.focus"]}\n';
+        if (cmd === "cmux --help") return "cmux help\n";
+        return "";
+      },
+      checkPort: async () => true,
+      configStore: { resolve: () => ({ daemon: { port: 7433, host: "127.0.0.1" }, db: { path: "/tmp/openrig/openrig.sqlite" }, transcripts: { enabled: true, path: "/tmp/openrig/transcripts" } }) },
+      platform: "darwin",
+      mkdirp: () => {},
+      checkWritable: () => {},
+      fetch: async () => { throw new Error("ECONNREFUSED"); },
+    };
+
+    const result = await runSetup(deps, { doctorDeps });
+
+    // No fail statuses in steps or verification -> ready=true
+    expect(result.ready).toBe(true);
+
+    // warn/skipped alone do not flip ready to false
+    const hasWarnOrSkipped = [
+      ...result.steps,
+      ...(result.verification?.checks ?? []),
+    ].some((c) => c.status === "warn" || c.status === "skipped");
+    // cmux_daemon is skipped, so this should be true
+    expect(hasWarnOrSkipped).toBe(true);
+    // But ready is still true
+    expect(result.ready).toBe(true);
+  });
+
+  it("tmux install failure returns structured fail, does not crash setup", async () => {
     const deps = makeDeps({
       exec: (cmd: string) => {
         if (cmd === "brew --version") return "Homebrew 4.0\n";
@@ -192,7 +271,7 @@ describe("rig setup", () => {
         return "";
       },
     });
-    const result = runSetup(deps, {});
+    const result = await runSetup(deps, {});
 
     const tmux = result.steps.find((s) => s.id === "tmux_install");
     expect(tmux?.status).toBe("fail");

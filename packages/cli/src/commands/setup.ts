@@ -1,6 +1,10 @@
 import { Command } from "commander";
 import { execSync } from "node:child_process";
-import { readFileSync, writeFileSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, accessSync, constants, mkdirSync } from "node:fs";
+import path from "node:path";
+import { runDoctorChecks, type DoctorDeps } from "./doctor.js";
+import { resolveDaemonPath } from "../daemon-lifecycle.js";
+import { ConfigStore } from "../config-store.js";
 
 export interface SetupStep {
   id: string;
@@ -10,11 +14,22 @@ export interface SetupStep {
   fixHint?: string;
 }
 
+export interface VerificationCheck {
+  name: string;
+  status: "pass" | "warn" | "fail" | "skipped";
+  message: string;
+  reason?: string;
+  fix?: string;
+}
+
 export interface SetupResult {
   profile: "core" | "full";
   platform: string;
   ready: boolean;
   steps: SetupStep[];
+  verification?: {
+    checks: VerificationCheck[];
+  };
 }
 
 export interface SetupDeps {
@@ -37,7 +52,7 @@ function defaultDeps(): SetupDeps {
   };
 }
 
-export function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?: boolean }): SetupResult {
+export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?: boolean; doctorDeps?: DoctorDeps }): Promise<SetupResult> {
   const profile = opts.full ? "full" : "core";
   const platform = deps.platform ?? process.platform;
   const stepIds = opts.full ? [...CORE_STEP_IDS, ...FULL_EXTRA_STEP_IDS] : [...CORE_STEP_IDS];
@@ -161,8 +176,52 @@ export function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?: boole
     }
   }
 
-  const ready = !steps.some((s) => s.status === "fail");
-  return { profile, platform, ready, steps };
+  // Run doctor-backed verification if not dry-run and doctorDeps available
+  let verification: SetupResult["verification"];
+  if (!opts.dryRun && opts.doctorDeps) {
+    const doctorDeps = opts.doctorDeps;
+    const doctor = runDoctorChecks(doctorDeps);
+    const asyncResults = await Promise.all(doctor.asyncChecks);
+    const allDoctorChecks = [...doctor.checks, ...asyncResults];
+    verification = {
+      checks: allDoctorChecks.map((c) => ({
+        name: c.name,
+        status: c.status,
+        message: c.message,
+        ...(c.reason ? { reason: c.reason } : {}),
+        ...(c.fix ? { fix: c.fix } : {}),
+      })),
+    };
+  }
+
+  // ready = no fail statuses in steps or verification checks
+  const stepsFailed = steps.some((s) => s.status === "fail");
+  const verificationFailed = verification?.checks.some((c) => c.status === "fail") ?? false;
+  const ready = !stepsFailed && !verificationFailed;
+  return { profile, platform, ready, steps, ...(verification ? { verification } : {}) };
+}
+
+function buildDefaultDoctorDeps(setupDeps: SetupDeps): DoctorDeps {
+  const platform = setupDeps.platform ?? process.platform;
+  const baseDir = path.dirname(path.dirname(new URL(import.meta.url).pathname));
+  return {
+    exists: setupDeps.exists,
+    baseDir,
+    exec: setupDeps.exec,
+    checkPort: async (port: number) => {
+      const net = await import("node:net");
+      return new Promise<boolean>((resolve) => {
+        const socket = new net.default.Socket();
+        socket.once("connect", () => { socket.destroy(); resolve(false); });
+        socket.once("error", () => resolve(true));
+        socket.connect(port, "127.0.0.1");
+      });
+    },
+    configStore: new ConfigStore(),
+    platform: platform as NodeJS.Platform,
+    mkdirp: (p: string) => mkdirSync(p, { recursive: true }),
+    checkWritable: (p: string) => accessSync(p, constants.W_OK),
+  };
 }
 
 export function setupCommand(depsOverride?: SetupDeps): Command {
@@ -172,9 +231,10 @@ export function setupCommand(depsOverride?: SetupDeps): Command {
     .option("--dry-run", "Show the plan without making changes")
     .option("--json", "Machine-readable JSON output")
     .option("--full", "Install broader operator workstation tools")
-    .action((opts: { dryRun?: boolean; json?: boolean; full?: boolean }) => {
+    .action(async (opts: { dryRun?: boolean; json?: boolean; full?: boolean }) => {
       const deps = depsOverride ?? defaultDeps();
-      const result = runSetup(deps, { dryRun: opts.dryRun, full: opts.full });
+      const doctorDeps = opts.dryRun ? undefined : buildDefaultDoctorDeps(deps);
+      const result = await runSetup(deps, { dryRun: opts.dryRun, full: opts.full, doctorDeps });
 
       if (opts.json) {
         console.log(JSON.stringify(result, null, 2));
