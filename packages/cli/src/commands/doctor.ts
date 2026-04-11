@@ -9,7 +9,7 @@ import { buildWritableHomeCheck } from "../system-preflight.js";
 
 interface DoctorCheck {
   name: string;
-  status: "pass" | "warn" | "fail";
+  status: "pass" | "warn" | "fail" | "skipped";
   message: string;
   reason?: string;
   fix?: string;
@@ -24,6 +24,7 @@ export interface DoctorDeps {
   platform?: NodeJS.Platform;
   mkdirp?: (path: string) => void;
   checkWritable?: (path: string) => void;
+  fetch?: (url: string) => Promise<{ ok: boolean; json?: () => Promise<unknown> }>;
 }
 
 const MIN_NODE_MAJOR = 20;
@@ -40,7 +41,7 @@ function defaultCheckPort(port: number): Promise<boolean> {
   });
 }
 
-export function runDoctorChecks(deps: DoctorDeps): { checks: DoctorCheck[]; portCheck: Promise<DoctorCheck> } {
+export function runDoctorChecks(deps: DoctorDeps): { checks: DoctorCheck[]; portCheck: Promise<DoctorCheck>; asyncChecks: Promise<DoctorCheck>[] } {
   const checks: DoctorCheck[] = [];
   const platform = deps.platform ?? process.platform;
 
@@ -119,13 +120,15 @@ export function runDoctorChecks(deps: DoctorDeps): { checks: DoctorCheck[]; port
     });
   }
 
-  // 5. cmux (optional but recommended for Open CMUX workflows)
+  // 5. cmux shell check (optional but recommended for Open CMUX workflows)
+  let shellCmuxPassed = false;
   try {
     deps.exec("cmux capabilities --json");
+    shellCmuxPassed = true;
     checks.push({
-      name: "cmux",
+      name: "cmux_shell",
       status: "pass",
-      message: "cmux control available.",
+      message: "cmux shell control available.",
     });
   } catch (err) {
     try {
@@ -135,7 +138,7 @@ export function runDoctorChecks(deps: DoctorDeps): { checks: DoctorCheck[]; port
         ? ` Likely cause on macOS: cmux socketControlMode is '${socketMode}'. Tell the user to allow OpenRig/cmux socket control, then rerun 'rig doctor'.`
         : "";
       checks.push({
-        name: "cmux",
+        name: "cmux_shell",
         status: "warn",
         message: "cmux installed, but control unavailable right now.",
         reason: "OpenRig can run without cmux, but Open CMUX actions and cmux-aware node control will be unavailable until cmux control works.",
@@ -143,7 +146,7 @@ export function runDoctorChecks(deps: DoctorDeps): { checks: DoctorCheck[]; port
       });
     } catch {
       checks.push({
-        name: "cmux",
+        name: "cmux_shell",
         status: "warn",
         message: "cmux not found.",
         reason: "OpenRig can run without cmux, but Open CMUX actions and surface control will be unavailable.",
@@ -188,7 +191,49 @@ export function runDoctorChecks(deps: DoctorDeps): { checks: DoctorCheck[]; port
     };
   });
 
-  return { checks, portCheck };
+  // 8. Daemon cmux control (async, only when shell cmux passed)
+  const asyncChecks: Promise<DoctorCheck>[] = [portCheck];
+  if (shellCmuxPassed) {
+    const fetchFn = deps.fetch ?? globalThis.fetch;
+    const daemonCmuxCheck = (async (): Promise<DoctorCheck> => {
+      try {
+        const healthRes = await fetchFn(`http://127.0.0.1:${DEFAULT_PORT}/healthz`);
+        if (!healthRes.ok) {
+          return { name: "cmux_daemon", status: "skipped", message: "Daemon not running. Skipping daemon cmux check." };
+        }
+      } catch {
+        return { name: "cmux_daemon", status: "skipped", message: "Daemon not reachable. Skipping daemon cmux check." };
+      }
+
+      try {
+        const cmuxRes = await fetchFn(`http://127.0.0.1:${DEFAULT_PORT}/api/adapters/cmux/status`);
+        if (cmuxRes.ok && cmuxRes.json) {
+          const data = (await cmuxRes.json()) as { available?: boolean };
+          if (data.available) {
+            return { name: "cmux_daemon", status: "pass", message: "Daemon cmux control available." };
+          }
+          return {
+            name: "cmux_daemon",
+            status: "warn",
+            message: "Shell cmux works, but the daemon cannot control cmux.",
+            reason: "The daemon inherited a terminal/session environment that broke cmux adapter initialization.",
+            fix: "Restart the daemon with `rig daemon start` after setup. If it still fails, inspect the daemon log with `rig daemon logs`.",
+          };
+        }
+      } catch { /* fetch failed */ }
+
+      return {
+        name: "cmux_daemon",
+        status: "warn",
+        message: "Shell cmux works, but the daemon cannot control cmux.",
+        reason: "The daemon inherited a terminal/session environment that broke cmux adapter initialization.",
+        fix: "Restart the daemon with `rig daemon start` after setup. If it still fails, inspect the daemon log with `rig daemon logs`.",
+      };
+    })();
+    asyncChecks.push(daemonCmuxCheck);
+  }
+
+  return { checks, portCheck, asyncChecks };
 }
 
 function readCmuxSocketControlMode(deps: DoctorDeps): string | null {
@@ -226,9 +271,9 @@ export function doctorCommand(depsOverride?: DoctorDeps): Command {
         checkWritable: (dirPath: string) => accessSync(dirPath, constants.W_OK),
       };
 
-      const { checks, portCheck } = runDoctorChecks(deps);
-      const portResult = await portCheck;
-      const allChecks = [...checks, portResult];
+      const { checks, asyncChecks } = runDoctorChecks(deps);
+      const resolvedAsync = await Promise.all(asyncChecks);
+      const allChecks = [...checks, ...resolvedAsync];
       const healthy = allChecks.every((c) => c.status !== "fail");
 
       if (opts.json) {
@@ -238,7 +283,7 @@ export function doctorCommand(depsOverride?: DoctorDeps): Command {
       }
 
       for (const check of allChecks) {
-        const icon = check.status === "pass" ? "OK" : check.status === "warn" ? "WARN" : "FAIL";
+        const icon = check.status === "pass" ? "OK" : check.status === "warn" ? "WARN" : check.status === "skipped" ? "SKIP" : "FAIL";
         console.log(`  [${icon}] ${check.name}: ${check.message}`);
         if (check.reason) console.log(`       Why: ${check.reason}`);
         if (check.fix) console.log(`       Fix: ${check.fix}`);

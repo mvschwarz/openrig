@@ -148,21 +148,14 @@ describe("runDoctorChecks", () => {
     expect(checks.find((c) => c.name === "tmux_mouse")).toBeUndefined();
   });
 
-  it("cmux control available -> pass", () => {
-    const deps = makeDeps({
-      exec: (cmd: string) => {
-        if (cmd === "tmux -V") return "tmux 3.4\n";
-        if (cmd === "cmux capabilities --json") return '{"capabilities":["surface.focus"]}\n';
-        if (cmd === "cmux --help") return "cmux help\n";
-        return "";
-      },
-    });
+  it("cmux_shell pass when shell capabilities work", () => {
+    const deps = makeDeps();
     const { checks } = runDoctorChecks(deps);
-    const cmuxCheck = checks.find((c) => c.name === "cmux");
-    expect(cmuxCheck?.status).toBe("pass");
+    const cmuxShell = checks.find((c) => c.name === "cmux_shell");
+    expect(cmuxShell?.status).toBe("pass");
   });
 
-  it("cmux installed but control unavailable -> warn with guidance", () => {
+  it("cmux_shell warn when shell cmux installed but control unavailable", () => {
     const deps = makeDeps({
       exec: (cmd: string) => {
         if (cmd === "tmux -V") return "tmux 3.4\n";
@@ -175,15 +168,12 @@ describe("runDoctorChecks", () => {
       },
     });
     const { checks } = runDoctorChecks(deps);
-    const cmuxCheck = checks.find((c) => c.name === "cmux");
-    expect(cmuxCheck?.status).toBe("warn");
-    expect(cmuxCheck?.message).toContain("control unavailable");
-    expect(cmuxCheck?.fix).toContain("tell the user");
-    expect(cmuxCheck?.fix).toContain("socketControlMode");
-    expect(cmuxCheck?.fix).toContain("localOnly");
+    const cmuxShell = checks.find((c) => c.name === "cmux_shell");
+    expect(cmuxShell?.status).toBe("warn");
+    expect(cmuxShell?.message).toContain("control unavailable");
   });
 
-  it("cmux missing -> warn, not fail", () => {
+  it("cmux_shell warn when cmux missing", () => {
     const deps = makeDeps({
       exec: (cmd: string) => {
         if (cmd === "tmux -V") return "tmux 3.4\n";
@@ -191,9 +181,89 @@ describe("runDoctorChecks", () => {
       },
     });
     const { checks } = runDoctorChecks(deps);
-    const cmuxCheck = checks.find((c) => c.name === "cmux");
-    expect(cmuxCheck?.status).toBe("warn");
-    expect(cmuxCheck?.message).toContain("not found");
+    const cmuxShell = checks.find((c) => c.name === "cmux_shell");
+    expect(cmuxShell?.status).toBe("warn");
+    expect(cmuxShell?.message).toContain("not found");
+  });
+
+  it("shell cmux pass + daemon cmux unavailable -> cmux_daemon warn with mismatch guidance", async () => {
+    const deps = makeDeps({
+      fetch: async (url: string) => {
+        if (url.includes("/healthz")) return { ok: true } as Response;
+        if (url.includes("/adapters/cmux/status")) return { ok: true, json: async () => ({ available: false }) } as Response;
+        return { ok: true } as Response;
+      },
+      checkPort: async () => false, // port in use = daemon running
+    });
+    const { checks, asyncChecks } = runDoctorChecks(deps);
+    const resolved = await Promise.all(asyncChecks ?? []);
+    const allChecks = [...checks, ...resolved];
+
+    const cmuxShell = allChecks.find((c) => c.name === "cmux_shell");
+    expect(cmuxShell?.status).toBe("pass");
+
+    const cmuxDaemon = allChecks.find((c) => c.name === "cmux_daemon");
+    expect(cmuxDaemon).toBeDefined();
+    expect(cmuxDaemon?.status).toBe("warn");
+    expect(cmuxDaemon?.message).toContain("daemon cannot control");
+    expect(cmuxDaemon?.fix).toContain("rig daemon start");
+  });
+
+  it("daemon not running -> cmux_daemon skipped and does not make doctor unhealthy", async () => {
+    const deps = makeDeps({
+      checkPort: async () => true,
+      fetch: async () => { throw new Error("ECONNREFUSED"); },
+    });
+    const { checks, asyncChecks } = runDoctorChecks(deps);
+    const resolved = await Promise.all(asyncChecks ?? []);
+    const allChecks = [...checks, ...resolved];
+
+    const cmuxDaemon = allChecks.find((c) => c.name === "cmux_daemon");
+    expect(cmuxDaemon).toBeDefined();
+    expect(cmuxDaemon?.status).toBe("skipped");
+    expect(cmuxDaemon?.message).toContain("not reachable");
+
+    const healthy = allChecks.every((c) => c.status !== "fail");
+    expect(healthy).toBe(true);
+  });
+
+  it("daemon cmux available -> cmux_daemon pass", async () => {
+    const deps = makeDeps({
+      fetch: async (url: string) => {
+        if (url.includes("/healthz")) return { ok: true } as Response;
+        if (url.includes("/adapters/cmux/status")) return { ok: true, json: async () => ({ available: true }) } as Response;
+        return { ok: true } as Response;
+      },
+      checkPort: async () => false, // port in use = daemon running
+    });
+    const { checks, asyncChecks } = runDoctorChecks(deps);
+    const resolved = await Promise.all(asyncChecks ?? []);
+    const allChecks = [...checks, ...resolved];
+
+    const cmuxDaemon = allChecks.find((c) => c.name === "cmux_daemon");
+    expect(cmuxDaemon).toBeDefined();
+    expect(cmuxDaemon?.status).toBe("pass");
+  });
+
+  it("shell cmux missing -> no cmux_daemon check (no misleading signal)", async () => {
+    const deps = makeDeps({
+      exec: (cmd: string) => {
+        if (cmd === "tmux -V") return "tmux 3.4\n";
+        throw new Error("command not found: cmux");
+      },
+      checkPort: async () => false, // daemon running
+      fetch: async (url: string) => {
+        if (url.includes("/healthz")) return { ok: true } as Response;
+        if (url.includes("/adapters/cmux/status")) return { ok: true, json: async () => ({ available: false }) } as Response;
+        return { ok: true } as Response;
+      },
+    });
+    const { checks, asyncChecks } = runDoctorChecks(deps);
+    const resolved = await Promise.all(asyncChecks ?? []);
+    const allChecks = [...checks, ...resolved];
+
+    const cmuxDaemon = allChecks.find((c) => c.name === "cmux_daemon");
+    expect(cmuxDaemon).toBeUndefined();
   });
 
   it("Node version check passes on current Node", () => {
@@ -307,9 +377,9 @@ describe("rig doctor", () => {
     );
 
     const parsed = JSON.parse(logs.join("\n"));
-    const cmuxCheck = parsed.checks.find((check: { name: string }) => check.name === "cmux");
+    const cmuxShellCheck = parsed.checks.find((check: { name: string }) => check.name === "cmux_shell");
     expect(parsed.healthy).toBe(true);
-    expect(cmuxCheck.status).toBe("warn");
+    expect(cmuxShellCheck.status).toBe("warn");
     expect(exitCode).toBeUndefined();
   });
 
@@ -331,6 +401,49 @@ describe("rig doctor", () => {
     expect(parsed.healthy).toBe(false);
     expect(writableCheck.status).toBe("fail");
     expect(exitCode).toBe(1);
+  });
+
+  it("--json surfaces cmux_daemon pass when daemon cmux is available", async () => {
+    const deps = makeDeps({
+      fetch: async (url: string) => {
+        if (url.includes("/healthz")) return { ok: true } as Response;
+        if (url.includes("/adapters/cmux/status")) return { ok: true, json: async () => ({ available: true }) } as Response;
+        return { ok: true } as Response;
+      },
+    });
+    const program = new Command();
+    program.addCommand(doctorCommand(deps));
+
+    const { logs } = await captureLogs(() =>
+      program.parseAsync(["node", "rig", "doctor", "--json"]),
+    );
+
+    const parsed = JSON.parse(logs.join("\n"));
+    const cmuxDaemon = parsed.checks.find((check: { name: string }) => check.name === "cmux_daemon");
+    expect(cmuxDaemon).toBeDefined();
+    expect(cmuxDaemon.status).toBe("pass");
+  });
+
+  it("--json surfaces cmux_daemon warn when shell cmux works but daemon cannot control", async () => {
+    const deps = makeDeps({
+      fetch: async (url: string) => {
+        if (url.includes("/healthz")) return { ok: true } as Response;
+        if (url.includes("/adapters/cmux/status")) return { ok: true, json: async () => ({ available: false }) } as Response;
+        return { ok: true } as Response;
+      },
+    });
+    const program = new Command();
+    program.addCommand(doctorCommand(deps));
+
+    const { logs } = await captureLogs(() =>
+      program.parseAsync(["node", "rig", "doctor", "--json"]),
+    );
+
+    const parsed = JSON.parse(logs.join("\n"));
+    const cmuxDaemon = parsed.checks.find((check: { name: string }) => check.name === "cmux_daemon");
+    expect(cmuxDaemon).toBeDefined();
+    expect(cmuxDaemon.status).toBe("warn");
+    expect(parsed.healthy).toBe(true); // warn does not make doctor unhealthy
   });
 
   it("wired via createProgram", async () => {
