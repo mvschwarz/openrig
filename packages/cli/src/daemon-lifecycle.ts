@@ -156,6 +156,48 @@ async function checkPid(state: DaemonState, deps: LifecycleDeps): Promise<"openr
   }
 }
 
+/**
+ * Scrub list: environment variable prefixes and exact names that should NOT
+ * be forwarded from the operator shell into the daemon process. These are
+ * terminal-emulator, GUI-session, and cmux-session variables that can break
+ * adapter initialization when the daemon runs detached.
+ */
+const ENV_SCRUB_PREFIXES = ["GHOSTTY_", "XPC_", "__CF"];
+const ENV_SCRUB_EXACT = new Set([
+  "TERM_PROGRAM",
+  "TERM_PROGRAM_VERSION",
+  "TERMINFO",
+  "CMUX_SOCKET_PATH",
+  "CMUX_WORKSPACE",
+  "CMUX_SURFACE_ID",
+]);
+
+export function buildDaemonEnv(
+  baseEnv: Record<string, string>,
+  opts: { port: number; host: string; db: string; transcriptsEnabled?: boolean; transcriptsPath?: string },
+): Record<string, string> {
+  const env: Record<string, string> = {};
+
+  for (const [key, value] of Object.entries(baseEnv)) {
+    if (ENV_SCRUB_EXACT.has(key)) continue;
+    if (ENV_SCRUB_PREFIXES.some((prefix) => key.startsWith(prefix))) continue;
+    env[key] = value;
+  }
+
+  // Explicit OPENRIG_* overrides — always win over inherited values
+  env["OPENRIG_PORT"] = String(opts.port);
+  env["OPENRIG_HOST"] = opts.host;
+  env["OPENRIG_DB"] = opts.db;
+  if (opts.transcriptsEnabled !== undefined) {
+    env["OPENRIG_TRANSCRIPTS_ENABLED"] = String(opts.transcriptsEnabled);
+  }
+  if (opts.transcriptsPath) {
+    env["OPENRIG_TRANSCRIPTS_PATH"] = opts.transcriptsPath;
+  }
+
+  return env;
+}
+
 export async function startDaemon(opts: StartOptions, deps: LifecycleDeps): Promise<DaemonState> {
   // Check if already running
   const existing = readState(deps);
@@ -181,14 +223,13 @@ export async function startDaemon(opts: StartOptions, deps: LifecycleDeps): Prom
   const logFd = deps.openForAppend(LOG_FILE);
 
   const child = deps.spawn(process.execPath, [daemonEntry], {
-    env: {
-      ...process.env as Record<string, string>,
-      OPENRIG_PORT: String(port),
-      OPENRIG_HOST: host,
-      OPENRIG_DB: db,
-      ...(opts.transcriptsEnabled !== undefined ? { OPENRIG_TRANSCRIPTS_ENABLED: String(opts.transcriptsEnabled) } : {}),
-      ...(opts.transcriptsPath ? { OPENRIG_TRANSCRIPTS_PATH: opts.transcriptsPath } : {}),
-    },
+    env: buildDaemonEnv(process.env as Record<string, string>, {
+      port,
+      host,
+      db,
+      transcriptsEnabled: opts.transcriptsEnabled,
+      transcriptsPath: opts.transcriptsPath,
+    }),
     stdio: ["ignore", logFd, logFd],
     detached: true,
   });

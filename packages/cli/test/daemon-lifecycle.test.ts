@@ -9,6 +9,7 @@ import {
   tailLogs,
   getDaemonPath,
   resolveDaemonPath,
+  buildDaemonEnv,
   STATE_FILE,
   LOG_FILE,
   OPENRIG_DIR,
@@ -636,5 +637,114 @@ describe("resolveDaemonPath", () => {
     const exists = () => false;
     const result = resolveDaemonPath("/repo/packages/cli/dist", exists);
     expect(result).toBe(path.resolve("/repo/packages/cli/dist", "../../daemon"));
+  });
+});
+
+describe("startDaemon env sanitization", () => {
+  it("startDaemon spawns with sanitized env that excludes terminal/GUI vars", async () => {
+    // Pollute process.env temporarily
+    const saved: Record<string, string | undefined> = {};
+    const pollutants: Record<string, string> = {
+      GHOSTTY_BIN_DIR: "/bad",
+      TERM_PROGRAM: "ghostty",
+      CMUX_WORKSPACE: "workspace:1",
+      __CFBundleIdentifier: "com.test",
+    };
+    for (const [k, v] of Object.entries(pollutants)) {
+      saved[k] = process.env[k];
+      process.env[k] = v;
+    }
+
+    try {
+      const deps = mockDeps();
+      await startDaemon({ port: 7433, host: "127.0.0.1", db: "/tmp/test.db" }, deps);
+
+      const spawnCall = (deps.spawn as ReturnType<typeof vi.fn>).mock.calls[0];
+      const spawnEnv = spawnCall![2].env as Record<string, string>;
+
+      // Scrubbed vars must NOT be in spawn env
+      expect(spawnEnv["GHOSTTY_BIN_DIR"]).toBeUndefined();
+      expect(spawnEnv["TERM_PROGRAM"]).toBeUndefined();
+      expect(spawnEnv["CMUX_WORKSPACE"]).toBeUndefined();
+      expect(spawnEnv["__CFBundleIdentifier"]).toBeUndefined();
+
+      // Core vars must be present
+      expect(spawnEnv["HOME"]).toBeDefined();
+      expect(spawnEnv["OPENRIG_PORT"]).toBe("7433");
+    } finally {
+      // Restore process.env
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+    }
+  });
+});
+
+describe("buildDaemonEnv", () => {
+  it("strips terminal/GUI vars and preserves core vars", () => {
+    const baseEnv: Record<string, string> = {
+      HOME: "/Users/tester",
+      PATH: "/opt/homebrew/bin:/usr/bin:/bin",
+      USER: "tester",
+      SHELL: "/bin/zsh",
+      GHOSTTY_BIN_DIR: "/Applications/Ghostty.app/bin",
+      GHOSTTY_RESOURCES_DIR: "/Applications/Ghostty.app/resources",
+      GHOSTTY_SHELL_FEATURES: "cursor,title",
+      TERM_PROGRAM: "ghostty",
+      TERM_PROGRAM_VERSION: "1.0",
+      TERMINFO: "/Applications/Ghostty.app/terminfo",
+      XPC_FLAGS: "0x0",
+      XPC_SERVICE_NAME: "0",
+      __CFBundleIdentifier: "com.cmuxterm.app",
+      __CF_USER_TEXT_ENCODING: "0x1F5:0x0:0x0",
+      CMUX_SOCKET_PATH: "/tmp/cmux.sock",
+      CMUX_WORKSPACE: "workspace:1",
+      CMUX_SURFACE_ID: "surface:3",
+      LANG: "en_US.UTF-8",
+    };
+
+    const result = buildDaemonEnv(baseEnv, { port: 7433, host: "127.0.0.1", db: "/tmp/test.db" });
+
+    // Core vars preserved
+    expect(result["HOME"]).toBe("/Users/tester");
+    expect(result["PATH"]).toBe("/opt/homebrew/bin:/usr/bin:/bin");
+    expect(result["USER"]).toBe("tester");
+    expect(result["SHELL"]).toBe("/bin/zsh");
+    expect(result["LANG"]).toBe("en_US.UTF-8");
+
+    // OPENRIG_* set from opts
+    expect(result["OPENRIG_PORT"]).toBe("7433");
+    expect(result["OPENRIG_HOST"]).toBe("127.0.0.1");
+    expect(result["OPENRIG_DB"]).toBe("/tmp/test.db");
+
+    // Scrubbed vars absent
+    expect(result["GHOSTTY_BIN_DIR"]).toBeUndefined();
+    expect(result["GHOSTTY_RESOURCES_DIR"]).toBeUndefined();
+    expect(result["GHOSTTY_SHELL_FEATURES"]).toBeUndefined();
+    expect(result["TERM_PROGRAM"]).toBeUndefined();
+    expect(result["TERM_PROGRAM_VERSION"]).toBeUndefined();
+    expect(result["TERMINFO"]).toBeUndefined();
+    expect(result["XPC_FLAGS"]).toBeUndefined();
+    expect(result["XPC_SERVICE_NAME"]).toBeUndefined();
+    expect(result["__CFBundleIdentifier"]).toBeUndefined();
+    expect(result["__CF_USER_TEXT_ENCODING"]).toBeUndefined();
+    expect(result["CMUX_SOCKET_PATH"]).toBeUndefined();
+    expect(result["CMUX_WORKSPACE"]).toBeUndefined();
+    expect(result["CMUX_SURFACE_ID"]).toBeUndefined();
+  });
+
+  it("explicit opts override inherited OPENRIG_* from base env", () => {
+    const baseEnv: Record<string, string> = {
+      HOME: "/Users/tester",
+      PATH: "/usr/bin",
+      OPENRIG_PORT: "9999",
+      OPENRIG_DB: "/old/path.db",
+    };
+
+    const result = buildDaemonEnv(baseEnv, { port: 7433, host: "127.0.0.1", db: "/new/path.db" });
+
+    expect(result["OPENRIG_PORT"]).toBe("7433");
+    expect(result["OPENRIG_DB"]).toBe("/new/path.db");
   });
 });
