@@ -41,6 +41,10 @@ if [ -d "$DAEMON_DIR/specs" ]; then
   cp -r "$DAEMON_DIR/specs" "$CLI_DIR/daemon/specs"
 fi
 
+if [ -d "$DAEMON_DIR/docs" ]; then
+  cp -r "$DAEMON_DIR/docs" "$CLI_DIR/daemon/docs"
+fi
+
 # UI: dist
 mkdir -p "$CLI_DIR/ui/dist"
 cp -r "$UI_DIR/dist/"* "$CLI_DIR/ui/dist/"
@@ -52,6 +56,7 @@ echo "CLI dist:        $(find "$CLI_DIR/dist" -name '*.js' | wc -l | tr -d ' ') 
 echo "Daemon dist:     $(find "$CLI_DIR/daemon/dist" -name '*.js' | wc -l | tr -d ' ') JS files"
 echo "Daemon assets:   $(find "$CLI_DIR/daemon/assets" -type f 2>/dev/null | wc -l | tr -d ' ') files"
 echo "Daemon specs:    $(find "$CLI_DIR/daemon/specs" -type f 2>/dev/null | wc -l | tr -d ' ') files"
+echo "Daemon docs:     $(find "$CLI_DIR/daemon/docs" -type f 2>/dev/null | wc -l | tr -d ' ') files"
 echo "UI dist:         $(find "$CLI_DIR/ui/dist" -type f | wc -l | tr -d ' ') files"
 echo ""
 echo "Ready to publish: cd packages/cli && npm publish --access public"

@@ -385,6 +385,20 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     })(),
   };
 
+  // Copy bundled reference docs to ~/.openrig/reference/ so agents can find them at a stable path
+  try {
+    const bundledDocsDir = nodePath.resolve(import.meta.dirname, "../docs/reference");
+    if (fs.existsSync(bundledDocsDir)) {
+      const referenceDir = getDefaultOpenRigPath("reference");
+      fs.mkdirSync(referenceDir, { recursive: true });
+      for (const file of fs.readdirSync(bundledDocsDir)) {
+        if (file.endsWith(".md")) {
+          fs.copyFileSync(nodePath.join(bundledDocsDir, file), nodePath.join(referenceDir, file));
+        }
+      }
+    }
+  } catch { /* best-effort — reference docs are not critical to daemon operation */ }
+
   const app = createApp(deps);
 
   // Context monitor — caller (index.ts) starts polling after listen
