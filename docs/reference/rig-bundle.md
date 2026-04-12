@@ -211,23 +211,35 @@ The create command:
 rig bundle inspect <bundle-path> [--json]
 ```
 
-Shows the manifest, digest validity, and integrity verification result without extracting or installing.
+Shows the manifest, digest validity, and integrity verification result. Inspect extracts the archive into a temporary directory for safe validation, then cleans that directory up. It does not install the bundle.
 
 ### Install a bundle
 
 ```bash
-rig bundle install <bundle-path> [--plan] [--yes]
+rig bundle install <bundle-path> [--plan] [--yes] [--target <root>] [--json]
 ```
 
-Extracts the bundle, validates integrity, and bootstraps the rig (same as `rig up` for a spec file).
+| Flag | Required | Default | Description |
+|------|----------|---------|-------------|
+| `<bundle-path>` | yes | — | Path to the `.rigbundle` file. |
+| `--plan` | no | `false` | Preview the bootstrap plan without installing or launching. |
+| `--yes` | no | `false` | Auto-approve trusted actions during apply mode. |
+| `--target <root>` | yes in apply mode | — | Target root directory for package installation. Required unless `--plan` is used. |
+| `--json` | no | `false` | Emit machine-readable JSON. |
+
+Extracts the bundle, validates integrity, and bootstraps the rig. In apply mode, the daemon requires `targetRoot`, so `rig bundle install` must be given `--target <root>` unless you are running with `--plan`.
 
 ### Launch directly
 
 ```bash
-rig up <bundle-path> [--cwd <dir>]
+rig up <bundle-path> [--target <root>] [--cwd <dir>]
 ```
 
-`rig up` auto-detects `.rigbundle` files and routes them through the bundle install path.
+`rig up` auto-detects `.rigbundle` files and routes them through the bundle bootstrap path.
+
+- `--target <root>` controls where packaged files are installed
+- if `--target` is omitted for a `.rigbundle`, the CLI defaults the install target to the current working directory
+- `--cwd <dir>` does **not** change the install target; it only overrides the launched members' working directory for that run
 
 ---
 
@@ -342,7 +354,14 @@ Integrity: PASS
 ### Install and launch
 
 ```bash
-rig up my-team.rigbundle --cwd ~/projects/my-project
+cd ~/projects/my-project
+rig up /path/to/my-team.rigbundle
 ```
 
-The bundle is extracted to a temporary directory, integrity is verified, and the rig is bootstrapped with all agents and resources from the bundle.
+Equivalent explicit form:
+
+```bash
+rig up /path/to/my-team.rigbundle --target ~/projects/my-project
+```
+
+The bundle is extracted to a temporary directory, integrity is verified, packaged files are installed into the target root, and the rig is bootstrapped with all agents and resources from the bundle. If you also want agents to launch with a different working directory for that run, pass `--cwd <dir>` separately.
