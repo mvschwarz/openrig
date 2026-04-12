@@ -41,6 +41,42 @@ function captureLogs(fn: () => Promise<void>): Promise<{ logs: string[]; exitCod
     .finally(() => { console.log = orig; });
 }
 
+function expectRuntimeConfigDisclosure(result: SetupResult): void {
+  expect(result.runtimeConfig).toHaveLength(5);
+  expect(result.runtimeConfig).toEqual(expect.arrayContaining([
+    {
+      scope: "global",
+      runtime: "claude-code",
+      path: "~/.claude/settings.json",
+      purpose: "Allow OpenRig commands without Claude permission prompts.",
+    },
+    {
+      scope: "global",
+      runtime: "claude-code",
+      path: "~/.claude.json",
+      purpose: "Pre-trust managed workspaces and mark Claude onboarding complete.",
+    },
+    {
+      scope: "project",
+      runtime: "claude-code",
+      path: ".claude/settings.local.json",
+      purpose: expect.stringContaining("statusLine"),
+    },
+    {
+      scope: "project",
+      runtime: "claude-code",
+      path: ".mcp.json",
+      purpose: "Configure project-local MCP servers for Claude-managed workspaces.",
+    },
+    {
+      scope: "global",
+      runtime: "codex",
+      path: "~/.codex/config.toml",
+      purpose: "Pre-trust managed workspaces and configure Codex MCP servers.",
+    },
+  ]));
+}
+
 describe("rig setup", () => {
   it("wired via createProgram", async () => {
     const { createProgram } = await import("../src/index.js");
@@ -76,13 +112,7 @@ describe("rig setup", () => {
     expect(stepIds).not.toContain("gh_install");
     // All steps should be skipped in dry run
     expect(result.steps.every((s) => s.status === "skipped")).toBe(true);
-    expect(result.runtimeConfig).toEqual([
-      { scope: "global", runtime: "claude-code", path: "~/.claude/settings.json", purpose: "Allow OpenRig commands without Claude permission prompts." },
-      { scope: "global", runtime: "claude-code", path: "~/.claude.json", purpose: "Pre-trust managed workspaces and mark Claude onboarding complete." },
-      { scope: "project", runtime: "claude-code", path: ".claude/settings.local.json", purpose: "Apply managed-session Claude permissions within the project." },
-      { scope: "project", runtime: "claude-code", path: ".mcp.json", purpose: "Configure project-local MCP servers for Claude-managed workspaces." },
-      { scope: "global", runtime: "codex", path: "~/.codex/config.toml", purpose: "Pre-trust managed workspaces and configure Codex MCP servers." },
-    ]);
+    expectRuntimeConfigDisclosure(result);
   });
 
   it("--dry-run --full --json includes full profile with core + extra step ids", async () => {
@@ -335,13 +365,7 @@ describe("rig setup", () => {
 
     const result = await runSetup(deps, {});
 
-    expect(result.runtimeConfig).toEqual([
-      { scope: "global", runtime: "claude-code", path: "~/.claude/settings.json", purpose: "Allow OpenRig commands without Claude permission prompts." },
-      { scope: "global", runtime: "claude-code", path: "~/.claude.json", purpose: "Pre-trust managed workspaces and mark Claude onboarding complete." },
-      { scope: "project", runtime: "claude-code", path: ".claude/settings.local.json", purpose: "Apply managed-session Claude permissions within the project." },
-      { scope: "project", runtime: "claude-code", path: ".mcp.json", purpose: "Configure project-local MCP servers for Claude-managed workspaces." },
-      { scope: "global", runtime: "codex", path: "~/.codex/config.toml", purpose: "Pre-trust managed workspaces and configure Codex MCP servers." },
-    ]);
+    expectRuntimeConfigDisclosure(result);
   });
 
   it("ready is false only when setup steps or verification checks have fail status", async () => {
