@@ -62,4 +62,22 @@ describe("RigSpec docs field", () => {
     const spec = RigSpecSchema.normalize(minimalSpec());
     expect(spec.docs).toBeUndefined();
   });
+
+  it("rejects null entry in docs array without crashing", () => {
+    const result = RigSpecSchema.validate(minimalSpec({ docs: [null] }));
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.includes("docs[0]: must be an object"))).toBe(true);
+  });
+
+  it("rejects primitive entry in docs array without crashing", () => {
+    const result = RigSpecSchema.validate(minimalSpec({ docs: [42] }));
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.includes("docs[0]: must be an object"))).toBe(true);
+  });
+
+  it("rejects string entry in docs array without crashing", () => {
+    const result = RigSpecSchema.validate(minimalSpec({ docs: ["SETUP.md"] }));
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.includes("docs[0]: must be an object"))).toBe(true);
+  });
 });

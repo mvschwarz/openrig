@@ -623,4 +623,50 @@ describe("PodBundleSourceResolver", () => {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
   });
+
+  it("bundles declared docs files alongside the rig spec", () => {
+    const spec = makeRigSpec({ docs: [{ path: "SETUP.md" }] });
+    const yaml = rigSpecYaml(spec);
+    const files: Record<string, string> = {
+      [`${RIG_ROOT}/rig.yaml`]: yaml,
+      [`${RIG_ROOT}/SETUP.md`]: "# Setup instructions\nInstall Exa MCP first.",
+      [`${RIG_ROOT}/agents/impl/agent.yaml`]: validAgentYaml("impl"),
+    };
+    const fs = mockFs(files);
+    const assembler = new PodBundleAssembler({ fsOps: fs });
+
+    const result = assembler.assemble({
+      rigRoot: RIG_ROOT,
+      rigSpecPath: `${RIG_ROOT}/rig.yaml`,
+      outputDir: "/out",
+      bundleName: "test",
+      bundleVersion: "1.0",
+    });
+
+    expect(result.collectedFiles).toContain("SETUP.md");
+    // The bundled rig.yaml should still reference the doc
+    const written = (fs as unknown as { _written: Record<string, string> })._written;
+    const bundledRigYaml = written["/out/rig.yaml"];
+    expect(bundledRigYaml).toContain("SETUP.md");
+  });
+
+  it("fails assembly when a declared doc file is missing from disk", () => {
+    const spec = makeRigSpec({ docs: [{ path: "SETUP.md" }] });
+    const yaml = rigSpecYaml(spec);
+    const files: Record<string, string> = {
+      [`${RIG_ROOT}/rig.yaml`]: yaml,
+      // SETUP.md deliberately missing
+      [`${RIG_ROOT}/agents/impl/agent.yaml`]: validAgentYaml("impl"),
+    };
+    const fs = mockFs(files);
+    const assembler = new PodBundleAssembler({ fsOps: fs });
+
+    expect(() => assembler.assemble({
+      rigRoot: RIG_ROOT,
+      rigSpecPath: `${RIG_ROOT}/rig.yaml`,
+      outputDir: "/out",
+      bundleName: "test",
+      bundleVersion: "1.0",
+    })).toThrow(/Declared doc file not found.*SETUP\.md/);
+  });
 });

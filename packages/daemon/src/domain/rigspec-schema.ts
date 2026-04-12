@@ -62,7 +62,12 @@ export class RigSpecSchema {
         errors.push("docs: must be an array");
       } else {
         for (let i = 0; i < (obj["docs"] as unknown[]).length; i++) {
-          const doc = (obj["docs"] as Record<string, unknown>[])[i]!;
+          const entry = (obj["docs"] as unknown[])[i];
+          if (!entry || typeof entry !== "object") {
+            errors.push(`docs[${i}]: must be an object with a path field`);
+            continue;
+          }
+          const doc = entry as Record<string, unknown>;
           if (!doc["path"] || typeof doc["path"] !== "string") {
             errors.push(`docs[${i}].path: required non-empty string`);
           } else {
