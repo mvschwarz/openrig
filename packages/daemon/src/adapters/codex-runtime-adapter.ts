@@ -97,6 +97,11 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       console.error(`[openrig] codex bootstrap warning: ${(err as Error).message}`);
     }
 
+    // Best-effort: provision MCPs for managed Codex sessions
+    try { this.provisionMcps(); } catch (err) {
+      console.error(`[openrig] codex MCP provisioning warning: ${(err as Error).message}`);
+    }
+
     let delivered = 0;
     const failed: Array<{ path: string; error: string }> = [];
 
@@ -263,6 +268,35 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
 
     for (const trustKey of this.workspaceTrustKeys(cwd)) {
       content = upsertCodexProjectTrust(content, trustKey);
+    }
+
+    this.fs.writeFile(configPath, content);
+  }
+
+  /**
+   * Best-effort: ensure Exa and Context7 MCPs are configured for Codex.
+   * Appends to ~/.codex/config.toml if the MCP entries don't already exist.
+   */
+  private provisionMcps(): void {
+    const home = this.fs.homedir ?? os.homedir();
+    if (!home) return;
+
+    const configPath = nodePath.join(home, ".codex", "config.toml");
+    this.fs.mkdirp(nodePath.dirname(configPath));
+
+    let content = "";
+    try {
+      if (this.fs.exists(configPath)) content = this.fs.readFile(configPath);
+    } catch { content = ""; }
+
+    // Add Exa if not present
+    if (!content.includes('[mcp_servers.exa]')) {
+      content += '\n[mcp_servers.exa]\nurl = "https://mcp.exa.ai/mcp"\n';
+    }
+
+    // Add Context7 if not present
+    if (!content.includes('[mcp_servers.context7]')) {
+      content += '\n[mcp_servers.context7]\nurl = "https://mcp.context7.com/mcp"\n';
     }
 
     this.fs.writeFile(configPath, content);

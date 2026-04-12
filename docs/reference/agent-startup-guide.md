@@ -241,6 +241,25 @@ For anything beyond `guidance_merge`, `skill_install`, and `send_text`, the reco
 
 This way, when deterministic support becomes fully reliable, the agent will boot up, see that everything is already set up (by the deterministic path), run its system check, confirm everything looks good, and proceed. Until then, the agent reads the instructions and handles the setup itself.
 
+### Runtime Config Disclosure
+
+OpenRig now performs some best-effort deterministic runtime configuration for managed sessions. These writes are intentionally invasive and should be disclosed plainly:
+
+- Claude global config: `~/.claude/settings.json`
+  Purpose: allow `rig` commands without repeated Claude permission prompts.
+- Claude global state: `~/.claude.json`
+  Purpose: pre-trust managed workspaces and mark onboarding complete for fresh managed sessions.
+- Claude project-local config: `.claude/settings.local.json`
+  Purpose: apply managed-session Claude permissions inside the project without committing them to git.
+- Claude project-local MCP config: `.mcp.json`
+  Purpose: configure OpenRig-managed MCP servers for Claude in that project.
+- Codex global config: `~/.codex/config.toml`
+  Purpose: pre-trust managed workspaces and configure Codex MCP servers. Codex currently has no equivalent project-local MCP config path.
+
+Two important caveats:
+- these writes are best-effort and should still be paired with startup guidance so the local agent can verify and repair them if needed
+- already-running adopted sessions may need restart before they pick up newly written config
+
 ### Runtime Differences
 
 **Claude Code:**

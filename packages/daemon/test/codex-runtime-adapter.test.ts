@@ -341,4 +341,37 @@ describe("Codex runtime adapter", () => {
     expect(content).toContain('[projects."/tmp/workspace"]');
     expect(content).toContain('trust_level = "trusted"');
   });
+
+  it("deliverStartup provisions Codex MCP servers in the global config without clobbering trust entries", async () => {
+    const fs = mockFs({
+      "/home/tester/.codex/config.toml": '[projects."/tmp/workspace"]\ntrust_level = "trusted"\n',
+    });
+    const fsWithHome = { ...fs, homedir: "/home/tester" };
+    const adapter = new CodexRuntimeAdapter({ tmux: mockTmux(), fsOps: fsWithHome });
+
+    await adapter.deliverStartup([], makeBinding("/tmp/workspace"));
+
+    const store = (fsWithHome as unknown as { _store: Record<string, string> })._store;
+    const content = store["/home/tester/.codex/config.toml"];
+    expect(content).toContain('[projects."/tmp/workspace"]');
+    expect(content).toContain('trust_level = "trusted"');
+    expect(content).toContain('[mcp_servers.exa]');
+    expect(content).toContain('url = "https://mcp.exa.ai/mcp"');
+    expect(content).toContain('[mcp_servers.context7]');
+    expect(content).toContain('url = "https://mcp.context7.com/mcp"');
+  });
+
+  it("deliverStartup keeps Codex MCP sections idempotent across repeated startup", async () => {
+    const fs = mockFs({});
+    const fsWithHome = { ...fs, homedir: "/home/tester" };
+    const adapter = new CodexRuntimeAdapter({ tmux: mockTmux(), fsOps: fsWithHome });
+
+    await adapter.deliverStartup([], makeBinding("/tmp/workspace"));
+    await adapter.deliverStartup([], makeBinding("/tmp/workspace"));
+
+    const store = (fsWithHome as unknown as { _store: Record<string, string> })._store;
+    const content = store["/home/tester/.codex/config.toml"];
+    expect(content.match(/\[mcp_servers\.exa\]/g)?.length ?? 0).toBe(1);
+    expect(content.match(/\[mcp_servers\.context7\]/g)?.length ?? 0).toBe(1);
+  });
 });

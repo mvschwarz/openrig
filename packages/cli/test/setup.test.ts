@@ -76,6 +76,13 @@ describe("rig setup", () => {
     expect(stepIds).not.toContain("gh_install");
     // All steps should be skipped in dry run
     expect(result.steps.every((s) => s.status === "skipped")).toBe(true);
+    expect(result.runtimeConfig).toEqual([
+      { scope: "global", runtime: "claude-code", path: "~/.claude/settings.json", purpose: "Allow OpenRig commands without Claude permission prompts." },
+      { scope: "global", runtime: "claude-code", path: "~/.claude.json", purpose: "Pre-trust managed workspaces and mark Claude onboarding complete." },
+      { scope: "project", runtime: "claude-code", path: ".claude/settings.local.json", purpose: "Apply managed-session Claude permissions within the project." },
+      { scope: "project", runtime: "claude-code", path: ".mcp.json", purpose: "Configure project-local MCP servers for Claude-managed workspaces." },
+      { scope: "global", runtime: "codex", path: "~/.codex/config.toml", purpose: "Pre-trust managed workspaces and configure Codex MCP servers." },
+    ]);
   });
 
   it("--dry-run --full --json includes full profile with core + extra step ids", async () => {
@@ -321,6 +328,20 @@ describe("rig setup", () => {
     // Doctor statuses used as-is, not renamed
     const nodeCheck = result.verification!.checks.find((c) => c.name === "node_version");
     expect(["pass", "warn", "fail", "skipped"]).toContain(nodeCheck?.status);
+  });
+
+  it("non-dry-run results include the same structured runtime config disclosure", async () => {
+    const deps = makeDeps();
+
+    const result = await runSetup(deps, {});
+
+    expect(result.runtimeConfig).toEqual([
+      { scope: "global", runtime: "claude-code", path: "~/.claude/settings.json", purpose: "Allow OpenRig commands without Claude permission prompts." },
+      { scope: "global", runtime: "claude-code", path: "~/.claude.json", purpose: "Pre-trust managed workspaces and mark Claude onboarding complete." },
+      { scope: "project", runtime: "claude-code", path: ".claude/settings.local.json", purpose: "Apply managed-session Claude permissions within the project." },
+      { scope: "project", runtime: "claude-code", path: ".mcp.json", purpose: "Configure project-local MCP servers for Claude-managed workspaces." },
+      { scope: "global", runtime: "codex", path: "~/.codex/config.toml", purpose: "Pre-trust managed workspaces and configure Codex MCP servers." },
+    ]);
   });
 
   it("ready is false only when setup steps or verification checks have fail status", async () => {
