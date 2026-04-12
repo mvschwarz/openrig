@@ -22,11 +22,19 @@ export interface VerificationCheck {
   fix?: string;
 }
 
+export interface RuntimeConfigDisclosure {
+  scope: "global" | "project";
+  runtime: "claude-code" | "codex";
+  path: string;
+  purpose: string;
+}
+
 export interface SetupResult {
   profile: "core" | "full";
   platform: string;
   ready: boolean;
   steps: SetupStep[];
+  runtimeConfig: RuntimeConfigDisclosure[];
   verification?: {
     checks: VerificationCheck[];
   };
@@ -52,6 +60,38 @@ const CORE_STEP_IDS = [
   "verify",
 ];
 const FULL_EXTRA_STEP_IDS = ["jq_install", "gh_install"];
+const RUNTIME_CONFIG_DISCLOSURE: RuntimeConfigDisclosure[] = [
+  {
+    scope: "global",
+    runtime: "claude-code",
+    path: "~/.claude/settings.json",
+    purpose: "Allow OpenRig commands without Claude permission prompts.",
+  },
+  {
+    scope: "global",
+    runtime: "claude-code",
+    path: "~/.claude.json",
+    purpose: "Pre-trust managed workspaces and mark Claude onboarding complete.",
+  },
+  {
+    scope: "project",
+    runtime: "claude-code",
+    path: ".claude/settings.local.json",
+    purpose: "Apply managed-session Claude permissions and context-collector statusLine config within the project.",
+  },
+  {
+    scope: "project",
+    runtime: "claude-code",
+    path: ".mcp.json",
+    purpose: "Configure project-local MCP servers for Claude-managed workspaces.",
+  },
+  {
+    scope: "global",
+    runtime: "codex",
+    path: "~/.codex/config.toml",
+    purpose: "Pre-trust managed workspaces and configure Codex MCP servers.",
+  },
+];
 
 function defaultDeps(): SetupDeps {
   return {
@@ -72,7 +112,7 @@ export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?:
     for (const id of stepIds) {
       steps.push({ id, status: "skipped", message: `Dry run: ${id} would be attempted.` });
     }
-    return { profile, platform, ready: false, steps };
+    return { profile, platform, ready: false, steps, runtimeConfig: RUNTIME_CONFIG_DISCLOSURE };
   }
 
   // Core steps
@@ -313,7 +353,7 @@ export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?:
   const stepsFailed = steps.some((s) => s.status === "fail");
   const verificationFailed = verification?.checks.some((c) => c.status === "fail") ?? false;
   const ready = !stepsFailed && !verificationFailed;
-  return { profile, platform, ready, steps, ...(verification ? { verification } : {}) };
+  return { profile, platform, ready, steps, runtimeConfig: RUNTIME_CONFIG_DISCLOSURE, ...(verification ? { verification } : {}) };
 }
 
 function buildDefaultDoctorDeps(setupDeps: SetupDeps): DoctorDeps {
@@ -359,6 +399,11 @@ export function setupCommand(depsOverride?: SetupDeps): Command {
 
       console.log(`\nProfile: ${result.profile}`);
       console.log(`Platform: ${result.platform}\n`);
+      console.log("OpenRig may modify runtime config in these locations:");
+      for (const item of result.runtimeConfig) {
+        console.log(`  - [${item.scope}] ${item.runtime} ${item.path} — ${item.purpose}`);
+      }
+      console.log("  - Note: already-running adopted sessions may need restart to pick up runtime config changes.\n");
 
       for (const step of result.steps) {
         const icon = step.status === "pass" ? "OK" : step.status === "applied" ? "APPLIED" : step.status === "warn" ? "WARN" : step.status === "skipped" ? "SKIP" : "FAIL";

@@ -100,6 +100,11 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       console.error(`[openrig] context collector provisioning warning: ${(err as Error).message}`);
     }
 
+    // Best-effort: provision permissions and MCP config for managed Claude sessions
+    try { this.provisionPermissionsAndMcps(binding); } catch (err) {
+      console.error(`[openrig] permissions/MCP provisioning warning: ${(err as Error).message}`);
+    }
+
     let delivered = 0;
     const failed: Array<{ path: string; error: string }> = [];
 
@@ -399,7 +404,9 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     try {
       if (!this.fs.exists(path)) return {};
       const parsed = JSON.parse(this.fs.readFile(path));
-      return typeof parsed === "object" && parsed !== null ? parsed as Record<string, unknown> : {};
+      return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+        ? parsed as Record<string, unknown>
+        : {};
     } catch {
       return {};
     }
@@ -449,6 +456,66 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     };
 
     this.fs.writeFile(settingsPath, JSON.stringify(existing, null, 2));
+  }
+
+  /**
+   * Best-effort: provision permissions allowlist and MCP config for managed Claude sessions.
+   * Merges into .claude/settings.local.json (project-level, gitignored).
+   * Idempotent: merge preserves existing settings.
+   */
+  private provisionPermissionsAndMcps(binding: { cwd?: string | null }): void {
+    if (!binding.cwd) return;
+
+    const settingsPath = nodePath.join(binding.cwd, ".claude", "settings.local.json");
+    this.fs.mkdirp(nodePath.dirname(settingsPath));
+
+    const existing = this.readJsonObject(settingsPath);
+    const existingPermissions = this.readJsonObjectField(existing, "permissions");
+    const existingAllow = this.readStringArray(existingPermissions["allow"]);
+    const existingDeny = this.readStringArray(existingPermissions["deny"]);
+
+    const rigAllowRules = [
+      "Bash(rig:*)",
+      "Bash(cat *)", "Bash(ls *)", "Bash(find *)", "Bash(grep *)",
+      "Bash(head *)", "Bash(tail *)", "Bash(wc *)",
+      "Bash(mkdir *)", "Bash(cp *)", "Bash(mv *)",
+      "Bash(node *)", "Bash(npx *)", "Bash(npm *)",
+      "Read", "Edit",
+    ];
+    const rigDenyRules = [
+      "Bash(git push*)", "Bash(git commit*)",
+      "Bash(rm -rf *)",
+      "Bash(gh pr *)",
+    ];
+
+    // Merge without duplicating
+    const mergedAllow = [...new Set([...existingAllow, ...rigAllowRules])];
+    const mergedDeny = [...new Set([...existingDeny, ...rigDenyRules])];
+
+    existing["permissions"] = {
+      ...existingPermissions,
+      defaultMode: "acceptEdits", // Unconditional: managed sessions must not inherit restrictive modes
+      allow: mergedAllow,
+      deny: mergedDeny,
+    };
+
+    this.fs.writeFile(settingsPath, JSON.stringify(existing, null, 2));
+
+    // Merge MCP config: ensure Exa and Context7 are configured at project level
+    const mcpPath = nodePath.join(binding.cwd, ".mcp.json");
+    const mcpConfig = this.readJsonObject(mcpPath);
+    const mcpServers = this.readJsonObjectField(mcpConfig, "mcpServers");
+
+    // Add Exa and Context7 if not already configured
+    if (!mcpServers["exa"]) {
+      mcpServers["exa"] = { type: "http", url: "https://mcp.exa.ai/mcp" };
+    }
+    if (!mcpServers["context7"]) {
+      mcpServers["context7"] = { type: "http", url: "https://mcp.context7.com/mcp" };
+    }
+
+    mcpConfig["mcpServers"] = mcpServers;
+    this.fs.writeFile(mcpPath, JSON.stringify(mcpConfig, null, 2));
   }
 }
 

@@ -126,6 +126,15 @@ Optional:
 
 Both commands support `--json` for agent-driven workflows.
 
+Managed runtime boot (during `rig up`) may modify runtime config to reduce permission and MCP friction. `rig setup` discloses these paths so agents know what was changed:
+- global Claude: `~/.claude/settings.json` for OpenRig command allowlisting
+- global Claude state: `~/.claude.json` for managed workspace trust and onboarding completion
+- project Claude: `.claude/settings.local.json` for managed-session permissions
+- project Claude MCP: `.mcp.json` for OpenRig-managed MCP servers
+- global Codex: `~/.codex/config.toml` for workspace trust and MCP servers
+
+Already-running adopted sessions may need restart before they pick up newly written runtime config.
+
 **For agents:** Ask the user whether they want core setup (`rig setup`) or the fuller workstation path (`rig setup --full`) before choosing the invocation. Inspect the result with `--json` and use `rig doctor` to finish any remaining machine-specific issues.
 
 ## Comparison with Claude Managed Agents

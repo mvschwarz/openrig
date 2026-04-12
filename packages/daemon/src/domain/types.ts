@@ -448,11 +448,16 @@ export interface RigSpecPod {
   edges: RigSpecPodEdge[];
 }
 
+export interface RigSpecDoc {
+  path: string;
+}
+
 export interface RigSpec {
   version: string;
   name: string;
   summary?: string;
   cultureFile?: string;
+  docs?: RigSpecDoc[];
   startup?: StartupBlock;
   services?: RigServicesSpec;
   pods: RigSpecPod[];

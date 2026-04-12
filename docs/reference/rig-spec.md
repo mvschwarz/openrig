@@ -37,6 +37,10 @@ summary: A full product squad with orchestration, development, and review pods.
 
 culture_file: culture/CULTURE.md
 
+docs:
+  - path: SETUP.md
+  - path: README.md
+
 startup:
   files:
     - path: guidance/team-norms.md
@@ -170,6 +174,7 @@ edges:
 | `name` | string | yes | — | Rig name. Used in session naming (`{pod}-{member}@{name}`), snapshot identification, and spec library lookup. |
 | `summary` | string | no | — | Human-readable description. Shown in spec library, review surfaces, and `rig specs show`. |
 | `culture_file` | string | no | — | Relative path to a rig-wide culture/constitution file. Must be a safe relative path (no `..`, no absolute). |
+| `docs` | Doc[] | no | — | Documentation files that should travel with the rig. Included in rig bundles. Each entry has a `path` field (safe relative path). The engine does not consume these — they are for humans and agents setting up the environment before launch. |
 | `startup` | StartupBlock | no | — | Rig-level startup files and actions. Applied to all members via the startup layering model. |
 | `services` | ServicesBlock | no | — | Optional managed services (Docker Compose). When present, services boot before any agent launches. |
 | `pods` | Pod[] | yes | — | At least one pod required. Each pod is a bounded context containing members and pod-local edges. |

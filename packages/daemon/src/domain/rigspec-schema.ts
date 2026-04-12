@@ -56,6 +56,28 @@ export class RigSpecSchema {
       }
     }
 
+    // docs: optional array of documentation file paths
+    if (obj["docs"] !== undefined) {
+      if (!Array.isArray(obj["docs"])) {
+        errors.push("docs: must be an array");
+      } else {
+        for (let i = 0; i < (obj["docs"] as unknown[]).length; i++) {
+          const entry = (obj["docs"] as unknown[])[i];
+          if (!entry || typeof entry !== "object") {
+            errors.push(`docs[${i}]: must be an object with a path field`);
+            continue;
+          }
+          const doc = entry as Record<string, unknown>;
+          if (!doc["path"] || typeof doc["path"] !== "string") {
+            errors.push(`docs[${i}].path: required non-empty string`);
+          } else {
+            const pathErr = validateSafePath(doc["path"] as string, `docs[${i}].path`);
+            if (pathErr) errors.push(pathErr);
+          }
+        }
+      }
+    }
+
     // rig-level startup
     if (obj["startup"] !== undefined) {
       errors.push(...validateStartupBlock(obj["startup"], "startup"));
@@ -121,11 +143,16 @@ export class RigSpecSchema {
         }))
       : [];
 
+    const docs = Array.isArray(raw["docs"])
+      ? (raw["docs"] as Record<string, unknown>[]).map((d) => ({ path: d["path"] as string }))
+      : undefined;
+
     return {
       version: raw["version"] as string,
       name: raw["name"] as string,
       summary: raw["summary"] as string | undefined,
       cultureFile: raw["culture_file"] as string | undefined,
+      docs,
       startup: raw["startup"] ? normalizeStartupBlock(raw["startup"]) : undefined,
       services: raw["services"] ? normalizeServicesBlock(raw["services"], raw["name"] as string) : undefined,
       pods,

@@ -196,7 +196,7 @@ describe("ClaudeCodeAdapter Context Collector Provisioning", () => {
   });
 
   // T7: No provisioning without stateDir/collectorAssetPath
-  it("no provisioning when stateDir or collectorAssetPath is missing", async () => {
+  it("no collector provisioning when stateDir or collectorAssetPath is missing", async () => {
     const adapter = new ClaudeCodeAdapter({
       tmux: mockTmux(),
       fsOps: mockFsOps(),
@@ -205,8 +205,14 @@ describe("ClaudeCodeAdapter Context Collector Provisioning", () => {
 
     await adapter.deliverStartup([], { cwd: "/project", tmuxSession: "test", nodeId: "n1" } as any);
 
-    // No settings.local.json written
-    expect(written["/project/.claude/settings.local.json"]).toBeUndefined();
+    // Permissions/MCP may still be provisioned, but statusLine (collector) must not be
+    const settingsContent = written["/project/.claude/settings.local.json"];
+    if (settingsContent) {
+      const settings = JSON.parse(settingsContent);
+      expect(settings.statusLine).toBeUndefined();
+    }
+    // Collector script must not be written
+    expect(written["/project/.openrig/context-collector.cjs"]).toBeUndefined();
   });
 
   // T8: Existing settings.local.json with unrelated keys preserved
@@ -261,6 +267,120 @@ describe("ClaudeCodeAdapter Context Collector Provisioning", () => {
     const settingsPath = "/home/tester/.claude/settings.json";
     expect(written[settingsPath]).toBeDefined();
     const settings = JSON.parse(written[settingsPath]!);
+    expect(settings.permissions.allow).toContain("Bash(rig:*)");
+  });
+
+  it("deliverStartup provisions project-scope Claude permissions and MCP config without clobbering existing settings", async () => {
+    written["/project/.claude/settings.local.json"] = JSON.stringify({
+      customSetting: true,
+      permissions: {
+        allow: ["Bash(rig:*)", "Bash(npm *)"],
+        deny: ["Bash(git push*)"],
+      },
+    });
+    written["/project/.mcp.json"] = JSON.stringify({
+      mcpServers: {
+        existing: { type: "http", url: "https://example.com/mcp" },
+      },
+    });
+
+    const adapter = new ClaudeCodeAdapter({
+      tmux: mockTmux(),
+      fsOps: mockFsOps(),
+      stateDir: tmpDir,
+      collectorAssetPath: "/fake/collector.js",
+    });
+
+    await adapter.deliverStartup([], { cwd: "/project", tmuxSession: "dev-impl@test", nodeId: "n1" } as any);
+
+    const settings = JSON.parse(written["/project/.claude/settings.local.json"]!);
+    expect(settings.customSetting).toBe(true);
+    expect(settings.statusLine.type).toBe("command");
+    expect(settings.permissions.defaultMode).toBe("acceptEdits");
+    expect(settings.permissions.allow).toContain("Bash(rig:*)");
+    expect(settings.permissions.allow.filter((rule: string) => rule === "Bash(rig:*)")).toHaveLength(1);
+    expect(settings.permissions.allow).toContain("Read");
+    expect(settings.permissions.allow).toContain("Edit");
+    expect(settings.permissions.deny).toContain("Bash(git push*)");
+    expect(settings.permissions.deny).toContain("Bash(rm -rf *)");
+    expect(settings.permissions.deny).toContain("Bash(gh pr *)");
+
+    const mcpConfig = JSON.parse(written["/project/.mcp.json"]!);
+    expect(mcpConfig.mcpServers.existing.url).toBe("https://example.com/mcp");
+    expect(mcpConfig.mcpServers.exa.url).toBe("https://mcp.exa.ai/mcp");
+    expect(mcpConfig.mcpServers.context7.url).toBe("https://mcp.context7.com/mcp");
+  });
+
+  it("deliverStartup keeps project-local Claude permission and MCP rules idempotent across repeated startup", async () => {
+    const adapter = new ClaudeCodeAdapter({
+      tmux: mockTmux(),
+      fsOps: mockFsOps(),
+      stateDir: tmpDir,
+      collectorAssetPath: "/fake/collector.js",
+    });
+
+    await adapter.deliverStartup([], { cwd: "/project", tmuxSession: "dev-impl@test", nodeId: "n1" } as any);
+    await adapter.deliverStartup([], { cwd: "/project", tmuxSession: "dev-impl@test", nodeId: "n1" } as any);
+
+    const settings = JSON.parse(written["/project/.claude/settings.local.json"]!);
+    expect(settings.permissions.allow.filter((rule: string) => rule === "Read")).toHaveLength(1);
+    expect(settings.permissions.allow.filter((rule: string) => rule === "Edit")).toHaveLength(1);
+    expect(settings.permissions.allow.filter((rule: string) => rule === "Bash(rig:*)")).toHaveLength(1);
+    expect(settings.permissions.deny.filter((rule: string) => rule === "Bash(rm -rf *)")).toHaveLength(1);
+
+    const mcpConfig = JSON.parse(written["/project/.mcp.json"]!);
+    expect(Object.keys(mcpConfig.mcpServers).filter((id) => id === "exa")).toHaveLength(1);
+    expect(Object.keys(mcpConfig.mcpServers).filter((id) => id === "context7")).toHaveLength(1);
+  });
+
+  it("deliverStartup recovers from array-valued settings.local.json and .mcp.json", async () => {
+    // Seed both files with JSON arrays (invalid for object merge)
+    written["/project/.claude/settings.local.json"] = "[]";
+    written["/project/.mcp.json"] = "[]";
+
+    const adapter = new ClaudeCodeAdapter({
+      tmux: mockTmux(),
+      fsOps: mockFsOps(),
+      stateDir: tmpDir,
+      collectorAssetPath: "/fake/collector.js",
+    });
+
+    await adapter.deliverStartup([], { cwd: "/project", tmuxSession: "dev-impl@test", nodeId: "n1" } as any);
+
+    // Settings must be a proper object with permissions, not a bare array
+    const settings = JSON.parse(written["/project/.claude/settings.local.json"]!);
+    expect(settings.permissions.defaultMode).toBe("acceptEdits");
+    expect(settings.permissions.allow).toContain("Bash(rig:*)");
+
+    // MCP config must be a proper object with mcpServers, not a bare array
+    const mcpConfig = JSON.parse(written["/project/.mcp.json"]!);
+    expect(mcpConfig.mcpServers.exa.url).toBe("https://mcp.exa.ai/mcp");
+    expect(mcpConfig.mcpServers.context7.url).toBe("https://mcp.context7.com/mcp");
+  });
+
+  it("deliverStartup overrides existing restrictive defaultMode with acceptEdits for managed sessions", async () => {
+    // Seed a restrictive existing defaultMode that would block managed-session autonomy
+    written["/project/.claude/settings.local.json"] = JSON.stringify({
+      permissions: {
+        defaultMode: "denyAll",
+        allow: ["Read"],
+      },
+    });
+
+    const adapter = new ClaudeCodeAdapter({
+      tmux: mockTmux(),
+      fsOps: mockFsOps(),
+      stateDir: tmpDir,
+      collectorAssetPath: "/fake/collector.js",
+    });
+
+    await adapter.deliverStartup([], { cwd: "/project", tmuxSession: "dev-impl@test", nodeId: "n1" } as any);
+
+    const settings = JSON.parse(written["/project/.claude/settings.local.json"]!);
+    // Must unconditionally force acceptEdits — not inherit the restrictive mode
+    expect(settings.permissions.defaultMode).toBe("acceptEdits");
+    // Existing allow rules should be merged, not replaced
+    expect(settings.permissions.allow).toContain("Read");
     expect(settings.permissions.allow).toContain("Bash(rig:*)");
   });
 

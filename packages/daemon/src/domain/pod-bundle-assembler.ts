@@ -73,6 +73,17 @@ export class PodBundleAssembler {
       this.collectRigFile(rigSpec.cultureFile, opts.rigRoot, opts.outputDir, collectedFiles);
     }
 
+    // 2b2. Docs files — required when declared (unlike culture/startup which are optional)
+    if (rigSpec.docs) {
+      for (const doc of rigSpec.docs) {
+        const absPath = nodePath.resolve(opts.rigRoot, doc.path);
+        if (!this.fs.exists(absPath)) {
+          throw new Error(`Declared doc file not found: ${doc.path} (resolved to ${absPath}). Remove it from the docs field or create the file.`);
+        }
+        this.collectRigFile(doc.path, opts.rigRoot, opts.outputDir, collectedFiles);
+      }
+    }
+
     // 2c. Rig startup files
     this.collectStartupFiles(rigSpec.startup, opts.rigRoot, opts.outputDir, collectedFiles);
 
