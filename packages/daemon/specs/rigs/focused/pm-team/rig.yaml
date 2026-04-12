@@ -25,6 +25,9 @@ pods:
       - kind: delegates_to
         from: lead
         to: researcher
+      - kind: escalates_to
+        from: researcher
+        to: lead
 
   - id: dev
     label: Development Support
@@ -43,9 +46,6 @@ edges:
   - kind: can_observe
     from: dev.coder
     to: pm.researcher
-  - kind: escalates_to
-    from: pm.researcher
-    to: pm.lead
   - kind: escalates_to
     from: dev.coder
     to: pm.lead

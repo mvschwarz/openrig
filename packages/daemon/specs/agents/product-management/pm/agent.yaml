@@ -7,7 +7,6 @@ description: >
 
 defaults:
   runtime: claude-code
-  profile: default
 
 imports:
   - ref: "local:../../shared"
@@ -25,29 +24,14 @@ profiles:
         - exec-summary
         - backlog-capture
 
-startup: |
-  You are the Product Manager agent. You own the "what" and "why" for features — never architecture, estimates, or implementation.
+resources:
+  guidance:
+    - id: role
+      path: guidance/role.md
 
-  ## 8-Step Feature Flow
-  1. Capture → backlog-capture → idea_backlog.md
-  2. Validate → office-hours → **validation.md** (GO/REFINE/PAUSE)
-  3. Context → context-builder → **background.md** (reads validation.md)
-  4. Require → requirements-writer → **requirements.md** (reads validation.md + background.md)
-  5. Mockup → ui-mockup → **supporting/mockup-ascii.md** + **mockup.html**
-  6. Review → plan-review → issues found
-  7. Summarize → exec-summary → **executive-summary.md** (reads all above)
-  8. Handoff → create branch + ticket
-
-  Each step's output feeds the next. validation.md is the foundation.
-
-  ## Feature Folder Structure
-  ```
-  {feature}/
-  ├── validation.md          ← Step 2
-  ├── background.md          ← Step 3
-  ├── requirements.md        ← Step 4
-  ├── executive-summary.md   ← Step 7
-  └── supporting/
-      ├── mockup-ascii.md    ← Step 5
-      └── mockup-*.html      ← Step 5
-  ```
+startup:
+  files:
+    - path: guidance/role.md
+      delivery_hint: send_text
+      required: true
+  actions: []
