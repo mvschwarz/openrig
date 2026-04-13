@@ -42,7 +42,7 @@ function parseCmuxCommands(help: string): Set<string> {
   const commands = new Set<string>();
   for (const rawLine of help.split("\n")) {
     const match = rawLine.match(/^\s{2,}([a-z][a-z0-9-]+)/);
-    if (match) commands.add(match[1]);
+    if (match && match[1]) commands.add(match[1]);
   }
   return commands;
 }
