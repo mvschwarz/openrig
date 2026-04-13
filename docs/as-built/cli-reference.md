@@ -11,7 +11,7 @@ This document reflects the current `rig` surface as shipped. Where live help tex
 ## Overview
 
 - Binary: `rig`
-- Top-level command groups: `40`
+- Top-level command groups: `41`
 - Output mode: human-readable by default; many commands also support `--json`
 - Daemon-backed commands fail when the daemon is stopped or unhealthy; `daemon`, `config`, `preflight`, and `doctor` also have local responsibilities
 - Managed apps are launched through the normal spec/library surfaces; the canonical shipped example is `rig up secrets-manager`
@@ -61,6 +61,7 @@ This document reflects the current `rig` surface as shipped. Where live help tex
 | `launch` | Launch or relaunch a node in a running rig |
 | `remove` | Remove a node from a running rig |
 | `shrink` | Remove an entire pod from a running rig |
+| `setup` | Prepare the machine for OpenRig |
 
 ## Core Daemon and System Commands
 
