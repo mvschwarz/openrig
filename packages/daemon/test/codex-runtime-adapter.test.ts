@@ -5,6 +5,7 @@ import Database from "better-sqlite3";
 import { describe, it, expect, vi } from "vitest";
 import { CodexRuntimeAdapter, type CodexAdapterFsOps } from "../src/adapters/codex-runtime-adapter.js";
 import type { NodeBinding, ResolvedStartupFile } from "../src/domain/runtime-adapter.js";
+import type { ProjectionPlan, ProjectionEntry } from "../src/domain/projection-planner.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 
 function mockTmux(overrides?: Partial<TmuxAdapter>): TmuxAdapter {
@@ -373,5 +374,78 @@ describe("Codex runtime adapter", () => {
     const content = store["/home/tester/.codex/config.toml"];
     expect(content.match(/\[mcp_servers\.exa\]/g)?.length ?? 0).toBe(1);
     expect(content.match(/\[mcp_servers\.context7\]/g)?.length ?? 0).toBe(1);
+  });
+
+  // --- Regenerator bug repair: rig-role managed-block skip ---
+  //
+  // Parallel to the Claude Code adapter fix. The same rig-role seat-collision
+  // symptom occurs for AGENTS.md on Codex members. Per architect SHAPE 1:
+  // skip mergeManagedBlock when the block id is `rig-role`; log honest skip.
+
+  it("projectEntry skips rig-role guidance managed block; AGENTS.md is not written", async () => {
+    const fs = mockFs({ "/agents/qa/guidance/role.md": "# You are `qa`\ngate discipline." });
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const adapter = new CodexRuntimeAdapter({ tmux: mockTmux(), fsOps: fs });
+    const plan: ProjectionPlan = {
+      runtime: "codex", cwd: "/project",
+      entries: [{
+        category: "guidance", effectiveId: "rig-role", mergeStrategy: "managed_block",
+        sourceSpec: "base", sourcePath: "/agents/qa",
+        resourcePath: "guidance/role.md", absolutePath: "/agents/qa/guidance/role.md",
+        classification: "safe_projection",
+      } as ProjectionEntry],
+      startup: { files: [], actions: [] }, conflicts: [], noOps: [], diagnostics: [],
+    };
+
+    await adapter.project(plan, makeBinding());
+
+    const store = (fs as unknown as { _store: Record<string, string> })._store;
+    expect(store["/project/AGENTS.md"]).toBeUndefined();
+    expect(logSpy).toHaveBeenCalledWith(
+      expect.stringContaining("skip: effectiveId is rig-role")
+    );
+    logSpy.mockRestore();
+  });
+
+  it("projectEntry still merges non-rig-role guidance blocks (regression)", async () => {
+    const fs = mockFs({ "/agents/base/guidance/using-openrig.md": "# Using OpenRig\nhub guidance" });
+    const adapter = new CodexRuntimeAdapter({ tmux: mockTmux(), fsOps: fs });
+    const plan: ProjectionPlan = {
+      runtime: "codex", cwd: "/project",
+      entries: [{
+        category: "guidance", effectiveId: "using-openrig.md", mergeStrategy: "managed_block",
+        sourceSpec: "base", sourcePath: "/agents/base",
+        resourcePath: "guidance/using-openrig.md",
+        absolutePath: "/agents/base/guidance/using-openrig.md",
+        classification: "safe_projection",
+      } as ProjectionEntry],
+      startup: { files: [], actions: [] }, conflicts: [], noOps: [], diagnostics: [],
+    };
+
+    await adapter.project(plan, makeBinding());
+
+    const store = (fs as unknown as { _store: Record<string, string> })._store;
+    expect(store["/project/AGENTS.md"]).toContain("BEGIN RIGGED MANAGED BLOCK: using-openrig.md");
+    expect(store["/project/AGENTS.md"]).toContain("hub guidance");
+  });
+
+  it("deliverStartup skips rig-role guidance_merge; AGENTS.md is not written", async () => {
+    const fs = mockFs({ "/rig/rig-role": "# You are `qa`\nrole body" });
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const adapter = new CodexRuntimeAdapter({ tmux: mockTmux(), fsOps: fs });
+    const file: ResolvedStartupFile = {
+      path: "rig-role", absolutePath: "/rig/rig-role", ownerRoot: "/rig",
+      deliveryHint: "guidance_merge", required: true, appliesOn: ["fresh_start", "restore"],
+    };
+
+    const result = await adapter.deliverStartup([file], makeBinding());
+
+    expect(result.delivered).toBe(1);
+    const store = (fs as unknown as { _store: Record<string, string> })._store;
+    expect(store["/project/AGENTS.md"]).toBeUndefined();
+    expect(logSpy).toHaveBeenCalledWith(
+      expect.stringContaining("skip: effectiveId is rig-role")
+    );
+    logSpy.mockRestore();
   });
 });

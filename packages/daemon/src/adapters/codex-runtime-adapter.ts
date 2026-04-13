@@ -242,6 +242,17 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   }
 
   private mergeGuidance(targetPath: string, blockId: string, content: string): void {
+    // Mirrors Claude Code adapter: the `rig-role` managed block collides across
+    // pod-mates because the regenerator pairs (target-file × spec) without
+    // seat correlation. Per-seat role content is delivered through `send_text`
+    // startup instead. Refuse the merge loudly; silent skip would mask the
+    // collision. See ADR-0006.
+    if (blockId === "rig-role") {
+      console.log(
+        `[openrig] skip: effectiveId is rig-role, per-seat delivery via send_text path required (target=${targetPath})`
+      );
+      return;
+    }
     mergeManagedBlock(this.fs, targetPath, blockId, content, {
       replaceBlockIds: blockId === "openrig-start.md" ? ["using-openrig.md"] : [],
     });
