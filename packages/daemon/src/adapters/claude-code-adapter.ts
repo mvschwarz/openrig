@@ -302,6 +302,18 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   }
 
   private mergeGuidance(targetPath: string, blockId: string, content: string): void {
+    // The `rig-role` managed block is authored per seat but delivered through a
+    // projection path that pairs (target-file × spec) without seat correlation,
+    // so multiple pod-mates' role bodies collide into one CLAUDE.md. The fix
+    // is to route per-seat content through the `send_text` startup path
+    // instead, which preserves seat identity. Here we refuse the merge loudly
+    // so the collision can't land silently. See ADR-0006.
+    if (blockId === "rig-role") {
+      console.log(
+        `[openrig] skip: effectiveId is rig-role, per-seat delivery via send_text path required (target=${targetPath})`
+      );
+      return;
+    }
     mergeManagedBlock(this.fs, targetPath, blockId, content, {
       replaceBlockIds: blockId === "openrig-start.md" ? ["using-openrig.md"] : [],
     });

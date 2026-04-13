@@ -333,4 +333,74 @@ describe("Claude Code runtime adapter", () => {
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.error).toContain("No tmux session");
   });
+
+  // --- Regenerator bug repair: rig-role managed-block skip ---
+  //
+  // The rig-role managed-block injector pairs target-file × spec independently
+  // of seat identity, causing CLAUDE.md to receive the wrong seat's body on
+  // multi-seat pods. Per architect SHAPE 1: skip mergeManagedBlock when the
+  // block id is `rig-role`. Per-seat delivery travels via startup.files
+  // send_text path instead. Skip must be logged (never silent).
+
+  it("projectEntry skips rig-role guidance managed block; CLAUDE.md is not written", async () => {
+    const fs = mockFs({ "/agents/impl/guidance/role.md": "# You are `impl`\nTDD discipline." });
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const adapter = new ClaudeCodeAdapter({ tmux: mockTmux(), fsOps: fs });
+    const plan: ProjectionPlan = {
+      runtime: "claude-code", cwd: "/project",
+      entries: [makeEntry({
+        category: "guidance", effectiveId: "rig-role", mergeStrategy: "managed_block",
+        absolutePath: "/agents/impl/guidance/role.md", resourcePath: "guidance/role.md",
+      })],
+      startup: { files: [], actions: [] }, conflicts: [], noOps: [], diagnostics: [],
+    };
+
+    await adapter.project(plan, makeBinding());
+
+    const store = (fs as unknown as { _store: Record<string, string> })._store;
+    expect(store["/project/CLAUDE.md"]).toBeUndefined();
+    expect(logSpy).toHaveBeenCalledWith(
+      expect.stringContaining("skip: effectiveId is rig-role")
+    );
+    logSpy.mockRestore();
+  });
+
+  it("projectEntry still merges non-rig-role guidance blocks (regression)", async () => {
+    const fs = mockFs({ "/agents/base/guidance/using-openrig.md": "# Using OpenRig\nhub guidance" });
+    const adapter = new ClaudeCodeAdapter({ tmux: mockTmux(), fsOps: fs });
+    const plan: ProjectionPlan = {
+      runtime: "claude-code", cwd: "/project",
+      entries: [makeEntry({
+        category: "guidance", effectiveId: "using-openrig.md", mergeStrategy: "managed_block",
+        absolutePath: "/agents/base/guidance/using-openrig.md", resourcePath: "guidance/using-openrig.md",
+      })],
+      startup: { files: [], actions: [] }, conflicts: [], noOps: [], diagnostics: [],
+    };
+
+    await adapter.project(plan, makeBinding());
+
+    const store = (fs as unknown as { _store: Record<string, string> })._store;
+    expect(store["/project/CLAUDE.md"]).toContain("BEGIN RIGGED MANAGED BLOCK: using-openrig.md");
+    expect(store["/project/CLAUDE.md"]).toContain("hub guidance");
+  });
+
+  it("deliverStartup skips rig-role guidance_merge; CLAUDE.md is not written", async () => {
+    const fs = mockFs({ "/rig/rig-role": "# You are `impl`\nrole body" });
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const adapter = new ClaudeCodeAdapter({ tmux: mockTmux(), fsOps: fs });
+    const file: ResolvedStartupFile = {
+      path: "rig-role", absolutePath: "/rig/rig-role", ownerRoot: "/rig",
+      deliveryHint: "guidance_merge", required: true, appliesOn: ["fresh_start", "restore"],
+    };
+
+    const result = await adapter.deliverStartup([file], makeBinding());
+
+    expect(result.delivered).toBe(1); // skip counts as delivered (non-failure)
+    const store = (fs as unknown as { _store: Record<string, string> })._store;
+    expect(store["/project/CLAUDE.md"]).toBeUndefined();
+    expect(logSpy).toHaveBeenCalledWith(
+      expect.stringContaining("skip: effectiveId is rig-role")
+    );
+    logSpy.mockRestore();
+  });
 });
