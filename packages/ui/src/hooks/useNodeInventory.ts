@@ -10,7 +10,7 @@ export interface NodeInventoryEntry {
   nodeKind: "agent" | "infrastructure";
   runtime: string | null;
   sessionStatus: string | null;
-  startupStatus: "pending" | "ready" | "failed" | null;
+  startupStatus: "pending" | "ready" | "attention_required" | "failed" | null;
   restoreOutcome: string;
   tmuxAttachCommand: string | null;
   resumeCommand: string | null;

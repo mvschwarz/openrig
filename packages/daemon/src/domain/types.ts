@@ -79,7 +79,7 @@ export interface Session {
   lastSeenAt: string | null;
   createdAt: string;
   origin: "launched" | "claimed";
-  startupStatus: "pending" | "ready" | "failed";
+  startupStatus: "pending" | "ready" | "attention_required" | "failed";
   startupCompletedAt: string | null;
 }
 
@@ -240,7 +240,7 @@ export interface NodeInventoryEntry {
   nodeKind: "agent" | "infrastructure";
   runtime: string | null;
   sessionStatus: string | null;
-  startupStatus: "pending" | "ready" | "failed" | null;
+  startupStatus: "pending" | "ready" | "attention_required" | "failed" | null;
   restoreOutcome: NodeRestoreOutcome;
   tmuxAttachCommand: string | null;
   resumeCommand: string | null;

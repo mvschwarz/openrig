@@ -164,6 +164,61 @@ describe("RigGraph", () => {
     expect(label.className).not.toContain("border");
   });
 
+  it("renders pod member nodes as visible so grouped graphs are actually readable", async () => {
+    mockFetch.mockResolvedValueOnce(mockGraphResponse([
+      {
+        id: "pod-alpha",
+        type: "podGroup",
+        position: { x: 0, y: 0 },
+        data: {
+          logicalId: "alpha",
+          podLabel: "Implementation",
+          rigId: "rig-1",
+          role: null,
+          runtime: null,
+          model: null,
+          status: null,
+          binding: null,
+          nodeKind: "agent",
+          startupStatus: null,
+          canonicalSessionName: null,
+          podId: "alpha",
+          restoreOutcome: "n-a",
+          resumeToken: null,
+        },
+      },
+      {
+        id: "n1",
+        type: "rigNode",
+        position: { x: 0, y: 0 },
+        parentId: "pod-alpha",
+        data: {
+          logicalId: "alpha.impl",
+          rigId: "rig-1",
+          role: "worker",
+          runtime: "claude-code",
+          model: null,
+          status: "running",
+          binding: { tmuxSession: "alpha-impl@test-rig", cmuxSurface: null },
+          nodeKind: "agent",
+          startupStatus: "ready",
+          canonicalSessionName: "alpha-impl@test-rig",
+          podId: "alpha",
+          restoreOutcome: "n-a",
+          resumeToken: null,
+        },
+      },
+    ], []));
+
+    const { container } = render(<QueryWrapper><RigGraph showDiscovered={false} rigId="rig-1" /></QueryWrapper>);
+
+    await waitFor(() => {
+      const rigNode = container.querySelector(".react-flow__node-rigNode") as HTMLElement | null;
+      expect(rigNode).not.toBeNull();
+      expect(rigNode?.style.visibility).toBe("visible");
+    });
+  });
+
   it("clicking a pod group routes selection back to the rig drawer", async () => {
     mockFetch.mockResolvedValueOnce(mockGraphResponse([
       {
@@ -516,6 +571,7 @@ describe("RigNode", () => {
     const statuses = [
       { status: "running", startupStatus: "ready", expectedLabel: "ready", expectedClass: "bg-green-500" },
       { status: "running", startupStatus: "pending", expectedLabel: "launching", expectedClass: "bg-amber-500" },
+      { status: "running", startupStatus: "attention_required", expectedLabel: "attention", expectedClass: "bg-orange-500" },
       { status: "running", startupStatus: "failed", expectedLabel: "failed", expectedClass: "bg-red-500" },
       { status: null, startupStatus: null, expectedLabel: "stopped", expectedClass: "bg-stone-400" },
     ];

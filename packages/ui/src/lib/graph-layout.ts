@@ -131,6 +131,8 @@ export function applyTreeLayout(
     if (entity.kind === "standalone") {
       const standalone = laidOutById.get(entity.node.id)!;
       standalone.position = { x: positioned.x, y: positioned.y };
+      standalone.initialWidth = NODE_WIDTH;
+      standalone.initialHeight = NODE_HEIGHT;
       continue;
     }
 
@@ -152,6 +154,8 @@ export function applyTreeLayout(
       const member = entity.members[index]!;
       const laidOutMember = laidOutById.get(member.id)!;
       laidOutMember.position = getMemberPosition(index);
+      laidOutMember.initialWidth = NODE_WIDTH;
+      laidOutMember.initialHeight = NODE_HEIGHT;
     }
   }
 

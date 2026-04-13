@@ -57,6 +57,12 @@ const FAILED_DETAIL = {
   ...AGENT_DETAIL, startupStatus: "failed", latestError: "harness launch timeout after 30s",
 };
 
+const ATTENTION_REQUIRED_DETAIL = {
+  ...AGENT_DETAIL,
+  startupStatus: "attention_required",
+  latestError: "Claude is waiting for workspace trust approval before the session can become interactive.",
+};
+
 // NS-T11: integration test — AppShell selection → NodeDetailPanel mounts
 import { NodeSelectionContext } from "../src/components/AppShell.js";
 import { useState } from "react";
@@ -172,6 +178,16 @@ describe("NodeDetailPanel", () => {
     await waitFor(() => {
       const banner = screen.getByTestId("detail-failure-banner");
       expect(banner.textContent).toContain("rig ps");
+    });
+  });
+
+  it("shows an attention banner for recoverable startup blockers", async () => {
+    mockDetail(ATTENTION_REQUIRED_DETAIL);
+    renderPanel();
+    await waitFor(() => {
+      expect(screen.getByTestId("detail-failure-banner")).toBeDefined();
+      expect(screen.getByText("Attention Required")).toBeDefined();
+      expect(screen.getByText(/rig capture/)).toBeDefined();
     });
   });
 

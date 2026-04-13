@@ -41,12 +41,17 @@ export interface SetupResult {
 }
 
 export interface SetupDeps {
-  exec: (cmd: string) => string;
+  exec: (cmd: string, opts?: { timeoutMs?: number }) => string;
   readFile: (path: string) => string | null;
   writeFile: (path: string, content: string) => void;
   exists: (path: string) => boolean;
   platform?: NodeJS.Platform;
 }
+
+const DEFAULT_COMMAND_TIMEOUT_MS = 30_000;
+const INSTALL_COMMAND_TIMEOUT_MS = 5 * 60_000;
+const CMUX_READY_ATTEMPTS = 5;
+const CMUX_READY_DELAY_MS = 1_000;
 
 const CORE_STEP_IDS = [
   "brew",
@@ -95,11 +100,55 @@ const RUNTIME_CONFIG_DISCLOSURE: RuntimeConfigDisclosure[] = [
 
 function defaultDeps(): SetupDeps {
   return {
-    exec: (cmd: string) => execSync(cmd, { encoding: "utf-8", timeout: 30_000 }),
+    exec: (cmd: string, opts?: { timeoutMs?: number }) =>
+      execSync(cmd, {
+        encoding: "utf-8",
+        timeout: opts?.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS,
+      }),
     readFile: (p: string) => { try { return readFileSync(p, "utf-8"); } catch { return null; } },
     writeFile: (p: string, c: string) => writeFileSync(p, c, "utf-8"),
     exists: (p: string) => existsSync(p),
   };
+}
+
+function installCommand(deps: SetupDeps, cmd: string): string {
+  return deps.exec(cmd, { timeoutMs: INSTALL_COMMAND_TIMEOUT_MS });
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitForCmuxCapabilities(deps: SetupDeps, attempts = CMUX_READY_ATTEMPTS): Promise<boolean> {
+  for (let index = 0; index < attempts; index += 1) {
+    try {
+      deps.exec("cmux capabilities --json");
+      return true;
+    } catch {
+      if (index < attempts - 1) {
+        await sleep(CMUX_READY_DELAY_MS);
+      }
+    }
+  }
+  return false;
+}
+
+async function tryEnableCmuxControl(deps: SetupDeps, platform: NodeJS.Platform): Promise<boolean> {
+  if (platform !== "darwin") return false;
+
+  try {
+    deps.exec("defaults write com.cmuxterm.app socketControlMode -string automation");
+  } catch {
+    // Best effort: if defaults write fails, the follow-up capability probe will surface it honestly.
+  }
+
+  try {
+    deps.exec("open -a /Applications/cmux.app");
+  } catch {
+    // Best effort: cmux may already be running or the app open may be blocked; capability probe decides readiness.
+  }
+
+  return waitForCmuxCapabilities(deps);
 }
 
 export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?: boolean; doctorDeps?: DoctorDeps }): Promise<SetupResult> {
@@ -149,7 +198,7 @@ export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?:
       steps.push({ id: "tmux_install", status: "skipped", message: "Skipped: Homebrew not available.", reason: "tmux install requires Homebrew." });
     } else {
       try {
-        deps.exec("brew install tmux");
+        installCommand(deps, "brew install tmux");
         steps.push({ id: "tmux_install", status: "applied", message: "Installed tmux with Homebrew." });
       } catch (err) {
         steps.push({ id: "tmux_install", status: "fail", message: `Failed to install tmux: ${(err as Error).message}` });
@@ -158,22 +207,52 @@ export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?:
   }
 
   // 3. cmux
-  try {
-    deps.exec("cmux capabilities --json");
+  if (await waitForCmuxCapabilities(deps, 1)) {
     steps.push({ id: "cmux_install", status: "pass", message: "cmux available." });
-  } catch {
+  } else {
     try {
       deps.exec("cmux --help");
-      steps.push({ id: "cmux_install", status: "warn", message: "cmux installed but control unavailable.", fixHint: "Open cmux and enable socket control." });
+
+      if (await tryEnableCmuxControl(deps, platform)) {
+        steps.push({
+          id: "cmux_install",
+          status: "applied",
+          message: "Enabled cmux socket control.",
+        });
+      } else {
+        steps.push({
+          id: "cmux_install",
+          status: platform === "darwin" ? "fail" : "warn",
+          message: "cmux installed but control unavailable.",
+          reason: "Open CMUX workflows need cmux socket control to be enabled.",
+          fixHint: "Open cmux, approve any first-run prompts, and rerun `rig setup` or `rig doctor`.",
+        });
+      }
     } catch {
       if (!brewOk) {
         steps.push({ id: "cmux_install", status: "skipped", message: "Skipped: Homebrew not available." });
       } else {
         try {
-          deps.exec("brew install --cask cmux");
-          steps.push({ id: "cmux_install", status: "applied", message: "Installed cmux with Homebrew." });
-        } catch {
-          steps.push({ id: "cmux_install", status: "warn", message: "cmux not installed. Open CMUX workflows will be unavailable.", fixHint: "Install cmux manually if needed." });
+          installCommand(deps, "brew install --cask cmux");
+          if (await tryEnableCmuxControl(deps, platform) || await waitForCmuxCapabilities(deps, 1)) {
+            steps.push({ id: "cmux_install", status: "applied", message: "Installed cmux with Homebrew." });
+          } else {
+            steps.push({
+              id: "cmux_install",
+              status: platform === "darwin" ? "fail" : "warn",
+              message: "Installed cmux, but control is still unavailable.",
+              reason: "Open CMUX workflows need the cmux app to expose socket control after installation.",
+              fixHint: "Open cmux, approve any first-run prompts, and rerun `rig setup` or `rig doctor`.",
+            });
+          }
+        } catch (err) {
+          steps.push({
+            id: "cmux_install",
+            status: "fail",
+            message: `Failed to install cmux: ${(err as Error).message}`,
+            reason: "Open CMUX workflows stay unavailable until the cmux app and CLI are installed.",
+            fixHint: "Retry `brew install --cask cmux` after connectivity stabilizes, or install cmux manually.",
+          });
         }
       }
     }
@@ -188,7 +267,7 @@ export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?:
     steps.push({ id: "claude_install", status: "pass", message: "Claude Code available." });
   } catch {
     try {
-      deps.exec("npm install -g @anthropic-ai/claude-code");
+      installCommand(deps, "npm install -g @anthropic-ai/claude-code");
       deps.exec("claude --version");
       claudeInstalled = true;
       steps.push({ id: "claude_install", status: "applied", message: "Installed Claude Code with npm." });
@@ -233,7 +312,7 @@ export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?:
     steps.push({ id: "codex_install", status: "pass", message: "Codex available." });
   } catch {
     try {
-      deps.exec("npm install -g @openai/codex");
+      installCommand(deps, "npm install -g @openai/codex");
       deps.exec("codex --version");
       codexInstalled = true;
       steps.push({ id: "codex_install", status: "applied", message: "Installed Codex with npm." });
@@ -321,7 +400,7 @@ export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?:
           steps.push({ id: tool.id, status: "skipped", message: `Skipped: Homebrew not available.` });
         } else {
           try {
-            deps.exec(`brew install ${tool.brew}`);
+            installCommand(deps, `brew install ${tool.brew}`);
             steps.push({ id: tool.id, status: "applied", message: `Installed ${tool.cmd} with Homebrew.` });
           } catch {
             steps.push({ id: tool.id, status: "warn", message: `Failed to install ${tool.cmd}.`, fixHint: `Install ${tool.cmd} manually.` });

@@ -16,7 +16,7 @@ interface RFNodeData {
   status: string | null;
   binding: Binding | null;
   nodeKind: "agent" | "infrastructure";
-  startupStatus: "pending" | "ready" | "failed" | null;
+  startupStatus: "pending" | "ready" | "attention_required" | "failed" | null;
   canonicalSessionName: string | null;
   podId: string | null;
   restoreOutcome: string;
@@ -53,7 +53,7 @@ const VERTICAL_SPACING = 200;
 
 export interface InventoryOverlay {
   logicalId: string;
-  startupStatus: "pending" | "ready" | "failed" | null;
+  startupStatus: "pending" | "ready" | "attention_required" | "failed" | null;
   canonicalSessionName: string | null;
   restoreOutcome: string;
   contextUsedPercentage?: number | null;
