@@ -164,7 +164,7 @@ describe("rig status", () => {
 
   // Test 3: Daemon stopped (no daemon.json) -> 'Daemon not running', no HTTP
   it("stopped daemon -> 'Daemon not running', no HTTP calls", async () => {
-    const fetchFn = vi.fn(async () => ({ ok: true }));
+    const fetchFn = vi.fn(async () => { throw new Error("refused"); });
     const clientFactory = vi.fn();
     const deps: StatusDeps = {
       lifecycleDeps: mockLifecycleDeps({
@@ -306,7 +306,10 @@ describe("rig status", () => {
     const { createProgram } = await import("../src/index.js");
 
     const statusDeps: StatusDeps = {
-      lifecycleDeps: mockLifecycleDeps({ exists: vi.fn(() => false) }),
+      lifecycleDeps: mockLifecycleDeps({
+        exists: vi.fn(() => false),
+        fetch: vi.fn(async () => { throw new Error("refused"); }),
+      }),
       clientFactory: vi.fn() as unknown as StatusDeps["clientFactory"],
     };
 

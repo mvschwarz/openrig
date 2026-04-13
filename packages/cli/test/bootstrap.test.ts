@@ -182,7 +182,9 @@ describe("Bootstrap CLI", () => {
   // T7: daemon not running -> error + exit 1
   it("daemon not running returns exit code 1", async () => {
     const stoppedDeps: StatusDeps = {
-      lifecycleDeps: mockLifecycleDeps(),
+      lifecycleDeps: mockLifecycleDeps({
+        fetch: vi.fn(async () => { throw new Error("refused"); }),
+      }),
       clientFactory: (baseUrl) => new DaemonClient(baseUrl),
     };
     const prog = new Command();

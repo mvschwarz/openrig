@@ -473,6 +473,7 @@ describe("Up CLI", () => {
     process.env["OPENRIG_PORT"] = "7461";
 
     let daemonState: DaemonState | null = null;
+    let daemonStarted = false;
     let spawnedPort: string | undefined;
     let clientBaseUrl: string | undefined;
 
@@ -487,12 +488,14 @@ describe("Up CLI", () => {
         openForAppend: vi.fn(() => 3),
         mkdirp: vi.fn(),
         spawn: vi.fn((cmd, args, opts) => {
+          daemonStarted = true;
           spawnedPort = opts.env["OPENRIG_PORT"];
           return { pid: 321, unref: vi.fn() } as never;
         }),
-        fetch: vi.fn(async (url: string) => ({
-          ok: url === "http://127.0.0.1:7461/healthz" || url === "http://127.0.0.1:7433/healthz",
-        })),
+        fetch: vi.fn(async (url: string) => {
+          if (!daemonStarted) throw new Error(`refused:${url}`);
+          return { ok: url === "http://127.0.0.1:7461/healthz" };
+        }),
       },
       clientFactory: (baseUrl) => {
         clientBaseUrl = baseUrl;

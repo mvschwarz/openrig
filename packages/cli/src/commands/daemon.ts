@@ -140,12 +140,13 @@ export function daemonCommand(depsOverride?: LifecycleDeps): Command {
     .description("Show daemon status")
     .action(async () => {
       const status = await getDaemonStatus(getDeps());
+      const pidSuffix = status.pid !== undefined ? ` (pid ${status.pid})` : "";
       switch (status.state) {
         case "running":
           if (status.healthy === false) {
-            console.log(`Daemon running on port ${status.port} (pid ${status.pid}) — healthz failed`);
+            console.log(`Daemon running on port ${status.port}${pidSuffix} — healthz failed`);
           } else {
-            console.log(`Daemon running on port ${status.port} (pid ${status.pid})`);
+            console.log(`Daemon running on port ${status.port}${pidSuffix}`);
           }
           break;
         case "stopped":

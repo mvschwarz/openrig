@@ -1,6 +1,7 @@
 import path from "node:path";
 import { existsSync } from "node:fs";
 import type { ChildProcess } from "node:child_process";
+import { ConfigStore } from "./config-store.js";
 import { OPENRIG_HOME, LEGACY_RIGGED_HOME, readOpenRigEnv } from "./openrig-compat.js";
 
 export interface DaemonState {
@@ -21,7 +22,7 @@ export interface DaemonStatus {
 
 /** Build the daemon HTTP URL from status. Uses persisted host or defaults to 127.0.0.1. */
 export function getDaemonUrl(status: DaemonStatus): string {
-  return `http://${status.host ?? "127.0.0.1"}:${status.port}`;
+  return `http://${status.host ?? DEFAULT_HOST}:${status.port}`;
 }
 
 export interface StartOptions {
@@ -56,6 +57,7 @@ export const LOG_FILE = path.join(OPENRIG_DIR, "daemon.log");
 export const LEGACY_STATE_FILE = path.join(LEGACY_RIGGED_HOME, "daemon.json");
 export const LEGACY_LOG_FILE = path.join(LEGACY_RIGGED_HOME, "daemon.log");
 
+const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT = 7433;
 const DEFAULT_DB = "openrig.sqlite";
 const HEALTHZ_RETRIES = 20;
@@ -144,7 +146,7 @@ function resolveLifecycleFile(deps: LifecycleDeps, filename: "daemon.json" | "da
  *  - "dead" — PID not alive */
 async function checkPid(state: DaemonState, deps: LifecycleDeps): Promise<"openrig" | "not_openrig" | "unresponsive" | "dead"> {
   if (!deps.isProcessAlive(state.pid)) return "dead";
-  const host = state.host ?? "127.0.0.1";
+  const host = state.host ?? DEFAULT_HOST;
   try {
     await fetchDaemonProbe(deps, `http://${host}:${state.port}/healthz`);
     // Any response (ok or not) means something is listening on our port → OpenRig
@@ -153,6 +155,21 @@ async function checkPid(state: DaemonState, deps: LifecycleDeps): Promise<"openr
     if (err instanceof HealthProbeTimeoutError) return "unresponsive";
     // Connection refused → PID alive but not our daemon
     return "not_openrig";
+  }
+}
+
+function resolveConfiguredDaemonTarget(): { host: string; port: number } {
+  try {
+    const config = new ConfigStore().resolve();
+    return {
+      host: config.daemon.host,
+      port: config.daemon.port,
+    };
+  } catch {
+    return {
+      host: DEFAULT_HOST,
+      port: DEFAULT_PORT,
+    };
   }
 }
 
@@ -201,6 +218,10 @@ export function buildDaemonEnv(
 }
 
 export async function startDaemon(opts: StartOptions, deps: LifecycleDeps): Promise<DaemonState> {
+  const port = opts.port ?? DEFAULT_PORT;
+  const host = opts.host ?? DEFAULT_HOST;
+  const db = opts.db ?? DEFAULT_DB;
+
   // Check if already running
   const existing = readState(deps);
   if (existing) {
@@ -213,11 +234,20 @@ export async function startDaemon(opts: StartOptions, deps: LifecycleDeps): Prom
       throw new Error(`Existing daemon process (pid ${existing.pid} on port ${existing.port}) is unresponsive — recover it before starting a new daemon.`);
     }
     // "dead" or "not_rigged" → stale state, safe to proceed
+  } else {
+    let recoveredRunning = false;
+    try {
+      await fetchDaemonProbe(deps, `http://${host}:${port}/healthz`);
+      recoveredRunning = true;
+    } catch (err) {
+      if (err instanceof HealthProbeTimeoutError) {
+        throw new Error(`Daemon on port ${port} is unresponsive, and daemon state is missing — recover it before starting a new daemon.`);
+      }
+    }
+    if (recoveredRunning) {
+      throw new Error(`Daemon already running on port ${port}, but daemon state is missing`);
+    }
   }
-
-  const port = opts.port ?? DEFAULT_PORT;
-  const host = opts.host ?? "127.0.0.1";
-  const db = opts.db ?? DEFAULT_DB;
   const daemonEntry = path.join(getDaemonPath(), "dist/index.js");
 
   deps.mkdirp(OPENRIG_DIR);
@@ -276,7 +306,22 @@ export async function startDaemon(opts: StartOptions, deps: LifecycleDeps): Prom
 
 export async function stopDaemon(deps: LifecycleDeps): Promise<void> {
   const state = readState(deps);
-  if (!state) return; // Not running — clean exit
+  if (!state) {
+    const configured = resolveConfiguredDaemonTarget();
+    let recoveredRunning = false;
+    try {
+      await fetchDaemonProbe(deps, `http://${configured.host}:${configured.port}/healthz`);
+      recoveredRunning = true;
+    } catch (err) {
+      if (err instanceof HealthProbeTimeoutError) {
+        throw new Error(`Daemon state is missing and port ${configured.port} is unresponsive — cannot stop safely.`);
+      }
+    }
+    if (recoveredRunning) {
+      throw new Error(`Daemon is running on port ${configured.port}, but daemon state is missing — cannot stop safely.`);
+    }
+    return;
+  }
   const stateFile = resolveLifecycleFile(deps, "daemon.json");
 
   const pidState = await checkPid(state, deps);
@@ -318,14 +363,27 @@ export async function getDaemonStatus(deps: LifecycleDeps): Promise<DaemonStatus
     try {
       const res = await fetchDaemonProbe(deps, `${openrigUrl}/healthz`);
       const url = new URL(openrigUrl);
-      return { state: "running", port: Number(url.port) || 7433, host: url.hostname || "127.0.0.1", healthy: res.ok };
+      return { state: "running", port: Number(url.port) || DEFAULT_PORT, host: url.hostname || DEFAULT_HOST, healthy: res.ok };
     } catch {
       return { state: "stopped" };
     }
   }
 
   const state = readState(deps);
-  if (!state) return { state: "stopped" };
+  if (!state) {
+    const configured = resolveConfiguredDaemonTarget();
+    try {
+      const res = await fetchDaemonProbe(deps, `http://${configured.host}:${configured.port}/healthz`);
+      return {
+        state: "running",
+        port: configured.port,
+        host: configured.host,
+        healthy: res.ok,
+      };
+    } catch {
+      return { state: "stopped" };
+    }
+  }
 
   if (!deps.isProcessAlive(state.pid)) {
     // Process dead — stale state
@@ -334,7 +392,7 @@ export async function getDaemonStatus(deps: LifecycleDeps): Promise<DaemonStatus
   }
 
   // Process alive — check healthz
-  const host = state.host ?? "127.0.0.1";
+  const host = state.host ?? DEFAULT_HOST;
   let healthy = false;
   try {
     const res = await fetchDaemonProbe(deps, `http://${host}:${state.port}/healthz`);
