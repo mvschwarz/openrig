@@ -120,7 +120,7 @@ describe("createDaemon startup composition", () => {
     db.close();
   });
 
-  it("createDaemon accepts cmuxExec, connect() issues 'cmux capabilities --json' through it", async () => {
+  it("createDaemon accepts cmuxExec, connect() probes the live cmux surface through it", async () => {
     const cmuxExec = vi.fn<ExecFn>().mockRejectedValue(
       Object.assign(new Error("command not found"), { code: "ENOENT" })
     );
@@ -128,13 +128,14 @@ describe("createDaemon startup composition", () => {
 
     const { db } = await createDaemon({ cmuxExec, tmuxExec });
 
-    // The injected cmuxExec was called during startup connect()
-    // It should have been called with 'cmux capabilities --json' (via the transport factory)
+    // The injected cmuxExec was called during startup connect().
+    // The transport now probes the live command surface via `cmux --help`
+    // before issuing version-adaptive requests.
     expect(cmuxExec).toHaveBeenCalled();
-    const capCall = cmuxExec.mock.calls.find(
-      (c: unknown[]) => typeof c[0] === "string" && (c[0] as string).includes("cmux capabilities --json")
+    const helpCall = cmuxExec.mock.calls.find(
+      (c: unknown[]) => typeof c[0] === "string" && (c[0] as string).includes("cmux --help")
     );
-    expect(capCall).toBeDefined();
+    expect(helpCall).toBeDefined();
 
     db.close();
   });

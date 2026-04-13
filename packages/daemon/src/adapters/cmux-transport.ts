@@ -212,7 +212,9 @@ export function createCmuxCliTransport(exec: ExecFn): CmuxTransportFactory {
 
 function legacyJsonFallback(method: string, output: string): unknown | null {
   const trimmed = output.trim();
-  if (!trimmed) return null;
+  if (!trimmed) {
+    return method === "surface.list" ? { surfaces: [] } : null;
+  }
 
   // cmux 0.61.x can still return a bare handle for some --json commands.
   if (method === "workspace.current") {
@@ -232,5 +234,41 @@ function legacyJsonFallback(method: string, output: string): unknown | null {
     return null;
   }
 
+  if (method === "surface.list") {
+    const surfaces = parsePlainTextSurfaceRows(trimmed);
+    if (surfaces) {
+      return { surfaces };
+    }
+  }
+
   return null;
+}
+
+function parsePlainTextSurfaceRows(output: string): Array<{ id: string; title: string; type: string }> | null {
+  const surfaces: Array<{ id: string; title: string; type: string }> = [];
+  const knownSurfaceTypes = new Set(["terminal", "browser", "markdown"]);
+
+  for (const rawLine of output.split("\n")) {
+    const line = rawLine.trim();
+    if (!line) continue;
+
+    const rowMatch = line.match(
+      /^(?:\*\s+)?(surface:[^\s]+)\s+([a-z][a-z0-9-]*)(?:\s+\[[^\]]+\])*\s*(?:"([^"]*)")?\s*$/i
+    );
+    if (!rowMatch || !rowMatch[1] || !rowMatch[2]) {
+      return null;
+    }
+    const type = rowMatch[2].toLowerCase();
+    if (!knownSurfaceTypes.has(type)) {
+      return null;
+    }
+
+    surfaces.push({
+      id: rowMatch[1],
+      title: rowMatch[3] ?? "",
+      type,
+    });
+  }
+
+  return surfaces;
 }
