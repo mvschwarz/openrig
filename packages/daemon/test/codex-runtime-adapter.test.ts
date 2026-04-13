@@ -397,14 +397,38 @@ describe("Codex runtime adapter", () => {
       startup: { files: [], actions: [] }, conflicts: [], noOps: [], diagnostics: [],
     };
 
-    await adapter.project(plan, makeBinding());
+    const result = await adapter.project(plan, makeBinding());
 
     const store = (fs as unknown as { _store: Record<string, string> })._store;
     expect(store["/project/AGENTS.md"]).toBeUndefined();
+    // ProjectionResult contract: rig-role must appear in `skipped`, NOT `projected`.
+    expect(result.skipped).toContain("rig-role");
+    expect(result.projected).not.toContain("rig-role");
     expect(logSpy).toHaveBeenCalledWith(
       expect.stringContaining("skip: effectiveId is rig-role")
     );
     logSpy.mockRestore();
+  });
+
+  it("projectEntry reports non-rig-role guidance in `projected`, not `skipped` (regression on contract)", async () => {
+    const fs = mockFs({ "/agents/base/guidance/using-openrig.md": "# Using OpenRig\nhub guidance" });
+    const adapter = new CodexRuntimeAdapter({ tmux: mockTmux(), fsOps: fs });
+    const plan: ProjectionPlan = {
+      runtime: "codex", cwd: "/project",
+      entries: [{
+        category: "guidance", effectiveId: "using-openrig.md", mergeStrategy: "managed_block",
+        sourceSpec: "base", sourcePath: "/agents/base",
+        resourcePath: "guidance/using-openrig.md",
+        absolutePath: "/agents/base/guidance/using-openrig.md",
+        classification: "safe_projection",
+      } as ProjectionEntry],
+      startup: { files: [], actions: [] }, conflicts: [], noOps: [], diagnostics: [],
+    };
+
+    const result = await adapter.project(plan, makeBinding());
+
+    expect(result.projected).toContain("using-openrig.md");
+    expect(result.skipped).not.toContain("using-openrig.md");
   });
 
   it("projectEntry still merges non-rig-role guidance blocks (regression)", async () => {
@@ -429,7 +453,7 @@ describe("Codex runtime adapter", () => {
     expect(store["/project/AGENTS.md"]).toContain("hub guidance");
   });
 
-  it("deliverStartup skips rig-role guidance_merge; AGENTS.md is not written", async () => {
+  it("deliverStartup skips rig-role guidance_merge; delivered is NOT incremented (honest metrics)", async () => {
     const fs = mockFs({ "/rig/rig-role": "# You are `qa`\nrole body" });
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     const adapter = new CodexRuntimeAdapter({ tmux: mockTmux(), fsOps: fs });
@@ -440,7 +464,9 @@ describe("Codex runtime adapter", () => {
 
     const result = await adapter.deliverStartup([file], makeBinding());
 
-    expect(result.delivered).toBe(1);
+    // StartupDeliveryResult contract: skip does NOT count as delivered.
+    expect(result.delivered).toBe(0);
+    expect(result.failed).toEqual([]);
     const store = (fs as unknown as { _store: Record<string, string> })._store;
     expect(store["/project/AGENTS.md"]).toBeUndefined();
     expect(logSpy).toHaveBeenCalledWith(
