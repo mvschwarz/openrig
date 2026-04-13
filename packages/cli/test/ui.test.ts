@@ -69,7 +69,10 @@ describe("rig ui open", () => {
   it("daemon down -> error, no exec", async () => {
     const execFn = vi.fn(async () => {});
     const deps: UiDeps = {
-      lifecycleDeps: mockLifecycleDeps({ exists: vi.fn(() => false) }),
+      lifecycleDeps: mockLifecycleDeps({
+        exists: vi.fn(() => false),
+        fetch: vi.fn(async () => { throw new Error("refused"); }),
+      }),
       exec: execFn,
     };
     const program = new Command();
@@ -78,6 +81,38 @@ describe("rig ui open", () => {
 
     expect(logs.join("\n")).toMatch(/not running/i);
     expect(execFn).not.toHaveBeenCalled();
+  });
+
+  it("no daemon.json but configured daemon is healthy -> opens recovered daemon URL", async () => {
+    const savedPort = process.env["OPENRIG_PORT"];
+    const savedHost = process.env["OPENRIG_HOST"];
+    process.env["OPENRIG_PORT"] = "7555";
+    process.env["OPENRIG_HOST"] = "127.0.0.1";
+    try {
+      const execFn = vi.fn(async () => {});
+      const deps: UiDeps = {
+        lifecycleDeps: mockLifecycleDeps({
+          exists: vi.fn(() => false),
+          fetch: vi.fn(async (url: string) => {
+            expect(url).toBe("http://127.0.0.1:7555/healthz");
+            return { ok: true };
+          }),
+        }),
+        exec: execFn,
+      };
+      const program = new Command();
+      program.addCommand(uiCommand(deps));
+      const logs = await captureLogs(() => program.parseAsync(["node", "rig", "ui", "open"]));
+
+      expect(execFn).toHaveBeenCalledWith("open", ["http://127.0.0.1:7555"]);
+      expect(logs.join("\n")).toContain("http://127.0.0.1:7555");
+      expect(logs.join("\n")).not.toMatch(/not running/i);
+    } finally {
+      if (savedPort === undefined) delete process.env["OPENRIG_PORT"];
+      else process.env["OPENRIG_PORT"] = savedPort;
+      if (savedHost === undefined) delete process.env["OPENRIG_HOST"];
+      else process.env["OPENRIG_HOST"] = savedHost;
+    }
   });
 
   // Test 3: UI URL derives from daemon port (daemon serves the UI)
@@ -120,7 +155,10 @@ describe("rig ui open", () => {
     const { createProgram } = await import("../src/index.js");
     const execFn = vi.fn(async () => {});
     const deps: UiDeps = {
-      lifecycleDeps: mockLifecycleDeps({ exists: vi.fn(() => false) }),
+      lifecycleDeps: mockLifecycleDeps({
+        exists: vi.fn(() => false),
+        fetch: vi.fn(async () => { throw new Error("refused"); }),
+      }),
       exec: execFn,
     };
     const program = createProgram({ uiDeps: deps });

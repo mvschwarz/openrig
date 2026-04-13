@@ -37,6 +37,22 @@ function mockDeps(overrides?: Partial<LifecycleDeps>): LifecycleDeps {
   };
 }
 
+function startableDeps(overrides?: Partial<LifecycleDeps>): LifecycleDeps {
+  let spawned = false;
+  const spawn = overrides?.spawn ?? vi.fn(() => {
+    spawned = true;
+    return { pid: 12345, unref: vi.fn() } as unknown as ChildProcess;
+  });
+  return mockDeps({
+    ...overrides,
+    spawn,
+    fetch: overrides?.fetch ?? vi.fn(async () => {
+      if (!spawned) throw new Error("refused");
+      return { ok: true };
+    }),
+  });
+}
+
 function writtenState(deps: LifecycleDeps): DaemonState {
   const call = (deps.writeFile as ReturnType<typeof vi.fn>).mock.calls.find(
     (c: unknown[]) => (c[0] as string).endsWith("daemon.json")
@@ -55,7 +71,7 @@ describe("Daemon Lifecycle", () => {
 
   // Test 2: start constructs exact spawn command with correct env/redirect
   it("start: constructs spawn with node, daemon entry, env, and log redirect", async () => {
-    const deps = mockDeps();
+    const deps = startableDeps();
     await startDaemon({ port: 7433, db: "openrig.sqlite" }, deps);
 
     const spawnMock = deps.spawn as ReturnType<typeof vi.fn>;
@@ -74,7 +90,7 @@ describe("Daemon Lifecycle", () => {
 
   // Test 3: start waits for healthz, writes daemon.json with pid+port+db+startedAt
   it("start: writes daemon.json with pid, port, db, startedAt after healthz", async () => {
-    const deps = mockDeps();
+    const deps = startableDeps();
     const result = await startDaemon({ port: 8000, db: "test.sqlite" }, deps);
 
     expect(result.pid).toBe(12345);
@@ -103,6 +119,19 @@ describe("Daemon Lifecycle", () => {
     await expect(startDaemon({}, deps)).rejects.toThrow(/already running/i);
   });
 
+  it("start: recovered running daemon without daemon.json -> throws instead of spawning duplicate", async () => {
+    const deps = mockDeps({
+      exists: vi.fn(() => false),
+      fetch: vi.fn(async (url: string) => {
+        expect(url).toBe("http://127.0.0.1:7433/healthz");
+        return { ok: true };
+      }),
+    });
+
+    await expect(startDaemon({}, deps)).rejects.toThrow(/already running/i);
+    expect(deps.spawn).not.toHaveBeenCalled();
+  });
+
   // Test 5: stop reads pid from daemon.json, sends SIGTERM, removes daemon.json
   it("stop: reads pid, sends SIGTERM, removes daemon.json", async () => {
     const state: DaemonState = { pid: 555, port: 7433, db: "openrig.sqlite", startedAt: "2026-01-01T00:00:00Z" };
@@ -127,10 +156,24 @@ describe("Daemon Lifecycle", () => {
   it("stop: not running -> does not throw", async () => {
     const deps = mockDeps({
       exists: vi.fn(() => false),
+      fetch: vi.fn(async () => { throw new Error("refused"); }),
     });
 
     // Should not throw
     await expect(stopDaemon(deps)).resolves.toBeUndefined();
+  });
+
+  it("stop: recovered running daemon without daemon.json -> throws honest error", async () => {
+    const deps = mockDeps({
+      exists: vi.fn(() => false),
+      fetch: vi.fn(async (url: string) => {
+        expect(url).toBe("http://127.0.0.1:7433/healthz");
+        return { ok: true };
+      }),
+    });
+
+    await expect(stopDaemon(deps)).rejects.toThrow(/state is missing|cannot stop safely/i);
+    expect(deps.kill).not.toHaveBeenCalled();
   });
 
   // Test 7: status reads port from daemon.json, reports running with port
@@ -158,10 +201,40 @@ describe("Daemon Lifecycle", () => {
   it("status: no daemon.json -> { state: 'stopped' }", async () => {
     const deps = mockDeps({
       exists: vi.fn(() => false),
+      fetch: vi.fn(async () => { throw new Error("refused"); }),
     });
 
     const status = await getDaemonStatus(deps);
     expect(status.state).toBe("stopped");
+  });
+
+  it("status: no daemon.json but configured healthz responds -> running without pid", async () => {
+    const savedPort = process.env["OPENRIG_PORT"];
+    const savedHost = process.env["OPENRIG_HOST"];
+    process.env["OPENRIG_PORT"] = "7555";
+    process.env["OPENRIG_HOST"] = "127.0.0.1";
+    try {
+      const deps = mockDeps({
+        exists: vi.fn(() => false),
+        fetch: vi.fn(async (url: string) => {
+          expect(url).toBe("http://127.0.0.1:7555/healthz");
+          return { ok: true };
+        }),
+      });
+
+      const status = await getDaemonStatus(deps);
+      expect(status).toEqual({
+        state: "running",
+        host: "127.0.0.1",
+        port: 7555,
+        healthy: true,
+      });
+    } finally {
+      if (savedPort === undefined) delete process.env["OPENRIG_PORT"];
+      else process.env["OPENRIG_PORT"] = savedPort;
+      if (savedHost === undefined) delete process.env["OPENRIG_HOST"];
+      else process.env["OPENRIG_HOST"] = savedHost;
+    }
   });
 
   // Test 9: status stale (daemon.json exists, process dead) -> reports stale, cleans up
@@ -183,7 +256,7 @@ describe("Daemon Lifecycle", () => {
 
   // Test 10: start --port flag stored in daemon.json and forwarded to env
   it("start: custom port stored in daemon.json and forwarded to spawn env", async () => {
-    const deps = mockDeps();
+    const deps = startableDeps();
     await startDaemon({ port: 9999 }, deps);
 
     const state = writtenState(deps);
@@ -233,7 +306,8 @@ describe("Daemon Lifecycle", () => {
     const { Command } = await import("commander");
 
     const deps = mockDeps({
-      exists: vi.fn(() => false), // no daemon.json -> stopped
+      exists: vi.fn(() => false), // no daemon.json + no healthy daemon -> stopped
+      fetch: vi.fn(async () => { throw new Error("refused"); }),
     });
 
     const program = new Command();
@@ -256,9 +330,74 @@ describe("Daemon Lifecycle", () => {
     expect(logs.join("\n")).toMatch(/stopped/i);
   });
 
+  it("daemonCommand status omits pid when daemon is recovered without state", async () => {
+    const savedPort = process.env["OPENRIG_PORT"];
+    const savedHost = process.env["OPENRIG_HOST"];
+    process.env["OPENRIG_PORT"] = "7555";
+    process.env["OPENRIG_HOST"] = "127.0.0.1";
+    try {
+      const { daemonCommand } = await import("../src/commands/daemon.js");
+      const { Command } = await import("commander");
+      const deps = mockDeps({
+        exists: vi.fn(() => false),
+        fetch: vi.fn(async () => ({ ok: true })),
+      });
+
+      const program = new Command();
+      program.addCommand(daemonCommand(deps));
+
+      const logs: string[] = [];
+      const origLog = console.log;
+      console.log = (...args: unknown[]) => logs.push(args.join(" "));
+
+      try {
+        await program.parseAsync(["node", "rig", "daemon", "status"]);
+      } finally {
+        console.log = origLog;
+      }
+
+      const output = logs.join("\n");
+      expect(output).toContain("Daemon running on port 7555");
+      expect(output).not.toContain("pid undefined");
+    } finally {
+      if (savedPort === undefined) delete process.env["OPENRIG_PORT"];
+      else process.env["OPENRIG_PORT"] = savedPort;
+      if (savedHost === undefined) delete process.env["OPENRIG_HOST"];
+      else process.env["OPENRIG_HOST"] = savedHost;
+    }
+  });
+
+  it("daemonCommand stop surfaces missing-state recovery error instead of claiming success", async () => {
+    const { daemonCommand } = await import("../src/commands/daemon.js");
+    const { Command } = await import("commander");
+    const deps = mockDeps({
+      exists: vi.fn(() => false),
+      fetch: vi.fn(async () => ({ ok: true })),
+    });
+
+    const program = new Command();
+    program.addCommand(daemonCommand(deps));
+
+    const logs: string[] = [];
+    const origErr = console.error;
+    const savedExitCode = process.exitCode;
+    process.exitCode = undefined;
+    console.error = (...args: unknown[]) => logs.push(args.join(" "));
+
+    try {
+      await program.parseAsync(["node", "rig", "daemon", "stop"]);
+    } finally {
+      console.error = origErr;
+    }
+
+    expect(logs.join("\n")).toMatch(/state is missing|cannot stop safely/i);
+    expect(process.exitCode).toBe(1);
+    process.exitCode = savedExitCode;
+  });
+
   // Test 15: start creates ~/.openrig directory if missing
   it("start: creates OPENRIG_DIR if missing", async () => {
-    const deps = mockDeps();
+    const deps = startableDeps();
     await startDaemon({ port: 7433 }, deps);
 
     expect(deps.mkdirp).toHaveBeenCalledWith(OPENRIG_DIR);
@@ -441,6 +580,7 @@ describe("Daemon Lifecycle", () => {
         if (p === STATE_FILE) return "NOT VALID JSON {{{";
         return null;
       }),
+      fetch: vi.fn(async () => { throw new Error("refused"); }),
     });
 
     const status = await getDaemonStatus(deps);
@@ -449,7 +589,7 @@ describe("Daemon Lifecycle", () => {
 
   // Test 22: malformed daemon.json -> startDaemon proceeds (treats as no state)
   it("malformed daemon.json -> startDaemon proceeds normally", async () => {
-    const deps = mockDeps({
+    const deps = startableDeps({
       exists: vi.fn((p: string) => p === STATE_FILE),
       readFile: vi.fn((p: string) => {
         if (p === STATE_FILE) return "GARBAGE";
@@ -501,7 +641,7 @@ describe("Daemon Lifecycle", () => {
 
   // Test 25: start spawns process.execPath, not bare "node"
   it("start: spawns process.execPath as the Node binary", async () => {
-    const deps = mockDeps();
+    const deps = startableDeps();
     await startDaemon({ port: 7433, db: "openrig.sqlite" }, deps);
 
     const spawnMock = deps.spawn as ReturnType<typeof vi.fn>;
@@ -660,7 +800,7 @@ describe("startDaemon env sanitization", () => {
     }
 
     try {
-      const deps = mockDeps();
+      const deps = startableDeps();
       await startDaemon({ port: 7433, host: "127.0.0.1", db: "/tmp/test.db" }, deps);
 
       const spawnCall = (deps.spawn as ReturnType<typeof vi.fn>).mock.calls[0];

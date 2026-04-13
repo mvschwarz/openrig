@@ -135,6 +135,43 @@ describe("Ps CLI", () => {
     expect(logs.some((l) => l.includes("No rigs"))).toBe(true);
   });
 
+  it("ps recovers when daemon.json is missing but configured daemon is healthy", async () => {
+    const savedPort = process.env["OPENRIG_PORT"];
+    const savedHost = process.env["OPENRIG_HOST"];
+    process.env["OPENRIG_PORT"] = String(port);
+    process.env["OPENRIG_HOST"] = "127.0.0.1";
+    try {
+      psData = [
+        { rigId: "rig-1", name: "recovered-rig", nodeCount: 1, runningCount: 1, status: "running", uptime: "15s", latestSnapshot: null },
+      ];
+      const prog = new Command();
+      prog.exitOverride();
+      prog.addCommand(psCommand({
+        lifecycleDeps: mockLifecycleDeps({
+          exists: vi.fn(() => false),
+          fetch: vi.fn(async (url: string) => {
+            expect(url).toBe(`http://127.0.0.1:${port}/healthz`);
+            return { ok: true };
+          }),
+        }),
+        clientFactory: (baseUrl) => new DaemonClient(baseUrl),
+      }));
+
+      const { logs, exitCode } = await captureLogs(async () => {
+        await prog.parseAsync(["node", "rig", "ps"]);
+      });
+      const output = logs.join("\n");
+      expect(output).toContain("recovered-rig");
+      expect(output).not.toMatch(/Daemon not running/i);
+      expect(exitCode).toBeUndefined();
+    } finally {
+      if (savedPort === undefined) delete process.env["OPENRIG_PORT"];
+      else process.env["OPENRIG_PORT"] = savedPort;
+      if (savedHost === undefined) delete process.env["OPENRIG_HOST"];
+      else process.env["OPENRIG_HOST"] = savedHost;
+    }
+  });
+
   // NS-T08: ps --nodes tests
 
   it("ps --nodes formats table with rig context and restore columns", async () => {
@@ -317,7 +354,9 @@ describe("Ps CLI", () => {
 
   it("daemon not running error includes guidance", async () => {
     const stoppedDeps: StatusDeps = {
-      lifecycleDeps: mockLifecycleDeps(),
+      lifecycleDeps: mockLifecycleDeps({
+        fetch: vi.fn(async () => { throw new Error("refused"); }),
+      }),
       clientFactory: (baseUrl) => new DaemonClient(baseUrl),
     };
     const prog = new Command();

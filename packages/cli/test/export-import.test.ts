@@ -53,7 +53,10 @@ function runningLifecycleDeps(port: number): LifecycleDeps {
 }
 
 function stoppedLifecycleDeps(): LifecycleDeps {
-  return mockLifecycleDeps({ exists: vi.fn(() => false) });
+  return mockLifecycleDeps({
+    exists: vi.fn(() => false),
+    fetch: vi.fn(async () => { throw new Error("refused"); }),
+  });
 }
 
 function unhealthyLifecycleDeps(): LifecycleDeps {

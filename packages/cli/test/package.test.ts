@@ -61,7 +61,10 @@ function runningDeps(port: number): StatusDeps {
 
 function stoppedDeps(): StatusDeps {
   return {
-    lifecycleDeps: mockLifecycleDeps({ exists: vi.fn(() => false) }),
+    lifecycleDeps: mockLifecycleDeps({
+      exists: vi.fn(() => false),
+      fetch: vi.fn(async () => { throw new Error("refused"); }),
+    }),
     clientFactory: vi.fn() as unknown as StatusDeps["clientFactory"],
   };
 }
