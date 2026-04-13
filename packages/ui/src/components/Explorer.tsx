@@ -24,6 +24,7 @@ function statusColor(startupStatus: string | null): string {
   switch (startupStatus) {
     case "ready": return "text-green-600";
     case "pending": return "text-amber-500";
+    case "attention_required": return "text-orange-500";
     case "failed": return "text-red-600";
     default: return "text-stone-400";
   }
@@ -38,8 +39,9 @@ function rigStatusColor(status: string): string {
   }
 }
 
-function aggregateStatus(nodes: NodeInventoryEntry[]): "ready" | "pending" | "failed" | null {
+function aggregateStatus(nodes: NodeInventoryEntry[]): "ready" | "pending" | "attention_required" | "failed" | null {
   if (nodes.some((node) => node.startupStatus === "failed")) return "failed";
+  if (nodes.some((node) => node.startupStatus === "attention_required")) return "attention_required";
   if (nodes.some((node) => node.startupStatus === "pending")) return "pending";
   if (nodes.some((node) => node.startupStatus === "ready")) return "ready";
   return null;

@@ -12,7 +12,7 @@ interface RigNodeData {
   status: string | null;
   packageRefs?: string[];
   nodeKind?: "agent" | "infrastructure";
-  startupStatus?: "pending" | "ready" | "failed" | null;
+  startupStatus?: "pending" | "ready" | "attention_required" | "failed" | null;
   canonicalSessionName?: string | null;
   podId?: string | null;
   restoreOutcome?: string;
@@ -39,6 +39,7 @@ function getStartupStatusLabel(startupStatus: string | null | undefined): string
   switch (startupStatus) {
     case "ready": return "ready";
     case "pending": return "launching";
+    case "attention_required": return "attention";
     case "failed": return "failed";
     default: return "stopped";
   }
@@ -48,6 +49,7 @@ function getStartupStatusColorClass(startupStatus: string | null | undefined): s
   switch (startupStatus) {
     case "ready": return "bg-green-500";
     case "pending": return "bg-amber-500";
+    case "attention_required": return "bg-orange-500";
     case "failed": return "bg-red-500";
     default: return "bg-stone-400";
   }
@@ -223,7 +225,13 @@ export function RigNode({ data }: { data: RigNodeData }) {
           </div>
         )}
 
-        {/* Alert state for failed */}
+        {/* Alert state for blocked/failed startup */}
+        {data.startupStatus === "attention_required" && (
+          <div className="stamp-badge">
+            <div className="w-2 h-2 rounded-full bg-orange-500" />
+            <span className="text-orange-600">ATTN</span>
+          </div>
+        )}
         {data.startupStatus === "failed" && (
           <div className="stamp-badge">
             <div className="w-2 h-2 rounded-full bg-red-500" />

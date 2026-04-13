@@ -34,9 +34,9 @@ export interface StartupInput {
 
 export type StartupResult =
   | { ok: true; startupStatus: "ready" }
-  | { ok: false; startupStatus: "failed"; errors: string[] };
+  | { ok: false; startupStatus: "attention_required" | "failed"; errors: string[] };
 
-const BLOCKING_READINESS_CODES = new Set(["trust_gate"]);
+const ATTENTION_REQUIRED_READINESS_CODES = new Set(["trust_gate", "update_gate", "login_required"]);
 
 interface StartupOrchestratorDeps {
   db: Database.Database;
@@ -103,11 +103,11 @@ export class StartupOrchestrator {
         for (const f of projectionResult.failed) {
           errors.push(`Projection failed for ${f.effectiveId}: ${f.error}`);
         }
-        return this.fail(input, errors);
+        return this.fail(input, "failed", errors);
       }
     } catch (err) {
       errors.push(`Projection error: ${(err as Error).message}`);
-      return this.fail(input, errors);
+      return this.fail(input, "failed", errors);
     }
 
     // 3. Partition startup files by concrete hint: pre-launch (filesystem) vs post-launch (TUI)
@@ -136,11 +136,11 @@ export class StartupOrchestrator {
         for (const f of deliveryResult.failed) {
           errors.push(`Pre-launch file delivery failed: ${f.path}: ${f.error}`);
         }
-        return this.fail(input, errors);
+        return this.fail(input, "failed", errors);
       }
     } catch (err) {
       errors.push(`Pre-launch delivery error: ${(err as Error).message}`);
-      return this.fail(input, errors);
+      return this.fail(input, "failed", errors);
     }
 
     // 5. Launch harness (unless skipped for legacy nodes)
@@ -152,7 +152,7 @@ export class StartupOrchestrator {
         });
         if (!launchResult.ok) {
           errors.push(`Harness launch failed: ${launchResult.error}`);
-          return this.fail(input, errors);
+          return this.fail(input, "failed", errors);
         }
         // Persist resume metadata if returned (either token or type)
         const normalizedResumeToken = launchResult.resumeToken?.trim();
@@ -163,7 +163,7 @@ export class StartupOrchestrator {
         }
       } catch (err) {
         errors.push(`Harness launch error: ${(err as Error).message}`);
-        return this.fail(input, errors);
+        return this.fail(input, "failed", errors);
       }
     }
 
@@ -171,16 +171,16 @@ export class StartupOrchestrator {
     try {
       const readiness = await this.waitForReady(input.adapter, input.binding, input.readinessTimeoutMs ?? 30_000);
       if (!readiness.ready) {
-        if (readiness.code && BLOCKING_READINESS_CODES.has(readiness.code)) {
-          errors.push(`Readiness blocked before harness became interactive: ${readiness.reason ?? "unknown"}`);
-        } else {
-          errors.push(`Readiness timeout after 30s — harness did not become interactive: ${readiness.reason ?? "unknown"}`);
+        if (readiness.code && ATTENTION_REQUIRED_READINESS_CODES.has(readiness.code)) {
+          errors.push(`Startup requires attention: ${readiness.reason ?? "unknown"}`);
+          return this.fail(input, "attention_required", errors);
         }
-        return this.fail(input, errors);
+        errors.push(`Readiness timeout after 30s — harness did not become interactive: ${readiness.reason ?? "unknown"}`);
+        return this.fail(input, "failed", errors);
       }
     } catch (err) {
       errors.push(`Readiness check error: ${(err as Error).message}`);
-      return this.fail(input, errors);
+      return this.fail(input, "failed", errors);
     }
 
     // 7. Deliver post-launch files (send_text → TUI, now that harness is ready)
@@ -191,24 +191,24 @@ export class StartupOrchestrator {
           for (const f of deliveryResult.failed) {
             errors.push(`Post-launch file delivery failed: ${f.path}: ${f.error}`);
           }
-          return this.fail(input, errors);
+          return this.fail(input, "failed", errors);
         }
       } catch (err) {
         errors.push(`Post-launch delivery error: ${(err as Error).message}`);
-        return this.fail(input, errors);
+        return this.fail(input, "failed", errors);
       }
     }
 
     // 8. Execute after_files actions
     const afterFilesResult = await this.executeActions(input, "after_files");
     if (!afterFilesResult.ok) {
-      return this.fail(input, afterFilesResult.errors);
+      return this.fail(input, "failed", afterFilesResult.errors);
     }
 
     // 9. Execute after_ready actions
     const afterReadyResult = await this.executeActions(input, "after_ready");
     if (!afterReadyResult.ok) {
-      return this.fail(input, afterReadyResult.errors);
+      return this.fail(input, "failed", afterReadyResult.errors);
     }
 
     // 7. Persist startup context for restore replay
@@ -247,7 +247,7 @@ export class StartupOrchestrator {
     while (true) {
       const result = await adapter.checkReady(binding);
       if (result.ready) return result;
-      if (result.code && BLOCKING_READINESS_CODES.has(result.code)) {
+      if (result.code && ATTENTION_REQUIRED_READINESS_CODES.has(result.code)) {
         return result;
       }
 
@@ -268,15 +268,19 @@ export class StartupOrchestrator {
     try { return this.readFile(path); } catch { return ""; }
   }
 
-  private fail(input: StartupInput, errors: string[]): StartupResult {
-    this.sessionRegistry.updateStartupStatus(input.sessionId, "failed");
+  private fail(
+    input: StartupInput,
+    status: "attention_required" | "failed",
+    errors: string[],
+  ): StartupResult {
+    this.sessionRegistry.updateStartupStatus(input.sessionId, status);
     this.eventBus.emit({
       type: "node.startup_failed",
       rigId: input.rigId,
       nodeId: input.nodeId,
       error: errors.join("; "),
     });
-    return { ok: false, startupStatus: "failed", errors };
+    return { ok: false, startupStatus: status, errors };
   }
 
   private async executeActions(

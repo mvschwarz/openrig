@@ -15,8 +15,16 @@ function statusColor(status: string | null): string {
   switch (status) {
     case "ready": return "text-green-600";
     case "pending": return "text-amber-600";
+    case "attention_required": return "text-orange-600";
     case "failed": return "text-red-600";
     default: return "text-stone-400";
+  }
+}
+
+function startupStatusLabel(status: string | null): string {
+  switch (status) {
+    case "attention_required": return "attention required";
+    default: return status ?? "stopped";
   }
 }
 
@@ -87,7 +95,7 @@ export function NodeDetailPanel({ rigId, logicalId, onClose }: NodeDetailPanelPr
             <div className="space-y-1 font-mono text-[10px]">
               <div className="flex justify-between">
                 <span className="text-stone-500">Startup</span>
-                <span className={statusColor(data.startupStatus)} data-testid="detail-startup-status">{data.startupStatus ?? "stopped"}</span>
+                <span className={statusColor(data.startupStatus)} data-testid="detail-startup-status">{startupStatusLabel(data.startupStatus)}</span>
               </div>
               {/* Restore outcome — prominent */}
               <div className="flex justify-between items-center">
@@ -100,18 +108,41 @@ export function NodeDetailPanel({ rigId, logicalId, onClose }: NodeDetailPanelPr
                 </span>
               </div>
               {/* Failure banner with actionable guidance */}
-              {(data.startupStatus === "failed" || data.latestError) && (
-                <div className="mt-2 p-2 bg-red-50 border border-red-200" data-testid="detail-failure-banner">
-                  <div className="font-mono text-[9px] text-red-700 font-bold mb-1">
-                    {data.startupStatus === "failed" ? "Startup Failed" : "Error"}
+              {(data.startupStatus === "failed" || data.startupStatus === "attention_required" || data.latestError) && (
+                <div
+                  className={`mt-2 p-2 border ${
+                    data.startupStatus === "attention_required"
+                      ? "bg-orange-50 border-orange-200"
+                      : "bg-red-50 border-red-200"
+                  }`}
+                  data-testid="detail-failure-banner"
+                >
+                  <div
+                    className={`font-mono text-[9px] font-bold mb-1 ${
+                      data.startupStatus === "attention_required" ? "text-orange-700" : "text-red-700"
+                    }`}
+                  >
+                    {data.startupStatus === "attention_required"
+                      ? "Attention Required"
+                      : data.startupStatus === "failed"
+                        ? "Startup Failed"
+                        : "Error"}
                   </div>
                   {data.latestError && (
-                    <div className="font-mono text-[9px] text-red-600 mb-1">{data.latestError}</div>
+                    <div
+                      className={`font-mono text-[9px] mb-1 ${
+                        data.startupStatus === "attention_required" ? "text-orange-700" : "text-red-600"
+                      }`}
+                    >
+                      {data.latestError}
+                    </div>
                   )}
                   <div className="font-mono text-[8px] text-stone-500">
-                    {data.startupStatus === "failed"
-                      ? "Check logs with: rig ps --nodes, or restart with: rig up"
-                      : "Try: rig restore <snapshotId>"}
+                    {data.startupStatus === "attention_required"
+                      ? `Use rig capture ${data.canonicalSessionName ?? "<session>"} to inspect the prompt, then rig send ${data.canonicalSessionName ?? "<session>"} to clear it.`
+                      : data.startupStatus === "failed"
+                        ? "Check logs with: rig ps --nodes, or restart with: rig up"
+                        : "Try: rig restore <snapshotId>"}
                   </div>
                 </div>
               )}

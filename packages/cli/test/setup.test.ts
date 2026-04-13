@@ -425,4 +425,134 @@ describe("rig setup", () => {
     expect(cmux).toBeDefined();
     expect(cmux?.status).toBe("pass");
   });
+
+  it("enables cmux automation mode on macOS when cmux is installed but not yet controllable", async () => {
+    let cmuxReady = false;
+    const seen: string[] = [];
+    const deps = makeDeps({
+      exec: (cmd: string) => {
+        seen.push(cmd);
+        if (cmd === "brew --version") return "Homebrew 4.0\n";
+        if (cmd === "tmux -V") return "tmux 3.4\n";
+        if (cmd === "cmux capabilities --json") {
+          if (cmuxReady) return '{"methods":["surface.focus"]}\n';
+          throw new Error("socket not ready");
+        }
+        if (cmd === "cmux --help") return "cmux help\n";
+        if (cmd === "defaults write com.cmuxterm.app socketControlMode -string automation") {
+          cmuxReady = true;
+          return "";
+        }
+        if (cmd === "open -a /Applications/cmux.app") return "";
+        if (cmd === "claude --version") return "2.1.101 (Claude Code)\n";
+        if (cmd === "claude auth status") return "Authenticated\n";
+        if (cmd === "codex --version") return "codex-cli 0.118.0\n";
+        if (cmd === "codex login status") return "Logged in\n";
+        return "";
+      },
+    });
+
+    const result = await runSetup(deps, {});
+
+    const cmux = result.steps.find((s) => s.id === "cmux_install");
+    expect(cmux?.status).toBe("applied");
+    expect(cmux?.message).toContain("Enabled cmux socket control");
+    expect(seen).toContain("defaults write com.cmuxterm.app socketControlMode -string automation");
+    expect(seen).toContain("open -a /Applications/cmux.app");
+    expect(result.ready).toBe(true);
+  });
+
+  it("fails honestly when cmux stays uncontrollable after automatic macOS setup", async () => {
+    const deps = makeDeps({
+      exec: (cmd: string) => {
+        if (cmd === "brew --version") return "Homebrew 4.0\n";
+        if (cmd === "tmux -V") return "tmux 3.4\n";
+        if (cmd === "cmux capabilities --json") throw new Error("broken pipe");
+        if (cmd === "cmux --help") return "cmux help\n";
+        if (cmd === "defaults write com.cmuxterm.app socketControlMode -string automation") return "";
+        if (cmd === "open -a /Applications/cmux.app") return "";
+        if (cmd === "claude --version") return "2.1.101 (Claude Code)\n";
+        if (cmd === "claude auth status") return "Authenticated\n";
+        if (cmd === "codex --version") return "codex-cli 0.118.0\n";
+        if (cmd === "codex login status") return "Logged in\n";
+        return "";
+      },
+    });
+
+    const result = await runSetup(deps, {});
+
+    const cmux = result.steps.find((s) => s.id === "cmux_install");
+    expect(cmux?.status).toBe("fail");
+    expect(cmux?.message).toContain("cmux installed but control unavailable");
+    expect(result.ready).toBe(false);
+  });
+
+  it("gives fresh install commands a longer timeout budget and fails cmux honestly when install still errors", async () => {
+    const seenTimeouts = new Map<string, number | undefined>();
+    const deps = makeDeps({
+      exec: (cmd: string, opts?: { timeoutMs?: number }) => {
+        if (cmd === "brew --version") return "Homebrew 4.0\n";
+        if (cmd === "tmux -V") return "tmux 3.4\n";
+        if (cmd === "cmux capabilities --json") throw new Error("command not found: cmux");
+        if (cmd === "cmux --help") throw new Error("command not found: cmux");
+        if (cmd === "brew install --cask cmux") {
+          seenTimeouts.set(cmd, opts?.timeoutMs);
+          throw new Error("spawnSync /bin/sh ETIMEDOUT");
+        }
+        if (cmd === "claude --version") return "2.1.101 (Claude Code)\n";
+        if (cmd === "claude auth status") return "Authenticated\n";
+        if (cmd === "codex --version") return "codex-cli 0.118.0\n";
+        if (cmd === "codex login status") return "Logged in\n";
+        throw new Error(`unexpected: ${cmd}`);
+      },
+    });
+
+    const result = await runSetup(deps, {});
+
+    expect(seenTimeouts.get("brew install --cask cmux")).toBe(300000);
+    const cmux = result.steps.find((s) => s.id === "cmux_install");
+    expect(cmux?.status).toBe("fail");
+    expect(cmux?.message).toContain("ETIMEDOUT");
+    expect(result.ready).toBe(false);
+  });
+
+  it("uses the extended timeout budget for npm runtime installs", async () => {
+    const seenTimeouts = new Map<string, number | undefined>();
+    let claudeInstalled = false;
+    let codexInstalled = false;
+    const deps = makeDeps({
+      exec: (cmd: string, opts?: { timeoutMs?: number }) => {
+        if (cmd === "brew --version") return "Homebrew 4.0\n";
+        if (cmd === "tmux -V") return "tmux 3.4\n";
+        if (cmd === "cmux capabilities --json") return '{"capabilities":[]}\n';
+        if (cmd === "claude --version") {
+          if (claudeInstalled) return "2.1.101 (Claude Code)\n";
+          throw new Error("command not found: claude");
+        }
+        if (cmd === "npm install -g @anthropic-ai/claude-code") {
+          seenTimeouts.set(cmd, opts?.timeoutMs);
+          claudeInstalled = true;
+          return "installed claude\n";
+        }
+        if (cmd === "claude auth status") return "Authenticated\n";
+        if (cmd === "codex --version") {
+          if (codexInstalled) return "codex-cli 0.118.0\n";
+          throw new Error("command not found: codex");
+        }
+        if (cmd === "npm install -g @openai/codex") {
+          seenTimeouts.set(cmd, opts?.timeoutMs);
+          codexInstalled = true;
+          return "installed codex\n";
+        }
+        if (cmd === "codex login status") return "Logged in\n";
+        throw new Error(`unexpected: ${cmd}`);
+      },
+    });
+
+    const result = await runSetup(deps, {});
+
+    expect(result.ready).toBe(true);
+    expect(seenTimeouts.get("npm install -g @anthropic-ai/claude-code")).toBe(300000);
+    expect(seenTimeouts.get("npm install -g @openai/codex")).toBe(300000);
+  });
 });

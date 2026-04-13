@@ -267,6 +267,25 @@ describe("StartupOrchestrator", () => {
     expect(session!.startupStatus).toBe("failed");
   });
 
+  it("recoverable interactive startup blockers become attention_required", async () => {
+    const seed = seedSession();
+    const adapter = mockAdapter({
+      checkReady: vi.fn(async () => ({
+        ready: false,
+        code: "trust_gate",
+        reason: "Claude is waiting for workspace trust approval before the session can become interactive.",
+      })),
+    });
+    const orch = createOrchestrator();
+    const result = await orch.startNode(makeInput(seed, { adapter }));
+
+    expect(result.ok).toBe(false);
+    expect(result.startupStatus).toBe("attention_required");
+
+    const row = db.prepare("SELECT startup_status FROM sessions WHERE id = ?").get(seed.sessionId) as { startup_status: string };
+    expect(row.startup_status).toBe("attention_required");
+  });
+
   // T10: launcher does not mark ready before actions complete
   it("startup_status stays pending until orchestrator completes", async () => {
     const seed = seedSession();
@@ -464,7 +483,8 @@ describe("StartupOrchestrator", () => {
     const result = await orch.startNode(makeInput(seed, { adapter, readinessTimeoutMs: 10_000 }));
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      expect(result.errors.some((e) => e.includes("Readiness blocked"))).toBe(true);
+      expect(result.startupStatus).toBe("attention_required");
+      expect(result.errors.some((e) => e.includes("Startup requires attention"))).toBe(true);
       expect(result.errors.some((e) => e.includes("timeout"))).toBe(false);
     }
   });
