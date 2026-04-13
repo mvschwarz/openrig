@@ -82,8 +82,12 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       }
 
       try {
-        this.projectEntry(entry, binding.cwd);
-        projected.push(entry.effectiveId);
+        const didProject = this.projectEntry(entry, binding.cwd);
+        if (didProject) {
+          projected.push(entry.effectiveId);
+        } else {
+          skipped.push(entry.effectiveId);
+        }
       } catch (err) {
         failed.push({ effectiveId: entry.effectiveId, error: (err as Error).message });
       }
@@ -113,7 +117,8 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
         switch (hint) {
           case "guidance_merge": {
             const targetPath = nodePath.join(binding.cwd, "AGENTS.md");
-            this.mergeGuidance(targetPath, file.path, content);
+            const merged = this.mergeGuidance(targetPath, file.path, content);
+            if (!merged) continue; // rig-role skip: do not count as delivered
             break;
           }
           case "skill_install": {
@@ -199,16 +204,15 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     this.provisionWorkspaceTrust(binding.cwd ?? null);
   }
 
-  private projectEntry(entry: ProjectionEntry, cwd: string): void {
+  private projectEntry(entry: ProjectionEntry, cwd: string): boolean {
     if (entry.category === "guidance" && entry.mergeStrategy === "managed_block") {
       const targetPath = nodePath.join(cwd, "AGENTS.md");
       const content = this.fs.readFile(entry.absolutePath);
-      this.mergeGuidance(targetPath, entry.effectiveId, content);
-      return;
+      return this.mergeGuidance(targetPath, entry.effectiveId, content);
     }
 
     const targetDir = this.resolveTargetDir(entry, cwd);
-    if (!targetDir) return;
+    if (!targetDir) return true;
 
     this.fs.mkdirp(targetDir);
     const isDir = this.fs.listFiles ? this.fs.listFiles(entry.absolutePath).length > 0 : false;
@@ -225,9 +229,10 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     } else {
       const content = this.fs.readFile(entry.absolutePath);
       const destFile = nodePath.join(targetDir, nodePath.basename(entry.absolutePath));
-      if (this.fs.exists(destFile) && hashContent(content) === hashContent(this.fs.readFile(destFile))) return;
+      if (this.fs.exists(destFile) && hashContent(content) === hashContent(this.fs.readFile(destFile))) return true;
       this.fs.writeFile(destFile, content);
     }
+    return true;
   }
 
   private resolveTargetDir(entry: ProjectionEntry, cwd: string): string | null {
@@ -241,7 +246,13 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     }
   }
 
-  private mergeGuidance(targetPath: string, blockId: string, content: string): void {
+  /**
+   * Merge a managed block into the target guidance file. Returns `true` when
+   * the merge happened, `false` when intentionally skipped (rig-role). Callers
+   * propagate the skip signal so ProjectionResult and StartupDeliveryResult
+   * report honest counts.
+   */
+  private mergeGuidance(targetPath: string, blockId: string, content: string): boolean {
     // Mirrors Claude Code adapter: the `rig-role` managed block collides across
     // pod-mates because the regenerator pairs (target-file × spec) without
     // seat correlation. Per-seat role content is delivered through `send_text`
@@ -251,11 +262,12 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       console.log(
         `[openrig] skip: effectiveId is rig-role, per-seat delivery via send_text path required (target=${targetPath})`
       );
-      return;
+      return false;
     }
     mergeManagedBlock(this.fs, targetPath, blockId, content, {
       replaceBlockIds: blockId === "openrig-start.md" ? ["using-openrig.md"] : [],
     });
+    return true;
   }
 
   private detectDeliveryHint(path: string, content: string): "guidance_merge" | "skill_install" | "send_text" {
