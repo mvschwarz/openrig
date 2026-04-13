@@ -277,6 +277,57 @@ describe("cmux CLI transport — version-adaptive surface listing", () => {
     expect(exec).toHaveBeenCalledWith("cmux list-panels --workspace 'workspace:2' --json");
   });
 
+  it("surface.list on modern cmux falls back to plain-text panel rows when `--json` still prints text", async () => {
+    const exec = mockExec({
+      modern: true,
+      overrides: {
+        "cmux list-panels --workspace 'workspace:1' --json":
+          '  surface:1  terminal  "~"\n* surface:2  terminal  [focused]  "tmux attach -t backend-api@control-plane-test"\n',
+      },
+    });
+    const transport = await createCmuxCliTransport(exec)();
+
+    const result = (await transport.request("surface.list", { workspaceId: "workspace:1" })) as {
+      surfaces: unknown;
+    };
+
+    expect(result).toEqual({
+      surfaces: [
+        { id: "surface:1", title: "~", type: "terminal" },
+        { id: "surface:2", title: "tmux attach -t backend-api@control-plane-test", type: "terminal" },
+      ],
+    });
+  });
+
+  it("surface.list on modern cmux treats empty plain-text output as an empty surface list", async () => {
+    const exec = mockExec({
+      modern: true,
+      overrides: { "cmux list-panels --workspace 'workspace:1' --json": "\n" },
+    });
+    const transport = await createCmuxCliTransport(exec)();
+
+    const result = (await transport.request("surface.list", { workspaceId: "workspace:1" })) as {
+      surfaces: unknown;
+    };
+
+    expect(result).toEqual({ surfaces: [] });
+  });
+
+  it("surface.list on modern cmux rejects plain-text error output that merely mentions a surface id", async () => {
+    const exec = mockExec({
+      modern: true,
+      overrides: {
+        "cmux list-panels --workspace 'workspace:1' --json":
+          "error: workspace contains stale binding for surface:1 not found\n",
+      },
+    });
+    const transport = await createCmuxCliTransport(exec)();
+
+    await expect(
+      transport.request("surface.list", { workspaceId: "workspace:1" })
+    ).rejects.toThrow(/Failed to parse JSON from cmux command/);
+  });
+
   it("surface.list on legacy cmux falls back to `list-surfaces --json`", async () => {
     const exec = mockExec({
       legacy: true,
