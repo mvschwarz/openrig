@@ -1,8 +1,8 @@
 # OpenRig
 
-Open source local control plane for coding-agent topologies.
+Open source multi-agent harness for coding teams.
 
-Define your agent team in YAML. Boot it with one command. Claude Code and Codex in the same topology, managed as one system.
+A harness wraps a model. A rig wraps your harnesses. Define your agent team in YAML, boot it with one command. Claude Code and Codex in the same rig, managed as one system.
 
 ![OpenRig UI](https://openrig.dev/screenshots/remotion/hero-ui-workspace.png)
 
@@ -24,9 +24,27 @@ rig ui open
 
 After the demo boots, open the UI and click **orch1.lead** in the topology graph. Use **Open CMUX** to jump into a terminal for that node. If cmux is not available, use the tmux attach command shown in the node detail panel instead.
 
+## Launch Walkthrough
+
+The launch path above has been walked end-to-end on fresh macOS VMs. The only thing your agent can't do would be the oauth logins for claude and openai and dealing with permission prompts.
+
+### 1. Open the demo rig
+
+When the UI opens, the explorer is already visible on the left. Click the `demo` rig to load its live topology.
+
+![Step 1: Click the demo rig in the explorer.](assets/ui/screenshots/launch-happy-path/guide-step-01-open-demo.png)
+
+### 2. Click `CMUX` on `orch1.lead`
+
+Once the topology loads, go to the `orch1.lead` node and click its `CMUX` button. That opens the orchestrator terminal directly.
+
+![Step 2: Click CMUX on orch1.lead in the topology.](assets/ui/screenshots/launch-happy-path/guide-step-02-open-cmux.png)
+
+> From here just talk to the orchestrator and tell it what you want it to build...
+
 ## What It Does
 
-OpenRig manages the topology that coding agents form when you run them together. Not the agents themselves. The system they create: which sessions are running, how they relate, how to recover after a reboot, and how to stop it from becoming terminal sprawl.
+OpenRig is a multi-agent harness — it manages the system that coding agents form when you run them together. Not the agents themselves, but the team they create: which sessions are running, how they relate, how to recover after a reboot, and how to stop it from becoming terminal sprawl.
 
 - **Define** topologies in YAML (RigSpec) with pods, edges, and continuity policies
 - **Boot** everything with `rig up` — tmux sessions, harnesses, startup files, readiness checks
@@ -89,7 +107,7 @@ Hono HTTP daemon
 
 ## Key Concepts
 
-- **RigSpec**: Declarative multi-agent topology in YAML. Pods, members, edges, continuity policies, culture file.
+- **RigSpec**: Declarative multi-agent harness definition in YAML. Pods, members, edges, continuity policies, culture file.
 - **AgentSpec**: Reusable agent blueprint with skills, guidance, hooks, profiles, and startup contracts.
 - **Pod**: Bounded context group. Agents in a pod share memory and can maintain each other's context.
 - **Discovery**: `rig discover` fingerprints existing tmux sessions. `rig adopt` brings them under management.
