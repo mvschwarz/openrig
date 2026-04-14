@@ -1,11 +1,17 @@
 import { Command } from "commander";
-import { accessSync, constants, existsSync, mkdirSync } from "node:fs";
+import { accessSync, constants, existsSync, mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import net from "node:net";
 import { execSync } from "node:child_process";
 import { resolveDaemonPath } from "../daemon-lifecycle.js";
 import { ConfigStore } from "../config-store.js";
 import { buildWritableHomeCheck } from "../system-preflight.js";
+import {
+  CMUX_SETTINGS_DISCLOSURE_PATH,
+  isCmuxSocketControlCompatible,
+  readCmuxSocketControlModeFromText,
+  resolveCmuxSettingsPath,
+} from "../cmux-config.js";
 
 interface DoctorCheck {
   name: string;
@@ -18,6 +24,7 @@ interface DoctorCheck {
 export interface DoctorDeps {
   exists: (p: string) => boolean;
   baseDir: string;
+  readFile: (path: string) => string | null;
   exec: (cmd: string) => string;
   checkPort: (port: number) => Promise<boolean>;
   configStore: Pick<ConfigStore, "resolve">;
@@ -134,8 +141,12 @@ export function runDoctorChecks(deps: DoctorDeps): { checks: DoctorCheck[]; port
     try {
       deps.exec("cmux --help");
       const socketMode = platform === "darwin" ? readCmuxSocketControlMode(deps) : null;
-      const modeHint = socketMode && !isCmuxSocketControlCompatible(socketMode)
-        ? ` Likely cause on macOS: cmux socketControlMode is '${socketMode}'. Tell the user to allow OpenRig/cmux socket control, then rerun 'rig doctor'.`
+      const modeHint = socketMode?.error
+        ? ` Likely cause on macOS: ${CMUX_SETTINGS_DISCLOSURE_PATH} is unreadable (${socketMode.error}).`
+        : socketMode && !isCmuxSocketControlCompatible(socketMode.mode) && socketMode.source === "default"
+        ? ` Likely cause on macOS: cmux is still using its default automation.socketControlMode '${socketMode.mode}'.`
+        : socketMode && !isCmuxSocketControlCompatible(socketMode.mode)
+        ? ` Likely cause on macOS: automation.socketControlMode is '${socketMode.mode}' in ${CMUX_SETTINGS_DISCLOSURE_PATH}.`
         : "";
       checks.push({
         name: "cmux_shell",
@@ -224,29 +235,33 @@ export function runDoctorChecks(deps: DoctorDeps): { checks: DoctorCheck[]; port
   return { checks, portCheck, asyncChecks };
 }
 
-function readCmuxSocketControlMode(deps: DoctorDeps): string | null {
-  try {
-    const mode = deps.exec("defaults read com.cmuxterm.app socketControlMode").trim();
-    return mode || null;
-  } catch {
-    return null;
-  }
-}
-
-function isCmuxSocketControlCompatible(mode: string | null): boolean {
-  return mode === "automation" || mode === "allowAll";
+function readCmuxSocketControlMode(deps: DoctorDeps) {
+  return readCmuxSocketControlModeFromText(deps.readFile(resolveCmuxSettingsPath()));
 }
 
 function buildCmuxDaemonWarning(deps: DoctorDeps, platform: NodeJS.Platform): DoctorCheck {
   const socketMode = platform === "darwin" ? readCmuxSocketControlMode(deps) : null;
 
-  if (platform === "darwin" && socketMode && !isCmuxSocketControlCompatible(socketMode)) {
+  if (platform === "darwin" && socketMode?.error) {
     return {
       name: "cmux_daemon",
       status: "warn",
       message: "Shell cmux works, but the daemon cannot control cmux.",
-      reason: `cmux socketControlMode is '${socketMode}', so the daemon cannot attach as an external cmux client yet.`,
-      fix: "Run `rig setup` to set cmux socket control to automation, then restart the daemon with `rig daemon start`. If you change cmux manually, rerun `rig doctor` after the prompt is cleared.",
+      reason: `${CMUX_SETTINGS_DISCLOSURE_PATH} is unreadable: ${socketMode.error}`,
+      fix: `Repair ${CMUX_SETTINGS_DISCLOSURE_PATH} or remove it so cmux can regenerate the template, then rerun \`rig setup\` or \`rig doctor\`.`,
+    };
+  }
+
+  if (platform === "darwin" && socketMode && !isCmuxSocketControlCompatible(socketMode.mode)) {
+    const reason = socketMode.source === "default"
+      ? `cmux is still using its default automation.socketControlMode '${socketMode.mode}', so the daemon cannot attach as an external cmux client yet.`
+      : `automation.socketControlMode is '${socketMode.mode}' in ${CMUX_SETTINGS_DISCLOSURE_PATH}, so the daemon cannot attach as an external cmux client yet.`;
+    return {
+      name: "cmux_daemon",
+      status: "warn",
+      message: "Shell cmux works, but the daemon cannot control cmux.",
+      reason,
+      fix: `Run \`rig setup\` to set automation.socketControlMode to "automation" in ${CMUX_SETTINGS_DISCLOSURE_PATH}, then restart the daemon with \`rig daemon start\`.`,
     };
   }
 
@@ -278,6 +293,7 @@ export function doctorCommand(depsOverride?: DoctorDeps): Command {
       const deps: DoctorDeps = depsOverride ?? {
         exists: existsSync,
         baseDir: import.meta.dirname,
+        readFile: (p: string) => { try { return readFileSync(p, "utf-8"); } catch { return null; } },
         exec: (c: string) => execSync(c, { encoding: "utf-8" }),
         checkPort: defaultCheckPort,
         configStore: new ConfigStore(),

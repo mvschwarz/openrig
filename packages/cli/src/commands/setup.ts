@@ -5,6 +5,13 @@ import path from "node:path";
 import { runDoctorChecks, type DoctorDeps } from "./doctor.js";
 import { resolveDaemonPath } from "../daemon-lifecycle.js";
 import { ConfigStore } from "../config-store.js";
+import {
+  CMUX_SETTINGS_DISCLOSURE_PATH,
+  isCmuxSocketControlCompatible,
+  readCmuxSocketControlModeFromText,
+  resolveCmuxSettingsPath,
+  upsertCmuxSocketControlMode,
+} from "../cmux-config.js";
 
 export interface SetupStep {
   id: string;
@@ -45,6 +52,7 @@ export interface SetupDeps {
   readFile: (path: string) => string | null;
   writeFile: (path: string, content: string) => void;
   exists: (path: string) => boolean;
+  mkdirp?: (path: string) => void;
   platform?: NodeJS.Platform;
 }
 
@@ -101,7 +109,7 @@ const BASE_RUNTIME_CONFIG_DISCLOSURE: RuntimeConfigDisclosure[] = [
 const DARWIN_RUNTIME_CONFIG_DISCLOSURE: RuntimeConfigDisclosure = {
   scope: "global",
   runtime: "cmux",
-  path: "macOS defaults: com.cmuxterm.app socketControlMode",
+  path: CMUX_SETTINGS_DISCLOSURE_PATH,
   purpose: "Set cmux socket control to an OpenRig-compatible automation mode.",
 };
 
@@ -115,6 +123,7 @@ function defaultDeps(): SetupDeps {
     readFile: (p: string) => { try { return readFileSync(p, "utf-8"); } catch { return null; } },
     writeFile: (p: string, c: string) => writeFileSync(p, c, "utf-8"),
     exists: (p: string) => existsSync(p),
+    mkdirp: (p: string) => mkdirSync(p, { recursive: true }),
   };
 }
 
@@ -143,10 +152,31 @@ async function waitForCmuxCapabilities(deps: SetupDeps, attempts = CMUX_READY_AT
 async function tryEnableCmuxControl(deps: SetupDeps, platform: NodeJS.Platform): Promise<boolean> {
   if (platform !== "darwin") return false;
 
+  const settingsPath = resolveCmuxSettingsPath();
+  const settingsText = deps.readFile(settingsPath);
+  const currentMode = readCmuxSocketControlModeFromText(settingsText);
+  if (currentMode.error) {
+    return false;
+  }
+
   try {
-    deps.exec("defaults write com.cmuxterm.app socketControlMode -string automation");
+    deps.mkdirp?.(path.dirname(settingsPath));
+    const next = upsertCmuxSocketControlMode(settingsText, "automation");
+    if (next.changed) {
+      deps.writeFile(settingsPath, next.content);
+    }
   } catch {
-    // Best effort: if defaults write fails, the follow-up capability probe will surface it honestly.
+    return false;
+  }
+
+  const shellReady = await waitForCmuxCapabilities(deps, 1);
+  if (shellReady) {
+    try {
+      deps.exec("cmux reload-config");
+    } catch {
+      // Best effort: if reload fails, the daemon-side verification will surface it honestly.
+    }
+    return waitForCmuxCapabilities(deps, 1);
   }
 
   try {
@@ -158,25 +188,34 @@ async function tryEnableCmuxControl(deps: SetupDeps, platform: NodeJS.Platform):
   return waitForCmuxCapabilities(deps);
 }
 
-function readCmuxSocketControlMode(deps: SetupDeps, platform: NodeJS.Platform): string | null {
-  if (platform !== "darwin") return null;
-
-  try {
-    const mode = deps.exec("defaults read com.cmuxterm.app socketControlMode").trim();
-    return mode || null;
-  } catch {
-    return null;
-  }
-}
-
-function isCmuxSocketControlCompatible(mode: string | null): boolean {
-  return mode === "automation" || mode === "allowAll";
-}
-
 function buildRuntimeConfigDisclosure(platform: NodeJS.Platform): RuntimeConfigDisclosure[] {
   return platform === "darwin"
     ? [...BASE_RUNTIME_CONFIG_DISCLOSURE, DARWIN_RUNTIME_CONFIG_DISCLOSURE]
     : [...BASE_RUNTIME_CONFIG_DISCLOSURE];
+}
+
+async function probeDaemonCmuxStatus(doctorDeps?: DoctorDeps): Promise<"available" | "unavailable" | "skipped"> {
+  const fetchFn = doctorDeps?.fetch;
+  if (!fetchFn) return "skipped";
+  const config = doctorDeps.configStore.resolve();
+  const host = config.daemon.host;
+  const port = config.daemon.port;
+
+  try {
+    const healthRes = await fetchFn(`http://${host}:${port}/healthz`);
+    if (!healthRes.ok) return "skipped";
+  } catch {
+    return "skipped";
+  }
+
+  try {
+    const cmuxRes = await fetchFn(`http://${host}:${port}/api/adapters/cmux/status`);
+    if (!cmuxRes.ok || !cmuxRes.json) return "unavailable";
+    const data = (await cmuxRes.json()) as { available?: boolean };
+    return data.available ? "available" : "unavailable";
+  } catch {
+    return "unavailable";
+  }
 }
 
 export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?: boolean; doctorDeps?: DoctorDeps }): Promise<SetupResult> {
@@ -236,24 +275,52 @@ export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?:
   }
 
   // 3. cmux
+  const daemonCmuxBefore = await probeDaemonCmuxStatus(opts.doctorDeps);
   if (await waitForCmuxCapabilities(deps, 1)) {
-    const socketMode = readCmuxSocketControlMode(deps, platform);
-    if (platform === "darwin" && socketMode && !isCmuxSocketControlCompatible(socketMode)) {
+    const socketMode = readCmuxSocketControlModeFromText(deps.readFile(resolveCmuxSettingsPath()));
+    if (platform === "darwin" && socketMode.error) {
+      steps.push({
+        id: "cmux_install",
+        status: "fail",
+        message: "cmux settings file is unreadable.",
+        reason: `OpenRig could not parse ${CMUX_SETTINGS_DISCLOSURE_PATH}: ${socketMode.error}`,
+        fixHint: "Repair or remove the cmux settings file, then rerun `rig setup`.",
+      });
+    } else if (platform === "darwin" && !isCmuxSocketControlCompatible(socketMode.mode)) {
       if (await tryEnableCmuxControl(deps, platform)) {
-        steps.push({
-          id: "cmux_install",
-          status: "applied",
-          message: "Normalized cmux socket control to automation mode.",
-        });
+        const daemonCmuxAfter = await probeDaemonCmuxStatus(opts.doctorDeps);
+        if (daemonCmuxAfter === "unavailable") {
+          steps.push({
+            id: "cmux_install",
+            status: "fail",
+            message: "OpenRig updated cmux settings, but the running daemon still cannot control cmux.",
+            reason: "The cmux settings file is now compatible, so the remaining blocker is in the live daemon/cmux session state.",
+            fixHint: "Restart the daemon with `rig daemon start`, then rerun `rig doctor` to confirm cmux daemon control.",
+          });
+        } else {
+          steps.push({
+            id: "cmux_install",
+            status: "applied",
+            message: "Normalized cmux socket control to automation mode in ~/.config/cmux/settings.json.",
+          });
+        }
       } else {
         steps.push({
           id: "cmux_install",
           status: "fail",
           message: "cmux shell control works, but OpenRig could not normalize cmux socket control.",
           reason: "OpenRig needs a compatible cmux socket control mode so the daemon can open CMUX surfaces reliably.",
-          fixHint: "Run `rig setup` again after clearing cmux prompts, or set cmux socket control to automation and rerun `rig doctor`.",
+          fixHint: `Set automation.socketControlMode to "automation" in ${CMUX_SETTINGS_DISCLOSURE_PATH}, then rerun \`rig setup\` or \`rig doctor\`.`,
         });
       }
+    } else if (daemonCmuxBefore === "unavailable") {
+      steps.push({
+        id: "cmux_install",
+        status: "fail",
+        message: "cmux shell control works, but the running daemon still cannot control cmux.",
+        reason: "Current cmux settings already look compatible, so the remaining blocker is outside the cmux settings file OpenRig can repair automatically.",
+        fixHint: "Run `rig doctor` for the exact daemon cmux diagnosis, then restart the daemon after clearing the underlying blocker.",
+      });
     } else {
       steps.push({ id: "cmux_install", status: "pass", message: "cmux available." });
     }
@@ -262,18 +329,31 @@ export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?:
       deps.exec("cmux --help");
 
       if (await tryEnableCmuxControl(deps, platform)) {
-        steps.push({
-          id: "cmux_install",
-          status: "applied",
-          message: "Enabled cmux socket control.",
-        });
+        const daemonCmuxAfter = await probeDaemonCmuxStatus(opts.doctorDeps);
+        if (daemonCmuxAfter === "unavailable") {
+          steps.push({
+            id: "cmux_install",
+            status: "fail",
+            message: "OpenRig enabled cmux socket control, but the running daemon still cannot control cmux.",
+            reason: "The cmux app and settings are now in place, so the remaining blocker is in the live daemon/cmux session state.",
+            fixHint: "Restart the daemon with `rig daemon start`, then rerun `rig doctor` to confirm cmux daemon control.",
+          });
+        } else {
+          steps.push({
+            id: "cmux_install",
+            status: "applied",
+            message: "Enabled cmux socket control in ~/.config/cmux/settings.json.",
+          });
+        }
       } else {
         steps.push({
           id: "cmux_install",
           status: platform === "darwin" ? "fail" : "warn",
           message: "cmux installed but control unavailable.",
           reason: "Open CMUX workflows need cmux socket control to be enabled.",
-          fixHint: "Open cmux, approve any first-run prompts, and rerun `rig setup` or `rig doctor`.",
+          fixHint: platform === "darwin"
+            ? `Set automation.socketControlMode to "automation" in ${CMUX_SETTINGS_DISCLOSURE_PATH}, then rerun \`rig setup\` or \`rig doctor\`.`
+            : "Open cmux, approve any first-run prompts, and rerun `rig setup` or `rig doctor`.",
         });
       }
     } catch {
@@ -489,6 +569,7 @@ function buildDefaultDoctorDeps(setupDeps: SetupDeps): DoctorDeps {
   return {
     exists: setupDeps.exists,
     baseDir,
+    readFile: setupDeps.readFile,
     exec: setupDeps.exec,
     checkPort: async (port: number) => {
       const net = await import("node:net");
@@ -503,6 +584,7 @@ function buildDefaultDoctorDeps(setupDeps: SetupDeps): DoctorDeps {
     platform: platform as NodeJS.Platform,
     mkdirp: (p: string) => mkdirSync(p, { recursive: true }),
     checkWritable: (p: string) => accessSync(p, constants.W_OK),
+    fetch: globalThis.fetch,
   };
 }
 
