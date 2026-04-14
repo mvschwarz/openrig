@@ -209,6 +209,36 @@ describe("runDoctorChecks", () => {
     expect(cmuxDaemon?.fix).toContain("rig daemon start");
   });
 
+  it("shell cmux pass + restrictive macOS socket control + daemon cmux unavailable -> cmux_daemon points at socket control mode", async () => {
+    const deps = makeDeps({
+      exec: (cmd: string) => {
+        if (cmd === "tmux -V") return "tmux 3.4\n";
+        if (cmd === "cmux capabilities --json") return '{"capabilities":["surface.focus"]}\n';
+        if (cmd === "cmux --help") return "cmux help\n";
+        if (cmd === "defaults read com.cmuxterm.app socketControlMode") return "cmuxOnly\n";
+        return "";
+      },
+      fetch: async (url: string) => {
+        if (url.includes("/healthz")) return { ok: true } as Response;
+        if (url.includes("/adapters/cmux/status")) return { ok: true, json: async () => ({ available: false }) } as Response;
+        return { ok: true } as Response;
+      },
+      checkPort: async () => false,
+    });
+
+    const { checks, asyncChecks } = runDoctorChecks(deps);
+    const resolved = await Promise.all(asyncChecks ?? []);
+    const allChecks = [...checks, ...resolved];
+
+    const cmuxDaemon = allChecks.find((c) => c.name === "cmux_daemon");
+    expect(cmuxDaemon).toBeDefined();
+    expect(cmuxDaemon?.status).toBe("warn");
+    expect(cmuxDaemon?.reason).toContain("socketControlMode");
+    expect(cmuxDaemon?.reason).toContain("cmuxOnly");
+    expect(cmuxDaemon?.fix).toContain("rig setup");
+    expect(cmuxDaemon?.fix).toContain("automation");
+  });
+
   it("daemon not running -> cmux_daemon skipped and does not make doctor unhealthy", async () => {
     const deps = makeDeps({
       checkPort: async () => true,

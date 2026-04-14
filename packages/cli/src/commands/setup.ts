@@ -24,7 +24,7 @@ export interface VerificationCheck {
 
 export interface RuntimeConfigDisclosure {
   scope: "global" | "project";
-  runtime: "claude-code" | "codex";
+  runtime: "claude-code" | "codex" | "cmux";
   path: string;
   purpose: string;
 }
@@ -65,7 +65,7 @@ const CORE_STEP_IDS = [
   "verify",
 ];
 const FULL_EXTRA_STEP_IDS = ["jq_install", "gh_install"];
-const RUNTIME_CONFIG_DISCLOSURE: RuntimeConfigDisclosure[] = [
+const BASE_RUNTIME_CONFIG_DISCLOSURE: RuntimeConfigDisclosure[] = [
   {
     scope: "global",
     runtime: "claude-code",
@@ -97,6 +97,13 @@ const RUNTIME_CONFIG_DISCLOSURE: RuntimeConfigDisclosure[] = [
     purpose: "Pre-trust managed workspaces and configure Codex MCP servers.",
   },
 ];
+
+const DARWIN_RUNTIME_CONFIG_DISCLOSURE: RuntimeConfigDisclosure = {
+  scope: "global",
+  runtime: "cmux",
+  path: "macOS defaults: com.cmuxterm.app socketControlMode",
+  purpose: "Set cmux socket control to an OpenRig-compatible automation mode.",
+};
 
 function defaultDeps(): SetupDeps {
   return {
@@ -151,9 +158,31 @@ async function tryEnableCmuxControl(deps: SetupDeps, platform: NodeJS.Platform):
   return waitForCmuxCapabilities(deps);
 }
 
+function readCmuxSocketControlMode(deps: SetupDeps, platform: NodeJS.Platform): string | null {
+  if (platform !== "darwin") return null;
+
+  try {
+    const mode = deps.exec("defaults read com.cmuxterm.app socketControlMode").trim();
+    return mode || null;
+  } catch {
+    return null;
+  }
+}
+
+function isCmuxSocketControlCompatible(mode: string | null): boolean {
+  return mode === "automation" || mode === "allowAll";
+}
+
+function buildRuntimeConfigDisclosure(platform: NodeJS.Platform): RuntimeConfigDisclosure[] {
+  return platform === "darwin"
+    ? [...BASE_RUNTIME_CONFIG_DISCLOSURE, DARWIN_RUNTIME_CONFIG_DISCLOSURE]
+    : [...BASE_RUNTIME_CONFIG_DISCLOSURE];
+}
+
 export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?: boolean; doctorDeps?: DoctorDeps }): Promise<SetupResult> {
   const profile = opts.full ? "full" : "core";
   const platform = deps.platform ?? process.platform;
+  const runtimeConfig = buildRuntimeConfigDisclosure(platform);
   const stepIds = opts.full ? [...CORE_STEP_IDS, ...FULL_EXTRA_STEP_IDS] : [...CORE_STEP_IDS];
   const steps: SetupStep[] = [];
 
@@ -161,7 +190,7 @@ export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?:
     for (const id of stepIds) {
       steps.push({ id, status: "skipped", message: `Dry run: ${id} would be attempted.` });
     }
-    return { profile, platform, ready: false, steps, runtimeConfig: RUNTIME_CONFIG_DISCLOSURE };
+    return { profile, platform, ready: false, steps, runtimeConfig };
   }
 
   // Core steps
@@ -208,7 +237,26 @@ export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?:
 
   // 3. cmux
   if (await waitForCmuxCapabilities(deps, 1)) {
-    steps.push({ id: "cmux_install", status: "pass", message: "cmux available." });
+    const socketMode = readCmuxSocketControlMode(deps, platform);
+    if (platform === "darwin" && socketMode && !isCmuxSocketControlCompatible(socketMode)) {
+      if (await tryEnableCmuxControl(deps, platform)) {
+        steps.push({
+          id: "cmux_install",
+          status: "applied",
+          message: "Normalized cmux socket control to automation mode.",
+        });
+      } else {
+        steps.push({
+          id: "cmux_install",
+          status: "fail",
+          message: "cmux shell control works, but OpenRig could not normalize cmux socket control.",
+          reason: "OpenRig needs a compatible cmux socket control mode so the daemon can open CMUX surfaces reliably.",
+          fixHint: "Run `rig setup` again after clearing cmux prompts, or set cmux socket control to automation and rerun `rig doctor`.",
+        });
+      }
+    } else {
+      steps.push({ id: "cmux_install", status: "pass", message: "cmux available." });
+    }
   } else {
     try {
       deps.exec("cmux --help");
@@ -432,7 +480,7 @@ export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?:
   const stepsFailed = steps.some((s) => s.status === "fail");
   const verificationFailed = verification?.checks.some((c) => c.status === "fail") ?? false;
   const ready = !stepsFailed && !verificationFailed;
-  return { profile, platform, ready, steps, runtimeConfig: RUNTIME_CONFIG_DISCLOSURE, ...(verification ? { verification } : {}) };
+  return { profile, platform, ready, steps, runtimeConfig, ...(verification ? { verification } : {}) };
 }
 
 function buildDefaultDoctorDeps(setupDeps: SetupDeps): DoctorDeps {

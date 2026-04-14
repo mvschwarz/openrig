@@ -42,7 +42,7 @@ function captureLogs(fn: () => Promise<void>): Promise<{ logs: string[]; exitCod
 }
 
 function expectRuntimeConfigDisclosure(result: SetupResult): void {
-  expect(result.runtimeConfig).toHaveLength(5);
+  expect(result.runtimeConfig).toHaveLength(6);
   expect(result.runtimeConfig).toEqual(expect.arrayContaining([
     {
       scope: "global",
@@ -73,6 +73,12 @@ function expectRuntimeConfigDisclosure(result: SetupResult): void {
       runtime: "codex",
       path: "~/.codex/config.toml",
       purpose: "Pre-trust managed workspaces and configure Codex MCP servers.",
+    },
+    {
+      scope: "global",
+      runtime: "cmux",
+      path: "macOS defaults: com.cmuxterm.app socketControlMode",
+      purpose: "Set cmux socket control to an OpenRig-compatible automation mode.",
     },
   ]));
 }
@@ -459,6 +465,36 @@ describe("rig setup", () => {
     expect(cmux?.message).toContain("Enabled cmux socket control");
     expect(seen).toContain("defaults write com.cmuxterm.app socketControlMode -string automation");
     expect(seen).toContain("open -a /Applications/cmux.app");
+    expect(result.ready).toBe(true);
+  });
+
+  it("normalizes restrictive cmux socket control on macOS even when shell cmux already works", async () => {
+    const seen: string[] = [];
+    const deps = makeDeps({
+      exec: (cmd: string) => {
+        seen.push(cmd);
+        if (cmd === "brew --version") return "Homebrew 4.0\n";
+        if (cmd === "tmux -V") return "tmux 3.4\n";
+        if (cmd === "cmux capabilities --json") return '{"capabilities":["surface.focus"]}\n';
+        if (cmd === "cmux --help") return "cmux help\n";
+        if (cmd === "defaults read com.cmuxterm.app socketControlMode") return "cmuxOnly\n";
+        if (cmd === "defaults write com.cmuxterm.app socketControlMode -string automation") return "";
+        if (cmd === "open -a /Applications/cmux.app") return "";
+        if (cmd === "claude --version") return "2.1.101 (Claude Code)\n";
+        if (cmd === "claude auth status") return "Authenticated\n";
+        if (cmd === "codex --version") return "codex-cli 0.118.0\n";
+        if (cmd === "codex login status") return "Logged in\n";
+        return "";
+      },
+    });
+
+    const result = await runSetup(deps, {});
+
+    const cmux = result.steps.find((s) => s.id === "cmux_install");
+    expect(cmux?.status).toBe("applied");
+    expect(cmux?.message).toContain("automation");
+    expect(seen).toContain("defaults read com.cmuxterm.app socketControlMode");
+    expect(seen).toContain("defaults write com.cmuxterm.app socketControlMode -string automation");
     expect(result.ready).toBe(true);
   });
 

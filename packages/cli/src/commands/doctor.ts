@@ -134,7 +134,7 @@ export function runDoctorChecks(deps: DoctorDeps): { checks: DoctorCheck[]; port
     try {
       deps.exec("cmux --help");
       const socketMode = platform === "darwin" ? readCmuxSocketControlMode(deps) : null;
-      const modeHint = socketMode && socketMode !== "allowAll"
+      const modeHint = socketMode && !isCmuxSocketControlCompatible(socketMode)
         ? ` Likely cause on macOS: cmux socketControlMode is '${socketMode}'. Tell the user to allow OpenRig/cmux socket control, then rerun 'rig doctor'.`
         : "";
       checks.push({
@@ -212,23 +212,11 @@ export function runDoctorChecks(deps: DoctorDeps): { checks: DoctorCheck[]; port
           if (data.available) {
             return { name: "cmux_daemon", status: "pass", message: "Daemon cmux control available." };
           }
-          return {
-            name: "cmux_daemon",
-            status: "warn",
-            message: "Shell cmux works, but the daemon cannot control cmux.",
-            reason: "The daemon inherited a terminal/session environment that broke cmux adapter initialization.",
-            fix: "Restart the daemon with `rig daemon start` after setup. If it still fails, inspect the daemon log with `rig daemon logs`.",
-          };
+          return buildCmuxDaemonWarning(deps, platform);
         }
       } catch { /* fetch failed */ }
 
-      return {
-        name: "cmux_daemon",
-        status: "warn",
-        message: "Shell cmux works, but the daemon cannot control cmux.",
-        reason: "The daemon inherited a terminal/session environment that broke cmux adapter initialization.",
-        fix: "Restart the daemon with `rig daemon start` after setup. If it still fails, inspect the daemon log with `rig daemon logs`.",
-      };
+      return buildCmuxDaemonWarning(deps, platform);
     })();
     asyncChecks.push(daemonCmuxCheck);
   }
@@ -243,6 +231,32 @@ function readCmuxSocketControlMode(deps: DoctorDeps): string | null {
   } catch {
     return null;
   }
+}
+
+function isCmuxSocketControlCompatible(mode: string | null): boolean {
+  return mode === "automation" || mode === "allowAll";
+}
+
+function buildCmuxDaemonWarning(deps: DoctorDeps, platform: NodeJS.Platform): DoctorCheck {
+  const socketMode = platform === "darwin" ? readCmuxSocketControlMode(deps) : null;
+
+  if (platform === "darwin" && socketMode && !isCmuxSocketControlCompatible(socketMode)) {
+    return {
+      name: "cmux_daemon",
+      status: "warn",
+      message: "Shell cmux works, but the daemon cannot control cmux.",
+      reason: `cmux socketControlMode is '${socketMode}', so the daemon cannot attach as an external cmux client yet.`,
+      fix: "Run `rig setup` to set cmux socket control to automation, then restart the daemon with `rig daemon start`. If you change cmux manually, rerun `rig doctor` after the prompt is cleared.",
+    };
+  }
+
+  return {
+    name: "cmux_daemon",
+    status: "warn",
+    message: "Shell cmux works, but the daemon cannot control cmux.",
+    reason: "The daemon inherited a terminal/session environment that broke cmux adapter initialization.",
+    fix: "Restart the daemon with `rig daemon start` after setup. If it still fails, inspect the daemon log with `rig daemon logs`.",
+  };
 }
 
 function readTmuxMouseMode(deps: DoctorDeps): "on" | "off" | null {
