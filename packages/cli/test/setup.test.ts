@@ -2,6 +2,9 @@ import { describe, it, expect, vi } from "vitest";
 import { Command } from "commander";
 import { setupCommand, runSetup, type SetupDeps, type SetupResult } from "../src/commands/setup.js";
 import type { DoctorDeps } from "../src/commands/doctor.js";
+import { resolveCmuxSettingsPath } from "../src/cmux-config.js";
+
+const CMUX_SETTINGS_PATH = resolveCmuxSettingsPath();
 
 function makeDeps(overrides?: Partial<SetupDeps>): SetupDeps {
   return {
@@ -22,6 +25,7 @@ function makeDeps(overrides?: Partial<SetupDeps>): SetupDeps {
     writeFile: vi.fn(),
     exists: () => false,
     platform: "darwin",
+    mkdirp: vi.fn(),
     ...overrides,
   };
 }
@@ -77,7 +81,7 @@ function expectRuntimeConfigDisclosure(result: SetupResult): void {
     {
       scope: "global",
       runtime: "cmux",
-      path: "macOS defaults: com.cmuxterm.app socketControlMode",
+      path: "~/.config/cmux/settings.json",
       purpose: "Set cmux socket control to an OpenRig-compatible automation mode.",
     },
   ]));
@@ -182,7 +186,7 @@ describe("rig setup", () => {
     expect(tmux?.status).toBe("pass");
 
     const cmux = result.steps.find((s) => s.id === "cmux_install");
-    expect(cmux?.status).toBe("pass");
+    expect(cmux?.status).toBe("applied");
 
     const claudeInstall = result.steps.find((s) => s.id === "claude_install");
     expect(claudeInstall?.status).toBe("pass");
@@ -338,6 +342,7 @@ describe("rig setup", () => {
       checkPort: async () => true,
       configStore: { resolve: () => ({ daemon: { port: 7433, host: "127.0.0.1" }, db: { path: "/tmp/openrig/openrig.sqlite" }, transcripts: { enabled: true, path: "/tmp/openrig/transcripts" } }) },
       platform: "darwin",
+      readFile: () => null,
       mkdirp: () => {},
       checkWritable: () => {},
       fetch: async () => { throw new Error("ECONNREFUSED"); },
@@ -389,6 +394,7 @@ describe("rig setup", () => {
       checkPort: async () => true,
       configStore: { resolve: () => ({ daemon: { port: 7433, host: "127.0.0.1" }, db: { path: "/tmp/openrig/openrig.sqlite" }, transcripts: { enabled: true, path: "/tmp/openrig/transcripts" } }) },
       platform: "darwin",
+      readFile: () => null,
       mkdirp: () => {},
       checkWritable: () => {},
       fetch: async () => { throw new Error("ECONNREFUSED"); },
@@ -429,13 +435,16 @@ describe("rig setup", () => {
     // Other steps still attempted
     const cmux = result.steps.find((s) => s.id === "cmux_install");
     expect(cmux).toBeDefined();
-    expect(cmux?.status).toBe("pass");
+    expect(cmux?.status).toBe("applied");
   });
 
   it("enables cmux automation mode on macOS when cmux is installed but not yet controllable", async () => {
     let cmuxReady = false;
     const seen: string[] = [];
+    const writeSpy = vi.fn();
     const deps = makeDeps({
+      readFile: (filePath: string) => filePath === CMUX_SETTINGS_PATH ? null : null,
+      writeFile: writeSpy,
       exec: (cmd: string) => {
         seen.push(cmd);
         if (cmd === "brew --version") return "Homebrew 4.0\n";
@@ -445,11 +454,10 @@ describe("rig setup", () => {
           throw new Error("socket not ready");
         }
         if (cmd === "cmux --help") return "cmux help\n";
-        if (cmd === "defaults write com.cmuxterm.app socketControlMode -string automation") {
+        if (cmd === "open -a /Applications/cmux.app") {
           cmuxReady = true;
           return "";
         }
-        if (cmd === "open -a /Applications/cmux.app") return "";
         if (cmd === "claude --version") return "2.1.101 (Claude Code)\n";
         if (cmd === "claude auth status") return "Authenticated\n";
         if (cmd === "codex --version") return "codex-cli 0.118.0\n";
@@ -463,23 +471,48 @@ describe("rig setup", () => {
     const cmux = result.steps.find((s) => s.id === "cmux_install");
     expect(cmux?.status).toBe("applied");
     expect(cmux?.message).toContain("Enabled cmux socket control");
-    expect(seen).toContain("defaults write com.cmuxterm.app socketControlMode -string automation");
     expect(seen).toContain("open -a /Applications/cmux.app");
+    expect(writeSpy).toHaveBeenCalledWith(
+      CMUX_SETTINGS_PATH,
+      expect.stringContaining("\"socketControlMode\": \"automation\""),
+    );
     expect(result.ready).toBe(true);
   });
 
   it("normalizes restrictive cmux socket control on macOS even when shell cmux already works", async () => {
     const seen: string[] = [];
+    const writeSpy = vi.fn();
+    const doctorDeps: DoctorDeps = {
+      exists: () => true,
+      baseDir: "/install/cli/dist",
+      readFile: () => null,
+      exec: (cmd: string) => {
+        if (cmd === "tmux -V") return "tmux 3.4\n";
+        if (cmd === "cmux capabilities --json") return '{"capabilities":["surface.focus"]}\n';
+        if (cmd === "cmux --help") return "cmux help\n";
+        return "";
+      },
+      checkPort: async () => false,
+      configStore: { resolve: () => ({ daemon: { port: 7433, host: "127.0.0.1" }, db: { path: "/tmp/openrig/openrig.sqlite" }, transcripts: { enabled: true, path: "/tmp/openrig/transcripts" } }) },
+      platform: "darwin",
+      mkdirp: () => {},
+      checkWritable: () => {},
+      fetch: async (url: string) => {
+        if (url.includes("/healthz")) return { ok: true };
+        if (url.includes("/api/adapters/cmux/status")) return { ok: true, json: async () => ({ available: true }) };
+        throw new Error(`unexpected fetch ${url}`);
+      },
+    };
     const deps = makeDeps({
+      readFile: (filePath: string) => filePath === CMUX_SETTINGS_PATH ? "{\n  \"automation\": {\n    \"socketControlMode\": \"cmuxOnly\"\n  }\n}\n" : null,
+      writeFile: writeSpy,
       exec: (cmd: string) => {
         seen.push(cmd);
         if (cmd === "brew --version") return "Homebrew 4.0\n";
         if (cmd === "tmux -V") return "tmux 3.4\n";
         if (cmd === "cmux capabilities --json") return '{"capabilities":["surface.focus"]}\n';
         if (cmd === "cmux --help") return "cmux help\n";
-        if (cmd === "defaults read com.cmuxterm.app socketControlMode") return "cmuxOnly\n";
-        if (cmd === "defaults write com.cmuxterm.app socketControlMode -string automation") return "";
-        if (cmd === "open -a /Applications/cmux.app") return "";
+        if (cmd === "cmux reload-config") return "";
         if (cmd === "claude --version") return "2.1.101 (Claude Code)\n";
         if (cmd === "claude auth status") return "Authenticated\n";
         if (cmd === "codex --version") return "codex-cli 0.118.0\n";
@@ -488,24 +521,27 @@ describe("rig setup", () => {
       },
     });
 
-    const result = await runSetup(deps, {});
+    const result = await runSetup(deps, { doctorDeps });
 
     const cmux = result.steps.find((s) => s.id === "cmux_install");
     expect(cmux?.status).toBe("applied");
     expect(cmux?.message).toContain("automation");
-    expect(seen).toContain("defaults read com.cmuxterm.app socketControlMode");
-    expect(seen).toContain("defaults write com.cmuxterm.app socketControlMode -string automation");
+    expect(seen).toContain("cmux reload-config");
+    expect(writeSpy).toHaveBeenCalledWith(
+      CMUX_SETTINGS_PATH,
+      expect.stringContaining("\"socketControlMode\": \"automation\""),
+    );
     expect(result.ready).toBe(true);
   });
 
   it("fails honestly when cmux stays uncontrollable after automatic macOS setup", async () => {
     const deps = makeDeps({
+      readFile: (filePath: string) => filePath === CMUX_SETTINGS_PATH ? "{\n  \"automation\": {\n    \"socketControlMode\": \"cmuxOnly\"\n  }\n}\n" : null,
       exec: (cmd: string) => {
         if (cmd === "brew --version") return "Homebrew 4.0\n";
         if (cmd === "tmux -V") return "tmux 3.4\n";
         if (cmd === "cmux capabilities --json") throw new Error("broken pipe");
         if (cmd === "cmux --help") return "cmux help\n";
-        if (cmd === "defaults write com.cmuxterm.app socketControlMode -string automation") return "";
         if (cmd === "open -a /Applications/cmux.app") return "";
         if (cmd === "claude --version") return "2.1.101 (Claude Code)\n";
         if (cmd === "claude auth status") return "Authenticated\n";
@@ -520,6 +556,69 @@ describe("rig setup", () => {
     const cmux = result.steps.find((s) => s.id === "cmux_install");
     expect(cmux?.status).toBe("fail");
     expect(cmux?.message).toContain("cmux installed but control unavailable");
+    expect(result.ready).toBe(false);
+  });
+
+  it("does not rewrite compatible password mode when shell cmux already works", async () => {
+    const writeSpy = vi.fn();
+    const deps = makeDeps({
+      readFile: (filePath: string) => filePath === CMUX_SETTINGS_PATH ? "{\n  \"automation\": {\n    \"socketControlMode\": \"password\"\n  }\n}\n" : null,
+      writeFile: writeSpy,
+      exec: (cmd: string) => {
+        if (cmd === "brew --version") return "Homebrew 4.0\n";
+        if (cmd === "tmux -V") return "tmux 3.4\n";
+        if (cmd === "cmux capabilities --json") return '{"capabilities":["surface.focus"]}\n';
+        if (cmd === "cmux --help") return "cmux help\n";
+        if (cmd === "claude --version") return "2.1.101 (Claude Code)\n";
+        if (cmd === "claude auth status") return "Authenticated\n";
+        if (cmd === "codex --version") return "codex-cli 0.118.0\n";
+        if (cmd === "codex login status") return "Logged in\n";
+        throw new Error(`unexpected: ${cmd}`);
+      },
+    });
+
+    const result = await runSetup(deps, {});
+
+    const cmux = result.steps.find((s) => s.id === "cmux_install");
+    expect(cmux?.status).toBe("pass");
+    expect(writeSpy).not.toHaveBeenCalledWith(
+      CMUX_SETTINGS_PATH,
+      expect.any(String),
+    );
+    expect(result.ready).toBe(true);
+  });
+
+  it("fails setup when shell cmux works but the running daemon still cannot control cmux", async () => {
+    const doctorDeps: DoctorDeps = {
+      exists: () => true,
+      baseDir: "/install/cli/dist",
+      readFile: () => null,
+      exec: (cmd: string) => {
+        if (cmd === "tmux -V") return "tmux 3.4\n";
+        if (cmd === "cmux capabilities --json") return '{"capabilities":["surface.focus"]}\n';
+        if (cmd === "cmux --help") return "cmux help\n";
+        return "";
+      },
+      checkPort: async () => false,
+      configStore: { resolve: () => ({ daemon: { port: 7433, host: "127.0.0.1" }, db: { path: "/tmp/openrig/openrig.sqlite" }, transcripts: { enabled: true, path: "/tmp/openrig/transcripts" } }) },
+      platform: "darwin",
+      mkdirp: () => {},
+      checkWritable: () => {},
+      fetch: async (url: string) => {
+        if (url.includes("/healthz")) return { ok: true };
+        if (url.includes("/api/adapters/cmux/status")) return { ok: true, json: async () => ({ available: false }) };
+        throw new Error(`unexpected fetch ${url}`);
+      },
+    };
+    const deps = makeDeps({
+      readFile: (filePath: string) => filePath === CMUX_SETTINGS_PATH ? "{\n  \"automation\": {\n    \"socketControlMode\": \"password\"\n  }\n}\n" : null,
+    });
+
+    const result = await runSetup(deps, { doctorDeps });
+
+    const cmux = result.steps.find((s) => s.id === "cmux_install");
+    expect(cmux?.status).toBe("fail");
+    expect(cmux?.message).toContain("running daemon still cannot control cmux");
     expect(result.ready).toBe(false);
   });
 

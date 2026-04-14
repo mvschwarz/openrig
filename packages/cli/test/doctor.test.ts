@@ -1,6 +1,9 @@
 import { describe, it, expect, vi } from "vitest";
 import { Command } from "commander";
 import { doctorCommand, runDoctorChecks, type DoctorDeps } from "../src/commands/doctor.js";
+import { resolveCmuxSettingsPath } from "../src/cmux-config.js";
+
+const CMUX_SETTINGS_PATH = resolveCmuxSettingsPath();
 
 const defaultConfig = {
   daemon: { port: 7433, host: "127.0.0.1" },
@@ -12,6 +15,7 @@ function makeDeps(overrides?: Partial<DoctorDeps>): DoctorDeps {
   return {
     exists: () => true,
     baseDir: "/install/cli/dist",
+    readFile: () => null,
     exec: (cmd: string) => {
       if (cmd === "tmux -V") return "tmux 3.4\n";
       if (cmd === "cmux capabilities --json") return '{"capabilities":["surface.focus"]}\n';
@@ -157,13 +161,13 @@ describe("runDoctorChecks", () => {
 
   it("cmux_shell warn when shell cmux installed but control unavailable", () => {
     const deps = makeDeps({
+      readFile: (filePath: string) => filePath === CMUX_SETTINGS_PATH ? "{\n  \"automation\": {\n    \"socketControlMode\": \"cmuxOnly\"\n  }\n}\n" : null,
       exec: (cmd: string) => {
         if (cmd === "tmux -V") return "tmux 3.4\n";
         if (cmd === "cmux capabilities --json") {
           throw new Error("Failed to connect to socket at /tmp/cmux.sock");
         }
         if (cmd === "cmux --help") return "cmux help\n";
-        if (cmd === "defaults read com.cmuxterm.app socketControlMode") return "localOnly\n";
         return "";
       },
     });
@@ -171,6 +175,8 @@ describe("runDoctorChecks", () => {
     const cmuxShell = checks.find((c) => c.name === "cmux_shell");
     expect(cmuxShell?.status).toBe("warn");
     expect(cmuxShell?.message).toContain("control unavailable");
+    expect(cmuxShell?.fix).toContain("cmuxOnly");
+    expect(cmuxShell?.fix).toContain("socketControlMode");
   });
 
   it("cmux_shell warn when cmux missing", () => {
@@ -211,13 +217,7 @@ describe("runDoctorChecks", () => {
 
   it("shell cmux pass + restrictive macOS socket control + daemon cmux unavailable -> cmux_daemon points at socket control mode", async () => {
     const deps = makeDeps({
-      exec: (cmd: string) => {
-        if (cmd === "tmux -V") return "tmux 3.4\n";
-        if (cmd === "cmux capabilities --json") return '{"capabilities":["surface.focus"]}\n';
-        if (cmd === "cmux --help") return "cmux help\n";
-        if (cmd === "defaults read com.cmuxterm.app socketControlMode") return "cmuxOnly\n";
-        return "";
-      },
+      readFile: (filePath: string) => filePath === CMUX_SETTINGS_PATH ? "{\n  \"automation\": {\n    \"socketControlMode\": \"cmuxOnly\"\n  }\n}\n" : null,
       fetch: async (url: string) => {
         if (url.includes("/healthz")) return { ok: true } as Response;
         if (url.includes("/adapters/cmux/status")) return { ok: true, json: async () => ({ available: false }) } as Response;
@@ -237,6 +237,70 @@ describe("runDoctorChecks", () => {
     expect(cmuxDaemon?.reason).toContain("cmuxOnly");
     expect(cmuxDaemon?.fix).toContain("rig setup");
     expect(cmuxDaemon?.fix).toContain("automation");
+  });
+
+  it("shell cmux pass + implicit default cmuxOnly + daemon cmux unavailable -> cmux_daemon points at effective default, not a fake file value", async () => {
+    const deps = makeDeps({
+      readFile: (filePath: string) => filePath === CMUX_SETTINGS_PATH ? null : null,
+      fetch: async (url: string) => {
+        if (url.includes("/healthz")) return { ok: true } as Response;
+        if (url.includes("/adapters/cmux/status")) return { ok: true, json: async () => ({ available: false }) } as Response;
+        return { ok: true } as Response;
+      },
+      checkPort: async () => false,
+    });
+
+    const { checks, asyncChecks } = runDoctorChecks(deps);
+    const resolved = await Promise.all(asyncChecks ?? []);
+    const allChecks = [...checks, ...resolved];
+
+    const cmuxDaemon = allChecks.find((c) => c.name === "cmux_daemon");
+    expect(cmuxDaemon?.status).toBe("warn");
+    expect(cmuxDaemon?.reason).toContain("default");
+    expect(cmuxDaemon?.reason).toContain("cmuxOnly");
+    expect(cmuxDaemon?.reason).not.toContain("is 'cmuxOnly' in");
+  });
+
+  it("shell cmux pass + unreadable cmux settings -> cmux_daemon warns about parse failure", async () => {
+    const deps = makeDeps({
+      readFile: (filePath: string) => filePath === CMUX_SETTINGS_PATH ? "{\n  invalid\n" : null,
+      fetch: async (url: string) => {
+        if (url.includes("/healthz")) return { ok: true } as Response;
+        if (url.includes("/adapters/cmux/status")) return { ok: true, json: async () => ({ available: false }) } as Response;
+        return { ok: true } as Response;
+      },
+      checkPort: async () => false,
+    });
+
+    const { checks, asyncChecks } = runDoctorChecks(deps);
+    const resolved = await Promise.all(asyncChecks ?? []);
+    const allChecks = [...checks, ...resolved];
+
+    const cmuxDaemon = allChecks.find((c) => c.name === "cmux_daemon");
+    expect(cmuxDaemon?.status).toBe("warn");
+    expect(cmuxDaemon?.reason).toContain("unreadable");
+    expect(cmuxDaemon?.fix).toContain("~/.config/cmux/settings.json");
+  });
+
+  it("shell cmux pass + compatible password mode + daemon cmux unavailable -> falls back to generic daemon warning", async () => {
+    const deps = makeDeps({
+      readFile: (filePath: string) => filePath === CMUX_SETTINGS_PATH ? "{\n  \"automation\": {\n    \"socketControlMode\": \"password\"\n  }\n}\n" : null,
+      fetch: async (url: string) => {
+        if (url.includes("/healthz")) return { ok: true } as Response;
+        if (url.includes("/adapters/cmux/status")) return { ok: true, json: async () => ({ available: false }) } as Response;
+        return { ok: true } as Response;
+      },
+      checkPort: async () => false,
+    });
+
+    const { checks, asyncChecks } = runDoctorChecks(deps);
+    const resolved = await Promise.all(asyncChecks ?? []);
+    const allChecks = [...checks, ...resolved];
+
+    const cmuxDaemon = allChecks.find((c) => c.name === "cmux_daemon");
+    expect(cmuxDaemon?.status).toBe("warn");
+    expect(cmuxDaemon?.reason).toContain("inherited a terminal/session environment");
+    expect(cmuxDaemon?.reason).not.toContain("socketControlMode");
   });
 
   it("daemon not running -> cmux_daemon skipped and does not make doctor unhealthy", async () => {

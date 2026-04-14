@@ -45,6 +45,7 @@
     "better-sqlite3": "^11.8.0",
     "commander": "^13.0.0",
     "hono": "^4.7.0",
+    "jsonc-parser": "^3.3.1",
     "tar": "^7.5.13",
     "ulid": "^2.3.0",
     "yaml": "^2.8.3",
