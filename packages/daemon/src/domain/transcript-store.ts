@@ -65,6 +65,20 @@ function isLikelyTuiFragment(line: string): boolean {
   return normalized.length <= 12;
 }
 
+function stripOrphanCursorFragments(line: string): string {
+  return line.replace(/\[\d{1,3}[A-Za-z]/g, " ");
+}
+
+function isStatusOverlayLine(line: string): boolean {
+  const trimmed = line.trim();
+  if (!trimmed) return false;
+  if (trimmed === "Checking for updates") return true;
+  if (/accept edits on/i.test(trimmed)) return true;
+  if (/background terminal running/i.test(trimmed)) return true;
+  if (/gpt-5\.4 xhigh fast/i.test(trimmed)) return true;
+  return false;
+}
+
 const TAIL_CHUNK_SIZE = 16 * 1024;
 
 /**
@@ -228,11 +242,13 @@ export class TranscriptStore {
     const normalizedLines = this.stripAnsi(rawText)
       .split("\n")
       .map((line) => stripShellPromptPrefix(line))
+      .map((line) => stripOrphanCursorFragments(line))
       .map((line) => line.trimEnd());
     const filtered = normalizedLines
       .filter((line) => line.trim() !== "")
       .filter((line) => !isBareShellPrompt(line));
     return filtered
+      .filter((line) => !isStatusOverlayLine(line))
       .filter((line) => !isUiChromeLine(line))
       .filter((line) => !isSpinnerOnlyLine(line))
       .filter((line) => !isLikelyTuiFragment(line))
