@@ -173,6 +173,8 @@ describe("Codex runtime adapter", () => {
         "› Use /skills to list available skills",
         "",
         "  gpt-5.4 default · ~/code/openrig",
+        "",
+        "",
       ].join("\n")),
     });
     const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs() });
