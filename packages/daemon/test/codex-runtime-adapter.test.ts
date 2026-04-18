@@ -44,10 +44,10 @@ function makeBinding(cwd = "/project"): NodeBinding {
   };
 }
 
-function createCodexLogsDb(homeDir: string, pid: number, threadId: string): void {
+function createCodexLogsDb(homeDir: string, pid: number, threadId: string, dbName = "logs_1.sqlite"): void {
   const codexDir = nodePath.join(homeDir, ".codex");
   fs.mkdirSync(codexDir, { recursive: true });
-  const db = new Database(nodePath.join(codexDir, "logs_1.sqlite"));
+  const db = new Database(nodePath.join(codexDir, dbName));
   try {
     db.exec(`
       CREATE TABLE logs (
@@ -309,10 +309,70 @@ describe("Codex runtime adapter", () => {
     });
   });
 
+  it("launchHarness captures a fresh Codex thread id from a nested wrapper -> vendor codex process tree", async () => {
+    const tmux = mockTmux({
+      getPanePid: vi.fn(async () => 900),
+    });
+    const adapter = new CodexRuntimeAdapter({
+      tmux,
+      fsOps: mockFs(),
+      listProcesses: () => [
+        { pid: 900, ppid: 1, command: "-zsh" },
+        { pid: 901, ppid: 900, command: "node /opt/homebrew/bin/codex -C /project -a never -s workspace-write" },
+        { pid: 902, ppid: 901, command: "/opt/homebrew/lib/node_modules/@openai/codex/vendor/codex/codex -C /project -a never -s workspace-write" },
+      ],
+      readThreadIdByPid: (pid) => pid === 902 ? "019d45bc-117d-78a3-a4ad-6fb186e5a86d" : undefined,
+      sleep: async () => {},
+    });
+
+    const result = await adapter.launchHarness(makeBinding(), { name: "dev-qa@test-rig" });
+
+    expect(result).toEqual({
+      ok: true,
+      resumeToken: "019d45bc-117d-78a3-a4ad-6fb186e5a86d",
+      resumeType: "codex_id",
+    });
+  });
+
   it("launchHarness captures a fresh Codex thread id from the child process home directory", async () => {
     const tempRoot = fs.mkdtempSync(nodePath.join(os.tmpdir(), "rigged-codex-home-"));
     const actualHome = nodePath.join(tempRoot, "actual-home");
     createCodexLogsDb(actualHome, 901, "019d45bc-117d-78a3-a4ad-6fb186e5a86d");
+
+    const tmux = mockTmux({
+      getPanePid: vi.fn(async () => 900),
+    });
+    const adapter = new CodexRuntimeAdapter({
+      tmux,
+      fsOps: {
+        readFile: (p: string) => fs.readFileSync(p, "utf-8"),
+        writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"),
+        exists: (p: string) => fs.existsSync(p),
+        mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }),
+        listFiles: (dir: string) => fs.readdirSync(dir),
+        homedir: "/wrong-home",
+      },
+      listProcesses: () => [
+        { pid: 900, ppid: 1, command: "-zsh" },
+        { pid: 901, ppid: 900, command: "codex" },
+      ],
+      resolveHomeDirByPid: (pid) => pid === 901 ? actualHome : undefined,
+      sleep: async () => {},
+    });
+
+    const result = await adapter.launchHarness(makeBinding(), { name: "dev-qa@test-rig" });
+
+    expect(result).toEqual({
+      ok: true,
+      resumeToken: "019d45bc-117d-78a3-a4ad-6fb186e5a86d",
+      resumeType: "codex_id",
+    });
+  });
+
+  it("launchHarness captures a fresh Codex thread id from the current versioned logs database", async () => {
+    const tempRoot = fs.mkdtempSync(nodePath.join(os.tmpdir(), "rigged-codex-home-"));
+    const actualHome = nodePath.join(tempRoot, "actual-home");
+    createCodexLogsDb(actualHome, 901, "019d45bc-117d-78a3-a4ad-6fb186e5a86d", "logs_2.sqlite");
 
     const tmux = mockTmux({
       getPanePid: vi.fn(async () => 900),

@@ -24,10 +24,10 @@ function mockTmux(overrides?: Partial<TmuxAdapter>): TmuxAdapter {
   } as unknown as TmuxAdapter;
 }
 
-function createCodexLogsDb(homeDir: string, pid: number, threadId: string): void {
+function createCodexLogsDb(homeDir: string, pid: number, threadId: string, dbName = "logs_1.sqlite"): void {
   const codexDir = nodePath.join(homeDir, ".codex");
   fs.mkdirSync(codexDir, { recursive: true });
-  const db = new Database(nodePath.join(codexDir, "logs_1.sqlite"));
+  const db = new Database(nodePath.join(codexDir, dbName));
   try {
     db.exec(`
       CREATE TABLE logs (
@@ -87,10 +87,86 @@ describe("ResumeMetadataRefresher", () => {
     );
   });
 
+  it("refreshes missing Codex resume token from a nested wrapper -> vendor codex process tree", async () => {
+    const sessionRegistry = {
+      updateResumeToken: vi.fn(),
+    } as unknown as SessionRegistry;
+    const tmux = mockTmux({
+      getPanePid: vi.fn(async () => 900),
+    });
+    const refresher = new ResumeMetadataRefresher({
+      sessionRegistry,
+      tmuxAdapter: tmux,
+      listProcesses: () => [
+        { pid: 900, ppid: 1, command: "-zsh" },
+        { pid: 901, ppid: 900, command: "node /opt/homebrew/bin/codex -C /project -a never -s workspace-write" },
+        { pid: 902, ppid: 901, command: "/opt/homebrew/lib/node_modules/@openai/codex/vendor/codex/codex -C /project -a never -s workspace-write" },
+      ],
+      readCodexThreadIdByPid: (pid) => pid === 902 ? "019d45c3-e909-7152-b52e-34edab4070ed" : undefined,
+      sleep: async () => {},
+    });
+
+    await refresher.refresh([
+      {
+        sessionId: "sess-1",
+        sessionName: "dev-qa@demo-rig",
+        runtime: "codex",
+        resumeType: null,
+        resumeToken: null,
+      },
+    ]);
+
+    expect(sessionRegistry.updateResumeToken).toHaveBeenCalledWith(
+      "sess-1",
+      "codex_id",
+      "019d45c3-e909-7152-b52e-34edab4070ed"
+    );
+  });
+
   it("refreshes missing Codex resume token from the child process home directory", async () => {
     const tempRoot = fs.mkdtempSync(nodePath.join(os.tmpdir(), "rigged-codex-refresh-"));
     const actualHome = nodePath.join(tempRoot, "actual-home");
     createCodexLogsDb(actualHome, 901, "019d45c3-e909-7152-b52e-34edab4070ed");
+
+    const sessionRegistry = {
+      updateResumeToken: vi.fn(),
+    } as unknown as SessionRegistry;
+    const tmux = mockTmux({
+      getPanePid: vi.fn(async () => 900),
+    });
+    const refresher = new ResumeMetadataRefresher({
+      sessionRegistry,
+      tmuxAdapter: tmux,
+      listProcesses: () => [
+        { pid: 900, ppid: 1, command: "-zsh" },
+        { pid: 901, ppid: 900, command: "codex" },
+      ],
+      resolveHomeDirByPid: (pid) => pid === 901 ? actualHome : undefined,
+      homeDir: "/wrong-home",
+      sleep: async () => {},
+    });
+
+    await refresher.refresh([
+      {
+        sessionId: "sess-1",
+        sessionName: "dev-qa@demo-rig",
+        runtime: "codex",
+        resumeType: null,
+        resumeToken: null,
+      },
+    ]);
+
+    expect(sessionRegistry.updateResumeToken).toHaveBeenCalledWith(
+      "sess-1",
+      "codex_id",
+      "019d45c3-e909-7152-b52e-34edab4070ed"
+    );
+  });
+
+  it("refreshes missing Codex resume token from the current versioned logs database", async () => {
+    const tempRoot = fs.mkdtempSync(nodePath.join(os.tmpdir(), "rigged-codex-refresh-"));
+    const actualHome = nodePath.join(tempRoot, "actual-home");
+    createCodexLogsDb(actualHome, 901, "019d45c3-e909-7152-b52e-34edab4070ed", "logs_2.sqlite");
 
     const sessionRegistry = {
       updateResumeToken: vi.fn(),
