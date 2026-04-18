@@ -109,18 +109,18 @@ export function assessNativeResumeProbe(
         detail: "Codex is waiting for workspace trust approval before the session can become interactive.",
       };
     }
-    if (paneContent.includes("Update available!") || paneContent.includes("Updating Codex")) {
-      return {
-        status: "inconclusive",
-        code: "update_gate",
-        detail: "Codex reached an update flow, so process-alive alone is not proof of a restored conversation.",
-      };
-    }
     if (looksLikeCodexTui(paneContent)) {
       return {
         status: "resumed",
         code: "active_runtime",
         detail: "Codex is running with an active interactive TUI in the probe pane.",
+      };
+    }
+    if (paneContent.includes("Update available!") || paneContent.includes("Updating Codex")) {
+      return {
+        status: "inconclusive",
+        code: "update_gate",
+        detail: "Codex reached an update flow, so process-alive alone is not proof of a restored conversation.",
       };
     }
     if (paneCommand.startsWith("codex")) {

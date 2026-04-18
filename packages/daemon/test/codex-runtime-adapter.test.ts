@@ -132,6 +132,32 @@ describe("Codex runtime adapter", () => {
     });
   });
 
+  it("checkReady returns true when Codex is interactive even if an update banner remains in scrollback", async () => {
+    const tmux = mockTmux({
+      getPaneCommand: vi.fn(async () => "codex"),
+      capturePaneContent: vi.fn(async () => [
+        "✨ Update available! 0.120.0 -> 0.121.0",
+        "Run npm install -g @openai/codex to update.",
+        "",
+        "╭───────────────────────────────────────╮",
+        "│ >_ OpenAI Codex (v0.120.0)            │",
+        "│                                       │",
+        "│ model:     gpt-5.4   /model to change │",
+        "│ directory: ~/code/openrig             │",
+        "╰───────────────────────────────────────╯",
+        "",
+        "› Improve documentation in @filename",
+        "",
+        "  gpt-5.4 default · ~/code/openrig",
+      ].join("\n")),
+    });
+    const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs() });
+
+    const result = await adapter.checkReady(makeBinding());
+
+    expect(result).toEqual({ ready: true });
+  });
+
   // T8: listInstalled reports projected resources
   it("listInstalled reports projected resources in .agents/", async () => {
     const fs = mockFs({
