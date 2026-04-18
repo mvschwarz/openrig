@@ -207,6 +207,32 @@ describe("rig setup", () => {
     expect(verify?.status).toBe("pass");
   });
 
+  it("fails setup honestly when tmux is installed but the default control socket is unhealthy", async () => {
+    const deps = makeDeps({
+      exec: (cmd: string) => {
+        if (cmd === "brew --version") return "Homebrew 4.0\n";
+        if (cmd === "tmux -V") return "tmux 3.4\n";
+        if (cmd === "tmux list-sessions") throw new Error("server exited unexpectedly");
+        if (cmd === "cmux capabilities --json") return '{"capabilities":[]}\n';
+        if (cmd === "cmux --help") return "cmux help\n";
+        if (cmd === "claude --version") return "2.1.101 (Claude Code)\n";
+        if (cmd === "claude auth status") return "Authenticated\n";
+        if (cmd === "codex --version") return "codex-cli 0.118.0\n";
+        if (cmd === "codex login status") return "Logged in\n";
+        return "";
+      },
+    });
+
+    const result = await runSetup(deps, {});
+
+    const tmux = result.steps.find((s) => s.id === "tmux_install");
+    expect(tmux?.status).toBe("fail");
+    expect(tmux?.message).toContain("control socket");
+    expect(tmux?.reason).toContain("server exited unexpectedly");
+    expect(tmux?.fixHint).toContain("restart the default tmux server");
+    expect(result.ready).toBe(false);
+  });
+
   it("full profile extends core with jq_install and gh_install", async () => {
     const deps = makeDeps();
     const result = await runSetup(deps, { full: true });
@@ -283,6 +309,7 @@ describe("rig setup", () => {
       platform: "linux",
       exec: (cmd: string) => {
         if (cmd === "tmux -V") return "tmux 3.4\n";
+        if (cmd === "tmux list-sessions") return "";
         if (cmd === "cmux capabilities --json") throw new Error("not found");
         if (cmd === "cmux --help") throw new Error("not found");
         if (cmd === "claude --version") return "2.1.101 (Claude Code)\n";
@@ -305,6 +332,7 @@ describe("rig setup", () => {
       exec: (cmd: string) => {
         if (cmd === "brew --version") throw new Error("command not found: brew");
         if (cmd === "tmux -V") throw new Error("command not found: tmux");
+        if (cmd === "tmux list-sessions") throw new Error("command not found: tmux");
         if (cmd === "cmux capabilities --json") throw new Error("not found");
         if (cmd === "cmux --help") throw new Error("not found");
         throw new Error(`unexpected: ${cmd}`);
@@ -567,6 +595,7 @@ describe("rig setup", () => {
       exec: (cmd: string) => {
         if (cmd === "brew --version") return "Homebrew 4.0\n";
         if (cmd === "tmux -V") return "tmux 3.4\n";
+        if (cmd === "tmux list-sessions") return "";
         if (cmd === "cmux capabilities --json") return '{"capabilities":["surface.focus"]}\n';
         if (cmd === "cmux --help") return "cmux help\n";
         if (cmd === "claude --version") return "2.1.101 (Claude Code)\n";
@@ -628,6 +657,7 @@ describe("rig setup", () => {
       exec: (cmd: string, opts?: { timeoutMs?: number }) => {
         if (cmd === "brew --version") return "Homebrew 4.0\n";
         if (cmd === "tmux -V") return "tmux 3.4\n";
+        if (cmd === "tmux list-sessions") throw new Error("error connecting to /tmp/tmux (No such file or directory)");
         if (cmd === "cmux capabilities --json") throw new Error("command not found: cmux");
         if (cmd === "cmux --help") throw new Error("command not found: cmux");
         if (cmd === "brew install --cask cmux") {
@@ -659,6 +689,7 @@ describe("rig setup", () => {
       exec: (cmd: string, opts?: { timeoutMs?: number }) => {
         if (cmd === "brew --version") return "Homebrew 4.0\n";
         if (cmd === "tmux -V") return "tmux 3.4\n";
+        if (cmd === "tmux list-sessions") return "";
         if (cmd === "cmux capabilities --json") return '{"capabilities":[]}\n';
         if (cmd === "claude --version") {
           if (claudeInstalled) return "2.1.101 (Claude Code)\n";

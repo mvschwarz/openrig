@@ -3,6 +3,7 @@ import { accessSync, mkdirSync, constants } from "node:fs";
 import { dirname } from "node:path";
 import type { ConfigStore, RiggedConfig } from "./config-store.js";
 import type { DaemonStatus } from "./daemon-lifecycle.js";
+import { buildTmuxControlFailure, probeTmuxControlAsync } from "./tmux-health.js";
 
 export interface PreflightCheck {
   name: string;
@@ -135,16 +136,25 @@ export class SystemPreflight {
     }
 
     // 2. tmux availability
-    try {
-      await this.deps.exec("tmux -V");
-      checks.push({ name: "tmux", ok: true });
-    } catch {
+    const tmuxProbe = await probeTmuxControlAsync(this.deps.exec);
+    if (tmuxProbe.code === "not_installed") {
       checks.push({
         name: "tmux",
         ok: false,
         error: "tmux was not found in PATH.",
         reason: "OpenRig uses tmux to create and control agent sessions.",
         fix: "Install tmux (brew install tmux on macOS, apt install tmux on Debian/Ubuntu).",
+      });
+    } else if (tmuxProbe.available) {
+      checks.push({ name: "tmux", ok: true });
+    } else {
+      const failure = buildTmuxControlFailure(tmuxProbe.detail ?? "unknown tmux control failure");
+      checks.push({
+        name: "tmux",
+        ok: false,
+        error: failure.message,
+        reason: failure.reason,
+        fix: failure.fix,
       });
     }
 

@@ -52,6 +52,12 @@ function runningDeps(port: number): StatusDeps {
   };
 }
 
+function healthyPreflightExec(cmd: string): Promise<string> {
+  if (cmd === "tmux -V") return Promise.resolve("tmux 3.6a");
+  if (cmd === "tmux list-sessions") return Promise.resolve("");
+  return Promise.resolve("");
+}
+
 describe("Up CLI", () => {
   let server: http.Server;
   let port: number;
@@ -375,7 +381,7 @@ describe("Up CLI", () => {
 
     const prog = new Command();
     prog.exitOverride();
-    prog.addCommand(upCommand(deps));
+    prog.addCommand(upCommand({ ...deps, preflightExec: healthyPreflightExec }));
 
     await captureLogs(async () => {
       await prog.parseAsync(["node", "rig", "up", "/tmp/rig.yaml"]);
@@ -510,7 +516,7 @@ describe("Up CLI", () => {
 
     const prog = new Command();
     prog.exitOverride();
-    prog.addCommand(upCommand(deps));
+    prog.addCommand(upCommand({ ...deps, preflightExec: healthyPreflightExec }));
 
     const { exitCode } = await captureLogs(async () => {
       await prog.parseAsync(["node", "rig", "up", "/tmp/test.yaml"]);
@@ -550,7 +556,7 @@ describe("Up CLI", () => {
 
     const prog = new Command();
     prog.exitOverride();
-    prog.addCommand(upCommand(deps));
+    prog.addCommand(upCommand({ ...deps, preflightExec: healthyPreflightExec }));
 
     const { logs, exitCode } = await captureLogs(async () => {
       await prog.parseAsync(["node", "rig", "up", "/tmp/test.yaml"]);

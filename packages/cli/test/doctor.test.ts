@@ -81,6 +81,7 @@ describe("runDoctorChecks", () => {
     const deps = makeDeps({
       exec: (cmd: string) => {
         if (cmd === "tmux -V") return "tmux 3.4\n";
+        if (cmd === "tmux list-sessions") return "";
         if (cmd === "tmux show-options -gqv mouse") return "on\n";
         return "";
       },
@@ -88,6 +89,26 @@ describe("runDoctorChecks", () => {
     const { checks } = runDoctorChecks(deps);
     const tmuxCheck = checks.find((c) => c.name === "tmux");
     expect(tmuxCheck?.status).toBe("pass");
+  });
+
+  it("tmux installed but default control socket unhealthy -> fail with attention guidance", () => {
+    const deps = makeDeps({
+      exec: (cmd: string) => {
+        if (cmd === "tmux -V") return "tmux 3.4\n";
+        if (cmd === "tmux list-sessions") throw new Error("server exited unexpectedly");
+        if (cmd === "cmux capabilities --json") return '{"capabilities":["surface.focus"]}\n';
+        if (cmd === "cmux --help") return "cmux help\n";
+        return "";
+      },
+    });
+
+    const { checks } = runDoctorChecks(deps);
+    const tmuxCheck = checks.find((c) => c.name === "tmux");
+
+    expect(tmuxCheck?.status).toBe("fail");
+    expect(tmuxCheck?.message).toContain("control socket");
+    expect(tmuxCheck?.reason).toContain("server exited unexpectedly");
+    expect(tmuxCheck?.fix).toContain("restart the default tmux server");
   });
 
   it("tmux mouse enabled on macOS -> pass", () => {
