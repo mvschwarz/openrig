@@ -1,4 +1,5 @@
 import os from "node:os";
+import nodePath from "node:path";
 import { execFileSync } from "node:child_process";
 import type { SessionRegistry } from "./session-registry.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
@@ -85,8 +86,8 @@ export class ResumeMetadataRefresher {
     for (let attempt = 0; attempt < 8; attempt++) {
       const shellPid = await this.tmuxAdapter.getPanePid(sessionTarget);
       if (shellPid) {
-        const codexPid = findCodexChildPid(this.listProcesses(), shellPid);
-        if (codexPid) {
+        const codexPids = findCodexDescendantPids(this.listProcesses(), shellPid);
+        for (const codexPid of codexPids) {
           const threadId = this.readCodexThreadIdByPid(codexPid);
           if (threadId) return threadId;
         }
@@ -197,9 +198,29 @@ function defaultListProcesses(): Array<{ pid: number; ppid: number; command: str
   }
 }
 
-function findCodexChildPid(processes: Array<{ pid: number; ppid: number; command: string }>, parentPid: number): number | undefined {
-  const child = processes.find((proc) => proc.ppid === parentPid && commandLooksLikeCodex(proc.command));
-  return child?.pid;
+function findCodexDescendantPids(
+  processes: Array<{ pid: number; ppid: number; command: string }>,
+  parentPid: number
+): number[] {
+  const childrenByParent = new Map<number, Array<{ pid: number; command: string }>>();
+  for (const proc of processes) {
+    const siblings = childrenByParent.get(proc.ppid) ?? [];
+    siblings.push({ pid: proc.pid, command: proc.command });
+    childrenByParent.set(proc.ppid, siblings);
+  }
+
+  const matches: number[] = [];
+  const visit = (pid: number): void => {
+    for (const child of childrenByParent.get(pid) ?? []) {
+      visit(child.pid);
+      if (commandLooksLikeCodex(child.command)) {
+        matches.push(child.pid);
+      }
+    }
+  };
+
+  visit(parentPid);
+  return matches;
 }
 
 function readCodexThreadIdFromLogs(
@@ -211,8 +232,12 @@ function readCodexThreadIdFromLogs(
 }
 
 function commandLooksLikeCodex(command: string): boolean {
-  const trimmed = command.trim();
-  return trimmed === "codex" || trimmed.startsWith("codex ");
+  const tokens = command.trim().split(/\s+/).filter(Boolean);
+  return tokens.some((token) => {
+    const unquoted = token.replace(/^['"]|['"]$/g, "");
+    const base = nodePath.basename(unquoted);
+    return base === "codex";
+  });
 }
 
 function sanitizeTmuxName(value: string): string {

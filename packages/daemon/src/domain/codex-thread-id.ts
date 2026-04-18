@@ -1,5 +1,6 @@
 import os from "node:os";
 import nodePath from "node:path";
+import fs from "node:fs";
 import { execFileSync } from "node:child_process";
 import Database from "better-sqlite3";
 
@@ -50,25 +51,55 @@ function readCodexThreadIdFromLogs(
   homeDir: string,
   exists?: (path: string) => boolean
 ): string | undefined {
-  const dbPath = nodePath.join(homeDir, ".codex", "logs_1.sqlite");
-  if (exists && !exists(dbPath)) return undefined;
+  for (const dbPath of resolveCodexLogDbPaths(homeDir, exists)) {
+    try {
+      const db = new Database(dbPath, { readonly: true });
+      try {
+        const row = db.prepare(
+          `SELECT thread_id
+           FROM logs
+           WHERE process_uuid LIKE ?
+             AND thread_id IS NOT NULL
+           ORDER BY ts DESC, ts_nanos DESC, id DESC
+           LIMIT 1`
+        ).get(`pid:${pid}:%`) as { thread_id?: string } | undefined;
+        if (row?.thread_id) {
+          return row.thread_id;
+        }
+      } finally {
+        db.close();
+      }
+    } catch {
+      continue;
+    }
+  }
+  return undefined;
+}
+
+function resolveCodexLogDbPaths(homeDir: string, exists?: (path: string) => boolean): string[] {
+  const codexDir = nodePath.join(homeDir, ".codex");
+  const discovered: Array<{ version: number; path: string }> = [];
 
   try {
-    const db = new Database(dbPath, { readonly: true });
-    try {
-      const row = db.prepare(
-        `SELECT thread_id
-         FROM logs
-         WHERE process_uuid LIKE ?
-           AND thread_id IS NOT NULL
-         ORDER BY ts DESC, ts_nanos DESC, id DESC
-         LIMIT 1`
-      ).get(`pid:${pid}:%`) as { thread_id?: string } | undefined;
-      return row?.thread_id;
-    } finally {
-      db.close();
+    for (const entry of fs.readdirSync(codexDir)) {
+      const match = entry.match(/^logs_(\d+)\.sqlite$/);
+      if (!match) continue;
+      discovered.push({
+        version: Number(match[1]),
+        path: nodePath.join(codexDir, entry),
+      });
     }
   } catch {
-    return undefined;
+    // Best effort only; fall back to the historical filename below.
   }
+
+  if (discovered.length === 0) {
+    discovered.push({ version: 1, path: nodePath.join(codexDir, "logs_1.sqlite") });
+  }
+
+  return discovered
+    .sort((a, b) => b.version - a.version)
+    .map((entry) => entry.path)
+    .filter((path, index, paths) => paths.indexOf(path) === index)
+    .filter((path) => !exists || exists(path));
 }

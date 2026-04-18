@@ -342,8 +342,8 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     for (let attempt = 0; attempt < 20; attempt++) {
       const shellPid = await this.tmux.getPanePid(target);
       if (shellPid) {
-        const codexPid = this.findCodexChildPid(shellPid);
-        if (codexPid) {
+        const codexPids = this.findCodexDescendantPids(shellPid);
+        for (const codexPid of codexPids) {
           const threadId = this.readThreadIdByPid(codexPid);
           if (threadId) return threadId;
         }
@@ -354,10 +354,9 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     return undefined;
   }
 
-  private findCodexChildPid(parentPid: number): number | undefined {
+  private findCodexDescendantPids(parentPid: number): number[] {
     const processes = this.listProcesses();
-    const child = processes.find((proc) => proc.ppid === parentPid && commandLooksLikeCodex(proc.command));
-    return child?.pid;
+    return findCodexDescendantPids(processes, parentPid);
   }
 
   private readThreadIdFromLogs(pid: number): string | undefined {
@@ -426,7 +425,36 @@ function defaultListProcesses(): Array<{ pid: number; ppid: number; command: str
   }
 }
 
+function findCodexDescendantPids(
+  processes: Array<{ pid: number; ppid: number; command: string }>,
+  parentPid: number
+): number[] {
+  const childrenByParent = new Map<number, Array<{ pid: number; command: string }>>();
+  for (const proc of processes) {
+    const siblings = childrenByParent.get(proc.ppid) ?? [];
+    siblings.push({ pid: proc.pid, command: proc.command });
+    childrenByParent.set(proc.ppid, siblings);
+  }
+
+  const matches: number[] = [];
+  const visit = (pid: number): void => {
+    for (const child of childrenByParent.get(pid) ?? []) {
+      visit(child.pid);
+      if (commandLooksLikeCodex(child.command)) {
+        matches.push(child.pid);
+      }
+    }
+  };
+
+  visit(parentPid);
+  return matches;
+}
+
 function commandLooksLikeCodex(command: string): boolean {
-  const trimmed = command.trim();
-  return trimmed === "codex" || trimmed.startsWith("codex ");
+  const tokens = command.trim().split(/\s+/).filter(Boolean);
+  return tokens.some((token) => {
+    const unquoted = token.replace(/^['"]|['"]$/g, "");
+    const base = nodePath.basename(unquoted);
+    return base === "codex";
+  });
 }
