@@ -255,6 +255,8 @@ describe("native resume probe", () => {
           "› Use /skills to list available skills",
           "",
           "  gpt-5.4 default · ~/code/openrig",
+          "",
+          "",
         ].join("\n"),
       })
     ).toEqual({

@@ -184,7 +184,7 @@ function looksLikeCodexTui(paneContent: string): boolean {
 
   const recentLines = paneContent.split("\n").slice(-12).join("\n");
   const hasPromptLine = /(^|\n)\s*›(?:\s|$)/.test(recentLines);
-  const hasModelFooter = /(^|\n)\s{2,}gpt-[^\n]+ · [^\n]+$/.test(recentLines);
+  const hasModelFooter = /(^|\n)\s{2,}gpt-[^\n]+ · [^\n]+(?:\n|$)/.test(recentLines);
 
   return hasPromptLine && hasModelFooter;
 }
