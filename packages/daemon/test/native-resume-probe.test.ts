@@ -238,6 +238,32 @@ describe("native resume probe", () => {
     });
   });
 
+  it("classifies Codex as resumed when tmux reports node and the header has scrolled out but the live prompt footer remains", () => {
+    expect(
+      assessNativeResumeProbe({
+        runtime: "codex",
+        paneCommand: "node",
+        paneContent: [
+          "› Without using tools or reading files, reply in exactly one line: CONFIRM",
+          "  CODEX2_B_20260418T1431 crimson-delta-pulse. Remember both exact lines for",
+          "  later continuity verification.",
+          "",
+          "",
+          "• CONFIRM CODEX2_B_20260418T1431 crimson-delta-pulse",
+          "",
+          "",
+          "› Use /skills to list available skills",
+          "",
+          "  gpt-5.4 default · ~/code/openrig",
+        ].join("\n"),
+      })
+    ).toEqual({
+      status: "resumed",
+      code: "active_runtime",
+      detail: "Codex is running with an active interactive TUI in the probe pane.",
+    });
+  });
+
   it("classifies a live Codex foreground process without failure markers as resumed", () => {
     expect(
       assessNativeResumeProbe({
