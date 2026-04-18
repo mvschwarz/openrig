@@ -158,6 +158,30 @@ describe("Codex runtime adapter", () => {
     expect(result).toEqual({ ready: true });
   });
 
+  it("checkReady returns true when a resumed Codex pane is foregrounded through node and only the live prompt footer remains in recent scrollback", async () => {
+    const tmux = mockTmux({
+      getPaneCommand: vi.fn(async () => "node"),
+      capturePaneContent: vi.fn(async () => [
+        "› Without using tools or reading files, reply in exactly one line: CONFIRM",
+        "  CODEX2_B_20260418T1431 crimson-delta-pulse. Remember both exact lines for",
+        "  later continuity verification.",
+        "",
+        "",
+        "• CONFIRM CODEX2_B_20260418T1431 crimson-delta-pulse",
+        "",
+        "",
+        "› Use /skills to list available skills",
+        "",
+        "  gpt-5.4 default · ~/code/openrig",
+      ].join("\n")),
+    });
+    const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs() });
+
+    const result = await adapter.checkReady(makeBinding());
+
+    expect(result).toEqual({ ready: true });
+  });
+
   // T8: listInstalled reports projected resources
   it("listInstalled reports projected resources in .agents/", async () => {
     const fs = mockFs({

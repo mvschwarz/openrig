@@ -178,7 +178,15 @@ function looksLikeClaudeLoginPrompt(paneContent: string): boolean {
 }
 
 function looksLikeCodexTui(paneContent: string): boolean {
-  return paneContent.includes("OpenAI Codex (v");
+  if (paneContent.includes("OpenAI Codex (v")) {
+    return true;
+  }
+
+  const recentLines = paneContent.split("\n").slice(-12).join("\n");
+  const hasPromptLine = /(^|\n)\s*›(?:\s|$)/.test(recentLines);
+  const hasModelFooter = /(^|\n)\s{2,}gpt-[^\n]+ · [^\n]+$/.test(recentLines);
+
+  return hasPromptLine && hasModelFooter;
 }
 
 function looksLikeCodexTrustPrompt(paneContent: string): boolean {
