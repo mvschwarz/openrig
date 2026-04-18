@@ -22,7 +22,7 @@ export function preflightCommand(depsOverride?: PreflightCommandDeps): Command {
 
       const exec = depsOverride?.exec ?? (async (c: string) => {
         const { execSync } = await import("node:child_process");
-        return execSync(c, { encoding: "utf-8" });
+        return execSync(c, { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] });
       });
 
       const preflight = new SystemPreflight({

@@ -12,6 +12,7 @@ import {
   readCmuxSocketControlModeFromText,
   resolveCmuxSettingsPath,
 } from "../cmux-config.js";
+import { buildTmuxControlFailure, probeTmuxControl } from "../tmux-health.js";
 
 interface DoctorCheck {
   name: string;
@@ -96,9 +97,17 @@ export function runDoctorChecks(deps: DoctorDeps): { checks: DoctorCheck[]; port
   }
 
   // 4. tmux
-  try {
-    const ver = deps.exec("tmux -V").trim();
-    checks.push({ name: "tmux", status: "pass", message: ver });
+  const tmuxProbe = probeTmuxControl((cmd) => deps.exec(cmd));
+  if (tmuxProbe.code === "not_installed") {
+    checks.push({
+      name: "tmux",
+      status: "fail",
+      message: "tmux not found.",
+      reason: "OpenRig uses tmux to manage agent sessions.",
+      fix: "Install tmux: brew install tmux (macOS), apt install tmux (Linux).",
+    });
+  } else if (tmuxProbe.available && tmuxProbe.version) {
+    checks.push({ name: "tmux", status: "pass", message: tmuxProbe.version });
     if (platform === "darwin") {
       const mouseMode = readTmuxMouseMode(deps);
       if (mouseMode === "on") {
@@ -117,13 +126,14 @@ export function runDoctorChecks(deps: DoctorDeps): { checks: DoctorCheck[]; port
         });
       }
     }
-  } catch {
+  } else {
+    const failure = buildTmuxControlFailure(tmuxProbe.detail ?? "unknown tmux control failure");
     checks.push({
       name: "tmux",
       status: "fail",
-      message: "tmux not found.",
-      reason: "OpenRig uses tmux to manage agent sessions.",
-      fix: "Install tmux: brew install tmux (macOS), apt install tmux (Linux).",
+      message: failure.message,
+      reason: failure.reason,
+      fix: failure.fix,
     });
   }
 
@@ -294,7 +304,7 @@ export function doctorCommand(depsOverride?: DoctorDeps): Command {
         exists: existsSync,
         baseDir: import.meta.dirname,
         readFile: (p: string) => { try { return readFileSync(p, "utf-8"); } catch { return null; } },
-        exec: (c: string) => execSync(c, { encoding: "utf-8" }),
+        exec: (c: string) => execSync(c, { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] }),
         checkPort: defaultCheckPort,
         configStore: new ConfigStore(),
         mkdirp: (dirPath: string) => mkdirSync(dirPath, { recursive: true }),

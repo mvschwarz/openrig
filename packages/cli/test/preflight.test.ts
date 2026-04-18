@@ -9,9 +9,17 @@ import { ConfigStore } from "../src/config-store.js";
 import { preflightCommand } from "../src/commands/preflight.js";
 import type { DaemonStatus } from "../src/daemon-lifecycle.js";
 
-function makeExec(tmuxOk = true): (cmd: string) => Promise<string> {
+function makeExec(tmuxMode: "healthy" | "missing" | "unhealthy" = "healthy"): (cmd: string) => Promise<string> {
   return async (cmd: string) => {
-    if (cmd.includes("tmux") && !tmuxOk) throw new Error("command not found: tmux");
+    if (cmd === "tmux -V") {
+      if (tmuxMode === "missing") throw new Error("command not found: tmux");
+      return "tmux 3.6a";
+    }
+    if (cmd === "tmux list-sessions") {
+      if (tmuxMode === "missing") throw new Error("command not found: tmux");
+      if (tmuxMode === "unhealthy") throw new Error("server exited unexpectedly");
+      return "";
+    }
     if (cmd.includes("tmux")) return "tmux 3.6a";
     return "";
   };
@@ -36,7 +44,7 @@ describe("SystemPreflight", () => {
   });
 
   function createPreflight(opts?: {
-    tmuxOk?: boolean;
+    tmuxMode?: "healthy" | "missing" | "unhealthy";
     configOverrides?: Record<string, unknown>;
     daemonStatus?: Partial<DaemonStatus>;
   }) {
@@ -47,7 +55,7 @@ describe("SystemPreflight", () => {
     mkdirSync(homeDir, { recursive: true });
 
     return new SystemPreflight({
-      exec: makeExec(opts?.tmuxOk ?? true),
+      exec: makeExec(opts?.tmuxMode ?? "healthy"),
       configStore: config,
       getDaemonStatus: makeStatus(opts?.daemonStatus),
       riggedHome: homeDir,
@@ -77,13 +85,25 @@ describe("SystemPreflight", () => {
 
   // Test 3
   it("tmux missing → ready: false with guidance", async () => {
-    const pf = createPreflight({ tmuxOk: false });
+    const pf = createPreflight({ tmuxMode: "missing" });
     const result = await pf.run();
     expect(result.ready).toBe(false);
     const tmuxCheck = result.checks.find((c) => c.name === "tmux");
     expect(tmuxCheck!.ok).toBe(false);
     expect(tmuxCheck!.error).toContain("not found");
     expect(tmuxCheck!.fix).toContain("install tmux");
+  });
+
+  it("tmux installed but default control socket unhealthy → ready: false with guidance", async () => {
+    const pf = createPreflight({ tmuxMode: "unhealthy" });
+    const result = await pf.run();
+
+    expect(result.ready).toBe(false);
+    const tmuxCheck = result.checks.find((c) => c.name === "tmux");
+    expect(tmuxCheck!.ok).toBe(false);
+    expect(tmuxCheck!.error).toContain("control socket");
+    expect(tmuxCheck!.reason).toContain("server exited unexpectedly");
+    expect(tmuxCheck!.fix).toContain("restart the default tmux server");
   });
 
   // Test 4
@@ -150,7 +170,7 @@ describe("SystemPreflight", () => {
   // Test 8
   it("multiple failures reported together (additive)", async () => {
     Object.defineProperty(process, "version", { value: "v18.19.0", writable: true });
-    const pf = createPreflight({ tmuxOk: false });
+    const pf = createPreflight({ tmuxMode: "missing" });
     const result = await pf.run();
     expect(result.ready).toBe(false);
     const failedChecks = result.checks.filter((c) => !c.ok);

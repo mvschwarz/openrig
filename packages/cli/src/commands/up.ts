@@ -7,7 +7,12 @@ import type { StatusDeps } from "./status.js";
 
 const LONG_RUNNING_UP_TIMEOUT_MS = 120_000;
 
-export function upCommand(depsOverride?: StatusDeps & { lifecycleDeps?: LifecycleDeps }): Command {
+export function upCommand(
+  depsOverride?: StatusDeps & {
+    lifecycleDeps?: LifecycleDeps;
+    preflightExec?: (cmd: string) => Promise<string>;
+  },
+): Command {
   const cmd = new Command("up")
     .description("Launch a rig or managed app from a spec, library entry, or bundle")
     .addHelpText("after", `
@@ -43,8 +48,10 @@ Examples:
           const { OPENRIG_DIR } = await import("../daemon-lifecycle.js");
           const configStore = new ConfigStore();
           resolvedConfig = configStore.resolve();
+          const preflightExec = depsOverride?.preflightExec ?? (async (cmd: string) =>
+            execSync(cmd, { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] }));
           const preflight = new SystemPreflight({
-            exec: async (cmd) => execSync(cmd, { encoding: "utf-8" }),
+            exec: preflightExec,
             configStore,
             getDaemonStatus: () => getDaemonStatus(deps.lifecycleDeps),
             openrigHome: OPENRIG_DIR,

@@ -12,6 +12,7 @@ import {
   resolveCmuxSettingsPath,
   upsertCmuxSocketControlMode,
 } from "../cmux-config.js";
+import { buildTmuxControlFailure, probeTmuxControl } from "../tmux-health.js";
 
 export interface SetupStep {
   id: string;
@@ -119,6 +120,7 @@ function defaultDeps(): SetupDeps {
       execSync(cmd, {
         encoding: "utf-8",
         timeout: opts?.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS,
+        stdio: ["pipe", "pipe", "pipe"],
       }),
     readFile: (p: string) => { try { return readFileSync(p, "utf-8"); } catch { return null; } },
     writeFile: (p: string, c: string) => writeFileSync(p, c, "utf-8"),
@@ -258,10 +260,8 @@ export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?:
   }
 
   // 2. tmux
-  try {
-    deps.exec("tmux -V");
-    steps.push({ id: "tmux_install", status: "pass", message: "tmux available." });
-  } catch {
+  const tmuxProbe = probeTmuxControl((cmd) => deps.exec(cmd));
+  if (tmuxProbe.code === "not_installed") {
     if (!brewOk) {
       steps.push({ id: "tmux_install", status: "skipped", message: "Skipped: Homebrew not available.", reason: "tmux install requires Homebrew." });
     } else {
@@ -272,6 +272,17 @@ export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?:
         steps.push({ id: "tmux_install", status: "fail", message: `Failed to install tmux: ${(err as Error).message}` });
       }
     }
+  } else if (!tmuxProbe.available) {
+    const failure = buildTmuxControlFailure(tmuxProbe.detail ?? "unknown tmux control failure");
+    steps.push({
+      id: "tmux_install",
+      status: "fail",
+      message: failure.message,
+      reason: failure.reason,
+      fixHint: failure.fix,
+    });
+  } else {
+    steps.push({ id: "tmux_install", status: "pass", message: "tmux available." });
   }
 
   // 3. cmux
