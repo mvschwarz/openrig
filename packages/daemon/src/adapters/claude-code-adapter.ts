@@ -506,6 +506,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     const existingPermissions = this.readJsonObjectField(existing, "permissions");
     const existingAllow = this.readStringArray(existingPermissions["allow"]);
     const existingDeny = this.readStringArray(existingPermissions["deny"]);
+    const existingEnabledMcpjsonServers = this.readStringArray(existing["enabledMcpjsonServers"]);
 
     const rigAllowRules = [
       "Bash(rig:*)",
@@ -547,7 +548,13 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       mcpServers["context7"] = { type: "http", url: "https://mcp.context7.com/mcp" };
     }
 
+    existing["enabledMcpjsonServers"] = [...new Set([
+      ...existingEnabledMcpjsonServers,
+      ...Object.keys(mcpServers),
+    ])];
     mcpConfig["mcpServers"] = mcpServers;
+
+    this.fs.writeFile(settingsPath, JSON.stringify(existing, null, 2));
     this.fs.writeFile(mcpPath, JSON.stringify(mcpConfig, null, 2));
   }
 }

@@ -59,6 +59,13 @@ export function assessNativeResumeProbe(
         detail: "Claude is waiting for workspace trust approval before the session can become interactive.",
       };
     }
+    if (looksLikeClaudeMcpApprovalPrompt(paneContent)) {
+      return {
+        status: "inconclusive",
+        code: "mcp_gate",
+        detail: "Claude is waiting for project MCP server approval before the session can become interactive.",
+      };
+    }
     if (looksLikeClaudeLoginPrompt(paneContent)) {
       return {
         status: "failed",
@@ -175,6 +182,12 @@ function looksLikeClaudeTrustPrompt(paneContent: string): boolean {
 function looksLikeClaudeLoginPrompt(paneContent: string): boolean {
   return paneContent.includes("Not logged in")
     && paneContent.includes("Run /login");
+}
+
+function looksLikeClaudeMcpApprovalPrompt(paneContent: string): boolean {
+  return paneContent.includes("new MCP servers found in .mcp.json")
+    && paneContent.includes("Select any you wish to enable")
+    && paneContent.includes("Enter to confirm");
 }
 
 function looksLikeCodexTui(paneContent: string): boolean {
