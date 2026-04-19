@@ -74,7 +74,25 @@ nodesRoutes.get("/:logicalId", (c) => {
 nodesRoutes.post("/:logicalId/launch", async (c) => {
   const rigId = c.req.param("rigId")!;
   const logicalId = c.req.param("logicalId")!;
-  const { nodeLauncher } = getDeps(c);
+  const { rigRepo, nodeLauncher } = getDeps(c);
+
+  const rig = rigRepo.getRig(rigId);
+  if (!rig) {
+    return c.json({ ok: false, code: "rig_not_found", error: `Rig "${rigId}" not found` }, 404);
+  }
+
+  const node = rig.nodes.find((entry) => entry.logicalId === logicalId || entry.id === logicalId);
+  if (!node) {
+    return c.json({ ok: false, code: "node_not_found", error: `Node "${logicalId}" not found in rig "${rigId}"` }, 404);
+  }
+
+  if (node.podId) {
+    return c.json({
+      ok: false,
+      code: "pod_aware_launch_unsupported",
+      error: "Pod-aware node launch via this route bypasses startup orchestration. Use rig up, rig import --instantiate, or rig restore instead.",
+    }, 409);
+  }
 
   const result = await nodeLauncher.launchNode(rigId, logicalId);
 
