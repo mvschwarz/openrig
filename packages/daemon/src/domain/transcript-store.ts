@@ -66,16 +66,16 @@ function isLikelyTuiFragment(line: string): boolean {
 }
 
 function stripOrphanCursorFragments(line: string): string {
-  return line.replace(/\[\d{1,3}[A-Za-z]/g, " ");
+  return line.replace(/\[\d{1,3}[A-Za-z](?=\S)/g, " ");
 }
 
 function isStatusOverlayLine(line: string): boolean {
   const trimmed = line.trim();
   if (!trimmed) return false;
   if (trimmed === "Checking for updates") return true;
-  if (/accept edits on/i.test(trimmed)) return true;
-  if (/background terminal running/i.test(trimmed)) return true;
-  if (/gpt-5\.4 xhigh fast/i.test(trimmed)) return true;
+  if (/^(?:[›⏵⏺❯]+\s*)?accept edits on\b.*\/clear to save\b.*tokens?$/i.test(trimmed)) return true;
+  if (/^\d+\s+background terminal running\b.*\/ps to view\b.*\/stop to close\b/i.test(trimmed)) return true;
+  if (/^gpt-[^\n]+ · Context \[[^\]]+\] · .+$/.test(trimmed)) return true;
   return false;
 }
 

@@ -312,6 +312,44 @@ describe("TranscriptStore", () => {
       expect(result).not.toContain("background terminal running");
       expect(result).not.toContain("gpt-5.4 xhigh fast");
     });
+
+    it("preserves legitimate transcript sentences that mention overlay phrases", () => {
+      const store = new TranscriptStore({ transcriptsRoot: tmpDir });
+      store.ensureTranscriptDir("my-rig");
+      const filePath = store.getTranscriptPath("my-rig", "dev@my-rig");
+      writeFileSync(
+        filePath,
+        [
+          "Please accept edits on this proposal only after review.",
+          "The phrase background terminal running appears here as quoted text.",
+          "We were discussing the gpt-5.4 xhigh fast footer format yesterday.",
+        ].join("\n") + "\n",
+      );
+
+      const result = store.readTail("my-rig", "dev@my-rig", 20);
+
+      expect(result).toContain("Please accept edits on this proposal only after review.");
+      expect(result).toContain("The phrase background terminal running appears here as quoted text.");
+      expect(result).toContain("We were discussing the gpt-5.4 xhigh fast footer format yesterday.");
+    });
+
+    it("preserves literal cursor-fragment tokens when they are mentioned as data", () => {
+      const store = new TranscriptStore({ transcriptsRoot: tmpDir });
+      store.ensureTranscriptDir("my-rig");
+      const filePath = store.getTranscriptPath("my-rig", "dev@my-rig");
+      writeFileSync(
+        filePath,
+        [
+          "The artifact looked like literal [2C and [1C tokens in the transcript.",
+          "That exact text should survive cleanup.",
+        ].join("\n") + "\n",
+      );
+
+      const result = store.readTail("my-rig", "dev@my-rig", 20);
+
+      expect(result).toContain("literal [2C and [1C tokens");
+      expect(result).toContain("That exact text should survive cleanup.");
+    });
   });
 
   describe("grep", () => {
