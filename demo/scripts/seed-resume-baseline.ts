@@ -100,7 +100,7 @@ function sendWarmup(sessionName: string | null, text: string): void {
   }
 
   execFileSync(
-    "rigged",
+    "rig",
     ["send", sessionName, text, "--verify", "--force", "--json"],
     { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] }
   );

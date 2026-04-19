@@ -59,7 +59,7 @@ export async function probeNodeResume(
   const pollMs = opts.pollMs ?? 500;
   const maxWaitMs = opts.maxWaitMs ?? 6_000;
   const attempts = Math.max(1, Math.floor(maxWaitMs / pollMs));
-  const sessionName = `rigged-probe-${sanitizeName(node.logicalId)}-${Date.now().toString(36)}`;
+  const sessionName = `rig-probe-${sanitizeName(node.logicalId)}-${Date.now().toString(36)}`;
 
   try {
     runTmux(["new-session", "-d", "-s", sessionName, "-c", resolveNodeCwd(node.cwd ?? ".")]);
