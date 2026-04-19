@@ -260,6 +260,48 @@ describe("ContextMonitor", () => {
     }));
   });
 
+  it("pollOnce normalizes stale Claude startup failures to attention_required when the runtime is blocked on trust", async () => {
+    const { sessionName, session } = (() => {
+      const rig = rigRepo.createRig("test-rig-5b");
+      const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code", cwd: "/project" });
+      const session = sessionRegistry.registerSession(node.id, "dev-impl-trust@test");
+      db.prepare("UPDATE sessions SET status = 'running', startup_status = 'failed' WHERE id = ?").run(session.id);
+      return { sessionName: "dev-impl-trust@test", session };
+    })();
+    writeSidecar(sessionName, { ...VALID_SIDECAR, session_name: sessionName });
+    checkReadySpy.mockResolvedValue({
+      ready: false,
+      code: "trust_gate",
+      reason: "Claude is waiting for workspace trust approval before the session can become interactive.",
+    });
+
+    await monitor.pollOnce();
+
+    const refreshed = db.prepare("SELECT startup_status FROM sessions WHERE id = ?").get(session.id) as { startup_status: string };
+    expect(refreshed.startup_status).toBe("attention_required");
+  });
+
+  it("pollOnce leaves stale Claude startup failures as failed when the runtime has really fallen back to shell", async () => {
+    const { sessionName, session } = (() => {
+      const rig = rigRepo.createRig("test-rig-5c");
+      const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code", cwd: "/project" });
+      const session = sessionRegistry.registerSession(node.id, "dev-impl-shell@test");
+      db.prepare("UPDATE sessions SET status = 'running', startup_status = 'failed' WHERE id = ?").run(session.id);
+      return { sessionName: "dev-impl-shell@test", session };
+    })();
+    writeSidecar(sessionName, { ...VALID_SIDECAR, session_name: sessionName });
+    checkReadySpy.mockResolvedValue({
+      ready: false,
+      code: "returned_to_shell",
+      reason: "The probe pane returned to a shell instead of staying inside the runtime.",
+    });
+
+    await monitor.pollOnce();
+
+    const refreshed = db.prepare("SELECT startup_status FROM sessions WHERE id = ?").get(session.id) as { startup_status: string };
+    expect(refreshed.startup_status).toBe("failed");
+  });
+
   it("pollOnce does not overwrite pending Claude startup state", async () => {
     const { sessionName, session } = (() => {
       const rig = rigRepo.createRig("test-rig-6");

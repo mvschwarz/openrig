@@ -1,6 +1,10 @@
 import type Database from "better-sqlite3";
 import type { ContextUsageStore } from "./context-usage-store.js";
-import type { NodeBinding, ReadinessResult } from "./runtime-adapter.js";
+import {
+  isAttentionRequiredReadinessCode,
+  type NodeBinding,
+  type ReadinessResult,
+} from "./runtime-adapter.js";
 
 /** Default polling interval: 30 seconds. */
 export const DEFAULT_POLL_INTERVAL_MS = 30_000;
@@ -118,14 +122,23 @@ export class ContextMonitor {
         updatedAt: "",
         cwd: session.cwd ?? "",
       });
-      if (!readiness.ready) return;
+      if (readiness.ready) {
+        this.db.prepare(`
+          UPDATE sessions
+          SET startup_status = 'ready',
+              startup_completed_at = ?
+          WHERE id = ?
+        `).run(new Date().toISOString(), session.session_id);
+        return;
+      }
 
-      this.db.prepare(`
-        UPDATE sessions
-        SET startup_status = 'ready',
-            startup_completed_at = ?
-        WHERE id = ?
-      `).run(new Date().toISOString(), session.session_id);
+      if (isAttentionRequiredReadinessCode(readiness.code)) {
+        this.db.prepare(`
+          UPDATE sessions
+          SET startup_status = 'attention_required'
+          WHERE id = ?
+        `).run(session.session_id);
+      }
     } catch {
       // Best-effort normalization only; telemetry polling still succeeds.
     }

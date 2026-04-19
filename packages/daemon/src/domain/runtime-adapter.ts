@@ -45,6 +45,17 @@ export interface ReadinessResult {
   code?: string;
 }
 
+export const ATTENTION_REQUIRED_READINESS_CODES = new Set([
+  "trust_gate",
+  "update_gate",
+  "login_required",
+  "mcp_gate",
+]);
+
+export function isAttentionRequiredReadinessCode(code: string | undefined): boolean {
+  return !!code && ATTENTION_REQUIRED_READINESS_CODES.has(code);
+}
+
 // -- Harness launch result --
 
 export type HarnessLaunchRecovery = "retry_fresh";
