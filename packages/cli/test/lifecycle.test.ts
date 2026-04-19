@@ -147,6 +147,16 @@ describe("Lifecycle CLI commands", () => {
         return;
       }
 
+      if (req.method === "POST" && req.url === "/api/rigs/rig-1/nodes/dev.pod/launch") {
+        res.writeHead(409, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({
+          ok: false,
+          code: "pod_aware_launch_unsupported",
+          error: "Pod-aware node launch via this route bypasses startup orchestration. Use rig up, rig import --instantiate, or rig restore instead.",
+        }));
+        return;
+      }
+
       if (req.method === "POST" && req.url === "/api/sessions/missing/unclaim") {
         res.writeHead(404, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ ok: false, error: "Claimed session 'missing' not found." }));
@@ -267,6 +277,20 @@ describe("Lifecycle CLI commands", () => {
     expect(exitCode).toBeUndefined();
     expect(logs.join("\n")).toContain("Launched node dev.qa in rig rig-1");
     expect(logs.join("\n")).toContain("dev-qa@test");
+  });
+
+  it("launch surfaces honest pod-aware rejection and exits non-zero", async () => {
+    const program = new Command();
+    program.exitOverride();
+    program.addCommand(launchCommand(runningDeps()));
+
+    const { logs, exitCode } = await captureLogs(async () => {
+      await program.parseAsync(["node", "rig", "launch", "rig-1", "dev.pod"]);
+    });
+
+    expect(exitCode).toBe(1);
+    expect(logs.join("\n")).toContain("bypasses startup orchestration");
+    expect(logs.join("\n")).toContain("rig import --instantiate");
   });
 
   it("--json prints raw unclaim payload", async () => {

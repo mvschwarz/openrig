@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type Database from "better-sqlite3";
 import { CmuxAdapter } from "../src/adapters/cmux.js";
 import type { CmuxTransportFactory } from "../src/adapters/cmux.js";
+import { PodRepository } from "../src/domain/pod-repository.js";
 import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
 
 function unavailableCmux() {
@@ -156,6 +157,30 @@ describe("Session routes", () => {
     expect(body.sessionName).toBe("r00-badname-worker");
     expect(body.session.sessionName).toBe("r00-badname-worker");
     expect(body.binding.tmuxSession).toBe("r00-badname-worker");
+  });
+
+  it("POST .../launch rejects pod-aware nodes because the route bypasses startup orchestration", async () => {
+    const { app, rigRepo, sessionRegistry } = createTestApp(db);
+    const podRepo = new PodRepository(db);
+    const rig = rigRepo.createRig("pod-rig");
+    const pod = podRepo.createPod(rig.id, "dev", "Development");
+    const node = rigRepo.addNode(rig.id, "dev.impl", {
+      runtime: "claude-code",
+      podId: pod.id,
+      agentRef: "local:agents/impl",
+      profile: "default",
+    });
+
+    const res = await app.request(`/api/rigs/${rig.id}/nodes/${encodeURIComponent("dev.impl")}/launch`, {
+      method: "POST",
+    });
+
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body.ok).toBe(false);
+    expect(body.code).toBe("pod_aware_launch_unsupported");
+    expect(String(body.error)).toContain("bypasses startup orchestration");
+    expect(sessionRegistry.getBindingForNode(node.id)).toBeNull();
   });
 
   it("POST .../focus with valid cmux binding -> calls focusSurface", async () => {
