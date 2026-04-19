@@ -297,6 +297,7 @@ describe("ClaudeCodeAdapter Context Collector Provisioning", () => {
     expect(settings.customSetting).toBe(true);
     expect(settings.statusLine.type).toBe("command");
     expect(settings.permissions.defaultMode).toBe("acceptEdits");
+    expect(settings.enabledMcpjsonServers).toEqual(["existing", "exa", "context7"]);
     expect(settings.permissions.allow).toContain("Bash(rig:*)");
     expect(settings.permissions.allow.filter((rule: string) => rule === "Bash(rig:*)")).toHaveLength(1);
     expect(settings.permissions.allow).toContain("Read");
@@ -312,6 +313,12 @@ describe("ClaudeCodeAdapter Context Collector Provisioning", () => {
   });
 
   it("deliverStartup keeps project-local Claude permission and MCP rules idempotent across repeated startup", async () => {
+    written["/project/.mcp.json"] = JSON.stringify({
+      mcpServers: {
+        existing: { type: "http", url: "https://example.com/mcp" },
+      },
+    });
+
     const adapter = new ClaudeCodeAdapter({
       tmux: mockTmux(),
       fsOps: mockFsOps(),
@@ -327,6 +334,7 @@ describe("ClaudeCodeAdapter Context Collector Provisioning", () => {
     expect(settings.permissions.allow.filter((rule: string) => rule === "Edit")).toHaveLength(1);
     expect(settings.permissions.allow.filter((rule: string) => rule === "Bash(rig:*)")).toHaveLength(1);
     expect(settings.permissions.deny.filter((rule: string) => rule === "Bash(rm -rf *)")).toHaveLength(1);
+    expect(settings.enabledMcpjsonServers).toEqual(["existing", "exa", "context7"]);
 
     const mcpConfig = JSON.parse(written["/project/.mcp.json"]!);
     expect(Object.keys(mcpConfig.mcpServers).filter((id) => id === "exa")).toHaveLength(1);

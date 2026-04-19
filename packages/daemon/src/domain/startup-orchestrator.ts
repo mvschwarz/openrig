@@ -36,7 +36,7 @@ export type StartupResult =
   | { ok: true; startupStatus: "ready"; continuityOutcome: "resumed" | "fresh" }
   | { ok: false; startupStatus: "attention_required" | "failed"; errors: string[] };
 
-const ATTENTION_REQUIRED_READINESS_CODES = new Set(["trust_gate", "update_gate", "login_required"]);
+const ATTENTION_REQUIRED_READINESS_CODES = new Set(["trust_gate", "update_gate", "login_required", "mcp_gate"]);
 
 interface StartupOrchestratorDeps {
   db: Database.Database;

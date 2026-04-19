@@ -72,6 +72,31 @@ describe("native resume probe", () => {
     });
   });
 
+  it("classifies the Claude MCP project-server approval screen as blocked, not failed", () => {
+    expect(
+      assessNativeResumeProbe({
+        runtime: "claude-code",
+        paneCommand: "claude.exe",
+        paneContent: [
+          "────────────────────────────────────────────────────────────────────────────────",
+          "  2 new MCP servers found in .mcp.json",
+          "  Select any you wish to enable.",
+          "",
+          "  MCP servers may execute code or access system resources. All tool calls",
+          "  require approval. Learn more in the MCP documentation.",
+          "",
+          "  ❯ [✔] exa",
+          "    [✔] context7",
+          " Space to select · Enter to confirm · Esc to reject all",
+        ].join("\n"),
+      })
+    ).toEqual({
+      status: "inconclusive",
+      code: "mcp_gate",
+      detail: "Claude is waiting for project MCP server approval before the session can become interactive.",
+    });
+  });
+
   it("classifies a live Claude TUI as resumed even when tmux reports a version string process", () => {
     expect(
       assessNativeResumeProbe({

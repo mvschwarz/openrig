@@ -312,6 +312,25 @@ describe("StartupOrchestrator", () => {
     expect(row.startup_status).toBe("attention_required");
   });
 
+  it("Claude MCP approval blockers become attention_required", async () => {
+    const seed = seedSession();
+    const adapter = mockAdapter({
+      checkReady: vi.fn(async () => ({
+        ready: false,
+        code: "mcp_gate",
+        reason: "Claude is waiting for project MCP server approval before the session can become interactive.",
+      })),
+    });
+    const orch = createOrchestrator();
+    const result = await orch.startNode(makeInput(seed, { adapter }));
+
+    expect(result.ok).toBe(false);
+    expect(result.startupStatus).toBe("attention_required");
+
+    const row = db.prepare("SELECT startup_status FROM sessions WHERE id = ?").get(seed.sessionId) as { startup_status: string };
+    expect(row.startup_status).toBe("attention_required");
+  });
+
   it("injects the session identity into the first fresh send_text prompt", async () => {
     const seed = seedSession();
     const deliverStartup = vi.fn(async (_files: ResolvedStartupFile[]) => ({ delivered: 0, failed: [] }));
