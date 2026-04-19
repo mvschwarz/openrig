@@ -20,13 +20,14 @@ function seedPodAwareRig(db: Database.Database, opts?: { rigName?: string }) {
 }
 
 function seedSession(db: Database.Database, nodeId: string, sessionName: string, opts?: {
+  id?: string;
   status?: string;
   startupStatus?: string;
   resumeType?: string;
   resumeToken?: string;
   startupCompletedAt?: string;
 }) {
-  const id = `sess-${nodeId}-${Date.now()}`;
+  const id = opts?.id ?? `sess-${nodeId}-${Date.now()}`;
   db.prepare(
     "INSERT INTO sessions (id, node_id, session_name, status, startup_status, resume_type, resume_token, startup_completed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
   ).run(
@@ -157,6 +158,39 @@ describe("Node Inventory Projection", () => {
     expect(entry?.resumeCommand).toBeNull();
   });
 
+  it("recoveryGuidance prefers native Claude resume but includes picker fallback", () => {
+    seedPodAwareRig(db);
+    seedSession(db, "node-1", "dev-impl@test-rig", {
+      resumeToken: "abc-123-def",
+    });
+
+    const entries = getNodeInventory(db, "rig-1");
+    const entry = entries.find((e) => e.logicalId === "dev.impl");
+    expect(entry?.recoveryGuidance?.summary).toContain("native Claude resume");
+    expect(entry?.recoveryGuidance?.commands).toContain("claude --resume abc-123-def");
+    expect(entry?.recoveryGuidance?.commands).toContain("cd /project");
+    expect(entry?.recoveryGuidance?.commands).toContain("claude --resume");
+    expect(entry?.recoveryGuidance?.notes).toContain("Look for session name: dev-impl@test-rig");
+    expect(entry?.recoveryGuidance?.notes).toContain("Choose the full conversation option, not summary.");
+  });
+
+  it("recoveryGuidance for Codex without token uses workspace-local picker fallback", () => {
+    db.prepare("INSERT INTO rigs (id, name) VALUES (?, ?)").run("rig-2", "test-rig");
+    db.prepare("INSERT INTO pods (id, rig_id, namespace, label) VALUES (?, ?, ?, ?)").run("pod-2", "rig-2", "dev", "Dev");
+    db.prepare(
+      "INSERT INTO nodes (id, rig_id, logical_id, runtime, cwd, pod_id, agent_ref, profile, resolved_spec_name, resolved_spec_version, resolved_spec_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    ).run("node-codex", "rig-2", "dev.qa", "codex", "/workspace/app", "pod-2", "local:agents/qa", "default", "qa", "1.0.0", "hash");
+    seedSession(db, "node-codex", "dev-qa@test-rig");
+
+    const entries = getNodeInventory(db, "rig-2");
+    const entry = entries.find((e) => e.logicalId === "dev.qa");
+    expect(entry?.resumeCommand).toBeNull();
+    expect(entry?.recoveryGuidance?.summary).toContain("workspace-local Codex picker fallback");
+    expect(entry?.recoveryGuidance?.commands).toEqual(["cd /workspace/app", "codex", "resume"]);
+    expect(entry?.recoveryGuidance?.notes).toContain("Use workspace and recent prompt text to identify the right conversation.");
+    expect(entry?.recoveryGuidance?.notes).toContain("If the identity anchor was captured, the picker may include: dev-qa@test-rig");
+  });
+
   // Test 7: startupStatus reflects session startup_status column
   it("startupStatus reflects session startup_status", () => {
     seedPodAwareRig(db);
@@ -244,6 +278,22 @@ describe("Node Inventory Projection", () => {
 
     const entries = getNodeInventory(db, "rig-1");
     const entry = entries.find((e) => e.logicalId === "dev.impl");
+    expect(entry?.latestError).toBeNull();
+  });
+
+  it("clears stale attention_required residue when the newest session is ready", () => {
+    seedPodAwareRig(db);
+    seedSession(db, "node-1", "dev-impl@test-rig-old", { id: "sess-node-1-0001", startupStatus: "attention_required" });
+    seedSession(db, "node-1", "dev-impl@test-rig", { id: "sess-node-1-0002", startupStatus: "ready" });
+    seedEvent(db, "rig-1", "node-1", "node.startup_failed", {
+      rigId: "rig-1",
+      nodeId: "node-1",
+      error: "Claude was waiting for trust approval",
+    });
+
+    const entries = getNodeInventory(db, "rig-1");
+    const entry = entries.find((e) => e.logicalId === "dev.impl");
+    expect(entry?.startupStatus).toBe("ready");
     expect(entry?.latestError).toBeNull();
   });
 

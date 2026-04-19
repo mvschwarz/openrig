@@ -252,7 +252,7 @@ describe("Claude Code runtime adapter", () => {
     );
   });
 
-  it("launchHarness fails honestly when resume drops back to shell with no conversation found", async () => {
+  it("launchHarness returns retry_fresh when Claude reports no conversation found for the requested resume token", async () => {
     const tmux = mockTmux();
     (tmux.getPaneCommand as ReturnType<typeof vi.fn>).mockResolvedValue("zsh");
     (tmux.capturePaneContent as ReturnType<typeof vi.fn>).mockResolvedValue(
@@ -265,6 +265,7 @@ describe("Claude Code runtime adapter", () => {
     expect(result).toEqual({
       ok: false,
       error: "Claude resume failed: no conversation found for the requested session",
+      recovery: "retry_fresh",
     });
   });
 

@@ -138,7 +138,19 @@ function createMockDaemon() {
         res.end(JSON.stringify({
           nodes: [
             { nodeId: "n1", logicalId: "orchestrator", status: "resumed" },
-            { nodeId: "n2", logicalId: "worker", status: "failed" },
+            {
+              nodeId: "n2",
+              logicalId: "worker",
+              status: "failed",
+              canonicalSessionName: "worker@test-rig",
+              tmuxAttachCommand: "tmux attach -t worker@test-rig",
+              cwd: "/workspace/app",
+              recoveryGuidance: {
+                summary: "Try native Claude resume first, then fall back to the workspace-local picker if needed.",
+                commands: ["claude --resume abc-123", "cd /workspace/app", "claude --resume"],
+                notes: ["Look for session name: worker@test-rig", "Choose the full conversation option, not summary."],
+              },
+            },
           ],
         }));
         return;
@@ -245,6 +257,10 @@ describe("rig snapshot + restore", () => {
 
     expect(logs.join("\n")).toContain("worker");
     expect(logs.join("\n")).toContain("failed");
+    expect(logs.join("\n")).toContain("Recovery guidance:");
+    expect(logs.join("\n")).toContain("tmux attach -t worker@test-rig");
+    expect(logs.join("\n")).toContain("$ claude --resume abc-123");
+    expect(logs.join("\n")).toContain("Choose the full conversation option, not summary.");
     expect(process.exitCode).toBe(1);
 
     process.exitCode = savedExitCode;

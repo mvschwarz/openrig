@@ -134,7 +134,7 @@ describe("ClaudeResumeAdapter", () => {
       expect(sendKeys).not.toHaveBeenCalled();
     });
 
-    it("returns resume_failed when Claude prints no conversation found and drops back to shell", async () => {
+    it("returns retry_fresh when Claude prints no conversation found and drops back to shell", async () => {
       const getPaneCommand = vi.fn(async () => "zsh");
       const capturePaneContent = vi.fn(async () => "No conversation found with session ID: abc123\nmschwarz@host %");
       const adapter = new ClaudeResumeAdapter(
@@ -146,7 +146,7 @@ describe("ClaudeResumeAdapter", () => {
 
       expect(result).toEqual({
         ok: false,
-        code: "resume_failed",
+        code: "retry_fresh",
         message: "Claude resume failed: no conversation found for the requested session",
       });
     });

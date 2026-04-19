@@ -33,7 +33,7 @@ export interface StartupInput {
 }
 
 export type StartupResult =
-  | { ok: true; startupStatus: "ready" }
+  | { ok: true; startupStatus: "ready"; continuityOutcome: "resumed" | "fresh" }
   | { ok: false; startupStatus: "attention_required" | "failed"; errors: string[] };
 
 const ATTENTION_REQUIRED_READINESS_CODES = new Set(["trust_gate", "update_gate", "login_required"]);
@@ -58,7 +58,8 @@ interface StartupOrchestratorDeps {
  * 3. Deliver pre-launch files (guidance_merge, skill_install → filesystem)
  * 4. Launch harness via adapter.launchHarness()
  * 5. Wait for harness ready (retry with exponential backoff, 30s timeout)
- * 6. Deliver post-launch files (send_text → TUI)
+ * 6. For fresh sessions, inject the built-in identity anchor as the first prompt
+ *    and deliver remaining post-launch files (send_text → TUI)
  * 7. Execute after_files actions
  * 8. Execute after_ready actions
  * 9. Persist startup context + resume token
@@ -90,6 +91,7 @@ export class StartupOrchestrator {
 
   async startNode(input: StartupInput): Promise<StartupResult> {
     const errors: string[] = [];
+    let continuityOutcome: "resumed" | "fresh" = input.resumeToken ? "resumed" : "fresh";
 
     // 1. Mark pending
     this.sessionRegistry.updateStartupStatus(input.sessionId, "pending");
@@ -116,7 +118,7 @@ export class StartupOrchestrator {
     const context = input.isRestore ? "restore" : "fresh_start";
     const applicableFiles = input.resolvedStartupFiles.filter((f) => f.appliesOn.includes(context));
     const preLaunchFiles: ResolvedStartupFile[] = [];
-    const postLaunchFiles: ResolvedStartupFile[] = [];
+    let postLaunchFiles: ResolvedStartupFile[] = [];
     for (const f of applicableFiles) {
       const hint = f.deliveryHint === "auto"
         ? resolveConcreteHint(f.path, this.safeReadFile(f.absolutePath))
@@ -146,20 +148,38 @@ export class StartupOrchestrator {
     // 5. Launch harness (unless skipped for legacy nodes)
     if (!input.skipHarnessLaunch) {
       try {
-        const launchResult = await input.adapter.launchHarness(input.binding, {
-          name: input.sessionName ?? input.binding.tmuxSession ?? "",
-          resumeToken: input.resumeToken,
-        });
-        if (!launchResult.ok) {
+        let launchResumeToken = input.resumeToken;
+        let attemptedFreshFallback = false;
+
+        while (true) {
+          const launchResult = await input.adapter.launchHarness(input.binding, {
+            name: input.sessionName ?? input.binding.tmuxSession ?? "",
+            resumeToken: launchResumeToken,
+          });
+          if (launchResult.ok) {
+            const normalizedResumeToken = launchResult.resumeToken?.trim();
+            if (normalizedResumeToken) {
+              try {
+                this.sessionRegistry.updateResumeToken(input.sessionId, launchResult.resumeType ?? "", normalizedResumeToken);
+              } catch { /* best-effort */ }
+            }
+            break;
+          }
+
+          const shouldRetryFresh =
+            !!launchResumeToken
+            && launchResult.recovery === "retry_fresh"
+            && !attemptedFreshFallback;
+
+          if (shouldRetryFresh) {
+            launchResumeToken = undefined;
+            continuityOutcome = "fresh";
+            attemptedFreshFallback = true;
+            continue;
+          }
+
           errors.push(`Harness launch failed: ${launchResult.error}`);
           return this.fail(input, "failed", errors);
-        }
-        // Persist resume metadata if returned (either token or type)
-        const normalizedResumeToken = launchResult.resumeToken?.trim();
-        if (normalizedResumeToken) {
-          try {
-            this.sessionRegistry.updateResumeToken(input.sessionId, launchResult.resumeType ?? "", normalizedResumeToken);
-          } catch { /* best-effort */ }
         }
       } catch (err) {
         errors.push(`Harness launch error: ${(err as Error).message}`);
@@ -181,6 +201,16 @@ export class StartupOrchestrator {
     } catch (err) {
       errors.push(`Readiness check error: ${(err as Error).message}`);
       return this.fail(input, "failed", errors);
+    }
+
+    const identityAction = this.extractSessionIdentityAction(input.startupActions, context);
+    if (continuityOutcome === "fresh" && identityAction) {
+      const initialPrompt = await this.deliverInitialSessionPrompt(input.binding, identityAction, postLaunchFiles);
+      if (!initialPrompt.ok) {
+        errors.push(initialPrompt.error);
+        return this.fail(input, "failed", errors);
+      }
+      postLaunchFiles = initialPrompt.remainingFiles;
     }
 
     // 7. Deliver post-launch files (send_text → TUI, now that harness is ready)
@@ -228,7 +258,7 @@ export class StartupOrchestrator {
     this.sessionRegistry.updateStartupStatus(input.sessionId, "ready", new Date().toISOString());
     this.eventBus.emit({ type: "node.startup_ready", rigId: input.rigId, nodeId: input.nodeId });
 
-    return { ok: true, startupStatus: "ready" };
+    return { ok: true, startupStatus: "ready", continuityOutcome };
   }
 
   /**
@@ -291,6 +321,8 @@ export class StartupOrchestrator {
     const context = input.isRestore ? "restore" : "fresh_start";
 
     for (const action of input.startupActions) {
+      if (isSessionIdentityAction(action)) continue;
+
       // Phase filter
       if (action.phase !== phase) continue;
 
@@ -307,23 +339,9 @@ export class StartupOrchestrator {
           continue;
         }
 
-        let text: string;
-        if (action.type === "slash_command") {
-          text = action.value; // e.g. "/rename implementer"
-        } else {
-          text = action.value; // send_text: raw text
-        }
-
-        const textResult = await this.tmuxAdapter.sendText(input.binding.tmuxSession, text);
-        if (!textResult.ok) {
-          errors.push(`Action failed (${action.type}): ${(textResult as { message?: string }).message ?? "unknown"}`);
-          continue;
-        }
-
-        await this.sleep(200);
-        const submitResult = await this.tmuxAdapter.sendKeys(input.binding.tmuxSession, ["C-m"]);
-        if (!submitResult.ok) {
-          errors.push(`Action submit failed (${action.type}): ${(submitResult as { message?: string }).message ?? "unknown"}`);
+        const sendError = await this.sendInteractiveText(input.binding.tmuxSession, action.value);
+        if (sendError) {
+          errors.push(`Action failed (${action.type}): ${sendError}`);
         }
       } catch (err) {
         errors.push(`Action error (${action.type}): ${(err as Error).message}`);
@@ -332,4 +350,66 @@ export class StartupOrchestrator {
 
     return errors.length > 0 ? { ok: false, errors } : { ok: true };
   }
+
+  private extractSessionIdentityAction(
+    actions: StartupAction[],
+    context: "fresh_start" | "restore",
+  ): StartupAction | null {
+    return actions.find((action) => isSessionIdentityAction(action) && action.appliesOn.includes(context)) ?? null;
+  }
+
+  private async deliverInitialSessionPrompt(
+    binding: NodeBinding,
+    identityAction: StartupAction,
+    postLaunchFiles: ResolvedStartupFile[],
+  ): Promise<{ ok: true; remainingFiles: ResolvedStartupFile[] } | { ok: false; error: string }> {
+    if (!binding.tmuxSession) {
+      return { ok: false, error: "No tmux session for the initial session identity prompt" };
+    }
+
+    const firstSendTextIndex = postLaunchFiles.findIndex((file) => file.deliveryHint === "send_text");
+    let prompt = identityAction.value;
+    let remainingFiles = postLaunchFiles;
+
+    if (firstSendTextIndex !== -1) {
+      const firstSendText = postLaunchFiles[firstSendTextIndex]!;
+      try {
+        const content = this.readFile(firstSendText.absolutePath);
+        if (content.length > 0) {
+          prompt = `${identityAction.value}\n\n${content}`;
+          remainingFiles = postLaunchFiles.filter((_, index) => index !== firstSendTextIndex);
+        }
+      } catch {
+        // Fall back to a standalone identity prompt and let the adapter handle
+        // the original startup file using its normal failure semantics.
+      }
+    }
+
+    const sendError = await this.sendInteractiveText(binding.tmuxSession, prompt);
+    if (sendError) {
+      return { ok: false, error: `Initial session identity prompt failed: ${sendError}` };
+    }
+
+    return { ok: true, remainingFiles };
+  }
+
+  private async sendInteractiveText(tmuxSession: string, text: string): Promise<string | null> {
+    const textResult = await this.tmuxAdapter.sendText(tmuxSession, text);
+    if (!textResult.ok) {
+      return (textResult as { message?: string }).message ?? "unknown";
+    }
+
+    await this.sleep(200);
+    const submitResult = await this.tmuxAdapter.sendKeys(tmuxSession, ["C-m"]);
+    if (!submitResult.ok) {
+      return (submitResult as { message?: string }).message ?? "unknown";
+    }
+
+    return null;
+  }
+}
+
+function isSessionIdentityAction(action: StartupAction): boolean {
+  if (action.builtin === "session_identity") return true;
+  return action.type === "send_text" && action.value.startsWith("OpenRig session identity:");
 }

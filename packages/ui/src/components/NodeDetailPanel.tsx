@@ -144,6 +144,26 @@ export function NodeDetailPanel({ rigId, logicalId, onClose }: NodeDetailPanelPr
                         ? "Check logs with: rig ps --nodes, or restart with: rig up"
                         : "Try: rig restore <snapshotId>"}
                   </div>
+                  {data.recoveryGuidance && (
+                    <div className="mt-2 border-t border-stone-200 pt-2" data-testid="detail-recovery-guidance">
+                      <div className="font-mono text-[8px] font-bold text-stone-700 mb-1">Recovery</div>
+                      <div className="font-mono text-[8px] text-stone-600 mb-1">{data.recoveryGuidance.summary}</div>
+                      <div className="space-y-0.5 mb-1">
+                        {data.recoveryGuidance.commands.map((command, index) => (
+                          <code key={`${command}-${index}`} className="font-mono text-[8px] text-stone-800 bg-stone-100 px-1 py-0.5 block">
+                            {command}
+                          </code>
+                        ))}
+                      </div>
+                      <div className="space-y-0.5">
+                        {data.recoveryGuidance.notes.map((note, index) => (
+                          <div key={`${note}-${index}`} className="font-mono text-[8px] text-stone-500">
+                            {note}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
             </div>

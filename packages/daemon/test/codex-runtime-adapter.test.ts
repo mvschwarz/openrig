@@ -441,6 +441,25 @@ describe("Codex runtime adapter", () => {
     expect(sendText).toHaveBeenCalledWith("r01-qa", "codex resume sess-456");
   });
 
+  it("launchHarness returns retry_fresh when Codex reports no saved session for the requested resume token", async () => {
+    const tmux = mockTmux({
+      getPaneCommand: vi.fn(async () => "zsh"),
+      capturePaneContent: vi.fn(async () => [
+        "No saved session found for id sess-456",
+        "admin@host openrig %",
+      ].join("\n")),
+    });
+    const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {} });
+
+    const result = await adapter.launchHarness(makeBinding(), { name: "dev-qa@test-rig", resumeToken: "sess-456" });
+
+    expect(result).toEqual({
+      ok: false,
+      error: "Codex resume failed: no saved session found for the requested session",
+      recovery: "retry_fresh",
+    });
+  });
+
   it("deliverStartup pre-seeds Codex trust for the managed project", async () => {
     const fs = mockFs({});
     const fsWithHome = { ...fs, homedir: "/home/tester" };

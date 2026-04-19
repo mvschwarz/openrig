@@ -168,6 +168,8 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     }
 
     if (opts.resumeToken) {
+      const verification = await this.verifyResumeLaunch(binding.tmuxSession);
+      if (!verification.ok) return verification;
       return { ok: true, resumeToken: opts.resumeToken, resumeType: "codex_id" };
     }
 
@@ -352,6 +354,50 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     }
 
     return undefined;
+  }
+
+  private async verifyResumeLaunch(tmuxSession: string): Promise<HarnessLaunchResult> {
+    const attempts = 6;
+
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      const paneCommand = await this.tmux.getPaneCommand(tmuxSession);
+      const paneContent = (await this.tmux.capturePaneContent(tmuxSession, 40)) ?? "";
+      const probe = assessNativeResumeProbe({
+        runtime: "codex",
+        paneCommand,
+        paneContent,
+      });
+
+      if (probe.code === "no_saved_session") {
+        return {
+          ok: false,
+          error: "Codex resume failed: no saved session found for the requested session",
+          recovery: "retry_fresh",
+        };
+      }
+
+      if (probe.code === "returned_to_shell") {
+        return {
+          ok: false,
+          error: "Codex resume failed: pane returned to shell instead of entering Codex",
+          recovery: "retry_fresh",
+        };
+      }
+
+      if (probe.status === "resumed") {
+        return { ok: true };
+      }
+
+      if (probe.code === "trust_gate" || probe.code === "update_gate") {
+        return { ok: true };
+      }
+
+      if (attempt < attempts - 1) {
+        await this.sleep(200);
+      }
+    }
+
+    return { ok: true };
   }
 
   private findCodexDescendantPids(parentPid: number): number[] {

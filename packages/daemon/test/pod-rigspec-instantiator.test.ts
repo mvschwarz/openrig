@@ -204,6 +204,7 @@ profiles:
 
     expect(identityCall).toBeDefined();
     expect(identityCall?.[0]).toBe("dev-impl@test-rig");
+    expect(identityCall?.[1]).toMatch(/^dev-impl@test-rig\nOpenRig session identity:/);
     // Identity fields preserved
     expect(identityCall?.[1]).toContain("- rig: test-rig");
     expect(identityCall?.[1]).toContain("- pod: dev");

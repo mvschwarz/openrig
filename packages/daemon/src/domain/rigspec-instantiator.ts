@@ -1318,6 +1318,7 @@ export class PodRigInstantiator {
     resolvedSpecName?: string | null;
   }): StartupAction {
     const lines = [
+      input.sessionName,
       "OpenRig session identity:",
       `- rig: ${input.rigName}`,
       `- pod: ${input.pod.id}`,
@@ -1339,6 +1340,7 @@ export class PodRigInstantiator {
       phase: "after_ready",
       appliesOn: ["fresh_start", "restore"],
       idempotent: true,
+      builtin: "session_identity",
     };
   }
 

@@ -229,6 +229,12 @@ export type RestoreOutcome =
 
 export type NodeRestoreOutcome = "resumed" | "rebuilt" | "fresh" | "failed" | "n-a";
 
+export interface NodeRecoveryGuidance {
+  summary: string;
+  commands: string[];
+  notes: string[];
+}
+
 export interface NodeInventoryEntry {
   rigId: string;
   rigName: string;
@@ -244,6 +250,7 @@ export interface NodeInventoryEntry {
   restoreOutcome: NodeRestoreOutcome;
   tmuxAttachCommand: string | null;
   resumeCommand: string | null;
+  recoveryGuidance: NodeRecoveryGuidance | null;
   latestError: string | null;
   // Extended fields
   model: string | null;
@@ -320,6 +327,7 @@ export interface StartupAction {
   phase: "after_files" | "after_ready";
   appliesOn: ("fresh_start" | "restore")[];
   idempotent: boolean;
+  builtin?: "session_identity";
 }
 
 export interface StartupBlock {

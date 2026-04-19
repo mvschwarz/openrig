@@ -30,7 +30,24 @@ export function restoreCommand(depsOverride?: StatusDeps): Command {
       const client = deps.clientFactory(getDaemonUrl(status));
       const rigId = opts.rig;
 
-      const res = await client.post<{ nodes?: Array<{ nodeId: string; logicalId: string; status: string; error?: string }>; attachCommand?: string }>(
+      const res = await client.post<{
+        nodes?: Array<{
+          nodeId: string;
+          logicalId: string;
+          status: string;
+          error?: string;
+          canonicalSessionName?: string | null;
+          tmuxAttachCommand?: string | null;
+          resumeCommand?: string | null;
+          recoveryGuidance?: {
+            summary: string;
+            commands: string[];
+            notes: string[];
+          } | null;
+          cwd?: string | null;
+        }>;
+        attachCommand?: string;
+      }>(
         `/api/rigs/${encodeURIComponent(rigId)}/restore/${encodeURIComponent(snapshotId)}`,
         undefined,
         { timeoutMs: LONG_RUNNING_TIMEOUT_MS },
@@ -52,6 +69,7 @@ export function restoreCommand(depsOverride?: StatusDeps): Command {
           const label = node.status === "failed" && node.error ? `${node.status} — ${node.error}` : node.status;
           console.log(`  ${node.logicalId}: ${label}`);
         }
+        printRecoveryGuidance(nodes);
         const attachCommand = (res.data as Record<string, unknown>)["attachCommand"] as string | undefined;
         if (attachCommand) {
           console.log(`Attach: ${attachCommand}`);
@@ -63,4 +81,41 @@ export function restoreCommand(depsOverride?: StatusDeps): Command {
     });
 
   return cmd;
+}
+
+function printRecoveryGuidance(
+  nodes: Array<{
+    logicalId: string;
+    status: string;
+    canonicalSessionName?: string | null;
+    tmuxAttachCommand?: string | null;
+    recoveryGuidance?: { summary: string; commands: string[]; notes: string[] } | null;
+    cwd?: string | null;
+  }>,
+): void {
+  const actionable = nodes.filter((node) =>
+    (node.status === "fresh" || node.status === "failed") && node.recoveryGuidance
+  );
+
+  if (actionable.length === 0) return;
+
+  console.log("\nRecovery guidance:");
+  for (const node of actionable) {
+    console.log(`  ${node.logicalId}: ${node.recoveryGuidance!.summary}`);
+    if (node.tmuxAttachCommand) {
+      console.log(`    attach: ${node.tmuxAttachCommand}`);
+    }
+    if (node.canonicalSessionName) {
+      console.log(`    session: ${node.canonicalSessionName}`);
+    }
+    if (node.cwd) {
+      console.log(`    cwd: ${node.cwd}`);
+    }
+    for (const command of node.recoveryGuidance!.commands) {
+      console.log(`    $ ${command}`);
+    }
+    for (const note of node.recoveryGuidance!.notes) {
+      console.log(`    note: ${note}`);
+    }
+  }
 }
