@@ -26,6 +26,7 @@ import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { ContextUsageStore } from "../src/domain/context-usage-store.js";
 import { ContextMonitor } from "../src/domain/context-monitor.js";
+import type { ReadinessResult } from "../src/domain/runtime-adapter.js";
 
 const ALL_MIGRATIONS = [
   coreSchema, bindingsSessionsSchema, eventsSchema, snapshotsSchema,
@@ -42,6 +43,7 @@ describe("ContextMonitor", () => {
   let store: ContextUsageStore;
   let monitor: ContextMonitor;
   let ensureContextCollectorSpy: ReturnType<typeof vi.fn>;
+  let checkReadySpy: ReturnType<typeof vi.fn>;
   let tmpDir: string;
 
   beforeEach(() => {
@@ -53,8 +55,10 @@ describe("ContextMonitor", () => {
     mkdirSync(join(tmpDir, "context"), { recursive: true });
     store = new ContextUsageStore(db, { stateDir: tmpDir });
     ensureContextCollectorSpy = vi.fn();
+    checkReadySpy = vi.fn(async (): Promise<ReadinessResult> => ({ ready: false, reason: "not_ready", code: "awaiting_runtime" }));
     monitor = new ContextMonitor(db, store, {
       ensureContextCollector: ensureContextCollectorSpy,
+      checkReady: checkReadySpy,
     });
   });
 
@@ -119,11 +123,11 @@ describe("ContextMonitor", () => {
   };
 
   // T1: pollOnce discovers running Claude sessions and persists usage
-  it("pollOnce discovers running Claude sessions and persists context usage", () => {
+  it("pollOnce discovers running Claude sessions and persists context usage", async () => {
     const { node, sessionName } = seedClaudeNode();
     writeSidecar(sessionName, VALID_SIDECAR);
 
-    monitor.pollOnce();
+    await monitor.pollOnce();
 
     const usage = store.getForNode(node.id, sessionName);
     expect(usage.availability).toBe("known");
@@ -135,10 +139,10 @@ describe("ContextMonitor", () => {
   });
 
   // T2: pollOnce skips non-Claude runtimes
-  it("pollOnce skips non-Claude runtimes", () => {
+  it("pollOnce skips non-Claude runtimes", async () => {
     const { node: codexNode } = seedCodexNode();
 
-    monitor.pollOnce();
+    await monitor.pollOnce();
 
     const usage = store.getForNode(codexNode.id, "dev-qa@test");
     expect(usage.availability).toBe("unknown");
@@ -146,11 +150,11 @@ describe("ContextMonitor", () => {
   });
 
   // T3: pollOnce persists unknown for missing sidecar
-  it("pollOnce persists unknown for missing sidecar files", () => {
+  it("pollOnce persists unknown for missing sidecar files", async () => {
     const { node, sessionName } = seedClaudeNode();
     // No sidecar file written
 
-    monitor.pollOnce();
+    await monitor.pollOnce();
 
     const usage = store.getForNode(node.id, sessionName);
     expect(usage.availability).toBe("unknown");
@@ -158,11 +162,11 @@ describe("ContextMonitor", () => {
   });
 
   // T4: pollOnce handles malformed sidecar without crashing
-  it("pollOnce handles malformed sidecar without crashing", () => {
+  it("pollOnce handles malformed sidecar without crashing", async () => {
     const { node, sessionName } = seedClaudeNode();
     writeSidecar(sessionName, { bad: "data" });
 
-    monitor.pollOnce();
+    await monitor.pollOnce();
 
     const usage = store.getForNode(node.id, sessionName);
     expect(usage.availability).toBe("unknown");
@@ -170,9 +174,9 @@ describe("ContextMonitor", () => {
   });
 
   // T5: pollOnce with zero eligible sessions does nothing
-  it("pollOnce with zero eligible sessions does nothing", () => {
+  it("pollOnce with zero eligible sessions does nothing", async () => {
     // No nodes seeded
-    monitor.pollOnce(); // Should not throw
+    await monitor.pollOnce(); // Should not throw
   });
 
   // T6: start/stop manages interval lifecycle
@@ -184,7 +188,7 @@ describe("ContextMonitor", () => {
   });
 
   // T7: One bad session doesn't prevent polling other sessions
-  it("one bad session does not prevent polling others", () => {
+  it("one bad session does not prevent polling others", async () => {
     const { node: node1, sessionName: s1 } = seedClaudeNode("dev.impl1", "impl1@test");
     const rig2 = rigRepo.createRig("rig2");
     const node2 = rigRepo.addNode(rig2.id, "dev.impl2", { runtime: "claude-code" });
@@ -194,7 +198,7 @@ describe("ContextMonitor", () => {
     // Write valid sidecar for node2 only; node1 has no sidecar
     writeSidecar("impl2@test", { ...VALID_SIDECAR, session_name: "impl2@test" });
 
-    monitor.pollOnce();
+    await monitor.pollOnce();
 
     // node1 should have unknown, node2 should have known
     expect(store.getForNode(node1.id, "impl1@test").availability).toBe("unknown");
@@ -202,9 +206,9 @@ describe("ContextMonitor", () => {
   });
 
   // T8: Monitor uses existing node/session identity (not its own)
-  it("monitor does not create its own node/session identity", () => {
+  it("monitor does not create its own node/session identity", async () => {
     seedClaudeNode();
-    monitor.pollOnce();
+    await monitor.pollOnce();
 
     // No new nodes or sessions should have been created
     const rig = rigRepo.getRig(rigRepo.listRigs()[0]!.id);
@@ -212,25 +216,65 @@ describe("ContextMonitor", () => {
   });
 
   // T9: Claimed/adopted Claude tmux sessions are polled
-  it("claimed tmux sessions are polled", () => {
+  it("claimed tmux sessions are polled", async () => {
     const { node } = seedClaimedNode();
     writeSidecar("adopted-session", { ...VALID_SIDECAR, session_name: "adopted-session" });
 
-    monitor.pollOnce();
+    await monitor.pollOnce();
 
     const usage = store.getForNode(node.id, "adopted-session");
     expect(usage.availability).toBe("known");
     expect(usage.usedPercentage).toBe(67);
   });
 
-  it("external_cli Claude sessions are not polled", () => {
+  it("external_cli Claude sessions are not polled", async () => {
     const { node } = seedExternalCliClaudeNode();
     writeSidecar("orch-lead@test", VALID_SIDECAR);
 
-    monitor.pollOnce();
+    await monitor.pollOnce();
 
     const usage = store.getForNode(node.id, "orch-lead@test");
     expect(usage.availability).toBe("unknown");
     expect(usage.reason).toBe("no_data");
+  });
+
+  it("pollOnce normalizes stale Claude startup failures back to ready when the runtime is live", async () => {
+    const { sessionName, session } = (() => {
+      const rig = rigRepo.createRig("test-rig-5");
+      const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code", cwd: "/project" });
+      const session = sessionRegistry.registerSession(node.id, "dev-impl@test");
+      db.prepare("UPDATE sessions SET status = 'running', startup_status = 'failed' WHERE id = ?").run(session.id);
+      return { sessionName: "dev-impl@test", session };
+    })();
+    writeSidecar(sessionName, VALID_SIDECAR);
+    checkReadySpy.mockResolvedValue({ ready: true });
+
+    await monitor.pollOnce();
+
+    const refreshed = db.prepare("SELECT startup_status FROM sessions WHERE id = ?").get(session.id) as { startup_status: string };
+    expect(refreshed.startup_status).toBe("ready");
+    expect(checkReadySpy).toHaveBeenCalledWith(expect.objectContaining({
+      nodeId: session.nodeId,
+      tmuxSession: sessionName,
+      cwd: "/project",
+    }));
+  });
+
+  it("pollOnce does not overwrite pending Claude startup state", async () => {
+    const { sessionName, session } = (() => {
+      const rig = rigRepo.createRig("test-rig-6");
+      const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code", cwd: "/project" });
+      const session = sessionRegistry.registerSession(node.id, "dev-impl-pending@test");
+      db.prepare("UPDATE sessions SET status = 'running', startup_status = 'pending' WHERE id = ?").run(session.id);
+      return { sessionName: "dev-impl-pending@test", session };
+    })();
+    writeSidecar(sessionName, { ...VALID_SIDECAR, session_name: sessionName });
+    checkReadySpy.mockResolvedValue({ ready: true });
+
+    await monitor.pollOnce();
+
+    const refreshed = db.prepare("SELECT startup_status FROM sessions WHERE id = ?").get(session.id) as { startup_status: string };
+    expect(refreshed.startup_status).toBe("pending");
+    expect(checkReadySpy).not.toHaveBeenCalled();
   });
 });
