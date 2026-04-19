@@ -62,7 +62,7 @@ pods:
           files: []
           actions:
             - type: send_text
-              value: "rigged status"
+              value: "rig status"
               phase: after_ready
               idempotent: true
               applies_on: [fresh_start]

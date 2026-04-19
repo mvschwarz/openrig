@@ -10,11 +10,11 @@ echo ""
 
 # 0. Start or reuse daemon
 echo "Step 0: Ensure daemon is running..."
-if rigged daemon start; then
+if rig daemon start; then
   sleep 2
 else
   echo "Daemon start returned non-zero; checking for an existing healthy daemon..."
-  if rigged ps --json >/dev/null 2>&1; then
+  if rig ps --json >/dev/null 2>&1; then
     echo "Reusing existing healthy daemon."
   else
     echo "ERROR: daemon failed to start and no healthy daemon is available." >&2
@@ -25,7 +25,7 @@ echo ""
 
 # 1. Boot
 echo "Step 1: Boot demo topology..."
-UP_OUTPUT=$(rigged up demo/rig.yaml 2>&1 | tee "$PROOF_DIR/up-transcript.txt")
+UP_OUTPUT=$(rig up demo/rig.yaml 2>&1 | tee "$PROOF_DIR/up-transcript.txt")
 RIG_ID=$(printf '%s\n' "$UP_OUTPUT" | sed -n 's/^Rig: //p' | tail -n1)
 if [ -z "$RIG_ID" ]; then
   echo "ERROR: No rig ID found in boot output. Proof failed."
@@ -35,7 +35,7 @@ echo ""
 
 # 2. Node status
 echo "Step 2: Node status after boot..."
-rigged ps --nodes 2>&1 | tee "$PROOF_DIR/ps-nodes.txt"
+rig ps --nodes 2>&1 | tee "$PROOF_DIR/ps-nodes.txt"
 echo ""
 
 # 3. Health check after boot
@@ -74,7 +74,7 @@ echo "Rig ID: $RIG_ID"
 # 7. Tear down
 echo ""
 echo "Step 7: Tear down..."
-DOWN_OUTPUT=$(rigged down "$RIG_ID" 2>&1 | tee "$PROOF_DIR/down-transcript.txt")
+DOWN_OUTPUT=$(rig down "$RIG_ID" 2>&1 | tee "$PROOF_DIR/down-transcript.txt")
 SNAPSHOT_ID=$(printf '%s\n' "$DOWN_OUTPUT" | sed -n 's/^Snapshot: //p' | tail -n1)
 if [ -z "$SNAPSHOT_ID" ]; then
   echo "ERROR: No snapshot ID found in teardown output. Proof failed."
@@ -90,12 +90,12 @@ echo ""
 
 # 9. Restore via explicit snapshot + rig ID
 echo "Step 9: Restore via explicit snapshot + rig ID..."
-rigged restore "$SNAPSHOT_ID" --rig "$RIG_ID" 2>&1 | tee "$PROOF_DIR/restore-transcript.txt"
+rig restore "$SNAPSHOT_ID" --rig "$RIG_ID" 2>&1 | tee "$PROOF_DIR/restore-transcript.txt"
 echo ""
 
 # 10. Node status after restore
 echo "Step 10: Node status after restore..."
-rigged ps --nodes 2>&1 | tee "$PROOF_DIR/ps-restored.txt"
+rig ps --nodes 2>&1 | tee "$PROOF_DIR/ps-restored.txt"
 echo ""
 
 echo "=== Automated proof artifacts produced ==="

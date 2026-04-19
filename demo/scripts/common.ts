@@ -59,12 +59,12 @@ export function runCommand(command: string, args: string[], cwd = repoRoot()): s
   }).trim();
 }
 
-export function runRigged(args: string[]): string {
-  return runCommand("rigged", args);
+export function runRig(args: string[]): string {
+  return runCommand("rig", args);
 }
 
-export function runRiggedJson<T>(args: string[]): T {
-  const output = runRigged(args);
+export function runRigJson<T>(args: string[]): T {
+  const output = runRig(args);
   return JSON.parse(output) as T;
 }
 
@@ -77,7 +77,7 @@ export function sleep(ms: number): Promise<void> {
 }
 
 export function listRigSummaries(): DemoRigSummary[] {
-  return runRiggedJson<DemoRigSummary[]>(["ps", "--json"]);
+  return runRigJson<DemoRigSummary[]>(["ps", "--json"]);
 }
 
 export function getCurrentRigSummary(rigNameOrId: string): DemoRigSummary | null {
@@ -95,7 +95,7 @@ export function listRigNodes(rigNameOrId: string): DemoNodeEntry[] {
     return [];
   }
   return filterNodesForRigId(
-    runRiggedJson<DemoNodeEntry[]>(["ps", "--nodes", "--json"]),
+    runRigJson<DemoNodeEntry[]>(["ps", "--nodes", "--json"]),
     summary.rigId
   );
 }
