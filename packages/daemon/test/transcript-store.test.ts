@@ -256,6 +256,100 @@ describe("TranscriptStore", () => {
       expect(result).not.toContain("Q  n");
       expect(result).not.toContain("u  z");
     });
+
+    it("removes orphaned cursor-motion fragments that survive without the ESC byte", () => {
+      const store = new TranscriptStore({ transcriptsRoot: tmpDir });
+      store.ensureTranscriptDir("my-rig");
+      const filePath = store.getTranscriptPath("my-rig", "dev@my-rig");
+      writeFileSync(
+        filePath,
+        [
+          "ok the current transcript snippet im looking at looks like this, it seems",
+          "like i should have spent a bit more time making sure the transcript was a",
+          "bit more cleaned up when we shipped v1 of rig transcript.  [2CHonest",
+          "[1Cframing: [1Cadding [1Cthe [1Cpack [1Cis [1Cmy [1Cdefault [1Cpattern",
+          "[1Cfrom [1Cthe [1Ctwo [1Cprior",
+          "[2Csuccessions; [1Cit's [1Chow [1CI [1Cstructured [1Clead2 [1C+ [1Corch-lead2",
+          "[2Cif [1Cyou [1Cwant [1Cminimal-wrapper [1Cfor [1Ca [1Cfresh-spawn [1Cnon-successor,",
+          "[2Cstrip [1Cit [1Cdown. [1CYour [1Ccall",
+          "[3Cconfirming [1Cthe [1Corder?",
+        ].join("\n") + "\n",
+      );
+
+      const result = store.readTail("my-rig", "dev@my-rig", 20);
+
+      expect(result).toContain("Honest");
+      expect(result).toContain("confirming");
+      expect(result).not.toContain("[1C");
+      expect(result).not.toContain("[2C");
+      expect(result).not.toContain("[3C");
+    });
+
+    it("drops repeated model status overlays from transcript tails", () => {
+      const store = new TranscriptStore({ transcriptsRoot: tmpDir });
+      store.ensureTranscriptDir("my-rig");
+      const filePath = store.getTranscriptPath("my-rig", "dev@my-rig");
+      writeFileSync(
+        filePath,
+        [
+          "  ⏵⏵ accept edits on (shift+tab to cycle)                 new task? /clear to save 248.6k tokens",
+          "                                                                            Checking for updates",
+          "  1 background terminal running · /ps to view · /stop to close",
+          "  gpt-5.4 xhigh fast · Context [█▏   ] · ~/code/substrate/shared-docs/rigs/kernel",
+          "OpenRig session identity:",
+          "- rig: kernel",
+          "- member: advisor-lead3",
+          "real transcript content should survive",
+        ].join("\n") + "\n",
+      );
+
+      const result = store.readTail("my-rig", "dev@my-rig", 20);
+
+      expect(result).toContain("OpenRig session identity:");
+      expect(result).toContain("real transcript content should survive");
+      expect(result).not.toContain("accept edits on");
+      expect(result).not.toContain("Checking for updates");
+      expect(result).not.toContain("background terminal running");
+      expect(result).not.toContain("gpt-5.4 xhigh fast");
+    });
+
+    it("preserves legitimate transcript sentences that mention overlay phrases", () => {
+      const store = new TranscriptStore({ transcriptsRoot: tmpDir });
+      store.ensureTranscriptDir("my-rig");
+      const filePath = store.getTranscriptPath("my-rig", "dev@my-rig");
+      writeFileSync(
+        filePath,
+        [
+          "Please accept edits on this proposal only after review.",
+          "The phrase background terminal running appears here as quoted text.",
+          "We were discussing the gpt-5.4 xhigh fast footer format yesterday.",
+        ].join("\n") + "\n",
+      );
+
+      const result = store.readTail("my-rig", "dev@my-rig", 20);
+
+      expect(result).toContain("Please accept edits on this proposal only after review.");
+      expect(result).toContain("The phrase background terminal running appears here as quoted text.");
+      expect(result).toContain("We were discussing the gpt-5.4 xhigh fast footer format yesterday.");
+    });
+
+    it("preserves literal cursor-fragment tokens when they are mentioned as data", () => {
+      const store = new TranscriptStore({ transcriptsRoot: tmpDir });
+      store.ensureTranscriptDir("my-rig");
+      const filePath = store.getTranscriptPath("my-rig", "dev@my-rig");
+      writeFileSync(
+        filePath,
+        [
+          "The artifact looked like literal [2C and [1C tokens in the transcript.",
+          "That exact text should survive cleanup.",
+        ].join("\n") + "\n",
+      );
+
+      const result = store.readTail("my-rig", "dev@my-rig", 20);
+
+      expect(result).toContain("literal [2C and [1C tokens");
+      expect(result).toContain("That exact text should survive cleanup.");
+    });
   });
 
   describe("grep", () => {
