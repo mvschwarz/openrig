@@ -10,6 +10,8 @@ export interface ImportDeps extends StatusDeps {
   readFile: (path: string) => string;
 }
 
+const LONG_RUNNING_IMPORT_TIMEOUT_MS = 120_000;
+
 export function importCommand(depsOverride?: ImportDeps): Command {
   const cmd = new Command("import").description("Import a rig spec from YAML");
   const getDeps = (): ImportDeps => depsOverride ?? {
@@ -120,7 +122,13 @@ export function importCommand(depsOverride?: ImportDeps): Command {
       }
 
       if (opts.instantiate) {
-        const res = await client.postText<{ rigId: string; specName: string; specVersion: string; nodes: Array<{ logicalId: string; status: string }> } | { ok: false; code: string; errors?: string[]; message?: string }>("/api/rigs/import", yaml, "text/yaml", extraHeaders);
+        const res = await client.postText<{ rigId: string; specName: string; specVersion: string; nodes: Array<{ logicalId: string; status: string }> } | { ok: false; code: string; errors?: string[]; message?: string }>(
+          "/api/rigs/import",
+          yaml,
+          "text/yaml",
+          extraHeaders,
+          { timeoutMs: LONG_RUNNING_IMPORT_TIMEOUT_MS },
+        );
         if (res.status === 409 || res.status === 400) {
           const data = res.data as { ok: false; code: string; errors?: string[]; message?: string };
           const detail = data.errors?.join("\n  ") ?? data.message ?? `status ${res.status}`;

@@ -437,4 +437,40 @@ describe("rig export + import", () => {
     expect(output).toContain("Attach:");
     expect(output).toContain("tmux attach -t orch-lead@imported-rig");
   });
+
+  it("import --instantiate uses a long-running daemon timeout budget", async () => {
+    let timeoutMs: number | undefined;
+    const postText = vi.fn(async (
+      _path: string,
+      _text: string,
+      _contentType?: string,
+      _extraHeaders?: Record<string, string>,
+      options?: { timeoutMs?: number },
+    ) => {
+      timeoutMs = options?.timeoutMs;
+      return {
+        status: 201,
+        data: {
+          rigId: "rig-new",
+          specName: "imported-rig",
+          specVersion: "0.1.0",
+          nodes: [{ logicalId: "orchestrator", status: "launched" }],
+          attachCommand: "tmux attach -t orch-lead@imported-rig",
+        },
+      };
+    });
+
+    const deps: ImportDeps = {
+      lifecycleDeps: runningLifecycleDeps(port),
+      clientFactory: () => ({ postText } as unknown as DaemonClient),
+      readFile: vi.fn(() => 'version: "0.2"\nname: test\npods:\n  - id: dev\n    label: Dev\n    members:\n      - id: impl\n        agent_ref: "local:agents/impl"\n        profile: default\n        runtime: claude-code\n        cwd: .\n    edges: []\nedges: []'),
+    };
+
+    const program = new Command();
+    program.addCommand(importCommand(deps));
+
+    await captureLogs(() => program.parseAsync(["node", "rig", "import", "rig.yaml", "--instantiate"]));
+
+    expect(timeoutMs).toBe(120_000);
+  });
 });
