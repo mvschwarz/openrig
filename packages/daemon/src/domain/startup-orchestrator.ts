@@ -7,7 +7,7 @@ import type {
   RuntimeAdapter, NodeBinding, ResolvedStartupFile,
   ProjectionResult, StartupDeliveryResult,
 } from "./runtime-adapter.js";
-import { resolveConcreteHint } from "./runtime-adapter.js";
+import { isAttentionRequiredReadinessCode, resolveConcreteHint } from "./runtime-adapter.js";
 import type { ProjectionPlan } from "./projection-planner.js";
 
 // -- Types --
@@ -35,8 +35,6 @@ export interface StartupInput {
 export type StartupResult =
   | { ok: true; startupStatus: "ready"; continuityOutcome: "resumed" | "fresh" }
   | { ok: false; startupStatus: "attention_required" | "failed"; errors: string[] };
-
-const ATTENTION_REQUIRED_READINESS_CODES = new Set(["trust_gate", "update_gate", "login_required", "mcp_gate"]);
 
 interface StartupOrchestratorDeps {
   db: Database.Database;
@@ -191,7 +189,7 @@ export class StartupOrchestrator {
     try {
       const readiness = await this.waitForReady(input.adapter, input.binding, input.readinessTimeoutMs ?? 30_000);
       if (!readiness.ready) {
-        if (readiness.code && ATTENTION_REQUIRED_READINESS_CODES.has(readiness.code)) {
+        if (isAttentionRequiredReadinessCode(readiness.code)) {
           errors.push(`Startup requires attention: ${readiness.reason ?? "unknown"}`);
           return this.fail(input, "attention_required", errors);
         }
@@ -277,7 +275,7 @@ export class StartupOrchestrator {
     while (true) {
       const result = await adapter.checkReady(binding);
       if (result.ready) return result;
-      if (result.code && ATTENTION_REQUIRED_READINESS_CODES.has(result.code)) {
+      if (isAttentionRequiredReadinessCode(result.code)) {
         return result;
       }
 
