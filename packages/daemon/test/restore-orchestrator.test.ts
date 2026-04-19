@@ -959,8 +959,59 @@ describe("RestoreOrchestrator", () => {
     // (The old helper resume fails with mock but returns baseStatus = failed)
   });
 
-  // NS-T05: R3 — pod-aware restore must fail loudly when continuity was requested but no token exists
-  it("pod-aware restore with resume type but missing token → failed", async () => {
+  it("legacy Claude restore with missing token launches a fresh harness when startup context is available", async () => {
+    const rig = rigRepo.createRig("r01");
+    const node = rigRepo.addNode(rig.id, "impl", { runtime: "claude-code" });
+    const session = sessionRegistry.registerSession(node.id, "r01-impl");
+    sessionRegistry.updateStatus(session.id, "running");
+    db.prepare("UPDATE sessions SET resume_type = ? WHERE id = ?").run("claude_id", session.id);
+    db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, ?, ?, ?)").run(node.id, "[]", "[]", "[]", "claude-code");
+    const snap = snapshotCapture.captureSnapshot(rig.id, "test");
+    sessionRegistry.updateStatus(session.id, "exited");
+    db.prepare("DELETE FROM bindings WHERE node_id = ?").run(node.id);
+
+    const launchHarness = vi.fn(async () => ({ ok: true as const, resumeToken: "fresh-claude-token", resumeType: "claude_id" }));
+    const mockAdapter = {
+      runtime: "claude-code",
+      listInstalled: vi.fn(async () => []),
+      project: vi.fn(async () => ({ projected: [], skipped: [], failed: [] })),
+      deliverStartup: vi.fn(async () => ({ delivered: 0, failed: [] })),
+      checkReady: vi.fn(async () => ({ ready: true })),
+      launchHarness,
+    };
+
+    const orch = createOrchestrator();
+    const result = await orch.restore(snap.id, { adapters: { "claude-code": mockAdapter } });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.result.nodes[0]!.status).toBe("fresh");
+      expect(launchHarness).toHaveBeenCalledTimes(1);
+      expect(launchHarness.mock.calls[0]![1].resumeToken).toBeUndefined();
+    }
+  });
+
+  it("legacy Claude restore with missing token fails honestly when no startup context is available for a fresh fallback", async () => {
+    const rig = rigRepo.createRig("r01");
+    const node = rigRepo.addNode(rig.id, "impl", { runtime: "claude-code" });
+    const session = sessionRegistry.registerSession(node.id, "r01-impl");
+    sessionRegistry.updateStatus(session.id, "running");
+    db.prepare("UPDATE sessions SET resume_type = ? WHERE id = ?").run("claude_id", session.id);
+    const snap = snapshotCapture.captureSnapshot(rig.id, "test");
+    sessionRegistry.updateStatus(session.id, "exited");
+    db.prepare("DELETE FROM bindings WHERE node_id = ?").run(node.id);
+
+    const orch = createOrchestrator();
+    const result = await orch.restore(snap.id);
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.result.nodes[0]!.status).toBe("failed");
+      expect(result.result.nodes[0]!.error).toContain("Resume fallback required a fresh launch");
+    }
+  });
+
+  it("pod-aware Claude restore with resume type but missing token falls back to fresh launch", async () => {
     const rig = rigRepo.createRig("test-rig");
     db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-2", rig.id, "Dev");
     const node = rigRepo.addNode(rig.id, "dev.qa", { runtime: "claude-code", podId: "pod-2" });
@@ -973,14 +1024,208 @@ describe("RestoreOrchestrator", () => {
     sessionRegistry.updateStatus(session.id, "exited");
     db.prepare("DELETE FROM bindings WHERE node_id = ?").run(node.id);
 
+    const mockAdapter = {
+      runtime: "claude-code",
+      listInstalled: vi.fn(async () => []),
+      project: vi.fn(async () => ({ projected: [], skipped: [], failed: [] })),
+      deliverStartup: vi.fn(async () => ({ delivered: 0, failed: [] })),
+      checkReady: vi.fn(async () => ({ ready: true })),
+      launchHarness: vi.fn(async () => ({ ok: true as const, resumeToken: "fresh-claude-token", resumeType: "claude_id" })),
+    };
+
     const orch = createOrchestrator();
-    const result = await orch.restore(snap.id);
+    const result = await orch.restore(snap.id, { adapters: { "claude-code": mockAdapter } });
 
     expect(result.ok).toBe(true);
     if (result.ok) {
       const nodeResult = result.result.nodes.find((n) => n.nodeId === node.id);
-      expect(nodeResult!.status).toBe("failed");
-      expect(nodeResult!.error).toContain("no token available");
+      expect(nodeResult!.status).toBe("fresh");
+    }
+  });
+
+  it("pod-aware Claude restore retries fresh when resume launch proves the saved session is gone", async () => {
+    const rig = rigRepo.createRig("test-rig");
+    db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-claude-retry", rig.id, "Dev");
+    const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code", podId: "pod-claude-retry" });
+    const session = sessionRegistry.registerSession(node.id, "dev-impl@test-rig");
+    sessionRegistry.updateStatus(session.id, "running");
+    sessionRegistry.updateResumeToken(session.id, "claude_id", "stale-claude-token");
+    db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, ?, ?, ?)").run(node.id, "[]", "[]", "[]", "claude-code");
+    const snap = snapshotCapture.captureSnapshot(rig.id, "test");
+    sessionRegistry.updateStatus(session.id, "exited");
+    db.prepare("DELETE FROM bindings WHERE node_id = ?").run(node.id);
+
+    const launchHarness = vi.fn()
+      .mockResolvedValueOnce({ ok: false as const, error: "Claude resume failed: no conversation found for the requested session", recovery: "retry_fresh" })
+      .mockResolvedValueOnce({ ok: true as const, resumeToken: "fresh-claude-token", resumeType: "claude_id" });
+    const mockAdapter = {
+      runtime: "claude-code",
+      listInstalled: vi.fn(async () => []),
+      project: vi.fn(async () => ({ projected: [], skipped: [], failed: [] })),
+      deliverStartup: vi.fn(async () => ({ delivered: 0, failed: [] })),
+      checkReady: vi.fn(async () => ({ ready: true })),
+      launchHarness,
+    };
+
+    const orch = createOrchestrator();
+    const result = await orch.restore(snap.id, { adapters: { "claude-code": mockAdapter } });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      const nodeResult = result.result.nodes.find((n) => n.nodeId === node.id);
+      expect(nodeResult!.status).toBe("fresh");
+      expect(launchHarness).toHaveBeenCalledTimes(2);
+      expect(launchHarness.mock.calls[0]![1].resumeToken).toBe("stale-claude-token");
+      expect(launchHarness.mock.calls[1]![1].resumeToken).toBeUndefined();
+    }
+  });
+
+  it("pod-aware Codex restore with resume type but missing token falls back to fresh launch", async () => {
+    const rig = rigRepo.createRig("test-rig");
+    db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-codex-missing", rig.id, "Dev");
+    const node = rigRepo.addNode(rig.id, "dev.qa", { runtime: "codex", podId: "pod-codex-missing" });
+    const session = sessionRegistry.registerSession(node.id, "dev-qa@test-rig");
+    sessionRegistry.updateStatus(session.id, "running");
+    db.prepare("UPDATE sessions SET resume_type = ? WHERE id = ?").run("codex_id", session.id);
+    db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, ?, ?, ?)").run(node.id, "[]", "[]", "[]", "codex");
+    const snap = snapshotCapture.captureSnapshot(rig.id, "test");
+    sessionRegistry.updateStatus(session.id, "exited");
+    db.prepare("DELETE FROM bindings WHERE node_id = ?").run(node.id);
+
+    const mockAdapter = {
+      runtime: "codex",
+      listInstalled: vi.fn(async () => []),
+      project: vi.fn(async () => ({ projected: [], skipped: [], failed: [] })),
+      deliverStartup: vi.fn(async () => ({ delivered: 0, failed: [] })),
+      checkReady: vi.fn(async () => ({ ready: true })),
+      launchHarness: vi.fn(async () => ({ ok: true as const, resumeToken: "fresh-codex-token", resumeType: "codex_id" })),
+    };
+
+    const orch = createOrchestrator();
+    const result = await orch.restore(snap.id, { adapters: { codex: mockAdapter } });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      const nodeResult = result.result.nodes.find((n) => n.nodeId === node.id);
+      expect(nodeResult!.status).toBe("fresh");
+    }
+  });
+
+  it("pod-aware Codex restore retries fresh when resume launch proves the saved session is gone", async () => {
+    const rig = rigRepo.createRig("test-rig");
+    db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-codex-retry", rig.id, "Dev");
+    const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "codex", podId: "pod-codex-retry" });
+    const session = sessionRegistry.registerSession(node.id, "dev-impl@test-rig");
+    sessionRegistry.updateStatus(session.id, "running");
+    sessionRegistry.updateResumeToken(session.id, "codex_id", "stale-codex-token");
+    db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, ?, ?, ?)").run(node.id, "[]", "[]", "[]", "codex");
+    const snap = snapshotCapture.captureSnapshot(rig.id, "test");
+    sessionRegistry.updateStatus(session.id, "exited");
+    db.prepare("DELETE FROM bindings WHERE node_id = ?").run(node.id);
+
+    const launchHarness = vi.fn()
+      .mockResolvedValueOnce({ ok: false as const, error: "Codex resume failed: no saved session found for the requested session", recovery: "retry_fresh" })
+      .mockResolvedValueOnce({ ok: true as const, resumeToken: "fresh-codex-token", resumeType: "codex_id" });
+    const mockAdapter = {
+      runtime: "codex",
+      listInstalled: vi.fn(async () => []),
+      project: vi.fn(async () => ({ projected: [], skipped: [], failed: [] })),
+      deliverStartup: vi.fn(async () => ({ delivered: 0, failed: [] })),
+      checkReady: vi.fn(async () => ({ ready: true })),
+      launchHarness,
+    };
+
+    const orch = createOrchestrator();
+    const result = await orch.restore(snap.id, { adapters: { codex: mockAdapter } });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      const nodeResult = result.result.nodes.find((n) => n.nodeId === node.id);
+      expect(nodeResult!.status).toBe("fresh");
+      expect(launchHarness).toHaveBeenCalledTimes(2);
+      expect(launchHarness.mock.calls[0]![1].resumeToken).toBe("stale-codex-token");
+      expect(launchHarness.mock.calls[1]![1].resumeToken).toBeUndefined();
+    }
+  });
+
+  it("pod-aware Codex restore treats a fresh fallback as resumed when the native token matches", async () => {
+    const rig = rigRepo.createRig("test-rig");
+    db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-codex-same-token", rig.id, "Dev");
+    const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "codex", podId: "pod-codex-same-token" });
+    const session = sessionRegistry.registerSession(node.id, "dev-impl@test-rig");
+    sessionRegistry.updateStatus(session.id, "running");
+    sessionRegistry.updateResumeToken(session.id, "codex_id", "stable-codex-token");
+    db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, ?, ?, ?)").run(node.id, "[]", "[]", "[]", "codex");
+    const snap = snapshotCapture.captureSnapshot(rig.id, "test");
+    sessionRegistry.updateStatus(session.id, "exited");
+    db.prepare("DELETE FROM bindings WHERE node_id = ?").run(node.id);
+
+    const launchHarness = vi.fn()
+      .mockResolvedValueOnce({ ok: false as const, error: "Codex resume failed: no saved session found for the requested session", recovery: "retry_fresh" })
+      .mockResolvedValueOnce({ ok: true as const, resumeToken: "stable-codex-token", resumeType: "codex_id" });
+    const mockAdapter = {
+      runtime: "codex",
+      listInstalled: vi.fn(async () => []),
+      project: vi.fn(async () => ({ projected: [], skipped: [], failed: [] })),
+      deliverStartup: vi.fn(async () => ({ delivered: 0, failed: [] })),
+      checkReady: vi.fn(async () => ({ ready: true })),
+      launchHarness,
+    };
+
+    const orch = createOrchestrator();
+    const result = await orch.restore(snap.id, { adapters: { codex: mockAdapter } });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      const nodeResult = result.result.nodes.find((n) => n.nodeId === node.id);
+      expect(nodeResult!.status).toBe("resumed");
+      expect(result.result.warnings).not.toContain("Node dev.impl: resume was unavailable; launched fresh instead.");
+      expect(launchHarness).toHaveBeenCalledTimes(2);
+      expect(launchHarness.mock.calls[0]![1].resumeToken).toBe("stable-codex-token");
+      expect(launchHarness.mock.calls[1]![1].resumeToken).toBeUndefined();
+    }
+  });
+
+  it("pod-aware Codex restore keeps rebuilt when fresh fallback replays a checkpoint", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "rigged-codex-restore-"));
+    try {
+      const rig = rigRepo.createRig("test-rig");
+      db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-codex-rebuilt", rig.id, "Dev");
+      const node = rigRepo.addNode(rig.id, "dev.ops", { runtime: "codex", podId: "pod-codex-rebuilt", cwd: tmpDir });
+      const session = sessionRegistry.registerSession(node.id, "dev-ops@test-rig");
+      sessionRegistry.updateStatus(session.id, "running");
+      sessionRegistry.updateResumeToken(session.id, "codex_id", "stale-codex-token");
+      checkpointStore.createCheckpoint(node.id, {
+        summary: "Resume this Codex task from checkpoint",
+        keyArtifacts: ["notes/todo.md"],
+      });
+      db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, ?, ?, ?)").run(node.id, "[]", "[]", "[]", "codex");
+      const snap = snapshotCapture.captureSnapshot(rig.id, "test");
+      sessionRegistry.updateStatus(session.id, "exited");
+      db.prepare("DELETE FROM bindings WHERE node_id = ?").run(node.id);
+
+      const launchHarness = vi.fn()
+        .mockResolvedValueOnce({ ok: false as const, error: "Codex resume failed: no saved session found for the requested session", recovery: "retry_fresh" })
+        .mockResolvedValueOnce({ ok: true as const, resumeToken: "fresh-codex-token", resumeType: "codex_id" });
+      const mockAdapter = {
+        runtime: "codex",
+        listInstalled: vi.fn(async () => []),
+        project: vi.fn(async () => ({ projected: [], skipped: [], failed: [] })),
+        deliverStartup: vi.fn(async () => ({ delivered: 0, failed: [] })),
+        checkReady: vi.fn(async () => ({ ready: true })),
+        launchHarness,
+      };
+
+      const orch = createOrchestrator();
+      const result = await orch.restore(snap.id, { adapters: { codex: mockAdapter } });
+
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        const nodeResult = result.result.nodes.find((n) => n.nodeId === node.id);
+        expect(nodeResult!.status).toBe("rebuilt");
+      }
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
     }
   });
 

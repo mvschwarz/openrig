@@ -411,6 +411,7 @@ export class RestoreOrchestrator {
     const resumeRequested = restorePolicy === "resume_if_possible" && !!resumeType && resumeType !== "none";
 
     let baseStatus: RestoreNodeResult["status"] = "fresh";
+    let needsFreshLaunchFallback = false;
 
     // Pod-aware nodes: resume via launchHarness (handled in startup orchestrator with skipHarnessLaunch: false)
     // Legacy nodes: resume via old claude-resume/codex-resume helpers
@@ -419,25 +420,41 @@ export class RestoreOrchestrator {
     if (resumeRequested && !isPodAware) {
       // Legacy resume path
       if (!resumeToken) {
-        return { nodeId: node.id, logicalId: node.logicalId, status: "failed", error: `Resume requested but no token available. Restore the node manually or launch fresh with: rig up` };
-      }
-      const resumed = await this.attemptResume(sessionName, resumeType, resumeToken, node.cwd ?? "/");
-      if (resumed) {
-        baseStatus = "resumed";
+        if (this.shouldFallbackFreshWithoutResume(node.runtime, resumeType)) {
+          warnings?.push(`Node ${node.logicalId}: resume requested but no token was available; launched fresh instead.`);
+          baseStatus = "fresh";
+          needsFreshLaunchFallback = true;
+        } else {
+          return { nodeId: node.id, logicalId: node.logicalId, status: "failed", error: `Resume requested but no token available. Restore the node manually or launch fresh with: rig up` };
+        }
       } else {
-        return { nodeId: node.id, logicalId: node.logicalId, status: "failed", error: `Resume attempted but failed. Check the harness state manually or launch fresh with: rig up` };
+        const resumeOutcome = await this.attemptResume(sessionName, resumeType, resumeToken, node.cwd ?? "/");
+        if (resumeOutcome === "resumed") {
+          baseStatus = "resumed";
+        } else if (resumeOutcome === "retry_fresh") {
+          warnings?.push(`Node ${node.logicalId}: resume was unavailable; launched fresh instead.`);
+          baseStatus = "fresh";
+          needsFreshLaunchFallback = true;
+        } else {
+          return { nodeId: node.id, logicalId: node.logicalId, status: "failed", error: `Resume attempted but failed. Check the harness state manually or launch fresh with: rig up` };
+        }
       }
     } else if (resumeRequested && isPodAware) {
       // Pod-aware restore must preserve the same honesty contract as legacy restore:
       // if resume was requested but continuity state is unavailable, fail loudly
       // instead of silently downgrading to a fresh launch with amnesia.
       if (!resumeToken) {
-        return {
-          nodeId: node.id,
-          logicalId: node.logicalId,
-          status: "failed",
-          error: "Resume requested but no token available. Restore the node manually or launch fresh with: rig up",
-        };
+        if (this.shouldFallbackFreshWithoutResume(node.runtime, resumeType)) {
+          warnings?.push(`Node ${node.logicalId}: resume requested but no token was available; launched fresh instead.`);
+          needsFreshLaunchFallback = true;
+        } else {
+          return {
+            nodeId: node.id,
+            logicalId: node.logicalId,
+            status: "failed",
+            error: "Resume requested but no token available. Restore the node manually or launch fresh with: rig up",
+          };
+        }
       }
     }
 
@@ -512,6 +529,7 @@ export class RestoreOrchestrator {
             const { StartupOrchestrator } = await import("./startup-orchestrator.js");
             const startupOrch = new StartupOrchestrator({ db: this.db, sessionRegistry: this.sessionRegistry, eventBus: this.eventBus, tmuxAdapter: this.tmuxAdapter });
             const replayAsRestore = baseStatus !== "fresh";
+            const shouldLaunchHarness = isPodAware || needsFreshLaunchFallback;
             const startupResult = await startupOrch.startNode({
               rigId,
               nodeId: node.id,
@@ -522,16 +540,25 @@ export class RestoreOrchestrator {
               resolvedStartupFiles: filteredFiles,
               startupActions: startupCtx.startupActions,
               isRestore: replayAsRestore,
-              skipHarnessLaunch: !isPodAware, // Pod-aware: use launchHarness with resumeToken. Legacy: old helpers already handled.
-              resumeToken: (isPodAware && resumeRequested) ? resumeToken ?? undefined : undefined,
+              skipHarnessLaunch: !shouldLaunchHarness,
+              resumeToken: (isPodAware && resumeRequested && !needsFreshLaunchFallback) ? resumeToken ?? undefined : undefined,
               sessionName: sessionName,
             });
             if (startupResult.ok) {
-              // Pod-aware nodes with resume token: startup used launchHarness with the token → resumed
-              const finalStatus = (isPodAware && resumeRequested) ? "resumed" : baseStatus;
+              const nativeContinuityProved = isPodAware
+                && resumeRequested
+                && this.launchedSessionMatchesSnapshotResume(launchResult.session.id, resumeType, resumeToken);
+              // Pod-aware nodes with resume token may either truly resume or
+              // prove that the saved session is gone and fall back to fresh.
+              if (isPodAware && resumeRequested && startupResult.continuityOutcome === "fresh" && !nativeContinuityProved) {
+                warnings?.push(`Node ${node.logicalId}: resume was unavailable; launched fresh instead.`);
+              }
+              const finalStatus = (isPodAware && resumeRequested)
+                ? ((startupResult.continuityOutcome === "resumed" || nativeContinuityProved) ? "resumed" : baseStatus)
+                : baseStatus;
               return { nodeId: node.id, logicalId: node.logicalId, status: finalStatus };
             }
-            if (isPodAware && resumeRequested) {
+            if ((isPodAware && resumeRequested) || needsFreshLaunchFallback) {
               return {
                 nodeId: node.id,
                 logicalId: node.logicalId,
@@ -541,7 +568,7 @@ export class RestoreOrchestrator {
             }
             warnings?.push(`Restore startup failed for ${node.logicalId}: ${startupResult.errors.join("; ")}`);
           } catch (err) {
-            if (isPodAware && resumeRequested) {
+            if ((isPodAware && resumeRequested) || needsFreshLaunchFallback) {
               return {
                 nodeId: node.id,
                 logicalId: node.logicalId,
@@ -555,7 +582,37 @@ export class RestoreOrchestrator {
       }
     }
 
+    if (needsFreshLaunchFallback) {
+      return {
+        nodeId: node.id,
+        logicalId: node.logicalId,
+        status: "failed",
+        error: "Resume fallback required a fresh launch, but no startup context was available to relaunch the runtime",
+      };
+    }
+
     return { nodeId: node.id, logicalId: node.logicalId, status: baseStatus };
+  }
+
+  private shouldFallbackFreshWithoutResume(runtime: string | null, resumeType: string | null): boolean {
+    return !!resumeType
+      && (
+        (runtime === "codex" && resumeType.startsWith("codex"))
+        || (runtime === "claude-code" && resumeType.startsWith("claude"))
+      );
+  }
+
+  private launchedSessionMatchesSnapshotResume(
+    sessionId: string,
+    resumeType: string | null,
+    resumeToken: string | null,
+  ): boolean {
+    if (!resumeType || !resumeToken) return false;
+    const row = this.db.prepare("SELECT resume_type, resume_token FROM sessions WHERE id = ?").get(sessionId) as
+      | { resume_type: string | null; resume_token: string | null }
+      | undefined;
+    if (!row?.resume_type || !row.resume_token) return false;
+    return row.resume_type === resumeType && row.resume_token === resumeToken;
   }
 
   private async attemptResume(
@@ -563,18 +620,19 @@ export class RestoreOrchestrator {
     resumeType: string,
     resumeToken: string | null,
     cwd: string
-  ): Promise<boolean> {
+  ): Promise<"resumed" | "retry_fresh" | "failed"> {
     if (this.claudeResume.canResume(resumeType, resumeToken)) {
       const result = await this.claudeResume.resume(sessionName, resumeType, resumeToken, cwd);
-      return result.ok;
+      if (result.ok) return "resumed";
+      return result.code === "retry_fresh" ? "retry_fresh" : "failed";
     }
 
     if (this.codexResume.canResume(resumeType, resumeToken)) {
       const result = await this.codexResume.resume(sessionName, resumeType, resumeToken, cwd);
-      return result.ok;
+      return result.ok ? "resumed" : "failed";
     }
 
-    return false;
+    return "failed";
   }
 
   private writeCheckpointFile(cwd: string, checkpoint: Checkpoint): boolean {

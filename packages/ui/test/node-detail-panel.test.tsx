@@ -29,6 +29,11 @@ const AGENT_DETAIL = {
   canonicalSessionName: "dev-impl@test-rig", nodeKind: "agent", runtime: "claude-code",
   sessionStatus: "running", startupStatus: "ready", restoreOutcome: "n-a",
   tmuxAttachCommand: "tmux attach -t dev-impl@test-rig", resumeCommand: "claude --resume abc-123",
+  recoveryGuidance: {
+    summary: "Try native Claude resume first, then fall back to the workspace-local picker if needed.",
+    commands: ["claude --resume abc-123", "cd /workspace", "claude --resume"],
+    notes: ["Look for session name: dev-impl@test-rig", "Choose the full conversation option, not summary."],
+  },
   latestError: null, model: "opus", agentRef: "local:agents/impl", profile: "default",
   resolvedSpecName: "impl", resolvedSpecVersion: "1.0.0", cwd: "/workspace",
   startupFiles: [{ path: "role.md", deliveryHint: "guidance_merge", required: true }],
@@ -47,6 +52,7 @@ const AGENT_DETAIL = {
 const INFRA_DETAIL = {
   ...AGENT_DETAIL, logicalId: "infra.server", nodeKind: "infrastructure", runtime: "terminal",
   profile: "none", agentRef: "builtin:terminal", resumeCommand: null,
+  recoveryGuidance: null,
   infrastructureStartupCommand: "npm run dev",
   canonicalSessionName: "infra-server@test-rig",
   tmuxAttachCommand: "tmux attach -t infra-server@test-rig",
@@ -178,6 +184,19 @@ describe("NodeDetailPanel", () => {
     await waitFor(() => {
       const banner = screen.getByTestId("detail-failure-banner");
       expect(banner.textContent).toContain("rig ps");
+    });
+  });
+
+  it("shows structured recovery guidance for failed runtime nodes", async () => {
+    mockDetail(FAILED_DETAIL);
+    renderPanel();
+    await waitFor(() => {
+      expect(screen.getByTestId("detail-recovery-guidance")).toBeDefined();
+      expect(screen.getByText("Try native Claude resume first, then fall back to the workspace-local picker if needed.")).toBeDefined();
+      expect(screen.getByText("claude --resume abc-123")).toBeDefined();
+      expect(screen.getByText("cd /workspace")).toBeDefined();
+      expect(screen.getByText("claude --resume")).toBeDefined();
+      expect(screen.getByText(/Choose the full conversation option, not summary/)).toBeDefined();
     });
   });
 

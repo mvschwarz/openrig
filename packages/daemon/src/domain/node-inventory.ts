@@ -1,5 +1,5 @@
 import type Database from "better-sqlite3";
-import type { NodeInventoryEntry, NodeDetailEntry, NodeDetailPeer, NodeDetailEdge, NodeDetailCompactSpec, NodeRestoreOutcome, Binding, RestoreResult } from "./types.js";
+import type { NodeInventoryEntry, NodeDetailEntry, NodeDetailPeer, NodeDetailEdge, NodeDetailCompactSpec, NodeRestoreOutcome, Binding, RestoreResult, NodeRecoveryGuidance } from "./types.js";
 import type { RuntimeAdapter } from "./runtime-adapter.js";
 import type { ContextUsageStore } from "./context-usage-store.js";
 
@@ -67,6 +67,70 @@ function computeResumeCommand(runtime: string | null, resumeToken: string | null
   if (!resumeToken) return null;
   if (runtime === "claude-code") return `claude --resume ${resumeToken}`;
   if (runtime === "codex") return `codex resume ${resumeToken}`;
+  return null;
+}
+
+function computeRecoveryGuidance(input: {
+  runtime: string | null;
+  resumeToken: string | null;
+  cwd: string | null;
+  sessionName: string | null;
+}): NodeRecoveryGuidance | null {
+  const { runtime, resumeToken, cwd, sessionName } = input;
+
+  if (runtime === "claude-code") {
+    const commands: string[] = [];
+    const notes: string[] = [];
+
+    if (resumeToken) {
+      commands.push(`claude --resume ${resumeToken}`);
+    }
+    if (cwd) {
+      commands.push(`cd ${cwd}`);
+    }
+    commands.push("claude --resume");
+
+    if (sessionName) {
+      notes.push(`Look for session name: ${sessionName}`);
+    }
+    notes.push("Choose the full conversation option, not summary.");
+
+    return {
+      summary: resumeToken
+        ? "Try native Claude resume first, then fall back to the workspace-local picker if needed."
+        : "No stored Claude resume token. Use the workspace-local Claude picker fallback.",
+      commands,
+      notes,
+    };
+  }
+
+  if (runtime === "codex") {
+    const commands: string[] = [];
+    const notes: string[] = [];
+
+    if (resumeToken) {
+      commands.push(`codex resume ${resumeToken}`);
+    }
+    if (cwd) {
+      commands.push(`cd ${cwd}`);
+    }
+    commands.push("codex");
+    commands.push("resume");
+
+    notes.push("Use workspace and recent prompt text to identify the right conversation.");
+    if (sessionName) {
+      notes.push(`If the identity anchor was captured, the picker may include: ${sessionName}`);
+    }
+
+    return {
+      summary: resumeToken
+        ? "Try native Codex resume first, then fall back to the workspace-local Codex picker if needed."
+        : "No stored Codex resume token. Use the workspace-local Codex picker fallback.",
+      commands,
+      notes,
+    };
+  }
+
   return null;
 }
 
@@ -189,6 +253,12 @@ export function getNodeInventory(db: Database.Database, rigId: string): NodeInve
     restoreOutcome: deriveRestoreOutcome(db, rigId, row.node_id),
     tmuxAttachCommand: row.binding_attachment_type === "tmux" && row.session_name ? `tmux attach -t ${row.session_name}` : null,
     resumeCommand: computeResumeCommand(row.runtime, row.resume_token),
+    recoveryGuidance: computeRecoveryGuidance({
+      runtime: row.runtime,
+      resumeToken: row.resume_token,
+      cwd: row.cwd,
+      sessionName: row.session_name,
+    }),
     latestError: row.startup_status === "ready" ? null : getLatestError(db, rigId, row.node_id),
     // Extended fields
     model: row.model,

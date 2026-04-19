@@ -47,9 +47,11 @@ export interface ReadinessResult {
 
 // -- Harness launch result --
 
+export type HarnessLaunchRecovery = "retry_fresh";
+
 export type HarnessLaunchResult =
   | { ok: true; resumeToken?: string; resumeType?: string }
-  | { ok: false; error: string };
+  | { ok: false; error: string; recovery?: HarnessLaunchRecovery };
 
 // -- Shared concrete-hint resolver --
 

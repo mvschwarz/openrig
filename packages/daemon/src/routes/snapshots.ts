@@ -87,6 +87,18 @@ restoreRoutes.post("/:snapshotId", async (c) => {
   const inventory = getNodeInventory(restoreOrchestrator.db, rigId);
   const firstRunning = inventory.find((n) => n.canonicalSessionName && n.sessionStatus === "running");
   const attachCommand = firstRunning?.tmuxAttachCommand ?? inventory.find((n) => n.canonicalSessionName)?.tmuxAttachCommand ?? null;
+  const inventoryByLogicalId = new Map(inventory.map((entry) => [entry.logicalId, entry]));
+  const nodes = outcome.result.nodes.map((node) => {
+    const detail = inventoryByLogicalId.get(node.logicalId);
+    return {
+      ...node,
+      canonicalSessionName: detail?.canonicalSessionName ?? null,
+      tmuxAttachCommand: detail?.tmuxAttachCommand ?? null,
+      resumeCommand: detail?.resumeCommand ?? null,
+      recoveryGuidance: detail?.recoveryGuidance ?? null,
+      cwd: detail?.cwd ?? null,
+    };
+  });
 
-  return c.json({ ...outcome.result, attachCommand });
+  return c.json({ ...outcome.result, nodes, attachCommand });
 });

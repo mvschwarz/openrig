@@ -75,7 +75,7 @@ export class ClaudeResumeAdapter {
       if (probe.code === "no_conversation_found") {
         return {
           ok: false,
-          code: "resume_failed",
+          code: "retry_fresh",
           message: "Claude resume failed: no conversation found for the requested session",
         };
       }
@@ -104,7 +104,7 @@ export class ClaudeResumeAdapter {
     if (finalCommand && SHELL_COMMANDS.has(finalCommand)) {
       return {
         ok: false,
-        code: "resume_failed",
+        code: "retry_fresh",
         message: "Claude resume failed: pane returned to shell instead of entering Claude",
       };
     }

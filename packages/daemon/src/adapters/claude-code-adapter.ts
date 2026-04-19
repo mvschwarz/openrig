@@ -231,7 +231,11 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       });
 
       if (probe.code === "no_conversation_found") {
-        return { ok: false, error: "Claude resume failed: no conversation found for the requested session" };
+        return {
+          ok: false,
+          error: "Claude resume failed: no conversation found for the requested session",
+          recovery: "retry_fresh",
+        };
       }
 
       if (probe.status === "resumed") {
@@ -256,7 +260,11 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     }
 
     if (finalCommand && SHELL_COMMANDS.has(finalCommand)) {
-      return { ok: false, error: "Claude resume failed: pane returned to shell instead of entering Claude" };
+      return {
+        ok: false,
+        error: "Claude resume failed: pane returned to shell instead of entering Claude",
+        recovery: "retry_fresh",
+      };
     }
 
     return { ok: false, error: "Claude resume failed: timed out waiting for Claude to become active" };

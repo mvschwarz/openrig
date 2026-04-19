@@ -51,6 +51,26 @@ function makeAction(overrides?: Partial<StartupAction>): StartupAction {
   return { type: "slash_command", value: "/test", phase: "after_ready", appliesOn: ["fresh_start", "restore"], idempotent: true, ...overrides };
 }
 
+function makeIdentityAction(overrides?: Partial<StartupAction>): StartupAction {
+  return {
+    type: "send_text",
+    value: [
+      "dev-impl@test-rig",
+      "OpenRig session identity:",
+      "- rig: test-rig",
+      "- pod: dev",
+      "- member: impl",
+      "- logical_id: dev.impl",
+      "- session: dev-impl@test-rig",
+    ].join("\n"),
+    phase: "after_ready",
+    appliesOn: ["fresh_start", "restore"],
+    idempotent: true,
+    builtin: "session_identity",
+    ...overrides,
+  };
+}
+
 describe("StartupOrchestrator", () => {
   let db: Database.Database;
   let sessionRegistry: SessionRegistry;
@@ -68,12 +88,18 @@ describe("StartupOrchestrator", () => {
 
   afterEach(() => { db.close(); });
 
-  function createOrchestrator(tmuxOverride?: TmuxAdapter): StartupOrchestrator {
+  function createOrchestrator(
+    opts?: TmuxAdapter | { tmux?: TmuxAdapter; readFile?: (path: string) => string },
+  ): StartupOrchestrator {
+    const normalized = opts && "sendText" in opts
+      ? { tmux: opts as TmuxAdapter }
+      : (opts ?? {});
     return new StartupOrchestrator({
       db,
       sessionRegistry,
       eventBus,
-      tmuxAdapter: tmuxOverride ?? tmux,
+      tmuxAdapter: normalized.tmux ?? tmux,
+      readFile: normalized.readFile,
       sleep: async () => {},
     });
   }
@@ -152,7 +178,7 @@ describe("StartupOrchestrator", () => {
   it("action failure transitions to failed", async () => {
     const seed = seedSession();
     const failTmux = mockTmux({ sendText: vi.fn(async () => ({ ok: false as const, message: "session gone" })) });
-    const orch = createOrchestrator(failTmux);
+    const orch = createOrchestrator({ tmux: failTmux });
     const actions: StartupAction[] = [makeAction({ phase: "after_ready" })];
     const result = await orch.startNode(makeInput(seed, { startupActions: actions }));
     expect(result.ok).toBe(false);
@@ -178,7 +204,7 @@ describe("StartupOrchestrator", () => {
       }),
     });
 
-    const orch = createOrchestrator(t);
+    const orch = createOrchestrator({ tmux: t });
     const actions: StartupAction[] = [
       makeAction({ phase: "after_files", value: "/after-files-cmd" }),
       makeAction({ phase: "after_ready", value: "/after-ready-cmd" }),
@@ -284,6 +310,108 @@ describe("StartupOrchestrator", () => {
 
     const row = db.prepare("SELECT startup_status FROM sessions WHERE id = ?").get(seed.sessionId) as { startup_status: string };
     expect(row.startup_status).toBe("attention_required");
+  });
+
+  it("injects the session identity into the first fresh send_text prompt", async () => {
+    const seed = seedSession();
+    const deliverStartup = vi.fn(async (_files: ResolvedStartupFile[]) => ({ delivered: 0, failed: [] }));
+    const adapter = mockAdapter({
+      deliverStartup,
+    });
+    const sendText = vi.fn(async () => ({ ok: true as const }));
+    const tmuxOverride = mockTmux({ sendText });
+    const orch = createOrchestrator({
+      tmux: tmuxOverride,
+      readFile: (path) => path === "/tmp/role.md" ? "Role instructions go here." : "",
+    });
+
+    const result = await orch.startNode(makeInput(seed, {
+      adapter,
+      resolvedStartupFiles: [{
+        path: "guidance/role.md",
+        absolutePath: "/tmp/role.md",
+        ownerRoot: "/tmp",
+        deliveryHint: "send_text",
+        required: true,
+        appliesOn: ["fresh_start"],
+      }],
+      startupActions: [
+        makeIdentityAction(),
+        makeAction({ value: "/rename impl" }),
+      ],
+    }));
+
+    expect(result).toEqual({
+      ok: true,
+      startupStatus: "ready",
+      continuityOutcome: "fresh",
+    });
+    expect(sendText).toHaveBeenNthCalledWith(1, "r01-impl", expect.any(String));
+    const firstPrompt = sendText.mock.calls[0]?.[1];
+    expect(firstPrompt).toContain("dev-impl@test-rig");
+    expect(firstPrompt).toContain("OpenRig session identity:");
+    expect(firstPrompt).toContain("Role instructions go here.");
+    expect(sendText).toHaveBeenNthCalledWith(2, "r01-impl", "/rename impl");
+    expect(deliverStartup).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not replay the session identity on a resumed restore", async () => {
+    const seed = seedSession();
+    const sendText = vi.fn(async () => ({ ok: true as const }));
+    const tmuxOverride = mockTmux({ sendText });
+    const orch = createOrchestrator({ tmux: tmuxOverride });
+
+    const result = await orch.startNode(makeInput(seed, {
+      startupActions: [
+        makeIdentityAction(),
+        makeAction({ value: "/rename impl" }),
+      ],
+      isRestore: true,
+      resumeToken: "claude-session-123",
+    }));
+
+    expect(result).toEqual({
+      ok: true,
+      startupStatus: "ready",
+      continuityOutcome: "resumed",
+    });
+    expect(sendText).toHaveBeenCalledTimes(1);
+    expect(sendText).toHaveBeenCalledWith("r01-impl", "/rename impl");
+  });
+
+  it("sends the identity prompt first when restore falls back to a fresh launch", async () => {
+    const seed = seedSession();
+    const sendText = vi.fn(async () => ({ ok: true as const }));
+    const tmuxOverride = mockTmux({ sendText });
+    const adapter = mockAdapter({
+      runtime: "codex",
+      launchHarness: vi.fn()
+        .mockResolvedValueOnce({ ok: false as const, error: "saved session missing", recovery: "retry_fresh" })
+        .mockResolvedValueOnce({ ok: true as const, resumeToken: "fresh-token", resumeType: "codex_id" }),
+    });
+    const orch = createOrchestrator({ tmux: tmuxOverride });
+
+    const result = await orch.startNode(makeInput(seed, {
+      adapter,
+      isRestore: true,
+      resumeToken: "stale-token",
+      startupActions: [
+        makeIdentityAction(),
+        makeAction({ value: "/rename impl" }),
+      ],
+    }));
+
+    expect(result).toEqual({
+      ok: true,
+      startupStatus: "ready",
+      continuityOutcome: "fresh",
+    });
+    expect(sendText).toHaveBeenNthCalledWith(
+      1,
+      "r01-impl",
+      expect.stringContaining("dev-impl@test-rig"),
+    );
+    expect(sendText).toHaveBeenNthCalledWith(2, "r01-impl", "/rename impl");
   });
 
   // T10: launcher does not mark ready before actions complete
@@ -438,6 +566,45 @@ describe("StartupOrchestrator", () => {
     const session = sessions.find((s) => s.id === seed.sessionId);
     expect(session!.resumeToken).toBeNull();
     expect(session!.resumeType).toBeNull();
+  });
+
+  it("retries restore once as fresh when launchHarness reports resume recovery can safely fall back", async () => {
+    const seed = seedSession();
+    const launchHarness = vi.fn()
+      .mockResolvedValueOnce({ ok: false as const, error: "saved session missing", recovery: "retry_fresh" })
+      .mockResolvedValueOnce({ ok: true as const, resumeToken: "fresh-token", resumeType: "codex_id" });
+    const adapter = mockAdapter({
+      runtime: "codex",
+      launchHarness,
+    });
+    const orch = createOrchestrator();
+
+    const result = await orch.startNode(makeInput(seed, {
+      adapter,
+      isRestore: true,
+      resumeToken: "stale-token",
+    }));
+
+    expect(result).toEqual({
+      ok: true,
+      startupStatus: "ready",
+      continuityOutcome: "fresh",
+    });
+    expect(launchHarness).toHaveBeenCalledTimes(2);
+    expect(launchHarness.mock.calls[0]![1]).toEqual({
+      name: "r01-impl",
+      resumeToken: "stale-token",
+    });
+    expect(launchHarness.mock.calls[1]![1]).toEqual({
+      name: "r01-impl",
+      resumeToken: undefined,
+    });
+
+    const sessions = sessionRegistry.getSessionsForRig(seed.rigId);
+    const session = sessions.find((s) => s.id === seed.sessionId);
+    expect(session!.resumeToken).toBe("fresh-token");
+    expect(session!.resumeType).toBe("codex_id");
+    expect(session!.startupStatus).toBe("ready");
   });
 
   // NS-T05: readiness retry loop
