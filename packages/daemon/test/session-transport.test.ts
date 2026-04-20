@@ -233,6 +233,44 @@ describe("SessionTransport", () => {
     expect(sendTextSpy).toHaveBeenCalled();
   });
 
+  it("send does not refuse on idle codex status lines truncated with unicode ellipsis", async () => {
+    seedCanonicalRig();
+    const sendTextSpy = vi.fn(async () => ({ ok: true as const }));
+    const tmux = mockTmux({
+      capturePaneContent: async () => [
+        "Lane closed.",
+        "",
+        "  2 background terminals running · /ps to view · /stop to close",
+        "",
+        "› Summarize recent commits",
+        "",
+        "  gpt-5.4 xhigh fast · Context [████ ] · ~/code/substrate/shared-docs/rigs/kerne…",
+      ].join("\n"),
+      sendText: sendTextSpy,
+    });
+    const transport = createTransport(tmux);
+
+    const result = await transport.send("dev-impl@my-rig", "hello");
+
+    expect(result.ok).toBe(true);
+    expect(sendTextSpy).toHaveBeenCalled();
+  });
+
+  it("send does not refuse on idle prompt lines ending in ascii ellipsis", async () => {
+    seedCanonicalRig();
+    const sendTextSpy = vi.fn(async () => ({ ok: true as const }));
+    const tmux = mockTmux({
+      capturePaneContent: async () => "ready prompt...\n❯ ",
+      sendText: sendTextSpy,
+    });
+    const transport = createTransport(tmux);
+
+    const result = await transport.send("dev-impl@my-rig", "hello");
+
+    expect(result.ok).toBe(true);
+    expect(sendTextSpy).toHaveBeenCalled();
+  });
+
   it("send to terminal session with foreground non-shell command refuses with mid_work", async () => {
     const rig = rigRepo.createRig("term-rig");
     const node = rigRepo.addNode(rig.id, "infra.ui", {
