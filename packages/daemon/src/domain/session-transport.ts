@@ -8,8 +8,6 @@ const MID_WORK_PATTERNS = [
   /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/, // spinner chars
   /Working/,
   /esc to interrupt/,
-  /\.{3,}$/m,  // lines ending in ...
-  /…$/m,       // lines ending in …
 ];
 
 const IDLE_TERMINAL_COMMANDS = new Set(["zsh", "bash", "sh", "fish", "nu", "tmux"]);
