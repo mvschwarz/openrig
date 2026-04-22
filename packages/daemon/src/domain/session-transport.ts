@@ -10,11 +10,32 @@ const MID_WORK_PATTERNS = [
   /esc to interrupt/,
 ];
 
+// Prompt indicators for Claude Code (❯) and Codex (›). When one of these
+// appears in the last few non-blank lines, the pane has settled to an idle
+// prompt even if stale scrollback above still contains mid-work text.
+const IDLE_PROMPT_PATTERNS = [
+  /^[❯›]\s/,  // prompt char + space (with or without typed text)
+  /^[❯›]$/,   // prompt char alone (empty input line)
+];
+
 const IDLE_TERMINAL_COMMANDS = new Set(["zsh", "bash", "sh", "fish", "nu", "tmux"]);
 
 function looksLikeMidWork(paneContent: string): boolean {
-  const lastLines = paneContent.split("\n").slice(-5).join("\n");
-  return MID_WORK_PATTERNS.some((p) => p.test(lastLines));
+  const lines = paneContent.split("\n");
+  const lastLines = lines.slice(-5).join("\n");
+  if (!MID_WORK_PATTERNS.some((p) => p.test(lastLines))) return false;
+
+  // Mid-work pattern matched in the 5-line tail. Check whether the pane has
+  // since settled to an idle harness prompt — if so, the match is stale
+  // scrollback, not current working state. Check the last 3 non-blank lines
+  // (covers prompt line + status bar below it).
+  const lastNonBlank = lines
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0)
+    .slice(-3);
+  if (lastNonBlank.some((l) => IDLE_PROMPT_PATTERNS.some((p) => p.test(l)))) return false;
+
+  return true;
 }
 
 function delay(ms: number): Promise<void> {
