@@ -313,6 +313,49 @@ describe("SessionTransport", () => {
     expect(sendTextSpy).toHaveBeenCalled();
   });
 
+  it("send still refuses when prompt char line contains mid-work text (active Claude input)", async () => {
+    seedCanonicalRig();
+    const tmux = mockTmux({
+      capturePaneContent: async () => [
+        "❯ Working on a task.",
+        "",
+      ].join("\n"),
+    });
+    const transport = createTransport(tmux);
+
+    const result = await transport.send("dev-impl@my-rig", "hello");
+
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe("mid_work");
+  });
+
+  // NOTE: r2 flagged '› 1. Yes, continue' as a bypass concern. This content
+  // does NOT match any MID_WORK_PATTERNS (no spinner/Working/esc-to-interrupt)
+  // so looksLikeMidWork was NEVER triggered — pre- or post-fix. This is a
+  // pre-existing gap (trust-prompt pass-through), not a stale-scrollback
+  // regression. Adding trust-prompt detection to MID_WORK_PATTERNS would be
+  // scope expansion per PM constraint #4. Filed as separate named concern in
+  // the handoff. This test documents the current truthful classification.
+  it("send proceeds when prompt char appears in a trust-choice line with no mid-work patterns", async () => {
+    seedCanonicalRig();
+    const sendTextSpy = vi.fn(async () => ({ ok: true as const }));
+    const tmux = mockTmux({
+      capturePaneContent: async () => [
+        "› 1. Yes, continue",
+        "",
+      ].join("\n"),
+      sendText: sendTextSpy,
+    });
+    const transport = createTransport(tmux);
+
+    const result = await transport.send("dev-impl@my-rig", "hello");
+
+    // No MID_WORK_PATTERNS match → guard not triggered → send proceeds.
+    // Trust-prompt detection is a separate concern (not stale-scrollback scope).
+    expect(result.ok).toBe(true);
+    expect(sendTextSpy).toHaveBeenCalled();
+  });
+
   it("send still refuses when Working footer is present with no idle prompt below it", async () => {
     seedCanonicalRig();
     const tmux = mockTmux({
