@@ -10,12 +10,19 @@ const MID_WORK_PATTERNS = [
   /esc to interrupt/,
 ];
 
-// Prompt indicators for Claude Code (❯) and Codex (›). When one of these
-// appears in the last few non-blank lines, the pane has settled to an idle
-// prompt even if stale scrollback above still contains mid-work text.
+// Idle-prompt patterns: empty prompt line (no typed text after the char).
+// Lines like '❯ Working on a task.' have text after the prompt char and
+// are NOT idle — the prompt is active with input that may look mid-work.
 const IDLE_PROMPT_PATTERNS = [
-  /^[❯›]\s/,  // prompt char + space (with or without typed text)
-  /^[❯›]$/,   // prompt char alone (empty input line)
+  /^[❯›]\s*$/,  // prompt char + optional whitespace + end-of-line only
+];
+
+// Status-bar patterns that ONLY appear when the harness is at its idle
+// prompt. These are more reliable than the prompt char alone because they
+// are never rendered during active tool execution.
+const IDLE_STATUS_BAR_PATTERNS = [
+  /gpt-\d[\d.]* .+ · Context \[/,  // Codex model/context footer
+  /⏵⏵ accept edits/,              // Claude Code edit-accept bar
 ];
 
 const IDLE_TERMINAL_COMMANDS = new Set(["zsh", "bash", "sh", "fish", "nu", "tmux"]);
@@ -28,12 +35,19 @@ function looksLikeMidWork(paneContent: string): boolean {
   // Mid-work pattern matched in the 5-line tail. Check whether the pane has
   // since settled to an idle harness prompt — if so, the match is stale
   // scrollback, not current working state. Check the last 3 non-blank lines
-  // (covers prompt line + status bar below it).
+  // for either an empty prompt (❯/› alone on a line) or a runtime-specific
+  // idle status bar (Codex model footer / Claude edit-accept bar). These
+  // indicators are only rendered when the harness is at the idle prompt;
+  // prompt chars with text after them (like '❯ Working on a task.') are
+  // NOT treated as idle.
   const lastNonBlank = lines
     .map((l) => l.trim())
     .filter((l) => l.length > 0)
     .slice(-3);
-  if (lastNonBlank.some((l) => IDLE_PROMPT_PATTERNS.some((p) => p.test(l)))) return false;
+  const hasIdleIndicator =
+    lastNonBlank.some((l) => IDLE_PROMPT_PATTERNS.some((p) => p.test(l))) ||
+    lastNonBlank.some((l) => IDLE_STATUS_BAR_PATTERNS.some((p) => p.test(l)));
+  if (hasIdleIndicator) return false;
 
   return true;
 }
