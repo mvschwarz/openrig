@@ -271,6 +271,67 @@ describe("SessionTransport", () => {
     expect(sendTextSpy).toHaveBeenCalled();
   });
 
+  it("send does not refuse when Working text is stale scrollback above an idle Codex prompt", async () => {
+    seedCanonicalRig();
+    const sendTextSpy = vi.fn(async () => ({ ok: true as const }));
+    const tmux = mockTmux({
+      capturePaneContent: async () => [
+        "◦ Working (9m 26s • esc to interrupt) · 6 background terminals running",
+        "",
+        "› Use /skills to list available skills",
+        "",
+        "  gpt-5.4 xhigh fast · Context [█▉   ] · ~/code/projects/openrig-hub · Fas…",
+      ].join("\n"),
+      sendText: sendTextSpy,
+    });
+    const transport = createTransport(tmux);
+
+    const result = await transport.send("dev-impl@my-rig", "hello");
+
+    expect(result.ok).toBe(true);
+    expect(sendTextSpy).toHaveBeenCalled();
+  });
+
+  it("send does not refuse when Working text is stale scrollback above an idle Claude Code prompt", async () => {
+    seedCanonicalRig();
+    const sendTextSpy = vi.fn(async () => ({ ok: true as const }));
+    const tmux = mockTmux({
+      capturePaneContent: async () => [
+        "✢ Working… (5m 9s · ↑ 4.4k tokens)",
+        "  ⎿  Tip: Use /btw to ask a quick side question",
+        "",
+        "❯ ",
+        "  ⏵⏵ accept edits on (shift+tab to cycle)",
+      ].join("\n"),
+      sendText: sendTextSpy,
+    });
+    const transport = createTransport(tmux);
+
+    const result = await transport.send("dev-impl@my-rig", "hello");
+
+    expect(result.ok).toBe(true);
+    expect(sendTextSpy).toHaveBeenCalled();
+  });
+
+  it("send still refuses when Working footer is present with no idle prompt below it", async () => {
+    seedCanonicalRig();
+    const tmux = mockTmux({
+      capturePaneContent: async () => [
+        "Reading file…",
+        "",
+        "◦ Working (2m 3s • esc to interrupt)",
+        "  ⎿  Processing 4 files",
+        "",
+      ].join("\n"),
+    });
+    const transport = createTransport(tmux);
+
+    const result = await transport.send("dev-impl@my-rig", "hello");
+
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe("mid_work");
+  });
+
   it("send to terminal session with foreground non-shell command refuses with mid_work", async () => {
     const rig = rigRepo.createRig("term-rig");
     const node = rigRepo.addNode(rig.id, "infra.ui", {
