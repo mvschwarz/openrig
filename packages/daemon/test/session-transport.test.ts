@@ -346,6 +346,33 @@ describe("SessionTransport", () => {
     expect(result.reason).toBe("mid_work");
   });
 
+  it("send refuses when a full-screen Codex trust prompt has blank padding below it", async () => {
+    seedCanonicalRig();
+    const tmux = mockTmux({
+      capturePaneContent: async () => [
+        "> You are in /Users/admin/workspace",
+        "",
+        "  Do you trust the contents of this directory? Working with untrusted contents",
+        "  comes with higher risk of prompt injection.",
+        "",
+        "› 1. Yes, continue",
+        "  2. No, quit",
+        "",
+        "  Press enter to continue",
+        "",
+        "",
+        "",
+        "",
+      ].join("\n"),
+    });
+    const transport = createTransport(tmux);
+
+    const result = await transport.send("dev-impl@my-rig", "hello");
+
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe("mid_work");
+  });
+
   it("send refuses when Claude Code trust-prompt choice line is the active pane content", async () => {
     seedCanonicalRig();
     const tmux = mockTmux({

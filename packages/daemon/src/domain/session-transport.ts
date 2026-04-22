@@ -30,24 +30,24 @@ const IDLE_TERMINAL_COMMANDS = new Set(["zsh", "bash", "sh", "fish", "nu", "tmux
 
 function looksLikeMidWork(paneContent: string): boolean {
   const lines = paneContent.split("\n");
-  const lastLines = lines.slice(-5).join("\n");
-  if (!MID_WORK_PATTERNS.some((p) => p.test(lastLines))) return false;
-
-  // Mid-work pattern matched in the 5-line tail. Check whether the pane has
-  // since settled to an idle harness prompt — if so, the match is stale
-  // scrollback, not current working state. Check the last 3 non-blank lines
-  // for either an empty prompt (❯/› alone on a line) or a runtime-specific
-  // idle status bar (Codex model footer / Claude edit-accept bar). These
-  // indicators are only rendered when the harness is at the idle prompt;
-  // prompt chars with text after them (like '❯ Working on a task.') are
-  // NOT treated as idle.
   const lastNonBlank = lines
     .map((l) => l.trim())
-    .filter((l) => l.length > 0)
-    .slice(-3);
+    .filter((l) => l.length > 0);
+  const recentWindow = lastNonBlank.slice(-8).join("\n");
+  if (!MID_WORK_PATTERNS.some((p) => p.test(recentWindow))) return false;
+
+  // Mid-work pattern matched in the trailing non-blank window. Check whether
+  // the pane has since settled to an idle harness prompt — if so, the match
+  // is stale scrollback, not current working state. Check the last 3
+  // non-blank lines for either an empty prompt (❯/› alone on a line) or a
+  // runtime-specific idle status bar (Codex model footer / Claude
+  // edit-accept bar). These indicators are only rendered when the harness is
+  // at the idle prompt; prompt chars with text after them (like
+  // '❯ Working on a task.') are NOT treated as idle.
+  const trailingNonBlank = lastNonBlank.slice(-3);
   const hasIdleIndicator =
-    lastNonBlank.some((l) => IDLE_PROMPT_PATTERNS.some((p) => p.test(l))) ||
-    lastNonBlank.some((l) => IDLE_STATUS_BAR_PATTERNS.some((p) => p.test(l)));
+    trailingNonBlank.some((l) => IDLE_PROMPT_PATTERNS.some((p) => p.test(l))) ||
+    trailingNonBlank.some((l) => IDLE_STATUS_BAR_PATTERNS.some((p) => p.test(l)));
   if (hasIdleIndicator) return false;
 
   return true;
@@ -391,7 +391,7 @@ export class SessionTransport {
             };
           }
         }
-        const paneContent = await this.tmuxAdapter.capturePaneContent(sessionName, 5);
+        const paneContent = await this.tmuxAdapter.capturePaneContent(sessionName, 20);
         if (paneContent && looksLikeMidWork(paneContent)) {
           return {
             ok: false,
