@@ -8,6 +8,7 @@ const MID_WORK_PATTERNS = [
   /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/, // spinner chars
   /Working/,
   /esc to interrupt/,
+  /^[❯›]\s*\d+\.\s/m,   // trust/consent prompt choices (e.g. '› 1. Yes, continue')
 ];
 
 // Idle-prompt patterns: empty prompt line (no typed text after the char).
