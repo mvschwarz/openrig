@@ -329,31 +329,38 @@ describe("SessionTransport", () => {
     expect(result.reason).toBe("mid_work");
   });
 
-  // NOTE: r2 flagged '› 1. Yes, continue' as a bypass concern. This content
-  // does NOT match any MID_WORK_PATTERNS (no spinner/Working/esc-to-interrupt)
-  // so looksLikeMidWork was NEVER triggered — pre- or post-fix. This is a
-  // pre-existing gap (trust-prompt pass-through), not a stale-scrollback
-  // regression. Adding trust-prompt detection to MID_WORK_PATTERNS would be
-  // scope expansion per PM constraint #4. Filed as separate named concern in
-  // the handoff. This test documents the current truthful classification.
-  it("send proceeds when prompt char appears in a trust-choice line with no mid-work patterns", async () => {
+  it("send refuses when Codex trust-prompt choice line is the active pane content", async () => {
     seedCanonicalRig();
-    const sendTextSpy = vi.fn(async () => ({ ok: true as const }));
     const tmux = mockTmux({
       capturePaneContent: async () => [
         "› 1. Yes, continue",
-        "",
+        "  2. Yes, allow all tools",
+        "  3. No, cancel",
       ].join("\n"),
-      sendText: sendTextSpy,
     });
     const transport = createTransport(tmux);
 
     const result = await transport.send("dev-impl@my-rig", "hello");
 
-    // No MID_WORK_PATTERNS match → guard not triggered → send proceeds.
-    // Trust-prompt detection is a separate concern (not stale-scrollback scope).
-    expect(result.ok).toBe(true);
-    expect(sendTextSpy).toHaveBeenCalled();
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe("mid_work");
+  });
+
+  it("send refuses when Claude Code trust-prompt choice line is the active pane content", async () => {
+    seedCanonicalRig();
+    const tmux = mockTmux({
+      capturePaneContent: async () => [
+        "❯ 1. Yes",
+        "  2. Yes, allow all edits in domain/ during this session",
+        "  3. No",
+      ].join("\n"),
+    });
+    const transport = createTransport(tmux);
+
+    const result = await transport.send("dev-impl@my-rig", "hello");
+
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe("mid_work");
   });
 
   it("send still refuses when Working footer is present with no idle prompt below it", async () => {
