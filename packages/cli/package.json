@@ -35,6 +35,7 @@
   ],
   "scripts": {
     "build": "tsc",
+    "postinstall": "node scripts/check-abi.mjs",
     "prepublishOnly": "bash ../../scripts/build-package.sh",
     "test": "vitest run",
     "test:watch": "vitest"
