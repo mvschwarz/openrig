@@ -584,6 +584,37 @@ describe("SessionTransport", () => {
     expect(result.reason).toBe("mid_work");
   });
 
+  it("realistic: short-burst Codex work with stale status bar in last 3 non-blank blocks", async () => {
+    // Short work burst: the Codex status bar from a prior idle state is only
+    // 2 non-blank lines above the active "Working" footer. Both appear in the
+    // last 3 non-blank lines. Current code false-negatives (allows) because
+    // the status bar matches IDLE_STATUS_BAR_PATTERNS. The fix should tighten
+    // the status-bar check to last-non-blank-line only so stale bars above
+    // active work don't override.
+    seedCanonicalRig();
+    const tmux = mockTmux({
+      capturePaneContent: async () => buildPaneFixture({
+        scrollback: [
+          "› Use /skills to list available skills",
+          "",
+          "  gpt-5.4 high · Context [████ ] · ~/code/projects/openrig-hub",
+        ],
+        content: [
+          "• Reading 1 file…",
+          "",
+          "◦ Working (0m 3s • esc to interrupt)",
+        ],
+        trailingBlanks: 4,
+      }),
+    });
+    const transport = createTransport(tmux);
+
+    const result = await transport.send("dev-impl@my-rig", "hello");
+
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe("mid_work");
+  });
+
   it("send to terminal session with foreground non-shell command refuses with mid_work", async () => {
     const rig = rigRepo.createRig("term-rig");
     const node = rigRepo.addNode(rig.id, "infra.ui", {

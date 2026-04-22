@@ -38,17 +38,23 @@ function looksLikeMidWork(paneContent: string): boolean {
 
   // Mid-work pattern matched in the trailing non-blank window. Check whether
   // the pane has since settled to an idle harness prompt — if so, the match
-  // is stale scrollback, not current working state. Check the last 3
-  // non-blank lines for either an empty prompt (❯/› alone on a line) or a
-  // runtime-specific idle status bar (Codex model footer / Claude
-  // edit-accept bar). These indicators are only rendered when the harness is
-  // at the idle prompt; prompt chars with text after them (like
-  // '❯ Working on a task.') are NOT treated as idle.
+  // is stale scrollback, not current working state.
+  //
+  // Two discriminators with different position rules:
+  // - IDLE_PROMPT_PATTERNS (❯/› empty prompt): checked across last 3
+  //   non-blank lines because the prompt line may sit above the status bar.
+  // - IDLE_STATUS_BAR_PATTERNS (Codex model footer / Claude edit-accept):
+  //   checked on the LAST non-blank line ONLY. Status bars render at the
+  //   visual bottom of the terminal; if something else is below the status
+  //   bar in the non-blank sequence, active work has been rendered over it
+  //   and the status bar is stale from a prior idle.
   const trailingNonBlank = lastNonBlank.slice(-3);
-  const hasIdleIndicator =
-    trailingNonBlank.some((l) => IDLE_PROMPT_PATTERNS.some((p) => p.test(l))) ||
-    trailingNonBlank.some((l) => IDLE_STATUS_BAR_PATTERNS.some((p) => p.test(l)));
-  if (hasIdleIndicator) return false;
+  const hasIdlePrompt = trailingNonBlank.some((l) =>
+    IDLE_PROMPT_PATTERNS.some((p) => p.test(l))
+  );
+  const lastLine = lastNonBlank.at(-1) ?? "";
+  const hasIdleStatusBar = IDLE_STATUS_BAR_PATTERNS.some((p) => p.test(lastLine));
+  if (hasIdlePrompt || hasIdleStatusBar) return false;
 
   return true;
 }
