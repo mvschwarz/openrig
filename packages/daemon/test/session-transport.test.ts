@@ -409,6 +409,181 @@ describe("SessionTransport", () => {
     expect(result.reason).toBe("mid_work");
   });
 
+  // --- Realistic pane-fixture tests (test-infrastructure lane) ---
+  //
+  // These use full-screen-shaped fixtures with blank padding, scrollback,
+  // status bars, and separator lines to match real tmux capturePaneContent
+  // output. Ensures the non-blank-window approach in looksLikeMidWork()
+  // handles realistic rendering, not just compact hand-written snippets.
+
+  /** Build a realistic pane fixture with terminal-geometry structure. */
+  function buildPaneFixture(opts: {
+    scrollback?: string[];
+    content: string[];
+    statusBar?: string[];
+    trailingBlanks?: number;
+  }): string {
+    const lines: string[] = [];
+    if (opts.scrollback) lines.push(...opts.scrollback, "");
+    lines.push(...opts.content);
+    if (opts.statusBar) lines.push("", ...opts.statusBar);
+    if (opts.trailingBlanks) lines.push(...Array(opts.trailingBlanks).fill(""));
+    return lines.join("\n");
+  }
+
+  // NOTE: if the prior-idle Codex status bar ("gpt-5.4 ... Context [...]")
+  // remains in the last 3 non-blank lines during active work, the idle
+  // discriminator false-negatives (treats active-work as idle). In real
+  // renders the status bar from a prior idle state is typically many lines
+  // above the current working footer. This fixture models that realistic
+  // distance. A fixture where the stale status bar is only 1-2 non-blank
+  // lines above the working footer DOES expose a gap — filed as residual
+  // in the return handoff.
+  it("realistic: full-screen Codex active-working pane with scrollback + padding blocks", async () => {
+    seedCanonicalRig();
+    const tmux = mockTmux({
+      capturePaneContent: async () => buildPaneFixture({
+        scrollback: [
+          "• Ran npm test --workspace @openrig/daemon",
+          "  └ 1784 tests passed",
+          "",
+          "  gpt-5.4 high · Context [████ ] · ~/code/projects/openrig-hub",
+          "",
+          "• I'll read the session-transport.ts file.",
+          "",
+          "• Ran cat packages/daemon/src/domain/session-transport.ts",
+          "  └ import type Database from 'better-sqlite3';",
+          "    … +54 lines (ctrl + t to view transcript)",
+        ],
+        content: [
+          "• Reading 3 files…",
+          "",
+          "◦ Working (2m 41s • esc to interrupt) · 6 background terminals running · /…",
+        ],
+        trailingBlanks: 6,
+      }),
+    });
+    const transport = createTransport(tmux);
+
+    const result = await transport.send("dev-impl@my-rig", "hello");
+
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe("mid_work");
+  });
+
+  it("realistic: full-screen Codex idle-at-prompt with stale Working in scrollback + padding allows", async () => {
+    seedCanonicalRig();
+    const sendTextSpy = vi.fn(async () => ({ ok: true as const }));
+    const tmux = mockTmux({
+      capturePaneContent: async () => buildPaneFixture({
+        scrollback: [
+          "• Ran npm test --workspace @openrig/daemon",
+          "  └ 1784 tests passed",
+          "",
+          "◦ Working (9m 26s • esc to interrupt) · 6 background terminals running",
+          "",
+          "✻ Worked for 9m 26s",
+        ],
+        content: [
+          "› Use /skills to list available skills",
+          "",
+          "  gpt-5.4 xhigh fast · Context [█▉   ] · ~/code/projects/openrig-hub · Fast off",
+        ],
+        trailingBlanks: 4,
+      }),
+      sendText: sendTextSpy,
+    });
+    const transport = createTransport(tmux);
+
+    const result = await transport.send("dev-impl@my-rig", "hello");
+
+    expect(result.ok).toBe(true);
+    expect(sendTextSpy).toHaveBeenCalled();
+  });
+
+  it("realistic: full-screen Claude Code active-working pane with tool output + padding blocks", async () => {
+    seedCanonicalRig();
+    const tmux = mockTmux({
+      capturePaneContent: async () => buildPaneFixture({
+        scrollback: [
+          "⏺ I'll read the session-transport.ts file to understand the current",
+          "  implementation.",
+          "",
+          "⏺ Reading 1 file…",
+          "  ⎿  Read packages/daemon/src/domain/session-transport.ts",
+        ],
+        content: [
+          "✢ Working… (5m 9s · ↑ 4.4k tokens)",
+          "  ⎿  Tip: Use /btw to ask a quick side question without",
+          "     interrupting Claude's current work",
+        ],
+        trailingBlanks: 5,
+      }),
+    });
+    const transport = createTransport(tmux);
+
+    const result = await transport.send("dev-impl@my-rig", "hello");
+
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe("mid_work");
+  });
+
+  it("realistic: full-screen Claude Code idle-at-prompt with stale Working in scrollback + edit-bar allows", async () => {
+    seedCanonicalRig();
+    const sendTextSpy = vi.fn(async () => ({ ok: true as const }));
+    const tmux = mockTmux({
+      capturePaneContent: async () => buildPaneFixture({
+        scrollback: [
+          "✢ Working… (5m 9s · ↑ 4.4k tokens)",
+          "  ⎿  Tip: Use /btw to ask a quick side question without",
+          "     interrupting Claude's current work",
+          "",
+          "⏺ Done. Committed as abc1234.",
+        ],
+        content: [
+          "──────────────────────────────────────────────────────────────",
+          "❯ ",
+          "──────────────────────────────────────────────────────────────",
+          "  ⏵⏵ accept edits on (shift+tab to cycle)",
+        ],
+        trailingBlanks: 3,
+      }),
+      sendText: sendTextSpy,
+    });
+    const transport = createTransport(tmux);
+
+    const result = await transport.send("dev-impl@my-rig", "hello");
+
+    expect(result.ok).toBe(true);
+    expect(sendTextSpy).toHaveBeenCalled();
+  });
+
+  it("realistic: full-screen Codex trust-prompt with multi-line instructions + heavy padding blocks", async () => {
+    seedCanonicalRig();
+    const tmux = mockTmux({
+      capturePaneContent: async () => buildPaneFixture({
+        content: [
+          "> You are in /Users/admin/workspace",
+          "",
+          "  Do you trust the contents of this directory? Working with untrusted",
+          "  contents comes with higher risk of prompt injection.",
+          "",
+          "› 1. Yes, continue",
+          "  2. No, quit",
+          "",
+          "  Press enter to continue",
+        ],
+        trailingBlanks: 8,
+      }),
+    });
+    const transport = createTransport(tmux);
+
+    const result = await transport.send("dev-impl@my-rig", "hello");
+
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe("mid_work");
+  });
+
   it("send to terminal session with foreground non-shell command refuses with mid_work", async () => {
     const rig = rigRepo.createRig("term-rig");
     const node = rigRepo.addNode(rig.id, "infra.ui", {
