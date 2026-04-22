@@ -55,5 +55,8 @@
     "@types/node": "^22.0.0",
     "typescript": "^5.7.0",
     "vitest": "^3.0.0"
+  },
+  "engines": {
+    "node": "^20 || ^22 || ^24"
   }
 }

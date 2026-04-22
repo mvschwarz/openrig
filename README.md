@@ -103,7 +103,7 @@ Hono HTTP daemon
 - **CLI**: 40+ commands designed for both humans and agents. Every mutating command ends with what happened, current state, and next action.
 - **UI**: Explorer sidebar, topology graph with pod grouping, node detail panel, system log, chatroom.
 - **MCP**: 17 tools so agents can manage their own topology (`rig_up`, `rig_ps`, `rig_send`, `rig_chatroom_send`, etc.)
-- **Runtimes**: Claude Code, Codex, and terminal nodes. Adapters for Pi and OpenHands in development.
+- **Runtimes**: Claude Code, Codex, and terminal nodes. Adapters for Pi and OpenCode in development.
 
 ## Key Concepts
 
@@ -129,7 +129,7 @@ Requires Docker for service-backed rigs.
 
 ## Requirements
 
-- Node.js 20+
+- Node.js 20, 22, or 24 (even-numbered LTS releases; odd releases like 25 lack native addon prebuilds)
 - tmux
 
 Optional:
