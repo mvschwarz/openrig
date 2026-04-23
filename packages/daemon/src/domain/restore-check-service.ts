@@ -89,6 +89,7 @@ export interface NodeInventoryEntry {
   startupStatus: string | null;
   tmuxAttachCommand: string | null;
   latestError: string | null;
+  cwd?: string | null;
 }
 
 export interface RestoreCheckDeps {
@@ -122,6 +123,20 @@ interface HostInfraCheckResult {
 // --- Service ---
 
 const DAEMON_HEALTHY_PATTERN = /^Daemon running\b/m;
+const CLAUDE_SESSION_START_COMPACT_COMMAND = "/Users/wrandom/code/substrate/shared-docs/control-plane/services/claude-hooks/bin/session-start-compact-context.sh";
+const CLAUDE_USER_PROMPT_SUBMIT_COMMAND = "/Users/wrandom/code/substrate/shared-docs/control-plane/services/claude-hooks/bin/userpromptsubmit-queue-attention.sh";
+const CLAUDE_HOOK_FRAGMENT_PATH = "/Users/wrandom/code/substrate/shared-docs/control-plane/services/claude-hooks/config/settings.fragment.json";
+
+interface ClaudeSettingsCandidate {
+  path: string;
+  scope: "host-global" | "project" | "project-local";
+}
+
+interface ClaudeHookInspection {
+  path: string;
+  hasSessionStartCompact: boolean;
+  hasUserPromptSubmit: boolean;
+}
 
 export class RestoreCheckService {
   private deps: RestoreCheckDeps;
@@ -652,16 +667,123 @@ export class RestoreCheckService {
 
   private checkHooks(node: NodeInventoryEntry): CheckEntry {
     const session = node.canonicalSessionName ?? node.logicalId;
-    // Slice 1: hook inspection not yet implemented. Honestly report as
-    // yellow/not-inspected rather than false-green. --no-hooks removes
-    // the check entirely; without --no-hooks, the check is present but
-    // honestly classified as uninspected.
+
+    if (node.nodeKind !== "agent") {
+      return {
+        check: `seat.${session}.hooks`, status: "green",
+        evidence: "Infrastructure/terminal node; Claude Code hook inspection not applicable",
+        remediation: "",
+      };
+    }
+
+    if (node.runtime !== "claude-code") {
+      return {
+        check: `seat.${session}.hooks`, status: "green",
+        evidence: `${node.runtime ?? "non-Claude"} seat; Claude Code hook inspection not applicable`,
+        remediation: "",
+      };
+    }
+
+    const candidates = this.getClaudeSettingsCandidates(node);
+    const searchedPaths = candidates.map((candidate) => candidate.path);
+    const cwdUnavailable = !node.cwd;
+    const inspections: ClaudeHookInspection[] = [];
+    const malformed: string[] = [];
+
+    for (const candidate of candidates) {
+      if (!this.deps.exists(candidate.path)) continue;
+
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(this.deps.readFile(candidate.path));
+      } catch (err) {
+        malformed.push(`${candidate.path}: ${err instanceof Error ? err.message : String(err)}`);
+        continue;
+      }
+
+      inspections.push({
+        path: candidate.path,
+        hasSessionStartCompact: this.hasClaudeCommandHook(parsed, "SessionStart", CLAUDE_SESSION_START_COMPACT_COMMAND, "compact"),
+        hasUserPromptSubmit: this.hasClaudeCommandHook(parsed, "UserPromptSubmit", CLAUDE_USER_PROMPT_SUBMIT_COMMAND),
+      });
+    }
+
+    if (malformed.length > 0) {
+      return {
+        check: `seat.${session}.hooks`, status: "yellow",
+        evidence: `Malformed applicable Claude settings file(s): ${malformed.join("; ")}. Claude hook configuration could not be trusted until the malformed applicable settings file is fixed. Searched settings paths: ${searchedPaths.join(", ")}`,
+        remediation: `Fix Claude settings JSON before trusting hook readiness: ${malformed.map((entry) => entry.split(":")[0]).join(", ")}`,
+        remediationSafe: false,
+      };
+    }
+
+    const complete = inspections.find((inspection) => inspection.hasSessionStartCompact && inspection.hasUserPromptSubmit);
+    if (complete) {
+      return {
+        check: `seat.${session}.hooks`, status: "green",
+        evidence: `Claude Code hook configuration present, not hook-execution verified; required SessionStart/compact and UserPromptSubmit commands found in ${complete.path}. Searched settings paths: ${searchedPaths.join(", ")}`,
+        remediation: "",
+      };
+    }
+
+    const hasSessionStart = inspections.some((inspection) => inspection.hasSessionStartCompact);
+    const hasUserPromptSubmit = inspections.some((inspection) => inspection.hasUserPromptSubmit);
+    const missing = [];
+    if (!hasSessionStart) {
+      missing.push(`SessionStart matcher compact command ${CLAUDE_SESSION_START_COMPACT_COMMAND}`);
+    }
+    if (!hasUserPromptSubmit) {
+      missing.push(`UserPromptSubmit command ${CLAUDE_USER_PROMPT_SUBMIT_COMMAND}`);
+    }
+
+    const inspected = inspections.length > 0
+      ? `Existing settings inspected: ${inspections.map((inspection) => inspection.path).join(", ")}.`
+      : "No existing Claude settings files were found.";
+    const cwdEvidence = cwdUnavailable
+      ? " project settings were not inspected because cwd is unavailable."
+      : "";
+
     return {
       check: `seat.${session}.hooks`, status: "yellow",
-      evidence: "Hook inspection not yet implemented (Slice 2)",
-      remediation: "Use --no-hooks to skip, or wait for Slice 2 hook inspection",
-      remediationSafe: true,
+      evidence: `Claude Code hook configuration missing required entries: ${missing.join("; ")}. Searched settings paths: ${searchedPaths.join(", ")}. ${inspected}${cwdEvidence}`,
+      remediation: `Merge required Claude hook entries from ${CLAUDE_HOOK_FRAGMENT_PATH} into host-global or project Claude settings`,
+      remediationSafe: false,
     };
+  }
+
+  private getClaudeSettingsCandidates(node: NodeInventoryEntry): ClaudeSettingsCandidate[] {
+    const home = process.env["HOME"] ?? "~";
+    const candidates: ClaudeSettingsCandidate[] = [{
+      path: join(home, ".claude", "settings.json"),
+      scope: "host-global",
+    }];
+
+    if (node.cwd) {
+      candidates.push({
+        path: join(node.cwd, ".claude", "settings.json"),
+        scope: "project",
+      });
+      candidates.push({
+        path: join(node.cwd, ".claude", "settings.local.json"),
+        scope: "project-local",
+      });
+    }
+
+    return candidates;
+  }
+
+  private hasClaudeCommandHook(settings: unknown, eventName: string, requiredCommand: string, requiredMatcher?: string): boolean {
+    if (!isRecord(settings) || !isRecord(settings["hooks"])) return false;
+    const eventEntries = settings["hooks"][eventName];
+    if (!Array.isArray(eventEntries)) return false;
+
+    return eventEntries.some((entry) => {
+      if (!isRecord(entry)) return false;
+      if (requiredMatcher !== undefined && entry["matcher"] !== requiredMatcher) return false;
+      const hooks = entry["hooks"];
+      if (!Array.isArray(hooks)) return false;
+      return hooks.some((hook) => isRecord(hook) && hook["command"] === requiredCommand);
+    });
   }
 
   private checkSpecPresent(rig: { rigId: string; name: string }): CheckEntry {
