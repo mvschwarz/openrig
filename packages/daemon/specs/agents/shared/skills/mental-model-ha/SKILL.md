@@ -397,6 +397,8 @@ A peer has already compacted and is active but confused. The durable artifacts s
 
 **Behavior:** Follow the Phased Restore Protocol below. Point to files, don't send contents via tmux. Run the quiz. Verify the restore.
 
+**Claude compact-in-place:** For an OpenRig Claude Code seat that keeps the same session after `/compact`, use `claude-compact-in-place` for the seat-specific read-depth audit and marshal acceptance rule. This skill remains the general durable-memory, session-log, and HA restore framework.
+
 ### Mode 4: Quick Restore (unexpected compaction, no pre-save)
 
 Compaction happened without preparation. No restore file exists or it's stale.
@@ -783,6 +785,7 @@ Claude and Codex handle compaction completely differently. The orchestrator MUST
 - When Claude compacts, it's all-or-nothing — the full conversation summary replaces context.
 - This is the catastrophe that mental-model-ha exists to manage.
 - The full pre-compaction save, peer restore, and quiz protocol applies.
+- For compact-in-place in an OpenRig seat, use `claude-compact-in-place` before accepting a `RESTORED` claim.
 - The orchestrator actively helps manage Claude's context lifecycle.
 
 ### Codex: Automatic Partial Compaction
