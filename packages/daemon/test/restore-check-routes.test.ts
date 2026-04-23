@@ -328,6 +328,33 @@ describe("Restore check routes", () => {
     expect(body.checks.some((c: { check: string }) => c.check === "probe.error")).toBe(false);
   });
 
+  it("GET /api/restore-check does not false-green malformed startup_actions_json", async () => {
+    const rig = rigRepo.createRig("malformed-startup-actions-rig");
+    const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code" });
+    const session = sessionRegistry.registerSession(node.id, "dev-impl@malformed-startup-actions-rig");
+    sessionRegistry.updateStatus(session.id, "running");
+    sessionRegistry.updateStartupStatus(session.id, "ready");
+    insertStartupContextRow(db, node.id, {
+      startupActionsJson: "{",
+    });
+
+    const res = await app.request("/api/restore-check?rig=malformed-startup-actions-rig&noQueue=true&noHooks=true");
+    expect(res.status).toBe(200);
+
+    const body = await res.json();
+    const startup = body.checks.find((c: { check: string }) => c.check === "seat.dev-impl@malformed-startup-actions-rig.startup-context");
+
+    expect(startup).toBeDefined();
+    expect(startup.status).not.toBe("green");
+    expect(startup).toEqual(expect.objectContaining({
+      status: "yellow",
+      remediationSafe: false,
+    }));
+    expect(startup.evidence).toContain("startup_actions_json");
+    expect(body.assertion.reason).not.toBe("unknown_probe_state");
+    expect(body.checks.some((c: { check: string }) => c.check === "probe.error")).toBe(false);
+  });
+
   it("daemon.reachable is green inside daemon route (self-proof)", async () => {
     rigRepo.createRig("test-rig");
 
