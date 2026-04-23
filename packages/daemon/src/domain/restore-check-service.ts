@@ -151,6 +151,7 @@ interface RecoveryRigInput {
   rigName: string;
   expectedNodes: number;
   runningReadyNodes: number;
+  blockingChecks: CheckEntry[];
   latestSnapshot: { id: string; kind: string } | null;
   snapshotLookupError?: string;
 }
@@ -287,6 +288,7 @@ export class RestoreCheckService {
         rigName: rollup.rigName,
         expectedNodes: rollup.expectedNodes,
         runningReadyNodes: rollup.runningReadyNodes,
+        blockingChecks: rollup.blockingChecks,
         latestSnapshot: latestSnapshot.snapshot,
         snapshotLookupError: latestSnapshot.error,
       });
@@ -1052,6 +1054,19 @@ export class RestoreCheckService {
         continue;
       }
 
+      const restoreInputBlockers = input.blockingChecks.filter((check) =>
+        this.classifyRecoveryBlockingCheck(check) === "restore_input"
+      );
+      if (restoreInputBlockers.length > 0) {
+        blocked.push({
+          scope: "rig",
+          rigId: input.rigId,
+          rigName: input.rigName,
+          reason: `No exact recovery action is known in v0 because restore-input blockers remain: ${restoreInputBlockers.map((check) => check.evidence).join("; ")}`,
+        });
+        continue;
+      }
+
       if (input.latestSnapshot) {
         actions.push({
           scope: "rig",
@@ -1089,6 +1104,19 @@ export class RestoreCheckService {
       blocked,
       unknown,
     };
+  }
+
+  private classifyRecoveryBlockingCheck(check: CheckEntry): "restore_input" | "runtime" | "other" {
+    if (check.status !== "red") return "other";
+
+    if (check.check.startsWith("seat.") && check.check.endsWith(".readiness")) {
+      if (check.evidence.includes("Missing canonical session identity")) {
+        return "restore_input";
+      }
+      return "runtime";
+    }
+
+    return "other";
   }
 
   private buildRecoverySummary(

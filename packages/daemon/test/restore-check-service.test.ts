@@ -1256,7 +1256,7 @@ describe("RestoreCheckService", () => {
   it("stopped snapshot-backed rig produces actionable recovery command", () => {
     const service = new RestoreCheckService(mockDeps({
       getNodeInventory: () => [claudeNode({
-        canonicalSessionName: null,
+        canonicalSessionName: "dev-impl@test-rig",
         sessionStatus: "stopped",
         startupStatus: "failed",
         tmuxAttachCommand: null,
@@ -1287,11 +1287,42 @@ describe("RestoreCheckService", () => {
     });
   });
 
+  it("missing canonical session identity with latest snapshot is blocked, not actionable", () => {
+    const service = new RestoreCheckService(mockDeps({
+      getNodeInventory: () => [claudeNode({
+        canonicalSessionName: null,
+        sessionStatus: "stopped",
+        startupStatus: "failed",
+        tmuxAttachCommand: null,
+        latestError: "seat crashed",
+      })],
+      getLatestSnapshot: () => ({ id: "snap-123", kind: "auto-pre-down" }),
+    }));
+
+    const result = service.check({ noHooks: true }) as any;
+
+    expect(result.fullyBack).toBe(false);
+    expect(result.recovery).toEqual({
+      status: "blocked",
+      summary: expect.stringContaining("1 rig blocked"),
+      actions: [],
+      blocked: [
+        expect.objectContaining({
+          scope: "rig",
+          rigId: "rig-1",
+          rigName: "test-rig",
+          reason: expect.stringContaining("Missing canonical session identity"),
+        }),
+      ],
+      unknown: [],
+    });
+  });
+
   it("stopped rig without latest snapshot is blocked, not actionable", () => {
     const service = new RestoreCheckService(mockDeps({
       hasSnapshot: () => false,
       getNodeInventory: () => [claudeNode({
-        canonicalSessionName: null,
+        canonicalSessionName: "dev-impl@test-rig",
         sessionStatus: "stopped",
         startupStatus: "failed",
         tmuxAttachCommand: null,
