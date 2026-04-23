@@ -1,3 +1,6 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type Database from "better-sqlite3";
 import type { Hono } from "hono";
@@ -6,12 +9,35 @@ import { createApp } from "../src/server.js";
 import type { RigRepository } from "../src/domain/rig-repository.js";
 import { RestoreCheckService } from "../src/domain/restore-check-service.js";
 
+const VALID_HOST_INFRA_DECLARATION = JSON.stringify({
+  schemaVersion: 1,
+  daemonBootstrap: {
+    declared: true,
+    mechanism: "launchd",
+    evidence: "com.openrig.daemon",
+  },
+  supportingInfra: [
+    {
+      id: "supervisor-wake",
+      declared: true,
+      required: true,
+      evidence: "kernel rig infra seat or host launch agent",
+    },
+  ],
+});
+
 describe("Restore check routes", () => {
   let db: Database.Database;
   let app: Hono;
   let rigRepo: RigRepository;
+  let openRigHome: string;
+  let originalOpenRigHome: string | undefined;
 
   beforeEach(() => {
+    originalOpenRigHome = process.env["OPENRIG_HOME"];
+    openRigHome = fs.mkdtempSync(path.join(os.tmpdir(), "restore-check-route-openrig-home-"));
+    process.env["OPENRIG_HOME"] = openRigHome;
+
     db = createFullTestDb();
     const setup = createTestApp(db);
     app = createApp(setup);
@@ -20,6 +46,9 @@ describe("Restore check routes", () => {
 
   afterEach(() => {
     db.close();
+    if (originalOpenRigHome === undefined) delete process.env["OPENRIG_HOME"];
+    else process.env["OPENRIG_HOME"] = originalOpenRigHome;
+    fs.rmSync(openRigHome, { recursive: true, force: true });
   });
 
   it("GET /api/restore-check returns JSON with verdict + checks + repairPacket", async () => {
@@ -135,7 +164,7 @@ describe("Restore check routes", () => {
       caveatChecks: expect.any(Array),
     }));
     expect(body.hostInfra).toEqual(expect.objectContaining({
-      status: "not_inspected",
+      status: "not_declared",
     }));
     // Hooks yellow → restorable_with_caveats → repairPacket populated
     expect(body.repairPacket).toBeInstanceOf(Array);
@@ -155,6 +184,26 @@ describe("Restore check routes", () => {
     if (hookStep) {
       expect(hookStep.blocking).toBe(false);
     }
+  });
+
+  it("GET /api/restore-check surfaces declared host-infra state from OPENRIG_HOME", async () => {
+    fs.writeFileSync(path.join(openRigHome, "host-infra.json"), VALID_HOST_INFRA_DECLARATION);
+    rigRepo.createRig("declared-rig");
+
+    const res = await app.request("/api/restore-check?rig=declared-rig");
+    expect(res.status).toBe(200);
+
+    const body = await res.json();
+    const check = body.checks.find((entry: { check: string }) => entry.check === "host.bootstrap-autostart.declaration");
+    expect(check).toEqual(expect.objectContaining({
+      status: "green",
+    }));
+    expect(check.evidence).toContain(path.join(openRigHome, "host-infra.json"));
+    expect(check.evidence).toContain("declared, not verified");
+    expect(body.hostInfra).toEqual(expect.objectContaining({
+      status: "declared",
+      evidence: expect.stringContaining("declared, not verified"),
+    }));
   });
 
   it("GET /api/restore-check route catch returns actionable repairPacket", async () => {

@@ -7,7 +7,7 @@ import { getCompatibleOpenRigPath } from "../openrig-compat.js";
 export type CheckStatus = "green" | "yellow" | "red";
 export type Verdict = "restorable" | "restorable_with_caveats" | "not_restorable" | "unknown";
 export type FullyBackStatus = "fully_back" | "not_fully_back" | "unknown";
-export type HostInfraStatus = "not_inspected" | "not_declared" | "unknown";
+export type HostInfraStatus = "not_inspected" | "not_declared" | "declared" | "unknown";
 
 export interface CheckEntry {
   check: string;
@@ -102,6 +102,8 @@ export interface RestoreCheckDeps {
   probeDaemonHealth: () => { healthy: boolean; evidence: string };
   /** Filesystem probes */
   exists: (path: string) => boolean;
+  /** Read a declaration/config file. Kept injectable so restore-check remains testable and source-safe. */
+  readFile: (path: string) => string;
   /** Substrate root for queue file path resolution */
   substrateRoot?: string;
 }
@@ -110,6 +112,11 @@ interface RigRollupInput {
   rig: { rigId: string; name: string };
   nodes: NodeInventoryEntry[];
   checks: CheckEntry[];
+}
+
+interface HostInfraCheckResult {
+  check: CheckEntry;
+  hostInfra: HostInfraAssertion;
 }
 
 // --- Service ---
@@ -140,6 +147,8 @@ export class RestoreCheckService {
     }
     checks.push(daemonCheck);
     checks.push(this.checkStateDirWritable());
+    const hostInfraCheck = this.checkHostInfraDeclaration();
+    checks.push(hostInfraCheck.check);
 
     // Get rigs — probe error produces unknown, not not_restorable
     let rigs: Array<{ rigId: string; name: string; hasServices?: boolean }>;
@@ -214,7 +223,7 @@ export class RestoreCheckService {
       rigRollupInputs.push({ rig, nodes, checks: rigChecks });
     }
 
-    return this.buildResult(checks, rigRollupInputs.map((input) => this.buildRigRollup(input)));
+    return this.buildResult(checks, rigRollupInputs.map((input) => this.buildRigRollup(input)), hostInfraCheck.hostInfra);
   }
 
   /** Returns CheckEntry on success/definite-down; null on probe exception
@@ -256,6 +265,162 @@ export class RestoreCheckService {
       remediationSafe: false,
       };
     }
+  }
+
+  private checkHostInfraDeclaration(): HostInfraCheckResult {
+    const declarationPath = getCompatibleOpenRigPath("host-infra.json");
+    const check = "host.bootstrap-autostart.declaration";
+
+    try {
+      if (!this.deps.exists(declarationPath)) {
+        const evidence = `Host infra declaration missing at ${declarationPath}`;
+        return {
+          check: {
+            check,
+            status: "yellow",
+            evidence,
+            remediation: `Create host infra declaration at ${declarationPath}`,
+            remediationSafe: false,
+          },
+          hostInfra: {
+            status: "not_declared",
+            evidence,
+          },
+        };
+      }
+
+      let raw: string;
+      try {
+        raw = this.deps.readFile(declarationPath);
+      } catch (err) {
+        const evidence = `Host infra declaration inspection failed at ${declarationPath}: ${err instanceof Error ? err.message : String(err)}`;
+        return {
+          check: {
+            check,
+            status: "yellow",
+            evidence,
+            remediation: `Inspect or fix host infra declaration at ${declarationPath}`,
+            remediationSafe: false,
+          },
+          hostInfra: {
+            status: "unknown",
+            evidence,
+          },
+        };
+      }
+
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(raw);
+      } catch (err) {
+        const evidence = `Host infra declaration JSON parse failed at ${declarationPath}: ${err instanceof Error ? err.message : String(err)}`;
+        return {
+          check: {
+            check,
+            status: "yellow",
+            evidence,
+            remediation: `Fix host infra declaration JSON at ${declarationPath}`,
+            remediationSafe: false,
+          },
+          hostInfra: {
+            status: "not_declared",
+            evidence,
+          },
+        };
+      }
+
+      const validation = this.validateHostInfraDeclaration(parsed);
+      if (validation.errors.length > 0) {
+        const evidence = `Invalid host infra declaration at ${declarationPath}: missing/invalid ${validation.errors.join(", ")}`;
+        return {
+          check: {
+            check,
+            status: "yellow",
+            evidence,
+            remediation: `Fix host infra declaration shape at ${declarationPath}`,
+            remediationSafe: false,
+          },
+          hostInfra: {
+            status: "not_declared",
+            evidence,
+          },
+        };
+      }
+
+      const evidence = `Host infra declaration at ${declarationPath} declared, not verified; daemonBootstrap mechanism=${validation.mechanism}; requiredSupportingInfra=${validation.requiredSupportingInfra}`;
+      return {
+        check: {
+          check,
+          status: "green",
+          evidence,
+          remediation: "",
+        },
+        hostInfra: {
+          status: "declared",
+          evidence,
+        },
+      };
+    } catch (err) {
+      const evidence = `Host infra declaration inspection failed at ${declarationPath}: ${err instanceof Error ? err.message : String(err)}`;
+      return {
+        check: {
+          check,
+          status: "yellow",
+          evidence,
+          remediation: `Inspect or fix host infra declaration at ${declarationPath}`,
+          remediationSafe: false,
+        },
+        hostInfra: {
+          status: "unknown",
+          evidence,
+        },
+      };
+    }
+  }
+
+  private validateHostInfraDeclaration(value: unknown): {
+    errors: string[];
+    mechanism: string;
+    requiredSupportingInfra: number;
+  } {
+    const errors: string[] = [];
+    const obj = isRecord(value) ? value : null;
+    if (obj === null) {
+      return {
+        errors: ["schemaVersion", "daemonBootstrap.mechanism", "supportingInfra"],
+        mechanism: "unknown",
+        requiredSupportingInfra: 0,
+      };
+    }
+
+    if (obj["schemaVersion"] !== 1) {
+      errors.push("schemaVersion");
+    }
+
+    const daemonBootstrap = isRecord(obj["daemonBootstrap"]) ? obj["daemonBootstrap"] : null;
+    const mechanism = daemonBootstrap && typeof daemonBootstrap["mechanism"] === "string"
+      ? daemonBootstrap["mechanism"].trim()
+      : "";
+    if (!mechanism) {
+      errors.push("daemonBootstrap.mechanism");
+    }
+    if (daemonBootstrap?.["declared"] !== true) {
+      errors.push("daemonBootstrap.declared");
+    }
+
+    const supportingInfra = Array.isArray(obj["supportingInfra"]) ? obj["supportingInfra"] : null;
+    if (!supportingInfra) {
+      errors.push("supportingInfra");
+    }
+    const requiredSupportingInfra = supportingInfra
+      ? supportingInfra.filter((entry) => isRecord(entry) && entry["required"] === true).length
+      : 0;
+
+    return {
+      errors,
+      mechanism: mechanism || "unknown",
+      requiredSupportingInfra,
+    };
   }
 
   private checkSnapshot(rig: { rigId: string; name: string }): CheckEntry {
@@ -410,7 +575,7 @@ export class RestoreCheckService {
     return { check: `rig.${rig.name}.spec-present`, status: "green", evidence: `Spec present at ${rigYaml}`, remediation: "" };
   }
 
-  private buildResult(checks: CheckEntry[], rigs: RigRestoreRollup[]): RestoreCheckResult {
+  private buildResult(checks: CheckEntry[], rigs: RigRestoreRollup[], hostInfra?: HostInfraAssertion): RestoreCheckResult {
     const red = checks.filter((c) => c.status === "red").length;
     const yellow = checks.filter((c) => c.status === "yellow").length;
     const green = checks.filter((c) => c.status === "green").length;
@@ -425,7 +590,7 @@ export class RestoreCheckService {
     }
 
     const repairPacket = this.buildRepairPacket(checks, verdict);
-    return this.withAssertion({ verdict, counts: { red, yellow, green }, checks, repairPacket }, rigs);
+    return this.withAssertion({ verdict, counts: { red, yellow, green }, checks, repairPacket }, rigs, hostInfra);
   }
 
   /** Probe error produces verdict=unknown (not not_restorable) so operators
@@ -441,6 +606,7 @@ export class RestoreCheckService {
   private withAssertion(
     result: Pick<RestoreCheckResult, "verdict" | "counts" | "checks" | "repairPacket">,
     rigs: RigRestoreRollup[],
+    hostInfra?: HostInfraAssertion,
   ): RestoreCheckResult {
     const blockingRigCount = rigs.filter((rig) => rig.blockedNodes > 0 || rig.blockingChecks.length > 0).length;
     const caveatRigCount = rigs.filter((rig) => rig.blockedNodes === 0 && rig.blockingChecks.length === 0 && (rig.caveatNodes > 0 || rig.caveatChecks.length > 0)).length;
@@ -459,7 +625,9 @@ export class RestoreCheckService {
       reason = "caveats_present";
     } else {
       status = "fully_back";
-      reason = "observable_rigs_fully_back";
+      reason = hostInfra?.status === "declared"
+        ? "observable_rigs_fully_back_host_infra_declared_not_verified"
+        : "observable_rigs_fully_back";
     }
 
     return {
@@ -474,12 +642,15 @@ export class RestoreCheckService {
         unknownRigCount,
       },
       rigs,
-      hostInfra: {
-        status: result.verdict === "unknown" ? "unknown" : "not_inspected",
-        evidence: result.verdict === "unknown"
-          ? "Host bootstrap/autostart source could not be inspected because restore-check state is unknown"
-          : "No host bootstrap/autostart source inspected by v0; fullyBack only covers observable daemon, rig, and seat readiness",
-      },
+      hostInfra: result.verdict === "unknown"
+        ? {
+            status: "unknown",
+            evidence: "Host bootstrap/autostart source could not be inspected because restore-check state is unknown",
+          }
+        : (hostInfra ?? {
+            status: "not_inspected",
+            evidence: "No host bootstrap/autostart source inspected by v0; fullyBack only covers observable daemon, rig, and seat readiness",
+          }),
     };
   }
 
@@ -552,4 +723,8 @@ export class RestoreCheckService {
       blocking: c.status === "red",
     }));
   }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
