@@ -33,11 +33,21 @@ Load these before starting any design work. The quality of your output depends o
    - `implementation-pair` — the smallest effective development unit (2 agents)
    - `secrets-manager` — a managed-app rig with services integration and a specialist agent
 
+**Read if present on this host:**
+
+4. **Host-level doctrine** at `~/code/substrate/shared-docs/HOST-TOPOLOGY.md` (or wherever substrate lives on this host). If this file exists, it supersedes the baseline process below for complex or high-stakes rigs. Specifically:
+   - §3 defines the canonical rig classes (kernel, project, ephemeral, infra-build, managed-app). Classify before designing.
+   - §4 defines context-sharing patterns (pods as context domains, pair pattern, HA via mental-model-ha skill + substrate session logs, terminal nodes as common-room, chatroom/substrate/transcripts/Corpus).
+   - **§7 is the canonical 12-step rig-spec authoring SOP for high-stakes rigs — use it instead of the baseline "Design Process" below when the rig is ≥4 members, uses HA, is a managed-app, or will be shared/copied.** The baseline below still applies to small/focused rigs.
+   - §10 contains the host's bootstrap sequence so you know where your new rig fits.
+   - §12 has the naming canon and vocabulary mapping to shipped terms.
+5. **Building-agent-software skill** at `~/code/substrate/shared-docs/skills/building-agent-software/` if present. Design principles for agent-facing tools and surfaces. Relevant when your rig ships a new CLI, service, or managed app.
+
 **Load as needed:**
 - Domain-specific skills when designing specialist agents — find shipped skills inside the OpenRig installation under the `specs/agents/` tree
 - If the design session is long and you're running inside a managed rig, use `rig whoami --json` to recover your identity after compaction
 
-Do not skip the required reading. A rig architect who doesn't know the spec format will produce specs that don't validate. An architect who doesn't know the startup layering model will produce agents that boot without knowing their role.
+Do not skip the required reading. A rig architect who doesn't know the spec format will produce specs that don't validate. An architect who doesn't know the startup layering model will produce agents that boot without knowing their role. An architect who doesn't check for host-level doctrine will reinvent conventions the host has already established.
 
 ## The Design Process
 
