@@ -52,6 +52,20 @@ restoreCheckRoutes.get("/", (c) => {
   } catch (err) {
     return c.json({
       verdict: "unknown",
+      fullyBack: false,
+      assertion: {
+        level: "host",
+        status: "unknown",
+        reason: "unknown_probe_state",
+        blockingRigCount: 0,
+        caveatRigCount: 0,
+        unknownRigCount: 0,
+      },
+      rigs: [],
+      hostInfra: {
+        status: "unknown",
+        evidence: "Host bootstrap/autostart source could not be inspected because restore-check route failed",
+      },
       counts: { red: 0, yellow: 0, green: 0 },
       checks: [{
         check: "probe.error",

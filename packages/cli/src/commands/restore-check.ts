@@ -23,8 +23,39 @@ interface RepairStep {
   blocking: boolean;
 }
 
+interface RestoreAssertion {
+  level: "host";
+  status: "fully_back" | "not_fully_back" | "unknown";
+  reason: string;
+  blockingRigCount: number;
+  caveatRigCount: number;
+  unknownRigCount: number;
+}
+
+interface RigRestoreRollup {
+  rigId: string;
+  rigName: string;
+  status: "fully_back" | "not_fully_back" | "unknown";
+  verdict: "restorable" | "restorable_with_caveats" | "not_restorable" | "unknown";
+  expectedNodes: number;
+  runningReadyNodes: number;
+  blockedNodes: number;
+  caveatNodes: number;
+  blockingChecks: CheckEntry[];
+  caveatChecks: CheckEntry[];
+}
+
+interface HostInfraAssertion {
+  status: "not_inspected" | "not_declared" | "unknown";
+  evidence: string;
+}
+
 interface RestoreCheckResult {
   verdict: "restorable" | "restorable_with_caveats" | "not_restorable" | "unknown";
+  fullyBack: boolean;
+  assertion: RestoreAssertion;
+  rigs: RigRestoreRollup[];
+  hostInfra: HostInfraAssertion;
   counts: { red: number; yellow: number; green: number };
   checks: CheckEntry[];
   repairPacket: RepairStep[] | null;
@@ -70,9 +101,8 @@ Exit codes:
       const status = await getDaemonStatus(deps.lifecycleDeps);
       if (status.state !== "running" || status.healthy === false) {
         // Daemon down — produce a structured not_restorable result
-        const result: RestoreCheckResult = {
+        const result = localRestoreResult({
           verdict: "not_restorable",
-          counts: { red: 1, yellow: 0, green: 0 },
           checks: [{
             check: "daemon.reachable",
             status: "red",
@@ -86,7 +116,7 @@ Exit codes:
             safe: false,  // mutating: starts a daemon process
             blocking: true,
           }],
-        };
+        });
 
         if (opts.json) {
           console.log(JSON.stringify(result, null, 2));
@@ -110,9 +140,8 @@ Exit codes:
         const response = await client.get<RestoreCheckResult>(path);
 
         if (response.status >= 500) {
-          const result: RestoreCheckResult = {
+          const result = localRestoreResult({
             verdict: "unknown",
-            counts: { red: 0, yellow: 0, green: 0 },
             checks: [{
               check: "probe.error",
               status: "red",
@@ -126,7 +155,7 @@ Exit codes:
               safe: true,
               blocking: true,
             }],
-          };
+          });
           if (opts.json) {
             console.log(JSON.stringify(result, null, 2));
           } else {
@@ -164,6 +193,22 @@ function printHuman(result: RestoreCheckResult): void {
   const verdictLabel = result.verdict.replace(/_/g, " ").toUpperCase();
   console.log(`RESTORE CHECK — ${verdictLabel}`);
   console.log(`${result.counts.green} green | ${result.counts.yellow} yellow | ${result.counts.red} red`);
+  const fullyBackLabel = result.assertion.status === "unknown" ? "unknown" : result.fullyBack ? "yes" : "no";
+  console.log(`FULLY BACK: ${fullyBackLabel} (${result.assertion.reason})`);
+  if (result.hostInfra) {
+    console.log(`Host bootstrap/autostart: ${result.hostInfra.status} — ${result.hostInfra.evidence}`);
+  }
+  if (result.rigs && result.rigs.length > 0) {
+    console.log();
+    console.log("Per-rig summary:");
+    console.log(`${"rig".padEnd(24)} ${"status".padEnd(16)} ${"ready".padEnd(9)} ${"blocked".padEnd(8)} caveats`);
+    for (const rig of result.rigs) {
+      console.log(
+        `${rig.rigName.slice(0, 24).padEnd(24)} ${rig.status.padEnd(16)} ` +
+        `${`${rig.runningReadyNodes}/${rig.expectedNodes}`.padEnd(9)} ${String(rig.blockedNodes).padEnd(8)} ${rig.caveatNodes}`
+      );
+    }
+  }
   console.log();
 
   for (const check of result.checks) {
@@ -189,4 +234,36 @@ function printHuman(result: RestoreCheckResult): void {
     console.log();
     console.log("Restorable with caveats. Yellow items are non-blocking but worth reviewing.");
   }
+}
+
+function localRestoreResult(input: {
+  verdict: RestoreCheckResult["verdict"];
+  checks: CheckEntry[];
+  repairPacket: RepairStep[] | null;
+}): RestoreCheckResult {
+  const red = input.checks.filter((c) => c.status === "red").length;
+  const yellow = input.checks.filter((c) => c.status === "yellow").length;
+  const green = input.checks.filter((c) => c.status === "green").length;
+  const unknown = input.verdict === "unknown";
+
+  return {
+    verdict: input.verdict,
+    fullyBack: false,
+    assertion: {
+      level: "host",
+      status: unknown ? "unknown" : "not_fully_back",
+      reason: unknown ? "unknown_probe_state" : "blockers_present",
+      blockingRigCount: 0,
+      caveatRigCount: 0,
+      unknownRigCount: 0,
+    },
+    rigs: [],
+    hostInfra: {
+      status: "unknown",
+      evidence: "Host bootstrap/autostart source could not be inspected because restore-check did not receive daemon route evidence",
+    },
+    counts: { red, yellow, green },
+    checks: input.checks,
+    repairPacket: input.repairPacket,
+  };
 }

@@ -30,6 +30,11 @@ describe("Restore check routes", () => {
     const body = await res.json();
     expect(body.verdict).toBeDefined();
     expect(["restorable", "restorable_with_caveats", "not_restorable", "unknown"]).toContain(body.verdict);
+    expect(typeof body.fullyBack).toBe("boolean");
+    expect(body.assertion).toBeDefined();
+    expect(body.assertion.level).toBe("host");
+    expect(body.rigs).toBeInstanceOf(Array);
+    expect(body.hostInfra).toBeDefined();
     expect(body.counts).toBeDefined();
     expect(body.checks).toBeInstanceOf(Array);
     // repairPacket is null when restorable, array when caveats/blockers exist
@@ -115,6 +120,22 @@ describe("Restore check routes", () => {
     expect(res.status).toBe(200);
 
     const body = await res.json();
+    expect(body.fullyBack).toBe(false);
+    expect(body.assertion).toBeDefined();
+    expect(body.rigs).toBeInstanceOf(Array);
+    expect(body.rigs[0]).toEqual(expect.objectContaining({
+      rigId: rig.id,
+      rigName: "broken-rig",
+      expectedNodes: 1,
+      runningReadyNodes: expect.any(Number),
+      blockedNodes: expect.any(Number),
+      caveatNodes: expect.any(Number),
+      blockingChecks: expect.any(Array),
+      caveatChecks: expect.any(Array),
+    }));
+    expect(body.hostInfra).toEqual(expect.objectContaining({
+      status: "not_inspected",
+    }));
     // Hooks yellow → restorable_with_caveats → repairPacket populated
     expect(body.repairPacket).toBeInstanceOf(Array);
     expect(body.repairPacket.length).toBeGreaterThan(0);

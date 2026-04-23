@@ -183,7 +183,7 @@ describe("RestoreCheckService", () => {
     expect(transcript?.evidence).toContain("missing");
   });
 
-  it("terminal/infra node transcript check is exempt (yellow, never red)", () => {
+  it("terminal/infra node transcript check is exempt without creating a caveat", () => {
     const service = new RestoreCheckService(mockDeps({
       getNodeInventory: () => [{
         rigId: "rig-1", rigName: "test-rig", logicalId: "infra.board",
@@ -197,7 +197,7 @@ describe("RestoreCheckService", () => {
     }));
     const result = service.check({});
     const transcript = result.checks.find((c) => c.check === "seat.infra-board@test-rig.transcript");
-    expect(transcript?.status).toBe("yellow");
+    expect(transcript?.status).toBe("green");
     expect(transcript?.evidence).toContain("exempt");
   });
 
@@ -240,15 +240,44 @@ describe("RestoreCheckService", () => {
 
   it("all green produces verdict restorable (with --no-hooks to avoid yellow placeholder)", () => {
     const service = new RestoreCheckService(mockDeps());
-    const result = service.check({ noHooks: true });
+    const result = service.check({ noHooks: true }) as any;
     expect(result.verdict).toBe("restorable");
     expect(result.counts.red).toBe(0);
+    expect(result.fullyBack).toBe(true);
+    expect(result.assertion).toEqual(expect.objectContaining({
+      level: "host",
+      status: "fully_back",
+      reason: "observable_rigs_fully_back",
+      blockingRigCount: 0,
+      caveatRigCount: 0,
+      unknownRigCount: 0,
+    }));
+    expect(result.hostInfra).toEqual(expect.objectContaining({
+      status: "not_inspected",
+    }));
+    expect(result.rigs).toEqual([
+      expect.objectContaining({
+        rigId: "rig-1",
+        rigName: "test-rig",
+        status: "fully_back",
+        expectedNodes: 1,
+        runningReadyNodes: 1,
+        blockedNodes: 0,
+        caveatNodes: 0,
+        blockingChecks: [],
+        caveatChecks: [],
+      }),
+    ]);
   });
 
   it("any yellow (no red) produces verdict restorable_with_caveats", () => {
     const service = new RestoreCheckService(mockDeps({ hasSnapshot: () => false }));
-    const result = service.check({});
+    const result = service.check({}) as any;
     expect(result.verdict).toBe("restorable_with_caveats");
+    expect(result.fullyBack).toBe(false);
+    expect(result.assertion.status).toBe("not_fully_back");
+    expect(result.assertion.reason).toBe("caveats_present");
+    expect(result.assertion.caveatRigCount).toBeGreaterThan(0);
     expect(result.counts.yellow).toBeGreaterThan(0);
     expect(result.counts.red).toBe(0);
   });
@@ -257,9 +286,98 @@ describe("RestoreCheckService", () => {
     const service = new RestoreCheckService(mockDeps({
       probeDaemonHealth: () => ({ healthy: false, evidence: "Daemon not running" }),
     }));
-    const result = service.check({});
+    const result = service.check({}) as any;
     expect(result.verdict).toBe("not_restorable");
+    expect(result.fullyBack).toBe(false);
+    expect(result.assertion.status).toBe("not_fully_back");
+    expect(result.assertion.blockingRigCount).toBeGreaterThanOrEqual(0);
     expect(result.counts.red).toBeGreaterThan(0);
+  });
+
+  it("probe error produces unknown fully-back assertion, not false green", () => {
+    const service = new RestoreCheckService(mockDeps({
+      probeDaemonHealth: () => { throw new Error("socket unavailable"); },
+    }));
+    const result = service.check({}) as any;
+
+    expect(result.verdict).toBe("unknown");
+    expect(result.fullyBack).toBe(false);
+    expect(result.assertion).toEqual(expect.objectContaining({
+      status: "unknown",
+      reason: "unknown_probe_state",
+    }));
+  });
+
+  it("stopped infrastructure node is represented in readiness and prevents fully_back", () => {
+    const service = new RestoreCheckService(mockDeps({
+      getNodeInventory: () => [{
+        rigId: "rig-1", rigName: "test-rig", logicalId: "infra.board",
+        podId: "infra", podNamespace: "infra",
+        canonicalSessionName: "infra-board@test-rig",
+        nodeKind: "infrastructure", runtime: "terminal",
+        sessionStatus: "stopped", startupStatus: "ready",
+        tmuxAttachCommand: null, latestError: null,
+      } as NodeInventoryEntry],
+    }));
+
+    const result = service.check({ noHooks: true }) as any;
+
+    expect(result.fullyBack).toBe(false);
+    expect(result.assertion.blockingRigCount).toBe(1);
+    expect(result.rigs[0]).toEqual(expect.objectContaining({
+      expectedNodes: 1,
+      runningReadyNodes: 0,
+      blockedNodes: 1,
+      status: "not_fully_back",
+    }));
+    expect(result.rigs[0].blockingChecks.some((check: { check: string }) => check.check.includes("readiness"))).toBe(true);
+    expect(result.repairPacket?.some((step: { blocking: boolean; safe: boolean }) => step.blocking && step.safe === false)).toBe(true);
+  });
+
+  it("running infrastructure node counts ready while transcript-exempt", () => {
+    const service = new RestoreCheckService(mockDeps({
+      getNodeInventory: () => [{
+        rigId: "rig-1", rigName: "test-rig", logicalId: "infra.board",
+        podId: "infra", podNamespace: "infra",
+        canonicalSessionName: "infra-board@test-rig",
+        nodeKind: "infrastructure", runtime: "terminal",
+        sessionStatus: "running", startupStatus: "ready",
+        tmuxAttachCommand: "tmux attach -t infra-board@test-rig", latestError: null,
+      } as NodeInventoryEntry],
+    }));
+
+    const result = service.check({ noHooks: true }) as any;
+
+    expect(result.verdict).toBe("restorable");
+    expect(result.fullyBack).toBe(true);
+    expect(result.rigs[0]).toEqual(expect.objectContaining({
+      expectedNodes: 1,
+      runningReadyNodes: 1,
+      blockedNodes: 0,
+      caveatNodes: 0,
+    }));
+    const transcript = result.checks.find((check: { check: string }) => check.check === "seat.infra-board@test-rig.transcript");
+    expect(transcript.status).toBe("green");
+  });
+
+  it("missing canonical session identity blocks fully_back", () => {
+    const service = new RestoreCheckService(mockDeps({
+      getNodeInventory: () => [{
+        rigId: "rig-1", rigName: "test-rig", logicalId: "dev.impl",
+        podId: "dev", podNamespace: "dev",
+        canonicalSessionName: null,
+        nodeKind: "agent", runtime: "claude-code",
+        sessionStatus: "running", startupStatus: "ready",
+        tmuxAttachCommand: null, latestError: null,
+      } as NodeInventoryEntry],
+    }));
+
+    const result = service.check({ noHooks: true }) as any;
+
+    expect(result.fullyBack).toBe(false);
+    expect(result.rigs[0].blockingChecks.some((check: { check: string; evidence: string }) => (
+      check.check.includes("readiness") && check.evidence.includes("canonical session")
+    ))).toBe(true);
   });
 
   // --- Rig filter ---
@@ -491,5 +609,26 @@ describe("RestoreCheckService", () => {
     // Omitted remediationSafe → safe:false (conservative default)
     expect(entry!.safe).toBe(false);
     expect(entry!.blocking).toBe(true);
+  });
+
+  it("new readiness repair steps preserve blocking severity versus execution safety", () => {
+    const service = new RestoreCheckService(mockDeps({
+      getNodeInventory: () => [{
+        rigId: "rig-1", rigName: "test-rig", logicalId: "dev.impl",
+        podId: "dev", podNamespace: "dev",
+        canonicalSessionName: "dev-impl@test-rig",
+        nodeKind: "agent", runtime: "claude-code",
+        sessionStatus: "stopped", startupStatus: "failed",
+        tmuxAttachCommand: null, latestError: "launch failed",
+      } as NodeInventoryEntry],
+    }));
+
+    const result = service.check({ noHooks: true });
+    const readinessRepair = result.repairPacket?.find((step) => step.rationale.includes("not running/ready"));
+
+    expect(readinessRepair).toEqual(expect.objectContaining({
+      blocking: true,
+      safe: false,
+    }));
   });
 });
