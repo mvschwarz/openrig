@@ -4,6 +4,9 @@ import os from "node:os";
 import { describe, it, expect } from "vitest";
 import { RestoreCheckService, type RestoreCheckDeps, type NodeInventoryEntry } from "../src/domain/restore-check-service.js";
 
+const REQUIRED_SESSION_START_COMPACT_COMMAND = "~/.openrig/shared-docs/control-plane/services/claude-hooks/bin/session-start-compact-context.sh";
+const REQUIRED_USER_PROMPT_SUBMIT_COMMAND = "~/.openrig/shared-docs/control-plane/services/claude-hooks/bin/userpromptsubmit-queue-attention.sh";
+
 const VALID_HOST_INFRA_DECLARATION = JSON.stringify({
   schemaVersion: 1,
   daemonBootstrap: {
@@ -43,6 +46,91 @@ function v2HostInfraDeclaration(overrides?: {
       },
     ],
   });
+}
+
+function claudeSettings(options?: {
+  sessionStartCommand?: string | null;
+  sessionStartMatcher?: string;
+  userPromptSubmitCommand?: string | null;
+  wrongEventCommand?: string | null;
+}): string {
+  const sessionStartHooks = [];
+  if (options?.sessionStartCommand !== null) {
+    sessionStartHooks.push({
+      type: "command",
+      command: options?.sessionStartCommand ?? REQUIRED_SESSION_START_COMPACT_COMMAND,
+    });
+  }
+
+  const userPromptSubmitHooks = [];
+  if (options?.userPromptSubmitCommand !== null) {
+    userPromptSubmitHooks.push({
+      type: "command",
+      command: options?.userPromptSubmitCommand ?? REQUIRED_USER_PROMPT_SUBMIT_COMMAND,
+    });
+  }
+
+  return JSON.stringify({
+    hooks: {
+      SessionStart: [
+        {
+          matcher: options?.sessionStartMatcher ?? "compact",
+          hooks: sessionStartHooks,
+        },
+        ...(options?.wrongEventCommand
+          ? [{
+              matcher: "wrong-event",
+              hooks: [{ type: "command", command: options.wrongEventCommand }],
+            }]
+          : []),
+      ],
+      UserPromptSubmit: [
+        {
+          hooks: userPromptSubmitHooks,
+        },
+      ],
+    },
+  });
+}
+
+function claudeNode(overrides?: Partial<NodeInventoryEntry> & { cwd?: string | null }): NodeInventoryEntry {
+  return {
+    rigId: "rig-1", rigName: "test-rig", logicalId: "dev.impl",
+    podId: "dev", podNamespace: "dev",
+    canonicalSessionName: "dev-impl@test-rig",
+    nodeKind: "agent", runtime: "claude-code",
+    sessionStatus: "running", startupStatus: "ready",
+    tmuxAttachCommand: "tmux attach -t dev-impl@test-rig",
+    latestError: null,
+    ...overrides,
+  } as NodeInventoryEntry;
+}
+
+function settingsDeps(input: {
+  settings: Record<string, string>;
+  nodes?: NodeInventoryEntry[];
+  hostInfraDeclared?: boolean;
+}): { deps: RestoreCheckDeps; readPaths: string[] } {
+  const readPaths: string[] = [];
+  const settingsPaths = new Set(Object.keys(input.settings));
+  return {
+    readPaths,
+    deps: mockDeps({
+      getNodeInventory: () => input.nodes ?? [claudeNode()],
+      exists: (p) => {
+        if (p.endsWith("host-infra.json")) return input.hostInfraDeclared ?? true;
+        if (p.includes(`${path.sep}.claude${path.sep}settings`)) return settingsPaths.has(p);
+        return true;
+      },
+      readFile: (p) => {
+        readPaths.push(p);
+        if (p.endsWith("host-infra.json")) return VALID_HOST_INFRA_DECLARATION;
+        const value = input.settings[p];
+        if (value === undefined) throw new Error(`unexpected read: ${p}`);
+        return value;
+      },
+    }),
+  };
 }
 
 function mockDeps(overrides?: Partial<RestoreCheckDeps>): RestoreCheckDeps {
@@ -777,14 +865,261 @@ describe("RestoreCheckService", () => {
     expect(hookChecks).toHaveLength(0);
   });
 
-  it("hooks without --no-hooks are honestly yellow (not false-green)", () => {
+  it("Claude hook check is green when project-local settings contain both required hooks", () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "restore-check-hooks-home-"));
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "restore-check-hooks-cwd-"));
+    const settingsPath = path.join(cwd, ".claude", "settings.local.json");
+    const previousHome = process.env["HOME"];
+    process.env["HOME"] = home;
+
+    try {
+      const { deps } = settingsDeps({
+        settings: { [settingsPath]: claudeSettings() },
+        nodes: [claudeNode({ cwd })],
+      });
+      const service = new RestoreCheckService(deps);
+      const result = service.check({});
+      const hook = result.checks.find((c) => c.check === "seat.dev-impl@test-rig.hooks");
+
+      expect(hook?.status).toBe("green");
+      expect(hook?.evidence).toContain(settingsPath);
+      expect(hook?.evidence).toContain("configuration present, not hook-execution verified");
+      expect(hook?.evidence).not.toContain("not yet implemented");
+    } finally {
+      if (previousHome === undefined) delete process.env["HOME"];
+      else process.env["HOME"] = previousHome;
+      fs.rmSync(home, { recursive: true, force: true });
+      fs.rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("Claude hook check is green from host-global settings when cwd is unavailable", () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "restore-check-hooks-global-home-"));
+    const settingsPath = path.join(home, ".claude", "settings.json");
+    const previousHome = process.env["HOME"];
+    process.env["HOME"] = home;
+
+    try {
+      const { deps } = settingsDeps({
+        settings: { [settingsPath]: claudeSettings() },
+        nodes: [claudeNode({ cwd: null })],
+      });
+      const service = new RestoreCheckService(deps);
+      const result = service.check({});
+      const hook = result.checks.find((c) => c.check === "seat.dev-impl@test-rig.hooks");
+
+      expect(hook?.status).toBe("green");
+      expect(hook?.evidence).toContain(settingsPath);
+      expect(hook?.evidence).toContain("configuration present, not hook-execution verified");
+      expect(hook?.evidence).not.toContain("cwd unavailable");
+    } finally {
+      if (previousHome === undefined) delete process.env["HOME"];
+      else process.env["HOME"] = previousHome;
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("Claude hook check is yellow when only one required hook is configured", () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "restore-check-hooks-partial-home-"));
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "restore-check-hooks-partial-cwd-"));
+    const settingsPath = path.join(cwd, ".claude", "settings.json");
+    const previousHome = process.env["HOME"];
+    process.env["HOME"] = home;
+
+    try {
+      const { deps } = settingsDeps({
+        settings: {
+          [settingsPath]: claudeSettings({ userPromptSubmitCommand: null }),
+        },
+        nodes: [claudeNode({ cwd })],
+      });
+      const service = new RestoreCheckService(deps);
+      const result = service.check({});
+      const hook = result.checks.find((c) => c.check === "seat.dev-impl@test-rig.hooks");
+      const repair = result.repairPacket?.find((step) => step.rationale.includes("UserPromptSubmit"));
+
+      expect(hook?.status).toBe("yellow");
+      expect(hook?.evidence).toContain("UserPromptSubmit");
+      expect(hook?.evidence).toContain(REQUIRED_USER_PROMPT_SUBMIT_COMMAND);
+      expect(repair).toEqual(expect.objectContaining({
+        safe: false,
+        blocking: false,
+      }));
+    } finally {
+      if (previousHome === undefined) delete process.env["HOME"];
+      else process.env["HOME"] = previousHome;
+      fs.rmSync(home, { recursive: true, force: true });
+      fs.rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("malformed applicable Claude settings keep hook check yellow even when another scope has hooks", () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "restore-check-hooks-malformed-home-"));
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "restore-check-hooks-malformed-cwd-"));
+    const hostSettingsPath = path.join(home, ".claude", "settings.json");
+    const localSettingsPath = path.join(cwd, ".claude", "settings.local.json");
+    const previousHome = process.env["HOME"];
+    process.env["HOME"] = home;
+
+    try {
+      const { deps } = settingsDeps({
+        settings: {
+          [hostSettingsPath]: "{ not json",
+          [localSettingsPath]: claudeSettings(),
+        },
+        nodes: [claudeNode({ cwd })],
+      });
+      const service = new RestoreCheckService(deps);
+      const result = service.check({});
+      const hook = result.checks.find((c) => c.check === "seat.dev-impl@test-rig.hooks");
+
+      expect(hook?.status).toBe("yellow");
+      expect(hook?.evidence).toContain(hostSettingsPath);
+      expect(hook?.evidence).toContain("configuration could not be trusted");
+      expect(result.repairPacket?.find((step) => step.rationale.includes(hostSettingsPath))).toEqual(expect.objectContaining({
+        safe: false,
+        blocking: false,
+      }));
+    } finally {
+      if (previousHome === undefined) delete process.env["HOME"];
+      else process.env["HOME"] = previousHome;
+      fs.rmSync(home, { recursive: true, force: true });
+      fs.rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("Codex and infrastructure hook checks are green not-applicable without hook repair steps", () => {
+    const service = new RestoreCheckService(mockDeps({
+      getNodeInventory: () => [
+        {
+          rigId: "rig-1", rigName: "test-rig", logicalId: "dev.qa",
+          podId: "dev", podNamespace: "dev",
+          canonicalSessionName: "dev-qa@test-rig",
+          nodeKind: "agent", runtime: "codex",
+          sessionStatus: "running", startupStatus: "ready",
+          tmuxAttachCommand: "tmux attach -t dev-qa@test-rig",
+          latestError: null,
+        } as NodeInventoryEntry,
+        {
+          rigId: "rig-1", rigName: "test-rig", logicalId: "infra.board",
+          podId: "infra", podNamespace: "infra",
+          canonicalSessionName: "infra-board@test-rig",
+          nodeKind: "infrastructure", runtime: "terminal",
+          sessionStatus: "running", startupStatus: "ready",
+          tmuxAttachCommand: null,
+          latestError: null,
+        } as NodeInventoryEntry,
+      ],
+    }));
+    const result = service.check({});
+    const hookChecks = result.checks.filter((c) => c.check.includes("hooks"));
+
+    expect(hookChecks).toHaveLength(2);
+    for (const hook of hookChecks) {
+      expect(hook.status).toBe("green");
+      expect(hook.evidence).toContain("not applicable");
+      expect(hook.remediation).toBe("");
+    }
+    expect(result.repairPacket?.some((step) => step.rationale.includes("Claude Code hook")) ?? false).toBe(false);
+  });
+
+  it("Claude hook check with missing cwd is yellow only when host-global settings do not satisfy hooks", () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "restore-check-hooks-no-cwd-home-"));
+    const previousHome = process.env["HOME"];
+    process.env["HOME"] = home;
+
+    try {
+      const { deps } = settingsDeps({
+        settings: {},
+        nodes: [claudeNode({ cwd: null })],
+      });
+      const service = new RestoreCheckService(deps);
+      const result = service.check({});
+      const hook = result.checks.find((c) => c.check === "seat.dev-impl@test-rig.hooks");
+
+      expect(hook?.status).toBe("yellow");
+      expect(hook?.evidence).toContain("project settings were not inspected because cwd is unavailable");
+      expect(hook?.evidence).toContain(path.join(home, ".claude", "settings.json"));
+    } finally {
+      if (previousHome === undefined) delete process.env["HOME"];
+      else process.env["HOME"] = previousHome;
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("Claude hook matching is event-local and exact", () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "restore-check-hooks-event-local-home-"));
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "restore-check-hooks-event-local-cwd-"));
+    const settingsPath = path.join(cwd, ".claude", "settings.json");
+    const previousHome = process.env["HOME"];
+    process.env["HOME"] = home;
+
+    try {
+      const { deps } = settingsDeps({
+        settings: {
+          [settingsPath]: claudeSettings({
+            sessionStartCommand: "./session-start-compact-context.sh",
+            wrongEventCommand: REQUIRED_SESSION_START_COMPACT_COMMAND,
+          }),
+        },
+        nodes: [claudeNode({ cwd })],
+      });
+      const service = new RestoreCheckService(deps);
+      const result = service.check({});
+      const hook = result.checks.find((c) => c.check === "seat.dev-impl@test-rig.hooks");
+
+      expect(hook?.status).toBe("yellow");
+      expect(hook?.evidence).toContain("SessionStart matcher compact");
+      expect(hook?.evidence).toContain(REQUIRED_SESSION_START_COMPACT_COMMAND);
+      expect(hook?.evidence).not.toContain("configuration present");
+    } finally {
+      if (previousHome === undefined) delete process.env["HOME"];
+      else process.env["HOME"] = previousHome;
+      fs.rmSync(home, { recursive: true, force: true });
+      fs.rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("Claude hook inspection reads only existing settings files", () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "restore-check-hooks-readonly-home-"));
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "restore-check-hooks-readonly-cwd-"));
+    const settingsPath = path.join(cwd, ".claude", "settings.local.json");
+    const previousHome = process.env["HOME"];
+    process.env["HOME"] = home;
+    fs.utimesSync(cwd, new Date(946684800000), new Date(946684800000));
+    const before = fs.statSync(cwd).mtimeMs;
+
+    try {
+      const { deps, readPaths } = settingsDeps({
+        settings: { [settingsPath]: claudeSettings() },
+        nodes: [claudeNode({ cwd })],
+        hostInfraDeclared: false,
+      });
+      const service = new RestoreCheckService(deps);
+      const result = service.check({});
+
+      expect(result.checks.find((c) => c.check === "seat.dev-impl@test-rig.hooks")?.status).toBe("green");
+      expect(readPaths).toEqual([settingsPath]);
+      expect(readPaths).not.toContain(REQUIRED_SESSION_START_COMPACT_COMMAND);
+      expect(readPaths).not.toContain(REQUIRED_USER_PROMPT_SUBMIT_COMMAND);
+      expect(fs.statSync(cwd).mtimeMs).toBe(before);
+    } finally {
+      if (previousHome === undefined) delete process.env["HOME"];
+      else process.env["HOME"] = previousHome;
+      fs.rmSync(home, { recursive: true, force: true });
+      fs.rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("Claude hooks without configuration are yellow without the old placeholder", () => {
     const service = new RestoreCheckService(mockDeps());
     const result = service.check({});
     const hookChecks = result.checks.filter((c) => c.check.includes("hooks"));
     expect(hookChecks.length).toBeGreaterThan(0);
     for (const hook of hookChecks) {
       expect(hook.status).toBe("yellow");
-      expect(hook.evidence).toContain("not yet implemented");
+      expect(hook.evidence).toContain("Claude Code hook configuration missing");
+      expect(hook.evidence).not.toContain("not yet implemented");
     }
   });
 

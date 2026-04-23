@@ -9,6 +9,9 @@ import { createApp } from "../src/server.js";
 import type { RigRepository } from "../src/domain/rig-repository.js";
 import { RestoreCheckService } from "../src/domain/restore-check-service.js";
 
+const REQUIRED_SESSION_START_COMPACT_COMMAND = "~/.openrig/shared-docs/control-plane/services/claude-hooks/bin/session-start-compact-context.sh";
+const REQUIRED_USER_PROMPT_SUBMIT_COMMAND = "~/.openrig/shared-docs/control-plane/services/claude-hooks/bin/userpromptsubmit-queue-attention.sh";
+
 const VALID_HOST_INFRA_DECLARATION = JSON.stringify({
   schemaVersion: 1,
   daemonBootstrap: {
@@ -47,6 +50,24 @@ function v2HostInfraDeclaration(overrides?: {
         evidencePaths: overrides?.supportingInfraEvidencePaths ?? ["${OPENRIG_HOME}/supervisor-wake/README.md"],
       },
     ],
+  });
+}
+
+function claudeHookSettings(): string {
+  return JSON.stringify({
+    hooks: {
+      SessionStart: [
+        {
+          matcher: "compact",
+          hooks: [{ type: "command", command: REQUIRED_SESSION_START_COMPACT_COMMAND }],
+        },
+      ],
+      UserPromptSubmit: [
+        {
+          hooks: [{ type: "command", command: REQUIRED_USER_PROMPT_SUBMIT_COMMAND }],
+        },
+      ],
+    },
   });
 }
 
@@ -150,6 +171,32 @@ describe("Restore check routes", () => {
 
     const hookChecks = body.checks.filter((c: { check: string }) => c.check.includes("hooks"));
     expect(hookChecks).toHaveLength(0);
+  });
+
+  it("GET /api/restore-check uses node cwd to inspect project-local Claude hook settings", async () => {
+    const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "restore-check-route-hook-cwd-"));
+    const settingsDir = path.join(projectDir, ".claude");
+    const settingsPath = path.join(settingsDir, "settings.local.json");
+    fs.mkdirSync(settingsDir, { recursive: true });
+    fs.writeFileSync(settingsPath, claudeHookSettings());
+    const rig = rigRepo.createRig("hooked-rig");
+    rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code", cwd: projectDir });
+
+    try {
+      const res = await app.request("/api/restore-check?rig=hooked-rig");
+      const body = await res.json();
+      const hook = body.checks.find((c: { check: string }) => c.check.includes(".hooks"));
+
+      expect(res.status).toBe(200);
+      expect(hook).toEqual(expect.objectContaining({
+        status: "green",
+        remediation: "",
+      }));
+      expect(hook.evidence).toContain(settingsPath);
+      expect(hook.evidence).toContain("configuration present, not hook-execution verified");
+    } finally {
+      fs.rmSync(projectDir, { recursive: true, force: true });
+    }
   });
 
   it("daemon.reachable is green inside daemon route (self-proof)", async () => {
