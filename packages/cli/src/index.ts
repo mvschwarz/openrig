@@ -45,6 +45,7 @@ import { destroyCommand, type DestroyCommandDeps } from "./commands/destroy.js";
 import { setupCommand } from "./commands/setup.js";
 import { contextCommand } from "./commands/context.js";
 import { restoreCheckCommand } from "./commands/restore-check.js";
+import { compactPlanCommand, type CompactPlanDeps } from "./commands/compact-plan.js";
 import type { LifecycleDeps } from "./daemon-lifecycle.js";
 import { CLI_VERSION } from "./version.js";
 
@@ -86,6 +87,7 @@ export interface ProgramDeps {
   removeDeps?: StatusDeps;
   shrinkDeps?: StatusDeps;
   destroyDeps?: DestroyCommandDeps;
+  compactPlanDeps?: CompactPlanDeps;
   configPath?: string;
 }
 
@@ -140,6 +142,7 @@ export function createProgram(depsOverride?: ProgramDeps): Command {
   program.addCommand(setupCommand());
   program.addCommand(contextCommand());
   program.addCommand(restoreCheckCommand());
+  program.addCommand(compactPlanCommand(depsOverride?.compactPlanDeps));
 
   return program;
 }
