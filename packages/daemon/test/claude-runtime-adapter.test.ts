@@ -430,13 +430,12 @@ describe("Claude Code runtime adapter", () => {
     logSpy.mockRestore();
   });
 
-  // --- Permission-config-at-spawn: standard-safe baseline provisioning ---
+  // --- Permission-config-at-spawn: Bash convenience baseline provisioning ---
 
-  it("provisionRigPermissions applies standard-safe baseline on fresh settings", async () => {
+  it("provisionRigPermissions applies Bash convenience baseline on fresh settings", async () => {
     const fs = mockFs({});
     const adapter = new ClaudeCodeAdapter({ tmux: mockTmux(), fsOps: { ...fs, homedir: "/home/test" } });
 
-    // Trigger provisioning via deliverStartup (which calls provisionManagedBootstrap)
     await adapter.deliverStartup([], makeBinding());
 
     const store = (fs as unknown as { _store: Record<string, string> })._store;
@@ -452,8 +451,10 @@ describe("Claude Code runtime adapter", () => {
     expect(allow).toContain("Bash(grep:*)");
     expect(allow).toContain("Bash(rg:*)");
     expect(allow).toContain("Bash(pwd)");
-    expect(allow).toContain("Bash(echo:*)");
     expect(allow).toContain("Bash(which:*)");
+    // Bash(echo:*) intentionally excluded — echo can write via shell
+    // redirection (echo "x" > file); not a convenience-safe pattern
+    expect(allow).not.toContain("Bash(echo:*)");
   });
 
   it("provisionRigPermissions is additive — preserves existing allow entries", async () => {
@@ -482,7 +483,6 @@ describe("Claude Code runtime adapter", () => {
     const fs = mockFs({});
     const adapter = new ClaudeCodeAdapter({ tmux: mockTmux(), fsOps: { ...fs, homedir: "/home/test" } });
 
-    // Run twice
     await adapter.deliverStartup([], makeBinding());
     await adapter.deliverStartup([], makeBinding());
 
@@ -490,11 +490,26 @@ describe("Claude Code runtime adapter", () => {
     const settings = JSON.parse(store["/home/test/.claude/settings.json"] ?? "{}");
     const allow: string[] = settings.permissions?.allow ?? [];
 
-    // Each pattern appears exactly once
     const rigCount = allow.filter((p: string) => p === "Bash(rig:*)").length;
     expect(rigCount).toBe(1);
     const lsCount = allow.filter((p: string) => p === "Bash(ls:*)").length;
     expect(lsCount).toBe(1);
+  });
+
+  it("provisionRigPermissions is file-idempotent — identical settings.json on consecutive runs", async () => {
+    const fs = mockFs({});
+    const adapter = new ClaudeCodeAdapter({ tmux: mockTmux(), fsOps: { ...fs, homedir: "/home/test" } });
+
+    await adapter.deliverStartup([], makeBinding());
+    const store = (fs as unknown as { _store: Record<string, string> })._store;
+    const firstWrite = store["/home/test/.claude/settings.json"];
+
+    await adapter.deliverStartup([], makeBinding());
+    const secondWrite = store["/home/test/.claude/settings.json"];
+
+    // Second run should not rewrite (all patterns already present);
+    // file content stays byte-identical including provenance timestamp
+    expect(secondWrite).toBe(firstWrite);
   });
 
   it("provisionRigPermissions writes provenance marker", async () => {
@@ -508,7 +523,7 @@ describe("Claude Code runtime adapter", () => {
 
     expect(settings._openrig_provenance).toBeDefined();
     expect(settings._openrig_provenance.author).toBe("openrig-at-spawn");
-    expect(settings._openrig_provenance.baseline).toBe("standard-safe");
+    expect(settings._openrig_provenance.baseline).toBe("convenience");
   });
 
   it("provisionRigPermissions preserves existing deny/ask entries", async () => {
