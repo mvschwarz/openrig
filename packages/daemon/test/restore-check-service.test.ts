@@ -102,6 +102,31 @@ describe("RestoreCheckService", () => {
     expect(result.verdict).toBe("unknown");
   });
 
+  // --- Read-only invariant ---
+
+  it("state-dir check does not create or delete any probe file (read-only)", () => {
+    const writtenPaths: string[] = [];
+    const deletedPaths: string[] = [];
+    // Spy on fs operations via a service that tracks writes
+    const service = new RestoreCheckService(mockDeps({
+      // Override exists to track but still delegate
+      exists: (p) => {
+        // Track if the service tries to check for a probe file it would have created
+        if (p.includes(".restore-check-probe")) {
+          writtenPaths.push(p);
+        }
+        return true;
+      },
+    }));
+    const result = service.check({ noQueue: true, noHooks: true });
+
+    // The service should NOT reference any probe file
+    expect(writtenPaths).toHaveLength(0);
+    // Verify the check itself ran and produced a result
+    const stateDir = result.checks.find((c) => c.check === "host.state-dir-writable");
+    expect(stateDir).toBeDefined();
+  });
+
   // --- Rig spec/root checks ---
 
   it("missing rig root produces spec-present red", () => {

@@ -1,4 +1,4 @@
-import { existsSync, accessSync, constants, writeFileSync, unlinkSync } from "node:fs";
+import { existsSync, accessSync, constants } from "node:fs";
 import { join } from "node:path";
 import { getCompatibleOpenRigPath } from "../openrig-compat.js";
 
@@ -165,10 +165,10 @@ export class RestoreCheckService {
 
   private checkStateDirWritable(): CheckEntry {
     const stateDir = getCompatibleOpenRigPath("");
-    const probePath = join(stateDir, ".restore-check-probe");
     try {
-      writeFileSync(probePath, "probe", "utf-8");
-      unlinkSync(probePath);
+      // Non-mutating permission probe — no file creation/deletion.
+      // accessSync throws if the directory is not writable.
+      accessSync(stateDir, constants.W_OK);
       return { check: "host.state-dir-writable", status: "green", evidence: `${stateDir} is writable`, remediation: "" };
     } catch {
       return {
