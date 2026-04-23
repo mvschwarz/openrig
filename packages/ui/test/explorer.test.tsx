@@ -245,4 +245,63 @@ describe("Explorer sidebar", () => {
     expect(screen.queryByTestId("turn-off")).toBeNull();
     expect(screen.queryByTestId("turn-on")).toBeNull();
   });
+
+  it("explorer renders context percentage indicator for agent with known context", async () => {
+    mockFetch.mockImplementation(async (url: string) => {
+      if (url.includes("/api/rigs/summary")) {
+        return { ok: true, json: async () => [{ id: "rig-1", name: "test-rig", nodeCount: 1, latestSnapshotAt: null, latestSnapshotId: null }] };
+      }
+      if (url.includes("/api/ps")) {
+        return { ok: true, json: async () => [{ rigId: "rig-1", name: "test-rig", nodeCount: 1, runningCount: 1, status: "running", uptime: "1m", latestSnapshot: null }] };
+      }
+      if (url.includes("/nodes")) {
+        return { ok: true, json: async () => [
+          {
+            rigId: "rig-1", rigName: "test-rig", logicalId: "dev.impl", podId: "dev",
+            nodeKind: "agent", runtime: "claude-code", startupStatus: "ready",
+            contextUsage: { usedPercentage: 72, availability: "known", fresh: true, sampledAt: new Date().toISOString(), contextWindowSize: 1000000, remainingPercentage: 28 },
+          },
+        ]};
+      }
+      return { ok: true, json: async () => [] };
+    });
+
+    renderExplorer();
+    await waitFor(() => expect(screen.getByLabelText("Expand rig test-rig")).toBeDefined());
+    fireEvent.click(screen.getByLabelText("Expand rig test-rig"));
+    await waitFor(() => expect(screen.getByTestId("context-indicator-dev.impl")).toBeDefined());
+
+    const indicator = screen.getByTestId("context-indicator-dev.impl");
+    expect(indicator.textContent).toContain("72%");
+    expect(indicator.className).toContain("text-amber-600");
+  });
+
+  it("explorer falls back to runtime label when context is unknown", async () => {
+    mockFetch.mockImplementation(async (url: string) => {
+      if (url.includes("/api/rigs/summary")) {
+        return { ok: true, json: async () => [{ id: "rig-1", name: "test-rig", nodeCount: 1, latestSnapshotAt: null, latestSnapshotId: null }] };
+      }
+      if (url.includes("/api/ps")) {
+        return { ok: true, json: async () => [{ rigId: "rig-1", name: "test-rig", nodeCount: 1, runningCount: 1, status: "running", uptime: "1m", latestSnapshot: null }] };
+      }
+      if (url.includes("/nodes")) {
+        return { ok: true, json: async () => [
+          {
+            rigId: "rig-1", rigName: "test-rig", logicalId: "dev.qa", podId: "dev",
+            nodeKind: "agent", runtime: "codex", startupStatus: "ready",
+            contextUsage: { usedPercentage: null, availability: "unknown", fresh: false, sampledAt: null, contextWindowSize: null, remainingPercentage: null },
+          },
+        ]};
+      }
+      return { ok: true, json: async () => [] };
+    });
+
+    renderExplorer();
+    await waitFor(() => expect(screen.getByLabelText("Expand rig test-rig")).toBeDefined());
+    fireEvent.click(screen.getByLabelText("Expand rig test-rig"));
+    await waitFor(() => expect(screen.getByText("qa")).toBeDefined());
+
+    expect(screen.queryByTestId("context-indicator-dev.qa")).toBeNull();
+    expect(screen.getByText("codex")).toBeDefined();
+  });
 });

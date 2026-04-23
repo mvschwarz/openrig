@@ -1516,4 +1516,71 @@ describe("RigNode spec hint", () => {
     expect(node.getAttribute("title")).toContain("Profile: default");
     expect(node.getAttribute("title")).toContain("Edges: 2");
   });
+
+  // --- Context usage prominence tests ---
+
+  it("renders prominent context percentage for known fresh seat", () => {
+    render(
+      <ReactFlowProvider>
+        <RigNode data={{
+          logicalId: "dev.impl", role: "worker", runtime: "claude-code",
+          model: null, status: "running", binding: null,
+          contextAvailability: "known", contextUsedPercentage: 85, contextFresh: true,
+        }} />
+      </ReactFlowProvider>
+    );
+
+    const badge = screen.getByTestId("context-badge");
+    expect(badge.textContent).toContain("85%");
+    expect(badge.className).toContain("text-red-600"); // >=80 = red
+    expect(badge.className).toContain("font-bold");
+    expect(badge.className).not.toContain("opacity-50");
+  });
+
+  it("renders stale context with reduced opacity", () => {
+    render(
+      <ReactFlowProvider>
+        <RigNode data={{
+          logicalId: "dev.impl", role: "worker", runtime: "claude-code",
+          model: null, status: "running", binding: null,
+          contextAvailability: "known", contextUsedPercentage: 45, contextFresh: false,
+        }} />
+      </ReactFlowProvider>
+    );
+
+    const badge = screen.getByTestId("context-badge");
+    expect(badge.textContent).toContain("45%");
+    expect(badge.className).toContain("text-green-700"); // <60 = green
+    expect(badge.className).toContain("opacity-50"); // stale
+  });
+
+  it("renders '?' for unknown context (Codex/terminal)", () => {
+    render(
+      <ReactFlowProvider>
+        <RigNode data={{
+          logicalId: "dev.qa", role: "worker", runtime: "codex",
+          model: null, status: "running", binding: null,
+          contextAvailability: "unknown", contextUsedPercentage: null, contextFresh: false,
+        }} />
+      </ReactFlowProvider>
+    );
+
+    const badge = screen.getByTestId("context-badge-unknown");
+    expect(badge.textContent?.trim()).toBe("?");
+  });
+
+  it("renders amber for warning-range context (60-80%)", () => {
+    render(
+      <ReactFlowProvider>
+        <RigNode data={{
+          logicalId: "dev.impl", role: "worker", runtime: "claude-code",
+          model: null, status: "running", binding: null,
+          contextAvailability: "known", contextUsedPercentage: 65, contextFresh: true,
+        }} />
+      </ReactFlowProvider>
+    );
+
+    const badge = screen.getByTestId("context-badge");
+    expect(badge.className).toContain("text-amber-600");
+  });
 });
