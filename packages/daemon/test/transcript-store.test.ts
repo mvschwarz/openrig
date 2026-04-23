@@ -357,9 +357,15 @@ describe("TranscriptStore", () => {
 
       expect(result).toContain("real semantic transcript content should survive");
       expect(result).toContain("and this line too");
+      // Branded headers removed
       expect(result).not.toContain("Claude Code v2.1.101");
       expect(result).not.toContain("Opus 4.6");
       expect(result).not.toContain("OpenAI Codex");
+      // Box-wrapped inner lines removed (model/directory/blank rows inside │...│)
+      expect(result).not.toContain("model:");
+      expect(result).not.toContain("directory:");
+      expect(result).not.toContain("╭");
+      expect(result).not.toContain("╰");
     });
 
     it("preserves legitimate sentences that mention startup splash strings", () => {
@@ -380,6 +386,28 @@ describe("TranscriptStore", () => {
       expect(result).toContain("I was running Claude Code v2.1.101 when the bug appeared.");
       expect(result).toContain("The Opus 4.6 model performed well on the benchmark.");
       expect(result).toContain("We tested against OpenAI Codex (v0.120.0) for comparison.");
+    });
+
+    it("preserves standalone model/directory output lines without box-drawing wrappers", () => {
+      const store = new TranscriptStore({ transcriptsRoot: tmpDir });
+      store.ensureTranscriptDir("my-rig");
+      const filePath = store.getTranscriptPath("my-rig", "dev@my-rig");
+      writeFileSync(
+        filePath,
+        [
+          "model: claude-opus-4-6",
+          "directory: /Users/admin/code/projects/openrig",
+          "The model configuration is set correctly.",
+        ].join("\n") + "\n",
+      );
+
+      const result = store.readTail("my-rig", "dev@my-rig", 20);
+
+      // Standalone model:/directory: without box wrappers survive —
+      // they could be legitimate command output or log entries
+      expect(result).toContain("model: claude-opus-4-6");
+      expect(result).toContain("directory: /Users/admin/code/projects/openrig");
+      expect(result).toContain("The model configuration is set correctly.");
     });
 
     it("preserves literal cursor-fragment tokens when they are mentioned as data", () => {
