@@ -85,6 +85,31 @@ export interface RecoveryPlan {
   unknown: RecoveryIssue[];
 }
 
+export interface StartupContextResolvedFile {
+  absolutePath: string;
+  required: boolean;
+  path?: string | null;
+  deliveryHint?: string | null;
+}
+
+export interface StartupContextProjectionEntry {
+  absolutePath: string;
+  effectiveId?: string | null;
+  category?: string | null;
+}
+
+export type StartupContextProbeResult =
+  | {
+      status: "ok";
+      runtime: string | null;
+      resolvedStartupFiles: StartupContextResolvedFile[];
+      projectionEntries: StartupContextProjectionEntry[];
+    }
+  | {
+      status: "missing" | "malformed" | "probe_error";
+      evidence: string;
+    };
+
 export interface RestoreCheckResult {
   verdict: Verdict;
   fullyBack: boolean;
@@ -106,6 +131,7 @@ export interface RestoreCheckOpts {
 // --- Deps (framework-free per ADR-0001; reads from existing projections per ADR-0002) ---
 
 export interface NodeInventoryEntry {
+  nodeId?: string | null;
   rigId: string;
   rigName: string;
   logicalId: string;
@@ -126,6 +152,8 @@ export interface RestoreCheckDeps {
   listRigs: () => Array<{ rigId: string; name: string; hasServices?: boolean }>;
   /** Get node inventory for a rig (ADR-0002: NodeInventory projection) */
   getNodeInventory: (rigId: string) => NodeInventoryEntry[];
+  /** Get persisted startup context for a node */
+  getStartupContext: (nodeId: string) => StartupContextProbeResult;
   /** Check if a snapshot exists for a rig */
   hasSnapshot: (rigId: string) => boolean;
   /** Get the newest snapshot for exact restore planning when available */
@@ -256,6 +284,16 @@ export class RestoreCheckService {
         const readinessCheck = this.checkSeatReadiness(node);
         checks.push(readinessCheck);
         rigChecks.push(readinessCheck);
+
+        const startupContextCheck = this.checkStartupContext(node);
+        if ("unknownChecks" in startupContextCheck) {
+          return this.buildUnknown([
+            ...checks,
+            ...startupContextCheck.unknownChecks,
+          ]);
+        }
+        checks.push(startupContextCheck.check);
+        rigChecks.push(startupContextCheck.check);
 
         const transcriptCheck = this.checkTranscript(rig.name, node);
         checks.push(transcriptCheck);
@@ -695,6 +733,113 @@ export class RestoreCheckService {
     };
   }
 
+  private checkStartupContext(node: NodeInventoryEntry): { check: CheckEntry } | { unknownChecks: CheckEntry[] } {
+    const session = node.canonicalSessionName ?? node.logicalId;
+    const check = `seat.${session}.startup-context`;
+    const runningReady = node.sessionStatus === "running" && node.startupStatus === "ready";
+
+    if (!node.nodeId) {
+      return {
+        check: this.buildStartupContextAvailabilityCheck(
+          check,
+          runningReady,
+          `Startup context cannot be inspected because node id is missing for ${session}`,
+        ),
+      };
+    }
+
+    const probe = this.deps.getStartupContext(node.nodeId);
+    switch (probe.status) {
+      case "probe_error":
+        return {
+          unknownChecks: [{
+            check: "probe.error",
+            status: "red",
+            evidence: `Failed to inspect startup context for ${session}: ${probe.evidence}`,
+            remediation: "Check daemon logs with: rig daemon logs",
+            remediationSafe: true,
+          }],
+        };
+      case "missing":
+      case "malformed":
+        return {
+          check: this.buildStartupContextAvailabilityCheck(check, runningReady, probe.evidence),
+        };
+      case "ok":
+        break;
+    }
+
+    const startupContext = probe;
+    const missingRequired = startupContext.resolvedStartupFiles.filter((file) => file.required && !this.deps.exists(file.absolutePath));
+    const missingOptional = startupContext.resolvedStartupFiles.filter((file) => !file.required && !this.deps.exists(file.absolutePath));
+    const missingProjectionEntries = startupContext.projectionEntries.filter((entry) => !this.deps.exists(entry.absolutePath));
+
+    if (missingRequired.length === 0 && missingOptional.length === 0 && missingProjectionEntries.length === 0) {
+      const detailParts: string[] = [];
+      if (startupContext.resolvedStartupFiles.length > 0) {
+        detailParts.push(
+          `resolved startup files present: ${startupContext.resolvedStartupFiles.map((file) => file.absolutePath).join(", ")}`
+        );
+      }
+      if (startupContext.projectionEntries.length > 0) {
+        detailParts.push(
+          `projection source paths present: ${startupContext.projectionEntries.map((entry) => entry.absolutePath).join(", ")}`
+        );
+      }
+      if (detailParts.length === 0) {
+        detailParts.push("no persisted startup files or projection source paths declared");
+      }
+      return {
+        check: {
+          check,
+          status: "green",
+          evidence: `Startup context present for node ${node.nodeId}; ${detailParts.join("; ")}`,
+          remediation: "",
+        },
+      };
+    }
+
+    const evidenceParts: string[] = [];
+    if (missingRequired.length > 0) {
+      evidenceParts.push(`missing required startup file(s): ${missingRequired.map((file) => file.absolutePath).join(", ")}`);
+    }
+    if (missingOptional.length > 0) {
+      evidenceParts.push(`missing optional startup file(s): ${missingOptional.map((file) => file.absolutePath).join(", ")}`);
+    }
+    if (missingProjectionEntries.length > 0) {
+      evidenceParts.push(`missing projection source path(s): ${missingProjectionEntries.map((entry) => entry.absolutePath).join(", ")}`);
+    }
+
+    const status: CheckStatus = missingRequired.length > 0 && !runningReady ? "red" : "yellow";
+    return {
+      check: {
+        check,
+        status,
+        evidence: `Startup context present for node ${node.nodeId}, but replay inputs are incomplete: ${evidenceParts.join("; ")}`,
+        remediation: `Restore or recreate the missing startup inputs from the rig or agent spec before trusting replay: ${[
+          ...missingRequired.map((file) => file.absolutePath),
+          ...missingOptional.map((file) => file.absolutePath),
+          ...missingProjectionEntries.map((entry) => entry.absolutePath),
+        ].join(", ")}`,
+        remediationSafe: false,
+      },
+    };
+  }
+
+  private buildStartupContextAvailabilityCheck(
+    check: string,
+    runningReady: boolean,
+    evidence: string,
+  ): CheckEntry {
+    return {
+      check,
+      status: runningReady ? "yellow" : "red",
+      evidence,
+      remediation: "Recreate the seat startup context from the rig or agent spec before trusting replay inputs",
+      remediationSafe: false,
+    };
+  }
+
   private checkQueueFile(rigName: string, node: NodeInventoryEntry): CheckEntry {
     const session = node.canonicalSessionName ?? node.logicalId;
     const check = `seat.${session}.queue-file`;
@@ -1114,6 +1259,10 @@ export class RestoreCheckService {
         return "restore_input";
       }
       return "runtime";
+    }
+
+    if (check.check.startsWith("seat.") && check.check.endsWith(".startup-context")) {
+      return "restore_input";
     }
 
     return "other";

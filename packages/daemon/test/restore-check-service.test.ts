@@ -95,6 +95,7 @@ function claudeSettings(options?: {
 
 function claudeNode(overrides?: Partial<NodeInventoryEntry> & { cwd?: string | null }): NodeInventoryEntry {
   return {
+    nodeId: "node-1",
     rigId: "rig-1", rigName: "test-rig", logicalId: "dev.impl",
     podId: "dev", podNamespace: "dev",
     canonicalSessionName: "dev-impl@test-rig",
@@ -104,6 +105,28 @@ function claudeNode(overrides?: Partial<NodeInventoryEntry> & { cwd?: string | n
     latestError: null,
     ...overrides,
   } as NodeInventoryEntry;
+}
+
+function startupContextProbe(options?: {
+  status?: "ok" | "missing" | "malformed" | "probe_error";
+  evidence?: string;
+  resolvedStartupFiles?: Array<{ absolutePath: string; required: boolean; path?: string; deliveryHint?: string }>;
+  projectionEntries?: Array<{ absolutePath: string; effectiveId?: string; category?: string }>;
+  runtime?: string;
+}) {
+  if (options?.status && options.status !== "ok") {
+    return {
+      status: options.status,
+      evidence: options.evidence ?? "startup context unavailable",
+    };
+  }
+
+  return {
+    status: "ok",
+    runtime: options?.runtime ?? "claude-code",
+    resolvedStartupFiles: options?.resolvedStartupFiles ?? [],
+    projectionEntries: options?.projectionEntries ?? [],
+  };
 }
 
 function settingsDeps(input: {
@@ -133,11 +156,14 @@ function settingsDeps(input: {
   };
 }
 
-function mockDeps(overrides?: Partial<RestoreCheckDeps>): RestoreCheckDeps {
+function mockDeps(overrides?: Partial<RestoreCheckDeps & {
+  getStartupContext: (nodeId: string) => unknown;
+}>): RestoreCheckDeps {
   return {
     listRigs: () => [{ rigId: "rig-1", name: "test-rig" }],
     getNodeInventory: () => [
       {
+        nodeId: "node-1",
         rigId: "rig-1", rigName: "test-rig", logicalId: "dev.impl",
         podId: "dev", podNamespace: "dev",
         canonicalSessionName: "dev-impl@test-rig",
@@ -152,6 +178,7 @@ function mockDeps(overrides?: Partial<RestoreCheckDeps>): RestoreCheckDeps {
     probeDaemonHealth: () => ({ healthy: true, evidence: "Daemon running on port 7433" }),
     exists: () => true,
     readFile: () => VALID_HOST_INFRA_DECLARATION,
+    getStartupContext: () => startupContextProbe(),
     ...overrides,
   };
 }
@@ -827,6 +854,7 @@ describe("RestoreCheckService", () => {
   it("terminal/infra node transcript check is exempt without creating a caveat", () => {
     const service = new RestoreCheckService(mockDeps({
       getNodeInventory: () => [{
+        nodeId: "node-1",
         rigId: "rig-1", rigName: "test-rig", logicalId: "infra.board",
         podId: "infra", podNamespace: "infra",
         canonicalSessionName: "infra-board@test-rig",
@@ -1318,6 +1346,177 @@ describe("RestoreCheckService", () => {
     });
   });
 
+  it("running/ready node with persisted startup context and existing required files is green", () => {
+    const requiredPath = path.join(os.tmpdir(), "restore-check-startup-required-present.md");
+    const service = new RestoreCheckService(mockDeps({
+      getStartupContext: () => startupContextProbe({
+        resolvedStartupFiles: [{ absolutePath: requiredPath, required: true }],
+      }) as never,
+    }));
+
+    const result = service.check({ noQueue: true, noHooks: true }) as any;
+    const startup = result.checks.find((check: { check: string }) => check.check === "seat.dev-impl@test-rig.startup-context");
+
+    expect(startup).toEqual(expect.objectContaining({
+      status: "green",
+      remediation: "",
+    }));
+    expect(startup.evidence).toContain(requiredPath);
+    expect(result.repairPacket).toBeNull();
+  });
+
+  it("non-ready snapshot-backed node with missing startup context is blocked, not actionable", () => {
+    const service = new RestoreCheckService(mockDeps({
+      getNodeInventory: () => [claudeNode({
+        nodeId: "node-1" as never,
+        sessionStatus: "stopped",
+        startupStatus: "failed",
+        latestError: "seat crashed",
+      })],
+      getStartupContext: () => startupContextProbe({
+        status: "missing",
+        evidence: "Persisted startup context missing for node node-1",
+      }) as never,
+      getLatestSnapshot: () => ({ id: "snap-123", kind: "auto-pre-down" }),
+    }));
+
+    const result = service.check({ noQueue: true, noHooks: true }) as any;
+    const startup = result.checks.find((check: { check: string }) => check.check === "seat.dev-impl@test-rig.startup-context");
+
+    expect(startup).toEqual(expect.objectContaining({
+      status: "red",
+    }));
+    expect(startup.evidence).toContain("Persisted startup context missing");
+    expect(result.recovery).toEqual(expect.objectContaining({
+      status: "blocked",
+      actions: [],
+      blocked: [
+        expect.objectContaining({
+          scope: "rig",
+          reason: expect.stringContaining("Persisted startup context missing"),
+        }),
+      ],
+    }));
+  });
+
+  it("running/ready node with missing startup context is a yellow caveat, not a recovery block", () => {
+    const service = new RestoreCheckService(mockDeps({
+      getStartupContext: () => startupContextProbe({
+        status: "missing",
+        evidence: "Persisted startup context missing for node node-1",
+      }) as never,
+    }));
+
+    const result = service.check({ noQueue: true, noHooks: true }) as any;
+    const startup = result.checks.find((check: { check: string }) => check.check === "seat.dev-impl@test-rig.startup-context");
+
+    expect(startup).toEqual(expect.objectContaining({
+      status: "yellow",
+    }));
+    expect(startup.evidence).toContain("Persisted startup context missing");
+    expect(result.recovery).toEqual({
+      status: "not_needed",
+      summary: expect.stringContaining("no recovery action needed"),
+      actions: [],
+      blocked: [],
+      unknown: [],
+    });
+  });
+
+  it("non-ready node with missing required startup file is a red restore-input blocker", () => {
+    const requiredPath = path.join(os.tmpdir(), "restore-check-startup-required-missing.md");
+    const service = new RestoreCheckService(mockDeps({
+      getNodeInventory: () => [claudeNode({
+        sessionStatus: "stopped",
+        startupStatus: "failed",
+        latestError: "seat crashed",
+      })],
+      getStartupContext: () => startupContextProbe({
+        resolvedStartupFiles: [{ absolutePath: requiredPath, required: true }],
+      }) as never,
+      getLatestSnapshot: () => ({ id: "snap-123", kind: "auto-pre-down" }),
+      exists: (p) => p !== requiredPath,
+    }));
+
+    const result = service.check({ noQueue: true, noHooks: true }) as any;
+    const startup = result.checks.find((check: { check: string }) => check.check === "seat.dev-impl@test-rig.startup-context");
+
+    expect(startup).toEqual(expect.objectContaining({
+      status: "red",
+      remediationSafe: false,
+    }));
+    expect(startup.evidence).toContain(requiredPath);
+    expect(result.recovery).toEqual(expect.objectContaining({
+      status: "blocked",
+      actions: [],
+      blocked: [
+        expect.objectContaining({
+          scope: "rig",
+          reason: expect.stringContaining(requiredPath),
+        }),
+      ],
+    }));
+  });
+
+  it("running/ready node with missing required startup file is a yellow caveat", () => {
+    const requiredPath = path.join(os.tmpdir(), "restore-check-startup-required-ready-missing.md");
+    const service = new RestoreCheckService(mockDeps({
+      getStartupContext: () => startupContextProbe({
+        resolvedStartupFiles: [{ absolutePath: requiredPath, required: true }],
+      }) as never,
+      exists: (p) => p !== requiredPath,
+    }));
+
+    const result = service.check({ noQueue: true, noHooks: true }) as any;
+    const startup = result.checks.find((check: { check: string }) => check.check === "seat.dev-impl@test-rig.startup-context");
+
+    expect(startup).toEqual(expect.objectContaining({
+      status: "yellow",
+      remediationSafe: false,
+    }));
+    expect(startup.evidence).toContain(requiredPath);
+    expect(result.recovery.status).toBe("not_needed");
+  });
+
+  it("missing optional startup file is a yellow caveat", () => {
+    const optionalPath = path.join(os.tmpdir(), "restore-check-startup-optional-missing.md");
+    const service = new RestoreCheckService(mockDeps({
+      getStartupContext: () => startupContextProbe({
+        resolvedStartupFiles: [{ absolutePath: optionalPath, required: false }],
+      }) as never,
+      exists: (p) => p !== optionalPath,
+    }));
+
+    const result = service.check({ noQueue: true, noHooks: true }) as any;
+    const startup = result.checks.find((check: { check: string }) => check.check === "seat.dev-impl@test-rig.startup-context");
+
+    expect(startup).toEqual(expect.objectContaining({
+      status: "yellow",
+      remediationSafe: false,
+    }));
+    expect(startup.evidence).toContain(optionalPath);
+  });
+
+  it("missing projection-entry source path is a yellow caveat, not a blocker", () => {
+    const projectionPath = path.join(os.tmpdir(), "restore-check-projection-source-missing.md");
+    const service = new RestoreCheckService(mockDeps({
+      getStartupContext: () => startupContextProbe({
+        projectionEntries: [{ absolutePath: projectionPath, effectiveId: "mental-model-ha", category: "guidance" }],
+      }) as never,
+      exists: (p) => p !== projectionPath,
+    }));
+
+    const result = service.check({ noQueue: true, noHooks: true }) as any;
+    const startup = result.checks.find((check: { check: string }) => check.check === "seat.dev-impl@test-rig.startup-context");
+
+    expect(startup).toEqual(expect.objectContaining({
+      status: "yellow",
+      remediationSafe: false,
+    }));
+    expect(startup.evidence).toContain(projectionPath);
+    expect(result.recovery.status).toBe("not_needed");
+  });
+
   it("stopped rig without latest snapshot is blocked, not actionable", () => {
     const service = new RestoreCheckService(mockDeps({
       hasSnapshot: () => false,
@@ -1378,6 +1577,7 @@ describe("RestoreCheckService", () => {
   it("running infrastructure node counts ready while transcript-exempt", () => {
     const service = new RestoreCheckService(mockDeps({
       getNodeInventory: () => [{
+        nodeId: "node-1",
         rigId: "rig-1", rigName: "test-rig", logicalId: "infra.board",
         podId: "infra", podNamespace: "infra",
         canonicalSessionName: "infra-board@test-rig",
