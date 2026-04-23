@@ -83,6 +83,17 @@ function getStartupContext(db: Database.Database, nodeId: string): StartupContex
       };
     }
 
+    const startupActions = parseStartupContextJsonField<unknown[]>(row.startup_actions_json, "startup_actions_json", nodeId);
+    if (!startupActions.ok) {
+      return { status: "malformed", evidence: startupActions.evidence };
+    }
+    if (!Array.isArray(startupActions.value)) {
+      return {
+        status: "malformed",
+        evidence: `Persisted startup context field startup_actions_json is not an array for node ${nodeId}`,
+      };
+    }
+
     return {
       status: "ok",
       runtime: row.runtime,
