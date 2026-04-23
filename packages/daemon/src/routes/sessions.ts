@@ -31,11 +31,29 @@ sessionsRoutes.get("/", (c) => {
 });
 
 // GET /api/rigs/:rigId/nodes — node inventory projection
-nodesRoutes.get("/", (c) => {
+// ?refresh=true triggers a context-monitor re-sample before responding
+nodesRoutes.get("/", async (c) => {
   const rigId = c.req.param("rigId")!;
   const deps = getDeps(c);
   const rig = deps.rigRepo.getRig(rigId);
   if (!rig) return c.json({ error: `Rig "${rigId}" not found. List rigs with: rig ps` }, 404);
+
+  const refresh = c.req.query("refresh") === "true";
+  if (refresh) {
+    const monitor = c.get("contextMonitor" as never) as { pollOnce(): Promise<void> } | undefined;
+    if (monitor) {
+      try {
+        await monitor.pollOnce();
+      } catch (err) {
+        return c.json({
+          error: "Context refresh failed. Stale data may be returned.",
+          code: "context_refresh_failed",
+          detail: err instanceof Error ? err.message : String(err),
+        }, 502);
+      }
+    }
+  }
+
   const contextUsageStore = c.get("contextUsageStore" as never) as ContextUsageStore | undefined;
   const inventory = contextUsageStore
     ? getNodeInventoryWithContext(deps.rigRepo.db, rigId, contextUsageStore)
