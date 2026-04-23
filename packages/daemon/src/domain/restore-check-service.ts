@@ -73,8 +73,17 @@ export class RestoreCheckService {
   check(opts: RestoreCheckOpts): RestoreCheckResult {
     const checks: CheckEntry[] = [];
 
-    // Host-level checks
-    checks.push(this.checkDaemonReachable());
+    // Host-level checks — daemon probe throw produces unknown (not not_restorable).
+    // Daemon definitely-down (healthy=false, negative text) is red/not_restorable.
+    // Daemon probe exception (socket unavailable, etc.) is unknown.
+    const daemonCheck = this.checkDaemonReachable();
+    if (daemonCheck === null) {
+      // Probe threw — state is uninspectable
+      return this.buildUnknown([
+        { check: "daemon.reachable", status: "red", evidence: "Daemon health probe failed (unable to determine state)", remediation: "Start the daemon with: rig daemon start" },
+      ]);
+    }
+    checks.push(daemonCheck);
     checks.push(this.checkStateDirWritable());
 
     // Get rigs — probe error produces unknown, not not_restorable
@@ -131,7 +140,9 @@ export class RestoreCheckService {
     return this.buildResult(checks);
   }
 
-  private checkDaemonReachable(): CheckEntry {
+  /** Returns CheckEntry on success/definite-down; null on probe exception
+   *  (uninspectable state → caller should produce verdict: unknown). */
+  private checkDaemonReachable(): CheckEntry | null {
     try {
       const probe = this.deps.probeDaemonHealth();
       // Anchored positive match: only "Daemon running" at line start is green.
@@ -147,13 +158,8 @@ export class RestoreCheckService {
         remediation: "Start the daemon with: rig daemon start",
       };
     } catch {
-      // Probe error — cannot determine daemon state; classified separately
-      // so buildUnknown can produce verdict: unknown (not not_restorable)
-      return {
-        check: "daemon.reachable", status: "red",
-        evidence: "Daemon health probe failed (unable to determine state)",
-        remediation: "Start the daemon with: rig daemon start",
-      };
+      // Probe threw — return null to signal uninspectable state
+      return null;
     }
   }
 
