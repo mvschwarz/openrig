@@ -288,10 +288,89 @@ describe("RestoreCheckService", () => {
 
   // --- JSON shape ---
 
-  it("result has repairPacket null", () => {
+  it("restorable result has repairPacket null", () => {
     const service = new RestoreCheckService(mockDeps());
-    const result = service.check({});
+    const result = service.check({ noHooks: true });
+    expect(result.verdict).toBe("restorable");
     expect(result.repairPacket).toBeNull();
+  });
+
+  it("not_restorable result includes blocking repair steps with explicit severity", () => {
+    const service = new RestoreCheckService(mockDeps({
+      probeDaemonHealth: () => ({ healthy: false, evidence: "Daemon not running" }),
+    }));
+
+    const result = service.check({ noHooks: true });
+
+    expect(result.verdict).toBe("not_restorable");
+    expect(result.repairPacket).toEqual([
+      expect.objectContaining({
+        step: 1,
+        command: "Start the daemon with: rig daemon start",
+        rationale: "Daemon not running",
+        blocking: true,
+        safe: expect.any(Boolean),
+      }),
+    ]);
+  });
+
+  it("restorable_with_caveats result includes non-blocking repair steps with prose actions", () => {
+    const service = new RestoreCheckService(mockDeps({
+      exists: (p) => !p.includes(".log"),
+    }));
+
+    const result = service.check({ noHooks: true });
+
+    expect(result.verdict).toBe("restorable_with_caveats");
+    expect(result.repairPacket).toEqual([
+      expect.objectContaining({
+        step: 1,
+        command: "Transcript will be created on next session launch",
+        rationale: expect.stringContaining("Transcript missing"),
+        blocking: false,
+        safe: expect.any(Boolean),
+      }),
+    ]);
+  });
+
+  it("repairPacket orders blockers before caveats and keeps 1-indexed steps", () => {
+    const service = new RestoreCheckService(mockDeps({
+      probeDaemonHealth: () => ({ healthy: false, evidence: "Daemon not running" }),
+      hasSnapshot: () => false,
+    }));
+
+    const result = service.check({ noHooks: true });
+    const packet = result.repairPacket as Array<{ step: number; command: string; blocking: boolean }> | null;
+
+    expect(packet).not.toBeNull();
+    expect(packet?.map((entry) => entry.step)).toEqual([1, 2]);
+    expect(packet?.[0]).toEqual(expect.objectContaining({
+      command: "Start the daemon with: rig daemon start",
+      blocking: true,
+    }));
+    expect(packet?.[1]).toEqual(expect.objectContaining({
+      command: "Create a snapshot with: rig snapshot <rigId>",
+      blocking: false,
+    }));
+  });
+
+  it("unknown result includes restore-blocking probe repair steps without changing verdict", () => {
+    const service = new RestoreCheckService(mockDeps({
+      probeDaemonHealth: () => { throw new Error("socket unavailable"); },
+    }));
+
+    const result = service.check({});
+
+    expect(result.verdict).toBe("unknown");
+    expect(result.repairPacket).toEqual([
+      expect.objectContaining({
+        step: 1,
+        command: "Start the daemon with: rig daemon start",
+        rationale: expect.stringContaining("unable to determine state"),
+        blocking: true,
+        safe: expect.any(Boolean),
+      }),
+    ]);
   });
 
   it("every check has check/status/evidence/remediation fields", () => {
@@ -303,5 +382,95 @@ describe("RestoreCheckService", () => {
       expect(typeof check.evidence).toBe("string");
       expect(typeof check.remediation).toBe("string");
     }
+  });
+
+  // --- Slice 2: repair packet ---
+
+  it("not_restorable verdict has repairPacket with blocking:true entries for red checks", () => {
+    const service = new RestoreCheckService(mockDeps({
+      probeDaemonHealth: () => ({ healthy: false, evidence: "Daemon not running" }),
+    }));
+    const result = service.check({ noQueue: true, noHooks: true });
+
+    expect(result.verdict).toBe("not_restorable");
+    expect(result.repairPacket).not.toBeNull();
+    expect(result.repairPacket!.length).toBeGreaterThan(0);
+
+    const blocker = result.repairPacket!.find((s) => s.blocking);
+    expect(blocker).toBeDefined();
+    expect(blocker!.step).toBe(1);
+    expect(typeof blocker!.command).toBe("string");
+    expect(blocker!.command.length).toBeGreaterThan(0);
+    expect(typeof blocker!.rationale).toBe("string");
+    expect(blocker!.safe).toBe(true); // prose guidance, not destructive
+    expect(blocker!.blocking).toBe(true);
+  });
+
+  it("restorable_with_caveats has repairPacket with blocking:false entries for yellow checks", () => {
+    const service = new RestoreCheckService(mockDeps({ hasSnapshot: () => false }));
+    const result = service.check({ noQueue: true, noHooks: true });
+
+    expect(result.verdict).toBe("restorable_with_caveats");
+    expect(result.repairPacket).not.toBeNull();
+
+    const caveat = result.repairPacket!.find((s) => !s.blocking);
+    expect(caveat).toBeDefined();
+    expect(caveat!.safe).toBe(true);
+    expect(caveat!.blocking).toBe(false);
+  });
+
+  it("restorable verdict has repairPacket null (nothing to repair)", () => {
+    const service = new RestoreCheckService(mockDeps());
+    const result = service.check({ noHooks: true });
+
+    expect(result.verdict).toBe("restorable");
+    expect(result.repairPacket).toBeNull();
+  });
+
+  it("repair packet orders blockers before caveats with 1-indexed steps", () => {
+    // Red daemon + yellow missing snapshot = blocker first, caveat second
+    const service = new RestoreCheckService(mockDeps({
+      probeDaemonHealth: () => ({ healthy: false, evidence: "Daemon not running" }),
+      hasSnapshot: () => false,
+    }));
+    const result = service.check({ noQueue: true, noHooks: true });
+
+    expect(result.repairPacket).not.toBeNull();
+    const steps = result.repairPacket!;
+    expect(steps.length).toBeGreaterThanOrEqual(2);
+    // First entry should be a blocker (daemon red)
+    expect(steps[0]!.blocking).toBe(true);
+    expect(steps[0]!.step).toBe(1);
+    // Last entry should be a caveat (snapshot yellow)
+    const lastCaveat = steps.find((s) => !s.blocking);
+    expect(lastCaveat).toBeDefined();
+    // Steps are sequential
+    for (let i = 0; i < steps.length; i++) {
+      expect(steps[i]!.step).toBe(i + 1);
+    }
+  });
+
+  it("unknown verdict has repairPacket with blocking:true entries", () => {
+    const service = new RestoreCheckService(mockDeps({
+      listRigs: () => { throw new Error("database locked"); },
+    }));
+    const result = service.check({});
+
+    expect(result.verdict).toBe("unknown");
+    expect(result.repairPacket).not.toBeNull();
+    const entry = result.repairPacket![0]!;
+    expect(entry.blocking).toBe(true);
+  });
+
+  it("repair entry command contains prose remediation, not shell command prefix", () => {
+    const service = new RestoreCheckService(mockDeps({ hasSnapshot: () => false }));
+    const result = service.check({ noQueue: true, noHooks: true });
+
+    expect(result.repairPacket).not.toBeNull();
+    const snapshotStep = result.repairPacket!.find((s) => s.rationale.includes("snapshot"));
+    expect(snapshotStep).toBeDefined();
+    // Command is prose guidance, not prefixed with $ or auto-executable
+    expect(snapshotStep!.command).not.toMatch(/^\$/);
+    expect(snapshotStep!.command.length).toBeGreaterThan(0);
   });
 });
