@@ -919,6 +919,38 @@ describe("RestoreCheckService", () => {
     }
   });
 
+  it("Claude hook check is green when required hooks are split across host-global and project-local settings", () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "restore-check-hooks-merged-home-"));
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "restore-check-hooks-merged-cwd-"));
+    const hostSettingsPath = path.join(home, ".claude", "settings.json");
+    const localSettingsPath = path.join(cwd, ".claude", "settings.local.json");
+    const previousHome = process.env["HOME"];
+    process.env["HOME"] = home;
+
+    try {
+      const { deps } = settingsDeps({
+        settings: {
+          [hostSettingsPath]: claudeSettings({ userPromptSubmitCommand: null }),
+          [localSettingsPath]: claudeSettings({ sessionStartCommand: null }),
+        },
+        nodes: [claudeNode({ cwd })],
+      });
+      const service = new RestoreCheckService(deps);
+      const result = service.check({});
+      const hook = result.checks.find((c) => c.check === "seat.dev-impl@test-rig.hooks");
+
+      expect(hook?.status).toBe("green");
+      expect(hook?.evidence).toContain("configuration present, not hook-execution verified");
+      expect(hook?.evidence).toContain(hostSettingsPath);
+      expect(hook?.evidence).toContain(localSettingsPath);
+    } finally {
+      if (previousHome === undefined) delete process.env["HOME"];
+      else process.env["HOME"] = previousHome;
+      fs.rmSync(home, { recursive: true, force: true });
+      fs.rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
   it("Claude hook check is yellow when only one required hook is configured", () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "restore-check-hooks-partial-home-"));
     const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "restore-check-hooks-partial-cwd-"));
