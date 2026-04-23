@@ -70,6 +70,56 @@ describe("RestoreCheckService", () => {
     expect(daemon?.status).toBe("green");
   });
 
+  // --- Probe error → unknown (not not_restorable) ---
+
+  it("listRigs probe error produces verdict unknown (not not_restorable)", () => {
+    const service = new RestoreCheckService(mockDeps({
+      listRigs: () => { throw new Error("database locked"); },
+    }));
+    const result = service.check({});
+    expect(result.verdict).toBe("unknown");
+    const probe = result.checks.find((c) => c.check === "probe.error");
+    expect(probe?.status).toBe("red");
+    expect(probe?.evidence).toContain("database locked");
+  });
+
+  it("getNodeInventory probe error produces verdict unknown", () => {
+    const service = new RestoreCheckService(mockDeps({
+      getNodeInventory: () => { throw new Error("query timeout"); },
+    }));
+    const result = service.check({});
+    expect(result.verdict).toBe("unknown");
+  });
+
+  // --- Rig spec/root checks ---
+
+  it("missing rig root produces spec-present red", () => {
+    const service = new RestoreCheckService(mockDeps({
+      exists: (p) => !p.includes("rigs/test-rig"),
+    }));
+    const result = service.check({});
+    const spec = result.checks.find((c) => c.check === "rig.test-rig.spec-present");
+    expect(spec?.status).toBe("red");
+    expect(spec?.evidence).toContain("Rig root missing");
+  });
+
+  it("rig root exists but rig.yaml missing produces spec-present yellow", () => {
+    const service = new RestoreCheckService(mockDeps({
+      exists: (p) => !p.endsWith("rig.yaml"),
+    }));
+    const result = service.check({});
+    const spec = result.checks.find((c) => c.check === "rig.test-rig.spec-present");
+    expect(spec?.status).toBe("yellow");
+    expect(spec?.evidence).toContain("rig.yaml missing");
+  });
+
+  it("rig root + rig.yaml present produces spec-present green", () => {
+    const service = new RestoreCheckService(mockDeps());
+    const result = service.check({});
+    const spec = result.checks.find((c) => c.check === "rig.test-rig.spec-present");
+    expect(spec?.status).toBe("green");
+  });
+
   // --- Rig-level checks ---
 
   it("missing snapshot produces yellow (not red)", () => {
@@ -131,14 +181,24 @@ describe("RestoreCheckService", () => {
     expect(hookChecks).toHaveLength(0);
   });
 
-  // --- Verdict aggregation ---
-
-  it("all green produces verdict restorable", () => {
+  it("hooks without --no-hooks are honestly yellow (not false-green)", () => {
     const service = new RestoreCheckService(mockDeps());
     const result = service.check({});
+    const hookChecks = result.checks.filter((c) => c.check.includes("hooks"));
+    expect(hookChecks.length).toBeGreaterThan(0);
+    for (const hook of hookChecks) {
+      expect(hook.status).toBe("yellow");
+      expect(hook.evidence).toContain("not yet implemented");
+    }
+  });
+
+  // --- Verdict aggregation ---
+
+  it("all green produces verdict restorable (with --no-hooks to avoid yellow placeholder)", () => {
+    const service = new RestoreCheckService(mockDeps());
+    const result = service.check({ noHooks: true });
     expect(result.verdict).toBe("restorable");
     expect(result.counts.red).toBe(0);
-    expect(result.counts.yellow).toBeGreaterThanOrEqual(0);
   });
 
   it("any yellow (no red) produces verdict restorable_with_caveats", () => {
