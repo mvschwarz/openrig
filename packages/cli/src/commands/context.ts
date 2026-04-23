@@ -158,10 +158,23 @@ Examples:
   cmd
     .option("--json", "JSON output for agents")
     .option("--rig <name>", "Show one rig only")
-    .option("--threshold <pct>", "Show seats at or above this percentage", parseInt)
+    .option("--threshold <pct>", "Show seats at or above this percentage")
     .option("--refresh", "Re-sample context usage before displaying")
-    .action(async (opts: { json?: boolean; rig?: string; threshold?: number; refresh?: boolean }) => {
+    .action(async (opts: { json?: boolean; rig?: string; threshold?: string; refresh?: boolean }) => {
       const deps = getDepsF();
+
+      // Strict threshold validation — reject non-integer input
+      let threshold: number | null = null;
+      if (opts.threshold != null) {
+        const parsed = Number(opts.threshold);
+        if (!Number.isInteger(parsed) || parsed < 0 || parsed > 100) {
+          console.error("rig context: --threshold must be an integer percentage (0-100)");
+          process.exitCode = 2;
+          return;
+        }
+        threshold = parsed;
+      }
+
       const status = await getDaemonStatus(deps.lifecycleDeps);
       if (status.state !== "running" || status.healthy === false) {
         console.error("Daemon is not running. Start it with: rig daemon start");
@@ -184,26 +197,25 @@ Examples:
           return;
         }
 
-        // Refresh once globally if requested (pollOnce samples all active Claude sessions)
-        let refreshFailed = false;
+        // Refresh once globally if requested (pollOnce samples all active Claude sessions).
+        // Refresh failure is a hard error — do not silently display stale data as if refreshed.
         if (opts.refresh && targetRigs.length > 0) {
           const firstRig = targetRigs[0]!;
           try {
             const refreshResult = await client.get(`/api/rigs/${firstRig.rigId}/nodes?refresh=true`);
             if (refreshResult.status >= 400) {
-              refreshFailed = true;
-              if (!opts.json) {
-                console.error("Context refresh failed. Displaying stale data.");
-                console.error(`Detail: ${JSON.stringify(refreshResult.data)}`);
-                console.error("");
-              }
+              console.error("Context refresh failed. Data may be stale.");
+              console.error(`Detail: ${JSON.stringify(refreshResult.data)}`);
+              console.error("Fix: retry without --refresh to see stale data, or check daemon logs.");
+              process.exitCode = 2;
+              return;
             }
-          } catch {
-            refreshFailed = true;
-            if (!opts.json) {
-              console.error("Context refresh failed. Displaying stale data.");
-              console.error("");
-            }
+          } catch (refreshErr) {
+            console.error("Context refresh failed. Data may be stale.");
+            console.error(`Detail: ${refreshErr instanceof Error ? refreshErr.message : String(refreshErr)}`);
+            console.error("Fix: retry without --refresh to see stale data, or check daemon logs.");
+            process.exitCode = 2;
+            return;
           }
         }
 
@@ -219,7 +231,7 @@ Examples:
         const seats = sortSeats(
           allNodes
             .map(analyze)
-            .filter((s) => isVisible(s, opts.threshold ?? null))
+            .filter((s) => isVisible(s, threshold))
         );
 
         const summary = {
@@ -233,12 +245,7 @@ Examples:
         };
 
         if (opts.json) {
-          const output: Record<string, unknown> = { seats, summary };
-          if (refreshFailed) {
-            output.refreshFailed = true;
-            output.refreshError = "Context refresh failed. Data may be stale.";
-          }
-          console.log(JSON.stringify(output, null, 2));
+          console.log(JSON.stringify({ seats, summary }, null, 2));
           return;
         }
 
