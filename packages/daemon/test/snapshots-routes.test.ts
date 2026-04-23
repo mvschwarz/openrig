@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -8,7 +8,7 @@ import type { RigRepository } from "../src/domain/rig-repository.js";
 import type { SessionRegistry } from "../src/domain/session-registry.js";
 import type { SnapshotCapture } from "../src/domain/snapshot-capture.js";
 import type { SnapshotRepository } from "../src/domain/snapshot-repository.js";
-import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
+import { createFullTestDb, createTestApp, mockTmuxAdapter } from "./helpers/test-app.js";
 import { createDaemon } from "../src/startup.js";
 import type { ExecFn } from "../src/adapters/tmux.js";
 
@@ -208,17 +208,24 @@ describe("Restore routes", () => {
     expect(res.status).toBe(500);
   });
 
-  it("POST running rig restore -> 409", async () => {
-    const rig = rigRepo.createRig("r99");
-    const node = rigRepo.addNode(rig.id, "worker", { role: "worker", runtime: "claude-code" });
-    const session = sessionRegistry.registerSession(node.id, "r99-worker");
-    sessionRegistry.updateStatus(session.id, "running");
-    const snap = snapshotCapture.captureSnapshot(rig.id, "manual");
+  it("POST running rig restore with live tmux sessions -> 409", async () => {
+    // Use a custom app with hasSession=true to simulate genuinely live tmux
+    const db2 = createFullTestDb();
+    const tmux = mockTmuxAdapter();
+    (tmux.hasSession as ReturnType<typeof vi.fn>).mockResolvedValue(true);
+    const setup = createTestApp(db2, { tmux });
 
-    const res = await app.request(`/api/rigs/${rig.id}/restore/${snap.id}`, { method: "POST" });
+    const rig = setup.rigRepo.createRig("r99");
+    const node = setup.rigRepo.addNode(rig.id, "worker", { role: "worker", runtime: "claude-code" });
+    const session = setup.sessionRegistry.registerSession(node.id, "r99-worker");
+    setup.sessionRegistry.updateStatus(session.id, "running");
+    const snap = setup.snapshotCapture.captureSnapshot(rig.id, "manual");
+
+    const res = await setup.app.request(`/api/rigs/${rig.id}/restore/${snap.id}`, { method: "POST" });
     expect(res.status).toBe(409);
     const body = await res.json();
     expect(body.code).toBe("rig_not_stopped");
+    db2.close();
   });
 
   it("restore response includes nodes array with status per node", async () => {

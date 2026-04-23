@@ -229,19 +229,106 @@ describe("RestoreOrchestrator", () => {
     if (!result.ok) expect(result.code).toBe("snapshot_not_found");
   });
 
-  it("running rig -> { ok: false, code: 'rig_not_stopped' }", async () => {
+  it("running rig with live tmux sessions -> { ok: false, code: 'rig_not_stopped' }", async () => {
     const rig = rigRepo.createRig("r99");
     const node = rigRepo.addNode(rig.id, "worker", { role: "worker", runtime: "claude-code" });
     const session = sessionRegistry.registerSession(node.id, "r99-worker");
     sessionRegistry.updateStatus(session.id, "running");
     const snap = snapshotCapture.captureSnapshot(rig.id, "manual");
 
-    const orch = createOrchestrator();
+    // tmux session IS alive — restore should block
+    const tmux = { ...mockTmux(), hasSession: vi.fn(async () => true) } as unknown as TmuxAdapter;
+    const orch = createOrchestrator({ tmux });
     const result = await orch.restore(snap.id);
 
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.code).toBe("rig_not_stopped");
     expect(snapshotRepo.listSnapshots(rig.id)).toHaveLength(1);
+  });
+
+  // --- Scenario A: stale DB sessions after tmux crash ---
+
+  it("restores successfully when DB shows sessions running but tmux sessions are dead (post-crash)", async () => {
+    // After a tmux crash, DB sessions are still status='running' but tmux
+    // has no matching sessions. Restore should reconcile stale state and
+    // proceed, not refuse with 'rig_not_stopped'.
+    const rig = rigRepo.createRig("crash-rig");
+    const node1 = rigRepo.addNode(rig.id, "dev.impl", { role: "worker", runtime: "claude-code" });
+    const node2 = rigRepo.addNode(rig.id, "dev.qa", { role: "worker", runtime: "codex" });
+    const sess1 = sessionRegistry.registerSession(node1.id, "dev-impl@crash-rig");
+    const sess2 = sessionRegistry.registerSession(node2.id, "dev-qa@crash-rig");
+    sessionRegistry.updateStatus(sess1.id, "running");
+    sessionRegistry.updateStatus(sess2.id, "running");
+    const snap = snapshotCapture.captureSnapshot(rig.id, "pre-crash");
+
+    // Simulate post-crash: tmux sessions are gone
+    const tmux = { ...mockTmux(), hasSession: vi.fn(async () => false) } as unknown as TmuxAdapter;
+    const orch = createOrchestrator({ tmux });
+
+    const result = await orch.restore(snap.id);
+
+    // Should proceed with restore, not refuse
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.result.nodes).toHaveLength(2);
+      const ids = result.result.nodes.map((n) => n.logicalId).sort();
+      expect(ids).toEqual(["dev.impl", "dev.qa"]);
+    }
+  });
+
+  it("still blocks restore when tmux sessions are genuinely alive (inverse invariant)", async () => {
+    const rig = rigRepo.createRig("live-rig");
+    const node = rigRepo.addNode(rig.id, "worker", { role: "worker", runtime: "claude-code" });
+    const sess = sessionRegistry.registerSession(node.id, "worker@live-rig");
+    sessionRegistry.updateStatus(sess.id, "running");
+    const snap = snapshotCapture.captureSnapshot(rig.id, "manual");
+
+    // tmux session IS alive
+    const tmux = { ...mockTmux(), hasSession: vi.fn(async () => true) } as unknown as TmuxAdapter;
+    const orch = createOrchestrator({ tmux });
+
+    const result = await orch.restore(snap.id);
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.code).toBe("rig_not_stopped");
+  });
+
+  // --- Scenario B: partial failure doesn't drop pods ---
+
+  it("partial node launch failure includes all snapshot nodes in result (no silent pod drops)", async () => {
+    const snap = seedRigAndSnapshot({
+      nodes: [
+        { logicalId: "orch.lead", role: "orch", runtime: "claude-code" },
+        { logicalId: "dev.impl", role: "impl", runtime: "claude-code" },
+        { logicalId: "dev.qa", role: "qa", runtime: "codex" },
+        { logicalId: "rev.r1", role: "reviewer", runtime: "claude-code" },
+      ],
+      edges: [
+        { sourceLogical: "orch.lead", targetLogical: "dev.impl", kind: "delegates_to" },
+        { sourceLogical: "orch.lead", targetLogical: "rev.r1", kind: "delegates_to" },
+      ],
+    });
+
+    // Make createSession fail for one specific node
+    const tmux = mockTmux();
+    (tmux.createSession as ReturnType<typeof vi.fn>).mockImplementation(async (name: string) => {
+      if (name.includes("dev_qa")) return { ok: false as const, message: "tmux error" };
+      return { ok: true as const };
+    });
+    const orch = createOrchestrator({ tmux });
+
+    const result = await orch.restore(snap.id);
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      const logicalIds = new Set(result.result.nodes.map((n) => n.logicalId));
+      // ALL 4 snapshot nodes present in result — none silently dropped
+      expect(logicalIds).toEqual(new Set(["orch.lead", "dev.impl", "dev.qa", "rev.r1"]));
+      // The failed node should be reported as failed, not absent
+      const qaResult = result.result.nodes.find((n) => n.logicalId === "dev.qa");
+      expect(qaResult).toBeDefined();
+      expect(qaResult!.status).toBe("failed");
+    }
   });
 
   it("topological order: delegates_to (exact order)", async () => {
