@@ -83,7 +83,7 @@ Exit codes:
             step: 1,
             command: "Start the daemon with: rig daemon start",
             rationale: "Daemon is not running",
-            safe: true,
+            safe: false,  // mutating: starts a daemon process
             blocking: true,
           }],
         };
