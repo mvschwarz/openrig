@@ -333,6 +333,55 @@ describe("TranscriptStore", () => {
       expect(result).toContain("We were discussing the gpt-5.4 xhigh fast footer format yesterday.");
     });
 
+    it("drops startup splash/header lines from Claude Code and Codex sessions", () => {
+      const store = new TranscriptStore({ transcriptsRoot: tmpDir });
+      store.ensureTranscriptDir("my-rig");
+      const filePath = store.getTranscriptPath("my-rig", "dev@my-rig");
+      writeFileSync(
+        filePath,
+        [
+          "Claude Code v2.1.101",
+          "Opus 4.6 (Claude Max)",
+          "╭───────────────────────────────────────╮",
+          "│ >_ OpenAI Codex (v0.120.0)            │",
+          "│                                       │",
+          "│ model:     gpt-5.4   /model to change │",
+          "│ directory: ~/code/openrig             │",
+          "╰───────────────────────────────────────╯",
+          "real semantic transcript content should survive",
+          "and this line too",
+        ].join("\n") + "\n",
+      );
+
+      const result = store.readTail("my-rig", "dev@my-rig", 20);
+
+      expect(result).toContain("real semantic transcript content should survive");
+      expect(result).toContain("and this line too");
+      expect(result).not.toContain("Claude Code v2.1.101");
+      expect(result).not.toContain("Opus 4.6");
+      expect(result).not.toContain("OpenAI Codex");
+    });
+
+    it("preserves legitimate sentences that mention startup splash strings", () => {
+      const store = new TranscriptStore({ transcriptsRoot: tmpDir });
+      store.ensureTranscriptDir("my-rig");
+      const filePath = store.getTranscriptPath("my-rig", "dev@my-rig");
+      writeFileSync(
+        filePath,
+        [
+          "I was running Claude Code v2.1.101 when the bug appeared.",
+          "The Opus 4.6 model performed well on the benchmark.",
+          "We tested against OpenAI Codex (v0.120.0) for comparison.",
+        ].join("\n") + "\n",
+      );
+
+      const result = store.readTail("my-rig", "dev@my-rig", 20);
+
+      expect(result).toContain("I was running Claude Code v2.1.101 when the bug appeared.");
+      expect(result).toContain("The Opus 4.6 model performed well on the benchmark.");
+      expect(result).toContain("We tested against OpenAI Codex (v0.120.0) for comparison.");
+    });
+
     it("preserves literal cursor-fragment tokens when they are mentioned as data", () => {
       const store = new TranscriptStore({ transcriptsRoot: tmpDir });
       store.ensureTranscriptDir("my-rig");
