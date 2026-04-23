@@ -26,6 +26,30 @@ const VALID_HOST_INFRA_DECLARATION = JSON.stringify({
   ],
 });
 
+function v2HostInfraDeclaration(overrides?: {
+  daemonEvidencePaths?: string[];
+  supportingInfraEvidencePaths?: string[];
+}): string {
+  return JSON.stringify({
+    schemaVersion: 2,
+    daemonBootstrap: {
+      declared: true,
+      mechanism: "launchd",
+      evidence: "com.openrig.daemon",
+      evidencePaths: overrides?.daemonEvidencePaths ?? ["${OPENRIG_HOME}/daemon/launchd.plist"],
+    },
+    supportingInfra: [
+      {
+        id: "supervisor-wake",
+        declared: true,
+        required: true,
+        evidence: "kernel rig infra seat or host launch agent",
+        evidencePaths: overrides?.supportingInfraEvidencePaths ?? ["${OPENRIG_HOME}/supervisor-wake/README.md"],
+      },
+    ],
+  });
+}
+
 describe("Restore check routes", () => {
   let db: Database.Database;
   let app: Hono;
@@ -204,6 +228,56 @@ describe("Restore check routes", () => {
       status: "declared",
       evidence: expect.stringContaining("declared, not verified"),
     }));
+  });
+
+  it("GET /api/restore-check surfaces schemaVersion 2 evidence paths present", async () => {
+    const daemonPath = path.join(openRigHome, "daemon", "launchd.plist");
+    const supportPath = path.join(openRigHome, "supervisor-wake", "README.md");
+    fs.mkdirSync(path.dirname(daemonPath), { recursive: true });
+    fs.mkdirSync(path.dirname(supportPath), { recursive: true });
+    fs.writeFileSync(path.join(openRigHome, "host-infra.json"), v2HostInfraDeclaration());
+    fs.writeFileSync(daemonPath, "daemon evidence");
+    fs.writeFileSync(supportPath, "support evidence");
+    rigRepo.createRig("declared-rig");
+
+    const res = await app.request("/api/restore-check?rig=declared-rig");
+    expect(res.status).toBe(200);
+
+    const body = await res.json();
+    const check = body.checks.find((entry: { check: string }) => entry.check === "host.bootstrap-autostart.declaration");
+    expect(check).toEqual(expect.objectContaining({
+      status: "green",
+    }));
+    expect(check.evidence).toContain("declared, evidence paths present, not autostart verified");
+    expect(check.evidence).toContain(daemonPath);
+    expect(check.evidence).toContain(supportPath);
+    expect(body.hostInfra).toEqual(expect.objectContaining({
+      status: "declared",
+      evidence: expect.stringContaining("not autostart verified"),
+    }));
+  });
+
+  it("GET /api/restore-check surfaces schemaVersion 2 missing evidence path as caveat", async () => {
+    const daemonPath = path.join(openRigHome, "daemon", "launchd.plist");
+    const supportPath = path.join(openRigHome, "supervisor-wake", "README.md");
+    fs.mkdirSync(path.dirname(daemonPath), { recursive: true });
+    fs.writeFileSync(path.join(openRigHome, "host-infra.json"), v2HostInfraDeclaration());
+    fs.writeFileSync(daemonPath, "daemon evidence");
+    rigRepo.createRig("declared-rig");
+
+    const res = await app.request("/api/restore-check?rig=declared-rig&noQueue=true&noHooks=true");
+    expect(res.status).toBe(200);
+
+    const body = await res.json();
+    const check = body.checks.find((entry: { check: string }) => entry.check === "host.bootstrap-autostart.declaration");
+    expect(check).toEqual(expect.objectContaining({
+      status: "yellow",
+    }));
+    expect(check.evidence).toContain(supportPath);
+    expect(body.hostInfra.status).toBe("declared");
+    expect(body.repairPacket.some((step: { command: string; safe: boolean; blocking: boolean }) => (
+      step.command.includes(supportPath) && step.safe === false && step.blocking === false
+    ))).toBe(true);
   });
 
   it("GET /api/restore-check?rig=nonexistent preserves missing host-infra state", async () => {

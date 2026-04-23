@@ -162,6 +162,66 @@ describe("rig restore-check", () => {
     expect(output).toContain("mechanism=launchd");
   });
 
+  it("JSON output preserves host-infra evidence-path presence copy", async () => {
+    const { deps } = makeDeps({
+      result: {
+        hostInfra: {
+          status: "declared",
+          evidence: "Host infra declaration at /tmp/openrig/host-infra.json declared, evidence paths present, not autostart verified; daemonBootstrap mechanism=launchd; requiredSupportingInfra=1; evidencePaths=/tmp/openrig/daemon/launchd.plist,/tmp/openrig/supervisor-wake/README.md",
+        },
+        checks: [
+          { check: "host.bootstrap-autostart.declaration", status: "green", evidence: "declared, evidence paths present, not autostart verified", remediation: "" },
+        ],
+      },
+    });
+    const cmd = restoreCheckCommand(deps);
+    await cmd.parseAsync(["node", "rig", "--json"]);
+
+    const json = JSON.parse(logs.join(""));
+    expect(json.hostInfra.status).toBe("declared");
+    expect(json.hostInfra.evidence).toContain("evidence paths present");
+    expect(json.hostInfra.evidence).toContain("not autostart verified");
+    expect(json.checks[0].evidence).toContain("not autostart verified");
+  });
+
+  it("human output preserves missing host-infra evidence-path repair guidance", async () => {
+    const missingPath = "/tmp/openrig/supervisor-wake/README.md";
+    const { deps } = makeDeps({
+      result: {
+        verdict: "restorable_with_caveats",
+        fullyBack: false,
+        assertion: {
+          level: "host",
+          status: "not_fully_back",
+          reason: "caveats_present",
+          blockingRigCount: 0,
+          caveatRigCount: 0,
+          unknownRigCount: 0,
+        },
+        hostInfra: {
+          status: "declared",
+          evidence: `Host infra declaration at /tmp/openrig/host-infra.json declared with insufficient evidence paths; missing ${missingPath}`,
+        },
+        counts: { red: 0, yellow: 1, green: 4 },
+        checks: [
+          { check: "host.bootstrap-autostart.declaration", status: "yellow", evidence: `Missing required evidence path: ${missingPath}`, remediation: `Add or repair host infra evidence path: ${missingPath}` },
+        ],
+        repairPacket: [
+          { step: 1, command: `Add or repair host infra evidence path: ${missingPath}`, rationale: `Missing required evidence path: ${missingPath}`, safe: false, blocking: false },
+        ],
+      },
+    });
+    const cmd = restoreCheckCommand(deps);
+    await cmd.parseAsync(["node", "rig"]);
+
+    const output = logs.join("\n");
+    expect(output).toContain("RESTORABLE WITH CAVEATS");
+    expect(output).toContain(missingPath);
+    expect(output).toContain("Repair steps: 1");
+    expect(output).toContain("0 blocking");
+    expect(output).toContain("1 caveats");
+  });
+
   it("exit 0 for restorable verdict", async () => {
     const { deps } = makeDeps({ result: { verdict: "restorable" } });
     const cmd = restoreCheckCommand(deps);
