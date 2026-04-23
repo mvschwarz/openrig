@@ -110,8 +110,14 @@ export class RestoreOrchestrator {
       return { ok: false, code: "rig_not_found", message: `Rig ${rigId} not found` };
     }
 
+    // Reconcile stale session state before checking — after a tmux crash, DB
+    // sessions may still show 'running' even though tmux is dead. Verify each
+    // DB-running session against tmux reality; mark dead sessions as detached
+    // so restore can proceed. Sessions that ARE genuinely alive still block.
+    await this.reconcileStaleRunningSessions(rigId);
+
     if (this.hasRunningSessions(rigId)) {
-      return { ok: false, code: "rig_not_stopped", message: `Rig ${rigId} must be stopped before restore` };
+      return { ok: false, code: "rig_not_stopped", message: `Rig ${rigId} has live sessions. Stop the rig with 'rig down' before restoring, or use the latest auto-pre-down snapshot.` };
     }
 
     // Per-rig concurrency lock
@@ -178,6 +184,22 @@ export class RestoreOrchestrator {
       .filter((s) => s.nodeId === nodeId && s.status !== "superseded" && s.status !== "exited")
       .map((s) => ({ id: s.id, status: s.status }));
     return { binding, sessions };
+  }
+
+  private async reconcileStaleRunningSessions(rigId: string): Promise<void> {
+    const sessions = this.sessionRegistry.getSessionsForRig(rigId);
+    for (const session of sessions) {
+      if (session.status !== "running") continue;
+      try {
+        const alive = await this.tmuxAdapter.hasSession(session.sessionName);
+        if (!alive) {
+          this.sessionRegistry.markDetached(session.id);
+        }
+      } catch {
+        // tmux check failed — fail closed: leave status as-is so
+        // hasRunningSessions still blocks (honest about uncertainty)
+      }
+    }
   }
 
   private hasRunningSessions(rigId: string): boolean {
