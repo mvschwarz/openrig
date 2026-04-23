@@ -346,8 +346,9 @@ describe("RestoreOrchestrator", () => {
     const snap = snapshotCapture.captureSnapshot(rig.id, "manual");
     const snapshotCountBefore = snapshotRepo.listSnapshots(rig.id).length;
 
-    // tmux check throws (e.g., tmux not running, network error)
-    const tmux = { ...mockTmux(), hasSession: vi.fn(async () => { throw new Error("tmux server not running"); }) } as unknown as TmuxAdapter;
+    // tmux check throws unexpected error (permission denied / socket failure)
+    // — NOT a known-absence error, so hasSession rethrows instead of returning false
+    const tmux = { ...mockTmux(), hasSession: vi.fn(async () => { throw new Error("error connecting to /tmp/tmux-501/default (Permission denied)"); }) } as unknown as TmuxAdapter;
     const orch = createOrchestrator({ tmux });
 
     const result = await orch.restore(snap.id);

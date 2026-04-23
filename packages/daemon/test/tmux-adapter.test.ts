@@ -159,22 +159,41 @@ describe("TmuxAdapter", () => {
 
   describe("hasSession", () => {
     it("returns true when tmux has-session exits 0", async () => {
-      // `tmux has-session -t <name>` exits 0 when session exists
       const adapter = new TmuxAdapter(mockExec({ "has-session": { stdout: "" } }));
       expect(await adapter.hasSession("target-session")).toBe(true);
     });
 
-    it("returns false when tmux has-session exits non-zero", async () => {
-      // `tmux has-session` throws (non-zero exit) when session doesn't exist
+    it("returns false when session not found", async () => {
       const adapter = new TmuxAdapter(mockExec({
         "has-session": { error: new Error("session not found: missing-session") },
       }));
       expect(await adapter.hasSession("missing-session")).toBe(false);
     });
 
+    it("returns false when can't find session", async () => {
+      const adapter = new TmuxAdapter(mockExec({
+        "has-session": { error: new Error("can't find session: old-session") },
+      }));
+      expect(await adapter.hasSession("old-session")).toBe(false);
+    });
+
     it("returns false on 'no server running' error", async () => {
       const adapter = new TmuxAdapter(mockExec({ "has-session": { error: NO_SERVER_ERROR } }));
       expect(await adapter.hasSession("any-session")).toBe(false);
+    });
+
+    it("throws on unexpected probe error (permission denied / socket failure)", async () => {
+      const adapter = new TmuxAdapter(mockExec({
+        "has-session": { error: new Error("error connecting to /tmp/tmux-501/default (Permission denied)") },
+      }));
+      await expect(adapter.hasSession("any-session")).rejects.toThrow("Permission denied");
+    });
+
+    it("throws on generic unrecognized exec error", async () => {
+      const adapter = new TmuxAdapter(mockExec({
+        "has-session": { error: new Error("Command failed with exit code 127") },
+      }));
+      await expect(adapter.hasSession("any-session")).rejects.toThrow("exit code 127");
     });
   });
 
