@@ -69,6 +69,19 @@ function stripOrphanCursorFragments(line: string): string {
   return line.replace(/\[\d{1,3}[A-Za-z](?=\S)/g, " ");
 }
 
+function isStartupSplashLine(line: string): boolean {
+  // Strip box-drawing wrappers from Codex-style banners before matching
+  const stripped = line.replace(/[│╭╰╮╯─━]/g, "").trim();
+  if (!stripped) return false;
+  // Claude Code version header: "Claude Code v2.1.101"
+  if (/^Claude Code v[\d.]+/.test(stripped)) return true;
+  // Claude model/plan line: "Opus 4.6 (Claude Max)", "Sonnet 4.6 (1M context)"
+  if (/^(?:Opus|Sonnet|Haiku) \d[\d.]+ /.test(stripped)) return true;
+  // Codex version header: "OpenAI Codex (v0.120.0)", ">_ OpenAI Codex (v0.120.0)"
+  if (/^>?_?\s*(?:OpenAI )?Codex\b.*v[\d.]+/.test(stripped)) return true;
+  return false;
+}
+
 function isStatusOverlayLine(line: string): boolean {
   const trimmed = line.trim();
   if (!trimmed) return false;
@@ -248,6 +261,7 @@ export class TranscriptStore {
       .filter((line) => line.trim() !== "")
       .filter((line) => !isBareShellPrompt(line));
     return filtered
+      .filter((line) => !isStartupSplashLine(line))
       .filter((line) => !isStatusOverlayLine(line))
       .filter((line) => !isUiChromeLine(line))
       .filter((line) => !isSpinnerOnlyLine(line))
