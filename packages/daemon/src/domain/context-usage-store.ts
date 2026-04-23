@@ -4,7 +4,7 @@ import { readFileSync, existsSync } from "node:fs";
 import type { ContextUsage, ContextUnknownReason } from "./types.js";
 
 /** Freshness threshold: samples older than this are considered stale for compact displays. */
-export const FRESHNESS_THRESHOLD_MS = 120_000; // 2 minutes
+export const FRESHNESS_THRESHOLD_MS = 600_000; // 10 minutes per PM spec
 
 export interface ContextUsageStoreOpts {
   stateDir: string;

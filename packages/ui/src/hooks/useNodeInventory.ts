@@ -15,6 +15,14 @@ export interface NodeInventoryEntry {
   tmuxAttachCommand: string | null;
   resumeCommand: string | null;
   latestError: string | null;
+  contextUsage?: {
+    usedPercentage: number | null;
+    remainingPercentage: number | null;
+    contextWindowSize: number | null;
+    availability: string | null;
+    sampledAt: string | null;
+    fresh: boolean;
+  };
 }
 
 async function fetchNodeInventory(rigId: string): Promise<NodeInventoryEntry[]> {

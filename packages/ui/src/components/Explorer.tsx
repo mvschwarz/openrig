@@ -165,9 +165,23 @@ function PodBranch({
                   testId={`node-icon-${node.logicalId}`}
                 />
                 <span className="font-mono text-[10px] text-stone-700 truncate">{memberName}</span>
-                <span className="ml-auto shrink-0 font-mono text-[8px] uppercase text-stone-400">
-                  {node.nodeKind === "infrastructure" ? "INFRA" : (node.runtime ?? "").replace("claude-code", "claude")}
-                </span>
+                {node.contextUsage?.availability === "known" && typeof node.contextUsage.usedPercentage === "number" ? (
+                  <span
+                    className={`ml-auto shrink-0 font-mono text-[10px] font-bold ${
+                      node.contextUsage.usedPercentage >= 80 ? "text-red-600" :
+                      node.contextUsage.usedPercentage >= 60 ? "text-amber-600" :
+                      "text-green-700"
+                    }${!node.contextUsage.fresh ? " opacity-50" : ""}`}
+                    data-testid={`context-indicator-${node.logicalId}`}
+                    title={node.contextUsage.fresh ? `${node.contextUsage.usedPercentage}% context (fresh)` : `${node.contextUsage.usedPercentage}% context (stale)`}
+                  >
+                    {node.contextUsage.usedPercentage}%
+                  </span>
+                ) : (
+                  <span className="ml-auto shrink-0 font-mono text-[8px] uppercase text-stone-400">
+                    {node.nodeKind === "infrastructure" ? "INFRA" : (node.runtime ?? "").replace("claude-code", "claude")}
+                  </span>
+                )}
               </button>
             );
           })}

@@ -194,14 +194,22 @@ export function RigNode({ data }: { data: RigNodeData }) {
           </div>
         )}
 
-        {/* Context usage badge */}
-        {data.contextAvailability === "known" && data.contextFresh && typeof data.contextUsedPercentage === "number" ? (
-          <div className="font-mono text-[8px] text-stone-500" data-testid="context-badge">
-            CTX {data.contextUsedPercentage}%
+        {/* Context usage — prominent big number per founder directive */}
+        {data.contextAvailability === "known" && typeof data.contextUsedPercentage === "number" ? (
+          <div
+            className={`font-mono text-base font-bold leading-tight ${
+              data.contextUsedPercentage >= 80 ? "text-red-600" :
+              data.contextUsedPercentage >= 60 ? "text-amber-600" :
+              "text-green-700"
+            }${!data.contextFresh ? " opacity-50" : ""}`}
+            data-testid="context-badge"
+            title={data.contextFresh ? "Context usage (fresh)" : "Context usage (stale sample)"}
+          >
+            {data.contextUsedPercentage}%
           </div>
         ) : (
-          <div className="font-mono text-[8px] text-stone-300" data-testid="context-badge-unknown">
-            CTX unknown
+          <div className="font-mono text-xs text-stone-400" data-testid="context-badge-unknown">
+            ?
           </div>
         )}
 

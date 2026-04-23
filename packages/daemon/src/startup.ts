@@ -399,11 +399,13 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     }
   } catch { /* best-effort — reference docs are not critical to daemon operation */ }
 
-  const app = createApp(deps);
-
-  // Context monitor — caller (index.ts) starts polling after listen
+  // Context monitor — constructed before createApp so routes can access pollOnce for refresh.
+  // Caller (index.ts) starts polling after listen.
   const { ContextMonitor } = await import("./domain/context-monitor.js");
   const contextMonitor = new ContextMonitor(db, contextUsageStore, claudeAdapter);
+  deps.contextMonitor = contextMonitor;
+
+  const app = createApp(deps);
 
   return { app, db, deps, contextMonitor };
 }

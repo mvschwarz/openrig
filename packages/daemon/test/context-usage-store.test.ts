@@ -174,7 +174,7 @@ describe("ContextUsageStore", () => {
   // T9: Freshness threshold is centralized
   it("FRESHNESS_THRESHOLD_MS is exported and used consistently", () => {
     expect(typeof FRESHNESS_THRESHOLD_MS).toBe("number");
-    expect(FRESHNESS_THRESHOLD_MS).toBe(120_000);
+    expect(FRESHNESS_THRESHOLD_MS).toBe(600_000);
   });
 
   // T10: context_usage row cascades on node delete
