@@ -4,6 +4,31 @@ import { restoreCheckCommand, type RestoreCheckDeps } from "../src/commands/rest
 function makeResult(overrides?: Record<string, unknown>) {
   return {
     verdict: "restorable",
+    fullyBack: true,
+    assertion: {
+      level: "host",
+      status: "fully_back",
+      reason: "observable_rigs_fully_back",
+      blockingRigCount: 0,
+      caveatRigCount: 0,
+      unknownRigCount: 0,
+    },
+    rigs: [{
+      rigId: "rig-1",
+      rigName: "test-rig",
+      status: "fully_back",
+      verdict: "restorable",
+      expectedNodes: 1,
+      runningReadyNodes: 1,
+      blockedNodes: 0,
+      caveatNodes: 0,
+      blockingChecks: [],
+      caveatChecks: [],
+    }],
+    hostInfra: {
+      status: "not_inspected",
+      evidence: "No host bootstrap/autostart source inspected by v0",
+    },
     counts: { red: 0, yellow: 1, green: 5 },
     checks: [
       { check: "daemon.reachable", status: "green", evidence: "Daemon running on port 7433", remediation: "" },
@@ -64,6 +89,10 @@ describe("rig restore-check", () => {
 
     const json = JSON.parse(logs.join(""));
     expect(json.verdict).toBe("restorable");
+    expect(json.fullyBack).toBe(true);
+    expect(json.assertion.status).toBe("fully_back");
+    expect(json.rigs).toBeInstanceOf(Array);
+    expect(json.hostInfra.status).toBe("not_inspected");
     expect(json.counts).toBeDefined();
     expect(json.checks).toBeInstanceOf(Array);
     expect(json.repairPacket).toBeNull();
@@ -81,6 +110,10 @@ describe("rig restore-check", () => {
     const output = logs.join("\n");
     expect(output).toContain("RESTORE CHECK");
     expect(output).toContain("RESTORABLE WITH CAVEATS");
+    expect(output).toContain("FULLY BACK:");
+    expect(output).toContain("Per-rig summary");
+    expect(output).toContain("test-rig");
+    expect(output).toContain("Host bootstrap/autostart");
     expect(output).toContain("daemon.reachable");
   });
 
@@ -175,6 +208,10 @@ describe("rig restore-check", () => {
 
     const json = JSON.parse(logs.join(""));
     expect(json.verdict).toBe("not_restorable");
+    expect(json.fullyBack).toBe(false);
+    expect(json.assertion.status).toBe("not_fully_back");
+    expect(json.rigs).toEqual([]);
+    expect(json.hostInfra.status).toBe("unknown");
     expect(json.checks[0].check).toBe("daemon.reachable");
     expect(json.checks[0].status).toBe("red");
     // Daemon-down local result includes repairPacket with blocking step
@@ -184,5 +221,26 @@ describe("rig restore-check", () => {
     expect(process.exitCode).toBe(1);
     // Should NOT have called the daemon
     expect(requestedPaths).toHaveLength(0);
+  });
+
+  it("daemon 500 local fallback includes fully-back assertion shape", async () => {
+    const { deps } = makeDeps({ serverError: true });
+    const cmd = restoreCheckCommand(deps);
+    await cmd.parseAsync(["node", "rig", "--json"]);
+
+    const json = JSON.parse(logs.join(""));
+    expect(json.verdict).toBe("unknown");
+    expect(json.fullyBack).toBe(false);
+    expect(json.assertion).toEqual(expect.objectContaining({
+      level: "host",
+      status: "unknown",
+      reason: "unknown_probe_state",
+    }));
+    expect(json.rigs).toEqual([]);
+    expect(json.hostInfra.status).toBe("unknown");
+    expect(json.repairPacket[0]).toEqual(expect.objectContaining({
+      blocking: true,
+      safe: true,
+    }));
   });
 });

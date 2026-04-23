@@ -6,6 +6,8 @@ import { getCompatibleOpenRigPath } from "../openrig-compat.js";
 
 export type CheckStatus = "green" | "yellow" | "red";
 export type Verdict = "restorable" | "restorable_with_caveats" | "not_restorable" | "unknown";
+export type FullyBackStatus = "fully_back" | "not_fully_back" | "unknown";
+export type HostInfraStatus = "not_inspected" | "not_declared" | "unknown";
 
 export interface CheckEntry {
   check: string;
@@ -28,8 +30,39 @@ export interface RepairStep {
   blocking: boolean;
 }
 
+export interface RestoreAssertion {
+  level: "host";
+  status: FullyBackStatus;
+  reason: string;
+  blockingRigCount: number;
+  caveatRigCount: number;
+  unknownRigCount: number;
+}
+
+export interface RigRestoreRollup {
+  rigId: string;
+  rigName: string;
+  status: FullyBackStatus;
+  verdict: Verdict;
+  expectedNodes: number;
+  runningReadyNodes: number;
+  blockedNodes: number;
+  caveatNodes: number;
+  blockingChecks: CheckEntry[];
+  caveatChecks: CheckEntry[];
+}
+
+export interface HostInfraAssertion {
+  status: HostInfraStatus;
+  evidence: string;
+}
+
 export interface RestoreCheckResult {
   verdict: Verdict;
+  fullyBack: boolean;
+  assertion: RestoreAssertion;
+  rigs: RigRestoreRollup[];
+  hostInfra: HostInfraAssertion;
   counts: { red: number; yellow: number; green: number };
   checks: CheckEntry[];
   repairPacket: RepairStep[] | null;
@@ -73,6 +106,12 @@ export interface RestoreCheckDeps {
   substrateRoot?: string;
 }
 
+interface RigRollupInput {
+  rig: { rigId: string; name: string };
+  nodes: NodeInventoryEntry[];
+  checks: CheckEntry[];
+}
+
 // --- Service ---
 
 const DAEMON_HEALTHY_PATTERN = /^Daemon running\b/m;
@@ -86,6 +125,7 @@ export class RestoreCheckService {
 
   check(opts: RestoreCheckOpts): RestoreCheckResult {
     const checks: CheckEntry[] = [];
+    const rigRollupInputs: RigRollupInput[] = [];
 
     // Host-level checks — daemon probe throw produces unknown (not not_restorable).
     // Daemon definitely-down (healthy=false, negative text) is red/not_restorable.
@@ -118,16 +158,22 @@ export class RestoreCheckService {
         return this.buildResult([
           ...checks,
           { check: `rig.${opts.rig}.exists`, status: "red", evidence: `Rig "${opts.rig}" not found`, remediation: "List rigs with: rig ps", remediationSafe: true },
-        ]);
+        ], []);
       }
     }
 
     // Per-rig checks
     for (const rig of rigs) {
-      checks.push(this.checkSnapshot(rig));
+      const rigChecks: CheckEntry[] = [];
+
+      const snapshotCheck = this.checkSnapshot(rig);
+      checks.push(snapshotCheck);
+      rigChecks.push(snapshotCheck);
 
       // Rig spec/root check
-      checks.push(this.checkSpecPresent(rig));
+      const specCheck = this.checkSpecPresent(rig);
+      checks.push(specCheck);
+      rigChecks.push(specCheck);
 
       // Per-seat checks — probe error produces unknown, not not_restorable
       let nodes: NodeInventoryEntry[];
@@ -141,18 +187,34 @@ export class RestoreCheckService {
       }
 
       for (const node of nodes) {
-        checks.push(this.checkTranscript(rig.name, node));
-        checks.push(this.checkResumePath(node));
+        const readinessCheck = this.checkSeatReadiness(node);
+        checks.push(readinessCheck);
+        rigChecks.push(readinessCheck);
+
+        const transcriptCheck = this.checkTranscript(rig.name, node);
+        checks.push(transcriptCheck);
+        rigChecks.push(transcriptCheck);
+
+        const resumeCheck = this.checkResumePath(node);
+        checks.push(resumeCheck);
+        rigChecks.push(resumeCheck);
+
         if (!opts.noQueue) {
-          checks.push(this.checkQueueFile(rig.name, node));
+          const queueCheck = this.checkQueueFile(rig.name, node);
+          checks.push(queueCheck);
+          rigChecks.push(queueCheck);
         }
         if (!opts.noHooks) {
-          checks.push(this.checkHooks(node));
+          const hooksCheck = this.checkHooks(node);
+          checks.push(hooksCheck);
+          rigChecks.push(hooksCheck);
         }
       }
+
+      rigRollupInputs.push({ rig, nodes, checks: rigChecks });
     }
 
-    return this.buildResult(checks);
+    return this.buildResult(checks, rigRollupInputs.map((input) => this.buildRigRollup(input)));
   }
 
   /** Returns CheckEntry on success/definite-down; null on probe exception
@@ -219,7 +281,7 @@ export class RestoreCheckService {
 
     // Terminal/infrastructure nodes are exempt from transcript checks
     if (node.nodeKind === "infrastructure") {
-      return { check, status: "yellow", evidence: "Terminal/infrastructure node — transcript exempt", remediation: "" };
+      return { check, status: "green", evidence: "Terminal/infrastructure node — transcript exempt", remediation: "" };
     }
 
     const transcriptPath = join(
@@ -235,6 +297,39 @@ export class RestoreCheckService {
       evidence: `Transcript missing: ${transcriptPath}`,
       remediation: "Transcript will be created on next session launch",
       remediationSafe: true,
+    };
+  }
+
+  private checkSeatReadiness(node: NodeInventoryEntry): CheckEntry {
+    const session = node.canonicalSessionName ?? node.logicalId;
+    const check = `seat.${session}.readiness`;
+
+    if (!node.canonicalSessionName) {
+      return {
+        check,
+        status: "red",
+        evidence: "Missing canonical session identity",
+        remediation: "Restore or relaunch the seat so it has a canonical session identity",
+        remediationSafe: false,
+      };
+    }
+
+    if (node.sessionStatus !== "running" || node.startupStatus !== "ready") {
+      const latestError = node.latestError ? ` latestError=${node.latestError}` : "";
+      return {
+        check,
+        status: "red",
+        evidence: `Seat not running/ready: sessionStatus=${node.sessionStatus ?? "unknown"} startupStatus=${node.startupStatus ?? "unknown"}${latestError}`,
+        remediation: "Restore or relaunch the seat, then rerun rig restore-check",
+        remediationSafe: false,
+      };
+    }
+
+    return {
+      check,
+      status: "green",
+      evidence: `Seat running and ready: ${node.canonicalSessionName}`,
+      remediation: "",
     };
   }
 
@@ -315,7 +410,7 @@ export class RestoreCheckService {
     return { check: `rig.${rig.name}.spec-present`, status: "green", evidence: `Spec present at ${rigYaml}`, remediation: "" };
   }
 
-  private buildResult(checks: CheckEntry[]): RestoreCheckResult {
+  private buildResult(checks: CheckEntry[], rigs: RigRestoreRollup[]): RestoreCheckResult {
     const red = checks.filter((c) => c.status === "red").length;
     const yellow = checks.filter((c) => c.status === "yellow").length;
     const green = checks.filter((c) => c.status === "green").length;
@@ -330,7 +425,7 @@ export class RestoreCheckService {
     }
 
     const repairPacket = this.buildRepairPacket(checks, verdict);
-    return { verdict, counts: { red, yellow, green }, checks, repairPacket };
+    return this.withAssertion({ verdict, counts: { red, yellow, green }, checks, repairPacket }, rigs);
   }
 
   /** Probe error produces verdict=unknown (not not_restorable) so operators
@@ -340,7 +435,99 @@ export class RestoreCheckService {
     const yellow = checks.filter((c) => c.status === "yellow").length;
     const green = checks.filter((c) => c.status === "green").length;
     const repairPacket = this.buildRepairPacket(checks, "unknown");
-    return { verdict: "unknown", counts: { red, yellow, green }, checks, repairPacket };
+    return this.withAssertion({ verdict: "unknown", counts: { red, yellow, green }, checks, repairPacket }, []);
+  }
+
+  private withAssertion(
+    result: Pick<RestoreCheckResult, "verdict" | "counts" | "checks" | "repairPacket">,
+    rigs: RigRestoreRollup[],
+  ): RestoreCheckResult {
+    const blockingRigCount = rigs.filter((rig) => rig.blockedNodes > 0 || rig.blockingChecks.length > 0).length;
+    const caveatRigCount = rigs.filter((rig) => rig.blockedNodes === 0 && rig.blockingChecks.length === 0 && (rig.caveatNodes > 0 || rig.caveatChecks.length > 0)).length;
+    const unknownRigCount = rigs.filter((rig) => rig.status === "unknown").length;
+
+    let status: FullyBackStatus;
+    let reason: string;
+    if (result.verdict === "unknown") {
+      status = "unknown";
+      reason = "unknown_probe_state";
+    } else if (result.counts.red > 0) {
+      status = "not_fully_back";
+      reason = "blockers_present";
+    } else if (result.counts.yellow > 0) {
+      status = "not_fully_back";
+      reason = "caveats_present";
+    } else {
+      status = "fully_back";
+      reason = "observable_rigs_fully_back";
+    }
+
+    return {
+      ...result,
+      fullyBack: status === "fully_back",
+      assertion: {
+        level: "host",
+        status,
+        reason,
+        blockingRigCount,
+        caveatRigCount,
+        unknownRigCount,
+      },
+      rigs,
+      hostInfra: {
+        status: result.verdict === "unknown" ? "unknown" : "not_inspected",
+        evidence: result.verdict === "unknown"
+          ? "Host bootstrap/autostart source could not be inspected because restore-check state is unknown"
+          : "No host bootstrap/autostart source inspected by v0; fullyBack only covers observable daemon, rig, and seat readiness",
+      },
+    };
+  }
+
+  private buildRigRollup(input: RigRollupInput): RigRestoreRollup {
+    const blockingChecks = input.checks.filter((check) => check.status === "red");
+    const caveatChecks = input.checks.filter((check) => check.status === "yellow");
+    const expectedNodes = input.nodes.length;
+    let runningReadyNodes = 0;
+    let blockedNodes = 0;
+    let caveatNodes = 0;
+
+    for (const node of input.nodes) {
+      const session = node.canonicalSessionName ?? node.logicalId;
+      const nodeChecks = input.checks.filter((check) => check.check.startsWith(`seat.${session}.`));
+      const hasBlocking = nodeChecks.some((check) => check.status === "red");
+      const hasCaveat = nodeChecks.some((check) => check.status === "yellow");
+      if (node.canonicalSessionName && node.sessionStatus === "running" && node.startupStatus === "ready") {
+        runningReadyNodes += 1;
+      }
+      if (hasBlocking) blockedNodes += 1;
+      else if (hasCaveat) caveatNodes += 1;
+    }
+
+    let verdict: Verdict;
+    let status: FullyBackStatus;
+    if (blockingChecks.length > 0) {
+      verdict = "not_restorable";
+      status = "not_fully_back";
+    } else if (caveatChecks.length > 0) {
+      verdict = "restorable_with_caveats";
+      status = "not_fully_back";
+    } else {
+      verdict = "restorable";
+      status = "fully_back";
+    }
+
+    return {
+      rigId: input.rig.rigId,
+      rigName: input.rig.name,
+      status,
+      verdict,
+      expectedNodes,
+      runningReadyNodes,
+      blockedNodes,
+      caveatNodes,
+      blockingChecks,
+      caveatChecks,
+    };
   }
 
   /** Generate ordered repair steps from non-green checks with remediation.
