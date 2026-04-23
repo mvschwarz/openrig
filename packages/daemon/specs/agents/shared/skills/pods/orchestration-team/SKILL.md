@@ -183,6 +183,7 @@ For destructive operations (git push, rm, daemon stop, npm publish): DO NOT auto
 - After being told to slow down, over-corrects to "wait for permission for everything"
 - Compaction is catastrophic — full context loss, needs preparation
 - After compaction: must re-read ALL skills from disk (skill names survive in system reminders but content is truncated)
+- For Claude compact-in-place, use `claude-compact-in-place` and require marshal acceptance before treating a `RESTORED` claim as real
 
 ### Codex agents (QA, peer, R2)
 - Self-manages its own context window — do NOT intervene based on context percentage
@@ -220,6 +221,8 @@ Before any destructive operation: "If this goes wrong, can I undo it?" If no, co
 3. `rig ps --nodes` to see the topology
 4. Read your restore file and session log if available
 5. Ask your peer for a quiz to verify your mental model
+
+For Claude Code seats in OpenRig, marshals/orchestrators should use `claude-compact-in-place` for the asked-vs-read-depth audit before accepting recovery. Preserve the Codex boundary: do not intervene on Codex context percentage or apply Claude compact-in-place by default.
 
 ## What you do not do
 

@@ -22,6 +22,8 @@ resources:
       path: skills/core/openrig-user
     - id: openrig-operator
       path: skills/core/openrig-operator
+    - id: claude-compact-in-place
+      path: skills/claude-compact-in-place
     - id: mental-model-ha
       path: skills/mental-model-ha
     - id: systematic-debugging

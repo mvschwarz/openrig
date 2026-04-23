@@ -256,6 +256,7 @@ describe("Starter specs", () => {
     const expectedSharedSkills = [
       "agent-browser",
       "brainstorming",
+      "claude-compact-in-place",
       "containerized-e2e",
       "dogfood",
       "executing-plans",
@@ -276,6 +277,20 @@ describe("Starter specs", () => {
       expect(skill).toBeDefined();
       expect(existsSync(join(SPECS_ROOT, "agents/shared", skill!.path, "SKILL.md"))).toBe(true);
     }
+
+    const compactSkill = sharedSkills.find((entry) => entry.id === "claude-compact-in-place");
+    expect(compactSkill).toBeDefined();
+    const compactSkillContent = readFileSync(join(SPECS_ROOT, "agents/shared", compactSkill!.path, "SKILL.md"), "utf-8");
+    expect(compactSkillContent).toContain("asked-vs-read-depth");
+    for (const depth of ["FULL", "TARGETED", "GREP", "INJECTED", "NOT-READ", "NOT-PRESENT"]) {
+      expect(compactSkillContent).toContain(depth);
+    }
+    expect(compactSkillContent).toContain("marshal acceptance");
+    expect(compactSkillContent).toContain("RESTORED");
+    expect(compactSkillContent).toContain("400k");
+    expect(compactSkillContent).toContain("policy target");
+    expect(compactSkillContent).toContain("not an automatic action");
+    expect(compactSkillContent).toContain("not for Codex by default");
 
     const expectedAgentSkills = new Map<string, string[]>([
       [
