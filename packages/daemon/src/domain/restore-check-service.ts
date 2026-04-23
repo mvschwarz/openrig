@@ -167,7 +167,7 @@ export class RestoreCheckService {
         return this.buildResult([
           ...checks,
           { check: `rig.${opts.rig}.exists`, status: "red", evidence: `Rig "${opts.rig}" not found`, remediation: "List rigs with: rig ps", remediationSafe: true },
-        ], []);
+        ], [], hostInfraCheck.hostInfra);
       }
     }
 

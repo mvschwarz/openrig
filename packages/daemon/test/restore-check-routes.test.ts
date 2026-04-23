@@ -206,6 +206,45 @@ describe("Restore check routes", () => {
     }));
   });
 
+  it("GET /api/restore-check?rig=nonexistent preserves missing host-infra state", async () => {
+    rigRepo.createRig("real-rig");
+
+    const res = await app.request("/api/restore-check?rig=nonexistent&noQueue=true&noHooks=true");
+    expect(res.status).toBe(200);
+
+    const body = await res.json();
+    const check = body.checks.find((entry: { check: string }) => entry.check === "host.bootstrap-autostart.declaration");
+    expect(body.verdict).toBe("not_restorable");
+    expect(check).toEqual(expect.objectContaining({
+      status: "yellow",
+      evidence: expect.stringContaining(path.join(openRigHome, "host-infra.json")),
+    }));
+    expect(body.hostInfra).toEqual(expect.objectContaining({
+      status: "not_declared",
+      evidence: check.evidence,
+    }));
+  });
+
+  it("GET /api/restore-check?rig=nonexistent preserves declared host-infra state", async () => {
+    fs.writeFileSync(path.join(openRigHome, "host-infra.json"), VALID_HOST_INFRA_DECLARATION);
+    rigRepo.createRig("real-rig");
+
+    const res = await app.request("/api/restore-check?rig=nonexistent&noQueue=true&noHooks=true");
+    expect(res.status).toBe(200);
+
+    const body = await res.json();
+    const check = body.checks.find((entry: { check: string }) => entry.check === "host.bootstrap-autostart.declaration");
+    expect(body.verdict).toBe("not_restorable");
+    expect(check).toEqual(expect.objectContaining({
+      status: "green",
+      evidence: expect.stringContaining(path.join(openRigHome, "host-infra.json")),
+    }));
+    expect(body.hostInfra).toEqual(expect.objectContaining({
+      status: "declared",
+      evidence: check.evidence,
+    }));
+  });
+
   it("GET /api/restore-check route catch returns actionable repairPacket", async () => {
     const spy = vi.spyOn(RestoreCheckService.prototype, "check").mockImplementationOnce(() => {
       throw new Error("route boom");

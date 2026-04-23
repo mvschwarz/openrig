@@ -193,6 +193,65 @@ describe("RestoreCheckService", () => {
     }
   });
 
+  it("unknown rig preserves missing host-infra declaration state on not_restorable result", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "restore-check-host-infra-missing-rig-"));
+    const declarationPath = path.join(tmpDir, "host-infra.json");
+    const previous = process.env["OPENRIG_HOME"];
+    process.env["OPENRIG_HOME"] = tmpDir;
+
+    try {
+      const service = new RestoreCheckService(mockDeps({
+        exists: (p) => p === declarationPath ? fs.existsSync(p) : true,
+      }));
+      const result = service.check({ rig: "missing-rig", noQueue: true, noHooks: true });
+      const check = result.checks.find((entry) => entry.check === "host.bootstrap-autostart.declaration");
+
+      expect(result.verdict).toBe("not_restorable");
+      expect(check).toEqual(expect.objectContaining({
+        status: "yellow",
+        evidence: expect.stringContaining(declarationPath),
+      }));
+      expect(result.hostInfra).toEqual(expect.objectContaining({
+        status: "not_declared",
+        evidence: check?.evidence,
+      }));
+    } finally {
+      if (previous === undefined) delete process.env["OPENRIG_HOME"];
+      else process.env["OPENRIG_HOME"] = previous;
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("unknown rig preserves declared host-infra state on not_restorable result", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "restore-check-host-infra-declared-rig-"));
+    const declarationPath = path.join(tmpDir, "host-infra.json");
+    const previous = process.env["OPENRIG_HOME"];
+    process.env["OPENRIG_HOME"] = tmpDir;
+
+    try {
+      const service = new RestoreCheckService(mockDeps({
+        exists: () => true,
+        readFile: () => VALID_HOST_INFRA_DECLARATION,
+      }));
+      const result = service.check({ rig: "missing-rig", noQueue: true, noHooks: true });
+      const check = result.checks.find((entry) => entry.check === "host.bootstrap-autostart.declaration");
+
+      expect(result.verdict).toBe("not_restorable");
+      expect(check).toEqual(expect.objectContaining({
+        status: "green",
+        evidence: expect.stringContaining(declarationPath),
+      }));
+      expect(result.hostInfra).toEqual(expect.objectContaining({
+        status: "declared",
+        evidence: check?.evidence,
+      }));
+    } finally {
+      if (previous === undefined) delete process.env["OPENRIG_HOME"];
+      else process.env["OPENRIG_HOME"] = previous;
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   it("malformed host-infra declaration is yellow with exact path and parse error", () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "restore-check-host-infra-malformed-"));
     const declarationPath = path.join(tmpDir, "host-infra.json");
