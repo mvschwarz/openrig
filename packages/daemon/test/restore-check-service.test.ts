@@ -402,7 +402,8 @@ describe("RestoreCheckService", () => {
     expect(typeof blocker!.command).toBe("string");
     expect(blocker!.command.length).toBeGreaterThan(0);
     expect(typeof blocker!.rationale).toBe("string");
-    expect(blocker!.safe).toBe(true); // prose guidance, not destructive
+    // Daemon start is a mutating action → safe: false
+    expect(blocker!.safe).toBe(false);
     expect(blocker!.blocking).toBe(true);
   });
 
@@ -415,7 +416,8 @@ describe("RestoreCheckService", () => {
 
     const caveat = result.repairPacket!.find((s) => !s.blocking);
     expect(caveat).toBeDefined();
-    expect(caveat!.safe).toBe(true);
+    // Snapshot creation is a mutating action → safe: false
+    expect(caveat!.safe).toBe(false);
     expect(caveat!.blocking).toBe(false);
   });
 
@@ -472,5 +474,22 @@ describe("RestoreCheckService", () => {
     // Command is prose guidance, not prefixed with $ or auto-executable
     expect(snapshotStep!.command).not.toMatch(/^\$/);
     expect(snapshotStep!.command.length).toBeGreaterThan(0);
+  });
+
+  it("omitted remediationSafe defaults to safe:false (conservative)", () => {
+    // getNodeInventory throw has remediation "Check daemon status" with no
+    // explicit remediationSafe — conservative default must produce safe:false
+    const service = new RestoreCheckService(mockDeps({
+      getNodeInventory: () => { throw new Error("query timeout"); },
+    }));
+    const result = service.check({});
+
+    expect(result.verdict).toBe("unknown");
+    expect(result.repairPacket).not.toBeNull();
+    const entry = result.repairPacket!.find((s) => s.rationale.includes("query timeout"));
+    expect(entry).toBeDefined();
+    // Omitted remediationSafe → safe:false (conservative default)
+    expect(entry!.safe).toBe(false);
+    expect(entry!.blocking).toBe(true);
   });
 });

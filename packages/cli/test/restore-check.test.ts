@@ -128,8 +128,8 @@ describe("rig restore-check", () => {
       verdict: "not_restorable",
       counts: { red: 1, yellow: 1, green: 3 },
       repairPacket: [
-        { step: 1, command: "Start the daemon", rationale: "Daemon down", safe: true, blocking: true },
-        { step: 2, command: "Create snapshot", rationale: "No snapshot", safe: true, blocking: false },
+        { step: 1, command: "Start the daemon", rationale: "Daemon down", safe: false, blocking: true },
+        { step: 2, command: "Create snapshot", rationale: "No snapshot", safe: false, blocking: false },
       ],
     }});
     const cmd = restoreCheckCommand(deps);

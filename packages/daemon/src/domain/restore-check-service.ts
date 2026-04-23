@@ -12,6 +12,12 @@ export interface CheckEntry {
   status: CheckStatus;
   evidence: string;
   remediation: string;
+  /** Whether the remediation action is execution-safe (read-only / manual
+   *  inspection). false for mutating actions (daemon start, chmod, create
+   *  files, snapshot). Defaults to false (unsafe) if omitted — conservative
+   *  so new checks without explicit classification don't invite agents to
+   *  auto-execute mutating commands. */
+  remediationSafe?: boolean;
 }
 
 export interface RepairStep {
@@ -88,7 +94,8 @@ export class RestoreCheckService {
     if (daemonCheck === null) {
       // Probe threw — state is uninspectable
       return this.buildUnknown([
-        { check: "daemon.reachable", status: "red", evidence: "Daemon health probe failed (unable to determine state)", remediation: "Start the daemon with: rig daemon start" },
+        { check: "daemon.reachable", status: "red", evidence: "Daemon health probe failed (unable to determine state)", remediation: "Start the daemon with: rig daemon start",
+      remediationSafe: false },
       ]);
     }
     checks.push(daemonCheck);
@@ -101,7 +108,7 @@ export class RestoreCheckService {
     } catch (err) {
       return this.buildUnknown([
         ...checks,
-        { check: "probe.error", status: "red", evidence: `Failed to list rigs: ${err instanceof Error ? err.message : String(err)}`, remediation: "Check daemon status with: rig daemon status" },
+        { check: "probe.error", status: "red", evidence: `Failed to list rigs: ${err instanceof Error ? err.message : String(err)}`, remediation: "Check daemon status with: rig daemon status", remediationSafe: true },
       ]);
     }
 
@@ -110,7 +117,7 @@ export class RestoreCheckService {
       if (rigs.length === 0) {
         return this.buildResult([
           ...checks,
-          { check: `rig.${opts.rig}.exists`, status: "red", evidence: `Rig "${opts.rig}" not found`, remediation: "List rigs with: rig ps" },
+          { check: `rig.${opts.rig}.exists`, status: "red", evidence: `Rig "${opts.rig}" not found`, remediation: "List rigs with: rig ps", remediationSafe: true },
         ]);
       }
     }
@@ -164,6 +171,7 @@ export class RestoreCheckService {
         check: "daemon.reachable", status: "red",
         evidence: probe.evidence || "Daemon health probe returned non-positive result",
         remediation: "Start the daemon with: rig daemon start",
+      remediationSafe: false,
       };
     } catch {
       // Probe threw — return null to signal uninspectable state
@@ -183,6 +191,7 @@ export class RestoreCheckService {
         check: "host.state-dir-writable", status: "red",
         evidence: `${stateDir} is not writable`,
         remediation: `Fix permissions: chmod u+w ${stateDir}`,
+      remediationSafe: false,
       };
     }
   }
@@ -197,6 +206,7 @@ export class RestoreCheckService {
         check: `rig.${rig.name}.snapshot`, status: "yellow",
         evidence: "No snapshot found (first-boot or adopted rig)",
         remediation: "Create a snapshot with: rig snapshot <rigId>",
+      remediationSafe: false,
       };
     } catch {
       return { check: `rig.${rig.name}.snapshot`, status: "yellow", evidence: "Could not check snapshots", remediation: "" };
@@ -224,6 +234,7 @@ export class RestoreCheckService {
       check, status: "yellow",
       evidence: `Transcript missing: ${transcriptPath}`,
       remediation: "Transcript will be created on next session launch",
+      remediationSafe: true,
     };
   }
 
@@ -236,6 +247,7 @@ export class RestoreCheckService {
       check: `seat.${session}.resume-path`, status: "yellow",
       evidence: "No attach command available",
       remediation: "Session will be created fresh on restore",
+      remediationSafe: true,
     };
   }
 
@@ -261,6 +273,7 @@ export class RestoreCheckService {
       check, status: "yellow",
       evidence: `Queue file missing: ${queuePath}`,
       remediation: "Create queue file per attention-queue convention",
+      remediationSafe: false,
     };
   }
 
@@ -274,6 +287,7 @@ export class RestoreCheckService {
       check: `seat.${session}.hooks`, status: "yellow",
       evidence: "Hook inspection not yet implemented (Slice 2)",
       remediation: "Use --no-hooks to skip, or wait for Slice 2 hook inspection",
+      remediationSafe: true,
     };
   }
 
@@ -287,6 +301,7 @@ export class RestoreCheckService {
         check: `rig.${rig.name}.spec-present`, status: "red",
         evidence: `Rig root missing: ${rigRoot}`,
         remediation: `Create the rig root directory at ${rigRoot} with a rig.yaml spec`,
+      remediationSafe: false,
       };
     }
     if (!this.deps.exists(rigYaml)) {
@@ -294,6 +309,7 @@ export class RestoreCheckService {
         check: `rig.${rig.name}.spec-present`, status: "yellow",
         evidence: `Rig root exists but rig.yaml missing: ${rigYaml}`,
         remediation: `Add a rig.yaml spec to ${rigRoot}`,
+      remediationSafe: false,
       };
     }
     return { check: `rig.${rig.name}.spec-present`, status: "green", evidence: `Spec present at ${rigYaml}`, remediation: "" };
@@ -345,7 +361,7 @@ export class RestoreCheckService {
       step: ++step,
       command: c.remediation,
       rationale: c.evidence,
-      safe: true,   // All Slice 2 repair steps are read-only suggestions, never destructive
+      safe: c.remediationSafe === true,  // conservative: default false unless explicitly marked safe
       blocking: c.status === "red",
     }));
   }
