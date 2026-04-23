@@ -88,6 +88,23 @@ function minimalSnapshotData(rigId: string, rigName: string) {
   };
 }
 
+function insertStartupContextRow(db: Database.Database, nodeId: string, options?: {
+  projectionEntriesJson?: string;
+  resolvedFilesJson?: string;
+  startupActionsJson?: string;
+  runtime?: string;
+}) {
+  db.prepare(
+    "INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, ?, ?, ?)"
+  ).run(
+    nodeId,
+    options?.projectionEntriesJson ?? "[]",
+    options?.resolvedFilesJson ?? "[]",
+    options?.startupActionsJson ?? "[]",
+    options?.runtime ?? "claude-code",
+  );
+}
+
 describe("Restore check routes", () => {
   let db: Database.Database;
   let app: Hono;
@@ -226,6 +243,7 @@ describe("Restore check routes", () => {
     const session = sessionRegistry.registerSession(node.id, "dev-impl@recoverable-rig");
     sessionRegistry.updateStatus(session.id, "stopped");
     sessionRegistry.updateStartupStatus(session.id, "failed");
+    insertStartupContextRow(db, node.id);
     snapshotRepo.createSnapshot(rig.id, "auto-pre-down", minimalSnapshotData(rig.id, rig.name) as never);
 
     const res = await app.request("/api/restore-check?rig=recoverable-rig&noQueue=true&noHooks=true");
@@ -248,6 +266,66 @@ describe("Restore check routes", () => {
       blocked: [],
       unknown: [],
     });
+  });
+
+  it("GET /api/restore-check blocks recovery when a stopped snapshot-backed rig is missing startup context", async () => {
+    const rig = rigRepo.createRig("recoverable-rig");
+    const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code" });
+    const session = sessionRegistry.registerSession(node.id, "dev-impl@recoverable-rig");
+    sessionRegistry.updateStatus(session.id, "stopped");
+    sessionRegistry.updateStartupStatus(session.id, "failed");
+    snapshotRepo.createSnapshot(rig.id, "auto-pre-down", minimalSnapshotData(rig.id, rig.name) as never);
+
+    const res = await app.request("/api/restore-check?rig=recoverable-rig&noQueue=true&noHooks=true");
+    expect(res.status).toBe(200);
+
+    const body = await res.json();
+    const startup = body.checks.find((c: { check: string }) => c.check === "seat.dev-impl@recoverable-rig.startup-context");
+
+    expect(startup).toEqual(expect.objectContaining({
+      status: "red",
+    }));
+    expect(startup.evidence).toContain("startup context");
+    expect(body.recovery).toEqual({
+      status: "blocked",
+      summary: expect.stringContaining("1 rig blocked"),
+      actions: [],
+      blocked: [
+        expect.objectContaining({
+          scope: "rig",
+          rigId: rig.id,
+          rigName: "recoverable-rig",
+          reason: expect.stringContaining("startup context"),
+        }),
+      ],
+      unknown: [],
+    });
+  });
+
+  it("GET /api/restore-check returns structured JSON for malformed startup-context rows", async () => {
+    const rig = rigRepo.createRig("malformed-startup-rig");
+    const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code" });
+    const session = sessionRegistry.registerSession(node.id, "dev-impl@malformed-startup-rig");
+    sessionRegistry.updateStatus(session.id, "running");
+    sessionRegistry.updateStartupStatus(session.id, "ready");
+    insertStartupContextRow(db, node.id, {
+      resolvedFilesJson: "{",
+    });
+
+    const res = await app.request("/api/restore-check?rig=malformed-startup-rig&noQueue=true&noHooks=true");
+    expect(res.status).toBe(200);
+
+    const body = await res.json();
+    const startup = body.checks.find((c: { check: string }) => c.check === "seat.dev-impl@malformed-startup-rig.startup-context");
+
+    expect(startup).toEqual(expect.objectContaining({
+      status: "yellow",
+      remediationSafe: false,
+    }));
+    expect(startup.evidence).toContain("JSON");
+    expect(startup.evidence).toContain("resolved_files_json");
+    expect(body.assertion.reason).not.toBe("unknown_probe_state");
+    expect(body.checks.some((c: { check: string }) => c.check === "probe.error")).toBe(false);
   });
 
   it("daemon.reachable is green inside daemon route (self-proof)", async () => {
