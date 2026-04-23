@@ -1,3 +1,6 @@
+import fs from "node:fs";
+import path from "node:path";
+import os from "node:os";
 import { describe, it, expect } from "vitest";
 import { RestoreCheckService, type RestoreCheckDeps, type NodeInventoryEntry } from "../src/domain/restore-check-service.js";
 
@@ -104,27 +107,32 @@ describe("RestoreCheckService", () => {
 
   // --- Read-only invariant ---
 
-  it("state-dir check does not create or delete any probe file (read-only)", () => {
-    const writtenPaths: string[] = [];
-    const deletedPaths: string[] = [];
-    // Spy on fs operations via a service that tracks writes
-    const service = new RestoreCheckService(mockDeps({
-      // Override exists to track but still delegate
-      exists: (p) => {
-        // Track if the service tries to check for a probe file it would have created
-        if (p.includes(".restore-check-probe")) {
-          writtenPaths.push(p);
-        }
-        return true;
-      },
-    }));
-    const result = service.check({ noQueue: true, noHooks: true });
+  it("state-dir check does not create probe file or mutate directory mtime (read-only)", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "restore-check-readonly-"));
+    const probePath = path.join(tmpDir, ".restore-check-probe");
+    const previous = process.env["OPENRIG_HOME"];
 
-    // The service should NOT reference any probe file
-    expect(writtenPaths).toHaveLength(0);
-    // Verify the check itself ran and produced a result
-    const stateDir = result.checks.find((c) => c.check === "host.state-dir-writable");
-    expect(stateDir).toBeDefined();
+    // Pin mtime to a known past value so any mutation is detectable
+    fs.utimesSync(tmpDir, new Date(946684800000), new Date(946684800000));
+    const before = fs.statSync(tmpDir).mtimeMs;
+
+    process.env["OPENRIG_HOME"] = tmpDir;
+    try {
+      const service = new RestoreCheckService(mockDeps());
+      const result = service.check({ noQueue: true, noHooks: true });
+
+      // No probe file created
+      expect(fs.existsSync(probePath)).toBe(false);
+      // Directory mtime unchanged — no filesystem mutation
+      expect(fs.statSync(tmpDir).mtimeMs).toBe(before);
+      // Check itself ran and produced a result
+      const stateDir = result.checks.find((c) => c.check === "host.state-dir-writable");
+      expect(stateDir).toBeDefined();
+    } finally {
+      if (previous === undefined) delete process.env["OPENRIG_HOME"];
+      else process.env["OPENRIG_HOME"] = previous;
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
   });
 
   // --- Rig spec/root checks ---
