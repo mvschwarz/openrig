@@ -46,7 +46,7 @@ interface RigRestoreRollup {
 }
 
 interface HostInfraAssertion {
-  status: "not_inspected" | "not_declared" | "unknown";
+  status: "not_inspected" | "not_declared" | "declared" | "unknown";
   evidence: string;
 }
 

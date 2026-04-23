@@ -4,6 +4,23 @@ import os from "node:os";
 import { describe, it, expect } from "vitest";
 import { RestoreCheckService, type RestoreCheckDeps, type NodeInventoryEntry } from "../src/domain/restore-check-service.js";
 
+const VALID_HOST_INFRA_DECLARATION = JSON.stringify({
+  schemaVersion: 1,
+  daemonBootstrap: {
+    declared: true,
+    mechanism: "launchd",
+    evidence: "com.openrig.daemon",
+  },
+  supportingInfra: [
+    {
+      id: "supervisor-wake",
+      declared: true,
+      required: true,
+      evidence: "kernel rig infra seat or host launch agent",
+    },
+  ],
+});
+
 function mockDeps(overrides?: Partial<RestoreCheckDeps>): RestoreCheckDeps {
   return {
     listRigs: () => [{ rigId: "rig-1", name: "test-rig" }],
@@ -21,6 +38,7 @@ function mockDeps(overrides?: Partial<RestoreCheckDeps>): RestoreCheckDeps {
     hasSnapshot: () => true,
     probeDaemonHealth: () => ({ healthy: true, evidence: "Daemon running on port 7433" }),
     exists: () => true,
+    readFile: () => VALID_HOST_INFRA_DECLARATION,
     ...overrides,
   };
 }
@@ -128,6 +146,168 @@ describe("RestoreCheckService", () => {
       // Check itself ran and produced a result
       const stateDir = result.checks.find((c) => c.check === "host.state-dir-writable");
       expect(stateDir).toBeDefined();
+    } finally {
+      if (previous === undefined) delete process.env["OPENRIG_HOME"];
+      else process.env["OPENRIG_HOME"] = previous;
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  // --- Host-infra declaration ---
+
+  it("missing host-infra declaration is a non-blocking caveat and prevents fully_back", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "restore-check-host-infra-missing-"));
+    const declarationPath = path.join(tmpDir, "host-infra.json");
+    const previous = process.env["OPENRIG_HOME"];
+    process.env["OPENRIG_HOME"] = tmpDir;
+
+    try {
+      const service = new RestoreCheckService(mockDeps({
+        exists: (p) => p === declarationPath ? fs.existsSync(p) : true,
+      }));
+      const result = service.check({ noQueue: true, noHooks: true });
+      const check = result.checks.find((entry) => entry.check === "host.bootstrap-autostart.declaration");
+
+      expect(check).toEqual(expect.objectContaining({
+        status: "yellow",
+      }));
+      expect(check?.evidence).toContain(declarationPath);
+      expect(check?.remediation).toContain(declarationPath);
+      expect(result.hostInfra.status).toBe("not_declared");
+      expect(result.hostInfra.evidence).toContain(declarationPath);
+      expect(result.verdict).toBe("restorable_with_caveats");
+      expect(result.fullyBack).toBe(false);
+      expect(result.assertion.reason).toBe("caveats_present");
+      expect(result.repairPacket).toEqual([
+        expect.objectContaining({
+          command: expect.stringContaining(declarationPath),
+          safe: false,
+          blocking: false,
+        }),
+      ]);
+      expect(fs.existsSync(declarationPath)).toBe(false);
+    } finally {
+      if (previous === undefined) delete process.env["OPENRIG_HOME"];
+      else process.env["OPENRIG_HOME"] = previous;
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("malformed host-infra declaration is yellow with exact path and parse error", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "restore-check-host-infra-malformed-"));
+    const declarationPath = path.join(tmpDir, "host-infra.json");
+    const previous = process.env["OPENRIG_HOME"];
+    process.env["OPENRIG_HOME"] = tmpDir;
+
+    try {
+      const service = new RestoreCheckService(mockDeps({
+        exists: () => true,
+        readFile: (p) => p === declarationPath ? "{ bad json" : VALID_HOST_INFRA_DECLARATION,
+      }));
+      const result = service.check({ noQueue: true, noHooks: true });
+      const check = result.checks.find((entry) => entry.check === "host.bootstrap-autostart.declaration");
+
+      expect(check?.status).toBe("yellow");
+      expect(check?.evidence).toContain(declarationPath);
+      expect(check?.evidence).toMatch(/parse|JSON/i);
+      expect(result.hostInfra.status).toBe("not_declared");
+      expect(result.fullyBack).toBe(false);
+      expect(result.repairPacket?.[0]).toEqual(expect.objectContaining({
+        command: expect.stringContaining(declarationPath),
+        safe: false,
+        blocking: false,
+      }));
+    } finally {
+      if (previous === undefined) delete process.env["OPENRIG_HOME"];
+      else process.env["OPENRIG_HOME"] = previous;
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("arbitrary JSON is not accepted as a declared host-infra contract", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "restore-check-host-infra-invalid-"));
+    const declarationPath = path.join(tmpDir, "host-infra.json");
+    const previous = process.env["OPENRIG_HOME"];
+    process.env["OPENRIG_HOME"] = tmpDir;
+
+    try {
+      const service = new RestoreCheckService(mockDeps({
+        exists: () => true,
+        readFile: (p) => p === declarationPath ? JSON.stringify({ arbitrary: true }) : VALID_HOST_INFRA_DECLARATION,
+      }));
+      const result = service.check({ noQueue: true, noHooks: true });
+      const check = result.checks.find((entry) => entry.check === "host.bootstrap-autostart.declaration");
+
+      expect(check?.status).toBe("yellow");
+      expect(check?.evidence).toContain(declarationPath);
+      expect(check?.evidence).toContain("schemaVersion");
+      expect(check?.evidence).toContain("daemonBootstrap.mechanism");
+      expect(check?.evidence).toContain("supportingInfra");
+      expect(result.hostInfra.status).toBe("not_declared");
+      expect(result.fullyBack).toBe(false);
+    } finally {
+      if (previous === undefined) delete process.env["OPENRIG_HOME"];
+      else process.env["OPENRIG_HOME"] = previous;
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("valid host-infra declaration is green declared-not-verified evidence", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "restore-check-host-infra-valid-"));
+    const declarationPath = path.join(tmpDir, "host-infra.json");
+    const previous = process.env["OPENRIG_HOME"];
+    process.env["OPENRIG_HOME"] = tmpDir;
+
+    try {
+      const service = new RestoreCheckService(mockDeps({
+        exists: () => true,
+        readFile: () => VALID_HOST_INFRA_DECLARATION,
+      }));
+      const result = service.check({ noQueue: true, noHooks: true });
+      const check = result.checks.find((entry) => entry.check === "host.bootstrap-autostart.declaration");
+
+      expect(check?.status).toBe("green");
+      expect(check?.evidence).toContain(declarationPath);
+      expect(check?.evidence).toContain("declared, not verified");
+      expect(check?.evidence).toContain("mechanism=launchd");
+      expect(check?.evidence).toContain("requiredSupportingInfra=1");
+      expect(result.hostInfra.status).toBe("declared");
+      expect(result.hostInfra.evidence).toContain("declared, not verified");
+      expect(result.verdict).toBe("restorable");
+      expect(result.fullyBack).toBe(true);
+      expect(result.assertion.reason).toBe("observable_rigs_fully_back_host_infra_declared_not_verified");
+      expect(result.repairPacket).toBeNull();
+    } finally {
+      if (previous === undefined) delete process.env["OPENRIG_HOME"];
+      else process.env["OPENRIG_HOME"] = previous;
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("host-infra read exception is caught inside service as unknown caveat", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "restore-check-host-infra-read-error-"));
+    const declarationPath = path.join(tmpDir, "host-infra.json");
+    const previous = process.env["OPENRIG_HOME"];
+    process.env["OPENRIG_HOME"] = tmpDir;
+
+    try {
+      const service = new RestoreCheckService(mockDeps({
+        exists: () => true,
+        readFile: (p) => {
+          if (p === declarationPath) throw new Error("EACCES");
+          return VALID_HOST_INFRA_DECLARATION;
+        },
+      }));
+      const result = service.check({ noQueue: true, noHooks: true });
+      const check = result.checks.find((entry) => entry.check === "host.bootstrap-autostart.declaration");
+
+      expect(result.verdict).toBe("restorable_with_caveats");
+      expect(result.fullyBack).toBe(false);
+      expect(result.assertion.reason).toBe("caveats_present");
+      expect(result.hostInfra.status).toBe("unknown");
+      expect(check?.status).toBe("yellow");
+      expect(check?.evidence).toContain(declarationPath);
+      expect(check?.evidence).toContain("EACCES");
     } finally {
       if (previous === undefined) delete process.env["OPENRIG_HOME"];
       else process.env["OPENRIG_HOME"] = previous;
@@ -247,13 +427,13 @@ describe("RestoreCheckService", () => {
     expect(result.assertion).toEqual(expect.objectContaining({
       level: "host",
       status: "fully_back",
-      reason: "observable_rigs_fully_back",
+      reason: "observable_rigs_fully_back_host_infra_declared_not_verified",
       blockingRigCount: 0,
       caveatRigCount: 0,
       unknownRigCount: 0,
     }));
     expect(result.hostInfra).toEqual(expect.objectContaining({
-      status: "not_inspected",
+      status: "declared",
     }));
     expect(result.rigs).toEqual([
       expect.objectContaining({

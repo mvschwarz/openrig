@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { Hono } from "hono";
 import { RestoreCheckService, type RestoreCheckDeps, type NodeInventoryEntry } from "../domain/restore-check-service.js";
 import { getNodeInventory } from "../domain/node-inventory.js";
@@ -43,6 +43,7 @@ restoreCheckRoutes.get("/", (c) => {
       exists: (path: string) => {
         try { return existsSync(path); } catch { return false; }
       },
+      readFile: (path: string) => readFileSync(path, "utf-8"),
     };
 
     const service = new RestoreCheckService(serviceDeps);

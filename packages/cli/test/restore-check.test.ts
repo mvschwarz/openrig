@@ -102,6 +102,24 @@ describe("rig restore-check", () => {
     expect(json.checks[0].remediation).toBeDefined();
   });
 
+  it("JSON output preserves declared host-infra status and evidence", async () => {
+    const { deps } = makeDeps({
+      result: {
+        hostInfra: {
+          status: "declared",
+          evidence: "Host infra declaration at /tmp/openrig/host-infra.json declared, not verified; daemonBootstrap mechanism=launchd; requiredSupportingInfra=1",
+        },
+      },
+    });
+    const cmd = restoreCheckCommand(deps);
+    await cmd.parseAsync(["node", "rig", "--json"]);
+
+    const json = JSON.parse(logs.join(""));
+    expect(json.hostInfra.status).toBe("declared");
+    expect(json.hostInfra.evidence).toContain("declared, not verified");
+    expect(json.hostInfra.evidence).toContain("mechanism=launchd");
+  });
+
   it("human output includes verdict + check details + remediation", async () => {
     const { deps } = makeDeps({ result: { verdict: "restorable_with_caveats" } });
     const cmd = restoreCheckCommand(deps);
@@ -115,6 +133,33 @@ describe("rig restore-check", () => {
     expect(output).toContain("test-rig");
     expect(output).toContain("Host bootstrap/autostart");
     expect(output).toContain("daemon.reachable");
+  });
+
+  it("human output shows declared-not-verified host-infra evidence", async () => {
+    const { deps } = makeDeps({
+      result: {
+        assertion: {
+          level: "host",
+          status: "fully_back",
+          reason: "observable_rigs_fully_back_host_infra_declared_not_verified",
+          blockingRigCount: 0,
+          caveatRigCount: 0,
+          unknownRigCount: 0,
+        },
+        hostInfra: {
+          status: "declared",
+          evidence: "Host infra declaration at /tmp/openrig/host-infra.json declared, not verified; daemonBootstrap mechanism=launchd; requiredSupportingInfra=1",
+        },
+      },
+    });
+    const cmd = restoreCheckCommand(deps);
+    await cmd.parseAsync(["node", "rig"]);
+
+    const output = logs.join("\n");
+    expect(output).toContain("FULLY BACK: yes (observable_rigs_fully_back_host_infra_declared_not_verified)");
+    expect(output).toContain("Host bootstrap/autostart: declared");
+    expect(output).toContain("declared, not verified");
+    expect(output).toContain("mechanism=launchd");
   });
 
   it("exit 0 for restorable verdict", async () => {
