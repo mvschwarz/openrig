@@ -429,4 +429,125 @@ describe("Claude Code runtime adapter", () => {
     );
     logSpy.mockRestore();
   });
+
+  // --- Permission-config-at-spawn: standard-safe baseline provisioning ---
+
+  it("provisionRigPermissions applies standard-safe baseline on fresh settings", async () => {
+    const fs = mockFs({});
+    const adapter = new ClaudeCodeAdapter({ tmux: mockTmux(), fsOps: { ...fs, homedir: "/home/test" } });
+
+    // Trigger provisioning via deliverStartup (which calls provisionManagedBootstrap)
+    await adapter.deliverStartup([], makeBinding());
+
+    const store = (fs as unknown as { _store: Record<string, string> })._store;
+    const settings = JSON.parse(store["/home/test/.claude/settings.json"] ?? "{}");
+    const allow: string[] = settings.permissions?.allow ?? [];
+
+    expect(allow).toContain("Bash(rig:*)");
+    expect(allow).toContain("Bash(ls:*)");
+    expect(allow).toContain("Bash(cat:*)");
+    expect(allow).toContain("Bash(tail:*)");
+    expect(allow).toContain("Bash(head:*)");
+    expect(allow).toContain("Bash(wc:*)");
+    expect(allow).toContain("Bash(grep:*)");
+    expect(allow).toContain("Bash(rg:*)");
+    expect(allow).toContain("Bash(pwd)");
+    expect(allow).toContain("Bash(echo:*)");
+    expect(allow).toContain("Bash(which:*)");
+  });
+
+  it("provisionRigPermissions is additive — preserves existing allow entries", async () => {
+    const fs = mockFs({
+      "/home/test/.claude/settings.json": JSON.stringify({
+        permissions: { allow: ["Bash(npm:*)", "Bash(git:*)"] },
+      }),
+    });
+    const adapter = new ClaudeCodeAdapter({ tmux: mockTmux(), fsOps: { ...fs, homedir: "/home/test" } });
+
+    await adapter.deliverStartup([], makeBinding());
+
+    const store = (fs as unknown as { _store: Record<string, string> })._store;
+    const settings = JSON.parse(store["/home/test/.claude/settings.json"] ?? "{}");
+    const allow: string[] = settings.permissions?.allow ?? [];
+
+    // Pre-existing entries preserved
+    expect(allow).toContain("Bash(npm:*)");
+    expect(allow).toContain("Bash(git:*)");
+    // Baseline entries added
+    expect(allow).toContain("Bash(ls:*)");
+    expect(allow).toContain("Bash(rig:*)");
+  });
+
+  it("provisionRigPermissions is idempotent — no duplicates on re-run", async () => {
+    const fs = mockFs({});
+    const adapter = new ClaudeCodeAdapter({ tmux: mockTmux(), fsOps: { ...fs, homedir: "/home/test" } });
+
+    // Run twice
+    await adapter.deliverStartup([], makeBinding());
+    await adapter.deliverStartup([], makeBinding());
+
+    const store = (fs as unknown as { _store: Record<string, string> })._store;
+    const settings = JSON.parse(store["/home/test/.claude/settings.json"] ?? "{}");
+    const allow: string[] = settings.permissions?.allow ?? [];
+
+    // Each pattern appears exactly once
+    const rigCount = allow.filter((p: string) => p === "Bash(rig:*)").length;
+    expect(rigCount).toBe(1);
+    const lsCount = allow.filter((p: string) => p === "Bash(ls:*)").length;
+    expect(lsCount).toBe(1);
+  });
+
+  it("provisionRigPermissions writes provenance marker", async () => {
+    const fs = mockFs({});
+    const adapter = new ClaudeCodeAdapter({ tmux: mockTmux(), fsOps: { ...fs, homedir: "/home/test" } });
+
+    await adapter.deliverStartup([], makeBinding());
+
+    const store = (fs as unknown as { _store: Record<string, string> })._store;
+    const settings = JSON.parse(store["/home/test/.claude/settings.json"] ?? "{}");
+
+    expect(settings._openrig_provenance).toBeDefined();
+    expect(settings._openrig_provenance.author).toBe("openrig-at-spawn");
+    expect(settings._openrig_provenance.baseline).toBe("standard-safe");
+  });
+
+  it("provisionRigPermissions preserves existing deny/ask entries", async () => {
+    const fs = mockFs({
+      "/home/test/.claude/settings.json": JSON.stringify({
+        permissions: {
+          deny: ["Bash(rm:*)"],
+          ask: ["Bash(git push:*)"],
+          allow: [],
+        },
+      }),
+    });
+    const adapter = new ClaudeCodeAdapter({ tmux: mockTmux(), fsOps: { ...fs, homedir: "/home/test" } });
+
+    await adapter.deliverStartup([], makeBinding());
+
+    const store = (fs as unknown as { _store: Record<string, string> })._store;
+    const settings = JSON.parse(store["/home/test/.claude/settings.json"] ?? "{}");
+
+    expect(settings.permissions.deny).toEqual(["Bash(rm:*)"]);
+    expect(settings.permissions.ask).toEqual(["Bash(git push:*)"]);
+  });
+
+  it("provisionRigPermissions preserves non-permissions keys", async () => {
+    const fs = mockFs({
+      "/home/test/.claude/settings.json": JSON.stringify({
+        theme: "dark",
+        mcpServers: { context7: {} },
+        permissions: { allow: [] },
+      }),
+    });
+    const adapter = new ClaudeCodeAdapter({ tmux: mockTmux(), fsOps: { ...fs, homedir: "/home/test" } });
+
+    await adapter.deliverStartup([], makeBinding());
+
+    const store = (fs as unknown as { _store: Record<string, string> })._store;
+    const settings = JSON.parse(store["/home/test/.claude/settings.json"] ?? "{}");
+
+    expect(settings.theme).toBe("dark");
+    expect(settings.mcpServers).toEqual({ context7: {} });
+  });
 });
