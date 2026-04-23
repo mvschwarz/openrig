@@ -376,10 +376,15 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     this.provisionOnboardingState();
   }
 
-  /** Standard-safe baseline patterns — the highest-friction Bash prompts in
-   *  daily operation. Additive only; never removes existing entries. Uses
-   *  `Bash(cmd:*)` colon-form per Claude Code convention. */
-  static readonly STANDARD_SAFE_BASELINE: readonly string[] = [
+  /** Bash convenience baseline — high-friction prompts in daily operation.
+   *  Additive only; never removes existing entries. Uses `Bash(cmd:*)`
+   *  colon-form per Claude Code convention.
+   *
+   *  NOTE: these are Bash CONVENIENCE patterns, not a security boundary.
+   *  Shell redirection (e.g. `cat file > target`) can write to the
+   *  filesystem even with a nominally read-only command. Deny/ask rules,
+   *  hooks, or sandboxing are required for actual write protection. */
+  static readonly CONVENIENCE_BASELINE: readonly string[] = [
     "Bash(ls:*)",
     "Bash(cat:*)",
     "Bash(tail:*)",
@@ -388,7 +393,6 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     "Bash(grep:*)",
     "Bash(rg:*)",
     "Bash(pwd)",
-    "Bash(echo:*)",
     "Bash(which:*)",
     "Bash(rig:*)",
   ];
@@ -404,10 +408,18 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     const permissions = this.readJsonObjectField(settings, "permissions");
     const allow = new Set(this.readStringArray(permissions["allow"]));
 
-    // Standard-safe baseline — additive only; never removes existing entries
-    for (const pattern of ClaudeCodeAdapter.STANDARD_SAFE_BASELINE) {
-      allow.add(pattern);
+    // Bash convenience baseline — additive only; never removes existing entries.
+    // Track whether any new patterns were actually added to avoid redundant writes
+    // (preserves provenance timestamp + file content idempotency on re-runs).
+    let added = 0;
+    for (const pattern of ClaudeCodeAdapter.CONVENIENCE_BASELINE) {
+      if (!allow.has(pattern)) {
+        allow.add(pattern);
+        added++;
+      }
     }
+
+    if (added === 0) return; // All patterns already present; skip write
 
     permissions["allow"] = Array.from(allow);
     settings["permissions"] = permissions;
@@ -415,8 +427,8 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     // Provenance marker so operators can distinguish rig-injected from human-authored
     settings["_openrig_provenance"] = {
       author: "openrig-at-spawn",
-      baseline: "standard-safe",
-      patterns_added: ClaudeCodeAdapter.STANDARD_SAFE_BASELINE.length,
+      baseline: "convenience",
+      patterns_added: added,
       ts: new Date().toISOString(),
     };
 
