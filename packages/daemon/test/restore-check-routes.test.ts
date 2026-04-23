@@ -1,17 +1,18 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import type Database from "better-sqlite3";
+import type { Hono } from "hono";
 import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
+import { createApp } from "../src/server.js";
+import type { RigRepository } from "../src/domain/rig-repository.js";
 
 describe("Restore check routes", () => {
   let db: Database.Database;
-  let app: ReturnType<typeof createTestApp>["app"];
-  let rigRepo: ReturnType<typeof createTestApp>["rigRepo"];
+  let app: Hono;
+  let rigRepo: RigRepository;
 
-  beforeEach(async () => {
+  beforeEach(() => {
     db = createFullTestDb();
     const setup = createTestApp(db);
-    // Remount with restore-check route
-    const { createApp } = await import("../src/server.js");
     app = createApp(setup);
     rigRepo = setup.rigRepo;
   });

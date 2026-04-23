@@ -77,14 +77,14 @@ export class RestoreCheckService {
     checks.push(this.checkDaemonReachable());
     checks.push(this.checkStateDirWritable());
 
-    // Get rigs
+    // Get rigs — probe error produces unknown, not not_restorable
     let rigs: Array<{ rigId: string; name: string; hasServices?: boolean }>;
     try {
       rigs = this.deps.listRigs();
-    } catch {
-      return this.buildResult([
+    } catch (err) {
+      return this.buildUnknown([
         ...checks,
-        { check: "host.rigs", status: "red", evidence: "Failed to list rigs", remediation: "Check daemon status with: rig daemon status" },
+        { check: "probe.error", status: "red", evidence: `Failed to list rigs: ${err instanceof Error ? err.message : String(err)}`, remediation: "Check daemon status with: rig daemon status" },
       ]);
     }
 
@@ -102,13 +102,18 @@ export class RestoreCheckService {
     for (const rig of rigs) {
       checks.push(this.checkSnapshot(rig));
 
-      // Per-seat checks
+      // Rig spec/root check
+      checks.push(this.checkSpecPresent(rig));
+
+      // Per-seat checks — probe error produces unknown, not not_restorable
       let nodes: NodeInventoryEntry[];
       try {
         nodes = this.deps.getNodeInventory(rig.rigId);
-      } catch {
-        checks.push({ check: `rig.${rig.name}.seats-healthy`, status: "red", evidence: "Failed to get node inventory", remediation: "Check daemon status" });
-        continue;
+      } catch (err) {
+        return this.buildUnknown([
+          ...checks,
+          { check: "probe.error", status: "red", evidence: `Failed to get node inventory for ${rig.name}: ${err instanceof Error ? err.message : String(err)}`, remediation: "Check daemon status" },
+        ]);
       }
 
       for (const node of nodes) {
@@ -141,10 +146,12 @@ export class RestoreCheckService {
         evidence: probe.evidence || "Daemon health probe returned non-positive result",
         remediation: "Start the daemon with: rig daemon start",
       };
-    } catch (err) {
+    } catch {
+      // Probe error — cannot determine daemon state; classified separately
+      // so buildUnknown can produce verdict: unknown (not not_restorable)
       return {
         check: "daemon.reachable", status: "red",
-        evidence: `Probe failed: ${err instanceof Error ? err.message : String(err)}`,
+        evidence: "Daemon health probe failed (unable to determine state)",
         remediation: "Start the daemon with: rig daemon start",
       };
     }
@@ -245,8 +252,37 @@ export class RestoreCheckService {
 
   private checkHooks(node: NodeInventoryEntry): CheckEntry {
     const session = node.canonicalSessionName ?? node.logicalId;
-    // Slice 1: hook check is a placeholder — checks for hook install records
-    return { check: `seat.${session}.hooks`, status: "green", evidence: "Hook check not yet implemented (Slice 2)", remediation: "" };
+    // Slice 1: hook inspection not yet implemented. Honestly report as
+    // yellow/not-inspected rather than false-green. --no-hooks removes
+    // the check entirely; without --no-hooks, the check is present but
+    // honestly classified as uninspected.
+    return {
+      check: `seat.${session}.hooks`, status: "yellow",
+      evidence: "Hook inspection not yet implemented (Slice 2)",
+      remediation: "Use --no-hooks to skip, or wait for Slice 2 hook inspection",
+    };
+  }
+
+  private checkSpecPresent(rig: { rigId: string; name: string }): CheckEntry {
+    const substrateRoot = this.deps.substrateRoot ?? join(process.env["HOME"] ?? "~", "code", "substrate", "shared-docs");
+    const rigRoot = join(substrateRoot, "rigs", rig.name);
+    const rigYaml = join(rigRoot, "rig.yaml");
+
+    if (!this.deps.exists(rigRoot)) {
+      return {
+        check: `rig.${rig.name}.spec-present`, status: "red",
+        evidence: `Rig root missing: ${rigRoot}`,
+        remediation: `Create the rig root directory at ${rigRoot} with a rig.yaml spec`,
+      };
+    }
+    if (!this.deps.exists(rigYaml)) {
+      return {
+        check: `rig.${rig.name}.spec-present`, status: "yellow",
+        evidence: `Rig root exists but rig.yaml missing: ${rigYaml}`,
+        remediation: `Add a rig.yaml spec to ${rigRoot}`,
+      };
+    }
+    return { check: `rig.${rig.name}.spec-present`, status: "green", evidence: `Spec present at ${rigYaml}`, remediation: "" };
   }
 
   private buildResult(checks: CheckEntry[]): RestoreCheckResult {
@@ -264,5 +300,14 @@ export class RestoreCheckService {
     }
 
     return { verdict, counts: { red, yellow, green }, checks, repairPacket: null };
+  }
+
+  /** Probe error produces verdict=unknown (not not_restorable) so operators
+   *  can distinguish "definitely broken" from "checker couldn't inspect." */
+  private buildUnknown(checks: CheckEntry[]): RestoreCheckResult {
+    const red = checks.filter((c) => c.status === "red").length;
+    const yellow = checks.filter((c) => c.status === "yellow").length;
+    const green = checks.filter((c) => c.status === "green").length;
+    return { verdict: "unknown", counts: { red, yellow, green }, checks, repairPacket: null };
   }
 }
