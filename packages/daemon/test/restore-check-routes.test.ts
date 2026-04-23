@@ -7,6 +7,7 @@ import type { Hono } from "hono";
 import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
 import { createApp } from "../src/server.js";
 import type { RigRepository } from "../src/domain/rig-repository.js";
+import type { SnapshotRepository } from "../src/domain/snapshot-repository.js";
 import { RestoreCheckService } from "../src/domain/restore-check-service.js";
 
 const REQUIRED_SESSION_START_COMPACT_COMMAND = "/Users/wrandom/code/substrate/shared-docs/control-plane/services/claude-hooks/bin/session-start-compact-context.sh";
@@ -71,10 +72,26 @@ function claudeHookSettings(): string {
   });
 }
 
+function minimalSnapshotData(rigId: string, rigName: string) {
+  return {
+    rig: {
+      id: rigId,
+      name: rigName,
+      createdAt: "2026-04-23T00:00:00.000Z",
+      updatedAt: "2026-04-23T00:00:00.000Z",
+    },
+    nodes: [],
+    edges: [],
+    sessions: [],
+    checkpoints: {},
+  };
+}
+
 describe("Restore check routes", () => {
   let db: Database.Database;
   let app: Hono;
   let rigRepo: RigRepository;
+  let snapshotRepo: SnapshotRepository;
   let openRigHome: string;
   let originalOpenRigHome: string | undefined;
 
@@ -87,6 +104,7 @@ describe("Restore check routes", () => {
     const setup = createTestApp(db);
     app = createApp(setup);
     rigRepo = setup.rigRepo;
+    snapshotRepo = setup.snapshotRepo;
   });
 
   afterEach(() => {
@@ -197,6 +215,33 @@ describe("Restore check routes", () => {
     } finally {
       fs.rmSync(projectDir, { recursive: true, force: true });
     }
+  });
+
+  it("GET /api/restore-check returns actionable recovery for a snapshot-backed stopped rig", async () => {
+    const rig = rigRepo.createRig("recoverable-rig");
+    rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code" });
+    snapshotRepo.createSnapshot(rig.id, "auto-pre-down", minimalSnapshotData(rig.id, rig.name) as never);
+
+    const res = await app.request("/api/restore-check?rig=recoverable-rig&noQueue=true&noHooks=true");
+    expect(res.status).toBe(200);
+
+    const body = await res.json();
+    expect(body.recovery).toEqual({
+      status: "actionable",
+      summary: expect.stringContaining("1 rig can be recovered"),
+      actions: [
+        expect.objectContaining({
+          scope: "rig",
+          rigId: rig.id,
+          rigName: "recoverable-rig",
+          command: expect.stringMatching(new RegExp(`^rig restore .+ --rig ${rig.id}$`)),
+          safe: false,
+          blocking: true,
+        }),
+      ],
+      blocked: [],
+      unknown: [],
+    });
   });
 
   it("daemon.reachable is green inside daemon route (self-proof)", async () => {
@@ -380,6 +425,18 @@ describe("Restore check routes", () => {
       expect(body.fullyBack).toBe(false);
       expect(body.assertion.status).toBe("unknown");
       expect(body.assertion.reason).toBe("unknown_probe_state");
+      expect(body.recovery).toEqual({
+        status: "unknown",
+        summary: expect.stringContaining("could not be inspected"),
+        actions: [],
+        blocked: [],
+        unknown: [
+          expect.objectContaining({
+            scope: "host",
+            reason: expect.stringContaining("route boom"),
+          }),
+        ],
+      });
       expect(body.checks[0]).toEqual(expect.objectContaining({
         check: "probe.error",
         status: "red",

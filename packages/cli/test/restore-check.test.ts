@@ -36,6 +36,13 @@ function makeResult(overrides?: Record<string, unknown>) {
       { check: "rig.test-rig.snapshot", status: "yellow", evidence: "No snapshot found", remediation: "Create a snapshot" },
     ],
     repairPacket: null,
+    recovery: {
+      status: "not_needed",
+      summary: "All observable rigs are already running/ready; no recovery action needed.",
+      actions: [],
+      blocked: [],
+      unknown: [],
+    },
     ...overrides,
   };
 }
@@ -96,6 +103,12 @@ describe("rig restore-check", () => {
     expect(json.counts).toBeDefined();
     expect(json.checks).toBeInstanceOf(Array);
     expect(json.repairPacket).toBeNull();
+    expect(json.recovery).toEqual(expect.objectContaining({
+      status: "not_needed",
+      actions: [],
+      blocked: [],
+      unknown: [],
+    }));
     expect(json.checks[0].check).toBeDefined();
     expect(json.checks[0].status).toBeDefined();
     expect(json.checks[0].evidence).toBeDefined();
@@ -132,7 +145,50 @@ describe("rig restore-check", () => {
     expect(output).toContain("Per-rig summary");
     expect(output).toContain("test-rig");
     expect(output).toContain("Host bootstrap/autostart");
+    expect(output).toContain("RECOVERY:");
     expect(output).toContain("daemon.reachable");
+  });
+
+  it("human output includes exact recovery action commands", async () => {
+    const { deps } = makeDeps({
+      result: {
+        verdict: "not_restorable",
+        fullyBack: false,
+        assertion: {
+          level: "host",
+          status: "not_fully_back",
+          reason: "blockers_present",
+          blockingRigCount: 1,
+          caveatRigCount: 0,
+          unknownRigCount: 0,
+        },
+        recovery: {
+          status: "actionable",
+          summary: "1 rig can be recovered by known OpenRig command; 0 blocked; 0 unknown.",
+          actions: [
+            {
+              scope: "rig",
+              rigId: "rig-1",
+              rigName: "test-rig",
+              action: "restore_from_latest_snapshot",
+              command: "rig restore snap-123 --rig rig-1",
+              reason: "Rig has a latest snapshot and one or more seats are not running/ready.",
+              safe: false,
+              blocking: true,
+            },
+          ],
+          blocked: [],
+          unknown: [],
+        },
+      },
+    });
+    const cmd = restoreCheckCommand(deps);
+    await cmd.parseAsync(["node", "rig"]);
+
+    const output = logs.join("\n");
+    expect(output).toContain("RECOVERY: ACTIONABLE");
+    expect(output).toContain("rig restore snap-123 --rig rig-1");
+    expect(output).toContain("1 rig can be recovered");
   });
 
   it("human output shows declared-not-verified host-infra evidence", async () => {
@@ -319,6 +375,17 @@ describe("rig restore-check", () => {
     expect(json.hostInfra.status).toBe("unknown");
     expect(json.checks[0].check).toBe("daemon.reachable");
     expect(json.checks[0].status).toBe("red");
+    expect(json.recovery).toEqual(expect.objectContaining({
+      status: "blocked",
+      actions: [],
+      unknown: [],
+      blocked: [
+        expect.objectContaining({
+          scope: "host",
+          reason: expect.stringContaining("Daemon is not running"),
+        }),
+      ],
+    }));
     // Daemon-down local result includes repairPacket with blocking step
     expect(json.repairPacket).not.toBeNull();
     expect(json.repairPacket[0].blocking).toBe(true);
@@ -343,6 +410,17 @@ describe("rig restore-check", () => {
     }));
     expect(json.rigs).toEqual([]);
     expect(json.hostInfra.status).toBe("unknown");
+    expect(json.recovery).toEqual(expect.objectContaining({
+      status: "unknown",
+      actions: [],
+      blocked: [],
+      unknown: [
+        expect.objectContaining({
+          scope: "host",
+          reason: expect.stringContaining("HTTP 500"),
+        }),
+      ],
+    }));
     expect(json.repairPacket[0]).toEqual(expect.objectContaining({
       blocking: true,
       safe: true,

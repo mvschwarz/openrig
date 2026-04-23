@@ -50,12 +50,39 @@ interface HostInfraAssertion {
   evidence: string;
 }
 
+interface RecoveryAction {
+  scope: "rig";
+  rigId: string;
+  rigName: string;
+  action: "restore_from_latest_snapshot";
+  command: string;
+  reason: string;
+  safe: boolean;
+  blocking: boolean;
+}
+
+interface RecoveryIssue {
+  scope: "host" | "rig";
+  rigId?: string;
+  rigName?: string;
+  reason: string;
+}
+
+interface RecoveryPlan {
+  status: "not_needed" | "actionable" | "blocked" | "unknown";
+  summary: string;
+  actions: RecoveryAction[];
+  blocked: RecoveryIssue[];
+  unknown: RecoveryIssue[];
+}
+
 interface RestoreCheckResult {
   verdict: "restorable" | "restorable_with_caveats" | "not_restorable" | "unknown";
   fullyBack: boolean;
   assertion: RestoreAssertion;
   rigs: RigRestoreRollup[];
   hostInfra: HostInfraAssertion;
+  recovery: RecoveryPlan;
   counts: { red: number; yellow: number; green: number };
   checks: CheckEntry[];
   repairPacket: RepairStep[] | null;
@@ -116,6 +143,16 @@ Exit codes:
             safe: false,  // mutating: starts a daemon process
             blocking: true,
           }],
+          recovery: {
+            status: "blocked",
+            summary: "No exact rig recovery action is known until the daemon is running.",
+            actions: [],
+            blocked: [{
+              scope: "host",
+              reason: "Daemon is not running; rig state could not be inspected for recovery planning.",
+            }],
+            unknown: [],
+          },
         });
 
         if (opts.json) {
@@ -155,6 +192,16 @@ Exit codes:
               safe: true,
               blocking: true,
             }],
+            recovery: {
+              status: "unknown",
+              summary: `Recovery status could not be inspected because daemon returned HTTP ${response.status}.`,
+              actions: [],
+              blocked: [],
+              unknown: [{
+                scope: "host",
+                reason: `Daemon returned HTTP ${response.status}`,
+              }],
+            },
           });
           if (opts.json) {
             console.log(JSON.stringify(result, null, 2));
@@ -198,6 +245,17 @@ function printHuman(result: RestoreCheckResult): void {
   if (result.hostInfra) {
     console.log(`Host bootstrap/autostart: ${result.hostInfra.status} — ${result.hostInfra.evidence}`);
   }
+  console.log(`RECOVERY: ${result.recovery.status.replace(/_/g, " ").toUpperCase()}`);
+  console.log(result.recovery.summary);
+  for (const action of result.recovery.actions) {
+    console.log(`  Action: ${action.command}`);
+  }
+  for (const issue of result.recovery.blocked) {
+    console.log(`  Blocked: ${issue.reason}`);
+  }
+  for (const issue of result.recovery.unknown) {
+    console.log(`  Unknown: ${issue.reason}`);
+  }
   if (result.rigs && result.rigs.length > 0) {
     console.log();
     console.log("Per-rig summary:");
@@ -240,6 +298,7 @@ function localRestoreResult(input: {
   verdict: RestoreCheckResult["verdict"];
   checks: CheckEntry[];
   repairPacket: RepairStep[] | null;
+  recovery: RecoveryPlan;
 }): RestoreCheckResult {
   const red = input.checks.filter((c) => c.status === "red").length;
   const yellow = input.checks.filter((c) => c.status === "yellow").length;
@@ -265,5 +324,6 @@ function localRestoreResult(input: {
     counts: { red, yellow, green },
     checks: input.checks,
     repairPacket: input.repairPacket,
+    recovery: input.recovery,
   };
 }

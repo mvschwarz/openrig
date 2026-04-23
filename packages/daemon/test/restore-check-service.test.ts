@@ -148,6 +148,7 @@ function mockDeps(overrides?: Partial<RestoreCheckDeps>): RestoreCheckDeps {
       } as NodeInventoryEntry,
     ],
     hasSnapshot: () => true,
+    getLatestSnapshot: () => null,
     probeDaemonHealth: () => ({ healthy: true, evidence: "Daemon running on port 7433" }),
     exists: () => true,
     readFile: () => VALID_HOST_INFRA_DECLARATION,
@@ -1187,6 +1188,13 @@ describe("RestoreCheckService", () => {
         caveatChecks: [],
       }),
     ]);
+    expect(result.recovery).toEqual({
+      status: "not_needed",
+      summary: expect.stringContaining("no recovery action needed"),
+      actions: [],
+      blocked: [],
+      unknown: [],
+    });
   });
 
   it("any yellow (no red) produces verdict restorable_with_caveats", () => {
@@ -1199,6 +1207,13 @@ describe("RestoreCheckService", () => {
     expect(result.assertion.caveatRigCount).toBeGreaterThan(0);
     expect(result.counts.yellow).toBeGreaterThan(0);
     expect(result.counts.red).toBe(0);
+    expect(result.recovery).toEqual({
+      status: "not_needed",
+      summary: expect.stringContaining("no recovery action needed"),
+      actions: [],
+      blocked: [],
+      unknown: [],
+    });
   });
 
   it("any red produces verdict not_restorable", () => {
@@ -1225,6 +1240,82 @@ describe("RestoreCheckService", () => {
       status: "unknown",
       reason: "unknown_probe_state",
     }));
+    expect(result.recovery).toEqual(expect.objectContaining({
+      status: "unknown",
+      actions: [],
+      blocked: [],
+      unknown: [
+        expect.objectContaining({
+          scope: "host",
+          reason: expect.stringContaining("unable to determine"),
+        }),
+      ],
+    }));
+  });
+
+  it("stopped snapshot-backed rig produces actionable recovery command", () => {
+    const service = new RestoreCheckService(mockDeps({
+      getNodeInventory: () => [claudeNode({
+        canonicalSessionName: null,
+        sessionStatus: "stopped",
+        startupStatus: "failed",
+        tmuxAttachCommand: null,
+        latestError: "seat crashed",
+      })],
+      getLatestSnapshot: () => ({ id: "snap-123", kind: "auto-pre-down" }),
+    }));
+
+    const result = service.check({ noHooks: true }) as any;
+
+    expect(result.fullyBack).toBe(false);
+    expect(result.recovery).toEqual({
+      status: "actionable",
+      summary: expect.stringContaining("1 rig can be recovered"),
+      actions: [
+        expect.objectContaining({
+          scope: "rig",
+          rigId: "rig-1",
+          rigName: "test-rig",
+          action: "restore_from_latest_snapshot",
+          command: "rig restore snap-123 --rig rig-1",
+          safe: false,
+          blocking: true,
+        }),
+      ],
+      blocked: [],
+      unknown: [],
+    });
+  });
+
+  it("stopped rig without latest snapshot is blocked, not actionable", () => {
+    const service = new RestoreCheckService(mockDeps({
+      hasSnapshot: () => false,
+      getNodeInventory: () => [claudeNode({
+        canonicalSessionName: null,
+        sessionStatus: "stopped",
+        startupStatus: "failed",
+        tmuxAttachCommand: null,
+      })],
+      getLatestSnapshot: () => null,
+    }));
+
+    const result = service.check({ noHooks: true }) as any;
+
+    expect(result.fullyBack).toBe(false);
+    expect(result.recovery).toEqual({
+      status: "blocked",
+      summary: expect.stringContaining("1 rig blocked"),
+      actions: [],
+      blocked: [
+        expect.objectContaining({
+          scope: "rig",
+          rigId: "rig-1",
+          rigName: "test-rig",
+          reason: expect.stringContaining("latest snapshot input is missing"),
+        }),
+      ],
+      unknown: [],
+    });
   });
 
   it("stopped infrastructure node is represented in readiness and prevents fully_back", () => {
