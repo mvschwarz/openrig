@@ -23,7 +23,7 @@ import { SnapshotCapture } from "../src/domain/snapshot-capture.js";
 import { NodeLauncher } from "../src/domain/node-launcher.js";
 import { RestoreOrchestrator } from "../src/domain/restore-orchestrator.js";
 import { ClaudeResumeAdapter } from "../src/adapters/claude-resume.js";
-import type { TmuxAdapter, TmuxResult } from "../src/adapters/tmux.js";
+import { TmuxAdapter, type TmuxResult } from "../src/adapters/tmux.js";
 import type { CodexResumeAdapter } from "../src/adapters/codex-resume.js";
 import type { ResumeResult } from "../src/adapters/claude-resume.js";
 import type { PersistedEvent, Snapshot } from "../src/domain/types.js";
@@ -360,6 +360,44 @@ describe("RestoreOrchestrator", () => {
     const runningSess = sessions.find((s) => s.id === sess.id);
     expect(runningSess?.status).toBe("running");
     // No pre_restore snapshot should have been created
+    expect(snapshotRepo.listSnapshots(rig.id)).toHaveLength(snapshotCountBefore);
+  });
+
+  it("production TmuxAdapter probe error reaches restore fail-closed path (end-to-end)", async () => {
+    // Uses a REAL TmuxAdapter with a mock exec — not a mocked hasSession vi.fn.
+    // Proves the actual adapter error-classification contract propagates through
+    // classifyRunningSessions to produce rig_not_stopped on unexpected errors.
+    const rig = rigRepo.createRig("e2e-probe-rig");
+    const node = rigRepo.addNode(rig.id, "worker", { role: "worker", runtime: "claude-code" });
+    const sess = sessionRegistry.registerSession(node.id, "worker@e2e-probe-rig");
+    sessionRegistry.updateStatus(sess.id, "running");
+    const snap = snapshotCapture.captureSnapshot(rig.id, "manual");
+    const snapshotCountBefore = snapshotRepo.listSnapshots(rig.id).length;
+
+    // Real TmuxAdapter with exec that throws Permission denied for has-session
+    const realTmux = new TmuxAdapter(async (cmd: string) => {
+      if (cmd.includes("has-session")) {
+        throw new Error("error connecting to /tmp/tmux-501/default (Permission denied)");
+      }
+      return "";
+    });
+    const nodeLauncher = new NodeLauncher({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: realTmux });
+    const orch = new RestoreOrchestrator({
+      db, rigRepo, sessionRegistry, eventBus, snapshotRepo, snapshotCapture,
+      checkpointStore, nodeLauncher, tmuxAdapter: realTmux,
+      claudeResume: mockClaudeResume(),
+      codexResume: mockCodexResume(),
+    });
+
+    const result = await orch.restore(snap.id);
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.code).toBe("rig_not_stopped");
+    // Original session preserved — no mutation
+    const sessions = sessionRegistry.getSessionsForRig(rig.id);
+    const runningSess = sessions.find((s) => s.id === sess.id);
+    expect(runningSess?.status).toBe("running");
+    // No pre_restore snapshot created
     expect(snapshotRepo.listSnapshots(rig.id)).toHaveLength(snapshotCountBefore);
   });
 
