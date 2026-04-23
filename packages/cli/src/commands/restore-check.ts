@@ -15,11 +15,19 @@ interface CheckEntry {
   remediation: string;
 }
 
+interface RepairStep {
+  step: number;
+  command: string;
+  rationale: string;
+  safe: boolean;
+  blocking: boolean;
+}
+
 interface RestoreCheckResult {
   verdict: "restorable" | "restorable_with_caveats" | "not_restorable" | "unknown";
   counts: { red: number; yellow: number; green: number };
   checks: CheckEntry[];
-  repairPacket: null;
+  repairPacket: RepairStep[] | null;
 }
 
 const STATUS_SYMBOLS: Record<string, string> = {
@@ -71,7 +79,13 @@ Exit codes:
             evidence: "Daemon is not running",
             remediation: "Start the daemon with: rig daemon start",
           }],
-          repairPacket: null,
+          repairPacket: [{
+            step: 1,
+            command: "Start the daemon with: rig daemon start",
+            rationale: "Daemon is not running",
+            safe: true,
+            blocking: true,
+          }],
         };
 
         if (opts.json) {
@@ -105,7 +119,13 @@ Exit codes:
               evidence: `Daemon returned HTTP ${response.status}`,
               remediation: "Check daemon logs with: rig daemon logs",
             }],
-            repairPacket: null,
+            repairPacket: [{
+              step: 1,
+              command: "Check daemon logs with: rig daemon logs",
+              rationale: `Daemon returned HTTP ${response.status}`,
+              safe: true,
+              blocking: true,
+            }],
           };
           if (opts.json) {
             console.log(JSON.stringify(result, null, 2));
@@ -154,7 +174,15 @@ function printHuman(result: RestoreCheckResult): void {
     }
   }
 
-  if (result.counts.red > 0) {
+  if (result.repairPacket && result.repairPacket.length > 0) {
+    const blockers = result.repairPacket.filter((s) => s.blocking).length;
+    const caveats = result.repairPacket.filter((s) => !s.blocking).length;
+    console.log();
+    console.log(`Repair steps: ${result.repairPacket.length} (${blockers} blocking, ${caveats} caveats)`);
+    if (blockers > 0) {
+      console.log("Resolve blocking steps before restoring.");
+    }
+  } else if (result.counts.red > 0) {
     console.log();
     console.log("Blockers found. Resolve red items before restoring.");
   } else if (result.counts.yellow > 0) {

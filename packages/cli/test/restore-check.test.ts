@@ -112,11 +112,33 @@ describe("rig restore-check", () => {
     expect(process.exitCode).toBe(2);
   });
 
-  it("exit 2 on daemon 500 error", async () => {
+  it("exit 2 on daemon 500 error with blocking repairPacket", async () => {
     const { deps } = makeDeps({ serverError: true });
     const cmd = restoreCheckCommand(deps);
     await cmd.parseAsync(["node", "rig", "--json"]);
     expect(process.exitCode).toBe(2);
+    const json = JSON.parse(logs.join(""));
+    expect(json.repairPacket).not.toBeNull();
+    expect(json.repairPacket[0].blocking).toBe(true);
+    expect(json.repairPacket[0].command).toContain("rig daemon logs");
+  });
+
+  it("human output shows repair step count when repairPacket is non-null", async () => {
+    const { deps } = makeDeps({ result: {
+      verdict: "not_restorable",
+      counts: { red: 1, yellow: 1, green: 3 },
+      repairPacket: [
+        { step: 1, command: "Start the daemon", rationale: "Daemon down", safe: true, blocking: true },
+        { step: 2, command: "Create snapshot", rationale: "No snapshot", safe: true, blocking: false },
+      ],
+    }});
+    const cmd = restoreCheckCommand(deps);
+    await cmd.parseAsync(["node", "rig"]);
+
+    const output = logs.join("\n");
+    expect(output).toContain("Repair steps: 2");
+    expect(output).toContain("1 blocking");
+    expect(output).toContain("1 caveats");
   });
 
   it("--rig passes through to daemon route query", async () => {
@@ -155,6 +177,10 @@ describe("rig restore-check", () => {
     expect(json.verdict).toBe("not_restorable");
     expect(json.checks[0].check).toBe("daemon.reachable");
     expect(json.checks[0].status).toBe("red");
+    // Daemon-down local result includes repairPacket with blocking step
+    expect(json.repairPacket).not.toBeNull();
+    expect(json.repairPacket[0].blocking).toBe(true);
+    expect(json.repairPacket[0].command).toContain("rig daemon start");
     expect(process.exitCode).toBe(1);
     // Should NOT have called the daemon
     expect(requestedPaths).toHaveLength(0);

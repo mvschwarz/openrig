@@ -14,11 +14,19 @@ export interface CheckEntry {
   remediation: string;
 }
 
+export interface RepairStep {
+  step: number;
+  command: string;
+  rationale: string;
+  safe: boolean;
+  blocking: boolean;
+}
+
 export interface RestoreCheckResult {
   verdict: Verdict;
   counts: { red: number; yellow: number; green: number };
   checks: CheckEntry[];
-  repairPacket: null;
+  repairPacket: RepairStep[] | null;
 }
 
 export interface RestoreCheckOpts {
@@ -305,7 +313,8 @@ export class RestoreCheckService {
       verdict = "restorable";
     }
 
-    return { verdict, counts: { red, yellow, green }, checks, repairPacket: null };
+    const repairPacket = this.buildRepairPacket(checks, verdict);
+    return { verdict, counts: { red, yellow, green }, checks, repairPacket };
   }
 
   /** Probe error produces verdict=unknown (not not_restorable) so operators
@@ -314,6 +323,30 @@ export class RestoreCheckService {
     const red = checks.filter((c) => c.status === "red").length;
     const yellow = checks.filter((c) => c.status === "yellow").length;
     const green = checks.filter((c) => c.status === "green").length;
-    return { verdict: "unknown", counts: { red, yellow, green }, checks, repairPacket: null };
+    const repairPacket = this.buildRepairPacket(checks, "unknown");
+    return { verdict: "unknown", counts: { red, yellow, green }, checks, repairPacket };
+  }
+
+  /** Generate ordered repair steps from non-green checks with remediation.
+   *  null when all green (restorable — nothing to repair).
+   *  Blockers (red) first in check order, then caveats (yellow). */
+  private buildRepairPacket(checks: CheckEntry[], verdict: Verdict): RepairStep[] | null {
+    if (verdict === "restorable") return null;
+
+    // Blockers first, then caveats, preserving original check order within each group
+    const blockers = checks.filter((c) => c.status === "red" && c.remediation);
+    const caveats = checks.filter((c) => c.status === "yellow" && c.remediation);
+    const ordered = [...blockers, ...caveats];
+
+    if (ordered.length === 0) return null;
+
+    let step = 0;
+    return ordered.map((c) => ({
+      step: ++step,
+      command: c.remediation,
+      rationale: c.evidence,
+      safe: true,   // All Slice 2 repair steps are read-only suggestions, never destructive
+      blocking: c.status === "red",
+    }));
   }
 }

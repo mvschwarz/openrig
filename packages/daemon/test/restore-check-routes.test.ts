@@ -32,7 +32,12 @@ describe("Restore check routes", () => {
     expect(["restorable", "restorable_with_caveats", "not_restorable", "unknown"]).toContain(body.verdict);
     expect(body.counts).toBeDefined();
     expect(body.checks).toBeInstanceOf(Array);
-    expect(body.repairPacket).toBeNull();
+    // repairPacket is null when restorable, array when caveats/blockers exist
+    if (body.verdict === "restorable") {
+      expect(body.repairPacket).toBeNull();
+    } else {
+      expect(body.repairPacket).toBeInstanceOf(Array);
+    }
 
     // Every check has required fields
     for (const check of body.checks) {
@@ -98,5 +103,48 @@ describe("Restore check routes", () => {
     expect(daemon).toBeDefined();
     expect(daemon.status).toBe("green");
     expect(daemon.evidence).toContain("Daemon running");
+  });
+
+  it("GET /api/restore-check returns non-null repairPacket with blocking field for broken fixture", async () => {
+    // Create a rig with a node — hooks are yellow by default (Slice 2 unimplemented),
+    // producing restorable_with_caveats and a non-null repairPacket
+    const rig = rigRepo.createRig("broken-rig");
+    rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code" });
+
+    const res = await app.request("/api/restore-check?rig=broken-rig");
+    expect(res.status).toBe(200);
+
+    const body = await res.json();
+    // Hooks yellow → restorable_with_caveats → repairPacket populated
+    expect(body.repairPacket).toBeInstanceOf(Array);
+    expect(body.repairPacket.length).toBeGreaterThan(0);
+
+    // Each repair step has the required fields including blocking
+    for (const step of body.repairPacket) {
+      expect(typeof step.step).toBe("number");
+      expect(typeof step.command).toBe("string");
+      expect(typeof step.rationale).toBe("string");
+      expect(typeof step.safe).toBe("boolean");
+      expect(typeof step.blocking).toBe("boolean");
+    }
+
+    // Yellow hooks are non-blocking caveats
+    const hookStep = body.repairPacket.find((s: { rationale: string }) => s.rationale.includes("Hook"));
+    if (hookStep) {
+      expect(hookStep.blocking).toBe(false);
+    }
+  });
+
+  it("GET /api/restore-check?rig=nonexistent returns repairPacket with blocking:true entry", async () => {
+    rigRepo.createRig("real-rig");
+
+    const res = await app.request("/api/restore-check?rig=nonexistent");
+    const body = await res.json();
+
+    expect(body.verdict).toBe("not_restorable");
+    expect(body.repairPacket).toBeInstanceOf(Array);
+    const blocker = body.repairPacket.find((s: { blocking: boolean }) => s.blocking);
+    expect(blocker).toBeDefined();
+    expect(blocker.command).toContain("rig ps");
   });
 });
