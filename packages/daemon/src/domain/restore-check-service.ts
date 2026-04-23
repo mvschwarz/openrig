@@ -717,17 +717,23 @@ export class RestoreCheckService {
       };
     }
 
-    const complete = inspections.find((inspection) => inspection.hasSessionStartCompact && inspection.hasUserPromptSubmit);
-    if (complete) {
+    const sessionStartPaths = inspections
+      .filter((inspection) => inspection.hasSessionStartCompact)
+      .map((inspection) => inspection.path);
+    const userPromptSubmitPaths = inspections
+      .filter((inspection) => inspection.hasUserPromptSubmit)
+      .map((inspection) => inspection.path);
+    const hasSessionStart = sessionStartPaths.length > 0;
+    const hasUserPromptSubmit = userPromptSubmitPaths.length > 0;
+
+    if (hasSessionStart && hasUserPromptSubmit) {
       return {
         check: `seat.${session}.hooks`, status: "green",
-        evidence: `Claude Code hook configuration present, not hook-execution verified; required SessionStart/compact and UserPromptSubmit commands found in ${complete.path}. Searched settings paths: ${searchedPaths.join(", ")}`,
+        evidence: `Claude Code hook configuration present, not hook-execution verified; SessionStart matcher compact command found in ${sessionStartPaths.join(", ")}; UserPromptSubmit command found in ${userPromptSubmitPaths.join(", ")}. Searched settings paths: ${searchedPaths.join(", ")}`,
         remediation: "",
       };
     }
 
-    const hasSessionStart = inspections.some((inspection) => inspection.hasSessionStartCompact);
-    const hasUserPromptSubmit = inspections.some((inspection) => inspection.hasUserPromptSubmit);
     const missing = [];
     if (!hasSessionStart) {
       missing.push(`SessionStart matcher compact command ${CLAUDE_SESSION_START_COMPACT_COMMAND}`);
