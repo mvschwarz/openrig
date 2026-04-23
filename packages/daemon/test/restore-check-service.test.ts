@@ -21,6 +21,30 @@ const VALID_HOST_INFRA_DECLARATION = JSON.stringify({
   ],
 });
 
+function v2HostInfraDeclaration(overrides?: {
+  daemonEvidencePaths?: string[];
+  supportingInfra?: Array<Record<string, unknown>>;
+}): string {
+  return JSON.stringify({
+    schemaVersion: 2,
+    daemonBootstrap: {
+      declared: true,
+      mechanism: "launchd",
+      evidence: "com.openrig.daemon",
+      evidencePaths: overrides?.daemonEvidencePaths,
+    },
+    supportingInfra: overrides?.supportingInfra ?? [
+      {
+        id: "supervisor-wake",
+        declared: true,
+        required: true,
+        evidence: "kernel rig infra seat or host launch agent",
+        evidencePaths: ["${OPENRIG_HOME}/supervisor-wake/README.md"],
+      },
+    ],
+  });
+}
+
 function mockDeps(overrides?: Partial<RestoreCheckDeps>): RestoreCheckDeps {
   return {
     listRigs: () => [{ rigId: "rig-1", name: "test-rig" }],
@@ -336,6 +360,295 @@ describe("RestoreCheckService", () => {
       expect(result.fullyBack).toBe(true);
       expect(result.assertion.reason).toBe("observable_rigs_fully_back_host_infra_declared_not_verified");
       expect(result.repairPacket).toBeNull();
+    } finally {
+      if (previous === undefined) delete process.env["OPENRIG_HOME"];
+      else process.env["OPENRIG_HOME"] = previous;
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("schemaVersion 2 with all evidence paths present is green without autostart overclaim", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "restore-check-host-infra-v2-present-"));
+    const declarationPath = path.join(tmpDir, "host-infra.json");
+    const daemonPath = path.join(tmpDir, "daemon", "launchd.plist");
+    const supportPath = path.join(tmpDir, "supervisor-wake", "README.md");
+    const previous = process.env["OPENRIG_HOME"];
+    process.env["OPENRIG_HOME"] = tmpDir;
+
+    try {
+      const service = new RestoreCheckService(mockDeps({
+        exists: () => true,
+        readFile: () => v2HostInfraDeclaration({
+          daemonEvidencePaths: [daemonPath],
+        }),
+      }));
+      const result = service.check({ noQueue: true, noHooks: true });
+      const check = result.checks.find((entry) => entry.check === "host.bootstrap-autostart.declaration");
+
+      expect(check?.status).toBe("green");
+      expect(check?.evidence).toContain("declared, evidence paths present, not autostart verified");
+      expect(check?.evidence).toContain(daemonPath);
+      expect(check?.evidence).toContain(supportPath);
+      expect(result.hostInfra.status).toBe("declared");
+      expect(result.hostInfra.evidence).toContain("not autostart verified");
+      expect(result.verdict).toBe("restorable");
+      expect(result.fullyBack).toBe(true);
+      expect(result.repairPacket).toBeNull();
+    } finally {
+      if (previous === undefined) delete process.env["OPENRIG_HOME"];
+      else process.env["OPENRIG_HOME"] = previous;
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("schemaVersion 2 requires daemonBootstrap evidencePaths", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "restore-check-host-infra-v2-no-daemon-evidence-"));
+    const declarationPath = path.join(tmpDir, "host-infra.json");
+    const supportPath = path.join(tmpDir, "supervisor-wake", "README.md");
+    const previous = process.env["OPENRIG_HOME"];
+    process.env["OPENRIG_HOME"] = tmpDir;
+
+    try {
+      const service = new RestoreCheckService(mockDeps({
+        exists: () => true,
+        readFile: () => v2HostInfraDeclaration(),
+      }));
+      const result = service.check({ noQueue: true, noHooks: true });
+      const check = result.checks.find((entry) => entry.check === "host.bootstrap-autostart.declaration");
+
+      expect(check?.status).toBe("yellow");
+      expect(check?.evidence).toContain("daemonBootstrap.evidencePaths");
+      expect(result.hostInfra.status).toBe("declared");
+      expect(result.fullyBack).toBe(false);
+      expect(result.assertion.reason).toBe("caveats_present");
+      expect(result.repairPacket?.[0]).toEqual(expect.objectContaining({
+        command: expect.stringContaining("daemonBootstrap.evidencePaths"),
+        safe: false,
+        blocking: false,
+      }));
+    } finally {
+      if (previous === undefined) delete process.env["OPENRIG_HOME"];
+      else process.env["OPENRIG_HOME"] = previous;
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("schemaVersion 2 missing daemon evidence path is yellow with exact path", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "restore-check-host-infra-v2-missing-daemon-"));
+    const declarationPath = path.join(tmpDir, "host-infra.json");
+    const daemonPath = path.join(tmpDir, "daemon", "launchd.plist");
+    const supportPath = path.join(tmpDir, "supervisor-wake", "README.md");
+    const previous = process.env["OPENRIG_HOME"];
+    process.env["OPENRIG_HOME"] = tmpDir;
+
+    try {
+      const service = new RestoreCheckService(mockDeps({
+        exists: (p) => p !== daemonPath,
+        readFile: () => v2HostInfraDeclaration({
+          daemonEvidencePaths: ["${OPENRIG_HOME}/daemon/launchd.plist"],
+        }),
+      }));
+      const result = service.check({ noQueue: true, noHooks: true });
+      const check = result.checks.find((entry) => entry.check === "host.bootstrap-autostart.declaration");
+
+      expect(check?.status).toBe("yellow");
+      expect(check?.evidence).toContain(daemonPath);
+      expect(result.hostInfra.status).toBe("declared");
+      expect(result.hostInfra.evidence).toContain(daemonPath);
+      expect(result.repairPacket?.[0]).toEqual(expect.objectContaining({
+        command: expect.stringContaining(daemonPath),
+        safe: false,
+        blocking: false,
+      }));
+    } finally {
+      if (previous === undefined) delete process.env["OPENRIG_HOME"];
+      else process.env["OPENRIG_HOME"] = previous;
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("schemaVersion 2 missing required supporting evidence path is yellow with exact path", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "restore-check-host-infra-v2-missing-support-"));
+    const declarationPath = path.join(tmpDir, "host-infra.json");
+    const daemonPath = path.join(tmpDir, "daemon", "launchd.plist");
+    const supportPath = path.join(tmpDir, "supervisor-wake", "README.md");
+    const previous = process.env["OPENRIG_HOME"];
+    process.env["OPENRIG_HOME"] = tmpDir;
+
+    try {
+      const service = new RestoreCheckService(mockDeps({
+        exists: (p) => p !== supportPath,
+        readFile: () => v2HostInfraDeclaration({
+          daemonEvidencePaths: ["${OPENRIG_HOME}/daemon/launchd.plist"],
+        }),
+      }));
+      const result = service.check({ noQueue: true, noHooks: true });
+      const check = result.checks.find((entry) => entry.check === "host.bootstrap-autostart.declaration");
+
+      expect(check?.status).toBe("yellow");
+      expect(check?.evidence).toContain(supportPath);
+      expect(result.hostInfra.status).toBe("declared");
+      expect(result.fullyBack).toBe(false);
+      expect(result.repairPacket?.[0]).toEqual(expect.objectContaining({
+        command: expect.stringContaining(supportPath),
+        safe: false,
+        blocking: false,
+      }));
+    } finally {
+      if (previous === undefined) delete process.env["OPENRIG_HOME"];
+      else process.env["OPENRIG_HOME"] = previous;
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("schemaVersion 2 required supportingInfra without evidencePaths is insufficient evidence", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "restore-check-host-infra-v2-required-no-evidence-"));
+    const declarationPath = path.join(tmpDir, "host-infra.json");
+    const daemonPath = path.join(tmpDir, "daemon", "launchd.plist");
+    const previous = process.env["OPENRIG_HOME"];
+    process.env["OPENRIG_HOME"] = tmpDir;
+
+    try {
+      const service = new RestoreCheckService(mockDeps({
+        exists: () => true,
+        readFile: () => v2HostInfraDeclaration({
+          daemonEvidencePaths: ["${OPENRIG_HOME}/daemon/launchd.plist"],
+          supportingInfra: [{
+            id: "supervisor-wake",
+            declared: true,
+            required: true,
+            evidence: "kernel rig infra seat or host launch agent",
+          }],
+        }),
+      }));
+      const result = service.check({ noQueue: true, noHooks: true });
+      const check = result.checks.find((entry) => entry.check === "host.bootstrap-autostart.declaration");
+
+      expect(check?.status).toBe("yellow");
+      expect(check?.evidence).toContain("supportingInfra[supervisor-wake].evidencePaths");
+      expect(result.hostInfra.status).toBe("declared");
+      expect(result.fullyBack).toBe(false);
+      expect(result.repairPacket?.[0]).toEqual(expect.objectContaining({
+        command: expect.stringContaining("supportingInfra[supervisor-wake].evidencePaths"),
+        safe: false,
+        blocking: false,
+      }));
+    } finally {
+      if (previous === undefined) delete process.env["OPENRIG_HOME"];
+      else process.env["OPENRIG_HOME"] = previous;
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("schemaVersion 2 optional supportingInfra without evidencePaths does not create a caveat", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "restore-check-host-infra-v2-optional-no-evidence-"));
+    const declarationPath = path.join(tmpDir, "host-infra.json");
+    const daemonPath = path.join(tmpDir, "daemon", "launchd.plist");
+    const previous = process.env["OPENRIG_HOME"];
+    process.env["OPENRIG_HOME"] = tmpDir;
+
+    try {
+      const service = new RestoreCheckService(mockDeps({
+        exists: () => true,
+        readFile: () => v2HostInfraDeclaration({
+          daemonEvidencePaths: ["${OPENRIG_HOME}/daemon/launchd.plist"],
+          supportingInfra: [{
+            id: "optional-dashboard",
+            declared: true,
+            required: false,
+            evidence: "nice-to-have dashboard helper",
+          }],
+        }),
+      }));
+      const result = service.check({ noQueue: true, noHooks: true });
+      const check = result.checks.find((entry) => entry.check === "host.bootstrap-autostart.declaration");
+
+      expect(check?.status).toBe("green");
+      expect(check?.evidence).toContain("declared, evidence paths present, not autostart verified");
+      expect(result.verdict).toBe("restorable");
+      expect(result.fullyBack).toBe(true);
+    } finally {
+      if (previous === undefined) delete process.env["OPENRIG_HOME"];
+      else process.env["OPENRIG_HOME"] = previous;
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("schemaVersion 2 rejects plain relative and traversal evidence paths", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "restore-check-host-infra-v2-relative-reject-"));
+    const declarationPath = path.join(tmpDir, "host-infra.json");
+    const daemonPath = path.join(tmpDir, "daemon", "launchd.plist");
+    const previous = process.env["OPENRIG_HOME"];
+    process.env["OPENRIG_HOME"] = tmpDir;
+
+    try {
+      const service = new RestoreCheckService(mockDeps({
+        exists: () => true,
+        readFile: () => v2HostInfraDeclaration({
+          daemonEvidencePaths: ["${OPENRIG_HOME}/daemon/launchd.plist"],
+          supportingInfra: [
+            {
+              id: "relative",
+              declared: true,
+              required: true,
+              evidencePaths: ["relative/path.txt"],
+            },
+            {
+              id: "traversal",
+              declared: true,
+              required: true,
+              evidencePaths: ["${OPENRIG_HOME}/../escape.txt"],
+            },
+          ],
+        }),
+      }));
+      const result = service.check({ noQueue: true, noHooks: true });
+      const check = result.checks.find((entry) => entry.check === "host.bootstrap-autostart.declaration");
+
+      expect(check?.status).toBe("yellow");
+      expect(check?.evidence).toContain("relative/path.txt");
+      expect(check?.evidence).toContain("${OPENRIG_HOME}/../escape.txt");
+      expect(result.hostInfra.status).toBe("declared");
+      expect(result.fullyBack).toBe(false);
+    } finally {
+      if (previous === undefined) delete process.env["OPENRIG_HOME"];
+      else process.env["OPENRIG_HOME"] = previous;
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("schemaVersion 2 evidence path checks are read-only", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "restore-check-host-infra-v2-readonly-"));
+    const daemonDir = path.join(tmpDir, "daemon");
+    const supportDir = path.join(tmpDir, "supervisor-wake");
+    fs.mkdirSync(daemonDir, { recursive: true });
+    fs.mkdirSync(supportDir, { recursive: true });
+    const declarationPath = path.join(tmpDir, "host-infra.json");
+    const daemonPath = path.join(daemonDir, "launchd.plist");
+    const supportPath = path.join(supportDir, "README.md");
+    fs.writeFileSync(daemonPath, "daemon evidence");
+    fs.writeFileSync(supportPath, "support evidence");
+    fs.utimesSync(tmpDir, new Date(946684800000), new Date(946684800000));
+    const before = fs.statSync(tmpDir).mtimeMs;
+    const readPaths: string[] = [];
+    const previous = process.env["OPENRIG_HOME"];
+    process.env["OPENRIG_HOME"] = tmpDir;
+
+    try {
+      const service = new RestoreCheckService(mockDeps({
+        exists: () => true,
+        readFile: (p) => {
+          readPaths.push(p);
+          return v2HostInfraDeclaration({
+            daemonEvidencePaths: ["${OPENRIG_HOME}/daemon/launchd.plist"],
+          });
+        },
+      }));
+      const result = service.check({ noQueue: true, noHooks: true });
+
+      expect(result.verdict).toBe("restorable");
+      expect(readPaths).toEqual([declarationPath]);
+      expect(fs.statSync(tmpDir).mtimeMs).toBe(before);
     } finally {
       if (previous === undefined) delete process.env["OPENRIG_HOME"];
       else process.env["OPENRIG_HOME"] = previous;

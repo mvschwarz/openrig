@@ -1,5 +1,5 @@
 import { existsSync, accessSync, constants } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, join, relative } from "node:path";
 import { getCompatibleOpenRigPath } from "../openrig-compat.js";
 
 // --- Types ---
@@ -347,7 +347,26 @@ export class RestoreCheckService {
         };
       }
 
-      const evidence = `Host infra declaration at ${declarationPath} declared, not verified; daemonBootstrap mechanism=${validation.mechanism}; requiredSupportingInfra=${validation.requiredSupportingInfra}`;
+      if (validation.schemaVersion === 2 && validation.evidenceProblems.length > 0) {
+        const evidence = `Host infra declaration at ${declarationPath} declared with insufficient evidence paths; ${validation.evidenceProblems.join("; ")}`;
+        return {
+          check: {
+            check,
+            status: "yellow",
+            evidence,
+            remediation: `Add or repair host infra evidence path(s): ${validation.evidenceProblems.join("; ")}`,
+            remediationSafe: false,
+          },
+          hostInfra: {
+            status: "declared",
+            evidence,
+          },
+        };
+      }
+
+      const evidence = validation.schemaVersion === 2
+        ? `Host infra declaration at ${declarationPath} declared, evidence paths present, not autostart verified; daemonBootstrap mechanism=${validation.mechanism}; requiredSupportingInfra=${validation.requiredSupportingInfra}; evidencePaths=${validation.evidencePaths.join(", ")}`
+        : `Host infra declaration at ${declarationPath} declared, not verified; daemonBootstrap mechanism=${validation.mechanism}; requiredSupportingInfra=${validation.requiredSupportingInfra}`;
       return {
         check: {
           check,
@@ -380,20 +399,31 @@ export class RestoreCheckService {
 
   private validateHostInfraDeclaration(value: unknown): {
     errors: string[];
+    schemaVersion: 1 | 2 | null;
     mechanism: string;
     requiredSupportingInfra: number;
+    evidencePaths: string[];
+    evidenceProblems: string[];
   } {
     const errors: string[] = [];
+    const evidencePaths: string[] = [];
+    const evidenceProblems: string[] = [];
     const obj = isRecord(value) ? value : null;
     if (obj === null) {
       return {
         errors: ["schemaVersion", "daemonBootstrap.mechanism", "supportingInfra"],
+        schemaVersion: null,
         mechanism: "unknown",
         requiredSupportingInfra: 0,
+        evidencePaths,
+        evidenceProblems,
       };
     }
 
-    if (obj["schemaVersion"] !== 1) {
+    const schemaVersion = obj["schemaVersion"] === 1 || obj["schemaVersion"] === 2
+      ? obj["schemaVersion"]
+      : null;
+    if (schemaVersion === null) {
       errors.push("schemaVersion");
     }
 
@@ -416,11 +446,94 @@ export class RestoreCheckService {
       ? supportingInfra.filter((entry) => isRecord(entry) && entry["required"] === true).length
       : 0;
 
+    if (schemaVersion === 2 && errors.length === 0) {
+      this.collectRequiredEvidencePaths(
+        "daemonBootstrap.evidencePaths",
+        daemonBootstrap?.["evidencePaths"],
+        evidencePaths,
+        evidenceProblems,
+      );
+
+      supportingInfra?.forEach((entry, index) => {
+        if (!isRecord(entry) || entry["required"] !== true) return;
+        const id = typeof entry["id"] === "string" && entry["id"].trim()
+          ? entry["id"].trim()
+          : String(index);
+        this.collectRequiredEvidencePaths(
+          `supportingInfra[${id}].evidencePaths`,
+          entry["evidencePaths"],
+          evidencePaths,
+          evidenceProblems,
+        );
+      });
+    }
+
     return {
       errors,
+      schemaVersion,
       mechanism: mechanism || "unknown",
       requiredSupportingInfra,
+      evidencePaths,
+      evidenceProblems,
     };
+  }
+
+  private collectRequiredEvidencePaths(
+    label: string,
+    value: unknown,
+    evidencePaths: string[],
+    evidenceProblems: string[],
+  ): void {
+    if (!Array.isArray(value) || value.length === 0) {
+      evidenceProblems.push(`${label} missing or empty`);
+      return;
+    }
+
+    for (const candidate of value) {
+      if (typeof candidate !== "string" || candidate.trim() === "") {
+        evidenceProblems.push(`${label} contains invalid evidence path ${String(candidate)}`);
+        continue;
+      }
+
+      const resolved = this.resolveHostInfraEvidencePath(candidate.trim());
+      if ("error" in resolved) {
+        evidenceProblems.push(`${label} invalid evidence path ${candidate}: ${resolved.error}`);
+        continue;
+      }
+
+      const resolvedPath = resolved.path;
+      evidencePaths.push(resolvedPath);
+      if (!this.deps.exists(resolvedPath)) {
+        evidenceProblems.push(`${label} missing evidence path ${resolvedPath}`);
+      }
+    }
+  }
+
+  private resolveHostInfraEvidencePath(rawPath: string): { path: string; error?: undefined } | { path?: undefined; error: string } {
+    const openRigPrefix = "${OPENRIG_HOME}/";
+    const hasTraversal = rawPath.split(/[\\/]+/).includes("..");
+
+    if (rawPath.startsWith(openRigPrefix)) {
+      const relativePath = rawPath.slice(openRigPrefix.length);
+      if (!relativePath || isAbsolute(relativePath) || hasTraversal) {
+        return { error: "path traversal or empty OPENRIG_HOME-relative path rejected" };
+      }
+      const openRigHome = getCompatibleOpenRigPath("");
+      const resolved = join(openRigHome, relativePath);
+      const relativeToHome = relative(openRigHome, resolved);
+      if (relativeToHome.startsWith("..") || isAbsolute(relativeToHome)) {
+        return { error: "path traversal outside OPENRIG_HOME rejected" };
+      }
+      return { path: resolved };
+    }
+
+    if (!isAbsolute(rawPath)) {
+      return { error: "plain relative evidence paths are rejected; use absolute or ${OPENRIG_HOME}/..." };
+    }
+    if (hasTraversal) {
+      return { error: "path traversal evidence paths are rejected" };
+    }
+    return { path: rawPath };
   }
 
   private checkSnapshot(rig: { rigId: string; name: string }): CheckEntry {
