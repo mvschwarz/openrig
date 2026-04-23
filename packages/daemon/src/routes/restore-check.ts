@@ -36,6 +36,10 @@ restoreCheckRoutes.get("/", (c) => {
       hasSnapshot: (rigId: string) => {
         return deps.snapshotRepo.listSnapshots(rigId).length > 0;
       },
+      getLatestSnapshot: (rigId: string) => {
+        const snapshot = deps.snapshotRepo.getLatestSnapshot(rigId);
+        return snapshot ? { id: snapshot.id, kind: snapshot.kind } : null;
+      },
       probeDaemonHealth: () => {
         // We're inside the daemon — if this route is responding, daemon is healthy
         return { healthy: true, evidence: "Daemon running (responding to API requests)" };
@@ -68,6 +72,16 @@ restoreCheckRoutes.get("/", (c) => {
       hostInfra: {
         status: "unknown",
         evidence: "Host bootstrap/autostart source could not be inspected because restore-check route failed",
+      },
+      recovery: {
+        status: "unknown",
+        summary: "Recovery status could not be inspected because the restore-check route failed.",
+        actions: [],
+        blocked: [],
+        unknown: [{
+          scope: "host",
+          reason: evidence,
+        }],
       },
       counts: { red: 0, yellow: 0, green: 0 },
       checks: [{

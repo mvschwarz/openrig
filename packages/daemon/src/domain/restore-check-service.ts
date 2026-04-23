@@ -57,12 +57,41 @@ export interface HostInfraAssertion {
   evidence: string;
 }
 
+export type RecoveryStatus = "not_needed" | "actionable" | "blocked" | "unknown";
+
+export interface RecoveryAction {
+  scope: "rig";
+  rigId: string;
+  rigName: string;
+  action: "restore_from_latest_snapshot";
+  command: string;
+  reason: string;
+  safe: boolean;
+  blocking: boolean;
+}
+
+export interface RecoveryIssue {
+  scope: "host" | "rig";
+  rigId?: string;
+  rigName?: string;
+  reason: string;
+}
+
+export interface RecoveryPlan {
+  status: RecoveryStatus;
+  summary: string;
+  actions: RecoveryAction[];
+  blocked: RecoveryIssue[];
+  unknown: RecoveryIssue[];
+}
+
 export interface RestoreCheckResult {
   verdict: Verdict;
   fullyBack: boolean;
   assertion: RestoreAssertion;
   rigs: RigRestoreRollup[];
   hostInfra: HostInfraAssertion;
+  recovery: RecoveryPlan;
   counts: { red: number; yellow: number; green: number };
   checks: CheckEntry[];
   repairPacket: RepairStep[] | null;
@@ -99,6 +128,8 @@ export interface RestoreCheckDeps {
   getNodeInventory: (rigId: string) => NodeInventoryEntry[];
   /** Check if a snapshot exists for a rig */
   hasSnapshot: (rigId: string) => boolean;
+  /** Get the newest snapshot for exact restore planning when available */
+  getLatestSnapshot?: (rigId: string) => { id: string; kind: string } | null;
   /** Probe daemon health: returns { healthy: boolean; evidence: string } */
   probeDaemonHealth: () => { healthy: boolean; evidence: string };
   /** Filesystem probes */
@@ -113,6 +144,15 @@ interface RigRollupInput {
   rig: { rigId: string; name: string };
   nodes: NodeInventoryEntry[];
   checks: CheckEntry[];
+}
+
+interface RecoveryRigInput {
+  rigId: string;
+  rigName: string;
+  expectedNodes: number;
+  runningReadyNodes: number;
+  latestSnapshot: { id: string; kind: string } | null;
+  snapshotLookupError?: string;
 }
 
 interface HostInfraCheckResult {
@@ -148,6 +188,7 @@ export class RestoreCheckService {
   check(opts: RestoreCheckOpts): RestoreCheckResult {
     const checks: CheckEntry[] = [];
     const rigRollupInputs: RigRollupInput[] = [];
+    const recoveryRigInputs: RecoveryRigInput[] = [];
 
     // Host-level checks — daemon probe throw produces unknown (not not_restorable).
     // Daemon definitely-down (healthy=false, negative text) is red/not_restorable.
@@ -238,7 +279,20 @@ export class RestoreCheckService {
       rigRollupInputs.push({ rig, nodes, checks: rigChecks });
     }
 
-    return this.buildResult(checks, rigRollupInputs.map((input) => this.buildRigRollup(input)), hostInfraCheck.hostInfra);
+    const rigRollups = rigRollupInputs.map((input) => this.buildRigRollup(input));
+    for (const rollup of rigRollups) {
+      const latestSnapshot = this.inspectLatestSnapshot(rollup.rigId);
+      recoveryRigInputs.push({
+        rigId: rollup.rigId,
+        rigName: rollup.rigName,
+        expectedNodes: rollup.expectedNodes,
+        runningReadyNodes: rollup.runningReadyNodes,
+        latestSnapshot: latestSnapshot.snapshot,
+        snapshotLookupError: latestSnapshot.error,
+      });
+    }
+
+    return this.buildResult(checks, rigRollups, hostInfraCheck.hostInfra, recoveryRigInputs);
   }
 
   /** Returns CheckEntry on success/definite-down; null on probe exception
@@ -816,7 +870,29 @@ export class RestoreCheckService {
     return { check: `rig.${rig.name}.spec-present`, status: "green", evidence: `Spec present at ${rigYaml}`, remediation: "" };
   }
 
-  private buildResult(checks: CheckEntry[], rigs: RigRestoreRollup[], hostInfra?: HostInfraAssertion): RestoreCheckResult {
+  private inspectLatestSnapshot(rigId: string): { snapshot: { id: string; kind: string } | null; error?: string } {
+    if (!this.deps.getLatestSnapshot) {
+      return { snapshot: null };
+    }
+
+    try {
+      const snapshot = this.deps.getLatestSnapshot(rigId);
+      if (!snapshot) return { snapshot: null };
+      return { snapshot: { id: snapshot.id, kind: snapshot.kind } };
+    } catch (err) {
+      return {
+        snapshot: null,
+        error: `Latest snapshot lookup failed: ${err instanceof Error ? err.message : String(err)}`,
+      };
+    }
+  }
+
+  private buildResult(
+    checks: CheckEntry[],
+    rigs: RigRestoreRollup[],
+    hostInfra?: HostInfraAssertion,
+    recoveryInputs: RecoveryRigInput[] = [],
+  ): RestoreCheckResult {
     const red = checks.filter((c) => c.status === "red").length;
     const yellow = checks.filter((c) => c.status === "yellow").length;
     const green = checks.filter((c) => c.status === "green").length;
@@ -831,7 +907,8 @@ export class RestoreCheckService {
     }
 
     const repairPacket = this.buildRepairPacket(checks, verdict);
-    return this.withAssertion({ verdict, counts: { red, yellow, green }, checks, repairPacket }, rigs, hostInfra);
+    const recovery = this.buildRecovery(verdict, checks, recoveryInputs);
+    return this.withAssertion({ verdict, counts: { red, yellow, green }, checks, repairPacket, recovery }, rigs, hostInfra);
   }
 
   /** Probe error produces verdict=unknown (not not_restorable) so operators
@@ -841,11 +918,25 @@ export class RestoreCheckService {
     const yellow = checks.filter((c) => c.status === "yellow").length;
     const green = checks.filter((c) => c.status === "green").length;
     const repairPacket = this.buildRepairPacket(checks, "unknown");
-    return this.withAssertion({ verdict: "unknown", counts: { red, yellow, green }, checks, repairPacket }, []);
+    const evidence = checks.find((check) => check.status === "red")?.evidence
+      ?? "Restore-check state could not be inspected";
+    return this.withAssertion({
+      verdict: "unknown",
+      counts: { red, yellow, green },
+      checks,
+      repairPacket,
+      recovery: {
+        status: "unknown",
+        summary: "Recovery status could not be inspected because restore-check state is unknown.",
+        actions: [],
+        blocked: [],
+        unknown: [{ scope: "host", reason: evidence }],
+      },
+    }, []);
   }
 
   private withAssertion(
-    result: Pick<RestoreCheckResult, "verdict" | "counts" | "checks" | "repairPacket">,
+    result: Pick<RestoreCheckResult, "verdict" | "counts" | "checks" | "repairPacket" | "recovery">,
     rigs: RigRestoreRollup[],
     hostInfra?: HostInfraAssertion,
   ): RestoreCheckResult {
@@ -892,7 +983,130 @@ export class RestoreCheckService {
             status: "not_inspected",
             evidence: "No host bootstrap/autostart source inspected by v0; fullyBack only covers observable daemon, rig, and seat readiness",
           }),
+      recovery: result.recovery,
     };
+  }
+
+  private buildRecovery(
+    verdict: Verdict,
+    checks: CheckEntry[],
+    recoveryInputs: RecoveryRigInput[],
+  ): RecoveryPlan {
+    if (verdict === "unknown") {
+      const evidence = checks.find((check) => check.status === "red")?.evidence
+        ?? "Restore-check state could not be inspected";
+      return {
+        status: "unknown",
+        summary: "Recovery status could not be inspected because restore-check state is unknown.",
+        actions: [],
+        blocked: [],
+        unknown: [{ scope: "host", reason: evidence }],
+      };
+    }
+
+    if (recoveryInputs.length === 0) {
+      const firstRed = checks.find((check) => check.status === "red");
+      if (firstRed) {
+        return {
+          status: "blocked",
+          summary: "No exact recovery action is known in v0 because restore-check found blockers outside runnable rig inventory.",
+          actions: [],
+          blocked: [{ scope: "host", reason: firstRed.evidence }],
+          unknown: [],
+        };
+      }
+      return {
+        status: "not_needed",
+        summary: "All observable rigs are already running/ready; no recovery action needed.",
+        actions: [],
+        blocked: [],
+        unknown: [],
+      };
+    }
+
+    const allReady = recoveryInputs.every((input) => input.runningReadyNodes === input.expectedNodes);
+    if (allReady) {
+      return {
+        status: "not_needed",
+        summary: "All observable rigs are already running/ready; no recovery action needed.",
+        actions: [],
+        blocked: [],
+        unknown: [],
+      };
+    }
+
+    const actions: RecoveryAction[] = [];
+    const blocked: RecoveryIssue[] = [];
+    const unknown: RecoveryIssue[] = [];
+
+    for (const input of recoveryInputs) {
+      if (input.runningReadyNodes === input.expectedNodes) continue;
+
+      if (input.snapshotLookupError) {
+        unknown.push({
+          scope: "rig",
+          rigId: input.rigId,
+          rigName: input.rigName,
+          reason: input.snapshotLookupError,
+        });
+        continue;
+      }
+
+      if (input.latestSnapshot) {
+        actions.push({
+          scope: "rig",
+          rigId: input.rigId,
+          rigName: input.rigName,
+          action: "restore_from_latest_snapshot",
+          command: `rig restore ${input.latestSnapshot.id} --rig ${input.rigId}`,
+          reason: "Rig has a latest snapshot and one or more seats are not running/ready.",
+          safe: false,
+          blocking: true,
+        });
+        continue;
+      }
+
+      blocked.push({
+        scope: "rig",
+        rigId: input.rigId,
+        rigName: input.rigName,
+        reason: "No exact recovery action is known in v0 because latest snapshot input is missing.",
+      });
+    }
+
+    const status: RecoveryStatus = unknown.length > 0
+      ? "unknown"
+      : actions.length > 0
+        ? "actionable"
+        : blocked.length > 0
+          ? "blocked"
+          : "not_needed";
+
+    return {
+      status,
+      summary: this.buildRecoverySummary(status, actions, blocked, unknown),
+      actions,
+      blocked,
+      unknown,
+    };
+  }
+
+  private buildRecoverySummary(
+    status: RecoveryStatus,
+    actions: RecoveryAction[],
+    blocked: RecoveryIssue[],
+    unknown: RecoveryIssue[],
+  ): string {
+    if (status === "not_needed") {
+      return "All observable rigs are already running/ready; no recovery action needed.";
+    }
+    if (status === "unknown") {
+      return `Recovery status could not be inspected completely; ${actions.length} actionable, ${blocked.length} blocked, ${unknown.length} unknown.`;
+    }
+    if (status === "actionable") {
+      return `${actions.length} ${pluralize(actions.length, "rig")} can be recovered by known OpenRig command; ${blocked.length} ${pluralize(blocked.length, "rig")} blocked; ${unknown.length} unknown.`;
+    }
+    return `${blocked.length} ${pluralize(blocked.length, "rig")} blocked; ${actions.length} actionable; ${unknown.length} unknown.`;
   }
 
   private buildRigRollup(input: RigRollupInput): RigRestoreRollup {
@@ -968,4 +1182,8 @@ export class RestoreCheckService {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function pluralize(count: number, noun: string): string {
+  return count === 1 ? noun : `${noun}s`;
 }
