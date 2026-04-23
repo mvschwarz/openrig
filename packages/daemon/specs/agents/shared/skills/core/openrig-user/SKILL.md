@@ -123,6 +123,17 @@ rig send <session> "message" --json
 
 Use `--verify` when you want delivery evidence. Use `--force` only when you intentionally want to bypass activity-risk checks.
 
+Observed operator nuance for `--verify`:
+- `Sent to ...` + `Verified: yes` = strong positive delivery evidence.
+- `Sent to ...` + `Verified: no` = ambiguous delivery, not automatic failure. The message may still land; treat this as verification drift until disproven.
+- no `Sent to ...` line or a hard error = send failure.
+
+When you get `Verified: no`, do not immediately retry blindly. First check one of:
+- a direct reply from the target
+- `rig capture <session>`
+- transcript evidence
+- queue/outbox state if the message asked for a durable handoff
+
 ### Capture terminal output
 
 ```bash
@@ -495,6 +506,37 @@ Current shipped MCP tools:
 - `rig_capture`
 - `rig_chatroom_send`
 - `rig_chatroom_watch`
+
+## Troubleshooting and Weird States
+
+When the CLI behaves strangely, use the smallest truthful check first:
+
+```bash
+rig whoami --json
+rig daemon status
+rig ps --nodes --json
+```
+
+Specific operator rules:
+- `Sent to ...` + `Verified: no` is ambiguous delivery, not automatic failure. Check reply, `rig capture`, transcript evidence, or queue/outbox state before retrying.
+- partial `rig whoami --json` can happen when identity is still inferable but the daemon-backed path is degraded.
+- the unified-exec-process warning is a host/tooling-layer signal, not automatic proof that the OpenRig topology is unhealthy.
+
+If you hit the unified-exec warning, inspect for stale one-shot helpers before touching live seats:
+
+```bash
+ps -axo pid,ppid,command | rg 'tmux send-keys|rig queue create|tmux attach|codex|claude'
+```
+
+Safe cleanup target:
+- orphaned one-shot wrappers like `tmux send-keys ...`
+
+Do not mass-kill:
+- `tmux attach ...`
+- `codex ...`
+- `claude ...`
+
+For deeper host/runtime triage, use the companion `openrig-operator` skill if it is available in your seat.
 
 ## JSON and Error Posture
 
