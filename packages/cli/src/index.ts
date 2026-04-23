@@ -44,6 +44,7 @@ import { shrinkCommand } from "./commands/shrink.js";
 import { destroyCommand, type DestroyCommandDeps } from "./commands/destroy.js";
 import { setupCommand } from "./commands/setup.js";
 import { contextCommand } from "./commands/context.js";
+import { restoreCheckCommand } from "./commands/restore-check.js";
 import type { LifecycleDeps } from "./daemon-lifecycle.js";
 import { CLI_VERSION } from "./version.js";
 
@@ -138,6 +139,7 @@ export function createProgram(depsOverride?: ProgramDeps): Command {
   program.addCommand(destroyCommand(depsOverride?.destroyDeps));
   program.addCommand(setupCommand());
   program.addCommand(contextCommand());
+  program.addCommand(restoreCheckCommand());
 
   return program;
 }

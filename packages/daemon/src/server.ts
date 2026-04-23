@@ -35,6 +35,7 @@ import { packagesRoutes } from "./routes/packages.js";
 import { bootstrapRoutes } from "./routes/bootstrap.js";
 import { discoveryRoutes } from "./routes/discovery.js";
 import { bundleRoutes } from "./routes/bundles.js";
+import { restoreCheckRoutes } from "./routes/restore-check.js";
 import { agentsRoutes } from "./routes/agents.js";
 import { psRoutes } from "./routes/ps.js";
 import type { PsProjectionService } from "./domain/ps-projection.js";
@@ -276,6 +277,7 @@ export function createApp(deps: AppDeps): Hono {
   app.route("/api/whoami", whoamiRoutes());
   app.route("/api/rigs/:rigId/chat", chatRoutes());
   app.route("/api/rigs/:rigId/env", envRoutes());
+  app.route("/api/restore-check", restoreCheckRoutes);
 
   const uiDistDir = deps.uiDistDir ?? resolveDefaultUiDistDir();
   const uiIndexPath = nodePath.join(uiDistDir, "index.html");
