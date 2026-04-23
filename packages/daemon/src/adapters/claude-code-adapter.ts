@@ -376,6 +376,23 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     this.provisionOnboardingState();
   }
 
+  /** Standard-safe baseline patterns — the highest-friction Bash prompts in
+   *  daily operation. Additive only; never removes existing entries. Uses
+   *  `Bash(cmd:*)` colon-form per Claude Code convention. */
+  static readonly STANDARD_SAFE_BASELINE: readonly string[] = [
+    "Bash(ls:*)",
+    "Bash(cat:*)",
+    "Bash(tail:*)",
+    "Bash(head:*)",
+    "Bash(wc:*)",
+    "Bash(grep:*)",
+    "Bash(rg:*)",
+    "Bash(pwd)",
+    "Bash(echo:*)",
+    "Bash(which:*)",
+    "Bash(rig:*)",
+  ];
+
   private provisionRigPermissions(): void {
     const home = this.fs.homedir ?? (typeof process !== "undefined" ? process.env.HOME : undefined);
     if (!home) return;
@@ -386,10 +403,22 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     const settings = this.readJsonObject(settingsPath);
     const permissions = this.readJsonObjectField(settings, "permissions");
     const allow = new Set(this.readStringArray(permissions["allow"]));
-    allow.add("Bash(rig:*)");
+
+    // Standard-safe baseline — additive only; never removes existing entries
+    for (const pattern of ClaudeCodeAdapter.STANDARD_SAFE_BASELINE) {
+      allow.add(pattern);
+    }
 
     permissions["allow"] = Array.from(allow);
     settings["permissions"] = permissions;
+
+    // Provenance marker so operators can distinguish rig-injected from human-authored
+    settings["_openrig_provenance"] = {
+      author: "openrig-at-spawn",
+      baseline: "standard-safe",
+      patterns_added: ClaudeCodeAdapter.STANDARD_SAFE_BASELINE.length,
+      ts: new Date().toISOString(),
+    };
 
     this.fs.writeFile(settingsPath, JSON.stringify(settings, null, 2));
   }
