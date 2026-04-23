@@ -70,15 +70,32 @@ function stripOrphanCursorFragments(line: string): string {
 }
 
 function isStartupSplashLine(line: string): boolean {
+  const hasBoxChars = /[│╭╰╮╯]/.test(line);
   // Strip box-drawing wrappers from Codex-style banners before matching
   const stripped = line.replace(/[│╭╰╮╯─━]/g, "").trim();
-  if (!stripped) return false;
+
+  if (!stripped) {
+    // Empty after stripping box chars — a box border or blank row inside a
+    // startup banner. Only filter when the original had box-drawing chars
+    // (genuine blank lines are already handled by the blank-line filter).
+    return hasBoxChars;
+  }
+
   // Claude Code version header: "Claude Code v2.1.101"
   if (/^Claude Code v[\d.]+/.test(stripped)) return true;
   // Claude model/plan line: "Opus 4.6 (Claude Max)", "Sonnet 4.6 (1M context)"
   if (/^(?:Opus|Sonnet|Haiku) \d[\d.]+ /.test(stripped)) return true;
   // Codex version header: "OpenAI Codex (v0.120.0)", ">_ OpenAI Codex (v0.120.0)"
   if (/^>?_?\s*(?:OpenAI )?Codex\b.*v[\d.]+/.test(stripped)) return true;
+
+  // Box-wrapped startup banner inner content (model/directory lines inside
+  // │...│). Only match when the original line has box-drawing wrappers so
+  // standalone "model:" or "directory:" in normal output survives.
+  if (hasBoxChars) {
+    if (/^model:\s+/i.test(stripped)) return true;
+    if (/^directory:\s+/i.test(stripped)) return true;
+  }
+
   return false;
 }
 
