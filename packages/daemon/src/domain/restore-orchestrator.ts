@@ -110,13 +110,12 @@ export class RestoreOrchestrator {
       return { ok: false, code: "rig_not_found", message: `Rig ${rigId} not found` };
     }
 
-    // Reconcile stale session state before checking — after a tmux crash, DB
-    // sessions may still show 'running' even though tmux is dead. Verify each
-    // DB-running session against tmux reality; mark dead sessions as detached
-    // so restore can proceed. Sessions that ARE genuinely alive still block.
-    await this.reconcileStaleRunningSessions(rigId);
-
-    if (this.hasRunningSessions(rigId)) {
+    // Classify DB-running sessions against tmux reality WITHOUT mutating DB.
+    // This determines whether the rig is safe to restore before any state
+    // changes occur — critical for pre_restore snapshot ordering (snapshot
+    // must capture original DB state, not post-reconciliation state).
+    const classification = await this.classifyRunningSessions(rigId);
+    if (classification.live.length > 0 || classification.unknown.length > 0) {
       return { ok: false, code: "rig_not_stopped", message: `Rig ${rigId} has live sessions. Stop the rig with 'rig down' before restoring, or use the latest auto-pre-down snapshot.` };
     }
 
@@ -127,8 +126,15 @@ export class RestoreOrchestrator {
     this.activeRestores.add(rigId);
 
     try {
-      // 2. Capture pre-restore snapshot BEFORE any mutations
+      // 2. Capture pre-restore snapshot BEFORE any DB mutations —
+      // DB still reflects original session state (running for stale sessions)
       const preRestoreSnapshot = this.snapshotCapture.captureSnapshot(rigId, "pre_restore");
+
+      // 2b. NOW mark stale sessions as detached (safe: we've captured the
+      // pre-restore snapshot and confirmed no live/unknown sessions remain)
+      for (const sessionId of classification.stale) {
+        this.sessionRegistry.markDetached(sessionId);
+      }
 
       // 3. Emit restore.started
       this.eventBus.emit({ type: "restore.started", rigId, snapshotId });
@@ -186,28 +192,38 @@ export class RestoreOrchestrator {
     return { binding, sessions };
   }
 
-  private async reconcileStaleRunningSessions(rigId: string): Promise<void> {
-    const sessions = this.sessionRegistry.getSessionsForRig(rigId);
-    for (const session of sessions) {
+  /**
+   * Classify ALL DB-running sessions against tmux reality without mutating DB.
+   * Scans every session (not just latest-per-node) to catch older live sessions
+   * behind newer detached rows. Returns structured classification for the caller
+   * to act on: live sessions block restore, stale sessions get marked detached
+   * AFTER the pre_restore snapshot is captured, unknown sessions fail closed.
+   */
+  private async classifyRunningSessions(rigId: string): Promise<{
+    live: string[];
+    stale: string[];
+    unknown: string[];
+  }> {
+    const live: string[] = [];
+    const stale: string[] = [];
+    const unknown: string[] = [];
+
+    for (const session of this.sessionRegistry.getSessionsForRig(rigId)) {
       if (session.status !== "running") continue;
       try {
         const alive = await this.tmuxAdapter.hasSession(session.sessionName);
-        if (!alive) {
-          this.sessionRegistry.markDetached(session.id);
+        if (alive) {
+          live.push(session.id);
+        } else {
+          stale.push(session.id);
         }
       } catch {
-        // tmux check failed — fail closed: leave status as-is so
-        // hasRunningSessions still blocks (honest about uncertainty)
+        // tmux check failed — fail closed: classify as unknown so restore blocks
+        unknown.push(session.id);
       }
     }
-  }
 
-  private hasRunningSessions(rigId: string): boolean {
-    const latestByNode = new Map<string, Session>();
-    for (const session of this.sessionRegistry.getSessionsForRig(rigId)) {
-      latestByNode.set(session.nodeId, session);
-    }
-    return Array.from(latestByNode.values()).some((session) => session.status === "running");
+    return { live, stale, unknown };
   }
 
   private clearStaleState(nodeId: string, rigId: string): void {

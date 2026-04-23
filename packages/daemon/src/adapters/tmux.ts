@@ -140,8 +140,15 @@ export class TmuxAdapter {
   }
 
   async hasSession(name: string): Promise<boolean> {
-    const sessions = await this.listSessions();
-    return sessions.some((s) => s.name === name);
+    try {
+      // Use `tmux has-session` directly for reliable existence check — avoids
+      // parsing format-string output from `list-sessions` which can fail when
+      // tab delimiters are malformed across tmux versions.
+      await this.exec(`tmux has-session -t ${shellQuote(name)}`);
+      return true; // exit 0 = session exists
+    } catch {
+      return false; // non-zero = session doesn't exist or tmux not running
+    }
   }
 
   async createSession(name: string, cwd?: string, env?: Record<string, string>): Promise<TmuxResult> {

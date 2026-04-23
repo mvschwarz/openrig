@@ -164,8 +164,12 @@ describe("createDaemon startup composition", () => {
       { rigName: "r01", logicalId: "dev1-impl", sessionName: "r01-dev1-impl" },
     ]);
 
-    // tmux reports no sessions (session is gone)
-    const tmuxExec: ExecFn = async () => "";
+    // tmux reports no sessions (session is gone):
+    // list-sessions returns empty; has-session throws (session not found)
+    const tmuxExec: ExecFn = async (cmd: string) => {
+      if (cmd.includes("has-session")) throw new Error("session not found");
+      return "";
+    };
     const cmuxExec: ExecFn = async () => { throw Object.assign(new Error(""), { code: "ENOENT" }); };
 
     const { db } = await createDaemon({ dbPath, tmuxExec, cmuxExec });
@@ -192,7 +196,10 @@ describe("createDaemon startup composition", () => {
       { rigName: "r02", logicalId: "dev2-impl", sessionName: "r02-dev2-impl" },
     ]);
 
-    const tmuxExec: ExecFn = async () => "";
+    const tmuxExec: ExecFn = async (cmd: string) => {
+      if (cmd.includes("has-session")) throw new Error("session not found");
+      return "";
+    };
     const cmuxExec: ExecFn = async () => { throw Object.assign(new Error(""), { code: "ENOENT" }); };
 
     const { db } = await createDaemon({ dbPath, tmuxExec, cmuxExec });

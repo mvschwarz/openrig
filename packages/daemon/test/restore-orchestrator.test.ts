@@ -283,7 +283,6 @@ describe("RestoreOrchestrator", () => {
     sessionRegistry.updateStatus(sess.id, "running");
     const snap = snapshotCapture.captureSnapshot(rig.id, "manual");
 
-    // tmux session IS alive
     const tmux = { ...mockTmux(), hasSession: vi.fn(async () => true) } as unknown as TmuxAdapter;
     const orch = createOrchestrator({ tmux });
 
@@ -291,6 +290,76 @@ describe("RestoreOrchestrator", () => {
 
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.code).toBe("rig_not_stopped");
+  });
+
+  it("pre_restore snapshot preserves original running session status (captured before mutation)", async () => {
+    const rig = rigRepo.createRig("snap-order-rig");
+    const node = rigRepo.addNode(rig.id, "worker", { role: "worker", runtime: "claude-code" });
+    const sess = sessionRegistry.registerSession(node.id, "worker@snap-order-rig");
+    sessionRegistry.updateStatus(sess.id, "running");
+    const snap = snapshotCapture.captureSnapshot(rig.id, "manual");
+
+    // tmux session is dead (post-crash) — restore should proceed
+    const tmux = { ...mockTmux(), hasSession: vi.fn(async () => false) } as unknown as TmuxAdapter;
+    const orch = createOrchestrator({ tmux });
+
+    const result = await orch.restore(snap.id);
+    expect(result.ok).toBe(true);
+
+    if (result.ok) {
+      // Verify the pre_restore snapshot captured original running state
+      const preSnap = snapshotRepo.getSnapshot(result.result.preRestoreSnapshotId);
+      expect(preSnap).toBeDefined();
+      const preSnapSessions = preSnap!.data.sessions ?? [];
+      const workerSession = preSnapSessions.find((s: { sessionName: string }) => s.sessionName === "worker@snap-order-rig");
+      expect(workerSession).toBeDefined();
+      expect(workerSession!.status).toBe("running"); // NOT detached
+    }
+  });
+
+  it("blocks when older running session is live even if newer same-node session is detached", async () => {
+    const rig = rigRepo.createRig("multi-sess-rig");
+    const node = rigRepo.addNode(rig.id, "worker", { role: "worker", runtime: "claude-code" });
+    // Older session: running + tmux alive
+    const oldSess = sessionRegistry.registerSession(node.id, "worker@multi-sess-rig");
+    sessionRegistry.updateStatus(oldSess.id, "running");
+    // Newer session: detached (e.g., from a prior restore attempt)
+    const newSess = sessionRegistry.registerSession(node.id, "worker@multi-sess-rig");
+    sessionRegistry.updateStatus(newSess.id, "detached");
+    const snap = snapshotCapture.captureSnapshot(rig.id, "manual");
+
+    // tmux says the OLD session name IS alive
+    const tmux = { ...mockTmux(), hasSession: vi.fn(async () => true) } as unknown as TmuxAdapter;
+    const orch = createOrchestrator({ tmux });
+
+    const result = await orch.restore(snap.id);
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.code).toBe("rig_not_stopped");
+  });
+
+  it("blocks and does not mutate when tmux check throws (fail-closed unknown)", async () => {
+    const rig = rigRepo.createRig("unknown-rig");
+    const node = rigRepo.addNode(rig.id, "worker", { role: "worker", runtime: "claude-code" });
+    const sess = sessionRegistry.registerSession(node.id, "worker@unknown-rig");
+    sessionRegistry.updateStatus(sess.id, "running");
+    const snap = snapshotCapture.captureSnapshot(rig.id, "manual");
+    const snapshotCountBefore = snapshotRepo.listSnapshots(rig.id).length;
+
+    // tmux check throws (e.g., tmux not running, network error)
+    const tmux = { ...mockTmux(), hasSession: vi.fn(async () => { throw new Error("tmux server not running"); }) } as unknown as TmuxAdapter;
+    const orch = createOrchestrator({ tmux });
+
+    const result = await orch.restore(snap.id);
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.code).toBe("rig_not_stopped");
+    // Session must NOT be detached — fail-closed preserves original state
+    const sessions = sessionRegistry.getSessionsForRig(rig.id);
+    const runningSess = sessions.find((s) => s.id === sess.id);
+    expect(runningSess?.status).toBe("running");
+    // No pre_restore snapshot should have been created
+    expect(snapshotRepo.listSnapshots(rig.id)).toHaveLength(snapshotCountBefore);
   });
 
   // --- Scenario B: partial failure doesn't drop pods ---

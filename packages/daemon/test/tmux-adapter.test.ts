@@ -158,20 +158,22 @@ describe("TmuxAdapter", () => {
   });
 
   describe("hasSession", () => {
-    it("returns true when session exists", async () => {
-      const output = "target-session\t1\t2026-03-23T01:00:00\t1\n";
-      const adapter = new TmuxAdapter(mockExec({ "list-sessions": { stdout: output } }));
+    it("returns true when tmux has-session exits 0", async () => {
+      // `tmux has-session -t <name>` exits 0 when session exists
+      const adapter = new TmuxAdapter(mockExec({ "has-session": { stdout: "" } }));
       expect(await adapter.hasSession("target-session")).toBe(true);
     });
 
-    it("returns false when session not in list", async () => {
-      const output = "other-session\t1\t2026-03-23T01:00:00\t1\n";
-      const adapter = new TmuxAdapter(mockExec({ "list-sessions": { stdout: output } }));
+    it("returns false when tmux has-session exits non-zero", async () => {
+      // `tmux has-session` throws (non-zero exit) when session doesn't exist
+      const adapter = new TmuxAdapter(mockExec({
+        "has-session": { error: new Error("session not found: missing-session") },
+      }));
       expect(await adapter.hasSession("missing-session")).toBe(false);
     });
 
     it("returns false on 'no server running' error", async () => {
-      const adapter = new TmuxAdapter(mockExec({ "list-sessions": { error: NO_SERVER_ERROR } }));
+      const adapter = new TmuxAdapter(mockExec({ "has-session": { error: NO_SERVER_ERROR } }));
       expect(await adapter.hasSession("any-session")).toBe(false);
     });
   });
