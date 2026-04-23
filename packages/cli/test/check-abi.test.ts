@@ -72,6 +72,37 @@ describe("postinstall ABI check", () => {
     expect(result.message).toContain("NODE_MODULE_VERSION");
   });
 
+  it("reports generic native-load-failure for MODULE_NOT_FOUND (not ABI-mismatch text)", () => {
+    const result = checkAbi({
+      nodeVersion: "v22.22.1",
+      loadNativeAddon: () => {
+        const err = new Error("Cannot find module 'better-sqlite3'");
+        (err as NodeJS.ErrnoException).code = "MODULE_NOT_FOUND";
+        throw err;
+      },
+    });
+    expect(result.ok).toBe(false);
+    // Should NOT say "native binary does not match" — that's ABI-specific
+    expect(result.message).not.toContain("native binary does not match");
+    // Should say generic addon-load-failure
+    expect(result.message).toContain("native addon failed to load");
+    expect(result.message).toContain("Cannot find module");
+    expect(result.message).toContain("npm rebuild better-sqlite3");
+  });
+
+  it("reports generic native-load-failure for filesystem permission errors", () => {
+    const result = checkAbi({
+      nodeVersion: "v22.22.1",
+      loadNativeAddon: () => {
+        throw new Error("EACCES: permission denied, open '/usr/local/lib/better_sqlite3.node'");
+      },
+    });
+    expect(result.ok).toBe(false);
+    expect(result.message).not.toContain("native binary does not match");
+    expect(result.message).toContain("native addon failed to load");
+    expect(result.message).toContain("EACCES");
+  });
+
   it("skips native addon check entirely for odd versions (fast path)", () => {
     let addonCalled = false;
     const result = checkAbi({
