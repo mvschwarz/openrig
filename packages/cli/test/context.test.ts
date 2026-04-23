@@ -194,4 +194,62 @@ describe("rig context", () => {
     expect(unknown.status).toBe("unknown");
     expect(unknown.fresh).toBe(false);
   });
+
+  // --- --refresh CLI tests ---
+
+  it("--refresh calls /nodes?refresh=true once then fetches inventory normally", async () => {
+    const requestedPaths: string[] = [];
+    const deps: ContextDeps = {
+      lifecycleDeps: {} as ContextDeps["lifecycleDeps"],
+      clientFactory: () => ({
+        get: vi.fn(async (path: string) => {
+          requestedPaths.push(path);
+          if (path === "/api/ps") return { status: 200, data: [{ rigId: "rig-0", name: "test-rig" }] };
+          return { status: 200, data: [] };
+        }),
+      }) as unknown as ReturnType<ContextDeps["clientFactory"]>,
+    };
+    const cmd = contextCommand(deps);
+    await cmd.parseAsync(["node", "rig", "--refresh", "--json"]);
+
+    // First non-ps call should be refresh, then normal inventory
+    const nodeCalls = requestedPaths.filter((p) => p.includes("/nodes"));
+    expect(nodeCalls.length).toBe(2);
+    expect(nodeCalls[0]).toContain("refresh=true");
+    expect(nodeCalls[1]).not.toContain("refresh=true");
+    expect(process.exitCode).toBeUndefined();
+  });
+
+  it("--refresh failure exits 2 with honest error copy", async () => {
+    const deps: ContextDeps = {
+      lifecycleDeps: {} as ContextDeps["lifecycleDeps"],
+      clientFactory: () => ({
+        get: vi.fn(async (path: string) => {
+          if (path === "/api/ps") return { status: 200, data: [{ rigId: "rig-0", name: "test-rig" }] };
+          if (path.includes("refresh=true")) return { status: 502, data: { code: "context_refresh_failed", error: "statusline read failed" } };
+          return { status: 200, data: [] };
+        }),
+      }) as unknown as ReturnType<ContextDeps["clientFactory"]>,
+    };
+    const cmd = contextCommand(deps);
+    await cmd.parseAsync(["node", "rig", "--refresh"]);
+
+    expect(process.exitCode).toBe(2);
+    const errorOutput = errors.join("\n");
+    expect(errorOutput).toContain("Context refresh failed");
+    expect(errorOutput).toContain("Fix:");
+  });
+
+  it("--refresh success returns same JSON semantics as non-refresh", async () => {
+    const deps = makeDeps();
+    const cmd = contextCommand(deps);
+    await cmd.parseAsync(["node", "rig", "--refresh", "--json"]);
+
+    const json = JSON.parse(logs.join(""));
+    expect(json.seats).toBeInstanceOf(Array);
+    expect(json.summary).toBeDefined();
+    // Should have the same structure as non-refresh output
+    expect(json.summary.total).toBeDefined();
+    expect(process.exitCode).toBeUndefined();
+  });
 });
