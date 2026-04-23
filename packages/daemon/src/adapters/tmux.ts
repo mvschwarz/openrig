@@ -35,6 +35,14 @@ function isNoServerError(err: unknown): boolean {
   return err instanceof Error && err.message.includes("no server running");
 }
 
+function isSessionAbsenceError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const msg = err.message.toLowerCase();
+  return msg.includes("session not found") ||
+    msg.includes("can't find session") ||
+    msg.includes("no session");
+}
+
 function classifyWriteError(err: unknown): TmuxResult {
   if (!(err instanceof Error)) {
     return { ok: false, code: "unknown", message: String(err) };
@@ -146,8 +154,15 @@ export class TmuxAdapter {
       // tab delimiters are malformed across tmux versions.
       await this.exec(`tmux has-session -t ${shellQuote(name)}`);
       return true; // exit 0 = session exists
-    } catch {
-      return false; // non-zero = session doesn't exist or tmux not running
+    } catch (err) {
+      // Known-absence patterns: session genuinely doesn't exist or tmux not running.
+      // Return false so post-crash restore can proceed for dead sessions.
+      if (isNoServerError(err) || isSessionAbsenceError(err)) {
+        return false;
+      }
+      // Unexpected probe failure (permission denied, socket error, etc.) — rethrow
+      // so callers can fail closed rather than treating a probe failure as absence.
+      throw err;
     }
   }
 
