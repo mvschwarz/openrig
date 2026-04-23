@@ -566,4 +566,69 @@ describe("Session routes", () => {
     // Cleanup
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
+
+  // --- Context refresh route tests ---
+
+  it("GET /api/rigs/:id/nodes?refresh=true calls contextMonitor.pollOnce before projection", async () => {
+    const db2 = createFullTestDb();
+    const pollOnceSpy = vi.fn(async () => {});
+    const setup = createTestApp(db2);
+    const { createApp } = await import("../src/server.js");
+    const appWithMonitor = createApp({ ...setup, contextMonitor: { pollOnce: pollOnceSpy } });
+    const rig = setup.rigRepo.createRig("refresh-rig");
+    setup.rigRepo.addNode(rig.id, "worker", { runtime: "claude-code" });
+
+    await appWithMonitor.request(`/api/rigs/${rig.id}/nodes?refresh=true`);
+
+    expect(pollOnceSpy).toHaveBeenCalledOnce();
+    db2.close();
+  });
+
+  it("GET /api/rigs/:id/nodes without refresh does not call pollOnce", async () => {
+    const db2 = createFullTestDb();
+    const pollOnceSpy = vi.fn(async () => {});
+    const setup = createTestApp(db2);
+    const { createApp } = await import("../src/server.js");
+    const appWithMonitor = createApp({ ...setup, contextMonitor: { pollOnce: pollOnceSpy } });
+    const rig = setup.rigRepo.createRig("no-refresh-rig");
+    setup.rigRepo.addNode(rig.id, "worker", { runtime: "claude-code" });
+
+    await appWithMonitor.request(`/api/rigs/${rig.id}/nodes`);
+
+    expect(pollOnceSpy).not.toHaveBeenCalled();
+    db2.close();
+  });
+
+  it("GET /api/rigs/:id/nodes?refresh=true returns 502 when pollOnce throws", async () => {
+    const db2 = createFullTestDb();
+    const pollOnceSpy = vi.fn(async () => { throw new Error("statusline read failed"); });
+    const setup = createTestApp(db2);
+    const { createApp } = await import("../src/server.js");
+    const appWithMonitor = createApp({ ...setup, contextMonitor: { pollOnce: pollOnceSpy } });
+    const rig = setup.rigRepo.createRig("fail-refresh-rig");
+    setup.rigRepo.addNode(rig.id, "worker", { runtime: "claude-code" });
+
+    const res = await appWithMonitor.request(`/api/rigs/${rig.id}/nodes?refresh=true`);
+
+    expect(res.status).toBe(502);
+    const body = await res.json();
+    expect(body.code).toBe("context_refresh_failed");
+    expect(body.detail).toContain("statusline read failed");
+    db2.close();
+  });
+
+  it("GET /api/rigs/:id/nodes?refresh=true works when no contextMonitor is wired", async () => {
+    const db2 = createFullTestDb();
+    const setup = createTestApp(db2);
+    const { createApp } = await import("../src/server.js");
+    const appNoMonitor = createApp({ ...setup }); // no contextMonitor
+    const rig = setup.rigRepo.createRig("no-monitor-rig");
+    setup.rigRepo.addNode(rig.id, "worker", { runtime: "claude-code" });
+
+    const res = await appNoMonitor.request(`/api/rigs/${rig.id}/nodes?refresh=true`);
+
+    // Should succeed (no monitor = nothing to poll; returns stale data honestly)
+    expect(res.status).toBe(200);
+    db2.close();
+  });
 });
