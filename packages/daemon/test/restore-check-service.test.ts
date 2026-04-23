@@ -72,6 +72,17 @@ describe("RestoreCheckService", () => {
 
   // --- Probe error → unknown (not not_restorable) ---
 
+  it("probeDaemonHealth throw produces verdict unknown (not not_restorable)", () => {
+    const service = new RestoreCheckService(mockDeps({
+      probeDaemonHealth: () => { throw new Error("socket unavailable"); },
+    }));
+    const result = service.check({});
+    expect(result.verdict).toBe("unknown");
+    const daemon = result.checks.find((c) => c.check === "daemon.reachable");
+    expect(daemon?.status).toBe("red");
+    expect(daemon?.evidence).toContain("unable to determine");
+  });
+
   it("listRigs probe error produces verdict unknown (not not_restorable)", () => {
     const service = new RestoreCheckService(mockDeps({
       listRigs: () => { throw new Error("database locked"); },
