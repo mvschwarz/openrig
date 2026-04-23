@@ -50,6 +50,8 @@ restoreCheckRoutes.get("/", (c) => {
 
     return c.json(result);
   } catch (err) {
+    const evidence = `Service error: ${err instanceof Error ? err.message : String(err)}`;
+
     return c.json({
       verdict: "unknown",
       fullyBack: false,
@@ -70,10 +72,16 @@ restoreCheckRoutes.get("/", (c) => {
       checks: [{
         check: "probe.error",
         status: "red",
-        evidence: `Service error: ${err instanceof Error ? err.message : String(err)}`,
+        evidence,
         remediation: "Check daemon logs with: rig daemon logs",
       }],
-      repairPacket: null,
+      repairPacket: [{
+        step: 1,
+        command: "Check daemon logs with: rig daemon logs",
+        rationale: evidence,
+        safe: true,
+        blocking: true,
+      }],
     }, 500);
   }
 });

@@ -1,9 +1,10 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type Database from "better-sqlite3";
 import type { Hono } from "hono";
 import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
 import { createApp } from "../src/server.js";
 import type { RigRepository } from "../src/domain/rig-repository.js";
+import { RestoreCheckService } from "../src/domain/restore-check-service.js";
 
 describe("Restore check routes", () => {
   let db: Database.Database;
@@ -153,6 +154,38 @@ describe("Restore check routes", () => {
     const hookStep = body.repairPacket.find((s: { rationale: string }) => s.rationale.includes("Hook"));
     if (hookStep) {
       expect(hookStep.blocking).toBe(false);
+    }
+  });
+
+  it("GET /api/restore-check route catch returns actionable repairPacket", async () => {
+    const spy = vi.spyOn(RestoreCheckService.prototype, "check").mockImplementationOnce(() => {
+      throw new Error("route boom");
+    });
+
+    try {
+      const res = await app.request("/api/restore-check");
+      expect(res.status).toBe(500);
+
+      const body = await res.json();
+      expect(body.verdict).toBe("unknown");
+      expect(body.fullyBack).toBe(false);
+      expect(body.assertion.status).toBe("unknown");
+      expect(body.assertion.reason).toBe("unknown_probe_state");
+      expect(body.checks[0]).toEqual(expect.objectContaining({
+        check: "probe.error",
+        status: "red",
+        remediation: "Check daemon logs with: rig daemon logs",
+      }));
+      expect(body.checks[0].evidence).toContain("route boom");
+      expect(body.repairPacket).toEqual([{
+        step: 1,
+        command: "Check daemon logs with: rig daemon logs",
+        rationale: expect.stringContaining("route boom"),
+        safe: true,
+        blocking: true,
+      }]);
+    } finally {
+      spy.mockRestore();
     }
   });
 
