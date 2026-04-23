@@ -58,16 +58,38 @@ export function checkAbi({ nodeVersion, loadNativeAddon }) {
     loadNativeAddon();
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
+    const isAbiMismatch = detail.includes("NODE_MODULE_VERSION");
+
+    if (isAbiMismatch) {
+      return {
+        ok: false,
+        message: [
+          "",
+          "  ╔══════════════════════════════════════════════════════════════╗",
+          "  ║  better-sqlite3 native binary does not match this Node.    ║",
+          `  ║  Current: ${nodeVersion.padEnd(49)}║`,
+          "  ║                                                            ║",
+          "  ║  Fix:  npm rebuild better-sqlite3                          ║",
+          "  ║   or:  nvm install 22 && npm install -g @openrig/cli       ║",
+          "  ╚══════════════════════════════════════════════════════════════╝",
+          "",
+          `  Detail: ${detail}`,
+          "",
+        ].join("\n"),
+      };
+    }
+
     return {
       ok: false,
       message: [
         "",
         "  ╔══════════════════════════════════════════════════════════════╗",
-        "  ║  better-sqlite3 native binary does not match this Node.    ║",
+        "  ║  better-sqlite3 native addon failed to load.               ║",
         `  ║  Current: ${nodeVersion.padEnd(49)}║`,
         "  ║                                                            ║",
         "  ║  Fix:  npm rebuild better-sqlite3                          ║",
-        "  ║   or:  nvm install 22 && npm install -g @openrig/cli       ║",
+        "  ║  If that fails, reinstall with a supported Node version:   ║",
+        "  ║        nvm install 22 && npm install -g @openrig/cli       ║",
         "  ╚══════════════════════════════════════════════════════════════╝",
         "",
         `  Detail: ${detail}`,

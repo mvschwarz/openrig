@@ -31,7 +31,8 @@
   "files": [
     "dist",
     "daemon",
-    "ui"
+    "ui",
+    "scripts"
   ],
   "scripts": {
     "build": "tsc",
