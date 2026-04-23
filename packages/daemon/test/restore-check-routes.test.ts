@@ -7,6 +7,7 @@ import type { Hono } from "hono";
 import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
 import { createApp } from "../src/server.js";
 import type { RigRepository } from "../src/domain/rig-repository.js";
+import type { SessionRegistry } from "../src/domain/session-registry.js";
 import type { SnapshotRepository } from "../src/domain/snapshot-repository.js";
 import { RestoreCheckService } from "../src/domain/restore-check-service.js";
 
@@ -91,6 +92,7 @@ describe("Restore check routes", () => {
   let db: Database.Database;
   let app: Hono;
   let rigRepo: RigRepository;
+  let sessionRegistry: SessionRegistry;
   let snapshotRepo: SnapshotRepository;
   let openRigHome: string;
   let originalOpenRigHome: string | undefined;
@@ -104,6 +106,7 @@ describe("Restore check routes", () => {
     const setup = createTestApp(db);
     app = createApp(setup);
     rigRepo = setup.rigRepo;
+    sessionRegistry = setup.sessionRegistry;
     snapshotRepo = setup.snapshotRepo;
   });
 
@@ -219,7 +222,10 @@ describe("Restore check routes", () => {
 
   it("GET /api/restore-check returns actionable recovery for a snapshot-backed stopped rig", async () => {
     const rig = rigRepo.createRig("recoverable-rig");
-    rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code" });
+    const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code" });
+    const session = sessionRegistry.registerSession(node.id, "dev-impl@recoverable-rig");
+    sessionRegistry.updateStatus(session.id, "stopped");
+    sessionRegistry.updateStartupStatus(session.id, "failed");
     snapshotRepo.createSnapshot(rig.id, "auto-pre-down", minimalSnapshotData(rig.id, rig.name) as never);
 
     const res = await app.request("/api/restore-check?rig=recoverable-rig&noQueue=true&noHooks=true");
