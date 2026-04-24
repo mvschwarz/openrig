@@ -9,8 +9,7 @@ import type { AgentActivity } from "./types.js";
 const MID_WORK_PATTERNS = [
   /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/, // spinner chars
   /Working/,
-  /Tomfoolering[.…]/,
-  /\bthinking\)?$/,
+  /^[✶✢✳✻✽·]\s+\S.*(?:…|\.{3})\s+\([^)]*\bthinking\)$/m,
   /esc to interrupt/,
   /^[❯›]\s*\d+\.\s/m,   // trust/consent prompt choices (e.g. '› 1. Yes, continue')
 ];
