@@ -154,9 +154,12 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       return { ok: false, error: "No tmux session bound — cannot launch Codex harness" };
     }
 
+    const model = binding.model?.trim();
+    const modelArg = model ? ` -m ${shellQuote(model)}` : "";
+    const gitDirArg = ` --add-dir ${shellQuote(nodePath.join(binding.cwd, ".git"))}`;
     const cmd = opts.resumeToken
       ? `codex resume ${opts.resumeToken}`
-      : `codex -C ${shellQuote(binding.cwd)} -a never -s workspace-write`;
+      : `codex -C ${shellQuote(binding.cwd)}${gitDirArg}${modelArg} -a never -s workspace-write`;
 
     const textResult = await this.tmux.sendText(binding.tmuxSession, cmd);
     if (!textResult.ok) {

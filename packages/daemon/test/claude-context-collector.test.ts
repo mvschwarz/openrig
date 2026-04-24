@@ -275,7 +275,7 @@ describe("ClaudeCodeAdapter Context Collector Provisioning", () => {
       customSetting: true,
       permissions: {
         allow: ["Bash(rig:*)", "Bash(npm *)"],
-        deny: ["Bash(git push*)"],
+        deny: ["Bash(git push*)", "Bash(gh pr *)"],
       },
     });
     written["/project/.mcp.json"] = JSON.stringify({
@@ -303,8 +303,11 @@ describe("ClaudeCodeAdapter Context Collector Provisioning", () => {
     expect(settings.permissions.allow).toContain("Read");
     expect(settings.permissions.allow).toContain("Edit");
     expect(settings.permissions.deny).toContain("Bash(git push*)");
-    expect(settings.permissions.deny).toContain("Bash(rm -rf *)");
+    expect(settings.permissions.deny.filter((rule: string) => rule === "Bash(git push*)")).toHaveLength(1);
     expect(settings.permissions.deny).toContain("Bash(gh pr *)");
+    expect(settings.permissions.deny.filter((rule: string) => rule === "Bash(gh pr *)")).toHaveLength(1);
+    expect(settings.permissions.deny).toContain("Bash(rm -rf *)");
+    expect(settings.permissions.deny).not.toContain("Bash(git commit*)");
 
     const mcpConfig = JSON.parse(written["/project/.mcp.json"]!);
     expect(mcpConfig.mcpServers.existing.url).toBe("https://example.com/mcp");
@@ -334,6 +337,9 @@ describe("ClaudeCodeAdapter Context Collector Provisioning", () => {
     expect(settings.permissions.allow.filter((rule: string) => rule === "Edit")).toHaveLength(1);
     expect(settings.permissions.allow.filter((rule: string) => rule === "Bash(rig:*)")).toHaveLength(1);
     expect(settings.permissions.deny.filter((rule: string) => rule === "Bash(rm -rf *)")).toHaveLength(1);
+    expect(settings.permissions.deny).not.toContain("Bash(git push*)");
+    expect(settings.permissions.deny).not.toContain("Bash(git commit*)");
+    expect(settings.permissions.deny).not.toContain("Bash(gh pr *)");
     expect(settings.enabledMcpjsonServers).toEqual(["existing", "exa", "context7"]);
 
     const mcpConfig = JSON.parse(written["/project/.mcp.json"]!);
