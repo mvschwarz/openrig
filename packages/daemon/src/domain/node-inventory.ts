@@ -21,6 +21,11 @@ interface InventoryRow {
   resolved_spec_name: string | null;
   resolved_spec_version: string | null;
   resolved_spec_hash: string | null;
+  occupant_lifecycle: string | null;
+  continuity_outcome: string | null;
+  handover_result: string | null;
+  previous_occupant: string | null;
+  handover_at: string | null;
   // Newest session fields (may be null if no session)
   session_name: string | null;
   session_status: string | null;
@@ -138,6 +143,23 @@ function deriveNodeKind(runtime: string | null): "agent" | "infrastructure" {
   return runtime === "terminal" ? "infrastructure" : "agent";
 }
 
+function deriveOccupantLifecycle(row: InventoryRow): NodeInventoryEntry["occupantLifecycle"] {
+  if (row.occupant_lifecycle) {
+    return row.occupant_lifecycle as NodeInventoryEntry["occupantLifecycle"];
+  }
+  return row.session_status === "running" ? "active" : "unknown";
+}
+
+function deriveContinuityOutcome(
+  row: InventoryRow,
+  restoreOutcome: NodeRestoreOutcome,
+): NodeInventoryEntry["continuityOutcome"] {
+  if (row.continuity_outcome) {
+    return row.continuity_outcome as NodeInventoryEntry["continuityOutcome"];
+  }
+  return restoreOutcome === "n-a" ? null : restoreOutcome;
+}
+
 function deriveRestoreOutcome(db: Database.Database, rigId: string, nodeId: string): NodeRestoreOutcome {
   // Find the latest restore.completed event for this rig
   const row = db.prepare(
@@ -221,6 +243,11 @@ export function getNodeInventory(db: Database.Database, rigId: string): NodeInve
       n.resolved_spec_name,
       n.resolved_spec_version,
       n.resolved_spec_hash,
+      n.occupant_lifecycle,
+      n.continuity_outcome,
+      n.handover_result,
+      n.previous_occupant,
+      n.handover_at,
       s.session_name,
       s.status as session_status,
       s.startup_status,
@@ -238,41 +265,49 @@ export function getNodeInventory(db: Database.Database, rigId: string): NodeInve
     ORDER BY n.created_at
   `).all(rigId) as InventoryRow[];
 
-  return rows.map((row) => ({
-    rigId: row.rig_id,
-    rigName: row.rig_name,
-    logicalId: row.logical_id,
-    podId: row.pod_id,
-    podNamespace: row.pod_namespace,
-    canonicalSessionName: row.session_name,
-    attachmentType: (row.binding_attachment_type as NodeInventoryEntry["attachmentType"]) ?? null,
-    nodeKind: deriveNodeKind(row.runtime),
-    runtime: row.runtime,
-    sessionStatus: row.session_status,
-    startupStatus: row.startup_status as NodeInventoryEntry["startupStatus"],
-    restoreOutcome: deriveRestoreOutcome(db, rigId, row.node_id),
-    tmuxAttachCommand: row.binding_attachment_type === "tmux" && row.session_name ? `tmux attach -t ${row.session_name}` : null,
-    resumeCommand: computeResumeCommand(row.runtime, row.resume_token),
-    recoveryGuidance: computeRecoveryGuidance({
+  return rows.map((row) => {
+    const restoreOutcome = deriveRestoreOutcome(db, rigId, row.node_id);
+    return {
+      rigId: row.rig_id,
+      rigName: row.rig_name,
+      logicalId: row.logical_id,
+      podId: row.pod_id,
+      podNamespace: row.pod_namespace,
+      canonicalSessionName: row.session_name,
+      attachmentType: (row.binding_attachment_type as NodeInventoryEntry["attachmentType"]) ?? null,
+      nodeKind: deriveNodeKind(row.runtime),
       runtime: row.runtime,
-      resumeToken: row.resume_token,
+      sessionStatus: row.session_status,
+      startupStatus: row.startup_status as NodeInventoryEntry["startupStatus"],
+      restoreOutcome,
+      occupantLifecycle: deriveOccupantLifecycle(row),
+      continuityOutcome: deriveContinuityOutcome(row, restoreOutcome),
+      handoverResult: row.handover_result as NodeInventoryEntry["handoverResult"] ?? null,
+      previousOccupant: row.previous_occupant,
+      handoverAt: row.handover_at,
+      tmuxAttachCommand: row.binding_attachment_type === "tmux" && row.session_name ? `tmux attach -t ${row.session_name}` : null,
+      resumeCommand: computeResumeCommand(row.runtime, row.resume_token),
+      recoveryGuidance: computeRecoveryGuidance({
+        runtime: row.runtime,
+        resumeToken: row.resume_token,
+        cwd: row.cwd,
+        sessionName: row.session_name,
+      }),
+      latestError: row.startup_status === "ready" ? null : getLatestError(db, rigId, row.node_id),
+      // Extended fields
+      model: row.model,
+      agentRef: row.agent_ref,
+      profile: row.profile,
+      resolvedSpecName: row.resolved_spec_name,
+      resolvedSpecVersion: row.resolved_spec_version,
+      resolvedSpecHash: row.resolved_spec_hash,
       cwd: row.cwd,
-      sessionName: row.session_name,
-    }),
-    latestError: row.startup_status === "ready" ? null : getLatestError(db, rigId, row.node_id),
-    // Extended fields
-    model: row.model,
-    agentRef: row.agent_ref,
-    profile: row.profile,
-    resolvedSpecName: row.resolved_spec_name,
-    resolvedSpecVersion: row.resolved_spec_version,
-    resolvedSpecHash: row.resolved_spec_hash,
-    cwd: row.cwd,
-    restorePolicy: row.restore_policy,
-    resumeType: row.resume_type,
-    resumeToken: row.resume_token,
-    startupCompletedAt: row.startup_completed_at,
-  }));
+      restorePolicy: row.restore_policy,
+      resumeType: row.resume_type,
+      resumeToken: row.resume_token,
+      startupCompletedAt: row.startup_completed_at,
+    };
+  });
 }
 
 /**

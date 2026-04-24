@@ -25,4 +25,9 @@ describe("CLI entrypoint direct-run detection", () => {
     const program = createProgram();
     expect(program.commands.some((cmd) => cmd.name() === "heartbeat")).toBe(true);
   });
+
+  it("registers the native seat command namespace", () => {
+    const program = createProgram();
+    expect(program.commands.some((cmd) => cmd.name() === "seat")).toBe(true);
+  });
 });
