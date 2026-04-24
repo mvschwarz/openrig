@@ -71,6 +71,7 @@ import { InstallEngine } from "../../src/domain/install-engine.js";
 import { InstallVerifier } from "../../src/domain/install-verifier.js";
 import { PodBundleSourceResolver } from "../../src/domain/bundle-source-resolver.js";
 import { NodeCmuxService } from "../../src/domain/node-cmux-service.js";
+import { AgentActivityStore } from "../../src/domain/agent-activity-store.js";
 import { createApp } from "../../src/server.js";
 import fs from "node:fs";
 
@@ -116,7 +117,13 @@ function readyRuntimeAdapter(runtime: string): RuntimeAdapter {
 
 export function createTestApp(
   db: Database.Database,
-  opts?: { cmux?: CmuxAdapter; tmux?: TmuxAdapter; adapters?: Partial<Record<string, RuntimeAdapter>> },
+  opts?: {
+    cmux?: CmuxAdapter;
+    tmux?: TmuxAdapter;
+    adapters?: Partial<Record<string, RuntimeAdapter>>;
+    activityHookToken?: string;
+    activityFreshnessMs?: number;
+  },
 ) {
   const rigRepo = new RigRepository(db);
   const sessionRegistry = new SessionRegistry(db);
@@ -209,6 +216,11 @@ export function createTestApp(
   const contextUsageStore = new ContextUsageStore(db, { stateDir: "/tmp/openrig-test" });
   const whoamiService = new WhoamiService({ db, rigRepo, sessionRegistry, transcriptStore, contextUsageStore });
   const nodeCmuxService = new NodeCmuxService(rigRepo, sessionRegistry, cmux);
+  const agentActivityStore = new AgentActivityStore({
+    db,
+    eventBus,
+    freshnessMs: opts?.activityFreshnessMs,
+  });
 
   const podBundleSourceResolver = new PodBundleSourceResolver();
 
@@ -228,6 +240,8 @@ export function createTestApp(
     contextUsageStore,
     whoamiService,
     nodeCmuxService,
+    agentActivityStore,
+    activityHookToken: opts?.activityHookToken,
   });
   return {
     app, rigRepo, sessionRegistry, eventBus, nodeLauncher, snapshotRepo,
@@ -241,5 +255,6 @@ export function createTestApp(
     upRouter: new UpCommandRouter({ fsOps: { exists: () => false, readFile: () => "", readHead: () => Buffer.alloc(0) } }),
     teardownOrchestrator: new RigTeardownOrchestrator({ db, rigRepo, sessionRegistry, tmuxAdapter: tmux, snapshotCapture, eventBus }),
     podInstantiator, podBundleSourceResolver, db, tmuxAdapter: tmux,
+    agentActivityStore,
   };
 }

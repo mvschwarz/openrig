@@ -30,7 +30,7 @@ const IDLE_STATUS_BAR_PATTERNS = [
 const IDLE_TERMINAL_COMMANDS = new Set(["zsh", "bash", "sh", "fish", "nu", "tmux"]);
 
 export interface PaneActivityClassification {
-  state: AgentActivity["state"];
+  state: "agent_active" | "agent_idle" | "attention" | "unknown";
   reason: string;
   evidence: string | null;
 }
@@ -151,29 +151,32 @@ export async function probeSessionActivity(input: {
       const paneCommand = await input.tmuxAdapter.getPaneCommand(input.sessionName);
       if (paneCommand && !IDLE_TERMINAL_COMMANDS.has(paneCommand)) {
         return {
-          state: "agent_active",
+          state: "running",
           reason: "foreground_command",
-          evidenceSource: "tmux_pane_command",
+          evidenceSource: "pane_heuristic",
           sampledAt,
           evidence: paneCommand,
+          fallback: true,
         };
       }
     } catch {
       return {
         state: "unknown",
         reason: "capture_failed",
-        evidenceSource: "tmux_pane_command",
+        evidenceSource: "pane_heuristic",
         sampledAt,
         evidence: null,
+        fallback: true,
       };
     }
 
     return {
       state: "unknown",
       reason: "unsupported_runtime",
-      evidenceSource: "tmux_pane_command",
+      evidenceSource: "pane_heuristic",
       sampledAt,
       evidence: null,
+      fallback: true,
     };
   }
 
@@ -202,19 +205,30 @@ export async function probeSessionActivity(input: {
     const paneContent = await input.tmuxAdapter.capturePaneContent(input.sessionName, 20);
     const classification = classifyPaneActivity(paneContent ?? "");
     return {
-      ...classification,
-      evidenceSource: "tmux_pane",
+      state: mapPaneState(classification.state),
+      reason: classification.reason,
+      evidence: classification.evidence,
+      evidenceSource: "pane_heuristic",
       sampledAt,
+      fallback: true,
     };
   } catch {
     return {
       state: "unknown",
       reason: "capture_failed",
-      evidenceSource: "tmux_pane",
+      evidenceSource: "pane_heuristic",
       sampledAt,
       evidence: null,
+      fallback: true,
     };
   }
+}
+
+function mapPaneState(state: PaneActivityClassification["state"]): AgentActivity["state"] {
+  if (state === "agent_active") return "running";
+  if (state === "attention") return "needs_input";
+  if (state === "agent_idle") return "idle";
+  return "unknown";
 }
 
 function looksLikeMidWork(paneContent: string): boolean {

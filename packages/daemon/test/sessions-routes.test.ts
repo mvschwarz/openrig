@@ -447,12 +447,85 @@ describe("Session routes", () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body[0].agentActivity).toMatchObject({
-      state: "agent_active",
+      state: "running",
       reason: "mid_work_pattern",
-      evidenceSource: "tmux_pane",
+      evidenceSource: "pane_heuristic",
+      fallback: true,
     });
     expect(typeof body[0].agentActivity.sampledAt).toBe("string");
     expect(tmux.capturePaneContent).toHaveBeenCalledWith("dev-impl@test-rig", 20);
+  });
+
+  it("GET /api/rigs/:rigId/nodes prefers fresh hook activity over pane fallback", async () => {
+    const tmux = {
+      hasSession: vi.fn(async () => true),
+      capturePaneContent: vi.fn(async () => "› idle\n\ngpt-5.5 xhigh fast · Context [████ ]"),
+    } as unknown as TmuxAdapter;
+    const { app, rigRepo, sessionRegistry, agentActivityStore } = createTestApp(db, {
+      tmux,
+      activityHookToken: "test-token",
+    });
+    const rig = rigRepo.createRig("test-rig");
+    const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code" });
+    const session = sessionRegistry.registerSession(node.id, "dev-impl@test-rig");
+    sessionRegistry.updateStatus(session.id, "running");
+    sessionRegistry.updateBinding(node.id, { tmuxSession: "dev-impl@test-rig", attachmentType: "tmux" });
+    agentActivityStore.recordHookEvent({
+      runtime: "claude-code",
+      sessionName: "dev-impl@test-rig",
+      hookEvent: "Notification",
+      subtype: "permission_prompt",
+      occurredAt: new Date().toISOString(),
+    });
+
+    const res = await app.request(`/api/rigs/${rig.id}/nodes`);
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body[0].agentActivity).toMatchObject({
+      state: "needs_input",
+      reason: "permission_prompt",
+      evidenceSource: "runtime_hook",
+      fallback: false,
+      rawEvent: "Notification",
+      rawSubtype: "permission_prompt",
+    });
+    expect(tmux.capturePaneContent).not.toHaveBeenCalled();
+  });
+
+  it("GET /api/rigs/:rigId/nodes reports stale hook evidence as unknown without pane fallback", async () => {
+    const tmux = {
+      hasSession: vi.fn(async () => true),
+      capturePaneContent: vi.fn(async () => "Working on task...\n⠋ Processing files\nesc to interrupt"),
+    } as unknown as TmuxAdapter;
+    const { app, rigRepo, sessionRegistry, agentActivityStore } = createTestApp(db, {
+      tmux,
+      activityHookToken: "test-token",
+      activityFreshnessMs: 1,
+    });
+    const rig = rigRepo.createRig("test-rig");
+    const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code" });
+    const session = sessionRegistry.registerSession(node.id, "dev-impl@test-rig");
+    sessionRegistry.updateStatus(session.id, "running");
+    sessionRegistry.updateBinding(node.id, { tmuxSession: "dev-impl@test-rig", attachmentType: "tmux" });
+    agentActivityStore.recordHookEvent({
+      runtime: "claude-code",
+      sessionName: "dev-impl@test-rig",
+      hookEvent: "UserPromptSubmit",
+      occurredAt: "2000-01-01T00:00:00.000Z",
+    });
+
+    const res = await app.request(`/api/rigs/${rig.id}/nodes`);
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body[0].agentActivity).toMatchObject({
+      state: "unknown",
+      reason: "stale_runtime_hook",
+      evidenceSource: "runtime_hook",
+      stale: true,
+    });
+    expect(tmux.capturePaneContent).not.toHaveBeenCalled();
   });
 
   it("GET /api/rigs/:rigId/nodes marks external CLI activity unsupported instead of idle", async () => {
@@ -473,6 +546,54 @@ describe("Session routes", () => {
       state: "unknown",
       reason: "unsupported_attachment",
       evidenceSource: "external_cli",
+    });
+  });
+
+  it("POST /api/activity/hooks requires the configured local hook token", async () => {
+    const { app } = createTestApp(db, { activityHookToken: "test-token" });
+
+    const res = await app.request("/api/activity/hooks", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        runtime: "claude-code",
+        sessionName: "dev-impl@test-rig",
+        hookEvent: "UserPromptSubmit",
+      }),
+    });
+
+    expect(res.status).toBe(401);
+    const body = await res.json();
+    expect(body.code).toBe("activity_hook_unauthorized");
+  });
+
+  it("POST /api/activity/hooks ingests authenticated runtime hook events", async () => {
+    const { app, rigRepo, sessionRegistry } = createTestApp(db, { activityHookToken: "test-token" });
+    const rig = rigRepo.createRig("test-rig");
+    const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code" });
+    const session = sessionRegistry.registerSession(node.id, "dev-impl@test-rig");
+    sessionRegistry.updateStatus(session.id, "running");
+
+    const res = await app.request("/api/activity/hooks", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "authorization": "Bearer test-token",
+      },
+      body: JSON.stringify({
+        runtime: "claude-code",
+        sessionName: "dev-impl@test-rig",
+        hookEvent: "PreToolUse",
+        occurredAt: "2026-04-24T11:59:00.000Z",
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.activity).toMatchObject({
+      state: "running",
+      reason: "pre_tool_use",
+      evidenceSource: "runtime_hook",
     });
   });
 

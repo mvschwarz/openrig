@@ -30,7 +30,7 @@ interface NodeEntry {
   resumeCommand: string | null;
   latestError: string | null;
   agentActivity?: {
-    state: "agent_active" | "agent_idle" | "attention" | "unknown";
+    state: "running" | "needs_input" | "idle" | "unknown";
     reason: string;
     evidenceSource: string;
     sampledAt: string;
@@ -171,9 +171,9 @@ async function handleNodes(client: DaemonClient, json: boolean): Promise<void> {
 
 function formatActivity(activity: NodeEntry["agentActivity"]): string {
   if (!activity) return "unknown";
-  if (activity.state === "agent_active") return "active";
-  if (activity.state === "agent_idle") return "idle";
-  if (activity.state === "attention") return "attention";
+  if (activity.state === "running") return "running";
+  if (activity.state === "needs_input") return "needs_input";
+  if (activity.state === "idle") return "idle";
   return "unknown";
 }
 
