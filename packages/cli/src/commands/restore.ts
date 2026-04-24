@@ -32,6 +32,7 @@ export function restoreCommand(depsOverride?: StatusDeps): Command {
 
       const res = await client.post<{
         rigResult?: string;
+        blockers?: RestoreBlocker[];
         nodes?: Array<{
           nodeId: string;
           logicalId: string;
@@ -58,6 +59,11 @@ export function restoreCommand(depsOverride?: StatusDeps): Command {
         console.error(`Snapshot "${snapshotId}" or rig "${rigId}" not found. List snapshots with: rig snapshot list --rig ${rigId}`);
         process.exitCode = 1;
       } else if (res.status === 409) {
+        if ((res.data as { code?: string }).code === "pre_restore_validation_failed") {
+          printRestoreNotAttempted(res.data);
+          process.exitCode = 1;
+          return;
+        }
         console.error(`Restore conflict: ${(res.data as { error?: string }).error ?? "rig may still be running"}. Stop the rig first with: rig down ${rigId}`);
         process.exitCode = 1;
       } else if (res.status >= 400) {
@@ -85,6 +91,34 @@ export function restoreCommand(depsOverride?: StatusDeps): Command {
     });
 
   return cmd;
+}
+
+interface RestoreBlocker {
+  code: string;
+  severity?: string;
+  logicalId?: string;
+  nodeId?: string;
+  target?: string;
+  path?: string;
+  message: string;
+  remediation: string;
+}
+
+function printRestoreNotAttempted(data: { rigResult?: string; blockers?: RestoreBlocker[]; error?: string }): void {
+  console.error(`Restore blocked: ${data.error ?? "pre-restore validation failed"}`);
+  if (data.rigResult) {
+    console.error(`Rig result: ${data.rigResult}`);
+  }
+  printBlockers(data.blockers ?? []);
+}
+
+function printBlockers(blockers: RestoreBlocker[]): void {
+  for (const blocker of blockers) {
+    const scope = blocker.logicalId ?? blocker.nodeId ?? blocker.target ?? blocker.code;
+    console.error(`  ${scope}: ${blocker.message}`);
+    if (blocker.path) console.error(`    path: ${blocker.path}`);
+    console.error(`    remediation: ${blocker.remediation}`);
+  }
 }
 
 function printRecoveryGuidance(

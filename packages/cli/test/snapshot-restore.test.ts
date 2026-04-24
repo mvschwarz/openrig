@@ -133,6 +133,27 @@ function createMockDaemon() {
         res.end(JSON.stringify({ error: "Rig rig-1 must be stopped before restore" }));
         return;
       }
+      if (snapshotId === "blocked") {
+        res.writeHead(409, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({
+          error: "Restore pre-validation failed; no restore mutation was attempted.",
+          code: "pre_restore_validation_failed",
+          snapshotId: "blocked",
+          preRestoreSnapshotId: null,
+          rigResult: "not_attempted",
+          nodes: [],
+          warnings: [],
+          blockers: [{
+            code: "required_startup_file_missing",
+            severity: "critical",
+            logicalId: "worker",
+            path: "/workspace/app/STARTUP.md",
+            message: "Required startup file is missing for worker: /workspace/app/STARTUP.md",
+            remediation: "Restore the missing startup file or capture a new snapshot before retrying restore.",
+          }],
+        }));
+        return;
+      }
       if (snapshotId === "failed-node") {
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({
@@ -291,6 +312,24 @@ describe("rig snapshot + restore", () => {
     expect(output).toContain("Rig result: partially_restored");
     expect(output).toContain("worker");
     expect(output).toContain("fresh");
+    expect(process.exitCode).toBe(1);
+
+    process.exitCode = savedExitCode;
+  });
+
+  it("restore: validation blocked response prints not_attempted blockers", async () => {
+    const savedExitCode = process.exitCode;
+    process.exitCode = undefined;
+
+    const program = new Command();
+    program.addCommand(restoreCommand(runningDeps(port)));
+    const logs = await captureLogs(() => program.parseAsync(["node", "rig", "restore", "blocked", "--rig", "rig-1"]));
+
+    const output = logs.join("\n");
+    expect(output).toContain("Rig result: not_attempted");
+    expect(output).toContain("Required startup file is missing");
+    expect(output).toContain("/workspace/app/STARTUP.md");
+    expect(output).toContain("Restore the missing startup file");
     expect(process.exitCode).toBe(1);
 
     process.exitCode = savedExitCode;

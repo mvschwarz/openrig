@@ -438,6 +438,57 @@ describe("Up CLI", () => {
     expect(exitCode).toBe(1);
   });
 
+  it("restored rig validation block prints not_attempted blockers and exits nonzero", async () => {
+    const origListeners = server.listeners("request");
+    server.removeAllListeners("request");
+    server.on("request", async (req: http.IncomingMessage, res: http.ServerResponse) => {
+      if (req.url === "/api/rigs/summary" && req.method === "GET") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify([{ id: "rig-1", name: "restore-me", nodeCount: 1 }]));
+        return;
+      }
+      if (req.url === "/api/up" && req.method === "POST") {
+        res.writeHead(409, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({
+          status: "not_attempted",
+          rigId: "rig-1",
+          rigName: "restore-me",
+          error: "Restore pre-validation failed; no restore mutation was attempted.",
+          code: "pre_restore_validation_failed",
+          snapshotId: "snap-1",
+          preRestoreSnapshotId: null,
+          rigResult: "not_attempted",
+          nodes: [],
+          warnings: [],
+          blockers: [{
+            code: "required_startup_file_missing",
+            severity: "critical",
+            logicalId: "worker",
+            path: "/workspace/app/STARTUP.md",
+            message: "Required startup file is missing for worker: /workspace/app/STARTUP.md",
+            remediation: "Restore the missing startup file or capture a new snapshot before retrying restore.",
+          }],
+        }));
+        return;
+      }
+      res.writeHead(404).end();
+    });
+
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "up", "restore-me"]);
+    });
+
+    server.removeAllListeners("request");
+    for (const l of origListeners) server.on("request", l as (...args: unknown[]) => void);
+
+    const output = logs.join("\n");
+    expect(output).toContain("Result: not_attempted");
+    expect(output).toContain("Required startup file is missing");
+    expect(output).toContain("/workspace/app/STARTUP.md");
+    expect(output).toContain("Restore the missing startup file");
+    expect(exitCode).toBe(1);
+  });
+
   // PNS-T06: fresh boot warnings (e.g. transcript attach failures) surface to stderr
   it("fresh boot success prints warnings when present", async () => {
     const origListeners = server.listeners("request");

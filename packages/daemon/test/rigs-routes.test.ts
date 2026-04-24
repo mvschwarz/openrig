@@ -528,6 +528,37 @@ describe("Rig CRUD routes", () => {
     expect(body.nodes[0].status).toBe("fresh");
   });
 
+  it("POST /api/rigs/:id/up returns validation blockers as not_attempted", async () => {
+    const rig = repo.createRig("restore-rig");
+    repo.addNode(rig.id, "worker", { role: "worker" });
+    const snap = snapshotCapture.captureSnapshot(rig.id, "auto-pre-down");
+    const data = JSON.parse(JSON.stringify(snap.data));
+    const node = data.nodes[0];
+    const missingPath = `/tmp/openrig-slice7-rigs-missing-${Date.now()}.md`;
+    data.nodeStartupContext[node.id] = {
+      projectionEntries: [],
+      resolvedStartupFiles: [{
+        path: "startup.md",
+        absolutePath: missingPath,
+        ownerRoot: "/tmp",
+        deliveryHint: "guidance_merge",
+        required: true,
+        appliesOn: ["restore"],
+      }],
+      startupActions: [],
+      runtime: "claude-code",
+    };
+    db.prepare("UPDATE snapshots SET data = ? WHERE id = ?").run(JSON.stringify(data), snap.id);
+
+    const res = await app.request(`/api/rigs/${rig.id}/up`, { method: "POST" });
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body.status).toBe("not_attempted");
+    expect(body.code).toBe("pre_restore_validation_failed");
+    expect(body.rigResult).toBe("not_attempted");
+    expect(body.blockers[0].path).toBe(missingPath);
+  });
+
   it("POST /api/rigs/:id/up returns 404 for nonexistent rig", async () => {
     const res = await app.request("/api/rigs/nonexistent/up", { method: "POST" });
     expect(res.status).toBe(404);

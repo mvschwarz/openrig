@@ -299,6 +299,17 @@ rigsRoutes.post("/:id/up", async (c) => {
     fsOps: { exists: (p: string) => fs.existsSync(p) },
   });
   if (!result.ok) {
+    if (result.code === "pre_restore_validation_failed") {
+      return c.json({
+        status: "not_attempted",
+        rigId,
+        rigName: rig.rig.name,
+        error: result.message,
+        code: result.code,
+        ...result.result,
+        remediation: result.result.blockers?.map((blocker) => blocker.remediation) ?? [],
+      }, 409);
+    }
     return c.json({ error: result.message, code: result.code }, result.code === "rig_not_stopped" ? 409 : 400);
   }
 

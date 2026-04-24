@@ -210,13 +210,25 @@ export interface Checkpoint {
 
 export interface RestoreResult {
   snapshotId: string;
-  preRestoreSnapshotId: string;
+  preRestoreSnapshotId: string | null;
   rigResult: RestoreRigResult;
   nodes: RestoreNodeResult[];
   warnings: string[];
+  blockers?: RestoreValidationBlocker[];
 }
 
 export type RestoreRigResult = "fully_restored" | "partially_restored" | "failed" | "not_attempted";
+
+export interface RestoreValidationBlocker {
+  code: string;
+  severity: "critical";
+  nodeId?: string;
+  logicalId?: string;
+  target?: string;
+  path?: string;
+  message: string;
+  remediation: string;
+}
 
 export interface RestoreNodeResult {
   nodeId: string;
@@ -232,7 +244,8 @@ export type RestoreOutcome =
   | { ok: false; code: "rig_not_stopped"; message: string }
   | { ok: false; code: "restore_error"; message: string }
   | { ok: false; code: "restore_in_progress"; message: string }
-  | { ok: false; code: "service_boot_failed"; message: string };
+  | { ok: false; code: "service_boot_failed"; message: string }
+  | { ok: false; code: "pre_restore_validation_failed"; message: string; result: RestoreResult };
 
 // -- Node inventory projection (NS-T02) --
 

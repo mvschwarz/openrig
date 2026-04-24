@@ -16,12 +16,14 @@ import type {
   RestoreOutcome,
   RestoreRigResult,
   RestoreResult,
+  RestoreValidationBlocker,
   RestoreNodeResult,
   SnapshotData,
   NodeWithBinding,
   Edge,
   Session,
   Checkpoint,
+  RigServicesRecord,
 } from "./types.js";
 
 // Only these edge kinds constrain launch order
@@ -137,6 +139,27 @@ export class RestoreOrchestrator {
     this.activeRestores.add(rigId);
 
     try {
+      const validation = this.validatePreRestore(snapshot.data, {
+        fsOps: opts?.fsOps,
+        servicesRecord: this.rigRepo.getServicesRecord(rigId),
+      });
+      if (validation.blockers.length > 0) {
+        const result: RestoreResult = {
+          snapshotId,
+          preRestoreSnapshotId: null,
+          rigResult: "not_attempted",
+          nodes: [],
+          warnings: validation.warnings,
+          blockers: validation.blockers,
+        };
+        return {
+          ok: false,
+          code: "pre_restore_validation_failed",
+          message: "Restore pre-validation failed; no restore mutation was attempted.",
+          result,
+        };
+      }
+
       // 2. Capture pre-restore snapshot BEFORE any DB mutations —
       // DB still reflects original session state (running for stale sessions)
       const preRestoreSnapshot = this.snapshotCapture.captureSnapshot(rigId, "pre_restore");
@@ -167,7 +190,7 @@ export class RestoreOrchestrator {
 
       // 5. Execute restore with compensating pattern per node
       const nodeResults: RestoreNodeResult[] = [];
-      const restoreWarnings: string[] = [];
+      const restoreWarnings: string[] = [...validation.warnings];
       for (const entry of plan) {
         const result = await this.restoreNodeWithCompensation(entry, rigId, snapshotId, snapshot.data, opts, restoreWarnings);
         nodeResults.push(result);
@@ -194,6 +217,187 @@ export class RestoreOrchestrator {
     } finally {
       this.activeRestores.delete(rigId);
     }
+  }
+
+  private validatePreRestore(
+    data: SnapshotData,
+    opts: {
+      fsOps?: { exists(path: string): boolean };
+      servicesRecord?: RigServicesRecord | null;
+    },
+  ): { blockers: RestoreValidationBlocker[]; warnings: string[] } {
+    const blockers: RestoreValidationBlocker[] = [];
+    const warnings: string[] = [];
+    const exists = opts.fsOps?.exists ?? (() => true);
+
+    const add = (blocker: RestoreValidationBlocker) => blockers.push(blocker);
+    const nodes = Array.isArray(data.nodes) ? data.nodes : null;
+    const sessions = Array.isArray(data.sessions) ? data.sessions : null;
+    const edges = Array.isArray(data.edges) ? data.edges : null;
+    const checkpoints = data.checkpoints && typeof data.checkpoints === "object" ? data.checkpoints : null;
+
+    if (!data.rig || typeof data.rig.id !== "string") {
+      add({
+        code: "invalid_snapshot_data",
+        severity: "critical",
+        target: "snapshot.rig",
+        message: "Snapshot is missing the rig record needed for restore.",
+        remediation: "Capture a new snapshot or restore from a structurally valid snapshot.",
+      });
+    }
+    if (!nodes) {
+      add({
+        code: "invalid_snapshot_data",
+        severity: "critical",
+        target: "snapshot.nodes",
+        message: "Snapshot is missing the node list needed for restore.",
+        remediation: "Capture a new snapshot or restore from a structurally valid snapshot.",
+      });
+    }
+    if (!sessions) {
+      add({
+        code: "invalid_snapshot_data",
+        severity: "critical",
+        target: "snapshot.sessions",
+        message: "Snapshot is missing session records needed for restore.",
+        remediation: "Capture a new snapshot or restore from a structurally valid snapshot.",
+      });
+    }
+    if (!edges) {
+      add({
+        code: "invalid_snapshot_data",
+        severity: "critical",
+        target: "snapshot.edges",
+        message: "Snapshot is missing topology edges needed for restore planning.",
+        remediation: "Capture a new snapshot or restore from a structurally valid snapshot.",
+      });
+    }
+    if (!checkpoints) {
+      add({
+        code: "invalid_snapshot_data",
+        severity: "critical",
+        target: "snapshot.checkpoints",
+        message: "Snapshot is missing the checkpoint map needed for restore.",
+        remediation: "Capture a new snapshot or restore from a structurally valid snapshot.",
+      });
+    }
+
+    if (!nodes || !checkpoints) {
+      return { blockers, warnings };
+    }
+
+    for (const node of nodes) {
+      const checkpoint = checkpoints[node.id] ?? null;
+      if (checkpoint && !node.cwd) {
+        add({
+          code: "checkpoint_missing_node_cwd",
+          severity: "critical",
+          nodeId: node.id,
+          logicalId: node.logicalId,
+          target: "checkpoint",
+          message: `Checkpoint exists for ${node.logicalId}, but the node has no cwd to receive it.`,
+          remediation: "Update the rig spec to include a cwd for this node, then capture a new snapshot or restore manually.",
+        });
+      }
+
+      const startupCtx = data.nodeStartupContext?.[node.id] ?? null;
+      if (!startupCtx) continue;
+
+      for (const file of startupCtx.resolvedStartupFiles ?? []) {
+        if (!file.required) {
+          if (this.pathLike(file.absolutePath) && !exists(file.absolutePath)) {
+            warnings.push(`Restore pre-validation: optional startup file missing for ${node.logicalId}: ${file.absolutePath}`);
+          }
+          continue;
+        }
+        if (this.pathLike(file.ownerRoot) && !exists(file.ownerRoot)) {
+          add({
+            code: "startup_owner_root_missing",
+            severity: "critical",
+            nodeId: node.id,
+            logicalId: node.logicalId,
+            target: file.path,
+            path: file.ownerRoot,
+            message: `Required startup file owner root is missing for ${node.logicalId}: ${file.ownerRoot}`,
+            remediation: "Restore the agent/source root or capture a new snapshot with reachable startup context.",
+          });
+        }
+        if (this.pathLike(file.absolutePath) && !exists(file.absolutePath)) {
+          add({
+            code: "required_startup_file_missing",
+            severity: "critical",
+            nodeId: node.id,
+            logicalId: node.logicalId,
+            target: file.path,
+            path: file.absolutePath,
+            message: `Required startup file is missing for ${node.logicalId}: ${file.absolutePath}`,
+            remediation: "Restore the missing startup file or capture a new snapshot before retrying restore.",
+          });
+        }
+      }
+
+      for (const entry of startupCtx.projectionEntries ?? []) {
+        if (this.pathLike(entry.sourcePath) && !exists(entry.sourcePath)) {
+          add({
+            code: "projection_source_missing",
+            severity: "critical",
+            nodeId: node.id,
+            logicalId: node.logicalId,
+            target: entry.effectiveId,
+            path: entry.sourcePath,
+            message: `Projection source root is missing for ${node.logicalId}: ${entry.sourcePath}`,
+            remediation: "Restore the agent/source root that owns this projected resource or capture a new snapshot.",
+          });
+        }
+        if (this.pathLike(entry.absolutePath) && !exists(entry.absolutePath)) {
+          add({
+            code: "projection_entry_missing",
+            severity: "critical",
+            nodeId: node.id,
+            logicalId: node.logicalId,
+            target: entry.effectiveId,
+            path: entry.absolutePath,
+            message: `Projection entry is missing for ${node.logicalId}: ${entry.absolutePath}`,
+            remediation: "Restore the projected source artifact or capture a new snapshot before retrying restore.",
+          });
+        }
+      }
+    }
+
+    const servicesRecord = opts.servicesRecord ?? null;
+    if (servicesRecord) {
+      if (this.pathLike(servicesRecord.rigRoot) && !exists(servicesRecord.rigRoot)) {
+        add({
+          code: "service_rig_root_missing",
+          severity: "critical",
+          target: "services.rigRoot",
+          path: servicesRecord.rigRoot,
+          message: `Service rig root is missing: ${servicesRecord.rigRoot}`,
+          remediation: "Restore the service rig root or update the services record before retrying restore.",
+        });
+      }
+      if (this.pathLike(servicesRecord.composeFile) && !exists(servicesRecord.composeFile)) {
+        add({
+          code: "service_compose_file_missing",
+          severity: "critical",
+          target: "services.composeFile",
+          path: servicesRecord.composeFile,
+          message: `Service compose file is missing: ${servicesRecord.composeFile}`,
+          remediation: "Restore the compose file or update the services record before retrying restore.",
+        });
+      }
+    }
+
+    return { blockers, warnings };
+  }
+
+  private pathLike(value: unknown): value is string {
+    return typeof value === "string" && value.trim().length > 0 && (
+      value.startsWith("/")
+      || value.startsWith("./")
+      || value.startsWith("../")
+      || value.startsWith("~")
+    );
   }
 
   private captureNodeState(nodeId: string, rigId: string): { binding: import("./types.js").Binding | null; sessions: { id: string; status: string }[] } {

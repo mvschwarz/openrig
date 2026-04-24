@@ -164,6 +164,44 @@ describe("Restore routes", () => {
     expect(body.nodes).toHaveLength(1);
   });
 
+  it("POST restore returns 409 not_attempted when pre-restore validation blocks", async () => {
+    const rig = rigRepo.createRig("r99");
+    rigRepo.addNode(rig.id, "worker", { role: "worker" });
+    const snap = snapshotCapture.captureSnapshot(rig.id, "manual");
+    const data = JSON.parse(JSON.stringify(snap.data));
+    const node = data.nodes[0];
+    const missingPath = `/tmp/openrig-slice7-snapshot-missing-${Date.now()}.md`;
+    data.nodeStartupContext[node.id] = {
+      projectionEntries: [],
+      resolvedStartupFiles: [{
+        path: "startup.md",
+        absolutePath: missingPath,
+        ownerRoot: "/tmp",
+        deliveryHint: "guidance_merge",
+        required: true,
+        appliesOn: ["restore"],
+      }],
+      startupActions: [],
+      runtime: "claude-code",
+    };
+    db.prepare("UPDATE snapshots SET data = ? WHERE id = ?").run(JSON.stringify(data), snap.id);
+
+    const res = await app.request(`/api/rigs/${rig.id}/restore/${snap.id}`, { method: "POST" });
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body.code).toBe("pre_restore_validation_failed");
+    expect(body.rigResult).toBe("not_attempted");
+    expect(body.preRestoreSnapshotId).toBeNull();
+    expect(body.nodes).toEqual([]);
+    expect(body.blockers[0]).toMatchObject({
+      code: "required_startup_file_missing",
+      severity: "critical",
+      logicalId: "worker",
+      path: missingPath,
+    });
+    expect(body.remediation[0]).toContain("Restore the missing startup file");
+  });
+
   it("POST nonexistent snapshot -> 404", async () => {
     const rig = rigRepo.createRig("r99");
     const res = await app.request(`/api/rigs/${rig.id}/restore/nonexistent`, { method: "POST" });
