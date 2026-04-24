@@ -253,6 +253,21 @@ export type NodeRestoreOutcome = "resumed" | "rebuilt" | "fresh" | "failed" | "n
 export type OccupantLifecycle = "active" | "retiring" | "retired" | "context_walled" | "compacted" | "crashed" | "unknown";
 export type ContinuityOutcome = "resumed" | "rebuilt" | "forked" | "fresh" | "failed";
 export type HandoverResult = "complete" | "unchanged" | "partial" | "failed" | null;
+export type AgentActivityState = "agent_active" | "agent_idle" | "attention" | "unknown";
+export type AgentActivityEvidenceSource =
+  | "tmux_pane"
+  | "tmux_pane_command"
+  | "tmux_session"
+  | "external_cli"
+  | "session_registry";
+
+export interface AgentActivity {
+  state: AgentActivityState;
+  reason: string;
+  evidenceSource: AgentActivityEvidenceSource;
+  sampledAt: string;
+  evidence: string | null;
+}
 
 export interface NodeRecoveryGuidance {
   summary: string;
@@ -294,6 +309,7 @@ export interface NodeInventoryEntry {
   resumeType: string | null;
   resumeToken: string | null;
   startupCompletedAt: string | null;
+  agentActivity?: AgentActivity;
   contextUsage?: ContextUsage;
 }
 

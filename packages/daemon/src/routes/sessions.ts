@@ -3,9 +3,10 @@ import type { RigRepository } from "../domain/rig-repository.js";
 import type { SessionRegistry } from "../domain/session-registry.js";
 import type { NodeLauncher } from "../domain/node-launcher.js";
 import type { CmuxAdapter } from "../adapters/cmux.js";
+import type { TmuxAdapter } from "../adapters/tmux.js";
 import type { NodeCmuxService } from "../domain/node-cmux-service.js";
 import type { TranscriptStore } from "../domain/transcript-store.js";
-import { getNodeInventory, getNodeDetail, getNodeInventoryWithContext, getNodeDetailWithContext } from "../domain/node-inventory.js";
+import { attachAgentActivity, getNodeInventory, getNodeDetail, getNodeInventoryWithContext, getNodeDetailWithContext } from "../domain/node-inventory.js";
 import type { ContextUsageStore } from "../domain/context-usage-store.js";
 import type { RigLifecycleService } from "../domain/rig-lifecycle-service.js";
 
@@ -18,6 +19,7 @@ function getDeps(c: { get: (key: string) => unknown }) {
     rigRepo: c.get("rigRepo" as never) as RigRepository,
     sessionRegistry: c.get("sessionRegistry" as never) as SessionRegistry,
     nodeLauncher: c.get("nodeLauncher" as never) as NodeLauncher,
+    tmuxAdapter: c.get("tmuxAdapter" as never) as TmuxAdapter,
     cmuxAdapter: c.get("cmuxAdapter" as never) as CmuxAdapter,
     rigLifecycleService: c.get("rigLifecycleService" as never) as RigLifecycleService | undefined,
   };
@@ -58,11 +60,11 @@ nodesRoutes.get("/", async (c) => {
   const inventory = contextUsageStore
     ? getNodeInventoryWithContext(deps.rigRepo.db, rigId, contextUsageStore)
     : getNodeInventory(deps.rigRepo.db, rigId);
-  return c.json(inventory);
+  return c.json(await attachAgentActivity(inventory, { tmuxAdapter: deps.tmuxAdapter }));
 });
 
 // GET /api/rigs/:rigId/nodes/:logicalId — node detail
-nodesRoutes.get("/:logicalId", (c) => {
+nodesRoutes.get("/:logicalId", async (c) => {
   const rigId = c.req.param("rigId")!;
   const logicalId = decodeURIComponent(c.req.param("logicalId")!);
   const deps = getDeps(c);
@@ -73,6 +75,8 @@ nodesRoutes.get("/:logicalId", (c) => {
     ? getNodeDetailWithContext(deps.rigRepo.db, rigId, logicalId, contextUsageStore)
     : getNodeDetail(deps.rigRepo.db, rigId, logicalId);
   if (!detail) return c.json({ error: `Node "${logicalId}" not found in rig "${rigId}". Check node IDs with: rig ps --nodes` }, 404);
+  const [detailWithActivity] = await attachAgentActivity([detail], { tmuxAdapter: deps.tmuxAdapter });
+  Object.assign(detail, { agentActivity: detailWithActivity?.agentActivity });
 
   // Enrich transcript info from TranscriptStore (not available to pure DB helper)
   const transcriptStore = c.get("transcriptStore" as never) as TranscriptStore | undefined;

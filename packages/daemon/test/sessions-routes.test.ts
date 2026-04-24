@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type Database from "better-sqlite3";
 import { CmuxAdapter } from "../src/adapters/cmux.js";
 import type { CmuxTransportFactory } from "../src/adapters/cmux.js";
+import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import { PodRepository } from "../src/domain/pod-repository.js";
 import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
 
@@ -428,6 +429,51 @@ describe("Session routes", () => {
     expect(body[0].logicalId).toBe("dev.impl");
     expect(body[0].nodeKind).toBe("agent");
     expect(body[0].canonicalSessionName).toBe("dev-impl@test-rig");
+  });
+
+  it("GET /api/rigs/:rigId/nodes includes read-only agent activity evidence", async () => {
+    const tmux = {
+      hasSession: vi.fn(async () => true),
+      capturePaneContent: vi.fn(async () => "Working on task...\n⠋ Processing files\nesc to interrupt"),
+    } as unknown as TmuxAdapter;
+    const { app, rigRepo, sessionRegistry } = createTestApp(db, { tmux });
+    const rig = rigRepo.createRig("test-rig");
+    const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code" });
+    sessionRegistry.registerSession(node.id, "dev-impl@test-rig");
+    sessionRegistry.updateBinding(node.id, { tmuxSession: "dev-impl@test-rig", attachmentType: "tmux" });
+
+    const res = await app.request(`/api/rigs/${rig.id}/nodes`);
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body[0].agentActivity).toMatchObject({
+      state: "agent_active",
+      reason: "mid_work_pattern",
+      evidenceSource: "tmux_pane",
+    });
+    expect(typeof body[0].agentActivity.sampledAt).toBe("string");
+    expect(tmux.capturePaneContent).toHaveBeenCalledWith("dev-impl@test-rig", 20);
+  });
+
+  it("GET /api/rigs/:rigId/nodes marks external CLI activity unsupported instead of idle", async () => {
+    const { app, rigRepo, sessionRegistry } = createTestApp(db);
+    const rig = rigRepo.createRig("test-rig");
+    const node = rigRepo.addNode(rig.id, "orch.lead", { runtime: "claude-code" });
+    sessionRegistry.registerClaimedSession(node.id, "orch-lead@test-rig");
+    sessionRegistry.updateBinding(node.id, {
+      attachmentType: "external_cli",
+      externalSessionName: "orch-lead@test-rig",
+    });
+
+    const res = await app.request(`/api/rigs/${rig.id}/nodes`);
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body[0].agentActivity).toMatchObject({
+      state: "unknown",
+      reason: "unsupported_attachment",
+      evidenceSource: "external_cli",
+    });
   });
 
   it("GET /api/rigs/:rigId/nodes -> 404 for unknown rig", async () => {
