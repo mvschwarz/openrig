@@ -530,7 +530,7 @@ describe("Claude Code runtime adapter", () => {
     const fs = mockFs({
       "/home/test/.claude/settings.json": JSON.stringify({
         permissions: {
-          deny: ["Bash(rm:*)"],
+          deny: ["Bash(git push*)", "Bash(gh pr *)"],
           ask: ["Bash(git push:*)"],
           allow: [],
         },
@@ -543,7 +543,7 @@ describe("Claude Code runtime adapter", () => {
     const store = (fs as unknown as { _store: Record<string, string> })._store;
     const settings = JSON.parse(store["/home/test/.claude/settings.json"] ?? "{}");
 
-    expect(settings.permissions.deny).toEqual(["Bash(rm:*)"]);
+    expect(settings.permissions.deny).toEqual(["Bash(git push*)", "Bash(gh pr *)"]);
     expect(settings.permissions.ask).toEqual(["Bash(git push:*)"]);
   });
 

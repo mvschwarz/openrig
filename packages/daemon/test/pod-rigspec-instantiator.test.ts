@@ -26,9 +26,9 @@ function mockTmux(): TmuxAdapter {
   } as unknown as TmuxAdapter;
 }
 
-function mockAdapter(): RuntimeAdapter {
+function mockAdapter(runtime = "claude-code"): RuntimeAdapter {
   return {
-    runtime: "claude-code",
+    runtime,
     listInstalled: vi.fn(async () => []),
     project: vi.fn(async () => ({ projected: [], skipped: [], failed: [] })),
     deliverStartup: vi.fn(async () => ({ delivered: 0, failed: [] })),
@@ -70,16 +70,17 @@ describe("PodRigInstantiator", () => {
     const nodeLauncher = new NodeLauncher({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux });
     const startupOrch = new StartupOrchestrator({ db, sessionRegistry, eventBus, tmuxAdapter: tmux });
     const adapter = mockAdapter();
+    const codexAdapter = mockAdapter("codex");
     const files = fsFiles ?? { [`${RIG_ROOT}/agents/impl/agent.yaml`]: agentYaml("impl") };
     const fsOps = mockFs(files);
 
     const inst = new PodRigInstantiator({
       db, rigRepo, podRepo, sessionRegistry, eventBus, nodeLauncher, startupOrchestrator: startupOrch,
-      fsOps, adapters: { "claude-code": adapter, "codex": mockAdapter(), "terminal": mockAdapter() },
+      fsOps, adapters: { "claude-code": adapter, "codex": codexAdapter, "terminal": mockAdapter("terminal") },
       tmuxAdapter: tmux,
     });
 
-    return { db, rigRepo, podRepo, sessionRegistry, eventBus, inst, adapter, tmux };
+    return { db, rigRepo, podRepo, sessionRegistry, eventBus, inst, adapter, codexAdapter, tmux };
   }
 
   // T1: valid rig instantiates pods + nodes + edges
@@ -119,6 +120,33 @@ describe("PodRigInstantiator", () => {
     expect(result.ok).toBe(true);
     expect(adapter.project).toHaveBeenCalled();
     expect(adapter.checkReady).toHaveBeenCalled();
+    db.close();
+  });
+
+  it("passes RigSpec member model into the Codex runtime binding", async () => {
+    const { db, inst, codexAdapter } = setup();
+    const spec = makeRigSpec({
+      pods: [{
+        id: "dev",
+        label: "Dev",
+        members: [{
+          id: "impl",
+          agentRef: "local:agents/impl",
+          profile: "default",
+          runtime: "codex",
+          model: "gpt-5.5",
+          cwd: ".",
+        }],
+        edges: [],
+      }],
+    });
+
+    const result = await inst.instantiate(RigSpecCodec.serialize(spec), RIG_ROOT);
+
+    expect(result.ok).toBe(true);
+    const launchHarness = codexAdapter.launchHarness as ReturnType<typeof vi.fn>;
+    expect(launchHarness).toHaveBeenCalled();
+    expect(launchHarness.mock.calls[0]?.[0].model).toBe("gpt-5.5");
     db.close();
   });
 

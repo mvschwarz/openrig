@@ -7,6 +7,7 @@ import type { ProjectionPlan } from "./projection-planner.js";
 
 export interface NodeBinding extends Binding {
   cwd: string;
+  model?: string;
 }
 
 // -- Resolved startup file with source-root provenance --

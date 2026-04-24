@@ -308,7 +308,24 @@ describe("Codex runtime adapter", () => {
 
     expect(result.ok).toBe(true);
     const sendText = tmux.sendText as ReturnType<typeof vi.fn>;
-    expect(sendText).toHaveBeenCalledWith("r01-qa", "codex -C '/project' -a never -s workspace-write");
+    expect(sendText).toHaveBeenCalledWith("r01-qa", "codex -C '/project' --add-dir '/project/.git' -a never -s workspace-write");
+  });
+
+  it("launchHarness passes the requested Codex model on fresh launch", async () => {
+    const tmux = mockTmux();
+    const adapter = new CodexRuntimeAdapter({
+      tmux,
+      fsOps: mockFs(),
+      listProcesses: () => [],
+      sleep: async () => {},
+    });
+    const binding = { ...makeBinding(), model: "gpt-5.5" };
+
+    const result = await adapter.launchHarness(binding, { name: "dev-qa@test-rig" });
+
+    expect(result.ok).toBe(true);
+    const sendText = tmux.sendText as ReturnType<typeof vi.fn>;
+    expect(sendText).toHaveBeenCalledWith("r01-qa", "codex -C '/project' --add-dir '/project/.git' -m 'gpt-5.5' -a never -s workspace-write");
   });
 
   it("launchHarness captures a fresh Codex thread id from the live child process", async () => {
@@ -439,6 +456,20 @@ describe("Codex runtime adapter", () => {
     expect(result.ok).toBe(true);
     const sendText = tmux.sendText as ReturnType<typeof vi.fn>;
     expect(sendText).toHaveBeenCalledWith("r01-qa", "codex resume sess-456");
+  });
+
+  it("launchHarness does not pass a model argument when resuming Codex", async () => {
+    const tmux = mockTmux();
+    const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs() });
+    const binding = { ...makeBinding(), model: "gpt-5.5" };
+
+    const result = await adapter.launchHarness(binding, { name: "dev-qa@test-rig", resumeToken: "sess-456" });
+
+    expect(result.ok).toBe(true);
+    const sendText = tmux.sendText as ReturnType<typeof vi.fn>;
+    expect(sendText).toHaveBeenCalledWith("r01-qa", "codex resume sess-456");
+    expect(sendText.mock.calls[0]?.[1]).not.toContain("-m");
+    expect(sendText.mock.calls[0]?.[1]).not.toContain("--add-dir");
   });
 
   it("launchHarness returns retry_fresh when Codex reports no saved session for the requested resume token", async () => {

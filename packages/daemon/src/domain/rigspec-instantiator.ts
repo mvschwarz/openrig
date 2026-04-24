@@ -1036,6 +1036,7 @@ export class PodRigInstantiator {
       cmuxSurface: null,
       updatedAt: "",
       cwd: configResult.config.cwd,
+      model: configResult.config.model,
     };
 
     const startupResult = await this.deps.startupOrchestrator.startNode({

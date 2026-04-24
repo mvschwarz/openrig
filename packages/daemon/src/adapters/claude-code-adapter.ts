@@ -557,10 +557,10 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       "Bash(node *)", "Bash(npx *)", "Bash(npm *)",
       "Read", "Edit",
     ];
+    // Keep managed-session denies to destructive guardrails only. Role-level
+    // policy decides whether a seat may commit, push, or open PRs.
     const rigDenyRules = [
-      "Bash(git push*)", "Bash(git commit*)",
       "Bash(rm -rf *)",
-      "Bash(gh pr *)",
     ];
 
     // Merge without duplicating
