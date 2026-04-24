@@ -4,6 +4,7 @@ import type { DaemonClient, DaemonResponse } from "./client.js";
 import { CLI_VERSION } from "./version.js";
 
 const LONG_RUNNING_UP_TIMEOUT_MS = 120_000;
+const WAIT_FOR_IDLE_REQUEST_OVERHEAD_MS = 5_000;
 
 type TextResult = {
   content: Array<{ type: "text"; text: string }>;
@@ -318,13 +319,14 @@ export function createMcpServer(client: DaemonClient): McpServer {
             isError: true,
           };
         }
+        const waitForIdleMs = waitForIdleSeconds === undefined ? undefined : Math.ceil(waitForIdleSeconds * 1000);
         const res = await client.post("/api/transport/send", {
           session,
           text,
           verify,
           force,
-          waitForIdleMs: waitForIdleSeconds === undefined ? undefined : Math.ceil(waitForIdleSeconds * 1000),
-        });
+          waitForIdleMs,
+        }, waitForIdleRequestOptions(waitForIdleMs));
         return mapResult(res);
       } catch (err) {
         return { content: [{ type: "text" as const, text: (err as Error).message }], isError: true as const };
@@ -421,4 +423,9 @@ export function createMcpServer(client: DaemonClient): McpServer {
   );
 
   return server;
+}
+
+function waitForIdleRequestOptions(waitForIdleMs: number | undefined): { timeoutMs: number } | undefined {
+  if (waitForIdleMs === undefined) return undefined;
+  return { timeoutMs: waitForIdleMs + WAIT_FOR_IDLE_REQUEST_OVERHEAD_MS };
 }
