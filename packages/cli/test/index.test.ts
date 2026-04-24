@@ -20,4 +20,9 @@ describe("CLI entrypoint direct-run detection", () => {
     const program = createProgram();
     expect(program.version()).toBe(CLI_VERSION);
   });
+
+  it("registers the native heartbeat command", () => {
+    const program = createProgram();
+    expect(program.commands.some((cmd) => cmd.name() === "heartbeat")).toBe(true);
+  });
 });
