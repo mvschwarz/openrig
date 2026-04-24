@@ -6,7 +6,7 @@ import { DaemonClient, type DaemonResponse } from "../src/client.js";
 
 function mockClient(overrides?: {
   get?: (path: string) => Promise<DaemonResponse>;
-  post?: (path: string, body?: unknown) => Promise<DaemonResponse>;
+  post?: (path: string, body?: unknown, options?: { timeoutMs?: number }) => Promise<DaemonResponse>;
   postText?: (path: string, text: string, contentType?: string, extraHeaders?: Record<string, string>) => Promise<DaemonResponse>;
 }): DaemonClient {
   const client = new DaemonClient("http://127.0.0.1:9999");
@@ -348,10 +348,55 @@ describe("MCP Server", () => {
     });
 
     expect(postFn).toHaveBeenCalled();
+    expect(postFn.mock.calls[0]?.[2]).toBeUndefined();
     expect(result.isError).toBeUndefined();
     const parsed = JSON.parse((result.content as Array<{ text: string }>)[0]!.text);
     expect(parsed.ok).toBe(true);
     expect(parsed.sessionName).toBe("dev-impl@my-rig");
+    await cleanup();
+  });
+
+  it("rig_send with waitForIdleSeconds extends request timeout", async () => {
+    const postFn = vi.fn(async () => ({
+      status: 200,
+      data: { ok: true, sessionName: "dev-impl@my-rig" },
+    }));
+    await setup({ post: postFn });
+
+    const result = await mcpClient.callTool({
+      name: "rig_send",
+      arguments: { session: "dev-impl@my-rig", text: "hello", waitForIdleSeconds: 30 },
+    });
+
+    expect(postFn).toHaveBeenCalledWith(
+      "/api/transport/send",
+      expect.objectContaining({
+        session: "dev-impl@my-rig",
+        text: "hello",
+        waitForIdleMs: 30000,
+      }),
+      { timeoutMs: 35000 },
+    );
+    expect(result.isError).toBeUndefined();
+    await cleanup();
+  });
+
+  it("rig_send rejects waitForIdleSeconds with force before daemon contact", async () => {
+    const postFn = vi.fn(async () => ({
+      status: 200,
+      data: { ok: true },
+    }));
+    await setup({ post: postFn });
+
+    const result = await mcpClient.callTool({
+      name: "rig_send",
+      arguments: { session: "dev-impl@my-rig", text: "hello", waitForIdleSeconds: 30, force: true },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(postFn).not.toHaveBeenCalled();
+    const parsed = JSON.parse((result.content as Array<{ text: string }>)[0]!.text);
+    expect(parsed.error).toContain("cannot be combined");
     await cleanup();
   });
 

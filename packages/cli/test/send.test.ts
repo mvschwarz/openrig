@@ -37,7 +37,7 @@ function captureLogs(fn: () => Promise<void>): Promise<{ logs: string[]; exitCod
   });
 }
 
-function runningDeps(port: number): StatusDeps {
+function runningDeps(port: number, clientFactory?: StatusDeps["clientFactory"]): StatusDeps {
   return {
     lifecycleDeps: {
       ...mockLifecycleDeps(),
@@ -48,7 +48,7 @@ function runningDeps(port: number): StatusDeps {
       }),
       fetch: vi.fn(async () => ({ ok: true })),
     },
-    clientFactory: (baseUrl) => new DaemonClient(baseUrl),
+    clientFactory: clientFactory ?? ((baseUrl) => new DaemonClient(baseUrl)),
   };
 }
 
@@ -87,10 +87,10 @@ describe("Send CLI", () => {
 
   afterAll(() => { server.close(); });
 
-  function makeCmd(): Command {
+  function makeCmd(deps: StatusDeps = runningDeps(port)): Command {
     const prog = new Command();
     prog.exitOverride();
-    prog.addCommand(sendCommand(runningDeps(port)));
+    prog.addCommand(sendCommand(deps));
     return prog;
   }
 
@@ -122,17 +122,38 @@ describe("Send CLI", () => {
     expect(parsed.sessionName).toBe("dev-impl@my-rig");
   });
 
-  it("send --wait-for-idle posts waitForIdleMs", async () => {
+  it("send --wait-for-idle posts waitForIdleMs and extends request timeout", async () => {
+    const postFn = vi.fn(async () => ({
+      status: 200,
+      data: { ok: true, sessionName: "dev-impl@my-rig" },
+    }));
+    const deps = runningDeps(port, () => ({ post: postFn } as unknown as DaemonClient));
     const { logs } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rig", "send", "dev-impl@my-rig", "hello", "--wait-for-idle", "30", "--json"]);
+      await makeCmd(deps).parseAsync(["node", "rig", "send", "dev-impl@my-rig", "hello", "--wait-for-idle", "30", "--json"]);
     });
     const parsed = JSON.parse(logs.join("\n"));
     expect(parsed.ok).toBe(true);
-    expect(lastSendBody).toMatchObject({
-      session: "dev-impl@my-rig",
-      text: "hello",
-      waitForIdleMs: 30000,
+    expect(postFn).toHaveBeenCalledWith(
+      "/api/transport/send",
+      expect.objectContaining({
+        session: "dev-impl@my-rig",
+        text: "hello",
+        waitForIdleMs: 30000,
+      }),
+      { timeoutMs: 35000 },
+    );
+  });
+
+  it("send without wait-for-idle uses default client timeout path", async () => {
+    const postFn = vi.fn(async () => ({
+      status: 200,
+      data: { ok: true, sessionName: "dev-impl@my-rig" },
+    }));
+    const deps = runningDeps(port, () => ({ post: postFn } as unknown as DaemonClient));
+    await captureLogs(async () => {
+      await makeCmd(deps).parseAsync(["node", "rig", "send", "dev-impl@my-rig", "hello"]);
     });
+    expect(postFn.mock.calls[0]?.[2]).toBeUndefined();
   });
 
   it("send rejects invalid wait-for-idle values before contacting daemon", async () => {

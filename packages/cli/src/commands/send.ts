@@ -4,6 +4,8 @@ import { getDaemonStatus, getDaemonUrl } from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 
+const WAIT_FOR_IDLE_REQUEST_OVERHEAD_MS = 5_000;
+
 export function sendCommand(depsOverride?: StatusDeps): Command {
   const cmd = new Command("send").description("Send a message to an agent's terminal");
   const getDeps = (): StatusDeps => depsOverride ?? {
@@ -56,7 +58,7 @@ Use --force to override mid-task safety checks without wait mode.`)
       const client = deps.clientFactory(getDaemonUrl(status));
       const res = await client.post<Record<string, unknown>>("/api/transport/send", {
         session, text, verify: opts.verify, force: opts.force, waitForIdleMs,
-      });
+      }, waitForIdleRequestOptions(waitForIdleMs));
 
       if (opts.json) {
         console.log(JSON.stringify(res.data));
@@ -86,4 +88,9 @@ function parseWaitForIdleMs(value: string | undefined): number | undefined | nul
   const seconds = Number(value);
   if (!Number.isFinite(seconds) || seconds <= 0) return null;
   return Math.ceil(seconds * 1000);
+}
+
+function waitForIdleRequestOptions(waitForIdleMs: number | undefined): { timeoutMs: number } | undefined {
+  if (waitForIdleMs === undefined) return undefined;
+  return { timeoutMs: waitForIdleMs + WAIT_FOR_IDLE_REQUEST_OVERHEAD_MS };
 }
