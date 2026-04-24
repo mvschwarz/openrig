@@ -157,9 +157,10 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     const model = binding.model?.trim();
     const modelArg = model ? ` -m ${shellQuote(model)}` : "";
     const gitDirArg = ` --add-dir ${shellQuote(nodePath.join(binding.cwd, ".git"))}`;
+    const queueStateDirArg = this.buildQueueStateAddDirArg(opts.name);
     const cmd = opts.resumeToken
-      ? `codex resume ${opts.resumeToken}`
-      : `codex -C ${shellQuote(binding.cwd)}${gitDirArg}${modelArg} -a never -s workspace-write`;
+      ? `codex resume${queueStateDirArg} ${shellQuote(opts.resumeToken)}`
+      : `codex -C ${shellQuote(binding.cwd)}${gitDirArg}${queueStateDirArg}${modelArg} -a never -s workspace-write`;
 
     const textResult = await this.tmux.sendText(binding.tmuxSession, cmd);
     if (!textResult.ok) {
@@ -184,6 +185,16 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     }
 
     return { ok: true };
+  }
+
+  private buildQueueStateAddDirArg(sessionName: string): string {
+    const identity = parseCanonicalSessionName(sessionName);
+    if (!identity) return "";
+
+    const sharedDocsRoot = process.env.OPENRIG_SHARED_DOCS_ROOT?.trim()
+      || nodePath.join(this.fs.homedir ?? os.homedir(), "code", "substrate", "shared-docs");
+    const queueStateRoot = nodePath.join(sharedDocsRoot, "rigs", identity.rig, "state", identity.pod);
+    return ` --add-dir ${shellQuote(queueStateRoot)}`;
   }
 
   async checkReady(binding: NodeBinding): Promise<ReadinessResult> {
@@ -499,6 +510,26 @@ function upsertCodexProjectTrust(content: string, projectPath: string): string {
   return `${lines.join("\n").replace(/\n*$/, "\n")}`;
 }
 
+function parseCanonicalSessionName(sessionName: string): { pod: string; member: string; rig: string } | null {
+  const trimmed = sessionName.trim();
+  const atIndex = trimmed.indexOf("@");
+  if (atIndex <= 0 || atIndex !== trimmed.lastIndexOf("@") || atIndex === trimmed.length - 1) return null;
+
+  const local = trimmed.slice(0, atIndex);
+  const rig = trimmed.slice(atIndex + 1);
+  const separatorIndex = local.indexOf("-");
+  if (separatorIndex <= 0 || separatorIndex === local.length - 1) return null;
+
+  const pod = local.slice(0, separatorIndex);
+  const member = local.slice(separatorIndex + 1);
+  if (!isSafeQueueSegment(pod) || !isSafeQueueSegment(member) || !isSafeQueueSegment(rig)) return null;
+
+  return { pod, member, rig };
+}
+
+function isSafeQueueSegment(segment: string): boolean {
+  return /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(segment);
+}
 
 function defaultListProcesses(): Array<{ pid: number; ppid: number; command: string }> {
   try {
