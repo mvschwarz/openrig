@@ -1475,6 +1475,47 @@ describe("RestoreOrchestrator", () => {
     }
   });
 
+  it("pod-aware Codex restore without resume metadata fails when fresh startup hits an update gate", async () => {
+    const rig = rigRepo.createRig("test-rig");
+    db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-codex-update", rig.id, "Dev");
+    const node = rigRepo.addNode(rig.id, "dev.qa", { runtime: "codex", podId: "pod-codex-update" });
+    const session = sessionRegistry.registerSession(node.id, "dev-qa@test-rig");
+    sessionRegistry.updateStatus(session.id, "running");
+    db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, ?, ?, ?)").run(node.id, "[]", "[]", "[]", "codex");
+    const snap = snapshotCapture.captureSnapshot(rig.id, "test");
+    sessionRegistry.updateStatus(session.id, "exited");
+    db.prepare("DELETE FROM bindings WHERE node_id = ?").run(node.id);
+
+    const mockAdapter = {
+      runtime: "codex",
+      listInstalled: vi.fn(async () => []),
+      project: vi.fn(async () => ({ projected: [], skipped: [], failed: [] })),
+      deliverStartup: vi.fn(async () => ({ delivered: 0, failed: [] })),
+      checkReady: vi.fn(async () => ({
+        ready: false,
+        code: "update_gate",
+        reason: "Codex reached an update flow, so process-alive alone is not proof of a restored conversation.",
+      })),
+      launchHarness: vi.fn(async () => ({ ok: true as const })),
+    };
+
+    const orch = createOrchestrator();
+    const result = await orch.restore(snap.id, { adapters: { codex: mockAdapter } });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      const nodeResult = result.result.nodes.find((n) => n.nodeId === node.id);
+      expect(nodeResult!.status).toBe("failed");
+      expect(nodeResult!.error).toContain("Restore startup requires attention");
+      expect(nodeResult!.error).toContain("Codex reached an update flow");
+      expect(result.result.rigResult).toBe("failed");
+      expect(mockAdapter.launchHarness).toHaveBeenCalledTimes(1);
+    }
+    const nodeSessions = sessionRegistry.getSessionsForRig(rig.id).filter((s) => s.nodeId === node.id);
+    const restoredSession = nodeSessions.reduce((latest, s) => s.id > latest.id ? s : latest);
+    expect(restoredSession?.startupStatus).toBe("attention_required");
+  });
+
   it("fallback fresh launch during restore replays fresh_start startup actions", async () => {
     const rig = rigRepo.createRig("test-rig");
     db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-4", rig.id, "Infra");

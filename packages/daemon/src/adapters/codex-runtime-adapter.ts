@@ -170,6 +170,8 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       return { ok: false, error: `Failed to send Enter: ${enterResult.message}` };
     }
 
+    await this.dismissSkippableCodexUpdatePrompt(binding.tmuxSession);
+
     if (opts.resumeToken) {
       const verification = await this.verifyResumeLaunch(binding.tmuxSession);
       if (!verification.ok) return verification;
@@ -203,6 +205,39 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
 
     if (probe.status === "resumed") return { ready: true };
     return { ready: false, reason: probe.detail, code: probe.code };
+  }
+
+  private async dismissSkippableCodexUpdatePrompt(tmuxSession: string, attempts = 6): Promise<boolean> {
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      const paneCommand = await this.tmux.getPaneCommand(tmuxSession);
+      const paneContent = (await this.tmux.capturePaneContent(tmuxSession, 40)) ?? "";
+      const probe = assessNativeResumeProbe({
+        runtime: "codex",
+        paneCommand,
+        paneContent,
+      });
+
+      if (probe.code === "update_gate") {
+        if (!isSkippableCodexUpdatePrompt(paneContent)) return false;
+
+        const textResult = await this.tmux.sendText(tmuxSession, "3");
+        if (!textResult.ok) return false;
+        const enterResult = await this.tmux.sendKeys(tmuxSession, ["Enter"]);
+        if (!enterResult.ok) return false;
+        await this.sleep(500);
+        return true;
+      }
+
+      if (probe.status === "resumed" || probe.status === "failed" || probe.code === "trust_gate") {
+        return false;
+      }
+
+      if (attempt < attempts - 1) {
+        await this.sleep(200);
+      }
+    }
+
+    return false;
   }
 
   ensureManagedBootstrap(binding: { cwd?: string | null }): void {
@@ -391,7 +426,18 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
         return { ok: true };
       }
 
-      if (probe.code === "trust_gate" || probe.code === "update_gate") {
+      if (probe.code === "update_gate") {
+        const dismissed = await this.dismissSkippableCodexUpdatePrompt(tmuxSession, 1);
+        if (dismissed) {
+          if (attempt < attempts - 1) {
+            await this.sleep(200);
+          }
+          continue;
+        }
+        return { ok: true };
+      }
+
+      if (probe.code === "trust_gate") {
         return { ok: true };
       }
 
@@ -506,4 +552,9 @@ function commandLooksLikeCodex(command: string): boolean {
     const base = nodePath.basename(unquoted);
     return base === "codex";
   });
+}
+
+function isSkippableCodexUpdatePrompt(paneContent: string): boolean {
+  return paneContent.includes("Update available!")
+    && paneContent.includes("Skip until next version");
 }

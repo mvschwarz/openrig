@@ -808,9 +808,28 @@ export class RestoreOrchestrator {
                 error: startupResult.errors.join("; "),
               };
             }
+            if (isPodAware) {
+              const prefix = startupResult.startupStatus === "attention_required"
+                ? "Restore startup requires attention"
+                : "Restore startup failed";
+              return {
+                nodeId: node.id,
+                logicalId: node.logicalId,
+                status: "failed",
+                error: `${prefix}: ${startupResult.errors.join("; ")}`,
+              };
+            }
             warnings?.push(`Restore startup failed for ${node.logicalId}: ${startupResult.errors.join("; ")}`);
           } catch (err) {
             if (isPodAware && resumeRequested) {
+              return {
+                nodeId: node.id,
+                logicalId: node.logicalId,
+                status: "failed",
+                error: `Restore startup error: ${(err as Error).message}`,
+              };
+            }
+            if (isPodAware) {
               return {
                 nodeId: node.id,
                 logicalId: node.logicalId,
