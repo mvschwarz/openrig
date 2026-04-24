@@ -228,7 +228,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
         return true;
       }
 
-      if (probe.status === "resumed" || probe.status === "failed" || probe.code === "trust_gate") {
+      if (probe.status === "resumed" || probe.code === "trust_gate") {
         return false;
       }
 
@@ -387,6 +387,9 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
           const threadId = this.readThreadIdByPid(codexPid);
           if (threadId) return threadId;
         }
+      }
+      if (binding.tmuxSession) {
+        await this.dismissSkippableCodexUpdatePrompt(binding.tmuxSession, 1);
       }
       await this.sleep(250);
     }

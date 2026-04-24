@@ -329,6 +329,10 @@ describe("Codex runtime adapter", () => {
   });
 
   it("launchHarness skips the non-mutating Codex update prompt before capturing a fresh thread id", async () => {
+    const initialShell = [
+      "codex -C '/project' --add-dir '/project/.git' -a never -s workspace-write",
+      "admin@host project %",
+    ].join("\n");
     const updatePrompt = [
       "✨ Update available! 0.120.0 -> 0.121.0",
       "Release notes: https://github.com/openai/codex/releases/latest",
@@ -338,7 +342,11 @@ describe("Codex runtime adapter", () => {
       "Press enter to continue",
     ].join("\n");
     const tmux = mockTmux({
+      getPaneCommand: vi.fn()
+        .mockResolvedValueOnce("zsh")
+        .mockResolvedValue("codex"),
       capturePaneContent: vi.fn()
+        .mockResolvedValueOnce(initialShell)
         .mockResolvedValueOnce(updatePrompt)
         .mockResolvedValue("OpenAI Codex (v0.120.0)"),
       getPanePid: vi.fn(async () => 900),
@@ -393,6 +401,58 @@ describe("Codex runtime adapter", () => {
     const sendText = tmux.sendText as ReturnType<typeof vi.fn>;
     expect(sendText.mock.calls).toEqual([
       ["r01-qa", "codex -C '/project' --add-dir '/project/.git' -a never -s workspace-write"],
+    ]);
+  });
+
+  it("launchHarness keeps checking for a skippable Codex update while waiting for a fresh thread id", async () => {
+    const initialShell = [
+      "codex -C '/project' --add-dir '/project/.git' -a never -s workspace-write",
+      "admin@host project %",
+    ].join("\n");
+    const updatePrompt = [
+      "✨ Update available! 0.120.0 -> 0.121.0",
+      "› 1. Update now (runs `npm install -g @openai/codex`)",
+      "  2. Skip",
+      "  3. Skip until next version",
+      "Press enter to continue",
+    ].join("\n");
+    const tmux = mockTmux({
+      getPaneCommand: vi.fn(async () => "zsh"),
+      capturePaneContent: vi.fn()
+        .mockResolvedValueOnce(initialShell)
+        .mockResolvedValueOnce(initialShell)
+        .mockResolvedValueOnce(initialShell)
+        .mockResolvedValueOnce(initialShell)
+        .mockResolvedValueOnce(initialShell)
+        .mockResolvedValueOnce(initialShell)
+        .mockResolvedValueOnce(updatePrompt)
+        .mockResolvedValue("OpenAI Codex (v0.120.0)"),
+      getPanePid: vi.fn()
+        .mockResolvedValueOnce(null)
+        .mockResolvedValue(900),
+    });
+    const adapter = new CodexRuntimeAdapter({
+      tmux,
+      fsOps: mockFs(),
+      listProcesses: () => [
+        { pid: 900, ppid: 1, command: "-zsh" },
+        { pid: 901, ppid: 900, command: "codex" },
+      ],
+      readThreadIdByPid: (pid) => pid === 901 ? "019d45bc-117d-78a3-a4ad-6fb186e5a86d" : undefined,
+      sleep: async () => {},
+    });
+
+    const result = await adapter.launchHarness(makeBinding(), { name: "dev-qa@test-rig" });
+
+    expect(result).toEqual({
+      ok: true,
+      resumeToken: "019d45bc-117d-78a3-a4ad-6fb186e5a86d",
+      resumeType: "codex_id",
+    });
+    const sendText = tmux.sendText as ReturnType<typeof vi.fn>;
+    expect(sendText.mock.calls).toEqual([
+      ["r01-qa", "codex -C '/project' --add-dir '/project/.git' -a never -s workspace-write"],
+      ["r01-qa", "3"],
     ]);
   });
 
