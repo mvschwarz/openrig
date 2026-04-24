@@ -47,17 +47,42 @@ interface BasePlanEntry {
   startupStatus: string | null;
 }
 
+interface CompactPlanThresholds {
+  thresholdTokens: number;
+  thresholdPercent: number;
+}
+
+interface CompactPlanSeatPolicy {
+  oneSeatAtATime: true;
+  autoCompactAllowed: false;
+  explicitAuthorizationRequired: true;
+}
+
+interface NotificationPacket {
+  recipient: string | null;
+  subject: string;
+  text: string;
+}
+
 interface CandidateEntry extends BasePlanEntry {
   status: "candidate_with_caveats";
+  thresholdReason: string;
   reasons: string[];
   missingEvidence: string[];
+  precompactRequirements: string[];
+  seatPolicy: CompactPlanSeatPolicy;
+  notificationPacket: NotificationPacket;
   nextAction: string;
 }
 
 interface BlockedEntry extends BasePlanEntry {
   status: "blocked";
+  thresholdReason: string | null;
   reasons: string[];
   missingEvidence: string[];
+  precompactRequirements: string[];
+  seatPolicy: CompactPlanSeatPolicy;
+  notificationPacket: NotificationPacket;
   nextAction: string;
 }
 
@@ -78,6 +103,9 @@ interface CompactPlanResult {
   policy: {
     mode: "read_only_plan";
     defaultThresholdTokens: number;
+    defaultThresholdPercent: number;
+    thresholdTokens: number;
+    thresholdPercent: number;
     oneSeatAtATime: true;
     autoCompactAllowed: false;
     explicitAuthorizationRequired: true;
@@ -91,6 +119,25 @@ interface CompactPlanResult {
 const DEFAULT_THRESHOLD_TOKENS = 400_000;
 const PERCENT_FALLBACK_THRESHOLD = 80;
 const FRESHNESS_THRESHOLD_S = 600;
+const PRECOMPACT_REQUIREMENTS = [
+  "fresh_context_sample",
+  "checkpoint_or_restore_packet_verification",
+  "explicit_operator_authorization",
+  "one_seat_at_a_time_only",
+  "post_compaction_restore_audit",
+];
+const SEAT_POLICY: CompactPlanSeatPolicy = {
+  oneSeatAtATime: true,
+  autoCompactAllowed: false,
+  explicitAuthorizationRequired: true,
+};
+
+function defaultThresholds(): CompactPlanThresholds {
+  return {
+    thresholdTokens: DEFAULT_THRESHOLD_TOKENS,
+    thresholdPercent: PERCENT_FALLBACK_THRESHOLD,
+  };
+}
 
 function estimateUsedTokens(usedPercentage: number | null, contextWindowSize: number | null): number | null {
   if (usedPercentage == null || contextWindowSize == null) return null;
@@ -136,7 +183,39 @@ function candidateSortScore(candidate: CandidateEntry): number {
   return candidate.estimatedUsedTokens ?? ((candidate.usedPercentage ?? 0) * 1_000);
 }
 
-function analyzeNode(node: NodeEntry): CandidateEntry | BlockedEntry | SkippedEntry {
+function notificationPacket(node: NodeEntry, status: "candidate_with_caveats" | "blocked", reasons: string[], missingEvidence: string[]): NotificationPacket {
+  const recipient = node.canonicalSessionName;
+  const subject = status === "candidate_with_caveats"
+    ? `Compact-plan marshal check for ${node.logicalId}`
+    : `Compact-plan evidence needed for ${node.logicalId}`;
+  const session = recipient ?? node.logicalId;
+  const text = status === "candidate_with_caveats"
+    ? [
+      `Read-only compact-plan flagged ${session} for one-seat-at-a-time Claude continuity triage.`,
+      `Reasons: ${reasons.join(", ")}.`,
+      `Before any compaction: verify checkpoint/restore evidence, get explicit operator authorization, compact only this seat, and audit restore after compact-in-place.`,
+      `No automatic compaction has been run.`,
+    ].join(" ")
+    : [
+      `Read-only compact-plan cannot safely plan ${session} yet.`,
+      `Blockers: ${reasons.join(", ")}.`,
+      `Missing evidence: ${missingEvidence.join(", ") || "none"}.`,
+      `Resolve these before requesting one-seat-at-a-time compaction authorization.`,
+    ].join(" ");
+  return { recipient, subject, text };
+}
+
+function thresholdReason(base: BasePlanEntry, thresholds: CompactPlanThresholds): string | null {
+  if (base.estimatedUsedTokens != null && base.estimatedUsedTokens >= thresholds.thresholdTokens) {
+    return "above_token_threshold";
+  }
+  if (base.estimatedUsedTokens == null && (base.usedPercentage ?? 0) >= thresholds.thresholdPercent) {
+    return "above_percent_threshold_missing_window";
+  }
+  return null;
+}
+
+function analyzeNode(node: NodeEntry, thresholds: CompactPlanThresholds): CandidateEntry | BlockedEntry | SkippedEntry {
   const base = baseEntry(node);
 
   if (!isClaude(node)) {
@@ -165,15 +244,18 @@ function analyzeNode(node: NodeEntry): CandidateEntry | BlockedEntry | SkippedEn
     return {
       ...base,
       status: "blocked",
+      thresholdReason: thresholdReason(base, thresholds),
       reasons: blockedReasons,
       missingEvidence: blockedMissingEvidence,
+      precompactRequirements: PRECOMPACT_REQUIREMENTS,
+      seatPolicy: SEAT_POLICY,
+      notificationPacket: notificationPacket(node, "blocked", blockedReasons, blockedMissingEvidence),
       nextAction: "Resolve blocked seat state and collect fresh context before adding this seat to marshal triage.",
     };
   }
 
-  const aboveTokenThreshold = base.estimatedUsedTokens != null && base.estimatedUsedTokens >= DEFAULT_THRESHOLD_TOKENS;
-  const percentFallbackCandidate = base.estimatedUsedTokens == null && (base.usedPercentage ?? 0) >= PERCENT_FALLBACK_THRESHOLD;
-  if (!aboveTokenThreshold && !percentFallbackCandidate) {
+  const reason = thresholdReason(base, thresholds);
+  if (!reason) {
     return {
       ...base,
       status: "skipped",
@@ -182,7 +264,7 @@ function analyzeNode(node: NodeEntry): CandidateEntry | BlockedEntry | SkippedEn
   }
 
   const reasons = [
-    aboveTokenThreshold ? "above_threshold" : "high_percent_missing_window",
+    reason,
     "authorization_required",
   ];
   const missingEvidence = ["checkpoint_or_restore_packet_verification"];
@@ -204,19 +286,23 @@ function analyzeNode(node: NodeEntry): CandidateEntry | BlockedEntry | SkippedEn
   return {
     ...base,
     status: "candidate_with_caveats",
+    thresholdReason: reason,
     reasons,
     missingEvidence,
+    precompactRequirements: PRECOMPACT_REQUIREMENTS,
+    seatPolicy: SEAT_POLICY,
+    notificationPacket: notificationPacket(node, "candidate_with_caveats", reasons, missingEvidence),
     nextAction: "Verify checkpoint/restore evidence, get explicit authorization, compact one Claude seat, then audit restore using claude-compact-in-place.",
   };
 }
 
-function buildPlan(nodes: NodeEntry[]): CompactPlanResult {
+function buildPlan(nodes: NodeEntry[], thresholds = defaultThresholds()): CompactPlanResult {
   const candidates: CandidateEntry[] = [];
   const blocked: BlockedEntry[] = [];
   const skipped: SkippedEntry[] = [];
 
   for (const node of nodes) {
-    const entry = analyzeNode(node);
+    const entry = analyzeNode(node, thresholds);
     if (entry.status === "candidate_with_caveats") candidates.push(entry);
     else if (entry.status === "blocked") blocked.push(entry);
     else skipped.push(entry);
@@ -240,6 +326,9 @@ function buildPlan(nodes: NodeEntry[]): CompactPlanResult {
     policy: {
       mode: "read_only_plan",
       defaultThresholdTokens: DEFAULT_THRESHOLD_TOKENS,
+      defaultThresholdPercent: PERCENT_FALLBACK_THRESHOLD,
+      thresholdTokens: thresholds.thresholdTokens,
+      thresholdPercent: thresholds.thresholdPercent,
       oneSeatAtATime: true,
       autoCompactAllowed: false,
       explicitAuthorizationRequired: true,
@@ -256,6 +345,7 @@ function buildPlan(nodes: NodeEntry[]): CompactPlanResult {
 function printHuman(plan: CompactPlanResult): void {
   console.log("READ-ONLY PLAN - does not compact");
   console.log("Policy: read_only_plan; one-seat-at-a-time marshal triage; autoCompactAllowed=false; explicit authorization required.");
+  console.log(`Thresholds: ${plan.policy.thresholdTokens} estimated tokens; ${plan.policy.thresholdPercent}% when context window size is missing.`);
   console.log(`Summary: ${plan.summary.candidateCount} candidates | ${plan.summary.blockedCount} blocked | ${plan.summary.skippedCount} skipped`);
   console.log();
 
@@ -273,7 +363,8 @@ function printHuman(plan: CompactPlanResult): void {
     console.log("Candidates with caveats:");
     for (const candidate of plan.candidates) {
       const estimate = candidate.estimatedUsedTokens == null ? "unknown tokens" : `${candidate.estimatedUsedTokens} estimated tokens`;
-      console.log(`  - ${candidate.session}: ${estimate}; reasons=${candidate.reasons.join(", ")}; missing=${candidate.missingEvidence.join(", ")}`);
+      console.log(`  - ${candidate.session}: ${estimate}; threshold=${candidate.thresholdReason}; reasons=${candidate.reasons.join(", ")}; missing=${candidate.missingEvidence.join(", ")}`);
+      console.log(`    Notify: ${candidate.notificationPacket.text}`);
     }
   }
 
@@ -282,6 +373,7 @@ function printHuman(plan: CompactPlanResult): void {
     console.log("Blocked / not safely plannable:");
     for (const blocked of plan.blocked) {
       console.log(`  - ${blocked.session ?? blocked.logicalId}: reasons=${blocked.reasons.join(", ")}; missing=${blocked.missingEvidence.join(", ") || "none"}`);
+      console.log(`    Notify: ${blocked.notificationPacket.text}`);
     }
   }
 
@@ -305,8 +397,17 @@ Examples:
     .option("--json", "JSON output for agents")
     .option("--rig <name>", "Plan one rig only")
     .option("--refresh", "Re-sample context usage before planning")
-    .action(async (opts: { json?: boolean; rig?: string; refresh?: boolean }) => {
+    .option("--threshold-tokens <n>", "Estimated used-token threshold for Claude compact-plan candidates")
+    .option("--threshold-percent <0-100>", "Used-percent threshold when context window size is missing")
+    .action(async (opts: { json?: boolean; rig?: string; refresh?: boolean; thresholdTokens?: string; thresholdPercent?: string }) => {
       const deps = getDepsF();
+      const thresholds = parseThresholdOptions(opts);
+      if (!thresholds.ok) {
+        console.error(thresholds.error);
+        process.exitCode = 1;
+        return;
+      }
+
       const status = await getDaemonStatus(deps.lifecycleDeps);
       if (status.state !== "running" || status.healthy === false) {
         console.error("Daemon is not running. Start it with: rig daemon start");
@@ -356,7 +457,7 @@ Examples:
           }
         }
 
-        const plan = buildPlan(allNodes);
+        const plan = buildPlan(allNodes, thresholds.value);
         if (opts.json) {
           console.log(JSON.stringify(plan, null, 2));
         } else {
@@ -370,4 +471,26 @@ Examples:
     });
 
   return cmd;
+}
+
+function parseThresholdOptions(opts: { thresholdTokens?: string; thresholdPercent?: string }): { ok: true; value: CompactPlanThresholds } | { ok: false; error: string } {
+  const thresholds = defaultThresholds();
+
+  if (opts.thresholdTokens != null) {
+    const value = Number(opts.thresholdTokens);
+    if (!Number.isInteger(value) || value <= 0) {
+      return { ok: false, error: "--threshold-tokens must be a positive integer" };
+    }
+    thresholds.thresholdTokens = value;
+  }
+
+  if (opts.thresholdPercent != null) {
+    const value = Number(opts.thresholdPercent);
+    if (!Number.isFinite(value) || value < 0 || value > 100) {
+      return { ok: false, error: "--threshold-percent must be a number from 0 to 100" };
+    }
+    thresholds.thresholdPercent = value;
+  }
+
+  return { ok: true, value: thresholds };
 }

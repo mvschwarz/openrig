@@ -184,6 +184,9 @@ describe("rig compact-plan", () => {
     expect(json.policy).toEqual({
       mode: "read_only_plan",
       defaultThresholdTokens: 400_000,
+      defaultThresholdPercent: 80,
+      thresholdTokens: 400_000,
+      thresholdPercent: 80,
       oneSeatAtATime: true,
       autoCompactAllowed: false,
       explicitAuthorizationRequired: true,
@@ -193,9 +196,18 @@ describe("rig compact-plan", () => {
     const candidate = json.candidates.find((entry: { session: string }) => entry.session === "orch-lead@test-rig");
     expect(candidate.status).toBe("candidate_with_caveats");
     expect(candidate.estimatedUsedTokens).toBe(850_000);
-    expect(candidate.reasons).toContain("above_threshold");
+    expect(candidate.thresholdReason).toBe("above_token_threshold");
+    expect(candidate.reasons).toContain("above_token_threshold");
     expect(candidate.reasons).toContain("authorization_required");
     expect(candidate.missingEvidence).toContain("checkpoint_or_restore_packet_verification");
+    expect(candidate.precompactRequirements).toContain("explicit_operator_authorization");
+    expect(candidate.seatPolicy).toEqual({
+      oneSeatAtATime: true,
+      autoCompactAllowed: false,
+      explicitAuthorizationRequired: true,
+    });
+    expect(candidate.notificationPacket.recipient).toBe("orch-lead@test-rig");
+    expect(candidate.notificationPacket.text).toContain("No automatic compaction has been run");
     expect(json.recommendedOrder).toEqual(["orch-lead@test-rig"]);
 
     const belowThreshold = json.skipped.find((entry: { session: string }) => entry.session === "dev-impl@test-rig");
@@ -247,9 +259,68 @@ describe("rig compact-plan", () => {
     expect(json.candidates.map((entry: { session: string }) => entry.session)).toContain("high-missing-window@test-rig");
     const candidate = json.candidates.find((entry: { session: string }) => entry.session === "high-missing-window@test-rig");
     expect(candidate.status).toBe("candidate_with_caveats");
+    expect(candidate.thresholdReason).toBe("above_percent_threshold_missing_window");
     expect(candidate.estimatedUsedTokens).toBeNull();
     expect(candidate.missingEvidence).toContain("context_window_size");
     expect(json.skipped.find((entry: { session: string }) => entry.session === "mid-missing-window@test-rig").reason).toBe("below_threshold");
+  });
+
+  it("honors custom token and percent thresholds in JSON policy and candidate selection", async () => {
+    const { deps } = makeDeps({
+      nodesByRig: {
+        "rig-0": [
+          node({
+            logicalId: "lower.token",
+            canonicalSessionName: "lower-token@test-rig",
+            contextUsage: {
+              usedPercentage: 30,
+              remainingPercentage: 70,
+              contextWindowSize: 1_000_000,
+              source: "claude_statusline_json",
+              availability: "known",
+              sampledAt: freshSample(),
+              fresh: true,
+            },
+          }),
+          node({
+            logicalId: "lower.percent",
+            canonicalSessionName: "lower-percent@test-rig",
+            contextUsage: {
+              usedPercentage: 75,
+              remainingPercentage: 25,
+              contextWindowSize: null,
+              source: "claude_statusline_json",
+              availability: "known",
+              sampledAt: freshSample(),
+              fresh: true,
+            },
+          }),
+        ],
+      },
+    });
+    const cmd = compactPlanCommand(deps);
+    await cmd.parseAsync(["node", "rig", "--threshold-tokens", "250000", "--threshold-percent", "70", "--json"]);
+
+    const json = JSON.parse(logs.join(""));
+    expect(json.policy.thresholdTokens).toBe(250_000);
+    expect(json.policy.thresholdPercent).toBe(70);
+    expect(json.candidates.map((entry: { session: string }) => entry.session)).toEqual([
+      "lower-token@test-rig",
+      "lower-percent@test-rig",
+    ]);
+    expect(json.candidates.find((entry: { session: string }) => entry.session === "lower-token@test-rig").thresholdReason).toBe("above_token_threshold");
+    expect(json.candidates.find((entry: { session: string }) => entry.session === "lower-percent@test-rig").thresholdReason).toBe("above_percent_threshold_missing_window");
+  });
+
+  it("rejects invalid threshold options before reading daemon inventory", async () => {
+    const { deps, requestedPaths } = makeDeps();
+    const cmd = compactPlanCommand(deps);
+
+    await cmd.parseAsync(["node", "rig", "--threshold-tokens", "0"]);
+
+    expect(process.exitCode).toBe(1);
+    expect(errors.join("\n")).toContain("--threshold-tokens");
+    expect(requestedPaths).toEqual([]);
   });
 
   it("surfaces stale context and missing attach or resume evidence as candidate caveats", async () => {
@@ -314,7 +385,10 @@ describe("rig compact-plan", () => {
     expect(json.candidates).toHaveLength(0);
     expect(json.recommendedOrder).toEqual([]);
     expect(json.blocked.find((entry: { logicalId: string }) => entry.logicalId === "unknown.context").reasons).toContain("context_unknown");
-    expect(json.blocked.find((entry: { logicalId: string }) => entry.logicalId === "missing.session").reasons).toContain("missing_canonical_session");
+    const missingSession = json.blocked.find((entry: { logicalId: string }) => entry.logicalId === "missing.session");
+    expect(missingSession.reasons).toContain("missing_canonical_session");
+    expect(missingSession.notificationPacket.text).toContain("cannot safely plan");
+    expect(missingSession.precompactRequirements).toContain("one_seat_at_a_time_only");
   });
 
   it("does not recommend non-running or not-ready Claude seats", async () => {
@@ -397,10 +471,12 @@ describe("rig compact-plan", () => {
     const output = logs.join("\n");
     expect(output).toContain("READ-ONLY PLAN");
     expect(output).toContain("does not compact");
+    expect(output).toContain("Thresholds:");
     expect(output).toContain("one-seat-at-a-time");
     expect(output).toContain("orch-lead@test-rig");
     expect(output).toContain("authorization");
     expect(output).toContain("checkpoint/restore");
     expect(output).toContain("claude-compact-in-place");
+    expect(output).toContain("No automatic compaction has been run");
   });
 });
