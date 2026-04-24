@@ -2,6 +2,7 @@ import type Database from "better-sqlite3";
 import type { RigRepository } from "./rig-repository.js";
 import type { SessionRegistry } from "./session-registry.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
+import type { AgentActivity } from "./types.js";
 
 // Mid-work detection patterns (cheap heuristics)
 const MID_WORK_PATTERNS = [
@@ -28,35 +29,197 @@ const IDLE_STATUS_BAR_PATTERNS = [
 
 const IDLE_TERMINAL_COMMANDS = new Set(["zsh", "bash", "sh", "fish", "nu", "tmux"]);
 
-function looksLikeMidWork(paneContent: string): boolean {
-  const lines = paneContent.split("\n");
-  const lastNonBlank = lines
-    .map((l) => l.trim())
-    .filter((l) => l.length > 0);
-  const recentWindow = lastNonBlank.slice(-8).join("\n");
-  if (!MID_WORK_PATTERNS.some((p) => p.test(recentWindow))) return false;
+export interface PaneActivityClassification {
+  state: AgentActivity["state"];
+  reason: string;
+  evidence: string | null;
+}
 
-  // Mid-work pattern matched in the trailing non-blank window. Check whether
-  // the pane has since settled to an idle harness prompt — if so, the match
-  // is stale scrollback, not current working state.
-  //
-  // Two discriminators with different position rules:
-  // - IDLE_PROMPT_PATTERNS (❯/› empty prompt): checked across last 3
-  //   non-blank lines because the prompt line may sit above the status bar.
-  // - IDLE_STATUS_BAR_PATTERNS (Codex model footer / Claude edit-accept):
-  //   checked on the LAST non-blank line ONLY. Status bars render at the
-  //   visual bottom of the terminal; if something else is below the status
-  //   bar in the non-blank sequence, active work has been rendered over it
-  //   and the status bar is stale from a prior idle.
+function trimPaneLines(paneContent: string): string[] {
+  return paneContent
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+}
+
+function truncateEvidence(text: string): string {
+  const compact = text.replace(/\s+/g, " ").trim();
+  return compact.length > 240 ? `${compact.slice(0, 237)}...` : compact;
+}
+
+function findPatternEvidence(lines: string[], patterns: RegExp[]): string | null {
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i]!;
+    if (patterns.some((pattern) => pattern.test(line))) return truncateEvidence(line);
+  }
+  return null;
+}
+
+export function classifyPaneActivity(paneContent: string): PaneActivityClassification {
+  const lastNonBlank = trimPaneLines(paneContent);
+  if (lastNonBlank.length === 0) {
+    return { state: "unknown", reason: "empty_capture", evidence: null };
+  }
+
+  const recentLines = lastNonBlank.slice(-8);
+  const recentWindow = recentLines.join("\n");
   const trailingNonBlank = lastNonBlank.slice(-3);
-  const hasIdlePrompt = trailingNonBlank.some((l) =>
-    IDLE_PROMPT_PATTERNS.some((p) => p.test(l))
-  );
   const lastLine = lastNonBlank.at(-1) ?? "";
-  const hasIdleStatusBar = IDLE_STATUS_BAR_PATTERNS.some((p) => p.test(lastLine));
-  if (hasIdlePrompt || hasIdleStatusBar) return false;
+  const idlePromptLine = trailingNonBlank.find((line) =>
+    IDLE_PROMPT_PATTERNS.some((pattern) => pattern.test(line))
+  );
+  const idleStatusBarLine = IDLE_STATUS_BAR_PATTERNS.some((pattern) => pattern.test(lastLine))
+    ? lastLine
+    : null;
+  const selectionPromptEvidence = findPatternEvidence(recentLines, [/^[❯›]\s*\d+\.\s/m]);
+  if (selectionPromptEvidence) {
+    return {
+      state: "attention",
+      reason: "selection_prompt",
+      evidence: selectionPromptEvidence,
+    };
+  }
 
-  return true;
+  if (idleStatusBarLine) {
+    return {
+      state: "agent_idle",
+      reason: "idle_status_bar",
+      evidence: truncateEvidence(idleStatusBarLine),
+    };
+  }
+  if (idlePromptLine && !MID_WORK_PATTERNS.some((pattern) => pattern.test(recentWindow))) {
+    return {
+      state: "agent_idle",
+      reason: "idle_prompt",
+      evidence: truncateEvidence(idlePromptLine),
+    };
+  }
+
+  const midWorkEvidence = findPatternEvidence(recentLines, MID_WORK_PATTERNS);
+  if (midWorkEvidence) {
+    return {
+      state: "agent_active",
+      reason: "mid_work_pattern",
+      evidence: midWorkEvidence,
+    };
+  }
+
+  if (idlePromptLine) {
+    return {
+      state: "agent_idle",
+      reason: "idle_prompt",
+      evidence: truncateEvidence(idlePromptLine),
+    };
+  }
+
+  return {
+    state: "unknown",
+    reason: "no_activity_signal",
+    evidence: truncateEvidence(lastLine),
+  };
+}
+
+export async function probeSessionActivity(input: {
+  sessionName: string | null;
+  runtime: string | null;
+  attachmentType: "tmux" | "external_cli" | null | undefined;
+  tmuxAdapter: TmuxAdapter;
+  now?: Date;
+}): Promise<AgentActivity> {
+  const sampledAt = (input.now ?? new Date()).toISOString();
+
+  if (!input.sessionName) {
+    return {
+      state: "unknown",
+      reason: "no_session",
+      evidenceSource: "session_registry",
+      sampledAt,
+      evidence: null,
+    };
+  }
+  if (input.attachmentType === "external_cli") {
+    return {
+      state: "unknown",
+      reason: "unsupported_attachment",
+      evidenceSource: "external_cli",
+      sampledAt,
+      evidence: input.sessionName,
+    };
+  }
+  if (input.runtime === "terminal") {
+    try {
+      const paneCommand = await input.tmuxAdapter.getPaneCommand(input.sessionName);
+      if (paneCommand && !IDLE_TERMINAL_COMMANDS.has(paneCommand)) {
+        return {
+          state: "agent_active",
+          reason: "foreground_command",
+          evidenceSource: "tmux_pane_command",
+          sampledAt,
+          evidence: paneCommand,
+        };
+      }
+    } catch {
+      return {
+        state: "unknown",
+        reason: "capture_failed",
+        evidenceSource: "tmux_pane_command",
+        sampledAt,
+        evidence: null,
+      };
+    }
+
+    return {
+      state: "unknown",
+      reason: "unsupported_runtime",
+      evidenceSource: "tmux_pane_command",
+      sampledAt,
+      evidence: null,
+    };
+  }
+
+  try {
+    const exists = await input.tmuxAdapter.hasSession(input.sessionName);
+    if (!exists) {
+      return {
+        state: "unknown",
+        reason: "session_missing",
+        evidenceSource: "tmux_session",
+        sampledAt,
+        evidence: input.sessionName,
+      };
+    }
+  } catch {
+    return {
+      state: "unknown",
+      reason: "tmux_unavailable",
+      evidenceSource: "tmux_session",
+      sampledAt,
+      evidence: null,
+    };
+  }
+
+  try {
+    const paneContent = await input.tmuxAdapter.capturePaneContent(input.sessionName, 20);
+    const classification = classifyPaneActivity(paneContent ?? "");
+    return {
+      ...classification,
+      evidenceSource: "tmux_pane",
+      sampledAt,
+    };
+  } catch {
+    return {
+      state: "unknown",
+      reason: "capture_failed",
+      evidenceSource: "tmux_pane",
+      sampledAt,
+      evidence: null,
+    };
+  }
+}
+
+function looksLikeMidWork(paneContent: string): boolean {
+  const activity = classifyPaneActivity(paneContent);
+  return activity.state === "agent_active" || activity.state === "attention";
 }
 
 function delay(ms: number): Promise<void> {

@@ -15,9 +15,97 @@ import { agentspecRebootSchema } from "../src/db/migrations/014_agentspec_reboot
 import { externalCliAttachmentSchema } from "../src/db/migrations/019_external_cli_attachment.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
-import { SessionTransport } from "../src/domain/session-transport.js";
+import { classifyPaneActivity, SessionTransport } from "../src/domain/session-transport.js";
 import type { TmuxAdapter, TmuxResult } from "../src/adapters/tmux.js";
 import { createFullTestDb } from "./helpers/test-app.js";
+
+describe("agent pane activity classifier", () => {
+  it("classifies active Working pane as agent_active", () => {
+    const result = classifyPaneActivity("Working on task...\n⠋ Processing files\nesc to interrupt");
+
+    expect(result.state).toBe("agent_active");
+    expect(result.reason).toBe("mid_work_pattern");
+  });
+
+  it("classifies numbered runtime prompts as attention, not idle", () => {
+    const result = classifyPaneActivity([
+      "› 1. Yes, continue",
+      "  2. No, cancel",
+      "",
+      "  Press enter to continue",
+    ].join("\n"));
+
+    expect(result.state).toBe("attention");
+    expect(result.reason).toBe("selection_prompt");
+  });
+
+  it("classifies numbered runtime prompts with a Codex footer as attention, not idle", () => {
+    const result = classifyPaneActivity([
+      "Some runtime update requires a choice.",
+      "",
+      "› 1. Update now",
+      "  2. Skip this version",
+      "  3. Remind me later",
+      "",
+      "  gpt-5.5 xhigh fast · Context [████ ] · ~/code/projects/openrig",
+    ].join("\n"));
+
+    expect(result.state).toBe("attention");
+    expect(result.reason).toBe("selection_prompt");
+  });
+
+  it("classifies idle Codex footer at the bottom as agent_idle", () => {
+    const result = classifyPaneActivity([
+      "› Summarize recent commits",
+      "",
+      "  gpt-5.5 xhigh fast · Context [████ ] · ~/code/projects/openrig",
+    ].join("\n"));
+
+    expect(result.state).toBe("agent_idle");
+    expect(result.reason).toBe("idle_status_bar");
+  });
+
+  it("classifies idle Claude edit-accept footer at the bottom as agent_idle", () => {
+    const result = classifyPaneActivity([
+      "❯ ",
+      "  ⏵⏵ accept edits on (shift+tab to cycle)",
+    ].join("\n"));
+
+    expect(result.state).toBe("agent_idle");
+    expect(result.reason).toBe("idle_status_bar");
+  });
+
+  it("does not classify stale active scrollback as active when current idle footer is below it", () => {
+    const result = classifyPaneActivity([
+      "◦ Working (9m 26s • esc to interrupt) · 6 background terminals running",
+      "",
+      "› Use /skills to list available skills",
+      "",
+      "  gpt-5.5 xhigh fast · Context [█▉   ] · ~/code/projects/openrig",
+    ].join("\n"));
+
+    expect(result.state).toBe("agent_idle");
+  });
+
+  it("does not classify stale idle footer as idle when current active work is below it", () => {
+    const result = classifyPaneActivity([
+      "  gpt-5.5 xhigh fast · Context [████ ] · ~/code/projects/openrig",
+      "",
+      "• Reading 1 file...",
+      "",
+      "◦ Working (0m 3s • esc to interrupt)",
+    ].join("\n"));
+
+    expect(result.state).toBe("agent_active");
+  });
+
+  it("classifies empty capture as unknown", () => {
+    const result = classifyPaneActivity("\n\n");
+
+    expect(result.state).toBe("unknown");
+    expect(result.reason).toBe("empty_capture");
+  });
+});
 
 function setupDb(): Database.Database {
   return createFullTestDb();

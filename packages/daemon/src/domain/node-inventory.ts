@@ -2,6 +2,8 @@ import type Database from "better-sqlite3";
 import type { NodeInventoryEntry, NodeDetailEntry, NodeDetailPeer, NodeDetailEdge, NodeDetailCompactSpec, NodeRestoreOutcome, Binding, RestoreResult, NodeRecoveryGuidance } from "./types.js";
 import type { RuntimeAdapter } from "./runtime-adapter.js";
 import type { ContextUsageStore } from "./context-usage-store.js";
+import type { TmuxAdapter } from "../adapters/tmux.js";
+import { probeSessionActivity } from "./session-transport.js";
 
 // -- Row types for SQL results --
 
@@ -524,4 +526,21 @@ export function getNodeDetailWithContext(
   }
 
   return detail;
+}
+
+export async function attachAgentActivity(
+  entries: NodeInventoryEntry[],
+  deps: { tmuxAdapter: TmuxAdapter; now?: Date },
+): Promise<NodeInventoryEntry[]> {
+  const sampledAt = deps.now ?? new Date();
+  return Promise.all(entries.map(async (entry) => ({
+    ...entry,
+    agentActivity: await probeSessionActivity({
+      sessionName: entry.canonicalSessionName,
+      runtime: entry.runtime,
+      attachmentType: entry.attachmentType,
+      tmuxAdapter: deps.tmuxAdapter,
+      now: sampledAt,
+    }),
+  })));
 }

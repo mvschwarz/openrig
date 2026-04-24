@@ -29,6 +29,13 @@ interface NodeEntry {
   tmuxAttachCommand: string | null;
   resumeCommand: string | null;
   latestError: string | null;
+  agentActivity?: {
+    state: "agent_active" | "agent_idle" | "attention" | "unknown";
+    reason: string;
+    evidenceSource: string;
+    sampledAt: string;
+    evidence: string | null;
+  };
   [key: string]: unknown;
 }
 
@@ -140,7 +147,7 @@ async function handleNodes(client: DaemonClient, json: boolean): Promise<void> {
     return;
   }
 
-  const header = padNodeRow("RIG", "POD", "MEMBER", "SESSION", "RUNTIME", "STATUS", "STARTUP", "RESTORE", "ERROR");
+  const header = padNodeRow("RIG", "POD", "MEMBER", "SESSION", "RUNTIME", "STATUS", "STARTUP", "ACTIVITY", "RESTORE", "ERROR");
   console.log(header);
   for (const n of allNodes) {
     const parts = n.logicalId.split(".");
@@ -155,10 +162,19 @@ async function handleNodes(client: DaemonClient, json: boolean): Promise<void> {
       n.runtime ?? "—",
       n.sessionStatus ?? "—",
       n.startupStatus ?? "—",
+      formatActivity(n.agentActivity),
       n.restoreOutcome,
       n.latestError ? truncate(n.latestError, 30) : "—",
     ));
   }
+}
+
+function formatActivity(activity: NodeEntry["agentActivity"]): string {
+  if (!activity) return "unknown";
+  if (activity.state === "agent_active") return "active";
+  if (activity.state === "agent_idle") return "idle";
+  if (activity.state === "attention") return "attention";
+  return "unknown";
 }
 
 function truncate(s: string, max: number): string {
@@ -180,15 +196,16 @@ function padRigRow(rig: string, nodes: string, running: string, status: string, 
   ].join("");
 }
 
-function padNodeRow(rig: string, pod: string, member: string, session: string, runtime: string, status: string, startup: string, restore: string, error: string): string {
+function padNodeRow(rig: string, pod: string, member: string, session: string, runtime: string, status: string, startup: string, activity: string, restore: string, error: string): string {
   return [
-    fitCell(rig, 32),
-    fitCell(pod, 12),
-    fitCell(member, 16),
-    fitCell(session, 40),
-    fitCell(runtime, 14),
+    fitCell(rig, 30),
+    fitCell(pod, 10),
+    fitCell(member, 14),
+    fitCell(session, 34),
+    fitCell(runtime, 12),
     fitCell(status, 10),
     fitCell(startup, 10),
+    fitCell(activity, 12),
     fitCell(restore, 10),
     error,
   ].join("");
