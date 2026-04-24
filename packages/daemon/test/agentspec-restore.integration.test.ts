@@ -118,7 +118,7 @@ describe("AS-T09: Continuity + snapshot/restore evolution", () => {
   // T7: RestoreResult carries warnings
   it("RestoreResult has warnings field", () => {
     const result: import("../src/domain/types.js").RestoreResult = {
-      snapshotId: "s1", preRestoreSnapshotId: "s0", nodes: [], warnings: ["test warning"],
+      snapshotId: "s1", preRestoreSnapshotId: "s0", rigResult: "failed", nodes: [], warnings: ["test warning"],
     };
     expect(result.warnings).toEqual(["test warning"]);
   });

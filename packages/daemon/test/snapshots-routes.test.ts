@@ -160,6 +160,7 @@ describe("Restore routes", () => {
     const body = await res.json();
     expect(body.snapshotId).toBe(snap.id);
     expect(body.preRestoreSnapshotId).toBeDefined();
+    expect(body.rigResult).toBe("partially_restored");
     expect(body.nodes).toHaveLength(1);
   });
 
@@ -236,6 +237,7 @@ describe("Restore routes", () => {
 
     const res = await app.request(`/api/rigs/${rig.id}/restore/${snap.id}`, { method: "POST" });
     const body = await res.json();
+    expect(body.rigResult).toBe("partially_restored");
     expect(body.nodes).toHaveLength(2);
     for (const node of body.nodes) {
       expect(node.logicalId).toBeDefined();

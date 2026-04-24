@@ -4,19 +4,23 @@ import { restoreCheckCommand, type RestoreCheckDeps } from "../src/commands/rest
 function makeResult(overrides?: Record<string, unknown>) {
   return {
     verdict: "restorable",
-    fullyBack: true,
-    assertion: {
-      level: "host",
-      status: "fully_back",
-      reason: "observable_rigs_fully_back",
+    readiness: {
+      status: "ready",
+      reason: "all_observable_checks_green",
       blockingRigCount: 0,
       caveatRigCount: 0,
       unknownRigCount: 0,
     },
+    continuity: {
+      status: "not_proven",
+      evidence: "Strict same-session/provider-context resume is not verified by restore-check v1. Observable readiness is verified.",
+      provenCapabilities: [],
+      unprovenCapabilities: ["provider_session_resume", "context_window_preservation", "interrupted_work_functional_resume"],
+    },
     rigs: [{
       rigId: "rig-1",
       rigName: "test-rig",
-      status: "fully_back",
+      status: "ready",
       verdict: "restorable",
       expectedNodes: 1,
       runningReadyNodes: 1,
@@ -96,8 +100,8 @@ describe("rig restore-check", () => {
 
     const json = JSON.parse(logs.join(""));
     expect(json.verdict).toBe("restorable");
-    expect(json.fullyBack).toBe(true);
-    expect(json.assertion.status).toBe("fully_back");
+    expect(json.readiness.status).toBe("ready");
+    expect(json.continuity).toBeDefined();
     expect(json.rigs).toBeInstanceOf(Array);
     expect(json.hostInfra.status).toBe("not_inspected");
     expect(json.counts).toBeDefined();
@@ -141,7 +145,7 @@ describe("rig restore-check", () => {
     const output = logs.join("\n");
     expect(output).toContain("RESTORE CHECK");
     expect(output).toContain("RESTORABLE WITH CAVEATS");
-    expect(output).toContain("FULLY BACK:");
+    expect(output).toContain("READINESS:");
     expect(output).toContain("Per-rig summary");
     expect(output).toContain("test-rig");
     expect(output).toContain("Host bootstrap/autostart");
@@ -153,10 +157,8 @@ describe("rig restore-check", () => {
     const { deps } = makeDeps({
       result: {
         verdict: "not_restorable",
-        fullyBack: false,
-        assertion: {
-          level: "host",
-          status: "not_fully_back",
+        readiness: {
+          status: "not_ready",
           reason: "blockers_present",
           blockingRigCount: 1,
           caveatRigCount: 0,
@@ -194,10 +196,9 @@ describe("rig restore-check", () => {
   it("human output shows declared-not-verified host-infra evidence", async () => {
     const { deps } = makeDeps({
       result: {
-        assertion: {
-          level: "host",
-          status: "fully_back",
-          reason: "observable_rigs_fully_back_host_infra_declared_not_verified",
+        readiness: {
+          status: "ready",
+          reason: "all_observable_checks_green_host_infra_declared_not_verified",
           blockingRigCount: 0,
           caveatRigCount: 0,
           unknownRigCount: 0,
@@ -212,7 +213,7 @@ describe("rig restore-check", () => {
     await cmd.parseAsync(["node", "rig"]);
 
     const output = logs.join("\n");
-    expect(output).toContain("FULLY BACK: yes (observable_rigs_fully_back_host_infra_declared_not_verified)");
+    expect(output).toContain("READINESS: ready (all_observable_checks_green_host_infra_declared_not_verified)");
     expect(output).toContain("Host bootstrap/autostart: declared");
     expect(output).toContain("declared, not verified");
     expect(output).toContain("mechanism=launchd");
@@ -245,10 +246,8 @@ describe("rig restore-check", () => {
     const { deps } = makeDeps({
       result: {
         verdict: "restorable_with_caveats",
-        fullyBack: false,
-        assertion: {
-          level: "host",
-          status: "not_fully_back",
+        readiness: {
+          status: "ready_with_caveats",
           reason: "caveats_present",
           blockingRigCount: 0,
           caveatRigCount: 0,
@@ -369,8 +368,7 @@ describe("rig restore-check", () => {
 
     const json = JSON.parse(logs.join(""));
     expect(json.verdict).toBe("not_restorable");
-    expect(json.fullyBack).toBe(false);
-    expect(json.assertion.status).toBe("not_fully_back");
+    expect(json.readiness.status).toBe("not_ready");
     expect(json.rigs).toEqual([]);
     expect(json.hostInfra.status).toBe("unknown");
     expect(json.checks[0].check).toBe("daemon.reachable");
@@ -395,16 +393,14 @@ describe("rig restore-check", () => {
     expect(requestedPaths).toHaveLength(0);
   });
 
-  it("daemon 500 local fallback includes fully-back assertion shape", async () => {
+  it("daemon 500 local fallback includes readiness shape", async () => {
     const { deps } = makeDeps({ serverError: true });
     const cmd = restoreCheckCommand(deps);
     await cmd.parseAsync(["node", "rig", "--json"]);
 
     const json = JSON.parse(logs.join(""));
     expect(json.verdict).toBe("unknown");
-    expect(json.fullyBack).toBe(false);
-    expect(json.assertion).toEqual(expect.objectContaining({
-      level: "host",
+    expect(json.readiness).toEqual(expect.objectContaining({
       status: "unknown",
       reason: "unknown_probe_state",
     }));
@@ -425,5 +421,59 @@ describe("rig restore-check", () => {
       blocking: true,
       safe: true,
     }));
+  });
+
+  // --- H62 absence proofs ---
+
+  it("JSON output has no fullyBack or assertion fields", async () => {
+    const { deps } = makeDeps({});
+    const cmd = restoreCheckCommand(deps);
+    await cmd.parseAsync(["node", "rig", "--json"]);
+
+    const json = JSON.parse(logs.join(""));
+    expect("fullyBack" in json).toBe(false);
+    expect("assertion" in json).toBe(false);
+    expect(json.readiness).toBeDefined();
+    expect(json.continuity).toBeDefined();
+  });
+
+  it("human output has no FULLY BACK line", async () => {
+    const { deps } = makeDeps({});
+    const cmd = restoreCheckCommand(deps);
+    await cmd.parseAsync(["node", "rig"]);
+
+    const output = logs.join("\n");
+    expect(output).not.toContain("FULLY BACK");
+    expect(output).toContain("READINESS:");
+    expect(output).toContain("CONTINUITY:");
+  });
+
+  it("daemon-down CLI fallback emits readiness + continuity with no legacy fields", async () => {
+    const { getDaemonStatus } = await import("../src/daemon-lifecycle.js");
+    (getDaemonStatus as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ state: "stopped", healthy: false });
+
+    const { deps } = makeDeps({});
+    const cmd = restoreCheckCommand(deps);
+    await cmd.parseAsync(["node", "rig", "--json"]);
+
+    const json = JSON.parse(logs.join(""));
+    expect("fullyBack" in json).toBe(false);
+    expect("assertion" in json).toBe(false);
+    expect(json.readiness.status).toBe("not_ready");
+    expect(json.continuity.status).toBe("not_proven");
+    expect(json.continuity.unprovenCapabilities.length).toBeGreaterThan(0);
+  });
+
+  it("per-rig status values use readiness vocabulary", async () => {
+    const { deps } = makeDeps({});
+    const cmd = restoreCheckCommand(deps);
+    await cmd.parseAsync(["node", "rig", "--json"]);
+
+    const json = JSON.parse(logs.join(""));
+    for (const rig of json.rigs) {
+      expect(["ready", "ready_with_caveats", "not_ready", "unknown"]).toContain(rig.status);
+      expect(rig.status).not.toBe("fully_back");
+      expect(rig.status).not.toBe("not_fully_back");
+    }
   });
 });

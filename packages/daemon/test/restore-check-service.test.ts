@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { RestoreCheckService, type RestoreCheckDeps, type NodeInventoryEntry } from "../src/domain/restore-check-service.js";
 
 const REQUIRED_SESSION_START_COMPACT_COMMAND = "~/.openrig/shared-docs/control-plane/services/claude-hooks/bin/session-start-compact-context.sh";
@@ -184,6 +184,22 @@ function mockDeps(overrides?: Partial<RestoreCheckDeps & {
 }
 
 describe("RestoreCheckService", () => {
+  let previousOpenRigHome: string | undefined;
+  let testOpenRigHome: string | null;
+
+  beforeEach(() => {
+    previousOpenRigHome = process.env["OPENRIG_HOME"];
+    testOpenRigHome = fs.mkdtempSync(path.join(os.tmpdir(), "restore-check-openrig-home-"));
+    process.env["OPENRIG_HOME"] = testOpenRigHome;
+  });
+
+  afterEach(() => {
+    if (previousOpenRigHome === undefined) delete process.env["OPENRIG_HOME"];
+    else process.env["OPENRIG_HOME"] = previousOpenRigHome;
+    if (testOpenRigHome) fs.rmSync(testOpenRigHome, { recursive: true, force: true });
+    testOpenRigHome = null;
+  });
+
   // --- Daemon false-green regression matrix ---
 
   it("daemon-down: exact 'Daemon not running' text produces red", () => {
@@ -295,7 +311,7 @@ describe("RestoreCheckService", () => {
 
   // --- Host-infra declaration ---
 
-  it("missing host-infra declaration is a non-blocking caveat and prevents fully_back", () => {
+  it("missing host-infra declaration is a non-blocking caveat and prevents ready", () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "restore-check-host-infra-missing-"));
     const declarationPath = path.join(tmpDir, "host-infra.json");
     const previous = process.env["OPENRIG_HOME"];
@@ -316,8 +332,8 @@ describe("RestoreCheckService", () => {
       expect(result.hostInfra.status).toBe("not_declared");
       expect(result.hostInfra.evidence).toContain(declarationPath);
       expect(result.verdict).toBe("restorable_with_caveats");
-      expect(result.fullyBack).toBe(false);
-      expect(result.assertion.reason).toBe("caveats_present");
+      expect(result.readiness.status).toBe("ready_with_caveats");
+      expect(result.readiness.reason).toBe("caveats_present");
       expect(result.repairPacket).toEqual([
         expect.objectContaining({
           command: expect.stringContaining(declarationPath),
@@ -410,7 +426,7 @@ describe("RestoreCheckService", () => {
       expect(check?.evidence).toContain(declarationPath);
       expect(check?.evidence).toMatch(/parse|JSON/i);
       expect(result.hostInfra.status).toBe("not_declared");
-      expect(result.fullyBack).toBe(false);
+      expect(result.readiness.status).toBe("ready_with_caveats");
       expect(result.repairPacket?.[0]).toEqual(expect.objectContaining({
         command: expect.stringContaining(declarationPath),
         safe: false,
@@ -443,7 +459,7 @@ describe("RestoreCheckService", () => {
       expect(check?.evidence).toContain("daemonBootstrap.mechanism");
       expect(check?.evidence).toContain("supportingInfra");
       expect(result.hostInfra.status).toBe("not_declared");
-      expect(result.fullyBack).toBe(false);
+      expect(result.readiness.status).toBe("ready_with_caveats");
     } finally {
       if (previous === undefined) delete process.env["OPENRIG_HOME"];
       else process.env["OPENRIG_HOME"] = previous;
@@ -473,8 +489,8 @@ describe("RestoreCheckService", () => {
       expect(result.hostInfra.status).toBe("declared");
       expect(result.hostInfra.evidence).toContain("declared, not verified");
       expect(result.verdict).toBe("restorable");
-      expect(result.fullyBack).toBe(true);
-      expect(result.assertion.reason).toBe("observable_rigs_fully_back_host_infra_declared_not_verified");
+      expect(result.readiness.status).toBe("ready");
+      expect(result.readiness.reason).toBe("all_observable_checks_green_host_infra_declared_not_verified");
       expect(result.repairPacket).toBeNull();
     } finally {
       if (previous === undefined) delete process.env["OPENRIG_HOME"];
@@ -508,7 +524,7 @@ describe("RestoreCheckService", () => {
       expect(result.hostInfra.status).toBe("declared");
       expect(result.hostInfra.evidence).toContain("not autostart verified");
       expect(result.verdict).toBe("restorable");
-      expect(result.fullyBack).toBe(true);
+      expect(result.readiness.status).toBe("ready");
       expect(result.repairPacket).toBeNull();
     } finally {
       if (previous === undefined) delete process.env["OPENRIG_HOME"];
@@ -535,8 +551,8 @@ describe("RestoreCheckService", () => {
       expect(check?.status).toBe("yellow");
       expect(check?.evidence).toContain("daemonBootstrap.evidencePaths");
       expect(result.hostInfra.status).toBe("declared");
-      expect(result.fullyBack).toBe(false);
-      expect(result.assertion.reason).toBe("caveats_present");
+      expect(result.readiness.status).toBe("ready_with_caveats");
+      expect(result.readiness.reason).toBe("caveats_present");
       expect(result.repairPacket?.[0]).toEqual(expect.objectContaining({
         command: expect.stringContaining("daemonBootstrap.evidencePaths"),
         safe: false,
@@ -604,7 +620,7 @@ describe("RestoreCheckService", () => {
       expect(check?.status).toBe("yellow");
       expect(check?.evidence).toContain(supportPath);
       expect(result.hostInfra.status).toBe("declared");
-      expect(result.fullyBack).toBe(false);
+      expect(result.readiness.status).toBe("ready_with_caveats");
       expect(result.repairPacket?.[0]).toEqual(expect.objectContaining({
         command: expect.stringContaining(supportPath),
         safe: false,
@@ -643,7 +659,7 @@ describe("RestoreCheckService", () => {
       expect(check?.status).toBe("yellow");
       expect(check?.evidence).toContain("supportingInfra[supervisor-wake].evidencePaths");
       expect(result.hostInfra.status).toBe("declared");
-      expect(result.fullyBack).toBe(false);
+      expect(result.readiness.status).toBe("ready_with_caveats");
       expect(result.repairPacket?.[0]).toEqual(expect.objectContaining({
         command: expect.stringContaining("supportingInfra[supervisor-wake].evidencePaths"),
         safe: false,
@@ -682,7 +698,7 @@ describe("RestoreCheckService", () => {
       expect(check?.status).toBe("green");
       expect(check?.evidence).toContain("declared, evidence paths present, not autostart verified");
       expect(result.verdict).toBe("restorable");
-      expect(result.fullyBack).toBe(true);
+      expect(result.readiness.status).toBe("ready");
     } finally {
       if (previous === undefined) delete process.env["OPENRIG_HOME"];
       else process.env["OPENRIG_HOME"] = previous;
@@ -725,7 +741,7 @@ describe("RestoreCheckService", () => {
       expect(check?.evidence).toContain("relative/path.txt");
       expect(check?.evidence).toContain("${OPENRIG_HOME}/../escape.txt");
       expect(result.hostInfra.status).toBe("declared");
-      expect(result.fullyBack).toBe(false);
+      expect(result.readiness.status).toBe("ready_with_caveats");
     } finally {
       if (previous === undefined) delete process.env["OPENRIG_HOME"];
       else process.env["OPENRIG_HOME"] = previous;
@@ -790,8 +806,8 @@ describe("RestoreCheckService", () => {
       const check = result.checks.find((entry) => entry.check === "host.bootstrap-autostart.declaration");
 
       expect(result.verdict).toBe("restorable_with_caveats");
-      expect(result.fullyBack).toBe(false);
-      expect(result.assertion.reason).toBe("caveats_present");
+      expect(result.readiness.status).toBe("ready_with_caveats");
+      expect(result.readiness.reason).toBe("caveats_present");
       expect(result.hostInfra.status).toBe("unknown");
       expect(check?.status).toBe("yellow");
       expect(check?.evidence).toContain(declarationPath);
@@ -1191,11 +1207,10 @@ describe("RestoreCheckService", () => {
     const result = service.check({ noHooks: true }) as any;
     expect(result.verdict).toBe("restorable");
     expect(result.counts.red).toBe(0);
-    expect(result.fullyBack).toBe(true);
-    expect(result.assertion).toEqual(expect.objectContaining({
-      level: "host",
-      status: "fully_back",
-      reason: "observable_rigs_fully_back_host_infra_declared_not_verified",
+    expect(result.readiness.status).toBe("ready");
+    expect(result.readiness).toEqual(expect.objectContaining({
+      status: "ready",
+      reason: "all_observable_checks_green_host_infra_declared_not_verified",
       blockingRigCount: 0,
       caveatRigCount: 0,
       unknownRigCount: 0,
@@ -1207,7 +1222,7 @@ describe("RestoreCheckService", () => {
       expect.objectContaining({
         rigId: "rig-1",
         rigName: "test-rig",
-        status: "fully_back",
+        status: "ready",
         expectedNodes: 1,
         runningReadyNodes: 1,
         blockedNodes: 0,
@@ -1229,10 +1244,9 @@ describe("RestoreCheckService", () => {
     const service = new RestoreCheckService(mockDeps({ hasSnapshot: () => false }));
     const result = service.check({}) as any;
     expect(result.verdict).toBe("restorable_with_caveats");
-    expect(result.fullyBack).toBe(false);
-    expect(result.assertion.status).toBe("not_fully_back");
-    expect(result.assertion.reason).toBe("caveats_present");
-    expect(result.assertion.caveatRigCount).toBeGreaterThan(0);
+    expect(result.readiness.status).toBe("ready_with_caveats");
+    expect(result.readiness.reason).toBe("caveats_present");
+    expect(result.readiness.caveatRigCount).toBeGreaterThan(0);
     expect(result.counts.yellow).toBeGreaterThan(0);
     expect(result.counts.red).toBe(0);
     expect(result.recovery).toEqual({
@@ -1250,21 +1264,20 @@ describe("RestoreCheckService", () => {
     }));
     const result = service.check({}) as any;
     expect(result.verdict).toBe("not_restorable");
-    expect(result.fullyBack).toBe(false);
-    expect(result.assertion.status).toBe("not_fully_back");
-    expect(result.assertion.blockingRigCount).toBeGreaterThanOrEqual(0);
+    expect(result.readiness.status).toBe("not_ready");
+    expect(result.readiness.blockingRigCount).toBeGreaterThanOrEqual(0);
     expect(result.counts.red).toBeGreaterThan(0);
   });
 
-  it("probe error produces unknown fully-back assertion, not false green", () => {
+  it("probe error produces unknown readiness, not false green", () => {
     const service = new RestoreCheckService(mockDeps({
       probeDaemonHealth: () => { throw new Error("socket unavailable"); },
     }));
     const result = service.check({}) as any;
 
     expect(result.verdict).toBe("unknown");
-    expect(result.fullyBack).toBe(false);
-    expect(result.assertion).toEqual(expect.objectContaining({
+    expect(result.readiness.status).toBe("unknown");
+    expect(result.readiness).toEqual(expect.objectContaining({
       status: "unknown",
       reason: "unknown_probe_state",
     }));
@@ -1295,7 +1308,7 @@ describe("RestoreCheckService", () => {
 
     const result = service.check({ noHooks: true }) as any;
 
-    expect(result.fullyBack).toBe(false);
+    expect(result.readiness.status).toBe("not_ready");
     expect(result.recovery).toEqual({
       status: "actionable",
       summary: expect.stringContaining("1 rig can be recovered"),
@@ -1329,7 +1342,7 @@ describe("RestoreCheckService", () => {
 
     const result = service.check({ noHooks: true }) as any;
 
-    expect(result.fullyBack).toBe(false);
+    expect(result.readiness.status).toBe("not_ready");
     expect(result.recovery).toEqual({
       status: "blocked",
       summary: expect.stringContaining("1 rig blocked"),
@@ -1531,7 +1544,7 @@ describe("RestoreCheckService", () => {
 
     const result = service.check({ noHooks: true }) as any;
 
-    expect(result.fullyBack).toBe(false);
+    expect(result.readiness.status).toBe("not_ready");
     expect(result.recovery).toEqual({
       status: "blocked",
       summary: expect.stringContaining("1 rig blocked"),
@@ -1548,7 +1561,7 @@ describe("RestoreCheckService", () => {
     });
   });
 
-  it("stopped infrastructure node is represented in readiness and prevents fully_back", () => {
+  it("stopped infrastructure node is represented in readiness and prevents ready", () => {
     const service = new RestoreCheckService(mockDeps({
       getNodeInventory: () => [{
         rigId: "rig-1", rigName: "test-rig", logicalId: "infra.board",
@@ -1562,13 +1575,13 @@ describe("RestoreCheckService", () => {
 
     const result = service.check({ noHooks: true }) as any;
 
-    expect(result.fullyBack).toBe(false);
-    expect(result.assertion.blockingRigCount).toBe(1);
+    expect(result.readiness.status).toBe("not_ready");
+    expect(result.readiness.blockingRigCount).toBe(1);
     expect(result.rigs[0]).toEqual(expect.objectContaining({
       expectedNodes: 1,
       runningReadyNodes: 0,
       blockedNodes: 1,
-      status: "not_fully_back",
+      status: "not_ready",
     }));
     expect(result.rigs[0].blockingChecks.some((check: { check: string }) => check.check.includes("readiness"))).toBe(true);
     expect(result.repairPacket?.some((step: { blocking: boolean; safe: boolean }) => step.blocking && step.safe === false)).toBe(true);
@@ -1590,7 +1603,7 @@ describe("RestoreCheckService", () => {
     const result = service.check({ noHooks: true }) as any;
 
     expect(result.verdict).toBe("restorable");
-    expect(result.fullyBack).toBe(true);
+    expect(result.readiness.status).toBe("ready");
     expect(result.rigs[0]).toEqual(expect.objectContaining({
       expectedNodes: 1,
       runningReadyNodes: 1,
@@ -1601,7 +1614,7 @@ describe("RestoreCheckService", () => {
     expect(transcript.status).toBe("green");
   });
 
-  it("missing canonical session identity blocks fully_back", () => {
+  it("missing canonical session identity blocks ready", () => {
     const service = new RestoreCheckService(mockDeps({
       getNodeInventory: () => [{
         rigId: "rig-1", rigName: "test-rig", logicalId: "dev.impl",
@@ -1615,7 +1628,7 @@ describe("RestoreCheckService", () => {
 
     const result = service.check({ noHooks: true }) as any;
 
-    expect(result.fullyBack).toBe(false);
+    expect(result.readiness.status).toBe("not_ready");
     expect(result.rigs[0].blockingChecks.some((check: { check: string; evidence: string }) => (
       check.check.includes("readiness") && check.evidence.includes("canonical session")
     ))).toBe(true);
@@ -1871,5 +1884,58 @@ describe("RestoreCheckService", () => {
       blocking: true,
       safe: false,
     }));
+  });
+
+  // --- H62 absence proofs ---
+
+  it("result has no top-level fullyBack field", () => {
+    const service = new RestoreCheckService(mockDeps());
+    const result = service.check({ noHooks: true }) as Record<string, unknown>;
+    expect("fullyBack" in result).toBe(false);
+  });
+
+  it("result has no top-level assertion field", () => {
+    const service = new RestoreCheckService(mockDeps());
+    const result = service.check({ noHooks: true }) as Record<string, unknown>;
+    expect("assertion" in result).toBe(false);
+  });
+
+  it("per-rig status uses readiness vocabulary, not fully_back/not_fully_back", () => {
+    const service = new RestoreCheckService(mockDeps());
+    const result = service.check({ noHooks: true });
+    for (const rig of result.rigs) {
+      expect(["ready", "ready_with_caveats", "not_ready", "unknown"]).toContain(rig.status);
+      expect(rig.status).not.toBe("fully_back");
+      expect(rig.status).not.toBe("not_fully_back");
+    }
+  });
+
+  // --- H62 continuity assertions ---
+
+  it("continuity is always not_proven in v1 with populated unprovenCapabilities", () => {
+    const service = new RestoreCheckService(mockDeps());
+    const result = service.check({ noHooks: true });
+    expect(result.continuity.status).toBe("not_proven");
+    expect(result.continuity.evidence).toBeTruthy();
+    expect(result.continuity.unprovenCapabilities.length).toBeGreaterThan(0);
+    expect(result.continuity.unprovenCapabilities).toContain("provider_session_resume");
+    expect(result.continuity.unprovenCapabilities).toContain("context_window_preservation");
+    expect(result.continuity.unprovenCapabilities).toContain("interrupted_work_functional_resume");
+  });
+
+  it("all-green observable rig still has continuity not_proven", () => {
+    const service = new RestoreCheckService(mockDeps());
+    const result = service.check({ noHooks: true });
+    expect(result.readiness.status).toBe("ready");
+    expect(result.continuity.status).toBe("not_proven");
+  });
+
+  it("unknown/probe-error result has continuity not_proven", () => {
+    const service = new RestoreCheckService(mockDeps({
+      probeDaemonHealth: () => { throw new Error("socket unavailable"); },
+    }));
+    const result = service.check({});
+    expect(result.readiness.status).toBe("unknown");
+    expect(result.continuity.status).toBe("not_proven");
   });
 });

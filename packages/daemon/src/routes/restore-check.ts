@@ -176,14 +176,18 @@ restoreCheckRoutes.get("/", (c) => {
 
     return c.json({
       verdict: "unknown",
-      fullyBack: false,
-      assertion: {
-        level: "host",
+      readiness: {
         status: "unknown",
         reason: "unknown_probe_state",
         blockingRigCount: 0,
         caveatRigCount: 0,
         unknownRigCount: 0,
+      },
+      continuity: {
+        status: "not_proven",
+        evidence: "Strict same-session/provider-context resume is not verified by restore-check v1.",
+        provenCapabilities: [],
+        unprovenCapabilities: ["provider_session_resume", "context_window_preservation", "interrupted_work_functional_resume"],
       },
       rigs: [],
       hostInfra: {

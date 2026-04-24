@@ -23,19 +23,25 @@ interface RepairStep {
   blocking: boolean;
 }
 
-interface RestoreAssertion {
-  level: "host";
-  status: "fully_back" | "not_fully_back" | "unknown";
+interface ReadinessAssertion {
+  status: "ready" | "ready_with_caveats" | "not_ready" | "unknown";
   reason: string;
   blockingRigCount: number;
   caveatRigCount: number;
   unknownRigCount: number;
 }
 
+interface ContinuityAssertion {
+  status: "proven" | "not_proven" | "partial" | "not_applicable";
+  evidence: string;
+  provenCapabilities: string[];
+  unprovenCapabilities: string[];
+}
+
 interface RigRestoreRollup {
   rigId: string;
   rigName: string;
-  status: "fully_back" | "not_fully_back" | "unknown";
+  status: "ready" | "ready_with_caveats" | "not_ready" | "unknown";
   verdict: "restorable" | "restorable_with_caveats" | "not_restorable" | "unknown";
   expectedNodes: number;
   runningReadyNodes: number;
@@ -78,8 +84,8 @@ interface RecoveryPlan {
 
 interface RestoreCheckResult {
   verdict: "restorable" | "restorable_with_caveats" | "not_restorable" | "unknown";
-  fullyBack: boolean;
-  assertion: RestoreAssertion;
+  readiness: ReadinessAssertion;
+  continuity: ContinuityAssertion;
   rigs: RigRestoreRollup[];
   hostInfra: HostInfraAssertion;
   recovery: RecoveryPlan;
@@ -240,8 +246,9 @@ function printHuman(result: RestoreCheckResult): void {
   const verdictLabel = result.verdict.replace(/_/g, " ").toUpperCase();
   console.log(`RESTORE CHECK — ${verdictLabel}`);
   console.log(`${result.counts.green} green | ${result.counts.yellow} yellow | ${result.counts.red} red`);
-  const fullyBackLabel = result.assertion.status === "unknown" ? "unknown" : result.fullyBack ? "yes" : "no";
-  console.log(`FULLY BACK: ${fullyBackLabel} (${result.assertion.reason})`);
+  const readinessLabel = result.readiness.status.replace(/_/g, " ");
+  console.log(`READINESS: ${readinessLabel} (${result.readiness.reason})`);
+  console.log(`CONTINUITY: ${result.continuity.status.replace(/_/g, " ")}`);
   if (result.hostInfra) {
     console.log(`Host bootstrap/autostart: ${result.hostInfra.status} — ${result.hostInfra.evidence}`);
   }
@@ -307,14 +314,18 @@ function localRestoreResult(input: {
 
   return {
     verdict: input.verdict,
-    fullyBack: false,
-    assertion: {
-      level: "host",
-      status: unknown ? "unknown" : "not_fully_back",
+    readiness: {
+      status: unknown ? "unknown" : "not_ready",
       reason: unknown ? "unknown_probe_state" : "blockers_present",
       blockingRigCount: 0,
       caveatRigCount: 0,
       unknownRigCount: 0,
+    },
+    continuity: {
+      status: "not_proven",
+      evidence: "Strict same-session/provider-context resume is not verified by restore-check v1.",
+      provenCapabilities: [],
+      unprovenCapabilities: ["provider_session_resume", "context_window_preservation", "interrupted_work_functional_resume"],
     },
     rigs: [],
     hostInfra: {

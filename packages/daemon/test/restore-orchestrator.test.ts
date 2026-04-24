@@ -927,6 +927,7 @@ describe("RestoreOrchestrator", () => {
     expect(payload.rigId).toBe(snap.data.rig.id);
     expect(payload.snapshotId).toBe(snap.id);
     expect(payload.result).toBeDefined();
+    expect(payload.result.rigResult).toBeDefined();
     expect(payload.result.nodes).toHaveLength(1);
 
     // Subscriber receives same payload
@@ -936,6 +937,7 @@ describe("RestoreOrchestrator", () => {
       expect(completedEvent.rigId).toBe(snap.data.rig.id);
       expect(completedEvent.snapshotId).toBe(snap.id);
       expect(completedEvent.result).toBeDefined();
+      expect(completedEvent.result.rigResult).toBe(result.ok ? result.result.rigResult : undefined);
       expect(completedEvent.result.nodes).toHaveLength(1);
       // Match the returned RestoreResult
       expect(result.ok).toBe(true);
@@ -1154,7 +1156,7 @@ describe("RestoreOrchestrator", () => {
     // (The old helper resume fails with mock but returns baseStatus = failed)
   });
 
-  it("legacy Claude restore with missing token launches a fresh harness when startup context is available", async () => {
+  it("legacy Claude restore with missing token fails even when startup context is available", async () => {
     const rig = rigRepo.createRig("r01");
     const node = rigRepo.addNode(rig.id, "impl", { runtime: "claude-code" });
     const session = sessionRegistry.registerSession(node.id, "r01-impl");
@@ -1180,13 +1182,13 @@ describe("RestoreOrchestrator", () => {
 
     expect(result.ok).toBe(true);
     if (result.ok) {
-      expect(result.result.nodes[0]!.status).toBe("fresh");
-      expect(launchHarness).toHaveBeenCalledTimes(1);
-      expect(launchHarness.mock.calls[0]![1].resumeToken).toBeUndefined();
+      expect(result.result.nodes[0]!.status).toBe("failed");
+      expect(result.result.nodes[0]!.error).toContain("Resume requested but no token available");
+      expect(launchHarness).not.toHaveBeenCalled();
     }
   });
 
-  it("legacy Claude restore with missing token fails honestly when no startup context is available for a fresh fallback", async () => {
+  it("legacy Claude restore with missing token fails honestly when no startup context is available", async () => {
     const rig = rigRepo.createRig("r01");
     const node = rigRepo.addNode(rig.id, "impl", { runtime: "claude-code" });
     const session = sessionRegistry.registerSession(node.id, "r01-impl");
@@ -1202,11 +1204,11 @@ describe("RestoreOrchestrator", () => {
     expect(result.ok).toBe(true);
     if (result.ok) {
       expect(result.result.nodes[0]!.status).toBe("failed");
-      expect(result.result.nodes[0]!.error).toContain("Resume fallback required a fresh launch");
+      expect(result.result.nodes[0]!.error).toContain("Resume requested but no token available");
     }
   });
 
-  it("pod-aware Claude restore with resume type but missing token falls back to fresh launch", async () => {
+  it("pod-aware Claude restore with resume type but missing token fails instead of launching fresh", async () => {
     const rig = rigRepo.createRig("test-rig");
     db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-2", rig.id, "Dev");
     const node = rigRepo.addNode(rig.id, "dev.qa", { runtime: "claude-code", podId: "pod-2" });
@@ -1234,11 +1236,13 @@ describe("RestoreOrchestrator", () => {
     expect(result.ok).toBe(true);
     if (result.ok) {
       const nodeResult = result.result.nodes.find((n) => n.nodeId === node.id);
-      expect(nodeResult!.status).toBe("fresh");
+      expect(nodeResult!.status).toBe("failed");
+      expect(nodeResult!.error).toContain("Resume requested but no token available");
+      expect(mockAdapter.launchHarness).not.toHaveBeenCalled();
     }
   });
 
-  it("pod-aware Claude restore retries fresh when resume launch proves the saved session is gone", async () => {
+  it("pod-aware Claude restore fails when resume launch proves the saved session is gone", async () => {
     const rig = rigRepo.createRig("test-rig");
     db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-claude-retry", rig.id, "Dev");
     const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code", podId: "pod-claude-retry" });
@@ -1268,14 +1272,14 @@ describe("RestoreOrchestrator", () => {
     expect(result.ok).toBe(true);
     if (result.ok) {
       const nodeResult = result.result.nodes.find((n) => n.nodeId === node.id);
-      expect(nodeResult!.status).toBe("fresh");
-      expect(launchHarness).toHaveBeenCalledTimes(2);
+      expect(nodeResult!.status).toBe("failed");
+      expect(nodeResult!.error).toContain("Harness launch failed");
+      expect(launchHarness).toHaveBeenCalledTimes(1);
       expect(launchHarness.mock.calls[0]![1].resumeToken).toBe("stale-claude-token");
-      expect(launchHarness.mock.calls[1]![1].resumeToken).toBeUndefined();
     }
   });
 
-  it("pod-aware Codex restore with resume type but missing token falls back to fresh launch", async () => {
+  it("pod-aware Codex restore with resume type but missing token fails instead of launching fresh", async () => {
     const rig = rigRepo.createRig("test-rig");
     db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-codex-missing", rig.id, "Dev");
     const node = rigRepo.addNode(rig.id, "dev.qa", { runtime: "codex", podId: "pod-codex-missing" });
@@ -1302,11 +1306,13 @@ describe("RestoreOrchestrator", () => {
     expect(result.ok).toBe(true);
     if (result.ok) {
       const nodeResult = result.result.nodes.find((n) => n.nodeId === node.id);
-      expect(nodeResult!.status).toBe("fresh");
+      expect(nodeResult!.status).toBe("failed");
+      expect(nodeResult!.error).toContain("Resume requested but no token available");
+      expect(mockAdapter.launchHarness).not.toHaveBeenCalled();
     }
   });
 
-  it("pod-aware Codex restore retries fresh when resume launch proves the saved session is gone", async () => {
+  it("pod-aware Codex restore fails when resume launch proves the saved session is gone", async () => {
     const rig = rigRepo.createRig("test-rig");
     db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-codex-retry", rig.id, "Dev");
     const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "codex", podId: "pod-codex-retry" });
@@ -1336,14 +1342,14 @@ describe("RestoreOrchestrator", () => {
     expect(result.ok).toBe(true);
     if (result.ok) {
       const nodeResult = result.result.nodes.find((n) => n.nodeId === node.id);
-      expect(nodeResult!.status).toBe("fresh");
-      expect(launchHarness).toHaveBeenCalledTimes(2);
+      expect(nodeResult!.status).toBe("failed");
+      expect(nodeResult!.error).toContain("Harness launch failed");
+      expect(launchHarness).toHaveBeenCalledTimes(1);
       expect(launchHarness.mock.calls[0]![1].resumeToken).toBe("stale-codex-token");
-      expect(launchHarness.mock.calls[1]![1].resumeToken).toBeUndefined();
     }
   });
 
-  it("pod-aware Codex restore treats a fresh fallback as resumed when the native token matches", async () => {
+  it("pod-aware Codex restore does not treat retry_fresh as resumed even if a later token could match", async () => {
     const rig = rigRepo.createRig("test-rig");
     db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-codex-same-token", rig.id, "Dev");
     const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "codex", podId: "pod-codex-same-token" });
@@ -1373,15 +1379,15 @@ describe("RestoreOrchestrator", () => {
     expect(result.ok).toBe(true);
     if (result.ok) {
       const nodeResult = result.result.nodes.find((n) => n.nodeId === node.id);
-      expect(nodeResult!.status).toBe("resumed");
+      expect(nodeResult!.status).toBe("failed");
+      expect(nodeResult!.error).toContain("Harness launch failed");
       expect(result.result.warnings).not.toContain("Node dev.impl: resume was unavailable; launched fresh instead.");
-      expect(launchHarness).toHaveBeenCalledTimes(2);
+      expect(launchHarness).toHaveBeenCalledTimes(1);
       expect(launchHarness.mock.calls[0]![1].resumeToken).toBe("stable-codex-token");
-      expect(launchHarness.mock.calls[1]![1].resumeToken).toBeUndefined();
     }
   });
 
-  it("pod-aware Codex restore keeps rebuilt when fresh fallback replays a checkpoint", async () => {
+  it("pod-aware Codex restore fails requested resume even when a checkpoint exists", async () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "rigged-codex-restore-"));
     try {
       const rig = rigRepo.createRig("test-rig");
@@ -1417,7 +1423,9 @@ describe("RestoreOrchestrator", () => {
       expect(result.ok).toBe(true);
       if (result.ok) {
         const nodeResult = result.result.nodes.find((n) => n.nodeId === node.id);
-        expect(nodeResult!.status).toBe("rebuilt");
+        expect(nodeResult!.status).toBe("failed");
+        expect(nodeResult!.error).toContain("Harness launch failed");
+        expect(launchHarness).toHaveBeenCalledTimes(1);
       }
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
@@ -1572,5 +1580,145 @@ describe("RestoreOrchestrator", () => {
       expect(env!.OPENRIG_NODE_ID).toBeTruthy();
       expect(env!.OPENRIG_SESSION_NAME).toBeTruthy();
     }
+  });
+
+  // --- Epic 3 D2: no silent fresh fallback on failed resume ---
+
+  it("D2: legacy node with resume_if_possible + missing token returns failed, not fresh", async () => {
+    const snapshot = seedRigAndSnapshot({
+      nodes: [{ logicalId: "agent-a", role: "worker", runtime: "claude-code" }],
+      edges: [],
+      resumeType: "claude_name",
+      resumeToken: null as unknown as string, // token missing
+      restorePolicy: "resume_if_possible",
+    });
+
+    const orchestrator = createOrchestrator();
+    const result = await orchestrator.restore(snapshot.id);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const node = result.result.nodes.find((n) => n.logicalId === "agent-a");
+    expect(node).toBeDefined();
+    // D2 invariant: failed resume must be FAILED loudly, not silently downgraded to fresh
+    expect(node!.status).toBe("failed");
+  });
+
+  it("D2: legacy node with resume attempted but unavailable returns failed, not fresh", async () => {
+    const snapshot = seedRigAndSnapshot({
+      nodes: [{ logicalId: "agent-a", role: "worker", runtime: "claude-code" }],
+      edges: [],
+      resumeType: "claude_name",
+      resumeToken: "stale-token-123",
+      restorePolicy: "resume_if_possible",
+    });
+
+    const claudeResume = mockClaudeResume({ ok: false as const, error: "Session not found" });
+    const orchestrator = createOrchestrator({ claude: claudeResume });
+    const result = await orchestrator.restore(snapshot.id);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const node = result.result.nodes.find((n) => n.logicalId === "agent-a");
+    expect(node).toBeDefined();
+    // D2 invariant: resume attempted but failed → status "failed", not "fresh"
+    expect(node!.status).toBe("failed");
+  });
+
+  // --- Epic 3 D3: rig-level restore result vocabulary ---
+
+  it("D3: all nodes resumed → rigResult fully_restored", async () => {
+    const snapshot = seedRigAndSnapshot({
+      nodes: [
+        { logicalId: "agent-a", role: "worker", runtime: "claude-code" },
+        { logicalId: "agent-b", role: "worker", runtime: "claude-code" },
+      ],
+      edges: [],
+      resumeType: "claude_name",
+      resumeToken: "token-123",
+      restorePolicy: "resume_if_possible",
+    });
+
+    const orchestrator = createOrchestrator();
+    const result = await orchestrator.restore(snapshot.id);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.result.rigResult).toBe("fully_restored");
+  });
+
+  it("D3: mixed resumed + failed → rigResult partially_restored", async () => {
+    // Seed two nodes with resume, one will succeed and one will fail
+    const snapshot = seedRigAndSnapshot({
+      nodes: [
+        { logicalId: "agent-ok", role: "worker", runtime: "claude-code" },
+        { logicalId: "agent-fail", role: "worker", runtime: "claude-code" },
+      ],
+      edges: [],
+      resumeType: "claude_name",
+      resumeToken: "token-123",
+      restorePolicy: "resume_if_possible",
+    });
+
+    // Claude resume succeeds for first call, fails for second
+    let callCount = 0;
+    const claudeResume = {
+      canResume: vi.fn((type: string | null) => type === "claude_name"),
+      resume: vi.fn(async () => {
+        callCount++;
+        if (callCount === 1) return { ok: true as const };
+        return { ok: false as const, error: "Session expired" };
+      }),
+    } as unknown as ClaudeResumeAdapter;
+
+    const orchestrator = createOrchestrator({ claude: claudeResume });
+    const result = await orchestrator.restore(snapshot.id);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.result.rigResult).toBe("partially_restored");
+  });
+
+  it("D3: all nodes failed → rigResult failed", async () => {
+    const snapshot = seedRigAndSnapshot({
+      nodes: [
+        { logicalId: "agent-a", role: "worker", runtime: "claude-code" },
+        { logicalId: "agent-b", role: "worker", runtime: "claude-code" },
+      ],
+      edges: [],
+      resumeType: "claude_name",
+      resumeToken: "token-123",
+      restorePolicy: "resume_if_possible",
+    });
+
+    const claudeResume = mockClaudeResume({ ok: false as const, error: "All expired" });
+    const orchestrator = createOrchestrator({ claude: claudeResume });
+    const result = await orchestrator.restore(snapshot.id);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.result.rigResult).toBe("failed");
+  });
+
+  it("D3: any fresh node prevents fully_restored", async () => {
+    // A rig where one node launches fresh (no resume data) and others succeed
+    const snapshot = seedRigAndSnapshot({
+      nodes: [
+        { logicalId: "agent-a", role: "worker", runtime: "claude-code" },
+      ],
+      edges: [],
+      // No resumeType → node will launch fresh
+    });
+
+    const orchestrator = createOrchestrator();
+    const result = await orchestrator.restore(snapshot.id);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const node = result.result.nodes.find((n) => n.logicalId === "agent-a");
+    expect(node?.status).toBe("fresh");
+    // D3 invariant per PM: fresh nodes prevent fully_restored
+    expect(result.result.rigResult).not.toBe("fully_restored");
+    expect(result.result.rigResult).toBe("partially_restored");
   });
 });

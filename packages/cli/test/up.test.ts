@@ -401,6 +401,43 @@ describe("Up CLI", () => {
     expect(output).toContain("tmux attach -t dev-impl@test-rig");
   });
 
+  it("restored rig output prints degraded rig result and exits nonzero", async () => {
+    const origListeners = server.listeners("request");
+    server.removeAllListeners("request");
+    server.on("request", async (req: http.IncomingMessage, res: http.ServerResponse) => {
+      if (req.url === "/api/rigs/summary" && req.method === "GET") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify([{ id: "rig-1", name: "restore-me", nodeCount: 1 }]));
+        return;
+      }
+      if (req.url === "/api/up" && req.method === "POST") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({
+          status: "restored",
+          rigId: "rig-1",
+          rigName: "restore-me",
+          rigResult: "partially_restored",
+          nodes: [{ logicalId: "worker", status: "fresh" }],
+          warnings: [],
+        }));
+        return;
+      }
+      res.writeHead(404).end();
+    });
+
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "up", "restore-me"]);
+    });
+
+    server.removeAllListeners("request");
+    for (const l of origListeners) server.on("request", l as (...args: unknown[]) => void);
+
+    const output = logs.join("\n");
+    expect(output).toContain("Result: partially_restored");
+    expect(output).toContain("worker: fresh");
+    expect(exitCode).toBe(1);
+  });
+
   // PNS-T06: fresh boot warnings (e.g. transcript attach failures) surface to stderr
   it("fresh boot success prints warnings when present", async () => {
     const origListeners = server.listeners("request");

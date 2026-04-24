@@ -6,7 +6,7 @@ import { getCompatibleOpenRigPath } from "../openrig-compat.js";
 
 export type CheckStatus = "green" | "yellow" | "red";
 export type Verdict = "restorable" | "restorable_with_caveats" | "not_restorable" | "unknown";
-export type FullyBackStatus = "fully_back" | "not_fully_back" | "unknown";
+export type ReadinessStatus = "ready" | "ready_with_caveats" | "not_ready" | "unknown";
 export type HostInfraStatus = "not_inspected" | "not_declared" | "declared" | "unknown";
 
 export interface CheckEntry {
@@ -30,19 +30,25 @@ export interface RepairStep {
   blocking: boolean;
 }
 
-export interface RestoreAssertion {
-  level: "host";
-  status: FullyBackStatus;
+export interface ReadinessAssertion {
+  status: ReadinessStatus;
   reason: string;
   blockingRigCount: number;
   caveatRigCount: number;
   unknownRigCount: number;
 }
 
+export interface ContinuityAssertion {
+  status: "proven" | "not_proven" | "partial" | "not_applicable";
+  evidence: string;
+  provenCapabilities: string[];
+  unprovenCapabilities: string[];
+}
+
 export interface RigRestoreRollup {
   rigId: string;
   rigName: string;
-  status: FullyBackStatus;
+  status: ReadinessStatus;
   verdict: Verdict;
   expectedNodes: number;
   runningReadyNodes: number;
@@ -112,8 +118,8 @@ export type StartupContextProbeResult =
 
 export interface RestoreCheckResult {
   verdict: Verdict;
-  fullyBack: boolean;
-  assertion: RestoreAssertion;
+  readiness: ReadinessAssertion;
+  continuity: ContinuityAssertion;
   rigs: RigRestoreRollup[];
   hostInfra: HostInfraAssertion;
   recovery: RecoveryPlan;
@@ -1091,35 +1097,46 @@ export class RestoreCheckService {
     const caveatRigCount = rigs.filter((rig) => rig.blockedNodes === 0 && rig.blockingChecks.length === 0 && (rig.caveatNodes > 0 || rig.caveatChecks.length > 0)).length;
     const unknownRigCount = rigs.filter((rig) => rig.status === "unknown").length;
 
-    let status: FullyBackStatus;
+    let readinessStatus: ReadinessStatus;
     let reason: string;
     if (result.verdict === "unknown") {
-      status = "unknown";
+      readinessStatus = "unknown";
       reason = "unknown_probe_state";
     } else if (result.counts.red > 0) {
-      status = "not_fully_back";
+      readinessStatus = "not_ready";
       reason = "blockers_present";
     } else if (result.counts.yellow > 0) {
-      status = "not_fully_back";
+      readinessStatus = "ready_with_caveats";
       reason = "caveats_present";
     } else {
-      status = "fully_back";
+      readinessStatus = "ready";
       reason = hostInfra?.status === "declared"
-        ? "observable_rigs_fully_back_host_infra_declared_not_verified"
-        : "observable_rigs_fully_back";
+        ? "all_observable_checks_green_host_infra_declared_not_verified"
+        : "all_observable_checks_green";
     }
+
+    // Continuity is always not_proven in v1 — no code path can produce "proven"
+    const continuity: ContinuityAssertion = {
+      status: "not_proven",
+      evidence: "Strict same-session/provider-context resume is not verified by restore-check v1. Observable readiness is verified.",
+      provenCapabilities: this.computeProvenCapabilities(result.checks),
+      unprovenCapabilities: [
+        "provider_session_resume",
+        "context_window_preservation",
+        "interrupted_work_functional_resume",
+      ],
+    };
 
     return {
       ...result,
-      fullyBack: status === "fully_back",
-      assertion: {
-        level: "host",
-        status,
+      readiness: {
+        status: readinessStatus,
         reason,
         blockingRigCount,
         caveatRigCount,
         unknownRigCount,
       },
+      continuity,
       rigs,
       hostInfra: result.verdict === "unknown"
         ? {
@@ -1128,10 +1145,21 @@ export class RestoreCheckService {
           }
         : (hostInfra ?? {
             status: "not_inspected",
-            evidence: "No host bootstrap/autostart source inspected by v0; fullyBack only covers observable daemon, rig, and seat readiness",
+            evidence: "No host bootstrap/autostart source inspected by v0; readiness only covers observable daemon, rig, and seat checks",
           }),
       recovery: result.recovery,
     };
+  }
+
+  /** Derive proven capabilities from green checks for the continuity block. */
+  private computeProvenCapabilities(checks: CheckEntry[]): string[] {
+    const proven: string[] = [];
+    if (checks.some((c) => c.check === "daemon.reachable" && c.status === "green")) proven.push("daemon_reachable");
+    if (checks.some((c) => c.check.endsWith(".transcript") && c.status === "green")) proven.push("transcript_readable");
+    if (checks.some((c) => c.check.endsWith(".spec-present") && c.status === "green")) proven.push("spec_present");
+    if (checks.some((c) => c.check.endsWith(".queue-file") && c.status === "green")) proven.push("queue_file_present");
+    if (checks.some((c) => c.check.endsWith(".resume-path") && c.status === "green")) proven.push("seat_identity_resolvable");
+    return proven;
   }
 
   private buildRecovery(
@@ -1307,16 +1335,16 @@ export class RestoreCheckService {
     }
 
     let verdict: Verdict;
-    let status: FullyBackStatus;
+    let status: ReadinessStatus;
     if (blockingChecks.length > 0) {
       verdict = "not_restorable";
-      status = "not_fully_back";
+      status = "not_ready";
     } else if (caveatChecks.length > 0) {
       verdict = "restorable_with_caveats";
-      status = "not_fully_back";
+      status = "ready_with_caveats";
     } else {
       verdict = "restorable";
-      status = "fully_back";
+      status = "ready";
     }
 
     return {

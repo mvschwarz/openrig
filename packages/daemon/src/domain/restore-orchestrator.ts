@@ -14,6 +14,7 @@ import type { CodexResumeAdapter } from "../adapters/codex-resume.js";
 import type { TranscriptStore } from "./transcript-store.js";
 import type {
   RestoreOutcome,
+  RestoreRigResult,
   RestoreResult,
   RestoreNodeResult,
   SnapshotData,
@@ -25,6 +26,16 @@ import type {
 
 // Only these edge kinds constrain launch order
 const LAUNCH_DEPENDENCY_KINDS = new Set(["delegates_to", "spawned_by"]);
+
+export function rollupRestoreRigResult(nodes: RestoreNodeResult[]): RestoreRigResult {
+  if (nodes.length === 0) return "failed";
+  const successful = nodes.filter((node) => node.status !== "failed");
+  if (successful.length === 0) return "failed";
+  if (nodes.some((node) => node.status === "fresh" || node.status === "failed")) {
+    return "partially_restored";
+  }
+  return "fully_restored";
+}
 
 interface RestoreOrchestratorDeps {
   db: Database.Database;
@@ -145,7 +156,7 @@ export class RestoreOrchestrator {
         if (svcRecord) {
           const bootResult = await this.serviceOrchestrator.boot(rigId);
           if (!bootResult.ok) {
-            this.eventBus.emit({ type: "restore.completed", rigId, snapshotId, result: { snapshotId, preRestoreSnapshotId: preRestoreSnapshot.id, nodes: [], warnings: [`Service boot failed: ${bootResult.error}`] } });
+            this.eventBus.emit({ type: "restore.completed", rigId, snapshotId, result: { snapshotId, preRestoreSnapshotId: preRestoreSnapshot.id, rigResult: "failed", nodes: [], warnings: [`Service boot failed: ${bootResult.error}`] } });
             return { ok: false, code: "service_boot_failed", message: `Service boot failed before agent restore: ${bootResult.error}` };
           }
         }
@@ -165,6 +176,7 @@ export class RestoreOrchestrator {
       const restoreResult: RestoreResult = {
         snapshotId,
         preRestoreSnapshotId: preRestoreSnapshot.id,
+        rigResult: rollupRestoreRigResult(nodeResults),
         nodes: nodeResults,
         warnings: restoreWarnings,
       };
@@ -449,7 +461,6 @@ export class RestoreOrchestrator {
     const resumeRequested = restorePolicy === "resume_if_possible" && !!resumeType && resumeType !== "none";
 
     let baseStatus: RestoreNodeResult["status"] = "fresh";
-    let needsFreshLaunchFallback = false;
 
     // Pod-aware nodes: resume via launchHarness (handled in startup orchestrator with skipHarnessLaunch: false)
     // Legacy nodes: resume via old claude-resume/codex-resume helpers
@@ -458,23 +469,13 @@ export class RestoreOrchestrator {
     if (resumeRequested && !isPodAware) {
       // Legacy resume path
       if (!resumeToken) {
-        if (this.shouldFallbackFreshWithoutResume(node.runtime, resumeType)) {
-          warnings?.push(`Node ${node.logicalId}: resume requested but no token was available; launched fresh instead.`);
-          baseStatus = "fresh";
-          needsFreshLaunchFallback = true;
-        } else {
-          return { nodeId: node.id, logicalId: node.logicalId, status: "failed", error: `Resume requested but no token available. Restore the node manually or launch fresh with: rig up` };
-        }
+        return { nodeId: node.id, logicalId: node.logicalId, status: "failed", error: `Resume requested but no token available. Restore the node manually or launch fresh explicitly.` };
       } else {
         const resumeOutcome = await this.attemptResume(sessionName, resumeType, resumeToken, node.cwd ?? "/");
         if (resumeOutcome === "resumed") {
           baseStatus = "resumed";
-        } else if (resumeOutcome === "retry_fresh") {
-          warnings?.push(`Node ${node.logicalId}: resume was unavailable; launched fresh instead.`);
-          baseStatus = "fresh";
-          needsFreshLaunchFallback = true;
         } else {
-          return { nodeId: node.id, logicalId: node.logicalId, status: "failed", error: `Resume attempted but failed. Check the harness state manually or launch fresh with: rig up` };
+          return { nodeId: node.id, logicalId: node.logicalId, status: "failed", error: `Resume attempted but failed. Check the harness state manually or launch fresh explicitly.` };
         }
       }
     } else if (resumeRequested && isPodAware) {
@@ -482,17 +483,12 @@ export class RestoreOrchestrator {
       // if resume was requested but continuity state is unavailable, fail loudly
       // instead of silently downgrading to a fresh launch with amnesia.
       if (!resumeToken) {
-        if (this.shouldFallbackFreshWithoutResume(node.runtime, resumeType)) {
-          warnings?.push(`Node ${node.logicalId}: resume requested but no token was available; launched fresh instead.`);
-          needsFreshLaunchFallback = true;
-        } else {
-          return {
-            nodeId: node.id,
-            logicalId: node.logicalId,
-            status: "failed",
-            error: "Resume requested but no token available. Restore the node manually or launch fresh with: rig up",
-          };
-        }
+        return {
+          nodeId: node.id,
+          logicalId: node.logicalId,
+          status: "failed",
+          error: "Resume requested but no token available. Restore the node manually or launch fresh explicitly.",
+        };
       }
     }
 
@@ -567,7 +563,7 @@ export class RestoreOrchestrator {
             const { StartupOrchestrator } = await import("./startup-orchestrator.js");
             const startupOrch = new StartupOrchestrator({ db: this.db, sessionRegistry: this.sessionRegistry, eventBus: this.eventBus, tmuxAdapter: this.tmuxAdapter });
             const replayAsRestore = baseStatus !== "fresh";
-            const shouldLaunchHarness = isPodAware || needsFreshLaunchFallback;
+            const shouldLaunchHarness = isPodAware;
             const startupResult = await startupOrch.startNode({
               rigId,
               nodeId: node.id,
@@ -579,24 +575,28 @@ export class RestoreOrchestrator {
               startupActions: startupCtx.startupActions,
               isRestore: replayAsRestore,
               skipHarnessLaunch: !shouldLaunchHarness,
-              resumeToken: (isPodAware && resumeRequested && !needsFreshLaunchFallback) ? resumeToken ?? undefined : undefined,
+              resumeToken: (isPodAware && resumeRequested) ? resumeToken ?? undefined : undefined,
               sessionName: sessionName,
+              allowFreshFallback: !(isPodAware && resumeRequested),
             });
             if (startupResult.ok) {
               const nativeContinuityProved = isPodAware
                 && resumeRequested
                 && this.launchedSessionMatchesSnapshotResume(launchResult.session.id, resumeType, resumeToken);
-              // Pod-aware nodes with resume token may either truly resume or
-              // prove that the saved session is gone and fall back to fresh.
               if (isPodAware && resumeRequested && startupResult.continuityOutcome === "fresh" && !nativeContinuityProved) {
-                warnings?.push(`Node ${node.logicalId}: resume was unavailable; launched fresh instead.`);
+                return {
+                  nodeId: node.id,
+                  logicalId: node.logicalId,
+                  status: "failed",
+                  error: "Resume attempted but runtime reported fresh continuity. Launch fresh explicitly if that degradation is acceptable.",
+                };
               }
               const finalStatus = (isPodAware && resumeRequested)
                 ? ((startupResult.continuityOutcome === "resumed" || nativeContinuityProved) ? "resumed" : baseStatus)
                 : baseStatus;
               return { nodeId: node.id, logicalId: node.logicalId, status: finalStatus };
             }
-            if ((isPodAware && resumeRequested) || needsFreshLaunchFallback) {
+            if (isPodAware && resumeRequested) {
               return {
                 nodeId: node.id,
                 logicalId: node.logicalId,
@@ -606,7 +606,7 @@ export class RestoreOrchestrator {
             }
             warnings?.push(`Restore startup failed for ${node.logicalId}: ${startupResult.errors.join("; ")}`);
           } catch (err) {
-            if ((isPodAware && resumeRequested) || needsFreshLaunchFallback) {
+            if (isPodAware && resumeRequested) {
               return {
                 nodeId: node.id,
                 logicalId: node.logicalId,
@@ -620,24 +620,7 @@ export class RestoreOrchestrator {
       }
     }
 
-    if (needsFreshLaunchFallback) {
-      return {
-        nodeId: node.id,
-        logicalId: node.logicalId,
-        status: "failed",
-        error: "Resume fallback required a fresh launch, but no startup context was available to relaunch the runtime",
-      };
-    }
-
     return { nodeId: node.id, logicalId: node.logicalId, status: baseStatus };
-  }
-
-  private shouldFallbackFreshWithoutResume(runtime: string | null, resumeType: string | null): boolean {
-    return !!resumeType
-      && (
-        (runtime === "codex" && resumeType.startsWith("codex"))
-        || (runtime === "claude-code" && resumeType.startsWith("claude"))
-      );
   }
 
   private launchedSessionMatchesSnapshotResume(
