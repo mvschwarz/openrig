@@ -108,6 +108,10 @@ describe("SeatHandoverPlanner", () => {
       ok: true,
       source: { mode: "fork", ref: "abc123", raw: "fork:abc123", defaulted: false },
     });
+    expect(parseHandoverSource("discovered:disc-123")).toMatchObject({
+      ok: true,
+      source: { mode: "discovered", ref: "disc-123", raw: "discovered:disc-123", defaulted: false },
+    });
   });
 
   it("requires a reason before planning", () => {

@@ -135,6 +135,47 @@ const HANDOVER_PLAN = {
   ],
 };
 
+const HANDOVER_RESULT = {
+  ok: true,
+  dryRun: false,
+  mutated: true,
+  continuityTransferred: false,
+  seat: {
+    ref: "dev-impl@seat-rig",
+    rigId: "rig-1",
+    rigName: "seat-rig",
+    logicalId: "dev.impl",
+    podId: "pod-1",
+    podNamespace: "dev",
+    runtime: "codex",
+  },
+  source: { mode: "discovered", ref: "disc-1", raw: "discovered:disc-1", defaulted: false },
+  reason: "mvp-proof",
+  operator: "orch-lead@seat-rig",
+  previousOccupant: "dev-impl@seat-rig",
+  currentOccupant: "successor-session",
+  previousSessionIdsSuperseded: ["sess-old"],
+  newSessionId: "sess-new",
+  discovery: { id: "disc-1", status: "claimed", tmuxSession: "successor-session", tmuxPane: "%1" },
+  currentStatus: {
+    sessionStatus: "running",
+    startupStatus: "ready",
+    occupantLifecycle: "active",
+    continuityOutcome: null,
+    handoverResult: "complete",
+    previousOccupant: "dev-impl@seat-rig",
+    handoverAt: "2026-04-24T18:30:00.000Z",
+    restoreOutcome: "n-a",
+  },
+  handoverAt: "2026-04-24T18:30:00.000Z",
+  eventSeq: 42,
+  sideEffects: {
+    departingSessionKilled: false,
+    startupContextDelivered: false,
+    provenanceRecordWritten: false,
+  },
+};
+
 describe("rig seat status", () => {
   afterEach(() => {
     vi.restoreAllMocks();
@@ -283,14 +324,68 @@ describe("rig seat status", () => {
     expect(errors.join("\n")).toContain("List seats with: rig ps --nodes");
   });
 
-  it("handover without --dry-run refuses mutation", async () => {
+  it("handover non-dry-run JSON prints mutation result for discovered source", async () => {
+    const paths: string[] = [];
+    const deps = makeDeps({ status: 200, data: HANDOVER_RESULT }, paths);
+
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCommand(deps).parseAsync([
+        "node", "rig", "seat", "handover", "dev-impl@seat-rig",
+        "--source", "discovered:disc-1",
+        "--reason", "mvp-proof",
+        "--operator", "orch-lead@seat-rig",
+        "--json",
+      ]);
+    });
+
+    expect(exitCode).toBeUndefined();
+    expect(paths).toEqual(["/api/seat/handover/dev-impl%40seat-rig"]);
+    const parsed = JSON.parse(logs.join("\n"));
+    expect(parsed).toMatchObject({
+      ok: true,
+      dryRun: false,
+      mutated: true,
+      continuityTransferred: false,
+      previousOccupant: "dev-impl@seat-rig",
+      currentOccupant: "successor-session",
+      currentStatus: { handoverResult: "complete" },
+      sideEffects: {
+        departingSessionKilled: false,
+        startupContextDelivered: false,
+        provenanceRecordWritten: false,
+      },
+    });
+  });
+
+  it("handover non-dry-run human output avoids continuity claims", async () => {
+    const deps = makeDeps({ status: 200, data: HANDOVER_RESULT }, []);
+
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCommand(deps).parseAsync([
+        "node", "rig", "seat", "handover", "dev-impl@seat-rig",
+        "--source", "discovered:disc-1",
+        "--reason", "mvp-proof",
+      ]);
+    });
+
+    const output = logs.join("\n");
+    expect(exitCode).toBeUndefined();
+    expect(output).toContain("Seat handover complete: dev-impl@seat-rig");
+    expect(output).toContain("Previous occupant: dev-impl@seat-rig");
+    expect(output).toContain("Current occupant: successor-session");
+    expect(output).toContain("Seat binding and inventory provenance were updated.");
+    expect(output).toContain("No conversation continuity");
+    expect(output).toContain("session stop");
+  });
+
+  it("handover without --dry-run refuses unsupported successor creation sources", async () => {
     const deps = makeDeps({
       status: 501,
       data: {
         ok: false,
-        code: "mutation_disabled",
-        message: "Seat handover mutation is not implemented in this slice.",
-        guidance: "Re-run with --dry-run to inspect the two-phase handover plan without changing topology.",
+        code: "successor_creation_not_implemented",
+        message: "Seat handover mutation for source \"fresh\" is not implemented in this slice.",
+        guidance: "For live mutation in this slice, provide an already-created successor with --source discovered:<id>.",
       },
     }, []);
 
@@ -302,7 +397,7 @@ describe("rig seat status", () => {
     });
 
     expect(exitCode).toBe(2);
-    expect(errors.join("\n")).toContain("Seat handover mutation is not implemented in this slice.");
-    expect(errors.join("\n")).toContain("Re-run with --dry-run");
+    expect(errors.join("\n")).toContain("not implemented in this slice");
+    expect(errors.join("\n")).toContain("--source discovered:<id>");
   });
 });
