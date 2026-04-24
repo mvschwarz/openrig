@@ -308,10 +308,23 @@ export function createMcpServer(client: DaemonClient): McpServer {
       text: z.string().describe("Message text to send"),
       verify: z.boolean().optional().describe("Verify delivery by checking pane content"),
       force: z.boolean().optional().describe("Send even if target appears mid-task"),
+      waitForIdleSeconds: z.number().positive().optional().describe("Wait until explicit idle evidence before sending"),
     },
-    async ({ session, text, verify, force }) => {
+    async ({ session, text, verify, force, waitForIdleSeconds }) => {
       try {
-        const res = await client.post("/api/transport/send", { session, text, verify, force });
+        if (force && waitForIdleSeconds !== undefined) {
+          return {
+            content: [{ type: "text", text: JSON.stringify({ ok: false, error: "waitForIdleSeconds cannot be combined with force" }) }],
+            isError: true,
+          };
+        }
+        const res = await client.post("/api/transport/send", {
+          session,
+          text,
+          verify,
+          force,
+          waitForIdleMs: waitForIdleSeconds === undefined ? undefined : Math.ceil(waitForIdleSeconds * 1000),
+        });
         return mapResult(res);
       } catch (err) {
         return { content: [{ type: "text" as const, text: (err as Error).message }], isError: true as const };

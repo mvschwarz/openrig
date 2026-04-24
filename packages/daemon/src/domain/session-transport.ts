@@ -2,6 +2,7 @@ import type Database from "better-sqlite3";
 import type { RigRepository } from "./rig-repository.js";
 import type { SessionRegistry } from "./session-registry.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
+import type { AgentActivityStore } from "./agent-activity-store.js";
 import type { AgentActivity } from "./types.js";
 
 // Mid-work detection patterns (cheap heuristics)
@@ -266,6 +267,7 @@ export type ResolveResult =
 export interface SendOpts {
   verify?: boolean;
   force?: boolean;
+  waitForIdleMs?: number;
 }
 
 export interface SendResult {
@@ -275,6 +277,10 @@ export interface SendResult {
   warning?: string;
   error?: string;
   reason?: string;
+  activity?: AgentActivity;
+  waitedMs?: number;
+  attempts?: number;
+  sent?: boolean;
 }
 
 export interface CaptureResult {
@@ -298,6 +304,10 @@ interface SessionTransportDeps {
   rigRepo: RigRepository;
   sessionRegistry: SessionRegistry;
   tmuxAdapter: TmuxAdapter;
+  agentActivityStore?: AgentActivityStore;
+  now?: () => Date;
+  sleep?: (ms: number) => Promise<void>;
+  waitForIdlePollMs?: number;
 }
 
 interface SessionRow { node_id: string; session_name: string; }
@@ -310,12 +320,20 @@ export class SessionTransport {
   private rigRepo: RigRepository;
   private sessionRegistry: SessionRegistry;
   private tmuxAdapter: TmuxAdapter;
+  private agentActivityStore?: AgentActivityStore;
+  private now: () => Date;
+  private sleep: (ms: number) => Promise<void>;
+  private waitForIdlePollMs: number;
 
   constructor(deps: SessionTransportDeps) {
     this.db = deps.db;
     this.rigRepo = deps.rigRepo;
     this.sessionRegistry = deps.sessionRegistry;
     this.tmuxAdapter = deps.tmuxAdapter;
+    this.agentActivityStore = deps.agentActivityStore;
+    this.now = deps.now ?? (() => new Date());
+    this.sleep = deps.sleep ?? delay;
+    this.waitForIdlePollMs = deps.waitForIdlePollMs ?? 500;
   }
 
   private getSessionMeta(sessionName: string): { runtime: string | null; attachmentType: string | null } {
@@ -530,6 +548,9 @@ export class SessionTransport {
     let preVerifyContent: string | null = null;
     const sessionMeta = this.getSessionMeta(sessionName);
     const runtime = sessionMeta.runtime;
+    const waitForIdleMs = opts?.waitForIdleMs;
+    const waitMode = waitForIdleMs !== undefined;
+    let waitEvidence: Pick<SendResult, "activity" | "waitedMs" | "attempts"> = {};
 
     if (sessionMeta.attachmentType === "external_cli") {
       return {
@@ -538,6 +559,27 @@ export class SessionTransport {
         reason: "transport_unavailable",
         error: `Session '${sessionName}' is attached as an external CLI node. Inbound tmux transport is unavailable for this target.`,
       };
+    }
+
+    if (waitForIdleMs !== undefined) {
+      if (opts?.force) {
+        return {
+          ok: false,
+          sessionName,
+          reason: "invalid_wait_for_idle",
+          error: "--wait-for-idle cannot be combined with force. No text was sent.",
+          sent: false,
+        };
+      }
+      if (!Number.isFinite(waitForIdleMs) || waitForIdleMs <= 0) {
+        return {
+          ok: false,
+          sessionName,
+          reason: "invalid_wait_for_idle",
+          error: "waitForIdleMs must be a positive number. No text was sent.",
+          sent: false,
+        };
+      }
     }
 
     // 1. Check session exists / tmux available
@@ -560,8 +602,32 @@ export class SessionTransport {
       };
     }
 
-    // 2. Mid-work check (unless force)
-    if (!opts?.force) {
+    if (waitForIdleMs !== undefined) {
+      const waitResult = await this.waitForIdle({
+        sessionName,
+        runtime,
+        attachmentType: sessionMeta.attachmentType,
+        timeoutMs: waitForIdleMs,
+      });
+      waitEvidence = {
+        activity: waitResult.activity,
+        waitedMs: waitResult.waitedMs,
+        attempts: waitResult.attempts,
+      };
+      if (!waitResult.ok) {
+        return {
+          ok: false,
+          sessionName,
+          reason: waitResult.reason,
+          error: waitResult.error,
+          sent: false,
+          ...waitEvidence,
+        };
+      }
+    }
+
+    // 2. Legacy mid-work check (unless force or explicit wait mode already proved idle)
+    if (!opts?.force && waitForIdleMs === undefined) {
       try {
         if (runtime === "terminal") {
           const paneCommand = await this.tmuxAdapter.getPaneCommand(sessionName);
@@ -604,11 +670,12 @@ export class SessionTransport {
         sessionName,
         reason: "send_failed",
         error: `Failed to send text to '${sessionName}': ${textResult.message}`,
+        ...(waitMode ? { sent: false, ...waitEvidence } : {}),
       };
     }
 
     // 4. Wait 200ms (spike-proven delay)
-    await delay(200);
+    await this.sleep(200);
 
     // 5. Submit (C-m)
     const submitResult = await this.tmuxAdapter.sendKeys(sessionName, ["C-m"]);
@@ -618,25 +685,108 @@ export class SessionTransport {
         sessionName,
         reason: "submit_failed",
         error: `Text is visible in '${sessionName}' but was not submitted (Enter failed). The agent may need manual attention.`,
+        ...(waitMode ? { sent: true, ...waitEvidence } : {}),
       };
     }
 
     // 6. Verify if requested
     if (opts?.verify) {
-      await delay(500);
+      await this.sleep(500);
       try {
         const content = await this.tmuxAdapter.capturePaneContent(sessionName, 30);
         const snippet = text.substring(0, Math.min(text.length, 40));
         const preCount = countOccurrences(preVerifyContent ?? "", snippet);
         const postCount = countOccurrences(content ?? "", snippet);
         const verified = postCount > preCount;
-        return { ok: true, sessionName, verified };
+        return { ok: true, sessionName, verified, ...(waitMode ? { sent: true, ...waitEvidence } : {}) };
       } catch {
-        return { ok: true, sessionName, verified: false };
+        return { ok: true, sessionName, verified: false, ...(waitMode ? { sent: true, ...waitEvidence } : {}) };
       }
     }
 
-    return { ok: true, sessionName };
+    return { ok: true, sessionName, ...(waitMode ? { sent: true, ...waitEvidence } : {}) };
+  }
+
+  private async waitForIdle(input: {
+    sessionName: string;
+    runtime: string | null;
+    attachmentType: string | null;
+    timeoutMs: number;
+  }): Promise<
+    | { ok: true; activity: AgentActivity; waitedMs: number; attempts: number }
+    | { ok: false; reason: string; error: string; activity: AgentActivity; waitedMs: number; attempts: number }
+  > {
+    const startedAt = Date.now();
+    let attempts = 0;
+
+    while (true) {
+      attempts++;
+      const activity = await this.classifySendReadiness(input);
+      const waitedMs = Date.now() - startedAt;
+
+      if (activity.state === "idle") {
+        return { ok: true, activity, waitedMs, attempts };
+      }
+
+      if (activity.state === "needs_input") {
+        return {
+          ok: false,
+          reason: "target_needs_input",
+          error: `Target requires attention (${activity.reason}). No text was sent.`,
+          activity,
+          waitedMs,
+          attempts,
+        };
+      }
+
+      if (activity.state === "unknown") {
+        return {
+          ok: false,
+          reason: "target_activity_unknown",
+          error: `Target activity could not be determined (${activity.reason}). No text was sent.`,
+          activity,
+          waitedMs,
+          attempts,
+        };
+      }
+
+      if (waitedMs >= input.timeoutMs) {
+        return {
+          ok: false,
+          reason: "wait_for_idle_timeout",
+          error: `Target remained busy for ${waitedMs}ms. No text was sent.`,
+          activity,
+          waitedMs,
+          attempts,
+        };
+      }
+
+      const remainingMs = input.timeoutMs - waitedMs;
+      await this.sleep(Math.min(this.waitForIdlePollMs, Math.max(1, remainingMs)));
+    }
+  }
+
+  private async classifySendReadiness(input: {
+    sessionName: string;
+    runtime: string | null;
+    attachmentType: string | null;
+  }): Promise<AgentActivity> {
+    const now = this.now();
+    const hookActivity = this.agentActivityStore?.getLatestForNode({
+      sessionName: input.sessionName,
+      now,
+    });
+    if (hookActivity && hookActivity.evidenceSource === "runtime_hook" && hookActivity.stale !== true) {
+      return hookActivity;
+    }
+
+    return probeSessionActivity({
+      sessionName: input.sessionName,
+      runtime: input.runtime,
+      attachmentType: input.attachmentType as "tmux" | "external_cli" | null | undefined,
+      tmuxAdapter: this.tmuxAdapter,
+      now,
+    });
   }
 
   async capture(sessionName: string, opts?: { lines?: number }): Promise<CaptureResult> {
