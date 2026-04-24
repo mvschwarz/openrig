@@ -328,6 +328,74 @@ describe("Codex runtime adapter", () => {
     expect(sendText).toHaveBeenCalledWith("r01-qa", "codex -C '/project' --add-dir '/project/.git' -m 'gpt-5.5' -a never -s workspace-write");
   });
 
+  it("launchHarness skips the non-mutating Codex update prompt before capturing a fresh thread id", async () => {
+    const updatePrompt = [
+      "✨ Update available! 0.120.0 -> 0.121.0",
+      "Release notes: https://github.com/openai/codex/releases/latest",
+      "› 1. Update now (runs `npm install -g @openai/codex`)",
+      "  2. Skip",
+      "  3. Skip until next version",
+      "Press enter to continue",
+    ].join("\n");
+    const tmux = mockTmux({
+      capturePaneContent: vi.fn()
+        .mockResolvedValueOnce(updatePrompt)
+        .mockResolvedValue("OpenAI Codex (v0.120.0)"),
+      getPanePid: vi.fn(async () => 900),
+    });
+    const adapter = new CodexRuntimeAdapter({
+      tmux,
+      fsOps: mockFs(),
+      listProcesses: () => [
+        { pid: 900, ppid: 1, command: "-zsh" },
+        { pid: 901, ppid: 900, command: "codex" },
+      ],
+      readThreadIdByPid: (pid) => pid === 901 ? "019d45bc-117d-78a3-a4ad-6fb186e5a86d" : undefined,
+      sleep: async () => {},
+    });
+
+    const result = await adapter.launchHarness(makeBinding(), { name: "dev-qa@test-rig" });
+
+    expect(result).toEqual({
+      ok: true,
+      resumeToken: "019d45bc-117d-78a3-a4ad-6fb186e5a86d",
+      resumeType: "codex_id",
+    });
+    const sendText = tmux.sendText as ReturnType<typeof vi.fn>;
+    expect(sendText.mock.calls).toEqual([
+      ["r01-qa", "codex -C '/project' --add-dir '/project/.git' -a never -s workspace-write"],
+      ["r01-qa", "3"],
+    ]);
+    const sendKeys = tmux.sendKeys as ReturnType<typeof vi.fn>;
+    expect(sendKeys.mock.calls).toEqual([
+      ["r01-qa", ["Enter"]],
+      ["r01-qa", ["Enter"]],
+    ]);
+  });
+
+  it("launchHarness does not choose a Codex update action unless skip-until-next-version is visible", async () => {
+    const tmux = mockTmux({
+      capturePaneContent: vi.fn(async () => [
+        "✨ Update available! 0.120.0 -> 0.121.0",
+        "Press enter to continue",
+      ].join("\n")),
+    });
+    const adapter = new CodexRuntimeAdapter({
+      tmux,
+      fsOps: mockFs(),
+      listProcesses: () => [],
+      sleep: async () => {},
+    });
+
+    const result = await adapter.launchHarness(makeBinding(), { name: "dev-qa@test-rig" });
+
+    expect(result.ok).toBe(true);
+    const sendText = tmux.sendText as ReturnType<typeof vi.fn>;
+    expect(sendText.mock.calls).toEqual([
+      ["r01-qa", "codex -C '/project' --add-dir '/project/.git' -a never -s workspace-write"],
+    ]);
+  });
+
   it("launchHarness captures a fresh Codex thread id from the live child process", async () => {
     const tmux = mockTmux({
       getPanePid: vi.fn(async () => 900),
@@ -456,6 +524,36 @@ describe("Codex runtime adapter", () => {
     expect(result.ok).toBe(true);
     const sendText = tmux.sendText as ReturnType<typeof vi.fn>;
     expect(sendText).toHaveBeenCalledWith("r01-qa", "codex resume sess-456");
+  });
+
+  it("launchHarness skips the non-mutating Codex update prompt during resume verification", async () => {
+    const updatePrompt = [
+      "✨ Update available! 0.120.0 -> 0.121.0",
+      "› 1. Update now (runs `npm install -g @openai/codex`)",
+      "  2. Skip",
+      "  3. Skip until next version",
+      "Press enter to continue",
+    ].join("\n");
+    const tmux = mockTmux({
+      capturePaneContent: vi.fn()
+        .mockResolvedValueOnce(updatePrompt)
+        .mockResolvedValue("OpenAI Codex (v0.120.0)"),
+    });
+    const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {} });
+
+    const result = await adapter.launchHarness(makeBinding(), { name: "dev-qa@test-rig", resumeToken: "sess-456" });
+
+    expect(result).toEqual({ ok: true, resumeToken: "sess-456", resumeType: "codex_id" });
+    const sendText = tmux.sendText as ReturnType<typeof vi.fn>;
+    expect(sendText.mock.calls).toEqual([
+      ["r01-qa", "codex resume sess-456"],
+      ["r01-qa", "3"],
+    ]);
+    const sendKeys = tmux.sendKeys as ReturnType<typeof vi.fn>;
+    expect(sendKeys.mock.calls).toEqual([
+      ["r01-qa", ["Enter"]],
+      ["r01-qa", ["Enter"]],
+    ]);
   });
 
   it("launchHarness does not pass a model argument when resuming Codex", async () => {
