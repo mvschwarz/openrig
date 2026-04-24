@@ -47,6 +47,7 @@ import { contextCommand } from "./commands/context.js";
 import { restoreCheckCommand } from "./commands/restore-check.js";
 import { compactPlanCommand, type CompactPlanDeps } from "./commands/compact-plan.js";
 import { heartbeatCommand, type HeartbeatDeps } from "./commands/heartbeat.js";
+import { seatCommand, type SeatDeps } from "./commands/seat.js";
 import type { LifecycleDeps } from "./daemon-lifecycle.js";
 import { CLI_VERSION } from "./version.js";
 
@@ -90,6 +91,7 @@ export interface ProgramDeps {
   destroyDeps?: DestroyCommandDeps;
   compactPlanDeps?: CompactPlanDeps;
   heartbeatDeps?: HeartbeatDeps;
+  seatDeps?: SeatDeps;
   configPath?: string;
 }
 
@@ -146,6 +148,7 @@ export function createProgram(depsOverride?: ProgramDeps): Command {
   program.addCommand(restoreCheckCommand());
   program.addCommand(compactPlanCommand(depsOverride?.compactPlanDeps));
   program.addCommand(heartbeatCommand(depsOverride?.heartbeatDeps));
+  program.addCommand(seatCommand(depsOverride?.seatDeps));
 
   return program;
 }

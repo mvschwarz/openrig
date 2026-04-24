@@ -43,6 +43,11 @@ export interface Node {
   resolvedSpecName: string | null;
   resolvedSpecVersion: string | null;
   resolvedSpecHash: string | null;
+  occupantLifecycle: OccupantLifecycle | null;
+  continuityOutcome: ContinuityOutcome | null;
+  handoverResult: HandoverResult;
+  previousOccupant: string | null;
+  handoverAt: string | null;
   createdAt: string;
 }
 
@@ -228,6 +233,9 @@ export type RestoreOutcome =
 // -- Node inventory projection (NS-T02) --
 
 export type NodeRestoreOutcome = "resumed" | "rebuilt" | "fresh" | "failed" | "n-a";
+export type OccupantLifecycle = "active" | "retiring" | "retired" | "context_walled" | "compacted" | "crashed" | "unknown";
+export type ContinuityOutcome = "resumed" | "rebuilt" | "forked" | "fresh" | "failed";
+export type HandoverResult = "complete" | "unchanged" | "partial" | "failed" | null;
 
 export interface NodeRecoveryGuidance {
   summary: string;
@@ -248,6 +256,11 @@ export interface NodeInventoryEntry {
   sessionStatus: string | null;
   startupStatus: "pending" | "ready" | "attention_required" | "failed" | null;
   restoreOutcome: NodeRestoreOutcome;
+  occupantLifecycle: OccupantLifecycle;
+  continuityOutcome: ContinuityOutcome | null;
+  handoverResult: HandoverResult;
+  previousOccupant: string | null;
+  handoverAt: string | null;
   tmuxAttachCommand: string | null;
   resumeCommand: string | null;
   recoveryGuidance: NodeRecoveryGuidance | null;

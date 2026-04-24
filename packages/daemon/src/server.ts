@@ -59,6 +59,7 @@ import type { WhoamiService } from "./domain/whoami-service.js";
 import { chatRoutes } from "./routes/chat.js";
 import { envRoutes } from "./routes/env.js";
 import type { RigLifecycleService } from "./domain/rig-lifecycle-service.js";
+import { seatRoutes } from "./routes/seat.js";
 
 export interface AppDeps {
   rigRepo: RigRepository;
@@ -275,6 +276,7 @@ export function createApp(deps: AppDeps): Hono {
   app.route("/api/specs/review", specReviewRoutes());
   app.route("/api/specs/library", specLibraryRoutes());
   app.route("/api/whoami", whoamiRoutes());
+  app.route("/api/seat", seatRoutes);
   app.route("/api/rigs/:rigId/chat", chatRoutes());
   app.route("/api/rigs/:rigId/env", envRoutes());
   app.route("/api/restore-check", restoreCheckRoutes);

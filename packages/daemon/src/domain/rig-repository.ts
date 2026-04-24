@@ -277,6 +277,11 @@ export class RigRepository {
       resolvedSpecName: row.resolved_spec_name ?? null,
       resolvedSpecVersion: row.resolved_spec_version ?? null,
       resolvedSpecHash: row.resolved_spec_hash ?? null,
+      occupantLifecycle: row.occupant_lifecycle as Node["occupantLifecycle"] ?? null,
+      continuityOutcome: row.continuity_outcome as Node["continuityOutcome"] ?? null,
+      handoverResult: row.handover_result as Node["handoverResult"] ?? null,
+      previousOccupant: row.previous_occupant ?? null,
+      handoverAt: row.handover_at ?? null,
       createdAt: row.created_at,
     };
   }
@@ -350,6 +355,11 @@ interface NodeRow {
   resolved_spec_name: string | null;
   resolved_spec_version: string | null;
   resolved_spec_hash: string | null;
+  occupant_lifecycle: string | null;
+  continuity_outcome: string | null;
+  handover_result: string | null;
+  previous_occupant: string | null;
+  handover_at: string | null;
   created_at: string;
 }
 
