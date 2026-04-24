@@ -74,6 +74,14 @@ restoreRoutes.post("/:snapshotId", async (c) => {
   });
 
   if (!outcome.ok) {
+    if (outcome.code === "pre_restore_validation_failed") {
+      return c.json({
+        error: outcome.message,
+        code: outcome.code,
+        ...outcome.result,
+        remediation: outcome.result.blockers?.map((blocker) => blocker.remediation) ?? [],
+      }, 409);
+    }
     const status = outcome.code === "snapshot_not_found" || outcome.code === "rig_not_found"
       ? 404
       : outcome.code === "restore_in_progress" || outcome.code === "rig_not_stopped"

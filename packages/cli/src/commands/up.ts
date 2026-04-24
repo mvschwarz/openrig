@@ -162,6 +162,8 @@ Examples:
         } else if (code === "preflight_failed") {
           const errors = (res.data["errors"] as string[]) ?? [];
           console.error(`Preflight check failed:\n${errors.map((e) => `  ${e}`).join("\n")}\nFix: resolve the issues above and retry.`);
+        } else if (code === "pre_restore_validation_failed") {
+          printRestoreNotAttempted(res.data as RestoreNotAttemptedData);
         } else {
           const errorText = String(res.data["error"] ?? "unknown error");
           console.error(`Up failed: ${errorText} (HTTP ${res.status}). Check daemon logs or validate your spec with: rig spec validate <path>`);
@@ -236,4 +238,34 @@ Examples:
     });
 
   return cmd;
+}
+
+interface RestoreBlocker {
+  code: string;
+  severity?: string;
+  logicalId?: string;
+  nodeId?: string;
+  target?: string;
+  path?: string;
+  message: string;
+  remediation: string;
+}
+
+interface RestoreNotAttemptedData {
+  error?: string;
+  rigResult?: string;
+  blockers?: RestoreBlocker[];
+}
+
+function printRestoreNotAttempted(data: RestoreNotAttemptedData): void {
+  console.error(`Restore blocked: ${data.error ?? "pre-restore validation failed"}`);
+  if (data.rigResult) {
+    console.error(`Result: ${data.rigResult}`);
+  }
+  for (const blocker of data.blockers ?? []) {
+    const scope = blocker.logicalId ?? blocker.nodeId ?? blocker.target ?? blocker.code;
+    console.error(`  ${scope}: ${blocker.message}`);
+    if (blocker.path) console.error(`    path: ${blocker.path}`);
+    console.error(`    remediation: ${blocker.remediation}`);
+  }
 }

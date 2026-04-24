@@ -152,6 +152,15 @@ describe("RestoreOrchestrator", () => {
     return snapshotCapture.captureSnapshot(rig.id, "manual");
   }
 
+  function updateSnapshotData(snapshot: Snapshot, mutate: (data: any) => void): Snapshot {
+    const data = JSON.parse(JSON.stringify(snapshot.data));
+    mutate(data);
+    db.prepare("UPDATE snapshots SET data = ? WHERE id = ?").run(JSON.stringify(data), snapshot.id);
+    const updated = snapshotRepo.getSnapshot(snapshot.id);
+    if (!updated) throw new Error("expected updated snapshot");
+    return updated;
+  }
+
   it("constructor throws on mismatched db handles", () => {
     const otherDb = setupDb();
     const otherRepo = new RigRepository(otherDb);
@@ -838,10 +847,14 @@ describe("RestoreOrchestrator", () => {
     const orch = createOrchestrator();
     const result = await orch.restore(snap.id);
 
-    expect(result.ok).toBe(true);
-    if (result.ok) {
-      expect(result.result.nodes[0]!.status).toBe("failed");
-      expect(result.result.nodes[0]!.error).toContain("no cwd");
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.code).toBe("pre_restore_validation_failed");
+      expect(result.result.rigResult).toBe("not_attempted");
+      expect(result.result.blockers?.[0]).toMatchObject({
+        code: "checkpoint_missing_node_cwd",
+        logicalId: "worker",
+      });
     }
   });
 
@@ -1720,5 +1733,182 @@ describe("RestoreOrchestrator", () => {
     // D3 invariant per PM: fresh nodes prevent fully_restored
     expect(result.result.rigResult).not.toBe("fully_restored");
     expect(result.result.rigResult).toBe("partially_restored");
+  });
+
+  it("D1/D4: missing required startup file blocks restore before mutation", async () => {
+    const snap = seedRigAndSnapshot({
+      nodes: [{ logicalId: "agent-a", role: "worker", runtime: "claude-code" }],
+      edges: [],
+    });
+    const node = snap.data.nodes[0]!;
+    const missingPath = "/tmp/openrig-missing-required-startup.md";
+    const snapshot = updateSnapshotData(snap, (data) => {
+      data.nodeStartupContext[node.id] = {
+        projectionEntries: [],
+        resolvedStartupFiles: [{
+          path: "startup.md",
+          absolutePath: missingPath,
+          ownerRoot: "/tmp",
+          deliveryHint: "guidance_merge",
+          required: true,
+          appliesOn: ["restore"],
+        }],
+        startupActions: [],
+        runtime: "claude-code",
+      };
+    });
+
+    const result = await createOrchestrator().restore(snapshot.id, {
+      fsOps: { exists: (p) => p !== missingPath },
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.code).toBe("pre_restore_validation_failed");
+    expect(result.result.rigResult).toBe("not_attempted");
+    expect(result.result.preRestoreSnapshotId).toBeNull();
+    expect(result.result.nodes).toEqual([]);
+    expect(result.result.blockers?.[0]).toMatchObject({
+      code: "required_startup_file_missing",
+      severity: "critical",
+      logicalId: "agent-a",
+      path: missingPath,
+    });
+    expect(result.result.blockers?.[0]?.remediation).toContain("Restore the missing startup file");
+  });
+
+  it("D1/D4: missing projection source or entry blocks restore before mutation", async () => {
+    const snap = seedRigAndSnapshot({
+      nodes: [{ logicalId: "agent-a", role: "worker", runtime: "claude-code" }],
+      edges: [],
+    });
+    const node = snap.data.nodes[0]!;
+    const missingSource = "/tmp/openrig-missing-agent-root";
+    const missingEntry = "/tmp/openrig-missing-agent-root/skills/review/SKILL.md";
+    const snapshot = updateSnapshotData(snap, (data) => {
+      data.nodeStartupContext[node.id] = {
+        projectionEntries: [{
+          category: "skill",
+          effectiveId: "review",
+          sourceSpec: "local:agents/review",
+          sourcePath: missingSource,
+          resourcePath: "skills/review/SKILL.md",
+          absolutePath: missingEntry,
+        }],
+        resolvedStartupFiles: [],
+        startupActions: [],
+        runtime: "claude-code",
+      };
+    });
+
+    const result = await createOrchestrator().restore(snapshot.id, {
+      fsOps: { exists: (p) => p !== missingSource && p !== missingEntry },
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    const codes = result.result.blockers?.map((b) => b.code) ?? [];
+    expect(codes).toContain("projection_source_missing");
+    expect(codes).toContain("projection_entry_missing");
+    expect(result.result.rigResult).toBe("not_attempted");
+  });
+
+  it("D1/D4: checkpoint with missing node cwd blocks before checkpoint write", async () => {
+    const snap = seedRigAndSnapshot({
+      nodes: [{ logicalId: "agent-a", role: "worker", runtime: "claude-code" }],
+      edges: [],
+      withCheckpoint: "agent-a",
+    });
+
+    const result = await createOrchestrator().restore(snap.id);
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.code).toBe("pre_restore_validation_failed");
+    expect(result.result.blockers?.[0]).toMatchObject({
+      code: "checkpoint_missing_node_cwd",
+      severity: "critical",
+      logicalId: "agent-a",
+    });
+  });
+
+  it("D1/D4: missing optional startup file is a warning, not a blocker", async () => {
+    const snap = seedRigAndSnapshot({
+      nodes: [{ logicalId: "agent-a", role: "worker", runtime: "claude-code" }],
+      edges: [],
+    });
+    const node = snap.data.nodes[0]!;
+    const missingPath = "/tmp/openrig-missing-optional-startup.md";
+    const snapshot = updateSnapshotData(snap, (data) => {
+      data.nodeStartupContext[node.id] = {
+        projectionEntries: [],
+        resolvedStartupFiles: [{
+          path: "optional.md",
+          absolutePath: missingPath,
+          ownerRoot: "/tmp",
+          deliveryHint: "guidance_merge",
+          required: false,
+          appliesOn: ["fresh_start"],
+        }],
+        startupActions: [],
+        runtime: "claude-code",
+      };
+    });
+
+    const adapter = {
+      runtime: "claude-code",
+      listInstalled: vi.fn(async () => []),
+      project: vi.fn(async () => ({ projected: [], skipped: [], failed: [] })),
+      deliverStartup: vi.fn(async () => ({ delivered: 0, failed: [] })),
+      checkReady: vi.fn(async () => ({ ready: true })),
+      launchHarness: vi.fn(async () => ({ ok: true as const })),
+    };
+    const result = await createOrchestrator().restore(snapshot.id, {
+      adapters: { "claude-code": adapter },
+      fsOps: { exists: (p) => p !== missingPath },
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.result.rigResult).toBe("partially_restored");
+    expect(result.result.warnings.some((warning) => warning.includes("optional startup file missing"))).toBe(true);
+  });
+
+  it("D1/D4: validation block does not emit restore events or mutate stale sessions", async () => {
+    const rig = rigRepo.createRig("validation-block");
+    const node = rigRepo.addNode(rig.id, "agent-a", { runtime: "claude-code" });
+    const session = sessionRegistry.registerSession(node.id, "agent-a@validation-block");
+    sessionRegistry.updateStatus(session.id, "running");
+    sessionRegistry.updateResumeToken(session.id, "claude_name", "resume-token");
+    db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, ?, ?, ?)").run(node.id, "[]", JSON.stringify([{
+      path: "required.md",
+      absolutePath: "/tmp/openrig-missing-required-startup.md",
+      ownerRoot: "/tmp",
+      deliveryHint: "guidance_merge",
+      required: true,
+      appliesOn: ["restore"],
+    }]), "[]", "claude-code");
+    const snap = snapshotCapture.captureSnapshot(rig.id, "manual");
+
+    const tmux = mockTmux();
+    const createSession = vi.fn(async () => ({ ok: true as const }));
+    (tmux as unknown as Record<string, unknown>).createSession = createSession;
+    const claude = mockClaudeResume();
+    const orch = createOrchestrator({ tmux, claude });
+    const result = await orch.restore(snap.id, {
+      fsOps: { exists: (p) => !p.includes("openrig-missing-required-startup") },
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.result.rigResult).toBe("not_attempted");
+    expect(createSession).not.toHaveBeenCalled();
+    expect(claude.resume).not.toHaveBeenCalled();
+    expect(snapshotRepo.listSnapshots(rig.id, { kind: "pre_restore" })).toHaveLength(0);
+    const events = db.prepare("SELECT type FROM events WHERE rig_id = ?").all(rig.id) as { type: string }[];
+    expect(events.map((event) => event.type)).not.toContain("restore.started");
+    expect(events.map((event) => event.type)).not.toContain("restore.completed");
+    const row = db.prepare("SELECT status FROM sessions WHERE id = ?").get(session.id) as { status: string };
+    expect(row.status).toBe("running");
   });
 });
