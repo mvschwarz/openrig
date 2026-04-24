@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import nodePath from "node:path";
 import Database from "better-sqlite3";
-import { describe, it, expect, vi } from "vitest";
+import { afterEach, describe, it, expect, vi } from "vitest";
 import { CodexRuntimeAdapter, type CodexAdapterFsOps } from "../src/adapters/codex-runtime-adapter.js";
 import type { NodeBinding, ResolvedStartupFile } from "../src/domain/runtime-adapter.js";
 import type { ProjectionPlan, ProjectionEntry } from "../src/domain/projection-planner.js";
@@ -43,6 +43,31 @@ function makeBinding(cwd = "/project"): NodeBinding {
     cmuxWorkspace: null, cmuxSurface: null, updatedAt: "", cwd,
   };
 }
+
+function testQueueRoot(sharedDocsRoot = nodePath.join(os.homedir(), "code", "substrate", "shared-docs")): string {
+  return nodePath.join(sharedDocsRoot, "rigs", "test-rig", "state", "dev");
+}
+
+function quote(value: string): string {
+  return `'${value.replace(/'/g, "'\"'\"'")}'`;
+}
+
+function expectedFreshLaunchCommand(options: { cwd?: string; model?: string; queueRoot?: string | null } = {}): string {
+  const cwd = options.cwd ?? "/project";
+  const gitDirArg = ` --add-dir ${quote(nodePath.join(cwd, ".git"))}`;
+  const queueDirArg = options.queueRoot === null ? "" : ` --add-dir ${quote(options.queueRoot ?? testQueueRoot())}`;
+  const modelArg = options.model ? ` -m ${quote(options.model)}` : "";
+  return `codex -C ${quote(cwd)}${gitDirArg}${queueDirArg}${modelArg} -a never -s workspace-write`;
+}
+
+function expectedResumeCommand(token = "sess-456", queueRoot: string | null = testQueueRoot()): string {
+  const queueDirArg = queueRoot === null ? "" : ` --add-dir ${quote(queueRoot)}`;
+  return `codex resume${queueDirArg} ${quote(token)}`;
+}
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
 
 function createCodexLogsDb(homeDir: string, pid: number, threadId: string, dbName = "logs_1.sqlite"): void {
   const codexDir = nodePath.join(homeDir, ".codex");
@@ -308,7 +333,7 @@ describe("Codex runtime adapter", () => {
 
     expect(result.ok).toBe(true);
     const sendText = tmux.sendText as ReturnType<typeof vi.fn>;
-    expect(sendText).toHaveBeenCalledWith("r01-qa", "codex -C '/project' --add-dir '/project/.git' -a never -s workspace-write");
+    expect(sendText).toHaveBeenCalledWith("r01-qa", expectedFreshLaunchCommand());
   });
 
   it("launchHarness passes the requested Codex model on fresh launch", async () => {
@@ -325,12 +350,48 @@ describe("Codex runtime adapter", () => {
 
     expect(result.ok).toBe(true);
     const sendText = tmux.sendText as ReturnType<typeof vi.fn>;
-    expect(sendText).toHaveBeenCalledWith("r01-qa", "codex -C '/project' --add-dir '/project/.git' -m 'gpt-5.5' -a never -s workspace-write");
+    expect(sendText).toHaveBeenCalledWith("r01-qa", expectedFreshLaunchCommand({ model: "gpt-5.5" }));
+  });
+
+  it("launchHarness uses OPENRIG_SHARED_DOCS_ROOT for the Codex queue state writable root", async () => {
+    vi.stubEnv("OPENRIG_SHARED_DOCS_ROOT", "/custom/shared-docs");
+    const tmux = mockTmux();
+    const adapter = new CodexRuntimeAdapter({
+      tmux,
+      fsOps: mockFs(),
+      listProcesses: () => [],
+      sleep: async () => {},
+    });
+
+    const result = await adapter.launchHarness(makeBinding(), { name: "dev-qa@test-rig" });
+
+    expect(result.ok).toBe(true);
+    const sendText = tmux.sendText as ReturnType<typeof vi.fn>;
+    expect(sendText).toHaveBeenCalledWith(
+      "r01-qa",
+      expectedFreshLaunchCommand({ queueRoot: testQueueRoot("/custom/shared-docs") })
+    );
+  });
+
+  it("launchHarness does not guess a queue state writable root for non-canonical session names", async () => {
+    const tmux = mockTmux();
+    const adapter = new CodexRuntimeAdapter({
+      tmux,
+      fsOps: mockFs(),
+      listProcesses: () => [],
+      sleep: async () => {},
+    });
+
+    const result = await adapter.launchHarness(makeBinding(), { name: "devqa@test-rig" });
+
+    expect(result.ok).toBe(true);
+    const sendText = tmux.sendText as ReturnType<typeof vi.fn>;
+    expect(sendText).toHaveBeenCalledWith("r01-qa", expectedFreshLaunchCommand({ queueRoot: null }));
   });
 
   it("launchHarness skips the non-mutating Codex update prompt before capturing a fresh thread id", async () => {
     const initialShell = [
-      "codex -C '/project' --add-dir '/project/.git' -a never -s workspace-write",
+      expectedFreshLaunchCommand(),
       "admin@host project %",
     ].join("\n");
     const updatePrompt = [
@@ -371,7 +432,7 @@ describe("Codex runtime adapter", () => {
     });
     const sendText = tmux.sendText as ReturnType<typeof vi.fn>;
     expect(sendText.mock.calls).toEqual([
-      ["r01-qa", "codex -C '/project' --add-dir '/project/.git' -a never -s workspace-write"],
+      ["r01-qa", expectedFreshLaunchCommand()],
       ["r01-qa", "3"],
     ]);
     const sendKeys = tmux.sendKeys as ReturnType<typeof vi.fn>;
@@ -400,13 +461,13 @@ describe("Codex runtime adapter", () => {
     expect(result.ok).toBe(true);
     const sendText = tmux.sendText as ReturnType<typeof vi.fn>;
     expect(sendText.mock.calls).toEqual([
-      ["r01-qa", "codex -C '/project' --add-dir '/project/.git' -a never -s workspace-write"],
+      ["r01-qa", expectedFreshLaunchCommand()],
     ]);
   });
 
   it("launchHarness keeps checking for a skippable Codex update while waiting for a fresh thread id", async () => {
     const initialShell = [
-      "codex -C '/project' --add-dir '/project/.git' -a never -s workspace-write",
+      expectedFreshLaunchCommand(),
       "admin@host project %",
     ].join("\n");
     const updatePrompt = [
@@ -451,7 +512,7 @@ describe("Codex runtime adapter", () => {
     });
     const sendText = tmux.sendText as ReturnType<typeof vi.fn>;
     expect(sendText.mock.calls).toEqual([
-      ["r01-qa", "codex -C '/project' --add-dir '/project/.git' -a never -s workspace-write"],
+      ["r01-qa", expectedFreshLaunchCommand()],
       ["r01-qa", "3"],
     ]);
   });
@@ -583,7 +644,7 @@ describe("Codex runtime adapter", () => {
 
     expect(result.ok).toBe(true);
     const sendText = tmux.sendText as ReturnType<typeof vi.fn>;
-    expect(sendText).toHaveBeenCalledWith("r01-qa", "codex resume sess-456");
+    expect(sendText).toHaveBeenCalledWith("r01-qa", expectedResumeCommand());
   });
 
   it("launchHarness skips the non-mutating Codex update prompt during resume verification", async () => {
@@ -606,7 +667,7 @@ describe("Codex runtime adapter", () => {
     expect(result).toEqual({ ok: true, resumeToken: "sess-456", resumeType: "codex_id" });
     const sendText = tmux.sendText as ReturnType<typeof vi.fn>;
     expect(sendText.mock.calls).toEqual([
-      ["r01-qa", "codex resume sess-456"],
+      ["r01-qa", expectedResumeCommand()],
       ["r01-qa", "3"],
     ]);
     const sendKeys = tmux.sendKeys as ReturnType<typeof vi.fn>;
@@ -625,9 +686,9 @@ describe("Codex runtime adapter", () => {
 
     expect(result.ok).toBe(true);
     const sendText = tmux.sendText as ReturnType<typeof vi.fn>;
-    expect(sendText).toHaveBeenCalledWith("r01-qa", "codex resume sess-456");
+    expect(sendText).toHaveBeenCalledWith("r01-qa", expectedResumeCommand());
     expect(sendText.mock.calls[0]?.[1]).not.toContain("-m");
-    expect(sendText.mock.calls[0]?.[1]).not.toContain("--add-dir");
+    expect(sendText.mock.calls[0]?.[1]).toContain("--add-dir");
   });
 
   it("launchHarness returns retry_fresh when Codex reports no saved session for the requested resume token", async () => {
