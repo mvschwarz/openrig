@@ -89,6 +89,31 @@ describe("agent pane activity classifier", () => {
     expect(result.state).toBe("agent_idle");
   });
 
+  it("classifies current Claude Code thinking status as agent_active even with prompt chrome below it", () => {
+    const result = classifyPaneActivity([
+      "⏺ Skill(openrig-user)",
+      "  ⎿  Successfully loaded skill",
+      "",
+      "✶ Tomfoolering… (6s · ↑ 284 tokens · thinking)",
+      "",
+      "──────────────────────────────────────── dev-impl@implementation-pair-slice19 ──",
+      "❯ ",
+      "────────────────────────────────────────────────────────────────────────────────",
+      "  paste again to expand                                      ◉ xhigh · /effort",
+    ].join("\n"));
+
+    expect(result.state).toBe("agent_active");
+    expect(result.reason).toBe("mid_work_pattern");
+    expect(result.evidence).toContain("Tomfoolering");
+  });
+
+  it("does not classify tmux focus-events guidance as idle", () => {
+    const result = classifyPaneActivity("tmux focus-events off · add 'set -g focus-events on' to ~/.tmux.conf and reattach");
+
+    expect(result.state).toBe("unknown");
+    expect(result.reason).toBe("no_activity_signal");
+  });
+
   it("does not classify stale idle footer as idle when current active work is below it", () => {
     const result = classifyPaneActivity([
       "  gpt-5.5 xhigh fast · Context [████ ] · ~/code/projects/openrig",
@@ -366,11 +391,93 @@ describe("SessionTransport", () => {
     expect(callOrder).toEqual(["capture", "capture", "sendText", "sendKeys"]);
   });
 
+  it("send with wait-for-idle waits through current Claude thinking evidence and sends after idle", async () => {
+    seedCanonicalRig();
+    const callOrder: string[] = [];
+    let captureCount = 0;
+    const sendTextSpy = vi.fn(async () => {
+      callOrder.push("sendText");
+      return { ok: true as const };
+    });
+    const tmux = mockTmux({
+      capturePaneContent: async () => {
+        callOrder.push("capture");
+        captureCount++;
+        return captureCount === 1
+          ? [
+              "⏺ Skill(openrig-user)",
+              "  ⎿  Successfully loaded skill",
+              "",
+              "✶ Tomfoolering… (6s · ↑ 284 tokens · thinking)",
+              "",
+              "──────────────────────────────────────── dev-impl@implementation-pair-slice19 ──",
+              "❯ ",
+              "────────────────────────────────────────────────────────────────────────────────",
+              "  paste again to expand                                      ◉ xhigh · /effort",
+            ].join("\n")
+          : [
+              "Ready for QA.",
+              "",
+              "──────────────────────────────────────── dev-impl@implementation-pair-slice19 ──",
+              "❯ ",
+              "────────────────────────────────────────────────────────────────────────────────",
+              "  paste again to expand                                      ◉ xhigh · /effort",
+            ].join("\n");
+      },
+      sendText: sendTextSpy,
+      sendKeys: async () => {
+        callOrder.push("sendKeys");
+        return { ok: true as const };
+      },
+    });
+    const transport = createTransport(tmux, {
+      sleep: async () => undefined,
+      waitForIdlePollMs: 1,
+    });
+
+    const result = await transport.send("dev-impl@my-rig", "hello", { waitForIdleMs: 50 });
+
+    expect(result.ok).toBe(true);
+    expect(result.sent).toBe(true);
+    expect(result.attempts).toBe(2);
+    expect(result.activity?.state).toBe("idle");
+    expect(sendTextSpy).toHaveBeenCalledWith("dev-impl@my-rig", "hello");
+    expect(callOrder).toEqual(["capture", "capture", "sendText", "sendKeys"]);
+  });
+
   it("send with wait-for-idle times out on running activity without sending text", async () => {
     seedCanonicalRig();
     const sendTextSpy = vi.fn(async () => ({ ok: true as const }));
     const tmux = mockTmux({
       capturePaneContent: async () => "Working on task...\n⠋ Processing files\nesc to interrupt",
+      sendText: sendTextSpy,
+    });
+    const transport = createTransport(tmux, { waitForIdlePollMs: 1 });
+
+    const result = await transport.send("dev-impl@my-rig", "hello", { waitForIdleMs: 1 });
+
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe("wait_for_idle_timeout");
+    expect(result.sent).toBe(false);
+    expect(result.activity?.state).toBe("running");
+    expect(sendTextSpy).not.toHaveBeenCalled();
+  });
+
+  it("send with wait-for-idle times out on persistent Claude thinking evidence without sending text", async () => {
+    seedCanonicalRig();
+    const sendTextSpy = vi.fn(async () => ({ ok: true as const }));
+    const tmux = mockTmux({
+      capturePaneContent: async () => [
+        "⏺ Skill(openrig-user)",
+        "  ⎿  Initializing…",
+        "",
+        "✢ Tomfoolering… (3s · ↓ 107 tokens · thinking)",
+        "",
+        "──────────────────────────────────────── dev-impl@implementation-pair-slice19 ──",
+        "❯ ",
+        "────────────────────────────────────────────────────────────────────────────────",
+        "  paste again to expand                                      ◉ xhigh · /effort",
+      ].join("\n"),
       sendText: sendTextSpy,
     });
     const transport = createTransport(tmux, { waitForIdlePollMs: 1 });
