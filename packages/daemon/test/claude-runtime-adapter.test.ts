@@ -565,4 +565,56 @@ describe("Claude Code runtime adapter", () => {
     expect(settings.theme).toBe("dark");
     expect(settings.mcpServers).toEqual({ context7: {} });
   });
+
+  it("provisions project-local Claude hooks without clobbering existing local settings or persisting the hook token", async () => {
+    const fs = mockFs({
+      "/daemon/assets/openrig-activity-hook-relay.cjs": "relay script",
+      "/project/.claude/settings.local.json": JSON.stringify({
+        statusLine: { type: "command", command: "node .openrig/context-collector.cjs" },
+        permissions: {
+          allow: ["Bash(existing:*)"],
+          deny: ["Bash(rm -rf *)"],
+        },
+        enabledMcpjsonServers: ["existing-mcp"],
+        hooks: {
+          Stop: [
+            {
+              hooks: [
+                { type: "command", command: "node ./existing-stop-hook.cjs", timeout: 10 },
+              ],
+            },
+          ],
+        },
+      }),
+    });
+    const adapter = new ClaudeCodeAdapter({
+      tmux: mockTmux(),
+      fsOps: { ...fs, homedir: "/home/test" },
+      activityHookRelayAssetPath: "/daemon/assets/openrig-activity-hook-relay.cjs",
+    });
+
+    await adapter.deliverStartup([], makeBinding());
+    await adapter.deliverStartup([], makeBinding());
+
+    const store = (fs as unknown as { _store: Record<string, string> })._store;
+    expect(store["/project/.openrig/activity-hook-relay.cjs"]).toBe("relay script");
+    const settings = JSON.parse(store["/project/.claude/settings.local.json"]!);
+
+    expect(settings.statusLine.command).toBe("node .openrig/context-collector.cjs");
+    expect(settings.permissions.allow).toContain("Bash(existing:*)");
+    expect(settings.permissions.deny).toContain("Bash(rm -rf *)");
+    expect(settings.enabledMcpjsonServers).toContain("existing-mcp");
+
+    const hookJson = JSON.stringify(settings.hooks);
+    expect(hookJson).toContain("node ./existing-stop-hook.cjs");
+    expect(hookJson).toContain("node '/project/.openrig/activity-hook-relay.cjs'");
+    expect(hookJson).toContain("SessionStart");
+    expect(hookJson).toContain("UserPromptSubmit");
+    expect(hookJson).toContain("Stop");
+    expect(hookJson).toContain("Notification");
+    expect(hookJson).not.toContain("secret-token");
+
+    const relayCommandMatches = hookJson.match(/activity-hook-relay\.cjs/g) ?? [];
+    expect(relayCommandMatches).toHaveLength(4);
+  });
 });

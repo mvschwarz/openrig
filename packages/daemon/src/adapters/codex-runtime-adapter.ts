@@ -42,6 +42,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   private readThreadIdByPid: (pid: number) => string | undefined;
   private sleep: (ms: number) => Promise<void>;
   private resolveHomeDirByPid: ResolveHomeDirByPid;
+  private activityHookRelayAssetPath: string | null;
 
   constructor(deps: {
     tmux: TmuxAdapter;
@@ -50,6 +51,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     readThreadIdByPid?: (pid: number) => string | undefined;
     resolveHomeDirByPid?: ResolveHomeDirByPid;
     sleep?: (ms: number) => Promise<void>;
+    activityHookRelayAssetPath?: string;
   }) {
     this.tmux = deps.tmux;
     this.fs = deps.fsOps;
@@ -57,6 +59,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     this.readThreadIdByPid = deps.readThreadIdByPid ?? ((pid) => this.readThreadIdFromLogs(pid));
     this.resolveHomeDirByPid = deps.resolveHomeDirByPid ?? defaultResolveHomeDirByPid;
     this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+    this.activityHookRelayAssetPath = deps.activityHookRelayAssetPath ?? null;
   }
 
   async listInstalled(binding: NodeBinding): Promise<InstalledResource[]> {
@@ -104,6 +107,12 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     // Best-effort: provision MCPs for managed Codex sessions
     try { this.provisionMcps(); } catch (err) {
       console.error(`[openrig] codex MCP provisioning warning: ${(err as Error).message}`);
+    }
+
+    // Best-effort: provision project-local provider hooks. The hook token is
+    // supplied through tmux session env, never written to provider config.
+    try { this.provisionActivityHooks(binding); } catch (err) {
+      console.error(`[openrig] codex activity hook provisioning warning: ${(err as Error).message}`);
     }
 
     let delivered = 0;
@@ -376,6 +385,50 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     this.fs.writeFile(configPath, content);
   }
 
+  private provisionActivityHooks(binding: { cwd?: string | null }): void {
+    if (!binding.cwd || !this.activityHookRelayAssetPath) return;
+
+    const relayDest = nodePath.join(binding.cwd, ".openrig", "activity-hook-relay.cjs");
+    this.fs.mkdirp(nodePath.dirname(relayDest));
+    this.fs.writeFile(relayDest, this.fs.readFile(this.activityHookRelayAssetPath));
+
+    const codexDir = nodePath.join(binding.cwd, ".codex");
+    this.fs.mkdirp(codexDir);
+
+    const hooksPath = nodePath.join(codexDir, "hooks.json");
+    const hooksConfig = this.readJsonObject(hooksPath);
+    const hooks = this.readJsonObjectField(hooksConfig, "hooks");
+    const command = `node ${shellQuote(relayDest)}`;
+    for (const event of ["SessionStart", "UserPromptSubmit", "Stop"]) {
+      upsertCommandHook(hooks, event, command);
+    }
+    hooksConfig["hooks"] = hooks;
+    this.fs.writeFile(hooksPath, `${JSON.stringify(hooksConfig, null, 2)}\n`);
+
+    const configPath = nodePath.join(codexDir, "config.toml");
+    const existingConfig = this.fs.exists(configPath) ? this.fs.readFile(configPath) : "";
+    this.fs.writeFile(configPath, upsertCodexHooksFeature(existingConfig));
+  }
+
+  private readJsonObject(path: string): Record<string, unknown> {
+    try {
+      if (!this.fs.exists(path)) return {};
+      const parsed = JSON.parse(this.fs.readFile(path));
+      return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+        ? parsed as Record<string, unknown>
+        : {};
+    } catch {
+      return {};
+    }
+  }
+
+  private readJsonObjectField(source: Record<string, unknown>, key: string): Record<string, unknown> {
+    const value = source[key];
+    return typeof value === "object" && value !== null && !Array.isArray(value)
+      ? value as Record<string, unknown>
+      : {};
+  }
+
   private workspaceTrustKeys(cwd: string): string[] {
     const keys = new Set<string>([nodePath.resolve(cwd)]);
     try {
@@ -529,6 +582,64 @@ function parseCanonicalSessionName(sessionName: string): { pod: string; member: 
 
 function isSafeQueueSegment(segment: string): boolean {
   return /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(segment);
+}
+
+function upsertCodexHooksFeature(content: string): string {
+  const lines = content.length > 0 ? content.replace(/\n*$/, "").split("\n") : [];
+  const featuresIndex = lines.findIndex((line) => line.trim() === "[features]");
+
+  if (featuresIndex === -1) {
+    const prefix = lines.length > 0 ? `${lines.join("\n")}\n\n` : "";
+    return `${prefix}[features]\ncodex_hooks = true\n`;
+  }
+
+  let nextSectionIndex = lines.length;
+  for (let i = featuresIndex + 1; i < lines.length; i++) {
+    if (lines[i]!.trim().startsWith("[")) {
+      nextSectionIndex = i;
+      break;
+    }
+  }
+
+  const flagIndex = lines.findIndex((line, index) =>
+    index > featuresIndex &&
+    index < nextSectionIndex &&
+    line.trim().startsWith("codex_hooks")
+  );
+  if (flagIndex >= 0) {
+    lines[flagIndex] = "codex_hooks = true";
+  } else {
+    lines.splice(featuresIndex + 1, 0, "codex_hooks = true");
+  }
+
+  return `${lines.join("\n")}\n`;
+}
+
+function upsertCommandHook(hooks: Record<string, unknown>, event: string, command: string): void {
+  const eventEntries = Array.isArray(hooks[event]) ? hooks[event] as unknown[] : [];
+  if (eventEntries.some((entry) => hookEntryContainsCommand(entry, command))) {
+    hooks[event] = eventEntries;
+    return;
+  }
+  eventEntries.push({
+    hooks: [
+      { type: "command", command, timeout: 5 },
+    ],
+  });
+  hooks[event] = eventEntries;
+}
+
+function hookEntryContainsCommand(entry: unknown, command: string): boolean {
+  if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return false;
+  const hooks = (entry as Record<string, unknown>)["hooks"];
+  if (!Array.isArray(hooks)) return false;
+  return hooks.some((hook) =>
+    typeof hook === "object" &&
+    hook !== null &&
+    !Array.isArray(hook) &&
+    (hook as Record<string, unknown>)["type"] === "command" &&
+    (hook as Record<string, unknown>)["command"] === command
+  );
 }
 
 function defaultListProcesses(): Array<{ pid: number; ppid: number; command: string }> {
