@@ -324,7 +324,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     podBundleSourceResolver,
     runtimeAdapters: { "claude-code": claudeAdapter, "codex": codexAdapter, "terminal": new (await import("./adapters/terminal-adapter.js")).TerminalAdapter() },
     transcriptStore,
-    sessionTransport: new SessionTransport({ db, rigRepo, sessionRegistry, tmuxAdapter }),
+    sessionTransport: new SessionTransport({ db, rigRepo, sessionRegistry, tmuxAdapter, agentActivityStore }),
     chatRepo: new ChatRepository(db),
     askService: (() => {
       const psProjectionService = new PsProjectionService({ db });

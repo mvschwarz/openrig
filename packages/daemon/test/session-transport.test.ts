@@ -16,6 +16,8 @@ import { externalCliAttachmentSchema } from "../src/db/migrations/019_external_c
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { classifyPaneActivity, SessionTransport } from "../src/domain/session-transport.js";
+import { AgentActivityStore } from "../src/domain/agent-activity-store.js";
+import { EventBus } from "../src/domain/event-bus.js";
 import type { TmuxAdapter, TmuxResult } from "../src/adapters/tmux.js";
 import { createFullTestDb } from "./helpers/test-app.js";
 
@@ -150,12 +152,18 @@ describe("SessionTransport", () => {
     db.close();
   });
 
-  function createTransport(tmux?: TmuxAdapter) {
+  function createTransport(tmux?: TmuxAdapter, overrides?: {
+    agentActivityStore?: AgentActivityStore;
+    sleep?: (ms: number) => Promise<void>;
+    waitForIdlePollMs?: number;
+    now?: () => Date;
+  }) {
     return new SessionTransport({
       db,
       rigRepo,
       sessionRegistry,
       tmuxAdapter: tmux ?? mockTmux(),
+      ...overrides,
     });
   }
 
@@ -319,6 +327,182 @@ describe("SessionTransport", () => {
     const result = await transport.send("dev-impl@my-rig", "hello", { force: true });
     expect(result.ok).toBe(true);
     expect(sendTextSpy).toHaveBeenCalled();
+  });
+
+  it("send with wait-for-idle waits through running pane activity and sends after idle", async () => {
+    seedCanonicalRig();
+    const callOrder: string[] = [];
+    let captureCount = 0;
+    const sendTextSpy = vi.fn(async () => {
+      callOrder.push("sendText");
+      return { ok: true as const };
+    });
+    const tmux = mockTmux({
+      capturePaneContent: async () => {
+        callOrder.push("capture");
+        captureCount++;
+        return captureCount === 1
+          ? "Working on task...\n⠋ Processing files\nesc to interrupt"
+          : "› Use /skills to list available skills\n\n  gpt-5.5 high · Context [████ ] · ~/code/projects/openrig";
+      },
+      sendText: sendTextSpy,
+      sendKeys: async () => {
+        callOrder.push("sendKeys");
+        return { ok: true as const };
+      },
+    });
+    const transport = createTransport(tmux, {
+      sleep: async () => undefined,
+      waitForIdlePollMs: 1,
+    });
+
+    const result = await transport.send("dev-impl@my-rig", "hello", { waitForIdleMs: 50 });
+
+    expect(result.ok).toBe(true);
+    expect(result.sent).toBe(true);
+    expect(result.attempts).toBe(2);
+    expect(result.activity?.state).toBe("idle");
+    expect(sendTextSpy).toHaveBeenCalledWith("dev-impl@my-rig", "hello");
+    expect(callOrder).toEqual(["capture", "capture", "sendText", "sendKeys"]);
+  });
+
+  it("send with wait-for-idle times out on running activity without sending text", async () => {
+    seedCanonicalRig();
+    const sendTextSpy = vi.fn(async () => ({ ok: true as const }));
+    const tmux = mockTmux({
+      capturePaneContent: async () => "Working on task...\n⠋ Processing files\nesc to interrupt",
+      sendText: sendTextSpy,
+    });
+    const transport = createTransport(tmux, { waitForIdlePollMs: 1 });
+
+    const result = await transport.send("dev-impl@my-rig", "hello", { waitForIdleMs: 1 });
+
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe("wait_for_idle_timeout");
+    expect(result.sent).toBe(false);
+    expect(result.activity?.state).toBe("running");
+    expect(sendTextSpy).not.toHaveBeenCalled();
+  });
+
+  it("send with wait-for-idle hard-stops on attention prompts without sending text", async () => {
+    seedCanonicalRig();
+    const sendTextSpy = vi.fn(async () => ({ ok: true as const }));
+    const tmux = mockTmux({
+      capturePaneContent: async () => [
+        "Codex update available.",
+        "",
+        "› 1. Update now",
+        "  2. Skip this version",
+        "  3. Remind me later",
+        "",
+        "  gpt-5.5 high · Context [████ ] · ~/code/projects/openrig",
+      ].join("\n"),
+      sendText: sendTextSpy,
+    });
+    const transport = createTransport(tmux, {
+      sleep: async () => undefined,
+      waitForIdlePollMs: 1,
+    });
+
+    const result = await transport.send("dev-impl@my-rig", "hello", { waitForIdleMs: 50 });
+
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe("target_needs_input");
+    expect(result.sent).toBe(false);
+    expect(result.activity?.state).toBe("needs_input");
+    expect(result.activity?.reason).toBe("selection_prompt");
+    expect(sendTextSpy).not.toHaveBeenCalled();
+  });
+
+  it("send with wait-for-idle hard-stops on unknown capture evidence without sending text", async () => {
+    seedCanonicalRig();
+    const sendTextSpy = vi.fn(async () => ({ ok: true as const }));
+    const tmux = mockTmux({
+      capturePaneContent: async () => { throw new Error("capture failed"); },
+      sendText: sendTextSpy,
+    });
+    const transport = createTransport(tmux, {
+      sleep: async () => undefined,
+      waitForIdlePollMs: 1,
+    });
+
+    const result = await transport.send("dev-impl@my-rig", "hello", { waitForIdleMs: 50 });
+
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe("target_activity_unknown");
+    expect(result.sent).toBe(false);
+    expect(result.activity?.state).toBe("unknown");
+    expect(result.activity?.reason).toBe("capture_failed");
+    expect(sendTextSpy).not.toHaveBeenCalled();
+  });
+
+  it("send with wait-for-idle prefers fresh hook activity and waits for hook idle", async () => {
+    seedCanonicalRig();
+    const eventBus = new EventBus(db);
+    const agentActivityStore = new AgentActivityStore({ db, eventBus });
+    agentActivityStore.recordHookEvent({
+      runtime: "claude-code",
+      sessionName: "dev-impl@my-rig",
+      hookEvent: "PreToolUse",
+    });
+    let sleepCount = 0;
+    const sendTextSpy = vi.fn(async () => ({ ok: true as const }));
+    const tmux = mockTmux({
+      capturePaneContent: async () => "Working on task...\n⠋ Processing\nesc to interrupt",
+      sendText: sendTextSpy,
+    });
+    const transport = createTransport(tmux, {
+      agentActivityStore,
+      sleep: async () => {
+        sleepCount++;
+        if (sleepCount === 1) {
+          agentActivityStore.recordHookEvent({
+            runtime: "claude-code",
+            sessionName: "dev-impl@my-rig",
+            hookEvent: "Stop",
+          });
+        }
+      },
+      waitForIdlePollMs: 1,
+    });
+
+    const result = await transport.send("dev-impl@my-rig", "hello", { waitForIdleMs: 50 });
+
+    expect(result.ok).toBe(true);
+    expect(result.sent).toBe(true);
+    expect(result.attempts).toBe(2);
+    expect(result.activity?.state).toBe("idle");
+    expect(result.activity?.evidenceSource).toBe("runtime_hook");
+    expect(sendTextSpy).toHaveBeenCalled();
+  });
+
+  it("send with wait-for-idle treats fresh unknown hook evidence as unknown and does not fall through to pane idle", async () => {
+    seedCanonicalRig();
+    const eventBus = new EventBus(db);
+    const agentActivityStore = new AgentActivityStore({ db, eventBus });
+    agentActivityStore.recordHookEvent({
+      runtime: "claude-code",
+      sessionName: "dev-impl@my-rig",
+      hookEvent: "SessionStart",
+    });
+    const sendTextSpy = vi.fn(async () => ({ ok: true as const }));
+    const tmux = mockTmux({
+      capturePaneContent: async () => "› idle\n\n  gpt-5.5 high · Context [████ ] · ~/code/projects/openrig",
+      sendText: sendTextSpy,
+    });
+    const transport = createTransport(tmux, {
+      agentActivityStore,
+      sleep: async () => undefined,
+      waitForIdlePollMs: 1,
+    });
+
+    const result = await transport.send("dev-impl@my-rig", "hello", { waitForIdleMs: 50 });
+
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe("target_activity_unknown");
+    expect(result.sent).toBe(false);
+    expect(result.activity?.evidenceSource).toBe("runtime_hook");
+    expect(sendTextSpy).not.toHaveBeenCalled();
   });
 
   it("send does not refuse on idle codex status lines truncated with unicode ellipsis", async () => {

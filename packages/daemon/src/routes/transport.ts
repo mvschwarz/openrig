@@ -11,10 +11,27 @@ export function transportRoutes(): Hono {
       text: string;
       verify?: boolean;
       force?: boolean;
+      waitForIdleMs?: number;
     }>();
 
     if (!body.session || !body.text) {
       return c.json({ error: "Missing required fields: session, text" }, 400);
+    }
+    if (body.waitForIdleMs !== undefined) {
+      if (body.force) {
+        return c.json({
+          ok: false,
+          reason: "invalid_wait_for_idle",
+          error: "--wait-for-idle cannot be combined with force. No text was sent.",
+        }, 400);
+      }
+      if (typeof body.waitForIdleMs !== "number" || !Number.isFinite(body.waitForIdleMs) || body.waitForIdleMs <= 0) {
+        return c.json({
+          ok: false,
+          reason: "invalid_wait_for_idle",
+          error: "waitForIdleMs must be a positive number. No text was sent.",
+        }, 400);
+      }
     }
 
     // Check for ambiguity first
@@ -27,6 +44,7 @@ export function transportRoutes(): Hono {
     const result = await transport.send(body.session, body.text, {
       verify: body.verify,
       force: body.force,
+      waitForIdleMs: body.waitForIdleMs,
     });
 
     if (!result.ok) {
@@ -35,10 +53,14 @@ export function transportRoutes(): Hono {
         tmux_unavailable: 503,
         transport_unavailable: 409,
         mid_work: 409,
+        invalid_wait_for_idle: 400,
+        wait_for_idle_timeout: 409,
+        target_needs_input: 409,
+        target_activity_unknown: 409,
         submit_failed: 502,
         send_failed: 502,
       };
-      const status = (statusMap[result.reason ?? ""] ?? 500) as 404 | 409 | 500 | 502 | 503;
+      const status = (statusMap[result.reason ?? ""] ?? 500) as 400 | 404 | 409 | 500 | 502 | 503;
       return c.json(result, status);
     }
 

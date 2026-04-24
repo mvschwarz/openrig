@@ -14,20 +14,36 @@ export function sendCommand(depsOverride?: StatusDeps): Command {
   cmd
     .argument("<session>", "Target session name (e.g. dev-impl@my-rig)")
     .argument("<text>", "Message text to send")
-    .option("--verify", "Verify delivery by checking pane content after send")
+    .option("--verify", "Verify pane only delivery by checking content after send")
     .option("--force", "Send even if target pane appears mid-task")
+    .option("--wait-for-idle <seconds>", "Wait until the target is explicitly idle before sending")
     .option("--json", "JSON output for agents")
     .addHelpText("after", `
 Examples:
   rig send dev-impl@my-rig "Context update: QA approved. Proceed."
   rig send dev-impl@my-rig "message" --verify
+  rig send dev-impl@my-rig "safe proof prompt" --wait-for-idle 30 --verify
   rig send dev-impl@my-rig "Stop and read the spec." --force
   rig send dev-impl@my-rig "message" --json
 
 The two-step send pattern (paste text, wait, submit Enter) is handled
-automatically. Use --verify to confirm the message appeared in the pane.
-Use --force to override mid-task safety checks.`)
-    .action(async (session: string, text: string, opts: { verify?: boolean; force?: boolean; json?: boolean }) => {
+automatically. Use --wait-for-idle to send only after explicit idle evidence;
+it fails closed on attention prompts, unknown activity, or timeout. Use --verify
+to confirm the message appeared in the pane only; it is not agent acknowledgement.
+Use --force to override mid-task safety checks without wait mode.`)
+    .action(async (session: string, text: string, opts: { verify?: boolean; force?: boolean; waitForIdle?: string; json?: boolean }) => {
+      const waitForIdleMs = parseWaitForIdleMs(opts.waitForIdle);
+      if (opts.force && waitForIdleMs !== undefined) {
+        console.error("--wait-for-idle cannot be combined with --force");
+        process.exitCode = 1;
+        return;
+      }
+      if (waitForIdleMs === null) {
+        console.error("--wait-for-idle must be a positive number of seconds");
+        process.exitCode = 1;
+        return;
+      }
+
       const deps = getDeps();
       const status = await getDaemonStatus(deps.lifecycleDeps);
 
@@ -39,7 +55,7 @@ Use --force to override mid-task safety checks.`)
 
       const client = deps.clientFactory(getDaemonUrl(status));
       const res = await client.post<Record<string, unknown>>("/api/transport/send", {
-        session, text, verify: opts.verify, force: opts.force,
+        session, text, verify: opts.verify, force: opts.force, waitForIdleMs,
       });
 
       if (opts.json) {
@@ -63,4 +79,11 @@ Use --force to override mid-task safety checks.`)
     });
 
   return cmd;
+}
+
+function parseWaitForIdleMs(value: string | undefined): number | undefined | null {
+  if (value === undefined) return undefined;
+  const seconds = Number(value);
+  if (!Number.isFinite(seconds) || seconds <= 0) return null;
+  return Math.ceil(seconds * 1000);
 }

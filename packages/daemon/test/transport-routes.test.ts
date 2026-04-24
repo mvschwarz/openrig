@@ -25,12 +25,18 @@ function setupDb(): Database.Database {
   return createFullTestDb();
 }
 
-function mockTmux(): TmuxAdapter {
+function mockTmux(overrides?: Partial<{
+  hasSession: (name: string) => Promise<boolean>;
+  sendText: (target: string, text: string) => Promise<TmuxResult>;
+  sendKeys: (target: string, keys: string[]) => Promise<TmuxResult>;
+  capturePaneContent: (paneId: string, lines?: number) => Promise<string | null>;
+  getPaneCommand: (paneId: string) => Promise<string | null>;
+}>): TmuxAdapter {
   return {
-    hasSession: async () => true,
-    sendText: async () => ({ ok: true as const }),
-    sendKeys: async () => ({ ok: true as const }),
-    capturePaneContent: async () => "idle\n❯ ",
+    hasSession: overrides?.hasSession ?? (async () => true),
+    sendText: overrides?.sendText ?? (async () => ({ ok: true as const })),
+    sendKeys: overrides?.sendKeys ?? (async () => ({ ok: true as const })),
+    capturePaneContent: overrides?.capturePaneContent ?? (async () => "idle\n❯ "),
     createSession: async () => ({ ok: true as const }),
     killSession: async () => ({ ok: true as const }),
     listSessions: async () => [],
@@ -39,7 +45,7 @@ function mockTmux(): TmuxAdapter {
     startPipePane: async () => ({ ok: true as const }),
     stopPipePane: async () => ({ ok: true as const }),
     getPanePid: async () => null,
-    getPaneCommand: async () => null,
+    getPaneCommand: overrides?.getPaneCommand ?? (async () => null),
   } as unknown as TmuxAdapter;
 }
 
@@ -128,6 +134,94 @@ describe("transport routes", () => {
     const body = await res.json();
     expect(body.ok).toBe(false);
     expect(body.reason).toBe("mid_work");
+  });
+
+  it("POST /send with waitForIdleMs waits for idle and returns activity evidence", async () => {
+    seedRig();
+    let captureCount = 0;
+    const sendTextSpy = vi.fn(async () => ({ ok: true as const }));
+    const tmux = mockTmux({
+      capturePaneContent: async () => {
+        captureCount++;
+        return captureCount === 1
+          ? "Working on task...\n⠋ Processing\nesc to interrupt"
+          : "› Use /skills to list available skills\n\n  gpt-5.5 high · Context [████ ] · ~/code/projects/openrig";
+      },
+      sendText: sendTextSpy,
+    });
+    const transport = new SessionTransport({
+      db,
+      rigRepo,
+      sessionRegistry,
+      tmuxAdapter: tmux,
+      sleep: async () => undefined,
+      waitForIdlePollMs: 1,
+    });
+    const app = createApp({ sessionTransport: transport });
+
+    const res = await app.request("/api/transport/send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session: "dev-impl@my-rig", text: "hello", waitForIdleMs: 50 }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.ok).toBe(true);
+    expect(body.sent).toBe(true);
+    expect(body.attempts).toBe(2);
+    expect(body.activity.state).toBe("idle");
+    expect(sendTextSpy).toHaveBeenCalledWith("dev-impl@my-rig", "hello");
+  });
+
+  it("POST /send rejects force with waitForIdleMs before sending", async () => {
+    seedRig();
+    const sendTextSpy = vi.fn(async () => ({ ok: true as const }));
+    const transport = new SessionTransport({
+      db,
+      rigRepo,
+      sessionRegistry,
+      tmuxAdapter: mockTmux({ sendText: sendTextSpy }),
+    });
+    const app = createApp({ sessionTransport: transport });
+
+    const res = await app.request("/api/transport/send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session: "dev-impl@my-rig", text: "hello", force: true, waitForIdleMs: 50 }),
+    });
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.reason).toBe("invalid_wait_for_idle");
+    expect(sendTextSpy).not.toHaveBeenCalled();
+  });
+
+  it("POST /send maps wait timeout to 409 without sending text", async () => {
+    seedRig();
+    const sendTextSpy = vi.fn(async () => ({ ok: true as const }));
+    const tmux = mockTmux({
+      capturePaneContent: async () => "Working on task...\n⠋ Processing\nesc to interrupt",
+      sendText: sendTextSpy,
+    });
+    const transport = new SessionTransport({
+      db,
+      rigRepo,
+      sessionRegistry,
+      tmuxAdapter: tmux,
+      waitForIdlePollMs: 1,
+    });
+    const app = createApp({ sessionTransport: transport });
+
+    const res = await app.request("/api/transport/send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session: "dev-impl@my-rig", text: "hello", waitForIdleMs: 1 }),
+    });
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body.ok).toBe(false);
+    expect(body.reason).toBe("wait_for_idle_timeout");
+    expect(body.sent).toBe(false);
+    expect(sendTextSpy).not.toHaveBeenCalled();
   });
 
   it("POST /send with ambiguous session returns 409", async () => {

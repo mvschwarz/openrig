@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, vi, beforeAll, afterAll, beforeEach } from "vitest";
 import http from "node:http";
 import { Command } from "commander";
 import { sendCommand } from "../src/commands/send.js";
@@ -55,6 +55,7 @@ function runningDeps(port: number): StatusDeps {
 describe("Send CLI", () => {
   let server: http.Server;
   let port: number;
+  let lastSendBody: Record<string, unknown> | null = null;
 
   beforeAll(async () => {
     server = http.createServer((req, res) => {
@@ -64,6 +65,7 @@ describe("Send CLI", () => {
       req.on("end", () => {
         if (req.method === "POST" && url === "/api/transport/send") {
           const parsed = JSON.parse(body);
+          lastSendBody = parsed;
           if (parsed.session === "dev-impl@my-rig") {
             res.writeHead(200, { "Content-Type": "application/json" });
             res.end(JSON.stringify({ ok: true, sessionName: "dev-impl@my-rig" }));
@@ -92,6 +94,10 @@ describe("Send CLI", () => {
     return prog;
   }
 
+  beforeEach(() => {
+    lastSendBody = null;
+  });
+
   it("send prints success output", async () => {
     const { logs } = await captureLogs(async () => {
       await makeCmd().parseAsync(["node", "rig", "send", "dev-impl@my-rig", "hello world"]);
@@ -116,11 +122,44 @@ describe("Send CLI", () => {
     expect(parsed.sessionName).toBe("dev-impl@my-rig");
   });
 
+  it("send --wait-for-idle posts waitForIdleMs", async () => {
+    const { logs } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "send", "dev-impl@my-rig", "hello", "--wait-for-idle", "30", "--json"]);
+    });
+    const parsed = JSON.parse(logs.join("\n"));
+    expect(parsed.ok).toBe(true);
+    expect(lastSendBody).toMatchObject({
+      session: "dev-impl@my-rig",
+      text: "hello",
+      waitForIdleMs: 30000,
+    });
+  });
+
+  it("send rejects invalid wait-for-idle values before contacting daemon", async () => {
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "send", "dev-impl@my-rig", "hello", "--wait-for-idle", "0"]);
+    });
+    expect(logs.join("\n")).toContain("positive number");
+    expect(exitCode).toBe(1);
+    expect(lastSendBody).toBeNull();
+  });
+
+  it("send rejects wait-for-idle with force before contacting daemon", async () => {
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "send", "dev-impl@my-rig", "hello", "--wait-for-idle", "30", "--force"]);
+    });
+    expect(logs.join("\n")).toContain("cannot be combined");
+    expect(exitCode).toBe(1);
+    expect(lastSendBody).toBeNull();
+  });
+
   it("send --help includes rediscovery examples", () => {
     const cmd = sendCommand(runningDeps(port));
     const helpText = cmd.helpInformation();
     expect(helpText).toContain("--verify");
     expect(helpText).toContain("--force");
+    expect(helpText).toContain("--wait-for-idle");
+    expect(helpText).toContain("pane only");
     expect(helpText).toContain("dev-impl@my-rig");
   });
 });
