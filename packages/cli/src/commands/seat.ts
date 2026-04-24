@@ -48,7 +48,7 @@ interface SeatHandoverPlan {
     runtime: string | null;
   };
   source: {
-    mode: "fresh" | "rebuild" | "fork";
+    mode: "fresh" | "rebuild" | "fork" | "discovered";
     ref: string | null;
     raw: string;
     defaulted: boolean;
@@ -72,6 +72,40 @@ interface SeatHandoverPlan {
     bindingUnchangedUntilComplete: boolean;
     steps: Array<{ id: string; title: string; description: string; willMutate: false }>;
   }>;
+}
+
+interface SeatHandoverMutationResult {
+  ok: true;
+  dryRun: false;
+  mutated: true;
+  continuityTransferred: false;
+  seat: SeatHandoverPlan["seat"];
+  source: {
+    mode: "discovered";
+    ref: string;
+    raw: string;
+    defaulted: false;
+  };
+  reason: string;
+  operator: string | null;
+  previousOccupant: string;
+  currentOccupant: string;
+  previousSessionIdsSuperseded: string[];
+  newSessionId: string;
+  discovery: {
+    id: string;
+    status: "claimed";
+    tmuxSession: string;
+    tmuxPane: string | null;
+  };
+  currentStatus: SeatHandoverPlan["currentStatus"];
+  handoverAt: string;
+  eventSeq: number;
+  sideEffects: {
+    departingSessionKilled: false;
+    startupContextDelivered: false;
+    provenanceRecordWritten: false;
+  };
 }
 
 function display(value: string | null | undefined, empty = "none"): string {
@@ -108,6 +142,20 @@ function printHumanHandoverPlan(plan: SeatHandoverPlan): void {
     }
   }
   console.log("No changes were made.");
+}
+
+function printHumanHandoverResult(result: SeatHandoverMutationResult): void {
+  console.log(`Seat handover complete: ${result.seat.ref}`);
+  console.log(`Rig: ${result.seat.rigName}`);
+  console.log(`Logical ID: ${result.seat.logicalId}`);
+  console.log(`Source: discovered:${result.discovery.id}`);
+  console.log(`Reason: ${result.reason}`);
+  console.log(`Operator: ${display(result.operator)}`);
+  console.log(`Previous occupant: ${result.previousOccupant}`);
+  console.log(`Current occupant: ${result.currentOccupant}`);
+  console.log(`Handover result: ${display(result.currentStatus.handoverResult)}`);
+  console.log("Seat binding and inventory provenance were updated.");
+  console.log("No conversation continuity, startup context delivery, provenance markdown, or session stop was performed.");
 }
 
 function printSeatError(error: SeatStatusError, fallback: string): void {
@@ -171,7 +219,7 @@ Examples:
   cmd
     .command("handover")
     .argument("<seat>", "Canonical session name or logical seat ref")
-    .option("--source <source>", "Occupant creation source: fresh, rebuild, or fork:<id>")
+    .option("--source <source>", "Source: discovered:<id> for live MVP; fresh, rebuild, or fork:<id> for dry-run planning")
     .option("--reason <reason>", "Why the handover is happening")
     .option("--operator <address>", "Operator initiating the handover")
     .option("--dry-run", "Plan the handover without changing topology")
@@ -181,7 +229,8 @@ Examples:
 Examples:
   rig seat handover spec-writer@openrig-pm --reason context-wall --dry-run
   rig seat handover spec-writer@openrig-pm --source rebuild --reason context-wall --dry-run --json
-  rig seat handover spec-writer@openrig-pm --source fork:0b0165d7 --reason successor-test --operator orch-lead@openrig-pm --dry-run`)
+  rig seat handover spec-writer@openrig-pm --source fork:0b0165d7 --reason successor-test --operator orch-lead@openrig-pm --dry-run
+  rig seat handover spec-writer@openrig-pm --source discovered:01H... --reason mvp-proof --json`)
     .action(async (seat: string, opts: { source?: string; reason?: string; operator?: string; dryRun?: boolean; json?: boolean }) => {
       if (!opts.reason?.trim()) {
         const error: SeatStatusError = {
@@ -208,7 +257,7 @@ Examples:
       }
 
       const client = deps.clientFactory(getDaemonUrl(daemon));
-      const res = await client.post<SeatHandoverPlan | SeatStatusError>(`/api/seat/handover/${encodeURIComponent(seat)}`, {
+      const res = await client.post<SeatHandoverPlan | SeatHandoverMutationResult | SeatStatusError>(`/api/seat/handover/${encodeURIComponent(seat)}`, {
         source: opts.source,
         reason: opts.reason,
         operator: opts.operator,
@@ -227,7 +276,12 @@ Examples:
         return;
       }
 
-      printHumanHandoverPlan(res.data as SeatHandoverPlan);
+      const data = res.data as SeatHandoverPlan | SeatHandoverMutationResult;
+      if (data.dryRun) {
+        printHumanHandoverPlan(data);
+      } else {
+        printHumanHandoverResult(data);
+      }
     });
 
   return cmd;

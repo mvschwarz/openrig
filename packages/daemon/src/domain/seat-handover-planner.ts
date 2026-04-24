@@ -1,7 +1,7 @@
 import type { RigRepository } from "./rig-repository.js";
 import { SeatStatusService, type SeatStatus, type SeatStatusResult } from "./seat-status-service.js";
 
-export type SeatHandoverSourceMode = "fresh" | "rebuild" | "fork";
+export type SeatHandoverSourceMode = "fresh" | "rebuild" | "fork" | "discovered";
 
 export interface SeatHandoverSource {
   mode: SeatHandoverSourceMode;
@@ -141,11 +141,21 @@ export function parseHandoverSource(source?: string | null): { ok: true; source:
     }
   }
 
+  if (raw.startsWith("discovered:")) {
+    const ref = raw.slice("discovered:".length).trim();
+    if (ref) {
+      return {
+        ok: true,
+        source: { mode: "discovered", ref, raw, defaulted: false },
+      };
+    }
+  }
+
   return {
     ok: false,
     code: "invalid_source",
     message: `Invalid handover source "${raw}".`,
-    guidance: "Use --source fresh, --source rebuild, or --source fork:<id>.",
+    guidance: "Use --source fresh, --source rebuild, --source fork:<id>, or --source discovered:<id>.",
   };
 }
 
@@ -253,6 +263,7 @@ function buildPlan(input: {
 
 function describeSource(source: SeatHandoverSource): string {
   if (source.mode === "fork") return `fork source ${source.ref}`;
+  if (source.mode === "discovered") return `already-created discovered successor ${source.ref}`;
   if (source.mode === "rebuild") return "artifact rebuild source";
   return source.defaulted ? "the default fresh source" : "fresh source";
 }
