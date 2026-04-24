@@ -53,13 +53,14 @@ describe("NodeLauncher", () => {
     db.close();
   });
 
-  function createLauncher(tmux?: TmuxAdapter) {
+  function createLauncher(tmux?: TmuxAdapter, sessionEnv?: Record<string, string | undefined>) {
     return new NodeLauncher({
       db,
       rigRepo,
       sessionRegistry,
       eventBus,
       tmuxAdapter: tmux ?? mockTmuxAdapter(),
+      sessionEnv,
     });
   }
 
@@ -116,6 +117,30 @@ describe("NodeLauncher", () => {
     await launcher.launchNode(rig.id, "dev1-impl");
 
     expect(createSpy.mock.calls[0]![0]).toBe("r01-dev1-impl");
+  });
+
+  it("passes runtime hook env to tmux session creation without putting it in provider config", async () => {
+    const rig = rigRepo.createRig("test-rig");
+    rigRepo.addNode(rig.id, "dev-qa", {
+      role: "worker",
+      runtime: "codex",
+    });
+    const createSpy = vi.fn<(name: string, cwd?: string, env?: Record<string, string>) => Promise<TmuxResult>>()
+      .mockResolvedValue({ ok: true });
+    const launcher = createLauncher(mockTmuxAdapter({ createSession: createSpy }), {
+      OPENRIG_URL: "http://127.0.0.1:7644",
+      OPENRIG_ACTIVITY_HOOK_TOKEN: "secret-token",
+    });
+
+    await launcher.launchNode(rig.id, "dev-qa");
+
+    expect(createSpy.mock.calls[0]![2]).toEqual({
+      OPENRIG_NODE_ID: expect.any(String),
+      OPENRIG_SESSION_NAME: "r00-test-rig-dev-qa",
+      OPENRIG_RUNTIME: "codex",
+      OPENRIG_URL: "http://127.0.0.1:7644",
+      OPENRIG_ACTIVITY_HOOK_TOKEN: "secret-token",
+    });
   });
 
   it("explicit sessionName override used when provided", async () => {

@@ -39,6 +39,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   private sleep: (ms: number) => Promise<void>;
   private stateDir: string | null;
   private collectorAssetPath: string | null;
+  private activityHookRelayAssetPath: string | null;
 
   constructor(deps: {
     tmux: TmuxAdapter;
@@ -47,6 +48,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     sleep?: (ms: number) => Promise<void>;
     stateDir?: string;
     collectorAssetPath?: string;
+    activityHookRelayAssetPath?: string;
   }) {
     this.tmux = deps.tmux;
     this.fs = deps.fsOps;
@@ -54,6 +56,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.stateDir = deps.stateDir ?? null;
     this.collectorAssetPath = deps.collectorAssetPath ?? null;
+    this.activityHookRelayAssetPath = deps.activityHookRelayAssetPath ?? null;
   }
 
   async listInstalled(binding: NodeBinding): Promise<InstalledResource[]> {
@@ -107,6 +110,12 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     // Best-effort: provision permissions and MCP config for managed Claude sessions
     try { this.provisionPermissionsAndMcps(binding); } catch (err) {
       console.error(`[openrig] permissions/MCP provisioning warning: ${(err as Error).message}`);
+    }
+
+    // Best-effort: provision project-local activity hooks. The hook token is
+    // supplied through tmux session env, never written to provider settings.
+    try { this.provisionActivityHooks(binding); } catch (err) {
+      console.error(`[openrig] claude activity hook provisioning warning: ${(err as Error).message}`);
     }
 
     let delivered = 0;
@@ -598,8 +607,61 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     this.fs.writeFile(settingsPath, JSON.stringify(existing, null, 2));
     this.fs.writeFile(mcpPath, JSON.stringify(mcpConfig, null, 2));
   }
+
+  private provisionActivityHooks(binding: { cwd?: string | null }): void {
+    if (!binding.cwd || !this.activityHookRelayAssetPath) return;
+
+    const relayDest = nodePath.join(binding.cwd, ".openrig", "activity-hook-relay.cjs");
+    this.fs.mkdirp(nodePath.dirname(relayDest));
+    this.fs.writeFile(relayDest, this.fs.readFile(this.activityHookRelayAssetPath));
+
+    const settingsPath = nodePath.join(binding.cwd, ".claude", "settings.local.json");
+    this.fs.mkdirp(nodePath.dirname(settingsPath));
+    const settings = this.readJsonObject(settingsPath);
+    const hooks = this.readJsonObjectField(settings, "hooks");
+    const command = `node ${shellQuote(relayDest)}`;
+
+    for (const event of ["SessionStart", "UserPromptSubmit", "Stop", "Notification"]) {
+      upsertCommandHook(hooks, event, command);
+    }
+
+    settings["hooks"] = hooks;
+    this.fs.writeFile(settingsPath, JSON.stringify(settings, null, 2));
+  }
 }
 
 function hashContent(content: string): string {
   return createHash("sha256").update(content).digest("hex");
+}
+
+/** Shell-quote a string using single quotes (POSIX-safe). */
+function shellQuote(s: string): string {
+  return "'" + s.replace(/'/g, "'\"'\"'") + "'";
+}
+
+function upsertCommandHook(hooks: Record<string, unknown>, event: string, command: string): void {
+  const eventEntries = Array.isArray(hooks[event]) ? hooks[event] as unknown[] : [];
+  if (eventEntries.some((entry) => hookEntryContainsCommand(entry, command))) {
+    hooks[event] = eventEntries;
+    return;
+  }
+  eventEntries.push({
+    hooks: [
+      { type: "command", command, timeout: 5 },
+    ],
+  });
+  hooks[event] = eventEntries;
+}
+
+function hookEntryContainsCommand(entry: unknown, command: string): boolean {
+  if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return false;
+  const hooks = (entry as Record<string, unknown>)["hooks"];
+  if (!Array.isArray(hooks)) return false;
+  return hooks.some((hook) =>
+    typeof hook === "object" &&
+    hook !== null &&
+    !Array.isArray(hook) &&
+    (hook as Record<string, unknown>)["type"] === "command" &&
+    (hook as Record<string, unknown>)["command"] === command
+  );
 }

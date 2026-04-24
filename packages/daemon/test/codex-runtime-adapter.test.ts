@@ -379,6 +379,26 @@ describe("Codex runtime adapter", () => {
     expect(sendText).toHaveBeenCalledWith("r01-qa", expectedFreshLaunchCommand({ model: "gpt-5.5" }));
   });
 
+  it("launchHarness passes the disposable proof Codex model on fresh launch", async () => {
+    const tmux = mockTmux();
+    const adapter = new CodexRuntimeAdapter({
+      tmux,
+      fsOps: mockFs(),
+      listProcesses: () => [],
+      sleep: async () => {},
+    });
+    const binding = { ...makeBinding(), model: "gpt-5.1-codex-mini" };
+
+    const result = await adapter.launchHarness(binding, { name: "dev-qa@test-rig" });
+
+    expect(result.ok).toBe(true);
+    const sendText = tmux.sendText as ReturnType<typeof vi.fn>;
+    expect(sendText).toHaveBeenCalledWith(
+      "r01-qa",
+      expectedFreshLaunchCommand({ model: "gpt-5.1-codex-mini" })
+    );
+  });
+
   it("launchHarness uses OPENRIG_SHARED_DOCS_ROOT for the Codex queue state writable root", async () => {
     vi.stubEnv("OPENRIG_SHARED_DOCS_ROOT", "/custom/shared-docs");
     const tmux = mockTmux();
@@ -671,6 +691,49 @@ describe("Codex runtime adapter", () => {
     expect(result.ok).toBe(true);
     const sendText = tmux.sendText as ReturnType<typeof vi.fn>;
     expect(sendText).toHaveBeenCalledWith("r01-qa", expectedResumeCommand());
+  });
+
+  it("provisions project-local Codex hooks and feature flag without persisting the hook token", async () => {
+    const fs = mockFs({
+      "/daemon/assets/openrig-activity-hook-relay.cjs": "relay script",
+      "/project/.codex/hooks.json": JSON.stringify({
+        hooks: {
+          UserPromptSubmit: [
+            {
+              hooks: [
+                { type: "command", command: "node ./existing-hook.cjs", timeout: 10 },
+              ],
+            },
+          ],
+        },
+      }),
+      "/project/.codex/config.toml": "[features]\ncodex_hooks = false\n",
+    });
+    const adapter = new CodexRuntimeAdapter({
+      tmux: mockTmux(),
+      fsOps: { ...fs, homedir: "/home/test" },
+      activityHookRelayAssetPath: "/daemon/assets/openrig-activity-hook-relay.cjs",
+    });
+
+    await adapter.deliverStartup([], makeBinding());
+    await adapter.deliverStartup([], makeBinding());
+
+    const store = (fs as unknown as { _store: Record<string, string> })._store;
+    expect(store["/project/.openrig/activity-hook-relay.cjs"]).toBe("relay script");
+    expect(store["/project/.codex/config.toml"]).toContain("codex_hooks = true");
+    expect(store["/home/test/.codex/hooks.json"]).toBeUndefined();
+
+    const hooksConfig = JSON.parse(store["/project/.codex/hooks.json"]!);
+    const hookJson = JSON.stringify(hooksConfig);
+    expect(hookJson).toContain("node ./existing-hook.cjs");
+    expect(hookJson).toContain("node '/project/.openrig/activity-hook-relay.cjs'");
+    expect(hookJson).toContain("SessionStart");
+    expect(hookJson).toContain("UserPromptSubmit");
+    expect(hookJson).toContain("Stop");
+    expect(hookJson).not.toContain("secret-token");
+
+    const relayCommandMatches = hookJson.match(/activity-hook-relay\.cjs/g) ?? [];
+    expect(relayCommandMatches).toHaveLength(3);
   });
 
   it("launchHarness skips the non-mutating Codex update prompt during resume verification", async () => {

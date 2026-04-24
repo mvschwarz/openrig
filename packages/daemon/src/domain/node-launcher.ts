@@ -25,6 +25,7 @@ interface NodeLauncherDeps {
   eventBus: EventBus;
   tmuxAdapter: TmuxAdapter;
   transcriptStore?: TranscriptStore;
+  sessionEnv?: Record<string, string | undefined>;
 }
 
 export class NodeLauncher {
@@ -34,6 +35,7 @@ export class NodeLauncher {
   private eventBus: EventBus;
   private tmuxAdapter: TmuxAdapter;
   private transcriptStore: TranscriptStore | null;
+  private sessionEnv: Record<string, string>;
 
   constructor(deps: NodeLauncherDeps) {
     // Hard runtime invariant: all domain services must share the same db handle.
@@ -54,6 +56,7 @@ export class NodeLauncher {
     this.eventBus = deps.eventBus;
     this.tmuxAdapter = deps.tmuxAdapter;
     this.transcriptStore = deps.transcriptStore ?? null;
+    this.sessionEnv = compactEnv(deps.sessionEnv ?? {});
   }
 
   async launchNode(
@@ -87,10 +90,12 @@ export class NodeLauncher {
     }
 
     // 3. Create tmux session with OpenRig identity env vars (handle stale duplicate by killing and retrying)
-    const openRigEnv = {
+    const openRigEnv = compactEnv({
       OPENRIG_NODE_ID: node.id,
       OPENRIG_SESSION_NAME: sessionName,
-    };
+      OPENRIG_RUNTIME: node.runtime ?? undefined,
+      ...this.sessionEnv,
+    });
     const sessionCwd = opts?.cwd ?? node.cwd ?? undefined;
     let tmuxResult = await this.tmuxAdapter.createSession(sessionName, sessionCwd, openRigEnv);
     if (!tmuxResult.ok && tmuxResult.code === "duplicate_session") {
@@ -160,4 +165,12 @@ export class NodeLauncher {
       warnings: launchWarnings.length > 0 ? launchWarnings : undefined,
     };
   }
+}
+
+function compactEnv(input: Record<string, string | undefined>): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const [key, value] of Object.entries(input)) {
+    if (typeof value === "string" && value.length > 0) result[key] = value;
+  }
+  return result;
 }
