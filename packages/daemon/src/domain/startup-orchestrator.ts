@@ -28,6 +28,8 @@ export interface StartupInput {
   resumeToken?: string;
   /** Skip harness launch (legacy nodes that already resumed via old helpers). */
   skipHarnessLaunch?: boolean;
+  /** Allow runtime adapter retry_fresh fallback when native resume data is stale. */
+  allowFreshFallback?: boolean;
   /** Readiness timeout in ms (default 30000). */
   readinessTimeoutMs?: number;
 }
@@ -166,6 +168,7 @@ export class StartupOrchestrator {
 
           const shouldRetryFresh =
             !!launchResumeToken
+            && input.allowFreshFallback !== false
             && launchResult.recovery === "retry_fresh"
             && !attemptedFreshFallback;
 

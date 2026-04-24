@@ -211,9 +211,12 @@ export interface Checkpoint {
 export interface RestoreResult {
   snapshotId: string;
   preRestoreSnapshotId: string;
+  rigResult: RestoreRigResult;
   nodes: RestoreNodeResult[];
   warnings: string[];
 }
+
+export type RestoreRigResult = "fully_restored" | "partially_restored" | "failed" | "not_attempted";
 
 export interface RestoreNodeResult {
   nodeId: string;

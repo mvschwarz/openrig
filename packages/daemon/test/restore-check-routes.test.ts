@@ -143,9 +143,9 @@ describe("Restore check routes", () => {
     const body = await res.json();
     expect(body.verdict).toBeDefined();
     expect(["restorable", "restorable_with_caveats", "not_restorable", "unknown"]).toContain(body.verdict);
-    expect(typeof body.fullyBack).toBe("boolean");
-    expect(body.assertion).toBeDefined();
-    expect(body.assertion.level).toBe("host");
+    expect(body.readiness).toBeDefined();
+    expect(["ready", "ready_with_caveats", "not_ready", "unknown"]).toContain(body.readiness.status);
+    expect(body.continuity).toBeDefined();
     expect(body.rigs).toBeInstanceOf(Array);
     expect(body.hostInfra).toBeDefined();
     expect(body.counts).toBeDefined();
@@ -324,7 +324,7 @@ describe("Restore check routes", () => {
     }));
     expect(startup.evidence).toContain("JSON");
     expect(startup.evidence).toContain("resolved_files_json");
-    expect(body.assertion.reason).not.toBe("unknown_probe_state");
+    expect(body.readiness.reason).not.toBe("unknown_probe_state");
     expect(body.checks.some((c: { check: string }) => c.check === "probe.error")).toBe(false);
   });
 
@@ -351,7 +351,7 @@ describe("Restore check routes", () => {
       remediationSafe: false,
     }));
     expect(startup.evidence).toContain("startup_actions_json");
-    expect(body.assertion.reason).not.toBe("unknown_probe_state");
+    expect(body.readiness.reason).not.toBe("unknown_probe_state");
     expect(body.checks.some((c: { check: string }) => c.check === "probe.error")).toBe(false);
   });
 
@@ -377,8 +377,8 @@ describe("Restore check routes", () => {
     expect(res.status).toBe(200);
 
     const body = await res.json();
-    expect(body.fullyBack).toBe(false);
-    expect(body.assertion).toBeDefined();
+    expect(body.readiness).toBeDefined();
+    expect(body.readiness.status).not.toBe("ready");
     expect(body.rigs).toBeInstanceOf(Array);
     expect(body.rigs[0]).toEqual(expect.objectContaining({
       rigId: rig.id,
@@ -533,9 +533,8 @@ describe("Restore check routes", () => {
 
       const body = await res.json();
       expect(body.verdict).toBe("unknown");
-      expect(body.fullyBack).toBe(false);
-      expect(body.assertion.status).toBe("unknown");
-      expect(body.assertion.reason).toBe("unknown_probe_state");
+      expect(body.readiness.status).toBe("unknown");
+      expect(body.readiness.reason).toBe("unknown_probe_state");
       expect(body.recovery).toEqual({
         status: "unknown",
         summary: expect.stringContaining("could not be inspected"),
@@ -577,5 +576,53 @@ describe("Restore check routes", () => {
     const blocker = body.repairPacket.find((s: { blocking: boolean }) => s.blocking);
     expect(blocker).toBeDefined();
     expect(blocker.command).toContain("rig ps");
+  });
+
+  // --- H62 absence proofs ---
+
+  it("GET /api/restore-check response has no fullyBack or assertion fields", async () => {
+    rigRepo.createRig("test-rig");
+
+    const res = await app.request("/api/restore-check");
+    const body = await res.json();
+
+    expect("fullyBack" in body).toBe(false);
+    expect("assertion" in body).toBe(false);
+    expect(body.readiness).toBeDefined();
+    expect(body.continuity).toBeDefined();
+  });
+
+  it("route 500 fallback emits readiness + continuity with no legacy fields", async () => {
+    const spy = vi.spyOn(RestoreCheckService.prototype, "check").mockImplementationOnce(() => {
+      throw new Error("fallback test");
+    });
+
+    try {
+      const res = await app.request("/api/restore-check");
+      expect(res.status).toBe(500);
+      const body = await res.json();
+
+      expect("fullyBack" in body).toBe(false);
+      expect("assertion" in body).toBe(false);
+      expect(body.readiness).toBeDefined();
+      expect(body.readiness.status).toBe("unknown");
+      expect(body.continuity).toBeDefined();
+      expect(body.continuity.status).toBe("not_proven");
+      expect(body.continuity.unprovenCapabilities).toBeInstanceOf(Array);
+      expect(body.continuity.unprovenCapabilities.length).toBeGreaterThan(0);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("continuity is always not_proven in route responses", async () => {
+    rigRepo.createRig("test-rig");
+
+    const res = await app.request("/api/restore-check");
+    const body = await res.json();
+
+    expect(body.continuity.status).toBe("not_proven");
+    expect(body.continuity.evidence).toBeTruthy();
+    expect(body.continuity.unprovenCapabilities).toContain("provider_session_resume");
   });
 });

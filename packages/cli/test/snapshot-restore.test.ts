@@ -136,6 +136,7 @@ function createMockDaemon() {
       if (snapshotId === "failed-node") {
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({
+          rigResult: "partially_restored",
           nodes: [
             { nodeId: "n1", logicalId: "orchestrator", status: "resumed" },
             {
@@ -155,8 +156,19 @@ function createMockDaemon() {
         }));
         return;
       }
+      if (snapshotId === "partial-fresh") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({
+          rigResult: "partially_restored",
+          nodes: [
+            { nodeId: "n1", logicalId: "worker", status: "fresh" },
+          ],
+        }));
+        return;
+      }
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({
+        rigResult: "fully_restored",
         nodes: [
           { nodeId: "n1", logicalId: "orchestrator", status: "resumed" },
           { nodeId: "n2", logicalId: "worker", status: "rebuilt" },
@@ -237,6 +249,7 @@ describe("rig snapshot + restore", () => {
     program.addCommand(restoreCommand(runningDeps(port)));
     const logs = await captureLogs(() => program.parseAsync(["node", "rig", "restore", "snap-1", "--rig", "rig-1"]));
     const output = logs.join("\n");
+    expect(output).toContain("Rig result: fully_restored");
     expect(output).toContain("orchestrator");
     expect(output).toContain("resumed");
     expect(output).toContain("worker");
@@ -261,6 +274,23 @@ describe("rig snapshot + restore", () => {
     expect(logs.join("\n")).toContain("tmux attach -t worker@test-rig");
     expect(logs.join("\n")).toContain("$ claude --resume abc-123");
     expect(logs.join("\n")).toContain("Choose the full conversation option, not summary.");
+    expect(process.exitCode).toBe(1);
+
+    process.exitCode = savedExitCode;
+  });
+
+  it("restore: partial rig result sets exit code 1 even without failed nodes", async () => {
+    const savedExitCode = process.exitCode;
+    process.exitCode = undefined;
+
+    const program = new Command();
+    program.addCommand(restoreCommand(runningDeps(port)));
+    const logs = await captureLogs(() => program.parseAsync(["node", "rig", "restore", "partial-fresh", "--rig", "rig-1"]));
+
+    const output = logs.join("\n");
+    expect(output).toContain("Rig result: partially_restored");
+    expect(output).toContain("worker");
+    expect(output).toContain("fresh");
     expect(process.exitCode).toBe(1);
 
     process.exitCode = savedExitCode;

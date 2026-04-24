@@ -31,6 +31,7 @@ export function restoreCommand(depsOverride?: StatusDeps): Command {
       const rigId = opts.rig;
 
       const res = await client.post<{
+        rigResult?: string;
         nodes?: Array<{
           nodeId: string;
           logicalId: string;
@@ -64,6 +65,9 @@ export function restoreCommand(depsOverride?: StatusDeps): Command {
         process.exitCode = 1;
       } else {
         console.log("Restore complete:");
+        if (res.data.rigResult) {
+          console.log(`Rig result: ${res.data.rigResult}`);
+        }
         const nodes = res.data.nodes ?? [];
         for (const node of nodes) {
           const label = node.status === "failed" && node.error ? `${node.status} — ${node.error}` : node.status;
@@ -74,7 +78,7 @@ export function restoreCommand(depsOverride?: StatusDeps): Command {
         if (attachCommand) {
           console.log(`Attach: ${attachCommand}`);
         }
-        if (nodes.some((node) => node.status === "failed")) {
+        if (res.data.rigResult === "partially_restored" || res.data.rigResult === "failed" || res.data.rigResult === "not_attempted" || nodes.some((node) => node.status === "failed")) {
           process.exitCode = 1;
         }
       }

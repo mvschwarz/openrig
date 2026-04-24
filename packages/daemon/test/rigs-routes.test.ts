@@ -4,6 +4,7 @@ import type Database from "better-sqlite3";
 import type { RigRepository } from "../src/domain/rig-repository.js";
 import type { SessionRegistry } from "../src/domain/session-registry.js";
 import type { SnapshotRepository } from "../src/domain/snapshot-repository.js";
+import type { SnapshotCapture } from "../src/domain/snapshot-capture.js";
 import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
 
 describe("Rig CRUD routes", () => {
@@ -12,6 +13,7 @@ describe("Rig CRUD routes", () => {
   let repo: RigRepository;
   let sessionRegistry: SessionRegistry;
   let snapshotRepo: SnapshotRepository;
+  let snapshotCapture: SnapshotCapture;
 
   beforeEach(() => {
     db = createFullTestDb();
@@ -20,6 +22,7 @@ describe("Rig CRUD routes", () => {
     repo = setup.rigRepo;
     sessionRegistry = setup.sessionRegistry;
     snapshotRepo = setup.snapshotRepo;
+    snapshotCapture = setup.snapshotCapture;
   });
 
   afterEach(() => {
@@ -510,6 +513,19 @@ describe("Rig CRUD routes", () => {
     expect(res.status).toBe(404);
     const body = await res.json();
     expect(body.code).toBe("no_snapshot");
+  });
+
+  it("POST /api/rigs/:id/up includes rigResult from restore rollup", async () => {
+    const rig = repo.createRig("restore-rig");
+    repo.addNode(rig.id, "worker", { role: "worker" });
+    snapshotCapture.captureSnapshot(rig.id, "auto-pre-down");
+
+    const res = await app.request(`/api/rigs/${rig.id}/up`, { method: "POST" });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.status).toBe("restored");
+    expect(body.rigResult).toBe("partially_restored");
+    expect(body.nodes[0].status).toBe("fresh");
   });
 
   it("POST /api/rigs/:id/up returns 404 for nonexistent rig", async () => {

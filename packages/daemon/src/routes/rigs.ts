@@ -313,6 +313,7 @@ rigsRoutes.post("/:id/up", async (c) => {
     rigId,
     rigName: rig.rig.name,
     snapshotId: snapshot.id,
+    rigResult: result.result.rigResult,
     nodes: result.result.nodes,
     warnings: result.result.warnings,
     attachCommand,

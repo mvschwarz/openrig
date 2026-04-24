@@ -147,6 +147,8 @@ Examples:
       if (opts.json) {
         console.log(JSON.stringify(res.data));
         if (res.status >= 400) process.exitCode = res.status === 409 ? 1 : 2;
+        const rigResult = res.data["rigResult"] as string | undefined;
+        if (rigResult === "partially_restored" || rigResult === "failed" || rigResult === "not_attempted") process.exitCode = 1;
         return;
       }
 
@@ -183,7 +185,9 @@ Examples:
         // Existing-rig power-on handoff
         const rigId = res.data["rigId"] as string;
         const rigName = res.data["rigName"] as string | undefined;
+        const rigResult = res.data["rigResult"] as string | undefined;
         console.log(`Rig "${rigName ?? rigId}" restored (ID: ${rigId})`);
+        if (rigResult) console.log(`Result: ${rigResult}`);
         const nodes = (res.data["nodes"] as Array<{ logicalId: string; status: string }>) ?? [];
         for (const n of nodes) {
           console.log(`  ${n.logicalId}: ${n.status}`);
@@ -197,7 +201,7 @@ Examples:
         if (attachCommand) {
           console.log(`Attach: ${attachCommand}`);
         }
-        if (nodes.some((n) => n.status === "failed")) {
+        if (rigResult === "partially_restored" || rigResult === "failed" || rigResult === "not_attempted" || nodes.some((n) => n.status === "failed")) {
           process.exitCode = 1;
         }
       } else {
