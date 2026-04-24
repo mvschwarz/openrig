@@ -55,6 +55,7 @@ import { RigTeardownOrchestrator } from "./domain/rig-teardown.js";
 import { ResumeMetadataRefresher } from "./domain/resume-metadata-refresher.js";
 import { TranscriptStore } from "./domain/transcript-store.js";
 import { SessionTransport } from "./domain/session-transport.js";
+import { AgentActivityStore } from "./domain/agent-activity-store.js";
 import { HistoryQuery } from "./domain/history-query.js";
 import { AskService } from "./domain/ask-service.js";
 import { ChatRepository } from "./domain/chat-repository.js";
@@ -281,6 +282,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const contextUsageStore = new ContextUsageStore(db, { stateDir: OPENRIG_HOME });
   const whoamiService = new WhoamiService({ db, rigRepo, sessionRegistry, transcriptStore, contextUsageStore });
   const nodeCmuxService = new NodeCmuxService(rigRepo, sessionRegistry, cmuxAdapter);
+  const agentActivityStore = new AgentActivityStore({ db, eventBus });
 
   const deps: AppDeps = {
     rigRepo,
@@ -360,6 +362,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     })(),
     whoamiService,
     nodeCmuxService,
+    agentActivityStore,
+    activityHookToken: readOpenRigEnv("OPENRIG_ACTIVITY_HOOK_TOKEN", "RIGGED_ACTIVITY_HOOK_TOKEN") || undefined,
     contextUsageStore,
     serviceOrchestrator,
     composeAdapter,

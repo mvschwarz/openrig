@@ -102,6 +102,7 @@ export type RigEvent =
   | { type: "snapshot.created"; rigId: string; snapshotId: string; kind: string }
   | { type: "restore.started"; rigId: string; snapshotId: string }
   | { type: "restore.completed"; rigId: string; snapshotId: string; result: RestoreResult }
+  | { type: "agent.activity"; rigId: string; nodeId: string; sessionName: string; runtime: string | null; activity: AgentActivity }
   | { type: "rig.imported"; rigId: string; specName: string; specVersion: string }
   // Package events (cross-rig, no rigId)
   | { type: "package.validated"; packageName: string; valid: boolean }
@@ -253,10 +254,10 @@ export type NodeRestoreOutcome = "resumed" | "rebuilt" | "fresh" | "failed" | "n
 export type OccupantLifecycle = "active" | "retiring" | "retired" | "context_walled" | "compacted" | "crashed" | "unknown";
 export type ContinuityOutcome = "resumed" | "rebuilt" | "forked" | "fresh" | "failed";
 export type HandoverResult = "complete" | "unchanged" | "partial" | "failed" | null;
-export type AgentActivityState = "agent_active" | "agent_idle" | "attention" | "unknown";
+export type AgentActivityState = "running" | "needs_input" | "idle" | "unknown";
 export type AgentActivityEvidenceSource =
-  | "tmux_pane"
-  | "tmux_pane_command"
+  | "runtime_hook"
+  | "pane_heuristic"
   | "tmux_session"
   | "external_cli"
   | "session_registry";
@@ -267,6 +268,12 @@ export interface AgentActivity {
   evidenceSource: AgentActivityEvidenceSource;
   sampledAt: string;
   evidence: string | null;
+  eventAt?: string | null;
+  rawEvent?: string | null;
+  rawSubtype?: string | null;
+  runtime?: string | null;
+  fallback?: boolean;
+  stale?: boolean;
 }
 
 export interface NodeRecoveryGuidance {

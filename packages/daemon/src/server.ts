@@ -45,8 +45,10 @@ import { upRoutes } from "./routes/up.js";
 import { downRoutes } from "./routes/down.js";
 import type { TranscriptStore } from "./domain/transcript-store.js";
 import type { SessionTransport } from "./domain/session-transport.js";
+import type { AgentActivityStore } from "./domain/agent-activity-store.js";
 import { transcriptRoutes } from "./routes/transcripts.js";
 import { transportRoutes } from "./routes/transport.js";
+import { activityRoutes } from "./routes/activity.js";
 import { askRoutes } from "./routes/ask.js";
 import type { AskService } from "./domain/ask-service.js";
 import { specReviewRoutes } from "./routes/spec-review.js";
@@ -102,6 +104,8 @@ export interface AppDeps {
   contextUsageStore?: import("./domain/context-usage-store.js").ContextUsageStore;
   contextMonitor?: { pollOnce(): Promise<void> };
   nodeCmuxService?: import("./domain/node-cmux-service.js").NodeCmuxService;
+  agentActivityStore?: AgentActivityStore;
+  activityHookToken?: string;
   serviceOrchestrator?: import("./domain/service-orchestrator.js").ServiceOrchestrator;
   composeAdapter?: import("./adapters/compose-services-adapter.js").ComposeServicesAdapter;
   uiDistDir?: string | null;
@@ -241,6 +245,8 @@ export function createApp(deps: AppDeps): Hono {
     c.set("contextUsageStore" as never, deps.contextUsageStore);
     c.set("contextMonitor" as never, deps.contextMonitor);
     c.set("nodeCmuxService" as never, deps.nodeCmuxService);
+    c.set("agentActivityStore" as never, deps.agentActivityStore);
+    c.set("activityHookToken" as never, deps.activityHookToken);
     c.set("serviceOrchestrator" as never, deps.serviceOrchestrator);
     c.set("composeAdapter" as never, deps.composeAdapter);
     c.set("db" as never, deps.rigRepo.db);
@@ -272,6 +278,7 @@ export function createApp(deps: AppDeps): Hono {
   app.route("/api/down", downRoutes);
   app.route("/api/transcripts", transcriptRoutes());
   app.route("/api/transport", transportRoutes());
+  app.route("/api/activity", activityRoutes);
   app.route("/api/ask", askRoutes);
   app.route("/api/specs/review", specReviewRoutes());
   app.route("/api/specs/library", specLibraryRoutes());

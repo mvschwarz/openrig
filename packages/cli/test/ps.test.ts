@@ -247,9 +247,9 @@ describe("Ps CLI", () => {
         sessionStatus: "running", startupStatus: "ready", restoreOutcome: "resumed",
         tmuxAttachCommand: null, resumeCommand: null, latestError: null,
         agentActivity: {
-          state: "agent_idle",
+          state: "idle",
           reason: "idle_status_bar",
-          evidenceSource: "tmux_pane",
+          evidenceSource: "pane_heuristic",
           sampledAt: "2026-04-24T12:00:00.000Z",
           evidence: "gpt-5.5 xhigh fast · Context [████ ]",
         },
@@ -264,9 +264,9 @@ describe("Ps CLI", () => {
     expect(parsed[0].nodeKind).toBe("agent");
     expect(parsed[0].podNamespace).toBe("dev");
     expect(parsed[0].agentActivity).toMatchObject({
-      state: "agent_idle",
+      state: "idle",
       reason: "idle_status_bar",
-      evidenceSource: "tmux_pane",
+      evidenceSource: "pane_heuristic",
     });
   });
 
@@ -280,14 +280,14 @@ describe("Ps CLI", () => {
         canonicalSessionName: "dev-impl@test-rig", nodeKind: "agent", runtime: "claude-code",
         sessionStatus: "running", startupStatus: "ready", restoreOutcome: "n-a",
         tmuxAttachCommand: null, resumeCommand: null, latestError: null,
-        agentActivity: { state: "agent_active", reason: "mid_work_pattern", evidenceSource: "tmux_pane", sampledAt: "2026-04-24T12:00:00.000Z", evidence: "Working" },
+        agentActivity: { state: "running", reason: "mid_work_pattern", evidenceSource: "pane_heuristic", sampledAt: "2026-04-24T12:00:00.000Z", evidence: "Working" },
       },
       {
         rigId: "rig-1", rigName: "test-rig", logicalId: "dev.qa", podId: "pod-1", podNamespace: "dev",
         canonicalSessionName: "dev-qa@test-rig", nodeKind: "agent", runtime: "codex",
         sessionStatus: "running", startupStatus: "ready", restoreOutcome: "n-a",
         tmuxAttachCommand: null, resumeCommand: null, latestError: null,
-        agentActivity: { state: "unknown", reason: "capture_failed", evidenceSource: "tmux_pane", sampledAt: "2026-04-24T12:00:00.000Z", evidence: null },
+        agentActivity: { state: "unknown", reason: "capture_failed", evidenceSource: "pane_heuristic", sampledAt: "2026-04-24T12:00:00.000Z", evidence: null },
       },
     ];
 
@@ -297,7 +297,7 @@ describe("Ps CLI", () => {
 
     const output = logs.join("\n");
     expect(output).toContain("ACTIVITY");
-    expect(output).toContain("active");
+    expect(output).toContain("running");
     expect(output).toContain("unknown");
     expect(output).toContain("dev-impl@test-rig");
   });

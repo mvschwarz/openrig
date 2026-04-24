@@ -6,6 +6,7 @@ import type { CmuxAdapter } from "../adapters/cmux.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import type { NodeCmuxService } from "../domain/node-cmux-service.js";
 import type { TranscriptStore } from "../domain/transcript-store.js";
+import type { AgentActivityStore } from "../domain/agent-activity-store.js";
 import { attachAgentActivity, getNodeInventory, getNodeDetail, getNodeInventoryWithContext, getNodeDetailWithContext } from "../domain/node-inventory.js";
 import type { ContextUsageStore } from "../domain/context-usage-store.js";
 import type { RigLifecycleService } from "../domain/rig-lifecycle-service.js";
@@ -21,6 +22,7 @@ function getDeps(c: { get: (key: string) => unknown }) {
     nodeLauncher: c.get("nodeLauncher" as never) as NodeLauncher,
     tmuxAdapter: c.get("tmuxAdapter" as never) as TmuxAdapter,
     cmuxAdapter: c.get("cmuxAdapter" as never) as CmuxAdapter,
+    agentActivityStore: c.get("agentActivityStore" as never) as AgentActivityStore | undefined,
     rigLifecycleService: c.get("rigLifecycleService" as never) as RigLifecycleService | undefined,
   };
 }
@@ -60,7 +62,7 @@ nodesRoutes.get("/", async (c) => {
   const inventory = contextUsageStore
     ? getNodeInventoryWithContext(deps.rigRepo.db, rigId, contextUsageStore)
     : getNodeInventory(deps.rigRepo.db, rigId);
-  return c.json(await attachAgentActivity(inventory, { tmuxAdapter: deps.tmuxAdapter }));
+  return c.json(await attachAgentActivity(inventory, { tmuxAdapter: deps.tmuxAdapter, activityStore: deps.agentActivityStore }));
 });
 
 // GET /api/rigs/:rigId/nodes/:logicalId — node detail
@@ -75,7 +77,7 @@ nodesRoutes.get("/:logicalId", async (c) => {
     ? getNodeDetailWithContext(deps.rigRepo.db, rigId, logicalId, contextUsageStore)
     : getNodeDetail(deps.rigRepo.db, rigId, logicalId);
   if (!detail) return c.json({ error: `Node "${logicalId}" not found in rig "${rigId}". Check node IDs with: rig ps --nodes` }, 404);
-  const [detailWithActivity] = await attachAgentActivity([detail], { tmuxAdapter: deps.tmuxAdapter });
+  const [detailWithActivity] = await attachAgentActivity([detail], { tmuxAdapter: deps.tmuxAdapter, activityStore: deps.agentActivityStore });
   Object.assign(detail, { agentActivity: detailWithActivity?.agentActivity });
 
   // Enrich transcript info from TranscriptStore (not available to pure DB helper)
