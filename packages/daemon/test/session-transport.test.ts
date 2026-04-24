@@ -89,12 +89,15 @@ describe("agent pane activity classifier", () => {
     expect(result.state).toBe("agent_idle");
   });
 
-  it("classifies current Claude Code thinking status as agent_active even with prompt chrome below it", () => {
+  it.each([
+    "✶ Synthesizing… (6s · ↑ 284 tokens · thinking)",
+    "✢ Reviewing... (3s · ↓ 107 tokens · thinking)",
+  ])("classifies Claude Code thinking status as agent_active without depending on the status verb: %s", (statusLine) => {
     const result = classifyPaneActivity([
       "⏺ Skill(openrig-user)",
       "  ⎿  Successfully loaded skill",
       "",
-      "✶ Tomfoolering… (6s · ↑ 284 tokens · thinking)",
+      statusLine,
       "",
       "──────────────────────────────────────── dev-impl@implementation-pair-slice19 ──",
       "❯ ",
@@ -104,7 +107,7 @@ describe("agent pane activity classifier", () => {
 
     expect(result.state).toBe("agent_active");
     expect(result.reason).toBe("mid_work_pattern");
-    expect(result.evidence).toContain("Tomfoolering");
+    expect(result.evidence).toContain("thinking");
   });
 
   it("does not classify tmux focus-events guidance as idle", () => {
@@ -408,7 +411,7 @@ describe("SessionTransport", () => {
               "⏺ Skill(openrig-user)",
               "  ⎿  Successfully loaded skill",
               "",
-              "✶ Tomfoolering… (6s · ↑ 284 tokens · thinking)",
+              "✶ Synthesizing… (6s · ↑ 284 tokens · thinking)",
               "",
               "──────────────────────────────────────── dev-impl@implementation-pair-slice19 ──",
               "❯ ",
@@ -471,7 +474,7 @@ describe("SessionTransport", () => {
         "⏺ Skill(openrig-user)",
         "  ⎿  Initializing…",
         "",
-        "✢ Tomfoolering… (3s · ↓ 107 tokens · thinking)",
+        "✢ Reviewing... (3s · ↓ 107 tokens · thinking)",
         "",
         "──────────────────────────────────────── dev-impl@implementation-pair-slice19 ──",
         "❯ ",
@@ -581,6 +584,68 @@ describe("SessionTransport", () => {
     expect(result.activity?.state).toBe("idle");
     expect(result.activity?.evidenceSource).toBe("runtime_hook");
     expect(sendTextSpy).toHaveBeenCalled();
+  });
+
+  it("send with wait-for-idle treats fresh UserPromptSubmit hook evidence as running", async () => {
+    seedCanonicalRig();
+    const eventBus = new EventBus(db);
+    const agentActivityStore = new AgentActivityStore({ db, eventBus });
+    agentActivityStore.recordHookEvent({
+      runtime: "claude-code",
+      sessionName: "dev-impl@my-rig",
+      hookEvent: "UserPromptSubmit",
+    });
+    const sendTextSpy = vi.fn(async () => ({ ok: true as const }));
+    const tmux = mockTmux({
+      capturePaneContent: async () => "❯ \n  ⏵⏵ accept edits on (shift+tab to cycle)",
+      sendText: sendTextSpy,
+    });
+    const transport = createTransport(tmux, {
+      agentActivityStore,
+      waitForIdlePollMs: 1,
+    });
+
+    const result = await transport.send("dev-impl@my-rig", "hello", { waitForIdleMs: 1 });
+
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe("wait_for_idle_timeout");
+    expect(result.sent).toBe(false);
+    expect(result.activity?.state).toBe("running");
+    expect(result.activity?.reason).toBe("user_prompt_submit");
+    expect(result.activity?.evidenceSource).toBe("runtime_hook");
+    expect(sendTextSpy).not.toHaveBeenCalled();
+  });
+
+  it("send with wait-for-idle hard-stops on fresh permission prompt hook evidence", async () => {
+    seedCanonicalRig();
+    const eventBus = new EventBus(db);
+    const agentActivityStore = new AgentActivityStore({ db, eventBus });
+    agentActivityStore.recordHookEvent({
+      runtime: "claude-code",
+      sessionName: "dev-impl@my-rig",
+      hookEvent: "Notification",
+      subtype: "permission_prompt",
+    });
+    const sendTextSpy = vi.fn(async () => ({ ok: true as const }));
+    const tmux = mockTmux({
+      capturePaneContent: async () => "❯ \n  ⏵⏵ accept edits on (shift+tab to cycle)",
+      sendText: sendTextSpy,
+    });
+    const transport = createTransport(tmux, {
+      agentActivityStore,
+      sleep: async () => undefined,
+      waitForIdlePollMs: 1,
+    });
+
+    const result = await transport.send("dev-impl@my-rig", "hello", { waitForIdleMs: 50 });
+
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe("target_needs_input");
+    expect(result.sent).toBe(false);
+    expect(result.activity?.state).toBe("needs_input");
+    expect(result.activity?.reason).toBe("permission_prompt");
+    expect(result.activity?.evidenceSource).toBe("runtime_hook");
+    expect(sendTextSpy).not.toHaveBeenCalled();
   });
 
   it("send with wait-for-idle treats fresh unknown hook evidence as unknown and does not fall through to pane idle", async () => {
