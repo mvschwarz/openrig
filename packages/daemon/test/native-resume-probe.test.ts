@@ -235,6 +235,45 @@ describe("native resume probe", () => {
     });
   });
 
+  it("classifies a Codex numbered model-selection prompt as blocked before active runtime", () => {
+    expect(
+      assessNativeResumeProbe({
+        runtime: "codex",
+        paneCommand: "codex-aarch64-a",
+        paneContent: [
+          "╭───────────────────────────────────────╮",
+          "│ >_ OpenAI Codex (v0.124.0)            │",
+          "╰───────────────────────────────────────╯",
+          "",
+          "› 1. Switch to gpt-5.1-codex-mini Optimized for codex. Cheaper,",
+          "  2. Switch to gpt-5.4-codex Stronger for complex tasks.",
+          "  3. Keep current model",
+          "",
+          "  gpt-5.4 default · ~/code/openrig",
+        ].join("\n"),
+      })
+    ).toEqual({
+      status: "inconclusive",
+      code: "model_selection_gate",
+      detail: "Codex is waiting for model selection before the session can become interactive.",
+    });
+  });
+
+  it("classifies Codex numbered model options structurally without sampled prompt wording", () => {
+    expect(
+      assessNativeResumeProbe({
+        runtime: "codex",
+        paneCommand: "codex",
+        paneContent: [
+          "› 1. gpt-5.1-codex-mini",
+          "  2. gpt-5.4-codex",
+          "",
+          "  gpt-5.4 default · ~/code/openrig",
+        ].join("\n"),
+      }).code
+    ).toBe("model_selection_gate");
+  });
+
   it("classifies Codex as resumed when an old update banner remains in scrollback but the live TUI is present", () => {
     expect(
       assessNativeResumeProbe({

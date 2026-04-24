@@ -157,6 +157,32 @@ describe("Codex runtime adapter", () => {
     });
   });
 
+  it("checkReady returns false when Codex is blocked on a numbered model-selection prompt", async () => {
+    const tmux = mockTmux({
+      getPaneCommand: vi.fn(async () => "codex-aarch64-a"),
+      capturePaneContent: vi.fn(async () => [
+        "╭───────────────────────────────────────╮",
+        "│ >_ OpenAI Codex (v0.124.0)            │",
+        "╰───────────────────────────────────────╯",
+        "",
+        "› 1. Switch to gpt-5.1-codex-mini Optimized for codex. Cheaper,",
+        "  2. Switch to gpt-5.4-codex Stronger for complex tasks.",
+        "  3. Keep current model",
+        "",
+        "  gpt-5.4 default · ~/code/openrig",
+      ].join("\n")),
+    });
+    const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs() });
+
+    const result = await adapter.checkReady(makeBinding());
+
+    expect(result).toEqual({
+      ready: false,
+      reason: "Codex is waiting for model selection before the session can become interactive.",
+      code: "model_selection_gate",
+    });
+  });
+
   it("checkReady returns true when Codex is interactive even if an update banner remains in scrollback", async () => {
     const tmux = mockTmux({
       getPaneCommand: vi.fn(async () => "codex"),

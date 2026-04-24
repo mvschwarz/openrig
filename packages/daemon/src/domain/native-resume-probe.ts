@@ -116,6 +116,13 @@ export function assessNativeResumeProbe(
         detail: "Codex is waiting for workspace trust approval before the session can become interactive.",
       };
     }
+    if (looksLikeCodexModelSelectionPrompt(paneContent)) {
+      return {
+        status: "inconclusive",
+        code: "model_selection_gate",
+        detail: "Codex is waiting for model selection before the session can become interactive.",
+      };
+    }
     if (looksLikeCodexTui(paneContent)) {
       return {
         status: "resumed",
@@ -205,4 +212,14 @@ function looksLikeCodexTui(paneContent: string): boolean {
 function looksLikeCodexTrustPrompt(paneContent: string): boolean {
   return paneContent.includes("Do you trust the contents of this directory?")
     && paneContent.includes("Yes, continue");
+}
+
+function looksLikeCodexModelSelectionPrompt(paneContent: string): boolean {
+  const recentLines = paneContent.split("\n").slice(-20);
+  const numberedModelOptions = recentLines.filter((line) => (
+    /^\s*(?:›\s*)?\d+\.\s+/.test(line)
+    && /\bgpt-[\w.-]+\b/i.test(line)
+  ));
+
+  return numberedModelOptions.length >= 2;
 }
