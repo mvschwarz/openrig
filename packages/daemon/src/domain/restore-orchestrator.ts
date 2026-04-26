@@ -761,6 +761,7 @@ export class RestoreOrchestrator {
           const binding = {
             ...launchResult.binding,
             cwd: node.cwd ?? ".",
+            codexConfigProfile: node.codexConfigProfile ?? undefined,
           };
 
           try {

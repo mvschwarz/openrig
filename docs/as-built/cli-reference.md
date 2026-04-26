@@ -359,7 +359,8 @@ Subcommands:
 Notes:
 - `specs` is the library surface for rigs, agents, and managed apps.
 - `preview` returns structured review data from the daemon.
-- `add` validates the file as either RigSpec or AgentSpec before copying it into the user library.
+- `add` accepts either a YAML spec file or a full spec directory containing `rig.yaml` or `agent.yaml`.
+- Directory adds copy the whole tree into the user library so adjacent agents, guidance, skills, and docs remain available.
 - `preview secrets-manager` is the canonical managed-app review example.
 
 ## Discovery and Topology Mutation

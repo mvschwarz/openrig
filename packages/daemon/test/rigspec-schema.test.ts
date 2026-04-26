@@ -44,6 +44,27 @@ describe("RigSpec schema (pod-aware)", () => {
     expect(result.errors).toEqual([]);
   });
 
+  it("allows codex_config_profile for Codex members and normalizes it", () => {
+    const rig = structuredClone(VALID_RIG);
+    (rig.pods[0]!.members[1] as Record<string, unknown>)["codex_config_profile"] = "sysadmin";
+
+    const result = RigSpecSchema.validate(rig);
+    expect(result.valid).toBe(true);
+
+    const normalized = RigSpecSchema.normalize(rig);
+    expect(normalized.pods[0]!.members[1]!.codexConfigProfile).toBe("sysadmin");
+  });
+
+  it("rejects codex_config_profile on non-Codex members", () => {
+    const rig = structuredClone(VALID_RIG);
+    (rig.pods[0]!.members[0] as Record<string, unknown>)["codex_config_profile"] = "sysadmin";
+
+    const result = RigSpecSchema.validate(rig);
+
+    expect(result.valid).toBe(false);
+    expect(result.errors[0]).toMatch(/codex_config_profile.*only valid/);
+  });
+
   // T2: missing pod member agent_ref fails
   it("missing pod member agent_ref fails", () => {
     const rig = structuredClone(VALID_RIG);

@@ -91,6 +91,7 @@ describe("Specs CLI", () => {
     expect(help).toContain("Browse, preview, and manage the spec library, including managed apps");
     expect(help).toContain("rig specs ls");
     expect(help).toContain("rig specs preview secrets-manager");
+    expect(help).toContain("Add a spec file or full spec directory to the user library");
   });
 
   it("specs ls prints library entries", async () => {
@@ -225,6 +226,102 @@ describe("Specs CLI", () => {
     expect(output).toContain("Added");
     expect(output).toContain("test-spec");
     expect(output).toContain("ID:");
+  });
+
+  it("specs add installs a full rig directory with adjacent resources", async () => {
+    const { mkdtempSync, writeFileSync, mkdirSync, rmSync, existsSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const { tmpdir } = await import("node:os");
+
+    const tmpDir = mkdtempSync(join(tmpdir(), "specs-add-dir-"));
+    const specDir = join(tmpDir, "building-openrig");
+    mkdirSync(join(specDir, "guidance"), { recursive: true });
+    mkdirSync(join(specDir, "agents", "lead", "guidance"), { recursive: true });
+    writeFileSync(join(specDir, "guidance", "builder.md"), "# Builder Context\n");
+    writeFileSync(join(specDir, "agents", "lead", "guidance", "role.md"), "# Lead Role\n");
+    writeFileSync(join(specDir, "agents", "lead", "agent.yaml"), [
+      'name: lead',
+      'version: "1.0"',
+      'profiles:',
+      '  default:',
+      '    uses:',
+      '      skills: []',
+      '      guidance: []',
+      '      subagents: []',
+      '      hooks: []',
+      '      runtime_resources: []',
+      '',
+    ].join("\n"));
+    writeFileSync(join(specDir, "rig.yaml"), [
+      'version: "0.2"',
+      'name: building-openrig',
+      'startup:',
+      '  files:',
+      '    - path: guidance/builder.md',
+      '      delivery_hint: guidance_merge',
+      '      required: true',
+      'pods:',
+      '  - id: orch',
+      '    label: Orchestration',
+      '    members:',
+      '      - id: lead',
+      '        agent_ref: "local:agents/lead"',
+      '        profile: default',
+      '        runtime: codex',
+      '        cwd: "."',
+      '    edges: []',
+      'edges: []',
+      '',
+    ].join("\n"));
+
+    const savedHome = process.env["HOME"];
+    process.env["HOME"] = tmpDir;
+
+    const addServer = http.createServer((req, res) => {
+      const url = decodeURIComponent(req.url ?? "");
+      req.resume();
+      req.on("end", () => {
+        if (url.startsWith("/api/specs/review/rig") && req.method === "POST") {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ kind: "rig", name: "building-openrig" }));
+        } else if (url === "/api/specs/library/sync" && req.method === "POST") {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify([{
+            id: "dir-id",
+            kind: "rig",
+            name: "building-openrig",
+            sourcePath: join(tmpDir, ".openrig", "specs", "building-openrig", "rig.yaml"),
+          }]));
+        } else if (url === "/api/specs/library") {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify([]));
+        } else {
+          res.writeHead(404).end();
+        }
+      });
+    });
+    await new Promise<void>((resolve) => { addServer.listen(0, resolve); });
+    const addPort = (addServer.address() as { port: number }).port;
+
+    const prog = new Command();
+    prog.exitOverride();
+    prog.addCommand(specsCommand(runningDeps(addPort)));
+
+    try {
+      const { logs } = await captureLogs(async () => {
+        await prog.parseAsync(["node", "rig", "specs", "add", specDir]);
+      });
+
+      expect(existsSync(join(tmpDir, ".openrig", "specs", "building-openrig", "rig.yaml"))).toBe(true);
+      expect(existsSync(join(tmpDir, ".openrig", "specs", "building-openrig", "guidance", "builder.md"))).toBe(true);
+      expect(existsSync(join(tmpDir, ".openrig", "specs", "building-openrig", "agents", "lead", "agent.yaml"))).toBe(true);
+      expect(logs.join("\n")).toContain("building-openrig");
+      expect(logs.join("\n")).toContain("ID:");
+    } finally {
+      addServer.close();
+      process.env["HOME"] = savedHome;
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
   });
 
   it("specs remove resolves by name and reports deletion", async () => {

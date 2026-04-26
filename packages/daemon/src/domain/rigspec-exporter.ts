@@ -156,6 +156,7 @@ export class RigSpecExporter {
           cwd: node.cwd ?? ".",
         };
         if (node.label) member.label = node.label;
+        if (node.codexConfigProfile) member.codexConfigProfile = node.codexConfigProfile;
         if (node.model) member.model = node.model;
         const rp = getRestorePolicy(node.id);
         if (rp) member.restorePolicy = rp;

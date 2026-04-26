@@ -228,6 +228,7 @@ Current behavior notes:
 - `rig up --cwd` is shipped. `rig up --cwd <path>` sends a per-run cwd override for all members in that launch.
 - `local:` `agent_ref` values resolve relative to the rig spec directory, not your shell cwd.
 - if you copy a built-in spec elsewhere, keep its `agents/` tree beside the YAML or rewrite those refs to `path:/absolute/path`
+- `rig specs add <directory>` installs a full spec tree when the directory contains `rig.yaml` or `agent.yaml`.
 
 Legacy/spec-specific surfaces still ship too:
 
@@ -476,7 +477,7 @@ rig agent validate <path> [--json]
 rig specs ls [--kind <kind>] [--json]
 rig specs show <name-or-id> [--json]
 rig specs preview <name-or-id> [--json]
-rig specs add <path> [--json]
+rig specs add <yaml-or-directory> [--json]
 rig specs sync [--json]
 rig specs remove <name-or-id> [--json]
 rig specs rename <name-or-id> <new-name> [--json]

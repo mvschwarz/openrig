@@ -17,6 +17,7 @@ interface InventoryRow {
   pod_namespace: string | null;
   runtime: string | null;
   model: string | null;
+  codex_config_profile: string | null;
   agent_ref: string | null;
   profile: string | null;
   cwd: string | null;
@@ -71,10 +72,10 @@ interface BindingRow {
 
 // -- Helpers --
 
-function computeResumeCommand(runtime: string | null, resumeToken: string | null): string | null {
+function computeResumeCommand(runtime: string | null, resumeToken: string | null, codexConfigProfile?: string | null): string | null {
   if (!resumeToken) return null;
   if (runtime === "claude-code") return `claude --resume ${resumeToken}`;
-  if (runtime === "codex") return `codex resume ${resumeToken}`;
+  if (runtime === "codex") return `codex${codexConfigProfile ? ` -p ${codexConfigProfile}` : ""} resume ${resumeToken}`;
   return null;
 }
 
@@ -83,8 +84,9 @@ function computeRecoveryGuidance(input: {
   resumeToken: string | null;
   cwd: string | null;
   sessionName: string | null;
+  codexConfigProfile?: string | null;
 }): NodeRecoveryGuidance | null {
-  const { runtime, resumeToken, cwd, sessionName } = input;
+  const { runtime, resumeToken, cwd, sessionName, codexConfigProfile } = input;
 
   if (runtime === "claude-code") {
     const commands: string[] = [];
@@ -115,17 +117,21 @@ function computeRecoveryGuidance(input: {
   if (runtime === "codex") {
     const commands: string[] = [];
     const notes: string[] = [];
+    const profileArg = codexConfigProfile ? ` -p ${codexConfigProfile}` : "";
 
     if (resumeToken) {
-      commands.push(`codex resume ${resumeToken}`);
+      commands.push(`codex${profileArg} resume ${resumeToken}`);
     }
     if (cwd) {
       commands.push(`cd ${cwd}`);
     }
-    commands.push("codex");
+    commands.push(`codex${profileArg}`);
     commands.push("resume");
 
     notes.push("Use workspace and recent prompt text to identify the right conversation.");
+    if (codexConfigProfile) {
+      notes.push(`Preserve Codex config profile: ${codexConfigProfile}`);
+    }
     if (sessionName) {
       notes.push(`If the identity anchor was captured, the picker may include: ${sessionName}`);
     }
@@ -229,6 +235,11 @@ function mapProjectionEntries(entries: unknown[]): Array<{ id: string; category:
 export function getNodeInventory(db: Database.Database, rigId: string): NodeInventoryEntry[] {
   // Join nodes with newest session (max ULID = max session.id string comparison)
   // and the rig name
+  const hasCodexConfigProfile = db.prepare("PRAGMA table_info(nodes)").all()
+    .some((row) => (row as { name?: string }).name === "codex_config_profile");
+  const codexConfigProfileSelect = hasCodexConfigProfile
+    ? "n.codex_config_profile"
+    : "NULL";
   const rows = db.prepare(`
     SELECT
       n.id as node_id,
@@ -239,6 +250,7 @@ export function getNodeInventory(db: Database.Database, rigId: string): NodeInve
       p.namespace as pod_namespace,
       n.runtime,
       n.model,
+      ${codexConfigProfileSelect} as codex_config_profile,
       n.agent_ref,
       n.profile,
       n.cwd,
@@ -289,18 +301,20 @@ export function getNodeInventory(db: Database.Database, rigId: string): NodeInve
       previousOccupant: row.previous_occupant,
       handoverAt: row.handover_at,
       tmuxAttachCommand: row.binding_attachment_type === "tmux" && row.session_name ? `tmux attach -t ${row.session_name}` : null,
-      resumeCommand: computeResumeCommand(row.runtime, row.resume_token),
+      resumeCommand: computeResumeCommand(row.runtime, row.resume_token, row.codex_config_profile),
       recoveryGuidance: computeRecoveryGuidance({
         runtime: row.runtime,
         resumeToken: row.resume_token,
         cwd: row.cwd,
         sessionName: row.session_name,
+        codexConfigProfile: row.codex_config_profile,
       }),
       latestError: row.startup_status === "ready" ? null : getLatestError(db, rigId, row.node_id),
       // Extended fields
       model: row.model,
       agentRef: row.agent_ref,
       profile: row.profile,
+      codexConfigProfile: row.codex_config_profile,
       resolvedSpecName: row.resolved_spec_name,
       resolvedSpecVersion: row.resolved_spec_version,
       resolvedSpecHash: row.resolved_spec_hash,

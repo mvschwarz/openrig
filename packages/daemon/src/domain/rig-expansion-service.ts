@@ -137,6 +137,7 @@ export class RigExpansionService {
             runtime: member.runtime,
             ...(member.agentRef ? { agent_ref: member.agentRef } : {}),
             ...(member.profile ? { profile: member.profile } : {}),
+            ...(member.codexConfigProfile ? { codex_config_profile: member.codexConfigProfile } : {}),
             ...(member.cwd ? { cwd: member.cwd } : {}),
             ...(member.model ? { model: member.model } : {}),
             ...(member.restorePolicy ? { restore_policy: member.restorePolicy } : {}),
