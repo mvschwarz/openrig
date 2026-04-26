@@ -17,6 +17,7 @@ interface NodeOptions {
   role?: string;
   runtime?: string;
   model?: string;
+  codexConfigProfile?: string;
   cwd?: string;
   surfaceHint?: string;
   workspace?: string;
@@ -57,32 +58,62 @@ export class RigRepository {
     }
 
     const id = ulid();
-    this.db
-      .prepare(
-        `INSERT INTO nodes (id, rig_id, logical_id, role, runtime, model, cwd, surface_hint, workspace, restore_policy, package_refs,
-         pod_id, agent_ref, profile, label, resolved_spec_name, resolved_spec_version, resolved_spec_hash)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-      )
-      .run(
-        id,
-        rigId,
-        logicalId,
-        opts?.role ?? null,
-        opts?.runtime ?? null,
-        opts?.model ?? null,
-        opts?.cwd ?? null,
-        opts?.surfaceHint ?? null,
-        opts?.workspace ?? null,
-        opts?.restorePolicy ?? null,
-        opts?.packageRefs ? JSON.stringify(opts.packageRefs) : null,
-        opts?.podId ?? null,
-        opts?.agentRef ?? null,
-        opts?.profile ?? null,
-        opts?.label ?? null,
-        opts?.resolvedSpecName ?? null,
-        opts?.resolvedSpecVersion ?? null,
-        opts?.resolvedSpecHash ?? null,
-      );
+    if (this.hasNodeColumn("codex_config_profile")) {
+      this.db
+        .prepare(
+          `INSERT INTO nodes (id, rig_id, logical_id, role, runtime, model, codex_config_profile, cwd, surface_hint, workspace, restore_policy, package_refs,
+           pod_id, agent_ref, profile, label, resolved_spec_name, resolved_spec_version, resolved_spec_hash)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run(
+          id,
+          rigId,
+          logicalId,
+          opts?.role ?? null,
+          opts?.runtime ?? null,
+          opts?.model ?? null,
+          opts?.codexConfigProfile ?? null,
+          opts?.cwd ?? null,
+          opts?.surfaceHint ?? null,
+          opts?.workspace ?? null,
+          opts?.restorePolicy ?? null,
+          opts?.packageRefs ? JSON.stringify(opts.packageRefs) : null,
+          opts?.podId ?? null,
+          opts?.agentRef ?? null,
+          opts?.profile ?? null,
+          opts?.label ?? null,
+          opts?.resolvedSpecName ?? null,
+          opts?.resolvedSpecVersion ?? null,
+          opts?.resolvedSpecHash ?? null,
+        );
+    } else {
+      this.db
+        .prepare(
+          `INSERT INTO nodes (id, rig_id, logical_id, role, runtime, model, cwd, surface_hint, workspace, restore_policy, package_refs,
+           pod_id, agent_ref, profile, label, resolved_spec_name, resolved_spec_version, resolved_spec_hash)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run(
+          id,
+          rigId,
+          logicalId,
+          opts?.role ?? null,
+          opts?.runtime ?? null,
+          opts?.model ?? null,
+          opts?.cwd ?? null,
+          opts?.surfaceHint ?? null,
+          opts?.workspace ?? null,
+          opts?.restorePolicy ?? null,
+          opts?.packageRefs ? JSON.stringify(opts.packageRefs) : null,
+          opts?.podId ?? null,
+          opts?.agentRef ?? null,
+          opts?.profile ?? null,
+          opts?.label ?? null,
+          opts?.resolvedSpecName ?? null,
+          opts?.resolvedSpecVersion ?? null,
+          opts?.resolvedSpecHash ?? null,
+        );
+    }
 
     return this.rowToNode(
       this.db.prepare("SELECT * FROM nodes WHERE id = ?").get(id) as NodeRow
@@ -265,6 +296,7 @@ export class RigRepository {
       role: row.role,
       runtime: row.runtime,
       model: row.model,
+      codexConfigProfile: row.codex_config_profile ?? null,
       cwd: row.cwd,
       surfaceHint: row.surface_hint ?? null,
       workspace: row.workspace ?? null,
@@ -325,6 +357,11 @@ export class RigRepository {
       updatedAt: row.updated_at,
     };
   }
+
+  private hasNodeColumn(columnName: string): boolean {
+    return this.db.prepare("PRAGMA table_info(nodes)").all()
+      .some((row) => (row as { name?: string }).name === columnName);
+  }
 }
 
 // -- Raw DB row types (snake_case) --
@@ -343,6 +380,7 @@ interface NodeRow {
   role: string | null;
   runtime: string | null;
   model: string | null;
+  codex_config_profile?: string | null;
   cwd: string | null;
   surface_hint: string | null;
   workspace: string | null;

@@ -692,6 +692,7 @@ Restore now:
    - `/api/specs/library` serves list/get/review/sync
 3. CLI:
    - `rig specs ls/show/preview/add/sync`
+   - `rig specs add` installs either a single YAML spec or a full spec directory containing `rig.yaml` or `agent.yaml`
    - `rig up` / `rig bootstrap` resolve library names before falling back to other source kinds
 4. UI:
    - `Specs` drawer presents a unified library list with `All / Apps / Rigs / Agents`

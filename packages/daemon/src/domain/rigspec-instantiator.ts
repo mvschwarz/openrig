@@ -437,6 +437,7 @@ export class PodRigInstantiator {
             const node = this.deps.rigRepo.addNode(materializedRigId, qualifiedId, {
               runtime: member.runtime,
               model: member.model,
+              codexConfigProfile: member.codexConfigProfile,
               cwd: member.cwd,
               restorePolicy: member.restorePolicy,
               podId: podRecord.id,
@@ -728,6 +729,7 @@ export class PodRigInstantiator {
           const node = this.deps.rigRepo.addNode(rigId, qualifiedId, {
             runtime: member.runtime,
             model: member.model,
+            codexConfigProfile: member.codexConfigProfile,
             cwd: configResult.config.cwd,
             restorePolicy: configResult.config.restorePolicy,
             podId,
@@ -1037,6 +1039,7 @@ export class PodRigInstantiator {
       updatedAt: "",
       cwd: configResult.config.cwd,
       model: configResult.config.model,
+      codexConfigProfile: input.member.codexConfigProfile,
     };
 
     const startupResult = await this.deps.startupOrchestrator.startNode({

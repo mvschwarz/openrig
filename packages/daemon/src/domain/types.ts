@@ -31,6 +31,7 @@ export interface Node {
   role: string | null;
   runtime: string | null;
   model: string | null;
+  codexConfigProfile?: string | null;
   cwd: string | null;
   surfaceHint: string | null;
   workspace: string | null;
@@ -308,6 +309,7 @@ export interface NodeInventoryEntry {
   model: string | null;
   agentRef: string | null;
   profile: string | null;
+  codexConfigProfile?: string | null;
   resolvedSpecName: string | null;
   resolvedSpecVersion: string | null;
   resolvedSpecHash: string | null;
@@ -481,6 +483,7 @@ export interface RigSpecPodMember {
   agentRef: string;
   profile: string;
   runtime: string;
+  codexConfigProfile?: string;
   model?: string;
   cwd: string;
   restorePolicy?: string;
@@ -640,6 +643,7 @@ export interface ExpansionPodFragment {
     profile?: string;
     cwd?: string;
     model?: string;
+    codexConfigProfile?: string;
     restorePolicy?: string;
     label?: string;
   }>;

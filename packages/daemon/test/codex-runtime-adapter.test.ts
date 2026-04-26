@@ -65,6 +65,19 @@ function expectedResumeCommand(token = "sess-456", queueRoot: string | null = te
   return `codex resume${queueDirArg} ${quote(token)}`;
 }
 
+function expectedProfileFreshLaunchCommand(profile: string, options: { cwd?: string; model?: string; queueRoot?: string | null } = {}): string {
+  const cwd = options.cwd ?? "/project";
+  const gitDirArg = ` --add-dir ${quote(nodePath.join(cwd, ".git"))}`;
+  const queueDirArg = options.queueRoot === null ? "" : ` --add-dir ${quote(options.queueRoot ?? testQueueRoot())}`;
+  const modelArg = options.model ? ` -m ${quote(options.model)}` : "";
+  return `codex -p ${quote(profile)} -C ${quote(cwd)}${gitDirArg}${queueDirArg}${modelArg}`;
+}
+
+function expectedProfileResumeCommand(profile: string, token = "sess-456", queueRoot: string | null = testQueueRoot()): string {
+  const queueDirArg = queueRoot === null ? "" : ` --add-dir ${quote(queueRoot)}`;
+  return `codex -p ${quote(profile)} resume${queueDirArg} ${quote(token)}`;
+}
+
 afterEach(() => {
   vi.unstubAllEnvs();
 });
@@ -379,6 +392,23 @@ describe("Codex runtime adapter", () => {
     expect(sendText).toHaveBeenCalledWith("r01-qa", expectedFreshLaunchCommand({ model: "gpt-5.5" }));
   });
 
+  it("launchHarness uses the requested Codex config profile without overriding sandbox or approval policy", async () => {
+    const tmux = mockTmux();
+    const adapter = new CodexRuntimeAdapter({
+      tmux,
+      fsOps: mockFs(),
+      listProcesses: () => [],
+      sleep: async () => {},
+    });
+    const binding = { ...makeBinding(), codexConfigProfile: "fleet" };
+
+    const result = await adapter.launchHarness(binding, { name: "dev-qa@test-rig" });
+
+    expect(result.ok).toBe(true);
+    const sendText = tmux.sendText as ReturnType<typeof vi.fn>;
+    expect(sendText).toHaveBeenCalledWith("r01-qa", expectedProfileFreshLaunchCommand("fleet"));
+  });
+
   it("launchHarness passes the disposable proof Codex model on fresh launch", async () => {
     const tmux = mockTmux();
     const adapter = new CodexRuntimeAdapter({
@@ -691,6 +721,23 @@ describe("Codex runtime adapter", () => {
     expect(result.ok).toBe(true);
     const sendText = tmux.sendText as ReturnType<typeof vi.fn>;
     expect(sendText).toHaveBeenCalledWith("r01-qa", expectedResumeCommand());
+  });
+
+  it("launchHarness passes the requested Codex config profile on resume", async () => {
+    const tmux = mockTmux();
+    const adapter = new CodexRuntimeAdapter({
+      tmux,
+      fsOps: mockFs(),
+      listProcesses: () => [],
+      sleep: async () => {},
+    });
+    const binding = { ...makeBinding(), codexConfigProfile: "fleet" };
+
+    const result = await adapter.launchHarness(binding, { name: "dev-qa@test-rig", resumeToken: "sess-456" });
+
+    expect(result.ok).toBe(true);
+    const sendText = tmux.sendText as ReturnType<typeof vi.fn>;
+    expect(sendText).toHaveBeenCalledWith("r01-qa", expectedProfileResumeCommand("fleet"));
   });
 
   it("provisions project-local Codex hooks and feature flag without persisting the hook token", async () => {

@@ -37,6 +37,12 @@ function normalizeExpansionPodFragment(raw: Record<string, unknown>): ExpansionP
               ? m["agent_ref"]
               : undefined,
         profile: typeof m["profile"] === "string" ? m["profile"] : undefined,
+        codexConfigProfile:
+          typeof m["codexConfigProfile"] === "string"
+            ? m["codexConfigProfile"]
+            : typeof m["codex_config_profile"] === "string"
+              ? m["codex_config_profile"]
+              : undefined,
         cwd: typeof m["cwd"] === "string" ? m["cwd"] : undefined,
         model: typeof m["model"] === "string" ? m["model"] : undefined,
         restorePolicy:

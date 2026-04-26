@@ -191,6 +191,27 @@ describe("Node Inventory Projection", () => {
     expect(entry?.recoveryGuidance?.notes).toContain("If the identity anchor was captured, the picker may include: dev-qa@test-rig");
   });
 
+  it("resumeCommand and recoveryGuidance preserve Codex config profile", () => {
+    db.prepare("INSERT INTO rigs (id, name) VALUES (?, ?)").run("rig-2", "test-rig");
+    db.prepare("INSERT INTO pods (id, rig_id, namespace, label) VALUES (?, ?, ?, ?)").run("pod-2", "rig-2", "platform", "Platform");
+    db.prepare(
+      "INSERT INTO nodes (id, rig_id, logical_id, runtime, codex_config_profile, cwd, pod_id, agent_ref, profile, resolved_spec_name, resolved_spec_version, resolved_spec_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    ).run("node-codex", "rig-2", "platform.mac-admin", "codex", "sysadmin", "~", "pod-2", "local:agents/mac-admin", "default", "mac-admin", "1.0.0", "hash");
+    seedSession(db, "node-codex", "platform-mac-admin@kernel", {
+      resumeType: "codex_id",
+      resumeToken: "sess-456",
+    });
+
+    const entries = getNodeInventory(db, "rig-2");
+    const entry = entries.find((e) => e.logicalId === "platform.mac-admin");
+
+    expect(entry?.codexConfigProfile).toBe("sysadmin");
+    expect(entry?.resumeCommand).toBe("codex -p sysadmin resume sess-456");
+    expect(entry?.recoveryGuidance?.commands).toContain("codex -p sysadmin resume sess-456");
+    expect(entry?.recoveryGuidance?.commands).toContain("codex -p sysadmin");
+    expect(entry?.recoveryGuidance?.notes).toContain("Preserve Codex config profile: sysadmin");
+  });
+
   // Test 7: startupStatus reflects session startup_status column
   it("startupStatus reflects session startup_status", () => {
     seedPodAwareRig(db);

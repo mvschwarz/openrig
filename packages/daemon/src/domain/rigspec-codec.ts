@@ -54,6 +54,7 @@ export class RigSpecCodec {
           cwd: m.cwd,
         };
         if (m.label) member["label"] = m.label;
+        if (m.codexConfigProfile) member["codex_config_profile"] = m.codexConfigProfile;
         if (m.model) member["model"] = m.model;
         if (m.restorePolicy) member["restore_policy"] = m.restorePolicy;
         if (m.startup) member["startup"] = serializeStartupBlock(m.startup);

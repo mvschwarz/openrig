@@ -240,6 +240,15 @@ function validateMember(member: Record<string, unknown>, index: number, podPrefi
   if (!member["runtime"] || typeof member["runtime"] !== "string") {
     errors.push(`${prefix}.runtime: required non-empty string`);
   }
+  if (member["codex_config_profile"] !== undefined) {
+    if (typeof member["codex_config_profile"] !== "string" || !member["codex_config_profile"].trim()) {
+      errors.push(`${prefix}.codex_config_profile: must be a non-empty string`);
+    } else if (!/^[A-Za-z0-9_.-]+$/.test(member["codex_config_profile"])) {
+      errors.push(`${prefix}.codex_config_profile: must contain only letters, numbers, underscores, dots, or hyphens`);
+    } else if (member["runtime"] !== "codex") {
+      errors.push(`${prefix}.codex_config_profile: only valid when runtime is "codex"`);
+    }
+  }
   if (!member["cwd"] || typeof member["cwd"] !== "string") {
     errors.push(`${prefix}.cwd: required non-empty string`);
   }
@@ -623,6 +632,7 @@ function normalizePod(raw: Record<string, unknown>): RigSpecPod {
     agentRef: m["agent_ref"] as string,
     profile: m["profile"] as string,
     runtime: m["runtime"] as string,
+    codexConfigProfile: m["codex_config_profile"] as string | undefined,
     model: m["model"] as string | undefined,
     cwd: m["cwd"] as string,
     restorePolicy: m["restore_policy"] as string | undefined,

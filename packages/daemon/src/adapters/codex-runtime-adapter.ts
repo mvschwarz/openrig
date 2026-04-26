@@ -165,11 +165,15 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
 
     const model = binding.model?.trim();
     const modelArg = model ? ` -m ${shellQuote(model)}` : "";
+    const profile = binding.codexConfigProfile?.trim();
+    const profileArg = profile ? ` -p ${shellQuote(profile)}` : "";
     const gitDirArg = ` --add-dir ${shellQuote(nodePath.join(binding.cwd, ".git"))}`;
     const queueStateDirArg = this.buildQueueStateAddDirArg(opts.name);
     const cmd = opts.resumeToken
-      ? `codex resume${queueStateDirArg} ${shellQuote(opts.resumeToken)}`
-      : `codex -C ${shellQuote(binding.cwd)}${gitDirArg}${queueStateDirArg}${modelArg} -a never -s workspace-write`;
+      ? `codex${profileArg} resume${queueStateDirArg} ${shellQuote(opts.resumeToken)}`
+      : profile
+        ? `codex${profileArg} -C ${shellQuote(binding.cwd)}${gitDirArg}${queueStateDirArg}${modelArg}`
+        : `codex -C ${shellQuote(binding.cwd)}${gitDirArg}${queueStateDirArg}${modelArg} -a never -s workspace-write`;
 
     const textResult = await this.tmux.sendText(binding.tmuxSession, cmd);
     if (!textResult.ok) {

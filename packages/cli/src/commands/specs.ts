@@ -1,4 +1,17 @@
 import { Command } from "commander";
+import {
+  copyFileSync,
+  cpSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+} from "node:fs";
+import { basename, join } from "node:path";
 import { getDefaultOpenRigPath } from "../openrig-compat.js";
 import { DaemonClient } from "../client.js";
 import { getDaemonStatus, getDaemonUrl } from "../daemon-lifecycle.js";
@@ -15,6 +28,114 @@ interface LibraryEntry {
   relativePath: string;
   updatedAt: string;
   summary?: string;
+}
+
+interface AddSpecSource {
+  inputPath: string;
+  yamlPath: string;
+  installName: string;
+  installKind: "file" | "directory";
+  libraryEntrySuffix: string;
+}
+
+function normalizePathForMatch(path: string): string {
+  return path.replaceAll("\\", "/");
+}
+
+function requireRegularFile(path: string, label: string): void {
+  const stat = lstatSync(path);
+  if (stat.isSymbolicLink()) {
+    throw new Error(`${label} must not be a symlink: ${path}`);
+  }
+  if (!stat.isFile()) {
+    throw new Error(`${label} must be a regular file: ${path}`);
+  }
+}
+
+function assertTreeHasNoSymlinks(root: string): void {
+  const stack = [root];
+  while (stack.length > 0) {
+    const current = stack.pop()!;
+    for (const entry of readdirSync(current, { withFileTypes: true })) {
+      const absPath = join(current, entry.name);
+      if (entry.isSymbolicLink()) {
+        throw new Error(`Spec directories must not contain symlinks: ${absPath}`);
+      }
+      if (entry.isDirectory()) {
+        stack.push(absPath);
+      }
+    }
+  }
+}
+
+function resolveAddSpecSource(inputPath: string): AddSpecSource {
+  if (!existsSync(inputPath)) {
+    throw new Error(`File not found: ${inputPath}`);
+  }
+
+  const stat = lstatSync(inputPath);
+  if (stat.isSymbolicLink()) {
+    throw new Error(`Spec path must not be a symlink: ${inputPath}`);
+  }
+
+  if (stat.isFile()) {
+    return {
+      inputPath,
+      yamlPath: inputPath,
+      installName: basename(inputPath),
+      installKind: "file",
+      libraryEntrySuffix: basename(inputPath),
+    };
+  }
+
+  if (!stat.isDirectory()) {
+    throw new Error(`Spec path must be a YAML file or spec directory: ${inputPath}`);
+  }
+
+  const rootSpec = ["rig.yaml", "rig.yml", "agent.yaml", "agent.yml"]
+    .map((candidate) => join(inputPath, candidate))
+    .find((candidate) => existsSync(candidate));
+  if (!rootSpec) {
+    throw new Error(`Spec directory must contain rig.yaml or agent.yaml: ${inputPath}`);
+  }
+  requireRegularFile(rootSpec, "Root spec file");
+
+  const installName = basename(inputPath);
+  return {
+    inputPath,
+    yamlPath: rootSpec,
+    installName,
+    installKind: "directory",
+    libraryEntrySuffix: normalizePathForMatch(join(installName, basename(rootSpec))),
+  };
+}
+
+function installSpecSource(source: AddSpecSource, userRoot: string): string {
+  mkdirSync(userRoot, { recursive: true });
+  const dest = join(userRoot, source.installName);
+
+  if (source.installKind === "file") {
+    requireRegularFile(source.inputPath, "Spec file");
+    copyFileSync(source.inputPath, dest);
+    return dest;
+  }
+
+  if (existsSync(dest)) {
+    throw new Error(`A spec directory already exists at ${dest}. Remove or rename it before adding this spec.`);
+  }
+
+  assertTreeHasNoSymlinks(source.inputPath);
+  const tempParent = mkdtempSync(join(userRoot, ".spec-add-"));
+  const tempDest = join(tempParent, source.installName);
+  try {
+    cpSync(source.inputPath, tempDest, { recursive: true, errorOnExist: true, force: false });
+    renameSync(tempDest, dest);
+  } catch (err) {
+    rmSync(tempParent, { recursive: true, force: true });
+    throw err;
+  }
+  rmSync(tempParent, { recursive: true, force: true });
+  return dest;
 }
 
 /**
@@ -167,20 +288,13 @@ Examples:
 
   // specs add
   cmd.command("add")
-    .argument("<path>", "Path to YAML spec file")
-    .description("Add a spec to the user library")
+    .argument("<path>", "Path to YAML spec file or spec directory")
+    .description("Add a spec file or full spec directory to the user library")
     .option("--json", "JSON output")
-    .action(async (filePath: string, opts: { json?: boolean }) => {
+    .action(async (inputPath: string, opts: { json?: boolean }) => {
       try {
-        const { readFileSync, copyFileSync, existsSync } = await import("node:fs");
-        const { join, basename } = await import("node:path");
-        const { homedir } = await import("node:os");
-
-        if (!existsSync(filePath)) {
-          throw new Error(`File not found: ${filePath}`);
-        }
-
-        const yaml = readFileSync(filePath, "utf-8");
+        const source = resolveAddSpecSource(inputPath);
+        const yaml = readFileSync(source.yamlPath, "utf-8");
         const client = await getClient();
 
         // Validate via daemon
@@ -196,16 +310,16 @@ Examples:
 
         // Copy to user library
         const userRoot = getDefaultOpenRigPath("specs");
-        const { mkdirSync } = await import("node:fs");
-        mkdirSync(userRoot, { recursive: true });
-        const dest = join(userRoot, basename(filePath));
-        copyFileSync(filePath, dest);
+        const dest = installSpecSource(source, userRoot);
 
         // Sync and find the new entry
         const syncRes = await client.post<LibraryEntry[]>("/api/specs/library/sync");
         const entries = syncRes.data ?? [];
-        const name = (res.data as Record<string, unknown>)["name"] as string ?? basename(filePath);
-        const newEntry = entries.find((e) => e.name === name && e.sourcePath.endsWith(basename(filePath)));
+        const name = (res.data as Record<string, unknown>)["name"] as string ?? source.installName;
+        const newEntry = entries.find((e) => (
+          e.name === name &&
+          normalizePathForMatch(e.sourcePath).endsWith(source.libraryEntrySuffix)
+        ));
 
         if (opts.json) {
           console.log(JSON.stringify({ name, kind, path: dest, id: newEntry?.id ?? null, entry: newEntry ?? null }));
