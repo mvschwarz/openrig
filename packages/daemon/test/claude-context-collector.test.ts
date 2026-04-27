@@ -275,7 +275,8 @@ describe("ClaudeCodeAdapter Context Collector Provisioning", () => {
       customSetting: true,
       permissions: {
         allow: ["Bash(rig:*)", "Bash(npm *)"],
-        deny: ["Bash(git push*)", "Bash(gh pr *)"],
+        ask: ["Bash(existing-ask:*)"],
+        deny: ["Bash(git push*)", "Bash(git commit*)", "Bash(gh pr *)", "Bash(rm -rf *)", "Bash(custom-danger:*)"],
       },
     });
     written["/project/.mcp.json"] = JSON.stringify({
@@ -300,14 +301,20 @@ describe("ClaudeCodeAdapter Context Collector Provisioning", () => {
     expect(settings.enabledMcpjsonServers).toEqual(["existing", "exa", "context7"]);
     expect(settings.permissions.allow).toContain("Bash(rig:*)");
     expect(settings.permissions.allow.filter((rule: string) => rule === "Bash(rig:*)")).toHaveLength(1);
-    expect(settings.permissions.allow).toContain("Read");
-    expect(settings.permissions.allow).toContain("Edit");
-    expect(settings.permissions.deny).toContain("Bash(git push*)");
-    expect(settings.permissions.deny.filter((rule: string) => rule === "Bash(git push*)")).toHaveLength(1);
-    expect(settings.permissions.deny).toContain("Bash(gh pr *)");
-    expect(settings.permissions.deny.filter((rule: string) => rule === "Bash(gh pr *)")).toHaveLength(1);
-    expect(settings.permissions.deny).toContain("Bash(rm -rf *)");
+    expect(settings.permissions.allow).toContain("Bash(npm *)");
+    expect(settings.permissions.allow).not.toContain("Read");
+    expect(settings.permissions.allow).not.toContain("Edit");
+    expect(settings.permissions.allow).not.toContain("Bash(cat *)");
+    expect(settings.permissions.ask).toContain("Bash(existing-ask:*)");
+    expect(settings.permissions.ask).toContain("Bash(rig up:*)");
+    expect(settings.permissions.ask).toContain("Bash(rig down:*)");
+    expect(settings.permissions.ask.filter((rule: string) => rule === "Bash(rig up:*)")).toHaveLength(1);
+    expect(settings.permissions.ask.filter((rule: string) => rule === "Bash(rig down:*)")).toHaveLength(1);
+    expect(settings.permissions.deny).toEqual(["Bash(custom-danger:*)"]);
+    expect(settings.permissions.deny).not.toContain("Bash(git push*)");
     expect(settings.permissions.deny).not.toContain("Bash(git commit*)");
+    expect(settings.permissions.deny).not.toContain("Bash(gh pr *)");
+    expect(settings.permissions.deny).not.toContain("Bash(rm -rf *)");
 
     const mcpConfig = JSON.parse(written["/project/.mcp.json"]!);
     expect(mcpConfig.mcpServers.existing.url).toBe("https://example.com/mcp");
@@ -333,13 +340,15 @@ describe("ClaudeCodeAdapter Context Collector Provisioning", () => {
     await adapter.deliverStartup([], { cwd: "/project", tmuxSession: "dev-impl@test", nodeId: "n1" } as any);
 
     const settings = JSON.parse(written["/project/.claude/settings.local.json"]!);
-    expect(settings.permissions.allow.filter((rule: string) => rule === "Read")).toHaveLength(1);
-    expect(settings.permissions.allow.filter((rule: string) => rule === "Edit")).toHaveLength(1);
     expect(settings.permissions.allow.filter((rule: string) => rule === "Bash(rig:*)")).toHaveLength(1);
-    expect(settings.permissions.deny.filter((rule: string) => rule === "Bash(rm -rf *)")).toHaveLength(1);
-    expect(settings.permissions.deny).not.toContain("Bash(git push*)");
-    expect(settings.permissions.deny).not.toContain("Bash(git commit*)");
-    expect(settings.permissions.deny).not.toContain("Bash(gh pr *)");
+    expect(settings.permissions.allow).not.toContain("Read");
+    expect(settings.permissions.allow).not.toContain("Edit");
+    expect(settings.permissions.ask.filter((rule: string) => rule === "Bash(rig up:*)")).toHaveLength(1);
+    expect(settings.permissions.ask.filter((rule: string) => rule === "Bash(rig down:*)")).toHaveLength(1);
+    expect(settings.permissions.deny ?? []).not.toContain("Bash(rm -rf *)");
+    expect(settings.permissions.deny ?? []).not.toContain("Bash(git push*)");
+    expect(settings.permissions.deny ?? []).not.toContain("Bash(git commit*)");
+    expect(settings.permissions.deny ?? []).not.toContain("Bash(gh pr *)");
     expect(settings.enabledMcpjsonServers).toEqual(["existing", "exa", "context7"]);
 
     const mcpConfig = JSON.parse(written["/project/.mcp.json"]!);
