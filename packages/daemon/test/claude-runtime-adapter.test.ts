@@ -215,6 +215,110 @@ describe("Claude Code runtime adapter", () => {
     expect(store["/project/.claude/agents/reviewer.yaml"]).toBe("name: reviewer");
   });
 
+  it("applies claude_settings_fragment runtime resources to project-local Claude settings", async () => {
+    const fs = mockFs({
+      "/agents/base/runtime/claude-settings.json": JSON.stringify({
+        permissions: {
+          defaultMode: "acceptEdits",
+          allow: ["Bash(npm:*)"],
+          ask: ["Bash(rig up:*)"],
+        },
+        enabledMcpjsonServers: ["context7"],
+      }),
+      "/project/.claude/settings.local.json": JSON.stringify({
+        customSetting: true,
+        permissions: {
+          allow: ["Bash(existing:*)"],
+          ask: ["Bash(existing-ask:*)"],
+        },
+        enabledMcpjsonServers: ["existing"],
+      }),
+    });
+    const adapter = new ClaudeCodeAdapter({ tmux: mockTmux(), fsOps: fs });
+    const plan: ProjectionPlan = {
+      runtime: "claude-code", cwd: "/project",
+      entries: [makeEntry({
+        category: "runtime_resource",
+        effectiveId: "claude-settings",
+        resourceType: "claude_settings_fragment",
+        absolutePath: "/agents/base/runtime/claude-settings.json",
+        resourcePath: "runtime/claude-settings.json",
+      })],
+      startup: { files: [], actions: [] }, conflicts: [], noOps: [], diagnostics: [],
+    };
+
+    const result = await adapter.project(plan, makeBinding());
+
+    expect(result).toEqual({ projected: ["claude-settings"], skipped: [], failed: [] });
+    const store = (fs as unknown as { _store: Record<string, string> })._store;
+    const settings = JSON.parse(store["/project/.claude/settings.local.json"]!);
+    expect(settings.customSetting).toBe(true);
+    expect(settings.permissions.defaultMode).toBe("acceptEdits");
+    expect(settings.permissions.allow).toEqual(["Bash(existing:*)", "Bash(npm:*)"]);
+    expect(settings.permissions.ask).toEqual(["Bash(existing-ask:*)", "Bash(rig up:*)"]);
+    expect(settings.enabledMcpjsonServers).toEqual(["existing", "context7"]);
+    expect(store["/project/.claude/extensions/claude-settings/claude-settings.json"]).toBeUndefined();
+  });
+
+  it("applies claude_mcp_fragment runtime resources to project-local MCP config", async () => {
+    const fs = mockFs({
+      "/agents/base/runtime/claude-mcp.json": JSON.stringify({
+        mcpServers: {
+          context7: { type: "http", url: "https://mcp.context7.com/mcp" },
+        },
+      }),
+      "/project/.mcp.json": JSON.stringify({
+        mcpServers: {
+          existing: { type: "http", url: "https://example.com/mcp" },
+        },
+      }),
+    });
+    const adapter = new ClaudeCodeAdapter({ tmux: mockTmux(), fsOps: fs });
+    const plan: ProjectionPlan = {
+      runtime: "claude-code", cwd: "/project",
+      entries: [makeEntry({
+        category: "runtime_resource",
+        effectiveId: "claude-mcp",
+        resourceType: "claude_mcp_fragment",
+        absolutePath: "/agents/base/runtime/claude-mcp.json",
+        resourcePath: "runtime/claude-mcp.json",
+      })],
+      startup: { files: [], actions: [] }, conflicts: [], noOps: [], diagnostics: [],
+    };
+
+    const result = await adapter.project(plan, makeBinding());
+
+    expect(result).toEqual({ projected: ["claude-mcp"], skipped: [], failed: [] });
+    const store = (fs as unknown as { _store: Record<string, string> })._store;
+    const mcp = JSON.parse(store["/project/.mcp.json"]!);
+    expect(Object.keys(mcp.mcpServers)).toEqual(["existing", "context7"]);
+    expect(mcp.mcpServers.existing.url).toBe("https://example.com/mcp");
+    expect(mcp.mcpServers.context7.url).toBe("https://mcp.context7.com/mcp");
+  });
+
+  it("fails projection honestly for malformed Claude runtime settings fragments", async () => {
+    const fs = mockFs({ "/agents/base/runtime/claude-settings.json": "[]" });
+    const adapter = new ClaudeCodeAdapter({ tmux: mockTmux(), fsOps: fs });
+    const plan: ProjectionPlan = {
+      runtime: "claude-code", cwd: "/project",
+      entries: [makeEntry({
+        category: "runtime_resource",
+        effectiveId: "claude-settings",
+        resourceType: "claude_settings_fragment",
+        absolutePath: "/agents/base/runtime/claude-settings.json",
+        resourcePath: "runtime/claude-settings.json",
+      })],
+      startup: { files: [], actions: [] }, conflicts: [], noOps: [], diagnostics: [],
+    };
+
+    const result = await adapter.project(plan, makeBinding());
+
+    expect(result.projected).toEqual([]);
+    expect(result.failed).toHaveLength(1);
+    expect(result.failed[0]!.effectiveId).toBe("claude-settings");
+    expect(result.failed[0]!.error).toContain("must be a JSON object");
+  });
+
   // NS-T04: launchHarness tests
   it("launchHarness sends correct fresh launch command", async () => {
     const tmux = mockTmux();
@@ -599,12 +703,10 @@ describe("Claude Code runtime adapter", () => {
     const settings = JSON.parse(store["/project/.claude/settings.local.json"]!);
 
     expect(settings.statusLine.command).toBe("node .openrig/context-collector.cjs");
-    expect(settings.permissions.allow).toContain("Bash(existing:*)");
-    expect(settings.permissions.allow).toContain("Bash(rig:*)");
-    expect(settings.permissions.ask).toContain("Bash(rig up:*)");
-    expect(settings.permissions.ask).toContain("Bash(rig down:*)");
-    expect(settings.permissions.deny ?? []).not.toContain("Bash(rm -rf *)");
-    expect(settings.enabledMcpjsonServers).toContain("existing-mcp");
+    expect(settings.permissions.allow).toEqual(["Bash(existing:*)"]);
+    expect(settings.permissions.ask).toBeUndefined();
+    expect(settings.permissions.deny).toEqual(["Bash(rm -rf *)"]);
+    expect(settings.enabledMcpjsonServers).toEqual(["existing-mcp"]);
 
     const hookJson = JSON.stringify(settings.hooks);
     expect(hookJson).toContain("node ./existing-stop-hook.cjs");

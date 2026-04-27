@@ -70,13 +70,13 @@ function expectRuntimeConfigDisclosure(result: SetupResult): void {
       scope: "project",
       runtime: "claude-code",
       path: ".mcp.json",
-      purpose: "Configure project-local MCP servers for Claude-managed workspaces.",
+      purpose: "Apply selected Claude MCP runtime-resource fragments.",
     },
     {
       scope: "global",
       runtime: "codex",
       path: "~/.codex/config.toml",
-      purpose: "Pre-trust managed workspaces and configure Codex MCP servers.",
+      purpose: "Pre-trust managed workspaces and apply selected Codex config runtime-resource fragments.",
     },
     {
       scope: "global",

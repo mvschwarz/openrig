@@ -270,13 +270,13 @@ describe("ClaudeCodeAdapter Context Collector Provisioning", () => {
     expect(settings.permissions.allow).toContain("Bash(rig:*)");
   });
 
-  it("deliverStartup provisions project-scope Claude permissions and MCP config without clobbering existing settings", async () => {
+  it("deliverStartup does not inject project-scope Claude permissions or MCP config without runtime resources", async () => {
     written["/project/.claude/settings.local.json"] = JSON.stringify({
       customSetting: true,
       permissions: {
-        allow: ["Bash(rig:*)", "Bash(npm *)"],
+        allow: ["Bash(npm *)"],
         ask: ["Bash(existing-ask:*)"],
-        deny: ["Bash(git push*)", "Bash(git commit*)", "Bash(gh pr *)", "Bash(rm -rf *)", "Bash(custom-danger:*)"],
+        deny: ["Bash(custom-danger:*)"],
       },
     });
     written["/project/.mcp.json"] = JSON.stringify({
@@ -297,32 +297,18 @@ describe("ClaudeCodeAdapter Context Collector Provisioning", () => {
     const settings = JSON.parse(written["/project/.claude/settings.local.json"]!);
     expect(settings.customSetting).toBe(true);
     expect(settings.statusLine.type).toBe("command");
-    expect(settings.permissions.defaultMode).toBe("acceptEdits");
-    expect(settings.enabledMcpjsonServers).toEqual(["existing", "exa", "context7"]);
-    expect(settings.permissions.allow).toContain("Bash(rig:*)");
-    expect(settings.permissions.allow.filter((rule: string) => rule === "Bash(rig:*)")).toHaveLength(1);
-    expect(settings.permissions.allow).toContain("Bash(npm *)");
-    expect(settings.permissions.allow).not.toContain("Read");
-    expect(settings.permissions.allow).not.toContain("Edit");
-    expect(settings.permissions.allow).not.toContain("Bash(cat *)");
-    expect(settings.permissions.ask).toContain("Bash(existing-ask:*)");
-    expect(settings.permissions.ask).toContain("Bash(rig up:*)");
-    expect(settings.permissions.ask).toContain("Bash(rig down:*)");
-    expect(settings.permissions.ask.filter((rule: string) => rule === "Bash(rig up:*)")).toHaveLength(1);
-    expect(settings.permissions.ask.filter((rule: string) => rule === "Bash(rig down:*)")).toHaveLength(1);
+    expect(settings.enabledMcpjsonServers).toBeUndefined();
+    expect(settings.permissions.allow).toEqual(["Bash(npm *)"]);
+    expect(settings.permissions.ask).toEqual(["Bash(existing-ask:*)"]);
     expect(settings.permissions.deny).toEqual(["Bash(custom-danger:*)"]);
-    expect(settings.permissions.deny).not.toContain("Bash(git push*)");
-    expect(settings.permissions.deny).not.toContain("Bash(git commit*)");
-    expect(settings.permissions.deny).not.toContain("Bash(gh pr *)");
-    expect(settings.permissions.deny).not.toContain("Bash(rm -rf *)");
 
     const mcpConfig = JSON.parse(written["/project/.mcp.json"]!);
     expect(mcpConfig.mcpServers.existing.url).toBe("https://example.com/mcp");
-    expect(mcpConfig.mcpServers.exa.url).toBe("https://mcp.exa.ai/mcp");
-    expect(mcpConfig.mcpServers.context7.url).toBe("https://mcp.context7.com/mcp");
+    expect(mcpConfig.mcpServers.exa).toBeUndefined();
+    expect(mcpConfig.mcpServers.context7).toBeUndefined();
   });
 
-  it("deliverStartup keeps project-local Claude permission and MCP rules idempotent across repeated startup", async () => {
+  it("deliverStartup keeps context collector idempotent without adding permission or MCP rules", async () => {
     written["/project/.mcp.json"] = JSON.stringify({
       mcpServers: {
         existing: { type: "http", url: "https://example.com/mcp" },
@@ -340,24 +326,15 @@ describe("ClaudeCodeAdapter Context Collector Provisioning", () => {
     await adapter.deliverStartup([], { cwd: "/project", tmuxSession: "dev-impl@test", nodeId: "n1" } as any);
 
     const settings = JSON.parse(written["/project/.claude/settings.local.json"]!);
-    expect(settings.permissions.allow.filter((rule: string) => rule === "Bash(rig:*)")).toHaveLength(1);
-    expect(settings.permissions.allow).not.toContain("Read");
-    expect(settings.permissions.allow).not.toContain("Edit");
-    expect(settings.permissions.ask.filter((rule: string) => rule === "Bash(rig up:*)")).toHaveLength(1);
-    expect(settings.permissions.ask.filter((rule: string) => rule === "Bash(rig down:*)")).toHaveLength(1);
-    expect(settings.permissions.deny ?? []).not.toContain("Bash(rm -rf *)");
-    expect(settings.permissions.deny ?? []).not.toContain("Bash(git push*)");
-    expect(settings.permissions.deny ?? []).not.toContain("Bash(git commit*)");
-    expect(settings.permissions.deny ?? []).not.toContain("Bash(gh pr *)");
-    expect(settings.enabledMcpjsonServers).toEqual(["existing", "exa", "context7"]);
+    expect(settings.statusLine.type).toBe("command");
+    expect(settings.permissions).toBeUndefined();
+    expect(settings.enabledMcpjsonServers).toBeUndefined();
 
     const mcpConfig = JSON.parse(written["/project/.mcp.json"]!);
-    expect(Object.keys(mcpConfig.mcpServers).filter((id) => id === "exa")).toHaveLength(1);
-    expect(Object.keys(mcpConfig.mcpServers).filter((id) => id === "context7")).toHaveLength(1);
+    expect(Object.keys(mcpConfig.mcpServers)).toEqual(["existing"]);
   });
 
-  it("deliverStartup recovers from array-valued settings.local.json and .mcp.json", async () => {
-    // Seed both files with JSON arrays (invalid for object merge)
+  it("deliverStartup recovers from array-valued settings.local.json for context collector only", async () => {
     written["/project/.claude/settings.local.json"] = "[]";
     written["/project/.mcp.json"] = "[]";
 
@@ -370,18 +347,13 @@ describe("ClaudeCodeAdapter Context Collector Provisioning", () => {
 
     await adapter.deliverStartup([], { cwd: "/project", tmuxSession: "dev-impl@test", nodeId: "n1" } as any);
 
-    // Settings must be a proper object with permissions, not a bare array
     const settings = JSON.parse(written["/project/.claude/settings.local.json"]!);
-    expect(settings.permissions.defaultMode).toBe("acceptEdits");
-    expect(settings.permissions.allow).toContain("Bash(rig:*)");
-
-    // MCP config must be a proper object with mcpServers, not a bare array
-    const mcpConfig = JSON.parse(written["/project/.mcp.json"]!);
-    expect(mcpConfig.mcpServers.exa.url).toBe("https://mcp.exa.ai/mcp");
-    expect(mcpConfig.mcpServers.context7.url).toBe("https://mcp.context7.com/mcp");
+    expect(settings.statusLine.type).toBe("command");
+    expect(settings.permissions).toBeUndefined();
+    expect(written["/project/.mcp.json"]).toBe("[]");
   });
 
-  it("deliverStartup overrides existing restrictive defaultMode with acceptEdits for managed sessions", async () => {
+  it("deliverStartup leaves existing project-local permission mode untouched without runtime resources", async () => {
     // Seed a restrictive existing defaultMode that would block managed-session autonomy
     written["/project/.claude/settings.local.json"] = JSON.stringify({
       permissions: {
@@ -400,11 +372,8 @@ describe("ClaudeCodeAdapter Context Collector Provisioning", () => {
     await adapter.deliverStartup([], { cwd: "/project", tmuxSession: "dev-impl@test", nodeId: "n1" } as any);
 
     const settings = JSON.parse(written["/project/.claude/settings.local.json"]!);
-    // Must unconditionally force acceptEdits — not inherit the restrictive mode
-    expect(settings.permissions.defaultMode).toBe("acceptEdits");
-    // Existing allow rules should be merged, not replaced
-    expect(settings.permissions.allow).toContain("Read");
-    expect(settings.permissions.allow).toContain("Bash(rig:*)");
+    expect(settings.permissions.defaultMode).toBe("denyAll");
+    expect(settings.permissions.allow).toEqual(["Read"]);
   });
 
   it("deliverStartup pre-seeds Claude workspace trust for the managed project", async () => {

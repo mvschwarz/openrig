@@ -163,6 +163,7 @@ export interface PersistedProjectionEntry {
   sourcePath: string;
   resourcePath: string;
   absolutePath: string;
+  resourceType?: string;
   mergeStrategy?: string;
   target?: string;
 }

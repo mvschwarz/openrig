@@ -117,9 +117,9 @@ resources:
       runtimes: [claude-code]
   runtime_resources:
     - id: claude-settings
-      path: runtime/claude-settings.json
+      path: runtime/claude-settings.fragment.json
       runtime: claude-code
-      type: settings
+      type: claude_settings_fragment
 
 startup:
   files:
@@ -292,9 +292,9 @@ resources:
       runtimes: [claude-code]
   runtime_resources:
     - id: claude-settings
-      path: runtime/claude-settings.json
+      path: runtime/claude-settings.fragment.json
       runtime: claude-code
-      type: settings
+      type: claude_settings_fragment
 ```
 
 Resources are the available pool. They are NOT automatically delivered to agents — profiles select them via `uses`. The only resources delivered are those that the active profile's `uses` block references.
@@ -310,6 +310,13 @@ Resources are the available pool. They are NOT automatically delivered to agents
 | `runtime_resources` | `id`, `path`, `runtime`, `type` | Runtime-specific resources. `runtime` and `type` are required. |
 
 *Fields marked with `*` are optional.
+
+Recognized runtime resource types:
+- `claude_settings_fragment` — merge a JSON object into `<cwd>/.claude/settings.local.json`.
+- `claude_mcp_fragment` — merge a JSON object into `<cwd>/.mcp.json`.
+- `codex_config_fragment` — upsert a TOML fragment into `~/.codex/config.toml` inside an OpenRig-managed block.
+
+Unknown runtime resource types are still copied to the runtime extension directory for agent-visible context.
 
 ### Resource Path Rules
 
@@ -391,7 +398,7 @@ my-agent/
   hooks/
     pre-commit.sh         # hook script
   runtime/
-    claude-settings.json  # runtime-specific resource
+    claude-settings.fragment.json  # runtime-specific resource
 ```
 
 The only required file is `agent.yaml`. Everything else is referenced by paths in the spec and must exist at those relative paths.

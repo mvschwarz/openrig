@@ -16,8 +16,8 @@ function makeGuidanceQR(id: string, path: string, target: string, merge: "manage
   return { effectiveId: id, sourceSpec: "base", sourcePath: "/agents/base", resource: { id, path, target, merge } as QualifiedResource["resource"] };
 }
 
-function makeRuntimeResourceQR(id: string, path: string, runtime: string): QualifiedResource {
-  return { effectiveId: id, sourceSpec: "base", sourcePath: "/agents/base", resource: { id, path, runtime, type: "plugin" } as QualifiedResource["resource"] };
+function makeRuntimeResourceQR(id: string, path: string, runtime: string, type = "plugin"): QualifiedResource {
+  return { effectiveId: id, sourceSpec: "base", sourcePath: "/agents/base", resource: { id, path, runtime, type } as QualifiedResource["resource"] };
 }
 
 function emptyResources(): ResolvedResources {
@@ -80,13 +80,14 @@ describe("Projection planner", () => {
   it("includes matching runtime_resources", () => {
     const config = makeConfig({
       runtime: "claude-code",
-      selectedResources: { ...emptyResources(), runtimeResources: [makeRuntimeResourceQR("claude-ext", "extensions/claude", "claude-code")] },
+      selectedResources: { ...emptyResources(), runtimeResources: [makeRuntimeResourceQR("claude-ext", "runtime/claude-settings.json", "claude-code", "claude_settings_fragment")] },
     });
     const result = planProjection({ config, collisions: [], fsOps: mockFs() });
     expect(result.ok).toBe(true);
     if (result.ok) {
       expect(result.plan.entries).toHaveLength(1);
       expect(result.plan.entries[0]!.effectiveId).toBe("claude-ext");
+      expect(result.plan.entries[0]!.resourceType).toBe("claude_settings_fragment");
     }
   });
 

@@ -107,11 +107,6 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       console.error(`[openrig] context collector provisioning warning: ${(err as Error).message}`);
     }
 
-    // Best-effort: provision permissions and MCP config for managed Claude sessions
-    try { this.provisionPermissionsAndMcps(binding); } catch (err) {
-      console.error(`[openrig] permissions/MCP provisioning warning: ${(err as Error).message}`);
-    }
-
     // Best-effort: provision project-local activity hooks. The hook token is
     // supplied through tmux session env, never written to provider settings.
     try { this.provisionActivityHooks(binding); } catch (err) {
@@ -280,6 +275,10 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   }
 
   private projectEntry(entry: ProjectionEntry, cwd: string): boolean {
+    if (entry.category === "runtime_resource" && this.applyRuntimeResource(entry, cwd)) {
+      return true;
+    }
+
     if (entry.category === "guidance" && entry.mergeStrategy === "managed_block") {
       const targetPath = nodePath.join(cwd, "CLAUDE.md");
       const content = this.fs.readFile(entry.absolutePath);
@@ -321,6 +320,27 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       case "runtime_resource": return nodePath.join(cwd, ".claude", "extensions", entry.effectiveId);
       default: return null;
     }
+  }
+
+  private applyRuntimeResource(entry: ProjectionEntry, cwd: string): boolean {
+    switch (entry.resourceType) {
+      case "claude_settings_fragment":
+        this.mergeJsonFragment(entry.absolutePath, nodePath.join(cwd, ".claude", "settings.local.json"));
+        return true;
+      case "claude_mcp_fragment":
+        this.mergeJsonFragment(entry.absolutePath, nodePath.join(cwd, ".mcp.json"));
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  private mergeJsonFragment(sourcePath: string, targetPath: string): void {
+    const fragment = this.readJsonObjectStrict(sourcePath);
+    const existing = this.readJsonObject(targetPath);
+    const merged = mergeJsonObjects(existing, fragment);
+    this.fs.mkdirp(nodePath.dirname(targetPath));
+    this.fs.writeFile(targetPath, JSON.stringify(merged, null, 2));
   }
 
   /**
@@ -484,6 +504,14 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     }
   }
 
+  private readJsonObjectStrict(path: string): Record<string, unknown> {
+    const parsed = JSON.parse(this.fs.readFile(path));
+    if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+    throw new Error(`${path} must be a JSON object`);
+  }
+
   private readJsonObjectField(source: Record<string, unknown>, key: string): Record<string, unknown> {
     const value = source[key];
     return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -513,12 +541,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     const settingsPath = nodePath.join(binding.cwd, ".claude", "settings.local.json");
     this.fs.mkdirp(nodePath.dirname(settingsPath));
 
-    let existing: Record<string, unknown> = {};
-    try {
-      if (this.fs.exists(settingsPath)) {
-        existing = JSON.parse(this.fs.readFile(settingsPath));
-      }
-    } catch { /* corrupt file — overwrite */ }
+    const existing = this.readJsonObject(settingsPath);
 
     const collectorCmd = `node ${collectorDest} ${contextDir}`;
     existing["statusLine"] = {
@@ -528,86 +551,6 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     };
 
     this.fs.writeFile(settingsPath, JSON.stringify(existing, null, 2));
-  }
-
-  /**
-   * Best-effort: provision permissions allowlist and MCP config for managed Claude sessions.
-   * Merges into .claude/settings.local.json (project-level, gitignored).
-   * Idempotent: merge preserves existing settings.
-   */
-  private provisionPermissionsAndMcps(binding: { cwd?: string | null }): void {
-    if (!binding.cwd) return;
-
-    const settingsPath = nodePath.join(binding.cwd, ".claude", "settings.local.json");
-    this.fs.mkdirp(nodePath.dirname(settingsPath));
-
-    const existing = this.readJsonObject(settingsPath);
-    const existingPermissions = this.readJsonObjectField(existing, "permissions");
-    const existingAllow = this.readStringArray(existingPermissions["allow"]);
-    const existingAsk = this.readStringArray(existingPermissions["ask"]);
-    const existingDeny = this.readStringArray(existingPermissions["deny"]);
-    const existingEnabledMcpjsonServers = this.readStringArray(existing["enabledMcpjsonServers"]);
-
-    const rigAllowRules = [
-      "Bash(rig:*)",
-    ];
-    const rigAskRules = [
-      "Bash(rig up:*)",
-      "Bash(rig down:*)",
-    ];
-    const legacyRigDenyRules = new Set([
-      "Bash(git push*)",
-      "Bash(git commit*)",
-      "Bash(gh pr *)",
-      "Bash(rm -rf *)",
-    ]);
-
-    // Merge without duplicating
-    const mergedAllow = [...new Set([...existingAllow, ...rigAllowRules])];
-    const mergedAsk = [...new Set([...existingAsk, ...rigAskRules])];
-    const mergedDeny = [...new Set(existingDeny.filter((rule) => !legacyRigDenyRules.has(rule)))];
-    const {
-      allow: _existingAllow,
-      ask: _existingAsk,
-      deny: _existingDeny,
-      ...otherPermissions
-    } = existingPermissions;
-
-    const permissions: Record<string, unknown> = {
-      ...otherPermissions,
-      defaultMode: "acceptEdits", // Unconditional: managed sessions must not inherit restrictive modes
-      allow: mergedAllow,
-      ask: mergedAsk,
-    };
-    if (mergedDeny.length > 0) {
-      permissions["deny"] = mergedDeny;
-    }
-
-    existing["permissions"] = permissions;
-
-    this.fs.writeFile(settingsPath, JSON.stringify(existing, null, 2));
-
-    // Merge MCP config: ensure Exa and Context7 are configured at project level
-    const mcpPath = nodePath.join(binding.cwd, ".mcp.json");
-    const mcpConfig = this.readJsonObject(mcpPath);
-    const mcpServers = this.readJsonObjectField(mcpConfig, "mcpServers");
-
-    // Add Exa and Context7 if not already configured
-    if (!mcpServers["exa"]) {
-      mcpServers["exa"] = { type: "http", url: "https://mcp.exa.ai/mcp" };
-    }
-    if (!mcpServers["context7"]) {
-      mcpServers["context7"] = { type: "http", url: "https://mcp.context7.com/mcp" };
-    }
-
-    existing["enabledMcpjsonServers"] = [...new Set([
-      ...existingEnabledMcpjsonServers,
-      ...Object.keys(mcpServers),
-    ])];
-    mcpConfig["mcpServers"] = mcpServers;
-
-    this.fs.writeFile(settingsPath, JSON.stringify(existing, null, 2));
-    this.fs.writeFile(mcpPath, JSON.stringify(mcpConfig, null, 2));
   }
 
   private provisionActivityHooks(binding: { cwd?: string | null }): void {
@@ -634,6 +577,49 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
 
 function hashContent(content: string): string {
   return createHash("sha256").update(content).digest("hex");
+}
+
+function mergeJsonObjects(base: Record<string, unknown>, fragment: Record<string, unknown>): Record<string, unknown> {
+  const merged: Record<string, unknown> = { ...base };
+  for (const [key, value] of Object.entries(fragment)) {
+    merged[key] = mergeJsonValue(merged[key], value);
+  }
+  return merged;
+}
+
+function mergeJsonValue(base: unknown, fragment: unknown): unknown {
+  if (isPlainObject(base) && isPlainObject(fragment)) {
+    return mergeJsonObjects(base, fragment);
+  }
+  if (Array.isArray(base) && Array.isArray(fragment)) {
+    return mergeJsonArrays(base, fragment);
+  }
+  return fragment;
+}
+
+function mergeJsonArrays(base: unknown[], fragment: unknown[]): unknown[] {
+  const result = [...base];
+  const seen = new Set(base.map(stableJsonKey));
+  for (const item of fragment) {
+    const key = stableJsonKey(item);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(item);
+  }
+  return result;
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function stableJsonKey(value: unknown): string {
+  if (!isPlainObject(value)) return JSON.stringify(value);
+  const sorted: Record<string, unknown> = {};
+  for (const key of Object.keys(value).sort()) {
+    sorted[key] = value[key];
+  }
+  return JSON.stringify(sorted);
 }
 
 /** Shell-quote a string using single quotes (POSIX-safe). */

@@ -57,5 +57,18 @@ resources:
       path: skills/pm/exec-summary
     - id: backlog-capture
       path: skills/pm/backlog-capture
+  runtime_resources:
+    - id: claude-default-settings
+      path: runtime/claude-settings.fragment.json
+      runtime: claude-code
+      type: claude_settings_fragment
+    - id: claude-default-mcp
+      path: runtime/claude-mcp.fragment.json
+      runtime: claude-code
+      type: claude_mcp_fragment
+    - id: codex-default-config
+      path: runtime/codex-config.fragment.toml
+      runtime: codex
+      type: codex_config_fragment
 
 profiles: {}
