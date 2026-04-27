@@ -189,6 +189,9 @@ export function validateAgentSpec(raw: unknown): ValidationResult {
               if (!entries[i]!["runtime"] || typeof entries[i]!["runtime"] !== "string") {
                 errors.push(`resources.runtime_resources[${i}].runtime: required non-empty string`);
               }
+              if (!entries[i]!["type"] || typeof entries[i]!["type"] !== "string") {
+                errors.push(`resources.runtime_resources[${i}].type: required non-empty string`);
+              }
             }
           }
         }

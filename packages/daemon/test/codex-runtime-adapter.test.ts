@@ -44,6 +44,14 @@ function makeBinding(cwd = "/project"): NodeBinding {
   };
 }
 
+function makeEntry(overrides?: Partial<ProjectionEntry>): ProjectionEntry {
+  return {
+    category: "skill", effectiveId: "test-skill", sourceSpec: "base", sourcePath: "/agents/base",
+    resourcePath: "skills/test", absolutePath: "/agents/base/skills/test/SKILL.md",
+    classification: "safe_projection", ...overrides,
+  };
+}
+
 function testQueueRoot(sharedDocsRoot = nodePath.join(os.homedir(), "code", "substrate", "shared-docs")): string {
   return nodePath.join(sharedDocsRoot, "rigs", "test-rig", "state", "dev");
 }
@@ -860,7 +868,7 @@ describe("Codex runtime adapter", () => {
     expect(content).toContain('trust_level = "trusted"');
   });
 
-  it("deliverStartup provisions Codex MCP servers in the global config without clobbering trust entries", async () => {
+  it("deliverStartup does not inject Codex MCP servers without runtime resources", async () => {
     const fs = mockFs({
       "/home/tester/.codex/config.toml": '[projects."/tmp/workspace"]\ntrust_level = "trusted"\n',
     });
@@ -873,24 +881,48 @@ describe("Codex runtime adapter", () => {
     const content = store["/home/tester/.codex/config.toml"];
     expect(content).toContain('[projects."/tmp/workspace"]');
     expect(content).toContain('trust_level = "trusted"');
-    expect(content).toContain('[mcp_servers.exa]');
-    expect(content).toContain('url = "https://mcp.exa.ai/mcp"');
-    expect(content).toContain('[mcp_servers.context7]');
-    expect(content).toContain('url = "https://mcp.context7.com/mcp"');
+    expect(content).not.toContain('[mcp_servers.exa]');
+    expect(content).not.toContain('[mcp_servers.context7]');
   });
 
-  it("deliverStartup keeps Codex MCP sections idempotent across repeated startup", async () => {
-    const fs = mockFs({});
+  it("applies codex_config_fragment runtime resources to the global Codex config idempotently", async () => {
+    const fs = mockFs({
+      "/agents/base/runtime/codex-config.toml": [
+        "[mcp_servers.exa]",
+        'url = "https://mcp.exa.ai/mcp"',
+        "",
+        "[mcp_servers.context7]",
+        'url = "https://mcp.context7.com/mcp"',
+        "",
+      ].join("\n"),
+      "/home/tester/.codex/config.toml": '[projects."/tmp/workspace"]\ntrust_level = "trusted"\n',
+    });
     const fsWithHome = { ...fs, homedir: "/home/tester" };
     const adapter = new CodexRuntimeAdapter({ tmux: mockTmux(), fsOps: fsWithHome });
+    const plan: ProjectionPlan = {
+      runtime: "codex", cwd: "/tmp/workspace",
+      entries: [makeEntry({
+        category: "runtime_resource",
+        effectiveId: "codex-default-config",
+        resourceType: "codex_config_fragment",
+        absolutePath: "/agents/base/runtime/codex-config.toml",
+        resourcePath: "runtime/codex-config.toml",
+      })],
+      startup: { files: [], actions: [] }, conflicts: [], noOps: [], diagnostics: [],
+    };
 
-    await adapter.deliverStartup([], makeBinding("/tmp/workspace"));
-    await adapter.deliverStartup([], makeBinding("/tmp/workspace"));
+    const first = await adapter.project(plan, makeBinding("/tmp/workspace"));
+    const second = await adapter.project(plan, makeBinding("/tmp/workspace"));
 
+    expect(first).toEqual({ projected: ["codex-default-config"], skipped: [], failed: [] });
+    expect(second).toEqual({ projected: ["codex-default-config"], skipped: [], failed: [] });
     const store = (fsWithHome as unknown as { _store: Record<string, string> })._store;
     const content = store["/home/tester/.codex/config.toml"];
+    expect(content).toContain('[projects."/tmp/workspace"]');
+    expect(content).toContain('trust_level = "trusted"');
     expect(content.match(/\[mcp_servers\.exa\]/g)?.length ?? 0).toBe(1);
     expect(content.match(/\[mcp_servers\.context7\]/g)?.length ?? 0).toBe(1);
+    expect(content.match(/BEGIN OPENRIG MANAGED CODEX CONFIG FRAGMENT: codex-default-config/g)?.length ?? 0).toBe(1);
   });
 
   // --- Regenerator bug repair: rig-role managed-block skip ---

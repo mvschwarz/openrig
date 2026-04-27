@@ -15,6 +15,7 @@ export interface ProjectionEntry {
   sourcePath: string;
   resourcePath: string;
   absolutePath: string;
+  resourceType?: string;
   classification: ProjectionClassification;
   conflictDetail?: { reason: string; existingHash?: string; sourceHash?: string };
   mergeStrategy?: "managed_block" | "append";
@@ -90,7 +91,7 @@ export function planProjection(input: ProjectionInput): PlanResult {
     for (const qr of resources) {
       // Runtime resource filtering
       if (catKey === "runtimeResources") {
-        const rr = qr.resource as { runtime: string };
+        const rr = qr.resource as { runtime: string; type?: string };
         if (rr.runtime !== config.runtime) continue;
       }
 
@@ -106,6 +107,10 @@ export function planProjection(input: ProjectionInput): PlanResult {
         absolutePath,
         classification: "safe_projection",
       };
+
+      if (catKey === "runtimeResources") {
+        entry.resourceType = (qr.resource as { type?: string }).type;
+      }
 
       // Guidance-specific
       if (catKey === "guidance") {

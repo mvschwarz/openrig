@@ -278,6 +278,18 @@ describe("Starter specs", () => {
       expect(existsSync(join(SPECS_ROOT, "agents/shared", skill!.path, "SKILL.md"))).toBe(true);
     }
 
+    const sharedRuntimeResources = (sharedResources["runtime_resources"] as Array<{ id: string; path: string; type: string }>) ?? [];
+    for (const resourceId of ["claude-default-settings", "claude-default-mcp", "codex-default-config"]) {
+      const resource = sharedRuntimeResources.find((entry) => entry.id === resourceId);
+      expect(resource).toBeDefined();
+      expect(existsSync(join(SPECS_ROOT, "agents/shared", resource!.path))).toBe(true);
+    }
+    const claudeSettingsResource = sharedRuntimeResources.find((entry) => entry.id === "claude-default-settings");
+    const claudeSettings = JSON.parse(readFileSync(join(SPECS_ROOT, "agents/shared", claudeSettingsResource!.path), "utf-8"));
+    expect(claudeSettings.permissions.allow).toEqual(["Bash(rig:*)"]);
+    expect(claudeSettings.permissions.ask).toEqual(["Bash(rig up:*)", "Bash(rig down:*)"]);
+    expect(claudeSettings.permissions.deny).toBeUndefined();
+
     const compactSkill = sharedSkills.find((entry) => entry.id === "claude-compact-in-place");
     expect(compactSkill).toBeDefined();
     const compactSkillContent = readFileSync(join(SPECS_ROOT, "agents/shared", compactSkill!.path, "SKILL.md"), "utf-8");

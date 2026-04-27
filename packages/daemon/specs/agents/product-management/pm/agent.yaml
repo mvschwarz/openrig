@@ -23,6 +23,10 @@ profiles:
         - plan-review
         - exec-summary
         - backlog-capture
+      runtime_resources:
+        - shared:claude-default-settings
+        - shared:claude-default-mcp
+        - shared:codex-default-config
 
 resources:
   guidance:

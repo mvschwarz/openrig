@@ -104,11 +104,6 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       console.error(`[openrig] codex bootstrap warning: ${(err as Error).message}`);
     }
 
-    // Best-effort: provision MCPs for managed Codex sessions
-    try { this.provisionMcps(); } catch (err) {
-      console.error(`[openrig] codex MCP provisioning warning: ${(err as Error).message}`);
-    }
-
     // Best-effort: provision project-local provider hooks. The hook token is
     // supplied through tmux session env, never written to provider config.
     try { this.provisionActivityHooks(binding); } catch (err) {
@@ -269,6 +264,10 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   }
 
   private projectEntry(entry: ProjectionEntry, cwd: string): boolean {
+    if (entry.category === "runtime_resource" && this.applyRuntimeResource(entry)) {
+      return true;
+    }
+
     if (entry.category === "guidance" && entry.mergeStrategy === "managed_block") {
       const targetPath = nodePath.join(cwd, "AGENTS.md");
       const content = this.fs.readFile(entry.absolutePath);
@@ -308,6 +307,21 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       case "runtime_resource": return nodePath.join(cwd, ".agents", "extensions", entry.effectiveId);
       default: return null;
     }
+  }
+
+  private applyRuntimeResource(entry: ProjectionEntry): boolean {
+    if (entry.resourceType !== "codex_config_fragment") {
+      return false;
+    }
+
+    const home = this.fs.homedir ?? os.homedir();
+    const configPath = nodePath.join(home, ".codex", "config.toml");
+    this.fs.mkdirp(nodePath.dirname(configPath));
+
+    const existing = this.fs.exists(configPath) ? this.fs.readFile(configPath) : "";
+    const fragment = this.fs.readFile(entry.absolutePath);
+    this.fs.writeFile(configPath, upsertManagedCodexConfigFragment(existing, entry.effectiveId, fragment));
+    return true;
   }
 
   /**
@@ -355,35 +369,6 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
 
     for (const trustKey of this.workspaceTrustKeys(cwd)) {
       content = upsertCodexProjectTrust(content, trustKey);
-    }
-
-    this.fs.writeFile(configPath, content);
-  }
-
-  /**
-   * Best-effort: ensure Exa and Context7 MCPs are configured for Codex.
-   * Appends to ~/.codex/config.toml if the MCP entries don't already exist.
-   */
-  private provisionMcps(): void {
-    const home = this.fs.homedir ?? os.homedir();
-    if (!home) return;
-
-    const configPath = nodePath.join(home, ".codex", "config.toml");
-    this.fs.mkdirp(nodePath.dirname(configPath));
-
-    let content = "";
-    try {
-      if (this.fs.exists(configPath)) content = this.fs.readFile(configPath);
-    } catch { content = ""; }
-
-    // Add Exa if not present
-    if (!content.includes('[mcp_servers.exa]')) {
-      content += '\n[mcp_servers.exa]\nurl = "https://mcp.exa.ai/mcp"\n';
-    }
-
-    // Add Context7 if not present
-    if (!content.includes('[mcp_servers.context7]')) {
-      content += '\n[mcp_servers.context7]\nurl = "https://mcp.context7.com/mcp"\n';
     }
 
     this.fs.writeFile(configPath, content);
@@ -617,6 +602,24 @@ function upsertCodexHooksFeature(content: string): string {
   }
 
   return `${lines.join("\n")}\n`;
+}
+
+function upsertManagedCodexConfigFragment(content: string, id: string, fragment: string): string {
+  const start = `# BEGIN OPENRIG MANAGED CODEX CONFIG FRAGMENT: ${id}`;
+  const end = `# END OPENRIG MANAGED CODEX CONFIG FRAGMENT: ${id}`;
+  const block = `${start}\n${fragment.replace(/\n*$/, "")}\n${end}\n`;
+  const pattern = new RegExp(`${escapeRegExp(start)}[\\s\\S]*?${escapeRegExp(end)}\\n?`, "m");
+
+  if (pattern.test(content)) {
+    return content.replace(pattern, block);
+  }
+
+  const prefix = content.replace(/\n*$/, "");
+  return prefix.length > 0 ? `${prefix}\n\n${block}` : block;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function upsertCommandHook(hooks: Record<string, unknown>, event: string, command: string): void {

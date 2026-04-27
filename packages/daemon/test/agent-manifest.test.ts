@@ -402,6 +402,21 @@ resources:
     expect(result.errors[0]).toMatch(/runtime.*required/);
   });
 
+  it("runtime_resources without type field fail", () => {
+    const raw = parseAgentSpec(`
+name: test
+version: "1.0"
+resources:
+  runtime_resources:
+    - id: foo
+      path: extensions/foo
+      runtime: claude-code
+`);
+    const result = validateAgentSpec(raw);
+    expect(result.valid).toBe(false);
+    expect(result.errors[0]).toMatch(/type.*required/);
+  });
+
   // T13: multiple errors reported together (including invalid enums)
   it("multiple validation errors reported together", () => {
     const raw = parseAgentSpec(`

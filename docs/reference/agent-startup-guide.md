@@ -199,9 +199,9 @@ Hooks are scripts copied to the agent's workspace. They can be git hooks, automa
 resources:
   runtime_resources:
     - id: claude-settings
-      path: runtime/claude-settings.json
+      path: runtime/claude-settings.fragment.json
       runtime: claude-code
-      type: settings
+      type: claude_settings_fragment
 ```
 Runtime-specific configuration files projected into the agent's runtime environment.
 
@@ -224,8 +224,8 @@ Commands sent to the agent's terminal after it's ready. Can install MCPs, run se
 | Skill projection (`skill_install`) | **Supported** | Reliable. Skills are copied to workspace. |
 | `send_text` delivery after ready | **Supported** | Reliable. Requires harness to be ready. |
 | Hook projection | **Experimental** | Files are copied but execution/integration varies by runtime. |
-| Runtime resource projection | **Experimental** | Files are projected but runtime-specific handling is not guaranteed. |
-| Permission allowlisting | **Supported (manual)** | Works via `~/.claude/settings.json` or Codex launch flags. OpenRig can describe the desired state; agent self-configures. |
+| Runtime resource projection | **Supported for recognized fragments** | `claude_settings_fragment`, `claude_mcp_fragment`, and `codex_config_fragment` are applied to provider config. Unknown types are copied to runtime extension directories. |
+| Permission allowlisting | **Supported via harness config** | Core OpenRig boot adds the minimal Claude `Bash(rig:*)` baseline. Additional policy should be supplied through spec-selected runtime resource fragments or native Codex config profiles, not adapter hard-code. |
 | MCP installation | **Experimental** | Claude Code: `/mcp` interactive command or `claude mcp add` from CLI. Can also be described in startup files for agent self-configuration. Reliability depends on runtime TUI state. |
 | System dependency installation | **Not deterministic** | Describe in startup files; agent handles via shell commands. |
 | Recurring tasks / wake timers | **Runtime-dependent** | Claude Code supports recurring tasks via the `/loop` command. Codex does not have a confirmed equivalent. Orchestrators should include `/loop` instructions in startup for Claude Code agents. |
@@ -243,18 +243,18 @@ This way, when deterministic support becomes fully reliable, the agent will boot
 
 ### Runtime Config Disclosure
 
-OpenRig now performs some best-effort deterministic runtime configuration for managed sessions. These writes are intentionally invasive and should be disclosed plainly:
+OpenRig performs best-effort deterministic runtime configuration for managed sessions. Core bootstrap stays minimal; user/custom policy belongs in spec-selected runtime resources. These writes are intentionally invasive and should be disclosed plainly:
 
 - Claude global config: `~/.claude/settings.json`
-  Purpose: allow `rig` commands without repeated Claude permission prompts.
+  Purpose: allow core `rig` commands without repeated Claude permission prompts.
 - Claude global state: `~/.claude.json`
   Purpose: pre-trust managed workspaces and mark onboarding complete for fresh managed sessions.
 - Claude project-local config: `.claude/settings.local.json`
-  Purpose: apply managed-session Claude permissions inside the project without committing them to git.
+  Purpose: apply context collector/activity hooks and selected `claude_settings_fragment` resources inside the project without committing them to git.
 - Claude project-local MCP config: `.mcp.json`
-  Purpose: configure OpenRig-managed MCP servers for Claude in that project.
+  Purpose: apply selected `claude_mcp_fragment` resources for Claude in that project.
 - Codex global config: `~/.codex/config.toml`
-  Purpose: pre-trust managed workspaces and configure Codex MCP servers. Codex currently has no equivalent project-local MCP config path.
+  Purpose: pre-trust managed workspaces and apply selected `codex_config_fragment` resources. Codex currently has no equivalent project-local MCP config path for global profile settings.
 
 Two important caveats:
 - these writes are best-effort and should still be paired with startup guidance so the local agent can verify and repair them if needed

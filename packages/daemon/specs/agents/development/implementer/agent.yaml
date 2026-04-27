@@ -15,7 +15,7 @@ profiles:
       guidance: []
       subagents: []
       hooks: []
-      runtime_resources: []
+      runtime_resources: [shared:claude-default-settings, shared:claude-default-mcp, shared:codex-default-config]
 
 resources:
   guidance:
