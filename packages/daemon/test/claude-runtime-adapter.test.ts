@@ -432,7 +432,7 @@ describe("Claude Code runtime adapter", () => {
 
   // --- Permission-config-at-spawn: Bash convenience baseline provisioning ---
 
-  it("provisionRigPermissions applies Bash convenience baseline on fresh settings", async () => {
+  it("provisionRigPermissions only adds the managed rig command on fresh settings", async () => {
     const fs = mockFs({});
     const adapter = new ClaudeCodeAdapter({ tmux: mockTmux(), fsOps: { ...fs, homedir: "/home/test" } });
 
@@ -443,17 +443,16 @@ describe("Claude Code runtime adapter", () => {
     const allow: string[] = settings.permissions?.allow ?? [];
 
     expect(allow).toContain("Bash(rig:*)");
-    expect(allow).toContain("Bash(ls:*)");
-    expect(allow).toContain("Bash(cat:*)");
-    expect(allow).toContain("Bash(tail:*)");
-    expect(allow).toContain("Bash(head:*)");
-    expect(allow).toContain("Bash(wc:*)");
-    expect(allow).toContain("Bash(grep:*)");
-    expect(allow).toContain("Bash(rg:*)");
-    expect(allow).toContain("Bash(pwd)");
-    expect(allow).toContain("Bash(which:*)");
-    // Bash(echo:*) intentionally excluded — echo can write via shell
-    // redirection (echo "x" > file); not a convenience-safe pattern
+    expect(allow).toEqual(["Bash(rig:*)"]);
+    expect(allow).not.toContain("Bash(ls:*)");
+    expect(allow).not.toContain("Bash(cat:*)");
+    expect(allow).not.toContain("Bash(tail:*)");
+    expect(allow).not.toContain("Bash(head:*)");
+    expect(allow).not.toContain("Bash(wc:*)");
+    expect(allow).not.toContain("Bash(grep:*)");
+    expect(allow).not.toContain("Bash(rg:*)");
+    expect(allow).not.toContain("Bash(pwd)");
+    expect(allow).not.toContain("Bash(which:*)");
     expect(allow).not.toContain("Bash(echo:*)");
   });
 
@@ -474,9 +473,9 @@ describe("Claude Code runtime adapter", () => {
     // Pre-existing entries preserved
     expect(allow).toContain("Bash(npm:*)");
     expect(allow).toContain("Bash(git:*)");
-    // Baseline entries added
-    expect(allow).toContain("Bash(ls:*)");
+    // Managed rig command added
     expect(allow).toContain("Bash(rig:*)");
+    expect(allow).not.toContain("Bash(ls:*)");
   });
 
   it("provisionRigPermissions is idempotent — no duplicates on re-run", async () => {
@@ -492,8 +491,7 @@ describe("Claude Code runtime adapter", () => {
 
     const rigCount = allow.filter((p: string) => p === "Bash(rig:*)").length;
     expect(rigCount).toBe(1);
-    const lsCount = allow.filter((p: string) => p === "Bash(ls:*)").length;
-    expect(lsCount).toBe(1);
+    expect(allow.filter((p: string) => p === "Bash(ls:*)")).toHaveLength(0);
   });
 
   it("provisionRigPermissions is file-idempotent — identical settings.json on consecutive runs", async () => {
@@ -602,7 +600,10 @@ describe("Claude Code runtime adapter", () => {
 
     expect(settings.statusLine.command).toBe("node .openrig/context-collector.cjs");
     expect(settings.permissions.allow).toContain("Bash(existing:*)");
-    expect(settings.permissions.deny).toContain("Bash(rm -rf *)");
+    expect(settings.permissions.allow).toContain("Bash(rig:*)");
+    expect(settings.permissions.ask).toContain("Bash(rig up:*)");
+    expect(settings.permissions.ask).toContain("Bash(rig down:*)");
+    expect(settings.permissions.deny ?? []).not.toContain("Bash(rm -rf *)");
     expect(settings.enabledMcpjsonServers).toContain("existing-mcp");
 
     const hookJson = JSON.stringify(settings.hooks);

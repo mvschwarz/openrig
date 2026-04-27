@@ -385,24 +385,13 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     this.provisionOnboardingState();
   }
 
-  /** Bash convenience baseline — high-friction prompts in daily operation.
+  /** Managed rig command baseline.
    *  Additive only; never removes existing entries. Uses `Bash(cmd:*)`
    *  colon-form per Claude Code convention.
    *
-   *  NOTE: these are Bash CONVENIENCE patterns, not a security boundary.
-   *  Shell redirection (e.g. `cat file > target`) can write to the
-   *  filesystem even with a nominally read-only command. Deny/ask rules,
-   *  hooks, or sandboxing are required for actual write protection. */
+   *  NOTE: this is not OpenRig's permission system. Harness-native
+   *  permissions should remain the primary control surface. */
   static readonly CONVENIENCE_BASELINE: readonly string[] = [
-    "Bash(ls:*)",
-    "Bash(cat:*)",
-    "Bash(tail:*)",
-    "Bash(head:*)",
-    "Bash(wc:*)",
-    "Bash(grep:*)",
-    "Bash(rg:*)",
-    "Bash(pwd)",
-    "Bash(which:*)",
     "Bash(rig:*)",
   ];
 
@@ -555,33 +544,46 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     const existing = this.readJsonObject(settingsPath);
     const existingPermissions = this.readJsonObjectField(existing, "permissions");
     const existingAllow = this.readStringArray(existingPermissions["allow"]);
+    const existingAsk = this.readStringArray(existingPermissions["ask"]);
     const existingDeny = this.readStringArray(existingPermissions["deny"]);
     const existingEnabledMcpjsonServers = this.readStringArray(existing["enabledMcpjsonServers"]);
 
     const rigAllowRules = [
       "Bash(rig:*)",
-      "Bash(cat *)", "Bash(ls *)", "Bash(find *)", "Bash(grep *)",
-      "Bash(head *)", "Bash(tail *)", "Bash(wc *)",
-      "Bash(mkdir *)", "Bash(cp *)", "Bash(mv *)",
-      "Bash(node *)", "Bash(npx *)", "Bash(npm *)",
-      "Read", "Edit",
     ];
-    // Keep managed-session denies to destructive guardrails only. Role-level
-    // policy decides whether a seat may commit, push, or open PRs.
-    const rigDenyRules = [
+    const rigAskRules = [
+      "Bash(rig up:*)",
+      "Bash(rig down:*)",
+    ];
+    const legacyRigDenyRules = new Set([
+      "Bash(git push*)",
+      "Bash(git commit*)",
+      "Bash(gh pr *)",
       "Bash(rm -rf *)",
-    ];
+    ]);
 
     // Merge without duplicating
     const mergedAllow = [...new Set([...existingAllow, ...rigAllowRules])];
-    const mergedDeny = [...new Set([...existingDeny, ...rigDenyRules])];
+    const mergedAsk = [...new Set([...existingAsk, ...rigAskRules])];
+    const mergedDeny = [...new Set(existingDeny.filter((rule) => !legacyRigDenyRules.has(rule)))];
+    const {
+      allow: _existingAllow,
+      ask: _existingAsk,
+      deny: _existingDeny,
+      ...otherPermissions
+    } = existingPermissions;
 
-    existing["permissions"] = {
-      ...existingPermissions,
+    const permissions: Record<string, unknown> = {
+      ...otherPermissions,
       defaultMode: "acceptEdits", // Unconditional: managed sessions must not inherit restrictive modes
       allow: mergedAllow,
-      deny: mergedDeny,
+      ask: mergedAsk,
     };
+    if (mergedDeny.length > 0) {
+      permissions["deny"] = mergedDeny;
+    }
+
+    existing["permissions"] = permissions;
 
     this.fs.writeFile(settingsPath, JSON.stringify(existing, null, 2));
 
