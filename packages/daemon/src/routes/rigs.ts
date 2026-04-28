@@ -288,7 +288,10 @@ rigsRoutes.post("/:id/attach-self", async (c) => {
   }
 });
 
-// POST /api/rigs/:id/up — power-on an existing rig from auto-pre-down snapshot
+// POST /api/rigs/:id/up — power-on an existing rig from its latest restore-usable snapshot
+// L3b: prefers `auto-pre-down` when present but falls back to the latest manual
+// snapshot whose structural metadata satisfies pre-validation. Echoes
+// `snapshotKind` so operators see which snapshot was used.
 rigsRoutes.post("/:id/up", async (c) => {
   const rigId = c.req.param("id")!;
   const repo = getRepo(c);
@@ -296,9 +299,9 @@ rigsRoutes.post("/:id/up", async (c) => {
   if (!rig) return c.json({ error: `Rig "${rigId}" not found. List rigs with: rig ps` }, 404);
 
   const snapshotRepo = c.get("snapshotRepo" as never) as SnapshotRepository;
-  const snapshot = snapshotRepo.findLatestAutoPreDown(rigId);
+  const snapshot = snapshotRepo.findLatestRestoreUsable(rigId);
   if (!snapshot) {
-    return c.json({ error: `Rig "${rig.rig.name}" exists but has no auto-pre-down snapshot. Start fresh with: rig up <spec-path>`, code: "no_snapshot" }, 404);
+    return c.json({ error: `Rig "${rig.rig.name}" exists but has no restore-usable snapshot. Start fresh with: rig up <spec-path>`, code: "no_snapshot" }, 404);
   }
 
   const restoreOrch = c.get("restoreOrchestrator" as never) as RestoreOrchestrator | undefined;
@@ -320,6 +323,7 @@ rigsRoutes.post("/:id/up", async (c) => {
         rigName: rig.rig.name,
         error: result.message,
         code: result.code,
+        snapshotKind: snapshot.kind,
         ...result.result,
         remediation: result.result.blockers?.map((blocker) => blocker.remediation) ?? [],
       }, 409);
@@ -338,6 +342,7 @@ rigsRoutes.post("/:id/up", async (c) => {
     rigId,
     rigName: rig.rig.name,
     snapshotId: snapshot.id,
+    snapshotKind: snapshot.kind,
     rigResult: result.result.rigResult,
     nodes: result.result.nodes,
     warnings: result.result.warnings,

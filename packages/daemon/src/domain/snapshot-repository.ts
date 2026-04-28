@@ -43,6 +43,43 @@ export class SnapshotRepository {
     return row ? this.rowToSnapshot(row) : null;
   }
 
+  /**
+   * L3b: returns the latest snapshot whose persisted `data` carries the minimum
+   * structural metadata `RestoreOrchestrator.restore`'s pre-validation requires.
+   * Prefers `auto-pre-down` over other kinds when both are present.
+   *
+   * The single SQL query orders snapshots by `(kind = 'auto-pre-down') DESC,
+   * created_at DESC, id DESC` so an auto-pre-down candidate always comes first
+   * if any exists. The in-memory loop then validates each candidate and skips
+   * snapshots with corrupted JSON or missing topology metadata, returning the
+   * first usable row. Returns null when no usable snapshot exists.
+   *
+   * Distinct from `findLatestUsableSnapshot` (rig-repository.ts, L2): that
+   * helper requires at least one persisted resume token and is consumed by
+   * the lifecycle projection. This helper only requires structural metadata
+   * `RestoreOrchestrator.restore` actually inspects, so terminal-only or
+   * resume-tokenless rigs still resolve.
+   */
+  findLatestRestoreUsable(rigId: string): Snapshot | null {
+    const rows = this.db
+      .prepare(
+        "SELECT * FROM snapshots WHERE rig_id = ? ORDER BY (kind = 'auto-pre-down') DESC, created_at DESC, id DESC"
+      )
+      .all(rigId) as SnapshotRow[];
+
+    for (const row of rows) {
+      let data: SnapshotData;
+      try {
+        data = JSON.parse(row.data) as SnapshotData;
+      } catch {
+        continue;
+      }
+      if (!isRestoreUsableSnapshotData(data)) continue;
+      return this.rowToSnapshot(row);
+    }
+    return null;
+  }
+
   getLatestSnapshot(rigId: string): Snapshot | null {
     const row = this.db
       .prepare(
@@ -118,4 +155,38 @@ interface SnapshotRow {
   status: string;
   data: string;
   created_at: string;
+}
+
+// Validates `SnapshotData` carries the minimum structural metadata
+// `RestoreOrchestrator.restore`'s pre-validation requires.
+//
+// Per the L3b orch amendment: validate against actual SnapshotData. There is
+// NO `data.bindings[]` field and `Session` has NO `runtime` field (runtime
+// lives on nodes). Resume tokens are NOT required (resume-tokenless rigs are
+// still restorable).
+//
+// Required:
+//   - rig with non-empty id
+//   - nodes array (may be empty — restore handles empty topologies)
+//   - edges array (may be empty)
+//   - sessions array (may be empty — `validatePreRestore` accepts empty)
+//   - checkpoints object
+//
+// When sessions is non-empty, each session must have a non-empty sessionName
+// and nodeId so node linkage can be resolved during restore. We do NOT check
+// session.runtime because that field doesn't exist on Session (orch amendment).
+function isRestoreUsableSnapshotData(data: unknown): data is SnapshotData {
+  if (!data || typeof data !== "object") return false;
+  const d = data as SnapshotData;
+  if (!d.rig || typeof d.rig.id !== "string" || d.rig.id.length === 0) return false;
+  if (!Array.isArray(d.nodes)) return false;
+  if (!Array.isArray(d.edges)) return false;
+  if (!Array.isArray(d.sessions)) return false;
+  if (!d.checkpoints || typeof d.checkpoints !== "object") return false;
+  for (const s of d.sessions) {
+    if (!s || typeof s !== "object") return false;
+    if (typeof s.sessionName !== "string" || s.sessionName.length === 0) return false;
+    if (typeof s.nodeId !== "string" || s.nodeId.length === 0) return false;
+  }
+  return true;
 }

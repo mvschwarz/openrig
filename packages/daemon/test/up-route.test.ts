@@ -131,4 +131,61 @@ describe("Up API route", () => {
     expect(body.rigResult).toBe("not_attempted");
     expect(body.blockers[0].path).toBe(missingPath);
   });
+
+  // L3b: rig-name path falls back to manual snapshot when no auto-pre-down exists.
+  // Both routes preserve auto-pre-down preference and echo `snapshotKind`.
+  describe("L3b snapshot-selection fallback", () => {
+    it("auto-pre-down preferred when present; response echoes snapshotKind=auto-pre-down", async () => {
+      const rig = rigRepo.createRig("auto-pref");
+      rigRepo.addNode(rig.id, "worker", { role: "worker" });
+      // Capture manual first, then auto-pre-down. Auto-pre-down must win.
+      snapshotCapture.captureSnapshot(rig.id, "manual");
+      snapshotCapture.captureSnapshot(rig.id, "auto-pre-down");
+
+      const res = await app.request("/api/up", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sourceRef: "auto-pref" }),
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.status).toBe("restored");
+      expect(body.snapshotKind).toBe("auto-pre-down");
+    });
+
+    it("falls back to manual snapshot when no auto-pre-down exists; response echoes snapshotKind=manual", async () => {
+      const rig = rigRepo.createRig("manual-only");
+      rigRepo.addNode(rig.id, "worker", { role: "worker" });
+      snapshotCapture.captureSnapshot(rig.id, "manual");
+
+      const res = await app.request("/api/up", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sourceRef: "manual-only" }),
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.status).toBe("restored");
+      expect(body.snapshotKind).toBe("manual");
+    });
+
+    it("returns 404 with updated 'no restore-usable snapshot' message when no usable snapshot exists", async () => {
+      rigRepo.createRig("no-snap");
+
+      const res = await app.request("/api/up", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sourceRef: "no-snap" }),
+      });
+
+      expect(res.status).toBe(404);
+      const body = await res.json();
+      expect(body.code).toBe("no_snapshot");
+      expect(body.error).toContain("restore-usable");
+      // Old message specifically said "auto-pre-down" — must NOT anymore.
+      expect(body.error).not.toContain("auto-pre-down snapshot");
+    });
+  });
 });
