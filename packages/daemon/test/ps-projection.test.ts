@@ -257,6 +257,31 @@ describe("PsProjectionService", () => {
       expect(entries[0]!.lifecycleState).toBe("attention_required");
     });
 
+    // L3-followup: rigName alias is always populated and equal to name.
+    it("rigName alias is populated and equal to name on every entry (L3-followup)", () => {
+      const rigA = seedRig("alpha");
+      const rigB = seedRig("beta");
+      seedNode(rigA, "dev");
+      seedNode(rigB, "qa");
+
+      const entries = ps.getEntries();
+      expect(entries.length).toBeGreaterThan(0);
+      for (const e of entries) {
+        expect(typeof e.rigName).toBe("string");
+        expect(e.rigName.length).toBeGreaterThan(0);
+        expect(e.rigName).toBe(e.name);
+      }
+    });
+
+    it("lifecycleState is always populated even for empty rigs (L3-followup)", () => {
+      seedRig("empty-rig");
+
+      const entries = ps.getEntries();
+      expect(entries[0]!.lifecycleState).toBeDefined();
+      expect(entries[0]!.lifecycleState).not.toBeNull();
+      expect(entries[0]!.lifecycleState).toBe("stopped");
+    });
+
     // Pure unit-level coverage of the fold helper.
     it("deriveRigLifecycleState fold helper covers all branches", () => {
       expect(deriveRigLifecycleState([])).toBe("stopped");

@@ -497,4 +497,235 @@ describe("Ps CLI", () => {
     const parsed = JSON.parse(logs.join(""));
     expect(parsed[0].lifecycleState).toBe("recoverable");
   });
+
+  // L3-followup: trustworthy and scale-safe rig ps.
+  describe("L3-followup: trustworthy and scale-safe rig ps", () => {
+    it("ps --json passes through rigName alias from server (jq '.[].rigName' regression)", async () => {
+      psData = [
+        { rigId: "rig-1", name: "alpha", rigName: "alpha", nodeCount: 1, runningCount: 1, status: "running", lifecycleState: "running", uptime: "1m", latestSnapshot: null },
+      ];
+      const { logs } = await captureLogs(async () => {
+        await makeCmd().parseAsync(["node", "rig", "ps", "--json"]);
+      });
+      const parsed = JSON.parse(logs.join(""));
+      expect(Array.isArray(parsed)).toBe(true);
+      expect(parsed[0].name).toBe("alpha");
+      expect(parsed[0].rigName).toBe("alpha");
+    });
+
+    it("ps --json without flags emits a bare array (back-compat)", async () => {
+      psData = [
+        { rigId: "rig-1", name: "alpha", rigName: "alpha", nodeCount: 1, runningCount: 1, status: "running", lifecycleState: "running", uptime: "1m", latestSnapshot: null },
+        { rigId: "rig-2", name: "beta", rigName: "beta", nodeCount: 1, runningCount: 0, status: "stopped", lifecycleState: "stopped", uptime: null, latestSnapshot: null },
+      ];
+      const { logs } = await captureLogs(async () => {
+        await makeCmd().parseAsync(["node", "rig", "ps", "--json"]);
+      });
+      const parsed = JSON.parse(logs.join(""));
+      expect(Array.isArray(parsed)).toBe(true);
+      expect(parsed).toHaveLength(2);
+    });
+
+    it("ps --json --limit emits envelope shape with truncated/totalRigs/hint", async () => {
+      psData = Array.from({ length: 10 }, (_, i) => ({
+        rigId: `rig-${i}`, name: `r${i}`, rigName: `r${i}`,
+        nodeCount: 1, runningCount: 1, status: "running" as const, lifecycleState: "running" as const,
+        uptime: "1m", latestSnapshot: null,
+      }));
+      const { logs } = await captureLogs(async () => {
+        await makeCmd().parseAsync(["node", "rig", "ps", "--json", "--limit", "3"]);
+      });
+      const parsed = JSON.parse(logs.join(""));
+      expect(Array.isArray(parsed)).toBe(false);
+      expect(parsed.entries).toHaveLength(3);
+      expect(parsed.totalRigs).toBe(10);
+      expect(parsed.truncated).toBe(true);
+      expect(parsed.hint).toContain("--full");
+    });
+
+    it("ps --json --fields projects only named fields", async () => {
+      psData = [
+        { rigId: "rig-1", name: "alpha", rigName: "alpha", nodeCount: 2, runningCount: 1, status: "partial", lifecycleState: "degraded", uptime: "1m", latestSnapshot: null },
+      ];
+      const { logs } = await captureLogs(async () => {
+        await makeCmd().parseAsync(["node", "rig", "ps", "--json", "--fields", "rigName,status,lifecycleState"]);
+      });
+      const parsed = JSON.parse(logs.join(""));
+      // Envelope (because --fields specified)
+      expect(parsed.entries[0]).toEqual({ rigName: "alpha", status: "partial", lifecycleState: "degraded" });
+      expect(parsed.entries[0].nodeCount).toBeUndefined();
+    });
+
+    it("ps --json --summary emits aggregate-only shape", async () => {
+      psData = [
+        { rigId: "rig-1", name: "a", rigName: "a", nodeCount: 1, runningCount: 1, status: "running", lifecycleState: "running", uptime: "1m", latestSnapshot: null },
+        { rigId: "rig-2", name: "b", rigName: "b", nodeCount: 1, runningCount: 0, status: "stopped", lifecycleState: "stopped", uptime: null, latestSnapshot: null },
+        { rigId: "rig-3", name: "c", rigName: "c", nodeCount: 1, runningCount: 0, status: "stopped", lifecycleState: "attention_required", uptime: null, latestSnapshot: null },
+      ];
+      const { logs } = await captureLogs(async () => {
+        await makeCmd().parseAsync(["node", "rig", "ps", "--json", "--summary"]);
+      });
+      const parsed = JSON.parse(logs.join(""));
+      expect(parsed.totalRigs).toBe(3);
+      expect(parsed.totalRunning).toBe(1);
+      expect(parsed.byLifecycle.running).toBe(1);
+      expect(parsed.byLifecycle.stopped).toBe(1);
+      expect(parsed.byLifecycle.attention_required).toBe(1);
+      expect(parsed.entries).toBeUndefined();
+    });
+
+    it("ps --filter status=running narrows entries", async () => {
+      psData = [
+        { rigId: "rig-1", name: "a", rigName: "a", nodeCount: 1, runningCount: 1, status: "running", lifecycleState: "running", uptime: "1m", latestSnapshot: null },
+        { rigId: "rig-2", name: "b", rigName: "b", nodeCount: 1, runningCount: 0, status: "stopped", lifecycleState: "stopped", uptime: null, latestSnapshot: null },
+      ];
+      const { logs } = await captureLogs(async () => {
+        await makeCmd().parseAsync(["node", "rig", "ps", "--json", "--filter", "status=running"]);
+      });
+      const parsed = JSON.parse(logs.join(""));
+      // Envelope because --filter specified
+      expect(parsed.entries).toHaveLength(1);
+      expect(parsed.entries[0].name).toBe("a");
+    });
+
+    it("ps --filter lifecycleState=attention_required narrows entries", async () => {
+      psData = [
+        { rigId: "rig-1", name: "a", rigName: "a", nodeCount: 1, runningCount: 1, status: "running", lifecycleState: "running", uptime: "1m", latestSnapshot: null },
+        { rigId: "rig-2", name: "b", rigName: "b", nodeCount: 1, runningCount: 1, status: "running", lifecycleState: "attention_required", uptime: "1m", latestSnapshot: null },
+      ];
+      const { logs } = await captureLogs(async () => {
+        await makeCmd().parseAsync(["node", "rig", "ps", "--json", "--filter", "lifecycleState=attention_required"]);
+      });
+      const parsed = JSON.parse(logs.join(""));
+      expect(parsed.entries).toHaveLength(1);
+      expect(parsed.entries[0].lifecycleState).toBe("attention_required");
+    });
+
+    it("ps --filter rejects unknown keys with actionable error and exits 1", async () => {
+      psData = [];
+      const { logs, exitCode } = await captureLogs(async () => {
+        await makeCmd().parseAsync(["node", "rig", "ps", "--json", "--filter", "unknown=foo"]);
+      });
+      expect(logs.some((l) => l.includes("Unknown --filter key 'unknown'"))).toBe(true);
+      expect(logs.some((l) => l.includes("Supported:"))).toBe(true);
+      expect(exitCode).toBe(1);
+    });
+
+    it("ps --filter rejects malformed value (no '=') and exits 1", async () => {
+      psData = [];
+      const { logs, exitCode } = await captureLogs(async () => {
+        await makeCmd().parseAsync(["node", "rig", "ps", "--json", "--filter", "noequals"]);
+      });
+      expect(logs.some((l) => l.includes("--filter must be key=value"))).toBe(true);
+      expect(exitCode).toBe(1);
+    });
+
+    it("ps --limit rejects non-numeric values and exits 1", async () => {
+      psData = [];
+      const { logs, exitCode } = await captureLogs(async () => {
+        await makeCmd().parseAsync(["node", "rig", "ps", "--json", "--limit", "abc"]);
+      });
+      expect(logs.some((l) => l.includes("--limit must be a non-negative integer"))).toBe(true);
+      expect(exitCode).toBe(1);
+    });
+
+    // Synthetic large-host fixture: 60 rigs (just over default 50 budget) is
+    // the smallest fixture that proves human-truncation behavior. Per Amendment
+    // C: the L4 proof already exercised real 100x10 scale; this test asserts
+    // the truncation path fires and the footer is honest. Using 60 instead of
+    // 100 keeps the test fast while still proving the budget boundary.
+    it("ps human output truncates above HUMAN_RIG_BUDGET (50) with honest footer (Amendment C)", async () => {
+      psData = Array.from({ length: 60 }, (_, i) => ({
+        rigId: `rig-${String(i).padStart(2, "0")}`,
+        name: `r${String(i).padStart(2, "0")}`,
+        rigName: `r${String(i).padStart(2, "0")}`,
+        nodeCount: 1, runningCount: 1, status: "running" as const, lifecycleState: "running" as const,
+        uptime: "1m", latestSnapshot: null,
+      }));
+      const { logs } = await captureLogs(async () => {
+        await makeCmd().parseAsync(["node", "rig", "ps"]);
+      });
+      const output = logs.join("\n");
+
+      // Header present
+      expect(output).toContain("LIFECYCLE");
+      // First 50 rig names visible
+      expect(output).toContain("r00");
+      expect(output).toContain("r49");
+      // Beyond-budget rigs not in default human output
+      expect(output).not.toContain("r59");
+      // Truncation footer with actual remaining count
+      expect(output).toMatch(/and 10 more rigs \(truncated at 50\)/);
+      expect(output).toContain("rig ps --full");
+    });
+
+    it("ps --full disables human truncation; all 60 rigs printed", async () => {
+      psData = Array.from({ length: 60 }, (_, i) => ({
+        rigId: `rig-${i}`, name: `r${i}`, rigName: `r${i}`,
+        nodeCount: 1, runningCount: 1, status: "running" as const, lifecycleState: "running" as const,
+        uptime: "1m", latestSnapshot: null,
+      }));
+      const { logs } = await captureLogs(async () => {
+        await makeCmd().parseAsync(["node", "rig", "ps", "--full"]);
+      });
+      const output = logs.join("\n");
+      expect(output).toContain("r0");
+      expect(output).toContain("r59");
+      expect(output).not.toMatch(/truncated/);
+    });
+
+    it("ps --json default unbounded for large rigs: emits all 60 entries (back-compat)", async () => {
+      psData = Array.from({ length: 60 }, (_, i) => ({
+        rigId: `rig-${i}`, name: `r${i}`, rigName: `r${i}`,
+        nodeCount: 1, runningCount: 1, status: "running" as const, lifecycleState: "running" as const,
+        uptime: "1m", latestSnapshot: null,
+      }));
+      const { logs } = await captureLogs(async () => {
+        await makeCmd().parseAsync(["node", "rig", "ps", "--json"]);
+      });
+      const parsed = JSON.parse(logs.join(""));
+      // Default JSON stays a bare array of all 60; NO envelope.
+      expect(Array.isArray(parsed)).toBe(true);
+      expect(parsed).toHaveLength(60);
+    });
+
+    it("ps --nodes --json default unbounded: bare array (back-compat)", async () => {
+      psData = [
+        { rigId: "rig-1", name: "test", rigName: "test", nodeCount: 2, runningCount: 1, status: "partial", lifecycleState: "degraded", uptime: "1m", latestSnapshot: null },
+      ];
+      nodesData["rig-1"] = Array.from({ length: 5 }, (_, i) => ({
+        rigId: "rig-1", rigName: "test", logicalId: `dev.n${i}`, podId: "pod-1", podNamespace: "dev",
+        canonicalSessionName: `n${i}@test`, nodeKind: "agent", runtime: "claude-code",
+        sessionStatus: "running", startupStatus: "ready", restoreOutcome: "n-a", lifecycleState: "running",
+        tmuxAttachCommand: null, resumeCommand: null, latestError: null,
+      }));
+      const { logs } = await captureLogs(async () => {
+        await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "--json"]);
+      });
+      const parsed = JSON.parse(logs.join(""));
+      expect(Array.isArray(parsed)).toBe(true);
+      expect(parsed).toHaveLength(5);
+    });
+
+    it("ps --nodes --json --limit emits envelope shape with totalNodes/truncated/hint", async () => {
+      psData = [
+        { rigId: "rig-1", name: "test", rigName: "test", nodeCount: 5, runningCount: 5, status: "running", lifecycleState: "running", uptime: "1m", latestSnapshot: null },
+      ];
+      nodesData["rig-1"] = Array.from({ length: 5 }, (_, i) => ({
+        rigId: "rig-1", rigName: "test", logicalId: `dev.n${i}`, podId: "pod-1", podNamespace: "dev",
+        canonicalSessionName: `n${i}@test`, nodeKind: "agent", runtime: "claude-code",
+        sessionStatus: "running", startupStatus: "ready", restoreOutcome: "n-a", lifecycleState: "running",
+        tmuxAttachCommand: null, resumeCommand: null, latestError: null,
+      }));
+      const { logs } = await captureLogs(async () => {
+        await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "--json", "--limit", "2"]);
+      });
+      const parsed = JSON.parse(logs.join(""));
+      expect(parsed.entries).toHaveLength(2);
+      expect(parsed.totalNodes).toBe(5);
+      expect(parsed.truncated).toBe(true);
+      expect(parsed.hint).toContain("--nodes");
+      expect(parsed.hint).toContain("--full");
+    });
+  });
 });

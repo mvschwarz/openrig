@@ -5,9 +5,21 @@ import { getNodeInventory } from "./node-inventory.js";
 export interface PsEntry {
   rigId: string;
   name: string;
+  /**
+   * Alias of `name`. Always populated and always equal to `name`.
+   *
+   * Background: per-node `NodeInventoryEntry` exposes the rig's name as
+   * `rigName` while rig-summary `PsEntry` historically used `name`. Agent
+   * code that projects `.rigName` from rig-summary JSON saw silent
+   * `null`/`undefined`. This alias closes that inconsistency without
+   * breaking existing consumers reading `.name`.
+   */
+  rigName: string;
   nodeCount: number;
   runningCount: number;
   status: "running" | "partial" | "stopped";
+  /** Always populated. Folded from per-node `lifecycleState` (post-L2);
+   * empty rigs derive `stopped`. Never undefined or null. */
   lifecycleState: RigLifecycleState;
   uptime: string | null;
   latestSnapshot: string | null;
@@ -98,6 +110,7 @@ export class PsProjectionService {
       return {
         rigId: r.rig_id,
         name: r.name,
+        rigName: r.name,
         nodeCount: r.node_count,
         runningCount: r.running_count,
         status,
