@@ -7,6 +7,8 @@ import type { StatusDeps } from "./status.js";
 interface PsEntry {
   rigId: string;
   name: string;
+  /** L3-followup: alias of `name`. Always populated and equal to `name`. */
+  rigName?: string;
   nodeCount: number;
   runningCount: number;
   status: "running" | "partial" | "stopped";
@@ -41,6 +43,111 @@ interface NodeEntry {
   [key: string]: unknown;
 }
 
+// L3-followup: human-output budgets bound default terminal output for hosts
+// with realistic agent counts. `--full` opts out. JSON output remains
+// unbounded by default for back-compat (Decision C hybrid).
+const HUMAN_RIG_BUDGET = 50;
+const HUMAN_NODE_BUDGET = 100;
+
+// L3-followup: --filter accepts only this allow-list. Unknown keys produce a
+// clear error with the supported list (Guard Review Checklist: filter-parser
+// security).
+const ALLOWED_FILTER_KEYS = new Set(["status", "lifecycleState", "name-prefix", "name"]);
+
+interface PsCliOptions {
+  json?: boolean;
+  nodes?: boolean;
+  full?: boolean;
+  limit?: string;
+  fields?: string;
+  summary?: boolean;
+  filter?: string;
+}
+
+interface ParsedFilter {
+  key: string;
+  value: string;
+}
+
+function parseFilter(filter: string): ParsedFilter | { error: string } {
+  const idx = filter.indexOf("=");
+  if (idx === -1) return { error: `--filter must be key=value; got: '${filter}'` };
+  const key = filter.slice(0, idx);
+  const value = filter.slice(idx + 1);
+  if (!ALLOWED_FILTER_KEYS.has(key)) {
+    return {
+      error: `Unknown --filter key '${key}'. Supported: ${[...ALLOWED_FILTER_KEYS].sort().join(", ")}`,
+    };
+  }
+  if (!value) {
+    return { error: `--filter value is empty for key '${key}'` };
+  }
+  return { key, value };
+}
+
+function applyRigFilter(entries: PsEntry[], filter: ParsedFilter): PsEntry[] {
+  return entries.filter((e) => {
+    if (filter.key === "status") return e.status === filter.value;
+    if (filter.key === "lifecycleState") return e.lifecycleState === filter.value;
+    if (filter.key === "name-prefix") return (e.rigName ?? e.name).startsWith(filter.value);
+    if (filter.key === "name") return (e.rigName ?? e.name) === filter.value;
+    return true;
+  });
+}
+
+function applyNodeFilter(entries: NodeEntry[], filter: ParsedFilter): NodeEntry[] {
+  return entries.filter((n) => {
+    // status maps to sessionStatus for nodes; lifecycleState applies directly.
+    if (filter.key === "status") return n.sessionStatus === filter.value;
+    if (filter.key === "lifecycleState") return n.lifecycleState === filter.value;
+    if (filter.key === "name-prefix") return n.rigName.startsWith(filter.value);
+    if (filter.key === "name") return n.rigName === filter.value;
+    return true;
+  });
+}
+
+function selectFields<T extends Record<string, unknown>>(entries: T[], fields: string[]): Array<Record<string, unknown>> {
+  return entries.map((e) => {
+    const out: Record<string, unknown> = {};
+    for (const f of fields) out[f] = e[f];
+    return out;
+  });
+}
+
+function summarizeRigs(entries: PsEntry[]): {
+  totalRigs: number;
+  totalRunning: number;
+  byLifecycle: Record<string, number>;
+  byStatus: Record<string, number>;
+} {
+  const byLifecycle: Record<string, number> = {};
+  const byStatus: Record<string, number> = {};
+  let totalRunning = 0;
+  for (const e of entries) {
+    const ls = e.lifecycleState ?? "unknown";
+    byLifecycle[ls] = (byLifecycle[ls] ?? 0) + 1;
+    byStatus[e.status] = (byStatus[e.status] ?? 0) + 1;
+    if (e.status === "running") totalRunning++;
+  }
+  return { totalRigs: entries.length, totalRunning, byLifecycle, byStatus };
+}
+
+function summarizeNodes(entries: NodeEntry[]): {
+  totalNodes: number;
+  byLifecycle: Record<string, number>;
+  bySessionStatus: Record<string, number>;
+} {
+  const byLifecycle: Record<string, number> = {};
+  const bySessionStatus: Record<string, number> = {};
+  for (const n of entries) {
+    const ls = n.lifecycleState ?? "unknown";
+    byLifecycle[ls] = (byLifecycle[ls] ?? 0) + 1;
+    const ss = n.sessionStatus ?? "unknown";
+    bySessionStatus[ss] = (bySessionStatus[ss] ?? 0) + 1;
+  }
+  return { totalNodes: entries.length, byLifecycle, bySessionStatus };
+}
+
 // Compact rig-level lifecycle codes for the rig table header (3-char fixed width).
 function abbrevRigLifecycle(state: PsEntry["lifecycleState"] | undefined): string {
   if (!state) return "—";
@@ -64,29 +171,53 @@ function abbrevNodeLifecycle(state: NodeEntry["lifecycleState"] | undefined): st
 
 /**
  * `rig ps` — list running rigs and optionally their nodes.
- * @param depsOverride - injectable deps for testing
- * @returns Commander command
+ *
+ * L3-followup adds CLI-side shaping flags (`--limit`, `--fields`, `--summary`,
+ * `--filter`, `--full`) for context-window-safe output on large hosts. Default
+ * `rig ps` (human) truncates to ~50 rigs with an explicit footer naming totals
+ * and the `--full` opt-out. Default `rig ps --json` keeps the bare-array shape
+ * for back-compat; the truncation/envelope shape only applies when at least
+ * one of `--limit`/`--summary`/`--fields`/`--filter` is specified.
  */
 export function psCommand(depsOverride?: StatusDeps): Command {
   const cmd = new Command("ps")
     .description("List rigs and their status")
     .addHelpText("after", `
 Examples:
-  rig ps                    Show all rigs with status
-  rig ps --json             JSON output for piping/parsing
-  rig ps --nodes            Show per-node detail for all rigs
-  rig ps --nodes --json     Node inventory as JSON array
+  rig ps                                          Show all rigs (human; truncated to ${HUMAN_RIG_BUDGET} with footer)
+  rig ps --full                                   Disable human truncation
+  rig ps --json                                   JSON output (bare array; back-compat)
+  rig ps --json --limit 20                        Bounded JSON envelope
+  rig ps --json --summary                         Aggregate-only JSON (no per-rig entries)
+  rig ps --json --fields rigName,status,lifecycleState
+                                                  Project JSON to named fields
+  rig ps --filter lifecycleState=attention_required
+                                                  Show only rigs needing attention
+  rig ps --filter status=running                  Show only running rigs
+  rig ps --filter name-prefix=demo                Filter by rig-name prefix
+  rig ps --nodes                                  Per-node detail (human; truncated to ${HUMAN_NODE_BUDGET})
+  rig ps --nodes --json --limit 50                Bounded per-node JSON envelope
+
+JSON output entries include both \`name\` and \`rigName\` (alias) for forward
+compatibility; agent code should prefer \`rigName\` (matches per-node JSON).
+
+--filter accepts: status, lifecycleState, name-prefix, name. Other keys are rejected.
 
 Exit codes:
   0  Success
-  1  Daemon not running
+  1  Daemon not running, or invalid --filter / --limit
   2  Failed to fetch data from daemon`);
   const getDepsF = () => depsOverride ?? { lifecycleDeps: realDeps(), clientFactory: (url: string) => new DaemonClient(url) };
 
   cmd
     .option("--json", "JSON output for agents")
     .option("--nodes", "Show per-node detail for all rigs")
-    .action(async (opts: { json?: boolean; nodes?: boolean }) => {
+    .option("--full", "Disable default human-output truncation")
+    .option("--limit <n>", "Limit number of entries (rigs or nodes)")
+    .option("--fields <list>", "Comma-separated field list to project (JSON only)")
+    .option("--summary", "Emit aggregate-only output (counts by status/lifecycle)")
+    .option("--filter <key=value>", "Filter entries; supported keys: status, lifecycleState, name-prefix, name")
+    .action(async (opts: PsCliOptions) => {
       const deps = getDepsF();
 
       const status = await getDaemonStatus(deps.lifecycleDeps);
@@ -96,10 +227,32 @@ Exit codes:
         return;
       }
 
+      // Parse filter once up front so unknown keys/malformed filters surface
+      // as exit-1 errors before any HTTP call.
+      let parsedFilter: ParsedFilter | null = null;
+      if (opts.filter) {
+        const result = parseFilter(opts.filter);
+        if ("error" in result) {
+          console.error(result.error);
+          process.exitCode = 1;
+          return;
+        }
+        parsedFilter = result;
+      }
+
+      const limit = opts.limit !== undefined ? Number(opts.limit) : null;
+      if (limit !== null && (!Number.isInteger(limit) || limit < 0)) {
+        console.error(`--limit must be a non-negative integer; got '${opts.limit}'`);
+        process.exitCode = 1;
+        return;
+      }
+      const fields = opts.fields ? opts.fields.split(",").map((f) => f.trim()).filter((f) => f.length > 0) : null;
+      const useEnvelope = parsedFilter !== null || limit !== null || fields !== null || opts.summary === true;
+
       const client = deps.clientFactory(getDaemonUrl(status));
 
       if (opts.nodes) {
-        await handleNodes(client, opts.json ?? false);
+        await handleNodes(client, opts, parsedFilter, limit, fields, useEnvelope);
         return;
       }
 
@@ -111,24 +264,66 @@ Exit codes:
         return;
       }
 
-      const entries = res.data;
+      const all = res.data;
+
+      // Apply CLI-side filter (Amendment A: prefer CLI shaping).
+      const filtered = parsedFilter ? applyRigFilter(all, parsedFilter) : all;
+
+      // Summary mode short-circuits per-entry output.
+      if (opts.summary) {
+        const summary = summarizeRigs(filtered);
+        if (opts.json) {
+          console.log(JSON.stringify(summary));
+        } else {
+          console.log(`totalRigs: ${summary.totalRigs}`);
+          console.log(`totalRunning: ${summary.totalRunning}`);
+          console.log(`byStatus: ${JSON.stringify(summary.byStatus)}`);
+          console.log(`byLifecycle: ${JSON.stringify(summary.byLifecycle)}`);
+        }
+        return;
+      }
+
+      // Apply --limit on top of filter (CLI side; daemon stays bare-array).
+      const limited = limit !== null ? filtered.slice(0, limit) : filtered;
+      const truncated = limit !== null && filtered.length > limit;
+
+      // Field projection runs last so requested fields apply to the limited set.
+      const projected = fields ? selectFields(limited as unknown as Array<Record<string, unknown>>, fields) : limited;
 
       if (opts.json) {
-        console.log(JSON.stringify(entries));
+        if (useEnvelope) {
+          // Envelope only on flag use; default JSON stays a bare array for compat.
+          const envelope: Record<string, unknown> = {
+            entries: projected,
+            totalRigs: filtered.length,
+            truncated,
+          };
+          if (truncated) envelope.hint = "rig ps --full --json";
+          console.log(JSON.stringify(envelope));
+        } else {
+          console.log(JSON.stringify(projected));
+        }
         return;
       }
 
-      if (entries.length === 0) {
-        console.log("No rigs");
+      if (limited.length === 0) {
+        if (parsedFilter) {
+          console.log(`No rigs match --filter ${parsedFilter.key}=${parsedFilter.value}`);
+        } else {
+          console.log("No rigs");
+        }
         return;
       }
 
-      // Formatted table
+      // Human output: apply default truncation budget unless --full.
+      const humanList = (opts.full || limit !== null) ? limited : limited.slice(0, HUMAN_RIG_BUDGET);
+      const humanTruncated = !opts.full && limit === null && filtered.length > HUMAN_RIG_BUDGET;
+
       const header = padRigRow("RIG", "NODES", "RUNNING", "STATUS", "LIFECYCLE", "UPTIME", "SNAPSHOT");
       console.log(header);
-      for (const e of entries) {
+      for (const e of humanList as PsEntry[]) {
         console.log(padRigRow(
-          e.name,
+          e.rigName ?? e.name,
           String(e.nodeCount),
           String(e.runningCount),
           e.status,
@@ -137,13 +332,27 @@ Exit codes:
           e.latestSnapshot ?? "—",
         ));
       }
+      if (humanTruncated) {
+        const remaining = filtered.length - HUMAN_RIG_BUDGET;
+        console.log(`... and ${remaining} more rig${remaining === 1 ? "" : "s"} (truncated at ${HUMAN_RIG_BUDGET}).`);
+        console.log("Run 'rig ps --full' to see all, or 'rig ps --filter lifecycleState=attention_required' to narrow.");
+      } else if (truncated) {
+        const remaining = filtered.length - (limit ?? 0);
+        console.log(`... and ${remaining} more rig${remaining === 1 ? "" : "s"} (--limit ${limit}).`);
+      }
     });
 
   return cmd;
 }
 
-async function handleNodes(client: DaemonClient, json: boolean): Promise<void> {
-  // Fetch rig list first
+async function handleNodes(
+  client: DaemonClient,
+  opts: PsCliOptions,
+  parsedFilter: ParsedFilter | null,
+  limit: number | null,
+  fields: string[] | null,
+  useEnvelope: boolean,
+): Promise<void> {
   const rigRes = await client.get<PsEntry[]>("/api/ps");
   if (rigRes.status >= 400) {
     console.error(`Failed to fetch rig list from daemon (HTTP ${rigRes.status}). Check daemon status with: rig status`);
@@ -155,25 +364,60 @@ async function handleNodes(client: DaemonClient, json: boolean): Promise<void> {
   for (const rig of rigRes.data) {
     const nodesRes = await client.get<NodeEntry[]>(`/api/rigs/${encodeURIComponent(rig.rigId)}/nodes`);
     if (nodesRes.status >= 400) {
-      console.error(`Warning: failed to fetch nodes for rig "${rig.name}" (HTTP ${nodesRes.status}). List rigs with: rig ps`);
+      console.error(`Warning: failed to fetch nodes for rig "${rig.rigName ?? rig.name}" (HTTP ${nodesRes.status}). List rigs with: rig ps`);
       continue;
     }
     allNodes.push(...nodesRes.data);
   }
 
-  if (json) {
-    console.log(JSON.stringify(allNodes));
+  const filtered = parsedFilter ? applyNodeFilter(allNodes, parsedFilter) : allNodes;
+
+  if (opts.summary) {
+    const summary = summarizeNodes(filtered);
+    if (opts.json) {
+      console.log(JSON.stringify(summary));
+    } else {
+      console.log(`totalNodes: ${summary.totalNodes}`);
+      console.log(`bySessionStatus: ${JSON.stringify(summary.bySessionStatus)}`);
+      console.log(`byLifecycle: ${JSON.stringify(summary.byLifecycle)}`);
+    }
     return;
   }
 
-  if (allNodes.length === 0) {
-    console.log("No nodes");
+  const limited = limit !== null ? filtered.slice(0, limit) : filtered;
+  const limitTruncated = limit !== null && filtered.length > limit;
+  const projected = fields ? selectFields(limited as unknown as Array<Record<string, unknown>>, fields) : limited;
+
+  if (opts.json) {
+    if (useEnvelope) {
+      const envelope: Record<string, unknown> = {
+        entries: projected,
+        totalNodes: filtered.length,
+        truncated: limitTruncated,
+      };
+      if (limitTruncated) envelope.hint = "rig ps --nodes --full --json";
+      console.log(JSON.stringify(envelope));
+    } else {
+      console.log(JSON.stringify(projected));
+    }
     return;
   }
+
+  if (limited.length === 0) {
+    if (parsedFilter) {
+      console.log(`No nodes match --filter ${parsedFilter.key}=${parsedFilter.value}`);
+    } else {
+      console.log("No nodes");
+    }
+    return;
+  }
+
+  const humanList = (opts.full || limit !== null) ? limited : limited.slice(0, HUMAN_NODE_BUDGET);
+  const humanTruncated = !opts.full && limit === null && filtered.length > HUMAN_NODE_BUDGET;
 
   const header = padNodeRow("RIG", "POD", "MEMBER", "SESSION", "RUNTIME", "STATUS", "STARTUP", "LIFECYCLE", "ACTIVITY", "RESTORE", "ERROR");
   console.log(header);
-  for (const n of allNodes) {
+  for (const n of humanList as NodeEntry[]) {
     const parts = n.logicalId.split(".");
     const pod = n.podNamespace ?? (parts.length > 1 ? parts[0]! : "—");
     const member = parts.length > 1 ? parts.slice(1).join(".") : n.logicalId;
@@ -191,6 +435,14 @@ async function handleNodes(client: DaemonClient, json: boolean): Promise<void> {
       n.restoreOutcome,
       n.latestError ? truncate(n.latestError, 30) : "—",
     ));
+  }
+  if (humanTruncated) {
+    const remaining = filtered.length - HUMAN_NODE_BUDGET;
+    console.log(`... and ${remaining} more node${remaining === 1 ? "" : "s"} (truncated at ${HUMAN_NODE_BUDGET}).`);
+    console.log("Run 'rig ps --nodes --full' to see all, or '--filter lifecycleState=attention_required' to narrow.");
+  } else if (limitTruncated) {
+    const remaining = filtered.length - (limit ?? 0);
+    console.log(`... and ${remaining} more node${remaining === 1 ? "" : "s"} (--limit ${limit}).`);
   }
 }
 
