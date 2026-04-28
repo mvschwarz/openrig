@@ -103,6 +103,11 @@ export type RigEvent =
   | { type: "snapshot.created"; rigId: string; snapshotId: string; kind: string }
   | { type: "restore.started"; rigId: string; snapshotId: string }
   | { type: "restore.completed"; rigId: string; snapshotId: string; result: RestoreResult }
+  // L3: appended (never replaces) when reconcileNodeRuntimeTruth upgrades a
+  // failed/attention_required restoreOutcome to operator_recovered after
+  // visible-runtime-evidence preconditions hold. The original failure event
+  // is preserved in the log; this event records the audit trail of the upgrade.
+  | { type: "restore.outcome_reconciled"; rigId: string; nodeId: string; attemptId: number; from: "failed" | "attention_required"; to: "operator_recovered"; evidence: { tmux: boolean; fgProcess: "claude" | "codex" | string; resumeTokenUsed: boolean; paneState: "usable" } }
   | { type: "agent.activity"; rigId: string; nodeId: string; sessionName: string; runtime: string | null; activity: AgentActivity }
   | { type: "rig.imported"; rigId: string; specName: string; specVersion: string }
   // Package events (cross-rig, no rigId)
@@ -236,8 +241,14 @@ export interface RestoreValidationBlocker {
 export interface RestoreNodeResult {
   nodeId: string;
   logicalId: string;
-  status: "resumed" | "rebuilt" | "fresh" | "failed";
+  // L3: `attention_required` is set when the post-launch probe detects a
+  // Claude resume-selection prompt. `operator_recovered` is the terminal
+  // outcome after `restore.outcome_reconciled`; never produced directly by
+  // the orchestrator's restore pipeline (only by reconcileNodeRuntimeTruth).
+  status: "resumed" | "rebuilt" | "fresh" | "failed" | "attention_required" | "operator_recovered";
   error?: string;
+  /** Pane evidence captured when status is `attention_required` (L3, optional). */
+  attentionEvidence?: string | null;
 }
 
 export type RestoreOutcome =
@@ -252,7 +263,10 @@ export type RestoreOutcome =
 
 // -- Node inventory projection (NS-T02) --
 
-export type NodeRestoreOutcome = "resumed" | "rebuilt" | "fresh" | "failed" | "n-a";
+// L3 extends with `attention_required` (Claude resume-selection prompt proxy)
+// and `operator_recovered` (terminal post-reconciliation outcome — never produced
+// directly by restore, only emitted via `restore.outcome_reconciled`).
+export type NodeRestoreOutcome = "resumed" | "rebuilt" | "fresh" | "failed" | "attention_required" | "operator_recovered" | "n-a";
 export type OccupantLifecycle = "active" | "retiring" | "retired" | "context_walled" | "compacted" | "crashed" | "unknown";
 export type ContinuityOutcome = "resumed" | "rebuilt" | "forked" | "fresh" | "failed";
 export type HandoverResult = "complete" | "unchanged" | "partial" | "failed" | null;

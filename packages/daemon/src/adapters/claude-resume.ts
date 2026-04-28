@@ -5,6 +5,10 @@ import { assessNativeResumeProbe } from "../domain/native-resume-probe.js";
 
 export type ResumeResult =
   | { ok: true }
+  // L3: `attention_required` is a non-terminal failure — Claude is alive and
+  // recoverable, but the resume-selection prompt is blocking. Caller maps to
+  // restoreOutcome=attention_required (do NOT auto-answer per Decision 2).
+  | { ok: false; code: "attention_required"; message: string; evidence?: string }
   | { ok: false; code: string; message: string };
 
 const CLAUDE_TYPES = new Set(["claude_name", "claude_id"]);
@@ -77,6 +81,20 @@ export class ClaudeResumeAdapter {
           ok: false,
           code: "retry_fresh",
           message: "Claude resume failed: no conversation found for the requested session",
+        };
+      }
+
+      // L3: Claude resume-selection prompt → attention_required (not failed).
+      // The runtime is alive and recoverable but blocked on operator selection.
+      // Decision 2 forbids auto-answering; surface evidence and let the
+      // operator/UI act, then later reconciliation may upgrade to
+      // operator_recovered when the pane reaches usable state.
+      if (probe.status === "attention_required") {
+        return {
+          ok: false,
+          code: "attention_required",
+          message: probe.detail,
+          evidence: paneContent.split("\n").slice(-12).join("\n"),
         };
       }
 

@@ -30,7 +30,23 @@ export function restoreCommand(depsOverride?: StatusDeps): Command {
       const client = deps.clientFactory(getDaemonUrl(status));
       const rigId = opts.rig;
 
+      // L3: install a SIGINT/SIGTERM handler that prints an honest message —
+      // interrupting the CLI client does NOT stop daemon-side restore work.
+      // Cancellation as a daemon protocol is a separate slice; ship the
+      // message so operators are not surprised.
+      const onSignal = () => {
+        console.error("Client interrupt received; daemon-side restore may continue. Use 'rig ps --nodes' or 'rig restore-check' to follow progress.");
+        process.exit(1);
+      };
+      process.once("SIGINT", onSignal);
+      process.once("SIGTERM", onSignal);
+
       const res = await client.post<{
+        ok?: boolean;
+        attemptId?: number;
+        status?: string;
+        rigId?: string;
+        // Pre-restore-started error path keeps the original payload shape.
         rigResult?: string;
         blockers?: RestoreBlocker[];
         nodes?: Array<{
@@ -69,7 +85,15 @@ export function restoreCommand(depsOverride?: StatusDeps): Command {
       } else if (res.status >= 400) {
         console.error(`Restore failed: ${(res.data as { error?: string }).error ?? "unknown error"} (HTTP ${res.status}). Check daemon logs or try a different snapshot.`);
         process.exitCode = 1;
+      } else if (res.data.attemptId !== undefined) {
+        // L3 success path: route returned 202 immediately after restore.started.
+        console.log(`Restore attempt id: ${res.data.attemptId}`);
+        console.log(`Status: ${res.data.status ?? "started"}`);
+        console.log("Daemon is restoring per-node in the background; follow progress with 'rig ps --nodes' or 'rig restore-check'.");
       } else {
+        // Defensive: server responded ok=true but didn't include attemptId.
+        // Fall back to the legacy summary if it's present (back-compat with
+        // pre-L3 daemons during rolling upgrades).
         console.log("Restore complete:");
         if (res.data.rigResult) {
           console.log(`Rig result: ${res.data.rigResult}`);

@@ -12,6 +12,7 @@ import type { TmuxAdapter } from "../adapters/tmux.js";
 import type { ClaudeResumeAdapter } from "../adapters/claude-resume.js";
 import type { CodexResumeAdapter } from "../adapters/codex-resume.js";
 import type { TranscriptStore } from "./transcript-store.js";
+import { assessNativeResumeProbe } from "./native-resume-probe.js";
 import type {
   RestoreOutcome,
   RestoreRigResult,
@@ -26,14 +27,42 @@ import type {
   RigServicesRecord,
 } from "./types.js";
 
+// L3: result shape for runtime-truth reconciliation. A reconciliation that
+// does NOT meet all four evidence preconditions is a no-op with a missing
+// reason, NOT an error. Decision 3: terminal post-reconciliation outcome is
+// `operator_recovered`; `ready` is forbidden.
+export type ReconcileNodeResult =
+  | {
+      ok: true;
+      attemptId: number;
+      from: "failed" | "attention_required";
+      to: "operator_recovered";
+      evidence: { tmux: boolean; fgProcess: "claude" | "codex" | string; resumeTokenUsed: boolean; paneState: "usable" };
+    }
+  | {
+      ok: false;
+      code:
+        | "node_not_found"
+        | "no_attempt"
+        | "outcome_not_upgradable"
+        | "tmux_session_missing"
+        | "fg_process_not_runtime"
+        | "resume_token_not_used"
+        | "pane_not_usable";
+      detail: string;
+    };
+
 // Only these edge kinds constrain launch order
 const LAUNCH_DEPENDENCY_KINDS = new Set(["delegates_to", "spawned_by"]);
 
 export function rollupRestoreRigResult(nodes: RestoreNodeResult[]): RestoreRigResult {
   if (nodes.length === 0) return "failed";
-  const successful = nodes.filter((node) => node.status !== "failed");
-  if (successful.length === 0) return "failed";
-  if (nodes.some((node) => node.status === "fresh" || node.status === "failed")) {
+  // L3: `attention_required` is non-terminal failure (alive but blocked on
+  // operator action). It rolls up as `partially_restored`. `operator_recovered`
+  // is a clean post-reconciliation outcome and rolls up like `resumed`.
+  const allFailed = nodes.every((node) => node.status === "failed");
+  if (allFailed) return "failed";
+  if (nodes.some((node) => node.status === "fresh" || node.status === "failed" || node.status === "attention_required")) {
     return "partially_restored";
   }
   return "fully_restored";
@@ -110,6 +139,13 @@ export class RestoreOrchestrator {
   async restore(snapshotId: string, opts?: {
     adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>;
     fsOps?: { exists(path: string): boolean };
+    /**
+     * L3: fired with the persisted `restore.started` event seq as soon as the
+     * orchestrator commits to running per-node restore. Routes use this to
+     * return `attemptId` to the client immediately while per-node work
+     * continues in the background.
+     */
+    onAttemptStarted?: (attemptId: number) => void;
   }): Promise<RestoreOutcome> {
     // 1. Load snapshot
     const snapshot = this.snapshotRepo.getSnapshot(snapshotId);
@@ -170,8 +206,16 @@ export class RestoreOrchestrator {
         this.sessionRegistry.markDetached(sessionId);
       }
 
-      // 3. Emit restore.started
-      this.eventBus.emit({ type: "restore.started", rigId, snapshotId });
+      // 3. Emit restore.started — the persisted event seq IS the attempt id
+      //    (Decision 1: no separate restore_attempts table).
+      const restoreStartedEvent = this.eventBus.emit({ type: "restore.started", rigId, snapshotId });
+      const attemptId = restoreStartedEvent.seq;
+      try {
+        opts?.onAttemptStarted?.(attemptId);
+      } catch {
+        // onAttemptStarted is fire-and-forget; never let a route's response
+        // logic crash the restore pipeline.
+      }
 
       // 3b. Service gate: boot services before agent restore if this rig has services
       if (this.serviceOrchestrator) {
@@ -676,8 +720,19 @@ export class RestoreOrchestrator {
         return { nodeId: node.id, logicalId: node.logicalId, status: "failed", error: `Resume requested but no token available. Restore the node manually or launch fresh explicitly.` };
       } else {
         const resumeOutcome = await this.attemptResume(sessionName, resumeType, resumeToken, node.cwd ?? "/");
-        if (resumeOutcome === "resumed") {
+        if (resumeOutcome.kind === "resumed") {
           baseStatus = "resumed";
+        } else if (resumeOutcome.kind === "attention_required") {
+          // L3 Decision 2: Claude resume-selection prompt -> attention_required.
+          // Do NOT auto-answer. Reconcile later via reconcileNodeRuntimeTruth
+          // when the operator reaches a usable pane state.
+          return {
+            nodeId: node.id,
+            logicalId: node.logicalId,
+            status: "attention_required",
+            error: resumeOutcome.message,
+            attentionEvidence: resumeOutcome.evidence ?? null,
+          };
         } else {
           return { nodeId: node.id, logicalId: node.logicalId, status: "failed", error: `Resume attempted but failed. Check the harness state manually or launch fresh explicitly.` };
         }
@@ -865,19 +920,163 @@ export class RestoreOrchestrator {
     resumeType: string,
     resumeToken: string | null,
     cwd: string
-  ): Promise<"resumed" | "retry_fresh" | "failed"> {
+  ): Promise<
+    | { kind: "resumed" }
+    | { kind: "retry_fresh" }
+    | { kind: "failed"; message: string }
+    | { kind: "attention_required"; message: string; evidence?: string }
+  > {
     if (this.claudeResume.canResume(resumeType, resumeToken)) {
       const result = await this.claudeResume.resume(sessionName, resumeType, resumeToken, cwd);
-      if (result.ok) return "resumed";
-      return result.code === "retry_fresh" ? "retry_fresh" : "failed";
+      if (result.ok) return { kind: "resumed" };
+      if (result.code === "retry_fresh") return { kind: "retry_fresh" };
+      // L3: surface attention_required from the Claude probe (resume-selection prompt).
+      if (result.code === "attention_required") {
+        return {
+          kind: "attention_required",
+          message: result.message,
+          evidence: (result as { evidence?: string }).evidence,
+        };
+      }
+      return { kind: "failed", message: result.message };
     }
 
     if (this.codexResume.canResume(resumeType, resumeToken)) {
       const result = await this.codexResume.resume(sessionName, resumeType, resumeToken, cwd);
-      return result.ok ? "resumed" : "failed";
+      return result.ok ? { kind: "resumed" } : { kind: "failed", message: result.message };
     }
 
-    return "failed";
+    return { kind: "failed", message: "No resume adapter available for this runtime/token combination." };
+  }
+
+  /**
+   * L3 Decision 3: runtime-truth reconciliation. Given a node whose original
+   * `restoreOutcome` was `failed` or `attention_required`, examine current
+   * runtime state. If ALL four visible-evidence preconditions hold, append
+   * `restore.outcome_reconciled` so the node's effective post-reconciliation
+   * outcome becomes `operator_recovered`. Never mutates or deletes the
+   * original failure event; never produces `ready`.
+   *
+   * Returns `{ ok: true, attemptId, from, to, evidence }` on upgrade, or
+   * `{ ok: false, code, detail }` describing exactly which precondition
+   * failed (or "no_attempt" / "outcome_not_upgradable" when there is nothing
+   * to reconcile).
+   */
+  async reconcileNodeRuntimeTruth(
+    rigId: string,
+    nodeId: string,
+  ): Promise<ReconcileNodeResult> {
+    // Locate the latest restore attempt for this rig.
+    const startedRow = this.db.prepare(
+      "SELECT seq, payload FROM events WHERE rig_id = ? AND type = 'restore.started' ORDER BY seq DESC LIMIT 1"
+    ).get(rigId) as { seq: number; payload: string } | undefined;
+    if (!startedRow) {
+      return { ok: false, code: "no_attempt", detail: "No restore.started event recorded for this rig." };
+    }
+    const attemptId = startedRow.seq;
+
+    // Find the node's most recent post-attempt outcome from the most-recent
+    // restore.completed event for this rig. If the latest outcome is not
+    // failed or attention_required, the reconciler has nothing to upgrade.
+    const completedRow = this.db.prepare(
+      "SELECT payload FROM events WHERE rig_id = ? AND type = 'restore.completed' AND seq > ? ORDER BY seq DESC LIMIT 1"
+    ).get(rigId, attemptId) as { payload: string } | undefined;
+    let nodeStatus: RestoreNodeResult["status"] | null = null;
+    let nodeLogicalId: string | null = null;
+    if (completedRow) {
+      try {
+        const parsed = JSON.parse(completedRow.payload) as { result: RestoreResult };
+        const found = parsed.result?.nodes?.find((n) => n.nodeId === nodeId);
+        if (found) {
+          nodeStatus = found.status;
+          nodeLogicalId = found.logicalId;
+        }
+      } catch {
+        // payload corruption — treat as no node record found
+      }
+    }
+    if (!nodeStatus) {
+      return { ok: false, code: "node_not_found", detail: `Node ${nodeId} has no record in the latest restore.completed event for rig ${rigId}.` };
+    }
+    if (nodeStatus !== "failed" && nodeStatus !== "attention_required") {
+      return { ok: false, code: "outcome_not_upgradable", detail: `Reconciliation only upgrades failed or attention_required; current outcome is ${nodeStatus}.` };
+    }
+    const fromStatus: "failed" | "attention_required" = nodeStatus;
+
+    // Resolve canonical session name for this node so we can probe tmux/pane.
+    const bindingRow = this.db.prepare(
+      "SELECT tmux_session FROM bindings WHERE node_id = ?"
+    ).get(nodeId) as { tmux_session: string | null } | undefined;
+    const sessionName = bindingRow?.tmux_session ?? null;
+    if (!sessionName) {
+      return { ok: false, code: "tmux_session_missing", detail: "No tmux session bound for this node." };
+    }
+
+    // Precondition #1: tmux session exists.
+    let alive = false;
+    try {
+      alive = await this.tmuxAdapter.hasSession(sessionName);
+    } catch {
+      // L1 fail-closed: ambiguous probe failure stays as not-alive for the
+      // reconciler. Original failure event remains untouched.
+      alive = false;
+    }
+    if (!alive) {
+      return { ok: false, code: "tmux_session_missing", detail: `Tmux session ${sessionName} is not currently alive.` };
+    }
+
+    // Resolve runtime + capture pane state for preconditions #2 and #4.
+    const nodeRow = this.db.prepare(
+      "SELECT runtime FROM nodes WHERE id = ?"
+    ).get(nodeId) as { runtime: string | null } | undefined;
+    const runtime = nodeRow?.runtime ?? null;
+    const paneCommand = await this.tmuxAdapter.getPaneCommand(sessionName);
+    const paneContent = (await this.tmuxAdapter.capturePaneContent(sessionName, 40)) ?? "";
+
+    // Precondition #2: foreground process is the runtime (claude or codex).
+    const probe = assessNativeResumeProbe({ runtime, paneCommand, paneContent });
+    const fgProcess = paneCommand && (paneCommand === "claude" || paneCommand.startsWith("codex"))
+      ? (paneCommand === "claude" ? "claude" : "codex") as "claude" | "codex"
+      : null;
+    if (!fgProcess) {
+      return { ok: false, code: "fg_process_not_runtime", detail: `Foreground process is "${paneCommand ?? "(unknown)"}", not claude/codex.` };
+    }
+
+    // Precondition #3: the resume token was actually used at launch.
+    // Stored on the latest session row; null/empty means resume was not
+    // exercised so a "recovered" claim has no basis.
+    const sessRow = this.db.prepare(
+      "SELECT resume_token FROM sessions WHERE node_id = ? ORDER BY id DESC LIMIT 1"
+    ).get(nodeId) as { resume_token: string | null } | undefined;
+    const resumeTokenUsed = typeof sessRow?.resume_token === "string" && sessRow.resume_token.length > 0;
+    if (!resumeTokenUsed) {
+      return { ok: false, code: "resume_token_not_used", detail: "No resume token recorded on the latest session row." };
+    }
+
+    // Precondition #4: pane is at a usable/idle state — explicitly NOT a
+    // resume-selection prompt and not the "returned to shell" failure mode.
+    if (probe.status !== "resumed") {
+      return { ok: false, code: "pane_not_usable", detail: `Pane state is ${probe.status} (${probe.code}); reconciliation requires resumed.` };
+    }
+
+    // All four preconditions hold. Append (never mutate) the audit event.
+    this.eventBus.emit({
+      type: "restore.outcome_reconciled",
+      rigId,
+      nodeId,
+      attemptId,
+      from: fromStatus,
+      to: "operator_recovered",
+      evidence: { tmux: true, fgProcess, resumeTokenUsed: true, paneState: "usable" },
+    });
+
+    return {
+      ok: true,
+      attemptId,
+      from: fromStatus,
+      to: "operator_recovered",
+      evidence: { tmux: true, fgProcess, resumeTokenUsed: true, paneState: "usable" },
+    };
   }
 
   private writeCheckpointFile(cwd: string, checkpoint: Checkpoint): boolean {

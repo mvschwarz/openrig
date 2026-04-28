@@ -174,7 +174,13 @@ export function deriveNodeLifecycleState(input: {
   nodeId: string;
   usableSnapshot: Snapshot | null;
 }): NodeLifecycleState {
-  if (input.restoreOutcome === "failed" && input.sessionStatus === "running") {
+  // L3: the explicit `attention_required` outcome (Claude resume-selection
+  // prompt) and the L2 proxy (failed + alive tmux session) both surface as
+  // lifecycleState=attention_required.
+  if (
+    input.restoreOutcome === "attention_required"
+    || (input.restoreOutcome === "failed" && input.sessionStatus === "running")
+  ) {
     return "attention_required";
   }
   if (input.sessionStatus === "running") return "running";
@@ -203,7 +209,14 @@ function deriveContinuityOutcome(
   if (row.continuity_outcome) {
     return row.continuity_outcome as NodeInventoryEntry["continuityOutcome"];
   }
-  return restoreOutcome === "n-a" ? null : restoreOutcome;
+  if (restoreOutcome === "n-a") return null;
+  // L3: `attention_required` and `operator_recovered` are restore-attempt
+  // outcomes that don't map onto the ContinuityOutcome vocabulary
+  // ("resumed"|"rebuilt"|"forked"|"fresh"|"failed"). Surface as null here;
+  // the lifecycleState projection picks them up via restoreOutcome directly.
+  if (restoreOutcome === "attention_required") return null;
+  if (restoreOutcome === "operator_recovered") return "resumed";
+  return restoreOutcome;
 }
 
 function deriveRestoreOutcome(db: Database.Database, rigId: string, nodeId: string): NodeRestoreOutcome {
@@ -223,6 +236,9 @@ function deriveRestoreOutcome(db: Database.Database, rigId: string, nodeId: stri
     if (nodeResult.status === "failed") return "failed";
     if (nodeResult.status === "rebuilt") return "rebuilt";
     if (nodeResult.status === "fresh") return "fresh";
+    // L3 outcomes (attention_required, operator_recovered)
+    if (nodeResult.status === "attention_required") return "attention_required";
+    if (nodeResult.status === "operator_recovered") return "operator_recovered";
     // Compat: old persisted events may contain pre-rename values
     if ((nodeResult.status as string) === "checkpoint_written") return "rebuilt";
     if ((nodeResult.status as string) === "fresh_no_checkpoint") return "fresh";
