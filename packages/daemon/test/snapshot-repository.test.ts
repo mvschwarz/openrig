@@ -147,4 +147,139 @@ describe("SnapshotRepository", () => {
     expect(remaining).toHaveLength(2);
     expect(remaining.map((s) => s.id)).toEqual(["s5", "s4"]); // newest 2 survive
   });
+
+  // L3b: findLatestRestoreUsable
+  describe("findLatestRestoreUsable (L3b)", () => {
+    function dataWithSession(opts?: { sessionName?: string; nodeId?: string; rigId?: string }): SnapshotData {
+      return {
+        rig: { id: opts?.rigId ?? "rig-1", name: "r01", createdAt: "2026-04-28", updatedAt: "2026-04-28" },
+        nodes: [],
+        edges: [],
+        sessions: [{
+          id: "sess-1",
+          nodeId: opts?.nodeId ?? "node-a",
+          sessionName: opts?.sessionName ?? "r01-worker",
+          status: "detached",
+          resumeType: null,
+          resumeToken: null,
+          restorePolicy: "resume_if_possible",
+          lastSeenAt: null,
+          createdAt: "2026-04-28T00:00:00Z",
+          origin: "launched",
+          startupStatus: "ready",
+          startupCompletedAt: null,
+        }],
+        checkpoints: {},
+      };
+    }
+
+    function insertRaw(id: string, rigId: string, kind: string, dataJson: string, createdAt: string): void {
+      db.prepare("INSERT INTO snapshots (id, rig_id, kind, status, data, created_at) VALUES (?, ?, ?, ?, ?, ?)")
+        .run(id, rigId, kind, "complete", dataJson, createdAt);
+    }
+
+    it("returns auto-pre-down when one exists (preference signal)", () => {
+      repo.createSnapshot("rig-1", "manual", dataWithSession());
+      const auto = repo.createSnapshot("rig-1", "auto-pre-down", dataWithSession());
+
+      const result = repo.findLatestRestoreUsable("rig-1");
+      expect(result).not.toBeNull();
+      expect(result!.id).toBe(auto.id);
+      expect(result!.kind).toBe("auto-pre-down");
+    });
+
+    it("returns latest manual when no auto-pre-down exists", () => {
+      const m = repo.createSnapshot("rig-1", "manual", dataWithSession());
+
+      const result = repo.findLatestRestoreUsable("rig-1");
+      expect(result).not.toBeNull();
+      expect(result!.id).toBe(m.id);
+      expect(result!.kind).toBe("manual");
+    });
+
+    it("returns latest manual when multiple manuals exist (created_at DESC, id DESC)", () => {
+      insertRaw("s1", "rig-1", "manual", JSON.stringify(dataWithSession()), "2026-04-27 10:00:00");
+      insertRaw("s2", "rig-1", "manual", JSON.stringify(dataWithSession()), "2026-04-28 10:00:00");
+      insertRaw("s3", "rig-1", "manual", JSON.stringify(dataWithSession()), "2026-04-28 09:00:00");
+
+      const result = repo.findLatestRestoreUsable("rig-1");
+      expect(result!.id).toBe("s2"); // newest by created_at
+    });
+
+    it("prefers auto-pre-down over a newer manual snapshot", () => {
+      insertRaw("auto-old", "rig-1", "auto-pre-down", JSON.stringify(dataWithSession()), "2026-04-27 10:00:00");
+      insertRaw("manual-new", "rig-1", "manual", JSON.stringify(dataWithSession()), "2026-04-28 10:00:00");
+
+      const result = repo.findLatestRestoreUsable("rig-1");
+      expect(result!.id).toBe("auto-old");
+      expect(result!.kind).toBe("auto-pre-down");
+    });
+
+    it("returns null when no snapshot exists", () => {
+      expect(repo.findLatestRestoreUsable("rig-1")).toBeNull();
+    });
+
+    it("skips a corrupted-JSON snapshot and considers next candidate", () => {
+      insertRaw("s-broken", "rig-1", "manual", "{ this is not valid json", "2026-04-28 11:00:00");
+      const good = repo.createSnapshot("rig-1", "manual", dataWithSession());
+      // Force ordering: re-insert good with older created_at so corrupt is "newest"
+      db.prepare("UPDATE snapshots SET created_at = ? WHERE id = ?").run("2026-04-28 10:00:00", good.id);
+      db.prepare("UPDATE snapshots SET created_at = ? WHERE id = ?").run("2026-04-28 11:00:00", "s-broken");
+
+      const result = repo.findLatestRestoreUsable("rig-1");
+      expect(result).not.toBeNull();
+      expect(result!.id).toBe(good.id);
+    });
+
+    it("skips a snapshot with missing sessionName on a session and considers next", () => {
+      const broken = JSON.parse(JSON.stringify(dataWithSession()));
+      broken.sessions[0].sessionName = "";
+      insertRaw("s-no-session-name", "rig-1", "manual", JSON.stringify(broken), "2026-04-28 11:00:00");
+      const good = repo.createSnapshot("rig-1", "manual", dataWithSession());
+      db.prepare("UPDATE snapshots SET created_at = ? WHERE id = ?").run("2026-04-28 10:00:00", good.id);
+
+      const result = repo.findLatestRestoreUsable("rig-1");
+      expect(result!.id).toBe(good.id);
+    });
+
+    it("skips a snapshot with missing nodeId on a session and considers next", () => {
+      const broken = JSON.parse(JSON.stringify(dataWithSession()));
+      delete broken.sessions[0].nodeId;
+      insertRaw("s-no-node-id", "rig-1", "manual", JSON.stringify(broken), "2026-04-28 11:00:00");
+      const good = repo.createSnapshot("rig-1", "manual", dataWithSession());
+      db.prepare("UPDATE snapshots SET created_at = ? WHERE id = ?").run("2026-04-28 10:00:00", good.id);
+
+      const result = repo.findLatestRestoreUsable("rig-1");
+      expect(result!.id).toBe(good.id);
+    });
+
+    it("returns null when no snapshot has restore-usable structural metadata", () => {
+      const noRig = JSON.stringify({ nodes: [], edges: [], sessions: [], checkpoints: {} });
+      const noNodes = JSON.stringify({ rig: { id: "x", name: "r", createdAt: "", updatedAt: "" }, edges: [], sessions: [], checkpoints: {} });
+      insertRaw("s-no-rig", "rig-1", "manual", noRig, "2026-04-28 11:00:00");
+      insertRaw("s-no-nodes", "rig-1", "manual", noNodes, "2026-04-28 12:00:00");
+
+      const result = repo.findLatestRestoreUsable("rig-1");
+      expect(result).toBeNull();
+    });
+
+    it("accepts a snapshot with empty sessions array (matches validatePreRestore)", () => {
+      // RestoreOrchestrator.validatePreRestore allows an empty sessions array
+      // (only missing/non-array is rejected). The helper must match.
+      const empty = sampleData();
+      const s = repo.createSnapshot("rig-1", "manual", empty);
+
+      const result = repo.findLatestRestoreUsable("rig-1");
+      expect(result).not.toBeNull();
+      expect(result!.id).toBe(s.id);
+    });
+
+    it("regression: findLatestAutoPreDown unchanged (still returns auto-pre-down only, no kind fallback)", () => {
+      repo.createSnapshot("rig-1", "manual", dataWithSession());
+      // No auto-pre-down: findLatestAutoPreDown returns null even though a
+      // valid manual exists. findLatestRestoreUsable would return the manual.
+      expect(repo.findLatestAutoPreDown("rig-1")).toBeNull();
+      expect(repo.findLatestRestoreUsable("rig-1")).not.toBeNull();
+    });
+  });
 });

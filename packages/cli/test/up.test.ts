@@ -826,4 +826,72 @@ describe("Up CLI", () => {
     const joined = logs.join("");
     expect(() => JSON.parse(joined)).not.toThrow();
   });
+
+  // L3b: manual-fallback note printed when restore came from a non-auto-pre-down snapshot.
+  it("L3b: prints manual-fallback note when daemon restored from a manual snapshot", async () => {
+    const origListeners = server.listeners("request");
+    server.removeAllListeners("request");
+    server.on("request", async (req: http.IncomingMessage, res: http.ServerResponse) => {
+      let body = "";
+      for await (const chunk of req) body += chunk;
+      if (req.url === "/api/specs/library" && req.method === "GET") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify([]));
+      } else if (req.url === "/api/rigs/summary" && req.method === "GET") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify([{ id: "r-l3b", name: "manual-only-rig", nodeCount: 1, lifecycleState: "recoverable" }]));
+      } else if (req.url === "/api/up" && req.method === "POST") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ status: "restored", rigId: "r-l3b", rigName: "manual-only-rig", rigResult: "fully_restored", nodes: [], warnings: [], snapshotKind: "manual" }));
+      } else {
+        res.writeHead(404);
+        res.end();
+      }
+    });
+
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "up", "manual-only-rig"]);
+    });
+
+    server.removeAllListeners("request");
+    for (const l of origListeners) server.on("request", l as (...args: unknown[]) => void);
+
+    const output = logs.join("\n");
+    expect(output).toContain("Restoring from manual snapshot (kind=manual); no auto-pre-down snapshot available.");
+    expect(output).toContain('Rig "manual-only-rig" restored');
+    expect(exitCode).toBeUndefined();
+  });
+
+  it("L3b: does NOT print manual-fallback note when restore came from auto-pre-down", async () => {
+    const origListeners = server.listeners("request");
+    server.removeAllListeners("request");
+    server.on("request", async (req: http.IncomingMessage, res: http.ServerResponse) => {
+      let body = "";
+      for await (const chunk of req) body += chunk;
+      if (req.url === "/api/specs/library" && req.method === "GET") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify([]));
+      } else if (req.url === "/api/rigs/summary" && req.method === "GET") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify([{ id: "r-l3b-auto", name: "auto-rig", nodeCount: 1, lifecycleState: "recoverable" }]));
+      } else if (req.url === "/api/up" && req.method === "POST") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ status: "restored", rigId: "r-l3b-auto", rigName: "auto-rig", rigResult: "fully_restored", nodes: [], warnings: [], snapshotKind: "auto-pre-down" }));
+      } else {
+        res.writeHead(404);
+        res.end();
+      }
+    });
+
+    const { logs } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "up", "auto-rig"]);
+    });
+
+    server.removeAllListeners("request");
+    for (const l of origListeners) server.on("request", l as (...args: unknown[]) => void);
+
+    const output = logs.join("\n");
+    expect(output).not.toContain("Restoring from manual snapshot");
+    expect(output).toContain('Rig "auto-rig" restored');
+  });
 });

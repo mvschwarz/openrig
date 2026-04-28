@@ -564,4 +564,42 @@ describe("Rig CRUD routes", () => {
     expect(res.status).toBe(404);
     expect((await res.json()).error).toContain("not found");
   });
+
+  // L3b: /:id/up mirrors the rig-name path: prefer auto-pre-down, fall back to
+  // latest restore-usable manual snapshot, echo `snapshotKind`.
+  it("L3b: POST /api/rigs/:id/up falls back to manual snapshot when no auto-pre-down exists; echoes snapshotKind", async () => {
+    const rig = repo.createRig("manual-only-byid");
+    repo.addNode(rig.id, "worker", { role: "worker" });
+    snapshotCapture.captureSnapshot(rig.id, "manual");
+
+    const res = await app.request(`/api/rigs/${rig.id}/up`, { method: "POST" });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.status).toBe("restored");
+    expect(body.snapshotKind).toBe("manual");
+  });
+
+  it("L3b: POST /api/rigs/:id/up prefers auto-pre-down over a newer manual snapshot", async () => {
+    const rig = repo.createRig("auto-pref-byid");
+    repo.addNode(rig.id, "worker", { role: "worker" });
+    // Capture order doesn't matter; the helper orders by `(kind = 'auto-pre-down') DESC`.
+    snapshotCapture.captureSnapshot(rig.id, "manual");
+    snapshotCapture.captureSnapshot(rig.id, "auto-pre-down");
+
+    const res = await app.request(`/api/rigs/${rig.id}/up`, { method: "POST" });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.snapshotKind).toBe("auto-pre-down");
+  });
+
+  it("L3b: POST /api/rigs/:id/up returns 404 with updated 'no restore-usable snapshot' message", async () => {
+    const rig = repo.createRig("no-usable-snap");
+
+    const res = await app.request(`/api/rigs/${rig.id}/up`, { method: "POST" });
+    expect(res.status).toBe(404);
+    const body = await res.json();
+    expect(body.code).toBe("no_snapshot");
+    expect(body.error).toContain("restore-usable");
+    expect(body.error).not.toContain("auto-pre-down snapshot");
+  });
 });

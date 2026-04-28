@@ -216,6 +216,14 @@ Examples:
         const rigId = res.data["rigId"] as string;
         const rigName = res.data["rigName"] as string | undefined;
         const rigResult = res.data["rigResult"] as string | undefined;
+        const snapshotKind = res.data["snapshotKind"] as string | undefined;
+        // L3b: when the daemon falls back to a non-auto-pre-down snapshot, surface
+        // the kind so operators see the manual fallback explicitly. The note is
+        // printed BEFORE the "Rig restored" line so it's visible in the typical
+        // top-of-output scan.
+        if (snapshotKind && snapshotKind !== "auto-pre-down") {
+          console.log(`Restoring from manual snapshot (kind=${snapshotKind}); no auto-pre-down snapshot available.`);
+        }
         console.log(`Rig "${rigName ?? rigId}" restored (ID: ${rigId})`);
         if (rigResult) console.log(`Result: ${rigResult}`);
         const nodes = (res.data["nodes"] as Array<{ logicalId: string; status: string }>) ?? [];

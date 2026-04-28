@@ -24,15 +24,22 @@ function getDeps(c: { get: (key: string) => unknown }) {
 }
 
 /**
- * Restore a rig by ID from its latest auto-pre-down snapshot.
+ * Restore a rig by ID from its latest restore-usable snapshot.
+ *
+ * L3b: prefers `auto-pre-down` when present (existing behavior preserved as a
+ * preference signal) but falls back to the latest manual snapshot whose
+ * structural metadata satisfies `RestoreOrchestrator.restore`'s pre-validation.
+ * The response payload echoes `snapshotKind` so the operator/CLI can surface
+ * which snapshot was used.
+ *
  * Shared helper used by both /api/up (rig_name) and /api/rigs/:rigId/up (Explorer).
  */
 async function restoreByRigId(rigId: string, rigName: string | null, deps: ReturnType<typeof getDeps>, c: { json: (data: unknown, status?: number) => Response }) {
   const { snapshotRepo, restoreOrchestrator } = deps;
 
-  const snapshot = snapshotRepo.findLatestAutoPreDown(rigId);
+  const snapshot = snapshotRepo.findLatestRestoreUsable(rigId);
   if (!snapshot) {
-    return c.json({ error: `Rig exists but has no auto-pre-down snapshot. Start fresh with: rig up <spec-path>`, code: "no_snapshot" }, 404);
+    return c.json({ error: `Rig exists but has no restore-usable snapshot. Start fresh with: rig up <spec-path>`, code: "no_snapshot" }, 404);
   }
 
   if (!restoreOrchestrator) {
@@ -52,6 +59,7 @@ async function restoreByRigId(rigId: string, rigName: string | null, deps: Retur
         rigName,
         error: result.message,
         code: result.code,
+        snapshotKind: snapshot.kind,
         ...result.result,
         remediation: result.result.blockers?.map((blocker) => blocker.remediation) ?? [],
       }, 409);
@@ -70,6 +78,7 @@ async function restoreByRigId(rigId: string, rigName: string | null, deps: Retur
     rigId,
     rigName,
     snapshotId: snapshot.id,
+    snapshotKind: snapshot.kind,
     rigResult: result.result.rigResult,
     nodes: result.result.nodes,
     warnings: result.result.warnings,
