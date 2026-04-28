@@ -1,36 +1,14 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import type Database from "better-sqlite3";
-import { createDb } from "../src/db/connection.js";
-import { migrate } from "../src/db/migrate.js";
-import { coreSchema } from "../src/db/migrations/001_core_schema.js";
-import { bindingsSessionsSchema } from "../src/db/migrations/002_bindings_sessions.js";
-import { eventsSchema } from "../src/db/migrations/003_events.js";
-import { snapshotsSchema } from "../src/db/migrations/004_snapshots.js";
-import { checkpointsSchema } from "../src/db/migrations/005_checkpoints.js";
-import { resumeMetadataSchema } from "../src/db/migrations/006_resume_metadata.js";
-import { nodeSpecFieldsSchema } from "../src/db/migrations/007_node_spec_fields.js";
-import { packagesSchema } from "../src/db/migrations/008_packages.js";
-import { installJournalSchema } from "../src/db/migrations/009_install_journal.js";
-import { journalSeqSchema } from "../src/db/migrations/010_journal_seq.js";
-import { bootstrapSchema } from "../src/db/migrations/011_bootstrap.js";
-import { discoverySchema } from "../src/db/migrations/012_discovery.js";
-import { discoveryFkFix } from "../src/db/migrations/013_discovery_fk_fix.js";
-import { PsProjectionService } from "../src/domain/ps-projection.js";
-
-const ALL_MIGRATIONS = [
-  coreSchema, bindingsSessionsSchema, eventsSchema, snapshotsSchema,
-  checkpointsSchema, resumeMetadataSchema, nodeSpecFieldsSchema,
-  packagesSchema, installJournalSchema, journalSeqSchema, bootstrapSchema,
-  discoverySchema, discoveryFkFix,
-];
+import { createFullTestDb } from "./helpers/test-app.js";
+import { PsProjectionService, deriveRigLifecycleState } from "../src/domain/ps-projection.js";
 
 describe("PsProjectionService", () => {
   let db: Database.Database;
   let ps: PsProjectionService;
 
   beforeEach(() => {
-    db = createDb();
-    migrate(db, ALL_MIGRATIONS);
+    db = createFullTestDb();
     ps = new PsProjectionService({ db });
   });
 
@@ -186,5 +164,110 @@ describe("PsProjectionService", () => {
     } finally {
       daemonDb.close();
     }
+  });
+
+  // L2 rig-level lifecycleState
+  describe("lifecycleState (L2)", () => {
+    function seedSnapshotForRig(rigId: string, sessions: Array<{ nodeId: string; resumeToken: string | null }>): void {
+      const data = {
+        rig: { id: rigId, name: "rig-name", createdAt: "2026-04-28T00:00:00Z", updatedAt: "2026-04-28T00:00:00Z" },
+        nodes: [],
+        edges: [],
+        sessions: sessions.map((s, i) => ({
+          id: `sess-snap-${i}`,
+          nodeId: s.nodeId,
+          sessionName: `tmux-${s.nodeId}`,
+          status: "detached",
+          resumeType: s.resumeToken ? "claude" : null,
+          resumeToken: s.resumeToken,
+          restorePolicy: "resume_if_possible",
+          lastSeenAt: null,
+          createdAt: "2026-04-28T00:00:00Z",
+          origin: "launched" as const,
+          startupStatus: "ready" as const,
+          startupCompletedAt: null,
+        })),
+        checkpoints: {},
+      };
+      db.prepare("INSERT INTO snapshots (id, rig_id, kind, status, data) VALUES (?, ?, ?, ?, ?)")
+        .run(`snap-${rigId}`, rigId, "manual", "complete", JSON.stringify(data));
+    }
+
+    it("all nodes running -> lifecycleState=running", () => {
+      const rigId = seedRig("all-run");
+      const n1 = seedNode(rigId, "dev");
+      const n2 = seedNode(rigId, "qa");
+      seedSession(n1, "running");
+      seedSession(n2, "running");
+
+      const entries = ps.getEntries();
+      expect(entries[0]!.lifecycleState).toBe("running");
+    });
+
+    it("all nodes detached + usable snapshot -> lifecycleState=recoverable", () => {
+      const rigId = seedRig("all-recoverable");
+      const n1 = seedNode(rigId, "dev");
+      const n2 = seedNode(rigId, "qa");
+      seedSession(n1, "detached");
+      seedSession(n2, "detached");
+      seedSnapshotForRig(rigId, [
+        { nodeId: n1, resumeToken: "tok-1" },
+        { nodeId: n2, resumeToken: "tok-2" },
+      ]);
+
+      const entries = ps.getEntries();
+      expect(entries[0]!.lifecycleState).toBe("recoverable");
+    });
+
+    it("all nodes detached + no usable snapshot -> lifecycleState=stopped", () => {
+      const rigId = seedRig("all-stopped");
+      const n1 = seedNode(rigId, "dev");
+      seedSession(n1, "detached");
+
+      const entries = ps.getEntries();
+      expect(entries[0]!.lifecycleState).toBe("stopped");
+    });
+
+    it("mixed running + detached -> lifecycleState=degraded", () => {
+      const rigId = seedRig("mixed");
+      const n1 = seedNode(rigId, "dev");
+      const n2 = seedNode(rigId, "qa");
+      seedSession(n1, "running");
+      seedSession(n2, "detached");
+
+      const entries = ps.getEntries();
+      expect(entries[0]!.lifecycleState).toBe("degraded");
+    });
+
+    it("any node attention_required -> lifecycleState=attention_required (priority over running)", () => {
+      const rigId = seedRig("att-priority");
+      const n1 = seedNode(rigId, "dev");
+      const n2 = seedNode(rigId, "qa");
+      seedSession(n1, "running");
+      seedSession(n2, "running");
+      // Mark n2 as attention_required via failed restoreOutcome on a running session
+      db.prepare(
+        "INSERT INTO events (rig_id, node_id, type, payload) VALUES (?, ?, ?, ?)"
+      ).run(rigId, n2, "restore.completed", JSON.stringify({
+        result: { rigResult: "partially_restored", nodes: [{ nodeId: n2, status: "failed" }] },
+        type: "restore.completed",
+      }));
+
+      const entries = ps.getEntries();
+      expect(entries[0]!.lifecycleState).toBe("attention_required");
+    });
+
+    // Pure unit-level coverage of the fold helper.
+    it("deriveRigLifecycleState fold helper covers all branches", () => {
+      expect(deriveRigLifecycleState([])).toBe("stopped");
+      expect(deriveRigLifecycleState(["running", "running"])).toBe("running");
+      expect(deriveRigLifecycleState(["detached", "detached"])).toBe("stopped");
+      expect(deriveRigLifecycleState(["recoverable", "detached"])).toBe("recoverable");
+      expect(deriveRigLifecycleState(["recoverable", "recoverable"])).toBe("recoverable");
+      expect(deriveRigLifecycleState(["running", "detached"])).toBe("degraded");
+      expect(deriveRigLifecycleState(["running", "recoverable"])).toBe("degraded");
+      expect(deriveRigLifecycleState(["attention_required", "running"])).toBe("attention_required");
+      expect(deriveRigLifecycleState(["attention_required", "detached"])).toBe("attention_required");
+    });
   });
 });

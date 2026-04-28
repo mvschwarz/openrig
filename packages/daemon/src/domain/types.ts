@@ -284,6 +284,19 @@ export interface NodeRecoveryGuidance {
   notes: string[];
 }
 
+// Per-node lifecycle projection derived from session/restore state plus snapshot resume metadata.
+// L2 cold-start truth model: distinguishes a recoverable detached node from a node that would
+// fresh-launch, and surfaces "attention required" for the post-L3 Claude resume-prompt proxy.
+export type NodeLifecycleState = "running" | "detached" | "recoverable" | "attention_required";
+
+// Per-rig lifecycle aggregate folded from per-node states.
+//   running           — every node is running.
+//   recoverable       — every node is non-running and at least one node has a usable snapshot token.
+//   stopped           — every node is non-running and no node has a usable snapshot token.
+//   degraded          — mixed running + non-running on the same rig.
+//   attention_required — any node is attention_required (priority over above).
+export type RigLifecycleState = "running" | "recoverable" | "stopped" | "degraded" | "attention_required";
+
 export interface NodeInventoryEntry {
   rigId: string;
   rigName: string;
@@ -297,6 +310,7 @@ export interface NodeInventoryEntry {
   sessionStatus: string | null;
   startupStatus: "pending" | "ready" | "attention_required" | "failed" | null;
   restoreOutcome: NodeRestoreOutcome;
+  lifecycleState: NodeLifecycleState;
   occupantLifecycle: OccupantLifecycle;
   continuityOutcome: ContinuityOutcome | null;
   handoverResult: HandoverResult;

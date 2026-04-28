@@ -10,6 +10,7 @@ interface PsEntry {
   nodeCount: number;
   runningCount: number;
   status: "running" | "partial" | "stopped";
+  lifecycleState?: "running" | "recoverable" | "stopped" | "degraded" | "attention_required";
   uptime: string | null;
   latestSnapshot: string | null;
 }
@@ -26,6 +27,7 @@ interface NodeEntry {
   sessionStatus: string | null;
   startupStatus: "pending" | "ready" | "attention_required" | "failed" | null;
   restoreOutcome: string;
+  lifecycleState?: "running" | "detached" | "recoverable" | "attention_required";
   tmuxAttachCommand: string | null;
   resumeCommand: string | null;
   latestError: string | null;
@@ -37,6 +39,27 @@ interface NodeEntry {
     evidence: string | null;
   };
   [key: string]: unknown;
+}
+
+// Compact rig-level lifecycle codes for the rig table header (3-char fixed width).
+function abbrevRigLifecycle(state: PsEntry["lifecycleState"] | undefined): string {
+  if (!state) return "—";
+  if (state === "running") return "run";
+  if (state === "recoverable") return "rec";
+  if (state === "stopped") return "stp";
+  if (state === "degraded") return "deg";
+  if (state === "attention_required") return "att";
+  return "—";
+}
+
+// Compact per-node lifecycle codes for the nodes table.
+function abbrevNodeLifecycle(state: NodeEntry["lifecycleState"] | undefined): string {
+  if (!state) return "—";
+  if (state === "running") return "run";
+  if (state === "recoverable") return "rec";
+  if (state === "detached") return "det";
+  if (state === "attention_required") return "att";
+  return "—";
 }
 
 /**
@@ -101,7 +124,7 @@ Exit codes:
       }
 
       // Formatted table
-      const header = padRigRow("RIG", "NODES", "RUNNING", "STATUS", "UPTIME", "SNAPSHOT");
+      const header = padRigRow("RIG", "NODES", "RUNNING", "STATUS", "LIFECYCLE", "UPTIME", "SNAPSHOT");
       console.log(header);
       for (const e of entries) {
         console.log(padRigRow(
@@ -109,6 +132,7 @@ Exit codes:
           String(e.nodeCount),
           String(e.runningCount),
           e.status,
+          abbrevRigLifecycle(e.lifecycleState),
           e.uptime ?? "—",
           e.latestSnapshot ?? "—",
         ));
@@ -147,7 +171,7 @@ async function handleNodes(client: DaemonClient, json: boolean): Promise<void> {
     return;
   }
 
-  const header = padNodeRow("RIG", "POD", "MEMBER", "SESSION", "RUNTIME", "STATUS", "STARTUP", "ACTIVITY", "RESTORE", "ERROR");
+  const header = padNodeRow("RIG", "POD", "MEMBER", "SESSION", "RUNTIME", "STATUS", "STARTUP", "LIFECYCLE", "ACTIVITY", "RESTORE", "ERROR");
   console.log(header);
   for (const n of allNodes) {
     const parts = n.logicalId.split(".");
@@ -162,6 +186,7 @@ async function handleNodes(client: DaemonClient, json: boolean): Promise<void> {
       n.runtime ?? "—",
       n.sessionStatus ?? "—",
       n.startupStatus ?? "—",
+      abbrevNodeLifecycle(n.lifecycleState),
       formatActivity(n.agentActivity),
       n.restoreOutcome,
       n.latestError ? truncate(n.latestError, 30) : "—",
@@ -185,18 +210,19 @@ function fitCell(value: string, width: number): string {
   return truncate(value, width).padEnd(width);
 }
 
-function padRigRow(rig: string, nodes: string, running: string, status: string, uptime: string, snapshot: string): string {
+function padRigRow(rig: string, nodes: string, running: string, status: string, lifecycle: string, uptime: string, snapshot: string): string {
   return [
     fitCell(rig, 24),
     fitCell(nodes, 7),
     fitCell(running, 9),
     fitCell(status, 10),
+    fitCell(lifecycle, 11),
     fitCell(uptime, 11),
     snapshot,
   ].join("");
 }
 
-function padNodeRow(rig: string, pod: string, member: string, session: string, runtime: string, status: string, startup: string, activity: string, restore: string, error: string): string {
+function padNodeRow(rig: string, pod: string, member: string, session: string, runtime: string, status: string, startup: string, lifecycle: string, activity: string, restore: string, error: string): string {
   return [
     fitCell(rig, 30),
     fitCell(pod, 10),
@@ -205,6 +231,7 @@ function padNodeRow(rig: string, pod: string, member: string, session: string, r
     fitCell(runtime, 12),
     fitCell(status, 10),
     fitCell(startup, 10),
+    fitCell(lifecycle, 11),
     fitCell(activity, 12),
     fitCell(restore, 10),
     error,

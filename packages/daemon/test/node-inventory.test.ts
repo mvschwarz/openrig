@@ -422,4 +422,94 @@ describe("Node Inventory Projection", () => {
     expect(detail!.installedResources).toHaveLength(1);
     expect(detail!.installedResources[0]!.id).toBe("live-skill");
   });
+
+  // L2 lifecycleState projection
+  describe("lifecycleState (L2)", () => {
+    function seedSnapshotForRig(rigId: string, sessions: Array<{ nodeId: string; resumeToken: string | null }>): void {
+      const data = {
+        rig: { id: rigId, name: "rig-name", createdAt: "2026-04-28T00:00:00Z", updatedAt: "2026-04-28T00:00:00Z" },
+        nodes: [],
+        edges: [],
+        sessions: sessions.map((s, i) => ({
+          id: `sess-snap-${i}`,
+          nodeId: s.nodeId,
+          sessionName: `tmux-${s.nodeId}`,
+          status: "detached",
+          resumeType: s.resumeToken ? "claude" : null,
+          resumeToken: s.resumeToken,
+          restorePolicy: "resume_if_possible",
+          lastSeenAt: null,
+          createdAt: "2026-04-28T00:00:00Z",
+          origin: "launched" as const,
+          startupStatus: "ready" as const,
+          startupCompletedAt: null,
+        })),
+        checkpoints: {},
+      };
+      db.prepare("INSERT INTO snapshots (id, rig_id, kind, status, data) VALUES (?, ?, ?, ?, ?)")
+        .run(`snap-${rigId}`, rigId, "manual", "complete", JSON.stringify(data));
+    }
+
+    it("running session -> lifecycleState=running", () => {
+      seedPodAwareRig(db);
+      seedSession(db, "node-1", "dev-impl@test-rig", { status: "running" });
+
+      const entries = getNodeInventory(db, "rig-1");
+      const entry = entries.find((e) => e.logicalId === "dev.impl");
+      expect(entry?.lifecycleState).toBe("running");
+    });
+
+    it("detached session + usable snapshot with token for THIS node -> lifecycleState=recoverable", () => {
+      seedPodAwareRig(db);
+      seedSession(db, "node-1", "dev-impl@test-rig", { status: "detached" });
+      seedSnapshotForRig("rig-1", [{ nodeId: "node-1", resumeToken: "abc-123" }]);
+
+      const entries = getNodeInventory(db, "rig-1");
+      const entry = entries.find((e) => e.logicalId === "dev.impl");
+      expect(entry?.lifecycleState).toBe("recoverable");
+    });
+
+    it("detached session + snapshot exists but resume token is null for this node -> lifecycleState=detached", () => {
+      seedPodAwareRig(db);
+      seedSession(db, "node-1", "dev-impl@test-rig", { status: "detached" });
+      // Snapshot has token for a DIFFERENT node, not this one
+      seedSnapshotForRig("rig-1", [{ nodeId: "node-2", resumeToken: "xyz-789" }]);
+
+      const entries = getNodeInventory(db, "rig-1");
+      const entry = entries.find((e) => e.logicalId === "dev.impl");
+      expect(entry?.lifecycleState).toBe("detached");
+    });
+
+    it("detached session + no snapshot -> lifecycleState=detached", () => {
+      seedPodAwareRig(db);
+      seedSession(db, "node-1", "dev-impl@test-rig", { status: "detached" });
+
+      const entries = getNodeInventory(db, "rig-1");
+      const entry = entries.find((e) => e.logicalId === "dev.impl");
+      expect(entry?.lifecycleState).toBe("detached");
+    });
+
+    it("restoreOutcome=failed + tmux session alive -> lifecycleState=attention_required (Claude resume-prompt proxy)", () => {
+      seedPodAwareRig(db);
+      seedSession(db, "node-1", "dev-impl@test-rig", { status: "running" });
+      // Persist a restore.completed event with this node failed
+      seedEvent(db, "rig-1", "node-1", "restore.completed", {
+        result: { rigResult: "partially_restored", nodes: [{ nodeId: "node-1", status: "failed" }] },
+      });
+
+      const entries = getNodeInventory(db, "rig-1");
+      const entry = entries.find((e) => e.logicalId === "dev.impl");
+      expect(entry?.restoreOutcome).toBe("failed");
+      expect(entry?.lifecycleState).toBe("attention_required");
+    });
+
+    it("exited session + no snapshot -> lifecycleState=detached", () => {
+      seedPodAwareRig(db);
+      seedSession(db, "node-1", "dev-impl@test-rig", { status: "exited" });
+
+      const entries = getNodeInventory(db, "rig-1");
+      const entry = entries.find((e) => e.logicalId === "dev.impl");
+      expect(entry?.lifecycleState).toBe("detached");
+    });
+  });
 });
