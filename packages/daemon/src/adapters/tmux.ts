@@ -43,6 +43,30 @@ function isSessionAbsenceError(err: unknown): boolean {
     msg.includes("no session");
 }
 
+// Post-reboot the tmux socket file at /tmp/tmux-<uid>/<name> is gone, so
+// `tmux has-session` exits non-zero with a transport-absent message rather than
+// a server/session-absent message. Treat that case as "no session" so cold-start
+// reconciliation can detach stale rows. Permission errors must remain rethrown.
+function isTmuxTransportAbsentError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const msg = err.message;
+  // Fail-closed: never classify a permission/authorization failure as absence.
+  if (/permission denied|operation not permitted|EACCES|EPERM/i.test(msg)) {
+    return false;
+  }
+  // tmux's socket-transport failure prefix; the parenthetical names the cause.
+  //   "error connecting to /private/tmp/tmux-501/default (No such file or directory)"
+  //   "error connecting to /private/tmp/tmux-501/default (Connection refused)"
+  if (msg.startsWith("error connecting to")) {
+    return /No such file or directory|Connection refused/.test(msg);
+  }
+  // Conservative bare-message variants that still reference a tmux socket path.
+  if (/tmux-\d+/.test(msg) && /No such file or directory|Connection refused/.test(msg)) {
+    return true;
+  }
+  return false;
+}
+
 function classifyWriteError(err: unknown): TmuxResult {
   if (!(err instanceof Error)) {
     return { ok: false, code: "unknown", message: String(err) };
@@ -122,7 +146,7 @@ export class TmuxAdapter {
       const output = await this.exec(`tmux list-sessions -F "${SESSION_FORMAT}"`);
       return parseLines(output, parseSessionLine);
     } catch (err) {
-      if (isNoServerError(err)) return [];
+      if (isNoServerError(err) || isTmuxTransportAbsentError(err)) return [];
       throw err;
     }
   }
@@ -132,7 +156,7 @@ export class TmuxAdapter {
       const output = await this.exec(`tmux list-windows -t ${shellQuote(sessionName)} -F "${WINDOW_FORMAT}"`);
       return parseLines(output, parseWindowLine);
     } catch (err) {
-      if (isNoServerError(err)) return [];
+      if (isNoServerError(err) || isTmuxTransportAbsentError(err)) return [];
       throw err;
     }
   }
@@ -142,7 +166,7 @@ export class TmuxAdapter {
       const output = await this.exec(`tmux list-panes -t ${shellQuote(target)} -F "${PANE_FORMAT}"`);
       return parseLines(output, parsePaneLine);
     } catch (err) {
-      if (isNoServerError(err)) return [];
+      if (isNoServerError(err) || isTmuxTransportAbsentError(err)) return [];
       throw err;
     }
   }
@@ -155,13 +179,14 @@ export class TmuxAdapter {
       await this.exec(`tmux has-session -t ${shellQuote(name)}`);
       return true; // exit 0 = session exists
     } catch (err) {
-      // Known-absence patterns: session genuinely doesn't exist or tmux not running.
-      // Return false so post-crash restore can proceed for dead sessions.
-      if (isNoServerError(err) || isSessionAbsenceError(err)) {
+      // Known-absence patterns: session genuinely doesn't exist, tmux not running,
+      // or the tmux socket file is gone post-reboot.
+      // Return false so cold-start reconciliation can detach stale rows.
+      if (isNoServerError(err) || isSessionAbsenceError(err) || isTmuxTransportAbsentError(err)) {
         return false;
       }
-      // Unexpected probe failure (permission denied, socket error, etc.) — rethrow
-      // so callers can fail closed rather than treating a probe failure as absence.
+      // Unexpected probe failure (permission denied, etc.) — rethrow so callers
+      // can fail closed rather than treating a probe failure as absence.
       throw err;
     }
   }

@@ -260,4 +260,47 @@ describe("Reconciler", () => {
     const sessions = sessionRegistry.getSessionsForRig(rig.id);
     expect(sessions[0]!.status).toBe("running");
   });
+
+  // L1 cold-start tmux truth repair: when the tmux adapter classifies a post-reboot
+  // socket-absence as "no session" (hasSession returns false), reconcile must
+  // detach the row honestly so DB state matches tmux reality.
+  it("socket-absent at adapter layer (hasSession returns false): session detached + event emitted", async () => {
+    const { rig } = seedRigWithSessions([
+      { logicalId: "dev1-impl", sessionName: "r01-dev1-impl", status: "running" },
+    ]);
+
+    const reconciler = createReconciler(mockTmuxAdapter({ "r01-dev1-impl": false }));
+    const result = await reconciler.reconcile(rig.id);
+
+    expect(result.checked).toBe(1);
+    expect(result.detached).toBe(1);
+
+    const sessions = sessionRegistry.getSessionsForRig(rig.id);
+    expect(sessions[0]!.status).toBe("detached");
+
+    const events = db
+      .prepare("SELECT * FROM events WHERE type = 'session.detached'")
+      .all();
+    expect(events).toHaveLength(1);
+  });
+
+  it("permission error at adapter layer (hasSession rethrows): session NOT detached, error recorded", async () => {
+    const { rig } = seedRigWithSessions([
+      { logicalId: "dev1-impl", sessionName: "r01-dev1-impl", status: "running" },
+    ]);
+
+    const permErr = new Error("error connecting to /private/tmp/tmux-501/default (Operation not permitted)");
+    const reconciler = createReconciler(
+      mockTmuxAdapter({}, { "r01-dev1-impl": permErr })
+    );
+    const result = await reconciler.reconcile(rig.id);
+
+    expect(result.checked).toBe(0);
+    expect(result.detached).toBe(0);
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0]!.error).toContain("Operation not permitted");
+
+    const sessions = sessionRegistry.getSessionsForRig(rig.id);
+    expect(sessions[0]!.status).toBe("running");
+  });
 });

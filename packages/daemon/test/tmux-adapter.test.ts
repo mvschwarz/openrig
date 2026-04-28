@@ -195,6 +195,36 @@ describe("TmuxAdapter", () => {
       }));
       await expect(adapter.hasSession("any-session")).rejects.toThrow("exit code 127");
     });
+
+    // L1 cold-start tmux truth repair: post-reboot socket absence must classify
+    // as "no session" so the reconciler can detach stale rows without manual fix.
+    it("returns false when tmux socket is gone post-reboot (No such file or directory)", async () => {
+      const adapter = new TmuxAdapter(mockExec({
+        "has-session": { error: new Error("error connecting to /private/tmp/tmux-501/default (No such file or directory)") },
+      }));
+      expect(await adapter.hasSession("any-session")).toBe(false);
+    });
+
+    it("returns false on Connection refused against a tmux socket path", async () => {
+      const adapter = new TmuxAdapter(mockExec({
+        "has-session": { error: new Error("error connecting to /private/tmp/tmux-501/default (Connection refused)") },
+      }));
+      expect(await adapter.hasSession("any-session")).toBe(false);
+    });
+
+    it("rethrows on 'Operation not permitted' (permission must remain fail-closed)", async () => {
+      const adapter = new TmuxAdapter(mockExec({
+        "has-session": { error: new Error("error connecting to /private/tmp/tmux-501/default (Operation not permitted)") },
+      }));
+      await expect(adapter.hasSession("any-session")).rejects.toThrow("Operation not permitted");
+    });
+
+    it("rethrows on EACCES (permission must remain fail-closed)", async () => {
+      const adapter = new TmuxAdapter(mockExec({
+        "has-session": { error: new Error("EACCES: permission denied, /private/tmp/tmux-501/default") },
+      }));
+      await expect(adapter.hasSession("any-session")).rejects.toThrow("EACCES");
+    });
   });
 
   describe("createSession", () => {

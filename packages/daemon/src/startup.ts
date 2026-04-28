@@ -170,12 +170,38 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // Connect to cmux at startup — degrades gracefully if absent
   await cmuxAdapter.connect();
 
-  // Reconcile all managed rigs — marks stale sessions as detached
+  // Reconcile all managed rigs — marks stale sessions as detached.
+  // Capture aggregate counts and log a compact summary so cold-start truth
+  // repair is visible in daemon output instead of silently swallowed.
   const reconciler = new Reconciler({ db, sessionRegistry, eventBus, tmuxAdapter });
   const rigs = rigRepo.listRigs();
+  let reconcileChecked = 0;
+  let reconcileDetached = 0;
+  let reconcileErrors = 0;
   for (const rig of rigs) {
-    await reconciler.reconcile(rig.id);
+    try {
+      const result = await reconciler.reconcile(rig.id);
+      reconcileChecked += result.checked;
+      reconcileDetached += result.detached;
+      reconcileErrors += result.errors.length;
+      for (const e of result.errors) {
+        try {
+          // eslint-disable-next-line no-console
+          console.warn(`startup reconcile warning: rig=${rig.id} session=${e.sessionId} error=${e.error}`);
+        } catch { /* logging must never throw */ }
+      }
+    } catch (err) {
+      reconcileErrors += 1;
+      try {
+        // eslint-disable-next-line no-console
+        console.warn(`startup reconcile warning: rig=${rig.id} error=${err instanceof Error ? err.message : String(err)}`);
+      } catch { /* logging must never throw */ }
+    }
   }
+  try {
+    // eslint-disable-next-line no-console
+    console.log(`startup reconcile: rigs=${rigs.length} checked=${reconcileChecked} detached=${reconcileDetached} errors=${reconcileErrors}`);
+  } catch { /* logging must never throw */ }
 
   const podRepo = new PodRepository(db);
   const rigSpecExporter = new RigSpecExporter({ rigRepo, sessionRegistry, podRepo });

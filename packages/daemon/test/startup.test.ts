@@ -230,4 +230,39 @@ describe("createDaemon startup composition", () => {
 
     db.close();
   });
+
+  // L1 cold-start tmux truth repair: startup must surface a compact reconcile
+  // summary so silent reconciliation drift is visible in daemon output.
+  it("startup logs compact reconcile summary line", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "rigged-test-"));
+    const dbPath = path.join(tmpDir, "test.sqlite");
+
+    seedDbWithStaleSessions(dbPath, [
+      { rigName: "r01", logicalId: "dev1-impl", sessionName: "r01-dev1-impl" },
+    ]);
+
+    const tmuxExec: ExecFn = async (cmd: string) => {
+      if (cmd.includes("has-session")) throw new Error("session not found");
+      return "";
+    };
+    const cmuxExec: ExecFn = async () => { throw Object.assign(new Error(""), { code: "ENOENT" }); };
+
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const { db } = await createDaemon({ dbPath, tmuxExec, cmuxExec });
+
+      const calls = logSpy.mock.calls.map((c: unknown[]) => String(c[0]));
+      const summary = calls.find((line) => line.startsWith("startup reconcile:"));
+      expect(summary).toBeDefined();
+      expect(summary).toMatch(/rigs=1\b/);
+      expect(summary).toMatch(/checked=1\b/);
+      expect(summary).toMatch(/detached=1\b/);
+      expect(summary).toMatch(/errors=0\b/);
+
+      db.close();
+    } finally {
+      logSpy.mockRestore();
+      fs.rmSync(tmpDir, { recursive: true });
+    }
+  });
 });
