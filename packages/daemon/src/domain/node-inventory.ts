@@ -1,10 +1,11 @@
 import type Database from "better-sqlite3";
-import type { NodeInventoryEntry, NodeDetailEntry, NodeDetailPeer, NodeDetailEdge, NodeDetailCompactSpec, NodeRestoreOutcome, Binding, RestoreResult, NodeRecoveryGuidance } from "./types.js";
+import type { NodeInventoryEntry, NodeDetailEntry, NodeDetailPeer, NodeDetailEdge, NodeDetailCompactSpec, NodeRestoreOutcome, NodeLifecycleState, Binding, RestoreResult, NodeRecoveryGuidance, Snapshot } from "./types.js";
 import type { RuntimeAdapter } from "./runtime-adapter.js";
 import type { ContextUsageStore } from "./context-usage-store.js";
 import type { AgentActivityStore } from "./agent-activity-store.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import { probeSessionActivity } from "./session-transport.js";
+import { findLatestUsableSnapshot } from "./rig-repository.js";
 
 // -- Row types for SQL results --
 
@@ -152,6 +153,42 @@ function deriveNodeKind(runtime: string | null): "agent" | "infrastructure" {
   return runtime === "terminal" ? "infrastructure" : "agent";
 }
 
+/**
+ * Derives per-node lifecycle state from session/restore truth plus the rig's latest
+ * usable snapshot.
+ *
+ * Priorities (post-L2):
+ *   attention_required  — restoreOutcome=failed AND tmux session is alive
+ *                         (v0 proxy for the Claude resume-prompt case; revisited in L3).
+ *   running             — sessionStatus=running.
+ *   recoverable         — non-running session AND the latest usable snapshot has a
+ *                         non-null resume token for THIS node.
+ *   detached            — anything else (no session, exited, detached without resume token).
+ *
+ * Permission/IO failures upstream (L1 fail-closed) leave sessionStatus unchanged, so
+ * the projection stays honest without misclassifying ambiguous probe failures.
+ */
+export function deriveNodeLifecycleState(input: {
+  sessionStatus: string | null;
+  restoreOutcome: NodeRestoreOutcome;
+  nodeId: string;
+  usableSnapshot: Snapshot | null;
+}): NodeLifecycleState {
+  if (input.restoreOutcome === "failed" && input.sessionStatus === "running") {
+    return "attention_required";
+  }
+  if (input.sessionStatus === "running") return "running";
+  if (input.usableSnapshot) {
+    const nodeSession = (input.usableSnapshot.data.sessions ?? []).find(
+      (s) => s.nodeId === input.nodeId,
+    );
+    if (typeof nodeSession?.resumeToken === "string" && nodeSession.resumeToken.length > 0) {
+      return "recoverable";
+    }
+  }
+  return "detached";
+}
+
 function deriveOccupantLifecycle(row: InventoryRow): NodeInventoryEntry["occupantLifecycle"] {
   if (row.occupant_lifecycle) {
     return row.occupant_lifecycle as NodeInventoryEntry["occupantLifecycle"];
@@ -233,6 +270,10 @@ function mapProjectionEntries(entries: unknown[]): Array<{ id: string; category:
  * Single source of truth consumed by CLI, UI, and MCP.
  */
 export function getNodeInventory(db: Database.Database, rigId: string): NodeInventoryEntry[] {
+  // Resolve the rig's latest usable snapshot once for the whole projection so per-node
+  // recoverability checks share the same source of truth without N extra queries.
+  const usableSnapshot = findLatestUsableSnapshot(db, rigId);
+
   // Join nodes with newest session (max ULID = max session.id string comparison)
   // and the rig name
   const hasCodexConfigProfile = db.prepare("PRAGMA table_info(nodes)").all()
@@ -282,6 +323,12 @@ export function getNodeInventory(db: Database.Database, rigId: string): NodeInve
 
   return rows.map((row) => {
     const restoreOutcome = deriveRestoreOutcome(db, rigId, row.node_id);
+    const lifecycleState = deriveNodeLifecycleState({
+      sessionStatus: row.session_status,
+      restoreOutcome,
+      nodeId: row.node_id,
+      usableSnapshot,
+    });
     return {
       rigId: row.rig_id,
       rigName: row.rig_name,
@@ -295,6 +342,7 @@ export function getNodeInventory(db: Database.Database, rigId: string): NodeInve
       sessionStatus: row.session_status,
       startupStatus: row.startup_status as NodeInventoryEntry["startupStatus"],
       restoreOutcome,
+      lifecycleState,
       occupantLifecycle: deriveOccupantLifecycle(row),
       continuityOutcome: deriveContinuityOutcome(row, restoreOutcome),
       handoverResult: row.handover_result as NodeInventoryEntry["handoverResult"] ?? null,

@@ -6,6 +6,7 @@ import type { SnapshotRepository } from "../domain/snapshot-repository.js";
 import type { RestoreOrchestrator } from "../domain/restore-orchestrator.js";
 import { projectRigToGraph, type InventoryOverlay } from "../domain/graph-projection.js";
 import { getNodeInventory, getNodeInventoryWithContext } from "../domain/node-inventory.js";
+import { deriveRigLifecycleState } from "../domain/ps-projection.js";
 import type { ContextUsageStore } from "../domain/context-usage-store.js";
 import type { Pod, ExpansionPodFragment } from "../domain/types.js";
 import type { RigExpansionService } from "../domain/rig-expansion-service.js";
@@ -87,7 +88,14 @@ function getSelfAttachService(c: { get: (key: string) => unknown }): SelfAttachS
 rigsRoutes.get("/summary", (c) => {
   const repo = getRepo(c);
   const summaries = repo.getRigSummaries();
-  return c.json(summaries);
+  // Enrich with rig-level lifecycleState so CLI surfaces (rig up wording, recover vs
+  // turn-on) can choose the right operator action without a second round trip.
+  const enriched = summaries.map((s) => {
+    const inventory = getNodeInventory(repo.db, s.id);
+    const lifecycleState = deriveRigLifecycleState(inventory.map((e) => e.lifecycleState));
+    return { ...s, lifecycleState };
+  });
+  return c.json(enriched);
 });
 
 rigsRoutes.post("/", async (c) => {

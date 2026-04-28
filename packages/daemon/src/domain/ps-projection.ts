@@ -1,4 +1,6 @@
 import type Database from "better-sqlite3";
+import type { NodeLifecycleState, RigLifecycleState } from "./types.js";
+import { getNodeInventory } from "./node-inventory.js";
 
 export interface PsEntry {
   rigId: string;
@@ -6,8 +8,40 @@ export interface PsEntry {
   nodeCount: number;
   runningCount: number;
   status: "running" | "partial" | "stopped";
+  lifecycleState: RigLifecycleState;
   uptime: string | null;
   latestSnapshot: string | null;
+}
+
+/**
+ * Folds per-node lifecycle states into a rig-level lifecycle state.
+ *
+ *   attention_required > running > recoverable > stopped, with `degraded` for mixes.
+ *
+ * Rules (post-L2):
+ *   - any node attention_required          → attention_required (priority over below).
+ *   - all nodes running                    → running.
+ *   - all nodes non-running, any recoverable → recoverable.
+ *   - all nodes non-running, none recoverable → stopped.
+ *   - mixed running + non-running          → degraded.
+ *   - empty rig (no nodes)                 → stopped.
+ *
+ * `recoverable` at rig level depends on per-node recoverability, which already accounts
+ * for whether the rig's latest usable snapshot has a resume token for that node.
+ */
+export function deriveRigLifecycleState(nodeStates: NodeLifecycleState[]): RigLifecycleState {
+  if (nodeStates.length === 0) return "stopped";
+  if (nodeStates.some((s) => s === "attention_required")) return "attention_required";
+
+  const runningCount = nodeStates.filter((s) => s === "running").length;
+  const totalCount = nodeStates.length;
+
+  if (runningCount === totalCount) return "running";
+  if (runningCount === 0) {
+    const anyRecoverable = nodeStates.some((s) => s === "recoverable");
+    return anyRecoverable ? "recoverable" : "stopped";
+  }
+  return "degraded";
 }
 
 /**
@@ -56,12 +90,18 @@ export class PsProjectionService {
         : r.running_count > 0 ? "partial"
         : "stopped";
 
+      // Derive rig-level lifecycleState by folding per-node states. The cost is one
+      // node-inventory pass per rig; this matches the v0 "derive, no migration" decision.
+      const inventory = getNodeInventory(this.db, r.rig_id);
+      const lifecycleState = deriveRigLifecycleState(inventory.map((e) => e.lifecycleState));
+
       return {
         rigId: r.rig_id,
         name: r.name,
         nodeCount: r.node_count,
         runningCount: r.running_count,
         status,
+        lifecycleState,
         uptime: r.earliest_running_at ? formatDuration(now - new Date(r.earliest_running_at + "Z").getTime()) : null,
         latestSnapshot: r.latest_snapshot_at ? formatAge(now - new Date(r.latest_snapshot_at + "Z").getTime()) : null,
       };

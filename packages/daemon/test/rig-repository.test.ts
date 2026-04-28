@@ -191,3 +191,103 @@ describe("Wiring regression", () => {
     db.close();
   });
 });
+
+// L2 findLatestUsableSnapshot
+describe("RigRepository.findLatestUsableSnapshot (L2)", () => {
+  let db: Database.Database;
+  let repo: RigRepository;
+
+  beforeEach(() => {
+    db = setupDb();
+    repo = new RigRepository(db);
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  function seedSnapshot(
+    rigId: string,
+    snapshotId: string,
+    sessions: Array<{ nodeId: string; resumeToken: string | null }>,
+    createdAt?: string,
+  ): void {
+    const data = {
+      rig: { id: rigId, name: "rig-name", createdAt: "2026-04-28T00:00:00Z", updatedAt: "2026-04-28T00:00:00Z" },
+      nodes: [],
+      edges: [],
+      sessions: sessions.map((s, i) => ({
+        id: `sess-snap-${i}`,
+        nodeId: s.nodeId,
+        sessionName: `tmux-${s.nodeId}`,
+        status: "detached",
+        resumeType: s.resumeToken ? "claude" : null,
+        resumeToken: s.resumeToken,
+        restorePolicy: "resume_if_possible",
+        lastSeenAt: null,
+        createdAt: "2026-04-28T00:00:00Z",
+        origin: "launched" as const,
+        startupStatus: "ready" as const,
+        startupCompletedAt: null,
+      })),
+      checkpoints: {},
+    };
+    if (createdAt) {
+      db.prepare("INSERT INTO snapshots (id, rig_id, kind, status, data, created_at) VALUES (?, ?, ?, ?, ?, ?)")
+        .run(snapshotId, rigId, "manual", "complete", JSON.stringify(data), createdAt);
+    } else {
+      db.prepare("INSERT INTO snapshots (id, rig_id, kind, status, data) VALUES (?, ?, ?, ?, ?)")
+        .run(snapshotId, rigId, "manual", "complete", JSON.stringify(data));
+    }
+  }
+
+  it("returns null when no snapshot exists for rig", () => {
+    const rig = repo.createRig("no-snap");
+    expect(repo.findLatestUsableSnapshot(rig.id)).toBeNull();
+  });
+
+  it("returns null when only snapshots have null resume tokens for all nodes", () => {
+    const rig = repo.createRig("null-tokens");
+    seedSnapshot(rig.id, "snap-1", [
+      { nodeId: "node-a", resumeToken: null },
+      { nodeId: "node-b", resumeToken: null },
+    ]);
+    expect(repo.findLatestUsableSnapshot(rig.id)).toBeNull();
+  });
+
+  it("returns latest snapshot when at least one session has a non-null resume token", () => {
+    const rig = repo.createRig("usable");
+    seedSnapshot(rig.id, "snap-1", [
+      { nodeId: "node-a", resumeToken: "tok-a" },
+      { nodeId: "node-b", resumeToken: null },
+    ]);
+
+    const result = repo.findLatestUsableSnapshot(rig.id);
+    expect(result).not.toBeNull();
+    expect(result!.id).toBe("snap-1");
+    expect(result!.data.sessions?.find((s) => s.nodeId === "node-a")?.resumeToken).toBe("tok-a");
+  });
+
+  it("returns the snapshot even when only some nodes have valid tokens (per-node lifecycleState handles individual recoverability)", () => {
+    const rig = repo.createRig("partial");
+    seedSnapshot(rig.id, "snap-1", [
+      { nodeId: "node-a", resumeToken: "tok-a" }, // recoverable
+      { nodeId: "node-b", resumeToken: null },     // detached
+      { nodeId: "node-c", resumeToken: null },     // detached
+    ]);
+
+    const result = repo.findLatestUsableSnapshot(rig.id);
+    expect(result).not.toBeNull();
+    expect(result!.data.sessions).toHaveLength(3);
+  });
+
+  it("returns the latest snapshot when multiple usable snapshots exist (ORDER BY created_at DESC, id DESC)", () => {
+    const rig = repo.createRig("multi-snap");
+    seedSnapshot(rig.id, "snap-old", [{ nodeId: "node-a", resumeToken: "tok-old" }], "2026-04-27 00:00:00");
+    seedSnapshot(rig.id, "snap-new", [{ nodeId: "node-a", resumeToken: "tok-new" }], "2026-04-28 00:00:00");
+
+    const result = repo.findLatestUsableSnapshot(rig.id);
+    expect(result).not.toBeNull();
+    expect(result!.id).toBe("snap-new");
+  });
+});

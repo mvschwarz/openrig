@@ -412,4 +412,89 @@ describe("Ps CLI", () => {
     expect(logs.some((l) => l.includes("rig daemon start"))).toBe(true);
     expect(exitCode).toBe(1);
   });
+
+  // L2 lifecycle column / JSON shape (rig + node level)
+  it("ps prints LIFECYCLE column with abbreviated rig-level state", async () => {
+    psData = [
+      { rigId: "rig-1", name: "running-rig", nodeCount: 2, runningCount: 2, status: "running", lifecycleState: "running", uptime: "2h", latestSnapshot: null },
+      { rigId: "rig-2", name: "recover-rig", nodeCount: 2, runningCount: 0, status: "stopped", lifecycleState: "recoverable", uptime: null, latestSnapshot: "1h ago" },
+      { rigId: "rig-3", name: "stop-rig", nodeCount: 1, runningCount: 0, status: "stopped", lifecycleState: "stopped", uptime: null, latestSnapshot: null },
+      { rigId: "rig-4", name: "deg-rig", nodeCount: 2, runningCount: 1, status: "partial", lifecycleState: "degraded", uptime: "30m", latestSnapshot: null },
+      { rigId: "rig-5", name: "att-rig", nodeCount: 2, runningCount: 2, status: "running", lifecycleState: "attention_required", uptime: "10m", latestSnapshot: null },
+    ];
+    const { logs } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "ps"]);
+    });
+    const output = logs.join("\n");
+    expect(output).toContain("LIFECYCLE");
+    expect(output).toContain("run");
+    expect(output).toContain("rec");
+    expect(output).toContain("stp");
+    expect(output).toContain("deg");
+    expect(output).toContain("att");
+  });
+
+  it("ps --json includes lifecycleState in rig entries", async () => {
+    psData = [
+      { rigId: "rig-1", name: "test", nodeCount: 1, runningCount: 0, status: "stopped", lifecycleState: "recoverable", uptime: null, latestSnapshot: "5m ago" },
+    ];
+    const { logs } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "ps", "--json"]);
+    });
+    const parsed = JSON.parse(logs.join(""));
+    expect(parsed[0].lifecycleState).toBe("recoverable");
+  });
+
+  it("ps --nodes prints LIFECYCLE column with per-node abbreviated state", async () => {
+    psData = [
+      { rigId: "rig-1", name: "mixed-rig", nodeCount: 3, runningCount: 1, status: "partial", lifecycleState: "degraded", uptime: "15m", latestSnapshot: null },
+    ];
+    nodesData["rig-1"] = [
+      {
+        rigId: "rig-1", rigName: "mixed-rig", logicalId: "dev.impl", podId: "pod-1", podNamespace: "dev",
+        canonicalSessionName: "dev-impl@mixed-rig", nodeKind: "agent", runtime: "claude-code",
+        sessionStatus: "running", startupStatus: "ready", restoreOutcome: "n-a", lifecycleState: "running",
+        tmuxAttachCommand: null, resumeCommand: null, latestError: null,
+      },
+      {
+        rigId: "rig-1", rigName: "mixed-rig", logicalId: "dev.qa", podId: "pod-1", podNamespace: "dev",
+        canonicalSessionName: "dev-qa@mixed-rig", nodeKind: "agent", runtime: "claude-code",
+        sessionStatus: "detached", startupStatus: "ready", restoreOutcome: "n-a", lifecycleState: "recoverable",
+        tmuxAttachCommand: null, resumeCommand: null, latestError: null,
+      },
+      {
+        rigId: "rig-1", rigName: "mixed-rig", logicalId: "dev.lead", podId: "pod-1", podNamespace: "dev",
+        canonicalSessionName: "dev-lead@mixed-rig", nodeKind: "agent", runtime: "claude-code",
+        sessionStatus: "detached", startupStatus: "ready", restoreOutcome: "n-a", lifecycleState: "detached",
+        tmuxAttachCommand: null, resumeCommand: null, latestError: null,
+      },
+    ];
+    const { logs } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes"]);
+    });
+    const output = logs.join("\n");
+    expect(output).toContain("LIFECYCLE");
+    expect(output).toContain("run");
+    expect(output).toContain("rec");
+    expect(output).toContain("det");
+  });
+
+  it("ps --nodes --json includes lifecycleState per node", async () => {
+    psData = [
+      { rigId: "rig-1", name: "test", nodeCount: 1, runningCount: 0, status: "stopped", lifecycleState: "recoverable", uptime: null, latestSnapshot: null },
+    ];
+    nodesData["rig-1"] = [
+      {
+        rigId: "rig-1", rigName: "test", logicalId: "dev.impl", podId: "pod-1", podNamespace: "dev",
+        canonicalSessionName: "dev-impl@test", nodeKind: "agent", runtime: "claude-code",
+        sessionStatus: "detached", startupStatus: "ready", restoreOutcome: "n-a", lifecycleState: "recoverable",
+        tmuxAttachCommand: null, resumeCommand: null, latestError: null,
+      },
+    ];
+    const { logs } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "--json"]);
+    });
+    const parsed = JSON.parse(logs.join(""));
+    expect(parsed[0].lifecycleState).toBe("recoverable");
+  });
 });

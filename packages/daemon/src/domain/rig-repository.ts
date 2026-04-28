@@ -11,7 +11,45 @@ import type {
   RigWithRelations,
   RigServicesRecord,
   RigServicesRecordInput,
+  Snapshot,
+  SnapshotData,
 } from "./types.js";
+
+/**
+ * Free helper: returns the latest snapshot for a rig whose data carries non-null
+ * `resume_token` for at least one persisted session, or null otherwise.
+ *
+ * Used by node-inventory and ps-projection to derive `lifecycleState=recoverable`
+ * post-L1 cold-start. Distinct from `findLatestAutoPreDown`, which filters by kind.
+ */
+export function findLatestUsableSnapshot(db: Database.Database, rigId: string): Snapshot | null {
+  const row = db.prepare(
+    "SELECT * FROM snapshots WHERE rig_id = ? ORDER BY created_at DESC, id DESC LIMIT 1"
+  ).get(rigId) as { id: string; rig_id: string; kind: string; status: string; data: string; created_at: string } | undefined;
+  if (!row) return null;
+
+  let data: SnapshotData;
+  try {
+    data = JSON.parse(row.data) as SnapshotData;
+  } catch {
+    return null;
+  }
+
+  const sessions = data.sessions ?? [];
+  const hasAnyResumeToken = sessions.some(
+    (s) => typeof s.resumeToken === "string" && s.resumeToken.length > 0,
+  );
+  if (!hasAnyResumeToken) return null;
+
+  return {
+    id: row.id,
+    rigId: row.rig_id,
+    kind: row.kind,
+    status: row.status,
+    data,
+    createdAt: row.created_at,
+  };
+}
 
 interface NodeOptions {
   role?: string;
@@ -171,6 +209,15 @@ export class RigRepository {
       .prepare("SELECT * FROM rigs ORDER BY created_at")
       .all() as RigRow[];
     return rows.map((r) => this.rowToRig(r));
+  }
+
+  /**
+   * Returns the latest snapshot for this rig with at least one non-null resume token,
+   * or null if no usable snapshot exists. Used by the lifecycle projection to derive
+   * `recoverable` state.
+   */
+  findLatestUsableSnapshot(rigId: string): Snapshot | null {
+    return findLatestUsableSnapshot(this.db, rigId);
   }
 
   findRigsByName(name: string): Rig[] {

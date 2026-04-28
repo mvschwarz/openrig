@@ -102,14 +102,27 @@ Examples:
 
       // If it looks like a name, check for library spec match
       let defaultLibraryCwdOverride: string | undefined;
+      // Cache rig summaries so we can both detect ambiguity AND derive lifecycleState
+      // for "Recovering ..." vs "Turning on ..." wording (post-L2).
+      let rigSummariesCache: Array<{ id: string; name: string; lifecycleState?: string }> | null = null;
+      const fetchRigSummaries = async () => {
+        if (rigSummariesCache !== null) return rigSummariesCache;
+        try {
+          const res = await client.get<Array<{ id: string; name: string; lifecycleState?: string }>>("/api/rigs/summary");
+          rigSummariesCache = res.data ?? [];
+        } catch {
+          rigSummariesCache = [];
+        }
+        return rigSummariesCache;
+      };
       if (isRigName) {
         try {
           const { resolveLibrarySpec } = await import("./specs.js");
           const entry = await resolveLibrarySpec(client, source);
           // Library match found — check for existing-rig collision
           // Use /api/rigs/summary which mirrors findRigsByName (includes stopped rigs)
-          const rigRes = await client.get<Array<{ id: string; name: string }>>("/api/rigs/summary");
-          const rigMatches = (rigRes.data ?? []).filter((r) => r.name === source);
+          const rigSummaries = await fetchRigSummaries();
+          const rigMatches = rigSummaries.filter((r) => r.name === source);
           if (rigMatches.length > 0) {
             console.error(`'${source}' is ambiguous — it matches both an existing rig restore target and a library spec.`);
             console.error(`  To launch the library spec: rig up ${entry.sourcePath}`);
@@ -130,6 +143,21 @@ Examples:
             return;
           }
           // Not found or other error — proceed with existing rig-name behavior
+        }
+
+        // Wording divergence (post-L2): if sourceRef stayed as the rig name we are
+        // routing through the existing-rig restore path. Print "Recovering ..." or
+        // "Turning on ..." per the rig's derived lifecycleState. Help text honesty:
+        // "Recover" describes what `rig up` does; it does not promise success before
+        // tester L4 VM proof completes.
+        if (sourceRef === source && !opts.json) {
+          const summaries = await fetchRigSummaries();
+          const match = summaries.find((r) => r.name === source);
+          if (match?.lifecycleState === "recoverable") {
+            console.log(`Recovering rig "${source}" from latest snapshot...`);
+          } else if (match?.lifecycleState === "stopped") {
+            console.log(`Turning on rig "${source}"...`);
+          }
         }
       }
 

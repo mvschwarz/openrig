@@ -689,4 +689,141 @@ describe("Up CLI", () => {
     expect(logs.join("\n")).toContain("/specs/alpha.yaml");
     expect(exitCode).toBe(1);
   });
+
+  // L2 wording divergence: rig name in recoverable state -> "Recovering ..."; stopped -> "Turning on ..."
+  it("up <rig-name> prints 'Recovering ... from latest snapshot' when lifecycleState=recoverable", async () => {
+    const origListeners = server.listeners("request");
+    server.removeAllListeners("request");
+    server.on("request", async (req: http.IncomingMessage, res: http.ServerResponse) => {
+      let body = "";
+      for await (const chunk of req) body += chunk;
+      if (req.url === "/api/specs/library" && req.method === "GET") {
+        // No library match — falls through to existing-rig path
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify([]));
+      } else if (req.url === "/api/rigs/summary" && req.method === "GET") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify([{ id: "r-rec", name: "stale-velocity", nodeCount: 4, lifecycleState: "recoverable" }]));
+      } else if (req.url === "/api/up" && req.method === "POST") {
+        res.writeHead(201, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ status: "restored", rigId: "r-rec", rigName: "stale-velocity", rigResult: "restored", nodes: [], warnings: [] }));
+      } else {
+        res.writeHead(404);
+        res.end();
+      }
+    });
+
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "up", "stale-velocity"]);
+    });
+
+    server.removeAllListeners("request");
+    for (const l of origListeners) server.on("request", l as (...args: unknown[]) => void);
+
+    const output = logs.join("\n");
+    expect(output).toContain('Recovering rig "stale-velocity" from latest snapshot');
+    expect(output).not.toContain('Turning on rig "stale-velocity"');
+    expect(exitCode).toBeUndefined(); // 0
+  });
+
+  it("up <rig-name> prints 'Turning on ...' when lifecycleState=stopped (no usable snapshot)", async () => {
+    const origListeners = server.listeners("request");
+    server.removeAllListeners("request");
+    server.on("request", async (req: http.IncomingMessage, res: http.ServerResponse) => {
+      let body = "";
+      for await (const chunk of req) body += chunk;
+      if (req.url === "/api/specs/library" && req.method === "GET") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify([]));
+      } else if (req.url === "/api/rigs/summary" && req.method === "GET") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify([{ id: "r-stop", name: "fresh-rig", nodeCount: 1, lifecycleState: "stopped" }]));
+      } else if (req.url === "/api/up" && req.method === "POST") {
+        res.writeHead(201, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ status: "completed", rigId: "r-stop", stages: [], errors: [], warnings: [] }));
+      } else {
+        res.writeHead(404);
+        res.end();
+      }
+    });
+
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "up", "fresh-rig"]);
+    });
+
+    server.removeAllListeners("request");
+    for (const l of origListeners) server.on("request", l as (...args: unknown[]) => void);
+
+    const output = logs.join("\n");
+    expect(output).toContain('Turning on rig "fresh-rig"');
+    expect(output).not.toContain('Recovering rig "fresh-rig"');
+    expect(exitCode).toBeUndefined();
+  });
+
+  it("up <rig-name> prints no recovery wording when lifecycleState=running (already up)", async () => {
+    const origListeners = server.listeners("request");
+    server.removeAllListeners("request");
+    server.on("request", async (req: http.IncomingMessage, res: http.ServerResponse) => {
+      let body = "";
+      for await (const chunk of req) body += chunk;
+      if (req.url === "/api/specs/library" && req.method === "GET") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify([]));
+      } else if (req.url === "/api/rigs/summary" && req.method === "GET") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify([{ id: "r-run", name: "live-rig", nodeCount: 1, lifecycleState: "running" }]));
+      } else if (req.url === "/api/up" && req.method === "POST") {
+        res.writeHead(201, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ status: "completed", rigId: "r-run", stages: [], errors: [], warnings: [] }));
+      } else {
+        res.writeHead(404);
+        res.end();
+      }
+    });
+
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "up", "live-rig"]);
+    });
+
+    server.removeAllListeners("request");
+    for (const l of origListeners) server.on("request", l as (...args: unknown[]) => void);
+
+    const output = logs.join("\n");
+    expect(output).not.toContain("Recovering rig");
+    expect(output).not.toContain("Turning on rig");
+    expect(exitCode).toBeUndefined();
+  });
+
+  it("up --json suppresses the wording prefix even for recoverable rigs (machine output stays clean)", async () => {
+    const origListeners = server.listeners("request");
+    server.removeAllListeners("request");
+    server.on("request", async (req: http.IncomingMessage, res: http.ServerResponse) => {
+      let body = "";
+      for await (const chunk of req) body += chunk;
+      if (req.url === "/api/specs/library" && req.method === "GET") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify([]));
+      } else if (req.url === "/api/rigs/summary" && req.method === "GET") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify([{ id: "r-rec", name: "json-rig", nodeCount: 1, lifecycleState: "recoverable" }]));
+      } else if (req.url === "/api/up" && req.method === "POST") {
+        res.writeHead(201, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ status: "restored", rigId: "r-rec", rigName: "json-rig", rigResult: "restored", nodes: [], warnings: [] }));
+      } else {
+        res.writeHead(404);
+        res.end();
+      }
+    });
+
+    const { logs } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "up", "json-rig", "--json"]);
+    });
+
+    server.removeAllListeners("request");
+    for (const l of origListeners) server.on("request", l as (...args: unknown[]) => void);
+
+    // The body must be valid JSON (no preceding "Recovering ..." text).
+    const joined = logs.join("");
+    expect(() => JSON.parse(joined)).not.toThrow();
+  });
 });
