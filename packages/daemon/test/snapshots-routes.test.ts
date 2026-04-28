@@ -150,18 +150,28 @@ describe("Restore routes", () => {
     db.close();
   });
 
-  it("POST /api/rigs/:rigId/restore/:snapshotId -> 200 + RestoreResult", async () => {
+  // L3: route returns 202 + attemptId immediately after restore.started emit.
+  // Per-node restore work runs in the background; clients query event log /
+  // node inventory for follow-up state.
+  it("POST /api/rigs/:rigId/restore/:snapshotId -> 202 + attemptId (L3)", async () => {
     const rig = rigRepo.createRig("r99");
     rigRepo.addNode(rig.id, "worker", { role: "worker" });
     const snap = snapshotCapture.captureSnapshot(rig.id, "manual");
 
     const res = await app.request(`/api/rigs/${rig.id}/restore/${snap.id}`, { method: "POST" });
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(202);
     const body = await res.json();
-    expect(body.snapshotId).toBe(snap.id);
-    expect(body.preRestoreSnapshotId).toBeDefined();
-    expect(body.rigResult).toBe("partially_restored");
-    expect(body.nodes).toHaveLength(1);
+    expect(body.ok).toBe(true);
+    expect(body.status).toBe("started");
+    expect(body.rigId).toBe(rig.id);
+    expect(typeof body.attemptId).toBe("number");
+    expect(body.attemptId).toBeGreaterThan(0);
+
+    // attemptId must match a queryable restore.started event seq.
+    const startedEvent = db
+      .prepare("SELECT seq FROM events WHERE rig_id = ? AND type = 'restore.started' ORDER BY seq DESC LIMIT 1")
+      .get(rig.id) as { seq: number } | undefined;
+    expect(startedEvent?.seq).toBe(body.attemptId);
   });
 
   it("POST restore returns 409 not_attempted when pre-restore validation blocks", async () => {
@@ -267,20 +277,25 @@ describe("Restore routes", () => {
     db2.close();
   });
 
-  it("restore response includes nodes array with status per node", async () => {
+  // L3: per-node detail is no longer in the immediate route response. Verify
+  // the route returns the new shape; per-node statuses are exercised by
+  // restore-orchestrator tests directly.
+  it("restore response is asynchronous: 202 + attemptId, no per-node body", async () => {
     const rig = rigRepo.createRig("r99");
     rigRepo.addNode(rig.id, "worker-a", { role: "worker" });
     rigRepo.addNode(rig.id, "worker-b", { role: "worker" });
     const snap = snapshotCapture.captureSnapshot(rig.id, "manual");
 
     const res = await app.request(`/api/rigs/${rig.id}/restore/${snap.id}`, { method: "POST" });
+    expect(res.status).toBe(202);
     const body = await res.json();
-    expect(body.rigResult).toBe("partially_restored");
-    expect(body.nodes).toHaveLength(2);
-    for (const node of body.nodes) {
-      expect(node.logicalId).toBeDefined();
-      expect(node.status).toBeDefined();
-    }
+    expect(body.ok).toBe(true);
+    expect(body.status).toBe("started");
+    expect(typeof body.attemptId).toBe("number");
+    // The immediate response intentionally does NOT include nodes/rigResult;
+    // per-node work runs in the background.
+    expect(body.nodes).toBeUndefined();
+    expect(body.rigResult).toBeUndefined();
   });
 });
 
@@ -308,7 +323,11 @@ describe("Restore concurrency", () => {
 });
 
 describe("Restore response contract", () => {
-  it("restore response can contain 'checkpoint_written' status", async () => {
+  // L3: per-node statuses are no longer in the immediate route response (route
+  // returns 202 + attemptId). Per-node behavior is verified in restore-orchestrator
+  // tests directly. This test now confirms the async contract holds even when a
+  // checkpoint exists for the node (which previously yielded `rebuilt`).
+  it("restore returns 202 + attemptId even when nodes have checkpoints (L3 async contract)", async () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "rigged-test-"));
     const db2 = createFullTestDb();
     const setup = createTestApp(db2);
@@ -322,9 +341,10 @@ describe("Restore response contract", () => {
     const snap = setup.snapshotCapture.captureSnapshot(rig.id, "manual");
 
     const res = await setup.app.request(`/api/rigs/${rig.id}/restore/${snap.id}`, { method: "POST" });
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(202);
     const body = await res.json();
-    expect(body.nodes[0].status).toBe("rebuilt");
+    expect(body.ok).toBe(true);
+    expect(typeof body.attemptId).toBe("number");
 
     db2.close();
     fs.rmSync(tmpDir, { recursive: true });

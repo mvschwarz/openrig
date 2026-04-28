@@ -1952,4 +1952,325 @@ describe("RestoreOrchestrator", () => {
     const row = db.prepare("SELECT status FROM sessions WHERE id = ?").get(session.id) as { status: string };
     expect(row.status).toBe("running");
   });
+
+  // L3 Decision 1: attempt id surfacing
+  describe("attempt id (L3)", () => {
+    it("restore() invokes onAttemptStarted with the persisted restore.started event seq", async () => {
+      const orch = createOrchestrator();
+      const snap = seedRigAndSnapshot();
+      let receivedAttemptId: number | null = null;
+
+      const outcome = await orch.restore(snap.id, {
+        onAttemptStarted: (id) => { receivedAttemptId = id; },
+      });
+
+      expect(outcome.ok).toBe(true);
+      expect(receivedAttemptId).not.toBeNull();
+      expect(typeof receivedAttemptId).toBe("number");
+
+      // attemptId must match a queryable restore.started event seq.
+      const startedRow = db
+        .prepare("SELECT seq FROM events WHERE rig_id = ? AND type = 'restore.started' ORDER BY seq DESC LIMIT 1")
+        .get(snap.rigId) as { seq: number } | undefined;
+      expect(startedRow?.seq).toBe(receivedAttemptId);
+    });
+
+    it("onAttemptStarted is NOT invoked when pre-restore validation fails (no restore.started emit)", async () => {
+      const orch = createOrchestrator();
+      const snap = seedRigAndSnapshot({
+        nodes: [{ logicalId: "orchestrator", role: "orchestrator", runtime: "claude-code", cwd: "/tmp" }],
+        edges: [],
+        withCheckpoint: "orchestrator",
+      });
+      // Force a pre-restore validation failure: clear the node's cwd so the
+      // checkpoint blocks restore (checkpoint_missing_node_cwd).
+      const data = JSON.parse(JSON.stringify(snap.data));
+      data.nodes[0].cwd = null;
+      db.prepare("UPDATE snapshots SET data = ? WHERE id = ?").run(JSON.stringify(data), snap.id);
+
+      let invoked = false;
+      const outcome = await orch.restore(snap.id, {
+        onAttemptStarted: () => { invoked = true; },
+      });
+
+      expect(outcome.ok).toBe(false);
+      if (!outcome.ok) {
+        expect(outcome.code).toBe("pre_restore_validation_failed");
+      }
+      expect(invoked).toBe(false);
+    });
+  });
+
+  // L3 Decision 3: runtime-truth reconciliation
+  describe("reconcileNodeRuntimeTruth (L3)", () => {
+    // Reconciler-specific mock with `hasSession` as a vi.fn so individual tests
+    // can vary it. Cannot reuse `mockTmux()` because that wires hasSession as a
+    // plain async function (88 existing tests depend on that shape).
+    function mockTmuxForReconciler(): TmuxAdapter {
+      return {
+        createSession: vi.fn(async () => ({ ok: true as const })),
+        killSession: vi.fn(async () => ({ ok: true as const })),
+        sendText: vi.fn(async () => ({ ok: true as const })),
+        sendKeys: vi.fn(async () => ({ ok: true as const })),
+        getPaneCommand: vi.fn(async () => "claude"),
+        capturePaneContent: vi.fn(async () => ""),
+        hasSession: vi.fn(async () => false),
+        listSessions: async () => [],
+        listWindows: async () => [],
+        listPanes: async () => [],
+      } as unknown as TmuxAdapter;
+    }
+
+    let nextSeed = 90;
+    function seedFailedAttempt(opts: {
+      rigName?: string;
+      logicalId?: string;
+      runtime?: "claude-code" | "codex";
+      restoreOutcome: "failed" | "attention_required";
+      withResumeToken?: boolean;
+      withBinding?: boolean;
+    }) {
+      // Session name validator requires legacy `r{NN}-{suffix}` or canonical
+      // `{pod}-{member}@{rig}`. Each call gets a unique numeric rig id so the
+      // legacy pattern matches and rig names don't collide.
+      const rigName = opts.rigName ?? `r${nextSeed++}`;
+      const logicalId = opts.logicalId ?? "worker";
+      const runtime = opts.runtime ?? "claude-code";
+      const rig = rigRepo.createRig(rigName);
+      const node = rigRepo.addNode(rig.id, logicalId, { role: "worker", runtime });
+
+      // Bind a tmux session name so the reconciler can probe.
+      const sessionName = `${rigName}-${logicalId}`;
+      if (opts.withBinding ?? true) {
+        sessionRegistry.updateBinding(node.id, { tmuxSession: sessionName });
+      }
+
+      // Seed a session row, optionally with resume token.
+      const sess = sessionRegistry.registerSession(node.id, sessionName);
+      if (opts.withResumeToken) {
+        db.prepare("UPDATE sessions SET resume_type = ?, resume_token = ? WHERE id = ?")
+          .run(runtime === "claude-code" ? "claude_id" : "codex_id", "tok-abc-123", sess.id);
+      }
+
+      // Seed restore.started + restore.completed events with this node's outcome.
+      eventBus.emit({ type: "restore.started", rigId: rig.id, snapshotId: "snap-recon" });
+      eventBus.emit({
+        type: "restore.completed",
+        rigId: rig.id,
+        snapshotId: "snap-recon",
+        result: {
+          snapshotId: "snap-recon",
+          preRestoreSnapshotId: null,
+          rigResult: "partially_restored",
+          nodes: [
+            { nodeId: node.id, logicalId, status: opts.restoreOutcome },
+          ],
+          warnings: [],
+        },
+      });
+
+      return { rig, nodeId: node.id, sessionName };
+    }
+
+    it("upgrades failed -> operator_recovered when ALL four preconditions hold; emits audit event", async () => {
+      const tmux = mockTmuxForReconciler();
+      (tmux.hasSession as ReturnType<typeof vi.fn>).mockResolvedValue(true);
+      (tmux.getPaneCommand as ReturnType<typeof vi.fn>).mockResolvedValue("claude");
+      (tmux.capturePaneContent as ReturnType<typeof vi.fn>).mockResolvedValue([
+        "Claude Code v2.1.89",
+        "",
+        " ❯ accept edits on",
+        "",
+      ].join("\n"));
+      const orch = createOrchestrator({ tmux });
+      const seeded = seedFailedAttempt({ restoreOutcome: "failed", withResumeToken: true });
+
+      const result = await orch.reconcileNodeRuntimeTruth(seeded.rig.id, seeded.nodeId);
+
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.from).toBe("failed");
+        expect(result.to).toBe("operator_recovered");
+        expect(result.evidence).toEqual({
+          tmux: true,
+          fgProcess: "claude",
+          resumeTokenUsed: true,
+          paneState: "usable",
+        });
+      }
+
+      // Audit event present.
+      const reconciled = db.prepare(
+        "SELECT * FROM events WHERE rig_id = ? AND type = 'restore.outcome_reconciled'"
+      ).all(seeded.rig.id);
+      expect(reconciled).toHaveLength(1);
+    });
+
+    it("upgrades attention_required -> operator_recovered when ALL preconditions hold", async () => {
+      const tmux = mockTmuxForReconciler();
+      (tmux.hasSession as ReturnType<typeof vi.fn>).mockResolvedValue(true);
+      (tmux.getPaneCommand as ReturnType<typeof vi.fn>).mockResolvedValue("claude");
+      (tmux.capturePaneContent as ReturnType<typeof vi.fn>).mockResolvedValue([
+        "Claude Code v2.1.89",
+        "",
+        " ❯ accept edits on",
+      ].join("\n"));
+      const orch = createOrchestrator({ tmux });
+      const seeded = seedFailedAttempt({ restoreOutcome: "attention_required", withResumeToken: true });
+
+      const result = await orch.reconcileNodeRuntimeTruth(seeded.rig.id, seeded.nodeId);
+
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.from).toBe("attention_required");
+        expect(result.to).toBe("operator_recovered");
+      }
+    });
+
+    it("audit-trail: original restore.completed event with status=failed remains queryable after upgrade", async () => {
+      const tmux = mockTmuxForReconciler();
+      (tmux.hasSession as ReturnType<typeof vi.fn>).mockResolvedValue(true);
+      (tmux.getPaneCommand as ReturnType<typeof vi.fn>).mockResolvedValue("claude");
+      (tmux.capturePaneContent as ReturnType<typeof vi.fn>).mockResolvedValue("Claude Code v2.1.89\n ❯ accept edits on");
+      const orch = createOrchestrator({ tmux });
+      const seeded = seedFailedAttempt({ restoreOutcome: "failed", withResumeToken: true });
+
+      await orch.reconcileNodeRuntimeTruth(seeded.rig.id, seeded.nodeId);
+
+      // Original restore.completed event must still carry the failed status.
+      const completed = db.prepare(
+        "SELECT payload FROM events WHERE rig_id = ? AND type = 'restore.completed'"
+      ).all(seeded.rig.id) as { payload: string }[];
+      expect(completed).toHaveLength(1);
+      const parsed = JSON.parse(completed[0]!.payload) as { result: { nodes: Array<{ status: string }> } };
+      expect(parsed.result.nodes[0]!.status).toBe("failed");
+    });
+
+    it("no-op when tmux session is missing (precondition #1 fails)", async () => {
+      const tmux = mockTmuxForReconciler();
+      (tmux.hasSession as ReturnType<typeof vi.fn>).mockResolvedValue(false);
+      const orch = createOrchestrator({ tmux });
+      const seeded = seedFailedAttempt({ restoreOutcome: "failed", withResumeToken: true });
+
+      const result = await orch.reconcileNodeRuntimeTruth(seeded.rig.id, seeded.nodeId);
+
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.code).toBe("tmux_session_missing");
+      const reconciled = db.prepare(
+        "SELECT * FROM events WHERE type = 'restore.outcome_reconciled'"
+      ).all();
+      expect(reconciled).toHaveLength(0);
+    });
+
+    it("no-op when foreground process is not runtime (precondition #2 fails)", async () => {
+      const tmux = mockTmuxForReconciler();
+      (tmux.hasSession as ReturnType<typeof vi.fn>).mockResolvedValue(true);
+      (tmux.getPaneCommand as ReturnType<typeof vi.fn>).mockResolvedValue("zsh"); // shell, not claude/codex
+      (tmux.capturePaneContent as ReturnType<typeof vi.fn>).mockResolvedValue("$ ");
+      const orch = createOrchestrator({ tmux });
+      const seeded = seedFailedAttempt({ restoreOutcome: "failed", withResumeToken: true });
+
+      const result = await orch.reconcileNodeRuntimeTruth(seeded.rig.id, seeded.nodeId);
+
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.code).toBe("fg_process_not_runtime");
+    });
+
+    it("no-op when resume token was not used (precondition #3 fails)", async () => {
+      const tmux = mockTmuxForReconciler();
+      (tmux.hasSession as ReturnType<typeof vi.fn>).mockResolvedValue(true);
+      (tmux.getPaneCommand as ReturnType<typeof vi.fn>).mockResolvedValue("claude");
+      (tmux.capturePaneContent as ReturnType<typeof vi.fn>).mockResolvedValue("Claude Code v2.1.89\n ❯ accept edits on");
+      const orch = createOrchestrator({ tmux });
+      const seeded = seedFailedAttempt({ restoreOutcome: "failed", withResumeToken: false });
+
+      const result = await orch.reconcileNodeRuntimeTruth(seeded.rig.id, seeded.nodeId);
+
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.code).toBe("resume_token_not_used");
+    });
+
+    it("no-op when pane is at Claude resume-selection prompt (precondition #4 fails)", async () => {
+      const tmux = mockTmuxForReconciler();
+      (tmux.hasSession as ReturnType<typeof vi.fn>).mockResolvedValue(true);
+      (tmux.getPaneCommand as ReturnType<typeof vi.fn>).mockResolvedValue("claude");
+      (tmux.capturePaneContent as ReturnType<typeof vi.fn>).mockResolvedValue([
+        "Choose a conversation to resume:",
+        "  1. project-foo",
+        "  2. project-bar",
+      ].join("\n"));
+      const orch = createOrchestrator({ tmux });
+      const seeded = seedFailedAttempt({ restoreOutcome: "attention_required", withResumeToken: true });
+
+      const result = await orch.reconcileNodeRuntimeTruth(seeded.rig.id, seeded.nodeId);
+
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.code).toBe("pane_not_usable");
+    });
+
+    it("does not upgrade an outcome that is not failed/attention_required", async () => {
+      // Seed a successfully-resumed outcome. Reconciler should refuse.
+      const rig = rigRepo.createRig("r80");
+      const node = rigRepo.addNode(rig.id, "worker", { role: "worker", runtime: "claude-code" });
+      sessionRegistry.updateBinding(node.id, { tmuxSession: "r80-worker" });
+      eventBus.emit({ type: "restore.started", rigId: rig.id, snapshotId: "snap-x" });
+      eventBus.emit({
+        type: "restore.completed",
+        rigId: rig.id,
+        snapshotId: "snap-x",
+        result: {
+          snapshotId: "snap-x",
+          preRestoreSnapshotId: null,
+          rigResult: "fully_restored",
+          nodes: [{ nodeId: node.id, logicalId: "worker", status: "resumed" }],
+          warnings: [],
+        },
+      });
+
+      const orch = createOrchestrator();
+      const result = await orch.reconcileNodeRuntimeTruth(rig.id, node.id);
+
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.code).toBe("outcome_not_upgradable");
+    });
+
+    it("rejects when no restore.started has ever been recorded for the rig", async () => {
+      const rig = rigRepo.createRig("r81");
+      const node = rigRepo.addNode(rig.id, "worker", { role: "worker", runtime: "claude-code" });
+      const orch = createOrchestrator();
+
+      const result = await orch.reconcileNodeRuntimeTruth(rig.id, node.id);
+
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.code).toBe("no_attempt");
+    });
+
+    it("never produces 'ready' as terminal outcome (Decision 3 forbids it)", async () => {
+      // Even when all preconditions hold, the upgrade target is operator_recovered.
+      const tmux = mockTmuxForReconciler();
+      (tmux.hasSession as ReturnType<typeof vi.fn>).mockResolvedValue(true);
+      (tmux.getPaneCommand as ReturnType<typeof vi.fn>).mockResolvedValue("claude");
+      (tmux.capturePaneContent as ReturnType<typeof vi.fn>).mockResolvedValue("Claude Code v2.1.89\n ❯ accept edits on");
+      const orch = createOrchestrator({ tmux });
+      const seeded = seedFailedAttempt({ restoreOutcome: "failed", withResumeToken: true });
+
+      const result = await orch.reconcileNodeRuntimeTruth(seeded.rig.id, seeded.nodeId);
+
+      if (result.ok) {
+        expect(result.to).toBe("operator_recovered");
+        expect(result.to).not.toBe("ready");
+      } else {
+        // Did not upgrade — that's also fine, point is `to` was never `ready`.
+      }
+
+      const reconciled = db.prepare(
+        "SELECT payload FROM events WHERE type = 'restore.outcome_reconciled'"
+      ).all() as { payload: string }[];
+      for (const row of reconciled) {
+        const parsed = JSON.parse(row.payload) as { to: string };
+        expect(parsed.to).toBe("operator_recovered");
+        expect(parsed.to).not.toBe("ready");
+      }
+    });
+  });
 });

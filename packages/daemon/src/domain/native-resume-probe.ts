@@ -1,6 +1,9 @@
 import { shellQuote } from "../adapters/shell-quote.js";
 
-export type NativeResumeProbeStatus = "resumed" | "failed" | "inconclusive";
+// L3 adds `attention_required` for the Claude resume-selection prompt proxy.
+// Distinct from `inconclusive` (we don't know yet) and `failed` (terminal
+// failure): the runtime is alive and recoverable but needs operator action.
+export type NativeResumeProbeStatus = "resumed" | "failed" | "inconclusive" | "attention_required";
 
 export interface NativeResumeProbeInput {
   runtime: string | null;
@@ -50,6 +53,13 @@ export function assessNativeResumeProbe(
         status: "failed",
         code: "no_conversation_found",
         detail: "Claude reported that the requested session no longer exists.",
+      };
+    }
+    if (looksLikeClaudeResumeSelectionPrompt(paneContent)) {
+      return {
+        status: "attention_required",
+        code: "claude_resume_selection_prompt",
+        detail: "Claude is at a resume-selection prompt; an operator must choose the conversation to continue.",
       };
     }
     if (looksLikeClaudeTrustPrompt(paneContent)) {
@@ -184,6 +194,29 @@ function looksLikeClaudeTui(paneContent: string): boolean {
 function looksLikeClaudeTrustPrompt(paneContent: string): boolean {
   return paneContent.includes("Accessing workspace:")
     && paneContent.includes("Yes, I trust this folder");
+}
+
+// Claude's resume-selection prompt appears when `claude --resume` finds multiple
+// candidate conversations (or after a reboot when the conversation index is
+// rebuilt). The prompt lists numbered options and asks the operator to pick.
+//
+// L3 invariant: do NOT auto-answer. Surface as `attention_required` and let an
+// operator choose; later reconciliation upgrades to `operator_recovered` only
+// when the operator reaches a usable state.
+function looksLikeClaudeResumeSelectionPrompt(paneContent: string): boolean {
+  // Stable substring is the explicit "Choose ... conversation" verb plus the
+  // numbered/arrow option marker that Claude prints. Both must be present so
+  // we don't false-positive on similar TUI strings.
+  const hasChooseVerb =
+    paneContent.includes("Choose a conversation")
+    || paneContent.includes("Choose the conversation")
+    || paneContent.includes("Select a conversation");
+  if (!hasChooseVerb) return false;
+
+  // Look for the numbered/arrow option marker in recent lines.
+  const recentLines = paneContent.split("\n").slice(-30);
+  const numberedOption = recentLines.some((line) => /^\s*(?:›\s*)?\d+\.\s+\S/.test(line));
+  return numberedOption;
 }
 
 function looksLikeClaudeLoginPrompt(paneContent: string): boolean {

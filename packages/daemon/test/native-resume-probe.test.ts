@@ -380,4 +380,79 @@ describe("native resume probe", () => {
       })
     ).toBe(false);
   });
+
+  // L3: Claude resume-selection prompt → attention_required.
+  describe("Claude resume-selection prompt (L3)", () => {
+    it("classifies a numbered Claude resume-selection prompt as attention_required", () => {
+      const paneContent = [
+        "Claude Code v2.1.89",
+        "",
+        "Choose a conversation to resume:",
+        "",
+        "  1. project-foo (modified 2h ago)",
+        "  2. project-bar (modified yesterday)",
+        "  3. project-baz (modified last week)",
+        "",
+        "Enter a number, or press q to cancel.",
+      ].join("\n");
+
+      const result = assessNativeResumeProbe({
+        runtime: "claude-code",
+        paneCommand: "claude",
+        paneContent,
+      });
+
+      expect(result.status).toBe("attention_required");
+      expect(result.code).toBe("claude_resume_selection_prompt");
+    });
+
+    it("classifies the › arrow variant of the resume-selection prompt as attention_required", () => {
+      const paneContent = [
+        "Choose the conversation to resume:",
+        "",
+        "› 1. recent project",
+        "  2. older project",
+      ].join("\n");
+
+      const result = assessNativeResumeProbe({
+        runtime: "claude-code",
+        paneCommand: "claude",
+        paneContent,
+      });
+
+      expect(result.status).toBe("attention_required");
+    });
+
+    it("does NOT classify Claude active TUI as resume-selection prompt (regression)", () => {
+      const paneContent = [
+        "Claude Code v2.1.89",
+        "",
+        " ❯ accept edits on",
+        "",
+        "[work in progress]",
+      ].join("\n");
+
+      const result = assessNativeResumeProbe({
+        runtime: "claude-code",
+        paneCommand: "claude",
+        paneContent,
+      });
+
+      // Should NOT be attention_required — this is the active TUI case.
+      expect(result.status).toBe("resumed");
+      expect(result.code).toBe("active_runtime");
+    });
+
+    it("does NOT classify mere mention of 'Choose a conversation' without numbered options", () => {
+      const paneContent = "The docs say: 'Choose a conversation to focus on.'";
+      const result = assessNativeResumeProbe({
+        runtime: "claude-code",
+        paneCommand: "claude",
+        paneContent,
+      });
+
+      // Without a numbered option list, this is not a real prompt.
+      expect(result.status).not.toBe("attention_required");
+    });
+  });
 });
