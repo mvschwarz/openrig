@@ -119,6 +119,13 @@ export function assessNativeResumeProbe(
         detail: "Codex reported that the requested saved session does not exist.",
       };
     }
+    if (looksLikeCodexAuthRefusal(paneContent)) {
+      return {
+        status: "attention_required",
+        code: "codex_auth_refusal",
+        detail: "Codex could not refresh the stored access token; an operator must sign in again before the session can resume.",
+      };
+    }
     if (looksLikeCodexTrustPrompt(paneContent)) {
       return {
         status: "inconclusive",
@@ -240,6 +247,27 @@ function looksLikeCodexTui(paneContent: string): boolean {
   const hasModelFooter = /(^|\n)\s{2,}gpt-[^\n]+ · [^\n]+(?:\n|$)/.test(recentLines);
 
   return hasPromptLine && hasModelFooter;
+}
+
+// Codex prints these messages when its stored OAuth access token can no
+// longer be refreshed — operator logged out elsewhere, account changed,
+// device key revoked, etc. Operator recovers via `codex login`. Both
+// anchors required: the access-token phrase distinguishes from generic
+// errors; the operator-instruction phrase distinguishes from internal
+// debug logs that may include the access-token phrase incidentally.
+//
+// Source verified at codex-cli 0.125.0 binary at
+// /opt/homebrew/Caskroom/codex/0.125.0/codex-aarch64-apple-darwin:
+//   "Your access token could not be refreshed because you have since
+//    logged out or signed in to another account. Please sign in again."
+//   "Your access token could not be refreshed. Please log out and sign
+//    in again."
+function looksLikeCodexAuthRefusal(paneContent: string): boolean {
+  if (!paneContent.includes("access token could not be refreshed")) return false;
+  return (
+    paneContent.includes("Please sign in again")
+    || paneContent.includes("Please log out and sign in again")
+  );
 }
 
 function looksLikeCodexTrustPrompt(paneContent: string): boolean {

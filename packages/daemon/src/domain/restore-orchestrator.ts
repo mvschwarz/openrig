@@ -943,7 +943,20 @@ export class RestoreOrchestrator {
 
     if (this.codexResume.canResume(resumeType, resumeToken)) {
       const result = await this.codexResume.resume(sessionName, resumeType, resumeToken, cwd);
-      return result.ok ? { kind: "resumed" } : { kind: "failed", message: result.message };
+      if (result.ok) return { kind: "resumed" };
+      if (result.code === "retry_fresh") return { kind: "retry_fresh" };
+      // Codex auth-refusal: stored OAuth token can no longer be refreshed.
+      // Recoverable — operator runs `codex login` and the seat continues.
+      // Per-node mapping at lines 725-735 emits `status: "attention_required"`
+      // with `attentionEvidence` for both runtimes; no further wiring needed.
+      if (result.code === "attention_required") {
+        return {
+          kind: "attention_required",
+          message: result.message,
+          evidence: (result as { evidence?: string }).evidence,
+        };
+      }
+      return { kind: "failed", message: result.message };
     }
 
     return { kind: "failed", message: "No resume adapter available for this runtime/token combination." };

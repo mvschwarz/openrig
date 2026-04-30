@@ -455,4 +455,86 @@ describe("native resume probe", () => {
       expect(result.status).not.toBe("attention_required");
     });
   });
+
+  // Codex auth-refusal -> attention_required. Closes the deferral recorded by
+  // the lifecycle scenario matrix slice. Pane patterns sourced verbatim from
+  // codex-cli 0.125.0 binary strings (token-refresh failure paths).
+  describe("Codex auth-refusal recognition", () => {
+    it("classifies Codex post-logout token-refresh failure as attention_required", () => {
+      const paneContent = [
+        "$ codex resume 019d-token",
+        "Error: Your access token could not be refreshed because you have since",
+        "logged out or signed in to another account. Please sign in again.",
+      ].join("\n");
+      const result = assessNativeResumeProbe({
+        runtime: "codex",
+        paneCommand: "zsh",
+        paneContent,
+      });
+      expect(result).toEqual({
+        status: "attention_required",
+        code: "codex_auth_refusal",
+        detail: "Codex could not refresh the stored access token; an operator must sign in again before the session can resume.",
+      });
+    });
+
+    it("classifies Codex token-refresh failure with `log out and sign in` guidance as attention_required", () => {
+      const paneContent = [
+        "$ codex resume 019d-token",
+        "Your access token could not be refreshed.",
+        "Please log out and sign in again.",
+      ].join("\n");
+      const result = assessNativeResumeProbe({
+        runtime: "codex",
+        paneCommand: "zsh",
+        paneContent,
+      });
+      expect(result.status).toBe("attention_required");
+      expect(result.code).toBe("codex_auth_refusal");
+    });
+
+    it("requires BOTH the access-token phrase AND operator-instruction phrase (negative)", () => {
+      // Access-token phrase alone (without operator instruction) does not
+      // qualify — could appear in incidental debug output.
+      const result = assessNativeResumeProbe({
+        runtime: "codex",
+        paneCommand: "codex",
+        paneContent: "debug: access token could not be refreshed (retrying...)",
+      });
+      expect(result.status).not.toBe("attention_required");
+    });
+
+    it("does NOT collide with no_saved_session (different code path)", () => {
+      const result = assessNativeResumeProbe({
+        runtime: "codex",
+        paneCommand: "zsh",
+        paneContent: "ERROR: No saved session found with ID 019d...",
+      });
+      expect(result.code).toBe("no_saved_session");
+      expect(result.status).toBe("failed");
+    });
+
+    it("does NOT collide with trust_gate", () => {
+      const result = assessNativeResumeProbe({
+        runtime: "codex",
+        paneCommand: "codex",
+        paneContent: [
+          "Do you trust the contents of this directory?",
+          "› 1. Yes, continue",
+          "  2. No, quit",
+        ].join("\n"),
+      });
+      expect(result.code).toBe("trust_gate");
+    });
+
+    it("does NOT collide with active_runtime when codex is foreground without auth-refusal text", () => {
+      const result = assessNativeResumeProbe({
+        runtime: "codex",
+        paneCommand: "codex",
+        paneContent: "OpenAI Codex (v0.125.0)\n  ›  ready\n  gpt-5 · context",
+      });
+      expect(result.status).toBe("resumed");
+      expect(result.code).toBe("active_runtime");
+    });
+  });
 });
