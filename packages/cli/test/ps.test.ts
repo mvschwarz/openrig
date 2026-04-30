@@ -629,6 +629,120 @@ describe("Ps CLI", () => {
       expect(exitCode).toBe(1);
     });
 
+    // C9a: --fields UX rejection alignment with --filter pattern.
+
+    it("ps --json --fields rejects unknown field with sorted supported list (rig-level)", async () => {
+      psData = [];
+      const { logs, exitCode } = await captureLogs(async () => {
+        await makeCmd().parseAsync(["node", "rig", "ps", "--json", "--fields", "rigId,bogus"]);
+      });
+      const stderr = logs.join("\n");
+      expect(stderr).toContain("Unknown --fields key 'bogus'");
+      expect(stderr).toContain("Supported:");
+      // Sorted rig-level allow-list keys appear in the message.
+      expect(stderr).toContain("latestSnapshot");
+      expect(stderr).toContain("rigName");
+      expect(stderr).toContain("nodeCount");
+      expect(exitCode).toBe(1);
+    });
+
+    it("ps --json --fields rejects multiple unknown fields with 'keys' plural", async () => {
+      psData = [];
+      const { logs, exitCode } = await captureLogs(async () => {
+        await makeCmd().parseAsync(["node", "rig", "ps", "--json", "--fields", "foo,bar"]);
+      });
+      const stderr = logs.join("\n");
+      expect(stderr).toContain("Unknown --fields keys 'foo', 'bar'");
+      expect(exitCode).toBe(1);
+    });
+
+    it("ps --json --fields rejects empty string and exits 1", async () => {
+      psData = [];
+      const { logs, exitCode } = await captureLogs(async () => {
+        await makeCmd().parseAsync(["node", "rig", "ps", "--json", "--fields", ""]);
+      });
+      expect(logs.some((l) => l.includes("--fields cannot be empty"))).toBe(true);
+      expect(exitCode).toBe(1);
+    });
+
+    it("ps --json --fields rejects whitespace-only-after-trim and exits 1", async () => {
+      psData = [];
+      const { logs, exitCode } = await captureLogs(async () => {
+        await makeCmd().parseAsync(["node", "rig", "ps", "--json", "--fields", ",,"]);
+      });
+      expect(logs.some((l) => l.includes("--fields cannot be empty"))).toBe(true);
+      expect(exitCode).toBe(1);
+    });
+
+    it("ps --json --fields rejects node-only field at rig-level (logicalId)", async () => {
+      psData = [];
+      const { logs, exitCode } = await captureLogs(async () => {
+        await makeCmd().parseAsync(["node", "rig", "ps", "--json", "--fields", "rigId,logicalId"]);
+      });
+      expect(logs.some((l) => l.includes("Unknown --fields key 'logicalId'"))).toBe(true);
+      expect(exitCode).toBe(1);
+    });
+
+    it("ps --json --fields accepts both name AND rigName at rig-level (aliasing preserved per 0a9fb43)", async () => {
+      psData = [
+        { rigId: "rig-1", name: "alpha", rigName: "alpha", nodeCount: 1, runningCount: 1, status: "running", lifecycleState: "running", uptime: "1m", latestSnapshot: null },
+      ];
+      const { logs, exitCode } = await captureLogs(async () => {
+        await makeCmd().parseAsync(["node", "rig", "ps", "--json", "--fields", "name,rigName"]);
+      });
+      expect(exitCode).not.toBe(1);
+      const parsed = JSON.parse(logs.join(""));
+      expect(parsed.entries[0]).toEqual({ name: "alpha", rigName: "alpha" });
+    });
+
+    it("ps --nodes --json --fields rejects 'name' with rigName hint (load-bearing aliasing decision)", async () => {
+      const { logs, exitCode } = await captureLogs(async () => {
+        await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "--json", "--fields", "name,logicalId"]);
+      });
+      const stderr = logs.join("\n");
+      expect(stderr).toContain("Unknown --fields key 'name'");
+      expect(stderr).toContain("Hint: 'name' is a rig-level field; use 'rigName' for node entries.");
+      expect(exitCode).toBe(1);
+    });
+
+    it("ps --nodes --json --fields rejects bogus key with sorted node-level supported list", async () => {
+      const { logs, exitCode } = await captureLogs(async () => {
+        await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "--json", "--fields", "rigName,bogus"]);
+      });
+      const stderr = logs.join("\n");
+      expect(stderr).toContain("Unknown --fields key 'bogus'");
+      expect(stderr).toContain("Supported:");
+      // Sorted node-level allow-list — node-level-only key must be present.
+      expect(stderr).toContain("agentActivity");
+      expect(stderr).toContain("logicalId");
+      // Rig-level-only key must NOT be in the node-level supported list.
+      expect(stderr).not.toMatch(/Supported:[^.]*\bname\b/);
+      expect(exitCode).toBe(1);
+    });
+
+    it("ps --filter rejection still works after --fields rejection wired in (regression)", async () => {
+      psData = [];
+      const { logs, exitCode } = await captureLogs(async () => {
+        await makeCmd().parseAsync(["node", "rig", "ps", "--json", "--filter", "unknown=v"]);
+      });
+      expect(logs.some((l) => l.includes("Unknown --filter key 'unknown'"))).toBe(true);
+      expect(exitCode).toBe(1);
+    });
+
+    it("ps --filter status=running --fields rigName combined still works (regression)", async () => {
+      psData = [
+        { rigId: "rig-1", name: "a", rigName: "a", nodeCount: 1, runningCount: 1, status: "running", lifecycleState: "running", uptime: "1m", latestSnapshot: null },
+        { rigId: "rig-2", name: "b", rigName: "b", nodeCount: 1, runningCount: 0, status: "stopped", lifecycleState: "stopped", uptime: null, latestSnapshot: null },
+      ];
+      const { logs, exitCode } = await captureLogs(async () => {
+        await makeCmd().parseAsync(["node", "rig", "ps", "--json", "--filter", "status=running", "--fields", "rigName,status"]);
+      });
+      expect(exitCode).not.toBe(1);
+      const parsed = JSON.parse(logs.join(""));
+      expect(parsed.entries).toHaveLength(1);
+      expect(parsed.entries[0]).toEqual({ rigName: "a", status: "running" });
+    });
+
     // Synthetic large-host fixture: 60 rigs (just over default 50 budget) is
     // the smallest fixture that proves human-truncation behavior. Per Amendment
     // C: the L4 proof already exercised real 100x10 scale; this test asserts
