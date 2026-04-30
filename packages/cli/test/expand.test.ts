@@ -154,8 +154,13 @@ describe("rig expand", () => {
     expect(parsed.nodes).toBeDefined();
   });
 
-  // T3a: Partial prints failed nodes + honest relaunch guidance
-  it("partial result prints failed nodes with relaunch guidance", async () => {
+  // T3a: Partial prints failed nodes + honest recovery guidance.
+  //
+  // Recovery shape mandated by the topology-mutation-add-seat-proof-pass
+  // slice: pod-aware /launch returns pod_aware_launch_unsupported for any
+  // node `expand` creates, so the per-node `rig launch <rigId> <logicalId>`
+  // form is doomed. The honest recovery path is shrink → fix → re-expand.
+  it("partial result prints failed nodes with shrink+re-expand recovery guidance", async () => {
     writeFileSync(fragmentPath, `id: partial-pod\nlabel: Dev\nmembers:\n  - id: impl\n    runtime: claude-code\n  - id: qa\n    runtime: codex\nedges: []\n`);
 
     const { logs, exitCode } = await captureLogs(async () => {
@@ -165,7 +170,10 @@ describe("rig expand", () => {
     const output = logs.join("\n");
     expect(output).toContain("FAIL");
     expect(output).toContain("dev.qa");
-    expect(output).toContain("rig launch rig-123 dev.qa");
+    expect(output).toContain("Failed nodes cannot be relaunched directly");
+    expect(output).toContain("rig shrink rig-123 dev"); // dev is podNamespace from PARTIAL_RESPONSE
+    expect(output).toContain("Re-run: rig expand rig-123");
+    expect(output).toContain("Failed targets: dev.qa");
     expect(exitCode).toBe(1);
   });
 
@@ -181,8 +189,13 @@ describe("rig expand", () => {
     expect(output).not.toContain("/launch");
   });
 
-  // T3b: Human output never suggests 'rig up' or 'rerun expand'
-  it("partial output never suggests rig up or rerun expand", async () => {
+  // T3b: Human output NEVER advertises the doomed per-node `rig launch
+  // <rigId> <logicalId>` form for pod-aware expand failures. The daemon
+  // /launch route returns pod_aware_launch_unsupported (HTTP 409) for every
+  // node expand creates because expand always materializes via the pod-aware
+  // seam. Advertising that retry is identity-honesty failure: telling
+  // operators to run a command we know will refuse them.
+  it("partial output does NOT advertise the doomed `rig launch <rigId> <logicalId>` form", async () => {
     writeFileSync(fragmentPath, `id: partial-pod\nlabel: Dev\nmembers:\n  - id: impl\n    runtime: claude-code\n  - id: qa\n    runtime: codex\nedges: []\n`);
 
     const { logs } = await captureLogs(async () => {
@@ -190,9 +203,10 @@ describe("rig expand", () => {
     });
 
     const output = logs.join("\n");
-    expect(output).not.toContain("rig up");
-    expect(output).not.toMatch(/rerun.*expand/i);
-    expect(output).not.toMatch(/rig expand/i);
+    // The exact doomed form for the failed node MUST NOT appear.
+    expect(output).not.toContain("rig launch rig-123 dev.qa");
+    // Defensive: no `rig launch <rigId> <bare-logical-id>` style line at all.
+    expect(output).not.toMatch(/rig launch rig-123 \w/);
   });
 
   // T4: API error -> exit 1
