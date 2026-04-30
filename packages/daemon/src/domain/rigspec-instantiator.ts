@@ -1042,6 +1042,27 @@ export class PodRigInstantiator {
       codexConfigProfile: input.member.codexConfigProfile,
     };
 
+    // session_source dispatch: fork (native runtime fork) vs rebuild (artifact-
+    // injected fresh launch). Mutually exclusive; only one is set on a member.
+    let forkSourceOpt: { forkSource: { kind: "native_id" | "artifact_path" | "name" | "last"; value?: string } } | undefined;
+    let rebuildArtifactsOpt: { rebuildArtifacts: import("./runtime-adapter.js").ResolvedStartupFile[] } | undefined;
+    if (input.member.sessionSource?.mode === "fork") {
+      const ref = input.member.sessionSource.ref;
+      forkSourceOpt = {
+        forkSource: {
+          kind: ref.kind,
+          ...(ref.value !== undefined ? { value: ref.value } : {}),
+        },
+      };
+    } else if (input.member.sessionSource?.mode === "rebuild") {
+      const { resolveRebuildArtifacts } = await import("./session-source-rebuild-resolver.js");
+      const resolved = resolveRebuildArtifacts(input.member.sessionSource);
+      if (!resolved.ok) {
+        return { status: "failed", error: resolved.error, sessionName: canonicalSessionName };
+      }
+      rebuildArtifactsOpt = { rebuildArtifacts: resolved.files };
+    }
+
     const startupResult = await this.deps.startupOrchestrator.startNode({
       rigId: input.rigId,
       nodeId: input.nodeId,
@@ -1062,12 +1083,8 @@ export class PodRigInstantiator {
         }),
       ],
       isRestore: false,
-      ...(input.member.sessionSource ? {
-        forkSource: {
-          kind: input.member.sessionSource.ref.kind,
-          ...(input.member.sessionSource.ref.value !== undefined ? { value: input.member.sessionSource.ref.value } : {}),
-        },
-      } : {}),
+      ...(forkSourceOpt ?? {}),
+      ...(rebuildArtifactsOpt ?? {}),
     });
 
     return {

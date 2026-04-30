@@ -149,6 +149,8 @@ Important route behaviors:
 - `rig send <session> "message" [--verify] [--force] [--host <id>]` — send to agent terminal; `--host` routes to a host declared in `~/.openrig/hosts.yaml` via single-hop ssh (CLI-side shell-out; daemon untouched). SSH success is NOT verify success — the remote rig's verify result is surfaced verbatim.
 - `rig capture <session> [--lines N] [--json] [--host <id>]` — capture agent pane content; `--host` same shape as `rig send --host`.
 - `rig broadcast --rig <name> "message"` — multi-agent broadcast
+
+**Session source declaration:** Member YAML may carry `session_source` to control how a new managed seat derives its starting context. v1 supports two modes: `fork` (start from a prior native runtime conversation; captures and persists a NEW post-fork token, never the parent — see cli-reference.md "Session source declaration"); and `rebuild` (fresh-launch seeded with operator-declared artifacts in trust-precedence order; the seat's `continuityOutcome` is `rebuilt` and no `resumeToken` is persisted). Both modes flow through the existing rig spec and `rig expand` member-input shapes; no new top-level command was introduced for either.
 - `rig transcript <session> --tail N / --grep "pattern" [--json]` — transcript access
 - `rig config [get <key> / set <key> <value> / reset <key>] [--json]` — configuration surface
 - `rig preflight [--json]` — system readiness check (Node, tmux, writable dirs, port)

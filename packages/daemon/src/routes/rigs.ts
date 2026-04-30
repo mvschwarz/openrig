@@ -34,12 +34,20 @@ function normalizeExpansionPodFragment(raw: Record<string, unknown>): ExpansionP
         const ss = rawSessionSource as Record<string, unknown>;
         const mode = ss["mode"];
         const ref = ss["ref"];
-        if (mode === "fork" && ref !== null && typeof ref === "object") {
+        if (ref !== null && typeof ref === "object") {
           const refRec = ref as Record<string, unknown>;
           const kind = refRec["kind"];
-          if (kind === "native_id" || kind === "artifact_path" || kind === "name" || kind === "last") {
+          if (mode === "fork" && (kind === "native_id" || kind === "artifact_path" || kind === "name" || kind === "last")) {
             const value = typeof refRec["value"] === "string" ? (refRec["value"] as string) : undefined;
             sessionSource = { mode: "fork", ref: { kind, ...(value !== undefined ? { value } : {}) } };
+          } else if (mode === "rebuild" && kind === "artifact_set" && Array.isArray(refRec["value"])) {
+            const paths: string[] = [];
+            for (const p of refRec["value"] as unknown[]) {
+              if (typeof p === "string" && p.trim() !== "") paths.push(p);
+            }
+            if (paths.length > 0) {
+              sessionSource = { mode: "rebuild", ref: { kind: "artifact_set", value: paths } };
+            }
           }
         }
       }

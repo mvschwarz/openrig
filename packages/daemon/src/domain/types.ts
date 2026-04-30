@@ -507,19 +507,37 @@ export interface ContinuityPolicySpec {
 }
 
 /**
- * Member-level launch input for declaring that a new managed seat should be
- * started from a prior native runtime conversation source. v1 narrow MVP:
- * mode="fork" + ref.kind="native_id" only. The original seat is NOT claimed
- * to have continued; the new seat persists its own NEW post-fork token.
+ * Member-level launch input for declaring how a new managed seat should
+ * derive its starting context. Discriminated union over `mode`:
  *
- * Other ref.kind values ("artifact_path", "name", "last") are reserved
- * shapes — schema rejects them today with an honest "v1 scope" error.
+ * - `fork` — start from a prior native runtime conversation source
+ *   (Claude `--fork-session` / Codex `fork`); persists a NEW post-fork
+ *   token; identity-honest (parent token is NEVER persisted onto the
+ *   new seat). v1 supports `ref.kind: "native_id"` only.
+ *
+ * - `rebuild` — fresh-launch a new seat seeded with operator-declared
+ *   artifacts (CULTURE, role doc, handover packet, queue files, session
+ *   logs). NO native-runtime resume or fork; NO `resumeToken` on the
+ *   resulting seat; `continuityOutcome` is `"rebuilt"` (NEVER `"fresh"`,
+ *   `"resumed"`, or `"forked"`). v1 supports `ref.kind: "artifact_set"`
+ *   only, with `ref.value` as a non-empty array of file paths in
+ *   operator-declared trust-precedence order.
  */
-export interface SessionSourceSpec {
+export type SessionSourceSpec = SessionSourceForkSpec | SessionSourceRebuildSpec;
+
+export interface SessionSourceForkSpec {
   mode: "fork";
   ref: {
     kind: "native_id" | "artifact_path" | "name" | "last";
     value?: string;
+  };
+}
+
+export interface SessionSourceRebuildSpec {
+  mode: "rebuild";
+  ref: {
+    kind: "artifact_set";
+    value: string[];
   };
 }
 

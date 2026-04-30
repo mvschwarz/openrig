@@ -318,14 +318,23 @@ function validateSessionSource(raw: unknown, prefix: string, isTerminalRuntime: 
     return errors;
   }
   if (isTerminalRuntime) {
-    errors.push(`${prefix}: terminal runtime has no native fork primitive; remove session_source for terminal members`);
+    errors.push(`${prefix}: terminal runtime has no native fork primitive and no agent context to rebuild; remove session_source for terminal members`);
     return errors;
   }
   const ss = raw as Record<string, unknown>;
   const mode = ss["mode"];
-  if (mode !== "fork") {
-    errors.push(`${prefix}.mode: v1 supports "fork" only (got ${JSON.stringify(mode)})`);
+  if (mode === "fork") {
+    return validateForkSessionSource(ss, prefix);
   }
+  if (mode === "rebuild") {
+    return validateRebuildSessionSource(ss, prefix);
+  }
+  errors.push(`${prefix}.mode: v1 supports "fork" or "rebuild" (got ${JSON.stringify(mode)})`);
+  return errors;
+}
+
+function validateForkSessionSource(ss: Record<string, unknown>, prefix: string): string[] {
+  const errors: string[] = [];
   const ref = ss["ref"];
   if (ref === null || typeof ref !== "object") {
     errors.push(`${prefix}.ref: required object with "kind" and (when kind=native_id) "value"`);
@@ -335,17 +344,54 @@ function validateSessionSource(raw: unknown, prefix: string, isTerminalRuntime: 
   const kind = refRec["kind"];
   if (kind !== "native_id") {
     if (kind === "artifact_path") {
-      errors.push(`${prefix}.ref.kind: "artifact_path" deferred to follow-up slice; v1 narrow MVP supports "native_id" only`);
+      errors.push(`${prefix}.ref.kind: "artifact_path" deferred to follow-up slice; v1 fork mode supports "native_id" only`);
     } else if (kind === "name" || kind === "last") {
-      errors.push(`${prefix}.ref.kind: "${kind}" is weaker than "native_id"; v1 scope supports "native_id" only`);
+      errors.push(`${prefix}.ref.kind: "${kind}" is weaker than "native_id"; v1 fork mode supports "native_id" only`);
+    } else if (kind === "artifact_set") {
+      errors.push(`${prefix}.ref.kind: "artifact_set" belongs to mode "rebuild"; for fork mode use ref.kind: "native_id"`);
     } else {
-      errors.push(`${prefix}.ref.kind: required; v1 supports "native_id" only (got ${JSON.stringify(kind)})`);
+      errors.push(`${prefix}.ref.kind: required; v1 fork mode supports "native_id" only (got ${JSON.stringify(kind)})`);
     }
     return errors;
   }
   const value = refRec["value"];
   if (typeof value !== "string" || value.trim() === "") {
     errors.push(`${prefix}.ref.value: required non-empty string when ref.kind is "native_id"`);
+  }
+  return errors;
+}
+
+function validateRebuildSessionSource(ss: Record<string, unknown>, prefix: string): string[] {
+  const errors: string[] = [];
+  const ref = ss["ref"];
+  if (ref === null || typeof ref !== "object") {
+    errors.push(`${prefix}.ref: required object with "kind: artifact_set" and "value: [paths...]" for rebuild mode`);
+    return errors;
+  }
+  const refRec = ref as Record<string, unknown>;
+  const kind = refRec["kind"];
+  if (kind !== "artifact_set") {
+    if (kind === "native_id" || kind === "artifact_path" || kind === "name" || kind === "last") {
+      errors.push(`${prefix}.ref.kind: rebuild mode requires ref.kind: "artifact_set"; the named kinds (${JSON.stringify(kind)}) belong to mode: "fork"`);
+    } else {
+      errors.push(`${prefix}.ref.kind: required; v1 rebuild mode supports "artifact_set" only (got ${JSON.stringify(kind)})`);
+    }
+    return errors;
+  }
+  const value = refRec["value"];
+  if (!Array.isArray(value)) {
+    errors.push(`${prefix}.ref.value: required non-empty array of artifact paths in trust-precedence order (highest-trust first: rig CULTURE, role doc, handover packet, queue file, pod shared session log, member session log)`);
+    return errors;
+  }
+  if (value.length === 0) {
+    errors.push(`${prefix}.ref.value: rebuild requires at least one artifact path; declare paths in trust-precedence order (highest-trust first)`);
+    return errors;
+  }
+  for (let i = 0; i < value.length; i++) {
+    const p = value[i];
+    if (typeof p !== "string" || p.trim() === "") {
+      errors.push(`${prefix}.ref.value[${i}]: each entry must be a non-empty string (file path)`);
+    }
   }
   return errors;
 }
@@ -673,14 +719,28 @@ function normalizeSessionSource(raw: unknown): import("./types.js").SessionSourc
   if (raw === null || typeof raw !== "object") return undefined;
   const ss = raw as Record<string, unknown>;
   const mode = ss["mode"];
-  if (mode !== "fork") return undefined;
   const ref = ss["ref"];
   if (ref === null || typeof ref !== "object") return undefined;
   const refRec = ref as Record<string, unknown>;
-  const kind = refRec["kind"];
-  if (kind !== "native_id" && kind !== "artifact_path" && kind !== "name" && kind !== "last") return undefined;
-  const value = typeof refRec["value"] === "string" ? (refRec["value"] as string) : undefined;
-  return { mode: "fork", ref: { kind, ...(value !== undefined ? { value } : {}) } };
+  if (mode === "fork") {
+    const kind = refRec["kind"];
+    if (kind !== "native_id" && kind !== "artifact_path" && kind !== "name" && kind !== "last") return undefined;
+    const value = typeof refRec["value"] === "string" ? (refRec["value"] as string) : undefined;
+    return { mode: "fork", ref: { kind, ...(value !== undefined ? { value } : {}) } };
+  }
+  if (mode === "rebuild") {
+    const kind = refRec["kind"];
+    if (kind !== "artifact_set") return undefined;
+    const value = refRec["value"];
+    if (!Array.isArray(value)) return undefined;
+    const paths: string[] = [];
+    for (const p of value) {
+      if (typeof p === "string" && p.trim() !== "") paths.push(p);
+    }
+    if (paths.length === 0) return undefined;
+    return { mode: "rebuild", ref: { kind: "artifact_set", value: paths } };
+  }
+  return undefined;
 }
 
 function normalizePod(raw: Record<string, unknown>): RigSpecPod {
