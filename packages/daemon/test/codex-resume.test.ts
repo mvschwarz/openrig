@@ -246,5 +246,53 @@ describe("CodexResumeAdapter", () => {
       expect(result).toEqual({ ok: true });
       expect(attempt).toBeGreaterThanOrEqual(2);
     });
+
+    // Codex auth-refusal -> attention_required pass-through. Mirrors
+    // ClaudeResumeAdapter.verifyResume's evidence shape (last 12 pane lines).
+    // Closes the lifecycle scenario matrix slice's documented Codex deferral.
+    it("probe says attention_required (codex auth-refusal) -> { ok: false, code: 'attention_required', evidence }", async () => {
+      const refusalPane = [
+        "$ codex resume 019d-token",
+        "Error: Your access token could not be refreshed because you have since",
+        "logged out or signed in to another account. Please sign in again.",
+      ].join("\n");
+      const adapter = new CodexResumeAdapter(
+        mockTmux({
+          getPaneCommand: async () => "zsh",
+          capturePaneContent: async () => refusalPane,
+        }),
+        fastOptions,
+      );
+
+      const result = await adapter.resume("r99-demo1-impl", "codex_id", "uuid-123", "/repo");
+
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.code).toBe("attention_required");
+        expect(result.message).toContain("sign in again");
+        // Evidence should be the last-12-lines tail of pane content
+        // (mirrors claude-resume.ts:97 shape exactly).
+        expect((result as { evidence?: string }).evidence).toBeDefined();
+        expect((result as { evidence?: string }).evidence).toContain("access token could not be refreshed");
+        expect((result as { evidence?: string }).evidence).toContain("Please sign in again");
+      }
+    });
+
+    it("attention_required does NOT trigger when only access-token phrase present (no operator instruction)", async () => {
+      const adapter = new CodexResumeAdapter(
+        mockTmux({
+          getPaneCommand: async () => "codex",
+          capturePaneContent: async () => "debug: access token could not be refreshed (retrying...)",
+        }),
+        fastOptions,
+      );
+
+      const result = await adapter.resume("r99-demo1-impl", "codex_id", "uuid-123", "/repo");
+
+      // Probe should fall through to inconclusive (paneCommand=codex still
+      // returns active_runtime / resumed); auth-refusal pattern requires
+      // both anchors.
+      expect(result.ok).toBe(true);
+    });
   });
 });

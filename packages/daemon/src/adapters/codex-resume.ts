@@ -62,11 +62,10 @@ export class CodexResumeAdapter {
   }
 
   // Mirrors ClaudeResumeAdapter.verifyResume: poll the pane, run the native
-  // probe, return resumed / retry_fresh / resume_failed based on observable
-  // runtime state. Closes the false-positive `resumed` shape that fire-and-
-  // forget left open. Does NOT introduce a Codex `attention_required` outcome
-  // — that requires new probe patterns for Codex auth refusal and is deferred
-  // to a follow-up provider-auth-attention slice.
+  // probe, return resumed / retry_fresh / attention_required / resume_failed
+  // based on observable runtime state. The `attention_required` outcome
+  // (Codex auth refusal — stored OAuth token can no longer be refreshed)
+  // closes the deferral recorded by the lifecycle scenario matrix slice.
   private async verifyResume(tmuxSessionName: string): Promise<ResumeResult> {
     const pollMs = this.options.pollMs ?? 200;
     const maxWaitMs = this.options.maxWaitMs ?? 5_000;
@@ -87,6 +86,19 @@ export class CodexResumeAdapter {
           ok: false,
           code: "retry_fresh",
           message: "Codex resume failed: no saved session found for the requested token",
+        };
+      }
+
+      // Codex auth-refusal is alive-but-recoverable: the stored access token
+      // can no longer be refreshed. Surface evidence (last 12 pane lines) so
+      // the operator/UI can decide whether to `codex login` and continue, or
+      // mark the seat permanently rebuilt. Mirror Claude's evidence shape.
+      if (probe.status === "attention_required") {
+        return {
+          ok: false,
+          code: "attention_required",
+          message: probe.detail,
+          evidence: paneContent.split("\n").slice(-12).join("\n"),
         };
       }
 

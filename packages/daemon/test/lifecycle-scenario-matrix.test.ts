@@ -397,20 +397,88 @@ describe("Lifecycle reboot/recovery scenario matrix (Tier 1)", () => {
         if (!r.ok) expect(r.code).toBe("retry_fresh");
       });
 
-      // DOCUMENTED DEFERRAL (slice closeout):
-      // Codex auth-refusal → attention_required is NOT a current outcome.
-      // Adding it requires (a) Codex auth-refusal pane patterns researched
-      // and added to native-resume-probe.ts, (b) a Codex `attention_required`
-      // outcome added to the probe, (c) a verifyResume branch returning that
-      // outcome with evidence, (d) restore-orchestrator wiring to map it the
-      // same way Claude is mapped at lines 725-735. That is a multi-surface
-      // feature that grows beyond smallest-honest-patch in this matrix slice.
-      // Tier 2 (real Codex auth refusal in disposable VM) is human-gated per
-      // disposable-vm-proof-default rule. Defer to a follow-up provider-auth-
-      // attention slice.
-      it.skip("DEFERRED: Codex auth-refusal → attention_required (probe extension required)", () => {
-        // Intentionally skipped; documents the deferred gap in-tree so a
-        // future driver picks it up alongside the smallest-honest-patch.
+      // Codex auth-refusal → attention_required end-to-end. Closes the
+      // deferral previously documented in this file. Implemented by the
+      // codex-auth-refusal-attention-required slice via:
+      //   (a) `looksLikeCodexAuthRefusal` in native-resume-probe.ts;
+      //   (b) `attention_required` pass-through in codex-resume.ts;
+      //   (c) Codex-branch translation in restore-orchestrator.ts:944-960.
+      // The runtime-agnostic per-node mapping at restore-orchestrator.ts:725-735
+      // emits `status: "attention_required"` with `attentionEvidence` for
+      // both runtimes — no further wiring needed.
+      it("Codex auth-refusal → node status=attention_required with auth-refusal pane evidence", async () => {
+        const db = createFullTestDb();
+        const rigRepo = new RigRepository(db);
+        const sessionRegistry = new SessionRegistry(db);
+        const eventBus = new EventBus(db);
+        const snapshotRepo = new SnapshotRepository(db);
+        const checkpointStore = new CheckpointStore(db);
+        const snapshotCapture = new SnapshotCapture({
+          db, rigRepo, sessionRegistry, eventBus, snapshotRepo, checkpointStore,
+        });
+        const tmux = mockTmuxForRestore({ hasSession: false });
+        const nodeLauncher = new NodeLauncher({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux });
+
+        // Codex adapter stub returns the same shape the real adapter would
+        // emit for auth-refusal: { ok: false, code: "attention_required",
+        // message, evidence } where evidence is the last 12 lines of pane
+        // content. Exercises restore-orchestrator's Codex branch translation
+        // patched in this slice.
+        const refusalEvidence = [
+          "$ codex resume tok-codex",
+          "Error: Your access token could not be refreshed because you have since",
+          "logged out or signed in to another account. Please sign in again.",
+        ].join("\n");
+        const codexAttentionResult: ResumeResult = {
+          ok: false,
+          code: "attention_required",
+          message: "Codex could not refresh the stored access token; an operator must sign in again before the session can resume.",
+          evidence: refusalEvidence,
+        };
+        const orchestrator = new RestoreOrchestrator({
+          db, rigRepo, sessionRegistry, eventBus, snapshotRepo, snapshotCapture,
+          checkpointStore, nodeLauncher, tmuxAdapter: tmux,
+          claudeResume: mockClaudeResumeReturning({ ok: true }),
+          codexResume: mockCodexResumeReturning(codexAttentionResult),
+        });
+
+        const rig = rigRepo.createRig("r97");
+        const node = rigRepo.addNode(rig.id, "codex-worker", { role: "worker", runtime: "codex", cwd: "/tmp" });
+        const snap = snapshotCapture.captureSnapshot(rig.id, "manual");
+        const fullSnap = snapshotRepo.getSnapshot(snap.id)!;
+        const data = JSON.parse(JSON.stringify(fullSnap.data));
+        data.sessions = [{
+          id: "sess-codex-1",
+          nodeId: node.id,
+          sessionName: "r97-codex-worker",
+          status: "running",
+          resumeType: "codex_id",
+          resumeToken: "tok-codex",
+          restorePolicy: "resume_if_possible",
+        }];
+        db.prepare("UPDATE snapshots SET data = ? WHERE id = ?")
+          .run(JSON.stringify(data), snap.id);
+
+        const outcome = await orchestrator.restore(snap.id);
+        expect(outcome.ok).toBe(true);
+        if (!outcome.ok) throw new Error(`restore failed: ${outcome.code}`);
+
+        // Per-node status: attention_required (NOT failed, NOT resumed).
+        const codexNode = outcome.result.nodes.find((n) => n.nodeId === node.id);
+        expect(codexNode?.status).toBe("attention_required");
+        // Evidence preserved on the node result via the runtime-agnostic
+        // mapping at restore-orchestrator.ts:725-735.
+        expect(codexNode?.attentionEvidence).toBeDefined();
+        expect(codexNode?.attentionEvidence).toContain("access token could not be refreshed");
+        expect(codexNode?.attentionEvidence).toContain("Please sign in again");
+
+        // Rig-level rollup: single attention_required node → partially_restored
+        // (NOT failed). Aggregation at restore-orchestrator.ts:65 already
+        // includes attention_required in the mixed-status set; this test
+        // confirms Codex participates honestly.
+        expect(outcome.result.rigResult).toBe("partially_restored");
+
+        db.close();
       });
     });
   });
