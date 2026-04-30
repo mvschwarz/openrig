@@ -5,10 +5,16 @@ import type { TmuxAdapter, TmuxResult } from "../src/adapters/tmux.js";
 function mockTmux(overrides?: {
   sendText?: (target: string, text: string) => Promise<TmuxResult>;
   sendKeys?: (target: string, keys: string[]) => Promise<TmuxResult>;
+  getPaneCommand?: (target: string) => Promise<string | null>;
+  capturePaneContent?: (target: string, lines?: number) => Promise<string | null>;
 }) {
   return {
     sendText: overrides?.sendText ?? vi.fn(async () => ({ ok: true as const })),
     sendKeys: overrides?.sendKeys ?? vi.fn(async () => ({ ok: true as const })),
+    // Default verifyResume probe: pane shows codex foreground process so
+    // assessNativeResumeProbe returns resumed/active_runtime on first attempt.
+    getPaneCommand: overrides?.getPaneCommand ?? vi.fn(async () => "codex"),
+    capturePaneContent: overrides?.capturePaneContent ?? vi.fn(async () => ""),
     createSession: async () => ({ ok: true as const }),
     killSession: async () => ({ ok: true as const }),
     listSessions: async () => [],
@@ -132,6 +138,113 @@ describe("CodexResumeAdapter", () => {
       await adapter.resume("r99-demo1-impl", "codex_id", "uuid-123", "/repo");
 
       expect(sendKeys).not.toHaveBeenCalled();
+    });
+  });
+
+  // verifyResume — closes the false-positive `resumed` gap that fire-and-forget
+  // left open. Mirrors ClaudeResumeAdapter.verifyResume; uses the existing
+  // Codex shape in assessNativeResumeProbe (no new probe patterns).
+  describe("verifyResume", () => {
+    const fastOptions = { pollMs: 1, maxWaitMs: 5, sleep: async () => {} };
+
+    it("probe returns resumed (codex foreground) -> { ok: true }", async () => {
+      const getPaneCommand = vi.fn(async () => "codex");
+      const capturePaneContent = vi.fn(async () => "");
+      const adapter = new CodexResumeAdapter(
+        mockTmux({ getPaneCommand, capturePaneContent }),
+        fastOptions,
+      );
+
+      const result = await adapter.resume("r99-demo1-impl", "codex_id", "uuid-123", "/repo");
+
+      expect(result).toEqual({ ok: true });
+      expect(getPaneCommand).toHaveBeenCalled();
+    });
+
+    it("probe sees Codex TUI banner (paneContent) -> { ok: true }", async () => {
+      const adapter = new CodexResumeAdapter(
+        mockTmux({
+          getPaneCommand: async () => "node",
+          capturePaneContent: async () => "OpenAI Codex (v0.42.0)\n  ›  ready\n  gpt-5 · context",
+        }),
+        fastOptions,
+      );
+
+      const result = await adapter.resume("r99-demo1-impl", "codex_id", "uuid-123", "/repo");
+
+      expect(result).toEqual({ ok: true });
+    });
+
+    it("probe sees `No saved session found` -> { ok: false, code: 'retry_fresh' }", async () => {
+      const adapter = new CodexResumeAdapter(
+        mockTmux({
+          getPaneCommand: async () => "codex",
+          capturePaneContent: async () => "Error: No saved session found for that token.\n",
+        }),
+        fastOptions,
+      );
+
+      const result = await adapter.resume("r99-demo1-impl", "codex_id", "uuid-123", "/repo");
+
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.code).toBe("retry_fresh");
+        expect(result.message).toContain("no saved session");
+      }
+    });
+
+    it("pane falls back to shell after timeout -> { ok: false, code: 'retry_fresh' }", async () => {
+      const adapter = new CodexResumeAdapter(
+        mockTmux({
+          // Inconclusive during polls (unknown command, empty content), then
+          // shell on the final assessment.
+          getPaneCommand: async () => "zsh",
+          capturePaneContent: async () => "",
+        }),
+        fastOptions,
+      );
+
+      const result = await adapter.resume("r99-demo1-impl", "codex_id", "uuid-123", "/repo");
+
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.code).toBe("retry_fresh");
+        expect(result.message).toContain("returned to shell");
+      }
+    });
+
+    it("probe stays inconclusive (unknown pane) past timeout -> { ok: false, code: 'resume_failed' }", async () => {
+      const adapter = new CodexResumeAdapter(
+        mockTmux({
+          getPaneCommand: async () => "unknown-binary",
+          capturePaneContent: async () => "still booting...",
+        }),
+        fastOptions,
+      );
+
+      const result = await adapter.resume("r99-demo1-impl", "codex_id", "uuid-123", "/repo");
+
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.code).toBe("resume_failed");
+        expect(result.message).toContain("timed out");
+      }
+    });
+
+    it("polls until resumed: first inconclusive, then codex foreground -> { ok: true }", async () => {
+      let attempt = 0;
+      const adapter = new CodexResumeAdapter(
+        mockTmux({
+          getPaneCommand: async () => (attempt++ === 0 ? "node" : "codex"),
+          capturePaneContent: async () => "",
+        }),
+        { pollMs: 1, maxWaitMs: 50, sleep: async () => {} },
+      );
+
+      const result = await adapter.resume("r99-demo1-impl", "codex_id", "uuid-123", "/repo");
+
+      expect(result).toEqual({ ok: true });
+      expect(attempt).toBeGreaterThanOrEqual(2);
     });
   });
 });
