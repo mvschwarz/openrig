@@ -5,6 +5,26 @@ import { getDaemonStatus, getDaemonUrl } from "../daemon-lifecycle.js";
 import { readOpenRigEnv } from "../openrig-compat.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
+import { loadHostRegistry, resolveHost } from "../host-registry.js";
+import { runCrossHostCommand, type RunCrossHostCommandOpts } from "../cross-host-executor.js";
+import { emitCrossHostError, emitCrossHostFailure } from "../cross-host-cli-helpers.js";
+
+interface WhoamiCliOptions {
+  nodeId?: string;
+  session?: string;
+  host?: string;
+  json?: boolean;
+}
+
+export interface WhoamiDeps extends StatusDeps {
+  /** Cross-host hooks; mirrors PsDeps/SendDeps shape. Tests inject mocks. */
+  hostRegistryLoader?: () => ReturnType<typeof loadHostRegistry>;
+  crossHostRun?: (
+    host: Parameters<typeof runCrossHostCommand>[0],
+    argv: readonly string[],
+    opts?: RunCrossHostCommandOpts,
+  ) => ReturnType<typeof runCrossHostCommand>;
+}
 
 interface WhoamiIdentity {
   rigName: string;
@@ -133,9 +153,9 @@ export function resolveIdentitySource(
   return null;
 }
 
-export function whoamiCommand(depsOverride?: StatusDeps): Command {
+export function whoamiCommand(depsOverride?: WhoamiDeps): Command {
   const cmd = new Command("whoami").description("Show current managed identity in an OpenRig topology");
-  const getDeps = (): StatusDeps => depsOverride ?? {
+  const getDeps = (): WhoamiDeps => depsOverride ?? {
     lifecycleDeps: realDeps(),
     clientFactory: (url: string) => new DaemonClient(url),
   };
@@ -143,16 +163,25 @@ export function whoamiCommand(depsOverride?: StatusDeps): Command {
   cmd
     .option("--node-id <id>", "Resolve by node ID")
     .option("--session <name>", "Resolve by session name")
+    .option("--host <id>", "Run on a remote host declared in ~/.openrig/hosts.yaml (CLI-side ssh shell-out)")
     .option("--json", "JSON output for agents")
-    .action(async (opts: { nodeId?: string; session?: string; json?: boolean }) => {
+    .action(async (opts: WhoamiCliOptions) => {
+      const deps = getDeps();
+
+      // --- Cross-host short-circuit (CLI-side ssh shell-out; daemon untouched) ---
+      // Runs BEFORE local identity-source resolution: the remote rig has its
+      // own daemon and identity context; we just forward the raw flags.
+      if (opts.host) {
+        await runCrossHostWhoami(opts.host, opts, deps);
+        return;
+      }
+
       const source = resolveIdentitySource(opts);
       if (!source) {
         console.error("Cannot determine identity. Run inside an OpenRig-managed session, or use --session or --node-id.");
         process.exitCode = 1;
         return;
       }
-
-      const deps = getDeps();
       const status = await getDaemonStatus(deps.lifecycleDeps);
       if (status.state !== "running" || status.healthy === false) {
         const partial = buildPartialWhoamiResult(source);
@@ -248,4 +277,55 @@ export function whoamiCommand(depsOverride?: StatusDeps): Command {
     });
 
   return cmd;
+}
+
+async function runCrossHostWhoami(
+  hostId: string,
+  opts: WhoamiCliOptions,
+  deps: WhoamiDeps,
+): Promise<void> {
+  const loader = deps.hostRegistryLoader ?? loadHostRegistry;
+  const runner = deps.crossHostRun ?? runCrossHostCommand;
+
+  const registry = loader();
+  if (!registry.ok) {
+    emitCrossHostError(hostId, "registry-load-failed", registry.error, opts.json);
+    return;
+  }
+  const resolved = resolveHost(registry.registry, hostId);
+  if (!resolved.ok) {
+    emitCrossHostError(hostId, "unknown-host", resolved.error, opts.json);
+    return;
+  }
+  const host = resolved.host;
+
+  // Reconstruct argv. `rig whoami` has no positional args; just the resolution
+  // flags. Identity resolution happens on the REMOTE rig (each host has its
+  // own daemon + tmux + identity context); we don't pre-resolve locally.
+  const argv: string[] = ["rig", "whoami"];
+  if (opts.nodeId !== undefined) argv.push("--node-id", opts.nodeId);
+  if (opts.session !== undefined) argv.push("--session", opts.session);
+  if (opts.json) argv.push("--json");
+
+  const result = await runner(host, argv);
+
+  if (opts.json) {
+    if (result.ok) {
+      // Verbatim remote stdout passthrough — the remote `rig whoami --json`
+      // already produced the correct JSON envelope; we do NOT double-wrap.
+      if (result.stdout) process.stdout.write(result.stdout);
+      if (result.stderr) process.stderr.write(result.stderr);
+      return;
+    }
+    emitCrossHostFailure(host.id, host.target, result, true);
+    return;
+  }
+
+  console.log(`[via host=${host.id} (${host.target})]`);
+  if (result.ok) {
+    if (result.stdout) process.stdout.write(result.stdout);
+    if (result.stderr) process.stderr.write(result.stderr);
+    return;
+  }
+  emitCrossHostFailure(host.id, host.target, result, false);
 }
