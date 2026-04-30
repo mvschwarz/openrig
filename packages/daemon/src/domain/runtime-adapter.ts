@@ -85,6 +85,21 @@ export function resolveConcreteHint(
 // -- Runtime adapter contract --
 
 /**
+ * Member-level fork-source input translated by the startup orchestrator from
+ * the rigspec member's `sessionSource` field. v1 narrow MVP: kind="native_id"
+ * only; other shapes are rejected at schema validation today.
+ *
+ * Adapters that support fork (claude-code, codex) build their respective
+ * fork command from this input and capture the NEW post-fork token, never
+ * the parent. Adapters that don't support fork (terminal) refuse with a
+ * clear runtime-mismatch error.
+ */
+export interface ForkSource {
+  kind: "native_id" | "artifact_path" | "name" | "last";
+  value?: string;
+}
+
+/**
  * The five-method runtime adapter contract.
  * Adapters own projection, delivery, harness launch, reconciliation, and readiness.
  * Startup action execution is NOT part of this contract — that belongs
@@ -102,8 +117,18 @@ export interface RuntimeAdapter {
   /** Deliver startup files to the runtime. */
   deliverStartup(files: ResolvedStartupFile[], binding: NodeBinding): Promise<StartupDeliveryResult>;
 
-  /** Launch the harness (claude/codex/terminal) inside the tmux session. */
-  launchHarness(binding: NodeBinding, opts: { name: string; resumeToken?: string }): Promise<HarnessLaunchResult>;
+  /**
+   * Launch the harness (claude/codex/terminal) inside the tmux session.
+   *
+   * `resumeToken` and `forkSource` are mutually exclusive. If both are
+   * provided, adapters MUST refuse with a clear error rather than guess.
+   * `forkSource` triggers a fork from the named source; the captured
+   * resumeToken in the result is the NEW post-fork token, never the parent.
+   */
+  launchHarness(
+    binding: NodeBinding,
+    opts: { name: string; resumeToken?: string; forkSource?: ForkSource },
+  ): Promise<HarnessLaunchResult>;
 
   /** Check if the runtime harness is responsive and ready. */
   checkReady(binding: NodeBinding): Promise<ReadinessResult>;

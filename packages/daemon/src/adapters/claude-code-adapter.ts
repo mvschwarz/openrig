@@ -156,13 +156,55 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     return { delivered, failed };
   }
 
-  async launchHarness(binding: NodeBinding, opts: { name: string; resumeToken?: string }): Promise<HarnessLaunchResult> {
+  async launchHarness(
+    binding: NodeBinding,
+    opts: { name: string; resumeToken?: string; forkSource?: import("../domain/runtime-adapter.js").ForkSource },
+  ): Promise<HarnessLaunchResult> {
     if (!binding.tmuxSession) {
       return { ok: false, error: "No tmux session bound — cannot launch Claude Code harness" };
     }
 
-    const generatedSessionId = opts.resumeToken ? null : this.sessionIdFactory();
+    if (opts.resumeToken && opts.forkSource) {
+      return { ok: false, error: "resumeToken and forkSource are mutually exclusive — pick one" };
+    }
+
     const permissionMode = "--permission-mode acceptEdits";
+
+    // Fork branch: build `claude --resume <parent> --fork-session --name <seat>`
+    // and capture the NEW post-fork session id. The parent token is NEVER
+    // persisted onto the new seat record (identity-honesty bedrock).
+    if (opts.forkSource) {
+      if (opts.forkSource.kind !== "native_id") {
+        return {
+          ok: false,
+          error: `claude-code fork: ref.kind="${opts.forkSource.kind}" is not supported in v1; use ref.kind="native_id" with the prior conversation's session id`,
+        };
+      }
+      const parentId = opts.forkSource.value?.trim();
+      if (!parentId) {
+        return { ok: false, error: "claude-code fork: forkSource.value is required (parent native_id)" };
+      }
+      const cmd = `claude ${permissionMode} --resume ${parentId} --fork-session --name ${opts.name}`;
+      const textResult = await this.tmux.sendText(binding.tmuxSession, cmd);
+      if (!textResult.ok) {
+        return { ok: false, error: `Failed to send launch command: ${textResult.message}` };
+      }
+      const enterResult = await this.tmux.sendKeys(binding.tmuxSession, ["Enter"]);
+      if (!enterResult.ok) {
+        return { ok: false, error: `Failed to send Enter: ${enterResult.message}` };
+      }
+      // Capture the NEW session id post-fork. Parent id is NOT persisted.
+      const newToken = this.captureResumeToken(opts.name);
+      if (!newToken) {
+        return {
+          ok: false,
+          error: "claude-code fork: could not capture new post-fork session id from claude session storage",
+        };
+      }
+      return { ok: true, resumeToken: newToken, resumeType: "claude_id" };
+    }
+
+    const generatedSessionId = opts.resumeToken ? null : this.sessionIdFactory();
     const cmd = opts.resumeToken
       ? `claude ${permissionMode} --resume ${opts.resumeToken} --name ${opts.name}`
       : `claude ${permissionMode} --session-id ${generatedSessionId} --name ${opts.name}`;

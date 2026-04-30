@@ -303,6 +303,50 @@ function validateMember(member: Record<string, unknown>, index: number, podPrefi
     errors.push(...validateStartupBlock(member["startup"], `${prefix}.startup`));
   }
 
+  // session_source validation (v1 narrow MVP: mode=fork + ref.kind=native_id)
+  if (member["session_source"] !== undefined) {
+    errors.push(...validateSessionSource(member["session_source"], `${prefix}.session_source`, isTerminalRuntime));
+  }
+
+  return errors;
+}
+
+function validateSessionSource(raw: unknown, prefix: string, isTerminalRuntime: boolean): string[] {
+  const errors: string[] = [];
+  if (raw === null || typeof raw !== "object") {
+    errors.push(`${prefix}: must be an object`);
+    return errors;
+  }
+  if (isTerminalRuntime) {
+    errors.push(`${prefix}: terminal runtime has no native fork primitive; remove session_source for terminal members`);
+    return errors;
+  }
+  const ss = raw as Record<string, unknown>;
+  const mode = ss["mode"];
+  if (mode !== "fork") {
+    errors.push(`${prefix}.mode: v1 supports "fork" only (got ${JSON.stringify(mode)})`);
+  }
+  const ref = ss["ref"];
+  if (ref === null || typeof ref !== "object") {
+    errors.push(`${prefix}.ref: required object with "kind" and (when kind=native_id) "value"`);
+    return errors;
+  }
+  const refRec = ref as Record<string, unknown>;
+  const kind = refRec["kind"];
+  if (kind !== "native_id") {
+    if (kind === "artifact_path") {
+      errors.push(`${prefix}.ref.kind: "artifact_path" deferred to follow-up slice; v1 narrow MVP supports "native_id" only`);
+    } else if (kind === "name" || kind === "last") {
+      errors.push(`${prefix}.ref.kind: "${kind}" is weaker than "native_id"; v1 scope supports "native_id" only`);
+    } else {
+      errors.push(`${prefix}.ref.kind: required; v1 supports "native_id" only (got ${JSON.stringify(kind)})`);
+    }
+    return errors;
+  }
+  const value = refRec["value"];
+  if (typeof value !== "string" || value.trim() === "") {
+    errors.push(`${prefix}.ref.value: required non-empty string when ref.kind is "native_id"`);
+  }
   return errors;
 }
 
@@ -625,6 +669,20 @@ function validateContinuityPolicy(raw: unknown, prefix: string): string[] {
 
 // -- Normalization helpers --
 
+function normalizeSessionSource(raw: unknown): import("./types.js").SessionSourceSpec | undefined {
+  if (raw === null || typeof raw !== "object") return undefined;
+  const ss = raw as Record<string, unknown>;
+  const mode = ss["mode"];
+  if (mode !== "fork") return undefined;
+  const ref = ss["ref"];
+  if (ref === null || typeof ref !== "object") return undefined;
+  const refRec = ref as Record<string, unknown>;
+  const kind = refRec["kind"];
+  if (kind !== "native_id" && kind !== "artifact_path" && kind !== "name" && kind !== "last") return undefined;
+  const value = typeof refRec["value"] === "string" ? (refRec["value"] as string) : undefined;
+  return { mode: "fork", ref: { kind, ...(value !== undefined ? { value } : {}) } };
+}
+
 function normalizePod(raw: Record<string, unknown>): RigSpecPod {
   const members = (raw["members"] as Record<string, unknown>[]).map((m) => ({
     id: m["id"] as string,
@@ -637,6 +695,7 @@ function normalizePod(raw: Record<string, unknown>): RigSpecPod {
     cwd: m["cwd"] as string,
     restorePolicy: m["restore_policy"] as string | undefined,
     startup: m["startup"] ? normalizeStartupBlock(m["startup"]) : undefined,
+    sessionSource: normalizeSessionSource(m["session_source"]),
   }));
 
   const edges = Array.isArray(raw["edges"])

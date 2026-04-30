@@ -28,6 +28,21 @@ function normalizeExpansionPodFragment(raw: Record<string, unknown>): ExpansionP
     summary: typeof raw["summary"] === "string" ? raw["summary"] : undefined,
     members: members.map((member) => {
       const m = (member ?? {}) as Record<string, unknown>;
+      const rawSessionSource = (m["sessionSource"] ?? m["session_source"]) as unknown;
+      let sessionSource: import("../domain/types.js").SessionSourceSpec | undefined;
+      if (rawSessionSource !== undefined && rawSessionSource !== null && typeof rawSessionSource === "object") {
+        const ss = rawSessionSource as Record<string, unknown>;
+        const mode = ss["mode"];
+        const ref = ss["ref"];
+        if (mode === "fork" && ref !== null && typeof ref === "object") {
+          const refRec = ref as Record<string, unknown>;
+          const kind = refRec["kind"];
+          if (kind === "native_id" || kind === "artifact_path" || kind === "name" || kind === "last") {
+            const value = typeof refRec["value"] === "string" ? (refRec["value"] as string) : undefined;
+            sessionSource = { mode: "fork", ref: { kind, ...(value !== undefined ? { value } : {}) } };
+          }
+        }
+      }
       return {
         id: typeof m["id"] === "string" ? m["id"] : "",
         runtime: typeof m["runtime"] === "string" ? m["runtime"] : "",
@@ -53,6 +68,7 @@ function normalizeExpansionPodFragment(raw: Record<string, unknown>): ExpansionP
               ? m["restore_policy"]
               : undefined,
         label: typeof m["label"] === "string" ? m["label"] : undefined,
+        ...(sessionSource ? { sessionSource } : {}),
       };
     }),
     edges: Array.isArray(raw["edges"])

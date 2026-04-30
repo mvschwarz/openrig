@@ -58,6 +58,11 @@ export class RigSpecCodec {
         if (m.model) member["model"] = m.model;
         if (m.restorePolicy) member["restore_policy"] = m.restorePolicy;
         if (m.startup) member["startup"] = serializeStartupBlock(m.startup);
+        if (m.sessionSource) {
+          const ref: Record<string, unknown> = { kind: m.sessionSource.ref.kind };
+          if (m.sessionSource.ref.value !== undefined) ref["value"] = m.sessionSource.ref.value;
+          member["session_source"] = { mode: m.sessionSource.mode, ref };
+        }
         return member;
       });
 

@@ -506,6 +506,23 @@ export interface ContinuityPolicySpec {
   restoreProtocol?: { peerDriven?: boolean; verifyViaQuiz?: boolean };
 }
 
+/**
+ * Member-level launch input for declaring that a new managed seat should be
+ * started from a prior native runtime conversation source. v1 narrow MVP:
+ * mode="fork" + ref.kind="native_id" only. The original seat is NOT claimed
+ * to have continued; the new seat persists its own NEW post-fork token.
+ *
+ * Other ref.kind values ("artifact_path", "name", "last") are reserved
+ * shapes — schema rejects them today with an honest "v1 scope" error.
+ */
+export interface SessionSourceSpec {
+  mode: "fork";
+  ref: {
+    kind: "native_id" | "artifact_path" | "name" | "last";
+    value?: string;
+  };
+}
+
 export interface RigSpecPodMember {
   id: string;
   label?: string;
@@ -517,6 +534,12 @@ export interface RigSpecPodMember {
   cwd: string;
   restorePolicy?: string;
   startup?: StartupBlock;
+  /**
+   * Optional fork source declaration. v1 MVP: mode="fork" with
+   * ref.kind="native_id". Validated by `rigspec-schema.ts` and translated
+   * to the runtime adapter's `forkSource` opt at launch time.
+   */
+  sessionSource?: SessionSourceSpec;
 }
 
 export interface RigSpecPodEdge {
@@ -675,6 +698,8 @@ export interface ExpansionPodFragment {
     codexConfigProfile?: string;
     restorePolicy?: string;
     label?: string;
+    /** Optional session source declaration; threaded through to launch. */
+    sessionSource?: SessionSourceSpec;
   }>;
   edges: Array<{ from: string; to: string; kind: string }>;
 }
