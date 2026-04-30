@@ -102,13 +102,23 @@ export function expandCommand(depsOverride?: StatusDeps): Command {
         for (const w of data.warnings) console.log(`  Warning: ${w}`);
       }
 
-      // Honest retry guidance for failed nodes
+      // Honest retry guidance for failed nodes. The pod-aware /launch route
+      // returns pod_aware_launch_unsupported for any node `expand` creates
+      // (every expand-created node has podId set), so the recoverable path is
+      // shrink-the-failed-pod + fix + re-expand, not per-node relaunch.
       if (data.retryTargets && data.retryTargets.length > 0) {
         console.log("");
-        console.log("  Failed nodes can be relaunched via the dashboard or CLI:");
-        for (const target of data.retryTargets) {
-          console.log(`    rig launch ${rigId} ${target}`);
+        console.log("  Failed nodes cannot be relaunched directly because pod-aware launch");
+        console.log("  bypasses startup orchestration. Recover by:");
+        console.log(`    1. Verify other seats are healthy: rig ps --filter rigName=${rigId} --nodes`);
+        if (data.podNamespace) {
+          console.log(`    2. Shrink the failed new pod: rig shrink ${rigId} ${data.podNamespace}`);
+        } else {
+          console.log(`    2. Shrink the failed new pod: rig shrink ${rigId} <pod-namespace>`);
         }
+        console.log(`    3. Fix the spec/config issue.`);
+        console.log(`    4. Re-run: rig expand ${rigId} <pod-fragment-path>`);
+        console.log(`  Failed targets: ${data.retryTargets.join(", ")}`);
       }
 
       if (data.status !== "ok") {
