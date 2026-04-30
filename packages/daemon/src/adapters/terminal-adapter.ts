@@ -31,7 +31,16 @@ export class TerminalAdapter implements RuntimeAdapter {
     return { delivered: 0, failed: [] };
   }
 
-  async launchHarness(_binding: NodeBinding, _opts: { name: string; resumeToken?: string }): Promise<HarnessLaunchResult> {
+  async launchHarness(
+    _binding: NodeBinding,
+    opts: { name: string; resumeToken?: string; forkSource?: import("../domain/runtime-adapter.js").ForkSource },
+  ): Promise<HarnessLaunchResult> {
+    if (opts.forkSource) {
+      return {
+        ok: false,
+        error: "terminal runtime has no native fork primitive; remove session_source for terminal members",
+      };
+    }
     return { ok: true };
   }
 

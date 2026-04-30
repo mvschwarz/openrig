@@ -1062,6 +1062,12 @@ export class PodRigInstantiator {
         }),
       ],
       isRestore: false,
+      ...(input.member.sessionSource ? {
+        forkSource: {
+          kind: input.member.sessionSource.ref.kind,
+          ...(input.member.sessionSource.ref.value !== undefined ? { value: input.member.sessionSource.ref.value } : {}),
+        },
+      } : {}),
     });
 
     return {

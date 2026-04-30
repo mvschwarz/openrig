@@ -142,6 +142,15 @@ export class RigExpansionService {
             ...(member.model ? { model: member.model } : {}),
             ...(member.restorePolicy ? { restore_policy: member.restorePolicy } : {}),
             ...(member.label ? { label: member.label } : {}),
+            ...(member.sessionSource ? {
+              session_source: {
+                mode: member.sessionSource.mode,
+                ref: {
+                  kind: member.sessionSource.ref.kind,
+                  ...(member.sessionSource.ref.value !== undefined ? { value: member.sessionSource.ref.value } : {}),
+                },
+              },
+            } : {}),
           })),
           edges: pod.edges.map((edge) => ({
             kind: edge.kind,

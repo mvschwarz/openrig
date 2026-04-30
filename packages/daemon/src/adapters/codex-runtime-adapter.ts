@@ -153,9 +153,16 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     return { delivered, failed };
   }
 
-  async launchHarness(binding: NodeBinding, opts: { name: string; resumeToken?: string }): Promise<HarnessLaunchResult> {
+  async launchHarness(
+    binding: NodeBinding,
+    opts: { name: string; resumeToken?: string; forkSource?: import("../domain/runtime-adapter.js").ForkSource },
+  ): Promise<HarnessLaunchResult> {
     if (!binding.tmuxSession) {
       return { ok: false, error: "No tmux session bound — cannot launch Codex harness" };
+    }
+
+    if (opts.resumeToken && opts.forkSource) {
+      return { ok: false, error: "resumeToken and forkSource are mutually exclusive — pick one" };
     }
 
     const model = binding.model?.trim();
@@ -164,6 +171,41 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     const profileArg = profile ? ` -p ${shellQuote(profile)}` : "";
     const gitDirArg = ` --add-dir ${shellQuote(nodePath.join(binding.cwd, ".git"))}`;
     const queueStateDirArg = this.buildQueueStateAddDirArg(opts.name);
+
+    // Fork branch: `codex fork <parent_thread_id>`. Captures the NEW thread id
+    // post-fork. Parent thread id is NOT persisted onto the new seat record
+    // (identity-honesty bedrock).
+    if (opts.forkSource) {
+      if (opts.forkSource.kind !== "native_id") {
+        return {
+          ok: false,
+          error: `codex fork: ref.kind="${opts.forkSource.kind}" is not supported in v1; use ref.kind="native_id" with the prior conversation's thread id`,
+        };
+      }
+      const parentId = opts.forkSource.value?.trim();
+      if (!parentId) {
+        return { ok: false, error: "codex fork: forkSource.value is required (parent native_id)" };
+      }
+      const cmd = `codex${profileArg} fork${queueStateDirArg} ${shellQuote(parentId)}`;
+      const textResult = await this.tmux.sendText(binding.tmuxSession, cmd);
+      if (!textResult.ok) {
+        return { ok: false, error: `Failed to send launch command: ${textResult.message}` };
+      }
+      const enterResult = await this.tmux.sendKeys(binding.tmuxSession, ["Enter"]);
+      if (!enterResult.ok) {
+        return { ok: false, error: `Failed to send Enter: ${enterResult.message}` };
+      }
+      await this.dismissSkippableCodexUpdatePrompt(binding.tmuxSession);
+      const threadId = await this.captureFreshThreadId(binding);
+      if (!threadId) {
+        return {
+          ok: false,
+          error: "codex fork: could not capture new post-fork thread id",
+        };
+      }
+      return { ok: true, resumeToken: threadId, resumeType: "codex_id" };
+    }
+
     const cmd = opts.resumeToken
       ? `codex${profileArg} resume${queueStateDirArg} ${shellQuote(opts.resumeToken)}`
       : profile

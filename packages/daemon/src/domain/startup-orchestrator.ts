@@ -5,7 +5,7 @@ import type { TmuxAdapter } from "../adapters/tmux.js";
 import type { StartupAction } from "./types.js";
 import type {
   RuntimeAdapter, NodeBinding, ResolvedStartupFile,
-  ProjectionResult, StartupDeliveryResult,
+  ProjectionResult, StartupDeliveryResult, ForkSource,
 } from "./runtime-adapter.js";
 import { isAttentionRequiredReadinessCode, resolveConcreteHint } from "./runtime-adapter.js";
 import type { ProjectionPlan } from "./projection-planner.js";
@@ -24,8 +24,15 @@ export interface StartupInput {
   isRestore: boolean;
   /** Session name for harness launch (used as --name flag). */
   sessionName?: string;
-  /** Resume token for restore path. */
+  /** Resume token for restore path. Mutually exclusive with forkSource. */
   resumeToken?: string;
+  /**
+   * Fork-source for new-seat-from-prior-conversation path. Mutually
+   * exclusive with resumeToken. v1: kind="native_id" only. The captured
+   * post-fork token (returned by the adapter) is what gets persisted on
+   * the new seat — the parent token is NEVER persisted.
+   */
+  forkSource?: ForkSource;
   /** Skip harness launch (legacy nodes that already resumed via old helpers). */
   skipHarnessLaunch?: boolean;
   /** Allow runtime adapter retry_fresh fallback when native resume data is stale. */
@@ -35,7 +42,7 @@ export interface StartupInput {
 }
 
 export type StartupResult =
-  | { ok: true; startupStatus: "ready"; continuityOutcome: "resumed" | "fresh" }
+  | { ok: true; startupStatus: "ready"; continuityOutcome: "resumed" | "fresh" | "forked" }
   | { ok: false; startupStatus: "attention_required" | "failed"; errors: string[] };
 
 interface StartupOrchestratorDeps {
@@ -91,7 +98,11 @@ export class StartupOrchestrator {
 
   async startNode(input: StartupInput): Promise<StartupResult> {
     const errors: string[] = [];
-    let continuityOutcome: "resumed" | "fresh" = input.resumeToken ? "resumed" : "fresh";
+    let continuityOutcome: "resumed" | "fresh" | "forked" = input.resumeToken
+      ? "resumed"
+      : input.forkSource
+        ? "forked"
+        : "fresh";
 
     // 1. Mark pending
     this.sessionRegistry.updateStartupStatus(input.sessionId, "pending");
@@ -155,6 +166,7 @@ export class StartupOrchestrator {
           const launchResult = await input.adapter.launchHarness(input.binding, {
             name: input.sessionName ?? input.binding.tmuxSession ?? "",
             resumeToken: launchResumeToken,
+            ...(input.forkSource && !launchResumeToken ? { forkSource: input.forkSource } : {}),
           });
           if (launchResult.ok) {
             const normalizedResumeToken = launchResult.resumeToken?.trim();
