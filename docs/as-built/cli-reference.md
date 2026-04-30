@@ -493,22 +493,67 @@ Notes:
 
 ### `rig send`
 
-Usage: `rig send <session> <text> [--verify] [--force] [--json]`
+Usage: `rig send <session> <text> [--verify] [--force] [--wait-for-idle <s>] [--host <id>] [--json]`
 
 Notes:
 - Uses the two-step send pattern automatically: paste text, wait, submit Enter.
 - `--verify` requests delivery verification.
 - `--force` overrides mid-task safety checks.
+- `--host <id>` routes the same command to a remote host declared in `~/.openrig/hosts.yaml` via single-hop ssh; see "Cross-host execution" below. SSH success is NOT verify success — the remote rig's `Verified: yes/no` is what counts and is surfaced verbatim.
 
 ### `rig capture`
 
 Usage:
-- `rig capture <session> [--lines <n>] [--json]`
-- `rig capture --rig <name> [--lines <n>] [--json]`
-- `rig capture --pod <name> --rig <name> [--lines <n>] [--json]`
+- `rig capture <session> [--lines <n>] [--host <id>] [--json]`
+- `rig capture --rig <name> [--lines <n>] [--host <id>] [--json]`
+- `rig capture --pod <name> --rig <name> [--lines <n>] [--host <id>] [--json]`
 
 Default:
 - `--lines 20`
+
+Notes:
+- `--host <id>` routes the same command to a remote host declared in `~/.openrig/hosts.yaml` via single-hop ssh; see "Cross-host execution" below.
+
+### Cross-host execution (`--host <id>`)
+
+`rig send` and `rig capture` accept a `--host <id>` flag that routes the
+command to a remote host over single-hop SSH. v0 is CLI-side shell-out
+only — the local daemon is not involved in routing, and there is no
+daemon-to-daemon networking. The remote host is expected to have its own
+managed `rig` available on `$PATH`.
+
+Hosts are declared by the operator in `~/.openrig/hosts.yaml`:
+
+```yaml
+hosts:
+  - id: vm-claude-test
+    transport: ssh
+    target: vm-claude-test.local
+    user: your-username        # optional
+    notes: "Tart VM"     # optional
+  - id: laptop-b
+    transport: ssh
+    target: laptop-b.tail-scale-net
+    user: your-username
+```
+
+Validation rules:
+
+- `hosts` is required and must be a non-null array.
+- Each entry: `id` required (non-empty, unique), `transport` required (v0 supports `ssh` only), `target` required (non-empty — DNS name, SSH config alias, or IP).
+- `user` and `notes` are optional.
+- The file is operator-managed; v0 does NOT include any sub-command to add, remove, or list hosts (operators edit the YAML directly).
+- A missing or invalid file returns a clear error pointing at the canonical path.
+
+The CLI distinguishes four structured failure modes (operators get an
+actionable error per mode; JSON output preserves the `failedStep` enum):
+
+- `ssh-unreachable` — SSH itself failed (connection refused, host key mismatch, etc.). Verify SSH access and the registry entry.
+- `permission-gate` — SSH hit an auth/permission gate (Permission denied, Keychain). The error includes a hint to the keychain-over-SSH field note.
+- `remote-daemon-unreachable` — SSH succeeded but the remote `rig` reported the remote daemon was not reachable. Start it with `ssh <target> rig daemon start`.
+- `remote-command-failed` — SSH succeeded but the remote `rig` exited non-zero for some other reason; the remote stderr is surfaced.
+
+Out of scope for v0: non-SSH transports; `--host` on `rig ps` / `rig whoami` / other commands; connection pooling; multi-hop SSH; cross-host queue routing; cross-host seat handover.
 
 ### `rig broadcast`
 

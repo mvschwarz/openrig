@@ -146,8 +146,8 @@ Important route behaviors:
 - `openrig-user` now teaches the shipped managed-app model (`software + specialist`) and cross-rig specialist interaction
 
 **Communication and history commands:**
-- `rig send <session> "message" [--verify] [--force]` — send to agent terminal
-- `rig capture <session> [--lines N] [--json]` — capture agent pane content
+- `rig send <session> "message" [--verify] [--force] [--host <id>]` — send to agent terminal; `--host` routes to a host declared in `~/.openrig/hosts.yaml` via single-hop ssh (CLI-side shell-out; daemon untouched). SSH success is NOT verify success — the remote rig's verify result is surfaced verbatim.
+- `rig capture <session> [--lines N] [--json] [--host <id>]` — capture agent pane content; `--host` same shape as `rig send --host`.
 - `rig broadcast --rig <name> "message"` — multi-agent broadcast
 - `rig transcript <session> --tail N / --grep "pattern" [--json]` — transcript access
 - `rig config [get <key> / set <key> <value> / reset <key>] [--json]` — configuration surface
