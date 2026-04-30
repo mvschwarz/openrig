@@ -420,6 +420,52 @@ Usage: `rig expand <rig-id> <pod-fragment-path> [--json] [--rig-root <path>]`
 Notes:
 - Adds a pod fragment to a running rig.
 - `--rig-root` controls agent resolution.
+- Member YAML may carry `session_source` (see "Session source declaration" below) to start the new seat from a prior native conversation (`mode: fork`) or from operator-declared artifacts (`mode: rebuild`).
+
+### Session source declaration (`session_source`)
+
+Member YAML in a rig spec or `rig expand` payload may declare a launch-time `session_source` to control how the new managed seat derives its starting context. Two modes are supported in v1:
+
+```yaml
+# Fork from a prior native runtime conversation. Captures and persists a NEW
+# post-fork token; the parent token is NEVER persisted onto the new seat.
+members:
+  - id: reviewer-2
+    runtime: claude-code        # or "codex"; not valid on terminal
+    session_source:
+      mode: fork
+      ref:
+        kind: native_id         # v1 fork mode supports "native_id" only
+        value: "0b0165d7-cb4d-4650-90de-15c0a1ede9e6"
+```
+
+```yaml
+# Rebuild from operator-declared artifacts (CULTURE, role doc, handover packet,
+# queue files, session logs). Fresh-launches the harness and seeds the running
+# TUI with the artifacts in the operator-declared trust-precedence order.
+# The seat's continuityOutcome is `rebuilt` (NEVER `fresh`/`resumed`/`forked`)
+# and NO `resumeToken` is persisted.
+members:
+  - id: writer-2
+    runtime: claude-code        # or "codex"; not valid on terminal
+    session_source:
+      mode: rebuild
+      ref:
+        kind: artifact_set      # v1 rebuild mode supports "artifact_set" only
+        value:                  # ordered list, highest-trust first
+          - /Users/wrandom/code/substrate/shared-docs/rigs/<rig>/CULTURE.md
+          - /Users/wrandom/code/substrate/shared-docs/specs/agents/<role>.md
+          - /path/to/handover-packet.md
+          - /path/to/state/<pod>/<member>.queue.md
+          - /path/to/state/<pod>/shared.session.log
+          - /path/to/state/<pod>/<member>.session.log
+```
+
+Notes:
+- `terminal` runtime rejects `session_source` (no native fork primitive; no agent context to rebuild).
+- `mode: fork` requires `ref.kind: native_id` and a non-empty `ref.value` string. Other ref kinds (`artifact_path`, `name`, `last`) are reserved shapes for follow-up slices and are refused in v1 fork mode.
+- `mode: rebuild` requires `ref.kind: artifact_set` and a non-empty `ref.value` array of paths. Missing paths are recorded as gaps and the launch proceeds with what resolved; if NO declared paths resolve, the launch fails with a clear error.
+- The two modes are mutually exclusive on a given member; mixing is a schema error.
 
 ### `rig unclaim`
 

@@ -63,6 +63,8 @@ export class RigSpecCodec {
           if (m.sessionSource.ref.value !== undefined) ref["value"] = m.sessionSource.ref.value;
           member["session_source"] = { mode: m.sessionSource.mode, ref };
         }
+        // (rebuild ref.value is an array; the codec re-emits it as-is via the
+        //  same `ref.value` slot — the YAML serializer handles array emission.)
         return member;
       });
 

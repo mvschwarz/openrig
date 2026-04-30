@@ -96,7 +96,7 @@ describe("session_source schema validation", () => {
     });
     const result = RigSpecSchema.validate(spec);
     expect(result.valid).toBe(false);
-    expect(result.errors.some((e) => e.includes('v1 supports "fork" only'))).toBe(true);
+    expect(result.errors.some((e) => e.includes('v1 supports "fork" or "rebuild"'))).toBe(true);
   });
 
   it("rejects ref.kind=artifact_path (deferred per dossier)", () => {
@@ -159,7 +159,7 @@ describe("session_source schema validation", () => {
     });
     const result = RigSpecSchema.validate(spec);
     expect(result.valid).toBe(false);
-    expect(result.errors.some((e) => e.includes('v1 supports "native_id" only'))).toBe(true);
+    expect(result.errors.some((e) => e.includes('v1 fork mode supports "native_id" only'))).toBe(true);
   });
 });
 

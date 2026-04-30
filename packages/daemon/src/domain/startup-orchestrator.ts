@@ -33,6 +33,15 @@ export interface StartupInput {
    * the new seat — the parent token is NEVER persisted.
    */
   forkSource?: ForkSource;
+  /**
+   * Rebuild-mode artifact set (operator-declared via
+   * `session_source.mode: rebuild`). When set, the orchestrator merges
+   * these artifacts into the post-launch delivery path, fresh-launches
+   * the harness with NO `resumeToken` and NO `forkSource`, and records
+   * `continuityOutcome: "rebuilt"` on the seat. NEVER paired with
+   * `resumeToken` or `forkSource` — rebuild is a distinct creation path.
+   */
+  rebuildArtifacts?: ResolvedStartupFile[];
   /** Skip harness launch (legacy nodes that already resumed via old helpers). */
   skipHarnessLaunch?: boolean;
   /** Allow runtime adapter retry_fresh fallback when native resume data is stale. */
@@ -42,7 +51,7 @@ export interface StartupInput {
 }
 
 export type StartupResult =
-  | { ok: true; startupStatus: "ready"; continuityOutcome: "resumed" | "fresh" | "forked" }
+  | { ok: true; startupStatus: "ready"; continuityOutcome: "resumed" | "fresh" | "forked" | "rebuilt" }
   | { ok: false; startupStatus: "attention_required" | "failed"; errors: string[] };
 
 interface StartupOrchestratorDeps {
@@ -98,11 +107,13 @@ export class StartupOrchestrator {
 
   async startNode(input: StartupInput): Promise<StartupResult> {
     const errors: string[] = [];
-    let continuityOutcome: "resumed" | "fresh" | "forked" = input.resumeToken
+    let continuityOutcome: "resumed" | "fresh" | "forked" | "rebuilt" = input.resumeToken
       ? "resumed"
       : input.forkSource
         ? "forked"
-        : "fresh";
+        : input.rebuildArtifacts && input.rebuildArtifacts.length > 0
+          ? "rebuilt"
+          : "fresh";
 
     // 1. Mark pending
     this.sessionRegistry.updateStartupStatus(input.sessionId, "pending");
@@ -126,8 +137,16 @@ export class StartupOrchestrator {
     // 3. Partition startup files by concrete hint: pre-launch (filesystem) vs post-launch (TUI)
     // Note: new file-building paths (NS-T05+) emit only concrete hints. The auto fallback
     // is compatibility-only for pre-NS-T05 persisted startup contexts in node_startup_context.
+    //
+    // Rebuild-mode artifacts (when set) are merged in front of resolvedStartupFiles
+    // so the operator's trust-precedence ordering is preserved when the post-launch
+    // delivery loop walks the array. Rebuild artifacts are tagged
+    // appliesOn: ["fresh_start"] by the resolver, which matches the rebuild context.
     const context = input.isRestore ? "restore" : "fresh_start";
-    const applicableFiles = input.resolvedStartupFiles.filter((f) => f.appliesOn.includes(context));
+    const sourceFiles = input.rebuildArtifacts && input.rebuildArtifacts.length > 0
+      ? [...input.rebuildArtifacts, ...input.resolvedStartupFiles]
+      : input.resolvedStartupFiles;
+    const applicableFiles = sourceFiles.filter((f) => f.appliesOn.includes(context));
     const preLaunchFiles: ResolvedStartupFile[] = [];
     let postLaunchFiles: ResolvedStartupFile[] = [];
     for (const f of applicableFiles) {
