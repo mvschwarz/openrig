@@ -54,6 +54,44 @@ const HUMAN_NODE_BUDGET = 100;
 // security).
 const ALLOWED_FILTER_KEYS = new Set(["status", "lifecycleState", "name-prefix", "name"]);
 
+// C9a: --fields accepts a per-level allow-list. Unknown keys produce a clear
+// error with the supported list, mirroring the --filter rejection pattern.
+// Per-level because rig and node entries have different schemas (PsEntry
+// rig-level vs NodeEntry node-level).
+//
+// Source of truth: PsEntry / NodeEntry interfaces above. `name` exists at
+// rig-level only; `rigName` is the alias and exists at both levels (per the
+// closed `rig ps trust and scale-safety` slice at openrig 0a9fb43).
+const ALLOWED_RIG_FIELDS = new Set([
+  "rigId",
+  "name",
+  "rigName",
+  "nodeCount",
+  "runningCount",
+  "status",
+  "lifecycleState",
+  "uptime",
+  "latestSnapshot",
+]);
+const ALLOWED_NODE_FIELDS = new Set([
+  "rigId",
+  "rigName",
+  "logicalId",
+  "podId",
+  "podNamespace",
+  "canonicalSessionName",
+  "nodeKind",
+  "runtime",
+  "sessionStatus",
+  "startupStatus",
+  "restoreOutcome",
+  "lifecycleState",
+  "tmuxAttachCommand",
+  "resumeCommand",
+  "latestError",
+  "agentActivity",
+]);
+
 interface PsCliOptions {
   json?: boolean;
   nodes?: boolean;
@@ -83,6 +121,30 @@ function parseFilter(filter: string): ParsedFilter | { error: string } {
     return { error: `--filter value is empty for key '${key}'` };
   }
   return { key, value };
+}
+
+// C9a: validate --fields against a per-level allow-list. Mirrors parseFilter's
+// shape: rejects with a sorted-supported-list error message including the
+// unknown key(s) quoted. The level-aware "Hint" fires when an operator types
+// `--fields name` against a node query (the most likely confusion case
+// preserved by the rigName/name aliasing at rig-level only).
+function parseFields(input: string, allowed: Set<string>, level: "rig" | "nodes"): string[] | { error: string } {
+  const fields = input.split(",").map((f) => f.trim()).filter((f) => f.length > 0);
+  if (fields.length === 0) {
+    return { error: `--fields cannot be empty` };
+  }
+  const unknown = fields.filter((f) => !allowed.has(f));
+  if (unknown.length > 0) {
+    const sorted = [...allowed].sort().join(", ");
+    const hint = level === "nodes" && unknown.includes("name")
+      ? ` Hint: 'name' is a rig-level field; use 'rigName' for node entries.`
+      : "";
+    const keyWord = unknown.length > 1 ? "keys" : "key";
+    return {
+      error: `Unknown --fields ${keyWord} ${unknown.map((u) => `'${u}'`).join(", ")}. Supported: ${sorted}.${hint}`,
+    };
+  }
+  return fields;
 }
 
 function applyRigFilter(entries: PsEntry[], filter: ParsedFilter): PsEntry[] {
@@ -203,6 +265,17 @@ compatibility; agent code should prefer \`rigName\` (matches per-node JSON).
 
 --filter accepts: status, lifecycleState, name-prefix, name. Other keys are rejected.
 
+--fields accepts (rig-level): rigId, name, rigName, nodeCount, runningCount,
+status, lifecycleState, uptime, latestSnapshot.
+--fields accepts (node-level, with --nodes): rigId, rigName, logicalId, podId,
+podNamespace, canonicalSessionName, nodeKind, runtime, sessionStatus,
+startupStatus, restoreOutcome, lifecycleState, tmuxAttachCommand,
+resumeCommand, latestError, agentActivity. Other keys are rejected.
+\`name\` is rig-level only; for node entries use \`rigName\`. Nested-field
+projection (e.g. \`agentActivity.state\`) is not supported in this slice; pass
+\`agentActivity\` to project the whole object and read the nested value
+downstream.
+
 Exit codes:
   0  Success
   1  Daemon not running, or invalid --filter / --limit
@@ -246,7 +319,22 @@ Exit codes:
         process.exitCode = 1;
         return;
       }
-      const fields = opts.fields ? opts.fields.split(",").map((f) => f.trim()).filter((f) => f.length > 0) : null;
+      // C9a: validate --fields against the per-level allow-list before any HTTP
+      // call, mirroring the --filter validation above. Level is determined by
+      // --nodes; both branches downstream use the same `fields` variable, so
+      // one up-front validation covers both paths.
+      let fields: string[] | null = null;
+      if (opts.fields !== undefined) {
+        const fieldsLevel: "rig" | "nodes" = opts.nodes ? "nodes" : "rig";
+        const fieldsAllowed = fieldsLevel === "nodes" ? ALLOWED_NODE_FIELDS : ALLOWED_RIG_FIELDS;
+        const fieldsResult = parseFields(opts.fields, fieldsAllowed, fieldsLevel);
+        if ("error" in fieldsResult) {
+          console.error(fieldsResult.error);
+          process.exitCode = 1;
+          return;
+        }
+        fields = fieldsResult;
+      }
       const useEnvelope = parsedFilter !== null || limit !== null || fields !== null || opts.summary === true;
 
       const client = deps.clientFactory(getDaemonUrl(status));
