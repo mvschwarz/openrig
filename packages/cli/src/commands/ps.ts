@@ -3,6 +3,9 @@ import { DaemonClient } from "../client.js";
 import { getDaemonStatus, getDaemonUrl, type LifecycleDeps } from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
+import { loadHostRegistry, resolveHost } from "../host-registry.js";
+import { runCrossHostCommand, type RunCrossHostCommandOpts } from "../cross-host-executor.js";
+import { emitCrossHostError, emitCrossHostFailure } from "../cross-host-cli-helpers.js";
 
 interface PsEntry {
   rigId: string;
@@ -100,6 +103,22 @@ interface PsCliOptions {
   fields?: string;
   summary?: boolean;
   filter?: string;
+  host?: string;
+}
+
+export interface PsDeps extends StatusDeps {
+  /**
+   * Cross-host hooks. Both default to the production loaders/executors; tests
+   * inject in-package mocks so no real ssh / no real ~/.ssh / no real network
+   * is touched. Mirrors the SendDeps/CaptureDeps shape from the closed
+   * cross-host-rig-commands slice (cdce3a6).
+   */
+  hostRegistryLoader?: () => ReturnType<typeof loadHostRegistry>;
+  crossHostRun?: (
+    host: Parameters<typeof runCrossHostCommand>[0],
+    argv: readonly string[],
+    opts?: RunCrossHostCommandOpts,
+  ) => ReturnType<typeof runCrossHostCommand>;
 }
 
 interface ParsedFilter {
@@ -241,7 +260,7 @@ function abbrevNodeLifecycle(state: NodeEntry["lifecycleState"] | undefined): st
  * for back-compat; the truncation/envelope shape only applies when at least
  * one of `--limit`/`--summary`/`--fields`/`--filter` is specified.
  */
-export function psCommand(depsOverride?: StatusDeps): Command {
+export function psCommand(depsOverride?: PsDeps): Command {
   const cmd = new Command("ps")
     .description("List rigs and their status")
     .addHelpText("after", `
@@ -259,6 +278,7 @@ Examples:
   rig ps --filter name-prefix=demo                Filter by rig-name prefix
   rig ps --nodes                                  Per-node detail (human; truncated to ${HUMAN_NODE_BUDGET})
   rig ps --nodes --json --limit 50                Bounded per-node JSON envelope
+  rig ps --host vm-claude-test --nodes --json     Run on a remote host via single-hop ssh
 
 JSON output entries include both \`name\` and \`rigName\` (alias) for forward
 compatibility; agent code should prefer \`rigName\` (matches per-node JSON).
@@ -276,11 +296,17 @@ projection (e.g. \`agentActivity.state\`) is not supported in this slice; pass
 \`agentActivity\` to project the whole object and read the nested value
 downstream.
 
+--host runs the same command on a remote host declared in ~/.openrig/hosts.yaml
+via single-hop ssh (CLI-side shell-out; daemon untouched). The remote rig's
+output is what counts and is surfaced verbatim on success; failure is
+distinguished into ssh-unreachable / permission-gate / remote-daemon-unreachable
+/ remote-command-failed.
+
 Exit codes:
   0  Success
-  1  Daemon not running, or invalid --filter / --limit
+  1  Daemon not running, or invalid --filter / --limit / --fields
   2  Failed to fetch data from daemon`);
-  const getDepsF = () => depsOverride ?? { lifecycleDeps: realDeps(), clientFactory: (url: string) => new DaemonClient(url) };
+  const getDepsF = (): PsDeps => depsOverride ?? { lifecycleDeps: realDeps(), clientFactory: (url: string) => new DaemonClient(url) };
 
   cmd
     .option("--json", "JSON output for agents")
@@ -290,8 +316,15 @@ Exit codes:
     .option("--fields <list>", "Comma-separated field list to project (JSON only)")
     .option("--summary", "Emit aggregate-only output (counts by status/lifecycle)")
     .option("--filter <key=value>", "Filter entries; supported keys: status, lifecycleState, name-prefix, name")
+    .option("--host <id>", "Run on a remote host declared in ~/.openrig/hosts.yaml (CLI-side ssh shell-out)")
     .action(async (opts: PsCliOptions) => {
       const deps = getDepsF();
+
+      // --- Cross-host short-circuit (CLI-side ssh shell-out; daemon untouched) ---
+      if (opts.host) {
+        await runCrossHostPs(opts.host, opts, deps);
+        return;
+      }
 
       const status = await getDaemonStatus(deps.lifecycleDeps);
       if (status.state !== "running" || status.healthy === false) {
@@ -576,4 +609,59 @@ function padNodeRow(rig: string, pod: string, member: string, session: string, r
     fitCell(restore, 10),
     error,
   ].join("");
+}
+
+
+async function runCrossHostPs(
+  hostId: string,
+  opts: PsCliOptions,
+  deps: PsDeps,
+): Promise<void> {
+  const loader = deps.hostRegistryLoader ?? loadHostRegistry;
+  const runner = deps.crossHostRun ?? runCrossHostCommand;
+
+  const registry = loader();
+  if (!registry.ok) {
+    emitCrossHostError(hostId, "registry-load-failed", registry.error, opts.json);
+    return;
+  }
+  const resolved = resolveHost(registry.registry, hostId);
+  if (!resolved.ok) {
+    emitCrossHostError(hostId, "unknown-host", resolved.error, opts.json);
+    return;
+  }
+  const host = resolved.host;
+
+  // Reconstruct argv. `rig ps` has no positional args; all flags propagate.
+  const argv: string[] = ["rig", "ps"];
+  if (opts.nodes) argv.push("--nodes");
+  if (opts.full) argv.push("--full");
+  if (opts.limit !== undefined) argv.push("--limit", opts.limit);
+  if (opts.fields !== undefined) argv.push("--fields", opts.fields);
+  if (opts.summary) argv.push("--summary");
+  if (opts.filter !== undefined) argv.push("--filter", opts.filter);
+  if (opts.json) argv.push("--json");
+
+  const result = await runner(host, argv);
+
+  if (opts.json) {
+    if (result.ok) {
+      // Verbatim remote stdout passthrough — the remote `rig ps --json` already
+      // produced the correct JSON shape (bare array OR envelope per its own
+      // shaping flags); we do NOT double-wrap.
+      if (result.stdout) process.stdout.write(result.stdout);
+      if (result.stderr) process.stderr.write(result.stderr);
+      return;
+    }
+    emitCrossHostFailure(host.id, host.target, result, true);
+    return;
+  }
+
+  console.log(`[via host=${host.id} (${host.target})]`);
+  if (result.ok) {
+    if (result.stdout) process.stdout.write(result.stdout);
+    if (result.stderr) process.stderr.write(result.stderr);
+    return;
+  }
+  emitCrossHostFailure(host.id, host.target, result, false);
 }

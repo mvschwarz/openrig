@@ -1,6 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { sendCommand, type SendDeps } from "../src/commands/send.js";
 import { captureCommand, type CaptureDeps } from "../src/commands/capture.js";
+import { psCommand, type PsDeps } from "../src/commands/ps.js";
+import { whoamiCommand, type WhoamiDeps } from "../src/commands/whoami.js";
 import type { CrossHostResult } from "../src/cross-host-executor.js";
 import type { HostRegistryLoadResult } from "../src/host-registry.js";
 
@@ -301,3 +303,255 @@ function makeFailingLifecycleDeps(): never {
     fetchHealthDetail: async () => ({ ok: false, code: "unreachable" }),
   } as never;
 }
+
+// ---------------------------------------------------------------------------
+// `rig ps --host <id>` (C9b)
+// ---------------------------------------------------------------------------
+
+function psDeps(overrides: { run?: (h: never, argv: readonly string[]) => Promise<CrossHostResult>; registry?: HostRegistryLoadResult } = {}): PsDeps {
+  return {
+    lifecycleDeps: {} as never,
+    clientFactory: (() => ({}) as never) as never,
+    hostRegistryLoader: () => overrides.registry ?? KNOWN_REGISTRY,
+    crossHostRun: overrides.run ?? (async () => ({ ok: true, failedStep: "none", stdout: "", stderr: "", remoteExitCode: 0 })),
+  };
+}
+
+describe("ps --host (cross-host short-circuit)", () => {
+  it("argv reconstruction: forwards every shaping flag in operator-declared order", async () => {
+    const captureCalls: { argv?: readonly string[] } = {};
+    const cmd = psCommand(psDeps({
+      run: async (_h, argv) => {
+        captureCalls.argv = argv;
+        return { ok: true, failedStep: "none", stdout: '[{"rigName":"r1"}]\n', stderr: "", remoteExitCode: 0 };
+      },
+    }));
+    await cmd.parseAsync([
+      "--host", "vm-a", "--nodes", "--full", "--limit", "20",
+      "--fields", "rigName,status", "--summary", "--filter", "status=running", "--json",
+    ], { from: "user" });
+    expect(captureCalls.argv).toEqual([
+      "rig", "ps", "--nodes", "--full", "--limit", "20", "--fields", "rigName,status",
+      "--summary", "--filter", "status=running", "--json",
+    ]);
+  });
+
+  it("argv reconstruction: bare `--host vm-a` produces ['rig','ps'] with no extra flags", async () => {
+    const captureCalls: { argv?: readonly string[] } = {};
+    const cmd = psCommand(psDeps({
+      run: async (_h, argv) => {
+        captureCalls.argv = argv;
+        return { ok: true, failedStep: "none", stdout: "", stderr: "", remoteExitCode: 0 };
+      },
+    }));
+    await cmd.parseAsync(["--host", "vm-a"], { from: "user" });
+    expect(captureCalls.argv).toEqual(["rig", "ps"]);
+  });
+
+  it("verbatim remote stdout passthrough on success — no double-JSON-wrapping", async () => {
+    const remoteJson = '[{"rigName":"r1","status":"running"},{"rigName":"r2","status":"stopped"}]\n';
+    const cmd = psCommand(psDeps({
+      run: async () => ({ ok: true, failedStep: "none", stdout: remoteJson, stderr: "", remoteExitCode: 0 }),
+    }));
+    await cmd.parseAsync(["--host", "vm-a", "--json"], { from: "user" });
+    const stdoutText = captured.stdoutWrites.join("");
+    // Output is verbatim remote stdout; NOT wrapped in {cross_host:..., result:...}.
+    expect(stdoutText).toBe(remoteJson);
+    expect(stdoutText).not.toContain("cross_host");
+  });
+
+  it("ssh-unreachable failure surfaces actionable error and exits 1", async () => {
+    const cmd = psCommand(psDeps({
+      run: async () => ({ ok: false, failedStep: "ssh-unreachable", sshStderr: "ssh: connect refused" }),
+    }));
+    await cmd.parseAsync(["--host", "vm-a"], { from: "user" });
+    expect(captured.stderrLines.join("\n")).toContain("ssh to host=vm-a");
+    expect(process.exitCode).toBe(1);
+  });
+
+  it("permission-gate failure surfaces hint and exits 1", async () => {
+    const cmd = psCommand(psDeps({
+      run: async () => ({ ok: false, failedStep: "permission-gate", sshStderr: "Permission denied", hint: "See keychain doc" }),
+    }));
+    await cmd.parseAsync(["--host", "vm-a"], { from: "user" });
+    expect(captured.stderrLines.join("\n")).toContain("permission/auth gate");
+    expect(captured.stderrLines.join("\n")).toContain("See keychain doc");
+    expect(process.exitCode).toBe(1);
+  });
+
+  it("remote-daemon-unreachable surfaces daemon-start hint", async () => {
+    const cmd = psCommand(psDeps({
+      run: async () => ({ ok: false, failedStep: "remote-daemon-unreachable", stdout: "", stderr: "Daemon not running", remoteExitCode: 1 }),
+    }));
+    await cmd.parseAsync(["--host", "vm-a"], { from: "user" });
+    expect(captured.stderrLines.join("\n")).toContain("could not reach the remote daemon");
+    expect(process.exitCode).toBe(1);
+  });
+
+  it("remote-command-failed surfaces remote stderr", async () => {
+    const cmd = psCommand(psDeps({
+      run: async () => ({ ok: false, failedStep: "remote-command-failed", stdout: "", stderr: "Some rig error", remoteExitCode: 3 }),
+    }));
+    await cmd.parseAsync(["--host", "vm-a"], { from: "user" });
+    expect(captured.stderrLines.join("\n")).toContain("remote rig command on host=vm-a failed");
+    expect(process.exitCode).toBe(1);
+  });
+
+  it("unknown host id surfaces friendly error with discoverability hint", async () => {
+    const cmd = psCommand(psDeps());
+    await cmd.parseAsync(["--host", "vm-bogus"], { from: "user" });
+    expect(captured.stderrLines.join("\n")).toContain("unknown host id 'vm-bogus'");
+    expect(process.exitCode).toBe(1);
+  });
+
+  it("JSON output for failure surfaces top-level failedStep envelope", async () => {
+    const cmd = psCommand(psDeps({
+      run: async () => ({ ok: false, failedStep: "permission-gate", sshStderr: "Permission denied", hint: "See keychain doc" }),
+    }));
+    await cmd.parseAsync(["--host", "vm-a", "--json"], { from: "user" });
+    const out = JSON.parse(captured.stdoutLines[0]!);
+    expect(out.ok).toBe(false);
+    expect(out.cross_host).toEqual({ host: "vm-a", target: "vm-a.local" });
+    expect(out.failedStep).toBe("permission-gate");
+    expect(out.hint).toBe("See keychain doc");
+    expect(process.exitCode).toBe(1);
+  });
+
+  it("help text mentions --host (operator discoverability)", () => {
+    const cmd = psCommand(psDeps());
+    expect(cmd.helpInformation()).toContain("--host");
+  });
+
+  it("compat regression: ps without --host does NOT call registry loader OR executor", async () => {
+    const loaderSpy = vi.fn();
+    const runSpy = vi.fn();
+    const cmd = psCommand({
+      lifecycleDeps: makeFailingLifecycleDeps(),
+      clientFactory: () => ({} as never),
+      hostRegistryLoader: loaderSpy as never,
+      crossHostRun: runSpy as never,
+    });
+    await cmd.parseAsync([], { from: "user" });
+    expect(loaderSpy).not.toHaveBeenCalled();
+    expect(runSpy).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// `rig whoami --host <id>` (C9b')
+// ---------------------------------------------------------------------------
+
+function whoamiDeps(overrides: { run?: (h: never, argv: readonly string[]) => Promise<CrossHostResult>; registry?: HostRegistryLoadResult } = {}): WhoamiDeps {
+  return {
+    lifecycleDeps: {} as never,
+    clientFactory: (() => ({}) as never) as never,
+    hostRegistryLoader: () => overrides.registry ?? KNOWN_REGISTRY,
+    crossHostRun: overrides.run ?? (async () => ({ ok: true, failedStep: "none", stdout: "", stderr: "", remoteExitCode: 0 })),
+  };
+}
+
+describe("whoami --host (cross-host short-circuit)", () => {
+  it("argv reconstruction: forwards --node-id, --session, --json in operator-declared order", async () => {
+    const captureCalls: { argv?: readonly string[] } = {};
+    const cmd = whoamiCommand(whoamiDeps({
+      run: async (_h, argv) => {
+        captureCalls.argv = argv;
+        return { ok: true, failedStep: "none", stdout: "{}", stderr: "", remoteExitCode: 0 };
+      },
+    }));
+    await cmd.parseAsync([
+      "--host", "vm-a", "--node-id", "01ABC", "--session", "foo@rig", "--json",
+    ], { from: "user" });
+    expect(captureCalls.argv).toEqual([
+      "rig", "whoami", "--node-id", "01ABC", "--session", "foo@rig", "--json",
+    ]);
+  });
+
+  it("argv reconstruction: bare `--host vm-a` produces ['rig','whoami'] with no extra flags", async () => {
+    const captureCalls: { argv?: readonly string[] } = {};
+    const cmd = whoamiCommand(whoamiDeps({
+      run: async (_h, argv) => {
+        captureCalls.argv = argv;
+        return { ok: true, failedStep: "none", stdout: "", stderr: "", remoteExitCode: 0 };
+      },
+    }));
+    await cmd.parseAsync(["--host", "vm-a"], { from: "user" });
+    expect(captureCalls.argv).toEqual(["rig", "whoami"]);
+  });
+
+  it("cross-host runs BEFORE local identity-source resolution (no local --node-id/--session required)", async () => {
+    // Critical for whoami: the local resolveIdentitySource() walks env vars and
+    // tmux pane metadata. Cross-host must NOT require any of that — the remote
+    // rig has its own identity context.
+    const cmd = whoamiCommand(whoamiDeps({
+      run: async () => ({ ok: true, failedStep: "none", stdout: '{"rigName":"remote"}\n', stderr: "", remoteExitCode: 0 }),
+    }));
+    await cmd.parseAsync(["--host", "vm-a", "--json"], { from: "user" });
+    // Should NOT have errored on "Cannot determine identity"; should have
+    // successfully written remote stdout.
+    expect(captured.stderrLines.join("\n")).not.toContain("Cannot determine identity");
+    const stdoutText = captured.stdoutWrites.join("");
+    expect(stdoutText).toContain("remote");
+  });
+
+  it("verbatim remote stdout passthrough on success — no double-JSON-wrapping", async () => {
+    const remoteJson = '{"resolvedBy":"node_id","identity":{"rigName":"x"}}\n';
+    const cmd = whoamiCommand(whoamiDeps({
+      run: async () => ({ ok: true, failedStep: "none", stdout: remoteJson, stderr: "", remoteExitCode: 0 }),
+    }));
+    await cmd.parseAsync(["--host", "vm-a", "--json"], { from: "user" });
+    const stdoutText = captured.stdoutWrites.join("");
+    expect(stdoutText).toBe(remoteJson);
+    expect(stdoutText).not.toContain("cross_host");
+  });
+
+  it("ssh-unreachable failure exits 1 with actionable message", async () => {
+    const cmd = whoamiCommand(whoamiDeps({
+      run: async () => ({ ok: false, failedStep: "ssh-unreachable", sshStderr: "Connection refused" }),
+    }));
+    await cmd.parseAsync(["--host", "vm-a"], { from: "user" });
+    expect(captured.stderrLines.join("\n")).toContain("ssh to host=vm-a");
+    expect(process.exitCode).toBe(1);
+  });
+
+  it("unknown host id surfaces friendly error", async () => {
+    const cmd = whoamiCommand(whoamiDeps());
+    await cmd.parseAsync(["--host", "vm-bogus"], { from: "user" });
+    expect(captured.stderrLines.join("\n")).toContain("unknown host id 'vm-bogus'");
+    expect(process.exitCode).toBe(1);
+  });
+
+  it("JSON output for failure surfaces top-level failedStep envelope", async () => {
+    const cmd = whoamiCommand(whoamiDeps({
+      run: async () => ({ ok: false, failedStep: "remote-daemon-unreachable", stdout: "", stderr: "Daemon not running", remoteExitCode: 1 }),
+    }));
+    await cmd.parseAsync(["--host", "vm-a", "--json"], { from: "user" });
+    const out = JSON.parse(captured.stdoutLines[0]!);
+    expect(out.ok).toBe(false);
+    expect(out.cross_host).toEqual({ host: "vm-a", target: "vm-a.local" });
+    expect(out.failedStep).toBe("remote-daemon-unreachable");
+    expect(process.exitCode).toBe(1);
+  });
+
+  it("help text mentions --host", () => {
+    const cmd = whoamiCommand(whoamiDeps());
+    expect(cmd.helpInformation()).toContain("--host");
+  });
+
+  it("compat regression: whoami without --host does NOT call registry loader OR executor", async () => {
+    const loaderSpy = vi.fn();
+    const runSpy = vi.fn();
+    const cmd = whoamiCommand({
+      lifecycleDeps: makeFailingLifecycleDeps(),
+      clientFactory: () => ({} as never),
+      hostRegistryLoader: loaderSpy as never,
+      crossHostRun: runSpy as never,
+    });
+    // Passing --node-id avoids the "cannot determine identity" branch; the
+    // local daemon-down path runs after that (or partial-result; either way
+    // does NOT consult the cross-host machinery).
+    await cmd.parseAsync(["--node-id", "abc"], { from: "user" });
+    expect(loaderSpy).not.toHaveBeenCalled();
+    expect(runSpy).not.toHaveBeenCalled();
+  });
+});

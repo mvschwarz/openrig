@@ -254,8 +254,8 @@ Notes:
 ### `rig ps`
 
 Usage:
-- `rig ps [--json] [--full] [--limit <n>] [--fields <list>] [--summary] [--filter <key=value>]`
-- `rig ps --nodes [--json] [--full] [--limit <n>] [--fields <list>] [--summary] [--filter <key=value>]`
+- `rig ps [--json] [--full] [--limit <n>] [--fields <list>] [--summary] [--filter <key=value>] [--host <id>]`
+- `rig ps --nodes [--json] [--full] [--limit <n>] [--fields <list>] [--summary] [--filter <key=value>] [--host <id>]`
 
 Notes:
 - `rig ps` lists rig summaries. Default human columns: `RIG`, `NODES`, `RUNNING`, `STATUS`, `LIFECYCLE`, `UPTIME`, `SNAPSHOT`. The `LIFECYCLE` column shows the rig-level fold of per-node lifecycle states with codes `run`/`rec`/`stp`/`deg`/`att`.
@@ -265,6 +265,7 @@ Notes:
 - `--summary` emits aggregate counts only (`byStatus`, `byLifecycle` for rigs; `bySessionStatus`, `byLifecycle` for nodes); useful for quick fleet checks without per-entry detail. Cross-facet disagreement (e.g. a `running` rig with `attention_required` nodes) is not directly visible in summary mode — narrow with `--filter lifecycleState=attention_required` instead.
 - `--fields <list>` projects JSON output to a comma-separated allow-list of top-level fields. Unknown keys are rejected before any HTTP call with an error naming the unknown key(s) and the sorted supported list. Exit code on rejection is `1`. Accepted (rig-level): `rigId`, `name`, `rigName`, `nodeCount`, `runningCount`, `status`, `lifecycleState`, `uptime`, `latestSnapshot`. Accepted (node-level, with `--nodes`): `rigId`, `rigName`, `logicalId`, `podId`, `podNamespace`, `canonicalSessionName`, `nodeKind`, `runtime`, `sessionStatus`, `startupStatus`, `restoreOutcome`, `lifecycleState`, `tmuxAttachCommand`, `resumeCommand`, `latestError`, `agentActivity`. `name` is rig-level only; for node entries use `rigName` (the rejection error includes a hint). Nested fields (e.g. `agentActivity.state`) are not drilled; pass the whole object name (e.g. `agentActivity`) and read the nested value downstream.
 - `--filter <key=value>` accepts only `status`, `lifecycleState`, `name-prefix`, `name`. Unknown keys are rejected before any HTTP call with a clear error naming the supported list.
+- `--host <id>` routes the same command to a remote host declared in `~/.openrig/hosts.yaml` via single-hop ssh (CLI-side shell-out; daemon untouched). Forwards every shaping flag (`--nodes`, `--full`, `--limit`, `--fields`, `--summary`, `--filter`, `--json`) to the remote `rig ps`. The remote rig's output is verbatim passthrough on success; failure is distinguished into `ssh-unreachable` / `permission-gate` / `remote-daemon-unreachable` / `remote-command-failed` per the closed cross-host execution contract.
 - Exit codes:
   - `0` success
   - `1` daemon not running, or invalid `--filter` / `--limit`
@@ -510,7 +511,7 @@ Notes:
 
 ### `rig whoami`
 
-Usage: `rig whoami [--node-id <id>] [--session <name>] [--json]`
+Usage: `rig whoami [--node-id <id>] [--session <name>] [--host <id>] [--json]`
 
 Identity resolution order:
 1. `--node-id`
@@ -525,6 +526,7 @@ Notes:
 - If the daemon is unreachable but an identity source can still be resolved, `--json` returns a partial result instead of crashing.
 - Human-readable output includes transcript location and context usage when available.
 - In Claude Code projects, unattended `rig whoami` on boot may require the local permissions allow list to include `Bash(rig:*)`.
+- `--host <id>` routes the same command to a remote host declared in `~/.openrig/hosts.yaml` via single-hop ssh (CLI-side shell-out; daemon untouched). Identity resolution happens on the REMOTE rig (each host has its own daemon + tmux + identity context); local `--node-id`/`--session` flags are forwarded to the remote `rig whoami` invocation. The remote rig's output is verbatim passthrough on success; failure is distinguished into the same `ssh-unreachable` / `permission-gate` / `remote-daemon-unreachable` / `remote-command-failed` enum as `rig ps --host` and `rig send --host`.
 
 ### `rig transcript`
 
