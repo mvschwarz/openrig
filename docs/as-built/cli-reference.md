@@ -254,15 +254,20 @@ Notes:
 ### `rig ps`
 
 Usage:
-- `rig ps [--json]`
-- `rig ps --nodes [--json]`
+- `rig ps [--json] [--full] [--limit <n>] [--fields <list>] [--summary] [--filter <key=value>]`
+- `rig ps --nodes [--json] [--full] [--limit <n>] [--fields <list>] [--summary] [--filter <key=value>]`
 
 Notes:
-- `rig ps` lists rig summaries.
-- `rig ps --nodes` expands into a cross-rig node inventory including session name, runtime, startup status, restore outcome, attach command, resume command, and latest error.
-- Exit codes are defined in help:
+- `rig ps` lists rig summaries. Default human columns: `RIG`, `NODES`, `RUNNING`, `STATUS`, `LIFECYCLE`, `UPTIME`, `SNAPSHOT`. The `LIFECYCLE` column shows the rig-level fold of per-node lifecycle states with codes `run`/`rec`/`stp`/`deg`/`att`.
+- `rig ps --nodes` expands into a cross-rig node inventory. Default human columns include `STATUS`, `STARTUP`, `LIFECYCLE`, `ACTIVITY`, `RESTORE`, `ERROR` so startup-time and live runtime state can be compared side-by-side without composing a separate diagnostic command.
+- JSON output for both rig and node tiers includes a `rigName` alias (equal to `name`) for forward compatibility; agent code should prefer `rigName`. Default `--json` is a bare array (back-compat); the envelope shape `{entries, totalRigs|totalNodes, truncated, hint?}` is only used when `--limit`, `--fields`, `--summary`, or `--filter` is set.
+- Default human output is bounded for context-window safety: rigs truncate at 50 with a footer naming the total + `--full` opt-out, nodes truncate at 100 with the same shape. `--full` disables truncation. `--limit <n>` sets an explicit bound.
+- `--summary` emits aggregate counts only (`byStatus`, `byLifecycle` for rigs; `bySessionStatus`, `byLifecycle` for nodes); useful for quick fleet checks without per-entry detail. Cross-facet disagreement (e.g. a `running` rig with `attention_required` nodes) is not directly visible in summary mode — narrow with `--filter lifecycleState=attention_required` instead.
+- `--fields <list>` projects JSON output to a comma-separated allow-list of top-level fields. Nested fields (e.g. `agentActivity.state`) are not drilled; pass the whole object name (e.g. `agentActivity`) and read the nested value downstream.
+- `--filter <key=value>` accepts only `status`, `lifecycleState`, `name-prefix`, `name`. Unknown keys are rejected before any HTTP call with a clear error naming the supported list.
+- Exit codes:
   - `0` success
-  - `1` daemon not running
+  - `1` daemon not running, or invalid `--filter` / `--limit`
   - `2` daemon fetch failure
 
 ### `rig snapshot`
