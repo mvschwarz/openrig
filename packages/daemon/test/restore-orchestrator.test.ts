@@ -1475,7 +1475,18 @@ describe("RestoreOrchestrator", () => {
     }
   });
 
-  it("pod-aware Codex restore without resume metadata fails when fresh startup hits an update gate", async () => {
+  // Updated by codex-auth-refusal-attention-required slice (revision 2):
+  // pod-aware nodes whose StartupOrchestrator returns
+  // `startupStatus: "attention_required"` (any attention-required readiness
+  // code: update_gate, trust_gate, mcp_gate, login_required, or the new
+  // codex_auth_refusal) now surface to RestoreNodeResult honestly as
+  // `status: "attention_required"` instead of being collapsed to "failed".
+  // This was previously a per-slice pinned dishonesty: the test name said
+  // "fails when ... update gate" while the error string already said
+  // "Restore startup requires attention", and the session-row
+  // startupStatus was already "attention_required". The patch aligns the
+  // RestoreNodeResult status with the already-honest startupStatus.
+  it("pod-aware Codex restore without resume metadata surfaces attention_required when fresh startup hits an update gate", async () => {
     const rig = rigRepo.createRig("test-rig");
     db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-codex-update", rig.id, "Dev");
     const node = rigRepo.addNode(rig.id, "dev.qa", { runtime: "codex", podId: "pod-codex-update" });
@@ -1505,10 +1516,12 @@ describe("RestoreOrchestrator", () => {
     expect(result.ok).toBe(true);
     if (result.ok) {
       const nodeResult = result.result.nodes.find((n) => n.nodeId === node.id);
-      expect(nodeResult!.status).toBe("failed");
+      expect(nodeResult!.status).toBe("attention_required");
       expect(nodeResult!.error).toContain("Restore startup requires attention");
       expect(nodeResult!.error).toContain("Codex reached an update flow");
-      expect(result.result.rigResult).toBe("failed");
+      // Single attention_required node → partially_restored (NOT failed)
+      // per restore-orchestrator.ts:65-67 mixed-status aggregation.
+      expect(result.result.rigResult).toBe("partially_restored");
       expect(mockAdapter.launchHarness).toHaveBeenCalledTimes(1);
     }
     const nodeSessions = sessionRegistry.getSessionsForRig(rig.id).filter((s) => s.nodeId === node.id);

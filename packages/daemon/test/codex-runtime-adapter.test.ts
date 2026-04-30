@@ -854,6 +854,52 @@ describe("Codex runtime adapter", () => {
     });
   });
 
+  // Codex auth-refusal pod-aware path. verifyResumeLaunch must surface
+  // probe.status === "attention_required" as recovery: "attention_required"
+  // with the last-12-line evidence tail. Closes the guard-blocked gap in
+  // commit 63ee206 alongside the legacy CodexResumeAdapter path.
+  it("launchHarness returns attention_required when Codex post-logout token-refresh fails during resume", async () => {
+    const refusalPane = [
+      "$ codex resume sess-456",
+      "Error: Your access token could not be refreshed because you have since",
+      "logged out or signed in to another account. Please sign in again.",
+    ].join("\n");
+    const tmux = mockTmux({
+      getPaneCommand: vi.fn(async () => "zsh"),
+      capturePaneContent: vi.fn(async () => refusalPane),
+    });
+    const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {} });
+
+    const result = await adapter.launchHarness(makeBinding(), { name: "dev-qa@test-rig", resumeToken: "sess-456" });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.recovery).toBe("attention_required");
+      expect(result.error).toContain("sign in again");
+      // Evidence is the last-12-line tail (mirrors claude-resume.ts:97).
+      expect(result.evidence).toBeDefined();
+      expect(result.evidence).toContain("access token could not be refreshed");
+      expect(result.evidence).toContain("Please sign in again");
+    }
+  });
+
+  it("launchHarness returns attention_required for `log out and sign in` Codex variant", async () => {
+    const tmux = mockTmux({
+      getPaneCommand: vi.fn(async () => "zsh"),
+      capturePaneContent: vi.fn(async () => [
+        "$ codex resume sess-456",
+        "Your access token could not be refreshed.",
+        "Please log out and sign in again.",
+      ].join("\n")),
+    });
+    const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {} });
+
+    const result = await adapter.launchHarness(makeBinding(), { name: "dev-qa@test-rig", resumeToken: "sess-456" });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.recovery).toBe("attention_required");
+  });
+
   it("deliverStartup pre-seeds Codex trust for the managed project", async () => {
     const fs = mockFs({});
     const fsWithHome = { ...fs, homedir: "/home/tester" };

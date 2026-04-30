@@ -520,6 +520,20 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
         };
       }
 
+      // Codex auth-refusal: stored OAuth token can no longer be refreshed.
+      // Recoverable — operator runs `codex login` and the seat continues.
+      // Mirror Claude's evidence shape (last 12 pane lines per
+      // claude-resume.ts:97). Closes the guard-blocked pod-aware-path gap
+      // alongside the legacy CodexResumeAdapter path patched at 63ee206.
+      if (probe.status === "attention_required") {
+        return {
+          ok: false,
+          error: probe.detail,
+          recovery: "attention_required",
+          evidence: paneContent.split("\n").slice(-12).join("\n"),
+        };
+      }
+
       if (probe.status === "resumed") {
         return { ok: true };
       }

@@ -626,6 +626,50 @@ describe("StartupOrchestrator", () => {
     expect(session!.startupStatus).toBe("ready");
   });
 
+  // Pod-aware Codex auth-refusal: when launchHarness reports
+  // recovery: "attention_required" with evidence, the orchestrator must
+  // surface startup_status: "attention_required" with the evidence preserved
+  // (NOT fall back to fresh launch — that would lose continuity for a state
+  // the operator can resolve by re-running `codex login`).
+  it("propagates attention_required recovery without falling back to fresh", async () => {
+    const seed = seedSession();
+    const refusalEvidence = [
+      "$ codex resume stale-token",
+      "Error: Your access token could not be refreshed because you have since",
+      "logged out or signed in to another account. Please sign in again.",
+    ].join("\n");
+    const launchHarness = vi.fn().mockResolvedValueOnce({
+      ok: false as const,
+      error: "Codex auth-refusal: please sign in again",
+      recovery: "attention_required",
+      evidence: refusalEvidence,
+    });
+    const adapter = mockAdapter({ runtime: "codex", launchHarness });
+    const orch = createOrchestrator();
+
+    const result = await orch.startNode(makeInput(seed, {
+      adapter,
+      isRestore: true,
+      resumeToken: "stale-token",
+    }));
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.startupStatus).toBe("attention_required");
+      // Evidence is preserved on the StartupResult so restore-orchestrator
+      // can populate attentionEvidence on RestoreNodeResult.
+      expect(result.evidence).toBe(refusalEvidence);
+      expect(result.errors.some((e) => e.includes("requires attention"))).toBe(true);
+    }
+    // Critical: launchHarness called ONCE — no fresh-fallback retry.
+    // Auth-refusal is operator-recoverable, not a stale-token signal.
+    expect(launchHarness).toHaveBeenCalledTimes(1);
+
+    const sessions = sessionRegistry.getSessionsForRig(seed.rigId);
+    const session = sessions.find((s) => s.id === seed.sessionId);
+    expect(session!.startupStatus).toBe("attention_required");
+  });
+
   // NS-T05: readiness retry loop
   it("readiness retries until ready", async () => {
     const seed = seedSession();

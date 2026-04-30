@@ -52,6 +52,11 @@ export const ATTENTION_REQUIRED_READINESS_CODES = new Set([
   "update_gate",
   "login_required",
   "mcp_gate",
+  // Codex auth refusal (stored OAuth token can no longer be refreshed).
+  // Defensive: row 6's verifyResumeLaunch patch propagates attention_required
+  // through the launch path so the readiness fallback shouldn't see this code,
+  // but adding it here keeps the two paths semantically aligned.
+  "codex_auth_refusal",
 ]);
 
 export function isAttentionRequiredReadinessCode(code: string | undefined): boolean {
@@ -60,11 +65,14 @@ export function isAttentionRequiredReadinessCode(code: string | undefined): bool
 
 // -- Harness launch result --
 
-export type HarnessLaunchRecovery = "retry_fresh";
+export type HarnessLaunchRecovery = "retry_fresh" | "attention_required";
 
 export type HarnessLaunchResult =
   | { ok: true; resumeToken?: string; resumeType?: string }
-  | { ok: false; error: string; recovery?: HarnessLaunchRecovery };
+  // `evidence` carries the last-N pane lines for `attention_required` outcomes
+  // so the failure can flow honest evidence through to RestoreNodeResult's
+  // attentionEvidence field. Omitted for non-attention recoveries.
+  | { ok: false; error: string; recovery?: HarnessLaunchRecovery; evidence?: string };
 
 // -- Shared concrete-hint resolver --
 

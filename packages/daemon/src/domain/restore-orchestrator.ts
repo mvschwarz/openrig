@@ -856,6 +856,24 @@ export class RestoreOrchestrator {
                 : baseStatus;
               return { nodeId: node.id, logicalId: node.logicalId, status: finalStatus };
             }
+            // Pod-aware attention_required: hoisted above both the
+            // resume-requested and non-resume-requested failed branches so
+            // that pod-aware Codex auth-refusal (verifyResumeLaunch →
+            // recovery: "attention_required") surfaces honestly regardless
+            // of whether resume was requested. Mirrors the runtime-agnostic
+            // legacy mapping at lines 725-735. This MUST come before the
+            // line 859 / 867 failed branches; otherwise the production
+            // pod-aware-resume path (most common) returns `status: "failed"`
+            // and the slice's "attention_required end-to-end" claim breaks.
+            if (isPodAware && startupResult.startupStatus === "attention_required") {
+              return {
+                nodeId: node.id,
+                logicalId: node.logicalId,
+                status: "attention_required",
+                error: `Restore startup requires attention: ${startupResult.errors.join("; ")}`,
+                attentionEvidence: startupResult.evidence ?? null,
+              };
+            }
             if (isPodAware && resumeRequested) {
               return {
                 nodeId: node.id,

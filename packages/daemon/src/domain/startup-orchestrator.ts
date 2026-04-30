@@ -52,7 +52,11 @@ export interface StartupInput {
 
 export type StartupResult =
   | { ok: true; startupStatus: "ready"; continuityOutcome: "resumed" | "fresh" | "forked" | "rebuilt" }
-  | { ok: false; startupStatus: "attention_required" | "failed"; errors: string[] };
+  // `evidence` carries the last-N pane lines for `attention_required`
+  // outcomes so restore-orchestrator's per-node mapping can populate
+  // `attentionEvidence` on the RestoreNodeResult. Internal type only;
+  // not persisted on the failure event.
+  | { ok: false; startupStatus: "attention_required" | "failed"; errors: string[]; evidence?: string };
 
 interface StartupOrchestratorDeps {
   db: Database.Database;
@@ -210,6 +214,17 @@ export class StartupOrchestrator {
             continue;
           }
 
+          // Pod-aware Codex auth-refusal (probe → verifyResumeLaunch →
+          // recovery: "attention_required"). Surface as attention_required
+          // startup_status with evidence so restore-orchestrator's per-node
+          // mapping at lines 867-877 can return RestoreNodeResult with
+          // status: "attention_required" + attentionEvidence (mirroring the
+          // legacy mapping at :725-735).
+          if (launchResult.recovery === "attention_required") {
+            errors.push(`Harness launch requires attention: ${launchResult.error}`);
+            return this.fail(input, "attention_required", errors, launchResult.evidence);
+          }
+
           errors.push(`Harness launch failed: ${launchResult.error}`);
           return this.fail(input, "failed", errors);
         }
@@ -334,6 +349,7 @@ export class StartupOrchestrator {
     input: StartupInput,
     status: "attention_required" | "failed",
     errors: string[],
+    evidence?: string,
   ): StartupResult {
     this.sessionRegistry.updateStartupStatus(input.sessionId, status);
     this.eventBus.emit({
@@ -342,7 +358,7 @@ export class StartupOrchestrator {
       nodeId: input.nodeId,
       error: errors.join("; "),
     });
-    return { ok: false, startupStatus: status, errors };
+    return { ok: false, startupStatus: status, errors, evidence };
   }
 
   private async executeActions(
