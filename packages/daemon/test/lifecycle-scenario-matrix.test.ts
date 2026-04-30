@@ -480,6 +480,102 @@ describe("Lifecycle reboot/recovery scenario matrix (Tier 1)", () => {
 
         db.close();
       });
+
+      // Pod-aware Codex auth-refusal end-to-end. The production resume path
+      // for pod-aware Codex nodes flows through `launchHarness` →
+      // `verifyResumeLaunch` → probe → `recovery: "attention_required"` →
+      // startup-orchestrator returns `startupStatus: "attention_required"` →
+      // restore-orchestrator's hoisted pod-aware mapping surfaces
+      // `status: "attention_required"` with `attentionEvidence`.
+      // Closes the gap guard caught in revision 1 (commit 63ee206 only
+      // covered the legacy CodexResumeAdapter path).
+      it("pod-aware Codex auth-refusal → node status=attention_required (production path)", async () => {
+        const db = createFullTestDb();
+        const rigRepo = new RigRepository(db);
+        const sessionRegistry = new SessionRegistry(db);
+        const eventBus = new EventBus(db);
+        const snapshotRepo = new SnapshotRepository(db);
+        const checkpointStore = new CheckpointStore(db);
+        const snapshotCapture = new SnapshotCapture({
+          db, rigRepo, sessionRegistry, eventBus, snapshotRepo, checkpointStore,
+        });
+        const tmux = mockTmuxForRestore();
+        const nodeLauncher = new NodeLauncher({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux });
+
+        const rig = rigRepo.createRig("r96");
+        // Pod-aware setup mirrors restore-orchestrator.test.ts:1296-1362
+        // pattern (pods row + node.podId + node_startup_context + snapshot).
+        db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)")
+          .run("pod-codex-attention", rig.id, "Codex");
+        const node = rigRepo.addNode(rig.id, "dev.qa", {
+          role: "worker", runtime: "codex", podId: "pod-codex-attention",
+        });
+        const session = sessionRegistry.registerSession(node.id, "dev-qa@r96");
+        sessionRegistry.updateStatus(session.id, "running");
+        sessionRegistry.updateResumeToken(session.id, "codex_id", "stale-codex-token");
+        db.prepare(
+          "INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, ?, ?, ?)"
+        ).run(node.id, "[]", "[]", "[]", "codex");
+        const snap = snapshotCapture.captureSnapshot(rig.id, "manual");
+        // Reset to "exited" so restore actually attempts launch.
+        sessionRegistry.updateStatus(session.id, "exited");
+        db.prepare("DELETE FROM bindings WHERE node_id = ?").run(node.id);
+
+        // The Codex runtime adapter's launchHarness returns the new shape
+        // landed in this revision: ok:false with recovery: "attention_required"
+        // and last-12-line pane evidence.
+        const refusalEvidence = [
+          "$ codex resume stale-codex-token",
+          "Error: Your access token could not be refreshed because you have since",
+          "logged out or signed in to another account. Please sign in again.",
+        ].join("\n");
+        const codexLaunchAttentionResult = {
+          ok: false as const,
+          error: "Codex could not refresh the stored access token; an operator must sign in again before the session can resume.",
+          recovery: "attention_required" as const,
+          evidence: refusalEvidence,
+        };
+        const launchHarness = vi.fn().mockResolvedValue(codexLaunchAttentionResult);
+        const mockCodexAdapter = {
+          runtime: "codex",
+          listInstalled: vi.fn(async () => []),
+          project: vi.fn(async () => ({ projected: [], skipped: [], failed: [] })),
+          deliverStartup: vi.fn(async () => ({ delivered: 0, failed: [] })),
+          checkReady: vi.fn(async () => ({ ready: true })),
+          launchHarness,
+        };
+
+        const orchestrator = new RestoreOrchestrator({
+          db, rigRepo, sessionRegistry, eventBus, snapshotRepo, snapshotCapture,
+          checkpointStore, nodeLauncher, tmuxAdapter: tmux,
+          claudeResume: mockClaudeResumeReturning({ ok: true }),
+          codexResume: mockCodexResumeReturning({ ok: true }),
+        });
+
+        const outcome = await orchestrator.restore(snap.id, {
+          adapters: { codex: mockCodexAdapter },
+        });
+
+        expect(outcome.ok).toBe(true);
+        if (!outcome.ok) throw new Error(`restore failed: ${outcome.code}`);
+
+        const codexNode = outcome.result.nodes.find((n) => n.nodeId === node.id);
+        expect(codexNode?.status).toBe("attention_required");
+        expect(codexNode?.attentionEvidence).toBeDefined();
+        expect(codexNode?.attentionEvidence).toContain("access token could not be refreshed");
+        expect(codexNode?.attentionEvidence).toContain("Please sign in again");
+
+        // Rig-level rollup: single attention_required node → partially_restored.
+        expect(outcome.result.rigResult).toBe("partially_restored");
+
+        // launchHarness called ONCE — fresh-fallback was NOT triggered for
+        // attention_required (auth-refusal is operator-recoverable, not a
+        // stale-token signal). The startup orchestrator's new branch
+        // distinguishes recovery: "attention_required" from "retry_fresh".
+        expect(launchHarness).toHaveBeenCalledTimes(1);
+
+        db.close();
+      });
     });
   });
 
