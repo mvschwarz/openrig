@@ -895,21 +895,21 @@ describe("Up CLI", () => {
     expect(output).toContain('Rig "auto-rig" restored');
   });
 
-  // Agent Starter v1 vertical M2 — CLI smoke proof for `rig up --plan`
-  // with a starter_ref-bearing fixture spec on disk.
-  //
-  // The CLI passes the resolved spec path to the daemon and surfaces the
-  // daemon's response. The proof is end-to-end: the spec exists, the CLI
-  // resolves the path, POSTs sourceRef, and prints "planned" when the
-  // daemon accepts it. The CLI itself does NOT validate spec contents —
-  // that's the daemon's job (covered by up-route.test.ts M2 cases).
-  it("up --plan smoke against a starter_ref fixture spec prints planned and forwards sourceRef", async () => {
+  // Agent Starter v1 vertical M2 R2 — CLI plan smoke proves resolved
+  // starter contents reach plan output (Path A from the M2 R2 dispatch
+  // packet). The daemon's plan-mode response carries a `resolve_starter`
+  // stage with the resolved starter ResolvedStartupFile shape; the CLI's
+  // --json mode renders the full daemon response, so the starter content
+  // surfaces verbatim in plan output. M2 R1 only asserted argument
+  // forwarding — Guard Finding 3 — which proved nothing about plan
+  // visibility of starter resolution.
+  it("M2 R2: rig up --plan --json against a starter_ref fixture spec surfaces resolved starter contents", async () => {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const fs = await import("node:fs");
     const os = await import("node:os");
     const path = await import("node:path");
 
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "cli-up-starter-"));
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "cli-up-starter-r2-"));
     const specPath = path.join(tmpDir, "starter-fixture.yaml");
     fs.writeFileSync(specPath, `version: "0.2"
 name: starter-cli-smoke
@@ -936,8 +936,37 @@ edges: []
       for await (const chunk of req) body += chunk;
       if (req.url === "/api/up" && req.method === "POST") {
         lastBody = JSON.parse(body);
+        // Plan-mode response that carries the resolved starter. The CLI's
+        // --json branch (commands/up.ts:175-181) prints the full response
+        // verbatim — so the starter content reaches operator output as
+        // structured data they can inspect or pipe into other tools.
         res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ status: "planned", runId: "starter-run", stages: [{ stage: "resolve_spec", status: "ok" }], errors: [], warnings: [] }));
+        res.end(JSON.stringify({
+          status: "planned",
+          runId: "starter-run",
+          stages: [
+            { stage: "resolve_spec", status: "ok" },
+            {
+              stage: "resolve_starter",
+              status: "ok",
+              detail: {
+                memberId: "dev.impl",
+                starterRef: "openrig-builder-base--claude-code",
+                starterContent: [
+                  {
+                    path: "openrig-builder-base--claude-code.yaml",
+                    ownerRoot: "/fixture/registry",
+                    deliveryHint: "guidance_merge",
+                    appliesOn: ["fresh_start"],
+                    required: true,
+                  },
+                ],
+              },
+            },
+          ],
+          errors: [],
+          warnings: [],
+        }));
       } else {
         res.writeHead(404);
         res.end();
@@ -946,10 +975,29 @@ edges: []
 
     try {
       const { logs } = await captureLogs(async () => {
-        await makeCmd().parseAsync(["node", "rig", "up", specPath, "--plan"]);
+        await makeCmd().parseAsync(["node", "rig", "up", specPath, "--plan", "--json"]);
       });
       const output = logs.join("\n");
-      expect(output).toContain("planned");
+      // The CLI's --json mode emits a single JSON.stringify(res.data) line.
+      // Parse it and verify the starter content reached plan output.
+      const parsed = JSON.parse(output) as {
+        status: string;
+        stages: Array<{ stage: string; status: string; detail?: Record<string, unknown> }>;
+      };
+      expect(parsed.status).toBe("planned");
+      const resolveStarter = parsed.stages.find((s) => s.stage === "resolve_starter");
+      expect(resolveStarter, "expected resolve_starter stage to surface in plan output").toBeDefined();
+      expect(resolveStarter!.status).toBe("ok");
+      const starterContent = (resolveStarter!.detail as { starterContent?: Array<Record<string, unknown>> })?.starterContent;
+      expect(starterContent, "expected resolved starter contents in plan output").toBeDefined();
+      expect(Array.isArray(starterContent)).toBe(true);
+      expect(starterContent!.length).toBeGreaterThan(0);
+      expect(starterContent![0]!["path"]).toBe("openrig-builder-base--claude-code.yaml");
+      expect(starterContent![0]!["deliveryHint"]).toBe("guidance_merge");
+      expect(starterContent![0]!["appliesOn"]).toEqual(["fresh_start"]);
+
+      // Belt-and-suspenders: argument forwarding still asserted so the
+      // smoke also catches CLI request-shape regressions.
       expect(lastBody.sourceRef).toBe(specPath);
       expect(lastBody.plan).toBe(true);
     } finally {

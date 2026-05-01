@@ -135,6 +135,20 @@ export function createTestApp(
       readFile: (p: string) => string;
       readHead: (p: string, n: number) => Buffer;
     };
+    /**
+     * Agent Starter v1 vertical M2 R2: optional fsOps for the
+     * PodRigInstantiator used by /api/up apply-mode tests that need
+     * real agent.yaml resolution. Default (always-false) preserved.
+     */
+    podInstantiatorFsOps?: {
+      exists: (p: string) => boolean;
+      readFile: (p: string) => string;
+    };
+    /**
+     * Agent Starter v1 vertical M2 R2: optionally expose the in-test
+     * StartupOrchestrator + PodRigInstantiator so callers can spy on
+     * `startNode` / inspect node_startup_context end-to-end.
+     */
   },
 ) {
   const rigRepo = new RigRepository(db);
@@ -194,7 +208,7 @@ export function createTestApp(
   const podInstantiator = new PodRigInstantiator({
     db, rigRepo, podRepo, sessionRegistry, eventBus, nodeLauncher,
     startupOrchestrator,
-    fsOps: { readFile: () => "", exists: () => false },
+    fsOps: opts?.podInstantiatorFsOps ?? { readFile: () => "", exists: () => false },
     adapters,
   });
 
@@ -275,5 +289,6 @@ export function createTestApp(
     teardownOrchestrator: new RigTeardownOrchestrator({ db, rigRepo, sessionRegistry, tmuxAdapter: tmux, snapshotCapture, eventBus }),
     podInstantiator, podBundleSourceResolver, db, tmuxAdapter: tmux,
     agentActivityStore,
+    startupOrchestrator,
   };
 }
