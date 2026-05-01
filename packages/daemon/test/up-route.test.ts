@@ -188,4 +188,165 @@ describe("Up API route", () => {
       expect(body.error).not.toContain("auto-pre-down snapshot");
     });
   });
+
+  // Agent Starter v1 vertical M2 — POST /api/up wiring proof for starter_ref.
+  //
+  // These tests exercise the spec-resolution path (sourceKind=rig_spec) by
+  // injecting a real-fs upRouter into createTestApp. The positive case
+  // demonstrates that a pod-aware spec with `starter_ref:` flows through
+  // validation cleanly. The two negatives demonstrate that the schema's
+  // composition rules surface as 400 responses through the route.
+  //
+  // The "failed-scan launch abort" negative is intentionally NOT tested at
+  // this level — the resolver runs only at apply-time inside the
+  // instantiator, and that behavior is already proven in
+  // `agent-starter-instantiator.test.ts` ("resolver throw aborts launch").
+  // Re-proving it through the HTTP layer would require fully wiring the
+  // bootstrap apply path with real fixtures, which is broader than this
+  // wiring proof needs.
+  describe("M2: POST /api/up with starter_ref", () => {
+    let specDir: string;
+    let app2: ReturnType<typeof createTestApp>["app"];
+    let db2: Database.Database;
+
+    beforeEach(() => {
+      specDir = fs.mkdtempSync(path.join(os.tmpdir(), "up-route-starter-"));
+      db2 = createFullTestDb();
+      const fsOps = {
+        exists: (p: string) => fs.existsSync(p),
+        readFile: (p: string) => fs.readFileSync(p, "utf-8"),
+        readHead: (p: string, n: number) => {
+          const buf = Buffer.alloc(n);
+          const fd = fs.openSync(p, "r");
+          try {
+            fs.readSync(fd, buf, 0, n, 0);
+          } finally {
+            fs.closeSync(fd);
+          }
+          return buf;
+        },
+      };
+      const setup = createTestApp(db2, { upRouterFsOps: fsOps });
+      app2 = setup.app;
+    });
+
+    afterEach(() => {
+      db2.close();
+      fs.rmSync(specDir, { recursive: true, force: true });
+    });
+
+    function writeSpec(name: string, body: string): string {
+      const p = path.join(specDir, name);
+      fs.writeFileSync(p, body, "utf-8");
+      return p;
+    }
+
+    it("accepts a pod-aware spec with starter_ref in plan mode (positive wiring proof)", async () => {
+      const yaml = `version: "0.2"
+name: starter-positive
+pods:
+  - id: dev
+    label: Development
+    members:
+      - id: impl
+        agent_ref: local:agents/impl
+        profile: default
+        runtime: claude-code
+        cwd: .
+        starter_ref:
+          name: openrig-builder-base--claude-code
+    edges: []
+edges: []
+`;
+      const specPath = writeSpec("starter-positive.yaml", yaml);
+
+      const res = await app2.request("/api/up", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sourceRef: specPath, plan: true }),
+      });
+      // The upRouter classifies as rig_spec (validation passed). Bootstrap
+      // plan may fail later stages (e.g., agent file resolution against an
+      // empty test cwd), but the spec MUST clear validation — proving
+      // `starter_ref` does not trip the schema. Status 200/400 are both
+      // acceptable wiring proofs as long as the body is NOT a top-level
+      // validation_failed error from upRouter.route().
+      const body = await res.json();
+      expect(body.error ?? "").not.toContain("not a valid rig spec");
+      expect(body.error ?? "").not.toContain("does not match composition rules");
+    });
+
+    it("rejects fork + starter_ref composition with 400 (terminal-equivalent route surface)", async () => {
+      const yaml = `version: "0.2"
+name: starter-fork-reject
+pods:
+  - id: dev
+    label: Development
+    members:
+      - id: impl
+        agent_ref: local:agents/impl
+        profile: default
+        runtime: claude-code
+        cwd: .
+        starter_ref:
+          name: openrig-builder-base--claude-code
+        session_source:
+          mode: fork
+          ref:
+            kind: native_id
+            value: some-id
+    edges: []
+edges: []
+`;
+      const specPath = writeSpec("starter-fork-reject.yaml", yaml);
+
+      const res = await app2.request("/api/up", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sourceRef: specPath, plan: true }),
+      });
+      // Pod-aware composition rule (validateStarterRef in rigspec-schema)
+      // rejects fork+starter_ref, so the upRouter does NOT classify the
+      // YAML as a valid pod-aware rig_spec. The route returns 400.
+      // (Pre-existing UX caveat: the error message bubbles from the
+      // legacy fallthrough, not from the pod-aware validator — but the
+      // contract behavior of REJECTING the spec is what M2 requires.)
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body.error).toContain("not a valid rig spec");
+    });
+
+    it("rejects terminal + starter_ref composition with 400", async () => {
+      const yaml = `version: "0.2"
+name: starter-terminal-reject
+pods:
+  - id: dev
+    label: Development
+    members:
+      - id: t1
+        agent_ref: local:agents/t1
+        profile: default
+        runtime: terminal
+        cwd: .
+        starter_ref:
+          name: openrig-builder-base--claude-code
+    edges: []
+edges: []
+`;
+      const specPath = writeSpec("starter-terminal-reject.yaml", yaml);
+
+      const res = await app2.request("/api/up", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sourceRef: specPath, plan: true }),
+      });
+      // Pod-aware composition rule rejects terminal+starter_ref. Route
+      // returns 400 (same caveat as the fork case above re: error
+      // message provenance — the contract behavior of rejection is what
+      // M2 requires).
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body.error).toContain("not a valid rig spec");
+    });
+  });
 });

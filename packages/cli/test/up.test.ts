@@ -894,4 +894,68 @@ describe("Up CLI", () => {
     expect(output).not.toContain("Restoring from manual snapshot");
     expect(output).toContain('Rig "auto-rig" restored');
   });
+
+  // Agent Starter v1 vertical M2 — CLI smoke proof for `rig up --plan`
+  // with a starter_ref-bearing fixture spec on disk.
+  //
+  // The CLI passes the resolved spec path to the daemon and surfaces the
+  // daemon's response. The proof is end-to-end: the spec exists, the CLI
+  // resolves the path, POSTs sourceRef, and prints "planned" when the
+  // daemon accepts it. The CLI itself does NOT validate spec contents —
+  // that's the daemon's job (covered by up-route.test.ts M2 cases).
+  it("up --plan smoke against a starter_ref fixture spec prints planned and forwards sourceRef", async () => {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const fs = await import("node:fs");
+    const os = await import("node:os");
+    const path = await import("node:path");
+
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "cli-up-starter-"));
+    const specPath = path.join(tmpDir, "starter-fixture.yaml");
+    fs.writeFileSync(specPath, `version: "0.2"
+name: starter-cli-smoke
+pods:
+  - id: dev
+    label: Development
+    members:
+      - id: impl
+        agent_ref: local:agents/impl
+        profile: default
+        runtime: claude-code
+        cwd: .
+        starter_ref:
+          name: openrig-builder-base--claude-code
+    edges: []
+edges: []
+`, "utf-8");
+
+    let lastBody: Record<string, unknown> = {};
+    const origListeners = server.listeners("request");
+    server.removeAllListeners("request");
+    server.on("request", async (req: http.IncomingMessage, res: http.ServerResponse) => {
+      let body = "";
+      for await (const chunk of req) body += chunk;
+      if (req.url === "/api/up" && req.method === "POST") {
+        lastBody = JSON.parse(body);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ status: "planned", runId: "starter-run", stages: [{ stage: "resolve_spec", status: "ok" }], errors: [], warnings: [] }));
+      } else {
+        res.writeHead(404);
+        res.end();
+      }
+    });
+
+    try {
+      const { logs } = await captureLogs(async () => {
+        await makeCmd().parseAsync(["node", "rig", "up", specPath, "--plan"]);
+      });
+      const output = logs.join("\n");
+      expect(output).toContain("planned");
+      expect(lastBody.sourceRef).toBe(specPath);
+      expect(lastBody.plan).toBe(true);
+    } finally {
+      server.removeAllListeners("request");
+      for (const l of origListeners) server.on("request", l as (...args: unknown[]) => void);
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
 });

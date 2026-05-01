@@ -124,6 +124,17 @@ export function createTestApp(
     adapters?: Partial<Record<string, RuntimeAdapter>>;
     activityHookToken?: string;
     activityFreshnessMs?: number;
+    /**
+     * Agent Starter v1 vertical M2: optional real-fs upRouter for tests
+     * that POST /api/up with a YAML spec on disk. Default behavior
+     * (always-false fsOps) preserved when this is omitted, so existing
+     * rig-name-path tests are not affected.
+     */
+    upRouterFsOps?: {
+      exists: (p: string) => boolean;
+      readFile: (p: string) => string;
+      readHead: (p: string, n: number) => Buffer;
+    };
   },
 ) {
   const rigRepo = new RigRepository(db);
@@ -225,6 +236,13 @@ export function createTestApp(
 
   const podBundleSourceResolver = new PodBundleSourceResolver();
 
+  const upRouterFs = opts?.upRouterFsOps ?? {
+    exists: (_p: string) => false,
+    readFile: (_p: string) => "",
+    readHead: (_p: string, _n: number) => Buffer.alloc(0),
+  };
+  const upRouter = new UpCommandRouter({ fsOps: upRouterFs });
+
   const app = createApp({
     rigRepo, sessionRegistry, eventBus, nodeLauncher, tmuxAdapter: tmux, cmuxAdapter: cmux,
     snapshotCapture, snapshotRepo, restoreOrchestrator,
@@ -234,7 +252,7 @@ export function createTestApp(
     discoveryCoordinator, discoveryRepo, claimService, selfAttachService, rigExpansionService,
     rigLifecycleService,
     psProjectionService: new PsProjectionService({ db }),
-    upRouter: new UpCommandRouter({ fsOps: { exists: () => false, readFile: () => "", readHead: () => Buffer.alloc(0) } }),
+    upRouter,
     teardownOrchestrator: new RigTeardownOrchestrator({ db, rigRepo, sessionRegistry, tmuxAdapter: tmux, snapshotCapture, eventBus }),
     podInstantiator,
     podBundleSourceResolver,
@@ -253,7 +271,7 @@ export function createTestApp(
     discoveryCoordinator, discoveryRepo, claimService, selfAttachService, rigExpansionService, tmuxScanner,
     rigLifecycleService,
     psProjectionService: new PsProjectionService({ db }),
-    upRouter: new UpCommandRouter({ fsOps: { exists: () => false, readFile: () => "", readHead: () => Buffer.alloc(0) } }),
+    upRouter,
     teardownOrchestrator: new RigTeardownOrchestrator({ db, rigRepo, sessionRegistry, tmuxAdapter: tmux, snapshotCapture, eventBus }),
     podInstantiator, podBundleSourceResolver, db, tmuxAdapter: tmux,
     agentActivityStore,

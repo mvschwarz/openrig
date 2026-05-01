@@ -660,33 +660,67 @@ profiles:
   // pass — the existing pipeline always handled YAML without
   // `starter_ref:` already.
   it("forward-compat: pod with starter_ref on a member instantiates without error AND the codec emits it (R2 repair)", async () => {
-    const { db, inst, rigRepo } = setup();
-    const yaml = RigSpecCodec.serialize(makeRigSpec({
-      pods: [{
-        id: "dev",
-        label: "Dev",
-        members: [{
-          id: "impl",
-          agentRef: "local:agents/impl",
-          profile: "default",
-          runtime: "claude-code",
-          cwd: ".",
-          starterRef: { name: "fixture-starter" },
+    // M2 update: the resolver now actively reads the registry when
+    // starterRef is set (M2.1/M2.2 wiring). Provide a fixture registry
+    // entry so the resolver succeeds; the smoke proves the field flows
+    // through to launch without breaking the existing pipeline. The
+    // dedicated end-to-end + abort behaviors live in
+    // agent-starter-instantiator.test.ts; this test stays as a
+    // forward-compat regression catch.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const fs = await import("node:fs");
+    const os = await import("node:os");
+    const path = await import("node:path");
+    const tmpRegistry = fs.mkdtempSync(path.join(os.tmpdir(), "starter-fwd-compat-"));
+    fs.writeFileSync(path.join(tmpRegistry, "fixture-starter.yaml"), `draft: false
+starter_id: fixture-starter
+runtime: claude-code
+manifest_id: openrig-builder-base
+manifest_version: "0.2"
+session_source:
+  mode: fork
+  ref:
+    kind: native_id
+    value: "fwd-compat-fixture"
+captured_at: 2026-05-01T00:00:00Z
+captured_by: fixture
+ready_check_evidence: ../evidence/fixture.md
+status: captured
+state: 2-named
+`);
+    process.env.OPENRIG_AGENT_STARTER_ROOT = tmpRegistry;
+    try {
+      const { db, inst, rigRepo } = setup();
+      const yaml = RigSpecCodec.serialize(makeRigSpec({
+        pods: [{
+          id: "dev",
+          label: "Dev",
+          members: [{
+            id: "impl",
+            agentRef: "local:agents/impl",
+            profile: "default",
+            runtime: "claude-code",
+            cwd: ".",
+            starterRef: { name: "fixture-starter" },
+          }],
+          edges: [],
         }],
-        edges: [],
-      }],
-    }));
-    // R2: prove the serialized YAML actually carries the new field, then
-    // verify instantiation still succeeds with it present.
-    expect(yaml).toContain("starter_ref:");
-    expect(yaml).toContain("fixture-starter");
-    const result = await inst.instantiate(yaml, RIG_ROOT);
-    expect(result.ok).toBe(true);
-    if (result.ok) {
-      const rig = rigRepo.getRig(result.result.rigId);
-      expect(rig).not.toBeNull();
-      expect(rig!.nodes).toHaveLength(1);
+      }));
+      // R2: prove the serialized YAML actually carries the new field, then
+      // verify instantiation still succeeds with it present.
+      expect(yaml).toContain("starter_ref:");
+      expect(yaml).toContain("fixture-starter");
+      const result = await inst.instantiate(yaml, RIG_ROOT);
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        const rig = rigRepo.getRig(result.result.rigId);
+        expect(rig).not.toBeNull();
+        expect(rig!.nodes).toHaveLength(1);
+      }
+      db.close();
+    } finally {
+      delete process.env.OPENRIG_AGENT_STARTER_ROOT;
+      fs.rmSync(tmpRegistry, { recursive: true, force: true });
     }
-    db.close();
   });
 });
