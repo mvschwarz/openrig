@@ -1063,6 +1063,40 @@ export class PodRigInstantiator {
       rebuildArtifactsOpt = { rebuildArtifacts: resolved.files };
     }
 
+    // Agent Starter resolver dispatch (Agent Starter v1 vertical M2). When
+    // `member.starterRef` is set, resolve the named registry entry into a
+    // `ResolvedStartupFile[]` that prepends ahead of the member's per-agent
+    // and per-pod startup files (the new STARTER layer at the front of the
+    // layer chain). The resolver THROWS on a failed credential scan, missing
+    // registry entry, or malformed YAML; on any throw we abort the launch
+    // BEFORE `startNode` runs (no STARTER layer added; no adapter
+    // `deliverStartup` called) — load-bearing credential-safety contract per
+    // M1 R1 finding 2.
+    let starterArtifacts: import("./runtime-adapter.js").ResolvedStartupFile[] | undefined;
+    if (input.member.starterRef) {
+      const { AgentStarterResolver } = await import("./agent-starter-resolver.js");
+      const resolver = new AgentStarterResolver();
+      try {
+        const resolved = resolver.resolveStarter(input.member.starterRef.name);
+        starterArtifacts = resolved.files;
+      } catch (err) {
+        return {
+          status: "failed",
+          error: `Agent Starter resolver failed: ${(err as Error).message}`,
+          sessionName: canonicalSessionName,
+          warnings: launchResult.warnings,
+        };
+      }
+    }
+
+    // STARTER layer (artifact-seeded fresh-launch context; precedes per-agent
+    // and per-pod layers). Prepended to dedupedResolvedFiles so the existing
+    // `startupOrchestrator.startNode` consumes the combined chain via the
+    // existing `resolvedStartupFiles` input — NO new orchestrator branch.
+    const finalResolvedStartupFiles = starterArtifacts
+      ? [...starterArtifacts, ...dedupedResolvedFiles]
+      : dedupedResolvedFiles;
+
     const startupResult = await this.deps.startupOrchestrator.startNode({
       rigId: input.rigId,
       nodeId: input.nodeId,
@@ -1070,7 +1104,7 @@ export class PodRigInstantiator {
       binding,
       adapter,
       plan: planResult.plan,
-      resolvedStartupFiles: dedupedResolvedFiles,
+      resolvedStartupFiles: finalResolvedStartupFiles,
       startupActions: [
         ...configResult.config.startup.actions,
         this.buildSessionIdentityAction({
