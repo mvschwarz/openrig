@@ -285,6 +285,103 @@ describe("Agent Starter v1 vertical — instantiator integration (M2)", () => {
     }
   });
 
+  // M2 R2 — Patch row M2-R2-4 — continuityOutcome stays at the
+  // fresh-launch default when starter is the only continuity source.
+  // Per startup-orchestrator.ts:114, continuityOutcome is derived from
+  // `input.resumeToken` / `input.forkSource` / `input.rebuildArtifacts`
+  // (initialized as "fresh" when none are present). A starter-only
+  // member must not set any of these, so continuityOutcome stays at
+  // "fresh" — proving STARTER is purely an additive guidance layer and
+  // does NOT masquerade as a continuity surface (which would be Finding 1
+  // territory).
+  it("M2-R2-4: continuityOutcome stays 'fresh' when starter is the only continuity source", async () => {
+    const ctx = setupWithStarter({ starterContent: CLEAN_STARTER });
+    const startNodeSpy = vi.spyOn(
+      ctx.inst["deps"].startupOrchestrator!,
+      "startNode",
+    );
+    try {
+      const yaml = RigSpecCodec.serialize(specWithStarterRef());
+      const result = await ctx.inst.instantiate(yaml, RIG_ROOT);
+      expect(result.ok).toBe(true);
+
+      // Assert the startup-orchestrator was called with no continuity
+      // surfaces — these are exactly the inputs that would change
+      // continuityOutcome away from "fresh" per the orchestrator's
+      // initial-value branch.
+      expect(startNodeSpy).toHaveBeenCalled();
+      const startNodeInput = startNodeSpy.mock.calls[0]![0];
+      expect(startNodeInput.resumeToken).toBeUndefined();
+      expect(startNodeInput.forkSource).toBeUndefined();
+      const rebuildArr = startNodeInput.rebuildArtifacts ?? [];
+      expect(rebuildArr.length).toBe(0);
+
+      // Belt-and-suspenders: assert the resolved promise carries
+      // continuityOutcome === "fresh" (the orchestrator surfaces it on
+      // success).
+      const startNodeResult = await startNodeSpy.mock.results[0]!.value as
+        | { ok: true; continuityOutcome: string }
+        | { ok: false };
+      expect(startNodeResult.ok).toBe(true);
+      if (startNodeResult.ok) {
+        expect(startNodeResult.continuityOutcome).toBe("fresh");
+      }
+    } finally {
+      ctx.cleanup();
+    }
+  });
+
+  // M2 R2 — Patch row M2-R2-4 — STARTER layer carries through SQLite
+  // roundtrip via `node_startup_context.resolved_files_json`. The
+  // startup-orchestrator persists the consumed `input.resolvedStartupFiles`
+  // verbatim at startup-orchestrator.ts:293-301; on restore replay the
+  // STARTER layer must come back intact (its absence here would imply
+  // the layer was held only in transient memory and would silently
+  // vanish across daemon restart).
+  it("M2-R2-4: STARTER layer survives node_startup_context.resolved_files_json roundtrip", async () => {
+    const ctx = setupWithStarter({ starterContent: CLEAN_STARTER });
+    try {
+      const yaml = RigSpecCodec.serialize(specWithStarterRef());
+      const result = await ctx.inst.instantiate(yaml, RIG_ROOT);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+
+      const node = result.result.nodes.find((n) => n.logicalId === "dev.impl");
+      expect(node).toBeDefined();
+      // The instantiator's NodeOutcome carries logicalId only; resolve the
+      // DB nodeId via the rig record (logicalId is the qualifiedId stored
+      // on the node row).
+      const rig = ctx.rigRepo.getRig(result.result.rigId);
+      expect(rig).not.toBeNull();
+      const dbNode = rig!.nodes.find((n) => n.logicalId === "dev.impl");
+      expect(dbNode, "expected dev.impl node row in rig").toBeDefined();
+      const nodeId = dbNode!.id;
+
+      const row = ctx.db
+        .prepare("SELECT resolved_files_json FROM node_startup_context WHERE node_id = ?")
+        .get(nodeId) as { resolved_files_json: string } | undefined;
+
+      expect(row, "expected node_startup_context row to exist after launch").toBeDefined();
+      const persisted = JSON.parse(row!.resolved_files_json) as Array<{
+        path: string;
+        ownerRoot: string;
+        appliesOn: string[];
+        deliveryHint: string;
+      }>;
+      expect(Array.isArray(persisted)).toBe(true);
+      expect(persisted.length).toBeGreaterThan(0);
+      // STARTER layer must be at index 0 (resolver result, ownerRoot =
+      // registryRoot, appliesOn = ["fresh_start"], deliveryHint =
+      // "guidance_merge"). Survival across the JSON roundtrip is the proof.
+      expect(persisted[0]!.ownerRoot).toBe(ctx.registryRoot);
+      expect(persisted[0]!.path).toBe("fixture-starter.yaml");
+      expect(persisted[0]!.appliesOn).toEqual(["fresh_start"]);
+      expect(persisted[0]!.deliveryHint).toBe("guidance_merge");
+    } finally {
+      ctx.cleanup();
+    }
+  });
+
   it("composition: starterRef + sessionSource.mode='rebuild' both fire on fresh_start", async () => {
     // Create a real artifact file that the rebuild resolver can find.
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "starter-rebuild-"));

@@ -1,10 +1,11 @@
-// Tier 1 proof for the Agent Starter v1 vertical M2 — Claude adapter
-// integration. Verifies that the STARTER layer artifacts (from
-// AgentStarterResolver) flow through the existing
-// `claude-code-adapter.deliverStartup` seam without any adapter-side
-// code change. The resolver emits ResolvedStartupFile with
-// `deliveryHint: "guidance_merge"` for the starter YAML; the adapter
-// merges into CLAUDE.md.
+// Tier 1 proof for the Agent Starter v1 vertical M2 Revision 2 — real
+// `ClaudeCodeAdapter` proof. M2 R1 used a mock RuntimeAdapter and only
+// asserted the spy received a STARTER ResolvedStartupFile, which is
+// caller-wiring proof, not adapter behavior. Guard blocked on this
+// (Finding 1). M2 R2 instantiates the real `ClaudeCodeAdapter` and
+// mocks at the tmux boundary; the proof is that real `deliverStartup`
+// exercises `guidance_merge` and writes the starter content into the
+// per-seat CLAUDE.md managed block.
 
 import { describe, it, expect, vi } from "vitest";
 import fs from "node:fs";
@@ -19,8 +20,9 @@ import { NodeLauncher } from "../src/domain/node-launcher.js";
 import { StartupOrchestrator } from "../src/domain/startup-orchestrator.js";
 import { PodRigInstantiator } from "../src/domain/rigspec-instantiator.js";
 import { RigSpecCodec } from "../src/domain/rigspec-codec.js";
+import { ClaudeCodeAdapter, type ClaudeAdapterFsOps } from "../src/adapters/claude-code-adapter.js";
 import type { AgentResolverFsOps } from "../src/domain/agent-resolver.js";
-import type { RuntimeAdapter, ResolvedStartupFile } from "../src/domain/runtime-adapter.js";
+import type { RuntimeAdapter } from "../src/domain/runtime-adapter.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import type { RigSpec } from "../src/domain/types.js";
 
@@ -34,17 +36,26 @@ function mockTmux(): TmuxAdapter {
     listWindows: vi.fn(async () => []),
     listPanes: vi.fn(async () => []),
     sendKeys: vi.fn(async () => ({ ok: true as const })),
+    getPaneCommand: vi.fn(async () => "claude"),
+    capturePaneContent: vi.fn(async () => ""),
   } as unknown as TmuxAdapter;
 }
 
-function mockClaudeAdapter(): RuntimeAdapter {
+// In-memory FS adapter pattern from claude-runtime-adapter.test.ts. We
+// pre-populate the registry-entry path (which the resolver returns as an
+// absolute path) so the real ClaudeCodeAdapter can read it via its fs
+// seam; writes to <cwd>/CLAUDE.md land in the same store and we read
+// them back to verify the merged-guidance result.
+function mockClaudeFs(seed: Record<string, string>): ClaudeAdapterFsOps & { _store: Record<string, string> } {
+  const store: Record<string, string> = { ...seed };
   return {
-    runtime: "claude-code",
-    listInstalled: vi.fn(async () => []),
-    project: vi.fn(async () => ({ projected: [], skipped: [], failed: [] })),
-    deliverStartup: vi.fn(async () => ({ delivered: 0, failed: [] })),
-    checkReady: vi.fn(async () => ({ ready: true })),
-    launchHarness: vi.fn(async () => ({ ok: true })),
+    readFile: (p: string) => { if (p in store) return store[p]!; throw new Error(`Not found: ${p}`); },
+    writeFile: (p: string, c: string) => { store[p] = c; },
+    exists: (p: string) => p in store,
+    mkdirp: () => {},
+    copyFile: () => {},
+    listFiles: (dir: string) => Object.keys(store).filter((k) => k.startsWith(dir + "/")).map((k) => k.slice(dir.length + 1)),
+    _store: store,
   };
 }
 
@@ -67,12 +78,13 @@ status: captured
 state: 2-named
 `;
 
-describe("Agent Starter v1 vertical — Claude adapter integration (M2)", () => {
-  it("claude-code-adapter.deliverStartup receives STARTER layer artifact when starterRef is set", async () => {
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "starter-adapter-claude-"));
+describe("Agent Starter v1 vertical — real Claude adapter delivery (M2 R2)", () => {
+  it("real ClaudeCodeAdapter.deliverStartup writes STARTER content to CLAUDE.md via guidance_merge", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "starter-adapter-claude-r2-"));
     const registryRoot = path.join(tmpDir, "registry");
     fs.mkdirSync(registryRoot, { recursive: true });
-    fs.writeFileSync(path.join(registryRoot, "claude-fixture-starter.yaml"), CLAUDE_STARTER);
+    const registryEntryPath = path.join(registryRoot, "claude-fixture-starter.yaml");
+    fs.writeFileSync(registryEntryPath, CLAUDE_STARTER);
     process.env.OPENRIG_AGENT_STARTER_ROOT = registryRoot;
 
     try {
@@ -84,7 +96,25 @@ describe("Agent Starter v1 vertical — Claude adapter integration (M2)", () => 
       const tmux = mockTmux();
       const nodeLauncher = new NodeLauncher({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux });
       const startupOrch = new StartupOrchestrator({ db, sessionRegistry, eventBus, tmuxAdapter: tmux });
-      const claudeAdapter = mockClaudeAdapter();
+
+      // Real ClaudeCodeAdapter. The fs seam is pre-loaded with the
+      // registry-entry content (matching the path the resolver will hand
+      // back) so the adapter's `readFile(file.absolutePath)` succeeds and
+      // the merge_guidance branch can run.
+      const claudeFs = mockClaudeFs({ [registryEntryPath]: CLAUDE_STARTER });
+      const claudeAdapter = new ClaudeCodeAdapter({ tmux, fsOps: claudeFs });
+
+      // Pass-through Codex/terminal adapters keep the instantiator's
+      // adapter map type-complete; this test only exercises Claude.
+      const passThroughAdapter: RuntimeAdapter = {
+        runtime: "codex",
+        listInstalled: async () => [],
+        project: async () => ({ projected: [], skipped: [], failed: [] }),
+        deliverStartup: async () => ({ delivered: 0, failed: [] }),
+        checkReady: async () => ({ ready: true }),
+        launchHarness: async () => ({ ok: true }),
+      };
+
       const fsOps: AgentResolverFsOps = {
         readFile: (p: string) => {
           if (p === `${RIG_ROOT}/agents/impl/agent.yaml`) {
@@ -100,8 +130,8 @@ describe("Agent Starter v1 vertical — Claude adapter integration (M2)", () => 
         startupOrchestrator: startupOrch, fsOps,
         adapters: {
           "claude-code": claudeAdapter,
-          "codex": mockClaudeAdapter(),
-          "terminal": mockClaudeAdapter(),
+          "codex": passThroughAdapter,
+          "terminal": passThroughAdapter,
         },
         tmuxAdapter: tmux,
       });
@@ -128,16 +158,20 @@ describe("Agent Starter v1 vertical — Claude adapter integration (M2)", () => 
       const result = await inst.instantiate(yaml, RIG_ROOT);
       expect(result.ok).toBe(true);
 
-      const deliverStartupSpy = claudeAdapter.deliverStartup as ReturnType<typeof vi.fn>;
-      expect(deliverStartupSpy).toHaveBeenCalled();
-      const files = deliverStartupSpy.mock.calls[0]![0] as ResolvedStartupFile[];
-
-      // STARTER layer prepended at front
-      expect(files[0]!.path).toBe("claude-fixture-starter.yaml");
-      expect(files[0]!.ownerRoot).toBe(registryRoot);
-      expect(files[0]!.appliesOn).toEqual(["fresh_start"]);
-      expect(files[0]!.required).toBe(true);
-      expect(files[0]!.deliveryHint).toBe("guidance_merge");
+      // The Claude adapter's `mergeGuidance` writes to <binding.cwd>/CLAUDE.md
+      // wrapped in a `BEGIN RIGGED MANAGED BLOCK` envelope. The cwd for this
+      // member resolves to RIG_ROOT (`cwd: "."`).
+      const expectedClaudeMdPath = path.join(RIG_ROOT, "CLAUDE.md");
+      const claudeMd = claudeFs._store[expectedClaudeMdPath];
+      expect(claudeMd, "expected real ClaudeCodeAdapter to have written CLAUDE.md via guidance_merge").toBeDefined();
+      // The managed block is keyed on the starter file path (`file.path`,
+      // which is the basename returned by the resolver).
+      expect(claudeMd).toContain("BEGIN RIGGED MANAGED BLOCK: claude-fixture-starter.yaml");
+      expect(claudeMd).toContain("END RIGGED MANAGED BLOCK: claude-fixture-starter.yaml");
+      // Some piece of the starter YAML body must appear inside the block.
+      // We pick `starter_id: claude-fixture-starter` because it's a stable,
+      // unambiguous marker the resolver passed through.
+      expect(claudeMd).toContain("starter_id: claude-fixture-starter");
 
       db.close();
     } finally {

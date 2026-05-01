@@ -189,50 +189,65 @@ describe("Up API route", () => {
     });
   });
 
-  // Agent Starter v1 vertical M2 — POST /api/up wiring proof for starter_ref.
+  // Agent Starter v1 vertical M2 R2 — POST /api/up end-to-end proof for starter_ref.
   //
-  // These tests exercise the spec-resolution path (sourceKind=rig_spec) by
-  // injecting a real-fs upRouter into createTestApp. The positive case
-  // demonstrates that a pod-aware spec with `starter_ref:` flows through
-  // validation cleanly. The two negatives demonstrate that the schema's
-  // composition rules surface as 400 responses through the route.
-  //
-  // The "failed-scan launch abort" negative is intentionally NOT tested at
-  // this level — the resolver runs only at apply-time inside the
-  // instantiator, and that behavior is already proven in
-  // `agent-starter-instantiator.test.ts` ("resolver throw aborts launch").
-  // Re-proving it through the HTTP layer would require fully wiring the
-  // bootstrap apply path with real fixtures, which is broader than this
-  // wiring proof needs.
-  describe("M2: POST /api/up with starter_ref", () => {
+  // These tests exercise the full apply path through the route. The positive
+  // case proves STARTER artifacts reach the startup-orchestrator (verified
+  // via `node_startup_context.resolved_files_json` SQLite roundtrip — the
+  // same persistence boundary asserted in agent-starter-instantiator.test.ts,
+  // but here driven through the HTTP layer). The failed-scan negative
+  // proves credential-bearing registry entries refuse the launch with a
+  // clear failure and no completed startup_context (load-bearing
+  // credential-safety contract — Finding 2). Schema-composition negatives
+  // (fork+starter_ref, terminal+starter_ref) remain plan-mode tests since
+  // they reject upfront.
+  describe("M2 R2: POST /api/up with starter_ref (end-to-end)", () => {
     let specDir: string;
+    let registryDir: string;
     let app2: ReturnType<typeof createTestApp>["app"];
+    let setup2: ReturnType<typeof createTestApp>;
     let db2: Database.Database;
 
     beforeEach(() => {
       specDir = fs.mkdtempSync(path.join(os.tmpdir(), "up-route-starter-"));
+      registryDir = fs.mkdtempSync(path.join(os.tmpdir(), "up-route-registry-"));
+
+      // Real agent.yaml fixture so apply-mode agent_ref resolution succeeds.
+      const agentDir = path.join(specDir, "agents", "impl");
+      fs.mkdirSync(agentDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(agentDir, "agent.yaml"),
+        `name: impl\nversion: "1.0.0"\nresources:\n  skills: []\nprofiles:\n  default:\n    uses:\n      skills: []\n`,
+      );
+
       db2 = createFullTestDb();
-      const fsOps = {
+      const realRouterFsOps = {
         exists: (p: string) => fs.existsSync(p),
         readFile: (p: string) => fs.readFileSync(p, "utf-8"),
         readHead: (p: string, n: number) => {
           const buf = Buffer.alloc(n);
           const fd = fs.openSync(p, "r");
-          try {
-            fs.readSync(fd, buf, 0, n, 0);
-          } finally {
-            fs.closeSync(fd);
-          }
+          try { fs.readSync(fd, buf, 0, n, 0); } finally { fs.closeSync(fd); }
           return buf;
         },
       };
-      const setup = createTestApp(db2, { upRouterFsOps: fsOps });
-      app2 = setup.app;
+      const realInstantiatorFsOps = {
+        exists: (p: string) => fs.existsSync(p),
+        readFile: (p: string) => fs.readFileSync(p, "utf-8"),
+      };
+      setup2 = createTestApp(db2, {
+        upRouterFsOps: realRouterFsOps,
+        podInstantiatorFsOps: realInstantiatorFsOps,
+      });
+      app2 = setup2.app;
+      process.env.OPENRIG_AGENT_STARTER_ROOT = registryDir;
     });
 
     afterEach(() => {
+      delete process.env.OPENRIG_AGENT_STARTER_ROOT;
       db2.close();
       fs.rmSync(specDir, { recursive: true, force: true });
+      fs.rmSync(registryDir, { recursive: true, force: true });
     });
 
     function writeSpec(name: string, body: string): string {
@@ -241,9 +256,49 @@ describe("Up API route", () => {
       return p;
     }
 
-    it("accepts a pod-aware spec with starter_ref in plan mode (positive wiring proof)", async () => {
+    function writeRegistryEntry(name: string, body: string): void {
+      fs.writeFileSync(path.join(registryDir, `${name}.yaml`), body, "utf-8");
+    }
+
+    const CLEAN_REGISTRY_BODY = `draft: false
+starter_id: route-fixture
+runtime: claude-code
+manifest_id: openrig-builder-base
+manifest_version: "0.2"
+session_source:
+  mode: fork
+  ref:
+    kind: native_id
+    value: "fx"
+captured_at: 2026-05-01T00:00:00Z
+captured_by: fixture
+ready_check_evidence: ../evidence/fixture.md
+status: captured
+state: 2-named
+`;
+
+    const CRED_REGISTRY_BODY = `draft: false
+starter_id: route-fixture-mal
+runtime: claude-code
+manifest_id: openrig-builder-base
+manifest_version: "0.2"
+session_source:
+  mode: fork
+  ref:
+    kind: native_id
+    value: "fx"
+captured_at: 2026-05-01T00:00:00Z
+captured_by: fixture
+ready_check_evidence: ../evidence/fixture.md
+status: captured
+state: 2-named
+api_key: example-not-real
+`;
+
+    it("end-to-end positive: apply-mode POST /api/up resolves starter and STARTER reaches orchestrator (DB roundtrip)", async () => {
+      writeRegistryEntry("route-fixture", CLEAN_REGISTRY_BODY);
       const yaml = `version: "0.2"
-name: starter-positive
+name: starter-route-positive
 pods:
   - id: dev
     label: Development
@@ -254,26 +309,90 @@ pods:
         runtime: claude-code
         cwd: .
         starter_ref:
-          name: openrig-builder-base--claude-code
+          name: route-fixture
     edges: []
 edges: []
 `;
-      const specPath = writeSpec("starter-positive.yaml", yaml);
+      const specPath = writeSpec("starter-route-positive.yaml", yaml);
 
       const res = await app2.request("/api/up", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sourceRef: specPath, plan: true }),
+        body: JSON.stringify({ sourceRef: specPath }),
       });
-      // The upRouter classifies as rig_spec (validation passed). Bootstrap
-      // plan may fail later stages (e.g., agent file resolution against an
-      // empty test cwd), but the spec MUST clear validation — proving
-      // `starter_ref` does not trip the schema. Status 200/400 are both
-      // acceptable wiring proofs as long as the body is NOT a top-level
-      // validation_failed error from upRouter.route().
       const body = await res.json();
-      expect(body.error ?? "").not.toContain("not a valid rig spec");
-      expect(body.error ?? "").not.toContain("does not match composition rules");
+      // Apply mode: 201 completed (or 200 partial if another stage flakes,
+      // but the import_rig stage MUST be ok and a rigId MUST be returned).
+      expect(body.rigId, JSON.stringify(body)).toBeDefined();
+
+      // Look up the impl node and read its node_startup_context row to
+      // verify the STARTER layer survived the persistence boundary
+      // (startup-orchestrator.ts:293-301 SQLite write).
+      const rig = setup2.rigRepo.getRig(body.rigId);
+      expect(rig).not.toBeNull();
+      const dbNode = rig!.nodes.find((n) => n.logicalId === "dev.impl");
+      expect(dbNode).toBeDefined();
+
+      const row = db2
+        .prepare("SELECT resolved_files_json FROM node_startup_context WHERE node_id = ?")
+        .get(dbNode!.id) as { resolved_files_json: string } | undefined;
+      expect(row, "expected node_startup_context row to exist after route apply").toBeDefined();
+      const persisted = JSON.parse(row!.resolved_files_json) as Array<{
+        path: string;
+        ownerRoot: string;
+        appliesOn: string[];
+        deliveryHint: string;
+      }>;
+      expect(persisted.length).toBeGreaterThan(0);
+      // STARTER layer at index 0 — registry-rooted, fresh_start, guidance_merge.
+      expect(persisted[0]!.ownerRoot).toBe(registryDir);
+      expect(persisted[0]!.path).toBe("route-fixture.yaml");
+      expect(persisted[0]!.appliesOn).toEqual(["fresh_start"]);
+      expect(persisted[0]!.deliveryHint).toBe("guidance_merge");
+    });
+
+    it("end-to-end negative: credential-bearing registry entry → launch fails with clear error and NO startup_context row", async () => {
+      writeRegistryEntry("route-fixture-mal", CRED_REGISTRY_BODY);
+      const yaml = `version: "0.2"
+name: starter-route-failed-scan
+pods:
+  - id: dev
+    label: Development
+    members:
+      - id: impl
+        agent_ref: local:agents/impl
+        profile: default
+        runtime: claude-code
+        cwd: .
+        starter_ref:
+          name: route-fixture-mal
+    edges: []
+edges: []
+`;
+      const specPath = writeSpec("starter-route-failed-scan.yaml", yaml);
+
+      const res = await app2.request("/api/up", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sourceRef: specPath }),
+      });
+      const body = await res.json();
+      // Credential-scan failure surfaces as a node-level launch failure.
+      // The instantiator returns a NodeOutcome with status="failed" and
+      // error mentioning "Agent Starter resolver failed" — this propagates
+      // up as a partial/failed bootstrap. The route returns non-2xx.
+      expect(res.status).not.toBe(201);
+      const errStr = JSON.stringify(body);
+      expect(errStr).toMatch(/Agent Starter resolver failed|credential/i);
+
+      // The rigId may or may not have been created depending on
+      // partial-failure policy; the load-bearing assertion is that NO
+      // node_startup_context row was persisted (the launch aborted
+      // before startup-orchestrator.startNode wrote the SQLite row).
+      const startupRows = db2
+        .prepare("SELECT COUNT(*) as cnt FROM node_startup_context")
+        .get() as { cnt: number };
+      expect(startupRows.cnt).toBe(0);
     });
 
     it("rejects fork + starter_ref composition with 400 (terminal-equivalent route surface)", async () => {
