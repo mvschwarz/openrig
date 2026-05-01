@@ -652,7 +652,14 @@ profiles:
   // existing pipeline. M1 only lands schema + resolver scaffolding; M2
   // wires `starterRef` into the launch path. This test verifies M1 does
   // not regress existing instantiation when the new field is present.
-  it("forward-compat: pod with starter_ref on a member instantiates without error (M2 wires the field)", async () => {
+  //
+  // R2 repair: assert the serialized YAML actually contains
+  // `starter_ref:` before instantiation. The R1 codec dropped the field
+  // (false-proof), so this assertion was added in R2 alongside the codec
+  // emission fix. Without this assertion the smoke would be a hollow
+  // pass — the existing pipeline always handled YAML without
+  // `starter_ref:` already.
+  it("forward-compat: pod with starter_ref on a member instantiates without error AND the codec emits it (R2 repair)", async () => {
     const { db, inst, rigRepo } = setup();
     const yaml = RigSpecCodec.serialize(makeRigSpec({
       pods: [{
@@ -669,6 +676,10 @@ profiles:
         edges: [],
       }],
     }));
+    // R2: prove the serialized YAML actually carries the new field, then
+    // verify instantiation still succeeds with it present.
+    expect(yaml).toContain("starter_ref:");
+    expect(yaml).toContain("fixture-starter");
     const result = await inst.instantiate(yaml, RIG_ROOT);
     expect(result.ok).toBe(true);
     if (result.ok) {

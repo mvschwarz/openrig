@@ -249,11 +249,18 @@ function scanForCredentials(
     }
 
     // 1. Literal credential paths.
+    // Refusal reason intentionally REDACTS the matched line content. The
+    // daemon-tier resolver flows error messages into logs/API responses;
+    // echoing the matched line would leak the credential-bearing content
+    // the deny-list is meant to catch. Operators see refusal code + line
+    // number + file path; that's enough to triage. Closes the v0 wrapper
+    // diagnostic-`match`-field caveat at the daemon-tier productization
+    // layer (per M1 Revision 2 finding 3).
     for (const literal of CRED_PATH_LITERALS) {
       if (line.includes(literal)) {
         return {
           ok: false,
-          reason: `credential_path_disallowed: line ${lineNo} of ${filePath} contains credential path ${JSON.stringify(literal)} (line: ${JSON.stringify(line)})`,
+          reason: `credential_path_disallowed: line ${lineNo} of ${filePath} matches a deny-list literal credential path (content redacted)`,
         };
       }
     }
@@ -262,7 +269,7 @@ function scanForCredentials(
     if (!isAllowlistedTranscript && CRED_PATH_RE.test(line)) {
       return {
         ok: false,
-        reason: `credential_path_disallowed: line ${lineNo} of ${filePath} matches credential path pattern (line: ${JSON.stringify(line)})`,
+        reason: `credential_path_disallowed: line ${lineNo} of ${filePath} matches credential path pattern (content redacted)`,
       };
     }
 
@@ -270,7 +277,7 @@ function scanForCredentials(
     if (CRED_STRING_RE.test(line)) {
       return {
         ok: false,
-        reason: `credential_content_disallowed: line ${lineNo} of ${filePath} matches credential content pattern (line: ${JSON.stringify(line)})`,
+        reason: `credential_content_disallowed: line ${lineNo} of ${filePath} matches credential content pattern (content redacted)`,
       };
     }
   }

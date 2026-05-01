@@ -99,4 +99,99 @@ describe("RigSpec codec (pod-aware)", () => {
     const parsed = LegacyRigSpecCodec.parse(yaml) as Record<string, unknown>;
     expect(parsed["name"]).toBe("test");
   });
+
+  // Agent Starter v1 vertical M1 R2 — codec roundtrip for `starter_ref`.
+  // Guard finding: the M1 R1 commit normalized snake-case input into
+  // `member.starterRef` but the canonical pod-aware serializer never
+  // wrote `starter_ref` back out. The forward-compat smoke at
+  // pod-rigspec-instantiator was therefore a false proof. R2 fix: emit
+  // `starter_ref` in `RigSpecCodec.serialize()` and assert the wire
+  // shape end-to-end (serialize → parse → validate → normalize).
+  it("starter_ref round-trips through serialize → parse → validate → normalize (R2)", () => {
+    const spec: RigSpec = {
+      ...VALID_RIG,
+      pods: [
+        {
+          id: "dev",
+          label: "Development",
+          members: [
+            {
+              id: "impl",
+              agentRef: "local:agents/impl",
+              profile: "default",
+              runtime: "claude-code",
+              cwd: ".",
+              starterRef: { name: "openrig-builder-base--claude-code" },
+            },
+          ],
+          edges: [],
+        },
+      ],
+    };
+
+    // Serialize → wire shape MUST contain starter_ref:
+    const yaml = RigSpecCodec.serialize(spec);
+    expect(yaml).toContain("starter_ref:");
+    expect(yaml).toContain("openrig-builder-base--claude-code");
+
+    // Parse → validate
+    const parsed = RigSpecCodec.parse(yaml);
+    const validation = RigSpecSchema.validate(parsed);
+    expect(validation.valid).toBe(true);
+    expect(validation.errors).toEqual([]);
+
+    // Normalize → starterRef preserved with the seed shape
+    const normalized = RigSpecSchema.normalize(parsed);
+    const member = normalized.pods[0]!.members[0]!;
+    expect(member.starterRef).toEqual({ name: "openrig-builder-base--claude-code" });
+  });
+
+  it("starter_ref + session_source.mode='rebuild' both survive roundtrip (composition allowed)", () => {
+    const spec: RigSpec = {
+      ...VALID_RIG,
+      pods: [
+        {
+          id: "dev",
+          label: "Development",
+          members: [
+            {
+              id: "impl",
+              agentRef: "local:agents/impl",
+              profile: "default",
+              runtime: "claude-code",
+              cwd: ".",
+              starterRef: { name: "fixture-starter" },
+              sessionSource: {
+                mode: "rebuild",
+                ref: { kind: "artifact_set", value: ["/tmp/fixture.md"] },
+              },
+            },
+          ],
+          edges: [],
+        },
+      ],
+    };
+
+    const yaml = RigSpecCodec.serialize(spec);
+    expect(yaml).toContain("starter_ref:");
+    expect(yaml).toContain("session_source:");
+    expect(yaml).toContain("rebuild");
+
+    const parsed = RigSpecCodec.parse(yaml);
+    const validation = RigSpecSchema.validate(parsed);
+    expect(validation.valid).toBe(true);
+
+    const normalized = RigSpecSchema.normalize(parsed);
+    const member = normalized.pods[0]!.members[0]!;
+    expect(member.starterRef).toEqual({ name: "fixture-starter" });
+    expect(member.sessionSource).toEqual({
+      mode: "rebuild",
+      ref: { kind: "artifact_set", value: ["/tmp/fixture.md"] },
+    });
+  });
+
+  it("specs with no starter_ref roundtrip cleanly (no spurious field emitted)", () => {
+    const yaml = RigSpecCodec.serialize(VALID_RIG);
+    expect(yaml).not.toContain("starter_ref:");
+  });
 });

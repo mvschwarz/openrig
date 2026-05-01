@@ -312,4 +312,52 @@ describe("RigExpansionService", () => {
     const events = db.prepare("SELECT type FROM events WHERE type = 'rig.imported'").all() as Array<{ type: string }>;
     expect(events).toHaveLength(0);
   });
+
+  // Agent Starter v1 vertical M1 R2 — expansion pass-through. Guard
+  // finding: ExpansionPodFragment.members had no `starterRef?` field
+  // and `buildSyntheticSpec` had no `starter_ref` emission, so an
+  // expansion request couldn't carry `starterRef` through the same
+  // route that already carries `sessionSource`. R2 fix: add the field
+  // + emit snake-case `starter_ref` in `buildSyntheticSpec`.
+  // Strategy: spy on podInstantiator.materialize to capture the
+  // synthetic YAML it receives; assert the YAML contains `starter_ref:`
+  // and the starter name.
+  it("preserves starterRef across expansion → buildSyntheticSpec → synthetic YAML (R2)", async () => {
+    const rig = seedRig();
+    const materializeSpy = vi.spyOn(setup.podInstantiator, "materialize");
+    const podWithStarter: ExpansionRequest["pod"] = {
+      id: "infra",
+      label: "Infrastructure",
+      members: [
+        {
+          id: "server",
+          runtime: "claude-code",
+          agentRef: "local:agents/server",
+          profile: "default",
+          cwd: "/tmp",
+          starterRef: { name: "openrig-builder-base--claude-code" },
+        },
+      ],
+      edges: [],
+    };
+    await service.expand({ rigId: rig.id, pod: podWithStarter });
+
+    expect(materializeSpy).toHaveBeenCalled();
+    // First arg to materialize is the synthetic YAML string.
+    const syntheticYaml = materializeSpy.mock.calls[0]![0] as string;
+    expect(syntheticYaml).toContain("starter_ref:");
+    expect(syntheticYaml).toContain("openrig-builder-base--claude-code");
+
+    materializeSpy.mockRestore();
+  });
+
+  it("absent starterRef does not leak starter_ref into synthetic YAML (negative regression)", async () => {
+    const rig = seedRig();
+    const materializeSpy = vi.spyOn(setup.podInstantiator, "materialize");
+    await service.expand({ rigId: rig.id, pod: terminalPodFragment() });
+
+    const syntheticYaml = materializeSpy.mock.calls[0]![0] as string;
+    expect(syntheticYaml).not.toContain("starter_ref:");
+    materializeSpy.mockRestore();
+  });
 });

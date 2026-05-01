@@ -109,8 +109,19 @@ describe("AgentStarterResolver (M1)", () => {
     );
     const fs = makeFs({ "/registry/fixture-mal.yaml": malicious });
     const resolver = new AgentStarterResolver({ registryRoot: "/registry", ...fs });
-    expect(() => resolver.resolveStarter("fixture-mal"))
-      .toThrow(AgentStarterCredentialScanFailedError);
+    let caught: AgentStarterCredentialScanFailedError | undefined;
+    try {
+      resolver.resolveStarter("fixture-mal");
+    } catch (err) {
+      if (err instanceof AgentStarterCredentialScanFailedError) caught = err;
+      else throw err;
+    }
+    expect(caught).toBeDefined();
+    expect(caught!.reason).toContain("credential_path_disallowed");
+    // R2-3 redaction: error message MUST NOT echo the matched line content.
+    expect(caught!.reason).toContain("content redacted");
+    expect(caught!.reason).not.toContain(".credentials.json");
+    expect(caught!.message).not.toContain(".credentials.json");
   });
 
   it("THROWS AgentStarterCredentialScanFailedError on credential-content match (api_key)", () => {
@@ -128,6 +139,12 @@ describe("AgentStarterResolver (M1)", () => {
     expect(caught).toBeDefined();
     expect(caught!.starterName).toBe("fixture-mal2");
     expect(caught!.reason).toContain("credential_content_disallowed");
+    // R2-3 redaction: error MUST NOT contain the fixture secret string.
+    expect(caught!.reason).toContain("content redacted");
+    expect(caught!.reason).not.toContain("example-not-real");
+    expect(caught!.message).not.toContain("example-not-real");
+    expect(caught!.reason).not.toContain("api_key");
+    expect(caught!.message).not.toContain("api_key");
   });
 
   it("THROWS on case-insensitive credential marker (API_KEY uppercase)", () => {
@@ -135,8 +152,63 @@ describe("AgentStarterResolver (M1)", () => {
 `;
     const fs = makeFs({ "/registry/fixture-mal3.yaml": malicious });
     const resolver = new AgentStarterResolver({ registryRoot: "/registry", ...fs });
-    expect(() => resolver.resolveStarter("fixture-mal3"))
-      .toThrow(AgentStarterCredentialScanFailedError);
+    let caught: AgentStarterCredentialScanFailedError | undefined;
+    try {
+      resolver.resolveStarter("fixture-mal3");
+    } catch (err) {
+      if (err instanceof AgentStarterCredentialScanFailedError) caught = err;
+      else throw err;
+    }
+    expect(caught).toBeDefined();
+    // R2-3 redaction: uppercase marker also must not leak.
+    expect(caught!.reason).toContain("content redacted");
+    expect(caught!.reason).not.toContain("API_KEY");
+    expect(caught!.message).not.toContain("API_KEY");
+    expect(caught!.reason).not.toContain("uppercase-not-real");
+    expect(caught!.message).not.toContain("uppercase-not-real");
+  });
+
+  // R2-3 leak negative: token-shaped secrets MUST NOT appear in error message.
+  it("redacts sk- token-shaped fixture from error message (R2-3)", () => {
+    const malicious = CLEAN_ENTRY.replace(
+      'value: "fixture-native-id"',
+      'value: "sk-fakefakefakefakefakefakefakefake"',
+    );
+    const fs = makeFs({ "/registry/fixture-mal-token.yaml": malicious });
+    const resolver = new AgentStarterResolver({ registryRoot: "/registry", ...fs });
+    let caught: AgentStarterCredentialScanFailedError | undefined;
+    try {
+      resolver.resolveStarter("fixture-mal-token");
+    } catch (err) {
+      if (err instanceof AgentStarterCredentialScanFailedError) caught = err;
+      else throw err;
+    }
+    expect(caught).toBeDefined();
+    expect(caught!.reason).toContain("credential_content_disallowed");
+    expect(caught!.reason).toContain("content redacted");
+    // The token-shaped substring MUST NOT appear in either field.
+    expect(caught!.reason).not.toContain("sk-fakefakefakefakefakefakefakefake");
+    expect(caught!.message).not.toContain("sk-fakefakefakefakefakefakefakefake");
+  });
+
+  // R2-3 diagnostic preservation: refusal code, line number, and file
+  // path MUST still appear so operators can triage.
+  it("error message preserves non-sensitive diagnostics (refusal code + line + path)", () => {
+    const malicious = `${CLEAN_ENTRY}api_key: example
+`;
+    const fs = makeFs({ "/registry/fixture-mal-diag.yaml": malicious });
+    const resolver = new AgentStarterResolver({ registryRoot: "/registry", ...fs });
+    let caught: AgentStarterCredentialScanFailedError | undefined;
+    try {
+      resolver.resolveStarter("fixture-mal-diag");
+    } catch (err) {
+      if (err instanceof AgentStarterCredentialScanFailedError) caught = err;
+      else throw err;
+    }
+    expect(caught).toBeDefined();
+    expect(caught!.reason).toMatch(/credential_content_disallowed/);
+    expect(caught!.reason).toMatch(/line \d+/);
+    expect(caught!.reason).toContain("/registry/fixture-mal-diag.yaml");
   });
 
   it("allowlist exception: transcript_path under ~/.claude/projects/ is accepted", () => {
