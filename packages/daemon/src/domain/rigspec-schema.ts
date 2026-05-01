@@ -308,6 +308,67 @@ function validateMember(member: Record<string, unknown>, index: number, podPrefi
     errors.push(...validateSessionSource(member["session_source"], `${prefix}.session_source`, isTerminalRuntime));
   }
 
+  // starter_ref validation (Agent Starter v1 vertical M1).
+  // - Rejects malformed name.
+  // - Rejects terminal runtime (analogous to terminal session_source rejection;
+  //   terminal `deliverStartup` is a no-op so a starter has nothing to seed).
+  // - Rejects starter_ref + session_source.mode=fork composition (per slice
+  //   review-independent finding 1; the v1+ "Real native-fork-from-registered-
+  //   thread-id starter proof" trigger covers that case).
+  // - Accepts starter_ref + session_source.mode=rebuild (additive: both
+  //   apply on fresh_start; rebuild artifacts and starter artifacts compose
+  //   independently in the launch pipeline).
+  // - Accepts starter_ref alone.
+  if (member["starter_ref"] !== undefined) {
+    errors.push(...validateStarterRef(
+      member["starter_ref"],
+      member["session_source"],
+      isTerminalRuntime,
+      `${prefix}.starter_ref`,
+    ));
+  }
+
+  return errors;
+}
+
+function validateStarterRef(
+  raw: unknown,
+  sessionSourceRaw: unknown,
+  isTerminalRuntime: boolean,
+  prefix: string,
+): string[] {
+  const errors: string[] = [];
+  if (raw === null || typeof raw !== "object") {
+    errors.push(`${prefix}: must be an object with a non-empty "name" string`);
+    return errors;
+  }
+  if (isTerminalRuntime) {
+    errors.push(`${prefix}: terminal runtime has no agent context to seed; starter_ref is meaningless on terminal members and is rejected (analogous to existing terminal session_source rejection)`);
+    return errors;
+  }
+  const sr = raw as Record<string, unknown>;
+  const name = sr["name"];
+  if (typeof name !== "string" || name.trim() === "") {
+    errors.push(`${prefix}.name: required non-empty string`);
+    return errors;
+  }
+  // Allowed character set: registry keys are lowercase alphanumeric plus
+  // hyphen + underscore + double-hyphen-as-separator. Reject anything that
+  // would create an unsafe filesystem path (no `/`, no `..`, no leading dot).
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/.test(name)) {
+    errors.push(`${prefix}.name: must be alphanumeric with optional "_" or "-" (got ${JSON.stringify(name)})`);
+    return errors;
+  }
+  // Cross-field rejection: starter_ref + session_source.mode=fork is the
+  // v1+ named trigger ("Real native-fork-from-registered-thread-id starter
+  // proof"). v0 schema refuses the composition rather than silently mixing
+  // the two semantics. Rebuild composition is allowed and lands additively.
+  if (sessionSourceRaw !== null && typeof sessionSourceRaw === "object") {
+    const ssRec = sessionSourceRaw as Record<string, unknown>;
+    if (ssRec["mode"] === "fork") {
+      errors.push(`${prefix}: starter_ref + session_source.mode="fork" composition is rejected in v0 (the v1+ "Real native-fork-from-registered-thread-id starter proof" trigger covers that combination); use either starter_ref alone or session_source.mode="rebuild" for artifact-additive composition`);
+    }
+  }
   return errors;
 }
 
@@ -715,6 +776,14 @@ function validateContinuityPolicy(raw: unknown, prefix: string): string[] {
 
 // -- Normalization helpers --
 
+function normalizeStarterRef(raw: unknown): import("./types.js").StarterRefSpec | undefined {
+  if (raw === null || typeof raw !== "object") return undefined;
+  const sr = raw as Record<string, unknown>;
+  const name = sr["name"];
+  if (typeof name !== "string" || name.trim() === "") return undefined;
+  return { name };
+}
+
 function normalizeSessionSource(raw: unknown): import("./types.js").SessionSourceSpec | undefined {
   if (raw === null || typeof raw !== "object") return undefined;
   const ss = raw as Record<string, unknown>;
@@ -756,6 +825,7 @@ function normalizePod(raw: Record<string, unknown>): RigSpecPod {
     restorePolicy: m["restore_policy"] as string | undefined,
     startup: m["startup"] ? normalizeStartupBlock(m["startup"]) : undefined,
     sessionSource: normalizeSessionSource(m["session_source"]),
+    starterRef: normalizeStarterRef(m["starter_ref"]),
   }));
 
   const edges = Array.isArray(raw["edges"])
