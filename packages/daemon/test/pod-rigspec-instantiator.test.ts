@@ -645,4 +645,37 @@ profiles:
 
     db.close();
   });
+
+  // Agent Starter v1 vertical M1 — forward-compat smoke. A member spec
+  // carrying the new `starter_ref` field (normalized as `starterRef`)
+  // must pass through pod-aware instantiation without breaking the
+  // existing pipeline. M1 only lands schema + resolver scaffolding; M2
+  // wires `starterRef` into the launch path. This test verifies M1 does
+  // not regress existing instantiation when the new field is present.
+  it("forward-compat: pod with starter_ref on a member instantiates without error (M2 wires the field)", async () => {
+    const { db, inst, rigRepo } = setup();
+    const yaml = RigSpecCodec.serialize(makeRigSpec({
+      pods: [{
+        id: "dev",
+        label: "Dev",
+        members: [{
+          id: "impl",
+          agentRef: "local:agents/impl",
+          profile: "default",
+          runtime: "claude-code",
+          cwd: ".",
+          starterRef: { name: "fixture-starter" },
+        }],
+        edges: [],
+      }],
+    }));
+    const result = await inst.instantiate(yaml, RIG_ROOT);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      const rig = rigRepo.getRig(result.result.rigId);
+      expect(rig).not.toBeNull();
+      expect(rig!.nodes).toHaveLength(1);
+    }
+    db.close();
+  });
 });

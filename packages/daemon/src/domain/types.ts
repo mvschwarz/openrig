@@ -541,6 +541,22 @@ export interface SessionSourceRebuildSpec {
   };
 }
 
+/**
+ * Reference to a named agent-starter registry entry. Artifact-seeded
+ * fresh-launch context: the starter's curated artifacts are added to the
+ * member's startup-file chain at launch time. Composes additively with
+ * `sessionSource` (independent semantics: starter_ref seeds context;
+ * session_source declares the runtime-source mode). v0 schema constraint:
+ * `starter_ref` MAY combine with `session_source.mode: "rebuild"` (both
+ * apply on `fresh_start`) but MAY NOT combine with `session_source.mode:
+ * "fork"` (the v1+ "Real native-fork-from-registered-thread-id starter
+ * proof" trigger covers that composition).
+ */
+export interface StarterRefSpec {
+  /** Registry key. Matches an entry at `<registryRoot>/<name>.yaml`. */
+  name: string;
+}
+
 export interface RigSpecPodMember {
   id: string;
   label?: string;
@@ -558,6 +574,14 @@ export interface RigSpecPodMember {
    * to the runtime adapter's `forkSource` opt at launch time.
    */
   sessionSource?: SessionSourceSpec;
+  /**
+   * Optional reference to a named starter registry entry.
+   * See {@link StarterRefSpec}. Resolved by `AgentStarterResolver` at
+   * launch time; resolved artifacts seed the STARTER layer of the
+   * member's startup-file chain. Mutually exclusive with
+   * `sessionSource.mode: "fork"` per v0 schema (validateStarterRef).
+   */
+  starterRef?: StarterRefSpec;
 }
 
 export interface RigSpecPodEdge {
