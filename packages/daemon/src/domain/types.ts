@@ -742,6 +742,12 @@ export interface ExpansionPodFragment {
     label?: string;
     /** Optional session source declaration; threaded through to launch. */
     sessionSource?: SessionSourceSpec;
+    /**
+     * Optional reference to a named starter registry entry; threaded
+     * through expansion → buildSyntheticSpec → daemon instantiation,
+     * matching the pass-through shape of `sessionSource`.
+     */
+    starterRef?: StarterRefSpec;
   }>;
   edges: Array<{ from: string; to: string; kind: string }>;
 }

@@ -65,6 +65,9 @@ export class RigSpecCodec {
         }
         // (rebuild ref.value is an array; the codec re-emits it as-is via the
         //  same `ref.value` slot — the YAML serializer handles array emission.)
+        if (m.starterRef) {
+          member["starter_ref"] = { name: m.starterRef.name };
+        }
         return member;
       });
 

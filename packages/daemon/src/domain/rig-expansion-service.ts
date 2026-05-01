@@ -151,6 +151,9 @@ export class RigExpansionService {
                 },
               },
             } : {}),
+            ...(member.starterRef ? {
+              starter_ref: { name: member.starterRef.name },
+            } : {}),
           })),
           edges: pod.edges.map((edge) => ({
             kind: edge.kind,
