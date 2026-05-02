@@ -50,35 +50,108 @@ function firstLine(text: string): string {
 }
 
 /**
- * Extract user-visible text from a Claude `message.content` field.
- * Handles three shapes:
- * - string (legacy / user): use directly.
- * - array of part objects (assistant or tool-bearing user): collect
- *   the `text` field of each `{ type: "text", text }` entry.
- * - other / null / undefined: empty string.
+ * Result of walking a Claude `message.content` field. Returns:
+ * - `text`: concatenated user-visible text from `{ type: "text" }` parts.
+ * - `toolUseCount`: number of `{ type: "tool_use" }` parts seen.
+ *   These are nested function-call records inside an assistant turn;
+ *   per M1 contract § 5 they map to `function_call_output`.
+ * - `toolResultCount`: number of `{ type: "tool_result" }` parts seen.
+ *   These are nested tool-output records inside a user turn; per
+ *   contract § 5 they map to `raw_tool_outputs`.
+ * - `toolPaths`: paths extracted from omitted tool_use inputs and
+ *   tool_result content (mirrors `codex-jsonl-parser.ts`'s tool-call
+ *   path-inventory behavior; the tool record itself is NOT in the
+ *   message text but its file references stay in the touched-files
+ *   inventory).
  *
- * Tool-use parts (`{ type: "tool_use", ... }`) and tool-result parts
- * (`{ type: "tool_result", ... }`) are intentionally NOT included in
- * the visible message text; those are captured separately as
- * raw_tool_outputs / function_call_output via the attachment-record path.
+ * R2 fix (per M2b R2 dispatch qitem-20260502011841-fb53d7fd): inspect
+ * nested content parts BEFORE discarding non-text. Previously dropped
+ * tool_use / tool_result silently, leading to misleading all-zero
+ * omittedCounts on real Claude transcripts where nearly every assistant
+ * turn has tool_use and most user turns have tool_result.
  */
-function textFromClaudeMessage(message: unknown): string {
-  if (!message || typeof message !== "object") return "";
-  const obj = message as Record<string, unknown>;
-  const content = obj.content;
+interface ContentWalkResult {
+  text: string;
+  toolUseCount: number;
+  toolResultCount: number;
+  toolPaths: string[];
+}
+
+/**
+ * Extract `text` candidates from a tool_result `content` field. The
+ * Claude API allows two shapes for `tool_result.content`:
+ * - string (the most common; e.g., a command's stdout): use directly.
+ * - array of part objects (when the tool returned structured content):
+ *   collect each part's `text` field.
+ * Returns a flat string suitable for path extraction.
+ */
+function toolResultText(content: unknown): string {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
-  return content
-    .map((part) => {
-      if (typeof part === "string") return part;
-      if (!part || typeof part !== "object") return "";
+  const parts: string[] = [];
+  for (const part of content) {
+    if (typeof part === "string") {
+      parts.push(part);
+    } else if (part && typeof part === "object") {
       const p = part as Record<string, unknown>;
-      if (p.type === "text" && typeof p.text === "string") return p.text;
-      // Skip tool_use / tool_result; they're not user-visible message text.
-      return "";
-    })
-    .filter((s) => s.length > 0)
-    .join("\n");
+      if (p.type === "text" && typeof p.text === "string") {
+        parts.push(p.text);
+      }
+    }
+  }
+  return parts.join("\n");
+}
+
+function walkClaudeContent(message: unknown): ContentWalkResult {
+  const out: ContentWalkResult = { text: "", toolUseCount: 0, toolResultCount: 0, toolPaths: [] };
+  if (!message || typeof message !== "object") return out;
+  const obj = message as Record<string, unknown>;
+  const content = obj.content;
+  if (typeof content === "string") {
+    out.text = content;
+    return out;
+  }
+  if (!Array.isArray(content)) return out;
+
+  const textParts: string[] = [];
+  for (const part of content) {
+    if (typeof part === "string") {
+      textParts.push(part);
+      continue;
+    }
+    if (!part || typeof part !== "object") continue;
+    const p = part as Record<string, unknown>;
+    const partType = typeof p.type === "string" ? p.type : "";
+
+    if (partType === "text" && typeof p.text === "string") {
+      textParts.push(p.text);
+      continue;
+    }
+
+    if (partType === "tool_use") {
+      out.toolUseCount += 1;
+      // Extract paths from the tool_use input. Mirrors the Codex parser's
+      // tool-call path-inventory behavior at codex-jsonl-parser.ts.
+      const input = p.input;
+      const inputStr = typeof input === "string" ? input : JSON.stringify(input ?? {});
+      out.toolPaths.push(inputStr);
+      continue;
+    }
+
+    if (partType === "tool_result") {
+      out.toolResultCount += 1;
+      // tool_result.content can be string OR array; both extract a flat
+      // text body for path scanning.
+      const resultText = toolResultText(p.content);
+      out.toolPaths.push(resultText);
+      continue;
+    }
+
+    // Other part types (image, etc.) are not user-visible text and not
+    // counted in the M1 contract enums; skip without counting.
+  }
+  out.text = textParts.filter((s) => s.length > 0).join("\n");
+  return out;
 }
 
 interface ClaudeRecord {
@@ -153,11 +226,30 @@ export function parseClaudeTranscript(content: string): StructuredTranscript {
 
     // Kept message.
     const role: "user" | "assistant" = recordType === "user" ? "user" : "assistant";
-    const rawText = textFromClaudeMessage(record.message);
-    if (hasSecretPattern(rawText)) {
+    const walked = walkClaudeContent(record.message);
+
+    // R2 fix: count nested tool_use / tool_result parts BEFORE deciding
+    // whether to emit a visible-text message. These counters fire
+    // regardless of whether the record contributes a message to the
+    // visible transcript — capturing them here is what M1 contract § 5
+    // requires for an honest `omitted_classes` field downstream.
+    for (let i = 0; i < walked.toolUseCount; i++) {
+      omittedCounter.recordOmission("function_call_output");
+    }
+    for (let i = 0; i < walked.toolResultCount; i++) {
+      omittedCounter.recordOmission("raw_tool_outputs");
+    }
+    // Path extraction from omitted tool parts (mirrors Codex parser
+    // behavior of walking tool-call args / inputs for path inventory
+    // even though the records themselves are omitted from messages).
+    for (const toolText of walked.toolPaths) {
+      extractPaths(toolText, pathCounts);
+    }
+
+    if (hasSecretPattern(walked.text)) {
       omittedCounter.recordRedaction();
     }
-    const text = redact(rawText).trim();
+    const text = redact(walked.text).trim();
     if (!text) continue;
 
     messageCount++;
