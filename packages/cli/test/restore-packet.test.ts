@@ -20,6 +20,15 @@ import {
   type ValidationResult,
 } from "../src/restore-packet/schema-validator.js";
 import { restorePacketCommand } from "../src/commands/restore-packet.js";
+import { redact, hasSecretPattern, SECRET_PATTERNS } from "../src/restore-packet/redaction.js";
+import {
+  classifyCodexRecord,
+  classifyClaudeRecord,
+  OmittedCounter,
+} from "../src/restore-packet/omitted-records.js";
+import { detectRuntime } from "../src/restore-packet/runtime-detect.js";
+import { parseCodexJsonl } from "../src/restore-packet/codex-jsonl-parser.js";
+import { parseClaudeTranscript } from "../src/restore-packet/claude-transcript-parser.js";
 
 // Minimal valid summary fixture matching the M1 contract (§ 2.1) required-field
 // set verbatim. Tests compose against this baseline by mutating one field at
@@ -270,5 +279,329 @@ describe("M2 restore-packet CLI command shell + mutual-exclusion", () => {
     const validateCmd = cmd.commands.find((c) => c.name() === "validate");
     expect(validateCmd).toBeDefined();
     expect(validateCmd!.description()).toMatch(/validate|schema/i);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// M2b sub-module tests (codex-jsonl-parser, claude-transcript-parser,
+// runtime-detect, redaction, omitted-records). All fixtures are
+// SYNTHETIC; no real transcript content imported. No auth tokens or
+// device codes (Quality Lesson v9).
+// ─────────────────────────────────────────────────────────────────────
+
+describe("M2b redaction (openrig-v0 / velocity-v1 patterns)", () => {
+  it("redacts sk-* tokens", () => {
+    const text = "Some leaked sk-aBcDeFgHiJkLmNoPqRsTuVwXyZ pattern here.";
+    const redacted = redact(text);
+    expect(redacted).not.toContain("sk-aBcDeFgHiJkLmNoPqRsTuVwXyZ");
+    expect(redacted).toContain("[REDACTED]");
+  });
+
+  it("redacts ghp_/ghs_/gho_ GitHub tokens", () => {
+    const text = "ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123 was leaked.";
+    const redacted = redact(text);
+    expect(redacted).not.toContain("ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123");
+    expect(redacted).toContain("[REDACTED]");
+  });
+
+  it("redacts github_pat_ fine-grained tokens", () => {
+    const text = "Token: github_pat_AbCdEfGh01234567890123456789";
+    const redacted = redact(text);
+    expect(redacted).not.toContain("github_pat_AbCdEfGh01234567890123456789");
+    expect(redacted).toContain("[REDACTED]");
+  });
+
+  it("redacts Bearer tokens", () => {
+    const text = "Authorization: Bearer aBcD1234.eFgH5678.iJkL9012-mNoP";
+    const redacted = redact(text);
+    expect(redacted).not.toContain("Bearer aBcD1234.eFgH5678.iJkL9012-mNoP");
+    expect(redacted).toContain("[REDACTED]");
+  });
+
+  it("redacts long base64-shaped strings", () => {
+    const text = "Encoded: aGVsbG93b3JsZGFlaW91YWVpb3VhZWlvdWFlaW91YWVpb3U=";
+    const redacted = redact(text);
+    expect(redacted).toContain("[REDACTED]");
+  });
+
+  it("leaves non-credential content unchanged byte-for-byte", () => {
+    const text = "Normal message: visit https://example.com for docs.";
+    const redacted = redact(text);
+    expect(redacted).toBe(text);
+  });
+
+  it("hasSecretPattern detects each known credential class", () => {
+    expect(hasSecretPattern("sk-AbCdEfGhIjKlMnOpQ")).toBe(true);
+    expect(hasSecretPattern("normal text without secrets")).toBe(false);
+    expect(hasSecretPattern("")).toBe(false);
+  });
+
+  it("exposes the pattern list (5 patterns per Velocity prior art)", () => {
+    expect(SECRET_PATTERNS.length).toBe(5);
+  });
+});
+
+describe("M2b omitted-records classifier", () => {
+  it("classifies Codex function_call → function_call_output", () => {
+    const result = classifyCodexRecord({ payload: { type: "function_call" } });
+    expect(result.kind).toBe("omitted");
+    if (result.kind === "omitted") {
+      expect(result.reason).toBe("function_call_output");
+    }
+  });
+
+  it("classifies Codex custom_tool_call → raw_tool_outputs", () => {
+    const result = classifyCodexRecord({ payload: { type: "custom_tool_call" } });
+    expect(result.kind).toBe("omitted");
+    if (result.kind === "omitted") {
+      expect(result.reason).toBe("raw_tool_outputs");
+    }
+  });
+
+  it("classifies Codex reasoning → reasoning_records", () => {
+    const result = classifyCodexRecord({ payload: { type: "reasoning" } });
+    expect(result.kind).toBe("omitted");
+    if (result.kind === "omitted") {
+      expect(result.reason).toBe("reasoning_records");
+    }
+  });
+
+  it("classifies Codex message+user-role → kept", () => {
+    const result = classifyCodexRecord({ payload: { type: "message", role: "user" } });
+    expect(result.kind).toBe("kept");
+  });
+
+  it("classifies Codex message+unknown-role → omitted (reasoning)", () => {
+    const result = classifyCodexRecord({ payload: { type: "message", role: "system" } });
+    expect(result.kind).toBe("omitted");
+  });
+
+  it("classifies Claude attachment → raw_tool_outputs", () => {
+    const result = classifyClaudeRecord({ type: "attachment" });
+    expect(result.kind).toBe("omitted");
+    if (result.kind === "omitted") {
+      expect(result.reason).toBe("raw_tool_outputs");
+    }
+  });
+
+  it("classifies Claude user|assistant → kept", () => {
+    expect(classifyClaudeRecord({ type: "user" }).kind).toBe("kept");
+    expect(classifyClaudeRecord({ type: "assistant" }).kind).toBe("kept");
+  });
+
+  it("classifies Claude summary → reasoning_records", () => {
+    const result = classifyClaudeRecord({ type: "summary" });
+    expect(result.kind).toBe("omitted");
+    if (result.kind === "omitted") {
+      expect(result.reason).toBe("reasoning_records");
+    }
+  });
+
+  it("OmittedCounter accumulates per-class counts and active-classes list", () => {
+    const counter = new OmittedCounter();
+    counter.recordOmission("reasoning_records");
+    counter.recordOmission("reasoning_records");
+    counter.recordOmission("function_call_output");
+    counter.recordRedaction();
+
+    expect(counter.counts.reasoning_records).toBe(2);
+    expect(counter.counts.function_call_output).toBe(1);
+    expect(counter.counts.redacted_secrets).toBe(1);
+    expect(counter.counts.raw_tool_outputs).toBe(0);
+
+    expect(counter.activeClasses()).toEqual([
+      "reasoning_records",
+      "function_call_output",
+      "redacted_secrets",
+    ]);
+  });
+});
+
+describe("M2b runtime-detect", () => {
+  it("detects Codex JSONL via response_item type marker", () => {
+    const content = `{"type":"session_meta","payload":{"cwd":"/x"}}
+{"type":"response_item","payload":{"type":"message","role":"user","content":"hi"}}`;
+    expect(detectRuntime(content)).toBe("codex");
+  });
+
+  it("detects Codex via session_meta alone", () => {
+    const content = `{"type":"session_meta","payload":{"cwd":"/x"}}`;
+    expect(detectRuntime(content)).toBe("codex");
+  });
+
+  it("detects Claude via top-level user/assistant type", () => {
+    const content = `{"type":"customTitle","customTitle":"x","sessionId":"s"}
+{"type":"user","message":{"role":"user","content":"hi"},"sessionId":"s"}`;
+    expect(detectRuntime(content)).toBe("claude-code");
+  });
+
+  it("returns null on empty input", () => {
+    expect(detectRuntime("")).toBe(null);
+  });
+
+  it("returns null on non-JSONL garbage", () => {
+    expect(detectRuntime("hello world\nfoo bar")).toBe(null);
+  });
+
+  it("returns null on JSONL with no runtime markers (ambiguous)", () => {
+    const content = `{"foo":"bar"}
+{"baz":"qux"}`;
+    expect(detectRuntime(content)).toBe(null);
+  });
+
+  it("does not use file extension or filename — pure content shape", () => {
+    // Calling with a string that LOOKS like a filename should still return null.
+    expect(detectRuntime("/tmp/fake.jsonl")).toBe(null);
+    expect(detectRuntime("rollout-2026-04-23.jsonl")).toBe(null);
+  });
+});
+
+describe("M2b codex-jsonl-parser", () => {
+  it("parses session_meta + response_item messages into StructuredTranscript", () => {
+    const content = `{"type":"session_meta","payload":{"cwd":"/Users/wrandom/code/projects/openrig-hub","id":"abc-123"}}
+{"type":"response_item","timestamp":"2026-05-02T01:00:00Z","payload":{"type":"message","role":"user","content":"Hello world"}}
+{"type":"response_item","timestamp":"2026-05-02T01:00:01Z","payload":{"type":"message","role":"assistant","content":[{"type":"text","text":"Hi back"}]}}`;
+    const result = parseCodexJsonl(content);
+    expect(result.sessionMeta?.cwd).toBe("/Users/wrandom/code/projects/openrig-hub");
+    expect(result.sessionMeta?.sessionId).toBe("abc-123");
+    expect(result.messageCount).toBe(2);
+    expect(result.messages[0]!.role).toBe("user");
+    expect(result.messages[0]!.text).toBe("Hello world");
+    expect(result.messages[1]!.role).toBe("assistant");
+    expect(result.messages[1]!.text).toBe("Hi back");
+    expect(result.lineCount).toBe(3);
+  });
+
+  it("filters reasoning + function_call + custom_tool_call records and counts them", () => {
+    const content = `{"type":"response_item","payload":{"type":"reasoning","content":"<thinking>"}}
+{"type":"response_item","payload":{"type":"function_call","arguments":"{\\"path\\":\\"/Users/wrandom/x.txt\\"}"}}
+{"type":"response_item","payload":{"type":"custom_tool_call","input":"some input"}}
+{"type":"response_item","payload":{"type":"message","role":"user","content":"kept"}}`;
+    const result = parseCodexJsonl(content);
+    expect(result.messageCount).toBe(1);
+    expect(result.omittedCounts.reasoning_records).toBeGreaterThanOrEqual(1);
+    expect(result.omittedCounts.function_call_output).toBe(1);
+    expect(result.omittedCounts.raw_tool_outputs).toBe(1);
+  });
+
+  it("counts compacted records separately and skips them from messages", () => {
+    const content = `{"type":"compacted","payload":{}}
+{"type":"compacted","payload":{}}
+{"type":"response_item","payload":{"type":"message","role":"user","content":"msg"}}`;
+    const result = parseCodexJsonl(content);
+    expect(result.compactedCount).toBe(2);
+    expect(result.messageCount).toBe(1);
+  });
+
+  it("redacts credential patterns in message content", () => {
+    const content = `{"type":"response_item","payload":{"type":"message","role":"user","content":"my token is sk-AbCdEfGhIjKlMnOpQrStUv now"}}`;
+    const result = parseCodexJsonl(content);
+    expect(result.messages[0]!.text).toContain("[REDACTED]");
+    expect(result.messages[0]!.text).not.toContain("sk-AbCdEfGhIjKlMnOpQrStUv");
+    expect(result.omittedCounts.redacted_secrets).toBe(1);
+  });
+
+  it("skips malformed JSONL lines silently (matches Velocity prior art)", () => {
+    const content = `{"type":"response_item","payload":{"type":"message","role":"user","content":"first"}}
+not valid json garbage line
+{"type":"response_item","payload":{"type":"message","role":"user","content":"second"}}`;
+    const result = parseCodexJsonl(content);
+    expect(result.messageCount).toBe(2);
+    expect(result.lineCount).toBe(3);
+  });
+
+  it("extracts paths from message content and tool args; sorts by frequency", () => {
+    const content = `{"type":"response_item","payload":{"type":"message","role":"user","content":"see packages/cli/src/index.ts and packages/cli/src/index.ts again"}}
+{"type":"response_item","payload":{"type":"function_call","arguments":"{\\"path\\":\\"/Users/wrandom/code/projects/openrig-hub/README.md\\"}"}}`;
+    const result = parseCodexJsonl(content);
+    expect(result.paths.length).toBeGreaterThan(0);
+    const indexEntry = result.paths.find((p) => p.path === "packages/cli/src/index.ts");
+    expect(indexEntry?.count).toBeGreaterThanOrEqual(2);
+  });
+});
+
+describe("M2b claude-transcript-parser", () => {
+  it("parses Claude user + assistant messages into StructuredTranscript", () => {
+    const content = `{"type":"customTitle","customTitle":"M2b test","sessionId":"sess-1"}
+{"type":"user","message":{"role":"user","content":"hello"},"cwd":"/x","sessionId":"sess-1","timestamp":"2026-05-02T01:00:00Z"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"hi back"}]},"cwd":"/x","sessionId":"sess-1","timestamp":"2026-05-02T01:00:01Z"}`;
+    const result = parseClaudeTranscript(content);
+    expect(result.messageCount).toBe(2);
+    expect(result.messages[0]!.role).toBe("user");
+    expect(result.messages[0]!.text).toBe("hello");
+    expect(result.messages[1]!.role).toBe("assistant");
+    expect(result.messages[1]!.text).toBe("hi back");
+  });
+
+  it("captures sessionMeta from the first record carrying cwd + sessionId", () => {
+    const content = `{"type":"customTitle","customTitle":"x","sessionId":"sess-2"}
+{"type":"user","message":{"role":"user","content":"first"},"cwd":"/Users/wrandom/code","sessionId":"sess-2"}`;
+    const result = parseClaudeTranscript(content);
+    expect(result.sessionMeta?.cwd).toBe("/Users/wrandom/code");
+    expect(result.sessionMeta?.sessionId).toBe("sess-2");
+  });
+
+  it("filters attachments → raw_tool_outputs counter", () => {
+    const content = `{"type":"user","message":{"role":"user","content":"see attached"},"cwd":"/x","sessionId":"s"}
+{"type":"attachment","attachment":{"path":"/Users/wrandom/x.txt","content":"file body"},"cwd":"/x","sessionId":"s"}`;
+    const result = parseClaudeTranscript(content);
+    expect(result.messageCount).toBe(1);
+    expect(result.omittedCounts.raw_tool_outputs).toBe(1);
+  });
+
+  it("redacts credential patterns in message content", () => {
+    const content = `{"type":"user","message":{"role":"user","content":"my token is ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0 now"},"cwd":"/x","sessionId":"s"}`;
+    const result = parseClaudeTranscript(content);
+    expect(result.messages[0]!.text).toContain("[REDACTED]");
+    expect(result.omittedCounts.redacted_secrets).toBe(1);
+  });
+
+  it("compactedCount is always 0 (Claude transcripts don't emit compaction records)", () => {
+    const content = `{"type":"user","message":{"role":"user","content":"x"},"cwd":"/x","sessionId":"s"}`;
+    const result = parseClaudeTranscript(content);
+    expect(result.compactedCount).toBe(0);
+  });
+
+  it("emits the SAME StructuredTranscript shape as the Codex parser (interface conformance)", () => {
+    const codex = parseCodexJsonl(`{"type":"response_item","payload":{"type":"message","role":"user","content":"x"}}`);
+    const claude = parseClaudeTranscript(`{"type":"user","message":{"role":"user","content":"x"},"cwd":"/x","sessionId":"s"}`);
+    // Field-by-field check that both expose the same top-level keys.
+    const codexKeys = Object.keys(codex).sort();
+    const claudeKeys = Object.keys(claude).sort();
+    expect(codexKeys).toEqual(claudeKeys);
+    // Both must expose omittedCounts with all 4 enum keys.
+    expect(Object.keys(codex.omittedCounts).sort()).toEqual([
+      "function_call_output",
+      "raw_tool_outputs",
+      "reasoning_records",
+      "redacted_secrets",
+    ]);
+    expect(Object.keys(claude.omittedCounts).sort()).toEqual([
+      "function_call_output",
+      "raw_tool_outputs",
+      "reasoning_records",
+      "redacted_secrets",
+    ]);
+  });
+});
+
+describe("M2b interaction: parse → redact → omitted-records counter chain", () => {
+  it("counts redacted_secrets AND filters all 3 codex omitted classes in one parse", () => {
+    const content = `{"type":"session_meta","payload":{"cwd":"/x"}}
+{"type":"response_item","payload":{"type":"reasoning"}}
+{"type":"response_item","payload":{"type":"function_call","arguments":"{}"}}
+{"type":"response_item","payload":{"type":"custom_tool_call","input":"{}"}}
+{"type":"response_item","payload":{"type":"message","role":"user","content":"my token sk-AbCdEfGhIjKlMnOpQrSt and more text"}}
+{"type":"response_item","payload":{"type":"message","role":"assistant","content":"clean reply"}}`;
+    const result = parseCodexJsonl(content);
+    expect(result.messageCount).toBe(2);
+    expect(result.omittedCounts.reasoning_records).toBeGreaterThanOrEqual(1);
+    expect(result.omittedCounts.function_call_output).toBe(1);
+    expect(result.omittedCounts.raw_tool_outputs).toBe(1);
+    expect(result.omittedCounts.redacted_secrets).toBe(1);
+    // The user message is redacted but kept.
+    expect(result.messages[0]!.text).toContain("[REDACTED]");
+    // The assistant message is unchanged.
+    expect(result.messages[1]!.text).toBe("clean reply");
   });
 });
