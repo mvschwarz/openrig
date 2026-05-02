@@ -861,6 +861,7 @@ describe("M2c-CLI packet-writer atomic emission", () => {
       authorityBoundaries: "May edit packages/cli/ and packages/daemon/ within M2c boundary; no M3+ surfaces.",
       sourceTrustRanking: ["rig_whoami", "bounded_latest_transcript"],
       sourceSessionId: "velocity-driver@openrig-velocity",
+      sourceRig: "openrig-velocity",
       sourceCwd: "~/code/projects/openrig-hub",
       generatorVersion: "rig-restore-packet@0.1.0",
       includeFullTranscript: false,
@@ -1046,6 +1047,7 @@ describe("M2c-CLI Velocity-shape round-trip (synthetic 4-role fixtures)", () => 
         authorityBoundaries: `${role} authority for Velocity-replay context.`,
         sourceTrustRanking: ["rig_whoami", "bounded_latest_transcript"],
         sourceSessionId: `velocity-${role}@openrig-velocity-code`,
+        sourceRig: "openrig-velocity-code",
         sourceCwd: "~/code/projects/openrig-hub",
         generatorVersion: "rig-restore-packet@0.1.0",
         includeFullTranscript: true,
@@ -1127,6 +1129,11 @@ describe("M2c-CLI redaction + omitted-record round-trip end-to-end", () => {
       "--target", targetDir,
       "--target-rig", "openrig-velocity-claude",
       "--target-runtime", "claude-code",
+      // src-session is bare (no @); operator must supply --source-rig-override
+      // per R2 honest-fallback policy.
+      "--source-rig-override", "openrig-test",
+      "--current-work-summary", "mock-daemon round-trip with bare session id + rig override.",
+      "--authority-boundaries", "test-only.",
     ]);
 
     // Daemon was queried at the new full-read route; no mutation methods called.
@@ -1139,6 +1146,8 @@ describe("M2c-CLI redaction + omitted-record round-trip end-to-end", () => {
     const validation = validateRestoreSummary(summary);
     expect(validation.valid, JSON.stringify(validation.errors)).toBe(true);
     expect(summary.source_session_id).toBe("src-session");
+    // R2: operator-supplied --source-rig-override is honored.
+    expect(summary.source_rig).toBe("openrig-test");
   });
 
   it("M2b R2 nested Claude content fixture: round-trips with non-zero omittedCounts in summary", async () => {
@@ -1185,6 +1194,7 @@ describe("M2c-CLI redaction + omitted-record round-trip end-to-end", () => {
       authorityBoundaries: "Velocity authority.",
       sourceTrustRanking: ["rig_whoami"],
       sourceSessionId: "claude-session-id",
+      sourceRig: "openrig-velocity-claude",
       sourceCwd: "~/code/projects/openrig-hub",
       generatorVersion: "rig-restore-packet@0.1.0",
       includeFullTranscript: false,
@@ -1196,5 +1206,247 @@ describe("M2c-CLI redaction + omitted-record round-trip end-to-end", () => {
     // Touched-files inventory captured the path from the omitted tool_result.
     expect(summary.touched_files.top_paths.some((p: { path: string }) =>
       p.path === "~/code/projects/openrig-hub")).toBe(true);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// M2c-CLI R2 — `--source-jsonl` provenance fix.
+//
+// Guard BLOCKED M2c-CLI at openrig e5de3ab because the `--source-jsonl`
+// adapter wrote the JSONL FILE PATH into `restore-summary.json.source_session_id`
+// and forced `source_rig: "unknown"`, EVEN WHEN the parsed Codex JSONL had
+// `session_meta.payload.id = "<seat>@<rig>"` available.
+//
+// These tests exercise the CLI command surface end-to-end (Quality Lesson
+// v12 candidate) — they parseAsync through createProgram() against synthetic
+// JSONL fixtures with realistic session_meta records, so the bug between
+// parse and writePacket call IS exercised. Writer-internal tests bypass
+// this path by passing manually-constructed sourceSessionId.
+// ─────────────────────────────────────────────────────────────────────
+
+describe("M2c-CLI R2 --source-jsonl provenance from parsed session_meta", () => {
+  let tmpRoot: string;
+
+  beforeEach(async () => {
+    const fs = await import("node:fs");
+    const os = await import("node:os");
+    const path = await import("node:path");
+    tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "restore-packet-r2-"));
+  });
+
+  afterEach(async () => {
+    const fs = await import("node:fs");
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+  });
+
+  // The exact reproducer fixture from the guard's BLOCK artifact.
+  function jsonlWithSessionMeta(): string {
+    return [
+      JSON.stringify({
+        type: "session_meta",
+        payload: {
+          cwd: "~/code/projects/openrig-hub",
+          id: "velocity-driver@openrig-velocity",
+        },
+      }),
+      JSON.stringify({
+        type: "response_item",
+        payload: {
+          type: "message",
+          role: "user",
+          content: "hello direct source",
+        },
+      }),
+    ].join("\n");
+  }
+
+  function jsonlWithoutSessionMeta(): string {
+    return [
+      JSON.stringify({
+        type: "response_item",
+        payload: {
+          type: "message",
+          role: "user",
+          content: "no session_meta in this JSONL",
+        },
+      }),
+    ].join("\n");
+  }
+
+  function jsonlWithBareSessionMetaId(): string {
+    // session_meta exists but the id is a bare token, not <seat>@<rig> shape.
+    return [
+      JSON.stringify({
+        type: "session_meta",
+        payload: { cwd: "/x", id: "bare-id-no-at" },
+      }),
+      JSON.stringify({
+        type: "response_item",
+        payload: { type: "message", role: "user", content: "hi" },
+      }),
+    ].join("\n");
+  }
+
+  it("guard reproducer: --source-jsonl with session_meta sets source_session_id from parsed id and source_rig from <seat>@<rig> split", async () => {
+    const { createProgram } = await import("../src/index.js");
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const src = path.join(tmpRoot, "source.jsonl");
+    fs.writeFileSync(src, jsonlWithSessionMeta(), "utf8");
+    const target = path.join(tmpRoot, "packet");
+
+    const program = createProgram();
+    program.exitOverride();
+    await program.parseAsync([
+      "node", "rig", "restore-packet", "write",
+      "--source-jsonl", src,
+      "--target", target,
+      "--target-rig", "openrig-velocity-claude",
+      "--target-runtime", "claude-code",
+      "--current-work-summary", "R2 guard reproducer: provenance from parsed session_meta.",
+      "--authority-boundaries", "R2 provenance check only.",
+    ]);
+
+    expect(fs.existsSync(target)).toBe(true);
+    const summary = JSON.parse(fs.readFileSync(path.join(target, "restore-summary.json"), "utf-8"));
+    const validation = validateRestoreSummary(summary);
+    expect(validation.valid, JSON.stringify(validation.errors)).toBe(true);
+    // Bug reproducer's expected values per BLOCK artifact:
+    expect(summary.source_session_id).toBe("velocity-driver@openrig-velocity");
+    expect(summary.source_rig).toBe("openrig-velocity");
+    expect(summary.source_cwd).toBe("~/code/projects/openrig-hub");
+    // session_session_id MUST NOT be the file path.
+    expect(summary.source_session_id).not.toContain("/source.jsonl");
+    expect(summary.source_session_id).not.toContain(tmpRoot);
+    // transcript.md emitted (messageCount > 0 → includeFullTranscript true).
+    expect(fs.existsSync(path.join(target, "transcript.md"))).toBe(true);
+  });
+
+  it("--source-jsonl with NO session_meta and NO override flags fails with explicit guidance", async () => {
+    const { createProgram } = await import("../src/index.js");
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const src = path.join(tmpRoot, "no-session.jsonl");
+    fs.writeFileSync(src, jsonlWithoutSessionMeta(), "utf8");
+    const target = path.join(tmpRoot, "packet-no-session");
+
+    const stderr: string[] = [];
+    const origConsoleError = console.error;
+    const origExitCode = process.exitCode;
+    console.error = (...args: unknown[]) => stderr.push(args.join(" "));
+    process.exitCode = undefined;
+    try {
+      const program = createProgram();
+      program.exitOverride();
+      await program.parseAsync([
+        "node", "rig", "restore-packet", "write",
+        "--source-jsonl", src,
+        "--target", target,
+        "--target-rig", "openrig-velocity-claude",
+        "--target-runtime", "claude-code",
+        "--current-work-summary", "no-session-meta error path.",
+        "--authority-boundaries", "R2 provenance check only.",
+      ]);
+    } finally {
+      console.error = origConsoleError;
+    }
+    expect(process.exitCode).not.toBe(0);
+    process.exitCode = origExitCode;
+    const errStr = stderr.join("\n");
+    expect(errStr).toMatch(/session.meta|--source-session-id-override|--source-rig-override|provenance/i);
+    // No partial packet written.
+    expect(fs.existsSync(target)).toBe(false);
+  });
+
+  it("--source-jsonl with NO session_meta + both overrides succeeds with overridden provenance", async () => {
+    const { createProgram } = await import("../src/index.js");
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const src = path.join(tmpRoot, "no-session-with-overrides.jsonl");
+    fs.writeFileSync(src, jsonlWithoutSessionMeta(), "utf8");
+    const target = path.join(tmpRoot, "packet-overrides");
+
+    const program = createProgram();
+    program.exitOverride();
+    await program.parseAsync([
+      "node", "rig", "restore-packet", "write",
+      "--source-jsonl", src,
+      "--target", target,
+      "--target-rig", "openrig-velocity-claude",
+      "--target-runtime", "claude-code",
+      "--source-session-id-override", "manual-driver@manual-rig",
+      "--source-rig-override", "manual-rig",
+      "--current-work-summary", "override path; honest provenance.",
+      "--authority-boundaries", "R2 override path.",
+    ]);
+
+    const summary = JSON.parse(fs.readFileSync(path.join(target, "restore-summary.json"), "utf-8"));
+    expect(summary.source_session_id).toBe("manual-driver@manual-rig");
+    expect(summary.source_rig).toBe("manual-rig");
+    const validation = validateRestoreSummary(summary);
+    expect(validation.valid, JSON.stringify(validation.errors)).toBe(true);
+  });
+
+  it("--source-jsonl with bare-id session_meta fails without --source-rig-override (no silent unknown)", async () => {
+    const { createProgram } = await import("../src/index.js");
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const src = path.join(tmpRoot, "bare-id.jsonl");
+    fs.writeFileSync(src, jsonlWithBareSessionMetaId(), "utf8");
+    const target = path.join(tmpRoot, "packet-bare");
+
+    const stderr: string[] = [];
+    const origConsoleError = console.error;
+    const origExitCode = process.exitCode;
+    console.error = (...args: unknown[]) => stderr.push(args.join(" "));
+    process.exitCode = undefined;
+    try {
+      const program = createProgram();
+      program.exitOverride();
+      await program.parseAsync([
+        "node", "rig", "restore-packet", "write",
+        "--source-jsonl", src,
+        "--target", target,
+        "--target-rig", "openrig-velocity-claude",
+        "--target-runtime", "claude-code",
+        "--current-work-summary", "bare-id no-rig-override path.",
+        "--authority-boundaries", "R2 honest fallback.",
+      ]);
+    } finally {
+      console.error = origConsoleError;
+    }
+    expect(process.exitCode).not.toBe(0);
+    process.exitCode = origExitCode;
+    const errStr = stderr.join("\n");
+    expect(errStr).toMatch(/source.rig|--source-rig-override|<seat>@<rig>|derive/i);
+    expect(fs.existsSync(target)).toBe(false);
+  });
+
+  it("--source-jsonl with --source-session-id-override overrides parsed session_meta id", async () => {
+    const { createProgram } = await import("../src/index.js");
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    // JSONL has session_meta.id = velocity-driver@openrig-velocity
+    const src = path.join(tmpRoot, "override-wins.jsonl");
+    fs.writeFileSync(src, jsonlWithSessionMeta(), "utf8");
+    const target = path.join(tmpRoot, "packet-override-wins");
+
+    const program = createProgram();
+    program.exitOverride();
+    await program.parseAsync([
+      "node", "rig", "restore-packet", "write",
+      "--source-jsonl", src,
+      "--target", target,
+      "--target-rig", "openrig-velocity-claude",
+      "--target-runtime", "claude-code",
+      "--source-session-id-override", "operator-renamed@operator-rig",
+      "--source-rig-override", "operator-rig",
+      "--current-work-summary", "override-wins path.",
+      "--authority-boundaries", "operator-supplied provenance.",
+    ]);
+
+    const summary = JSON.parse(fs.readFileSync(path.join(target, "restore-summary.json"), "utf-8"));
+    expect(summary.source_session_id).toBe("operator-renamed@operator-rig");
+    expect(summary.source_rig).toBe("operator-rig");
   });
 });
