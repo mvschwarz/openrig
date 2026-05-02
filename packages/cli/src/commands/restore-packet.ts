@@ -1,17 +1,25 @@
 // restore-packet.ts — `rig restore-packet {write,read,validate}` CLI command.
 //
-// M2a chunk: command shape + mutual-exclusion for `write`; `read` and
-// `validate` are subcommand stubs that return a clear "M3 only" error so
-// the CLI surface is registrable now.
-//
-// M2b will add: source-adapter wiring (codex-jsonl-parser, claude-transcript-
-// parser, runtime-detect, redaction, omitted-records).
-// M2c will add: packet-writer atomic emission + daemon route integration.
-// M3 will replace the read/validate stubs with real implementations.
+// M2a: command shape + mutual-exclusion + read/validate stubs.
+// M2b: source-adapter wiring (codex-jsonl-parser, claude-transcript-parser,
+//      runtime-detect, redaction, omitted-records).
+// M2c-CLI: write action full impl using packet-writer.ts; --source-jsonl
+//          + --source-session adapter wiring; CLI flag defaults for the
+//          ~11 contract-required fields not derivable from the parser.
+// M2c-Daemon: full-read transcript route + auth + redaction + tests.
+// M3: real read + validate implementations replacing the stubs.
 
 import { Command } from "commander";
+import { readFileSync } from "node:fs";
+import { resolve as resolvePath } from "node:path";
 import { DaemonClient } from "../client.js";
-import { type LifecycleDeps } from "../daemon-lifecycle.js";
+import { getDaemonStatus, getDaemonUrl, type LifecycleDeps } from "../daemon-lifecycle.js";
+import { realDeps } from "./daemon.js";
+import { detectRuntime } from "../restore-packet/runtime-detect.js";
+import { parseCodexJsonl } from "../restore-packet/codex-jsonl-parser.js";
+import { parseClaudeTranscript } from "../restore-packet/claude-transcript-parser.js";
+import { writePacket, type WritePacketOptions } from "../restore-packet/packet-writer.js";
+import type { SourceRuntime, StructuredTranscript } from "../restore-packet/types.js";
 
 export interface RestorePacketDeps {
   lifecycleDeps?: LifecycleDeps;
@@ -27,6 +35,13 @@ interface WriteOptions {
   targetRuntime?: string;
   targetWorkspaceRoot?: string;
   defaultTargetRepo?: string;
+  rolePointer?: string;
+  currentWorkSummary?: string;
+  nextOwner?: string;
+  caveat?: string[];
+  authorityBoundaries?: string;
+  sourceTrustRanking?: string;
+  generatorVersion?: string;
 }
 
 function reportFailure(message: string): void {
@@ -34,11 +49,79 @@ function reportFailure(message: string): void {
   process.exitCode = 2;
 }
 
-export function restorePacketCommand(_depsOverride?: RestorePacketDeps): Command {
-  // _depsOverride is reserved for M2b/M2c when the source adapters need a
-  // DaemonClient (full-read transcript route) and a LifecycleDeps for daemon
-  // boot / status checks. M2a does not use either; the test suite passes
-  // depsOverride? as undefined.
+function isValidRuntime(value: string | undefined): value is SourceRuntime {
+  return value === "codex" || value === "claude-code";
+}
+
+async function fetchSourceTranscriptViaDaemon(
+  session: string,
+  deps: RestorePacketDeps | undefined,
+): Promise<{ content: string; sourceCwd: string | null }> {
+  const lifecycleDeps = deps?.lifecycleDeps ?? realDeps();
+  const status = await getDaemonStatus(lifecycleDeps);
+  if (status.state !== "running" || typeof status.port !== "number") {
+    throw new Error("daemon not running; start it with: rig daemon start");
+  }
+  const url = getDaemonUrl(status);
+  const client = (deps?.clientFactory ?? ((u: string) => new DaemonClient(u)))(url);
+  // M2c-Daemon will define this route. M2c-CLI calls it; M2c-CLI tests
+  // mock the daemon (compact-plan.test.ts:166-176 pattern). The path is
+  // a draft — M2c-Daemon may pick a different naming convention; if so,
+  // M2c-Daemon will land that change in restore-packet.ts the same commit
+  // that adds the daemon route.
+  const path = `/api/transcripts/${encodeURIComponent(session)}/full`;
+  const response = await client.get<{ content: string; cwd?: string | null }>(path);
+  if (response.status >= 400 || !response.data) {
+    throw new Error(
+      `daemon transcript fetch failed: HTTP ${response.status}: ${
+        typeof response.data === "object" && response.data !== null
+          ? JSON.stringify(response.data)
+          : "(no body)"
+      }`,
+    );
+  }
+  return {
+    content: response.data.content ?? "",
+    sourceCwd: response.data.cwd ?? null,
+  };
+}
+
+function buildWritePacketOptions(
+  opts: WriteOptions,
+  structured: StructuredTranscript,
+  sourceRuntime: SourceRuntime,
+  sourceCwdFallback: string,
+  sourceSessionId: string,
+): WritePacketOptions {
+  const trustRankingDefault = "rig_whoami,bounded_latest_transcript";
+  const trustRankingRaw = opts.sourceTrustRanking ?? trustRankingDefault;
+  const trustRanking = trustRankingRaw
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+
+  return {
+    targetDir: resolvePath(opts.target),
+    structured,
+    sourceRuntime,
+    targetRig: opts.targetRig ?? "openrig-velocity",
+    targetRuntime: isValidRuntime(opts.targetRuntime) ? opts.targetRuntime : "claude-code",
+    targetWorkspaceRoot: opts.targetWorkspaceRoot ?? structured.sessionMeta?.cwd ?? sourceCwdFallback,
+    defaultTargetRepo: opts.defaultTargetRepo ?? null,
+    rolePointer: opts.rolePointer ?? `rigs/${opts.targetRig ?? "openrig-velocity"}/state/velocity/role.md`,
+    currentWorkSummary: opts.currentWorkSummary ?? "Cross-runtime restore packet generated by rig restore-packet write.",
+    nextOwner: opts.nextOwner ?? "self",
+    caveats: opts.caveat ?? [],
+    authorityBoundaries: opts.authorityBoundaries ?? "Restored seat authority per source session role.",
+    sourceTrustRanking: trustRanking,
+    sourceSessionId,
+    sourceCwd: structured.sessionMeta?.cwd ?? sourceCwdFallback,
+    generatorVersion: opts.generatorVersion ?? "rig-restore-packet@0.1.0",
+    includeFullTranscript: structured.messages.length > 0,
+  };
+}
+
+export function restorePacketCommand(depsOverride?: RestorePacketDeps): Command {
   const cmd = new Command("restore-packet")
     .description(
       "Generate, read, and validate cross-runtime restore packets per the v0 standard",
@@ -74,6 +157,36 @@ export function restorePacketCommand(_depsOverride?: RestorePacketDeps): Command
       "--default-target-repo <path>",
       "Default target repo absolute path or null",
     )
+    .option(
+      "--role-pointer <path>",
+      "Role guidance pointer path or URI for the restored seat",
+    )
+    .option(
+      "--current-work-summary <text>",
+      "One-paragraph summary of the source seat's current work",
+    )
+    .option(
+      "--next-owner <name>",
+      'Who the restored seat hands off to next (default: "self")',
+    )
+    .option(
+      "--caveat <text>",
+      "Caveat to include in the packet (repeatable)",
+      (value: string, prev: string[] = []) => prev.concat([value]),
+      [] as string[],
+    )
+    .option(
+      "--authority-boundaries <text>",
+      "Explicit statement of restored-seat authority",
+    )
+    .option(
+      "--source-trust-ranking <csv>",
+      "Comma-separated source-trust ranking; default: rig_whoami,bounded_latest_transcript",
+    )
+    .option(
+      "--generator-version <version>",
+      'Generator version identifier (default: "rig-restore-packet@0.1.0")',
+    )
     .action(async (opts: WriteOptions) => {
       const hasSession = typeof opts.sourceSession === "string" && opts.sourceSession.length > 0;
       const hasJsonl = typeof opts.sourceJsonl === "string" && opts.sourceJsonl.length > 0;
@@ -89,15 +202,60 @@ export function restorePacketCommand(_depsOverride?: RestorePacketDeps): Command
         );
         return;
       }
-      // M2b lands the actual write path. The mutual-exclusion checks above
-      // are M2a-final; from here on (M2b) the source-adapter dispatch will
-      // route to codex-jsonl-parser, claude-transcript-parser, or the
-      // daemon full-read route.
-      reportFailure(
-        "M2a: source adapters land in M2b; this command is registered but not yet executable. (target was: " +
-          opts.target +
-          ")",
-      );
+
+      try {
+        let content: string;
+        let sourceCwdFallback: string;
+        let sourceSessionId: string;
+        if (hasJsonl) {
+          const jsonlPath = resolvePath(opts.sourceJsonl!);
+          content = readFileSync(jsonlPath, "utf-8");
+          sourceCwdFallback = "/";
+          sourceSessionId = jsonlPath;
+        } else {
+          const session = opts.sourceSession!;
+          const fetched = await fetchSourceTranscriptViaDaemon(session, depsOverride);
+          content = fetched.content;
+          sourceCwdFallback = fetched.sourceCwd ?? "/";
+          sourceSessionId = session;
+        }
+
+        let runtime: SourceRuntime | null = null;
+        if (isValidRuntime(opts.sourceRuntime)) {
+          runtime = opts.sourceRuntime;
+        } else if (typeof opts.sourceRuntime === "string" && opts.sourceRuntime.length > 0) {
+          reportFailure(
+            `--source-runtime must be 'codex' or 'claude-code'; got '${opts.sourceRuntime}'.`,
+          );
+          return;
+        } else {
+          runtime = detectRuntime(content);
+          if (runtime === null) {
+            reportFailure(
+              "could not auto-detect source runtime; pass --source-runtime <claude-code|codex> explicitly.",
+            );
+            return;
+          }
+        }
+
+        const structured = runtime === "codex"
+          ? parseCodexJsonl(content)
+          : parseClaudeTranscript(content);
+
+        const writeOpts = buildWritePacketOptions(opts, structured, runtime, sourceCwdFallback, sourceSessionId);
+        const result = await writePacket(writeOpts);
+
+        // Per Quality Lesson v9: log only metadata, NOT transcript content.
+        console.log(`packet: ${result.targetDir}`);
+        console.log(`files: ${result.files.length}`);
+        for (const f of result.files) {
+          console.log(`  - ${f}`);
+        }
+        console.log(`messages: ${structured.messageCount}`);
+        console.log(`omitted-classes: ${Object.entries(structured.omittedCounts).filter(([, v]) => v > 0).map(([k, v]) => `${k}=${v}`).join(",") || "(none)"}`);
+      } catch (err) {
+        reportFailure((err as Error).message);
+      }
     });
 
   cmd.command("read")

@@ -9,8 +9,22 @@
 // fail first, then the implementation was written to green. The committed
 // state is the green/passing state.
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { Command } from "commander";
+
+// Module-level mock for daemon-lifecycle so the M2c-CLI mock-daemon
+// round-trip test can drive a fake "daemon running" state without
+// touching the host's real daemon. Other tests in this file don't
+// invoke daemon-lifecycle (they exercise pure parsers / packet-writer),
+// so they're unaffected.
+vi.mock("../src/daemon-lifecycle.js", async () => {
+  const actual = await vi.importActual<Record<string, unknown>>("../src/daemon-lifecycle.js");
+  return {
+    ...actual,
+    getDaemonStatus: vi.fn(async () => ({ state: "running", healthy: true, pid: 1234, port: 7433 })),
+    getDaemonUrl: vi.fn(() => "http://localhost:7433"),
+  };
+});
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
@@ -797,5 +811,390 @@ describe("M2b R2 Claude parser nested-content-part handling", () => {
     expect(r.messageCount).toBe(1);
     expect(r.omittedCounts.function_call_output).toBe(0);
     expect(r.omittedCounts.raw_tool_outputs).toBe(0);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// M2c-CLI: packet-writer atomic emission + round-trip tests.
+//
+// packet-writer.ts assembles a v0 restore packet directory atomically:
+// writes to a tempdir, validates the resulting restore-summary.json
+// against the embedded JSON Schema, then renames tempdir → target.
+// On any validation failure, the tempdir is removed; no partial packet
+// is left in the operator's filesystem.
+//
+// Per M1 contract § 1: directory contains 4 required files
+// (restore-instructions.md, transcript-latest.md, touched-files.md,
+// restore-summary.json) plus optional transcript.md.
+// ─────────────────────────────────────────────────────────────────────
+
+describe("M2c-CLI packet-writer atomic emission", () => {
+  let tmpRoot: string;
+
+  beforeEach(async () => {
+    const fs = await import("node:fs");
+    const os = await import("node:os");
+    const path = await import("node:path");
+    tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "restore-packet-test-"));
+  });
+
+  afterEach(async () => {
+    const fs = await import("node:fs");
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+  });
+
+  function buildBaselineOpts(targetDir: string): Record<string, unknown> {
+    return {
+      targetDir,
+      structured: parseCodexJsonl(`{"type":"session_meta","payload":{"cwd":"~/code/projects/openrig-hub","id":"src-session-id"}}
+{"type":"response_item","timestamp":"2026-05-02T01:00:00Z","payload":{"type":"message","role":"user","content":"Walk through the M1 contract"}}
+{"type":"response_item","timestamp":"2026-05-02T01:00:01Z","payload":{"type":"message","role":"assistant","content":[{"type":"text","text":"Per § 2.1 the schema requires 21 fields"}]}}`),
+      sourceRuntime: "codex" as const,
+      targetRig: "openrig-velocity-claude",
+      targetRuntime: "claude-code" as const,
+      targetWorkspaceRoot: "~/code/projects/openrig-hub",
+      defaultTargetRepo: "~/code/projects/openrig-hub/openrig",
+      rolePointer: "rigs/openrig-velocity-claude/state/velocity/driver-role.md",
+      currentWorkSummary: "Working on Restore-Packet vertical M2c-CLI chunk.",
+      nextOwner: "self",
+      caveats: ["Cross-runtime restore from Codex JSONL to Claude Code seat."],
+      authorityBoundaries: "May edit packages/cli/ and packages/daemon/ within M2c boundary; no M3+ surfaces.",
+      sourceTrustRanking: ["rig_whoami", "bounded_latest_transcript"],
+      sourceSessionId: "velocity-driver@openrig-velocity",
+      sourceCwd: "~/code/projects/openrig-hub",
+      generatorVersion: "rig-restore-packet@0.1.0",
+      includeFullTranscript: false,
+    };
+  }
+
+  it("emits 4 required files + restore-summary.json schema-valid", async () => {
+    const { writePacket } = await import("../src/restore-packet/packet-writer.js");
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const targetDir = path.join(tmpRoot, "packet-1");
+    const result = await writePacket(buildBaselineOpts(targetDir) as Parameters<typeof writePacket>[0]);
+
+    expect(result.targetDir).toBe(targetDir);
+    for (const required of ["restore-instructions.md", "transcript-latest.md", "touched-files.md", "restore-summary.json"]) {
+      expect(fs.existsSync(path.join(targetDir, required)), `missing ${required}`).toBe(true);
+    }
+    // Optional transcript.md should NOT be present when includeFullTranscript=false.
+    expect(fs.existsSync(path.join(targetDir, "transcript.md"))).toBe(false);
+
+    // Summary parses and schema-validates.
+    const summary = JSON.parse(fs.readFileSync(path.join(targetDir, "restore-summary.json"), "utf-8"));
+    const validation = validateRestoreSummary(summary);
+    expect(validation.valid, JSON.stringify(validation.errors)).toBe(true);
+  });
+
+  it("emits transcript.md when includeFullTranscript=true; full_transcript key present in summary", async () => {
+    const { writePacket } = await import("../src/restore-packet/packet-writer.js");
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const targetDir = path.join(tmpRoot, "packet-full");
+    const opts = buildBaselineOpts(targetDir);
+    (opts as Record<string, unknown>)["includeFullTranscript"] = true;
+    await writePacket(opts as Parameters<typeof writePacket>[0]);
+
+    expect(fs.existsSync(path.join(targetDir, "transcript.md"))).toBe(true);
+    const summary = JSON.parse(fs.readFileSync(path.join(targetDir, "restore-summary.json"), "utf-8"));
+    expect(summary.full_transcript).toBeDefined();
+    expect(typeof summary.full_transcript.path).toBe("string");
+    expect(typeof summary.full_transcript.line_count).toBe("number");
+  });
+
+  it("populates contract § 2.1 required fields verbatim from operator-supplied options", async () => {
+    const { writePacket } = await import("../src/restore-packet/packet-writer.js");
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const targetDir = path.join(tmpRoot, "packet-fields");
+    await writePacket(buildBaselineOpts(targetDir) as Parameters<typeof writePacket>[0]);
+
+    const summary = JSON.parse(fs.readFileSync(path.join(targetDir, "restore-summary.json"), "utf-8"));
+    expect(summary.target_rig).toBe("openrig-velocity-claude");
+    expect(summary.target_runtime).toBe("claude-code");
+    expect(summary.role_pointer).toBe("rigs/openrig-velocity-claude/state/velocity/driver-role.md");
+    expect(summary.bounded_latest_transcript.bound).toBe(120);
+    expect(summary.redaction_policy_id).toBe("openrig-v0");
+    expect(summary.generator_version).toBe("rig-restore-packet@0.1.0");
+    expect(summary.source_runtime).toBe("codex");
+    expect(summary.source_session_id).toBe("velocity-driver@openrig-velocity");
+    expect(Array.isArray(summary.touched_files.top_paths)).toBe(true);
+    expect(summary.durable_pointers.queue_pointers).toBeDefined();
+    expect(summary.durable_pointers.progress_pointers).toBeDefined();
+    expect(summary.durable_pointers.field_note_pointers).toBeDefined();
+    expect(summary.durable_pointers.artifact_pointers).toBeDefined();
+  });
+
+  it("rejects when target directory already exists", async () => {
+    const { writePacket } = await import("../src/restore-packet/packet-writer.js");
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const targetDir = path.join(tmpRoot, "preexisting");
+    fs.mkdirSync(targetDir);
+    fs.writeFileSync(path.join(targetDir, "marker.txt"), "do not overwrite");
+
+    const opts = buildBaselineOpts(targetDir) as Parameters<typeof writePacket>[0];
+    await expect(writePacket(opts)).rejects.toThrow(/exists|already/i);
+    // Marker preserved (no partial overwrite).
+    expect(fs.readFileSync(path.join(targetDir, "marker.txt"), "utf-8")).toBe("do not overwrite");
+  });
+
+  it("atomic emission: schema-validation failure mid-write leaves NO target dir AND cleans tempdir", async () => {
+    const { writePacket } = await import("../src/restore-packet/packet-writer.js");
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const targetDir = path.join(tmpRoot, "packet-fail");
+    const opts = buildBaselineOpts(targetDir) as Record<string, unknown>;
+    // Inject a contract violation: empty current_work_summary should fail
+    // schema validation (minLength: 1).
+    opts["currentWorkSummary"] = "";
+
+    await expect(
+      writePacket(opts as Parameters<typeof writePacket>[0]),
+    ).rejects.toThrow(/schema|valid|current_work_summary/i);
+
+    // Target dir was NEVER created (atomic rename semantics).
+    expect(fs.existsSync(targetDir)).toBe(false);
+    // No leftover .tmp- prefixed dirs in tmpRoot.
+    const tmpRootContents = fs.readdirSync(tmpRoot);
+    const leftovers = tmpRootContents.filter((name) => name.includes(".tmp-restore-packet-"));
+    expect(leftovers).toEqual([]);
+  });
+
+  it("transcript-latest.md bounded at 120 messages; message_count reflects actual count", async () => {
+    const { writePacket } = await import("../src/restore-packet/packet-writer.js");
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+
+    // Build 150 user messages (exceeds the 120 bound).
+    const lines: string[] = [`{"type":"session_meta","payload":{"cwd":"/x"}}`];
+    for (let i = 0; i < 150; i++) {
+      lines.push(`{"type":"response_item","payload":{"type":"message","role":"user","content":"msg ${i}"}}`);
+    }
+    const opts = buildBaselineOpts(path.join(tmpRoot, "packet-bound")) as Record<string, unknown>;
+    opts["structured"] = parseCodexJsonl(lines.join("\n"));
+    await writePacket(opts as Parameters<typeof writePacket>[0]);
+
+    const summary = JSON.parse(fs.readFileSync(path.join(tmpRoot, "packet-bound", "restore-summary.json"), "utf-8"));
+    expect(summary.bounded_latest_transcript.bound).toBe(120);
+    expect(summary.bounded_latest_transcript.message_count).toBe(120);
+
+    // Latest transcript file contains exactly 120 sectioned messages.
+    const latest = fs.readFileSync(path.join(tmpRoot, "packet-bound", "transcript-latest.md"), "utf-8");
+    const sectionCount = (latest.match(/^## \d+\. /gm) ?? []).length;
+    expect(sectionCount).toBe(120);
+  });
+});
+
+describe("M2c-CLI Velocity-shape round-trip (synthetic 4-role fixtures)", () => {
+  let tmpRoot: string;
+
+  beforeEach(async () => {
+    const fs = await import("node:fs");
+    const os = await import("node:os");
+    const path = await import("node:path");
+    tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "restore-packet-rt-"));
+  });
+
+  afterEach(async () => {
+    const fs = await import("node:fs");
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+  });
+
+  // Build a synthetic Codex JSONL with the same structural shape as
+  // Velocity prior art: session_meta + response_item messages + tool_calls
+  // + reasoning records + a credential-pattern needle for redaction.
+  function syntheticCodexJsonlFor(role: string): string {
+    return [
+      `{"type":"session_meta","payload":{"cwd":"~/code/projects/openrig-hub","id":"velocity-${role}@openrig-velocity-code"}}`,
+      `{"type":"response_item","payload":{"type":"reasoning","content":"<thinking>"}}`,
+      `{"type":"response_item","payload":{"type":"function_call","arguments":"{\\"path\\":\\"packages/cli/src/index.ts\\"}"}}`,
+      `{"type":"response_item","timestamp":"2026-04-23T18:08:00Z","payload":{"type":"message","role":"user","content":"${role}: please review the diff"}}`,
+      `{"type":"response_item","timestamp":"2026-04-23T18:08:30Z","payload":{"type":"message","role":"assistant","content":[{"type":"text","text":"${role}: token sk-FakeAbCdEfGhIjKlMn was visible in logs"}]}}`,
+      `{"type":"compacted","payload":{}}`,
+    ].join("\n");
+  }
+
+  for (const role of ["driver", "guard", "planner", "tester"]) {
+    it(`Velocity-shape ${role} round-trip: parser → packet-writer → schema-valid; counts + redaction preserved`, async () => {
+      const { writePacket } = await import("../src/restore-packet/packet-writer.js");
+      const fs = await import("node:fs");
+      const path = await import("node:path");
+      const structured = parseCodexJsonl(syntheticCodexJsonlFor(role));
+
+      // Sanity-check parser output before writer round-trip.
+      expect(structured.messageCount).toBe(2);
+      expect(structured.compactedCount).toBe(1);
+      expect(structured.omittedCounts.reasoning_records).toBeGreaterThanOrEqual(1);
+      expect(structured.omittedCounts.function_call_output).toBe(1);
+      expect(structured.omittedCounts.redacted_secrets).toBe(1);
+
+      const targetDir = path.join(tmpRoot, `packet-${role}`);
+      await writePacket({
+        targetDir,
+        structured,
+        sourceRuntime: "codex",
+        targetRig: "openrig-velocity-claude",
+        targetRuntime: "claude-code",
+        targetWorkspaceRoot: "~/code/projects/openrig-hub",
+        defaultTargetRepo: "~/code/projects/openrig-hub/openrig",
+        rolePointer: `rigs/openrig-velocity-claude/state/velocity/${role}-role.md`,
+        currentWorkSummary: `Synthetic ${role} round-trip for Velocity-shape parity.`,
+        nextOwner: "self",
+        caveats: [],
+        authorityBoundaries: `${role} authority for Velocity-replay context.`,
+        sourceTrustRanking: ["rig_whoami", "bounded_latest_transcript"],
+        sourceSessionId: `velocity-${role}@openrig-velocity-code`,
+        sourceCwd: "~/code/projects/openrig-hub",
+        generatorVersion: "rig-restore-packet@0.1.0",
+        includeFullTranscript: true,
+      });
+
+      const summary = JSON.parse(fs.readFileSync(path.join(targetDir, "restore-summary.json"), "utf-8"));
+      const validation = validateRestoreSummary(summary);
+      expect(validation.valid, JSON.stringify(validation.errors)).toBe(true);
+      // Provenance preserved at relevant fields:
+      expect(summary.source_session_id).toBe(`velocity-${role}@openrig-velocity-code`);
+      expect(summary.source_cwd).toBe("~/code/projects/openrig-hub");
+      expect(summary.bounded_latest_transcript.message_count).toBe(2);
+      // Omitted-class enumeration matches what the parser counted:
+      expect(summary.omitted_classes).toContain("reasoning_records");
+      expect(summary.omitted_classes).toContain("function_call_output");
+      expect(summary.omitted_classes).toContain("redacted_secrets");
+      // Redacted output: assistant's "sk-FakeAbCdEfGhIjKlMn" must NOT appear in transcript.md.
+      const fullT = fs.readFileSync(path.join(targetDir, "transcript.md"), "utf-8");
+      expect(fullT).not.toContain("sk-FakeAbCdEfGhIjKlMn");
+      expect(fullT).toContain("[REDACTED]");
+    });
+  }
+});
+
+describe("M2c-CLI redaction + omitted-record round-trip end-to-end", () => {
+  let tmpRoot: string;
+
+  beforeEach(async () => {
+    const fs = await import("node:fs");
+    const os = await import("node:os");
+    const path = await import("node:path");
+    tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "restore-packet-er-"));
+  });
+
+  afterEach(async () => {
+    const fs = await import("node:fs");
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+  });
+
+  it("mock-daemon --source-session round-trip writes packet and forwards no mutation", async () => {
+    const { restorePacketCommand } = await import("../src/commands/restore-packet.js");
+    const { createProgram } = await import("../src/index.js");
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+
+    const requestedPaths: string[] = [];
+    const mutationMethods = {
+      post: vi.fn(async () => { throw new Error("mock-daemon: post should not be called by restore-packet write"); }),
+      delete: vi.fn(async () => { throw new Error("mock-daemon: delete should not be called by restore-packet write"); }),
+      postText: vi.fn(async () => { throw new Error("mock-daemon: postText should not be called"); }),
+      postExpectText: vi.fn(async () => { throw new Error("mock-daemon: postExpectText should not be called"); }),
+    };
+    // Synthetic Codex JSONL the mock-daemon serves on the new full-read route.
+    const fixtureContent = `{"type":"session_meta","payload":{"cwd":"~/code/x","id":"src-session"}}
+{"type":"response_item","payload":{"type":"message","role":"user","content":"hello from session"}}
+{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"text","text":"reply"}]}}`;
+
+    const deps = {
+      lifecycleDeps: {} as Parameters<typeof restorePacketCommand>[0] extends undefined ? never : NonNullable<Parameters<typeof restorePacketCommand>[0]>["lifecycleDeps"],
+      clientFactory: () => ({
+        get: vi.fn(async (p: string) => {
+          requestedPaths.push(p);
+          if (p === "/api/transcripts/src-session/full") {
+            return { status: 200, data: { content: fixtureContent, cwd: "~/code/x" } };
+          }
+          return { status: 404, data: { error: "not found" } };
+        }),
+        getText: vi.fn(async () => ({ status: 200, data: "" })),
+        ...mutationMethods,
+      }),
+    };
+
+    const targetDir = path.join(tmpRoot, "via-daemon");
+    const program = createProgram({ restorePacketDeps: deps as unknown as Parameters<typeof createProgram>[0]["restorePacketDeps"] });
+    program.exitOverride();
+    await program.parseAsync([
+      "node", "rig", "restore-packet", "write",
+      "--source-session", "src-session",
+      "--target", targetDir,
+      "--target-rig", "openrig-velocity-claude",
+      "--target-runtime", "claude-code",
+    ]);
+
+    // Daemon was queried at the new full-read route; no mutation methods called.
+    expect(requestedPaths).toContain("/api/transcripts/src-session/full");
+    expect(mutationMethods.post).not.toHaveBeenCalled();
+    expect(mutationMethods.delete).not.toHaveBeenCalled();
+    // Packet emitted.
+    expect(fs.existsSync(targetDir)).toBe(true);
+    const summary = JSON.parse(fs.readFileSync(path.join(targetDir, "restore-summary.json"), "utf-8"));
+    const validation = validateRestoreSummary(summary);
+    expect(validation.valid, JSON.stringify(validation.errors)).toBe(true);
+    expect(summary.source_session_id).toBe("src-session");
+  });
+
+  it("M2b R2 nested Claude content fixture: round-trips with non-zero omittedCounts in summary", async () => {
+    const { writePacket } = await import("../src/restore-packet/packet-writer.js");
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const content = JSON.stringify({
+      type: "assistant",
+      message: {
+        role: "assistant",
+        content: [
+          { type: "tool_use", id: "toolu_1", name: "Bash", input: { cmd: "pwd" } },
+          { type: "text", text: "checking now" },
+        ],
+      },
+      cwd: "~/code/projects/openrig-hub",
+      sessionId: "claude-session-id",
+    }) + "\n" + JSON.stringify({
+      type: "user",
+      message: {
+        role: "user",
+        content: [
+          { type: "tool_result", tool_use_id: "toolu_1", content: "~/code/projects/openrig-hub" },
+        ],
+      },
+      cwd: "~/code/projects/openrig-hub",
+      sessionId: "claude-session-id",
+    });
+    const structured = parseClaudeTranscript(content);
+
+    const targetDir = path.join(tmpRoot, "claude-nested");
+    await writePacket({
+      targetDir,
+      structured,
+      sourceRuntime: "claude-code",
+      targetRig: "openrig-velocity-claude",
+      targetRuntime: "claude-code",
+      targetWorkspaceRoot: "~/code/projects/openrig-hub",
+      defaultTargetRepo: null,
+      rolePointer: "rigs/openrig-velocity-claude/state/velocity/driver-role.md",
+      currentWorkSummary: "Nested-content round-trip for M2c-CLI.",
+      nextOwner: "self",
+      caveats: [],
+      authorityBoundaries: "Velocity authority.",
+      sourceTrustRanking: ["rig_whoami"],
+      sourceSessionId: "claude-session-id",
+      sourceCwd: "~/code/projects/openrig-hub",
+      generatorVersion: "rig-restore-packet@0.1.0",
+      includeFullTranscript: false,
+    });
+
+    const summary = JSON.parse(fs.readFileSync(path.join(targetDir, "restore-summary.json"), "utf-8"));
+    expect(summary.omitted_classes).toContain("function_call_output");
+    expect(summary.omitted_classes).toContain("raw_tool_outputs");
+    // Touched-files inventory captured the path from the omitted tool_result.
+    expect(summary.touched_files.top_paths.some((p: { path: string }) =>
+      p.path === "~/code/projects/openrig-hub")).toBe(true);
   });
 });
