@@ -45,6 +45,7 @@ import { destroyCommand, type DestroyCommandDeps } from "./commands/destroy.js";
 import { setupCommand } from "./commands/setup.js";
 import { contextCommand } from "./commands/context.js";
 import { restoreCheckCommand } from "./commands/restore-check.js";
+import { restorePacketCommand, type RestorePacketDeps } from "./commands/restore-packet.js";
 import { compactPlanCommand, type CompactPlanDeps } from "./commands/compact-plan.js";
 import { heartbeatCommand, type HeartbeatDeps } from "./commands/heartbeat.js";
 import { seatCommand, type SeatDeps } from "./commands/seat.js";
@@ -89,6 +90,7 @@ export interface ProgramDeps {
   removeDeps?: StatusDeps;
   shrinkDeps?: StatusDeps;
   destroyDeps?: DestroyCommandDeps;
+  restorePacketDeps?: RestorePacketDeps;
   compactPlanDeps?: CompactPlanDeps;
   heartbeatDeps?: HeartbeatDeps;
   seatDeps?: SeatDeps;
@@ -146,6 +148,7 @@ export function createProgram(depsOverride?: ProgramDeps): Command {
   program.addCommand(setupCommand());
   program.addCommand(contextCommand());
   program.addCommand(restoreCheckCommand());
+  program.addCommand(restorePacketCommand(depsOverride?.restorePacketDeps));
   program.addCommand(compactPlanCommand(depsOverride?.compactPlanDeps));
   program.addCommand(heartbeatCommand(depsOverride?.heartbeatDeps));
   program.addCommand(seatCommand(depsOverride?.seatDeps));
