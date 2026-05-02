@@ -30,6 +30,19 @@ interface WriteOptions {
   sourceSession?: string;
   sourceJsonl?: string;
   sourceRuntime?: string;
+  /**
+   * R2: explicit operator override for source_session_id. Wins over parsed
+   * session_meta and over the --source-session arg. Required when JSONL
+   * has no session_meta record.
+   */
+  sourceSessionIdOverride?: string;
+  /**
+   * R2: explicit operator override for source_rig. Wins over <seat>@<rig>
+   * derivation. Required when the canonical source_session_id is bare
+   * (no @) and the operator has not supplied --source-session-id-override
+   * with @ shape.
+   */
+  sourceRigOverride?: string;
   target: string;
   targetRig?: string;
   targetRuntime?: string;
@@ -42,6 +55,53 @@ interface WriteOptions {
   authorityBoundaries?: string;
   sourceTrustRanking?: string;
   generatorVersion?: string;
+}
+
+/**
+ * R2: derive canonical (source_session_id, source_rig) per honest-fallback
+ * policy. Override flags > parsed session_meta (jsonl) > supplied --source-session.
+ *
+ * Returns either the derived pair (with no exception) OR throws an Error
+ * containing the explicit operator-facing guidance message. The action
+ * caller catches and routes to reportFailure().
+ */
+function deriveProvenance(
+  opts: WriteOptions,
+  parsedSessionId: string | null,
+  hasJsonl: boolean,
+): { sourceSessionId: string; sourceRig: string } {
+  // Step 1: source_session_id — override > parsed > --source-session arg.
+  let sourceSessionId: string;
+  if (typeof opts.sourceSessionIdOverride === "string" && opts.sourceSessionIdOverride.length > 0) {
+    sourceSessionId = opts.sourceSessionIdOverride;
+  } else if (hasJsonl) {
+    if (!parsedSessionId) {
+      throw new Error(
+        "no session_meta record in source JSONL; supply --source-session-id-override <id> AND --source-rig-override <rig> to set provenance explicitly. Silent fallback to file-path-as-session-id is not allowed (M2c-CLI R2 honest-provenance policy).",
+      );
+    }
+    sourceSessionId = parsedSessionId;
+  } else {
+    // hasSession path: operator-named session is authoritative.
+    sourceSessionId = opts.sourceSession!;
+  }
+
+  // Step 2: source_rig — override > <seat>@<rig> split.
+  let sourceRig: string;
+  if (typeof opts.sourceRigOverride === "string" && opts.sourceRigOverride.length > 0) {
+    sourceRig = opts.sourceRigOverride;
+  } else {
+    const m = /^[^@]+@([^@]+)$/.exec(sourceSessionId);
+    const captured = m?.[1];
+    if (!captured) {
+      throw new Error(
+        `could not derive source_rig from session id '${sourceSessionId}' (does not match <seat>@<rig> shape); supply --source-rig-override <rig> explicitly. Silent fallback to source_rig:"unknown" is not allowed (M2c-CLI R2 honest-provenance policy).`,
+      );
+    }
+    sourceRig = captured;
+  }
+
+  return { sourceSessionId, sourceRig };
 }
 
 function reportFailure(message: string): void {
@@ -92,6 +152,7 @@ function buildWritePacketOptions(
   sourceRuntime: SourceRuntime,
   sourceCwdFallback: string,
   sourceSessionId: string,
+  sourceRig: string,
 ): WritePacketOptions {
   const trustRankingDefault = "rig_whoami,bounded_latest_transcript";
   const trustRankingRaw = opts.sourceTrustRanking ?? trustRankingDefault;
@@ -115,6 +176,7 @@ function buildWritePacketOptions(
     authorityBoundaries: opts.authorityBoundaries ?? "Restored seat authority per source session role.",
     sourceTrustRanking: trustRanking,
     sourceSessionId,
+    sourceRig,
     sourceCwd: structured.sessionMeta?.cwd ?? sourceCwdFallback,
     generatorVersion: opts.generatorVersion ?? "rig-restore-packet@0.1.0",
     includeFullTranscript: structured.messages.length > 0,
@@ -187,6 +249,14 @@ export function restorePacketCommand(depsOverride?: RestorePacketDeps): Command 
       "--generator-version <version>",
       'Generator version identifier (default: "rig-restore-packet@0.1.0")',
     )
+    .option(
+      "--source-session-id-override <id>",
+      "Operator override for source_session_id (R2; required when JSONL has no session_meta record)",
+    )
+    .option(
+      "--source-rig-override <rig>",
+      "Operator override for source_rig (R2; required when canonical session id is bare with no <seat>@<rig> shape)",
+    )
     .action(async (opts: WriteOptions) => {
       const hasSession = typeof opts.sourceSession === "string" && opts.sourceSession.length > 0;
       const hasJsonl = typeof opts.sourceJsonl === "string" && opts.sourceJsonl.length > 0;
@@ -206,18 +276,15 @@ export function restorePacketCommand(depsOverride?: RestorePacketDeps): Command 
       try {
         let content: string;
         let sourceCwdFallback: string;
-        let sourceSessionId: string;
         if (hasJsonl) {
           const jsonlPath = resolvePath(opts.sourceJsonl!);
           content = readFileSync(jsonlPath, "utf-8");
           sourceCwdFallback = "/";
-          sourceSessionId = jsonlPath;
         } else {
           const session = opts.sourceSession!;
           const fetched = await fetchSourceTranscriptViaDaemon(session, depsOverride);
           content = fetched.content;
           sourceCwdFallback = fetched.sourceCwd ?? "/";
-          sourceSessionId = session;
         }
 
         let runtime: SourceRuntime | null = null;
@@ -242,7 +309,26 @@ export function restorePacketCommand(depsOverride?: RestorePacketDeps): Command 
           ? parseCodexJsonl(content)
           : parseClaudeTranscript(content);
 
-        const writeOpts = buildWritePacketOptions(opts, structured, runtime, sourceCwdFallback, sourceSessionId);
+        // R2: derive (source_session_id, source_rig) honestly. Override
+        // flags > parsed session_meta (jsonl) > supplied --source-session
+        // arg. Throws an Error with explicit operator guidance when the
+        // honest-provenance policy can't be satisfied.
+        let provenance: { sourceSessionId: string; sourceRig: string };
+        try {
+          provenance = deriveProvenance(opts, structured.sessionMeta?.sessionId ?? null, hasJsonl);
+        } catch (err) {
+          reportFailure((err as Error).message);
+          return;
+        }
+
+        const writeOpts = buildWritePacketOptions(
+          opts,
+          structured,
+          runtime,
+          sourceCwdFallback,
+          provenance.sourceSessionId,
+          provenance.sourceRig,
+        );
         const result = await writePacket(writeOpts);
 
         // Per Quality Lesson v9: log only metadata, NOT transcript content.

@@ -57,6 +57,13 @@ export interface WritePacketOptions {
   sourceTrustRanking: string[];
   /** Source session id. */
   sourceSessionId: string;
+  /**
+   * Source rig name. Per M2c-CLI R2: passed explicitly by the CLI adapter
+   * (computed from parsed session_meta `<seat>@<rig>` split or operator
+   * --source-rig-override). The writer does NOT derive this from
+   * sourceSessionId — that hidden derivation was the M2c-CLI R1 bug.
+   */
+  sourceRig: string;
   /** Source cwd (absolute path). */
   sourceCwd: string;
   /** Generator version identifier (e.g., "rig-restore-packet@0.1.0"). */
@@ -172,7 +179,7 @@ function buildSummary(opts: WritePacketOptions): Record<string, unknown> {
   const messageCount = Math.min(opts.structured.messages.length, TRANSCRIPT_BOUND);
   const summary: Record<string, unknown> = {
     source_session_id: opts.sourceSessionId,
-    source_rig: opts.sourceSessionId.includes("@") ? opts.sourceSessionId.split("@")[1] ?? "unknown" : "unknown",
+    source_rig: opts.sourceRig,
     source_runtime: opts.sourceRuntime,
     source_cwd: opts.sourceCwd,
     target_rig: opts.targetRig,
