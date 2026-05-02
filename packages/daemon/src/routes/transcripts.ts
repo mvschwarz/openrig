@@ -4,6 +4,7 @@ import type { RigRepository } from "../domain/rig-repository.js";
 import type { TranscriptStore } from "../domain/transcript-store.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import { startTmuxTranscriptCapture } from "../domain/transcript-capture.js";
+import { redactTranscriptContent } from "../domain/transcript-redaction.js";
 
 interface SessionRow {
   node_id: string;
@@ -203,6 +204,54 @@ export function transcriptRoutes(): Hono {
     }
 
     return c.json({ session: sessionName, pattern, matches });
+  });
+
+  // GET /:session/full — return the full transcript content for a session.
+  //
+  // Per orch decision approved-option-a (escalation
+  // qitem-20260502020833-68e4eca3): this route adopts the existing
+  // tail/grep posture (open route, daemon-local trust boundary). No
+  // session-scoped auth is enforced because no caller-identity primitive
+  // exists in the daemon today. Route-level redaction (M1 contract § 4 /
+  // openrig-v0 policy) is the protective primitive — credential-shaped
+  // patterns are scrubbed from the wire payload BEFORE serialization.
+  //
+  // A future slice may layer a coherent transcript-read auth policy
+  // across tail/grep/full; that work is out of scope for M2c-Daemon and
+  // tracked as a Product Lab follow-up signal.
+  router.get("/:session/full", async (c) => {
+    const transcriptStore = c.get("transcriptStore" as never) as TranscriptStore;
+    const db = c.get("db" as never) as Database.Database;
+    const rigRepo = c.get("rigRepo" as never) as RigRepository;
+    const sessionName = c.req.param("session");
+
+    if (!transcriptStore?.enabled) {
+      return c.json(
+        { error: "Transcripts are disabled. Enable with: rig config set transcripts.enabled true" },
+        404,
+      );
+    }
+
+    const resolution = resolveSessionToRig(db, rigRepo, sessionName);
+    if ("error" in resolution) {
+      return c.json({ error: resolution.error }, resolution.status as 404);
+    }
+
+    const raw = transcriptStore.readFull(resolution.rigName, sessionName);
+    if (raw === null) {
+      return c.json(
+        {
+          error: `No transcript for '${sessionName}'. Transcripts start automatically on next rig up.`,
+        },
+        404,
+      );
+    }
+
+    // Apply route-level redaction BEFORE serialization. Per Quality Lesson
+    // v9 + orch decision approved-option-a: the wire payload MUST be
+    // already redacted; do NOT rely on client-side redaction.
+    const content = redactTranscriptContent(raw);
+    return c.json({ session: sessionName, content });
   });
 
   return router;

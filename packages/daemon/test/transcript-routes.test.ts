@@ -247,4 +247,125 @@ describe("transcript routes", () => {
     const body = await res.json();
     expect(body.error).toContain("Invalid grep pattern");
   });
+
+  // ─────────────────────────────────────────────────────────────────────
+  // M2c-Daemon — GET /:session/full route tests.
+  //
+  // Per orch decision approved-option-a-open-local-transcript-full-read-with-redaction
+  // (qitem-20260502020833-68e4eca3): full-read route adopts the existing
+  // tail/grep posture (open route, daemon-local trust boundary). Redaction
+  // is the protective primitive in this slice. The originally-requested
+  // session-scoped denial test was reframed by orch to session-resolution
+  // failure (404 unknown session), since no caller-identity / session-scope
+  // primitive exists in the daemon today.
+  //
+  // Test plan (4 cases per dispatch + 1 ambiguity bonus per orch easy-case):
+  // (a) authorized success → full transcript content in response
+  // (b) session-resolution failure → 404 unknown session
+  // (c) route-level redaction → synthetic credential patterns absent from wire payload
+  // (d) disabled/missing transcript → explicit 404
+  // (extra) ambiguity → 409 (matches tail/grep precedent)
+  // ─────────────────────────────────────────────────────────────────────
+
+  it("GET /full returns 200 with full transcript content for existing session (success case)", async () => {
+    const fixture = "first line\nsecond line\nthird line\n";
+    const { store } = seedRigWithTranscript(fixture);
+    const app = createApp({ db, rigRepo, sessionRegistry, transcriptStore: store });
+
+    const res = await app.request("/api/transcripts/dev-impl@my-rig/full");
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.session).toBe("dev-impl@my-rig");
+    expect(typeof body.content).toBe("string");
+    expect(body.content).toContain("first line");
+    expect(body.content).toContain("second line");
+    expect(body.content).toContain("third line");
+  });
+
+  it("GET /full with unknown session returns 404 (session-resolution failure; reframe per orch)", async () => {
+    // Orch reframe: session-scoped denial replaced with session-resolution
+    // failure since no caller-identity/session-scope primitive exists.
+    const store = new TranscriptStore({ transcriptsRoot: tmpDir, enabled: true });
+    const app = createApp({ db, rigRepo, sessionRegistry, transcriptStore: store });
+
+    const res = await app.request("/api/transcripts/nonexistent-session/full");
+    expect(res.status).toBe(404);
+    const body = await res.json();
+    expect(body.error).toContain("not found");
+    expect(body.error).toContain("rig ps");
+  });
+
+  it("GET /full applies route-level redaction: synthetic credential patterns absent from wire payload", async () => {
+    // Synthetic credentials covering 4 of the 5 v0 patterns (sk-*, gh*_*,
+    // github_pat_*, Bearer *). NOT real credentials. Per Quality Lesson v9.
+    const fixture = [
+      "INFO startup",
+      "user pasted token sk-FakeAbCdEfGhIjKlMnOpQr in chat",
+      "another sample token ghp_FakeAbCdEfGhIjKlMnOpQrSt was used",
+      "fine-grained pat: github_pat_FakeAbCdEfGhIjKlMnOpQrSt",
+      "auth header: Bearer FakeAbCdEfGhIjKlMnOpQrStUvWxYz123456",
+      "trailing line",
+    ].join("\n");
+    const { store } = seedRigWithTranscript(fixture);
+    const app = createApp({ db, rigRepo, sessionRegistry, transcriptStore: store });
+
+    const res = await app.request("/api/transcripts/dev-impl@my-rig/full");
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    // Wire payload MUST NOT contain any of the planted credential patterns.
+    expect(body.content).not.toContain("sk-FakeAbCdEfGhIjKlMnOpQr");
+    expect(body.content).not.toContain("ghp_FakeAbCdEfGhIjKlMnOpQrSt");
+    expect(body.content).not.toContain("github_pat_FakeAbCdEfGhIjKlMnOpQrSt");
+    expect(body.content).not.toContain("Bearer FakeAbCdEfGhIjKlMnOpQrStUvWxYz123456");
+    // Route-level redaction left a [REDACTED] marker in place of each.
+    expect(body.content).toContain("[REDACTED]");
+    // Surrounding context preserved (redaction is non-destructive at line level).
+    expect(body.content).toContain("INFO startup");
+    expect(body.content).toContain("trailing line");
+  });
+
+  it("GET /full with transcripts disabled returns 404 with guidance (disabled case)", async () => {
+    seedRigWithTranscript("content");
+    const disabledStore = new TranscriptStore({ transcriptsRoot: tmpDir, enabled: false });
+    const app = createApp({ db, rigRepo, sessionRegistry, transcriptStore: disabledStore });
+
+    const res = await app.request("/api/transcripts/dev-impl@my-rig/full");
+    expect(res.status).toBe(404);
+    const body = await res.json();
+    expect(body.error).toContain("disabled");
+  });
+
+  it("GET /full with known session but no transcript file returns 404 with guidance (missing case)", async () => {
+    // Create rig + session but NO transcript file.
+    const rig = rigRepo.createRig("my-rig");
+    const node = rigRepo.addNode(rig.id, "dev-impl", { role: "worker", runtime: "claude-code" });
+    sessionRegistry.registerSession(node.id, "dev-impl@my-rig");
+
+    const store = new TranscriptStore({ transcriptsRoot: tmpDir, enabled: true });
+    const app = createApp({ db, rigRepo, sessionRegistry, transcriptStore: store });
+
+    const res = await app.request("/api/transcripts/dev-impl@my-rig/full");
+    expect(res.status).toBe(404);
+    const body = await res.json();
+    expect(body.error).toContain("No transcript");
+  });
+
+  it("GET /full with ambiguous session name across rigs returns 409 (precedent match with tail/grep)", async () => {
+    // Two rigs, same session name → ambiguity 409 (mirrors tail/grep behavior).
+    const rig1 = rigRepo.createRig("my-rig");
+    const node1 = rigRepo.addNode(rig1.id, "dev-impl", { role: "worker", runtime: "claude-code" });
+    sessionRegistry.registerSession(node1.id, "dev-impl@my-rig");
+
+    const rig2 = rigRepo.createRig("other-rig");
+    const node2 = rigRepo.addNode(rig2.id, "dev-impl2", { role: "worker", runtime: "claude-code" });
+    sessionRegistry.registerSession(node2.id, "dev-impl@my-rig");
+
+    const store = new TranscriptStore({ transcriptsRoot: tmpDir, enabled: true });
+    const app = createApp({ db, rigRepo, sessionRegistry, transcriptStore: store });
+
+    const res = await app.request("/api/transcripts/dev-impl@my-rig/full");
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body.error).toContain("ambiguous");
+  });
 });
