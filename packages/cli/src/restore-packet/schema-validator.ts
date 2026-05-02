@@ -237,12 +237,24 @@ export function validateRestoreSummary(summary: unknown): ValidationResult {
     let field = instancePath.replace(/^\//, "").replace(/\//g, ".");
     if (missing) field = field ? `${field}.${missing}` : missing;
     if (additional) field = additional;
+    // Per M1 contract § 8 + IMPL § M3: optional-field malformations are
+    // severity "warning"; required-field violations are severity "error".
+    // The only top-level optional field in v0 is `full_transcript`.
+    // Errors whose path begins at `/full_transcript` come from validating
+    // the optional object's contents, not from a missing-required check
+    // on a required field.
+    const isOptionalFieldError = instancePath.startsWith("/full_transcript");
     return {
       field: field || "<root>",
       value: truncateValue(err.data),
       rule: `${err.keyword}: ${err.message ?? ""}`.trim(),
-      severity: "error",
+      severity: isOptionalFieldError ? "warning" : "error",
     };
   });
+  // `valid` is false on ANY ajv violation (preserves M2c writer
+  // semantics: any malformation should block atomic rename). The M3
+  // validate command consults `errors[].severity` to decide exit code
+  // per M1 contract § 8 (required-field-class errors → exit nonzero;
+  // optional-field warnings → exit 0 with warning text).
   return { valid: false, errors };
 }
