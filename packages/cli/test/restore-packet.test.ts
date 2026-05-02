@@ -1685,3 +1685,315 @@ describe("M2c-Daemon final regression — CLI-surface redaction + omitted round-
       p.path === "/Users/wrandom/code/projects/openrig-hub")).toBe(true);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────
+// M3 — `rig restore-packet read` + `validate` actual implementations.
+//
+// Per dispatch qitem-20260502023319-d997e182 + IMPL § M3 line 154-191 +
+// M1 contract § 1 (packet shape) + § 4 (redaction enum-only) + § 8
+// (validate behavior + exit-code matrix). Predecessor: M2c-Daemon
+// ACCEPTED at openrig c7b74fa.
+// ─────────────────────────────────────────────────────────────────────
+
+describe("M3 restore-packet read + validate", () => {
+  let tmpRoot: string;
+
+  beforeEach(async () => {
+    const fs = await import("node:fs");
+    const os = await import("node:os");
+    const path = await import("node:path");
+    tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "restore-packet-m3-"));
+  });
+
+  afterEach(async () => {
+    const fs = await import("node:fs");
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+  });
+
+  async function buildValidPacket(targetDir: string): Promise<void> {
+    const { createProgram } = await import("../src/index.js");
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const src = path.join(tmpRoot, `src-${path.basename(targetDir)}.jsonl`);
+    fs.writeFileSync(src, [
+      JSON.stringify({
+        type: "session_meta",
+        payload: { cwd: "/Users/wrandom/code/projects/openrig-hub", id: "m3-driver@m3-rig" },
+      }),
+      JSON.stringify({
+        type: "response_item",
+        payload: { type: "message", role: "user", content: "M3 fixture packet" },
+      }),
+    ].join("\n"), "utf8");
+
+    const program = createProgram();
+    program.exitOverride();
+    await program.parseAsync([
+      "node", "rig", "restore-packet", "write",
+      "--source-jsonl", src,
+      "--target", targetDir,
+      "--target-rig", "openrig-velocity-claude",
+      "--target-runtime", "claude-code",
+      "--current-work-summary", "M3 fixture packet for read/validate tests.",
+      "--authority-boundaries", "M3 test fixture only.",
+    ]);
+  }
+
+  async function captureCli(argv: string[]): Promise<{ exitCode: number | undefined; stdout: string[]; stderr: string[] }> {
+    const { createProgram } = await import("../src/index.js");
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const origLog = console.log;
+    const origErr = console.error;
+    const origExit = process.exitCode;
+    console.log = (...args: unknown[]) => stdout.push(args.join(" "));
+    console.error = (...args: unknown[]) => stderr.push(args.join(" "));
+    process.exitCode = undefined;
+    try {
+      const program = createProgram();
+      program.exitOverride();
+      try {
+        await program.parseAsync(argv);
+      } catch (err) {
+        if (err instanceof Error && process.exitCode === undefined) {
+          process.exitCode = 2;
+        }
+        if (err instanceof Error) stderr.push(err.message);
+      }
+    } finally {
+      console.log = origLog;
+      console.error = origErr;
+    }
+    const exitCode = process.exitCode;
+    process.exitCode = origExit;
+    return { exitCode, stdout, stderr };
+  }
+
+  it("read: human output prints restore-instructions body + summary metadata + transcript digest", async () => {
+    const path = await import("node:path");
+    const target = path.join(tmpRoot, "packet-read-human");
+    await buildValidPacket(target);
+
+    const { exitCode, stdout } = await captureCli([
+      "node", "rig", "restore-packet", "read", target,
+    ]);
+    expect(exitCode === undefined || exitCode === 0).toBe(true);
+    const out = stdout.join("\n");
+    expect(out).toContain("# Restore Instructions");
+    expect(out).toContain("source_session_id");
+    expect(out).toContain("m3-driver@m3-rig");
+    expect(out).toContain("source_rig");
+    expect(out).toContain("m3-rig");
+    expect(out).toContain("target_rig");
+    expect(out).toContain("openrig-velocity-claude");
+    expect(out).toContain("generator_version");
+    expect(out).toContain("rig-restore-packet@0.1.0");
+    expect(out).toMatch(/transcript\.md/);
+  });
+
+  it("read --json: stdout is round-trippable to restore-summary.json", async () => {
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const target = path.join(tmpRoot, "packet-read-json");
+    await buildValidPacket(target);
+
+    const { exitCode, stdout } = await captureCli([
+      "node", "rig", "restore-packet", "read", target, "--json",
+    ]);
+    expect(exitCode === undefined || exitCode === 0).toBe(true);
+    const stdoutSummary = JSON.parse(stdout.join("\n"));
+    const onDisk = JSON.parse(fs.readFileSync(path.join(target, "restore-summary.json"), "utf-8"));
+    expect(stdoutSummary).toEqual(onDisk);
+  });
+
+  it("read: missing restore-summary.json fails with explicit error", async () => {
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const target = path.join(tmpRoot, "packet-read-missing-summary");
+    await buildValidPacket(target);
+    fs.rmSync(path.join(target, "restore-summary.json"));
+
+    const { exitCode, stderr } = await captureCli([
+      "node", "rig", "restore-packet", "read", target,
+    ]);
+    expect(exitCode).not.toBe(0);
+    const errText = stderr.join("\n");
+    expect(errText).toMatch(/restore-summary\.json|missing|not found/i);
+  });
+
+  it("read: packet without transcript.md AND without full_transcript summary key prints absence line", async () => {
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const target = path.join(tmpRoot, "packet-read-no-transcript");
+    await buildValidPacket(target);
+    fs.rmSync(path.join(target, "transcript.md"));
+    const summary = JSON.parse(fs.readFileSync(path.join(target, "restore-summary.json"), "utf-8"));
+    delete summary.full_transcript;
+    fs.writeFileSync(path.join(target, "restore-summary.json"), JSON.stringify(summary, null, 2));
+
+    const { exitCode, stdout } = await captureCli([
+      "node", "rig", "restore-packet", "read", target,
+    ]);
+    expect(exitCode === undefined || exitCode === 0).toBe(true);
+    expect(stdout.join("\n")).toMatch(/transcript\.md absent/i);
+  });
+
+  it("validate: ACCEPT well-formed packet WITH transcript.md + full_transcript key (parity respected)", async () => {
+    const path = await import("node:path");
+    const target = path.join(tmpRoot, "packet-validate-with-transcript");
+    await buildValidPacket(target);
+
+    const { exitCode, stdout } = await captureCli([
+      "node", "rig", "restore-packet", "validate", target,
+    ]);
+    expect(exitCode === undefined || exitCode === 0).toBe(true);
+    expect(stdout.join("\n")).toMatch(/valid|ok|pass/i);
+  });
+
+  it("validate: ACCEPT well-formed packet WITHOUT transcript.md AND WITHOUT full_transcript key (parity via absence)", async () => {
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const target = path.join(tmpRoot, "packet-validate-no-transcript");
+    await buildValidPacket(target);
+    fs.rmSync(path.join(target, "transcript.md"));
+    const summary = JSON.parse(fs.readFileSync(path.join(target, "restore-summary.json"), "utf-8"));
+    delete summary.full_transcript;
+    fs.writeFileSync(path.join(target, "restore-summary.json"), JSON.stringify(summary, null, 2));
+
+    const { exitCode } = await captureCli([
+      "node", "rig", "restore-packet", "validate", target,
+    ]);
+    expect(exitCode === undefined || exitCode === 0).toBe(true);
+  });
+
+  it("validate: REJECT packet with full_transcript key but transcript.md absent (parity violation)", async () => {
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const target = path.join(tmpRoot, "packet-validate-parity-1");
+    await buildValidPacket(target);
+    fs.rmSync(path.join(target, "transcript.md"));
+
+    const { exitCode, stdout, stderr } = await captureCli([
+      "node", "rig", "restore-packet", "validate", target,
+    ]);
+    expect(exitCode).not.toBe(0);
+    const out = stdout.concat(stderr).join("\n");
+    expect(out).toMatch(/parity|transcript\.md|full_transcript/i);
+  });
+
+  it("validate: REJECT packet with transcript.md present but full_transcript key omitted (parity violation)", async () => {
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const target = path.join(tmpRoot, "packet-validate-parity-2");
+    await buildValidPacket(target);
+    const summary = JSON.parse(fs.readFileSync(path.join(target, "restore-summary.json"), "utf-8"));
+    delete summary.full_transcript;
+    fs.writeFileSync(path.join(target, "restore-summary.json"), JSON.stringify(summary, null, 2));
+
+    const { exitCode, stdout, stderr } = await captureCli([
+      "node", "rig", "restore-packet", "validate", target,
+    ]);
+    expect(exitCode).not.toBe(0);
+    const out = stdout.concat(stderr).join("\n");
+    expect(out).toMatch(/parity|transcript\.md|full_transcript/i);
+  });
+
+  it("validate: REJECT packet with required field missing (per-field error reported)", async () => {
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const target = path.join(tmpRoot, "packet-validate-missing-field");
+    await buildValidPacket(target);
+    const summary = JSON.parse(fs.readFileSync(path.join(target, "restore-summary.json"), "utf-8"));
+    delete summary.source_session_id;
+    fs.writeFileSync(path.join(target, "restore-summary.json"), JSON.stringify(summary, null, 2));
+
+    const { exitCode, stdout, stderr } = await captureCli([
+      "node", "rig", "restore-packet", "validate", target,
+    ]);
+    expect(exitCode).not.toBe(0);
+    const out = stdout.concat(stderr).join("\n");
+    expect(out).toMatch(/source_session_id/);
+  });
+
+  it("validate: REJECT packet missing one of the 4 required files", async () => {
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const target = path.join(tmpRoot, "packet-validate-missing-file");
+    await buildValidPacket(target);
+    fs.rmSync(path.join(target, "touched-files.md"));
+
+    const { exitCode, stdout, stderr } = await captureCli([
+      "node", "rig", "restore-packet", "validate", target,
+    ]);
+    expect(exitCode).not.toBe(0);
+    const out = stdout.concat(stderr).join("\n");
+    expect(out).toMatch(/touched-files\.md|required file|missing/i);
+  });
+
+  it("validate --json: machine-readable shape { valid: boolean, errors: [...] }", async () => {
+    const path = await import("node:path");
+    const target = path.join(tmpRoot, "packet-validate-json");
+    await buildValidPacket(target);
+
+    const { exitCode, stdout } = await captureCli([
+      "node", "rig", "restore-packet", "validate", target, "--json",
+    ]);
+    expect(exitCode === undefined || exitCode === 0).toBe(true);
+    const report = JSON.parse(stdout.join("\n"));
+    expect(report).toHaveProperty("valid");
+    expect(report).toHaveProperty("errors");
+    expect(report.valid).toBe(true);
+    expect(Array.isArray(report.errors)).toBe(true);
+  });
+
+  it("validate: optional-field malformation (full_transcript wrong type) -> exit 0 with WARNING (per contract § 8)", async () => {
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const target = path.join(tmpRoot, "packet-validate-warning");
+    await buildValidPacket(target);
+    const summary = JSON.parse(fs.readFileSync(path.join(target, "restore-summary.json"), "utf-8"));
+    summary.full_transcript = { path: "transcript.md", line_count: "not-an-integer" };
+    fs.writeFileSync(path.join(target, "restore-summary.json"), JSON.stringify(summary, null, 2));
+
+    const { exitCode, stdout, stderr } = await captureCli([
+      "node", "rig", "restore-packet", "validate", target,
+    ]);
+    expect(exitCode === undefined || exitCode === 0).toBe(true);
+    const out = stdout.concat(stderr).join("\n");
+    expect(out).toMatch(/warning|warn/i);
+    expect(out).toMatch(/full_transcript|line_count/i);
+  });
+
+  it("validate: redaction_policy_id ENUM-ONLY check (deliberate v0 behavior; matches Velocity precedent per contract § 4 + § 8)", async () => {
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const target = path.join(tmpRoot, "packet-validate-enum-only");
+    await buildValidPacket(target);
+    fs.writeFileSync(
+      path.join(target, "transcript.md"),
+      "# Transcript\n\ntoken FAKETESTSTRING-NOT-A-REAL-CREDENTIAL-x123 was visible in logs\n",
+    );
+
+    const { exitCode } = await captureCli([
+      "node", "rig", "restore-packet", "validate", target,
+    ]);
+    expect(exitCode === undefined || exitCode === 0).toBe(true);
+  });
+
+  it("validate: redaction_policy_id WRONG enum value -> REJECT", async () => {
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const target = path.join(tmpRoot, "packet-validate-bad-enum");
+    await buildValidPacket(target);
+    const summary = JSON.parse(fs.readFileSync(path.join(target, "restore-summary.json"), "utf-8"));
+    summary.redaction_policy_id = "not-a-real-policy";
+    fs.writeFileSync(path.join(target, "restore-summary.json"), JSON.stringify(summary, null, 2));
+
+    const { exitCode, stdout, stderr } = await captureCli([
+      "node", "rig", "restore-packet", "validate", target,
+    ]);
+    expect(exitCode).not.toBe(0);
+    const out = stdout.concat(stderr).join("\n");
+    expect(out).toMatch(/redaction_policy_id|enum/i);
+  });
+});
