@@ -1980,6 +1980,37 @@ describe("M3 restore-packet read + validate", () => {
     expect(exitCode === undefined || exitCode === 0).toBe(true);
   });
 
+  // ─── M4 ───
+  // Per dispatch qitem-20260502024605-55720e41 + IMPL § M4 line 193-207:
+  // command-registration meta-tests. Catch any future regression where
+  // `restore-packet` would import-but-not-register (createProgram chain
+  // wiring break). Reference precedent: compact-plan.test.ts:166-176.
+
+  it("M4: createProgram registers restore-packet as a top-level command", async () => {
+    const { createProgram } = await import("../src/index.js");
+    const program = createProgram();
+    const names = program.commands.map((c) => c.name());
+    expect(names).toContain("restore-packet");
+  });
+
+  it("M4: rig --help discovers restore-packet in help output", async () => {
+    const { createProgram } = await import("../src/index.js");
+    const program = createProgram();
+    const helpText = program.helpInformation();
+    expect(helpText).toContain("restore-packet");
+  });
+
+  it("M4: rig restore-packet --help discovers all 3 subcommands (write, read, validate)", async () => {
+    const { createProgram } = await import("../src/index.js");
+    const program = createProgram();
+    const restorePacket = program.commands.find((c) => c.name() === "restore-packet");
+    expect(restorePacket).toBeDefined();
+    const helpText = restorePacket!.helpInformation();
+    expect(helpText).toContain("write");
+    expect(helpText).toContain("read");
+    expect(helpText).toContain("validate");
+  });
+
   it("validate: redaction_policy_id WRONG enum value -> REJECT", async () => {
     const fs = await import("node:fs");
     const path = await import("node:path");
