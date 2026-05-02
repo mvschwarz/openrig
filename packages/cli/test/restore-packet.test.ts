@@ -1450,3 +1450,238 @@ describe("M2c-CLI R2 --source-jsonl provenance from parsed session_meta", () => 
     expect(summary.source_rig).toBe("operator-rig");
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────
+// M2c-Daemon final M2 regression — Velocity 4-pack round-trip via CLI.
+//
+// Per dispatch qitem-20260502020626-8cd2b7a6 (item 4): load each of the
+// four Velocity prior-art role packets, locate their original Codex
+// JSONL, run --source-jsonl through the v0 generator, and assert
+// provenance fields preserved + schema valid + redaction policy applied.
+//
+// Tests are gated on file presence: the original JSONL files live in
+// ~/.codex/sessions/2026/04/23/ on the host. When absent (other devs /
+// CI), the cases skip with a guard message — the synthetic Velocity
+// round-trip describe above already exercises the structural shape; this
+// suite adds REAL data validation when available (dispatch-condition).
+// ─────────────────────────────────────────────────────────────────────
+
+describe("M2c-Daemon final regression — Velocity 4-pack round-trip via CLI", () => {
+  let tmpRoot: string;
+  const VELOCITY_ROOT = "/Users/wrandom/code/substrate/shared-docs/openrig-work/field-notes/2026-04-27-velocity-claude-from-codex-restore";
+
+  beforeEach(async () => {
+    const fs = await import("node:fs");
+    const os = await import("node:os");
+    const path = await import("node:path");
+    tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "restore-packet-velocity-cli-"));
+  });
+
+  afterEach(async () => {
+    const fs = await import("node:fs");
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+  });
+
+  for (const role of ["driver", "guard", "planner", "tester"]) {
+    it(`Velocity ${role} packet: --source-jsonl round-trip yields v0 packet with preserved provenance`, async () => {
+      const fs = await import("node:fs");
+      const path = await import("node:path");
+      const refSummaryPath = path.join(VELOCITY_ROOT, role, "restore-summary.json");
+      if (!fs.existsSync(refSummaryPath)) {
+        console.warn(`SKIP: Velocity reference packet absent at ${refSummaryPath}`);
+        return;
+      }
+      const refSummary = JSON.parse(fs.readFileSync(refSummaryPath, "utf-8")) as {
+        source_jsonl?: string;
+        source_session?: string;
+        source_cwd?: string;
+      };
+      const sourceJsonl = refSummary.source_jsonl ?? "";
+      if (!sourceJsonl || !fs.existsSync(sourceJsonl)) {
+        console.warn(`SKIP: Velocity ${role} source JSONL absent at ${sourceJsonl}`);
+        return;
+      }
+
+      const { createProgram } = await import("../src/index.js");
+      const target = path.join(tmpRoot, `packet-${role}`);
+
+      // Codex JSONL session_meta carries a UUID-shaped rollout id, not a
+      // <seat>@<rig> name. The Velocity prior-art .mjs got the canonical
+      // name from a CLI arg; for the v0 round-trip we mirror that by
+      // passing --source-session-id-override + --source-rig-override
+      // matching the reference packet's source_session value.
+      const canonicalSessionId = refSummary.source_session ?? "";
+      const canonicalRig = canonicalSessionId.split("@")[1] ?? "openrig-velocity-code";
+
+      const program = createProgram();
+      program.exitOverride();
+      await program.parseAsync([
+        "node", "rig", "restore-packet", "write",
+        "--source-jsonl", sourceJsonl,
+        "--target", target,
+        "--target-rig", "openrig-velocity-claude",
+        "--target-runtime", "claude-code",
+        "--source-session-id-override", canonicalSessionId,
+        "--source-rig-override", canonicalRig,
+        "--current-work-summary", `Velocity ${role} round-trip via M2c-Daemon final regression.`,
+        "--authority-boundaries", `Restored ${role} authority for Velocity-replay context.`,
+      ]);
+
+      // v0 packet structure check.
+      expect(fs.existsSync(target)).toBe(true);
+      const summary = JSON.parse(fs.readFileSync(path.join(target, "restore-summary.json"), "utf-8"));
+      const validation = validateRestoreSummary(summary);
+      expect(validation.valid, JSON.stringify(validation.errors)).toBe(true);
+
+      // Provenance fields preserved (Velocity prior-art -> v0 mapping).
+      expect(summary.source_session_id).toBe(refSummary.source_session);
+      // source_rig derived from <seat>@<rig> split of source_session.
+      const expectedRig = refSummary.source_session?.split("@")[1];
+      expect(summary.source_rig).toBe(expectedRig);
+      expect(summary.source_cwd).toBe(refSummary.source_cwd);
+
+      // Redaction policy applied.
+      expect(summary.redaction_policy_id).toBe("openrig-v0");
+
+      // Omitted-record counts are reasonable (Velocity packets should have
+      // many reasoning_records and function_call_output records since they
+      // were generated from full Codex sessions).
+      expect(Array.isArray(summary.omitted_classes)).toBe(true);
+      expect(summary.omitted_classes.length).toBeGreaterThan(0);
+
+      // bounded_latest_transcript file was written.
+      expect(fs.existsSync(path.join(target, "transcript-latest.md"))).toBe(true);
+    }, 90000); // Velocity JSONLs are 22-37MB; allow generous timeout.
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// M2c-Daemon final M2 regression — CLI-surface redaction + omitted
+// round-trips. Per dispatch items 7 + 8: exercise the parse-to-write
+// path through createProgram() (Quality Lesson v12 carry-forward) for
+// (a) credential-pattern redaction via --source-jsonl, (b) M2b R2
+// nested-content omitted-record counting (Quality Lesson v11
+// carry-forward).
+// ─────────────────────────────────────────────────────────────────────
+
+describe("M2c-Daemon final regression — CLI-surface redaction + omitted round-trips", () => {
+  let tmpRoot: string;
+
+  beforeEach(async () => {
+    const fs = await import("node:fs");
+    const os = await import("node:os");
+    const path = await import("node:path");
+    tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "restore-packet-final-cli-"));
+  });
+
+  afterEach(async () => {
+    const fs = await import("node:fs");
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+  });
+
+  it("--source-jsonl with credential-pattern fixture: emitted transcript is redacted at the wire", async () => {
+    const { createProgram } = await import("../src/index.js");
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    // Synthetic credentials. NOT real tokens. Per Quality Lesson v9.
+    const src = path.join(tmpRoot, "with-creds.jsonl");
+    fs.writeFileSync(src, [
+      JSON.stringify({
+        type: "session_meta",
+        payload: { cwd: "/x", id: "creds-driver@creds-rig" },
+      }),
+      JSON.stringify({
+        type: "response_item",
+        payload: {
+          type: "message",
+          role: "assistant",
+          content: [{ type: "text", text: "saw token sk-FakeAbCdEfGhIjKlMnOpQr in logs" }],
+        },
+      }),
+    ].join("\n"), "utf8");
+
+    const target = path.join(tmpRoot, "packet-creds");
+    const program = createProgram();
+    program.exitOverride();
+    await program.parseAsync([
+      "node", "rig", "restore-packet", "write",
+      "--source-jsonl", src,
+      "--target", target,
+      "--target-rig", "openrig-velocity-claude",
+      "--target-runtime", "claude-code",
+      "--current-work-summary", "redaction CLI round-trip.",
+      "--authority-boundaries", "redaction proof.",
+    ]);
+
+    const transcriptLatest = fs.readFileSync(path.join(target, "transcript-latest.md"), "utf-8");
+    expect(transcriptLatest).not.toContain("sk-FakeAbCdEfGhIjKlMnOpQr");
+    expect(transcriptLatest).toContain("[REDACTED]");
+
+    // Summary's omitted_classes records the redaction occurrence.
+    const summary = JSON.parse(fs.readFileSync(path.join(target, "restore-summary.json"), "utf-8"));
+    expect(summary.omitted_classes).toContain("redacted_secrets");
+    expect(summary.redaction_policy_id).toBe("openrig-v0");
+  });
+
+  it("--source-jsonl with M2b R2 nested Claude content (tool_use + tool_result): omitted counts populated via CLI surface", async () => {
+    const { createProgram } = await import("../src/index.js");
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    // Claude transcript with nested tool_use + tool_result inside top-level
+    // assistant/user records (the M2b R2 reproducer shape per Quality
+    // Lesson v11 carry-forward).
+    const src = path.join(tmpRoot, "claude-nested.jsonl");
+    fs.writeFileSync(src, [
+      JSON.stringify({
+        type: "assistant",
+        message: {
+          role: "assistant",
+          content: [
+            { type: "tool_use", id: "toolu_1", name: "Bash", input: { cmd: "pwd" } },
+            { type: "text", text: "checking now" },
+          ],
+        },
+        cwd: "/Users/wrandom/code/projects/openrig-hub",
+        sessionId: "claude-final@openrig-velocity-claude",
+      }),
+      JSON.stringify({
+        type: "user",
+        message: {
+          role: "user",
+          content: [
+            { type: "tool_result", tool_use_id: "toolu_1", content: "/Users/wrandom/code/projects/openrig-hub" },
+          ],
+        },
+        cwd: "/Users/wrandom/code/projects/openrig-hub",
+        sessionId: "claude-final@openrig-velocity-claude",
+      }),
+    ].join("\n"), "utf8");
+
+    const target = path.join(tmpRoot, "packet-claude-nested");
+    const program = createProgram();
+    program.exitOverride();
+    await program.parseAsync([
+      "node", "rig", "restore-packet", "write",
+      "--source-jsonl", src,
+      "--target", target,
+      "--target-rig", "openrig-velocity-claude",
+      "--target-runtime", "claude-code",
+      "--source-runtime", "claude-code",
+      "--current-work-summary", "M2b R2 nested-content via CLI surface.",
+      "--authority-boundaries", "Quality Lesson v11 carry-forward.",
+    ]);
+
+    const summary = JSON.parse(fs.readFileSync(path.join(target, "restore-summary.json"), "utf-8"));
+    const validation = validateRestoreSummary(summary);
+    expect(validation.valid, JSON.stringify(validation.errors)).toBe(true);
+    expect(summary.omitted_classes).toContain("function_call_output");
+    expect(summary.omitted_classes).toContain("raw_tool_outputs");
+    // Provenance from session_meta-equivalent (Claude per-record sessionId).
+    expect(summary.source_session_id).toBe("claude-final@openrig-velocity-claude");
+    expect(summary.source_rig).toBe("openrig-velocity-claude");
+    expect(summary.source_cwd).toBe("/Users/wrandom/code/projects/openrig-hub");
+    // Touched-files inventory captured the path from the omitted tool_result.
+    expect(summary.touched_files.top_paths.some((p: { path: string }) =>
+      p.path === "/Users/wrandom/code/projects/openrig-hub")).toBe(true);
+  });
+});

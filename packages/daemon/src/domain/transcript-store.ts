@@ -1,4 +1,4 @@
-import { mkdirSync, appendFileSync, existsSync, openSync, readSync, closeSync, statSync } from "node:fs";
+import { mkdirSync, appendFileSync, existsSync, openSync, readSync, closeSync, statSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { getCompatibleOpenRigPath } from "../openrig-compat.js";
@@ -284,6 +284,30 @@ export class TranscriptStore {
       .filter((line) => !isSpinnerOnlyLine(line))
       .filter((line) => !isLikelyTuiFragment(line))
       .filter((line, index) => !isPromptRedrawDuplicate(line, filtered[index + 1]));
+  }
+
+  /**
+   * Read the entire transcript file as a single string. Returns the raw
+   * file contents (callers handle ANSI/cleanup as needed for their use
+   * case). Returns null if the file is missing OR any I/O error occurs.
+   * Returns "" for an existing-but-empty file.
+   *
+   * Used by GET /api/transcripts/:session/full (M2c-Daemon). Unlike
+   * `readTail`, this does not apply terminal-cleanup heuristics — the
+   * route's caller (e.g., the restore-packet generator) needs the
+   * unfiltered content the runtime emitted. Route-level redaction is
+   * applied at the route layer via `redactTranscriptContent` BEFORE
+   * serialization (per orch decision approved-option-a:
+   * open-route-with-redaction-as-protective-primitive).
+   */
+  readFull(rigName: string, sessionName: string): string | null {
+    try {
+      const filePath = this.getTranscriptPath(rigName, sessionName);
+      if (!existsSync(filePath)) return null;
+      return readFileSync(filePath, "utf-8");
+    } catch {
+      return null;
+    }
   }
 
   grep(rigName: string, sessionName: string, pattern: string): string[] | null {
