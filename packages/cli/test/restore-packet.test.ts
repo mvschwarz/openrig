@@ -605,3 +605,197 @@ describe("M2b interaction: parse → redact → omitted-records counter chain", 
     expect(result.messages[1]!.text).toBe("clean reply");
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────
+// M2b R2: Claude parser nested tool_use / tool_result handling.
+//
+// Per guard's M2b BLOCK: the parser silently dropped tool_use parts
+// (inside assistant content) and tool_result parts (inside user
+// content) without counting them as omitted classes. Real Claude
+// transcripts have these on nearly every turn; the previous M2b
+// commit produced misleading omittedCounts of all-zero.
+//
+// R2 fix: walk message.content parts inside kept user/assistant
+// records; count tool_use → function_call_output, tool_result →
+// raw_tool_outputs; extract paths from omitted parts (mirroring
+// Codex parser's behavior at codex-jsonl-parser.ts where function_call
+// args + custom_tool_call input are walked for paths even though the
+// records themselves are omitted from the message stream).
+// ─────────────────────────────────────────────────────────────────────
+
+describe("M2b R2 Claude parser nested-content-part handling", () => {
+  it("guard reproducer fixture: tool_use + tool_result both counted; paths extracted", () => {
+    const content = JSON.stringify({
+      type: "assistant",
+      message: {
+        role: "assistant",
+        content: [
+          { type: "tool_use", id: "toolu_1", name: "Bash", input: { cmd: "pwd" } },
+          { type: "text", text: "done" },
+        ],
+      },
+      cwd: "/x",
+      sessionId: "s",
+    }) + "\n" + JSON.stringify({
+      type: "user",
+      message: {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "toolu_1",
+            content: "/Users/wrandom/code/projects/openrig-hub",
+          },
+        ],
+      },
+      cwd: "/x",
+      sessionId: "s",
+    });
+    const r = parseClaudeTranscript(content);
+    // Both top-level records are KEPT (the parser still emits the visible
+    // text "done" from the assistant turn; the user turn has only
+    // tool_result content so no visible text — but the record was
+    // classified as kept; without visible text it's dropped from
+    // messages but the nested tool_result must STILL be counted.)
+    expect(r.omittedCounts.function_call_output).toBe(1);
+    expect(r.omittedCounts.raw_tool_outputs).toBe(1);
+    expect(r.paths.some((p) => p.path === "/Users/wrandom/code/projects/openrig-hub")).toBe(true);
+  });
+
+  it("counts each tool_use part in a multi-tool assistant turn", () => {
+    const content = JSON.stringify({
+      type: "assistant",
+      message: {
+        role: "assistant",
+        content: [
+          { type: "tool_use", id: "t1", name: "Bash", input: { cmd: "ls" } },
+          { type: "tool_use", id: "t2", name: "Read", input: { path: "/Users/wrandom/code/x.md" } },
+          { type: "text", text: "running both" },
+        ],
+      },
+      cwd: "/x",
+      sessionId: "s",
+    });
+    const r = parseClaudeTranscript(content);
+    expect(r.omittedCounts.function_call_output).toBe(2);
+    expect(r.paths.some((p) => p.path === "/Users/wrandom/code/x.md")).toBe(true);
+  });
+
+  it("counts each tool_result part in a multi-result user turn", () => {
+    // Note: the Velocity-prior-art path pattern is greedy on the
+    // /Users/wrandom prefix and includes trailing whitespace and word
+    // chars until end-of-line; using \n separators here so each path
+    // is matched cleanly.
+    const content = JSON.stringify({
+      type: "user",
+      message: {
+        role: "user",
+        content: [
+          { type: "tool_result", tool_use_id: "t1", content: "/Users/wrandom/code/a.md\nrunning" },
+          { type: "tool_result", tool_use_id: "t2", content: "/Users/wrandom/code/b.md\nrunning" },
+        ],
+      },
+      cwd: "/x",
+      sessionId: "s",
+    });
+    const r = parseClaudeTranscript(content);
+    expect(r.omittedCounts.raw_tool_outputs).toBe(2);
+    expect(r.paths.some((p) => p.path === "/Users/wrandom/code/a.md")).toBe(true);
+    expect(r.paths.some((p) => p.path === "/Users/wrandom/code/b.md")).toBe(true);
+  });
+
+  it("mixed text + tool_use: visible text kept; tool_use counted", () => {
+    const content = JSON.stringify({
+      type: "assistant",
+      message: {
+        role: "assistant",
+        content: [
+          { type: "text", text: "I'll run a command:" },
+          { type: "tool_use", id: "t1", name: "Bash", input: { cmd: "pwd" } },
+          { type: "text", text: "and report back" },
+        ],
+      },
+      cwd: "/x",
+      sessionId: "s",
+    });
+    const r = parseClaudeTranscript(content);
+    expect(r.messageCount).toBe(1);
+    expect(r.messages[0]!.text).toContain("I'll run a command:");
+    expect(r.messages[0]!.text).toContain("and report back");
+    expect(r.omittedCounts.function_call_output).toBe(1);
+  });
+
+  it("tool_use with non-path input: counted but contributes no paths", () => {
+    const content = JSON.stringify({
+      type: "assistant",
+      message: {
+        role: "assistant",
+        content: [
+          { type: "tool_use", id: "t1", name: "Bash", input: { cmd: "echo hello" } },
+          { type: "text", text: "done" },
+        ],
+      },
+      cwd: "/x",
+      sessionId: "s",
+    });
+    const r = parseClaudeTranscript(content);
+    expect(r.omittedCounts.function_call_output).toBe(1);
+    // No /Users/wrandom or recognized prefix path in the input.
+    expect(r.paths.length).toBe(0);
+  });
+
+  it("tool_result with non-path content: counted but contributes no paths", () => {
+    const content = JSON.stringify({
+      type: "user",
+      message: {
+        role: "user",
+        content: [
+          { type: "tool_result", tool_use_id: "t1", content: "command exited with status 0" },
+        ],
+      },
+      cwd: "/x",
+      sessionId: "s",
+    });
+    const r = parseClaudeTranscript(content);
+    expect(r.omittedCounts.raw_tool_outputs).toBe(1);
+    expect(r.paths.length).toBe(0);
+  });
+
+  it("tool_result with array content shape: walks the array for paths", () => {
+    // Claude tool_result content can be either a string OR an array of
+    // { type: "text", text } parts (the same shape as message content).
+    const content = JSON.stringify({
+      type: "user",
+      message: {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "t1",
+            content: [
+              { type: "text", text: "found at /Users/wrandom/code/projects/openrig-hub/README.md" },
+            ],
+          },
+        ],
+      },
+      cwd: "/x",
+      sessionId: "s",
+    });
+    const r = parseClaudeTranscript(content);
+    expect(r.omittedCounts.raw_tool_outputs).toBe(1);
+    expect(r.paths.some((p) => p.path === "/Users/wrandom/code/projects/openrig-hub/README.md")).toBe(true);
+  });
+
+  it("kept text-only assistant turn (no tools): counters stay at zero", () => {
+    const content = JSON.stringify({
+      type: "assistant",
+      message: { role: "assistant", content: [{ type: "text", text: "hello" }] },
+      cwd: "/x",
+      sessionId: "s",
+    });
+    const r = parseClaudeTranscript(content);
+    expect(r.messageCount).toBe(1);
+    expect(r.omittedCounts.function_call_output).toBe(0);
+    expect(r.omittedCounts.raw_tool_outputs).toBe(0);
+  });
+});
