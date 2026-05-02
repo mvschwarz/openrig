@@ -11,8 +11,12 @@
 
 import { describe, it, expect } from "vitest";
 import { Command } from "commander";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, resolve } from "node:path";
 import {
   validateRestoreSummary,
+  RESTORE_SUMMARY_SCHEMA,
   type ValidationResult,
 } from "../src/restore-packet/schema-validator.js";
 import { restorePacketCommand } from "../src/commands/restore-packet.js";
@@ -143,6 +147,28 @@ describe("M2 restore-packet schema-validator", () => {
     summary["full_transcript"] = { path: "transcript.md", line_count: 4321 };
     const result = validateRestoreSummary(summary);
     expect(result.valid).toBe(true);
+  });
+
+  // M2a R2 drift-catcher: the canonical JSON Schema file at
+  // src/schemas/restore-summary.schema.json and the embedded TS const
+  // RESTORE_SUMMARY_SCHEMA must stay byte-equivalent. Embedding the schema
+  // in the validator is the M2a R2 packaging fix (tsc emits the const into
+  // dist/restore-packet/schema-validator.js, so the validator works after
+  // raw `tsc` emit without any extra build-script copy step). The JSON file
+  // remains the canonical source for downstream tooling that reads JSON
+  // Schema directly. This test fails loudly if either form drifts.
+  it("M2a R2 drift-catcher: TS const RESTORE_SUMMARY_SCHEMA equals the canonical JSON schema file", () => {
+    const __filename = fileURLToPath(import.meta.url);
+    const __dirname = dirname(__filename);
+    const schemaJsonPath = resolve(
+      __dirname,
+      "..",
+      "src",
+      "schemas",
+      "restore-summary.schema.json",
+    );
+    const jsonForm: unknown = JSON.parse(readFileSync(schemaJsonPath, "utf-8"));
+    expect(RESTORE_SUMMARY_SCHEMA).toEqual(jsonForm);
   });
 });
 
