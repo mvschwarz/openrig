@@ -1,5 +1,6 @@
 import type Database from "better-sqlite3";
 import type { EventBus } from "./event-bus.js";
+import type { PersistedEvent } from "./types.js";
 import { QueueTransitionLog } from "./queue-transition-log.js";
 import {
   computeClosureRequiredAt,
@@ -226,8 +227,12 @@ export class QueueRepository {
    * handoff-and-complete commit. Records the result via recordNudgeAttempt.
    * Errors are caught and surfaced as nudge_result strings — they do not
    * unwind the underlying queue mutation.
+   *
+   * Phase D extension point (orch-ratified): public so workflow-projector
+   * can invoke after its outer transaction commits, completing the
+   * createWithinTransaction()'s deferred post-commit side effects.
    */
-  private async maybeNudge(
+  async maybeNudge(
     qitemId: string,
     destinationSession: string,
     nudgeOpt: boolean | undefined,
@@ -255,6 +260,67 @@ export class QueueRepository {
       );
     }
 
+    const txn = this.db.transaction(() => this.createInTransactionalContext(input));
+    const { qitemId: id, persistedEvent } = txn();
+    this.eventBus.notifySubscribers(persistedEvent);
+    await this.maybeNudge(id, input.destinationSession, input.nudge);
+    return this.getByIdOrThrow(id);
+  }
+
+  /**
+   * PL-004 Phase D extension point (orch-ratified per slice IMPL §
+   * Driver Handoff Contract). Creates a queue item using the SAME
+   * caller-managed db.transaction for transactional-scribe semantics
+   * (workflow-projector folds step closure + next-qitem creation into
+   * one atomic unit). Returns the persisted event AND qitem id so the
+   * caller can defer notifySubscribers/maybeNudge until AFTER its
+   * outer transaction commits.
+   *
+   * Caller MUST:
+   *   1. Invoke this from inside a `db.transaction(() => {...})` block.
+   *   2. After the outer txn commits, call:
+   *        - eventBus.notifySubscribers(persistedEvent)
+   *        - this.maybeNudge(qitemId, destinationSession, input.nudge)
+   *   3. NOT call this from outside a transaction (will produce a
+   *      half-state if the caller errors before committing).
+   *
+   * The split exists ONLY because notifySubscribers + maybeNudge are
+   * post-commit side effects (subscribers should not see events for
+   * data that may roll back; nudges should not fire for handoffs that
+   * may roll back). For independent create()s that don't need to
+   * compose with an outer transaction, use create() instead.
+   */
+  createWithinTransaction(input: QueueCreateInput): {
+    qitemId: string;
+    persistedEvent: PersistedEvent;
+    destinationSession: string;
+    nudge: boolean | undefined;
+  } {
+    if (!this.validateRig(input.destinationSession)) {
+      throw new QueueRepositoryError(
+        "unknown_destination_rig",
+        `destination_session ${input.destinationSession} references an unknown rig`
+      );
+    }
+    const result = this.createInTransactionalContext(input);
+    return {
+      qitemId: result.qitemId,
+      persistedEvent: result.persistedEvent,
+      destinationSession: input.destinationSession,
+      nudge: input.nudge,
+    };
+  }
+
+  /**
+   * Internal: insert + transition + emit event. Caller is responsible
+   * for transaction wrapping (the public create() wraps; the public
+   * createWithinTransaction() does not — caller's outer transaction
+   * provides the atomic boundary).
+   */
+  private createInTransactionalContext(input: QueueCreateInput): {
+    qitemId: string;
+    persistedEvent: PersistedEvent;
+  } {
     const id = input.qitemId ?? newQitemId();
     const ts = new Date().toISOString();
     const priority = input.priority ?? "routine";
@@ -263,49 +329,29 @@ export class QueueRepository {
     const chain = input.chainOfRecord ? JSON.stringify(input.chainOfRecord) : null;
     const expiresAt = input.expiresAt ?? null;
 
-    const txn = this.db.transaction(() => {
-      this.db
-        .prepare(
-          `INSERT INTO queue_items (
-            qitem_id, ts_created, ts_updated, source_session, destination_session,
-            state, priority, tier, tags, expires_at, chain_of_record, body
-          ) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)`
-        )
-        .run(
-          id,
-          ts,
-          ts,
-          input.sourceSession,
-          input.destinationSession,
-          priority,
-          tier,
-          tags,
-          expiresAt,
-          chain,
-          input.body
-        );
-
-      this.transitionLog.append({
-        qitemId: id,
-        state: "pending",
-        actorSession: input.sourceSession,
-        transitionNote: "created",
-      });
-
-      return this.eventBus.persistWithinTransaction({
-        type: "queue.created",
-        qitemId: id,
-        sourceSession: input.sourceSession,
-        destinationSession: input.destinationSession,
-        priority,
-        tier,
-      });
+    this.db
+      .prepare(
+        `INSERT INTO queue_items (
+          qitem_id, ts_created, ts_updated, source_session, destination_session,
+          state, priority, tier, tags, expires_at, chain_of_record, body
+        ) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)`
+      )
+      .run(id, ts, ts, input.sourceSession, input.destinationSession, priority, tier, tags, expiresAt, chain, input.body);
+    this.transitionLog.append({
+      qitemId: id,
+      state: "pending",
+      actorSession: input.sourceSession,
+      transitionNote: "created",
     });
-
-    const persistedEvent = txn();
-    this.eventBus.notifySubscribers(persistedEvent);
-    await this.maybeNudge(id, input.destinationSession, input.nudge);
-    return this.getByIdOrThrow(id);
+    const persistedEvent = this.eventBus.persistWithinTransaction({
+      type: "queue.created",
+      qitemId: id,
+      sourceSession: input.sourceSession,
+      destinationSession: input.destinationSession,
+      priority,
+      tier,
+    });
+    return { qitemId: id, persistedEvent };
   }
 
   /**

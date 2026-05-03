@@ -66,13 +66,21 @@ interface WatchdogPolicyEngineDeps {
   deliver: DeliveryFn;
   parseSpec?: PolicyContextParser;
   now?: () => Date;
+  /**
+   * PL-004 Phase D extension point (orch-ratified per slice IMPL):
+   * additional policies to register alongside the Phase C built-in
+   * three. Used to register `workflow-keepalive` (which depends on
+   * the Phase D workflow_instances DB and so must be constructed at
+   * daemon startup with a db handle injected).
+   */
+  additionalPolicies?: Policy[];
 }
 
-const POLICY_REGISTRY: Map<string, Policy> = new Map([
-  [periodicReminderPolicy.name, periodicReminderPolicy],
-  [artifactPoolReadyPolicy.name, artifactPoolReadyPolicy],
-  [edgeArtifactRequiredPolicy.name, edgeArtifactRequiredPolicy],
-]);
+const PHASE_C_BUILTIN_POLICIES: ReadonlyArray<Policy> = [
+  periodicReminderPolicy,
+  artifactPoolReadyPolicy,
+  edgeArtifactRequiredPolicy,
+];
 
 /**
  * Quiet skip reasons — POC `shouldAppendHistory` (engine.mjs:99-112)
@@ -103,6 +111,7 @@ export class WatchdogPolicyEngine {
   private readonly deliver: DeliveryFn;
   private readonly parseSpec: PolicyContextParser;
   private readonly now: () => Date;
+  private readonly policies: Map<string, Policy>;
 
   constructor(deps: WatchdogPolicyEngineDeps) {
     this.jobsRepo = deps.jobsRepo;
@@ -111,10 +120,15 @@ export class WatchdogPolicyEngine {
     this.deliver = deps.deliver;
     this.parseSpec = deps.parseSpec ?? defaultParseSpec;
     this.now = deps.now ?? (() => new Date());
+    this.policies = new Map();
+    for (const p of PHASE_C_BUILTIN_POLICIES) this.policies.set(p.name, p);
+    if (deps.additionalPolicies) {
+      for (const p of deps.additionalPolicies) this.policies.set(p.name, p);
+    }
   }
 
   resolvePolicy(name: string): Policy | undefined {
-    return POLICY_REGISTRY.get(name);
+    return this.policies.get(name);
   }
 
   async evaluate(job: WatchdogJob): Promise<EvaluationResult> {

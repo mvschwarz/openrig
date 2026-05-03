@@ -71,6 +71,8 @@ import { WatchdogJobsRepository } from "./domain/watchdog-jobs-repository.js";
 import { WatchdogHistoryLog } from "./domain/watchdog-history-log.js";
 import { WatchdogPolicyEngine } from "./domain/watchdog-policy-engine.js";
 import { WatchdogScheduler } from "./domain/watchdog-scheduler.js";
+import { WorkflowRuntime } from "./domain/workflow-runtime.js";
+import { makeWorkflowKeepalivePolicy } from "./domain/policies/workflow-keepalive.js";
 import { SpecReviewService } from "./domain/spec-review-service.js";
 import { SpecLibraryService } from "./domain/spec-library-service.js";
 import { WhoamiService } from "./domain/whoami-service.js";
@@ -109,6 +111,10 @@ import { classifierLeasesSchema } from "./db/migrations/029_classifier_leases.js
 import { viewsCustomSchema } from "./db/migrations/030_views_custom.js";
 import { watchdogJobsSchema } from "./db/migrations/031_watchdog_jobs.js";
 import { watchdogHistorySchema } from "./db/migrations/032_watchdog_history.js";
+import { workflowSpecsSchema } from "./db/migrations/033_workflow_specs.js";
+import { workflowInstancesSchema } from "./db/migrations/034_workflow_instances.js";
+import { workflowStepTrailsSchema } from "./db/migrations/035_workflow_step_trails.js";
+import { watchdogPolicyEnumExtensionSchema } from "./db/migrations/036_watchdog_policy_enum_extension.js";
 import { OPENRIG_HOME } from "./openrig-compat.js";
 import {
   getCompatibleOpenRigPath,
@@ -134,7 +140,7 @@ interface DaemonResult {
 export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> {
   const dbPath = opts?.dbPath ?? ":memory:";
   const db = createDb(dbPath);
-  migrate(db, [coreSchema, bindingsSessionsSchema, eventsSchema, snapshotsSchema, checkpointsSchema, resumeMetadataSchema, nodeSpecFieldsSchema, packagesSchema, installJournalSchema, journalSeqSchema, bootstrapSchema, discoverySchema, discoveryFkFix, agentspecRebootSchema, startupContextSchema, chatMessagesSchema, podNamespaceSchema, contextUsageSchema, externalCliAttachmentSchema, rigServicesSchema, seatHandoverObservabilitySchema, nodeCodexConfigProfileSchema, streamItemsSchema, queueItemsSchema, queueTransitionsSchema, inboxEntriesSchema, outboxEntriesSchema, projectClassificationsSchema, classifierLeasesSchema, viewsCustomSchema, watchdogJobsSchema, watchdogHistorySchema]);
+  migrate(db, [coreSchema, bindingsSessionsSchema, eventsSchema, snapshotsSchema, checkpointsSchema, resumeMetadataSchema, nodeSpecFieldsSchema, packagesSchema, installJournalSchema, journalSeqSchema, bootstrapSchema, discoverySchema, discoveryFkFix, agentspecRebootSchema, startupContextSchema, chatMessagesSchema, podNamespaceSchema, contextUsageSchema, externalCliAttachmentSchema, rigServicesSchema, seatHandoverObservabilitySchema, nodeCodexConfigProfileSchema, streamItemsSchema, queueItemsSchema, queueTransitionsSchema, inboxEntriesSchema, outboxEntriesSchema, projectClassificationsSchema, classifierLeasesSchema, viewsCustomSchema, watchdogJobsSchema, watchdogHistorySchema, workflowSpecsSchema, workflowInstancesSchema, workflowStepTrailsSchema, watchdogPolicyEnumExtensionSchema]);
 
   const rigRepo = new RigRepository(db);
   const sessionRegistry = new SessionRegistry(db);
@@ -533,6 +539,22 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // through the live SessionTransport. Scheduler is started by
   // index.ts after listen() so the daemon's HTTP surface is ready
   // before the scheduler's first tick.
+  // PL-004 Phase D — workflow runtime + workflow-keepalive policy.
+  // Workflow runtime is constructed first; then the watchdog policy
+  // engine is constructed with workflow-keepalive injected via
+  // additionalPolicies (orch-ratified Phase D extension point per
+  // slice IMPL § Write Set / § Driver Handoff Contract).
+  const queueRepoForWorkflow = deps.queueRepo;
+  let workflowRuntime: WorkflowRuntime | undefined;
+  if (queueRepoForWorkflow) {
+    workflowRuntime = new WorkflowRuntime({
+      db,
+      eventBus,
+      queueRepo: queueRepoForWorkflow,
+    });
+    deps.workflowRuntime = workflowRuntime;
+  }
+
   const sessionTransport = deps.sessionTransport;
   if (sessionTransport) {
     const watchdogPolicyEngine = new WatchdogPolicyEngine({
@@ -547,6 +569,11 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
           return { status: "failed", error: err instanceof Error ? err.message : String(err) };
         }
       },
+      // PL-004 Phase D: register workflow-keepalive policy alongside
+      // Phase C's three built-in policies. workflow-keepalive reads
+      // SQLite workflow_instances directly via the new Phase D tables
+      // (audit row 18: SQLite-source-only, no markdown read).
+      additionalPolicies: [makeWorkflowKeepalivePolicy({ db })],
     });
     const watchdogScheduler = new WatchdogScheduler({
       jobsRepo: watchdogJobsRepoInstance,

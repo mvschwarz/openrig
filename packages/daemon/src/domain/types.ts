@@ -182,7 +182,17 @@ export type RigEvent =
   | { type: "watchdog.evaluation_skipped"; jobId: string; policy: string; skipReason: string }
   | { type: "watchdog.evaluation_terminal"; jobId: string; policy: string; terminalReason: string }
   | { type: "watchdog.job_registered"; jobId: string; policy: string; targetSession: string; registeredBy: string }
-  | { type: "watchdog.job_stopped"; jobId: string; reason: string };
+  | { type: "watchdog.job_stopped"; jobId: string; reason: string }
+  // PL-004 Phase D: daemon-native Workflow Runtime events. Step closure
+  // and next-qitem projection are emitted within the SAME daemon
+  // transaction (transactional-scribe contract). Subscribers see the
+  // pair atomically.
+  | { type: "workflow.instantiated"; instanceId: string; workflowName: string; workflowVersion: string; createdBy: string }
+  | { type: "workflow.step_closed"; instanceId: string; stepId: string; closureReason: string; actorSession: string; priorQitemId: string }
+  | { type: "workflow.next_qitem_projected"; instanceId: string; nextQitemId: string; nextOwner: string; nextStepId: string }
+  | { type: "workflow.completed"; instanceId: string; workflowName: string }
+  | { type: "workflow.failed"; instanceId: string; workflowName: string; reason: string }
+  | { type: "workflow.routing_table_changed"; rigName: string; cause: string };
 
 export type PersistedEvent = RigEvent & {
   seq: number;
