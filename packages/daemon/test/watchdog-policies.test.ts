@@ -198,6 +198,61 @@ describe("artifactPoolReadyPolicy (POC contract)", () => {
     expect(out.message).not.toContain("malformed.md");
   });
 
+  // R2 fix (guard blocker 2): valid YAML scalars containing colons
+  // (ISO timestamps, URLs) MUST parse cleanly via the `yaml` package
+  // and the artifact MUST be included. The R1 local parser excluded
+  // these as "malformed" because of the inner colons.
+  it("includes ready artifacts with ISO timestamp frontmatter (POC YAML parity)", async () => {
+    writeFileSync(
+      join(tmp, "with-timestamp.md"),
+      "---\nstatus: ready\nclaimed_at: 2026-05-03T05:15:25Z\n---\n# Body\n",
+    );
+    writeFileSync(
+      join(tmp, "malformed.md"),
+      "---\nstatus: ready\nbroken: value: still broken\n---\n",
+    );
+    const out = await artifactPoolReadyPolicy.evaluate(
+      makeJob({
+        context: { pools: [{ path: tmp, include_statuses: ["ready"] }] },
+      }),
+    );
+    expect(out.action).toBe("send");
+    if (out.action !== "send") return;
+    expect(out.message).toContain("with-timestamp.md");
+    expect(out.message).not.toContain("malformed.md");
+    expect(out.message).toMatch(/has 1 actionable/);
+  });
+
+  it("includes ready artifacts with URL frontmatter (POC YAML parity)", async () => {
+    writeFileSync(
+      join(tmp, "with-url.md"),
+      "---\nstatus: ready\nsource_url: https://example.org/path\n---\n# Body\n",
+    );
+    const out = await artifactPoolReadyPolicy.evaluate(
+      makeJob({
+        context: { pools: [{ path: tmp, include_statuses: ["ready"] }] },
+      }),
+    );
+    expect(out.action).toBe("send");
+    if (out.action !== "send") return;
+    expect(out.message).toContain("with-url.md");
+  });
+
+  it("includes ready artifacts with quoted-string frontmatter containing colons", async () => {
+    writeFileSync(
+      join(tmp, "with-quoted-colon.md"),
+      "---\nstatus: ready\ntitle: \"Phase C: things\"\n---\n",
+    );
+    const out = await artifactPoolReadyPolicy.evaluate(
+      makeJob({
+        context: { pools: [{ path: tmp, include_statuses: ["ready"] }] },
+      }),
+    );
+    expect(out.action).toBe("send");
+    if (out.action !== "send") return;
+    expect(out.message).toContain("with-quoted-colon.md");
+  });
+
   it("supports configured ignore_names (POC parity)", async () => {
     writeFileSync(join(tmp, "skip-me.md"), "---\nstatus: ready\n---\n");
     writeFileSync(join(tmp, "include-me.md"), "---\nstatus: ready\n---\n");
