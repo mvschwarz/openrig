@@ -217,6 +217,120 @@ describe("rig queue CLI", () => {
     expect(call!.path).toContain("recentLimit=10");
   });
 
+  it("whoami defaults the session from OPENRIG_SESSION_NAME when --session is omitted", async () => {
+    const saved = process.env["OPENRIG_SESSION_NAME"];
+    process.env["OPENRIG_SESSION_NAME"] = "bob@rig";
+    try {
+      const { deps, calls } = makeDeps({
+        routes: {
+          "GET /api/queue/whoami?session=bob%40rig&recentLimit=25": {
+            status: 200,
+            data: {
+              session: "bob@rig",
+              asDestination: { pending: 1, inProgress: 0, blocked: 0, recent: [] },
+              asSource: { total: 0 },
+            },
+          },
+        },
+      });
+      const program = createProgram({ queueDeps: deps });
+      program.exitOverride();
+      await program.parseAsync(["node", "rig", "queue", "whoami", "--json"]);
+
+      const call = calls.find((c) => c.method === "GET" && c.path.startsWith("/api/queue/whoami"));
+      expect(call).toBeDefined();
+      expect(call!.path).toContain("session=bob%40rig");
+      expect(call!.path).toContain("recentLimit=25");
+    } finally {
+      if (saved === undefined) delete process.env["OPENRIG_SESSION_NAME"];
+      else process.env["OPENRIG_SESSION_NAME"] = saved;
+    }
+  });
+
+  it("claim defaults the destination from OPENRIG_SESSION_NAME when --destination is omitted", async () => {
+    const saved = process.env["OPENRIG_SESSION_NAME"];
+    process.env["OPENRIG_SESSION_NAME"] = "bob@rig";
+    try {
+      const { deps, calls } = makeDeps({
+        routes: {
+          "POST /api/queue/qitem-x/claim": {
+            status: 200,
+            data: { qitemId: "qitem-x", destinationSession: "bob@rig", state: "in-progress" },
+          },
+        },
+      });
+      const program = createProgram({ queueDeps: deps });
+      program.exitOverride();
+      await program.parseAsync(["node", "rig", "queue", "claim", "qitem-x", "--json"]);
+
+      const call = calls.find((c) => c.path === "/api/queue/qitem-x/claim");
+      expect(call).toBeDefined();
+      expect((call!.body as { destinationSession: string }).destinationSession).toBe("bob@rig");
+    } finally {
+      if (saved === undefined) delete process.env["OPENRIG_SESSION_NAME"];
+      else process.env["OPENRIG_SESSION_NAME"] = saved;
+    }
+  });
+
+  it("update defaults the actor from OPENRIG_SESSION_NAME when --actor is omitted", async () => {
+    const saved = process.env["OPENRIG_SESSION_NAME"];
+    process.env["OPENRIG_SESSION_NAME"] = "bob@rig";
+    try {
+      const { deps, calls } = makeDeps({
+        routes: {
+          "POST /api/queue/qitem-x/update": {
+            status: 200,
+            data: { qitemId: "qitem-x", state: "done", closureReason: "no-follow-on" },
+          },
+        },
+      });
+      const program = createProgram({ queueDeps: deps });
+      program.exitOverride();
+      await program.parseAsync([
+        "node", "rig", "queue", "update", "qitem-x",
+        "--state", "done",
+        "--closure-reason", "no-follow-on",
+        "--json",
+      ]);
+
+      const call = calls.find((c) => c.path === "/api/queue/qitem-x/update");
+      expect(call).toBeDefined();
+      expect((call!.body as { actorSession: string }).actorSession).toBe("bob@rig");
+    } finally {
+      if (saved === undefined) delete process.env["OPENRIG_SESSION_NAME"];
+      else process.env["OPENRIG_SESSION_NAME"] = saved;
+    }
+  });
+
+  it("handoff defaults the source from OPENRIG_SESSION_NAME when --from is omitted", async () => {
+    const saved = process.env["OPENRIG_SESSION_NAME"];
+    process.env["OPENRIG_SESSION_NAME"] = "bob@rig";
+    try {
+      const { deps, calls } = makeDeps({
+        routes: {
+          "POST /api/queue/qitem-x/handoff": {
+            status: 201,
+            data: { closed: { state: "handed-off" }, created: { qitemId: "qitem-new" } },
+          },
+        },
+      });
+      const program = createProgram({ queueDeps: deps });
+      program.exitOverride();
+      await program.parseAsync([
+        "node", "rig", "queue", "handoff", "qitem-x",
+        "--to", "carol@rig",
+        "--json",
+      ]);
+
+      const call = calls.find((c) => c.path === "/api/queue/qitem-x/handoff");
+      expect(call).toBeDefined();
+      expect((call!.body as { fromSession: string }).fromSession).toBe("bob@rig");
+    } finally {
+      if (saved === undefined) delete process.env["OPENRIG_SESSION_NAME"];
+      else process.env["OPENRIG_SESSION_NAME"] = saved;
+    }
+  });
+
   it("create against unknown destination rig surfaces 400 error and exits non-zero", async () => {
     const { deps } = makeDeps({
       routes: {
