@@ -86,6 +86,37 @@ describe("createDaemon startup composition", () => {
     db.close();
   });
 
+  it("passes daemon CLI reachability env and PATH into launched tmux sessions", async () => {
+    vi.stubEnv("PATH", "/proof/openrig/bin:/usr/bin:/bin");
+    vi.stubEnv("OPENRIG_PORT", "17433");
+    vi.stubEnv("OPENRIG_HOST", "127.0.0.1");
+    const cmuxFactory: CmuxTransportFactory = async () => {
+      throw Object.assign(new Error(""), { code: "ENOENT" });
+    };
+    const tmuxExec = vi.fn<ExecFn>(async () => "");
+
+    try {
+      const { db, deps } = await createDaemon({ cmuxFactory, tmuxExec });
+      const rig = deps.rigRepo.createRig("path-env-rig");
+      deps.rigRepo.addNode(rig.id, "worker", { runtime: "codex" });
+
+      const result = await deps.nodeLauncher.launchNode(rig.id, "worker");
+
+      expect(result.ok).toBe(true);
+      const newSessionCmd = tmuxExec.mock.calls
+        .map((call) => call[0])
+        .find((cmd) => cmd.includes("tmux new-session"));
+      expect(newSessionCmd).toBeDefined();
+      expect(newSessionCmd).toContain("-e 'PATH=/proof/openrig/bin:/usr/bin:/bin'");
+      expect(newSessionCmd).toContain("-e 'OPENRIG_PORT=17433'");
+      expect(newSessionCmd).toContain("-e 'OPENRIG_HOST=127.0.0.1'");
+
+      db.close();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("createDaemon wires node cmux service for POST /api/rigs/:rigId/nodes/:logicalId/open-cmux", async () => {
     const cmuxFactory: CmuxTransportFactory = async () => ({
       request: async (method: string) => {

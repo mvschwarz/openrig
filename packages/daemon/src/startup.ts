@@ -195,6 +195,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const transcriptsPath = readOpenRigEnv("OPENRIG_TRANSCRIPTS_PATH", "RIGGED_TRANSCRIPTS_PATH") || undefined;
   const activityHookToken = readOpenRigEnv("OPENRIG_ACTIVITY_HOOK_TOKEN", "RIGGED_ACTIVITY_HOOK_TOKEN") || undefined;
   const activityHookUrl = readOpenRigEnv("OPENRIG_URL", "RIGGED_URL") || undefined;
+  const openRigPort = readOpenRigEnv("OPENRIG_PORT", "RIGGED_PORT") || undefined;
+  const openRigHost = readOpenRigEnv("OPENRIG_HOST", "RIGGED_HOST") || undefined;
   const transcriptStore = new TranscriptStore({
     enabled: transcriptsEnabled,
     transcriptsRoot: transcriptsPath,
@@ -208,6 +210,10 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     tmuxAdapter,
     transcriptStore,
     sessionEnv: {
+      PATH: process.env.PATH,
+      OPENRIG_HOME,
+      OPENRIG_PORT: openRigPort,
+      OPENRIG_HOST: openRigHost,
       OPENRIG_URL: activityHookUrl,
       OPENRIG_ACTIVITY_HOOK_TOKEN: activityHookToken,
     },
