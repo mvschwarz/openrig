@@ -118,6 +118,19 @@ export interface QueueUpdateInput {
   transitionNote?: string;
   closureReason?: string;
   closureTarget?: string;
+  /**
+   * PL-004 Phase D extension: when set, persists the queue_items.handed_off_to
+   * column. Used by workflow-projector for state=handed-off transitions so
+   * the canonical "next owner" pointer is recoverable from queue state alone.
+   * Optional to preserve backward compatibility with existing update() callers.
+   */
+  handedOffTo?: string;
+  /**
+   * PL-004 Phase D extension: when set, persists the queue_items.blocked_on
+   * column. Used by workflow-projector for state=blocked transitions so the
+   * blocker reference (qitem id, gate name) is recoverable from queue state.
+   */
+  blockedOn?: string;
 }
 
 export interface QueueHandoffInput {
@@ -760,6 +773,47 @@ export class QueueRepository {
    * invisible to the view bridge.
    */
   update(input: QueueUpdateInput): QueueItem {
+    const txn = this.db.transaction(() => this.updateInTransactionalContext(input));
+    const persistedEvent = txn();
+    this.eventBus.notifySubscribers(persistedEvent);
+    return this.getByIdOrThrow(input.qitemId);
+  }
+
+  /**
+   * PL-004 Phase D extension point (orch-ratified per slice IMPL Driver
+   * Handoff Contract / Guard R1 repair). Same closure validation +
+   * UPDATE + transition log + queue.updated event as update(), but
+   * runs inside the caller's outer db.transaction so it composes with
+   * workflow-projector's transactional-scribe contract.
+   *
+   * Caller MUST:
+   *   1. Invoke from inside a `db.transaction(() => {...})` block.
+   *   2. After the outer txn commits, call:
+   *        eventBus.notifySubscribers(persistedEvent)
+   *   3. NOT call this from outside a transaction (will produce a
+   *      half-state if the caller errors before committing).
+   *
+   * Closure validation runs at call time (before the UPDATE) so a
+   * Phase A invariant violation (e.g., state=done without closure_reason)
+   * throws before the workflow projector's outer transaction can commit
+   * any partial state. The Phase A hot-potato strict-rejection rule
+   * therefore applies to workflow projection unchanged.
+   */
+  updateWithinTransaction(input: QueueUpdateInput): {
+    qitemId: string;
+    persistedEvent: PersistedEvent;
+  } {
+    const persistedEvent = this.updateInTransactionalContext(input);
+    return { qitemId: input.qitemId, persistedEvent };
+  }
+
+  /**
+   * Internal: closure validation + UPDATE + transition log + emit
+   * queue.updated event. Caller is responsible for transaction wrapping
+   * (the public update() wraps; the public updateWithinTransaction()
+   * composes inside the caller's outer transaction).
+   */
+  private updateInTransactionalContext(input: QueueUpdateInput): PersistedEvent {
     const qitem = this.getById(input.qitemId);
     if (!qitem) {
       throw new QueueRepositoryError(
@@ -788,47 +842,45 @@ export class QueueRepository {
     const ts = new Date().toISOString();
     const fromState = qitem.state;
 
-    const txn = this.db.transaction(() => {
-      this.db
-        .prepare(
-          `UPDATE queue_items
-             SET state = ?,
-                 ts_updated = ?,
-                 closure_reason = COALESCE(?, closure_reason),
-                 closure_target = COALESCE(?, closure_target)
-           WHERE qitem_id = ?`
-        )
-        .run(
-          input.state,
-          ts,
-          validation.closureReason,
-          validation.closureTarget,
-          input.qitemId
-        );
+    this.db
+      .prepare(
+        `UPDATE queue_items
+           SET state = ?,
+               ts_updated = ?,
+               closure_reason = COALESCE(?, closure_reason),
+               closure_target = COALESCE(?, closure_target),
+               handed_off_to = COALESCE(?, handed_off_to),
+               blocked_on = COALESCE(?, blocked_on)
+         WHERE qitem_id = ?`
+      )
+      .run(
+        input.state,
+        ts,
+        validation.closureReason,
+        validation.closureTarget,
+        input.handedOffTo ?? null,
+        input.blockedOn ?? null,
+        input.qitemId
+      );
 
-      this.transitionLog.append({
-        qitemId: input.qitemId,
-        state: input.state,
-        actorSession: input.actorSession,
-        transitionNote: input.transitionNote,
-        closureReason: validation.closureReason ?? undefined,
-        closureTarget: validation.closureTarget ?? undefined,
-      });
-
-      return this.eventBus.persistWithinTransaction({
-        type: "queue.updated",
-        qitemId: input.qitemId,
-        fromState,
-        toState: input.state,
-        closureReason: validation.closureReason ?? null,
-        closureTarget: validation.closureTarget ?? null,
-        actorSession: input.actorSession,
-      });
+    this.transitionLog.append({
+      qitemId: input.qitemId,
+      state: input.state,
+      actorSession: input.actorSession,
+      transitionNote: input.transitionNote,
+      closureReason: validation.closureReason ?? undefined,
+      closureTarget: validation.closureTarget ?? undefined,
     });
 
-    const persistedEvent = txn();
-    this.eventBus.notifySubscribers(persistedEvent);
-    return this.getByIdOrThrow(input.qitemId);
+    return this.eventBus.persistWithinTransaction({
+      type: "queue.updated",
+      qitemId: input.qitemId,
+      fromState,
+      toState: input.state,
+      closureReason: validation.closureReason ?? null,
+      closureTarget: validation.closureTarget ?? null,
+      actorSession: input.actorSession,
+    });
   }
 
   getById(qitemId: string): QueueItem | null {

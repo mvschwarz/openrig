@@ -105,6 +105,84 @@ describe("WorkflowProjector + WorkflowRuntime (PL-004 Phase D; transactional-scr
     expect(entryItem?.state).toBe("pending");
   });
 
+  // R1 fix (guard blocker 1): project handoff persists Phase A queue
+  // closure metadata (closure_reason, closure_target, handed_off_to) +
+  // appends queue_transitions row + emits queue.updated event.
+  it("project(handoff) persists Phase A queue closure metadata + transition row + queue.updated event", async () => {
+    const events: Array<{ type: string }> = [];
+    bus.subscribe((e) => events.push(e));
+    const inst = await runtime.instantiate({
+      specPath,
+      rootObjective: "x",
+      createdBySession: "ops@rig",
+    });
+    const projected = await runtime.project({
+      instanceId: inst.instance.instanceId,
+      currentPacketId: inst.entryQitemId,
+      exit: "handoff",
+      actorSession: "producer@rig",
+      resultNote: "produced",
+    });
+    // Phase A queue closure contract preserved.
+    const closedItem = queueRepo.getById(inst.entryQitemId);
+    expect(closedItem?.state).toBe("handed-off");
+    expect(closedItem?.closureReason).toBe("handed_off_to");
+    expect(closedItem?.closureTarget).toBe("reviewer@rig");
+    expect(closedItem?.handedOffTo).toBe("reviewer@rig");
+    // queue_transitions row appended.
+    const transitions = db
+      .prepare(`SELECT * FROM queue_transitions WHERE qitem_id = ? ORDER BY ts DESC`)
+      .all(inst.entryQitemId) as Array<{ state: string; closure_reason: string | null; closure_target: string | null }>;
+    expect(transitions.find((t) => t.state === "handed-off")).toBeDefined();
+    expect(transitions.find((t) => t.state === "handed-off")?.closure_reason).toBe("handed_off_to");
+    // queue.updated event emitted.
+    expect(events.find((e) => e.type === "queue.updated")).toBeDefined();
+    // Workflow events too.
+    expect(events.find((e) => e.type === "workflow.step_closed")).toBeDefined();
+    expect(events.find((e) => e.type === "workflow.next_qitem_projected")).toBeDefined();
+    expect(projected.nextStepId).toBe("review");
+  });
+
+  it("project(done) without exposed closure overrides defaults closure_reason to no-follow-on", async () => {
+    const inst = await runtime.instantiate({
+      specPath,
+      rootObjective: "x",
+      createdBySession: "ops@rig",
+    });
+    const events: Array<{ type: string }> = [];
+    bus.subscribe((e) => events.push(e));
+    await runtime.project({
+      instanceId: inst.instance.instanceId,
+      currentPacketId: inst.entryQitemId,
+      exit: "done",
+      actorSession: "producer@rig",
+    });
+    const closedItem = queueRepo.getById(inst.entryQitemId);
+    expect(closedItem?.state).toBe("done");
+    expect(closedItem?.closureReason).toBe("no-follow-on");
+    expect(events.find((e) => e.type === "queue.updated")).toBeDefined();
+  });
+
+  it("project(waiting) uses Phase A blocked state + closure_reason=blocked_on + blocked_on column", async () => {
+    const inst = await runtime.instantiate({
+      specPath,
+      rootObjective: "x",
+      createdBySession: "ops@rig",
+    });
+    await runtime.project({
+      instanceId: inst.instance.instanceId,
+      currentPacketId: inst.entryQitemId,
+      exit: "waiting",
+      actorSession: "producer@rig",
+      blockedOn: "external-gate-x",
+    });
+    const closedItem = queueRepo.getById(inst.entryQitemId);
+    expect(closedItem?.state).toBe("blocked");
+    expect(closedItem?.closureReason).toBe("blocked_on");
+    expect(closedItem?.closureTarget).toBe("external-gate-x");
+    expect(closedItem?.blockedOn).toBe("external-gate-x");
+  });
+
   it("project(handoff) closes current packet AND creates next-step packet IN ONE TRANSACTION; emits step_closed + next_qitem_projected", async () => {
     const events: Array<{ type: string }> = [];
     bus.subscribe((e) => events.push(e));
@@ -255,12 +333,17 @@ describe("WorkflowProjector + WorkflowRuntime (PL-004 Phase D; transactional-scr
     }
   });
 
-  it("project(waiting) sets status=waiting + frontier preserves the packet", async () => {
+  // R1 fix (guard blocker 2b): project(waiting) PRESERVES the closed
+  // packet on currentFrontier so workflow-keepalive can still resolve
+  // the owner. The blocker bug was: removing the closed packet left
+  // single-packet waiting workflows with no owner to wake.
+  it("project(waiting) sets status=waiting AND preserves the closed packet on currentFrontier (workflow-keepalive resolvability)", async () => {
     const inst = await runtime.instantiate({
       specPath,
       rootObjective: "x",
       createdBySession: "ops@rig",
     });
+    expect(inst.instance.currentFrontier).toEqual([inst.entryQitemId]);
     const projected = await runtime.project({
       instanceId: inst.instance.instanceId,
       currentPacketId: inst.entryQitemId,
@@ -270,6 +353,43 @@ describe("WorkflowProjector + WorkflowRuntime (PL-004 Phase D; transactional-scr
     });
     expect(projected.instance.status).toBe("waiting");
     expect(projected.nextQitemId).toBeNull();
+    // Phase A queue closure shape on the blocked packet.
     expect(queueRepo.getById(inst.entryQitemId)?.state).toBe("blocked");
+    // FRONTIER PRESERVED — workflow-keepalive can still wake the owner.
+    expect(projected.instance.currentFrontier).toEqual([inst.entryQitemId]);
+    // Re-fetch to confirm the persisted instance row reflects the same.
+    const reread = runtime.instanceStore.getByIdOrThrow(inst.instance.instanceId);
+    expect(reread.currentFrontier).toEqual([inst.entryQitemId]);
+  });
+
+  // R1 fix (guard blocker 2a): exit=failed sets workflow status=failed
+  // (not completed) AND emits workflow.failed (not workflow.completed).
+  it("project(failed) sets workflow status=failed AND emits workflow.failed (NOT completed)", async () => {
+    const events: Array<{ type: string }> = [];
+    bus.subscribe((e) => events.push(e));
+    const inst = await runtime.instantiate({
+      specPath,
+      rootObjective: "x",
+      createdBySession: "ops@rig",
+    });
+    const projected = await runtime.project({
+      instanceId: inst.instance.instanceId,
+      currentPacketId: inst.entryQitemId,
+      exit: "failed",
+      actorSession: "producer@rig",
+      resultNote: "could not produce artifact",
+    });
+    expect(projected.instance.status).toBe("failed");
+    expect(events.find((e) => e.type === "workflow.failed")).toBeDefined();
+    expect(events.find((e) => e.type === "workflow.completed")).toBeUndefined();
+    // Phase A queue closure: state=done with closure_reason=denied.
+    const closedItem = queueRepo.getById(inst.entryQitemId);
+    expect(closedItem?.state).toBe("done");
+    expect(closedItem?.closureReason).toBe("denied");
+    // Persisted failed event carries the reason.
+    const failedEvent = events.find((e) => e.type === "workflow.failed") as
+      | { type: "workflow.failed"; reason: string }
+      | undefined;
+    expect(failedEvent?.reason).toBe("could not produce artifact");
   });
 });
