@@ -27,6 +27,8 @@ import { transcriptCommand } from "./commands/transcript.js";
 import { sendCommand } from "./commands/send.js";
 import { streamCommand, type StreamDeps } from "./commands/stream.js";
 import { queueCommand, type QueueDeps } from "./commands/queue.js";
+import { projectCommand, type ProjectDeps } from "./commands/project.js";
+import { viewCommand, type ViewDeps } from "./commands/view.js";
 import { captureCommand } from "./commands/capture.js";
 import { broadcastCommand } from "./commands/broadcast.js";
 import { configCommand } from "./commands/config.js";
@@ -80,6 +82,8 @@ export interface ProgramDeps {
   sendDeps?: StatusDeps;
   streamDeps?: StreamDeps;
   queueDeps?: QueueDeps;
+  projectDeps?: ProjectDeps;
+  viewDeps?: ViewDeps;
   captureDeps?: StatusDeps;
   broadcastDeps?: StatusDeps;
   askDeps?: StatusDeps;
@@ -134,6 +138,8 @@ export function createProgram(depsOverride?: ProgramDeps): Command {
   program.addCommand(sendCommand(depsOverride?.sendDeps));
   program.addCommand(streamCommand(depsOverride?.streamDeps));
   program.addCommand(queueCommand(depsOverride?.queueDeps));
+  program.addCommand(projectCommand(depsOverride?.projectDeps));
+  program.addCommand(viewCommand(depsOverride?.viewDeps));
   program.addCommand(captureCommand(depsOverride?.captureDeps));
   program.addCommand(broadcastCommand(depsOverride?.broadcastDeps));
   program.addCommand(askCommand(depsOverride?.askDeps));
