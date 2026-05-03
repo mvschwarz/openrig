@@ -7,7 +7,7 @@ It is intentionally simpler than a monolithic `CHANGELOG.md`.
 Each shipped release gets its own note:
 
 - `v0.1.12.md`
-- `v0.1.13.md`
+- `v0.2.0.md`
 - and so on
 
 ## Why This Exists

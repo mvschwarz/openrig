@@ -3,14 +3,16 @@
 
 Status:
 - OpenRig currently ships a pod-aware multi-agent runtime, rig-scoped environment management, a filesystem-backed spec library, managed-app browsing/review surfaces, and the canonical `secrets-manager` + `vault.specialist` agent-managed app example.
-- Shipped source footprint: `286` source files across the three packages.
-- Daemon footprint: `150` source files total, including `90` domain files, `22` route files, `11` adapters, and `20` migrations.
-- CLI footprint: `49` source files.
+- OpenRig v0.2.0 also ships daemon-backed coordination primitives: stream, queue, project, view, watchdog, and workflow runtime.
+- Shipped source footprint: `376` source files across the three packages.
+- Daemon footprint: `211` source files total, including `126` domain files, `31` route files, `11` adapters, and `36` migrations.
+- CLI footprint: `78` source files.
 - UI footprint: `87` source files.
-- Current full-suite verification during this refresh:
-  - daemon: `127/127` files, `1668/1668` passing
-  - CLI: `37/37` files, `366/366` passing
-  - UI: `37/37` files, `388/388` passing
+- Current v0.2.0 release verification:
+  - root build and package build passing
+  - daemon focused suite: `171/171` files, `2561/2561` passing
+  - CLI sanitized suite: `56/56` files, `794/794` passing
+  - Mode 3 real-agent dual-auth dogfood covered Claude-only, Codex-only, and mixed Claude-to-Codex paths
 
 Packages: `@openrig/daemon`, `@openrig/cli`, `@openrig/ui`
 
@@ -32,10 +34,10 @@ Legacy flat-node/package flows remain for backward compatibility.
 The stack is:
 
 ```text
-CLI (40 command groups) / UI (explorer + workspace + drawer) / MCP (17 tools)
+CLI (53 command groups) / UI (explorer + workspace + drawer) / MCP (17 tools)
       |
       v
-Hono daemon routes (22 route groups + dedicated health/export/static handlers)
+Hono daemon routes (31 route groups + dedicated health/export/static handlers)
       |
       +-- dual-format route adapters (legacy v1 + rebooted v0.2)
       +-- env routes (status / logs / down)
@@ -49,7 +51,7 @@ Hono daemon routes (22 route groups + dedicated health/export/static handlers)
       v
 Framework-free domain services
       |
-      +-- SQLite state (20 migrations)
+      +-- SQLite state (36 migrations)
       +-- tmux / cmux / resume adapters
       +-- runtime adapters (Claude Code / Codex / Terminal)
       +-- RigEnv substrate (compose adapter, readiness evaluator, service orchestrator)
@@ -120,7 +122,7 @@ Important route behaviors:
 
 ### CLI commands
 
-`index.ts` currently mounts 40 command groups. Reboot-era commands plus:
+`index.ts` currently mounts 53 command groups. Reboot-era commands plus:
 
 **Operator and topology commands:**
 - `rig up <rig-name>` — existing-rig restore by name (auto-finds latest snapshot)

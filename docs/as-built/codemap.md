@@ -3,10 +3,10 @@
 Source-driven map of every file under `packages/daemon/src`, `packages/cli/src`, and `packages/ui/src` at current `HEAD`.
 
 Current footprint:
-- daemon: 150 source files (90 domain, 22 routes, 11 adapters, 20 migrations, 7 other)
-- CLI: 49 source files
+- daemon: 211 source files (126 domain, 31 routes, 11 adapters, 36 migrations, 7 other)
+- CLI: 78 source files
 - UI: 87 source files
-- total: 286 source files
+- total: 376 source files
 
 How to use this doc:
 - `Exports` lists the public symbols defined by the file.
@@ -27,7 +27,7 @@ Fast lookup:
 - Context usage: `packages/daemon/src/domain/context-usage-store.ts`, `packages/daemon/src/domain/context-monitor.ts`
 - Resume honesty: `packages/daemon/src/domain/native-resume-probe.ts`, `resume-metadata-refresher.ts`, `codex-thread-id.ts`
 - Package / bootstrap / bundle flows: `packages/daemon/src/domain/package-*`, `install-*`, `bootstrap-*`, `bundle-*`
-- CLI command surface: `packages/cli/src/index.ts`, `packages/cli/src/commands/*` (40 groups)
+- CLI command surface: `packages/cli/src/index.ts`, `packages/cli/src/commands/*` (53 groups)
 - CLI infrastructure: `packages/cli/src/config-store.ts`, `packages/cli/src/system-preflight.ts`
 - UI workspace and navigation: `packages/ui/src/components/Explorer.tsx`, `packages/ui/src/components/WorkspaceHome.tsx`, `packages/ui/src/components/AppShell.tsx`
 - UI shared drawer: `packages/ui/src/components/SharedDetailDrawer.tsx`, `RigDetailPanel.tsx`, `NodeDetailPanel.tsx`, `DiscoveryPanel.tsx`, `SpecsPanel.tsx`, `RigChatPanel.tsx`, `SystemPanel.tsx`
@@ -42,7 +42,7 @@ Fast lookup:
 - `packages/daemon/src/index.ts`: CLI entrypoint for starting the daemon HTTP server. Exports: startServer. Related: `packages/daemon/src/startup.js`.
 - `packages/daemon/src/seed.ts`: Development/test seed entrypoint for populating sample daemon state. Exports: none. Related: `packages/daemon/src/db/connection.js`, `packages/daemon/src/db/migrate.js`, `packages/daemon/src/db/migrations/001_core_schema.js`, `packages/daemon/src/db/migrations/002_bindings_sessions.js`, +3 more.
 - `packages/daemon/src/server.ts`: Defines `AppDeps`, enforces shared-DB invariants, and mounts the full public Hono route tree including dual-format rigspec import/export/materialize, bundles, transport/transcripts/ask/chat, env status/logs/down, specs review/library, and `whoami`. Exports: AppDeps, createApp. Related: `packages/daemon/src/adapters/cmux.js`, `packages/daemon/src/adapters/tmux.js`, `packages/daemon/src/domain/bootstrap-orchestrator.js`, `packages/daemon/src/domain/bootstrap-repository.js`, +36 more.
-- `packages/daemon/src/startup.ts`: Constructs the daemon dependency graph, runs all 20 migrations, wires legacy, reboot, North Star, Post-North-Star, Phase 5 RigEnv, context-usage, and Final Stretch 3 managed-app services together, and returns `{ app, db, deps }`. Exports: createDaemon. Related: `packages/daemon/src/adapters/claude-resume.js`, `packages/daemon/src/adapters/cmux-transport.js`, `packages/daemon/src/adapters/cmux.js`, `packages/daemon/src/adapters/codex-resume.js`, +58 more.
+- `packages/daemon/src/startup.ts`: Constructs the daemon dependency graph, runs all 36 migrations, wires legacy, reboot, North Star, Post-North-Star, Phase 5 RigEnv, context-usage, Final Stretch 3 managed-app services, and PL-004 coordination services together, and returns `{ app, db, deps }`. Exports: createDaemon. Related: `packages/daemon/src/adapters/claude-resume.js`, `packages/daemon/src/adapters/cmux-transport.js`, `packages/daemon/src/adapters/cmux.js`, `packages/daemon/src/adapters/codex-resume.js`, +58 more.
 
 ### Adapters
 - `packages/daemon/src/adapters/claude-code-adapter.ts`: Adapter implementation for claude code integration. Exports: ClaudeAdapterFsOps, ClaudeCodeAdapter. Related: `packages/daemon/src/adapters/tmux.js`, `packages/daemon/src/domain/projection-planner.js`, `packages/daemon/src/domain/runtime-adapter.js`.

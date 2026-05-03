@@ -248,6 +248,8 @@ Flags:
 Notes:
 - When `--snapshot` succeeds, human output includes the restore command.
 - If the rig name is uniquely reusable, the handoff prefers `rig up <rigName>`.
+- v0.2.0 known issue: `rig down <name> --delete` can return HTTP 404; use
+  `rig ps` to find the rig ID and run `rig down <rigId> --delete`.
 
 ### `rig env`
 
