@@ -65,7 +65,7 @@ function expectedFreshLaunchCommand(options: { cwd?: string; model?: string; que
   const gitDirArg = ` --add-dir ${quote(nodePath.join(cwd, ".git"))}`;
   const queueDirArg = options.queueRoot === null ? "" : ` --add-dir ${quote(options.queueRoot ?? testQueueRoot())}`;
   const modelArg = options.model ? ` -m ${quote(options.model)}` : "";
-  return `codex -C ${quote(cwd)}${gitDirArg}${queueDirArg}${modelArg} -a never -s workspace-write`;
+  return `codex -C ${quote(cwd)}${gitDirArg}${queueDirArg}${modelArg} -a on-request -s danger-full-access`;
 }
 
 function expectedResumeCommand(token = "sess-456", queueRoot: string | null = testQueueRoot()): string {
@@ -634,8 +634,8 @@ describe("Codex runtime adapter", () => {
       fsOps: mockFs(),
       listProcesses: () => [
         { pid: 900, ppid: 1, command: "-zsh" },
-        { pid: 901, ppid: 900, command: "node /opt/homebrew/bin/codex -C /project -a never -s workspace-write" },
-        { pid: 902, ppid: 901, command: "/opt/homebrew/lib/node_modules/@openai/codex/vendor/codex/codex -C /project -a never -s workspace-write" },
+        { pid: 901, ppid: 900, command: "node /opt/homebrew/bin/codex -C /project -a on-request -s danger-full-access" },
+        { pid: 902, ppid: 901, command: "/opt/homebrew/lib/node_modules/@openai/codex/vendor/codex/codex -C /project -a on-request -s danger-full-access" },
       ],
       readThreadIdByPid: (pid) => pid === 902 ? "019d45bc-117d-78a3-a4ad-6fb186e5a86d" : undefined,
       sleep: async () => {},

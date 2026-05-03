@@ -210,7 +210,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       ? `codex${profileArg} resume${queueStateDirArg} ${shellQuote(opts.resumeToken)}`
       : profile
         ? `codex${profileArg} -C ${shellQuote(binding.cwd)}${gitDirArg}${queueStateDirArg}${modelArg}`
-        : `codex -C ${shellQuote(binding.cwd)}${gitDirArg}${queueStateDirArg}${modelArg} -a never -s workspace-write`;
+        : `codex -C ${shellQuote(binding.cwd)}${gitDirArg}${queueStateDirArg}${modelArg} -a on-request -s danger-full-access`;
 
     const textResult = await this.tmux.sendText(binding.tmuxSession, cmd);
     if (!textResult.ok) {
