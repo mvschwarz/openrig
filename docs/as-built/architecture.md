@@ -207,7 +207,7 @@ The UI is now explorer-first, with a shared drawer plus center-workspace route m
 
 ## 3. Database Schema
 
-The daemon now has 20 migrations.
+The daemon now has 27 migrations (22 existing plus 5 added by PL-004 Phase A).
 
 ### Core state tables
 
@@ -322,6 +322,35 @@ Migration boundary:
 - `018_context_usage.ts` adds context-usage persistence.
 - `019_external_cli_attachment.ts` extends binding rows for external CLI attachment.
 - `020_rig_services.ts` adds rig-scoped services persistence.
+- `021_seat_handover_observability.ts` adds seat-handover observability fields.
+- `022_node_codex_config_profile.ts` adds Codex config-profile field on nodes.
+- `023_stream_items.ts` through `027_outbox_entries.ts` add the PL-004 Phase A coordination tables (see § Coordination Layer below).
+
+### Coordination tables (PL-004 Phase A)
+
+Five host-scoped tables back the coordination primitive:
+
+**stream_items** (`023_stream_items.ts`)
+- L1 — append-only intake/audit root.
+- Columns: `stream_item_id` (ULID PK), `ts_emitted`, `stream_sort_key`, `source_session`, `body`, `format` (default `text`), `hint_type`, `hint_urgency`, `hint_destination`, `hint_tags` (JSON), `interrupt`, `archived_at`.
+- Items immutable after emit (only `archived_at` may be set).
+
+**queue_items** (`024_queue_items.ts`)
+- L3 — owned-work queue.
+- Columns: `qitem_id` (TEXT PK preserving POC `qitem-YYYYMMDDHHMMSS-<hex>` shape), `ts_created`, `ts_updated`, `source_session`, `destination_session`, `state` (8-value enum), `priority`, `tier`, `tags` (JSON), `blocked_on`, `handed_off_to`, `handed_off_from`, `expires_at`, `chain_of_record` (JSON), `body`, `closure_reason`, `closure_target`, `closure_required_at`, `claimed_at`, `last_nudge_attempt`, `last_nudge_result`, `last_heartbeat`, `resolution`.
+- State enum: `pending | in-progress | done | blocked | failed | denied | canceled | handed-off`.
+
+**queue_transitions** (`025_queue_transitions.ts`)
+- L3 — append-only transition log. Authoritative audit trail for queue state evolution. No UPDATE / DELETE from domain code.
+- Columns: `transition_id` (AUTOINCREMENT PK), `qitem_id`, `ts`, `state`, `transition_note`, `actor_session`, `closure_reason`, `closure_target`.
+
+**inbox_entries** (`026_inbox_entries.ts`)
+- Mailbox-style asynchronous deposit; idempotent on `inbox_id`.
+- Columns: `inbox_id` (PK), `destination_session`, `sender_session` (authenticated), `body`, `tags` (JSON), `urgency`, `ts_dropped`, `state` (`pending | absorbed | denied`), `absorbed_at`, `absorbed_qitem_id`, `denied_at`, `denied_reason`, `audit_pointer`.
+
+**outbox_entries** (`027_outbox_entries.ts`)
+- Sender-side audit; symmetric to inbox; idempotent on `outbox_id`.
+- Columns: `outbox_id` (PK), `sender_session`, `destination_session`, `body`, `tags` (JSON), `urgency`, `ts_dispatched`, `delivery_state` (`pending | delivered | failed`), `delivered_at`, `audit_pointer`.
 
 ---
 
@@ -531,6 +560,17 @@ Three runtime adapters implement the five-method contract: projection, startup d
 - `history-query.ts`: transcript + chat search — prefers `rg` when available, falls back to `grep -E`, surfaces which backend was used
 - `ask-service.ts`: context engineering evidence pack — gathers rig summary plus transcript excerpts, chat excerpts, insufficiency state, and guidance. Does NOT call an external LLM.
 - `chat-repository.ts`: durable rig-scoped chat — CRUD for chat_messages table, SSE-compatible event emission
+
+### Coordination primitive (PL-004 Phase A)
+
+Six host-scoped services implementing the SQLite-canonical coordination layer. POC `rigx queue` / `rigx stream` filesystem path remains untouched; daemon `rig queue` / `rig stream` writes only to SQLite. Routes import these; services are Hono-free.
+
+- `stream-store.ts`: L1 stream — idempotent emit (on `stream_item_id`), chronological list with cursor pagination, archive (soft).
+- `queue-repository.ts`: L3 queue — create, claim/unclaim, update (general state mutator with hot-potato strict-rejection on `done`), transactional handoff (close source as `handed-off` plus create new owned qitem, single transaction), pod-fallback rerouting, overdue lookup, nudge/heartbeat tracking. Cross-rig validation hook exposed as `validateRig` constructor option.
+- `queue-transition-log.ts`: append-only state transition log. Used by `queue-repository.ts` and exposed read-only on `queue_repository.transitionLog`.
+- `hot-potato-enforcer.ts`: pure validator for the load-bearing API contract — `state=done` requires `closure_reason ∈ {handed_off_to, blocked_on, denied, canceled, no-follow-on, escalation}`; `handed_off_to | blocked_on | escalation` additionally require `closure_target`. Tier→SLA mapping for `closure_required_at` lives here.
+- `inbox-handler.ts`: mailbox handler — authenticated drop (idempotent on `inbox_id`), absorb (promotes pending entry to a queue_item, idempotent), deny (records reason). Auth check is a pluggable constructor hook.
+- `outbox-handler.ts`: sender-side outbox; idempotent record, mark delivered/failed, list. No event-bus events emitted (pure audit).
 
 ### Resume honesty
 
@@ -859,6 +899,13 @@ Present in the union but not yet emitted by production code:
 - `pod.created`, `pod.deleted`
 - `continuity.sync`, `continuity.degraded`
 
+PL-004 Phase A adds 9 coordination events emitted by domain services:
+- `stream.emitted` (StreamStore.emit)
+- `queue.created`, `queue.handed_off`, `queue.claimed`, `queue.unclaimed`, `qitem.fallback_routed`, `qitem.closure_overdue` (QueueRepository)
+- `inbox.absorbed`, `inbox.denied` (InboxHandler)
+
+Two SSE surfaces stream coordination events: `/api/stream/watch` for new stream items, `/api/queue/watch` for queue/inbox events.
+
 The event log remains append-only and SQLite-backed. The global SSE stream (`/api/events`) delivers all events; the chat SSE stream (`/api/rigs/:rigId/chat/watch`) delivers chat messages for one rig.
 
 ---
@@ -867,7 +914,7 @@ The event log remains append-only and SQLite-backed. The global SSE stream (`/ap
 
 `createDaemon()` now does the following:
 
-1. Open SQLite and run all 20 migrations.
+1. Open SQLite and run all 27 migrations (22 existing plus the 5 PL-004 Phase A coordination tables).
 2. Construct core repositories and legacy services.
 3. Construct package/bootstrap/discovery services.
 4. Construct rebooted startup/runtime services:
@@ -892,7 +939,8 @@ The event log remains append-only and SQLite-backed. The global SSE stream (`/ap
    - `SpecLibraryService` (builtin + user roots)
    - `WhoamiService`
 8. Construct `BootstrapOrchestrator` with both legacy and rebooted seams.
-9. Build `AppDeps`, enforce shared-DB invariants in `createApp()`, and mount the full route tree including env, specs review/library, and `whoami`.
+9. Construct PL-004 Phase A coordination services from a shared `QueueRepository` instance (so `InboxHandler.absorb()` and `/api/queue` write to the same repo): `StreamStore`, `QueueRepository`, `InboxHandler`, `OutboxHandler`.
+10. Build `AppDeps`, enforce shared-DB invariants in `createApp()`, and mount the full route tree including env, specs review/library, `whoami`, plus the PL-004 coordination routes (`/api/stream`, `/api/queue`).
 
 ---
 

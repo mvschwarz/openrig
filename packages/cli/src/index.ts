@@ -25,6 +25,8 @@ import { agentCommand, type AgentDeps } from "./commands/agent.js";
 import { rigCommand, type RigDeps } from "./commands/rig.js";
 import { transcriptCommand } from "./commands/transcript.js";
 import { sendCommand } from "./commands/send.js";
+import { streamCommand, type StreamDeps } from "./commands/stream.js";
+import { queueCommand, type QueueDeps } from "./commands/queue.js";
 import { captureCommand } from "./commands/capture.js";
 import { broadcastCommand } from "./commands/broadcast.js";
 import { configCommand } from "./commands/config.js";
@@ -76,6 +78,8 @@ export interface ProgramDeps {
   rigDeps?: RigDeps;
   transcriptDeps?: StatusDeps;
   sendDeps?: StatusDeps;
+  streamDeps?: StreamDeps;
+  queueDeps?: QueueDeps;
   captureDeps?: StatusDeps;
   broadcastDeps?: StatusDeps;
   askDeps?: StatusDeps;
@@ -128,6 +132,8 @@ export function createProgram(depsOverride?: ProgramDeps): Command {
   program.addCommand(rigCommand(depsOverride?.rigDeps));
   program.addCommand(transcriptCommand(depsOverride?.transcriptDeps));
   program.addCommand(sendCommand(depsOverride?.sendDeps));
+  program.addCommand(streamCommand(depsOverride?.streamDeps));
+  program.addCommand(queueCommand(depsOverride?.queueDeps));
   program.addCommand(captureCommand(depsOverride?.captureDeps));
   program.addCommand(broadcastCommand(depsOverride?.broadcastDeps));
   program.addCommand(askCommand(depsOverride?.askDeps));
