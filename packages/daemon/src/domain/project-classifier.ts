@@ -104,6 +104,22 @@ export class ProjectClassifier {
     // lease_held by other session, or lease_expired.
     this.leaseManager.requireActiveHolder(input.classifierSession);
 
+    // R1 fix (BLOCKER 1): existence check on stream_item_id. The L1→L2
+    // FK in migration 028 is a defense-in-depth safety net, but the SQLite
+    // FK violation would surface as an opaque error string. Pre-checking
+    // here gives a clean structured error (`unknown_stream_item`) that
+    // routes can map to a 400-class status.
+    const streamRow = this.db
+      .prepare(`SELECT 1 FROM stream_items WHERE stream_item_id = ? LIMIT 1`)
+      .get(input.streamItemId) as { 1: number } | undefined;
+    if (!streamRow) {
+      throw new ProjectClassifierError(
+        "unknown_stream_item",
+        `stream_item_id ${input.streamItemId} does not exist in stream_items; emit it first via 'rig stream emit' or check the id`,
+        { streamItemId: input.streamItemId },
+      );
+    }
+
     // Pre-check idempotency for a clean error path (constraint violation
     // would also catch this but the SQLite error message is opaque).
     const existing = this.db

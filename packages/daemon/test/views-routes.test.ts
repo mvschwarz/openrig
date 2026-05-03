@@ -11,6 +11,7 @@ import { viewsCustomSchema } from "../src/db/migrations/030_views_custom.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
 import { ViewProjector } from "../src/domain/view-projector.js";
+import { wireViewEventBridge } from "../src/domain/view-event-bridge.js";
 import { viewsRoutes } from "../src/routes/views.js";
 
 function buildApp(opts: {
@@ -155,5 +156,68 @@ describe("views routes (PL-004 Phase B)", () => {
     } finally {
       await res.body?.cancel();
     }
+  });
+
+  // ---- R1 BLOCKER 2: SSE consumer observes view.changed when queue mutates ----
+  // Per guard finding 2: route-level test that mutates queue state and
+  // observes a view.changed event. Wires the view-event-bridge in the test
+  // so the production code path is exercised.
+  it("R1 BLOCKER 2: queue mutation triggers view.changed visible to SSE consumer", async () => {
+    // Wire the bridge so queue.created → view.changed flows through the
+    // event-bus the SSE handler is subscribed to.
+    wireViewEventBridge(bus, projector);
+
+    // Subscribe to the SSE stream and read until we see a view.changed
+    // line for the recently-active view (caused by queue.created), or
+    // bail out after a short timeout.
+    const sseResPromise = app.request("/api/views/recently-active/sse");
+
+    // Mutate queue state in parallel: create a new qitem.
+    await queueRepo.create({
+      sourceSession: "alice@rig",
+      destinationSession: "bob@rig",
+      body: "trigger view.changed",
+      nudge: false,
+    });
+
+    const res = await sseResPromise;
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type") ?? "").toContain("text/event-stream");
+
+    // Read SSE body for up to ~1.5s and look for a view.changed event.
+    const reader = res.body!.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    const deadline = Date.now() + 1500;
+    let observed = false;
+    try {
+      while (Date.now() < deadline && !observed) {
+        const readP = reader.read();
+        const tickP = new Promise<{ done: true; value: undefined }>((resolve) =>
+          setTimeout(() => resolve({ done: true, value: undefined }), 200),
+        );
+        const { done, value } = (await Promise.race([readP, tickP])) as { done: boolean; value?: Uint8Array };
+        if (!done && value) buffer += decoder.decode(value, { stream: true });
+        if (buffer.includes('"type":"view.changed"') && buffer.includes('"viewName":"recently-active"')) {
+          observed = true;
+          break;
+        }
+        // Push another mutation if we haven't seen the event yet — the
+        // first one may have raced past the SSE handler's subscription.
+        if (Date.now() < deadline && !observed) {
+          await queueRepo.create({
+            sourceSession: "alice@rig",
+            destinationSession: "bob@rig",
+            body: `nudge-${Date.now()}`,
+            nudge: false,
+          });
+        }
+      }
+    } finally {
+      // Cancel via the reader (releases the stream lock cleanly).
+      await reader.cancel().catch(() => {});
+    }
+
+    expect(observed).toBe(true);
   });
 });

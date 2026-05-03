@@ -99,6 +99,32 @@ describe("rig project CLI (PL-004 Phase B)", () => {
     expect(body.classificationDestination).toBe("planning@rig");
   });
 
+  it("R1 BLOCKER 1: classify with unknown_stream_item 400 surfaces error + non-zero exit", async () => {
+    const { deps } = makeDeps({
+      routes: {
+        "POST /api/projects/project": {
+          status: 400,
+          data: {
+            error: "unknown_stream_item",
+            message: "stream_item_id stream-nonexistent does not exist in stream_items",
+            streamItemId: "stream-nonexistent",
+          },
+        },
+      },
+    });
+    const program = createProgram({ projectDeps: deps });
+    program.exitOverride();
+    await program.parseAsync([
+      "node", "rig", "project", "classify", "stream-nonexistent",
+      "--session", "alice@rig",
+      "--json",
+    ]);
+    expect(process.exitCode).toBe(1);
+    const out = logs.join("\n");
+    expect(out).toContain("unknown_stream_item");
+    expect(out).toContain("does not exist");
+  });
+
   it("classify with idempotency_violation 409 surfaces error + non-zero exit", async () => {
     const { deps } = makeDeps({
       routes: {
