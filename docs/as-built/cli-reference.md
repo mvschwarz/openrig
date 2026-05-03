@@ -1,6 +1,6 @@
 # OpenRig CLI Reference
 
-Verified against the shipped CLI on 2026-04-09 using:
+Verified against the shipped CLI on 2026-05-03 (v0.2.0) using:
 - `packages/cli/src/index.ts`
 - `packages/cli/src/commands/*.ts`
 - `packages/cli/src/mcp-server.ts`
@@ -11,7 +11,7 @@ This document reflects the current `rig` surface as shipped. Where live help tex
 ## Overview
 
 - Binary: `rig`
-- Top-level command groups: `41`
+- Top-level command groups: `53`
 - Output mode: human-readable by default; many commands also support `--json`
 - Daemon-backed commands fail when the daemon is stopped or unhealthy; `daemon`, `config`, `preflight`, and `doctor` also have local responsibilities
 - Managed apps are launched through the normal spec/library surfaces; the canonical shipped example is `rig up secrets-manager`
@@ -62,6 +62,18 @@ This document reflects the current `rig` surface as shipped. Where live help tex
 | `remove` | Remove a node from a running rig |
 | `shrink` | Remove an entire pod from a running rig |
 | `setup` | Prepare the machine for OpenRig |
+| `stream` | Coordination L1 — append-only intake stream |
+| `queue` | Coordination L3 — owned-work queue + inbox/outbox |
+| `project` | Coordination L2 — agent-backed classifier with daemon-enforced lease + idempotency + reclaim |
+| `view` | Coordination L5 — daemon-backed views over coordination state |
+| `watchdog` | Coordination Watchdog — daemon-native scheduler |
+| `workflow` | Daemon-native Workflow Runtime — declarative spec + transactional-scribe step projection |
+| `restore-packet` | Generate, read, and validate cross-runtime restore packets |
+| `restore-check` | Check restore readiness across running rigs |
+| `context` | Show context-usage across running agents |
+| `compact-plan` | Plan Claude compact-in-place candidates without compacting anything |
+| `heartbeat` | Show workflow execution proof state from queue files |
+| `seat` | Inspect OpenRig seat observability state |
 
 ## Core Daemon and System Commands
 
@@ -290,6 +302,29 @@ Important:
 Notes:
 - Human output prints each restored node and any failed node error.
 - Non-zero exit if any restored node fails.
+
+### `rig restore-check`
+
+Usage: `rig restore-check [--rig <name>] [--no-queue] [--no-hooks] [--json]`
+
+Notes:
+- Checks restore readiness across running rigs (or one rig with `--rig`).
+- `--no-queue` skips queue file checks; `--no-hooks` skips hook checks.
+- Exit codes: `0` restorable (or restorable with caveats), `1` not restorable (red blockers found), `2` unknown / probe error.
+
+### `rig restore-packet`
+
+Usage: `rig restore-packet <subcommand>`
+
+Subcommands:
+- `write [options]` — generate a restore packet from a source session or JSONL file.
+- `read <packet-dir> [--json]` — render a restore packet's contents (human or JSON).
+- `validate <packet-dir> [--json]` — validate a restore packet against the v0 schema.
+
+Notes:
+- Packet shape is the cross-runtime v0 standard (Claude Code and Codex transcripts both supported via runtime parsers + redaction).
+- `write` emits a packet directory with the canonical schema files plus `omitted-records` accounting.
+- `read` and `validate` operate on existing packet directories and do not mutate them.
 
 ### `rig export`
 
@@ -700,6 +735,44 @@ Closure-reason semantics:
 - `no-follow-on` — terminal completion, nothing else needed.
 - `escalation` — kicked up to a higher tier (target = escalation target).
 
+## Coordination Project / Classifier and View (PL-004 Phase B)
+
+Two top-level commands extend the coordination layer with L2 (project / classifier) and L5 (views).
+
+### `rig project`
+
+Usage: `rig project <subcommand>` — L2 agent-backed classifier with daemon-enforced lease + idempotency + reclaim.
+
+Subcommands:
+- `lease-acquire [options]` — acquire the active classifier lease for the caller.
+- `lease-heartbeat [options]` — send a heartbeat for an active classifier lease (extends TTL).
+- `lease-show [options]` — show the currently-active classifier lease.
+- `reclaim-classifier [options]` — operator verb to reclaim the active classifier lease. Use `--if-dead` to refuse if holder is still alive.
+- `classify <streamItemId> [options]` — project a stream item with classification fields. Idempotent on `stream_item_id`; requires an active lease.
+- `list [options]` — list project classifications with filters.
+- `show <projectId> [options]` — show one project classification.
+
+Notes:
+- Lease semantics: only one classifier holds the active lease at a time. Heartbeats extend TTL; lease expiry frees the slot for the next acquirer.
+- `classify` enforces L1→L2 foreign-key existence: the referenced `stream_items` row must exist or the call is rejected before any state mutation.
+- `reclaim-classifier` is the operator-side verb to recover from a hung classifier; `--if-dead` adds a liveness guard so a still-heartbeating classifier is not stolen from.
+
+### `rig view`
+
+Usage: `rig view <subcommand>` — L5 daemon-backed views over coordination state.
+
+Subcommands:
+- `list [options]` — list built-in + custom views.
+- `show <viewName> [options]` — run a view (built-in or custom).
+- `register [options]` — register or update a custom view.
+
+Built-in views:
+- `recently-active`, `founder`, `pod-load`, `escalations`, `held`, `activity`.
+
+Notes:
+- Views emit a `view.changed` SSE event on every state mutation that affects them. Queue update mutations bridge to `queue.updated` and then to `view.changed` for all six built-in views (Phase B R2).
+- Custom view registration writes to the `views_custom` table; the daemon hot-reloads on registration.
+
 ## Coordination Watchdog (PL-004 Phase C)
 
 `rig watchdog` registers, lists, inspects, and stops daemon-native scheduler jobs. The scheduler runs inside the daemon supervision tree and persists state in SQLite (`watchdog_jobs`/`watchdog_history`); jobs survive daemon restarts. Three policies are available at v1: `periodic-reminder`, `artifact-pool-ready`, and `edge-artifact-required`. The fourth POC policy `workflow-keepalive` is rejected with `policy_deferred_to_phase_d` and ships in Phase D.
@@ -731,6 +804,49 @@ Phase D extends the policy enum with `workflow-keepalive` (the policy deferred f
 - `continue <instanceId>` — idempotent inspector; in v1 returns the current state.
 
 The owner-as-author + workflow-as-transactional-scribe contract is enforced by the daemon. The owner of a packet decides when it closes; the workflow runtime atomically records the closure AND creates/projects the next qitem per the workflow spec, in a single daemon transaction.
+
+## Operational Inspection
+
+Read-only inspection commands for context-window state, compaction planning, workflow heartbeat, and seat handover observability. Default mode is read-only across this section.
+
+### `rig context`
+
+Usage: `rig context [--rig <name>] [--threshold <pct>] [--refresh] [--json]`
+
+Notes:
+- Shows context-window usage across running agents.
+- `--rig <name>` narrows to a single rig; `--threshold <pct>` filters to seats at or above the percent (plus unknown + stale).
+- `--refresh` re-samples context usage before displaying instead of reading the latest cached snapshot.
+
+### `rig compact-plan`
+
+Usage: `rig compact-plan [--rig <name>] [--refresh] [--threshold-tokens <n>] [--threshold-percent <0-100>] [--json]`
+
+Notes:
+- Plans Claude compact-in-place candidates without compacting anything (read-only triage).
+- `--threshold-tokens <n>` is the estimated used-token threshold; `--threshold-percent <0-100>` is the used-percent threshold when the context window size is missing.
+- Output identifies seats that are candidates for compaction by current heuristics; the operator decides what (if anything) to compact.
+
+### `rig heartbeat`
+
+Usage: `rig heartbeat [--rig <name>] [--nudge] [--include-done] [--json]`
+
+Notes:
+- Shows workflow execution proof state from queue files.
+- Default mode is read-only. `--nudge` sends informational proof instructions to stalled or unproven owners; it does not modify queue files or reroute work.
+- `--include-done` includes done/handed-off queue items in the output (excluded by default).
+
+### `rig seat`
+
+Usage: `rig seat <subcommand>`
+
+Subcommands:
+- `status <seat> [options]` — show read-only seat handover observability status.
+- `handover <seat> [options]` — plan a safe two-phase seat handover.
+
+Notes:
+- `status` reads the seat-handover observability tables (migration `021`); it does not mutate anything.
+- `handover` plans the two-phase sequence; actual execution happens through the existing seat-launch surfaces under operator gating.
 
 ## Commands Not Present
 
