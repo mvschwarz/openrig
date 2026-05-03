@@ -714,6 +714,24 @@ Closure-reason semantics:
 
 History records only loud evaluations: `sent` (delivery executed) or `terminal` (policy declared the job done). Quiet skip reasons (`not_due`, `no_actionable_artifacts`, `no_missing_edge_artifacts`, `active_wake_not_due`) are NOT recorded — POC parity so agents are not woken about scheduler polls. Loud `skipped` rows are recorded only if a policy returns a non-quiet reason.
 
+Phase D extends the policy enum with `workflow-keepalive` (the policy deferred from Phase C). It reads `workflow_instances` directly via SQLite, requires `status: active|waiting`, and resolves frontier qitem owners from `queue_items`.
+
+## Workflow Runtime (PL-004 Phase D)
+
+`rig workflow` operates on the daemon-native Workflow Runtime: declarative spec validation, instance creation, step projection (transactional-scribe), trace, and idempotent continue. Workflow specs are markdown/YAML files on disk (workspace-surface); the daemon caches them in SQLite for fast lookup.
+
+### `rig workflow`
+
+- `validate <specPath>` — validate a workflow spec file; returns structured ok/error report (role resolution, step uniqueness, allowed-exits consistency, optional seat liveness).
+- `instantiate <specPath> --root-objective <text> --created-by <session>` — create a new instance + entry-step qitem in the same daemon transaction; `--entry-owner <session>` overrides the default entry owner.
+- `project --instance <id> --current-packet <qitem-id> --exit <handoff|waiting|done|failed> --actor-session <session>` — close the current packet AND project the next-step packet IN THE SAME daemon transaction (transactional-scribe; lost handoffs impossible by design). `--result-note <text>`, `--blocked-on <ref>`, `--next-owner <session>` modify behavior.
+- `list [--status <s>]` — list instances; optionally filter by status (`active`/`waiting`/`completed`/`failed`).
+- `show <instanceId>` — show one instance.
+- `trace <instanceId>` — show the instance + its append-only step trail (audit-only).
+- `continue <instanceId>` — idempotent inspector; in v1 returns the current state.
+
+The owner-as-author + workflow-as-transactional-scribe contract is enforced by the daemon. The owner of a packet decides when it closes; the workflow runtime atomically records the closure AND creates/projects the next qitem per the workflow spec, in a single daemon transaction.
+
 ## Commands Not Present
 
 These are not current top-level `rig` commands:

@@ -71,15 +71,18 @@ describe("watchdog routes (PL-004 Phase C)", () => {
     expect(captured.some((e) => e.type === "watchdog.job_registered")).toBe(true);
   });
 
-  it("POST /register rejects workflow-keepalive with 400 + policy_deferred_to_phase_d", async () => {
+  // PL-004 Phase D: registration-rejection for workflow-keepalive REPLACED
+  // with positive registration-accept.
+  it("POST /register accepts workflow-keepalive (Phase D enum extension)", async () => {
     const res = await app.request("/api/watchdog/register", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ ...validRegisterBody, policy: "workflow-keepalive" }),
     });
-    expect(res.status).toBe(400);
-    const body = (await res.json()) as { error: string };
-    expect(body.error).toBe("policy_deferred_to_phase_d");
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { policy: string; state: string };
+    expect(body.policy).toBe("workflow-keepalive");
+    expect(body.state).toBe("active");
   });
 
   it("POST /register rejects unknown policy with 400 + policy_unknown", async () => {

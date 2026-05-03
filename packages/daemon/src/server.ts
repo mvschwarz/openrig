@@ -64,6 +64,7 @@ import { queueRoutes } from "./routes/queue.js";
 import { projectsRoutes } from "./routes/projects.js";
 import { viewsRoutes } from "./routes/views.js";
 import { watchdogRoutes } from "./routes/watchdog.js";
+import { workflowRoutes } from "./routes/workflow.js";
 import type { StreamStore } from "./domain/stream-store.js";
 import type { QueueRepository } from "./domain/queue-repository.js";
 import type { InboxHandler } from "./domain/inbox-handler.js";
@@ -75,6 +76,7 @@ import type { WatchdogJobsRepository } from "./domain/watchdog-jobs-repository.j
 import type { WatchdogHistoryLog } from "./domain/watchdog-history-log.js";
 import type { WatchdogPolicyEngine } from "./domain/watchdog-policy-engine.js";
 import type { WatchdogScheduler } from "./domain/watchdog-scheduler.js";
+import type { WorkflowRuntime } from "./domain/workflow-runtime.js";
 import { envRoutes } from "./routes/env.js";
 import type { RigLifecycleService } from "./domain/rig-lifecycle-service.js";
 import { seatRoutes } from "./routes/seat.js";
@@ -125,6 +127,7 @@ export interface AppDeps {
   watchdogHistoryLog?: WatchdogHistoryLog;
   watchdogPolicyEngine?: WatchdogPolicyEngine;
   watchdogScheduler?: WatchdogScheduler;
+  workflowRuntime?: WorkflowRuntime;
   specReviewService?: SpecReviewService;
   specLibraryService?: SpecLibraryService;
   whoamiService?: WhoamiService;
@@ -277,6 +280,7 @@ export function createApp(deps: AppDeps): Hono {
     c.set("watchdogHistoryLog" as never, deps.watchdogHistoryLog);
     c.set("watchdogPolicyEngine" as never, deps.watchdogPolicyEngine);
     c.set("watchdogScheduler" as never, deps.watchdogScheduler);
+    c.set("workflowRuntime" as never, deps.workflowRuntime);
     c.set("specReviewService" as never, deps.specReviewService);
     c.set("specLibraryService" as never, deps.specLibraryService);
     c.set("whoamiService" as never, deps.whoamiService);
@@ -328,6 +332,7 @@ export function createApp(deps: AppDeps): Hono {
   app.route("/api/projects", projectsRoutes());
   app.route("/api/views", viewsRoutes());
   app.route("/api/watchdog", watchdogRoutes());
+  app.route("/api/workflow", workflowRoutes());
   app.route("/api/rigs/:rigId/env", envRoutes());
   app.route("/api/restore-check", restoreCheckRoutes);
 

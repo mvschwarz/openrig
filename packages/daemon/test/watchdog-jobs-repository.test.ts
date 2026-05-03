@@ -46,14 +46,13 @@ describe("WatchdogJobsRepository (PL-004 Phase C)", () => {
     }
   });
 
-  it("register rejects workflow-keepalive with policy_deferred_to_phase_d", () => {
-    try {
-      repo.register(validInput({ policy: "workflow-keepalive" }));
-      throw new Error("should have thrown");
-    } catch (err) {
-      expect(err).toBeInstanceOf(WatchdogJobsError);
-      expect((err as WatchdogJobsError).code).toBe("policy_deferred_to_phase_d");
-    }
+  // PL-004 Phase D: registration-rejection for workflow-keepalive REPLACED
+  // with positive registration-accept. workflow-keepalive is now an
+  // accepted policy enum value (orch-ratified Phase D extension).
+  it("register accepts workflow-keepalive (Phase D enum extension)", () => {
+    const job = repo.register(validInput({ policy: "workflow-keepalive" }));
+    expect(job.policy).toBe("workflow-keepalive");
+    expect(job.state).toBe("active");
   });
 
   it("register rejects unknown policy with policy_unknown", () => {

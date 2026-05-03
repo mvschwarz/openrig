@@ -2,27 +2,36 @@ import type Database from "better-sqlite3";
 import { ulid } from "ulid";
 
 /**
- * Watchdog jobs repository (PL-004 Phase C).
+ * Watchdog jobs repository (PL-004 Phase C; extended in Phase D).
  *
  * Owns all reads/writes against `watchdog_jobs`. Pure persistence; no
  * event-bus, no scheduler, no policy dispatch. Composed by the
  * scheduler and policy engine.
  *
- * Phase C v1 enforces the policy enum against three values:
- * periodic-reminder, artifact-pool-ready, edge-artifact-required.
- * `workflow-keepalive` is intentionally rejected with a structured
- * `policy_deferred_to_phase_d` error.
+ * Phase D v1 accepts FOUR policy values (the orch-ratified Phase C
+ * `workflow-keepalive` deferral has been lifted; the policy module
+ * now exists at `policies/workflow-keepalive.ts` and reads from the
+ * SQLite `workflow_instances` table introduced in Phase D):
+ *   - periodic-reminder (Phase C)
+ *   - artifact-pool-ready (Phase C)
+ *   - edge-artifact-required (Phase C)
+ *   - workflow-keepalive (Phase D)
+ *
+ * PHASE_C_POLICIES retained as a deprecated alias for callers that
+ * still reference it; new code uses PHASE_D_POLICIES.
  */
 
-export const PHASE_C_POLICIES = [
+export const PHASE_D_POLICIES = [
   "periodic-reminder",
   "artifact-pool-ready",
   "edge-artifact-required",
+  "workflow-keepalive",
 ] as const;
 
-export type WatchdogPolicyName = (typeof PHASE_C_POLICIES)[number];
+/** @deprecated since Phase D — use PHASE_D_POLICIES. */
+export const PHASE_C_POLICIES = PHASE_D_POLICIES;
 
-export const WORKFLOW_KEEPALIVE_DEFERRED_POLICY = "workflow-keepalive";
+export type WatchdogPolicyName = (typeof PHASE_D_POLICIES)[number];
 
 export type WatchdogJobState = "active" | "stopped" | "terminal";
 
@@ -90,18 +99,11 @@ export class WatchdogJobsRepository {
   ) {}
 
   register(input: RegisterWatchdogJobInput): WatchdogJob {
-    if (input.policy === WORKFLOW_KEEPALIVE_DEFERRED_POLICY) {
-      throw new WatchdogJobsError(
-        "policy_deferred_to_phase_d",
-        `policy 'workflow-keepalive' ships in PL-004 Phase D paired with workflow_instances; not available in Phase C v1`,
-        { policy: input.policy, phase: "C", deferredTo: "D" },
-      );
-    }
-    if (!PHASE_C_POLICIES.includes(input.policy as WatchdogPolicyName)) {
+    if (!PHASE_D_POLICIES.includes(input.policy as WatchdogPolicyName)) {
       throw new WatchdogJobsError(
         "policy_unknown",
-        `unknown watchdog policy '${input.policy}'; Phase C v1 supports: ${PHASE_C_POLICIES.join(", ")}`,
-        { policy: input.policy, supported: [...PHASE_C_POLICIES] },
+        `unknown watchdog policy '${input.policy}'; Phase D v1 supports: ${PHASE_D_POLICIES.join(", ")}`,
+        { policy: input.policy, supported: [...PHASE_D_POLICIES] },
       );
     }
     if (!Number.isInteger(input.intervalSeconds) || input.intervalSeconds <= 0) {

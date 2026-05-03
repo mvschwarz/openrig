@@ -135,21 +135,24 @@ describe("rig watchdog CLI (PL-004 Phase C)", () => {
     expect(body.registeredBySession).toBe("ops@kernel");
   });
 
-  it("register propagates daemon-side workflow-keepalive rejection (Phase D deferral surfaced via 400)", async () => {
-    const { deps } = makeDeps({
+  // PL-004 Phase D: registration-rejection assertion REPLACED with
+  // positive registration-accept. workflow-keepalive is now an
+  // accepted policy.
+  it("register accepts workflow-keepalive (Phase D enum extension surfaces 201 + job_id)", async () => {
+    const { deps, calls } = makeDeps({
       routes: {
         "POST /api/watchdog/register": {
-          status: 400,
-          data: {
-            error: "policy_deferred_to_phase_d",
-            message: "policy 'workflow-keepalive' ships in PL-004 Phase D",
-          },
+          status: 201,
+          data: { jobId: "01J...", policy: "workflow-keepalive", state: "active" },
         },
       },
     });
     const tmp = mkdtempSync(join(tmpdir(), "wd-cli-"));
     const spec = join(tmp, "spec.yaml");
-    writeFileSync(spec, "policy: workflow-keepalive\n");
+    writeFileSync(
+      spec,
+      "policy: workflow-keepalive\ntarget:\n  session: alice@rig\ninterval_seconds: 1800\ncontext:\n  workflow_instance_id: 01ABC\n",
+    );
     const program = createProgram({ watchdogDeps: deps });
     program.exitOverride();
     await program.parseAsync([
@@ -164,13 +167,17 @@ describe("rig watchdog CLI (PL-004 Phase C)", () => {
       "--target-session",
       "alice@rig",
       "--interval-seconds",
-      "60",
+      "1800",
       "--registered-by",
       "ops@kernel",
       "--json",
     ]);
-    expect(process.exitCode).toBe(1);
-    expect(logs.some((l) => l.includes("policy_deferred_to_phase_d"))).toBe(true);
+    const call = calls.find((c) => c.path === "/api/watchdog/register");
+    expect(call).toBeDefined();
+    const body = call!.body as Record<string, unknown>;
+    expect(body.policy).toBe("workflow-keepalive");
+    // exit code unchanged since 201 is success.
+    expect(process.exitCode).toBeUndefined();
   });
 
   it("list GETs /api/watchdog/list", async () => {
