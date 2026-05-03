@@ -647,6 +647,59 @@ Notes:
 - `clear` is destructive and rig-scoped. Removes all messages for that rig.
 - `watch --tmux` starts a dedicated tmux watcher session.
 
+## Coordination Primitive (PL-004 Phase A)
+
+Two top-level commands back the SQLite-canonical coordination layer. They speak only to the daemon HTTP API; they do NOT touch the POC `rigx-stream-proto` / `rigx-queue-proto` filesystem state. POC and daemon coexist at OPERATOR level only.
+
+### `rig stream`
+
+Usage: `rig stream <subcommand>` — L1 append-only intake stream.
+
+Subcommands:
+- `emit --source <session> --body <text> [--hint-destination <session>] [--hint-type <type>] [--hint-urgency <urgency>] [--hint-tags <csv>] [--interrupt] [--id <streamItemId>] [--json]`
+- `list [--source <session>] [--hint-destination <session>] [--limit <n>] [--after <sortKey>] [--include-archived] [--json]`
+- `show <streamItemId> [--json]`
+- `archive <streamItemId> [--json]`
+
+Notes:
+- `--id` is for idempotency; same id returns the same row, body of subsequent calls is ignored.
+- `archive` is soft — the row remains for audit and is excluded from `list` unless `--include-archived` is passed.
+
+### `rig queue`
+
+Usage: `rig queue <subcommand>` — L3 owned-work queue plus inbox/outbox.
+
+Subcommands:
+- `create --source <session> --destination <session> --body <text> [--priority <p>] [--tier <t>] [--tags <csv>] [--expires-at <iso>] [--id <qitemId>] [--json]`
+- `claim <qitemId> --destination <session> [--json]` — pending → in-progress; computes closure_required_at from tier
+- `unclaim <qitemId> --destination <session> [--reason <text>] [--json]` — in-progress → pending
+- `update <qitemId> --actor <session> --state <state> [--closure-reason <r>] [--closure-target <t>] [--note <text>] [--json]`
+- `handoff <qitemId> --from <session> --to <session> [--body <text>] [--note <text>] [--priority <p>] [--tier <t>] [--tags <csv>] [--json]` — transactional close-as-handed-off + create-new
+- `fallback <qitemId> --destination <session> [--reason <text>] [--json]` — reroute to fallback seat
+- `show <qitemId> [--json]`
+- `transitions <qitemId> [--json]` — append-only transition log
+- `list [--destination <session>] [--source <session>] [--state <csv>] [--limit <n>] [--json]`
+- `overdue [--json]` — in-progress qitems past closure_required_at
+- `inbox-drop <destinationSession> --sender <session> --body <text> [--tags <csv>] [--urgency <u>] [--audit <pointer>] [--id <inboxId>] [--json]`
+- `inbox-absorb <inboxId> --receiver <session> [--json]` — promote a pending inbox entry to a queue_item
+- `inbox-deny <inboxId> --receiver <session> --reason <text> [--json]`
+- `inbox-pending <destinationSession> [--json]`
+- `outbox-record --sender <session> --destination <session> --body <text> [--tags <csv>] [--urgency <u>] [--audit <pointer>] [--id <outboxId>] [--json]`
+- `outbox-list <senderSession> [--limit <n>] [--json]`
+
+Hot-potato strict-rejection (load-bearing API contract):
+- `update --state done` REQUIRES `--closure-reason` from one of: `handed_off_to`, `blocked_on`, `denied`, `canceled`, `no-follow-on`, `escalation`. Missing or invalid reason → exit 1 with structured error naming the 6 valid values.
+- `closure-reason` of `handed_off_to`, `blocked_on`, or `escalation` additionally requires `--closure-target`.
+- All hot-potato enforcement happens at the daemon domain layer; every surface (CLI, future MCP, future UI) inherits the same guarantee.
+
+Closure-reason semantics:
+- `handed_off_to` — work continues at a different seat (target = new owner). `handoff` subcommand is the preferred path; `update` accepts it for non-handoff terminal closures.
+- `blocked_on` — parked pending another qitem (target = blocker qitem_id).
+- `denied` — receiver rejected the work.
+- `canceled` — sender or receiver withdrew.
+- `no-follow-on` — terminal completion, nothing else needed.
+- `escalation` — kicked up to a higher tier (target = escalation target).
+
 ## Commands Not Present
 
 These are not current top-level `rig` commands:

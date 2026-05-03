@@ -59,6 +59,12 @@ import type { ChatRepository } from "./domain/chat-repository.js";
 import { whoamiRoutes } from "./routes/whoami.js";
 import type { WhoamiService } from "./domain/whoami-service.js";
 import { chatRoutes } from "./routes/chat.js";
+import { streamRoutes } from "./routes/stream.js";
+import { queueRoutes } from "./routes/queue.js";
+import type { StreamStore } from "./domain/stream-store.js";
+import type { QueueRepository } from "./domain/queue-repository.js";
+import type { InboxHandler } from "./domain/inbox-handler.js";
+import type { OutboxHandler } from "./domain/outbox-handler.js";
 import { envRoutes } from "./routes/env.js";
 import type { RigLifecycleService } from "./domain/rig-lifecycle-service.js";
 import { seatRoutes } from "./routes/seat.js";
@@ -98,6 +104,10 @@ export interface AppDeps {
   sessionTransport?: SessionTransport;
   askService?: AskService;
   chatRepo?: ChatRepository;
+  streamStore?: StreamStore;
+  queueRepo?: QueueRepository;
+  inboxHandler?: InboxHandler;
+  outboxHandler?: OutboxHandler;
   specReviewService?: SpecReviewService;
   specLibraryService?: SpecLibraryService;
   whoamiService?: WhoamiService;
@@ -239,6 +249,10 @@ export function createApp(deps: AppDeps): Hono {
     c.set("sessionTransport" as never, deps.sessionTransport);
     c.set("askService" as never, deps.askService);
     c.set("chatRepo" as never, deps.chatRepo);
+    c.set("streamStore" as never, deps.streamStore);
+    c.set("queueRepo" as never, deps.queueRepo);
+    c.set("inboxHandler" as never, deps.inboxHandler);
+    c.set("outboxHandler" as never, deps.outboxHandler);
     c.set("specReviewService" as never, deps.specReviewService);
     c.set("specLibraryService" as never, deps.specLibraryService);
     c.set("whoamiService" as never, deps.whoamiService);
@@ -285,6 +299,8 @@ export function createApp(deps: AppDeps): Hono {
   app.route("/api/whoami", whoamiRoutes());
   app.route("/api/seat", seatRoutes);
   app.route("/api/rigs/:rigId/chat", chatRoutes());
+  app.route("/api/stream", streamRoutes());
+  app.route("/api/queue", queueRoutes());
   app.route("/api/rigs/:rigId/env", envRoutes());
   app.route("/api/restore-check", restoreCheckRoutes);
 

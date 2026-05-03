@@ -59,6 +59,10 @@ import { AgentActivityStore } from "./domain/agent-activity-store.js";
 import { HistoryQuery } from "./domain/history-query.js";
 import { AskService } from "./domain/ask-service.js";
 import { ChatRepository } from "./domain/chat-repository.js";
+import { StreamStore } from "./domain/stream-store.js";
+import { QueueRepository } from "./domain/queue-repository.js";
+import { InboxHandler } from "./domain/inbox-handler.js";
+import { OutboxHandler } from "./domain/outbox-handler.js";
 import { SpecReviewService } from "./domain/spec-review-service.js";
 import { SpecLibraryService } from "./domain/spec-library-service.js";
 import { WhoamiService } from "./domain/whoami-service.js";
@@ -87,6 +91,11 @@ import { externalCliAttachmentSchema } from "./db/migrations/019_external_cli_at
 import { rigServicesSchema } from "./db/migrations/020_rig_services.js";
 import { seatHandoverObservabilitySchema } from "./db/migrations/021_seat_handover_observability.js";
 import { nodeCodexConfigProfileSchema } from "./db/migrations/022_node_codex_config_profile.js";
+import { streamItemsSchema } from "./db/migrations/023_stream_items.js";
+import { queueItemsSchema } from "./db/migrations/024_queue_items.js";
+import { queueTransitionsSchema } from "./db/migrations/025_queue_transitions.js";
+import { inboxEntriesSchema } from "./db/migrations/026_inbox_entries.js";
+import { outboxEntriesSchema } from "./db/migrations/027_outbox_entries.js";
 import { OPENRIG_HOME } from "./openrig-compat.js";
 import {
   getCompatibleOpenRigPath,
@@ -112,11 +121,14 @@ interface DaemonResult {
 export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> {
   const dbPath = opts?.dbPath ?? ":memory:";
   const db = createDb(dbPath);
-  migrate(db, [coreSchema, bindingsSessionsSchema, eventsSchema, snapshotsSchema, checkpointsSchema, resumeMetadataSchema, nodeSpecFieldsSchema, packagesSchema, installJournalSchema, journalSeqSchema, bootstrapSchema, discoverySchema, discoveryFkFix, agentspecRebootSchema, startupContextSchema, chatMessagesSchema, podNamespaceSchema, contextUsageSchema, externalCliAttachmentSchema, rigServicesSchema, seatHandoverObservabilitySchema, nodeCodexConfigProfileSchema]);
+  migrate(db, [coreSchema, bindingsSessionsSchema, eventsSchema, snapshotsSchema, checkpointsSchema, resumeMetadataSchema, nodeSpecFieldsSchema, packagesSchema, installJournalSchema, journalSeqSchema, bootstrapSchema, discoverySchema, discoveryFkFix, agentspecRebootSchema, startupContextSchema, chatMessagesSchema, podNamespaceSchema, contextUsageSchema, externalCliAttachmentSchema, rigServicesSchema, seatHandoverObservabilitySchema, nodeCodexConfigProfileSchema, streamItemsSchema, queueItemsSchema, queueTransitionsSchema, inboxEntriesSchema, outboxEntriesSchema]);
 
   const rigRepo = new RigRepository(db);
   const sessionRegistry = new SessionRegistry(db);
   const eventBus = new EventBus(db);
+  // PL-004 Phase A — shared coordination services. Constructed early so
+  // both the queueRepo dep slot and inboxHandler can share one instance.
+  const queueRepoInstance = new QueueRepository(db, eventBus);
 
   const tmuxAdapter = new TmuxAdapter(opts?.tmuxExec ?? execCommand);
   // cmuxFactory takes precedence (for tests), then cmuxExec-based CLI transport, then default
@@ -360,6 +372,10 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     transcriptStore,
     sessionTransport: new SessionTransport({ db, rigRepo, sessionRegistry, tmuxAdapter, agentActivityStore }),
     chatRepo: new ChatRepository(db),
+    streamStore: new StreamStore(db, eventBus),
+    queueRepo: queueRepoInstance,
+    inboxHandler: new InboxHandler(db, eventBus, queueRepoInstance),
+    outboxHandler: new OutboxHandler(db),
     askService: (() => {
       const psProjectionService = new PsProjectionService({ db });
       const execDep = (cmd: string, args: string[]): Promise<{ stdout: string; exitCode: number }> =>

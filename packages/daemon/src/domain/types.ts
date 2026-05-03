@@ -142,7 +142,19 @@ export type RigEvent =
   // Chat events
   | { type: "chat.message"; rigId: string; messageId: string; sender: string; kind: string; body: string; topic?: string }
   // Expansion events
-  | { type: "rig.expanded"; rigId: string; podId: string; podNamespace: string; nodes: Array<{ logicalId: string; status: string }>; status: string };
+  | { type: "rig.expanded"; rigId: string; podId: string; podNamespace: string; nodes: Array<{ logicalId: string; status: string }>; status: string }
+  // Coordination primitive (PL-004 Phase A) — stream / queue / inbox.
+  // Host-scoped; rigId is left null because items reference seats by string
+  // (`<member>@<rig>`) and can cross rigs.
+  | { type: "stream.emitted"; streamItemId: string; sourceSession: string; hintDestination: string | null; hintType: string | null; hintUrgency: string | null; interrupt: boolean }
+  | { type: "queue.created"; qitemId: string; sourceSession: string; destinationSession: string; priority: string; tier: string | null }
+  | { type: "queue.handed_off"; qitemId: string; fromSession: string; toSession: string; closureReason: "handed_off_to" }
+  | { type: "queue.claimed"; qitemId: string; destinationSession: string; claimedAt: string; closureRequiredAt: string | null }
+  | { type: "queue.unclaimed"; qitemId: string; destinationSession: string; reason: string }
+  | { type: "qitem.fallback_routed"; qitemId: string; originalDestination: string; rerouteDestination: string; reason: string }
+  | { type: "qitem.closure_overdue"; qitemId: string; destinationSession: string; closureRequiredAt: string; overdueSince: string }
+  | { type: "inbox.absorbed"; inboxId: string; destinationSession: string; senderSession: string; promotedQitemId: string }
+  | { type: "inbox.denied"; inboxId: string; destinationSession: string; senderSession: string; reason: string };
 
 export type PersistedEvent = RigEvent & {
   seq: number;
