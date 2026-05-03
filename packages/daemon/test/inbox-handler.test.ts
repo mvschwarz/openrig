@@ -82,14 +82,14 @@ describe("InboxHandler", () => {
     ).toThrow(InboxHandlerError);
   });
 
-  it("absorb promotes pending entry to a queue_item, emits inbox.absorbed", () => {
+  it("absorb promotes pending entry to a queue_item, emits inbox.absorbed", async () => {
     const entry = inbox.drop({
       destinationSession: "bob@rig",
       senderSession: "alice@rig",
       body: "review this",
       urgency: "urgent",
     });
-    const result = inbox.absorb(entry.inboxId, "bob@rig");
+    const result = await inbox.absorb(entry.inboxId, "bob@rig");
     expect(result.entry.state).toBe("absorbed");
     expect(result.entry.absorbedQitemId).toBe(result.qitemId);
 
@@ -102,27 +102,27 @@ describe("InboxHandler", () => {
     expect(captured.some((e) => e.type === "inbox.absorbed")).toBe(true);
   });
 
-  it("absorb is idempotent — second call returns same qitem_id", () => {
+  it("absorb is idempotent — second call returns same qitem_id", async () => {
     const entry = inbox.drop({
       destinationSession: "bob@rig",
       senderSession: "alice@rig",
       body: "x",
     });
-    const a = inbox.absorb(entry.inboxId, "bob@rig");
-    const b = inbox.absorb(entry.inboxId, "bob@rig");
+    const a = await inbox.absorb(entry.inboxId, "bob@rig");
+    const b = await inbox.absorb(entry.inboxId, "bob@rig");
     expect(a.qitemId).toBe(b.qitemId);
   });
 
-  it("absorb refuses if destination doesn't match", () => {
+  it("absorb refuses if destination doesn't match", async () => {
     const entry = inbox.drop({
       destinationSession: "bob@rig",
       senderSession: "alice@rig",
       body: "x",
     });
-    expect(() => inbox.absorb(entry.inboxId, "carol@rig")).toThrow(/destined for/);
+    await expect(inbox.absorb(entry.inboxId, "carol@rig")).rejects.toThrow(/destined for/);
   });
 
-  it("deny records reason + emits inbox.denied; cannot subsequently absorb", () => {
+  it("deny records reason + emits inbox.denied; cannot subsequently absorb", async () => {
     const entry = inbox.drop({
       destinationSession: "bob@rig",
       senderSession: "alice@rig",
@@ -132,7 +132,7 @@ describe("InboxHandler", () => {
     expect(denied.state).toBe("denied");
     expect(denied.deniedReason).toBe("off-topic-for-this-rig");
     expect(captured.some((e) => e.type === "inbox.denied")).toBe(true);
-    expect(() => inbox.absorb(entry.inboxId, "bob@rig")).toThrow(/denied/);
+    await expect(inbox.absorb(entry.inboxId, "bob@rig")).rejects.toThrow(/denied/);
   });
 
   it("listPending returns only pending entries for the given destination", () => {

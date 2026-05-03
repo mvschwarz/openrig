@@ -82,7 +82,7 @@ export function queueRoutes(): Hono {
     if (!body.body) return c.json({ error: "body is required" }, 400);
 
     try {
-      const item = getRepo(c).create({
+      const item = await getRepo(c).create({
         qitemId: body.qitemId,
         sourceSession: body.sourceSession,
         destinationSession: body.destinationSession,
@@ -92,6 +92,7 @@ export function queueRoutes(): Hono {
         tags: body.tags,
         expiresAt: body.expiresAt,
         chainOfRecord: body.chainOfRecord,
+        nudge: (body as { nudge?: boolean }).nudge,
       });
       return c.json(item, 201);
     } catch (err) {
@@ -169,7 +170,7 @@ export function queueRoutes(): Hono {
     if (!body.toSession) return c.json({ error: "toSession is required" }, 400);
 
     try {
-      const result = getRepo(c).handoff({
+      const result = await getRepo(c).handoff({
         qitemId,
         fromSession: body.fromSession,
         toSession: body.toSession,
@@ -178,6 +179,43 @@ export function queueRoutes(): Hono {
         priority: body.priority,
         tier: body.tier,
         tags: body.tags,
+        nudge: (body as { nudge?: boolean }).nudge,
+      });
+      return c.json(result, 201);
+    } catch (err) {
+      return errorResponse(c, err);
+    }
+  });
+
+  // POST /:qitemId/handoff-and-complete — variant of handoff that closes
+  // source as `done` (terminal) instead of `handed-off` (intermediate).
+  // Same atomic close+create + chain_of_record + default-nudge contract.
+  app.post("/:qitemId/handoff-and-complete", async (c) => {
+    const qitemId = c.req.param("qitemId");
+    const body = await c.req.json<{
+      fromSession?: string;
+      toSession?: string;
+      body?: string;
+      transitionNote?: string;
+      priority?: QueuePriority;
+      tier?: string;
+      tags?: string[];
+      nudge?: boolean;
+    }>().catch(() => ({} as never));
+    if (!body.fromSession) return c.json({ error: "fromSession is required" }, 400);
+    if (!body.toSession) return c.json({ error: "toSession is required" }, 400);
+
+    try {
+      const result = await getRepo(c).handoffAndComplete({
+        qitemId,
+        fromSession: body.fromSession,
+        toSession: body.toSession,
+        body: body.body,
+        transitionNote: body.transitionNote,
+        priority: body.priority,
+        tier: body.tier,
+        tags: body.tags,
+        nudge: body.nudge,
       });
       return c.json(result, 201);
     } catch (err) {
@@ -196,6 +234,17 @@ export function queueRoutes(): Hono {
     } catch (err) {
       return errorResponse(c, err);
     }
+  });
+
+  // GET /whoami — caller's queue position from the daemon's perspective.
+  // MUST precede /:qitemId so the literal path wins.
+  app.get("/whoami", (c) => {
+    const session = c.req.query("session");
+    if (!session) return c.json({ error: "session is required" }, 400);
+    const recentLimit = c.req.query("recentLimit")
+      ? Number.parseInt(c.req.query("recentLimit")!, 10)
+      : undefined;
+    return c.json(getRepo(c).whoami(session, { recentLimit }));
   });
 
   // GET /list — list with filters. MUST precede /:qitemId so the literal path wins.
@@ -274,7 +323,7 @@ export function queueRoutes(): Hono {
     const body = await c.req.json<{ receiverSession?: string }>().catch(() => ({} as never));
     if (!body.receiverSession) return c.json({ error: "receiverSession is required" }, 400);
     try {
-      const result = getInbox(c).absorb(inboxId, body.receiverSession);
+      const result = await getInbox(c).absorb(inboxId, body.receiverSession);
       return c.json(result);
     } catch (err) {
       return errorResponse(c, err);
@@ -343,8 +392,10 @@ export function queueRoutes(): Hono {
   });
 
   // ---- SSE watch over coordination events ----
+  // Mounted at both /watch (legacy alias) and /sse (Phase A contract per IMPL).
+  // Same handler; either path emits the identical event stream.
 
-  app.get("/watch", (c) => {
+  const sseHandler = (c: Parameters<typeof streamSSE>[0]) => {
     const eventBus = getEventBus(c);
 
     return streamSSE(c, async (stream) => {
@@ -371,7 +422,10 @@ export function queueRoutes(): Hono {
         unsubscribe();
       }
     });
-  });
+  };
+
+  app.get("/watch", sseHandler);
+  app.get("/sse", sseHandler);
 
   return app;
 }

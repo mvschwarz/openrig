@@ -74,6 +74,23 @@ interface QueueItemRow {
   resolution: string | null;
 }
 
+/**
+ * Async transport contract — exists in this domain module so QueueRepository
+ * can do durable+waking handoffs (Phase A contract: queue create / handoff /
+ * handoff-and-complete are nudging by default unless caller opts out).
+ *
+ * The wired-in implementation is `SessionTransport` (packages/daemon/src/
+ * domain/session-transport.ts), but the repository depends only on this
+ * minimal shape so test code can supply a stub.
+ */
+export interface QueueNudgeTransport {
+  send(
+    sessionName: string,
+    text: string,
+    opts?: { verify?: boolean }
+  ): Promise<{ ok: boolean; verified?: boolean; error?: string; reason?: string }>;
+}
+
 export interface QueueCreateInput {
   qitemId?: string;
   sourceSession: string;
@@ -84,6 +101,13 @@ export interface QueueCreateInput {
   tags?: string[];
   expiresAt?: string;
   chainOfRecord?: string[];
+  /**
+   * R1 fix (PL-004 Phase A revision): Phase A is durable + waking by default.
+   * When true (or omitted), the repository nudges the destination after the
+   * create transaction commits and persists last_nudge_attempt + last_nudge_result.
+   * Operators opt out with `nudge: false` for cold-queue cases.
+   */
+  nudge?: boolean;
 }
 
 export interface QueueUpdateInput {
@@ -104,7 +128,18 @@ export interface QueueHandoffInput {
   priority?: QueuePriority;
   tier?: string;
   tags?: string[];
+  /** Default true; nudge the destination after the close+create transaction. */
+  nudge?: boolean;
 }
+
+/**
+ * Like {@link QueueHandoffInput} but the source qitem is closed as `done`
+ * (terminal) instead of `handed-off` (intermediate). Use when the source seat
+ * is fully complete with the work and the new qitem is the canonical
+ * follow-on. Closure_reason is recorded as `handed_off_to` and the new qitem
+ * is created in the same atomic transaction.
+ */
+export interface QueueHandoffAndCompleteInput extends QueueHandoffInput {}
 
 export interface QueueClaimInput {
   qitemId: string;
@@ -150,19 +185,69 @@ export class QueueRepository {
   readonly transitionLog: QueueTransitionLog;
   private readonly eventBus: EventBus;
   private readonly validateRig: (sessionRef: string) => boolean;
+  private transport: QueueNudgeTransport | undefined;
 
   constructor(
     db: Database.Database,
     eventBus: EventBus,
-    opts?: { validateRig?: (sessionRef: string) => boolean }
+    opts?: {
+      validateRig?: (sessionRef: string) => boolean;
+      /**
+       * R1 fix (PL-004 Phase A revision): durable+waking-by-default transport
+       * for create / handoff / handoff-and-complete. When provided, the
+       * repository nudges the destination after the corresponding transaction
+       * commits and records last_nudge_attempt + last_nudge_result via
+       * recordNudgeAttempt(). When absent, no nudge is issued (caller is in
+       * a test or daemon-bootstrap path where transport is not yet wired).
+       */
+      transport?: QueueNudgeTransport;
+    }
   ) {
     this.db = db;
     this.eventBus = eventBus;
     this.transitionLog = new QueueTransitionLog(db);
     this.validateRig = opts?.validateRig ?? (() => true);
+    this.transport = opts?.transport;
   }
 
-  create(input: QueueCreateInput): QueueItem {
+  /**
+   * Attach the wake-path transport AFTER construction. Used by daemon
+   * startup, where SessionTransport is constructed later in the dep graph
+   * than QueueRepository (because SessionTransport needs agentActivityStore
+   * which itself needs eventBus). Calling this is safe at any time; create /
+   * handoff / handoff-and-complete will start nudging on the next call.
+   */
+  attachTransport(transport: QueueNudgeTransport): void {
+    this.transport = transport;
+  }
+
+  /**
+   * Issue a default nudge to the destination after a create / handoff /
+   * handoff-and-complete commit. Records the result via recordNudgeAttempt.
+   * Errors are caught and surfaced as nudge_result strings — they do not
+   * unwind the underlying queue mutation.
+   */
+  private async maybeNudge(
+    qitemId: string,
+    destinationSession: string,
+    nudgeOpt: boolean | undefined,
+  ): Promise<void> {
+    if (nudgeOpt === false) return;
+    if (!this.transport) return;
+    const text = `Queue handoff: ${qitemId} - check your queue.`;
+    try {
+      const res = await this.transport.send(destinationSession, text, { verify: true });
+      const result = res.ok
+        ? (res.verified ? "verified" : "sent-unverified")
+        : `failed:${res.error ?? res.reason ?? "unknown"}`;
+      this.recordNudgeAttempt(qitemId, result);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.recordNudgeAttempt(qitemId, `failed:${msg}`);
+    }
+  }
+
+  async create(input: QueueCreateInput): Promise<QueueItem> {
     if (!this.validateRig(input.destinationSession)) {
       throw new QueueRepositoryError(
         "unknown_destination_rig",
@@ -219,6 +304,7 @@ export class QueueRepository {
 
     const persistedEvent = txn();
     this.eventBus.notifySubscribers(persistedEvent);
+    await this.maybeNudge(id, input.destinationSession, input.nudge);
     return this.getByIdOrThrow(id);
   }
 
@@ -227,7 +313,7 @@ export class QueueRepository {
    * closure_reason=handed_off_to) and create a new qitem owned by `toSession`,
    * with `handed_off_from` recording the chain. One atomic transaction.
    */
-  handoff(input: QueueHandoffInput): { closed: QueueItem; created: QueueItem } {
+  async handoff(input: QueueHandoffInput): Promise<{ closed: QueueItem; created: QueueItem }> {
     const source = this.getById(input.qitemId);
     if (!source) {
       throw new QueueRepositoryError(
@@ -333,9 +419,178 @@ export class QueueRepository {
       this.eventBus.notifySubscribers(e.payload as import("./types.js").PersistedEvent);
     }
 
+    await this.maybeNudge(newId, input.toSession, input.nudge);
+
     return {
       closed: this.getByIdOrThrow(source.qitemId),
       created: this.getByIdOrThrow(newId),
+    };
+  }
+
+  /**
+   * Variant of {@link handoff} that closes the source qitem as `done`
+   * (terminal closure) instead of `handed-off` (intermediate). Same atomic
+   * close+create, same chain_of_record semantics, same default-nudge behavior.
+   * Use when the source seat is fully complete with the work — no follow-up
+   * tracking needed against the source qitem.
+   */
+  async handoffAndComplete(input: QueueHandoffAndCompleteInput): Promise<{ closed: QueueItem; created: QueueItem }> {
+    const source = this.getById(input.qitemId);
+    if (!source) {
+      throw new QueueRepositoryError(
+        "qitem_not_found",
+        `qitem ${input.qitemId} not found`
+      );
+    }
+    if (source.state === "done" || source.state === "handed-off") {
+      throw new QueueRepositoryError(
+        "qitem_already_terminal",
+        `qitem ${input.qitemId} is already in terminal state ${source.state}`
+      );
+    }
+    if (!this.validateRig(input.toSession)) {
+      throw new QueueRepositoryError(
+        "unknown_destination_rig",
+        `to_session ${input.toSession} references an unknown rig`
+      );
+    }
+
+    const newId = newQitemId();
+    const ts = new Date().toISOString();
+    const body = input.body ?? source.body;
+    const priority = input.priority ?? source.priority;
+    const tier = input.tier ?? source.tier;
+    const tags = input.tags ? JSON.stringify(input.tags) : (source.tags ? JSON.stringify(source.tags) : null);
+    const chain = JSON.stringify([...(source.chainOfRecord ?? []), source.qitemId]);
+
+    const events: Array<{ name: string; payload: import("./types.js").RigEvent }> = [];
+
+    const txn = this.db.transaction(() => {
+      this.db
+        .prepare(
+          `UPDATE queue_items
+             SET state = 'done',
+                 ts_updated = ?,
+                 handed_off_to = ?,
+                 closure_reason = 'handed_off_to',
+                 closure_target = ?
+           WHERE qitem_id = ?`
+        )
+        .run(ts, input.toSession, input.toSession, source.qitemId);
+
+      this.transitionLog.append({
+        qitemId: source.qitemId,
+        state: "done",
+        actorSession: input.fromSession,
+        transitionNote: input.transitionNote ?? `handoff-and-complete to ${input.toSession}`,
+        closureReason: "handed_off_to",
+        closureTarget: input.toSession,
+      });
+
+      this.db
+        .prepare(
+          `INSERT INTO queue_items (
+            qitem_id, ts_created, ts_updated, source_session, destination_session,
+            state, priority, tier, tags, handed_off_from, chain_of_record, body
+          ) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)`
+        )
+        .run(
+          newId,
+          ts,
+          ts,
+          input.fromSession,
+          input.toSession,
+          priority,
+          tier,
+          tags,
+          source.qitemId,
+          chain,
+          body
+        );
+
+      this.transitionLog.append({
+        qitemId: newId,
+        state: "pending",
+        actorSession: input.fromSession,
+        transitionNote: `handoff-and-complete from ${source.qitemId}`,
+      });
+
+      const handoffEvent = this.eventBus.persistWithinTransaction({
+        type: "queue.handed_off",
+        qitemId: source.qitemId,
+        fromSession: input.fromSession,
+        toSession: input.toSession,
+        closureReason: "handed_off_to",
+      });
+      events.push({ name: "queue.handed_off", payload: handoffEvent });
+
+      const createdEvent = this.eventBus.persistWithinTransaction({
+        type: "queue.created",
+        qitemId: newId,
+        sourceSession: input.fromSession,
+        destinationSession: input.toSession,
+        priority,
+        tier,
+      });
+      events.push({ name: "queue.created", payload: createdEvent });
+    });
+
+    txn();
+    for (const e of events) {
+      this.eventBus.notifySubscribers(e.payload as import("./types.js").PersistedEvent);
+    }
+
+    await this.maybeNudge(newId, input.toSession, input.nudge);
+
+    return {
+      closed: this.getByIdOrThrow(source.qitemId),
+      created: this.getByIdOrThrow(newId),
+    };
+  }
+
+  /**
+   * `whoami` — return the seat's queue position from the daemon's perspective.
+   * Counts active qitems (pending + in-progress + blocked) destined for the
+   * caller, lists the most recent active qitems, and reports counts for the
+   * caller's outgoing source role too. Read-only; no mutations.
+   *
+   * Per PL-004 Phase A § Routes: GET /api/queue/whoami.
+   */
+  whoami(session: string, opts?: { recentLimit?: number }): {
+    session: string;
+    asDestination: { pending: number; inProgress: number; blocked: number; recent: QueueItem[] };
+    asSource: { total: number };
+  } {
+    const limit = Math.max(1, Math.min(opts?.recentLimit ?? 25, 200));
+    const countByState = (state: string): number => {
+      const row = this.db
+        .prepare(
+          `SELECT COUNT(*) AS n FROM queue_items WHERE destination_session = ? AND state = ?`
+        )
+        .get(session, state) as { n: number };
+      return row.n;
+    };
+    const recent = this.db
+      .prepare(
+        `SELECT * FROM queue_items
+          WHERE destination_session = ?
+            AND state IN ('pending','in-progress','blocked')
+          ORDER BY ts_updated DESC
+          LIMIT ?`
+      )
+      .all(session, limit) as QueueItemRow[];
+    const sourceTotalRow = this.db
+      .prepare(`SELECT COUNT(*) AS n FROM queue_items WHERE source_session = ?`)
+      .get(session) as { n: number };
+    return {
+      session,
+      asDestination: {
+        pending: countByState("pending"),
+        inProgress: countByState("in-progress"),
+        blocked: countByState("blocked"),
+        recent: recent.map((r) => this.rowToItem(r)),
+      },
+      asSource: { total: sourceTotalRow.n },
     };
   }
 

@@ -83,8 +83,11 @@ export function streamRoutes(): Hono {
     return c.json({ ok: true });
   });
 
-  // GET /watch — SSE for new stream.emitted events
-  app.get("/watch", (c) => {
+  // GET /watch — SSE for new stream.emitted events.
+  // Mounted at both /watch (legacy alias) and /sse (Phase A contract per
+  // IMPL § Routes: GET /api/stream/sse). Same handler; either path emits
+  // the identical event stream.
+  const sseHandler = (c: Parameters<typeof streamSSE>[0]) => {
     const eventBus = getEventBus(c);
     const store = getStore(c);
 
@@ -124,7 +127,10 @@ export function streamRoutes(): Hono {
         unsubscribe();
       }
     });
-  });
+  };
+
+  app.get("/watch", sseHandler);
+  app.get("/sse", sseHandler);
 
   return app;
 }

@@ -58,6 +58,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     .option("--tags <tags>", "Comma-separated tags")
     .option("--expires-at <iso>", "ISO timestamp at which the qitem expires")
     .option("--id <qitemId>", "Idempotent qitem_id (skip if not provided)")
+    .option("--no-nudge", "Suppress the default destination nudge (cold-queue)")
     .option("--json", "JSON output for agents")
     .action(async (opts: {
       source: string;
@@ -68,6 +69,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
       tags?: string;
       expiresAt?: string;
       id?: string;
+      nudge?: boolean;
       json?: boolean;
     }) => {
       const deps = getDeps();
@@ -82,6 +84,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           tier: opts.tier,
           tags,
           expiresAt: opts.expiresAt,
+          nudge: opts.nudge,
         });
         printResult(opts.json ?? false, res.data, res.status);
       });
@@ -159,6 +162,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     .option("--priority <priority>", "Override priority for the new qitem")
     .option("--tier <tier>", "Override tier for the new qitem")
     .option("--tags <tags>", "Comma-separated tags for the new qitem")
+    .option("--no-nudge", "Suppress the default nudge to the new destination")
     .option("--json", "JSON output for agents")
     .action(async (qitemId: string, opts: {
       from: string;
@@ -168,6 +172,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
       priority?: string;
       tier?: string;
       tags?: string;
+      nudge?: boolean;
       json?: boolean;
     }) => {
       const deps = getDeps();
@@ -181,7 +186,68 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           priority: opts.priority,
           tier: opts.tier,
           tags,
+          nudge: opts.nudge,
         });
+        printResult(opts.json ?? false, res.data, res.status);
+      });
+    });
+
+  cmd
+    .command("handoff-and-complete <qitemId>")
+    .description(
+      "Atomic close (state=done, closure_reason=handed_off_to) + create new qitem owned by --to. Variant of handoff that fully terminates the source qitem."
+    )
+    .requiredOption("--from <session>", "Source seat handing off")
+    .requiredOption("--to <session>", "Destination seat receiving the new qitem")
+    .option("--body <text>", "New qitem body (defaults to source body)")
+    .option("--note <text>", "Transition note")
+    .option("--priority <priority>", "Override priority for the new qitem")
+    .option("--tier <tier>", "Override tier for the new qitem")
+    .option("--tags <tags>", "Comma-separated tags for the new qitem")
+    .option("--no-nudge", "Suppress the default nudge to the new destination")
+    .option("--json", "JSON output for agents")
+    .action(async (qitemId: string, opts: {
+      from: string;
+      to: string;
+      body?: string;
+      note?: string;
+      priority?: string;
+      tier?: string;
+      tags?: string;
+      nudge?: boolean;
+      json?: boolean;
+    }) => {
+      const deps = getDeps();
+      const tags = opts.tags ? opts.tags.split(",").map((s) => s.trim()).filter(Boolean) : undefined;
+      await withClient(deps, async (client) => {
+        const res = await client.post<unknown>(`/api/queue/${encodeURIComponent(qitemId)}/handoff-and-complete`, {
+          fromSession: opts.from,
+          toSession: opts.to,
+          body: opts.body,
+          transitionNote: opts.note,
+          priority: opts.priority,
+          tier: opts.tier,
+          tags,
+          nudge: opts.nudge,
+        });
+        printResult(opts.json ?? false, res.data, res.status);
+      });
+    });
+
+  cmd
+    .command("whoami")
+    .description("Show the caller's queue position from the daemon's perspective")
+    .requiredOption("--session <session>", "Caller's session name")
+    .option("--recent-limit <n>", "How many recent active qitems to include", "25")
+    .option("--json", "JSON output for agents")
+    .action(async (opts: { session: string; recentLimit: string; json?: boolean }) => {
+      const deps = getDeps();
+      const params = new URLSearchParams({
+        session: opts.session,
+        recentLimit: opts.recentLimit,
+      });
+      await withClient(deps, async (client) => {
+        const res = await client.get<unknown>(`/api/queue/whoami?${params.toString()}`);
         printResult(opts.json ?? false, res.data, res.status);
       });
     });
