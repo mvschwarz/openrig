@@ -63,6 +63,9 @@ import { StreamStore } from "./domain/stream-store.js";
 import { QueueRepository } from "./domain/queue-repository.js";
 import { InboxHandler } from "./domain/inbox-handler.js";
 import { OutboxHandler } from "./domain/outbox-handler.js";
+import { ProjectClassifier } from "./domain/project-classifier.js";
+import { ClassifierLeaseManager } from "./domain/classifier-lease-manager.js";
+import { ViewProjector } from "./domain/view-projector.js";
 import { SpecReviewService } from "./domain/spec-review-service.js";
 import { SpecLibraryService } from "./domain/spec-library-service.js";
 import { WhoamiService } from "./domain/whoami-service.js";
@@ -96,6 +99,9 @@ import { queueItemsSchema } from "./db/migrations/024_queue_items.js";
 import { queueTransitionsSchema } from "./db/migrations/025_queue_transitions.js";
 import { inboxEntriesSchema } from "./db/migrations/026_inbox_entries.js";
 import { outboxEntriesSchema } from "./db/migrations/027_outbox_entries.js";
+import { projectClassificationsSchema } from "./db/migrations/028_project_classifications.js";
+import { classifierLeasesSchema } from "./db/migrations/029_classifier_leases.js";
+import { viewsCustomSchema } from "./db/migrations/030_views_custom.js";
 import { OPENRIG_HOME } from "./openrig-compat.js";
 import {
   getCompatibleOpenRigPath,
@@ -121,7 +127,7 @@ interface DaemonResult {
 export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> {
   const dbPath = opts?.dbPath ?? ":memory:";
   const db = createDb(dbPath);
-  migrate(db, [coreSchema, bindingsSessionsSchema, eventsSchema, snapshotsSchema, checkpointsSchema, resumeMetadataSchema, nodeSpecFieldsSchema, packagesSchema, installJournalSchema, journalSeqSchema, bootstrapSchema, discoverySchema, discoveryFkFix, agentspecRebootSchema, startupContextSchema, chatMessagesSchema, podNamespaceSchema, contextUsageSchema, externalCliAttachmentSchema, rigServicesSchema, seatHandoverObservabilitySchema, nodeCodexConfigProfileSchema, streamItemsSchema, queueItemsSchema, queueTransitionsSchema, inboxEntriesSchema, outboxEntriesSchema]);
+  migrate(db, [coreSchema, bindingsSessionsSchema, eventsSchema, snapshotsSchema, checkpointsSchema, resumeMetadataSchema, nodeSpecFieldsSchema, packagesSchema, installJournalSchema, journalSeqSchema, bootstrapSchema, discoverySchema, discoveryFkFix, agentspecRebootSchema, startupContextSchema, chatMessagesSchema, podNamespaceSchema, contextUsageSchema, externalCliAttachmentSchema, rigServicesSchema, seatHandoverObservabilitySchema, nodeCodexConfigProfileSchema, streamItemsSchema, queueItemsSchema, queueTransitionsSchema, inboxEntriesSchema, outboxEntriesSchema, projectClassificationsSchema, classifierLeasesSchema, viewsCustomSchema]);
 
   const rigRepo = new RigRepository(db);
   const sessionRegistry = new SessionRegistry(db);
@@ -143,6 +149,10 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const queueRepoInstance = new QueueRepository(db, eventBus, {
     validateRig: topologyValidateRig,
   });
+  // PL-004 Phase B — classifier lease manager. Constructed early so both
+  // the leaseManager dep slot and project-classifier can share one instance.
+  // isAlive is post-attached after whoami-service is constructed.
+  const classifierLeaseManagerInstance = new ClassifierLeaseManager(db, eventBus);
 
   const tmuxAdapter = new TmuxAdapter(opts?.tmuxExec ?? execCommand);
   // cmuxFactory takes precedence (for tests), then cmuxExec-based CLI transport, then default
@@ -389,6 +399,24 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       // PL-004 Phase A revision (R1): wire QueueRepository's wake-path so
       // create / handoff / handoff-and-complete nudge by default.
       queueRepoInstance.attachTransport(t);
+      // PL-004 Phase B: wire classifier-lease-manager liveness check from
+      // the sessions table. Lease holder is "alive" iff there is at least
+      // one row in `sessions` with session_name == classifierSession AND
+      // status == 'running'.
+      classifierLeaseManagerInstance.attachIsAlive((classifierSession: string): boolean => {
+        try {
+          const row = db
+            .prepare(
+              `SELECT 1 FROM sessions WHERE session_name = ? AND status = 'running' LIMIT 1`,
+            )
+            .get(classifierSession) as { 1: number } | undefined;
+          return row !== undefined;
+        } catch {
+          // Conservative: on lookup error, treat as alive (do not falsely
+          // trigger deadness-based lease expiry).
+          return true;
+        }
+      });
       return t;
     })(),
     chatRepo: new ChatRepository(db),
@@ -396,6 +424,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     queueRepo: queueRepoInstance,
     inboxHandler: new InboxHandler(db, eventBus, queueRepoInstance),
     outboxHandler: new OutboxHandler(db),
+    classifierLeaseManager: classifierLeaseManagerInstance,
+    projectClassifier: new ProjectClassifier(db, eventBus, classifierLeaseManagerInstance),
+    viewProjector: new ViewProjector(db, eventBus),
     askService: (() => {
       const psProjectionService = new PsProjectionService({ db });
       const execDep = (cmd: string, args: string[]): Promise<{ stdout: string; exitCode: number }> =>

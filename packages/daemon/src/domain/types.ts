@@ -154,7 +154,19 @@ export type RigEvent =
   | { type: "qitem.fallback_routed"; qitemId: string; originalDestination: string; rerouteDestination: string; reason: string }
   | { type: "qitem.closure_overdue"; qitemId: string; destinationSession: string; closureRequiredAt: string; overdueSince: string }
   | { type: "inbox.absorbed"; inboxId: string; destinationSession: string; senderSession: string; promotedQitemId: string }
-  | { type: "inbox.denied"; inboxId: string; destinationSession: string; senderSession: string; reason: string };
+  | { type: "inbox.denied"; inboxId: string; destinationSession: string; senderSession: string; reason: string }
+  // Coordination primitive (PL-004 Phase B) — project (classifier) / view.
+  // project.classified: emitted when a stream item is successfully projected.
+  // classifier.lease_*: lifecycle of the daemon-enforced single-writer lease.
+  // classifier.dead: heartbeat absence past TTL detected (deadness inference).
+  // classifier.reclaimed: operator-verb reclaim took the lease.
+  // view.changed: a view's projection result-set changed (SSE consumers see deltas).
+  | { type: "project.classified"; projectId: string; streamItemId: string; classifierSession: string; classificationType: string | null; classificationDestination: string | null }
+  | { type: "classifier.lease_acquired"; leaseId: string; classifierSession: string; acquiredAt: string; expiresAt: string }
+  | { type: "classifier.lease_expired"; leaseId: string; classifierSession: string; expiredAt: string }
+  | { type: "classifier.dead"; leaseId: string; classifierSession: string; lastHeartbeat: string; detectedAt: string }
+  | { type: "classifier.reclaimed"; leaseId: string; previousClassifierSession: string; reclaimedBySession: string; reason: string; reclaimedAt: string }
+  | { type: "view.changed"; viewName: string; cause: string };
 
 export type PersistedEvent = RigEvent & {
   seq: number;
