@@ -96,11 +96,40 @@ describe("stream routes", () => {
     expect(data).toHaveLength(0);
   });
 
-  // ---- PL-004 Phase A revision (R1): SSE alias ----
-  it("/api/stream/sse is mounted alongside /api/stream/watch (same handler)", async () => {
-    const watchRes = await app.request("/api/stream/watch", { method: "HEAD" });
-    const sseRes = await app.request("/api/stream/sse", { method: "HEAD" });
-    expect(watchRes.status).toBe(sseRes.status);
-    expect(watchRes.status).toBeLessThan(500);
+  // ---- PL-004 Phase A revision (R1): SSE route — live GET reaches handler ----
+  // Per QA finding: HEAD comparison was inadequate. Dynamic route shadowing
+  // (/:streamItemId catching `sse` and `watch` as ids) returns 404 with
+  // `stream item not found` instead of the SSE handler. Live GET asserting
+  // content-type: text/event-stream proves the handler is reached.
+
+  it("GET /api/stream/sse returns 200 + content-type: text/event-stream (handler reached)", async () => {
+    const res = await app.request("/api/stream/sse");
+    try {
+      expect(res.status).toBe(200);
+      expect(res.headers.get("content-type") ?? "").toContain("text/event-stream");
+    } finally {
+      await res.body?.cancel();
+    }
+  });
+
+  it("GET /api/stream/watch returns 200 + content-type: text/event-stream (handler reached)", async () => {
+    const res = await app.request("/api/stream/watch");
+    try {
+      expect(res.status).toBe(200);
+      expect(res.headers.get("content-type") ?? "").toContain("text/event-stream");
+    } finally {
+      await res.body?.cancel();
+    }
+  });
+
+  it("GET /api/stream/sse does NOT return stream-item-not-found (route-order regression guard)", async () => {
+    const res = await app.request("/api/stream/sse");
+    try {
+      expect(res.status).not.toBe(404);
+      const ct = res.headers.get("content-type") ?? "";
+      expect(ct).not.toContain("application/json");
+    } finally {
+      await res.body?.cancel();
+    }
   });
 });
