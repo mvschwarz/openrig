@@ -325,6 +325,8 @@ Migration boundary:
 - `021_seat_handover_observability.ts` adds seat-handover observability fields.
 - `022_node_codex_config_profile.ts` adds Codex config-profile field on nodes.
 - `023_stream_items.ts` through `027_outbox_entries.ts` add the PL-004 Phase A coordination tables (see § Coordination Layer below).
+- `028_project_classifications.ts` through `030_views_custom.ts` add the PL-004 Phase B classifier + view tables.
+- `031_watchdog_jobs.ts` and `032_watchdog_history.ts` add the PL-004 Phase C watchdog supervision-tree tables. `watchdog_jobs` is the canonical scheduler state (policy, target_session, intervals, lifecycle); `watchdog_history` is the append-only audit of meaningful evaluations (`sent`/`skipped`/`terminal`). Pure `not_due` polls are not recorded. Three v1 policies: `periodic-reminder`, `artifact-pool-ready`, `edge-artifact-required`. The fourth POC policy `workflow-keepalive` is intentionally rejected at registration with `policy_deferred_to_phase_d` and ships in Phase D paired with workflow_instances.
 
 ### Coordination tables (PL-004 Phase A)
 

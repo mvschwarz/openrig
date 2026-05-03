@@ -63,6 +63,7 @@ import { streamRoutes } from "./routes/stream.js";
 import { queueRoutes } from "./routes/queue.js";
 import { projectsRoutes } from "./routes/projects.js";
 import { viewsRoutes } from "./routes/views.js";
+import { watchdogRoutes } from "./routes/watchdog.js";
 import type { StreamStore } from "./domain/stream-store.js";
 import type { QueueRepository } from "./domain/queue-repository.js";
 import type { InboxHandler } from "./domain/inbox-handler.js";
@@ -70,6 +71,10 @@ import type { OutboxHandler } from "./domain/outbox-handler.js";
 import type { ProjectClassifier } from "./domain/project-classifier.js";
 import type { ClassifierLeaseManager } from "./domain/classifier-lease-manager.js";
 import type { ViewProjector } from "./domain/view-projector.js";
+import type { WatchdogJobsRepository } from "./domain/watchdog-jobs-repository.js";
+import type { WatchdogHistoryLog } from "./domain/watchdog-history-log.js";
+import type { WatchdogPolicyEngine } from "./domain/watchdog-policy-engine.js";
+import type { WatchdogScheduler } from "./domain/watchdog-scheduler.js";
 import { envRoutes } from "./routes/env.js";
 import type { RigLifecycleService } from "./domain/rig-lifecycle-service.js";
 import { seatRoutes } from "./routes/seat.js";
@@ -116,6 +121,10 @@ export interface AppDeps {
   projectClassifier?: ProjectClassifier;
   classifierLeaseManager?: ClassifierLeaseManager;
   viewProjector?: ViewProjector;
+  watchdogJobsRepo?: WatchdogJobsRepository;
+  watchdogHistoryLog?: WatchdogHistoryLog;
+  watchdogPolicyEngine?: WatchdogPolicyEngine;
+  watchdogScheduler?: WatchdogScheduler;
   specReviewService?: SpecReviewService;
   specLibraryService?: SpecLibraryService;
   whoamiService?: WhoamiService;
@@ -264,6 +273,10 @@ export function createApp(deps: AppDeps): Hono {
     c.set("projectClassifier" as never, deps.projectClassifier);
     c.set("classifierLeaseManager" as never, deps.classifierLeaseManager);
     c.set("viewProjector" as never, deps.viewProjector);
+    c.set("watchdogJobsRepo" as never, deps.watchdogJobsRepo);
+    c.set("watchdogHistoryLog" as never, deps.watchdogHistoryLog);
+    c.set("watchdogPolicyEngine" as never, deps.watchdogPolicyEngine);
+    c.set("watchdogScheduler" as never, deps.watchdogScheduler);
     c.set("specReviewService" as never, deps.specReviewService);
     c.set("specLibraryService" as never, deps.specLibraryService);
     c.set("whoamiService" as never, deps.whoamiService);
@@ -314,6 +327,7 @@ export function createApp(deps: AppDeps): Hono {
   app.route("/api/queue", queueRoutes());
   app.route("/api/projects", projectsRoutes());
   app.route("/api/views", viewsRoutes());
+  app.route("/api/watchdog", watchdogRoutes());
   app.route("/api/rigs/:rigId/env", envRoutes());
   app.route("/api/restore-check", restoreCheckRoutes);
 
