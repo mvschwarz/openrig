@@ -155,6 +155,12 @@ export type RigEvent =
   | { type: "qitem.closure_overdue"; qitemId: string; destinationSession: string; closureRequiredAt: string; overdueSince: string }
   | { type: "inbox.absorbed"; inboxId: string; destinationSession: string; senderSession: string; promotedQitemId: string }
   | { type: "inbox.denied"; inboxId: string; destinationSession: string; senderSession: string; reason: string }
+  // PL-004 Phase B R2: queue.updated emitted from QueueRepository.update()
+  // for general state mutations (pending → blocked, in-progress → done,
+  // closure transitions, etc.). Lets the view-event-bridge wake SSE
+  // consumers on /api/views/:name/sse when ANY queue state mutation
+  // changes a view result-set, not just create/handoff/claim/unclaim.
+  | { type: "queue.updated"; qitemId: string; fromState: string; toState: string; closureReason: string | null; closureTarget: string | null; actorSession: string }
   // Coordination primitive (PL-004 Phase B) — project (classifier) / view.
   // project.classified: emitted when a stream item is successfully projected.
   // classifier.lease_*: lifecycle of the daemon-enforced single-writer lease.

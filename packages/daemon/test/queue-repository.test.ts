@@ -84,6 +84,57 @@ describe("QueueRepository", () => {
     );
   });
 
+  it("R2: update emits queue.updated event with fromState + toState + closure metadata", async () => {
+    const item = await repo.create({
+      sourceSession: "alice@rig",
+      destinationSession: "bob@rig",
+      body: "x",
+    });
+    repo.claim({ qitemId: item.qitemId, destinationSession: "bob@rig" });
+    captured.length = 0;
+    repo.update({
+      qitemId: item.qitemId,
+      actorSession: "bob@rig",
+      state: "done",
+      closureReason: "no-follow-on",
+      transitionNote: "wrapping up",
+    });
+    const updateEvents = captured.filter((e) => e.type === "queue.updated");
+    expect(updateEvents).toHaveLength(1);
+    const evt = updateEvents[0]! as {
+      qitemId: string;
+      fromState: string;
+      toState: string;
+      closureReason: string | null;
+      closureTarget: string | null;
+      actorSession: string;
+    };
+    expect(evt.qitemId).toBe(item.qitemId);
+    expect(evt.fromState).toBe("in-progress");
+    expect(evt.toState).toBe("done");
+    expect(evt.closureReason).toBe("no-follow-on");
+    expect(evt.actorSession).toBe("bob@rig");
+  });
+
+  it("R2: update emits queue.updated for blocked transition (fromState=pending, toState=blocked)", async () => {
+    const item = await repo.create({
+      sourceSession: "alice@rig",
+      destinationSession: "bob@rig",
+      body: "x",
+    });
+    captured.length = 0;
+    repo.update({
+      qitemId: item.qitemId,
+      actorSession: "bob@rig",
+      state: "blocked",
+      transitionNote: "blocked on dep",
+    });
+    const evt = captured.find((e) => e.type === "queue.updated") as { fromState: string; toState: string } | undefined;
+    expect(evt).toBeDefined();
+    expect(evt!.fromState).toBe("pending");
+    expect(evt!.toState).toBe("blocked");
+  });
+
   it("update state=done WITHOUT closure_reason rejected with missing_closure_reason", async () => {
     const item = await repo.create({
       sourceSession: "alice@rig",

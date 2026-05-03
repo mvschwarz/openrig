@@ -48,6 +48,14 @@ const EVENT_TO_VIEWS: Record<string, readonly string[]> = {
   "queue.handed_off":       ["recently-active", "pod-load", "activity"],
   "queue.claimed":          ["recently-active", "pod-load", "activity"],
   "queue.unclaimed":        ["recently-active", "pod-load", "activity"],
+  // R2 fix (closes guard BLOCKER on queue.updated coverage): general state
+  // mutator (POST /api/queue/:qitemId/update) emits queue.updated for any
+  // pending → blocked / in-progress → done / closure / escalation transition.
+  // Maps to ALL state-derived views because the projection result-set may
+  // change for any of them (e.g., done removes from recently-active +
+  // pod-load; blocked adds to held; closure_reason='escalation' adds to
+  // escalations; ts_updated change reorders activity).
+  "queue.updated":          ["recently-active", "founder", "pod-load", "escalations", "held", "activity"],
   "qitem.fallback_routed":  ["recently-active", "pod-load", "activity"],
   "qitem.closure_overdue":  ["recently-active", "escalations", "activity"],
   "inbox.absorbed":         ["recently-active", "pod-load", "activity"],

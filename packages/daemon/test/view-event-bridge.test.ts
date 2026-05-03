@@ -105,6 +105,58 @@ describe("view-event-bridge (PL-004 Phase B R1; BLOCKER 2 fix)", () => {
     // queue.handed_off ALSO emits queue.created for the new qitem (which fires its own view.changed batch).
   });
 
+  it("R2: queue.updated triggers view.changed for ALL 6 built-in views (state mutations may affect any)", async () => {
+    const item = await queueRepo.create({
+      sourceSession: "alice@rig",
+      destinationSession: "bob@rig",
+      body: "test",
+      nudge: false,
+    });
+    queueRepo.claim({ qitemId: item.qitemId, destinationSession: "bob@rig" });
+    captured.length = 0;
+    queueRepo.update({
+      qitemId: item.qitemId,
+      actorSession: "bob@rig",
+      state: "done",
+      closureReason: "no-follow-on",
+    });
+    const events = viewChangedEvents();
+    const updateViewNames = events
+      .filter((e) => e.cause === "queue.updated")
+      .map((e) => e.viewName)
+      .sort();
+    // R2 mapping: queue.updated → all 6 built-in views.
+    expect(updateViewNames).toEqual([
+      "activity",
+      "escalations",
+      "founder",
+      "held",
+      "pod-load",
+      "recently-active",
+    ]);
+  });
+
+  it("R2: queue.updated for pending → blocked transition triggers view.changed for held + activity (and others)", async () => {
+    const item = await queueRepo.create({
+      sourceSession: "alice@rig",
+      destinationSession: "bob@rig",
+      body: "test-blocked",
+      nudge: false,
+    });
+    captured.length = 0;
+    queueRepo.update({
+      qitemId: item.qitemId,
+      actorSession: "bob@rig",
+      state: "blocked",
+      transitionNote: "blocked on dep",
+    });
+    const events = viewChangedEvents();
+    const updateViews = events.filter((e) => e.cause === "queue.updated").map((e) => e.viewName);
+    // held + activity are the most semantically affected, but all 6 fire conservatively.
+    expect(updateViews).toContain("held");
+    expect(updateViews).toContain("activity");
+  });
+
   it("queue.claimed triggers view.changed for recently-active + pod-load + activity", async () => {
     const item = await queueRepo.create({
       sourceSession: "alice@rig",
