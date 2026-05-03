@@ -194,6 +194,107 @@ describe("WatchdogScheduler (PL-004 Phase C)", () => {
     expect(sched.isRunning()).toBe(false);
   });
 
+  // R2 fix (guard blocker 1): the scheduler MUST consult
+  // scan_interval_seconds when set; interval_seconds is a fallback only.
+  // These tests use distinct values so a regression that uses
+  // interval_seconds will fail (unlike R1's equal-valued active-wake test).
+  it("isDue uses scan_interval_seconds (=30) over interval_seconds (=600) — due after 45s elapsed", () => {
+    const job = jobsRepo.register({
+      policy: "periodic-reminder",
+      specYaml: "policy: periodic-reminder\ntarget:\n  session: a@rig\nmessage: x\n",
+      targetSession: "a@rig",
+      intervalSeconds: 600,
+      scanIntervalSeconds: 30,
+      registeredBySession: "ops@kernel",
+    });
+    const fortyFiveSecondsAgo = new Date(Date.now() - 45_000).toISOString();
+    jobsRepo.recordEvaluation(job.jobId, fortyFiveSecondsAgo, true);
+    const updated = jobsRepo.getByIdOrThrow(job.jobId);
+    expect(isDue(updated, Date.now())).toBe(true);
+  });
+
+  it("isDue uses scan_interval_seconds (=600) over interval_seconds (=30) — NOT due after 45s elapsed", () => {
+    const job = jobsRepo.register({
+      policy: "periodic-reminder",
+      specYaml: "policy: periodic-reminder\ntarget:\n  session: a@rig\nmessage: x\n",
+      targetSession: "a@rig",
+      intervalSeconds: 30,
+      scanIntervalSeconds: 600,
+      registeredBySession: "ops@kernel",
+    });
+    const fortyFiveSecondsAgo = new Date(Date.now() - 45_000).toISOString();
+    jobsRepo.recordEvaluation(job.jobId, fortyFiveSecondsAgo, true);
+    const updated = jobsRepo.getByIdOrThrow(job.jobId);
+    expect(isDue(updated, Date.now())).toBe(false);
+  });
+
+  it("runTickNow does NOT invoke policy nor write history during scan_interval_seconds not-due window", async () => {
+    // scan_interval_seconds=600 with interval_seconds=30 (the discriminating
+    // pair: a scheduler that ignores scan_interval_seconds would be due
+    // after 30s and would invoke the policy + write history). Test asserts
+    // policy is NOT invoked through the scheduler boundary AND that no
+    // sent history row was written.
+    let policyCalled = 0;
+    const job = jobsRepo.register({
+      policy: "periodic-reminder",
+      specYaml:
+        "policy: periodic-reminder\ntarget:\n  session: counted@rig\nmessage: counted\n",
+      targetSession: "counted@rig",
+      intervalSeconds: 30,
+      scanIntervalSeconds: 600,
+      registeredBySession: "ops@kernel",
+    });
+    const fortyFiveSecondsAgo = new Date(Date.now() - 45_000).toISOString();
+    jobsRepo.recordEvaluation(job.jobId, fortyFiveSecondsAgo, true);
+    const engine = new WatchdogPolicyEngine({
+      jobsRepo,
+      historyLog: log,
+      eventBus: bus,
+      deliver: async (req) => {
+        policyCalled += 1;
+        deliveries.push(req);
+        return { status: "ok" };
+      },
+    });
+    const sched = new WatchdogScheduler({ jobsRepo, policyEngine: engine });
+    const historyCountBefore = log.countForJob(job.jobId);
+    await sched.runTickNow();
+    expect(policyCalled).toBe(0);
+    expect(deliveries.length).toBe(0);
+    expect(log.countForJob(job.jobId)).toBe(historyCountBefore);
+    expect(jobsRepo.getByIdOrThrow(job.jobId).lastEvaluationAt).toBe(fortyFiveSecondsAgo);
+  });
+
+  it("runTickNow DOES invoke policy when scan_interval_seconds elapsed even if interval_seconds large", async () => {
+    let policyCalled = 0;
+    const job = jobsRepo.register({
+      policy: "periodic-reminder",
+      specYaml:
+        "policy: periodic-reminder\ntarget:\n  session: counted@rig\nmessage: counted\n",
+      targetSession: "counted@rig",
+      intervalSeconds: 600,
+      scanIntervalSeconds: 30,
+      registeredBySession: "ops@kernel",
+    });
+    const fortyFiveSecondsAgo = new Date(Date.now() - 45_000).toISOString();
+    jobsRepo.recordEvaluation(job.jobId, fortyFiveSecondsAgo, true);
+    const engine = new WatchdogPolicyEngine({
+      jobsRepo,
+      historyLog: log,
+      eventBus: bus,
+      deliver: async (req) => {
+        policyCalled += 1;
+        deliveries.push(req);
+        return { status: "ok" };
+      },
+    });
+    const sched = new WatchdogScheduler({ jobsRepo, policyEngine: engine });
+    await sched.runTickNow();
+    expect(policyCalled).toBe(1);
+    expect(deliveries).toEqual([{ targetSession: "counted@rig", message: "counted" }]);
+    expect(log.countForJob(job.jobId)).toBe(1);
+  });
+
   it("recovers schedule across restart via SQLite (new repo + new scheduler picks up active jobs)", async () => {
     jobsRepo.register({
       policy: "periodic-reminder",

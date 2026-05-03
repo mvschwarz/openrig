@@ -15,6 +15,7 @@
 
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
+import { parse as parseYaml } from "yaml";
 
 const DEFAULT_EXTENSIONS = [".md"];
 const DEFAULT_IGNORE_NAMES = ["README.md", ".DS_Store"];
@@ -50,8 +51,13 @@ export interface ScannedArtifact {
   pool_path: string;
   /** Full file content (used by edge-artifact-required body-match). */
   raw: string;
-  /** Parsed YAML frontmatter (top-level keys only). */
-  frontmatter: Record<string, string>;
+  /**
+   * Parsed YAML frontmatter (top-level keys). Values are kept as `unknown`
+   * because YAML scalars are heterogeneous: timestamps parse to Date,
+   * URLs to string, numbers to number, etc. Frontmatter consumers in
+   * the policy layer (status filter, key_field lookup) coerce to string.
+   */
+  frontmatter: Record<string, unknown>;
   /** Parse error message when include_malformed_frontmatter=true; else null. */
   frontmatter_parse_error: string | null;
   /** Convenience accessor for frontmatter.status; null when absent. */
@@ -65,14 +71,17 @@ const FRONTMATTER_OPEN = "---\n";
  * Returns { raw, frontmatter, parseError } so callers can decide whether
  * to include malformed artifacts.
  *
- * Detection of malformed frontmatter mirrors POC behavior: lines that
- * fail the `key: value` shape after the opener are treated as parse
- * errors (rather than silently dropped) so include_malformed_frontmatter
- * gating works as POC tests expect.
+ * R2 fix (guard blocker 2): use the `yaml` package (already a daemon
+ * dep) rather than a local key/value parser. Mirrors POC's
+ * `lib/policies/artifact-pool.js:21-30` which delegates to the shared
+ * YAML loader. Valid YAML scalars containing colons (ISO timestamps,
+ * URLs) parse cleanly. Only true YAML parse failures (e.g.,
+ * `broken: value: still broken` which is genuinely invalid YAML) cause
+ * exclusion when `include_malformed_frontmatter` is unset.
  */
 function readFrontmatter(filePath: string): {
   raw: string;
-  frontmatter: Record<string, string>;
+  frontmatter: Record<string, unknown>;
   frontmatter_parse_error: string | null;
 } {
   const raw = readFileSync(filePath, "utf-8");
@@ -84,42 +93,26 @@ function readFrontmatter(filePath: string): {
     return { raw, frontmatter: {}, frontmatter_parse_error: null };
   }
   const block = raw.slice(FRONTMATTER_OPEN.length, endIdx);
-  const fm: Record<string, string> = {};
-  let parseError: string | null = null;
-  for (const line of block.split("\n")) {
-    if (line.trim().length === 0) continue;
-    const colonIdx = line.indexOf(":");
-    if (colonIdx === -1) {
-      parseError = `frontmatter line missing ':' (${line.slice(0, 40)})`;
-      break;
-    }
-    const key = line.slice(0, colonIdx).trim();
-    const valueRaw = line.slice(colonIdx + 1);
-    let value = valueRaw.trim();
-    // Detect malformed values like 'broken: value: still broken' where the
-    // value side itself contains another `:` outside quotes. POC treats
-    // these as parse errors so half-written drafts do not slip through.
-    const stripped = value.replace(/^"(.*)"$/, "$1").replace(/^'(.*)'$/, "$1");
-    if (
-      stripped !== value &&
-      stripped.length === value.length - 2
-    ) {
-      // Was quoted; treat as a clean string regardless of inner colons.
-      value = stripped;
-    } else if (value.includes(":")) {
-      parseError = `frontmatter value contains unescaped ':' for key '${key}'`;
-      break;
-    }
-    if (!key) {
-      parseError = "frontmatter line missing key";
-      break;
-    }
-    fm[key] = value;
+  let parsed: unknown;
+  try {
+    parsed = parseYaml(block);
+  } catch (err) {
+    return {
+      raw,
+      frontmatter: {},
+      frontmatter_parse_error: err instanceof Error ? err.message : "frontmatter parse error",
+    };
+  }
+  // YAML parsed but produced a non-object root (string, array, null) —
+  // treat as empty frontmatter, NOT a parse error. Matches POC behavior
+  // (lib/policies/artifact-pool.js:35-38): non-object root yields {}.
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return { raw, frontmatter: {}, frontmatter_parse_error: null };
   }
   return {
     raw,
-    frontmatter: parseError ? {} : fm,
-    frontmatter_parse_error: parseError,
+    frontmatter: parsed as Record<string, unknown>,
+    frontmatter_parse_error: null,
   };
 }
 
@@ -161,6 +154,20 @@ function statusAllowed(status: string | null, pool: ArtifactPoolSpec): boolean {
 }
 
 /**
+ * Coerce a YAML-parsed frontmatter status field to a comparable string.
+ * YAML loaders may parse unquoted statuses as identifiers (string),
+ * but a status like `2026-05-03` would parse as Date. We coerce to ISO
+ * for non-string scalars so include_statuses comparisons remain stable.
+ */
+function statusFromFrontmatter(fm: Record<string, unknown>): string | null {
+  const v = fm.status;
+  if (v === undefined || v === null) return null;
+  if (typeof v === "string") return v;
+  if (v instanceof Date) return v.toISOString();
+  return String(v);
+}
+
+/**
  * Scan one or more artifact pools per spec(s). Mirrors POC
  * `scanArtifactPools(pools)`. Returns the flat union of matches across
  * all pools, sorted by absolute path. Missing pools yield empty.
@@ -199,7 +206,7 @@ export async function scanArtifactPools(
       if (parsed.frontmatter_parse_error && !pool.include_malformed_frontmatter) {
         continue;
       }
-      const status = parsed.frontmatter.status ?? null;
+      const status = statusFromFrontmatter(parsed.frontmatter);
       if (!statusAllowed(status, pool)) continue;
       out.push({
         path: filePath,
@@ -249,11 +256,14 @@ export function formatArtifactList(artifacts: ScannedArtifact[], maxItems: numbe
 /**
  * Compute the source-key for an artifact. Mirrors POC sourceKeyFor:
  * prefer frontmatter[keyField], else basename sans .md extension.
+ * Coerces non-string scalars (Date, number) to string for comparison.
  */
 export function sourceKeyFor(artifact: ScannedArtifact, keyField: string): string {
   const value = artifact.frontmatter[keyField];
   if (value === undefined || value === null || value === "") {
     return basename(artifact.path).replace(/\.md$/, "");
   }
+  if (typeof value === "string") return value;
+  if (value instanceof Date) return value.toISOString();
   return String(value);
 }
