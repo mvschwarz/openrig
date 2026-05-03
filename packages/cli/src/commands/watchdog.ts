@@ -11,8 +11,8 @@ import type { StatusDeps } from "./status.js";
  * Backed by `/api/watchdog`. Operates only via the daemon HTTP API.
  *
  * Per PRD § Watchdog: scheduler is daemon-native and joins the
- * supervision tree. Three policies in scope at v1; workflow-keepalive
- * deferred to Phase D.
+ * supervision tree. Phase D includes workflow-keepalive alongside the
+ * Phase C watchdog policies.
  */
 
 export interface WatchdogDeps extends StatusDeps {}
@@ -54,7 +54,7 @@ export function watchdogCommand(depsOverride?: WatchdogDeps): Command {
     .command("register")
     .description("Register a new watchdog job from a YAML spec file")
     .requiredOption("--spec <path>", "Path to YAML spec file (policy + target + interval + context)")
-    .requiredOption("--policy <policy>", "Policy name (one of: periodic-reminder, artifact-pool-ready, edge-artifact-required)")
+    .requiredOption("--policy <policy>", "Policy name (one of: periodic-reminder, artifact-pool-ready, edge-artifact-required, workflow-keepalive)")
     .requiredOption("--target-session <session>", "Canonical <member>@<rig> target")
     .requiredOption("--interval-seconds <n>", "Evaluation interval (positive integer)")
     .requiredOption("--registered-by <session>", "Registering session (for audit)")
