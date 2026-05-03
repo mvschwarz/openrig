@@ -133,12 +133,39 @@ export class WorkflowProjector {
         { currentPacketId: input.currentPacketId },
       );
     }
-    const currentStep = inferCurrentStep(spec, instance, this.trailLog);
+    // R2 fix (guard blocker 1): read durable current_step_id from instance
+    // rather than inferring "last_trail_step + 1". Reused-frontier packets
+    // (waiting then resume) now correctly resume the SAME step.
+    const currentStep = resolveCurrentStep(spec, instance);
     if (!currentStep) {
       throw new WorkflowProjectorError(
         "current_step_unknown",
-        `workflow instance ${instance.instanceId} cannot infer the current step from spec ${spec.id}@${spec.version} + trail; check that the trail is consistent and that the spec has not changed shape mid-instance`,
-        { instanceId: instance.instanceId, frontier: instance.currentFrontier },
+        `workflow instance ${instance.instanceId} has no resolvable current step (current_step_id=${JSON.stringify(instance.currentStepId)}). The instance may be in a terminal state, or the spec ${spec.id}@${spec.version} may have changed shape mid-instance.`,
+        { instanceId: instance.instanceId, currentStepId: instance.currentStepId, frontier: instance.currentFrontier },
+      );
+    }
+
+    // R2 fix (guard blocker 2): enforce currentStep.allowed_exits at
+    // projection time. POC contract: an exit not in the step's
+    // allowed_exits is rejected with a structured error and NO state
+    // mutation. Validation happens BEFORE any side effect (queue close,
+    // trail append, frontier update, event persist). When allowed_exits
+    // is omitted on the step, no enforcement (operator opted out at
+    // spec authoring time).
+    if (
+      currentStep.allowed_exits &&
+      currentStep.allowed_exits.length > 0 &&
+      !currentStep.allowed_exits.includes(input.exit)
+    ) {
+      throw new WorkflowProjectorError(
+        "exit_not_allowed",
+        `step "${currentStep.id}" allows exits ${JSON.stringify(currentStep.allowed_exits)}; got "${input.exit}". Either close with a permitted exit, or amend the spec.`,
+        {
+          instanceId: instance.instanceId,
+          stepId: currentStep.id,
+          attemptedExit: input.exit,
+          allowedExits: currentStep.allowed_exits,
+        },
       );
     }
 
@@ -269,6 +296,19 @@ export class WorkflowProjector {
       } else {
         nextStatus = "active";
       }
+      // R2 fix: set durable current_step_id transition.
+      //   handoff       → next step
+      //   waiting       → preserve (resume on same packet still on same step)
+      //   done / failed → clear (terminal)
+      let currentStepIdUpdate: "preserve" | "clear" | string;
+      if (input.exit === "handoff" && nextStep) {
+        currentStepIdUpdate = nextStep.id;
+      } else if (input.exit === "waiting") {
+        currentStepIdUpdate = "preserve";
+      } else {
+        // done or failed
+        currentStepIdUpdate = "clear";
+      }
       this.instanceStore.updateFrontier(instance.instanceId, nextFrontier, nextStatus, {
         bumpHopCount: input.exit === "handoff",
         lastContinuationDecision: {
@@ -278,8 +318,10 @@ export class WorkflowProjector {
           nextPacket: nextQitemId,
           resultNote: input.resultNote ?? null,
           blockedOn: input.blockedOn ?? null,
+          currentStep: currentStep.id,
         },
         completedAt,
+        currentStepId: currentStepIdUpdate,
       });
 
       // 6. Persist workflow events within the same txn.
@@ -354,27 +396,36 @@ export class WorkflowProjector {
 }
 
 /**
- * Infer the current step from the trail. v1 uses a simple rule:
- *   - If trail is empty → entry step is the current step.
- *   - Else → the step after the most recently-trailed step.
+ * R2 fix (guard blocker 1): resolve the current step from durable
+ * instance.currentStepId, NOT from trail order. The previous trail-based
+ * inference produced wrong results for reused-frontier packets:
+ * waiting → resume on same packet would skip a step, because the
+ * waiting close wrote a trail row that the next inference treated as
+ * "last step + 1".
  *
- * Multi-active-frontier instances (parallel steps) are a graduation;
- * v1 always has at most one active frontier packet at a time.
+ * Falls back to the entry step ONLY when current_step_id is null
+ * (instantiate didn't set it; defense-in-depth, not the production
+ * path).
+ *
+ * Multi-active-frontier instances (parallel steps) remain a graduation;
+ * v1 supports a single active frontier packet, so a single
+ * current_step_id column suffices.
  */
-function inferCurrentStep(
+function resolveCurrentStep(
   spec: WorkflowSpec,
   instance: WorkflowInstance,
-  trailLog: WorkflowStepTrailLog,
 ): WorkflowStepSpec | null {
-  const trail = trailLog.listForInstance(instance.instanceId, 1);
-  if (trail.length === 0) {
-    const entryRole = spec.entry?.role;
-    return spec.steps[0] ?? (entryRole ? spec.steps.find((s) => s.actor_role === entryRole) ?? null : null) ?? null;
+  if (instance.currentStepId) {
+    return spec.steps.find((s) => s.id === instance.currentStepId) ?? null;
   }
-  const lastStepId = trail[0]!.stepId;
-  const idx = spec.steps.findIndex((s) => s.id === lastStepId);
-  if (idx === -1) return null;
-  return spec.steps[idx + 1] ?? null;
+  // Defense-in-depth: instance lacks current_step_id. Fall back to
+  // entry step (matches behavior of pre-R2 instances if any survive).
+  const entryRole = spec.entry?.role;
+  return (
+    spec.steps[0] ??
+    (entryRole ? spec.steps.find((s) => s.actor_role === entryRole) ?? null : null) ??
+    null
+  );
 }
 
 /**

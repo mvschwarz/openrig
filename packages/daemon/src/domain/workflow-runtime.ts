@@ -142,6 +142,10 @@ export class WorkflowRuntime {
         workflowVersion: specRow.version,
         createdBySession: input.createdBySession,
         initialFrontier: [],
+        // R2 fix: set durable current_step_id at instantiate so the
+        // projector resolves the correct step on the first project()
+        // call without any trail-based inference.
+        currentStepId: entryStep.id,
       });
       instanceId = instance.instanceId;
 

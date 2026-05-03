@@ -51,6 +51,44 @@ const SPEC = `workflow:
       - handoff
       - waiting
       - done
+      - failed
+`;
+
+// Permissive spec for testing closure-shape variants (done, waiting, failed)
+// without walking through the whole workflow. The entry step allows all four
+// exit kinds; otherwise R2's allowed_exits enforcement (correctly) rejects
+// non-handoff closures on a step that only declares handoff.
+const PERMISSIVE_SPEC = `workflow:
+  id: pd-permissive
+  version: 1
+  objective: closure-shape unit tests
+  entry:
+    role: anyone
+  roles:
+    anyone:
+      preferred_targets:
+        - anyone@rig
+    next:
+      preferred_targets:
+        - next@rig
+  steps:
+    - id: act
+      actor_role: anyone
+      allowed_exits:
+        - handoff
+        - waiting
+        - done
+        - failed
+    - id: follow
+      actor_role: next
+      allowed_exits:
+        - done
+  invariants:
+    allowed_exits:
+      - handoff
+      - waiting
+      - done
+      - failed
 `;
 
 describe("WorkflowProjector + WorkflowRuntime (PL-004 Phase D; transactional-scribe LOAD-BEARING)", () => {
@@ -60,6 +98,7 @@ describe("WorkflowProjector + WorkflowRuntime (PL-004 Phase D; transactional-scr
   let runtime: WorkflowRuntime;
   let tmp: string;
   let specPath: string;
+  let permissiveSpecPath: string;
 
   beforeEach(() => {
     db = createDb();
@@ -79,6 +118,8 @@ describe("WorkflowProjector + WorkflowRuntime (PL-004 Phase D; transactional-scr
     tmp = mkdtempSync(join(tmpdir(), "wf-proj-"));
     specPath = join(tmp, "spec.yaml");
     writeFileSync(specPath, SPEC);
+    permissiveSpecPath = join(tmp, "permissive-spec.yaml");
+    writeFileSync(permissiveSpecPath, PERMISSIVE_SPEC);
     runtime = new WorkflowRuntime({ db, eventBus: bus, queueRepo });
   });
 
@@ -145,7 +186,7 @@ describe("WorkflowProjector + WorkflowRuntime (PL-004 Phase D; transactional-scr
 
   it("project(done) without exposed closure overrides defaults closure_reason to no-follow-on", async () => {
     const inst = await runtime.instantiate({
-      specPath,
+      specPath: permissiveSpecPath,
       rootObjective: "x",
       createdBySession: "ops@rig",
     });
@@ -155,7 +196,7 @@ describe("WorkflowProjector + WorkflowRuntime (PL-004 Phase D; transactional-scr
       instanceId: inst.instance.instanceId,
       currentPacketId: inst.entryQitemId,
       exit: "done",
-      actorSession: "producer@rig",
+      actorSession: "anyone@rig",
     });
     const closedItem = queueRepo.getById(inst.entryQitemId);
     expect(closedItem?.state).toBe("done");
@@ -165,7 +206,7 @@ describe("WorkflowProjector + WorkflowRuntime (PL-004 Phase D; transactional-scr
 
   it("project(waiting) uses Phase A blocked state + closure_reason=blocked_on + blocked_on column", async () => {
     const inst = await runtime.instantiate({
-      specPath,
+      specPath: permissiveSpecPath,
       rootObjective: "x",
       createdBySession: "ops@rig",
     });
@@ -173,7 +214,7 @@ describe("WorkflowProjector + WorkflowRuntime (PL-004 Phase D; transactional-scr
       instanceId: inst.instance.instanceId,
       currentPacketId: inst.entryQitemId,
       exit: "waiting",
-      actorSession: "producer@rig",
+      actorSession: "anyone@rig",
       blockedOn: "external-gate-x",
     });
     const closedItem = queueRepo.getById(inst.entryQitemId);
@@ -308,7 +349,7 @@ describe("WorkflowProjector + WorkflowRuntime (PL-004 Phase D; transactional-scr
 
   it("project rejects on completed instance → 409 instance_not_active", async () => {
     const inst = await runtime.instantiate({
-      specPath,
+      specPath: permissiveSpecPath,
       rootObjective: "x",
       createdBySession: "ops@rig",
     });
@@ -316,7 +357,7 @@ describe("WorkflowProjector + WorkflowRuntime (PL-004 Phase D; transactional-scr
       instanceId: inst.instance.instanceId,
       currentPacketId: inst.entryQitemId,
       exit: "done",
-      actorSession: "producer@rig",
+      actorSession: "anyone@rig",
     });
     expect(projected.instance.status).toBe("completed");
     try {
@@ -324,7 +365,7 @@ describe("WorkflowProjector + WorkflowRuntime (PL-004 Phase D; transactional-scr
         instanceId: inst.instance.instanceId,
         currentPacketId: inst.entryQitemId,
         exit: "done",
-        actorSession: "producer@rig",
+        actorSession: "anyone@rig",
       });
       throw new Error("should have thrown");
     } catch (err) {
@@ -339,7 +380,7 @@ describe("WorkflowProjector + WorkflowRuntime (PL-004 Phase D; transactional-scr
   // single-packet waiting workflows with no owner to wake.
   it("project(waiting) sets status=waiting AND preserves the closed packet on currentFrontier (workflow-keepalive resolvability)", async () => {
     const inst = await runtime.instantiate({
-      specPath,
+      specPath: permissiveSpecPath,
       rootObjective: "x",
       createdBySession: "ops@rig",
     });
@@ -348,7 +389,7 @@ describe("WorkflowProjector + WorkflowRuntime (PL-004 Phase D; transactional-scr
       instanceId: inst.instance.instanceId,
       currentPacketId: inst.entryQitemId,
       exit: "waiting",
-      actorSession: "producer@rig",
+      actorSession: "anyone@rig",
       blockedOn: "external-gate",
     });
     expect(projected.instance.status).toBe("waiting");
@@ -362,13 +403,191 @@ describe("WorkflowProjector + WorkflowRuntime (PL-004 Phase D; transactional-scr
     expect(reread.currentFrontier).toEqual([inst.entryQitemId]);
   });
 
+  // R2 fix (guard blocker 1): durable current-step binding. After
+  // handoff to step N then waiting on the same packet, resuming with
+  // done/handoff must close step N — NOT step N+1 (the trail-based
+  // bug R1 didn't catch). This is the canonical "resume after parked"
+  // regression per skill lesson feedback_resume_after_parked_state_regression.
+  it("R2 resume regression: handoff → waiting on step N → done on same qitem closes step N (not N+1)", async () => {
+    // Use a 3-step spec where step "review" allows handoff + waiting + done
+    // (so we can park at step 2 and resume).
+    const resumeSpec = `workflow:
+  id: pd-resume-after-waiting
+  version: 1
+  entry:
+    role: producer
+  roles:
+    producer:
+      preferred_targets:
+        - producer@rig
+    reviewer:
+      preferred_targets:
+        - reviewer@rig
+    finalizer:
+      preferred_targets:
+        - finalizer@rig
+  steps:
+    - id: produce
+      actor_role: producer
+      allowed_exits:
+        - handoff
+    - id: review
+      actor_role: reviewer
+      allowed_exits:
+        - handoff
+        - waiting
+        - done
+    - id: finalize
+      actor_role: finalizer
+      allowed_exits:
+        - done
+  invariants:
+    allowed_exits:
+      - handoff
+      - waiting
+      - done
+`;
+    const resumeSpecPath = join(tmp, "resume.yaml");
+    writeFileSync(resumeSpecPath, resumeSpec);
+
+    // Step 1: instantiate, then handoff produce → review.
+    const inst = await runtime.instantiate({
+      specPath: resumeSpecPath,
+      rootObjective: "resume regression",
+      createdBySession: "ops@rig",
+    });
+    const handed = await runtime.project({
+      instanceId: inst.instance.instanceId,
+      currentPacketId: inst.entryQitemId,
+      exit: "handoff",
+      actorSession: "producer@rig",
+    });
+    expect(handed.nextStepId).toBe("review");
+    const reviewQitemId = handed.nextQitemId!;
+
+    // current_step_id now bound to "review".
+    let instAfterHandoff = runtime.instanceStore.getByIdOrThrow(inst.instance.instanceId);
+    expect(instAfterHandoff.currentStepId).toBe("review");
+    expect(instAfterHandoff.currentFrontier).toEqual([reviewQitemId]);
+
+    // Step 2: park review on the same qitem.
+    const waited = await runtime.project({
+      instanceId: inst.instance.instanceId,
+      currentPacketId: reviewQitemId,
+      exit: "waiting",
+      actorSession: "reviewer@rig",
+      blockedOn: "external-gate",
+    });
+    expect(waited.instance.status).toBe("waiting");
+    // Frontier preserved AND current_step_id still "review" (NOT advanced
+    // to "finalize" by trail order).
+    let instWaiting = runtime.instanceStore.getByIdOrThrow(inst.instance.instanceId);
+    expect(instWaiting.currentFrontier).toEqual([reviewQitemId]);
+    expect(instWaiting.currentStepId).toBe("review");
+
+    // Step 3: resume with done on the SAME packet. Must close step "review",
+    // not "finalize". And the workflow_step_trails should have a "review"
+    // closure (the R1 bug was that trail-based inference would have
+    // resumed as if we were now on "finalize" — wrong).
+    const resumed = await runtime.project({
+      instanceId: inst.instance.instanceId,
+      currentPacketId: reviewQitemId,
+      exit: "done",
+      actorSession: "reviewer@rig",
+      resultNote: "review complete",
+    });
+
+    // Last trail entry is for step "review", NOT "finalize".
+    const trail = runtime.trailLog.listForInstance(inst.instance.instanceId);
+    const lastTrail = trail[0]!; // DESC order
+    expect(lastTrail.stepId).toBe("review");
+    expect(lastTrail.closureReason).toBe("done");
+    expect(lastTrail.priorQitemId).toBe(reviewQitemId);
+
+    // The done exit on review with no successor on the frontier means the
+    // workflow is now... actually the spec says "review" can exit with done,
+    // and the next step "finalize" exists but isn't projected because we
+    // chose "done" not "handoff". So the workflow ends here as completed.
+    expect(resumed.instance.status).toBe("completed");
+    expect(resumed.instance.currentFrontier).toEqual([]);
+
+    // Critical: NO trail row was written for "finalize" — the bug would
+    // have either skipped to finalize OR made the closure target the
+    // wrong step.
+    expect(trail.find((t) => t.stepId === "finalize")).toBeUndefined();
+  });
+
+  // R2 fix (guard blocker 2): allowed_exits enforcement positive case.
+  it("R2 allowed_exits enforcement (positive): exit included in step.allowed_exits succeeds", async () => {
+    const inst = await runtime.instantiate({
+      specPath, // produce step allows handoff
+      rootObjective: "x",
+      createdBySession: "ops@rig",
+    });
+    // handoff IS in produce's allowed_exits — must succeed.
+    const projected = await runtime.project({
+      instanceId: inst.instance.instanceId,
+      currentPacketId: inst.entryQitemId,
+      exit: "handoff",
+      actorSession: "producer@rig",
+    });
+    expect(projected.nextStepId).toBe("review");
+  });
+
+  // R2 fix (guard blocker 2): allowed_exits enforcement negative case
+  // with rollback/no-side-effect coverage.
+  it("R2 allowed_exits enforcement (negative): disallowed exit throws exit_not_allowed with NO side effects", async () => {
+    const inst = await runtime.instantiate({
+      specPath, // produce step allows handoff ONLY
+      rootObjective: "x",
+      createdBySession: "ops@rig",
+    });
+    const beforeQueueState = queueRepo.getById(inst.entryQitemId)?.state;
+    const beforeFrontier = inst.instance.currentFrontier;
+    const beforeStepId = inst.instance.currentStepId;
+    const beforeTrailCount = runtime.trailLog.countForInstance(inst.instance.instanceId);
+    const eventsBefore: Array<{ type: string }> = [];
+    bus.subscribe((e) => eventsBefore.push(e));
+
+    // done is NOT in produce.allowed_exits — must throw.
+    let threw = false;
+    try {
+      await runtime.project({
+        instanceId: inst.instance.instanceId,
+        currentPacketId: inst.entryQitemId,
+        exit: "done",
+        actorSession: "producer@rig",
+      });
+    } catch (err) {
+      threw = true;
+      expect(err).toBeInstanceOf(WorkflowProjectorError);
+      const e = err as WorkflowProjectorError;
+      expect(e.code).toBe("exit_not_allowed");
+      expect(e.details?.allowedExits).toEqual(["handoff"]);
+      expect(e.details?.attemptedExit).toBe("done");
+      expect(e.details?.stepId).toBe("produce");
+    }
+    expect(threw).toBe(true);
+
+    // NO SIDE EFFECTS: queue state, instance frontier, current_step_id,
+    // trail count, events all unchanged.
+    expect(queueRepo.getById(inst.entryQitemId)?.state).toBe(beforeQueueState);
+    const instAfter = runtime.instanceStore.getByIdOrThrow(inst.instance.instanceId);
+    expect(instAfter.currentFrontier).toEqual(beforeFrontier);
+    expect(instAfter.currentStepId).toBe(beforeStepId);
+    expect(runtime.trailLog.countForInstance(inst.instance.instanceId)).toBe(beforeTrailCount);
+    // No workflow.* events emitted by the rejected projection.
+    expect(eventsBefore.find((e) => e.type === "workflow.step_closed")).toBeUndefined();
+    expect(eventsBefore.find((e) => e.type === "queue.updated")).toBeUndefined();
+  });
+
   // R1 fix (guard blocker 2a): exit=failed sets workflow status=failed
   // (not completed) AND emits workflow.failed (not workflow.completed).
   it("project(failed) sets workflow status=failed AND emits workflow.failed (NOT completed)", async () => {
     const events: Array<{ type: string }> = [];
     bus.subscribe((e) => events.push(e));
     const inst = await runtime.instantiate({
-      specPath,
+      specPath: permissiveSpecPath,
       rootObjective: "x",
       createdBySession: "ops@rig",
     });
@@ -376,7 +595,7 @@ describe("WorkflowProjector + WorkflowRuntime (PL-004 Phase D; transactional-scr
       instanceId: inst.instance.instanceId,
       currentPacketId: inst.entryQitemId,
       exit: "failed",
-      actorSession: "producer@rig",
+      actorSession: "anyone@rig",
       resultNote: "could not produce artifact",
     });
     expect(projected.instance.status).toBe("failed");

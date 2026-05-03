@@ -81,6 +81,15 @@ export interface WorkflowInstance {
   status: WorkflowInstanceStatus;
   /** qitem_ids that are currently active step packets. */
   currentFrontier: string[];
+  /**
+   * R2 fix: durable current-step binding (which step the active
+   * frontier packet represents). Set on instantiate (entry step) and
+   * on handoff (next step). Cleared on terminal closure. Read by
+   * WorkflowProjector instead of inferring from trail order — fixes
+   * the waiting-resume "skip a step" bug. v1 supports a single active
+   * frontier packet.
+   */
+  currentStepId: string | null;
   hopCount: number;
   fallbackSynthesis: string | null;
   lastContinuationDecision: Record<string, unknown> | null;
