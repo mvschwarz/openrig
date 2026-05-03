@@ -86,7 +86,7 @@ export class WorkflowStepTrailLog {
     const rows = this.db
       .prepare(
         `SELECT * FROM workflow_step_trails WHERE instance_id = ?
-         ORDER BY closed_at DESC, trail_id DESC LIMIT ?`,
+         ORDER BY closed_at DESC, rowid DESC LIMIT ?`,
       )
       .all(instanceId, limit) as TrailRow[];
     return rows.map(rowToEntry);
