@@ -138,9 +138,17 @@ export class WatchdogScheduler {
   }
 }
 
+/**
+ * R1 fix: scan cadence is governed by `scan_interval_seconds` when
+ * supplied, falling back to `interval_seconds`. Mirrors POC engine
+ * (lib/engine.mjs:38-46) where `last_scan_at` and `scan_interval_seconds`
+ * gate the policy invocation. Wake-cadence (`active_wake_interval_seconds`)
+ * is enforced one layer up by the policy engine, NOT here.
+ */
 export function isDue(job: WatchdogJob, nowMs: number): boolean {
   if (!job.lastEvaluationAt) return true;
   const last = Date.parse(job.lastEvaluationAt);
   if (Number.isNaN(last)) return true;
-  return nowMs - last >= job.intervalSeconds * 1000;
+  const cadenceSeconds = job.scanIntervalSeconds ?? job.intervalSeconds;
+  return nowMs - last >= cadenceSeconds * 1000;
 }

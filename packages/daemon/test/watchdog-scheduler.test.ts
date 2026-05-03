@@ -153,16 +153,17 @@ describe("WatchdogScheduler (PL-004 Phase C)", () => {
   });
 
   it("policy evaluation errors are caught and tick continues for siblings", async () => {
+    // Job 1 has no message anywhere — periodic-reminder throws policy_spec_invalid.
     jobsRepo.register({
       policy: "periodic-reminder",
-      specYaml: "context:\n  message: only-message-no-target\n",
+      specYaml: "policy: periodic-reminder\ntarget:\n  session: a@rig\n",
       targetSession: "a@rig",
       intervalSeconds: 30,
       registeredBySession: "ops@kernel",
     });
     const ok = jobsRepo.register({
       policy: "periodic-reminder",
-      specYaml: "context:\n  target:\n    session: ok@rig\n  message: ok\n",
+      specYaml: "policy: periodic-reminder\ntarget:\n  session: ok@rig\nmessage: ok\n",
       targetSession: "ok@rig",
       intervalSeconds: 30,
       registeredBySession: "ops@kernel",

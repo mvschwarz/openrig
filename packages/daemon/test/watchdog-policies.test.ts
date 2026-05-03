@@ -11,7 +11,7 @@ function makeJob(overrides: Partial<PolicyJob> & { context: Record<string, unkno
   return {
     jobId: "job-1",
     policy: "periodic-reminder",
-    targetSession: "a@rig",
+    target: { session: "a@rig" },
     intervalSeconds: 60,
     activeWakeIntervalSeconds: null,
     scanIntervalSeconds: null,
@@ -23,28 +23,42 @@ function makeJob(overrides: Partial<PolicyJob> & { context: Record<string, unkno
   };
 }
 
-describe("periodicReminderPolicy", () => {
-  it("returns send with explicit target+message from context", async () => {
+describe("periodicReminderPolicy (POC contract)", () => {
+  it("returns send with target object + message from job.message", async () => {
     const out = await periodicReminderPolicy.evaluate(
       makeJob({
-        context: { target: { session: "alice@rig" }, message: "ping" },
+        target: { session: "alice@rig" },
+        message: "ping",
+        context: {},
       }),
     );
-    expect(out).toEqual({ action: "send", target: "alice@rig", message: "ping" });
+    expect(out).toEqual({ action: "send", target: { session: "alice@rig" }, message: "ping" });
   });
 
-  it("throws policy_spec_invalid when context.target.session is missing", async () => {
+  it("returns send with message from context.message when job.message absent", async () => {
+    const out = await periodicReminderPolicy.evaluate(
+      makeJob({
+        target: { session: "alice@rig" },
+        context: { message: "ctx-ping" },
+      }),
+    );
+    expect(out).toEqual({ action: "send", target: { session: "alice@rig" }, message: "ctx-ping" });
+  });
+
+  it("throws policy_spec_invalid when target.session is missing", async () => {
     try {
-      await periodicReminderPolicy.evaluate(makeJob({ context: { message: "x" } }));
+      await periodicReminderPolicy.evaluate(
+        makeJob({ target: { session: "" }, context: { message: "x" } }),
+      );
       throw new Error("should have thrown");
     } catch (err) {
       expect((err as Error & { code: string }).code).toBe("policy_spec_invalid");
     }
   });
 
-  it("throws policy_spec_invalid when context.message is missing", async () => {
+  it("throws policy_spec_invalid when no message anywhere", async () => {
     try {
-      await periodicReminderPolicy.evaluate(makeJob({ context: { target: { session: "a@rig" } } }));
+      await periodicReminderPolicy.evaluate(makeJob({ context: {} }));
       throw new Error("should have thrown");
     } catch (err) {
       expect((err as Error & { code: string }).code).toBe("policy_spec_invalid");
@@ -52,7 +66,7 @@ describe("periodicReminderPolicy", () => {
   });
 });
 
-describe("artifactPoolReadyPolicy", () => {
+describe("artifactPoolReadyPolicy (POC contract)", () => {
   let tmp: string;
   beforeEach(() => {
     tmp = join(tmpdir(), `watchdog-pool-${Date.now()}-${Math.random()}`);
@@ -63,7 +77,7 @@ describe("artifactPoolReadyPolicy", () => {
   it("skip with reason no_actionable_artifacts when pool empty", async () => {
     const out = await artifactPoolReadyPolicy.evaluate(
       makeJob({
-        context: { target: { session: "a@rig" }, pools: { path: tmp } },
+        context: { pools: [{ path: tmp }] },
       }),
     );
     expect(out).toEqual({ action: "skip", reason: "no_actionable_artifacts" });
@@ -74,19 +88,21 @@ describe("artifactPoolReadyPolicy", () => {
     writeFileSync(join(tmp, "b.md"), "---\nstatus: ready\n---\nbody-b\n");
     const out = await artifactPoolReadyPolicy.evaluate(
       makeJob({
+        target: { session: "a@rig" },
         context: {
-          target: { session: "a@rig" },
-          pools: { path: tmp, include_statuses: ["ready"] },
+          pools: [{ path: tmp, include_statuses: ["ready"] }],
           label: "things",
         },
       }),
     );
     expect(out.action).toBe("send");
     if (out.action !== "send") return;
-    expect(out.target).toBe("a@rig");
+    expect(out.target).toEqual({ session: "a@rig" });
     expect(out.message).toMatch(/things has 2 actionable artifact/);
     expect(out.message).toContain("a.md");
     expect(out.message).toContain("b.md");
+    // POC trailer message
+    expect(out.message).toContain("Claim and process the next artifact");
   });
 
   it("respects include_statuses filter (artifact with non-matching status is excluded)", async () => {
@@ -94,10 +110,7 @@ describe("artifactPoolReadyPolicy", () => {
     writeFileSync(join(tmp, "b.md"), "---\nstatus: draft\n---\nbody-b\n");
     const out = await artifactPoolReadyPolicy.evaluate(
       makeJob({
-        context: {
-          target: { session: "a@rig" },
-          pools: { path: tmp, include_statuses: ["ready"] },
-        },
+        context: { pools: [{ path: tmp, include_statuses: ["ready"] }] },
       }),
     );
     expect(out.action).toBe("send");
@@ -107,15 +120,14 @@ describe("artifactPoolReadyPolicy", () => {
     expect(out.message).not.toContain("b.md");
   });
 
-  it("respects max_items cap in formatted bullet list", async () => {
+  it("respects max_items cap (formatted bullet list capped)", async () => {
     for (const c of ["a", "b", "c", "d", "e", "f", "g"]) {
       writeFileSync(join(tmp, `${c}.md`), "---\nstatus: ready\n---\n");
     }
     const out = await artifactPoolReadyPolicy.evaluate(
       makeJob({
         context: {
-          target: { session: "a@rig" },
-          pools: { path: tmp, include_statuses: ["ready"] },
+          pools: [{ path: tmp, include_statuses: ["ready"] }],
           max_items: 3,
         },
       }),
@@ -123,22 +135,115 @@ describe("artifactPoolReadyPolicy", () => {
     expect(out.action).toBe("send");
     if (out.action !== "send") return;
     expect(out.message).toMatch(/has 7 actionable/);
-    const bulletCount = out.message.split("\n").filter((l) => l.startsWith("- ")).length;
+    const bulletCount = out.message
+      .split("\n")
+      .filter((l) => l.startsWith("- ") && !l.startsWith("- ..."))
+      .length;
     expect(bulletCount).toBe(3);
+    expect(out.message).toContain("- ... 4 more");
   });
 
-  it("missing pool directory yields skip (no actionable)", async () => {
+  it("missing pool directory yields skip (ENOENT-tolerant)", async () => {
     rmSync(tmp, { recursive: true, force: true });
     const out = await artifactPoolReadyPolicy.evaluate(
       makeJob({
-        context: { target: { session: "a@rig" }, pools: { path: tmp } },
+        context: { pools: [{ path: tmp }] },
+      }),
+    );
+    expect(out).toEqual({ action: "skip", reason: "no_actionable_artifacts" });
+  });
+
+  // R1 fix: POC scanner parity (guard blocker 3).
+  it("default-ignores README.md (POC parity)", async () => {
+    writeFileSync(join(tmp, "README.md"), "# Pool docs\n");
+    writeFileSync(join(tmp, "ready.md"), "---\nstatus: ready\n---\n");
+    const out = await artifactPoolReadyPolicy.evaluate(
+      makeJob({
+        context: { pools: [{ path: tmp, include_statuses: ["ready"] }] },
+      }),
+    );
+    expect(out.action).toBe("send");
+    if (out.action !== "send") return;
+    expect(out.message).toContain("ready.md");
+    expect(out.message).not.toContain("README.md");
+  });
+
+  it("default-ignores .DS_Store (POC parity)", async () => {
+    writeFileSync(join(tmp, ".DS_Store"), "binary-junk");
+    writeFileSync(join(tmp, "ready.md"), "---\nstatus: ready\n---\n");
+    const out = await artifactPoolReadyPolicy.evaluate(
+      makeJob({
+        context: { pools: [{ path: tmp, include_statuses: ["ready"] }] },
+      }),
+    );
+    expect(out.action).toBe("send");
+    if (out.action !== "send") return;
+    expect(out.message).not.toContain(".DS_Store");
+  });
+
+  it("excludes malformed-frontmatter artifacts unless include_malformed_frontmatter=true", async () => {
+    writeFileSync(join(tmp, "ready.md"), "---\nstatus: ready\n---\n");
+    writeFileSync(
+      join(tmp, "malformed.md"),
+      "---\nstatus: ready\nbroken: value: still broken\n---\n",
+    );
+    const out = await artifactPoolReadyPolicy.evaluate(
+      makeJob({
+        context: { pools: [{ path: tmp, include_statuses: ["ready"] }] },
+      }),
+    );
+    expect(out.action).toBe("send");
+    if (out.action !== "send") return;
+    expect(out.message).toContain("ready.md");
+    expect(out.message).not.toContain("malformed.md");
+  });
+
+  it("supports configured ignore_names (POC parity)", async () => {
+    writeFileSync(join(tmp, "skip-me.md"), "---\nstatus: ready\n---\n");
+    writeFileSync(join(tmp, "include-me.md"), "---\nstatus: ready\n---\n");
+    const out = await artifactPoolReadyPolicy.evaluate(
+      makeJob({
+        context: {
+          pools: [{ path: tmp, include_statuses: ["ready"], ignore_names: ["skip-me.md"] }],
+        },
+      }),
+    );
+    expect(out.action).toBe("send");
+    if (out.action !== "send") return;
+    expect(out.message).toContain("include-me.md");
+    expect(out.message).not.toContain("skip-me.md");
+  });
+
+  it("recursive=true descends into subdirectories", async () => {
+    const sub = join(tmp, "sub");
+    mkdirSync(sub, { recursive: true });
+    writeFileSync(join(sub, "nested-ready.md"), "---\nstatus: ready\n---\n");
+    const out = await artifactPoolReadyPolicy.evaluate(
+      makeJob({
+        context: {
+          pools: [{ path: tmp, include_statuses: ["ready"], recursive: true }],
+        },
+      }),
+    );
+    expect(out.action).toBe("send");
+    if (out.action !== "send") return;
+    expect(out.message).toContain("nested-ready.md");
+  });
+
+  it("recursive default=false excludes subdirectories", async () => {
+    const sub = join(tmp, "sub");
+    mkdirSync(sub, { recursive: true });
+    writeFileSync(join(sub, "nested-ready.md"), "---\nstatus: ready\n---\n");
+    const out = await artifactPoolReadyPolicy.evaluate(
+      makeJob({
+        context: { pools: [{ path: tmp, include_statuses: ["ready"] }] },
       }),
     );
     expect(out).toEqual({ action: "skip", reason: "no_actionable_artifacts" });
   });
 });
 
-describe("edgeArtifactRequiredPolicy", () => {
+describe("edgeArtifactRequiredPolicy (POC contract)", () => {
   let src: string;
   let tgt: string;
   beforeEach(() => {
@@ -152,89 +257,117 @@ describe("edgeArtifactRequiredPolicy", () => {
     rmSync(tgt, { recursive: true, force: true });
   });
 
-  it("skip when every source key has matching target", async () => {
-    writeFileSync(join(src, "x.md"), "---\nentry: x\nstatus: ready\n---\n");
-    writeFileSync(join(tgt, "x-downstream.md"), "---\nentry: x\nstatus: anything\n---\n");
+  // R1 fix (guard blocker 2): POC contract uses context.source / context.target.
+  it("skip when downstream raw content references source key (POC body-match)", async () => {
+    writeFileSync(
+      join(src, "x.md"),
+      "---\nentry: coordination-stream-queue-view-intake-pilot-a-vertical\nstatus: shipped\n---\n# Pilot A\n",
+    );
+    writeFileSync(
+      join(tgt, "old.md"),
+      "---\nstatus: closed\n---\n# Old item\n\nThis item mentions agent-starter-v1-vertical only.\n",
+    );
+    writeFileSync(
+      join(tgt, "new.md"),
+      "---\nstatus: ready\n---\nLifecycle edge for coordination-stream-queue-view-intake-pilot-a-vertical.\n",
+    );
     const out = await edgeArtifactRequiredPolicy.evaluate(
       makeJob({
+        target: { session: "delivery-orch-lead@openrig-velocity" },
         context: {
-          target: { session: "a@rig" },
-          source_pools: { path: src, include_statuses: ["ready"] },
-          target_pools: { path: tgt },
+          edge_label: "delivery-to-lifecycle",
+          source: { path: src, include_statuses: ["shipped"], key_field: "entry" },
+          target: { path: tgt },
         },
       }),
     );
     expect(out).toEqual({ action: "skip", reason: "no_missing_edge_artifacts" });
   });
 
-  it("send with missing-edge list when sources lack matching targets", async () => {
-    writeFileSync(join(src, "x.md"), "---\nentry: x\nstatus: ready\n---\n");
-    writeFileSync(join(src, "y.md"), "---\nentry: y\nstatus: ready\n---\n");
-    writeFileSync(join(tgt, "x-downstream.md"), "---\nentry: x\n---\n");
+  it("send when downstream raw does NOT reference source key (POC body-match)", async () => {
+    writeFileSync(
+      join(src, "x.md"),
+      "---\nentry: coordination-stream-queue-view-intake-pilot-a-vertical\nstatus: shipped\n---\n# Pilot A\n",
+    );
+    writeFileSync(
+      join(tgt, "old.md"),
+      "---\nstatus: closed\n---\n# Old item\n\nThis item mentions agent-starter-v1-vertical only.\n",
+    );
     const out = await edgeArtifactRequiredPolicy.evaluate(
       makeJob({
+        target: { session: "delivery-orch-lead@openrig-velocity" },
         context: {
-          target: { session: "a@rig" },
-          source_pools: { path: src, include_statuses: ["ready"] },
-          target_pools: { path: tgt },
-          label: "myedge",
+          edge_label: "delivery-to-lifecycle",
+          source: { path: src, include_statuses: ["shipped"], key_field: "entry" },
+          target: { path: tgt },
         },
       }),
     );
     expect(out.action).toBe("send");
     if (out.action !== "send") return;
-    expect(out.target).toBe("a@rig");
-    expect(out.message).toMatch(/myedge has 1 upstream artifact/);
-    expect(out.message).toContain("y.md");
-    expect(out.message).not.toContain("x.md");
+    expect(out.target).toEqual({ session: "delivery-orch-lead@openrig-velocity" });
+    expect(out.message).toContain("delivery-to-lifecycle");
+    expect(out.message).toContain("coordination-stream-queue-view-intake-pilot-a-vertical");
+    expect(out.message).toContain("Producer loop owns creating the missing downstream artifact");
   });
 
   it("source key falls back to basename-sans-md when frontmatter[key_field] absent", async () => {
     writeFileSync(join(src, "no-frontmatter-key.md"), "---\nstatus: ready\n---\n");
     const out = await edgeArtifactRequiredPolicy.evaluate(
       makeJob({
+        target: { session: "a@rig" },
         context: {
-          target: { session: "a@rig" },
-          source_pools: { path: src, include_statuses: ["ready"] },
-          target_pools: { path: tgt },
+          source: { path: src, include_statuses: ["ready"] },
+          target: { path: tgt },
         },
       }),
     );
     expect(out.action).toBe("send");
     if (out.action !== "send") return;
-    expect(out.message).toContain("no-frontmatter-key.md");
+    expect(out.message).toContain("no-frontmatter-key");
   });
 
-  it("target match honors target_key_field override", async () => {
-    writeFileSync(join(src, "x.md"), "---\nentry: foo\nstatus: ready\n---\n");
-    writeFileSync(join(tgt, "x.md"), "---\nlinks_to: foo\n---\n");
-    const out = await edgeArtifactRequiredPolicy.evaluate(
-      makeJob({
-        context: {
-          target: { session: "a@rig" },
-          source_pools: { path: src, include_statuses: ["ready"] },
-          target_pools: { path: tgt },
-          source_key_field: "entry",
-          target_key_field: "links_to",
-        },
-      }),
-    );
-    expect(out).toEqual({ action: "skip", reason: "no_missing_edge_artifacts" });
-  });
-
-  it("target scan ignores include_statuses (matches POC override)", async () => {
+  it("target scan ignores source's include_statuses (POC override)", async () => {
     writeFileSync(join(src, "x.md"), "---\nentry: x\nstatus: ready\n---\n");
-    // Target has matching key but a non-listed status; match should still count.
-    writeFileSync(join(tgt, "x-down.md"), "---\nentry: x\nstatus: rejected\n---\n");
+    // Target has matching key in body but a non-listed status; match still counts.
+    writeFileSync(join(tgt, "x-down.md"), "---\nstatus: rejected\n---\nReferences x here.\n");
     const out = await edgeArtifactRequiredPolicy.evaluate(
       makeJob({
+        target: { session: "a@rig" },
         context: {
-          target: { session: "a@rig" },
-          source_pools: { path: src, include_statuses: ["ready"] },
-          target_pools: { path: tgt, include_statuses: ["accepted"] },
+          source: { path: src, include_statuses: ["ready"] },
+          target: { path: tgt, include_statuses: ["accepted"] },
         },
       }),
     );
     expect(out).toEqual({ action: "skip", reason: "no_missing_edge_artifacts" });
+  });
+
+  it("throws policy_spec_invalid when context.source is missing", async () => {
+    try {
+      await edgeArtifactRequiredPolicy.evaluate(
+        makeJob({
+          target: { session: "a@rig" },
+          context: { target: { path: tgt } },
+        }),
+      );
+      throw new Error("should have thrown");
+    } catch (err) {
+      expect((err as Error & { code: string }).code).toBe("policy_spec_invalid");
+    }
+  });
+
+  it("throws policy_spec_invalid when context.target is missing", async () => {
+    try {
+      await edgeArtifactRequiredPolicy.evaluate(
+        makeJob({
+          target: { session: "a@rig" },
+          context: { source: { path: src } },
+        }),
+      );
+      throw new Error("should have thrown");
+    } catch (err) {
+      expect((err as Error & { code: string }).code).toBe("policy_spec_invalid");
+    }
   });
 });

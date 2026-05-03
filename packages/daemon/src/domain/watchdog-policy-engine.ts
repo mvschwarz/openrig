@@ -10,21 +10,28 @@ import {
 import type { WatchdogHistoryEntry, WatchdogHistoryLog } from "./watchdog-history-log.js";
 
 /**
- * Watchdog policy engine (PL-004 Phase C).
+ * Watchdog policy engine (PL-004 Phase C R1).
  *
- * Owns:
- *   1. Policy resolution by name (registry).
- *   2. spec_yaml → context parse for the policy.
- *   3. Dispatch evaluate(job) → PolicyEvaluation.
- *   4. For action=send: invoke delivery callback, record history,
- *      emit watchdog.evaluation_fired.
- *   5. For action=skip: record history, emit watchdog.evaluation_skipped.
- *   6. For action=terminal: mark job terminal, record history, emit
- *      watchdog.evaluation_terminal.
+ * Owns the per-evaluation state machine that mirrors POC engine
+ * `lib/engine.mjs`:
+ *   1. Resolve policy by name from registry. Unknown policy → terminal.
+ *   2. Parse spec_yaml into top-level `target:` + top-level `message?:` +
+ *      nested `context:` block, then build a PolicyJob with the
+ *      resolved target object (falls back to registered targetSession
+ *      when spec lacks an explicit `target:`).
+ *   3. Dispatch policy.evaluate(policyJob).
+ *   4. Action handling:
+ *      - skip: clear actionable=false; record history + emit event
+ *        ONLY if reason is "loud" (not in QUIET_SKIP_REASONS).
+ *      - send: enforce active-wake throttle. If state.actionable was
+ *        already true AND active_wake_interval_seconds is set AND not
+ *        elapsed since last_fire_at → emit/record `active_wake_not_due`
+ *        (quiet skip per POC). Otherwise call delivery, record history
+ *        with sent outcome, emit evaluation_fired, set actionable=true.
+ *      - terminal: mark job terminal, record history, emit terminal.
  *
- * The actual delivery is injected as a callback so tests can stub it
- * and so the daemon supervision tree can wire it to SessionTransport
- * without this module needing a concrete dependency.
+ * `not_due` polls are filtered upstream by the scheduler and never
+ * reach this engine.
  */
 
 export interface DeliveryRequest {
@@ -40,8 +47,16 @@ export interface DeliveryOutcome {
 export type DeliveryFn = (req: DeliveryRequest) => Promise<DeliveryOutcome>;
 
 export interface PolicyContextParser {
-  /** Parse the operator-supplied spec_yaml into the `context:` block. */
-  (specYaml: string): Record<string, unknown>;
+  /**
+   * Parse the operator-supplied spec_yaml into the structured fields the
+   * engine needs. Returns the top-level `target` (object), top-level
+   * `message` (string), and the `context:` block (Record).
+   */
+  (specYaml: string): {
+    target: { session: string } | null;
+    message: string | null;
+    context: Record<string, unknown>;
+  };
 }
 
 interface WatchdogPolicyEngineDeps {
@@ -49,8 +64,7 @@ interface WatchdogPolicyEngineDeps {
   historyLog: WatchdogHistoryLog;
   eventBus: EventBus;
   deliver: DeliveryFn;
-  /** Optional override: defaults to a YAML-aware parser. */
-  parseContext?: PolicyContextParser;
+  parseSpec?: PolicyContextParser;
   now?: () => Date;
 }
 
@@ -60,11 +74,26 @@ const POLICY_REGISTRY: Map<string, Policy> = new Map([
   [edgeArtifactRequiredPolicy.name, edgeArtifactRequiredPolicy],
 ]);
 
+/**
+ * Quiet skip reasons — POC `shouldAppendHistory` (engine.mjs:99-112)
+ * suppresses these from history. Same set must NOT emit watchdog.*
+ * events for parity with POC SSE behavior; agents never see scheduler
+ * polls just because the pool was empty or the wake throttle was active.
+ */
+const QUIET_SKIP_REASONS = new Set<string>([
+  "not_due",
+  "no_actionable_artifacts",
+  "no_missing_edge_artifacts",
+  "active_wake_not_due",
+]);
+
 export interface EvaluationResult {
   job: WatchdogJob;
-  outcome: PolicyEvaluation;
+  outcome: PolicyEvaluation | { action: "skip"; reason: "active_wake_not_due" };
   history: WatchdogHistoryEntry | null;
   delivery: DeliveryOutcome | null;
+  /** True if this evaluation produced a history record + event. */
+  meaningful: boolean;
 }
 
 export class WatchdogPolicyEngine {
@@ -72,7 +101,7 @@ export class WatchdogPolicyEngine {
   private readonly historyLog: WatchdogHistoryLog;
   private readonly eventBus: EventBus;
   private readonly deliver: DeliveryFn;
-  private readonly parseContext: PolicyContextParser;
+  private readonly parseSpec: PolicyContextParser;
   private readonly now: () => Date;
 
   constructor(deps: WatchdogPolicyEngineDeps) {
@@ -80,7 +109,7 @@ export class WatchdogPolicyEngine {
     this.historyLog = deps.historyLog;
     this.eventBus = deps.eventBus;
     this.deliver = deps.deliver;
-    this.parseContext = deps.parseContext ?? defaultParseContext;
+    this.parseSpec = deps.parseSpec ?? defaultParseSpec;
     this.now = deps.now ?? (() => new Date());
   }
 
@@ -88,21 +117,13 @@ export class WatchdogPolicyEngine {
     return POLICY_REGISTRY.get(name);
   }
 
-  /**
-   * Evaluate one watchdog job. Side-effects: history record (for
-   * meaningful outcomes), event emission, and (on send) delivery.
-   *
-   * Pure `not_due` decisions are NOT this engine's concern; the
-   * scheduler decides dueness and only calls evaluate for due jobs.
-   * If the policy itself returns skip with an internal reason
-   * (no_actionable_artifacts, etc.) we DO record that.
-   */
   async evaluate(job: WatchdogJob): Promise<EvaluationResult> {
     const policy = this.resolvePolicy(job.policy);
+    const evaluatedAt = this.now().toISOString();
+
     if (!policy) {
       const reason = `unknown_policy:${job.policy}`;
       this.jobsRepo.markTerminal(job.jobId, reason);
-      const evaluatedAt = this.now().toISOString();
       const history = this.historyLog.record({
         jobId: job.jobId,
         evaluatedAt,
@@ -120,18 +141,21 @@ export class WatchdogPolicyEngine {
         outcome: { action: "terminal", reason },
         history,
         delivery: null,
+        meaningful: true,
       };
     }
 
-    const context = this.parseContext(job.specYaml);
+    const parsed = this.parseSpec(job.specYaml);
+    const target = parsed.target ?? { session: job.targetSession };
     const policyJob: PolicyJob = {
       jobId: job.jobId,
       policy: job.policy,
-      targetSession: job.targetSession,
+      target,
+      message: parsed.message ?? undefined,
       intervalSeconds: job.intervalSeconds,
       activeWakeIntervalSeconds: job.activeWakeIntervalSeconds,
       scanIntervalSeconds: job.scanIntervalSeconds,
-      context,
+      context: parsed.context,
       lastEvaluationAt: job.lastEvaluationAt,
       lastFireAt: job.lastFireAt,
       registeredBySession: job.registeredBySession,
@@ -139,39 +163,22 @@ export class WatchdogPolicyEngine {
     };
 
     const outcome = await policy.evaluate(policyJob);
-    const evaluatedAt = this.now().toISOString();
-
-    if (outcome.action === "send") {
-      const delivery = await this.deliver({
-        targetSession: outcome.target,
-        message: outcome.message,
-      });
-      const history = this.historyLog.record({
-        jobId: job.jobId,
-        evaluatedAt,
-        outcome: "sent",
-        deliveryTargetSession: outcome.target,
-        deliveryStatus: delivery.status,
-        deliveryMessage: outcome.message,
-        evaluationNotes: outcome.notes ?? null,
-      });
-      this.jobsRepo.recordEvaluation(job.jobId, evaluatedAt, true);
-      this.eventBus.emit({
-        type: "watchdog.evaluation_fired",
-        jobId: job.jobId,
-        policy: job.policy,
-        targetSession: outcome.target,
-        deliveryStatus: delivery.status,
-      });
-      return {
-        job: this.jobsRepo.getByIdOrThrow(job.jobId),
-        outcome,
-        history,
-        delivery,
-      };
-    }
 
     if (outcome.action === "skip") {
+      // POC parity: skip clears actionable. Loud-vs-quiet decides
+      // whether to record + emit.
+      this.jobsRepo.recordEvaluation(job.jobId, evaluatedAt, false);
+      this.jobsRepo.setActionable(job.jobId, false, evaluatedAt);
+      const isQuiet = QUIET_SKIP_REASONS.has(outcome.reason);
+      if (isQuiet) {
+        return {
+          job: this.jobsRepo.getByIdOrThrow(job.jobId),
+          outcome,
+          history: null,
+          delivery: null,
+          meaningful: false,
+        };
+      }
       const history = this.historyLog.record({
         jobId: job.jobId,
         evaluatedAt,
@@ -179,7 +186,6 @@ export class WatchdogPolicyEngine {
         skipReason: outcome.reason,
         evaluationNotes: outcome.notes ?? null,
       });
-      this.jobsRepo.recordEvaluation(job.jobId, evaluatedAt, false);
       this.eventBus.emit({
         type: "watchdog.evaluation_skipped",
         jobId: job.jobId,
@@ -191,91 +197,196 @@ export class WatchdogPolicyEngine {
         outcome,
         history,
         delivery: null,
+        meaningful: true,
       };
     }
 
-    // terminal
-    this.jobsRepo.markTerminal(job.jobId, outcome.reason);
+    if (outcome.action === "terminal") {
+      this.jobsRepo.markTerminal(job.jobId, outcome.reason);
+      const history = this.historyLog.record({
+        jobId: job.jobId,
+        evaluatedAt,
+        outcome: "terminal",
+        skipReason: outcome.reason,
+        evaluationNotes: outcome.notes ?? null,
+      });
+      this.eventBus.emit({
+        type: "watchdog.evaluation_terminal",
+        jobId: job.jobId,
+        policy: job.policy,
+        terminalReason: outcome.reason,
+      });
+      return {
+        job: this.jobsRepo.getByIdOrThrow(job.jobId),
+        outcome,
+        history,
+        delivery: null,
+        meaningful: true,
+      };
+    }
+
+    // outcome.action === "send".
+    // POC active-wake throttle (engine.mjs:49-64, :243-263):
+    //   - If state.actionable was already true AND active_wake_interval
+    //     is set AND wake-window has not elapsed → quiet skip. Preserves
+    //     existing last_fire_at and last_actionable_at.
+    //   - Otherwise: deliver, set actionable=true, stamp last_fire_at +
+    //     last_actionable_at (preserve existing first-actionable timestamp).
+    if (
+      job.actionable &&
+      job.activeWakeIntervalSeconds !== null &&
+      job.lastFireAt !== null
+    ) {
+      const lastFireMs = Date.parse(job.lastFireAt);
+      const nowMs = Date.parse(evaluatedAt);
+      const intervalMs = job.activeWakeIntervalSeconds * 1000;
+      if (Number.isFinite(lastFireMs) && nowMs - lastFireMs < intervalMs) {
+        // Quiet skip: scan happened, pool still actionable, but the
+        // wake window is closed. Update last_evaluation_at, do NOT
+        // touch last_fire_at, keep actionable=true and preserve
+        // last_actionable_at.
+        this.jobsRepo.recordEvaluation(job.jobId, evaluatedAt, false);
+        this.jobsRepo.setActionable(job.jobId, true, evaluatedAt, job.lastActionableAt);
+        return {
+          job: this.jobsRepo.getByIdOrThrow(job.jobId),
+          outcome: { action: "skip", reason: "active_wake_not_due" },
+          history: null,
+          delivery: null,
+          meaningful: false,
+        };
+      }
+    }
+
+    const delivery = await this.deliver({
+      targetSession: outcome.target.session,
+      message: outcome.message,
+    });
     const history = this.historyLog.record({
       jobId: job.jobId,
       evaluatedAt,
-      outcome: "terminal",
-      skipReason: outcome.reason,
+      outcome: "sent",
+      deliveryTargetSession: outcome.target.session,
+      deliveryStatus: delivery.status,
+      deliveryMessage: outcome.message,
       evaluationNotes: outcome.notes ?? null,
     });
+    this.jobsRepo.recordEvaluation(job.jobId, evaluatedAt, true);
+    this.jobsRepo.setActionable(job.jobId, true, evaluatedAt, job.lastActionableAt);
     this.eventBus.emit({
-      type: "watchdog.evaluation_terminal",
+      type: "watchdog.evaluation_fired",
       jobId: job.jobId,
       policy: job.policy,
-      terminalReason: outcome.reason,
+      targetSession: outcome.target.session,
+      deliveryStatus: delivery.status,
     });
     return {
       job: this.jobsRepo.getByIdOrThrow(job.jobId),
       outcome,
       history,
-      delivery: null,
+      delivery,
+      meaningful: true,
     };
   }
 }
 
 /**
- * Default spec_yaml parser. Extracts the `context:` block as a
- * generic Record<string, unknown>. Uses a minimal recursive
- * indentation-based parser sufficient for the POC spec shape:
+ * Default spec_yaml parser. Extracts:
+ *   - top-level `target:` block (POC contract: `{session: "..."}`)
+ *   - top-level `message:` scalar (POC pattern for periodic-reminder)
+ *   - nested `context:` block as Record<string, unknown>
+ *
+ * Uses a minimal recursive indentation-based parser sufficient for the
+ * POC spec set:
  *   policy: ...
- *   target: <member>@<rig>
+ *   target:
+ *     session: ...
+ *   message: "..."
  *   interval_seconds: 1800
  *   context:
- *     target:
- *       session: ...
- *     message: "..."
  *     pools:
  *       - path: /abs/...
  *         include_statuses: [ready]
  *
- * For robust YAML, a future maintenance pass can swap in `yaml` or
+ * For richer YAML, a future maintenance pass can swap in `yaml` /
  * `js-yaml`; the POC schemas are simple enough that this parser
  * handles them in-tree without an extra dependency.
  */
-function defaultParseContext(specYaml: string): Record<string, unknown> {
+function defaultParseSpec(specYaml: string): {
+  target: { session: string } | null;
+  message: string | null;
+  context: Record<string, unknown>;
+} {
   const lines = specYaml.split("\n");
+  const result: { target: { session: string } | null; message: string | null; context: Record<string, unknown> } = {
+    target: null,
+    message: null,
+    context: {},
+  };
   let i = 0;
   while (i < lines.length) {
     const line = lines[i] ?? "";
-    if (/^context\s*:\s*$/.test(line)) {
+    if (line.trimStart() !== line) {
+      // Indented line at top level — skip until we re-hit indent 0.
       i++;
-      const block: string[] = [];
-      while (i < lines.length) {
-        const sub = lines[i] ?? "";
-        if (sub.length === 0) {
-          block.push(sub);
-          i++;
-          continue;
-        }
-        if (sub.startsWith(" ") || sub.startsWith("\t")) {
-          block.push(sub);
-          i++;
-          continue;
-        }
-        break;
-      }
-      // Strip leading two-space indent to make it a top-level YAML doc.
-      const dedented = block
-        .map((l) => (l.startsWith("  ") ? l.slice(2) : l))
-        .join("\n");
-      return parseSimpleYaml(dedented) as Record<string, unknown>;
+      continue;
     }
+    const trimmed = line.trim();
+    if (trimmed.length === 0 || trimmed.startsWith("#")) {
+      i++;
+      continue;
+    }
+    const colonIdx = trimmed.indexOf(":");
+    if (colonIdx === -1) {
+      i++;
+      continue;
+    }
+    const key = trimmed.slice(0, colonIdx).trim();
+    const value = trimmed.slice(colonIdx + 1).trim();
+    if (value.length > 0) {
+      // Inline scalar.
+      if (key === "message") {
+        result.message = stripQuotes(value);
+      }
+      i++;
+      continue;
+    }
+    // Block. Collect indented lines below.
     i++;
+    const block: string[] = [];
+    while (i < lines.length) {
+      const sub = lines[i] ?? "";
+      if (sub.length === 0) {
+        block.push(sub);
+        i++;
+        continue;
+      }
+      if (sub.startsWith(" ") || sub.startsWith("\t")) {
+        block.push(sub);
+        i++;
+        continue;
+      }
+      break;
+    }
+    const dedented = block.map((l) => (l.startsWith("  ") ? l.slice(2) : l)).join("\n");
+    if (key === "context") {
+      result.context = parseSimpleYaml(dedented) as Record<string, unknown>;
+    } else if (key === "target") {
+      const parsed = parseSimpleYaml(dedented);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        const sess = (parsed as Record<string, unknown>).session;
+        if (typeof sess === "string") result.target = { session: sess };
+      }
+    }
   }
-  return {};
+  return result;
 }
 
-/**
- * Minimal indentation-aware YAML parser. Supports nested mappings,
- * inline `[a, b]` arrays, dash-prefixed sequences of mappings, and
- * scalar string values (quoted or unquoted). Sufficient for the POC
- * spec set; not a general YAML implementation.
- */
+function stripQuotes(value: string): string {
+  if (value.startsWith('"') && value.endsWith('"')) return value.slice(1, -1);
+  if (value.startsWith("'") && value.endsWith("'")) return value.slice(1, -1);
+  return value;
+}
+
 function parseSimpleYaml(src: string): unknown {
   const lines = src.split("\n").filter((l) => l.trim().length > 0 && !l.trim().startsWith("#"));
   const idx = { i: 0 };
@@ -300,9 +411,7 @@ function parseScalar(raw: string): unknown {
     if (inner === "") return [];
     return inner.split(",").map((p) => parseScalar(p));
   }
-  if (trimmed.startsWith('"') && trimmed.endsWith('"')) return trimmed.slice(1, -1);
-  if (trimmed.startsWith("'") && trimmed.endsWith("'")) return trimmed.slice(1, -1);
-  return trimmed;
+  return stripQuotes(trimmed);
 }
 
 function parseYamlBlock(lines: string[], idx: { i: number }, expectedIndent: number): unknown {
@@ -337,7 +446,6 @@ function parseYamlMap(
     if (valuePart.length > 0) {
       result[key] = parseScalar(valuePart);
     } else {
-      // Nested block: probe next line indent.
       if (idx.i < lines.length) {
         const next = lines[idx.i] ?? "";
         const nextIndent = indentOf(next);
@@ -368,9 +476,6 @@ function parseYamlSeq(
     const rest = trimmed.slice(2).trim();
     idx.i++;
     if (rest.includes(":")) {
-      // First key of an inline mapping element. Synthesize a virtual
-      // sub-block by re-injecting the rest as a key + scanning further
-      // lines at deeper indent.
       const colonIdx = rest.indexOf(":");
       const k = rest.slice(0, colonIdx).trim();
       const v = rest.slice(colonIdx + 1).trim();
@@ -382,7 +487,6 @@ function parseYamlSeq(
       } else {
         elem[k] = null;
       }
-      // Continue gathering same-element keys at indent blockIndent + 2.
       while (idx.i < lines.length) {
         const sub = lines[idx.i] ?? "";
         const subIndent = indentOf(sub);
