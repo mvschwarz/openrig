@@ -155,19 +155,8 @@ export class WorkflowProjector {
     const persistedEvents: PersistedEvent[] = [];
 
     const txn = this.db.transaction(() => {
-      // 1. Close the current packet via direct UPDATE inside this txn.
-      this.db
-        .prepare(
-          `UPDATE queue_items SET state = ?, ts_updated = ? WHERE qitem_id = ?`,
-        )
-        .run(
-          input.exit === "handoff" ? "handed-off" : input.exit === "waiting" ? "blocked" : "done",
-          evaluatedAt,
-          input.currentPacketId,
-        );
-
-      // 2. If exit is handoff: create next-step qitem in same txn.
-      let createdNext: { qitemId: string; persistedEvent: PersistedEvent; destinationSession: string; nudge: boolean | undefined } | null = null;
+      // 1. Resolve next owner BEFORE closing prior so closure_target is set.
+      let resolvedNextOwner: string | null = null;
       if (input.exit === "handoff") {
         if (!nextStep) {
           throw new WorkflowProjectorError(
@@ -184,11 +173,36 @@ export class WorkflowProjector {
             { instanceId: instance.instanceId, nextStepId: nextStep.id, nextRole: nextStep.actor_role },
           );
         }
-        nextOwnerSession = owner;
+        resolvedNextOwner = owner;
+      }
+
+      // 2. R1 fix (guard blocker 1): close the current packet via Phase A's
+      // QueueRepository.updateWithinTransaction. This validates closure
+      // (Phase A hot-potato strict-rejection invariants), persists closure
+      // metadata (closure_reason, closure_target, handed_off_to / blocked_on),
+      // appends queue_transitions, and emits queue.updated — all inside this
+      // outer transaction. The Phase A closure authority is preserved.
+      const closure = workflowExitToQueueClosure(input, resolvedNextOwner);
+      const queueUpdate = this.queueRepo.updateWithinTransaction({
+        qitemId: input.currentPacketId,
+        actorSession: input.actorSession,
+        state: closure.state,
+        closureReason: closure.closureReason,
+        closureTarget: closure.closureTarget ?? undefined,
+        handedOffTo: closure.handedOffTo,
+        blockedOn: closure.blockedOn,
+        transitionNote: closure.transitionNote,
+      });
+      persistedEvents.push(queueUpdate.persistedEvent);
+
+      // 3. If exit is handoff: create next-step qitem in same txn.
+      let createdNext: { qitemId: string; persistedEvent: PersistedEvent; destinationSession: string; nudge: boolean | undefined } | null = null;
+      if (input.exit === "handoff" && nextStep && resolvedNextOwner) {
+        nextOwnerSession = resolvedNextOwner;
         nextStepId = nextStep.id;
         createdNext = this.queueRepo.createWithinTransaction({
           sourceSession: input.actorSession,
-          destinationSession: owner,
+          destinationSession: resolvedNextOwner,
           body: workflowHandoffBody({
             spec,
             instance,
@@ -209,7 +223,7 @@ export class WorkflowProjector {
         };
       }
 
-      // 3. Append step trail entry (prior + next ids).
+      // 4. Append step trail entry (prior + next ids).
       this.trailLog.record({
         instanceId: instance.instanceId,
         stepId: currentStep.id,
@@ -222,15 +236,33 @@ export class WorkflowProjector {
         priorQitemId: input.currentPacketId,
       });
 
-      // 4. Update instance frontier + status.
+      // 5. Update instance frontier + status.
+      // R1 fix (guard blocker 2b): on exit=waiting, PRESERVE the closed
+      // packet on the frontier. workflow-keepalive treats waiting as
+      // eligible and resolves owners from current_frontier_json; removing
+      // the packet would leave a single-packet waiting workflow with no
+      // owner to wake.
       const remainingFrontier = instance.currentFrontier.filter(
         (id) => id !== input.currentPacketId,
       );
-      const nextFrontier = nextQitemId ? [...remainingFrontier, nextQitemId] : remainingFrontier;
+      let nextFrontier: string[];
+      if (input.exit === "waiting") {
+        // Keep the closed packet on frontier; the watchdog uses it to wake the owner.
+        nextFrontier = [...remainingFrontier, input.currentPacketId];
+      } else if (nextQitemId) {
+        nextFrontier = [...remainingFrontier, nextQitemId];
+      } else {
+        nextFrontier = remainingFrontier;
+      }
+      // R1 fix (guard blocker 2a): exit=failed sets status=failed, NOT
+      // completed. Emits workflow.failed instead of workflow.completed.
       let nextStatus: WorkflowInstance["status"];
       let completedAt: string | null = null;
       if (input.exit === "waiting") {
         nextStatus = "waiting";
+      } else if (input.exit === "failed") {
+        nextStatus = "failed";
+        completedAt = evaluatedAt;
       } else if (nextFrontier.length === 0) {
         nextStatus = "completed";
         completedAt = evaluatedAt;
@@ -245,11 +277,12 @@ export class WorkflowProjector {
           closedPacket: input.currentPacketId,
           nextPacket: nextQitemId,
           resultNote: input.resultNote ?? null,
+          blockedOn: input.blockedOn ?? null,
         },
         completedAt,
       });
 
-      // 5. Persist workflow events within the same txn.
+      // 6. Persist workflow events within the same txn.
       persistedEvents.push(
         this.eventBus.persistWithinTransaction({
           type: "workflow.step_closed",
@@ -260,8 +293,7 @@ export class WorkflowProjector {
           priorQitemId: input.currentPacketId,
         }),
       );
-      if (createdNext) {
-        // Persist queue.created event (created within QueueRepository.createWithinTransaction).
+      if (createdNext && nextStep && resolvedNextOwner) {
         persistedEvents.push(createdNext.persistedEvent);
         persistedEvents.push(
           this.eventBus.persistWithinTransaction({
@@ -269,7 +301,7 @@ export class WorkflowProjector {
             instanceId: instance.instanceId,
             nextQitemId: createdNext.qitemId,
             nextOwner: createdNext.destinationSession,
-            nextStepId: nextStep!.id,
+            nextStepId: nextStep.id,
           }),
         );
       }
@@ -279,6 +311,15 @@ export class WorkflowProjector {
             type: "workflow.completed",
             instanceId: instance.instanceId,
             workflowName: instance.workflowName,
+          }),
+        );
+      } else if (nextStatus === "failed") {
+        persistedEvents.push(
+          this.eventBus.persistWithinTransaction({
+            type: "workflow.failed",
+            instanceId: instance.instanceId,
+            workflowName: instance.workflowName,
+            reason: input.resultNote ?? "workflow_step_failed",
           }),
         );
       }
@@ -356,6 +397,85 @@ function resolveDefaultOwner(spec: WorkflowSpec, step: WorkflowStepSpec): string
   const role = spec.roles?.[step.actor_role];
   const targets = role?.preferred_targets ?? [];
   return targets[0] ?? null;
+}
+
+/**
+ * R1 fix (guard blocker 1): translate a workflow exit into the Phase A
+ * queue closure shape (state + closure_reason + closure_target +
+ * handed_off_to / blocked_on metadata). Phase A's hot-potato closure
+ * validation enforces the rules:
+ *   - state=done requires closure_reason from CLOSURE_REASONS
+ *   - handed_off_to / blocked_on / escalation also require closure_target
+ *
+ * Mappings:
+ *   handoff → state=handed-off, closure_reason=handed_off_to,
+ *             closure_target+handed_off_to=<next-owner>
+ *   waiting → state=blocked, closure_reason=blocked_on,
+ *             closure_target+blocked_on=<blocker>
+ *   done    → state=done, closure_reason=no-follow-on
+ *   failed  → state=done, closure_reason=denied (workflow status=failed
+ *             is set separately on the instance row)
+ */
+function workflowExitToQueueClosure(
+  input: ProjectStepInput,
+  resolvedNextOwner: string | null,
+): {
+  state: "handed-off" | "blocked" | "done";
+  closureReason: string;
+  closureTarget: string | null;
+  handedOffTo?: string;
+  blockedOn?: string;
+  transitionNote: string;
+} {
+  switch (input.exit) {
+    case "handoff": {
+      if (!resolvedNextOwner) {
+        // Defense-in-depth — projector validates this earlier and throws
+        // next_owner_unresolved, so this branch is unreachable in practice.
+        throw new WorkflowProjectorError(
+          "next_owner_unresolved",
+          "handoff exit requires a resolved next owner before queue closure",
+        );
+      }
+      return {
+        state: "handed-off",
+        closureReason: "handed_off_to",
+        closureTarget: resolvedNextOwner,
+        handedOffTo: resolvedNextOwner,
+        transitionNote: `workflow handoff to ${resolvedNextOwner}`,
+      };
+    }
+    case "waiting": {
+      const blocker = input.blockedOn ?? "external-gate";
+      return {
+        state: "blocked",
+        closureReason: "blocked_on",
+        closureTarget: blocker,
+        blockedOn: blocker,
+        transitionNote: `workflow waiting on ${blocker}`,
+      };
+    }
+    case "done": {
+      return {
+        state: "done",
+        closureReason: "no-follow-on",
+        closureTarget: null,
+        transitionNote: input.resultNote
+          ? `workflow done: ${input.resultNote}`
+          : "workflow done",
+      };
+    }
+    case "failed": {
+      return {
+        state: "done",
+        closureReason: "denied",
+        closureTarget: input.resultNote ?? "workflow_step_failed",
+        transitionNote: input.resultNote
+          ? `workflow failed: ${input.resultNote}`
+          : "workflow failed",
+      };
+    }
+  }
 }
 
 function workflowHandoffBody(input: {
