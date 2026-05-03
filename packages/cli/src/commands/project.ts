@@ -53,12 +53,17 @@ export function projectCommand(depsOverride?: ProjectDeps): Command {
     .command("lease-acquire")
     .description("Acquire the active classifier lease for the caller")
     .requiredOption("--session <session>", "Classifier session name")
+    .option(
+      "--evaluate-deadness-first",
+      "Before acquire, call evaluateDeadness to clear any stale TTL-expired or dead-holder lease (per PRD § L2 deadness-detection)",
+    )
     .option("--json", "JSON output for agents")
-    .action(async (opts: { session: string; json?: boolean }) => {
+    .action(async (opts: { session: string; evaluateDeadnessFirst?: boolean; json?: boolean }) => {
       const deps = getDeps();
       await withClient(deps, async (client) => {
         const res = await client.post<unknown>("/api/projects/lease/acquire", {
           classifierSession: opts.session,
+          evaluateDeadnessFirst: opts.evaluateDeadnessFirst,
         });
         printResult(opts.json ?? false, res.data, res.status);
       });

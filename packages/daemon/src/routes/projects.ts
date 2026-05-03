@@ -32,6 +32,7 @@ export function projectsRoutes(): Hono {
     if (err instanceof ProjectClassifierError) {
       const status = err.code === "idempotency_violation" ? 409
         : err.code === "project_not_found" ? 404
+        : err.code === "unknown_stream_item" ? 400
         : 500;
       return c.json({ error: err.code, message: err.message, ...(err.meta ?? {}) }, status as 200);
     }
@@ -51,10 +52,20 @@ export function projectsRoutes(): Hono {
   }
 
   // POST /lease/acquire — acquire active classifier lease for caller.
+  // R1 NOTE 3: optional `evaluateDeadnessFirst: true` causes the route to
+  // call evaluateDeadness BEFORE acquire, which clears stale TTL-expired or
+  // dead-holder leases. Without this opt-in, acquire returns 409 lease_held
+  // even when the holder is dead (the operator-verb reclaim path is the
+  // only other way to clear a dead lease without waiting for TTL+next
+  // evaluateDeadness call). Default OFF — operators / classifiers
+  // explicitly request the proactive cleanup.
   app.post("/lease/acquire", async (c) => {
-    const body = await c.req.json<{ classifierSession?: string }>().catch(() => ({} as never));
+    const body = await c.req.json<{ classifierSession?: string; evaluateDeadnessFirst?: boolean }>().catch(() => ({} as never));
     if (!body.classifierSession) return c.json({ error: "classifierSession is required" }, 400);
     try {
+      if (body.evaluateDeadnessFirst === true) {
+        getLease(c).evaluateDeadness();
+      }
       const lease = getLease(c).acquire(body.classifierSession);
       return c.json(lease, 201);
     } catch (err) {

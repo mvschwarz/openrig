@@ -153,7 +153,15 @@ export class ViewProjector {
         params = [...rigParams, limit];
         break;
       case "pod-load":
-        // Per-destination qitem counts (active states only).
+        // R1 NOTE 4: PRD § L5 names this view "per-pod queue-item counts",
+        // but Phase A's queue_items table does not carry pod metadata —
+        // destination_session is `<member>@<rig>` shape and there is no
+        // pod_id column. v0 interpretation: group by destination_session
+        // (i.e., per-seat counts). When pod metadata becomes available
+        // (Phase D workflow runtime or later), this view should be
+        // upgraded to GROUP BY pod_id with destination_session aggregation
+        // as a sub-grouping. Documented v0 behavior preserves the view
+        // name but reduces the grouping key.
         sql = `
           SELECT destination_session AS pod, COUNT(*) AS active_count
           FROM queue_items

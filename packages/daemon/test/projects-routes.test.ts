@@ -5,11 +5,13 @@ import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
 import { coreSchema } from "../src/db/migrations/001_core_schema.js";
 import { eventsSchema } from "../src/db/migrations/003_events.js";
+import { streamItemsSchema } from "../src/db/migrations/023_stream_items.js";
 import { classifierLeasesSchema } from "../src/db/migrations/029_classifier_leases.js";
 import { projectClassificationsSchema } from "../src/db/migrations/028_project_classifications.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { ClassifierLeaseManager } from "../src/domain/classifier-lease-manager.js";
 import { ProjectClassifier } from "../src/domain/project-classifier.js";
+import { StreamStore } from "../src/domain/stream-store.js";
 import { projectsRoutes } from "../src/routes/projects.js";
 
 function buildApp(opts: {
@@ -33,14 +35,27 @@ describe("projects routes (PL-004 Phase B)", () => {
   let bus: EventBus;
   let leaseMgr: ClassifierLeaseManager;
   let classifier: ProjectClassifier;
+  let streamStore: StreamStore;
   let app: Hono;
+
+  // R1 fix (BLOCKER 1): tests now migrate streamItemsSchema (Phase A
+  // migration 023) and seed real stream_items rows so the L1→L2 FK +
+  // existence check is exercised end-to-end through the route.
+  function seedStreamItem(streamItemId: string): void {
+    streamStore.emit({
+      streamItemId,
+      sourceSession: "discovery@rig",
+      body: `body for ${streamItemId}`,
+    });
+  }
 
   beforeEach(() => {
     db = createDb();
-    migrate(db, [coreSchema, eventsSchema, classifierLeasesSchema, projectClassificationsSchema]);
+    migrate(db, [coreSchema, eventsSchema, streamItemsSchema, classifierLeasesSchema, projectClassificationsSchema]);
     bus = new EventBus(db);
     leaseMgr = new ClassifierLeaseManager(db, bus);
     classifier = new ProjectClassifier(db, bus, leaseMgr);
+    streamStore = new StreamStore(db, bus);
     app = buildApp({ eventBus: bus, classifier, leaseMgr });
   });
 
@@ -59,6 +74,7 @@ describe("projects routes (PL-004 Phase B)", () => {
   });
 
   it("POST /api/projects/project requires lease + idempotent on stream_item_id", async () => {
+    seedStreamItem("stream-x");
     await app.request("/api/projects/lease/acquire", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -92,6 +108,7 @@ describe("projects routes (PL-004 Phase B)", () => {
   });
 
   it("POST /api/projects/project without active lease returns 409 no_active_lease", async () => {
+    seedStreamItem("stream-x");
     const res = await app.request("/api/projects/project", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -103,6 +120,29 @@ describe("projects routes (PL-004 Phase B)", () => {
     expect(res.status).toBe(409);
     const err = (await res.json()) as { error: string };
     expect(err.error).toBe("no_active_lease");
+  });
+
+  it("R1 BLOCKER 1: POST /api/projects/project with nonexistent stream_item_id returns 400 unknown_stream_item", async () => {
+    await app.request("/api/projects/lease/acquire", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ classifierSession: "alice@rig" }),
+    });
+    // Note: NO seedStreamItem call — stream-nonexistent has no row in stream_items.
+    const res = await app.request("/api/projects/project", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        streamItemId: "stream-nonexistent",
+        classifierSession: "alice@rig",
+        classificationType: "idea",
+      }),
+    });
+    expect(res.status).toBe(400);
+    const err = (await res.json()) as { error: string; message: string; streamItemId: string };
+    expect(err.error).toBe("unknown_stream_item");
+    expect(err.message).toMatch(/does not exist/);
+    expect(err.streamItemId).toBe("stream-nonexistent");
   });
 
   it("POST /api/projects/reclaim-classifier with --if-dead refuses on alive holder", async () => {
@@ -161,6 +201,7 @@ describe("projects routes (PL-004 Phase B)", () => {
       body: JSON.stringify({ classifierSession: "alice@rig" }),
     });
     for (const [id, dest] of [["s1", "planning@rig"], ["s2", "delivery@rig"], ["s3", "planning@rig"]] as Array<[string, string]>) {
+      seedStreamItem(id);
       await app.request("/api/projects/project", {
         method: "POST",
         headers: { "Content-Type": "application/json" },

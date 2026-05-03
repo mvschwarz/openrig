@@ -66,6 +66,7 @@ import { OutboxHandler } from "./domain/outbox-handler.js";
 import { ProjectClassifier } from "./domain/project-classifier.js";
 import { ClassifierLeaseManager } from "./domain/classifier-lease-manager.js";
 import { ViewProjector } from "./domain/view-projector.js";
+import { wireViewEventBridge } from "./domain/view-event-bridge.js";
 import { SpecReviewService } from "./domain/spec-review-service.js";
 import { SpecLibraryService } from "./domain/spec-library-service.js";
 import { WhoamiService } from "./domain/whoami-service.js";
@@ -153,6 +154,14 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // the leaseManager dep slot and project-classifier can share one instance.
   // isAlive is post-attached after whoami-service is constructed.
   const classifierLeaseManagerInstance = new ClassifierLeaseManager(db, eventBus);
+  // PL-004 Phase B — view-projector. Constructed early so both the
+  // viewProjector dep slot and the view-event-bridge can share one instance.
+  const viewProjectorInstance = new ViewProjector(db, eventBus);
+  // PL-004 Phase B R1 (closes guard BLOCKER 2): wire the view event bridge
+  // so queue/inbox/project mutations emit view.changed for affected built-in
+  // views. SSE consumers on /api/views/:name/sse now receive change events
+  // when underlying state mutates.
+  wireViewEventBridge(eventBus, viewProjectorInstance);
 
   const tmuxAdapter = new TmuxAdapter(opts?.tmuxExec ?? execCommand);
   // cmuxFactory takes precedence (for tests), then cmuxExec-based CLI transport, then default
@@ -426,7 +435,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     outboxHandler: new OutboxHandler(db),
     classifierLeaseManager: classifierLeaseManagerInstance,
     projectClassifier: new ProjectClassifier(db, eventBus, classifierLeaseManagerInstance),
-    viewProjector: new ViewProjector(db, eventBus),
+    viewProjector: viewProjectorInstance,
     askService: (() => {
       const psProjectionService = new PsProjectionService({ db });
       const execDep = (cmd: string, args: string[]): Promise<{ stdout: string; exitCode: number }> =>
