@@ -8,6 +8,15 @@ import type { Migration } from "../migrate.js";
  * filesystem reconciliation. The current_frontier_json column holds the
  * array of qitem_ids that are the active step packets at any given time.
  *
+ * R2 fix (guard blocker 1): durable current-step binding via
+ * `current_step_id`. Replaces trail-based "last_step + 1" inference,
+ * which produced wrong results for reused-frontier packets (e.g.,
+ * waiting → resume on same packet would skip a step). Mirrors POC
+ * which extracts step_id from the current packet binding rather than
+ * inferring from trail order. v1 supports a single active frontier
+ * packet; multi-frontier (parallel branches) is graduation and would
+ * need a packet→step map.
+ *
  * Status enum (matches POC + PRD):
  *   - active: instance has at least one frontier packet in-flight
  *   - waiting: instance has a frontier packet blocked on an external gate
@@ -41,6 +50,7 @@ export const workflowInstancesSchema: Migration = {
       created_at TEXT NOT NULL,
       status TEXT NOT NULL DEFAULT 'active',
       current_frontier_json TEXT NOT NULL DEFAULT '[]',
+      current_step_id TEXT,
       hop_count INTEGER NOT NULL DEFAULT 0,
       fallback_synthesis TEXT,
       last_continuation_decision_json TEXT,

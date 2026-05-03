@@ -20,6 +20,7 @@ interface InstanceRow {
   created_at: string;
   status: string;
   current_frontier_json: string;
+  current_step_id: string | null;
   hop_count: number;
   fallback_synthesis: string | null;
   last_continuation_decision_json: string | null;
@@ -31,6 +32,8 @@ export interface CreateWorkflowInstanceInput {
   workflowVersion: string;
   createdBySession: string;
   initialFrontier?: string[];
+  /** R2: durable current-step binding set at instantiate time. */
+  currentStepId?: string;
 }
 
 export class WorkflowInstanceError extends Error {
@@ -58,8 +61,8 @@ export class WorkflowInstanceStore {
       .prepare(
         `INSERT INTO workflow_instances (
            instance_id, workflow_name, workflow_version, created_by_session,
-           created_at, status, current_frontier_json, hop_count
-         ) VALUES (?, ?, ?, ?, ?, 'active', ?, 0)`,
+           created_at, status, current_frontier_json, current_step_id, hop_count
+         ) VALUES (?, ?, ?, ?, ?, 'active', ?, ?, 0)`,
       )
       .run(
         instanceId,
@@ -68,6 +71,7 @@ export class WorkflowInstanceStore {
         input.createdBySession,
         createdAt,
         JSON.stringify(frontier),
+        input.currentStepId ?? null,
       );
     return this.getByIdOrThrow(instanceId);
   }
@@ -122,19 +126,38 @@ export class WorkflowInstanceStore {
       lastContinuationDecision?: Record<string, unknown> | null;
       fallbackSynthesis?: string | null;
       completedAt?: string | null;
+      /**
+       * R2: explicit next current_step_id. When provided, OVERWRITES
+       * the column (including to NULL by passing the empty string for
+       * "clear"). When omitted, current_step_id is preserved (the
+       * frontier packet is reused, e.g., on waiting). To clear pass
+       * the symbol "clear-current-step" (typed as the literal below).
+       */
+      currentStepId?: string | "preserve" | "clear";
     } = {},
   ): void {
     const setHop = opts.bumpHopCount ? "hop_count = hop_count + 1, " : "";
-    this.db
-      .prepare(
-        `UPDATE workflow_instances SET
-           ${setHop}status = ?, current_frontier_json = ?,
+    let currentStepClause = "";
+    let currentStepValue: string | null | undefined;
+    if (opts.currentStepId === "preserve" || opts.currentStepId === undefined) {
+      currentStepClause = "";
+      currentStepValue = undefined;
+    } else if (opts.currentStepId === "clear") {
+      currentStepClause = "current_step_id = NULL, ";
+    } else {
+      currentStepClause = "current_step_id = ?, ";
+      currentStepValue = opts.currentStepId;
+    }
+    const sql = `UPDATE workflow_instances SET
+           ${setHop}${currentStepClause}status = ?, current_frontier_json = ?,
            last_continuation_decision_json = COALESCE(?, last_continuation_decision_json),
            fallback_synthesis = COALESCE(?, fallback_synthesis),
            completed_at = COALESCE(?, completed_at)
-         WHERE instance_id = ?`,
-      )
-      .run(
+         WHERE instance_id = ?`;
+    const stmt = this.db.prepare(sql);
+    if (currentStepValue !== undefined) {
+      stmt.run(
+        currentStepValue,
         nextStatus,
         JSON.stringify(nextFrontier),
         opts.lastContinuationDecision ? JSON.stringify(opts.lastContinuationDecision) : null,
@@ -142,6 +165,16 @@ export class WorkflowInstanceStore {
         opts.completedAt ?? null,
         instanceId,
       );
+    } else {
+      stmt.run(
+        nextStatus,
+        JSON.stringify(nextFrontier),
+        opts.lastContinuationDecision ? JSON.stringify(opts.lastContinuationDecision) : null,
+        opts.fallbackSynthesis ?? null,
+        opts.completedAt ?? null,
+        instanceId,
+      );
+    }
   }
 }
 
@@ -154,6 +187,7 @@ function rowToInstance(row: InstanceRow): WorkflowInstance {
     createdAt: row.created_at,
     status: row.status as WorkflowInstanceStatus,
     currentFrontier: JSON.parse(row.current_frontier_json) as string[],
+    currentStepId: row.current_step_id,
     hopCount: row.hop_count,
     fallbackSynthesis: row.fallback_synthesis,
     lastContinuationDecision: row.last_continuation_decision_json
