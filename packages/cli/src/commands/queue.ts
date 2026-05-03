@@ -1,6 +1,7 @@
 import { Command } from "commander";
 import { DaemonClient } from "../client.js";
 import { getDaemonStatus, getDaemonUrl } from "../daemon-lifecycle.js";
+import { readOpenRigEnv } from "../openrig-compat.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 
@@ -38,6 +39,15 @@ function printResult(json: boolean, body: unknown, status: number): void {
     console.log(JSON.stringify(body, null, 2));
   }
   if (status >= 400) process.exitCode = status >= 500 ? 2 : 1;
+}
+
+function resolveCurrentSession(explicit: string | undefined, optionName: string): string | undefined {
+  const session = explicit ?? readOpenRigEnv("OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME");
+  if (session) return session;
+
+  console.error(`--${optionName} is required when OPENRIG_SESSION_NAME is not set`);
+  process.exitCode = 1;
+  return undefined;
 }
 
 export function queueCommand(depsOverride?: QueueDeps): Command {
@@ -93,13 +103,15 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
   cmd
     .command("claim <qitemId>")
     .description("Claim a qitem (pending → in-progress); computes closure_required_at from tier")
-    .requiredOption("--destination <session>", "Destination session claiming the qitem")
+    .option("--destination <session>", "Destination session claiming the qitem (defaults to OPENRIG_SESSION_NAME)")
     .option("--json", "JSON output for agents")
-    .action(async (qitemId: string, opts: { destination: string; json?: boolean }) => {
+    .action(async (qitemId: string, opts: { destination?: string; json?: boolean }) => {
+      const destination = resolveCurrentSession(opts.destination, "destination");
+      if (!destination) return;
       const deps = getDeps();
       await withClient(deps, async (client) => {
         const res = await client.post<unknown>(`/api/queue/${encodeURIComponent(qitemId)}/claim`, {
-          destinationSession: opts.destination,
+          destinationSession: destination,
         });
         printResult(opts.json ?? false, res.data, res.status);
       });
@@ -108,14 +120,16 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
   cmd
     .command("unclaim <qitemId>")
     .description("Release a claimed qitem (in-progress → pending)")
-    .requiredOption("--destination <session>", "Destination session releasing the qitem")
+    .option("--destination <session>", "Destination session releasing the qitem (defaults to OPENRIG_SESSION_NAME)")
     .option("--reason <text>", "Reason for unclaim", "manual")
     .option("--json", "JSON output for agents")
-    .action(async (qitemId: string, opts: { destination: string; reason: string; json?: boolean }) => {
+    .action(async (qitemId: string, opts: { destination?: string; reason: string; json?: boolean }) => {
+      const destination = resolveCurrentSession(opts.destination, "destination");
+      if (!destination) return;
       const deps = getDeps();
       await withClient(deps, async (client) => {
         const res = await client.post<unknown>(`/api/queue/${encodeURIComponent(qitemId)}/unclaim`, {
-          destinationSession: opts.destination,
+          destinationSession: destination,
           reason: opts.reason,
         });
         printResult(opts.json ?? false, res.data, res.status);
@@ -125,24 +139,26 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
   cmd
     .command("update <qitemId>")
     .description("Mutate qitem state. state=done REQUIRES --closure-reason (one of: handed_off_to, blocked_on, denied, canceled, no-follow-on, escalation)")
-    .requiredOption("--actor <session>", "Actor session performing the transition")
+    .option("--actor <session>", "Actor session performing the transition (defaults to OPENRIG_SESSION_NAME)")
     .requiredOption("--state <state>", "New state: pending | in-progress | done | blocked | failed | denied | canceled | handed-off")
     .option("--closure-reason <reason>", "Required for state=done")
     .option("--closure-target <target>", "Required for handed_off_to, blocked_on, escalation")
     .option("--note <text>", "Transition note for the audit log")
     .option("--json", "JSON output for agents")
     .action(async (qitemId: string, opts: {
-      actor: string;
+      actor?: string;
       state: string;
       closureReason?: string;
       closureTarget?: string;
       note?: string;
       json?: boolean;
     }) => {
+      const actor = resolveCurrentSession(opts.actor, "actor");
+      if (!actor) return;
       const deps = getDeps();
       await withClient(deps, async (client) => {
         const res = await client.post<unknown>(`/api/queue/${encodeURIComponent(qitemId)}/update`, {
-          actorSession: opts.actor,
+          actorSession: actor,
           state: opts.state,
           closureReason: opts.closureReason,
           closureTarget: opts.closureTarget,
@@ -155,7 +171,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
   cmd
     .command("handoff <qitemId>")
     .description("Transactional handoff: closes source as handed-off + creates new qitem owned by --to")
-    .requiredOption("--from <session>", "Source seat handing off")
+    .option("--from <session>", "Source seat handing off (defaults to OPENRIG_SESSION_NAME)")
     .requiredOption("--to <session>", "Destination seat receiving the new qitem")
     .option("--body <text>", "New qitem body (defaults to source body)")
     .option("--note <text>", "Transition note")
@@ -165,7 +181,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     .option("--no-nudge", "Suppress the default nudge to the new destination")
     .option("--json", "JSON output for agents")
     .action(async (qitemId: string, opts: {
-      from: string;
+      from?: string;
       to: string;
       body?: string;
       note?: string;
@@ -175,11 +191,13 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
       nudge?: boolean;
       json?: boolean;
     }) => {
+      const from = resolveCurrentSession(opts.from, "from");
+      if (!from) return;
       const deps = getDeps();
       const tags = opts.tags ? opts.tags.split(",").map((s) => s.trim()).filter(Boolean) : undefined;
       await withClient(deps, async (client) => {
         const res = await client.post<unknown>(`/api/queue/${encodeURIComponent(qitemId)}/handoff`, {
-          fromSession: opts.from,
+          fromSession: from,
           toSession: opts.to,
           body: opts.body,
           transitionNote: opts.note,
@@ -197,7 +215,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     .description(
       "Atomic close (state=done, closure_reason=handed_off_to) + create new qitem owned by --to. Variant of handoff that fully terminates the source qitem."
     )
-    .requiredOption("--from <session>", "Source seat handing off")
+    .option("--from <session>", "Source seat handing off (defaults to OPENRIG_SESSION_NAME)")
     .requiredOption("--to <session>", "Destination seat receiving the new qitem")
     .option("--body <text>", "New qitem body (defaults to source body)")
     .option("--note <text>", "Transition note")
@@ -207,7 +225,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     .option("--no-nudge", "Suppress the default nudge to the new destination")
     .option("--json", "JSON output for agents")
     .action(async (qitemId: string, opts: {
-      from: string;
+      from?: string;
       to: string;
       body?: string;
       note?: string;
@@ -217,11 +235,13 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
       nudge?: boolean;
       json?: boolean;
     }) => {
+      const from = resolveCurrentSession(opts.from, "from");
+      if (!from) return;
       const deps = getDeps();
       const tags = opts.tags ? opts.tags.split(",").map((s) => s.trim()).filter(Boolean) : undefined;
       await withClient(deps, async (client) => {
         const res = await client.post<unknown>(`/api/queue/${encodeURIComponent(qitemId)}/handoff-and-complete`, {
-          fromSession: opts.from,
+          fromSession: from,
           toSession: opts.to,
           body: opts.body,
           transitionNote: opts.note,
@@ -237,13 +257,15 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
   cmd
     .command("whoami")
     .description("Show the caller's queue position from the daemon's perspective")
-    .requiredOption("--session <session>", "Caller's session name")
+    .option("--session <session>", "Caller's session name (defaults to OPENRIG_SESSION_NAME)")
     .option("--recent-limit <n>", "How many recent active qitems to include", "25")
     .option("--json", "JSON output for agents")
-    .action(async (opts: { session: string; recentLimit: string; json?: boolean }) => {
+    .action(async (opts: { session?: string; recentLimit: string; json?: boolean }) => {
+      const session = resolveCurrentSession(opts.session, "session");
+      if (!session) return;
       const deps = getDeps();
       const params = new URLSearchParams({
-        session: opts.session,
+        session,
         recentLimit: opts.recentLimit,
       });
       await withClient(deps, async (client) => {
