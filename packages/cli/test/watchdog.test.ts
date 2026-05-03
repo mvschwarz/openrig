@@ -180,6 +180,15 @@ describe("rig watchdog CLI (PL-004 Phase C)", () => {
     expect(process.exitCode).toBeUndefined();
   });
 
+  it("register help lists workflow-keepalive as an accepted policy", () => {
+    const { deps } = makeDeps();
+    const program = createProgram({ watchdogDeps: deps });
+    const watchdog = program.commands.find((c) => c.name() === "watchdog");
+    const register = watchdog?.commands.find((c) => c.name() === "register");
+    expect(register).toBeDefined();
+    expect(register!.helpInformation()).toContain("workflow-keepalive");
+  });
+
   it("list GETs /api/watchdog/list", async () => {
     const { deps, calls } = makeDeps({
       routes: { "GET /api/watchdog/list": { status: 200, data: [] } },
