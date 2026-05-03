@@ -141,6 +141,71 @@ describe("workflow routes (PL-004 Phase D)", () => {
     expect(body.nextOwnerSession).toBe("reviewer@rig");
   });
 
+  // R3 fix (guard blocker): exit_not_allowed must surface as HTTP 400
+  // (not 500 internal-server-error) with structured details preserved.
+  // Asserts no side effects on the public path: queue still pending,
+  // instance state unchanged.
+  it("POST /project surfaces exit_not_allowed as 400 with structured details + no side effects", async () => {
+    const create = await app.request("/api/workflow/instantiate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ specPath, rootObjective: "x", createdBySession: "ops@rig" }),
+    });
+    const created = (await create.json()) as { instance: { instanceId: string }; entryQitemId: string };
+
+    // Capture pre-rejection state via the public surface.
+    const beforeShow = await app.request(`/api/workflow/${created.instance.instanceId}`);
+    const beforeInstance = (await beforeShow.json()) as {
+      currentFrontier: string[];
+      currentStepId: string | null;
+      status: string;
+    };
+
+    // Attempt exit=done on the produce step (which only allows handoff).
+    const res = await app.request("/api/workflow/project", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        instanceId: created.instance.instanceId,
+        currentPacketId: created.entryQitemId,
+        exit: "done",
+        actorSession: "producer@rig",
+      }),
+    });
+
+    // R3 critical: 400 (NOT 500), structured error code + details preserved.
+    expect(res.status).toBe(400);
+    expect(res.status).not.toBe(500);
+    const body = (await res.json()) as {
+      error: string;
+      message: string;
+      stepId?: string;
+      attemptedExit?: string;
+      allowedExits?: string[];
+    };
+    expect(body.error).toBe("exit_not_allowed");
+    expect(body.error).not.toBe("internal_error");
+    expect(body.message).toContain("produce");
+    expect(body.stepId).toBe("produce");
+    expect(body.attemptedExit).toBe("done");
+    expect(body.allowedExits).toEqual(["handoff"]);
+
+    // No side effects through the public path: instance unchanged.
+    const afterShow = await app.request(`/api/workflow/${created.instance.instanceId}`);
+    const afterInstance = (await afterShow.json()) as {
+      currentFrontier: string[];
+      currentStepId: string | null;
+      status: string;
+    };
+    expect(afterInstance.currentFrontier).toEqual(beforeInstance.currentFrontier);
+    expect(afterInstance.currentStepId).toBe(beforeInstance.currentStepId);
+    expect(afterInstance.status).toBe(beforeInstance.status);
+    // Trail still empty (no projected step closure recorded).
+    const traceRes = await app.request(`/api/workflow/${created.instance.instanceId}/trace`);
+    const trace = (await traceRes.json()) as { trail: Array<unknown> };
+    expect(trace.trail).toEqual([]);
+  });
+
   it("GET /list returns all instances", async () => {
     await app.request("/api/workflow/instantiate", {
       method: "POST",

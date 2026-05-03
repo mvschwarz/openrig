@@ -57,6 +57,11 @@ export function workflowRoutes(): Hono {
         : err.code === "spec_not_cached" || err.code === "current_step_unknown" ? 409
         : err.code === "no_next_step" || err.code === "next_owner_unresolved" ? 400
         : err.code === "spec_invalid" || err.code === "entry_owner_unresolved" || err.code === "spec_no_steps" ? 400
+        // R3 fix (guard blocker): map allowed_exits projection-time
+        // rejection to 400 so the public surface (HTTP API + CLI) is
+        // honest about operator/spec misuse instead of falsifying it
+        // as 500 internal-server-error.
+        : err.code === "exit_not_allowed" ? 400
         : err.code === "packet_not_found" ? 404
         : 500;
       return c.json({ error: err.code, message: err.message, ...(err.details ?? {}) }, status as 200);
