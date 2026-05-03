@@ -65,25 +65,10 @@ export function streamRoutes(): Hono {
     return c.json(items);
   });
 
-  // GET /:streamItemId — fetch one
-  app.get("/:streamItemId", (c) => {
-    const id = c.req.param("streamItemId");
-    const store = getStore(c);
-    const item = store.getById(id);
-    if (!item) return c.json({ error: "stream item not found" }, 404);
-    return c.json(item);
-  });
-
-  // POST /:streamItemId/archive
-  app.post("/:streamItemId/archive", (c) => {
-    const id = c.req.param("streamItemId");
-    const store = getStore(c);
-    const ok = store.archive(id);
-    if (!ok) return c.json({ error: "stream item not found or already archived" }, 404);
-    return c.json({ ok: true });
-  });
-
   // GET /watch — SSE for new stream.emitted events.
+  // MUST precede /:streamItemId so the literal `watch` and `sse` paths
+  // win over the bare-param route (otherwise GET /api/stream/sse resolves
+  // as /:streamItemId with id="sse" and returns 404 stream-item-not-found).
   // Mounted at both /watch (legacy alias) and /sse (Phase A contract per
   // IMPL § Routes: GET /api/stream/sse). Same handler; either path emits
   // the identical event stream.
@@ -131,6 +116,24 @@ export function streamRoutes(): Hono {
 
   app.get("/watch", sseHandler);
   app.get("/sse", sseHandler);
+
+  // GET /:streamItemId — fetch one
+  app.get("/:streamItemId", (c) => {
+    const id = c.req.param("streamItemId");
+    const store = getStore(c);
+    const item = store.getById(id);
+    if (!item) return c.json({ error: "stream item not found" }, 404);
+    return c.json(item);
+  });
+
+  // POST /:streamItemId/archive
+  app.post("/:streamItemId/archive", (c) => {
+    const id = c.req.param("streamItemId");
+    const store = getStore(c);
+    const ok = store.archive(id);
+    if (!ok) return c.json({ error: "stream item not found or already archived" }, 404);
+    return c.json({ ok: true });
+  });
 
   return app;
 }

@@ -265,6 +265,43 @@ export function queueRoutes(): Hono {
     return c.json(items);
   });
 
+  // ---- SSE watch over coordination events ----
+  // MUST precede /:qitemId so the literal `watch` and `sse` paths win
+  // over the bare-param route (otherwise GET /api/queue/sse resolves as
+  // /:qitemId with qitemId="sse" and returns 404 qitem_not_found).
+  // Mounted at both /watch (legacy alias) and /sse (Phase A contract per IMPL).
+  // Same handler; either path emits the identical event stream.
+  const sseHandler = (c: Parameters<typeof streamSSE>[0]) => {
+    const eventBus = getEventBus(c);
+    return streamSSE(c, async (stream) => {
+      const unsubscribe = eventBus.subscribe((event) => {
+        if (
+          event.type !== "queue.created" &&
+          event.type !== "queue.handed_off" &&
+          event.type !== "queue.claimed" &&
+          event.type !== "queue.unclaimed" &&
+          event.type !== "qitem.fallback_routed" &&
+          event.type !== "qitem.closure_overdue" &&
+          event.type !== "inbox.absorbed" &&
+          event.type !== "inbox.denied"
+        ) return;
+        const sse = { id: String(event.seq), data: JSON.stringify(event) };
+        stream.writeSSE(sse).catch(() => {});
+      });
+
+      try {
+        await new Promise<void>((resolve) => {
+          stream.onAbort(() => resolve());
+        });
+      } finally {
+        unsubscribe();
+      }
+    });
+  };
+
+  app.get("/watch", sseHandler);
+  app.get("/sse", sseHandler);
+
   // GET /:qitemId/transitions — registered before /:qitemId so the literal
   // suffix wins over the bare param route.
   app.get("/:qitemId/transitions", (c) => {
@@ -390,42 +427,6 @@ export function queueRoutes(): Hono {
     const limit = c.req.query("limit") ? Number.parseInt(c.req.query("limit")!, 10) : undefined;
     return c.json(getOutbox(c).listForSender(senderSession, limit));
   });
-
-  // ---- SSE watch over coordination events ----
-  // Mounted at both /watch (legacy alias) and /sse (Phase A contract per IMPL).
-  // Same handler; either path emits the identical event stream.
-
-  const sseHandler = (c: Parameters<typeof streamSSE>[0]) => {
-    const eventBus = getEventBus(c);
-
-    return streamSSE(c, async (stream) => {
-      const unsubscribe = eventBus.subscribe((event) => {
-        if (
-          event.type !== "queue.created" &&
-          event.type !== "queue.handed_off" &&
-          event.type !== "queue.claimed" &&
-          event.type !== "queue.unclaimed" &&
-          event.type !== "qitem.fallback_routed" &&
-          event.type !== "qitem.closure_overdue" &&
-          event.type !== "inbox.absorbed" &&
-          event.type !== "inbox.denied"
-        ) return;
-        const sse = { id: String(event.seq), data: JSON.stringify(event) };
-        stream.writeSSE(sse).catch(() => {});
-      });
-
-      try {
-        await new Promise<void>((resolve) => {
-          stream.onAbort(() => resolve());
-        });
-      } finally {
-        unsubscribe();
-      }
-    });
-  };
-
-  app.get("/watch", sseHandler);
-  app.get("/sse", sseHandler);
 
   return app;
 }

@@ -436,16 +436,45 @@ describe("queue routes", () => {
     });
   });
 
-  describe("R1 SSE alias", () => {
-    it("/api/queue/sse is mounted alongside /api/queue/watch (same handler)", async () => {
-      // Both routes resolve to handlers; HEAD-style probe by aborting after a short ping.
-      // Since SSE responses don't return a synchronous body, we just confirm the
-      // route is mounted (not 404). The /watch path is the legacy alias, /sse is canonical.
-      const watchRes = await app.request("/api/queue/watch", { method: "HEAD" });
-      const sseRes = await app.request("/api/queue/sse", { method: "HEAD" });
-      // Both should be the same status (Hono returns 200 for SSE before stream starts; HEAD is method-allowed by default for GET routes).
-      expect(watchRes.status).toBe(sseRes.status);
-      expect(watchRes.status).toBeLessThan(500);
+  describe("R1 SSE route — live GET reaches the SSE handler (not shadowed by /:qitemId)", () => {
+    // Live GET tests per QA finding: HEAD comparison was inadequate because
+    // dynamic route shadowing (/:qitemId catching `sse` and `watch` as ids)
+    // returns 404 with `qitem_not_found` instead of the SSE handler.
+    // Real GET that asserts content-type: text/event-stream proves the
+    // SSE handler is reached. We cancel the response body to release the
+    // long-lived stream.
+
+    it("GET /api/queue/sse returns 200 + content-type: text/event-stream (handler reached)", async () => {
+      const res = await app.request("/api/queue/sse");
+      try {
+        expect(res.status).toBe(200);
+        expect(res.headers.get("content-type") ?? "").toContain("text/event-stream");
+      } finally {
+        await res.body?.cancel();
+      }
+    });
+
+    it("GET /api/queue/watch returns 200 + content-type: text/event-stream (handler reached)", async () => {
+      const res = await app.request("/api/queue/watch");
+      try {
+        expect(res.status).toBe(200);
+        expect(res.headers.get("content-type") ?? "").toContain("text/event-stream");
+      } finally {
+        await res.body?.cancel();
+      }
+    });
+
+    it("GET /api/queue/sse does NOT return qitem_not_found (route-order regression guard)", async () => {
+      const res = await app.request("/api/queue/sse");
+      try {
+        // If /:qitemId catches `sse` as an id, it returns 404 JSON with
+        // {"error":"qitem_not_found"}. This must never happen.
+        expect(res.status).not.toBe(404);
+        const ct = res.headers.get("content-type") ?? "";
+        expect(ct).not.toContain("application/json");
+      } finally {
+        await res.body?.cancel();
+      }
     });
   });
 });
