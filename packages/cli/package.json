@@ -35,7 +35,7 @@
     "scripts"
   ],
   "scripts": {
-    "build": "tsc && mkdir -p dist/schemas && cp src/schemas/*.json dist/schemas/",
+    "build": "tsc && chmod +x dist/bin-wrapper.js && mkdir -p dist/schemas && cp src/schemas/*.json dist/schemas/",
     "postinstall": "node scripts/check-abi.mjs",
     "prepublishOnly": "bash ../../scripts/build-package.sh",
     "test": "vitest run",
