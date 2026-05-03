@@ -35,11 +35,13 @@ describe("WatchdogJobsRepository (PL-004 Phase C)", () => {
     };
   }
 
-  it("register stores all three v1 policies", () => {
+  it("register stores all three v1 policies + actionable defaults to false", () => {
     for (const p of PHASE_C_POLICIES) {
       const job = repo.register(validInput({ policy: p }));
       expect(job.policy).toBe(p);
       expect(job.state).toBe("active");
+      expect(job.actionable).toBe(false);
+      expect(job.lastActionableAt).toBeNull();
       expect(job.jobId).toMatch(/^[0-9A-Z]{26}$/);
     }
   });
@@ -136,6 +138,31 @@ describe("WatchdogJobsRepository (PL-004 Phase C)", () => {
       expect(err).toBeInstanceOf(WatchdogJobsError);
       expect((err as WatchdogJobsError).code).toBe("job_terminal");
     }
+  });
+
+  it("setActionable(true) sets actionable=1 + last_actionable_at to evaluatedAt by default", () => {
+    const job = repo.register(validInput());
+    repo.setActionable(job.jobId, true, "2026-05-03T07:00:00.000Z");
+    const after = repo.getByIdOrThrow(job.jobId);
+    expect(after.actionable).toBe(true);
+    expect(after.lastActionableAt).toBe("2026-05-03T07:00:00.000Z");
+  });
+
+  it("setActionable(true) preserves last_actionable_at when preserve arg passed (continued window)", () => {
+    const job = repo.register(validInput());
+    repo.setActionable(job.jobId, true, "2026-05-03T07:00:00.000Z");
+    repo.setActionable(job.jobId, true, "2026-05-03T07:01:00.000Z", "2026-05-03T07:00:00.000Z");
+    const after = repo.getByIdOrThrow(job.jobId);
+    expect(after.lastActionableAt).toBe("2026-05-03T07:00:00.000Z");
+  });
+
+  it("setActionable(false) clears actionable + last_actionable_at", () => {
+    const job = repo.register(validInput());
+    repo.setActionable(job.jobId, true, "2026-05-03T07:00:00.000Z");
+    repo.setActionable(job.jobId, false, "2026-05-03T07:01:00.000Z");
+    const after = repo.getByIdOrThrow(job.jobId);
+    expect(after.actionable).toBe(false);
+    expect(after.lastActionableAt).toBeNull();
   });
 
   it("getByIdOrThrow throws job_not_found for unknown id", () => {

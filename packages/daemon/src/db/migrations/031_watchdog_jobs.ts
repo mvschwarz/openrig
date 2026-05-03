@@ -15,8 +15,20 @@ import type { Migration } from "../migrate.js";
  *   stopped  - operator stopped the job; scheduler skips it
  *   terminal - policy declared the job complete (e.g., workflow finished)
  *
- * Schema details mirror the POC declarative spec (target_session,
- * interval_seconds, optional pool-ready-specific scan/active intervals).
+ * Cadence columns mirror POC engine semantics:
+ *   - interval_seconds is the legacy / fallback cadence.
+ *   - scan_interval_seconds overrides the scheduler isDue cadence
+ *     (how often to run the policy at all).
+ *   - active_wake_interval_seconds throttles re-delivery: when the
+ *     pool stays continuously actionable, fire only every Nth scan.
+ *
+ * Active-wake state (R1 fix; POC parity for active-wake throttle):
+ *   - actionable: 1 iff the most recent scan returned action=send.
+ *     Used to detect newly-actionable transitions (no throttle on
+ *     transition; throttle on continued actionable state).
+ *   - last_actionable_at: first attempt time during the current
+ *     actionable window. Cleared when the policy returns skip.
+ *
  * spec_yaml preserves the original operator-supplied YAML for audit.
  */
 export const watchdogJobsSchema: Migration = {
@@ -32,6 +44,8 @@ export const watchdogJobsSchema: Migration = {
       scan_interval_seconds INTEGER,
       last_evaluation_at TEXT,
       last_fire_at TEXT,
+      actionable INTEGER NOT NULL DEFAULT 0,
+      last_actionable_at TEXT,
       state TEXT NOT NULL DEFAULT 'active',
       registered_by_session TEXT NOT NULL,
       registered_at TEXT NOT NULL,

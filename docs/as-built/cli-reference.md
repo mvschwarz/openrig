@@ -712,7 +712,7 @@ Closure-reason semantics:
 - `status <job_id>` — show job + recent evaluation history (last 20 entries).
 - `stop <job_id> [--reason <text>]` — operator stop; scheduler skips the job thereafter.
 
-History records only meaningful evaluations: `sent` (delivery executed), `skipped` (policy returned skip with a reason such as `no_actionable_artifacts`), or `terminal` (policy declared the job done). Pure `not_due` polls are not recorded.
+History records only loud evaluations: `sent` (delivery executed) or `terminal` (policy declared the job done). Quiet skip reasons (`not_due`, `no_actionable_artifacts`, `no_missing_edge_artifacts`, `active_wake_not_due`) are NOT recorded — POC parity so agents are not woken about scheduler polls. Loud `skipped` rows are recorded only if a policy returns a non-quiet reason.
 
 ## Commands Not Present
 

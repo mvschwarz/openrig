@@ -36,6 +36,8 @@ export interface WatchdogJob {
   scanIntervalSeconds: number | null;
   lastEvaluationAt: string | null;
   lastFireAt: string | null;
+  actionable: boolean;
+  lastActionableAt: string | null;
   state: WatchdogJobState;
   registeredBySession: string;
   registeredAt: string;
@@ -62,6 +64,8 @@ interface JobRow {
   scan_interval_seconds: number | null;
   last_evaluation_at: string | null;
   last_fire_at: string | null;
+  actionable: number;
+  last_actionable_at: string | null;
   state: string;
   registered_by_session: string;
   registered_at: string;
@@ -186,6 +190,38 @@ export class WatchdogJobsRepository {
     }
   }
 
+  /**
+   * R1 fix: write the actionable-state machine columns. Mirrors POC
+   * engine's `state.actionable` + `state.last_actionable_at`. Called
+   * by the policy engine after every meaningful evaluation:
+   *   - newActionable=false (skip): clears actionable + last_actionable_at.
+   *   - newActionable=true with no preserveLastActionableAt: stamps
+   *     last_actionable_at to evaluatedAt (newly actionable).
+   *   - newActionable=true with preserveLastActionableAt set: keeps the
+   *     existing first-actionable timestamp (continued actionable window).
+   */
+  setActionable(
+    jobId: string,
+    newActionable: boolean,
+    evaluatedAt: string,
+    preserveLastActionableAt: string | null = null,
+  ): void {
+    if (!newActionable) {
+      this.db
+        .prepare(
+          `UPDATE watchdog_jobs SET actionable = 0, last_actionable_at = NULL WHERE job_id = ?`,
+        )
+        .run(jobId);
+      return;
+    }
+    const stamp = preserveLastActionableAt ?? evaluatedAt;
+    this.db
+      .prepare(
+        `UPDATE watchdog_jobs SET actionable = 1, last_actionable_at = ? WHERE job_id = ?`,
+      )
+      .run(stamp, jobId);
+  }
+
   markTerminal(jobId: string, reason: string): void {
     this.db
       .prepare(
@@ -222,6 +258,8 @@ function rowToJob(row: JobRow): WatchdogJob {
     scanIntervalSeconds: row.scan_interval_seconds,
     lastEvaluationAt: row.last_evaluation_at,
     lastFireAt: row.last_fire_at,
+    actionable: row.actionable !== 0,
+    lastActionableAt: row.last_actionable_at,
     state: row.state as WatchdogJobState,
     registeredBySession: row.registered_by_session,
     registeredAt: row.registered_at,

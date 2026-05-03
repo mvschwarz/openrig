@@ -9,7 +9,14 @@
 export interface PolicyJob {
   jobId: string;
   policy: string;
-  targetSession: string;
+  /**
+   * POC-shape target object. Built from spec_yaml top-level `target:`
+   * block when present; otherwise falls back to `{session: registered
+   * targetSession}`. Policies access `job.target.session` per POC.
+   */
+  target: { session: string };
+  /** Optional top-level message override (POC pattern: `job.message`). */
+  message?: string;
   intervalSeconds: number;
   activeWakeIntervalSeconds: number | null;
   scanIntervalSeconds: number | null;
@@ -22,7 +29,7 @@ export interface PolicyJob {
 }
 
 export type PolicyEvaluation =
-  | { action: "send"; target: string; message: string; notes?: Record<string, unknown> }
+  | { action: "send"; target: { session: string }; message: string; notes?: Record<string, unknown> }
   | { action: "skip"; reason: string; notes?: Record<string, unknown> }
   | { action: "terminal"; reason: string; notes?: Record<string, unknown> };
 
