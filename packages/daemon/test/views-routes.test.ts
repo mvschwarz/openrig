@@ -220,4 +220,79 @@ describe("views routes (PL-004 Phase B)", () => {
 
     expect(observed).toBe(true);
   });
+
+  // ---- R2 BLOCKER: queue.updated triggers view.changed visible to SSE consumer ----
+  // Per R2 guard finding: pending → blocked / in-progress → done / closure /
+  // escalation transitions through QueueRepository.update() must emit
+  // queue.updated → view.changed. Without this, normal state mutations
+  // never wake SSE consumers on /api/views/:name/sse.
+  it("R2 BLOCKER: queue.update mutation triggers view.changed (cause=queue.updated) visible to SSE consumer", async () => {
+    wireViewEventBridge(bus, projector);
+
+    // Pre-create + claim a qitem so we can run an update path.
+    const item = await queueRepo.create({
+      sourceSession: "alice@rig",
+      destinationSession: "bob@rig",
+      body: "pre-existing for update",
+      nudge: false,
+    });
+    queueRepo.claim({ qitemId: item.qitemId, destinationSession: "bob@rig" });
+
+    // Subscribe to view SSE first so we don't miss the event.
+    const sseResPromise = app.request("/api/views/recently-active/sse");
+
+    // Run an update through the general state mutator (in-progress → done).
+    queueRepo.update({
+      qitemId: item.qitemId,
+      actorSession: "bob@rig",
+      state: "done",
+      closureReason: "no-follow-on",
+    });
+
+    const res = await sseResPromise;
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type") ?? "").toContain("text/event-stream");
+
+    const reader = res.body!.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    const deadline = Date.now() + 1500;
+    let observed = false;
+    try {
+      while (Date.now() < deadline && !observed) {
+        const readP = reader.read();
+        const tickP = new Promise<{ done: true; value: undefined }>((resolve) =>
+          setTimeout(() => resolve({ done: true, value: undefined }), 200),
+        );
+        const { done, value } = (await Promise.race([readP, tickP])) as { done: boolean; value?: Uint8Array };
+        if (!done && value) buffer += decoder.decode(value, { stream: true });
+        if (
+          buffer.includes('"type":"view.changed"') &&
+          buffer.includes('"viewName":"recently-active"') &&
+          buffer.includes('"cause":"queue.updated"')
+        ) {
+          observed = true;
+          break;
+        }
+        if (Date.now() < deadline && !observed) {
+          const item2 = await queueRepo.create({
+            sourceSession: "alice@rig",
+            destinationSession: "bob@rig",
+            body: `nudge-${Date.now()}`,
+            nudge: false,
+          });
+          queueRepo.update({
+            qitemId: item2.qitemId,
+            actorSession: "bob@rig",
+            state: "blocked",
+            transitionNote: "nudge",
+          });
+        }
+      }
+    } finally {
+      await reader.cancel().catch(() => {});
+    }
+
+    expect(observed).toBe(true);
+  });
 });

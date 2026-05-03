@@ -702,6 +702,16 @@ export class QueueRepository {
   /**
    * General state mutator. Routes through hot-potato strict-rejection on
    * `done` transitions. All transitions append to the log.
+   *
+   * Phase B R2: emits queue.updated event atomically with the UPDATE +
+   * transition log append, so the view-event-bridge can wake SSE consumers
+   * on /api/views/:name/sse for normal state transitions (pending → blocked,
+   * in-progress → done, closure, escalation). Phase A write semantics are
+   * UNCHANGED — only an additional event emission inside the existing
+   * transaction. Per slice IMPL § Guard Checkpoint Focus item 9, this is
+   * an explicit narrow event-only extension to a Phase A write surface,
+   * justified by the R2 guard finding that update-path mutations were
+   * invisible to the view bridge.
    */
   update(input: QueueUpdateInput): QueueItem {
     const qitem = this.getById(input.qitemId);
@@ -730,6 +740,7 @@ export class QueueRepository {
     }
 
     const ts = new Date().toISOString();
+    const fromState = qitem.state;
 
     const txn = this.db.transaction(() => {
       this.db
@@ -757,9 +768,20 @@ export class QueueRepository {
         closureReason: validation.closureReason ?? undefined,
         closureTarget: validation.closureTarget ?? undefined,
       });
+
+      return this.eventBus.persistWithinTransaction({
+        type: "queue.updated",
+        qitemId: input.qitemId,
+        fromState,
+        toState: input.state,
+        closureReason: validation.closureReason ?? null,
+        closureTarget: validation.closureTarget ?? null,
+        actorSession: input.actorSession,
+      });
     });
 
-    txn();
+    const persistedEvent = txn();
+    this.eventBus.notifySubscribers(persistedEvent);
     return this.getByIdOrThrow(input.qitemId);
   }
 
