@@ -126,9 +126,23 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const rigRepo = new RigRepository(db);
   const sessionRegistry = new SessionRegistry(db);
   const eventBus = new EventBus(db);
+  // PL-004 Phase A revision (R1): topology-backed validateRig.
+  // Reject `<member>@<unknown-rig>` shapes by checking the rig portion
+  // against the rig registry. Bare ids without `@` are also rejected
+  // (no canonical rig binding).
+  const topologyValidateRig = (sessionRef: string): boolean => {
+    const m = /^[^@]+@(.+)$/.exec(sessionRef);
+    if (!m) return false;
+    const rigName = m[1]!;
+    return rigRepo.findRigsByName(rigName).length > 0;
+  };
   // PL-004 Phase A — shared coordination services. Constructed early so
   // both the queueRepo dep slot and inboxHandler can share one instance.
-  const queueRepoInstance = new QueueRepository(db, eventBus);
+  // Transport is wired after SessionTransport instantiation below via
+  // attachTransport().
+  const queueRepoInstance = new QueueRepository(db, eventBus, {
+    validateRig: topologyValidateRig,
+  });
 
   const tmuxAdapter = new TmuxAdapter(opts?.tmuxExec ?? execCommand);
   // cmuxFactory takes precedence (for tests), then cmuxExec-based CLI transport, then default
@@ -370,7 +384,13 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     podBundleSourceResolver,
     runtimeAdapters: { "claude-code": claudeAdapter, "codex": codexAdapter, "terminal": new (await import("./adapters/terminal-adapter.js")).TerminalAdapter() },
     transcriptStore,
-    sessionTransport: new SessionTransport({ db, rigRepo, sessionRegistry, tmuxAdapter, agentActivityStore }),
+    sessionTransport: (() => {
+      const t = new SessionTransport({ db, rigRepo, sessionRegistry, tmuxAdapter, agentActivityStore });
+      // PL-004 Phase A revision (R1): wire QueueRepository's wake-path so
+      // create / handoff / handoff-and-complete nudge by default.
+      queueRepoInstance.attachTransport(t);
+      return t;
+    })(),
     chatRepo: new ChatRepository(db),
     streamStore: new StreamStore(db, eventBus),
     queueRepo: queueRepoInstance,

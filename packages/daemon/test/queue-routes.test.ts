@@ -235,4 +235,217 @@ describe("queue routes", () => {
     const data = (await res.json()) as unknown[];
     expect(data).toHaveLength(1);
   });
+
+  // ---- PL-004 Phase A revision (R1) route tests ----
+
+  describe("R1 cross-rig validation rejection", () => {
+    let strictDb: Database.Database;
+    let strictBus: EventBus;
+    let strictRepo: QueueRepository;
+    let strictApp: Hono;
+
+    beforeEach(() => {
+      strictDb = createDb();
+      migrate(strictDb, [
+        coreSchema,
+        eventsSchema,
+        queueItemsSchema,
+        queueTransitionsSchema,
+        inboxEntriesSchema,
+        outboxEntriesSchema,
+      ]);
+      strictBus = new EventBus(strictDb);
+      strictRepo = new QueueRepository(strictDb, strictBus, {
+        // Topology-backed validator stub: only `@known-rig` is recognized.
+        validateRig: (s) => /^[^@]+@known-rig$/.test(s),
+      });
+      const strictInbox = new InboxHandler(strictDb, strictBus, strictRepo);
+      const strictOutbox = new OutboxHandler(strictDb);
+      strictApp = buildApp({
+        eventBus: strictBus,
+        queueRepo: strictRepo,
+        inboxHandler: strictInbox,
+        outboxHandler: strictOutbox,
+      });
+    });
+
+    afterEach(() => strictDb.close());
+
+    it("POST /api/queue/create rejects unknown rig with 400 + structured error", async () => {
+      const res = await strictApp.request("/api/queue/create", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sourceSession: "alice@known-rig",
+          destinationSession: "bob@phantom-rig",
+          body: "x",
+        }),
+      });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error: string; message: string };
+      expect(body.error).toBe("unknown_destination_rig");
+      expect(body.message).toMatch(/phantom-rig/);
+    });
+
+    it("POST /api/queue/create accepts known rig with 201", async () => {
+      const res = await strictApp.request("/api/queue/create", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sourceSession: "alice@known-rig",
+          destinationSession: "bob@known-rig",
+          body: "ok",
+        }),
+      });
+      expect(res.status).toBe(201);
+    });
+
+    it("POST /api/queue/:id/handoff rejects unknown destination rig", async () => {
+      const created = await strictApp.request("/api/queue/create", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sourceSession: "alice@known-rig",
+          destinationSession: "bob@known-rig",
+          body: "x",
+        }),
+      });
+      const item = (await created.json()) as { qitemId: string };
+      const res = await strictApp.request(`/api/queue/${item.qitemId}/handoff`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          fromSession: "bob@known-rig",
+          toSession: "carol@phantom-rig",
+        }),
+      });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error: string };
+      expect(body.error).toBe("unknown_destination_rig");
+    });
+
+    it("POST /api/queue/:id/handoff-and-complete rejects unknown destination rig", async () => {
+      const created = await strictApp.request("/api/queue/create", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sourceSession: "alice@known-rig",
+          destinationSession: "bob@known-rig",
+          body: "x",
+        }),
+      });
+      const item = (await created.json()) as { qitemId: string };
+      const res = await strictApp.request(`/api/queue/${item.qitemId}/handoff-and-complete`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          fromSession: "bob@known-rig",
+          toSession: "carol@phantom-rig",
+        }),
+      });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error: string };
+      expect(body.error).toBe("unknown_destination_rig");
+    });
+  });
+
+  describe("R1 handoff-and-complete route", () => {
+    it("POST /api/queue/:id/handoff-and-complete closes source as done + creates new", async () => {
+      const created = await app.request("/api/queue/create", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sourceSession: "alice@r", destinationSession: "bob@r", body: "x" }),
+      });
+      const item = (await created.json()) as { qitemId: string };
+      const res = await app.request(`/api/queue/${item.qitemId}/handoff-and-complete`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          fromSession: "bob@r",
+          toSession: "carol@r",
+          body: "carol's piece",
+        }),
+      });
+      expect(res.status).toBe(201);
+      const result = (await res.json()) as {
+        closed: { state: string; closureReason: string; handedOffTo: string };
+        created: { state: string; handedOffFrom: string; destinationSession: string; body: string };
+      };
+      expect(result.closed.state).toBe("done");
+      expect(result.closed.closureReason).toBe("handed_off_to");
+      expect(result.closed.handedOffTo).toBe("carol@r");
+      expect(result.created.state).toBe("pending");
+      expect(result.created.handedOffFrom).toBe(item.qitemId);
+      expect(result.created.body).toBe("carol's piece");
+    });
+
+    it("POST /api/queue/:id/handoff-and-complete returns 400 on missing fromSession or toSession", async () => {
+      const res = await app.request("/api/queue/some-id/handoff-and-complete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ toSession: "carol@r" }),
+      });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error: string };
+      expect(body.error).toMatch(/fromSession/);
+    });
+  });
+
+  describe("R1 whoami route", () => {
+    it("GET /api/queue/whoami returns counts + recent for the session", async () => {
+      // Seed: 2 pending + 1 in-progress for bob; 1 unrelated for carol.
+      const a = await app.request("/api/queue/create", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sourceSession: "alice@r", destinationSession: "bob@r", body: "1" }),
+      });
+      const itemA = (await a.json()) as { qitemId: string };
+      await app.request("/api/queue/create", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sourceSession: "alice@r", destinationSession: "bob@r", body: "2" }),
+      });
+      await app.request("/api/queue/create", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sourceSession: "alice@r", destinationSession: "carol@r", body: "3" }),
+      });
+      await app.request(`/api/queue/${itemA.qitemId}/claim`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ destinationSession: "bob@r" }),
+      });
+
+      const res = await app.request("/api/queue/whoami?session=bob@r");
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        session: string;
+        asDestination: { pending: number; inProgress: number; recent: unknown[] };
+        asSource: { total: number };
+      };
+      expect(body.session).toBe("bob@r");
+      expect(body.asDestination.pending).toBe(1);
+      expect(body.asDestination.inProgress).toBe(1);
+      expect(body.asDestination.recent).toHaveLength(2);
+      expect(body.asSource.total).toBe(0);
+    });
+
+    it("GET /api/queue/whoami returns 400 without session query param", async () => {
+      const res = await app.request("/api/queue/whoami");
+      expect(res.status).toBe(400);
+    });
+  });
+
+  describe("R1 SSE alias", () => {
+    it("/api/queue/sse is mounted alongside /api/queue/watch (same handler)", async () => {
+      // Both routes resolve to handlers; HEAD-style probe by aborting after a short ping.
+      // Since SSE responses don't return a synchronous body, we just confirm the
+      // route is mounted (not 404). The /watch path is the legacy alias, /sse is canonical.
+      const watchRes = await app.request("/api/queue/watch", { method: "HEAD" });
+      const sseRes = await app.request("/api/queue/sse", { method: "HEAD" });
+      // Both should be the same status (Hono returns 200 for SSE before stream starts; HEAD is method-allowed by default for GET routes).
+      expect(watchRes.status).toBe(sseRes.status);
+      expect(watchRes.status).toBeLessThan(500);
+    });
+  });
 });

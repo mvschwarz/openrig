@@ -128,7 +128,7 @@ export class InboxHandler {
    * Idempotent on inbox_id: if already absorbed, returns the existing
    * `absorbed_qitem_id` rather than creating a duplicate.
    */
-  absorb(inboxId: string, receiverSession: string): { entry: InboxEntry; qitemId: string } {
+  async absorb(inboxId: string, receiverSession: string): Promise<{ entry: InboxEntry; qitemId: string }> {
     const entry = this.getById(inboxId);
     if (!entry) {
       throw new InboxHandlerError("inbox_not_found", `inbox ${inboxId} not found`);
@@ -149,12 +149,16 @@ export class InboxHandler {
       );
     }
 
-    const qitem = this.queueRepo.create({
+    // Inbox-absorb suppresses the default queue create-time nudge: the inbox
+    // surface already had its own delivery (the original drop), so a second
+    // nudge on absorb is duplicative. The destination knows it absorbed.
+    const qitem = await this.queueRepo.create({
       sourceSession: entry.senderSession,
       destinationSession: entry.destinationSession,
       body: entry.body,
       tags: entry.tags ?? undefined,
       priority: entry.urgency === "critical" ? "critical" : entry.urgency === "urgent" ? "urgent" : "routine",
+      nudge: false,
     });
 
     const ts = new Date().toISOString();

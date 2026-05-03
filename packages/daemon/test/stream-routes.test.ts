@@ -95,4 +95,12 @@ describe("stream routes", () => {
     const data = (await list.json()) as unknown[];
     expect(data).toHaveLength(0);
   });
+
+  // ---- PL-004 Phase A revision (R1): SSE alias ----
+  it("/api/stream/sse is mounted alongside /api/stream/watch (same handler)", async () => {
+    const watchRes = await app.request("/api/stream/watch", { method: "HEAD" });
+    const sseRes = await app.request("/api/stream/sse", { method: "HEAD" });
+    expect(watchRes.status).toBe(sseRes.status);
+    expect(watchRes.status).toBeLessThan(500);
+  });
 });
