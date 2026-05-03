@@ -67,6 +67,10 @@ import { ProjectClassifier } from "./domain/project-classifier.js";
 import { ClassifierLeaseManager } from "./domain/classifier-lease-manager.js";
 import { ViewProjector } from "./domain/view-projector.js";
 import { wireViewEventBridge } from "./domain/view-event-bridge.js";
+import { WatchdogJobsRepository } from "./domain/watchdog-jobs-repository.js";
+import { WatchdogHistoryLog } from "./domain/watchdog-history-log.js";
+import { WatchdogPolicyEngine } from "./domain/watchdog-policy-engine.js";
+import { WatchdogScheduler } from "./domain/watchdog-scheduler.js";
 import { SpecReviewService } from "./domain/spec-review-service.js";
 import { SpecLibraryService } from "./domain/spec-library-service.js";
 import { WhoamiService } from "./domain/whoami-service.js";
@@ -103,6 +107,8 @@ import { outboxEntriesSchema } from "./db/migrations/027_outbox_entries.js";
 import { projectClassificationsSchema } from "./db/migrations/028_project_classifications.js";
 import { classifierLeasesSchema } from "./db/migrations/029_classifier_leases.js";
 import { viewsCustomSchema } from "./db/migrations/030_views_custom.js";
+import { watchdogJobsSchema } from "./db/migrations/031_watchdog_jobs.js";
+import { watchdogHistorySchema } from "./db/migrations/032_watchdog_history.js";
 import { OPENRIG_HOME } from "./openrig-compat.js";
 import {
   getCompatibleOpenRigPath,
@@ -128,7 +134,7 @@ interface DaemonResult {
 export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> {
   const dbPath = opts?.dbPath ?? ":memory:";
   const db = createDb(dbPath);
-  migrate(db, [coreSchema, bindingsSessionsSchema, eventsSchema, snapshotsSchema, checkpointsSchema, resumeMetadataSchema, nodeSpecFieldsSchema, packagesSchema, installJournalSchema, journalSeqSchema, bootstrapSchema, discoverySchema, discoveryFkFix, agentspecRebootSchema, startupContextSchema, chatMessagesSchema, podNamespaceSchema, contextUsageSchema, externalCliAttachmentSchema, rigServicesSchema, seatHandoverObservabilitySchema, nodeCodexConfigProfileSchema, streamItemsSchema, queueItemsSchema, queueTransitionsSchema, inboxEntriesSchema, outboxEntriesSchema, projectClassificationsSchema, classifierLeasesSchema, viewsCustomSchema]);
+  migrate(db, [coreSchema, bindingsSessionsSchema, eventsSchema, snapshotsSchema, checkpointsSchema, resumeMetadataSchema, nodeSpecFieldsSchema, packagesSchema, installJournalSchema, journalSeqSchema, bootstrapSchema, discoverySchema, discoveryFkFix, agentspecRebootSchema, startupContextSchema, chatMessagesSchema, podNamespaceSchema, contextUsageSchema, externalCliAttachmentSchema, rigServicesSchema, seatHandoverObservabilitySchema, nodeCodexConfigProfileSchema, streamItemsSchema, queueItemsSchema, queueTransitionsSchema, inboxEntriesSchema, outboxEntriesSchema, projectClassificationsSchema, classifierLeasesSchema, viewsCustomSchema, watchdogJobsSchema, watchdogHistorySchema]);
 
   const rigRepo = new RigRepository(db);
   const sessionRegistry = new SessionRegistry(db);
@@ -162,6 +168,12 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // views. SSE consumers on /api/views/:name/sse now receive change events
   // when underlying state mutates.
   wireViewEventBridge(eventBus, viewProjectorInstance);
+
+  // PL-004 Phase C — watchdog supervision tree. Repository + history-log
+  // are constructed early; the policy engine + scheduler are constructed
+  // after SessionTransport is available so the engine can wire delivery.
+  const watchdogJobsRepoInstance = new WatchdogJobsRepository(db);
+  const watchdogHistoryLogInstance = new WatchdogHistoryLog(db);
 
   const tmuxAdapter = new TmuxAdapter(opts?.tmuxExec ?? execCommand);
   // cmuxFactory takes precedence (for tests), then cmuxExec-based CLI transport, then default
@@ -436,6 +448,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     classifierLeaseManager: classifierLeaseManagerInstance,
     projectClassifier: new ProjectClassifier(db, eventBus, classifierLeaseManagerInstance),
     viewProjector: viewProjectorInstance,
+    watchdogJobsRepo: watchdogJobsRepoInstance,
+    watchdogHistoryLog: watchdogHistoryLogInstance,
     askService: (() => {
       const psProjectionService = new PsProjectionService({ db });
       const execDep = (cmd: string, args: string[]): Promise<{ stdout: string; exitCode: number }> =>
@@ -513,6 +527,34 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       }
     }
   } catch { /* best-effort — reference docs are not critical to daemon operation */ }
+
+  // PL-004 Phase C — watchdog policy engine + scheduler. Wired here
+  // (after deps construction) so the engine can dispatch deliveries
+  // through the live SessionTransport. Scheduler is started by
+  // index.ts after listen() so the daemon's HTTP surface is ready
+  // before the scheduler's first tick.
+  const sessionTransport = deps.sessionTransport;
+  if (sessionTransport) {
+    const watchdogPolicyEngine = new WatchdogPolicyEngine({
+      jobsRepo: watchdogJobsRepoInstance,
+      historyLog: watchdogHistoryLogInstance,
+      eventBus,
+      deliver: async ({ targetSession, message }) => {
+        try {
+          const result = await sessionTransport.send(targetSession, message);
+          return result.ok ? { status: "ok" } : { status: "failed", error: result.error };
+        } catch (err) {
+          return { status: "failed", error: err instanceof Error ? err.message : String(err) };
+        }
+      },
+    });
+    const watchdogScheduler = new WatchdogScheduler({
+      jobsRepo: watchdogJobsRepoInstance,
+      policyEngine: watchdogPolicyEngine,
+    });
+    deps.watchdogPolicyEngine = watchdogPolicyEngine;
+    deps.watchdogScheduler = watchdogScheduler;
+  }
 
   // Context monitor — constructed before createApp so routes can access pollOnce for refresh.
   // Caller (index.ts) starts polling after listen.

@@ -172,7 +172,17 @@ export type RigEvent =
   | { type: "classifier.lease_expired"; leaseId: string; classifierSession: string; expiredAt: string }
   | { type: "classifier.dead"; leaseId: string; classifierSession: string; lastHeartbeat: string; detectedAt: string }
   | { type: "classifier.reclaimed"; leaseId: string; previousClassifierSession: string; reclaimedBySession: string; reason: string; reclaimedAt: string }
-  | { type: "view.changed"; viewName: string; cause: string };
+  | { type: "view.changed"; viewName: string; cause: string }
+  // PL-004 Phase C: daemon-native Watchdog supervision tree events.
+  // Three policies in scope (periodic-reminder, artifact-pool-ready,
+  // edge-artifact-required); workflow-keepalive deferred to Phase D.
+  // Pure `not_due` polls are NOT recorded in history and NOT emitted
+  // as events; only meaningful evaluations + lifecycle transitions are.
+  | { type: "watchdog.evaluation_fired"; jobId: string; policy: string; targetSession: string; deliveryStatus: string }
+  | { type: "watchdog.evaluation_skipped"; jobId: string; policy: string; skipReason: string }
+  | { type: "watchdog.evaluation_terminal"; jobId: string; policy: string; terminalReason: string }
+  | { type: "watchdog.job_registered"; jobId: string; policy: string; targetSession: string; registeredBy: string }
+  | { type: "watchdog.job_stopped"; jobId: string; reason: string };
 
 export type PersistedEvent = RigEvent & {
   seq: number;

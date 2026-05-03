@@ -700,6 +700,20 @@ Closure-reason semantics:
 - `no-follow-on` — terminal completion, nothing else needed.
 - `escalation` — kicked up to a higher tier (target = escalation target).
 
+## Coordination Watchdog (PL-004 Phase C)
+
+`rig watchdog` registers, lists, inspects, and stops daemon-native scheduler jobs. The scheduler runs inside the daemon supervision tree and persists state in SQLite (`watchdog_jobs`/`watchdog_history`); jobs survive daemon restarts. Three policies are available at v1: `periodic-reminder`, `artifact-pool-ready`, and `edge-artifact-required`. The fourth POC policy `workflow-keepalive` is rejected with `policy_deferred_to_phase_d` and ships in Phase D.
+
+### `rig watchdog`
+
+- `register --spec <path> --policy <name> --target-session <s> --interval-seconds <n> --registered-by <s>` — register a job from a YAML spec; `--active-wake-interval-seconds` and `--scan-interval-seconds` are pool-ready-specific opt-ins.
+- `list` — list all jobs (active + stopped + terminal).
+- `show <job_id>` — show one job.
+- `status <job_id>` — show job + recent evaluation history (last 20 entries).
+- `stop <job_id> [--reason <text>]` — operator stop; scheduler skips the job thereafter.
+
+History records only meaningful evaluations: `sent` (delivery executed), `skipped` (policy returned skip with a reason such as `no_actionable_artifacts`), or `terminal` (policy declared the job done). Pure `not_due` polls are not recorded.
+
 ## Commands Not Present
 
 These are not current top-level `rig` commands:
