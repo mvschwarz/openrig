@@ -5,6 +5,7 @@ import { chatroomCommand } from "../src/commands/chatroom.js";
 import { DaemonClient } from "../src/client.js";
 import { STATE_FILE, type LifecycleDeps, type DaemonState } from "../src/daemon-lifecycle.js";
 import type { StatusDeps } from "../src/commands/status.js";
+import { ulid } from "ulid";
 
 function mockLifecycleDeps(): LifecycleDeps {
   return {
@@ -308,7 +309,7 @@ describe("Chatroom CLI", () => {
     // Inject a new message after 1s (will appear on second poll)
     const injectionTimer = setTimeout(() => {
       dynamicMessages.push({
-        id: "01KNZZZZZZZZZZZZZZZZZZZZZZ", // ULID > any current ULID baseline
+        id: ulid(),
         rigId: "rig-1",
         sender: "new-peer",
         kind: "message",
