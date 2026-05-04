@@ -233,6 +233,84 @@ describe("LibraryReview", () => {
     });
   });
 
+  it("renders workflow review with topology graph + steps + Activate as Lens (Workflows in Spec Library v0)", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+
+      if (url === "/api/specs/library/active-lens" && (!init || !init.method || init.method === "GET")) {
+        return new Response(JSON.stringify({ activeLens: null }), { status: 200 });
+      }
+      if (url === "/api/specs/library/active-lens" && init?.method === "POST") {
+        return new Response(JSON.stringify({
+          activeLens: { specName: "rsi-v2-hot-potato", specVersion: "1", activatedAt: "2026-05-04T00:00:00Z" },
+        }), { status: 200 });
+      }
+
+      const decoded = decodeURIComponent(url);
+      if (decoded === "/api/specs/library/workflow:rsi-v2-hot-potato:1/review") {
+        return new Response(JSON.stringify({
+          kind: "workflow",
+          libraryEntryId: "workflow:rsi-v2-hot-potato:1",
+          name: "rsi-v2-hot-potato",
+          version: "1",
+          purpose: "Hot-potato workflow for RSI",
+          targetRig: null,
+          terminalTurnRule: "hot_potato",
+          rolesCount: 2,
+          stepsCount: 2,
+          isBuiltIn: true,
+          sourcePath: "/builtins/workflow-specs/rsi-v2-hot-potato.yaml",
+          cachedAt: "2026-05-04T00:00:00Z",
+          topology: {
+            nodes: [
+              { stepId: "step-1", role: "alpha", objective: "Start", preferredTarget: "alpha@rig", isEntry: true, isTerminal: false },
+              { stepId: "step-2", role: "beta", objective: "End", preferredTarget: null, isEntry: false, isTerminal: true },
+            ],
+            edges: [{ fromStepId: "step-1", toStepId: "step-2", routingType: "direct" }],
+          },
+          steps: [
+            { stepId: "step-1", role: "alpha", objective: "Start", allowedExits: ["handoff"], allowedNextSteps: [{ stepId: "step-2", role: "beta" }] },
+            { stepId: "step-2", role: "beta", objective: "End", allowedExits: ["done"], allowedNextSteps: [] },
+          ],
+        }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url} (method=${init?.method ?? "GET"})`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(createAppTestRouter({
+      initialPath: "/specs/library/workflow:rsi-v2-hot-potato:1",
+      routes: [
+        { path: "/specs/library/workflow:rsi-v2-hot-potato:1", component: () => <LibraryReview entryId="workflow:rsi-v2-hot-potato:1" /> },
+        { path: "/specs", component: () => <div data-testid="back-route">back</div> },
+      ],
+    }));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("library-review-workflow")).toBeDefined();
+    });
+
+    expect(screen.getByText("rsi-v2-hot-potato v1")).toBeDefined();
+    expect(screen.getByText("Hot-potato workflow for RSI")).toBeDefined();
+    expect(screen.getByTestId("workflow-topology-graph")).toBeDefined();
+    expect(screen.getByTestId("workflow-step-step-1")).toBeDefined();
+    expect(screen.getByTestId("workflow-step-step-2")).toBeDefined();
+
+    const terminal = screen.getByTestId("workflow-terminal-rule");
+    expect(terminal.textContent).toContain("hot_potato");
+
+    const activateBtn = screen.getByTestId("workflow-activate-lens");
+    expect(activateBtn).toBeDefined();
+    fireEvent.click(activateBtn);
+
+    await waitFor(() => {
+      expect(fetchMock.mock.calls.some((call) =>
+        String(call[0]) === "/api/specs/library/active-lens"
+        && (call[1] as RequestInit | undefined)?.method === "POST",
+      )).toBe(true);
+    });
+  });
+
   it("opens the matching agent spec from a rig member row", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);

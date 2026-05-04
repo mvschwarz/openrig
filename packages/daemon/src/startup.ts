@@ -761,6 +761,16 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     // returns 503 with structured setup hint.
     const { SteeringComposer, steeringOptsFromEnv } = await import("./domain/steering/steering-composer.js");
     deps.steeringComposer = new SteeringComposer(steeringOptsFromEnv());
+
+    // Workflows in Spec Library + Activation Lens v0 — active lens
+    // persistence under OPENRIG_HOME/active-workflow-lens.json. Same
+    // file-backed pattern as UI Enhancement Pack v0's audit JSONL —
+    // honors OPENRIG_HOME so isolated test/dogfood daemons keep their
+    // own lens state instead of bleeding into the operator's host.
+    const { ActiveLensStore } = await import("./domain/active-lens-store.js");
+    deps.activeLensStore = new ActiveLensStore({
+      filePath: nodePath.join(OPENRIG_HOME, "active-workflow-lens.json"),
+    });
   }
 
   const sessionTransport = deps.sessionTransport;

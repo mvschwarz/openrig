@@ -1,28 +1,80 @@
 import { Hono } from "hono";
+import type Database from "better-sqlite3";
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { parse as parseYaml } from "yaml";
+import type { ActiveLensStore } from "../domain/active-lens-store.js";
 import type { SpecLibraryService } from "../domain/spec-library-service.js";
 import { SpecReviewService, SpecReviewError } from "../domain/spec-review-service.js";
+import {
+  getWorkflowReview,
+  parseWorkflowLibraryId,
+  scanWorkflowSpecs,
+} from "../domain/spec-library-workflow-scanner.js";
 
 export function specLibraryRoutes(): Hono {
   const router = new Hono();
 
+  function refreshWorkflowEntries(c: { get: (k: string) => unknown }): SpecLibraryService {
+    const lib = c.get("specLibraryService" as never) as SpecLibraryService;
+    const db = c.get("rigRepoDb" as never) as Database.Database | undefined
+      ?? (c.get("rigRepo" as never) as { db: Database.Database } | undefined)?.db;
+    const builtinDir = c.get("workflowBuiltinSpecsDir" as never) as string | undefined;
+    if (db) {
+      // Re-scan workflow specs on each list request — cheap (single
+      // SELECT against the workflow_specs cache) and means lens-driven
+      // surfaces always see the freshest cache state without a separate
+      // POST /sync.
+      const workflowEntries = scanWorkflowSpecs({ db, workflowBuiltinSpecsDir: builtinDir ?? null });
+      lib.setWorkflowEntries(workflowEntries);
+    }
+    return lib;
+  }
+
+  // GET /active-lens — read the active workflow lens (if any).
+  // Mounted BEFORE /:id so the literal path doesn't get eaten by the
+  // bare-param catchall (Phase A R1 SSE route-order lesson).
+  router.get("/active-lens", (c) => {
+    const store = c.get("activeLensStore" as never) as ActiveLensStore | undefined;
+    if (!store) return c.json({ activeLens: null });
+    return c.json({ activeLens: store.get() });
+  });
+
+  // POST /active-lens — set / replace the active workflow lens.
+  router.post("/active-lens", async (c) => {
+    const store = c.get("activeLensStore" as never) as ActiveLensStore | undefined;
+    if (!store) return c.json({ error: "active_lens_unavailable" }, 503);
+    const body = await c.req.json<{ specName?: string; specVersion?: string }>().catch(() => ({} as { specName?: string; specVersion?: string }));
+    if (!body.specName || !body.specVersion) {
+      return c.json({ error: "specName and specVersion are required" }, 400);
+    }
+    const lens = store.set(body.specName, body.specVersion);
+    return c.json({ activeLens: lens });
+  });
+
+  // DELETE /active-lens — clear the active workflow lens.
+  router.delete("/active-lens", (c) => {
+    const store = c.get("activeLensStore" as never) as ActiveLensStore | undefined;
+    if (!store) return c.json({ error: "active_lens_unavailable" }, 503);
+    store.clear();
+    return c.json({ activeLens: null });
+  });
+
   // GET / — list library entries
   router.get("/", (c) => {
-    const lib = c.get("specLibraryService" as never) as SpecLibraryService;
-    const kind = c.req.query("kind") as "rig" | "agent" | undefined;
+    const lib = refreshWorkflowEntries(c);
+    const kind = c.req.query("kind") as "rig" | "agent" | "workflow" | undefined;
     const entries = lib.list(kind ? { kind } : undefined);
     return c.json(entries);
   });
 
   // GET /:id — entry metadata + YAML content
   router.get("/:id", (c) => {
-    const lib = c.get("specLibraryService" as never) as SpecLibraryService;
+    const lib = refreshWorkflowEntries(c);
     const id = c.req.param("id");
 
-    // Guard: don't match sub-paths like /review or /sync
-    if (id === "sync" || id === "review") return c.notFound();
+    // Guard: don't match sub-paths like /review or /sync or /active-lens
+    if (id === "sync" || id === "review" || id === "active-lens") return c.notFound();
 
     const result = lib.get(id);
     if (!result) {
@@ -33,13 +85,34 @@ export function specLibraryRoutes(): Hono {
 
   // GET /:id/review — structured review with library provenance
   router.get("/:id/review", (c) => {
-    const lib = c.get("specLibraryService" as never) as SpecLibraryService;
+    const lib = refreshWorkflowEntries(c);
     const svc = c.get("specReviewService" as never) as SpecReviewService;
     const id = c.req.param("id");
 
     const result = lib.get(id);
     if (!result) {
       return c.json({ error: `Spec '${id}' not found in library` }, 404);
+    }
+
+    // Workflows in Spec Library v0: workflow review is a separate
+    // payload shape — topology graph + per-step list + source-path
+    // — projected from the workflow_specs SQLite cache.
+    if (result.entry.kind === "workflow") {
+      const parsed = parseWorkflowLibraryId(id);
+      if (!parsed) return c.json({ error: `Workflow library id '${id}' could not be parsed` }, 400);
+      const db = (c.get("rigRepo" as never) as { db: Database.Database } | undefined)?.db;
+      const builtinDir = c.get("workflowBuiltinSpecsDir" as never) as string | undefined;
+      if (!db) return c.json({ error: "workflow_specs_db_unavailable" }, 503);
+      const review = getWorkflowReview({
+        db,
+        workflowBuiltinSpecsDir: builtinDir ?? null,
+        name: parsed.name,
+        version: parsed.version,
+      });
+      if (!review) {
+        return c.json({ error: `Workflow spec '${parsed.name}' v${parsed.version} not in workflow_specs cache` }, 404);
+      }
+      return c.json({ ...review, libraryEntryId: id });
     }
 
     try {
