@@ -83,6 +83,83 @@ export const MISSION_CONTROL_DESIRED_FIELDS = [
   "recoveryGuidance",
 ] as const;
 
+/**
+ * Daemon-side mirror of the CLI's `rig ps --nodes --fields ...`
+ * node-level allow-list. Sourced from
+ * `packages/cli/src/commands/ps.ts:79-96` (ALLOWED_NODE_FIELDS).
+ * The CLI does not export this set, so the daemon mirrors it here at
+ * the workspace version (Phase A v0 ships at OpenRig 0.2.0). Future
+ * graduation can replace this mirror with a live CLI introspection
+ * shell-out per rig; v1 single-host topology makes that overhead
+ * unnecessary.
+ *
+ * To compute drift: any field in MISSION_CONTROL_DESIRED_FIELDS that
+ * is NOT in this set is "missing on this rig's CLI version" — the
+ * production probe surfaces it as drift.
+ */
+export const LOCAL_CLI_NODE_FIELDS_AT_0_2_0: ReadonlySet<string> = new Set([
+  "rigId",
+  "rigName",
+  "logicalId",
+  "podId",
+  "podNamespace",
+  "canonicalSessionName",
+  "nodeKind",
+  "runtime",
+  "sessionStatus",
+  "startupStatus",
+  "restoreOutcome",
+  "lifecycleState",
+  "tmuxAttachCommand",
+  "resumeCommand",
+  "latestError",
+  "agentActivity",
+]);
+
+/**
+ * Local CLI version label embedded at workspace build time. Mission
+ * Control reports this label in the drift indicator alongside per-rig
+ * field availability. Hardcoded at v0.2.0 (the workspace shipping
+ * version); a future graduation can read it from package.json or a
+ * build-time constant.
+ */
+export const LOCAL_CLI_VERSION_LABEL = "0.2.0";
+
+/**
+ * Production probe factory (R1 fix per guard PL-005 Phase A review).
+ * Returns a probeRig function that compares MISSION_CONTROL_DESIRED_FIELDS
+ * against the daemon-mirrored LOCAL_CLI_NODE_FIELDS_AT_0_2_0 set and
+ * reports any missing fields as drift. Per-rig honesty (sub-clause 2):
+ * each rig is probed individually; in v1 single-host topology all rigs
+ * share the same local CLI, so they all report the same drift result,
+ * which is the honest outcome for the audit-row-5 case.
+ *
+ * For test scaffolding (or a future per-rig shell-out probe), callers
+ * can override probeRig in the constructor; this factory is the v1
+ * production default and is wired into createDaemon's startup so the
+ * `/api/mission-control/cli-capabilities` route reports drift honestly
+ * out of the box.
+ */
+export function makeLocalCliCapabilityProbe(opts?: {
+  versionLabel?: string;
+  knownNodeFields?: ReadonlySet<string>;
+}): (rigName: string) => Promise<{
+  cliVersionLabel: string;
+  unsupportedFields: string[];
+}> {
+  const versionLabel = opts?.versionLabel ?? LOCAL_CLI_VERSION_LABEL;
+  const knownFields = opts?.knownNodeFields ?? LOCAL_CLI_NODE_FIELDS_AT_0_2_0;
+  return async (_rigName: string) => {
+    const unsupportedFields: string[] = [];
+    for (const desired of MISSION_CONTROL_DESIRED_FIELDS) {
+      if (!knownFields.has(desired)) {
+        unsupportedFields.push(desired);
+      }
+    }
+    return { cliVersionLabel: versionLabel, unsupportedFields };
+  };
+}
+
 type DesiredField = (typeof MISSION_CONTROL_DESIRED_FIELDS)[number];
 
 export class MissionControlFleetCliCapability {

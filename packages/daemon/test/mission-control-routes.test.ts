@@ -18,7 +18,11 @@ import { RigRepository } from "../src/domain/rig-repository.js";
 import { MissionControlActionLog } from "../src/domain/mission-control/mission-control-action-log.js";
 import { MissionControlWriteContract } from "../src/domain/mission-control/mission-control-write-contract.js";
 import { MissionControlReadLayer } from "../src/domain/mission-control/mission-control-read-layer.js";
-import { MissionControlFleetCliCapability } from "../src/domain/mission-control/mission-control-fleet-cli-capability.js";
+import {
+  MissionControlFleetCliCapability,
+  makeLocalCliCapabilityProbe,
+  LOCAL_CLI_VERSION_LABEL,
+} from "../src/domain/mission-control/mission-control-fleet-cli-capability.js";
 import { missionControlRoutes } from "../src/routes/mission-control.js";
 
 function buildApp(opts: {
@@ -149,6 +153,48 @@ describe("mission-control routes (PL-005 Phase A)", () => {
     const body = (await res.json()) as { rows: unknown[]; staleCliCount: number };
     expect(Array.isArray(body.rows)).toBe(true);
     expect(typeof body.staleCliCount).toBe("number");
+  });
+
+  // R1 fix per PL-005 Phase A guard review (2026-05-04). End-to-end
+  // proof through the production-wired ROUTE PATH (not just an injected
+  // unit seam): when the fleet capability is constructed with the
+  // production probe (the same factory startup.ts wires in), the
+  // /api/mission-control/cli-capabilities route payload exposes
+  // recoveryGuidance drift to UI consumers.
+  it("R1 PRODUCTION-WIRED ROUTE: /cli-capabilities reports recoveryGuidance drift in JSON payload + per-row cliDriftDetected", async () => {
+    // Build a fresh app with the production probe wired (the no-op
+    // default from earlier tests is replaced by the canonical factory).
+    const productionFleetCli = new MissionControlFleetCliCapability({
+      db,
+      eventBus: bus,
+      rigRepo: new RigRepository(db),
+      probeRig: makeLocalCliCapabilityProbe(),
+    });
+    const productionApp = new Hono();
+    productionApp.use("*", async (c, next) => {
+      c.set("eventBus" as never, bus);
+      c.set("missionControlReadLayer" as never, c.get("missionControlReadLayer" as never));
+      c.set("missionControlWriteContract" as never, c.get("missionControlWriteContract" as never));
+      c.set("missionControlFleetCliCapability" as never, productionFleetCli);
+      await next();
+    });
+    productionApp.route("/api/mission-control", missionControlRoutes());
+
+    const res = await productionApp.request("/api/mission-control/cli-capabilities");
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      rows: Array<{ rigName: string; cliDriftDetected: boolean; cliVersionLabel: string }>;
+      staleCliCount: number;
+      degradedFields: string[];
+      sourceFallback: string | null;
+    };
+    expect(body.staleCliCount).toBeGreaterThan(0);
+    expect(body.degradedFields).toContain("recoveryGuidance");
+    expect(body.degradedFields).not.toContain("agentActivity");
+    for (const row of body.rows) {
+      expect(row.cliDriftDetected).toBe(true);
+      expect(row.cliVersionLabel).toBe(LOCAL_CLI_VERSION_LABEL);
+    }
   });
 
   // SSE route-order discipline (per PL-004 Phase A R1 lesson; literal
