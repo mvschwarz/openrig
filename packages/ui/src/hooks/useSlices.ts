@@ -59,12 +59,69 @@ export function useSlices(filter: SliceFilter) {
 
 export interface StoryEvent {
   ts: string;
-  phase: "discovery" | "product-lab" | "delivery" | "lifecycle" | "qa" | "other";
+  /** Spec-defined step.id when bound to a workflow_instance + the
+   *  event's qitem maps to a step trail; null when untagged (no
+   *  binding, no trail mapping, or non-qitem event). v1 removed the v0
+   *  hardcoded RSI-v2 phase enum. */
+  phase: string | null;
   kind: string;
   actorSession: string | null;
   qitemId: string | null;
   summary: string;
   detail: Record<string, unknown> | null;
+}
+
+export interface PhaseDefinition {
+  id: string;
+  label: string;
+  role: string;
+}
+
+export interface CurrentStepPayload {
+  stepId: string;
+  role: string;
+  objective: string | null;
+  allowedExits: string[];
+  allowedNextSteps: Array<{ stepId: string; role: string; reason: "next_hop" }>;
+  hopCount: number;
+  instanceStatus: string;
+}
+
+export interface SpecGraphNode {
+  stepId: string;
+  label: string;
+  role: string;
+  preferredTarget: string | null;
+  isEntry: boolean;
+  isCurrent: boolean;
+  isTerminal: boolean;
+}
+
+export interface SpecGraphEdge {
+  fromStepId: string;
+  toStepId: string;
+  routingType: "direct";
+  isLoopBack: boolean;
+}
+
+export interface SpecGraphPayload {
+  specName: string;
+  specVersion: string;
+  nodes: SpecGraphNode[];
+  edges: SpecGraphEdge[];
+}
+
+export interface WorkflowBindingPayload {
+  instanceId: string;
+  workflowName: string;
+  workflowVersion: string;
+  status: string;
+  currentStepId: string | null;
+  currentFrontier: string[];
+  hopCount: number;
+  createdAt: string;
+  completedAt: string | null;
+  additionalInstanceIds: string[];
 }
 
 export interface AcceptanceItem {
@@ -117,12 +174,35 @@ export interface SliceDetail {
   qitemIds: string[];
   commitRefs: string[];
   lastActivityAt: string | null;
-  story: { events: StoryEvent[] };
-  acceptance: { totalItems: number; doneItems: number; percentage: number; items: AcceptanceItem[]; closureCallout: string | null };
+  /** v1: bound workflow_instance metadata; null when no instance touches
+   *  any of this slice's qitems (UI falls back to v0 behavior). */
+  workflowBinding: WorkflowBindingPayload | null;
+  story: {
+    events: StoryEvent[];
+    /** v1: spec-declared phase definitions; null when no instance bound. */
+    phaseDefinitions: PhaseDefinition[] | null;
+  };
+  acceptance: {
+    totalItems: number;
+    doneItems: number;
+    percentage: number;
+    items: AcceptanceItem[];
+    closureCallout: string | null;
+    /** v1: bound instance's current step + allowed next steps; null
+     *  when no instance bound. */
+    currentStep: CurrentStepPayload | null;
+  };
   decisions: { rows: DecisionRow[] };
   docs: { tree: DocsTreeEntry[] };
   tests: { proofPackets: ProofPacketRendered[]; aggregate: { passCount: number; failCount: number } };
-  topology: { affectedRigs: TopologyRigEntry[]; totalSeats: number };
+  topology: {
+    affectedRigs: TopologyRigEntry[];
+    totalSeats: number;
+    /** v1: spec graph (nodes + edges) derived from the bound instance's
+     *  workflow_spec; null when unbound (UI falls back to per-rig
+     *  session listing). */
+    specGraph: SpecGraphPayload | null;
+  };
 }
 
 async function fetchSliceDetail(name: string): Promise<SliceDetail> {

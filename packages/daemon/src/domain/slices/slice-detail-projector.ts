@@ -1,25 +1,49 @@
-// Slice Story View v0 — per-tab payload projector.
+// Slice Story View v0 + v1 — per-tab payload projector.
 //
 // Given a SliceRecord (from SliceIndexer), this assembles the full
 // per-slice payload covering all six tabs: Story, Acceptance, Decisions,
 // Docs, Tests/Verification, Topology. Read-only; no mutations. Composes
 // already-shipped tables (queue_items, queue_transitions,
-// mission_control_actions) + slice docs on disk + dogfood-evidence.
+// mission_control_actions, workflow_specs, workflow_instances,
+// workflow_step_trails) + slice docs on disk + dogfood-evidence.
 //
-// Topology shape at v0 is per-rig session-name groupings (NOT a full
-// rendered subgraph — TopologyTab links through to the main topology
-// surface for the operator's deep-dive). Per PRD: "this tab is
-// read-only; clicking a node from here takes the operator to the
-// regular topology / node-drawer surface."
+// v1 enrichment (per slices/slice-story-view-v1/IMPLEMENTATION-PRD.md):
+// when a workflow_instance is bound to the slice, four dimensions
+// activate — spec-graph topology, spec-driven phase tagging, current-
+// step + allowed exits in Acceptance, routing-type edge metadata
+// (default `direct` only at v1 per audit-row-6 carve-out).
+//
+// v0 hardcoded RSI-v2 phase taxonomy ("discovery"/"product-lab"/
+// "delivery"/"lifecycle"/"qa"/"other") is REMOVED at v1 per PRD § Write
+// Set Sketch. StoryEvent.phase is now an open-ended string-or-null:
+// when bound to a workflow_instance, the value is the spec-defined
+// step.id; otherwise null (UI groups under "Untagged").
 
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type Database from "better-sqlite3";
 import type { SliceIndexer, SliceRecord, SliceProofPacket } from "./slice-indexer.js";
+import type { WorkflowSpecCache } from "../workflow-spec-cache.js";
+import {
+  findSliceWorkflowBinding,
+  type SliceWorkflowBinding,
+} from "../workflow/slice-workflow-binding.js";
+import {
+  projectSpecGraph,
+  projectPhaseDefinitions,
+  projectCurrentStep,
+  type SpecGraphPayload,
+  type PhaseDefinition,
+  type CurrentStepPayload,
+} from "../workflow/slice-workflow-projection.js";
 
 export interface StoryEvent {
   ts: string;
-  phase: "discovery" | "product-lab" | "delivery" | "lifecycle" | "qa" | "other";
+  /** Spec-defined step.id when the event traces back through a workflow
+   *  step trail; null when the event is untagged (no trail mapping or
+   *  the slice has no bound workflow_instance). v1 removed the v0
+   *  hardcoded RSI-v2 phase enum. */
+  phase: string | null;
   kind: string;
   actorSession: string | null;
   qitemId: string | null;
@@ -39,6 +63,10 @@ export interface AcceptancePayload {
   percentage: number;
   items: AcceptanceItem[];
   closureCallout: string | null;
+  /** v1 dimension #3: bound workflow_instance's current step + the
+   *  spec-declared allowed next steps. Null when the slice has no
+   *  bound instance (UI falls back to PROGRESS.md checkbox view only). */
+  currentStep: CurrentStepPayload | null;
 }
 
 export interface DecisionRow {
@@ -87,6 +115,26 @@ export interface TopologyPayload {
   affectedRigs: TopologyRigEntry[];
   /** Total unique seats touching the slice across all rigs. */
   totalSeats: number;
+  /** v1 dimension #1: workflow_spec graph (nodes + edges) when the
+   *  slice is bound to a workflow_instance. Null when unbound (UI falls
+   *  back to the v0 per-rig session listing). */
+  specGraph: SpecGraphPayload | null;
+}
+
+export interface WorkflowBindingPayload {
+  instanceId: string;
+  workflowName: string;
+  workflowVersion: string;
+  status: string;
+  currentStepId: string | null;
+  currentFrontier: string[];
+  hopCount: number;
+  createdAt: string;
+  completedAt: string | null;
+  /** Other workflow_instances also touching this slice's qitem set;
+   *  v1 picks the most recent as the primary binding (per PRD), and
+   *  exposes the rest here so the UI can render a "+N more" indicator. */
+  additionalInstanceIds: string[];
 }
 
 export interface SliceDetailPayload {
@@ -98,7 +146,15 @@ export interface SliceDetailPayload {
   qitemIds: string[];
   commitRefs: string[];
   lastActivityAt: string | null;
-  story: { events: StoryEvent[] };
+  /** v1: bound workflow_instance metadata (most-recent if multiple),
+   *  null when no workflow_instance touches this slice's qitems. */
+  workflowBinding: WorkflowBindingPayload | null;
+  story: {
+    events: StoryEvent[];
+    /** v1 dimension #2: spec-declared phase definitions when bound;
+     *  null when unbound (UI falls back to ungrouped chronological). */
+    phaseDefinitions: PhaseDefinition[] | null;
+  };
   acceptance: AcceptancePayload;
   decisions: { rows: DecisionRow[] };
   docs: { tree: DocsTreeEntry[] };
@@ -109,18 +165,37 @@ export interface SliceDetailPayload {
 export interface SliceDetailProjectorOpts {
   db: Database.Database;
   indexer: SliceIndexer;
+  /** v1: optional WorkflowSpecCache used to resolve the bound
+   *  workflow_instance's spec for spec-graph + phase + current-step
+   *  projection. When omitted, the projector silently degrades to v0
+   *  behavior (everything renders as before; v1 fields are null). */
+  workflowSpecCache?: WorkflowSpecCache;
 }
 
 export class SliceDetailProjector {
   private readonly db: Database.Database;
   private readonly indexer: SliceIndexer;
+  private readonly workflowSpecCache: WorkflowSpecCache | undefined;
 
   constructor(opts: SliceDetailProjectorOpts) {
     this.db = opts.db;
     this.indexer = opts.indexer;
+    this.workflowSpecCache = opts.workflowSpecCache;
   }
 
   project(slice: SliceRecord): SliceDetailPayload {
+    // v1: resolve workflow_instance binding once; the bound spec drives
+    // four downstream dimensions (story phase tags, spec graph, current
+    // step, phase definitions). When unbound or when the spec is no
+    // longer cached (operator deleted the spec file, etc.), all v1
+    // fields return null and v0 fallbacks apply.
+    const bindingResult = findSliceWorkflowBinding(this.db, slice.qitemIds);
+    const binding = bindingResult.primary;
+    const spec = binding && this.workflowSpecCache
+      ? this.tryGetSpec(binding.workflowName, binding.workflowVersion)
+      : null;
+    const trailQitemToStep = binding ? this.buildTrailQitemToStepMap(binding.instanceId) : new Map<string, string>();
+
     return {
       name: slice.name,
       displayName: slice.displayName,
@@ -130,19 +205,88 @@ export class SliceDetailProjector {
       qitemIds: slice.qitemIds,
       commitRefs: slice.commitRefs,
       lastActivityAt: slice.lastActivityAt,
-      story: { events: this.buildStory(slice) },
-      acceptance: this.buildAcceptance(slice),
+      workflowBinding: binding ? {
+        instanceId: binding.instanceId,
+        workflowName: binding.workflowName,
+        workflowVersion: binding.workflowVersion,
+        status: binding.status,
+        currentStepId: binding.currentStepId,
+        currentFrontier: binding.currentFrontier,
+        hopCount: binding.hopCount,
+        createdAt: binding.createdAt,
+        completedAt: binding.completedAt,
+        additionalInstanceIds: bindingResult.additionalInstanceIds,
+      } : null,
+      story: {
+        events: this.buildStory(slice, trailQitemToStep),
+        phaseDefinitions: spec ? projectPhaseDefinitions(spec) : null,
+      },
+      acceptance: {
+        ...this.buildAcceptance(slice),
+        currentStep: spec && binding
+          ? projectCurrentStep(spec, binding.currentStepId, binding.hopCount, binding.status)
+          : null,
+      },
       decisions: { rows: this.buildDecisions(slice) },
       docs: { tree: this.buildDocsTree(slice) },
       tests: this.buildTests(slice.proofPacket),
-      topology: this.buildTopology(slice),
+      topology: {
+        ...this.buildTopology(slice),
+        specGraph: spec && binding ? projectSpecGraph(spec, binding.currentStepId) : null,
+      },
     };
+  }
+
+  // --- v1 helpers ---
+
+  private tryGetSpec(name: string, version: string) {
+    if (!this.workflowSpecCache) return null;
+    try {
+      const row = this.workflowSpecCache.getByNameVersion(name, version);
+      return row?.spec ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Builds a qitem_id → step_id map by reading the bound instance's
+   * workflow_step_trails. Each trail row's prior_qitem_id maps to the
+   * step that closed (`step_id`), and next_qitem_id maps to the
+   * subsequent step's first packet. Used by buildStory to tag each
+   * StoryEvent with the spec-defined phase the qitem traces back to.
+   */
+  private buildTrailQitemToStepMap(instanceId: string): Map<string, string> {
+    const map = new Map<string, string>();
+    try {
+      const trails = this.db.prepare(
+        `SELECT step_id, prior_qitem_id, next_qitem_id
+           FROM workflow_step_trails
+           WHERE instance_id = ?`
+      ).all(instanceId) as Array<{
+        step_id: string;
+        prior_qitem_id: string;
+        next_qitem_id: string | null;
+      }>;
+      for (const t of trails) {
+        // The prior_qitem_id is the one that closed AT step_id —
+        // events for that qitem belong to step_id's phase.
+        map.set(t.prior_qitem_id, t.step_id);
+      }
+    } catch {
+      // workflow_step_trails absent — empty map (events untagged).
+    }
+    return map;
   }
 
   // --- Story tab ---
 
-  private buildStory(slice: SliceRecord): StoryEvent[] {
+  private buildStory(slice: SliceRecord, trailQitemToStep: Map<string, string>): StoryEvent[] {
     const events: StoryEvent[] = [];
+    // v1: phase tag = spec step.id from trail mapping (when bound),
+    // null otherwise. v0's hardcoded RSI-v2 phase taxonomy is gone.
+    const phaseFor = (qitemId: string | null): string | null =>
+      qitemId ? trailQitemToStep.get(qitemId) ?? null : null;
 
     if (slice.qitemIds.length > 0) {
       const placeholders = slice.qitemIds.map(() => "?").join(",");
@@ -161,7 +305,7 @@ export class SliceDetailProjector {
         for (const r of qrows) {
           events.push({
             ts: r.ts_created,
-            phase: this.classifyPhase(r.destination_session),
+            phase: phaseFor(r.qitem_id),
             kind: "queue.created",
             actorSession: r.source_session,
             qitemId: r.qitem_id,
@@ -174,8 +318,7 @@ export class SliceDetailProjector {
       }
 
       // queue_transitions (per-state-change log; append-only per PL-004
-      // Phase A schema). Columns: transition_id, qitem_id, ts, state,
-      // transition_note, actor_session, closure_reason, closure_target.
+      // Phase A schema).
       try {
         const trows = this.db.prepare(
           `SELECT qitem_id, ts, state, transition_note, actor_session, closure_reason
@@ -190,7 +333,7 @@ export class SliceDetailProjector {
           const note = t.transition_note ?? t.closure_reason;
           events.push({
             ts: t.ts,
-            phase: this.classifyPhase(t.actor_session),
+            phase: phaseFor(t.qitem_id),
             kind: `transition.${t.state}`,
             actorSession: t.actor_session,
             qitemId: t.qitem_id,
@@ -202,9 +345,7 @@ export class SliceDetailProjector {
         // queue_transitions absent — skip
       }
 
-      // mission_control_actions (operator verbs; PL-005 Phase A migration
-      // 037). Columns: action_id, action_verb, qitem_id, actor_session,
-      // acted_at, before_state_json, after_state_json, reason, annotation, ...
+      // mission_control_actions (operator verbs; PL-005 Phase A migration 037).
       try {
         const arows = this.db.prepare(
           `SELECT action_id, acted_at, qitem_id, action_verb, actor_session,
@@ -221,7 +362,7 @@ export class SliceDetailProjector {
           const note = a.annotation ?? a.reason;
           events.push({
             ts: a.acted_at,
-            phase: this.classifyPhase(a.actor_session),
+            phase: phaseFor(a.qitem_id),
             kind: `mission_control.${a.action_verb}`,
             actorSession: a.actor_session,
             qitemId: a.qitem_id,
@@ -234,7 +375,9 @@ export class SliceDetailProjector {
       }
     }
 
-    // Slice doc edits (mtimes inside the slice folder).
+    // Slice doc edits (mtimes inside the slice folder). v1: no phase tag
+    // — these aren't qitem-bound so they don't trace to a spec step.
+    // UI will group them under "Untagged" or render them without a tag.
     try {
       const sliceDir = path.join(this.indexer.slicesRoot, slice.name);
       const docEntries = fs.readdirSync(sliceDir, { withFileTypes: true });
@@ -243,7 +386,7 @@ export class SliceDetailProjector {
         const st = fs.statSync(path.join(sliceDir, entry.name));
         events.push({
           ts: st.mtime.toISOString(),
-          phase: "discovery",
+          phase: null,
           kind: "doc.edited",
           actorSession: null,
           qitemId: null,
@@ -256,10 +399,11 @@ export class SliceDetailProjector {
     }
 
     // Proof packet emission — single event per packet using directory mtime.
+    // v1: also untagged (not qitem-bound).
     if (slice.proofPacket) {
       events.push({
         ts: slice.proofPacket.mtime,
-        phase: "qa",
+        phase: null,
         kind: "proof_packet.emitted",
         actorSession: null,
         qitemId: null,
@@ -278,7 +422,7 @@ export class SliceDetailProjector {
 
   // --- Acceptance tab ---
 
-  private buildAcceptance(slice: SliceRecord): AcceptancePayload {
+  private buildAcceptance(slice: SliceRecord): Omit<AcceptancePayload, "currentStep"> {
     const items: AcceptanceItem[] = [];
     // Parse README + IMPLEMENTATION-PRD + PROGRESS.md for [ ]/[x] checkbox lines.
     // Source citation = file + 1-based line number so the operator can jump.
@@ -473,7 +617,7 @@ export class SliceDetailProjector {
 
   // --- Topology tab ---
 
-  private buildTopology(slice: SliceRecord): TopologyPayload {
+  private buildTopology(slice: SliceRecord): Omit<TopologyPayload, "specGraph"> {
     if (slice.qitemIds.length === 0) {
       return { affectedRigs: [], totalSeats: 0 };
     }
@@ -525,18 +669,13 @@ export class SliceDetailProjector {
     }
   }
 
-  // --- helpers ---
-
-  private classifyPhase(session: string | null | undefined): StoryEvent["phase"] {
-    if (!session) return "other";
-    const lower = session.toLowerCase();
-    if (lower.includes("product-lab") || lower.includes("planner")) return "product-lab";
-    if (lower.includes("intake") || lower.includes("steward") || lower.includes("discovery")) return "discovery";
-    if (lower.includes("qa")) return "qa";
-    if (lower.includes("velocity") || lower.includes("orch") || lower.includes("driver") || lower.includes("guard")) return "delivery";
-    if (lower.includes("kernel") || lower.includes("life") || lower.includes("supervisor")) return "lifecycle";
-    return "other";
-  }
+  // v1: classifyPhase() heuristic removed — phase tagging is now
+  // spec-driven (via workflow_step_trails join in buildTrailQitemToStepMap)
+  // or null (untagged) when no workflow_instance is bound. The v0
+  // hardcoded RSI-v2 phase taxonomy ("discovery"/"product-lab"/"delivery"/
+  // "lifecycle"/"qa"/"other" inferred from session-name substrings) is
+  // gone. Per slices/slice-story-view-v1/IMPLEMENTATION-PRD.md § Write
+  // Set Sketch — explicit deletion noted in commit message.
 }
 
 function truncate(s: string, n: number): string {
