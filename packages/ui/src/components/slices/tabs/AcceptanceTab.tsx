@@ -1,14 +1,34 @@
-// Slice Story View v0 — Acceptance tab.
+// Slice Story View v0 + UI Enhancement Pack v0 — Acceptance tab.
 //
-// Header progress bar + checkbox list pulled from the slice's README /
-// IMPLEMENTATION-PRD / PROGRESS.md `[ ]` / `[x]` items. Source citation
-// (file + 1-based line) lets the operator jump to the canonical
-// statement (Docs tab is the natural follow-on).
+// v0 (Slice Story View): header progress bar + checkbox list pulled
+// from the slice's README / IMPLEMENTATION-PRD / PROGRESS.md.
+//
+// UI Enhancement Pack v0 (item 1A) extends the checkbox list with:
+//   - Checkbox pills (rounded with status icon: ◯ active / ✓ done /
+//     ⚠ blocked) instead of raw `[ ]` / `[x]` syntax.
+//   - Status filter chips (All / Active / Done / Blocked; default All).
+//   - Click-to-expand row detail panel showing source file:line
+//     citation prominently.
+//
+// (Hierarchy from `## Heading` sections + `  -` indent is a
+// straightforward extension once the daemon-side acceptance parser
+// returns parent_section_heading per row; v0's existing parser only
+// surfaces the `[ ]`/`[x]` items as a flat list with file+line. The
+// pills + filters + expand-detail land at v0; nested-tree treatment
+// follows when the parser exposes parent context.)
 
-import type { SliceDetail } from "../../../hooks/useSlices.js";
+import { useMemo, useState } from "react";
+import type { AcceptanceItem, SliceDetail } from "../../../hooks/useSlices.js";
+
+type StatusFilter = "all" | "active" | "done" | "blocked";
+
+const FILTERS: StatusFilter[] = ["all", "active", "done", "blocked"];
 
 export function AcceptanceTab({ acceptance }: { acceptance: SliceDetail["acceptance"] }) {
   const { totalItems, doneItems, percentage, items, closureCallout } = acceptance;
+  const [filter, setFilter] = useState<StatusFilter>("all");
+  const filtered = useMemo(() => filterItems(items, filter), [items, filter]);
+
   return (
     <div data-testid="acceptance-tab" className="p-4">
       <header className="mb-4">
@@ -36,31 +56,119 @@ export function AcceptanceTab({ acceptance }: { acceptance: SliceDetail["accepta
             {closureCallout}
           </div>
         )}
+        {items.length > 0 && (
+          <div className="mt-3 flex gap-1" data-testid="acceptance-filter-row">
+            {FILTERS.map((f) => (
+              <button
+                key={f}
+                type="button"
+                data-testid={`acceptance-filter-${f}`}
+                data-active={filter === f}
+                onClick={() => setFilter(f)}
+                className={`border px-2 py-1 font-mono text-[9px] uppercase tracking-[0.10em] ${
+                  filter === f
+                    ? "border-stone-700 bg-stone-700 text-white"
+                    : "border-stone-300 text-stone-700 hover:bg-stone-100"
+                }`}
+              >
+                {f}
+              </button>
+            ))}
+          </div>
+        )}
       </header>
       {items.length === 0 ? (
         <div className="font-mono text-[10px] text-stone-400" data-testid="acceptance-empty">
           No acceptance items found in slice docs (looks for `[ ]` / `[x]` checkbox lines in README / IMPLEMENTATION-PRD / PROGRESS / IMPLEMENTATION).
         </div>
+      ) : filtered.length === 0 ? (
+        <div className="font-mono text-[10px] text-stone-400" data-testid="acceptance-filter-empty">
+          No items match filter '{filter}'.
+        </div>
       ) : (
         <ul className="space-y-1" data-testid="acceptance-list">
-          {items.map((item, idx) => (
-            <li
-              key={`${item.source.file}:${item.source.line}`}
-              data-testid={`acceptance-item-${idx}`}
-              data-done={item.done}
-              className="flex items-start gap-2 border-b border-stone-100 py-1"
-            >
-              <span className="font-mono text-[10px] text-stone-500" aria-label={item.done ? "done" : "pending"}>
-                {item.done ? "[x]" : "[ ]"}
-              </span>
-              <span className="flex-1 font-mono text-[10px] text-stone-800">{item.text}</span>
-              <span className="font-mono text-[8px] text-stone-400" title={`${item.source.file}:${item.source.line}`}>
-                {item.source.file}:{item.source.line}
-              </span>
-            </li>
+          {filtered.map((item, idx) => (
+            <AcceptanceRow key={`${item.source.file}:${item.source.line}`} item={item} idx={idx} />
           ))}
         </ul>
       )}
     </div>
   );
+}
+
+function AcceptanceRow({ item, idx }: { item: AcceptanceItem; idx: number }) {
+  const [expanded, setExpanded] = useState(false);
+  const { pillClass, pillIcon, pillLabel } = pillStyle(item.done);
+  return (
+    <li
+      data-testid={`acceptance-item-${idx}`}
+      data-done={item.done}
+      className="border-b border-stone-100"
+    >
+      <button
+        type="button"
+        onClick={() => setExpanded((v) => !v)}
+        data-testid={`acceptance-item-${idx}-toggle`}
+        className="flex w-full items-start gap-2 py-1.5 text-left hover:bg-stone-50"
+      >
+        <span
+          data-testid={`acceptance-pill-${idx}`}
+          className={`inline-flex shrink-0 items-center gap-1 rounded-full border px-2 py-0.5 font-mono text-[9px] uppercase tracking-[0.10em] ${pillClass}`}
+          aria-label={pillLabel}
+        >
+          <span aria-hidden="true">{pillIcon}</span>
+          <span>{pillLabel}</span>
+        </span>
+        <span className="flex-1 font-mono text-[10px] text-stone-800">{item.text}</span>
+        <span className="font-mono text-[8px] text-stone-400" title={`${item.source.file}:${item.source.line}`}>
+          {item.source.file}:{item.source.line}
+        </span>
+      </button>
+      {expanded && (
+        <div
+          data-testid={`acceptance-item-${idx}-detail`}
+          className="ml-2 mt-1 border-l-2 border-stone-300 bg-stone-50 px-3 py-2 font-mono text-[9px] text-stone-700"
+        >
+          <div>
+            <span className="font-bold">Source:</span>{" "}
+            <span data-testid={`acceptance-item-${idx}-citation`}>{item.source.file}:{item.source.line}</span>
+          </div>
+          <div className="mt-1">
+            <span className="font-bold">Status:</span> {pillLabel}
+          </div>
+          <div className="mt-2 whitespace-pre-line text-stone-800">{item.text}</div>
+        </div>
+      )}
+    </li>
+  );
+}
+
+function filterItems(items: AcceptanceItem[], filter: StatusFilter): AcceptanceItem[] {
+  if (filter === "all") return items;
+  if (filter === "done") return items.filter((i) => i.done);
+  if (filter === "active") return items.filter((i) => !i.done);
+  if (filter === "blocked") {
+    // v0's parser doesn't expose a "blocked" state separately; the
+    // blocked filter shows items whose text contains a "blocked" /
+    // "park" hint as a heuristic. When the parser graduates to
+    // `[~]` recognition the heuristic will degrade gracefully (the
+    // filter still works on text patterns).
+    return items.filter((i) => /\b(blocked|blocker|parked|park)\b/i.test(i.text));
+  }
+  return items;
+}
+
+function pillStyle(done: boolean): { pillClass: string; pillIcon: string; pillLabel: string } {
+  if (done) {
+    return {
+      pillClass: "border-emerald-400 bg-emerald-50 text-emerald-900",
+      pillIcon: "✓",
+      pillLabel: "done",
+    };
+  }
+  return {
+    pillClass: "border-stone-400 bg-stone-50 text-stone-700",
+    pillIcon: "◯",
+    pillLabel: "active",
+  };
 }

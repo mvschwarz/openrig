@@ -1,6 +1,6 @@
 import { type CSSProperties, type ReactNode, useCallback, useEffect, useState, createContext, useContext } from "react";
 import { Link, useRouterState } from "@tanstack/react-router";
-import { Cog, FileText, Layers, SquarePlus } from "lucide-react";
+import { CheckSquare, Cog, FileText, Folder, Layers, SquarePlus } from "lucide-react";
 import { Explorer, type ExplorerSurface } from "./Explorer.js";
 import { SharedDetailDrawer, type DrawerSelection } from "./SharedDetailDrawer.js";
 import type { DiscoveryPlacementTarget } from "./DiscoveryPanel.js";
@@ -97,6 +97,8 @@ function resolveSurfaceTitle(pathname: string, rigId: string | null, rigName: st
   if (pathname.startsWith("/bundles/inspect")) return "Bundle Inspector";
   if (pathname.startsWith("/bundles/install")) return "Bundle Install";
   if (pathname.startsWith("/slices")) return "Slices";
+  if (pathname.startsWith("/progress")) return "Progress";
+  if (pathname.startsWith("/files")) return "Files";
   return null;
 }
 
@@ -296,6 +298,36 @@ export function AppShell({ children }: AppShellProps) {
               title="Open slices"
             >
               <Layers className="h-4 w-4" />
+            </Link>
+            {/* UI Enhancement Pack v0 — top-level Progress (item 1B) +
+                Files (items 3 + 4) workspace links. Both navigate to
+                their own routes with internal layouts (no left-sidebar
+                overlay; the route body owns its UX entirely). */}
+            <Link
+              to="/progress"
+              data-testid="progress-link"
+              className={`inline-flex h-8 w-8 items-center justify-center text-stone-700 transition-colors ${
+                pathname.startsWith("/progress")
+                  ? "text-stone-950"
+                  : "hover:text-stone-950"
+              }`}
+              aria-label="Open progress"
+              title="Open progress"
+            >
+              <CheckSquare className="h-4 w-4" />
+            </Link>
+            <Link
+              to="/files"
+              data-testid="files-link"
+              className={`inline-flex h-8 w-8 items-center justify-center text-stone-700 transition-colors ${
+                pathname.startsWith("/files")
+                  ? "text-stone-950"
+                  : "hover:text-stone-950"
+              }`}
+              aria-label="Open files"
+              title="Open files"
+            >
+              <Folder className="h-4 w-4" />
             </Link>
             <button
               type="button"
