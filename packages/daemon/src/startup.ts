@@ -119,7 +119,10 @@ import { missionControlActionsSchema } from "./db/migrations/037_mission_control
 import { MissionControlActionLog } from "./domain/mission-control/mission-control-action-log.js";
 import { MissionControlWriteContract } from "./domain/mission-control/mission-control-write-contract.js";
 import { MissionControlReadLayer } from "./domain/mission-control/mission-control-read-layer.js";
-import { MissionControlFleetCliCapability } from "./domain/mission-control/mission-control-fleet-cli-capability.js";
+import {
+  MissionControlFleetCliCapability,
+  makeLocalCliCapabilityProbe,
+} from "./domain/mission-control/mission-control-fleet-cli-capability.js";
 import { OPENRIG_HOME } from "./openrig-compat.js";
 import {
   getCompatibleOpenRigPath,
@@ -582,6 +585,15 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       db,
       eventBus,
       rigRepo,
+      // R1 fix per guard PL-005 Phase A review: wire the production
+      // capability probe so /api/mission-control/cli-capabilities
+      // honestly reports drift when MISSION_CONTROL_DESIRED_FIELDS
+      // are missing from the local CLI's allow-list. Without this
+      // probe injection, the production path defaulted to a no-op
+      // that always reported staleCliCount=0 even when the audit-
+      // row-5 case (recoveryGuidance not in CLI allow-list) was
+      // present.
+      probeRig: makeLocalCliCapabilityProbe(),
     });
     const mcReadLayer = new MissionControlReadLayer({
       db,

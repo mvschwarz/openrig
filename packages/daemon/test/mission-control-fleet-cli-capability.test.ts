@@ -10,6 +10,9 @@ import { RigRepository } from "../src/domain/rig-repository.js";
 import {
   MissionControlFleetCliCapability,
   MISSION_CONTROL_DESIRED_FIELDS,
+  LOCAL_CLI_NODE_FIELDS_AT_0_2_0,
+  LOCAL_CLI_VERSION_LABEL,
+  makeLocalCliCapabilityProbe,
 } from "../src/domain/mission-control/mission-control-fleet-cli-capability.js";
 
 describe("MissionControlFleetCliCapability (PL-005 Phase A; 4 sub-clauses of graceful degradation)", () => {
@@ -130,5 +133,51 @@ describe("MissionControlFleetCliCapability (PL-005 Phase A; 4 sub-clauses of gra
     const alpha = fleet.rows.find((r) => r.rigName === "rig-alpha");
     expect(alpha?.activityState).toBe("blocked");
     expect(alpha?.attentionReason).toContain("gate-x");
+  });
+
+  // R1 fix per PL-005 Phase A guard review (2026-05-04). Production
+  // probe (makeLocalCliCapabilityProbe + LOCAL_CLI_NODE_FIELDS_AT_0_2_0)
+  // honestly reports drift WITHOUT a fake probeRig injection. This is
+  // the production-wired path: the same factory startup.ts uses to
+  // construct the daemon-level fleet capability service.
+  it("R1 PRODUCTION-WIRED probe (makeLocalCliCapabilityProbe): recoveryGuidance NOT in CLI allow-list → reports drift on every rig", async () => {
+    const cli = new MissionControlFleetCliCapability({
+      db,
+      eventBus: bus,
+      rigRepo,
+      probeRig: makeLocalCliCapabilityProbe(),
+    });
+    const fleet = await cli.rollupFleet();
+    expect(fleet.staleCliCount).toBe(2);
+    expect(fleet.degradedFields).toContain("recoveryGuidance");
+    expect(fleet.degradedFields).not.toContain("agentActivity");
+    for (const row of fleet.rows) {
+      expect(row.cliDriftDetected).toBe(true);
+      expect(row.cliVersionLabel).toBe(LOCAL_CLI_VERSION_LABEL);
+    }
+  });
+
+  it("R1: agentActivity IS in LOCAL_CLI_NODE_FIELDS_AT_0_2_0 (audit row 5 ground truth)", () => {
+    expect(LOCAL_CLI_NODE_FIELDS_AT_0_2_0.has("agentActivity")).toBe(true);
+    expect(LOCAL_CLI_NODE_FIELDS_AT_0_2_0.has("recoveryGuidance")).toBe(false);
+  });
+
+  it("R1 production probe: an extended (hypothetical future) CLI allow-list with recoveryGuidance reports zero drift", async () => {
+    const futureFields = new Set([
+      ...LOCAL_CLI_NODE_FIELDS_AT_0_2_0,
+      "recoveryGuidance",
+    ]);
+    const cli = new MissionControlFleetCliCapability({
+      db,
+      eventBus: bus,
+      rigRepo,
+      probeRig: makeLocalCliCapabilityProbe({
+        versionLabel: "0.3.0",
+        knownNodeFields: futureFields,
+      }),
+    });
+    const fleet = await cli.rollupFleet();
+    expect(fleet.staleCliCount).toBe(0);
+    expect(fleet.degradedFields).toEqual([]);
   });
 });
