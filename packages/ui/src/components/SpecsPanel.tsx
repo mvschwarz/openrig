@@ -7,7 +7,7 @@ import { usePsEntries } from "../hooks/usePsEntries.js";
 import { useExpandRig, useRemoveLibrarySpec, useRenameLibrarySpec, type ExpandRigResult } from "../hooks/mutations.js";
 import { ExpansionOutcome } from "./ExpansionOutcome.js";
 
-type LibraryFilter = "all" | "apps" | "rigs" | "agents";
+type LibraryFilter = "all" | "apps" | "rigs" | "agents" | "workflows";
 
 function deriveStability(entry: SpecLibraryEntry): "Stable" | "Experimental" | "Community" {
   if (entry.sourceType !== "builtin") return "Community";
@@ -16,7 +16,8 @@ function deriveStability(entry: SpecLibraryEntry): "Stable" | "Experimental" | "
   return "Experimental";
 }
 
-function deriveTypeBadge(entry: SpecLibraryEntry): "APP" | "RIG" | "AGENT" {
+function deriveTypeBadge(entry: SpecLibraryEntry): "APP" | "RIG" | "AGENT" | "WORKFLOW" {
+  if (entry.kind === "workflow") return "WORKFLOW";
   if (entry.kind === "agent") return "AGENT";
   if (entry.hasServices) return "APP";
   return "RIG";
@@ -27,6 +28,7 @@ function filterEntries(entries: SpecLibraryEntry[], filter: LibraryFilter): Spec
     case "apps": return entries.filter((e) => e.kind === "rig" && e.hasServices);
     case "rigs": return entries.filter((e) => e.kind === "rig" && !e.hasServices);
     case "agents": return entries.filter((e) => e.kind === "agent");
+    case "workflows": return entries.filter((e) => e.kind === "workflow");
     default: return entries;
   }
 }
@@ -463,7 +465,7 @@ export function SpecsPanel({ onClose }: SpecsPanelProps) {
         <div className="space-y-2">
           <div className="font-mono text-[8px] uppercase tracking-[0.16em] text-stone-500">Library</div>
           <div className="flex gap-1">
-            {(["all", "apps", "rigs", "agents"] as LibraryFilter[]).map((f) => (
+            {(["all", "apps", "rigs", "agents", "workflows"] as LibraryFilter[]).map((f) => (
               <button
                 key={f}
                 data-testid={`filter-${f}`}

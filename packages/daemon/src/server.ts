@@ -170,6 +170,8 @@ export interface AppDeps {
   missionControlBearerToken?: string | null;
   specReviewService?: SpecReviewService;
   specLibraryService?: SpecLibraryService;
+  /** Workflows in Spec Library v0 — active workflow lens persistence. */
+  activeLensStore?: import("./domain/active-lens-store.js").ActiveLensStore;
   whoamiService?: WhoamiService;
   contextUsageStore?: import("./domain/context-usage-store.js").ContextUsageStore;
   contextMonitor?: { pollOnce(): Promise<void> };
@@ -344,6 +346,7 @@ export function createApp(deps: AppDeps): Hono {
     c.set("missionControlNotificationDispatcher" as never, deps.missionControlNotificationDispatcher);
     c.set("specReviewService" as never, deps.specReviewService);
     c.set("specLibraryService" as never, deps.specLibraryService);
+    c.set("activeLensStore" as never, deps.activeLensStore);
     c.set("whoamiService" as never, deps.whoamiService);
     c.set("contextUsageStore" as never, deps.contextUsageStore);
     c.set("contextMonitor" as never, deps.contextMonitor);
