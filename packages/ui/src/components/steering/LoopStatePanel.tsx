@@ -6,6 +6,8 @@
 // product-specs filter, so the operator sees who's busy on what).
 
 import { useQuery } from "@tanstack/react-query";
+import { useState } from "react";
+import { SessionPreviewPane } from "../preview/SessionPreviewPane.js";
 
 interface MissionControlRow {
   qitemId: string;
@@ -28,6 +30,10 @@ async function fetchRecentlyActive(): Promise<MissionControlViewResponse> {
 }
 
 export function LoopStatePanel() {
+  // Preview Terminal v0 (PL-018) — click a row → toggle inline preview
+  // for that seat. Single-row-open at a time keeps the panel compact;
+  // operators wanting multiple panes pin from the node-detail drawer.
+  const [openSeat, setOpenSeat] = useState<string | null>(null);
   const view = useQuery({
     queryKey: ["mission-control", "views", "recently-active"],
     queryFn: fetchRecentlyActive,
@@ -62,17 +68,34 @@ export function LoopStatePanel() {
         }
         return (
           <ul className="divide-y divide-stone-100">
-            {seats.slice(0, 10).map(([seat, row]) => (
-              <li
-                key={seat}
-                data-testid={`steering-loop-row-${seat}`}
-                className="flex items-baseline gap-2 px-3 py-1"
-              >
-                <span className="font-mono text-[9px] text-stone-500 shrink-0">{(row.tsUpdated ?? "").slice(11, 19)}</span>
-                <span className="font-mono text-[10px] font-semibold text-stone-900 shrink-0 truncate max-w-[14rem]">{seat}</span>
-                <span className="flex-1 font-mono text-[10px] text-stone-700 truncate">{row.body ?? row.qitemId}</span>
-              </li>
-            ))}
+            {seats.slice(0, 10).map(([seat, row]) => {
+              const isOpen = openSeat === seat;
+              return (
+                <li
+                  key={seat}
+                  data-testid={`steering-loop-row-${seat}`}
+                  data-open={isOpen ? "true" : "false"}
+                  className="px-3 py-1"
+                >
+                  <button
+                    type="button"
+                    data-testid={`steering-loop-row-${seat}-toggle`}
+                    onClick={() => setOpenSeat(isOpen ? null : seat)}
+                    className="flex w-full items-baseline gap-2 text-left hover:bg-stone-50 -mx-3 px-3 py-0.5"
+                  >
+                    <span className="font-mono text-[9px] text-stone-500 shrink-0">{(row.tsUpdated ?? "").slice(11, 19)}</span>
+                    <span className="font-mono text-[10px] font-semibold text-stone-900 shrink-0 truncate max-w-[14rem]">{seat}</span>
+                    <span className="flex-1 font-mono text-[10px] text-stone-700 truncate">{row.body ?? row.qitemId}</span>
+                    <span className="font-mono text-[9px] text-stone-400 shrink-0">{isOpen ? "▾" : "▸"}</span>
+                  </button>
+                  {isOpen && seat !== "unknown" && (
+                    <div data-testid={`steering-loop-row-${seat}-preview`} className="mt-1">
+                      <SessionPreviewPane sessionName={seat} testIdPrefix={`loop-preview-${seat}`} />
+                    </div>
+                  )}
+                </li>
+              );
+            })}
           </ul>
         );
       })()}
