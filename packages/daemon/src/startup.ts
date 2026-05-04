@@ -694,16 +694,43 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
 
   // Slice Story View v0 — slice indexer + per-tab projector.
   //
-  // Configured via env (single-host MVP; no per-rig override at v0):
-  //   OPENRIG_SLICES_ROOT             absolute path to slices folder root
+  // User Settings v0 graduates `OPENRIG_SLICES_ROOT` env-var into the
+  // typed `workspace.slices_root` setting (resolution chain: env >
+  // config-file > default `<workspace.root>/slices`). Backward-compat:
+  // operators with OPENRIG_SLICES_ROOT set continue to work because the
+  // settings store reads env in the same resolution slot. Operators
+  // setting via `rig config set workspace.slices_root <path>` or via the
+  // System drawer Settings panel UI now flow through the indexer too —
+  // closes the PRD § Scenario B requirement that wasn't wired in v0.
+  //
+  //   OPENRIG_SLICES_ROOT             legacy short env var (still honored
+  //                                   if set; preferred route is settings)
+  //   OPENRIG_WORKSPACE_SLICES_ROOT   typed-key env override
+  //   workspace.slices_root           typed setting in ~/.openrig/config.json
+  //   workspace.root                  cascade fallback (default ~/.openrig/workspace)
   //   OPENRIG_DOGFOOD_EVIDENCE_ROOT   absolute path to dogfood-evidence root
   //
-  // When OPENRIG_SLICES_ROOT is unset, the indexer is still constructed
-  // but isReady() returns false — the routes return a clear
-  // "slices_root_not_configured" 503 with a setup hint, so the operator
-  // can wire the env vars without daemon-restart-debug-loop.
+  // When the resolved slicesRoot path doesn't exist on disk, the indexer
+  // is still constructed but isReady() returns false — the routes return
+  // a clear "slices_root_not_configured" 503 with a setup hint.
   {
-    const slicesRoot = readOpenRigEnv("OPENRIG_SLICES_ROOT", "RIGGED_SLICES_ROOT") ?? "";
+    // Prefer the legacy short env var if explicitly set (existing
+    // dogfood / test daemons rely on it). Otherwise fall back to the
+    // settings-resolved path (env > file > default cascade inside
+    // SettingsStore). The SettingsStore is constructed locally here
+    // so the slices block doesn't depend on the User Settings v0 wiring
+    // block ordering further below.
+    const legacyEnvSlicesRoot = readOpenRigEnv("OPENRIG_SLICES_ROOT", "RIGGED_SLICES_ROOT") ?? "";
+    let resolvedSlicesRoot = "";
+    if (!legacyEnvSlicesRoot) {
+      try {
+        const { SettingsStore: SettingsStoreCtor } = await import("./domain/user-settings/settings-store.js");
+        resolvedSlicesRoot = new SettingsStoreCtor().resolveConfig().workspaceSlicesRoot;
+      } catch {
+        // SettingsStore unavailable — keep slicesRoot empty; routes return 503.
+      }
+    }
+    const slicesRoot = legacyEnvSlicesRoot || resolvedSlicesRoot;
     const dogfoodRoot = readOpenRigEnv("OPENRIG_DOGFOOD_EVIDENCE_ROOT", "RIGGED_DOGFOOD_EVIDENCE_ROOT") ?? "";
     const { SliceIndexer } = await import("./domain/slices/slice-indexer.js");
     const { SliceDetailProjector } = await import("./domain/slices/slice-detail-projector.js");
@@ -737,23 +764,26 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // with structured config hints so the UI can surface a setup message
   // instead of a generic error.
   {
-    const { readAllowlistFromEnv } = await import("./domain/files/path-safety.js");
+    const { decodeAllowlist } = await import("./domain/files/path-safety.js");
     const { FileWriteService } = await import("./domain/files/file-write-service.js");
-    const { ProgressIndexer, readProgressRootsFromEnv } = await import("./domain/progress/progress-indexer.js");
-    const filesAllowlist = readAllowlistFromEnv();
+    const { ProgressIndexer, decodeProgressScanRoots } = await import("./domain/progress/progress-indexer.js");
+    // User Settings v0 — UEP env-vars graduated to typed settings.
+    // Resolution: env > settings file > empty. SettingsStore handles
+    // the env > file > default precedence; we just decode the raw
+    // string into structured roots.
+    const { SettingsStore } = await import("./domain/user-settings/settings-store.js");
+    const settingsStore = new SettingsStore();
+    deps.settingsStore = settingsStore;
+    const cfg = settingsStore.resolveConfig();
+    const filesAllowlist = decodeAllowlist(cfg.filesAllowlistRaw);
     deps.filesAllowlist = filesAllowlist;
     deps.fileWriteService = filesAllowlist.length > 0
       ? new FileWriteService({
           allowlist: filesAllowlist,
-          // Honor OPENRIG_HOME for state isolation. Without this, the
-          // service's DEFAULT_AUDIT_FILE falls back to process.env.HOME
-          // and writes audit rows to the host's ~/.openrig/, which
-          // breaks isolated dogfood/test daemons (rows bleed back to
-          // the operator's real home regardless of OPENRIG_HOME).
           auditFilePath: nodePath.join(OPENRIG_HOME, "file-edit-audit.jsonl"),
         })
       : null;
-    deps.progressIndexer = new ProgressIndexer({ roots: readProgressRootsFromEnv() });
+    deps.progressIndexer = new ProgressIndexer({ roots: decodeProgressScanRoots(cfg.progressScanRootsRaw) });
 
     // Operator Surface Reconciliation v0 — steering composer (item 1).
     // Reads workspace root + per-section overrides from env. Empty

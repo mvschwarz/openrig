@@ -2,7 +2,10 @@ import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { PanelsTopLeft, ServerCog } from "lucide-react";
 import { LogFeedList } from "./ActivityFeed.js";
+import { SettingsTab } from "./system/SettingsTab.js";
 import type { ActivityEvent } from "../hooks/useActivityFeed.js";
+
+type SystemTab = "log" | "status" | "settings";
 
 async function fetchHealth(): Promise<boolean> {
   const res = await fetch("/healthz");
@@ -19,7 +22,7 @@ async function fetchCmux(): Promise<{ available: boolean }> {
 interface SystemPanelProps {
   onClose: () => void;
   events: ActivityEvent[];
-  initialTab?: "log" | "status";
+  initialTab?: SystemTab;
 }
 
 function statusTone(ok: boolean | null): string {
@@ -33,7 +36,7 @@ function statusLabel(ok: boolean | null, positive: string, negative: string, unk
 }
 
 export function SystemPanel({ onClose, events, initialTab = "log" }: SystemPanelProps) {
-  const [activeTab, setActiveTab] = useState<"log" | "status">(initialTab);
+  const [activeTab, setActiveTab] = useState<SystemTab>(initialTab);
 
   useEffect(() => {
     setActiveTab(initialTab);
@@ -88,13 +91,21 @@ export function SystemPanel({ onClose, events, initialTab = "log" }: SystemPanel
         >
           Status
         </button>
+        <button
+          data-testid="system-tab-settings"
+          onClick={() => setActiveTab("settings")}
+          className={`flex-1 py-2 text-xs font-mono uppercase text-center ${activeTab === "settings" ? "border-b-2 border-stone-800 font-bold text-stone-900" : "text-stone-400"}`}
+        >
+          Settings
+        </button>
       </div>
 
-      {activeTab === "log" ? (
+      {activeTab === "log" && (
         <div className="flex flex-1 min-h-0 flex-col overflow-hidden" data-testid="system-log-tab">
           <LogFeedList events={events} />
         </div>
-      ) : (
+      )}
+      {activeTab === "status" && (
         <div className="flex-1 overflow-y-auto px-4 py-3 space-y-4" data-testid="system-status-tab">
           <section className="border border-stone-300/28 bg-white/12 px-3 py-3">
             <div className="font-mono text-[8px] text-stone-400 uppercase tracking-wider mb-3">Runtime</div>
@@ -124,6 +135,7 @@ export function SystemPanel({ onClose, events, initialTab = "log" }: SystemPanel
           </section>
         </div>
       )}
+      {activeTab === "settings" && <SettingsTab />}
     </aside>
   );
 }
