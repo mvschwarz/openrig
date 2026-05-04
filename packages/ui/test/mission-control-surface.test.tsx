@@ -172,4 +172,30 @@ describe("MissionControlSurface", () => {
       );
     });
   });
+
+  it("shows handoff destination candidates instead of only a raw text field", async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        destinations: [
+          {
+            sessionName: "velocity.qa@openrig-velocity",
+            label: "velocity.qa@openrig-velocity",
+            source: "queue",
+          },
+        ],
+      }),
+    });
+
+    renderWithQueryClient(
+      <VerbActions qitemId="qitem-1" actorSession="human-wrandom@kernel" enabledVerbs={["handoff"]} />,
+    );
+
+    fireEvent.click(screen.getByTestId("mc-verb-handoff"));
+
+    const select = await screen.findByTestId("mc-verb-destination-select");
+    await waitFor(() => {
+      expect(select.textContent).toContain("velocity.qa@openrig-velocity");
+    });
+  });
 });

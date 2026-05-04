@@ -77,6 +77,7 @@ function buildApp(opts: {
   const app = new Hono();
   app.use("*", async (c, next) => {
     c.set("eventBus" as never, opts.bus);
+    c.set("db" as never, db);
     c.set("missionControlReadLayer" as never, readLayer);
     c.set("missionControlWriteContract" as never, writeContract);
     c.set("missionControlActionLog" as never, actionLog);
@@ -245,6 +246,25 @@ describe("mission-control routes Phase B (PL-005)", () => {
   });
 
   describe("Route-order discipline", () => {
+    it("GET /destinations returns phone-friendly handoff candidates from queue-observed sessions", async () => {
+      const { app } = buildApp({ bus, queueRepo, bearerToken: "secret", withDispatcher: false });
+      await queueRepo.create({
+        sourceSession: "velocity.qa@openrig-velocity",
+        destinationSession: "human-wrandom@kernel",
+        body: "x",
+        tier: "human-gate",
+      });
+
+      const res = await app.request("/api/mission-control/destinations");
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        destinations: Array<{ sessionName: string; source: string; label: string }>;
+      };
+      expect(body.destinations.some((d) => d.sessionName === "velocity.qa@openrig-velocity")).toBe(true);
+      expect(body.destinations.some((d) => d.sessionName === "human-wrandom@kernel")).toBe(true);
+      expect(body.destinations.every((d) => d.label.length > 0)).toBe(true);
+    });
+
     it("/audit literal path does NOT shadow /views/:view-name", async () => {
       const { app } = buildApp({ bus, queueRepo, bearerToken: null, withDispatcher: false });
       const auditRes = await app.request("/api/mission-control/audit");
