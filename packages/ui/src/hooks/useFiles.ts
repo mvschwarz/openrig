@@ -159,13 +159,17 @@ export function useFilesWrite() {
   return useMutation({
     mutationFn: postWrite,
     onSuccess: (result, vars) => {
-      // Invalidate the read query so the next render gets the new
-      // mtime + contentHash + content.
+      // Only invalidate when the write actually landed. On a 409
+      // conflict we MUST keep the read query stable so the editor's
+      // last-known mtime/contentHash + the operator's draft survive
+      // long enough for the conflict banner to render. Invalidating
+      // here would refetch the read, the editor's useEffect would
+      // fire on the new read, and both the draft and the conflict
+      // banner would get wiped silently — losing the operator's
+      // edits and the conflict signal.
+      if ("conflict" in result) return;
       qc.invalidateQueries({ queryKey: ["files", "read", vars.root, vars.path] });
       qc.invalidateQueries({ queryKey: ["files", "list", vars.root] });
-      // Result-shape is either success or conflict; conflict isn't
-      // an error per react-query semantics here — caller inspects.
-      void result;
     },
   });
 }
