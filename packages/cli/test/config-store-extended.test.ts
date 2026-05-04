@@ -92,6 +92,8 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
     expect(cfg.workspace.steeringPath).toBe(join(cfg.workspace.root, "steering", "STEERING.md"));
     expect(cfg.workspace.fieldNotesRoot).toBe(join(cfg.workspace.root, "field-notes"));
     expect(cfg.workspace.specsRoot).toBe(join(cfg.workspace.root, "specs"));
+    expect(cfg.files.allowlist).toBe(`workspace:${cfg.workspace.root}`);
+    expect(cfg.progress.scanRoots).toBe(`workspace:${cfg.workspace.root}`);
   });
 
   it("setting workspace.root cascades into per-subdir defaults", () => {
@@ -101,6 +103,8 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
     expect(cfg.workspace.root).toBe("/custom/ws");
     expect(cfg.workspace.slicesRoot).toBe("/custom/ws/slices");
     expect(cfg.workspace.steeringPath).toBe("/custom/ws/steering/STEERING.md");
+    expect(cfg.files.allowlist).toBe("workspace:/custom/ws");
+    expect(cfg.progress.scanRoots).toBe("workspace:/custom/ws");
   });
 
   it("per-subdir override beats workspace.root cascade", () => {

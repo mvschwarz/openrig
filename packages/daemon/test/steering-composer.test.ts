@@ -21,6 +21,7 @@ import {
   SteeringComposer,
   matchRailItemCode,
   steeringOptsFromEnv,
+  steeringOptsFromSettings,
 } from "../src/domain/steering/steering-composer.js";
 
 describe("Operator Surface Reconciliation v0 — matchRailItemCode", () => {
@@ -52,6 +53,35 @@ describe("Operator Surface Reconciliation v0 — steeringOptsFromEnv", () => {
   it("falls back to RIGGED_STEERING_WORKSPACE when OPENRIG var is empty (|| not ??)", () => {
     expect(steeringOptsFromEnv({ OPENRIG_STEERING_WORKSPACE: "", RIGGED_STEERING_WORKSPACE: "/legacy" }))
       .toMatchObject({ workspaceRoot: "/legacy" });
+  });
+
+  it("uses typed workspace settings as the fresh-install default, with env overrides still winning", () => {
+    const opts = steeringOptsFromSettings(
+      {
+        workspaceRoot: "/Users/me/.openrig/workspace",
+        workspaceSteeringPath: "/Users/me/.openrig/workspace/steering/STEERING.md",
+      },
+      {},
+    );
+    expect(opts).toMatchObject({
+      workspaceRoot: "/Users/me/.openrig/workspace",
+      steeringPath: "/Users/me/.openrig/workspace/steering/STEERING.md",
+    });
+
+    const overridden = steeringOptsFromSettings(
+      {
+        workspaceRoot: "/Users/me/.openrig/workspace",
+        workspaceSteeringPath: "/Users/me/.openrig/workspace/steering/STEERING.md",
+      },
+      {
+        OPENRIG_STEERING_WORKSPACE: "/env/workspace",
+        OPENRIG_STEERING_PATH: "/env/STEERING.md",
+      },
+    );
+    expect(overridden).toMatchObject({
+      workspaceRoot: "/env/workspace",
+      steeringPath: "/env/STEERING.md",
+    });
   });
 });
 

@@ -795,11 +795,13 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     deps.progressIndexer = new ProgressIndexer({ roots: decodeProgressScanRoots(cfg.progressScanRootsRaw) });
 
     // Operator Surface Reconciliation v0 — steering composer (item 1).
-    // Reads workspace root + per-section overrides from env. Empty
-    // workspace root → composer.isReady() = false → /api/steering
-    // returns 503 with structured setup hint.
-    const { SteeringComposer, steeringOptsFromEnv } = await import("./domain/steering/steering-composer.js");
-    deps.steeringComposer = new SteeringComposer(steeringOptsFromEnv());
+    // Reads typed workspace settings by default while preserving the
+    // OPENRIG_STEERING_* env override family for non-canonical layouts.
+    const { SteeringComposer, steeringOptsFromSettings } = await import("./domain/steering/steering-composer.js");
+    deps.steeringComposer = new SteeringComposer(steeringOptsFromSettings({
+      workspaceRoot: cfg.workspaceRoot,
+      workspaceSteeringPath: cfg.workspaceSteeringPath,
+    }));
 
     // Workflows in Spec Library + Activation Lens v0 — active lens
     // persistence under OPENRIG_HOME/active-workflow-lens.json. Same
