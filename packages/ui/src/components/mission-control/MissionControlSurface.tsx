@@ -17,8 +17,15 @@ import { ActiveWorkView } from "./views/ActiveWorkView.js";
 import { RecentShipsView } from "./views/RecentShipsView.js";
 import { RecentlyActiveView } from "./views/RecentlyActiveView.js";
 import { RecentObservationsView } from "./views/RecentObservationsView.js";
+import { AuditHistoryView } from "./views/AuditHistoryView.js";
 
-const VIEW_LABELS: Record<MissionControlViewName, string> = {
+// PL-005 Phase B: UI-side tab union extends Phase A's 7 daemon view
+// names with an "audit-history" tab that consumes a different daemon
+// endpoint (/api/mission-control/audit, not /views/:name). The daemon
+// MISSION_CONTROL_VIEWS enum is unchanged (Phase A surface no-touch).
+type MissionControlTabName = MissionControlViewName | "audit-history";
+
+const VIEW_LABELS: Record<MissionControlTabName, string> = {
   "my-queue": "My queue",
   "human-gate": "Human gate",
   fleet: "Fleet",
@@ -26,10 +33,13 @@ const VIEW_LABELS: Record<MissionControlViewName, string> = {
   "recent-ships": "Recent ships",
   "recently-active": "Recently active",
   "recent-observations": "Observations",
+  "audit-history": "Audit history",
 };
 
+const ALL_TABS: MissionControlTabName[] = [...MISSION_CONTROL_VIEWS, "audit-history"];
+
 export function MissionControlSurface() {
-  const [activeView, setActiveView] = useState<MissionControlViewName>("my-queue");
+  const [activeView, setActiveView] = useState<MissionControlTabName>("my-queue");
   return (
     <div
       data-testid="mc-surface"
@@ -43,7 +53,7 @@ export function MissionControlSurface() {
           Queue observability
         </h1>
         <nav data-testid="mc-tab-nav" className="mt-2 flex flex-wrap gap-1">
-          {MISSION_CONTROL_VIEWS.map((view) => (
+          {ALL_TABS.map((view) => (
             <button
               key={view}
               type="button"
@@ -69,6 +79,7 @@ export function MissionControlSurface() {
         {activeView === "recent-ships" ? <RecentShipsView /> : null}
         {activeView === "recently-active" ? <RecentlyActiveView /> : null}
         {activeView === "recent-observations" ? <RecentObservationsView /> : null}
+        {activeView === "audit-history" ? <AuditHistoryView /> : null}
       </main>
     </div>
   );

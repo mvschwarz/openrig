@@ -133,6 +133,14 @@ export interface AppDeps {
   missionControlWriteContract?: import("./domain/mission-control/mission-control-write-contract.js").MissionControlWriteContract;
   missionControlActionLog?: import("./domain/mission-control/mission-control-action-log.js").MissionControlActionLog;
   missionControlFleetCliCapability?: import("./domain/mission-control/mission-control-fleet-cli-capability.js").MissionControlFleetCliCapability;
+  missionControlAuditBrowse?: import("./domain/mission-control/audit-browse.js").MissionControlAuditBrowse;
+  missionControlNotificationDispatcher?: import("./domain/mission-control/notification-dispatcher.js").MissionControlNotificationDispatcher;
+  /**
+   * PL-005 Phase B: bearer token (or null for loopback-only mode).
+   * The mission-control routes use this to wire the
+   * authBearerTokenMiddleware on write verbs.
+   */
+  missionControlBearerToken?: string | null;
   specReviewService?: SpecReviewService;
   specLibraryService?: SpecLibraryService;
   whoamiService?: WhoamiService;
@@ -290,6 +298,8 @@ export function createApp(deps: AppDeps): Hono {
     c.set("missionControlWriteContract" as never, deps.missionControlWriteContract);
     c.set("missionControlActionLog" as never, deps.missionControlActionLog);
     c.set("missionControlFleetCliCapability" as never, deps.missionControlFleetCliCapability);
+    c.set("missionControlAuditBrowse" as never, deps.missionControlAuditBrowse);
+    c.set("missionControlNotificationDispatcher" as never, deps.missionControlNotificationDispatcher);
     c.set("specReviewService" as never, deps.specReviewService);
     c.set("specLibraryService" as never, deps.specLibraryService);
     c.set("whoamiService" as never, deps.whoamiService);
@@ -342,7 +352,10 @@ export function createApp(deps: AppDeps): Hono {
   app.route("/api/views", viewsRoutes());
   app.route("/api/watchdog", watchdogRoutes());
   app.route("/api/workflow", workflowRoutes());
-  app.route("/api/mission-control", missionControlRoutes());
+  app.route(
+    "/api/mission-control",
+    missionControlRoutes({ bearerToken: deps.missionControlBearerToken ?? null }),
+  );
   app.route("/api/rigs/:rigId/env", envRoutes());
   app.route("/api/restore-check", restoreCheckRoutes);
 

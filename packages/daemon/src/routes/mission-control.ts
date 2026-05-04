@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { EventBus } from "../domain/event-bus.js";
+import { authBearerTokenMiddleware } from "../middleware/auth-bearer-token.js";
 import {
   MissionControlActionLogError,
   MISSION_CONTROL_VERBS,
@@ -16,6 +17,8 @@ import {
   type MissionControlWriteContract,
 } from "../domain/mission-control/mission-control-write-contract.js";
 import type { MissionControlFleetCliCapability } from "../domain/mission-control/mission-control-fleet-cli-capability.js";
+import type { MissionControlAuditBrowse } from "../domain/mission-control/audit-browse.js";
+import type { MissionControlNotificationDispatcher } from "../domain/mission-control/notification-dispatcher.js";
 
 /**
  * Mission Control HTTP routes (PL-005 Phase A). Backs the integrated
@@ -32,11 +35,39 @@ import type { MissionControlFleetCliCapability } from "../domain/mission-control
  *   GET  /api/mission-control/cli-capabilities    per-rig CLI capability cache
  *   GET  /api/mission-control/views               list view names
  */
-export function missionControlRoutes(): Hono {
+export interface MissionControlRoutesOpts {
+  /**
+   * PL-005 Phase B: bearer token enforced on write verbs (POST /action,
+   * POST /notifications/test) when set. When null, the daemon is
+   * loopback-bound and no auth is enforced (the index.ts startup
+   * check guarantees this).
+   */
+  bearerToken?: string | null;
+}
+
+export function missionControlRoutes(opts?: MissionControlRoutesOpts): Hono {
   const app = new Hono();
+  const bearerToken = opts?.bearerToken ?? null;
+  // PL-005 Phase B: bearer-token middleware mounted on write verbs.
+  // Reads remain open behind tailnet bind for the headed-browser-from-
+  // phone case where the operator hasn't typed the token into mobile
+  // yet — the bearer is for write integrity, not view confidentiality.
+  // (Operator may extend gating to reads by mounting on read paths in
+  // a future revision; v0 default per planner brief is gate-writes-only.)
+  const requireAuth = authBearerTokenMiddleware({ expectedToken: bearerToken });
 
   function getReadLayer(c: { get: (key: string) => unknown }): MissionControlReadLayer {
     return c.get("missionControlReadLayer" as never) as MissionControlReadLayer;
+  }
+  function getAuditBrowse(c: { get: (key: string) => unknown }): MissionControlAuditBrowse {
+    return c.get("missionControlAuditBrowse" as never) as MissionControlAuditBrowse;
+  }
+  function getNotificationDispatcher(
+    c: { get: (key: string) => unknown },
+  ): MissionControlNotificationDispatcher | undefined {
+    return c.get("missionControlNotificationDispatcher" as never) as
+      | MissionControlNotificationDispatcher
+      | undefined;
   }
   function getWriteContract(c: { get: (key: string) => unknown }): MissionControlWriteContract {
     return c.get("missionControlWriteContract" as never) as MissionControlWriteContract;
@@ -113,6 +144,10 @@ export function missionControlRoutes(): Hono {
   app.get("/sse", sseHandler);
   app.get("/watch", sseHandler);
 
+  // PL-005 Phase B: bearer-token gate on write verbs.
+  app.post("/action", requireAuth);
+  app.post("/notifications/test", requireAuth);
+
   // POST /action — execute one of 7 verbs through the atomic write contract.
   app.post("/action", async (c) => {
     const body = await c.req
@@ -159,8 +194,64 @@ export function missionControlRoutes(): Hono {
     }
   });
 
+  // PL-005 Phase B: GET /audit — read-only browse over mission_control_actions.
+  // MUST come BEFORE /views/:view-name catchall (route-order discipline
+  // per PL-004 Phase A R1 lesson).
+  app.get("/audit", async (c) => {
+    const audit = getAuditBrowse(c);
+    if (!audit) return c.json({ error: "audit_browse_unavailable" }, 500);
+    const qitemId = c.req.query("qitem_id") || undefined;
+    const actionVerb = c.req.query("action_verb") || undefined;
+    const actorSession = c.req.query("actor_session") || undefined;
+    const since = c.req.query("since") || undefined;
+    const until = c.req.query("until") || undefined;
+    const limit = c.req.query("limit") ? Number.parseInt(c.req.query("limit")!, 10) : undefined;
+    const beforeId = c.req.query("before_id") || undefined;
+    try {
+      const result = audit.query({ qitemId, actionVerb, actorSession, since, until, limit, beforeId });
+      return c.json(result);
+    } catch (err) {
+      return c.json(
+        {
+          error: "audit_query_failed",
+          message: err instanceof Error ? err.message : "internal error",
+        },
+        500,
+      );
+    }
+  });
+
+  // PL-005 Phase B: POST /notifications/test — synthetic notification
+  // through the configured mechanism so the operator can verify before
+  // relying on it. Bearer-token gated (registered above).
+  app.post("/notifications/test", async (c) => {
+    const dispatcher = getNotificationDispatcher(c);
+    if (!dispatcher) {
+      return c.json(
+        {
+          error: "notifications_unconfigured",
+          message:
+            "notifications dispatcher is not wired; configure notifications.mechanism (ntfy|webhook) in daemon config and restart",
+        },
+        503,
+      );
+    }
+    try {
+      const result = await dispatcher.sendTest();
+      return c.json(result);
+    } catch (err) {
+      return c.json(
+        {
+          error: "notification_test_failed",
+          message: err instanceof Error ? err.message : "internal error",
+        },
+        500,
+      );
+    }
+  });
+
   // GET /views/:view-name — read one of 7 views. MUST come AFTER /views,
-  // /cli-capabilities, /sse, /watch literal paths.
+  // /cli-capabilities, /sse, /watch, /audit literal paths.
   app.get("/views/:view-name", async (c) => {
     const viewName = c.req.param("view-name") as MissionControlViewName;
     if (!MISSION_CONTROL_VIEWS.includes(viewName)) {
