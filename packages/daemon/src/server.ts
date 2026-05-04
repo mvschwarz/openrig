@@ -130,6 +130,15 @@ export interface AppDeps {
   watchdogPolicyEngine?: WatchdogPolicyEngine;
   watchdogScheduler?: WatchdogScheduler;
   workflowRuntime?: WorkflowRuntime;
+  /**
+   * RSI v2 starter v0: absolute path to the daemon's bundled built-in
+   * workflow-specs directory. Used by `GET /api/workflow/specs` to
+   * compute the per-row `isBuiltIn` flag (source_path under this dir
+   * → built-in; otherwise → operator-authored). Optional: when unset,
+   * the route returns isBuiltIn=false for every spec (graceful — the
+   * surface still works, just without the indicator).
+   */
+  workflowBuiltinSpecsDir?: string;
   missionControlReadLayer?: import("./domain/mission-control/mission-control-read-layer.js").MissionControlReadLayer;
   missionControlWriteContract?: import("./domain/mission-control/mission-control-write-contract.js").MissionControlWriteContract;
   missionControlActionLog?: import("./domain/mission-control/mission-control-action-log.js").MissionControlActionLog;
@@ -308,6 +317,7 @@ export function createApp(deps: AppDeps): Hono {
     c.set("watchdogPolicyEngine" as never, deps.watchdogPolicyEngine);
     c.set("watchdogScheduler" as never, deps.watchdogScheduler);
     c.set("workflowRuntime" as never, deps.workflowRuntime);
+    c.set("workflowBuiltinSpecsDir" as never, deps.workflowBuiltinSpecsDir);
     c.set("missionControlReadLayer" as never, deps.missionControlReadLayer);
     c.set("missionControlWriteContract" as never, deps.missionControlWriteContract);
     c.set("missionControlActionLog" as never, deps.missionControlActionLog);
