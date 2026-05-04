@@ -190,6 +190,15 @@ export function CompactStatusRow({
               </div>
             ) : null}
           </div>
+          {row.qitemId ? (
+            <a
+              data-testid="mc-qitem-audit-link"
+              href={`/mission-control?view=audit-history&qitem_id=${encodeURIComponent(row.qitemId)}`}
+              className="inline-flex border border-stone-300 px-2 py-1 font-mono text-[10px] uppercase tracking-[0.12em] text-stone-700 hover:bg-stone-100"
+            >
+              Audit
+            </a>
+          ) : null}
         </div>
       ) : null}
     </div>

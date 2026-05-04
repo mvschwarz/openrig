@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { MissionControlSurface } from "../src/components/mission-control/MissionControlSurface.js";
 import { CompactStatusRow } from "../src/components/mission-control/components/CompactStatusRow.js";
 import { VerbActions } from "../src/components/mission-control/components/VerbActions.js";
+import { AuditHistoryView } from "../src/components/mission-control/views/AuditHistoryView.js";
 
 const fetchMock = vi.fn();
 globalThis.fetch = fetchMock as unknown as typeof fetch;
@@ -141,5 +142,34 @@ describe("MissionControlSurface", () => {
       "Approve the release candidate after checking the phone notification path.",
     );
     expect(screen.getByTestId("mc-qitem-id").textContent).toContain("qitem-phone");
+    expect((screen.getByTestId("mc-qitem-audit-link") as HTMLAnchorElement).href).toContain(
+      "/mission-control?view=audit-history&qitem_id=qitem-phone",
+    );
+  });
+
+  it("prefills audit filters from URL params for phone deep links", async () => {
+    window.history.replaceState(
+      null,
+      "",
+      "/mission-control?view=audit-history&qitem_id=qitem-phone&action_verb=approve",
+    );
+    fetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        rows: [],
+        hasMore: false,
+        nextBeforeId: null,
+      }),
+    });
+
+    renderWithQueryClient(<AuditHistoryView />);
+
+    expect(screen.getByTestId("mc-audit-filter-qitem-id")).toHaveProperty("value", "qitem-phone");
+    expect(screen.getByTestId("mc-audit-filter-action-verb")).toHaveProperty("value", "approve");
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/mission-control/audit?qitem_id=qitem-phone&action_verb=approve&limit=50",
+      );
+    });
   });
 });
