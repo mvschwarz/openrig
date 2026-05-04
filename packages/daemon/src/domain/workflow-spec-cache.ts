@@ -156,9 +156,17 @@ export class WorkflowSpecCache {
       )
       .get(spec.id, spec.version) as SpecRow | undefined;
     if (existing && existing.source_hash === sourceHash) {
-      return rowToWorkflowSpec(existing);
+      // readThrough is file-authoritative: return the freshly parsed
+      // file spec so validation sees non-column metadata such as
+      // workflow.entry and workflow.invariants.
+      return rowToWorkflowSpec(existing, spec);
     }
     const cachedAt = this.now().toISOString();
+    const purpose = spec.objective ?? null;
+    const targetRig = spec.target?.rig ?? null;
+    const rolesJson = JSON.stringify(spec.roles);
+    const stepsJson = JSON.stringify(spec.steps);
+    const coordinationTerminalTurnRule = spec.coordination_terminal_turn_rule ?? "hot_potato";
     if (existing) {
       // Update in place (same name+version, content changed).
       this.db
@@ -170,17 +178,27 @@ export class WorkflowSpecCache {
            WHERE spec_id = ?`,
         )
         .run(
-          spec.objective ?? null,
-          spec.target?.rig ?? null,
-          JSON.stringify(spec.roles),
-          JSON.stringify(spec.steps),
-          spec.coordination_terminal_turn_rule ?? "hot_potato",
+          purpose,
+          targetRig,
+          rolesJson,
+          stepsJson,
+          coordinationTerminalTurnRule,
           sourcePath,
           sourceHash,
           cachedAt,
           existing.spec_id,
         );
-      return this.getByIdOrThrow(existing.spec_id);
+      return rowToWorkflowSpec({
+        ...existing,
+        purpose,
+        target_rig: targetRig,
+        roles_json: rolesJson,
+        steps_json: stepsJson,
+        coordination_terminal_turn_rule: coordinationTerminalTurnRule,
+        source_path: sourcePath,
+        source_hash: sourceHash,
+        cached_at: cachedAt,
+      }, spec);
     }
     const specId = ulid();
     this.db
@@ -195,16 +213,28 @@ export class WorkflowSpecCache {
         specId,
         spec.id,
         spec.version,
-        spec.objective ?? null,
-        spec.target?.rig ?? null,
-        JSON.stringify(spec.roles),
-        JSON.stringify(spec.steps),
-        spec.coordination_terminal_turn_rule ?? "hot_potato",
+        purpose,
+        targetRig,
+        rolesJson,
+        stepsJson,
+        coordinationTerminalTurnRule,
         sourcePath,
         sourceHash,
         cachedAt,
       );
-    return this.getByIdOrThrow(specId);
+    return rowToWorkflowSpec({
+      spec_id: specId,
+      name: spec.id,
+      version: spec.version,
+      purpose,
+      target_rig: targetRig,
+      roles_json: rolesJson,
+      steps_json: stepsJson,
+      coordination_terminal_turn_rule: coordinationTerminalTurnRule,
+      source_path: sourcePath,
+      source_hash: sourceHash,
+      cached_at: cachedAt,
+    }, spec);
   }
 
   getByNameVersion(name: string, version: string): WorkflowSpecRow | null {
@@ -224,7 +254,7 @@ export class WorkflowSpecCache {
     const rows = this.db
       .prepare(`SELECT * FROM workflow_specs ORDER BY name, version`)
       .all() as SpecRow[];
-    return rows.map(rowToWorkflowSpec);
+    return rows.map((row) => rowToWorkflowSpec(row));
   }
 
   getByIdOrThrow(specId: string): WorkflowSpecRow {
@@ -242,18 +272,24 @@ export class WorkflowSpecCache {
   }
 }
 
-function rowToWorkflowSpec(row: SpecRow): WorkflowSpecRow {
+function rowToWorkflowSpec(row: SpecRow, parsedSpec?: WorkflowSpec): WorkflowSpecRow {
   const roles = JSON.parse(row.roles_json) as WorkflowSpec["roles"];
   const steps = JSON.parse(row.steps_json) as WorkflowSpec["steps"];
-  const spec: WorkflowSpec = {
-    id: row.name,
-    version: row.version,
-    objective: row.purpose ?? undefined,
-    target: row.target_rig ? { rig: row.target_rig } : undefined,
-    roles,
-    steps,
-    coordination_terminal_turn_rule: row.coordination_terminal_turn_rule,
-  };
+  const spec: WorkflowSpec = parsedSpec
+    ? {
+        ...parsedSpec,
+        coordination_terminal_turn_rule:
+          parsedSpec.coordination_terminal_turn_rule ?? row.coordination_terminal_turn_rule,
+      }
+    : {
+        id: row.name,
+        version: row.version,
+        objective: row.purpose ?? undefined,
+        target: row.target_rig ? { rig: row.target_rig } : undefined,
+        roles,
+        steps,
+        coordination_terminal_turn_rule: row.coordination_terminal_turn_rule,
+      };
   return {
     specId: row.spec_id,
     name: row.name,
