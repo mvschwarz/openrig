@@ -162,6 +162,11 @@ describe("Hono server (production app)", () => {
     expect(deepLinkRes.headers.get("content-type")).toContain("text/html");
     expect(await deepLinkRes.text()).toContain("OpenRig UI");
 
+    const dottedLogicalIdRes = await app.request("/rigs/rig-1/nodes/dev.impl");
+    expect(dottedLogicalIdRes.status).toBe(200);
+    expect(dottedLogicalIdRes.headers.get("content-type")).toContain("text/html");
+    expect(await dottedLogicalIdRes.text()).toContain("OpenRig UI");
+
     fs.rmSync(uiDistDir, { recursive: true, force: true });
     db.close();
   });

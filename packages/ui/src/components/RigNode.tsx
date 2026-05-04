@@ -2,6 +2,15 @@ import { useRef, useEffect, useState } from "react";
 import { Handle, Position } from "@xyflow/react";
 import { copyText } from "../lib/copy-text.js";
 import { displayAgentName } from "../lib/display-name.js";
+import {
+  getActivityState,
+  getActivityLabel,
+  getActivityBgClass,
+  getActivityAnimationClass,
+  isActivityStale,
+  shortQitemTail,
+} from "../lib/activity-visuals.js";
+import type { AgentActivitySummary, CurrentQitemSummary } from "../hooks/useNodeInventory.js";
 
 interface RigNodeData {
   logicalId: string;
@@ -28,31 +37,16 @@ interface RigNodeData {
   contextFresh?: boolean;
   contextAvailability?: string;
   placementState?: "available" | "selected" | null;
+  // PL-019: agent activity drives the node's primary "is this agent
+  // working?" dot color (replacing the previous startup-status color).
+  // currentQitems surfaces in the hover hint when the agent is running.
+  agentActivity?: AgentActivitySummary | null;
+  currentQitems?: CurrentQitemSummary[];
 }
 
 /** Core roles get dark header stripe, workers get light */
 function isCore(role: string | null): boolean {
   return role === "architect" || role === "lead" || role === "orchestrator";
-}
-
-function getStartupStatusLabel(startupStatus: string | null | undefined): string {
-  switch (startupStatus) {
-    case "ready": return "ready";
-    case "pending": return "launching";
-    case "attention_required": return "attention";
-    case "failed": return "failed";
-    default: return "stopped";
-  }
-}
-
-function getStartupStatusColorClass(startupStatus: string | null | undefined): string {
-  switch (startupStatus) {
-    case "ready": return "bg-green-500";
-    case "pending": return "bg-amber-500";
-    case "attention_required": return "bg-orange-500";
-    case "failed": return "bg-red-500";
-    default: return "bg-stone-400";
-  }
 }
 
 export function RigNode({ data }: { data: RigNodeData }) {
@@ -83,15 +77,35 @@ export function RigNode({ data }: { data: RigNodeData }) {
 
   const runtimeModel = [data.runtime, data.model].filter(Boolean).join(" \u00B7 ");
   const agentName = displayAgentName(data.logicalId);
-  const statusLabel = getStartupStatusLabel(data.startupStatus);
-  const statusClass = getStartupStatusColorClass(data.startupStatus);
+
+  // PL-019: dot color is now driven by agentActivity.state, not startupStatus.
+  // startupStatus retains its independent surface via the ATTN/FAILED badges
+  // below \u2014 activity answers "is this agent working?", startup answers "did
+  // this agent boot?". Two different questions, two different surfaces.
+  const activityState = getActivityState(data.agentActivity);
+  const activityLabel = getActivityLabel(activityState);
+  const activityBgClass = getActivityBgClass(activityState);
+  const activityAnimClass = getActivityAnimationClass(activityState);
+  const activityIsStale = isActivityStale(data.agentActivity);
+
   const placementChipLabel = data.placementState === "selected" ? "target" : data.placementState === "available" ? "avail" : null;
+
+  // PL-019 item 5: include active-qitem summary in the hover hint when the
+  // agent is currently running and the daemon attached one or more qitems.
+  // Short ULID tail for hover; full id is in the drawer (separate surface).
+  const currentQitems = data.currentQitems ?? [];
+  const qitemHoverLines = currentQitems.length > 0
+    ? currentQitems.map((q) => `On: ${shortQitemTail(q.qitemId)} \u2014 ${q.bodyExcerpt}`)
+    : [];
+
   const hoverHintLines = [
+    `Activity: ${activityLabel}${activityIsStale ? " (stale sample)" : ""}`,
     data.canonicalSessionName ? `Session: ${data.canonicalSessionName}` : null,
     runtimeModel ? `Runtime: ${runtimeModel}` : null,
     data.resolvedSpecName ? `Spec: ${data.resolvedSpecName}` : null,
     data.profile ? `Profile: ${data.profile}` : null,
     typeof data.edgeCount === "number" ? `Edges: ${data.edgeCount}` : null,
+    ...qitemHoverLines,
   ].filter((line): line is string => Boolean(line));
   const hoverHint = hoverHintLines.join("\n");
 
@@ -170,12 +184,24 @@ export function RigNode({ data }: { data: RigNodeData }) {
         <span className="font-bold truncate">
           {agentName}
         </span>
-        <span
-          className={`inline-flex h-2.5 w-2.5 rounded-full border border-white/50 ${statusClass} ${statusChanged ? "status-changed" : ""}`}
-          data-testid={`status-dot-${data.logicalId}`}
-          aria-label={statusLabel}
-          title={statusLabel}
-        />
+        <span className="inline-flex items-center gap-1">
+          {activityIsStale && (
+            <span
+              data-testid={`activity-staleness-${data.logicalId}`}
+              className="font-mono text-[7px] uppercase tracking-[0.10em] text-stone-300"
+              title={`Activity sample is older than threshold; daemon may not be probing this seat`}
+            >
+              stale
+            </span>
+          )}
+          <span
+            className={`inline-flex h-2.5 w-2.5 rounded-full border border-white/50 ${activityBgClass} ${activityAnimClass} ${statusChanged ? "status-changed" : ""}`}
+            data-testid={`activity-dot-${data.logicalId}`}
+            data-activity-state={activityState}
+            aria-label={`activity: ${activityLabel}`}
+            title={`activity: ${activityLabel}`}
+          />
+        </span>
       </div>
 
       {/* Body */}

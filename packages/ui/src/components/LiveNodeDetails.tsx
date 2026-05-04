@@ -1,11 +1,12 @@
 import { useState } from "react";
-import { useNodeDetail } from "../hooks/useNodeDetail.js";
+import { useNodeDetail, type NodeDetailData } from "../hooks/useNodeDetail.js";
 import { useSpecLibrary, useLibraryReview } from "../hooks/useSpecLibrary.js";
 import { WorkspacePage } from "./WorkspacePage.js";
 import { WorkflowHeader } from "./WorkflowScaffold.js";
 import { LiveIdentityDisplay } from "./LiveIdentityDisplay.js";
 import { AgentSpecDisplay } from "./AgentSpecDisplay.js";
 import { displayPodName, inferPodName } from "../lib/display-name.js";
+import { getActivityLabel, getActivityState, getActivityTextClass, isActivityStale } from "../lib/activity-visuals.js";
 import type { AgentSpecReview } from "../hooks/useSpecReview.js";
 
 type Tab = "identity" | "agent-spec" | "startup" | "transcript";
@@ -61,6 +62,49 @@ function AgentSpecSection({ agentRef }: { agentRef: string | null }) {
   return <AgentSpecDisplay review={review as AgentSpecReview} yaml={review.raw} testIdPrefix="live-agent" />;
 }
 
+function LiveNodeCurrentState({ data }: { data: NodeDetailData }) {
+  const activityState = getActivityState(data.agentActivity);
+  const activityLabel = getActivityLabel(activityState);
+  const activityTextClass = getActivityTextClass(activityState);
+  const activityStale = isActivityStale(data.agentActivity);
+  const qitems = data.currentQitems ?? [];
+
+  return (
+    <section
+      data-testid="live-node-current-state"
+      className="grid gap-3 border border-stone-200 bg-stone-50/60 p-3 sm:grid-cols-2"
+    >
+      <div>
+        <div className="font-mono text-[8px] uppercase tracking-wider text-stone-400">Activity</div>
+        <div
+          data-testid="live-node-agent-activity"
+          className={`mt-1 font-mono text-[11px] font-bold uppercase ${activityTextClass}`}
+        >
+          {activityLabel}{activityStale ? " stale" : ""}
+        </div>
+        {data.agentActivity?.reason && (
+          <div className="mt-1 font-mono text-[9px] text-stone-500">{data.agentActivity.reason}</div>
+        )}
+      </div>
+
+      <div>
+        <div className="font-mono text-[8px] uppercase tracking-wider text-stone-400">Current Work</div>
+        <div data-testid="live-node-current-qitems" className="mt-1 space-y-1">
+          {qitems.length > 0 ? qitems.map((qitem) => (
+            <div key={qitem.qitemId} className="font-mono text-[9px] leading-4 text-stone-700">
+              <div className="font-bold text-stone-900">{qitem.qitemId}</div>
+              <div>{qitem.bodyExcerpt}</div>
+              {qitem.tier && <div className="text-[8px] uppercase tracking-wider text-stone-400">{qitem.tier}</div>}
+            </div>
+          )) : (
+            <div className="font-mono text-[9px] text-stone-400">No current qitems</div>
+          )}
+        </div>
+      </div>
+    </section>
+  );
+}
+
 export function LiveNodeDetails({ rigId, logicalId }: LiveNodeDetailsProps) {
   const { data, isLoading, error } = useNodeDetail(rigId, logicalId);
   const [activeTab, setActiveTab] = useState<Tab>("identity");
@@ -78,6 +122,7 @@ export function LiveNodeDetails({ rigId, logicalId }: LiveNodeDetailsProps) {
 
         {isLoading && <div className="font-mono text-[10px] text-stone-400">Loading...</div>}
         {error && <div className="p-3 bg-red-50 border border-red-200 font-mono text-[10px] text-red-700">{(error as Error).message}</div>}
+        {data && <LiveNodeCurrentState data={data} />}
 
         {/* Tabs */}
         <div className="flex gap-1 border-b border-stone-200">

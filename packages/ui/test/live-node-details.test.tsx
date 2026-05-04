@@ -23,6 +23,20 @@ const NODE_DETAIL = {
   },
   transcript: { enabled: true, path: "/tmp/test.log", tailCommand: "rig transcript dev-impl --tail 100" },
   compactSpec: { name: "impl", version: "1.0.0", profile: "default", skillCount: 2, guidanceCount: 1 },
+  agentActivity: {
+    state: "running",
+    reason: "edit",
+    evidenceSource: "runtime_hook",
+    sampledAt: "2026-05-04T07:58:31.057Z",
+    evidence: "edit",
+  },
+  currentQitems: [
+    {
+      qitemId: "qitem-20260504001234-driver",
+      bodyExcerpt: "Implement PL-019 edge activity pulse and graph qitem hover.",
+      tier: "mode-2",
+    },
+  ],
 };
 
 const INFRA_DETAIL = {
@@ -133,5 +147,18 @@ describe("LiveNodeDetails", () => {
       expect(screen.getByTestId("live-startup-section")).toBeDefined();
       expect(screen.getByText(/role\.md/)).toBeDefined();
     });
+  });
+
+  it("PL-019: full details shows activity and current qitems from node detail", async () => {
+    mockNodeDetail(NODE_DETAIL);
+    renderDetails();
+
+    await waitFor(() => {
+      expect(screen.getByTestId("live-node-current-state")).toBeDefined();
+    });
+
+    expect(screen.getByTestId("live-node-agent-activity").textContent).toContain("running");
+    expect(screen.getByTestId("live-node-current-qitems").textContent).toContain("04001234-driver");
+    expect(screen.getByTestId("live-node-current-qitems").textContent).toContain("Implement PL-019 edge activity pulse");
   });
 });
