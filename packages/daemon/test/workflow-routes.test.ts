@@ -118,6 +118,28 @@ describe("workflow routes (PL-004 Phase D)", () => {
     expect(body.entryQitemId).toBeDefined();
   });
 
+  it("POST /instantiate surfaces queue destination validation as 400", async () => {
+    const rejectingQueueRepo = new QueueRepository(db, bus, { validateRig: () => false });
+    const rejectingRuntime = new WorkflowRuntime({
+      db,
+      eventBus: bus,
+      queueRepo: rejectingQueueRepo,
+    });
+    const rejectingApp = buildApp({ eventBus: bus, runtime: rejectingRuntime });
+
+    const res = await rejectingApp.request("/api/workflow/instantiate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ specPath, rootObjective: "test", createdBySession: "ops@rig" }),
+    });
+
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string; message: string };
+    expect(body.error).toBe("unknown_destination_rig");
+    expect(body.error).not.toBe("internal_error");
+    expect(body.message).toContain("producer@rig");
+  });
+
   it("POST /project closes packet + creates next packet", async () => {
     const create = await app.request("/api/workflow/instantiate", {
       method: "POST",

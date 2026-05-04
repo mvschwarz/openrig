@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import * as path from "node:path";
 import type { EventBus } from "../domain/event-bus.js";
+import { QueueRepositoryError } from "../domain/queue-repository.js";
 import {
   WorkflowInstanceError,
   WorkflowProjectorError,
@@ -66,6 +67,13 @@ export function workflowRoutes(): Hono {
         : err.code === "packet_not_found" ? 404
         : 500;
       return c.json({ error: err.code, message: err.message, ...(err.details ?? {}) }, status as 200);
+    }
+    if (err instanceof QueueRepositoryError) {
+      const status =
+        err.code === "unknown_destination_rig" ? 400
+        : err.code === "qitem_not_found" ? 404
+        : 500;
+      return c.json({ error: err.code, message: err.message, ...(err.meta ?? {}) }, status as 200);
     }
     const message = err instanceof Error ? err.message : "internal error";
     return c.json({ error: "internal_error", message }, 500);
