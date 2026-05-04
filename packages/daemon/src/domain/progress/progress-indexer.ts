@@ -83,8 +83,13 @@ const SKIP_DIRS = new Set(["node_modules", ".git", ".worktrees", "dist", "build"
 const ENV_VAR = "OPENRIG_PROGRESS_SCAN_ROOTS";
 const LEGACY_ENV_VAR = "RIGGED_PROGRESS_SCAN_ROOTS";
 
-export function readProgressRootsFromEnv(env: NodeJS.ProcessEnv = process.env): ProgressScanRoot[] {
-  const raw = env[ENV_VAR] ?? env[LEGACY_ENV_VAR] ?? "";
+/**
+ * Decodes a raw `name:/abs/path,...` progress-roots string into a
+ * ProgressScanRoot[]. Same semantics as decodeAllowlist in path-safety;
+ * keep them parallel. Used by both the env-only legacy path and the
+ * settings-resolved (env > file > empty) path.
+ */
+export function decodeProgressScanRoots(raw: string): ProgressScanRoot[] {
   if (!raw.trim()) return [];
   const out = new Map<string, string>();
   for (const pair of raw.split(",")) {
@@ -100,6 +105,11 @@ export function readProgressRootsFromEnv(env: NodeJS.ProcessEnv = process.env): 
     out.set(name, canonical);
   }
   return Array.from(out.entries()).map(([name, canonicalPath]) => ({ name, canonicalPath }));
+}
+
+export function readProgressRootsFromEnv(env: NodeJS.ProcessEnv = process.env): ProgressScanRoot[] {
+  const raw = env[ENV_VAR] ?? env[LEGACY_ENV_VAR] ?? "";
+  return decodeProgressScanRoots(raw);
 }
 
 export interface ProgressIndexerOpts {
