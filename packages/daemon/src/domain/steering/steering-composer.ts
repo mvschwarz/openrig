@@ -118,6 +118,24 @@ export function steeringOptsFromEnv(env: NodeJS.ProcessEnv = process.env): Steer
   };
 }
 
+export interface SteeringSettingsDefaults {
+  workspaceRoot: string;
+  workspaceSteeringPath: string;
+}
+
+export function steeringOptsFromSettings(
+  settings: SteeringSettingsDefaults,
+  env: NodeJS.ProcessEnv = process.env,
+): SteeringComposerOpts {
+  const envOpts = steeringOptsFromEnv(env);
+  return {
+    workspaceRoot: envOpts.workspaceRoot ?? settings.workspaceRoot,
+    steeringPath: envOpts.steeringPath ?? settings.workspaceSteeringPath,
+    roadmapPath: envOpts.roadmapPath ?? null,
+    deliveryReadyDir: envOpts.deliveryReadyDir ?? null,
+  };
+}
+
 export class SteeringComposer {
   private readonly opts: Required<Omit<SteeringComposerOpts, "workspaceRoot">> & { workspaceRoot: string | null };
 
