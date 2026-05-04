@@ -25,6 +25,13 @@ export interface SliceListResponse {
   slices: SliceListEntry[];
   totalCount: number;
   filter: SliceFilter;
+  // Workflows in Spec Library v0 — present only when boundToWorkflow filter applied.
+  boundToWorkflow?: {
+    specName: string;
+    specVersion: string;
+    matched: number;
+    total: number;
+  };
 }
 
 export interface SlicesUnavailable {
@@ -33,8 +40,20 @@ export interface SlicesUnavailable {
   hint?: string;
 }
 
-async function fetchSlicesList(filter: SliceFilter): Promise<SliceListResponse | SlicesUnavailable> {
-  const res = await fetch(`/api/slices?filter=${encodeURIComponent(filter)}`);
+export interface BoundToWorkflowFilter {
+  specName: string;
+  specVersion: string;
+}
+
+async function fetchSlicesList(
+  filter: SliceFilter,
+  boundToWorkflow: BoundToWorkflowFilter | null,
+): Promise<SliceListResponse | SlicesUnavailable> {
+  const params = new URLSearchParams({ filter });
+  if (boundToWorkflow) {
+    params.set("boundToWorkflow", `${boundToWorkflow.specName}:${boundToWorkflow.specVersion}`);
+  }
+  const res = await fetch(`/api/slices?${params.toString()}`);
   if (res.status === 503) {
     const body = (await res.json().catch(() => ({}))) as Partial<SlicesUnavailable> & { error?: string; hint?: string };
     return {
@@ -47,10 +66,15 @@ async function fetchSlicesList(filter: SliceFilter): Promise<SliceListResponse |
   return (await res.json()) as SliceListResponse;
 }
 
-export function useSlices(filter: SliceFilter) {
+export function useSlices(filter: SliceFilter, boundToWorkflow: BoundToWorkflowFilter | null = null) {
   return useQuery({
-    queryKey: ["slices", "list", filter],
-    queryFn: () => fetchSlicesList(filter),
+    queryKey: [
+      "slices",
+      "list",
+      filter,
+      boundToWorkflow ? `${boundToWorkflow.specName}:${boundToWorkflow.specVersion}` : "all",
+    ],
+    queryFn: () => fetchSlicesList(filter, boundToWorkflow),
     staleTime: 30_000,
   });
 }

@@ -6,7 +6,9 @@
 
 import { useState } from "react";
 import { Link, useParams } from "@tanstack/react-router";
+import { useQueryClient } from "@tanstack/react-query";
 import { useSlices, type SliceFilter, type SliceListEntry, type SliceListResponse, type SlicesUnavailable } from "../../hooks/useSlices.js";
+import { useActiveLens, clearActiveLens } from "../../hooks/useSpecLibrary.js";
 
 const FILTERS: SliceFilter[] = ["all", "active", "done", "blocked"];
 
@@ -18,7 +20,20 @@ export function SliceExplorerPanel({ onNavigate = () => {} }: { onNavigate?: () 
   const params = useParams({ strict: false }) as { name?: string };
   const selectedName = params.name ?? null;
   const [filter, setFilter] = useState<SliceFilter>("active");
-  const list = useSlices(filter);
+  const [showAll, setShowAll] = useState(false);
+  const queryClient = useQueryClient();
+  const { data: activeLens } = useActiveLens();
+  const lensActive = !!activeLens && !showAll;
+  const list = useSlices(
+    filter,
+    lensActive ? { specName: activeLens!.specName, specVersion: activeLens!.specVersion } : null,
+  );
+
+  const onClearLens = async () => {
+    await clearActiveLens();
+    await queryClient.invalidateQueries({ queryKey: ["spec-library", "active-lens"] });
+    await queryClient.invalidateQueries({ queryKey: ["slices"] });
+  };
 
   return (
     <div data-testid="slice-list-pane" className="flex h-full flex-col">
@@ -42,6 +57,34 @@ export function SliceExplorerPanel({ onNavigate = () => {} }: { onNavigate?: () 
             </button>
           ))}
         </div>
+        {activeLens && (
+          <div
+            data-testid="slice-lens-indicator"
+            className="mt-2 border border-stone-300 bg-stone-50 px-2 py-1 font-mono text-[9px] text-stone-700 space-y-1"
+          >
+            <div className="flex items-center justify-between">
+              <span className="truncate">
+                Lens: {activeLens.specName} v{activeLens.specVersion}
+              </span>
+              <button
+                type="button"
+                data-testid="slice-lens-clear"
+                onClick={() => void onClearLens()}
+                className="ml-2 shrink-0 border border-stone-300 px-1 py-0.5 text-[8px] uppercase tracking-[0.10em] text-stone-600 hover:bg-stone-200"
+              >
+                Clear
+              </button>
+            </div>
+            <button
+              type="button"
+              data-testid="slice-lens-show-all-toggle"
+              onClick={() => setShowAll((v) => !v)}
+              className="w-full border border-stone-300 px-1 py-0.5 text-[8px] uppercase tracking-[0.10em] text-stone-600 hover:bg-stone-200"
+            >
+              {showAll ? "Apply Lens Filter" : "Show All Slices"}
+            </button>
+          </div>
+        )}
       </div>
 
       <div className="flex-1 overflow-y-auto" data-testid="slice-list">
@@ -54,7 +97,11 @@ export function SliceExplorerPanel({ onNavigate = () => {} }: { onNavigate?: () 
           </div>
         )}
         {!isUnavailable(list.data) && list.data && list.data.slices.length === 0 && (
-          <div className="p-3 font-mono text-[10px] text-stone-400">No slices match.</div>
+          <div className="p-3 font-mono text-[10px] text-stone-400" data-testid="slice-list-empty">
+            {lensActive
+              ? `No slices bound to ${activeLens?.specName} v${activeLens?.specVersion}.`
+              : "No slices match."}
+          </div>
         )}
         {!isUnavailable(list.data) && list.data && list.data.slices.map((slice) => (
           <SliceListRow

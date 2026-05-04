@@ -120,7 +120,12 @@ const STATUS_TO_BUCKET: Record<string, SliceStatus> = {
 export class SliceIndexer {
   readonly slicesRoot: string;
   readonly dogfoodEvidenceRoot: string | null;
-  private readonly db: Database.Database;
+  /** Workflows in Spec Library v0: exposed read-only so the slices
+   *  route's `boundToWorkflow` lens filter can call
+   *  `findSliceWorkflowBinding(db, qitemIds)` without re-injecting
+   *  the db handle elsewhere. Internal callers continue to use it
+   *  the same way; read-only consumer outside the class. */
+  readonly db: Database.Database;
   private readonly cacheTtlMs: number;
   private listingCache: CachedListing | null = null;
   private detailCache: Map<string, CachedSlice> = new Map();

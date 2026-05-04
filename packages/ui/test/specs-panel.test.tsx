@@ -281,3 +281,107 @@ describe("SpecsPanel filter chips and richer rows", () => {
     });
   });
 });
+
+describe("SpecsPanel Workflows filter chip (Workflows in Spec Library v0)", () => {
+  const origFetch = globalThis.fetch;
+  const mockFetch2 = vi.fn();
+
+  beforeEach(() => {
+    globalThis.fetch = mockFetch2 as unknown as typeof fetch;
+    mockFetch2.mockImplementation(async (url: string) => {
+      if (typeof url === "string" && url.includes("/api/specs/library") && !url.includes("kind=")) {
+        return {
+          ok: true,
+          json: async () => [
+            {
+              id: "rig-1",
+              kind: "rig",
+              name: "demo",
+              version: "0.2",
+              sourceType: "builtin",
+              sourcePath: "/specs/rigs/launch/demo/rig.yaml",
+              relativePath: "rigs/launch/demo/rig.yaml",
+              updatedAt: "2026-04-09T00:00:00Z",
+            },
+            {
+              id: "agent-1",
+              kind: "agent",
+              name: "implementer",
+              version: "1.0",
+              sourceType: "builtin",
+              sourcePath: "/specs/agents/development/implementer/agent.yaml",
+              relativePath: "agents/development/implementer/agent.yaml",
+              updatedAt: "2026-04-09T00:00:00Z",
+            },
+            {
+              id: "workflow:rsi-v2-hot-potato:1",
+              kind: "workflow",
+              name: "rsi-v2-hot-potato",
+              version: "1",
+              sourceType: "builtin",
+              sourcePath: "/builtins/workflow-specs/rsi-v2-hot-potato.yaml",
+              relativePath: "rsi-v2-hot-potato.yaml",
+              updatedAt: "2026-05-04T00:00:00Z",
+              isBuiltIn: true,
+              rolesCount: 3,
+              stepsCount: 4,
+              terminalTurnRule: "hot_potato",
+              targetRig: null,
+            },
+          ],
+        };
+      }
+      if (typeof url === "string" && url.includes("/api/specs/library") && url.includes("kind=")) {
+        return { ok: true, json: async () => [] };
+      }
+      return { ok: true, json: async () => [] };
+    });
+  });
+
+  afterEach(() => {
+    globalThis.fetch = origFetch;
+    window.localStorage.clear();
+    cleanup();
+  });
+
+  function renderFilterPanel() {
+    const onClose = vi.fn();
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+    return render(
+      <QueryClientProvider client={qc}>
+        {createAppTestRouter({
+          initialPath: "/",
+          routes: [
+            { path: "/", component: () => <div>home</div> },
+            { path: "/specs/library/$entryId", component: () => <div data-testid="library-review">review</div> },
+          ],
+          rootComponent: ({ children }) => (
+            <SpecsWorkspaceProvider>
+              <SpecsPanel onClose={onClose} />
+              {children}
+            </SpecsWorkspaceProvider>
+          ),
+        })}
+      </QueryClientProvider>
+    );
+  }
+
+  it("renders the Workflows filter chip and a workflow row with WORKFLOW badge", async () => {
+    renderFilterPanel();
+    await waitFor(() => expect(screen.getByText("rsi-v2-hot-potato")).toBeDefined());
+    expect(screen.getByTestId("filter-workflows")).toBeDefined();
+    const wfRow = screen.getByTestId("library-entry-workflow:rsi-v2-hot-potato:1");
+    expect(wfRow.textContent).toContain("WORKFLOW");
+  });
+
+  it("clicking Workflows filter shows only workflow entries", async () => {
+    renderFilterPanel();
+    await waitFor(() => expect(screen.getByText("rsi-v2-hot-potato")).toBeDefined());
+    fireEvent.click(screen.getByTestId("filter-workflows"));
+    await waitFor(() => {
+      expect(screen.getByText("rsi-v2-hot-potato")).toBeDefined();
+      expect(screen.queryByText("demo")).toBeNull();
+      expect(screen.queryByText("implementer")).toBeNull();
+    });
+  });
+});
