@@ -126,21 +126,7 @@ export class MissionControlWriteContract {
       return this.annotateOnly(input);
     }
 
-    const source = this.queueRepo.getById(input.qitemId);
-    if (!source) {
-      throw new MissionControlWriteContractError(
-        "qitem_not_found",
-        `qitem ${input.qitemId} not found`,
-        { qitemId: input.qitemId },
-      );
-    }
-    if (source.state === "done" || source.state === "handed-off") {
-      throw new MissionControlWriteContractError(
-        "qitem_already_terminal",
-        `qitem ${input.qitemId} is already terminal (state=${source.state}); Mission Control cannot mutate terminal items`,
-        { qitemId: input.qitemId, state: source.state },
-      );
-    }
+    const source = this.requireMutableQitem(input.qitemId);
 
     if ((input.verb === "route" || input.verb === "handoff") && !input.destinationSession) {
       throw new MissionControlWriteContractError(
@@ -274,6 +260,8 @@ export class MissionControlWriteContract {
         { verb: input.verb },
       );
     }
+    const source = this.requireMutableQitem(input.qitemId);
+    const snapshot = snapshotQitem(source);
     const evaluatedAt = this.now().toISOString();
     let actionEntry: ReturnType<MissionControlActionLog["record"]> | null = null;
     const persistedEvents: PersistedEvent[] = [];
@@ -284,6 +272,8 @@ export class MissionControlWriteContract {
         qitemId: input.qitemId,
         actorSession: input.actorSession,
         actedAt: evaluatedAt,
+        beforeState: snapshot,
+        afterState: snapshot,
         annotation: input.annotation!,
         auditNotes: input.auditNotes ?? null,
       });
@@ -310,6 +300,25 @@ export class MissionControlWriteContract {
       notifyResult: null,
       auditedAt: evaluatedAt,
     };
+  }
+
+  private requireMutableQitem(qitemId: string): QueueItem {
+    const source = this.queueRepo.getById(qitemId);
+    if (!source) {
+      throw new MissionControlWriteContractError(
+        "qitem_not_found",
+        `qitem ${qitemId} not found`,
+        { qitemId },
+      );
+    }
+    if (source.state === "done" || source.state === "handed-off") {
+      throw new MissionControlWriteContractError(
+        "qitem_already_terminal",
+        `qitem ${qitemId} is already terminal (state=${source.state}); Mission Control cannot mutate terminal items`,
+        { qitemId, state: source.state },
+      );
+    }
+    return source;
   }
 }
 
