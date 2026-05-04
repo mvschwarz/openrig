@@ -104,6 +104,8 @@ describe("SettingsStore (User Settings v0)", () => {
     expect(cfg.workspaceSteeringPath).toBe("/custom/ws/steering/STEERING.md");
     expect(cfg.workspaceFieldNotesRoot).toBe("/custom/ws/field-notes");
     expect(cfg.workspaceSpecsRoot).toBe("/custom/ws/specs");
+    expect(cfg.filesAllowlistRaw).toBe("workspace:/custom/ws");
+    expect(cfg.progressScanRootsRaw).toBe("workspace:/custom/ws");
   });
 
   it("per-subdir override beats the workspace.root cascade", () => {
