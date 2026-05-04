@@ -47,6 +47,11 @@ export interface QueueItem {
   lastNudgeResult: string | null;
   lastHeartbeat: string | null;
   resolution: string | null;
+  /** PL-007 Workspace Primitive — typed repo scope for the qitem. Validated
+   *  by the route layer against the source rig's RigSpec.workspace.repos[].
+   *  Null when the task is unambiguously the rig's default_repo or
+   *  ambiguity is absent. Stored as a dedicated TEXT column (migration 038). */
+  targetRepo: string | null;
 }
 
 interface QueueItemRow {
@@ -73,6 +78,7 @@ interface QueueItemRow {
   last_nudge_result: string | null;
   last_heartbeat: string | null;
   resolution: string | null;
+  target_repo: string | null;
 }
 
 /**
@@ -102,6 +108,9 @@ export interface QueueCreateInput {
   tags?: string[];
   expiresAt?: string;
   chainOfRecord?: string[];
+  /** PL-007 — typed repo scope for this qitem. Route validates against
+   *  source rig's workspace.repos[]; unknown names rejected upstream. */
+  targetRepo?: string | null;
   /**
    * R1 fix (PL-004 Phase A revision): Phase A is durable + waking by default.
    * When true (or omitted), the repository nudges the destination after the
@@ -144,6 +153,9 @@ export interface QueueHandoffInput {
   tags?: string[];
   /** Default true; nudge the destination after the close+create transaction. */
   nudge?: boolean;
+  /** PL-007 — typed repo scope for the new qitem. When omitted, the new
+   *  qitem inherits the source's targetRepo. */
+  targetRepo?: string | null;
 }
 
 /**
@@ -164,6 +176,8 @@ export interface QueueListOptions {
   destinationSession?: string;
   sourceSession?: string;
   state?: QueueState | QueueState[];
+  /** PL-007 — filter qitems by target_repo. Exact match. */
+  targetRepo?: string;
   limit?: number;
 }
 
@@ -185,6 +199,18 @@ function newQitemId(): string {
   return `qitem-${ts}-${hex}`;
 }
 
+/** PL-007 — defensive column probe. Older test fixtures bypass the
+ *  canonical migration list, so target_repo may be absent. Mirrors
+ *  the `hasNodeColumn` pattern in rig-repository.ts. */
+function detectQueueColumn(db: Database.Database, columnName: string): boolean {
+  try {
+    return db.prepare("PRAGMA table_info(queue_items)").all()
+      .some((row) => (row as { name?: string }).name === columnName);
+  } catch {
+    return false;
+  }
+}
+
 /**
  * L3 — Queue repository. Owns CRUD over `queue_items` plus the wired-in
  * append-only transition log and hot-potato strict-rejection contract.
@@ -200,6 +226,12 @@ export class QueueRepository {
   private readonly eventBus: EventBus;
   private readonly validateRig: (sessionRef: string) => boolean;
   private transport: QueueNudgeTransport | undefined;
+  /** PL-007 Workspace Primitive — true when migration 038 has applied the
+   *  queue_items.target_repo column. Older test fixtures that bypass the
+   *  canonical migration list don't have the column; INSERTs degrade to
+   *  the pre-PL-007 statement and target_repo input is silently dropped.
+   *  Production daemons always have the column (migration is in startup.ts). */
+  private readonly hasTargetRepoColumn: boolean;
 
   constructor(
     db: Database.Database,
@@ -222,6 +254,7 @@ export class QueueRepository {
     this.transitionLog = new QueueTransitionLog(db);
     this.validateRig = opts?.validateRig ?? (() => true);
     this.transport = opts?.transport;
+    this.hasTargetRepoColumn = detectQueueColumn(db, "target_repo");
   }
 
   /**
@@ -341,15 +374,27 @@ export class QueueRepository {
     const tags = input.tags ? JSON.stringify(input.tags) : null;
     const chain = input.chainOfRecord ? JSON.stringify(input.chainOfRecord) : null;
     const expiresAt = input.expiresAt ?? null;
+    const targetRepo = input.targetRepo ?? null;
 
-    this.db
-      .prepare(
-        `INSERT INTO queue_items (
-          qitem_id, ts_created, ts_updated, source_session, destination_session,
-          state, priority, tier, tags, expires_at, chain_of_record, body
-        ) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)`
-      )
-      .run(id, ts, ts, input.sourceSession, input.destinationSession, priority, tier, tags, expiresAt, chain, input.body);
+    if (this.hasTargetRepoColumn) {
+      this.db
+        .prepare(
+          `INSERT INTO queue_items (
+            qitem_id, ts_created, ts_updated, source_session, destination_session,
+            state, priority, tier, tags, expires_at, chain_of_record, body, target_repo
+          ) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run(id, ts, ts, input.sourceSession, input.destinationSession, priority, tier, tags, expiresAt, chain, input.body, targetRepo);
+    } else {
+      this.db
+        .prepare(
+          `INSERT INTO queue_items (
+            qitem_id, ts_created, ts_updated, source_session, destination_session,
+            state, priority, tier, tags, expires_at, chain_of_record, body
+          ) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)`
+        )
+        .run(id, ts, ts, input.sourceSession, input.destinationSession, priority, tier, tags, expiresAt, chain, input.body);
+    }
     this.transitionLog.append({
       qitemId: id,
       state: "pending",
@@ -400,6 +445,7 @@ export class QueueRepository {
     const tier = input.tier ?? source.tier;
     const tags = input.tags ? JSON.stringify(input.tags) : (source.tags ? JSON.stringify(source.tags) : null);
     const chain = JSON.stringify([...(source.chainOfRecord ?? []), source.qitemId]);
+    const targetRepo = input.targetRepo === undefined ? source.targetRepo : input.targetRepo;
 
     const events: Array<{ name: string; payload: import("./types.js").RigEvent }> = [];
 
@@ -425,26 +471,25 @@ export class QueueRepository {
         closureTarget: input.toSession,
       });
 
-      this.db
-        .prepare(
-          `INSERT INTO queue_items (
-            qitem_id, ts_created, ts_updated, source_session, destination_session,
-            state, priority, tier, tags, handed_off_from, chain_of_record, body
-          ) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)`
-        )
-        .run(
-          newId,
-          ts,
-          ts,
-          input.fromSession,
-          input.toSession,
-          priority,
-          tier,
-          tags,
-          source.qitemId,
-          chain,
-          body
-        );
+      if (this.hasTargetRepoColumn) {
+        this.db
+          .prepare(
+            `INSERT INTO queue_items (
+              qitem_id, ts_created, ts_updated, source_session, destination_session,
+              state, priority, tier, tags, handed_off_from, chain_of_record, body, target_repo
+            ) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)`
+          )
+          .run(newId, ts, ts, input.fromSession, input.toSession, priority, tier, tags, source.qitemId, chain, body, targetRepo);
+      } else {
+        this.db
+          .prepare(
+            `INSERT INTO queue_items (
+              qitem_id, ts_created, ts_updated, source_session, destination_session,
+              state, priority, tier, tags, handed_off_from, chain_of_record, body
+            ) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)`
+          )
+          .run(newId, ts, ts, input.fromSession, input.toSession, priority, tier, tags, source.qitemId, chain, body);
+      }
 
       this.transitionLog.append({
         qitemId: newId,
@@ -521,6 +566,7 @@ export class QueueRepository {
     const tier = input.tier ?? source.tier;
     const tags = input.tags ? JSON.stringify(input.tags) : (source.tags ? JSON.stringify(source.tags) : null);
     const chain = JSON.stringify([...(source.chainOfRecord ?? []), source.qitemId]);
+    const targetRepo = input.targetRepo === undefined ? source.targetRepo : input.targetRepo;
 
     const events: Array<{ name: string; payload: import("./types.js").RigEvent }> = [];
 
@@ -546,26 +592,25 @@ export class QueueRepository {
         closureTarget: input.toSession,
       });
 
-      this.db
-        .prepare(
-          `INSERT INTO queue_items (
-            qitem_id, ts_created, ts_updated, source_session, destination_session,
-            state, priority, tier, tags, handed_off_from, chain_of_record, body
-          ) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)`
-        )
-        .run(
-          newId,
-          ts,
-          ts,
-          input.fromSession,
-          input.toSession,
-          priority,
-          tier,
-          tags,
-          source.qitemId,
-          chain,
-          body
-        );
+      if (this.hasTargetRepoColumn) {
+        this.db
+          .prepare(
+            `INSERT INTO queue_items (
+              qitem_id, ts_created, ts_updated, source_session, destination_session,
+              state, priority, tier, tags, handed_off_from, chain_of_record, body, target_repo
+            ) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)`
+          )
+          .run(newId, ts, ts, input.fromSession, input.toSession, priority, tier, tags, source.qitemId, chain, body, targetRepo);
+      } else {
+        this.db
+          .prepare(
+            `INSERT INTO queue_items (
+              qitem_id, ts_created, ts_updated, source_session, destination_session,
+              state, priority, tier, tags, handed_off_from, chain_of_record, body
+            ) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)`
+          )
+          .run(newId, ts, ts, input.fromSession, input.toSession, priority, tier, tags, source.qitemId, chain, body);
+      }
 
       this.transitionLog.append({
         qitemId: newId,
@@ -909,6 +954,10 @@ export class QueueRepository {
       conditions.push(`state IN (${placeholders})`);
       params.push(...states);
     }
+    if (opts?.targetRepo && this.hasTargetRepoColumn) {
+      conditions.push("target_repo = ?");
+      params.push(opts.targetRepo);
+    }
 
     const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
     params.push(limit);
@@ -1037,6 +1086,9 @@ export class QueueRepository {
       lastNudgeResult: row.last_nudge_result,
       lastHeartbeat: row.last_heartbeat,
       resolution: row.resolution,
+      // PL-007: target_repo present only when migration 038 has applied;
+      // older test fixtures supply legacy rows where target_repo is undefined.
+      targetRepo: row.target_repo ?? null,
     };
   }
 }

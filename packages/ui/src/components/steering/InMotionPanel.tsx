@@ -10,6 +10,8 @@
 // to PL-005, which is out of scope here.
 
 import { useQuery } from "@tanstack/react-query";
+import { useWorkspace } from "../../hooks/useWorkspace.js";
+import { WorkspaceKindBadge } from "../WorkspaceKindBadge.js";
 
 interface MissionControlRow {
   qitemId: string;
@@ -53,6 +55,7 @@ function isSpecRelated(row: MissionControlRow): boolean {
 }
 
 export function InMotionPanel() {
+  const workspace = useWorkspace();
   const view = useQuery({
     queryKey: ["mission-control", "views", "recently-active"],
     queryFn: fetchRecentlyActive,
@@ -64,8 +67,15 @@ export function InMotionPanel() {
       className="border border-stone-300 bg-white"
     >
       <header className="flex items-baseline justify-between border-b border-stone-200 bg-stone-50 px-3 py-2">
-        <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-stone-700">
-          Product-specs in motion
+        <div className="flex items-baseline gap-2">
+          <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-stone-700">
+            Product-specs in motion
+          </div>
+          {/* PL-007: PRDs live in knowledge canon — surface the kind on
+           *  the panel header so the operator-context row is typed. */}
+          {workspace.data?.knowledgeKind && (
+            <WorkspaceKindBadge kind={workspace.data.knowledgeKind} compact />
+          )}
         </div>
         <div className="font-mono text-[9px] text-stone-500">
           via Mission Control · recently-active filtered to spec-related
