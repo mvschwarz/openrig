@@ -850,6 +850,14 @@ Notes:
 - `status` reads the seat-handover observability tables (migration `021`); it does not mutate anything.
 - `handover` plans the two-phase sequence; actual execution happens through the existing seat-launch surfaces under operator gating.
 
+## Mission Control / Queue Observability (PL-005 Phase A)
+
+Mission Control is an integrated product UI inside the existing shell, NOT a new `rig` command. Per PL-005 PRD line 301: "no new commands at v0; the `rig ps --nodes --json` surface is consumed read-only."
+
+Mission Control is reached via the product UI at the `/mission-control` route. The HTTP API surface (`/api/mission-control/*`) is documented in `docs/as-built/architecture.md` § Mission Control / Queue Observability. The 7 verbs (`approve`, `deny`, `route`, `annotate`, `hold`, `drop`, `handoff`) execute via `POST /api/mission-control/action`; the 7 views are read via `GET /api/mission-control/views/:view-name`.
+
+Mission Control consumes `rig ps --nodes --json` for fleet roll-up where the canonical CLI source is preferred. Cross-CLI-version drift is handled per the 4 sub-clauses of PRD § Runtime/Source Drift Acceptance: missing fields surface as honest "field unavailable on this rig's daemon version" placeholders; once-per-session-per-rig logging avoids spam; the fleet view shows a top-level "rigs running stale CLI" indicator.
+
 ## Commands Not Present
 
 These are not current top-level `rig` commands:

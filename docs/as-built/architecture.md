@@ -330,6 +330,35 @@ Migration boundary:
 - `028_project_classifications.ts` through `030_views_custom.ts` add the PL-004 Phase B classifier + view tables.
 - `031_watchdog_jobs.ts` and `032_watchdog_history.ts` add the PL-004 Phase C watchdog supervision-tree tables. `watchdog_jobs` is the canonical scheduler state (policy, target_session, scan + active-wake intervals, actionable + last_actionable_at active-wake state, lifecycle); `watchdog_history` is the append-only audit of meaningful evaluations only (loud `sent`/`skipped`/`terminal`). Quiet skip reasons (`not_due`, `no_actionable_artifacts`, `no_missing_edge_artifacts`, `active_wake_not_due`) are NOT recorded and do NOT emit `watchdog.*` events — POC parity so agents are not woken about scheduler polls. Scan cadence (`scan_interval_seconds`) is enforced by the scheduler; re-delivery cadence (`active_wake_interval_seconds`) is enforced by the policy engine and only suppresses repeated wakes during a continuously-actionable window. Phase D extends the policy enum to four values (Phase C's three plus `workflow-keepalive`); see § Workflow Runtime below.
 - `033_workflow_specs.ts`, `034_workflow_instances.ts`, `035_workflow_step_trails.ts` add the PL-004 Phase D Workflow Runtime tables. Migration `036_watchdog_policy_enum_extension.ts` is a documenting no-op that records the Phase D enum extension (Phase C uses application-layer enforcement via `PHASE_D_POLICIES` array, so no DDL is needed).
+- `037_mission_control_actions.ts` adds the PL-005 Phase A Mission Control action audit table. Append-only at the API surface; records every operator action through Mission Control with before/after qitem snapshots for forensic reconstruction (see § Mission Control / Queue Observability below).
+
+### Mission Control / Queue Observability (PL-005 Phase A)
+
+Daemon-backed Mission Control surface. Per PRD § Acceptance Criteria + founder steering 2026-05-03 (Q1-Q5): seven views + seven verbs + first-class human seats + recent-ships=10 + daemon-backed action audit table; no old-dashboard migration/cutover.
+
+**Seven views** (`my-queue`, `human-gate`, `fleet`, `active-work`, `recent-ships`, `recently-active`, `recent-observations`) all return rows in the load-bearing 9-field phone-friendly content model (rig/mission name, current phase, active|idle|attention|blocked|degraded, next-action, pending-human-decision, read-cost, last-update timestamp, confidence/freshness, evidence link). The model is non-negotiable across all 7 views; UI may render compact, JSON preserves all 9.
+
+`MissionControlReadLayer` maps each view to its source-of-truth path:
+- `my-queue` / `human-gate` / `active-work` / `recent-ships` query PL-004 Phase A `queue_items` via `QueueRepository`.
+- `fleet` consumes the per-rig CLI capability cache + queue summary.
+- `recently-active` delegates to PL-004 Phase B `ViewProjector.show("recently-active")`.
+- `recent-observations` reads PL-004 Phase A `stream_items` via `StreamStore`.
+
+Filesystem fallbacks (`~/.openrig/stream/<date>.jsonl`, raw queue file grep) are graceful-degradation aids, NOT the primary path.
+
+**Seven verbs** (`approve`, `deny`, `route`, `annotate`, `hold`, `drop`, `handoff`) execute through the load-bearing `MissionControlWriteContract`. Each verb is one atomic daemon transaction: queue mutation via `QueueRepository.updateWithinTransaction()` (which preserves Phase A hot-potato closure validation) + audit row in `mission_control_actions` + persisted `mission_control.action_executed` event, all in one `db.transaction`. The 4-step `handoff` shape (source-update + destination-create + opt-in best-effort notify + audit-record append) is verified atomic; notify failure does NOT roll back durable mutations (PRD invariant). Failure-injection rolls back source closure + audit row + new qitem together.
+
+**Cross-CLI-version drift** is handled per the 4 sub-clauses of PRD § Runtime/Source Drift Acceptance:
+1. Per-field availability check (`MissionControlFleetCliCapability.probeRig`).
+2. Per-rig capability honesty (each rig surfaces its own capabilities; mixed fleet rendered honestly).
+3. Once-per-session-per-rig logging (`MissionControlFleetCliCapability` deduplicates drift events by `(rig, field)` until daemon restart).
+4. Fleet-level "rigs running stale CLI" indicator (`FleetView` surfaces `staleCliCount` from `/api/mission-control/cli-capabilities`).
+
+**Human seats are first-class product concepts** (founder Q3): the operator's default `human-wrandom@kernel` seat is rendered via `HumanSeatCard` showing identity, pending load, blocked count, and verb capabilities. NOT invisible config-layer convention.
+
+**Mission Control is integrated product UI inside the existing shell** — a new top-level route `/mission-control` registered in `packages/ui/src/routes.tsx` mounting `MissionControlSurface`, NOT a new managed app, NOT a re-implementation of the proven `services/dashboard/` ancestor. The dashboard remains as a vocabulary/prototype reference; no production cutover/migration ceremony.
+
+PL-005 Phase A extends `RigEvent` with 3 new types: `mission_control.action_executed`, `mission_control.cli_drift_detected`, `mission_control.view_refreshed`. Existing 32 PL-004 events untouched. Localhost-only auth at v0 (matches existing dashboard posture; remote-bind is a separate slice).
 
 ### Workflow Runtime (PL-004 Phase D)
 

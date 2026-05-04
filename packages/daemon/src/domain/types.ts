@@ -192,7 +192,14 @@ export type RigEvent =
   | { type: "workflow.next_qitem_projected"; instanceId: string; nextQitemId: string; nextOwner: string; nextStepId: string }
   | { type: "workflow.completed"; instanceId: string; workflowName: string }
   | { type: "workflow.failed"; instanceId: string; workflowName: string; reason: string }
-  | { type: "workflow.routing_table_changed"; rigName: string; cause: string };
+  | { type: "workflow.routing_table_changed"; rigName: string; cause: string }
+  // PL-005 Phase A: Mission Control / Queue Observability events.
+  // Action audit + cross-CLI-version drift detection. view_refreshed
+  // is emitted when a Mission Control view is recomputed (SSE
+  // consumers can choose whether to re-fetch).
+  | { type: "mission_control.action_executed"; actionId: string; actionVerb: string; qitemId: string | null; actorSession: string }
+  | { type: "mission_control.cli_drift_detected"; rigName: string; missingField: string; observedAt: string }
+  | { type: "mission_control.view_refreshed"; viewName: string; cause: string };
 
 export type PersistedEvent = RigEvent & {
   seq: number;
