@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
+import type Database from "better-sqlite3";
 import type { EventBus } from "../domain/event-bus.js";
 import { authBearerTokenMiddleware } from "../middleware/auth-bearer-token.js";
 import {
@@ -33,6 +34,7 @@ import type { MissionControlNotificationDispatcher } from "../domain/mission-con
  *   GET  /api/mission-control/sse                 SSE stream of mission_control.* events
  *   GET  /api/mission-control/watch               alias of /sse
  *   GET  /api/mission-control/cli-capabilities    per-rig CLI capability cache
+ *   GET  /api/mission-control/destinations         handoff/route destination candidates
  *   GET  /api/mission-control/views               list view names
  */
 export interface MissionControlRoutesOpts {
@@ -43,6 +45,16 @@ export interface MissionControlRoutesOpts {
    * check guarantees this).
    */
   bearerToken?: string | null;
+}
+
+export interface MissionControlDestination {
+  sessionName: string;
+  label: string;
+  source: "topology" | "queue";
+  rigName?: string | null;
+  logicalId?: string | null;
+  runtime?: string | null;
+  status?: string | null;
 }
 
 export function missionControlRoutes(opts?: MissionControlRoutesOpts): Hono {
@@ -77,6 +89,105 @@ export function missionControlRoutes(opts?: MissionControlRoutesOpts): Hono {
   }
   function getEventBus(c: { get: (key: string) => unknown }): EventBus {
     return c.get("eventBus" as never) as EventBus;
+  }
+  function getDb(c: { get: (key: string) => unknown }): Database.Database | undefined {
+    return c.get("db" as never) as Database.Database | undefined;
+  }
+
+  function tableExists(db: Database.Database, tableName: string): boolean {
+    const row = db
+      .prepare("SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = ?")
+      .get(tableName) as { present: number } | undefined;
+    return Boolean(row);
+  }
+
+  function listDestinations(db: Database.Database): MissionControlDestination[] {
+    const destinations = new Map<string, MissionControlDestination>();
+    const addDestination = (candidate: MissionControlDestination) => {
+      const sessionName = candidate.sessionName.trim();
+      if (!sessionName) return;
+      const existing = destinations.get(sessionName);
+      if (!existing || candidate.source === "topology") {
+        destinations.set(sessionName, { ...candidate, sessionName });
+      }
+    };
+
+    if (tableExists(db, "sessions") && tableExists(db, "nodes") && tableExists(db, "rigs")) {
+      const rows = db
+        .prepare(
+          `
+            SELECT
+              s.session_name,
+              s.status,
+              n.logical_id,
+              n.runtime,
+              r.name AS rig_name
+            FROM sessions s
+            JOIN nodes n ON n.id = s.node_id
+            JOIN rigs r ON r.id = n.rig_id
+            WHERE s.session_name IS NOT NULL AND TRIM(s.session_name) != ''
+            ORDER BY r.name COLLATE NOCASE, n.logical_id COLLATE NOCASE, s.session_name COLLATE NOCASE
+          `,
+        )
+        .all() as Array<{
+          session_name: string;
+          status: string | null;
+          logical_id: string | null;
+          runtime: string | null;
+          rig_name: string | null;
+        }>;
+
+      for (const row of rows) {
+        const topologyLabel =
+          row.logical_id && row.rig_name ? `${row.logical_id}@${row.rig_name}` : null;
+        addDestination({
+          sessionName: row.session_name,
+          label:
+            topologyLabel && topologyLabel !== row.session_name
+              ? `${topologyLabel} - ${row.session_name}`
+              : row.session_name,
+          source: "topology",
+          rigName: row.rig_name,
+          logicalId: row.logical_id,
+          runtime: row.runtime,
+          status: row.status,
+        });
+      }
+    }
+
+    if (tableExists(db, "queue_items")) {
+      const rows = db
+        .prepare(
+          `
+            SELECT DISTINCT TRIM(session_name) AS session_name
+            FROM (
+              SELECT source_session AS session_name FROM queue_items
+              UNION
+              SELECT destination_session AS session_name FROM queue_items
+              UNION
+              SELECT handed_off_to AS session_name FROM queue_items
+              UNION
+              SELECT handed_off_from AS session_name FROM queue_items
+            )
+            WHERE session_name IS NOT NULL AND TRIM(session_name) != ''
+            ORDER BY session_name COLLATE NOCASE
+          `,
+        )
+        .all() as Array<{ session_name: string }>;
+
+      for (const row of rows) {
+        addDestination({
+          sessionName: row.session_name,
+          label: row.session_name,
+          source: "queue",
+        });
+      }
+    }
+
+    return [...destinations.values()].sort((a, b) => {
+      if (a.source !== b.source) return a.source === "topology" ? -1 : 1;
+      return a.label.localeCompare(b.label);
+    });
   }
 
   function errorResponse(
@@ -118,6 +229,14 @@ export function missionControlRoutes(opts?: MissionControlRoutesOpts): Hono {
   app.get("/cli-capabilities", async (c) => {
     const fleet = await getCliCapability(c).rollupFleet();
     return c.json(fleet);
+  });
+
+  // GET /destinations — phone-friendly route/handoff candidates. MUST precede
+  // /views/:view-name catchall with the other Mission Control literal routes.
+  app.get("/destinations", (c) => {
+    const db = getDb(c);
+    if (!db) return c.json({ destinations: [] });
+    return c.json({ destinations: listDestinations(db) });
   });
 
   // SSE for mission_control.* events. MUST precede /views/:view-name
