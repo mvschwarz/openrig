@@ -155,6 +155,22 @@ describe("PL-slice-story-view-v0 SliceIndexer", () => {
       expect(byName.get("s4")).toBe("draft");
       expect(byName.get("s5")).toBe("draft");
     });
+
+    it("uses PROGRESS.md status as the current slice cursor over stale README dispatch status", () => {
+      writeSlice(slicesRoot, "mission-control-queue-observability-phase-a", {
+        "README.md": "---\nslice: mission-control-queue-observability-phase-a\nstatus: ready-for-delivery-dispatch\nrail-item: PL-005\n---\n# Mission Control Phase A\n",
+        "PROGRESS.md": "---\ndoc: mission-control-progress\nstatus: phase-a-closed-locally-promoted\nrail-item: PL-005\n---\n# Progress\n",
+      });
+      const indexer = new SliceIndexer({ slicesRoot, dogfoodEvidenceRoot: null, db });
+      const entry = indexer.list()[0]!;
+      const detail = indexer.get("mission-control-queue-observability-phase-a")!;
+
+      expect(entry.rawStatus).toBe("phase-a-closed-locally-promoted");
+      expect(entry.status).toBe("done");
+      expect(entry.displayName).toBe("mission-control-queue-observability-phase-a");
+      expect(detail.rawStatus).toBe("phase-a-closed-locally-promoted");
+      expect(detail.status).toBe("done");
+    });
   });
 
   describe("rail-item extraction", () => {

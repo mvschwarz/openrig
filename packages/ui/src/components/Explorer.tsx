@@ -13,10 +13,12 @@ import {
   getActivityAnimationClass,
   shortQitemTail,
 } from "../lib/activity-visuals.js";
+import { SliceExplorerPanel } from "./slices/SliceExplorerPanel.js";
 
 import type { DrawerSelection } from "./SharedDetailDrawer.js";
 
 export type ExplorerDesktopMode = "full" | "hidden";
+export type ExplorerSurface = "topology" | "slices";
 
 interface ExplorerProps {
   open: boolean;
@@ -24,6 +26,8 @@ interface ExplorerProps {
   selection: DrawerSelection;
   onSelect: (sel: DrawerSelection) => void;
   desktopMode?: ExplorerDesktopMode;
+  surface?: ExplorerSurface;
+  onSurfaceChange?: (surface: ExplorerSurface) => void;
   onDesktopToggle?: () => void;
 }
 
@@ -461,12 +465,51 @@ function FullExplorerContents({
   );
 }
 
+function ExplorerModeTabs({
+  surface,
+  onSurfaceChange,
+}: {
+  surface: ExplorerSurface;
+  onSurfaceChange: (surface: ExplorerSurface) => void;
+}) {
+  const tabs: Array<{ value: ExplorerSurface; label: string; testId: string }> = [
+    { value: "topology", label: "Explore", testId: "explorer-tab-explore" },
+    { value: "slices", label: "Slices", testId: "explorer-tab-slices" },
+  ];
+
+  return (
+    <div data-testid="explorer-mode-tabs" className="border-b border-stone-200 p-2 pr-12">
+      <div className="grid grid-cols-2 gap-1">
+        {tabs.map((tab) => (
+          <button
+            key={tab.value}
+            type="button"
+            data-testid={tab.testId}
+            data-active={surface === tab.value}
+            onClick={() => onSurfaceChange(tab.value)}
+            className={cn(
+              "border px-2 py-1.5 font-mono text-[10px] uppercase tracking-[0.12em] transition-colors",
+              surface === tab.value
+                ? "border-stone-700 bg-stone-700 text-white"
+                : "border-stone-300 text-stone-700 hover:bg-stone-100"
+            )}
+          >
+            {tab.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export function Explorer({
   open,
   onClose,
   selection,
   onSelect,
   desktopMode = "full",
+  surface = "topology",
+  onSurfaceChange = () => {},
   onDesktopToggle = () => {},
 }: ExplorerProps) {
   const routerState = useRouterState();
@@ -505,14 +548,23 @@ export function Explorer({
         </button>
 
         {desktopMode === "full" ? (
-          <FullExplorerContents
-            rigs={rigs}
-            psMap={psMap}
-            selection={selection}
-            onSelect={onSelect}
-            onClose={onClose}
-            currentRigId={currentRigId}
-          />
+          <>
+            <ExplorerModeTabs surface={surface} onSurfaceChange={onSurfaceChange} />
+            {surface === "slices" ? (
+              <div className="min-h-0 flex-1">
+                <SliceExplorerPanel onNavigate={onClose} />
+              </div>
+            ) : (
+              <FullExplorerContents
+                rigs={rigs}
+                psMap={psMap}
+                selection={selection}
+                onSelect={onSelect}
+                onClose={onClose}
+                currentRigId={currentRigId}
+              />
+            )}
+          </>
         ) : (
           <div className="hidden h-full w-full lg:block" />
         )}

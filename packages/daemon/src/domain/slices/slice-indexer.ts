@@ -242,15 +242,23 @@ export class SliceIndexer {
   }
 
   private readPrimaryFrontmatter(slicePath: string): Record<string, unknown> {
-    // Prefer IMPLEMENTATION-PRD.md, fall back to README.md, then PROGRESS.md.
-    // Some slices only have a planner-brief at this point.
+    // Merge canonical slice frontmatter in document-order, with PROGRESS.md
+    // last so the current lifecycle cursor overrides older dispatch metadata
+    // while README.md/IMPLEMENTATION-PRD.md still supply slice title, rail item,
+    // and source refs when PROGRESS.md is sparse.
     const candidates = ["IMPLEMENTATION-PRD.md", "README.md", "PROGRESS.md"];
+    const merged: Record<string, unknown> = {};
     for (const candidate of candidates) {
       const fullPath = path.join(slicePath, candidate);
       if (!fs.existsSync(fullPath)) continue;
       const fm = parseFrontmatter(fs.readFileSync(fullPath, "utf8"));
-      if (Object.keys(fm).length > 0) return fm;
+      if (Object.keys(fm).length > 0) {
+        Object.assign(merged, fm);
+      }
     }
+    if (Object.keys(merged).length > 0) return merged;
+
+    // Some slices only have a planner-brief at this point.
     // Best-effort: any planner-brief shape.
     try {
       const entries = fs.readdirSync(slicePath, { withFileTypes: true });
