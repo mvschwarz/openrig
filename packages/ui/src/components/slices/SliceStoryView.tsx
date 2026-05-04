@@ -86,7 +86,12 @@ export function SliceStoryView() {
               </nav>
             </header>
             <section data-testid={`slice-tab-content-${activeTab}`} className="flex-1 min-h-0 overflow-y-auto">
-              {activeTab === "story" && <StoryTab events={detail.data.story.events} />}
+              {activeTab === "story" && (
+                <StoryTab
+                  events={detail.data.story.events}
+                  phaseDefinitions={detail.data.story.phaseDefinitions}
+                />
+              )}
               {activeTab === "acceptance" && <AcceptanceTab acceptance={detail.data.acceptance} />}
               {activeTab === "decisions" && <DecisionsTab rows={detail.data.decisions.rows} />}
               {activeTab === "docs" && <DocsTab sliceName={detail.data.name} tree={detail.data.docs.tree} />}
