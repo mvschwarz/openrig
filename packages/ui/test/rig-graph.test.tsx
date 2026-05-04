@@ -544,7 +544,9 @@ describe("RigNode", () => {
     expect(screen.getByText("impl")).toBeDefined();
     expect(screen.getByText("RUNTIME: claude-code · opus")).toBeDefined();
     expect(screen.queryByText("WORKER")).toBeNull();
-    expect(screen.getByTestId("status-dot-dev.impl").getAttribute("aria-label")).toBe("stopped");
+    // PL-019: dot now reflects agentActivity (was startupStatus); no
+    // agentActivity attached → "unknown" state, desaturated stone.
+    expect(screen.getByTestId("activity-dot-dev.impl").getAttribute("aria-label")).toBe("activity: unknown");
   });
 
   it("shows a compact stopped indicator when binding is null and status is null", () => {
@@ -563,29 +565,39 @@ describe("RigNode", () => {
       </ReactFlowProvider>
     );
 
-    expect(screen.getByTestId("status-dot-worker").getAttribute("aria-label")).toBe("stopped");
+    // PL-019: no agentActivity attached → unknown.
+    expect(screen.getByTestId("activity-dot-worker").getAttribute("aria-label")).toBe("activity: unknown");
   });
 
-  it("status dot uses color-only state on graph cards", () => {
-    // NS-T12: status colors now based on startupStatus
-    const statuses = [
-      { status: "running", startupStatus: "ready", expectedLabel: "ready", expectedClass: "bg-green-500" },
-      { status: "running", startupStatus: "pending", expectedLabel: "launching", expectedClass: "bg-amber-500" },
-      { status: "running", startupStatus: "attention_required", expectedLabel: "attention", expectedClass: "bg-orange-500" },
-      { status: "running", startupStatus: "failed", expectedLabel: "failed", expectedClass: "bg-red-500" },
-      { status: null, startupStatus: null, expectedLabel: "stopped", expectedClass: "bg-stone-400" },
+  it("PL-019: activity dot color is driven by agentActivity.state (not startupStatus)", () => {
+    // The four states + the no-activity fallback cover the entire palette
+    // contract. Per orch design guidance: running uses warm green/teal,
+    // needs_input is the static eye-catcher (amber), idle is calm cool
+    // (slate-400), unknown is desaturated (stone-300).
+    const cases = [
+      { state: "running" as const, expectedLabel: "activity: running", expectedClass: "bg-emerald-500" },
+      { state: "needs_input" as const, expectedLabel: "activity: needs input", expectedClass: "bg-amber-500" },
+      { state: "idle" as const, expectedLabel: "activity: idle", expectedClass: "bg-slate-400" },
+      { state: "unknown" as const, expectedLabel: "activity: unknown", expectedClass: "bg-stone-300" },
     ];
 
-    for (const { status, startupStatus, expectedLabel, expectedClass } of statuses) {
+    for (const { state, expectedLabel, expectedClass } of cases) {
       cleanup();
       const data = {
         logicalId: "test-node",
         role: "worker",
         runtime: "claude-code",
         model: null,
-        status,
-        startupStatus,
+        status: "running",
+        startupStatus: "ready" as const,
         binding: null,
+        agentActivity: {
+          state,
+          reason: "test",
+          evidenceSource: "pane_heuristic" as const,
+          sampledAt: new Date().toISOString(),
+          evidence: null,
+        },
       };
 
       render(
@@ -594,10 +606,87 @@ describe("RigNode", () => {
         </ReactFlowProvider>
       );
 
-      const dot = screen.getByTestId("status-dot-test-node");
+      const dot = screen.getByTestId("activity-dot-test-node");
       expect(dot.getAttribute("aria-label")).toBe(expectedLabel);
+      expect(dot.getAttribute("data-activity-state")).toBe(state);
       expect(dot.className).toContain(expectedClass);
     }
+  });
+
+  it("PL-019: only running gets the subtle pulse animation; needs_input/idle/unknown stay static", () => {
+    const animatingStates = [{ state: "running" as const, shouldPulse: true }];
+    const nonAnimatingStates: { state: "needs_input" | "idle" | "unknown"; shouldPulse: boolean }[] = [
+      { state: "needs_input", shouldPulse: false },
+      { state: "idle", shouldPulse: false },
+      { state: "unknown", shouldPulse: false },
+    ];
+    for (const { state, shouldPulse } of [...animatingStates, ...nonAnimatingStates]) {
+      cleanup();
+      render(
+        <ReactFlowProvider>
+          <RigNode data={{
+            logicalId: "n",
+            role: "worker",
+            runtime: "claude-code",
+            model: null,
+            status: "running",
+            startupStatus: "ready" as const,
+            binding: null,
+            agentActivity: { state, reason: "x", evidenceSource: "pane_heuristic" as const, sampledAt: new Date().toISOString(), evidence: null },
+          }} />
+        </ReactFlowProvider>
+      );
+      const dot = screen.getByTestId("activity-dot-n");
+      if (shouldPulse) {
+        expect(dot.className).toContain("activity-pulse-running");
+      } else {
+        expect(dot.className).not.toContain("activity-pulse-running");
+      }
+    }
+  });
+
+  it("PL-019: stale activity (sampledAt > threshold) renders the small staleness badge next to the dot", () => {
+    const longAgo = new Date(Date.now() - 120_000).toISOString();
+    render(
+      <ReactFlowProvider>
+        <RigNode data={{
+          logicalId: "stale-node",
+          role: "worker",
+          runtime: "claude-code",
+          model: null,
+          status: "running",
+          startupStatus: "ready" as const,
+          binding: null,
+          agentActivity: { state: "running", reason: "x", evidenceSource: "pane_heuristic" as const, sampledAt: longAgo, evidence: null },
+        }} />
+      </ReactFlowProvider>
+    );
+    expect(screen.getByTestId("activity-staleness-stale-node").textContent).toBe("stale");
+  });
+
+  it("PL-019: when running with currentQitems, the hover hint includes 'On: <short tail> — <excerpt>'", () => {
+    render(
+      <ReactFlowProvider>
+        <RigNode data={{
+          logicalId: "busy-node",
+          role: "worker",
+          runtime: "claude-code",
+          model: null,
+          status: "running",
+          startupStatus: "ready" as const,
+          binding: null,
+          agentActivity: { state: "running", reason: "x", evidenceSource: "pane_heuristic" as const, sampledAt: new Date().toISOString(), evidence: null },
+          currentQitems: [
+            { qitemId: "qitem-20260504001234-tail9999", bodyExcerpt: "Phase B audit", tier: "mode2" },
+          ],
+        }} />
+      </ReactFlowProvider>
+    );
+    // Hover hint sits in the rig-node title attribute (composite tooltip);
+    // also rendered as a separate hidden block. We assert the ULID tail
+    // appears at least once within the rendered DOM.
+    expect(document.body.innerHTML).toContain("tail9999");
+    expect(document.body.innerHTML).toContain("Phase B audit");
   });
 
   it("node actions are visible on the card surface when session commands are available", () => {
@@ -968,7 +1057,9 @@ describe("RigGraph SSE integration", () => {
 
     // Fire SSE message
     act(() => {
-      const es = instances[instances.length - 1]!;
+      // PL-019: RigGraph now opens two EventSources (useRigEvents + the
+      // new useTopologyEdgeActivity). Target the rig-events one by URL.
+      const es = instances.find((i) => i.url.includes("?rigId="))!;
       es.simulateMessage('{"type":"node.added"}');
     });
 
@@ -998,7 +1089,9 @@ describe("RigGraph SSE integration", () => {
 
     // Fire SSE message to trigger refetch
     act(() => {
-      const es = instances[instances.length - 1]!;
+      // PL-019: RigGraph now opens two EventSources (useRigEvents + the
+      // new useTopologyEdgeActivity). Target the rig-events one by URL.
+      const es = instances.find((i) => i.url.includes("?rigId="))!;
       es.simulateMessage('{"type":"node.added"}');
     });
 
@@ -1017,7 +1110,7 @@ describe("RigGraph SSE integration", () => {
     await waitFor(() => expect(instances.length).toBeGreaterThan(0));
 
     act(() => {
-      instances[instances.length - 1]!.simulateError();
+      instances.find((i) => i.url.includes("?rigId="))!.simulateError();
     });
 
     await waitFor(() => {
@@ -1035,7 +1128,7 @@ describe("RigGraph SSE integration", () => {
 
     // Error
     act(() => {
-      instances[instances.length - 1]!.simulateError();
+      instances.find((i) => i.url.includes("?rigId="))!.simulateError();
     });
 
     await waitFor(() => {
@@ -1047,7 +1140,7 @@ describe("RigGraph SSE integration", () => {
 
     // Reconnect (open event)
     act(() => {
-      instances[instances.length - 1]!.simulateOpen();
+      instances.find((i) => i.url.includes("?rigId="))!.simulateOpen();
     });
 
     await waitFor(() => {

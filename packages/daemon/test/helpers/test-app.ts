@@ -24,6 +24,13 @@ import { externalCliAttachmentSchema } from "../../src/db/migrations/019_externa
 import { rigServicesSchema } from "../../src/db/migrations/020_rig_services.js";
 import { seatHandoverObservabilitySchema } from "../../src/db/migrations/021_seat_handover_observability.js";
 import { nodeCodexConfigProfileSchema } from "../../src/db/migrations/022_node_codex_config_profile.js";
+// PL-019: GET /api/rigs/:id/graph + GET /api/rigs/:rigId/nodes/:logicalId
+// now perform a read-side join over queue_items (in-progress qitem
+// ownership per session). The route returns 500 if the table is absent,
+// so the integration harness needs the queue migrations through 025.
+import { streamItemsSchema } from "../../src/db/migrations/023_stream_items.js";
+import { queueItemsSchema } from "../../src/db/migrations/024_queue_items.js";
+import { queueTransitionsSchema } from "../../src/db/migrations/025_queue_transitions.js";
 import { BootstrapRepository } from "../../src/domain/bootstrap-repository.js";
 import { RuntimeVerifier } from "../../src/domain/runtime-verifier.js";
 import { RequirementsProbeRegistry } from "../../src/domain/requirements-probe.js";
@@ -78,7 +85,7 @@ import fs from "node:fs";
 
 export function createFullTestDb(): Database.Database {
   const db = createDb();
-  migrate(db, [coreSchema, bindingsSessionsSchema, eventsSchema, snapshotsSchema, checkpointsSchema, resumeMetadataSchema, nodeSpecFieldsSchema, packagesSchema, installJournalSchema, journalSeqSchema, bootstrapSchema, discoverySchema, discoveryFkFix, agentspecRebootSchema, startupContextSchema, chatMessagesSchema, podNamespaceSchema, contextUsageSchema, externalCliAttachmentSchema, rigServicesSchema, seatHandoverObservabilitySchema, nodeCodexConfigProfileSchema]);
+  migrate(db, [coreSchema, bindingsSessionsSchema, eventsSchema, snapshotsSchema, checkpointsSchema, resumeMetadataSchema, nodeSpecFieldsSchema, packagesSchema, installJournalSchema, journalSeqSchema, bootstrapSchema, discoverySchema, discoveryFkFix, agentspecRebootSchema, startupContextSchema, chatMessagesSchema, podNamespaceSchema, contextUsageSchema, externalCliAttachmentSchema, rigServicesSchema, seatHandoverObservabilitySchema, nodeCodexConfigProfileSchema, streamItemsSchema, queueItemsSchema, queueTransitionsSchema]);
   return db;
 }
 
