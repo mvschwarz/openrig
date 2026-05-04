@@ -593,7 +593,10 @@ export interface ContinuityPolicySpec {
  *   only, with `ref.value` as a non-empty array of file paths in
  *   operator-declared trust-precedence order.
  */
-export type SessionSourceSpec = SessionSourceForkSpec | SessionSourceRebuildSpec;
+export type SessionSourceSpec =
+  | SessionSourceForkSpec
+  | SessionSourceRebuildSpec
+  | SessionSourceAgentImageSpec;
 
 export interface SessionSourceForkSpec {
   mode: "fork";
@@ -608,6 +611,28 @@ export interface SessionSourceRebuildSpec {
   ref: {
     kind: "artifact_set";
     value: string[];
+  };
+}
+
+/**
+ * PL-016 Item 4 — agent_image session source.
+ * The instantiator looks up the named image in the
+ * AgentImageLibraryService, captures the runtime resume token from the
+ * manifest, and dispatches the launch through the existing fork code
+ * path (forkSource: { kind: "native_id", value: <resumeToken> }) so
+ * `nativeResumeProbe` semantics are preserved.
+ *
+ * v0 supports `ref.kind: "image_name"` only; `image_id` and
+ * `image_hash` are NAMED v1+ triggers per PRD § v0 Out.
+ */
+export interface SessionSourceAgentImageSpec {
+  mode: "agent_image";
+  ref: {
+    kind: "image_name";
+    value: string;
+    /** Optional version selector; defaults to "1" at consumption
+     *  time (matches the manifest convention). */
+    version?: string;
   };
 }
 

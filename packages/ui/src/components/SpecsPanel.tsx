@@ -4,19 +4,20 @@ import { Button } from "@/components/ui/button";
 import { useSpecsWorkspace, type SpecsDraft } from "./SpecsWorkspace.js";
 import { useSpecLibrary, useLibraryReview, type SpecLibraryEntry } from "../hooks/useSpecLibrary.js";
 import { useContextPackLibrary, type ContextPackEntry } from "../hooks/useContextPackLibrary.js";
+import { useAgentImageLibrary, type AgentImageEntry } from "../hooks/useAgentImageLibrary.js";
 import { usePsEntries } from "../hooks/usePsEntries.js";
 import { useExpandRig, useRemoveLibrarySpec, useRenameLibrarySpec, type ExpandRigResult } from "../hooks/mutations.js";
 import { ExpansionOutcome } from "./ExpansionOutcome.js";
 
-type LibraryFilter = "all" | "apps" | "rigs" | "agents" | "workflows" | "context-packs";
+type LibraryFilter = "all" | "apps" | "rigs" | "agents" | "workflows" | "context-packs" | "agent-images";
 
-// PL-014: unified entry shape covers both spec library entries and
-// context-pack entries — both are filesystem-canonical, library-
-// discoverable, reviewable. Discriminated by kind.
-type UnifiedLibraryEntry = SpecLibraryEntry | (ContextPackEntry & {
-  summary?: string;
-  hasServices?: undefined;
-});
+// PL-014 + PL-016: unified entry shape covers spec library entries,
+// context-pack entries, and agent-image entries — all filesystem-
+// canonical, library-discoverable, reviewable. Discriminated by kind.
+type UnifiedLibraryEntry =
+  | SpecLibraryEntry
+  | (ContextPackEntry & { summary?: string; hasServices?: undefined })
+  | (AgentImageEntry & { summary?: string; hasServices?: undefined });
 
 function deriveStability(entry: UnifiedLibraryEntry): "Stable" | "Experimental" | "Community" {
   if (entry.sourceType !== "builtin") return "Community";
@@ -25,7 +26,8 @@ function deriveStability(entry: UnifiedLibraryEntry): "Stable" | "Experimental" 
   return "Experimental";
 }
 
-function deriveTypeBadge(entry: UnifiedLibraryEntry): "APP" | "RIG" | "AGENT" | "WORKFLOW" | "PACK" {
+function deriveTypeBadge(entry: UnifiedLibraryEntry): "APP" | "RIG" | "AGENT" | "WORKFLOW" | "PACK" | "IMAGE" {
+  if (entry.kind === "agent-image") return "IMAGE";
   if (entry.kind === "context-pack") return "PACK";
   if (entry.kind === "workflow") return "WORKFLOW";
   if (entry.kind === "agent") return "AGENT";
@@ -40,8 +42,19 @@ function filterEntries(entries: UnifiedLibraryEntry[], filter: LibraryFilter): U
     case "agents": return entries.filter((e) => e.kind === "agent");
     case "workflows": return entries.filter((e) => e.kind === "workflow");
     case "context-packs": return entries.filter((e) => e.kind === "context-pack");
+    case "agent-images": return entries.filter((e) => e.kind === "agent-image");
     default: return entries;
   }
+}
+
+// PL-016: project AgentImageEntry into the row-render shape with a
+// summary line surfacing runtime + token estimate + fork count.
+function agentImageToUnified(entry: AgentImageEntry): UnifiedLibraryEntry {
+  const lastUsed = entry.stats.lastUsedAt
+    ? ` · last used ${new Date(entry.stats.lastUsedAt).toLocaleDateString()}`
+    : "";
+  const summary = `${entry.runtime} · forks ${entry.stats.forkCount} · ~${entry.derivedEstimatedTokens} tokens${lastUsed}${entry.pinned ? " · pinned" : ""}`;
+  return { ...entry, summary };
 }
 
 // PL-014: project ContextPackEntry into the row-shape the LibraryList
@@ -269,12 +282,13 @@ export function SpecsPanel({ onClose }: SpecsPanelProps) {
   // separate daemon route. Merge them into the unified library list so
   // filter chips operate on one array.
   const { data: contextPacks = [] } = useContextPackLibrary();
+  const { data: agentImages = [] } = useAgentImageLibrary();
   const allLibrary: UnifiedLibraryEntry[] = [
     ...specEntries,
-    // Defensive: if the daemon returns a non-array placeholder (older
-    // version without the route), Array.isArray guard keeps the panel
-    // from blowing up on render.
+    // Defensive Array.isArray guard for cross-CLI-version drift on
+    // older daemons that may return non-array placeholders.
     ...(Array.isArray(contextPacks) ? contextPacks.map(contextPackToUnified) : []),
+    ...(Array.isArray(agentImages) ? agentImages.map(agentImageToUnified) : []),
   ];
   const [libraryFilter, setLibraryFilter] = useState<LibraryFilter>("all");
   const filteredLibrary = filterEntries(allLibrary, libraryFilter);
@@ -495,7 +509,7 @@ export function SpecsPanel({ onClose }: SpecsPanelProps) {
         <div className="space-y-2">
           <div className="font-mono text-[8px] uppercase tracking-[0.16em] text-stone-500">Library</div>
           <div className="flex gap-1">
-            {(["all", "apps", "rigs", "agents", "workflows", "context-packs"] as LibraryFilter[]).map((f) => (
+            {(["all", "apps", "rigs", "agents", "workflows", "context-packs", "agent-images"] as LibraryFilter[]).map((f) => (
               <button
                 key={f}
                 data-testid={`filter-${f}`}

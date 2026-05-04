@@ -154,7 +154,8 @@ describe("session_source rebuild — schema validation", () => {
     });
     const result = RigSpecSchema.validate(spec);
     expect(result.valid).toBe(false);
-    expect(result.errors.some((e) => e.includes('v1 supports "fork" or "rebuild"'))).toBe(true);
+    // PL-016 Item 4: error message names the now-three valid modes.
+    expect(result.errors.some((e) => e.includes('supports "fork", "rebuild", or "agent_image"'))).toBe(true);
   });
 });
 

@@ -26,6 +26,13 @@ import {
   useContextPackSend,
   type ContextPackEntry,
 } from "../hooks/useContextPackLibrary.js";
+import {
+  useAgentImageLibrary,
+  useAgentImagePreview,
+  useAgentImagePin,
+  type AgentImageEntry,
+  type AgentImagePreview,
+} from "../hooks/useAgentImageLibrary.js";
 import { usePsEntries } from "../hooks/usePsEntries.js";
 import { useQueryClient } from "@tanstack/react-query";
 import {
@@ -202,6 +209,11 @@ export function LibraryReview({ entryId }: LibraryReviewProps) {
   // against the spec-library route for context-pack ids).
   if (entryId.startsWith("context-pack:")) {
     return <LibraryContextPackReviewPage entryId={entryId} />;
+  }
+  // PL-016: agent_images live at /api/agent-images/library with id
+  // prefix "agent-image:".
+  if (entryId.startsWith("agent-image:")) {
+    return <LibraryAgentImageReviewPage entryId={entryId} />;
   }
   return <LibrarySpecReview entryId={entryId} />;
 }
@@ -718,6 +730,183 @@ function ContextPackReviewBody({
             </>
           )}
         </section>
+      </div>
+    </WorkspacePage>
+  );
+}
+
+// --- Fork Primitive + Starter Agent Images v0 (PL-016): agent-image
+//     review variant. Shows manifest + statistics badges + lineage +
+//     Use-as-starter snippet + Pin/Unpin button. ---
+
+function LibraryAgentImageReviewPage({ entryId }: { entryId: string }) {
+  const navigate = useNavigate();
+  const { data: images = [], isLoading: imagesLoading, error: imagesError } = useAgentImageLibrary();
+  const entry = images.find((i) => i.id === entryId) ?? null;
+  const { data: preview, isLoading: previewLoading } = useAgentImagePreview(entry ? entryId : null);
+
+  if (imagesLoading) {
+    return (
+      <WorkspacePage>
+        <div className="font-mono text-[10px] text-stone-400">Loading agent image…</div>
+      </WorkspacePage>
+    );
+  }
+  if (imagesError || !entry) {
+    return (
+      <WorkspacePage>
+        <div data-testid="library-review-error" className="space-y-4">
+          <WorkflowHeader
+            eyebrow="Library"
+            title="Agent Image Not Found"
+            description={(imagesError as Error)?.message ?? `No agent image with id ${entryId}.`}
+          />
+          <Button variant="outline" size="sm" onClick={() => navigate({ to: "/specs" })}>Back to Specs</Button>
+        </div>
+      </WorkspacePage>
+    );
+  }
+  return <AgentImageReviewBody entry={entry} preview={preview} previewLoading={previewLoading} />;
+}
+
+function AgentImageReviewBody({
+  entry,
+  preview,
+  previewLoading,
+}: {
+  entry: AgentImageEntry;
+  preview: AgentImagePreview | undefined;
+  previewLoading: boolean;
+}) {
+  const navigate = useNavigate();
+  const pinMutation = useAgentImagePin();
+  const [snippetCopied, setSnippetCopied] = useState(false);
+  const [pinError, setPinError] = useState<string | null>(null);
+
+  const onCopySnippet = async () => {
+    if (!preview?.starterSnippet) return;
+    const ok = await copyText(preview.starterSnippet);
+    if (ok) {
+      setSnippetCopied(true);
+      window.setTimeout(() => setSnippetCopied(false), 2000);
+    }
+  };
+
+  const onTogglePin = async () => {
+    setPinError(null);
+    try {
+      await pinMutation.mutateAsync({ id: entry.id, pin: !entry.pinned });
+    } catch (err) {
+      setPinError((err as Error).message);
+    }
+  };
+
+  return (
+    <WorkspacePage>
+      <div data-testid="library-review-agent-image" className="space-y-4">
+        <WorkflowHeader
+          eyebrow={`Library — Agent Image${entry.sourceType === "builtin" ? " (built-in)" : ""}`}
+          title={`${entry.name} v${entry.version}`}
+          description={entry.notes ?? `Snapshot of ${entry.sourceSeat}.`}
+          actions={
+            <div className="flex gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                data-testid="agent-image-pin-toggle"
+                onClick={() => void onTogglePin()}
+                disabled={pinMutation.isPending}
+              >
+                {entry.pinned ? "Unpin" : "Pin"}
+              </Button>
+              <Button variant="outline" size="sm" onClick={() => navigate({ to: "/specs" })}>Back to Specs</Button>
+            </div>
+          }
+        />
+
+        <WorkflowSummaryGrid>
+          <WorkflowSummaryCard label="Runtime" value={entry.runtime} testId="lib-image-runtime" />
+          <WorkflowSummaryCard label="Forks" value={String(entry.stats.forkCount)} testId="lib-image-forks" />
+          <WorkflowSummaryCard label="Tokens (~)" value={String(entry.derivedEstimatedTokens)} testId="lib-image-tokens" />
+          <WorkflowSummaryCard label="Size" value={`${entry.stats.estimatedSizeBytes}B`} testId="lib-image-size" />
+        </WorkflowSummaryGrid>
+
+        <div data-testid="lib-image-source" className="font-mono text-[9px] text-stone-500 space-y-0.5">
+          <div>source seat: {entry.sourceSeat}</div>
+          <div>created: {entry.createdAt}</div>
+          <div>last used: {entry.stats.lastUsedAt ?? "never"}</div>
+          <div>path: {entry.sourcePath}</div>
+          <div data-testid="lib-image-pinned" className={entry.pinned ? "text-amber-700 font-bold" : ""}>pinned: {String(entry.pinned)}</div>
+        </div>
+
+        {entry.lineage.length > 0 && (
+          <section data-testid="lib-image-lineage" className="border border-stone-300/40 bg-white/8">
+            <header className="border-b border-stone-200 bg-stone-50 px-3 py-2 font-mono text-[10px] uppercase tracking-[0.10em] text-stone-600">
+              Lineage
+            </header>
+            <div className="px-3 py-2 font-mono text-[10px] text-stone-700">
+              {entry.lineage.join(" → ")} → <span className="font-bold">{entry.name}</span>
+            </div>
+          </section>
+        )}
+
+        <section data-testid="lib-image-starter-snippet" className="border border-stone-400 bg-white px-3 py-3 space-y-2">
+          <div className="flex items-center justify-between">
+            <div className="font-mono text-[10px] uppercase tracking-[0.10em] text-stone-700">Use as starter</div>
+            <Button
+              variant="outline"
+              size="sm"
+              data-testid="agent-image-copy-snippet"
+              onClick={() => void onCopySnippet()}
+              disabled={!preview?.starterSnippet}
+            >
+              {snippetCopied ? "Copied" : "Copy snippet"}
+            </Button>
+          </div>
+          <div className="font-mono text-[9px] text-stone-500">
+            Paste into your agent.yaml's session_source. The instantiator resolves the image
+            via the daemon AgentImageLibraryService at startup time.
+          </div>
+          {previewLoading && <div className="font-mono text-[9px] text-stone-400">Loading snippet…</div>}
+          {preview?.starterSnippet && (
+            <pre
+              data-testid="lib-image-snippet-text"
+              className="font-mono text-[10px] bg-stone-50 border border-stone-200 px-2 py-1 whitespace-pre-wrap"
+            >
+              {preview.starterSnippet}
+            </pre>
+          )}
+        </section>
+
+        {pinError && (
+          <div data-testid="lib-image-pin-error" className="font-mono text-[9px] text-red-600">{pinError}</div>
+        )}
+
+        {entry.files.length > 0 && (
+          <section className="border border-stone-300/40 bg-white/8">
+            <header className="border-b border-stone-200 bg-stone-50 px-3 py-2 font-mono text-[10px] uppercase tracking-[0.10em] text-stone-600">
+              Supplementary files
+            </header>
+            <ul className="divide-y divide-stone-100">
+              {entry.files.map((f) => (
+                <li
+                  key={f.path}
+                  className="px-3 py-2 font-mono text-[10px] text-stone-800"
+                  data-testid={`lib-image-file-${f.path}`}
+                >
+                  <div className="flex items-baseline justify-between gap-2">
+                    <span className="font-bold truncate">{f.path}</span>
+                    <span className="font-mono text-[8px] text-stone-500 shrink-0">
+                      role: {f.role}
+                      {f.bytes === null ? " · MISSING" : ` · ${f.bytes}B`}
+                    </span>
+                  </div>
+                  {f.summary && <div className="mt-0.5 text-stone-600 text-[9px]">{f.summary}</div>}
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
       </div>
     </WorkspacePage>
   );
