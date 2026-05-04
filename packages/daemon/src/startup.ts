@@ -728,6 +728,34 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     deps.sliceDetailProjector = sliceDetailProjector;
   }
 
+  // UI Enhancement Pack v0:
+  //   - file allowlist (item 3) from OPENRIG_FILES_ALLOWLIST
+  //   - atomic write service (item 4) wired only when allowlist non-empty
+  //   - progress scan-roots (item 1B) from OPENRIG_PROGRESS_SCAN_ROOTS
+  //
+  // Empty env → empty allowlist / no-roots indexer; routes return 503
+  // with structured config hints so the UI can surface a setup message
+  // instead of a generic error.
+  {
+    const { readAllowlistFromEnv } = await import("./domain/files/path-safety.js");
+    const { FileWriteService } = await import("./domain/files/file-write-service.js");
+    const { ProgressIndexer, readProgressRootsFromEnv } = await import("./domain/progress/progress-indexer.js");
+    const filesAllowlist = readAllowlistFromEnv();
+    deps.filesAllowlist = filesAllowlist;
+    deps.fileWriteService = filesAllowlist.length > 0
+      ? new FileWriteService({
+          allowlist: filesAllowlist,
+          // Honor OPENRIG_HOME for state isolation. Without this, the
+          // service's DEFAULT_AUDIT_FILE falls back to process.env.HOME
+          // and writes audit rows to the host's ~/.openrig/, which
+          // breaks isolated dogfood/test daemons (rows bleed back to
+          // the operator's real home regardless of OPENRIG_HOME).
+          auditFilePath: nodePath.join(OPENRIG_HOME, "file-edit-audit.jsonl"),
+        })
+      : null;
+    deps.progressIndexer = new ProgressIndexer({ roots: readProgressRootsFromEnv() });
+  }
+
   const sessionTransport = deps.sessionTransport;
   if (sessionTransport) {
     const watchdogPolicyEngine = new WatchdogPolicyEngine({

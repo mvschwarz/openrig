@@ -1,14 +1,23 @@
-// Slice Story View v0 — Docs tab.
+// Slice Story View v0 + UI Enhancement Pack v0 — Docs tab.
 //
 // Two-column layout: left = file tree (slice folder + descendants),
-// right = lazy markdown viewer for the selected file. Composable with
-// PL-009 Markdown Viewer when that ships; until then v0 renders the
-// markdown content as plain `<pre>` so the operator at least sees the
-// canonical text + can copy citations into queue messages.
+// right = lazy markdown viewer for the selected file.
+//
+// UI Enhancement Pack v0 item 2: the right pane now renders Markdown
+// via the new MarkdownViewer (YAML frontmatter as metadata header,
+// code blocks with syntax highlighting, lists, tables, links,
+// images, mermaid placeholder per carve-out). v0's plain-`<pre>`
+// fallback is preserved for non-`.md` files.
+//
+// Image src resolution: relative paths in `.md` content are resolved
+// against the slice's proof-asset endpoint when applicable. v1 of
+// UI Enhancement Pack can extend this to the slice's docs endpoint
+// once the daemon adds an analogous static-asset path for slice docs.
 
 import { useState } from "react";
 import type { DocsTreeEntry } from "../../../hooks/useSlices.js";
 import { useSliceDoc } from "../../../hooks/useSlices.js";
+import { MarkdownViewer } from "../../markdown/MarkdownViewer.js";
 
 export function DocsTab({ sliceName, tree }: { sliceName: string; tree: DocsTreeEntry[] }) {
   const initial = tree.find((e) => e.type === "file" && e.name === "README.md")?.relPath
@@ -54,9 +63,15 @@ export function DocsTab({ sliceName, tree }: { sliceName: string; tree: DocsTree
           <div className="p-4 font-mono text-[10px] text-red-600">Error loading doc.</div>
         )}
         {selected && doc.data && (
-          <pre className="whitespace-pre-wrap break-words p-4 font-mono text-[11px] text-stone-800" data-testid="docs-viewer-content">
-            {doc.data.content}
-          </pre>
+          <div data-testid="docs-viewer-content" className="p-4">
+            {selected.toLowerCase().endsWith(".md") ? (
+              <MarkdownViewer content={doc.data.content} />
+            ) : (
+              <pre className="whitespace-pre-wrap break-words font-mono text-[11px] text-stone-800">
+                {doc.data.content}
+              </pre>
+            )}
+          </div>
         )}
       </main>
     </div>
