@@ -20,6 +20,17 @@ export interface ResolvedStartupFile {
   deliveryHint: "auto" | "guidance_merge" | "skill_install" | "send_text";
   required: boolean;
   appliesOn: ("fresh_start" | "restore")[];
+  /** PL-014 Item 6: kind discriminator on the resolved record. The
+   *  instantiator's expandContextPacks step rewrites entries with
+   *  kind: "context_pack" into kind: "file" pointing at the
+   *  assembled-bundle file on disk; downstream consumers
+   *  (resolveAutoHints, adapter.deliverStartup) see only kind: "file"
+   *  records. The field is optional so back-compat code paths that
+   *  don't set it default to "file" semantics. */
+  kind?: "file" | "context_pack";
+  /** PL-014 Item 6: only meaningful pre-expansion. */
+  contextPackName?: string;
+  contextPackVersion?: string;
 }
 
 // -- Adapter result types --
