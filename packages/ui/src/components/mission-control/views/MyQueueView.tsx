@@ -8,10 +8,12 @@ import { GenericListView } from "./GenericListView.js";
 
 export interface MyQueueViewProps {
   operatorSession?: string;
+  highlightedQitemId?: string | null;
 }
 
 export function MyQueueView({
   operatorSession = "human-wrandom@kernel",
+  highlightedQitemId,
 }: MyQueueViewProps) {
   const query = useMissionControlView("my-queue", { operatorSession });
   return (
@@ -24,6 +26,7 @@ export function MyQueueView({
         subtitle="Decisions that need me, ordered by read-cost"
         emptyMessage="No human-gated items waiting on you."
         withVerbActions
+        highlightedQitemId={highlightedQitemId}
       />
     </div>
   );

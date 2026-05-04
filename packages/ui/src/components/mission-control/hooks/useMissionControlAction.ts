@@ -1,5 +1,6 @@
 // PL-005 Phase A: mutation hook for the 7 Mission Control verbs.
 import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { missionControlAuthHeaders } from "../missionControlAuth.js";
 
 export const MISSION_CONTROL_VERBS = [
   "approve",
@@ -39,7 +40,7 @@ export interface MissionControlActionResult {
 async function postAction(input: MissionControlActionInput): Promise<MissionControlActionResult> {
   const res = await fetch("/api/mission-control/action", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...missionControlAuthHeaders() },
     body: JSON.stringify(input),
   });
   const body = await res.json();

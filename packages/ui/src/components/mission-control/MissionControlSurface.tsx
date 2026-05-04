@@ -5,7 +5,7 @@
 // the 7 views. NOT a new managed app; NOT a re-implementation of the
 // dashboard at the same architecture level.
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   MISSION_CONTROL_VIEWS,
   type MissionControlViewName,
@@ -17,8 +17,16 @@ import { ActiveWorkView } from "./views/ActiveWorkView.js";
 import { RecentShipsView } from "./views/RecentShipsView.js";
 import { RecentlyActiveView } from "./views/RecentlyActiveView.js";
 import { RecentObservationsView } from "./views/RecentObservationsView.js";
+import { AuditHistoryView } from "./views/AuditHistoryView.js";
+import { primeMissionControlBearerTokenFromUrl } from "./missionControlAuth.js";
 
-const VIEW_LABELS: Record<MissionControlViewName, string> = {
+// PL-005 Phase B: UI-side tab union extends Phase A's 7 daemon view
+// names with an "audit-history" tab that consumes a different daemon
+// endpoint (/api/mission-control/audit, not /views/:name). The daemon
+// MISSION_CONTROL_VIEWS enum is unchanged (Phase A surface no-touch).
+type MissionControlTabName = MissionControlViewName | "audit-history";
+
+const VIEW_LABELS: Record<MissionControlTabName, string> = {
   "my-queue": "My queue",
   "human-gate": "Human gate",
   fleet: "Fleet",
@@ -26,10 +34,33 @@ const VIEW_LABELS: Record<MissionControlViewName, string> = {
   "recent-ships": "Recent ships",
   "recently-active": "Recently active",
   "recent-observations": "Observations",
+  "audit-history": "Audit history",
 };
 
+const ALL_TABS: MissionControlTabName[] = [...MISSION_CONTROL_VIEWS, "audit-history"];
+
+function initialViewFromUrl(): MissionControlTabName {
+  if (typeof window === "undefined") return "my-queue";
+  const requested = new URL(window.location.href).searchParams.get("view");
+  if (requested && (ALL_TABS as string[]).includes(requested)) {
+    return requested as MissionControlTabName;
+  }
+  return new URL(window.location.href).searchParams.has("qitem") ? "human-gate" : "my-queue";
+}
+
+function highlightedQitemFromUrl(): string | null {
+  if (typeof window === "undefined") return null;
+  return new URL(window.location.href).searchParams.get("qitem");
+}
+
 export function MissionControlSurface() {
-  const [activeView, setActiveView] = useState<MissionControlViewName>("my-queue");
+  const [activeView, setActiveView] = useState<MissionControlTabName>(() => initialViewFromUrl());
+  const [highlightedQitemId] = useState<string | null>(() => highlightedQitemFromUrl());
+
+  useEffect(() => {
+    primeMissionControlBearerTokenFromUrl();
+  }, []);
+
   return (
     <div
       data-testid="mc-surface"
@@ -43,7 +74,7 @@ export function MissionControlSurface() {
           Queue observability
         </h1>
         <nav data-testid="mc-tab-nav" className="mt-2 flex flex-wrap gap-1">
-          {MISSION_CONTROL_VIEWS.map((view) => (
+          {ALL_TABS.map((view) => (
             <button
               key={view}
               type="button"
@@ -62,13 +93,14 @@ export function MissionControlSurface() {
         </nav>
       </header>
       <main data-testid="mc-active-view" className="min-h-0 flex-1 overflow-y-auto">
-        {activeView === "my-queue" ? <MyQueueView /> : null}
-        {activeView === "human-gate" ? <HumanGateView /> : null}
+        {activeView === "my-queue" ? <MyQueueView highlightedQitemId={highlightedQitemId} /> : null}
+        {activeView === "human-gate" ? <HumanGateView highlightedQitemId={highlightedQitemId} /> : null}
         {activeView === "fleet" ? <FleetView /> : null}
-        {activeView === "active-work" ? <ActiveWorkView /> : null}
-        {activeView === "recent-ships" ? <RecentShipsView /> : null}
-        {activeView === "recently-active" ? <RecentlyActiveView /> : null}
-        {activeView === "recent-observations" ? <RecentObservationsView /> : null}
+        {activeView === "active-work" ? <ActiveWorkView highlightedQitemId={highlightedQitemId} /> : null}
+        {activeView === "recent-ships" ? <RecentShipsView highlightedQitemId={highlightedQitemId} /> : null}
+        {activeView === "recently-active" ? <RecentlyActiveView highlightedQitemId={highlightedQitemId} /> : null}
+        {activeView === "recent-observations" ? <RecentObservationsView highlightedQitemId={highlightedQitemId} /> : null}
+        {activeView === "audit-history" ? <AuditHistoryView /> : null}
       </main>
     </div>
   );
