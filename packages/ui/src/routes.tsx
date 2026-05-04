@@ -23,6 +23,7 @@ import { BundleInstallFlow } from "./components/BundleInstallFlow.js";
 import { LibraryReview } from "./components/LibraryReview.js";
 import { LiveNodeDetails } from "./components/LiveNodeDetails.js";
 import { DiscoveryOverlay } from "./components/DiscoveryOverlay.js";
+import { MissionControlSurface } from "./components/mission-control/MissionControlSurface.js";
 import { useRigSummary } from "./hooks/useRigSummary.js";
 import { useDrawerSelection } from "./components/AppShell.js";
 
@@ -218,6 +219,13 @@ const liveNodeDetailsRoute = createRoute({
   },
 });
 
+// PL-005 Phase A: Mission Control / Queue Observability surface.
+const missionControlRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/mission-control",
+  component: MissionControlSurface,
+});
+
 const routeTree = rootRoute.addChildren([
   indexRoute,
   rigDetailRoute,
@@ -236,6 +244,7 @@ const routeTree = rootRoute.addChildren([
   bundleInspectRoute,
   bundleInstallRoute,
   liveNodeDetailsRoute,
+  missionControlRoute,
 ]);
 
 // Router

@@ -65,6 +65,7 @@ import { projectsRoutes } from "./routes/projects.js";
 import { viewsRoutes } from "./routes/views.js";
 import { watchdogRoutes } from "./routes/watchdog.js";
 import { workflowRoutes } from "./routes/workflow.js";
+import { missionControlRoutes } from "./routes/mission-control.js";
 import type { StreamStore } from "./domain/stream-store.js";
 import type { QueueRepository } from "./domain/queue-repository.js";
 import type { InboxHandler } from "./domain/inbox-handler.js";
@@ -128,6 +129,10 @@ export interface AppDeps {
   watchdogPolicyEngine?: WatchdogPolicyEngine;
   watchdogScheduler?: WatchdogScheduler;
   workflowRuntime?: WorkflowRuntime;
+  missionControlReadLayer?: import("./domain/mission-control/mission-control-read-layer.js").MissionControlReadLayer;
+  missionControlWriteContract?: import("./domain/mission-control/mission-control-write-contract.js").MissionControlWriteContract;
+  missionControlActionLog?: import("./domain/mission-control/mission-control-action-log.js").MissionControlActionLog;
+  missionControlFleetCliCapability?: import("./domain/mission-control/mission-control-fleet-cli-capability.js").MissionControlFleetCliCapability;
   specReviewService?: SpecReviewService;
   specLibraryService?: SpecLibraryService;
   whoamiService?: WhoamiService;
@@ -281,6 +286,10 @@ export function createApp(deps: AppDeps): Hono {
     c.set("watchdogPolicyEngine" as never, deps.watchdogPolicyEngine);
     c.set("watchdogScheduler" as never, deps.watchdogScheduler);
     c.set("workflowRuntime" as never, deps.workflowRuntime);
+    c.set("missionControlReadLayer" as never, deps.missionControlReadLayer);
+    c.set("missionControlWriteContract" as never, deps.missionControlWriteContract);
+    c.set("missionControlActionLog" as never, deps.missionControlActionLog);
+    c.set("missionControlFleetCliCapability" as never, deps.missionControlFleetCliCapability);
     c.set("specReviewService" as never, deps.specReviewService);
     c.set("specLibraryService" as never, deps.specLibraryService);
     c.set("whoamiService" as never, deps.whoamiService);
@@ -333,6 +342,7 @@ export function createApp(deps: AppDeps): Hono {
   app.route("/api/views", viewsRoutes());
   app.route("/api/watchdog", watchdogRoutes());
   app.route("/api/workflow", workflowRoutes());
+  app.route("/api/mission-control", missionControlRoutes());
   app.route("/api/rigs/:rigId/env", envRoutes());
   app.route("/api/restore-check", restoreCheckRoutes);
 
