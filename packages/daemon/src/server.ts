@@ -64,6 +64,7 @@ import type { WhoamiService } from "./domain/whoami-service.js";
 import { chatRoutes } from "./routes/chat.js";
 import { streamRoutes } from "./routes/stream.js";
 import { queueRoutes } from "./routes/queue.js";
+import { workspaceRoutes } from "./routes/workspace.js";
 import { projectsRoutes } from "./routes/projects.js";
 import { viewsRoutes } from "./routes/views.js";
 import { watchdogRoutes } from "./routes/watchdog.js";
@@ -424,6 +425,7 @@ export function createApp(deps: AppDeps): Hono {
   app.route("/api/rigs/:rigId/chat", chatRoutes());
   app.route("/api/stream", streamRoutes());
   app.route("/api/queue", queueRoutes());
+  app.route("/api/workspace", workspaceRoutes());
   app.route("/api/projects", projectsRoutes());
   app.route("/api/views", viewsRoutes());
   app.route("/api/watchdog", watchdogRoutes());
