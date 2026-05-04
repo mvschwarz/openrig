@@ -20,7 +20,14 @@ export function WorkspaceHome() {
           Use <span className="font-mono text-stone-800">Specs</span> to import a rig spec or run bootstrap,
           and use the <span className="font-mono text-stone-800">Discovery</span> drawer to place running sessions.
         </p>
-        <div className="flex items-center justify-center gap-3 pt-2">
+        <div className="flex flex-wrap items-center justify-center gap-3 pt-2">
+          <a
+            href="/mission-control"
+            data-testid="workspace-open-mission-control"
+            className="border border-stone-900 bg-stone-900 px-4 py-2 font-mono text-[10px] uppercase tracking-[0.14em] text-stone-50 transition-colors hover:bg-stone-800"
+          >
+            Mission Control
+          </a>
           <button
             type="button"
             data-testid="workspace-open-explorer"
