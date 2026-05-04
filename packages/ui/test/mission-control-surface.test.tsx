@@ -2,6 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { MissionControlSurface } from "../src/components/mission-control/MissionControlSurface.js";
+import { CompactStatusRow } from "../src/components/mission-control/components/CompactStatusRow.js";
 import { VerbActions } from "../src/components/mission-control/components/VerbActions.js";
 
 const fetchMock = vi.fn();
@@ -108,5 +109,37 @@ describe("MissionControlSurface", () => {
         }),
       );
     });
+  });
+
+  it("shows qitem context and expands full details when a phone row is tapped", () => {
+    render(
+      <CompactStatusRow
+        row={{
+          rigOrMissionName: "human-wrandom@kernel",
+          currentPhase: "human-gate",
+          state: "idle",
+          nextAction: null,
+          pendingHumanDecision: "urgent human-gate item",
+          readCost: "skim/approve",
+          lastUpdate: "2026-05-04T06:43:48.863Z",
+          confidenceFreshness: "urgent",
+          evidenceLink: null,
+          qitemId: "qitem-phone",
+          rawSourceRef: "velocity.qa@openrig-velocity",
+          qitemSummary: "Approve the release candidate",
+          qitemBody: "Approve the release candidate after checking the phone notification path.",
+        }}
+      />,
+    );
+
+    expect(screen.getByTestId("mc-qitem-summary").textContent).toContain("Approve the release candidate");
+    expect(screen.queryByTestId("mc-qitem-body")).toBeNull();
+
+    fireEvent.click(screen.getByTestId("mc-status-row"));
+
+    expect(screen.getByTestId("mc-qitem-body").textContent).toContain(
+      "Approve the release candidate after checking the phone notification path.",
+    );
+    expect(screen.getByTestId("mc-qitem-id").textContent).toContain("qitem-phone");
   });
 });

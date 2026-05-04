@@ -25,6 +25,8 @@ export interface CompactStatusRow {
   evidenceLink: string | null;
   qitemId?: string | null;
   rawSourceRef?: string | null;
+  qitemSummary?: string | null;
+  qitemBody?: string | null;
 }
 
 export interface MissionControlViewResult {
