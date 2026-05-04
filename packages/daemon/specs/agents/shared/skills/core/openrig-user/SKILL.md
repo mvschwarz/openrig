@@ -8,6 +8,31 @@ description: Use when operating OpenRig with the `rig` CLI and you need the ship
 This is an as-built guide to the shipped `rig` CLI.
 Use current code and `rig ... --help` as ground truth if anything here ever conflicts with older planning docs.
 
+This is not the config-layer or builder guide. Use the substrate control-plane guidance for `rigx`
+and experimental overlays. Use the OpenRig builder guidance when changing OpenRig behavior,
+doctrine, or release posture.
+
+## Runtime-Gated Coordination Primitives
+
+OpenRig v0.2.0 includes the bundled PL-004 Coordination Primitive System: Phase A `rig stream` /
+`rig queue`, Phase B `rig project` / `rig view`, Phase C `rig watchdog`, and Phase D `rig workflow`
+/ `workflow-keepalive`.
+
+Do not confuse package/source truth with active daemon truth. These commands are shipped product
+surfaces in v0.2.0+, but they need a v0.2.0+ daemon and matching SQLite schema at runtime.
+
+Default posture:
+
+- Treat daemon `rig queue`, `rig stream`, `rig project`, `rig view`, `rig watchdog`, and
+  `rig workflow` as the product coordination surfaces when the active daemon is v0.2.0 or newer.
+- Use temporary substrate overlays such as `rigx queue`, `rigx stream`, `rigx project`, and
+  `rigx view-proto` only where the current OpenRig workstream explicitly says that legacy/control
+  layer is still in use.
+- If a daemon-backed coordination command fails, debug the command/runtime/schema edge directly;
+  do not assume the right workaround is to drop back to a config-layer primitive.
+- Do not perform daemon stop/start, production DB copy/mutation, release, publish, or other
+  consequence-boundary actions unless the operator/workstream has granted that specific gate.
+
 ## Core Loop
 
 Most work in OpenRig reduces to this loop:
