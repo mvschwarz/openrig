@@ -310,6 +310,11 @@ interface PodInstantiatorDeps {
    *  the pack's assembled bundle. Optional — when absent, context_pack
    *  startup files surface a structured error at instantiation time. */
   contextPackLibrary?: import("./context-packs/context-pack-library-service.js").ContextPackLibraryService;
+  /** PL-016 Item 4: optional agent-image library so AgentSpec
+   *  session_source: mode: agent_image entries can resolve to the
+   *  image's resume token. Optional — when absent, agent_image session
+   *  source surfaces a structured error at instantiation time. */
+  agentImageLibrary?: import("./agent-images/agent-image-library-service.js").AgentImageLibraryService;
 }
 
 export interface MaterializeResult {
@@ -1051,7 +1056,8 @@ export class PodRigInstantiator {
     };
 
     // session_source dispatch: fork (native runtime fork) vs rebuild (artifact-
-    // injected fresh launch). Mutually exclusive; only one is set on a member.
+    // injected fresh launch) vs agent_image (PL-016 Item 4: dispatch through
+    // fork using the image's resume token). Mutually exclusive on a member.
     let forkSourceOpt: { forkSource: { kind: "native_id" | "artifact_path" | "name" | "last"; value?: string } } | undefined;
     let rebuildArtifactsOpt: { rebuildArtifacts: import("./runtime-adapter.js").ResolvedStartupFile[] } | undefined;
     if (input.member.sessionSource?.mode === "fork") {
@@ -1069,6 +1075,44 @@ export class PodRigInstantiator {
         return { status: "failed", error: resolved.error, sessionName: canonicalSessionName };
       }
       rebuildArtifactsOpt = { rebuildArtifacts: resolved.files };
+    } else if (input.member.sessionSource?.mode === "agent_image") {
+      // PL-016 Item 4: agent_image → resolve via library + dispatch
+      // through the native-fork code path so nativeResumeProbe
+      // semantics are preserved (architecture.md § Resume honesty).
+      const library = this.deps.agentImageLibrary;
+      if (!library) {
+        return {
+          status: "failed",
+          error: `session_source: mode: agent_image requires the daemon AgentImageLibraryService to be wired; restart the daemon or check ~/.openrig/agent-images/ exists.`,
+          sessionName: canonicalSessionName,
+        };
+      }
+      const ref = input.member.sessionSource.ref;
+      const version = ref.version ?? "1";
+      const image = library.getByNameVersion(ref.value, version);
+      if (!image) {
+        return {
+          status: "failed",
+          error: `Agent image '${ref.value}' v${version} not found in library. Run 'rig agent-image list' to see what's installed.`,
+          sessionName: canonicalSessionName,
+        };
+      }
+      if (image.runtime !== input.member.runtime) {
+        return {
+          status: "failed",
+          error: `Agent image '${ref.value}' v${version} runtime '${image.runtime}' does not match member '${input.member.id}' runtime '${input.member.runtime}'.`,
+          sessionName: canonicalSessionName,
+        };
+      }
+      forkSourceOpt = {
+        forkSource: { kind: "native_id", value: image.sourceResumeToken },
+      };
+      // Best-effort stats bump. Stat-write failures don't abort launch.
+      try {
+        library.recordConsumption(image.id);
+      } catch (err) {
+        console.warn(`[openrig] agent-image stats update failed for ${image.id}: ${(err as Error).message}`);
+      }
     }
 
     // Agent Starter resolver dispatch (Agent Starter v1 vertical M2). When

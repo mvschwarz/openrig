@@ -76,6 +76,8 @@ import { makeWorkflowKeepalivePolicy } from "./domain/policies/workflow-keepaliv
 import { SpecReviewService } from "./domain/spec-review-service.js";
 import { SpecLibraryService } from "./domain/spec-library-service.js";
 import { ContextPackLibraryService } from "./domain/context-packs/context-pack-library-service.js";
+import { AgentImageLibraryService } from "./domain/agent-images/agent-image-library-service.js";
+import { SnapshotCapturer } from "./domain/agent-images/snapshot-capturer.js";
 import { SettingsStore as ContextPackSettingsStore } from "./domain/user-settings/settings-store.js";
 import { WhoamiService } from "./domain/whoami-service.js";
 import { NodeCmuxService } from "./domain/node-cmux-service.js";
@@ -384,6 +386,40 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     return lib;
   })();
 
+  // PL-016 Item 2 + Item 4: hoist AgentImageLibraryService construction
+  // so the PodRigInstantiator can resolve `session_source: mode:
+  // agent_image` at materialize time. Same instance returned to deps
+  // below so /api/agent-images/* + the SnapshotCapturer share it.
+  const agentImageRootBuilder = () => {
+    const userImagesRoot = getDefaultOpenRigPath("agent-images");
+    try { fs.mkdirSync(userImagesRoot, { recursive: true }); } catch { /* best-effort */ }
+    const roots: Array<{ path: string; sourceType: "builtin" | "user_file" | "workspace" }> = [
+      { path: userImagesRoot, sourceType: "user_file" },
+    ];
+    try {
+      const settingsStore = new ContextPackSettingsStore();
+      const cfg = settingsStore.resolveConfig();
+      const workspaceImagesRoot = nodePath.join(cfg.workspaceRoot, ".openrig", "agent-images");
+      if (workspaceImagesRoot !== userImagesRoot && fs.existsSync(workspaceImagesRoot)) {
+        roots.push({ path: workspaceImagesRoot, sourceType: "workspace" });
+      }
+    } catch { /* settings unavailable */ }
+    return { userImagesRoot, roots };
+  };
+  const agentImageLibrary = (() => {
+    const { roots } = agentImageRootBuilder();
+    const lib = new AgentImageLibraryService({ roots });
+    lib.scan();
+    return lib;
+  })();
+  const snapshotCapturer = new SnapshotCapturer({
+    db,
+    rigRepo,
+    sessionRegistry,
+    agentImageLibrary,
+    targetRoot: getDefaultOpenRigPath("agent-images"),
+  });
+
   const podInstantiator = new PodRigInstantiator({
     db, rigRepo, podRepo,
     sessionRegistry, eventBus, nodeLauncher, startupOrchestrator,
@@ -391,6 +427,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     adapters: { "claude-code": claudeAdapter, "codex": codexAdapter, "terminal": new (await import("./adapters/terminal-adapter.js")).TerminalAdapter() },
     tmuxAdapter,
     contextPackLibrary,
+    agentImageLibrary,
   });
 
   const podBundleSourceResolver = new PodBundleSourceResolver();
@@ -580,6 +617,26 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     // entries — sharing the cache means /api/context-packs/* + the
     // instantiator see consistent state.
     contextPackLibrary,
+    // PL-016 — agent_image typed primitive. Shared library + capturer
+    // + spec-roots supplier across /api/agent-images/* and the
+    // PodRigInstantiator's session_source: mode: agent_image dispatch.
+    agentImageLibrary,
+    snapshotCapturer,
+    agentImageSpecRoots: () => {
+      // Spec-library roots scanned by the evidence guard. v0: user
+      // specs under ~/.openrig/specs + workspace-local specs root
+      // (from the SettingsStore-resolved workspace.specsRoot).
+      const userSpecsRoot = getDefaultOpenRigPath("specs");
+      const roots: string[] = [userSpecsRoot];
+      try {
+        const settingsStore = new ContextPackSettingsStore();
+        const cfg = settingsStore.resolveConfig();
+        if (cfg.workspaceSpecsRoot && cfg.workspaceSpecsRoot !== userSpecsRoot) {
+          roots.push(cfg.workspaceSpecsRoot);
+        }
+      } catch { /* settings unavailable */ }
+      return roots;
+    },
   };
 
   // Copy bundled reference docs to ~/.openrig/reference/ so agents can find them at a stable path
