@@ -159,4 +159,47 @@ describe("WhoamiService", () => {
     expect(result!.commands.sendExamples).toEqual([]);
     expect(result!.commands.captureExamples).toEqual([]);
   });
+
+  // --- PL-012 Token / Context Usage Surface v0: runtimeContext block ---
+
+  it("PL-012: claude-code seat surfaces runtimeContext with resumeToken from sessions table", () => {
+    const { nodeA, sessA } = seedRig();
+    db.prepare("UPDATE sessions SET resume_token = ? WHERE id = ?").run("claude-resume-abc", sessA.id);
+    const result = svc.resolve({ nodeId: nodeA.id });
+    expect(result).not.toBeNull();
+    expect(result!.runtimeContext).not.toBeNull();
+    expect(result!.runtimeContext?.runtime).toBe("claude-code");
+    if (result!.runtimeContext?.runtime === "claude-code") {
+      expect(result!.runtimeContext.resumeToken).toBe("claude-resume-abc");
+    }
+  });
+
+  it("PL-012: codex seat surfaces runtimeContext with runtime=codex (threadId null at v0)", () => {
+    const { nodeB } = seedRig();
+    const result = svc.resolve({ nodeId: nodeB.id });
+    expect(result).not.toBeNull();
+    expect(result!.runtimeContext?.runtime).toBe("codex");
+    if (result!.runtimeContext?.runtime === "codex") {
+      // v0: threadId resolution requires pid plumbing; surface null
+      // honestly rather than fabricated.
+      expect(result!.runtimeContext.threadId).toBeNull();
+      expect(result!.runtimeContext.conversationId).toBeNull();
+    }
+  });
+
+  it("PL-012: terminal runtime surfaces null runtimeContext (no conversation)", () => {
+    const rig = rigRepo.createRig("term-rig");
+    const node = rigRepo.addNode(rig.id, "tools.shell", { role: "worker", runtime: "terminal", label: "Shell" });
+    const result = svc.resolve({ nodeId: node.id });
+    expect(result).not.toBeNull();
+    expect(result!.runtimeContext).toBeNull();
+  });
+
+  it("PL-012: unknown runtime surfaces null runtimeContext (honest degradation)", () => {
+    const rig = rigRepo.createRig("future-rig");
+    const node = rigRepo.addNode(rig.id, "future.experimental", { role: "worker", runtime: "future-runtime-xyz", label: "Future" });
+    const result = svc.resolve({ nodeId: node.id });
+    expect(result).not.toBeNull();
+    expect(result!.runtimeContext).toBeNull();
+  });
 });

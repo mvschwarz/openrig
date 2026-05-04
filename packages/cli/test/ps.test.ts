@@ -616,7 +616,9 @@ describe("Ps CLI", () => {
       const { logs, exitCode } = await captureLogs(async () => {
         await makeCmd().parseAsync(["node", "rig", "ps", "--json", "--filter", "noequals"]);
       });
-      expect(logs.some((l) => l.includes("--filter must be key=value"))).toBe(true);
+      // PL-012: error message now names the comparator family since
+      // numeric ops (>=, >, <=, <, =) are accepted.
+      expect(logs.some((l) => l.includes("--filter must be key") && l.includes("op = "))).toBe(true);
       expect(exitCode).toBe(1);
     });
 

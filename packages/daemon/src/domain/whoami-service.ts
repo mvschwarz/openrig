@@ -47,7 +47,27 @@ export interface WhoamiResult {
     captureExamples: string[];
   };
   contextUsage?: import("./types.js").ContextUsage;
+  /** PL-012 Token / Context Usage Surface v0 — runtime-specific context
+   *  detail surfaced alongside the cross-runtime contextUsage primitive.
+   *  Codex: threadId from the per-pid logs DB. Claude Code: resumeToken
+   *  + current usage from the context-usage sample. Terminal: null. */
+  runtimeContext?: RuntimeContext | null;
 }
+
+export type RuntimeContext =
+  | {
+      runtime: "codex";
+      threadId: string | null;
+      conversationId: string | null;
+      estimatedTokens: number | null;
+      lastSampledAt: string | null;
+    }
+  | {
+      runtime: "claude-code";
+      resumeToken: string | null;
+      estimatedTokens: number | null;
+      lastSampledAt: string | null;
+    };
 
 export class WhoamiAmbiguousError extends Error {
   constructor(message: string) {
@@ -283,6 +303,11 @@ export class WhoamiService {
       ? this.contextUsageStore.getForNode(nodeRow.id, currentSessionName)
       : undefined;
 
+    // PL-012: runtime-specific context block. Codex/Claude Code surface
+    // additional debug-friendly detail; terminal seats have no
+    // conversation context and report null.
+    const runtimeContext = this.computeRuntimeContext(nodeRow.id, identity.runtime, contextUsage);
+
     return {
       resolvedBy,
       identity,
@@ -291,7 +316,65 @@ export class WhoamiService {
       transcript,
       commands: { sendExamples, captureExamples },
       contextUsage,
+      runtimeContext,
     };
+  }
+
+  /** PL-012: produce the runtime-specific context block. v0 surfaces
+   *  what the daemon already has captured without taking on new pid /
+   *  log lookups (those need helper plumbing across the daemon's tmux
+   *  adapter). When data isn't available, fields return null honestly
+   *  instead of fabricating. Terminal seats: null entire block. */
+  private computeRuntimeContext(
+    nodeId: string,
+    runtime: string,
+    contextUsage: import("./types.js").ContextUsage | undefined,
+  ): RuntimeContext | null {
+    if (runtime === "terminal") return null;
+
+    const totalIn = contextUsage?.totalInputTokens ?? 0;
+    const totalOut = contextUsage?.totalOutputTokens ?? 0;
+    const estimatedTokens = (contextUsage?.availability === "known")
+      ? (totalIn + totalOut) || null
+      : null;
+    const lastSampledAt = contextUsage?.sampledAt ?? null;
+
+    if (runtime === "codex") {
+      // Codex thread-id resolution requires a pid (codex-thread-id.ts is
+      // pid-keyed). Surface null at v0 — the operator drops to terminal
+      // for thread-id extraction. NAMED v0+1 trigger: dogfood reports
+      // needing UI-side thread-id without terminal drop.
+      return {
+        runtime: "codex",
+        threadId: null,
+        conversationId: null,
+        estimatedTokens,
+        lastSampledAt,
+      };
+    }
+    if (runtime === "claude-code") {
+      // resumeToken lives on sessions.resume_token (migration 006).
+      // Read the most-recent session for this node.
+      let resumeToken: string | null = null;
+      try {
+        const row = this.db
+          .prepare("SELECT resume_token FROM sessions WHERE node_id = ? ORDER BY id DESC LIMIT 1")
+          .get(nodeId) as { resume_token: string | null } | undefined;
+        resumeToken = row?.resume_token ?? null;
+      } catch {
+        // Migration absent (test harness) — surface null honestly.
+        resumeToken = null;
+      }
+      return {
+        runtime: "claude-code",
+        resumeToken,
+        estimatedTokens,
+        lastSampledAt,
+      };
+    }
+    // Unknown runtime: surface null until the daemon learns the
+    // runtime's context exposure shape. PL-005 honest-degradation.
+    return null;
   }
 
   private getCurrentSessionName(nodeId: string, rigId: string): string | null {
