@@ -139,6 +139,14 @@ export interface AppDeps {
   // "slices_root_not_configured" 503 so the UI can surface a setup hint.
   sliceIndexer?: import("./domain/slices/slice-indexer.js").SliceIndexer;
   sliceDetailProjector?: import("./domain/slices/slice-detail-projector.js").SliceDetailProjector;
+  missionControlAuditBrowse?: import("./domain/mission-control/audit-browse.js").MissionControlAuditBrowse;
+  missionControlNotificationDispatcher?: import("./domain/mission-control/notification-dispatcher.js").MissionControlNotificationDispatcher;
+  /**
+   * PL-005 Phase B: bearer token (or null for loopback-only mode).
+   * The mission-control routes use this to wire the
+   * authBearerTokenMiddleware on write verbs.
+   */
+  missionControlBearerToken?: string | null;
   specReviewService?: SpecReviewService;
   specLibraryService?: SpecLibraryService;
   whoamiService?: WhoamiService;
@@ -306,6 +314,8 @@ export function createApp(deps: AppDeps): Hono {
     c.set("missionControlFleetCliCapability" as never, deps.missionControlFleetCliCapability);
     c.set("sliceIndexer" as never, deps.sliceIndexer);
     c.set("sliceDetailProjector" as never, deps.sliceDetailProjector);
+    c.set("missionControlAuditBrowse" as never, deps.missionControlAuditBrowse);
+    c.set("missionControlNotificationDispatcher" as never, deps.missionControlNotificationDispatcher);
     c.set("specReviewService" as never, deps.specReviewService);
     c.set("specLibraryService" as never, deps.specLibraryService);
     c.set("whoamiService" as never, deps.whoamiService);
@@ -358,7 +368,10 @@ export function createApp(deps: AppDeps): Hono {
   app.route("/api/views", viewsRoutes());
   app.route("/api/watchdog", watchdogRoutes());
   app.route("/api/workflow", workflowRoutes());
-  app.route("/api/mission-control", missionControlRoutes());
+  app.route(
+    "/api/mission-control",
+    missionControlRoutes({ bearerToken: deps.missionControlBearerToken ?? null }),
+  );
   // Slice Story View v0 — slice indexer + per-tab payload routes.
   app.route("/api/slices", slicesRoutes());
   app.route("/api/rigs/:rigId/env", envRoutes());

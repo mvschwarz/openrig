@@ -199,7 +199,11 @@ export type RigEvent =
   // consumers can choose whether to re-fetch).
   | { type: "mission_control.action_executed"; actionId: string; actionVerb: string; qitemId: string | null; actorSession: string }
   | { type: "mission_control.cli_drift_detected"; rigName: string; missingField: string; observedAt: string }
-  | { type: "mission_control.view_refreshed"; viewName: string; cause: string };
+  | { type: "mission_control.view_refreshed"; viewName: string; cause: string }
+  // PL-005 Phase B: notification dispatch events. Best-effort delivery;
+  // failure does NOT interrupt the underlying action being notified about.
+  | { type: "mission_control.notification_sent"; mechanism: string; target: string; qitemId: string | null; sentAt: string }
+  | { type: "mission_control.notification_failed"; mechanism: string; target: string; qitemId: string | null; error: string; failedAt: string };
 
 export type PersistedEvent = RigEvent & {
   seq: number;

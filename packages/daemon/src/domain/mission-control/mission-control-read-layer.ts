@@ -70,6 +70,9 @@ export interface CompactStatusRow {
   /** Carrier metadata (id used for verb actions). */
   qitemId?: string | null;
   rawSourceRef?: string | null;
+  /** Human-readable qitem context for phone decisions. */
+  qitemSummary?: string | null;
+  qitemBody?: string | null;
 }
 
 export interface MissionControlReadResult {
@@ -272,7 +275,15 @@ function qitemToRow(
     evidenceLink: null,
     qitemId: q.qitemId,
     rawSourceRef: q.sourceSession,
+    qitemSummary: summarizeBody(q.body),
+    qitemBody: q.body,
   };
+}
+
+function summarizeBody(body: string): string {
+  const compact = body.replace(/\s+/g, " ").trim();
+  if (compact.length <= 120) return compact;
+  return `${compact.slice(0, 117).trimEnd()}...`;
 }
 
 function qitemStateToCompactState(state: QueueState): CompactStatusRow["state"] {

@@ -1,14 +1,24 @@
 import { serve } from "@hono/node-server";
 import { readOpenRigEnv } from "./openrig-compat.js";
 import { createDaemon } from "./startup.js";
+import { assertBindAuthInvariant } from "./middleware/auth-bearer-token.js";
 
 export async function startServer(port?: number) {
   const p = port ?? parseInt(readOpenRigEnv("OPENRIG_PORT", "RIGGED_PORT") ?? "7433", 10);
   const dbPath = readOpenRigEnv("OPENRIG_DB", "RIGGED_DB") ?? "openrig.sqlite";
 
-  const { app, contextMonitor, deps } = await createDaemon({ dbPath });
-
   const h = readOpenRigEnv("OPENRIG_HOST", "RIGGED_HOST") ?? "127.0.0.1";
+  // PL-005 Phase B: bearer token for Mission Control write verbs.
+  // No legacy alias (this env var is new in Phase B).
+  const bearerToken = process.env.OPENRIG_AUTH_BEARER_TOKEN ?? null;
+
+  // PL-005 Phase B HARD-GATE (audit row 8): refuse non-loopback bind
+  // when no bearer token is configured. Prevents shipping a tailnet-
+  // bound daemon with no auth on Mission Control write verbs.
+  // Throws AuthBearerTokenStartupError before any DB or HTTP work.
+  assertBindAuthInvariant({ host: h, bearerToken });
+
+  const { app, contextMonitor, deps } = await createDaemon({ dbPath, bearerToken });
 
   const server = serve({ fetch: app.fetch, port: p, hostname: h }, (info) => {
     console.log(`OpenRig daemon listening on http://localhost:${info.port}`);

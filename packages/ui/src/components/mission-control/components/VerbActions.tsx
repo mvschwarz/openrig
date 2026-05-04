@@ -10,6 +10,7 @@ import {
   type MissionControlVerb,
   useMissionControlAction,
 } from "../hooks/useMissionControlAction.js";
+import { useMissionControlDestinations } from "../hooks/useMissionControlDestinations.js";
 
 export interface VerbActionsProps {
   qitemId: string;
@@ -38,6 +39,7 @@ export function VerbActions({
   const mutation = useMissionControlAction();
   const [activeVerb, setActiveVerb] = useState<MissionControlVerb | null>(null);
   const [destinationSession, setDestinationSession] = useState("");
+  const [manualDestination, setManualDestination] = useState(false);
   const [annotation, setAnnotation] = useState("");
   const [reason, setReason] = useState("");
 
@@ -48,6 +50,15 @@ export function VerbActions({
   function reset() {
     setActiveVerb(null);
     setDestinationSession("");
+    setManualDestination(false);
+    setAnnotation("");
+    setReason("");
+  }
+
+  function selectVerb(verb: MissionControlVerb) {
+    setActiveVerb(verb);
+    setDestinationSession("");
+    setManualDestination(false);
     setAnnotation("");
     setReason("");
   }
@@ -72,6 +83,14 @@ export function VerbActions({
     );
   }
 
+  const destinationsQuery = useMissionControlDestinations(needsDestination);
+  const destinationOptions = destinationsQuery.data?.destinations ?? [];
+  const destinationListLoading = needsDestination && destinationsQuery.isLoading;
+  const showDestinationSelect = needsDestination && (destinationOptions.length > 0 || destinationListLoading);
+  const showManualDestinationInput =
+    needsDestination &&
+    (manualDestination || destinationsQuery.isError || (destinationsQuery.isFetched && destinationOptions.length === 0));
+
   return (
     <div data-testid="mc-verb-actions" className="space-y-2">
       <div className="flex flex-wrap gap-1">
@@ -80,7 +99,7 @@ export function VerbActions({
             key={verb}
             type="button"
             data-testid={`mc-verb-${verb}`}
-            onClick={() => setActiveVerb(verb)}
+            onClick={() => selectVerb(verb)}
             disabled={mutation.isPending}
             className={`border px-2 py-0.5 font-mono text-[9px] uppercase tracking-[0.12em] ${
               activeVerb === verb
@@ -95,14 +114,49 @@ export function VerbActions({
       {activeVerb && (
         <div className="space-y-1 border border-stone-200 bg-stone-50 p-2">
           {needsDestination && (
-            <input
-              type="text"
-              data-testid="mc-verb-destination-input"
-              value={destinationSession}
-              onChange={(e) => setDestinationSession(e.target.value)}
-              placeholder="destination session (member@rig)"
-              className="w-full border border-stone-300 px-2 py-1 font-mono text-xs"
-            />
+            <div className="space-y-1">
+              {showDestinationSelect ? (
+                <select
+                  data-testid="mc-verb-destination-select"
+                  aria-label="Destination session"
+                  value={manualDestination ? "__manual__" : destinationSession}
+                  disabled={destinationListLoading}
+                  onChange={(e) => {
+                    if (e.target.value === "__manual__") {
+                      setManualDestination(true);
+                      setDestinationSession("");
+                      return;
+                    }
+                    setManualDestination(false);
+                    setDestinationSession(e.target.value);
+                  }}
+                  className="w-full border border-stone-300 bg-white px-2 py-1 font-mono text-xs"
+                >
+                  <option value="">
+                    {destinationListLoading ? "loading destinations..." : "choose destination"}
+                  </option>
+                  {destinationOptions.map((destination) => (
+                    <option key={destination.sessionName} value={destination.sessionName}>
+                      {destination.label}
+                    </option>
+                  ))}
+                  <option value="__manual__">manual entry</option>
+                </select>
+              ) : null}
+              {showManualDestinationInput ? (
+                <input
+                  type="text"
+                  data-testid="mc-verb-destination-input"
+                  value={destinationSession}
+                  onChange={(e) => setDestinationSession(e.target.value)}
+                  placeholder="destination session (member@rig)"
+                  className="w-full border border-stone-300 px-2 py-1 font-mono text-xs"
+                />
+              ) : null}
+              {destinationsQuery.isError ? (
+                <div className="font-mono text-[10px] text-amber-700">destination list unavailable</div>
+              ) : null}
+            </div>
           )}
           {needsAnnotation && (
             <textarea
