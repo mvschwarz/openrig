@@ -580,6 +580,30 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       queueRepo: queueRepoForWorkflow,
     });
     deps.workflowRuntime = workflowRuntime;
+
+    // RSI v2 starter v0: seed built-in starter workflow_specs into the
+    // cache. Idempotent + workspace-surface-respecting — operator
+    // overrides at workspace paths are preserved (skip-if-cached).
+    // Errors are collected into the result for diagnostic logging but
+    // do NOT block startup; a malformed bundled spec should not bring
+    // the daemon down.
+    const { loadStarterWorkflowSpecs, defaultBuiltinSpecsDir } = await import(
+      "./domain/workflow/starter-spec-loader.js"
+    );
+    const builtinSpecsDir = defaultBuiltinSpecsDir();
+    const starterResult = loadStarterWorkflowSpecs({
+      cache: workflowRuntime.specCache,
+      builtinDir: builtinSpecsDir,
+    });
+    // Surface the resolved path to the routes layer so
+    // GET /api/workflow/specs can compute the per-row isBuiltIn flag.
+    deps.workflowBuiltinSpecsDir = builtinSpecsDir;
+    if (starterResult.errors.length > 0) {
+      console.warn(
+        `[starter-spec-loader] ${starterResult.errors.length} spec(s) failed to load:`,
+        starterResult.errors,
+      );
+    }
   }
 
   // PL-005 Phase A: Mission Control / Queue Observability services.
