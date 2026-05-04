@@ -3,6 +3,7 @@ import { Link, useRouterState } from "@tanstack/react-router";
 import { CheckSquare, Cog, Compass, FileText, Folder, Layers, SquarePlus } from "lucide-react";
 import { Explorer, type ExplorerSurface } from "./Explorer.js";
 import { SharedDetailDrawer, type DrawerSelection } from "./SharedDetailDrawer.js";
+import { PreviewStack } from "./preview/PreviewStack.js";
 import type { DiscoveryPlacementTarget } from "./DiscoveryPanel.js";
 import { SpecsWorkspaceProvider } from "./SpecsWorkspace.js";
 import { useActivityFeed } from "../hooks/useActivityFeed.js";
@@ -399,6 +400,11 @@ export function AppShell({ children }: AppShellProps) {
             placementTarget={placementTarget}
             onClearPlacement={clearPlacement}
           />
+          {/* Preview Terminal v0 (PL-018) — pinned-preview side rail.
+              Self-hides when no pins; positioned right edge under the
+              detail drawer so the drawer takes precedence when both
+              are mounted (z-index 20 > 10). */}
+          <PreviewStack />
         </div>
         </div>
         </ExplorerVisibilityContext.Provider>

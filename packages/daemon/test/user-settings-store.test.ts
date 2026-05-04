@@ -54,13 +54,14 @@ describe("SettingsStore (User Settings v0)", () => {
     restoreEnv();
   });
 
-  it("SETTINGS_VALID_KEYS matches the documented 12-key set", () => {
+  it("SETTINGS_VALID_KEYS matches the documented 15-key set (12 baseline + 3 PL-018 ui.preview.*)", () => {
     expect([...SETTINGS_VALID_KEYS]).toEqual([
       "daemon.port", "daemon.host", "db.path",
       "transcripts.enabled", "transcripts.path",
       "workspace.root", "workspace.slices_root", "workspace.steering_path",
       "workspace.field_notes_root", "workspace.specs_root",
       "files.allowlist", "progress.scan_roots",
+      "ui.preview.refresh_interval_seconds", "ui.preview.max_pins", "ui.preview.default_lines",
     ]);
   });
 

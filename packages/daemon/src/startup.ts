@@ -775,6 +775,15 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     const settingsStore = new SettingsStore();
     deps.settingsStore = settingsStore;
     const cfg = settingsStore.resolveConfig();
+
+    // Preview Terminal v0 (PL-018) — per-session rate limiter for the
+    // /preview route. 1-second window per (session, lines) cache key:
+    // short enough that legitimate polling at the operator's refresh
+    // interval (`ui.preview.refresh_interval_seconds`, default 3s) always
+    // sees fresh content, but multiple pinned-pane requests for the same
+    // seat within a single second collapse to one tmux capture.
+    const { PreviewRateLimiter } = await import("./domain/preview/preview-rate-limiter.js");
+    deps.previewRateLimiter = new PreviewRateLimiter(1000);
     const filesAllowlist = decodeAllowlist(cfg.filesAllowlistRaw);
     deps.filesAllowlist = filesAllowlist;
     deps.fileWriteService = filesAllowlist.length > 0

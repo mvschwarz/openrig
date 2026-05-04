@@ -20,7 +20,9 @@
 // v2+ territory.
 
 import { Link } from "@tanstack/react-router";
+import { useState } from "react";
 import type { SliceDetail, SpecGraphPayload } from "../../../hooks/useSlices.js";
+import { SessionPreviewPane } from "../../preview/SessionPreviewPane.js";
 
 export function TopologyTab({ topology }: { topology: SliceDetail["topology"] }) {
   const { affectedRigs, totalSeats, specGraph } = topology;
@@ -79,13 +81,7 @@ export function TopologyTab({ topology }: { topology: SliceDetail["topology"] })
               </header>
               <ul className="divide-y divide-stone-100">
                 {rig.sessionNames.map((session) => (
-                  <li
-                    key={session}
-                    data-testid={`topology-seat-${session}`}
-                    className="px-3 py-1 font-mono text-[10px] text-stone-700"
-                  >
-                    {session}
-                  </li>
+                  <SeatRow key={session} session={session} />
                 ))}
               </ul>
             </section>
@@ -93,6 +89,36 @@ export function TopologyTab({ topology }: { topology: SliceDetail["topology"] })
         </div>
       )}
     </div>
+  );
+}
+
+// Preview Terminal v0 (PL-018) — clickable seat row.
+// Click toggles inline preview for the seat using the session-keyed
+// preview alias. Operator wanting persistent / multi-pin behavior
+// pins from the node-detail drawer (separate flow).
+function SeatRow({ session }: { session: string }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <li
+      data-testid={`topology-seat-${session}`}
+      data-open={open ? "true" : "false"}
+      className="px-3 py-1"
+    >
+      <button
+        type="button"
+        data-testid={`topology-seat-${session}-toggle`}
+        onClick={() => setOpen((o) => !o)}
+        className="flex w-full items-baseline gap-2 text-left font-mono text-[10px] text-stone-700 hover:bg-stone-50 -mx-3 px-3 py-0.5"
+      >
+        <span className="flex-1 truncate">{session}</span>
+        <span className="text-stone-400 shrink-0">{open ? "▾" : "▸"}</span>
+      </button>
+      {open && (
+        <div data-testid={`topology-seat-${session}-preview`} className="mt-1">
+          <SessionPreviewPane sessionName={session} testIdPrefix={`topology-preview-${session}`} />
+        </div>
+      )}
+    </li>
   );
 }
 

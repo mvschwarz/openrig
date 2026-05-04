@@ -42,6 +42,9 @@ export const SETTINGS_VALID_KEYS = [
   "workspace.specs_root",
   "files.allowlist",
   "progress.scan_roots",
+  "ui.preview.refresh_interval_seconds",
+  "ui.preview.max_pins",
+  "ui.preview.default_lines",
 ] as const;
 
 export type SettingsValidKey = typeof SETTINGS_VALID_KEYS[number];
@@ -59,6 +62,9 @@ const ENV_MAP: Record<SettingsValidKey, { primary: string; legacy: string }> = {
   "workspace.specs_root": { primary: "OPENRIG_WORKSPACE_SPECS_ROOT", legacy: "RIGGED_WORKSPACE_SPECS_ROOT" },
   "files.allowlist": { primary: "OPENRIG_FILES_ALLOWLIST", legacy: "RIGGED_FILES_ALLOWLIST" },
   "progress.scan_roots": { primary: "OPENRIG_PROGRESS_SCAN_ROOTS", legacy: "RIGGED_PROGRESS_SCAN_ROOTS" },
+  "ui.preview.refresh_interval_seconds": { primary: "OPENRIG_UI_PREVIEW_REFRESH_INTERVAL_SECONDS", legacy: "RIGGED_UI_PREVIEW_REFRESH_INTERVAL_SECONDS" },
+  "ui.preview.max_pins": { primary: "OPENRIG_UI_PREVIEW_MAX_PINS", legacy: "RIGGED_UI_PREVIEW_MAX_PINS" },
+  "ui.preview.default_lines": { primary: "OPENRIG_UI_PREVIEW_DEFAULT_LINES", legacy: "RIGGED_UI_PREVIEW_DEFAULT_LINES" },
 };
 
 const KEY_TO_PATH: Record<SettingsValidKey, string[]> = {
@@ -74,6 +80,9 @@ const KEY_TO_PATH: Record<SettingsValidKey, string[]> = {
   "workspace.specs_root": ["workspace", "specsRoot"],
   "files.allowlist": ["files", "allowlist"],
   "progress.scan_roots": ["progress", "scanRoots"],
+  "ui.preview.refresh_interval_seconds": ["ui", "preview", "refreshIntervalSeconds"],
+  "ui.preview.max_pins": ["ui", "preview", "maxPins"],
+  "ui.preview.default_lines": ["ui", "preview", "defaultLines"],
 };
 
 export type SettingSource = "env" | "file" | "default";
@@ -147,6 +156,10 @@ function getDefaultValue(key: SettingsValidKey, workspaceRoot: string): string |
     case "workspace.root": return DEFAULT_WORKSPACE_ROOT;
     case "files.allowlist": return "";
     case "progress.scan_roots": return "";
+    // Preview Terminal v0 (PL-018) defaults — match cli/src/config-store.ts.
+    case "ui.preview.refresh_interval_seconds": return 3;
+    case "ui.preview.max_pins": return 4;
+    case "ui.preview.default_lines": return 50;
     default: return "";
   }
 }
@@ -174,6 +187,10 @@ export interface ResolvedConfig {
   workspaceSpecsRoot: string;
   filesAllowlistRaw: string;
   progressScanRootsRaw: string;
+  // Preview Terminal v0 (PL-018) — UI preview preferences.
+  uiPreviewRefreshIntervalSeconds: number;
+  uiPreviewMaxPins: number;
+  uiPreviewDefaultLines: number;
 }
 
 export class SettingsStore {
@@ -220,6 +237,9 @@ export class SettingsStore {
       workspaceSpecsRoot: this.resolveOne("workspace.specs_root", fc, wr).value as string,
       filesAllowlistRaw: this.resolveOne("files.allowlist", fc, wr).value as string,
       progressScanRootsRaw: this.resolveOne("progress.scan_roots", fc, wr).value as string,
+      uiPreviewRefreshIntervalSeconds: this.resolveOne("ui.preview.refresh_interval_seconds", fc, wr).value as number,
+      uiPreviewMaxPins: this.resolveOne("ui.preview.max_pins", fc, wr).value as number,
+      uiPreviewDefaultLines: this.resolveOne("ui.preview.default_lines", fc, wr).value as number,
     };
   }
 

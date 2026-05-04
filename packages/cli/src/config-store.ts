@@ -34,6 +34,15 @@ export interface RiggedConfig {
   progress: {
     scanRoots: string;
   };
+  // Preview Terminal v0 (PL-018) — UI-side preferences for the live
+  // terminal preview pane.
+  ui: {
+    preview: {
+      refreshIntervalSeconds: number;
+      maxPins: number;
+      defaultLines: number;
+    };
+  };
 }
 
 const DEFAULT_WORKSPACE_ROOT = getDefaultOpenRigPath("workspace");
@@ -51,6 +60,13 @@ const DEFAULTS = {
   },
   files: { allowlist: "" },
   progress: { scanRoots: "" },
+  ui: {
+    preview: {
+      refreshIntervalSeconds: 3,
+      maxPins: 4,
+      defaultLines: 50,
+    },
+  },
 } as const;
 
 export const VALID_KEYS = [
@@ -66,6 +82,9 @@ export const VALID_KEYS = [
   "workspace.specs_root",
   "files.allowlist",
   "progress.scan_roots",
+  "ui.preview.refresh_interval_seconds",
+  "ui.preview.max_pins",
+  "ui.preview.default_lines",
 ] as const;
 
 export type ValidKey = typeof VALID_KEYS[number];
@@ -86,6 +105,9 @@ export const ENV_MAP: Record<ValidKey, { primary: string; legacy: string }> = {
   // typed keys (no breaking change).
   "files.allowlist": { primary: "OPENRIG_FILES_ALLOWLIST", legacy: "RIGGED_FILES_ALLOWLIST" },
   "progress.scan_roots": { primary: "OPENRIG_PROGRESS_SCAN_ROOTS", legacy: "RIGGED_PROGRESS_SCAN_ROOTS" },
+  "ui.preview.refresh_interval_seconds": { primary: "OPENRIG_UI_PREVIEW_REFRESH_INTERVAL_SECONDS", legacy: "RIGGED_UI_PREVIEW_REFRESH_INTERVAL_SECONDS" },
+  "ui.preview.max_pins": { primary: "OPENRIG_UI_PREVIEW_MAX_PINS", legacy: "RIGGED_UI_PREVIEW_MAX_PINS" },
+  "ui.preview.default_lines": { primary: "OPENRIG_UI_PREVIEW_DEFAULT_LINES", legacy: "RIGGED_UI_PREVIEW_DEFAULT_LINES" },
 };
 
 // Maps dotted-string config keys to the camelCase RiggedConfig path.
@@ -105,6 +127,9 @@ const KEY_TO_PATH: Record<ValidKey, string[]> = {
   "workspace.specs_root": ["workspace", "specsRoot"],
   "files.allowlist": ["files", "allowlist"],
   "progress.scan_roots": ["progress", "scanRoots"],
+  "ui.preview.refresh_interval_seconds": ["ui", "preview", "refreshIntervalSeconds"],
+  "ui.preview.max_pins": ["ui", "preview", "maxPins"],
+  "ui.preview.default_lines": ["ui", "preview", "defaultLines"],
 };
 
 function isValidKey(key: string): key is ValidKey {
@@ -223,6 +248,13 @@ export class ConfigStore {
       },
       progress: {
         scanRoots: v("progress.scan_roots") as string,
+      },
+      ui: {
+        preview: {
+          refreshIntervalSeconds: v("ui.preview.refresh_interval_seconds") as number,
+          maxPins: v("ui.preview.max_pins") as number,
+          defaultLines: v("ui.preview.default_lines") as number,
+        },
       },
     };
   }
