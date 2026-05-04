@@ -93,8 +93,9 @@ describe("workflow routes (PL-004 Phase D)", () => {
       body: JSON.stringify({ specPath }),
     });
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { ok: boolean };
+    const body = (await res.json()) as { ok: boolean; summary: { entryRole: string | null } };
     expect(body.ok).toBe(true);
+    expect(body.summary.entryRole).toBe("producer");
   });
 
   it("POST /validate returns 404 for missing file", async () => {
@@ -116,6 +117,28 @@ describe("workflow routes (PL-004 Phase D)", () => {
     const body = (await res.json()) as { instance: { instanceId: string }; entryQitemId: string };
     expect(body.instance.instanceId).toMatch(/^[0-9A-Z]{26}$/);
     expect(body.entryQitemId).toBeDefined();
+  });
+
+  it("POST /instantiate surfaces queue destination validation as 400", async () => {
+    const rejectingQueueRepo = new QueueRepository(db, bus, { validateRig: () => false });
+    const rejectingRuntime = new WorkflowRuntime({
+      db,
+      eventBus: bus,
+      queueRepo: rejectingQueueRepo,
+    });
+    const rejectingApp = buildApp({ eventBus: bus, runtime: rejectingRuntime });
+
+    const res = await rejectingApp.request("/api/workflow/instantiate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ specPath, rootObjective: "test", createdBySession: "ops@rig" }),
+    });
+
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string; message: string };
+    expect(body.error).toBe("unknown_destination_rig");
+    expect(body.error).not.toBe("internal_error");
+    expect(body.message).toContain("producer@rig");
   });
 
   it("POST /project closes packet + creates next packet", async () => {

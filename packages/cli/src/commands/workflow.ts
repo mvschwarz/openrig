@@ -140,6 +140,47 @@ export function workflowCommand(depsOverride?: WorkflowDeps): Command {
       });
     });
 
+  // RSI v2 starter v0: list cached workflow_specs (NOT instances). The
+  // existing `rig workflow list` lists instances; this is the
+  // complementary surface for inspecting which specs are registered,
+  // including the new built-in starter(s) shipped at daemon startup.
+  // Built-in rows display a `(built-in)` indicator in human output and
+  // an `isBuiltIn: true` field in JSON output.
+  cmd
+    .command("specs")
+    .description("List registered workflow specs; built-in starters tagged with (built-in)")
+    .option("--json", "JSON output for agents")
+    .action(async (opts: { json?: boolean }) => {
+      const deps = getDeps();
+      await withClient(deps, async (client) => {
+        const res = await client.get<{ specs: Array<{
+          name: string; version: string; purpose: string | null;
+          targetRig: string | null; coordinationTerminalTurnRule: string;
+          sourcePath: string; cachedAt: string; isBuiltIn: boolean;
+        }> }>("/api/workflow/specs");
+        if (opts.json) {
+          printResult(true, res.data, res.status);
+          return;
+        }
+        if (res.status >= 400) {
+          printResult(false, res.data, res.status);
+          return;
+        }
+        const rows = res.data.specs ?? [];
+        if (rows.length === 0) {
+          console.log("No workflow specs registered.");
+          return;
+        }
+        // Compact human table — name, version, source, indicator.
+        for (const row of rows) {
+          const indicator = row.isBuiltIn ? " (built-in)" : "";
+          console.log(`${row.name} v${row.version}${indicator}`);
+          if (row.purpose) console.log(`  purpose: ${row.purpose.replace(/\n/g, " ").slice(0, 120)}`);
+          console.log(`  source: ${row.sourcePath}`);
+        }
+      });
+    });
+
   cmd
     .command("show <instanceId>")
     .description("Show one workflow instance")
