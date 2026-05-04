@@ -25,6 +25,8 @@ import { LiveNodeDetails } from "./components/LiveNodeDetails.js";
 import { DiscoveryOverlay } from "./components/DiscoveryOverlay.js";
 import { MissionControlSurface } from "./components/mission-control/MissionControlSurface.js";
 import { SliceStoryView } from "./components/slices/SliceStoryView.js";
+import { ProgressWorkspace } from "./components/progress/ProgressWorkspace.js";
+import { FilesWorkspace } from "./components/files/FilesWorkspace.js";
 import { useRigSummary } from "./hooks/useRigSummary.js";
 import { useDrawerSelection } from "./components/AppShell.js";
 
@@ -241,6 +243,20 @@ const sliceDetailRoute = createRoute({
   component: SliceStoryView,
 });
 
+// UI Enhancement Pack v0: top-level Progress (item 1B) + Files
+// (item 3 + item 4) workspaces. Both are read-only pages with their
+// own internal layout — no left-sidebar nav coupling.
+const progressRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/progress",
+  component: ProgressWorkspace,
+});
+const filesRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/files",
+  component: FilesWorkspace,
+});
+
 const routeTree = rootRoute.addChildren([
   indexRoute,
   rigDetailRoute,
@@ -262,6 +278,8 @@ const routeTree = rootRoute.addChildren([
   missionControlRoute,
   slicesIndexRoute,
   sliceDetailRoute,
+  progressRoute,
+  filesRoute,
 ]);
 
 // Router
