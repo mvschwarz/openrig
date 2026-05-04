@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
+import * as path from "node:path";
 import type { EventBus } from "../domain/event-bus.js";
 import {
   WorkflowInstanceError,
@@ -148,6 +149,28 @@ export function workflowRoutes(): Hono {
     return c.json(getRuntime(c).instanceStore.listAll());
   });
 
+  // RSI v2 starter v0: lists every cached workflow_spec with an
+  // `isBuiltIn` flag computed from whether the spec's source_path is
+  // under the daemon's built-in starter directory. Mounted BEFORE
+  // /:instance_id (Phase A R1 SSE route-order lesson) so the literal
+  // `/specs` path isn't shadowed by the bare-param catchall.
+  app.get("/specs", (c) => {
+    const runtime = getRuntime(c);
+    const builtinDirAbs = c.get("workflowBuiltinSpecsDir" as never) as string | undefined;
+    const rows = runtime.specCache.listAll();
+    const payload = rows.map((row) => ({
+      name: row.name,
+      version: row.version,
+      purpose: row.purpose,
+      targetRig: row.targetRig,
+      coordinationTerminalTurnRule: row.coordinationTerminalTurnRule,
+      sourcePath: row.sourcePath,
+      cachedAt: row.cachedAt,
+      isBuiltIn: builtinDirAbs ? isUnderDir(row.sourcePath, builtinDirAbs) : false,
+    }));
+    return c.json({ specs: payload });
+  });
+
   // SSE for workflow.* events. MUST precede /:instance_id (Phase A R1 lesson).
   const sseHandler = (c: Parameters<typeof streamSSE>[0]) => {
     const eventBus = getEventBus(c);
@@ -202,4 +225,18 @@ export function workflowRoutes(): Hono {
   });
 
   return app;
+}
+
+/**
+ * Returns true when childPath resolves to a location strictly underneath
+ * parentDir on disk. Both inputs are resolved to absolute paths first;
+ * the parent comparison appends a trailing path.sep to avoid the
+ * `/foo/bar-other` matching `/foo/bar` false-positive case.
+ */
+function isUnderDir(childPath: string, parentDir: string): boolean {
+  const child = path.resolve(childPath);
+  const parent = path.resolve(parentDir);
+  if (child === parent) return false;
+  const parentWithSep = parent.endsWith(path.sep) ? parent : `${parent}${path.sep}`;
+  return child.startsWith(parentWithSep);
 }

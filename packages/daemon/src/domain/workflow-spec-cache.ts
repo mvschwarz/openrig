@@ -214,6 +214,19 @@ export class WorkflowSpecCache {
     return row ? rowToWorkflowSpec(row) : null;
   }
 
+  /**
+   * Lists every cached spec, ordered by name then version. Used by the
+   * `GET /api/workflow/specs` endpoint (RSI v2 starter v0). Cheap —
+   * the workflow_specs table is bounded by the number of operator-
+   * authored + built-in starter specs (single-host MVP).
+   */
+  listAll(): WorkflowSpecRow[] {
+    const rows = this.db
+      .prepare(`SELECT * FROM workflow_specs ORDER BY name, version`)
+      .all() as SpecRow[];
+    return rows.map(rowToWorkflowSpec);
+  }
+
   getByIdOrThrow(specId: string): WorkflowSpecRow {
     const row = this.db
       .prepare(`SELECT * FROM workflow_specs WHERE spec_id = ?`)
