@@ -54,6 +54,7 @@ import type { AskService } from "./domain/ask-service.js";
 import { specReviewRoutes } from "./routes/spec-review.js";
 import { specLibraryRoutes } from "./routes/spec-library.js";
 import { configRoutes } from "./routes/config.js";
+import { contextPacksRoutes } from "./routes/context-packs.js";
 import type { SpecReviewService } from "./domain/spec-review-service.js";
 import type { SpecLibraryService } from "./domain/spec-library-service.js";
 import type { ChatRepository } from "./domain/chat-repository.js";
@@ -182,6 +183,8 @@ export interface AppDeps {
   specLibraryService?: SpecLibraryService;
   /** Workflows in Spec Library v0 — active workflow lens persistence. */
   activeLensStore?: import("./domain/active-lens-store.js").ActiveLensStore;
+  /** Rig Context / Composable Context Injection v0 (PL-014) — context_packs library service. */
+  contextPackLibrary?: import("./domain/context-packs/context-pack-library-service.js").ContextPackLibraryService;
   whoamiService?: WhoamiService;
   contextUsageStore?: import("./domain/context-usage-store.js").ContextUsageStore;
   contextMonitor?: { pollOnce(): Promise<void> };
@@ -359,6 +362,7 @@ export function createApp(deps: AppDeps): Hono {
     c.set("specReviewService" as never, deps.specReviewService);
     c.set("specLibraryService" as never, deps.specLibraryService);
     c.set("activeLensStore" as never, deps.activeLensStore);
+    c.set("contextPackLibrary" as never, deps.contextPackLibrary);
     c.set("whoamiService" as never, deps.whoamiService);
     c.set("contextUsageStore" as never, deps.contextUsageStore);
     c.set("contextMonitor" as never, deps.contextMonitor);
@@ -401,6 +405,7 @@ export function createApp(deps: AppDeps): Hono {
   app.route("/api/specs/review", specReviewRoutes());
   app.route("/api/specs/library", specLibraryRoutes());
   app.route("/api/config", configRoutes());
+  app.route("/api/context-packs", contextPacksRoutes());
   app.route("/api/whoami", whoamiRoutes());
   app.route("/api/seat", seatRoutes);
   app.route("/api/rigs/:rigId/chat", chatRoutes());

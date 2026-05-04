@@ -460,7 +460,16 @@ export interface ImportSpec {
 }
 
 export interface StartupFile {
+  /** PL-014 Item 6: kind defaults to "file" for back-compat. When
+   *  "context_pack", contextPackName is required and the resolver
+   *  expands the entry into the pack's assembled bundle written to a
+   *  synthesized path under <rigRoot>/.openrig/resolved-context-packs/. */
+  kind?: "file" | "context_pack";
   path: string;
+  /** PL-014 Item 6: pack name when kind === "context_pack". */
+  contextPackName?: string;
+  /** PL-014 Item 6: pack version when kind === "context_pack"; defaults to "1". */
+  contextPackVersion?: string;
   deliveryHint: "auto" | "guidance_merge" | "skill_install" | "send_text";
   required: boolean;
   appliesOn: ("fresh_start" | "restore")[];

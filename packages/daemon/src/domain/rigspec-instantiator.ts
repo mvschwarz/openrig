@@ -1,5 +1,8 @@
 import nodePath from "node:path";
+import { mkdirSync, writeFileSync } from "node:fs";
 import type Database from "better-sqlite3";
+import { assembleBundle } from "./context-packs/bundle-assembler.js";
+import type { ContextPackEntry } from "./context-packs/context-pack-types.js";
 import type { RigRepository } from "./rig-repository.js";
 import type { SessionRegistry } from "./session-registry.js";
 import type { EventBus } from "./event-bus.js";
@@ -302,6 +305,11 @@ interface PodInstantiatorDeps {
   fsOps: AgentResolverFsOps;
   adapters: Record<string, RuntimeAdapter>;
   tmuxAdapter?: TmuxAdapter;
+  /** PL-014 Item 6: optional context-pack library so AgentSpec
+   *  startup_files entries with `kind: context_pack` can resolve to
+   *  the pack's assembled bundle. Optional — when absent, context_pack
+   *  startup files surface a structured error at instantiation time. */
+  contextPackLibrary?: import("./context-packs/context-pack-library-service.js").ContextPackLibraryService;
 }
 
 export interface MaterializeResult {
@@ -1284,6 +1292,7 @@ export class PodRigInstantiator {
       }
     }
 
+    this.expandContextPacks(files, rigRoot);
     return this.resolveAutoHints(files);
   }
 
@@ -1350,7 +1359,72 @@ export class PodRigInstantiator {
       appliesOn: ["fresh_start", "restore"],
     });
 
+    this.expandContextPacks(files, rigRoot);
     return this.resolveAutoHints(files);
+  }
+
+  /**
+   * PL-014 Item 6: expand any startup_files entries with `kind:
+   * "context_pack"` into a real file on disk + adjust the
+   * ResolvedStartupFile entry to point to it. Operates in place.
+   *
+   * Strategy:
+   *   1. Look up the pack via the daemon-side ContextPackLibraryService.
+   *   2. Assemble the pack into a single coherent paste-ready string.
+   *   3. Write the bundle to <rigRoot>/.openrig/resolved-context-packs/
+   *      <name>-<version>.md.
+   *   4. Replace the entry's path/absolutePath/ownerRoot with that
+   *      written path so the rest of the pipeline (resolveAutoHints +
+   *      adapter.deliverStartup) treats it as a normal file.
+   *
+   * Throws on missing pack or absent library service so the
+   * materialize path surfaces the failure honestly.
+   */
+  private expandContextPacks(files: ResolvedStartupFile[], rigRoot: string): void {
+    const library = this.deps.contextPackLibrary;
+    const targetDir = nodePath.join(rigRoot, ".openrig", "resolved-context-packs");
+    let madeDir = false;
+    for (let i = 0; i < files.length; i++) {
+      const f = files[i] as ResolvedStartupFile & {
+        kind?: "file" | "context_pack";
+        contextPackName?: string;
+        contextPackVersion?: string;
+      };
+      if (f.kind !== "context_pack") continue;
+      if (!library) {
+        throw new Error(
+          `startup_files entry references kind: context_pack '${f.contextPackName ?? "(missing-name)"}' v${f.contextPackVersion ?? "1"}, but the daemon ContextPackLibraryService is not wired.`,
+        );
+      }
+      const name = f.contextPackName;
+      const version = f.contextPackVersion ?? "1";
+      if (!name) {
+        throw new Error(`startup_files entry kind: context_pack is missing 'name'`);
+      }
+      const pack = library.getByNameVersion(name, version);
+      if (!pack) {
+        throw new Error(
+          `Context pack '${name}' v${version} not found in library. Run 'rig context-pack list' to see what's installed.`,
+        );
+      }
+      const bundle = assembleBundle({ packEntry: pack as ContextPackEntry });
+      if (!madeDir) {
+        mkdirSync(targetDir, { recursive: true });
+        madeDir = true;
+      }
+      const targetPath = nodePath.join(targetDir, `${name}-${version}.md`);
+      writeFileSync(targetPath, bundle.text, "utf-8");
+      files[i] = {
+        ...f,
+        kind: "file",
+        path: nodePath.relative(rigRoot, targetPath),
+        absolutePath: targetPath,
+        ownerRoot: rigRoot,
+        deliveryHint: f.deliveryHint === "auto" ? "send_text" : f.deliveryHint,
+        contextPackName: undefined,
+        contextPackVersion: undefined,
+      };
+    }
   }
 
   private dedupeProjectedManagedStartupFiles(

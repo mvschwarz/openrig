@@ -385,3 +385,107 @@ describe("SpecsPanel Workflows filter chip (Workflows in Spec Library v0)", () =
     });
   });
 });
+
+describe("SpecsPanel Context Packs filter chip (PL-014)", () => {
+  const origFetch = globalThis.fetch;
+  const mockFetch3 = vi.fn();
+
+  beforeEach(() => {
+    globalThis.fetch = mockFetch3 as unknown as typeof fetch;
+    mockFetch3.mockImplementation(async (url: string) => {
+      if (typeof url === "string" && url.includes("/api/specs/library") && !url.includes("kind=")) {
+        return {
+          ok: true,
+          json: async () => [
+            {
+              id: "rig-1",
+              kind: "rig",
+              name: "demo",
+              version: "0.2",
+              sourceType: "builtin",
+              sourcePath: "/specs/rigs/launch/demo/rig.yaml",
+              relativePath: "rigs/launch/demo/rig.yaml",
+              updatedAt: "2026-04-09T00:00:00Z",
+            },
+          ],
+        };
+      }
+      if (typeof url === "string" && url.includes("/api/specs/library") && url.includes("kind=")) {
+        return { ok: true, json: async () => [] };
+      }
+      if (typeof url === "string" && url.includes("/api/context-packs/library")) {
+        return {
+          ok: true,
+          json: async () => [
+            {
+              id: "context-pack:pl-005-priming:1",
+              kind: "context-pack",
+              name: "pl-005-priming",
+              version: "1",
+              purpose: "Priming for PL-005",
+              sourceType: "user_file",
+              sourcePath: "/home/op/.openrig/context-packs/pl-005-priming",
+              relativePath: "pl-005-priming",
+              updatedAt: "2026-05-04T00:00:00Z",
+              manifestEstimatedTokens: null,
+              derivedEstimatedTokens: 800,
+              files: [
+                { path: "prd.md", role: "prd", summary: null, absolutePath: "/abs/prd.md", bytes: 200, estimatedTokens: 50 },
+                { path: "proof.md", role: "proof", summary: null, absolutePath: "/abs/proof.md", bytes: 3000, estimatedTokens: 750 },
+              ],
+            },
+          ],
+        };
+      }
+      return { ok: true, json: async () => [] };
+    });
+  });
+
+  afterEach(() => {
+    globalThis.fetch = origFetch;
+    window.localStorage.clear();
+    cleanup();
+  });
+
+  function renderFilterPanel() {
+    const onClose = vi.fn();
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+    return render(
+      <QueryClientProvider client={qc}>
+        {createAppTestRouter({
+          initialPath: "/",
+          routes: [
+            { path: "/", component: () => <div>home</div> },
+            { path: "/specs/library/$entryId", component: () => <div data-testid="library-review">review</div> },
+          ],
+          rootComponent: ({ children }) => (
+            <SpecsWorkspaceProvider>
+              <SpecsPanel onClose={onClose} />
+              {children}
+            </SpecsWorkspaceProvider>
+          ),
+        })}
+      </QueryClientProvider>
+    );
+  }
+
+  it("renders the Context Packs filter chip and a pack row with PACK badge", async () => {
+    renderFilterPanel();
+    await waitFor(() => expect(screen.getByText("pl-005-priming")).toBeDefined());
+    expect(screen.getByTestId("filter-context-packs")).toBeDefined();
+    const packRow = screen.getByTestId("library-entry-context-pack:pl-005-priming:1");
+    expect(packRow.textContent).toContain("PACK");
+    expect(packRow.textContent).toContain("2 files");
+    expect(packRow.textContent).toContain("~800 tokens");
+  });
+
+  it("clicking Context Packs filter shows only pack entries", async () => {
+    renderFilterPanel();
+    await waitFor(() => expect(screen.getByText("pl-005-priming")).toBeDefined());
+    fireEvent.click(screen.getByTestId("filter-context-packs"));
+    await waitFor(() => {
+      expect(screen.getByText("pl-005-priming")).toBeDefined();
+      expect(screen.queryByText("demo")).toBeNull();
+    });
+  });
+});
