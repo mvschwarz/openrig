@@ -93,8 +93,9 @@ describe("workflow routes (PL-004 Phase D)", () => {
       body: JSON.stringify({ specPath }),
     });
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { ok: boolean };
+    const body = (await res.json()) as { ok: boolean; summary: { entryRole: string | null } };
     expect(body.ok).toBe(true);
+    expect(body.summary.entryRole).toBe("producer");
   });
 
   it("POST /validate returns 404 for missing file", async () => {
