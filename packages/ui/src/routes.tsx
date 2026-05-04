@@ -28,6 +28,7 @@ import { SliceStoryView } from "./components/slices/SliceStoryView.js";
 import { ProgressWorkspace } from "./components/progress/ProgressWorkspace.js";
 import { FilesWorkspace } from "./components/files/FilesWorkspace.js";
 import { SteeringWorkspace } from "./components/steering/SteeringWorkspace.js";
+import { ContextWorkspace } from "./components/context/ContextWorkspace.js";
 import { useRigSummary } from "./hooks/useRigSummary.js";
 import { useDrawerSelection } from "./components/AppShell.js";
 
@@ -264,6 +265,26 @@ const steeringRoute = createRoute({
   component: SteeringWorkspace,
 });
 
+// Token / Context Usage Surface v0 (PL-012) — /context portfolio dashboard.
+interface ContextSearch {
+  tier?: "critical" | "warning" | "low" | "unknown";
+  runtime?: string;
+  rigId?: string;
+}
+const contextRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/context",
+  component: ContextWorkspace,
+  validateSearch: (search: Record<string, unknown>): ContextSearch => {
+    const out: ContextSearch = {};
+    if (search["tier"] === "critical" || search["tier"] === "warning"
+        || search["tier"] === "low" || search["tier"] === "unknown") out.tier = search["tier"];
+    if (typeof search["runtime"] === "string") out.runtime = search["runtime"];
+    if (typeof search["rigId"] === "string") out.rigId = search["rigId"];
+    return out;
+  },
+});
+
 const routeTree = rootRoute.addChildren([
   indexRoute,
   rigDetailRoute,
@@ -288,6 +309,7 @@ const routeTree = rootRoute.addChildren([
   progressRoute,
   filesRoute,
   steeringRoute,
+  contextRoute,
 ]);
 
 // Router
