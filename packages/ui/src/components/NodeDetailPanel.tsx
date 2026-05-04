@@ -4,6 +4,7 @@ import { getRestoreStatusColorClass } from "../lib/restore-status-colors.js";
 import { copyText } from "../lib/copy-text.js";
 import { displayPodName, inferPodName } from "../lib/display-name.js";
 import { LiveIdentityDisplay } from "./LiveIdentityDisplay.js";
+import { PreviewPane } from "./preview/PreviewPane.js";
 
 interface NodeDetailPanelProps {
   rigId: string;
@@ -168,6 +169,19 @@ export function NodeDetailPanel({ rigId, logicalId, onClose }: NodeDetailPanelPr
               )}
             </div>
           </section>
+
+          {/* Preview Terminal v0 (PL-018) — live preview pane */}
+          {data.canonicalSessionName && (
+            <section className="px-4 py-3 border-b border-stone-100">
+              <div className="font-mono text-[8px] text-stone-400 uppercase tracking-wider mb-2">Preview</div>
+              <PreviewPane
+                rigId={rigId}
+                rigName={data.rigName}
+                logicalId={logicalId}
+                testIdPrefix="detail-preview"
+              />
+            </section>
+          )}
 
           {/* Actions */}
           <section className="px-4 py-3 border-b border-stone-100">

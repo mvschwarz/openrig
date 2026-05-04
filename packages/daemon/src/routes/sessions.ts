@@ -10,6 +10,8 @@ import type { AgentActivityStore } from "../domain/agent-activity-store.js";
 import { attachAgentActivity, getNodeInventory, getNodeDetail, getNodeInventoryWithContext, getNodeDetailWithContext } from "../domain/node-inventory.js";
 import type { ContextUsageStore } from "../domain/context-usage-store.js";
 import type { RigLifecycleService } from "../domain/rig-lifecycle-service.js";
+import type { SessionTransport } from "../domain/session-transport.js";
+import type { PreviewRateLimiter } from "../domain/preview/preview-rate-limiter.js";
 
 export const sessionsRoutes = new Hono();
 export const nodesRoutes = new Hono();
@@ -150,6 +152,79 @@ nodesRoutes.post("/:logicalId/launch", async (c) => {
   return c.json(result, 201);
 });
 
+// GET /api/rigs/:rigId/nodes/:logicalId/preview?lines=N
+//
+// Preview Terminal v0 (PL-018): returns the seat's last N lines via
+// SessionTransport.capture. Rate-limited per session through the
+// daemon-side PreviewRateLimiter (default 1 sec window) so live polling
+// from multiple panes doesn't hammer tmux.
+//
+// Returns 404 when the rig/node/session can't be resolved (UI surfaces
+// this as "preview unavailable on this rig"). Returns 503 when
+// SessionTransport is missing from context (degraded daemon).
+nodesRoutes.get("/:logicalId/preview", async (c) => {
+  const rigId = c.req.param("rigId")!;
+  const logicalId = decodeURIComponent(c.req.param("logicalId")!);
+  const deps = getDeps(c);
+  const sessionTransport = c.get("sessionTransport" as never) as SessionTransport | undefined;
+  const rateLimiter = c.get("previewRateLimiter" as never) as PreviewRateLimiter<{
+    content: string;
+    lines: number;
+    sessionName: string;
+    capturedAt: string;
+  }> | undefined;
+  if (!sessionTransport) {
+    return c.json({ error: "preview_unavailable", hint: "SessionTransport not configured on this daemon." }, 503);
+  }
+
+  const rig = deps.rigRepo.getRig(rigId);
+  if (!rig) return c.json({ error: `Rig "${rigId}" not found.` }, 404);
+
+  // Resolve canonical session name. The node-detail projector already
+  // does this; we re-use the raw rig object to keep the route cheap.
+  const node = rig.nodes.find((n) => n.logicalId === logicalId || n.id === logicalId);
+  if (!node) return c.json({ error: `Node "${logicalId}" not found in rig "${rigId}".` }, 404);
+  const sessionName = node.binding?.tmuxSession;
+  if (!sessionName) {
+    return c.json({
+      error: "session_unbound",
+      hint: "Node has no tmux session yet. Use rig up or rig launch to start the seat.",
+    }, 409);
+  }
+
+  const linesRaw = c.req.query("lines");
+  const linesParsed = linesRaw ? parseInt(linesRaw, 10) : NaN;
+  // Clamp lines to a sensible range; default 50 matches the v0 UI pref.
+  const lines = Number.isFinite(linesParsed) && linesParsed > 0
+    ? Math.min(linesParsed, 1000)
+    : 50;
+
+  // Cache key includes the line count so a 50-line poll doesn't poison
+  // a 200-line manual fetch (and vice versa).
+  const cacheKey = `${sessionName}:${lines}`;
+  const cached = rateLimiter?.get(cacheKey);
+  if (cached) {
+    return c.json(cached.payload);
+  }
+
+  const result = await sessionTransport.capture(sessionName, { lines });
+  if (!result.ok) {
+    return c.json({
+      error: result.reason ?? "capture_failed",
+      hint: result.error,
+      sessionName,
+    }, 502);
+  }
+  const payload = {
+    content: result.content ?? "",
+    lines: result.lines ?? lines,
+    sessionName,
+    capturedAt: new Date().toISOString(),
+  };
+  rateLimiter?.set(cacheKey, payload);
+  return c.json(payload);
+});
+
 // POST /api/rigs/:rigId/nodes/:logicalId/open-cmux
 nodesRoutes.post("/:logicalId/open-cmux", async (c) => {
   const rigId = c.req.param("rigId")!;
@@ -207,6 +282,53 @@ nodesRoutes.delete("/:logicalId", async (c) => {
   }
 
   return c.json(result, 200);
+});
+
+// GET /api/sessions/:sessionName/preview?lines=N
+//
+// Preview Terminal v0 (PL-018) — session-keyed alias for /preview.
+// Used by surfaces that hold a sessionName but not a (rigId, logicalId)
+// pair (Steering Loop State panel, Slice Story View Topology tab).
+// Behavior identical to the rig+node-keyed route otherwise.
+sessionAdminRoutes.get("/:sessionName/preview", async (c) => {
+  const sessionName = decodeURIComponent(c.req.param("sessionName")!);
+  const sessionTransport = c.get("sessionTransport" as never) as SessionTransport | undefined;
+  const rateLimiter = c.get("previewRateLimiter" as never) as PreviewRateLimiter<{
+    content: string;
+    lines: number;
+    sessionName: string;
+    capturedAt: string;
+  }> | undefined;
+  if (!sessionTransport) {
+    return c.json({ error: "preview_unavailable", hint: "SessionTransport not configured on this daemon." }, 503);
+  }
+
+  const linesRaw = c.req.query("lines");
+  const linesParsed = linesRaw ? parseInt(linesRaw, 10) : NaN;
+  const lines = Number.isFinite(linesParsed) && linesParsed > 0
+    ? Math.min(linesParsed, 1000)
+    : 50;
+
+  const cacheKey = `${sessionName}:${lines}`;
+  const cached = rateLimiter?.get(cacheKey);
+  if (cached) return c.json(cached.payload);
+
+  const result = await sessionTransport.capture(sessionName, { lines });
+  if (!result.ok) {
+    return c.json({
+      error: result.reason ?? "capture_failed",
+      hint: result.error,
+      sessionName,
+    }, 502);
+  }
+  const payload = {
+    content: result.content ?? "",
+    lines: result.lines ?? lines,
+    sessionName,
+    capturedAt: new Date().toISOString(),
+  };
+  rateLimiter?.set(cacheKey, payload);
+  return c.json(payload);
 });
 
 // POST /api/sessions/:sessionRef/unclaim

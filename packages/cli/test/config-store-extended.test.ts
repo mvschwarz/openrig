@@ -62,13 +62,14 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
     restoreEnv();
   });
 
-  it("VALID_KEYS includes the 5 legacy + 7 new keys", () => {
+  it("VALID_KEYS includes the 5 legacy + 7 user-settings + 3 PL-018 ui.preview.* keys", () => {
     const expected = [
       "daemon.port", "daemon.host", "db.path",
       "transcripts.enabled", "transcripts.path",
       "workspace.root", "workspace.slices_root", "workspace.steering_path",
       "workspace.field_notes_root", "workspace.specs_root",
       "files.allowlist", "progress.scan_roots",
+      "ui.preview.refresh_interval_seconds", "ui.preview.max_pins", "ui.preview.default_lines",
     ];
     expect([...VALID_KEYS]).toEqual(expected);
   });
@@ -205,6 +206,58 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
     const store = new ConfigStore(configPath);
     expect(() => store.resolve()).toThrow(/malformed/i);
     expect(() => store.resolve()).toThrow(/reset/i);
+  });
+
+  // --- Preview Terminal v0 (PL-018) keys ---
+  it("ui.preview.refresh_interval_seconds defaults to 3", () => {
+    const store = new ConfigStore(configPath);
+    expect(store.get("ui.preview.refresh_interval_seconds")).toBe(3);
+  });
+
+  it("ui.preview.max_pins defaults to 4", () => {
+    const store = new ConfigStore(configPath);
+    expect(store.get("ui.preview.max_pins")).toBe(4);
+  });
+
+  it("ui.preview.default_lines defaults to 50", () => {
+    const store = new ConfigStore(configPath);
+    expect(store.get("ui.preview.default_lines")).toBe(50);
+  });
+
+  it("ui.preview.* keys coerce numeric values from set", () => {
+    const store = new ConfigStore(configPath);
+    store.set("ui.preview.refresh_interval_seconds", "5");
+    store.set("ui.preview.max_pins", "2");
+    store.set("ui.preview.default_lines", "100");
+    expect(store.get("ui.preview.refresh_interval_seconds")).toBe(5);
+    expect(store.get("ui.preview.max_pins")).toBe(2);
+    expect(store.get("ui.preview.default_lines")).toBe(100);
+  });
+
+  it("ui.preview.* keys reject non-numeric values", () => {
+    const store = new ConfigStore(configPath);
+    expect(() => store.set("ui.preview.refresh_interval_seconds", "soon")).toThrow(/expected a number/);
+  });
+
+  it("OPENRIG_UI_PREVIEW_* env vars override file values", () => {
+    const store = new ConfigStore(configPath);
+    store.set("ui.preview.refresh_interval_seconds", "5");
+    process.env["OPENRIG_UI_PREVIEW_REFRESH_INTERVAL_SECONDS"] = "10";
+    try {
+      const r = store.resolveWithSource("ui.preview.refresh_interval_seconds");
+      expect(r.value).toBe(10);
+      expect(r.source).toBe("env");
+    } finally {
+      delete process.env["OPENRIG_UI_PREVIEW_REFRESH_INTERVAL_SECONDS"];
+    }
+  });
+
+  it("RiggedConfig.ui.preview shape exposed", () => {
+    const store = new ConfigStore(configPath);
+    const cfg = store.resolve();
+    expect(cfg.ui.preview.refreshIntervalSeconds).toBe(3);
+    expect(cfg.ui.preview.maxPins).toBe(4);
+    expect(cfg.ui.preview.defaultLines).toBe(50);
   });
 });
 

@@ -62,13 +62,16 @@ describe("config routes (User Settings v0)", () => {
     return app;
   }
 
-  it("GET /api/config returns all 12 keys with source + default", async () => {
+  it("GET /api/config returns all 15 keys (12 baseline + 3 PL-018 ui.preview.*) with source + default", async () => {
     const app = buildApp();
     const res = await app.request("/api/config");
     expect(res.status).toBe(200);
     const body = await res.json() as { settings: Record<string, { value: unknown; source: string }> };
-    expect(Object.keys(body.settings).length).toBe(12);
+    expect(Object.keys(body.settings).length).toBe(15);
     expect(body.settings["daemon.port"]?.source).toBe("default");
+    expect(body.settings["ui.preview.refresh_interval_seconds"]?.value).toBe(3);
+    expect(body.settings["ui.preview.max_pins"]?.value).toBe(4);
+    expect(body.settings["ui.preview.default_lines"]?.value).toBe(50);
   });
 
   it("GET /api/config/:key returns the resolved value", async () => {

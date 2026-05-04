@@ -155,6 +155,13 @@ export interface AppDeps {
   sliceDetailProjector?: import("./domain/slices/slice-detail-projector.js").SliceDetailProjector;
   /** User Settings v0 — daemon-side settings store (env > file > default). */
   settingsStore?: import("./domain/user-settings/settings-store.js").SettingsStore;
+  /** Preview Terminal v0 (PL-018) — per-session rate limiter for /preview. */
+  previewRateLimiter?: import("./domain/preview/preview-rate-limiter.js").PreviewRateLimiter<{
+    content: string;
+    lines: number;
+    sessionName: string;
+    capturedAt: string;
+  }>;
   /** UI Enhancement Pack v0 — file allowlist + browser routes (item 3). */
   filesAllowlist?: import("./domain/files/path-safety.js").AllowlistRoot[];
   /** UI Enhancement Pack v0 — atomic write service (item 4). */
@@ -343,6 +350,7 @@ export function createApp(deps: AppDeps): Hono {
     c.set("sliceDetailProjector" as never, deps.sliceDetailProjector);
     c.set("filesAllowlist" as never, deps.filesAllowlist);
     c.set("settingsStore" as never, deps.settingsStore);
+    c.set("previewRateLimiter" as never, deps.previewRateLimiter);
     c.set("fileWriteService" as never, deps.fileWriteService);
     c.set("progressIndexer" as never, deps.progressIndexer);
     c.set("steeringComposer" as never, deps.steeringComposer);
