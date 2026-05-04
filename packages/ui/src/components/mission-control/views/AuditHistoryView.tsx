@@ -11,12 +11,17 @@ import {
 } from "../hooks/useMissionControlAudit.js";
 import { MISSION_CONTROL_VERBS } from "../hooks/useMissionControlAction.js";
 
+function urlParam(name: string): string {
+  if (typeof window === "undefined") return "";
+  return new URL(window.location.href).searchParams.get(name) ?? "";
+}
+
 export function AuditHistoryView() {
-  const [qitemId, setQitemId] = useState("");
-  const [actionVerb, setActionVerb] = useState("");
-  const [actorSession, setActorSession] = useState("");
-  const [since, setSince] = useState("");
-  const [until, setUntil] = useState("");
+  const [qitemId, setQitemId] = useState(() => urlParam("qitem_id") || urlParam("qitem"));
+  const [actionVerb, setActionVerb] = useState(() => urlParam("action_verb") || urlParam("verb"));
+  const [actorSession, setActorSession] = useState(() => urlParam("actor_session") || urlParam("actor"));
+  const [since, setSince] = useState(() => urlParam("since"));
+  const [until, setUntil] = useState(() => urlParam("until"));
   const [limit] = useState(50);
   const [beforeIdStack, setBeforeIdStack] = useState<string[]>([]);
 
