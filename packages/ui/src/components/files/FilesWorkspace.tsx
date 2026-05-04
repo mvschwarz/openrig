@@ -26,6 +26,7 @@ import {
 } from "../../hooks/useFiles.js";
 import { MarkdownViewer } from "../markdown/MarkdownViewer.js";
 import { SyntaxHighlight } from "../markdown/SyntaxHighlight.js";
+import { useSpecReview } from "../../hooks/useSteering.js";
 
 const TEXT_LIKE_EXTENSIONS = new Set([".md", ".txt", ".log", ".yaml", ".yml", ".json", ".js", ".jsx", ".ts", ".tsx", ".py", ".sh", ".bash", ".sql", ".css", ".html"]);
 const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"]);
@@ -291,9 +292,12 @@ function FileContentPanel({
 
 function FileViewer({ root, path, read }: { root: string; path: string; read: FilesReadResponse }) {
   const ext = pathExtension(path);
+  // OSR v0 item 3: detect spec-kind YAML files for inline validation.
+  const specKind = detectSpecKind(path);
   if (IMAGE_EXTENSIONS.has(ext)) {
     return (
       <div data-testid="files-image-view" className="p-4">
+        <TruncationMarker read={read} />
         <img src={fileAssetUrl(root, path)} alt={path} className="max-w-full border border-stone-200" />
       </div>
     );
@@ -301,6 +305,7 @@ function FileViewer({ root, path, read }: { root: string; path: string; read: Fi
   if (ext === ".md") {
     return (
       <div className="p-4">
+        <TruncationMarker read={read} />
         <MarkdownViewer content={read.content} />
       </div>
     );
@@ -308,6 +313,8 @@ function FileViewer({ root, path, read }: { root: string; path: string; read: Fi
   if (TEXT_LIKE_EXTENSIONS.has(ext)) {
     return (
       <div data-testid="files-code-view" className="p-4">
+        <TruncationMarker read={read} />
+        {specKind && <SpecValidationPanel kind={specKind} yaml={read.content} />}
         <SyntaxHighlight code={read.content} language={ext.slice(1)} />
       </div>
     );
@@ -323,7 +330,96 @@ function FileViewer({ root, path, read }: { root: string; path: string; read: Fi
   }
   return (
     <div data-testid="files-text-fallback" className="p-4">
+      <TruncationMarker read={read} />
       <pre className="whitespace-pre-wrap break-words font-mono text-[10px] text-stone-800">{read.content}</pre>
+    </div>
+  );
+}
+
+// Operator Surface Reconciliation v0 item 5: explicit truncation marker
+// rendered above the file body when the daemon capped the read at
+// FILE_READ_TRUNCATION_BYTES (1 MB). Honest about the limit so the
+// operator knows to use an external editor for full content.
+function TruncationMarker({ read }: { read: FilesReadResponse }) {
+  if (!read.truncated) return null;
+  const totalKb = Math.round((read.totalBytes ?? read.size) / 1024);
+  return (
+    <div
+      data-testid="files-truncation-marker"
+      data-truncated-at-bytes={read.truncatedAtBytes ?? ""}
+      data-total-bytes={read.totalBytes ?? ""}
+      className="mb-3 border border-amber-400 bg-amber-50 px-3 py-2 font-mono text-[10px] text-amber-900"
+    >
+      ⚠ Truncated by file viewer at {Math.round((read.truncatedAtBytes ?? 0) / 1024)} KB —
+      file is {totalKb} KB total. Use an external editor for full content.
+    </div>
+  );
+}
+
+// OSR v0 item 3: RigSpec / AgentSpec validation panel. Detects spec
+// kind by filename and invokes the existing /api/specs/review/{rig|agent}
+// endpoint via the useSpecReview hook. Errors / warnings render inline
+// alongside the YAML view; non-spec YAML files don't surface this
+// panel at all.
+function detectSpecKind(filePath: string): "rig" | "agent" | null {
+  const lower = filePath.toLowerCase();
+  if (lower.endsWith("/rig.yaml") || lower === "rig.yaml" || lower.endsWith("/rig.yml") || lower === "rig.yml") return "rig";
+  if (lower.endsWith("/agent.yaml") || lower === "agent.yaml" || lower.endsWith("/agent.yml") || lower === "agent.yml") return "agent";
+  // Spec library entries: <pkg>/specs/<spec-name>/{rig,agent}.yaml shape;
+  // we already match those above via the basename. Driver picks
+  // additional heuristics here in v0+1 if false-positive avoidance
+  // becomes a friction (e.g., "config.yaml" inside an unrelated
+  // workspace tree should NOT trigger spec validation).
+  return null;
+}
+
+function SpecValidationPanel({ kind, yaml }: { kind: "rig" | "agent"; yaml: string }) {
+  const review = useSpecReview(kind, yaml);
+  if (review.isLoading) {
+    return (
+      <div data-testid="files-spec-validation-loading" className="mb-3 border border-stone-300 bg-stone-50 px-3 py-2 font-mono text-[10px] text-stone-500">
+        Validating {kind}.yaml…
+      </div>
+    );
+  }
+  if (review.isError) {
+    return (
+      <div data-testid="files-spec-validation-error" className="mb-3 border border-red-400 bg-red-50 px-3 py-2 font-mono text-[10px] text-red-900">
+        Validation failed to run: {(review.error as Error)?.message ?? "unknown error"}
+      </div>
+    );
+  }
+  if (!review.data) return null;
+  const errors = review.data.errors ?? [];
+  const isValid = errors.length === 0;
+  return (
+    <div
+      data-testid="files-spec-validation-panel"
+      data-spec-kind={kind}
+      data-valid={isValid}
+      className={`mb-3 border px-3 py-2 font-mono text-[10px] ${
+        isValid
+          ? "border-emerald-400 bg-emerald-50 text-emerald-900"
+          : "border-red-400 bg-red-50 text-red-900"
+      }`}
+    >
+      <div className="mb-1 font-bold uppercase tracking-[0.10em]">
+        {isValid ? `✓ Valid ${kind === "rig" ? "RigSpec" : "AgentSpec"}` : `✗ ${kind === "rig" ? "RigSpec" : "AgentSpec"} validation errors`}
+      </div>
+      {errors.length > 0 && (
+        <ul className="space-y-1">
+          {errors.map((err, idx) => (
+            <li
+              key={idx}
+              data-testid={`files-spec-validation-error-${idx}`}
+              className="text-[10px]"
+            >
+              {err.field && <span className="font-bold">{err.field}: </span>}
+              {err.message}
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   );
 }

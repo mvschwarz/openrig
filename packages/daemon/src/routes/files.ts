@@ -1,4 +1,4 @@
-// UI Enhancement Pack v0 — file browser routes.
+// UI Enhancement Pack v0 + Operator Surface Reconciliation v0 — file browser routes.
 //
 // Endpoints (item 3 + item 4):
 //   GET  /api/files/roots                          allowlist root list
@@ -6,6 +6,13 @@
 //   GET  /api/files/read?root=<name>&path=<rel>    file content + metadata
 //   GET  /api/files/asset?root=<name>&path=<rel>   raw bytes for embedded images
 //   POST /api/files/write                          atomic write (item 4)
+//
+// Operator Surface Reconciliation v0 item 5: GET /read caps returned
+// content at FILE_READ_TRUNCATION_BYTES (1 MB; PRD § Item 5;
+// dashboard precedent). Response includes `truncated`, `truncatedAtBytes`,
+// `totalBytes` so the UI can render a truncation marker. The hash is
+// still computed over the FULL file content so atomic-write conflict
+// detection stays honest even when the read was truncated.
 //
 // Route-order discipline (per Phase A R1 SSE lesson): all routes are
 // literal — no `/:param` catchalls — so order doesn't matter for
@@ -34,6 +41,12 @@ export interface FilesRoutesDeps {
   /** Atomic-write service; absent → POST /write returns 503 unconfigured. */
   writeService: FileWriteService | null;
 }
+
+/** Operator Surface Reconciliation v0 item 5: file-read truncation
+ *  cap. PRD § Item 5 picks 1 MB (founder Q6 option b). The dashboard
+ *  precedent was 200 KB; the v0 ceiling is 1 MB so the operator can
+ *  read most workspace canon files in full. */
+export const FILE_READ_TRUNCATION_BYTES = 1_048_576;
 
 export function filesRoutes(): Hono {
   const app = new Hono();
@@ -119,15 +132,25 @@ export function filesRoutes(): Hono {
     try {
       const resolved = resolveAllowedFile(deps.allowlist, rootName, relativePath);
       const stat = fs.statSync(resolved);
-      const content = fs.readFileSync(resolved);
+      const fullContent = fs.readFileSync(resolved);
+      // Operator Surface Reconciliation v0 item 5: cap returned content
+      // at FILE_READ_TRUNCATION_BYTES (1 MB). Hash is over the FULL
+      // file so edit-mode conflict detection stays honest.
+      const truncated = stat.size > FILE_READ_TRUNCATION_BYTES;
+      const returnedContent = truncated
+        ? fullContent.subarray(0, FILE_READ_TRUNCATION_BYTES)
+        : fullContent;
       return c.json({
         root: rootName,
         path: relativePath,
         absolutePath: resolved,
-        content: content.toString("utf-8"),
+        content: returnedContent.toString("utf-8"),
         mtime: stat.mtime.toISOString(),
-        contentHash: sha256Hex(content),
+        contentHash: sha256Hex(fullContent),
         size: stat.size,
+        truncated,
+        truncatedAtBytes: truncated ? FILE_READ_TRUNCATION_BYTES : null,
+        totalBytes: stat.size,
       });
     } catch (err) {
       if (err instanceof FilePathSafetyError) return pathSafetyErrorResponse(c, err);
