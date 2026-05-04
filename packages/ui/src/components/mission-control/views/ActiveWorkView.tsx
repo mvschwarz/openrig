@@ -1,6 +1,6 @@
 import { GenericListView } from "./GenericListView.js";
 
-export function ActiveWorkView() {
+export function ActiveWorkView({ highlightedQitemId }: { highlightedQitemId?: string | null }) {
   return (
     <GenericListView
       viewName="active-work"
@@ -8,6 +8,7 @@ export function ActiveWorkView() {
       subtitle="Pending / in-progress / blocked, priority-first"
       emptyMessage="No active work in flight."
       withVerbActions
+      highlightedQitemId={highlightedQitemId}
     />
   );
 }

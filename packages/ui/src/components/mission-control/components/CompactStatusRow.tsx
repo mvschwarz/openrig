@@ -21,6 +21,7 @@ export interface CompactStatusRowProps {
   row: CompactStatusRowData;
   density?: "compact" | "expanded";
   onAction?: () => void;
+  highlighted?: boolean;
 }
 
 const STATE_BADGES: Record<CompactStatusRowData["state"], { label: string; cls: string }> = {
@@ -35,6 +36,7 @@ export function CompactStatusRow({
   row,
   density = "expanded",
   onAction,
+  highlighted = false,
 }: CompactStatusRowProps) {
   const badge = STATE_BADGES[row.state];
   return (
@@ -42,7 +44,13 @@ export function CompactStatusRow({
       data-testid="mc-status-row"
       data-state={row.state}
       data-qitem-id={row.qitemId ?? ""}
-      className="border border-stone-200 bg-white p-3 hover:bg-stone-50"
+      data-highlighted={highlighted ? "true" : "false"}
+      id={row.qitemId ? `mc-qitem-${row.qitemId}` : undefined}
+      className={`border p-3 hover:bg-stone-50 ${
+        highlighted
+          ? "border-amber-400 bg-amber-50 ring-2 ring-amber-300"
+          : "border-stone-200 bg-white"
+      }`}
     >
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2 min-w-0 flex-1">

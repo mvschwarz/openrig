@@ -639,6 +639,10 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     // No legacy alias for these env vars (new in Phase B).
     const mechanism = process.env.OPENRIG_NOTIFICATIONS_MECHANISM ?? "none";
     const target = process.env.OPENRIG_NOTIFICATIONS_TARGET ?? "";
+    const missionControlBaseUrl =
+      process.env.OPENRIG_MISSION_CONTROL_BASE_URL ??
+      process.env.OPENRIG_URL ??
+      process.env.RIGGED_URL;
     const includeVerbCompletion =
       process.env.OPENRIG_NOTIFICATIONS_INCLUDE_VERB_COMPLETION === "1";
     if (mechanism !== "none" && target.length > 0) {
@@ -657,6 +661,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
         eventBus,
         adapter,
         includeVerbCompletion,
+        missionControlBaseUrl,
       });
       dispatcher.start();
       deps.missionControlNotificationDispatcher = dispatcher;

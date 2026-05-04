@@ -1,7 +1,7 @@
 // PL-005 Phase A: cross-fleet human-gate view.
 import { GenericListView } from "./GenericListView.js";
 
-export function HumanGateView() {
+export function HumanGateView({ highlightedQitemId }: { highlightedQitemId?: string | null }) {
   return (
     <GenericListView
       viewName="human-gate"
@@ -9,6 +9,7 @@ export function HumanGateView() {
       subtitle="Cross-fleet items waiting on a human decision"
       emptyMessage="No human-gated items across the fleet."
       withVerbActions
+      highlightedQitemId={highlightedQitemId}
     />
   );
 }
