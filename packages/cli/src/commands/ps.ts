@@ -55,7 +55,23 @@ const HUMAN_NODE_BUDGET = 100;
 // L3-followup: --filter accepts only this allow-list. Unknown keys produce a
 // clear error with the supported list (Guard Review Checklist: filter-parser
 // security).
-const ALLOWED_FILTER_KEYS = new Set(["status", "lifecycleState", "name-prefix", "name"]);
+//
+// PL-019 item 1: extends the allow-list with the nested key `agentActivity.state`.
+// This is the only nested filter key v0 supports; the parser checks for the
+// dotted form explicitly. Bare `agentActivity` is intentionally NOT a filter
+// key — it's an object, not a scalar; project it via --fields if you need it.
+const ALLOWED_FILTER_KEYS = new Set([
+  "status",
+  "lifecycleState",
+  "name-prefix",
+  "name",
+  "agentActivity.state",
+]);
+
+// PL-019 item 1: when filter key is `agentActivity.state`, the value is
+// validated against the AgentActivityState enum. Invalid values produce a
+// three-part error (what failed / what's allowed / what to do).
+const ALLOWED_AGENT_ACTIVITY_STATES = new Set(["running", "needs_input", "idle", "unknown"]);
 
 // C9a: --fields accepts a per-level allow-list. Unknown keys produce a clear
 // error with the supported list, mirroring the --filter rejection pattern.
@@ -104,6 +120,7 @@ interface PsCliOptions {
   summary?: boolean;
   filter?: string;
   host?: string;
+  active?: boolean;
 }
 
 export interface PsDeps extends StatusDeps {
@@ -139,6 +156,17 @@ function parseFilter(filter: string): ParsedFilter | { error: string } {
   if (!value) {
     return { error: `--filter value is empty for key '${key}'` };
   }
+  // PL-019 item 1: agentActivity.state is enum-valued; reject invalid values
+  // up-front so operators don't get a silent empty result on a typo. Three-part
+  // shape per `feedback_smart_agents_no_bureaucracy.md`: what failed / what's
+  // allowed / what to do.
+  if (key === "agentActivity.state" && !ALLOWED_AGENT_ACTIVITY_STATES.has(value)) {
+    return {
+      error: `--filter agentActivity.state='${value}' is not a valid activity state. ` +
+        `Allowed: ${[...ALLOWED_AGENT_ACTIVITY_STATES].sort().join(", ")}. ` +
+        `Use 'rig ps --nodes --fields agentActivity --json' to see what daemon is reporting.`,
+    };
+  }
   return { key, value };
 }
 
@@ -172,6 +200,10 @@ function applyRigFilter(entries: PsEntry[], filter: ParsedFilter): PsEntry[] {
     if (filter.key === "lifecycleState") return e.lifecycleState === filter.value;
     if (filter.key === "name-prefix") return (e.rigName ?? e.name).startsWith(filter.value);
     if (filter.key === "name") return (e.rigName ?? e.name) === filter.value;
+    // PL-019 item 1: agentActivity.state is node-level only; at the rig
+    // level it has no meaning, so the filter passes everything through and
+    // the user gets all rigs (the operator can `--nodes` to scope it).
+    if (filter.key === "agentActivity.state") return true;
     return true;
   });
 }
@@ -183,6 +215,10 @@ function applyNodeFilter(entries: NodeEntry[], filter: ParsedFilter): NodeEntry[
     if (filter.key === "lifecycleState") return n.lifecycleState === filter.value;
     if (filter.key === "name-prefix") return n.rigName.startsWith(filter.value);
     if (filter.key === "name") return n.rigName === filter.value;
+    // PL-019 item 1: nested-key traversal for agentActivity.state. Nodes
+    // without an agentActivity attachment never match a non-unknown filter
+    // value (the daemon reports `unknown` when it has no signal — explicit).
+    if (filter.key === "agentActivity.state") return n.agentActivity?.state === filter.value;
     return true;
   });
 }
@@ -278,12 +314,17 @@ Examples:
   rig ps --filter name-prefix=demo                Filter by rig-name prefix
   rig ps --nodes                                  Per-node detail (human; truncated to ${HUMAN_NODE_BUDGET})
   rig ps --nodes --json --limit 50                Bounded per-node JSON envelope
+  rig ps --nodes --active                         Show only nodes whose agentActivity.state == running (PL-019)
+  rig ps --nodes --filter agentActivity.state=running
+                                                  Same as --active (the explicit form)
   rig ps --host vm-claude-test --nodes --json     Run on a remote host via single-hop ssh
 
 JSON output entries include both \`name\` and \`rigName\` (alias) for forward
 compatibility; agent code should prefer \`rigName\` (matches per-node JSON).
 
---filter accepts: status, lifecycleState, name-prefix, name. Other keys are rejected.
+--filter accepts: status, lifecycleState, name-prefix, name, agentActivity.state.
+Other keys are rejected. agentActivity.state is node-level (use with --nodes);
+allowed values: running, needs_input, idle, unknown.
 
 --fields accepts (rig-level): rigId, name, rigName, nodeCount, runningCount,
 status, lifecycleState, uptime, latestSnapshot.
@@ -315,7 +356,8 @@ Exit codes:
     .option("--limit <n>", "Limit number of entries (rigs or nodes)")
     .option("--fields <list>", "Comma-separated field list to project (JSON only)")
     .option("--summary", "Emit aggregate-only output (counts by status/lifecycle)")
-    .option("--filter <key=value>", "Filter entries; supported keys: status, lifecycleState, name-prefix, name")
+    .option("--filter <key=value>", "Filter entries; supported keys: status, lifecycleState, name-prefix, name, agentActivity.state")
+    .option("--active", "Shortcut for --filter agentActivity.state=running (PL-019)")
     .option("--host <id>", "Run on a remote host declared in ~/.openrig/hosts.yaml (CLI-side ssh shell-out)")
     .action(async (opts: PsCliOptions) => {
       const deps = getDepsF();
@@ -335,9 +377,28 @@ Exit codes:
 
       // Parse filter once up front so unknown keys/malformed filters surface
       // as exit-1 errors before any HTTP call.
+      //
+      // PL-019 item 1: --active is sugar for --filter agentActivity.state=running.
+      // Combining --active with --filter is rejected (composition is
+      // ambiguous — pick one explicit form). Parity is verified end-to-end
+      // by the focused test: `--active` and the explicit filter must yield
+      // identical output on the same fixture.
+      let effectiveFilter = opts.filter;
+      if (opts.active) {
+        if (effectiveFilter) {
+          console.error(
+            `--active and --filter cannot be combined. ` +
+            `--active is sugar for --filter agentActivity.state=running. ` +
+            `Pick one form, or compose by upgrading to --filter directly.`
+          );
+          process.exitCode = 1;
+          return;
+        }
+        effectiveFilter = "agentActivity.state=running";
+      }
       let parsedFilter: ParsedFilter | null = null;
-      if (opts.filter) {
-        const result = parseFilter(opts.filter);
+      if (effectiveFilter) {
+        const result = parseFilter(effectiveFilter);
         if ("error" in result) {
           console.error(result.error);
           process.exitCode = 1;

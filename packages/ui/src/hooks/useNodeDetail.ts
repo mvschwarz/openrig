@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
+import type { AgentActivitySummary, CurrentQitemSummary } from "./useNodeInventory.js";
 
 export interface NodeDetailPeer {
   logicalId: string;
@@ -60,6 +61,8 @@ export interface NodeDetailData {
   edges: { outgoing: NodeDetailEdge[]; incoming: NodeDetailEdge[] };
   transcript: NodeDetailTranscript;
   compactSpec: NodeDetailCompactSpec;
+  agentActivity?: AgentActivitySummary | null;
+  currentQitems?: CurrentQitemSummary[];
   contextUsage?: {
     availability: string;
     reason?: string | null;

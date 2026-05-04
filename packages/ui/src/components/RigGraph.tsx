@@ -3,6 +3,7 @@ import { ReactFlow, Controls, Handle, Position, type NodeTypes, type Node, type 
 import "@xyflow/react/dist/style.css";
 import { useRigGraph } from "../hooks/useRigGraph.js";
 import { useRigEvents } from "../hooks/useRigEvents.js";
+import { useTopologyEdgeActivity } from "../hooks/useTopologyEdgeActivity.js";
 import { useDiscoveredSessionsConditional, type DiscoveredSession } from "../hooks/useDiscovery.js";
 import { useDiscoveryPlacement, useDrawerSelection, useNodeSelection } from "./AppShell.js";
 import { getEdgeStyle } from "@/lib/edge-styles";
@@ -105,6 +106,7 @@ export function RigGraph({
   const rawEdges = data?.edges ?? [];
   const error = queryError?.message ?? null;
   const { reconnecting } = useRigEvents(rigId);
+  const edgeActivity = useTopologyEdgeActivity();
   const [focusMessage, setFocusMessage] = useState<FocusMessage | null>(null);
   const dismissTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -134,23 +136,62 @@ export function RigGraph({
     };
   }, []);
 
-  // Apply edge styles from design system + entrance animation
+  // PL-019 item 6: build a node-id → canonicalSessionName lookup so edge
+  // activity (keyed on session names from /api/events) can be resolved
+  // against React Flow edges (keyed on internal node ids). Built each
+  // render off rawNodes; cheap (O(n) on graph nodes), and node-id is
+  // stable for a given rig, so edges stay stable visually too.
+  const sessionNameByNodeId = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const node of rawNodes as Node[]) {
+      const data = node.data as { canonicalSessionName?: string | null } | undefined;
+      if (data?.canonicalSessionName) {
+        map.set(node.id, data.canonicalSessionName);
+      }
+    }
+    return map;
+  }, [rawNodes]);
+
+  // Apply edge styles from design system + entrance animation +
+  // PL-019 traffic emphasis. Class composition order:
+  //   - shouldAnimate: one-shot entrance (existing behavior; not toggled
+  //     after first render).
+  //   - edge-recent-traffic: sustained 1.5x weight + brighter for any
+  //     edge whose directed pair fired in the last ~30s.
+  //   - edge-just-fired: one-shot 1.2s pulse on top of the sustained
+  //     emphasis when the most recent firing is within ~1.2s.
+  // edgeActivity.version is included in deps so the memo refreshes when
+  // a new event arrives or an old one ages out of the recent window.
   const rfEdges = useMemo(() => {
     return (rawEdges as (Edge & { data?: { kind?: string } })[]).map((edge) => {
       const kind = (edge as { data?: { kind?: string } }).data?.kind ??
         (edge as { label?: string }).label ?? "delegates_to";
       const styleResult = getEdgeStyle(kind);
+      const sourceSession = sessionNameByNodeId.get(edge.source as string);
+      const destSession = sessionNameByNodeId.get(edge.target as string);
+      const recentTraffic = sourceSession && destSession
+        ? edgeActivity.recentTraffic(sourceSession, destSession)
+        : false;
+      const justFired = sourceSession && destSession
+        ? edgeActivity.justFired(sourceSession, destSession)
+        : false;
+      const trafficClass = [
+        shouldAnimate ? "edge-draw-in" : "",
+        recentTraffic ? "edge-recent-traffic" : "",
+        justFired ? "edge-just-fired" : "",
+      ].filter(Boolean).join(" ") || undefined;
       return {
         ...edge,
         ...styleResult,
-        className: shouldAnimate ? "edge-draw-in" : undefined,
+        className: trafficClass,
         style: {
           ...styleResult.style,
           animationDelay: shouldAnimate ? `${Math.min(rawNodes.length * 50 + 100, 2000)}ms` : undefined,
         },
       };
     });
-  }, [rawEdges, shouldAnimate, rawNodes.length]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rawEdges, shouldAnimate, rawNodes.length, sessionNameByNodeId, edgeActivity.version]);
 
   // Apply tree layout + entrance animation to nodes
   const podMetaById = useMemo(() => {

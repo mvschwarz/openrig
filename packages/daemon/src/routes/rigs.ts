@@ -1,11 +1,14 @@
 import { Hono } from "hono";
+import type Database from "better-sqlite3";
 import type { RigRepository } from "../domain/rig-repository.js";
 import type { SessionRegistry } from "../domain/session-registry.js";
 import type { EventBus } from "../domain/event-bus.js";
 import type { SnapshotRepository } from "../domain/snapshot-repository.js";
 import type { RestoreOrchestrator } from "../domain/restore-orchestrator.js";
-import { projectRigToGraph, type InventoryOverlay } from "../domain/graph-projection.js";
-import { getNodeInventory, getNodeInventoryWithContext } from "../domain/node-inventory.js";
+import { projectRigToGraph, type InventoryOverlay, type CurrentQitemSummary } from "../domain/graph-projection.js";
+import { getNodeInventory, getNodeInventoryWithContext, attachAgentActivity } from "../domain/node-inventory.js";
+import type { TmuxAdapter } from "../adapters/tmux.js";
+import type { AgentActivityStore } from "../domain/agent-activity-store.js";
 import { deriveRigLifecycleState } from "../domain/ps-projection.js";
 import type { ContextUsageStore } from "../domain/context-usage-store.js";
 import type { Pod, ExpansionPodFragment } from "../domain/types.js";
@@ -14,6 +17,43 @@ import type { RigLifecycleService } from "../domain/rig-lifecycle-service.js";
 import type { SelfAttachService } from "../domain/self-attach-service.js";
 
 export const rigsRoutes = new Hono();
+
+// PL-019 item 5: read-side join helper. Returns map of
+// destination_session → in-progress qitems (capped at MAX_QITEMS_PER_NODE
+// per node), keyed by canonicalSessionName so the route can stitch into
+// the InventoryOverlay. Body is excerpted to stay phone-friendly in
+// tooltip / drawer surfaces (item 5's UI consumers).
+const MAX_QITEMS_PER_NODE = 3;
+const BODY_EXCERPT_MAX_CHARS = 80;
+
+export function loadCurrentQitemsForSessions(
+  db: Database.Database,
+  sessionNames: string[]
+): Map<string, CurrentQitemSummary[]> {
+  const out = new Map<string, CurrentQitemSummary[]>();
+  if (sessionNames.length === 0) return out;
+  const placeholders = sessionNames.map(() => "?").join(",");
+  const rows = db.prepare(
+    `SELECT qitem_id, destination_session, body, tier
+       FROM queue_items
+       WHERE state = 'in-progress' AND destination_session IN (${placeholders})
+       ORDER BY ts_updated DESC`
+  ).all(...sessionNames) as Array<{ qitem_id: string; destination_session: string; body: string; tier: string | null }>;
+  for (const row of rows) {
+    const list = out.get(row.destination_session) ?? [];
+    if (list.length < MAX_QITEMS_PER_NODE) {
+      list.push({
+        qitemId: row.qitem_id,
+        bodyExcerpt: row.body.length > BODY_EXCERPT_MAX_CHARS
+          ? `${row.body.slice(0, BODY_EXCERPT_MAX_CHARS)}…`
+          : row.body,
+        tier: row.tier,
+      });
+    }
+    out.set(row.destination_session, list);
+  }
+  return out;
+}
 
 function normalizeExpansionPodFragment(raw: Record<string, unknown>): ExpansionPodFragment | null {
   if (!raw || typeof raw !== "object") return null;
@@ -145,22 +185,43 @@ rigsRoutes.get("/:id", (c) => {
   return c.json(rig);
 });
 
-rigsRoutes.get("/:id/graph", (c) => {
+rigsRoutes.get("/:id/graph", async (c) => {
   const rig = getRepo(c).getRig(c.req.param("id"));
   if (!rig) {
     return c.json({ error: "rig not found" }, 404);
   }
   const rigId = c.req.param("id");
   const sessions = getSessionRegistry(c).getSessionsForRig(rigId);
-  // Overlay inventory data for enriched graph fields
+  // Overlay inventory data for enriched graph fields.
   const ctxStore = c.get("contextUsageStore" as never) as ContextUsageStore | undefined;
   const inventory = ctxStore
     ? getNodeInventoryWithContext(getRepo(c).db, rigId, ctxStore)
     : getNodeInventory(getRepo(c).db, rigId);
+
+  // PL-019 item 4: enrich inventory with agentActivity at graph-payload time
+  // so UI consumers receive activity in a single fetch (no separate
+  // /api/rigs/:id/nodes round-trip just to color the topology dots).
+  const tmuxAdapter = c.get("tmuxAdapter" as never) as TmuxAdapter | undefined;
+  const agentActivityStore = c.get("agentActivityStore" as never) as AgentActivityStore | undefined;
+  const inventoryWithActivity = tmuxAdapter
+    ? await attachAgentActivity(inventory, { tmuxAdapter, activityStore: agentActivityStore })
+    : inventory;
+
+  // PL-019 item 5: read-side join for active-qitem enrichment. Cheap by
+  // virtue of the existing idx_queue_items_destination_state index. The
+  // helper is exported so it can be unit-tested without spinning up the
+  // full route stack.
+  const currentQitemsBySession = loadCurrentQitemsForSessions(
+    getRepo(c).db,
+    inventoryWithActivity
+      .map((n) => n.canonicalSessionName)
+      .filter((s): s is string => Boolean(s))
+  );
+
   const pods = getRepo(c).db
     .prepare("SELECT id, rig_id, namespace, label, summary, continuity_policy_json, created_at FROM pods WHERE rig_id = ? ORDER BY created_at")
     .all(rigId) as Array<{ id: string; rig_id: string; namespace: string; label: string; summary: string | null; continuity_policy_json: string | null; created_at: string }>;
-  const overlay: InventoryOverlay[] = inventory.map((n) => ({
+  const overlay: InventoryOverlay[] = inventoryWithActivity.map((n) => ({
     logicalId: n.logicalId,
     startupStatus: n.startupStatus,
     canonicalSessionName: n.canonicalSessionName,
@@ -168,6 +229,10 @@ rigsRoutes.get("/:id/graph", (c) => {
     contextUsedPercentage: n.contextUsage?.usedPercentage ?? null,
     contextFresh: n.contextUsage?.fresh ?? false,
     contextAvailability: n.contextUsage?.availability ?? "unknown",
+    agentActivity: n.agentActivity ?? null,
+    currentQitems: n.canonicalSessionName
+      ? currentQitemsBySession.get(n.canonicalSessionName) ?? []
+      : [],
   }));
   const projectedPods: Pod[] = pods.map((pod) => ({
     id: pod.id,

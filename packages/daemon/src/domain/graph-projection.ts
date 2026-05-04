@@ -1,8 +1,14 @@
-import type { RigWithRelations, Session, Binding, Pod } from "./types.js";
+import type { RigWithRelations, Session, Binding, Pod, AgentActivity } from "./types.js";
 
 export interface RigGraphInput extends RigWithRelations {
   sessions: Session[];
   pods?: Pod[];
+}
+
+export interface CurrentQitemSummary {
+  qitemId: string;
+  bodyExcerpt: string;
+  tier: string | null;
 }
 
 interface RFNodeData {
@@ -27,6 +33,8 @@ interface RFNodeData {
   contextUsedPercentage: number | null;
   contextFresh: boolean;
   contextAvailability: string;
+  agentActivity?: AgentActivity | null;
+  currentQitems?: CurrentQitemSummary[];
 }
 
 interface RFNode {
@@ -59,6 +67,8 @@ export interface InventoryOverlay {
   contextUsedPercentage?: number | null;
   contextFresh?: boolean;
   contextAvailability?: string;
+  agentActivity?: AgentActivity | null;
+  currentQitems?: CurrentQitemSummary[];
 }
 
 export function projectRigToGraph(input: RigGraphInput, inventoryOverlay?: InventoryOverlay[]): ReactFlowGraph {
@@ -115,6 +125,8 @@ export function projectRigToGraph(input: RigGraphInput, inventoryOverlay?: Inven
         contextUsedPercentage: overlay?.contextUsedPercentage ?? null,
         contextFresh: overlay?.contextFresh ?? false,
         contextAvailability: overlay?.contextAvailability ?? "unknown",
+        agentActivity: overlay?.agentActivity ?? null,
+        currentQitems: overlay?.currentQitems ?? [],
       },
     };
   });
@@ -148,6 +160,8 @@ export function projectRigToGraph(input: RigGraphInput, inventoryOverlay?: Inven
         contextUsedPercentage: null,
         contextFresh: false,
         contextAvailability: "unknown",
+        agentActivity: null,
+        currentQitems: [],
       },
     });
   }

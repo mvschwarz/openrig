@@ -1,11 +1,18 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useRouterState } from "@tanstack/react-router";
-import { Boxes, ChevronLeft, ChevronRight, CircleDot, Globe, Layers3, Server } from "lucide-react";
+import { Boxes, ChevronLeft, ChevronRight, CircleDot, Globe, Layers3, Server, Activity } from "lucide-react";
 import { useRigSummary, type RigSummary } from "../hooks/useRigSummary.js";
 import { usePsEntries, type PsEntry } from "../hooks/usePsEntries.js";
 import { useNodeInventory, type NodeInventoryEntry } from "../hooks/useNodeInventory.js";
 import { cn } from "../lib/utils.js";
 import { displayAgentName, displayPodName, inferPodName } from "../lib/display-name.js";
+import {
+  getActivityState,
+  getActivityLabel,
+  getActivityTextClass,
+  getActivityAnimationClass,
+  shortQitemTail,
+} from "../lib/activity-visuals.js";
 
 import type { DrawerSelection } from "./SharedDetailDrawer.js";
 
@@ -73,6 +80,54 @@ function TreeToggle({
     >
       <ChevronRight className={cn("h-4 w-4 transition-transform duration-150", expanded && "rotate-90")} />
     </button>
+  );
+}
+
+// PL-019 item 3: per-row activity indicator that sits next to the
+// startup-status icon. Uses the same shared palette as RigNode (item 2)
+// so the operator's mental model is the same on both surfaces.
+//
+// "Owns active work" tag (qitem tooltip) renders only when the daemon
+// attached one or more in-progress qitems on the node-detail/inventory
+// payload — currentQitems comes from the read-side join in routes/sessions.ts
+// + routes/rigs.ts.
+function NodeActivityIndicator({ node }: { node: NodeInventoryEntry }) {
+  const activity = node.agentActivity;
+  const state = getActivityState(activity);
+  const label = getActivityLabel(state);
+  const textClass = getActivityTextClass(state);
+  const animClass = getActivityAnimationClass(state);
+  const qitems = node.currentQitems ?? [];
+
+  // Build a single tooltip line summarizing activity + (if running) the
+  // owned qitem(s). Operator-friendly: the explorer is a tree, the drawer
+  // shows the full id; the tooltip is the short answer.
+  const titleLines = [`activity: ${label}`];
+  if (qitems.length > 0) {
+    for (const q of qitems) {
+      titleLines.push(`on ${shortQitemTail(q.qitemId)} — ${q.bodyExcerpt}`);
+    }
+  }
+  const title = titleLines.join("\n");
+
+  return (
+    <span
+      className="inline-flex items-center gap-0.5 ml-1"
+      data-testid={`node-activity-${node.logicalId}`}
+      data-activity-state={state}
+      title={title}
+    >
+      <Activity className={cn("h-2.5 w-2.5 shrink-0", textClass, animClass)} strokeWidth={2.4} aria-label={title} />
+      {qitems.length > 0 && (
+        <span
+          className="font-mono text-[8px] uppercase tracking-[0.10em] text-stone-500"
+          data-testid={`node-active-work-${node.logicalId}`}
+          aria-label="owns active work"
+        >
+          ●
+        </span>
+      )}
+    </span>
   );
 }
 
@@ -164,6 +219,7 @@ function PodBranch({
                   statusClass={statusColor(node.startupStatus)}
                   testId={`node-icon-${node.logicalId}`}
                 />
+                <NodeActivityIndicator node={node} />
                 <span className="font-mono text-[10px] text-stone-700 truncate">{memberName}</span>
                 {node.contextUsage?.availability === "known" && typeof node.contextUsage.usedPercentage === "number" ? (
                   <span
@@ -288,6 +344,7 @@ function RigBranch({
                         statusClass={statusColor(node.startupStatus)}
                         testId={`node-icon-${node.logicalId}`}
                       />
+                      <NodeActivityIndicator node={node} />
                       <span className="font-mono text-[10px] text-stone-700 truncate">{memberName}</span>
                     </button>
                   );

@@ -1,5 +1,20 @@
 import { useQuery } from "@tanstack/react-query";
 
+export interface AgentActivitySummary {
+  state: "running" | "needs_input" | "idle" | "unknown";
+  reason: string;
+  evidenceSource: string;
+  sampledAt: string;
+  evidence?: string | null;
+  staleness?: number | null;
+}
+
+export interface CurrentQitemSummary {
+  qitemId: string;
+  bodyExcerpt: string;
+  tier: string | null;
+}
+
 export interface NodeInventoryEntry {
   rigId: string;
   rigName: string;
@@ -23,6 +38,10 @@ export interface NodeInventoryEntry {
     sampledAt: string | null;
     fresh: boolean;
   };
+  // PL-019: agent activity attached daemon-side via attachAgentActivity.
+  agentActivity?: AgentActivitySummary | null;
+  // PL-019: in-progress qitems joined daemon-side on node-detail responses.
+  currentQitems?: CurrentQitemSummary[];
 }
 
 async function fetchNodeInventory(rigId: string): Promise<NodeInventoryEntry[]> {
