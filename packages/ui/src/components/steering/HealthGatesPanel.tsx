@@ -4,7 +4,12 @@
 // Each badge is read-only at v0; deeper drill-down (e.g., clicking
 // "attention-required: N") is a v1+ ergonomic upgrade and surfaced
 // here as a copy-able CLI hint instead of a daemon write.
+//
+// PL-012: context-tier badges are now click-through links to the
+// /context dashboard filtered by the corresponding tier. Operator
+// scans steering, sees "critical: 2", clicks → /context filtered.
 
+import { Link } from "@tanstack/react-router";
 import { useContextHealth, useNodeHealth } from "../../hooks/useSteering.js";
 
 export function HealthGatesPanel() {
@@ -51,18 +56,57 @@ export function HealthGatesPanel() {
     const { total, byUrgency, critical, warning, stale } = contextHealth.data;
     return (
       <div data-testid="steering-health-context" className="space-y-1">
-        <div className="font-mono text-[9px] uppercase tracking-[0.10em] text-stone-500">Context usage</div>
+        <div className="flex items-baseline justify-between">
+          <div className="font-mono text-[9px] uppercase tracking-[0.10em] text-stone-500">Context usage</div>
+          <Link
+            to="/context"
+            data-testid="steering-context-open"
+            className="font-mono text-[9px] uppercase tracking-[0.10em] text-blue-700 hover:underline"
+          >
+            Open dashboard →
+          </Link>
+        </div>
         <div className="flex flex-wrap items-baseline gap-2 font-mono text-[10px]">
           <Stat label="total" value={total} />
-          <Stat label="ok" value={byUrgency["low"] ?? 0} variant="ok" />
-          <Stat label="warning" value={warning} variant={warning > 0 ? "warn" : "dim"} />
-          <Stat label="critical" value={critical} variant={critical > 0 ? "alert" : "dim"} />
+          {/* PL-012: tier counts are click-through to /context?tier=…. */}
+          <TierStatLink tier="low" label="ok" value={byUrgency["low"] ?? 0} variant="ok" />
+          <TierStatLink tier="warning" label="warning" value={warning} variant={warning > 0 ? "warn" : "dim"} />
+          <TierStatLink tier="critical" label="critical" value={critical} variant={critical > 0 ? "alert" : "dim"} />
           <Stat label="stale" value={stale} variant={stale > 0 ? "warn" : "dim"} />
         </div>
         <div className="font-mono text-[8px] text-stone-400">via rig context --json</div>
       </div>
     );
   }
+}
+
+function TierStatLink({
+  tier,
+  label,
+  value,
+  variant = "dim",
+}: {
+  tier: "critical" | "warning" | "low";
+  label: string;
+  value: number;
+  variant?: "ok" | "warn" | "alert" | "dim";
+}) {
+  const cls =
+    variant === "ok" ? "text-emerald-700"
+    : variant === "warn" ? "text-amber-700"
+    : variant === "alert" ? "text-red-700 font-bold"
+    : "text-stone-600";
+  return (
+    <Link
+      to="/context"
+      search={{ tier }}
+      data-testid={`steering-stat-${label}`}
+      className="inline-flex items-baseline gap-0.5 hover:underline"
+    >
+      <span className="text-stone-500">{label}:</span>
+      <span className={cls}>{value}</span>
+    </Link>
+  );
 }
 
 function Stat({ label, value, variant = "dim" }: { label: string; value: number; variant?: "ok" | "warn" | "alert" | "dim" }) {
