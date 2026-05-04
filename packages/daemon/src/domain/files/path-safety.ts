@@ -51,17 +51,13 @@ const ENV_VAR = "OPENRIG_FILES_ALLOWLIST";
 const LEGACY_ENV_VAR = "RIGGED_FILES_ALLOWLIST";
 
 /**
- * Reads the allowlist env var and returns the parsed root list. Each
- * pair is `<name>:<absolute-path>`; whitespace around delimiters is
- * trimmed. Invalid pairs (no colon, empty name, non-absolute path)
- * are silently skipped (logged at construction by the caller, not
- * here — keep this pure for tests). Duplicate names: last entry wins
- * (operator presumably means to override).
+ * Decodes a raw `name:/abs/path,name:/abs/path` allowlist string into
+ * canonical AllowlistRoot[]. Whitespace around delimiters trimmed.
+ * Invalid pairs (no colon, empty name, non-absolute path) silently
+ * skipped. Duplicate names: last wins. Same shape both env-var and
+ * settings-file-resolved values produce.
  */
-export function readAllowlistFromEnv(env: NodeJS.ProcessEnv = process.env): AllowlistRoot[] {
-  // Use || (not ??) so an empty-string OPENRIG_FILES_ALLOWLIST falls
-  // back to the legacy var. ?? only handles null/undefined.
-  const raw = (env[ENV_VAR] || env[LEGACY_ENV_VAR] || "").toString();
+export function decodeAllowlist(raw: string): AllowlistRoot[] {
   if (!raw.trim()) return [];
   const out = new Map<string, string>();
   for (const pair of raw.split(",")) {
@@ -73,9 +69,6 @@ export function readAllowlistFromEnv(env: NodeJS.ProcessEnv = process.env): Allo
     const rawPath = trimmed.slice(colon + 1).trim();
     if (!name || !rawPath) continue;
     if (!path.isAbsolute(rawPath)) continue;
-    // Resolve to canonical absolute path. If the path doesn't exist
-    // on disk yet, fall back to path.resolve so the operator can
-    // pre-configure roots. realpath would throw on missing paths.
     let canonical: string;
     try {
       canonical = fs.realpathSync(rawPath);
@@ -85,6 +78,18 @@ export function readAllowlistFromEnv(env: NodeJS.ProcessEnv = process.env): Allo
     out.set(name, canonical);
   }
   return Array.from(out.entries()).map(([name, canonicalPath]) => ({ name, canonicalPath }));
+}
+
+/**
+ * Reads the allowlist env var directly and returns the parsed root list.
+ * Preserved for backward-compat callers; v0 callers prefer the resolved
+ * settings-store path which honors env > settings-file > empty.
+ */
+export function readAllowlistFromEnv(env: NodeJS.ProcessEnv = process.env): AllowlistRoot[] {
+  // Use || (not ??) so an empty-string OPENRIG_FILES_ALLOWLIST falls
+  // back to the legacy var. ?? only handles null/undefined.
+  const raw = (env[ENV_VAR] || env[LEGACY_ENV_VAR] || "").toString();
+  return decodeAllowlist(raw);
 }
 
 /**

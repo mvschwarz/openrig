@@ -53,6 +53,7 @@ import { askRoutes } from "./routes/ask.js";
 import type { AskService } from "./domain/ask-service.js";
 import { specReviewRoutes } from "./routes/spec-review.js";
 import { specLibraryRoutes } from "./routes/spec-library.js";
+import { configRoutes } from "./routes/config.js";
 import type { SpecReviewService } from "./domain/spec-review-service.js";
 import type { SpecLibraryService } from "./domain/spec-library-service.js";
 import type { ChatRepository } from "./domain/chat-repository.js";
@@ -152,6 +153,8 @@ export interface AppDeps {
   // "slices_root_not_configured" 503 so the UI can surface a setup hint.
   sliceIndexer?: import("./domain/slices/slice-indexer.js").SliceIndexer;
   sliceDetailProjector?: import("./domain/slices/slice-detail-projector.js").SliceDetailProjector;
+  /** User Settings v0 — daemon-side settings store (env > file > default). */
+  settingsStore?: import("./domain/user-settings/settings-store.js").SettingsStore;
   /** UI Enhancement Pack v0 — file allowlist + browser routes (item 3). */
   filesAllowlist?: import("./domain/files/path-safety.js").AllowlistRoot[];
   /** UI Enhancement Pack v0 — atomic write service (item 4). */
@@ -339,6 +342,7 @@ export function createApp(deps: AppDeps): Hono {
     c.set("sliceIndexer" as never, deps.sliceIndexer);
     c.set("sliceDetailProjector" as never, deps.sliceDetailProjector);
     c.set("filesAllowlist" as never, deps.filesAllowlist);
+    c.set("settingsStore" as never, deps.settingsStore);
     c.set("fileWriteService" as never, deps.fileWriteService);
     c.set("progressIndexer" as never, deps.progressIndexer);
     c.set("steeringComposer" as never, deps.steeringComposer);
@@ -388,6 +392,7 @@ export function createApp(deps: AppDeps): Hono {
   app.route("/api/ask", askRoutes);
   app.route("/api/specs/review", specReviewRoutes());
   app.route("/api/specs/library", specLibraryRoutes());
+  app.route("/api/config", configRoutes());
   app.route("/api/whoami", whoamiRoutes());
   app.route("/api/seat", seatRoutes);
   app.route("/api/rigs/:rigId/chat", chatRoutes());
