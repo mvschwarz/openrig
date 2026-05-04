@@ -384,4 +384,135 @@ describe("LibraryReview", () => {
       expect(screen.getByTestId("agent-drilldown-route")).toBeDefined();
     });
   });
+
+  // --- PL-014: context-pack review variant ---
+
+  it("renders the context-pack review variant for context-pack:* ids", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/context-packs/library") {
+        return new Response(JSON.stringify([
+          {
+            id: "context-pack:pl-005-priming:1",
+            kind: "context-pack",
+            name: "pl-005-priming",
+            version: "1",
+            purpose: "Priming for PL-005 Phase A review.",
+            sourceType: "user_file",
+            sourcePath: "/home/op/.openrig/context-packs/pl-005-priming",
+            relativePath: "pl-005-priming",
+            updatedAt: "2026-05-04T00:00:00Z",
+            manifestEstimatedTokens: null,
+            derivedEstimatedTokens: 800,
+            files: [
+              { path: "prd.md", role: "prd", summary: "PRD", absolutePath: "/abs/prd.md", bytes: 200, estimatedTokens: 50 },
+              { path: "missing.md", role: "proof", summary: null, absolutePath: null, bytes: null, estimatedTokens: null },
+            ],
+          },
+        ]), { status: 200 });
+      }
+      if (url === "/api/context-packs/library/context-pack%3Apl-005-priming%3A1/preview") {
+        return new Response(JSON.stringify({
+          id: "context-pack:pl-005-priming:1",
+          name: "pl-005-priming",
+          version: "1",
+          bundleText: "# OpenRig Context Pack: pl-005-priming v1\n\nPRD body\n",
+          bundleBytes: 60,
+          estimatedTokens: 15,
+          files: [{ path: "prd.md", role: "prd", bytes: 200, estimatedTokens: 50 }],
+          missingFiles: [{ path: "missing.md", role: "proof" }],
+        }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(createAppTestRouter({
+      initialPath: "/specs/library/context-pack:pl-005-priming:1",
+      routes: [
+        { path: "/specs/library/context-pack:pl-005-priming:1", component: () => <LibraryReview entryId="context-pack:pl-005-priming:1" /> },
+      ],
+    }));
+
+    await waitFor(() => expect(screen.getByTestId("library-review-context-pack")).toBeDefined());
+    expect(screen.getByText("pl-005-priming")).toBeDefined();
+    expect(screen.getByTestId("lib-pack-version").textContent).toContain("1");
+    expect(screen.getByTestId("lib-pack-files").textContent).toContain("2");
+    // Per-file row with role + size
+    const present = screen.getByTestId("lib-pack-file-prd.md");
+    expect(present.textContent).toContain("role: prd");
+    expect(present.textContent).toContain("200B");
+    // Missing file rendered with MISSING marker + data-missing flag
+    const missing = screen.getByTestId("lib-pack-file-missing.md");
+    expect(missing.getAttribute("data-missing")).toBe("true");
+    expect(missing.textContent).toContain("MISSING");
+    // Bundle preview present + missing-file warning (preview is a
+    // separate query; wait for it to resolve)
+    await waitFor(() => expect(screen.getByTestId("lib-pack-bundle-text")).toBeDefined());
+    expect(screen.getByTestId("lib-pack-bundle-text").textContent).toContain("PRD body");
+    expect(screen.getByTestId("lib-pack-missing-warning")).toBeDefined();
+  });
+
+  it("Send-to-seat modal opens on click and shows running sessions", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/context-packs/library") {
+        return new Response(JSON.stringify([
+          {
+            id: "context-pack:test:1",
+            kind: "context-pack",
+            name: "test",
+            version: "1",
+            purpose: null,
+            sourceType: "user_file",
+            sourcePath: "/x/test",
+            relativePath: "test",
+            updatedAt: "2026-05-04T00:00:00Z",
+            manifestEstimatedTokens: null,
+            derivedEstimatedTokens: 50,
+            files: [{ path: "a.md", role: "r", summary: null, absolutePath: "/abs/a.md", bytes: 30, estimatedTokens: 8 }],
+          },
+        ]), { status: 200 });
+      }
+      if (url.endsWith("/preview")) {
+        return new Response(JSON.stringify({
+          id: "context-pack:test:1", name: "test", version: "1",
+          bundleText: "ok", bundleBytes: 2, estimatedTokens: 1,
+          files: [], missingFiles: [],
+        }), { status: 200 });
+      }
+      if (url === "/api/ps") {
+        return new Response(JSON.stringify([
+          {
+            rigId: "rig-1",
+            name: "demo",
+            nodes: [
+              { canonicalSessionName: "driver@demo", sessionStatus: "running" },
+              { canonicalSessionName: "qa@demo", sessionStatus: "running" },
+              { canonicalSessionName: "stopped@demo", sessionStatus: "exited" },
+            ],
+          },
+        ]), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(createAppTestRouter({
+      initialPath: "/specs/library/context-pack:test:1",
+      routes: [
+        { path: "/specs/library/context-pack:test:1", component: () => <LibraryReview entryId="context-pack:test:1" /> },
+      ],
+    }));
+
+    await waitFor(() => expect(screen.getByTestId("context-pack-send-button")).toBeDefined());
+    fireEvent.click(screen.getByTestId("context-pack-send-button"));
+    await waitFor(() => expect(screen.getByTestId("context-pack-send-modal")).toBeDefined());
+    const select = screen.getByTestId("context-pack-send-session") as HTMLSelectElement;
+    const options = Array.from(select.querySelectorAll("option")).map((o) => o.value);
+    expect(options).toContain("driver@demo");
+    expect(options).toContain("qa@demo");
+    // Stopped session not surfaced (only sessionStatus === "running")
+    expect(options).not.toContain("stopped@demo");
+  });
 });

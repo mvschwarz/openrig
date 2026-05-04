@@ -3,34 +3,53 @@ import { useNavigate } from "@tanstack/react-router";
 import { Button } from "@/components/ui/button";
 import { useSpecsWorkspace, type SpecsDraft } from "./SpecsWorkspace.js";
 import { useSpecLibrary, useLibraryReview, type SpecLibraryEntry } from "../hooks/useSpecLibrary.js";
+import { useContextPackLibrary, type ContextPackEntry } from "../hooks/useContextPackLibrary.js";
 import { usePsEntries } from "../hooks/usePsEntries.js";
 import { useExpandRig, useRemoveLibrarySpec, useRenameLibrarySpec, type ExpandRigResult } from "../hooks/mutations.js";
 import { ExpansionOutcome } from "./ExpansionOutcome.js";
 
-type LibraryFilter = "all" | "apps" | "rigs" | "agents" | "workflows";
+type LibraryFilter = "all" | "apps" | "rigs" | "agents" | "workflows" | "context-packs";
 
-function deriveStability(entry: SpecLibraryEntry): "Stable" | "Experimental" | "Community" {
+// PL-014: unified entry shape covers both spec library entries and
+// context-pack entries — both are filesystem-canonical, library-
+// discoverable, reviewable. Discriminated by kind.
+type UnifiedLibraryEntry = SpecLibraryEntry | (ContextPackEntry & {
+  summary?: string;
+  hasServices?: undefined;
+});
+
+function deriveStability(entry: UnifiedLibraryEntry): "Stable" | "Experimental" | "Community" {
   if (entry.sourceType !== "builtin") return "Community";
   const rp = (entry.relativePath ?? "").replaceAll("\\", "/");
   if (rp.startsWith("rigs/launch/")) return "Stable";
   return "Experimental";
 }
 
-function deriveTypeBadge(entry: SpecLibraryEntry): "APP" | "RIG" | "AGENT" | "WORKFLOW" {
+function deriveTypeBadge(entry: UnifiedLibraryEntry): "APP" | "RIG" | "AGENT" | "WORKFLOW" | "PACK" {
+  if (entry.kind === "context-pack") return "PACK";
   if (entry.kind === "workflow") return "WORKFLOW";
   if (entry.kind === "agent") return "AGENT";
-  if (entry.hasServices) return "APP";
+  if ((entry as SpecLibraryEntry).hasServices) return "APP";
   return "RIG";
 }
 
-function filterEntries(entries: SpecLibraryEntry[], filter: LibraryFilter): SpecLibraryEntry[] {
+function filterEntries(entries: UnifiedLibraryEntry[], filter: LibraryFilter): UnifiedLibraryEntry[] {
   switch (filter) {
-    case "apps": return entries.filter((e) => e.kind === "rig" && e.hasServices);
-    case "rigs": return entries.filter((e) => e.kind === "rig" && !e.hasServices);
+    case "apps": return entries.filter((e) => e.kind === "rig" && (e as SpecLibraryEntry).hasServices);
+    case "rigs": return entries.filter((e) => e.kind === "rig" && !(e as SpecLibraryEntry).hasServices);
     case "agents": return entries.filter((e) => e.kind === "agent");
     case "workflows": return entries.filter((e) => e.kind === "workflow");
+    case "context-packs": return entries.filter((e) => e.kind === "context-pack");
     default: return entries;
   }
+}
+
+// PL-014: project ContextPackEntry into the row-shape the LibraryList
+// renders (adds a `summary` line surfacing files-count + token estimate).
+function contextPackToUnified(entry: ContextPackEntry): UnifiedLibraryEntry {
+  const firstPurposeLine = entry.purpose?.split("\n")[0]?.trim();
+  const summary = `${entry.files.length} file${entry.files.length === 1 ? "" : "s"} · ~${entry.derivedEstimatedTokens} tokens${firstPurposeLine ? ` · ${firstPurposeLine}` : ""}`;
+  return { ...entry, summary };
 }
 
 interface SpecsPanelProps {
@@ -98,10 +117,10 @@ function LibraryList({
   renderExpanded,
 }: {
   title: string;
-  entries: SpecLibraryEntry[];
+  entries: UnifiedLibraryEntry[];
   onSelect: (id: string) => void;
-  renderAction?: (entry: SpecLibraryEntry) => ReactNode;
-  renderExpanded?: (entry: SpecLibraryEntry) => ReactNode;
+  renderAction?: (entry: UnifiedLibraryEntry) => ReactNode;
+  renderExpanded?: (entry: UnifiedLibraryEntry) => ReactNode;
 }) {
   if (entries.length === 0) return null;
 
@@ -245,7 +264,18 @@ export function SpecsPanel({ onClose }: SpecsPanelProps) {
     await openSurface("/specs/agent");
   };
 
-  const { data: allLibrary = [] } = useSpecLibrary();
+  const { data: specEntries = [] } = useSpecLibrary();
+  // PL-014: context_packs are a sibling primitive served from a
+  // separate daemon route. Merge them into the unified library list so
+  // filter chips operate on one array.
+  const { data: contextPacks = [] } = useContextPackLibrary();
+  const allLibrary: UnifiedLibraryEntry[] = [
+    ...specEntries,
+    // Defensive: if the daemon returns a non-array placeholder (older
+    // version without the route), Array.isArray guard keeps the panel
+    // from blowing up on render.
+    ...(Array.isArray(contextPacks) ? contextPacks.map(contextPackToUnified) : []),
+  ];
   const [libraryFilter, setLibraryFilter] = useState<LibraryFilter>("all");
   const filteredLibrary = filterEntries(allLibrary, libraryFilter);
   const [addToRigEntryId, setAddToRigEntryId] = useState<string | null>(null);
@@ -263,7 +293,7 @@ export function SpecsPanel({ onClose }: SpecsPanelProps) {
   const rigDraftHistory = recentRigDrafts.filter((draft) => draft.id !== currentRigDraft?.id);
   const agentDraftHistory = recentAgentDrafts.filter((draft) => draft.id !== currentAgentDraft?.id);
 
-  const startRename = (entry: SpecLibraryEntry) => {
+  const startRename = (entry: UnifiedLibraryEntry) => {
     setLibraryActionError(null);
     setConfirmRemoveEntryId(null);
     setRenameEntryId(entry.id);
@@ -295,7 +325,7 @@ export function SpecsPanel({ onClose }: SpecsPanelProps) {
     }
   };
 
-  const renderLibraryAction = (entry: SpecLibraryEntry, allowAddToRig: boolean) => (
+  const renderLibraryAction = (entry: UnifiedLibraryEntry, allowAddToRig: boolean) => (
     <div className="flex items-center gap-1">
       {allowAddToRig && (
         <button
@@ -339,7 +369,7 @@ export function SpecsPanel({ onClose }: SpecsPanelProps) {
     </div>
   );
 
-  const renderLibraryExpanded = (entry: SpecLibraryEntry) => {
+  const renderLibraryExpanded = (entry: UnifiedLibraryEntry) => {
     const showRename = renameEntryId === entry.id;
     const showRemove = confirmRemoveEntryId === entry.id;
     if (!showRename && !showRemove) return null;
@@ -465,7 +495,7 @@ export function SpecsPanel({ onClose }: SpecsPanelProps) {
         <div className="space-y-2">
           <div className="font-mono text-[8px] uppercase tracking-[0.16em] text-stone-500">Library</div>
           <div className="flex gap-1">
-            {(["all", "apps", "rigs", "agents", "workflows"] as LibraryFilter[]).map((f) => (
+            {(["all", "apps", "rigs", "agents", "workflows", "context-packs"] as LibraryFilter[]).map((f) => (
               <button
                 key={f}
                 data-testid={`filter-${f}`}
