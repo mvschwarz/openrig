@@ -694,16 +694,43 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
 
   // Slice Story View v0 — slice indexer + per-tab projector.
   //
-  // Configured via env (single-host MVP; no per-rig override at v0):
-  //   OPENRIG_SLICES_ROOT             absolute path to slices folder root
+  // User Settings v0 graduates `OPENRIG_SLICES_ROOT` env-var into the
+  // typed `workspace.slices_root` setting (resolution chain: env >
+  // config-file > default `<workspace.root>/slices`). Backward-compat:
+  // operators with OPENRIG_SLICES_ROOT set continue to work because the
+  // settings store reads env in the same resolution slot. Operators
+  // setting via `rig config set workspace.slices_root <path>` or via the
+  // System drawer Settings panel UI now flow through the indexer too —
+  // closes the PRD § Scenario B requirement that wasn't wired in v0.
+  //
+  //   OPENRIG_SLICES_ROOT             legacy short env var (still honored
+  //                                   if set; preferred route is settings)
+  //   OPENRIG_WORKSPACE_SLICES_ROOT   typed-key env override
+  //   workspace.slices_root           typed setting in ~/.openrig/config.json
+  //   workspace.root                  cascade fallback (default ~/.openrig/workspace)
   //   OPENRIG_DOGFOOD_EVIDENCE_ROOT   absolute path to dogfood-evidence root
   //
-  // When OPENRIG_SLICES_ROOT is unset, the indexer is still constructed
-  // but isReady() returns false — the routes return a clear
-  // "slices_root_not_configured" 503 with a setup hint, so the operator
-  // can wire the env vars without daemon-restart-debug-loop.
+  // When the resolved slicesRoot path doesn't exist on disk, the indexer
+  // is still constructed but isReady() returns false — the routes return
+  // a clear "slices_root_not_configured" 503 with a setup hint.
   {
-    const slicesRoot = readOpenRigEnv("OPENRIG_SLICES_ROOT", "RIGGED_SLICES_ROOT") ?? "";
+    // Prefer the legacy short env var if explicitly set (existing
+    // dogfood / test daemons rely on it). Otherwise fall back to the
+    // settings-resolved path (env > file > default cascade inside
+    // SettingsStore). The SettingsStore is constructed locally here
+    // so the slices block doesn't depend on the User Settings v0 wiring
+    // block ordering further below.
+    const legacyEnvSlicesRoot = readOpenRigEnv("OPENRIG_SLICES_ROOT", "RIGGED_SLICES_ROOT") ?? "";
+    let resolvedSlicesRoot = "";
+    if (!legacyEnvSlicesRoot) {
+      try {
+        const { SettingsStore: SettingsStoreCtor } = await import("./domain/user-settings/settings-store.js");
+        resolvedSlicesRoot = new SettingsStoreCtor().resolveConfig().workspaceSlicesRoot;
+      } catch {
+        // SettingsStore unavailable — keep slicesRoot empty; routes return 503.
+      }
+    }
+    const slicesRoot = legacyEnvSlicesRoot || resolvedSlicesRoot;
     const dogfoodRoot = readOpenRigEnv("OPENRIG_DOGFOOD_EVIDENCE_ROOT", "RIGGED_DOGFOOD_EVIDENCE_ROOT") ?? "";
     const { SliceIndexer } = await import("./domain/slices/slice-indexer.js");
     const { SliceDetailProjector } = await import("./domain/slices/slice-detail-projector.js");
