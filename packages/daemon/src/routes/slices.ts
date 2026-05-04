@@ -19,6 +19,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { SliceIndexer, SliceListEntry, SliceStatus } from "../domain/slices/slice-indexer.js";
 import type { SliceDetailProjector } from "../domain/slices/slice-detail-projector.js";
+import { findSliceWorkflowBinding } from "../domain/workflow/slice-workflow-binding.js";
 
 export interface SlicesRoutesDeps {
   indexer: SliceIndexer;
@@ -49,11 +50,45 @@ export function slicesRoutes(): Hono {
       }, 400);
     }
     const all = deps.indexer.list();
-    const filtered = filter === "all" ? all : all.filter((s) => s.status === filter);
+    let filtered = filter === "all" ? all : all.filter((s) => s.status === filter);
+    // Workflows in Spec Library v0: optional lens filter — narrow to
+    // slices bound to a workflow_instance of <name>:<version>.
+    const boundToWorkflow = c.req.query("boundToWorkflow");
+    let boundDiagnostic: { specName: string; specVersion: string; matched: number; total: number } | null = null;
+    if (boundToWorkflow) {
+      const colonIdx = boundToWorkflow.lastIndexOf(":");
+      if (colonIdx === -1) {
+        return c.json({
+          error: "boundToWorkflow_invalid",
+          hint: "Format is boundToWorkflow=<specName>:<specVersion>",
+        }, 400);
+      }
+      const specName = boundToWorkflow.slice(0, colonIdx);
+      const specVersion = boundToWorkflow.slice(colonIdx + 1);
+      const db = deps.indexer.db;
+      const before = filtered.length;
+      filtered = filtered.filter((slice) => {
+        // Re-resolve binding per slice. The indexer's list payload
+        // doesn't carry workflowName so we do the join here. v0 cost
+        // is bounded by the slice count + a small SQL per slice; with
+        // ~109 slices this stays sub-100ms in practice.
+        const sliceRecord = deps.indexer.get(slice.name);
+        if (!sliceRecord || sliceRecord.qitemIds.length === 0) return false;
+        const binding = findSliceWorkflowBinding(db, sliceRecord.qitemIds);
+        return binding.primary?.workflowName === specName
+          && binding.primary?.workflowVersion === specVersion;
+      });
+      boundDiagnostic = { specName, specVersion, matched: filtered.length, total: before };
+    }
     // Sort by lastActivityAt DESC (most recently touched first); slices
     // without activity sort to the end.
     filtered.sort(compareByActivityDesc);
-    return c.json({ slices: filtered, totalCount: filtered.length, filter });
+    return c.json({
+      slices: filtered,
+      totalCount: filtered.length,
+      filter,
+      boundToWorkflow: boundDiagnostic,
+    });
   });
 
   // 2) Proof asset serving — registered BEFORE /:name to keep /:name from

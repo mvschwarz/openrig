@@ -6,7 +6,7 @@ import { SpecReviewService } from "./spec-review-service.js";
 
 export interface SpecLibraryEntry {
   id: string;
-  kind: "rig" | "agent";
+  kind: "rig" | "agent" | "workflow";
   name: string;
   version: string;
   sourceType: "builtin" | "user_file";
@@ -15,6 +15,12 @@ export interface SpecLibraryEntry {
   updatedAt: string;
   summary?: string;
   hasServices?: boolean;
+  /** Workflows in Spec Library v0 — workflow-only metadata (kind === "workflow"). */
+  isBuiltIn?: boolean;
+  rolesCount?: number;
+  stepsCount?: number;
+  terminalTurnRule?: string;
+  targetRig?: string | null;
 }
 
 export interface SpecLibraryOpts {
@@ -77,6 +83,11 @@ function shouldIndexRelativePath(sourceType: "builtin" | "user_file", relPath: s
 
 export class SpecLibraryService {
   private entries = new Map<string, SpecLibraryEntry>();
+  /** Workflow entries are written by the route layer via
+   *  setWorkflowEntries() — kept separate from the rig+agent scan
+   *  because their source-of-truth is the workflow_specs SQLite cache,
+   *  not YAML files on disk. */
+  private workflowEntries = new Map<string, SpecLibraryEntry>();
   private readonly roots: SpecLibraryOpts["roots"];
   private readonly specReviewService: SpecReviewService;
 
@@ -124,15 +135,37 @@ export class SpecLibraryService {
     this.entries = newEntries;
   }
 
-  list(filter?: { kind?: "rig" | "agent" }): SpecLibraryEntry[] {
-    const entries = Array.from(this.entries.values());
+  list(filter?: { kind?: "rig" | "agent" | "workflow" }): SpecLibraryEntry[] {
+    const entries = [
+      ...Array.from(this.entries.values()),
+      ...Array.from(this.workflowEntries.values()),
+    ];
     if (filter?.kind) {
       return entries.filter((e) => e.kind === filter.kind);
     }
     return entries;
   }
 
+  /** Workflows in Spec Library v0: replace the workflow-entry projection
+   *  in one shot. Called by the route layer after running
+   *  scanWorkflowSpecs() against the workflow_specs SQLite cache. */
+  setWorkflowEntries(entries: SpecLibraryEntry[]): void {
+    const next = new Map<string, SpecLibraryEntry>();
+    for (const entry of entries) {
+      if (entry.kind !== "workflow") continue;
+      next.set(entry.id, entry);
+    }
+    this.workflowEntries = next;
+  }
+
   get(id: string): { entry: SpecLibraryEntry; yaml: string } | null {
+    // Workflow entries: yaml is read from the source path on demand.
+    const wfEntry = this.workflowEntries.get(id);
+    if (wfEntry) {
+      let yaml = "";
+      try { yaml = readFileSync(wfEntry.sourcePath, "utf-8"); } catch { /* tolerate */ }
+      return { entry: wfEntry, yaml };
+    }
     const entry = this.entries.get(id);
     if (!entry) return null;
 
