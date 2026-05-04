@@ -66,6 +66,7 @@ import { viewsRoutes } from "./routes/views.js";
 import { watchdogRoutes } from "./routes/watchdog.js";
 import { workflowRoutes } from "./routes/workflow.js";
 import { missionControlRoutes } from "./routes/mission-control.js";
+import { slicesRoutes } from "./routes/slices.js";
 import type { StreamStore } from "./domain/stream-store.js";
 import type { QueueRepository } from "./domain/queue-repository.js";
 import type { InboxHandler } from "./domain/inbox-handler.js";
@@ -133,6 +134,11 @@ export interface AppDeps {
   missionControlWriteContract?: import("./domain/mission-control/mission-control-write-contract.js").MissionControlWriteContract;
   missionControlActionLog?: import("./domain/mission-control/mission-control-action-log.js").MissionControlActionLog;
   missionControlFleetCliCapability?: import("./domain/mission-control/mission-control-fleet-cli-capability.js").MissionControlFleetCliCapability;
+  // Slice Story View v0 — slice indexer + per-tab projector. Both
+  // optional: when slicesRoot is unset, the routes return a clear
+  // "slices_root_not_configured" 503 so the UI can surface a setup hint.
+  sliceIndexer?: import("./domain/slices/slice-indexer.js").SliceIndexer;
+  sliceDetailProjector?: import("./domain/slices/slice-detail-projector.js").SliceDetailProjector;
   specReviewService?: SpecReviewService;
   specLibraryService?: SpecLibraryService;
   whoamiService?: WhoamiService;
@@ -290,6 +296,8 @@ export function createApp(deps: AppDeps): Hono {
     c.set("missionControlWriteContract" as never, deps.missionControlWriteContract);
     c.set("missionControlActionLog" as never, deps.missionControlActionLog);
     c.set("missionControlFleetCliCapability" as never, deps.missionControlFleetCliCapability);
+    c.set("sliceIndexer" as never, deps.sliceIndexer);
+    c.set("sliceDetailProjector" as never, deps.sliceDetailProjector);
     c.set("specReviewService" as never, deps.specReviewService);
     c.set("specLibraryService" as never, deps.specLibraryService);
     c.set("whoamiService" as never, deps.whoamiService);
@@ -343,6 +351,8 @@ export function createApp(deps: AppDeps): Hono {
   app.route("/api/watchdog", watchdogRoutes());
   app.route("/api/workflow", workflowRoutes());
   app.route("/api/mission-control", missionControlRoutes());
+  // Slice Story View v0 — slice indexer + per-tab payload routes.
+  app.route("/api/slices", slicesRoutes());
   app.route("/api/rigs/:rigId/env", envRoutes());
   app.route("/api/restore-check", restoreCheckRoutes);
 

@@ -24,6 +24,7 @@ import { LibraryReview } from "./components/LibraryReview.js";
 import { LiveNodeDetails } from "./components/LiveNodeDetails.js";
 import { DiscoveryOverlay } from "./components/DiscoveryOverlay.js";
 import { MissionControlSurface } from "./components/mission-control/MissionControlSurface.js";
+import { SliceStoryView } from "./components/slices/SliceStoryView.js";
 import { useRigSummary } from "./hooks/useRigSummary.js";
 import { useDrawerSelection } from "./components/AppShell.js";
 
@@ -226,6 +227,20 @@ const missionControlRoute = createRoute({
   component: MissionControlSurface,
 });
 
+// Slice Story View v0: top-level /slices route + /slices/:name detail.
+// The component reads :name via useParams when present and renders
+// the two-pane layout (filter+list on the left, six tabs on the right).
+const slicesIndexRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/slices",
+  component: SliceStoryView,
+});
+const sliceDetailRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/slices/$name",
+  component: SliceStoryView,
+});
+
 const routeTree = rootRoute.addChildren([
   indexRoute,
   rigDetailRoute,
@@ -245,6 +260,8 @@ const routeTree = rootRoute.addChildren([
   bundleInstallRoute,
   liveNodeDetailsRoute,
   missionControlRoute,
+  slicesIndexRoute,
+  sliceDetailRoute,
 ]);
 
 // Router
