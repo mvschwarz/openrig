@@ -123,6 +123,11 @@ import {
   MissionControlFleetCliCapability,
   makeLocalCliCapabilityProbe,
 } from "./domain/mission-control/mission-control-fleet-cli-capability.js";
+import { MissionControlAuditBrowse } from "./domain/mission-control/audit-browse.js";
+import { MissionControlNotificationDispatcher } from "./domain/mission-control/notification-dispatcher.js";
+import { NtfyNotificationAdapter } from "./domain/mission-control/notification-adapter-ntfy.js";
+import { WebhookNotificationAdapter } from "./domain/mission-control/notification-adapter-webhook.js";
+import type { NotificationAdapter } from "./domain/mission-control/notification-adapter-types.js";
 import { OPENRIG_HOME } from "./openrig-compat.js";
 import {
   getCompatibleOpenRigPath,
@@ -136,6 +141,14 @@ interface DaemonOptions {
   cmuxExec?: ExecFn;
   cmuxFactory?: CmuxTransportFactory;
   cmuxTimeoutMs?: number;
+  /**
+   * PL-005 Phase B: bearer token for Mission Control write verbs.
+   * When null, the auth-bearer-token middleware passes through (the
+   * index.ts startup-side check ensures this is only valid when bound
+   * on loopback). When set, the middleware enforces constant-time
+   * comparison + 401 on missing/mismatch.
+   */
+  bearerToken?: string | null;
 }
 
 interface DaemonResult {
@@ -606,6 +619,48 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     deps.missionControlWriteContract = mcWriteContract;
     deps.missionControlFleetCliCapability = mcFleetCliCapability;
     deps.missionControlReadLayer = mcReadLayer;
+
+    // PL-005 Phase B: audit-history browse layer (read-only) +
+    // notification dispatcher + bearer-token plumbing.
+    const mcAuditBrowse = new MissionControlAuditBrowse(db);
+    deps.missionControlAuditBrowse = mcAuditBrowse;
+
+    // Bearer token from createDaemon options is propagated to the
+    // routes constructor via deps so the auth middleware is mounted
+    // at route mount time (not per-request).
+    deps.missionControlBearerToken = opts?.bearerToken ?? null;
+
+    // Notification dispatcher: chosen mechanism via env config.
+    // OPENRIG_NOTIFICATIONS_MECHANISM=ntfy|webhook|none (default none).
+    // OPENRIG_NOTIFICATIONS_TARGET=<topic url | webhook url>.
+    // OPENRIG_NOTIFICATIONS_INCLUDE_VERB_COMPLETION=1 to opt into the
+    // verb-completion trigger (default off; only human-gate arrivals
+    // trigger by default per planner brief).
+    // No legacy alias for these env vars (new in Phase B).
+    const mechanism = process.env.OPENRIG_NOTIFICATIONS_MECHANISM ?? "none";
+    const target = process.env.OPENRIG_NOTIFICATIONS_TARGET ?? "";
+    const includeVerbCompletion =
+      process.env.OPENRIG_NOTIFICATIONS_INCLUDE_VERB_COMPLETION === "1";
+    if (mechanism !== "none" && target.length > 0) {
+      let adapter: NotificationAdapter;
+      if (mechanism === "ntfy") {
+        adapter = new NtfyNotificationAdapter({ topicUrl: target });
+      } else if (mechanism === "webhook") {
+        adapter = new WebhookNotificationAdapter({ endpointUrl: target });
+      } else {
+        throw new Error(
+          `OPENRIG_NOTIFICATIONS_MECHANISM='${mechanism}' is not recognized; supported: ntfy | webhook | none`,
+        );
+      }
+      const dispatcher = new MissionControlNotificationDispatcher({
+        db,
+        eventBus,
+        adapter,
+        includeVerbCompletion,
+      });
+      dispatcher.start();
+      deps.missionControlNotificationDispatcher = dispatcher;
+    }
   }
 
   const sessionTransport = deps.sessionTransport;
