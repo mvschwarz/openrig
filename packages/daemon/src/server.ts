@@ -182,6 +182,14 @@ function fileResponse(filePath: string): Response {
   });
 }
 
+function isUiAssetRequestPath(requestPath: string): boolean {
+  const relativePath = requestPath.replace(/^\/+/, "");
+  return relativePath.startsWith("assets/")
+    || relativePath === "favicon.ico"
+    || relativePath === "robots.txt"
+    || relativePath === "manifest.webmanifest";
+}
+
 export function createApp(deps: AppDeps): Hono {
   // Hard runtime invariant: all domain services must share the same db handle.
   if (deps.rigRepo.db !== deps.eventBus.db) {
@@ -366,7 +374,7 @@ export function createApp(deps: AppDeps): Hono {
       return fileResponse(requestedFile);
     }
 
-    if (nodePath.extname(requestPath)) {
+    if (isUiAssetRequestPath(requestPath)) {
       return c.notFound();
     }
 
