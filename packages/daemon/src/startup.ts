@@ -732,7 +732,15 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     const filesAllowlist = readAllowlistFromEnv();
     deps.filesAllowlist = filesAllowlist;
     deps.fileWriteService = filesAllowlist.length > 0
-      ? new FileWriteService({ allowlist: filesAllowlist })
+      ? new FileWriteService({
+          allowlist: filesAllowlist,
+          // Honor OPENRIG_HOME for state isolation. Without this, the
+          // service's DEFAULT_AUDIT_FILE falls back to process.env.HOME
+          // and writes audit rows to the host's ~/.openrig/, which
+          // breaks isolated dogfood/test daemons (rows bleed back to
+          // the operator's real home regardless of OPENRIG_HOME).
+          auditFilePath: nodePath.join(OPENRIG_HOME, "file-edit-audit.jsonl"),
+        })
       : null;
     deps.progressIndexer = new ProgressIndexer({ roots: readProgressRootsFromEnv() });
   }
