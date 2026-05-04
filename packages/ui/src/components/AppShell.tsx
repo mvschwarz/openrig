@@ -1,7 +1,7 @@
 import { type CSSProperties, type ReactNode, useCallback, useEffect, useState, createContext, useContext } from "react";
 import { Link, useRouterState } from "@tanstack/react-router";
 import { Cog, FileText, Layers, SquarePlus } from "lucide-react";
-import { Explorer } from "./Explorer.js";
+import { Explorer, type ExplorerSurface } from "./Explorer.js";
 import { SharedDetailDrawer, type DrawerSelection } from "./SharedDetailDrawer.js";
 import type { DiscoveryPlacementTarget } from "./DiscoveryPanel.js";
 import { SpecsWorkspaceProvider } from "./SpecsWorkspace.js";
@@ -115,6 +115,7 @@ export function AppShell({ children }: AppShellProps) {
   const [selectionState, setSelectionState] = useState<DrawerSelection>(null);
   const [selectedDiscoveredId, setSelectedDiscoveredIdState] = useState<string | null>(null);
   const [placementTarget, setPlacementTargetState] = useState<DiscoveryPlacementTarget>(null);
+  const [explorerSurface, setExplorerSurface] = useState<ExplorerSurface>(() => pathname.startsWith("/slices") ? "slices" : "topology");
   const currentRigName = currentRigId ? (rigs?.find((rig) => rig.id === currentRigId)?.name ?? null) : null;
   const surfaceTitle = resolveSurfaceTitle(pathname, currentRigId, currentRigName);
   const setSelection = useCallback((next: DrawerSelection) => {
@@ -156,6 +157,10 @@ export function AppShell({ children }: AppShellProps) {
       setPlacementTargetState(null);
     }
   }, [currentRigId, placementTarget, selectionState]);
+
+  useEffect(() => {
+    setExplorerSurface(pathname.startsWith("/slices") ? "slices" : "topology");
+  }, [pathname]);
 
   useEffect(() => {
     const handleResize = () => {
@@ -271,13 +276,17 @@ export function AppShell({ children }: AppShellProps) {
             >
               <FileText className="h-4 w-4" />
             </button>
-            {/* Slice Story View v0 — top-level link to /slices. Distinct
-                from the Specs/Discovery/System DRAWERS (which open right-side
-                detail pane); Slices navigates to its own route with internal
-                two-pane layout (filter+list + 6 tab views). */}
+            {/* Slice Story View v0 — top-level link to /slices. Slices uses
+                the existing explorer column for its filter/list and the route
+                body for the six-tab story detail pane. */}
             <Link
               to="/slices"
               data-testid="slices-link"
+              onClick={() => {
+                setExplorerSurface("slices");
+                setDesktopExplorerOpen(true);
+                if (!isWideLayout) setSidebarOpen(true);
+              }}
               className={`inline-flex h-8 w-8 items-center justify-center text-stone-700 transition-colors ${
                 pathname.startsWith("/slices")
                   ? "text-stone-950"
@@ -321,6 +330,8 @@ export function AppShell({ children }: AppShellProps) {
             selection={selectionState}
             onSelect={setSelection}
             desktopMode={desktopExplorerOpen ? "full" : "hidden"}
+            surface={explorerSurface}
+            onSurfaceChange={setExplorerSurface}
             onDesktopToggle={() => setDesktopExplorerOpen((open) => !open)}
           />
 

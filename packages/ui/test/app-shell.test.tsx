@@ -58,6 +58,48 @@ function mockAllApis() {
     if (url === "/api/adapters/cmux/status") {
       return Promise.resolve({ ok: true, json: async () => ({ available: true }) });
     }
+    if (typeof url === "string" && url.startsWith("/api/slices?filter=")) {
+      return Promise.resolve({
+        ok: true,
+        json: async () => ({
+          filter: new URL(`http://test${url}`).searchParams.get("filter") ?? "active",
+          totalCount: 1,
+          slices: [
+            {
+              name: "mission-control-queue-observability-phase-a",
+              displayName: "Mission Control Phase A",
+              railItem: "PL-005",
+              status: "done",
+              rawStatus: "phase-a-closed-locally-promoted",
+              qitemCount: 0,
+              hasProofPacket: true,
+              lastActivityAt: "2026-05-04T12:00:00.000Z",
+            },
+          ],
+        }),
+      });
+    }
+    if (typeof url === "string" && url.includes("/api/slices/mission-control-queue-observability-phase-a")) {
+      return Promise.resolve({
+        ok: true,
+        json: async () => ({
+          name: "mission-control-queue-observability-phase-a",
+          displayName: "Mission Control Phase A",
+          railItem: "PL-005",
+          status: "done",
+          rawStatus: "phase-a-closed-locally-promoted",
+          qitemIds: [],
+          commitRefs: [],
+          lastActivityAt: "2026-05-04T12:00:00.000Z",
+          story: { events: [] },
+          acceptance: { totalItems: 0, doneItems: 0, percentage: 0, items: [], closureCallout: null },
+          decisions: { rows: [] },
+          docs: { tree: [] },
+          tests: { proofPackets: [], aggregate: { passCount: 0, failCount: 0 } },
+          topology: { affectedRigs: [], totalSeats: 0 },
+        }),
+      });
+    }
     if (typeof url === "string" && url.includes("/graph")) {
       return Promise.resolve({
         ok: true,
@@ -385,6 +427,38 @@ describe("App Shell + Routing", () => {
       expect(screen.getByTestId("explorer").className).toContain("lg:w-72");
       expect(screen.getByTestId("explorer-edge-toggle").getAttribute("aria-label")).toContain("Collapse");
     });
+  });
+
+  it("sidebar keeps Explore and Slices as tabs in the same explorer column", async () => {
+    mockAllApis();
+    await renderRealAppAt("/slices/mission-control-queue-observability-phase-a");
+
+    await waitFor(() => {
+      expect(screen.getByTestId("explorer-mode-tabs")).toBeDefined();
+      expect(screen.getByTestId("explorer-tab-explore")).toBeDefined();
+      expect(screen.getByTestId("explorer-tab-slices")).toBeDefined();
+      expect(screen.getByTestId("slice-list-pane")).toBeDefined();
+      expect(screen.getByTestId("slice-detail-pane")).toBeDefined();
+    });
+
+    expect(screen.getByTestId("explorer-tab-slices").getAttribute("data-active")).toBe("true");
+    expect(screen.getByTestId("explorer-tab-explore").getAttribute("data-active")).toBe("false");
+
+    fireEvent.click(screen.getByTestId("explorer-tab-explore"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("environment-branch-local")).toBeDefined();
+    });
+    expect(screen.getByTestId("explorer-tab-explore").getAttribute("data-active")).toBe("true");
+    expect(screen.queryByTestId("slice-list-pane")).toBeNull();
+    expect(screen.getByTestId("slice-detail-pane")).toBeDefined();
+
+    fireEvent.click(screen.getByTestId("explorer-tab-slices"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("slice-list-pane")).toBeDefined();
+    });
+    expect(screen.getByTestId("explorer-tab-slices").getAttribute("data-active")).toBe("true");
   });
 
   it("workspace discovery button opens the discovery drawer instead of routing away", async () => {

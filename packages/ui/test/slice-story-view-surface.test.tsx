@@ -1,7 +1,7 @@
 // Slice Story View v0 — top-level surface tests.
 //
-// Covers the parent SliceStoryView shell (left filter+list pane + right
-// tab nav). Each tab's deep behavior is tested in its own focused
+// Covers the Slice Story View shell (route detail pane + existing AppShell
+// explorer content). Each tab's deep behavior is tested in its own focused
 // component test (TestsVerificationTab.test.tsx is the load-bearing
 // example); this file confirms the surface composition + filter UX +
 // tab switching + the "slices indexer unavailable" graceful path.
@@ -9,6 +9,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, cleanup, waitFor } from "@testing-library/react";
 import { createTestRouter } from "./helpers/test-router.js";
+import { SliceExplorerPanel } from "../src/components/slices/SliceExplorerPanel.js";
 import { SliceStoryView } from "../src/components/slices/SliceStoryView.js";
 
 const mockFetch = vi.fn();
@@ -84,9 +85,19 @@ describe("PL-slice-story-view-v0 SliceStoryView", () => {
     await waitFor(() => expect(screen.getByTestId("slice-no-selection")).toBeDefined());
   });
 
-  it("renders the four-filter row defaulting to 'active'", async () => {
+  it("keeps route content offset from the AppShell explorer instead of owning a second sidebar", async () => {
+    mockFetch.mockResolvedValue(jsonResponse({ slices: makeListEntries(), totalCount: 2, filter: "active" }));
+    render(createTestRouter({ component: () => <SliceStoryView />, path: "/slices", initialPath: "/slices" }));
+    await waitFor(() => expect(screen.getByTestId("slice-story-view")).toBeDefined());
+
+    expect(screen.getByTestId("slice-story-view").className).toContain("lg:pl-[var(--workspace-left-offset,0px)]");
+    expect(screen.getByTestId("slice-story-view").className).toContain("lg:pr-[var(--workspace-right-offset,0px)]");
+    expect(screen.queryByTestId("slice-list-pane")).toBeNull();
+  });
+
+  it("SliceExplorerPanel renders the four-filter row defaulting to 'active'", async () => {
     mockFetch.mockResolvedValue(jsonResponse({ slices: [], totalCount: 0, filter: "active" }));
-    render(createTestRouter({ component: () => <SliceStoryView />, path: "/slices" }));
+    render(createTestRouter({ component: () => <SliceExplorerPanel />, path: "/slices" }));
     await waitFor(() => expect(screen.getByTestId("slice-filter-row")).toBeDefined());
     for (const filter of ["all", "active", "done", "blocked"]) {
       expect(screen.getByTestId(`slice-filter-${filter}`)).toBeDefined();
@@ -94,24 +105,24 @@ describe("PL-slice-story-view-v0 SliceStoryView", () => {
     expect(screen.getByTestId("slice-filter-active").getAttribute("data-active")).toBe("true");
   });
 
-  it("clicking a filter triggers a refetch with that filter", async () => {
+  it("SliceExplorerPanel clicking a filter triggers a refetch with that filter", async () => {
     mockFetch.mockImplementation(async (url: string) => {
       if (url.includes("filter=active")) return jsonResponse({ slices: [], totalCount: 0, filter: "active" });
       if (url.includes("filter=all")) return jsonResponse({ slices: makeListEntries(), totalCount: 2, filter: "all" });
       return jsonResponse({ slices: [], totalCount: 0, filter: "all" });
     });
-    render(createTestRouter({ component: () => <SliceStoryView />, path: "/slices" }));
+    render(createTestRouter({ component: () => <SliceExplorerPanel />, path: "/slices" }));
     await waitFor(() => expect(mockFetch).toHaveBeenCalledWith("/api/slices?filter=active"));
     fireEvent.click(screen.getByTestId("slice-filter-all"));
     await waitFor(() => expect(mockFetch).toHaveBeenCalledWith("/api/slices?filter=all"));
   });
 
-  it("surfaces 'slices indexer unavailable' hint when daemon returns 503", async () => {
+  it("SliceExplorerPanel surfaces 'slices indexer unavailable' hint when daemon returns 503", async () => {
     mockFetch.mockResolvedValue(jsonResponse({
       error: "slices_root_not_configured",
       hint: "Set OPENRIG_SLICES_ROOT to the directory containing slice folders",
     }, 503));
-    render(createTestRouter({ component: () => <SliceStoryView />, path: "/slices" }));
+    render(createTestRouter({ component: () => <SliceExplorerPanel />, path: "/slices" }));
     await waitFor(() => expect(screen.getByTestId("slice-list-unavailable")).toBeDefined());
     expect(screen.getByTestId("slice-list-unavailable").textContent).toContain("OPENRIG_SLICES_ROOT");
   });

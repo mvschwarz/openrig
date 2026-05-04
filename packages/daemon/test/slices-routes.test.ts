@@ -200,6 +200,34 @@ describe("PL-slice-story-view-v0 slices routes", () => {
       expect(byRig.get("rig-a")?.sort()).toEqual(["alpha@rig-a", "beta@rig-a"]);
       expect(byRig.get("rig-b")).toEqual(["gamma@rig-b"]);
     });
+
+    it("badges accepted dogfood reports as pass even when the narrative mentions blocked/failed repro history", async () => {
+      writeSlice(slicesRoot, "proof-badge-slice", { "README.md": "---\nstatus: shipped\n---\n" });
+      const dir = path.join(dogfoodRoot, "proof-badge-slice-20260504");
+      fs.mkdirSync(dir);
+      fs.writeFileSync(path.join(dir, "accepted-dogfood.md"), [
+        "# Proof",
+        "",
+        "## Result",
+        "",
+        "ACCEPT after local dogfood fix commit.",
+        "",
+        "The headed dogfood passed after fixing one console issue.",
+        "",
+        "Repro notes mention a hold verb that became blocked and a red-first test that failed before the fix.",
+      ].join("\n"));
+
+      const res = await app.request("/api/slices/proof-badge-slice");
+      const body = (await res.json()) as {
+        tests: {
+          proofPackets: Array<{ passFailBadge: string }>;
+          aggregate: { passCount: number; failCount: number };
+        };
+      };
+
+      expect(body.tests.proofPackets[0]!.passFailBadge).toBe("pass");
+      expect(body.tests.aggregate).toEqual({ passCount: 1, failCount: 0 });
+    });
   });
 
   describe("GET /api/slices/:name/proof-asset/* (founder-named load-bearing)", () => {

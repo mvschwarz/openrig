@@ -555,7 +555,7 @@ function sessionRigKey(session: string): string {
 function inferPassFailBadge(content: string): "pass" | "fail" | "partial" | "unknown" {
   if (!content) return "unknown";
   const lower = content.toLowerCase();
-  if (/\b(all green|all pass|fully green|complete|✅|🟢)/.test(lower)) return "pass";
+  if (/\b(accept|accepted|passed|all green|all pass|fully green|green after fix|complete|✅|🟢)/.test(lower)) return "pass";
   if (/\b(blocker|blocked|fail|red|🔴|❌)/.test(lower)) return "fail";
   if (/\b(partial|partially|in progress|standing by)/.test(lower)) return "partial";
   return "unknown";
