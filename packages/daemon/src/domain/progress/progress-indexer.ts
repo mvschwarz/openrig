@@ -70,6 +70,14 @@ export interface ProgressTreeResult {
 
 const DEFAULT_MAX_DEPTH = 6;
 const PROGRESS_FILENAME = "PROGRESS.md";
+// OSR v0 Item 2 anchors STEERING.md as the constraint-frame node at the
+// top of the Priority Rail Rule tree. The classifier already maps the
+// STEERING basename to the `steering` level; we also need the indexer
+// to actually pick it up. Walk both filenames; the row-counts machinery
+// is filename-agnostic and treats STEERING.md content the same as any
+// other markdown rail.
+const STEERING_FILENAME = "STEERING.md";
+const TREE_FILENAMES = new Set([PROGRESS_FILENAME, STEERING_FILENAME]);
 const SKIP_DIRS = new Set(["node_modules", ".git", ".worktrees", "dist", "build", ".turbo", ".next"]);
 
 const ENV_VAR = "OPENRIG_PROGRESS_SCAN_ROOTS";
@@ -146,7 +154,7 @@ export class ProgressIndexer {
       const childRel = rel ? `${rel}/${entry.name}` : entry.name;
       if (entry.isDirectory()) {
         this.walkDir(root, childAbs, childRel, depth + 1, out);
-      } else if (entry.isFile() && entry.name === PROGRESS_FILENAME) {
+      } else if (entry.isFile() && TREE_FILENAMES.has(entry.name)) {
         const node = this.parseProgressFile(root, childAbs, childRel);
         if (node) out.push(node);
       }
