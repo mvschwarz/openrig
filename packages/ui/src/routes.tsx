@@ -27,6 +27,7 @@ import { MissionControlSurface } from "./components/mission-control/MissionContr
 import { SliceStoryView } from "./components/slices/SliceStoryView.js";
 import { ProgressWorkspace } from "./components/progress/ProgressWorkspace.js";
 import { FilesWorkspace } from "./components/files/FilesWorkspace.js";
+import { SteeringWorkspace } from "./components/steering/SteeringWorkspace.js";
 import { useRigSummary } from "./hooks/useRigSummary.js";
 import { useDrawerSelection } from "./components/AppShell.js";
 
@@ -256,6 +257,12 @@ const filesRoute = createRoute({
   path: "/files",
   component: FilesWorkspace,
 });
+// Operator Surface Reconciliation v0 — top-level Steering route (item 1).
+const steeringRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/steering",
+  component: SteeringWorkspace,
+});
 
 const routeTree = rootRoute.addChildren([
   indexRoute,
@@ -280,6 +287,7 @@ const routeTree = rootRoute.addChildren([
   sliceDetailRoute,
   progressRoute,
   filesRoute,
+  steeringRoute,
 ]);
 
 // Router

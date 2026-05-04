@@ -86,6 +86,11 @@ export interface FilesReadResponse {
   mtime: string;
   contentHash: string;
   size: number;
+  /** Operator Surface Reconciliation v0 item 5: present when the
+   *  daemon truncated the returned content (file > 1 MB cap). */
+  truncated?: boolean;
+  truncatedAtBytes?: number | null;
+  totalBytes?: number;
 }
 
 async function fetchRead(root: string, path: string): Promise<FilesReadResponse> {

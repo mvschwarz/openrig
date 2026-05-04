@@ -22,7 +22,7 @@
 // prop so the daemon's /api/files/asset endpoint or the slice's
 // /api/slices/<name>/proof-asset/ endpoint can serve them.
 
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { SyntaxHighlight } from "./SyntaxHighlight.js";
 
 export interface MarkdownViewerProps {
@@ -31,20 +31,65 @@ export interface MarkdownViewerProps {
   assetBasePath?: string;
   /** Hide the YAML frontmatter metadata header (default false). */
   hideFrontmatter?: boolean;
+  /** Operator Surface Reconciliation v0 item 4: hide the raw/rendered
+   *  toggle for callers (e.g., the steering Priority Stack panel) where
+   *  the toggle would visually compete with the surrounding shell. */
+  hideRawToggle?: boolean;
 }
 
-export function MarkdownViewer({ content, assetBasePath, hideFrontmatter = false }: MarkdownViewerProps) {
+export function MarkdownViewer({ content, assetBasePath, hideFrontmatter = false, hideRawToggle = false }: MarkdownViewerProps) {
   const parsed = useMemo(() => parseMarkdown(content), [content]);
+  // Operator Surface Reconciliation v0 item 4: per-instance toggle
+  // between rendered (default) and raw (monospace pre-rendered text +
+  // visible Markdown source). Frontmatter metadata header still
+  // renders in raw mode unless hideFrontmatter is set.
+  const [mode, setMode] = useState<"rendered" | "raw">("rendered");
   return (
-    <article data-testid="markdown-viewer" className="prose-tactical max-w-none">
+    <article data-testid="markdown-viewer" data-mode={mode} className="prose-tactical max-w-none">
+      {!hideRawToggle && (
+        <div data-testid="markdown-viewer-mode-toggle" className="mb-2 flex items-center gap-1">
+          <button
+            type="button"
+            data-testid="markdown-viewer-mode-rendered"
+            data-active={mode === "rendered"}
+            onClick={() => setMode("rendered")}
+            className={`border px-2 py-0.5 font-mono text-[9px] uppercase tracking-[0.10em] ${
+              mode === "rendered"
+                ? "border-stone-700 bg-stone-700 text-white"
+                : "border-stone-300 text-stone-700 hover:bg-stone-100"
+            }`}
+          >
+            rendered
+          </button>
+          <button
+            type="button"
+            data-testid="markdown-viewer-mode-raw"
+            data-active={mode === "raw"}
+            onClick={() => setMode("raw")}
+            className={`border px-2 py-0.5 font-mono text-[9px] uppercase tracking-[0.10em] ${
+              mode === "raw"
+                ? "border-stone-700 bg-stone-700 text-white"
+                : "border-stone-300 text-stone-700 hover:bg-stone-100"
+            }`}
+          >
+            raw
+          </button>
+        </div>
+      )}
       {!hideFrontmatter && parsed.frontmatter && (
         <FrontmatterHeader frontmatter={parsed.frontmatter} />
       )}
-      <div className="space-y-3">
-        {parsed.blocks.map((block, idx) => (
-          <BlockRenderer key={idx} block={block} assetBasePath={assetBasePath} />
-        ))}
-      </div>
+      {mode === "raw" ? (
+        <pre data-testid="markdown-viewer-raw" className="overflow-x-auto whitespace-pre-wrap break-words bg-stone-50 p-3 font-mono text-[10px] text-stone-800">
+          {content}
+        </pre>
+      ) : (
+        <div className="space-y-3" data-testid="markdown-viewer-rendered">
+          {parsed.blocks.map((block, idx) => (
+            <BlockRenderer key={idx} block={block} assetBasePath={assetBasePath} />
+          ))}
+        </div>
+      )}
     </article>
   );
 }
