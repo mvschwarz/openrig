@@ -737,23 +737,26 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // with structured config hints so the UI can surface a setup message
   // instead of a generic error.
   {
-    const { readAllowlistFromEnv } = await import("./domain/files/path-safety.js");
+    const { decodeAllowlist } = await import("./domain/files/path-safety.js");
     const { FileWriteService } = await import("./domain/files/file-write-service.js");
-    const { ProgressIndexer, readProgressRootsFromEnv } = await import("./domain/progress/progress-indexer.js");
-    const filesAllowlist = readAllowlistFromEnv();
+    const { ProgressIndexer, decodeProgressScanRoots } = await import("./domain/progress/progress-indexer.js");
+    // User Settings v0 — UEP env-vars graduated to typed settings.
+    // Resolution: env > settings file > empty. SettingsStore handles
+    // the env > file > default precedence; we just decode the raw
+    // string into structured roots.
+    const { SettingsStore } = await import("./domain/user-settings/settings-store.js");
+    const settingsStore = new SettingsStore();
+    deps.settingsStore = settingsStore;
+    const cfg = settingsStore.resolveConfig();
+    const filesAllowlist = decodeAllowlist(cfg.filesAllowlistRaw);
     deps.filesAllowlist = filesAllowlist;
     deps.fileWriteService = filesAllowlist.length > 0
       ? new FileWriteService({
           allowlist: filesAllowlist,
-          // Honor OPENRIG_HOME for state isolation. Without this, the
-          // service's DEFAULT_AUDIT_FILE falls back to process.env.HOME
-          // and writes audit rows to the host's ~/.openrig/, which
-          // breaks isolated dogfood/test daemons (rows bleed back to
-          // the operator's real home regardless of OPENRIG_HOME).
           auditFilePath: nodePath.join(OPENRIG_HOME, "file-edit-audit.jsonl"),
         })
       : null;
-    deps.progressIndexer = new ProgressIndexer({ roots: readProgressRootsFromEnv() });
+    deps.progressIndexer = new ProgressIndexer({ roots: decodeProgressScanRoots(cfg.progressScanRootsRaw) });
 
     // Operator Surface Reconciliation v0 — steering composer (item 1).
     // Reads workspace root + per-section overrides from env. Empty

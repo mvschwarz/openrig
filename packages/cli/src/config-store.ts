@@ -6,42 +6,112 @@ import {
   readOpenRigEnv,
 } from "./openrig-compat.js";
 
+// User Settings v0 — extends the existing ConfigStore with new namespaces
+// (workspace.*, files.*, progress.*) without changing the existing 5
+// daemon/db/transcripts keys' behavior. Storage stays single-source-of-
+// truth at ~/.openrig/config.json. Resolution stays env > file > default.
+
 export interface RiggedConfig {
   daemon: { port: number; host: string };
   db: { path: string };
   transcripts: { enabled: boolean; path: string };
+  // User Settings v0 — workspace paths.
+  workspace: {
+    root: string;
+    slicesRoot: string;
+    steeringPath: string;
+    fieldNotesRoot: string;
+    specsRoot: string;
+  };
+  // User Settings v0 — UEP env-var graduation.
+  // Values are stored as raw named-pair strings ("name:/abs/path,...")
+  // matching the OPENRIG_FILES_ALLOWLIST / OPENRIG_PROGRESS_SCAN_ROOTS
+  // formats; decoded helpers (parseNamedPairs) turn them into structured
+  // arrays.
+  files: {
+    allowlist: string;
+  };
+  progress: {
+    scanRoots: string;
+  };
 }
 
-const DEFAULTS: RiggedConfig = {
+const DEFAULT_WORKSPACE_ROOT = getDefaultOpenRigPath("workspace");
+
+const DEFAULTS = {
   daemon: { port: 7433, host: "127.0.0.1" },
   db: { path: getDefaultOpenRigPath("openrig.sqlite") },
   transcripts: { enabled: true, path: getDefaultOpenRigPath("transcripts") },
-};
+  workspace: {
+    root: DEFAULT_WORKSPACE_ROOT,
+    slicesRoot: "",
+    steeringPath: "",
+    fieldNotesRoot: "",
+    specsRoot: "",
+  },
+  files: { allowlist: "" },
+  progress: { scanRoots: "" },
+} as const;
 
-const VALID_KEYS = [
+export const VALID_KEYS = [
   "daemon.port",
   "daemon.host",
   "db.path",
   "transcripts.enabled",
   "transcripts.path",
+  "workspace.root",
+  "workspace.slices_root",
+  "workspace.steering_path",
+  "workspace.field_notes_root",
+  "workspace.specs_root",
+  "files.allowlist",
+  "progress.scan_roots",
 ] as const;
 
-type ValidKey = typeof VALID_KEYS[number];
+export type ValidKey = typeof VALID_KEYS[number];
 
-const ENV_MAP: Record<ValidKey, { primary: string; legacy: string }> = {
+export const ENV_MAP: Record<ValidKey, { primary: string; legacy: string }> = {
   "daemon.port": { primary: "OPENRIG_PORT", legacy: "RIGGED_PORT" },
   "daemon.host": { primary: "OPENRIG_HOST", legacy: "RIGGED_HOST" },
   "db.path": { primary: "OPENRIG_DB", legacy: "RIGGED_DB" },
   "transcripts.enabled": { primary: "OPENRIG_TRANSCRIPTS_ENABLED", legacy: "RIGGED_TRANSCRIPTS_ENABLED" },
   "transcripts.path": { primary: "OPENRIG_TRANSCRIPTS_PATH", legacy: "RIGGED_TRANSCRIPTS_PATH" },
+  "workspace.root": { primary: "OPENRIG_WORKSPACE_ROOT", legacy: "RIGGED_WORKSPACE_ROOT" },
+  "workspace.slices_root": { primary: "OPENRIG_WORKSPACE_SLICES_ROOT", legacy: "RIGGED_WORKSPACE_SLICES_ROOT" },
+  "workspace.steering_path": { primary: "OPENRIG_WORKSPACE_STEERING_PATH", legacy: "RIGGED_WORKSPACE_STEERING_PATH" },
+  "workspace.field_notes_root": { primary: "OPENRIG_WORKSPACE_FIELD_NOTES_ROOT", legacy: "RIGGED_WORKSPACE_FIELD_NOTES_ROOT" },
+  "workspace.specs_root": { primary: "OPENRIG_WORKSPACE_SPECS_ROOT", legacy: "RIGGED_WORKSPACE_SPECS_ROOT" },
+  // UEP env-var graduation: existing OPENRIG_FILES_ALLOWLIST /
+  // OPENRIG_PROGRESS_SCAN_ROOTS become the env override for the new
+  // typed keys (no breaking change).
+  "files.allowlist": { primary: "OPENRIG_FILES_ALLOWLIST", legacy: "RIGGED_FILES_ALLOWLIST" },
+  "progress.scan_roots": { primary: "OPENRIG_PROGRESS_SCAN_ROOTS", legacy: "RIGGED_PROGRESS_SCAN_ROOTS" },
+};
+
+// Maps dotted-string config keys to the camelCase RiggedConfig path.
+// Workspace per-subdir keys are stored on disk as `workspace.slices_root`
+// (snake) and exposed in RiggedConfig as `workspace.slicesRoot` (camel)
+// to match TS conventions.
+const KEY_TO_PATH: Record<ValidKey, string[]> = {
+  "daemon.port": ["daemon", "port"],
+  "daemon.host": ["daemon", "host"],
+  "db.path": ["db", "path"],
+  "transcripts.enabled": ["transcripts", "enabled"],
+  "transcripts.path": ["transcripts", "path"],
+  "workspace.root": ["workspace", "root"],
+  "workspace.slices_root": ["workspace", "slicesRoot"],
+  "workspace.steering_path": ["workspace", "steeringPath"],
+  "workspace.field_notes_root": ["workspace", "fieldNotesRoot"],
+  "workspace.specs_root": ["workspace", "specsRoot"],
+  "files.allowlist": ["files", "allowlist"],
+  "progress.scan_roots": ["progress", "scanRoots"],
 };
 
 function isValidKey(key: string): key is ValidKey {
   return (VALID_KEYS as readonly string[]).includes(key);
 }
 
-function getNestedValue(obj: Record<string, unknown>, key: string): unknown {
-  const parts = key.split(".");
+function getNestedValue(obj: Record<string, unknown>, parts: string[]): unknown {
   let current: unknown = obj;
   for (const part of parts) {
     if (current == null || typeof current !== "object") return undefined;
@@ -50,8 +120,7 @@ function getNestedValue(obj: Record<string, unknown>, key: string): unknown {
   return current;
 }
 
-function setNestedValue(obj: Record<string, unknown>, key: string, value: unknown): void {
-  const parts = key.split(".");
+function setNestedValue(obj: Record<string, unknown>, parts: string[], value: unknown): void {
   let current = obj;
   for (let i = 0; i < parts.length - 1; i++) {
     const part = parts[i]!;
@@ -63,12 +132,35 @@ function setNestedValue(obj: Record<string, unknown>, key: string, value: unknow
   current[parts[parts.length - 1]!] = value;
 }
 
-function getDefaultValue(key: ValidKey): string | number | boolean {
-  return getNestedValue(DEFAULTS as unknown as Record<string, unknown>, key) as string | number | boolean;
+// Per-subdir defaults derived from workspace.root. v0 uses canonical
+// subdir names per founder dialog (slices/ steering/ progress/ field-notes/
+// specs/). Steering is a FILE path (STEERING.md) under the steering subdir.
+export function deriveWorkspaceDefault(key: ValidKey, workspaceRoot: string): string {
+  switch (key) {
+    case "workspace.slices_root":      return join(workspaceRoot, "slices");
+    case "workspace.steering_path":    return join(workspaceRoot, "steering", "STEERING.md");
+    case "workspace.field_notes_root": return join(workspaceRoot, "field-notes");
+    case "workspace.specs_root":       return join(workspaceRoot, "specs");
+    default: return "";
+  }
 }
 
-function coerceValue(key: ValidKey, raw: string): string | number | boolean {
-  const defaultVal = getDefaultValue(key);
+const WORKSPACE_DERIVED_KEYS: ReadonlySet<ValidKey> = new Set([
+  "workspace.slices_root",
+  "workspace.steering_path",
+  "workspace.field_notes_root",
+  "workspace.specs_root",
+]);
+
+function getDefaultValue(key: ValidKey, workspaceRoot: string): string | number | boolean {
+  if (WORKSPACE_DERIVED_KEYS.has(key)) {
+    return deriveWorkspaceDefault(key, workspaceRoot);
+  }
+  return getNestedValue(DEFAULTS as unknown as Record<string, unknown>, KEY_TO_PATH[key]) as string | number | boolean;
+}
+
+function coerceValue(key: ValidKey, raw: string, workspaceRoot: string): string | number | boolean {
+  const defaultVal = getDefaultValue(key, workspaceRoot);
   if (typeof defaultVal === "number") {
     const n = parseInt(raw, 10);
     if (isNaN(n)) throw new Error(`Invalid value for ${key}: expected a number, got "${raw}"`);
@@ -82,6 +174,14 @@ function coerceValue(key: ValidKey, raw: string): string | number | boolean {
   return raw;
 }
 
+export type SettingSource = "env" | "file" | "default";
+
+export interface ResolvedSetting {
+  value: string | number | boolean;
+  source: SettingSource;
+  defaultValue: string | number | boolean;
+}
+
 export class ConfigStore {
   readonly configPath: string;
 
@@ -92,62 +192,123 @@ export class ConfigStore {
   resolve(): RiggedConfig {
     const fileConfig = this.readConfigFile();
 
-    const resolveKey = (key: ValidKey): string | number | boolean => {
-      // 1. Environment variable
-      const envVal = readOpenRigEnv(ENV_MAP[key].primary, ENV_MAP[key].legacy);
-      if (envVal !== undefined && envVal !== "") {
-        return coerceValue(key, envVal);
-      }
-      // 2. Config file
-      const fileVal = getNestedValue(fileConfig, key);
-      if (fileVal !== undefined && fileVal !== null) {
-        return fileVal as string | number | boolean;
-      }
-      // 3. Default
-      return getDefaultValue(key);
-    };
+    // Workspace root must be resolved first so derived per-subdir
+    // defaults can use it.
+    const workspaceRoot = this.resolveOne("workspace.root", fileConfig, DEFAULT_WORKSPACE_ROOT).value as string;
+
+    const v = (key: ValidKey) =>
+      this.resolveOne(key, fileConfig, workspaceRoot).value;
 
     return {
       daemon: {
-        port: resolveKey("daemon.port") as number,
-        host: resolveKey("daemon.host") as string,
+        port: v("daemon.port") as number,
+        host: v("daemon.host") as string,
       },
       db: {
-        path: resolveKey("db.path") as string,
+        path: v("db.path") as string,
       },
       transcripts: {
-        enabled: resolveKey("transcripts.enabled") as boolean,
-        path: resolveKey("transcripts.path") as string,
+        enabled: v("transcripts.enabled") as boolean,
+        path: v("transcripts.path") as string,
+      },
+      workspace: {
+        root: workspaceRoot,
+        slicesRoot: v("workspace.slices_root") as string,
+        steeringPath: v("workspace.steering_path") as string,
+        fieldNotesRoot: v("workspace.field_notes_root") as string,
+        specsRoot: v("workspace.specs_root") as string,
+      },
+      files: {
+        allowlist: v("files.allowlist") as string,
+      },
+      progress: {
+        scanRoots: v("progress.scan_roots") as string,
       },
     };
   }
 
-  get(key: string): string | number | boolean {
+  /**
+   * Resolve a single key with its source. Used by the daemon HTTP route
+   * + UI Settings panel for honest provenance display (env / file /
+   * default).
+   */
+  resolveWithSource(key: string): ResolvedSetting {
     if (!isValidKey(key)) {
       throw new Error(`Unknown config key "${key}". Valid keys: ${VALID_KEYS.join(", ")}`);
     }
-    const config = this.resolve();
-    return getNestedValue(config as unknown as Record<string, unknown>, key) as string | number | boolean;
+    const fileConfig = this.readConfigFile();
+    const workspaceRoot = this.resolveOne("workspace.root", fileConfig, DEFAULT_WORKSPACE_ROOT).value as string;
+    return this.resolveOne(key, fileConfig, workspaceRoot);
+  }
+
+  /** Resolve all valid keys with sources. Convenience for the UI. */
+  resolveAllWithSource(): Record<ValidKey, ResolvedSetting> {
+    const fileConfig = this.readConfigFile();
+    const workspaceRoot = this.resolveOne("workspace.root", fileConfig, DEFAULT_WORKSPACE_ROOT).value as string;
+    const out = {} as Record<ValidKey, ResolvedSetting>;
+    for (const key of VALID_KEYS) {
+      out[key] = this.resolveOne(key, fileConfig, workspaceRoot);
+    }
+    return out;
+  }
+
+  private resolveOne(key: ValidKey, fileConfig: Record<string, unknown>, workspaceRoot: string): ResolvedSetting {
+    const defaultValue = getDefaultValue(key, workspaceRoot);
+    // 1. Environment variable
+    const envVal = readOpenRigEnv(ENV_MAP[key].primary, ENV_MAP[key].legacy);
+    if (envVal !== undefined && envVal !== "") {
+      return { value: coerceValue(key, envVal, workspaceRoot), source: "env", defaultValue };
+    }
+    // 2. Config file
+    const fileVal = getNestedValue(fileConfig, KEY_TO_PATH[key]);
+    if (fileVal !== undefined && fileVal !== null && fileVal !== "") {
+      return { value: fileVal as string | number | boolean, source: "file", defaultValue };
+    }
+    // 3. Default
+    return { value: defaultValue, source: "default", defaultValue };
+  }
+
+  get(key: string): string | number | boolean {
+    return this.resolveWithSource(key).value;
   }
 
   set(key: string, value: string): void {
     if (!isValidKey(key)) {
       throw new Error(`Unknown config key "${key}". Valid keys: ${VALID_KEYS.join(", ")}`);
     }
-    const coerced = coerceValue(key, value);
-    // readConfigFile (not Raw) — throws on malformed config so set doesn't silently overwrite
     const fileConfig = this.readConfigFile();
-    setNestedValue(fileConfig, key, coerced);
+    const workspaceRoot = (getNestedValue(fileConfig, KEY_TO_PATH["workspace.root"]) as string | undefined)
+      || readOpenRigEnv(ENV_MAP["workspace.root"].primary, ENV_MAP["workspace.root"].legacy)
+      || DEFAULT_WORKSPACE_ROOT;
+    const coerced = coerceValue(key, value, workspaceRoot);
+    setNestedValue(fileConfig, KEY_TO_PATH[key], coerced);
     mkdirSync(dirname(this.configPath), { recursive: true });
     writeFileSync(this.configPath, JSON.stringify(fileConfig, null, 2) + "\n", "utf-8");
   }
 
-  reset(): void {
-    try {
-      unlinkSync(this.configPath);
-    } catch {
-      // File doesn't exist — that's fine
+  /**
+   * Clear an override. Without a key argument, deletes the whole config
+   * file (revert all to defaults). With a key, removes just that key
+   * from the config file.
+   */
+  reset(key?: string): void {
+    if (key === undefined) {
+      try { unlinkSync(this.configPath); } catch { /* missing is fine */ }
+      return;
     }
+    if (!isValidKey(key)) {
+      throw new Error(`Unknown config key "${key}". Valid keys: ${VALID_KEYS.join(", ")}`);
+    }
+    if (!existsSync(this.configPath)) return;
+    const fileConfig = this.readConfigFile();
+    const parts = KEY_TO_PATH[key];
+    const parentParts = parts.slice(0, -1);
+    const leaf = parts[parts.length - 1]!;
+    const parent = getNestedValue(fileConfig, parentParts) as Record<string, unknown> | undefined;
+    if (parent && leaf in parent) {
+      delete parent[leaf];
+    }
+    writeFileSync(this.configPath, JSON.stringify(fileConfig, null, 2) + "\n", "utf-8");
   }
 
   private readConfigFile(): Record<string, unknown> {
@@ -161,5 +322,33 @@ export class ConfigStore {
       );
     }
   }
+}
 
+// --- User Settings v0: named-pair decoder ---
+//
+// `files.allowlist` and `progress.scan_roots` are stored as the same
+// comma-separated `name:/abs/path` strings UEP introduced via env var.
+// This helper decodes the raw string into structured pairs. Invalid
+// entries (no colon, empty name/path) are silently skipped per UEP
+// convention; duplicate names: last wins.
+
+export interface NamedPair {
+  name: string;
+  path: string;
+}
+
+export function parseNamedPairs(raw: string): NamedPair[] {
+  if (!raw || !raw.trim()) return [];
+  const out = new Map<string, string>();
+  for (const pair of raw.split(",")) {
+    const trimmed = pair.trim();
+    if (!trimmed) continue;
+    const colon = trimmed.indexOf(":");
+    if (colon === -1) continue;
+    const name = trimmed.slice(0, colon).trim();
+    const rawPath = trimmed.slice(colon + 1).trim();
+    if (!name || !rawPath) continue;
+    out.set(name, rawPath);
+  }
+  return Array.from(out.entries()).map(([name, path]) => ({ name, path }));
 }

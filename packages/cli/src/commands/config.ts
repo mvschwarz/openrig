@@ -1,33 +1,69 @@
 import { Command } from "commander";
-import { ConfigStore } from "../config-store.js";
+import { ConfigStore, VALID_KEYS, type ResolvedSetting, type ValidKey } from "../config-store.js";
+import { initWorkspaceCommand } from "./config-init-workspace.js";
+
+function formatRow(key: string, value: unknown): string {
+  return `${key.padEnd(28)} ${value}`;
+}
+
+function summarizeSettings(store: ConfigStore): Record<ValidKey, ResolvedSetting> {
+  return store.resolveAllWithSource();
+}
 
 export function configCommand(configPath?: string): Command {
   const cmd = new Command("config").description("Inspect and change OpenRig configuration");
   const store = new ConfigStore(configPath);
 
   cmd
-    .option("--json", "JSON output for agents")
+    .option("--json", "JSON output for agents (resolved RiggedConfig)")
+    .option("--with-source", "Include source/default per key (honest provenance)")
     .addHelpText("after", `
 Examples:
-  rig config                           # show all resolved config
-  rig config --json                    # JSON output
-  rig config get daemon.port           # read a single key
-  rig config set daemon.port 7434      # change a value
-  rig config reset                     # delete config file, revert to defaults
+  rig config                                 # show all resolved config
+  rig config --json                          # JSON RiggedConfig (structured)
+  rig config --json --with-source            # JSON per-key with source + default
+  rig config get daemon.port                 # read a single key
+  rig config get workspace.slices_root --show-source
+  rig config set daemon.port 7434            # change a value
+  rig config set workspace.slices_root /path # configure a workspace path
+  rig config reset                           # delete config file, revert all to defaults
+  rig config reset workspace.slices_root     # clear one key, revert to default
+  rig config init-workspace                  # scaffold ~/.openrig/workspace/ with 5 subdirs
 
-Keys: daemon.port, daemon.host, db.path, transcripts.enabled, transcripts.path
+Keys:
+  daemon.*               port, host
+  db.path
+  transcripts.*          enabled, path
+  workspace.*            root, slices_root, steering_path, field_notes_root, specs_root
+  files.allowlist        name:/abs/path,name:/abs/path
+  progress.scan_roots    name:/abs/path,name:/abs/path
+
 Precedence: CLI flag > environment variable > config file > default`)
-    .action((opts: { json?: boolean }) => {
+    .action((opts: { json?: boolean; withSource?: boolean }) => {
       try {
+        if (opts.withSource) {
+          const all = summarizeSettings(store);
+          if (opts.json) {
+            console.log(JSON.stringify(all, null, 2));
+          } else {
+            for (const key of VALID_KEYS) {
+              const r = all[key];
+              console.log(formatRow(key, `${r.value}  (source: ${r.source})`));
+            }
+          }
+          return;
+        }
+        // Default: structured RiggedConfig output (preserves pre-v0
+        // bare-action shape so existing scripts / tests keep working).
         const config = store.resolve();
         if (opts.json) {
           console.log(JSON.stringify(config, null, 2));
         } else {
-          console.log(`daemon.port           ${config.daemon.port}`);
-          console.log(`daemon.host           ${config.daemon.host}`);
-          console.log(`db.path               ${config.db.path}`);
-          console.log(`transcripts.enabled   ${config.transcripts.enabled}`);
-          console.log(`transcripts.path      ${config.transcripts.path}`);
+          const all = summarizeSettings(store);
+          for (const key of VALID_KEYS) {
+            const r = all[key];
+            console.log(formatRow(key, `${r.value}  (source: ${r.source})`));
+          }
         }
       } catch (err) {
         console.error((err as Error).message);
@@ -37,9 +73,20 @@ Precedence: CLI flag > environment variable > config file > default`)
 
   const getCmd = new Command("get")
     .argument("<key>", "Config key (e.g. daemon.port)")
+    .option("--json", "JSON output with value + source + default")
+    .option("--show-source", "Print value + source on a single line")
     .description("Read a single config value")
-    .action((key: string) => {
+    .action((key: string, opts: { json?: boolean; showSource?: boolean }) => {
       try {
+        if (opts.json) {
+          console.log(JSON.stringify(store.resolveWithSource(key), null, 2));
+          return;
+        }
+        if (opts.showSource) {
+          const r = store.resolveWithSource(key);
+          console.log(`${r.value}\t(source: ${r.source})`);
+          return;
+        }
         console.log(String(store.get(key)));
       } catch (err) {
         console.error((err as Error).message);
@@ -62,15 +109,26 @@ Precedence: CLI flag > environment variable > config file > default`)
     });
 
   const resetCmd = new Command("reset")
-    .description("Delete config file and revert to defaults")
-    .action(() => {
-      store.reset();
-      console.log("Config reset to defaults.");
+    .argument("[key]", "Optional config key to reset (omit to reset entire file)")
+    .description("Clear a config override (or delete the entire file when no key given)")
+    .action((key: string | undefined) => {
+      try {
+        store.reset(key);
+        if (key) {
+          console.log(`${key} reset to default (${store.get(key)}).`);
+        } else {
+          console.log("Config reset to defaults.");
+        }
+      } catch (err) {
+        console.error((err as Error).message);
+        process.exitCode = 1;
+      }
     });
 
   cmd.addCommand(getCmd);
   cmd.addCommand(setCmd);
   cmd.addCommand(resetCmd);
+  cmd.addCommand(initWorkspaceCommand(configPath));
 
   return cmd;
 }
