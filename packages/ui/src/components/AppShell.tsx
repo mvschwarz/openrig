@@ -1,6 +1,6 @@
 import { type CSSProperties, type ReactNode, useCallback, useEffect, useState, createContext, useContext } from "react";
 import { Link, useRouterState } from "@tanstack/react-router";
-import { Cog, FileText, SquarePlus } from "lucide-react";
+import { Cog, FileText, Layers, SquarePlus } from "lucide-react";
 import { Explorer } from "./Explorer.js";
 import { SharedDetailDrawer, type DrawerSelection } from "./SharedDetailDrawer.js";
 import type { DiscoveryPlacementTarget } from "./DiscoveryPanel.js";
@@ -96,6 +96,7 @@ function resolveSurfaceTitle(pathname: string, rigId: string | null, rigName: st
   ) return "Specs";
   if (pathname.startsWith("/bundles/inspect")) return "Bundle Inspector";
   if (pathname.startsWith("/bundles/install")) return "Bundle Install";
+  if (pathname.startsWith("/slices")) return "Slices";
   return null;
 }
 
@@ -270,6 +271,23 @@ export function AppShell({ children }: AppShellProps) {
             >
               <FileText className="h-4 w-4" />
             </button>
+            {/* Slice Story View v0 — top-level link to /slices. Distinct
+                from the Specs/Discovery/System DRAWERS (which open right-side
+                detail pane); Slices navigates to its own route with internal
+                two-pane layout (filter+list + 6 tab views). */}
+            <Link
+              to="/slices"
+              data-testid="slices-link"
+              className={`inline-flex h-8 w-8 items-center justify-center text-stone-700 transition-colors ${
+                pathname.startsWith("/slices")
+                  ? "text-stone-950"
+                  : "hover:text-stone-950"
+              }`}
+              aria-label="Open slices"
+              title="Open slices"
+            >
+              <Layers className="h-4 w-4" />
+            </Link>
             <button
               type="button"
               data-testid="system-toggle"
