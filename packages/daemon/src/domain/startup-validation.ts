@@ -19,8 +19,24 @@ const VALID_APPLIES_ON = new Set(["fresh_start", "restore"]);
  */
 export function validateStartupFile(raw: Record<string, unknown>, index: number, prefix: string): string[] {
   const errors: string[] = [];
-  const pathErr = validateSafePath(raw["path"] as string, `${prefix}files[${index}].path`);
-  if (pathErr) errors.push(pathErr);
+  // PL-014 Item 6: kind defaults to "file" for back-compat. When
+  // "context_pack", path is synthesized by the resolver, so the safe-
+  // path check is skipped and `name` is required instead.
+  const kind = (raw["kind"] as string | undefined) ?? "file";
+  if (kind !== "file" && kind !== "context_pack") {
+    errors.push(`${prefix}files[${index}].kind: must be one of file, context_pack (got "${kind}")`);
+  }
+  if (kind === "context_pack") {
+    if (typeof raw["name"] !== "string" || (raw["name"] as string).length === 0) {
+      errors.push(`${prefix}files[${index}].name: required when kind: context_pack`);
+    }
+    if (raw["version"] !== undefined && typeof raw["version"] !== "string" && typeof raw["version"] !== "number") {
+      errors.push(`${prefix}files[${index}].version: must be a string or number when kind: context_pack`);
+    }
+  } else {
+    const pathErr = validateSafePath(raw["path"] as string, `${prefix}files[${index}].path`);
+    if (pathErr) errors.push(pathErr);
+  }
   if (raw["delivery_hint"] !== undefined && !VALID_DELIVERY_HINTS.has(raw["delivery_hint"] as string)) {
     errors.push(`${prefix}files[${index}].delivery_hint: must be one of ${[...VALID_DELIVERY_HINTS].join(", ")} (got "${raw["delivery_hint"]}")`);
   }
@@ -130,14 +146,43 @@ export function normalizeStartupBlock(raw: unknown): StartupBlock {
   const obj = raw as Record<string, unknown>;
 
   const files: StartupFile[] = Array.isArray(obj["files"])
-    ? (obj["files"] as Record<string, unknown>[]).map((f) => ({
-        path: f["path"] as string,
-        deliveryHint: (f["delivery_hint"] as StartupFile["deliveryHint"]) ?? "auto",
-        required: f["required"] !== false,
-        appliesOn: Array.isArray(f["applies_on"])
-          ? (f["applies_on"] as StartupFile["appliesOn"])
-          : ["fresh_start", "restore"],
-      }))
+    ? (obj["files"] as Record<string, unknown>[]).map((f) => {
+        // PL-014 Item 6: kind defaults to "file" for back-compat;
+        // "context_pack" entries reference a pack by name + version.
+        const kind = (f["kind"] as string | undefined) ?? "file";
+        if (kind === "context_pack") {
+          const name = f["name"] as string | undefined;
+          const version = f["version"] !== undefined ? String(f["version"]) : "1";
+          // Synthesize a stable path so downstream consumers that
+          // identify files by `path` (e.g., logs, error messages)
+          // get a meaningful identifier. The instantiator's resolver
+          // overwrites this with the actual on-disk bundle path.
+          const synthPath = `.openrig/resolved-context-packs/${name ?? "(missing-name)"}-${version}.md`;
+          return {
+            kind: "context_pack" as const,
+            path: synthPath,
+            contextPackName: name,
+            contextPackVersion: version,
+            // Send-text by default: pack lands as one paste in the live
+            // seat. Operator can override via delivery_hint if they want
+            // pre-launch filesystem delivery instead.
+            deliveryHint: (f["delivery_hint"] as StartupFile["deliveryHint"]) ?? "send_text",
+            required: f["required"] !== false,
+            appliesOn: Array.isArray(f["applies_on"])
+              ? (f["applies_on"] as StartupFile["appliesOn"])
+              : ["fresh_start", "restore"],
+          };
+        }
+        return {
+          kind: "file" as const,
+          path: f["path"] as string,
+          deliveryHint: (f["delivery_hint"] as StartupFile["deliveryHint"]) ?? "auto",
+          required: f["required"] !== false,
+          appliesOn: Array.isArray(f["applies_on"])
+            ? (f["applies_on"] as StartupFile["appliesOn"])
+            : ["fresh_start", "restore"],
+        };
+      })
     : [];
 
   const actions: StartupAction[] = Array.isArray(obj["actions"])

@@ -357,12 +357,40 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const claudeAdapter = new ClaudeCodeAdapter({ tmux: tmuxAdapter, fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"), exists: (p: string) => fs.existsSync(p), mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }), copyFile: (src: string, dest: string) => fs.copyFileSync(src, dest), listFiles: (dir: string) => { const r: string[] = []; function w(d: string, pre: string) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.isDirectory()) w(nodePath.join(d, e.name), nodePath.join(pre, e.name)); else r.push(pre ? nodePath.join(pre, e.name) : e.name); } } w(dir, ""); return r; }, readdir: (dir: string) => fs.readdirSync(dir), homedir: os.homedir() }, stateDir: OPENRIG_HOME, collectorAssetPath: nodePath.resolve(import.meta.dirname, "../assets/claude-statusline-context.cjs"), activityHookRelayAssetPath });
   const codexAdapter = new CodexRuntimeAdapter({ tmux: tmuxAdapter, fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"), exists: (p: string) => fs.existsSync(p), mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }), listFiles: (dir: string) => { const r: string[] = []; function w(d: string, pre: string) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.isDirectory()) w(nodePath.join(d, e.name), nodePath.join(pre, e.name)); else r.push(pre ? nodePath.join(pre, e.name) : e.name); } } w(dir, ""); return r; } }, activityHookRelayAssetPath });
 
+  // PL-014 Item 6: hoist ContextPackLibraryService construction so the
+  // PodRigInstantiator can resolve `kind: context_pack` startup_files
+  // entries at materialize time. Same instance is returned to deps
+  // below so /api/context-packs/* shares it.
+  const contextPackLibrary = (() => {
+    const userPacksRoot = getDefaultOpenRigPath("context-packs");
+    try { fs.mkdirSync(userPacksRoot, { recursive: true }); } catch { /* best-effort */ }
+    const roots: Array<{ path: string; sourceType: "builtin" | "user_file" | "workspace" }> = [
+      { path: userPacksRoot, sourceType: "user_file" },
+    ];
+    try {
+      const settingsStore = new ContextPackSettingsStore();
+      const cfg = settingsStore.resolveConfig();
+      const workspacePacksRoot = nodePath.join(cfg.workspaceRoot, ".openrig", "context-packs");
+      if (workspacePacksRoot !== userPacksRoot && fs.existsSync(workspacePacksRoot)) {
+        roots.push({ path: workspacePacksRoot, sourceType: "workspace" });
+      }
+    } catch { /* settings unavailable; fall through with user-file root only */ }
+    const builtinPacksRoot = nodePath.resolve(import.meta.dirname, "../context-packs");
+    if (fs.existsSync(builtinPacksRoot)) {
+      roots.unshift({ path: builtinPacksRoot, sourceType: "builtin" });
+    }
+    const lib = new ContextPackLibraryService({ roots });
+    lib.scan();
+    return lib;
+  })();
+
   const podInstantiator = new PodRigInstantiator({
     db, rigRepo, podRepo,
     sessionRegistry, eventBus, nodeLauncher, startupOrchestrator,
     fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), exists: (p: string) => fs.existsSync(p) },
     adapters: { "claude-code": claudeAdapter, "codex": codexAdapter, "terminal": new (await import("./adapters/terminal-adapter.js")).TerminalAdapter() },
     tmuxAdapter,
+    contextPackLibrary,
   });
 
   const podBundleSourceResolver = new PodBundleSourceResolver();
@@ -547,44 +575,11 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       lib.scan();
       return lib;
     })(),
-    contextPackLibrary: (() => {
-      // Rig Context / Composable Context Injection v0 (PL-014).
-      // Discovery roots:
-      //   1. ~/.openrig/context-packs/  (host-global; user_file)
-      //   2. <workspace>/.openrig/context-packs/  (workspace-local; workspace)
-      // Workspace path comes from the workspace.root setting if set;
-      // otherwise inherits from ~/.openrig/workspace/. Both are
-      // optional — empty roots → empty library.
-      const userPacksRoot = getDefaultOpenRigPath("context-packs");
-      try { fs.mkdirSync(userPacksRoot, { recursive: true }); } catch { /* best-effort */ }
-      const roots: Array<{ path: string; sourceType: "builtin" | "user_file" | "workspace" }> = [
-        { path: userPacksRoot, sourceType: "user_file" },
-      ];
-      // Workspace-local context-packs/ — best-effort lookup off the
-      // workspace.root setting. If unset, falls back to the default
-      // workspace path which is the same parent as user packs (skipped
-      // as a duplicate). Last-wins ordering: workspace > user_file
-      // (operator's per-project edits win on collision).
-      try {
-        const settingsStore = new ContextPackSettingsStore();
-        const cfg = settingsStore.resolveConfig();
-        const workspacePacksRoot = nodePath.join(cfg.workspaceRoot, ".openrig", "context-packs");
-        if (workspacePacksRoot !== userPacksRoot && fs.existsSync(workspacePacksRoot)) {
-          roots.push({ path: workspacePacksRoot, sourceType: "workspace" });
-        }
-      } catch {
-        // Settings unavailable in this build path → use only user_file root.
-      }
-      // Bundled built-in packs would live under packages/daemon/context-packs/
-      // when shipped; absent today (no built-in packs at v0).
-      const builtinPacksRoot = nodePath.resolve(import.meta.dirname, "../context-packs");
-      if (fs.existsSync(builtinPacksRoot)) {
-        roots.unshift({ path: builtinPacksRoot, sourceType: "builtin" });
-      }
-      const lib = new ContextPackLibraryService({ roots });
-      lib.scan();
-      return lib;
-    })(),
+    // PL-014 Item 6: same instance hoisted earlier so the
+    // PodRigInstantiator can resolve `kind: context_pack` startup_files
+    // entries — sharing the cache means /api/context-packs/* + the
+    // instantiator see consistent state.
+    contextPackLibrary,
   };
 
   // Copy bundled reference docs to ~/.openrig/reference/ so agents can find them at a stable path
