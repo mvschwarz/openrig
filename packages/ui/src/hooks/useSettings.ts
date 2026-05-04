@@ -19,7 +19,11 @@ export type SettingsKey =
   | "transcripts.enabled" | "transcripts.path"
   | "workspace.root" | "workspace.slices_root" | "workspace.steering_path"
   | "workspace.field_notes_root" | "workspace.specs_root"
-  | "files.allowlist" | "progress.scan_roots";
+  | "files.allowlist" | "progress.scan_roots"
+  // Preview Terminal v0 (PL-018) keys.
+  | "ui.preview.refresh_interval_seconds"
+  | "ui.preview.max_pins"
+  | "ui.preview.default_lines";
 
 export interface SettingsResponse {
   settings: Record<SettingsKey, ResolvedSetting>;
