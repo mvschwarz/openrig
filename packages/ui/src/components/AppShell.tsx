@@ -1,6 +1,6 @@
 import { type CSSProperties, type ReactNode, useCallback, useEffect, useState, createContext, useContext } from "react";
 import { Link, useRouterState } from "@tanstack/react-router";
-import { CheckSquare, Cog, FileText, Folder, Layers, SquarePlus } from "lucide-react";
+import { CheckSquare, Cog, Compass, FileText, Folder, Layers, SquarePlus } from "lucide-react";
 import { Explorer, type ExplorerSurface } from "./Explorer.js";
 import { SharedDetailDrawer, type DrawerSelection } from "./SharedDetailDrawer.js";
 import type { DiscoveryPlacementTarget } from "./DiscoveryPanel.js";
@@ -99,6 +99,7 @@ function resolveSurfaceTitle(pathname: string, rigId: string | null, rigName: st
   if (pathname.startsWith("/slices")) return "Slices";
   if (pathname.startsWith("/progress")) return "Progress";
   if (pathname.startsWith("/files")) return "Files";
+  if (pathname.startsWith("/steering")) return "Steering";
   return null;
 }
 
@@ -328,6 +329,23 @@ export function AppShell({ children }: AppShellProps) {
               title="Open files"
             >
               <Folder className="h-4 w-4" />
+            </Link>
+            {/* Operator Surface Reconciliation v0 — Steering Link
+                (item 1, HEADLINE). One-screen composed steering surface
+                — priority stack + roadmap + in-motion + lane rails +
+                loop state + health gates. */}
+            <Link
+              to="/steering"
+              data-testid="steering-link"
+              className={`inline-flex h-8 w-8 items-center justify-center text-stone-700 transition-colors ${
+                pathname.startsWith("/steering")
+                  ? "text-stone-950"
+                  : "hover:text-stone-950"
+              }`}
+              aria-label="Open steering"
+              title="Open steering"
+            >
+              <Compass className="h-4 w-4" />
             </Link>
             <button
               type="button"

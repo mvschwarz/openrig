@@ -754,6 +754,13 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
         })
       : null;
     deps.progressIndexer = new ProgressIndexer({ roots: readProgressRootsFromEnv() });
+
+    // Operator Surface Reconciliation v0 — steering composer (item 1).
+    // Reads workspace root + per-section overrides from env. Empty
+    // workspace root → composer.isReady() = false → /api/steering
+    // returns 503 with structured setup hint.
+    const { SteeringComposer, steeringOptsFromEnv } = await import("./domain/steering/steering-composer.js");
+    deps.steeringComposer = new SteeringComposer(steeringOptsFromEnv());
   }
 
   const sessionTransport = deps.sessionTransport;
