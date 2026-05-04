@@ -43,6 +43,16 @@ interface NodeEntry {
     sampledAt: string;
     evidence: string | null;
   };
+  // PL-012: context-usage block surfaced from the daemon's
+  // /api/rigs/:id/nodes route (already populated). Optional because
+  // older daemons may not emit it.
+  contextUsage?: {
+    availability: "known" | "unknown";
+    usedPercentage: number | null;
+    fresh: boolean;
+    state?: "critical" | "warning" | "low" | "unknown";
+    sampledAt: string | null;
+  };
   [key: string]: unknown;
 }
 
@@ -66,12 +76,25 @@ const ALLOWED_FILTER_KEYS = new Set([
   "name-prefix",
   "name",
   "agentActivity.state",
+  // PL-012: context-usage filters. percent is numeric (>=, >, <=, <, =);
+  // state is enum (critical / warning / low / unknown — lockstep with
+  // computeContextHealthSummary tier vocabulary).
+  "contextUsage.percent",
+  "contextUsage.state",
 ]);
 
 // PL-019 item 1: when filter key is `agentActivity.state`, the value is
 // validated against the AgentActivityState enum. Invalid values produce a
 // three-part error (what failed / what's allowed / what to do).
 const ALLOWED_AGENT_ACTIVITY_STATES = new Set(["running", "needs_input", "idle", "unknown"]);
+
+// PL-012: ALLOWED_CONTEXT_USAGE_STATES — must stay lockstep with the
+// daemon's computeContextHealthSummary urgency vocab.
+const ALLOWED_CONTEXT_USAGE_STATES = new Set(["critical", "warning", "low", "unknown"]);
+
+const NUMERIC_FILTER_KEYS = new Set(["contextUsage.percent"]);
+type NumericComparator = ">=" | ">" | "<=" | "<" | "=";
+const NUMERIC_OPERATORS: NumericComparator[] = [">=", "<=", ">", "<", "="];
 
 // C9a: --fields accepts a per-level allow-list. Unknown keys produce a clear
 // error with the supported list, mirroring the --filter rejection pattern.
@@ -109,6 +132,7 @@ const ALLOWED_NODE_FIELDS = new Set([
   "resumeCommand",
   "latestError",
   "agentActivity",
+  "contextUsage",
 ]);
 
 interface PsCliOptions {
@@ -141,13 +165,34 @@ export interface PsDeps extends StatusDeps {
 interface ParsedFilter {
   key: string;
   value: string;
+  /** PL-012: numeric comparator for keys in NUMERIC_FILTER_KEYS;
+   *  defaults to "=" (equality) for all other keys. */
+  op: NumericComparator;
+  /** PL-012: parsed numeric value when op is a numeric comparator. */
+  numericValue?: number;
 }
 
 function parseFilter(filter: string): ParsedFilter | { error: string } {
-  const idx = filter.indexOf("=");
-  if (idx === -1) return { error: `--filter must be key=value; got: '${filter}'` };
-  const key = filter.slice(0, idx);
-  const value = filter.slice(idx + 1);
+  // PL-012: pre-detect numeric comparators (>=, <=, >, <, =) so callers
+  // can write `contextUsage.percent>=80`. Order matters: check >= and
+  // <= before > and < so the longer prefix wins.
+  let op: NumericComparator = "=";
+  let opIdx = -1;
+  for (const candidate of NUMERIC_OPERATORS) {
+    const i = filter.indexOf(candidate);
+    if (i !== -1) {
+      // Prefer the leftmost match; on tie, prefer the longest comparator.
+      if (opIdx === -1 || i < opIdx || (i === opIdx && candidate.length > op.length)) {
+        opIdx = i;
+        op = candidate;
+      }
+    }
+  }
+  if (opIdx === -1) {
+    return { error: `--filter must be key<op>value (op = ${NUMERIC_OPERATORS.join(", ")}); got: '${filter}'` };
+  }
+  const key = filter.slice(0, opIdx);
+  const value = filter.slice(opIdx + op.length);
   if (!ALLOWED_FILTER_KEYS.has(key)) {
     return {
       error: `Unknown --filter key '${key}'. Supported: ${[...ALLOWED_FILTER_KEYS].sort().join(", ")}`,
@@ -156,6 +201,30 @@ function parseFilter(filter: string): ParsedFilter | { error: string } {
   if (!value) {
     return { error: `--filter value is empty for key '${key}'` };
   }
+
+  // PL-012: numeric-keyed filters validate the value parses as a finite
+  // number. Three-part error per the existing convention.
+  if (NUMERIC_FILTER_KEYS.has(key)) {
+    const numericValue = Number(value);
+    if (!Number.isFinite(numericValue)) {
+      return {
+        error: `--filter ${key}${op}'${value}' is not a numeric value. ` +
+          `Allowed: a finite number (e.g., ${key}>=80). ` +
+          `Use 'rig ps --nodes --fields contextUsage --json' to see what daemon is reporting.`,
+      };
+    }
+    return { key, value, op, numericValue };
+  }
+
+  // PL-012: contextUsage.state enum guard — same shape as agentActivity.state.
+  if (key === "contextUsage.state" && !ALLOWED_CONTEXT_USAGE_STATES.has(value)) {
+    return {
+      error: `--filter contextUsage.state='${value}' is not a valid context state. ` +
+        `Allowed: ${[...ALLOWED_CONTEXT_USAGE_STATES].sort().join(", ")}. ` +
+        `Use 'rig ps --nodes --fields contextUsage --json' to see what daemon is reporting.`,
+    };
+  }
+
   // PL-019 item 1: agentActivity.state is enum-valued; reject invalid values
   // up-front so operators don't get a silent empty result on a typo. Three-part
   // shape per `feedback_smart_agents_no_bureaucracy.md`: what failed / what's
@@ -167,7 +236,25 @@ function parseFilter(filter: string): ParsedFilter | { error: string } {
         `Use 'rig ps --nodes --fields agentActivity --json' to see what daemon is reporting.`,
     };
   }
-  return { key, value };
+
+  // Non-numeric keys must use op = "=".
+  if (op !== "=") {
+    return {
+      error: `--filter ${key}${op}... uses a numeric comparator on a non-numeric key. ` +
+        `Allowed numeric keys: ${[...NUMERIC_FILTER_KEYS].sort().join(", ")}. ` +
+        `Use ${key}=<value> for equality.`,
+    };
+  }
+  return { key, value, op };
+}
+
+// PL-012: derive a context-usage tier from a numeric percent. Lockstep
+// with daemon-side computeContextHealthSummary thresholds.
+function deriveContextUsageState(percent: number | null | undefined): "critical" | "warning" | "low" | "unknown" {
+  if (typeof percent !== "number") return "unknown";
+  if (percent >= 80) return "critical";
+  if (percent >= 60) return "warning";
+  return "low";
 }
 
 // C9a: validate --fields against a per-level allow-list. Mirrors parseFilter's
@@ -204,6 +291,8 @@ function applyRigFilter(entries: PsEntry[], filter: ParsedFilter): PsEntry[] {
     // level it has no meaning, so the filter passes everything through and
     // the user gets all rigs (the operator can `--nodes` to scope it).
     if (filter.key === "agentActivity.state") return true;
+    // PL-012: contextUsage.* filters are node-level only.
+    if (filter.key === "contextUsage.percent" || filter.key === "contextUsage.state") return true;
     return true;
   });
 }
@@ -219,6 +308,24 @@ function applyNodeFilter(entries: NodeEntry[], filter: ParsedFilter): NodeEntry[
     // without an agentActivity attachment never match a non-unknown filter
     // value (the daemon reports `unknown` when it has no signal — explicit).
     if (filter.key === "agentActivity.state") return n.agentActivity?.state === filter.value;
+    // PL-012: contextUsage.percent — numeric comparison. Nodes with no
+    // sample fail every comparator (operator can filter on
+    // contextUsage.state=unknown to find them).
+    if (filter.key === "contextUsage.percent") {
+      const pct = n.contextUsage?.usedPercentage;
+      if (typeof pct !== "number" || filter.numericValue === undefined) return false;
+      switch (filter.op) {
+        case ">=": return pct >= filter.numericValue;
+        case ">":  return pct >  filter.numericValue;
+        case "<=": return pct <= filter.numericValue;
+        case "<":  return pct <  filter.numericValue;
+        case "=":  return pct === filter.numericValue;
+      }
+    }
+    if (filter.key === "contextUsage.state") {
+      const derived = n.contextUsage?.state ?? deriveContextUsageState(n.contextUsage?.usedPercentage ?? null);
+      return derived === filter.value;
+    }
     return true;
   });
 }
@@ -597,7 +704,7 @@ async function handleNodes(
   const humanList = (opts.full || limit !== null) ? limited : limited.slice(0, HUMAN_NODE_BUDGET);
   const humanTruncated = !opts.full && limit === null && filtered.length > HUMAN_NODE_BUDGET;
 
-  const header = padNodeRow("RIG", "POD", "MEMBER", "SESSION", "RUNTIME", "STATUS", "STARTUP", "LIFECYCLE", "ACTIVITY", "RESTORE", "ERROR");
+  const header = padNodeRow("RIG", "POD", "MEMBER", "SESSION", "RUNTIME", "STATUS", "STARTUP", "LIFECYCLE", "ACTIVITY", "CTX", "RESTORE", "ERROR");
   console.log(header);
   for (const n of humanList as NodeEntry[]) {
     const parts = n.logicalId.split(".");
@@ -614,6 +721,7 @@ async function handleNodes(
       n.startupStatus ?? "—",
       abbrevNodeLifecycle(n.lifecycleState),
       formatActivity(n.agentActivity),
+      formatContextUsage(n.contextUsage),
       n.restoreOutcome,
       n.latestError ? truncate(n.latestError, 30) : "—",
     ));
@@ -656,7 +764,7 @@ function padRigRow(rig: string, nodes: string, running: string, status: string, 
   ].join("");
 }
 
-function padNodeRow(rig: string, pod: string, member: string, session: string, runtime: string, status: string, startup: string, lifecycle: string, activity: string, restore: string, error: string): string {
+function padNodeRow(rig: string, pod: string, member: string, session: string, runtime: string, status: string, startup: string, lifecycle: string, activity: string, ctx: string, restore: string, error: string): string {
   return [
     fitCell(rig, 30),
     fitCell(pod, 10),
@@ -667,9 +775,22 @@ function padNodeRow(rig: string, pod: string, member: string, session: string, r
     fitCell(startup, 10),
     fitCell(lifecycle, 11),
     fitCell(activity, 12),
+    fitCell(ctx, 6),
     fitCell(restore, 10),
     error,
   ].join("");
+}
+
+// PL-012: render context-usage as a 5-char cell — "<percent>%" when
+// known + fresh, "<percent>%*" when known but stale, "??" when unknown.
+// 4-char width keeps the table compact without truncating two-digit
+// percentages (e.g., "98%*" or "5%").
+function formatContextUsage(ctx: NodeEntry["contextUsage"]): string {
+  if (!ctx || ctx.availability !== "known" || typeof ctx.usedPercentage !== "number") {
+    return "??";
+  }
+  const stale = ctx.fresh === false ? "*" : "";
+  return `${ctx.usedPercentage}%${stale}`;
 }
 
 

@@ -11,6 +11,7 @@ import {
   shortQitemTail,
 } from "../lib/activity-visuals.js";
 import type { AgentActivitySummary, CurrentQitemSummary } from "../hooks/useNodeInventory.js";
+import { ContextUsageRing } from "./ContextUsageRing.js";
 
 interface RigNodeData {
   logicalId: string;
@@ -200,6 +201,16 @@ export function RigNode({ data }: { data: RigNodeData }) {
             data-activity-state={activityState}
             aria-label={`activity: ${activityLabel}`}
             title={`activity: ${activityLabel}`}
+          />
+          {/* PL-012: context-usage tier ring parallel to PL-019 activity
+              dot. Two signals at the same scale: "is this agent working?"
+              (left dot, filled) vs "is this agent close to context
+              exhaustion?" (right ring, hollow). */}
+          <ContextUsageRing
+            percent={data.contextUsedPercentage}
+            fresh={data.contextFresh}
+            availability={data.contextAvailability}
+            testIdSuffix={data.logicalId}
           />
         </span>
       </div>
