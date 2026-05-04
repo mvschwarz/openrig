@@ -12,6 +12,7 @@
 // landing posture: lightweight `<textarea>` (no CodeMirror).
 
 import { useEffect, useMemo, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import {
   fileAssetUrl,
   useFilesList,
@@ -333,9 +334,13 @@ function FileEditor({ root, path, read }: { root: string; path: string; read: Fi
   const [conflict, setConflict] = useState<{ currentMtime: string; currentContentHash: string } | null>(null);
   const [savedIndicator, setSavedIndicator] = useState(false);
   const write = useFilesWrite();
+  const qc = useQueryClient();
 
   // When a fresh read comes in (after Refresh on conflict, or after a
-  // successful save), reset the draft to the new content.
+  // successful save), reset the draft to the new content. Note: useFilesWrite
+  // intentionally does NOT invalidate the read query on a 409 conflict,
+  // so a conflict-state read stays stable until the operator clicks
+  // Refresh (which triggers the invalidation explicitly).
   useEffect(() => {
     setDraft(read.content);
     setConflict(null);
@@ -398,8 +403,20 @@ function FileEditor({ root, path, read }: { root: string; path: string; read: Fi
         )}
       </div>
       {conflict && (
-        <div data-testid="files-editor-conflict" className="border-b border-red-200 bg-red-50 px-3 py-2 font-mono text-[10px] text-red-900">
-          File changed externally. Local mtime <code>{read.mtime}</code> ≠ server <code>{conflict.currentMtime}</code>. Refresh to re-read; your edits are preserved in the textarea below.
+        <div data-testid="files-editor-conflict" className="flex items-center gap-2 border-b border-red-200 bg-red-50 px-3 py-2 font-mono text-[10px] text-red-900">
+          <span className="flex-1">
+            File changed externally. Local mtime <code>{read.mtime}</code> ≠ server <code>{conflict.currentMtime}</code>. Click Refresh to re-read the file (your draft will be replaced with the new server content; copy it elsewhere first if you need to re-apply).
+          </span>
+          <button
+            type="button"
+            data-testid="files-editor-refresh"
+            onClick={() => {
+              qc.invalidateQueries({ queryKey: ["files", "read", root, path] });
+            }}
+            className="border border-red-500 bg-white px-2 py-0.5 uppercase tracking-[0.10em] text-red-900"
+          >
+            refresh
+          </button>
         </div>
       )}
       {saveError && (
