@@ -66,6 +66,29 @@ describe("MissionControlNotificationDispatcher (PL-005 Phase B)", () => {
     expect(adapter.calls[0]!.tags).toContain("human-gate");
   });
 
+  it("includes a Mission Control deep link for human-gate qitem notifications", async () => {
+    dispatcher.stop();
+    dispatcher = new MissionControlNotificationDispatcher({
+      db,
+      eventBus: bus,
+      adapter,
+      missionControlBaseUrl: "http://100.95.124.51:18437",
+    });
+    dispatcher.start();
+
+    const created = await queueRepo.create({
+      sourceSession: "src@rig",
+      destinationSession: "human-wrandom@kernel",
+      body: "needs human approval",
+      tier: "human-gate",
+    });
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(adapter.calls[0]!.qitemRef).toBe(
+      `http://100.95.124.51:18437/mission-control?view=human-gate&qitem=${encodeURIComponent(created.qitemId)}`,
+    );
+  });
+
   it("does NOT dispatch on non-human-gate qitem arrival", async () => {
     await queueRepo.create({
       sourceSession: "src@rig",

@@ -25,6 +25,7 @@ export interface GenericListViewProps {
   /** Show row-level verb actions. Default true for actionable views,
    * false for read-only views (recent-ships, recently-active, etc.). */
   withVerbActions?: boolean;
+  highlightedQitemId?: string | null;
 }
 
 export function GenericListView({
@@ -35,6 +36,7 @@ export function GenericListView({
   title,
   subtitle,
   withVerbActions = false,
+  highlightedQitemId,
 }: GenericListViewProps) {
   const query = useMissionControlView(viewName, { operatorSession });
   const actorSession = operatorSession ?? "human-wrandom@kernel";
@@ -64,7 +66,11 @@ export function GenericListView({
         <ul data-testid="mc-view-rows" className="space-y-1.5">
           {query.data?.rows.map((row, idx) => (
             <li key={row.qitemId ?? `${viewName}-${idx}`} className="space-y-1">
-              <CompactStatusRow row={row} density="expanded" />
+              <CompactStatusRow
+                row={row}
+                density="expanded"
+                highlighted={!!highlightedQitemId && row.qitemId === highlightedQitemId}
+              />
               {withVerbActions && row.qitemId ? (
                 <VerbActions
                   qitemId={row.qitemId}

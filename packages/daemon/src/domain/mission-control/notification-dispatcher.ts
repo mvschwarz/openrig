@@ -34,6 +34,7 @@ export interface NotificationDispatcherDeps {
    * trigger by default (per planner brief mandatory trigger).
    */
   includeVerbCompletion?: boolean;
+  missionControlBaseUrl?: string;
   now?: () => Date;
 }
 
@@ -50,6 +51,7 @@ export class MissionControlNotificationDispatcher {
   private readonly eventBus: EventBus;
   private readonly adapter: NotificationAdapter;
   private readonly includeVerbCompletion: boolean;
+  private readonly missionControlBaseUrl: string | null;
   private readonly now: () => Date;
   private unsubscribe: (() => void) | null = null;
   /** Per-(qitem_id, mechanism) drop set for once-per-qitem dedup. */
@@ -60,6 +62,7 @@ export class MissionControlNotificationDispatcher {
     this.eventBus = deps.eventBus;
     this.adapter = deps.adapter;
     this.includeVerbCompletion = Boolean(deps.includeVerbCompletion);
+    this.missionControlBaseUrl = normalizeBaseUrl(deps.missionControlBaseUrl);
     this.now = deps.now ?? (() => new Date());
   }
 
@@ -156,7 +159,7 @@ export class MissionControlNotificationDispatcher {
     const result = await this.adapter.send({
       title: input.title,
       body: input.body,
-      qitemRef: input.qitemId ?? undefined,
+      qitemRef: this.qitemRef(input.qitemId),
       tags: input.tags,
     });
     if (result.ok) {
@@ -197,6 +200,15 @@ export class MissionControlNotificationDispatcher {
     return row ?? null;
   }
 
+  private qitemRef(qitemId: string | null): string | undefined {
+    if (!qitemId) return undefined;
+    if (!this.missionControlBaseUrl) return qitemId;
+    const url = new URL("/mission-control", this.missionControlBaseUrl);
+    url.searchParams.set("view", "human-gate");
+    url.searchParams.set("qitem", qitemId);
+    return url.toString();
+  }
+
   /** Test/observability: clear once-per-qitem dedup set. */
   resetDedupForTest(): void {
     this.dispatchedKeys.clear();
@@ -206,4 +218,15 @@ export class MissionControlNotificationDispatcher {
 function truncateBody(s: string, max: number): string {
   if (s.length <= max) return s;
   return s.slice(0, max - 1) + "…";
+}
+
+function normalizeBaseUrl(raw: string | undefined): string | null {
+  const trimmed = raw?.trim();
+  if (!trimmed) return null;
+  try {
+    const url = new URL(trimmed);
+    return url.toString();
+  } catch {
+    return null;
+  }
 }
