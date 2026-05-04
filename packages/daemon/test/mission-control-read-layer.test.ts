@@ -125,6 +125,20 @@ describe("MissionControlReadLayer (PL-005 Phase A; 7 views)", () => {
     expect(result.rows[0]?.rigOrMissionName).toBe("human-wrandom@kernel");
   });
 
+  it("qitem-backed rows preserve the queue body for phone human-gate decisions", async () => {
+    await queueRepo.create({
+      sourceSession: "src@rig",
+      destinationSession: "human-wrandom@kernel",
+      body: "Approve the release candidate after checking the phone notification path.",
+      tier: "human-gate",
+    });
+
+    const result = await readLayer.readView("my-queue");
+    const row = result.rows[0] as Record<string, unknown>;
+    expect(row.qitemBody).toBe("Approve the release candidate after checking the phone notification path.");
+    expect(row.qitemSummary).toContain("Approve the release candidate");
+  });
+
   it("recent-ships caps at 10 (founder Q4 default)", async () => {
     for (let i = 0; i < 15; i++) {
       const created = await queueRepo.create({
