@@ -80,6 +80,25 @@ nodesRoutes.get("/:logicalId", async (c) => {
   const [detailWithActivity] = await attachAgentActivity([detail], { tmuxAdapter: deps.tmuxAdapter, activityStore: deps.agentActivityStore });
   Object.assign(detail, { agentActivity: detailWithActivity?.agentActivity });
 
+  // PL-019 item 5: surface in-progress qitems on node-detail when the
+  // node has a session name (matches /graph payload's enrichment shape).
+  if (detail.canonicalSessionName) {
+    const rows = deps.rigRepo.db.prepare(
+      `SELECT qitem_id, body, tier
+         FROM queue_items
+         WHERE state = 'in-progress' AND destination_session = ?
+         ORDER BY ts_updated DESC
+         LIMIT 3`
+    ).all(detail.canonicalSessionName) as Array<{ qitem_id: string; body: string; tier: string | null }>;
+    Object.assign(detail, {
+      currentQitems: rows.map((r) => ({
+        qitemId: r.qitem_id,
+        bodyExcerpt: r.body.length > 80 ? `${r.body.slice(0, 80)}…` : r.body,
+        tier: r.tier,
+      })),
+    });
+  }
+
   // Enrich transcript info from TranscriptStore (not available to pure DB helper)
   const transcriptStore = c.get("transcriptStore" as never) as TranscriptStore | undefined;
   if (transcriptStore?.enabled && detail.canonicalSessionName) {
