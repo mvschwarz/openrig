@@ -712,7 +712,18 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       dogfoodEvidenceRoot: dogfoodRoot || null,
       db,
     });
-    const sliceDetailProjector = new SliceDetailProjector({ db, indexer: sliceIndexer });
+    // Slice Story View v1: pass workflowRuntime.specCache so the
+    // projector can resolve a bound workflow_instance's spec for
+    // spec-graph + phase + current-step projection. When the workflow
+    // runtime is not constructed (queueRepo absent — same condition
+    // already guards the workflowRuntime block above), the projector
+    // silently degrades to v0 behavior (workflowBinding=null,
+    // specGraph=null, phaseDefinitions=null, currentStep=null).
+    const sliceDetailProjector = new SliceDetailProjector({
+      db,
+      indexer: sliceIndexer,
+      workflowSpecCache: workflowRuntime?.specCache,
+    });
     deps.sliceIndexer = sliceIndexer;
     deps.sliceDetailProjector = sliceDetailProjector;
   }
