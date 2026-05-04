@@ -390,7 +390,39 @@ function validateSessionSource(raw: unknown, prefix: string, isTerminalRuntime: 
   if (mode === "rebuild") {
     return validateRebuildSessionSource(ss, prefix);
   }
-  errors.push(`${prefix}.mode: v1 supports "fork" or "rebuild" (got ${JSON.stringify(mode)})`);
+  // PL-016 Item 4: agent_image session source — references a named
+  // image in the AgentImageLibraryService. The instantiator dispatches
+  // through the fork code path with the image's resume token.
+  if (mode === "agent_image") {
+    return validateAgentImageSessionSource(ss, prefix);
+  }
+  errors.push(`${prefix}.mode: supports "fork", "rebuild", or "agent_image" (got ${JSON.stringify(mode)})`);
+  return errors;
+}
+
+/** PL-016 Item 4 — validate session_source: mode: agent_image. */
+function validateAgentImageSessionSource(ss: Record<string, unknown>, prefix: string): string[] {
+  const errors: string[] = [];
+  const ref = ss["ref"];
+  if (ref === null || typeof ref !== "object") {
+    errors.push(`${prefix}.ref: required object with "kind: image_name" and "value: <name>" for agent_image mode`);
+    return errors;
+  }
+  const refRec = ref as Record<string, unknown>;
+  const kind = refRec["kind"];
+  if (kind !== "image_name") {
+    errors.push(`${prefix}.ref.kind: agent_image mode supports "image_name" only at v0 (got ${JSON.stringify(kind)})`);
+    return errors;
+  }
+  const value = refRec["value"];
+  if (typeof value !== "string" || value.trim() === "") {
+    errors.push(`${prefix}.ref.value: required non-empty string when ref.kind is "image_name"`);
+  }
+  // Optional version: string or number coerces to string at parse time.
+  const version = refRec["version"];
+  if (version !== undefined && typeof version !== "string" && typeof version !== "number") {
+    errors.push(`${prefix}.ref.version: optional; must be a string or number when present`);
+  }
   return errors;
 }
 
@@ -808,6 +840,19 @@ function normalizeSessionSource(raw: unknown): import("./types.js").SessionSourc
     }
     if (paths.length === 0) return undefined;
     return { mode: "rebuild", ref: { kind: "artifact_set", value: paths } };
+  }
+  // PL-016 Item 4: agent_image session source.
+  if (mode === "agent_image") {
+    const kind = refRec["kind"];
+    if (kind !== "image_name") return undefined;
+    const value = refRec["value"];
+    if (typeof value !== "string" || value.trim() === "") return undefined;
+    const versionRaw = refRec["version"];
+    const version = versionRaw === undefined ? undefined : String(versionRaw);
+    return {
+      mode: "agent_image",
+      ref: { kind: "image_name", value, ...(version !== undefined ? { version } : {}) },
+    };
   }
   return undefined;
 }
