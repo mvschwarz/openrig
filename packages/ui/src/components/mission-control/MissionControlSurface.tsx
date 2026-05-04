@@ -31,7 +31,10 @@ const VIEW_LABELS: Record<MissionControlViewName, string> = {
 export function MissionControlSurface() {
   const [activeView, setActiveView] = useState<MissionControlViewName>("my-queue");
   return (
-    <div data-testid="mc-surface" className="flex h-full flex-col">
+    <div
+      data-testid="mc-surface"
+      className="flex h-full flex-col lg:pl-[var(--workspace-left-offset,0px)] lg:pr-[var(--workspace-right-offset,0px)]"
+    >
       <header className="border-b border-stone-200 bg-stone-50 p-3">
         <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-stone-500">
           Mission Control

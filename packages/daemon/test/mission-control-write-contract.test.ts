@@ -146,6 +146,42 @@ describe("MissionControlWriteContract (PL-005 Phase A; atomic 7-verb)", () => {
     expect(list[0]?.annotation).toBe("operator note");
   });
 
+  it("annotate rejects unknown qitem instead of creating a ghost audit row", async () => {
+    const auditCountBefore = actionLog.countAll();
+    try {
+      await writeContract.act({
+        verb: "annotate",
+        qitemId: "qitem-missing",
+        actorSession: "human@r",
+        annotation: "operator note",
+      });
+      throw new Error("should have thrown");
+    } catch (err) {
+      expect(err).toBeInstanceOf(MissionControlWriteContractError);
+      expect((err as MissionControlWriteContractError).code).toBe("qitem_not_found");
+    }
+    expect(actionLog.countAll()).toBe(auditCountBefore);
+  });
+
+  it("annotate rejects terminal qitems like other Mission Control actions", async () => {
+    const qitemId = await seedQitem();
+    await writeContract.act({ verb: "approve", qitemId, actorSession: "human@r" });
+    const auditCountBefore = actionLog.countAll();
+    try {
+      await writeContract.act({
+        verb: "annotate",
+        qitemId,
+        actorSession: "human@r",
+        annotation: "late note",
+      });
+      throw new Error("should have thrown");
+    } catch (err) {
+      expect(err).toBeInstanceOf(MissionControlWriteContractError);
+      expect((err as MissionControlWriteContractError).code).toBe("qitem_already_terminal");
+    }
+    expect(actionLog.countAll()).toBe(auditCountBefore);
+  });
+
   it("rejects mutations on terminal items with qitem_already_terminal", async () => {
     const qitemId = await seedQitem();
     await writeContract.act({ verb: "approve", qitemId, actorSession: "human@r" });

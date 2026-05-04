@@ -147,6 +147,22 @@ describe("mission-control routes (PL-005 Phase A)", () => {
     expect(body.error).toBe("qitem_already_terminal");
   });
 
+  it("POST /action annotate on missing qitem returns 404 + qitem_not_found", async () => {
+    const res = await app.request("/api/mission-control/action", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        verb: "annotate",
+        qitemId: "qitem-missing",
+        actorSession: "human@r",
+        annotation: "operator note",
+      }),
+    });
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe("qitem_not_found");
+  });
+
   it("GET /cli-capabilities returns fleet roll-up", async () => {
     const res = await app.request("/api/mission-control/cli-capabilities");
     expect(res.status).toBe(200);
