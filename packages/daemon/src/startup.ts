@@ -608,6 +608,31 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     deps.missionControlReadLayer = mcReadLayer;
   }
 
+  // Slice Story View v0 — slice indexer + per-tab projector.
+  //
+  // Configured via env (single-host MVP; no per-rig override at v0):
+  //   OPENRIG_SLICES_ROOT             absolute path to slices folder root
+  //   OPENRIG_DOGFOOD_EVIDENCE_ROOT   absolute path to dogfood-evidence root
+  //
+  // When OPENRIG_SLICES_ROOT is unset, the indexer is still constructed
+  // but isReady() returns false — the routes return a clear
+  // "slices_root_not_configured" 503 with a setup hint, so the operator
+  // can wire the env vars without daemon-restart-debug-loop.
+  {
+    const slicesRoot = readOpenRigEnv("OPENRIG_SLICES_ROOT", "RIGGED_SLICES_ROOT") ?? "";
+    const dogfoodRoot = readOpenRigEnv("OPENRIG_DOGFOOD_EVIDENCE_ROOT", "RIGGED_DOGFOOD_EVIDENCE_ROOT") ?? "";
+    const { SliceIndexer } = await import("./domain/slices/slice-indexer.js");
+    const { SliceDetailProjector } = await import("./domain/slices/slice-detail-projector.js");
+    const sliceIndexer = new SliceIndexer({
+      slicesRoot,
+      dogfoodEvidenceRoot: dogfoodRoot || null,
+      db,
+    });
+    const sliceDetailProjector = new SliceDetailProjector({ db, indexer: sliceIndexer });
+    deps.sliceIndexer = sliceIndexer;
+    deps.sliceDetailProjector = sliceDetailProjector;
+  }
+
   const sessionTransport = deps.sessionTransport;
   if (sessionTransport) {
     const watchdogPolicyEngine = new WatchdogPolicyEngine({

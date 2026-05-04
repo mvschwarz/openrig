@@ -1,10 +1,16 @@
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+
+const here = dirname(fileURLToPath(import.meta.url));
+const indexHtml = join(here, "..", "index.html");
 
 describe("index.html", () => {
-  it("declares a favicon so browsers do not request /favicon.ico and dirty the console", () => {
-    const html = readFileSync(resolve(__dirname, "../index.html"), "utf8");
+  it("declares an empty favicon so headed dogfood stays console-clean", () => {
+    const html = readFileSync(indexHtml, "utf8");
+
     expect(html).toContain('rel="icon"');
+    expect(html).toContain('href="data:,"');
   });
 });
