@@ -67,6 +67,8 @@ import { watchdogRoutes } from "./routes/watchdog.js";
 import { workflowRoutes } from "./routes/workflow.js";
 import { missionControlRoutes } from "./routes/mission-control.js";
 import { slicesRoutes } from "./routes/slices.js";
+import { filesRoutes } from "./routes/files.js";
+import { progressRoutes } from "./routes/progress.js";
 import type { StreamStore } from "./domain/stream-store.js";
 import type { QueueRepository } from "./domain/queue-repository.js";
 import type { InboxHandler } from "./domain/inbox-handler.js";
@@ -148,6 +150,12 @@ export interface AppDeps {
   // "slices_root_not_configured" 503 so the UI can surface a setup hint.
   sliceIndexer?: import("./domain/slices/slice-indexer.js").SliceIndexer;
   sliceDetailProjector?: import("./domain/slices/slice-detail-projector.js").SliceDetailProjector;
+  /** UI Enhancement Pack v0 — file allowlist + browser routes (item 3). */
+  filesAllowlist?: import("./domain/files/path-safety.js").AllowlistRoot[];
+  /** UI Enhancement Pack v0 — atomic write service (item 4). */
+  fileWriteService?: import("./domain/files/file-write-service.js").FileWriteService | null;
+  /** UI Enhancement Pack v0 — workspace PROGRESS.md indexer (item 1B). */
+  progressIndexer?: import("./domain/progress/progress-indexer.js").ProgressIndexer;
   missionControlAuditBrowse?: import("./domain/mission-control/audit-browse.js").MissionControlAuditBrowse;
   missionControlNotificationDispatcher?: import("./domain/mission-control/notification-dispatcher.js").MissionControlNotificationDispatcher;
   /**
@@ -324,6 +332,9 @@ export function createApp(deps: AppDeps): Hono {
     c.set("missionControlFleetCliCapability" as never, deps.missionControlFleetCliCapability);
     c.set("sliceIndexer" as never, deps.sliceIndexer);
     c.set("sliceDetailProjector" as never, deps.sliceDetailProjector);
+    c.set("filesAllowlist" as never, deps.filesAllowlist);
+    c.set("fileWriteService" as never, deps.fileWriteService);
+    c.set("progressIndexer" as never, deps.progressIndexer);
     c.set("missionControlAuditBrowse" as never, deps.missionControlAuditBrowse);
     c.set("missionControlNotificationDispatcher" as never, deps.missionControlNotificationDispatcher);
     c.set("specReviewService" as never, deps.specReviewService);
@@ -384,6 +395,9 @@ export function createApp(deps: AppDeps): Hono {
   );
   // Slice Story View v0 — slice indexer + per-tab payload routes.
   app.route("/api/slices", slicesRoutes());
+  // UI Enhancement Pack v0 — files (item 3 + item 4) + progress (item 1B) routes.
+  app.route("/api/files", filesRoutes());
+  app.route("/api/progress", progressRoutes());
   app.route("/api/rigs/:rigId/env", envRoutes());
   app.route("/api/restore-check", restoreCheckRoutes);
 
