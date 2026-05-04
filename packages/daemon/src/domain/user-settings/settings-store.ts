@@ -132,6 +132,8 @@ function deriveWorkspaceDefault(key: SettingsValidKey, workspaceRoot: string): s
     case "workspace.steering_path":    return path.join(workspaceRoot, "steering", "STEERING.md");
     case "workspace.field_notes_root": return path.join(workspaceRoot, "field-notes");
     case "workspace.specs_root":       return path.join(workspaceRoot, "specs");
+    case "files.allowlist":            return `workspace:${workspaceRoot}`;
+    case "progress.scan_roots":        return `workspace:${workspaceRoot}`;
     default: return "";
   }
 }
@@ -141,6 +143,8 @@ const WORKSPACE_DERIVED_KEYS: ReadonlySet<SettingsValidKey> = new Set([
   "workspace.steering_path",
   "workspace.field_notes_root",
   "workspace.specs_root",
+  "files.allowlist",
+  "progress.scan_roots",
 ]);
 
 function getDefaultValue(key: SettingsValidKey, workspaceRoot: string): string | number | boolean {
@@ -154,8 +158,6 @@ function getDefaultValue(key: SettingsValidKey, workspaceRoot: string): string |
     case "transcripts.enabled": return true;
     case "transcripts.path": return path.join(path.dirname(DEFAULT_CONFIG_PATH), "transcripts");
     case "workspace.root": return DEFAULT_WORKSPACE_ROOT;
-    case "files.allowlist": return "";
-    case "progress.scan_roots": return "";
     // Preview Terminal v0 (PL-018) defaults — match cli/src/config-store.ts.
     case "ui.preview.refresh_interval_seconds": return 3;
     case "ui.preview.max_pins": return 4;
