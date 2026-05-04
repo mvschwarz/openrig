@@ -75,6 +75,8 @@ import { WorkflowRuntime } from "./domain/workflow-runtime.js";
 import { makeWorkflowKeepalivePolicy } from "./domain/policies/workflow-keepalive.js";
 import { SpecReviewService } from "./domain/spec-review-service.js";
 import { SpecLibraryService } from "./domain/spec-library-service.js";
+import { ContextPackLibraryService } from "./domain/context-packs/context-pack-library-service.js";
+import { SettingsStore as ContextPackSettingsStore } from "./domain/user-settings/settings-store.js";
 import { WhoamiService } from "./domain/whoami-service.js";
 import { NodeCmuxService } from "./domain/node-cmux-service.js";
 import { createApp, type AppDeps } from "./server.js";
@@ -542,6 +544,44 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
         roots.unshift({ path: builtinSpecsRoot, sourceType: "builtin" });
       }
       const lib = new SpecLibraryService({ roots, specReviewService });
+      lib.scan();
+      return lib;
+    })(),
+    contextPackLibrary: (() => {
+      // Rig Context / Composable Context Injection v0 (PL-014).
+      // Discovery roots:
+      //   1. ~/.openrig/context-packs/  (host-global; user_file)
+      //   2. <workspace>/.openrig/context-packs/  (workspace-local; workspace)
+      // Workspace path comes from the workspace.root setting if set;
+      // otherwise inherits from ~/.openrig/workspace/. Both are
+      // optional — empty roots → empty library.
+      const userPacksRoot = getDefaultOpenRigPath("context-packs");
+      try { fs.mkdirSync(userPacksRoot, { recursive: true }); } catch { /* best-effort */ }
+      const roots: Array<{ path: string; sourceType: "builtin" | "user_file" | "workspace" }> = [
+        { path: userPacksRoot, sourceType: "user_file" },
+      ];
+      // Workspace-local context-packs/ — best-effort lookup off the
+      // workspace.root setting. If unset, falls back to the default
+      // workspace path which is the same parent as user packs (skipped
+      // as a duplicate). Last-wins ordering: workspace > user_file
+      // (operator's per-project edits win on collision).
+      try {
+        const settingsStore = new ContextPackSettingsStore();
+        const cfg = settingsStore.resolveConfig();
+        const workspacePacksRoot = nodePath.join(cfg.workspaceRoot, ".openrig", "context-packs");
+        if (workspacePacksRoot !== userPacksRoot && fs.existsSync(workspacePacksRoot)) {
+          roots.push({ path: workspacePacksRoot, sourceType: "workspace" });
+        }
+      } catch {
+        // Settings unavailable in this build path → use only user_file root.
+      }
+      // Bundled built-in packs would live under packages/daemon/context-packs/
+      // when shipped; absent today (no built-in packs at v0).
+      const builtinPacksRoot = nodePath.resolve(import.meta.dirname, "../context-packs");
+      if (fs.existsSync(builtinPacksRoot)) {
+        roots.unshift({ path: builtinPacksRoot, sourceType: "builtin" });
+      }
+      const lib = new ContextPackLibraryService({ roots });
       lib.scan();
       return lib;
     })(),

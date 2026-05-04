@@ -20,6 +20,13 @@ import {
   type LibraryAgentReview,
   type LibraryWorkflowReview,
 } from "../hooks/useSpecLibrary.js";
+import {
+  useContextPackLibrary,
+  useContextPackPreview,
+  useContextPackSend,
+  type ContextPackEntry,
+} from "../hooks/useContextPackLibrary.js";
+import { usePsEntries } from "../hooks/usePsEntries.js";
 import { useQueryClient } from "@tanstack/react-query";
 import {
   WorkflowHeader,
@@ -189,6 +196,17 @@ function LibraryRigReviewContent({ review }: { review: LibraryRigReview }) {
 }
 
 export function LibraryReview({ entryId }: LibraryReviewProps) {
+  // PL-014: context_packs live at /api/context-packs/library and have
+  // an id prefix of "context-pack:". Dispatch to the pack-specific
+  // review page before invoking useLibraryReview (which would 404
+  // against the spec-library route for context-pack ids).
+  if (entryId.startsWith("context-pack:")) {
+    return <LibraryContextPackReviewPage entryId={entryId} />;
+  }
+  return <LibrarySpecReview entryId={entryId} />;
+}
+
+function LibrarySpecReview({ entryId }: LibraryReviewProps) {
   const navigate = useNavigate();
   const { data: review, isLoading, error } = useLibraryReview(entryId);
 
@@ -461,6 +479,245 @@ function LibraryWorkflowReviewPage({ review }: { review: LibraryWorkflowReview }
             ))}
           </div>
         </div>
+      </div>
+    </WorkspacePage>
+  );
+}
+
+// --- Rig Context / Composable Context Injection v0 (PL-014):
+//     context_pack review page ---
+
+function LibraryContextPackReviewPage({ entryId }: { entryId: string }) {
+  const navigate = useNavigate();
+  const { data: packs = [], isLoading: packsLoading, error: packsError } = useContextPackLibrary();
+  const entry = packs.find((p) => p.id === entryId) ?? null;
+  const { data: preview, isLoading: previewLoading } = useContextPackPreview(entry ? entryId : null);
+
+  if (packsLoading) {
+    return (
+      <WorkspacePage>
+        <div className="font-mono text-[10px] text-stone-400">Loading context pack…</div>
+      </WorkspacePage>
+    );
+  }
+  if (packsError || !entry) {
+    return (
+      <WorkspacePage>
+        <div data-testid="library-review-error" className="space-y-4">
+          <WorkflowHeader
+            eyebrow="Library"
+            title="Context Pack Not Found"
+            description={(packsError as Error)?.message ?? `No context pack with id ${entryId}.`}
+          />
+          <Button variant="outline" size="sm" onClick={() => navigate({ to: "/specs" })}>Back to Specs</Button>
+        </div>
+      </WorkspacePage>
+    );
+  }
+
+  return <ContextPackReviewBody entry={entry} preview={preview} previewLoading={previewLoading} />;
+}
+
+function ContextPackReviewBody({
+  entry,
+  preview,
+  previewLoading,
+}: {
+  entry: ContextPackEntry;
+  preview: ReturnType<typeof useContextPackPreview>["data"];
+  previewLoading: boolean;
+}) {
+  const navigate = useNavigate();
+  const [showSendPicker, setShowSendPicker] = useState(false);
+  const [destinationSession, setDestinationSession] = useState<string>("");
+  const [sendError, setSendError] = useState<string | null>(null);
+  const [sendStatus, setSendStatus] = useState<"idle" | "dry-run-shown" | "sent">("idle");
+  const sendMutation = useContextPackSend();
+  const { data: psEntries = [] } = usePsEntries();
+
+  const runningSessions: string[] = (() => {
+    const sessions: string[] = [];
+    for (const rig of psEntries) {
+      const nodes = (rig as { nodes?: Array<{ canonicalSessionName?: string | null; sessionStatus?: string | null }> }).nodes ?? [];
+      for (const n of nodes) {
+        if (n.canonicalSessionName && n.sessionStatus === "running") sessions.push(n.canonicalSessionName);
+      }
+    }
+    return sessions.sort();
+  })();
+
+  const onDryRun = async () => {
+    setSendError(null);
+    if (!destinationSession) {
+      setSendError("Pick a destination session first.");
+      return;
+    }
+    try {
+      await sendMutation.mutateAsync({ id: entry.id, destinationSession, dryRun: true });
+      setSendStatus("dry-run-shown");
+    } catch (err) {
+      setSendError((err as Error).message);
+    }
+  };
+
+  const onSend = async () => {
+    setSendError(null);
+    if (!destinationSession) {
+      setSendError("Pick a destination session first.");
+      return;
+    }
+    try {
+      await sendMutation.mutateAsync({ id: entry.id, destinationSession, dryRun: false });
+      setSendStatus("sent");
+    } catch (err) {
+      setSendError((err as Error).message);
+    }
+  };
+
+  return (
+    <WorkspacePage>
+      <div data-testid="library-review-context-pack" className="space-y-4">
+        <WorkflowHeader
+          eyebrow={`Library — Context Pack${entry.sourceType === "builtin" ? " (built-in)" : ""}`}
+          title={entry.name}
+          description={entry.purpose ?? "Operator-authored composable context bundle."}
+          actions={
+            <div className="flex gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                data-testid="context-pack-send-button"
+                onClick={() => setShowSendPicker((v) => !v)}
+              >
+                {showSendPicker ? "Hide Send" : "Send to seat"}
+              </Button>
+              <Button variant="outline" size="sm" onClick={() => navigate({ to: "/specs" })}>Back to Specs</Button>
+            </div>
+          }
+        />
+
+        <WorkflowSummaryGrid>
+          <WorkflowSummaryCard label="Version" value={entry.version} testId="lib-pack-version" />
+          <WorkflowSummaryCard label="Files" value={entry.files.length} testId="lib-pack-files" />
+          <WorkflowSummaryCard
+            label="Tokens (~)"
+            value={String(entry.derivedEstimatedTokens)}
+            testId="lib-pack-tokens"
+          />
+          <WorkflowSummaryCard label="Source" value={entry.sourceType} testId="lib-pack-source" />
+        </WorkflowSummaryGrid>
+
+        <div data-testid="lib-pack-source-path" className="font-mono text-[9px] text-stone-500">
+          path: {entry.sourcePath}
+        </div>
+
+        <section className="border border-stone-300/40 bg-white/8">
+          <header className="border-b border-stone-200 bg-stone-50 px-3 py-2 font-mono text-[10px] uppercase tracking-[0.10em] text-stone-600">
+            Files
+          </header>
+          <ul data-testid="lib-pack-file-list" className="divide-y divide-stone-100">
+            {entry.files.map((f) => {
+              const missing = f.bytes === null;
+              return (
+                <li
+                  key={f.path}
+                  data-testid={`lib-pack-file-${f.path}`}
+                  data-missing={missing ? "true" : "false"}
+                  className={`px-3 py-2 font-mono text-[10px] ${missing ? "text-red-700" : "text-stone-800"}`}
+                >
+                  <div className="flex items-baseline justify-between gap-2">
+                    <span className="font-bold truncate">{f.path}</span>
+                    <span className="font-mono text-[8px] text-stone-500 shrink-0">
+                      role: {f.role}
+                      {missing
+                        ? " · MISSING"
+                        : ` · ${f.bytes}B · ~${f.estimatedTokens} tokens`}
+                    </span>
+                  </div>
+                  {f.summary && (
+                    <div className="mt-0.5 text-stone-600 text-[9px]">{f.summary}</div>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+        </section>
+
+        {showSendPicker && (
+          <section data-testid="context-pack-send-modal" className="border border-stone-400 bg-white px-3 py-3 space-y-2">
+            <div className="font-mono text-[10px] uppercase tracking-[0.10em] text-stone-700">Send to seat</div>
+            <select
+              data-testid="context-pack-send-session"
+              className="w-full font-mono text-[10px] border border-stone-300 px-2 py-1"
+              value={destinationSession}
+              onChange={(e) => setDestinationSession(e.target.value)}
+            >
+              <option value="">Pick a running session…</option>
+              {runningSessions.map((s) => (
+                <option key={s} value={s}>{s}</option>
+              ))}
+            </select>
+            <div className="flex gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                data-testid="context-pack-send-dry-run"
+                onClick={() => void onDryRun()}
+                disabled={sendMutation.isPending}
+              >
+                {sendMutation.isPending ? "…" : "Dry run"}
+              </Button>
+              <Button
+                size="sm"
+                data-testid="context-pack-send-confirm"
+                onClick={() => void onSend()}
+                disabled={sendMutation.isPending || !destinationSession}
+              >
+                {sendMutation.isPending ? "Sending…" : "Send"}
+              </Button>
+            </div>
+            {sendError && (
+              <div data-testid="context-pack-send-error" className="font-mono text-[9px] text-red-600">{sendError}</div>
+            )}
+            {sendStatus === "sent" && (
+              <div data-testid="context-pack-send-success" className="font-mono text-[9px] text-emerald-700">
+                Sent to {destinationSession}.
+              </div>
+            )}
+            {sendStatus === "dry-run-shown" && sendMutation.data?.bundleText && (
+              <pre
+                data-testid="context-pack-send-bundle-preview"
+                className="font-mono text-[9px] bg-stone-50 border border-stone-200 px-2 py-1 max-h-64 overflow-y-auto whitespace-pre-wrap"
+              >
+                {sendMutation.data.bundleText}
+              </pre>
+            )}
+          </section>
+        )}
+
+        <section className="border border-stone-300/40 bg-white/8">
+          <header className="border-b border-stone-200 bg-stone-50 px-3 py-2 font-mono text-[10px] uppercase tracking-[0.10em] text-stone-600">
+            Bundle preview
+          </header>
+          {previewLoading && (
+            <div className="px-3 py-2 font-mono text-[9px] text-stone-400">Loading bundle…</div>
+          )}
+          {preview && (
+            <>
+              {preview.missingFiles.length > 0 && (
+                <div data-testid="lib-pack-missing-warning" className="px-3 py-2 font-mono text-[9px] text-red-700 border-b border-stone-200">
+                  Warning: {preview.missingFiles.length} file{preview.missingFiles.length === 1 ? "" : "s"} referenced by manifest but missing on disk.
+                </div>
+              )}
+              <pre
+                data-testid="lib-pack-bundle-text"
+                className="font-mono text-[9px] text-stone-800 bg-stone-50 px-3 py-2 max-h-96 overflow-y-auto whitespace-pre-wrap"
+              >
+                {preview.bundleText}
+              </pre>
+            </>
+          )}
+        </section>
       </div>
     </WorkspacePage>
   );
