@@ -29,8 +29,9 @@ Examples:
     .option("--yes", "Auto-approve trusted actions")
     .option("--cwd <path>", "Override launch working directory for all members for this run only")
     .option("--target <root>", "Target root directory for package installation (.rigbundle only; does not change agent cwd)")
+    .option("--existing", "Treat <source> as an existing rig name; bypass library-spec name resolution")
     .option("--json", "JSON output for agents")
-    .action(async (source: string, opts: { plan?: boolean; yes?: boolean; cwd?: string; target?: string; json?: boolean }) => {
+    .action(async (source: string, opts: { plan?: boolean; yes?: boolean; cwd?: string; target?: string; existing?: boolean; json?: boolean }) => {
       const deps = getDepsF();
 
       // Run preflight before auto-start
@@ -115,7 +116,7 @@ Examples:
         }
         return rigSummariesCache;
       };
-      if (isRigName) {
+      if (isRigName && !opts.existing) {
         try {
           const { resolveLibrarySpec } = await import("./specs.js");
           const entry = await resolveLibrarySpec(client, source);
@@ -154,10 +155,18 @@ Examples:
           const summaries = await fetchRigSummaries();
           const match = summaries.find((r) => r.name === source);
           if (match?.lifecycleState === "recoverable") {
-            console.log(`Recovering rig "${source}" from latest snapshot...`);
+            console.log(`Recovering rig "${source}" from latest snapshot or current DB state...`);
           } else if (match?.lifecycleState === "stopped") {
             console.log(`Turning on rig "${source}"...`);
           }
+        }
+      } else if (isRigName && opts.existing && !opts.json) {
+        const summaries = await fetchRigSummaries();
+        const match = summaries.find((r) => r.name === source);
+        if (match?.lifecycleState === "recoverable") {
+          console.log(`Recovering rig "${source}" from latest snapshot or current DB state...`);
+        } else {
+          console.log(`Turning on existing rig "${source}"...`);
         }
       }
 

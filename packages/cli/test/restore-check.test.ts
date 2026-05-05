@@ -173,7 +173,7 @@ describe("rig restore-check", () => {
               rigId: "rig-1",
               rigName: "test-rig",
               action: "restore_from_latest_snapshot",
-              command: "rig restore snap-123 --rig rig-1",
+              command: "rig up --existing test-rig",
               reason: "Rig has a latest snapshot and one or more seats are not running/ready.",
               safe: false,
               blocking: true,
@@ -189,7 +189,7 @@ describe("rig restore-check", () => {
 
     const output = logs.join("\n");
     expect(output).toContain("RECOVERY: ACTIONABLE");
-    expect(output).toContain("rig restore snap-123 --rig rig-1");
+    expect(output).toContain("rig up --existing test-rig");
     expect(output).toContain("1 rig can be recovered");
   });
 

@@ -690,6 +690,38 @@ describe("Up CLI", () => {
     expect(exitCode).toBe(1);
   });
 
+  it("up --existing bypasses library-name ambiguity and posts the rig name", async () => {
+    const origListeners = server.listeners("request");
+    let lastBody: Record<string, unknown> = {};
+    server.removeAllListeners("request");
+    server.on("request", async (req: http.IncomingMessage, res: http.ServerResponse) => {
+      let body = "";
+      for await (const chunk of req) body += chunk;
+      if (req.url === "/api/rigs/summary" && req.method === "GET") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify([{ id: "r1", name: "alpha", nodeCount: 1, lifecycleState: "recoverable" }]));
+      } else if (req.url === "/api/up" && req.method === "POST") {
+        lastBody = JSON.parse(body);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ status: "restored", rigId: "r1", rigName: "alpha", rigResult: "restored", nodes: [], warnings: [] }));
+      } else {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: `unexpected request: ${req.method} ${req.url}` }));
+      }
+    });
+
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "up", "alpha", "--existing"]);
+    });
+
+    server.removeAllListeners("request");
+    for (const l of origListeners) server.on("request", l as (...args: unknown[]) => void);
+
+    expect(lastBody.sourceRef).toBe("alpha");
+    expect(logs.join("\n")).toContain('Recovering rig "alpha" from latest snapshot or current DB state');
+    expect(exitCode).toBeUndefined();
+  });
+
   // L2 wording divergence: rig name in recoverable state -> "Recovering ..."; stopped -> "Turning on ..."
   it("up <rig-name> prints 'Recovering ... from latest snapshot' when lifecycleState=recoverable", async () => {
     const origListeners = server.listeners("request");
@@ -721,7 +753,7 @@ describe("Up CLI", () => {
     for (const l of origListeners) server.on("request", l as (...args: unknown[]) => void);
 
     const output = logs.join("\n");
-    expect(output).toContain('Recovering rig "stale-velocity" from latest snapshot');
+    expect(output).toContain('Recovering rig "stale-velocity" from latest snapshot or current DB state');
     expect(output).not.toContain('Turning on rig "stale-velocity"');
     expect(exitCode).toBeUndefined(); // 0
   });

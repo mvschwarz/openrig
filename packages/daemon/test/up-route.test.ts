@@ -4,6 +4,7 @@ import path from "node:path";
 import os from "node:os";
 import type Database from "better-sqlite3";
 import type { RigRepository } from "../src/domain/rig-repository.js";
+import type { SessionRegistry } from "../src/domain/session-registry.js";
 import type { SnapshotCapture } from "../src/domain/snapshot-capture.js";
 import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
 
@@ -17,11 +18,18 @@ nodes:
 edges: []
 `.trim();
 
+function insertStartupContextRow(db: Database.Database, nodeId: string) {
+  db.prepare(
+    "INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, ?, ?, ?)"
+  ).run(nodeId, "[]", "[]", "[]", "claude-code");
+}
+
 describe("Up API route", () => {
   let db: Database.Database;
   let app: ReturnType<typeof createTestApp>["app"];
   let tmpDir: string;
   let rigRepo: RigRepository;
+  let sessionRegistry: SessionRegistry;
   let snapshotCapture: SnapshotCapture;
 
   beforeEach(() => {
@@ -31,6 +39,7 @@ describe("Up API route", () => {
     const setup = createTestApp(db);
     app = setup.app;
     rigRepo = setup.rigRepo;
+    sessionRegistry = setup.sessionRegistry;
     snapshotCapture = setup.snapshotCapture;
   });
 
@@ -186,6 +195,27 @@ describe("Up API route", () => {
       expect(body.error).toContain("restore-usable");
       // Old message specifically said "auto-pre-down" — must NOT anymore.
       expect(body.error).not.toContain("auto-pre-down snapshot");
+    });
+
+    it("captures auto-rehydrate snapshot from durable current state when no usable snapshot exists", async () => {
+      const rig = rigRepo.createRig("current-state-rig");
+      const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code" });
+      const session = sessionRegistry.registerSession(node.id, "dev-impl@current-state-rig");
+      sessionRegistry.updateStatus(session.id, "stopped");
+      sessionRegistry.updateStartupStatus(session.id, "failed");
+      insertStartupContextRow(db, node.id);
+
+      const res = await app.request("/api/up", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sourceRef: "current-state-rig" }),
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.status).toBe("restored");
+      expect(body.snapshotKind).toBe("auto-rehydrate");
+      expect(body.warnings).toContain("No restore-usable snapshot existed; captured current DB state as auto-rehydrate snapshot for reboot recovery.");
     });
   });
 

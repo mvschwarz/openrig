@@ -7,6 +7,12 @@ import type { SnapshotRepository } from "../src/domain/snapshot-repository.js";
 import type { SnapshotCapture } from "../src/domain/snapshot-capture.js";
 import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
 
+function insertStartupContextRow(db: Database.Database, nodeId: string) {
+  db.prepare(
+    "INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, ?, ?, ?)"
+  ).run(nodeId, "[]", "[]", "[]", "claude-code");
+}
+
 describe("Rig CRUD routes", () => {
   let db: Database.Database;
   let app: Hono;
@@ -513,6 +519,26 @@ describe("Rig CRUD routes", () => {
     expect(res.status).toBe(404);
     const body = await res.json();
     expect(body.code).toBe("no_snapshot");
+  });
+
+  it("POST /api/rigs/:id/up captures auto-rehydrate snapshot from durable current state", async () => {
+    const rig = repo.createRig("rehydrate-rig");
+    const node = repo.addNode(rig.id, "dev.impl", { runtime: "claude-code" });
+    const session = sessionRegistry.registerSession(node.id, "dev-impl@rehydrate-rig");
+    sessionRegistry.updateStatus(session.id, "stopped");
+    sessionRegistry.updateStartupStatus(session.id, "failed");
+    insertStartupContextRow(db, node.id);
+
+    const res = await app.request(`/api/rigs/${rig.id}/up`, { method: "POST" });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.status).toBe("restored");
+    expect(body.snapshotKind).toBe("auto-rehydrate");
+    expect(body.warnings).toContain("No restore-usable snapshot existed; captured current DB state as auto-rehydrate snapshot for reboot recovery.");
+    const autoRehydrate = db
+      .prepare("SELECT kind FROM snapshots WHERE rig_id = ? AND kind = 'auto-rehydrate'")
+      .get(rig.id) as { kind: string } | undefined;
+    expect(autoRehydrate?.kind).toBe("auto-rehydrate");
   });
 
   it("POST /api/rigs/:id/up includes rigResult from restore rollup", async () => {
