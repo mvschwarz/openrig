@@ -123,19 +123,41 @@ export class AgentImageLibraryService {
   }
 
   /**
-   * Atomically increment the fork count + bump lastUsedAt on stats.json.
-   * Used by the instantiator when an image is consumed via session_source:
-   * mode: agent_image AND by the rig fork verb when forking from an image.
+   * Atomically update stats.json — bump lastUsedAt always; increment
+   * forkCount only when `incrementForkCount: true` (default true to
+   * preserve back-compat with the first-shipped signature). Used by
+   * the instantiator in two phases:
+   *   1. Pre-launch (incrementForkCount: false): records the operator's
+   *      INTENT to consume the image. lastUsedAt updates so the library
+   *      view shows recent activity even when the launch ultimately
+   *      fails — operators see "this image was tried" without conflating
+   *      attempts with successful forks.
+   *   2. Post-launch on success (incrementForkCount: true): increments
+   *      forkCount only when startupResult.ok===true (PL-016 hardening
+   *      v0+1 review-lead live e2e finding 4, 2026-05-04). Prior
+   *      behavior incremented on intent regardless of outcome, which
+   *      polluted forkCount with failed-launch noise.
+   *
    * Best-effort: a stat-write failure surfaces as an AgentImageError but
    * does NOT abort the consumer (the image consumption path itself does
    * not depend on stats; the operator just loses fork-count visibility
    * on this consumption).
+   *
+   * Back-compat: legacy `recordConsumption(id, () => new Date())` form
+   * still works — a positional function argument is treated as the
+   * `now` clock with `incrementForkCount: true`.
    */
-  recordConsumption(id: string, now: () => Date = () => new Date()): void {
+  recordConsumption(
+    id: string,
+    optsOrNow?: { incrementForkCount?: boolean; now?: () => Date } | (() => Date),
+  ): void {
     const entry = this.entries.get(id);
     if (!entry) {
       throw new AgentImageError("image_not_found", `agent image '${id}' not found in library`);
     }
+    const opts = typeof optsOrNow === "function"
+      ? { incrementForkCount: true, now: optsOrNow }
+      : { incrementForkCount: optsOrNow?.incrementForkCount ?? true, now: optsOrNow?.now ?? (() => new Date()) };
     const statsPath = join(entry.sourcePath, STATS_FILENAME);
     let current: AgentImageStats = { ...entry.stats };
     try {
@@ -148,8 +170,8 @@ export class AgentImageLibraryService {
       // Malformed stats.json — fall through with the in-memory copy.
     }
     const next: AgentImageStats = {
-      forkCount: (current.forkCount ?? 0) + 1,
-      lastUsedAt: now().toISOString(),
+      forkCount: (current.forkCount ?? 0) + (opts.incrementForkCount ? 1 : 0),
+      lastUsedAt: opts.now().toISOString(),
       estimatedSizeBytes: current.estimatedSizeBytes ?? entry.stats.estimatedSizeBytes,
       lineage: current.lineage ?? entry.stats.lineage,
     };

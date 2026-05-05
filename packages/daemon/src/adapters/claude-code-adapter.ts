@@ -27,6 +27,14 @@ export interface ClaudeAdapterFsOps {
 
 const SHELL_COMMANDS = new Set(["bash", "fish", "nu", "sh", "tmux", "zsh"]);
 
+// PL-016 hardening v0+1 (review-lead live e2e finding 1, 2026-05-04):
+// Real Claude Code binary needs 1-3s to write the new fork session-name
+// file under ~/.claude/sessions/. Poll instead of single-shot lookup.
+// 12 × 500ms = 6s ceiling — comfortably above the observed cold-start
+// fork-file write window without making a bad-token error feel slow.
+const FORK_POLL_ATTEMPTS = 12;
+const FORK_POLL_DELAY_MS = 500;
+
 /**
  * Claude Code runtime adapter. Projects resources to .claude/ targets
  * and delivers startup files via guidance merge, skill install, or tmux send-text.
@@ -193,12 +201,18 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       if (!enterResult.ok) {
         return { ok: false, error: `Failed to send Enter: ${enterResult.message}` };
       }
-      // Capture the NEW session id post-fork. Parent id is NOT persisted.
-      const newToken = this.captureResumeToken(opts.name);
+      // PL-016 hardening (review-lead live e2e finding 1, 2026-05-04):
+      // claude needs 1-3s to write the new fork session-name file under
+      // ~/.claude/sessions/. The original implementation captured the
+      // token IMMEDIATELY after Enter, which always returned undefined
+      // against a real binary — so EVERY claude-code agent_image fork
+      // had been broken since PL-016 merge until this fix. Poll on the
+      // verifyResumeLaunch cadence (12 × 500ms = 6s ceiling).
+      const newToken = await this.pollForResumeToken(opts.name, FORK_POLL_ATTEMPTS, FORK_POLL_DELAY_MS);
       if (!newToken) {
         return {
           ok: false,
-          error: "claude-code fork: could not capture new post-fork session id from claude session storage",
+          error: `claude-code fork: could not capture new post-fork session id from claude session storage after ${FORK_POLL_ATTEMPTS} polls (${(FORK_POLL_ATTEMPTS * FORK_POLL_DELAY_MS) / 1000}s ceiling)`,
         };
       }
       return { ok: true, resumeToken: newToken, resumeType: "claude_id" };
@@ -416,6 +430,28 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
    * Finds the session file whose name matches the expected session name.
    * Returns the sessionId if found, undefined otherwise.
    */
+  /**
+   * PL-016 hardening v0+1 — poll captureResumeToken on the
+   * verifyResumeLaunch cadence. Returns the token as soon as the
+   * session file appears, or undefined after attempts × delayMs ceiling.
+   * Used by the fork branch where the new session-name file appears
+   * 1-3s after the Enter key is sent (cold-start fork-file write).
+   */
+  private async pollForResumeToken(
+    expectedName: string,
+    attempts: number,
+    delayMs: number,
+  ): Promise<string | undefined> {
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      const token = this.captureResumeToken(expectedName);
+      if (token) return token;
+      if (attempt < attempts - 1) {
+        await this.sleep(delayMs);
+      }
+    }
+    return undefined;
+  }
+
   private captureResumeToken(expectedName: string): string | undefined {
     try {
       const home = this.fs.homedir ?? (typeof process !== "undefined" ? process.env.HOME : undefined);
