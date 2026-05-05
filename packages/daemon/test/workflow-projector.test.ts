@@ -252,6 +252,77 @@ describe("WorkflowProjector + WorkflowRuntime (PL-004 Phase D; transactional-scr
     expect(events.filter((e) => e.type === "workflow.next_qitem_projected")).toHaveLength(1);
   });
 
+  it("project(handoff) follows next_hop.suggested_roles so a final QA step can loop back to Discovery", async () => {
+    const loopSpec = `workflow:
+  id: rsi-loop-regression
+  version: 1
+  entry:
+    role: discovery-router
+  roles:
+    discovery-router:
+      preferred_targets:
+        - discovery@rig
+    qa-tester:
+      preferred_targets:
+        - qa@rig
+  steps:
+    - id: discovery
+      actor_role: discovery-router
+      allowed_exits:
+        - handoff
+      next_hop:
+        mode: prefer
+        suggested_roles:
+          - qa-tester
+    - id: qa
+      actor_role: qa-tester
+      allowed_exits:
+        - handoff
+        - done
+      next_hop:
+        mode: prefer
+        suggested_roles:
+          - discovery-router
+  invariants:
+    allowed_exits:
+      - handoff
+      - done
+`;
+    const loopSpecPath = join(tmp, "loop-regression.yaml");
+    writeFileSync(loopSpecPath, loopSpec);
+    const inst = await runtime.instantiate({
+      specPath: loopSpecPath,
+      rootObjective: "loop regression",
+      createdBySession: "ops@rig",
+    });
+
+    const qaProjection = await runtime.project({
+      instanceId: inst.instance.instanceId,
+      currentPacketId: inst.entryQitemId,
+      exit: "handoff",
+      actorSession: "discovery@rig",
+      resultNote: "candidate ready",
+    });
+    expect(qaProjection.nextStepId).toBe("qa");
+    expect(qaProjection.nextOwnerSession).toBe("qa@rig");
+
+    const loopProjection = await runtime.project({
+      instanceId: inst.instance.instanceId,
+      currentPacketId: qaProjection.nextQitemId!,
+      exit: "handoff",
+      actorSession: "qa@rig",
+      resultNote: "runtime signal ready for discovery",
+    });
+
+    expect(loopProjection.nextStepId).toBe("discovery");
+    expect(loopProjection.nextOwnerSession).toBe("discovery@rig");
+    expect(loopProjection.nextQitemId).not.toBeNull();
+    expect(loopProjection.instance.status).toBe("active");
+    expect(loopProjection.instance.currentStepId).toBe("discovery");
+    expect(loopProjection.instance.currentFrontier).toEqual([loopProjection.nextQitemId]);
+    expect(queueRepo.getById(qaProjection.nextQitemId!)?.closureTarget).toBe("discovery@rig");
+  });
+
   it("transactional-scribe ROLLBACK: if next-qitem creation fails, prior packet remains in-progress + no trail row + no orphan qitem", async () => {
     const inst = await runtime.instantiate({
       specPath,

@@ -429,11 +429,16 @@ function resolveCurrentStep(
 }
 
 /**
- * Resolve the next step. v1 = one-hop continuity (the next step in
- * declaration order). Multi-hop chaining via `next_hop.suggested_roles`
- * is a graduation feature per PRD § Risks "Workflow runtime over-engineered".
+ * Resolve the next step. Prefer the spec-authored `next_hop.suggested_roles`
+ * edge, then fall back to declaration order for legacy/simple specs.
  */
 function resolveNextStep(spec: WorkflowSpec, currentStep: WorkflowStepSpec): WorkflowStepSpec | null {
+  if (currentStep.next_hop?.mode === "forbid") return null;
+  for (const role of currentStep.next_hop?.suggested_roles ?? []) {
+    const target = spec.steps.find((s) => s.actor_role === role);
+    if (target) return target;
+  }
+  if (currentStep.next_hop?.mode === "require") return null;
   const idx = spec.steps.findIndex((s) => s.id === currentStep.id);
   if (idx === -1) return null;
   return spec.steps[idx + 1] ?? null;
