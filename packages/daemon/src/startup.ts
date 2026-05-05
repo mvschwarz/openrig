@@ -176,7 +176,11 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // Reject `<member>@<unknown-rig>` shapes by checking the rig portion
   // against the rig registry. Bare ids without `@` are also rejected
   // (no canonical rig binding).
+  const isHumanSeatSessionRef = (sessionRef: string): boolean => {
+    return /^human(?:-[A-Za-z0-9._-]+)?@(kernel|host)$/.test(sessionRef);
+  };
   const topologyValidateRig = (sessionRef: string): boolean => {
+    if (isHumanSeatSessionRef(sessionRef)) return true;
     const m = /^[^@]+@(.+)$/.exec(sessionRef);
     if (!m) return false;
     const rigName = m[1]!;
