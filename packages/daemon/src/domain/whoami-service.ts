@@ -144,7 +144,7 @@ export class WhoamiService {
     this.contextUsageStore = deps.contextUsageStore ?? null;
   }
 
-  resolve(query: { nodeId?: string; sessionName?: string }): WhoamiResult | null {
+  resolve(query: { nodeId?: string; sessionName?: string; targetRepoOverride?: string }): WhoamiResult | null {
     let nodeRow: NodeRow | undefined;
     let resolvedBy: "node_id" | "session_name";
     let currentSessionName: string | null;
@@ -320,7 +320,7 @@ export class WhoamiService {
     const workspace = resolveWorkspaceContext({
       spec: workspaceSpec,
       cwd: nodeRow.cwd,
-      envOverride: process.env["OPENRIG_TARGET_REPO"] ?? null,
+      envOverride: query.targetRepoOverride ?? process.env["OPENRIG_TARGET_REPO"] ?? null,
     });
 
     return {

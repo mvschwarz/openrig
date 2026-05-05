@@ -198,11 +198,13 @@ export function whoamiCommand(depsOverride?: WhoamiDeps): Command {
       }
 
       const client = deps.clientFactory(getDaemonUrl(status));
-      const query = source.nodeId
-        ? `nodeId=${encodeURIComponent(source.nodeId)}`
-        : `sessionName=${encodeURIComponent(source.sessionName!)}`;
+      const params = new URLSearchParams();
+      if (source.nodeId) params.set("nodeId", source.nodeId);
+      else params.set("sessionName", source.sessionName!);
+      const targetRepo = readOpenRigEnv("OPENRIG_TARGET_REPO", "RIGGED_TARGET_REPO");
+      if (targetRepo) params.set("targetRepo", targetRepo);
 
-      const res = await client.get<Record<string, unknown>>(`/api/whoami?${query}`);
+      const res = await client.get<Record<string, unknown>>(`/api/whoami?${params.toString()}`);
 
       if (opts.json) {
         console.log(JSON.stringify(res.data, null, 2));

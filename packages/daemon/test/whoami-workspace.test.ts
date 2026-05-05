@@ -76,6 +76,22 @@ describe("whoami workspace block (PL-007)", () => {
     expect(result?.workspace?.knowledgeKind).toBe("knowledge");
   });
 
+  it("honors caller-supplied target repo override for CLI-scoped whoami", () => {
+    const rig = rigRepo.createRig("alpha-rig");
+    const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code", cwd: "/Users/op/hub/main/sub" });
+    rigRepo.setRigWorkspace(rig.id, {
+      workspaceRoot: "/Users/op/hub",
+      repos: [
+        { name: "main", path: "/Users/op/hub/main", kind: "project" },
+        { name: "internal", path: "/Users/op/hub/internal", kind: "project" },
+      ],
+      defaultRepo: "main",
+    });
+
+    const result = whoami.resolve({ nodeId: node.id, targetRepoOverride: "internal" });
+    expect(result?.workspace?.activeRepo).toBe("internal");
+  });
+
   it("returns workspace=null when rig has no workspace declared", () => {
     const rig = rigRepo.createRig("plain-rig");
     const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code", cwd: "/x" });
