@@ -87,6 +87,45 @@ export class RigRepository {
     );
   }
 
+  /**
+   * PL-007 Workspace Primitive — persist the typed workspace block on the
+   * rigs row. Stored as JSON in `workspace_json` (migration 038). Pass
+   * null to clear. Older test fixtures that bypass the canonical migration
+   * list don't have the column; setter is a no-op in that case (the
+   * caller's contract is "best-effort persistence"). Whoami / node-inventory
+   * read this column to surface the rig's workspace block alongside cwd.
+   */
+  setRigWorkspace(rigId: string, workspace: import("./types.js").WorkspaceSpec | null): void {
+    if (!this.hasRigColumn("workspace_json")) return;
+    const json = workspace ? JSON.stringify(workspace) : null;
+    this.db.prepare("UPDATE rigs SET workspace_json = ?, updated_at = ? WHERE id = ?")
+      .run(json, new Date().toISOString(), rigId);
+  }
+
+  /** PL-007 — read the persisted workspace block for a rig. */
+  getRigWorkspace(rigId: string): import("./types.js").WorkspaceSpec | null {
+    if (!this.hasRigColumn("workspace_json")) return null;
+    const row = this.db.prepare("SELECT workspace_json FROM rigs WHERE id = ?")
+      .get(rigId) as { workspace_json: string | null } | undefined;
+    if (!row || !row.workspace_json) return null;
+    try {
+      return JSON.parse(row.workspace_json) as import("./types.js").WorkspaceSpec;
+    } catch {
+      return null;
+    }
+  }
+
+  /** PL-007 — defensive column probe on rigs (migration 038's
+   *  workspace_json is absent in legacy test fixtures). */
+  private hasRigColumn(columnName: string): boolean {
+    try {
+      return this.db.prepare("PRAGMA table_info(rigs)").all()
+        .some((row) => (row as { name?: string }).name === columnName);
+    } catch {
+      return false;
+    }
+  }
+
   addNode(rigId: string, logicalId: string, opts?: NodeOptions): Node {
     // Same-rig guard for podId
     if (opts?.podId) {

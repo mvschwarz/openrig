@@ -9,6 +9,8 @@ import { Link, useParams } from "@tanstack/react-router";
 import { useQueryClient } from "@tanstack/react-query";
 import { useSlices, type SliceFilter, type SliceListEntry, type SliceListResponse, type SlicesUnavailable } from "../../hooks/useSlices.js";
 import { useActiveLens, clearActiveLens } from "../../hooks/useSpecLibrary.js";
+import { useWorkspace, type WhoamiWorkspaceUI } from "../../hooks/useWorkspace.js";
+import { WorkspaceKindBadge, resolveKindForPath } from "../WorkspaceKindBadge.js";
 
 const FILTERS: SliceFilter[] = ["all", "active", "done", "blocked"];
 
@@ -22,6 +24,7 @@ export function SliceExplorerPanel({ onNavigate = () => {} }: { onNavigate?: () 
   const [filter, setFilter] = useState<SliceFilter>("active");
   const [showAll, setShowAll] = useState(false);
   const queryClient = useQueryClient();
+  const workspace = useWorkspace();
   const { data: activeLens } = useActiveLens();
   const lensActive = !!activeLens && !showAll;
   const list = useSlices(
@@ -109,6 +112,7 @@ export function SliceExplorerPanel({ onNavigate = () => {} }: { onNavigate?: () 
             slice={slice}
             selected={slice.name === selectedName}
             onNavigate={onNavigate}
+            workspace={workspace.data ?? null}
           />
         ))}
       </div>
@@ -120,10 +124,12 @@ function SliceListRow({
   slice,
   selected,
   onNavigate,
+  workspace,
 }: {
   slice: SliceListEntry;
   selected: boolean;
   onNavigate: () => void;
+  workspace: WhoamiWorkspaceUI | null;
 }) {
   const statusGlyph = slice.status === "done"
     ? "D"
@@ -148,6 +154,10 @@ function SliceListRow({
       <div className="flex items-center gap-2">
         <span className="font-mono text-[10px] text-stone-500" aria-label={`status ${slice.status}`}>{statusGlyph}</span>
         <span className="min-w-0 flex-1 truncate font-mono text-[10px] font-semibold text-stone-900">{slice.name}</span>
+        {(() => {
+          const kind = resolveKindForPath(slice.slicePath ?? null, workspace);
+          return kind ? <WorkspaceKindBadge kind={kind} compact /> : null;
+        })()}
         {slice.railItem && (
           <span className="font-mono text-[8px] uppercase tracking-[0.10em] text-stone-500">{slice.railItem}</span>
         )}
