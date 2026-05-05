@@ -45,6 +45,7 @@ export interface RiggedConfig {
   };
   recovery: {
     autoDriveProviderPrompts: boolean;
+    providerAuthEnvAllowlist: string;
   };
 }
 
@@ -72,6 +73,7 @@ const DEFAULTS = {
   },
   recovery: {
     autoDriveProviderPrompts: false,
+    providerAuthEnvAllowlist: "",
   },
 } as const;
 
@@ -92,6 +94,7 @@ export const VALID_KEYS = [
   "ui.preview.max_pins",
   "ui.preview.default_lines",
   "recovery.auto_drive_provider_prompts",
+  "recovery.provider_auth_env_allowlist",
 ] as const;
 
 export type ValidKey = typeof VALID_KEYS[number];
@@ -116,6 +119,7 @@ export const ENV_MAP: Record<ValidKey, { primary: string; legacy: string }> = {
   "ui.preview.max_pins": { primary: "OPENRIG_UI_PREVIEW_MAX_PINS", legacy: "RIGGED_UI_PREVIEW_MAX_PINS" },
   "ui.preview.default_lines": { primary: "OPENRIG_UI_PREVIEW_DEFAULT_LINES", legacy: "RIGGED_UI_PREVIEW_DEFAULT_LINES" },
   "recovery.auto_drive_provider_prompts": { primary: "OPENRIG_RECOVERY_AUTO_DRIVE_PROVIDER_PROMPTS", legacy: "RIGGED_RECOVERY_AUTO_DRIVE_PROVIDER_PROMPTS" },
+  "recovery.provider_auth_env_allowlist": { primary: "OPENRIG_RECOVERY_PROVIDER_AUTH_ENV_ALLOWLIST", legacy: "RIGGED_RECOVERY_PROVIDER_AUTH_ENV_ALLOWLIST" },
 };
 
 // Maps dotted-string config keys to the camelCase RiggedConfig path.
@@ -139,6 +143,7 @@ const KEY_TO_PATH: Record<ValidKey, string[]> = {
   "ui.preview.max_pins": ["ui", "preview", "maxPins"],
   "ui.preview.default_lines": ["ui", "preview", "defaultLines"],
   "recovery.auto_drive_provider_prompts": ["recovery", "autoDriveProviderPrompts"],
+  "recovery.provider_auth_env_allowlist": ["recovery", "providerAuthEnvAllowlist"],
 };
 
 function isValidKey(key: string): key is ValidKey {
@@ -273,6 +278,7 @@ export class ConfigStore {
       },
       recovery: {
         autoDriveProviderPrompts: v("recovery.auto_drive_provider_prompts") as boolean,
+        providerAuthEnvAllowlist: v("recovery.provider_auth_env_allowlist") as string,
       },
     };
   }

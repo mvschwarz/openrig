@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createDaemon } from "../src/startup.js";
+import { collectAllowlistedProviderAuthEnv, createDaemon } from "../src/startup.js";
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
 import { coreSchema } from "../src/db/migrations/001_core_schema.js";
@@ -152,6 +152,55 @@ describe("createDaemon startup composition", () => {
     } finally {
       vi.unstubAllEnvs();
     }
+  });
+
+  it("passes only explicitly allowlisted provider auth env into launched tmux sessions", async () => {
+    vi.stubEnv("OPENRIG_RECOVERY_PROVIDER_AUTH_ENV_ALLOWLIST", "ANTHROPIC_API_KEY,CLAUDE_CODE_OAUTH_TOKEN,OPENAI_API_KEY,BOGUS_TOKEN");
+    vi.stubEnv("ANTHROPIC_API_KEY", "anthropic-test-key");
+    vi.stubEnv("CLAUDE_CODE_OAUTH_TOKEN", "claude-oauth-test-token");
+    vi.stubEnv("OPENAI_API_KEY", "openai-test-key");
+    vi.stubEnv("BOGUS_TOKEN", "must-not-leak");
+    const cmuxFactory: CmuxTransportFactory = async () => {
+      throw Object.assign(new Error(""), { code: "ENOENT" });
+    };
+    const tmuxExec = vi.fn<ExecFn>(async () => "");
+
+    try {
+      const { db, deps } = await createDaemon({ cmuxFactory, tmuxExec });
+      const rig = deps.rigRepo.createRig("provider-auth-env-rig");
+      deps.rigRepo.addNode(rig.id, "worker", { runtime: "claude-code" });
+
+      const result = await deps.nodeLauncher.launchNode(rig.id, "worker");
+
+      expect(result.ok).toBe(true);
+      const newSessionCmd = tmuxExec.mock.calls
+        .map((call) => call[0])
+        .find((cmd) => cmd.includes("tmux new-session"));
+      expect(newSessionCmd).toBeDefined();
+      expect(newSessionCmd).toContain("-e 'ANTHROPIC_API_KEY=anthropic-test-key'");
+      expect(newSessionCmd).toContain("-e 'CLAUDE_CODE_OAUTH_TOKEN=claude-oauth-test-token'");
+      expect(newSessionCmd).toContain("-e 'OPENAI_API_KEY=openai-test-key'");
+      expect(newSessionCmd).not.toContain("BOGUS_TOKEN");
+
+      db.close();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("collectAllowlistedProviderAuthEnv ignores empty, invalid, and unknown names", () => {
+    expect(collectAllowlistedProviderAuthEnv(
+      "ANTHROPIC_API_KEY, nope, ../BAD, OPENAI_API_KEY, BOGUS_TOKEN, CLAUDE_CODE_OAUTH_TOKEN",
+      {
+        ANTHROPIC_API_KEY: "anthropic-test-key",
+        OPENAI_API_KEY: "",
+        BOGUS_TOKEN: "must-not-leak",
+        CLAUDE_CODE_OAUTH_TOKEN: "claude-oauth-test-token",
+      },
+    )).toEqual({
+      ANTHROPIC_API_KEY: "anthropic-test-key",
+      CLAUDE_CODE_OAUTH_TOKEN: "claude-oauth-test-token",
+    });
   });
 
   it("createDaemon wires node cmux service for POST /api/rigs/:rigId/nodes/:logicalId/open-cmux", async () => {

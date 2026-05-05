@@ -164,6 +164,34 @@ interface DaemonResult {
   contextMonitor: import("./domain/context-monitor.js").ContextMonitor;
 }
 
+const KNOWN_PROVIDER_AUTH_ENV = new Set([
+  "ANTHROPIC_API_KEY",
+  "ANTHROPIC_AUTH_TOKEN",
+  "CLAUDE_CODE_OAUTH_TOKEN",
+  "OPENAI_API_KEY",
+  "OPENAI_BASE_URL",
+  "OPENAI_ORG_ID",
+  "OPENAI_PROJECT_ID",
+]);
+
+export function collectAllowlistedProviderAuthEnv(
+  raw: string | null | undefined,
+  env: Record<string, string | undefined>,
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const item of (raw ?? "").split(",")) {
+    const name = item.trim();
+    if (!name) continue;
+    if (!/^[A-Z_][A-Z0-9_]*$/.test(name)) continue;
+    if (!KNOWN_PROVIDER_AUTH_ENV.has(name)) continue;
+    const value = env[name];
+    if (typeof value === "string" && value.length > 0) {
+      out[name] = value;
+    }
+  }
+  return out;
+}
+
 export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> {
   const dbPath = opts?.dbPath ?? ":memory:";
   const db = createDb(dbPath);
@@ -228,6 +256,11 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const activityHookUrl = readOpenRigEnv("OPENRIG_URL", "RIGGED_URL") || undefined;
   const openRigPort = readOpenRigEnv("OPENRIG_PORT", "RIGGED_PORT") || undefined;
   const openRigHost = readOpenRigEnv("OPENRIG_HOST", "RIGGED_HOST") || undefined;
+  const startupSettings = new ContextPackSettingsStore().resolveConfig();
+  const providerAuthEnv = collectAllowlistedProviderAuthEnv(
+    startupSettings.recoveryProviderAuthEnvAllowlistRaw,
+    process.env,
+  );
   const transcriptStore = new TranscriptStore({
     enabled: transcriptsEnabled,
     transcriptsRoot: transcriptsPath,
@@ -247,6 +280,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       OPENRIG_HOST: openRigHost,
       OPENRIG_URL: activityHookUrl,
       OPENRIG_ACTIVITY_HOOK_TOKEN: activityHookToken,
+      ...providerAuthEnv,
     },
   });
 

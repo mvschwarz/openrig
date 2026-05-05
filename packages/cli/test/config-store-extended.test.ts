@@ -31,10 +31,14 @@ function clearEnv(): () => void {
     "OPENRIG_WORKSPACE_STEERING_PATH", "OPENRIG_WORKSPACE_FIELD_NOTES_ROOT",
     "OPENRIG_WORKSPACE_SPECS_ROOT",
     "OPENRIG_FILES_ALLOWLIST", "OPENRIG_PROGRESS_SCAN_ROOTS",
+    "OPENRIG_RECOVERY_AUTO_DRIVE_PROVIDER_PROMPTS",
+    "OPENRIG_RECOVERY_PROVIDER_AUTH_ENV_ALLOWLIST",
     "RIGGED_PORT", "RIGGED_HOST", "RIGGED_DB",
     "RIGGED_TRANSCRIPTS_ENABLED", "RIGGED_TRANSCRIPTS_PATH",
     "RIGGED_WORKSPACE_ROOT", "RIGGED_WORKSPACE_SLICES_ROOT",
     "RIGGED_FILES_ALLOWLIST", "RIGGED_PROGRESS_SCAN_ROOTS",
+    "RIGGED_RECOVERY_AUTO_DRIVE_PROVIDER_PROMPTS",
+    "RIGGED_RECOVERY_PROVIDER_AUTH_ENV_ALLOWLIST",
   ];
   const saved: Record<string, string | undefined> = {};
   for (const k of keysToClear) {
@@ -73,6 +77,7 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
       "files.allowlist", "progress.scan_roots",
       "ui.preview.refresh_interval_seconds", "ui.preview.max_pins", "ui.preview.default_lines",
       "recovery.auto_drive_provider_prompts",
+      "recovery.provider_auth_env_allowlist",
     ];
     expect([...VALID_KEYS]).toEqual(expected);
   });
@@ -256,6 +261,22 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
       expect(r.source).toBe("env");
     } finally {
       delete process.env["OPENRIG_UI_PREVIEW_REFRESH_INTERVAL_SECONDS"];
+    }
+  });
+
+  it("recovery provider auth env allowlist defaults empty and supports env override", () => {
+    const store = new ConfigStore(configPath);
+    expect(store.get("recovery.provider_auth_env_allowlist")).toBe("");
+    store.set("recovery.provider_auth_env_allowlist", "ANTHROPIC_API_KEY,CLAUDE_CODE_OAUTH_TOKEN");
+    expect(store.resolve().recovery.providerAuthEnvAllowlist).toBe("ANTHROPIC_API_KEY,CLAUDE_CODE_OAUTH_TOKEN");
+
+    process.env["OPENRIG_RECOVERY_PROVIDER_AUTH_ENV_ALLOWLIST"] = "OPENAI_API_KEY";
+    try {
+      const r = store.resolveWithSource("recovery.provider_auth_env_allowlist");
+      expect(r.value).toBe("OPENAI_API_KEY");
+      expect(r.source).toBe("env");
+    } finally {
+      delete process.env["OPENRIG_RECOVERY_PROVIDER_AUTH_ENV_ALLOWLIST"];
     }
   });
 
