@@ -6,6 +6,9 @@
 
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import http from "node:http";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Command } from "commander";
 import { contextPackCommand } from "../src/commands/context-pack.js";
 import { DaemonClient } from "../src/client.js";
@@ -165,6 +168,109 @@ describe("rig context-pack CLI (PL-014)", () => {
     prog.addCommand(contextPackCommand(runningDeps(port)));
     return prog;
   }
+
+  function writePack(manifest: string): string {
+    const dir = mkdtempSync(join(tmpdir(), "openrig-context-pack-test-"));
+    writeFileSync(join(dir, "manifest.yaml"), manifest);
+    return dir;
+  }
+
+  it.each([
+    [
+      "path traversal",
+      `name: invalid-pack
+version: 1.0.0
+files:
+  - path: ../secret.md
+    role: notes
+`,
+      "must be a relative path inside the pack",
+    ],
+    [
+      "absolute path",
+      `name: invalid-pack
+version: 1.0.0
+files:
+  - path: /etc/passwd
+    role: notes
+`,
+      "must be a relative path inside the pack",
+    ],
+    [
+      "leading backslash",
+      `name: invalid-pack
+version: 1.0.0
+files:
+  - path: '\\evil.md'
+    role: notes
+`,
+      "must be a relative path inside the pack",
+    ],
+    [
+      "unknown suffix",
+      `name: invalid-pack
+version: 1.0.0
+files:
+  - path: secret.bin
+    role: notes
+`,
+      "has an unsupported suffix",
+    ],
+    [
+      "missing name",
+      `version: 1.0.0
+files:
+  - path: notes.md
+    role: notes
+`,
+      "missing required field 'name'",
+    ],
+    [
+      "missing version",
+      `name: invalid-pack
+files:
+  - path: notes.md
+    role: notes
+`,
+      "missing required field 'version'",
+    ],
+    [
+      "missing files",
+      `name: invalid-pack
+version: 1.0.0
+`,
+      "must declare 'files: [...]'",
+    ],
+    [
+      "missing path",
+      `name: invalid-pack
+version: 1.0.0
+files:
+  - role: notes
+`,
+      "missing 'path'",
+    ],
+    [
+      "missing role",
+      `name: invalid-pack
+version: 1.0.0
+files:
+  - path: notes.md
+`,
+      "missing 'role'",
+    ],
+  ])("rejects invalid context-pack add manifest: %s", async (_name, manifest, expectedError) => {
+    const dir = writePack(manifest);
+    try {
+      const { errLogs, exitCode } = await captureLogs(async () => {
+        await makeCmd().parseAsync(["node", "rig", "context-pack", "add", dir]);
+      });
+      expect(exitCode).toBe(1);
+      expect(errLogs.join("\n")).toContain(expectedError);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 
   it("list shows discovered packs", async () => {
     const { logs, exitCode } = await captureLogs(async () => {

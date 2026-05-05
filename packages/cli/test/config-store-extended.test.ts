@@ -10,6 +10,7 @@
 //   - init-workspace creates 5 subdirs + READMEs + STEERING placeholder; idempotent
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { Command } from "commander";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -19,6 +20,7 @@ import {
   parseNamedPairs,
   deriveWorkspaceDefault,
 } from "../src/config-store.js";
+import { configCommand } from "../src/commands/config.js";
 import { initWorkspaceCommand, runInitWorkspace } from "../src/commands/config-init-workspace.js";
 
 function clearEnv(): () => void {
@@ -337,6 +339,36 @@ describe("init-workspace runner", () => {
     console.log = (msg?: unknown) => { logs.push(String(msg)); };
     try {
       await cmd.parseAsync(["node", "init-workspace", "--root", workspaceRoot, "--dry-run", "--json"]);
+    } finally {
+      console.log = origLog;
+    }
+
+    const parsed = JSON.parse(logs.join("\n")) as { root: string; dryRun: boolean; subdirs: Array<{ name: string }> };
+    expect(parsed.root).toBe(workspaceRoot);
+    expect(parsed.dryRun).toBe(true);
+    expect(parsed.subdirs.map((s) => s.name)).toContain("slices");
+  });
+
+  it("rig-level --json emits parseable JSON for config init-workspace", async () => {
+    const cmd = new Command("rig");
+    cmd.exitOverride();
+    cmd.option("--json", "emit machine-readable JSON");
+    cmd.addCommand(configCommand(configPath));
+
+    const logs: string[] = [];
+    const origLog = console.log;
+    console.log = (msg?: unknown) => { logs.push(String(msg)); };
+    try {
+      await cmd.parseAsync([
+        "node",
+        "rig",
+        "--json",
+        "config",
+        "init-workspace",
+        "--root",
+        workspaceRoot,
+        "--dry-run",
+      ]);
     } finally {
       console.log = origLog;
     }
