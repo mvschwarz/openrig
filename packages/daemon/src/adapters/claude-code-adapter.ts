@@ -48,6 +48,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   private stateDir: string | null;
   private collectorAssetPath: string | null;
   private activityHookRelayAssetPath: string | null;
+  private autoDriveProviderPrompts: boolean;
 
   constructor(deps: {
     tmux: TmuxAdapter;
@@ -57,6 +58,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     stateDir?: string;
     collectorAssetPath?: string;
     activityHookRelayAssetPath?: string;
+    autoDriveProviderPrompts?: boolean;
   }) {
     this.tmux = deps.tmux;
     this.fs = deps.fsOps;
@@ -65,6 +67,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     this.stateDir = deps.stateDir ?? null;
     this.collectorAssetPath = deps.collectorAssetPath ?? null;
     this.activityHookRelayAssetPath = deps.activityHookRelayAssetPath ?? null;
+    this.autoDriveProviderPrompts = deps.autoDriveProviderPrompts ?? false;
   }
 
   async listInstalled(binding: NodeBinding): Promise<InstalledResource[]> {
@@ -300,6 +303,15 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
 
       if (probe.status === "resumed") {
         return { ok: true };
+      }
+
+      if (this.autoDriveProviderPrompts && probe.code === "trust_gate") {
+        const enterResult = await this.tmux.sendKeys(tmuxSession, ["Enter"]);
+        if (!enterResult.ok) {
+          return { ok: false, error: `Claude trust prompt auto-drive failed: ${enterResult.message}` };
+        }
+        await this.sleep(200);
+        continue;
       }
 
       if (attempt < attempts - 1) {

@@ -64,7 +64,7 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
     restoreEnv();
   });
 
-  it("VALID_KEYS includes the 5 legacy + 7 user-settings + 3 PL-018 ui.preview.* keys", () => {
+  it("VALID_KEYS includes legacy, user-settings, ui.preview, and recovery keys", () => {
     const expected = [
       "daemon.port", "daemon.host", "db.path",
       "transcripts.enabled", "transcripts.path",
@@ -72,6 +72,7 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
       "workspace.field_notes_root", "workspace.specs_root",
       "files.allowlist", "progress.scan_roots",
       "ui.preview.refresh_interval_seconds", "ui.preview.max_pins", "ui.preview.default_lines",
+      "recovery.auto_drive_provider_prompts",
     ];
     expect([...VALID_KEYS]).toEqual(expected);
   });
@@ -264,6 +265,14 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
     expect(cfg.ui.preview.refreshIntervalSeconds).toBe(3);
     expect(cfg.ui.preview.maxPins).toBe(4);
     expect(cfg.ui.preview.defaultLines).toBe(50);
+  });
+
+  it("recovery.auto_drive_provider_prompts defaults false and coerces booleans", () => {
+    const store = new ConfigStore(configPath);
+    expect(store.get("recovery.auto_drive_provider_prompts")).toBe(false);
+    store.set("recovery.auto_drive_provider_prompts", "true");
+    expect(store.get("recovery.auto_drive_provider_prompts")).toBe(true);
+    expect(store.resolve().recovery.autoDriveProviderPrompts).toBe(true);
   });
 });
 

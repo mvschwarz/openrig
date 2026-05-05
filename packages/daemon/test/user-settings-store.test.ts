@@ -54,7 +54,7 @@ describe("SettingsStore (User Settings v0)", () => {
     restoreEnv();
   });
 
-  it("SETTINGS_VALID_KEYS matches the documented 15-key set (12 baseline + 3 PL-018 ui.preview.*)", () => {
+  it("SETTINGS_VALID_KEYS matches the documented settings key set", () => {
     expect([...SETTINGS_VALID_KEYS]).toEqual([
       "daemon.port", "daemon.host", "db.path",
       "transcripts.enabled", "transcripts.path",
@@ -62,6 +62,7 @@ describe("SettingsStore (User Settings v0)", () => {
       "workspace.field_notes_root", "workspace.specs_root",
       "files.allowlist", "progress.scan_roots",
       "ui.preview.refresh_interval_seconds", "ui.preview.max_pins", "ui.preview.default_lines",
+      "recovery.auto_drive_provider_prompts",
     ]);
   });
 
@@ -106,6 +107,13 @@ describe("SettingsStore (User Settings v0)", () => {
     expect(cfg.workspaceSpecsRoot).toBe("/custom/ws/specs");
     expect(cfg.filesAllowlistRaw).toBe("workspace:/custom/ws");
     expect(cfg.progressScanRootsRaw).toBe("workspace:/custom/ws");
+  });
+
+  it("recovery.auto_drive_provider_prompts defaults false and resolves into daemon config", () => {
+    const store = new SettingsStore(configPath);
+    expect(store.resolveOne("recovery.auto_drive_provider_prompts").value).toBe(false);
+    store.set("recovery.auto_drive_provider_prompts", "true");
+    expect(store.resolveConfig().recoveryAutoDriveProviderPrompts).toBe(true);
   });
 
   it("per-subdir override beats the workspace.root cascade", () => {
