@@ -19,7 +19,7 @@ import {
   parseNamedPairs,
   deriveWorkspaceDefault,
 } from "../src/config-store.js";
-import { runInitWorkspace } from "../src/commands/config-init-workspace.js";
+import { initWorkspaceCommand, runInitWorkspace } from "../src/commands/config-init-workspace.js";
 
 function clearEnv(): () => void {
   const keysToClear = [
@@ -328,6 +328,23 @@ describe("init-workspace runner", () => {
       "slices", "steering", "progress", "field-notes", "specs",
     ]);
     expect(existsSync(workspaceRoot)).toBe(false);
+  });
+
+  it("command --json emits parseable JSON for agent setup flows", async () => {
+    const cmd = initWorkspaceCommand(configPath);
+    const logs: string[] = [];
+    const origLog = console.log;
+    console.log = (msg?: unknown) => { logs.push(String(msg)); };
+    try {
+      await cmd.parseAsync(["node", "init-workspace", "--root", workspaceRoot, "--dry-run", "--json"]);
+    } finally {
+      console.log = origLog;
+    }
+
+    const parsed = JSON.parse(logs.join("\n")) as { root: string; dryRun: boolean; subdirs: Array<{ name: string }> };
+    expect(parsed.root).toBe(workspaceRoot);
+    expect(parsed.dryRun).toBe(true);
+    expect(parsed.subdirs.map((s) => s.name)).toContain("slices");
   });
 
   it("creates 5 subdirs + READMEs + STEERING placeholder", () => {
