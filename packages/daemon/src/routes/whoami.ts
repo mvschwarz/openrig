@@ -8,6 +8,7 @@ export function whoamiRoutes(): Hono {
     const svc = c.get("whoamiService" as never) as WhoamiService;
     const nodeId = c.req.query("nodeId");
     const sessionName = c.req.query("sessionName");
+    const targetRepo = c.req.query("targetRepo");
 
     if (!nodeId && !sessionName) {
       return c.json({
@@ -16,7 +17,11 @@ export function whoamiRoutes(): Hono {
     }
 
     try {
-      const result = svc.resolve({ nodeId: nodeId ?? undefined, sessionName: sessionName ?? undefined });
+      const result = svc.resolve({
+        nodeId: nodeId ?? undefined,
+        sessionName: sessionName ?? undefined,
+        targetRepoOverride: targetRepo ?? undefined,
+      });
 
       if (!result) {
         const identifier = nodeId ?? sessionName;
