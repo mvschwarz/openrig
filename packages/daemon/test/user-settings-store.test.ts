@@ -23,8 +23,12 @@ function clearEnv(): () => void {
     "OPENRIG_WORKSPACE_STEERING_PATH", "OPENRIG_WORKSPACE_FIELD_NOTES_ROOT",
     "OPENRIG_WORKSPACE_SPECS_ROOT",
     "OPENRIG_FILES_ALLOWLIST", "OPENRIG_PROGRESS_SCAN_ROOTS",
+    "OPENRIG_RECOVERY_AUTO_DRIVE_PROVIDER_PROMPTS",
+    "OPENRIG_RECOVERY_PROVIDER_AUTH_ENV_ALLOWLIST",
     "RIGGED_PORT", "RIGGED_HOST", "RIGGED_FILES_ALLOWLIST",
     "RIGGED_PROGRESS_SCAN_ROOTS",
+    "RIGGED_RECOVERY_AUTO_DRIVE_PROVIDER_PROMPTS",
+    "RIGGED_RECOVERY_PROVIDER_AUTH_ENV_ALLOWLIST",
   ];
   const saved: Record<string, string | undefined> = {};
   for (const k of keys) {
@@ -63,6 +67,7 @@ describe("SettingsStore (User Settings v0)", () => {
       "files.allowlist", "progress.scan_roots",
       "ui.preview.refresh_interval_seconds", "ui.preview.max_pins", "ui.preview.default_lines",
       "recovery.auto_drive_provider_prompts",
+      "recovery.provider_auth_env_allowlist",
     ]);
   });
 
@@ -114,6 +119,13 @@ describe("SettingsStore (User Settings v0)", () => {
     expect(store.resolveOne("recovery.auto_drive_provider_prompts").value).toBe(false);
     store.set("recovery.auto_drive_provider_prompts", "true");
     expect(store.resolveConfig().recoveryAutoDriveProviderPrompts).toBe(true);
+  });
+
+  it("recovery.provider_auth_env_allowlist defaults empty and resolves into daemon config", () => {
+    const store = new SettingsStore(configPath);
+    expect(store.resolveOne("recovery.provider_auth_env_allowlist").value).toBe("");
+    store.set("recovery.provider_auth_env_allowlist", "ANTHROPIC_API_KEY,CLAUDE_CODE_OAUTH_TOKEN");
+    expect(store.resolveConfig().recoveryProviderAuthEnvAllowlistRaw).toBe("ANTHROPIC_API_KEY,CLAUDE_CODE_OAUTH_TOKEN");
   });
 
   it("per-subdir override beats the workspace.root cascade", () => {

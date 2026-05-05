@@ -37,7 +37,7 @@ Keys:
   workspace.*            root, slices_root, steering_path, field_notes_root, specs_root
   files.allowlist        name:/abs/path,name:/abs/path
   progress.scan_roots    name:/abs/path,name:/abs/path
-  recovery.*             auto_drive_provider_prompts
+  recovery.*             auto_drive_provider_prompts, provider_auth_env_allowlist
 
 Precedence: CLI flag > environment variable > config file > default`)
     .action((opts: { json?: boolean; withSource?: boolean }) => {

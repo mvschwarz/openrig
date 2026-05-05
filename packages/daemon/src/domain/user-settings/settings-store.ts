@@ -46,6 +46,7 @@ export const SETTINGS_VALID_KEYS = [
   "ui.preview.max_pins",
   "ui.preview.default_lines",
   "recovery.auto_drive_provider_prompts",
+  "recovery.provider_auth_env_allowlist",
 ] as const;
 
 export type SettingsValidKey = typeof SETTINGS_VALID_KEYS[number];
@@ -67,6 +68,7 @@ const ENV_MAP: Record<SettingsValidKey, { primary: string; legacy: string }> = {
   "ui.preview.max_pins": { primary: "OPENRIG_UI_PREVIEW_MAX_PINS", legacy: "RIGGED_UI_PREVIEW_MAX_PINS" },
   "ui.preview.default_lines": { primary: "OPENRIG_UI_PREVIEW_DEFAULT_LINES", legacy: "RIGGED_UI_PREVIEW_DEFAULT_LINES" },
   "recovery.auto_drive_provider_prompts": { primary: "OPENRIG_RECOVERY_AUTO_DRIVE_PROVIDER_PROMPTS", legacy: "RIGGED_RECOVERY_AUTO_DRIVE_PROVIDER_PROMPTS" },
+  "recovery.provider_auth_env_allowlist": { primary: "OPENRIG_RECOVERY_PROVIDER_AUTH_ENV_ALLOWLIST", legacy: "RIGGED_RECOVERY_PROVIDER_AUTH_ENV_ALLOWLIST" },
 };
 
 const KEY_TO_PATH: Record<SettingsValidKey, string[]> = {
@@ -86,6 +88,7 @@ const KEY_TO_PATH: Record<SettingsValidKey, string[]> = {
   "ui.preview.max_pins": ["ui", "preview", "maxPins"],
   "ui.preview.default_lines": ["ui", "preview", "defaultLines"],
   "recovery.auto_drive_provider_prompts": ["recovery", "autoDriveProviderPrompts"],
+  "recovery.provider_auth_env_allowlist": ["recovery", "providerAuthEnvAllowlist"],
 };
 
 export type SettingSource = "env" | "file" | "default";
@@ -166,6 +169,7 @@ function getDefaultValue(key: SettingsValidKey, workspaceRoot: string): string |
     case "ui.preview.max_pins": return 4;
     case "ui.preview.default_lines": return 50;
     case "recovery.auto_drive_provider_prompts": return false;
+    case "recovery.provider_auth_env_allowlist": return "";
     default: return "";
   }
 }
@@ -198,6 +202,7 @@ export interface ResolvedConfig {
   uiPreviewMaxPins: number;
   uiPreviewDefaultLines: number;
   recoveryAutoDriveProviderPrompts: boolean;
+  recoveryProviderAuthEnvAllowlistRaw: string;
 }
 
 export class SettingsStore {
@@ -248,6 +253,7 @@ export class SettingsStore {
       uiPreviewMaxPins: this.resolveOne("ui.preview.max_pins", fc, wr).value as number,
       uiPreviewDefaultLines: this.resolveOne("ui.preview.default_lines", fc, wr).value as number,
       recoveryAutoDriveProviderPrompts: this.resolveOne("recovery.auto_drive_provider_prompts", fc, wr).value as boolean,
+      recoveryProviderAuthEnvAllowlistRaw: this.resolveOne("recovery.provider_auth_env_allowlist", fc, wr).value as string,
     };
   }
 
