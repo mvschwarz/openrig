@@ -12,6 +12,10 @@ export interface AgentImageEntry {
   runtime: "claude-code" | "codex";
   sourceSeat: string;
   sourceSessionId: string;
+  /** PL-016 Finding 2 — source seat's cwd at snapshot time. null when
+   *  manifest predates Finding 2 fix (back-compat). The Use-as-starter
+   *  snippet emits `cwd: <sourceCwd>` when this is non-null. */
+  sourceCwd: string | null;
   notes: string | null;
   createdAt: string;
   sourceType: "user_file" | "workspace" | "builtin";

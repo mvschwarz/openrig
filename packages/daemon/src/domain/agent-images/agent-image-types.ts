@@ -29,6 +29,17 @@ export interface AgentImageManifest {
    *  identity from a runtime-resume token without breaking older
    *  manifests. */
   sourceResumeToken: string;
+  /** PL-016 Finding 2 (Option 3, founder-confirmed 2026-05-04): the
+   *  source seat's resolved cwd at snapshot time. Captured so the
+   *  Use-as-starter snippet can emit `cwd: <source_cwd>` and the fork
+   *  starts in the SAME directory the parent session was created in
+   *  — Claude's project-dir-scoped session storage works because the
+   *  jsonl file lives there. The daemon does NOT override cwd at fork
+   *  dispatch — if operator manually changes the rig.yaml cwd, fork
+   *  fails honestly with "no conversation found". Optional: manifests
+   *  authored before Finding 2 omit this field; snippet renders
+   *  without cwd line for back-compat. */
+  sourceCwd?: string;
   createdAt: string;
   notes?: string;
   /** Optional supplementary files (analogous to context_pack files).
@@ -78,6 +89,10 @@ export interface AgentImageEntry {
   runtime: AgentImageRuntime;
   sourceSeat: string;
   sourceSessionId: string;
+  /** PL-016 Finding 2 — source seat's cwd at snapshot time. null when
+   *  manifest predates Finding 2 fix (back-compat surface). Consumed
+   *  by the Use-as-starter snippet generator. */
+  sourceCwd: string | null;
   notes: string | null;
   createdAt: string;
   sourceType: AgentImageSourceType;

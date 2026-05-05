@@ -99,6 +99,15 @@ export function parseAgentImageManifest(rawYaml: string, sourcePath: string): Ag
 
   const notes = typeof obj["notes"] === "string" ? (obj["notes"] as string) : undefined;
 
+  // PL-016 Finding 2 (Option 3, founder-confirmed 2026-05-04): optional
+  // source_cwd captured at snapshot time. Manifests authored before this
+  // fix omit the field; consumers fall back to "no cwd line" rendering
+  // (back-compat).
+  const sourceCwdRaw = obj["source_cwd"] ?? obj["sourceCwd"];
+  const sourceCwd = typeof sourceCwdRaw === "string" && sourceCwdRaw.length > 0
+    ? sourceCwdRaw
+    : undefined;
+
   const filesRaw = obj["files"];
   const files: AgentImageManifestFile[] = [];
   if (Array.isArray(filesRaw)) {
@@ -164,6 +173,7 @@ export function parseAgentImageManifest(rawYaml: string, sourcePath: string): Ag
     sourceSeat: sourceSeatRaw,
     sourceSessionId: sourceSessionIdRaw,
     sourceResumeToken: sourceResumeTokenRaw,
+    ...(sourceCwd !== undefined ? { sourceCwd } : {}),
     createdAt,
     ...(notes !== undefined ? { notes } : {}),
     files,
