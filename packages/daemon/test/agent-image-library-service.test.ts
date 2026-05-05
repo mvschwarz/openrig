@@ -99,6 +99,67 @@ files: []
     expect(stats.forkCount).toBe(1);
   });
 
+  it("recordConsumption with incrementForkCount: false bumps lastUsedAt only (PL-016 hardening v0+1 finding 4)", () => {
+    writeImage(userRoot, "p", `
+name: p
+version: 1
+runtime: claude-code
+source_seat: x
+source_session_id: s
+source_resume_token: t
+files: []
+`, {});
+    const lib = new AgentImageLibraryService({
+      roots: [{ path: userRoot, sourceType: "user_file" }],
+    });
+    lib.scan();
+    const before = lib.list()[0]!;
+    expect(before.stats.forkCount).toBe(0);
+
+    // Pre-launch optimistic call — bumps lastUsedAt without inflating
+    // fork_count (lastUsedAt records intent regardless of outcome).
+    lib.recordConsumption(before.id, {
+      incrementForkCount: false,
+      now: () => new Date("2026-05-04T20:00:00Z"),
+    });
+    const afterIntent = lib.list()[0]!;
+    expect(afterIntent.stats.forkCount).toBe(0);
+    expect(afterIntent.stats.lastUsedAt).toBe("2026-05-04T20:00:00.000Z");
+
+    // Post-launch success call — bumps fork_count.
+    lib.recordConsumption(before.id, {
+      incrementForkCount: true,
+      now: () => new Date("2026-05-04T20:00:05Z"),
+    });
+    const afterSuccess = lib.list()[0]!;
+    expect(afterSuccess.stats.forkCount).toBe(1);
+    expect(afterSuccess.stats.lastUsedAt).toBe("2026-05-04T20:00:05.000Z");
+  });
+
+  it("recordConsumption back-compat: legacy positional `now` form still works", () => {
+    writeImage(userRoot, "p", `
+name: p
+version: 1
+runtime: claude-code
+source_seat: x
+source_session_id: s
+source_resume_token: t
+files: []
+`, {});
+    const lib = new AgentImageLibraryService({
+      roots: [{ path: userRoot, sourceType: "user_file" }],
+    });
+    lib.scan();
+    const before = lib.list()[0]!;
+    // Legacy form: positional `() => Date` argument is treated as the
+    // clock and incrementForkCount defaults to true (preserves the
+    // first-shipped signature for any out-of-tree callers).
+    lib.recordConsumption(before.id, () => new Date("2026-05-04T20:00:00Z"));
+    const after = lib.list()[0]!;
+    expect(after.stats.forkCount).toBe(1);
+    expect(after.stats.lastUsedAt).toBe("2026-05-04T20:00:00.000Z");
+  });
+
   it("pin / unpin write and remove the .pinned sentinel", () => {
     writeImage(userRoot, "p", `
 name: p
