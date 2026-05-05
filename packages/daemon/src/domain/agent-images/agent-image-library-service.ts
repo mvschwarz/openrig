@@ -285,6 +285,9 @@ export class AgentImageLibraryService {
       sourceSeat: manifest.sourceSeat,
       sourceSessionId: manifest.sourceSessionId,
       sourceResumeToken: manifest.sourceResumeToken,
+      // PL-016 Finding 2: surface sourceCwd verbatim from the manifest.
+      // null when the manifest predates Finding 2 (back-compat).
+      sourceCwd: manifest.sourceCwd ?? null,
       notes: manifest.notes ?? null,
       createdAt: manifest.createdAt,
       sourceType: root.sourceType,
@@ -326,6 +329,12 @@ export class AgentImageLibraryService {
       `source_resume_token: ${quoteIfNeeded(manifest.sourceResumeToken)}`,
       `created_at: ${quoteIfNeeded(manifest.createdAt)}`,
     ];
+    // PL-016 Finding 2: persist sourceCwd to manifest YAML so the
+    // Use-as-starter snippet can emit `cwd: <source_cwd>` from the
+    // library entry. Omitted when capture-time cwd was unknown.
+    if (manifest.sourceCwd) {
+      yamlLines.push(`source_cwd: ${quoteIfNeeded(manifest.sourceCwd)}`);
+    }
     if (manifest.notes) {
       yamlLines.push(`notes: |`);
       for (const line of manifest.notes.split("\n")) yamlLines.push(`  ${line}`);
