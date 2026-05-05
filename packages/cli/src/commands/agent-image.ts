@@ -217,14 +217,19 @@ Examples:
     .argument("<source-session>", "Source session canonical name (e.g., velocity-driver@openrig-velocity)")
     .description("Capture a productive seat's resumable state into a new agent image")
     .requiredOption("--name <name>", "Image name (used as the directory name and library id)")
-    .option("--version <version>", "Image version (default: 1)")
+    // PL-016 hardening v0+1 (review-lead live e2e finding 3, 2026-05-04):
+    // renamed from --version to --image-version because Commander.js
+    // intercepts the global --version flag (prints CLI version + exits
+    // 0 silently). Per-command name resolves the collision without
+    // losing the global --version surface.
+    .option("--image-version <version>", "Image version (default: 1)")
     .option("--notes <text>", "Operator-supplied notes preserved in manifest")
     .option("--estimated-tokens <n>", "Operator-supplied token estimate")
     .option("--lineage <names...>", "Comma-separated parent image names if forking from another image")
     .option("--json", "JSON output")
     .action(async (sourceSession: string, opts: {
       name: string;
-      version?: string;
+      imageVersion?: string;
       notes?: string;
       estimatedTokens?: string;
       lineage?: string[];
@@ -236,7 +241,7 @@ Examples:
           sourceSession,
           name: opts.name,
         };
-        if (opts.version) body["version"] = opts.version;
+        if (opts.imageVersion) body["version"] = opts.imageVersion;
         if (opts.notes) body["notes"] = opts.notes;
         if (opts.estimatedTokens) {
           const n = Number(opts.estimatedTokens);
