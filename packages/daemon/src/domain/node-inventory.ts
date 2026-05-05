@@ -1,11 +1,12 @@
 import type Database from "better-sqlite3";
-import type { NodeInventoryEntry, NodeDetailEntry, NodeDetailPeer, NodeDetailEdge, NodeDetailCompactSpec, NodeRestoreOutcome, NodeLifecycleState, Binding, RestoreResult, NodeRecoveryGuidance, Snapshot } from "./types.js";
+import type { NodeInventoryEntry, NodeDetailEntry, NodeDetailPeer, NodeDetailEdge, NodeDetailCompactSpec, NodeRestoreOutcome, NodeLifecycleState, Binding, RestoreResult, NodeRecoveryGuidance, Snapshot, WorkspaceSpec } from "./types.js";
 import type { RuntimeAdapter } from "./runtime-adapter.js";
 import type { ContextUsageStore } from "./context-usage-store.js";
 import type { AgentActivityStore } from "./agent-activity-store.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import { probeSessionActivity } from "./session-transport.js";
 import { findLatestUsableSnapshot } from "./rig-repository.js";
+import { resolveNodeWorkspace } from "./workspace/workspace-resolver.js";
 
 // -- Row types for SQL results --
 
@@ -289,6 +290,9 @@ export function getNodeInventory(db: Database.Database, rigId: string): NodeInve
   // Resolve the rig's latest usable snapshot once for the whole projection so per-node
   // recoverability checks share the same source of truth without N extra queries.
   const usableSnapshot = findLatestUsableSnapshot(db, rigId);
+  // PL-007: rig's typed workspace block (if declared) loaded once per
+  // projection so per-node kind resolution shares one parse.
+  const workspaceSpec = readRigWorkspaceJson(db, rigId);
 
   // Join nodes with newest session (max ULID = max session.id string comparison)
   // and the rig name
@@ -387,8 +391,27 @@ export function getNodeInventory(db: Database.Database, rigId: string): NodeInve
       resumeType: row.resume_type,
       resumeToken: row.resume_token,
       startupCompletedAt: row.startup_completed_at,
+      // PL-007 Workspace Primitive — per-node workspace summary derived
+      // from cwd against the rig's typed workspace block. null when the
+      // rig has no workspace declaration.
+      workspace: resolveNodeWorkspace({ spec: workspaceSpec, cwd: row.cwd }),
     };
   });
+}
+
+/** PL-007 — read the rig's typed workspace block from `rigs.workspace_json`
+ *  defensively. Migration 038 may not yet be applied in older test fixtures
+ *  that bypass the canonical migration list, so a missing column returns
+ *  null cleanly. */
+function readRigWorkspaceJson(db: Database.Database, rigId: string): WorkspaceSpec | null {
+  try {
+    const row = db.prepare("SELECT workspace_json FROM rigs WHERE id = ?")
+      .get(rigId) as { workspace_json: string | null } | undefined;
+    if (!row || !row.workspace_json) return null;
+    return JSON.parse(row.workspace_json) as WorkspaceSpec;
+  } catch {
+    return null;
+  }
 }
 
 /**

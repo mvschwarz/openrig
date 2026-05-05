@@ -410,6 +410,19 @@ export interface NodeInventoryEntry {
   startupCompletedAt: string | null;
   agentActivity?: AgentActivity;
   contextUsage?: ContextUsage;
+  /** PL-007: per-node workspace block when the rig declares a workspace.
+   *  workspaceRoot mirrors RigSpec.workspace.workspaceRoot. activeRepo is
+   *  the repo whose path contains the node's cwd, or RigSpec.workspace.
+   *  defaultRepo when no containing repo is found. kind is the kind of
+   *  the active repo, or `knowledge` when cwd is under knowledgeRoot.
+   *  null when the rig does not declare a workspace. */
+  workspace?: NodeWorkspaceInfo | null;
+}
+
+export interface NodeWorkspaceInfo {
+  workspaceRoot: string;
+  activeRepo: string | null;
+  kind: WorkspaceKind | null;
 }
 
 export interface NodeDetailPeer {
@@ -705,6 +718,36 @@ export interface RigSpecDoc {
   path: string;
 }
 
+/**
+ * PL-007 Workspace Primitive — typed workspace kinds enum. Reserved set
+ * at v0; adding a sixth kind is a v1+ amendment per the PL-007 product
+ * spec. Each kind has folder shape + frontmatter contract + ownership
+ * rules (see `frontmatter-validator.ts` for the per-kind required-field
+ * map).
+ */
+export const WORKSPACE_KINDS = ["user", "project", "knowledge", "lab", "delivery"] as const;
+export type WorkspaceKind = (typeof WORKSPACE_KINDS)[number];
+
+/** PL-007 — RigSpec.workspace.repos[] entry (typed). */
+export interface WorkspaceRepoSpec {
+  name: string;
+  /** Absolute path after normalization. Authors may declare a path relative to
+   *  `workspaceRoot` in YAML; the codec resolves to absolute at parse time. */
+  path: string;
+  kind: WorkspaceKind;
+}
+
+/** PL-007 — Optional RigSpec.workspace block. Rigs without it stay valid;
+ *  whoami / node-inventory return a null workspace block in that case. */
+export interface WorkspaceSpec {
+  workspaceRoot: string;
+  repos: WorkspaceRepoSpec[];
+  defaultRepo?: string;
+  /** Optional knowledge-canon root (e.g., substrate/shared-docs/openrig-work).
+   *  Treated as kind=knowledge when surfaced through whoami / UI. */
+  knowledgeRoot?: string;
+}
+
 export interface RigSpec {
   version: string;
   name: string;
@@ -713,6 +756,8 @@ export interface RigSpec {
   docs?: RigSpecDoc[];
   startup?: StartupBlock;
   services?: RigServicesSpec;
+  /** PL-007 Workspace Primitive — optional typed workspace declaration. */
+  workspace?: WorkspaceSpec;
   pods: RigSpecPod[];
   edges: RigSpecCrossPodEdge[];
 }

@@ -120,6 +120,8 @@ import { workflowInstancesSchema } from "./db/migrations/034_workflow_instances.
 import { workflowStepTrailsSchema } from "./db/migrations/035_workflow_step_trails.js";
 import { watchdogPolicyEnumExtensionSchema } from "./db/migrations/036_watchdog_policy_enum_extension.js";
 import { missionControlActionsSchema } from "./db/migrations/037_mission_control_actions.js";
+import { workspacePrimitiveSchema } from "./db/migrations/038_workspace_primitive.js";
+import { queueTargetRepoSchema } from "./db/migrations/039_queue_target_repo.js";
 import { MissionControlActionLog } from "./domain/mission-control/mission-control-action-log.js";
 import { MissionControlWriteContract } from "./domain/mission-control/mission-control-write-contract.js";
 import { MissionControlReadLayer } from "./domain/mission-control/mission-control-read-layer.js";
@@ -165,7 +167,7 @@ interface DaemonResult {
 export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> {
   const dbPath = opts?.dbPath ?? ":memory:";
   const db = createDb(dbPath);
-  migrate(db, [coreSchema, bindingsSessionsSchema, eventsSchema, snapshotsSchema, checkpointsSchema, resumeMetadataSchema, nodeSpecFieldsSchema, packagesSchema, installJournalSchema, journalSeqSchema, bootstrapSchema, discoverySchema, discoveryFkFix, agentspecRebootSchema, startupContextSchema, chatMessagesSchema, podNamespaceSchema, contextUsageSchema, externalCliAttachmentSchema, rigServicesSchema, seatHandoverObservabilitySchema, nodeCodexConfigProfileSchema, streamItemsSchema, queueItemsSchema, queueTransitionsSchema, inboxEntriesSchema, outboxEntriesSchema, projectClassificationsSchema, classifierLeasesSchema, viewsCustomSchema, watchdogJobsSchema, watchdogHistorySchema, workflowSpecsSchema, workflowInstancesSchema, workflowStepTrailsSchema, watchdogPolicyEnumExtensionSchema, missionControlActionsSchema]);
+  migrate(db, [coreSchema, bindingsSessionsSchema, eventsSchema, snapshotsSchema, checkpointsSchema, resumeMetadataSchema, nodeSpecFieldsSchema, packagesSchema, installJournalSchema, journalSeqSchema, bootstrapSchema, discoverySchema, discoveryFkFix, agentspecRebootSchema, startupContextSchema, chatMessagesSchema, podNamespaceSchema, contextUsageSchema, externalCliAttachmentSchema, rigServicesSchema, seatHandoverObservabilitySchema, nodeCodexConfigProfileSchema, streamItemsSchema, queueItemsSchema, queueTransitionsSchema, inboxEntriesSchema, outboxEntriesSchema, projectClassificationsSchema, classifierLeasesSchema, viewsCustomSchema, watchdogJobsSchema, watchdogHistorySchema, workflowSpecsSchema, workflowInstancesSchema, workflowStepTrailsSchema, watchdogPolicyEnumExtensionSchema, missionControlActionsSchema, workspacePrimitiveSchema, queueTargetRepoSchema]);
 
   const rigRepo = new RigRepository(db);
   const sessionRegistry = new SessionRegistry(db);

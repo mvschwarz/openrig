@@ -9,10 +9,14 @@ import type {
   RigServicesSurface,
   RigServicesCheckpointHook,
   ValidationResult,
+  WorkspaceSpec,
+  WorkspaceRepoSpec,
 } from "./types.js";
+import { WORKSPACE_KINDS } from "./types.js";
 import { validateSafePath } from "./path-safety.js";
 import { validateStartupBlock, normalizeStartupBlock } from "./startup-validation.js";
 import { COMPOSE_PROJECT_NAME_PATTERN, deriveComposeProjectName } from "./compose-project-name.js";
+import * as path from "node:path";
 
 // -- Canonical pod-aware RigSpec validation (AgentSpec reboot) --
 
@@ -23,6 +27,7 @@ const VALID_IMPORT_PREFIXES = ["local:", "path:"];
 const VALID_SERVICES_KIND = new Set(["compose"]);
 const VALID_DOWN_POLICIES = new Set(["leave_running", "down", "down_and_volumes"]);
 const VALID_WAIT_TARGET_CONDITIONS = new Set(["healthy"]);
+const VALID_WORKSPACE_KINDS = new Set<string>(WORKSPACE_KINDS as readonly string[]);
 
 /**
  * Pod-aware RigSpec validator. Canonical contract for the AgentSpec reboot.
@@ -86,6 +91,13 @@ export class RigSpecSchema {
     // services: optional top-level sibling of pods
     if (obj["services"] !== undefined) {
       errors.push(...validateServicesBlock(obj["services"], "services"));
+    }
+
+    // PL-007: optional workspace block (typed primitive). Rigs without it
+    // stay valid for back-compat; whoami/node-inventory return null
+    // workspace when not declared.
+    if (obj["workspace"] !== undefined && obj["workspace"] !== null) {
+      errors.push(...validateWorkspaceBlock(obj["workspace"], "workspace"));
     }
 
     // pods: required array
@@ -155,10 +167,109 @@ export class RigSpecSchema {
       docs,
       startup: raw["startup"] ? normalizeStartupBlock(raw["startup"]) : undefined,
       services: raw["services"] ? normalizeServicesBlock(raw["services"], raw["name"] as string) : undefined,
+      workspace: raw["workspace"] ? normalizeWorkspaceBlock(raw["workspace"]) : undefined,
       pods,
       edges,
     };
   }
+}
+
+/** PL-007 Workspace Primitive — validate the optional rig-level workspace
+ *  block. Required: workspace_root (non-empty string), repos (array of
+ *  {name, path, kind}). Optional: default_repo, knowledge_root.
+ *  Constraints: kinds restricted to the reserved 5; repo names unique;
+ *  default_repo must reference a declared repo; paths must be non-empty
+ *  strings (existence is NOT enforced at validate time per PL-007 PRD —
+ *  schema is paper-only; live filesystem checks happen at preflight). */
+function validateWorkspaceBlock(raw: unknown, prefix: string): string[] {
+  if (typeof raw !== "object" || Array.isArray(raw)) return [`${prefix}: must be an object`];
+  const obj = raw as Record<string, unknown>;
+  const errors: string[] = [];
+
+  const wr = obj["workspace_root"];
+  if (typeof wr !== "string" || wr.trim() === "") {
+    errors.push(`${prefix}.workspace_root: required non-empty string`);
+  }
+
+  const rawRepos = obj["repos"];
+  const repoNames = new Set<string>();
+  if (!Array.isArray(rawRepos)) {
+    errors.push(`${prefix}.repos: required array`);
+  } else {
+    for (let i = 0; i < rawRepos.length; i++) {
+      const repo = rawRepos[i];
+      const repoPrefix = `${prefix}.repos[${i}]`;
+      if (typeof repo !== "object" || repo === null || Array.isArray(repo)) {
+        errors.push(`${repoPrefix}: must be an object with name, path, kind`);
+        continue;
+      }
+      const r = repo as Record<string, unknown>;
+      const name = r["name"];
+      if (typeof name !== "string" || name.trim() === "") {
+        errors.push(`${repoPrefix}.name: required non-empty string`);
+      } else if (repoNames.has(name)) {
+        errors.push(`${repoPrefix}.name: duplicate repo name "${name}"`);
+      } else {
+        repoNames.add(name);
+      }
+      const repoPath = r["path"];
+      if (typeof repoPath !== "string" || repoPath.trim() === "") {
+        errors.push(`${repoPrefix}.path: required non-empty string`);
+      }
+      const kind = r["kind"];
+      if (typeof kind !== "string" || !VALID_WORKSPACE_KINDS.has(kind)) {
+        errors.push(`${repoPrefix}.kind: must be one of ${[...VALID_WORKSPACE_KINDS].join(", ")} (got ${JSON.stringify(kind)})`);
+      }
+    }
+  }
+
+  const defaultRepo = obj["default_repo"];
+  if (defaultRepo !== undefined && defaultRepo !== null) {
+    if (typeof defaultRepo !== "string" || defaultRepo.trim() === "") {
+      errors.push(`${prefix}.default_repo: must be a non-empty string when present`);
+    } else if (repoNames.size > 0 && !repoNames.has(defaultRepo)) {
+      errors.push(`${prefix}.default_repo: "${defaultRepo}" does not match any repo in repos[]`);
+    }
+  }
+
+  const knowledgeRoot = obj["knowledge_root"];
+  if (knowledgeRoot !== undefined && knowledgeRoot !== null) {
+    if (typeof knowledgeRoot !== "string" || knowledgeRoot.trim() === "") {
+      errors.push(`${prefix}.knowledge_root: must be a non-empty string when present`);
+    }
+  }
+
+  return errors;
+}
+
+/** PL-007 — normalize the YAML workspace block into typed WorkspaceSpec.
+ *  Resolves relative repo paths against workspace_root (per the convention
+ *  worked example where authors write `path: openrig` relative to the hub). */
+function normalizeWorkspaceBlock(raw: unknown): WorkspaceSpec | undefined {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return undefined;
+  const obj = raw as Record<string, unknown>;
+  const workspaceRoot = obj["workspace_root"] as string;
+  const rawRepos = obj["repos"];
+  const repos: WorkspaceRepoSpec[] = [];
+  if (Array.isArray(rawRepos)) {
+    for (const r of rawRepos as Record<string, unknown>[]) {
+      const declaredPath = r["path"] as string;
+      const absolute = path.isAbsolute(declaredPath)
+        ? declaredPath
+        : path.resolve(workspaceRoot, declaredPath);
+      repos.push({
+        name: r["name"] as string,
+        path: absolute,
+        kind: r["kind"] as WorkspaceRepoSpec["kind"],
+      });
+    }
+  }
+  return {
+    workspaceRoot,
+    repos,
+    defaultRepo: typeof obj["default_repo"] === "string" ? (obj["default_repo"] as string) : undefined,
+    knowledgeRoot: typeof obj["knowledge_root"] === "string" ? (obj["knowledge_root"] as string) : undefined,
+  };
 }
 
 // -- Pod validation --

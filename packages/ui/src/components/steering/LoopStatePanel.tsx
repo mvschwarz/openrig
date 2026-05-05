@@ -8,6 +8,8 @@
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { SessionPreviewPane } from "../preview/SessionPreviewPane.js";
+import { useWorkspace } from "../../hooks/useWorkspace.js";
+import { WorkspaceKindBadge } from "../WorkspaceKindBadge.js";
 
 interface MissionControlRow {
   qitemId: string;
@@ -34,6 +36,7 @@ export function LoopStatePanel() {
   // for that seat. Single-row-open at a time keeps the panel compact;
   // operators wanting multiple panes pin from the node-detail drawer.
   const [openSeat, setOpenSeat] = useState<string | null>(null);
+  const workspace = useWorkspace();
   const view = useQuery({
     queryKey: ["mission-control", "views", "recently-active"],
     queryFn: fetchRecentlyActive,
@@ -42,8 +45,13 @@ export function LoopStatePanel() {
   return (
     <section data-testid="steering-loop-state" className="border border-stone-300 bg-white">
       <header className="flex items-baseline justify-between border-b border-stone-200 bg-stone-50 px-3 py-2">
-        <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-stone-700">
-          Loop state
+        <div className="flex items-baseline gap-2">
+          <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-stone-700">
+            Loop state
+          </div>
+          {workspace.data?.knowledgeKind && (
+            <WorkspaceKindBadge kind={workspace.data.knowledgeKind} compact />
+          )}
         </div>
         <div className="font-mono text-[9px] text-stone-500">
           most-recent qitem per seat (cross-rig roll-up)

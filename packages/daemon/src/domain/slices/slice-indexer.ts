@@ -77,6 +77,10 @@ export interface SliceListEntry {
   qitemCount: number;
   hasProofPacket: boolean;
   lastActivityAt: string | null;
+  /** PL-007 — absolute filesystem path of the slice folder. UI resolves
+   *  workspace kind by matching this against RigSpec.workspace.repos[].path
+   *  / knowledgeRoot. Always populated by toListEntry. */
+  slicePath: string;
 }
 
 export interface SliceIndexerOpts {
@@ -219,6 +223,7 @@ export class SliceIndexer {
       qitemCount: qitemIds.length,
       hasProofPacket: proofPacket !== null,
       lastActivityAt,
+      slicePath,
     };
   }
 

@@ -410,6 +410,11 @@ export class PodRigInstantiator {
           persistedEvents.push(this.deps.eventBus.persistWithinTransaction({ type: "rig.created", rigId: materializedRigId }));
         }
 
+        // PL-007: persist the rig's typed workspace block when declared.
+        if (rigSpec.workspace) {
+          this.deps.rigRepo.setRigWorkspace(materializedRigId, rigSpec.workspace);
+        }
+
         const currentRig = this.deps.rigRepo.getRig(materializedRigId)!;
         const logicalIdToNodeId = new Map(currentRig.nodes.map((node) => [node.logicalId, node.id]));
         const existingPodIds = new Set(
@@ -643,6 +648,11 @@ export class PodRigInstantiator {
     try {
       const rig = this.deps.rigRepo.createRig(rigSpec.name);
       rigId = rig.id;
+      // PL-007: persist typed workspace block (when declared) on the rig
+      // record. Whoami / node-inventory read it via getRigWorkspace().
+      if (rigSpec.workspace) {
+        this.deps.rigRepo.setRigWorkspace(rigId, rigSpec.workspace);
+      }
     } catch (err) {
       return { ok: false, code: "instantiate_error", message: (err as Error).message };
     }

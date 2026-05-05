@@ -2,6 +2,7 @@ import type Database from "better-sqlite3";
 import type { RigRepository } from "./rig-repository.js";
 import type { SessionRegistry } from "./session-registry.js";
 import type { TranscriptStore } from "./transcript-store.js";
+import { resolveWorkspaceContext, type WhoamiWorkspaceBlock } from "./workspace/workspace-resolver.js";
 
 export interface WhoamiResult {
   resolvedBy: "node_id" | "session_name";
@@ -52,6 +53,10 @@ export interface WhoamiResult {
    *  Codex: threadId from the per-pid logs DB. Claude Code: resumeToken
    *  + current usage from the context-usage sample. Terminal: null. */
   runtimeContext?: RuntimeContext | null;
+  /** PL-007 Workspace Primitive v0 — typed workspace block when the
+   *  rig's RigSpec declares one. null when the rig has no workspace
+   *  declaration; agents fall back to cwd-only orientation. */
+  workspace?: WhoamiWorkspaceBlock | null;
 }
 
 export type RuntimeContext =
@@ -308,6 +313,16 @@ export class WhoamiService {
     // conversation context and report null.
     const runtimeContext = this.computeRuntimeContext(nodeRow.id, identity.runtime, contextUsage);
 
+    // PL-007: workspace block resolved from RigSpec.workspace. activeRepo
+    // resolves per-rig default first; envOverride lets per-session
+    // OPENRIG_TARGET_REPO override (subject to repo-name validation).
+    const workspaceSpec = this.rigRepo.getRigWorkspace(nodeRow.rig_id);
+    const workspace = resolveWorkspaceContext({
+      spec: workspaceSpec,
+      cwd: nodeRow.cwd,
+      envOverride: process.env["OPENRIG_TARGET_REPO"] ?? null,
+    });
+
     return {
       resolvedBy,
       identity,
@@ -317,6 +332,7 @@ export class WhoamiService {
       commands: { sendExamples, captureExamples },
       contextUsage,
       runtimeContext,
+      workspace,
     };
   }
 

@@ -19,6 +19,9 @@ export interface SliceListEntry {
   qitemCount: number;
   hasProofPacket: boolean;
   lastActivityAt: string | null;
+  /** PL-007: absolute filesystem path of the slice folder, used by the UI
+   *  to resolve workspace kind against the rig's RigSpec.workspace block. */
+  slicePath?: string;
 }
 
 export interface SliceListResponse {

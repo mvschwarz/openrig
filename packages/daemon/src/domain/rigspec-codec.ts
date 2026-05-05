@@ -18,6 +18,19 @@ export class RigSpecCodec {
     if (spec.cultureFile) doc["culture_file"] = spec.cultureFile;
     if (spec.docs && spec.docs.length > 0) doc["docs"] = spec.docs.map((d) => ({ path: d.path }));
     if (spec.startup) doc["startup"] = serializeStartupBlock(spec.startup);
+    // PL-007: optional rig-level workspace block. Repos round-trip with
+    // their normalized absolute path; the codec does not strip back to
+    // workspace-relative since it has no signal that the original author
+    // wrote a relative path.
+    if (spec.workspace) {
+      const ws: Record<string, unknown> = {
+        workspace_root: spec.workspace.workspaceRoot,
+        repos: spec.workspace.repos.map((r) => ({ name: r.name, path: r.path, kind: r.kind })),
+      };
+      if (spec.workspace.defaultRepo !== undefined) ws["default_repo"] = spec.workspace.defaultRepo;
+      if (spec.workspace.knowledgeRoot !== undefined) ws["knowledge_root"] = spec.workspace.knowledgeRoot;
+      doc["workspace"] = ws;
+    }
 
     doc["pods"] = spec.pods.map((pod) => {
       const p: Record<string, unknown> = {

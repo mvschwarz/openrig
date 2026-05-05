@@ -27,6 +27,8 @@ import {
 import { MarkdownViewer } from "../markdown/MarkdownViewer.js";
 import { SyntaxHighlight } from "../markdown/SyntaxHighlight.js";
 import { useSpecReview } from "../../hooks/useSteering.js";
+import { useWorkspace } from "../../hooks/useWorkspace.js";
+import { WorkspaceKindBadge, resolveKindForPath } from "../WorkspaceKindBadge.js";
 
 const TEXT_LIKE_EXTENSIONS = new Set([".md", ".txt", ".log", ".yaml", ".yml", ".json", ".js", ".jsx", ".ts", ".tsx", ".py", ".sh", ".bash", ".sql", ".css", ".html"]);
 const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"]);
@@ -38,6 +40,7 @@ function isUnavailable(data: unknown): data is { unavailable: true; error: strin
 
 export function FilesWorkspace() {
   const roots = useFilesRoots();
+  const workspace = useWorkspace();
   const [selectedRoot, setSelectedRoot] = useState<string | null>(null);
   const [currentPath, setCurrentPath] = useState<string>("");
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
@@ -66,7 +69,7 @@ export function FilesWorkspace() {
       </header>
       <div className="flex flex-1 min-h-0">
         <aside data-testid="files-tree-pane" className="w-72 shrink-0 overflow-y-auto border-r border-stone-200 bg-stone-50">
-          <RootSelector roots={roots.data} isLoading={roots.isLoading} selectedRoot={selectedRoot} onSelect={setSelectedRoot} />
+          <RootSelector roots={roots.data} isLoading={roots.isLoading} selectedRoot={selectedRoot} onSelect={setSelectedRoot} workspace={workspace.data ?? null} />
           {selectedRoot && (
             <>
               <Breadcrumbs root={selectedRoot} path={currentPath} onNavigate={setCurrentPath} />
@@ -110,11 +113,13 @@ function RootSelector({
   isLoading,
   selectedRoot,
   onSelect,
+  workspace,
 }: {
   roots: ReturnType<typeof useFilesRoots>["data"] | undefined;
   isLoading: boolean;
   selectedRoot: string | null;
   onSelect: (name: string) => void;
+  workspace: import("../../hooks/useWorkspace.js").WhoamiWorkspaceUI | null;
 }) {
   if (isLoading) return <div className="p-3 font-mono text-[10px] text-stone-400">Loading roots…</div>;
   if (!roots) return null;
@@ -138,22 +143,26 @@ function RootSelector({
     <div data-testid="files-root-selector" className="border-b border-stone-200 p-2">
       <div className="mb-1 font-mono text-[8px] uppercase tracking-[0.18em] text-stone-500">Roots</div>
       <ul>
-        {roots.roots.map((r: AllowlistRoot) => (
-          <li key={r.name}>
-            <button
-              type="button"
-              data-testid={`files-root-${r.name}`}
-              data-active={selectedRoot === r.name}
-              onClick={() => onSelect(r.name)}
-              className={`block w-full px-2 py-1 text-left font-mono text-[10px] hover:bg-stone-100 ${
-                selectedRoot === r.name ? "bg-stone-200/80 text-stone-900" : "text-stone-700"
-              }`}
-              title={r.path}
-            >
-              {r.name}
-            </button>
-          </li>
-        ))}
+        {roots.roots.map((r: AllowlistRoot) => {
+          const kind = resolveKindForPath(r.path, workspace);
+          return (
+            <li key={r.name}>
+              <button
+                type="button"
+                data-testid={`files-root-${r.name}`}
+                data-active={selectedRoot === r.name}
+                onClick={() => onSelect(r.name)}
+                className={`flex w-full items-center justify-between gap-2 px-2 py-1 text-left font-mono text-[10px] hover:bg-stone-100 ${
+                  selectedRoot === r.name ? "bg-stone-200/80 text-stone-900" : "text-stone-700"
+                }`}
+                title={r.path}
+              >
+                <span className="truncate">{r.name}</span>
+                {kind && <WorkspaceKindBadge kind={kind} compact />}
+              </button>
+            </li>
+          );
+        })}
       </ul>
     </div>
   );

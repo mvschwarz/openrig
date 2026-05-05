@@ -18,6 +18,8 @@ import {
   type LintWarning,
   type PriorityRailLevel,
 } from "./priority-rail-rule.js";
+import { useWorkspace, type WhoamiWorkspaceUI } from "../../hooks/useWorkspace.js";
+import { WorkspaceKindBadge, resolveKindForPath } from "../WorkspaceKindBadge.js";
 
 type StatusFilter = "all" | "active" | "done" | "blocked";
 
@@ -35,6 +37,7 @@ function isUnavailable(data: unknown): data is { unavailable: true; error: strin
 
 export function ProgressWorkspace() {
   const tree = useProgressTree();
+  const workspace = useWorkspace();
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [search, setSearch] = useState("");
   const [selectedRow, setSelectedRow] = useState<{ file: ProgressFileNode; row: ProgressRow } | null>(null);
@@ -160,6 +163,7 @@ export function ProgressWorkspace() {
               search={search}
               onRowClick={(row) => setSelectedRow({ file, row })}
               selectedRow={selectedRow}
+              workspace={workspace.data ?? null}
             />
           ))}
         </main>
@@ -205,6 +209,7 @@ function ProgressFileSection({
   search,
   onRowClick,
   selectedRow,
+  workspace,
 }: {
   file: ProgressFileNode;
   meta: FileMeta | undefined;
@@ -213,6 +218,7 @@ function ProgressFileSection({
   search: string;
   onRowClick: (row: ProgressRow) => void;
   selectedRow: { file: ProgressFileNode; row: ProgressRow } | null;
+  workspace: WhoamiWorkspaceUI | null;
 }) {
   const [collapsed, setCollapsed] = useState(false);
   const filteredRows = useMemo(() => filterRows(file.rows, statusFilter, search), [file.rows, statusFilter, search]);
@@ -246,6 +252,10 @@ function ProgressFileSection({
         )}
         <span className="font-mono text-[11px] font-bold text-stone-900">{file.title ?? file.relPath}</span>
         <span className="font-mono text-[8px] uppercase tracking-[0.10em] text-stone-500">{file.rootName}</span>
+        {(() => {
+          const kind = resolveKindForPath(file.absolutePath, workspace);
+          return kind ? <WorkspaceKindBadge kind={kind} compact /> : null;
+        })()}
         {showLint && lintWarnings.length > 0 && (
           <span
             data-testid={`progress-file-${file.rootName}-${file.relPath}-lint-count`}

@@ -68,6 +68,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     .option("--tags <tags>", "Comma-separated tags")
     .option("--expires-at <iso>", "ISO timestamp at which the qitem expires")
     .option("--id <qitemId>", "Idempotent qitem_id (skip if not provided)")
+    .option("--target-repo <name>", "PL-007: typed repo scope (must match a repo in the source rig's RigSpec.workspace.repos[])")
     .option("--no-nudge", "Suppress the default destination nudge (cold-queue)")
     .option("--json", "JSON output for agents")
     .action(async (opts: {
@@ -79,6 +80,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
       tags?: string;
       expiresAt?: string;
       id?: string;
+      targetRepo?: string;
       nudge?: boolean;
       json?: boolean;
     }) => {
@@ -94,6 +96,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           tier: opts.tier,
           tags,
           expiresAt: opts.expiresAt,
+          targetRepo: opts.targetRepo,
           nudge: opts.nudge,
         });
         printResult(opts.json ?? false, res.data, res.status);
@@ -178,6 +181,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     .option("--priority <priority>", "Override priority for the new qitem")
     .option("--tier <tier>", "Override tier for the new qitem")
     .option("--tags <tags>", "Comma-separated tags for the new qitem")
+    .option("--target-repo <name>", "PL-007: typed repo scope for the new qitem")
     .option("--no-nudge", "Suppress the default nudge to the new destination")
     .option("--json", "JSON output for agents")
     .action(async (qitemId: string, opts: {
@@ -188,6 +192,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
       priority?: string;
       tier?: string;
       tags?: string;
+      targetRepo?: string;
       nudge?: boolean;
       json?: boolean;
     }) => {
@@ -204,6 +209,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           priority: opts.priority,
           tier: opts.tier,
           tags,
+          targetRepo: opts.targetRepo,
           nudge: opts.nudge,
         });
         printResult(opts.json ?? false, res.data, res.status);
@@ -222,6 +228,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     .option("--priority <priority>", "Override priority for the new qitem")
     .option("--tier <tier>", "Override tier for the new qitem")
     .option("--tags <tags>", "Comma-separated tags for the new qitem")
+    .option("--target-repo <name>", "PL-007: typed repo scope for the new qitem")
     .option("--no-nudge", "Suppress the default nudge to the new destination")
     .option("--json", "JSON output for agents")
     .action(async (qitemId: string, opts: {
@@ -232,6 +239,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
       priority?: string;
       tier?: string;
       tags?: string;
+      targetRepo?: string;
       nudge?: boolean;
       json?: boolean;
     }) => {
@@ -248,6 +256,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           priority: opts.priority,
           tier: opts.tier,
           tags,
+          targetRepo: opts.targetRepo,
           nudge: opts.nudge,
         });
         printResult(opts.json ?? false, res.data, res.status);
@@ -321,12 +330,14 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     .option("--destination <session>", "Filter by destination session")
     .option("--source <session>", "Filter by source session")
     .option("--state <state>", "Filter by state (comma-separated for multiple)")
+    .option("--target-repo <name>", "PL-007: filter qitems by target_repo (exact match)")
     .option("--limit <n>", "Result limit", "100")
     .option("--json", "JSON output for agents")
     .action(async (opts: {
       destination?: string;
       source?: string;
       state?: string;
+      targetRepo?: string;
       limit: string;
       json?: boolean;
     }) => {
@@ -335,6 +346,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
       if (opts.destination) params.set("destinationSession", opts.destination);
       if (opts.source) params.set("sourceSession", opts.source);
       if (opts.state) params.set("state", opts.state);
+      if (opts.targetRepo) params.set("targetRepo", opts.targetRepo);
       if (opts.limit) params.set("limit", opts.limit);
       await withClient(deps, async (client) => {
         const res = await client.get<unknown>(`/api/queue/list?${params.toString()}`);

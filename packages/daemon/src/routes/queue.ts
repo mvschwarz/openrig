@@ -34,6 +34,38 @@ export function queueRoutes(): Hono {
     return c.get("eventBus" as never) as EventBus;
   }
 
+  /** PL-007: validate `target_repo` against the source rig's typed
+   *  workspace block. Returns 3-part structured error when the repo name
+   *  does not match the source rig's RigSpec.workspace.repos[]. Sessions
+   *  not associated with a workspace-bearing rig pass-through (target_repo
+   *  is honored as a free-form tag for back-compat). */
+  function validateTargetRepo(
+    c: { get: (key: string) => unknown },
+    sourceSession: string,
+    targetRepo: string,
+  ): { ok: true } | { ok: false; error: string; message: string; meta?: Record<string, unknown> } {
+    const rigRepo = c.get("rigRepo" as never) as import("../domain/rig-repository.js").RigRepository | undefined;
+    if (!rigRepo) return { ok: true };
+    const m = /^[^@]+@(.+)$/.exec(sourceSession);
+    if (!m) return { ok: true };
+    const rigName = m[1]!;
+    const rigs = rigRepo.findRigsByName(rigName);
+    if (rigs.length === 0) return { ok: true };
+    const rigId = rigs[0]!.id;
+    const ws = rigRepo.getRigWorkspace(rigId);
+    if (!ws) return { ok: true };
+    const known = ws.repos.map((r) => r.name);
+    if (!known.includes(targetRepo)) {
+      return {
+        ok: false,
+        error: "unknown_target_repo",
+        message: `target_repo "${targetRepo}" does not match any repo in rig ${rigName}'s workspace; check rig whoami --json | jq .workspace.repos to see declared repos`,
+        meta: { rigName, knownRepos: known },
+      };
+    }
+    return { ok: true };
+  }
+
   function errorResponse(c: { json: (body: unknown, status?: number) => Response }, err: unknown): Response {
     if (err instanceof QueueRepositoryError) {
       const status = err.code === "qitem_not_found" ? 404
@@ -75,11 +107,18 @@ export function queueRoutes(): Hono {
       tags?: string[];
       expiresAt?: string;
       chainOfRecord?: string[];
+      targetRepo?: string;
     }>().catch(() => ({} as never));
 
     if (!body.sourceSession) return c.json({ error: "sourceSession is required" }, 400);
     if (!body.destinationSession) return c.json({ error: "destinationSession is required" }, 400);
     if (!body.body) return c.json({ error: "body is required" }, 400);
+
+    // PL-007: validate target_repo against source rig's workspace.repos[].
+    if (body.targetRepo) {
+      const validation = validateTargetRepo(c, body.sourceSession, body.targetRepo);
+      if (!validation.ok) return c.json({ error: validation.error, message: validation.message, ...(validation.meta ?? {}) }, 400);
+    }
 
     try {
       const item = await getRepo(c).create({
@@ -92,6 +131,7 @@ export function queueRoutes(): Hono {
         tags: body.tags,
         expiresAt: body.expiresAt,
         chainOfRecord: body.chainOfRecord,
+        targetRepo: body.targetRepo,
         nudge: (body as { nudge?: boolean }).nudge,
       });
       return c.json(item, 201);
@@ -165,9 +205,15 @@ export function queueRoutes(): Hono {
       priority?: QueuePriority;
       tier?: string;
       tags?: string[];
+      targetRepo?: string;
     }>().catch(() => ({} as never));
     if (!body.fromSession) return c.json({ error: "fromSession is required" }, 400);
     if (!body.toSession) return c.json({ error: "toSession is required" }, 400);
+
+    if (body.targetRepo) {
+      const validation = validateTargetRepo(c, body.fromSession, body.targetRepo);
+      if (!validation.ok) return c.json({ error: validation.error, message: validation.message, ...(validation.meta ?? {}) }, 400);
+    }
 
     try {
       const result = await getRepo(c).handoff({
@@ -179,6 +225,7 @@ export function queueRoutes(): Hono {
         priority: body.priority,
         tier: body.tier,
         tags: body.tags,
+        targetRepo: body.targetRepo,
         nudge: (body as { nudge?: boolean }).nudge,
       });
       return c.json(result, 201);
@@ -201,9 +248,15 @@ export function queueRoutes(): Hono {
       tier?: string;
       tags?: string[];
       nudge?: boolean;
+      targetRepo?: string;
     }>().catch(() => ({} as never));
     if (!body.fromSession) return c.json({ error: "fromSession is required" }, 400);
     if (!body.toSession) return c.json({ error: "toSession is required" }, 400);
+
+    if (body.targetRepo) {
+      const validation = validateTargetRepo(c, body.fromSession, body.targetRepo);
+      if (!validation.ok) return c.json({ error: validation.error, message: validation.message, ...(validation.meta ?? {}) }, 400);
+    }
 
     try {
       const result = await getRepo(c).handoffAndComplete({
@@ -215,6 +268,7 @@ export function queueRoutes(): Hono {
         priority: body.priority,
         tier: body.tier,
         tags: body.tags,
+        targetRepo: body.targetRepo,
         nudge: body.nudge,
       });
       return c.json(result, 201);
@@ -252,9 +306,10 @@ export function queueRoutes(): Hono {
     const destinationSession = c.req.query("destinationSession") || undefined;
     const sourceSession = c.req.query("sourceSession") || undefined;
     const stateRaw = c.req.query("state") || undefined;
+    const targetRepo = c.req.query("targetRepo") || undefined;
     const limit = c.req.query("limit") ? Number.parseInt(c.req.query("limit")!, 10) : undefined;
     const state = stateRaw ? (stateRaw.split(",") as QueueState[]) : undefined;
-    const items = getRepo(c).list({ destinationSession, sourceSession, state, limit });
+    const items = getRepo(c).list({ destinationSession, sourceSession, state, targetRepo, limit });
     return c.json(items);
   });
 

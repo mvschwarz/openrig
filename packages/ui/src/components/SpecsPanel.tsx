@@ -8,6 +8,8 @@ import { useAgentImageLibrary, type AgentImageEntry } from "../hooks/useAgentIma
 import { usePsEntries } from "../hooks/usePsEntries.js";
 import { useExpandRig, useRemoveLibrarySpec, useRenameLibrarySpec, type ExpandRigResult } from "../hooks/mutations.js";
 import { ExpansionOutcome } from "./ExpansionOutcome.js";
+import { useWorkspace, type WhoamiWorkspaceUI } from "../hooks/useWorkspace.js";
+import { WorkspaceKindBadge, resolveKindForPath, type WorkspaceKindLabel } from "./WorkspaceKindBadge.js";
 
 type LibraryFilter = "all" | "apps" | "rigs" | "agents" | "workflows" | "context-packs" | "agent-images";
 
@@ -45,6 +47,21 @@ function filterEntries(entries: UnifiedLibraryEntry[], filter: LibraryFilter): U
     case "agent-images": return entries.filter((e) => e.kind === "agent-image");
     default: return entries;
   }
+}
+
+/** PL-007: classify a library entry by workspace kind.
+ *  user_file → "user"; workspace entries resolved against the rig's
+ *  RigSpec.workspace block; built-in entries return null (they ship
+ *  with the daemon and do not belong to operator workspace topology). */
+function deriveEntryWorkspaceKind(
+  entry: UnifiedLibraryEntry,
+  workspace: WhoamiWorkspaceUI | null,
+): WorkspaceKindLabel | null {
+  if (entry.sourceType === "user_file") return "user";
+  if (entry.sourceType === "workspace") {
+    return resolveKindForPath(entry.sourcePath ?? null, workspace);
+  }
+  return null;
 }
 
 // PL-016: project AgentImageEntry into the row-render shape with a
@@ -128,12 +145,14 @@ function LibraryList({
   onSelect,
   renderAction,
   renderExpanded,
+  workspace,
 }: {
   title: string;
   entries: UnifiedLibraryEntry[];
   onSelect: (id: string) => void;
   renderAction?: (entry: UnifiedLibraryEntry) => ReactNode;
   renderExpanded?: (entry: UnifiedLibraryEntry) => ReactNode;
+  workspace?: WhoamiWorkspaceUI | null;
 }) {
   if (entries.length === 0) return null;
 
@@ -159,6 +178,10 @@ function LibraryList({
                       <span className="font-mono text-[7px] uppercase tracking-[0.12em] text-stone-500 border border-stone-300/50 px-1 py-0.5">
                         {typeBadge}
                       </span>
+                      {(() => {
+                        const kind = deriveEntryWorkspaceKind(entry, workspace ?? null);
+                        return kind ? <WorkspaceKindBadge kind={kind} compact /> : null;
+                      })()}
                       <span className="font-mono text-[7px] uppercase tracking-[0.12em] text-stone-400">
                         {stability}
                       </span>
@@ -251,6 +274,7 @@ function AddToRigFlow({ entryId, onDone }: { entryId: string; onDone: () => void
 
 export function SpecsPanel({ onClose }: SpecsPanelProps) {
   const navigate = useNavigate();
+  const workspace = useWorkspace();
   const {
     activeTask,
     currentRigDraft,
@@ -530,6 +554,7 @@ export function SpecsPanel({ onClose }: SpecsPanelProps) {
             onSelect={openLibraryEntry}
             renderAction={(entry) => renderLibraryAction(entry, entry.kind === "rig")}
             renderExpanded={renderLibraryExpanded}
+            workspace={workspace.data ?? null}
           />
           {addToRigEntryId && allLibrary.some((e) => e.id === addToRigEntryId) && (
             <AddToRigFlow entryId={addToRigEntryId} onDone={() => setAddToRigEntryId(null)} />
