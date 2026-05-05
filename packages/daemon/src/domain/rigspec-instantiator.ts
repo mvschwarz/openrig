@@ -1060,6 +1060,12 @@ export class PodRigInstantiator {
     // fork using the image's resume token). Mutually exclusive on a member.
     let forkSourceOpt: { forkSource: { kind: "native_id" | "artifact_path" | "name" | "last"; value?: string } } | undefined;
     let rebuildArtifactsOpt: { rebuildArtifacts: import("./runtime-adapter.js").ResolvedStartupFile[] } | undefined;
+    // PL-016 hardening v0+1 (review-lead live e2e finding 4): the
+    // consumed image id + library handle stash so the post-launch block
+    // can bump fork_count only on startupResult.ok===true (lastUsedAt
+    // already bumped optimistically in the dispatch branch).
+    let consumedAgentImageId: string | undefined;
+    let consumedAgentImageLibrary: import("./agent-images/agent-image-library-service.js").AgentImageLibraryService | undefined;
     if (input.member.sessionSource?.mode === "fork") {
       const ref = input.member.sessionSource.ref;
       forkSourceOpt = {
@@ -1107,12 +1113,19 @@ export class PodRigInstantiator {
       forkSourceOpt = {
         forkSource: { kind: "native_id", value: image.sourceResumeToken },
       };
-      // Best-effort stats bump. Stat-write failures don't abort launch.
+      // PL-016 hardening v0+1 (review-lead live e2e finding 4, 2026-05-04):
+      // pre-launch bump of lastUsedAt only — records the operator's
+      // INTENT to consume the image. forkCount increments later, gated
+      // on startupResult.ok===true (see post-startNode block below).
+      // Best-effort: stat-write failures don't abort launch.
       try {
-        library.recordConsumption(image.id);
+        library.recordConsumption(image.id, { incrementForkCount: false });
       } catch (err) {
         console.warn(`[openrig] agent-image stats update failed for ${image.id}: ${(err as Error).message}`);
       }
+      // Stash the consumed image for the post-launch fork-count bump.
+      consumedAgentImageId = image.id;
+      consumedAgentImageLibrary = library;
     }
 
     // Agent Starter resolver dispatch (Agent Starter v1 vertical M2). When
@@ -1172,6 +1185,17 @@ export class PodRigInstantiator {
       ...(forkSourceOpt ?? {}),
       ...(rebuildArtifactsOpt ?? {}),
     });
+
+    // PL-016 hardening v0+1 (review-lead live e2e finding 4, 2026-05-04):
+    // bump fork_count only on launch success. lastUsedAt already
+    // updated optimistically in the agent_image dispatch branch above.
+    if (startupResult.ok && consumedAgentImageId && consumedAgentImageLibrary) {
+      try {
+        consumedAgentImageLibrary.recordConsumption(consumedAgentImageId, { incrementForkCount: true });
+      } catch (err) {
+        console.warn(`[openrig] agent-image fork_count bump failed for ${consumedAgentImageId}: ${(err as Error).message}`);
+      }
+    }
 
     return {
       status: startupResult.ok ? "launched" : "failed",
