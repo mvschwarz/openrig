@@ -19,6 +19,12 @@ export interface DiscoveryResult {
    *  external_session_name for external-CLI Codex seats). null when
    *  the daemon can't surface one yet. */
   nativeId: string | null;
+  /** PL-016 Finding 2 (Option 3, founder-confirmed 2026-05-04): source
+   *  seat's resolved cwd from the nodes table. Captured here so
+   *  SnapshotCapturer (and any future fork route) can persist it on
+   *  the manifest without an additional query. null when the source
+   *  node has no recorded cwd. */
+  nodeCwd: string | null;
 }
 
 export interface DiscoveryFailure {
@@ -42,9 +48,10 @@ export function discoverResumeToken(db: Database.Database, sourceSession: string
     };
   }
   const nodeRow = db
-    .prepare("SELECT runtime FROM nodes WHERE id = ?")
-    .get(sessionRow.node_id) as { runtime: string | null } | undefined;
+    .prepare("SELECT runtime, cwd FROM nodes WHERE id = ?")
+    .get(sessionRow.node_id) as { runtime: string | null; cwd: string | null } | undefined;
   const runtime = nodeRow?.runtime ?? null;
+  const nodeCwd = nodeRow?.cwd ?? null;
   if (runtime !== "claude-code" && runtime !== "codex") {
     return {
       ok: false,
@@ -57,7 +64,7 @@ export function discoverResumeToken(db: Database.Database, sourceSession: string
   if (runtime === "claude-code") {
     return {
       ok: true,
-      result: { runtime, nativeId: sessionRow.resume_token ?? null },
+      result: { runtime, nativeId: sessionRow.resume_token ?? null, nodeCwd },
     };
   }
   // Codex — external_session_name on the binding row holds the
@@ -66,9 +73,9 @@ export function discoverResumeToken(db: Database.Database, sourceSession: string
     .prepare("SELECT external_session_name, attachment_type FROM bindings WHERE node_id = ?")
     .get(sessionRow.node_id) as { external_session_name: string | null; attachment_type: string | null } | undefined;
   if (bindingRow?.attachment_type === "external_cli" && bindingRow.external_session_name) {
-    return { ok: true, result: { runtime, nativeId: bindingRow.external_session_name } };
+    return { ok: true, result: { runtime, nativeId: bindingRow.external_session_name, nodeCwd } };
   }
   // tmux-attached Codex: thread-id-via-pid lookup not plumbed at v0.
   // NAMED v0+1 trigger.
-  return { ok: true, result: { runtime, nativeId: null } };
+  return { ok: true, result: { runtime, nativeId: null, nodeCwd } };
 }
