@@ -62,20 +62,50 @@ export function discoverResumeToken(db: Database.Database, sourceSession: string
     };
   }
   if (runtime === "claude-code") {
+    const contextSessionId = discoverClaudeContextSessionId(db, sessionRow.node_id, sourceSession);
     return {
       ok: true,
-      result: { runtime, nativeId: sessionRow.resume_token ?? null, nodeCwd },
+      result: { runtime, nativeId: contextSessionId ?? sessionRow.resume_token ?? null, nodeCwd },
     };
   }
-  // Codex — external_session_name on the binding row holds the
-  // conversation id when the seat is attached as external_cli.
+  // Codex managed tmux seats persist the captured native thread id on the
+  // sessions row after launch. Use it directly for image capture/fork.
+  if (sessionRow.resume_token) {
+    return { ok: true, result: { runtime, nativeId: sessionRow.resume_token, nodeCwd } };
+  }
+  // Codex external_cli seats may not have a sessions.resume_token; the
+  // external_session_name on the binding row holds the native conversation id.
   const bindingRow = db
     .prepare("SELECT external_session_name, attachment_type FROM bindings WHERE node_id = ?")
     .get(sessionRow.node_id) as { external_session_name: string | null; attachment_type: string | null } | undefined;
   if (bindingRow?.attachment_type === "external_cli" && bindingRow.external_session_name) {
     return { ok: true, result: { runtime, nativeId: bindingRow.external_session_name, nodeCwd } };
   }
-  // tmux-attached Codex: thread-id-via-pid lookup not plumbed at v0.
-  // NAMED v0+1 trigger.
   return { ok: true, result: { runtime, nativeId: null, nodeCwd } };
+}
+
+function discoverClaudeContextSessionId(
+  db: Database.Database,
+  nodeId: string,
+  sourceSession: string,
+): string | null {
+  try {
+    const row = db
+      .prepare(`
+        SELECT session_id, session_name
+        FROM context_usage
+        WHERE node_id = ?
+        LIMIT 1
+      `)
+      .get(nodeId) as { session_id: string | null; session_name: string | null } | undefined;
+
+    if (!row) return null;
+    if (row.session_name && row.session_name !== sourceSession) return null;
+    const nativeId = row.session_id?.trim();
+    return nativeId ? nativeId : null;
+  } catch {
+    // Back-compat for minimal test DBs or older stores: fall back to the
+    // persisted sessions.resume_token rather than making discovery fail.
+    return null;
+  }
 }

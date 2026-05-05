@@ -35,6 +35,7 @@ import { resumeMetadataSchema } from "../src/db/migrations/006_resume_metadata.j
 import { nodeSpecFieldsSchema } from "../src/db/migrations/007_node_spec_fields.js";
 import { agentspecRebootSchema } from "../src/db/migrations/014_agentspec_reboot.js";
 import { podNamespaceSchema } from "../src/db/migrations/017_pod_namespace.js";
+import { contextUsageSchema } from "../src/db/migrations/018_context_usage.js";
 import { externalCliAttachmentSchema } from "../src/db/migrations/019_external_cli_attachment.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
@@ -76,6 +77,7 @@ describe("PL-016 Finding 2 — snapshot capturer captures source_cwd", () => {
       nodeSpecFieldsSchema,
       agentspecRebootSchema,
       podNamespaceSchema,
+      contextUsageSchema,
       externalCliAttachmentSchema,
     ]);
     const rigRepo = new RigRepository(db);
@@ -116,6 +118,78 @@ describe("PL-016 Finding 2 — snapshot capturer captures source_cwd", () => {
     const yaml = readFileSync(join(userRoot, "captured-image", "manifest.yaml"), "utf-8");
     expect(yaml).toContain("source_cwd:");
     expect(yaml).toContain("/Users/op/code/projects/openrig");
+
+    db.close();
+  });
+
+  it("captures Claude's live context session id instead of stale launch resume_token", () => {
+    const { db, rigRepo, sessionRegistry } = setupDb();
+    const rig = rigRepo.createRig("test-rig");
+    const node = rigRepo.addNode(rig.id, "dev.impl", {
+      runtime: "claude-code",
+      cwd: "/Users/op/code/projects/openrig",
+    });
+    const sessionId = ulid();
+    db.prepare(
+      `INSERT INTO sessions (id, node_id, session_name, status, created_at)
+       VALUES (?, ?, ?, 'live', ?)`,
+    ).run(sessionId, node.id, "dev-impl@test-rig", new Date().toISOString());
+    db.prepare(`UPDATE sessions SET resume_token = ?, resume_type = 'claude_id' WHERE id = ?`)
+      .run("STALE-GENERATED-LAUNCH-ID", sessionId);
+    db.prepare(`
+      INSERT INTO context_usage (
+        node_id, session_id, session_name, availability, source, sampled_at
+      ) VALUES (?, ?, ?, 'known', 'claude_statusline_json', ?)
+    `).run(node.id, "LIVE-CLAUDE-TRANSCRIPT-ID", "dev-impl@test-rig", new Date().toISOString());
+
+    const library = new AgentImageLibraryService({ roots: [{ path: userRoot, sourceType: "user_file" }] });
+    const capturer = new SnapshotCapturer({
+      db, rigRepo, sessionRegistry, agentImageLibrary: library,
+      targetRoot: userRoot,
+    });
+
+    const result = capturer.capture({
+      sourceSession: "dev-impl@test-rig",
+      name: "captured-live-session-image",
+    });
+
+    expect(result.manifest.sourceSessionId).toBe("LIVE-CLAUDE-TRANSCRIPT-ID");
+    expect(result.manifest.sourceResumeToken).toBe("LIVE-CLAUDE-TRANSCRIPT-ID");
+    expect(result.manifest.sourceResumeToken).not.toBe("STALE-GENERATED-LAUNCH-ID");
+
+    db.close();
+  });
+
+  it("captures a managed Codex seat's persisted thread id into manifest", () => {
+    const { db, rigRepo, sessionRegistry } = setupDb();
+    const rig = rigRepo.createRig("test-rig");
+    const node = rigRepo.addNode(rig.id, "dev.qa", {
+      runtime: "codex",
+      cwd: "/Users/op/code/projects/openrig",
+    });
+    const sessionId = ulid();
+    db.prepare(
+      `INSERT INTO sessions (id, node_id, session_name, status, created_at)
+       VALUES (?, ?, ?, 'live', ?)`,
+    ).run(sessionId, node.id, "dev-qa@test-rig", new Date().toISOString());
+    db.prepare(`UPDATE sessions SET resume_token = ?, resume_type = 'codex_id' WHERE id = ?`)
+      .run("LIVE-CODEX-THREAD-ID", sessionId);
+
+    const library = new AgentImageLibraryService({ roots: [{ path: userRoot, sourceType: "user_file" }] });
+    const capturer = new SnapshotCapturer({
+      db, rigRepo, sessionRegistry, agentImageLibrary: library,
+      targetRoot: userRoot,
+    });
+
+    const result = capturer.capture({
+      sourceSession: "dev-qa@test-rig",
+      name: "captured-codex-image",
+    });
+
+    expect(result.manifest.runtime).toBe("codex");
+    expect(result.manifest.sourceSessionId).toBe("LIVE-CODEX-THREAD-ID");
+    expect(result.manifest.sourceResumeToken).toBe("LIVE-CODEX-THREAD-ID");
+    expect(result.manifest.sourceCwd).toBe("/Users/op/code/projects/openrig");
 
     db.close();
   });
