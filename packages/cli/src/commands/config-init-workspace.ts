@@ -90,8 +90,9 @@ export function initWorkspaceCommand(configPath?: string): Command {
     .option("--json", "JSON output")
     .action((opts: InitWorkspaceOpts) => {
       try {
-        const result = runInitWorkspace({ ...opts, configPath });
-        if (opts.json) {
+        const effectiveJson = opts.json ?? Boolean(cmd.optsWithGlobals().json);
+        const result = runInitWorkspace({ ...opts, json: effectiveJson, configPath });
+        if (effectiveJson) {
           console.log(JSON.stringify(result, null, 2));
         } else {
           if (result.dryRun) console.log(`(dry-run) workspace root: ${result.root}`);
