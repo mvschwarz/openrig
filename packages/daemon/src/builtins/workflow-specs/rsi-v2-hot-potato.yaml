@@ -106,7 +106,7 @@ workflow:
         Surface and classify a candidate from raw signal; route the shaped
         candidate forward to Product Lab, OR close as no-op with rationale
         recorded in the closure_evidence.
-      allowed_exits: [handoff, waiting, failed]
+      allowed_exits: [handoff, done, waiting, failed]
       next_hop:
         mode: prefer
         suggested_roles: [product-lab-planner]
