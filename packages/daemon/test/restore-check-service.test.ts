@@ -1318,7 +1318,7 @@ describe("RestoreCheckService", () => {
           rigId: "rig-1",
           rigName: "test-rig",
           action: "restore_from_latest_snapshot",
-          command: "rig restore snap-123 --rig rig-1",
+          command: "rig up --existing test-rig",
           safe: false,
           blocking: true,
         }),
@@ -1530,7 +1530,7 @@ describe("RestoreCheckService", () => {
     expect(result.recovery.status).toBe("not_needed");
   });
 
-  it("stopped rig without latest snapshot is blocked, not actionable", () => {
+  it("stopped rig without latest snapshot is actionable when durable current state is present", () => {
     const service = new RestoreCheckService(mockDeps({
       hasSnapshot: () => false,
       getNodeInventory: () => [claudeNode({
@@ -1546,17 +1546,18 @@ describe("RestoreCheckService", () => {
 
     expect(result.readiness.status).toBe("not_ready");
     expect(result.recovery).toEqual({
-      status: "blocked",
-      summary: expect.stringContaining("1 rig blocked"),
-      actions: [],
-      blocked: [
+      status: "actionable",
+      summary: expect.stringContaining("1 rig can be recovered"),
+      actions: [
         expect.objectContaining({
           scope: "rig",
           rigId: "rig-1",
           rigName: "test-rig",
-          reason: expect.stringContaining("latest snapshot input is missing"),
+          command: "rig up --existing test-rig",
+          reason: expect.stringContaining("current DB state"),
         }),
       ],
+      blocked: [],
       unknown: [],
     });
   });

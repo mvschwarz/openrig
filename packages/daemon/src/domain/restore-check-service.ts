@@ -1246,7 +1246,7 @@ export class RestoreCheckService {
           rigId: input.rigId,
           rigName: input.rigName,
           action: "restore_from_latest_snapshot",
-          command: `rig restore ${input.latestSnapshot.id} --rig ${input.rigId}`,
+          command: `rig up --existing ${shellQuote(input.rigName)}`,
           reason: "Rig has a latest snapshot and one or more seats are not running/ready.",
           safe: false,
           blocking: true,
@@ -1254,11 +1254,15 @@ export class RestoreCheckService {
         continue;
       }
 
-      blocked.push({
+      actions.push({
         scope: "rig",
         rigId: input.rigId,
         rigName: input.rigName,
-        reason: "No exact recovery action is known in v0 because latest snapshot input is missing.",
+        action: "restore_from_latest_snapshot",
+        command: `rig up --existing ${shellQuote(input.rigName)}`,
+        reason: "Rig has persisted current DB state but no latest snapshot; rig up will capture an auto-rehydrate snapshot and restore.",
+        safe: false,
+        blocking: true,
       });
     }
 
@@ -1383,6 +1387,11 @@ export class RestoreCheckService {
       blocking: c.status === "red",
     }));
   }
+}
+
+function shellQuote(value: string): string {
+  if (/^[A-Za-z0-9._@:-]+$/.test(value)) return value;
+  return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

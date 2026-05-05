@@ -4,12 +4,14 @@ import type { RigRepository } from "../domain/rig-repository.js";
 import type { SessionRegistry } from "../domain/session-registry.js";
 import type { EventBus } from "../domain/event-bus.js";
 import type { SnapshotRepository } from "../domain/snapshot-repository.js";
+import type { SnapshotCapture } from "../domain/snapshot-capture.js";
 import type { RestoreOrchestrator } from "../domain/restore-orchestrator.js";
 import { projectRigToGraph, type InventoryOverlay, type CurrentQitemSummary } from "../domain/graph-projection.js";
 import { getNodeInventory, getNodeInventoryWithContext, attachAgentActivity } from "../domain/node-inventory.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import type { AgentActivityStore } from "../domain/agent-activity-store.js";
 import { deriveRigLifecycleState } from "../domain/ps-projection.js";
+import { assessCurrentStateRehydrateEligibility } from "../domain/rehydrate-eligibility.js";
 import type { ContextUsageStore } from "../domain/context-usage-store.js";
 import type { Pod, ExpansionPodFragment } from "../domain/types.js";
 import type { RigExpansionService } from "../domain/rig-expansion-service.js";
@@ -388,9 +390,20 @@ rigsRoutes.post("/:id/up", async (c) => {
   if (!rig) return c.json({ error: `Rig "${rigId}" not found. List rigs with: rig ps` }, 404);
 
   const snapshotRepo = c.get("snapshotRepo" as never) as SnapshotRepository;
-  const snapshot = snapshotRepo.findLatestRestoreUsable(rigId);
+  const snapshotCapture = c.get("snapshotCapture" as never) as SnapshotCapture;
+  let snapshot = snapshotRepo.findLatestRestoreUsable(rigId);
+  let capturedCurrentState = false;
   if (!snapshot) {
-    return c.json({ error: `Rig "${rig.rig.name}" exists but has no restore-usable snapshot. Start fresh with: rig up <spec-path>`, code: "no_snapshot" }, 404);
+    const eligibility = assessCurrentStateRehydrateEligibility(repo.db, rig);
+    if (!eligibility.ok) {
+      return c.json({
+        error: `Rig "${rig.rig.name}" exists but has no restore-usable snapshot and current DB state is insufficient for rehydrate. Start fresh with: rig up <spec-path>`,
+        code: "no_snapshot",
+        blockers: eligibility.blockers,
+      }, 404);
+    }
+    snapshot = snapshotCapture.captureSnapshot(rigId, "auto-rehydrate");
+    capturedCurrentState = true;
   }
 
   const restoreOrch = c.get("restoreOrchestrator" as never) as RestoreOrchestrator | undefined;
@@ -434,7 +447,9 @@ rigsRoutes.post("/:id/up", async (c) => {
     snapshotKind: snapshot.kind,
     rigResult: result.result.rigResult,
     nodes: result.result.nodes,
-    warnings: result.result.warnings,
+    warnings: capturedCurrentState
+      ? ["No restore-usable snapshot existed; captured current DB state as auto-rehydrate snapshot for reboot recovery.", ...result.result.warnings]
+      : result.result.warnings,
     attachCommand,
   }, 200);
 });

@@ -258,7 +258,7 @@ describe("Restore check routes", () => {
           scope: "rig",
           rigId: rig.id,
           rigName: "recoverable-rig",
-          command: expect.stringMatching(new RegExp(`^rig restore .+ --rig ${rig.id}$`)),
+          command: "rig up --existing recoverable-rig",
           safe: false,
           blocking: true,
         }),

@@ -6,7 +6,9 @@ import type { EventBus } from "../domain/event-bus.js";
 import type { UpCommandRouter } from "../domain/up-command-router.js";
 import type { RigRepository } from "../domain/rig-repository.js";
 import type { SnapshotRepository } from "../domain/snapshot-repository.js";
+import type { SnapshotCapture } from "../domain/snapshot-capture.js";
 import type { RestoreOrchestrator } from "../domain/restore-orchestrator.js";
+import { assessCurrentStateRehydrateEligibility } from "../domain/rehydrate-eligibility.js";
 
 export const upRoutes = new Hono();
 
@@ -18,6 +20,7 @@ function getDeps(c: { get: (key: string) => unknown }) {
     upRouter: c.get("upRouter" as never) as UpCommandRouter,
     rigRepo: c.get("rigRepo" as never) as RigRepository,
     snapshotRepo: c.get("snapshotRepo" as never) as SnapshotRepository,
+    snapshotCapture: c.get("snapshotCapture" as never) as SnapshotCapture,
     restoreOrchestrator: c.get("restoreOrchestrator" as never) as RestoreOrchestrator | undefined,
     runtimeAdapters: c.get("runtimeAdapters" as never) as Record<string, import("../domain/runtime-adapter.js").RuntimeAdapter> | undefined,
   };
@@ -37,9 +40,24 @@ function getDeps(c: { get: (key: string) => unknown }) {
 async function restoreByRigId(rigId: string, rigName: string | null, deps: ReturnType<typeof getDeps>, c: { json: (data: unknown, status?: number) => Response }) {
   const { snapshotRepo, restoreOrchestrator } = deps;
 
-  const snapshot = snapshotRepo.findLatestRestoreUsable(rigId);
+  const rig = deps.rigRepo.getRig(rigId);
+  if (!rig) {
+    return c.json({ error: `Rig ${rigId} not found`, code: "rig_not_found" }, 404);
+  }
+
+  let snapshot = snapshotRepo.findLatestRestoreUsable(rigId);
+  let capturedCurrentState = false;
   if (!snapshot) {
-    return c.json({ error: `Rig exists but has no restore-usable snapshot. Start fresh with: rig up <spec-path>`, code: "no_snapshot" }, 404);
+    const eligibility = assessCurrentStateRehydrateEligibility(snapshotRepo.db, rig);
+    if (!eligibility.ok) {
+      return c.json({
+        error: `Rig exists but has no restore-usable snapshot and current DB state is insufficient for rehydrate. Start fresh with: rig up <spec-path>`,
+        code: "no_snapshot",
+        blockers: eligibility.blockers,
+      }, 404);
+    }
+    snapshot = deps.snapshotCapture.captureSnapshot(rigId, "auto-rehydrate");
+    capturedCurrentState = true;
   }
 
   if (!restoreOrchestrator) {
@@ -81,7 +99,9 @@ async function restoreByRigId(rigId: string, rigName: string | null, deps: Retur
     snapshotKind: snapshot.kind,
     rigResult: result.result.rigResult,
     nodes: result.result.nodes,
-    warnings: result.result.warnings,
+    warnings: capturedCurrentState
+      ? ["No restore-usable snapshot existed; captured current DB state as auto-rehydrate snapshot for reboot recovery.", ...result.result.warnings]
+      : result.result.warnings,
     attachCommand,
   }, 200);
 }
