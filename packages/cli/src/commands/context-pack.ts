@@ -18,7 +18,8 @@ import {
   readdirSync,
   readFileSync,
 } from "node:fs";
-import { basename, join } from "node:path";
+import { basename, extname, isAbsolute, join } from "node:path";
+import { parse as parseYaml } from "yaml";
 import { getDefaultOpenRigPath } from "../openrig-compat.js";
 import { DaemonClient } from "../client.js";
 import { getDaemonStatus, getDaemonUrl } from "../daemon-lifecycle.js";
@@ -84,6 +85,51 @@ function assertTreeHasNoSymlinks(root: string): void {
         throw new Error(`Context pack directories must not contain symlinks: ${absPath}`);
       }
       if (entry.isDirectory()) stack.push(absPath);
+    }
+  }
+}
+
+const ALLOWED_CONTEXT_PACK_SUFFIXES = new Set([".md", ".markdown", ".yaml", ".yml", ".txt"]);
+
+function validateContextPackManifestForInstall(manifestPath: string): void {
+  let parsed: unknown;
+  try {
+    parsed = parseYaml(readFileSync(manifestPath, "utf-8"));
+  } catch (err) {
+    throw new Error(`manifest at ${manifestPath} is not valid YAML: ${(err as Error).message}`);
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`manifest at ${manifestPath} must be a YAML object at the root`);
+  }
+  const obj = parsed as Record<string, unknown>;
+  if (typeof obj["name"] !== "string" || obj["name"].length === 0) {
+    throw new Error(`manifest at ${manifestPath} is missing required field 'name' (string)`);
+  }
+  if (obj["version"] === undefined || obj["version"] === null) {
+    throw new Error(`manifest at ${manifestPath} is missing required field 'version'`);
+  }
+  const files = obj["files"];
+  if (!Array.isArray(files)) {
+    throw new Error(`manifest at ${manifestPath} must declare 'files: [...]'`);
+  }
+  for (let i = 0; i < files.length; i++) {
+    const entry = files[i];
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      throw new Error(`manifest at ${manifestPath} has malformed entry at files[${i}]`);
+    }
+    const file = entry as Record<string, unknown>;
+    const relPath = file["path"];
+    if (typeof relPath !== "string" || relPath.length === 0) {
+      throw new Error(`manifest at ${manifestPath} files[${i}] missing 'path' (string)`);
+    }
+    if (relPath.includes("..") || isAbsolute(relPath) || relPath.startsWith("\\")) {
+      throw new Error(`manifest at ${manifestPath} files[${i}].path '${relPath}' must be a relative path inside the pack (no '..' segments, no leading '/')`);
+    }
+    if (!ALLOWED_CONTEXT_PACK_SUFFIXES.has(extname(relPath))) {
+      throw new Error(`manifest at ${manifestPath} files[${i}].path '${relPath}' has an unsupported suffix; allowed: ${Array.from(ALLOWED_CONTEXT_PACK_SUFFIXES).join(", ")}`);
+    }
+    if (typeof file["role"] !== "string" || file["role"].length === 0) {
+      throw new Error(`manifest at ${manifestPath} files[${i}] missing 'role' (string)`);
     }
   }
 }
@@ -269,6 +315,7 @@ Examples:
         if (!existsSync(manifestPath)) {
           throw new Error(`Source directory must contain manifest.yaml: ${sourceDir}`);
         }
+        validateContextPackManifestForInstall(manifestPath);
         // Read the manifest's name as the canonical install name when
         // --name not given. Cheap parse: trust the daemon to validate
         // on next sync; here we just need the name.
@@ -291,12 +338,16 @@ Examples:
         cpSync(sourceDir, targetDir, { recursive: true });
         // Sync the daemon library so the new pack appears immediately.
         const client = await getClient();
-        const syncRes = await client.post<{ count: number; entries: ContextPackEntryWire[] }>("/api/context-packs/library/sync");
+        const syncRes = await client.post<{ count: number; errors?: Array<{ source: string; error: string }>; entries: ContextPackEntryWire[] }>("/api/context-packs/library/sync");
         if (syncRes.status !== 200) {
           // Install succeeded; sync failed → still surface install path.
           if (opts.json) console.log(JSON.stringify({ installedAt: targetDir, syncError: `HTTP ${syncRes.status}` }, null, 2));
           else console.log(`Installed at ${targetDir}; daemon sync failed (HTTP ${syncRes.status}). Run 'rig context-pack sync' manually.`);
           return;
+        }
+        const syncError = syncRes.data.errors?.find((e) => e.source === targetDir);
+        if (syncError) {
+          throw new Error(`Installed at ${targetDir}, but daemon rejected the pack during sync: ${syncError.error}`);
         }
         if (opts.json) {
           console.log(JSON.stringify({ installedAt: targetDir, count: syncRes.data.count }, null, 2));
