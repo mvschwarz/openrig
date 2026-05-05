@@ -629,7 +629,9 @@ export class RestoreOrchestrator {
 
     // Derive canonical session name for pod-aware nodes
     const rig = this.rigRepo.getRig(rigId);
-    let launchOpts: { sessionName?: string } | undefined;
+    let launchOpts: { sessionName?: string; cwd?: string } | undefined = node.cwd
+      ? { cwd: node.cwd }
+      : undefined;
     let expectedSessionName: string | undefined;
     if (node.podId && rig) {
       // Pod-aware: derive {pod}-{member}@{rigName} from node identity
@@ -639,7 +641,7 @@ export class RestoreOrchestrator {
         const memberPart = parts.slice(1).join(".");
         const { deriveCanonicalSessionName, deriveSessionName } = await import("./session-name.js");
         expectedSessionName = deriveCanonicalSessionName(podPart, memberPart, rig.rig.name);
-        launchOpts = { sessionName: expectedSessionName };
+        launchOpts = { ...launchOpts, sessionName: expectedSessionName };
       }
     }
     if (!expectedSessionName && rig) {

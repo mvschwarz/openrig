@@ -45,6 +45,7 @@ export const SETTINGS_VALID_KEYS = [
   "ui.preview.refresh_interval_seconds",
   "ui.preview.max_pins",
   "ui.preview.default_lines",
+  "recovery.auto_drive_provider_prompts",
 ] as const;
 
 export type SettingsValidKey = typeof SETTINGS_VALID_KEYS[number];
@@ -65,6 +66,7 @@ const ENV_MAP: Record<SettingsValidKey, { primary: string; legacy: string }> = {
   "ui.preview.refresh_interval_seconds": { primary: "OPENRIG_UI_PREVIEW_REFRESH_INTERVAL_SECONDS", legacy: "RIGGED_UI_PREVIEW_REFRESH_INTERVAL_SECONDS" },
   "ui.preview.max_pins": { primary: "OPENRIG_UI_PREVIEW_MAX_PINS", legacy: "RIGGED_UI_PREVIEW_MAX_PINS" },
   "ui.preview.default_lines": { primary: "OPENRIG_UI_PREVIEW_DEFAULT_LINES", legacy: "RIGGED_UI_PREVIEW_DEFAULT_LINES" },
+  "recovery.auto_drive_provider_prompts": { primary: "OPENRIG_RECOVERY_AUTO_DRIVE_PROVIDER_PROMPTS", legacy: "RIGGED_RECOVERY_AUTO_DRIVE_PROVIDER_PROMPTS" },
 };
 
 const KEY_TO_PATH: Record<SettingsValidKey, string[]> = {
@@ -83,6 +85,7 @@ const KEY_TO_PATH: Record<SettingsValidKey, string[]> = {
   "ui.preview.refresh_interval_seconds": ["ui", "preview", "refreshIntervalSeconds"],
   "ui.preview.max_pins": ["ui", "preview", "maxPins"],
   "ui.preview.default_lines": ["ui", "preview", "defaultLines"],
+  "recovery.auto_drive_provider_prompts": ["recovery", "autoDriveProviderPrompts"],
 };
 
 export type SettingSource = "env" | "file" | "default";
@@ -162,6 +165,7 @@ function getDefaultValue(key: SettingsValidKey, workspaceRoot: string): string |
     case "ui.preview.refresh_interval_seconds": return 3;
     case "ui.preview.max_pins": return 4;
     case "ui.preview.default_lines": return 50;
+    case "recovery.auto_drive_provider_prompts": return false;
     default: return "";
   }
 }
@@ -193,6 +197,7 @@ export interface ResolvedConfig {
   uiPreviewRefreshIntervalSeconds: number;
   uiPreviewMaxPins: number;
   uiPreviewDefaultLines: number;
+  recoveryAutoDriveProviderPrompts: boolean;
 }
 
 export class SettingsStore {
@@ -242,6 +247,7 @@ export class SettingsStore {
       uiPreviewRefreshIntervalSeconds: this.resolveOne("ui.preview.refresh_interval_seconds", fc, wr).value as number,
       uiPreviewMaxPins: this.resolveOne("ui.preview.max_pins", fc, wr).value as number,
       uiPreviewDefaultLines: this.resolveOne("ui.preview.default_lines", fc, wr).value as number,
+      recoveryAutoDriveProviderPrompts: this.resolveOne("recovery.auto_drive_provider_prompts", fc, wr).value as boolean,
     };
   }
 

@@ -43,6 +43,9 @@ export interface RiggedConfig {
       defaultLines: number;
     };
   };
+  recovery: {
+    autoDriveProviderPrompts: boolean;
+  };
 }
 
 const DEFAULT_WORKSPACE_ROOT = getDefaultOpenRigPath("workspace");
@@ -67,6 +70,9 @@ const DEFAULTS = {
       defaultLines: 50,
     },
   },
+  recovery: {
+    autoDriveProviderPrompts: false,
+  },
 } as const;
 
 export const VALID_KEYS = [
@@ -85,6 +91,7 @@ export const VALID_KEYS = [
   "ui.preview.refresh_interval_seconds",
   "ui.preview.max_pins",
   "ui.preview.default_lines",
+  "recovery.auto_drive_provider_prompts",
 ] as const;
 
 export type ValidKey = typeof VALID_KEYS[number];
@@ -108,6 +115,7 @@ export const ENV_MAP: Record<ValidKey, { primary: string; legacy: string }> = {
   "ui.preview.refresh_interval_seconds": { primary: "OPENRIG_UI_PREVIEW_REFRESH_INTERVAL_SECONDS", legacy: "RIGGED_UI_PREVIEW_REFRESH_INTERVAL_SECONDS" },
   "ui.preview.max_pins": { primary: "OPENRIG_UI_PREVIEW_MAX_PINS", legacy: "RIGGED_UI_PREVIEW_MAX_PINS" },
   "ui.preview.default_lines": { primary: "OPENRIG_UI_PREVIEW_DEFAULT_LINES", legacy: "RIGGED_UI_PREVIEW_DEFAULT_LINES" },
+  "recovery.auto_drive_provider_prompts": { primary: "OPENRIG_RECOVERY_AUTO_DRIVE_PROVIDER_PROMPTS", legacy: "RIGGED_RECOVERY_AUTO_DRIVE_PROVIDER_PROMPTS" },
 };
 
 // Maps dotted-string config keys to the camelCase RiggedConfig path.
@@ -130,6 +138,7 @@ const KEY_TO_PATH: Record<ValidKey, string[]> = {
   "ui.preview.refresh_interval_seconds": ["ui", "preview", "refreshIntervalSeconds"],
   "ui.preview.max_pins": ["ui", "preview", "maxPins"],
   "ui.preview.default_lines": ["ui", "preview", "defaultLines"],
+  "recovery.auto_drive_provider_prompts": ["recovery", "autoDriveProviderPrompts"],
 };
 
 function isValidKey(key: string): key is ValidKey {
@@ -261,6 +270,9 @@ export class ConfigStore {
           maxPins: v("ui.preview.max_pins") as number,
           defaultLines: v("ui.preview.default_lines") as number,
         },
+      },
+      recovery: {
+        autoDriveProviderPrompts: v("recovery.auto_drive_provider_prompts") as boolean,
       },
     };
   }

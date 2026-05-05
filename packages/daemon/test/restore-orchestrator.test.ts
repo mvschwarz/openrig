@@ -1649,6 +1649,34 @@ describe("RestoreOrchestrator", () => {
     }
   });
 
+  it("restored sessions launch tmux in the snapshot node cwd", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "restore-cwd-"));
+    try {
+      const snap = seedRigAndSnapshot({
+        nodes: [{ logicalId: "worker", role: "worker", runtime: "claude-code", cwd: tmpDir }],
+        edges: [],
+      });
+      const createSessionSpy = vi.fn<(name: string, cwd?: string, env?: Record<string, string>) => Promise<{ ok: true }>>()
+        .mockResolvedValue({ ok: true });
+      const tmux = mockTmux();
+      (tmux as unknown as Record<string, unknown>).createSession = createSessionSpy;
+
+      const nodeLauncher = new NodeLauncher({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux });
+      const orch = new RestoreOrchestrator({
+        db, rigRepo, sessionRegistry, eventBus, snapshotRepo, snapshotCapture,
+        checkpointStore, nodeLauncher, tmuxAdapter: tmux,
+        claudeResume: mockClaudeResume(),
+        codexResume: mockCodexResume(),
+      });
+
+      const result = await orch.restore(snap.id);
+      expect(result.ok).toBe(true);
+      expect(createSessionSpy).toHaveBeenCalledWith(expect.any(String), tmpDir, expect.any(Object));
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   // --- Epic 3 D2: no silent fresh fallback on failed resume ---
 
   it("D2: legacy node with resume_if_possible + missing token returns failed, not fresh", async () => {

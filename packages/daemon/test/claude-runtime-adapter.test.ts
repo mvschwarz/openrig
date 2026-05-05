@@ -373,6 +373,38 @@ describe("Claude Code runtime adapter", () => {
     });
   });
 
+  it("launchHarness auto-accepts Claude workspace trust prompt only when explicitly configured", async () => {
+    const tmux = mockTmux();
+    (tmux.getPaneCommand as ReturnType<typeof vi.fn>).mockResolvedValue("claude");
+    (tmux.capturePaneContent as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce([
+        "Accessing workspace:",
+        "/project",
+        "❯ 1. Yes, I trust this folder",
+        "  2. No, exit",
+      ].join("\n"))
+      .mockResolvedValue([
+        "Claude Code v2.1.89",
+        "❯ Ready",
+      ].join("\n"));
+    const adapter = new ClaudeCodeAdapter({
+      tmux,
+      fsOps: mockFs(),
+      sleep: async () => {},
+      autoDriveProviderPrompts: true,
+    });
+
+    const result = await adapter.launchHarness(makeBinding(), { name: "dev-impl@test-rig", resumeToken: "abc-123" });
+
+    expect(result).toEqual({
+      ok: true,
+      resumeToken: "abc-123",
+      resumeType: "claude_id",
+    });
+    expect(tmux.sendKeys).toHaveBeenCalledTimes(2);
+    expect(tmux.sendKeys).toHaveBeenNthCalledWith(2, "r01-impl", ["Enter"]);
+  });
+
   it("launchHarness treats a live Claude TUI as success even when tmux reports a version-string foreground command", async () => {
     const tmux = mockTmux();
     (tmux.getPaneCommand as ReturnType<typeof vi.fn>)
