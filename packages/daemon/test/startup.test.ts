@@ -70,6 +70,43 @@ describe("createDaemon startup composition", () => {
     db.close();
   });
 
+  it("createDaemon queue validation accepts first-class human seats without a materialized kernel rig", async () => {
+    const cmuxFactory: CmuxTransportFactory = async () => {
+      throw Object.assign(new Error(""), { code: "ENOENT" });
+    };
+    const tmuxExec: ExecFn = async () => "";
+
+    const { db, deps } = await createDaemon({ cmuxFactory, tmuxExec });
+
+    const canonical = await deps.queueRepo.create({
+      sourceSession: "dev-qa@implementation-pair",
+      destinationSession: "human-wrandom@kernel",
+      body: "human gate smoke",
+      tier: "human-gate",
+      nudge: false,
+    });
+    const generic = await deps.queueRepo.create({
+      sourceSession: "dev-qa@implementation-pair",
+      destinationSession: "human@host",
+      body: "human host smoke",
+      tier: "human-gate",
+      nudge: false,
+    });
+
+    expect(canonical.destinationSession).toBe("human-wrandom@kernel");
+    expect(generic.destinationSession).toBe("human@host");
+    await expect(
+      deps.queueRepo.create({
+        sourceSession: "dev-qa@implementation-pair",
+        destinationSession: "driver@phantom-rig",
+        body: "must still reject phantom rigs",
+        nudge: false,
+      }),
+    ).rejects.toThrow(/unknown rig/);
+
+    db.close();
+  });
+
   it("createDaemon app: GET /api/adapters/cmux/status returns 200 (adapter routes mounted)", async () => {
     const cmuxFactory: CmuxTransportFactory = async () => {
       throw Object.assign(new Error(""), { code: "ENOENT" });
