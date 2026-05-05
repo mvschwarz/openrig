@@ -33,7 +33,7 @@ import {
   type AgentImageEntry,
   type AgentImagePreview,
 } from "../hooks/useAgentImageLibrary.js";
-import { usePsEntries } from "../hooks/usePsEntries.js";
+import { useMissionControlDestinations } from "./mission-control/hooks/useMissionControlDestinations.js";
 import { useQueryClient } from "@tanstack/react-query";
 import {
   WorkflowHeader,
@@ -545,18 +545,12 @@ function ContextPackReviewBody({
   const [sendError, setSendError] = useState<string | null>(null);
   const [sendStatus, setSendStatus] = useState<"idle" | "dry-run-shown" | "sent">("idle");
   const sendMutation = useContextPackSend();
-  const { data: psEntries = [] } = usePsEntries();
+  const { data: destinations } = useMissionControlDestinations(showSendPicker);
 
-  const runningSessions: string[] = (() => {
-    const sessions: string[] = [];
-    for (const rig of psEntries) {
-      const nodes = (rig as { nodes?: Array<{ canonicalSessionName?: string | null; sessionStatus?: string | null }> }).nodes ?? [];
-      for (const n of nodes) {
-        if (n.canonicalSessionName && n.sessionStatus === "running") sessions.push(n.canonicalSessionName);
-      }
-    }
-    return sessions.sort();
-  })();
+  const runningSessions = (destinations?.destinations ?? [])
+    .filter((d) => d.source === "topology" && d.status === "running")
+    .map((d) => d.sessionName)
+    .sort();
 
   const onDryRun = async () => {
     setSendError(null);
