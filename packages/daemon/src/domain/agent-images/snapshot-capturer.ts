@@ -69,7 +69,7 @@ export class SnapshotCapturer {
         { sourceSession },
       );
     }
-    const { runtime, nativeId } = discovery.result;
+    const { runtime, nativeId, nodeCwd } = discovery.result;
     if (!nativeId) {
       throw new AgentImageError(
         "image_not_found",
@@ -85,6 +85,12 @@ export class SnapshotCapturer {
       sourceSeat: sourceSession,
       sourceSessionId: nativeId,
       sourceResumeToken: nativeId,
+      // PL-016 Finding 2 (Option 3, founder-confirmed 2026-05-04):
+      // capture source seat's resolved cwd so the Use-as-starter
+      // snippet can emit `cwd: <source_cwd>`. nodeCwd may be null when
+      // the source node has no recorded cwd (legacy fixture or seat
+      // pre-cwd-capture); manifest field is omitted in that case.
+      ...(nodeCwd ? { sourceCwd: nodeCwd } : {}),
       createdAt: this.now().toISOString(),
       ...(opts.notes !== undefined ? { notes: opts.notes } : {}),
       files: [],

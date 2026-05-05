@@ -251,14 +251,30 @@ export function agentImagesRoutes(deps: AgentImageRoutesDeps): Hono {
 
 /** PRD § Item 5: review-pane "Use as starter" surface. We synthesize
  *  the agent.yaml snippet here so the UI can render it directly with
- *  no client-side templating. */
+ *  no client-side templating.
+ *
+ *  PL-016 Finding 2 (Option 3, founder-confirmed 2026-05-04): when the
+ *  manifest carries source_cwd, the snippet emits `cwd: <source_cwd>`
+ *  ahead of the session_source block — operator pastes verbatim, fork
+ *  starts in the SAME directory the parent session was created in,
+ *  Claude's project-dir-scoped session storage works because the jsonl
+ *  file lives there. The daemon does NOT override cwd at fork dispatch
+ *  (founder direction "respect the provider; no funny business") — if
+ *  operator manually changes cwd, fork fails honestly with "no
+ *  conversation found". Manifests without source_cwd (pre-Finding-2)
+ *  render without the cwd line for back-compat. */
 function buildStarterSnippet(entry: AgentImageEntry): string {
-  return [
+  const lines: string[] = [];
+  if (entry.sourceCwd) {
+    lines.push(`cwd: ${JSON.stringify(entry.sourceCwd)}`);
+  }
+  lines.push(
     "session_source:",
     "  mode: agent_image",
     "  ref:",
     "    kind: image_name",
     `    value: ${JSON.stringify(entry.name)}`,
     `    version: ${JSON.stringify(entry.version)}`,
-  ].join("\n") + "\n";
+  );
+  return lines.join("\n") + "\n";
 }
