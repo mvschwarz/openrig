@@ -571,7 +571,9 @@ export function Explorer({
       data-testid="explorer"
       data-surface={surface}
       className={cn(
-        "border-r border-stone-300/25 flex z-20 overflow-hidden",
+        // V1 border weight doctrine (universal-shell.md L39–L48):
+        // 1px outline-variant ghost line for inter-region edges.
+        "border-r border-outline-variant flex z-20 overflow-hidden",
         "bg-[rgba(250,249,245,0.035)] supports-[backdrop-filter]:bg-[rgba(250,249,245,0.018)] backdrop-blur-[14px] backdrop-saturate-75 shadow-[6px_0_14px_rgba(46,52,46,0.04)]",
         // Mobile: slide-over from left below the top-bar header (h-14).
         "fixed top-14 bottom-0 left-0 transition-transform duration-200 ease-tactical w-72 max-w-[80vw]",

@@ -262,10 +262,12 @@ function Rail({
       data-testid="app-rail"
       aria-label="Primary navigation"
       className={cn(
-        "bg-background border-stone-900 flex shrink-0",
+        // V1 border weight doctrine (universal-shell.md L39–L48):
+        // 1px outline-variant ghost line for inter-region edges.
+        "bg-background border-outline-variant flex shrink-0",
         vertical
-          ? "w-12 flex-col items-center border-r-2 py-2 gap-1"
-          : "w-full flex-row items-center border-b-2 px-2 gap-1 overflow-x-auto",
+          ? "w-12 flex-col items-center border-r py-2 gap-1"
+          : "w-full flex-row items-center border-b px-2 gap-1 overflow-x-auto",
       )}
     >
       <div
@@ -398,7 +400,7 @@ export function AppShell({ children }: AppShellProps) {
                 stay visible everywhere. */}
             <header
               data-testid="app-topbar"
-              className="h-14 flex items-center justify-between px-4 bg-background border-b-2 border-stone-900 shrink-0 relative z-30"
+              className="h-14 flex items-center justify-between px-4 bg-background border-b border-outline-variant shrink-0 relative z-30"
             >
               <div className="flex items-center gap-3">
                 <button
@@ -458,7 +460,7 @@ export function AppShell({ children }: AppShellProps) {
                   <div
                     data-testid="mobile-rail-tray"
                     className={cn(
-                      "fixed top-14 left-0 bottom-0 z-30 bg-background border-r-2 border-stone-900 transition-transform duration-200 ease-tactical lg:hidden",
+                      "fixed top-14 left-0 bottom-0 z-30 bg-background border-r border-outline-variant transition-transform duration-200 ease-tactical lg:hidden",
                       "w-72 max-w-[85vw] flex flex-col",
                       explorerOpen ? "translate-x-0" : "-translate-x-full",
                     )}
