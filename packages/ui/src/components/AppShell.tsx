@@ -374,7 +374,11 @@ export function AppShell({ children }: AppShellProps) {
   const workspaceLeftOffset = isWideLayout
     ? `${3 + (explorerVisible && desktopExplorerOpen ? 18 : 0)}rem`
     : "0rem";
-  const workspaceRightOffset = isWideLayout && drawerOpen ? "45rem" : "0rem";
+  // Coupled to VellumSheet wide preset (lg:w-[38rem]) — bounce-fix #3
+  // caught the gap that emerged when bounce-fix #2 calibrated the drawer
+  // 45rem → 38rem without updating this offset. Keep these two literals
+  // in sync; the regression test in app-shell.test.tsx asserts they match.
+  const workspaceRightOffset = isWideLayout && drawerOpen ? "38rem" : "0rem";
   const workspaceStyle = {
     "--workspace-left-offset": workspaceLeftOffset,
     "--workspace-right-offset": workspaceRightOffset,

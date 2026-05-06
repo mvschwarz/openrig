@@ -5,9 +5,10 @@
 // right-sidebar (closer to document-reading width)."
 //
 // Phase 2 lays the chrome: VellumSheet primitive (Phase 1) wraps each
-// panel; default-closed (selection === null returns null); ~720px wide
-// on desktop (`lg:w-[45rem]` via VellumSheet width="wide"); user-closable
-// via VellumSheet's onClose [×] button.
+// panel; default-closed (selection === null returns null); ~608px wide
+// on desktop (`lg:w-[38rem]` via VellumSheet width="wide"; calibrated
+// 2026-05-06 per content-drawer.md L9); user-closable via VellumSheet's
+// onClose [×] button.
 //
 // Phase 4 wires the new viewer types (QueueItemViewer, FileViewer,
 // SubSpecPreview, SeatDetailViewer) and named triggers from feed cards
