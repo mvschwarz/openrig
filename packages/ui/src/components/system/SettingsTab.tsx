@@ -149,9 +149,39 @@ export function SettingsTab() {
     return <div data-testid="settings-loading" className="px-4 py-3 font-mono text-[10px] text-stone-400">Loading settings…</div>;
   }
   if (error || !data) {
+    // V1 attempt-3 Phase 3 bounce-fix A2 — soften the failure mode.
+    // The shipped daemon (npm package) at v0.2.0 doesn't expose /api/config
+    // yet; the route lands at v0.3.0. Render an honest empty-state pointing
+    // at the CLI (canonical edit path per useSettings.ts header note),
+    // not a raw "HTTP 404" red error.
+    const errMsg = (error as Error)?.message ?? "";
+    const looksLikeMissingEndpoint = errMsg.includes("404");
     return (
-      <div data-testid="settings-error" className="px-4 py-3 font-mono text-[10px] text-red-600">
-        Could not load settings: {(error as Error)?.message ?? "unknown"}
+      <div
+        data-testid="settings-error"
+        className="px-4 py-6 font-mono text-xs text-on-surface-variant border border-outline-variant bg-surface-low"
+      >
+        {looksLikeMissingEndpoint ? (
+          <>
+            <div className="text-stone-900 font-bold uppercase tracking-wide text-[10px] mb-2">
+              Settings UI requires daemon ≥ v0.3.0
+            </div>
+            <p className="mb-2">
+              The shipped daemon doesn't expose the settings HTTP route yet.
+              Until that lands, configure via the CLI:
+            </p>
+            <pre className="font-mono text-[10px] bg-stone-50 border border-outline-variant px-2 py-1 inline-block">
+              rig config get / set / reset
+            </pre>
+          </>
+        ) : (
+          <>
+            <div className="text-stone-900 font-bold uppercase tracking-wide text-[10px] mb-2">
+              Settings unavailable
+            </div>
+            <p>{errMsg || "Daemon is unreachable."}</p>
+          </>
+        )}
       </div>
     );
   }

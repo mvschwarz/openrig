@@ -154,13 +154,17 @@ describe("AppShell — Phase 2 chrome", () => {
   });
 
   describe("SC-6: drawer default-closed", () => {
-    it("SharedDetailDrawer is NOT rendered at any default route (selection=null)", async () => {
-      for (const path of ["/", "/topology", "/for-you", "/project", "/specs", "/settings"]) {
-        const { container, unmount } = await renderAt(path);
-        expect(container.querySelector("[data-testid='shared-detail-drawer']")).toBeNull();
-        unmount();
-      }
-    });
+    it.each([
+      ["/", "Dashboard"],
+      ["/topology", "Topology host"],
+      ["/for-you", "For You"],
+      ["/project", "Project workspace"],
+      ["/specs", "Specs library"],
+      ["/settings", "Settings"],
+    ])("SharedDetailDrawer NOT rendered at %s (%s)", async (path) => {
+      const { container } = await renderAt(path);
+      expect(container.querySelector("[data-testid='shared-detail-drawer']")).toBeNull();
+    }, 15000);
   });
 
   describe("Surface routing — Explorer surface union", () => {

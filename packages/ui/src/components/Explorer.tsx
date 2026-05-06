@@ -14,6 +14,9 @@ import {
   shortQitemTail,
 } from "../lib/activity-visuals.js";
 import { EmptyState } from "./ui/empty-state.js";
+import { ProjectTreeView } from "./project/ProjectTreeView.js";
+import { SpecsTreeView } from "./specs/SpecsTreeView.js";
+import { TopologyTreeView } from "./topology/TopologyTreeView.js";
 
 import type { DrawerSelection } from "./SharedDetailDrawer.js";
 
@@ -39,6 +42,11 @@ interface ExplorerProps {
   desktopMode?: ExplorerDesktopMode;
   surface?: ExplorerSurface;
   onDesktopToggle?: () => void;
+  /** V1 attempt-3 Phase 3 bounce-fix — Class B selective vellum overlay.
+   *  "overlay" = vellum-translucent + position absolute z-30 (topology
+   *  graph view-mode signature). "opaque" = default solid background
+   *  (every other destination + view-mode). */
+  overlayMode?: "overlay" | "opaque";
 }
 
 function statusColor(startupStatus: string | null): string {
@@ -496,50 +504,49 @@ function SurfaceBody({
   currentRigId: string | null;
 }) {
   if (surface === "topology") {
-    return (
-      <FullExplorerContents
-        rigs={rigs}
-        psMap={psMap}
-        selection={selection}
-        onSelect={onSelect}
-        onClose={onClose}
-        currentRigId={currentRigId}
-      />
-    );
+    return <TopologyTreeView />;
   }
   if (surface === "project") {
-    return (
-      <div className="flex-1 p-4">
-        <EmptyState
-          label="PROJECT TREE"
-          description="workspace > mission > slice — Phase 3 fills."
-          variant="card"
-          testId="explorer-project-placeholder"
-        />
-      </div>
-    );
+    return <ProjectTreeView />;
   }
   if (surface === "specs") {
-    return (
-      <div className="flex-1 p-4">
-        <EmptyState
-          label="SPECS TREE"
-          description="rigs / workspaces / workflows / context-packs / agent-images / applications — Phase 3 fills."
-          variant="card"
-          testId="explorer-specs-placeholder"
-        />
-      </div>
-    );
+    return <SpecsTreeView />;
   }
   if (surface === "for-you") {
+    // Subscription affordance — settings-shaped surface per for-you-feed.md L134-L140.
+    // The PRIMARY UX of /for-you is the FEED in the center; subscriptions live
+    // here as a small on-demand list. NOT dominating.
     return (
-      <div className="flex-1 p-4">
-        <EmptyState
-          label="FOR YOU LENS"
-          description="Lens chips + filter chips + subscriptions list — Phase 3 fills (settings-shaped subscriptions, NOT feed-shaped)."
-          variant="card"
-          testId="explorer-for-you-placeholder"
-        />
+      <div data-testid="explorer-for-you-subscriptions" className="flex-1 overflow-y-auto py-3 px-3">
+        <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-on-surface-variant mb-2">
+          Subscriptions
+        </div>
+        <ul className="space-y-1 font-mono text-xs">
+          <li className="flex items-center justify-between">
+            <span>Action required</span>
+            <span className="text-[9px] text-on-surface-variant">forced ON</span>
+          </li>
+          <li className="flex items-center justify-between">
+            <span>Approvals</span>
+            <span className="text-[9px] text-success">on</span>
+          </li>
+          <li className="flex items-center justify-between">
+            <span>Feature ships</span>
+            <span className="text-[9px] text-success">on</span>
+          </li>
+          <li className="flex items-center justify-between">
+            <span>Slice progress</span>
+            <span className="text-[9px] text-success">on</span>
+          </li>
+          <li className="flex items-center justify-between">
+            <span>Audit log</span>
+            <span className="text-[9px] text-on-surface-variant">off</span>
+          </li>
+        </ul>
+        <p className="mt-3 font-mono text-[9px] text-on-surface-variant italic">
+          Per-subscription toggles wire in Phase 4. V1 list reads canonical
+          defaults from for-you-feed.md L142–L150.
+        </p>
       </div>
     );
   }
@@ -554,6 +561,7 @@ export function Explorer({
   desktopMode = "full",
   surface = "topology",
   onDesktopToggle = () => {},
+  overlayMode = "opaque",
 }: ExplorerProps) {
   const routerState = useRouterState();
   const currentPath = routerState.location.pathname;
@@ -566,37 +574,80 @@ export function Explorer({
   // Surface "none" (Dashboard / Settings) — Explorer is not rendered.
   if (surface === "none") return null;
 
+  // Class B: overlay vs opaque background grammar.
+  // OPAQUE (default; every destination except topology-graph): solid
+  //   paper-cream tone (Phase 2 baseline) so the explore tree reads
+  //   crisply against the center workspace.
+  // OVERLAY (topology graph only): light vellum translucent surface
+  //   (.vellum class from globals.css L113-117 — rgba(255,255,255,0.4)
+  //   + backdrop-blur(8px)) with elevated z-index so the graph canvas
+  //   underneath shows through. Sheets-of-vellum-layered aesthetic per
+  //   universal-shell.md L48. Founder calibration 2026-05-06: vellum
+  //   (40%) reads coherent with the baseline 3.5% opacity Phase 2 had;
+  //   vellum-heavy (70%) was too dense.
+  const isOverlay = overlayMode === "overlay";
+  const isCollapsed = desktopMode === "hidden";
+
+  // When collapsed at desktop: render ONLY a floating toggle button
+  // at left=rail-edge (no aside container behind it). The Explorer
+  // surface tree is unmounted; the canvas + tabs reflow to fill the
+  // freed width. Founder direction 2026-05-06.
+  if (isCollapsed) {
+    return (
+      <button
+        type="button"
+        data-testid="explorer-edge-toggle"
+        data-explorer-collapsed="true"
+        aria-label="Expand explorer"
+        onClick={onDesktopToggle}
+        className={cn(
+          "hidden lg:flex fixed top-[5.5rem] left-[3.5rem] z-30 h-8 w-8 items-center justify-center",
+          "rounded-full border border-outline-variant bg-background/90 text-stone-700",
+          "shadow-[0_2px_8px_rgba(41,37,36,0.08)] backdrop-blur-sm transition-colors",
+          "hover:bg-stone-100 hover:text-stone-900",
+        )}
+      >
+        <ChevronRight className="h-4 w-4" strokeWidth={1.5} />
+      </button>
+    );
+  }
+
   return (
     <aside
       data-testid="explorer"
       data-surface={surface}
+      data-explorer-mode={overlayMode}
+      data-explorer-collapsed="false"
       className={cn(
         // V1 border weight doctrine (universal-shell.md L39–L48):
         // 1px outline-variant ghost line for inter-region edges.
-        "border-r border-outline-variant flex z-20 overflow-hidden",
-        "bg-[rgba(250,249,245,0.035)] supports-[backdrop-filter]:bg-[rgba(250,249,245,0.018)] backdrop-blur-[14px] backdrop-saturate-75 shadow-[6px_0_14px_rgba(46,52,46,0.04)]",
+        "border-r border-outline-variant flex overflow-hidden",
+        // Background grammar by mode:
+        isOverlay
+          ? "vellum z-30 shadow-[6px_0_14px_rgba(46,52,46,0.06)]"
+          : "z-20 bg-[rgba(250,249,245,0.035)] supports-[backdrop-filter]:bg-[rgba(250,249,245,0.018)] backdrop-blur-[14px] backdrop-saturate-75 shadow-[6px_0_14px_rgba(46,52,46,0.04)]",
         // Mobile: slide-over from left below the top-bar header (h-14).
         "fixed top-14 bottom-0 left-0 transition-transform duration-200 ease-tactical w-72 max-w-[80vw]",
         open ? "translate-x-0" : "-translate-x-full",
-        // Desktop (>=lg): persistent column at 280px (lg:w-72) per universal-shell.md L34.
-        // Position absolutely after the 48px rail; AppShell pads its main content with workspace-left-offset.
-        desktopMode === "full" && "lg:absolute lg:top-0 lg:bottom-0 lg:left-12 lg:w-72 lg:max-w-none lg:translate-x-0",
-        desktopMode === "hidden" && "lg:hidden",
+        // Desktop (>=lg): persistent column at 280px (lg:w-72) per
+        // universal-shell.md L34. Positioned absolutely after the 48px
+        // rail.
+        "lg:absolute lg:top-0 lg:bottom-0 lg:left-12 lg:w-72 lg:max-w-none lg:translate-x-0",
       )}
     >
       <div className="relative flex h-full w-full flex-col">
         <button
           type="button"
           data-testid="explorer-edge-toggle"
-          aria-label={desktopMode === "full" ? "Collapse explorer" : "Expand explorer"}
+          aria-label="Collapse explorer"
           onClick={onDesktopToggle}
           className={cn(
-            "hidden lg:flex absolute z-10 h-8 w-8 items-center justify-center rounded-full border border-stone-300 bg-background/90 text-stone-700",
+            "hidden lg:flex absolute z-10 h-8 w-8 items-center justify-center rounded-full border border-outline-variant bg-background/90 text-stone-700",
             "shadow-[0_2px_8px_rgba(41,37,36,0.08)] backdrop-blur-sm transition-colors hover:bg-stone-100 hover:text-stone-900",
             "right-2 top-3",
           )}
         >
-          <ChevronLeft className="h-4 w-4" />
+          <ChevronLeft className="h-4 w-4" strokeWidth={1.5} />
         </button>
 
         <SurfaceBody

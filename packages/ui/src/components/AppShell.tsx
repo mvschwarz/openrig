@@ -46,6 +46,10 @@ import { SharedDetailDrawer, type DrawerSelection } from "./SharedDetailDrawer.j
 import { PreviewStack } from "./preview/PreviewStack.js";
 import type { DiscoveryPlacementTarget } from "./DiscoveryPanel.js";
 import { SpecsWorkspaceProvider } from "./SpecsWorkspace.js";
+import {
+  TopologyOverlayProvider,
+  useTopologyOverlay,
+} from "./topology/topology-overlay-context.js";
 import { useActivityFeed } from "../hooks/useActivityFeed.js";
 import { useGlobalEvents } from "../hooks/useGlobalEvents.js";
 import { cn } from "../lib/utils.js";
@@ -112,7 +116,8 @@ interface RailIconSpec {
   id: string;
   label: string;
   to: string;
-  icon: ComponentType<{ className?: string }>;
+  // lucide-react icons accept SVG props (strokeWidth, color, size, etc).
+  icon: ComponentType<{ className?: string; strokeWidth?: number | string }>;
   /** Path prefix used for active-state matching. */
   activeWhen: (pathname: string) => boolean;
   testId: string;
@@ -243,10 +248,13 @@ function Rail({
           "focus-visible:outline focus-visible:outline-2 focus-visible:outline-stone-900 focus-visible:outline-offset-2",
           active
             ? "bg-stone-900 text-stone-50"
-            : "text-stone-700 hover:bg-stone-200 hover:text-stone-900",
+            : "text-stone-700 hover:bg-stone-200/60 hover:text-stone-900",
         )}
       >
-        <Icon className="h-5 w-5" />
+        {/* Lighter icon line weight (founder direction 2026-05-06):
+            stroke-width 1.25 (default lucide is 2) for an architectural
+            drafting feel that matches the 1px ghost border doctrine. */}
+        <Icon className="h-5 w-5" strokeWidth={1.25} />
         {active && (
           <span
             aria-hidden="true"
@@ -264,7 +272,11 @@ function Rail({
       className={cn(
         // V1 border weight doctrine (universal-shell.md L39–L48):
         // 1px outline-variant ghost line for inter-region edges.
-        "bg-background border-outline-variant flex shrink-0",
+        // Vellum surface (founder direction 2026-05-06): same translucent
+        // treatment as the topology-graph Explorer overlay, so the rail
+        // reads as a paper sheet layered over the canvas (sheets-of-vellum
+        // aesthetic per universal-shell.md L48).
+        "vellum border-outline-variant flex shrink-0",
         vertical
           ? "w-12 flex-col items-center border-r py-2 gap-1"
           : "w-full flex-row items-center border-b px-2 gap-1 overflow-x-auto",
@@ -302,9 +314,20 @@ interface AppShellProps {
 const WIDE_LAYOUT_BREAKPOINT = 1024;
 
 export function AppShell({ children }: AppShellProps) {
+  return (
+    <SpecsWorkspaceProvider>
+      <TopologyOverlayProvider>
+        <AppShellInner>{children}</AppShellInner>
+      </TopologyOverlayProvider>
+    </SpecsWorkspaceProvider>
+  );
+}
+
+function AppShellInner({ children }: AppShellProps) {
   const routerState = useRouterState();
   const pathname = routerState.location.pathname;
   const surface = surfaceForPath(pathname);
+  const { mode: explorerMode } = useTopologyOverlay();
 
   const [explorerOpen, setExplorerOpen] = useState(false); // mobile slide-over state
   const [desktopExplorerOpen, setDesktopExplorerOpen] = useState(true);
@@ -369,11 +392,34 @@ export function AppShell({ children }: AppShellProps) {
   const explorerVisible = surface !== "none";
   const drawerOpen = Boolean(selectionState);
 
-  // CSS var consumed by surfaces that pad themselves inside center.
-  // Rail: 48px (3rem). Explorer: 280px (18rem) when desktop-open, 0 when collapsed/none.
+  // V1 attempt-3 Phase 3 bounce-fix — Class B fixed-anchor + selective overlay.
+  // Topology graph mode signals overlay; only meaningful while on /topology
+  // (surface === "topology"). Other surfaces ALWAYS use opaque layout.
+  const isTopologyOverlay = explorerMode === "overlay" && surface === "topology";
+
+  // Anchor stays the same in BOTH modes — tab bar position never moves.
+  // Main padding-left differs:
+  //   - opaque: padding = anchor (content starts AFTER explorer)
+  //   - overlay: padding = 0 (content extends behind translucent explorer);
+  //              tab bar is sticky/positioned at left=anchor independently.
+  // 21rem = rail (3rem) + explorer (18rem).
+  // 21rem (rail 3 + explorer 18) when explorer fully open. When
+  // collapsed: 3rem (rail only) — the floating chevron toggle floats
+  // over the canvas and doesn't claim layout space. When no explorer
+  // for the destination: 3rem (rail only).
+  const explorerAnchorLeft = isWideLayout && explorerVisible && desktopExplorerOpen
+    ? "21rem"
+    : "3rem";
   const workspaceLeftOffset = isWideLayout
-    ? `${3 + (explorerVisible && desktopExplorerOpen ? 18 : 0)}rem`
+    ? isTopologyOverlay
+      ? "0rem"
+      : explorerAnchorLeft
     : "0rem";
+  // Class B fixed-anchor: header (eyebrow + title + view-mode tabs) ALWAYS
+  // sits at the explorer-anchor offset, even in overlay mode where the
+  // canvas extends behind the Explorer. This keeps the tab bar at a
+  // stable left position across view-mode switches.
+  const headerAnchorOffset = isWideLayout && isTopologyOverlay ? explorerAnchorLeft : "0rem";
   // Coupled to VellumSheet wide preset (lg:w-[38rem]) — bounce-fix #3
   // caught the gap that emerged when bounce-fix #2 calibrated the drawer
   // 45rem → 38rem without updating this offset. Keep these two literals
@@ -382,12 +428,13 @@ export function AppShell({ children }: AppShellProps) {
   const workspaceStyle = {
     "--workspace-left-offset": workspaceLeftOffset,
     "--workspace-right-offset": workspaceRightOffset,
+    "--explorer-anchor-left": explorerAnchorLeft,
+    "--header-anchor-offset": headerAnchorOffset,
   } as CSSProperties;
 
   return (
-    <SpecsWorkspaceProvider>
-      <DrawerSelectionContext.Provider value={{ selection: selectionState, setSelection }}>
-        <DiscoveryPlacementContext.Provider
+    <DrawerSelectionContext.Provider value={{ selection: selectionState, setSelection }}>
+      <DiscoveryPlacementContext.Provider
           value={{
             selectedDiscoveredId,
             setSelectedDiscoveredId,
@@ -474,7 +521,10 @@ export function AppShell({ children }: AppShellProps) {
                 </>
               )}
 
-              {/* Explorer — desktop column or mobile slide-over (Explorer.tsx handles both modes). */}
+              {/* Explorer — desktop column or mobile slide-over.
+                  In overlay mode (topology graph): vellum-translucent + z-30
+                  so it floats over the canvas. In opaque mode: default
+                  Phase 2 behavior (z-20, opaque background). */}
               {explorerVisible && (
                 <Explorer
                   open={explorerOpen}
@@ -484,16 +534,33 @@ export function AppShell({ children }: AppShellProps) {
                   desktopMode={desktopExplorerOpen ? "full" : "hidden"}
                   surface={surface}
                   onDesktopToggle={() => setDesktopExplorerOpen((open) => !open)}
+                  overlayMode={isTopologyOverlay ? "overlay" : "opaque"}
                 />
               )}
 
               {/* Center workspace */}
               <main
                 data-testid="content-area"
+                data-explorer-mode={isTopologyOverlay ? "overlay" : "opaque"}
                 className="flex-1 flex flex-col overflow-auto relative"
-                style={workspaceStyle}
+                style={{
+                  ...workspaceStyle,
+                  paddingLeft: `var(--workspace-left-offset, 0px)`,
+                }}
               >
-                <div key={pathname} className="relative z-10 route-enter flex-1 flex flex-col">
+                {/* Reset the workspace offset CSS vars to 0 inside main so that
+                    legacy children (e.g., LiveNodeDetails → WorkspacePage which
+                    also reads var(--workspace-left-offset) for its own padding)
+                    don't double-pad. The padding is already applied at <main>
+                    above; child surfaces should treat their own offset as 0. */}
+                <div
+                  key={pathname}
+                  className="relative z-10 route-enter flex-1 flex flex-col"
+                  style={{
+                    "--workspace-left-offset": "0px",
+                    "--workspace-right-offset": "0px",
+                  } as CSSProperties}
+                >
                   {children}
                 </div>
               </main>
@@ -515,8 +582,7 @@ export function AppShell({ children }: AppShellProps) {
               <PreviewStack />
             </div>
           </div>
-        </DiscoveryPlacementContext.Provider>
-      </DrawerSelectionContext.Provider>
-    </SpecsWorkspaceProvider>
+      </DiscoveryPlacementContext.Provider>
+    </DrawerSelectionContext.Provider>
   );
 }
