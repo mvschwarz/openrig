@@ -391,30 +391,49 @@ export function AppShell({ children }: AppShellProps) {
           }}
         >
           <div className="h-screen flex flex-col">
-            {/* Mobile top-bar (lg:hidden) — hamburger + brand. Desktop has no top-bar. */}
+            {/* Top bar — universal across viewports per universal-shell.md
+                L40–L53. Single source of truth: same element renders at
+                all sizes. Hamburger button keeps its own lg:hidden so it
+                only appears at narrow viewports; brand mark + right-slot
+                stay visible everywhere. */}
             <header
-              data-testid="app-mobile-topbar"
-              className="h-14 flex items-center justify-between px-4 bg-background border-b-2 border-stone-900 shrink-0 relative z-30 lg:hidden"
+              data-testid="app-topbar"
+              className="h-14 flex items-center justify-between px-4 bg-background border-b-2 border-stone-900 shrink-0 relative z-30"
             >
-              <button
-                type="button"
-                data-testid="mobile-menu-toggle"
-                onClick={() => setExplorerOpen((open) => !open)}
-                aria-label="Toggle navigation"
-                className="flex flex-col gap-[3px] p-2"
+              <div className="flex items-center gap-3">
+                <button
+                  type="button"
+                  data-testid="mobile-menu-toggle"
+                  onClick={() => setExplorerOpen((open) => !open)}
+                  aria-label="Toggle navigation"
+                  className="flex flex-col gap-[3px] p-2 lg:hidden"
+                >
+                  <span className="block w-4 h-[1.5px] bg-stone-900" />
+                  <span className="block w-4 h-[1.5px] bg-stone-900" />
+                  <span className="block w-3 h-[1.5px] bg-stone-900" />
+                </button>
+                <Link
+                  to="/"
+                  data-testid="brand-home-link"
+                  className="inline-flex items-center bg-stone-950 px-3 py-1 font-mono text-sm font-bold uppercase tracking-[0.08em] text-stone-50 hover:bg-stone-800"
+                >
+                  OPENRIG
+                </Link>
+              </div>
+              {/* Right-slot — reserved for V2 global affordances. V1 carries
+                  a minimal env indicator. Hidden on narrow viewports to
+                  preserve mobile space. */}
+              <div
+                data-testid="topbar-right-slot"
+                className="hidden sm:flex items-center gap-2"
               >
-                <span className="block w-4 h-[1.5px] bg-stone-900" />
-                <span className="block w-4 h-[1.5px] bg-stone-900" />
-                <span className="block w-3 h-[1.5px] bg-stone-900" />
-              </button>
-              <Link
-                to="/"
-                data-testid="brand-home-link-mobile"
-                className="inline-flex items-center bg-stone-950 px-3 py-1 font-mono text-sm font-bold uppercase tracking-[0.08em] text-stone-50"
-              >
-                OPENRIG
-              </Link>
-              <span className="w-8" /> {/* spacer to balance hamburger */}
+                <span
+                  data-testid="topbar-env-indicator"
+                  className="font-mono text-[10px] uppercase tracking-[0.18em] text-on-surface-variant"
+                >
+                  localhost
+                </span>
+              </div>
             </header>
 
             {/* Main: rail + explore + center + drawer */}

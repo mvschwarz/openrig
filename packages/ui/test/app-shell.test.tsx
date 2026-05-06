@@ -187,18 +187,51 @@ describe("AppShell — Phase 2 chrome", () => {
     });
   });
 
-  describe("SC-8: mobile rail collapses to top-bar menu", () => {
-    it("mobile top-bar (hamburger + brand) is rendered with lg:hidden", async () => {
+  describe("Top bar — universal-shell.md L40–L53 (Phase 2 bounce-fix)", () => {
+    it("top bar renders at desktop (single source of truth — no lg:hidden)", async () => {
       const { container } = await renderAt("/");
-      const topbar = container.querySelector("[data-testid='app-mobile-topbar']") as HTMLElement;
+      const topbar = container.querySelector("[data-testid='app-topbar']") as HTMLElement;
       expect(topbar).toBeTruthy();
-      expect(topbar.className).toContain("lg:hidden");
-      const hamburger = container.querySelector("[data-testid='mobile-menu-toggle']");
-      expect(hamburger).toBeTruthy();
+      // Single source of truth — top bar is universal, NOT lg:hidden.
+      expect(topbar.className).not.toContain("lg:hidden");
+      expect(topbar.className).toContain("h-14");
     });
 
+    it("brand link visible at desktop and links to / (Dashboard)", async () => {
+      const { container } = await renderAt("/topology");
+      const brand = container.querySelector("[data-testid='brand-home-link']") as HTMLAnchorElement;
+      expect(brand).toBeTruthy();
+      expect(brand.getAttribute("href")).toBe("/");
+      expect(brand.textContent).toContain("OPENRIG");
+    });
+
+    it("right-slot env indicator present (V1 = 'localhost')", async () => {
+      const { container } = await renderAt("/");
+      const envIndicator = container.querySelector(
+        "[data-testid='topbar-env-indicator']",
+      ) as HTMLElement;
+      expect(envIndicator).toBeTruthy();
+      expect(envIndicator.textContent).toContain("localhost");
+    });
+
+    it("hamburger button is mobile-only (lg:hidden) — preserved Phase 2 behavior", async () => {
+      const { container } = await renderAt("/");
+      const hamburger = container.querySelector(
+        "[data-testid='mobile-menu-toggle']",
+      ) as HTMLElement;
+      expect(hamburger).toBeTruthy();
+      expect(hamburger.className).toContain("lg:hidden");
+    });
+
+    it("legacy app-mobile-topbar testid is GONE (renamed to app-topbar)", async () => {
+      const { container } = await renderAt("/");
+      expect(container.querySelector("[data-testid='app-mobile-topbar']")).toBeNull();
+      expect(container.querySelector("[data-testid='brand-home-link-mobile']")).toBeNull();
+    });
+  });
+
+  describe("SC-8: mobile rail collapses to slide-over tray", () => {
     it("mobile rail tray renders only at narrow viewport (conditional)", async () => {
-      // Switch to narrow viewport, then re-render.
       const { router } = await import("../src/routes.js");
       Object.defineProperty(window, "innerWidth", { configurable: true, value: 375, writable: true });
       window.dispatchEvent(new Event("resize"));
@@ -206,7 +239,7 @@ describe("AppShell — Phase 2 chrome", () => {
       const memoryRouter = createRouter({ routeTree: router.routeTree, history: memoryHistory });
       const { container } = render(<RouterProvider router={memoryRouter} />);
       await waitFor(() => {
-        const topbar = container.querySelector("[data-testid='app-mobile-topbar']") as HTMLElement;
+        const topbar = container.querySelector("[data-testid='app-topbar']") as HTMLElement;
         expect(topbar).toBeTruthy();
       });
       const tray = container.querySelector("[data-testid='mobile-rail-tray']") as HTMLElement;

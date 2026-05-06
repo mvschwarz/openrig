@@ -96,7 +96,10 @@ export function SharedDetailDrawer({
       width="wide"
       onClose={onClose}
       testId="shared-detail-drawer"
-      className="fixed top-0 right-0 z-30 h-full"
+      // top-14 starts below the universal top bar (h-14, fixed at top); bottom-0
+      // anchors to viewport bottom so the drawer fills the remaining height
+      // without needing a calc() expression.
+      className="fixed top-14 right-0 bottom-0 z-30"
     >
       {inner}
     </VellumSheet>
