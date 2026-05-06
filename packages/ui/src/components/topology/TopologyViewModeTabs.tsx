@@ -32,12 +32,15 @@ export function TopologyViewModeTabs<T extends string>({
 }: TopologyViewModeTabsProps<T>) {
   return (
     // Internal tablist — div, not <nav>, so SC-1 left-chrome count
-    // (querySelectorAll("nav, aside")) stays at exactly 2.
+    // (querySelectorAll("nav, aside")) stays at exactly 2. No wrapper
+    // line border — founder direction 2026-05-06: only the active tab
+    // carries an underline; the rest of the tablist breathes over the
+    // canvas.
     <div
       role="tablist"
       aria-label="Topology view modes"
       data-testid={`${testIdPrefix}-tabs`}
-      className="flex gap-1 border-b border-outline-variant"
+      className="flex gap-6"
     >
       {tabs.map((t) => (
         <button
@@ -49,7 +52,7 @@ export function TopologyViewModeTabs<T extends string>({
           data-active={active === t.id}
           onClick={() => onSelect(t.id)}
           className={cn(
-            "px-3 py-2 font-mono text-[10px] uppercase tracking-[0.18em] border-b-2 -mb-px",
+            "py-3 font-mono text-[10px] uppercase tracking-[0.18em] border-b-2",
             active === t.id
               ? "border-stone-900 text-stone-900"
               : "border-transparent text-on-surface-variant hover:text-stone-900",
