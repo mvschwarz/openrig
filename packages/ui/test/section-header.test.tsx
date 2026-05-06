@@ -33,9 +33,16 @@ describe("SectionHeader (Phase 1 primitive)", () => {
     );
   });
 
-  it("tone=emphasis applies tertiary color", () => {
-    const { container } = render(<SectionHeader tone="emphasis">X</SectionHeader>);
+  it("tone=alert applies tertiary color", () => {
+    const { container } = render(<SectionHeader tone="alert">X</SectionHeader>);
     expect((container.firstChild as HTMLElement).className).toContain("text-tertiary");
+  });
+
+  it("tone=strong applies stone-900 + font-bold", () => {
+    const { container } = render(<SectionHeader tone="strong">X</SectionHeader>);
+    const cls = (container.firstChild as HTMLElement).className;
+    expect(cls).toContain("text-stone-900");
+    expect(cls).toContain("font-bold");
   });
 
   it("default as=header element", () => {
