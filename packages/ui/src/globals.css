@@ -70,7 +70,7 @@
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
     /* Blueprint dot grid — the paper texture */
-    background-image: radial-gradient(#d1d1cf 0.5px, transparent 0.5px);
+    background-image: radial-gradient(#d1d1cf 1px, transparent 1px);
     background-size: 20px 20px;
   }
 
@@ -91,8 +91,8 @@
   .reg-mark > .reg-tl::after { content: ''; position: absolute; background-color: #546073; }
 
   .reg-tl { position: absolute; top: 0; left: 0; width: 0; height: 0; }
-  .reg-tl::before { top: 0; left: 0; width: 1px; height: 8px; }
-  .reg-tl::after  { top: 0; left: 0; width: 8px; height: 1px; }
+  .reg-tl::before { content: ''; position: absolute; top: 0; left: 0; width: 1px; height: 8px; background-color: #546073; }
+  .reg-tl::after  { content: ''; position: absolute; top: 0; left: 0; width: 8px; height: 1px; background-color: #546073; }
 
   .reg-tr { position: absolute; top: 0; right: 0; width: 0; height: 0; }
   .reg-tr::before { content: ''; position: absolute; top: 0; right: 0; width: 1px; height: 8px; background-color: #546073; }
