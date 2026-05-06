@@ -40,34 +40,32 @@ function useOverlayForActiveTab(active: string) {
 }
 
 function ScopeShell({
-  eyebrow,
-  title,
   tabsNav,
   children,
 }: {
-  eyebrow: string;
-  title: string;
+  /** Eyebrow + title are no longer rendered — founder direction
+   *  2026-05-06: tabs only, anchored to right of Explorer. The scope
+   *  identity reads from the URL + Explorer tree active state, so the
+   *  big DISCOVERY.INTAKE-ROUTER style title in the canvas is redundant.
+   *  Keeping the prop names for now in case Phase 5 wants to revive a
+   *  smaller breadcrumb. */
+  eyebrow?: string;
+  title?: string;
   tabsNav: React.ReactNode;
   children: React.ReactNode;
 }) {
-  // Class B fixed-anchor: header (with eyebrow + title + view-mode tabs)
-  // ALWAYS sits at left = var(--explorer-anchor-left) so the tab bar is
-  // positioned consistently across graph / table / terminal switches.
-  // The CONTENT below the header inherits the parent <main>'s
-  // padding-left rule (which is 0 in overlay mode so canvas extends
-  // behind the Explorer; or anchor in opaque mode). Tab bar gets z-30
-  // and a solid background so it stays on top of the Explorer overlay
-  // in graph mode.
+  // Class B fixed-anchor: tabsNav sits at left = var(--explorer-anchor-left)
+  // (set on <main> in AppShell) so position is identical across graph /
+  // table / terminal switches. Transparent over the canvas — paper-grid
+  // shows through. z-30 keeps tabs above the Explorer overlay in graph
+  // mode (the tabs are anchored past the Explorer's right edge so they
+  // shouldn't actually overlap, but z-order is the safety net).
   return (
     <div className="flex flex-col h-full">
       <div
-        className="px-6 pt-6 pb-2 border-b border-outline-variant relative z-30 bg-background"
+        className="relative z-30 px-6 pt-4"
         style={{ marginLeft: "var(--header-anchor-offset, 0px)" }}
       >
-        <SectionHeader tone="muted">{eyebrow}</SectionHeader>
-        <h1 className="font-headline text-headline-md font-bold tracking-tight uppercase text-stone-900 mt-1 mb-3">
-          {title}
-        </h1>
         {tabsNav}
       </div>
       <div className="flex-1 min-h-0 overflow-auto">
