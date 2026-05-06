@@ -92,4 +92,27 @@ describe("VellumCard (Phase 1 primitive)", () => {
     );
     expect(container.querySelector("section[data-testid='vc-sec']")).toBeTruthy();
   });
+
+  it("interactive (href) carries focus-visible classes", () => {
+    const { container } = render(
+      <VellumCard href="/foo" testId="vc-fv-href">x</VellumCard>,
+    );
+    const el = container.querySelector("[data-testid='vc-fv-href']") as HTMLElement;
+    expect(el.className).toContain("focus-visible:outline");
+    expect(el.className).toContain("focus-visible:outline-stone-900");
+  });
+
+  it("interactive (onClick) carries focus-visible classes", () => {
+    const { container } = render(
+      <VellumCard onClick={() => {}} testId="vc-fv-click">x</VellumCard>,
+    );
+    const el = container.querySelector("[data-testid='vc-fv-click']") as HTMLElement;
+    expect(el.className).toContain("focus-visible:outline");
+  });
+
+  it("non-interactive does NOT add focus-visible classes", () => {
+    const { container } = render(<VellumCard testId="vc-static">x</VellumCard>);
+    const el = container.querySelector("[data-testid='vc-static']") as HTMLElement;
+    expect(el.className).not.toContain("focus-visible:outline");
+  });
 });

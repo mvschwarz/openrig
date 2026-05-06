@@ -1,6 +1,25 @@
+// V1 attempt-3 Phase 2 — AppShell chrome tests.
+//
+// Replaces the legacy 655-line test that exercised the pre-Phase-2 shell
+// (slices-link / specs-toggle / discovery-toggle / progress-link /
+// steering-link / context-link / system-toggle). Phase 2 deleted those
+// header buttons; the rail with 6+2 icons takes over destination
+// switching.
+//
+// Coverage:
+// - SC-1 — exactly 2 left chromes on desktop (rail + explore); Sidebar.tsx GONE
+// - SC-2 — rail roster: 6 destinations + 2 chat icons in spec'd order
+// - SC-6 — drawer default-closed (selection=null → null render)
+// - SC-7 — Settings rail icon links to /settings (center, not drawer)
+// - SC-8 — mobile rail collapses to top-bar menu (hamburger present at <lg)
+// - Surface routing — Explorer renders for tree/lens destinations;
+//   not for Dashboard / Settings (surface=none)
+
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, waitFor, cleanup, fireEvent } from "@testing-library/react";
+import { render, cleanup, waitFor } from "@testing-library/react";
 import { createMemoryHistory, RouterProvider, createRouter } from "@tanstack/react-router";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { createMockEventSourceClass } from "./helpers/mock-event-source.js";
 
 const mockFetch = vi.fn();
@@ -10,9 +29,15 @@ let OriginalEventSource: typeof EventSource | undefined;
 
 beforeEach(async () => {
   mockFetch.mockReset();
+  // Default rig/ps mocks return empty so chrome can render.
+  mockFetch.mockImplementation(async (url: string) => {
+    if (url.includes("/api/rigs/summary")) return new Response(JSON.stringify([]));
+    if (url.includes("/api/rigs/ps")) return new Response(JSON.stringify([]));
+    if (url.includes("/api/inventory")) return new Response(JSON.stringify([]));
+    return new Response("[]");
+  });
   OriginalEventSource = globalThis.EventSource;
   globalThis.EventSource = createMockEventSourceClass() as unknown as typeof EventSource;
-  // Clear production queryClient cache between tests to prevent stale data
   const { queryClient } = await import("../src/lib/query-client.js");
   queryClient.clear();
 });
@@ -29,627 +54,312 @@ afterEach(() => {
   window.dispatchEvent(new Event("resize"));
 });
 
-function setViewportWidth(width: number) {
-  Object.defineProperty(window, "innerWidth", {
-    configurable: true,
-    value: width,
-    writable: true,
-  });
+async function renderAt(initialPath: string) {
+  Object.defineProperty(window, "innerWidth", { configurable: true, value: 1440, writable: true });
   window.dispatchEvent(new Event("resize"));
+  const { router } = await import("../src/routes.js");
+  const memoryHistory = createMemoryHistory({ initialEntries: [initialPath] });
+  const memoryRouter = createRouter({ routeTree: router.routeTree, history: memoryHistory });
+  const result = render(<RouterProvider router={memoryRouter} />);
+  // TanStack Router resolves route component async; wait for chrome to land.
+  await waitFor(() => {
+    expect(result.container.querySelector("[data-testid='app-rail']")).toBeTruthy();
+  }, { timeout: 5000 });
+  return result;
 }
 
-function mockAllApis() {
-  mockFetch.mockImplementation((url: string) => {
-    if (url === "/api/rigs/summary") {
-      return Promise.resolve({
-        ok: true,
-        json: async () => [{ id: "r1", name: "alpha", nodeCount: 3, latestSnapshotAt: null, latestSnapshotId: null }],
-      });
-    }
-    if (url === "/api/ps") {
-      return Promise.resolve({
-        ok: true,
-        json: async () => [{ rigId: "r1", name: "alpha", nodeCount: 3, runningCount: 3, status: "running", uptime: "1h", latestSnapshot: null }],
-      });
-    }
-    if (url === "/healthz") {
-      return Promise.resolve({ ok: true, json: async () => ({ status: "ok" }) });
-    }
-    if (url === "/api/adapters/cmux/status") {
-      return Promise.resolve({ ok: true, json: async () => ({ available: true }) });
-    }
-    if (typeof url === "string" && url.startsWith("/api/slices?filter=")) {
-      return Promise.resolve({
-        ok: true,
-        json: async () => ({
-          filter: new URL(`http://test${url}`).searchParams.get("filter") ?? "active",
-          totalCount: 1,
-          slices: [
-            {
-              name: "mission-control-queue-observability-phase-a",
-              displayName: "Mission Control Phase A",
-              railItem: "PL-005",
-              status: "done",
-              rawStatus: "phase-a-closed-locally-promoted",
-              qitemCount: 0,
-              hasProofPacket: true,
-              lastActivityAt: "2026-05-04T12:00:00.000Z",
-            },
-          ],
-        }),
-      });
-    }
-    if (typeof url === "string" && url.includes("/api/slices/mission-control-queue-observability-phase-a")) {
-      return Promise.resolve({
-        ok: true,
-        json: async () => ({
-          name: "mission-control-queue-observability-phase-a",
-          displayName: "Mission Control Phase A",
-          railItem: "PL-005",
-          status: "done",
-          rawStatus: "phase-a-closed-locally-promoted",
-          qitemIds: [],
-          commitRefs: [],
-          lastActivityAt: "2026-05-04T12:00:00.000Z",
-          story: { events: [] },
-          acceptance: { totalItems: 0, doneItems: 0, percentage: 0, items: [], closureCallout: null },
-          decisions: { rows: [] },
-          docs: { tree: [] },
-          tests: { proofPackets: [], aggregate: { passCount: 0, failCount: 0 } },
-          topology: { affectedRigs: [], totalSeats: 0 },
-        }),
-      });
-    }
-    if (typeof url === "string" && url.includes("/graph")) {
-      return Promise.resolve({
-        ok: true,
-        json: async () => ({
-          nodes: [{ id: "n1", type: "rigNode", position: { x: 0, y: 0 }, data: { logicalId: "orchestrator", role: "orchestrator", runtime: "claude-code", model: "opus", status: "running", binding: null } }],
-          edges: [],
-        }),
-      });
-    }
-    if (typeof url === "string" && url.includes("/nodes/")) {
-      return Promise.resolve({
-        ok: true,
-        json: async () => ({
-          rigId: "r1",
-          rigName: "alpha",
-          logicalId: "orch.lead",
-          podId: "orch",
-          canonicalSessionName: "orch-lead@alpha",
-          nodeKind: "agent",
-          runtime: "claude-code",
-          sessionStatus: "running",
-          startupStatus: "ready",
-          restoreOutcome: "resumed",
-          tmuxAttachCommand: "tmux attach -t orch-lead@alpha",
-          resumeCommand: "claude --resume abc-123",
-          latestError: null,
-          model: "opus",
-          agentRef: "local:agents/lead",
-          profile: "default",
-          resolvedSpecName: "lead",
-          resolvedSpecVersion: "1.0.0",
-          startupFiles: [],
-          startupActions: [],
-          recentEvents: [],
-          infrastructureStartupCommand: null,
-          binding: { tmuxSession: "orch-lead@alpha" },
-        }),
-      });
-    }
-    if (typeof url === "string" && url.includes("/api/rigs/r1/nodes")) {
-      return Promise.resolve({
-        ok: true,
-        json: async () => [
-          { rigId: "r1", rigName: "alpha", logicalId: "orch.lead", podId: "orch", nodeKind: "agent", runtime: "claude-code", startupStatus: "ready", canonicalSessionName: "orch-lead@alpha" },
-        ],
-      });
-    }
-    if (typeof url === "string" && url.includes("/snapshots")) {
-      return Promise.resolve({ ok: true, json: async () => [] });
-    }
-    if (typeof url === "string" && url.includes("/api/specs/library")) {
-      return Promise.resolve({ ok: true, json: async () => [] });
-    }
-    return Promise.resolve({ ok: true, json: async () => ({}) });
-  });
-}
+describe("AppShell — Phase 2 chrome", () => {
+  describe("SC-1: exactly 2 left chromes on desktop (rail + explore)", () => {
+    it("renders exactly 2 left chromes at /topology desktop (rail + explore) — SC-1 strict count", async () => {
+      const { container } = await renderAt("/topology");
+      const chromeCount = container.querySelectorAll("nav, aside").length;
+      expect(chromeCount).toBe(2);
+      // No legacy Sidebar.tsx anywhere — file is deleted.
+      expect(container.querySelector("[data-testid='sidebar']")).toBeNull();
+    });
 
-function mockApisFailing() {
-  mockFetch.mockImplementation(() => {
-    return Promise.reject(new Error("connection refused"));
-  });
-}
+    it("Dashboard surface (/) renders rail but NO Explorer (surface=none)", async () => {
+      const { container } = await renderAt("/");
+      expect(container.querySelector("[data-testid='app-rail']")).toBeTruthy();
+      expect(container.querySelector("[data-testid='explorer']")).toBeNull();
+    });
 
-/**
- * Render the REAL app router from routes.tsx at a given path.
- * This uses the production route tree, not a test-only rebuild.
- */
-async function renderRealAppAt(path: string) {
-  // Import the real route tree from routes.tsx
-  const mod = await import("../src/routes.js");
-
-  // Create a new router instance with memory history for testing
-  // We access the route tree from the exported router
-  const router = createRouter({
-    routeTree: mod.router.routeTree,
-    history: createMemoryHistory({ initialEntries: [path] }),
-  });
-
-  return render(<RouterProvider router={router} />);
-}
-
-describe("App Shell + Routing", () => {
-  it("root route renders AppShell with sidebar and content area", async () => {
-    mockAllApis();
-    await renderRealAppAt("/");
-
-    await waitFor(() => {
-      expect(screen.getByTestId("app-header")).toBeDefined();
-      expect(screen.getByTestId("explorer")).toBeDefined();
-      expect(screen.getByTestId("content-area")).toBeDefined();
-      expect(screen.getByTestId("specs-toggle")).toBeDefined();
-      expect(screen.getByTestId("system-toggle")).toBeDefined();
+    it("Settings surface (/settings) renders rail but NO Explorer (surface=none)", async () => {
+      const { container } = await renderAt("/settings");
+      expect(container.querySelector("[data-testid='app-rail']")).toBeTruthy();
+      expect(container.querySelector("[data-testid='explorer']")).toBeNull();
     });
   });
 
-  it("header brand links back to home and the gear is borderless", async () => {
-    mockAllApis();
-    await renderRealAppAt("/rigs/r1");
-
-    await waitFor(() => {
-      expect(screen.getByTestId("brand-home-link")).toBeDefined();
-      expect(screen.getByTestId("discovery-toggle")).toBeDefined();
-      expect(screen.getByTestId("specs-toggle")).toBeDefined();
-      expect(screen.getByTestId("system-toggle")).toBeDefined();
-    });
-
-    const brand = screen.getByTestId("brand-home-link");
-    expect(brand.getAttribute("href")).toBe("/");
-    expect(brand.className).toContain("bg-stone-950");
-
-    const gear = screen.getByTestId("system-toggle");
-    expect(gear.className).not.toContain("border");
-    expect(gear.className).not.toContain("bg-white");
-  });
-
-  it("header specs button opens the specs drawer", async () => {
-    mockAllApis();
-    await renderRealAppAt("/rigs/r1");
-
-    await waitFor(() => {
-      expect(screen.getByTestId("specs-toggle")).toBeDefined();
-    });
-
-    fireEvent.click(screen.getByTestId("specs-toggle"));
-
-    await waitFor(() => {
-      expect(screen.getByTestId("specs-panel")).toBeDefined();
-      expect(screen.getByText("Import RigSpec")).toBeDefined();
-      expect(screen.getByText("Bootstrap")).toBeDefined();
-      expect(screen.getByText("Validate AgentSpec")).toBeDefined();
-    });
-  });
-
-  it("wide layouts keep the specs drawer open across navigation", async () => {
-    mockAllApis();
-    setViewportWidth(1280);
-    await renderRealAppAt("/specs");
-
-    await waitFor(() => {
-      expect(screen.getByTestId("specs-panel")).toBeDefined();
-      expect(screen.getByText("Import RigSpec")).toBeDefined();
-    });
-
-    fireEvent.click(screen.getByText("Import RigSpec"));
-
-    await waitFor(() => {
-      expect(screen.getByTestId("import-flow")).toBeDefined();
-      expect(screen.getByTestId("specs-panel")).toBeDefined();
-    });
-  });
-
-  it("wide layouts keep specs open when launching validate agent", async () => {
-    mockAllApis();
-    setViewportWidth(1280);
-    await renderRealAppAt("/specs");
-
-    await waitFor(() => {
-      expect(screen.getByTestId("specs-panel")).toBeDefined();
-      expect(screen.getByText("Validate AgentSpec")).toBeDefined();
-    });
-
-    fireEvent.click(screen.getByText("Validate AgentSpec"));
-
-    await waitFor(() => {
-      expect(screen.getByTestId("agent-spec-validate-flow")).toBeDefined();
-      expect(screen.getByTestId("specs-panel")).toBeDefined();
-    });
-  });
-
-  it("wide layouts keep specs open when opening a rig draft review from the drawer", async () => {
-    window.localStorage.setItem("rigged.specs.recent-rig-drafts", JSON.stringify([
-      {
-        id: "rig-review",
-        kind: "rig",
-        label: "review-target",
-        yaml: "name: review-target\npods: []\n",
-        updatedAt: Date.now(),
-      },
-    ]));
-
-    mockAllApis();
-    setViewportWidth(1280);
-    await renderRealAppAt("/specs");
-
-    await waitFor(() => {
-      expect(screen.getByTestId("specs-panel")).toBeDefined();
-      expect(screen.getByText("review-target")).toBeDefined();
-    });
-
-    fireEvent.click(screen.getByText("review-target"));
-
-    await waitFor(() => {
-      expect(screen.getByTestId("rig-spec-review")).toBeDefined();
-      expect(screen.getByTestId("specs-panel")).toBeDefined();
-    });
-  });
-
-  it("wide layouts keep specs open when opening an agent draft review from the drawer", async () => {
-    window.localStorage.setItem("rigged.specs.recent-agent-drafts", JSON.stringify([
-      {
-        id: "agent-review",
-        kind: "agent",
-        label: "qa",
-        yaml: "name: qa\nprofiles:\n  default:\n",
-        updatedAt: Date.now(),
-      },
-    ]));
-
-    mockAllApis();
-    setViewportWidth(1280);
-    await renderRealAppAt("/specs");
-
-    await waitFor(() => {
-      expect(screen.getByTestId("specs-panel")).toBeDefined();
-      expect(screen.getByText("qa")).toBeDefined();
-    });
-
-    fireEvent.click(screen.getByText("qa"));
-
-    await waitFor(() => {
-      expect(screen.getByTestId("agent-spec-review")).toBeDefined();
-      expect(screen.getByTestId("specs-panel")).toBeDefined();
-    });
-  });
-
-  it("compact layouts clear the specs drawer on navigation to a workspace page", async () => {
-    mockAllApis();
-    setViewportWidth(768);
-    await renderRealAppAt("/specs");
-
-    await waitFor(() => {
-      expect(screen.getByTestId("specs-panel")).toBeDefined();
-      expect(screen.getByText("Import RigSpec")).toBeDefined();
-    });
-
-    fireEvent.click(screen.getByText("Import RigSpec"));
-
-    await waitFor(() => {
-      expect(screen.getByTestId("import-flow")).toBeDefined();
-      expect(screen.queryByTestId("specs-panel")).toBeNull();
-    });
-  });
-
-  it("header discovery button opens the discovery drawer", async () => {
-    mockAllApis();
-    await renderRealAppAt("/rigs/r1");
-
-    await waitFor(() => {
-      expect(screen.getByTestId("discovery-toggle")).toBeDefined();
-    });
-
-    fireEvent.click(screen.getByTestId("discovery-toggle"));
-
-    await waitFor(() => {
-      expect(screen.getByTestId("discovery-panel")).toBeDefined();
-    });
-  });
-
-  it("header no longer renders top navigation links", async () => {
-    mockAllApis();
-    await renderRealAppAt("/");
-
-    await waitFor(() => {
-      expect(screen.getByTestId("app-header")).toBeDefined();
-    });
-
-    const header = screen.getByTestId("app-header");
-    expect(header.textContent).not.toContain("RIGS");
-    expect(header.textContent).not.toContain("SPECS");
-    expect(header.textContent).not.toContain("DISCOVERY");
-  });
-
-  it("desktop explorer is controlled by a single edge toggle", async () => {
-    mockAllApis();
-    await renderRealAppAt("/");
-
-    await waitFor(() => {
-      expect(screen.getByTestId("explorer-edge-toggle")).toBeDefined();
-      expect(screen.getByTestId("explorer")).toBeDefined();
-    });
-
-    fireEvent.click(screen.getByTestId("explorer-edge-toggle"));
-
-    await waitFor(() => {
-      expect(screen.getByTestId("explorer").className).toContain("lg:w-12");
-      expect(screen.getByTestId("explorer-edge-toggle").getAttribute("aria-label")).toContain("Expand");
-    });
-
-    fireEvent.click(screen.getByTestId("explorer-edge-toggle"));
-
-    await waitFor(() => {
-      expect(screen.getByTestId("explorer").className).not.toContain("lg:hidden");
-      expect(screen.getByTestId("explorer-edge-toggle").getAttribute("aria-label")).toContain("Collapse");
-    });
-  });
-
-  it("/ renders the explorer-first workspace home", async () => {
-    mockAllApis();
-    await renderRealAppAt("/");
-
-    await waitFor(() => {
-      expect(screen.getByTestId("workspace-home")).toBeDefined();
-      expect(screen.getByText(/Select a rig from the explorer/i)).toBeDefined();
-      expect(screen.getByTestId("workspace-open-explorer")).toBeDefined();
-    });
-  });
-
-  it("workspace Explore button reopens the explorer", async () => {
-    mockAllApis();
-    await renderRealAppAt("/");
-
-    await waitFor(() => {
-      expect(screen.getByTestId("explorer-edge-toggle")).toBeDefined();
-    });
-
-    fireEvent.click(screen.getByTestId("explorer-edge-toggle"));
-
-    await waitFor(() => {
-      expect(screen.getByTestId("explorer").className).toContain("lg:w-12");
-    });
-
-    fireEvent.click(screen.getByTestId("workspace-open-explorer"));
-
-    await waitFor(() => {
-      expect(screen.getByTestId("explorer").className).toContain("lg:w-72");
-      expect(screen.getByTestId("explorer-edge-toggle").getAttribute("aria-label")).toContain("Collapse");
-    });
-  });
-
-  it("sidebar keeps Explore and Slices as tabs in the same explorer column", async () => {
-    mockAllApis();
-    await renderRealAppAt("/slices/mission-control-queue-observability-phase-a");
-
-    await waitFor(() => {
-      expect(screen.getByTestId("explorer-mode-tabs")).toBeDefined();
-      expect(screen.getByTestId("explorer-tab-explore")).toBeDefined();
-      expect(screen.getByTestId("explorer-tab-slices")).toBeDefined();
-      expect(screen.getByTestId("slice-list-pane")).toBeDefined();
-      expect(screen.getByTestId("slice-detail-pane")).toBeDefined();
-    });
-
-    expect(screen.getByTestId("explorer-tab-slices").getAttribute("data-active")).toBe("true");
-    expect(screen.getByTestId("explorer-tab-explore").getAttribute("data-active")).toBe("false");
-
-    fireEvent.click(screen.getByTestId("explorer-tab-explore"));
-
-    await waitFor(() => {
-      expect(screen.getByTestId("environment-branch-local")).toBeDefined();
-    });
-    expect(screen.getByTestId("explorer-tab-explore").getAttribute("data-active")).toBe("true");
-    expect(screen.queryByTestId("slice-list-pane")).toBeNull();
-    expect(screen.getByTestId("slice-detail-pane")).toBeDefined();
-
-    fireEvent.click(screen.getByTestId("explorer-tab-slices"));
-
-    await waitFor(() => {
-      expect(screen.getByTestId("slice-list-pane")).toBeDefined();
-    });
-    expect(screen.getByTestId("explorer-tab-slices").getAttribute("data-active")).toBe("true");
-  });
-
-  it("workspace discovery button opens the discovery drawer instead of routing away", async () => {
-    mockAllApis();
-    await renderRealAppAt("/");
-
-    await waitFor(() => {
-      expect(screen.getByTestId("workspace-open-discovery")).toBeDefined();
-    });
-
-    fireEvent.click(screen.getByTestId("workspace-open-discovery"));
-
-    await waitFor(() => {
-      expect(screen.getByTestId("discovery-panel")).toBeDefined();
-    });
-  });
-
-  it("workspace specs button opens the specs drawer instead of routing away", async () => {
-    mockAllApis();
-    await renderRealAppAt("/");
-
-    await waitFor(() => {
-      expect(screen.getByTestId("workspace-open-specs")).toBeDefined();
-    });
-
-    fireEvent.click(screen.getByTestId("workspace-open-specs"));
-
-    await waitFor(() => {
-      expect(screen.getByTestId("specs-panel")).toBeDefined();
-    });
-  });
-
-  it("/rigs/:rigId renders without standalone SnapshotPanel", async () => {
-    mockAllApis();
-    await renderRealAppAt("/rigs/r1");
-
-    // Wait for route to render
-    await waitFor(() => {
-      expect(screen.getByTestId("content-area")).toBeDefined();
-    });
-    // SnapshotPanel should NOT be in the route (moved to rig drawer)
-    expect(screen.queryByTestId("snapshot-panel")).toBeNull();
-  });
-
-  it("/import renders import flow", async () => {
-    mockAllApis();
-    await renderRealAppAt("/import");
-
-    await waitFor(() => {
-      expect(screen.getByTestId("import-flow")).toBeDefined();
-      expect(screen.getByTestId("header-surface-title").textContent).toBe("Specs");
-    });
-  });
-
-  it("/agents/validate renders the agent validation flow with a Specs title", async () => {
-    mockAllApis();
-    mockFetch.mockImplementation((url: string) => {
-      if (url === "/api/rigs/summary") {
-        return Promise.resolve({
-          ok: true,
-          json: async () => [{ id: "r1", name: "alpha", nodeCount: 3, latestSnapshotAt: null, latestSnapshotId: null }],
-        });
+  describe("SC-2: rail roster — 6 destinations + 2 chat icons", () => {
+    it("rail renders 6 destination icons in canonical order: Dashboard, Topology, For You, Project, Specs, Settings", async () => {
+      const { container } = await renderAt("/");
+      const expectedDestinations = [
+        "rail-dashboard",
+        "rail-topology",
+        "rail-for-you",
+        "rail-project",
+        "rail-specs",
+        "rail-settings",
+      ];
+      for (const id of expectedDestinations) {
+        expect(container.querySelector(`[data-testid='${id}']`)).toBeTruthy();
       }
-      if (url === "/api/ps") {
-        return Promise.resolve({
-          ok: true,
-          json: async () => [{ rigId: "r1", name: "alpha", nodeCount: 3, runningCount: 3, status: "running", uptime: "1h", latestSnapshot: null }],
-        });
+    });
+
+    it("rail renders 2 chat icons (Advisor + Operator) per agent-chat-surface.md V1 placeholder", async () => {
+      const { container } = await renderAt("/");
+      expect(container.querySelector("[data-testid='rail-advisor']")).toBeTruthy();
+      expect(container.querySelector("[data-testid='rail-operator']")).toBeTruthy();
+    });
+
+    it("rail does NOT include a Discovery icon (legacy header pattern removed)", async () => {
+      const { container } = await renderAt("/");
+      expect(container.querySelector("[data-testid='rail-discovery']")).toBeNull();
+      expect(container.querySelector("[data-testid='discovery-toggle']")).toBeNull();
+    });
+
+    it("Settings rail icon points to /settings (SC-7: Settings in center, NOT drawer)", async () => {
+      const { container } = await renderAt("/");
+      const settingsIcon = container.querySelector("[data-testid='rail-settings']") as HTMLAnchorElement | null;
+      expect(settingsIcon).toBeTruthy();
+      expect(settingsIcon?.getAttribute("href")).toBe("/settings");
+    });
+  });
+
+  describe("Active rail state", () => {
+    it("Topology rail icon active at /topology", async () => {
+      const { container } = await renderAt("/topology");
+      const icon = container.querySelector("[data-testid='rail-topology']") as HTMLElement;
+      expect(icon.getAttribute("data-active")).toBe("true");
+    });
+
+    it("Topology rail icon active at /rigs/$rigId (legacy graph route)", async () => {
+      const { container } = await renderAt("/rigs/abc");
+      const icon = container.querySelector("[data-testid='rail-topology']") as HTMLElement;
+      expect(icon.getAttribute("data-active")).toBe("true");
+    });
+
+    it("Project rail icon active at /project", async () => {
+      const { container } = await renderAt("/project");
+      const icon = container.querySelector("[data-testid='rail-project']") as HTMLElement;
+      expect(icon.getAttribute("data-active")).toBe("true");
+    });
+
+    it("For You rail icon active at /for-you", async () => {
+      const { container } = await renderAt("/for-you");
+      const icon = container.querySelector("[data-testid='rail-for-you']") as HTMLElement;
+      expect(icon.getAttribute("data-active")).toBe("true");
+    });
+  });
+
+  describe("SC-6: drawer default-closed", () => {
+    it("SharedDetailDrawer is NOT rendered at any default route (selection=null)", async () => {
+      for (const path of ["/", "/topology", "/for-you", "/project", "/specs", "/settings"]) {
+        const { container, unmount } = await renderAt(path);
+        expect(container.querySelector("[data-testid='shared-detail-drawer']")).toBeNull();
+        unmount();
       }
-      if (url === "/healthz") return Promise.resolve({ ok: true, json: async () => ({ status: "ok" }) });
-      if (url === "/api/adapters/cmux/status") return Promise.resolve({ ok: true, json: async () => ({ available: true }) });
-      return Promise.resolve({ ok: true, json: async () => ({}) });
-    });
-
-    await renderRealAppAt("/agents/validate");
-
-    await waitFor(() => {
-      expect(screen.getByTestId("agent-spec-validate-flow")).toBeDefined();
-      expect(screen.getByTestId("header-surface-title").textContent).toBe("Specs");
     });
   });
 
-  it("explorer renders with rig tree", async () => {
-    mockAllApis();
-    await renderRealAppAt("/");
-
-    await waitFor(() => expect(screen.getByTestId("explorer")).toBeDefined());
-  });
-
-  it("system gear opens the system drawer on the log tab by default", async () => {
-    mockAllApis();
-    await renderRealAppAt("/");
-
-    await waitFor(() => {
-      expect(screen.getByTestId("system-toggle")).toBeDefined();
+  describe("Surface routing — Explorer surface union", () => {
+    it("Topology routes set surface=topology", async () => {
+      const { container } = await renderAt("/topology");
+      const explorer = container.querySelector("[data-testid='explorer']") as HTMLElement;
+      expect(explorer?.getAttribute("data-surface")).toBe("topology");
     });
 
-    fireEvent.click(screen.getByTestId("system-toggle"));
-
-    await waitFor(() => {
-      expect(screen.getByTestId("system-panel")).toBeDefined();
-      expect(screen.getByTestId("system-log-tab")).toBeDefined();
-      expect(screen.getByTestId("system-tab-log").className).toContain("font-bold");
-      expect(screen.getByTestId("system-log-tab").className).toContain("flex");
-      expect(screen.getByTestId("system-log-tab").className).toContain("flex-col");
-      expect(screen.getByTestId("system-log-tab").className).toContain("overflow-hidden");
-    });
-  });
-
-  it("system panel shows cmux control label with honest description", async () => {
-    mockAllApis();
-    await renderRealAppAt("/");
-
-    await waitFor(() => {
-      expect(screen.getByTestId("system-toggle")).toBeDefined();
+    it("Project routes set surface=project", async () => {
+      const { container } = await renderAt("/project");
+      const explorer = container.querySelector("[data-testid='explorer']") as HTMLElement;
+      expect(explorer?.getAttribute("data-surface")).toBe("project");
     });
 
-    fireEvent.click(screen.getByTestId("system-toggle"));
-
-    // Switch to status tab
-    await waitFor(() => {
-      expect(screen.getByTestId("system-panel")).toBeDefined();
+    it("Specs routes set surface=specs", async () => {
+      const { container } = await renderAt("/specs");
+      const explorer = container.querySelector("[data-testid='explorer']") as HTMLElement;
+      expect(explorer?.getAttribute("data-surface")).toBe("specs");
     });
-    fireEvent.click(screen.getByTestId("system-tab-status"));
 
-    await waitFor(() => {
-      expect(screen.getByText("cmux control")).toBeDefined();
-      expect(screen.getByText(/OpenRig can control cmux/)).toBeDefined();
+    it("For You route sets surface=for-you", async () => {
+      const { container } = await renderAt("/for-you");
+      const explorer = container.querySelector("[data-testid='explorer']") as HTMLElement;
+      expect(explorer?.getAttribute("data-surface")).toBe("for-you");
     });
   });
 
-  it("/discovery opens the discovery drawer over the workspace shell", async () => {
-    mockAllApis();
-    await renderRealAppAt("/discovery");
+  describe("Top bar — universal-shell.md L40–L53 (Phase 2 bounce-fix)", () => {
+    it("top bar renders at desktop (single source of truth — no lg:hidden)", async () => {
+      const { container } = await renderAt("/");
+      const topbar = container.querySelector("[data-testid='app-topbar']") as HTMLElement;
+      expect(topbar).toBeTruthy();
+      // Single source of truth — top bar is universal, NOT lg:hidden.
+      expect(topbar.className).not.toContain("lg:hidden");
+      expect(topbar.className).toContain("h-14");
+    });
 
-    await waitFor(() => {
-      expect(screen.getByTestId("discovery-panel")).toBeDefined();
-      expect(screen.getByTestId("workspace-home")).toBeDefined();
-      expect(screen.getByTestId("header-surface-title").textContent).toBe("Discovery");
+    it("brand link visible at desktop and links to / (Dashboard)", async () => {
+      const { container } = await renderAt("/topology");
+      const brand = container.querySelector("[data-testid='brand-home-link']") as HTMLAnchorElement;
+      expect(brand).toBeTruthy();
+      expect(brand.getAttribute("href")).toBe("/");
+      expect(brand.textContent).toContain("OPENRIG");
+    });
+
+    it("right-slot env indicator present (V1 = 'localhost')", async () => {
+      const { container } = await renderAt("/");
+      const envIndicator = container.querySelector(
+        "[data-testid='topbar-env-indicator']",
+      ) as HTMLElement;
+      expect(envIndicator).toBeTruthy();
+      expect(envIndicator.textContent).toContain("localhost");
+    });
+
+    it("hamburger button is mobile-only (lg:hidden) — preserved Phase 2 behavior", async () => {
+      const { container } = await renderAt("/");
+      const hamburger = container.querySelector(
+        "[data-testid='mobile-menu-toggle']",
+      ) as HTMLElement;
+      expect(hamburger).toBeTruthy();
+      expect(hamburger.className).toContain("lg:hidden");
+    });
+
+    it("legacy app-mobile-topbar testid is GONE (renamed to app-topbar)", async () => {
+      const { container } = await renderAt("/");
+      expect(container.querySelector("[data-testid='app-mobile-topbar']")).toBeNull();
+      expect(container.querySelector("[data-testid='brand-home-link-mobile']")).toBeNull();
     });
   });
 
-  it("/discovery/inventory renders the inventory workspace with a discovery title", async () => {
-    mockAllApis();
-    await renderRealAppAt("/discovery/inventory");
-
-    await waitFor(() => {
-      expect(screen.getByTestId("discovery-overlay")).toBeDefined();
-      expect(screen.getByTestId("header-surface-title").textContent).toBe("Discovery");
+  describe("SC-8: mobile rail collapses to slide-over tray", () => {
+    it("mobile rail tray renders only at narrow viewport (conditional)", async () => {
+      const { router } = await import("../src/routes.js");
+      Object.defineProperty(window, "innerWidth", { configurable: true, value: 375, writable: true });
+      window.dispatchEvent(new Event("resize"));
+      const memoryHistory = createMemoryHistory({ initialEntries: ["/"] });
+      const memoryRouter = createRouter({ routeTree: router.routeTree, history: memoryHistory });
+      const { container } = render(<RouterProvider router={memoryRouter} />);
+      await waitFor(() => {
+        const topbar = container.querySelector("[data-testid='app-topbar']") as HTMLElement;
+        expect(topbar).toBeTruthy();
+      });
+      const tray = container.querySelector("[data-testid='mobile-rail-tray']") as HTMLElement;
+      expect(tray).toBeTruthy();
+      expect(tray.className).toContain("-translate-x-full");
     });
   });
 
-  it("system status tab spells out daemon and cmux state", async () => {
-    mockAllApis();
-    await renderRealAppAt("/");
+  // Phase 2 BOUNCE-FIX #3 — width-coupling regression (guard-3 catch).
+  // The center workspace's --workspace-right-offset CSS variable must equal
+  // the VellumSheet wide preset width when drawer is open. Bounce-fix #2
+  // calibrated VellumSheet 45rem → 38rem but missed this consumer; net
+  // effect was a 7rem (112px) gap between drawer and reserved padding.
+  // Per pseudo-element-paint test contract (discipline ritual #7), assert
+  // via CSS source rather than runtime (computed style of CSS vars from
+  // jsdom is brittle).
+  describe("Drawer width / right-offset coupling (bounce-fix #3 regression)", () => {
+    const APP_SHELL_SRC = readFileSync(
+      path.resolve(__dirname, "../src/components/AppShell.tsx"),
+      "utf8",
+    );
+    const VELLUM_SHEET_SRC = readFileSync(
+      path.resolve(__dirname, "../src/components/ui/vellum-sheet.tsx"),
+      "utf8",
+    );
+    const SHARED_DRAWER_SRC = readFileSync(
+      path.resolve(__dirname, "../src/components/SharedDetailDrawer.tsx"),
+      "utf8",
+    );
 
-    await waitFor(() => {
-      expect(screen.getByTestId("system-toggle")).toBeDefined();
+    it("VellumSheet wide preset and AppShell workspaceRightOffset use the SAME literal", () => {
+      // Pull the wide-preset width from VellumSheet source.
+      const vellumMatch = VELLUM_SHEET_SRC.match(
+        /wide:\s*"w-full\s+lg:w-\[(\d+rem)\]/,
+      );
+      expect(vellumMatch, "VellumSheet wide preset must declare lg:w-[Xrem]").toBeTruthy();
+      const vellumWide = vellumMatch![1];
+
+      // Pull the open-drawer offset from AppShell source.
+      const offsetMatch = APP_SHELL_SRC.match(
+        /workspaceRightOffset\s*=\s*[^?]*\?\s*"(\d+rem)"\s*:/,
+      );
+      expect(offsetMatch, "AppShell workspaceRightOffset must declare ternary 'Xrem' : '0rem'")
+        .toBeTruthy();
+      const offsetOpen = offsetMatch![1];
+
+      expect(offsetOpen, "AppShell workspaceRightOffset must equal VellumSheet wide preset width")
+        .toBe(vellumWide);
     });
 
-    fireEvent.click(screen.getByTestId("system-toggle"));
-    await waitFor(() => {
-      expect(screen.getByTestId("system-panel")).toBeDefined();
-    });
-    fireEvent.click(screen.getByTestId("system-tab-status"));
-
-    await waitFor(() => {
-      expect(screen.getByTestId("system-daemon-status").textContent).toBe("connected");
-      expect(screen.getByTestId("system-cmux-status").textContent).toBe("available");
+    it("no live 45rem string in chrome source (only historical calibration comments are allowed)", () => {
+      // Extract every line containing "45rem" and verify each is inside
+      // a comment (calibration history). Chrome source must NOT carry
+      // 45rem as a live class or value.
+      const checkSource = (src: string, label: string) => {
+        const lines = src.split("\n");
+        for (let i = 0; i < lines.length; i++) {
+          const line = lines[i];
+          if (!line.includes("45rem")) continue;
+          // Permitted only when the line is a JS/TS line comment ("//") or
+          // an active block-comment context ("/*", "*"). We scan backward
+          // for a recent /* opener if no "//" on this line.
+          const trimmed = line.trim();
+          const isLineComment = trimmed.startsWith("//") || trimmed.startsWith("*");
+          let isInsideBlockComment = false;
+          if (!isLineComment) {
+            // Look backward up to 30 lines for a /* without an intervening */.
+            for (let j = i - 1; j >= Math.max(0, i - 30); j--) {
+              if (lines[j].includes("*/")) break;
+              if (lines[j].includes("/*")) {
+                isInsideBlockComment = true;
+                break;
+              }
+            }
+          }
+          expect(
+            isLineComment || isInsideBlockComment,
+            `${label}:${i + 1} contains live (non-comment) "45rem" — bounce-fix #3 width-coupling regression`,
+          ).toBe(true);
+        }
+      };
+      checkSource(APP_SHELL_SRC, "AppShell.tsx");
+      checkSource(SHARED_DRAWER_SRC, "SharedDetailDrawer.tsx");
+      // VellumSheet keeps a historical calibration comment with 45rem;
+      // it's inside a // comment so the same checker passes there too.
+      checkSource(VELLUM_SHEET_SRC, "vellum-sheet.tsx");
     });
   });
 
-  it("rig detail route renders full-width without snapshot panel", async () => {
-    mockAllApis();
-    await renderRealAppAt("/rigs/r1");
-
-    await waitFor(() => {
-      expect(screen.getByTestId("content-area")).toBeDefined();
-      expect(screen.getByTestId("header-surface-title").textContent).toBe("alpha");
-    });
-    expect(screen.queryByTestId("snapshot-panel")).toBeNull();
-  });
-
-  it("home route leaves the header title blank", async () => {
-    mockAllApis();
-    await renderRealAppAt("/");
-
-    await waitFor(() => {
-      expect(screen.getByTestId("app-header")).toBeDefined();
+  describe("Legacy buttons removed (Phase 2 deleted Sidebar + header toggle pattern)", () => {
+    it("specs-toggle button does NOT exist", async () => {
+      const { container } = await renderAt("/");
+      expect(container.querySelector("[data-testid='specs-toggle']")).toBeNull();
     });
 
-    expect(screen.queryByTestId("header-surface-title")).toBeNull();
+    it("system-toggle button does NOT exist", async () => {
+      const { container } = await renderAt("/");
+      expect(container.querySelector("[data-testid='system-toggle']")).toBeNull();
+    });
+
+    it("slices-link button does NOT exist", async () => {
+      const { container } = await renderAt("/");
+      expect(container.querySelector("[data-testid='slices-link']")).toBeNull();
+    });
+
+    it("steering-link button does NOT exist", async () => {
+      const { container } = await renderAt("/");
+      expect(container.querySelector("[data-testid='steering-link']")).toBeNull();
+    });
+
+    it("context-link button does NOT exist", async () => {
+      const { container } = await renderAt("/");
+      expect(container.querySelector("[data-testid='context-link']")).toBeNull();
+    });
+
+    it("progress-link button does NOT exist", async () => {
+      const { container } = await renderAt("/");
+      expect(container.querySelector("[data-testid='progress-link']")).toBeNull();
+    });
   });
 });

@@ -13,12 +13,23 @@ import {
   getActivityAnimationClass,
   shortQitemTail,
 } from "../lib/activity-visuals.js";
-import { SliceExplorerPanel } from "./slices/SliceExplorerPanel.js";
+import { EmptyState } from "./ui/empty-state.js";
 
 import type { DrawerSelection } from "./SharedDetailDrawer.js";
 
 export type ExplorerDesktopMode = "full" | "hidden";
-export type ExplorerSurface = "topology" | "slices";
+
+// V1 attempt-3 Phase 2 — canon surface union per universal-shell.md L62:
+// "Renders the destination's tree (or a feed lens filter chip rail for
+// For You; or a flat nav for Settings; or nothing for Dashboard)."
+//
+// Phase 2 lays the union; Phase 3 fills tree contents + lens chips.
+export type ExplorerSurface =
+  | "topology"
+  | "project"
+  | "specs"
+  | "for-you"
+  | "none";
 
 interface ExplorerProps {
   open: boolean;
@@ -27,7 +38,6 @@ interface ExplorerProps {
   onSelect: (sel: DrawerSelection) => void;
   desktopMode?: ExplorerDesktopMode;
   surface?: ExplorerSurface;
-  onSurfaceChange?: (surface: ExplorerSurface) => void;
   onDesktopToggle?: () => void;
 }
 
@@ -465,41 +475,75 @@ function FullExplorerContents({
   );
 }
 
-function ExplorerModeTabs({
+// Surface-routed body. Phase 2 lays placeholders for non-topology
+// surfaces; Phase 3 fills tree contents + lens chips. "none" surface
+// (Dashboard / Settings) means Explorer is not rendered at all.
+function SurfaceBody({
   surface,
-  onSurfaceChange,
+  rigs,
+  psMap,
+  selection,
+  onSelect,
+  onClose,
+  currentRigId,
 }: {
   surface: ExplorerSurface;
-  onSurfaceChange: (surface: ExplorerSurface) => void;
+  rigs: RigSummary[] | undefined;
+  psMap: Map<string, PsEntry>;
+  selection: DrawerSelection;
+  onSelect: (sel: DrawerSelection) => void;
+  onClose: () => void;
+  currentRigId: string | null;
 }) {
-  const tabs: Array<{ value: ExplorerSurface; label: string; testId: string }> = [
-    { value: "topology", label: "Explore", testId: "explorer-tab-explore" },
-    { value: "slices", label: "Slices", testId: "explorer-tab-slices" },
-  ];
-
-  return (
-    <div data-testid="explorer-mode-tabs" className="border-b border-stone-200 p-2 pr-12">
-      <div className="grid grid-cols-2 gap-1">
-        {tabs.map((tab) => (
-          <button
-            key={tab.value}
-            type="button"
-            data-testid={tab.testId}
-            data-active={surface === tab.value}
-            onClick={() => onSurfaceChange(tab.value)}
-            className={cn(
-              "border px-2 py-1.5 font-mono text-[10px] uppercase tracking-[0.12em] transition-colors",
-              surface === tab.value
-                ? "border-stone-700 bg-stone-700 text-white"
-                : "border-stone-300 text-stone-700 hover:bg-stone-100"
-            )}
-          >
-            {tab.label}
-          </button>
-        ))}
+  if (surface === "topology") {
+    return (
+      <FullExplorerContents
+        rigs={rigs}
+        psMap={psMap}
+        selection={selection}
+        onSelect={onSelect}
+        onClose={onClose}
+        currentRigId={currentRigId}
+      />
+    );
+  }
+  if (surface === "project") {
+    return (
+      <div className="flex-1 p-4">
+        <EmptyState
+          label="PROJECT TREE"
+          description="workspace > mission > slice — Phase 3 fills."
+          variant="card"
+          testId="explorer-project-placeholder"
+        />
       </div>
-    </div>
-  );
+    );
+  }
+  if (surface === "specs") {
+    return (
+      <div className="flex-1 p-4">
+        <EmptyState
+          label="SPECS TREE"
+          description="rigs / workspaces / workflows / context-packs / agent-images / applications — Phase 3 fills."
+          variant="card"
+          testId="explorer-specs-placeholder"
+        />
+      </div>
+    );
+  }
+  if (surface === "for-you") {
+    return (
+      <div className="flex-1 p-4">
+        <EmptyState
+          label="FOR YOU LENS"
+          description="Lens chips + filter chips + subscriptions list — Phase 3 fills (settings-shaped subscriptions, NOT feed-shaped)."
+          variant="card"
+          testId="explorer-for-you-placeholder"
+        />
+      </div>
+    );
+  }
+  return null;
 }
 
 export function Explorer({
@@ -509,7 +553,6 @@ export function Explorer({
   onSelect,
   desktopMode = "full",
   surface = "topology",
-  onSurfaceChange = () => {},
   onDesktopToggle = () => {},
 }: ExplorerProps) {
   const routerState = useRouterState();
@@ -520,16 +563,25 @@ export function Explorer({
 
   const psMap = new Map((psEntries ?? []).map((entry) => [entry.rigId, entry]));
 
+  // Surface "none" (Dashboard / Settings) — Explorer is not rendered.
+  if (surface === "none") return null;
+
   return (
     <aside
       data-testid="explorer"
+      data-surface={surface}
       className={cn(
-        "border-r border-stone-300/25 flex z-20 overflow-hidden",
+        // V1 border weight doctrine (universal-shell.md L39–L48):
+        // 1px outline-variant ghost line for inter-region edges.
+        "border-r border-outline-variant flex z-20 overflow-hidden",
         "bg-[rgba(250,249,245,0.035)] supports-[backdrop-filter]:bg-[rgba(250,249,245,0.018)] backdrop-blur-[14px] backdrop-saturate-75 shadow-[6px_0_14px_rgba(46,52,46,0.04)]",
+        // Mobile: slide-over from left below the top-bar header (h-14).
         "fixed top-14 bottom-0 left-0 transition-transform duration-200 ease-tactical w-72 max-w-[80vw]",
         open ? "translate-x-0" : "-translate-x-full",
-        desktopMode === "full" && "lg:absolute lg:top-0 lg:bottom-0 lg:left-0 lg:w-72 lg:max-w-none lg:translate-x-0",
-        desktopMode === "hidden" && "lg:absolute lg:top-0 lg:bottom-0 lg:left-0 lg:w-12 lg:max-w-none lg:translate-x-0"
+        // Desktop (>=lg): persistent column at 280px (lg:w-72) per universal-shell.md L34.
+        // Position absolutely after the 48px rail; AppShell pads its main content with workspace-left-offset.
+        desktopMode === "full" && "lg:absolute lg:top-0 lg:bottom-0 lg:left-12 lg:w-72 lg:max-w-none lg:translate-x-0",
+        desktopMode === "hidden" && "lg:hidden",
       )}
     >
       <div className="relative flex h-full w-full flex-col">
@@ -541,33 +593,21 @@ export function Explorer({
           className={cn(
             "hidden lg:flex absolute z-10 h-8 w-8 items-center justify-center rounded-full border border-stone-300 bg-background/90 text-stone-700",
             "shadow-[0_2px_8px_rgba(41,37,36,0.08)] backdrop-blur-sm transition-colors hover:bg-stone-100 hover:text-stone-900",
-            desktopMode === "full" ? "right-2 top-3" : "left-1/2 top-3 -translate-x-1/2"
+            "right-2 top-3",
           )}
         >
-          {desktopMode === "full" ? <ChevronLeft className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+          <ChevronLeft className="h-4 w-4" />
         </button>
 
-        {desktopMode === "full" ? (
-          <>
-            <ExplorerModeTabs surface={surface} onSurfaceChange={onSurfaceChange} />
-            {surface === "slices" ? (
-              <div className="min-h-0 flex-1">
-                <SliceExplorerPanel onNavigate={onClose} />
-              </div>
-            ) : (
-              <FullExplorerContents
-                rigs={rigs}
-                psMap={psMap}
-                selection={selection}
-                onSelect={onSelect}
-                onClose={onClose}
-                currentRigId={currentRigId}
-              />
-            )}
-          </>
-        ) : (
-          <div className="hidden h-full w-full lg:block" />
-        )}
+        <SurfaceBody
+          surface={surface}
+          rigs={rigs}
+          psMap={psMap}
+          selection={selection}
+          onSelect={onSelect}
+          onClose={onClose}
+          currentRigId={currentRigId}
+        />
       </div>
     </aside>
   );
