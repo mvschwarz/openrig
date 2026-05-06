@@ -534,7 +534,19 @@ function AppShellInner({ children }: AppShellProps) {
                   paddingLeft: `var(--workspace-left-offset, 0px)`,
                 }}
               >
-                <div key={pathname} className="relative z-10 route-enter flex-1 flex flex-col">
+                {/* Reset the workspace offset CSS vars to 0 inside main so that
+                    legacy children (e.g., LiveNodeDetails → WorkspacePage which
+                    also reads var(--workspace-left-offset) for its own padding)
+                    don't double-pad. The padding is already applied at <main>
+                    above; child surfaces should treat their own offset as 0. */}
+                <div
+                  key={pathname}
+                  className="relative z-10 route-enter flex-1 flex flex-col"
+                  style={{
+                    "--workspace-left-offset": "0px",
+                    "--workspace-right-offset": "0px",
+                  } as CSSProperties}
+                >
                   {children}
                 </div>
               </main>
