@@ -68,7 +68,10 @@ function ScopeShell({
       >
         {tabsNav}
       </div>
-      <div className="flex-1 min-h-0 overflow-auto">
+      {/* flex column so the active view-mode panel can fill remaining
+          height. min-h-0 lets the flex child shrink correctly inside
+          the AppShell main scroll container. */}
+      <div className="flex-1 min-h-0 flex flex-col">
         {children}
       </div>
     </div>
@@ -138,7 +141,7 @@ export function RigScopePage() {
       tabsNav={<TopologyViewModeTabs tabs={RIG_POD_SCOPE_TABS} active={active} onSelect={setActive} testIdPrefix="topology-rig" />}
     >
       {active === "graph" ? (
-        <div className="flex-1 min-h-[400px] relative">
+        <div className="flex-1 min-h-0 relative">
           <RigGraph rigId={rigId} rigName={rig?.name ?? null} showDiscovered={false} />
         </div>
       ) : null}
