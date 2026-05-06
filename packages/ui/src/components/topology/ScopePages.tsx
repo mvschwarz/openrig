@@ -5,7 +5,7 @@
 // page renders its tab nav + the active view-mode panel.
 // (Attempt-2 violated this by using separate routes per view-mode.)
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useParams } from "@tanstack/react-router";
 import {
   TopologyViewModeTabs,
@@ -22,6 +22,22 @@ import { EmptyState } from "../ui/empty-state.js";
 import { RigGraph } from "../RigGraph.js";
 import { useRigSummary } from "../../hooks/useRigSummary.js";
 import { LiveNodeDetails } from "../LiveNodeDetails.js";
+import { useTopologyOverlay } from "./topology-overlay-context.js";
+
+/** Set the AppShell's Explorer overlay mode based on the scope page's
+ *  active view-mode. Graph view-mode → overlay (vellum-translucent
+ *  Explorer over canvas); table/terminal → opaque. Resets to opaque
+ *  when the component unmounts so non-topology destinations don't
+ *  inherit overlay state. */
+function useOverlayForActiveTab(active: string) {
+  const { setMode } = useTopologyOverlay();
+  useEffect(() => {
+    setMode(active === "graph" ? "overlay" : "opaque");
+    return () => {
+      setMode("opaque");
+    };
+  }, [active, setMode]);
+}
 
 function ScopeShell({
   eyebrow,
@@ -34,9 +50,20 @@ function ScopeShell({
   tabsNav: React.ReactNode;
   children: React.ReactNode;
 }) {
+  // Class B fixed-anchor: header (with eyebrow + title + view-mode tabs)
+  // ALWAYS sits at left = var(--explorer-anchor-left) so the tab bar is
+  // positioned consistently across graph / table / terminal switches.
+  // The CONTENT below the header inherits the parent <main>'s
+  // padding-left rule (which is 0 in overlay mode so canvas extends
+  // behind the Explorer; or anchor in opaque mode). Tab bar gets z-30
+  // and a solid background so it stays on top of the Explorer overlay
+  // in graph mode.
   return (
     <div className="flex flex-col h-full">
-      <div className="px-6 pt-6 pb-2 border-b border-outline-variant">
+      <div
+        className="px-6 pt-6 pb-2 border-b border-outline-variant relative z-30 bg-background"
+        style={{ marginLeft: "var(--header-anchor-offset, 0px)" }}
+      >
         <SectionHeader tone="muted">{eyebrow}</SectionHeader>
         <h1 className="font-headline text-headline-md font-bold tracking-tight uppercase text-stone-900 mt-1 mb-3">
           {title}
@@ -66,6 +93,7 @@ function TerminalGridPlaceholder({ scope }: { scope: string }) {
 export function HostScopePage() {
   const [active, setActive] = useState<TopologyHostScopeTab>("graph");
   const { data: rigs } = useRigSummary();
+  useOverlayForActiveTab(active);
 
   return (
     <ScopeShell
@@ -103,6 +131,7 @@ export function RigScopePage() {
   const { data: rigs } = useRigSummary();
   const rig = rigs?.find((r) => r.id === rigId);
   const [active, setActive] = useState<TopologyRigPodScopeTab>("graph");
+  useOverlayForActiveTab(active);
 
   return (
     <ScopeShell
@@ -138,6 +167,7 @@ export function RigScopePage() {
 export function PodScopePage() {
   const { rigId, podName } = useParams({ from: "/topology/pod/$rigId/$podName" });
   const [active, setActive] = useState<TopologyRigPodScopeTab>("table");
+  useOverlayForActiveTab(active);
 
   return (
     <ScopeShell

@@ -42,6 +42,11 @@ interface ExplorerProps {
   desktopMode?: ExplorerDesktopMode;
   surface?: ExplorerSurface;
   onDesktopToggle?: () => void;
+  /** V1 attempt-3 Phase 3 bounce-fix — Class B selective vellum overlay.
+   *  "overlay" = vellum-translucent + position absolute z-30 (topology
+   *  graph view-mode signature). "opaque" = default solid background
+   *  (every other destination + view-mode). */
+  overlayMode?: "overlay" | "opaque";
 }
 
 function statusColor(startupStatus: string | null): string {
@@ -556,6 +561,7 @@ export function Explorer({
   desktopMode = "full",
   surface = "topology",
   onDesktopToggle = () => {},
+  overlayMode = "opaque",
 }: ExplorerProps) {
   const routerState = useRouterState();
   const currentPath = routerState.location.pathname;
@@ -568,20 +574,37 @@ export function Explorer({
   // Surface "none" (Dashboard / Settings) — Explorer is not rendered.
   if (surface === "none") return null;
 
+  // Class B: overlay vs opaque background grammar.
+  // OPAQUE (default; every destination except topology-graph): solid
+  //   paper-cream tone (Phase 2 baseline) so the explore tree reads
+  //   crisply against the center workspace.
+  // OVERLAY (topology graph only): vellum-heavy translucent surface
+  //   (.vellum-heavy class from globals.css L118-122 — rgba(255,255,255,0.7)
+  //   + backdrop-blur(16px)) with elevated z-index so the graph canvas
+  //   underneath shows through. Sheets-of-vellum-layered aesthetic per
+  //   universal-shell.md L48.
+  const isOverlay = overlayMode === "overlay";
   return (
     <aside
       data-testid="explorer"
       data-surface={surface}
+      data-explorer-mode={overlayMode}
       className={cn(
         // V1 border weight doctrine (universal-shell.md L39–L48):
         // 1px outline-variant ghost line for inter-region edges.
-        "border-r border-outline-variant flex z-20 overflow-hidden",
-        "bg-[rgba(250,249,245,0.035)] supports-[backdrop-filter]:bg-[rgba(250,249,245,0.018)] backdrop-blur-[14px] backdrop-saturate-75 shadow-[6px_0_14px_rgba(46,52,46,0.04)]",
+        "border-r border-outline-variant flex overflow-hidden",
+        // Background grammar by mode:
+        isOverlay
+          ? "vellum-heavy z-30 shadow-[6px_0_14px_rgba(46,52,46,0.08)]"
+          : "z-20 bg-[rgba(250,249,245,0.035)] supports-[backdrop-filter]:bg-[rgba(250,249,245,0.018)] backdrop-blur-[14px] backdrop-saturate-75 shadow-[6px_0_14px_rgba(46,52,46,0.04)]",
         // Mobile: slide-over from left below the top-bar header (h-14).
         "fixed top-14 bottom-0 left-0 transition-transform duration-200 ease-tactical w-72 max-w-[80vw]",
         open ? "translate-x-0" : "-translate-x-full",
         // Desktop (>=lg): persistent column at 280px (lg:w-72) per universal-shell.md L34.
-        // Position absolutely after the 48px rail; AppShell pads its main content with workspace-left-offset.
+        // Position absolutely after the 48px rail; in opaque mode AppShell
+        // also pads main with workspace-left-offset so center content
+        // starts AFTER the Explorer. In overlay mode the main padding is
+        // 0 so the canvas extends behind this translucent panel.
         desktopMode === "full" && "lg:absolute lg:top-0 lg:bottom-0 lg:left-12 lg:w-72 lg:max-w-none lg:translate-x-0",
         desktopMode === "hidden" && "lg:hidden",
       )}

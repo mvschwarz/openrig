@@ -9,6 +9,7 @@ import { useState, useMemo } from "react";
 import { Link } from "@tanstack/react-router";
 import { ChevronDown, ChevronRight } from "lucide-react";
 import { useSlices } from "../../hooks/useSlices.js";
+import { useWorkspaceName } from "../../hooks/useWorkspaceName.js";
 import { MissionStatusBadge, type MissionStatus } from "../MissionStatusBadge.js";
 
 type GroupedMission = {
@@ -28,6 +29,7 @@ function deriveStatus(slices: Array<{ status: string }>): MissionStatus {
 
 export function ProjectTreeView() {
   const { data: slicesResp } = useSlices("all");
+  const workspace = useWorkspaceName();
   const [expanded, setExpanded] = useState<Record<string, boolean>>({
     workspace: true,
   });
@@ -56,6 +58,39 @@ export function ProjectTreeView() {
     }));
   }, [slicesResp]);
 
+  // A5 bounce-fix: replace hardcoded "openrig-work" with live-wired
+  // workspace name from ConfigStore. When unset/unreachable: render an
+  // honest empty-state node ("No workspace connected" + Link to /settings).
+  if (!workspace.isLoading && workspace.name === null) {
+    return (
+      <div
+        data-testid="project-tree-view"
+        className="flex-1 overflow-y-auto py-3 px-3"
+      >
+        <div
+          data-testid="project-no-workspace"
+          className="border border-outline-variant bg-surface-low px-3 py-3 font-mono text-[10px]"
+        >
+          <div className="text-stone-900 uppercase tracking-wide font-bold mb-1">
+            No workspace connected
+          </div>
+          <p className="text-on-surface-variant mb-2">
+            Configure a workspace root to browse missions and slices.
+          </p>
+          <Link
+            to="/settings"
+            data-testid="project-no-workspace-cta"
+            className="inline-flex items-center text-stone-900 hover:underline uppercase"
+          >
+            Open settings →
+          </Link>
+        </div>
+      </div>
+    );
+  }
+
+  const workspaceLabel = workspace.name ?? "loading…";
+
   return (
     <div data-testid="project-tree-view" className="flex-1 overflow-y-auto py-2">
       <ul>
@@ -71,8 +106,11 @@ export function ProjectTreeView() {
             ) : (
               <ChevronRight className="h-3 w-3 text-on-surface-variant" />
             )}
-            <span className="font-mono text-[11px] uppercase tracking-wide text-stone-900 flex-1">
-              openrig-work
+            <span
+              data-testid="project-workspace-label"
+              className="font-mono text-[11px] uppercase tracking-wide text-stone-900 flex-1"
+            >
+              {workspaceLabel}
             </span>
             <Link
               to="/project"

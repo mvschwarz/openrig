@@ -8,11 +8,12 @@
 // pages where mountable + EmptyState placeholders for Phase 5 polish.
 
 import { useState, type ReactNode } from "react";
-import { useParams } from "@tanstack/react-router";
+import { Link, useParams } from "@tanstack/react-router";
 import { cn } from "../../lib/utils.js";
 import { SectionHeader } from "../ui/section-header.js";
 import { EmptyState } from "../ui/empty-state.js";
 import { FilesWorkspace } from "../files/FilesWorkspace.js";
+import { useWorkspaceName } from "../../hooks/useWorkspaceName.js";
 
 type SharedTab = "overview" | "progress" | "artifacts" | "queue" | "topology";
 type SliceTab = SharedTab | "story" | "tests";
@@ -118,10 +119,27 @@ function PlaceholderTab({ label, description }: { label: string; description?: s
 
 export function WorkspaceScopePage() {
   const [active, setActive] = useState<SharedTab>("overview");
+  const workspace = useWorkspaceName();
+
+  // A5 bounce-fix: live-wired workspace name; honest empty-state when unset.
+  if (!workspace.isLoading && workspace.name === null) {
+    return (
+      <div className="mx-auto w-full max-w-[960px] px-6 py-12">
+        <EmptyState
+          label="NO WORKSPACE CONNECTED"
+          description="Configure a workspace root to browse missions and slices in this destination."
+          variant="card"
+          testId="workspace-scope-no-workspace"
+          action={{ label: "Open settings", href: "/settings" }}
+        />
+      </div>
+    );
+  }
+
   return (
     <ScopeShell
       eyebrow="Workspace"
-      title="openrig-work"
+      title={workspace.name ?? "loading…"}
       tabs={SHARED_TABS}
       active={active}
       onSelect={(id) => setActive(id as SharedTab)}

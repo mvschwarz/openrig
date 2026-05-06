@@ -6,6 +6,7 @@
 import { SectionHeader } from "../ui/section-header.js";
 import { EmptyState } from "../ui/empty-state.js";
 import { useActivityFeed } from "../../hooks/useActivityFeed.js";
+import { formatEventPayload } from "../../lib/format-event-payload.js";
 
 const MAX_ITEMS = 10;
 
@@ -37,8 +38,8 @@ export function RecentActivity() {
                 <span className="text-on-surface-variant text-[10px] uppercase tracking-wide w-32 shrink-0 truncate">
                   {evt.type}
                 </span>
-                <span className="text-stone-900 truncate">
-                  {String((evt.payload as Record<string, unknown>)?.summary ?? evt.type)}
+                <span className="text-stone-900 truncate" title={formatEventPayload(evt.payload)}>
+                  {formatEventPayload(evt.payload)}
                 </span>
               </li>
             ))}
