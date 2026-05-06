@@ -46,6 +46,10 @@ import { SharedDetailDrawer, type DrawerSelection } from "./SharedDetailDrawer.j
 import { PreviewStack } from "./preview/PreviewStack.js";
 import type { DiscoveryPlacementTarget } from "./DiscoveryPanel.js";
 import { SpecsWorkspaceProvider } from "./SpecsWorkspace.js";
+import {
+  TopologyOverlayProvider,
+  useTopologyOverlay,
+} from "./topology/topology-overlay-context.js";
 import { useActivityFeed } from "../hooks/useActivityFeed.js";
 import { useGlobalEvents } from "../hooks/useGlobalEvents.js";
 import { cn } from "../lib/utils.js";
@@ -302,9 +306,20 @@ interface AppShellProps {
 const WIDE_LAYOUT_BREAKPOINT = 1024;
 
 export function AppShell({ children }: AppShellProps) {
+  return (
+    <SpecsWorkspaceProvider>
+      <TopologyOverlayProvider>
+        <AppShellInner>{children}</AppShellInner>
+      </TopologyOverlayProvider>
+    </SpecsWorkspaceProvider>
+  );
+}
+
+function AppShellInner({ children }: AppShellProps) {
   const routerState = useRouterState();
   const pathname = routerState.location.pathname;
   const surface = surfaceForPath(pathname);
+  const { mode: explorerMode } = useTopologyOverlay();
 
   const [explorerOpen, setExplorerOpen] = useState(false); // mobile slide-over state
   const [desktopExplorerOpen, setDesktopExplorerOpen] = useState(true);
@@ -369,11 +384,28 @@ export function AppShell({ children }: AppShellProps) {
   const explorerVisible = surface !== "none";
   const drawerOpen = Boolean(selectionState);
 
-  // CSS var consumed by surfaces that pad themselves inside center.
-  // Rail: 48px (3rem). Explorer: 280px (18rem) when desktop-open, 0 when collapsed/none.
+  // V1 attempt-3 Phase 3 bounce-fix — Class B fixed-anchor + selective overlay.
+  // Topology graph mode signals overlay; only meaningful while on /topology
+  // (surface === "topology"). Other surfaces ALWAYS use opaque layout.
+  const isTopologyOverlay = explorerMode === "overlay" && surface === "topology";
+
+  // Anchor stays the same in BOTH modes — tab bar position never moves.
+  // Main padding-left differs:
+  //   - opaque: padding = anchor (content starts AFTER explorer)
+  //   - overlay: padding = 0 (content extends behind translucent explorer);
+  //              tab bar is sticky/positioned at left=anchor independently.
+  // 21rem = rail (3rem) + explorer (18rem).
+  const explorerAnchorLeft = isWideLayout && explorerVisible && desktopExplorerOpen ? "21rem" : "3rem";
   const workspaceLeftOffset = isWideLayout
-    ? `${3 + (explorerVisible && desktopExplorerOpen ? 18 : 0)}rem`
+    ? isTopologyOverlay
+      ? "0rem"
+      : explorerAnchorLeft
     : "0rem";
+  // Class B fixed-anchor: header (eyebrow + title + view-mode tabs) ALWAYS
+  // sits at the explorer-anchor offset, even in overlay mode where the
+  // canvas extends behind the Explorer. This keeps the tab bar at a
+  // stable left position across view-mode switches.
+  const headerAnchorOffset = isWideLayout && isTopologyOverlay ? explorerAnchorLeft : "0rem";
   // Coupled to VellumSheet wide preset (lg:w-[38rem]) — bounce-fix #3
   // caught the gap that emerged when bounce-fix #2 calibrated the drawer
   // 45rem → 38rem without updating this offset. Keep these two literals
@@ -382,12 +414,13 @@ export function AppShell({ children }: AppShellProps) {
   const workspaceStyle = {
     "--workspace-left-offset": workspaceLeftOffset,
     "--workspace-right-offset": workspaceRightOffset,
+    "--explorer-anchor-left": explorerAnchorLeft,
+    "--header-anchor-offset": headerAnchorOffset,
   } as CSSProperties;
 
   return (
-    <SpecsWorkspaceProvider>
-      <DrawerSelectionContext.Provider value={{ selection: selectionState, setSelection }}>
-        <DiscoveryPlacementContext.Provider
+    <DrawerSelectionContext.Provider value={{ selection: selectionState, setSelection }}>
+      <DiscoveryPlacementContext.Provider
           value={{
             selectedDiscoveredId,
             setSelectedDiscoveredId,
@@ -474,7 +507,10 @@ export function AppShell({ children }: AppShellProps) {
                 </>
               )}
 
-              {/* Explorer — desktop column or mobile slide-over (Explorer.tsx handles both modes). */}
+              {/* Explorer — desktop column or mobile slide-over.
+                  In overlay mode (topology graph): vellum-translucent + z-30
+                  so it floats over the canvas. In opaque mode: default
+                  Phase 2 behavior (z-20, opaque background). */}
               {explorerVisible && (
                 <Explorer
                   open={explorerOpen}
@@ -484,14 +520,19 @@ export function AppShell({ children }: AppShellProps) {
                   desktopMode={desktopExplorerOpen ? "full" : "hidden"}
                   surface={surface}
                   onDesktopToggle={() => setDesktopExplorerOpen((open) => !open)}
+                  overlayMode={isTopologyOverlay ? "overlay" : "opaque"}
                 />
               )}
 
               {/* Center workspace */}
               <main
                 data-testid="content-area"
+                data-explorer-mode={isTopologyOverlay ? "overlay" : "opaque"}
                 className="flex-1 flex flex-col overflow-auto relative"
-                style={workspaceStyle}
+                style={{
+                  ...workspaceStyle,
+                  paddingLeft: `var(--workspace-left-offset, 0px)`,
+                }}
               >
                 <div key={pathname} className="relative z-10 route-enter flex-1 flex flex-col">
                   {children}
@@ -515,8 +556,7 @@ export function AppShell({ children }: AppShellProps) {
               <PreviewStack />
             </div>
           </div>
-        </DiscoveryPlacementContext.Provider>
-      </DrawerSelectionContext.Provider>
-    </SpecsWorkspaceProvider>
+      </DiscoveryPlacementContext.Provider>
+    </DrawerSelectionContext.Provider>
   );
 }
