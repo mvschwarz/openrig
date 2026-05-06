@@ -18,10 +18,10 @@ describe("VellumSheet (Phase 1 primitive)", () => {
     expect(el.className).toContain("vellum-heavy");
   });
 
-  it("default width=wide applies the wide width class", () => {
+  it("default width=wide applies the wide width class (38rem ~608px iPad-portrait)", () => {
     const { container } = render(<VellumSheet testId="vs-w">x</VellumSheet>);
     const el = container.querySelector("[data-testid='vs-w']") as HTMLElement;
-    expect(el.className).toContain("lg:w-[45rem]");
+    expect(el.className).toContain("lg:w-[38rem]");
     expect(el.className).toContain("lg:max-w-[80vw]");
   });
 
@@ -33,18 +33,20 @@ describe("VellumSheet (Phase 1 primitive)", () => {
     expect(el.className).toContain("lg:w-[22rem]");
   });
 
-  it("edge=right (default) places left border", () => {
+  it("edge=right (default) places left border (1px outline-variant per border weight doctrine)", () => {
     const { container } = render(<VellumSheet testId="vs-r">x</VellumSheet>);
     const el = container.querySelector("[data-testid='vs-r']") as HTMLElement;
-    expect(el.className).toContain("border-l-2");
+    expect(el.className).toContain("border-l");
+    expect(el.className).toContain("border-outline-variant");
   });
 
-  it("edge=left places right border", () => {
+  it("edge=left places right border (1px outline-variant per border weight doctrine)", () => {
     const { container } = render(
       <VellumSheet edge="left" testId="vs-l">x</VellumSheet>,
     );
     const el = container.querySelector("[data-testid='vs-l']") as HTMLElement;
-    expect(el.className).toContain("border-r-2");
+    expect(el.className).toContain("border-r");
+    expect(el.className).toContain("border-outline-variant");
   });
 
   it("renders close button when onClose provided; clicking calls handler", () => {

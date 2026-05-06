@@ -40,12 +40,16 @@ export function VellumCard({
   as = "div",
   className,
   testId,
+  onClick,
   ...rest
 }: VellumCardProps) {
+  const isInteractive = Boolean(href || onClick);
   const containerClass = cn(
     variantSurface[variant],
     elevationShadow[elevation],
     "flex flex-col relative",
+    isInteractive &&
+      "focus-visible:outline focus-visible:outline-2 focus-visible:outline-stone-900 focus-visible:outline-offset-2",
     accentClass,
     className,
   );
@@ -68,6 +72,7 @@ export function VellumCard({
         href={href}
         className={containerClass}
         data-testid={testId}
+        onClick={onClick}
         {...(rest as React.AnchorHTMLAttributes<HTMLAnchorElement>)}
       >
         {inner}
@@ -77,20 +82,20 @@ export function VellumCard({
 
   if (as === "article") {
     return (
-      <article className={containerClass} data-testid={testId} {...rest}>
+      <article className={containerClass} data-testid={testId} onClick={onClick} {...rest}>
         {inner}
       </article>
     );
   }
   if (as === "section") {
     return (
-      <section className={containerClass} data-testid={testId} {...rest}>
+      <section className={containerClass} data-testid={testId} onClick={onClick} {...rest}>
         {inner}
       </section>
     );
   }
   return (
-    <div className={containerClass} data-testid={testId} {...rest}>
+    <div className={containerClass} data-testid={testId} onClick={onClick} {...rest}>
       {inner}
     </div>
   );

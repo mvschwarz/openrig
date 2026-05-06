@@ -1,7 +1,7 @@
 import * as React from "react";
 import { cn } from "@/lib/utils";
 
-export type SectionHeaderTone = "default" | "muted" | "emphasis";
+export type SectionHeaderTone = "default" | "muted" | "strong" | "alert";
 
 type PolymorphicAs = "header" | "div" | "section";
 
@@ -15,7 +15,8 @@ export interface SectionHeaderProps extends React.HTMLAttributes<HTMLElement> {
 const toneClass: Record<SectionHeaderTone, string> = {
   default: "text-stone-900",
   muted: "text-on-surface-variant",
-  emphasis: "text-tertiary",
+  strong: "text-stone-900 font-bold",
+  alert: "text-tertiary",
 };
 
 export function SectionHeader({
