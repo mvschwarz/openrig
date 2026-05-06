@@ -1,15 +1,25 @@
-import { useEffect } from "react";
+// V1 Shell Redesign Phase 2 — canonical routes per shell-redesign-v1
+// canon docs (universal-shell.md / dashboard.md / topology-tree.md /
+// project-tree.md / specs-tree.md / for-you-feed.md / agent-chat-surface.md).
+//
+// Phase 2 lays the route shells. Phase 3 fills tree contents +
+// destination cards + view-mode tab CONTENTS. View-mode tabs are
+// IN-PLACE within a single URL per SC-5 / SC-10 (NOT separate URLs).
+//
+// Daemon /api/* UNTOUCHED (SC-29).
+
 import {
   createRootRoute,
   createRoute,
   createRouter,
+  Navigate,
   Outlet,
+  useParams,
 } from "@tanstack/react-router";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { queryClient } from "./lib/query-client.js";
 import { AppShell } from "./components/AppShell.js";
 import { RigGraph } from "./components/RigGraph.js";
-import { WorkspaceHome } from "./components/WorkspaceHome.js";
 import { ImportFlow } from "./components/ImportFlow.js";
 import { PackageList } from "./components/PackageList.js";
 import { PackageInstallFlow } from "./components/PackageInstallFlow.js";
@@ -23,14 +33,23 @@ import { BundleInstallFlow } from "./components/BundleInstallFlow.js";
 import { LibraryReview } from "./components/LibraryReview.js";
 import { LiveNodeDetails } from "./components/LiveNodeDetails.js";
 import { DiscoveryOverlay } from "./components/DiscoveryOverlay.js";
-import { MissionControlSurface } from "./components/mission-control/MissionControlSurface.js";
-import { SliceStoryView } from "./components/slices/SliceStoryView.js";
-import { ProgressWorkspace } from "./components/progress/ProgressWorkspace.js";
-import { FilesWorkspace } from "./components/files/FilesWorkspace.js";
-import { SteeringWorkspace } from "./components/steering/SteeringWorkspace.js";
-import { ContextWorkspace } from "./components/context/ContextWorkspace.js";
+import { AuditHistoryView } from "./components/mission-control/views/AuditHistoryView.js";
 import { useRigSummary } from "./hooks/useRigSummary.js";
-import { useDrawerSelection } from "./components/AppShell.js";
+import { EmptyState } from "./components/ui/empty-state.js";
+
+// Phase 2 placeholder for canon destinations Phase 3 will fill.
+function DestinationPlaceholder({ label, description }: { label: string; description?: string }) {
+  return (
+    <div className="flex h-full w-full items-center justify-center p-8">
+      <EmptyState
+        label={label}
+        description={description ?? "Phase 3 will fill this destination."}
+        variant="card"
+        testId={`placeholder-${label.toLowerCase().replace(/\s+/g, "-")}`}
+      />
+    </div>
+  );
+}
 
 // Root route — wraps everything in AppShell
 const rootRoute = createRootRoute({
@@ -43,19 +62,178 @@ const rootRoute = createRootRoute({
   ),
 });
 
-// Index route — Dashboard
+// =====================================================================
+// Canon destinations (Phase 2 lays shells; Phase 3 fills)
+// =====================================================================
+
 const indexRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/",
-  component: WorkspaceHome,
+  component: () => (
+    <DestinationPlaceholder
+      label="DASHBOARD"
+      description="6-card launcher (Topology / Project / For You / Specs / Search / Settings) — Phase 3 fills."
+    />
+  ),
 });
 
-// Rig detail route — Graph + SnapshotPanel
+// Topology destination: SC-5 / SC-10 — single URL with view-mode tabs IN-PLACE
+// (graph / table / terminal). Phase 2 lays the four scope routes; Phase 3
+// renders the tabs and fills view-mode content.
+
+const topologyRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/topology",
+  component: () => (
+    <DestinationPlaceholder
+      label="TOPOLOGY"
+      description="Host scope (graph / table / terminal view-mode tabs IN-PLACE per SC-10) — Phase 3 fills."
+    />
+  ),
+});
+
+const topologyRigRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/topology/rig/$rigId",
+  component: () => (
+    <DestinationPlaceholder
+      label="TOPOLOGY — RIG SCOPE"
+      description="Rig-scoped graph / table / terminal / overview tabs — Phase 3 fills."
+    />
+  ),
+});
+
+const topologyPodRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/topology/pod/$rigId/$podName",
+  component: () => (
+    <DestinationPlaceholder
+      label="TOPOLOGY — POD SCOPE"
+      description="Pod-scoped graph / table / terminal / overview tabs — Phase 3 fills."
+    />
+  ),
+});
+
+const topologySeatRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/topology/seat/$rigId/$logicalId",
+  component: () => (
+    <DestinationPlaceholder
+      label="TOPOLOGY — SEAT SCOPE"
+      description="Seat-scoped detail / transcript / terminal tabs — Phase 3 fills."
+    />
+  ),
+});
+
+const forYouRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/for-you",
+  component: () => (
+    <DestinationPlaceholder
+      label="FOR YOU"
+      description="Cross-cutting attention feed (5 card types: ACTION / APPROVAL / SHIPPED / PROGRESS / OBSERVATION) — Phase 3 fills."
+    />
+  ),
+});
+
+const projectRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/project",
+  component: () => (
+    <DestinationPlaceholder
+      label="PROJECT"
+      description="Workspace > mission > slice tree — Phase 3 fills."
+    />
+  ),
+});
+
+const projectMissionRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/project/mission/$missionId",
+  component: () => (
+    <DestinationPlaceholder
+      label="PROJECT — MISSION"
+      description="Mission scope — Phase 3 fills."
+    />
+  ),
+});
+
+const projectSliceRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/project/slice/$sliceId",
+  component: () => (
+    <DestinationPlaceholder
+      label="PROJECT — SLICE"
+      description="Slice scope (story / overview / progress / artifacts / tests / queue / topology tabs) — Phase 3 fills."
+    />
+  ),
+});
+
+const specsLibraryRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/specs",
+  component: () => (
+    <DestinationPlaceholder
+      label="SPECS LIBRARY"
+      description="Top-level: toolbar + tanstack-table + search + filter chips — Phase 3 fills."
+    />
+  ),
+});
+
+const specsApplicationsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/specs/applications",
+  component: () => (
+    <DestinationPlaceholder
+      label="SPECS — APPLICATIONS"
+      description="Phase 3 fills."
+    />
+  ),
+});
+
+// Generic spec detail by kind/name — Phase 3 fills with kind-aware routing
+// (rigs / workspaces / workflows / context-packs / agent-images / applications).
+const specsKindRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/specs/$specKind/$specName",
+  component: () => {
+    const { specKind, specName } = useParams({ from: "/specs/$specKind/$specName" });
+    return (
+      <DestinationPlaceholder
+        label={`SPEC: ${specKind.toUpperCase()} / ${specName}`}
+        description="Existing spec detail page mounted here — Phase 3 wires."
+      />
+    );
+  },
+});
+
+const settingsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/settings",
+  component: () => (
+    <DestinationPlaceholder
+      label="SETTINGS"
+      description="3-tab Settings / Log / Status — Phase 3 fills. Mounts in CENTER workspace per SC-7 (NOT right sidebar)."
+    />
+  ),
+});
+
+const searchRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/search",
+  component: AuditHistoryView,
+});
+
+// =====================================================================
+// Existing routes preserved per code-map AFTER tree (not in delete list)
+// =====================================================================
+
+// Rig graph (legacy detail; topology destination supersedes — keep until
+// Phase 3 wires /topology/rig/$rigId).
 function RigDetail() {
-  const { rigId } = rigDetailRoute.useParams();
+  const { rigId } = useParams({ from: "/rigs/$rigId" });
   const { data: rigs } = useRigSummary();
   const rigName = rigs?.find((r: { id: string; name: string }) => r.id === rigId)?.name;
-
   return (
     <div className="flex flex-col flex-1 h-full">
       <div className="flex-1 min-h-[400px] relative">
@@ -71,28 +249,39 @@ const rigDetailRoute = createRoute({
   component: RigDetail,
 });
 
-// Import route
+const liveNodeDetailsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/rigs/$rigId/nodes/$logicalId",
+  component: () => {
+    const { rigId, logicalId } = useParams({ from: "/rigs/$rigId/nodes/$logicalId" });
+    return <LiveNodeDetails rigId={rigId} logicalId={decodeURIComponent(logicalId)} />;
+  },
+});
+
 const importRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/import",
   component: ImportFlow,
 });
 
-// Packages route
 const packagesRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/packages",
   component: PackageList,
 });
 
-// Package install route
 const packageInstallRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/packages/install",
   component: PackageInstallFlow,
 });
 
-// Bootstrap route
+const packageDetailRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/packages/$packageId",
+  component: PackageDetail,
+});
+
 const bootstrapRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/bootstrap",
@@ -105,86 +294,41 @@ const agentValidateRoute = createRoute({
   component: AgentSpecValidateFlow,
 });
 
-function DiscoveryRouteBridge() {
-  const { setSelection } = useDrawerSelection();
-
-  useEffect(() => {
-    setSelection({ type: "discovery" });
-  }, [setSelection]);
-
-  return <WorkspaceHome />;
-}
-
-function SpecsRouteBridge() {
-  const { setSelection } = useDrawerSelection();
-
-  useEffect(() => {
-    setSelection({ type: "specs" });
-  }, [setSelection]);
-
-  return <WorkspaceHome />;
-}
-
-function RigSpecReviewRoute() {
-  const { setSelection } = useDrawerSelection();
-
-  useEffect(() => {
-    setSelection({ type: "specs" });
-  }, [setSelection]);
-
-  return <RigSpecReview />;
-}
-
-function AgentSpecReviewRoute() {
-  const { setSelection } = useDrawerSelection();
-
-  useEffect(() => {
-    setSelection({ type: "specs" });
-  }, [setSelection]);
-
-  return <AgentSpecReview />;
-}
-
-// Discovery route
-const discoveryRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "/discovery",
-  component: DiscoveryRouteBridge,
-});
-
-const specsRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "/specs",
-  component: SpecsRouteBridge,
-});
-
+// /specs/rig + /specs/agent + /specs/library/$entryId — existing review
+// surfaces preserved per code-map AFTER tree. No drawer auto-open
+// (SC-6: drawer default-closed; opens only on named triggers).
 const rigSpecReviewRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/specs/rig",
-  component: RigSpecReviewRoute,
+  component: RigSpecReview,
 });
 
 const agentSpecReviewRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/specs/agent",
-  component: AgentSpecReviewRoute,
+  component: AgentSpecReview,
 });
-
-function LibraryReviewRoute() {
-  const { entryId } = libraryReviewRoute.useParams();
-  const { setSelection } = useDrawerSelection();
-
-  useEffect(() => {
-    setSelection({ type: "specs" });
-  }, [setSelection]);
-
-  return <LibraryReview entryId={entryId} />;
-}
 
 const libraryReviewRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/specs/library/$entryId",
-  component: LibraryReviewRoute,
+  component: () => {
+    const { entryId } = useParams({ from: "/specs/library/$entryId" });
+    return <LibraryReview entryId={entryId} />;
+  },
+});
+
+// Discovery — preserved per code-map ("discovery surface — keep but evaluate route").
+// No drawer auto-open (SC-6).
+const discoveryRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/discovery",
+  component: () => (
+    <DestinationPlaceholder
+      label="DISCOVERY"
+      description="Discovery surface preserved; redesign deferred per code-map."
+    />
+  ),
 });
 
 const discoveryInventoryRoute = createRoute({
@@ -193,7 +337,6 @@ const discoveryInventoryRoute = createRoute({
   component: DiscoveryOverlay,
 });
 
-// Bundle routes
 const bundleInspectRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/bundles/inspect",
@@ -206,95 +349,83 @@ const bundleInstallRoute = createRoute({
   component: BundleInstallFlow,
 });
 
-// Package detail route
-const packageDetailRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "/packages/$packageId",
-  component: PackageDetail,
-});
+// =====================================================================
+// Redirects from deleted routes
+// =====================================================================
 
-// Route tree
-// Live node full details route
-const liveNodeDetailsRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "/rigs/$rigId/nodes/$logicalId",
-  component: () => {
-    const { rigId, logicalId } = liveNodeDetailsRoute.useParams();
-    return <LiveNodeDetails rigId={rigId} logicalId={decodeURIComponent(logicalId)} />;
-  },
-});
-
-// PL-005 Phase A: Mission Control / Queue Observability surface.
-const missionControlRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "/mission-control",
-  component: MissionControlSurface,
-});
-
-// Slice Story View v0: top-level /slices route + /slices/:name detail.
-// The component reads :name via useParams when present and renders
-// the two-pane layout (filter+list on the left, six tabs on the right).
-const slicesIndexRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "/slices",
-  component: SliceStoryView,
-});
-const sliceDetailRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "/slices/$name",
-  component: SliceStoryView,
-});
-
-// UI Enhancement Pack v0: top-level Progress (item 1B) + Files
-// (item 3 + item 4) workspaces. Both are read-only pages with their
-// own internal layout — no left-sidebar nav coupling.
-const progressRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "/progress",
-  component: ProgressWorkspace,
-});
-const filesRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "/files",
-  component: FilesWorkspace,
-});
-// Operator Surface Reconciliation v0 — top-level Steering route (item 1).
-const steeringRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "/steering",
-  component: SteeringWorkspace,
-});
-
-// Token / Context Usage Surface v0 (PL-012) — /context portfolio dashboard.
-interface ContextSearch {
-  tier?: "critical" | "warning" | "low" | "unknown";
-  runtime?: string;
-  rigId?: string;
-}
-const contextRoute = createRoute({
+// /context redirects to /topology (SC-25 — relocates to topology table view; Phase 3 wires the actual view).
+const contextRedirectRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/context",
-  component: ContextWorkspace,
-  validateSearch: (search: Record<string, unknown>): ContextSearch => {
-    const out: ContextSearch = {};
-    if (search["tier"] === "critical" || search["tier"] === "warning"
-        || search["tier"] === "low" || search["tier"] === "unknown") out.tier = search["tier"];
-    if (typeof search["runtime"] === "string") out.runtime = search["runtime"];
-    if (typeof search["rigId"] === "string") out.rigId = search["rigId"];
-    return out;
+  component: () => <Navigate to="/topology" />,
+});
+
+// /mission-control DELETED per SC-18 — redirect to /for-you (which replaces it).
+const missionControlRedirectRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/mission-control",
+  component: () => <Navigate to="/for-you" />,
+});
+
+// /slices DELETED per project-tree.md — redirect to /project.
+const slicesRedirectRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/slices",
+  component: () => <Navigate to="/project" />,
+});
+
+const sliceDetailRedirectRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/slices/$name",
+  component: () => {
+    const { name } = useParams({ from: "/slices/$name" });
+    return <Navigate to="/project/slice/$sliceId" params={{ sliceId: name }} />;
   },
 });
 
+// /progress folds into Project tabs (Phase 3) — redirect to /project.
+const progressRedirectRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/progress",
+  component: () => <Navigate to="/project" />,
+});
+
+// /steering folds into Project workspace overview tab (Phase 3) — redirect to /project.
+const steeringRedirectRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/steering",
+  component: () => <Navigate to="/project" />,
+});
+
+// =====================================================================
+// Route tree
+// =====================================================================
+
 const routeTree = rootRoute.addChildren([
+  // Canon destinations
   indexRoute,
+  topologyRoute,
+  topologyRigRoute,
+  topologyPodRoute,
+  topologySeatRoute,
+  forYouRoute,
+  projectRoute,
+  projectMissionRoute,
+  projectSliceRoute,
+  specsLibraryRoute,
+  specsApplicationsRoute,
+  specsKindRoute,
+  settingsRoute,
+  searchRoute,
+  // Preserved existing routes
   rigDetailRoute,
+  liveNodeDetailsRoute,
   importRoute,
   packagesRoute,
   packageInstallRoute,
   packageDetailRoute,
   bootstrapRoute,
   agentValidateRoute,
-  specsRoute,
   rigSpecReviewRoute,
   agentSpecReviewRoute,
   libraryReviewRoute,
@@ -302,20 +433,17 @@ const routeTree = rootRoute.addChildren([
   discoveryInventoryRoute,
   bundleInspectRoute,
   bundleInstallRoute,
-  liveNodeDetailsRoute,
-  missionControlRoute,
-  slicesIndexRoute,
-  sliceDetailRoute,
-  progressRoute,
-  filesRoute,
-  steeringRoute,
-  contextRoute,
+  // Redirects from deleted routes
+  contextRedirectRoute,
+  missionControlRedirectRoute,
+  slicesRedirectRoute,
+  sliceDetailRedirectRoute,
+  progressRedirectRoute,
+  steeringRedirectRoute,
 ]);
 
-// Router
 export const router = createRouter({ routeTree });
 
-// Type registration for type-safe navigation
 declare module "@tanstack/react-router" {
   interface Register {
     router: typeof router;
