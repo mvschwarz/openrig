@@ -116,7 +116,8 @@ interface RailIconSpec {
   id: string;
   label: string;
   to: string;
-  icon: ComponentType<{ className?: string }>;
+  // lucide-react icons accept SVG props (strokeWidth, color, size, etc).
+  icon: ComponentType<{ className?: string; strokeWidth?: number | string }>;
   /** Path prefix used for active-state matching. */
   activeWhen: (pathname: string) => boolean;
   testId: string;
@@ -247,10 +248,13 @@ function Rail({
           "focus-visible:outline focus-visible:outline-2 focus-visible:outline-stone-900 focus-visible:outline-offset-2",
           active
             ? "bg-stone-900 text-stone-50"
-            : "text-stone-700 hover:bg-stone-200 hover:text-stone-900",
+            : "text-stone-700 hover:bg-stone-200/60 hover:text-stone-900",
         )}
       >
-        <Icon className="h-5 w-5" />
+        {/* Lighter icon line weight (founder direction 2026-05-06):
+            stroke-width 1.25 (default lucide is 2) for an architectural
+            drafting feel that matches the 1px ghost border doctrine. */}
+        <Icon className="h-5 w-5" strokeWidth={1.25} />
         {active && (
           <span
             aria-hidden="true"
@@ -268,7 +272,11 @@ function Rail({
       className={cn(
         // V1 border weight doctrine (universal-shell.md L39–L48):
         // 1px outline-variant ghost line for inter-region edges.
-        "bg-background border-outline-variant flex shrink-0",
+        // Vellum surface (founder direction 2026-05-06): same translucent
+        // treatment as the topology-graph Explorer overlay, so the rail
+        // reads as a paper sheet layered over the canvas (sheets-of-vellum
+        // aesthetic per universal-shell.md L48).
+        "vellum border-outline-variant flex shrink-0",
         vertical
           ? "w-12 flex-col items-center border-r py-2 gap-1"
           : "w-full flex-row items-center border-b px-2 gap-1 overflow-x-auto",
@@ -395,13 +403,12 @@ function AppShellInner({ children }: AppShellProps) {
   //   - overlay: padding = 0 (content extends behind translucent explorer);
   //              tab bar is sticky/positioned at left=anchor independently.
   // 21rem = rail (3rem) + explorer (18rem).
-  // 21rem (rail 3 + explorer 18) when explorer fully open; 6rem
-  // (rail 3 + collapsed-explorer-stub 3) when explorer collapsed; 3rem
-  // (rail only) when no explorer for the destination.
-  const explorerAnchorLeft = isWideLayout && explorerVisible
-    ? desktopExplorerOpen
-      ? "21rem"
-      : "6rem"
+  // 21rem (rail 3 + explorer 18) when explorer fully open. When
+  // collapsed: 3rem (rail only) — the floating chevron toggle floats
+  // over the canvas and doesn't claim layout space. When no explorer
+  // for the destination: 3rem (rail only).
+  const explorerAnchorLeft = isWideLayout && explorerVisible && desktopExplorerOpen
+    ? "21rem"
     : "3rem";
   const workspaceLeftOffset = isWideLayout
     ? isTopologyOverlay

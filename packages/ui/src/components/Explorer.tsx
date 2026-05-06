@@ -587,12 +587,37 @@ export function Explorer({
   //   vellum-heavy (70%) was too dense.
   const isOverlay = overlayMode === "overlay";
   const isCollapsed = desktopMode === "hidden";
+
+  // When collapsed at desktop: render ONLY a floating toggle button
+  // at left=rail-edge (no aside container behind it). The Explorer
+  // surface tree is unmounted; the canvas + tabs reflow to fill the
+  // freed width. Founder direction 2026-05-06.
+  if (isCollapsed) {
+    return (
+      <button
+        type="button"
+        data-testid="explorer-edge-toggle"
+        data-explorer-collapsed="true"
+        aria-label="Expand explorer"
+        onClick={onDesktopToggle}
+        className={cn(
+          "hidden lg:flex fixed top-[5.5rem] left-[3.5rem] z-30 h-8 w-8 items-center justify-center",
+          "rounded-full border border-outline-variant bg-background/90 text-stone-700",
+          "shadow-[0_2px_8px_rgba(41,37,36,0.08)] backdrop-blur-sm transition-colors",
+          "hover:bg-stone-100 hover:text-stone-900",
+        )}
+      >
+        <ChevronRight className="h-4 w-4" strokeWidth={1.5} />
+      </button>
+    );
+  }
+
   return (
     <aside
       data-testid="explorer"
       data-surface={surface}
       data-explorer-mode={overlayMode}
-      data-explorer-collapsed={isCollapsed}
+      data-explorer-collapsed="false"
       className={cn(
         // V1 border weight doctrine (universal-shell.md L39–L48):
         // 1px outline-variant ghost line for inter-region edges.
@@ -606,44 +631,34 @@ export function Explorer({
         open ? "translate-x-0" : "-translate-x-full",
         // Desktop (>=lg): persistent column at 280px (lg:w-72) per
         // universal-shell.md L34. Positioned absolutely after the 48px
-        // rail. When collapsed: thin 12px column with just the
-        // chevron-right re-open toggle visible (founder direction
-        // 2026-05-06 — no way to expand otherwise without page refresh).
-        desktopMode === "full" && "lg:absolute lg:top-0 lg:bottom-0 lg:left-12 lg:w-72 lg:max-w-none lg:translate-x-0",
-        desktopMode === "hidden" && "lg:absolute lg:top-0 lg:bottom-0 lg:left-12 lg:w-12 lg:max-w-none lg:translate-x-0 bg-background",
+        // rail.
+        "lg:absolute lg:top-0 lg:bottom-0 lg:left-12 lg:w-72 lg:max-w-none lg:translate-x-0",
       )}
     >
       <div className="relative flex h-full w-full flex-col">
-        {/* Collapse / expand toggle — always reachable. When the
-            explorer is collapsed (desktopMode='hidden'), the entire
-            aside shrinks to a 12px column showing only this toggle so
-            the user can re-expand without refreshing. Founder direction
-            2026-05-06. */}
         <button
           type="button"
           data-testid="explorer-edge-toggle"
-          aria-label={isCollapsed ? "Expand explorer" : "Collapse explorer"}
+          aria-label="Collapse explorer"
           onClick={onDesktopToggle}
           className={cn(
-            "hidden lg:flex absolute z-10 h-8 w-8 items-center justify-center rounded-full border border-stone-300 bg-background/90 text-stone-700",
+            "hidden lg:flex absolute z-10 h-8 w-8 items-center justify-center rounded-full border border-outline-variant bg-background/90 text-stone-700",
             "shadow-[0_2px_8px_rgba(41,37,36,0.08)] backdrop-blur-sm transition-colors hover:bg-stone-100 hover:text-stone-900",
-            isCollapsed ? "left-1/2 top-3 -translate-x-1/2" : "right-2 top-3",
+            "right-2 top-3",
           )}
         >
-          {isCollapsed ? <ChevronRight className="h-4 w-4" /> : <ChevronLeft className="h-4 w-4" />}
+          <ChevronLeft className="h-4 w-4" strokeWidth={1.5} />
         </button>
 
-        {!isCollapsed && (
-          <SurfaceBody
-            surface={surface}
-            rigs={rigs}
-            psMap={psMap}
-            selection={selection}
-            onSelect={onSelect}
-            onClose={onClose}
-            currentRigId={currentRigId}
-          />
-        )}
+        <SurfaceBody
+          surface={surface}
+          rigs={rigs}
+          psMap={psMap}
+          selection={selection}
+          onSelect={onSelect}
+          onClose={onClose}
+          currentRigId={currentRigId}
+        />
       </div>
     </aside>
   );
