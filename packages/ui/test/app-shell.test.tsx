@@ -18,6 +18,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, cleanup, waitFor } from "@testing-library/react";
 import { createMemoryHistory, RouterProvider, createRouter } from "@tanstack/react-router";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { createMockEventSourceClass } from "./helpers/mock-event-source.js";
 
 const mockFetch = vi.fn();
@@ -245,6 +247,87 @@ describe("AppShell — Phase 2 chrome", () => {
       const tray = container.querySelector("[data-testid='mobile-rail-tray']") as HTMLElement;
       expect(tray).toBeTruthy();
       expect(tray.className).toContain("-translate-x-full");
+    });
+  });
+
+  // Phase 2 BOUNCE-FIX #3 — width-coupling regression (guard-3 catch).
+  // The center workspace's --workspace-right-offset CSS variable must equal
+  // the VellumSheet wide preset width when drawer is open. Bounce-fix #2
+  // calibrated VellumSheet 45rem → 38rem but missed this consumer; net
+  // effect was a 7rem (112px) gap between drawer and reserved padding.
+  // Per pseudo-element-paint test contract (discipline ritual #7), assert
+  // via CSS source rather than runtime (computed style of CSS vars from
+  // jsdom is brittle).
+  describe("Drawer width / right-offset coupling (bounce-fix #3 regression)", () => {
+    const APP_SHELL_SRC = readFileSync(
+      path.resolve(__dirname, "../src/components/AppShell.tsx"),
+      "utf8",
+    );
+    const VELLUM_SHEET_SRC = readFileSync(
+      path.resolve(__dirname, "../src/components/ui/vellum-sheet.tsx"),
+      "utf8",
+    );
+    const SHARED_DRAWER_SRC = readFileSync(
+      path.resolve(__dirname, "../src/components/SharedDetailDrawer.tsx"),
+      "utf8",
+    );
+
+    it("VellumSheet wide preset and AppShell workspaceRightOffset use the SAME literal", () => {
+      // Pull the wide-preset width from VellumSheet source.
+      const vellumMatch = VELLUM_SHEET_SRC.match(
+        /wide:\s*"w-full\s+lg:w-\[(\d+rem)\]/,
+      );
+      expect(vellumMatch, "VellumSheet wide preset must declare lg:w-[Xrem]").toBeTruthy();
+      const vellumWide = vellumMatch![1];
+
+      // Pull the open-drawer offset from AppShell source.
+      const offsetMatch = APP_SHELL_SRC.match(
+        /workspaceRightOffset\s*=\s*[^?]*\?\s*"(\d+rem)"\s*:/,
+      );
+      expect(offsetMatch, "AppShell workspaceRightOffset must declare ternary 'Xrem' : '0rem'")
+        .toBeTruthy();
+      const offsetOpen = offsetMatch![1];
+
+      expect(offsetOpen, "AppShell workspaceRightOffset must equal VellumSheet wide preset width")
+        .toBe(vellumWide);
+    });
+
+    it("no live 45rem string in chrome source (only historical calibration comments are allowed)", () => {
+      // Extract every line containing "45rem" and verify each is inside
+      // a comment (calibration history). Chrome source must NOT carry
+      // 45rem as a live class or value.
+      const checkSource = (src: string, label: string) => {
+        const lines = src.split("\n");
+        for (let i = 0; i < lines.length; i++) {
+          const line = lines[i];
+          if (!line.includes("45rem")) continue;
+          // Permitted only when the line is a JS/TS line comment ("//") or
+          // an active block-comment context ("/*", "*"). We scan backward
+          // for a recent /* opener if no "//" on this line.
+          const trimmed = line.trim();
+          const isLineComment = trimmed.startsWith("//") || trimmed.startsWith("*");
+          let isInsideBlockComment = false;
+          if (!isLineComment) {
+            // Look backward up to 30 lines for a /* without an intervening */.
+            for (let j = i - 1; j >= Math.max(0, i - 30); j--) {
+              if (lines[j].includes("*/")) break;
+              if (lines[j].includes("/*")) {
+                isInsideBlockComment = true;
+                break;
+              }
+            }
+          }
+          expect(
+            isLineComment || isInsideBlockComment,
+            `${label}:${i + 1} contains live (non-comment) "45rem" — bounce-fix #3 width-coupling regression`,
+          ).toBe(true);
+        }
+      };
+      checkSource(APP_SHELL_SRC, "AppShell.tsx");
+      checkSource(SHARED_DRAWER_SRC, "SharedDetailDrawer.tsx");
+      // VellumSheet keeps a historical calibration comment with 45rem;
+      // it's inside a // comment so the same checker passes there too.
+      checkSource(VELLUM_SHEET_SRC, "vellum-sheet.tsx");
     });
   });
 
