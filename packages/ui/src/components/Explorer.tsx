@@ -14,6 +14,9 @@ import {
   shortQitemTail,
 } from "../lib/activity-visuals.js";
 import { EmptyState } from "./ui/empty-state.js";
+import { ProjectTreeView } from "./project/ProjectTreeView.js";
+import { SpecsTreeView } from "./specs/SpecsTreeView.js";
+import { TopologyTreeView } from "./topology/TopologyTreeView.js";
 
 import type { DrawerSelection } from "./SharedDetailDrawer.js";
 
@@ -496,50 +499,49 @@ function SurfaceBody({
   currentRigId: string | null;
 }) {
   if (surface === "topology") {
-    return (
-      <FullExplorerContents
-        rigs={rigs}
-        psMap={psMap}
-        selection={selection}
-        onSelect={onSelect}
-        onClose={onClose}
-        currentRigId={currentRigId}
-      />
-    );
+    return <TopologyTreeView />;
   }
   if (surface === "project") {
-    return (
-      <div className="flex-1 p-4">
-        <EmptyState
-          label="PROJECT TREE"
-          description="workspace > mission > slice — Phase 3 fills."
-          variant="card"
-          testId="explorer-project-placeholder"
-        />
-      </div>
-    );
+    return <ProjectTreeView />;
   }
   if (surface === "specs") {
-    return (
-      <div className="flex-1 p-4">
-        <EmptyState
-          label="SPECS TREE"
-          description="rigs / workspaces / workflows / context-packs / agent-images / applications — Phase 3 fills."
-          variant="card"
-          testId="explorer-specs-placeholder"
-        />
-      </div>
-    );
+    return <SpecsTreeView />;
   }
   if (surface === "for-you") {
+    // Subscription affordance — settings-shaped surface per for-you-feed.md L134-L140.
+    // The PRIMARY UX of /for-you is the FEED in the center; subscriptions live
+    // here as a small on-demand list. NOT dominating.
     return (
-      <div className="flex-1 p-4">
-        <EmptyState
-          label="FOR YOU LENS"
-          description="Lens chips + filter chips + subscriptions list — Phase 3 fills (settings-shaped subscriptions, NOT feed-shaped)."
-          variant="card"
-          testId="explorer-for-you-placeholder"
-        />
+      <div data-testid="explorer-for-you-subscriptions" className="flex-1 overflow-y-auto py-3 px-3">
+        <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-on-surface-variant mb-2">
+          Subscriptions
+        </div>
+        <ul className="space-y-1 font-mono text-xs">
+          <li className="flex items-center justify-between">
+            <span>Action required</span>
+            <span className="text-[9px] text-on-surface-variant">forced ON</span>
+          </li>
+          <li className="flex items-center justify-between">
+            <span>Approvals</span>
+            <span className="text-[9px] text-success">on</span>
+          </li>
+          <li className="flex items-center justify-between">
+            <span>Feature ships</span>
+            <span className="text-[9px] text-success">on</span>
+          </li>
+          <li className="flex items-center justify-between">
+            <span>Slice progress</span>
+            <span className="text-[9px] text-success">on</span>
+          </li>
+          <li className="flex items-center justify-between">
+            <span>Audit log</span>
+            <span className="text-[9px] text-on-surface-variant">off</span>
+          </li>
+        </ul>
+        <p className="mt-3 font-mono text-[9px] text-on-surface-variant italic">
+          Per-subscription toggles wire in Phase 4. V1 list reads canonical
+          defaults from for-you-feed.md L142–L150.
+        </p>
       </div>
     );
   }
