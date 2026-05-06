@@ -287,7 +287,9 @@ function RigBranch({
   const [expanded, setExpanded] = useState(autoExpand);
   const rigStatus = ps?.status ?? "stopped";
   const { data: nodes, isLoading } = useNodeInventory(expanded ? rig.id : null);
-  const isSelected = selection?.type === "rig" && selection.rigId === rig.id;
+  // Phase 4 P4-5: 'rig' kind retired from DrawerSelection; rig click
+  // now navigates via Link only (no drawer auto-open).
+  const isSelected = false;
 
   useEffect(() => {
     if (autoExpand) setExpanded(true);
@@ -321,9 +323,9 @@ function RigBranch({
           to="/rigs/$rigId"
           params={{ rigId: rig.id }}
           onClick={() => {
-            if (selection?.type !== "discovery") {
-              onSelect({ type: "rig", rigId: rig.id });
-            }
+            // Phase 4 P4-5: rig click navigates via URL only; the legacy
+            // drawer auto-open pattern (RigDetailPanel) is retired in
+            // favor of explicit manual-trigger drawer (SeatDetailViewer).
             onClose();
           }}
           className={cn(

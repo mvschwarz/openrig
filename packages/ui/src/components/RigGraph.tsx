@@ -340,7 +340,9 @@ export function RigGraph({
       }
 
       if (node.type === "podGroup" || node.type === "group") {
-        setSelection({ type: "rig", rigId });
+        // Phase 4 P4-5: 'rig' kind retired from DrawerSelection;
+        // pod-group click is a no-op at the graph level (pods open
+        // via Explorer tree's /topology/pod/$rigId/$podName link).
         return;
       }
 
