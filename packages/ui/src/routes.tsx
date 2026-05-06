@@ -36,20 +36,22 @@ import { DiscoveryOverlay } from "./components/DiscoveryOverlay.js";
 import { AuditHistoryView } from "./components/mission-control/views/AuditHistoryView.js";
 import { useRigSummary } from "./hooks/useRigSummary.js";
 import { EmptyState } from "./components/ui/empty-state.js";
-
-// Phase 2 placeholder for canon destinations Phase 3 will fill.
-function DestinationPlaceholder({ label, description }: { label: string; description?: string }) {
-  return (
-    <div className="flex h-full w-full items-center justify-center p-8">
-      <EmptyState
-        label={label}
-        description={description ?? "Phase 3 will fill this destination."}
-        variant="card"
-        testId={`placeholder-${label.toLowerCase().replace(/\s+/g, "-")}`}
-      />
-    </div>
-  );
-}
+// Phase 3 destination components.
+import { Dashboard } from "./components/dashboard/Dashboard.js";
+import { Feed } from "./components/for-you/Feed.js";
+import { SpecsLibraryPage } from "./components/specs/SpecsLibraryPage.js";
+import { SettingsCenter } from "./components/system/SettingsCenter.js";
+import {
+  HostScopePage,
+  RigScopePage,
+  PodScopePage,
+  SeatScopePage,
+} from "./components/topology/ScopePages.js";
+import {
+  WorkspaceScopePage,
+  MissionScopePage,
+  SliceScopePage,
+} from "./components/project/ScopePages.js";
 
 // Root route — wraps everything in AppShell
 const rootRoute = createRootRoute({
@@ -69,153 +71,89 @@ const rootRoute = createRootRoute({
 const indexRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/",
-  component: () => (
-    <DestinationPlaceholder
-      label="DASHBOARD"
-      description="6-card launcher (Topology / Project / For You / Specs / Search / Settings) — Phase 3 fills."
-    />
-  ),
+  component: Dashboard,
 });
 
 // Topology destination: SC-5 / SC-10 — single URL with view-mode tabs IN-PLACE
-// (graph / table / terminal). Phase 2 lays the four scope routes; Phase 3
-// renders the tabs and fills view-mode content.
+// (graph / table / terminal). Tab state is React useState INSIDE each scope
+// page; URL stays at the scope path across tab switches.
 
 const topologyRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/topology",
-  component: () => (
-    <DestinationPlaceholder
-      label="TOPOLOGY"
-      description="Host scope (graph / table / terminal view-mode tabs IN-PLACE per SC-10) — Phase 3 fills."
-    />
-  ),
+  component: HostScopePage,
 });
 
 const topologyRigRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/topology/rig/$rigId",
-  component: () => (
-    <DestinationPlaceholder
-      label="TOPOLOGY — RIG SCOPE"
-      description="Rig-scoped graph / table / terminal / overview tabs — Phase 3 fills."
-    />
-  ),
+  component: RigScopePage,
 });
 
 const topologyPodRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/topology/pod/$rigId/$podName",
-  component: () => (
-    <DestinationPlaceholder
-      label="TOPOLOGY — POD SCOPE"
-      description="Pod-scoped graph / table / terminal / overview tabs — Phase 3 fills."
-    />
-  ),
+  component: PodScopePage,
 });
 
 const topologySeatRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/topology/seat/$rigId/$logicalId",
-  component: () => (
-    <DestinationPlaceholder
-      label="TOPOLOGY — SEAT SCOPE"
-      description="Seat-scoped detail / transcript / terminal tabs — Phase 3 fills."
-    />
-  ),
+  component: SeatScopePage,
 });
 
 const forYouRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/for-you",
-  component: () => (
-    <DestinationPlaceholder
-      label="FOR YOU"
-      description="Cross-cutting attention feed (5 card types: ACTION / APPROVAL / SHIPPED / PROGRESS / OBSERVATION) — Phase 3 fills."
-    />
-  ),
+  component: Feed,
 });
 
 const projectRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/project",
-  component: () => (
-    <DestinationPlaceholder
-      label="PROJECT"
-      description="Workspace > mission > slice tree — Phase 3 fills."
-    />
-  ),
+  component: WorkspaceScopePage,
 });
 
 const projectMissionRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/project/mission/$missionId",
-  component: () => (
-    <DestinationPlaceholder
-      label="PROJECT — MISSION"
-      description="Mission scope — Phase 3 fills."
-    />
-  ),
+  component: MissionScopePage,
 });
 
 const projectSliceRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/project/slice/$sliceId",
-  component: () => (
-    <DestinationPlaceholder
-      label="PROJECT — SLICE"
-      description="Slice scope (story / overview / progress / artifacts / tests / queue / topology tabs) — Phase 3 fills."
-    />
-  ),
+  component: SliceScopePage,
 });
 
 const specsLibraryRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/specs",
-  component: () => (
-    <DestinationPlaceholder
-      label="SPECS LIBRARY"
-      description="Top-level: toolbar + tanstack-table + search + filter chips — Phase 3 fills."
-    />
-  ),
+  component: SpecsLibraryPage,
 });
 
 const specsApplicationsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/specs/applications",
-  component: () => (
-    <DestinationPlaceholder
-      label="SPECS — APPLICATIONS"
-      description="Phase 3 fills."
-    />
-  ),
+  component: SpecsLibraryPage,
 });
 
-// Generic spec detail by kind/name — Phase 3 fills with kind-aware routing
-// (rigs / workspaces / workflows / context-packs / agent-images / applications).
+// Generic spec detail by kind/name — Phase 4+ wires direct mounts of
+// existing detail pages (RigSpecReview / AgentSpecReview etc) by kind.
+// V1 placeholder: redirect to /specs/library/$specName when kind matches.
 const specsKindRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/specs/$specKind/$specName",
   component: () => {
-    const { specKind, specName } = useParams({ from: "/specs/$specKind/$specName" });
-    return (
-      <DestinationPlaceholder
-        label={`SPEC: ${specKind.toUpperCase()} / ${specName}`}
-        description="Existing spec detail page mounted here — Phase 3 wires."
-      />
-    );
+    const { specName } = useParams({ from: "/specs/$specKind/$specName" });
+    return <Navigate to="/specs/library/$entryId" params={{ entryId: specName }} />;
   },
 });
 
 const settingsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/settings",
-  component: () => (
-    <DestinationPlaceholder
-      label="SETTINGS"
-      description="3-tab Settings / Log / Status — Phase 3 fills. Mounts in CENTER workspace per SC-7 (NOT right sidebar)."
-    />
-  ),
+  component: SettingsCenter,
 });
 
 const searchRoute = createRoute({
@@ -324,10 +262,14 @@ const discoveryRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/discovery",
   component: () => (
-    <DestinationPlaceholder
-      label="DISCOVERY"
-      description="Discovery surface preserved; redesign deferred per code-map."
-    />
+    <div className="flex h-full w-full items-center justify-center p-8">
+      <EmptyState
+        label="DISCOVERY"
+        description="Discovery surface preserved; redesign deferred per code-map."
+        variant="card"
+        testId="discovery-placeholder"
+      />
+    </div>
   ),
 });
 

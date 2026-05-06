@@ -1,28 +1,11 @@
-// MissionControlSurface — Phase 2 SHELL-AND-STUB (V1 attempt-3 DRIFT P2-C
-// resolution). The /mission-control route is deleted in Phase 2 per
-// SC-18, so this placeholder is unreachable. Phase 3 will refactor
-// the body in place to render the For You feed shape (5 card types
-// per for-you-feed.md).
-//
-// View sub-files (ActiveWorkView, FleetView, GenericListView,
-// HumanGateView, MyQueueView, RecentObservationsView, RecentShipsView,
-// RecentlyActiveView) deleted in Phase 2; AuditHistoryView preserved
-// for Phase 3 /search mount.
+// V1 attempt-3 Phase 3 — refactored in place from Phase 2 shell-and-stub
+// (DRIFT P2-C resolution) to the For You feed render shape per
+// for-you-feed.md. The component name persists for backward compat;
+// the body renders the Feed (5 card types + lens chips + client-synthesize
+// SHIPPED per SC-17 — NO new daemon event types per SC-29).
 
-import { EmptyState } from "../ui/empty-state";
+import { Feed } from "../for-you/Feed.js";
 
 export function MissionControlSurface() {
-  return (
-    <div
-      data-testid="mc-surface"
-      className="flex h-full flex-col items-center justify-center"
-    >
-      <EmptyState
-        label="MISSION CONTROL"
-        description="For You feed under construction (Phase 3). The /mission-control route is no longer reachable; this surface is preserved for in-place refactor."
-        variant="card"
-        testId="mc-surface-stub"
-      />
-    </div>
-  );
+  return <Feed />;
 }
