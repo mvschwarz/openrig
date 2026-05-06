@@ -100,6 +100,53 @@ describe("Seat scope tabs (direct render — bypasses route fetching)", () => {
   });
 });
 
+// V1 attempt-3 Phase 3 bounce-fix Class B — selective vellum overlay
+// negative assertion (ritual #8): non-topology destinations MUST NEVER
+// receive the vellum-translucent overlay treatment. Only the topology
+// destination (and only its graph view-mode) gets data-explorer-mode='overlay';
+// all other routes — including /, /project, /specs, /for-you, /settings —
+// must show data-explorer-mode='opaque' (or no Explorer at all for
+// destinations with surface='none').
+//
+// Codifies the runtime assertion that previously only ran in agent-browser
+// during driver self-walk. guard-3 process gate: this test must be in CI.
+describe("Class B negative assertion: non-topology routes never get vellum overlay (ritual #8)", () => {
+  async function renderAndWait(initialPath: string) {
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 1440, writable: true });
+    const { router } = await import("../src/routes.js");
+    const history = createMemoryHistory({ initialEntries: [initialPath] });
+    const r = createRouter({ routeTree: router.routeTree, history });
+    const result = render(<RouterProvider router={r} />);
+    await waitFor(() => {
+      expect(result.container.querySelector("[data-testid='app-rail']")).toBeTruthy();
+    }, { timeout: 5000 });
+    return result;
+  }
+
+  it.each([
+    ["/", "Dashboard"],
+    ["/project", "Project workspace"],
+    ["/specs", "Specs library"],
+    ["/for-you", "For You feed"],
+    ["/settings", "Settings"],
+  ])("route %s (%s) does NOT carry data-explorer-mode='overlay' anywhere in DOM", async (route) => {
+    const { container } = await renderAndWait(route);
+    const overlayElements = container.querySelectorAll("[data-explorer-mode='overlay']");
+    expect(overlayElements.length).toBe(0);
+  });
+
+  it("topology graph (/topology) DOES carry data-explorer-mode='overlay' (positive companion)", async () => {
+    const { container } = await renderAndWait("/topology");
+    // The active tab defaults to 'graph' on first mount per HostScopePage;
+    // useOverlayForActiveTab effect sets the topology overlay context to
+    // 'overlay'. AppShell propagates that to the Explorer's overlayMode prop.
+    await waitFor(() => {
+      const explorer = container.querySelector("[data-testid='explorer']");
+      expect(explorer?.getAttribute("data-explorer-mode")).toBe("overlay");
+    }, { timeout: 5000 });
+  });
+});
+
 // CSS-source-assertion regression test (per pseudo-element-paint contract):
 // guard that routes.tsx never grows view-mode-as-URL paths
 // (e.g., `/topology/host/table`, `/topology/rig/$rigId/graph`).
