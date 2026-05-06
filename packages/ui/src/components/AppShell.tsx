@@ -395,7 +395,14 @@ function AppShellInner({ children }: AppShellProps) {
   //   - overlay: padding = 0 (content extends behind translucent explorer);
   //              tab bar is sticky/positioned at left=anchor independently.
   // 21rem = rail (3rem) + explorer (18rem).
-  const explorerAnchorLeft = isWideLayout && explorerVisible && desktopExplorerOpen ? "21rem" : "3rem";
+  // 21rem (rail 3 + explorer 18) when explorer fully open; 6rem
+  // (rail 3 + collapsed-explorer-stub 3) when explorer collapsed; 3rem
+  // (rail only) when no explorer for the destination.
+  const explorerAnchorLeft = isWideLayout && explorerVisible
+    ? desktopExplorerOpen
+      ? "21rem"
+      : "6rem"
+    : "3rem";
   const workspaceLeftOffset = isWideLayout
     ? isTopologyOverlay
       ? "0rem"

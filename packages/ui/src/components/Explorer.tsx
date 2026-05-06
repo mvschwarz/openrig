@@ -578,61 +578,72 @@ export function Explorer({
   // OPAQUE (default; every destination except topology-graph): solid
   //   paper-cream tone (Phase 2 baseline) so the explore tree reads
   //   crisply against the center workspace.
-  // OVERLAY (topology graph only): vellum-heavy translucent surface
-  //   (.vellum-heavy class from globals.css L118-122 — rgba(255,255,255,0.7)
-  //   + backdrop-blur(16px)) with elevated z-index so the graph canvas
+  // OVERLAY (topology graph only): light vellum translucent surface
+  //   (.vellum class from globals.css L113-117 — rgba(255,255,255,0.4)
+  //   + backdrop-blur(8px)) with elevated z-index so the graph canvas
   //   underneath shows through. Sheets-of-vellum-layered aesthetic per
-  //   universal-shell.md L48.
+  //   universal-shell.md L48. Founder calibration 2026-05-06: vellum
+  //   (40%) reads coherent with the baseline 3.5% opacity Phase 2 had;
+  //   vellum-heavy (70%) was too dense.
   const isOverlay = overlayMode === "overlay";
+  const isCollapsed = desktopMode === "hidden";
   return (
     <aside
       data-testid="explorer"
       data-surface={surface}
       data-explorer-mode={overlayMode}
+      data-explorer-collapsed={isCollapsed}
       className={cn(
         // V1 border weight doctrine (universal-shell.md L39–L48):
         // 1px outline-variant ghost line for inter-region edges.
         "border-r border-outline-variant flex overflow-hidden",
         // Background grammar by mode:
         isOverlay
-          ? "vellum-heavy z-30 shadow-[6px_0_14px_rgba(46,52,46,0.08)]"
+          ? "vellum z-30 shadow-[6px_0_14px_rgba(46,52,46,0.06)]"
           : "z-20 bg-[rgba(250,249,245,0.035)] supports-[backdrop-filter]:bg-[rgba(250,249,245,0.018)] backdrop-blur-[14px] backdrop-saturate-75 shadow-[6px_0_14px_rgba(46,52,46,0.04)]",
         // Mobile: slide-over from left below the top-bar header (h-14).
         "fixed top-14 bottom-0 left-0 transition-transform duration-200 ease-tactical w-72 max-w-[80vw]",
         open ? "translate-x-0" : "-translate-x-full",
-        // Desktop (>=lg): persistent column at 280px (lg:w-72) per universal-shell.md L34.
-        // Position absolutely after the 48px rail; in opaque mode AppShell
-        // also pads main with workspace-left-offset so center content
-        // starts AFTER the Explorer. In overlay mode the main padding is
-        // 0 so the canvas extends behind this translucent panel.
+        // Desktop (>=lg): persistent column at 280px (lg:w-72) per
+        // universal-shell.md L34. Positioned absolutely after the 48px
+        // rail. When collapsed: thin 12px column with just the
+        // chevron-right re-open toggle visible (founder direction
+        // 2026-05-06 — no way to expand otherwise without page refresh).
         desktopMode === "full" && "lg:absolute lg:top-0 lg:bottom-0 lg:left-12 lg:w-72 lg:max-w-none lg:translate-x-0",
-        desktopMode === "hidden" && "lg:hidden",
+        desktopMode === "hidden" && "lg:absolute lg:top-0 lg:bottom-0 lg:left-12 lg:w-12 lg:max-w-none lg:translate-x-0 bg-background",
       )}
     >
       <div className="relative flex h-full w-full flex-col">
+        {/* Collapse / expand toggle — always reachable. When the
+            explorer is collapsed (desktopMode='hidden'), the entire
+            aside shrinks to a 12px column showing only this toggle so
+            the user can re-expand without refreshing. Founder direction
+            2026-05-06. */}
         <button
           type="button"
           data-testid="explorer-edge-toggle"
-          aria-label={desktopMode === "full" ? "Collapse explorer" : "Expand explorer"}
+          aria-label={isCollapsed ? "Expand explorer" : "Collapse explorer"}
           onClick={onDesktopToggle}
           className={cn(
             "hidden lg:flex absolute z-10 h-8 w-8 items-center justify-center rounded-full border border-stone-300 bg-background/90 text-stone-700",
             "shadow-[0_2px_8px_rgba(41,37,36,0.08)] backdrop-blur-sm transition-colors hover:bg-stone-100 hover:text-stone-900",
-            "right-2 top-3",
+            isCollapsed ? "left-1/2 top-3 -translate-x-1/2" : "right-2 top-3",
           )}
         >
-          <ChevronLeft className="h-4 w-4" />
+          {isCollapsed ? <ChevronRight className="h-4 w-4" /> : <ChevronLeft className="h-4 w-4" />}
         </button>
 
-        <SurfaceBody
-          surface={surface}
-          rigs={rigs}
-          psMap={psMap}
-          selection={selection}
-          onSelect={onSelect}
-          onClose={onClose}
-          currentRigId={currentRigId}
-        />
+        {!isCollapsed && (
+          <SurfaceBody
+            surface={surface}
+            rigs={rigs}
+            psMap={psMap}
+            selection={selection}
+            onSelect={onSelect}
+            onClose={onClose}
+            currentRigId={currentRigId}
+          />
+        )}
       </div>
     </aside>
   );
