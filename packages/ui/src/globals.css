@@ -298,6 +298,57 @@
     60%  { stroke-width: 3px; filter: brightness(1.3); }
     100% { stroke-width: 3px; filter: brightness(1.15); }
   }
+
+  @keyframes activity-ring-active-frames {
+    0%, 100% { opacity: 0.58; box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.0); }
+    50%      { opacity: 0.92; box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.14); }
+  }
+  @keyframes activity-ring-needs-input-frames {
+    0%, 100% { opacity: 0.72; box-shadow: 0 0 0 0 rgba(245, 158, 11, 0.0); }
+    50%      { opacity: 1; box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.22); }
+  }
+  @keyframes activity-ring-blocked-frames {
+    0%, 100% { opacity: 0.78; box-shadow: 0 0 0 0 rgba(220, 38, 38, 0.0); }
+    50%      { opacity: 1; box-shadow: 0 0 0 2px rgba(220, 38, 38, 0.18); }
+  }
+  @keyframes activity-ring-flash-frames {
+    0%   { opacity: 1; box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.42); }
+    100% { opacity: 0.82; box-shadow: 0 0 0 5px rgba(16, 185, 129, 0.0); }
+  }
+  .activity-ring-active {
+    animation: activity-ring-active-frames 2.2s ease-in-out infinite;
+  }
+  .activity-ring-needs-input {
+    animation: activity-ring-needs-input-frames 1.9s ease-in-out infinite;
+  }
+  .activity-ring-blocked {
+    animation: activity-ring-blocked-frames 3.2s ease-in-out infinite;
+  }
+  .activity-ring-source-flash,
+  .activity-ring-target-flash {
+    animation: activity-ring-flash-frames 700ms ease-out 1;
+  }
+
+  .hot-potato-edge-active .react-flow__edge-path,
+  .react-flow__edge.hot-potato-edge-active .react-flow__edge-path {
+    transition: stroke-width 180ms ease-out, filter 180ms ease-out;
+  }
+  .hot-potato-packet,
+  .hot-potato-packet-cross {
+    filter: drop-shadow(0 0 3px rgba(16, 185, 129, 0.32));
+  }
+  .hot-potato-packet-cross {
+    opacity: 0.72;
+    filter: drop-shadow(0 0 2px rgba(120, 113, 108, 0.22));
+  }
+
+  @keyframes rig-activity-frame-frames {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.0); }
+    50%      { box-shadow: 0 0 0 2px rgba(16, 185, 129, 0.12); }
+  }
+  .rig-activity-frame-pulse {
+    animation: rig-activity-frame-frames 2.4s ease-in-out infinite;
+  }
 }
 
 /* === REDUCED MOTION === */
@@ -311,7 +362,13 @@
   .animate-pulse-tactical,
   .activity-pulse-running,
   .terminal-card-active,
-  .edge-just-fired {
+  .edge-just-fired,
+  .activity-ring-active,
+  .activity-ring-needs-input,
+  .activity-ring-blocked,
+  .activity-ring-source-flash,
+  .activity-ring-target-flash,
+  .rig-activity-frame-pulse {
     animation: none;
     opacity: 1;
     transform: none;

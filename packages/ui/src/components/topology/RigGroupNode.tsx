@@ -28,6 +28,7 @@ export interface RigGroupNodeData {
   nodeCount: number;
   runningCount: number;
   podCount?: number; // optional; populated post-graph-fetch when expanded
+  recentActivity?: boolean;
   /** Click handler: owner threads through to toggle expand state. */
   onToggle: (rigId: string) => void;
 }
@@ -39,7 +40,7 @@ function statusToPip(s: RigGroupNodeData["status"]): React.ComponentProps<typeof
 }
 
 export function RigGroupNode({ data }: { data: RigGroupNodeData }) {
-  const { rigId, rigName, collapsed, status, nodeCount, runningCount, podCount, onToggle } = data;
+  const { rigId, rigName, collapsed, status, nodeCount, runningCount, podCount, recentActivity, onToggle } = data;
   return (
     <div
       data-testid={`rig-group-node-${rigId}`}
@@ -55,6 +56,7 @@ export function RigGroupNode({ data }: { data: RigGroupNodeData }) {
         collapsed
           ? "border border-outline-variant bg-white/40 backdrop-blur-[8px] hard-shadow hover:bg-white/60"
           : "border border-outline-variant/70 bg-white/[0.14] backdrop-blur-[2px] shadow-[0_0_0_1px_rgba(84,96,115,0.06)]",
+        recentActivity && "rig-activity-frame-pulse",
       )}
     >
       <RegistrationMarks testIdPrefix={`rig-group-${rigId}`} />

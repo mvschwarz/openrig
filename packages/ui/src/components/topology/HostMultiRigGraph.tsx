@@ -27,6 +27,7 @@ import {
   type Node,
   type Edge,
   type NodeTypes,
+  type EdgeTypes,
   type NodeMouseHandler,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
@@ -34,13 +35,21 @@ import { useQueries } from "@tanstack/react-query";
 import { usePsEntries } from "../../hooks/usePsEntries.js";
 import { RigGroupNode, type RigGroupNodeData } from "./RigGroupNode.js";
 import { HybridAgentNode, HybridPodGroupNode } from "./HybridTopologyNodes.js";
+import { HotPotatoEdge } from "./HotPotatoEdge.js";
 import { useTopologyOverlay } from "./topology-overlay-context.js";
+import { useTopologyActivity } from "../../hooks/useTopologyActivity.js";
+import { usePrefersReducedMotion } from "../../hooks/usePrefersReducedMotion.js";
 import {
   HYBRID_COLLAPSED_RIG_HEIGHT,
   HYBRID_COLLAPSED_RIG_WIDTH,
   layoutHybridOuterRigs,
   layoutHybridRig,
 } from "../../lib/hybrid-layout.js";
+import {
+  applyHotPotatoEdges,
+  buildTopologySessionIndex,
+  type TopologyActivityBaseline,
+} from "../../lib/topology-activity.js";
 
 interface GraphData {
   nodes: unknown[];
@@ -59,9 +68,14 @@ const nodeTypes: NodeTypes = {
   rigNode: HybridAgentNode as unknown as NodeTypes[string],
 };
 
+const edgeTypes: EdgeTypes = {
+  hotPotato: HotPotatoEdge,
+};
+
 export function HostMultiRigGraph() {
   const navigate = useNavigate();
   const { data: psEntries } = usePsEntries();
+  const reducedMotion = usePrefersReducedMotion();
 
   // V1 polish slice Phase 5.2 bounce-fix: rig-expanded state lifted to
   // TopologyOverlayProvider scope. Direct-URL entry to /topology/rig/$id
@@ -120,6 +134,7 @@ export function HostMultiRigGraph() {
       const rawEdges = (queryResult?.data?.edges ?? []) as RawE[];
       const layout = layoutHybridRig({
         rigId: rig.rigId,
+        rigName: rig.name,
         nodes: rawNodes,
         edges: rawEdges,
         collapsed: !isExpanded,
@@ -187,6 +202,63 @@ export function HostMultiRigGraph() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rigList, expanded, graphQueries]);
 
+  const sessionIndex = useMemo(() => buildTopologySessionIndex(
+    mergedNodes
+      .filter((node) => node.type === "rigNode")
+      .map((node) => {
+        const data = node.data as {
+          rigId?: string | null;
+          rigName?: string | null;
+          logicalId?: string | null;
+          canonicalSessionName?: string | null;
+          agentActivity?: TopologyActivityBaseline["agentActivity"];
+          currentQitems?: TopologyActivityBaseline["currentQitems"];
+          startupStatus?: string | null;
+        } | undefined;
+        return {
+          nodeId: node.id,
+          rigId: data?.rigId ?? null,
+          rigName: data?.rigName ?? null,
+          logicalId: data?.logicalId ?? null,
+          canonicalSessionName: data?.canonicalSessionName ?? null,
+          agentActivity: data?.agentActivity ?? null,
+          currentQitems: data?.currentQitems ?? null,
+          startupStatus: data?.startupStatus ?? null,
+        };
+      }),
+  ), [mergedNodes]);
+  const topologyActivity = useTopologyActivity(sessionIndex);
+
+  const activeNodes = useMemo(() => mergedNodes.map((node) => {
+    if (node.type === "rigGroup") {
+      const data = node.data as unknown as RigGroupNodeData;
+      return {
+        ...node,
+        data: {
+          ...data,
+          recentActivity: topologyActivity.isRigRecentlyActive(data.rigId),
+        } as unknown as Record<string, unknown>,
+      };
+    }
+    if (node.type !== "rigNode") return node;
+    const data = node.data as TopologyActivityBaseline & {
+      logicalId?: string | null;
+    };
+    return {
+      ...node,
+      data: {
+        ...(node.data ?? {}),
+        activityRing: topologyActivity.getNodeActivity(node.id, data),
+        reducedMotion,
+      },
+    };
+  }), [mergedNodes, topologyActivity, reducedMotion]);
+
+  const activeEdges = useMemo(
+    () => applyHotPotatoEdges(mergedEdges, topologyActivity.packets, { reducedMotion }),
+    [mergedEdges, topologyActivity.packets, reducedMotion],
+  );
+
   // P5.2-7 click handlers: agent -> seat URL; pod group -> pod URL;
   // rig group -> toggle (handled inside RigGroupNode onClick; this
   // handler is a no-op for rigGroup type to avoid double-fire).
@@ -229,9 +301,10 @@ export function HostMultiRigGraph() {
       className="w-full h-full relative"
     >
       <ReactFlow
-        nodes={mergedNodes}
-        edges={mergedEdges}
+        nodes={activeNodes}
+        edges={activeEdges}
         nodeTypes={nodeTypes}
+        edgeTypes={edgeTypes}
         onNodeClick={onNodeClick}
         nodesDraggable={false}
         fitView

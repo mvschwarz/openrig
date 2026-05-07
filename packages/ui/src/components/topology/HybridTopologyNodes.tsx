@@ -1,4 +1,5 @@
 import { Handle, Position } from "@xyflow/react";
+import { PanelsTopLeft } from "lucide-react";
 import { displayAgentName, inferPodName } from "../../lib/display-name.js";
 import {
   getActivityAnimationClass,
@@ -9,6 +10,9 @@ import {
 } from "../../lib/activity-visuals.js";
 import type { AgentActivitySummary } from "../../hooks/useNodeInventory.js";
 import { cn } from "../../lib/utils.js";
+import { useCmuxLaunch } from "../../hooks/useCmuxLaunch.js";
+import { ActivityRing } from "./ActivityRing.js";
+import type { TopologyActivityVisual } from "../../lib/topology-activity.js";
 
 interface HybridPodGroupNodeData {
   podDisplayName?: string | null;
@@ -33,6 +37,10 @@ interface HybridAgentNodeData {
   contextFresh?: boolean;
   contextAvailability?: string | null;
   agentActivity?: AgentActivitySummary | null;
+  currentQitems?: unknown[];
+  rigId?: string | null;
+  activityRing?: TopologyActivityVisual;
+  reducedMotion?: boolean;
 }
 
 function isCoreRole(role: string | null | undefined): boolean {
@@ -73,6 +81,7 @@ export function HybridPodGroupNode({ data }: { data: HybridPodGroupNodeData }) {
 }
 
 export function HybridAgentNode({ data }: { data: HybridAgentNodeData }) {
+  const cmuxLaunch = useCmuxLaunch();
   const core = isCoreRole(data.role);
   const isInfra = data.nodeKind === "infrastructure";
   const activityState = getActivityState(data.agentActivity);
@@ -83,7 +92,7 @@ export function HybridAgentNode({ data }: { data: HybridAgentNodeData }) {
   const runtimeModel = [data.runtime, data.model].filter(Boolean).join(" / ");
   const contextKnown = data.contextAvailability === "known" && typeof data.contextUsedPercentage === "number";
 
-  return (
+  const card = (
     <div
       data-testid="hybrid-agent-node"
       title={[
@@ -123,6 +132,21 @@ export function HybridAgentNode({ data }: { data: HybridAgentNodeData }) {
           aria-label={`activity: ${activityLabel}`}
         />
       </div>
+      {data.rigId ? (
+        <button
+          type="button"
+          data-testid={`hybrid-cmux-open-${data.logicalId}`}
+          aria-label={`Open ${data.logicalId} in cmux`}
+          title="Open in cmux"
+          onClick={(event) => {
+            event.stopPropagation();
+            cmuxLaunch.mutate({ rigId: data.rigId!, logicalId: data.logicalId });
+          }}
+          className="absolute right-1.5 top-7 z-10 inline-flex h-6 w-6 items-center justify-center border border-outline-variant bg-white/90 text-stone-700 opacity-0 shadow-[1px_1px_0_rgba(46,52,46,0.14)] transition-opacity hover:bg-stone-100 hover:text-stone-950 focus:!opacity-100 focus:opacity-100 focus:outline-none focus:ring-2 focus:ring-stone-900/20 group-hover:!opacity-100 group-hover:opacity-100 group-focus-within:!opacity-100 group-focus-within:opacity-100"
+        >
+          <PanelsTopLeft className="h-3.5 w-3.5" aria-hidden="true" />
+        </button>
+      ) : null}
       <div className="space-y-1 px-2 py-1.5">
         <div className="truncate font-mono text-[7px] text-stone-500">
           {data.canonicalSessionName ?? data.logicalId}
@@ -136,5 +160,16 @@ export function HybridAgentNode({ data }: { data: HybridAgentNodeData }) {
       </div>
       <Handle type="source" position={Position.Right} className="opacity-0" />
     </div>
+  );
+  return (
+    <ActivityRing
+      state={data.activityRing?.state ?? "idle"}
+      flash={data.activityRing?.flash ?? null}
+      reducedMotion={data.reducedMotion}
+      testId={`hybrid-activity-ring-${data.logicalId}`}
+      className="h-full w-full rounded-none"
+    >
+      {card}
+    </ActivityRing>
   );
 }

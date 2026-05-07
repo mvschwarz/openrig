@@ -5,7 +5,9 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { useActivityFeed } from "../src/hooks/useActivityFeed.js";
 import { useGlobalEvents } from "../src/hooks/useGlobalEvents.js";
+import { useTopologyActivity } from "../src/hooks/useTopologyActivity.js";
 import { useTopologyEdgeActivity } from "../src/hooks/useTopologyEdgeActivity.js";
+import { buildTopologySessionIndex } from "../src/lib/topology-activity.js";
 import { createMockEventSourceClass, instances } from "./helpers/mock-event-source.js";
 
 let OriginalEventSource: typeof EventSource | undefined;
@@ -14,11 +16,28 @@ function EventHubHarness() {
   useGlobalEvents();
   const feed = useActivityFeed();
   const edgeActivity = useTopologyEdgeActivity();
+  const topologyActivity = useTopologyActivity(buildTopologySessionIndex([
+    {
+      nodeId: "rig-1::orch.lead",
+      rigId: "rig-1",
+      rigName: "rig-1",
+      logicalId: "orch.lead",
+      canonicalSessionName: "orch.lead@rig-1",
+    },
+    {
+      nodeId: "rig-1::dev.driver",
+      rigId: "rig-1",
+      rigName: "rig-1",
+      logicalId: "dev.driver",
+      canonicalSessionName: "dev.driver@rig-1",
+    },
+  ]));
   return (
     <div>
       <span data-testid="hub-connected">{String(feed.connected)}</span>
       <span data-testid="hub-event-count">{feed.events.length}</span>
       <span data-testid="hub-edge-version">{edgeActivity.version}</span>
+      <span data-testid="hub-packet-count">{topologyActivity.packets.length}</span>
     </div>
   );
 }
@@ -70,6 +89,7 @@ describe("P5.3 shared topology event hub", () => {
     await waitFor(() => {
       expect(screen.getByTestId("hub-event-count").textContent).toBe("1");
       expect(Number(screen.getByTestId("hub-edge-version").textContent)).toBeGreaterThan(0);
+      expect(screen.getByTestId("hub-packet-count").textContent).toBe("1");
     });
 
     unmount();
@@ -83,6 +103,7 @@ describe("P5.3 shared topology event hub", () => {
       "hooks/useGlobalEvents.ts",
       "hooks/useRigEvents.ts",
       "hooks/useTopologyEdgeActivity.ts",
+      "hooks/useTopologyActivity.ts",
     ];
     for (const relative of hookFiles) {
       const src = readFileSync(path.join(srcRoot, relative), "utf8");
