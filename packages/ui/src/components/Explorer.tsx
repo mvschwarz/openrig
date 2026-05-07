@@ -17,6 +17,7 @@ import { EmptyState } from "./ui/empty-state.js";
 import { ProjectTreeView } from "./project/ProjectTreeView.js";
 import { SpecsTreeView } from "./specs/SpecsTreeView.js";
 import { TopologyTreeView } from "./topology/TopologyTreeView.js";
+import { SubscriptionToggleList } from "./for-you/SubscriptionToggleList.js";
 
 import type { DrawerSelection } from "./SharedDetailDrawer.js";
 
@@ -518,37 +519,14 @@ function SurfaceBody({
     // Subscription affordance — settings-shaped surface per for-you-feed.md L134-L140.
     // The PRIMARY UX of /for-you is the FEED in the center; subscriptions live
     // here as a small on-demand list. NOT dominating.
+    //
+    // V1 attempt-3 Phase 5 P5-3: live ConfigStore-wired toggles via
+    // SubscriptionToggleList. action_required is forced ON; the other 4
+    // toggle interactively. Settings endpoint unreachable → canonical
+    // defaults rendered with CLI-fallback hint.
     return (
       <div data-testid="explorer-for-you-subscriptions" className="flex-1 overflow-y-auto py-3 px-3">
-        <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-on-surface-variant mb-2">
-          Subscriptions
-        </div>
-        <ul className="space-y-1 font-mono text-xs">
-          <li className="flex items-center justify-between">
-            <span>Action required</span>
-            <span className="text-[9px] text-on-surface-variant">forced ON</span>
-          </li>
-          <li className="flex items-center justify-between">
-            <span>Approvals</span>
-            <span className="text-[9px] text-success">on</span>
-          </li>
-          <li className="flex items-center justify-between">
-            <span>Feature ships</span>
-            <span className="text-[9px] text-success">on</span>
-          </li>
-          <li className="flex items-center justify-between">
-            <span>Slice progress</span>
-            <span className="text-[9px] text-success">on</span>
-          </li>
-          <li className="flex items-center justify-between">
-            <span>Audit log</span>
-            <span className="text-[9px] text-on-surface-variant">off</span>
-          </li>
-        </ul>
-        <p className="mt-3 font-mono text-[9px] text-on-surface-variant italic">
-          Per-subscription toggles wire in Phase 4. V1 list reads canonical
-          defaults from for-you-feed.md L142–L150.
-        </p>
+        <SubscriptionToggleList />
       </div>
     );
   }
