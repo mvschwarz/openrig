@@ -1,7 +1,7 @@
 // V1 polish slice Phase 5.2 — multi-rig single-canvas /topology graph
 // regression guard. Covers ritual #6 (HostMultiRigGraph reachability)
 // + ritual #8 (no .map(useRigGraph) rules-of-hooks anti-pattern) +
-// ritual #9 (coupled-literal scan for default-collapsed state across
+// ritual #9 (coupled-literal scan for default-expanded state across
 // HostMultiRigGraph + RigGroupNode + multi-rig-layout).
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
@@ -244,7 +244,7 @@ describe("multi-rig-layout: computeBounds", () => {
 // ----------------------------------------------------------------------
 
 describe("HostMultiRigGraph (P5.2-1 reachability — ritual #6)", () => {
-  it("renders one rigGroup node per rig from /api/ps; default ALL collapsed", async () => {
+  it("renders one rigGroup node per rig from /api/ps; default ALL expanded", async () => {
     setupFetchOk({});
     const { findByTestId } = withQueryClient(<HostMultiRigGraph />);
     expect(await findByTestId("host-multi-rig-graph")).toBeTruthy();
@@ -252,13 +252,18 @@ describe("HostMultiRigGraph (P5.2-1 reachability — ritual #6)", () => {
     expect(await findByTestId("rig-group-node-rig-1")).toBeTruthy();
     expect(await findByTestId("rig-group-node-rig-2")).toBeTruthy();
     expect(await findByTestId("rig-group-node-rig-3")).toBeTruthy();
-    // All collapsed by default (P5.2-5).
+    // All expanded by default so the fleet canvas opens fully.
     expect(
       (await findByTestId("rig-group-node-rig-1")).getAttribute("data-collapsed"),
-    ).toBe("true");
+    ).toBe("false");
     expect(
       (await findByTestId("rig-group-node-rig-2")).getAttribute("data-collapsed"),
-    ).toBe("true");
+    ).toBe("false");
+    await waitFor(() => {
+      expect(mockFetch).toHaveBeenCalledWith("/api/rigs/rig-1/graph");
+      expect(mockFetch).toHaveBeenCalledWith("/api/rigs/rig-2/graph");
+      expect(mockFetch).toHaveBeenCalledWith("/api/rigs/rig-3/graph");
+    });
   });
 
   it("rig group body click toggles collapse state (P5.2-5)", async () => {
@@ -269,7 +274,7 @@ describe("HostMultiRigGraph (P5.2-1 reachability — ritual #6)", () => {
     });
     const { findByTestId } = withQueryClient(<HostMultiRigGraph />);
     const node = await findByTestId("rig-group-node-rig-1");
-    expect(node.getAttribute("data-collapsed")).toBe("true");
+    expect(node.getAttribute("data-collapsed")).toBe("false");
     fireEvent.click(node);
     await waitFor(() => {
       expect(
@@ -278,9 +283,9 @@ describe("HostMultiRigGraph (P5.2-1 reachability — ritual #6)", () => {
             "[data-testid='rig-group-node-rig-1']",
           ) as HTMLElement
         ).getAttribute("data-collapsed"),
-      ).toBe("false");
+      ).toBe("true");
     });
-    // Re-click → collapsed again.
+    // Re-click expands again.
     fireEvent.click(
       document.querySelector("[data-testid='rig-group-node-rig-1']") as HTMLElement,
     );
@@ -291,7 +296,51 @@ describe("HostMultiRigGraph (P5.2-1 reachability — ritual #6)", () => {
             "[data-testid='rig-group-node-rig-1']",
           ) as HTMLElement
         ).getAttribute("data-collapsed"),
+      ).toBe("false");
+    });
+  });
+
+  it("canvas controls collapse and expand every rig", async () => {
+    setupFetchOk({});
+    const { findByTestId } = withQueryClient(<HostMultiRigGraph />);
+    const collapseAll = await findByTestId("topology-collapse-all-rigs");
+    const expandAll = await findByTestId("topology-expand-all-rigs");
+    expect((await findByTestId("rig-group-node-rig-1")).getAttribute("data-collapsed")).toBe("false");
+
+    fireEvent.click(collapseAll);
+    await waitFor(() => {
+      expect(
+        (
+          document.querySelector(
+            "[data-testid='rig-group-node-rig-1']",
+          ) as HTMLElement
+        ).getAttribute("data-collapsed"),
       ).toBe("true");
+      expect(
+        (
+          document.querySelector(
+            "[data-testid='rig-group-node-rig-2']",
+          ) as HTMLElement
+        ).getAttribute("data-collapsed"),
+      ).toBe("true");
+    });
+
+    fireEvent.click(expandAll);
+    await waitFor(() => {
+      expect(
+        (
+          document.querySelector(
+            "[data-testid='rig-group-node-rig-1']",
+          ) as HTMLElement
+        ).getAttribute("data-collapsed"),
+      ).toBe("false");
+      expect(
+        (
+          document.querySelector(
+            "[data-testid='rig-group-node-rig-2']",
+          ) as HTMLElement
+        ).getAttribute("data-collapsed"),
+      ).toBe("false");
     });
   });
 
@@ -305,12 +354,12 @@ describe("HostMultiRigGraph (P5.2-1 reachability — ritual #6)", () => {
     // onClick) per the bottom-of-file ritual #9 source-assertion guard.
     expect(drill).toBeTruthy();
     expect(drill.tagName).toBe("A");
-    // Rig body remains collapsed (clicking the drill link, even if its
+    // Rig body remains expanded (clicking the drill link, even if its
     // onClick doesn't fire in jsdom, must not bubble to the body's
     // toggle handler — verified visually + via stopPropagation source).
     expect(
       (await findByTestId("rig-group-node-rig-1")).getAttribute("data-collapsed"),
-    ).toBe("true");
+    ).toBe("false");
   });
 
   it("empty rig list renders honest empty-state (no /api/rigs/.../graph fetches)", async () => {
@@ -357,7 +406,7 @@ describe("source-assertion guards", () => {
     expect(src).toContain("e.stopPropagation()");
   });
 
-  it("HostMultiRigGraph default state is all-collapsed (ritual #9 coupled-literal)", () => {
+  it("HostMultiRigGraph default state is all-expanded (ritual #9 coupled-literal)", () => {
     const ctxSrc = readFileSync(
       path.join(SRC, "components/topology/topology-overlay-context.tsx"),
       "utf8",
@@ -374,7 +423,10 @@ describe("source-assertion guards", () => {
       path.join(SRC, "components/topology/HostMultiRigGraph.tsx"),
       "utf8",
     );
-    // collapsed: !p.isExpanded — the default-collapse semantic carrier
+    expect(hostSrc).toContain("const DEFAULT_RIG_EXPANDED = true");
+    expect(hostSrc).toContain("const HOST_GRAPH_MIN_ZOOM = 0.03");
+    expect(hostSrc).toContain("HostGraphAutoFit");
+    // collapsed: !p.isExpanded — the expanded/collapsed semantic carrier
     // (still in the host component; reads from the lifted context).
     expect(hostSrc).toMatch(/collapsed:\s*!p\.isExpanded/);
   });
