@@ -523,8 +523,8 @@ describe("RigGraph", () => {
       // React Flow uses our custom node type — nodes have class react-flow__node-rigNode
       const customNodes = container.querySelectorAll(".react-flow__node-rigNode");
       expect(customNodes.length).toBe(2);
-      // RigNode renders runtime text in combined format
-      expect(screen.getByText("RUNTIME: claude-code · opus")).toBeDefined();
+      // RigNode renders runtime text in the compact card grammar.
+      expect(screen.getByText("claude-code · opus")).toBeDefined();
     });
   });
 });
@@ -547,7 +547,7 @@ describe("RigNode", () => {
     );
 
     expect(screen.getByText("impl")).toBeDefined();
-    expect(screen.getByText("RUNTIME: claude-code · opus")).toBeDefined();
+    expect(screen.getByText("claude-code · opus")).toBeDefined();
     expect(screen.queryByText("WORKER")).toBeNull();
     // PL-019: dot now reflects agentActivity (was startupStatus); no
     // agentActivity attached → "unknown" state, desaturated stone.
@@ -1624,6 +1624,7 @@ describe("RigNode spec hint", () => {
           logicalId: "dev.impl", role: "worker", runtime: "claude-code",
           model: null, status: "running", binding: null,
           contextAvailability: "known", contextUsedPercentage: 85, contextFresh: true,
+          contextTotalInputTokens: 120_000, contextTotalOutputTokens: 14_000,
         }} />
       </ReactFlowProvider>
     );
@@ -1633,6 +1634,9 @@ describe("RigNode spec hint", () => {
     expect(badge.className).toContain("text-red-600"); // >=80 = red
     expect(badge.className).toContain("font-bold");
     expect(badge.className).not.toContain("opacity-50");
+    const tokenTotal = screen.getByTestId("token-total");
+    expect(tokenTotal.textContent).toContain("134k");
+    expect(tokenTotal.getAttribute("title")).toContain("Tokens: 134,000");
   });
 
   it("renders stale context with reduced opacity", () => {

@@ -1,9 +1,13 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { cleanup, render, screen } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { ReactFlowProvider } from "@xyflow/react";
+import type React from "react";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { ActivityRing } from "../src/components/topology/ActivityRing.js";
 import { HotPotatoEdge } from "../src/components/topology/HotPotatoEdge.js";
+import { HybridAgentNode } from "../src/components/topology/HybridTopologyNodes.js";
 import { fallbackActivityCardState, getActivityCardClasses } from "../src/components/topology/activity-card-visuals.js";
 import {
   HOT_POTATO_WITHIN_RIG_DURATION_MS,
@@ -50,6 +54,15 @@ function edgeProps(reducedMotion: boolean) {
     selected: false,
     animated: false,
   } as any;
+}
+
+function renderHybridNode(children: React.ReactNode) {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return render(
+    <QueryClientProvider client={client}>
+      <ReactFlowProvider>{children}</ReactFlowProvider>
+    </QueryClientProvider>,
+  );
 }
 
 describe("P5.3 ActivityRing and HotPotatoEdge", () => {
@@ -104,6 +117,29 @@ describe("P5.3 ActivityRing and HotPotatoEdge", () => {
     expect(getActivityCardClasses({ state: "blocked" })).toContain("activity-card-blocked");
     expect(getActivityCardClasses({ state: "active", flash: "target" })).toContain("activity-card-target-flash");
     expect(getActivityCardClasses({ state: "active", flash: "source", reducedMotion: true })).toContain("activity-card-reduced-motion");
+  });
+
+  it("hybrid agent card renders compact context and token totals", () => {
+    renderHybridNode(
+      <HybridAgentNode
+        data={{
+          logicalId: "driver",
+          role: "driver",
+          runtime: "claude-code",
+          model: null,
+          status: "running",
+          contextAvailability: "known",
+          contextUsedPercentage: 14,
+          contextFresh: true,
+          contextTotalInputTokens: 200_000,
+          contextTotalOutputTokens: 19_000,
+          canonicalSessionName: "velocity-driver@openrig-velocity",
+        }}
+      />,
+    );
+
+    expect(screen.getByTestId("hybrid-context-badge").textContent).toBe("14%");
+    expect(screen.getByTestId("hybrid-token-total").textContent).toBe("219k");
   });
 
   it("source scan keeps activity and packet layers production-reachable", () => {

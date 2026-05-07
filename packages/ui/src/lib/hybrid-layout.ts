@@ -4,7 +4,7 @@ import { Position, type Edge, type Node } from "@xyflow/react";
 const PREFIX_DELIMITER = "::";
 
 export const HYBRID_AGENT_WIDTH = 166;
-export const HYBRID_AGENT_HEIGHT = 116;
+export const HYBRID_AGENT_HEIGHT = 94;
 export const HYBRID_POD_HEADER_HEIGHT = 38;
 export const HYBRID_POD_PADDING_X = 28;
 export const HYBRID_POD_PADDING_BOTTOM = 22;
