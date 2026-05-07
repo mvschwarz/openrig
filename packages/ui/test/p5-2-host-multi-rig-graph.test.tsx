@@ -28,6 +28,7 @@ vi.mock("@tanstack/react-router", async (importActual) => {
 });
 
 import { HostMultiRigGraph } from "../src/components/topology/HostMultiRigGraph.js";
+import { TopologyOverlayProvider } from "../src/components/topology/topology-overlay-context.js";
 import {
   prefixRigData,
   packRigGroups,
@@ -52,7 +53,16 @@ function withQueryClient(ui: React.ReactNode) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   // Wrap in TanStack Router with memory history so <Link> resolves the
   // route context without crashing inside RigGroupNode.
-  const rootRoute = createRootRoute({ component: () => <Outlet /> });
+  // V1 polish slice Phase 5.2 bounce-fix: TopologyOverlayProvider wraps
+  // the route component so HostMultiRigGraph's useTopologyOverlay()
+  // returns a real toggleRig (not the no-op default).
+  const rootRoute = createRootRoute({
+    component: () => (
+      <TopologyOverlayProvider>
+        <Outlet />
+      </TopologyOverlayProvider>
+    ),
+  });
   const indexRoute = createRoute({
     getParentRoute: () => rootRoute,
     path: "/",
@@ -348,15 +358,25 @@ describe("source-assertion guards", () => {
   });
 
   it("HostMultiRigGraph default state is all-collapsed (ritual #9 coupled-literal)", () => {
-    const src = readFileSync(
+    const ctxSrc = readFileSync(
+      path.join(SRC, "components/topology/topology-overlay-context.tsx"),
+      "utf8",
+    );
+    // V1 polish slice Phase 5.2 bounce-fix: rig-expanded state lifted
+    // from HostMultiRigGraph local useState into the provider scope so
+    // direct-URL navigation (where HostMultiRigGraph isn't mounted)
+    // still updates the state. Coupled-literal scan now targets the
+    // provider's initializer.
+    // Substring contracts (robust to multi-line formatting).
+    expect(ctxSrc).toContain("useState<Map<string, boolean>>");
+    expect(ctxSrc).toContain("() => new Map()");
+    const hostSrc = readFileSync(
       path.join(SRC, "components/topology/HostMultiRigGraph.tsx"),
       "utf8",
     );
-    // useState<Map<string, boolean>>(() => new Map()) → empty map → no
-    // rig is in the map → expanded.get(rigId) returns undefined → ?? false.
-    expect(src).toMatch(/useState<Map<string, boolean>>\s*\(\s*\(\s*\)\s*=>\s*new Map\(\)\s*\)/);
-    // collapsed: !p.isExpanded — the default-collapse semantic carrier.
-    expect(src).toMatch(/collapsed:\s*!p\.isExpanded/);
+    // collapsed: !p.isExpanded — the default-collapse semantic carrier
+    // (still in the host component; reads from the lifted context).
+    expect(hostSrc).toMatch(/collapsed:\s*!p\.isExpanded/);
   });
 
   it("RigGroupNode uses 1px outline-variant border + hard-shadow + RegistrationMarks", () => {
