@@ -12,7 +12,10 @@ import type { AgentActivitySummary } from "../../hooks/useNodeInventory.js";
 import { cn } from "../../lib/utils.js";
 import { useCmuxLaunch } from "../../hooks/useCmuxLaunch.js";
 import { ActivityRing } from "./ActivityRing.js";
+import { getActivityCardClasses, getActivityCardSignal } from "./activity-card-visuals.js";
+import { TerminalPreviewPopover } from "./TerminalPreviewPopover.js";
 import type { TopologyActivityVisual } from "../../lib/topology-activity.js";
+import { formatCompactTokenCount, formatTokenTotalTitle, sumTokenCounts } from "../../lib/token-format.js";
 
 interface HybridPodGroupNodeData {
   podDisplayName?: string | null;
@@ -36,6 +39,8 @@ interface HybridAgentNodeData {
   contextUsedPercentage?: number | null;
   contextFresh?: boolean;
   contextAvailability?: string | null;
+  contextTotalInputTokens?: number | null;
+  contextTotalOutputTokens?: number | null;
   agentActivity?: AgentActivitySummary | null;
   currentQitems?: unknown[];
   rigId?: string | null;
@@ -89,8 +94,13 @@ export function HybridAgentNode({ data }: { data: HybridAgentNodeData }) {
   const activityBgClass = getActivityBgClass(activityState);
   const activityAnimClass = getActivityAnimationClass(activityState);
   const activityStale = isActivityStale(data.agentActivity);
+  const activityCard = getActivityCardSignal({ activityRing: data.activityRing, activityState });
   const runtimeModel = [data.runtime, data.model].filter(Boolean).join(" / ");
   const contextKnown = data.contextAvailability === "known" && typeof data.contextUsedPercentage === "number";
+  const tokenTotal = sumTokenCounts(data.contextTotalInputTokens, data.contextTotalOutputTokens);
+  const tokenLabel = formatCompactTokenCount(tokenTotal);
+  const tokenTitle = formatTokenTotalTitle(data.contextTotalInputTokens, data.contextTotalOutputTokens);
+  const hoverIconClass = "inline-flex h-6 w-6 items-center justify-center border border-outline-variant bg-white/90 text-stone-700 opacity-0 shadow-[1px_1px_0_rgba(46,52,46,0.14)] transition-opacity hover:bg-stone-100 hover:text-stone-950 focus:!opacity-100 focus:opacity-100 focus:outline-none focus:ring-2 focus:ring-stone-900/20 group-hover:!opacity-100 group-hover:opacity-100 group-focus-within:!opacity-100 group-focus-within:opacity-100";
 
   const card = (
     <div
@@ -99,9 +109,17 @@ export function HybridAgentNode({ data }: { data: HybridAgentNodeData }) {
         data.canonicalSessionName,
         `activity: ${activityLabel}${activityStale ? " (stale)" : ""}`,
         runtimeModel || null,
+        tokenTitle,
       ].filter(Boolean).join("\n")}
+      data-activity-card-state={activityCard.state}
+      data-activity-card-flash={activityCard.flash ?? "none"}
       className={cn(
-        "group relative h-full w-full select-none border bg-white hard-shadow",
+        "group relative h-full w-full select-none border hard-shadow transition-[background-color,border-color,box-shadow] duration-300",
+        getActivityCardClasses({
+          state: activityCard.state,
+          flash: activityCard.flash,
+          reducedMotion: data.reducedMotion,
+        }),
         data.startupStatus === "failed"
           ? "border-red-700"
           : data.startupStatus === "attention_required"
@@ -133,6 +151,17 @@ export function HybridAgentNode({ data }: { data: HybridAgentNodeData }) {
         />
       </div>
       {data.rigId ? (
+        <TerminalPreviewPopover
+          rigId={data.rigId}
+          logicalId={data.logicalId}
+          sessionName={data.canonicalSessionName ?? null}
+          reducedMotion={data.reducedMotion}
+          testIdPrefix={`hybrid-${data.logicalId}`}
+          wrapperClassName="absolute right-8 top-6 z-20"
+          buttonClassName={hoverIconClass}
+        />
+      ) : null}
+      {data.rigId ? (
         <button
           type="button"
           data-testid={`hybrid-cmux-open-${data.logicalId}`}
@@ -142,20 +171,35 @@ export function HybridAgentNode({ data }: { data: HybridAgentNodeData }) {
             event.stopPropagation();
             cmuxLaunch.mutate({ rigId: data.rigId!, logicalId: data.logicalId });
           }}
-          className="absolute right-1.5 top-7 z-10 inline-flex h-6 w-6 items-center justify-center border border-outline-variant bg-white/90 text-stone-700 opacity-0 shadow-[1px_1px_0_rgba(46,52,46,0.14)] transition-opacity hover:bg-stone-100 hover:text-stone-950 focus:!opacity-100 focus:opacity-100 focus:outline-none focus:ring-2 focus:ring-stone-900/20 group-hover:!opacity-100 group-hover:opacity-100 group-focus-within:!opacity-100 group-focus-within:opacity-100"
+          className={cn("absolute right-1.5 top-6 z-10", hoverIconClass)}
         >
           <PanelsTopLeft className="h-3.5 w-3.5" aria-hidden="true" />
         </button>
       ) : null}
       <div className="space-y-1 px-2 py-1.5">
-        <div className="truncate font-mono text-[7px] text-stone-500">
+        <div className="truncate font-mono text-[8px] leading-tight text-stone-500">
           {data.canonicalSessionName ?? data.logicalId}
         </div>
-        <div className="truncate font-mono text-[7px] uppercase tracking-[0.08em] text-stone-400">
+        <div className="truncate font-mono text-[7px] uppercase tracking-[0.12em] text-stone-400">
           {runtimeModel || data.resolvedSpecName || data.profile || "runtime unknown"}
         </div>
-        <div className={cn("font-mono text-[12px] font-bold leading-none", contextClass(data.contextUsedPercentage, data.contextFresh))}>
-          {contextKnown ? `${data.contextUsedPercentage}%` : "--"}
+        <div className="flex items-end justify-between gap-2 pt-0.5">
+          <div
+            className={cn("font-mono text-[14px] font-bold leading-none", contextClass(data.contextUsedPercentage, data.contextFresh))}
+            data-testid="hybrid-context-badge"
+          >
+            {contextKnown ? `${data.contextUsedPercentage}%` : "--"}
+          </div>
+          <div
+            className={cn(
+              "font-mono text-[13px] font-bold leading-none tracking-[0.02em]",
+              tokenLabel ? "text-stone-500" : "text-stone-300",
+            )}
+            data-testid="hybrid-token-total"
+            title={tokenTitle ?? "Token sample unavailable"}
+          >
+            {tokenLabel ?? "--"}
+          </div>
         </div>
       </div>
       <Handle type="source" position={Position.Right} className="opacity-0" />

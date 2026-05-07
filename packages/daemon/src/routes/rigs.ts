@@ -231,6 +231,8 @@ rigsRoutes.get("/:id/graph", async (c) => {
     contextUsedPercentage: n.contextUsage?.usedPercentage ?? null,
     contextFresh: n.contextUsage?.fresh ?? false,
     contextAvailability: n.contextUsage?.availability ?? "unknown",
+    contextTotalInputTokens: n.contextUsage?.totalInputTokens ?? null,
+    contextTotalOutputTokens: n.contextUsage?.totalOutputTokens ?? null,
     agentActivity: n.agentActivity ?? null,
     currentQitems: n.canonicalSessionName
       ? currentQitemsBySession.get(n.canonicalSessionName) ?? []

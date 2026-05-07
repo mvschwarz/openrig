@@ -50,7 +50,10 @@ export function HotPotatoEdge({
             data-reduced-motion="true"
             cx={targetX}
             cy={targetY}
-            r={crossRig ? 2.5 : 3.25}
+            r={crossRig ? 5 : 6.5}
+            stroke="rgba(255,255,255,0.88)"
+            strokeWidth={crossRig ? 1.75 : 2.25}
+            vectorEffect="non-scaling-stroke"
             className={crossRig ? "fill-stone-500" : "fill-emerald-600"}
           />
         ) : (
@@ -58,7 +61,10 @@ export function HotPotatoEdge({
             key={packet.id}
             data-testid={`hot-potato-packet-${packet.id}`}
             data-reduced-motion="false"
-            r={crossRig ? 2.25 : 3}
+            r={crossRig ? 5 : 6.5}
+            stroke="rgba(255,255,255,0.88)"
+            strokeWidth={crossRig ? 1.75 : 2.25}
+            vectorEffect="non-scaling-stroke"
             className={crossRig ? "fill-stone-500 hot-potato-packet-cross" : "fill-emerald-600 hot-potato-packet"}
           >
             <animateMotion

@@ -33,6 +33,8 @@ interface RFNodeData {
   contextUsedPercentage: number | null;
   contextFresh: boolean;
   contextAvailability: string;
+  contextTotalInputTokens: number | null;
+  contextTotalOutputTokens: number | null;
   agentActivity?: AgentActivity | null;
   currentQitems?: CurrentQitemSummary[];
 }
@@ -67,6 +69,8 @@ export interface InventoryOverlay {
   contextUsedPercentage?: number | null;
   contextFresh?: boolean;
   contextAvailability?: string;
+  contextTotalInputTokens?: number | null;
+  contextTotalOutputTokens?: number | null;
   agentActivity?: AgentActivity | null;
   currentQitems?: CurrentQitemSummary[];
 }
@@ -125,6 +129,8 @@ export function projectRigToGraph(input: RigGraphInput, inventoryOverlay?: Inven
         contextUsedPercentage: overlay?.contextUsedPercentage ?? null,
         contextFresh: overlay?.contextFresh ?? false,
         contextAvailability: overlay?.contextAvailability ?? "unknown",
+        contextTotalInputTokens: overlay?.contextTotalInputTokens ?? null,
+        contextTotalOutputTokens: overlay?.contextTotalOutputTokens ?? null,
         agentActivity: overlay?.agentActivity ?? null,
         currentQitems: overlay?.currentQitems ?? [],
       },
@@ -160,6 +166,8 @@ export function projectRigToGraph(input: RigGraphInput, inventoryOverlay?: Inven
         contextUsedPercentage: null,
         contextFresh: false,
         contextAvailability: "unknown",
+        contextTotalInputTokens: null,
+        contextTotalOutputTokens: null,
         agentActivity: null,
         currentQitems: [],
       },
