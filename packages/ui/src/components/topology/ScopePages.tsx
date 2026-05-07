@@ -17,6 +17,7 @@ import {
   type TopologySeatScopeTab,
 } from "./TopologyViewModeTabs.js";
 import { TopologyTableView } from "./TopologyTableView.js";
+import { TopologyTerminalView } from "./TopologyTerminalView.js";
 import { SectionHeader } from "../ui/section-header.js";
 import { EmptyState } from "../ui/empty-state.js";
 import { RigGraph } from "../RigGraph.js";
@@ -78,18 +79,9 @@ function ScopeShell({
   );
 }
 
-function TerminalGridPlaceholder({ scope }: { scope: string }) {
-  return (
-    <div className="p-6">
-      <EmptyState
-        label="TERMINAL GRID"
-        description={`${scope} terminals — pinned-card grid (Phase 5 polish; safe-N pagination per topology-terminal-view.md L70-80).`}
-        variant="card"
-        testId="topology-terminal-placeholder"
-      />
-    </div>
-  );
-}
+// V1 attempt-3 Phase 5 P5-7: TopologyTerminalView replaces the placeholder
+// with a real safe-N=12 paginated pinned-card grid + pulsing-ring on active
+// terminals (per topology-terminal-view.md L47/L60-65/L70-80).
 
 export function HostScopePage() {
   const [active, setActive] = useState<TopologyHostScopeTab>("graph");
@@ -122,7 +114,7 @@ export function HostScopePage() {
           <TopologyTableView />
         </div>
       ) : null}
-      {active === "terminal" ? <TerminalGridPlaceholder scope="Host" /> : null}
+      {active === "terminal" ? <TopologyTerminalView scope="host" /> : null}
     </ScopeShell>
   );
 }
@@ -150,7 +142,7 @@ export function RigScopePage() {
           <TopologyTableView rigIdScope={rigId} />
         </div>
       ) : null}
-      {active === "terminal" ? <TerminalGridPlaceholder scope="Rig" /> : null}
+      {active === "terminal" ? <TopologyTerminalView scope="rig" rigId={rigId} /> : null}
       {active === "overview" ? (
         <div className="p-6">
           <EmptyState
@@ -186,7 +178,9 @@ export function PodScopePage() {
           <TopologyTableView rigIdScope={rigId} />
         </div>
       ) : null}
-      {active === "terminal" ? <TerminalGridPlaceholder scope="Pod" /> : null}
+      {active === "terminal" ? (
+        <TopologyTerminalView scope="pod" rigId={rigId} podName={podName} />
+      ) : null}
       {active === "overview" ? (
         <div className="p-6">
           <EmptyState label="POD OVERVIEW" description="Pod detail (Phase 5)." variant="card" />
