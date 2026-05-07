@@ -1,6 +1,17 @@
 // V1 attempt-3 Phase 3 — Topology table view per topology-table-view.md + SC-25.
 //
 // Tanstack-backed table; row per agent across topology, scoped by URL.
+//
+// V1 attempt-3 Phase 5 P5-9 ship-gate bounce P0-1: rules-of-hooks fix.
+// Previous shape used `scopedRigs.map((r) => useNodeInventory(r.id))` which
+// calls hooks in a loop with variable count — when scopedRigs grew from 0
+// (initial render before useRigSummary resolves) to N (after resolution),
+// React detected the hook count change and threw "Cannot read properties
+// of undefined (reading 'length')" downstream. This crashed /topology at
+// 375x812 mobile because P5-9 mounts the table immediately at first
+// render (graph view-mode degraded to table for narrow viewports) BEFORE
+// rigs data is available. Switched to `useQueries` from React Query —
+// single hook call regardless of array length.
 
 import { useMemo, useState } from "react";
 import {
@@ -12,11 +23,18 @@ import {
   type SortingState,
   useReactTable,
 } from "@tanstack/react-table";
+import { useQueries } from "@tanstack/react-query";
 import { useRigSummary } from "../../hooks/useRigSummary.js";
-import { useNodeInventory, type NodeInventoryEntry } from "../../hooks/useNodeInventory.js";
+import type { NodeInventoryEntry } from "../../hooks/useNodeInventory.js";
 import { VellumInput } from "../ui/vellum-input.js";
 import { StatusPip } from "../ui/status-pip.js";
 import { inferPodName } from "../../lib/display-name.js";
+
+async function fetchNodeInventory(rigId: string): Promise<NodeInventoryEntry[]> {
+  const res = await fetch(`/api/rigs/${encodeURIComponent(rigId)}/nodes`);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
 
 interface AgentRow {
   rigId: string;
@@ -54,25 +72,35 @@ const COLUMNS: ColumnDef<AgentRow>[] = [
 
 export function TopologyTableView({ rigIdScope }: { rigIdScope?: string }) {
   const { data: rigs } = useRigSummary();
-  const scopedRigs = rigIdScope
-    ? rigs?.filter((r) => r.id === rigIdScope) ?? []
-    : rigs ?? [];
+  const scopedRigs = useMemo(
+    () =>
+      rigIdScope
+        ? rigs?.filter((r) => r.id === rigIdScope) ?? []
+        : rigs ?? [],
+    [rigs, rigIdScope],
+  );
 
-  // Fetch node inventories per rig in scope.
-  const inventoryQueries = scopedRigs.map((r) => ({
-    rigId: r.id,
-    rigName: r.name,
-    inv: useNodeInventory(r.id),
-  }));
+  // P0-1 fix: useQueries replaces the .map(useNodeInventory) loop. Single
+  // hook call regardless of scopedRigs length — React's hook order stays
+  // stable across renders even when rigs grows from undefined → [N].
+  const inventoryResults = useQueries({
+    queries: scopedRigs.map((r) => ({
+      queryKey: ["rig", r.id, "nodes"] as const,
+      queryFn: () => fetchNodeInventory(r.id),
+    })),
+  });
 
   const data: AgentRow[] = useMemo(() => {
     const rows: AgentRow[] = [];
-    for (const q of inventoryQueries) {
-      const nodes: NodeInventoryEntry[] = q.inv.data ?? [];
+    for (let i = 0; i < scopedRigs.length; i++) {
+      const rig = scopedRigs[i];
+      const result = inventoryResults[i];
+      if (!rig || !result) continue;
+      const nodes: NodeInventoryEntry[] = result.data ?? [];
       for (const n of nodes) {
         rows.push({
-          rigId: q.rigId,
-          rigName: q.rigName,
+          rigId: rig.id,
+          rigName: rig.name,
           podName: inferPodName(n.logicalId) ?? "default",
           logicalId: n.logicalId,
           sessionName: n.canonicalSessionName ?? n.logicalId,
@@ -83,7 +111,7 @@ export function TopologyTableView({ rigIdScope }: { rigIdScope?: string }) {
       }
     }
     return rows;
-  }, [JSON.stringify(inventoryQueries.map((q) => q.inv.data ?? []))]);
+  }, [scopedRigs, inventoryResults]);
 
   const [sorting, setSorting] = useState<SortingState>([]);
   const [search, setSearch] = useState("");
