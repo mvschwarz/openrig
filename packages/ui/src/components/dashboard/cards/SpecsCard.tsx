@@ -19,7 +19,7 @@ export function SpecsCard() {
         <div className="bg-stone-900 text-white px-4 py-1.5 flex items-center gap-2">
           <FileText className="h-3 w-3" />
           <SectionHeader tone="default" className="text-stone-50">
-            Specs
+            Library
           </SectionHeader>
         </div>
         <div className="p-4 space-y-2">
@@ -28,10 +28,10 @@ export function SpecsCard() {
             <span className="text-stone-900 font-bold" data-testid="specs-count">{total}</span>
           </div>
           <div className="text-xs text-on-surface-variant">
-            Rigs / workspaces / workflows / context-packs / agent-images
+            Specs / context packs / agent images / skills
           </div>
           <div className="font-mono text-[9px] uppercase tracking-wide text-on-surface-variant pt-1">
-            Open library →
+            Open Library →
           </div>
         </div>
       </VellumCard>

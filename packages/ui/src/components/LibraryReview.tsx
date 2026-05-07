@@ -247,7 +247,7 @@ function LibrarySpecReview({ entryId }: LibraryReviewProps) {
       <WorkspacePage>
         <div data-testid="library-review-error" className="space-y-4">
           <WorkflowHeader eyebrow="Library" title="Spec Not Found" description={(error as Error)?.message ?? "Could not load spec."} />
-          <Button variant="outline" size="sm" onClick={() => navigate({ to: "/specs" })}>Back to Specs</Button>
+          <Button variant="outline" size="sm" onClick={() => navigate({ to: "/specs" })}>Back to Library</Button>
         </div>
       </WorkspacePage>
     );
@@ -533,7 +533,7 @@ function LibraryContextPackReviewPage({ entryId }: { entryId: string }) {
             title="Context Pack Not Found"
             description={(packsError as Error)?.message ?? `No context pack with id ${entryId}.`}
           />
-          <Button variant="outline" size="sm" onClick={() => navigate({ to: "/specs" })}>Back to Specs</Button>
+          <Button variant="outline" size="sm" onClick={() => navigate({ to: "/specs" })}>Back to Library</Button>
         </div>
       </WorkspacePage>
     );
@@ -609,7 +609,7 @@ function ContextPackReviewBody({
               >
                 {showSendPicker ? "Hide Send" : "Send to seat"}
               </Button>
-              <Button variant="outline" size="sm" onClick={() => navigate({ to: "/specs" })}>Back to Specs</Button>
+              <Button variant="outline" size="sm" onClick={() => navigate({ to: "/specs" })}>Back to Library</Button>
             </div>
           }
         />
@@ -773,7 +773,7 @@ function LibraryAgentImageReviewPage({ entryId }: { entryId: string }) {
             title="Agent Image Not Found"
             description={(imagesError as Error)?.message ?? `No agent image with id ${entryId}.`}
           />
-          <Button variant="outline" size="sm" onClick={() => navigate({ to: "/specs" })}>Back to Specs</Button>
+          <Button variant="outline" size="sm" onClick={() => navigate({ to: "/specs" })}>Back to Library</Button>
         </div>
       </WorkspacePage>
     );
@@ -831,7 +831,7 @@ function AgentImageReviewBody({
               >
                 {entry.pinned ? "Unpin" : "Pin"}
               </Button>
-              <Button variant="outline" size="sm" onClick={() => navigate({ to: "/specs" })}>Back to Specs</Button>
+              <Button variant="outline" size="sm" onClick={() => navigate({ to: "/specs" })}>Back to Library</Button>
             </div>
           }
         />

@@ -23,7 +23,7 @@ export function AgentSpecReview() {
           <WorkflowHeader
             eyebrow="Agent Spec Review"
             title="No AgentSpec Selected"
-            description="Choose a current or recent agent draft from the Specs drawer to review it here before you validate it."
+            description="Choose a current or recent agent draft from the Library drawer to review it here before you validate it."
           />
           <Button variant="outline" size="sm" onClick={() => navigate({ to: "/agents/validate" })}>
             Open Validate
