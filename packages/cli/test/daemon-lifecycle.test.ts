@@ -917,4 +917,48 @@ describe("buildDaemonEnv", () => {
     expect(result["OPENRIG_PORT"]).toBe("7433");
     expect(result["OPENRIG_DB"]).toBe("/new/path.db");
   });
+
+  describe("V1 pre-release CLI/daemon Item 1 — transcript rotation tunables projection", () => {
+    it("projects transcriptsLines + transcriptsPollIntervalSeconds into OPENRIG_* env vars when provided", () => {
+      const baseEnv: Record<string, string> = { HOME: "/Users/tester", PATH: "/usr/bin" };
+      const result = buildDaemonEnv(baseEnv, {
+        port: 7433,
+        host: "127.0.0.1",
+        db: "/tmp/test.db",
+        transcriptsLines: 500,
+        transcriptsPollIntervalSeconds: 5,
+      });
+      expect(result["OPENRIG_TRANSCRIPTS_LINES"]).toBe("500");
+      expect(result["OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS"]).toBe("5");
+    });
+
+    it("omits the transcript rotation env vars when the opts are undefined so the rotation hook falls back to its own defaults", () => {
+      const baseEnv: Record<string, string> = { HOME: "/Users/tester", PATH: "/usr/bin" };
+      const result = buildDaemonEnv(baseEnv, {
+        port: 7433,
+        host: "127.0.0.1",
+        db: "/tmp/test.db",
+      });
+      expect(result["OPENRIG_TRANSCRIPTS_LINES"]).toBeUndefined();
+      expect(result["OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS"]).toBeUndefined();
+    });
+
+    it("scrubs inherited OPENRIG_TRANSCRIPTS_* from the base env when opts override is set, so the daemon honors the file-stored ConfigStore value", () => {
+      const baseEnv: Record<string, string> = {
+        HOME: "/Users/tester",
+        PATH: "/usr/bin",
+        OPENRIG_TRANSCRIPTS_LINES: "9999",
+        OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS: "60",
+      };
+      const result = buildDaemonEnv(baseEnv, {
+        port: 7433,
+        host: "127.0.0.1",
+        db: "/tmp/test.db",
+        transcriptsLines: 500,
+        transcriptsPollIntervalSeconds: 5,
+      });
+      expect(result["OPENRIG_TRANSCRIPTS_LINES"]).toBe("500");
+      expect(result["OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS"]).toBe("5");
+    });
+  });
 });
