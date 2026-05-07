@@ -10,7 +10,6 @@
 // retired (legacy auto-open right-sidebar pattern); rig clicks now
 // navigate to /topology/rig/$rigId via URL (no drawer auto-open).
 
-import { NodeDetailPanel } from "./NodeDetailPanel.js";
 import { SystemPanel } from "./SystemPanel.js";
 import { DiscoveryPanel, type DiscoveryPlacementTarget } from "./DiscoveryPanel.js";
 import { VellumSheet } from "./ui/vellum-sheet.js";
@@ -20,8 +19,15 @@ import { SubSpecPreview, type SubSpecPreviewData } from "./drawer-viewers/SubSpe
 import { SeatDetailViewer } from "./drawer-viewers/SeatDetailViewer.js";
 import type { ActivityEvent } from "../hooks/useActivityFeed.js";
 
+// V1 attempt-3 Phase 5 P5-4: legacy 'node' kind retired. The 'seat-detail' kind
+// (Phase 4) is now the single canonical seat-detail surface; SeatDetailViewer
+// wraps NodeDetailPanel inside the canonical 38rem drawer chrome. Founder noticed
+// graph-node clicks rendered NodeDetailPanel "full-width with empty whitespace
+// on left" — width-coupling broke when the legacy 'node' branch routed
+// NodeDetailPanel directly past the drawer chrome. Migration: every prior
+// setSelection({type:'node',...}) callsite now routes through 'seat-detail';
+// useNodeSelection alias coerces same. Negative-assertion test enforces removal.
 export type DrawerSelection =
-  | { type: "node"; rigId: string; logicalId: string }
   | { type: "system"; tab?: "log" | "status" }
   | { type: "discovery" }
   // Phase 4 viewer kinds
@@ -54,15 +60,6 @@ export function SharedDetailDrawer({
   if (!selection) return null;
 
   const inner = (() => {
-    if (selection.type === "node") {
-      return (
-        <NodeDetailPanel
-          rigId={selection.rigId}
-          logicalId={selection.logicalId}
-          onClose={onClose}
-        />
-      );
-    }
     if (selection.type === "system") {
       return (
         <SystemPanel onClose={onClose} events={events} initialTab={selection.tab ?? "log"} />

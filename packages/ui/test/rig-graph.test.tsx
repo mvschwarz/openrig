@@ -1497,7 +1497,10 @@ describe("RigGraph discovery integration", () => {
 import { DrawerSelectionContext } from "../src/components/AppShell.js";
 
 describe("RigGraph node selection", () => {
-  it("click node -> setSelection({ type: 'node', rigId, logicalId }) called via shared context", async () => {
+  // V1 attempt-3 Phase 5 P5-4: legacy 'node' kind retired; useNodeSelection
+  // now coerces through 'seat-detail' kind so SeatDetailViewer (Phase 4)
+  // wraps NodeDetailPanel inside the canonical 38rem drawer chrome.
+  it("click node -> setSelection({ type: 'seat-detail', rigId, logicalId }) called via shared context", async () => {
     const setSelectionSpy = vi.fn();
 
     // Wrap RigGraph in selection context with spy
@@ -1531,10 +1534,12 @@ describe("RigGraph node selection", () => {
       node.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
 
-    // setSelection should have been called with a node selection
+    // P5-4: setSelection should be called with 'seat-detail' kind (canonical
+    // drawer-viewer pattern; SeatDetailViewer wraps NodeDetailPanel inside
+    // 38rem VellumSheet chrome).
     await waitFor(() => {
       expect(setSelectionSpy).toHaveBeenCalledWith({
-        type: "node",
+        type: "seat-detail",
         rigId: "rig-1",
         logicalId: "orchestrator",
       });

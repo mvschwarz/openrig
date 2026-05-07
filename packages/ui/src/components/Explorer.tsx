@@ -222,14 +222,14 @@ function PodBranch({
       {expanded && (
         <div className="ml-4 border-l border-stone-200">
           {sortedNodes.map((node) => {
-            const isSelected = selection?.type === "node" && selection.rigId === node.rigId && selection.logicalId === node.logicalId;
+            const isSelected = selection?.type === "seat-detail" && selection.rigId === node.rigId && selection.logicalId === node.logicalId;
             const memberName = displayAgentName(node.logicalId);
 
             return (
               <button
                 key={node.logicalId}
                 type="button"
-                onClick={() => onSelect({ type: "node", rigId: node.rigId, logicalId: node.logicalId })}
+                onClick={() => onSelect({ type: "seat-detail", rigId: node.rigId, logicalId: node.logicalId })}
                 data-testid={`node-${node.logicalId}`}
                 className={cn(
                   "flex w-full items-center gap-2 rounded-sm px-4 py-1.5 text-left transition-colors hover:bg-stone-100",
@@ -349,14 +349,14 @@ function RigBranch({
             podId === "__ungrouped__" ? (
               <div key={podId}>
                 {podNodes.map((node) => {
-                  const isNodeSelected = selection?.type === "node" && selection.rigId === node.rigId && selection.logicalId === node.logicalId;
+                  const isNodeSelected = selection?.type === "seat-detail" && selection.rigId === node.rigId && selection.logicalId === node.logicalId;
                   const memberName = displayAgentName(node.logicalId);
 
                   return (
                     <button
                     key={node.logicalId}
                     type="button"
-                    onClick={() => onSelect({ type: "node", rigId: node.rigId, logicalId: node.logicalId })}
+                    onClick={() => onSelect({ type: "seat-detail", rigId: node.rigId, logicalId: node.logicalId })}
                     data-testid={`node-${node.logicalId}`}
                       className={cn(
                         "flex w-full items-center gap-2 rounded-sm px-4 py-1.5 text-left transition-colors hover:bg-stone-100",
@@ -383,7 +383,7 @@ function RigBranch({
                 onSelect={onSelect}
                 autoExpand={
                   expanded || (
-                    selection?.type === "node" &&
+                    selection?.type === "seat-detail" &&
                     selection.rigId === rig.id &&
                     podNodes.some((node) => node.logicalId === selection.logicalId)
                   )

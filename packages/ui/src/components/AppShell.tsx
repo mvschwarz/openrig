@@ -94,17 +94,21 @@ export function useDiscoveryPlacement() {
 }
 
 // Backward-compat alias for consumers (RigGraph.tsx) that still use the old name.
+// V1 attempt-3 Phase 5 P5-4: coerces to/from 'seat-detail' kind instead of legacy
+// 'node' kind. SeatDetailViewer (Phase 4) wraps NodeDetailPanel in canonical
+// 38rem drawer width — closes founder concern about "graph node click → full-width
+// old panel with empty whitespace" by routing through canonical drawer-viewer pattern.
 export const NodeSelectionContext = DrawerSelectionContext;
 export function useNodeSelection() {
   const { selection, setSelection } = useDrawerSelection();
   return {
     selectedNode:
-      selection?.type === "node"
+      selection?.type === "seat-detail"
         ? { rigId: selection.rigId, logicalId: selection.logicalId }
         : null,
     setSelectedNode: (node: { rigId: string; logicalId: string } | null) =>
       setSelection(
-        node ? { type: "node", rigId: node.rigId, logicalId: node.logicalId } : null,
+        node ? { type: "seat-detail", rigId: node.rigId, logicalId: node.logicalId } : null,
       ),
   };
 }
