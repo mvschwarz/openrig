@@ -1,9 +1,10 @@
 import { useEffect, useRef } from "react";
 import { useQueryClient } from "@tanstack/react-query";
+import { subscribeTopologyEvents } from "../lib/topology-events.js";
 
 /**
- * Global SSE event listener. Connects to /api/events (all events)
- * and invalidates relevant queries when state-changing events arrive.
+ * Global event listener. Subscribes to the shared /api/events hub and
+ * invalidates relevant queries when state-changing events arrive.
  * Mounted once in AppShell.
  */
 export function useGlobalEvents(): void {
@@ -11,14 +12,9 @@ export function useGlobalEvents(): void {
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
-    const es = new EventSource("/api/events");
     const pendingInvalidations = new Set<string>();
 
-    es.addEventListener("message", (event) => {
-      // Coalesce invalidations — collect all affected query keys, flush on debounce
-      let parsed: { type?: string; rigId?: string } = {};
-      try { parsed = JSON.parse(event.data); } catch { /* ignore */ }
-
+    const unsubscribe = subscribeTopologyEvents((parsed) => {
       const { type, rigId } = parsed;
       if (!type) return;
 
@@ -59,7 +55,7 @@ export function useGlobalEvents(): void {
     });
 
     return () => {
-      es.close();
+      unsubscribe();
       if (debounceRef.current) {
         clearTimeout(debounceRef.current);
         debounceRef.current = null;
