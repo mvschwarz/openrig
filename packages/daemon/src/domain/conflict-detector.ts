@@ -16,9 +16,9 @@ function hashContent(content: string): string {
 }
 
 const MANAGED_BLOCK_START = (packageName: string) =>
-  `<!-- BEGIN RIGGED MANAGED BLOCK: ${packageName} -->`;
+  `<!-- BEGIN OpenRig MANAGED BLOCK: ${packageName} -->`;
 const MANAGED_BLOCK_END = (packageName: string) =>
-  `<!-- END RIGGED MANAGED BLOCK: ${packageName} -->`;
+  `<!-- END OpenRig MANAGED BLOCK: ${packageName} -->`;
 
 /**
  * Refines an InstallPlan with content-aware conflict detection.
@@ -95,7 +95,11 @@ export function detectConflicts(
         const targetContent = fs.readFile(entry.targetPath);
         const beginMarker = MANAGED_BLOCK_START(plan.packageName);
         const endMarker = MANAGED_BLOCK_END(plan.packageName);
-        const hasExistingBlock = targetContent.includes(beginMarker) && targetContent.includes(endMarker);
+        const legacyBegin = `<!-- BEGIN RIGGED MANAGED BLOCK: ${plan.packageName} -->`;
+        const legacyEnd = `<!-- END RIGGED MANAGED BLOCK: ${plan.packageName} -->`;
+        const hasExistingBlock =
+          (targetContent.includes(beginMarker) && targetContent.includes(endMarker)) ||
+          (targetContent.includes(legacyBegin) && targetContent.includes(legacyEnd));
 
         const refined: InstallPlanEntry & { guidanceMeta?: GuidanceConflictMeta } = {
           ...entry,
