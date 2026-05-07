@@ -315,6 +315,84 @@
     0%   { opacity: 1; box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.42); }
     100% { opacity: 0.82; box-shadow: 0 0 0 5px rgba(16, 185, 129, 0.0); }
   }
+  @keyframes activity-card-active-frames {
+    0%, 100% {
+      background-color: rgba(220, 252, 231, 0.82);
+      box-shadow: 2px 2px 0px #2e342e, inset 0 0 0 1px rgba(16, 185, 129, 0.16);
+    }
+    50% {
+      background-color: rgba(187, 247, 208, 0.96);
+      box-shadow: 2px 2px 0px #2e342e, inset 0 0 0 1px rgba(16, 185, 129, 0.30);
+    }
+  }
+  @keyframes activity-card-needs-input-frames {
+    0%, 100% {
+      background-color: rgba(254, 243, 199, 0.88);
+      box-shadow: 2px 2px 0px #2e342e, inset 0 0 0 1px rgba(245, 158, 11, 0.22);
+    }
+    50% {
+      background-color: rgba(253, 230, 138, 0.98);
+      box-shadow: 2px 2px 0px #2e342e, inset 0 0 0 1px rgba(245, 158, 11, 0.38);
+    }
+  }
+  @keyframes activity-card-blocked-frames {
+    0%, 100% {
+      background-color: rgba(254, 226, 226, 0.88);
+      box-shadow: 2px 2px 0px #2e342e, inset 0 0 0 1px rgba(220, 38, 38, 0.26);
+    }
+    50% {
+      background-color: rgba(254, 202, 202, 0.96);
+      box-shadow: 2px 2px 0px #2e342e, inset 0 0 0 1px rgba(220, 38, 38, 0.38);
+    }
+  }
+  @keyframes activity-card-source-flash-frames {
+    0% {
+      background-color: rgba(167, 243, 208, 0.98);
+      box-shadow: 2px 2px 0px #2e342e, 0 0 0 5px rgba(16, 185, 129, 0.34), 0 0 24px rgba(16, 185, 129, 0.30);
+    }
+    100% {
+      box-shadow: 2px 2px 0px #2e342e, 0 0 0 0 rgba(16, 185, 129, 0);
+    }
+  }
+  @keyframes activity-card-target-flash-frames {
+    0% {
+      background-color: rgba(110, 231, 183, 1);
+      box-shadow: 2px 2px 0px #2e342e, 0 0 0 7px rgba(16, 185, 129, 0.42), 0 0 32px rgba(16, 185, 129, 0.38);
+    }
+    100% {
+      box-shadow: 2px 2px 0px #2e342e, 0 0 0 0 rgba(16, 185, 129, 0);
+    }
+  }
+  .activity-card-surface {
+    background-color: rgba(255, 255, 255, 0.96);
+  }
+  .activity-card-active {
+    background-color: rgba(220, 252, 231, 0.88);
+    box-shadow: 2px 2px 0px #2e342e, inset 0 0 0 1px rgba(16, 185, 129, 0.18);
+  }
+  .activity-card-needs-input {
+    background-color: rgba(254, 243, 199, 0.92);
+    box-shadow: 2px 2px 0px #2e342e, inset 0 0 0 1px rgba(245, 158, 11, 0.24);
+  }
+  .activity-card-blocked {
+    background-color: rgba(254, 226, 226, 0.92);
+    box-shadow: 2px 2px 0px #2e342e, inset 0 0 0 1px rgba(220, 38, 38, 0.28);
+  }
+  .activity-card-active:not(.activity-card-reduced-motion) {
+    animation: activity-card-active-frames 2.4s ease-in-out infinite;
+  }
+  .activity-card-needs-input:not(.activity-card-reduced-motion) {
+    animation: activity-card-needs-input-frames 2.1s ease-in-out infinite;
+  }
+  .activity-card-blocked:not(.activity-card-reduced-motion) {
+    animation: activity-card-blocked-frames 3.4s ease-in-out infinite;
+  }
+  .activity-card-source-flash:not(.activity-card-reduced-motion) {
+    animation: activity-card-source-flash-frames 760ms ease-out 1;
+  }
+  .activity-card-target-flash:not(.activity-card-reduced-motion) {
+    animation: activity-card-target-flash-frames 900ms ease-out 1;
+  }
   .activity-ring-active {
     animation: activity-ring-active-frames 2.2s ease-in-out infinite;
   }
@@ -331,15 +409,18 @@
 
   .hot-potato-edge-active .react-flow__edge-path,
   .react-flow__edge.hot-potato-edge-active .react-flow__edge-path {
+    filter: drop-shadow(0 0 6px rgba(16, 185, 129, 0.42)) !important;
+    stroke-width: 4px !important;
     transition: stroke-width 180ms ease-out, filter 180ms ease-out;
+    vector-effect: non-scaling-stroke;
   }
   .hot-potato-packet,
   .hot-potato-packet-cross {
-    filter: drop-shadow(0 0 3px rgba(16, 185, 129, 0.32));
+    filter: drop-shadow(0 0 8px rgba(16, 185, 129, 0.52));
   }
   .hot-potato-packet-cross {
-    opacity: 0.72;
-    filter: drop-shadow(0 0 2px rgba(120, 113, 108, 0.22));
+    opacity: 0.86;
+    filter: drop-shadow(0 0 6px rgba(120, 113, 108, 0.36));
   }
 
   @keyframes rig-activity-frame-frames {
@@ -368,6 +449,11 @@
   .activity-ring-blocked,
   .activity-ring-source-flash,
   .activity-ring-target-flash,
+  .activity-card-active,
+  .activity-card-needs-input,
+  .activity-card-blocked,
+  .activity-card-source-flash,
+  .activity-card-target-flash,
   .rig-activity-frame-pulse {
     animation: none;
     opacity: 1;
