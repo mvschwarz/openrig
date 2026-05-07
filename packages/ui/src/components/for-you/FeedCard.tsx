@@ -51,8 +51,15 @@ function extractQitemViewerData(card: FeedCardModel): QueueItemViewerData | null
     : undefined;
   return {
     qitemId,
-    source: asString(payload.source_session),
-    destination: asString(payload.destination) ?? asString(payload.destination_session),
+    source:
+      asString(payload.source_session) ??
+      asString(payload.sourceSession) ??
+      asString(payload.fromSession),
+    destination:
+      asString(payload.destination) ??
+      asString(payload.destination_session) ??
+      asString(payload.destinationSession) ??
+      asString(payload.toSession),
     state: asString(payload.state),
     tags,
     createdAt: card.createdAt,
