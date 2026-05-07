@@ -26,7 +26,7 @@ export function RigSpecReview() {
           <WorkflowHeader
             eyebrow="Rig Spec Review"
             title="No RigSpec Selected"
-            description="Choose a current or recent rig draft from the Specs drawer to review it here before you import or bootstrap it."
+            description="Choose a current or recent rig draft from the Library drawer to review it here before you import or bootstrap it."
           />
           <Button variant="outline" size="sm" onClick={() => navigate({ to: "/import" })}>
             Open Import

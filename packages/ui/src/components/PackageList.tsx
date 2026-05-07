@@ -112,7 +112,7 @@ export function PackageList() {
       <div className="flex flex-col items-center justify-center min-h-[60vh]" data-testid="packages-empty">
         <h2 className="text-display-lg text-foreground mb-spacing-4">NO LEGACY PACKAGE INSTALLS</h2>
         <p className="text-body-md text-foreground-muted mb-spacing-8">
-          Legacy package tools remain available for bootstrap internals while Specs becomes the main authoring surface.
+          Legacy package tools remain available for bootstrap internals while Library becomes the main authoring surface.
         </p>
         <div className="flex flex-col items-center gap-spacing-3">
           <Button
