@@ -137,11 +137,15 @@ describe("Send CLI", () => {
       "/api/transport/send",
       expect.objectContaining({
         session: "dev-impl@my-rig",
-        text: "hello",
+        text: expect.stringContaining("hello"),
         waitForIdleMs: 30000,
       }),
       { timeoutMs: 35000 },
     );
+    const sentText = postFn.mock.calls[0]?.[1] as { text: string } | undefined;
+    expect(sentText?.text).toContain("To: dev-impl@my-rig");
+    expect(sentText?.text).toContain("---\nhello\n---");
+    expect(sentText?.text).toContain('↩ Reply: rig send');
   });
 
   it("send without wait-for-idle uses default client timeout path", async () => {

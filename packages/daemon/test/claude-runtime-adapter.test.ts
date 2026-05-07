@@ -115,10 +115,10 @@ describe("Claude Code runtime adapter", () => {
     const fs = mockFs({
       "/rig/openrig-start.md": "# OpenRig Start\n\nNew guidance",
       "/project/CLAUDE.md": [
-        "<!-- BEGIN RIGGED MANAGED BLOCK: using-openrig.md -->",
+        "<!-- BEGIN OpenRig MANAGED BLOCK: using-openrig.md -->",
         "# Using OpenRig",
         "Old guidance",
-        "<!-- END RIGGED MANAGED BLOCK: using-openrig.md -->",
+        "<!-- END OpenRig MANAGED BLOCK: using-openrig.md -->",
       ].join("\n"),
     });
     const adapter = new ClaudeCodeAdapter({ tmux: mockTmux(), fsOps: fs });
@@ -135,8 +135,8 @@ describe("Claude Code runtime adapter", () => {
 
     const store = (fs as unknown as { _store: Record<string, string> })._store;
     const content = store["/project/CLAUDE.md"]!;
-    expect(content).toContain("BEGIN RIGGED MANAGED BLOCK: openrig-start.md");
-    expect(content).not.toContain("BEGIN RIGGED MANAGED BLOCK: using-openrig.md");
+    expect(content).toContain("BEGIN OpenRig MANAGED BLOCK: openrig-start.md");
+    expect(content).not.toContain("BEGIN OpenRig MANAGED BLOCK: using-openrig.md");
     expect(content).toContain("New guidance");
   });
 
@@ -539,7 +539,7 @@ describe("Claude Code runtime adapter", () => {
     await adapter.project(plan, makeBinding());
 
     const store = (fs as unknown as { _store: Record<string, string> })._store;
-    expect(store["/project/CLAUDE.md"]).toContain("BEGIN RIGGED MANAGED BLOCK: using-openrig.md");
+    expect(store["/project/CLAUDE.md"]).toContain("BEGIN OpenRig MANAGED BLOCK: using-openrig.md");
     expect(store["/project/CLAUDE.md"]).toContain("hub guidance");
   });
 

@@ -112,6 +112,13 @@ export function daemonCommand(depsOverride?: LifecycleDeps): Command {
             db: opts.db ?? config.db.path,
             transcriptsEnabled: config.transcripts.enabled,
             transcriptsPath: config.transcripts.path,
+            // V1 pre-release CLI/daemon Item 1 — project the
+            // ConfigStore-resolved rotation tunables into the daemon
+            // process env so file-stored values
+            // (`rig config set transcripts.lines 500`) actually
+            // reach the rotation hook.
+            transcriptsLines: config.transcripts.lines,
+            transcriptsPollIntervalSeconds: config.transcripts.pollIntervalSeconds,
           },
           getDeps(),
         );

@@ -27,8 +27,8 @@ export interface VerifierFsOps {
   exists: (filePath: string) => boolean;
 }
 
-const BLOCK_START = (name: string) => `<!-- BEGIN RIGGED MANAGED BLOCK: ${name} -->`;
-const BLOCK_END = (name: string) => `<!-- END RIGGED MANAGED BLOCK: ${name} -->`;
+const BLOCK_START = (name: string) => `<!-- BEGIN OpenRig MANAGED BLOCK: ${name} -->`;
+const BLOCK_END = (name: string) => `<!-- END OpenRig MANAGED BLOCK: ${name} -->`;
 
 function hashContent(content: string): string {
   return createHash("sha256").update(content).digest("hex");
@@ -125,10 +125,15 @@ export class InstallVerifier {
           });
         }
 
-        // Check 3: Guidance managed block markers
+        // Check 3: Guidance managed block markers — recognize both
+        // the OpenRig form (current writes) and the legacy RIGGED form
+        // from prior installs so verification of pre-rename installs
+        // does not falsely report missing markers.
         if (entry.exportType === "guidance") {
-          const hasStart = content.includes(BLOCK_START(packageName));
-          const hasEnd = content.includes(BLOCK_END(packageName));
+          const legacyStart = `<!-- BEGIN RIGGED MANAGED BLOCK: ${packageName} -->`;
+          const legacyEnd = `<!-- END RIGGED MANAGED BLOCK: ${packageName} -->`;
+          const hasStart = content.includes(BLOCK_START(packageName)) || content.includes(legacyStart);
+          const hasEnd = content.includes(BLOCK_END(packageName)) || content.includes(legacyEnd);
           checks.push({
             name: "managed_block_markers",
             passed: hasStart && hasEnd,

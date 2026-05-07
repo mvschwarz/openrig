@@ -9,6 +9,7 @@ import type { ResumeMetadataRefresher } from "./resume-metadata-refresher.js";
 import fs from "node:fs";
 import nodePath from "node:path";
 import { removeManagedBlocksFromFile } from "./managed-blocks.js";
+import { stopTranscriptRotation } from "./transcript-rotation.js";
 
 export interface TeardownResult {
   rigId: string;
@@ -114,6 +115,10 @@ export class RigTeardownOrchestrator {
     // 5. Kill each live session
     let killFailures = 0;
     for (const session of liveSessions) {
+      // V1 pre-release CLI/daemon Item 1: stop the rotation timer
+      // before killing the tmux session so capture-pane stops poking
+      // a dead target. Idempotent: silent no-op if no timer registered.
+      stopTranscriptRotation(session.sessionName);
       const killResult = await this.deps.tmuxAdapter.killSession(session.sessionName);
 
       if (killResult.ok || (killResult as { code?: string }).code === "session_not_found") {

@@ -68,18 +68,43 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
     restoreEnv();
   });
 
-  it("VALID_KEYS includes legacy, user-settings, ui.preview, and recovery keys", () => {
+  it("VALID_KEYS includes legacy, user-settings, ui.preview, recovery, agents, feed, and transcript-rotation keys", () => {
     const expected = [
       "daemon.port", "daemon.host", "db.path",
       "transcripts.enabled", "transcripts.path",
+      // V1 pre-release CLI/daemon Item 1 — capture-pane rotation tunables.
+      "transcripts.lines", "transcripts.poll_interval_seconds",
       "workspace.root", "workspace.slices_root", "workspace.steering_path",
       "workspace.field_notes_root", "workspace.specs_root",
       "files.allowlist", "progress.scan_roots",
       "ui.preview.refresh_interval_seconds", "ui.preview.max_pins", "ui.preview.default_lines",
       "recovery.auto_drive_provider_prompts",
       "recovery.provider_auth_env_allowlist",
+      // V1 attempt-3 Phase 4 — Advisor/Operator placeholders.
+      "agents.advisor_session", "agents.operator_session",
+      // V1 attempt-3 Phase 5 P5-3 — For You feed subscription toggles.
+      "feed.subscriptions.action_required",
+      "feed.subscriptions.approvals",
+      "feed.subscriptions.shipped",
+      "feed.subscriptions.progress",
+      "feed.subscriptions.audit_log",
     ];
     expect([...VALID_KEYS]).toEqual(expected);
+  });
+
+  it("transcripts.lines + transcripts.poll_interval_seconds roundtrip — set → resolve reflects file-stored values for daemon launch projection", () => {
+    const store = new ConfigStore(configPath);
+    // Defaults BEFORE set.
+    const before = store.resolve();
+    expect(before.transcripts.lines).toBe(1000);
+    expect(before.transcripts.pollIntervalSeconds).toBe(2);
+
+    store.set("transcripts.lines", "500");
+    store.set("transcripts.poll_interval_seconds", "5");
+
+    const after = store.resolve();
+    expect(after.transcripts.lines).toBe(500);
+    expect(after.transcripts.pollIntervalSeconds).toBe(5);
   });
 
   it("legacy 5-key behavior preserved: get/set/reset still work", () => {

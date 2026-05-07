@@ -153,8 +153,8 @@ describe("Agent Starter v1 vertical — real Codex adapter delivery (M2 R2)", ()
       const expectedAgentsMdPath = path.join(RIG_ROOT, "AGENTS.md");
       const agentsMd = codexFs._store[expectedAgentsMdPath];
       expect(agentsMd, "expected real CodexRuntimeAdapter to have written AGENTS.md via guidance_merge").toBeDefined();
-      expect(agentsMd).toContain("BEGIN RIGGED MANAGED BLOCK: codex-fixture-starter.yaml");
-      expect(agentsMd).toContain("END RIGGED MANAGED BLOCK: codex-fixture-starter.yaml");
+      expect(agentsMd).toContain("BEGIN OpenRig MANAGED BLOCK: codex-fixture-starter.yaml");
+      expect(agentsMd).toContain("END OpenRig MANAGED BLOCK: codex-fixture-starter.yaml");
       expect(agentsMd).toContain("starter_id: codex-fixture-starter");
 
       db.close();

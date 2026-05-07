@@ -299,8 +299,8 @@ describe("Package API routes", () => {
 
     // Verify managed block was inserted
     const claudeMd = fs.readFileSync(path.join(targetDir, "CLAUDE.md"), "utf-8");
-    expect(claudeMd).toContain("<!-- BEGIN RIGGED MANAGED BLOCK: guidance-pkg -->");
-    expect(claudeMd).toContain("<!-- END RIGGED MANAGED BLOCK: guidance-pkg -->");
+    expect(claudeMd).toContain("<!-- BEGIN OpenRig MANAGED BLOCK: guidance-pkg -->");
+    expect(claudeMd).toContain("<!-- END OpenRig MANAGED BLOCK: guidance-pkg -->");
     expect(claudeMd).toContain("# Existing content");
   });
 

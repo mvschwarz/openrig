@@ -27,8 +27,8 @@ export interface RollbackResult {
   deleted: string[];
 }
 
-const BLOCK_START = (name: string) => `<!-- BEGIN RIGGED MANAGED BLOCK: ${name} -->`;
-const BLOCK_END = (name: string) => `<!-- END RIGGED MANAGED BLOCK: ${name} -->`;
+const BLOCK_START = (name: string) => `<!-- BEGIN OpenRig MANAGED BLOCK: ${name} -->`;
+const BLOCK_END = (name: string) => `<!-- END OpenRig MANAGED BLOCK: ${name} -->`;
 
 function hashContent(content: string): string {
   return createHash("sha256").update(content).digest("hex");
@@ -180,12 +180,28 @@ export class InstallEngine {
       const existing = this.fs.readFile(entry.targetPath);
       const startMarker = BLOCK_START(packageName);
       const endMarker = BLOCK_END(packageName);
-      const startIdx = existing.indexOf(startMarker);
-      const endIdx = existing.indexOf(endMarker);
+      const legacyStart = `<!-- BEGIN RIGGED MANAGED BLOCK: ${packageName} -->`;
+      const legacyEnd = `<!-- END RIGGED MANAGED BLOCK: ${packageName} -->`;
+      // Prefer the OpenRig form; fall back to legacy markers from
+      // prior installs so re-applying a guidance package over a
+      // pre-rename file replaces the old block instead of appending a
+      // duplicate.
+      let startIdx = existing.indexOf(startMarker);
+      let endIdx = existing.indexOf(endMarker);
+      let matchedEndLength = endMarker.length;
+      if (startIdx === -1 || endIdx === -1) {
+        const legacyStartIdx = existing.indexOf(legacyStart);
+        const legacyEndIdx = existing.indexOf(legacyEnd);
+        if (legacyStartIdx !== -1 && legacyEndIdx !== -1) {
+          startIdx = legacyStartIdx;
+          endIdx = legacyEndIdx;
+          matchedEndLength = legacyEnd.length;
+        }
+      }
 
       if (startIdx !== -1 && endIdx !== -1) {
-        // Update existing block
-        const updated = existing.slice(0, startIdx) + block + existing.slice(endIdx + endMarker.length);
+        // Update existing block (rewrites legacy markers to OpenRig form).
+        const updated = existing.slice(0, startIdx) + block + existing.slice(endIdx + matchedEndLength);
         this.fs.writeFile(entry.targetPath, updated);
       } else {
         // Insert new block at end

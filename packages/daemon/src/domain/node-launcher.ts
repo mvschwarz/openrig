@@ -6,6 +6,10 @@ import type { TmuxAdapter } from "../adapters/tmux.js";
 import type { TranscriptStore } from "./transcript-store.js";
 import type { PersistedEvent } from "./types.js";
 import { validateSessionName, deriveSessionName } from "./session-name.js";
+import {
+  startTranscriptRotation,
+  getTranscriptRotationOptionsFromEnv,
+} from "./transcript-rotation.js";
 
 import type { Session, Binding } from "./types.js";
 
@@ -106,16 +110,22 @@ export class NodeLauncher {
       return { ok: false, code: tmuxResult.code, message: tmuxResult.message };
     }
 
-    // 3b. Start transcript piping (best-effort — failure warns, doesn't block launch)
+    // 3b. Start transcript rotation (V1 pre-release CLI/daemon Item 1:
+    // bounded capture-pane overwrite replaces the unbounded pipe-pane
+    // mechanism). Failures inside individual rotation ticks are silent
+    // (best-effort); only the transcript directory not being writable
+    // surfaces a launch warning.
     const launchWarnings: string[] = [];
     if (this.transcriptStore?.enabled) {
       const dirOk = this.transcriptStore.ensureTranscriptDir(rig.rig.name);
       if (dirOk) {
         const transcriptPath = this.transcriptStore.getTranscriptPath(rig.rig.name, sessionName);
-        const pipeResult = await this.tmuxAdapter.startPipePane(sessionName, transcriptPath);
-        if (!pipeResult.ok) {
-          launchWarnings.push(`Transcript capture failed for ${sessionName}: ${pipeResult.message}`);
-        }
+        startTranscriptRotation(
+          this.tmuxAdapter,
+          sessionName,
+          transcriptPath,
+          getTranscriptRotationOptionsFromEnv(),
+        );
       } else {
         launchWarnings.push(`Transcript directory creation failed for rig ${rig.rig.name}`);
       }
