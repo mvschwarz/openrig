@@ -1493,24 +1493,27 @@ describe("RigGraph discovery integration", () => {
   });
 });
 
-// NS-T12: graph selection — clicking a graph node sets shared selection
-import { DrawerSelectionContext } from "../src/components/AppShell.js";
+// NS-T12: graph selection — clicking a graph node navigates to the
+// canonical agent-detail center page (LiveNodeDetails).
+//
+// V1 polish slice Phase 5.1 P5.1-2 + DRIFT P5.1-D2: graph node click
+// migrated from setSelection({type:'seat-detail'}) drawer-open to
+// useNavigate(/topology/seat/$rigId/$logicalId). Parity with Explorer
+// tree click + topology table row click. The test asserts useNavigate
+// was invoked with the canonical seat URL.
 
-describe("RigGraph node selection", () => {
-  // V1 attempt-3 Phase 5 P5-4: legacy 'node' kind retired; useNodeSelection
-  // now coerces through 'seat-detail' kind so SeatDetailViewer (Phase 4)
-  // wraps NodeDetailPanel inside the canonical 38rem drawer chrome.
-  it("click node -> setSelection({ type: 'seat-detail', rigId, logicalId }) called via shared context", async () => {
-    const setSelectionSpy = vi.fn();
+const navigateSpy = vi.fn();
+vi.mock("@tanstack/react-router", async (importActual) => {
+  const actual = await importActual<typeof import("@tanstack/react-router")>();
+  return {
+    ...actual,
+    useNavigate: () => navigateSpy,
+  };
+});
 
-    // Wrap RigGraph in selection context with spy
-    function SelectionWrapper({ children }: { children: React.ReactNode }) {
-      return (
-        <DrawerSelectionContext.Provider value={{ selection: null, setSelection: setSelectionSpy }}>
-          {children}
-        </DrawerSelectionContext.Provider>
-      );
-    }
+describe("RigGraph node selection (P5.1-2 navigate)", () => {
+  it("click node -> navigate({ to: '/topology/seat/$rigId/$logicalId', params })", async () => {
+    navigateSpy.mockClear();
 
     mockFetch
       .mockResolvedValueOnce(mockGraphResponse(sampleNodes(), sampleEdges()))
@@ -1518,9 +1521,7 @@ describe("RigGraph node selection", () => {
 
     const { container } = render(
       <QueryWrapper>
-        <SelectionWrapper>
-          <RigGraph showDiscovered={false} rigId="rig-1" />
-        </SelectionWrapper>
+        <RigGraph showDiscovered={false} rigId="rig-1" />
       </QueryWrapper>
     );
 
@@ -1534,15 +1535,13 @@ describe("RigGraph node selection", () => {
       node.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
 
-    // P5-4: setSelection should be called with 'seat-detail' kind (canonical
-    // drawer-viewer pattern; SeatDetailViewer wraps NodeDetailPanel inside
-    // 38rem VellumSheet chrome).
     await waitFor(() => {
-      expect(setSelectionSpy).toHaveBeenCalledWith({
-        type: "seat-detail",
-        rigId: "rig-1",
-        logicalId: "orchestrator",
-      });
+      expect(navigateSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          to: "/topology/seat/$rigId/$logicalId",
+          params: { rigId: "rig-1", logicalId: encodeURIComponent("orchestrator") },
+        }),
+      );
     });
   });
 });

@@ -3,51 +3,101 @@
 // host > rig > pod > seat. Multi-host envelope: V1 has only one host
 // node ("localhost") above all rigs; V2 adds remote host registration.
 //
-// V1 attempt-3 Phase 5 P5-1: seat leaves gain a "details" icon that opens
-// SeatDetailViewer in the right drawer per content-drawer.md L40 manual-open
-// contract ("'details' icon on any topology node — replaces current auto-open
-// behavior"). The seat row remains a Link to /topology/seat/$rigId/$logicalId
-// for explicit center navigation; the icon is the named-trigger drawer surface.
+// V1 polish slice Phase 5.1 P5.1-2 + DRIFT P5.1-D2: SeatLeaf details
+// icon (P5-1) RETIRED at V1 polish. Founder direction: graph node
+// click + tree click + table row click all navigate to the canonical
+// /topology/seat/$rigId/$logicalId center page. The drawer-as-seat-
+// detail mode is gone; SeatDetailTrigger primitive deleted.
+//
+// P5.1-2 second part — auto-expand: when the route is on a seat URL,
+// expand the matching rig + pod branches automatically so the user
+// sees where the agent lives in the tree. Implemented via
+// useRouterState pathname parsing inside RigBranch + PodBranch.
 
-import { useState } from "react";
-import { Link } from "@tanstack/react-router";
-import { ChevronDown, ChevronRight, Globe, PanelRightOpen } from "lucide-react";
+import { useEffect, useState } from "react";
+import { Link, useRouterState } from "@tanstack/react-router";
+import { ChevronDown, ChevronRight, Globe } from "lucide-react";
 import { cn } from "../../lib/utils.js";
 import { useRigSummary } from "../../hooks/useRigSummary.js";
 import { useNodeInventory } from "../../hooks/useNodeInventory.js";
 import { displayPodName, inferPodName } from "../../lib/display-name.js";
-import { SeatDetailTrigger } from "../drawer-triggers/SeatDetailTrigger.js";
 
-function SeatLeaf({ rigId, logicalId, label }: { rigId: string; logicalId: string; label: string }) {
+/** Parse the active topology pathname for the seat-scope rigId+logicalId
+ *  and (when on a rig/pod URL) the active rigId / podName. Used for
+ *  auto-expand of the matching branches. */
+function useActiveTopologyContext(): {
+  rigId: string | null;
+  podName: string | null;
+  logicalId: string | null;
+} {
+  const pathname = useRouterState({ select: (s) => s.location.pathname });
+  // /topology/seat/$rigId/$logicalId
+  const seatMatch = pathname.match(/^\/topology\/seat\/([^/]+)\/(.+)$/);
+  if (seatMatch) {
+    const rigId = decodeURIComponent(seatMatch[1]!);
+    const logicalId = decodeURIComponent(seatMatch[2]!);
+    const podName = inferPodName(logicalId) ?? "default";
+    return { rigId, podName, logicalId };
+  }
+  // /topology/pod/$rigId/$podName
+  const podMatch = pathname.match(/^\/topology\/pod\/([^/]+)\/([^/]+)$/);
+  if (podMatch) {
+    return {
+      rigId: decodeURIComponent(podMatch[1]!),
+      podName: decodeURIComponent(podMatch[2]!),
+      logicalId: null,
+    };
+  }
+  // /topology/rig/$rigId
+  const rigMatch = pathname.match(/^\/topology\/rig\/([^/]+)$/);
+  if (rigMatch) {
+    return { rigId: decodeURIComponent(rigMatch[1]!), podName: null, logicalId: null };
+  }
+  return { rigId: null, podName: null, logicalId: null };
+}
+
+function SeatLeaf({ rigId, logicalId, label, isActive }: {
+  rigId: string;
+  logicalId: string;
+  label: string;
+  isActive: boolean;
+}) {
   return (
-    <li className="group flex items-center gap-1 px-2 py-0.5 hover:bg-surface-low">
+    <li className="px-2 py-0.5 hover:bg-surface-low">
       <Link
         to="/topology/seat/$rigId/$logicalId"
         params={{ rigId, logicalId: encodeURIComponent(logicalId) }}
         data-testid={`topology-seat-${rigId}-${logicalId}`}
-        className="flex-1 min-w-0 font-mono text-xs text-on-surface hover:text-stone-900 truncate"
+        data-active={isActive}
+        className={cn(
+          "block w-full min-w-0 font-mono text-xs truncate",
+          isActive
+            ? "text-stone-900 font-bold"
+            : "text-on-surface hover:text-stone-900",
+        )}
       >
         {label}
       </Link>
-      <SeatDetailTrigger
-        rigId={rigId}
-        logicalId={logicalId}
-        testId={`topology-seat-details-${rigId}-${logicalId}`}
-        className="shrink-0 p-0.5 rounded-sm text-on-surface-variant hover:text-stone-900 hover:bg-stone-200/60 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity"
-      >
-        <PanelRightOpen className="h-3 w-3" strokeWidth={1.5} aria-hidden="true" />
-        <span className="sr-only">Open details in drawer</span>
-      </SeatDetailTrigger>
     </li>
   );
 }
 
-function PodBranch({ rigId, podName, seats }: {
+function PodBranch({ rigId, podName, seats, activeRigId, activePodName, activeLogicalId }: {
   rigId: string;
   podName: string;
   seats: Array<{ logicalId: string; label: string }>;
+  activeRigId: string | null;
+  activePodName: string | null;
+  activeLogicalId: string | null;
 }) {
   const [open, setOpen] = useState(false);
+  // P5.1-2 auto-expand: when current route is on this pod (via pod URL
+  // OR via a seat URL whose pod resolves to this pod), force-expand.
+  const shouldAutoExpand =
+    activeRigId === rigId && activePodName === podName;
+  useEffect(() => {
+    if (shouldAutoExpand && !open) setOpen(true);
+  }, [shouldAutoExpand, open]);
   return (
     <li data-testid={`topology-pod-${rigId}-${podName}`}>
       <button
@@ -69,7 +119,13 @@ function PodBranch({ rigId, podName, seats }: {
       {open ? (
         <ul className="ml-4 border-l border-stone-200">
           {seats.map((s) => (
-            <SeatLeaf key={s.logicalId} rigId={rigId} logicalId={s.logicalId} label={s.label} />
+            <SeatLeaf
+              key={s.logicalId}
+              rigId={rigId}
+              logicalId={s.logicalId}
+              label={s.label}
+              isActive={activeRigId === rigId && activeLogicalId === s.logicalId}
+            />
           ))}
         </ul>
       ) : null}
@@ -77,9 +133,24 @@ function PodBranch({ rigId, podName, seats }: {
   );
 }
 
-function RigBranch({ rigId, rigName }: { rigId: string; rigName: string }) {
+function RigBranch({ rigId, rigName, activeRigId, activePodName, activeLogicalId }: {
+  rigId: string;
+  rigName: string;
+  activeRigId: string | null;
+  activePodName: string | null;
+  activeLogicalId: string | null;
+}) {
+  // P5.1-2 auto-expand: when the active route lives in this rig (rig
+  // scope URL OR pod/seat scope URL whose rigId matches), force-expand.
+  const shouldAutoExpand = activeRigId === rigId;
   const [open, setOpen] = useState(false);
-  const { data: nodes } = useNodeInventory(open ? rigId : null);
+  useEffect(() => {
+    if (shouldAutoExpand && !open) setOpen(true);
+  }, [shouldAutoExpand, open]);
+  // When auto-expanded, fetch nodes eagerly so the pod tree resolves
+  // even if user lands on a deep URL without manually expanding the rig.
+  const eagerFetch = open || shouldAutoExpand;
+  const { data: nodes } = useNodeInventory(eagerFetch ? rigId : null);
   const podsMap = new Map<string, Array<{ logicalId: string; label: string }>>();
   for (const n of nodes ?? []) {
     const pod = inferPodName(n.logicalId) ?? "default";
@@ -113,7 +184,15 @@ function RigBranch({ rigId, rigName }: { rigId: string; rigName: string }) {
             </li>
           ) : (
             pods.map(([pod, seats]) => (
-              <PodBranch key={pod} rigId={rigId} podName={pod} seats={seats} />
+              <PodBranch
+                key={pod}
+                rigId={rigId}
+                podName={pod}
+                seats={seats}
+                activeRigId={activeRigId}
+                activePodName={activePodName}
+                activeLogicalId={activeLogicalId}
+              />
             ))
           )}
         </ul>
@@ -125,6 +204,10 @@ function RigBranch({ rigId, rigName }: { rigId: string; rigName: string }) {
 export function TopologyTreeView() {
   const { data: rigs } = useRigSummary();
   const [hostOpen, setHostOpen] = useState(true);
+  // P5.1-2 auto-expand: pull active route context once at the tree root
+  // and thread down through RigBranch + PodBranch.
+  const { rigId: activeRigId, podName: activePodName, logicalId: activeLogicalId } =
+    useActiveTopologyContext();
 
   return (
     <div data-testid="topology-tree-view" className="flex-1 overflow-y-auto py-2">
@@ -149,7 +232,16 @@ export function TopologyTreeView() {
           {hostOpen ? (
             <ul className="ml-5">
               {rigs && rigs.length > 0 ? (
-                rigs.map((r) => <RigBranch key={r.id} rigId={r.id} rigName={r.name} />)
+                rigs.map((r) => (
+                  <RigBranch
+                    key={r.id}
+                    rigId={r.id}
+                    rigName={r.name}
+                    activeRigId={activeRigId}
+                    activePodName={activePodName}
+                    activeLogicalId={activeLogicalId}
+                  />
+                ))
               ) : (
                 <li className="px-2 py-1 font-mono text-[10px] text-on-surface-variant italic">
                   No rigs.

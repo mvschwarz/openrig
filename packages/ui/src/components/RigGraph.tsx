@@ -1,11 +1,12 @@
 import { useMemo, useCallback, useState, useRef, useEffect } from "react";
+import { useNavigate } from "@tanstack/react-router";
 import { ReactFlow, Controls, Handle, Position, type NodeTypes, type Node, type Edge, type NodeMouseHandler } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { useRigGraph } from "../hooks/useRigGraph.js";
 import { useRigEvents } from "../hooks/useRigEvents.js";
 import { useTopologyEdgeActivity } from "../hooks/useTopologyEdgeActivity.js";
 import { useDiscoveredSessionsConditional, type DiscoveredSession } from "../hooks/useDiscovery.js";
-import { useDiscoveryPlacement, useDrawerSelection, useNodeSelection } from "./AppShell.js";
+import { useDiscoveryPlacement, useDrawerSelection } from "./AppShell.js";
 import { getEdgeStyle } from "@/lib/edge-styles";
 import { applyTreeLayout } from "@/lib/graph-layout";
 import { RigNode } from "./RigNode.js";
@@ -95,15 +96,55 @@ export function RigGraph({
   rigId,
   rigName = null,
   showDiscovered = true,
+  podScope,
 }: {
   rigId: string | null;
   rigName?: string | null;
   showDiscovered?: boolean;
+  /** V1 polish slice Phase 5.1 P5.1-5: pod-scope filter. When set, the
+   *  graph renders only nodes/edges/podGroups whose pod matches this
+   *  name (matched via inferPodName + node.podId/podNamespace). Other
+   *  rig nodes are filtered out so the graph reads as a single-pod
+   *  subset. Used by /topology/pod/$rigId/$podName graph view-mode. */
+  podScope?: string;
 }) {
   const { data, isPending: loading, error: queryError } = useRigGraph(rigId ?? "");
   const discoveredSessions = useDiscoveredSessionsConditional(showDiscovered);
-  const rawNodes = data?.nodes ?? [];
-  const rawEdges = data?.edges ?? [];
+  const allRawNodes = data?.nodes ?? [];
+  const allRawEdges = data?.edges ?? [];
+
+  // P5.1-5 pod-scope filter: when podScope set, restrict nodes to those
+  // whose pod matches; restrict edges to those between filtered nodes.
+  // Hook data is typed as unknown[]; cast inline to known shape.
+  const { rawNodes, rawEdges } = useMemo(() => {
+    if (!podScope) return { rawNodes: allRawNodes, rawEdges: allRawEdges };
+    type RigNodeShape = {
+      id: string;
+      type?: string;
+      data?: { logicalId?: string; podId?: string | null; podNamespace?: string | null };
+    };
+    type RigEdgeShape = { source: string; target: string };
+    const allowedNodeIds = new Set<string>();
+    const filteredNodes = (allRawNodes as RigNodeShape[]).filter((n) => {
+      if (n.type === "podGroup" || n.type === "group") {
+        const matches =
+          (n.data?.podNamespace ?? n.data?.podId) === podScope;
+        if (matches) allowedNodeIds.add(n.id);
+        return matches;
+      }
+      const inferredPod =
+        n.data?.podNamespace ??
+        n.data?.podId ??
+        inferPodName(n.data?.logicalId ?? null);
+      const matches = inferredPod === podScope;
+      if (matches) allowedNodeIds.add(n.id);
+      return matches;
+    });
+    const filteredEdges = (allRawEdges as RigEdgeShape[]).filter(
+      (e) => allowedNodeIds.has(e.source) && allowedNodeIds.has(e.target),
+    );
+    return { rawNodes: filteredNodes, rawEdges: filteredEdges };
+  }, [allRawNodes, allRawEdges, podScope]);
   const error = queryError?.message ?? null;
   const { reconnecting } = useRigEvents(rigId);
   const edgeActivity = useTopologyEdgeActivity();
@@ -296,7 +337,12 @@ export function RigGraph({
     return [...managed, ...discovered] as Node[];
   }, [rawNodes, rawEdges, shouldAnimate, discoveredSessions, placementMode, placementTarget]);
 
-  const { setSelectedNode } = useNodeSelection();
+  // V1 polish slice Phase 5.1 P5.1-2 + DRIFT P5.1-D2: graph node click
+  // navigates to /topology/seat/$rigId/$logicalId center page (matches
+  // Explorer tree click + table row click contract). Replaces legacy
+  // setSelection({type:'seat-detail'}) drawer-open behavior. The
+  // useNodeSelection alias is fully retired post-Phase 5.1.
+  const navigate = useNavigate();
   const rigStamp = rigName?.trim() ? rigName : (rigId ? shortId(rigId) : null);
 
   const onNodeClick: NodeMouseHandler = useCallback(
@@ -351,8 +397,13 @@ export function RigGraph({
         binding: { cmuxSurface?: string | null } | null;
       };
 
-      // Set shared node selection (for detail panel)
-      setSelectedNode({ rigId, logicalId: nodeData.logicalId });
+      // V1 polish slice Phase 5.1 P5.1-2: navigate to center page
+      // (canonical agent-detail = LiveNodeDetails). Parity with Explorer
+      // tree click + topology table row click (P5.1-7).
+      navigate({
+        to: "/topology/seat/$rigId/$logicalId",
+        params: { rigId, logicalId: encodeURIComponent(nodeData.logicalId) },
+      });
 
       if (!nodeData.binding?.cmuxSurface) {
         showFocusMessage({ text: "Not bound to cmux surface", type: "info" });
@@ -383,7 +434,7 @@ export function RigGraph({
         showFocusMessage({ text: "Focus failed", type: "error" });
       }
     },
-    [placementMode, podMetaById, rigId, setPlacementTarget, setSelectedNode, setSelection, showFocusMessage]
+    [placementMode, podMetaById, rigId, setPlacementTarget, navigate, setSelection, showFocusMessage]
   );
 
   if (rigId === null) {
