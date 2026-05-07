@@ -253,9 +253,17 @@ function RigOverviewTab({ rigId, rigName }: { rigId: string; rigName: string | n
 }
 
 export function PodScopePage() {
+  // V1 polish slice Phase 5.1 P5.1-5: pod-scope graph wires through
+  // RigGraph's new podScope prop (filters nodes + edges + pod groups
+  // to the matching pod only). Default tab moved to "graph" so the
+  // graph view-mode is the landing surface (matches host/rig scope
+  // pattern; founder direction "I noticed that there's no graph view
+  // when you click on a pod").
   const { rigId, podName } = useParams({ from: "/topology/pod/$rigId/$podName" });
-  const [active, setActive] = useState<TopologyRigPodScopeTab>("table");
+  const [active, setActive] = useState<TopologyRigPodScopeTab>("graph");
+  const { isWideLayout } = useShellViewport();
   useOverlayForActiveTab(active);
+  const effectiveActive = !isWideLayout && active === "graph" ? "table" : active;
 
   return (
     <ScopeShell
@@ -263,17 +271,25 @@ export function PodScopePage() {
       title={`${rigId} / ${podName}`}
       tabsNav={<TopologyViewModeTabs tabs={RIG_POD_SCOPE_TABS} active={active} onSelect={setActive} testIdPrefix="topology-pod" />}
     >
-      {active === "graph" ? (
-        <div className="p-6">
-          <EmptyState label="POD GRAPH" description="Pod-scoped graph view (Phase 5 polish)." variant="card" />
+      {effectiveActive === "graph" ? (
+        <div className="flex-1 min-h-0 relative">
+          <RigGraph rigId={rigId} rigName={null} showDiscovered={false} podScope={podName} />
         </div>
       ) : null}
-      {active === "table" ? (
+      {effectiveActive === "table" ? (
         <div className="px-6 pb-6">
+          {!isWideLayout && active === "graph" ? (
+            <p
+              data-testid="topology-mobile-graph-degraded"
+              className="font-mono text-[9px] text-on-surface-variant italic mb-2"
+            >
+              Graph view degrades to table on narrow viewports.
+            </p>
+          ) : null}
           <TopologyTableView rigIdScope={rigId} />
         </div>
       ) : null}
-      {active === "terminal" ? (
+      {effectiveActive === "terminal" ? (
         <TopologyTerminalView scope="pod" rigId={rigId} podName={podName} />
       ) : null}
       {active === "overview" ? (
