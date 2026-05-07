@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type React from "react";
-import { Terminal, X } from "lucide-react";
+import { Terminal } from "lucide-react";
 import { SessionPreviewPane } from "../preview/SessionPreviewPane.js";
 import { cn } from "../../lib/utils.js";
 
@@ -79,32 +79,19 @@ export function TerminalPreviewPopover({
           data-testid={`${testIdPrefix}-terminal-popover`}
           data-reduced-motion={reducedMotion ? "true" : "false"}
           className={cn(
-            "nodrag nopan absolute left-full top-0 z-[80] ml-2 w-80 border border-stone-900 bg-white p-2 hard-shadow",
-            "cursor-default select-text",
+            "nodrag nopan absolute left-full top-0 z-[80] ml-2 w-80 border border-outline-variant bg-stone-950 p-1.5 hard-shadow",
+            "cursor-default select-text text-stone-100",
             popoverClassName,
           )}
           onClick={(event) => event.stopPropagation()}
           onPointerDown={(event) => event.stopPropagation()}
         >
-          <div className="mb-2 flex items-center justify-between gap-2">
-            <div className="truncate font-mono text-[8px] uppercase tracking-[0.14em] text-stone-500">
-              terminal preview
-            </div>
-            <button
-              type="button"
-              data-testid={`${testIdPrefix}-terminal-close`}
-              aria-label="Close terminal preview"
-              title="Close"
-              onClick={(event) => {
-                event.stopPropagation();
-                setOpen(false);
-              }}
-              className="inline-flex h-5 w-5 items-center justify-center border border-outline-variant bg-white text-stone-600 hover:bg-stone-100 hover:text-stone-950 focus:outline-none focus:ring-2 focus:ring-stone-900/20"
-            >
-              <X className="h-3 w-3" aria-hidden="true" />
-            </button>
-          </div>
-          <SessionPreviewPane sessionName={sessionName} lines={80} testIdPrefix={`${testIdPrefix}-terminal-preview`} />
+          <SessionPreviewPane
+            sessionName={sessionName}
+            lines={80}
+            testIdPrefix={`${testIdPrefix}-terminal-preview`}
+            variant="compact-terminal"
+          />
         </div>
       ) : null}
     </div>
