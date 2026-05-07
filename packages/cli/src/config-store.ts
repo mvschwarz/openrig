@@ -54,6 +54,19 @@ export interface RiggedConfig {
     advisorSession: string;
     operatorSession: string;
   };
+  // V1 attempt-3 Phase 5 P5-3 — For You feed subscription toggles per
+  // for-you-feed.md L144–L151. SC-29 EXCEPTION declared in Phase 5
+  // dispatch ACK §5 DRIFT P5-D2: same scope as Phase 4 (allowlist-only;
+  // no migrations / new endpoints / event types).
+  feed: {
+    subscriptions: {
+      actionRequired: boolean;
+      approvals: boolean;
+      shipped: boolean;
+      progress: boolean;
+      auditLog: boolean;
+    };
+  };
 }
 
 const DEFAULT_WORKSPACE_ROOT = getDefaultOpenRigPath("workspace");
@@ -88,6 +101,20 @@ const DEFAULTS = {
     advisorSession: "advisor-lead@openrig-velocity",
     operatorSession: "",
   },
+  // V1 Phase 5 P5-3 — feed subscription defaults per for-you-feed.md
+  // L144–L151. action_required forced ON in UI (load-bearing
+  // human-gate items per L145; cannot be disabled); approvals/
+  // shipped/progress default ON; audit_log default OFF (verbose;
+  // opt-in for triage runs).
+  feed: {
+    subscriptions: {
+      actionRequired: true,
+      approvals: true,
+      shipped: true,
+      progress: true,
+      auditLog: false,
+    },
+  },
 } as const;
 
 export const VALID_KEYS = [
@@ -111,6 +138,12 @@ export const VALID_KEYS = [
   // V1 Phase 4 SC-29 exception — allowlist-only additions.
   "agents.advisor_session",
   "agents.operator_session",
+  // V1 Phase 5 P5-3 SC-29 exception — allowlist-only additions.
+  "feed.subscriptions.action_required",
+  "feed.subscriptions.approvals",
+  "feed.subscriptions.shipped",
+  "feed.subscriptions.progress",
+  "feed.subscriptions.audit_log",
 ] as const;
 
 export type ValidKey = typeof VALID_KEYS[number];
@@ -138,6 +171,11 @@ export const ENV_MAP: Record<ValidKey, { primary: string; legacy: string }> = {
   "recovery.provider_auth_env_allowlist": { primary: "OPENRIG_RECOVERY_PROVIDER_AUTH_ENV_ALLOWLIST", legacy: "RIGGED_RECOVERY_PROVIDER_AUTH_ENV_ALLOWLIST" },
   "agents.advisor_session": { primary: "OPENRIG_AGENTS_ADVISOR_SESSION", legacy: "RIGGED_AGENTS_ADVISOR_SESSION" },
   "agents.operator_session": { primary: "OPENRIG_AGENTS_OPERATOR_SESSION", legacy: "RIGGED_AGENTS_OPERATOR_SESSION" },
+  "feed.subscriptions.action_required": { primary: "OPENRIG_FEED_SUBSCRIPTIONS_ACTION_REQUIRED", legacy: "RIGGED_FEED_SUBSCRIPTIONS_ACTION_REQUIRED" },
+  "feed.subscriptions.approvals": { primary: "OPENRIG_FEED_SUBSCRIPTIONS_APPROVALS", legacy: "RIGGED_FEED_SUBSCRIPTIONS_APPROVALS" },
+  "feed.subscriptions.shipped": { primary: "OPENRIG_FEED_SUBSCRIPTIONS_SHIPPED", legacy: "RIGGED_FEED_SUBSCRIPTIONS_SHIPPED" },
+  "feed.subscriptions.progress": { primary: "OPENRIG_FEED_SUBSCRIPTIONS_PROGRESS", legacy: "RIGGED_FEED_SUBSCRIPTIONS_PROGRESS" },
+  "feed.subscriptions.audit_log": { primary: "OPENRIG_FEED_SUBSCRIPTIONS_AUDIT_LOG", legacy: "RIGGED_FEED_SUBSCRIPTIONS_AUDIT_LOG" },
 };
 
 // Maps dotted-string config keys to the camelCase RiggedConfig path.
@@ -164,6 +202,11 @@ const KEY_TO_PATH: Record<ValidKey, string[]> = {
   "recovery.provider_auth_env_allowlist": ["recovery", "providerAuthEnvAllowlist"],
   "agents.advisor_session": ["agents", "advisorSession"],
   "agents.operator_session": ["agents", "operatorSession"],
+  "feed.subscriptions.action_required": ["feed", "subscriptions", "actionRequired"],
+  "feed.subscriptions.approvals": ["feed", "subscriptions", "approvals"],
+  "feed.subscriptions.shipped": ["feed", "subscriptions", "shipped"],
+  "feed.subscriptions.progress": ["feed", "subscriptions", "progress"],
+  "feed.subscriptions.audit_log": ["feed", "subscriptions", "auditLog"],
 };
 
 function isValidKey(key: string): key is ValidKey {
@@ -303,6 +346,15 @@ export class ConfigStore {
       agents: {
         advisorSession: v("agents.advisor_session") as string,
         operatorSession: v("agents.operator_session") as string,
+      },
+      feed: {
+        subscriptions: {
+          actionRequired: v("feed.subscriptions.action_required") as boolean,
+          approvals: v("feed.subscriptions.approvals") as boolean,
+          shipped: v("feed.subscriptions.shipped") as boolean,
+          progress: v("feed.subscriptions.progress") as boolean,
+          auditLog: v("feed.subscriptions.audit_log") as boolean,
+        },
       },
     };
   }

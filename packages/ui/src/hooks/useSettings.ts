@@ -23,7 +23,18 @@ export type SettingsKey =
   // Preview Terminal v0 (PL-018) keys.
   | "ui.preview.refresh_interval_seconds"
   | "ui.preview.max_pins"
-  | "ui.preview.default_lines";
+  | "ui.preview.default_lines"
+  // V1 Phase 4 ConfigStore allowlist exception (advisor/operator seats).
+  | "agents.advisor_session" | "agents.operator_session"
+  // V1 Phase 5 P5-3 ConfigStore allowlist exception (For You feed
+  // subscription toggles per for-you-feed.md L144-L151). Same SC-29
+  // exception scope as Phase 4 (allowlist-only; no schema migrations
+  // / new endpoints / event types).
+  | "feed.subscriptions.action_required"
+  | "feed.subscriptions.approvals"
+  | "feed.subscriptions.shipped"
+  | "feed.subscriptions.progress"
+  | "feed.subscriptions.audit_log";
 
 export interface SettingsResponse {
   settings: Record<SettingsKey, ResolvedSetting>;
