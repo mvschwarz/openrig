@@ -50,6 +50,7 @@ import {
   TopologyOverlayProvider,
   useTopologyOverlay,
 } from "./topology/topology-overlay-context.js";
+import { useSettings } from "../hooks/useSettings.js";
 import { useActivityFeed } from "../hooks/useActivityFeed.js";
 import { useGlobalEvents } from "../hooks/useGlobalEvents.js";
 import { cn } from "../lib/utils.js";
@@ -203,6 +204,34 @@ const RAIL_ICONS: RailIconSpec[] = [
   },
 ];
 
+// V1 Phase 4 P4-4 helpers — config-driven Advisor / Operator click resolution.
+
+function readSettingString(
+  data: { settings?: Record<string, { value?: unknown }> } | undefined,
+  key: string,
+): string {
+  if (!data || !data.settings) return "";
+  const v = data.settings[key]?.value;
+  return typeof v === "string" ? v : "";
+}
+
+/** Map a ConfigStore session-string ("logicalId@rigId") to a navigation
+ *  target. When configured: `/topology/seat/$rigId/$logicalId`. When
+ *  unset: `/settings#agents-{role}-session`. Per universal-shell.md L80
+ *  (one-click navigation; not popup-then-CTA two-click). */
+function resolveChatTo(session: string, role: "advisor" | "operator"): string {
+  if (!session) return `/settings#agents-${role}-session`;
+  const at = session.indexOf("@");
+  if (at === -1) {
+    // Malformed; fall back to /settings.
+    return `/settings#agents-${role}-session`;
+  }
+  const logicalId = session.slice(0, at);
+  const rigId = session.slice(at + 1);
+  if (!rigId || !logicalId) return `/settings#agents-${role}-session`;
+  return `/topology/seat/${encodeURIComponent(rigId)}/${encodeURIComponent(logicalId)}`;
+}
+
 // =====================================================================
 // Path → Explorer surface mapping
 // =====================================================================
@@ -229,7 +258,24 @@ function Rail({
   vertical: boolean;
 }) {
   const destinationIcons = RAIL_ICONS.filter((i) => i.group === "destination");
-  const chatIcons = RAIL_ICONS.filter((i) => i.group === "chat");
+  // V1 attempt-3 Phase 4 P4-4 — Advisor / Operator click handlers
+  // resolve `agents.advisor_session` / `agents.operator_session` from
+  // ConfigStore (via useSettings). When configured: navigate to seat
+  // detail. When unset: navigate to /settings#agents-{role}-session
+  // CTA. Defaults from universal-shell.md L83-L84 (advisor =
+  // advisor-lead@openrig-velocity; operator = empty/not configured).
+  const { data: settingsData } = useSettings();
+  const advisorSession = readSettingString(settingsData, "agents.advisor_session");
+  const operatorSession = readSettingString(settingsData, "agents.operator_session");
+  const chatIcons: RailIconSpec[] = RAIL_ICONS.filter((i) => i.group === "chat").map((spec) => {
+    if (spec.id === "advisor") {
+      return { ...spec, to: resolveChatTo(advisorSession, "advisor") };
+    }
+    if (spec.id === "operator") {
+      return { ...spec, to: resolveChatTo(operatorSession, "operator") };
+    }
+    return spec;
+  });
 
   const renderIcon = (spec: RailIconSpec) => {
     const Icon = spec.icon;
