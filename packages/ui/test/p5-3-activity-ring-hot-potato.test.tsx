@@ -104,6 +104,7 @@ describe("P5.3 ActivityRing and HotPotatoEdge", () => {
     const ring = readFileSync(path.join(srcRoot, "components/topology/ActivityRing.tsx"), "utf8");
     const edge = readFileSync(path.join(srcRoot, "components/topology/HotPotatoEdge.tsx"), "utf8");
     const activity = readFileSync(path.join(srcRoot, "lib/topology-activity.ts"), "utf8");
+    const hybridLayout = readFileSync(path.join(srcRoot, "lib/hybrid-layout.ts"), "utf8");
     const css = readFileSync(path.join(srcRoot, "globals.css"), "utf8");
 
     expect(host).toMatch(/useTopologyActivity/);
@@ -118,7 +119,11 @@ describe("P5.3 ActivityRing and HotPotatoEdge", () => {
     expect(ring).not.toMatch(/StatusPip/);
     expect(edge).toMatch(/animateMotion/);
     expect(activity).toMatch(/TOPOLOGY_NODE_ACTIVITY_TTL_MS/);
-    expect(activity).toMatch(/HOT_POTATO_CROSS_RIG_STROKE_DASH/);
+    expect(activity).toMatch(/HYBRID_CROSS_RIG_STROKE_DASH/);
+    expect(activity).not.toMatch(/HOT_POTATO_CROSS_RIG_STROKE_DASH/);
+    expect(hybridLayout).toContain('export const HYBRID_CROSS_RIG_STROKE_DASH = "6 7"');
+    const sourceFiles = [activity, hybridLayout];
+    expect(sourceFiles.join("\n").match(/"6 7"/g) ?? []).toHaveLength(1);
     expect(css).toMatch(/@media \(prefers-reduced-motion: reduce\)/);
     expect(css).toMatch(/activity-ring-active/);
     expect(css).toMatch(/rig-activity-frame-pulse/);

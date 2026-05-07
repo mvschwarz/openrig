@@ -1,5 +1,6 @@
 import type { Edge, Node } from "@xyflow/react";
 import type { AgentActivitySummary, CurrentQitemSummary } from "../hooks/useNodeInventory.js";
+import { HYBRID_CROSS_RIG_STROKE_DASH } from "./hybrid-layout.js";
 
 const SESSION_PAIR_DELIMITER = "\u0000";
 
@@ -10,7 +11,6 @@ export const HOT_POTATO_CROSS_RIG_DURATION_MS = 1_600;
 export const HOT_POTATO_TRAIL_TTL_MS = 3_000;
 export const HOT_POTATO_SOURCE_FLASH_MS = 650;
 export const HOT_POTATO_TARGET_FLASH_MS = 900;
-export const HOT_POTATO_CROSS_RIG_STROKE_DASH = "6 7";
 
 export type ActivityRingState = "active" | "needs_input" | "blocked" | "idle";
 export type ActivityFlash = "source" | "target" | null;
@@ -375,7 +375,7 @@ export function applyHotPotatoEdges(
 }
 
 function decorateHotPotatoEdge(edge: Edge, packet: HotPotatoPacket | null, reducedMotion: boolean): Edge {
-  const crossRig = packet?.crossRig || (edge.style as { strokeDasharray?: string } | undefined)?.strokeDasharray === HOT_POTATO_CROSS_RIG_STROKE_DASH;
+  const crossRig = packet?.crossRig || (edge.style as { strokeDasharray?: string } | undefined)?.strokeDasharray === HYBRID_CROSS_RIG_STROKE_DASH;
   const data = {
     ...(edge.data ?? {}),
     hotPotatoPacket: packet,
@@ -399,7 +399,7 @@ function hotPotatoEdgeStyle(crossRig: boolean): Edge["style"] {
   return {
     stroke: crossRig ? "#a8a29e" : "#047857",
     strokeWidth: crossRig ? 1.25 : 2.25,
-    strokeDasharray: crossRig ? HOT_POTATO_CROSS_RIG_STROKE_DASH : undefined,
+    strokeDasharray: crossRig ? HYBRID_CROSS_RIG_STROKE_DASH : undefined,
   };
 }
 
