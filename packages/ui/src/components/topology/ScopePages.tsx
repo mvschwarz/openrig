@@ -21,7 +21,9 @@ import { TopologyTerminalView } from "./TopologyTerminalView.js";
 import { SectionHeader } from "../ui/section-header.js";
 import { EmptyState } from "../ui/empty-state.js";
 import { RigGraph } from "../RigGraph.js";
+import { RigSpecDisplay } from "../RigSpecDisplay.js";
 import { useRigSummary } from "../../hooks/useRigSummary.js";
+import { useSpecLibrary, useLibraryReview, type LibraryRigReview } from "../../hooks/useSpecLibrary.js";
 import { LiveNodeDetails } from "../LiveNodeDetails.js";
 import { useTopologyOverlay } from "./topology-overlay-context.js";
 // V1 attempt-3 Phase 5 P5-9: graph view-mode degrades to table on
@@ -173,17 +175,80 @@ export function RigScopePage() {
         </div>
       ) : null}
       {effectiveActive === "terminal" ? <TopologyTerminalView scope="rig" rigId={rigId} /> : null}
-      {active === "overview" ? (
-        <div className="p-6">
-          <EmptyState
-            label="RIG OVERVIEW"
-            description="Existing rig spec / detail page mounted here in Phase 5 polish."
-            variant="card"
-            testId="topology-rig-overview-placeholder"
-          />
-        </div>
-      ) : null}
+      {active === "overview" ? <RigOverviewTab rigId={rigId} rigName={rig?.name ?? null} /> : null}
     </ScopeShell>
+  );
+}
+
+/** V1 polish slice Phase 5.1 P5.1-6 — Rig overview tab.
+ *
+ *  Founder direction at V1 founder-walk:
+ *  > "Topology page, there's an overview tab that says 'rig overview
+ *  > existing rig spec detail page mounted here in phase five polish.'"
+ *
+ *  Mounts the existing canonical RigSpecDisplay component (from
+ *  /specs/rig/$id) sourced via useSpecLibrary("rig") + useLibraryReview.
+ *  Matches the rig name against the library entries (per
+ *  LibraryReview.tsx pattern) and renders the spec detail.
+ */
+function RigOverviewTab({ rigId, rigName }: { rigId: string; rigName: string | null }) {
+  const { data: entries = [], isLoading: entriesLoading } = useSpecLibrary("rig");
+  // Match by rig name when available; some rigs may have one library
+  // entry per name (operator-authored rig spec).
+  const matches = rigName ? entries.filter((e) => e.name === rigName) : [];
+  const entryId = matches.length === 1 ? matches[0]!.id : null;
+  const { data: review, isLoading: reviewLoading } = useLibraryReview(entryId);
+
+  if (entriesLoading || reviewLoading) {
+    return (
+      <div className="p-6">
+        <div className="font-mono text-[10px] text-stone-400">Loading rig spec…</div>
+      </div>
+    );
+  }
+  if (matches.length === 0) {
+    return (
+      <div className="p-6">
+        <EmptyState
+          label="NO RIG SPEC"
+          description={`No rig spec entry found for "${rigName ?? rigId}". Author one via /specs.`}
+          variant="card"
+          testId="topology-rig-overview-no-spec"
+        />
+      </div>
+    );
+  }
+  if (matches.length > 1) {
+    return (
+      <div className="p-6">
+        <EmptyState
+          label="AMBIGUOUS RIG SPEC"
+          description={`${matches.length} rig spec entries match "${rigName ?? rigId}". Disambiguate at /specs.`}
+          variant="card"
+        />
+      </div>
+    );
+  }
+  if (!review || review.kind !== "rig") {
+    return (
+      <div className="p-6">
+        <EmptyState
+          label="RIG SPEC UNAVAILABLE"
+          description="Rig spec failed to load."
+          variant="card"
+        />
+      </div>
+    );
+  }
+  const rigReview = review as LibraryRigReview;
+  return (
+    <div className="px-6 pb-6" data-testid="topology-rig-overview">
+      <RigSpecDisplay
+        review={rigReview}
+        yaml={rigReview.raw}
+        testIdPrefix="topology-rig-overview-"
+      />
+    </div>
   );
 }
 
