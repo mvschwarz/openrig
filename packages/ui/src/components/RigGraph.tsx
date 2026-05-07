@@ -1,18 +1,25 @@
 import { useMemo, useCallback, useState, useRef, useEffect } from "react";
 import { useNavigate } from "@tanstack/react-router";
-import { ReactFlow, Controls, Handle, Position, type NodeTypes, type Node, type Edge, type NodeMouseHandler } from "@xyflow/react";
+import { ReactFlow, Controls, Handle, Position, type NodeTypes, type EdgeTypes, type Node, type Edge, type NodeMouseHandler } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { useRigGraph } from "../hooks/useRigGraph.js";
 import { useRigEvents } from "../hooks/useRigEvents.js";
-import { useTopologyEdgeActivity } from "../hooks/useTopologyEdgeActivity.js";
 import { useDiscoveredSessionsConditional, type DiscoveredSession } from "../hooks/useDiscovery.js";
 import { useDiscoveryPlacement, useDrawerSelection } from "./AppShell.js";
 import { getEdgeStyle } from "@/lib/edge-styles";
 import { applyTreeLayout } from "@/lib/graph-layout";
 import { RigNode } from "./RigNode.js";
+import { HotPotatoEdge } from "./topology/HotPotatoEdge.js";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { displayPodName, inferPodName } from "../lib/display-name.js";
 import { shortId } from "../lib/display-id.js";
+import { useTopologyActivity } from "../hooks/useTopologyActivity.js";
+import { usePrefersReducedMotion } from "../hooks/usePrefersReducedMotion.js";
+import {
+  applyHotPotatoEdges,
+  buildTopologySessionIndex,
+  type TopologyActivityBaseline,
+} from "../lib/topology-activity.js";
 
 function PodGroupNode({
   data,
@@ -67,6 +74,10 @@ const nodeTypes: NodeTypes = {
   rigNode: RigNode,
   discoveredNode: DiscoveredNode,
   podGroup: PodGroupNode,
+};
+
+const edgeTypes: EdgeTypes = {
+  hotPotato: HotPotatoEdge,
 };
 
 /** Wireframe ghost for empty topology */
@@ -147,11 +158,11 @@ export function RigGraph({
   }, [allRawNodes, allRawEdges, podScope]);
   const error = queryError?.message ?? null;
   const { reconnecting } = useRigEvents(rigId);
-  const edgeActivity = useTopologyEdgeActivity();
+  const reducedMotion = usePrefersReducedMotion();
   const [focusMessage, setFocusMessage] = useState<FocusMessage | null>(null);
   const dismissTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Entrance animation tracking — keyed by rigId, fires once per navigation
+  // Entrance animation tracking: keyed by rigId, fires once per navigation
   const animatedRigRef = useRef<string | null>(null);
   const shouldAnimate = rigId !== null && animatedRigRef.current !== rigId;
 
@@ -177,54 +188,40 @@ export function RigGraph({
     };
   }, []);
 
-  // PL-019 item 6: build a node-id → canonicalSessionName lookup so edge
-  // activity (keyed on session names from /api/events) can be resolved
-  // against React Flow edges (keyed on internal node ids). Built each
-  // render off rawNodes; cheap (O(n) on graph nodes), and node-id is
-  // stable for a given rig, so edges stay stable visually too.
-  const sessionNameByNodeId = useMemo(() => {
-    const map = new Map<string, string>();
-    for (const node of rawNodes as Node[]) {
-      const data = node.data as { canonicalSessionName?: string | null } | undefined;
-      if (data?.canonicalSessionName) {
-        map.set(node.id, data.canonicalSessionName);
-      }
-    }
-    return map;
-  }, [rawNodes]);
+  const sessionIndex = useMemo(() => {
+    return buildTopologySessionIndex((rawNodes as Node[])
+      .filter((node) => node.type === "rigNode")
+      .map((node) => {
+        const data = node.data as {
+          logicalId?: string | null;
+          canonicalSessionName?: string | null;
+          agentActivity?: TopologyActivityBaseline["agentActivity"];
+          currentQitems?: TopologyActivityBaseline["currentQitems"];
+          startupStatus?: string | null;
+        } | undefined;
+        return {
+          nodeId: node.id,
+          rigId,
+          rigName,
+          logicalId: data?.logicalId ?? null,
+          canonicalSessionName: data?.canonicalSessionName ?? null,
+          agentActivity: data?.agentActivity ?? null,
+          currentQitems: data?.currentQitems ?? null,
+          startupStatus: data?.startupStatus ?? null,
+        };
+      }));
+  }, [rawNodes, rigId, rigName]);
+  const topologyActivity = useTopologyActivity(sessionIndex);
 
-  // Apply edge styles from design system + entrance animation +
-  // PL-019 traffic emphasis. Class composition order:
-  //   - shouldAnimate: one-shot entrance (existing behavior; not toggled
-  //     after first render).
-  //   - edge-recent-traffic: sustained 1.5x weight + brighter for any
-  //     edge whose directed pair fired in the last ~30s.
-  //   - edge-just-fired: one-shot 1.2s pulse on top of the sustained
-  //     emphasis when the most recent firing is within ~1.2s.
-  // edgeActivity.version is included in deps so the memo refreshes when
-  // a new event arrives or an old one ages out of the recent window.
   const rfEdges = useMemo(() => {
     return (rawEdges as (Edge & { data?: { kind?: string } })[]).map((edge) => {
       const kind = (edge as { data?: { kind?: string } }).data?.kind ??
         (edge as { label?: string }).label ?? "delegates_to";
       const styleResult = getEdgeStyle(kind);
-      const sourceSession = sessionNameByNodeId.get(edge.source as string);
-      const destSession = sessionNameByNodeId.get(edge.target as string);
-      const recentTraffic = sourceSession && destSession
-        ? edgeActivity.recentTraffic(sourceSession, destSession)
-        : false;
-      const justFired = sourceSession && destSession
-        ? edgeActivity.justFired(sourceSession, destSession)
-        : false;
-      const trafficClass = [
-        shouldAnimate ? "edge-draw-in" : "",
-        recentTraffic ? "edge-recent-traffic" : "",
-        justFired ? "edge-just-fired" : "",
-      ].filter(Boolean).join(" ") || undefined;
       return {
         ...edge,
         ...styleResult,
-        className: trafficClass,
+        className: shouldAnimate ? "edge-draw-in" : undefined,
         style: {
           ...styleResult.style,
           animationDelay: shouldAnimate ? `${Math.min(rawNodes.length * 50 + 100, 2000)}ms` : undefined,
@@ -232,7 +229,7 @@ export function RigGraph({
       };
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rawEdges, shouldAnimate, rawNodes.length, sessionNameByNodeId, edgeActivity.version]);
+  }, [rawEdges, shouldAnimate, rawNodes.length]);
 
   // Apply tree layout + entrance animation to nodes
   const podMetaById = useMemo(() => {
@@ -336,6 +333,24 @@ export function RigGraph({
 
     return [...managed, ...discovered] as Node[];
   }, [rawNodes, rawEdges, shouldAnimate, discoveredSessions, placementMode, placementTarget]);
+
+  const activityNodes = useMemo(() => rfNodes.map((node) => {
+    if (node.type !== "rigNode") return node;
+    const data = node.data as TopologyActivityBaseline;
+    return {
+      ...node,
+      data: {
+        ...(node.data ?? {}),
+        activityRing: topologyActivity.getNodeActivity(node.id, data),
+        reducedMotion,
+      },
+    };
+  }), [rfNodes, topologyActivity, reducedMotion]);
+
+  const activityEdges = useMemo(
+    () => applyHotPotatoEdges(rfEdges, topologyActivity.packets, { reducedMotion }),
+    [rfEdges, topologyActivity.packets, reducedMotion],
+  );
 
   // V1 polish slice Phase 5.1 P5.1-2 + DRIFT P5.1-D2: graph node click
   // navigates to /topology/seat/$rigId/$logicalId center page (matches
@@ -460,7 +475,7 @@ export function RigGraph({
     );
   }
 
-  if (rfNodes.length === 0) {
+  if (activityNodes.length === 0) {
     return <EmptyTopologyGhost />;
   }
 
@@ -486,7 +501,7 @@ export function RigGraph({
       {reconnecting && (
         <div className="absolute top-spacing-4 right-spacing-4 z-20">
           <Alert>
-            <AlertDescription className="text-warning">Live updates disconnected from daemon — reconnecting...</AlertDescription>
+            <AlertDescription className="text-warning">Live updates disconnected from daemon - reconnecting...</AlertDescription>
           </Alert>
         </div>
       )}
@@ -504,13 +519,14 @@ export function RigGraph({
           data-testid="graph-placement-banner"
           className="absolute top-spacing-4 left-1/2 z-20 -translate-x-1/2 border border-emerald-300/90 bg-[rgba(236,253,245,0.92)] px-3.5 py-2 font-mono text-[10px] text-emerald-950 shadow-[0_12px_28px_rgba(34,197,94,0.14)] backdrop-blur-sm"
         >
-          PLACEMENT MODE · click an available node to bind, or click a pod to add a new node.
+          PLACEMENT MODE / click an available node to bind, or click a pod to add a new node.
         </div>
       )}
       <ReactFlow
-        nodes={rfNodes}
-        edges={rfEdges}
+        nodes={activityNodes}
+        edges={activityEdges}
         nodeTypes={nodeTypes}
+        edgeTypes={edgeTypes}
         onNodeClick={onNodeClick}
         nodesDraggable={false}
         selectionOnDrag={false}

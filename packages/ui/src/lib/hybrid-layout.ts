@@ -58,6 +58,7 @@ interface StandaloneLayout {
 
 export interface HybridRigLayoutInput {
   rigId: string;
+  rigName?: string | null;
   nodes: HybridRawNode[];
   edges: HybridRawEdge[];
   collapsed: boolean;
@@ -207,7 +208,7 @@ export function layoutHybridRig(input: HybridRigLayoutInput): HybridRigLayoutRes
       parentId: rigParentId,
       extent: "parent",
       position: pod.position,
-      data: { ...(pod.node.data ?? {}), rigId: input.rigId, agentCount: pod.members.length },
+      data: { ...(pod.node.data ?? {}), rigId: input.rigId, rigName: input.rigName ?? null, agentCount: pod.members.length },
       style: { ...(pod.node.style ?? {}), width: pod.width, height: pod.height },
       draggable: false,
       zIndex: 1,
@@ -221,7 +222,7 @@ export function layoutHybridRig(input: HybridRigLayoutInput): HybridRigLayoutRes
         parentId: podId,
         extent: "parent",
         position: member.position,
-        data: { ...(member.node.data ?? {}), rigId: input.rigId },
+        data: { ...(member.node.data ?? {}), rigId: input.rigId, rigName: input.rigName ?? null },
         style: { ...(member.node.style ?? {}), width: HYBRID_AGENT_WIDTH, height: HYBRID_AGENT_HEIGHT },
         initialWidth: HYBRID_AGENT_WIDTH,
         initialHeight: HYBRID_AGENT_HEIGHT,
@@ -241,7 +242,7 @@ export function layoutHybridRig(input: HybridRigLayoutInput): HybridRigLayoutRes
       parentId: rigParentId,
       extent: "parent",
       position: standalone.position,
-      data: { ...(standalone.node.data ?? {}), rigId: input.rigId },
+      data: { ...(standalone.node.data ?? {}), rigId: input.rigId, rigName: input.rigName ?? null },
       style: { ...(standalone.node.style ?? {}), width: HYBRID_AGENT_WIDTH, height: HYBRID_AGENT_HEIGHT },
       initialWidth: HYBRID_AGENT_WIDTH,
       initialHeight: HYBRID_AGENT_HEIGHT,

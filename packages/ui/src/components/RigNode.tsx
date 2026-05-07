@@ -1,5 +1,6 @@
 import { useRef, useEffect, useState } from "react";
 import { Handle, Position } from "@xyflow/react";
+import { PanelsTopLeft } from "lucide-react";
 import { copyText } from "../lib/copy-text.js";
 import { displayAgentName } from "../lib/display-name.js";
 import {
@@ -12,6 +13,8 @@ import {
 } from "../lib/activity-visuals.js";
 import type { AgentActivitySummary, CurrentQitemSummary } from "../hooks/useNodeInventory.js";
 import { ContextUsageRing } from "./ContextUsageRing.js";
+import { ActivityRing } from "./topology/ActivityRing.js";
+import type { TopologyActivityVisual } from "../lib/topology-activity.js";
 
 interface RigNodeData {
   logicalId: string;
@@ -43,6 +46,8 @@ interface RigNodeData {
   // currentQitems surfaces in the hover hint when the agent is running.
   agentActivity?: AgentActivitySummary | null;
   currentQitems?: CurrentQitemSummary[];
+  activityRing?: TopologyActivityVisual;
+  reducedMotion?: boolean;
 }
 
 /** Core roles get dark header stripe, workers get light */
@@ -160,7 +165,7 @@ export function RigNode({ data }: { data: RigNodeData }) {
         : "bg-white text-stone-900 border-stone-300 hover:bg-stone-100"
     }`;
 
-  return (
+  const card = (
     <div
       className={`group bg-white border min-w-[200px] hard-shadow relative ${
         data.placementState === "selected"
@@ -287,7 +292,7 @@ export function RigNode({ data }: { data: RigNodeData }) {
         {(data.canonicalSessionName ?? data.binding?.tmuxSession ?? data.resumeToken ?? data.rigId) && (
           <div
             data-testid="node-toolbar"
-            className="flex flex-wrap gap-1 pt-1"
+            className="absolute right-2 top-8 z-20 flex flex-wrap justify-end gap-1 opacity-0 transition-opacity group-hover:!opacity-100 group-hover:opacity-100 group-focus-within:!opacity-100 group-focus-within:opacity-100"
             onClick={(e) => e.stopPropagation()}
             onKeyDown={(e) => e.stopPropagation()}
           >
@@ -305,9 +310,12 @@ export function RigNode({ data }: { data: RigNodeData }) {
               <button
                 onClick={handleOpenCmux}
                 data-testid="toolbar-cmux-open"
-                className={buttonClass("cmux")}
+                className={`${buttonClass("cmux")} inline-flex h-6 w-6 items-center justify-center px-0 py-0`}
+                aria-label="Open in cmux"
+                title="Open in cmux"
               >
-                {actionFeedback === "cmux" ? "opened" : "cmux"}
+                <PanelsTopLeft className="h-3.5 w-3.5" aria-hidden="true" />
+                <span className="sr-only">{actionFeedback === "cmux" ? "opened" : "cmux"}</span>
               </button>
             )}
             {data.resumeToken && data.runtime && data.runtime !== "terminal" && (
@@ -351,5 +359,16 @@ export function RigNode({ data }: { data: RigNodeData }) {
 
       <Handle type="source" position={Position.Bottom} />
     </div>
+  );
+  return (
+    <ActivityRing
+      state={data.activityRing?.state ?? "idle"}
+      flash={data.activityRing?.flash ?? null}
+      reducedMotion={data.reducedMotion}
+      testId={`rig-node-activity-ring-${data.logicalId}`}
+      className="rounded-none"
+    >
+      {card}
+    </ActivityRing>
   );
 }
