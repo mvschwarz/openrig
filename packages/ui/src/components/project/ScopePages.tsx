@@ -25,10 +25,19 @@ import { FilesWorkspace } from "../files/FilesWorkspace.js";
 import { useWorkspaceName } from "../../hooks/useWorkspaceName.js";
 import {
   useQueueItemMap,
+  useSlices,
   useSliceDetail,
   type QueueItemDetail,
   type SliceDetail,
 } from "../../hooks/useSlices.js";
+import {
+  deriveMissionStatusFromSlices,
+  latestProjectMissionActivity,
+  partitionProjectMissions,
+  projectSliceFromListEntry,
+  projectSliceMeta,
+  type ProjectMissionGroup,
+} from "../../lib/project-mission-state.js";
 import { StoryTab } from "../slices/tabs/StoryTab.js";
 import { AcceptanceTab } from "../slices/tabs/AcceptanceTab.js";
 import { DocsTab } from "../slices/tabs/DocsTab.js";
@@ -139,6 +148,145 @@ function PlaceholderTab({ label, description }: { label: string; description?: s
   );
 }
 
+function formatLastActivity(ts: number): string {
+  if (ts <= 0) return "no recent activity";
+  return new Date(ts).toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function WorkspaceOverviewPanel() {
+  const { data, isLoading } = useSlices("all");
+  const missions = useMemo<ProjectMissionGroup[]>(() => {
+    if (!data || "unavailable" in data) return [];
+    const buckets = new Map<string, ProjectMissionGroup["slices"]>();
+    for (const slice of data.slices) {
+      const row = projectSliceFromListEntry(slice);
+      const key = row.railItem ?? "unsorted";
+      if (!buckets.has(key)) buckets.set(key, []);
+      buckets.get(key)!.push(row);
+    }
+    return Array.from(buckets.entries()).map(([key, slices]) => ({
+      id: key,
+      label: key === "unsorted" ? "Unsorted" : key,
+      status: deriveMissionStatusFromSlices(slices),
+      slices,
+    }));
+  }, [data]);
+  const sections = useMemo(() => partitionProjectMissions(missions), [missions]);
+
+  if (isLoading) {
+    return (
+      <EmptyState
+        label="LOADING WORKSPACE"
+        description="Reading slice index."
+        variant="card"
+        testId="workspace-overview-loading"
+      />
+    );
+  }
+
+  if (data && "unavailable" in data) {
+    return (
+      <EmptyState
+        label="WORKSPACE INDEX UNAVAILABLE"
+        description={data.hint ?? "Slice index is not available from the configured workspace."}
+        variant="card"
+        testId="workspace-overview-unavailable"
+      />
+    );
+  }
+
+  const renderMissionCard = (mission: ProjectMissionGroup, bucket: "current" | "archive") => (
+    <article
+      key={mission.id}
+      data-testid={`workspace-overview-mission-${mission.id}`}
+      data-mission-bucket={bucket}
+      className="border border-outline-variant bg-white/20 px-3 py-3"
+    >
+      <div className="flex items-start justify-between gap-3 border-b border-outline-variant pb-2">
+        <div className="min-w-0">
+          <h3 className="font-mono text-[12px] uppercase tracking-[0.12em] text-stone-900 truncate">
+            {mission.label}
+          </h3>
+          <p className="font-mono text-[9px] uppercase tracking-[0.12em] text-stone-500">
+            {mission.slices.length} slice{mission.slices.length === 1 ? "" : "s"} ·{" "}
+            {formatLastActivity(latestProjectMissionActivity(mission))}
+          </p>
+        </div>
+        <span className="font-mono text-[9px] uppercase tracking-[0.12em] text-stone-500">
+          {mission.status}
+        </span>
+      </div>
+      <ul className="mt-2 space-y-1">
+        {mission.slices.map((slice) => (
+          <li key={slice.name}>
+            <Link
+              to="/project/slice/$sliceId"
+              params={{ sliceId: slice.name }}
+              data-testid={`workspace-overview-slice-${slice.name}`}
+              className="block px-2 py-1 font-mono text-[11px] text-on-surface hover:bg-surface-low hover:text-stone-900"
+            >
+              <span className="block truncate">{slice.displayName}</span>
+              <span className="block truncate text-[9px] uppercase tracking-[0.12em] text-stone-500">
+                {projectSliceMeta(slice)}
+              </span>
+            </Link>
+          </li>
+        ))}
+      </ul>
+    </article>
+  );
+
+  return (
+    <div data-testid="workspace-overview-panel" className="grid gap-4 lg:grid-cols-2">
+      <section data-testid="workspace-overview-current" className="space-y-3">
+        <div className="flex items-center justify-between border-b border-outline-variant pb-2">
+          <h2 className="font-mono text-[11px] uppercase tracking-[0.16em] text-stone-900">
+            Current Work
+          </h2>
+          <span className="font-mono text-[10px] text-stone-500">
+            {sections.current.length}
+          </span>
+        </div>
+        {sections.current.length > 0 ? (
+          sections.current.map((mission) => renderMissionCard(mission, "current"))
+        ) : (
+          <EmptyState
+            label="NO CURRENT WORK"
+            description="No live qitem-backed or recent active slices are indexed."
+            variant="card"
+            testId="workspace-overview-current-empty"
+          />
+        )}
+      </section>
+      <section data-testid="workspace-overview-archive" className="space-y-3">
+        <div className="flex items-center justify-between border-b border-outline-variant pb-2">
+          <h2 className="font-mono text-[11px] uppercase tracking-[0.16em] text-stone-900">
+            Archive
+          </h2>
+          <span className="font-mono text-[10px] text-stone-500">
+            {sections.archive.length}
+          </span>
+        </div>
+        {sections.archive.length > 0 ? (
+          sections.archive.map((mission) => renderMissionCard(mission, "archive"))
+        ) : (
+          <EmptyState
+            label="NO ARCHIVE"
+            description="No archived slices are indexed."
+            variant="card"
+            testId="workspace-overview-archive-empty"
+          />
+        )}
+      </section>
+    </div>
+  );
+}
+
 export function WorkspaceScopePage() {
   const [active, setActive] = useState<SharedTab>("overview");
   const workspace = useWorkspaceName();
@@ -167,7 +315,7 @@ export function WorkspaceScopePage() {
       onSelect={(id) => setActive(id as SharedTab)}
     >
       {active === "overview" ? (
-        <PlaceholderTab label="WORKSPACE OVERVIEW" description="Renders STEERING.md (root attractor) + summary of missions in flight." />
+        <WorkspaceOverviewPanel />
       ) : null}
       {active === "progress" ? (
         <PlaceholderTab label="WORKSPACE PROGRESS" description="Cross-mission rollup." />
