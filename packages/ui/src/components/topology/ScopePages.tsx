@@ -17,12 +17,18 @@ import {
   type TopologySeatScopeTab,
 } from "./TopologyViewModeTabs.js";
 import { TopologyTableView } from "./TopologyTableView.js";
+import { TopologyTerminalView } from "./TopologyTerminalView.js";
 import { SectionHeader } from "../ui/section-header.js";
 import { EmptyState } from "../ui/empty-state.js";
 import { RigGraph } from "../RigGraph.js";
 import { useRigSummary } from "../../hooks/useRigSummary.js";
 import { LiveNodeDetails } from "../LiveNodeDetails.js";
 import { useTopologyOverlay } from "./topology-overlay-context.js";
+// V1 attempt-3 Phase 5 P5-9: graph view-mode degrades to table on
+// narrow viewports per universal-shell.md L143 ("Topology graph view
+// degrades to table view by default on mobile (graph is too dense for
+// phone screens)").
+import { useShellViewport } from "../../hooks/useShellViewport.js";
 
 /** Set the AppShell's Explorer overlay mode based on the scope page's
  *  active view-mode. Graph view-mode → overlay (vellum-translucent
@@ -78,23 +84,20 @@ function ScopeShell({
   );
 }
 
-function TerminalGridPlaceholder({ scope }: { scope: string }) {
-  return (
-    <div className="p-6">
-      <EmptyState
-        label="TERMINAL GRID"
-        description={`${scope} terminals — pinned-card grid (Phase 5 polish; safe-N pagination per topology-terminal-view.md L70-80).`}
-        variant="card"
-        testId="topology-terminal-placeholder"
-      />
-    </div>
-  );
-}
+// V1 attempt-3 Phase 5 P5-7: TopologyTerminalView replaces the placeholder
+// with a real safe-N=12 paginated pinned-card grid + pulsing-ring on active
+// terminals (per topology-terminal-view.md L47/L60-65/L70-80).
 
 export function HostScopePage() {
   const [active, setActive] = useState<TopologyHostScopeTab>("graph");
   const { data: rigs } = useRigSummary();
+  const { isWideLayout } = useShellViewport();
   useOverlayForActiveTab(active);
+
+  // P5-9 mobile graph degradation: at <lg viewport, treat graph view-mode
+  // as table per universal-shell.md L143. The tab nav still shows graph
+  // selected (operator may resize to wide and the graph reactivates).
+  const effectiveActive = !isWideLayout && active === "graph" ? "table" : active;
 
   return (
     <ScopeShell
@@ -102,7 +105,7 @@ export function HostScopePage() {
       title="localhost"
       tabsNav={<TopologyViewModeTabs tabs={HOST_SCOPE_TABS} active={active} onSelect={setActive} testIdPrefix="topology-host" />}
     >
-      {active === "graph" ? (
+      {effectiveActive === "graph" ? (
         <div className="p-6">
           <EmptyState
             label="HOST GRAPH"
@@ -117,12 +120,20 @@ export function HostScopePage() {
           />
         </div>
       ) : null}
-      {active === "table" ? (
+      {effectiveActive === "table" ? (
         <div className="px-6 pb-6">
+          {!isWideLayout && active === "graph" ? (
+            <p
+              data-testid="topology-mobile-graph-degraded"
+              className="font-mono text-[9px] text-on-surface-variant italic mb-2"
+            >
+              Graph view degrades to table on narrow viewports.
+            </p>
+          ) : null}
           <TopologyTableView />
         </div>
       ) : null}
-      {active === "terminal" ? <TerminalGridPlaceholder scope="Host" /> : null}
+      {effectiveActive === "terminal" ? <TopologyTerminalView scope="host" /> : null}
     </ScopeShell>
   );
 }
@@ -132,7 +143,10 @@ export function RigScopePage() {
   const { data: rigs } = useRigSummary();
   const rig = rigs?.find((r) => r.id === rigId);
   const [active, setActive] = useState<TopologyRigPodScopeTab>("graph");
+  const { isWideLayout } = useShellViewport();
   useOverlayForActiveTab(active);
+
+  const effectiveActive = !isWideLayout && active === "graph" ? "table" : active;
 
   return (
     <ScopeShell
@@ -140,17 +154,25 @@ export function RigScopePage() {
       title={rig?.name ?? rigId}
       tabsNav={<TopologyViewModeTabs tabs={RIG_POD_SCOPE_TABS} active={active} onSelect={setActive} testIdPrefix="topology-rig" />}
     >
-      {active === "graph" ? (
+      {effectiveActive === "graph" ? (
         <div className="flex-1 min-h-0 relative">
           <RigGraph rigId={rigId} rigName={rig?.name ?? null} showDiscovered={false} />
         </div>
       ) : null}
-      {active === "table" ? (
+      {effectiveActive === "table" ? (
         <div className="px-6 pb-6">
+          {!isWideLayout && active === "graph" ? (
+            <p
+              data-testid="topology-mobile-graph-degraded"
+              className="font-mono text-[9px] text-on-surface-variant italic mb-2"
+            >
+              Graph view degrades to table on narrow viewports.
+            </p>
+          ) : null}
           <TopologyTableView rigIdScope={rigId} />
         </div>
       ) : null}
-      {active === "terminal" ? <TerminalGridPlaceholder scope="Rig" /> : null}
+      {effectiveActive === "terminal" ? <TopologyTerminalView scope="rig" rigId={rigId} /> : null}
       {active === "overview" ? (
         <div className="p-6">
           <EmptyState
@@ -186,7 +208,9 @@ export function PodScopePage() {
           <TopologyTableView rigIdScope={rigId} />
         </div>
       ) : null}
-      {active === "terminal" ? <TerminalGridPlaceholder scope="Pod" /> : null}
+      {active === "terminal" ? (
+        <TopologyTerminalView scope="pod" rigId={rigId} podName={podName} />
+      ) : null}
       {active === "overview" ? (
         <div className="p-6">
           <EmptyState label="POD OVERVIEW" description="Pod detail (Phase 5)." variant="card" />

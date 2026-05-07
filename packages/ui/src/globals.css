@@ -265,6 +265,19 @@
     animation: activity-pulse-running-frames 1.8s ease-in-out infinite;
   }
 
+  /* V1 attempt-3 Phase 5 P5-7 — Topology terminal grid pulsing-ring per
+     topology-terminal-view.md L47. Cards for "active" agents (output
+     emitted within polling window) get a pulsing ring around the card;
+     idle cards are neutral. At-a-glance scan signal so the human can
+     spot which agents to attend to without reading every card. */
+  @keyframes terminal-card-active-frames {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(167, 139, 250, 0.0); }
+    50%      { box-shadow: 0 0 0 3px rgba(167, 139, 250, 0.30); }
+  }
+  .terminal-card-active {
+    animation: terminal-card-active-frames 2.2s ease-in-out infinite;
+  }
+
   /* PL-019 item 6 — edge animation. One-shot ~1.2s emphasis on edges
      between source-seat and dest-seat when a queue event fires. React Flow
      renders edges as SVG <path> wrapped in .react-flow__edge; we toggle
@@ -297,6 +310,7 @@
   .shimmer,
   .animate-pulse-tactical,
   .activity-pulse-running,
+  .terminal-card-active,
   .edge-just-fired {
     animation: none;
     opacity: 1;

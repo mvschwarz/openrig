@@ -17,6 +17,7 @@ import { EmptyState } from "./ui/empty-state.js";
 import { ProjectTreeView } from "./project/ProjectTreeView.js";
 import { SpecsTreeView } from "./specs/SpecsTreeView.js";
 import { TopologyTreeView } from "./topology/TopologyTreeView.js";
+import { SubscriptionToggleList } from "./for-you/SubscriptionToggleList.js";
 
 import type { DrawerSelection } from "./SharedDetailDrawer.js";
 
@@ -222,14 +223,14 @@ function PodBranch({
       {expanded && (
         <div className="ml-4 border-l border-stone-200">
           {sortedNodes.map((node) => {
-            const isSelected = selection?.type === "node" && selection.rigId === node.rigId && selection.logicalId === node.logicalId;
+            const isSelected = selection?.type === "seat-detail" && selection.rigId === node.rigId && selection.logicalId === node.logicalId;
             const memberName = displayAgentName(node.logicalId);
 
             return (
               <button
                 key={node.logicalId}
                 type="button"
-                onClick={() => onSelect({ type: "node", rigId: node.rigId, logicalId: node.logicalId })}
+                onClick={() => onSelect({ type: "seat-detail", rigId: node.rigId, logicalId: node.logicalId })}
                 data-testid={`node-${node.logicalId}`}
                 className={cn(
                   "flex w-full items-center gap-2 rounded-sm px-4 py-1.5 text-left transition-colors hover:bg-stone-100",
@@ -349,14 +350,14 @@ function RigBranch({
             podId === "__ungrouped__" ? (
               <div key={podId}>
                 {podNodes.map((node) => {
-                  const isNodeSelected = selection?.type === "node" && selection.rigId === node.rigId && selection.logicalId === node.logicalId;
+                  const isNodeSelected = selection?.type === "seat-detail" && selection.rigId === node.rigId && selection.logicalId === node.logicalId;
                   const memberName = displayAgentName(node.logicalId);
 
                   return (
                     <button
                     key={node.logicalId}
                     type="button"
-                    onClick={() => onSelect({ type: "node", rigId: node.rigId, logicalId: node.logicalId })}
+                    onClick={() => onSelect({ type: "seat-detail", rigId: node.rigId, logicalId: node.logicalId })}
                     data-testid={`node-${node.logicalId}`}
                       className={cn(
                         "flex w-full items-center gap-2 rounded-sm px-4 py-1.5 text-left transition-colors hover:bg-stone-100",
@@ -383,7 +384,7 @@ function RigBranch({
                 onSelect={onSelect}
                 autoExpand={
                   expanded || (
-                    selection?.type === "node" &&
+                    selection?.type === "seat-detail" &&
                     selection.rigId === rig.id &&
                     podNodes.some((node) => node.logicalId === selection.logicalId)
                   )
@@ -518,37 +519,14 @@ function SurfaceBody({
     // Subscription affordance — settings-shaped surface per for-you-feed.md L134-L140.
     // The PRIMARY UX of /for-you is the FEED in the center; subscriptions live
     // here as a small on-demand list. NOT dominating.
+    //
+    // V1 attempt-3 Phase 5 P5-3: live ConfigStore-wired toggles via
+    // SubscriptionToggleList. action_required is forced ON; the other 4
+    // toggle interactively. Settings endpoint unreachable → canonical
+    // defaults rendered with CLI-fallback hint.
     return (
       <div data-testid="explorer-for-you-subscriptions" className="flex-1 overflow-y-auto py-3 px-3">
-        <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-on-surface-variant mb-2">
-          Subscriptions
-        </div>
-        <ul className="space-y-1 font-mono text-xs">
-          <li className="flex items-center justify-between">
-            <span>Action required</span>
-            <span className="text-[9px] text-on-surface-variant">forced ON</span>
-          </li>
-          <li className="flex items-center justify-between">
-            <span>Approvals</span>
-            <span className="text-[9px] text-success">on</span>
-          </li>
-          <li className="flex items-center justify-between">
-            <span>Feature ships</span>
-            <span className="text-[9px] text-success">on</span>
-          </li>
-          <li className="flex items-center justify-between">
-            <span>Slice progress</span>
-            <span className="text-[9px] text-success">on</span>
-          </li>
-          <li className="flex items-center justify-between">
-            <span>Audit log</span>
-            <span className="text-[9px] text-on-surface-variant">off</span>
-          </li>
-        </ul>
-        <p className="mt-3 font-mono text-[9px] text-on-surface-variant italic">
-          Per-subscription toggles wire in Phase 4. V1 list reads canonical
-          defaults from for-you-feed.md L142–L150.
-        </p>
+        <SubscriptionToggleList />
       </div>
     );
   }
