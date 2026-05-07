@@ -24,8 +24,8 @@
 // to 100+ rigs per the for-you-feed.md L9 north-star without upfront
 // fan-out.
 
-import { useEffect, useMemo, useState } from "react";
-import { useNavigate, useRouterState } from "@tanstack/react-router";
+import { useMemo } from "react";
+import { useNavigate } from "@tanstack/react-router";
 import {
   ReactFlow,
   Controls,
@@ -41,6 +41,7 @@ import { applyTreeLayout } from "../../lib/graph-layout.js";
 import { useShellViewport } from "../../hooks/useShellViewport.js";
 import { RigNode } from "../RigNode.js";
 import { RigGroupNode, type RigGroupNodeData } from "./RigGroupNode.js";
+import { useTopologyOverlay } from "./topology-overlay-context.js";
 import {
   prefixRigData,
   packRigGroups,
@@ -89,47 +90,19 @@ const nodeTypes: NodeTypes = {
   rigNode: RigNode,
 };
 
-/** Active topology context derived from the route pathname so the rig
- *  matching the URL auto-expands (parity with Phase 5.1 TopologyTreeView). */
-function useActiveRigId(): string | null {
-  const pathname = useRouterState({ select: (s) => s.location.pathname });
-  const seat = pathname.match(/^\/topology\/seat\/([^/]+)\//);
-  if (seat) return decodeURIComponent(seat[1]!);
-  const pod = pathname.match(/^\/topology\/pod\/([^/]+)\//);
-  if (pod) return decodeURIComponent(pod[1]!);
-  const rig = pathname.match(/^\/topology\/rig\/([^/]+)$/);
-  if (rig) return decodeURIComponent(rig[1]!);
-  return null;
-}
-
 export function HostMultiRigGraph() {
   const navigate = useNavigate();
   const { data: psEntries } = usePsEntries();
   const { innerWidth } = useShellViewport();
-  const activeRigId = useActiveRigId();
 
-  // Default-all-collapsed state; per-session Map<rigId, expanded?>.
-  const [expanded, setExpanded] = useState<Map<string, boolean>>(() => new Map());
-
-  const toggleRig = (rigId: string) => {
-    setExpanded((prev) => {
-      const next = new Map(prev);
-      next.set(rigId, !(prev.get(rigId) ?? false));
-      return next;
-    });
-  };
-
-  // Auto-expand the rig matching the active route on mount + on route
-  // change (parity with Phase 5.1 TopologyTreeView auto-expand).
-  useEffect(() => {
-    if (!activeRigId) return;
-    setExpanded((prev) => {
-      if (prev.get(activeRigId)) return prev;
-      const next = new Map(prev);
-      next.set(activeRigId, true);
-      return next;
-    });
-  }, [activeRigId]);
+  // V1 polish slice Phase 5.2 bounce-fix — rig-expanded state lifted to
+  // TopologyOverlayProvider scope. Direct-URL entry to /topology/rig/$id
+  // (which mounts RigScopePage, NOT HostMultiRigGraph because topology
+  // routes are SIBLING) still updates the context's expandedRigs map
+  // via the provider's auto-expand useEffect; when the operator returns
+  // to /topology, this component reads the persisted state via
+  // useTopologyOverlay() and renders the matching rig expanded.
+  const { expandedRigs: expanded, toggleRig } = useTopologyOverlay();
 
   // P5.2-2 + P5.2-3: useQueries for per-rig graph data; enabled only
   // when the rig is expanded. Stable hook-call count (single useQueries
