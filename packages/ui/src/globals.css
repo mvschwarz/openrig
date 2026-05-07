@@ -364,7 +364,7 @@
     }
   }
   .activity-card-surface {
-    background-color: rgba(255, 255, 255, 0.96);
+    background-color: rgba(255, 255, 255, 0.72);
   }
   .activity-card-active {
     background-color: rgba(220, 252, 231, 0.88);

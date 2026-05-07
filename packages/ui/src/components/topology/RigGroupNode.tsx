@@ -54,8 +54,8 @@ export function RigGroupNode({ data }: { data: RigGroupNodeData }) {
       className={cn(
         "w-full h-full relative flex flex-col cursor-pointer select-none overflow-visible",
         collapsed
-          ? "border border-outline-variant bg-white/40 backdrop-blur-[8px] hard-shadow hover:bg-white/60"
-          : "border border-outline-variant/70 bg-white/[0.14] backdrop-blur-[2px] shadow-[0_0_0_1px_rgba(84,96,115,0.06)]",
+          ? "border border-outline-variant bg-white/30 backdrop-blur-[8px] hard-shadow hover:bg-white/40"
+          : "border border-outline-variant/70 bg-white/[0.10] backdrop-blur-[2px] shadow-[0_0_0_1px_rgba(84,96,115,0.06)]",
         recentActivity && "rig-activity-frame-pulse",
       )}
     >
