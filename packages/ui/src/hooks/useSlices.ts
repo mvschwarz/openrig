@@ -5,7 +5,8 @@
 // as a structured error object so the UI can render a setup hint
 // instead of the raw 503.
 
-import { useQuery } from "@tanstack/react-query";
+import { useMemo } from "react";
+import { useQueries, useQuery } from "@tanstack/react-query";
 
 export type SliceStatus = "active" | "done" | "blocked" | "draft";
 export type SliceFilter = "all" | "active" | "done" | "blocked";
@@ -271,4 +272,62 @@ export function useSliceDoc(name: string | null, relPath: string | null) {
 
 export function proofAssetUrl(sliceName: string, relPath: string): string {
   return `/api/slices/${encodeURIComponent(sliceName)}/proof-asset/${encodeURI(relPath)}`;
+}
+
+export interface QueueItemDetail {
+  qitemId: string;
+  tsCreated: string;
+  tsUpdated: string;
+  sourceSession: string;
+  destinationSession: string;
+  state: string;
+  priority: string;
+  tier: string | null;
+  tags: string[] | null;
+  body: string;
+}
+
+export interface QueueItemMapResult {
+  itemsById: Map<string, QueueItemDetail>;
+  isFetching: boolean;
+  missingIds: string[];
+}
+
+async function fetchQueueItem(qitemId: string): Promise<QueueItemDetail | null> {
+  const res = await fetch(`/api/queue/${encodeURIComponent(qitemId)}`);
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return (await res.json()) as QueueItemDetail;
+}
+
+export function useQueueItemMap(qitemIds: string[]): QueueItemMapResult {
+  const uniqueIds = useMemo(
+    () => Array.from(new Set(qitemIds.filter((id) => id.length > 0))).sort(),
+    [qitemIds],
+  );
+  const queries = useQueries({
+    queries: uniqueIds.map((qitemId) => ({
+      queryKey: ["queue", "item", qitemId],
+      queryFn: () => fetchQueueItem(qitemId),
+      staleTime: 30_000,
+    })),
+  });
+
+  return useMemo(() => {
+    const itemsById = new Map<string, QueueItemDetail>();
+    const missingIds: string[] = [];
+    uniqueIds.forEach((qitemId, idx) => {
+      const item = queries[idx]?.data;
+      if (item) {
+        itemsById.set(qitemId, item);
+      } else if (queries[idx]?.status === "success") {
+        missingIds.push(qitemId);
+      }
+    });
+    return {
+      itemsById,
+      isFetching: queries.some((query) => query.isFetching),
+      missingIds,
+    };
+  }, [queries, uniqueIds]);
 }

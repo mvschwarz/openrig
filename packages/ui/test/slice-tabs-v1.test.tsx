@@ -20,6 +20,7 @@ import type {
   StoryEvent,
   PhaseDefinition,
   CurrentStepPayload,
+  QueueItemDetail,
   SpecGraphPayload,
   SliceDetail,
 } from "../src/hooks/useSlices.js";
@@ -90,6 +91,40 @@ describe("PL-slice-story-view-v1 StoryTab", () => {
     const rows = screen.getAllByTestId(/story-row-/);
     expect(rows[0]?.getAttribute("data-testid")).toBe("story-row-new.event");
     expect(screen.getByTestId("story-step-connector-new.event")).toBeDefined();
+  });
+
+  it("renders qitem body as the primary story content when queue details are loaded", () => {
+    const queueItem: QueueItemDetail = {
+      qitemId: "q-1",
+      tsCreated: "2026-05-04T00:00:00.000Z",
+      tsUpdated: "2026-05-04T00:00:00.000Z",
+      sourceSession: "src@r",
+      destinationSession: "dest@r",
+      state: "in-progress",
+      priority: "routine",
+      tier: "mode2",
+      tags: ["demo"],
+      body: "Implement the observability body-first story view.\nInclude acceptance evidence.",
+    };
+    render(
+      <StoryTab
+        events={[
+          event({
+            kind: "queue.created",
+            qitemId: "q-1",
+            summary: "src@r -> dest@r: truncated metadata summary",
+          }),
+        ]}
+        phaseDefinitions={null}
+        queueItemsById={new Map([["q-1", queueItem]])}
+      />,
+    );
+    const body = screen.getByTestId("story-row-body-queue.created");
+    expect(body.getAttribute("data-source")).toBe("qitem");
+    expect(body.textContent).toContain("Implement the observability body-first story view.");
+    expect(screen.getByTestId("story-row-summary-queue.created").textContent).toContain(
+      "truncated metadata summary",
+    );
   });
 });
 

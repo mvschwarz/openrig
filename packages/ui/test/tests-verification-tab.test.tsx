@@ -1,8 +1,7 @@
 // Slice Story View v0 — TestsVerificationTab focused tests.
 //
-// This is the founder-named load-bearing tab; orch will bounce drops
-// of the inline screenshot rendering or video player. These tests
-// pin both behaviors as a regression gate.
+// This is a load-bearing tab. These tests pin inline screenshot rendering
+// and the video player as regression gates.
 
 import { describe, it, expect, afterEach } from "vitest";
 import { render, screen, cleanup } from "@testing-library/react";
@@ -32,9 +31,25 @@ function makeTests(packets: ProofPacketRendered[], aggregate?: { passCount: numb
 describe("PL-slice-story-view-v0 TestsVerificationTab", () => {
   afterEach(() => cleanup());
 
-  it("renders empty state when slice has no proof packet (graceful — pre-dogfood slices)", () => {
-    render(<TestsVerificationTab sliceName="x" tests={{ proofPackets: [], aggregate: { passCount: 0, failCount: 0 } }} />);
+  it("renders useful diagnostics when slice has no proof packet", () => {
+    render(
+      <TestsVerificationTab
+        sliceName="x"
+        tests={{ proofPackets: [], aggregate: { passCount: 0, failCount: 0 } }}
+        qitemCount={3}
+        docsCount={2}
+        lastActivityAt="2026-05-07T21:00:00Z"
+      />,
+    );
     expect(screen.getByTestId("tests-empty")).toBeDefined();
+    expect(screen.getByTestId("tests-empty-reason").textContent).toContain(
+      "proof matcher",
+    );
+    expect(screen.getByTestId("tests-empty-diagnostics").textContent).toContain("3");
+    expect(screen.getByTestId("tests-empty-diagnostics").textContent).toContain("2");
+    expect(screen.getByTestId("tests-empty-next-steps").textContent).toContain(
+      "Check Artifacts",
+    );
   });
 
   it("renders header aggregate '<pass> pass, <fail> fail · N packets'", () => {
@@ -54,7 +69,7 @@ describe("PL-slice-story-view-v0 TestsVerificationTab", () => {
     expect(md.textContent).toContain("PL019-dogfood.md");
   });
 
-  it("MANDATORY (founder-named): renders <img> tag inline for each screenshot path", () => {
+  it("renders <img> tag inline for each screenshot path", () => {
     const tests = makeTests([makePacket({
       screenshots: ["screenshots/mission-control-active-work.png", "headed-browser/screenshots/edge-fired.png"],
     })]);
@@ -68,7 +83,7 @@ describe("PL-slice-story-view-v0 TestsVerificationTab", () => {
     expect(img2.getAttribute("src")).toContain("edge-fired.png");
   });
 
-  it("MANDATORY (founder-named): renders <video controls> player for each video path", () => {
+  it("renders <video controls> player for each video path", () => {
     const tests = makeTests([makePacket({
       videos: ["videos/demo.mp4", "videos/walkthrough.webm"],
     })]);
