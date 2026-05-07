@@ -94,7 +94,7 @@ export function TopologyOverlayProvider({ children }: { children: ReactNode }) {
   );
   const setRigExpanded = useCallback((rigId: string, expanded: boolean) => {
     setExpandedRigs((prev) => {
-      if ((prev.get(rigId) ?? false) === expanded) return prev;
+      if (prev.has(rigId) && prev.get(rigId) === expanded) return prev;
       const next = new Map(prev);
       next.set(rigId, expanded);
       return next;

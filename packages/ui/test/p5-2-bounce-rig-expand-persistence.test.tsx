@@ -223,7 +223,7 @@ describe("TopologyOverlayProvider auto-expand on URL (P5.2 bounce-fix)", () => {
     });
   });
 
-  it("/topology root pathname does NOT auto-expand any rig (default-all-collapsed preserved)", async () => {
+  it("/topology root pathname does NOT write explicit expansion overrides", async () => {
     const { findByTestId } = renderAt("/topology", <ContextProbe />);
     const probe = await findByTestId("topology-context-probe");
     // Allow the render to settle.
@@ -237,38 +237,37 @@ describe("TopologyOverlayProvider auto-expand on URL (P5.2 bounce-fix)", () => {
 // ---------------------------------------------------------------------
 
 describe("HostMultiRigGraph reads expandedRigs from context (P5.2 bounce-fix persistence)", () => {
-  it("when context's expandedRigs has rigId=true on mount, the rig group renders expanded", async () => {
-    // Custom probe that pre-sets the context state then mounts the graph.
-    function PreExpandedHarness() {
+  it("when context has rigId=false on mount, only that rig renders collapsed", async () => {
+    // Custom probe that pre-sets an explicit collapse then mounts the graph.
+    function PreCollapsedHarness() {
       const { setRigExpanded } = useTopologyOverlay();
-      // Fire the pre-expand once on mount (simulates a prior visit to
-      // /topology/rig/rig-1 having set state, then user returns to
-      // /topology and HostMultiRigGraph mounts fresh).
+      // Fire the pre-collapse once on mount (simulates the operator
+      // collapsing a rig, navigating away, then returning to /topology).
       // useEffect intentionally not used here — the test just calls in
       // an effect via setTimeout so React batches commit before render.
       if (typeof window !== "undefined") {
         // Idempotent: subsequent renders won't double-set.
-        queueMicrotask(() => setRigExpanded("rig-1", true));
+        queueMicrotask(() => setRigExpanded("rig-2", false));
       }
       return <HostMultiRigGraph />;
     }
 
-    const { findByTestId } = renderAt("/topology", <PreExpandedHarness />);
-    const node = await findByTestId("rig-group-node-rig-1");
+    const { findByTestId } = renderAt("/topology", <PreCollapsedHarness />);
+    const node = await findByTestId("rig-group-node-rig-2");
     await waitFor(() => {
-      expect(node.getAttribute("data-collapsed")).toBe("false");
+      expect(node.getAttribute("data-collapsed")).toBe("true");
     });
-    // Other rig stays collapsed.
-    const otherRig = await findByTestId("rig-group-node-rig-2");
-    expect(otherRig.getAttribute("data-collapsed")).toBe("true");
+    // Other rig remains expanded by default.
+    const otherRig = await findByTestId("rig-group-node-rig-1");
+    expect(otherRig.getAttribute("data-collapsed")).toBe("false");
   });
 
-  it("when no rig is pre-expanded in context, all rigs render collapsed (default preserved)", async () => {
+  it("when no rig has an explicit context override, all rigs render expanded", async () => {
     const { findByTestId } = renderAt("/topology", <HostMultiRigGraph />);
     const r1 = await findByTestId("rig-group-node-rig-1");
     const r2 = await findByTestId("rig-group-node-rig-2");
-    expect(r1.getAttribute("data-collapsed")).toBe("true");
-    expect(r2.getAttribute("data-collapsed")).toBe("true");
+    expect(r1.getAttribute("data-collapsed")).toBe("false");
+    expect(r2.getAttribute("data-collapsed")).toBe("false");
   });
 });
 

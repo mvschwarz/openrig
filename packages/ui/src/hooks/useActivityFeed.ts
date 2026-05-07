@@ -1,5 +1,10 @@
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { useQueryClient } from "@tanstack/react-query";
+import {
+  subscribeTopologyEvents,
+  subscribeTopologyEventStatus,
+  type TopologyEvent,
+} from "../lib/topology-events.js";
 
 export const MAX_ACTIVITY_EVENTS = 100;
 
@@ -23,94 +28,71 @@ export function useActivityFeed(): UseActivityFeedResult {
   const [events, setEvents] = useState<ActivityEvent[]>([]);
   const [connected, setConnected] = useState(false);
   const [feedOpen, setFeedOpen] = useState(false);
-  const hasErroredRef = useRef(false);
 
-  const addEvent = useCallback((data: string) => {
-    try {
-      const parsed = JSON.parse(data) as Record<string, unknown>;
-      const event: ActivityEvent = {
-        seq: typeof parsed["seq"] === "number" ? parsed["seq"] : Date.now(),
-        type: (parsed["type"] as string) ?? "unknown",
-        payload: parsed,
-        createdAt: (parsed["createdAt"] as string) ?? new Date().toISOString(),
-        receivedAt: Date.now(),
-      };
-      setEvents((prev) => [event, ...prev].slice(0, MAX_ACTIVITY_EVENTS));
+  const addEvent = useCallback((parsed: TopologyEvent) => {
+    const event: ActivityEvent = {
+      seq: typeof parsed["seq"] === "number" ? parsed["seq"] : Date.now(),
+      type: (parsed["type"] as string) ?? "unknown",
+      payload: parsed,
+      createdAt: (parsed["createdAt"] as string) ?? new Date().toISOString(),
+      receivedAt: Date.now(),
+    };
+    setEvents((prev) => [event, ...prev].slice(0, MAX_ACTIVITY_EVENTS));
 
-      // Invalidate package queries on package mutation events
-      if (event.type === "package.installed" || event.type === "package.rolledback") {
-        queryClient.invalidateQueries({ queryKey: ["packages"] });
-      }
-      // Invalidate rig summary on bootstrap completion (new rig may have been created)
-      if (event.type === "bootstrap.completed" || event.type === "bootstrap.partial") {
-        queryClient.invalidateQueries({ queryKey: ["rigs", "summary"] });
-      }
-      // Invalidate discovery queries on discovery events
-      if (event.type === "session.discovered" || event.type === "session.vanished") {
-        queryClient.invalidateQueries({ queryKey: ["discovery"] });
-      }
-      // node.claimed: invalidate discovery + target rig graph
-      if (event.type === "node.claimed") {
-        queryClient.invalidateQueries({ queryKey: ["discovery"] });
-        const rigId = event.payload["rigId"] as string | undefined;
-        if (rigId) {
-          queryClient.invalidateQueries({ queryKey: ["rig", rigId, "graph"] });
-          queryClient.invalidateQueries({ queryKey: ["rig", rigId, "nodes"] });
-          queryClient.invalidateQueries({ queryKey: ["rig", rigId, "sessions"] });
-          queryClient.invalidateQueries({ queryKey: ["rigs", "summary"] });
-          queryClient.invalidateQueries({ queryKey: ["ps"] });
-        }
-      }
-
-      if (event.type === "session.detached") {
-        queryClient.invalidateQueries({ queryKey: ["discovery"] });
-      }
-
-      if (
-        event.type === "session.detached"
-        || event.type === "node.removed"
-        || event.type === "pod.deleted"
-        || event.type === "rig.expanded"
-        || event.type === "restore.completed"
-        || event.type === "rig.deleted"
-      ) {
-        const rigId = event.payload["rigId"] as string | undefined;
-        if (rigId) {
-          queryClient.invalidateQueries({ queryKey: ["rig", rigId, "graph"] });
-          queryClient.invalidateQueries({ queryKey: ["rig", rigId, "nodes"] });
-          queryClient.invalidateQueries({ queryKey: ["rig", rigId, "sessions"] });
-        }
+    // Invalidate package queries on package mutation events.
+    if (event.type === "package.installed" || event.type === "package.rolledback") {
+      queryClient.invalidateQueries({ queryKey: ["packages"] });
+    }
+    if (event.type === "bootstrap.completed" || event.type === "bootstrap.partial") {
+      queryClient.invalidateQueries({ queryKey: ["rigs", "summary"] });
+    }
+    if (event.type === "session.discovered" || event.type === "session.vanished") {
+      queryClient.invalidateQueries({ queryKey: ["discovery"] });
+    }
+    if (event.type === "node.claimed") {
+      queryClient.invalidateQueries({ queryKey: ["discovery"] });
+      const rigId = event.payload["rigId"] as string | undefined;
+      if (rigId) {
+        queryClient.invalidateQueries({ queryKey: ["rig", rigId, "graph"] });
+        queryClient.invalidateQueries({ queryKey: ["rig", rigId, "nodes"] });
+        queryClient.invalidateQueries({ queryKey: ["rig", rigId, "sessions"] });
         queryClient.invalidateQueries({ queryKey: ["rigs", "summary"] });
         queryClient.invalidateQueries({ queryKey: ["ps"] });
       }
-    } catch {
-      // Ignore unparseable messages
+    }
+
+    if (event.type === "session.detached") {
+      queryClient.invalidateQueries({ queryKey: ["discovery"] });
+    }
+
+    if (
+      event.type === "session.detached"
+      || event.type === "node.removed"
+      || event.type === "pod.deleted"
+      || event.type === "rig.expanded"
+      || event.type === "restore.completed"
+      || event.type === "rig.deleted"
+    ) {
+      const rigId = event.payload["rigId"] as string | undefined;
+      if (rigId) {
+        queryClient.invalidateQueries({ queryKey: ["rig", rigId, "graph"] });
+        queryClient.invalidateQueries({ queryKey: ["rig", rigId, "nodes"] });
+        queryClient.invalidateQueries({ queryKey: ["rig", rigId, "sessions"] });
+      }
+      queryClient.invalidateQueries({ queryKey: ["rigs", "summary"] });
+      queryClient.invalidateQueries({ queryKey: ["ps"] });
     }
   }, [queryClient]);
 
   useEffect(() => {
-    hasErroredRef.current = false;
-    setConnected(false);
-
-    const es = new EventSource("/api/events");
-
-    es.addEventListener("open", () => {
-      setConnected(true);
-      hasErroredRef.current = false;
-    });
-
-    es.addEventListener("message", (event: Event) => {
-      const msgEvent = event as MessageEvent;
-      addEvent(msgEvent.data as string);
-    });
-
-    es.addEventListener("error", () => {
-      setConnected(false);
-      hasErroredRef.current = true;
+    const unsubscribeEvents = subscribeTopologyEvents((event) => addEvent(event));
+    const unsubscribeStatus = subscribeTopologyEventStatus((status) => {
+      setConnected(status.connected);
     });
 
     return () => {
-      es.close();
+      unsubscribeEvents();
+      unsubscribeStatus();
     };
   }, [addEvent]);
 

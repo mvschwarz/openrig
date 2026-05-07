@@ -481,18 +481,14 @@ describe("LibraryReview", () => {
           files: [], missingFiles: [],
         }), { status: 200 });
       }
-      if (url === "/api/ps") {
-        return new Response(JSON.stringify([
-          {
-            rigId: "rig-1",
-            name: "demo",
-            nodes: [
-              { canonicalSessionName: "driver@demo", sessionStatus: "running" },
-              { canonicalSessionName: "qa@demo", sessionStatus: "running" },
-              { canonicalSessionName: "stopped@demo", sessionStatus: "exited" },
-            ],
-          },
-        ]), { status: 200 });
+      if (url === "/api/mission-control/destinations") {
+        return new Response(JSON.stringify({
+          destinations: [
+            { sessionName: "driver@demo", label: "driver", source: "topology", status: "running" },
+            { sessionName: "qa@demo", label: "qa", source: "topology", status: "running" },
+            { sessionName: "stopped@demo", label: "stopped", source: "topology", status: "exited" },
+          ],
+        }), { status: 200 });
       }
       throw new Error(`Unexpected fetch: ${url}`);
     });

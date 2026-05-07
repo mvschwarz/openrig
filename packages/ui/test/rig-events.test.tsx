@@ -59,12 +59,12 @@ function getLastInstance(): MockEventSourceInstance {
 }
 
 describe("useRigEvents hook", () => {
-  it("opens EventSource to correct URL", async () => {
+  it("opens the shared EventSource to the global events URL", async () => {
     renderWithQuery(<HookHarness rigId="rig-1" />);
 
     await waitFor(() => {
       expect(instances).toHaveLength(1);
-      expect(instances[0]!.url).toBe("/api/events?rigId=rig-1");
+      expect(instances[0]!.url).toBe("/api/events");
     });
   });
 
@@ -81,7 +81,9 @@ describe("useRigEvents hook", () => {
     await waitFor(() => expect(instances).toHaveLength(1));
     const es = getLastInstance();
 
-    act(() => { es.simulateMessage("event1"); });
+    act(() => {
+      es.simulateMessage(JSON.stringify({ type: "node.startup_ready", rigId: "rig-1" }));
+    });
 
     // Wait for debounce (100ms)
     await waitFor(() => {
@@ -104,9 +106,9 @@ describe("useRigEvents hook", () => {
 
     // Rapid fire — all within debounce window
     act(() => {
-      es.simulateMessage("e1");
-      es.simulateMessage("e2");
-      es.simulateMessage("e3");
+      es.simulateMessage(JSON.stringify({ type: "node.startup_ready", rigId: "rig-1", seq: 1 }));
+      es.simulateMessage(JSON.stringify({ type: "node.startup_ready", rigId: "rig-1", seq: 2 }));
+      es.simulateMessage(JSON.stringify({ type: "node.startup_ready", rigId: "rig-1", seq: 3 }));
     });
 
     await waitFor(() => {
@@ -146,19 +148,19 @@ describe("useRigEvents hook", () => {
     expect(es.readyState).toBe(2); // CLOSED
   });
 
-  it("rigId change -> old EventSource closed, new one opened", async () => {
+  it("rigId change keeps the shared URL while resubscribing the rig filter", async () => {
     const { getByText } = renderWithQuery(<ChangingRigHarness />);
 
     await waitFor(() => expect(instances).toHaveLength(1));
     const first = instances[0]!;
-    expect(first.url).toContain("rig-1");
+    expect(first.url).toBe("/api/events");
 
     act(() => { getByText("change").click(); });
 
     await waitFor(() => {
       expect(instances).toHaveLength(2);
       expect(first.readyState).toBe(2); // CLOSED
-      expect(instances[1]!.url).toContain("rig-2");
+      expect(instances[1]!.url).toBe("/api/events");
     });
   });
 

@@ -1,5 +1,9 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { useQueryClient } from "@tanstack/react-query";
+import {
+  subscribeTopologyEvents,
+  subscribeTopologyEventStatus,
+} from "../lib/topology-events.js";
 
 const DEBOUNCE_MS = 100;
 
@@ -20,7 +24,7 @@ export function useRigEvents(rigId: string | null): UseRigEventsResult {
     if (debounceTimerRef.current) return;
     debounceTimerRef.current = setTimeout(() => {
       debounceTimerRef.current = null;
-      // Only invalidate the graph query — matches previous behavior
+      // Only invalidate the graph query; this matches previous behavior.
       queryClient.invalidateQueries({ queryKey: ["rig", rigId, "graph"] });
     }, DEBOUNCE_MS);
   }, [rigId, queryClient]);
@@ -35,31 +39,27 @@ export function useRigEvents(rigId: string | null): UseRigEventsResult {
     hasErroredRef.current = false;
     setConnected(false);
     setReconnecting(false);
-    const es = new EventSource(`/api/events?rigId=${rigId}`);
-
-    es.addEventListener("open", () => {
-      setConnected(true);
-      if (hasErroredRef.current) {
-        // Reconnect after error — clear indicator and trigger graph refetch
-        setReconnecting(false);
+    const unsubscribeStatus = subscribeTopologyEventStatus((status) => {
+      setConnected(status.connected);
+      setReconnecting(status.reconnecting);
+      if (status.reconnecting) {
+        hasErroredRef.current = true;
+        return;
+      }
+      if (status.connected && hasErroredRef.current) {
         hasErroredRef.current = false;
         invalidateGraph();
       }
-      // Initial open does NOT trigger invalidation (preserving existing behavior)
     });
 
-    es.addEventListener("message", () => {
+    const unsubscribeEvents = subscribeTopologyEvents((event) => {
+      if (event.rigId !== rigId) return;
       invalidateGraph();
     });
 
-    es.addEventListener("error", () => {
-      setConnected(false);
-      setReconnecting(true);
-      hasErroredRef.current = true;
-    });
-
     return () => {
-      es.close();
+      unsubscribeEvents();
+      unsubscribeStatus();
       if (debounceTimerRef.current) {
         clearTimeout(debounceTimerRef.current);
         debounceTimerRef.current = null;
