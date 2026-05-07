@@ -1,40 +1,34 @@
-// V1 attempt-3 Phase 2 — SharedDetailDrawer chrome.
+// V1 attempt-3 Phase 4 — SharedDetailDrawer chrome + DrawerSelection
+// union extended for the 4 new viewer kinds (qitem / file / sub-spec /
+// seat-detail) per content-drawer.md.
 //
-// Per content-drawer.md L9: "default closed, opens only on named
-// triggers, user-closable at any time, wider than the current
-// right-sidebar (closer to document-reading width)."
+// SC-22 preserved: default-closed (selection===null returns null);
+// VellumSheet width="wide" (38rem); user-closable [×]; one-trigger-at-
+// a-time (clicking new trigger swaps content via setSelection).
 //
-// Phase 2 lays the chrome: VellumSheet primitive (Phase 1) wraps each
-// panel; default-closed (selection === null returns null); ~608px wide
-// on desktop (`lg:w-[38rem]` via VellumSheet width="wide"; calibrated
-// 2026-05-06 per content-drawer.md L9); user-closable via VellumSheet's
-// onClose [×] button.
-//
-// Phase 4 wires the new viewer types (QueueItemViewer, FileViewer,
-// SubSpecPreview, SeatDetailViewer) and named triggers from feed cards
-// + topology table rows + spec sub-references. The current rig / node /
-// system / discovery panels are preserved as transitional viewers
-// (existing surfaces still set DrawerSelection.type to one of them).
-//
-// SC-6 (default-closed; opens only on named triggers): selection===null
-// → renders null; chrome only mounts when a named selection is present.
+// Phase 4 P4-5: 'rig' kind removed from DrawerSelection. RigDetailPanel
+// retired (legacy auto-open right-sidebar pattern); rig clicks now
+// navigate to /topology/rig/$rigId via URL (no drawer auto-open).
 
-import { RigDetailPanel } from "./RigDetailPanel.js";
 import { NodeDetailPanel } from "./NodeDetailPanel.js";
 import { SystemPanel } from "./SystemPanel.js";
 import { DiscoveryPanel, type DiscoveryPlacementTarget } from "./DiscoveryPanel.js";
 import { VellumSheet } from "./ui/vellum-sheet.js";
+import { QueueItemViewer, type QueueItemViewerData } from "./drawer-viewers/QueueItemViewer.js";
+import { FileViewer, type FileViewerData } from "./drawer-viewers/FileViewer.js";
+import { SubSpecPreview, type SubSpecPreviewData } from "./drawer-viewers/SubSpecPreview.js";
+import { SeatDetailViewer } from "./drawer-viewers/SeatDetailViewer.js";
 import type { ActivityEvent } from "../hooks/useActivityFeed.js";
 
-// Drawer selection union. The "specs" variant from prior shells was
-// removed in Phase 2 (SpecsPanel.tsx deleted; specs detail pages render
-// in the CENTER workspace per content-drawer.md decision rule —
-// "Full-feature page (spec detail, slice detail, mission detail) — Center").
 export type DrawerSelection =
-  | { type: "rig"; rigId: string }
   | { type: "node"; rigId: string; logicalId: string }
   | { type: "system"; tab?: "log" | "status" }
   | { type: "discovery" }
+  // Phase 4 viewer kinds
+  | { type: "qitem"; data: QueueItemViewerData }
+  | { type: "file"; data: FileViewerData }
+  | { type: "sub-spec"; data: SubSpecPreviewData }
+  | { type: "seat-detail"; rigId: string; logicalId: string }
   | null;
 
 interface SharedDetailDrawerProps {
@@ -60,9 +54,6 @@ export function SharedDetailDrawer({
   if (!selection) return null;
 
   const inner = (() => {
-    if (selection.type === "rig") {
-      return <RigDetailPanel rigId={selection.rigId} onClose={onClose} />;
-    }
     if (selection.type === "node") {
       return (
         <NodeDetailPanel
@@ -88,6 +79,24 @@ export function SharedDetailDrawer({
         />
       );
     }
+    if (selection.type === "qitem") {
+      return <QueueItemViewer {...selection.data} />;
+    }
+    if (selection.type === "file") {
+      return <FileViewer {...selection.data} />;
+    }
+    if (selection.type === "sub-spec") {
+      return <SubSpecPreview {...selection.data} />;
+    }
+    if (selection.type === "seat-detail") {
+      return (
+        <SeatDetailViewer
+          rigId={selection.rigId}
+          logicalId={selection.logicalId}
+          onClose={onClose}
+        />
+      );
+    }
     return null;
   })();
 
@@ -98,8 +107,8 @@ export function SharedDetailDrawer({
       onClose={onClose}
       testId="shared-detail-drawer"
       // top-14 starts below the universal top bar (h-14, fixed at top); bottom-0
-      // anchors to viewport bottom so the drawer fills the remaining height
-      // without needing a calc() expression.
+      // anchors to viewport bottom so the drawer fills the remaining height.
+      // Bounce-fix #3 width-coupling: 38rem (lg:w-[38rem]) per VellumSheet wide preset.
       className="fixed top-14 right-0 bottom-0 z-30"
     >
       {inner}

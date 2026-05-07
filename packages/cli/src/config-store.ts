@@ -47,6 +47,13 @@ export interface RiggedConfig {
     autoDriveProviderPrompts: boolean;
     providerAuthEnvAllowlist: string;
   };
+  // V1 attempt-3 Phase 4 — Advisor / Operator rail icon V1 placeholders
+  // per universal-shell.md L82–L84. SC-29 EXCEPTION: allowlist-only
+  // additions (no schema migrations / new endpoints / event types).
+  agents: {
+    advisorSession: string;
+    operatorSession: string;
+  };
 }
 
 const DEFAULT_WORKSPACE_ROOT = getDefaultOpenRigPath("workspace");
@@ -75,6 +82,12 @@ const DEFAULTS = {
     autoDriveProviderPrompts: false,
     providerAuthEnvAllowlist: "",
   },
+  // V1 Phase 4 — Advisor default per universal-shell.md L83;
+  // Operator default empty per L84 ("not configured").
+  agents: {
+    advisorSession: "advisor-lead@openrig-velocity",
+    operatorSession: "",
+  },
 } as const;
 
 export const VALID_KEYS = [
@@ -95,6 +108,9 @@ export const VALID_KEYS = [
   "ui.preview.default_lines",
   "recovery.auto_drive_provider_prompts",
   "recovery.provider_auth_env_allowlist",
+  // V1 Phase 4 SC-29 exception — allowlist-only additions.
+  "agents.advisor_session",
+  "agents.operator_session",
 ] as const;
 
 export type ValidKey = typeof VALID_KEYS[number];
@@ -120,6 +136,8 @@ export const ENV_MAP: Record<ValidKey, { primary: string; legacy: string }> = {
   "ui.preview.default_lines": { primary: "OPENRIG_UI_PREVIEW_DEFAULT_LINES", legacy: "RIGGED_UI_PREVIEW_DEFAULT_LINES" },
   "recovery.auto_drive_provider_prompts": { primary: "OPENRIG_RECOVERY_AUTO_DRIVE_PROVIDER_PROMPTS", legacy: "RIGGED_RECOVERY_AUTO_DRIVE_PROVIDER_PROMPTS" },
   "recovery.provider_auth_env_allowlist": { primary: "OPENRIG_RECOVERY_PROVIDER_AUTH_ENV_ALLOWLIST", legacy: "RIGGED_RECOVERY_PROVIDER_AUTH_ENV_ALLOWLIST" },
+  "agents.advisor_session": { primary: "OPENRIG_AGENTS_ADVISOR_SESSION", legacy: "RIGGED_AGENTS_ADVISOR_SESSION" },
+  "agents.operator_session": { primary: "OPENRIG_AGENTS_OPERATOR_SESSION", legacy: "RIGGED_AGENTS_OPERATOR_SESSION" },
 };
 
 // Maps dotted-string config keys to the camelCase RiggedConfig path.
@@ -144,6 +162,8 @@ const KEY_TO_PATH: Record<ValidKey, string[]> = {
   "ui.preview.default_lines": ["ui", "preview", "defaultLines"],
   "recovery.auto_drive_provider_prompts": ["recovery", "autoDriveProviderPrompts"],
   "recovery.provider_auth_env_allowlist": ["recovery", "providerAuthEnvAllowlist"],
+  "agents.advisor_session": ["agents", "advisorSession"],
+  "agents.operator_session": ["agents", "operatorSession"],
 };
 
 function isValidKey(key: string): key is ValidKey {
@@ -279,6 +299,10 @@ export class ConfigStore {
       recovery: {
         autoDriveProviderPrompts: v("recovery.auto_drive_provider_prompts") as boolean,
         providerAuthEnvAllowlist: v("recovery.provider_auth_env_allowlist") as string,
+      },
+      agents: {
+        advisorSession: v("agents.advisor_session") as string,
+        operatorSession: v("agents.operator_session") as string,
       },
     };
   }

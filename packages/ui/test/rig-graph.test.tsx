@@ -219,7 +219,11 @@ describe("RigGraph", () => {
     });
   });
 
-  it("clicking a pod group routes selection back to the rig drawer", async () => {
+  // V1 attempt-3 Phase 4 P4-5 — RigDetailPanel + 'rig' kind retired
+  // from DrawerSelection. Pod-group click is now a no-op at the graph
+  // level (pods open via Explorer tree's /topology/pod/$rigId/$podName
+  // link). Test renamed + assertion flipped to verify NO setSelection.
+  it("clicking a pod group is a no-op at the graph level (RigDetailPanel retired)", async () => {
     mockFetch.mockResolvedValueOnce(mockGraphResponse([
       {
         id: "pod-alpha",
@@ -280,7 +284,8 @@ describe("RigGraph", () => {
 
     fireEvent.click(container.querySelector(".react-flow__node-podGroup")!);
 
-    expect(setSelection).toHaveBeenCalledWith({ type: "rig", rigId: "rig-1" });
+    // 'rig' kind retired in Phase 4 — pod-group click does NOT setSelection.
+    expect(setSelection).not.toHaveBeenCalled();
   });
 
   it("clicking an unbound node in discovery placement mode selects it as a bind target", async () => {
