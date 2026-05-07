@@ -62,12 +62,22 @@ describe("SettingsStore (User Settings v0)", () => {
     expect([...SETTINGS_VALID_KEYS]).toEqual([
       "daemon.port", "daemon.host", "db.path",
       "transcripts.enabled", "transcripts.path",
+      // V1 pre-release CLI/daemon Item 1 — capture-pane rotation tunables.
+      "transcripts.lines", "transcripts.poll_interval_seconds",
       "workspace.root", "workspace.slices_root", "workspace.steering_path",
       "workspace.field_notes_root", "workspace.specs_root",
       "files.allowlist", "progress.scan_roots",
       "ui.preview.refresh_interval_seconds", "ui.preview.max_pins", "ui.preview.default_lines",
       "recovery.auto_drive_provider_prompts",
       "recovery.provider_auth_env_allowlist",
+      // V1 attempt-3 Phase 4 — Advisor/Operator placeholders.
+      "agents.advisor_session", "agents.operator_session",
+      // V1 attempt-3 Phase 5 P5-3 — For You feed subscription toggles.
+      "feed.subscriptions.action_required",
+      "feed.subscriptions.approvals",
+      "feed.subscriptions.shipped",
+      "feed.subscriptions.progress",
+      "feed.subscriptions.audit_log",
     ]);
   });
 

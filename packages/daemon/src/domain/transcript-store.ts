@@ -1,5 +1,5 @@
 import { mkdirSync, appendFileSync, existsSync, openSync, readSync, closeSync, statSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { getCompatibleOpenRigPath } from "../openrig-compat.js";
 
@@ -208,6 +208,12 @@ export class TranscriptStore {
     if (!this._enabled) return false;
     try {
       const filePath = this.getTranscriptPath(rigName, sessionName);
+      // Ensure the rig directory exists so the marker write succeeds
+      // even when called before the launcher's ensureTranscriptDir.
+      // Restore orchestration writes the marker before launch; the
+      // launcher creates the dir later, which used to lose markers
+      // for the first restore on a fresh rig.
+      mkdirSync(dirname(filePath), { recursive: true });
       const marker = `--- SESSION BOUNDARY: ${reason} at ${new Date().toISOString()} ---\n`;
       appendFileSync(filePath, marker, "utf-8");
       return true;
