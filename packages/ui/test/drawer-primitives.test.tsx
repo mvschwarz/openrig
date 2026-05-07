@@ -6,23 +6,19 @@
 //
 // - Each viewer renders without crashing when given canonical-shape props.
 // - Each trigger fires setSelection on click with the correct DrawerSelection
-//   discriminator (`type: "qitem" | "file" | "sub-spec" | "seat-detail"`)
-//   and the matching payload.
+//   discriminator (`type: "qitem" | "file" | "sub-spec"`) and the matching
+//   payload.
 // - SharedDetailDrawer routes selection.type to the correct viewer component.
 //
-// SeatDetailViewer wraps NodeDetailPanel (which does its own /api fetches via
-// React Query); the mock below bypasses that depth so the wrapper itself is
-// the thing under test.
+// V1 polish slice Phase 5.1 P5.1-D2: SeatDetailViewer + SeatDetailTrigger
+// RETIRED. seat-detail navigation goes to /topology/seat/$rigId/$logicalId
+// center page (LiveNodeDetails). The 'seat-detail' kind is dropped from
+// DrawerSelection union; this file now covers only the 3 remaining
+// drawer surfaces (qitem / file / sub-spec). The retirement-regression
+// guard lives in test/node-selection-migration.test.tsx.
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, fireEvent, cleanup } from "@testing-library/react";
-
-// Mock NodeDetailPanel so SeatDetailViewer renders without React Query / fetches.
-vi.mock("../src/components/NodeDetailPanel.js", () => ({
-  NodeDetailPanel: ({ rigId, logicalId }: { rigId: string; logicalId: string }) => (
-    <div data-testid="node-detail-panel-mock">{rigId}::{logicalId}</div>
-  ),
-}));
 
 import {
   DrawerSelectionContext,
@@ -31,11 +27,9 @@ import {
 import { QueueItemViewer } from "../src/components/drawer-viewers/QueueItemViewer.js";
 import { FileViewer } from "../src/components/drawer-viewers/FileViewer.js";
 import { SubSpecPreview } from "../src/components/drawer-viewers/SubSpecPreview.js";
-import { SeatDetailViewer } from "../src/components/drawer-viewers/SeatDetailViewer.js";
 import { QueueItemTrigger } from "../src/components/drawer-triggers/QueueItemTrigger.js";
 import { FileReferenceTrigger } from "../src/components/drawer-triggers/FileReferenceTrigger.js";
 import { SubSpecTrigger } from "../src/components/drawer-triggers/SubSpecTrigger.js";
-import { SeatDetailTrigger } from "../src/components/drawer-triggers/SeatDetailTrigger.js";
 import { SharedDetailDrawer } from "../src/components/SharedDetailDrawer.js";
 
 beforeEach(() => {
@@ -104,13 +98,8 @@ describe("Drawer viewers (P4-1) render with canonical props", () => {
     expect(queryByTestId("sub-spec-open-center")).toBeNull();
   });
 
-  it("SeatDetailViewer wraps NodeDetailPanel with rigId + logicalId", () => {
-    const { getByTestId } = render(
-      <SeatDetailViewer rigId="rig-1" logicalId="dev.impl" />,
-    );
-    expect(getByTestId("seat-detail-viewer")).toBeTruthy();
-    expect(getByTestId("node-detail-panel-mock").textContent).toBe("rig-1::dev.impl");
-  });
+  // V1 polish slice Phase 5.1 P5.1-D2: SeatDetailViewer RETIRED.
+  // Negative-assertion guard lives in test/node-selection-migration.test.tsx.
 });
 
 // ---------------------------------------------------------------------------
@@ -158,17 +147,9 @@ describe("Drawer triggers (P4-2) fire setSelection with correct kind on click", 
     expect(setSelection).toHaveBeenCalledWith({ type: "sub-spec", data });
   });
 
-  it("SeatDetailTrigger click → setSelection({ type: 'seat-detail', rigId, logicalId })", () => {
-    const { setSelection, getByTestId } = renderWithDrawerCtx(
-      <SeatDetailTrigger rigId="rig-1" logicalId="dev.impl">open</SeatDetailTrigger>,
-    );
-    fireEvent.click(getByTestId("seat-detail-trigger"));
-    expect(setSelection).toHaveBeenCalledWith({
-      type: "seat-detail",
-      rigId: "rig-1",
-      logicalId: "dev.impl",
-    });
-  });
+  // V1 polish slice Phase 5.1 P5.1-D2: SeatDetailTrigger RETIRED. Click
+  // contract for the (now-deleted) primitive is guarded as a
+  // file-doesn't-exist negative-assertion in node-selection-migration.test.tsx.
 
   it("trigger custom testId override is respected (predicate-consistency probe)", () => {
     const data = { qitemId: "q", body: "b" };
@@ -233,15 +214,8 @@ describe("SharedDetailDrawer (Phase 4) routes selection.type to the correct view
     expect(getByTestId("sub-spec-preview")).toBeTruthy();
   });
 
-  it("selection.type='seat-detail' → SeatDetailViewer mounts in drawer", () => {
-    const selection: DrawerSelection = {
-      type: "seat-detail",
-      rigId: "rig-1",
-      logicalId: "dev.impl",
-    };
-    const { getByTestId } = render(
-      <SharedDetailDrawer selection={selection} onClose={() => {}} {...NOOP_PROPS} />,
-    );
-    expect(getByTestId("seat-detail-viewer")).toBeTruthy();
-  });
+  // V1 polish slice Phase 5.1 P5.1-D2: 'seat-detail' kind RETIRED from
+  // DrawerSelection union; navigation to /topology/seat/$rigId/$logicalId
+  // center page (LiveNodeDetails) replaces the drawer-mounted variant.
+  // Routing-by-type test for 'seat-detail' is gone with the kind itself.
 });

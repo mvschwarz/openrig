@@ -16,25 +16,22 @@ import { VellumSheet } from "./ui/vellum-sheet.js";
 import { QueueItemViewer, type QueueItemViewerData } from "./drawer-viewers/QueueItemViewer.js";
 import { FileViewer, type FileViewerData } from "./drawer-viewers/FileViewer.js";
 import { SubSpecPreview, type SubSpecPreviewData } from "./drawer-viewers/SubSpecPreview.js";
-import { SeatDetailViewer } from "./drawer-viewers/SeatDetailViewer.js";
 import type { ActivityEvent } from "../hooks/useActivityFeed.js";
 
-// V1 attempt-3 Phase 5 P5-4: legacy 'node' kind retired. The 'seat-detail' kind
-// (Phase 4) is now the single canonical seat-detail surface; SeatDetailViewer
-// wraps NodeDetailPanel inside the canonical 38rem drawer chrome. Founder noticed
-// graph-node clicks rendered NodeDetailPanel "full-width with empty whitespace
-// on left" — width-coupling broke when the legacy 'node' branch routed
-// NodeDetailPanel directly past the drawer chrome. Migration: every prior
-// setSelection({type:'node',...}) callsite now routes through 'seat-detail';
-// useNodeSelection alias coerces same. Negative-assertion test enforces removal.
+// V1 polish slice Phase 5.1 P5.1-1 + DRIFT P5.1-D2: 'seat-detail' kind
+// RETIRED at V1 polish per founder direction. Graph node click + tree
+// click + table row click all navigate to /topology/seat/$rigId/$logicalId
+// center page (canonical agent-detail surface = LiveNodeDetails).
+// SeatDetailViewer wrapper component DELETED; SeatDetailTrigger primitive
+// DELETED. Drawer remains a content-viewer surface for the other auto-
+// open triggers (qitem / file / sub-spec) per content-drawer.md L23-L34.
 export type DrawerSelection =
   | { type: "system"; tab?: "log" | "status" }
   | { type: "discovery" }
-  // Phase 4 viewer kinds
+  // Phase 4 viewer kinds (seat-detail retired Phase 5.1 P5.1-D2)
   | { type: "qitem"; data: QueueItemViewerData }
   | { type: "file"; data: FileViewerData }
   | { type: "sub-spec"; data: SubSpecPreviewData }
-  | { type: "seat-detail"; rigId: string; logicalId: string }
   | null;
 
 interface SharedDetailDrawerProps {
@@ -84,15 +81,6 @@ export function SharedDetailDrawer({
     }
     if (selection.type === "sub-spec") {
       return <SubSpecPreview {...selection.data} />;
-    }
-    if (selection.type === "seat-detail") {
-      return (
-        <SeatDetailViewer
-          rigId={selection.rigId}
-          logicalId={selection.logicalId}
-          onClose={onClose}
-        />
-      );
     }
     return null;
   })();

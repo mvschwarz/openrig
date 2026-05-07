@@ -156,47 +156,12 @@ describe("FeedCard P5-1 wiring: show-context QueueItemTrigger", () => {
   });
 });
 
-// -----------------------------------------------------------------------
-// TopologyTreeView SeatLeaf "details" icon → SeatDetailTrigger → drawer.
-// -----------------------------------------------------------------------
-
-// Render the SeatLeaf component directly (it's local-scope; we test via the
-// trigger primitive contract). To exercise inside the tree we'd need the full
-// TanStack Router + useRigSummary mocks; the per-affordance contract is
-// equivalent and is what ritual #6 verifies.
-
-import { SeatDetailTrigger } from "../src/components/drawer-triggers/SeatDetailTrigger.js";
-
-describe("TopologyTreeView P5-1 wiring: SeatLeaf details icon", () => {
-  it("clicking SeatDetailTrigger fires setSelection({ type: 'seat-detail', rigId, logicalId })", () => {
-    const { setSelection, getByTestId } = renderWithDrawerCtx(
-      <SeatDetailTrigger rigId="rig-1" logicalId="orch.lead" testId="seat-leaf-test">
-        details
-      </SeatDetailTrigger>,
-    );
-    fireEvent.click(getByTestId("seat-leaf-test"));
-    expect(setSelection).toHaveBeenCalledWith({
-      type: "seat-detail",
-      rigId: "rig-1",
-      logicalId: "orch.lead",
-    });
-  });
-
-  it("TopologyTreeView source contains SeatDetailTrigger import + PanelRightOpen icon (CSS-source-assertion ritual #1+#9)", async () => {
-    // This is a doctrine-compliance / coupled-literal regression scan
-    // (ritual #9): confirm the canonical source pattern is in place; if
-    // someone strips it out in a refactor, this test breaks.
-    const { readFileSync } = await import("node:fs");
-    const path = await import("node:path");
-    const src = readFileSync(
-      path.resolve(__dirname, "../src/components/topology/TopologyTreeView.tsx"),
-      "utf8",
-    );
-    expect(src).toMatch(/import\s*\{\s*SeatDetailTrigger\s*\}/);
-    expect(src).toMatch(/<SeatDetailTrigger\s+rigId=/);
-    expect(src).toMatch(/PanelRightOpen/); // lucide details-icon glyph
-  });
-});
+// V1 polish slice Phase 5.1 P5.1-D2: TopologyTreeView SeatLeaf details
+// icon RETIRED. SeatDetailTrigger primitive RETIRED. SeatLeaf is now
+// Link-only navigation to /topology/seat/$rigId/$logicalId. Retirement-
+// regression guard lives in test/node-selection-migration.test.tsx
+// (file-doesn't-exist for SeatDetailTrigger.tsx + SharedDetailDrawer
+// has no 'seat-detail' kind).
 
 // -----------------------------------------------------------------------
 // RigSpecDisplay pod-member agentRef cell → SubSpecTrigger → drawer.
