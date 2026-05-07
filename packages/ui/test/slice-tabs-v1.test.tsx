@@ -79,6 +79,18 @@ describe("PL-slice-story-view-v1 StoryTab", () => {
     render(<StoryTab events={events} phaseDefinitions={null} />);
     expect(screen.getByTestId("story-row-phase-queue.created").textContent).toBe("step-x");
   });
+
+  it("renders a newest-first connected step tree", () => {
+    const events = [
+      event({ kind: "old.event", ts: "2026-05-04T00:00:00.000Z", summary: "older" }),
+      event({ kind: "new.event", ts: "2026-05-04T01:00:00.000Z", summary: "newer" }),
+    ];
+    render(<StoryTab events={events} phaseDefinitions={null} />);
+    expect(screen.getByTestId("story-step-tree").getAttribute("data-order")).toBe("newest-first");
+    const rows = screen.getAllByTestId(/story-row-/);
+    expect(rows[0]?.getAttribute("data-testid")).toBe("story-row-new.event");
+    expect(screen.getByTestId("story-step-connector-new.event")).toBeDefined();
+  });
 });
 
 // --- AcceptanceTab ---
@@ -182,6 +194,8 @@ describe("PL-slice-story-view-v1 TopologyTab", () => {
     };
     render(makeRouter(topologyShape(sg)));
     await waitFor(() => expect(screen.getByTestId("topology-spec-graph")).toBeDefined());
+    expect(screen.getByTestId("topology-spec-graph").getAttribute("data-layout")).toBe("react-flow-dagre");
+    expect(screen.getByTestId("slice-workflow-graph")).toBeDefined();
     expect(screen.getByTestId("topology-spec-name").textContent).toBe("test-loop");
     // Per-step nodes rendered.
     expect(screen.getByTestId("spec-node-discovery")).toBeDefined();

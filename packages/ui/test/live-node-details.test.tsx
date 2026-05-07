@@ -88,17 +88,17 @@ describe("LiveNodeDetails", () => {
 
     expect(screen.getByText("Live Node Details")).toBeDefined();
     expect(screen.getByTestId("detail-edges")).toBeDefined();
+    expect(screen.getByTestId("live-node-actions").nextElementSibling?.getAttribute("data-testid")).toBe("live-node-tabs");
+    expect(screen.queryByTestId("live-node-status")).toBeNull();
+    expect(screen.queryByTestId("detail-transcript")).toBeNull();
+    expect(screen.queryByTestId("detail-compact-spec")).toBeNull();
   });
 
   it("agent spec tab shows unavailable when agentRef is null", async () => {
     mockNodeDetail({ ...NODE_DETAIL, agentRef: null });
     renderDetails();
 
-    await waitFor(() => {
-      expect(screen.getByTestId("live-node-details")).toBeDefined();
-    });
-
-    fireEvent.click(screen.getByTestId("live-tab-agent-spec"));
+    fireEvent.click(await screen.findByTestId("live-tab-agent-spec"));
 
     await waitFor(() => {
       expect(screen.getByTestId("agent-spec-unavailable")).toBeDefined();
@@ -109,11 +109,7 @@ describe("LiveNodeDetails", () => {
     mockNodeDetail({ ...NODE_DETAIL, agentRef: "remote:agents/impl" });
     renderDetails();
 
-    await waitFor(() => {
-      expect(screen.getByTestId("live-node-details")).toBeDefined();
-    });
-
-    fireEvent.click(screen.getByTestId("live-tab-agent-spec"));
+    fireEvent.click(await screen.findByTestId("live-tab-agent-spec"));
 
     await waitFor(() => {
       expect(screen.getByTestId("agent-spec-unavailable")).toBeDefined();
@@ -125,10 +121,9 @@ describe("LiveNodeDetails", () => {
     renderDetails("infra.server");
 
     // Wait for data to load and re-render without agent-spec tab
-    await waitFor(() => {
-      expect(screen.queryByTestId("live-tab-agent-spec")).toBeNull();
-    });
+    await screen.findByTestId("live-tab-identity");
 
+    expect(screen.queryByTestId("live-tab-agent-spec")).toBeNull();
     expect(screen.getByTestId("live-tab-identity")).toBeDefined();
     expect(screen.getByTestId("live-tab-startup")).toBeDefined();
   });
@@ -137,15 +132,28 @@ describe("LiveNodeDetails", () => {
     mockNodeDetail(NODE_DETAIL);
     renderDetails();
 
-    await waitFor(() => {
-      expect(screen.getByTestId("live-node-details")).toBeDefined();
-    });
-
-    fireEvent.click(screen.getByTestId("live-tab-startup"));
+    fireEvent.click(await screen.findByTestId("live-tab-startup"));
 
     await waitFor(() => {
       expect(screen.getByTestId("live-startup-section")).toBeDefined();
+      expect(screen.getByTestId("live-node-status")).toBeDefined();
+      expect(screen.getByTestId("live-node-preview")).toBeDefined();
       expect(screen.getByText(/role\.md/)).toBeDefined();
+    });
+  });
+
+  it("transcript and terminal tabs own their named content", async () => {
+    mockNodeDetail(NODE_DETAIL);
+    renderDetails();
+
+    fireEvent.click(await screen.findByTestId("live-tab-transcript"));
+    expect(await screen.findByTestId("detail-transcript")).toBeDefined();
+
+    fireEvent.click(screen.getByTestId("live-tab-terminal"));
+    const terminalShell = await screen.findByTestId("live-terminal-shell");
+    expect(terminalShell.className).toContain("bg-stone-950/65");
+    await waitFor(() => {
+      expect(screen.getByTestId("live-terminal-preview-pane").getAttribute("data-variant")).toBe("compact-terminal");
     });
   });
 
