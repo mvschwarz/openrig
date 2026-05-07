@@ -53,7 +53,13 @@ export interface NodeDetailData {
   resolvedSpecName: string | null;
   resolvedSpecVersion: string | null;
   cwd: string | null;
-  startupFiles: Array<{ path: string; deliveryHint: string; required: boolean }>;
+  startupFiles: Array<{
+    path: string;
+    deliveryHint: string;
+    required: boolean;
+    absolutePath?: string | null;
+    ownerRoot?: string | null;
+  }>;
   startupActions: Array<{ type: string; value: string }>;
   recentEvents: Array<{ type: string; createdAt: string }>;
   infrastructureStartupCommand: string | null;

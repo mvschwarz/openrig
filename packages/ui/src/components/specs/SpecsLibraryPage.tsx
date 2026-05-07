@@ -1,54 +1,352 @@
-// V1 attempt-3 Phase 3 — Specs library top-level page per specs-tree.md L51–L82 + SC-28.
-
+import { useMemo, useState } from "react";
 import { Link } from "@tanstack/react-router";
 import { SectionHeader } from "../ui/section-header.js";
-import { SpecsTable } from "./SpecsTable.js";
+import { EmptyState } from "../ui/empty-state.js";
+import { FileViewer } from "../drawer-viewers/FileViewer.js";
+import { useSpecLibrary, type SpecLibraryEntry } from "../../hooks/useSpecLibrary.js";
+import { useContextPackLibrary, type ContextPackEntry } from "../../hooks/useContextPackLibrary.js";
+import { useAgentImageLibrary, type AgentImageEntry } from "../../hooks/useAgentImageLibrary.js";
+import { useLibrarySkills, type LibrarySkillEntry, type LibrarySkillFile } from "../../hooks/useLibrarySkills.js";
 
-const TOOLBAR_ACTIONS: Array<{
-  label: string;
-  to: string;
-  testId: string;
-}> = [
+const TOOLBAR_ACTIONS = [
   { label: "+ Add spec", to: "/specs/rig", testId: "specs-toolbar-add" },
-  { label: "Discover", to: "/discovery", testId: "specs-toolbar-discover" },
-  { label: "Import bundle", to: "/import", testId: "specs-toolbar-import" },
+  { label: "Import", to: "/import", testId: "specs-toolbar-import" },
+  { label: "Discover", to: "/search", testId: "specs-toolbar-discover" },
   { label: "Create rig", to: "/specs/rig", testId: "specs-toolbar-create-rig" },
   { label: "Generate workflow", to: "/specs/agent", testId: "specs-toolbar-gen-workflow" },
-  { label: "Audit", to: "/search", testId: "specs-toolbar-audit" },
-];
+] as const;
+
+interface LibraryRow {
+  id: string;
+  label: string;
+  meta: string;
+  entryId?: string;
+}
+
+function specRow(entry: SpecLibraryEntry): LibraryRow {
+  return {
+    id: entry.id,
+    label: entry.name,
+    meta: `${entry.version} · ${entry.sourceType}`,
+    entryId: entry.id,
+  };
+}
+
+function contextPackRow(entry: ContextPackEntry): LibraryRow {
+  return {
+    id: entry.id,
+    label: entry.name,
+    meta: `${entry.version} · ${entry.sourceType} · ~${entry.derivedEstimatedTokens} tokens`,
+    entryId: entry.id,
+  };
+}
+
+function agentImageRow(entry: AgentImageEntry): LibraryRow {
+  return {
+    id: entry.id,
+    label: entry.name,
+    meta: `${entry.version} · ${entry.runtime} · ${entry.sourceType}`,
+    entryId: entry.id,
+  };
+}
+
+function LibrarySection({
+  id,
+  title,
+  rows,
+  isLoading,
+  emptyLabel,
+}: {
+  id: string;
+  title: string;
+  rows: LibraryRow[];
+  isLoading?: boolean;
+  emptyLabel?: string;
+}) {
+  return (
+    <section data-testid={`library-section-${id}`} className="border border-outline-variant bg-white/25 hard-shadow">
+      <header className="flex items-baseline justify-between border-b border-outline-variant bg-white/30 px-3 py-2">
+        <SectionHeader tone="default">{title}</SectionHeader>
+        <span className="font-mono text-[9px] uppercase tracking-[0.12em] text-stone-500">
+          {isLoading ? "loading" : `${rows.length} items`}
+        </span>
+      </header>
+      {rows.length > 0 ? (
+        <ul className="divide-y divide-outline-variant">
+          {rows.map((row) => (
+            <li key={row.id}>
+              {row.entryId ? (
+                <Link
+                  to="/specs/library/$entryId"
+                  params={{ entryId: row.entryId }}
+                  data-testid={`library-row-${id}-${row.id}`}
+                  className="block px-3 py-2 hover:bg-stone-100/50"
+                >
+                  <LibraryRowContent row={row} />
+                </Link>
+              ) : (
+                <div data-testid={`library-row-${id}-${row.id}`} className="px-3 py-2">
+                  <LibraryRowContent row={row} />
+                </div>
+              )}
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <div className="px-3 py-4 font-mono text-[10px] text-stone-500">
+          {isLoading ? "Loading..." : emptyLabel ?? "No entries."}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function LibraryRowContent({ row }: { row: LibraryRow }) {
+  return (
+    <div className="flex items-baseline justify-between gap-3 font-mono">
+      <span className="truncate text-xs font-bold text-stone-900">{row.label}</span>
+      <span className="shrink-0 text-[9px] uppercase tracking-[0.08em] text-stone-500">{row.meta}</span>
+    </div>
+  );
+}
+
+function SkillSourceLabel({ source }: { source: LibrarySkillEntry["source"] }) {
+  return (
+    <span className="font-mono text-[8px] uppercase tracking-[0.12em] text-stone-500">
+      {source === "workspace" ? "workspace" : "openrig"}
+    </span>
+  );
+}
+
+function SkillsSection({
+  skills,
+  isLoading,
+}: {
+  skills: LibrarySkillEntry[];
+  isLoading: boolean;
+}) {
+  const [selectedSkillId, setSelectedSkillId] = useState<string | null>(null);
+  const [selectedFilePath, setSelectedFilePath] = useState<string | null>(null);
+  const selectedSkill = skills.find((skill) => skill.id === selectedSkillId) ?? skills[0] ?? null;
+  const selectedFile = selectedSkill
+    ? selectedSkill.files.find((file) => file.path === selectedFilePath) ?? selectedSkill.files[0] ?? null
+    : null;
+
+  const selectSkill = (skill: LibrarySkillEntry) => {
+    setSelectedSkillId(skill.id);
+    setSelectedFilePath(skill.files[0]?.path ?? null);
+  };
+
+  const selectFile = (file: LibrarySkillFile) => {
+    setSelectedFilePath(file.path);
+  };
+
+  return (
+    <section data-testid="library-section-skills" className="border border-outline-variant bg-white/25 hard-shadow">
+      <header className="flex items-baseline justify-between border-b border-outline-variant bg-white/30 px-3 py-2">
+        <SectionHeader tone="default">Skills</SectionHeader>
+        <span className="font-mono text-[9px] uppercase tracking-[0.12em] text-stone-500">
+          {isLoading ? "loading" : `${skills.length} folders`}
+        </span>
+      </header>
+      {skills.length === 0 ? (
+        <div className="px-3 py-4">
+          <EmptyState
+            label={isLoading ? "LOADING" : "NO SKILLS FOUND"}
+            description={isLoading
+              ? "Loading skill folders..."
+              : "No .openrig/skills or packaged OpenRig skill folders are visible through configured file roots."}
+            variant="card"
+            testId="library-skills-empty"
+          />
+        </div>
+      ) : (
+        <div className="grid min-h-[28rem] grid-cols-[18rem_minmax(0,1fr)]">
+          <aside className="border-r border-outline-variant">
+            <ul className="divide-y divide-outline-variant">
+              {skills.map((skill) => (
+                <li key={skill.id}>
+                  <button
+                    type="button"
+                    data-testid={`library-skill-${skill.name}`}
+                    data-active={selectedSkill?.id === skill.id}
+                    onClick={() => selectSkill(skill)}
+                    className={`block w-full px-3 py-2 text-left hover:bg-stone-100/50 ${
+                      selectedSkill?.id === skill.id ? "bg-stone-100/70" : ""
+                    }`}
+                  >
+                    <div className="flex items-baseline justify-between gap-2">
+                      <span className="truncate font-mono text-xs font-bold text-stone-900">{skill.name}</span>
+                      <SkillSourceLabel source={skill.source} />
+                    </div>
+                    <div className="mt-1 font-mono text-[9px] text-stone-500">
+                      {skill.files.length} markdown files
+                    </div>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </aside>
+          <div className="grid min-w-0 grid-cols-[14rem_minmax(0,1fr)]">
+            <aside className="border-r border-outline-variant bg-white/20">
+              <div className="border-b border-outline-variant px-3 py-2 font-mono text-[9px] uppercase tracking-[0.12em] text-stone-500">
+                Files
+              </div>
+              <ul className="divide-y divide-outline-variant">
+                {selectedSkill?.files.map((file) => (
+                  <li key={file.path}>
+                    <button
+                      type="button"
+                      data-testid={`library-skill-file-${file.name}`}
+                      data-active={selectedFile?.path === file.path}
+                      onClick={() => selectFile(file)}
+                      className={`block w-full px-3 py-2 text-left font-mono text-[10px] hover:bg-stone-100/50 ${
+                        selectedFile?.path === file.path ? "bg-stone-100/70 text-stone-900" : "text-stone-700"
+                      }`}
+                    >
+                      {file.name}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </aside>
+            <div className="min-w-0">
+              {selectedSkill && selectedFile ? (
+                <FileViewer
+                  path={`${selectedSkill.name}/${selectedFile.name}`}
+                  root={selectedSkill.root}
+                  readPath={selectedFile.path}
+                  kind="markdown"
+                />
+              ) : (
+                <EmptyState
+                  label="NO FILE SELECTED"
+                  description="Select a skill file to preview it."
+                  variant="card"
+                  testId="library-skill-no-file"
+                />
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
 
 export function SpecsLibraryPage() {
+  const { data: specs = [], isLoading: specsLoading } = useSpecLibrary();
+  const { data: contextPacks = [], isLoading: contextPacksLoading } = useContextPackLibrary();
+  const { data: agentImages = [], isLoading: agentImagesLoading } = useAgentImageLibrary();
+  const { data: skills = [], isLoading: skillsLoading } = useLibrarySkills();
+
+  const sections = useMemo(() => {
+    const rigSpecs = specs.filter((entry) => entry.kind === "rig" && !entry.hasServices).map(specRow);
+    const workflowSpecs = specs.filter((entry) => entry.kind === "workflow").map(specRow);
+    const agentSpecs = specs.filter((entry) => entry.kind === "agent").map(specRow);
+    const applications = specs.filter((entry) => entry.kind === "rig" && entry.hasServices).map(specRow);
+    return { rigSpecs, workflowSpecs, agentSpecs, applications };
+  }, [specs]);
+
+  const total =
+    sections.rigSpecs.length
+    + sections.workflowSpecs.length
+    + sections.agentSpecs.length
+    + sections.applications.length
+    + contextPacks.length
+    + agentImages.length
+    + skills.length;
+
   return (
     <div
       data-testid="specs-library-page"
-      className="mx-auto w-full max-w-[1200px] px-6 py-8"
+      className="h-full overflow-y-auto bg-paper-grid px-6 py-5 lg:pl-[var(--workspace-left-offset,0px)] lg:pr-[var(--workspace-right-offset,0px)]"
     >
-      <header className="border-b border-outline-variant pb-4 mb-6">
-        <SectionHeader tone="muted">Library</SectionHeader>
-        <h1 className="font-headline text-headline-md font-bold tracking-tight uppercase text-stone-900 mt-1">
-          Specs
-        </h1>
+      <header className="mb-5 flex items-start justify-between gap-4">
+        <div>
+          <SectionHeader tone="muted">Library</SectionHeader>
+          <h1 className="mt-1 font-headline text-2xl font-bold tracking-tight text-stone-900">
+            Library
+          </h1>
+          <p className="mt-1 max-w-3xl text-sm text-stone-600">
+            Specs, context packs, agent images, applications, and skill folders.
+          </p>
+        </div>
+        <nav
+          aria-label="Library actions"
+          className="flex flex-wrap justify-end gap-2"
+        >
+          {TOOLBAR_ACTIONS.map((a) => (
+            <Link
+              key={a.testId}
+              to={a.to}
+              data-testid={a.testId}
+              className="border border-outline-variant bg-white/25 px-3 py-1.5 font-mono text-[10px] uppercase tracking-[0.12em] text-stone-700 hard-shadow hover:bg-white/40"
+            >
+              {a.label}
+            </Link>
+          ))}
+        </nav>
       </header>
 
-      <div
-        data-testid="specs-toolbar"
-        role="toolbar"
-        aria-label="Specs library actions"
-        className="flex flex-wrap gap-2 mb-6"
-      >
-        {TOOLBAR_ACTIONS.map((a) => (
-          <Link
-            key={a.testId}
-            to={a.to}
-            data-testid={a.testId}
-            className="inline-flex items-center px-3 py-1.5 border border-outline-variant bg-white font-mono text-[10px] uppercase tracking-[0.18em] text-stone-900 hover:bg-stone-100"
-          >
-            {a.label}
-          </Link>
-        ))}
+      <div className="mb-4 font-mono text-[10px] uppercase tracking-[0.14em] text-stone-500">
+        {total} library entries visible through current sources
       </div>
 
-      <SpecsTable />
+      <div className="grid gap-4 xl:grid-cols-2">
+        <LibrarySection
+          id="rig-specs"
+          title="Rig Specs"
+          rows={sections.rigSpecs}
+          isLoading={specsLoading}
+          emptyLabel="No rig specs found."
+        />
+        <LibrarySection
+          id="workspace-specs"
+          title="Workspace Specs"
+          rows={[]}
+          emptyLabel="No workspace specs source is wired yet."
+        />
+        <LibrarySection
+          id="workflow-specs"
+          title="Workflow Specs"
+          rows={sections.workflowSpecs}
+          isLoading={specsLoading}
+          emptyLabel="No workflow specs found."
+        />
+        <LibrarySection
+          id="context-packs"
+          title="Context Packs"
+          rows={contextPacks.map(contextPackRow)}
+          isLoading={contextPacksLoading}
+          emptyLabel="No context packs found."
+        />
+        <LibrarySection
+          id="agent-specs"
+          title="Agent Specs"
+          rows={sections.agentSpecs}
+          isLoading={specsLoading}
+          emptyLabel="No agent specs found."
+        />
+        <LibrarySection
+          id="agent-images"
+          title="Agent Images"
+          rows={agentImages.map(agentImageRow)}
+          isLoading={agentImagesLoading}
+          emptyLabel="No agent images found."
+        />
+        <LibrarySection
+          id="applications"
+          title="Applications"
+          rows={sections.applications}
+          isLoading={specsLoading}
+          emptyLabel="No application specs found."
+        />
+      </div>
+
+      <div className="mt-4">
+        <SkillsSection skills={skills} isLoading={skillsLoading} />
+      </div>
     </div>
   );
 }

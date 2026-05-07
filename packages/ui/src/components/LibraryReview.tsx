@@ -87,7 +87,12 @@ function LibraryAgentReviewPage({ review }: { review: LibraryAgentReview }) {
           <WorkflowSummaryCard label="Skills" value={resources.skills.length} testId="lib-agent-skills" />
         </WorkflowSummaryGrid>
 
-        <AgentSpecDisplay review={review} yaml={review.raw} testIdPrefix="lib-agent" />
+        <AgentSpecDisplay
+          review={review}
+          yaml={review.raw}
+          testIdPrefix="lib-agent"
+          sourcePath={review.sourcePath}
+        />
       </div>
     </WorkspacePage>
   );
@@ -242,7 +247,7 @@ function LibrarySpecReview({ entryId }: LibraryReviewProps) {
       <WorkspacePage>
         <div data-testid="library-review-error" className="space-y-4">
           <WorkflowHeader eyebrow="Library" title="Spec Not Found" description={(error as Error)?.message ?? "Could not load spec."} />
-          <Button variant="outline" size="sm" onClick={() => navigate({ to: "/specs" })}>Back to Specs</Button>
+          <Button variant="outline" size="sm" onClick={() => navigate({ to: "/specs" })}>Back to Library</Button>
         </div>
       </WorkspacePage>
     );
@@ -528,7 +533,7 @@ function LibraryContextPackReviewPage({ entryId }: { entryId: string }) {
             title="Context Pack Not Found"
             description={(packsError as Error)?.message ?? `No context pack with id ${entryId}.`}
           />
-          <Button variant="outline" size="sm" onClick={() => navigate({ to: "/specs" })}>Back to Specs</Button>
+          <Button variant="outline" size="sm" onClick={() => navigate({ to: "/specs" })}>Back to Library</Button>
         </div>
       </WorkspacePage>
     );
@@ -604,7 +609,7 @@ function ContextPackReviewBody({
               >
                 {showSendPicker ? "Hide Send" : "Send to seat"}
               </Button>
-              <Button variant="outline" size="sm" onClick={() => navigate({ to: "/specs" })}>Back to Specs</Button>
+              <Button variant="outline" size="sm" onClick={() => navigate({ to: "/specs" })}>Back to Library</Button>
             </div>
           }
         />
@@ -639,7 +644,7 @@ function ContextPackReviewBody({
                   className={`font-mono text-[10px] ${missing ? "text-red-700" : "text-stone-800"}`}
                 >
                   <FileReferenceTrigger
-                    data={{ path: f.path }}
+                    data={{ path: f.path, absolutePath: f.absolutePath }}
                     testId={`lib-pack-file-trigger-${f.path}`}
                     className="block w-full px-3 py-2 text-left hover:bg-stone-100/60 transition-colors"
                   >
@@ -768,7 +773,7 @@ function LibraryAgentImageReviewPage({ entryId }: { entryId: string }) {
             title="Agent Image Not Found"
             description={(imagesError as Error)?.message ?? `No agent image with id ${entryId}.`}
           />
-          <Button variant="outline" size="sm" onClick={() => navigate({ to: "/specs" })}>Back to Specs</Button>
+          <Button variant="outline" size="sm" onClick={() => navigate({ to: "/specs" })}>Back to Library</Button>
         </div>
       </WorkspacePage>
     );
@@ -826,7 +831,7 @@ function AgentImageReviewBody({
               >
                 {entry.pinned ? "Unpin" : "Pin"}
               </Button>
-              <Button variant="outline" size="sm" onClick={() => navigate({ to: "/specs" })}>Back to Specs</Button>
+              <Button variant="outline" size="sm" onClick={() => navigate({ to: "/specs" })}>Back to Library</Button>
             </div>
           }
         />
@@ -906,7 +911,7 @@ function AgentImageReviewBody({
                   data-testid={`lib-image-file-${f.path}`}
                 >
                   <FileReferenceTrigger
-                    data={{ path: f.path }}
+                    data={{ path: f.path, absolutePath: f.absolutePath }}
                     testId={`lib-image-file-trigger-${f.path}`}
                     className="block w-full px-3 py-2 text-left hover:bg-stone-100/60 transition-colors"
                   >
