@@ -31,6 +31,11 @@ export interface StartOptions {
   db?: string;
   transcriptsEnabled?: boolean;
   transcriptsPath?: string;
+  // V1 pre-release CLI/daemon Item 1 — capture-pane rotation tunables.
+  // Threaded through to the daemon process env so the rotation hook
+  // picks up file-stored ConfigStore values, not just shell env.
+  transcriptsLines?: number;
+  transcriptsPollIntervalSeconds?: number;
 }
 
 export interface LifecycleDeps {
@@ -193,7 +198,18 @@ const ENV_SCRUB_EXACT = new Set([
 
 export function buildDaemonEnv(
   baseEnv: Record<string, string>,
-  opts: { port: number; host: string; db: string; transcriptsEnabled?: boolean; transcriptsPath?: string },
+  opts: {
+    port: number;
+    host: string;
+    db: string;
+    transcriptsEnabled?: boolean;
+    transcriptsPath?: string;
+    // V1 pre-release CLI/daemon Item 1 — projected from ConfigStore so
+    // the rotation hook honors file-stored values, not just inherited
+    // shell env.
+    transcriptsLines?: number;
+    transcriptsPollIntervalSeconds?: number;
+  },
 ): Record<string, string> {
   const env: Record<string, string> = {};
 
@@ -212,6 +228,12 @@ export function buildDaemonEnv(
   }
   if (opts.transcriptsPath) {
     env["OPENRIG_TRANSCRIPTS_PATH"] = opts.transcriptsPath;
+  }
+  if (opts.transcriptsLines !== undefined) {
+    env["OPENRIG_TRANSCRIPTS_LINES"] = String(opts.transcriptsLines);
+  }
+  if (opts.transcriptsPollIntervalSeconds !== undefined) {
+    env["OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS"] = String(opts.transcriptsPollIntervalSeconds);
   }
 
   return env;
@@ -261,6 +283,8 @@ export async function startDaemon(opts: StartOptions, deps: LifecycleDeps): Prom
       db,
       transcriptsEnabled: opts.transcriptsEnabled,
       transcriptsPath: opts.transcriptsPath,
+      transcriptsLines: opts.transcriptsLines,
+      transcriptsPollIntervalSeconds: opts.transcriptsPollIntervalSeconds,
     }),
     stdio: ["ignore", logFd, logFd],
     detached: true,
