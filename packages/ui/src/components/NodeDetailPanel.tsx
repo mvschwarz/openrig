@@ -49,9 +49,17 @@ export function NodeDetailPanel({ rigId, logicalId, onClose }: NodeDetailPanelPr
   };
 
   return (
+    // V1 attempt-3 Phase 5 P5-9 ship-gate bounce P0-2: switch from
+    // `absolute inset-y-0 right-0 z-20 w-80` legacy self-pinning (which
+    // left ~288px orphan whitespace inside the 38rem drawer because the
+    // panel pinned itself to viewport-right with w-80=320px) to
+    // `relative w-full h-full` fill-parent. Only production caller is
+    // SeatDetailViewer (verified via grep `<NodeDetailPanel`) which mounts
+    // inside the canonical 38rem VellumSheet drawer chrome and supplies
+    // its own width context. Background + backdrop preserved.
     <aside
       data-testid="node-detail-panel"
-      className="absolute inset-y-0 right-0 z-20 w-80 border-l border-stone-300/25 bg-[rgba(250,249,245,0.035)] supports-[backdrop-filter]:bg-[rgba(250,249,245,0.018)] backdrop-blur-[14px] backdrop-saturate-75 shadow-[-6px_0_14px_rgba(46,52,46,0.04)] flex flex-col overflow-hidden"
+      className="relative w-full h-full bg-[rgba(250,249,245,0.035)] supports-[backdrop-filter]:bg-[rgba(250,249,245,0.018)] flex flex-col overflow-hidden"
     >
       {/* Header */}
       <div className="flex justify-between items-center px-4 py-3 border-b border-stone-300/35 shrink-0">
