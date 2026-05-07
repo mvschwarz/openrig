@@ -24,6 +24,11 @@ import { RigGraph } from "../RigGraph.js";
 import { useRigSummary } from "../../hooks/useRigSummary.js";
 import { LiveNodeDetails } from "../LiveNodeDetails.js";
 import { useTopologyOverlay } from "./topology-overlay-context.js";
+// V1 attempt-3 Phase 5 P5-9: graph view-mode degrades to table on
+// narrow viewports per universal-shell.md L143 ("Topology graph view
+// degrades to table view by default on mobile (graph is too dense for
+// phone screens)").
+import { useShellViewport } from "../../hooks/useShellViewport.js";
 
 /** Set the AppShell's Explorer overlay mode based on the scope page's
  *  active view-mode. Graph view-mode → overlay (vellum-translucent
@@ -86,7 +91,13 @@ function ScopeShell({
 export function HostScopePage() {
   const [active, setActive] = useState<TopologyHostScopeTab>("graph");
   const { data: rigs } = useRigSummary();
+  const { isWideLayout } = useShellViewport();
   useOverlayForActiveTab(active);
+
+  // P5-9 mobile graph degradation: at <lg viewport, treat graph view-mode
+  // as table per universal-shell.md L143. The tab nav still shows graph
+  // selected (operator may resize to wide and the graph reactivates).
+  const effectiveActive = !isWideLayout && active === "graph" ? "table" : active;
 
   return (
     <ScopeShell
@@ -94,7 +105,7 @@ export function HostScopePage() {
       title="localhost"
       tabsNav={<TopologyViewModeTabs tabs={HOST_SCOPE_TABS} active={active} onSelect={setActive} testIdPrefix="topology-host" />}
     >
-      {active === "graph" ? (
+      {effectiveActive === "graph" ? (
         <div className="p-6">
           <EmptyState
             label="HOST GRAPH"
@@ -109,12 +120,20 @@ export function HostScopePage() {
           />
         </div>
       ) : null}
-      {active === "table" ? (
+      {effectiveActive === "table" ? (
         <div className="px-6 pb-6">
+          {!isWideLayout && active === "graph" ? (
+            <p
+              data-testid="topology-mobile-graph-degraded"
+              className="font-mono text-[9px] text-on-surface-variant italic mb-2"
+            >
+              Graph view degrades to table on narrow viewports.
+            </p>
+          ) : null}
           <TopologyTableView />
         </div>
       ) : null}
-      {active === "terminal" ? <TopologyTerminalView scope="host" /> : null}
+      {effectiveActive === "terminal" ? <TopologyTerminalView scope="host" /> : null}
     </ScopeShell>
   );
 }
@@ -124,7 +143,10 @@ export function RigScopePage() {
   const { data: rigs } = useRigSummary();
   const rig = rigs?.find((r) => r.id === rigId);
   const [active, setActive] = useState<TopologyRigPodScopeTab>("graph");
+  const { isWideLayout } = useShellViewport();
   useOverlayForActiveTab(active);
+
+  const effectiveActive = !isWideLayout && active === "graph" ? "table" : active;
 
   return (
     <ScopeShell
@@ -132,17 +154,25 @@ export function RigScopePage() {
       title={rig?.name ?? rigId}
       tabsNav={<TopologyViewModeTabs tabs={RIG_POD_SCOPE_TABS} active={active} onSelect={setActive} testIdPrefix="topology-rig" />}
     >
-      {active === "graph" ? (
+      {effectiveActive === "graph" ? (
         <div className="flex-1 min-h-0 relative">
           <RigGraph rigId={rigId} rigName={rig?.name ?? null} showDiscovered={false} />
         </div>
       ) : null}
-      {active === "table" ? (
+      {effectiveActive === "table" ? (
         <div className="px-6 pb-6">
+          {!isWideLayout && active === "graph" ? (
+            <p
+              data-testid="topology-mobile-graph-degraded"
+              className="font-mono text-[9px] text-on-surface-variant italic mb-2"
+            >
+              Graph view degrades to table on narrow viewports.
+            </p>
+          ) : null}
           <TopologyTableView rigIdScope={rigId} />
         </div>
       ) : null}
-      {active === "terminal" ? <TopologyTerminalView scope="rig" rigId={rigId} /> : null}
+      {effectiveActive === "terminal" ? <TopologyTerminalView scope="rig" rigId={rigId} /> : null}
       {active === "overview" ? (
         <div className="p-6">
           <EmptyState
