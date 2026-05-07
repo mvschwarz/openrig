@@ -72,7 +72,13 @@ describe("AppShell — Phase 2 chrome", () => {
   describe("SC-1: exactly 2 left chromes on desktop (rail + explore)", () => {
     it("renders exactly 2 left chromes at /topology desktop (rail + explore) — SC-1 strict count", async () => {
       const { container } = await renderAt("/topology");
-      const chromeCount = container.querySelectorAll("nav, aside").length;
+      // SC-1: count desktop-visible nav/aside elements only. The Phase 5 P5-9
+      // MobileBottomNav uses <nav lg:hidden> — it's in the DOM but display:none
+      // at desktop (lg breakpoint). SC-1's "exactly 2 left chromes on desktop"
+      // is about VISIBLE chromes, not raw element count — filter by lg:hidden.
+      const chromeCount = Array.from(
+        container.querySelectorAll("nav, aside"),
+      ).filter((el) => !(el as HTMLElement).className.includes("lg:hidden")).length;
       expect(chromeCount).toBe(2);
       // No legacy Sidebar.tsx anywhere — file is deleted.
       expect(container.querySelector("[data-testid='sidebar']")).toBeNull();

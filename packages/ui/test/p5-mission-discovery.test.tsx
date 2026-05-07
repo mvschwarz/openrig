@@ -1,0 +1,306 @@
+// V1 attempt-3 Phase 5 P5-5 + P5-6 — filesystem-based mission discovery +
+// MissionStatusBadge live PROGRESS.md fetch.
+//
+// Both features ride on the existing /api/files/list + /api/files/read
+// daemon routes (no new daemon endpoints; SC-29 honored). When the
+// allowlist doesn't expose workspace.root, the tree falls back to the
+// legacy railItem-grouped slice listing — also tested here.
+
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { render, cleanup, waitFor } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import {
+  createMemoryHistory,
+  RouterProvider,
+  createRouter,
+  createRootRoute,
+  createRoute,
+  Outlet,
+} from "@tanstack/react-router";
+import { parseMissionStatus } from "../src/components/MissionStatusBadge.js";
+
+const mockFetch = vi.fn();
+globalThis.fetch = mockFetch;
+
+beforeEach(() => {
+  mockFetch.mockReset();
+});
+
+afterEach(() => {
+  cleanup();
+});
+
+// -----------------------------------------------------------------------
+// parseMissionStatus — unit-level (Phase 3 already covered most paths;
+// adding a few P5-6 path-specific cases for invariant guard).
+// -----------------------------------------------------------------------
+
+describe("parseMissionStatus (P5-6 invariants)", () => {
+  it("parses status:active from PROGRESS.md frontmatter", () => {
+    expect(
+      parseMissionStatus("---\nname: Mission X\nstatus: active\n---\n# body"),
+    ).toBe("active");
+  });
+
+  it("parses status:shipped variants", () => {
+    expect(parseMissionStatus("---\nstatus: shipped\n---")).toBe("shipped");
+    expect(parseMissionStatus("---\nstatus: complete\n---")).toBe("shipped");
+    expect(parseMissionStatus("---\nstatus: completed\n---")).toBe("shipped");
+    expect(parseMissionStatus("---\nstatus: done\n---")).toBe("shipped");
+  });
+
+  it("parses status:blocked variants", () => {
+    expect(parseMissionStatus("---\nstatus: blocked\n---")).toBe("blocked");
+    expect(parseMissionStatus("---\nstatus: stalled\n---")).toBe("blocked");
+  });
+
+  it("returns 'unknown' on missing/empty/malformed input", () => {
+    expect(parseMissionStatus(null)).toBe("unknown");
+    expect(parseMissionStatus(undefined)).toBe("unknown");
+    expect(parseMissionStatus("")).toBe("unknown");
+    expect(parseMissionStatus("# no frontmatter")).toBe("unknown");
+    expect(parseMissionStatus("---\nfoo: bar\n---")).toBe("unknown");
+  });
+});
+
+// -----------------------------------------------------------------------
+// useMissionDiscovery — integration via ProjectTreeView (the real consumer).
+// -----------------------------------------------------------------------
+
+import { ProjectTreeView } from "../src/components/project/ProjectTreeView.js";
+
+interface RenderTreeOpts {
+  // Settings response: workspace.root absolute path. Pass null to render
+  // the unset/unreachable empty-state.
+  workspaceRoot: string | null;
+  settingsAvailable?: boolean;
+  // Files API mocks.
+  roots: Array<{ name: string; path: string }>;
+  // Map "<root>:<path>" → directory entries.
+  listings?: Record<string, Array<{ name: string; type: "dir" | "file" }>>;
+  // Map "<root>:<path>" → file content.
+  reads?: Record<string, { content: string; mtime?: string }>;
+  // useSlices response.
+  slices?: Array<{ name: string; displayName: string; railItem: string | null; status: string; rawStatus: string | null; qitemCount: number; hasProofPacket: boolean; lastActivityAt: string | null }>;
+}
+
+function setupFetch(opts: RenderTreeOpts) {
+  mockFetch.mockImplementation(async (url: string) => {
+    // /api/config (settings)
+    if (url.includes("/api/config")) {
+      if (opts.settingsAvailable === false) {
+        return new Response("not implemented", { status: 404 });
+      }
+      const settings: Record<string, { value: unknown }> = {};
+      if (opts.workspaceRoot !== null) {
+        settings["workspace.root"] = { value: opts.workspaceRoot };
+      }
+      return new Response(JSON.stringify({ settings }), { status: 200 });
+    }
+    // /api/files/roots
+    if (url.includes("/api/files/roots")) {
+      return new Response(JSON.stringify({ roots: opts.roots }), { status: 200 });
+    }
+    // /api/files/list?root=<name>&path=<rel>
+    if (url.includes("/api/files/list")) {
+      const u = new URL(url, "http://localhost");
+      const root = u.searchParams.get("root") ?? "";
+      const path = u.searchParams.get("path") ?? "";
+      const key = `${root}:${path}`;
+      const entries = opts.listings?.[key] ?? [];
+      return new Response(
+        JSON.stringify({ root, path, entries: entries.map((e) => ({ ...e, size: null, mtime: null })) }),
+        { status: 200 },
+      );
+    }
+    // /api/files/read?root=<name>&path=<rel>
+    if (url.includes("/api/files/read")) {
+      const u = new URL(url, "http://localhost");
+      const root = u.searchParams.get("root") ?? "";
+      const path = u.searchParams.get("path") ?? "";
+      const key = `${root}:${path}`;
+      const data = opts.reads?.[key];
+      if (!data) return new Response("not found", { status: 404 });
+      return new Response(
+        JSON.stringify({
+          root,
+          path,
+          absolutePath: `/${root}/${path}`,
+          content: data.content,
+          mtime: data.mtime ?? "2026-05-06T18:00:00Z",
+          contentHash: "deadbeef",
+          size: data.content.length,
+        }),
+        { status: 200 },
+      );
+    }
+    // /api/slices?filter=...
+    if (url.includes("/api/slices")) {
+      return new Response(
+        JSON.stringify({
+          slices: opts.slices ?? [],
+          totalCount: opts.slices?.length ?? 0,
+          filter: "all",
+        }),
+        { status: 200 },
+      );
+    }
+    return new Response("[]");
+  });
+}
+
+function renderTree(opts: RenderTreeOpts): ReturnType<typeof render> {
+  setupFetch(opts);
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const rootRoute = createRootRoute({ component: () => <Outlet /> });
+  const indexRoute = createRoute({
+    getParentRoute: () => rootRoute,
+    path: "/",
+    component: () => <ProjectTreeView />,
+  });
+  const fallbackRoute = createRoute({
+    getParentRoute: () => rootRoute,
+    path: "$",
+    component: () => null,
+  });
+  const router = createRouter({
+    routeTree: rootRoute.addChildren([indexRoute, fallbackRoute]),
+    history: createMemoryHistory({ initialEntries: ["/"] }),
+  });
+  return render(
+    <QueryClientProvider client={queryClient}>
+      <RouterProvider router={router} />
+    </QueryClientProvider>,
+  );
+}
+
+describe("ProjectTreeView P5-5/P5-6 mission discovery", () => {
+  it("filesystem-discovered missions surface as tree nodes when allowlist exposes workspace root", async () => {
+    const { findByTestId } = renderTree({
+      workspaceRoot: "/Users/admin/.openrig/workspace",
+      roots: [{ name: "workspace", path: "/Users/admin/.openrig/workspace" }],
+      listings: {
+        "workspace:missions": [
+          { name: "rsi-v2", type: "dir" },
+          { name: "shell-redesign-v1", type: "dir" },
+          { name: "README.md", type: "file" }, // file → filtered out
+        ],
+      },
+      reads: {
+        "workspace:missions/rsi-v2/PROGRESS.md": {
+          content: "---\nstatus: active\n---\n# RSI v2",
+        },
+        "workspace:missions/shell-redesign-v1/PROGRESS.md": {
+          content: "---\nstatus: shipped\n---\n# Shell V1",
+        },
+      },
+      slices: [],
+    });
+    expect(await findByTestId("project-mission-rsi-v2")).toBeTruthy();
+    expect(await findByTestId("project-mission-shell-redesign-v1")).toBeTruthy();
+  });
+
+  it("file-type entries under missions/ are not surfaced as missions", async () => {
+    const { findByTestId, queryByTestId } = renderTree({
+      workspaceRoot: "/Users/admin/.openrig/workspace",
+      roots: [{ name: "workspace", path: "/Users/admin/.openrig/workspace" }],
+      listings: {
+        "workspace:missions": [
+          { name: "rsi-v2", type: "dir" },
+          { name: "README.md", type: "file" },
+        ],
+      },
+      slices: [],
+    });
+    await findByTestId("project-mission-rsi-v2");
+    expect(queryByTestId("project-mission-README.md")).toBeNull();
+  });
+
+  it("falls back to railItem grouping when no allowlist root contains workspace.root", async () => {
+    const { findByTestId } = renderTree({
+      workspaceRoot: "/Users/admin/.openrig/workspace",
+      roots: [{ name: "elsewhere", path: "/Users/admin/code/elsewhere" }],
+      slices: [
+        {
+          name: "slice-a",
+          displayName: "Slice A",
+          railItem: "rsi-v2",
+          status: "active",
+          rawStatus: "active",
+          qitemCount: 1,
+          hasProofPacket: false,
+          lastActivityAt: null,
+        },
+      ],
+    });
+    expect(await findByTestId("project-discovery-degraded")).toBeTruthy();
+    expect(await findByTestId("project-mission-rsi-v2")).toBeTruthy();
+  });
+
+  it("falls back to railItem grouping when allowlist is empty", async () => {
+    const { findByTestId } = renderTree({
+      workspaceRoot: "/Users/admin/.openrig/workspace",
+      roots: [],
+      slices: [
+        {
+          name: "slice-x",
+          displayName: "Slice X",
+          railItem: null,
+          status: "active",
+          rawStatus: "active",
+          qitemCount: 1,
+          hasProofPacket: false,
+          lastActivityAt: null,
+        },
+      ],
+    });
+    expect(await findByTestId("project-discovery-degraded")).toBeTruthy();
+    expect(await findByTestId("project-mission-unsorted")).toBeTruthy();
+  });
+
+  it("workspace.root unconfigured renders the no-workspace empty-state (Phase 3 A5 behavior preserved)", async () => {
+    const { findByTestId } = renderTree({
+      workspaceRoot: null,
+      roots: [],
+      slices: [],
+    });
+    expect(await findByTestId("project-no-workspace")).toBeTruthy();
+  });
+
+  it("matches slices to filesystem missions by railItem; orphans go to 'unsorted'", async () => {
+    const { findByTestId, queryByTestId } = renderTree({
+      workspaceRoot: "/Users/admin/.openrig/workspace",
+      roots: [{ name: "workspace", path: "/Users/admin/.openrig/workspace" }],
+      listings: {
+        "workspace:missions": [{ name: "rsi-v2", type: "dir" }],
+      },
+      reads: {
+        "workspace:missions/rsi-v2/PROGRESS.md": { content: "---\nstatus: active\n---" },
+      },
+      slices: [
+        {
+          name: "slice-rsi",
+          displayName: "RSI Slice",
+          railItem: "rsi-v2",
+          status: "active",
+          rawStatus: "active",
+          qitemCount: 0,
+          hasProofPacket: false,
+          lastActivityAt: null,
+        },
+        {
+          name: "slice-orphan",
+          displayName: "Orphan Slice",
+          railItem: "no-such-mission",
+          status: "active",
+          rawStatus: "active",
+          qitemCount: 0,
+          hasProofPacket: false,
+          lastActivityAt: null,
+        },
+      ],
+    });
+    expect(await findByTestId("project-mission-rsi-v2")).toBeTruthy();
+    expect(await findByTestId("project-mission-unsorted")).toBeTruthy();
+  });
+});

@@ -53,6 +53,17 @@ export const SETTINGS_VALID_KEYS = [
   // endpoints / event types.
   "agents.advisor_session",
   "agents.operator_session",
+  // V1 attempt-3 Phase 5 P5-3 — For You feed subscription toggles per
+  // for-you-feed.md L144–L151. SC-29 EXCEPTION declared in Phase 5
+  // dispatch ACK §5 (DRIFT P5-D2; same scope as Phase 4: allowlist-only;
+  // no migrations / new endpoints / event types). action_required is
+  // forced ON in the UI (cannot be toggled per L145); the key exists
+  // for future operator override but is not surfaced as a toggle in V1.
+  "feed.subscriptions.action_required",
+  "feed.subscriptions.approvals",
+  "feed.subscriptions.shipped",
+  "feed.subscriptions.progress",
+  "feed.subscriptions.audit_log",
 ] as const;
 
 export type SettingsValidKey = typeof SETTINGS_VALID_KEYS[number];
@@ -77,6 +88,11 @@ const ENV_MAP: Record<SettingsValidKey, { primary: string; legacy: string }> = {
   "recovery.provider_auth_env_allowlist": { primary: "OPENRIG_RECOVERY_PROVIDER_AUTH_ENV_ALLOWLIST", legacy: "RIGGED_RECOVERY_PROVIDER_AUTH_ENV_ALLOWLIST" },
   "agents.advisor_session": { primary: "OPENRIG_AGENTS_ADVISOR_SESSION", legacy: "RIGGED_AGENTS_ADVISOR_SESSION" },
   "agents.operator_session": { primary: "OPENRIG_AGENTS_OPERATOR_SESSION", legacy: "RIGGED_AGENTS_OPERATOR_SESSION" },
+  "feed.subscriptions.action_required": { primary: "OPENRIG_FEED_SUBSCRIPTIONS_ACTION_REQUIRED", legacy: "RIGGED_FEED_SUBSCRIPTIONS_ACTION_REQUIRED" },
+  "feed.subscriptions.approvals": { primary: "OPENRIG_FEED_SUBSCRIPTIONS_APPROVALS", legacy: "RIGGED_FEED_SUBSCRIPTIONS_APPROVALS" },
+  "feed.subscriptions.shipped": { primary: "OPENRIG_FEED_SUBSCRIPTIONS_SHIPPED", legacy: "RIGGED_FEED_SUBSCRIPTIONS_SHIPPED" },
+  "feed.subscriptions.progress": { primary: "OPENRIG_FEED_SUBSCRIPTIONS_PROGRESS", legacy: "RIGGED_FEED_SUBSCRIPTIONS_PROGRESS" },
+  "feed.subscriptions.audit_log": { primary: "OPENRIG_FEED_SUBSCRIPTIONS_AUDIT_LOG", legacy: "RIGGED_FEED_SUBSCRIPTIONS_AUDIT_LOG" },
 };
 
 const KEY_TO_PATH: Record<SettingsValidKey, string[]> = {
@@ -99,6 +115,11 @@ const KEY_TO_PATH: Record<SettingsValidKey, string[]> = {
   "recovery.provider_auth_env_allowlist": ["recovery", "providerAuthEnvAllowlist"],
   "agents.advisor_session": ["agents", "advisorSession"],
   "agents.operator_session": ["agents", "operatorSession"],
+  "feed.subscriptions.action_required": ["feed", "subscriptions", "actionRequired"],
+  "feed.subscriptions.approvals": ["feed", "subscriptions", "approvals"],
+  "feed.subscriptions.shipped": ["feed", "subscriptions", "shipped"],
+  "feed.subscriptions.progress": ["feed", "subscriptions", "progress"],
+  "feed.subscriptions.audit_log": ["feed", "subscriptions", "auditLog"],
 };
 
 export type SettingSource = "env" | "file" | "default";
@@ -184,6 +205,16 @@ function getDefaultValue(key: SettingsValidKey, workspaceRoot: string): string |
     // Operator default empty per L84 ("not configured").
     case "agents.advisor_session": return "advisor-lead@openrig-velocity";
     case "agents.operator_session": return "";
+    // V1 Phase 5 P5-3 — For You feed subscription defaults per
+    // for-you-feed.md L144–L151. action_required is forced ON in the UI
+    // (cannot be disabled per L145 — load-bearing human-gate items);
+    // approvals/shipped/progress default ON; audit_log default OFF
+    // (verbose; opt-in for triage runs).
+    case "feed.subscriptions.action_required": return true;
+    case "feed.subscriptions.approvals": return true;
+    case "feed.subscriptions.shipped": return true;
+    case "feed.subscriptions.progress": return true;
+    case "feed.subscriptions.audit_log": return false;
     default: return "";
   }
 }
