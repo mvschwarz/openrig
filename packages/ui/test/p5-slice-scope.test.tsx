@@ -86,7 +86,7 @@ function makeDetail(overrides: Partial<SliceDetail> = {}): SliceDetail {
     status: "active",
     rawStatus: "active",
     qitemIds: ["qitem-A", "qitem-B"],
-    commitRefs: [],
+    commitRefs: ["abc1234"],
     lastActivityAt: "2026-05-06T18:00:00Z",
     workflowBinding: null,
     story: { events: [], phaseDefinitions: null },
@@ -96,12 +96,10 @@ function makeDetail(overrides: Partial<SliceDetail> = {}): SliceDetail {
       percentage: 33,
       items: [
         {
-          line: 1,
-          rawLine: "[x] item one",
-          status: "done",
           text: "item one",
-          path: "PROGRESS.md",
-        } as any,
+          done: true,
+          source: { file: "PROGRESS.md", line: 1 },
+        },
       ],
       closureCallout: null,
       currentStep: null,
@@ -161,8 +159,23 @@ describe("SliceScopePage P5-2 tab content piping", () => {
     await findByTestId("project-tab-nav");
     fireEvent.click(container.querySelector("[data-testid='project-tab-artifacts']")!);
     expect(await findByTestId("slice-artifacts-tab")).toBeTruthy();
+    expect(container.querySelector("[data-testid='slice-artifacts-files']")).toBeTruthy();
+    expect(container.querySelector("[data-testid='slice-artifacts-commits']")).toBeTruthy();
     expect(container.querySelector("[data-testid='slice-artifacts-docs']")).toBeTruthy();
     expect(container.querySelector("[data-testid='slice-artifacts-decisions']")).toBeTruthy();
+  });
+
+  it("overview tab mounts a distinct summary surface rather than the docs browser", async () => {
+    const { container, findByTestId } = renderSliceScope({
+      sliceId: "idea-ledger",
+      detail: makeDetail(),
+    });
+    await findByTestId("project-tab-nav");
+    fireEvent.click(container.querySelector("[data-testid='project-tab-overview']")!);
+    expect(await findByTestId("slice-overview-tab")).toBeTruthy();
+    expect(container.querySelector("[data-testid='slice-overview-summary']")).toBeTruthy();
+    expect(container.querySelector("[data-testid='slice-overview-current-step']")).toBeTruthy();
+    expect(container.querySelector("[data-testid='slice-artifacts-docs']")).toBeNull();
   });
 
   it("queue tab lists qitemIds wrapped in QueueItemTrigger; click fires setSelection", async () => {

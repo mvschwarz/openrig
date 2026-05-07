@@ -5,7 +5,7 @@
 // slice = +story +tests = 7 tabs
 //
 // V1 attempt-3 Phase 5 P5-2: SliceScopePage tab content piping.
-// Per code-map AFTER tree fold mapping (founder-approved at Phase 5 dispatch):
+// Per code-map AFTER tree fold mapping from Phase 5 dispatch:
 //   - StoryTab → story tab (preserved; events + phaseDefinitions props)
 //   - TestsVerificationTab → tests tab (preserved; tests prop)
 //   - TopologyTab → topology tab (preserved; topology prop)
@@ -23,7 +23,7 @@ import { SectionHeader } from "../ui/section-header.js";
 import { EmptyState } from "../ui/empty-state.js";
 import { FilesWorkspace } from "../files/FilesWorkspace.js";
 import { useWorkspaceName } from "../../hooks/useWorkspaceName.js";
-import { useSliceDetail } from "../../hooks/useSlices.js";
+import { useSliceDetail, type SliceDetail } from "../../hooks/useSlices.js";
 import { StoryTab } from "../slices/tabs/StoryTab.js";
 import { AcceptanceTab } from "../slices/tabs/AcceptanceTab.js";
 import { DocsTab } from "../slices/tabs/DocsTab.js";
@@ -230,52 +230,172 @@ function SliceQueueTab({ qitemIds }: { qitemIds: string[] }) {
   );
 }
 
-function SliceArtifactsTab({
-  sliceName,
-  docsTree,
-  decisionsRows,
-}: {
-  sliceName: string;
-  docsTree: import("../../hooks/useSlices.js").DocsTreeEntry[];
-  decisionsRows: import("../../hooks/useSlices.js").DecisionRow[];
-}) {
-  // FOLDED per code-map AFTER tree: canonical artifacts tab combines
-  // DocsTab (slice docs tree + lazy markdown viewer) + DecisionsTab
-  // (operator-driven decision-log timeline). Vertical sections so each
-  // sub-tool is fully visible without nested tabs.
+function formatMaybeDate(ts: string | null): string {
+  if (!ts) return "unknown";
+  const date = new Date(ts);
+  if (Number.isNaN(date.getTime())) return ts;
+  return date.toLocaleString();
+}
+
+function SliceMetric({ label, value }: { label: string; value: string | number }) {
+  return (
+    <div className="border border-outline-variant bg-white/30 p-3">
+      <div className="font-mono text-[8px] uppercase tracking-[0.14em] text-on-surface-variant">{label}</div>
+      <div className="mt-1 font-mono text-sm font-bold text-stone-900">{value}</div>
+    </div>
+  );
+}
+
+function SliceArtifactsTab({ detail }: { detail: SliceDetail }) {
+  const docsTree = detail.docs.tree;
+  const proofPackets = detail.tests.proofPackets;
   return (
     <div data-testid="slice-artifacts-tab" className="space-y-6">
+      <section data-testid="slice-artifacts-files" className="border border-outline-variant bg-white/20 p-4">
+        <SectionHeader tone="muted">Files</SectionHeader>
+        {docsTree.length > 0 ? (
+          <ul className="mt-3 divide-y divide-outline-variant border border-outline-variant bg-white/30">
+            {docsTree.map((entry) => (
+              <li key={entry.relPath} className="grid grid-cols-[1fr_auto_auto] gap-3 px-3 py-2 font-mono text-[10px]">
+                <span className="truncate text-stone-900">{entry.relPath}</span>
+                <span className="uppercase tracking-[0.10em] text-stone-500">{entry.type}</span>
+                <span className="text-stone-400">{entry.size == null ? "-" : `${entry.size}b`}</span>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <div className="mt-3 font-mono text-[10px] text-stone-400">No slice files indexed.</div>
+        )}
+      </section>
+
+      <section data-testid="slice-artifacts-commits" className="border border-outline-variant bg-white/20 p-4">
+        <SectionHeader tone="muted">Commits</SectionHeader>
+        {detail.commitRefs.length > 0 ? (
+          <ul className="mt-3 divide-y divide-outline-variant border border-outline-variant bg-white/30">
+            {detail.commitRefs.map((commitRef) => (
+              <li key={commitRef} className="px-3 py-2 font-mono text-[10px] text-stone-900">
+                {commitRef}
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <div className="mt-3 font-mono text-[10px] text-stone-400">No commit refs indexed for this slice.</div>
+        )}
+      </section>
+
+      <section data-testid="slice-artifacts-proof" className="border border-outline-variant bg-white/20 p-4">
+        <SectionHeader tone="muted">Proof Packets</SectionHeader>
+        {proofPackets.length > 0 ? (
+          <ul className="mt-3 divide-y divide-outline-variant border border-outline-variant bg-white/30">
+            {proofPackets.map((packet) => (
+              <li key={packet.dirName} className="px-3 py-2 font-mono text-[10px] text-stone-700">
+                <div className="font-bold text-stone-900">{packet.dirName}</div>
+                <div className="mt-1 uppercase tracking-[0.10em] text-stone-500">{packet.passFailBadge}</div>
+                <div className="mt-1 text-stone-400">
+                  {packet.screenshots.length} screenshots / {packet.videos.length} videos / {packet.traces.length} traces
+                </div>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <div className="mt-3 font-mono text-[10px] text-stone-400">No proof packets indexed.</div>
+        )}
+      </section>
+
       <section data-testid="slice-artifacts-docs">
-        <SectionHeader tone="muted">Docs</SectionHeader>
+        <SectionHeader tone="muted">Docs Browser</SectionHeader>
         <div className="mt-2 border border-outline-variant">
-          <DocsTab sliceName={sliceName} tree={docsTree} />
+          <DocsTab sliceName={detail.name} tree={docsTree} />
         </div>
       </section>
+
       <section data-testid="slice-artifacts-decisions">
         <SectionHeader tone="muted">Decisions</SectionHeader>
         <div className="mt-2 border border-outline-variant">
-          <DecisionsTab rows={decisionsRows} />
+          <DecisionsTab rows={detail.decisions.rows} />
         </div>
       </section>
     </div>
   );
 }
 
-function SliceOverviewTab({
-  sliceName,
-  docsTree,
-}: {
-  sliceName: string;
-  docsTree: import("../../hooks/useSlices.js").DocsTreeEntry[];
-}) {
-  // Per project-tree.md L57-L59: slice overview renders README.md /
-  // IMPLEMENTATION-PRD.md with steering section. DocsTab already
-  // pre-selects README.md (or IMPLEMENTATION-PRD.md as fallback) on
-  // mount (StoryTab.tsx-equivalent initial selection). Reuses DocsTab
-  // for consistency; bigger overview shape is V2.
+function SliceOverviewTab({ detail }: { detail: SliceDetail }) {
+  const currentStep = detail.acceptance.currentStep;
+  const primaryDocs = detail.docs.tree.filter((entry) =>
+    entry.type === "file" && /(^|\/)(README|IMPLEMENTATION-PRD|PROGRESS)\.md$/i.test(entry.relPath),
+  );
+
   return (
-    <div data-testid="slice-overview-tab" className="border border-outline-variant">
-      <DocsTab sliceName={sliceName} tree={docsTree} />
+    <div data-testid="slice-overview-tab" className="space-y-6">
+      <section data-testid="slice-overview-summary" className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        <SliceMetric label="Status" value={detail.status} />
+        <SliceMetric label="Progress" value={`${detail.acceptance.percentage}%`} />
+        <SliceMetric label="Qitems" value={detail.qitemIds.length} />
+        <SliceMetric label="Last Activity" value={formatMaybeDate(detail.lastActivityAt)} />
+      </section>
+
+      <section data-testid="slice-overview-current-step" className="border border-outline-variant bg-white/20 p-4">
+        <SectionHeader tone="muted">Current Step</SectionHeader>
+        {currentStep ? (
+          <div className="mt-3 grid gap-2 font-mono text-[10px] text-stone-700 sm:grid-cols-2">
+            <div>
+              <div className="text-[8px] uppercase tracking-[0.14em] text-stone-400">Step</div>
+              <div className="font-bold text-stone-900">{currentStep.stepId}</div>
+            </div>
+            <div>
+              <div className="text-[8px] uppercase tracking-[0.14em] text-stone-400">Role</div>
+              <div className="font-bold text-stone-900">{currentStep.role}</div>
+            </div>
+            <div className="sm:col-span-2">
+              <div className="text-[8px] uppercase tracking-[0.14em] text-stone-400">Objective</div>
+              <div>{currentStep.objective ?? "No objective declared."}</div>
+            </div>
+            <div>
+              <div className="text-[8px] uppercase tracking-[0.14em] text-stone-400">Allowed exits</div>
+              <div>{currentStep.allowedExits.join(", ") || "-"}</div>
+            </div>
+            <div>
+              <div className="text-[8px] uppercase tracking-[0.14em] text-stone-400">Hop count</div>
+              <div>{currentStep.hopCount}</div>
+            </div>
+          </div>
+        ) : (
+          <div className="mt-3 font-mono text-[10px] text-stone-400">No workflow step is currently bound.</div>
+        )}
+      </section>
+
+      <section data-testid="slice-overview-readiness" className="border border-outline-variant bg-white/20 p-4">
+        <SectionHeader tone="muted">Readiness</SectionHeader>
+        <div className="mt-3 space-y-2 font-mono text-[10px] text-stone-700">
+          <div>{detail.acceptance.doneItems} of {detail.acceptance.totalItems} acceptance items complete.</div>
+          <div>{detail.tests.aggregate.passCount} proof packets passing / {detail.tests.aggregate.failCount} failing.</div>
+          {detail.acceptance.closureCallout && (
+            <div className="border border-amber-300 bg-amber-50 px-2 py-1 text-amber-800">
+              {detail.acceptance.closureCallout}
+            </div>
+          )}
+          {detail.workflowBinding && (
+            <div className="text-stone-500">
+              Workflow: {detail.workflowBinding.workflowName} v{detail.workflowBinding.workflowVersion}
+            </div>
+          )}
+        </div>
+      </section>
+
+      <section data-testid="slice-overview-docs" className="border border-outline-variant bg-white/20 p-4">
+        <SectionHeader tone="muted">Primary Docs</SectionHeader>
+        {primaryDocs.length > 0 ? (
+          <ul className="mt-3 divide-y divide-outline-variant border border-outline-variant bg-white/30">
+            {primaryDocs.map((entry) => (
+              <li key={entry.relPath} className="px-3 py-2 font-mono text-[10px] text-stone-900">
+                {entry.relPath}
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <div className="mt-3 font-mono text-[10px] text-stone-400">No README, implementation PRD, or progress file indexed.</div>
+        )}
+      </section>
     </div>
   );
 }
@@ -341,7 +461,7 @@ export function SliceScopePage() {
         <StoryTab events={detail.story.events} phaseDefinitions={detail.story.phaseDefinitions} />
       ) : null}
       {active === "overview" ? (
-        <SliceOverviewTab sliceName={detail.name} docsTree={detail.docs.tree} />
+        <SliceOverviewTab detail={detail} />
       ) : null}
       {active === "progress" ? (
         // FOLDED: AcceptanceTab content. Acceptance is the canonical "progress"
@@ -350,11 +470,7 @@ export function SliceScopePage() {
         <AcceptanceTab acceptance={detail.acceptance} />
       ) : null}
       {active === "artifacts" ? (
-        <SliceArtifactsTab
-          sliceName={detail.name}
-          docsTree={detail.docs.tree}
-          decisionsRows={detail.decisions.rows}
-        />
+        <SliceArtifactsTab detail={detail} />
       ) : null}
       {active === "tests" ? (
         <TestsVerificationTab sliceName={detail.name} tests={detail.tests} />
