@@ -78,6 +78,27 @@ describe("PL-019 projectRigToGraph: agentActivity + currentQitems", () => {
     expect(result.nodes[0].data.agentActivity).toEqual(RUNNING_ACTIVITY);
   });
 
+  it("projects context token totals onto RFNodeData when overlay carries them", () => {
+    const input = makeRig(
+      [{ id: "n1", logicalId: "alpha", role: "worker" }],
+      [],
+      [makeRunningSession("n1")]
+    );
+    const overlay: InventoryOverlay[] = [
+      {
+        logicalId: "alpha",
+        startupStatus: "ready",
+        canonicalSessionName: "r01-alpha",
+        restoreOutcome: "n-a",
+        contextTotalInputTokens: 120_000,
+        contextTotalOutputTokens: 14_000,
+      },
+    ];
+    const result = projectRigToGraph(input, overlay);
+    expect(result.nodes[0].data.contextTotalInputTokens).toBe(120_000);
+    expect(result.nodes[0].data.contextTotalOutputTokens).toBe(14_000);
+  });
+
   it("defaults agentActivity to null when overlay omits it", () => {
     const input = makeRig(
       [{ id: "n1", logicalId: "alpha", role: "worker" }],
@@ -155,6 +176,8 @@ describe("PL-019 projectRigToGraph: agentActivity + currentQitems", () => {
     expect(podNode).toBeDefined();
     expect(podNode!.data.agentActivity).toBeNull();
     expect(podNode!.data.currentQitems).toEqual([]);
+    expect(podNode!.data.contextTotalInputTokens).toBeNull();
+    expect(podNode!.data.contextTotalOutputTokens).toBeNull();
   });
 
   it("multiple nodes with mixed activity states project independently", () => {

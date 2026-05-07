@@ -88,6 +88,8 @@ describe("Context Usage Projection", () => {
     const graphNode = body.nodes.find((n: any) => n.data?.logicalId === "dev.impl");
     expect(graphNode?.data?.contextAvailability).toBe("known");
     expect(graphNode?.data?.contextUsedPercentage).toBe(67);
+    expect(graphNode?.data?.contextTotalInputTokens).toBe(120000);
+    expect(graphNode?.data?.contextTotalOutputTokens).toBe(14000);
   });
 
   // T5: WhoamiResult includes contextUsage (via route)
