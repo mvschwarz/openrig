@@ -13,6 +13,7 @@ import { cn } from "../../lib/utils.js";
 import { useCmuxLaunch } from "../../hooks/useCmuxLaunch.js";
 import { ActivityRing } from "./ActivityRing.js";
 import { getActivityCardClasses, getActivityCardSignal } from "./activity-card-visuals.js";
+import { TerminalPreviewPopover } from "./TerminalPreviewPopover.js";
 import type { TopologyActivityVisual } from "../../lib/topology-activity.js";
 import { formatCompactTokenCount, formatTokenTotalTitle, sumTokenCounts } from "../../lib/token-format.js";
 
@@ -99,6 +100,7 @@ export function HybridAgentNode({ data }: { data: HybridAgentNodeData }) {
   const tokenTotal = sumTokenCounts(data.contextTotalInputTokens, data.contextTotalOutputTokens);
   const tokenLabel = formatCompactTokenCount(tokenTotal);
   const tokenTitle = formatTokenTotalTitle(data.contextTotalInputTokens, data.contextTotalOutputTokens);
+  const hoverIconClass = "inline-flex h-6 w-6 items-center justify-center border border-outline-variant bg-white/90 text-stone-700 opacity-0 shadow-[1px_1px_0_rgba(46,52,46,0.14)] transition-opacity hover:bg-stone-100 hover:text-stone-950 focus:!opacity-100 focus:opacity-100 focus:outline-none focus:ring-2 focus:ring-stone-900/20 group-hover:!opacity-100 group-hover:opacity-100 group-focus-within:!opacity-100 group-focus-within:opacity-100";
 
   const card = (
     <div
@@ -149,6 +151,17 @@ export function HybridAgentNode({ data }: { data: HybridAgentNodeData }) {
         />
       </div>
       {data.rigId ? (
+        <TerminalPreviewPopover
+          rigId={data.rigId}
+          logicalId={data.logicalId}
+          sessionName={data.canonicalSessionName ?? null}
+          reducedMotion={data.reducedMotion}
+          testIdPrefix={`hybrid-${data.logicalId}`}
+          wrapperClassName="absolute right-8 top-6 z-20"
+          buttonClassName={hoverIconClass}
+        />
+      ) : null}
+      {data.rigId ? (
         <button
           type="button"
           data-testid={`hybrid-cmux-open-${data.logicalId}`}
@@ -158,7 +171,7 @@ export function HybridAgentNode({ data }: { data: HybridAgentNodeData }) {
             event.stopPropagation();
             cmuxLaunch.mutate({ rigId: data.rigId!, logicalId: data.logicalId });
           }}
-          className="absolute right-1.5 top-6 z-10 inline-flex h-6 w-6 items-center justify-center border border-outline-variant bg-white/90 text-stone-700 opacity-0 shadow-[1px_1px_0_rgba(46,52,46,0.14)] transition-opacity hover:bg-stone-100 hover:text-stone-950 focus:!opacity-100 focus:opacity-100 focus:outline-none focus:ring-2 focus:ring-stone-900/20 group-hover:!opacity-100 group-hover:opacity-100 group-focus-within:!opacity-100 group-focus-within:opacity-100"
+          className={cn("absolute right-1.5 top-6 z-10", hoverIconClass)}
         >
           <PanelsTopLeft className="h-3.5 w-3.5" aria-hidden="true" />
         </button>
