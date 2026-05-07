@@ -6,24 +6,27 @@
 // per-rig graph fetches, cross-rig node ID prefixing, collapse persistence,
 // URL auto-expand, and graph/tree/table navigate parity.
 //
-// Default state: ALL rigs collapsed; rig cards on canvas with status pip
-// + counts. Auto-expand rule (parity with Phase 5.1 TopologyTreeView):
+// Default state: rigs expanded so the topology opens as the full fleet
+// canvas. Explicit collapse state is still persisted in TopologyOverlayProvider,
+// and the operator can collapse / expand every rig from the canvas controls.
+// Auto-expand rule (parity with Phase 5.1 TopologyTreeView):
 // when route is /topology/rig/$rigId or /topology/seat/$rigId/* or
 // /topology/pod/$rigId/*, the matching rig is auto-expanded on mount /
 // route change. Click rig card body -> toggle collapse. Click arrow Link
 // on rig card name -> navigate to /topology/rig/$rigId (drill-in).
 //
 // Performance: per-rig graph data is lazy-fetched (useQueries enabled
-// only when rig is expanded). At default state with N rigs collapsed,
-// only one /api/ps fetch happens (for the rig cards' counts). Scales
-// to 100+ rigs per the for-you-feed.md L9 north-star without upfront
-// fan-out.
+// only when rig is expanded). The V1 operator default now intentionally
+// fetches expanded rigs up front; explicit Collapse All restores the prior
+// low-fan-out behavior.
 
-import { useMemo } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import {
   ReactFlow,
   Controls,
+  Panel,
+  useReactFlow,
   type Node,
   type Edge,
   type NodeTypes,
@@ -32,6 +35,7 @@ import {
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { useQueries } from "@tanstack/react-query";
+import { Maximize2, Minimize2 } from "lucide-react";
 import { usePsEntries } from "../../hooks/usePsEntries.js";
 import { RigGroupNode, type RigGroupNodeData } from "./RigGroupNode.js";
 import { HybridAgentNode, HybridPodGroupNode } from "./HybridTopologyNodes.js";
@@ -72,6 +76,11 @@ const edgeTypes: EdgeTypes = {
   hotPotato: HotPotatoEdge,
 };
 
+const DEFAULT_RIG_EXPANDED = true;
+const HOST_GRAPH_MIN_ZOOM = 0.03;
+const HOST_GRAPH_MAX_ZOOM = 2;
+const HOST_GRAPH_FIT_PADDING = 0.08;
+
 export function HostMultiRigGraph() {
   const navigate = useNavigate();
   const { data: psEntries } = usePsEntries();
@@ -84,7 +93,14 @@ export function HostMultiRigGraph() {
   // via the provider's auto-expand useEffect; when the operator returns
   // to /topology, this component reads the persisted state via
   // useTopologyOverlay() and renders the matching rig expanded.
-  const { expandedRigs: expanded, toggleRig } = useTopologyOverlay();
+  const { expandedRigs: expanded, setRigExpanded } = useTopologyOverlay();
+  const isRigExpanded = useCallback(
+    (rigId: string) => expanded.get(rigId) ?? DEFAULT_RIG_EXPANDED,
+    [expanded],
+  );
+  const toggleRig = useCallback((rigId: string) => {
+    setRigExpanded(rigId, !isRigExpanded(rigId));
+  }, [isRigExpanded, setRigExpanded]);
 
   // P5.2-2 + P5.2-3: useQueries for per-rig graph data; enabled only
   // when the rig is expanded. Stable hook-call count (single useQueries
@@ -95,10 +111,20 @@ export function HostMultiRigGraph() {
     queries: rigList.map((rig) => ({
       queryKey: ["rig", rig.rigId, "graph"] as const,
       queryFn: () => fetchGraph(rig.rigId),
-      enabled: expanded.get(rig.rigId) ?? false,
+      enabled: isRigExpanded(rig.rigId),
       refetchInterval: 30_000,
     })),
   });
+  const expandedCount = useMemo(
+    () => rigList.filter((rig) => isRigExpanded(rig.rigId)).length,
+    [rigList, isRigExpanded],
+  );
+  const expandAllRigs = useCallback(() => {
+    for (const rig of rigList) setRigExpanded(rig.rigId, true);
+  }, [rigList, setRigExpanded]);
+  const collapseAllRigs = useCallback(() => {
+    for (const rig of rigList) setRigExpanded(rig.rigId, false);
+  }, [rigList, setRigExpanded]);
 
   // Build per-rig nested subgraphs and lay out rig frames on the host canvas.
   const { mergedNodes, mergedEdges } = useMemo(() => {
@@ -121,7 +147,7 @@ export function HostMultiRigGraph() {
 
     for (let i = 0; i < rigList.length; i++) {
       const rig = rigList[i]!;
-      const isExpanded = expanded.get(rig.rigId) ?? false;
+      const isExpanded = isRigExpanded(rig.rigId);
       const queryResult = graphQueries[i];
 
       let childNodes: Node[] = [];
@@ -200,7 +226,7 @@ export function HostMultiRigGraph() {
     // toggleRig is stable per-render but useMemo doesn't know; safe to
     // include rigList + expanded + graphQueries as deps.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rigList, expanded, graphQueries]);
+  }, [rigList, isRigExpanded, graphQueries]);
 
   const sessionIndex = useMemo(() => buildTopologySessionIndex(
     mergedNodes
@@ -258,6 +284,17 @@ export function HostMultiRigGraph() {
     () => applyHotPotatoEdges(mergedEdges, topologyActivity.packets, { reducedMotion }),
     [mergedEdges, topologyActivity.packets, reducedMotion],
   );
+  const layoutSignature = useMemo(() => mergedNodes.map((node) => {
+    const style = node.style as { width?: string | number; height?: string | number } | undefined;
+    return [
+      node.id,
+      Math.round(node.position.x),
+      Math.round(node.position.y),
+      style?.width ?? "",
+      style?.height ?? "",
+      node.parentId ?? "",
+    ].join(":");
+  }).join("|"), [mergedNodes]);
 
   // P5.2-7 click handlers: agent -> seat URL; pod group -> pod URL;
   // rig group -> toggle (handled inside RigGroupNode onClick; this
@@ -308,9 +345,38 @@ export function HostMultiRigGraph() {
         onNodeClick={onNodeClick}
         nodesDraggable={false}
         fitView
-        fitViewOptions={{ padding: 0.15, includeHiddenNodes: false }}
+        fitViewOptions={{ padding: HOST_GRAPH_FIT_PADDING, includeHiddenNodes: false }}
+        minZoom={HOST_GRAPH_MIN_ZOOM}
+        maxZoom={HOST_GRAPH_MAX_ZOOM}
         proOptions={{ hideAttribution: true }}
       >
+        <HostGraphAutoFit layoutSignature={layoutSignature} />
+        <Panel position="top-right" className="!m-3">
+          <div className="flex items-center gap-1 border border-outline-variant bg-background/80 px-1.5 py-1 shadow-[2px_2px_0_rgba(46,52,46,0.10)] backdrop-blur-sm">
+            <button
+              type="button"
+              data-testid="topology-expand-all-rigs"
+              onClick={expandAllRigs}
+              disabled={expandedCount === rigList.length}
+              title="Expand all rigs"
+              className="inline-flex h-7 items-center gap-1 border border-transparent px-2 font-mono text-[9px] uppercase tracking-[0.08em] text-stone-700 hover:border-outline-variant hover:bg-white/70 hover:text-stone-950 disabled:pointer-events-none disabled:opacity-35"
+            >
+              <Maximize2 className="h-3.5 w-3.5" aria-hidden="true" />
+              Expand all
+            </button>
+            <button
+              type="button"
+              data-testid="topology-collapse-all-rigs"
+              onClick={collapseAllRigs}
+              disabled={expandedCount === 0}
+              title="Collapse all rigs"
+              className="inline-flex h-7 items-center gap-1 border border-transparent px-2 font-mono text-[9px] uppercase tracking-[0.08em] text-stone-700 hover:border-outline-variant hover:bg-white/70 hover:text-stone-950 disabled:pointer-events-none disabled:opacity-35"
+            >
+              <Minimize2 className="h-3.5 w-3.5" aria-hidden="true" />
+              Collapse all
+            </button>
+          </div>
+        </Panel>
         <Controls
           position="bottom-right"
           showInteractive={false}
@@ -319,4 +385,24 @@ export function HostMultiRigGraph() {
       </ReactFlow>
     </div>
   );
+}
+
+function HostGraphAutoFit({ layoutSignature }: { layoutSignature: string }) {
+  const { fitView } = useReactFlow();
+  const lastSignatureRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!layoutSignature || lastSignatureRef.current === layoutSignature) return;
+    lastSignatureRef.current = layoutSignature;
+    const timer = window.setTimeout(() => {
+      void fitView({
+        padding: HOST_GRAPH_FIT_PADDING,
+        includeHiddenNodes: false,
+        duration: 250,
+      });
+    }, 50);
+    return () => window.clearTimeout(timer);
+  }, [fitView, layoutSignature]);
+
+  return null;
 }
