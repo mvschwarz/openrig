@@ -16,6 +16,7 @@ import type { AgentActivitySummary, CurrentQitemSummary } from "../hooks/useNode
 import { ContextUsageRing } from "./ContextUsageRing.js";
 import { ActivityRing } from "./topology/ActivityRing.js";
 import { getActivityCardClasses, getActivityCardSignal } from "./topology/activity-card-visuals.js";
+import { TerminalPreviewPopover } from "./topology/TerminalPreviewPopover.js";
 import type { TopologyActivityVisual } from "../lib/topology-activity.js";
 import { formatCompactTokenCount, formatTokenTotalTitle, sumTokenCounts } from "../lib/token-format.js";
 
@@ -174,6 +175,8 @@ export function RigNode({ data }: { data: RigNodeData }) {
         ? "bg-stone-900 text-white border-stone-900"
         : "bg-white text-stone-900 border-stone-300 hover:bg-stone-100"
     }`;
+  const toolbarIconButtonClass = "border font-mono text-[7px] uppercase transition-colors bg-white text-stone-900 border-stone-300 hover:bg-stone-100 inline-flex h-6 w-6 items-center justify-center px-0 py-0";
+  const terminalSessionName = data.canonicalSessionName ?? data.binding?.tmuxSession ?? null;
 
   const card = (
     <div
@@ -345,6 +348,16 @@ export function RigNode({ data }: { data: RigNodeData }) {
                 <PanelsTopLeft className="h-3.5 w-3.5" aria-hidden="true" />
                 <span className="sr-only">{actionFeedback === "cmux" ? "opened" : "cmux"}</span>
               </button>
+            )}
+            {data.rigId && terminalSessionName && (
+              <TerminalPreviewPopover
+                rigId={data.rigId}
+                logicalId={data.logicalId}
+                sessionName={terminalSessionName}
+                reducedMotion={data.reducedMotion}
+                testIdPrefix={`rig-node-${data.logicalId}`}
+                buttonClassName={toolbarIconButtonClass}
+              />
             )}
             {data.resumeToken && data.runtime && data.runtime !== "terminal" && (
               <button
