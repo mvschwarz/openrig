@@ -14,7 +14,7 @@
 //
 // SC-1 satisfied: exactly 2 left chromes on desktop (rail + explore).
 // SC-2 satisfied: rail order Dashboard / Topology / For You / Project /
-// Specs / Settings + Advisor + Operator (no discovery in rail).
+// Library / Settings + Advisor + Operator (no discovery in rail).
 // SC-7 satisfied: Settings mounts in CENTER (rail icon → /settings route,
 // not a drawer toggle).
 // SC-8 satisfied: mobile rail collapses to top-bar menu; explore
@@ -164,7 +164,7 @@ const RAIL_ICONS: RailIconSpec[] = [
   },
   {
     id: "specs",
-    label: "Specs",
+    label: "Library",
     to: "/specs",
     icon: FileText,
     activeWhen: (p) => p.startsWith("/specs"),
@@ -293,9 +293,9 @@ function Rail({
             : "text-stone-700 hover:bg-stone-200/60 hover:text-stone-900",
         )}
       >
-        {/* Lighter icon line weight (founder direction 2026-05-06):
-            stroke-width 1.25 (default lucide is 2) for an architectural
-            drafting feel that matches the 1px ghost border doctrine. */}
+        {/* Lighter icon line weight: stroke-width 1.25 (default lucide is 2)
+            for an architectural drafting feel that matches the 1px ghost
+            border doctrine. */}
         <Icon className="h-5 w-5" strokeWidth={1.25} />
         {active && (
           <span
@@ -314,10 +314,9 @@ function Rail({
       className={cn(
         // V1 border weight doctrine (universal-shell.md L39–L48):
         // 1px outline-variant ghost line for inter-region edges.
-        // Vellum surface (founder direction 2026-05-06): same translucent
-        // treatment as the topology-graph Explorer overlay, so the rail
-        // reads as a paper sheet layered over the canvas (sheets-of-vellum
-        // aesthetic per universal-shell.md L48).
+        // Vellum surface: same translucent treatment as the topology-graph
+        // Explorer overlay, so the rail reads as a paper sheet layered over
+        // the canvas (sheets-of-vellum aesthetic per universal-shell.md L48).
         "vellum border-outline-variant flex shrink-0",
         vertical
           ? "w-12 flex-col items-center border-r py-2 gap-1"

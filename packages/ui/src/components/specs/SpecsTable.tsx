@@ -99,7 +99,7 @@ export function SpecsTable() {
     <div data-testid="specs-library-table" className="space-y-3">
       <div className="flex items-center gap-2">
         <VellumInput
-          placeholder="Search specs..."
+          placeholder="Search library..."
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           className="max-w-xs"
@@ -137,7 +137,7 @@ export function SpecsTable() {
             ) : table.getRowModel().rows.length === 0 ? (
               <tr>
                 <td colSpan={COLUMNS.length} className="px-3 py-6 text-center font-mono text-xs text-on-surface-variant">
-                  No specs match.
+          No library entries match.
                 </td>
               </tr>
             ) : (

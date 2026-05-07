@@ -101,7 +101,12 @@ function AgentSpecSection({ data }: { data: NodeDetailData }) {
       ) : !review || review.kind !== "agent" ? (
         <div data-testid="agent-spec-unavailable" className="p-4 font-mono text-[10px] text-stone-400">No agent spec available</div>
       ) : (
-        <AgentSpecDisplay review={review as AgentSpecReview} yaml={review.raw} testIdPrefix="live-agent" />
+        <AgentSpecDisplay
+          review={review as AgentSpecReview}
+          yaml={review.raw}
+          testIdPrefix="live-agent"
+          sourcePath={review.sourcePath}
+        />
       )}
     </div>
   );
@@ -460,7 +465,7 @@ function StartupTab({ rigId, logicalId, data }: { rigId: string; logicalId: stri
                 data-testid={`live-startup-file-${f.path}`}
               >
                 <FileReferenceTrigger
-                  data={{ path: f.path }}
+                  data={{ path: f.path, absolutePath: f.absolutePath }}
                   testId={`live-startup-file-trigger-${f.path}`}
                   className="block w-full px-3 py-2 text-left hover:bg-stone-100/60 transition-colors font-mono text-[10px]"
                 >

@@ -2,6 +2,7 @@ import { describe, it, expect, afterEach, vi, beforeEach } from "vitest";
 import { render, screen, cleanup, waitFor, fireEvent } from "@testing-library/react";
 import { createTestRouter } from "./helpers/test-router.js";
 import { LiveNodeDetails } from "../src/components/LiveNodeDetails.js";
+import { DrawerSelectionContext, type DrawerSelection } from "../src/components/AppShell.js";
 
 const mockFetch = vi.fn();
 
@@ -12,7 +13,12 @@ const NODE_DETAIL = {
   tmuxAttachCommand: "tmux attach -t dev-impl@test-rig", resumeCommand: null,
   latestError: null, model: "opus", agentRef: "local:agents/impl", profile: "default",
   resolvedSpecName: "impl", resolvedSpecVersion: "1.0.0", cwd: "/workspace",
-  startupFiles: [{ path: "role.md", deliveryHint: "guidance_merge", required: true }],
+  startupFiles: [{
+    path: "role.md",
+    deliveryHint: "guidance_merge",
+    required: true,
+    absolutePath: "/workspace/specs/agents/impl/guidance/role.md",
+  }],
   startupActions: [], recentEvents: [],
   infrastructureStartupCommand: null,
   binding: { tmuxSession: "dev-impl@test-rig" },
@@ -72,6 +78,19 @@ describe("LiveNodeDetails", () => {
     return render(
       createTestRouter({
         component: () => <LiveNodeDetails rigId="rig-1" logicalId={logicalId} />,
+        path: "/test",
+      }),
+    );
+  }
+
+  function renderDetailsWithDrawerSelection(setSelection: (sel: DrawerSelection) => void, logicalId = "dev.impl") {
+    return render(
+      createTestRouter({
+        component: () => (
+          <DrawerSelectionContext.Provider value={{ selection: null, setSelection }}>
+            <LiveNodeDetails rigId="rig-1" logicalId={logicalId} />
+          </DrawerSelectionContext.Provider>
+        ),
         path: "/test",
       }),
     );
@@ -139,6 +158,23 @@ describe("LiveNodeDetails", () => {
       expect(screen.getByTestId("live-node-status")).toBeDefined();
       expect(screen.getByTestId("live-node-preview")).toBeDefined();
       expect(screen.getByText(/role\.md/)).toBeDefined();
+    });
+  });
+
+  it("startup file trigger includes resolved file provenance for drawer loading", async () => {
+    const setSelection = vi.fn();
+    mockNodeDetail(NODE_DETAIL);
+    renderDetailsWithDrawerSelection(setSelection as (sel: DrawerSelection) => void);
+
+    fireEvent.click(await screen.findByTestId("live-tab-startup"));
+    fireEvent.click(await screen.findByTestId("live-startup-file-trigger-role.md"));
+
+    expect(setSelection).toHaveBeenCalledWith({
+      type: "file",
+      data: {
+        path: "role.md",
+        absolutePath: "/workspace/specs/agents/impl/guidance/role.md",
+      },
     });
   });
 
