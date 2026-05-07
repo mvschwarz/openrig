@@ -154,6 +154,43 @@ describe("FeedCard P5-1 wiring: show-context QueueItemTrigger", () => {
     expect(arg.data.state).toBe("human-gate");
     expect(arg.data.body).toBe("Authorize v0.3.0 RC tag/push?");
   });
+
+  it("show-context handles queue.created camelCase daemon payloads", async () => {
+    const card = makeCard({
+      id: "queue-created-1",
+      kind: "progress",
+      title: "Queue item created",
+      body: "orch-lead@openrig-velocity -> driver@openrig-velocity",
+      authorSession: "orch-lead@openrig-velocity",
+      source: {
+        seq: 3,
+        type: "queue.created",
+        payload: {
+          qitemId: "qitem-20260507-daemon",
+          sourceSession: "orch-lead@openrig-velocity",
+          destinationSession: "driver@openrig-velocity",
+          priority: "routine",
+          tier: "mode2",
+        },
+        createdAt: "2026-05-07T21:18:52Z",
+        receivedAt: 1_000_000,
+      } as FeedCardModel["source"],
+    });
+    const { setSelection, findByTestId } = renderWithRouterAndQuery(
+      <FeedCard card={card} />,
+    );
+    const trigger = await findByTestId(`feed-card-show-context-${card.id}`);
+    fireEvent.click(trigger);
+    expect(setSelection).toHaveBeenCalledOnce();
+    const arg = setSelection.mock.calls[0][0];
+    expect(arg.type).toBe("qitem");
+    expect(arg.data.qitemId).toBe("qitem-20260507-daemon");
+    expect(arg.data.source).toBe("orch-lead@openrig-velocity");
+    expect(arg.data.destination).toBe("driver@openrig-velocity");
+    expect(arg.data.body).toBe(
+      "orch-lead@openrig-velocity -> driver@openrig-velocity",
+    );
+  });
 });
 
 // V1 polish slice Phase 5.1 P5.1-D2: TopologyTreeView SeatLeaf details

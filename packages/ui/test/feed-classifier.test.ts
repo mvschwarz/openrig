@@ -31,6 +31,51 @@ describe("classifyFeed — SC-15 5 card types", () => {
     expect(cards[0]?.kind).toBe("approval");
   });
 
+  it("queue.created daemon event → visible progress card", () => {
+    const cards = classifyFeed([
+      evt("queue.created", {
+        qitemId: "qitem-20260507-abcdef12",
+        sourceSession: "orch-lead@openrig-velocity",
+        destinationSession: "driver@openrig-velocity",
+        priority: "routine",
+        tier: "mode2",
+      }),
+    ]);
+    expect(cards[0]?.kind).toBe("progress");
+    expect(cards[0]?.title).toBe("Queue item created: qitem-20260507-abcdef12");
+    expect(cards[0]?.body).toContain(
+      "orch-lead@openrig-velocity -> driver@openrig-velocity",
+    );
+    expect(cards[0]?.body).toContain("priority=routine / tier=mode2");
+    expect(cards[0]?.authorSession).toBe("orch-lead@openrig-velocity");
+  });
+
+  it("queue.handed_off daemon event → visible progress card", () => {
+    const cards = classifyFeed([
+      evt("queue.handed_off", {
+        qitemId: "qitem-20260507-handoff",
+        fromSession: "driver@openrig-velocity",
+        toSession: "guard@openrig-velocity",
+      }),
+    ]);
+    expect(cards[0]?.kind).toBe("progress");
+    expect(cards[0]?.title).toBe("Queue item handed off: qitem-20260507-handoff");
+    expect(cards[0]?.body).toContain(
+      "driver@openrig-velocity -> guard@openrig-velocity",
+    );
+    expect(cards[0]?.authorSession).toBe("driver@openrig-velocity");
+  });
+
+  it("qitem.closure_overdue daemon event → action-required", () => {
+    const cards = classifyFeed([
+      evt("qitem.closure_overdue", {
+        qitemId: "qitem-20260507-overdue",
+        destinationSession: "driver@openrig-velocity",
+      }),
+    ]);
+    expect(cards[0]?.kind).toBe("action-required");
+  });
+
   it("queue.item.shipped.closed → SHIPPED (client-synthesize per SC-17)", () => {
     const cards = classifyFeed([evt("queue.item.shipped.closed", {})]);
     expect(cards[0]?.kind).toBe("shipped");
@@ -73,6 +118,13 @@ describe("classifyFeed — SC-15 5 card types", () => {
   it("extracts authorSession from actor_session payload", () => {
     const cards = classifyFeed([
       evt("queue.item.updated", { actor_session: "driver@vel" }),
+    ]);
+    expect(cards[0]?.authorSession).toBe("driver@vel");
+  });
+
+  it("extracts authorSession from camelCase actor payload", () => {
+    const cards = classifyFeed([
+      evt("queue.updated", { actorSession: "driver@vel" }),
     ]);
     expect(cards[0]?.authorSession).toBe("driver@vel");
   });

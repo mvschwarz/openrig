@@ -30,21 +30,130 @@ function asString(v: unknown): string | undefined {
   return typeof v === "string" && v.length > 0 ? v : undefined;
 }
 
+function pickString(
+  payload: Record<string, unknown>,
+  ...keys: string[]
+): string | undefined {
+  for (const key of keys) {
+    const value = asString(payload[key]);
+    if (value) return value;
+  }
+  return undefined;
+}
+
+function shortQitemId(qitemId: string | undefined): string | undefined {
+  if (!qitemId) return undefined;
+  if (qitemId.length <= 28) return qitemId;
+  return `${qitemId.slice(0, 18)}...${qitemId.slice(-6)}`;
+}
+
+function queueEventLabel(type: string): string {
+  switch (type) {
+    case "queue.created":
+    case "queue.item.created":
+      return "Queue item created";
+    case "queue.updated":
+    case "queue.item.updated":
+      return "Queue item updated";
+    case "queue.handed_off":
+      return "Queue item handed off";
+    case "queue.claimed":
+      return "Queue item claimed";
+    case "queue.unclaimed":
+      return "Queue item unclaimed";
+    case "qitem.fallback_routed":
+      return "Queue item fallback routed";
+    case "qitem.closure_overdue":
+      return "Queue item closure overdue";
+    case "inbox.absorbed":
+      return "Inbox item absorbed";
+    case "inbox.denied":
+      return "Inbox item denied";
+    default:
+      return type;
+  }
+}
+
+function isQueueVisibilityEvent(type: string): boolean {
+  return (
+    type === "queue.created" ||
+    type === "queue.updated" ||
+    type === "queue.claimed" ||
+    type === "queue.unclaimed" ||
+    type === "queue.handed_off" ||
+    type === "queue.item.created" ||
+    type === "queue.item.updated" ||
+    type === "qitem.fallback_routed" ||
+    type === "qitem.closure_overdue" ||
+    type === "inbox.absorbed" ||
+    type === "inbox.denied"
+  );
+}
+
+function queueKind(type: string, state: string | undefined): FeedCardKind {
+  if (type.startsWith("queue.") && type.endsWith(".closed")) {
+    return "shipped";
+  }
+  if (type === "qitem.closure_overdue" || type === "inbox.denied") {
+    return "action-required";
+  }
+  if (state === "human-gate" || state === "pending-approval") {
+    return "action-required";
+  }
+  if (state === "closeout-pending-ratify") {
+    return "approval";
+  }
+  if (state === "closed" || state === "completed" || state === "shipped") {
+    return "shipped";
+  }
+  return "progress";
+}
+
+function queueBody(payload: Record<string, unknown>): string | undefined {
+  const source = pickString(payload, "sourceSession", "source_session", "fromSession");
+  const destination = pickString(
+    payload,
+    "destinationSession",
+    "destination_session",
+    "toSession",
+    "destination",
+  );
+  const route =
+    source && destination
+      ? `${source} -> ${destination}`
+      : source
+        ? `Source: ${source}`
+        : destination
+          ? `Destination: ${destination}`
+          : undefined;
+  const meta = [
+    pickString(payload, "priority") ? `priority=${pickString(payload, "priority")}` : undefined,
+    pickString(payload, "tier") ? `tier=${pickString(payload, "tier")}` : undefined,
+    pickString(payload, "state") ? `state=${pickString(payload, "state")}` : undefined,
+  ].filter((item): item is string => Boolean(item));
+
+  return [route, meta.length > 0 ? meta.join(" / ") : undefined]
+    .filter((item): item is string => Boolean(item))
+    .join("\n") || undefined;
+}
+
 function classifyEvent(evt: ActivityEvent): FeedCard | null {
   const payload = (evt.payload ?? {}) as Record<string, unknown>;
-  const author =
-    asString(payload.actor_session) ??
-    asString(payload.source_session) ??
-    asString(payload.sender);
-  const rigId = asString(payload.rig_id) ?? asString(payload.rigId);
-  const summary =
-    asString(payload.summary) ??
-    asString(payload.body) ??
-    asString(payload.title);
+  const author = pickString(
+    payload,
+    "actor_session",
+    "actorSession",
+    "source_session",
+    "sourceSession",
+    "fromSession",
+    "sender",
+  );
+  const rigId = pickString(payload, "rig_id", "rigId");
+  const summary = pickString(payload, "summary", "body", "title");
   const base = {
     id: `${evt.type}-${evt.seq}`,
     title: summary ?? evt.type,
-    body: undefined as string | undefined,
+    body: asString(payload.body),
     authorSession: author,
     rigId,
     receivedAt: evt.receivedAt,
@@ -56,15 +165,20 @@ function classifyEvent(evt: ActivityEvent): FeedCard | null {
   if (evt.type.startsWith("queue.") && evt.type.endsWith(".closed")) {
     return { ...base, kind: "shipped" };
   }
-  if (evt.type === "queue.item.created" || evt.type === "queue.item.updated") {
-    const state = asString(payload.state);
-    if (state === "human-gate" || state === "pending-approval") {
-      return { ...base, kind: "action-required" };
-    }
-    if (state === "closeout-pending-ratify") {
-      return { ...base, kind: "approval" };
-    }
-    return { ...base, kind: "progress" };
+  if (isQueueVisibilityEvent(evt.type)) {
+    const qitemId = pickString(payload, "qitemId", "qitem_id");
+    const explicitTitle = pickString(payload, "summary", "title");
+    const title =
+      explicitTitle ??
+      [queueEventLabel(evt.type), shortQitemId(qitemId)]
+        .filter((item): item is string => Boolean(item))
+        .join(": ");
+    return {
+      ...base,
+      title,
+      body: asString(payload.body) ?? queueBody(payload),
+      kind: queueKind(evt.type, asString(payload.state)),
+    };
   }
   if (evt.type.startsWith("workflow.")) {
     return { ...base, kind: "progress" };
