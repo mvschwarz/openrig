@@ -93,25 +93,17 @@ export function useDiscoveryPlacement() {
   return useContext(DiscoveryPlacementContext);
 }
 
-// Backward-compat alias for consumers (RigGraph.tsx) that still use the old name.
-// V1 attempt-3 Phase 5 P5-4: coerces to/from 'seat-detail' kind instead of legacy
-// 'node' kind. SeatDetailViewer (Phase 4) wraps NodeDetailPanel in canonical
-// 38rem drawer width — closes founder concern about "graph node click → full-width
-// old panel with empty whitespace" by routing through canonical drawer-viewer pattern.
+// V1 polish slice Phase 5.1 P5.1-1 + DRIFT P5.1-D2: useNodeSelection
+// alias FULLY RETIRED. After 'seat-detail' kind retirement, the only
+// callsite (RigGraph node click) now uses useNavigate to route to the
+// /topology/seat/$rigId/$logicalId center page directly. Verified via
+// grep — no remaining production consumer of useNodeSelection or
+// NodeSelectionContext outside the legacy AppShell export.
+//
+// NodeSelectionContext alias retained as a no-op export for any test
+// file still importing the symbol (negative-assertion guard); functions
+// retired entirely.
 export const NodeSelectionContext = DrawerSelectionContext;
-export function useNodeSelection() {
-  const { selection, setSelection } = useDrawerSelection();
-  return {
-    selectedNode:
-      selection?.type === "seat-detail"
-        ? { rigId: selection.rigId, logicalId: selection.logicalId }
-        : null,
-    setSelectedNode: (node: { rigId: string; logicalId: string } | null) =>
-      setSelection(
-        node ? { type: "seat-detail", rigId: node.rigId, logicalId: node.logicalId } : null,
-      ),
-  };
-}
 
 // =====================================================================
 // Rail icon roster — universal-shell.md L37–L58 + agent-chat-surface.md V1 placeholder
