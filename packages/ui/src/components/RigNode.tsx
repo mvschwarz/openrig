@@ -3,6 +3,7 @@ import { Handle, Position } from "@xyflow/react";
 import { PanelsTopLeft } from "lucide-react";
 import { copyText } from "../lib/copy-text.js";
 import { displayAgentName } from "../lib/display-name.js";
+import { cn } from "../lib/utils.js";
 import {
   getActivityState,
   getActivityLabel,
@@ -14,7 +15,10 @@ import {
 import type { AgentActivitySummary, CurrentQitemSummary } from "../hooks/useNodeInventory.js";
 import { ContextUsageRing } from "./ContextUsageRing.js";
 import { ActivityRing } from "./topology/ActivityRing.js";
+import { getActivityCardClasses, getActivityCardSignal } from "./topology/activity-card-visuals.js";
+import { TerminalPreviewPopover } from "./topology/TerminalPreviewPopover.js";
 import type { TopologyActivityVisual } from "../lib/topology-activity.js";
+import { formatCompactTokenCount, formatTokenTotalTitle, sumTokenCounts } from "../lib/token-format.js";
 
 interface RigNodeData {
   logicalId: string;
@@ -40,6 +44,8 @@ interface RigNodeData {
   contextUsedPercentage?: number | null;
   contextFresh?: boolean;
   contextAvailability?: string;
+  contextTotalInputTokens?: number | null;
+  contextTotalOutputTokens?: number | null;
   placementState?: "available" | "selected" | null;
   // PL-019: agent activity drives the node's primary "is this agent
   // working?" dot color (replacing the previous startup-status color).
@@ -93,6 +99,10 @@ export function RigNode({ data }: { data: RigNodeData }) {
   const activityBgClass = getActivityBgClass(activityState);
   const activityAnimClass = getActivityAnimationClass(activityState);
   const activityIsStale = isActivityStale(data.agentActivity);
+  const activityCard = getActivityCardSignal({ activityRing: data.activityRing, activityState });
+  const tokenTotal = sumTokenCounts(data.contextTotalInputTokens, data.contextTotalOutputTokens);
+  const tokenLabel = formatCompactTokenCount(tokenTotal);
+  const tokenTitle = formatTokenTotalTitle(data.contextTotalInputTokens, data.contextTotalOutputTokens);
 
   const placementChipLabel = data.placementState === "selected" ? "target" : data.placementState === "available" ? "avail" : null;
 
@@ -111,6 +121,7 @@ export function RigNode({ data }: { data: RigNodeData }) {
     data.resolvedSpecName ? `Spec: ${data.resolvedSpecName}` : null,
     data.profile ? `Profile: ${data.profile}` : null,
     typeof data.edgeCount === "number" ? `Edges: ${data.edgeCount}` : null,
+    tokenTitle,
     ...qitemHoverLines,
   ].filter((line): line is string => Boolean(line));
   const hoverHint = hoverHintLines.join("\n");
@@ -164,16 +175,26 @@ export function RigNode({ data }: { data: RigNodeData }) {
         ? "bg-stone-900 text-white border-stone-900"
         : "bg-white text-stone-900 border-stone-300 hover:bg-stone-100"
     }`;
+  const toolbarIconButtonClass = "border font-mono text-[7px] uppercase transition-colors bg-white text-stone-900 border-stone-300 hover:bg-stone-100 inline-flex h-6 w-6 items-center justify-center px-0 py-0";
+  const terminalSessionName = data.canonicalSessionName ?? data.binding?.tmuxSession ?? null;
 
   const card = (
     <div
-      className={`group bg-white border min-w-[200px] hard-shadow relative ${
+      className={cn(
+        "group relative min-w-[200px] border hard-shadow transition-[background-color,border-color,box-shadow] duration-300",
+        getActivityCardClasses({
+          state: activityCard.state,
+          flash: activityCard.flash,
+          reducedMotion: data.reducedMotion,
+        }),
         data.placementState === "selected"
           ? "border-emerald-600 ring-2 ring-emerald-400/70 shadow-[0_0_0_3px_rgba(52,211,153,0.12)]"
           : data.placementState === "available"
             ? "border-emerald-500 ring-1 ring-emerald-300/70"
-            : "border-stone-900"
-      }`}
+            : "border-stone-900",
+      )}
+      data-activity-card-state={activityCard.state}
+      data-activity-card-flash={activityCard.flash ?? "none"}
       data-testid="rig-node"
       title={hoverHint || undefined}
     >
@@ -221,13 +242,14 @@ export function RigNode({ data }: { data: RigNodeData }) {
       </div>
 
       {/* Body */}
-      <div className="p-3 space-y-2">
-        {/* Runtime info */}
-        {runtimeModel && (
-          <div className="font-mono text-[8px] text-stone-500">
-            RUNTIME: {runtimeModel}
-          </div>
-        )}
+      <div className="space-y-1 px-2 py-1.5">
+        <div className="truncate font-mono text-[8px] leading-tight text-stone-500">
+          {data.canonicalSessionName ?? data.logicalId}
+        </div>
+
+        <div className="truncate font-mono text-[8px] uppercase tracking-[0.12em] text-stone-400">
+          {runtimeModel || data.profile || "runtime unknown"}
+        </div>
 
         {/* Spec hint */}
         {data.resolvedSpecName && (
@@ -237,23 +259,32 @@ export function RigNode({ data }: { data: RigNodeData }) {
         )}
 
         {/* Context usage — prominent big number per founder directive */}
-        {data.contextAvailability === "known" && typeof data.contextUsedPercentage === "number" ? (
+        <div className="flex items-end justify-between gap-3 pt-0.5">
+          {data.contextAvailability === "known" && typeof data.contextUsedPercentage === "number" ? (
+            <div
+              className={`font-mono text-base font-bold leading-none ${
+                data.contextUsedPercentage >= 80 ? "text-red-600" :
+                data.contextUsedPercentage >= 60 ? "text-amber-600" :
+                "text-green-700"
+              }${!data.contextFresh ? " opacity-50" : ""}`}
+              data-testid="context-badge"
+              title={data.contextFresh ? "Context usage (fresh)" : "Context usage (stale sample)"}
+            >
+              {data.contextUsedPercentage}%
+            </div>
+          ) : (
+            <div className="font-mono text-xs text-stone-400" data-testid="context-badge-unknown">
+              ?
+            </div>
+          )}
           <div
-            className={`font-mono text-base font-bold leading-tight ${
-              data.contextUsedPercentage >= 80 ? "text-red-600" :
-              data.contextUsedPercentage >= 60 ? "text-amber-600" :
-              "text-green-700"
-            }${!data.contextFresh ? " opacity-50" : ""}`}
-            data-testid="context-badge"
-            title={data.contextFresh ? "Context usage (fresh)" : "Context usage (stale sample)"}
+            className={`font-mono text-base font-bold leading-none tracking-[0.02em] ${tokenLabel ? "text-stone-500" : "text-stone-300"}`}
+            data-testid="token-total"
+            title={tokenTitle ?? "Token sample unavailable"}
           >
-            {data.contextUsedPercentage}%
+            {tokenLabel ?? "--"}
           </div>
-        ) : (
-          <div className="font-mono text-xs text-stone-400" data-testid="context-badge-unknown">
-            ?
-          </div>
-        )}
+        </div>
 
         {/* Restore outcome */}
         {data.restoreOutcome && data.restoreOutcome !== "n-a" && (
@@ -317,6 +348,16 @@ export function RigNode({ data }: { data: RigNodeData }) {
                 <PanelsTopLeft className="h-3.5 w-3.5" aria-hidden="true" />
                 <span className="sr-only">{actionFeedback === "cmux" ? "opened" : "cmux"}</span>
               </button>
+            )}
+            {data.rigId && terminalSessionName && (
+              <TerminalPreviewPopover
+                rigId={data.rigId}
+                logicalId={data.logicalId}
+                sessionName={terminalSessionName}
+                reducedMotion={data.reducedMotion}
+                testIdPrefix={`rig-node-${data.logicalId}`}
+                buttonClassName={toolbarIconButtonClass}
+              />
             )}
             {data.resumeToken && data.runtime && data.runtime !== "terminal" && (
               <button

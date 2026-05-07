@@ -9,6 +9,7 @@
 // node-detail context. Operator dogfood reports needing pin from
 // Loop State / Topology tab → NAMED v0+1 trigger.
 
+import { useLayoutEffect, useRef } from "react";
 import { useSessionPreview, isNodePreviewUnavailable } from "../../hooks/useNodePreview.js";
 
 interface SessionPreviewPaneProps {
@@ -18,8 +19,29 @@ interface SessionPreviewPaneProps {
   testIdPrefix?: string;
 }
 
+function isNearBottom(el: HTMLElement): boolean {
+  return el.scrollHeight - el.scrollTop - el.clientHeight <= 4;
+}
+
 export function SessionPreviewPane({ sessionName, lines, paused, testIdPrefix = "session-preview" }: SessionPreviewPaneProps) {
   const preview = useSessionPreview({ sessionName, lines, paused });
+  const contentRef = useRef<HTMLPreElement | null>(null);
+  const shouldFollowTailRef = useRef(true);
+  const content = !isNodePreviewUnavailable(preview.data) ? preview.data?.content : undefined;
+
+  useLayoutEffect(() => {
+    const el = contentRef.current;
+    if (!el || !preview.data || isNodePreviewUnavailable(preview.data)) return;
+    if (shouldFollowTailRef.current) {
+      el.scrollTop = el.scrollHeight;
+    }
+  }, [content, preview.data]);
+
+  const handleScroll = () => {
+    const el = contentRef.current;
+    if (!el) return;
+    shouldFollowTailRef.current = isNearBottom(el);
+  };
 
   return (
     <div
@@ -48,7 +70,9 @@ export function SessionPreviewPane({ sessionName, lines, paused, testIdPrefix = 
       {!isNodePreviewUnavailable(preview.data) && preview.data && (
         <>
           <pre
+            ref={contentRef}
             data-testid={`${testIdPrefix}-content`}
+            onScroll={handleScroll}
             className="font-mono text-[9px] text-stone-800 bg-stone-50 px-2 py-1 max-h-32 overflow-y-auto whitespace-pre-wrap break-all"
           >
             {preview.data.content || "(empty pane)"}
