@@ -31,6 +31,10 @@ import { useTopologyOverlay } from "./topology-overlay-context.js";
 // degrades to table view by default on mobile (graph is too dense for
 // phone screens)").
 import { useShellViewport } from "../../hooks/useShellViewport.js";
+// V1 polish slice Phase 5.2: HostScopePage graph view-mode replaces
+// the prior placeholder with the multi-rig single-canvas component
+// (rig-collapse affordance; default-all-collapsed; auto-expand on URL).
+import { HostMultiRigGraph } from "./HostMultiRigGraph.js";
 
 /** Set the AppShell's Explorer overlay mode based on the scope page's
  *  active view-mode. Graph view-mode → overlay (vellum-translucent
@@ -108,18 +112,8 @@ export function HostScopePage() {
       tabsNav={<TopologyViewModeTabs tabs={HOST_SCOPE_TABS} active={active} onSelect={setActive} testIdPrefix="topology-host" />}
     >
       {effectiveActive === "graph" ? (
-        <div className="p-6">
-          <EmptyState
-            label="HOST GRAPH"
-            description="Multi-rig graph view at host scope; click a rig to drill in."
-            variant="card"
-            testId="topology-host-graph-placeholder"
-            action={
-              rigs && rigs[0]
-                ? { label: `Open ${rigs[0].name}`, href: `/topology/rig/${rigs[0].id}` }
-                : undefined
-            }
-          />
+        <div className="flex-1 min-h-0 relative">
+          <HostMultiRigGraph />
         </div>
       ) : null}
       {effectiveActive === "table" ? (
