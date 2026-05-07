@@ -1060,12 +1060,10 @@ describe("RigGraph SSE integration", () => {
       expect(mockFetch).toHaveBeenCalledTimes(1);
     });
 
-    // Fire SSE message
+    // Fire shared topology event message.
     act(() => {
-      // PL-019: RigGraph now opens two EventSources (useRigEvents + the
-      // new useTopologyEdgeActivity). Target the rig-events one by URL.
-      const es = instances.find((i) => i.url.includes("?rigId="))!;
-      es.simulateMessage('{"type":"node.added"}');
+      const es = instances.find((i) => i.url === "/api/events")!;
+      es.simulateMessage('{"type":"node.added","rigId":"rig-1"}');
     });
 
     // Wait for debounced refetch
@@ -1092,12 +1090,10 @@ describe("RigGraph SSE integration", () => {
       expect(nodes.length).toBe(1);
     });
 
-    // Fire SSE message to trigger refetch
+    // Fire shared topology event message to trigger refetch.
     act(() => {
-      // PL-019: RigGraph now opens two EventSources (useRigEvents + the
-      // new useTopologyEdgeActivity). Target the rig-events one by URL.
-      const es = instances.find((i) => i.url.includes("?rigId="))!;
-      es.simulateMessage('{"type":"node.added"}');
+      const es = instances.find((i) => i.url === "/api/events")!;
+      es.simulateMessage('{"type":"node.added","rigId":"rig-1"}');
     });
 
     // Wait for re-render with 2 nodes
@@ -1115,7 +1111,7 @@ describe("RigGraph SSE integration", () => {
     await waitFor(() => expect(instances.length).toBeGreaterThan(0));
 
     act(() => {
-      instances.find((i) => i.url.includes("?rigId="))!.simulateError();
+      instances.find((i) => i.url === "/api/events")!.simulateError();
     });
 
     await waitFor(() => {
@@ -1133,7 +1129,7 @@ describe("RigGraph SSE integration", () => {
 
     // Error
     act(() => {
-      instances.find((i) => i.url.includes("?rigId="))!.simulateError();
+      instances.find((i) => i.url === "/api/events")!.simulateError();
     });
 
     await waitFor(() => {
@@ -1145,7 +1141,7 @@ describe("RigGraph SSE integration", () => {
 
     // Reconnect (open event)
     act(() => {
-      instances.find((i) => i.url.includes("?rigId="))!.simulateOpen();
+      instances.find((i) => i.url === "/api/events")!.simulateOpen();
     });
 
     await waitFor(() => {

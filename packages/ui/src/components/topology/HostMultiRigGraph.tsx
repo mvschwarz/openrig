@@ -1,22 +1,17 @@
-// V1 polish slice Phase 5.2 — multi-rig single-canvas /topology graph.
+// V1 polish slice: multi-rig hybrid /topology graph.
 //
-// Bundles 8 dispatch items in one canvas component:
-//   P5.2-1 HostMultiRigGraph composition (this file)
-//   P5.2-2 useQueries for N parallel rig graph fetches (lazy on expand)
-//   P5.2-3 cross-rig node-ID prefixing via prefixRigData (multi-rig-layout.ts)
-//   P5.2-4 rigGroup ReactFlow node type (RigGroupNode.tsx)
-//   P5.2-5 default-collapsed rig groups + click-body-to-toggle affordance
-//   P5.2-6 layout option (a) per-rig + outer offset (multi-rig-layout.ts)
-//   P5.2-7 click handler reads rigId from node.data.rigId (NOT closure)
-//   P5.2-8 per-rig features (cmux focus / agent click navigate / pod click
-//          navigate) thread through node.data.rigId
+// Uses shared dagre helpers to lay out each expanded rig as a soft frame
+// containing pod sub-frames and compact agent leaves, then lays out rig
+// frames on the host canvas. V1 contracts remain load-bearing: lazy
+// per-rig graph fetches, cross-rig node ID prefixing, collapse persistence,
+// URL auto-expand, and graph/tree/table navigate parity.
 //
 // Default state: ALL rigs collapsed; rig cards on canvas with status pip
 // + counts. Auto-expand rule (parity with Phase 5.1 TopologyTreeView):
 // when route is /topology/rig/$rigId or /topology/seat/$rigId/* or
 // /topology/pod/$rigId/*, the matching rig is auto-expanded on mount /
-// route change. Click rig card body → toggle collapse. Click "→" Link
-// on rig card name → navigate to /topology/rig/$rigId (drill-in).
+// route change. Click rig card body -> toggle collapse. Click arrow Link
+// on rig card name -> navigate to /topology/rig/$rigId (drill-in).
 //
 // Performance: per-rig graph data is lazy-fetched (useQueries enabled
 // only when rig is expanded). At default state with N rigs collapsed,
@@ -37,20 +32,15 @@ import {
 import "@xyflow/react/dist/style.css";
 import { useQueries } from "@tanstack/react-query";
 import { usePsEntries } from "../../hooks/usePsEntries.js";
-import { applyTreeLayout } from "../../lib/graph-layout.js";
-import { useShellViewport } from "../../hooks/useShellViewport.js";
-import { RigNode } from "../RigNode.js";
 import { RigGroupNode, type RigGroupNodeData } from "./RigGroupNode.js";
+import { HybridAgentNode, HybridPodGroupNode } from "./HybridTopologyNodes.js";
 import { useTopologyOverlay } from "./topology-overlay-context.js";
 import {
-  prefixRigData,
-  packRigGroups,
-  computeBounds,
-  COLLAPSED_RIG_WIDTH,
-  COLLAPSED_RIG_HEIGHT,
-  RIG_HEADER_HEIGHT,
-  RIG_PADDING,
-} from "../../lib/multi-rig-layout.js";
+  HYBRID_COLLAPSED_RIG_HEIGHT,
+  HYBRID_COLLAPSED_RIG_WIDTH,
+  layoutHybridOuterRigs,
+  layoutHybridRig,
+} from "../../lib/hybrid-layout.js";
 
 interface GraphData {
   nodes: unknown[];
@@ -63,39 +53,17 @@ async function fetchGraph(rigId: string): Promise<GraphData> {
   return res.json();
 }
 
-// Pod-group inline renderer for the multi-rig canvas. Mirrors RigGraph's
-// PodGroupNode shape (data.podDisplayName / podNamespace / etc.) but
-// stays local so this canvas's nodeTypes registry is self-contained.
-function MultiRigPodGroupNode({
-  data,
-}: {
-  data: { podDisplayName?: string | null; podNamespace?: string | null; podId?: string | null };
-}) {
-  const label = data.podDisplayName ?? data.podNamespace ?? data.podId ?? "pod";
-  return (
-    <div
-      data-testid="multi-rig-pod-group-node"
-      className="w-full h-full relative pointer-events-auto"
-    >
-      <div className="absolute left-3 top-2 inline-flex items-center font-mono text-[11px] font-bold leading-none tracking-[0.08em] text-stone-700">
-        {`${label} pod`}
-      </div>
-    </div>
-  );
-}
-
 const nodeTypes: NodeTypes = {
   rigGroup: RigGroupNode as unknown as NodeTypes[string],
-  podGroup: MultiRigPodGroupNode,
-  rigNode: RigNode,
+  podGroup: HybridPodGroupNode as unknown as NodeTypes[string],
+  rigNode: HybridAgentNode as unknown as NodeTypes[string],
 };
 
 export function HostMultiRigGraph() {
   const navigate = useNavigate();
   const { data: psEntries } = usePsEntries();
-  const { innerWidth } = useShellViewport();
 
-  // V1 polish slice Phase 5.2 bounce-fix — rig-expanded state lifted to
+  // V1 polish slice Phase 5.2 bounce-fix: rig-expanded state lifted to
   // TopologyOverlayProvider scope. Direct-URL entry to /topology/rig/$id
   // (which mounts RigScopePage, NOT HostMultiRigGraph because topology
   // routes are SIBLING) still updates the context's expandedRigs map
@@ -106,7 +74,7 @@ export function HostMultiRigGraph() {
 
   // P5.2-2 + P5.2-3: useQueries for per-rig graph data; enabled only
   // when the rig is expanded. Stable hook-call count (single useQueries
-  // call) regardless of how psEntries grows from undefined → [N], so
+  // call) regardless of how psEntries grows from undefined to [N], so
   // no rules-of-hooks regression (P0-1 pattern preserved).
   const rigList = psEntries ?? [];
   const graphQueries = useQueries({
@@ -118,13 +86,11 @@ export function HostMultiRigGraph() {
     })),
   });
 
-  // Build per-rig prefixed sub-graphs (only for expanded rigs); compute
-  // each rig's bounding box; pack rig groups in a grid via packRigGroups.
+  // Build per-rig nested subgraphs and lay out rig frames on the host canvas.
   const { mergedNodes, mergedEdges } = useMemo(() => {
-    type RawN = { id: string; type?: string; data?: Record<string, unknown>; position?: { x: number; y: number }; parentId?: string; initialWidth?: number; initialHeight?: number };
-    type RawE = { id: string; source: string; target: string };
+    type RawN = Node & { data?: Record<string, unknown>; initialWidth?: number; initialHeight?: number };
+    type RawE = Edge & { source: string; target: string; data?: Record<string, unknown>; label?: unknown };
 
-    // Step 1 — for each rig, compute its prefixed nodes/edges + bounds.
     const perRig: Array<{
       rigId: string;
       rigName: string;
@@ -146,46 +112,24 @@ export function HostMultiRigGraph() {
 
       let childNodes: Node[] = [];
       let childEdges: Edge[] = [];
-      let width = COLLAPSED_RIG_WIDTH;
-      let height = COLLAPSED_RIG_HEIGHT;
+      let width = HYBRID_COLLAPSED_RIG_WIDTH;
+      let height = HYBRID_COLLAPSED_RIG_HEIGHT;
       let podCount: number | undefined;
 
-      if (isExpanded && queryResult?.data) {
-        // Apply per-rig layout (option (a) per Phase 5.2 ACK §2).
-        const rawNodes = (queryResult.data.nodes ?? []) as RawN[];
-        const rawEdges = (queryResult.data.edges ?? []) as RawE[];
-        // Cast to LayoutNode shape for applyTreeLayout (it's permissive).
-        const laidOut = applyTreeLayout(
-          rawNodes as Parameters<typeof applyTreeLayout>[0],
-          rawEdges as Parameters<typeof applyTreeLayout>[1],
-        ) as RawN[];
-        // Cross-rig prefix step.
-        const prefixed = prefixRigData(rig.rigId, laidOut, rawEdges);
-        // Bounds for the rig group container.
-        const bounds = computeBounds(
-          prefixed.nodes.map((n) => ({
-            position: n.position ?? { x: 0, y: 0 },
-            initialWidth: n.initialWidth,
-            initialHeight: n.initialHeight,
-          })),
-        );
-        width = bounds.width;
-        height = bounds.height;
-        // Re-position relative to rig-internal origin (top-left = padding,
-        // header eaten by RIG_HEADER_HEIGHT).
-        childNodes = prefixed.nodes.map((n) => ({
-          ...(n as Node),
-          position: {
-            x: (n.position?.x ?? 0) - bounds.minX + RIG_PADDING,
-            y: (n.position?.y ?? 0) - bounds.minY + RIG_HEADER_HEIGHT + RIG_PADDING,
-          },
-          parentId: `rig-${rig.rigId}`,
-          extent: "parent" as const,
-        }));
-        childEdges = prefixed.edges as Edge[];
-        podCount = prefixed.nodes.filter(
-          (n) => n.type === "podGroup" || n.type === "group",
-        ).length;
+      const rawNodes = (queryResult?.data?.nodes ?? []) as RawN[];
+      const rawEdges = (queryResult?.data?.edges ?? []) as RawE[];
+      const layout = layoutHybridRig({
+        rigId: rig.rigId,
+        nodes: rawNodes,
+        edges: rawEdges,
+        collapsed: !isExpanded,
+      });
+      width = layout.width;
+      height = layout.height;
+      if (isExpanded) {
+        childNodes = layout.nodes;
+        childEdges = layout.edges;
+        podCount = layout.podCount;
       }
 
       perRig.push({
@@ -203,15 +147,10 @@ export function HostMultiRigGraph() {
       });
     }
 
-    // Step 2 — pack rig groups in the canvas grid.
-    const packed = packRigGroups(
+    const packed = layoutHybridOuterRigs(
       perRig.map((p) => ({ rigId: p.rigId, width: p.width, height: p.height })),
-      Math.max(innerWidth, 1024) - 64, // canvas padding
     );
 
-    // Step 3 — emit rigGroup container nodes + child nodes (offset by
-    // pack position, since children carry parentId so react-flow handles
-    // the visual offset for us).
     const nodes: Node[] = [];
     const edges: Edge[] = [];
     for (let i = 0; i < perRig.length; i++) {
@@ -230,12 +169,11 @@ export function HostMultiRigGraph() {
       nodes.push({
         id: `rig-${p.rigId}`,
         type: "rigGroup",
-        position: { x: pack.offsetX, y: pack.offsetY },
+        position: pack.position,
         data: data as unknown as Record<string, unknown>,
         style: { width: pack.width, height: pack.height },
-        // Rig group must come BEFORE its children in the nodes array so
-        // react-flow's parent/child positioning resolves correctly.
-        // Children only included when expanded.
+        draggable: false,
+        zIndex: 0,
       });
       if (p.isExpanded) {
         nodes.push(...p.childNodes);
@@ -245,12 +183,12 @@ export function HostMultiRigGraph() {
 
     return { mergedNodes: nodes, mergedEdges: edges };
     // toggleRig is stable per-render but useMemo doesn't know; safe to
-    // include rigList + expanded + graphQueries + innerWidth as deps.
+    // include rigList + expanded + graphQueries as deps.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rigList, expanded, graphQueries, innerWidth]);
+  }, [rigList, expanded, graphQueries]);
 
-  // P5.2-7 click handlers — agent → seat URL; pod group → pod URL;
-  // rig group → toggle (handled inside RigGroupNode onClick; this
+  // P5.2-7 click handlers: agent -> seat URL; pod group -> pod URL;
+  // rig group -> toggle (handled inside RigGroupNode onClick; this
   // handler is a no-op for rigGroup type to avoid double-fire).
   const onNodeClick: NodeMouseHandler = (_evt, node) => {
     const data = node.data as { rigId?: string; logicalId?: string; podId?: string | null; podNamespace?: string | null } | undefined;
@@ -295,6 +233,7 @@ export function HostMultiRigGraph() {
         edges={mergedEdges}
         nodeTypes={nodeTypes}
         onNodeClick={onNodeClick}
+        nodesDraggable={false}
         fitView
         fitViewOptions={{ padding: 0.15, includeHiddenNodes: false }}
         proOptions={{ hideAttribution: true }}
