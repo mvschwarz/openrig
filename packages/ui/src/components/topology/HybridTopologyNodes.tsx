@@ -71,7 +71,7 @@ export function HybridPodGroupNode({ data }: { data: HybridPodGroupNodeData }) {
   return (
     <div
       data-testid="hybrid-pod-group-node"
-      className="relative h-full w-full border border-dashed border-stone-400/55 bg-stone-50/35"
+      className="relative h-full w-full border border-dashed border-stone-400/55 bg-stone-50/25"
     >
       <div className="absolute left-2 top-2 flex items-center gap-2 font-mono text-[9px] lowercase tracking-[0.02em] text-stone-600">
         <span>{label}</span>
@@ -114,7 +114,7 @@ export function HybridAgentNode({ data }: { data: HybridAgentNodeData }) {
       data-activity-card-state={activityCard.state}
       data-activity-card-flash={activityCard.flash ?? "none"}
       className={cn(
-        "group relative h-full w-full select-none border hard-shadow transition-[background-color,border-color,box-shadow] duration-300",
+        "group relative h-full w-full select-none border bg-white/30 hard-shadow transition-[background-color,border-color,box-shadow] duration-300",
         getActivityCardClasses({
           state: activityCard.state,
           flash: activityCard.flash,

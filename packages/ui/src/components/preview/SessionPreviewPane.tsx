@@ -60,7 +60,7 @@ export function SessionPreviewPane({
       className={cn(
         "space-y-1",
         compactTerminal
-          ? "border-0 bg-transparent p-0 text-stone-100"
+          ? "border-0 bg-transparent p-0 text-stone-50"
           : "border border-stone-300/40 bg-white/8 px-3 py-2",
       )}
     >
@@ -75,7 +75,7 @@ export function SessionPreviewPane({
       {preview.isError && (
         <div
           data-testid={`${testIdPrefix}-error`}
-          className={cn("font-mono text-[9px]", compactTerminal ? "text-red-300" : "text-red-600")}
+          className={cn("font-mono text-[9px]", compactTerminal ? "text-red-200" : "text-red-600")}
         >
           {(preview.error as Error)?.message ?? "Preview failed."}
         </div>
@@ -85,16 +85,25 @@ export function SessionPreviewPane({
           data-testid={`${testIdPrefix}-unavailable`}
           className={cn(
             "font-mono space-y-0.5",
-            compactTerminal ? "text-[10px] text-stone-300" : "text-[9px] text-stone-500",
+            compactTerminal ? "text-[10px] text-stone-50" : "text-[9px] text-stone-500",
           )}
         >
-          <div>Preview unavailable: {preview.data.reason}.</div>
-          {preview.data.hint && (
-            <div className={compactTerminal ? "text-stone-500" : "text-stone-400"}>{preview.data.hint}</div>
+          {compactTerminal ? (
+            <>
+              <div>Preview unavailable.</div>
+              <div className="text-stone-400">$ waiting for terminal output</div>
+            </>
+          ) : (
+            <>
+              <div>Preview unavailable: {preview.data.reason}.</div>
+              {preview.data.hint && (
+                <div className="text-stone-400">{preview.data.hint}</div>
+              )}
+              <div className="text-stone-400">
+                Use <code>rig capture {sessionName}</code> from terminal as a fallback.
+              </div>
+            </>
           )}
-          <div className={compactTerminal ? "text-stone-500" : "text-stone-400"}>
-            Use <code>rig capture {sessionName}</code> from terminal as a fallback.
-          </div>
         </div>
       )}
       {!isNodePreviewUnavailable(preview.data) && preview.data && (
@@ -106,7 +115,7 @@ export function SessionPreviewPane({
             className={cn(
               "font-mono overflow-y-auto whitespace-pre-wrap break-all",
               compactTerminal
-                ? "max-h-72 bg-transparent px-1 py-0.5 text-[10px] leading-[1.25] text-stone-100"
+                ? "max-h-72 bg-transparent px-1 py-0.5 text-[10px] leading-[1.25] text-stone-50"
                 : "max-h-32 bg-stone-50 px-2 py-1 text-[9px] text-stone-800",
             )}
           >

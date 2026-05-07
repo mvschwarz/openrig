@@ -206,6 +206,11 @@ describe("P5.3 ActivityRing and HotPotatoEdge", () => {
     expect(driverPopover.parentElement).toBe(document.body);
     expect(driverPopover.className).toContain("fixed");
     expect(driverPopover.className).toContain("z-[1000]");
+    expect(driverPopover.className).toContain("bg-stone-950/65");
+    expect(driverPopover.className).toContain("text-stone-50");
+    expect(driverPopover.className).toContain("backdrop-blur-sm");
+    expect(driverPopover.className).not.toContain("border");
+    expect(driverPopover.className).not.toContain("hard-shadow");
     expect(driverPopover.style.left).not.toBe("");
     expect(driverPopover.style.top).not.toBe("");
 
@@ -226,6 +231,7 @@ describe("P5.3 ActivityRing and HotPotatoEdge", () => {
     const rigGraph = readFileSync(path.join(srcRoot, "components/RigGraph.tsx"), "utf8");
     const rigNode = readFileSync(path.join(srcRoot, "components/RigNode.tsx"), "utf8");
     const hybridNodes = readFileSync(path.join(srcRoot, "components/topology/HybridTopologyNodes.tsx"), "utf8");
+    const rigGroupNode = readFileSync(path.join(srcRoot, "components/topology/RigGroupNode.tsx"), "utf8");
     const terminalPopover = readFileSync(path.join(srcRoot, "components/topology/TerminalPreviewPopover.tsx"), "utf8");
     const activityCards = readFileSync(path.join(srcRoot, "components/topology/activity-card-visuals.ts"), "utf8");
     const table = readFileSync(path.join(srcRoot, "components/topology/TopologyTableView.tsx"), "utf8");
@@ -250,12 +256,25 @@ describe("P5.3 ActivityRing and HotPotatoEdge", () => {
     expect(terminalPopover).toMatch(/createPortal/);
     expect(terminalPopover).toMatch(/document\.body/);
     expect(terminalPopover).toMatch(/variant="compact-terminal"/);
-    expect(terminalPopover).toMatch(/bg-stone-950/);
+    expect(terminalPopover).toMatch(/bg-stone-950\/65/);
+    expect(terminalPopover).toMatch(/text-stone-50/);
+    expect(terminalPopover).toMatch(/backdrop-blur-sm/);
+    expect(terminalPopover).not.toMatch(/border-outline-variant/);
+    expect(terminalPopover).not.toMatch(/hard-shadow/);
     expect(terminalPopover).toMatch(/z-\[1000\]/);
     expect(terminalPopover).not.toMatch(/absolute left-full/);
     expect(terminalPopover).not.toMatch(/terminal preview/);
     expect(terminalPopover).not.toMatch(/terminal-close/);
+    expect(rigGroupNode).toMatch(/bg-white\/30/);
+    expect(rigGroupNode).toMatch(/hover:bg-white\/40/);
+    expect(rigGroupNode).toMatch(/bg-white\/\[0\.10\]/);
+    expect(rigGroupNode).not.toMatch(/bg-white\/\[0\.14\]/);
+    expect(rigGroupNode).not.toMatch(/hover:bg-white\/60/);
+    expect(hybridNodes).toMatch(/bg-white\/30/);
+    expect(hybridNodes).toMatch(/bg-stone-50\/25/);
     expect(activityCards).toMatch(/activity-card-active/);
+    expect(css).toMatch(/background-color: rgba\(255, 255, 255, 0\.72\)/);
+    expect(css).not.toMatch(/background-color: rgba\(255, 255, 255, 0\.96\)/);
     expect(rigGraph).toMatch(/activityRing/);
     expect(table).toMatch(/ActivityRing/);
     expect(table).toMatch(/group-hover:opacity-100/);
