@@ -38,4 +38,13 @@ describe("polish-8 demo-readiness source guards", () => {
     expect(graphSrc).toContain("dagre.layout");
     expect(graphSrc).toContain("RegistrationMarks");
   });
+
+  it("SliceWorkflowGraph single-sources rendered node dimensions with dagre layout dimensions", () => {
+    const graphSrc = read("../src/components/slices/tabs/SliceWorkflowGraph.tsx");
+    expect(graphSrc.match(/\b200\b/g) ?? []).toHaveLength(1);
+    expect(graphSrc.match(/\b112\b/g) ?? []).toHaveLength(1);
+    expect(graphSrc).toContain("style={{ width: NODE_WIDTH, height: NODE_HEIGHT }}");
+    expect(graphSrc).not.toContain("w-[200px]");
+    expect(graphSrc).not.toContain("h-[112px]");
+  });
 });
