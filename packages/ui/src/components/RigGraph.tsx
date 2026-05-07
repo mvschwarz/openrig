@@ -96,15 +96,55 @@ export function RigGraph({
   rigId,
   rigName = null,
   showDiscovered = true,
+  podScope,
 }: {
   rigId: string | null;
   rigName?: string | null;
   showDiscovered?: boolean;
+  /** V1 polish slice Phase 5.1 P5.1-5: pod-scope filter. When set, the
+   *  graph renders only nodes/edges/podGroups whose pod matches this
+   *  name (matched via inferPodName + node.podId/podNamespace). Other
+   *  rig nodes are filtered out so the graph reads as a single-pod
+   *  subset. Used by /topology/pod/$rigId/$podName graph view-mode. */
+  podScope?: string;
 }) {
   const { data, isPending: loading, error: queryError } = useRigGraph(rigId ?? "");
   const discoveredSessions = useDiscoveredSessionsConditional(showDiscovered);
-  const rawNodes = data?.nodes ?? [];
-  const rawEdges = data?.edges ?? [];
+  const allRawNodes = data?.nodes ?? [];
+  const allRawEdges = data?.edges ?? [];
+
+  // P5.1-5 pod-scope filter: when podScope set, restrict nodes to those
+  // whose pod matches; restrict edges to those between filtered nodes.
+  // Hook data is typed as unknown[]; cast inline to known shape.
+  const { rawNodes, rawEdges } = useMemo(() => {
+    if (!podScope) return { rawNodes: allRawNodes, rawEdges: allRawEdges };
+    type RigNodeShape = {
+      id: string;
+      type?: string;
+      data?: { logicalId?: string; podId?: string | null; podNamespace?: string | null };
+    };
+    type RigEdgeShape = { source: string; target: string };
+    const allowedNodeIds = new Set<string>();
+    const filteredNodes = (allRawNodes as RigNodeShape[]).filter((n) => {
+      if (n.type === "podGroup" || n.type === "group") {
+        const matches =
+          (n.data?.podNamespace ?? n.data?.podId) === podScope;
+        if (matches) allowedNodeIds.add(n.id);
+        return matches;
+      }
+      const inferredPod =
+        n.data?.podNamespace ??
+        n.data?.podId ??
+        inferPodName(n.data?.logicalId ?? null);
+      const matches = inferredPod === podScope;
+      if (matches) allowedNodeIds.add(n.id);
+      return matches;
+    });
+    const filteredEdges = (allRawEdges as RigEdgeShape[]).filter(
+      (e) => allowedNodeIds.has(e.source) && allowedNodeIds.has(e.target),
+    );
+    return { rawNodes: filteredNodes, rawEdges: filteredEdges };
+  }, [allRawNodes, allRawEdges, podScope]);
   const error = queryError?.message ?? null;
   const { reconnecting } = useRigEvents(rigId);
   const edgeActivity = useTopologyEdgeActivity();
