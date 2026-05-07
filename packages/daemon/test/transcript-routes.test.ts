@@ -119,7 +119,12 @@ describe("transcript routes", () => {
     expect(body.error).toContain("rig up");
   });
 
-  it("GET /tail starts transcript capture for a tmux-bound session with no transcript file", async () => {
+  it("GET /tail registers a transcript rotation timer for a tmux-bound session with no transcript file", async () => {
+    const {
+      getActiveRotationCount,
+      clearAllTranscriptRotationsForTest,
+    } = await import("../src/domain/transcript-rotation.js");
+    clearAllTranscriptRotationsForTest();
     const rig = rigRepo.createRig("my-rig");
     const node = rigRepo.addNode(rig.id, "dev-impl", { role: "worker", runtime: "claude-code" });
     sessionRegistry.registerSession(node.id, "dev-impl@my-rig");
@@ -127,26 +132,34 @@ describe("transcript routes", () => {
 
     const store = new TranscriptStore({ transcriptsRoot: tmpDir, enabled: true });
     vi.spyOn(store, "ensureTranscriptDir").mockReturnValue(true);
-    const startPipePaneSpy = vi.fn(async () => ({ ok: true as const }));
+    // V1 pre-release Item 1: capture-pane returns null (no terminal
+    // content yet) so the rotation tick is a no-op write — the
+    // transcript file stays empty and readTail returns null, which
+    // surfaces as the legacy "started now" 404 to clients polling
+    // before the first real capture.
+    const capturePaneSpy = vi.fn(async () => null);
     const app = createApp({
       db,
       rigRepo,
       sessionRegistry,
       transcriptStore: store,
-      tmuxAdapter: { startPipePane: startPipePaneSpy } as unknown as TmuxAdapter,
+      tmuxAdapter: { capturePaneContent: capturePaneSpy } as unknown as TmuxAdapter,
     });
 
     const res = await app.request("/api/transcripts/dev-impl@my-rig/tail");
     expect(res.status).toBe(404);
     const body = await res.json();
     expect(body.error).toContain("started now");
-    expect(startPipePaneSpy).toHaveBeenCalledWith(
-      "dev-impl@my-rig",
-      store.getTranscriptPath("my-rig", "dev-impl@my-rig"),
-    );
+    expect(getActiveRotationCount()).toBeGreaterThan(0);
+    clearAllTranscriptRotationsForTest();
   });
 
   it("GET /tail returns warmed content after lazy-start capture when output appears quickly", async () => {
+    const {
+      getActiveRotationCount,
+      clearAllTranscriptRotationsForTest,
+    } = await import("../src/domain/transcript-rotation.js");
+    clearAllTranscriptRotationsForTest();
     const rig = rigRepo.createRig("my-rig");
     const node = rigRepo.addNode(rig.id, "dev-impl", { role: "worker", runtime: "claude-code" });
     sessionRegistry.registerSession(node.id, "dev-impl@my-rig");
@@ -157,21 +170,22 @@ describe("transcript routes", () => {
       .mockReturnValueOnce(null)
       .mockReturnValueOnce("READY\n");
     vi.spyOn(store, "ensureTranscriptDir").mockReturnValue(true);
-    const startPipePaneSpy = vi.fn(async () => ({ ok: true as const }));
+    const capturePaneSpy = vi.fn(async () => "READY\n");
     const app = createApp({
       db,
       rigRepo,
       sessionRegistry,
       transcriptStore: store,
-      tmuxAdapter: { startPipePane: startPipePaneSpy } as unknown as TmuxAdapter,
+      tmuxAdapter: { capturePaneContent: capturePaneSpy } as unknown as TmuxAdapter,
     });
 
     const res = await app.request("/api/transcripts/dev-impl@my-rig/tail");
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.content).toBe("READY\n");
-    expect(startPipePaneSpy).toHaveBeenCalledOnce();
+    expect(getActiveRotationCount()).toBeGreaterThan(0);
     expect(readTailSpy).toHaveBeenCalledTimes(2);
+    clearAllTranscriptRotationsForTest();
   });
 
   it("GET /tail with non-positive lines normalizes to default", async () => {

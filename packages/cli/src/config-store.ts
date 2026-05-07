@@ -14,7 +14,15 @@ import {
 export interface RiggedConfig {
   daemon: { port: number; host: string };
   db: { path: string };
-  transcripts: { enabled: boolean; path: string };
+  transcripts: {
+    enabled: boolean;
+    path: string;
+    // V1 pre-release CLI/daemon Item 1 — capture-pane rotation tunables.
+    // SC-29 EXCEPTION #4 declared in pre-release ACK §5: same allowlist
+    // shape as the Phase 4 / Phase 5 prior exceptions.
+    lines: number;
+    pollIntervalSeconds: number;
+  };
   // User Settings v0 — workspace paths.
   workspace: {
     root: string;
@@ -74,7 +82,7 @@ const DEFAULT_WORKSPACE_ROOT = getDefaultOpenRigPath("workspace");
 const DEFAULTS = {
   daemon: { port: 7433, host: "127.0.0.1" },
   db: { path: getDefaultOpenRigPath("openrig.sqlite") },
-  transcripts: { enabled: true, path: getDefaultOpenRigPath("transcripts") },
+  transcripts: { enabled: true, path: getDefaultOpenRigPath("transcripts"), lines: 1000, pollIntervalSeconds: 2 },
   workspace: {
     root: DEFAULT_WORKSPACE_ROOT,
     slicesRoot: "",
@@ -123,6 +131,10 @@ export const VALID_KEYS = [
   "db.path",
   "transcripts.enabled",
   "transcripts.path",
+  // V1 pre-release CLI/daemon Item 1 — SC-29 EXCEPTION #4 allowlist
+  // sub-piece: transcript rotation tunables (line count + poll interval).
+  "transcripts.lines",
+  "transcripts.poll_interval_seconds",
   "workspace.root",
   "workspace.slices_root",
   "workspace.steering_path",
@@ -154,6 +166,8 @@ export const ENV_MAP: Record<ValidKey, { primary: string; legacy: string }> = {
   "db.path": { primary: "OPENRIG_DB", legacy: "RIGGED_DB" },
   "transcripts.enabled": { primary: "OPENRIG_TRANSCRIPTS_ENABLED", legacy: "RIGGED_TRANSCRIPTS_ENABLED" },
   "transcripts.path": { primary: "OPENRIG_TRANSCRIPTS_PATH", legacy: "RIGGED_TRANSCRIPTS_PATH" },
+  "transcripts.lines": { primary: "OPENRIG_TRANSCRIPTS_LINES", legacy: "RIGGED_TRANSCRIPTS_LINES" },
+  "transcripts.poll_interval_seconds": { primary: "OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS", legacy: "RIGGED_TRANSCRIPTS_POLL_INTERVAL_SECONDS" },
   "workspace.root": { primary: "OPENRIG_WORKSPACE_ROOT", legacy: "RIGGED_WORKSPACE_ROOT" },
   "workspace.slices_root": { primary: "OPENRIG_WORKSPACE_SLICES_ROOT", legacy: "RIGGED_WORKSPACE_SLICES_ROOT" },
   "workspace.steering_path": { primary: "OPENRIG_WORKSPACE_STEERING_PATH", legacy: "RIGGED_WORKSPACE_STEERING_PATH" },
@@ -188,6 +202,8 @@ const KEY_TO_PATH: Record<ValidKey, string[]> = {
   "db.path": ["db", "path"],
   "transcripts.enabled": ["transcripts", "enabled"],
   "transcripts.path": ["transcripts", "path"],
+  "transcripts.lines": ["transcripts", "lines"],
+  "transcripts.poll_interval_seconds": ["transcripts", "pollIntervalSeconds"],
   "workspace.root": ["workspace", "root"],
   "workspace.slices_root": ["workspace", "slicesRoot"],
   "workspace.steering_path": ["workspace", "steeringPath"],
@@ -318,6 +334,8 @@ export class ConfigStore {
       transcripts: {
         enabled: v("transcripts.enabled") as boolean,
         path: v("transcripts.path") as string,
+        lines: v("transcripts.lines") as number,
+        pollIntervalSeconds: v("transcripts.poll_interval_seconds") as number,
       },
       workspace: {
         root: workspaceRoot,

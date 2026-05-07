@@ -1588,8 +1588,13 @@ describe("RestoreOrchestrator", () => {
     const transcriptStore = new TranscriptStore({ transcriptsRoot: tmpDir, enabled: true });
 
     const tmux = mockTmux();
-    // startPipePane fails → warning propagates, but boundary marker still written
-    (tmux as unknown as Record<string, unknown>).startPipePane = vi.fn(async () => ({ ok: false, code: "unknown", message: "pipe-pane failed" }));
+    // V1 pre-release Item 1: capture is via the rotation module, whose
+    // failures are best-effort silent (next tick retries). The legacy
+    // "Transcript capture failed" launch-warning path no longer fires;
+    // the only structural transcript warning surfaces if the
+    // transcript directory creation itself fails. The boundary marker
+    // is still written prior to launch and asserted below regardless
+    // of capture-tick outcomes.
 
     const nodeLauncher = new NodeLauncher({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux, transcriptStore });
     const orch = new RestoreOrchestrator({
@@ -1603,9 +1608,6 @@ describe("RestoreOrchestrator", () => {
     const result = await orch.restore(snap.id);
     expect(result.ok).toBe(true);
     if (result.ok) {
-      // Launch warnings propagate (transcript capture failed)
-      expect(result.result.warnings.some((w: string) => w.includes("Transcript capture failed"))).toBe(true);
-
       // Boundary markers were actually written to transcript files
       const rigDir = path.join(tmpDir, "r99");
       expect(fs.existsSync(rigDir)).toBe(true);

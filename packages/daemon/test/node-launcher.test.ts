@@ -409,14 +409,16 @@ describe("NodeLauncher", () => {
   });
 
   describe("transcript integration", () => {
-    it("calls startPipePane on successful launch when TranscriptStore is enabled", async () => {
+    it("starts the transcript rotation timer on successful launch when TranscriptStore is enabled", async () => {
+      const {
+        getActiveRotationCount,
+        clearAllTranscriptRotationsForTest,
+      } = await import("../src/domain/transcript-rotation.js");
+      clearAllTranscriptRotationsForTest();
       const { rig } = seedRigWithNode();
-      const pipePaneSpy = vi.fn<(name: string, path: string) => Promise<TmuxResult>>()
-        .mockResolvedValue({ ok: true });
       const tmux = mockTmuxAdapter({
         createSession: async () => ({ ok: true as const }),
       });
-      (tmux as unknown as Record<string, unknown>).startPipePane = pipePaneSpy;
 
       const { TranscriptStore } = await import("../src/domain/transcript-store.js");
       const transcriptStore = new TranscriptStore({ transcriptsRoot: "/tmp/test-transcripts", enabled: true });
@@ -428,25 +430,23 @@ describe("NodeLauncher", () => {
 
       const result = await launcher.launchNode(rig.id, "dev1-impl");
       expect(result.ok).toBe(true);
-      expect(pipePaneSpy).toHaveBeenCalledOnce();
-      expect(pipePaneSpy.mock.calls[0]![1]).toContain("dev1-impl");
+      // Rotation timer registered for the launched session.
+      expect(getActiveRotationCount()).toBeGreaterThan(0);
       if (result.ok) {
         expect(result.warnings).toBeUndefined();
       }
+      clearAllTranscriptRotationsForTest();
     });
 
-    it("adds warning to LaunchResult.warnings on pipe-pane failure but launch still succeeds", async () => {
+    it("warns and still succeeds when the transcript directory cannot be created", async () => {
       const { rig } = seedRigWithNode();
-      const pipePaneSpy = vi.fn<(name: string, path: string) => Promise<TmuxResult>>()
-        .mockResolvedValue({ ok: false, code: "unknown", message: "pipe-pane failed" });
       const tmux = mockTmuxAdapter({
         createSession: async () => ({ ok: true as const }),
       });
-      (tmux as unknown as Record<string, unknown>).startPipePane = pipePaneSpy;
 
       const { TranscriptStore } = await import("../src/domain/transcript-store.js");
       const transcriptStore = new TranscriptStore({ transcriptsRoot: "/tmp/test-transcripts", enabled: true });
-      vi.spyOn(transcriptStore, "ensureTranscriptDir").mockReturnValue(true);
+      vi.spyOn(transcriptStore, "ensureTranscriptDir").mockReturnValue(false);
 
       const launcher = new NodeLauncher({
         db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux, transcriptStore,
@@ -457,7 +457,7 @@ describe("NodeLauncher", () => {
       if (result.ok) {
         expect(result.warnings).toBeDefined();
         expect(result.warnings!.length).toBe(1);
-        expect(result.warnings![0]).toContain("Transcript capture failed");
+        expect(result.warnings![0]).toContain("Transcript directory creation failed");
       }
     });
   });
