@@ -62,4 +62,37 @@ describe("SessionPreviewPane", () => {
       expect(content.scrollTop).toBe(240);
     });
   });
+
+  it("renders compact terminal variant without metadata chrome", async () => {
+    mockFetch.mockImplementation(async (url: string) => {
+      if (url === "/api/config") return new Response(JSON.stringify(settingsResponse()));
+      if (url.includes("/api/sessions/")) {
+        return new Response(JSON.stringify({
+          sessionName: "driver@test-rig",
+          content: "tail line",
+          lines: 1,
+          capturedAt: "2026-05-07T08:00:00Z",
+        }));
+      }
+      return new Response(JSON.stringify({}), { status: 404 });
+    });
+
+    withQueryClient(
+      <SessionPreviewPane
+        sessionName="driver@test-rig"
+        testIdPrefix="compact-terminal-test"
+        variant="compact-terminal"
+      />,
+    );
+
+    const pane = await screen.findByTestId("compact-terminal-test-pane");
+    const content = await screen.findByTestId("compact-terminal-test-content");
+
+    expect(pane.getAttribute("data-variant")).toBe("compact-terminal");
+    expect(content.className).toContain("text-[10px]");
+    expect(content.className).toContain("text-stone-100");
+    expect(screen.queryByText(/live preview/i)).toBeNull();
+    expect(screen.queryByText(/captured/i)).toBeNull();
+    expect(screen.queryByText(/1 lines/i)).toBeNull();
+  });
 });
