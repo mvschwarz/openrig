@@ -12,6 +12,7 @@ import type { AgentActivitySummary } from "../../hooks/useNodeInventory.js";
 import { cn } from "../../lib/utils.js";
 import { useCmuxLaunch } from "../../hooks/useCmuxLaunch.js";
 import { ActivityRing } from "./ActivityRing.js";
+import { getActivityCardClasses, getActivityCardSignal } from "./activity-card-visuals.js";
 import type { TopologyActivityVisual } from "../../lib/topology-activity.js";
 
 interface HybridPodGroupNodeData {
@@ -89,6 +90,7 @@ export function HybridAgentNode({ data }: { data: HybridAgentNodeData }) {
   const activityBgClass = getActivityBgClass(activityState);
   const activityAnimClass = getActivityAnimationClass(activityState);
   const activityStale = isActivityStale(data.agentActivity);
+  const activityCard = getActivityCardSignal({ activityRing: data.activityRing, activityState });
   const runtimeModel = [data.runtime, data.model].filter(Boolean).join(" / ");
   const contextKnown = data.contextAvailability === "known" && typeof data.contextUsedPercentage === "number";
 
@@ -100,8 +102,15 @@ export function HybridAgentNode({ data }: { data: HybridAgentNodeData }) {
         `activity: ${activityLabel}${activityStale ? " (stale)" : ""}`,
         runtimeModel || null,
       ].filter(Boolean).join("\n")}
+      data-activity-card-state={activityCard.state}
+      data-activity-card-flash={activityCard.flash ?? "none"}
       className={cn(
-        "group relative h-full w-full select-none border bg-white hard-shadow",
+        "group relative h-full w-full select-none border hard-shadow transition-[background-color,border-color,box-shadow] duration-300",
+        getActivityCardClasses({
+          state: activityCard.state,
+          flash: activityCard.flash,
+          reducedMotion: data.reducedMotion,
+        }),
         data.startupStatus === "failed"
           ? "border-red-700"
           : data.startupStatus === "attention_required"

@@ -3,6 +3,7 @@ import { Handle, Position } from "@xyflow/react";
 import { PanelsTopLeft } from "lucide-react";
 import { copyText } from "../lib/copy-text.js";
 import { displayAgentName } from "../lib/display-name.js";
+import { cn } from "../lib/utils.js";
 import {
   getActivityState,
   getActivityLabel,
@@ -14,6 +15,7 @@ import {
 import type { AgentActivitySummary, CurrentQitemSummary } from "../hooks/useNodeInventory.js";
 import { ContextUsageRing } from "./ContextUsageRing.js";
 import { ActivityRing } from "./topology/ActivityRing.js";
+import { getActivityCardClasses, getActivityCardSignal } from "./topology/activity-card-visuals.js";
 import type { TopologyActivityVisual } from "../lib/topology-activity.js";
 
 interface RigNodeData {
@@ -93,6 +95,7 @@ export function RigNode({ data }: { data: RigNodeData }) {
   const activityBgClass = getActivityBgClass(activityState);
   const activityAnimClass = getActivityAnimationClass(activityState);
   const activityIsStale = isActivityStale(data.agentActivity);
+  const activityCard = getActivityCardSignal({ activityRing: data.activityRing, activityState });
 
   const placementChipLabel = data.placementState === "selected" ? "target" : data.placementState === "available" ? "avail" : null;
 
@@ -167,13 +170,21 @@ export function RigNode({ data }: { data: RigNodeData }) {
 
   const card = (
     <div
-      className={`group bg-white border min-w-[200px] hard-shadow relative ${
+      className={cn(
+        "group relative min-w-[200px] border hard-shadow transition-[background-color,border-color,box-shadow] duration-300",
+        getActivityCardClasses({
+          state: activityCard.state,
+          flash: activityCard.flash,
+          reducedMotion: data.reducedMotion,
+        }),
         data.placementState === "selected"
           ? "border-emerald-600 ring-2 ring-emerald-400/70 shadow-[0_0_0_3px_rgba(52,211,153,0.12)]"
           : data.placementState === "available"
             ? "border-emerald-500 ring-1 ring-emerald-300/70"
-            : "border-stone-900"
-      }`}
+            : "border-stone-900",
+      )}
+      data-activity-card-state={activityCard.state}
+      data-activity-card-flash={activityCard.flash ?? "none"}
       data-testid="rig-node"
       title={hoverHint || undefined}
     >

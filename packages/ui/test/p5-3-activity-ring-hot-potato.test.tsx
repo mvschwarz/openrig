@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { ActivityRing } from "../src/components/topology/ActivityRing.js";
 import { HotPotatoEdge } from "../src/components/topology/HotPotatoEdge.js";
+import { fallbackActivityCardState, getActivityCardClasses } from "../src/components/topology/activity-card-visuals.js";
 import {
   HOT_POTATO_WITHIN_RIG_DURATION_MS,
   type HotPotatoPacket,
@@ -95,11 +96,23 @@ describe("P5.3 ActivityRing and HotPotatoEdge", () => {
     expect(screen.getByTestId("hot-potato-packet-packet-1").getAttribute("data-reduced-motion")).toBe("true");
   });
 
+  it("whole-card activity classes make active and handoff states visible", () => {
+    expect(fallbackActivityCardState("running")).toBe("active");
+    expect(fallbackActivityCardState("idle")).toBe("idle");
+    expect(getActivityCardClasses({ state: "active" })).toContain("activity-card-active");
+    expect(getActivityCardClasses({ state: "needs_input" })).toContain("activity-card-needs-input");
+    expect(getActivityCardClasses({ state: "blocked" })).toContain("activity-card-blocked");
+    expect(getActivityCardClasses({ state: "active", flash: "target" })).toContain("activity-card-target-flash");
+    expect(getActivityCardClasses({ state: "active", flash: "source", reducedMotion: true })).toContain("activity-card-reduced-motion");
+  });
+
   it("source scan keeps activity and packet layers production-reachable", () => {
     const srcRoot = path.resolve(__dirname, "../src");
     const host = readFileSync(path.join(srcRoot, "components/topology/HostMultiRigGraph.tsx"), "utf8");
     const rigGraph = readFileSync(path.join(srcRoot, "components/RigGraph.tsx"), "utf8");
+    const rigNode = readFileSync(path.join(srcRoot, "components/RigNode.tsx"), "utf8");
     const hybridNodes = readFileSync(path.join(srcRoot, "components/topology/HybridTopologyNodes.tsx"), "utf8");
+    const activityCards = readFileSync(path.join(srcRoot, "components/topology/activity-card-visuals.ts"), "utf8");
     const table = readFileSync(path.join(srcRoot, "components/topology/TopologyTableView.tsx"), "utf8");
     const ring = readFileSync(path.join(srcRoot, "components/topology/ActivityRing.tsx"), "utf8");
     const edge = readFileSync(path.join(srcRoot, "components/topology/HotPotatoEdge.tsx"), "utf8");
@@ -114,6 +127,10 @@ describe("P5.3 ActivityRing and HotPotatoEdge", () => {
     expect(rigGraph).toMatch(/applyHotPotatoEdges/);
     expect(rigGraph).toMatch(/edgeTypes=\{edgeTypes\}/);
     expect(hybridNodes).toMatch(/ActivityRing/);
+    expect(hybridNodes).toMatch(/getActivityCardClasses/);
+    expect(rigNode).toMatch(/getActivityCardClasses/);
+    expect(activityCards).toMatch(/activity-card-active/);
+    expect(rigGraph).toMatch(/activityRing/);
     expect(table).toMatch(/ActivityRing/);
     expect(table).toMatch(/group-hover:opacity-100/);
     expect(ring).not.toMatch(/StatusPip/);
@@ -126,6 +143,9 @@ describe("P5.3 ActivityRing and HotPotatoEdge", () => {
     expect(sourceFiles.join("\n").match(/"6 7"/g) ?? []).toHaveLength(1);
     expect(css).toMatch(/@media \(prefers-reduced-motion: reduce\)/);
     expect(css).toMatch(/activity-ring-active/);
+    expect(css).toMatch(/activity-card-active/);
+    expect(css).toMatch(/activity-card-target-flash/);
+    expect(edge).toMatch(/non-scaling-stroke/);
     expect(css).toMatch(/rig-activity-frame-pulse/);
   });
 });
