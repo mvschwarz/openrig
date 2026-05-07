@@ -148,7 +148,8 @@ function SliceWorkflowStepNode({ data }: NodeProps<SliceWorkflowNode>) {
       data-is-current={step.isCurrent}
       data-is-entry={step.isEntry}
       data-is-terminal={step.isTerminal}
-      className={`relative h-[112px] w-[200px] border border-outline-variant bg-white/30 p-3 font-mono hard-shadow ${
+      style={{ width: NODE_WIDTH, height: NODE_HEIGHT }}
+      className={`relative border border-outline-variant bg-white/30 p-3 font-mono hard-shadow ${
         step.isCurrent ? "ring-2 ring-emerald-500/50 bg-emerald-50/60" : ""
       }`}
     >
