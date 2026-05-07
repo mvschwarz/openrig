@@ -1,11 +1,8 @@
-// V1 polish slice Phase 5.1 P5.1-7 — TopologyTableView CMUX column +
+// V1 polish slice Phase 5.1 P5.1-7: TopologyTableView CMUX column +
 // row click navigation regression guard.
 //
-// Founder direction at V1 founder-walk:
-// > "[Table view] is missing some columns... missing the CMUX button
-// > where you can basically click a button to launch cmux. Also you
-// > should be able to click one of the agents and it should open up
-// > the agent detail page."
+// Founder-walk direction requires a cmux launch affordance and row-click
+// navigation to the agent detail page.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, fireEvent, cleanup, waitFor } from "@testing-library/react";
@@ -73,6 +70,8 @@ describe("TopologyTableView P5.1-7 CMUX column + row click", () => {
     const cmux = await findByTestId("topology-table-cmux-orch.lead");
     expect(cmux).toBeTruthy();
     expect((cmux as HTMLButtonElement).textContent).toContain("CMUX");
+    expect((cmux as HTMLButtonElement).className).toContain("opacity-0");
+    expect((cmux as HTMLButtonElement).className).toContain("group-hover:opacity-100");
   });
 
   it("CMUX button click POSTs to /api/rigs/.../focus (existing useCmuxLaunch hook)", async () => {
