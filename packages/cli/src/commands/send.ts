@@ -6,8 +6,33 @@ import type { StatusDeps } from "./status.js";
 import { loadHostRegistry, resolveHost } from "../host-registry.js";
 import { runCrossHostCommand, type RunCrossHostCommandOpts } from "../cross-host-executor.js";
 import { emitCrossHostError, emitCrossHostFailure } from "../cross-host-cli-helpers.js";
+import { readOpenRigEnv } from "../openrig-compat.js";
 
 const WAIT_FOR_IDLE_REQUEST_OVERHEAD_MS = 5_000;
+
+const SENDER_FALLBACK = "<unknown sender>";
+
+/**
+ * Wrap a `rig send` body with an email-style envelope so the recipient
+ * pane has both the sender's identity and a copy-pasteable reply hint.
+ * Cross-host sends do NOT wrap locally: the remote rig wraps when it
+ * runs the same command, and double-wrapping would nest envelopes.
+ */
+export function wrapSendBody(sender: string | undefined, recipient: string, body: string): string {
+  const senderLabel = sender && sender.trim().length > 0 ? sender : SENDER_FALLBACK;
+  return [
+    `From: ${senderLabel}`,
+    `To: ${recipient}`,
+    "---",
+    body,
+    "---",
+    `↩ Reply: rig send ${senderLabel} "..."`,
+  ].join("\n");
+}
+
+function resolveSenderSession(): string | undefined {
+  return readOpenRigEnv("OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME");
+}
 
 export interface SendDeps extends StatusDeps {
   /**
@@ -86,8 +111,9 @@ via single-hop ssh. SSH success is NOT verify success: the remote rig's
       }
 
       const client = deps.clientFactory(getDaemonUrl(status));
+      const wrappedText = wrapSendBody(resolveSenderSession(), session, text);
       const res = await client.post<Record<string, unknown>>("/api/transport/send", {
-        session, text, verify: opts.verify, force: opts.force, waitForIdleMs,
+        session, text: wrappedText, verify: opts.verify, force: opts.force, waitForIdleMs,
       }, waitForIdleRequestOptions(waitForIdleMs));
 
       if (opts.json) {

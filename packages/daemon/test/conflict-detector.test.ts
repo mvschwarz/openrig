@@ -112,7 +112,7 @@ describe("ConflictDetector", () => {
   // Test 6: Existing guidance, has managed block -> managed_merge, hasExistingBlock=true
   it("existing guidance, has managed block -> managed_merge, hasExistingBlock=true", () => {
     const result = resolveAndPlan(BASIC_MANIFEST, {
-      "/repo/AGENTS.md": "# Header\n<!-- BEGIN RIGGED MANAGED BLOCK: test-pkg -->\nold content\n<!-- END RIGGED MANAGED BLOCK: test-pkg -->\n# Footer",
+      "/repo/AGENTS.md": "# Header\n<!-- BEGIN OpenRig MANAGED BLOCK: test-pkg -->\nold content\n<!-- END OpenRig MANAGED BLOCK: test-pkg -->\n# Footer",
     });
     const guidance = result.actionable.find((e) => e.exportType === "guidance") as InstallPlanEntry & { guidanceMeta?: GuidanceConflictMeta };
     expect(guidance).toBeDefined();
@@ -252,7 +252,7 @@ exports:
   // Test 11: Managed block for DIFFERENT package -> hasExistingBlock=false
   it("existing guidance with managed block for different package -> hasExistingBlock=false", () => {
     const result = resolveAndPlan(BASIC_MANIFEST, {
-      "/repo/AGENTS.md": "# Header\n<!-- BEGIN RIGGED MANAGED BLOCK: other-package -->\nother content\n<!-- END RIGGED MANAGED BLOCK: other-package -->\n",
+      "/repo/AGENTS.md": "# Header\n<!-- BEGIN OpenRig MANAGED BLOCK: other-package -->\nother content\n<!-- END OpenRig MANAGED BLOCK: other-package -->\n",
     });
     const guidance = result.actionable.find((e) => e.exportType === "guidance") as InstallPlanEntry & { guidanceMeta?: GuidanceConflictMeta };
     expect(guidance).toBeDefined();

@@ -35,6 +35,11 @@ export const SETTINGS_VALID_KEYS = [
   "db.path",
   "transcripts.enabled",
   "transcripts.path",
+  // V1 pre-release CLI/daemon Item 1 — capture-pane rotation tunables.
+  // SC-29 EXCEPTION #4 allowlist sub-piece (lockstep with
+  // cli/src/config-store.ts).
+  "transcripts.lines",
+  "transcripts.poll_interval_seconds",
   "workspace.root",
   "workspace.slices_root",
   "workspace.steering_path",
@@ -74,6 +79,8 @@ const ENV_MAP: Record<SettingsValidKey, { primary: string; legacy: string }> = {
   "db.path": { primary: "OPENRIG_DB", legacy: "RIGGED_DB" },
   "transcripts.enabled": { primary: "OPENRIG_TRANSCRIPTS_ENABLED", legacy: "RIGGED_TRANSCRIPTS_ENABLED" },
   "transcripts.path": { primary: "OPENRIG_TRANSCRIPTS_PATH", legacy: "RIGGED_TRANSCRIPTS_PATH" },
+  "transcripts.lines": { primary: "OPENRIG_TRANSCRIPTS_LINES", legacy: "RIGGED_TRANSCRIPTS_LINES" },
+  "transcripts.poll_interval_seconds": { primary: "OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS", legacy: "RIGGED_TRANSCRIPTS_POLL_INTERVAL_SECONDS" },
   "workspace.root": { primary: "OPENRIG_WORKSPACE_ROOT", legacy: "RIGGED_WORKSPACE_ROOT" },
   "workspace.slices_root": { primary: "OPENRIG_WORKSPACE_SLICES_ROOT", legacy: "RIGGED_WORKSPACE_SLICES_ROOT" },
   "workspace.steering_path": { primary: "OPENRIG_WORKSPACE_STEERING_PATH", legacy: "RIGGED_WORKSPACE_STEERING_PATH" },
@@ -101,6 +108,8 @@ const KEY_TO_PATH: Record<SettingsValidKey, string[]> = {
   "db.path": ["db", "path"],
   "transcripts.enabled": ["transcripts", "enabled"],
   "transcripts.path": ["transcripts", "path"],
+  "transcripts.lines": ["transcripts", "lines"],
+  "transcripts.poll_interval_seconds": ["transcripts", "pollIntervalSeconds"],
   "workspace.root": ["workspace", "root"],
   "workspace.slices_root": ["workspace", "slicesRoot"],
   "workspace.steering_path": ["workspace", "steeringPath"],
@@ -194,6 +203,9 @@ function getDefaultValue(key: SettingsValidKey, workspaceRoot: string): string |
     case "db.path": return path.join(path.dirname(DEFAULT_CONFIG_PATH), "openrig.sqlite");
     case "transcripts.enabled": return true;
     case "transcripts.path": return path.join(path.dirname(DEFAULT_CONFIG_PATH), "transcripts");
+    // V1 pre-release CLI/daemon Item 1 — capture-pane rotation defaults.
+    case "transcripts.lines": return 1000;
+    case "transcripts.poll_interval_seconds": return 2;
     case "workspace.root": return DEFAULT_WORKSPACE_ROOT;
     // Preview Terminal v0 (PL-018) defaults — match cli/src/config-store.ts.
     case "ui.preview.refresh_interval_seconds": return 3;

@@ -215,10 +215,16 @@ describe("SelfAttachService", () => {
     });
 
     expect(result.ok).toBe(true);
-    expect(startPipePaneSpy).toHaveBeenCalledWith(
-      "dev1-impl2@rigged-buildout",
-      transcriptStore.getTranscriptPath("rigged-buildout", "dev1-impl2@rigged-buildout"),
-    );
+    // V1 pre-release Item 1: transcript capture path now starts a
+    // rotation timer (capture-pane overwrite) instead of pipe-pane.
+    // The rotation module's first tick calls capturePaneContent on the
+    // adapter; with capturePaneContent unstubbed in the smoke harness,
+    // the call is best-effort silent. Test the integration boundary
+    // via getActiveRotationCount.
+    const { getActiveRotationCount, clearAllTranscriptRotationsForTest } =
+      await import("../src/domain/transcript-rotation.js");
+    expect(getActiveRotationCount()).toBeGreaterThan(0);
+    clearAllTranscriptRotationsForTest();
   });
 
   it("attachToNode provisions Claude context collection when self-attaching from tmux", async () => {

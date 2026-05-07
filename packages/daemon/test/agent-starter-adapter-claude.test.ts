@@ -159,15 +159,15 @@ describe("Agent Starter v1 vertical — real Claude adapter delivery (M2 R2)", (
       expect(result.ok).toBe(true);
 
       // The Claude adapter's `mergeGuidance` writes to <binding.cwd>/CLAUDE.md
-      // wrapped in a `BEGIN RIGGED MANAGED BLOCK` envelope. The cwd for this
+      // wrapped in a `BEGIN OpenRig MANAGED BLOCK` envelope. The cwd for this
       // member resolves to RIG_ROOT (`cwd: "."`).
       const expectedClaudeMdPath = path.join(RIG_ROOT, "CLAUDE.md");
       const claudeMd = claudeFs._store[expectedClaudeMdPath];
       expect(claudeMd, "expected real ClaudeCodeAdapter to have written CLAUDE.md via guidance_merge").toBeDefined();
       // The managed block is keyed on the starter file path (`file.path`,
       // which is the basename returned by the resolver).
-      expect(claudeMd).toContain("BEGIN RIGGED MANAGED BLOCK: claude-fixture-starter.yaml");
-      expect(claudeMd).toContain("END RIGGED MANAGED BLOCK: claude-fixture-starter.yaml");
+      expect(claudeMd).toContain("BEGIN OpenRig MANAGED BLOCK: claude-fixture-starter.yaml");
+      expect(claudeMd).toContain("END OpenRig MANAGED BLOCK: claude-fixture-starter.yaml");
       // Some piece of the starter YAML body must appear inside the block.
       // We pick `starter_id: claude-fixture-starter` because it's a stable,
       // unambiguous marker the resolver passed through.

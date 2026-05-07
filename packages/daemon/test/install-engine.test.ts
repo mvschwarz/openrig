@@ -143,9 +143,9 @@ describe("InstallEngine", () => {
     engine.apply(makePolicy([entry]), makePlan([entry]), pkg.id, repoRoot);
 
     const content = fs.readFileSync(targetPath, "utf-8");
-    expect(content).toContain("<!-- BEGIN RIGGED MANAGED BLOCK: test-pkg -->");
+    expect(content).toContain("<!-- BEGIN OpenRig MANAGED BLOCK: test-pkg -->");
     expect(content).toContain("Review all PRs carefully.");
-    expect(content).toContain("<!-- END RIGGED MANAGED BLOCK: test-pkg -->");
+    expect(content).toContain("<!-- END OpenRig MANAGED BLOCK: test-pkg -->");
   });
 
   // Test 3: Journal entries with hashes
@@ -197,7 +197,7 @@ describe("InstallEngine", () => {
     expect(content).toContain("# Existing content");
     expect(content).toContain("Keep this.");
     expect(content).toContain("New guidance.");
-    expect(content).toContain("<!-- BEGIN RIGGED MANAGED BLOCK: test-pkg -->");
+    expect(content).toContain("<!-- BEGIN OpenRig MANAGED BLOCK: test-pkg -->");
   });
 
   // Test 6: Existing managed block updated in place
@@ -206,7 +206,7 @@ describe("InstallEngine", () => {
     const sourcePath = writeSource("guidance/AGENTS.md", "Updated guidance.");
     const targetPath = path.join(repoRoot, "AGENTS.md");
     fs.writeFileSync(targetPath,
-      "# Header\n<!-- BEGIN RIGGED MANAGED BLOCK: test-pkg -->\nOld content.\n<!-- END RIGGED MANAGED BLOCK: test-pkg -->\n# Footer\n",
+      "# Header\n<!-- BEGIN OpenRig MANAGED BLOCK: test-pkg -->\nOld content.\n<!-- END OpenRig MANAGED BLOCK: test-pkg -->\n# Footer\n",
       "utf-8"
     );
 

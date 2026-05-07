@@ -287,9 +287,9 @@ describe("RigTeardownOrchestrator", () => {
     const claudeMd = path.join(cwd, "CLAUDE.md");
     fs.writeFileSync(claudeMd, [
       "# User intro",
-      "<!-- BEGIN RIGGED MANAGED BLOCK: role -->",
+      "<!-- BEGIN OpenRig MANAGED BLOCK: role -->",
       "managed role",
-      "<!-- END RIGGED MANAGED BLOCK: role -->",
+      "<!-- END OpenRig MANAGED BLOCK: role -->",
       "<!-- BEGIN THIRD PARTY BLOCK -->",
       "third party",
       "<!-- END THIRD PARTY BLOCK -->",
@@ -304,7 +304,7 @@ describe("RigTeardownOrchestrator", () => {
     expect(content).toContain("# User intro");
     expect(content).toContain("third party");
     expect(content).toContain("tail");
-    expect(content).not.toContain("BEGIN RIGGED MANAGED BLOCK");
+    expect(content).not.toContain("BEGIN OpenRig MANAGED BLOCK");
   });
 
   it("deletes guidance file if only OpenRig-managed content remains after teardown", async () => {
@@ -312,9 +312,9 @@ describe("RigTeardownOrchestrator", () => {
     fs.mkdirSync(cwd, { recursive: true });
     const agentsMd = path.join(cwd, "AGENTS.md");
     fs.writeFileSync(agentsMd, [
-      "<!-- BEGIN RIGGED MANAGED BLOCK: role -->",
+      "<!-- BEGIN OpenRig MANAGED BLOCK: role -->",
       "managed role",
-      "<!-- END RIGGED MANAGED BLOCK: role -->",
+      "<!-- END OpenRig MANAGED BLOCK: role -->",
     ].join("\n"));
     const { rigId } = seedRigWithNode({ runtime: "codex", cwd, sessionStatus: "exited" });
     const td = buildTeardown();

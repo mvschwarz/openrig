@@ -61,9 +61,15 @@ describe("TranscriptStore", () => {
     });
 
     it("returns false on filesystem error without throwing", () => {
-      const store = new TranscriptStore({ transcriptsRoot: join(tmpDir, "nonexistent", "deep") });
-      // Directory doesn't exist, write will fail
-      const result = store.writeBoundaryMarker("my-rig", "dev-impl@my-rig", "test");
+      // V1 pre-release Item 1: writeBoundaryMarker now mkdir's its
+      // parent on demand so a fresh rig directory is no longer a fail
+      // case. The remaining error path is mkdir running into a regular
+      // file where it expected a directory — reproducible cross-
+      // platform without permission-quirk tricks.
+      const collisionPath = join(tmpDir, "rig-name-collision");
+      writeFileSync(collisionPath, "regular file in the way");
+      const store = new TranscriptStore({ transcriptsRoot: tmpDir });
+      const result = store.writeBoundaryMarker("rig-name-collision", "dev-impl@my-rig", "test");
       expect(result).toBe(false);
     });
   });

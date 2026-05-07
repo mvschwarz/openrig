@@ -287,10 +287,10 @@ describe("Codex runtime adapter", () => {
     const fs = mockFs({
       "/rig/openrig-start.md": "# OpenRig Start\n\nNew guidance",
       "/project/AGENTS.md": [
-        "<!-- BEGIN RIGGED MANAGED BLOCK: using-openrig.md -->",
+        "<!-- BEGIN OpenRig MANAGED BLOCK: using-openrig.md -->",
         "# Using OpenRig",
         "Old guidance",
-        "<!-- END RIGGED MANAGED BLOCK: using-openrig.md -->",
+        "<!-- END OpenRig MANAGED BLOCK: using-openrig.md -->",
       ].join("\n"),
     });
     const adapter = new CodexRuntimeAdapter({ tmux: mockTmux(), fsOps: fs });
@@ -307,8 +307,8 @@ describe("Codex runtime adapter", () => {
 
     const store = (fs as unknown as { _store: Record<string, string> })._store;
     const content = store["/project/AGENTS.md"]!;
-    expect(content).toContain("BEGIN RIGGED MANAGED BLOCK: openrig-start.md");
-    expect(content).not.toContain("BEGIN RIGGED MANAGED BLOCK: using-openrig.md");
+    expect(content).toContain("BEGIN OpenRig MANAGED BLOCK: openrig-start.md");
+    expect(content).not.toContain("BEGIN OpenRig MANAGED BLOCK: using-openrig.md");
     expect(content).toContain("New guidance");
   });
 
@@ -348,7 +348,7 @@ describe("Codex runtime adapter", () => {
   it("replay on restore is safe for already-projected content", async () => {
     const fs = mockFs({
       "/rig/guide.md": "# Guidance",
-      "/project/AGENTS.md": "<!-- BEGIN RIGGED MANAGED BLOCK: guide.md -->\n# Guidance\n<!-- END RIGGED MANAGED BLOCK: guide.md -->",
+      "/project/AGENTS.md": "<!-- BEGIN OpenRig MANAGED BLOCK: guide.md -->\n# Guidance\n<!-- END OpenRig MANAGED BLOCK: guide.md -->",
     });
     const adapter = new CodexRuntimeAdapter({ tmux: mockTmux(), fsOps: fs });
     const file: ResolvedStartupFile = {
@@ -362,7 +362,7 @@ describe("Codex runtime adapter", () => {
 
     const store = (fs as unknown as { _store: Record<string, string> })._store;
     const content = store["/project/AGENTS.md"]!;
-    const blockCount = (content.match(/BEGIN RIGGED MANAGED BLOCK/g) ?? []).length;
+    const blockCount = (content.match(/BEGIN OpenRig MANAGED BLOCK/g) ?? []).length;
     expect(blockCount).toBe(1); // exactly one block, not two
   });
 
@@ -1044,7 +1044,7 @@ describe("Codex runtime adapter", () => {
     await adapter.project(plan, makeBinding());
 
     const store = (fs as unknown as { _store: Record<string, string> })._store;
-    expect(store["/project/AGENTS.md"]).toContain("BEGIN RIGGED MANAGED BLOCK: using-openrig.md");
+    expect(store["/project/AGENTS.md"]).toContain("BEGIN OpenRig MANAGED BLOCK: using-openrig.md");
     expect(store["/project/AGENTS.md"]).toContain("hub guidance");
   });
 

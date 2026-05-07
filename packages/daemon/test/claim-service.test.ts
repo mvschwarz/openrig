@@ -275,10 +275,13 @@ describe("ClaimService", () => {
     const result = await claimService.bind({ discoveredId: discovered.id, rigId: rig.id, logicalId: "orch.lead" });
 
     expect(result.ok).toBe(true);
-    expect(startPipePaneSpy).toHaveBeenCalledWith(
-      "orch-lead@host",
-      transcriptStore.getTranscriptPath("test-rig", "orch-lead@host"),
-    );
+    // V1 pre-release Item 1: transcript capture path now starts a
+    // rotation timer instead of pipe-pane. Confirm via the rotation
+    // module's active-count rather than the legacy pipe-pane spy.
+    const { getActiveRotationCount, clearAllTranscriptRotationsForTest } =
+      await import("../src/domain/transcript-rotation.js");
+    expect(getActiveRotationCount()).toBeGreaterThan(0);
+    clearAllTranscriptRotationsForTest();
   });
 
   it("bind provisions Claude context collection for adopted tmux sessions", async () => {
