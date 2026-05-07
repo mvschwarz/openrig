@@ -14,6 +14,7 @@
 // single hook call regardless of array length.
 
 import { useMemo, useState } from "react";
+import { useNavigate } from "@tanstack/react-router";
 import {
   type ColumnDef,
   flexRender,
@@ -29,6 +30,7 @@ import type { NodeInventoryEntry } from "../../hooks/useNodeInventory.js";
 import { VellumInput } from "../ui/vellum-input.js";
 import { StatusPip } from "../ui/status-pip.js";
 import { inferPodName } from "../../lib/display-name.js";
+import { useCmuxLaunch } from "../../hooks/useCmuxLaunch.js";
 
 async function fetchNodeInventory(rigId: string): Promise<NodeInventoryEntry[]> {
   const res = await fetch(`/api/rigs/${encodeURIComponent(rigId)}/nodes`);
@@ -56,6 +58,27 @@ function statusToSemanticPip(s: string): "active" | "running" | "stopped" | "war
   return "info";
 }
 
+// V1 polish slice Phase 5.1 P5.1-7: actions column with per-row cmux
+// button. Cell stops click propagation so the row's navigate handler
+// doesn't also fire (cmux button is the explicit action; row click is
+// the implicit "open detail" navigation per row-click contract).
+function CmuxButton({ row }: { row: AgentRow }) {
+  const cmuxLaunch = useCmuxLaunch();
+  return (
+    <button
+      type="button"
+      data-testid={`topology-table-cmux-${row.logicalId}`}
+      onClick={(e) => {
+        e.stopPropagation();
+        cmuxLaunch.mutate({ rigId: row.rigId, logicalId: row.logicalId });
+      }}
+      className="px-2 py-1 border border-outline-variant bg-white/30 font-mono text-[9px] uppercase tracking-wide text-stone-700 hover:bg-stone-100/60 hover:text-stone-900"
+    >
+      CMUX
+    </button>
+  );
+}
+
 const COLUMNS: ColumnDef<AgentRow>[] = [
   { accessorKey: "rigName", header: "Rig", cell: ({ getValue }) => <span className="font-mono text-xs">{String(getValue())}</span> },
   { accessorKey: "podName", header: "Pod", cell: ({ getValue }) => <span className="font-mono text-xs">{String(getValue())}</span> },
@@ -68,9 +91,21 @@ const COLUMNS: ColumnDef<AgentRow>[] = [
       <StatusPip status={statusToSemanticPip(String(getValue()))} label={String(getValue())} variant="pill" />
     ),
   },
+  // V1 polish slice Phase 5.1 P5.1-7: actions column with cmux launcher
+  // per-row (founder-noted topology-table-view.md L54 column).
+  {
+    id: "actions",
+    header: "Actions",
+    enableSorting: false,
+    cell: ({ row }) => <CmuxButton row={row.original} />,
+  },
 ];
 
 export function TopologyTableView({ rigIdScope }: { rigIdScope?: string }) {
+  // V1 polish slice Phase 5.1 P5.1-7: row click navigates to seat-scope
+  // center page (parity with graph node click + Explorer tree click +
+  // Topology Tree details-icon-retired contract).
+  const navigate = useNavigate();
   const { data: rigs } = useRigSummary();
   const scopedRigs = useMemo(
     () =>
@@ -182,7 +217,16 @@ export function TopologyTableView({ rigIdScope }: { rigIdScope?: string }) {
                 <tr
                   key={row.id}
                   data-testid={`topology-table-row-${row.original.logicalId}`}
-                  className="border-b border-outline-variant last:border-b-0 hover:bg-surface-low"
+                  onClick={() =>
+                    navigate({
+                      to: "/topology/seat/$rigId/$logicalId",
+                      params: {
+                        rigId: row.original.rigId,
+                        logicalId: encodeURIComponent(row.original.logicalId),
+                      },
+                    })
+                  }
+                  className="border-b border-outline-variant last:border-b-0 hover:bg-surface-low cursor-pointer"
                 >
                   {row.getVisibleCells().map((cell) => (
                     <td key={cell.id} className="px-3 py-2">
