@@ -5,7 +5,11 @@
 // timeline, while adding visible flow cues for event-to-event handoff reading.
 
 import { useMemo, useState } from "react";
-import type { PhaseDefinition, StoryEvent } from "../../../hooks/useSlices.js";
+import type {
+  PhaseDefinition,
+  QueueItemDetail,
+  StoryEvent,
+} from "../../../hooks/useSlices.js";
 
 const PHASE_PALETTE: string[] = [
   "bg-amber-100 text-amber-800 border-amber-300",
@@ -22,9 +26,11 @@ const UNTAGGED_CLASS = "bg-stone-100 text-stone-700 border-stone-300";
 export function StoryTab({
   events,
   phaseDefinitions,
+  queueItemsById,
 }: {
   events: StoryEvent[];
   phaseDefinitions: PhaseDefinition[] | null;
+  queueItemsById?: Map<string, QueueItemDetail>;
 }) {
   const phaseMeta = useMemo(() => {
     const map = new Map<string, { label: string; colorClass: string }>();
@@ -57,6 +63,7 @@ export function StoryTab({
             event={event}
             phaseMeta={phaseMeta}
             isLast={idx === sortedEvents.length - 1}
+            queueItem={event.qitemId ? queueItemsById?.get(event.qitemId) : undefined}
           />
         ))}
       </div>
@@ -86,14 +93,27 @@ function flowLabel(event: StoryEvent): { source: string | null; target: string |
   return { source, target };
 }
 
+function eventBody(event: StoryEvent, queueItem: QueueItemDetail | undefined): string {
+  const detailBody = detailString(event.detail, ["body", "content", "message"]);
+  return queueItem?.body ?? detailBody ?? event.summary;
+}
+
+function previewText(text: string, maxLines = 12): string {
+  const lines = text.split("\n");
+  if (lines.length <= maxLines) return text;
+  return `${lines.slice(0, maxLines).join("\n")}\n... ${lines.length - maxLines} more lines`;
+}
+
 function StoryStepCard({
   event,
   phaseMeta,
   isLast,
+  queueItem,
 }: {
   event: StoryEvent;
   phaseMeta: Map<string, { label: string; colorClass: string }>;
   isLast: boolean;
+  queueItem?: QueueItemDetail;
 }) {
   const [expanded, setExpanded] = useState(false);
   const tsShort = event.ts.length > 19 ? event.ts.slice(0, 19) : event.ts;
@@ -101,6 +121,8 @@ function StoryStepCard({
   const phaseLabel = meta?.label ?? event.phase ?? "untagged";
   const phaseClass = meta?.colorClass ?? UNTAGGED_CLASS;
   const flow = flowLabel(event);
+  const primaryBody = eventBody(event, queueItem);
+  const bodyIsQitem = Boolean(queueItem?.body);
 
   return (
     <div className="relative pl-9 pb-3 last:pb-0">
@@ -121,7 +143,6 @@ function StoryStepCard({
         className="w-full border border-outline-variant bg-white/30 px-3 py-2 text-left hard-shadow hover:bg-white/40"
       >
         <div className="flex items-center gap-2">
-          <span className="font-mono text-[9px] text-stone-500 shrink-0">{tsShort}</span>
           <span
             data-testid={`story-row-phase-${event.kind}`}
             data-phase-id={event.phase ?? "untagged"}
@@ -130,13 +151,27 @@ function StoryStepCard({
             {phaseLabel}
           </span>
           <span className="font-mono text-[10px] text-stone-700 truncate">{event.kind}</span>
-          {event.qitemId && (
-            <span className="ml-auto shrink-0 font-mono text-[8px] uppercase tracking-[0.10em] text-stone-400">
+          <span className="ml-auto shrink-0 font-mono text-[9px] text-stone-500">{tsShort}</span>
+        </div>
+        <pre
+          data-testid={`story-row-body-${event.kind}`}
+          data-source={bodyIsQitem ? "qitem" : "event"}
+          className="mt-2 whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-stone-950"
+        >
+          {previewText(primaryBody)}
+        </pre>
+        <div className="mt-2 flex flex-wrap items-center gap-2 font-mono text-[9px] text-stone-500">
+          {event.qitemId ? (
+            <span className="shrink-0 font-mono text-[8px] uppercase tracking-[0.10em] text-stone-400">
               {event.qitemId}
             </span>
-          )}
+          ) : null}
+          {bodyIsQitem && event.summary !== primaryBody ? (
+            <span data-testid={`story-row-summary-${event.kind}`} className="truncate">
+              {event.summary}
+            </span>
+          ) : null}
         </div>
-        <div className="mt-1 font-mono text-[10px] text-stone-900">{event.summary}</div>
         {(flow.source || flow.target) && (
           <div data-testid={`story-step-flow-${event.kind}`} className="mt-1 flex items-center gap-2 font-mono text-[9px] text-stone-500">
             <span className="truncate">{flow.source ?? "unknown source"}</span>

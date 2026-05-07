@@ -16,14 +16,19 @@
 // Workspace + Mission scope tab piping remains Phase 5 polish (filesystem-walk
 // dependent; P5-5 lays the data layer).
 
-import { useState, type ReactNode } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import { Link, useParams } from "@tanstack/react-router";
 import { cn } from "../../lib/utils.js";
 import { SectionHeader } from "../ui/section-header.js";
 import { EmptyState } from "../ui/empty-state.js";
 import { FilesWorkspace } from "../files/FilesWorkspace.js";
 import { useWorkspaceName } from "../../hooks/useWorkspaceName.js";
-import { useSliceDetail, type SliceDetail } from "../../hooks/useSlices.js";
+import {
+  useQueueItemMap,
+  useSliceDetail,
+  type QueueItemDetail,
+  type SliceDetail,
+} from "../../hooks/useSlices.js";
 import { StoryTab } from "../slices/tabs/StoryTab.js";
 import { AcceptanceTab } from "../slices/tabs/AcceptanceTab.js";
 import { DocsTab } from "../slices/tabs/DocsTab.js";
@@ -194,13 +199,37 @@ export function MissionScopePage() {
   );
 }
 
-function SliceQueueTab({ qitemIds }: { qitemIds: string[] }) {
+function queueItemViewerData(qitemId: string, item: QueueItemDetail | undefined) {
+  return {
+    qitemId,
+    source: item?.sourceSession,
+    destination: item?.destinationSession,
+    state: item?.state,
+    tags: item?.tags ?? undefined,
+    createdAt: item?.tsCreated,
+    body: item?.body,
+  };
+}
+
+function queueBodyPreview(qitemId: string, item: QueueItemDetail | undefined): string {
+  if (!item?.body) return qitemId;
+  const lines = item.body.split("\n");
+  if (lines.length <= 8) return item.body;
+  return `${lines.slice(0, 8).join("\n")}\n... ${lines.length - 8} more lines`;
+}
+
+function SliceQueueTab({
+  qitemIds,
+  queueItemsById,
+  queueItemsFetching,
+}: {
+  qitemIds: string[];
+  queueItemsById: Map<string, QueueItemDetail>;
+  queueItemsFetching: boolean;
+}) {
   // V1 attempt-3 Phase 5 P5-2: slice queue tab. Each qitem id is wrapped in
-  // QueueItemTrigger (P5-1 trigger primitive) — clicking opens the
-  // QueueItemViewer in the drawer. Full qitem payload (source/dest/state/
-  // tags/body) is supplied by QueueItemViewer's empty-state when richer
-  // metadata isn't available; richer per-qitem fetch wiring is Phase 5
-  // polish if founder feedback requests it.
+  // QueueItemTrigger (P5-1 trigger primitive). Phase B supplies the body and
+  // provenance from the existing queue detail endpoint when available.
   if (qitemIds.length === 0) {
     return (
       <EmptyState
@@ -212,21 +241,49 @@ function SliceQueueTab({ qitemIds }: { qitemIds: string[] }) {
     );
   }
   return (
-    <ul data-testid="slice-queue-list" className="divide-y divide-outline-variant border border-outline-variant">
-      {qitemIds.map((qitemId) => (
-        <li key={qitemId}>
-          <QueueItemTrigger
-            data={{ qitemId }}
-            testId={`slice-queue-trigger-${qitemId}`}
-            className="block w-full px-3 py-2 text-left hover:bg-stone-100/60 transition-colors font-mono text-xs"
-          >
-            <span className="text-stone-900 break-all underline decoration-dotted decoration-stone-400">
-              {qitemId}
-            </span>
-          </QueueItemTrigger>
-        </li>
-      ))}
-    </ul>
+    <div>
+      {queueItemsFetching ? (
+        <div
+          data-testid="slice-queue-fetching"
+          className="mb-2 font-mono text-[10px] uppercase tracking-[0.12em] text-stone-400"
+        >
+          Loading queue bodies...
+        </div>
+      ) : null}
+      <ul
+        data-testid="slice-queue-list"
+        className="divide-y divide-outline-variant border border-outline-variant"
+      >
+        {qitemIds.map((qitemId) => {
+          const item = queueItemsById.get(qitemId);
+          return (
+            <li key={qitemId} className="bg-white/20">
+              <QueueItemTrigger
+                data={queueItemViewerData(qitemId, item)}
+                testId={`slice-queue-trigger-${qitemId}`}
+                className="block w-full px-3 py-2 text-left hover:bg-stone-100/60 transition-colors font-mono text-xs"
+              >
+                <span className="block whitespace-pre-wrap break-words text-stone-900">
+                  {queueBodyPreview(qitemId, item)}
+                </span>
+                {item ? (
+                  <span
+                    data-testid={`slice-queue-meta-${qitemId}`}
+                    className="mt-1 block text-[10px] text-stone-500"
+                  >
+                    {qitemId}
+                    {" / "}
+                    {item.sourceSession} -&gt; {item.destinationSession}
+                    {" / "}
+                    {item.state}
+                  </span>
+                ) : null}
+              </QueueItemTrigger>
+            </li>
+          );
+        })}
+      </ul>
+    </div>
   );
 }
 
@@ -404,6 +461,8 @@ export function SliceScopePage() {
   const { sliceId } = useParams({ from: "/project/slice/$sliceId" });
   const [active, setActive] = useState<SliceTab>("story");
   const detailQuery = useSliceDetail(sliceId);
+  const queueItems = useQueueItemMap(detailQuery.data?.qitemIds ?? []);
+  const queueItemsById = useMemo(() => queueItems.itemsById, [queueItems.itemsById]);
 
   if (detailQuery.isLoading) {
     return (
@@ -458,7 +517,11 @@ export function SliceScopePage() {
       onSelect={(id) => setActive(id as SliceTab)}
     >
       {active === "story" ? (
-        <StoryTab events={detail.story.events} phaseDefinitions={detail.story.phaseDefinitions} />
+        <StoryTab
+          events={detail.story.events}
+          phaseDefinitions={detail.story.phaseDefinitions}
+          queueItemsById={queueItemsById}
+        />
       ) : null}
       {active === "overview" ? (
         <SliceOverviewTab detail={detail} />
@@ -473,9 +536,21 @@ export function SliceScopePage() {
         <SliceArtifactsTab detail={detail} />
       ) : null}
       {active === "tests" ? (
-        <TestsVerificationTab sliceName={detail.name} tests={detail.tests} />
+        <TestsVerificationTab
+          sliceName={detail.name}
+          tests={detail.tests}
+          qitemCount={detail.qitemIds.length}
+          docsCount={detail.docs.tree.length}
+          lastActivityAt={detail.lastActivityAt}
+        />
       ) : null}
-      {active === "queue" ? <SliceQueueTab qitemIds={detail.qitemIds} /> : null}
+      {active === "queue" ? (
+        <SliceQueueTab
+          qitemIds={detail.qitemIds}
+          queueItemsById={queueItemsById}
+          queueItemsFetching={queueItems.isFetching}
+        />
+      ) : null}
       {active === "topology" ? <TopologyTab topology={detail.topology} /> : null}
     </ScopeShell>
   );
