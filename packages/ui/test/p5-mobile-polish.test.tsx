@@ -146,13 +146,28 @@ describe("Topology graph degradation P5-9 (universal-shell.md L143)", () => {
     // The table view-mode is what actually mounts (graph degraded).
     expect(await findByTestId("topology-mobile-graph-degraded")).toBeTruthy();
     // graph placeholder is NOT rendered at mobile.
+    // V1 polish slice Phase 5.2: host graph placeholder REPLACED with
+    // HostMultiRigGraph; the placeholder testid no longer exists at any
+    // viewport, so this negative assertion remains structurally correct
+    // (mobile path renders table view, not the multi-rig canvas).
     expect(container.querySelector("[data-testid='topology-host-graph-placeholder']")).toBeNull();
+    expect(container.querySelector("[data-testid='host-multi-rig-graph']")).toBeNull();
   });
 
   it("at >= lg viewport, /topology graph view-mode renders the graph (no degradation hint)", async () => {
     const { findByTestId, container } = await renderAt("/topology", 1440);
     // Default tab is graph; placeholder visible.
-    expect(await findByTestId("topology-host-graph-placeholder")).toBeTruthy();
+    // V1 polish slice Phase 5.2: HostMultiRigGraph replaces the prior
+    // placeholder card at host scope graph view-mode. At >= lg viewport
+    // either the canvas mounts (with rigs) or the empty-state mounts
+    // (mock returns []). Either is acceptable proof that the desktop
+    // path is NOT degraded to the table; <lg path would have rendered
+    // the table degradation hint.
+    const desktopMount = await waitFor(() =>
+      container.querySelector("[data-testid='host-multi-rig-graph']") ??
+      container.querySelector("[data-testid='host-multi-rig-graph-empty']"),
+    );
+    expect(desktopMount).toBeTruthy();
     expect(container.querySelector("[data-testid='topology-mobile-graph-degraded']")).toBeNull();
   });
 });
