@@ -2,6 +2,7 @@ import { Link } from "@tanstack/react-router";
 import { Cog } from "lucide-react";
 import { VellumCard } from "../../ui/vellum-card.js";
 import { SectionHeader } from "../../ui/section-header.js";
+import { dashboardCardSurfaceClass } from "./card-surface.js";
 
 export function SettingsCard() {
   return (
@@ -10,7 +11,7 @@ export function SettingsCard() {
       data-testid="dashboard-card-settings"
       className="block focus-visible:outline focus-visible:outline-2 focus-visible:outline-stone-900 focus-visible:outline-offset-2"
     >
-      <VellumCard className="h-full hover:hard-shadow-hover" variant="ghost" elevation="flat">
+      <VellumCard className={dashboardCardSurfaceClass} variant="ghost" elevation="flat">
         <div className="border-b border-outline-variant px-4 py-1.5 flex items-center gap-2">
           <Cog className="h-3 w-3 text-stone-700" />
           <SectionHeader tone="muted">Settings</SectionHeader>

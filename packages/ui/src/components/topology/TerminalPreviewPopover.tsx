@@ -127,8 +127,8 @@ export function TerminalPreviewPopover({
       data-testid={`${testIdPrefix}-terminal-popover`}
       data-reduced-motion={reducedMotion ? "true" : "false"}
       className={cn(
-        "nodrag nopan fixed z-[1000] w-80 border border-outline-variant bg-stone-950 p-1.5 hard-shadow",
-        "cursor-default select-text text-stone-100",
+        "nodrag nopan fixed z-[1000] w-80 bg-stone-950/65 p-1.5 backdrop-blur-sm",
+        "cursor-default select-text text-stone-50",
         popoverClassName,
       )}
       style={{ left: position.left, top: position.top }}

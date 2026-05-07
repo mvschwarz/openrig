@@ -90,9 +90,35 @@ describe("SessionPreviewPane", () => {
 
     expect(pane.getAttribute("data-variant")).toBe("compact-terminal");
     expect(content.className).toContain("text-[10px]");
-    expect(content.className).toContain("text-stone-100");
+    expect(content.className).toContain("text-stone-50");
     expect(screen.queryByText(/live preview/i)).toBeNull();
     expect(screen.queryByText(/captured/i)).toBeNull();
     expect(screen.queryByText(/1 lines/i)).toBeNull();
+  });
+
+  it("renders compact unavailable state without machine labels or fallback chrome", async () => {
+    mockFetch.mockImplementation(async (url: string) => {
+      if (url === "/api/config") return new Response(JSON.stringify(settingsResponse()));
+      if (url.includes("/api/sessions/")) {
+        return new Response(JSON.stringify({ error: "preview_unavailable" }), { status: 404 });
+      }
+      return new Response(JSON.stringify({}), { status: 404 });
+    });
+
+    withQueryClient(
+      <SessionPreviewPane
+        sessionName="driver@test-rig"
+        testIdPrefix="compact-terminal-test"
+        variant="compact-terminal"
+      />,
+    );
+
+    const unavailable = await screen.findByTestId("compact-terminal-test-unavailable");
+
+    expect(unavailable.className).toContain("text-stone-50");
+    expect(unavailable.textContent).toContain("Preview unavailable.");
+    expect(unavailable.textContent).toContain("$ waiting for terminal output");
+    expect(unavailable.textContent).not.toContain("preview_unavailable");
+    expect(unavailable.textContent).not.toContain("rig capture");
   });
 });

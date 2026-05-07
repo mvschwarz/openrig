@@ -11,6 +11,7 @@ import { VellumCard } from "../../ui/vellum-card.js";
 import { SectionHeader } from "../../ui/section-header.js";
 import { useRigSummary } from "../../../hooks/useRigSummary.js";
 import { usePsEntries } from "../../../hooks/usePsEntries.js";
+import { dashboardCardSurfaceClass } from "./card-surface.js";
 
 export function TopologyCard() {
   const { data: rigs } = useRigSummary();
@@ -25,7 +26,7 @@ export function TopologyCard() {
       data-testid="dashboard-card-topology"
       className="block focus-visible:outline focus-visible:outline-2 focus-visible:outline-stone-900 focus-visible:outline-offset-2"
     >
-      <VellumCard className="h-full hover:hard-shadow-hover">
+      <VellumCard className={dashboardCardSurfaceClass}>
         <div className="bg-stone-900 text-white px-4 py-1.5 flex items-center gap-2">
           <Network className="h-3 w-3" />
           <SectionHeader tone="default" className="text-stone-50">
