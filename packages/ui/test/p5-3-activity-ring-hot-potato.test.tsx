@@ -202,6 +202,12 @@ describe("P5.3 ActivityRing and HotPotatoEdge", () => {
     expect(screen.queryByText(/captured/i)).toBeNull();
     expect(screen.queryByText(/1 lines/i)).toBeNull();
     expect(screen.getByTestId("hybrid-driver-terminal-preview-pane").getAttribute("data-variant")).toBe("compact-terminal");
+    const driverPopover = screen.getByTestId("hybrid-driver-terminal-popover");
+    expect(driverPopover.parentElement).toBe(document.body);
+    expect(driverPopover.className).toContain("fixed");
+    expect(driverPopover.className).toContain("z-[1000]");
+    expect(driverPopover.style.left).not.toBe("");
+    expect(driverPopover.style.top).not.toBe("");
 
     fireEvent.pointerDown(document.body);
     expect(screen.queryByTestId("hybrid-driver-terminal-popover")).toBeNull();
@@ -241,8 +247,12 @@ describe("P5.3 ActivityRing and HotPotatoEdge", () => {
     expect(rigNode).toMatch(/getActivityCardClasses/);
     expect(rigNode).toMatch(/TerminalPreviewPopover/);
     expect(terminalPopover).toMatch(/SessionPreviewPane/);
+    expect(terminalPopover).toMatch(/createPortal/);
+    expect(terminalPopover).toMatch(/document\.body/);
     expect(terminalPopover).toMatch(/variant="compact-terminal"/);
     expect(terminalPopover).toMatch(/bg-stone-950/);
+    expect(terminalPopover).toMatch(/z-\[1000\]/);
+    expect(terminalPopover).not.toMatch(/absolute left-full/);
     expect(terminalPopover).not.toMatch(/terminal preview/);
     expect(terminalPopover).not.toMatch(/terminal-close/);
     expect(activityCards).toMatch(/activity-card-active/);
