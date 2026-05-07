@@ -1,11 +1,12 @@
 import { useMemo, useCallback, useState, useRef, useEffect } from "react";
+import { useNavigate } from "@tanstack/react-router";
 import { ReactFlow, Controls, Handle, Position, type NodeTypes, type Node, type Edge, type NodeMouseHandler } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { useRigGraph } from "../hooks/useRigGraph.js";
 import { useRigEvents } from "../hooks/useRigEvents.js";
 import { useTopologyEdgeActivity } from "../hooks/useTopologyEdgeActivity.js";
 import { useDiscoveredSessionsConditional, type DiscoveredSession } from "../hooks/useDiscovery.js";
-import { useDiscoveryPlacement, useDrawerSelection, useNodeSelection } from "./AppShell.js";
+import { useDiscoveryPlacement, useDrawerSelection } from "./AppShell.js";
 import { getEdgeStyle } from "@/lib/edge-styles";
 import { applyTreeLayout } from "@/lib/graph-layout";
 import { RigNode } from "./RigNode.js";
@@ -296,7 +297,12 @@ export function RigGraph({
     return [...managed, ...discovered] as Node[];
   }, [rawNodes, rawEdges, shouldAnimate, discoveredSessions, placementMode, placementTarget]);
 
-  const { setSelectedNode } = useNodeSelection();
+  // V1 polish slice Phase 5.1 P5.1-2 + DRIFT P5.1-D2: graph node click
+  // navigates to /topology/seat/$rigId/$logicalId center page (matches
+  // Explorer tree click + table row click contract). Replaces legacy
+  // setSelection({type:'seat-detail'}) drawer-open behavior. The
+  // useNodeSelection alias is fully retired post-Phase 5.1.
+  const navigate = useNavigate();
   const rigStamp = rigName?.trim() ? rigName : (rigId ? shortId(rigId) : null);
 
   const onNodeClick: NodeMouseHandler = useCallback(
@@ -351,8 +357,13 @@ export function RigGraph({
         binding: { cmuxSurface?: string | null } | null;
       };
 
-      // Set shared node selection (for detail panel)
-      setSelectedNode({ rigId, logicalId: nodeData.logicalId });
+      // V1 polish slice Phase 5.1 P5.1-2: navigate to center page
+      // (canonical agent-detail = LiveNodeDetails). Parity with Explorer
+      // tree click + topology table row click (P5.1-7).
+      navigate({
+        to: "/topology/seat/$rigId/$logicalId",
+        params: { rigId, logicalId: encodeURIComponent(nodeData.logicalId) },
+      });
 
       if (!nodeData.binding?.cmuxSurface) {
         showFocusMessage({ text: "Not bound to cmux surface", type: "info" });
@@ -383,7 +394,7 @@ export function RigGraph({
         showFocusMessage({ text: "Focus failed", type: "error" });
       }
     },
-    [placementMode, podMetaById, rigId, setPlacementTarget, setSelectedNode, setSelection, showFocusMessage]
+    [placementMode, podMetaById, rigId, setPlacementTarget, navigate, setSelection, showFocusMessage]
   );
 
   if (rigId === null) {

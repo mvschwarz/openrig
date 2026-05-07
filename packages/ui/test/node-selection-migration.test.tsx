@@ -1,92 +1,114 @@
-// V1 attempt-3 Phase 5 P5-4 — negative-assertion regression guard (ritual #8).
+// V1 polish slice Phase 5.1 P5.1-1 + DRIFT P5.1-D2 — drawer-as-seat-detail
+// retirement regression guard (negative-assertion ritual #8).
 //
-// The legacy 'node' kind was retired from DrawerSelection union in P5-4. The
-// canonical 'seat-detail' kind (Phase 4) now covers all seat-detail surfaces
-// (graph node click via useNodeSelection alias; Explorer seat-leaf click; any
-// SeatDetailTrigger-wrapped surface). SeatDetailViewer wraps NodeDetailPanel
-// inside the canonical 38rem drawer chrome — fixes the founder-noticed
-// "graph node click → full-width panel with empty whitespace on left" bug
-// that was caused by the legacy 'node' branch routing NodeDetailPanel
-// directly past the drawer chrome's width-coupling.
+// Originally Phase 5 P5-4 negative-assertion that the legacy 'node' kind
+// had been retired from DrawerSelection in favor of 'seat-detail'. At V1
+// polish Phase 5.1, founder direction supersedes the seat-detail-as-drawer
+// pattern entirely: graph + tree + table all navigate to the canonical
+// /topology/seat/$rigId/$logicalId center page (LiveNodeDetails). The
+// drawer surface is reserved for content viewers (qitem / file / sub-spec)
+// per content-drawer.md L23-L34.
 //
-// This test is the source-assertion guard against re-introduction of the
-// 'node' discriminator (parallel to the P5-1 SC-20 source-assertion + the
-// rig-graph pod-group negative-assertion already in place).
+// This file converts the prior P5-4 negative-assertion into the broader
+// P5.1-D2 retirement guard:
+//   - NodeDetailPanel.tsx file does NOT exist
+//   - SeatDetailViewer.tsx file does NOT exist
+//   - SeatDetailTrigger.tsx file does NOT exist
+//   - 'seat-detail' kind absent from DrawerSelection union
+//   - 'node' kind absent from DrawerSelection union (preserved from P5-4)
+//   - useNodeSelection function absent from AppShell (alias retired)
+//   - RigGraph node click uses useNavigate (not setSelection / not
+//     setSelectedNode)
 
 import { describe, it, expect } from "vitest";
+import { existsSync } from "node:fs";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 
-const SHARED_DETAIL_DRAWER_PATH = path.resolve(
-  __dirname,
-  "../src/components/SharedDetailDrawer.tsx",
-);
-const APP_SHELL_PATH = path.resolve(__dirname, "../src/components/AppShell.tsx");
-const EXPLORER_PATH = path.resolve(__dirname, "../src/components/Explorer.tsx");
+const SRC = path.resolve(__dirname, "../src");
+const SHARED_DETAIL_DRAWER_PATH = path.join(SRC, "components/SharedDetailDrawer.tsx");
+const APP_SHELL_PATH = path.join(SRC, "components/AppShell.tsx");
+const RIG_GRAPH_PATH = path.join(SRC, "components/RigGraph.tsx");
+const NODE_DETAIL_PANEL_PATH = path.join(SRC, "components/NodeDetailPanel.tsx");
+const SEAT_DETAIL_VIEWER_PATH = path.join(SRC, "components/drawer-viewers/SeatDetailViewer.tsx");
+const SEAT_DETAIL_TRIGGER_PATH = path.join(SRC, "components/drawer-triggers/SeatDetailTrigger.tsx");
 
-describe("P5-4: legacy 'node' kind retired from DrawerSelection (negative-assertion)", () => {
-  it("SharedDetailDrawer.tsx DrawerSelection union does NOT contain 'node' kind", () => {
+describe("P5.1-D2 retirement regression: drawer-as-seat-detail removed", () => {
+  it("NodeDetailPanel.tsx file does NOT exist (component retired)", () => {
+    expect(existsSync(NODE_DETAIL_PANEL_PATH)).toBe(false);
+  });
+
+  it("SeatDetailViewer.tsx file does NOT exist (drawer wrapper retired)", () => {
+    expect(existsSync(SEAT_DETAIL_VIEWER_PATH)).toBe(false);
+  });
+
+  it("SeatDetailTrigger.tsx file does NOT exist (trigger primitive retired)", () => {
+    expect(existsSync(SEAT_DETAIL_TRIGGER_PATH)).toBe(false);
+  });
+
+  it("DrawerSelection union does NOT contain 'seat-detail' kind", () => {
     const src = readFileSync(SHARED_DETAIL_DRAWER_PATH, "utf8");
-    // Find the DrawerSelection union declaration block.
     const unionMatch = src.match(/export type DrawerSelection =[\s\S]*?\| null;/);
     expect(unionMatch).not.toBeNull();
     const unionBlock = unionMatch![0];
-    // Negative-assertion: '{ type: "node"' must NOT appear in the union.
+    expect(unionBlock).not.toMatch(/\{\s*type:\s*["']seat-detail["']/);
+  });
+
+  it("DrawerSelection union does NOT contain legacy 'node' kind (P5-4 preserved)", () => {
+    const src = readFileSync(SHARED_DETAIL_DRAWER_PATH, "utf8");
+    const unionMatch = src.match(/export type DrawerSelection =[\s\S]*?\| null;/);
+    const unionBlock = unionMatch![0];
     expect(unionBlock).not.toMatch(/\{\s*type:\s*["']node["']/);
-    // Positive companion: 'seat-detail' kind IS present (canonical surface).
-    expect(unionBlock).toMatch(/\{\s*type:\s*["']seat-detail["']/);
   });
 
-  it("SharedDetailDrawer.tsx routing does NOT branch on selection.type === 'node'", () => {
+  it("SharedDetailDrawer routing has NO 'seat-detail' branch", () => {
     const src = readFileSync(SHARED_DETAIL_DRAWER_PATH, "utf8");
-    // Negative-assertion: legacy `if (selection.type === "node")` routing branch
-    // must be gone (it routed directly to NodeDetailPanel past the drawer chrome).
+    expect(src).not.toMatch(/selection\.type\s*===\s*["']seat-detail["']/);
     expect(src).not.toMatch(/selection\.type\s*===\s*["']node["']/);
-    // Positive companion: 'seat-detail' branch still routes via SeatDetailViewer.
-    expect(src).toMatch(/selection\.type\s*===\s*["']seat-detail["']/);
   });
 
-  it("SharedDetailDrawer.tsx no longer imports NodeDetailPanel directly (uses SeatDetailViewer wrapper)", () => {
-    const src = readFileSync(SHARED_DETAIL_DRAWER_PATH, "utf8");
-    // After P5-4, NodeDetailPanel reaches drawer ONLY through SeatDetailViewer
-    // (which is the canonical wrapper). SharedDetailDrawer.tsx imports
-    // SeatDetailViewer, NOT NodeDetailPanel directly.
-    expect(src).not.toMatch(/import\s*\{\s*NodeDetailPanel\s*\}\s*from\s*["']\.\/NodeDetailPanel\.js["']/);
-    expect(src).toMatch(/import\s*\{\s*SeatDetailViewer\s*\}/);
-  });
-
-  it("AppShell.tsx useNodeSelection alias coerces to/from 'seat-detail' (NOT 'node')", () => {
+  it("AppShell.tsx no longer exports useNodeSelection function (alias retired)", () => {
     const src = readFileSync(APP_SHELL_PATH, "utf8");
-    // Find useNodeSelection function block.
-    const fnMatch = src.match(/export function useNodeSelection\(\)[\s\S]*?^\}/m);
-    expect(fnMatch).not.toBeNull();
-    const fnBlock = fnMatch![0];
-    // Negative-assertion: legacy 'node' kind reads/writes are gone.
-    expect(fnBlock).not.toMatch(/selection\??\.type\s*===\s*["']node["']/);
-    expect(fnBlock).not.toMatch(/type:\s*["']node["']/);
-    // Positive companion: alias now uses 'seat-detail'.
-    expect(fnBlock).toMatch(/selection\??\.type\s*===\s*["']seat-detail["']/);
-    expect(fnBlock).toMatch(/type:\s*["']seat-detail["']/);
+    // Strip comments first so historical mentions don't trigger.
+    const codeOnly = src
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/^\s*\/\/[^\n]*\n/gm, "");
+    expect(codeOnly).not.toMatch(/export\s+function\s+useNodeSelection\s*\(/);
   });
 
-  it("Explorer.tsx seat-leaf selection state + onClick use 'seat-detail' kind (NOT 'node')", () => {
-    const src = readFileSync(EXPLORER_PATH, "utf8");
-    // The DrawerSelection 'node' kind appears in two distinct contexts in this
-    // file:
-    //   1) Pod-leaf seat selection (PodBranch + ungrouped pod fallback).
-    //   2) Auto-expand predicate at the rig branch level.
-    // All three should be migrated to 'seat-detail'.
-    //
-    // Negative-assertion (file-wide): no remaining `{ type: "node"` literal.
-    // (DiscoveryPlacementTarget.kind === "node" is a SEPARATE namespace —
-    // discovery placement, not DrawerSelection — and is allowed elsewhere; but
-    // Explorer.tsx itself should not contain DrawerSelection's 'node' kind.)
-    expect(src).not.toMatch(/\{\s*type:\s*["']node["']/);
-    // selection?.type === "node" must be gone too.
-    expect(src).not.toMatch(/selection\?\.type\s*===\s*["']node["']/);
-    // Positive companion: 'seat-detail' is the new discriminator at all
-    // 3 spots (count is at least 3; 2 onClick + 1 isSelected predicates).
-    const seatDetailMatches = src.match(/["']seat-detail["']/g) ?? [];
-    expect(seatDetailMatches.length).toBeGreaterThanOrEqual(3);
+  it("RigGraph uses useNavigate (NOT setSelectedNode / NOT setSelection seat-detail)", () => {
+    const src = readFileSync(RIG_GRAPH_PATH, "utf8");
+    const codeOnly = src
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/^\s*\/\/[^\n]*\n/gm, "");
+    // Positive: useNavigate import + call.
+    expect(src).toMatch(/import\s*\{[^}]*useNavigate[^}]*\}\s*from\s*["']@tanstack\/react-router["']/);
+    expect(codeOnly).toMatch(/useNavigate\s*\(\s*\)/);
+    // Negative: setSelectedNode + 'seat-detail' setSelection patterns gone.
+    expect(codeOnly).not.toMatch(/setSelectedNode/);
+    expect(codeOnly).not.toMatch(/setSelection\s*\(\s*\{\s*type:\s*["']seat-detail["']/);
+  });
+
+  it("LiveNodeDetails.tsx renders the 5-tab body row (single canonical surface per DRIFT P5.1-D1)", () => {
+    const src = readFileSync(path.join(SRC, "components/LiveNodeDetails.tsx"), "utf8");
+    // Tab union literal carries all 5 canonical tab keys.
+    expect(src).toMatch(/type\s+Tab\s*=\s*"identity"\s*\|\s*"agent-spec"\s*\|\s*"startup"\s*\|\s*"transcript"\s*\|\s*"terminal"/);
+    // FileReferenceTrigger wraps startup files (P5.1-1a).
+    expect(src).toMatch(/import\s*\{[^}]*FileReferenceTrigger[^}]*\}\s*from/);
+    expect(src).toMatch(/<FileReferenceTrigger/);
+  });
+
+  it("SeatScopePage drops outer tabs and mounts LiveNodeDetails directly (DRIFT P5.1-D1)", () => {
+    const src = readFileSync(path.join(SRC, "components/topology/ScopePages.tsx"), "utf8");
+    // Locate the SeatScopePage function body specifically (not the
+    // file-wide imports which still reference the SEAT_SCOPE_TABS
+    // constant for other surfaces).
+    const seatFn = src.match(/export function SeatScopePage\(\)\s*\{[\s\S]*?^}/m);
+    expect(seatFn).not.toBeNull();
+    const body = seatFn![0];
+    // No outer ScopeShell tabsNav for seat scope; LiveNodeDetails mounts
+    // as the page body.
+    expect(body).not.toMatch(/SEAT_SCOPE_TABS/);
+    expect(body).toMatch(/<LiveNodeDetails\s+rigId=/);
   });
 });

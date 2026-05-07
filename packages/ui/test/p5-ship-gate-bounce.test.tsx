@@ -108,23 +108,25 @@ describe("TopologyTableView P0-1 regression: no rules-of-hooks crash on first-re
 // P0-2: NodeDetailPanel fill-parent regression — no self-pinning.
 // -----------------------------------------------------------------------
 
-describe("NodeDetailPanel P0-2 regression: fills parent (no absolute self-pinning)", () => {
-  it("source uses 'relative w-full h-full' on the root <aside> (NOT 'absolute inset-y-0 right-0 w-80')", () => {
-    const src = readFileSync(
-      path.resolve(__dirname, "../src/components/NodeDetailPanel.tsx"),
+describe("NodeDetailPanel P0-2 regression: drawer fill-parent guard", () => {
+  // V1 polish slice Phase 5.1 P5.1-D2: NodeDetailPanel.tsx is fully
+  // RETIRED at V1 polish; the canonical agent-detail surface is now
+  // LiveNodeDetails.tsx (center page). The original P0-2 ship-gate
+  // bounce regression guarded NodeDetailPanel's drawer fill-parent
+  // layout; now that the file is gone, the guard becomes the
+  // file-doesn't-exist assertion (which lives in
+  // node-selection-migration.test.tsx). This block converts to a
+  // companion source-assertion on LiveNodeDetails: the canonical
+  // surface must NOT regress into legacy absolute self-pinning.
+  it("LiveNodeDetails.tsx does not regress into legacy 'absolute inset-y-0 right-0 w-80' self-pinning", async () => {
+    const liveSrc = readFileSync(
+      path.resolve(__dirname, "../src/components/LiveNodeDetails.tsx"),
       "utf8",
     );
-    // Strip comments so historical mentions of the legacy class string
-    // (preserved in the explanatory comment block) don't trigger the
-    // negative assertion.
-    const codeOnly = src
+    const codeOnly = liveSrc
       .replace(/\/\*[\s\S]*?\*\//g, "")
       .replace(/^\s*\/\/[^\n]*\n/gm, "");
-    // Negative-assertion: legacy `absolute inset-y-0 right-0 ... w-80`
-    // pinning class string MUST NOT survive in code.
     expect(codeOnly).not.toMatch(/absolute\s+inset-y-0\s+right-0/);
     expect(codeOnly).not.toMatch(/\bw-80\b/);
-    // Positive companion: fill-parent layout present on the root <aside>.
-    expect(codeOnly).toMatch(/relative\s+w-full\s+h-full/);
   });
 });

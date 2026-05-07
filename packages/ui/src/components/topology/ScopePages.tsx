@@ -221,29 +221,16 @@ export function PodScopePage() {
 }
 
 export function SeatScopePage() {
+  // V1 polish slice Phase 5.1 P5.1-1 + DRIFT P5.1-D1: outer scope tabs
+  // (detail / transcript / terminal) RETIRED at V1 polish per founder
+  // direction. LiveNodeDetails owns the canonical 5-tab body row inline
+  // (Identity / Agent Spec / Startup / Transcript / Terminal). The
+  // ScopeShell wrapper is dropped too — LiveNodeDetails is the page.
   const { rigId, logicalId } = useParams({ from: "/topology/seat/$rigId/$logicalId" });
   const decodedLogicalId = decodeURIComponent(logicalId);
-  const [active, setActive] = useState<TopologySeatScopeTab>("detail");
-
   return (
-    <ScopeShell
-      eyebrow="Topology · Seat"
-      title={decodedLogicalId}
-      tabsNav={<TopologyViewModeTabs tabs={SEAT_SCOPE_TABS} active={active} onSelect={setActive} testIdPrefix="topology-seat" />}
-    >
-      {active === "detail" ? (
-        <LiveNodeDetails rigId={rigId} logicalId={decodedLogicalId} />
-      ) : null}
-      {active === "transcript" ? (
-        <div className="p-6">
-          <EmptyState label="TRANSCRIPT" description="Existing transcript view re-mounts here in Phase 5 polish." variant="card" />
-        </div>
-      ) : null}
-      {active === "terminal" ? (
-        <div className="p-6">
-          <EmptyState label="SEAT TERMINAL" description="Pinned terminal card (Phase 5); V2 web terminal." variant="card" />
-        </div>
-      ) : null}
-    </ScopeShell>
+    <div data-testid="seat-scope-page" className="flex flex-col h-full">
+      <LiveNodeDetails rigId={rigId} logicalId={decodedLogicalId} />
+    </div>
   );
 }

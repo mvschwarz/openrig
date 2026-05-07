@@ -71,8 +71,11 @@ describe("Design System Compliance", () => {
     const rigNode = readFileSync(resolve(SRC_DIR, "components/RigNode.tsx"), "utf-8");
     expect(rigNode).toContain("font-mono");
 
-    const nodeDetailPanel = readFileSync(resolve(SRC_DIR, "components/NodeDetailPanel.tsx"), "utf-8");
-    expect(nodeDetailPanel).toContain("font-mono");
+    // V1 polish slice Phase 5.1 P5.1-1: NodeDetailPanel.tsx RETIRED;
+    // canonical agent-detail surface is LiveNodeDetails.tsx now (which
+    // also uses font-mono per the tactical aesthetic).
+    const liveNodeDetails = readFileSync(resolve(SRC_DIR, "components/LiveNodeDetails.tsx"), "utf-8");
+    expect(liveNodeDetails).toContain("font-mono");
 
     const importFlow = readFileSync(resolve(SRC_DIR, "components/ImportFlow.tsx"), "utf-8");
     expect(importFlow).toContain("font-mono");
