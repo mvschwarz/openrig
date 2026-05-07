@@ -2,26 +2,42 @@
 //
 // host > rig > pod > seat. Multi-host envelope: V1 has only one host
 // node ("localhost") above all rigs; V2 adds remote host registration.
+//
+// V1 attempt-3 Phase 5 P5-1: seat leaves gain a "details" icon that opens
+// SeatDetailViewer in the right drawer per content-drawer.md L40 manual-open
+// contract ("'details' icon on any topology node — replaces current auto-open
+// behavior"). The seat row remains a Link to /topology/seat/$rigId/$logicalId
+// for explicit center navigation; the icon is the named-trigger drawer surface.
 
 import { useState } from "react";
 import { Link } from "@tanstack/react-router";
-import { ChevronDown, ChevronRight, Globe } from "lucide-react";
+import { ChevronDown, ChevronRight, Globe, PanelRightOpen } from "lucide-react";
 import { cn } from "../../lib/utils.js";
 import { useRigSummary } from "../../hooks/useRigSummary.js";
 import { useNodeInventory } from "../../hooks/useNodeInventory.js";
 import { displayPodName, inferPodName } from "../../lib/display-name.js";
+import { SeatDetailTrigger } from "../drawer-triggers/SeatDetailTrigger.js";
 
 function SeatLeaf({ rigId, logicalId, label }: { rigId: string; logicalId: string; label: string }) {
   return (
-    <li>
+    <li className="group flex items-center gap-1 px-2 py-0.5 hover:bg-surface-low">
       <Link
         to="/topology/seat/$rigId/$logicalId"
         params={{ rigId, logicalId: encodeURIComponent(logicalId) }}
         data-testid={`topology-seat-${rigId}-${logicalId}`}
-        className="block px-2 py-0.5 font-mono text-xs text-on-surface hover:text-stone-900 hover:bg-surface-low truncate"
+        className="flex-1 min-w-0 font-mono text-xs text-on-surface hover:text-stone-900 truncate"
       >
         {label}
       </Link>
+      <SeatDetailTrigger
+        rigId={rigId}
+        logicalId={logicalId}
+        testId={`topology-seat-details-${rigId}-${logicalId}`}
+        className="shrink-0 p-0.5 rounded-sm text-on-surface-variant hover:text-stone-900 hover:bg-stone-200/60 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity"
+      >
+        <PanelRightOpen className="h-3 w-3" strokeWidth={1.5} aria-hidden="true" />
+        <span className="sr-only">Open details in drawer</span>
+      </SeatDetailTrigger>
     </li>
   );
 }

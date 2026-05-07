@@ -10,6 +10,13 @@ import {
 import "@xyflow/react/dist/style.css";
 import { Button } from "@/components/ui/button";
 import { WorkspacePage } from "./WorkspacePage.js";
+// V1 attempt-3 Phase 5 P5-1: file references in context-pack + agent-image
+// "Files" / "Supplementary files" lists become FileReferenceTrigger-wrapped
+// rows so click → FileViewer in drawer. Per content-drawer.md L23-L34
+// auto-open trigger contract. Content arrives later (Phase 5 P5-5/P5-6
+// data-fetch wiring may add live content); FileViewer empty-state covers
+// the no-content interim.
+import { FileReferenceTrigger } from "./drawer-triggers/FileReferenceTrigger.js";
 import {
   useLibraryReview,
   useSpecLibrary,
@@ -629,20 +636,26 @@ function ContextPackReviewBody({
                   key={f.path}
                   data-testid={`lib-pack-file-${f.path}`}
                   data-missing={missing ? "true" : "false"}
-                  className={`px-3 py-2 font-mono text-[10px] ${missing ? "text-red-700" : "text-stone-800"}`}
+                  className={`font-mono text-[10px] ${missing ? "text-red-700" : "text-stone-800"}`}
                 >
-                  <div className="flex items-baseline justify-between gap-2">
-                    <span className="font-bold truncate">{f.path}</span>
-                    <span className="font-mono text-[8px] text-stone-500 shrink-0">
-                      role: {f.role}
-                      {missing
-                        ? " · MISSING"
-                        : ` · ${f.bytes}B · ~${f.estimatedTokens} tokens`}
-                    </span>
-                  </div>
-                  {f.summary && (
-                    <div className="mt-0.5 text-stone-600 text-[9px]">{f.summary}</div>
-                  )}
+                  <FileReferenceTrigger
+                    data={{ path: f.path }}
+                    testId={`lib-pack-file-trigger-${f.path}`}
+                    className="block w-full px-3 py-2 text-left hover:bg-stone-100/60 transition-colors"
+                  >
+                    <div className="flex items-baseline justify-between gap-2">
+                      <span className="font-bold truncate underline decoration-dotted decoration-stone-400">{f.path}</span>
+                      <span className="font-mono text-[8px] text-stone-500 shrink-0">
+                        role: {f.role}
+                        {missing
+                          ? " · MISSING"
+                          : ` · ${f.bytes}B · ~${f.estimatedTokens} tokens`}
+                      </span>
+                    </div>
+                    {f.summary && (
+                      <div className="mt-0.5 text-stone-600 text-[9px]">{f.summary}</div>
+                    )}
+                  </FileReferenceTrigger>
                 </li>
               );
             })}
@@ -889,17 +902,23 @@ function AgentImageReviewBody({
               {entry.files.map((f) => (
                 <li
                   key={f.path}
-                  className="px-3 py-2 font-mono text-[10px] text-stone-800"
+                  className="font-mono text-[10px] text-stone-800"
                   data-testid={`lib-image-file-${f.path}`}
                 >
-                  <div className="flex items-baseline justify-between gap-2">
-                    <span className="font-bold truncate">{f.path}</span>
-                    <span className="font-mono text-[8px] text-stone-500 shrink-0">
-                      role: {f.role}
-                      {f.bytes === null ? " · MISSING" : ` · ${f.bytes}B`}
-                    </span>
-                  </div>
-                  {f.summary && <div className="mt-0.5 text-stone-600 text-[9px]">{f.summary}</div>}
+                  <FileReferenceTrigger
+                    data={{ path: f.path }}
+                    testId={`lib-image-file-trigger-${f.path}`}
+                    className="block w-full px-3 py-2 text-left hover:bg-stone-100/60 transition-colors"
+                  >
+                    <div className="flex items-baseline justify-between gap-2">
+                      <span className="font-bold truncate underline decoration-dotted decoration-stone-400">{f.path}</span>
+                      <span className="font-mono text-[8px] text-stone-500 shrink-0">
+                        role: {f.role}
+                        {f.bytes === null ? " · MISSING" : ` · ${f.bytes}B`}
+                      </span>
+                    </div>
+                    {f.summary && <div className="mt-0.5 text-stone-600 text-[9px]">{f.summary}</div>}
+                  </FileReferenceTrigger>
                 </li>
               ))}
             </ul>

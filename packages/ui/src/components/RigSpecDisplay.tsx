@@ -3,6 +3,26 @@ import { Button } from "@/components/ui/button";
 import { SpecTopologyPreview } from "./SpecTopologyPreview.js";
 import { WorkflowCodePreview } from "./WorkflowScaffold.js";
 import type { RigSpecReview } from "../hooks/useSpecReview.js";
+// V1 attempt-3 Phase 5 P5-1: pod-member agentRef cells become SubSpecTrigger-
+// wrapped — click → SubSpecPreview in drawer (referenced agent spec). Per
+// content-drawer.md L31 sub-spec auto-open trigger contract.
+import { SubSpecTrigger } from "./drawer-triggers/SubSpecTrigger.js";
+
+// agentRef shape examples: "local:agents/impl", "local:agents/orch-lead",
+// "fork:agents/qa@0.2.0", "builtin:agents/driver". The leg after agents/ is
+// the spec name; everything before agents/ is the source qualifier.
+function parseAgentRef(agentRef: string): { specName: string; source: "builtin" | "user_file" | "fork" } {
+  const trimmed = agentRef.startsWith("local:") ? agentRef.slice("local:".length) : agentRef;
+  const stripQual = trimmed.replace(/^(builtin|user|fork):/, "");
+  const after = stripQual.startsWith("agents/") ? stripQual.slice("agents/".length) : stripQual;
+  const specName = after.split("@")[0] ?? after;
+  const source = agentRef.startsWith("fork:")
+    ? "fork"
+    : agentRef.startsWith("builtin:")
+      ? "builtin"
+      : "user_file";
+  return { specName, source };
+}
 
 type Tab = "topology" | "configuration" | "environment" | "yaml";
 
@@ -91,7 +111,24 @@ export function RigSpecDisplay({ review, yaml, testIdPrefix = "", yamlTestId, sh
                           )}
                         </div>
                       </td>
-                      <td className="py-1 text-stone-600">{m.agentRef}</td>
+                      <td className="py-1 text-stone-600">
+                        {(() => {
+                          const parsed = parseAgentRef(m.agentRef);
+                          return (
+                            <SubSpecTrigger
+                              data={{
+                                specKind: "agent",
+                                specName: parsed.specName,
+                                source: parsed.source,
+                              }}
+                              testId={`${prefix}member-sub-spec-${pod.id}-${m.id}`}
+                              className="text-stone-600 underline decoration-dotted decoration-stone-400 hover:text-stone-900 hover:decoration-stone-700"
+                            >
+                              {m.agentRef}
+                            </SubSpecTrigger>
+                          );
+                        })()}
+                      </td>
                       <td className="py-1">{m.runtime}</td>
                       <td className="py-1 text-stone-500">{m.profile ?? "—"}</td>
                     </tr>
