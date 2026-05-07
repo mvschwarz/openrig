@@ -1,7 +1,8 @@
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { render, screen, cleanup, fireEvent } from "@testing-library/react";
 import { RigSpecDisplay } from "../src/components/RigSpecDisplay.js";
 import { AgentSpecDisplay } from "../src/components/AgentSpecDisplay.js";
+import { DrawerSelectionContext, type DrawerSelection } from "../src/components/AppShell.js";
 import type { RigSpecReview, AgentSpecReview } from "../src/hooks/useSpecReview.js";
 
 afterEach(() => cleanup());
@@ -157,6 +158,28 @@ describe("AgentSpecDisplay", () => {
     expect(screen.getByText("tdd")).toBeDefined();
     expect(screen.getByText("debugging")).toBeDefined();
     expect(screen.getByText("code-style.md")).toBeDefined();
+  });
+
+  it("wraps guidance resources in file triggers when sourcePath is available", () => {
+    const setSelection = vi.fn();
+    render(
+      <DrawerSelectionContext.Provider value={{ selection: null, setSelection: setSelection as (sel: DrawerSelection) => void }}>
+        <AgentSpecDisplay
+          review={AGENT_REVIEW}
+          yaml="name: test"
+          sourcePath="/workspace/specs/agents/test-agent/agent.yaml"
+        />
+      </DrawerSelectionContext.Provider>,
+    );
+
+    fireEvent.click(screen.getByTestId("agent-guidance-file-trigger-code-style.md"));
+    expect(setSelection).toHaveBeenCalledWith({
+      type: "file",
+      data: {
+        path: "code-style.md",
+        absolutePath: "/workspace/specs/agents/test-agent/code-style.md",
+      },
+    });
   });
 
   it("renders startup section with files and actions", () => {

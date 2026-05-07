@@ -87,7 +87,12 @@ function LibraryAgentReviewPage({ review }: { review: LibraryAgentReview }) {
           <WorkflowSummaryCard label="Skills" value={resources.skills.length} testId="lib-agent-skills" />
         </WorkflowSummaryGrid>
 
-        <AgentSpecDisplay review={review} yaml={review.raw} testIdPrefix="lib-agent" />
+        <AgentSpecDisplay
+          review={review}
+          yaml={review.raw}
+          testIdPrefix="lib-agent"
+          sourcePath={review.sourcePath}
+        />
       </div>
     </WorkspacePage>
   );
@@ -639,7 +644,7 @@ function ContextPackReviewBody({
                   className={`font-mono text-[10px] ${missing ? "text-red-700" : "text-stone-800"}`}
                 >
                   <FileReferenceTrigger
-                    data={{ path: f.path }}
+                    data={{ path: f.path, absolutePath: f.absolutePath }}
                     testId={`lib-pack-file-trigger-${f.path}`}
                     className="block w-full px-3 py-2 text-left hover:bg-stone-100/60 transition-colors"
                   >
@@ -906,7 +911,7 @@ function AgentImageReviewBody({
                   data-testid={`lib-image-file-${f.path}`}
                 >
                   <FileReferenceTrigger
-                    data={{ path: f.path }}
+                    data={{ path: f.path, absolutePath: f.absolutePath }}
                     testId={`lib-image-file-trigger-${f.path}`}
                     className="block w-full px-3 py-2 text-left hover:bg-stone-100/60 transition-colors"
                   >

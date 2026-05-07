@@ -18,7 +18,9 @@
 // guard lives in test/node-selection-migration.test.tsx.
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, fireEvent, cleanup } from "@testing-library/react";
+import { render, fireEvent, cleanup, screen } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import type { ReactElement } from "react";
 
 import {
   DrawerSelectionContext,
@@ -34,7 +36,19 @@ import { SharedDetailDrawer } from "../src/components/SharedDetailDrawer.js";
 
 beforeEach(() => {
   cleanup();
+  vi.restoreAllMocks();
 });
+
+function renderWithQuery(ui: ReactElement) {
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  return render(
+    <QueryClientProvider client={queryClient}>
+      {ui}
+    </QueryClientProvider>,
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Viewers — render-without-crash with canonical-shape props
@@ -81,6 +95,72 @@ describe("Drawer viewers (P4-1) render with canonical props", () => {
   it("FileViewer empty-state when no content/imageUrl and not binary", () => {
     const { getByTestId } = render(<FileViewer path="missing.md" kind="markdown" />);
     expect(getByTestId("file-viewer-empty")).toBeTruthy();
+  });
+
+  it("FileViewer reads drawer content from an explicit /api/files root + path", async () => {
+    const fetchMock = vi.fn(async (url: string) => {
+      expect(url).toBe("/api/files/read?root=workspace&path=docs%2Frole.md");
+      return {
+        ok: true,
+        json: async () => ({
+          root: "workspace",
+          path: "docs/role.md",
+          absolutePath: "/workspace/docs/role.md",
+          content: "# Role\nLoaded from files API.",
+          mtime: "2026-05-07T00:00:00.000Z",
+          contentHash: "hash",
+          size: 29,
+          truncated: false,
+          truncatedAtBytes: null,
+          totalBytes: 29,
+        }),
+      };
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    renderWithQuery(
+      <FileViewer path="role.md" kind="markdown" root="workspace" readPath="docs/role.md" />,
+    );
+
+    expect(await screen.findByTestId("file-viewer")).toBeTruthy();
+    expect(screen.getByText(/Loaded from files API/)).toBeTruthy();
+    expect(screen.getByTestId("file-viewer-root-path").textContent).toBe("workspace/docs/role.md");
+  });
+
+  it("FileViewer resolves an absolute file path against /api/files roots", async () => {
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url === "/api/files/roots") {
+        return {
+          ok: true,
+          json: async () => ({ roots: [{ name: "workspace", path: "/workspace" }] }),
+        };
+      }
+      expect(url).toBe("/api/files/read?root=workspace&path=agents%2Frole.md");
+      return {
+        ok: true,
+        json: async () => ({
+          root: "workspace",
+          path: "agents/role.md",
+          absolutePath: "/workspace/agents/role.md",
+          content: "# Agent Role",
+          mtime: "2026-05-07T00:00:00.000Z",
+          contentHash: "hash",
+          size: 12,
+          truncated: false,
+          truncatedAtBytes: null,
+          totalBytes: 12,
+        }),
+      };
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    renderWithQuery(
+      <FileViewer path="role.md" kind="markdown" absolutePath="/workspace/agents/role.md" />,
+    );
+
+    expect(await screen.findByTestId("file-viewer")).toBeTruthy();
+    expect(screen.getByText(/Agent Role/)).toBeTruthy();
+    expect(screen.getByTestId("file-viewer-root-path").textContent).toBe("workspace/agents/role.md");
   });
 
   it("SubSpecPreview renders header + manifest excerpt; no Link when entryId omitted", () => {

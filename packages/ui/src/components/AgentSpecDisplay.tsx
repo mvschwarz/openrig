@@ -1,13 +1,57 @@
+import type { ReactNode } from "react";
 import type { AgentSpecReview } from "../hooks/useSpecReview.js";
 import { WorkflowCodePreview } from "./WorkflowScaffold.js";
+import { FileReferenceTrigger } from "./drawer-triggers/FileReferenceTrigger.js";
 
 interface AgentSpecDisplayProps {
   review?: AgentSpecReview | null;
   yaml: string;
   testIdPrefix?: string;
+  sourcePath?: string | null;
 }
 
-export function AgentSpecDisplay({ review, yaml, testIdPrefix = "agent" }: AgentSpecDisplayProps) {
+function resolveSpecRelativePath(sourcePath: string | null | undefined, filePath: string): string | null {
+  if (!sourcePath || !filePath) return null;
+  if (filePath.startsWith("/")) return filePath;
+  const sourceDir = sourcePath.replace(/\/[^/]*$/, "");
+  const parts = `${sourceDir}/${filePath}`.split("/");
+  const resolved: string[] = [];
+  for (const part of parts) {
+    if (!part || part === ".") continue;
+    if (part === "..") {
+      resolved.pop();
+      continue;
+    }
+    resolved.push(part);
+  }
+  return `/${resolved.join("/")}`;
+}
+
+function FileChip({
+  label,
+  sourcePath,
+  testId,
+  children,
+}: {
+  label: string;
+  sourcePath?: string | null;
+  testId: string;
+  children: ReactNode;
+}) {
+  const absolutePath = resolveSpecRelativePath(sourcePath, label);
+  if (!absolutePath) return <>{children}</>;
+  return (
+    <FileReferenceTrigger
+      data={{ path: label, absolutePath }}
+      testId={testId}
+      className="inline-block text-left"
+    >
+      {children}
+    </FileReferenceTrigger>
+  );
+}
+
+export function AgentSpecDisplay({ review, yaml, testIdPrefix = "agent", sourcePath }: AgentSpecDisplayProps) {
   const profiles = review?.profiles ?? [];
   const resources = review?.resources ?? { skills: [], guidance: [], hooks: [], subagents: [] };
   const startup = review?.startup ?? { files: [], actions: [] };
@@ -45,7 +89,16 @@ export function AgentSpecDisplay({ review, yaml, testIdPrefix = "agent" }: Agent
             <div>
               <span className="text-stone-500">Guidance:</span>{" "}
               {resources.guidance.map((g, i) => (
-                <span key={i} className="inline-block bg-stone-100 px-1.5 py-0.5 mr-1 mb-0.5">{g}</span>
+                <FileChip
+                  key={`${g}-${i}`}
+                  label={g}
+                  sourcePath={sourcePath}
+                  testId={`${testIdPrefix}-guidance-file-trigger-${g}`}
+                >
+                  <span className="inline-block bg-stone-100 px-1.5 py-0.5 mr-1 mb-0.5 underline decoration-dotted decoration-stone-400">
+                    {g}
+                  </span>
+                </FileChip>
               ))}
             </div>
           )}
@@ -66,7 +119,14 @@ export function AgentSpecDisplay({ review, yaml, testIdPrefix = "agent" }: Agent
               <div className="font-mono text-[9px] text-stone-500 uppercase mb-1">Files</div>
               {startup.files.map((f, i) => (
                 <div key={i} className="font-mono text-[10px]">
-                  {f.path} {f.required && <span className="text-red-500 text-[8px]">REQUIRED</span>}
+                  <FileChip
+                    label={f.path}
+                    sourcePath={sourcePath}
+                    testId={`${testIdPrefix}-startup-file-trigger-${f.path}`}
+                  >
+                    <span className="underline decoration-dotted decoration-stone-400">{f.path}</span>
+                  </FileChip>{" "}
+                  {f.required && <span className="text-red-500 text-[8px]">REQUIRED</span>}
                 </div>
               ))}
             </div>
