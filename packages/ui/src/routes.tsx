@@ -52,6 +52,7 @@ import {
   MissionScopePage,
   SliceScopePage,
 } from "./components/project/ScopePages.js";
+import { ProjectGraphicsPreview } from "./components/lab/ProjectGraphicsPreview.js";
 
 // Root route — wraps everything in AppShell
 const rootRoute = createRootRoute({
@@ -160,6 +161,12 @@ const searchRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/search",
   component: AuditHistoryView,
+});
+
+const projectGraphicsPreviewRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/lab/project-graphics-preview",
+  component: ProjectGraphicsPreview,
 });
 
 // =====================================================================
@@ -359,6 +366,7 @@ const routeTree = rootRoute.addChildren([
   specsKindRoute,
   settingsRoute,
   searchRoute,
+  projectGraphicsPreviewRoute,
   // Preserved existing routes
   rigDetailRoute,
   liveNodeDetailsRoute,

@@ -81,7 +81,7 @@ interface RenderTreeOpts {
   // Map "<root>:<path>" → file content.
   reads?: Record<string, { content: string; mtime?: string }>;
   // useSlices response.
-  slices?: Array<{ name: string; displayName: string; railItem: string | null; status: string; rawStatus: string | null; qitemCount: number; hasProofPacket: boolean; lastActivityAt: string | null }>;
+  slices?: Array<{ name: string; missionId?: string | null; displayName: string; railItem: string | null; status: string; rawStatus: string | null; qitemCount: number; hasProofPacket: boolean; lastActivityAt: string | null }>;
 }
 
 function setupFetch(opts: RenderTreeOpts) {
@@ -197,6 +197,7 @@ describe("ProjectTreeView P5-5/P5-6 mission discovery", () => {
       slices: [],
     });
     expect(await findByTestId("project-mission-rsi-v2")).toBeTruthy();
+    expect((await findByTestId("project-mission-link-rsi-v2")).getAttribute("href")).toBe("/project/mission/rsi-v2");
     expect(await findByTestId("project-mission-shell-redesign-v1")).toBeTruthy();
   });
 
@@ -216,7 +217,7 @@ describe("ProjectTreeView P5-5/P5-6 mission discovery", () => {
     expect(queryByTestId("project-mission-README.md")).toBeNull();
   });
 
-  it("falls back to railItem grouping when no allowlist root contains workspace.root", async () => {
+  it("falls back to indexed slice grouping when no allowlist root contains workspace.root", async () => {
     const { findByTestId } = renderTree({
       workspaceRoot: "/Users/admin/.openrig/workspace",
       roots: [{ name: "elsewhere", path: "/Users/admin/code/elsewhere" }],
@@ -237,7 +238,7 @@ describe("ProjectTreeView P5-5/P5-6 mission discovery", () => {
     expect(await findByTestId("project-mission-rsi-v2")).toBeTruthy();
   });
 
-  it("falls back to railItem grouping when allowlist is empty", async () => {
+  it("falls back to indexed slice grouping when allowlist is empty", async () => {
     const { findByTestId } = renderTree({
       workspaceRoot: "/Users/admin/.openrig/workspace",
       roots: [],
@@ -258,6 +259,53 @@ describe("ProjectTreeView P5-5/P5-6 mission discovery", () => {
     expect(await findByTestId("project-mission-unsorted")).toBeTruthy();
   });
 
+  it("separates live qitem-backed work from stale archived seed slices", async () => {
+    const { findByTestId, queryByTestId } = renderTree({
+      workspaceRoot: "/Users/admin/.openrig/workspace",
+      roots: [],
+      slices: [
+        {
+          name: "idea-ledger",
+          displayName: "Idea Ledger RSI v2 proof slice",
+          railItem: "RSI-V2-PROOF",
+          status: "done",
+          rawStatus: "done",
+          qitemCount: 78,
+          hasProofPacket: false,
+          lastActivityAt: "2026-05-07T22:06:36.083Z",
+        },
+        {
+          name: "seed-slice-active",
+          displayName: "seed-slice-active",
+          railItem: null,
+          status: "active",
+          rawStatus: "active",
+          qitemCount: 0,
+          hasProofPacket: false,
+          lastActivityAt: "2000-01-01T00:00:00.000Z",
+        },
+      ],
+    });
+
+    expect(await findByTestId("project-discovery-degraded")).toBeTruthy();
+    expect((await findByTestId("project-mission-section-current")).textContent).toContain(
+      "Current Work · 1",
+    );
+    expect((await findByTestId("project-mission-section-archive")).textContent).toContain(
+      "Archive · 1",
+    );
+
+    const liveMission = await findByTestId("project-mission-RSI-V2-PROOF");
+    expect(liveMission.getAttribute("data-mission-bucket")).toBe("current");
+    expect((await findByTestId("project-slice-idea-ledger-meta")).textContent).toContain(
+      "78 qitems",
+    );
+
+    const archiveMission = await findByTestId("project-mission-unsorted");
+    expect(archiveMission.getAttribute("data-mission-bucket")).toBe("archive");
+    expect(queryByTestId("project-slice-seed-slice-active")).toBeNull();
+  });
+
   it("workspace.root unconfigured renders the no-workspace empty-state (Phase 3 A5 behavior preserved)", async () => {
     const { findByTestId } = renderTree({
       workspaceRoot: null,
@@ -267,8 +315,8 @@ describe("ProjectTreeView P5-5/P5-6 mission discovery", () => {
     expect(await findByTestId("project-no-workspace")).toBeTruthy();
   });
 
-  it("matches slices to filesystem missions by railItem; orphans go to 'unsorted'", async () => {
-    const { findByTestId, queryByTestId } = renderTree({
+  it("matches slices to filesystem missions by missionId first; unmatched mission keys stay reachable", async () => {
+    const { findByTestId } = renderTree({
       workspaceRoot: "/Users/admin/.openrig/workspace",
       roots: [{ name: "workspace", path: "/Users/admin/.openrig/workspace" }],
       listings: {
@@ -280,8 +328,9 @@ describe("ProjectTreeView P5-5/P5-6 mission discovery", () => {
       slices: [
         {
           name: "slice-rsi",
+          missionId: "rsi-v2",
           displayName: "RSI Slice",
-          railItem: "rsi-v2",
+          railItem: null,
           status: "active",
           rawStatus: "active",
           qitemCount: 0,
@@ -301,6 +350,63 @@ describe("ProjectTreeView P5-5/P5-6 mission discovery", () => {
       ],
     });
     expect(await findByTestId("project-mission-rsi-v2")).toBeTruthy();
-    expect(await findByTestId("project-mission-unsorted")).toBeTruthy();
+    expect(await findByTestId("project-mission-no-such-mission")).toBeTruthy();
+  });
+
+  it("preserves unmatched legacy rail groups when filesystem missions are available", async () => {
+    const { findByTestId } = renderTree({
+      workspaceRoot: "/Users/admin/.openrig/workspace",
+      roots: [{ name: "workspace", path: "/Users/admin/.openrig/workspace" }],
+      listings: {
+        "workspace:missions": [{ name: "demo-seed", type: "dir" }],
+      },
+      reads: {
+        "workspace:missions/demo-seed/PROGRESS.md": { content: "---\nstatus: active\n---" },
+      },
+      slices: [
+        {
+          name: "idea-ledger-find-ideas-cycle-4",
+          missionId: "demo-seed",
+          displayName: "Find Ideas Cycle 4",
+          railItem: null,
+          status: "active",
+          rawStatus: "active",
+          qitemCount: 1,
+          hasProofPacket: false,
+          lastActivityAt: "2026-05-08T00:00:00.000Z",
+        },
+        {
+          name: "idea-ledger",
+          displayName: "Idea Ledger RSI v2 proof slice",
+          railItem: "RSI-V2-PROOF",
+          status: "done",
+          rawStatus: "done",
+          qitemCount: 78,
+          hasProofPacket: false,
+          lastActivityAt: "2026-05-07T22:06:36.083Z",
+        },
+        {
+          name: "seed-slice-active",
+          displayName: "seed-slice-active",
+          railItem: null,
+          status: "active",
+          rawStatus: "active",
+          qitemCount: 0,
+          hasProofPacket: false,
+          lastActivityAt: "2000-01-01T00:00:00.000Z",
+        },
+      ],
+    });
+
+    expect((await findByTestId("project-mission-section-current")).textContent).toContain(
+      "Current Work · 2",
+    );
+    expect((await findByTestId("project-mission-section-archive")).textContent).toContain(
+      "Archive · 1",
+    );
+    expect(await findByTestId("project-slice-idea-ledger-find-ideas-cycle-4")).toBeTruthy();
+    expect((await findByTestId("project-mission-demo-seed")).getAttribute("data-mission-bucket")).toBe("current");
+    expect((await findByTestId("project-mission-RSI-V2-PROOF")).getAttribute("data-mission-bucket")).toBe("current");
+    expect((await findByTestId("project-mission-unsorted")).getAttribute("data-mission-bucket")).toBe("archive");
   });
 });

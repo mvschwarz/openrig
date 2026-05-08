@@ -45,6 +45,7 @@ export const SETTINGS_VALID_KEYS = [
   "workspace.steering_path",
   "workspace.field_notes_root",
   "workspace.specs_root",
+  "workspace.dogfood_evidence_root",
   "files.allowlist",
   "progress.scan_roots",
   "ui.preview.refresh_interval_seconds",
@@ -86,6 +87,7 @@ const ENV_MAP: Record<SettingsValidKey, { primary: string; legacy: string }> = {
   "workspace.steering_path": { primary: "OPENRIG_WORKSPACE_STEERING_PATH", legacy: "RIGGED_WORKSPACE_STEERING_PATH" },
   "workspace.field_notes_root": { primary: "OPENRIG_WORKSPACE_FIELD_NOTES_ROOT", legacy: "RIGGED_WORKSPACE_FIELD_NOTES_ROOT" },
   "workspace.specs_root": { primary: "OPENRIG_WORKSPACE_SPECS_ROOT", legacy: "RIGGED_WORKSPACE_SPECS_ROOT" },
+  "workspace.dogfood_evidence_root": { primary: "OPENRIG_DOGFOOD_EVIDENCE_ROOT", legacy: "RIGGED_DOGFOOD_EVIDENCE_ROOT" },
   "files.allowlist": { primary: "OPENRIG_FILES_ALLOWLIST", legacy: "RIGGED_FILES_ALLOWLIST" },
   "progress.scan_roots": { primary: "OPENRIG_PROGRESS_SCAN_ROOTS", legacy: "RIGGED_PROGRESS_SCAN_ROOTS" },
   "ui.preview.refresh_interval_seconds": { primary: "OPENRIG_UI_PREVIEW_REFRESH_INTERVAL_SECONDS", legacy: "RIGGED_UI_PREVIEW_REFRESH_INTERVAL_SECONDS" },
@@ -115,6 +117,7 @@ const KEY_TO_PATH: Record<SettingsValidKey, string[]> = {
   "workspace.steering_path": ["workspace", "steeringPath"],
   "workspace.field_notes_root": ["workspace", "fieldNotesRoot"],
   "workspace.specs_root": ["workspace", "specsRoot"],
+  "workspace.dogfood_evidence_root": ["workspace", "dogfoodEvidenceRoot"],
   "files.allowlist": ["files", "allowlist"],
   "progress.scan_roots": ["progress", "scanRoots"],
   "ui.preview.refresh_interval_seconds": ["ui", "preview", "refreshIntervalSeconds"],
@@ -174,13 +177,22 @@ function setNestedValue(obj: Record<string, unknown>, parts: string[], value: un
 
 function deriveWorkspaceDefault(key: SettingsValidKey, workspaceRoot: string): string {
   switch (key) {
-    case "workspace.slices_root":      return path.join(workspaceRoot, "slices");
-    case "workspace.steering_path":    return path.join(workspaceRoot, "steering", "STEERING.md");
+    case "workspace.slices_root":      return path.join(workspaceRoot, "missions");
+    case "workspace.steering_path":    return path.join(workspaceRoot, "STEERING.md");
     case "workspace.field_notes_root": return path.join(workspaceRoot, "field-notes");
     case "workspace.specs_root":       return path.join(workspaceRoot, "specs");
+    case "workspace.dogfood_evidence_root": return path.join(workspaceRoot, "dogfood-evidence");
     case "files.allowlist":            return `workspace:${workspaceRoot}`;
     case "progress.scan_roots":        return `workspace:${workspaceRoot}`;
     default: return "";
+  }
+}
+
+function deriveLegacyWorkspaceDefault(key: SettingsValidKey, workspaceRoot: string): string | null {
+  switch (key) {
+    case "workspace.slices_root": return path.join(workspaceRoot, "slices");
+    case "workspace.steering_path": return path.join(workspaceRoot, "steering", "STEERING.md");
+    default: return null;
   }
 }
 
@@ -189,6 +201,7 @@ const WORKSPACE_DERIVED_KEYS: ReadonlySet<SettingsValidKey> = new Set([
   "workspace.steering_path",
   "workspace.field_notes_root",
   "workspace.specs_root",
+  "workspace.dogfood_evidence_root",
   "files.allowlist",
   "progress.scan_roots",
 ]);
@@ -252,6 +265,7 @@ export interface ResolvedConfig {
   workspaceSteeringPath: string;
   workspaceFieldNotesRoot: string;
   workspaceSpecsRoot: string;
+  workspaceDogfoodEvidenceRoot: string;
   filesAllowlistRaw: string;
   progressScanRootsRaw: string;
   // Preview Terminal v0 (PL-018) — UI preview preferences.
@@ -279,6 +293,10 @@ export class SettingsStore {
     }
     const fileVal = getNestedValue(fc, KEY_TO_PATH[key]);
     if (fileVal !== undefined && fileVal !== null && fileVal !== "") {
+      const legacyDefault = deriveLegacyWorkspaceDefault(key, wr);
+      if (legacyDefault !== null && fileVal === legacyDefault) {
+        return { value: defaultValue, source: "default", defaultValue };
+      }
       return { value: fileVal as string | number | boolean, source: "file", defaultValue };
     }
     return { value: defaultValue, source: "default", defaultValue };
@@ -304,6 +322,7 @@ export class SettingsStore {
       workspaceSteeringPath: this.resolveOne("workspace.steering_path", fc, wr).value as string,
       workspaceFieldNotesRoot: this.resolveOne("workspace.field_notes_root", fc, wr).value as string,
       workspaceSpecsRoot: this.resolveOne("workspace.specs_root", fc, wr).value as string,
+      workspaceDogfoodEvidenceRoot: this.resolveOne("workspace.dogfood_evidence_root", fc, wr).value as string,
       filesAllowlistRaw: this.resolveOne("files.allowlist", fc, wr).value as string,
       progressScanRootsRaw: this.resolveOne("progress.scan_roots", fc, wr).value as string,
       uiPreviewRefreshIntervalSeconds: this.resolveOne("ui.preview.refresh_interval_seconds", fc, wr).value as number,

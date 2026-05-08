@@ -21,12 +21,12 @@ function clearEnv(): () => void {
     "OPENRIG_TRANSCRIPTS_ENABLED", "OPENRIG_TRANSCRIPTS_PATH",
     "OPENRIG_WORKSPACE_ROOT", "OPENRIG_WORKSPACE_SLICES_ROOT",
     "OPENRIG_WORKSPACE_STEERING_PATH", "OPENRIG_WORKSPACE_FIELD_NOTES_ROOT",
-    "OPENRIG_WORKSPACE_SPECS_ROOT",
+    "OPENRIG_WORKSPACE_SPECS_ROOT", "OPENRIG_DOGFOOD_EVIDENCE_ROOT",
     "OPENRIG_FILES_ALLOWLIST", "OPENRIG_PROGRESS_SCAN_ROOTS",
     "OPENRIG_RECOVERY_AUTO_DRIVE_PROVIDER_PROMPTS",
     "OPENRIG_RECOVERY_PROVIDER_AUTH_ENV_ALLOWLIST",
     "RIGGED_PORT", "RIGGED_HOST", "RIGGED_FILES_ALLOWLIST",
-    "RIGGED_PROGRESS_SCAN_ROOTS",
+    "RIGGED_PROGRESS_SCAN_ROOTS", "RIGGED_DOGFOOD_EVIDENCE_ROOT",
     "RIGGED_RECOVERY_AUTO_DRIVE_PROVIDER_PROMPTS",
     "RIGGED_RECOVERY_PROVIDER_AUTH_ENV_ALLOWLIST",
   ];
@@ -66,6 +66,7 @@ describe("SettingsStore (User Settings v0)", () => {
       "transcripts.lines", "transcripts.poll_interval_seconds",
       "workspace.root", "workspace.slices_root", "workspace.steering_path",
       "workspace.field_notes_root", "workspace.specs_root",
+      "workspace.dogfood_evidence_root",
       "files.allowlist", "progress.scan_roots",
       "ui.preview.refresh_interval_seconds", "ui.preview.max_pins", "ui.preview.default_lines",
       "recovery.auto_drive_provider_prompts",
@@ -116,10 +117,11 @@ describe("SettingsStore (User Settings v0)", () => {
     store.set("workspace.root", "/custom/ws");
     const cfg = store.resolveConfig();
     expect(cfg.workspaceRoot).toBe("/custom/ws");
-    expect(cfg.workspaceSlicesRoot).toBe("/custom/ws/slices");
-    expect(cfg.workspaceSteeringPath).toBe("/custom/ws/steering/STEERING.md");
+    expect(cfg.workspaceSlicesRoot).toBe("/custom/ws/missions");
+    expect(cfg.workspaceSteeringPath).toBe("/custom/ws/STEERING.md");
     expect(cfg.workspaceFieldNotesRoot).toBe("/custom/ws/field-notes");
     expect(cfg.workspaceSpecsRoot).toBe("/custom/ws/specs");
+    expect(cfg.workspaceDogfoodEvidenceRoot).toBe("/custom/ws/dogfood-evidence");
     expect(cfg.filesAllowlistRaw).toBe("workspace:/custom/ws");
     expect(cfg.progressScanRootsRaw).toBe("workspace:/custom/ws");
   });
@@ -141,11 +143,41 @@ describe("SettingsStore (User Settings v0)", () => {
   it("per-subdir override beats the workspace.root cascade", () => {
     const store = new SettingsStore(configPath);
     store.set("workspace.root", "/ws");
-    store.set("workspace.slices_root", "/founder/slices");
+    store.set("workspace.slices_root", "/custom/slices");
     const cfg = store.resolveConfig();
-    expect(cfg.workspaceSlicesRoot).toBe("/founder/slices");
+    expect(cfg.workspaceSlicesRoot).toBe("/custom/slices");
     // Other subdirs still cascade from workspace.root:
     expect(cfg.workspaceFieldNotesRoot).toBe("/ws/field-notes");
+    expect(cfg.workspaceDogfoodEvidenceRoot).toBe("/ws/dogfood-evidence");
+  });
+
+  it("workspace.dogfood_evidence_root defaults from workspace.root and supports env override", () => {
+    const store = new SettingsStore(configPath);
+    store.set("workspace.root", "/custom/ws");
+    expect(store.resolveConfig().workspaceDogfoodEvidenceRoot).toBe("/custom/ws/dogfood-evidence");
+
+    process.env["OPENRIG_DOGFOOD_EVIDENCE_ROOT"] = "/proof/root";
+    try {
+      const resolved = store.resolveOne("workspace.dogfood_evidence_root");
+      expect(resolved).toMatchObject({ value: "/proof/root", source: "env" });
+    } finally {
+      delete process.env["OPENRIG_DOGFOOD_EVIDENCE_ROOT"];
+    }
+  });
+
+  it("treats persisted legacy workspace defaults as default-derived values", () => {
+    writeFileSync(configPath, JSON.stringify({
+      workspace: {
+        root: "/ws",
+        slicesRoot: "/ws/slices",
+        steeringPath: "/ws/steering/STEERING.md",
+      },
+    }));
+    const store = new SettingsStore(configPath);
+    const slices = store.resolveOne("workspace.slices_root");
+    const steering = store.resolveOne("workspace.steering_path");
+    expect(slices).toMatchObject({ value: "/ws/missions", source: "default" });
+    expect(steering).toMatchObject({ value: "/ws/STEERING.md", source: "default" });
   });
 
   it("UEP env-var graduation: OPENRIG_FILES_ALLOWLIST resolves files.allowlist", () => {
@@ -161,9 +193,9 @@ describe("SettingsStore (User Settings v0)", () => {
 
   it("set + reset round-trips through the file format", () => {
     const store = new SettingsStore(configPath);
-    store.set("workspace.slices_root", "/founder/slices");
+    store.set("workspace.slices_root", "/custom/slices");
     expect(existsSync(configPath)).toBe(true);
-    expect(store.resolveOne("workspace.slices_root").value).toBe("/founder/slices");
+    expect(store.resolveOne("workspace.slices_root").value).toBe("/custom/slices");
 
     store.reset("workspace.slices_root");
     expect(store.resolveOne("workspace.slices_root").source).toBe("default");

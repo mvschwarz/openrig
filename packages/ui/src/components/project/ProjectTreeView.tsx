@@ -5,7 +5,7 @@
 // and live MissionStatusBadge derived from PROGRESS.md frontmatter via
 // useMissionProgressStatus (over /api/files/read). When the allowlist
 // doesn't expose workspace.root, the tree falls back to the legacy
-// railItem-grouped slice listing.
+// railItem/missionId-grouped slice listing.
 
 import { useState, useMemo } from "react";
 import { Link } from "@tanstack/react-router";
@@ -18,27 +18,26 @@ import {
 } from "../../hooks/useMissionDiscovery.js";
 import { useMissionProgressStatus } from "../../hooks/useMissionProgressStatus.js";
 import { MissionStatusBadge, type MissionStatus } from "../MissionStatusBadge.js";
-
-type SliceRow = { name: string; displayName: string; status: string };
+import {
+  deriveMissionStatusFromSlices,
+  isCurrentProjectSlice,
+  partitionProjectMissions,
+  projectSliceFromListEntry,
+  projectSliceMeta,
+  type ProjectMissionBucket,
+  type ProjectSliceRow,
+} from "../../lib/project-mission-state.js";
 
 type GroupedMission = {
   id: string;
   label: string;
   status: MissionStatus;
-  slices: SliceRow[];
+  slices: ProjectSliceRow[];
   // P5-5: filesystem-discovered missions carry root + path so the live
   // PROGRESS.md status fetcher knows where to read.
   fsRoot?: string;
   fsPath?: string;
 };
-
-function deriveStatusFromSlices(slices: Array<{ status: string }>): MissionStatus {
-  if (slices.length === 0) return "unknown";
-  if (slices.some((s) => s.status === "blocked")) return "blocked";
-  if (slices.some((s) => s.status === "active")) return "active";
-  if (slices.every((s) => s.status === "done")) return "shipped";
-  return "active";
-}
 
 /** Live mission-status badge: when the mission was discovered on disk,
  *  fetches PROGRESS.md frontmatter; otherwise falls back to the heuristic
@@ -70,63 +69,61 @@ export function ProjectTreeView() {
   const sliceList: SliceListEntry[] =
     slicesResp && "slices" in slicesResp ? slicesResp.slices : [];
 
-  // Group slices by railItem (the "mission" label they self-report).
-  const slicesByRailItem = useMemo(() => {
-    const buckets = new Map<string, SliceRow[]>();
+  // Group slices by missionId first, then railItem for legacy flat roots.
+  const slicesByMissionKey = useMemo(() => {
+    const buckets = new Map<string, ProjectSliceRow[]>();
     for (const s of sliceList) {
-      const key = s.railItem ?? "unsorted";
+      const key = s.missionId ?? s.railItem ?? "unsorted";
       if (!buckets.has(key)) buckets.set(key, []);
-      buckets.get(key)!.push({
-        name: s.name,
-        displayName: s.displayName,
-        status: s.status,
-      });
+      buckets.get(key)!.push(projectSliceFromListEntry(s));
     }
     return buckets;
   }, [sliceList]);
 
   // P5-5: when filesystem mission discovery is available, surface the
-  // disk-discovered missions and attach their slices via railItem match.
-  // Otherwise fall back to railItem grouping alone.
+  // disk-discovered missions and attach their slices via missionId match.
+  // Otherwise fall back to missionId/railItem grouping alone.
   const missions = useMemo<GroupedMission[]>(() => {
     if (!discovery.unavailable && discovery.missions.length > 0) {
-      const orphanSlices: SliceRow[] = [];
       const consumedKeys = new Set<string>();
       const discovered: GroupedMission[] = discovery.missions.map((m: DiscoveredMission) => {
-        const matchedSlices = slicesByRailItem.get(m.name) ?? [];
+        const matchedSlices = slicesByMissionKey.get(m.name) ?? [];
         if (matchedSlices.length > 0) consumedKeys.add(m.name);
         return {
           id: m.name,
           label: m.name,
-          status: deriveStatusFromSlices(matchedSlices), // baseline; live overrides via badge
+          status: deriveMissionStatusFromSlices(matchedSlices), // baseline; live overrides via badge
           slices: matchedSlices,
           fsRoot: m.root,
           fsPath: m.path,
         };
       });
-      // Any slice whose railItem doesn't match a disk mission goes into
-      // "unsorted" so it's still reachable.
-      for (const [railItem, slices] of slicesByRailItem.entries()) {
-        if (!consumedKeys.has(railItem)) orphanSlices.push(...slices);
-      }
-      if (orphanSlices.length > 0) {
+      // Any slice whose mission key doesn't match a disk mission goes into
+      // its own indexed group so legacy railItem missions do not get
+      // collapsed into one mixed current/archive bucket.
+      for (const [missionKey, slices] of slicesByMissionKey.entries()) {
+        if (consumedKeys.has(missionKey)) continue;
         discovered.push({
-          id: "unsorted",
-          label: "Unsorted",
-          status: deriveStatusFromSlices(orphanSlices),
-          slices: orphanSlices,
+          id: missionKey,
+          label: missionKey === "unsorted" ? "Unsorted" : missionKey,
+          status: deriveMissionStatusFromSlices(slices),
+          slices,
         });
       }
       return discovered;
     }
-    // Fallback: railItem grouping only (Phase 3 behavior).
-    return Array.from(slicesByRailItem.entries()).map(([k, slices]) => ({
+    // Fallback: missionId/railItem grouping only.
+    return Array.from(slicesByMissionKey.entries()).map(([k, slices]) => ({
       id: k,
       label: k === "unsorted" ? "Unsorted" : k,
-      status: deriveStatusFromSlices(slices),
+      status: deriveMissionStatusFromSlices(slices),
       slices,
     }));
-  }, [discovery.unavailable, discovery.missions, slicesByRailItem]);
+  }, [discovery.unavailable, discovery.missions, slicesByMissionKey]);
+
+  const missionSections = useMemo(() => {
+    return partitionProjectMissions(missions);
+  }, [missions]);
 
   // A5 bounce-fix: replace hardcoded "openrig-work" with live-wired
   // workspace name from ConfigStore. When unset/unreachable: render an
@@ -160,6 +157,80 @@ export function ProjectTreeView() {
   }
 
   const workspaceLabel = workspace.name ?? "loading…";
+  const isExpanded = (key: string, defaultValue = false) => expanded[key] ?? defaultValue;
+
+  const renderMission = (m: GroupedMission, bucket: ProjectMissionBucket) => {
+    const defaultExpanded = bucket === "current";
+    const missionExpanded = isExpanded(`mission-${m.id}`, defaultExpanded);
+    return (
+      <li
+        key={m.id}
+        data-testid={`project-mission-${m.id}`}
+        data-mission-bucket={bucket}
+      >
+        <div className="w-full flex items-center gap-1 px-2 py-0.5 hover:bg-surface-low text-left">
+          <button
+            type="button"
+            aria-label={`${missionExpanded ? "Collapse" : "Expand"} ${m.label}`}
+            onClick={() =>
+              setExpanded((p) => ({
+                ...p,
+                [`mission-${m.id}`]: !missionExpanded,
+              }))
+            }
+            className="flex h-4 w-4 items-center justify-center"
+            data-testid={`project-mission-toggle-${m.id}`}
+          >
+            {missionExpanded ? (
+              <ChevronDown className="h-3 w-3 text-on-surface-variant" />
+            ) : (
+              <ChevronRight className="h-3 w-3 text-on-surface-variant" />
+            )}
+          </button>
+          <Link
+            to="/project/mission/$missionId"
+            params={{ missionId: m.id }}
+            data-testid={`project-mission-link-${m.id}`}
+            className="font-mono text-[11px] text-stone-900 flex-1 truncate hover:underline"
+          >
+            {m.label}
+          </Link>
+          <LiveMissionStatusBadge mission={m} />
+        </div>
+        {missionExpanded ? (
+          <ul className="ml-4 border-l border-stone-200">
+            {m.slices.length === 0 ? (
+              <li className="px-2 py-0.5 font-mono text-[10px] text-on-surface-variant italic">
+                No slices.
+              </li>
+            ) : (
+              m.slices.map((s) => {
+                const sliceBucket = isCurrentProjectSlice(s) ? "current" : "archive";
+                return (
+                  <li key={s.name} data-slice-bucket={sliceBucket}>
+                    <Link
+                      to="/project/slice/$sliceId"
+                      params={{ sliceId: s.name }}
+                      data-testid={`project-slice-${s.name}`}
+                      className="block px-2 py-1 font-mono text-xs text-on-surface hover:text-stone-900 hover:bg-surface-low"
+                    >
+                      <span className="block truncate">{s.displayName}</span>
+                      <span
+                        data-testid={`project-slice-${s.name}-meta`}
+                        className="block truncate text-[9px] uppercase tracking-[0.12em] text-stone-500"
+                      >
+                        {projectSliceMeta(s)}
+                      </span>
+                    </Link>
+                  </li>
+                );
+              })
+            )}
+          </ul>
+        ) : null}
+      </li>
+    );
+  };
 
   return (
     <div data-testid="project-tree-view" className="flex-1 overflow-y-auto py-2">
@@ -191,7 +262,7 @@ export function ProjectTreeView() {
               open
             </Link>
           </button>
-          {expanded.workspace ? (
+          {isExpanded("workspace") ? (
             <ul className="ml-4 border-l border-stone-200">
               {discovery.unavailable && discovery.hint ? (
                 <li
@@ -199,7 +270,7 @@ export function ProjectTreeView() {
                   className="px-2 py-1 font-mono text-[9px] text-on-surface-variant italic"
                   title={discovery.hint}
                 >
-                  Filesystem mission discovery unavailable; showing railItem grouping.
+                  Workspace missions folder unavailable; showing indexed slice grouping. Expected workspace/missions/&lt;mission&gt;/slices/&lt;slice&gt;.
                 </li>
               ) : null}
               {missions.length === 0 ? (
@@ -207,48 +278,40 @@ export function ProjectTreeView() {
                   No missions yet.
                 </li>
               ) : (
-                missions.map((m) => (
-                  <li key={m.id} data-testid={`project-mission-${m.id}`}>
-                    <button
-                      type="button"
-                      onClick={() => toggle(`mission-${m.id}`)}
-                      className="w-full flex items-center gap-1 px-2 py-0.5 hover:bg-surface-low text-left"
-                      data-testid={`project-mission-toggle-${m.id}`}
-                    >
-                      {expanded[`mission-${m.id}`] ? (
-                        <ChevronDown className="h-3 w-3 text-on-surface-variant" />
-                      ) : (
-                        <ChevronRight className="h-3 w-3 text-on-surface-variant" />
-                      )}
-                      <span className="font-mono text-[11px] text-stone-900 flex-1 truncate">
-                        {m.label}
-                      </span>
-                      <LiveMissionStatusBadge mission={m} />
-                    </button>
-                    {expanded[`mission-${m.id}`] ? (
-                      <ul className="ml-4 border-l border-stone-200">
-                        {m.slices.length === 0 ? (
-                          <li className="px-2 py-0.5 font-mono text-[10px] text-on-surface-variant italic">
-                            No slices.
-                          </li>
-                        ) : (
-                          m.slices.map((s) => (
-                            <li key={s.name}>
-                              <Link
-                                to="/project/slice/$sliceId"
-                                params={{ sliceId: s.name }}
-                                data-testid={`project-slice-${s.name}`}
-                                className="block px-2 py-0.5 font-mono text-xs text-on-surface hover:text-stone-900 hover:bg-surface-low truncate"
-                              >
-                                {s.displayName}
-                              </Link>
-                            </li>
-                          ))
-                        )}
-                      </ul>
-                    ) : null}
+                <>
+                  <li
+                    data-testid="project-mission-section-current"
+                    className="px-2 pt-2 pb-1 font-mono text-[9px] uppercase tracking-[0.16em] text-stone-500"
+                  >
+                    Current Work · {missionSections.current.length}
                   </li>
-                ))
+                  {missionSections.current.length > 0 ? (
+                    missionSections.current.map((m) => renderMission(m, "current"))
+                  ) : (
+                    <li
+                      data-testid="project-mission-section-current-empty"
+                      className="px-2 py-1 font-mono text-[10px] text-on-surface-variant italic"
+                    >
+                      No current work.
+                    </li>
+                  )}
+                  <li
+                    data-testid="project-mission-section-archive"
+                    className="px-2 pt-3 pb-1 font-mono text-[9px] uppercase tracking-[0.16em] text-stone-500"
+                  >
+                    Archive · {missionSections.archive.length}
+                  </li>
+                  {missionSections.archive.length > 0 ? (
+                    missionSections.archive.map((m) => renderMission(m, "archive"))
+                  ) : (
+                    <li
+                      data-testid="project-mission-section-archive-empty"
+                      className="px-2 py-1 font-mono text-[10px] text-on-surface-variant italic"
+                    >
+                      No archived work.
+                    </li>
+                  )}
+                </>
               )}
             </ul>
           ) : null}

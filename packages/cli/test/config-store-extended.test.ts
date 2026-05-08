@@ -7,7 +7,7 @@
 //   - UEP env-var graduation: OPENRIG_FILES_ALLOWLIST + OPENRIG_PROGRESS_SCAN_ROOTS still work
 //   - reset(key) clears one key; bare reset deletes the file
 //   - parseNamedPairs decodes the named-pair format
-//   - init-workspace creates 5 subdirs + READMEs + STEERING placeholder; idempotent
+//   - init-workspace creates mission-aware workspace files; idempotent
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { Command } from "commander";
@@ -29,13 +29,14 @@ function clearEnv(): () => void {
     "OPENRIG_TRANSCRIPTS_ENABLED", "OPENRIG_TRANSCRIPTS_PATH",
     "OPENRIG_WORKSPACE_ROOT", "OPENRIG_WORKSPACE_SLICES_ROOT",
     "OPENRIG_WORKSPACE_STEERING_PATH", "OPENRIG_WORKSPACE_FIELD_NOTES_ROOT",
-    "OPENRIG_WORKSPACE_SPECS_ROOT",
+    "OPENRIG_WORKSPACE_SPECS_ROOT", "OPENRIG_DOGFOOD_EVIDENCE_ROOT",
     "OPENRIG_FILES_ALLOWLIST", "OPENRIG_PROGRESS_SCAN_ROOTS",
     "OPENRIG_RECOVERY_AUTO_DRIVE_PROVIDER_PROMPTS",
     "OPENRIG_RECOVERY_PROVIDER_AUTH_ENV_ALLOWLIST",
     "RIGGED_PORT", "RIGGED_HOST", "RIGGED_DB",
     "RIGGED_TRANSCRIPTS_ENABLED", "RIGGED_TRANSCRIPTS_PATH",
     "RIGGED_WORKSPACE_ROOT", "RIGGED_WORKSPACE_SLICES_ROOT",
+    "RIGGED_DOGFOOD_EVIDENCE_ROOT",
     "RIGGED_FILES_ALLOWLIST", "RIGGED_PROGRESS_SCAN_ROOTS",
     "RIGGED_RECOVERY_AUTO_DRIVE_PROVIDER_PROMPTS",
     "RIGGED_RECOVERY_PROVIDER_AUTH_ENV_ALLOWLIST",
@@ -76,6 +77,7 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
       "transcripts.lines", "transcripts.poll_interval_seconds",
       "workspace.root", "workspace.slices_root", "workspace.steering_path",
       "workspace.field_notes_root", "workspace.specs_root",
+      "workspace.dogfood_evidence_root",
       "files.allowlist", "progress.scan_roots",
       "ui.preview.refresh_interval_seconds", "ui.preview.max_pins", "ui.preview.default_lines",
       "recovery.auto_drive_provider_prompts",
@@ -121,10 +123,11 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
     const store = new ConfigStore(configPath);
     const cfg = store.resolve();
     expect(cfg.workspace.root).toMatch(/\.openrig[\/\\]workspace$/);
-    expect(cfg.workspace.slicesRoot).toBe(join(cfg.workspace.root, "slices"));
-    expect(cfg.workspace.steeringPath).toBe(join(cfg.workspace.root, "steering", "STEERING.md"));
+    expect(cfg.workspace.slicesRoot).toBe(join(cfg.workspace.root, "missions"));
+    expect(cfg.workspace.steeringPath).toBe(join(cfg.workspace.root, "STEERING.md"));
     expect(cfg.workspace.fieldNotesRoot).toBe(join(cfg.workspace.root, "field-notes"));
     expect(cfg.workspace.specsRoot).toBe(join(cfg.workspace.root, "specs"));
+    expect(cfg.workspace.dogfoodEvidenceRoot).toBe(join(cfg.workspace.root, "dogfood-evidence"));
     expect(cfg.files.allowlist).toBe(`workspace:${cfg.workspace.root}`);
     expect(cfg.progress.scanRoots).toBe(`workspace:${cfg.workspace.root}`);
   });
@@ -134,21 +137,38 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
     store.set("workspace.root", "/custom/ws");
     const cfg = store.resolve();
     expect(cfg.workspace.root).toBe("/custom/ws");
-    expect(cfg.workspace.slicesRoot).toBe("/custom/ws/slices");
-    expect(cfg.workspace.steeringPath).toBe("/custom/ws/steering/STEERING.md");
+    expect(cfg.workspace.slicesRoot).toBe("/custom/ws/missions");
+    expect(cfg.workspace.steeringPath).toBe("/custom/ws/STEERING.md");
+    expect(cfg.workspace.dogfoodEvidenceRoot).toBe("/custom/ws/dogfood-evidence");
     expect(cfg.files.allowlist).toBe("workspace:/custom/ws");
     expect(cfg.progress.scanRoots).toBe("workspace:/custom/ws");
+  });
+
+  it("treats persisted legacy workspace defaults as default-derived values", () => {
+    writeFileSync(configPath, JSON.stringify({
+      workspace: {
+        root: "/custom/ws",
+        slicesRoot: "/custom/ws/slices",
+        steeringPath: "/custom/ws/steering/STEERING.md",
+      },
+    }));
+    const store = new ConfigStore(configPath);
+    const slices = store.resolveWithSource("workspace.slices_root");
+    const steering = store.resolveWithSource("workspace.steering_path");
+    expect(slices).toMatchObject({ value: "/custom/ws/missions", source: "default" });
+    expect(steering).toMatchObject({ value: "/custom/ws/STEERING.md", source: "default" });
   });
 
   it("per-subdir override beats workspace.root cascade", () => {
     const store = new ConfigStore(configPath);
     store.set("workspace.root", "/ws");
-    store.set("workspace.slices_root", "/founder/slices");
+    store.set("workspace.slices_root", "/custom/slices");
     const cfg = store.resolve();
     // workspace.root cascade applies to OTHER subdirs:
     expect(cfg.workspace.fieldNotesRoot).toBe("/ws/field-notes");
+    expect(cfg.workspace.dogfoodEvidenceRoot).toBe("/ws/dogfood-evidence");
     // per-subdir override wins:
-    expect(cfg.workspace.slicesRoot).toBe("/founder/slices");
+    expect(cfg.workspace.slicesRoot).toBe("/custom/slices");
   });
 
   it("env > file > default for new keys", () => {
@@ -193,6 +213,21 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
       expect(r.source).toBe("env");
     } finally {
       delete process.env["OPENRIG_PROGRESS_SCAN_ROOTS"];
+    }
+  });
+
+  it("dogfood evidence root defaults under workspace.root and supports env override", () => {
+    const store = new ConfigStore(configPath);
+    store.set("workspace.root", "/custom/ws");
+    expect(store.resolve().workspace.dogfoodEvidenceRoot).toBe("/custom/ws/dogfood-evidence");
+
+    process.env["OPENRIG_DOGFOOD_EVIDENCE_ROOT"] = "/proof/root";
+    try {
+      const r = store.resolveWithSource("workspace.dogfood_evidence_root");
+      expect(r.value).toBe("/proof/root");
+      expect(r.source).toBe("env");
+    } finally {
+      delete process.env["OPENRIG_DOGFOOD_EVIDENCE_ROOT"];
     }
   });
 
@@ -354,10 +389,11 @@ describe("parseNamedPairs", () => {
 
 describe("deriveWorkspaceDefault", () => {
   it("returns canonical subpaths under workspace root", () => {
-    expect(deriveWorkspaceDefault("workspace.slices_root", "/ws")).toBe("/ws/slices");
-    expect(deriveWorkspaceDefault("workspace.steering_path", "/ws")).toBe("/ws/steering/STEERING.md");
+    expect(deriveWorkspaceDefault("workspace.slices_root", "/ws")).toBe("/ws/missions");
+    expect(deriveWorkspaceDefault("workspace.steering_path", "/ws")).toBe("/ws/STEERING.md");
     expect(deriveWorkspaceDefault("workspace.field_notes_root", "/ws")).toBe("/ws/field-notes");
     expect(deriveWorkspaceDefault("workspace.specs_root", "/ws")).toBe("/ws/specs");
+    expect(deriveWorkspaceDefault("workspace.dogfood_evidence_root", "/ws")).toBe("/ws/dogfood-evidence");
   });
 });
 
@@ -381,9 +417,15 @@ describe("init-workspace runner", () => {
   it("--dry-run reports what would be created without writing anything", () => {
     const result = runInitWorkspace({ dryRun: true, root: workspaceRoot, configPath });
     expect(result.dryRun).toBe(true);
-    expect(result.subdirs.map((s) => s.name)).toEqual([
-      "slices", "steering", "progress", "field-notes", "specs",
-    ]);
+    expect(result.subdirs.map((s) => s.name)).toEqual(expect.arrayContaining([
+      "missions",
+      "progress",
+      "field-notes",
+      "specs",
+      "dogfood-evidence",
+      "missions/idea-ledger/slices/capture-product-ideas",
+      "missions/handoff-loop/slices/route-work-packets",
+    ]));
     expect(existsSync(workspaceRoot)).toBe(false);
   });
 
@@ -401,7 +443,7 @@ describe("init-workspace runner", () => {
     const parsed = JSON.parse(logs.join("\n")) as { root: string; dryRun: boolean; subdirs: Array<{ name: string }> };
     expect(parsed.root).toBe(workspaceRoot);
     expect(parsed.dryRun).toBe(true);
-    expect(parsed.subdirs.map((s) => s.name)).toContain("slices");
+    expect(parsed.subdirs.map((s) => s.name)).toContain("missions/idea-ledger/slices/capture-product-ideas");
   });
 
   it("rig-level --json emits parseable JSON for config init-workspace", async () => {
@@ -431,37 +473,39 @@ describe("init-workspace runner", () => {
     const parsed = JSON.parse(logs.join("\n")) as { root: string; dryRun: boolean; subdirs: Array<{ name: string }> };
     expect(parsed.root).toBe(workspaceRoot);
     expect(parsed.dryRun).toBe(true);
-    expect(parsed.subdirs.map((s) => s.name)).toContain("slices");
+    expect(parsed.subdirs.map((s) => s.name)).toContain("missions/handoff-loop/slices/route-work-packets");
   });
 
-  it("creates 5 subdirs + READMEs + STEERING placeholder", () => {
+  it("creates mission-aware workspace files + STEERING placeholder", () => {
     const result = runInitWorkspace({ root: workspaceRoot, configPath });
     expect(result.dryRun).toBe(false);
     expect(existsSync(workspaceRoot)).toBe(true);
-    for (const sub of ["slices", "steering", "progress", "field-notes", "specs"]) {
+    for (const sub of ["missions", "progress", "field-notes", "specs", "dogfood-evidence"]) {
       expect(existsSync(join(workspaceRoot, sub))).toBe(true);
       expect(existsSync(join(workspaceRoot, sub, "README.md"))).toBe(true);
     }
-    const steeringMd = readFileSync(join(workspaceRoot, "steering", "STEERING.md"), "utf-8");
+    expect(existsSync(join(workspaceRoot, "missions", "idea-ledger", "slices", "capture-product-ideas", "README.md"))).toBe(true);
+    expect(existsSync(join(workspaceRoot, "missions", "handoff-loop", "slices", "verify-loop-evidence", "IMPLEMENTATION-PRD.md"))).toBe(true);
+    const steeringMd = readFileSync(join(workspaceRoot, "STEERING.md"), "utf-8");
     expect(steeringMd).toContain("OpenRig Priority Stack");
   });
 
   it("is idempotent: running twice without --force is a no-op for existing files", () => {
     runInitWorkspace({ root: workspaceRoot, configPath });
-    const sliceReadme = join(workspaceRoot, "slices", "README.md");
+    const sliceReadme = join(workspaceRoot, "missions", "idea-ledger", "slices", "capture-product-ideas", "README.md");
     writeFileSync(sliceReadme, "operator-edited content", "utf-8");
 
     const second = runInitWorkspace({ root: workspaceRoot, configPath });
-    const sliceFile = second.files.find((f) => f.relPath === "slices/README.md");
+    const sliceFile = second.files.find((f) => f.relPath === "missions/idea-ledger/slices/capture-product-ideas/README.md");
     expect(sliceFile?.skipped).toBe("exists");
     expect(readFileSync(sliceReadme, "utf-8")).toBe("operator-edited content");
   });
 
   it("--force overwrites existing files but never deletes operator content under directories", () => {
     runInitWorkspace({ root: workspaceRoot, configPath });
-    const operatorFile = join(workspaceRoot, "slices", "my-slice.md");
+    const operatorFile = join(workspaceRoot, "missions", "idea-ledger", "slices", "capture-product-ideas", "operator-note.md");
     writeFileSync(operatorFile, "my work", "utf-8");
-    const operatorReadme = join(workspaceRoot, "slices", "README.md");
+    const operatorReadme = join(workspaceRoot, "missions", "idea-ledger", "slices", "capture-product-ideas", "README.md");
     writeFileSync(operatorReadme, "edited", "utf-8");
 
     runInitWorkspace({ root: workspaceRoot, force: true, configPath });
@@ -469,7 +513,7 @@ describe("init-workspace runner", () => {
     expect(existsSync(operatorFile)).toBe(true);
     expect(readFileSync(operatorFile, "utf-8")).toBe("my work");
     // README is overwritten
-    expect(readFileSync(operatorReadme, "utf-8")).toContain("# slices");
+    expect(readFileSync(operatorReadme, "utf-8")).toContain("# Capture Product Ideas");
   });
 
   it("--root override beats configured workspace.root", () => {

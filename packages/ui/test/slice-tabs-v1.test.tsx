@@ -10,16 +10,19 @@
 //   - TopologyTab: per-rig listing still renders alongside spec graph
 //   - TopologyTab: routingType="direct" carved-out — every edge has it
 
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { render, screen, cleanup, waitFor } from "@testing-library/react";
+import type { ReactNode } from "react";
 import { createTestRouter } from "./helpers/test-router.js";
 import { StoryTab } from "../src/components/slices/tabs/StoryTab.js";
+import { DrawerSelectionContext } from "../src/components/AppShell.js";
 import { AcceptanceTab } from "../src/components/slices/tabs/AcceptanceTab.js";
 import { TopologyTab } from "../src/components/slices/tabs/TopologyTab.js";
 import type {
   StoryEvent,
   PhaseDefinition,
   CurrentStepPayload,
+  QueueItemDetail,
   SpecGraphPayload,
   SliceDetail,
 } from "../src/hooks/useSlices.js";
@@ -45,6 +48,14 @@ const SPEC_PHASES: PhaseDefinition[] = [
   { id: "qa", label: "qa-tester", role: "qa-tester" },
 ];
 
+function renderStory(ui: ReactNode) {
+  return render(
+    <DrawerSelectionContext.Provider value={{ selection: null, setSelection: vi.fn() }}>
+      {ui}
+    </DrawerSelectionContext.Provider>,
+  );
+}
+
 describe("PL-slice-story-view-v1 StoryTab", () => {
   it("groups events by spec-declared phase labels (NOT v0 hardcoded RSI-v2 names)", () => {
     const events = [
@@ -52,7 +63,7 @@ describe("PL-slice-story-view-v1 StoryTab", () => {
       event({ kind: "queue.handed_off", phase: "delivery", qitemId: "q-x" }),
       event({ kind: "transition.in-progress", phase: "qa", qitemId: "q-q" }),
     ];
-    render(<StoryTab events={events} phaseDefinitions={SPEC_PHASES} />);
+    renderStory(<StoryTab events={events} phaseDefinitions={SPEC_PHASES} />);
     // Each row's phase chip uses the spec-declared label (which equals
     // the actor_role for v1's projector default).
     expect(screen.getByTestId("story-row-phase-queue.created").textContent).toBe("discovery-router");
@@ -62,21 +73,21 @@ describe("PL-slice-story-view-v1 StoryTab", () => {
 
   it("untagged events render with the neutral 'untagged' label + stone palette", () => {
     const events = [event({ kind: "doc.edited", phase: null, qitemId: null })];
-    render(<StoryTab events={events} phaseDefinitions={SPEC_PHASES} />);
+    renderStory(<StoryTab events={events} phaseDefinitions={SPEC_PHASES} />);
     const chip = screen.getByTestId("story-row-phase-doc.edited");
     expect(chip.textContent).toBe("untagged");
     expect(chip.getAttribute("data-phase-id")).toBe("untagged");
     expect(chip.className).toContain("stone-100");
   });
 
-  it("when phaseDefinitions is null (unbound slice), spec phase ids on events fall through verbatim", () => {
+  it("when phaseDefinitions is null (unbound slice), spec phase ids on events fall through exactly", () => {
     // Edge case: an event somehow carries a phase id but the slice isn't
     // bound. The chip falls back to displaying the raw phase id rather
     // than crashing. (Realistic v1 scenario when a previously-bound slice
     // loses its workflow_instance binding — events were tagged at fetch
     // time, definitions weren't.)
     const events = [event({ kind: "queue.created", phase: "step-x" })];
-    render(<StoryTab events={events} phaseDefinitions={null} />);
+    renderStory(<StoryTab events={events} phaseDefinitions={null} />);
     expect(screen.getByTestId("story-row-phase-queue.created").textContent).toBe("step-x");
   });
 
@@ -85,11 +96,45 @@ describe("PL-slice-story-view-v1 StoryTab", () => {
       event({ kind: "old.event", ts: "2026-05-04T00:00:00.000Z", summary: "older" }),
       event({ kind: "new.event", ts: "2026-05-04T01:00:00.000Z", summary: "newer" }),
     ];
-    render(<StoryTab events={events} phaseDefinitions={null} />);
+    renderStory(<StoryTab events={events} phaseDefinitions={null} />);
     expect(screen.getByTestId("story-step-tree").getAttribute("data-order")).toBe("newest-first");
     const rows = screen.getAllByTestId(/story-row-/);
     expect(rows[0]?.getAttribute("data-testid")).toBe("story-row-new.event");
     expect(screen.getByTestId("story-step-connector-new.event")).toBeDefined();
+  });
+
+  it("renders qitem body as the primary story content when queue details are loaded", () => {
+    const queueItem: QueueItemDetail = {
+      qitemId: "q-1",
+      tsCreated: "2026-05-04T00:00:00.000Z",
+      tsUpdated: "2026-05-04T00:00:00.000Z",
+      sourceSession: "src@r",
+      destinationSession: "dest@r",
+      state: "in-progress",
+      priority: "routine",
+      tier: "mode2",
+      tags: ["demo"],
+      body: "Implement the observability body-first story view.\nInclude acceptance evidence.",
+    };
+    renderStory(
+      <StoryTab
+        events={[
+          event({
+            kind: "queue.created",
+            qitemId: "q-1",
+            summary: "src@r -> dest@r: truncated metadata summary",
+          }),
+        ]}
+        phaseDefinitions={null}
+        queueItemsById={new Map([["q-1", queueItem]])}
+      />,
+    );
+    const body = screen.getByTestId("story-row-body-queue.created");
+    expect(body.getAttribute("data-source")).toBe("qitem");
+    expect(body.textContent).toContain("Implement the observability body-first story view.");
+    expect(screen.getByTestId("story-row-summary-queue.created").textContent).toContain(
+      "truncated metadata summary",
+    );
   });
 });
 
@@ -213,10 +258,11 @@ describe("PL-slice-story-view-v1 TopologyTab", () => {
     expect(screen.getByTestId("topology-rig-demo")).toBeDefined();
   });
 
-  it("does NOT render the spec graph panel when unbound (specGraph=null) — v0 fallback", async () => {
+  it("renders a derived runtime graph when unbound but affected seats are present", async () => {
     render(makeRouter(topologyShape(null)));
     await waitFor(() => expect(screen.getByTestId("topology-rig-demo")).toBeDefined());
-    expect(screen.queryByTestId("topology-spec-graph")).toBeNull();
+    expect(screen.getByTestId("topology-spec-graph").getAttribute("data-spec-name")).toBe("runtime-handoff-map");
+    expect(screen.getByTestId("spec-node-demo")).toBeDefined();
   });
 
   it("v1 carve-out: every spec edge carries data-routing-type='direct' (Phase D has no routing_type field yet)", async () => {

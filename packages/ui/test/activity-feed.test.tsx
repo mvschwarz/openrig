@@ -94,6 +94,11 @@ function HookHarness() {
   );
 }
 
+function ReplayHarness({ testId }: { testId: string }) {
+  const { events } = useActivityFeed();
+  return <span data-testid={testId}>{events.map((event) => event.type).join(",")}</span>;
+}
+
 function renderHookHarness() {
   const queryClient = createTestQueryClient();
   return render(
@@ -340,6 +345,42 @@ describe("Activity Feed", () => {
     await waitFor(() => {
       expect(instances).toHaveLength(1);
       expect(instances[0]!.url).toBe("/api/events");
+    });
+  });
+
+  it("replays recent events to Feed consumers mounted after the shared hub is already connected", async () => {
+    const queryClient = createTestQueryClient();
+    const { rerender } = render(
+      <QueryClientProvider client={queryClient}>
+        <ReplayHarness testId="early-feed" />
+      </QueryClientProvider>
+    );
+
+    await waitFor(() => expect(instances).toHaveLength(1));
+    act(() => {
+      getLastInstance().simulateMessage(JSON.stringify({
+        type: "queue.created",
+        qitemId: "qitem-late-feed",
+        sourceSession: "orch@rig",
+        destinationSession: "driver@rig",
+        seq: 91,
+        createdAt: "2026-05-08T00:00:00.000Z",
+      }));
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("early-feed").textContent).toContain("queue.created");
+    });
+
+    rerender(
+      <QueryClientProvider client={queryClient}>
+        <ReplayHarness testId="early-feed" />
+        <ReplayHarness testId="late-feed" />
+      </QueryClientProvider>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("late-feed").textContent).toContain("queue.created");
     });
   });
 

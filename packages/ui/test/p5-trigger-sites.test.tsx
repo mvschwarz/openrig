@@ -154,6 +154,227 @@ describe("FeedCard P5-1 wiring: show-context QueueItemTrigger", () => {
     expect(arg.data.state).toBe("human-gate");
     expect(arg.data.body).toBe("Authorize v0.3.0 RC tag/push?");
   });
+
+  it("show-context handles queue.created camelCase daemon payloads", async () => {
+    const card = makeCard({
+      id: "queue-created-1",
+      kind: "progress",
+      title: "Queue item created",
+      body: "orch-lead@openrig-velocity -> driver@openrig-velocity",
+      authorSession: "orch-lead@openrig-velocity",
+      source: {
+        seq: 3,
+        type: "queue.created",
+        payload: {
+          qitemId: "qitem-20260507-daemon",
+          sourceSession: "orch-lead@openrig-velocity",
+          destinationSession: "driver@openrig-velocity",
+          priority: "routine",
+          tier: "mode2",
+        },
+        createdAt: "2026-05-07T21:18:52Z",
+        receivedAt: 1_000_000,
+      } as FeedCardModel["source"],
+    });
+    const { setSelection, findByTestId } = renderWithRouterAndQuery(
+      <FeedCard card={card} />,
+    );
+    const trigger = await findByTestId(`feed-card-show-context-${card.id}`);
+    fireEvent.click(trigger);
+    expect(setSelection).toHaveBeenCalledOnce();
+    const arg = setSelection.mock.calls[0][0];
+    expect(arg.type).toBe("qitem");
+    expect(arg.data.qitemId).toBe("qitem-20260507-daemon");
+    expect(arg.data.source).toBe("orch-lead@openrig-velocity");
+    expect(arg.data.destination).toBe("driver@openrig-velocity");
+    expect(arg.data.body).toBe(
+      "orch-lead@openrig-velocity -> driver@openrig-velocity",
+    );
+  });
+
+  it("prefers hydrated queue body and renders proof screenshots for shipped cards", async () => {
+    const card = makeCard({
+      id: "queue-shipped-1",
+      kind: "shipped",
+      title: "Queue item shipped: qitem-demo",
+      body: "metadata-only fallback",
+      source: {
+        seq: 4,
+        type: "queue.updated",
+        payload: { qitemId: "qitem-demo", toState: "done" },
+        createdAt: "2026-05-07T21:18:52Z",
+        receivedAt: 1_000_000,
+      } as FeedCardModel["source"],
+    });
+    const { findByTestId, findByText } = renderWithRouterAndQuery(
+      <FeedCard
+        card={card}
+        queueItem={{
+          qitemId: "qitem-demo",
+          tsCreated: "2026-05-07T21:18:52Z",
+          tsUpdated: "2026-05-07T21:20:00Z",
+          sourceSession: "driver@rig",
+          destinationSession: "human@host",
+          state: "done",
+          priority: "urgent",
+          tier: "fast",
+          tags: ["idea-ledger-triage-ideas-cycle-4"],
+          body: "Review the completed proof packet and screenshots for the triage slice.",
+        }}
+        proofPreview={{
+          sliceName: "idea-ledger-triage-ideas-cycle-4",
+          displayName: "Idea Ledger triage ideas cycle 4",
+          passFailBadge: "pass",
+          screenshots: ["screenshots/for-you-live-human-pending-final.png"],
+        }}
+      />,
+    );
+    expect(await findByText("Review the completed proof packet and screenshots for the triage slice.")).toBeTruthy();
+    expect(await findByTestId(`feed-card-proof-preview-${card.id}`)).toBeTruthy();
+    const img = await findByTestId("feed-card-proof-screenshot-screenshots/for-you-live-human-pending-final.png") as HTMLImageElement;
+    expect(img.getAttribute("src")).toContain("/api/slices/idea-ledger-triage-ideas-cycle-4/proof-asset/");
+  });
+
+  it("renders approve, deny, and route actions for actionable human queue cards", async () => {
+    const card = makeCard();
+    const { findByTestId, queryByTestId } = renderWithRouterAndQuery(
+      <FeedCard
+        card={card}
+        queueItem={{
+          qitemId: "qitem-20260506-test",
+          tsCreated: "2026-05-06T18:00:00Z",
+          tsUpdated: "2026-05-06T18:00:00Z",
+          sourceSession: "orch-lead@openrig-velocity",
+          destinationSession: "human@host",
+          state: "human-gate",
+          priority: "urgent",
+          tier: "fast",
+          tags: ["human-review"],
+          body: "Review this proof packet and choose a queue action.",
+        }}
+      />,
+    );
+
+    expect(await findByTestId(`feed-card-actions-${card.id}`)).toBeTruthy();
+    expect(await findByTestId("mc-verb-approve")).toBeTruthy();
+    expect(await findByTestId("mc-verb-deny")).toBeTruthy();
+    expect(await findByTestId("mc-verb-route")).toBeTruthy();
+    expect(queryByTestId("mc-verb-handoff")).toBeNull();
+  });
+
+  it("renders approval outcome instead of action controls after an action lands", async () => {
+    const card = makeCard();
+    const { findByTestId, findByText, queryByTestId } = renderWithRouterAndQuery(
+      <FeedCard
+        card={card}
+        queueItem={{
+          qitemId: "qitem-20260506-test",
+          tsCreated: "2026-05-06T18:00:00Z",
+          tsUpdated: "2026-05-06T18:05:00Z",
+          sourceSession: "orch-lead@openrig-velocity",
+          destinationSession: "human-wrandom@kernel",
+          state: "pending",
+          priority: "urgent",
+          tier: "fast",
+          tags: ["approval"],
+          body: "Review this proof packet and choose a queue action.",
+        }}
+        actionOutcome={{
+          verb: "approve",
+          actorSession: "human-wrandom@kernel",
+          actedAt: "2026-05-06T18:06:00Z",
+          state: "done",
+        }}
+      />,
+    );
+
+    expect(await findByTestId("feed-card-action-outcome")).toBeTruthy();
+    expect(await findByText("Approved by human-wrandom@kernel.")).toBeTruthy();
+    expect(queryByTestId(`feed-card-actions-${card.id}`)).toBeNull();
+    expect(queryByTestId("mc-verb-approve")).toBeNull();
+  });
+
+  it("renders route outcome with the destination and hides stale action controls", async () => {
+    const card = makeCard();
+    const { findByText, queryByTestId } = renderWithRouterAndQuery(
+      <FeedCard
+        card={card}
+        actionOutcome={{
+          verb: "route",
+          actorSession: "human@host",
+          actedAt: "2026-05-06T18:06:00Z",
+          state: "handed-off",
+          destinationSession: "driver@openrig-velocity",
+        }}
+      />,
+    );
+
+    expect(await findByText("Routed by human@host to driver@openrig-velocity.")).toBeTruthy();
+    expect(queryByTestId(`feed-card-actions-${card.id}`)).toBeNull();
+  });
+
+  it("hides actions for terminal handed-off queue state even before audit hydration", async () => {
+    const card = makeCard();
+    const { findByTestId, findByText, queryByTestId } = renderWithRouterAndQuery(
+      <FeedCard
+        card={card}
+        queueItem={{
+          qitemId: "qitem-20260506-test",
+          tsCreated: "2026-05-06T18:00:00Z",
+          tsUpdated: "2026-05-06T18:05:00Z",
+          sourceSession: "orch-lead@openrig-velocity",
+          destinationSession: "human@host",
+          state: "handed-off",
+          priority: "urgent",
+          tier: "fast",
+          tags: ["approval"],
+          body: "Review this proof packet and choose a queue action.",
+          closureReason: "handed_off_to",
+          closureTarget: "driver@openrig-velocity",
+          handedOffTo: "driver@openrig-velocity",
+        }}
+      />,
+    );
+
+    expect(await findByTestId("feed-card-action-outcome")).toBeTruthy();
+    expect(await findByText("Routed by human@host to driver@openrig-velocity.")).toBeTruthy();
+    expect(queryByTestId(`feed-card-actions-${card.id}`)).toBeNull();
+  });
+
+  it("does not render action controls for completed shipped cards", async () => {
+    const card = makeCard({
+      id: "queue-shipped-2",
+      kind: "shipped",
+      title: "Queue item shipped: qitem-demo",
+      source: {
+        seq: 5,
+        type: "queue.updated",
+        payload: { qitemId: "qitem-demo", toState: "done" },
+        createdAt: "2026-05-07T21:18:52Z",
+        receivedAt: 1_000_000,
+      } as FeedCardModel["source"],
+    });
+    const { findByTestId, queryByTestId } = renderWithRouterAndQuery(
+      <FeedCard
+        card={card}
+        queueItem={{
+          qitemId: "qitem-demo",
+          tsCreated: "2026-05-07T21:18:52Z",
+          tsUpdated: "2026-05-07T21:20:00Z",
+          sourceSession: "driver@rig",
+          destinationSession: "human@host",
+          state: "done",
+          priority: "urgent",
+          tier: "fast",
+          tags: ["proof"],
+          body: "Completed proof packet.",
+        }}
+      />,
+    );
+
+    expect(await findByTestId("feed-card-shipped")).toBeTruthy();
+    expect(queryByTestId(`feed-card-actions-${card.id}`)).toBeNull();
+  });
 });
 
 // V1 polish slice Phase 5.1 P5.1-D2: TopologyTreeView SeatLeaf details

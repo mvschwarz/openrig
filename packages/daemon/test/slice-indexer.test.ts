@@ -7,7 +7,7 @@
 //   - frontmatter parsing + display name fallback
 //   - status enum mapping (incl. heuristic fallbacks)
 //   - rail-item extraction from frontmatter
-//   - qitem matching strategies (slice-name body match + rail-item body match)
+//   - qitem matching strategies (slice-name/mission body + tags)
 //   - dogfood-evidence proof packet detection (with screenshots / videos / traces)
 //   - cache TTL invalidation
 //   - graceful degradation when slicesRoot is unset / queue_items missing
@@ -44,10 +44,10 @@ function writeSlice(slicesRoot: string, name: string, files: Record<string, stri
   }
 }
 
-function insertQitem(db: Database.Database, opts: { qitemId: string; body: string; tsCreated?: string; tsUpdated?: string }): void {
+function insertQitem(db: Database.Database, opts: { qitemId: string; body: string; tags?: string[]; tsCreated?: string; tsUpdated?: string }): void {
   db.prepare(
-    `INSERT INTO queue_items (qitem_id, ts_created, ts_updated, source_session, destination_session, state, priority, body)
-     VALUES (?, ?, ?, ?, ?, ?, 'routine', ?)`
+    `INSERT INTO queue_items (qitem_id, ts_created, ts_updated, source_session, destination_session, state, priority, tags, body)
+     VALUES (?, ?, ?, ?, ?, ?, 'routine', ?, ?)`
   ).run(
     opts.qitemId,
     opts.tsCreated ?? "2026-05-04T00:00:00.000Z",
@@ -55,6 +55,7 @@ function insertQitem(db: Database.Database, opts: { qitemId: string; body: strin
     "src@r",
     "dst@r",
     "in-progress",
+    opts.tags ? JSON.stringify(opts.tags) : null,
     opts.body,
   );
 }
@@ -128,6 +129,49 @@ describe("PL-slice-story-view-v0 SliceIndexer", () => {
       const indexer = new SliceIndexer({ slicesRoot, dogfoodEvidenceRoot: null, db });
       const entries = indexer.list();
       expect(entries.map((e) => e.name).sort()).toEqual(["alpha-slice", "beta-slice"]);
+    });
+
+    it("enumerates mission-aware workspace layout under missions/<mission>/slices/<slice>", () => {
+      const missionsRoot = path.join(cleanup, "missions");
+      writeSlice(path.join(missionsRoot, "idea-ledger", "slices"), "capture-product-ideas", {
+        "README.md": "---\ntitle: Capture Product Ideas\nstatus: active\n---\n# Capture\n",
+      });
+      writeSlice(path.join(missionsRoot, "handoff-loop", "slices"), "route-work-packets", {
+        "README.md": "---\nstatus: draft\n---\n# Route\n",
+      });
+
+      const indexer = new SliceIndexer({ slicesRoot: missionsRoot, dogfoodEvidenceRoot: null, db });
+      const entries = indexer.list();
+      expect(entries.map((e) => [e.name, e.missionId])).toEqual([
+        ["capture-product-ideas", "idea-ledger"],
+        ["route-work-packets", "handoff-loop"],
+      ]);
+      expect(indexer.get("capture-product-ideas")?.slicePath).toBe(
+        path.join(missionsRoot, "idea-ledger", "slices", "capture-product-ideas"),
+      );
+    });
+
+    it("can index legacy flat slices and mission-aware slices from compatibility roots", () => {
+      const missionsRoot = path.join(cleanup, "missions");
+      writeSlice(slicesRoot, "legacy-flat-slice", {
+        "README.md": "---\nstatus: active\n---\n# Legacy\n",
+      });
+      writeSlice(path.join(missionsRoot, "demo-seed", "slices"), "idea-ledger-find-ideas-cycle-4", {
+        "README.md": "---\ntitle: Find Ideas Cycle 4\nstatus: active\n---\n# Cycle 4\n",
+      });
+
+      const indexer = new SliceIndexer({
+        slicesRoot,
+        additionalSliceRoots: [missionsRoot],
+        dogfoodEvidenceRoot: null,
+        db,
+      });
+      const byName = new Map(indexer.list().map((entry) => [entry.name, entry]));
+      expect(byName.get("legacy-flat-slice")?.missionId).toBeNull();
+      expect(byName.get("idea-ledger-find-ideas-cycle-4")?.missionId).toBe("demo-seed");
+      expect(indexer.get("idea-ledger-find-ideas-cycle-4")?.slicePath).toBe(
+        path.join(missionsRoot, "demo-seed", "slices", "idea-ledger-find-ideas-cycle-4"),
+      );
     });
 
     it("derives displayName from frontmatter title, then first H1, then folder name", () => {
@@ -210,6 +254,33 @@ describe("PL-slice-story-view-v0 SliceIndexer", () => {
       expect(slice.qitemIds.sort()).toEqual(["q-by-name", "q-by-rail"]);
     });
 
+    it("matches nested mission slices by mission id and tags", () => {
+      const missionsRoot = path.join(cleanup, "missions");
+      writeSlice(path.join(missionsRoot, "idea-ledger", "slices"), "triage-product-ideas", {
+        "README.md": "---\nstatus: active\n---\n# Triage\n",
+      });
+      insertQitem(db, {
+        qitemId: "q-by-mission-body",
+        body: "Advance the idea-ledger mission.",
+      });
+      insertQitem(db, {
+        qitemId: "q-by-slice-tag",
+        body: "No visible slice name here.",
+        tags: ["triage-product-ideas"],
+      });
+      insertQitem(db, {
+        qitemId: "q-none",
+        body: "Other project",
+        tags: ["unrelated"],
+      });
+
+      const indexer = new SliceIndexer({ slicesRoot: missionsRoot, dogfoodEvidenceRoot: null, db });
+      const slice = indexer.get("triage-product-ideas")!;
+      expect(slice.missionId).toBe("idea-ledger");
+      expect(slice.railItem).toBe("idea-ledger");
+      expect(slice.qitemIds.sort()).toEqual(["q-by-mission-body", "q-by-slice-tag"]);
+    });
+
     it("returns empty qitem set when queue_items table is absent", () => {
       // Re-create db without queue_items to simulate the test-harness gap.
       const bareDb = createDb();
@@ -262,7 +333,7 @@ describe("PL-slice-story-view-v0 SliceIndexer", () => {
       expect(indexer.get("x-slice")!.proofPacket?.dirName).toBe("x-slice-20260601");
     });
 
-    it("classifies .mp4/.webm files as videos (founder-named load-bearing)", () => {
+    it("classifies .mp4/.webm files as videos", () => {
       writeSlice(slicesRoot, "video-slice", { "README.md": "---\n---\n" });
       const proofDir = path.join(dogfoodRoot, "video-slice-20260504");
       fs.mkdirSync(proofDir);

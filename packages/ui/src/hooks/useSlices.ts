@@ -5,13 +5,15 @@
 // as a structured error object so the UI can render a setup hint
 // instead of the raw 503.
 
-import { useQuery } from "@tanstack/react-query";
+import { useMemo } from "react";
+import { useQueries, useQuery } from "@tanstack/react-query";
 
 export type SliceStatus = "active" | "done" | "blocked" | "draft";
 export type SliceFilter = "all" | "active" | "done" | "blocked";
 
 export interface SliceListEntry {
   name: string;
+  missionId: string | null;
   displayName: string;
   railItem: string | null;
   status: SliceStatus;
@@ -194,6 +196,8 @@ export interface TopologyRigEntry {
 
 export interface SliceDetail {
   name: string;
+  missionId: string | null;
+  slicePath: string;
   displayName: string;
   railItem: string | null;
   status: string;
@@ -247,6 +251,44 @@ export function useSliceDetail(name: string | null) {
   });
 }
 
+export interface SliceDetailsMapResult {
+  itemsByName: Map<string, SliceDetail>;
+  isFetching: boolean;
+  missingNames: string[];
+}
+
+export function useSliceDetails(names: string[]): SliceDetailsMapResult {
+  const uniqueNames = useMemo(
+    () => Array.from(new Set(names.filter((name) => name.length > 0))).sort(),
+    [names],
+  );
+  const queries = useQueries({
+    queries: uniqueNames.map((name) => ({
+      queryKey: ["slices", "detail", name],
+      queryFn: () => fetchSliceDetail(name),
+      staleTime: 30_000,
+    })),
+  });
+
+  return useMemo(() => {
+    const itemsByName = new Map<string, SliceDetail>();
+    const missingNames: string[] = [];
+    uniqueNames.forEach((name, idx) => {
+      const item = queries[idx]?.data;
+      if (item) {
+        itemsByName.set(name, item);
+      } else if (queries[idx]?.isError) {
+        missingNames.push(name);
+      }
+    });
+    return {
+      itemsByName,
+      isFetching: queries.some((query) => query.isFetching),
+      missingNames,
+    };
+  }, [queries, uniqueNames]);
+}
+
 // --- doc body fetcher (Docs tab; lazy on click) ---
 
 export interface SliceDocResponse {
@@ -271,4 +313,66 @@ export function useSliceDoc(name: string | null, relPath: string | null) {
 
 export function proofAssetUrl(sliceName: string, relPath: string): string {
   return `/api/slices/${encodeURIComponent(sliceName)}/proof-asset/${encodeURI(relPath)}`;
+}
+
+export interface QueueItemDetail {
+  qitemId: string;
+  tsCreated: string;
+  tsUpdated: string;
+  sourceSession: string;
+  destinationSession: string;
+  state: string;
+  priority: string;
+  tier: string | null;
+  tags: string[] | null;
+  body: string;
+  closureReason?: string | null;
+  closureTarget?: string | null;
+  handedOffTo?: string | null;
+  blockedOn?: string | null;
+}
+
+export interface QueueItemMapResult {
+  itemsById: Map<string, QueueItemDetail>;
+  isFetching: boolean;
+  missingIds: string[];
+}
+
+async function fetchQueueItem(qitemId: string): Promise<QueueItemDetail | null> {
+  const res = await fetch(`/api/queue/${encodeURIComponent(qitemId)}`);
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return (await res.json()) as QueueItemDetail;
+}
+
+export function useQueueItemMap(qitemIds: string[]): QueueItemMapResult {
+  const uniqueIds = useMemo(
+    () => Array.from(new Set(qitemIds.filter((id) => id.length > 0))).sort(),
+    [qitemIds],
+  );
+  const queries = useQueries({
+    queries: uniqueIds.map((qitemId) => ({
+      queryKey: ["queue", "item", qitemId],
+      queryFn: () => fetchQueueItem(qitemId),
+      staleTime: 30_000,
+    })),
+  });
+
+  return useMemo(() => {
+    const itemsById = new Map<string, QueueItemDetail>();
+    const missingIds: string[] = [];
+    uniqueIds.forEach((qitemId, idx) => {
+      const item = queries[idx]?.data;
+      if (item) {
+        itemsById.set(qitemId, item);
+      } else if (queries[idx]?.status === "success") {
+        missingIds.push(qitemId);
+      }
+    });
+    return {
+      itemsById,
+      isFetching: queries.some((query) => query.isFetching),
+      missingIds,
+    };
+  }, [queries, uniqueIds]);
 }

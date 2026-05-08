@@ -8,6 +8,7 @@ import path from "node:path";
 import { ActivityRing } from "../src/components/topology/ActivityRing.js";
 import { HotPotatoEdge } from "../src/components/topology/HotPotatoEdge.js";
 import { HybridAgentNode } from "../src/components/topology/HybridTopologyNodes.js";
+import { computeTerminalPopoverPosition } from "../src/components/topology/TerminalPreviewPopover.js";
 import { fallbackActivityCardState, getActivityCardClasses } from "../src/components/topology/activity-card-visuals.js";
 import {
   HOT_POTATO_WITHIN_RIG_DURATION_MS,
@@ -206,7 +207,13 @@ describe("P5.3 ActivityRing and HotPotatoEdge", () => {
     expect(driverPopover.parentElement).toBe(document.body);
     expect(driverPopover.className).toContain("fixed");
     expect(driverPopover.className).toContain("z-[1000]");
+    expect(driverPopover.className).toContain("w-[calc(80ch+24px)]");
+    expect(driverPopover.className).toContain("max-w-[calc(100vw-1rem)]");
+    expect(driverPopover.className).toContain("max-h-[calc(100vh-1rem)]");
+    expect(driverPopover.className).toContain("overflow-hidden");
     expect(driverPopover.className).toContain("bg-stone-950/65");
+    expect(driverPopover.className).toContain("font-mono");
+    expect(driverPopover.className).toContain("text-[8px]");
     expect(driverPopover.className).toContain("text-stone-50");
     expect(driverPopover.className).toContain("backdrop-blur-sm");
     expect(driverPopover.className).not.toContain("border");
@@ -223,6 +230,32 @@ describe("P5.3 ActivityRing and HotPotatoEdge", () => {
     fireEvent.click(screen.getByTestId("hybrid-guard-terminal-open"));
     expect(screen.getByTestId("hybrid-guard-terminal-popover")).toBeDefined();
     expect(screen.queryByTestId("hybrid-driver-terminal-popover")).toBeNull();
+  });
+
+  it("terminal popover flips above the anchor when bottom viewport space would clip it", () => {
+    const position = computeTerminalPopoverPosition(
+      { left: 1040, right: 1080, top: 582, bottom: 610 },
+      400,
+      300,
+      { width: 1280, height: 720 },
+    );
+
+    expect(position.top).toBe(274);
+    expect(position.top + 300).toBeLessThanOrEqual(712);
+    expect(position.left + 400).toBeLessThanOrEqual(1272);
+  });
+
+  it("terminal popover clamps vertically when neither side has full room", () => {
+    const position = computeTerminalPopoverPosition(
+      { left: 24, right: 64, top: 120, bottom: 148 },
+      400,
+      700,
+      { width: 640, height: 720 },
+    );
+
+    expect(position.top).toBe(12);
+    expect(position.top + 700).toBeLessThanOrEqual(712);
+    expect(position.left).toBe(72);
   });
 
   it("source scan keeps activity and packet layers production-reachable", () => {
@@ -265,12 +298,13 @@ describe("P5.3 ActivityRing and HotPotatoEdge", () => {
     expect(terminalPopover).not.toMatch(/absolute left-full/);
     expect(terminalPopover).not.toMatch(/terminal preview/);
     expect(terminalPopover).not.toMatch(/terminal-close/);
-    expect(rigGroupNode).toMatch(/bg-white\/30/);
-    expect(rigGroupNode).toMatch(/hover:bg-white\/40/);
-    expect(rigGroupNode).toMatch(/bg-white\/\[0\.10\]/);
+    expect(rigGroupNode).toMatch(/bg-white\/40/);
+    expect(rigGroupNode).toMatch(/hover:bg-white\/50/);
+    expect(rigGroupNode).toMatch(/backdrop-blur-\[8px\]/);
     expect(rigGroupNode).not.toMatch(/bg-white\/\[0\.14\]/);
     expect(rigGroupNode).not.toMatch(/hover:bg-white\/60/);
-    expect(hybridNodes).toMatch(/bg-white\/30/);
+    expect(hybridNodes).toMatch(/bg-white\/40/);
+    expect(hybridNodes).toMatch(/backdrop-blur-\[8px\]/);
     expect(hybridNodes).toMatch(/bg-stone-50\/25/);
     expect(activityCards).toMatch(/activity-card-active/);
     expect(css).toMatch(/background-color: rgba\(255, 255, 255, 0\.72\)/);
