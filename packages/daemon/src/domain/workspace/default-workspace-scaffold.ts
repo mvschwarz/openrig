@@ -1,41 +1,3 @@
-// User Settings v0 — `rig config init-workspace` operator-explicit scaffolding.
-//
-// Creates the mission-aware default workspace at ~/.openrig/workspace/ (or a
-// caller-supplied --root). Operator-explicit safety stop: never auto-runs on
-// `rig setup` / `rig daemon start` / first `rig up`.
-//
-// Behavior:
-//   - Reads workspace.root setting (default ~/.openrig/workspace/).
-//   - Creates canonical subdirs: missions/ progress/ field-notes/ specs/ dogfood-evidence/.
-//   - Seeds two example missions with multiple slices.
-//   - Drops workspace README.md + STEERING.md.
-//   - --dry-run: report what would be created without acting.
-//   - --force: overwrite existing files (NOT directories — never deletes
-//     operator content).
-//   - Idempotent without --force: existing-dir + existing-readme is a no-op.
-
-import { Command } from "commander";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
-import { ConfigStore } from "../config-store.js";
-
-export interface InitWorkspaceOpts {
-  root?: string;
-  force?: boolean;
-  dryRun?: boolean;
-  json?: boolean;
-}
-
-export interface InitWorkspaceResult {
-  root: string;
-  /** True when this run would (or did) create the root dir; false if root existed. */
-  rootCreated: boolean;
-  subdirs: Array<{ name: string; path: string; created: boolean }>;
-  files: Array<{ relPath: string; absPath: string; created: boolean; skipped: "exists" | null }>;
-  /** True when --dry-run; nothing was actually written. */
-  dryRun: boolean;
-}
-
 type DefaultSlice = {
   id: string;
   title: string;
@@ -94,18 +56,20 @@ const DEFAULT_MISSIONS: DefaultMission[] = [
   },
 ];
 
-const WORKSPACE_DIRS = [
-  "missions",
-  "progress",
-  "field-notes",
-  "specs",
-  "dogfood-evidence",
-  ...DEFAULT_MISSIONS.flatMap((mission) => [
-    `missions/${mission.id}`,
-    `missions/${mission.id}/slices`,
-    ...mission.slices.map((slice) => `missions/${mission.id}/slices/${slice.id}`),
-  ]),
-] as const;
+export function workspaceScaffoldDirs(): string[] {
+  return [
+    "missions",
+    "progress",
+    "field-notes",
+    "specs",
+    "dogfood-evidence",
+    ...DEFAULT_MISSIONS.flatMap((mission) => [
+      `missions/${mission.id}`,
+      `missions/${mission.id}/slices`,
+      ...mission.slices.map((slice) => `missions/${mission.id}/slices/${slice.id}`),
+    ]),
+  ];
+}
 
 function subdirReadmeContent(subdir: string): string {
   switch (subdir) {
@@ -257,7 +221,7 @@ ${slice.objective}
 `;
 }
 
-function scaffoldFiles(): Array<{ relPath: string; content: string }> {
+export function workspaceScaffoldFiles(): Array<{ relPath: string; content: string }> {
   const files: Array<{ relPath: string; content: string }> = [
     { relPath: "README.md", content: WORKSPACE_README },
     { relPath: "STEERING.md", content: STEERING_PLACEHOLDER },
@@ -281,74 +245,4 @@ function scaffoldFiles(): Array<{ relPath: string; content: string }> {
     }
   }
   return files;
-}
-
-export function initWorkspaceCommand(configPath?: string): Command {
-  const cmd = new Command("init-workspace")
-    .description("Scaffold the default workspace at ~/.openrig/workspace/ with mission/slice folders")
-    .option("--root <path>", "Override workspace root (default: workspace.root setting)")
-    .option("--force", "Overwrite existing scaffolded files (does NOT remove directories)")
-    .option("--dry-run", "Show what would be created without writing")
-    .option("--json", "JSON output")
-    .action((opts: InitWorkspaceOpts) => {
-      try {
-        const effectiveJson = opts.json ?? Boolean(cmd.optsWithGlobals().json);
-        const result = runInitWorkspace({ ...opts, json: effectiveJson, configPath });
-        if (effectiveJson) {
-          console.log(JSON.stringify(result, null, 2));
-        } else {
-          if (result.dryRun) console.log(`(dry-run) workspace root: ${result.root}`);
-          else console.log(`workspace root: ${result.root}`);
-          for (const sub of result.subdirs) {
-            console.log(`  ${sub.created ? "+" : " "} ${sub.name}/`);
-          }
-          for (const f of result.files) {
-            console.log(`  ${f.created ? "+" : " "} ${f.relPath}${f.skipped ? `  (skipped: ${f.skipped})` : ""}`);
-          }
-          if (result.dryRun) console.log("(dry-run; no files written.)");
-        }
-      } catch (err) {
-        console.error((err as Error).message);
-        process.exitCode = 1;
-      }
-    });
-  return cmd;
-}
-
-export function runInitWorkspace(opts: InitWorkspaceOpts & { configPath?: string }): InitWorkspaceResult {
-  const store = new ConfigStore(opts.configPath);
-  const root = opts.root ?? (store.get("workspace.root") as string);
-  const dryRun = !!opts.dryRun;
-  const force = !!opts.force;
-
-  const rootExists = existsSync(root);
-  const result: InitWorkspaceResult = {
-    root,
-    rootCreated: !rootExists,
-    subdirs: [],
-    files: [],
-    dryRun,
-  };
-
-  if (!rootExists && !dryRun) mkdirSync(root, { recursive: true });
-
-  for (const sub of WORKSPACE_DIRS) {
-    const subPath = join(root, sub);
-    const subExists = existsSync(subPath);
-    if (!subExists && !dryRun) mkdirSync(subPath, { recursive: true });
-    result.subdirs.push({ name: sub, path: subPath, created: !subExists });
-  }
-
-  for (const file of scaffoldFiles()) {
-    const absPath = join(root, file.relPath);
-    const exists = existsSync(absPath);
-    if (exists && !force) {
-      result.files.push({ relPath: file.relPath, absPath, created: false, skipped: "exists" });
-    } else {
-      if (!dryRun) writeFileSync(absPath, file.content, "utf-8");
-      result.files.push({ relPath: file.relPath, absPath, created: true, skipped: null });
-    }
-  }
-
-  return result;
 }

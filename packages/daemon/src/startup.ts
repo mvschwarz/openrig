@@ -829,7 +829,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   //
   // User Settings v0 graduates `OPENRIG_SLICES_ROOT` env-var into the
   // typed `workspace.slices_root` setting (resolution chain: env >
-  // config-file > default `<workspace.root>/slices`). Backward-compat:
+  // config-file > default `<workspace.root>/missions`). Backward-compat:
   // operators with OPENRIG_SLICES_ROOT set continue to work because the
   // settings store reads env in the same resolution slot. Operators
   // setting via `rig config set workspace.slices_root <path>` or via the
@@ -841,7 +841,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   //   OPENRIG_WORKSPACE_SLICES_ROOT   typed-key env override
   //   workspace.slices_root           typed setting in ~/.openrig/config.json
   //   workspace.root                  cascade fallback (default ~/.openrig/workspace)
-  //   OPENRIG_DOGFOOD_EVIDENCE_ROOT   absolute path to dogfood-evidence root
+  //   workspace.dogfood_evidence_root typed setting for proof packet assets
+  //   OPENRIG_DOGFOOD_EVIDENCE_ROOT   env override for compatibility
   //
   // When the resolved slicesRoot path doesn't exist on disk, the indexer
   // is still constructed but isReady() returns false — the routes return
@@ -855,21 +856,40 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     // block ordering further below.
     const legacyEnvSlicesRoot = readOpenRigEnv("OPENRIG_SLICES_ROOT", "RIGGED_SLICES_ROOT") ?? "";
     let resolvedSlicesRoot = "";
+    let resolvedWorkspaceRoot = "";
+    let resolvedDogfoodRoot = "";
     if (!legacyEnvSlicesRoot) {
       try {
         const { SettingsStore: SettingsStoreCtor } = await import("./domain/user-settings/settings-store.js");
-        resolvedSlicesRoot = new SettingsStoreCtor().resolveConfig().workspaceSlicesRoot;
+        const resolvedConfig = new SettingsStoreCtor().resolveConfig();
+        resolvedSlicesRoot = resolvedConfig.workspaceSlicesRoot;
+        resolvedWorkspaceRoot = resolvedConfig.workspaceRoot;
+        resolvedDogfoodRoot = resolvedConfig.workspaceDogfoodEvidenceRoot;
       } catch {
         // SettingsStore unavailable — keep slicesRoot empty; routes return 503.
       }
+    } else {
+      try {
+        const { SettingsStore: SettingsStoreCtor } = await import("./domain/user-settings/settings-store.js");
+        const resolvedConfig = new SettingsStoreCtor().resolveConfig();
+        resolvedDogfoodRoot = resolvedConfig.workspaceDogfoodEvidenceRoot;
+      } catch {
+        // SettingsStore unavailable — proof packets remain disabled.
+      }
     }
     const slicesRoot = legacyEnvSlicesRoot || resolvedSlicesRoot;
-    const dogfoodRoot = readOpenRigEnv("OPENRIG_DOGFOOD_EVIDENCE_ROOT", "RIGGED_DOGFOOD_EVIDENCE_ROOT") ?? "";
+    const additionalSliceRoots = resolvedWorkspaceRoot
+      ? [
+          nodePath.join(resolvedWorkspaceRoot, "missions"),
+          nodePath.join(resolvedWorkspaceRoot, "slices"),
+        ].filter((root) => root !== slicesRoot)
+      : [];
     const { SliceIndexer } = await import("./domain/slices/slice-indexer.js");
     const { SliceDetailProjector } = await import("./domain/slices/slice-detail-projector.js");
     const sliceIndexer = new SliceIndexer({
       slicesRoot,
-      dogfoodEvidenceRoot: dogfoodRoot || null,
+      additionalSliceRoots,
+      dogfoodEvidenceRoot: resolvedDogfoodRoot || null,
       db,
     });
     // Slice Story View v1: pass workflowRuntime.specCache so the

@@ -49,6 +49,14 @@ export function useActivityFeed(): UseActivityFeedResult {
     if (event.type === "session.discovered" || event.type === "session.vanished") {
       queryClient.invalidateQueries({ queryKey: ["discovery"] });
     }
+    if (event.type === "mission_control.action_executed") {
+      queryClient.invalidateQueries({ queryKey: ["mission-control", "audit"] });
+      queryClient.invalidateQueries({ queryKey: ["slices"] });
+      const qitemId = event.payload["qitemId"] as string | undefined;
+      if (qitemId) {
+        queryClient.invalidateQueries({ queryKey: ["queue", "item", qitemId] });
+      }
+    }
     if (event.type === "node.claimed") {
       queryClient.invalidateQueries({ queryKey: ["discovery"] });
       const rigId = event.payload["rigId"] as string | undefined;

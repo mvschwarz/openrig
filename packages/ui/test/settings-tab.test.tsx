@@ -30,8 +30,8 @@ function makeSettingsResponse() {
       "transcripts.enabled": { value: true, source: "default", defaultValue: true },
       "transcripts.path": { value: "/Users/me/.openrig/transcripts", source: "default", defaultValue: "/Users/me/.openrig/transcripts" },
       "workspace.root": { value: "/Users/me/.openrig/workspace", source: "default", defaultValue: "/Users/me/.openrig/workspace" },
-      "workspace.slices_root": { value: "/Users/me/.openrig/workspace/slices", source: "default", defaultValue: "/Users/me/.openrig/workspace/slices" },
-      "workspace.steering_path": { value: "/Users/me/.openrig/workspace/steering/STEERING.md", source: "default", defaultValue: "/Users/me/.openrig/workspace/steering/STEERING.md" },
+      "workspace.slices_root": { value: "/Users/me/.openrig/workspace/missions", source: "default", defaultValue: "/Users/me/.openrig/workspace/missions" },
+      "workspace.steering_path": { value: "/Users/me/.openrig/workspace/STEERING.md", source: "default", defaultValue: "/Users/me/.openrig/workspace/STEERING.md" },
       "workspace.field_notes_root": { value: "/Users/me/.openrig/workspace/field-notes", source: "default", defaultValue: "/Users/me/.openrig/workspace/field-notes" },
       "workspace.specs_root": { value: "/Users/me/.openrig/workspace/specs", source: "default", defaultValue: "/Users/me/.openrig/workspace/specs" },
       "files.allowlist": { value: "", source: "default", defaultValue: "" },
@@ -64,7 +64,7 @@ describe("SettingsTab — User Settings v0", () => {
     mockFetch.mockImplementation(async (url: RequestInfo | URL, init?: RequestInit) => {
       calls.push({ url: String(url), init });
       if (init?.method === "POST" && String(url).includes("/api/config/workspace.slices_root")) {
-        return jsonResponse({ ok: true, key: "workspace.slices_root", resolved: { value: "/founder/slices", source: "file", defaultValue: "" } });
+        return jsonResponse({ ok: true, key: "workspace.slices_root", resolved: { value: "/custom/slices", source: "file", defaultValue: "" } });
       }
       return jsonResponse(makeSettingsResponse());
     });
@@ -74,14 +74,14 @@ describe("SettingsTab — User Settings v0", () => {
 
     fireEvent.click(screen.getByTestId("setting-workspace.slices_root-edit"));
     const input = screen.getByTestId("setting-workspace.slices_root-input") as HTMLInputElement;
-    fireEvent.change(input, { target: { value: "/founder/slices" } });
+    fireEvent.change(input, { target: { value: "/custom/slices" } });
     fireEvent.click(screen.getByTestId("setting-workspace.slices_root-save"));
 
     await waitFor(() => {
       expect(calls.some((c) =>
         c.url.includes("/api/config/workspace.slices_root")
         && c.init?.method === "POST"
-        && (c.init.body as string).includes("/founder/slices")
+        && (c.init.body as string).includes("/custom/slices")
       )).toBe(true);
     });
   });
@@ -106,8 +106,7 @@ describe("SettingsTab — User Settings v0", () => {
           root: "/Users/me/.openrig/workspace",
           rootCreated: true,
           subdirs: [
-            { name: "slices", path: "/x/slices", created: true },
-            { name: "steering", path: "/x/steering", created: true },
+            { name: "missions", path: "/x/missions", created: true },
             { name: "progress", path: "/x/progress", created: true },
             { name: "field-notes", path: "/x/field-notes", created: true },
             { name: "specs", path: "/x/specs", created: true },
@@ -125,7 +124,7 @@ describe("SettingsTab — User Settings v0", () => {
 
     await waitFor(() => expect(initCalled).toBe(true));
     await waitFor(() => expect(screen.getByTestId("settings-init-result")).toBeDefined());
-    expect(screen.getByTestId("settings-init-result").textContent).toContain("created 5 subdir");
+    expect(screen.getByTestId("settings-init-result").textContent).toContain("created 4 subdir");
   });
 
   it("renders a friendly error when the daemon route 503s", async () => {

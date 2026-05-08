@@ -40,11 +40,20 @@ function renderSliceScope(opts: {
   const setSelection = vi.fn();
   // Mock /api/slices/:name response.
   mockFetch.mockImplementation(async (url: string) => {
+    if (url.includes(`/api/slices/${opts.sliceId}/doc/`)) {
+      return new Response(JSON.stringify({ relPath: "README.md", content: "# Readme" }), { status: 200 });
+    }
     if (url.includes(`/api/slices/${opts.sliceId}`)) {
       if (opts.status && opts.status !== 200) {
         return new Response("not found", { status: opts.status });
       }
       return new Response(JSON.stringify(opts.detail), { status: 200 });
+    }
+    if (url.includes("/api/queue/qitem-A")) {
+      return new Response(JSON.stringify(makeQueueItem("qitem-A", "Body for qitem-A")));
+    }
+    if (url.includes("/api/queue/qitem-B")) {
+      return new Response(JSON.stringify(makeQueueItem("qitem-B", "Body for qitem-B")));
     }
     return new Response("[]");
   });
@@ -76,6 +85,21 @@ function renderSliceScope(opts: {
     </QueryClientProvider>,
   );
   return { setSelection, ...utils };
+}
+
+function makeQueueItem(qitemId: string, body: string) {
+  return {
+    qitemId,
+    tsCreated: "2026-05-06T18:00:00Z",
+    tsUpdated: "2026-05-06T18:00:00Z",
+    sourceSession: "source@rig",
+    destinationSession: "dest@rig",
+    state: "in-progress",
+    priority: "routine",
+    tier: "mode2",
+    tags: ["demo"],
+    body,
+  };
 }
 
 function makeDetail(overrides: Partial<SliceDetail> = {}): SliceDetail {
@@ -186,10 +210,19 @@ describe("SliceScopePage P5-2 tab content piping", () => {
     await findByTestId("project-tab-nav");
     fireEvent.click(container.querySelector("[data-testid='project-tab-queue']")!);
     const trigger = await findByTestId("slice-queue-trigger-qitem-A");
+    await waitFor(() => expect(trigger.textContent).toContain("Body for qitem-A"));
     fireEvent.click(trigger);
     expect(setSelection).toHaveBeenCalledWith({
       type: "qitem",
-      data: { qitemId: "qitem-A" },
+      data: {
+        qitemId: "qitem-A",
+        source: "source@rig",
+        destination: "dest@rig",
+        state: "in-progress",
+        tags: ["demo"],
+        createdAt: "2026-05-06T18:00:00Z",
+        body: "Body for qitem-A",
+      },
     });
   });
 
@@ -224,7 +257,8 @@ describe("SliceScopePage P5-2 tab content piping", () => {
     });
     await findByTestId("project-tab-nav");
     fireEvent.click(container.querySelector("[data-testid='project-tab-tests']")!);
-    // TestsVerificationTab renders empty-state when no proofPackets.
+    // TestsVerificationTab renders a diagnostic empty-state when no proofPackets.
     expect(await findByTestId("tests-empty")).toBeTruthy();
+    expect(container.querySelector("[data-testid='tests-empty-diagnostics']")).toBeTruthy();
   });
 });

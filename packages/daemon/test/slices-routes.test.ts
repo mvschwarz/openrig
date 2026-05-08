@@ -107,7 +107,7 @@ describe("PL-slice-story-view-v0 slices routes", () => {
       expect(res.status).toBe(503);
       const body = (await res.json()) as { error: string; hint: string };
       expect(body.error).toBe("slices_root_not_configured");
-      expect(body.hint).toContain("OPENRIG_SLICES_ROOT");
+      expect(body.hint).toContain("workspace/missions");
     });
 
     it("returns slices array sorted by lastActivityAt DESC with totalCount + filter echo", async () => {
@@ -156,8 +156,8 @@ describe("PL-slice-story-view-v0 slices routes", () => {
       const body = (await res.json()) as Record<string, unknown>;
       expect(Object.keys(body).sort()).toEqual([
         "acceptance", "commitRefs", "decisions", "displayName", "docs",
-        "lastActivityAt", "name", "qitemIds", "railItem", "rawStatus",
-        "status", "story", "tests", "topology", "workflowBinding",
+        "lastActivityAt", "missionId", "name", "qitemIds", "railItem", "rawStatus",
+        "slicePath", "status", "story", "tests", "topology", "workflowBinding",
       ]);
       const acc = (body.acceptance as { totalItems: number; doneItems: number; percentage: number });
       expect(acc.totalItems).toBe(2);
@@ -230,7 +230,7 @@ describe("PL-slice-story-view-v0 slices routes", () => {
     });
   });
 
-  describe("GET /api/slices/:name/proof-asset/* (founder-named load-bearing)", () => {
+  describe("GET /api/slices/:name/proof-asset/* (named proof assets)", () => {
     it("serves a screenshot file with image/png Content-Type", async () => {
       writeSlice(slicesRoot, "proof-slice", { "README.md": "---\n---\n" });
       const dir = path.join(dogfoodRoot, "proof-slice-20260504");

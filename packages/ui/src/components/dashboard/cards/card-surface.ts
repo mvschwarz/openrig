@@ -1,1 +1,1 @@
-export const dashboardCardSurfaceClass = "h-full bg-white/30 hover:bg-white/40 hover:hard-shadow-hover";
+export const dashboardCardSurfaceClass = "h-full bg-white/40 backdrop-blur-[8px] hover:bg-white/50 hover:hard-shadow-hover";

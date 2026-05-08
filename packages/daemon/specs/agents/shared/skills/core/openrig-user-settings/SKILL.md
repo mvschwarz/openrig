@@ -36,16 +36,29 @@ rig config reset                          # delete the whole file
 ## Initialize a default workspace
 
 ```bash
-rig config init-workspace                 # scaffold ~/.openrig/workspace/ + 5 subdirs
+rig config init-workspace                 # scaffold ~/.openrig/workspace/ with missions + slices
 rig config init-workspace --dry-run       # show what would be created
 rig config init-workspace --root /path    # use a custom root
 rig config init-workspace --force         # overwrite scaffolded files (NOT operator content)
 ```
 
-This creates `slices/ steering/ progress/ field-notes/ specs/` under the
-workspace root, with one-paragraph READMEs and a placeholder
-`steering/STEERING.md`. It is operator-explicit per founder safety stop —
-do NOT run it on your own initiative; only when the operator asks.
+This creates a file-backed Project workspace under the workspace root:
+
+```text
+README.md
+STEERING.md
+missions/<mission-id>/README.md
+missions/<mission-id>/PROGRESS.md
+missions/<mission-id>/slices/<slice-id>/README.md
+progress/
+field-notes/
+specs/
+```
+
+It seeds two starter missions with multiple slices so the Project UI has a
+real mission/slice map out of the box. It is operator-explicit; do NOT run it
+on your own initiative unless the operator asks for workspace initialization
+or repair.
 
 ## Common keys
 
@@ -57,8 +70,8 @@ do NOT run it on your own initiative; only when the operator asks.
 | `transcripts.enabled` | boolean | Whether the daemon writes transcripts |
 | `transcripts.path` | string | Transcripts dir (default ~/.openrig/transcripts) |
 | `workspace.root` | string | Single-root override (default ~/.openrig/workspace) |
-| `workspace.slices_root` | string | Per-subdir override; default `<root>/slices` |
-| `workspace.steering_path` | string | STEERING.md path; default `<root>/steering/STEERING.md` |
+| `workspace.slices_root` | string | Slice discovery root; default `<root>/missions` |
+| `workspace.steering_path` | string | STEERING.md path; default `<root>/STEERING.md` |
 | `workspace.field_notes_root` | string | Field notes dir; default `<root>/field-notes` |
 | `workspace.specs_root` | string | Specs dir; default `<root>/specs` |
 | `files.allowlist` | string | `name:/abs/path,name:/abs/path` — UI Files browser roots |
@@ -69,11 +82,11 @@ Resolution order for workspace per-subdir keys: per-subdir override >
 
 ## Common operator requests → canonical commands
 
-> **"Make the UI work against my substrate layout"** (founder's case):
+> **"Make the UI work against an existing workspace layout"**:
 > set the per-subdir workspace overrides explicitly:
 >
 > ```bash
-> rig config set workspace.slices_root /Users/me/code/substrate/.../slices
+> rig config set workspace.slices_root /Users/me/code/substrate/.../missions
 > rig config set workspace.steering_path /Users/me/code/substrate/openrig-work/STEERING.md
 > rig config set workspace.progress_scan_roots 'work:/Users/me/code/substrate/openrig-work,missions:/Users/me/code/substrate/openrig-work/missions'
 > rig config set workspace.field_notes_root /Users/me/code/substrate/openrig-work/field-notes
@@ -88,6 +101,16 @@ Resolution order for workspace per-subdir keys: per-subdir override >
 > ```bash
 > rig config init-workspace
 > ```
+
+After initialization, the Project UI expects this mapping:
+
+- `workspace.root` maps to the Project workspace.
+- `workspace.root/missions/<mission-id>` maps to a Project mission.
+- `workspace.root/missions/<mission-id>/slices/<slice-id>` maps to a Project slice.
+
+Queue item bodies or tags should mention the mission id and slice id when the
+work belongs to a slice. That lets the Project Story, Queue, Tests, and
+Topology tabs attach runtime work to the filesystem slice.
 
 > **"Allow the file browser to see X directory"**:
 >
