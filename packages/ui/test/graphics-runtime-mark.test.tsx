@@ -28,6 +28,13 @@ describe("graphics runtime package", () => {
     expect(screen.getByRole("img", { name: "Claude" })).toBeTruthy();
   });
 
+  it("renders inline runtime labels without badge chrome", () => {
+    const { container } = render(<RuntimeBadge runtime="codex" compact variant="inline" />);
+    expect(screen.getByText("Codex")).toBeTruthy();
+    expect(container.firstElementChild?.className).not.toContain("border");
+    expect(container.firstElementChild?.className).not.toContain("bg-");
+  });
+
   it("renders tool marks as named glyphs", () => {
     render(<ToolMark tool="cmux" title="Open in CMUX" />);
     expect(screen.getByRole("img", { name: "Open in CMUX" })).toBeTruthy();

@@ -253,7 +253,8 @@ export function RigNode({ data }: { data: RigNodeData }) {
             model={data.model}
             size="xs"
             compact
-            className="max-w-full bg-white/40"
+            variant="inline"
+            className="max-w-full"
           />
           {!runtimeModel && data.profile ? (
             <span className="ml-1 font-mono text-[8px] uppercase tracking-[0.12em] text-stone-400">

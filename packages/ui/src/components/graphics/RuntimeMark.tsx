@@ -27,11 +27,25 @@ const badgeSizeClass = {
   lg: "gap-2.5 px-2.5 py-1.5 text-[11px]",
 };
 
+const inlineSizeClass = {
+  xs: "gap-1 text-[8px]",
+  sm: "gap-1.5 text-[9px]",
+  md: "gap-2 text-[10px]",
+  lg: "gap-2.5 text-[11px]",
+};
+
 const toneClass: Record<RuntimeBrandId, string> = {
   "claude-code": "border-[#9f5f4e]/40 bg-[#b06a57]/12 text-[#62392f]",
   codex: "border-stone-400/50 bg-white/75 text-stone-950",
   terminal: "border-stone-400/45 bg-stone-900/8 text-stone-800",
   unknown: "border-stone-300 bg-white/55 text-stone-600",
+};
+
+const inlineToneClass: Record<RuntimeBrandId, string> = {
+  "claude-code": "text-[#62392f]",
+  codex: "text-stone-950",
+  terminal: "text-stone-800",
+  unknown: "text-stone-600",
 };
 
 const toolToneClass: Record<ToolBrandId, string> = {
@@ -215,21 +229,24 @@ export function RuntimeBadge({
   size = "sm",
   className,
   compact = false,
+  variant = "badge",
 }: {
   runtime: string | null | undefined;
   model?: string | null;
   size?: RuntimeMarkProps["size"];
   className?: string;
   compact?: boolean;
+  variant?: "badge" | "inline";
 }) {
   const id = normalizeRuntimeBrandId(runtime);
   const brand = runtimeBrand(runtime);
+  const isInline = variant === "inline";
   return (
     <span
       className={cn(
-        "inline-flex min-w-0 items-center border font-mono uppercase tracking-[0.10em]",
-        badgeSizeClass[size ?? "sm"],
-        toneClass[id],
+        "inline-flex min-w-0 items-center font-mono uppercase tracking-[0.10em]",
+        isInline ? inlineSizeClass[size ?? "sm"] : badgeSizeClass[size ?? "sm"],
+        isInline ? inlineToneClass[id] : cn("border", toneClass[id]),
         className,
       )}
       title={model ? `${brand.label} / ${model}` : brand.label}

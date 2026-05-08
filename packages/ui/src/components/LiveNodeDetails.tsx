@@ -321,7 +321,7 @@ function IdentitySummary({ data }: { data: NodeDetailData }) {
         {data.runtime ? (
           <div className="flex justify-between gap-3 font-mono text-[10px]">
             <span className="text-stone-500">Runtime</span>
-            <RuntimeBadge runtime={data.runtime} model={data.model} size="xs" compact className="max-w-[12rem] bg-white/45" />
+            <RuntimeBadge runtime={data.runtime} model={data.model} size="xs" compact variant="inline" className="max-w-[12rem]" />
           </div>
         ) : null}
         <InfoRow label="Model" value={data.model} />

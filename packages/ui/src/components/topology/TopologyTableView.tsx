@@ -116,7 +116,7 @@ function agentColumns(): ColumnDef<AgentRow>[] {
       accessorKey: "runtime",
       header: "Runtime",
       cell: ({ getValue }) => (
-        <RuntimeBadge runtime={String(getValue() ?? "")} size="xs" compact className="bg-white/45" />
+        <RuntimeBadge runtime={String(getValue() ?? "")} size="xs" compact variant="inline" />
       ),
     },
     {

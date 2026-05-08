@@ -65,7 +65,7 @@ function SeatTerminalCard({ seat }: { seat: NodeInventoryEntry }) {
           {memberName}
         </span>
         <span className="inline-flex shrink-0 items-center gap-1">
-          <RuntimeBadge runtime={seat.runtime} size="xs" compact className="bg-white/45" />
+          <RuntimeBadge runtime={seat.runtime} size="xs" compact variant="inline" />
           {typeof seat.contextUsage?.usedPercentage === "number" ? (
             <span className="font-mono text-[8px] uppercase tracking-wide text-on-surface-variant">
               {seat.contextUsage.usedPercentage}%

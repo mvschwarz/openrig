@@ -186,7 +186,8 @@ export function HybridAgentNode({ data }: { data: HybridAgentNodeData }) {
             model={data.model}
             size="xs"
             compact
-            className="max-w-full bg-white/45"
+            variant="inline"
+            className="max-w-full"
           />
           {!runtimeModel && (data.resolvedSpecName || data.profile) ? (
             <span className="ml-1 font-mono text-[7px] uppercase tracking-[0.12em] text-stone-400">
