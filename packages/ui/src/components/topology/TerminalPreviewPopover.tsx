@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type React from "react";
 import { createPortal } from "react-dom";
 import { Terminal } from "lucide-react";
@@ -8,7 +8,7 @@ import { cn } from "../../lib/utils.js";
 const TERMINAL_PREVIEW_EVENT = "openrig:topology-terminal-preview";
 const POPOVER_GAP = 8;
 const POPOVER_MARGIN = 8;
-const FALLBACK_POPOVER_WIDTH = 560;
+const FALLBACK_POPOVER_WIDTH = 400;
 const FALLBACK_POPOVER_HEIGHT = 240;
 
 interface TerminalPreviewEventDetail {
@@ -25,6 +25,11 @@ interface AnchorRect {
 interface PopoverPosition {
   left: number;
   top: number;
+}
+
+interface ViewportSize {
+  width: number;
+  height: number;
 }
 
 interface TerminalPreviewPopoverProps {
@@ -52,15 +57,27 @@ function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max);
 }
 
-function computePopoverPosition(anchor: AnchorRect, width: number, height: number): PopoverPosition {
-  const viewportWidth = window.innerWidth || width + POPOVER_MARGIN * 2;
-  const viewportHeight = window.innerHeight || height + POPOVER_MARGIN * 2;
+export function computeTerminalPopoverPosition(
+  anchor: AnchorRect,
+  width: number,
+  height: number,
+  viewport?: ViewportSize,
+): PopoverPosition {
+  const viewportWidth = viewport?.width ?? (typeof window === "undefined" ? width + POPOVER_MARGIN * 2 : window.innerWidth);
+  const viewportHeight = viewport?.height ?? (typeof window === "undefined" ? height + POPOVER_MARGIN * 2 : window.innerHeight);
   const rightSideLeft = anchor.right + POPOVER_GAP;
   const leftSideLeft = anchor.left - width - POPOVER_GAP;
   const left = rightSideLeft + width <= viewportWidth - POPOVER_MARGIN ? rightSideLeft : leftSideLeft;
+  const preferredTop = anchor.top;
+  const aboveTop = anchor.top - height - POPOVER_GAP;
+  const top = preferredTop + height <= viewportHeight - POPOVER_MARGIN
+    ? preferredTop
+    : aboveTop >= POPOVER_MARGIN
+      ? aboveTop
+      : viewportHeight - height - POPOVER_MARGIN;
   return {
     left: clamp(left, POPOVER_MARGIN, Math.max(POPOVER_MARGIN, viewportWidth - width - POPOVER_MARGIN)),
-    top: clamp(anchor.top, POPOVER_MARGIN, Math.max(POPOVER_MARGIN, viewportHeight - height - POPOVER_MARGIN)),
+    top: clamp(top, POPOVER_MARGIN, Math.max(POPOVER_MARGIN, viewportHeight - height - POPOVER_MARGIN)),
   };
 }
 
@@ -78,8 +95,15 @@ export function TerminalPreviewPopover({
   const rootRef = useRef<HTMLDivElement | null>(null);
   const popoverRef = useRef<HTMLDivElement | null>(null);
   const [open, setOpen] = useState(false);
-  const [anchorRect, setAnchorRect] = useState<AnchorRect | null>(null);
   const [position, setPosition] = useState<PopoverPosition | null>(null);
+
+  const updatePosition = useCallback(() => {
+    if (!open) return;
+    const nextAnchor = rectFromElement(rootRef.current);
+    const width = popoverRef.current?.offsetWidth || FALLBACK_POPOVER_WIDTH;
+    const height = popoverRef.current?.offsetHeight || FALLBACK_POPOVER_HEIGHT;
+    setPosition(computeTerminalPopoverPosition(nextAnchor, width, height));
+  }, [open]);
 
   useEffect(() => {
     const handleOpen = (event: Event) => {
@@ -88,8 +112,7 @@ export function TerminalPreviewPopover({
       setOpen(nextOpen);
       if (nextOpen) {
         const nextAnchor = rectFromElement(rootRef.current);
-        setAnchorRect(nextAnchor);
-        setPosition(computePopoverPosition(nextAnchor, FALLBACK_POPOVER_WIDTH, FALLBACK_POPOVER_HEIGHT));
+        setPosition(computeTerminalPopoverPosition(nextAnchor, FALLBACK_POPOVER_WIDTH, FALLBACK_POPOVER_HEIGHT));
       }
     };
     window.addEventListener(TERMINAL_PREVIEW_EVENT, handleOpen);
@@ -97,9 +120,27 @@ export function TerminalPreviewPopover({
   }, [key]);
 
   useLayoutEffect(() => {
-    if (!open || !anchorRect || !popoverRef.current) return;
-    setPosition(computePopoverPosition(anchorRect, popoverRef.current.offsetWidth, popoverRef.current.offsetHeight));
-  }, [anchorRect, open]);
+    if (!open || !popoverRef.current) return;
+    updatePosition();
+    const frame = window.requestAnimationFrame(updatePosition);
+    return () => window.cancelAnimationFrame(frame);
+  }, [open, updatePosition]);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const handleViewportChange = () => updatePosition();
+    const observer = typeof ResizeObserver === "undefined" || !popoverRef.current
+      ? null
+      : new ResizeObserver(handleViewportChange);
+    if (popoverRef.current) observer?.observe(popoverRef.current);
+    window.addEventListener("resize", handleViewportChange);
+    window.addEventListener("scroll", handleViewportChange, true);
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener("resize", handleViewportChange);
+      window.removeEventListener("scroll", handleViewportChange, true);
+    };
+  }, [open, updatePosition]);
 
   useEffect(() => {
     if (!open) return undefined;
@@ -127,8 +168,8 @@ export function TerminalPreviewPopover({
       data-testid={`${testIdPrefix}-terminal-popover`}
       data-reduced-motion={reducedMotion ? "true" : "false"}
       className={cn(
-        "nodrag nopan fixed z-[1000] w-[112ch] max-w-[calc(100vw-1rem)] bg-stone-950/65 p-1.5 backdrop-blur-sm",
-        "cursor-default select-text text-stone-50",
+        "nodrag nopan fixed z-[1000] max-h-[calc(100vh-1rem)] w-[80ch] max-w-[calc(100vw-1rem)] overflow-hidden bg-stone-950/65 p-1.5 backdrop-blur-sm",
+        "cursor-default select-text font-mono text-[8px] text-stone-50",
         popoverClassName,
       )}
       style={{ left: position.left, top: position.top }}
