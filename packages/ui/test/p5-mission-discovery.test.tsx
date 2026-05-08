@@ -314,8 +314,8 @@ describe("ProjectTreeView P5-5/P5-6 mission discovery", () => {
     expect(await findByTestId("project-no-workspace")).toBeTruthy();
   });
 
-  it("matches slices to filesystem missions by missionId first; orphans go to 'unsorted'", async () => {
-    const { findByTestId, queryByTestId } = renderTree({
+  it("matches slices to filesystem missions by missionId first; unmatched mission keys stay reachable", async () => {
+    const { findByTestId } = renderTree({
       workspaceRoot: "/Users/admin/.openrig/workspace",
       roots: [{ name: "workspace", path: "/Users/admin/.openrig/workspace" }],
       listings: {
@@ -349,6 +349,63 @@ describe("ProjectTreeView P5-5/P5-6 mission discovery", () => {
       ],
     });
     expect(await findByTestId("project-mission-rsi-v2")).toBeTruthy();
-    expect(await findByTestId("project-mission-unsorted")).toBeTruthy();
+    expect(await findByTestId("project-mission-no-such-mission")).toBeTruthy();
+  });
+
+  it("preserves unmatched legacy rail groups when filesystem missions are available", async () => {
+    const { findByTestId } = renderTree({
+      workspaceRoot: "/Users/admin/.openrig/workspace",
+      roots: [{ name: "workspace", path: "/Users/admin/.openrig/workspace" }],
+      listings: {
+        "workspace:missions": [{ name: "demo-seed", type: "dir" }],
+      },
+      reads: {
+        "workspace:missions/demo-seed/PROGRESS.md": { content: "---\nstatus: active\n---" },
+      },
+      slices: [
+        {
+          name: "idea-ledger-find-ideas-cycle-4",
+          missionId: "demo-seed",
+          displayName: "Find Ideas Cycle 4",
+          railItem: null,
+          status: "active",
+          rawStatus: "active",
+          qitemCount: 1,
+          hasProofPacket: false,
+          lastActivityAt: "2026-05-08T00:00:00.000Z",
+        },
+        {
+          name: "idea-ledger",
+          displayName: "Idea Ledger RSI v2 proof slice",
+          railItem: "RSI-V2-PROOF",
+          status: "done",
+          rawStatus: "done",
+          qitemCount: 78,
+          hasProofPacket: false,
+          lastActivityAt: "2026-05-07T22:06:36.083Z",
+        },
+        {
+          name: "seed-slice-active",
+          displayName: "seed-slice-active",
+          railItem: null,
+          status: "active",
+          rawStatus: "active",
+          qitemCount: 0,
+          hasProofPacket: false,
+          lastActivityAt: "2000-01-01T00:00:00.000Z",
+        },
+      ],
+    });
+
+    expect((await findByTestId("project-mission-section-current")).textContent).toContain(
+      "Current Work · 2",
+    );
+    expect((await findByTestId("project-mission-section-archive")).textContent).toContain(
+      "Archive · 1",
+    );
+    expect(await findByTestId("project-slice-idea-ledger-find-ideas-cycle-4")).toBeTruthy();
+    expect((await findByTestId("project-mission-demo-seed")).getAttribute("data-mission-bucket")).toBe("current");
+    expect((await findByTestId("project-mission-RSI-V2-PROOF")).getAttribute("data-mission-bucket")).toBe("current");
+    expect((await findByTestId("project-mission-unsorted")).getAttribute("data-mission-bucket")).toBe("archive");
   });
 });

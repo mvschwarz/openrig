@@ -140,6 +140,21 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
     expect(cfg.progress.scanRoots).toBe("workspace:/custom/ws");
   });
 
+  it("treats persisted legacy workspace defaults as default-derived values", () => {
+    writeFileSync(configPath, JSON.stringify({
+      workspace: {
+        root: "/custom/ws",
+        slicesRoot: "/custom/ws/slices",
+        steeringPath: "/custom/ws/steering/STEERING.md",
+      },
+    }));
+    const store = new ConfigStore(configPath);
+    const slices = store.resolveWithSource("workspace.slices_root");
+    const steering = store.resolveWithSource("workspace.steering_path");
+    expect(slices).toMatchObject({ value: "/custom/ws/missions", source: "default" });
+    expect(steering).toMatchObject({ value: "/custom/ws/STEERING.md", source: "default" });
+  });
+
   it("per-subdir override beats workspace.root cascade", () => {
     const store = new ConfigStore(configPath);
     store.set("workspace.root", "/ws");

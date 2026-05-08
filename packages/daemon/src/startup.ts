@@ -855,20 +855,30 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     // block ordering further below.
     const legacyEnvSlicesRoot = readOpenRigEnv("OPENRIG_SLICES_ROOT", "RIGGED_SLICES_ROOT") ?? "";
     let resolvedSlicesRoot = "";
+    let resolvedWorkspaceRoot = "";
     if (!legacyEnvSlicesRoot) {
       try {
         const { SettingsStore: SettingsStoreCtor } = await import("./domain/user-settings/settings-store.js");
-        resolvedSlicesRoot = new SettingsStoreCtor().resolveConfig().workspaceSlicesRoot;
+        const resolvedConfig = new SettingsStoreCtor().resolveConfig();
+        resolvedSlicesRoot = resolvedConfig.workspaceSlicesRoot;
+        resolvedWorkspaceRoot = resolvedConfig.workspaceRoot;
       } catch {
         // SettingsStore unavailable — keep slicesRoot empty; routes return 503.
       }
     }
     const slicesRoot = legacyEnvSlicesRoot || resolvedSlicesRoot;
+    const additionalSliceRoots = resolvedWorkspaceRoot
+      ? [
+          nodePath.join(resolvedWorkspaceRoot, "missions"),
+          nodePath.join(resolvedWorkspaceRoot, "slices"),
+        ].filter((root) => root !== slicesRoot)
+      : [];
     const dogfoodRoot = readOpenRigEnv("OPENRIG_DOGFOOD_EVIDENCE_ROOT", "RIGGED_DOGFOOD_EVIDENCE_ROOT") ?? "";
     const { SliceIndexer } = await import("./domain/slices/slice-indexer.js");
     const { SliceDetailProjector } = await import("./domain/slices/slice-detail-projector.js");
     const sliceIndexer = new SliceIndexer({
       slicesRoot,
+      additionalSliceRoots,
       dogfoodEvidenceRoot: dogfoodRoot || null,
       db,
     });
