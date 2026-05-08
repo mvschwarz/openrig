@@ -15,7 +15,6 @@
 
 import { useMemo, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
-import { PanelsTopLeft } from "lucide-react";
 import {
   type ColumnDef,
   flexRender,
@@ -40,6 +39,7 @@ import {
   type TopologyActivityVisual,
 } from "../../lib/topology-activity.js";
 import { ActivityRing } from "./ActivityRing.js";
+import { RuntimeBadge, ToolMark } from "../graphics/RuntimeMark.js";
 
 async function fetchNodeInventory(rigId: string): Promise<NodeInventoryEntry[]> {
   const res = await fetch(`/api/rigs/${encodeURIComponent(rigId)}/nodes`);
@@ -85,7 +85,7 @@ function CmuxButton({ row }: { row: AgentRow }) {
       title="Open in cmux"
       className="inline-flex h-7 w-7 items-center justify-center border border-outline-variant bg-white/65 text-stone-700 opacity-0 shadow-[1px_1px_0_rgba(46,52,46,0.12)] transition-opacity hover:bg-stone-100 hover:text-stone-950 focus:!opacity-100 focus:opacity-100 focus:outline-none focus:ring-2 focus:ring-stone-900/20 group-hover:!opacity-100 group-hover:opacity-100 group-focus-within:!opacity-100 group-focus-within:opacity-100"
     >
-      <PanelsTopLeft className="h-3.5 w-3.5" aria-hidden="true" />
+      <ToolMark tool="cmux" size="sm" />
       <span className="sr-only">CMUX</span>
     </button>
   );
@@ -112,7 +112,13 @@ function agentColumns(): ColumnDef<AgentRow>[] {
         </ActivityRing>
       ),
     },
-    { accessorKey: "runtime", header: "Runtime", cell: ({ getValue }) => <span className="font-mono text-[10px] uppercase tracking-wide">{String(getValue() ?? "-")}</span> },
+    {
+      accessorKey: "runtime",
+      header: "Runtime",
+      cell: ({ getValue }) => (
+        <RuntimeBadge runtime={String(getValue() ?? "")} size="xs" compact className="bg-white/45" />
+      ),
+    },
     {
       accessorKey: "status",
       header: "Status",

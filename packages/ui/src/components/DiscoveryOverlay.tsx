@@ -18,24 +18,7 @@ import {
 } from "../hooks/useDiscovery.js";
 import { useRigSummary } from "../hooks/useRigSummary.js";
 import { WorkspacePage } from "./WorkspacePage.js";
-
-function runtimeAccent(hint: string): string {
-  switch (hint) {
-    case "claude-code": return "text-primary";
-    case "codex": return "text-accent";
-    case "terminal": return "text-foreground";
-    default: return "text-foreground-muted";
-  }
-}
-
-function runtimeLabel(hint: string): string {
-  switch (hint) {
-    case "claude-code": return "Claude Code";
-    case "codex": return "Codex";
-    case "terminal": return "Terminal";
-    default: return "Unknown";
-  }
-}
+import { RuntimeBadge, ToolMark } from "./graphics/RuntimeMark.js";
 
 function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
@@ -51,11 +34,13 @@ function DiscoveryActionButton({
   activeLabel,
   onClick,
   testId,
+  tool,
 }: {
   label: string;
   activeLabel: string;
   onClick: () => boolean | Promise<boolean>;
   testId?: string;
+  tool?: string;
 }) {
   const [active, setActive] = useState(false);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -81,15 +66,17 @@ function DiscoveryActionButton({
     <button
       type="button"
       data-testid={testId}
+      aria-label={label}
       onClick={() => { void handleClick(); }}
       className={cn(
-        "px-spacing-2 py-1 border font-mono text-[10px] uppercase transition-colors duration-150 ease-tactical",
+        "inline-flex items-center gap-1.5 px-spacing-2 py-1 border font-mono text-[10px] uppercase transition-colors duration-150 ease-tactical",
         active
           ? "bg-stone-900 text-white border-stone-900"
           : "bg-white text-stone-900 border-stone-300 hover:bg-stone-100",
       )}
     >
-      {active ? activeLabel : label}
+      {tool ? <ToolMark tool={tool} size="sm" /> : null}
+      <span>{active ? activeLabel : label}</span>
     </button>
   );
 }
@@ -105,12 +92,9 @@ function DiscoveredSessionCard({ session, onAdopt }: { session: DiscoveredSessio
       <div className="flex flex-col gap-spacing-3 lg:flex-row lg:items-center lg:justify-between">
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-x-spacing-3 gap-y-spacing-1">
-            <div
-              data-testid="runtime-badge"
-              className={cn("text-[10px] uppercase tracking-[0.08em]", runtimeAccent(session.runtimeHint))}
-            >
-              {runtimeLabel(session.runtimeHint)}
-            </div>
+            <span data-testid="runtime-badge">
+              <RuntimeBadge runtime={session.runtimeHint} size="sm" compact />
+            </span>
             <div
               data-testid="session-name"
               className="font-mono text-[13px] leading-5 text-foreground"
@@ -146,6 +130,7 @@ function DiscoveredSessionCard({ session, onAdopt }: { session: DiscoveredSessio
           label="copy tmux"
           activeLabel="copied"
           testId="copy-tmux-btn"
+          tool="tmux"
           onClick={async () => {
             const ok = await copyText(attachCommand(session));
             return ok;

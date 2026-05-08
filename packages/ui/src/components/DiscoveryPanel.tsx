@@ -5,6 +5,7 @@ import { copyText } from "@/lib/copy-text";
 import { cn } from "@/lib/utils";
 import { displayAgentName } from "../lib/display-name.js";
 import { shortId } from "../lib/display-id.js";
+import { RuntimeBadge, ToolMark } from "./graphics/RuntimeMark.js";
 import {
   useAdoptSession,
   useDiscoveredSessions,
@@ -45,22 +46,6 @@ function parseCurrentRigId(pathname: string): string | null {
   return match?.[1] ?? null;
 }
 
-function runtimeAccent(hint: string): string {
-  switch (hint) {
-    case "claude-code": return "text-primary";
-    case "codex": return "text-accent";
-    default: return "text-foreground-muted";
-  }
-}
-
-function runtimeLabel(hint: string): string {
-  switch (hint) {
-    case "claude-code": return "Claude Code";
-    case "codex": return "Codex";
-    default: return "Unknown";
-  }
-}
-
 function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
@@ -93,11 +78,13 @@ function CopyActionButton({
   activeLabel,
   onClick,
   testId,
+  tool,
 }: {
   label: string;
   activeLabel: string;
   onClick: () => boolean | Promise<boolean>;
   testId?: string;
+  tool?: string;
 }) {
   const [active, setActive] = useState(false);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -123,15 +110,17 @@ function CopyActionButton({
     <button
       type="button"
       data-testid={testId}
+      aria-label={label}
       onClick={() => { void handleClick(); }}
       className={cn(
-        "px-1.5 py-0.5 border font-mono text-[7px] uppercase transition-colors",
+        "inline-flex items-center gap-1 px-1.5 py-0.5 border font-mono text-[7px] uppercase transition-colors",
         active
           ? "bg-stone-900 text-white border-stone-900"
           : "bg-white text-stone-900 border-stone-300 hover:bg-stone-100",
       )}
     >
-      {active ? activeLabel : label}
+      {tool ? <ToolMark tool={tool} size="xs" /> : null}
+      <span>{active ? activeLabel : label}</span>
     </button>
   );
 }
@@ -276,9 +265,7 @@ export function DiscoveryPanel({
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0 flex-1">
                     <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                      <div className={cn("font-mono text-[8px] uppercase tracking-[0.12em]", runtimeAccent(session.runtimeHint))}>
-                        {runtimeLabel(session.runtimeHint)}
-                      </div>
+                      <RuntimeBadge runtime={session.runtimeHint} size="xs" compact className="bg-white/45" />
                       <div className="font-mono text-[10px] text-stone-900 truncate" title={session.tmuxSession}>
                         {session.tmuxSession}
                       </div>
@@ -303,6 +290,7 @@ export function DiscoveryPanel({
                     label="copy tmux"
                     activeLabel="copied"
                     testId={`discovery-copy-tmux-${session.id}`}
+                    tool="tmux"
                     onClick={async () => copyText(attachCommand(session))}
                   />
                   {session.cwd ? (

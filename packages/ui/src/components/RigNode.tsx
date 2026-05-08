@@ -1,6 +1,5 @@
 import { useRef, useEffect, useState } from "react";
 import { Handle, Position } from "@xyflow/react";
-import { PanelsTopLeft } from "lucide-react";
 import { copyText } from "../lib/copy-text.js";
 import { displayAgentName } from "../lib/display-name.js";
 import { cn } from "../lib/utils.js";
@@ -19,6 +18,7 @@ import { getActivityCardClasses, getActivityCardSignal } from "./topology/activi
 import { TerminalPreviewPopover } from "./topology/TerminalPreviewPopover.js";
 import type { TopologyActivityVisual } from "../lib/topology-activity.js";
 import { formatCompactTokenCount, formatTokenTotalTitle, sumTokenCounts } from "../lib/token-format.js";
+import { RuntimeBadge, ToolMark } from "./graphics/RuntimeMark.js";
 
 interface RigNodeData {
   logicalId: string;
@@ -170,7 +170,7 @@ export function RigNode({ data }: { data: RigNodeData }) {
   };
 
   const buttonClass = (kind: "attach" | "resume" | "cmux") =>
-    `px-1.5 py-0.5 border font-mono text-[7px] uppercase transition-colors ${
+    `inline-flex items-center gap-1 px-1.5 py-0.5 border font-mono text-[7px] uppercase transition-colors ${
       actionFeedback === kind
         ? "bg-stone-900 text-white border-stone-900"
         : "bg-white text-stone-900 border-stone-300 hover:bg-stone-100"
@@ -247,8 +247,19 @@ export function RigNode({ data }: { data: RigNodeData }) {
           {data.canonicalSessionName ?? data.logicalId}
         </div>
 
-        <div className="truncate font-mono text-[8px] uppercase tracking-[0.12em] text-stone-400">
-          {runtimeModel || data.profile || "runtime unknown"}
+        <div className="min-w-0">
+          <RuntimeBadge
+            runtime={data.runtime}
+            model={data.model}
+            size="xs"
+            compact
+            className="max-w-full bg-white/40"
+          />
+          {!runtimeModel && data.profile ? (
+            <span className="ml-1 font-mono text-[8px] uppercase tracking-[0.12em] text-stone-400">
+              {data.profile}
+            </span>
+          ) : null}
         </div>
 
         {/* Spec hint */}
@@ -332,9 +343,11 @@ export function RigNode({ data }: { data: RigNodeData }) {
                 onClick={handleCopyAttach}
                 data-testid="toolbar-copy-attach"
                 className={buttonClass("attach")}
+                aria-label="Copy tmux attach command"
                 title={`tmux attach -t ${data.canonicalSessionName ?? data.binding?.tmuxSession ?? "?"}`}
               >
-                {actionFeedback === "attach" ? "copied" : "tmux"}
+                <ToolMark tool="tmux" size="xs" />
+                <span>{actionFeedback === "attach" ? "copied" : "tmux"}</span>
               </button>
             )}
             {data.rigId && (
@@ -345,7 +358,7 @@ export function RigNode({ data }: { data: RigNodeData }) {
                 aria-label="Open in cmux"
                 title="Open in cmux"
               >
-                <PanelsTopLeft className="h-3.5 w-3.5" aria-hidden="true" />
+                <ToolMark tool="cmux" size="sm" />
                 <span className="sr-only">{actionFeedback === "cmux" ? "opened" : "cmux"}</span>
               </button>
             )}

@@ -109,7 +109,8 @@ describe("DiscoveryOverlay", () => {
     await waitFor(() => {
       const activeSection = screen.getByTestId("discovery-active-section");
       const badges = screen.getAllByTestId("runtime-badge");
-      expect(badges[0]!.textContent).toContain("Claude Code");
+      expect(badges[0]!.textContent).toContain("Claude");
+      expect(within(badges[0]!).getByRole("img", { name: "Claude" })).toBeTruthy();
       expect(within(activeSection).getByTestId("session-name").textContent).toContain("organic");
       expect(within(activeSection).getByText("/projects/app")).toBeTruthy();
       expect(screen.queryByText("Found via")).toBeNull();
