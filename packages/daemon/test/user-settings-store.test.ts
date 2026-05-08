@@ -148,6 +148,21 @@ describe("SettingsStore (User Settings v0)", () => {
     expect(cfg.workspaceFieldNotesRoot).toBe("/ws/field-notes");
   });
 
+  it("treats persisted legacy workspace defaults as default-derived values", () => {
+    writeFileSync(configPath, JSON.stringify({
+      workspace: {
+        root: "/ws",
+        slicesRoot: "/ws/slices",
+        steeringPath: "/ws/steering/STEERING.md",
+      },
+    }));
+    const store = new SettingsStore(configPath);
+    const slices = store.resolveOne("workspace.slices_root");
+    const steering = store.resolveOne("workspace.steering_path");
+    expect(slices).toMatchObject({ value: "/ws/missions", source: "default" });
+    expect(steering).toMatchObject({ value: "/ws/STEERING.md", source: "default" });
+  });
+
   it("UEP env-var graduation: OPENRIG_FILES_ALLOWLIST resolves files.allowlist", () => {
     const store = new SettingsStore(configPath);
     process.env["OPENRIG_FILES_ALLOWLIST"] = "ws:/Users/me";

@@ -91,6 +91,8 @@ export interface SliceListEntry {
 export interface SliceIndexerOpts {
   /** Root directory containing slice folders. */
   slicesRoot: string;
+  /** Additional compatible roots to scan after the primary root. */
+  additionalSliceRoots?: string[];
   /** Root directory containing dogfood-evidence directories. */
   dogfoodEvidenceRoot: string | null;
   /** SQLite handle for read-only joins to queue_items + transitions + actions. */
@@ -134,6 +136,7 @@ const STATUS_TO_BUCKET: Record<string, SliceStatus> = {
 
 export class SliceIndexer {
   readonly slicesRoot: string;
+  readonly additionalSliceRoots: string[];
   readonly dogfoodEvidenceRoot: string | null;
   /** Workflows in Spec Library v0: exposed read-only so the slices
    *  route's `boundToWorkflow` lens filter can call
@@ -147,19 +150,15 @@ export class SliceIndexer {
 
   constructor(opts: SliceIndexerOpts) {
     this.slicesRoot = opts.slicesRoot;
+    this.additionalSliceRoots = opts.additionalSliceRoots ?? [];
     this.dogfoodEvidenceRoot = opts.dogfoodEvidenceRoot;
     this.db = opts.db;
     this.cacheTtlMs = opts.cacheTtlMs ?? DEFAULT_CACHE_TTL_MS;
   }
 
-  /** Returns true when the slicesRoot path is configured + exists on disk. */
+  /** Returns true when any configured slice root exists on disk. */
   isReady(): boolean {
-    if (!this.slicesRoot) return false;
-    try {
-      return fs.statSync(this.slicesRoot).isDirectory();
-    } catch {
-      return false;
-    }
+    return this.sliceRoots().some((root) => this.isDirectory(root));
   }
 
   /** Drops both caches. Used by tests + by a future explicit-refresh route. */
@@ -198,12 +197,6 @@ export class SliceIndexer {
   // --- internals ---
 
   private readSliceLocations(): SliceLocation[] {
-    let entries: fs.Dirent[];
-    try {
-      entries = fs.readdirSync(this.slicesRoot, { withFileTypes: true });
-    } catch {
-      return [];
-    }
     const locations: SliceLocation[] = [];
     const seen = new Set<string>();
     const addLocation = (location: SliceLocation) => {
@@ -211,32 +204,41 @@ export class SliceIndexer {
       seen.add(location.name);
       locations.push(location);
     };
-    for (const entry of entries) {
-      if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
-      const entryPath = path.join(this.slicesRoot, entry.name);
-      const nestedSlicesRoot = path.join(entryPath, "slices");
-      if (this.isDirectory(nestedSlicesRoot)) {
-        let nestedEntries: fs.Dirent[];
-        try {
-          nestedEntries = fs.readdirSync(nestedSlicesRoot, { withFileTypes: true });
-        } catch {
-          nestedEntries = [];
-        }
-        for (const nested of nestedEntries) {
-          if (!nested.isDirectory() || nested.name.startsWith(".")) continue;
-          addLocation({
-            name: nested.name,
-            missionId: entry.name,
-            slicePath: path.join(nestedSlicesRoot, nested.name),
-          });
-        }
+
+    for (const root of this.sliceRoots()) {
+      let entries: fs.Dirent[];
+      try {
+        entries = fs.readdirSync(root, { withFileTypes: true });
+      } catch {
         continue;
       }
-      addLocation({
-        name: entry.name,
-        missionId: null,
-        slicePath: entryPath,
-      });
+      for (const entry of entries) {
+        if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
+        const entryPath = path.join(root, entry.name);
+        const nestedSlicesRoot = path.join(entryPath, "slices");
+        if (this.isDirectory(nestedSlicesRoot)) {
+          let nestedEntries: fs.Dirent[];
+          try {
+            nestedEntries = fs.readdirSync(nestedSlicesRoot, { withFileTypes: true });
+          } catch {
+            nestedEntries = [];
+          }
+          for (const nested of nestedEntries) {
+            if (!nested.isDirectory() || nested.name.startsWith(".")) continue;
+            addLocation({
+              name: nested.name,
+              missionId: entry.name,
+              slicePath: path.join(nestedSlicesRoot, nested.name),
+            });
+          }
+          continue;
+        }
+        addLocation({
+          name: entry.name,
+          missionId: null,
+          slicePath: entryPath,
+        });
+      }
     }
     return locations.sort((a, b) => a.name.localeCompare(b.name));
   }
@@ -251,6 +253,19 @@ export class SliceIndexer {
     } catch {
       return false;
     }
+  }
+
+  private sliceRoots(): string[] {
+    const roots = [this.slicesRoot, ...this.additionalSliceRoots].filter((root) => root.length > 0);
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const root of roots) {
+      const resolved = path.resolve(root);
+      if (seen.has(resolved)) continue;
+      seen.add(resolved);
+      out.push(root);
+    }
+    return out;
   }
 
   private toListEntry(location: SliceLocation): SliceListEntry {

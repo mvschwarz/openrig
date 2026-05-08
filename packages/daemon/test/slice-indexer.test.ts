@@ -151,6 +151,29 @@ describe("PL-slice-story-view-v0 SliceIndexer", () => {
       );
     });
 
+    it("can index legacy flat slices and mission-aware slices from compatibility roots", () => {
+      const missionsRoot = path.join(cleanup, "missions");
+      writeSlice(slicesRoot, "legacy-flat-slice", {
+        "README.md": "---\nstatus: active\n---\n# Legacy\n",
+      });
+      writeSlice(path.join(missionsRoot, "demo-seed", "slices"), "idea-ledger-find-ideas-cycle-4", {
+        "README.md": "---\ntitle: Find Ideas Cycle 4\nstatus: active\n---\n# Cycle 4\n",
+      });
+
+      const indexer = new SliceIndexer({
+        slicesRoot,
+        additionalSliceRoots: [missionsRoot],
+        dogfoodEvidenceRoot: null,
+        db,
+      });
+      const byName = new Map(indexer.list().map((entry) => [entry.name, entry]));
+      expect(byName.get("legacy-flat-slice")?.missionId).toBeNull();
+      expect(byName.get("idea-ledger-find-ideas-cycle-4")?.missionId).toBe("demo-seed");
+      expect(indexer.get("idea-ledger-find-ideas-cycle-4")?.slicePath).toBe(
+        path.join(missionsRoot, "demo-seed", "slices", "idea-ledger-find-ideas-cycle-4"),
+      );
+    });
+
     it("derives displayName from frontmatter title, then first H1, then folder name", () => {
       writeSlice(slicesRoot, "from-title", { "README.md": "---\ntitle: Custom Title\n---\n# Heading" });
       writeSlice(slicesRoot, "from-h1", { "README.md": "---\nstatus: draft\n---\n# H1 Heading\nbody" });

@@ -184,6 +184,14 @@ function deriveWorkspaceDefault(key: SettingsValidKey, workspaceRoot: string): s
   }
 }
 
+function deriveLegacyWorkspaceDefault(key: SettingsValidKey, workspaceRoot: string): string | null {
+  switch (key) {
+    case "workspace.slices_root": return path.join(workspaceRoot, "slices");
+    case "workspace.steering_path": return path.join(workspaceRoot, "steering", "STEERING.md");
+    default: return null;
+  }
+}
+
 const WORKSPACE_DERIVED_KEYS: ReadonlySet<SettingsValidKey> = new Set([
   "workspace.slices_root",
   "workspace.steering_path",
@@ -279,6 +287,10 @@ export class SettingsStore {
     }
     const fileVal = getNestedValue(fc, KEY_TO_PATH[key]);
     if (fileVal !== undefined && fileVal !== null && fileVal !== "") {
+      const legacyDefault = deriveLegacyWorkspaceDefault(key, wr);
+      if (legacyDefault !== null && fileVal === legacyDefault) {
+        return { value: defaultValue, source: "default", defaultValue };
+      }
       return { value: fileVal as string | number | boolean, source: "file", defaultValue };
     }
     return { value: defaultValue, source: "default", defaultValue };

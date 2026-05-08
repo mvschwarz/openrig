@@ -85,7 +85,6 @@ export function ProjectTreeView() {
   // Otherwise fall back to missionId/railItem grouping alone.
   const missions = useMemo<GroupedMission[]>(() => {
     if (!discovery.unavailable && discovery.missions.length > 0) {
-      const orphanSlices: ProjectSliceRow[] = [];
       const consumedKeys = new Set<string>();
       const discovered: GroupedMission[] = discovery.missions.map((m: DiscoveredMission) => {
         const matchedSlices = slicesByMissionKey.get(m.name) ?? [];
@@ -100,16 +99,15 @@ export function ProjectTreeView() {
         };
       });
       // Any slice whose mission key doesn't match a disk mission goes into
-      // "unsorted" so it's still reachable.
+      // its own indexed group so legacy railItem missions do not get
+      // collapsed into one mixed current/archive bucket.
       for (const [missionKey, slices] of slicesByMissionKey.entries()) {
-        if (!consumedKeys.has(missionKey)) orphanSlices.push(...slices);
-      }
-      if (orphanSlices.length > 0) {
+        if (consumedKeys.has(missionKey)) continue;
         discovered.push({
-          id: "unsorted",
-          label: "Unsorted",
-          status: deriveMissionStatusFromSlices(orphanSlices),
-          slices: orphanSlices,
+          id: missionKey,
+          label: missionKey === "unsorted" ? "Unsorted" : missionKey,
+          status: deriveMissionStatusFromSlices(slices),
+          slices,
         });
       }
       return discovered;

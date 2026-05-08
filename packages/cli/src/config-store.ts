@@ -268,6 +268,14 @@ export function deriveWorkspaceDefault(key: ValidKey, workspaceRoot: string): st
   }
 }
 
+function deriveLegacyWorkspaceDefault(key: ValidKey, workspaceRoot: string): string | null {
+  switch (key) {
+    case "workspace.slices_root": return join(workspaceRoot, "slices");
+    case "workspace.steering_path": return join(workspaceRoot, "steering", "STEERING.md");
+    default: return null;
+  }
+}
+
 const WORKSPACE_DERIVED_KEYS: ReadonlySet<ValidKey> = new Set([
   "workspace.slices_root",
   "workspace.steering_path",
@@ -413,6 +421,10 @@ export class ConfigStore {
     // 2. Config file
     const fileVal = getNestedValue(fileConfig, KEY_TO_PATH[key]);
     if (fileVal !== undefined && fileVal !== null && fileVal !== "") {
+      const legacyDefault = deriveLegacyWorkspaceDefault(key, workspaceRoot);
+      if (legacyDefault !== null && fileVal === legacyDefault) {
+        return { value: defaultValue, source: "default", defaultValue };
+      }
       return { value: fileVal as string | number | boolean, source: "file", defaultValue };
     }
     // 3. Default
