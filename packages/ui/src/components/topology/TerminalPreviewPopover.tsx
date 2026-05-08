@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type React from "react";
 import { createPortal } from "react-dom";
-import { Terminal } from "lucide-react";
 import { SessionPreviewPane } from "../preview/SessionPreviewPane.js";
 import { cn } from "../../lib/utils.js";
+import { ToolMark } from "../graphics/RuntimeMark.js";
 
 const TERMINAL_PREVIEW_EVENT = "openrig:topology-terminal-preview";
 const POPOVER_GAP = 8;
@@ -196,7 +196,7 @@ export function TerminalPreviewPopover({
         onClick={openPreview}
         className={buttonClassName}
       >
-        <Terminal className="h-3.5 w-3.5" aria-hidden="true" />
+        <ToolMark tool="terminal" size="sm" />
       </button>
       {popover}
     </div>
