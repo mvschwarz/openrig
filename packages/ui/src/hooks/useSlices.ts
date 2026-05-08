@@ -326,6 +326,10 @@ export interface QueueItemDetail {
   tier: string | null;
   tags: string[] | null;
   body: string;
+  closureReason?: string | null;
+  closureTarget?: string | null;
+  handedOffTo?: string | null;
+  blockedOn?: string | null;
 }
 
 export interface QueueItemMapResult {

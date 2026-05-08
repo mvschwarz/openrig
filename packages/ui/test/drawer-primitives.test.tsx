@@ -294,6 +294,23 @@ describe("SharedDetailDrawer (Phase 4) routes selection.type to the correct view
     expect(getByTestId("sub-spec-preview")).toBeTruthy();
   });
 
+  it("outside click closes the drawer, while inside click keeps it open", () => {
+    const onClose = vi.fn();
+    const selection: DrawerSelection = {
+      type: "qitem",
+      data: { qitemId: "qitem-routing-test", body: "x" },
+    };
+    const { getByTestId } = render(
+      <SharedDetailDrawer selection={selection} onClose={onClose} {...NOOP_PROPS} />,
+    );
+
+    fireEvent.pointerDown(getByTestId("shared-detail-drawer"));
+    expect(onClose).not.toHaveBeenCalled();
+
+    fireEvent.pointerDown(getByTestId("shared-detail-drawer-outside"));
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
   // V1 polish slice Phase 5.1 P5.1-D2: 'seat-detail' kind RETIRED from
   // DrawerSelection union; navigation to /topology/seat/$rigId/$logicalId
   // center page (LiveNodeDetails) replaces the drawer-mounted variant.

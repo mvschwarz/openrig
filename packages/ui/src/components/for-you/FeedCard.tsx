@@ -17,6 +17,7 @@ import {
   type ProjectToken,
 } from "../project/ProjectMetaPrimitives.js";
 import { ProofImageViewer } from "../project/ProofImageViewer.js";
+import type { MissionControlVerb } from "../mission-control/hooks/useMissionControlAction.js";
 
 const KIND_ACCENT: Record<FeedCardKind, string> = {
   "action-required": "border-l-4 border-l-tertiary",
@@ -100,21 +101,136 @@ function compactQueueBody(body: string | undefined): string | undefined {
   return `${trimmed.slice(0, 520).trimEnd()}\n...`;
 }
 
-function isActionableCard(kind: FeedCardKind, item: QueueItemDetail | undefined): boolean {
+export interface FeedActionOutcome {
+  verb: MissionControlVerb;
+  actorSession: string;
+  actedAt: string;
+  state?: string | null;
+  destinationSession?: string | null;
+  reason?: string | null;
+}
+
+const TERMINAL_QUEUE_STATES = new Set([
+  "done",
+  "closed",
+  "completed",
+  "shipped",
+  "canceled",
+  "cancelled",
+  "denied",
+  "failed",
+  "handed-off",
+]);
+
+function isTerminalQueueItem(item: QueueItemDetail | undefined): boolean {
+  if (!item) return false;
+  return TERMINAL_QUEUE_STATES.has(item.state.toLowerCase());
+}
+
+function isActionableCard(
+  kind: FeedCardKind,
+  item: QueueItemDetail | undefined,
+  outcome: FeedActionOutcome | null,
+): boolean {
   if (kind !== "action-required" && kind !== "approval") return false;
-  const state = item?.state?.toLowerCase() ?? "";
-  if (state.includes("done") || state.includes("closed") || state.includes("canceled")) return false;
+  if (outcome) return false;
+  if (isTerminalQueueItem(item)) return false;
   return true;
+}
+
+function fallbackOutcomeFromQueueItem(
+  kind: FeedCardKind,
+  item: QueueItemDetail | undefined,
+): FeedActionOutcome | null {
+  if (kind !== "action-required" && kind !== "approval") return null;
+  if (!item || !isTerminalQueueItem(item)) return null;
+  const reason = item.closureReason ?? null;
+  const destinationSession = item.handedOffTo ?? item.closureTarget ?? null;
+  const verb: MissionControlVerb =
+    reason === "denied" ? "deny"
+      : reason === "handed_off_to" ? "route"
+        : reason === "canceled" ? "drop"
+          : "approve";
+  return {
+    verb,
+    actorSession: item.destinationSession,
+    actedAt: item.tsUpdated,
+    state: item.state,
+    destinationSession,
+    reason: reason === "no-follow-on" ? null : item.closureTarget ?? reason,
+  };
+}
+
+function outcomeToken(outcome: FeedActionOutcome): ProjectToken {
+  switch (outcome.verb) {
+    case "approve":
+      return { label: "Approved", tone: "success" };
+    case "deny":
+      return { label: "Denied", tone: "danger" };
+    case "route":
+    case "handoff":
+      return { label: "Routed", tone: "info" };
+    case "hold":
+      return { label: "Held", tone: "warning" };
+    case "drop":
+      return { label: "Dropped", tone: "neutral" };
+    case "annotate":
+      return { label: "Annotated", tone: "neutral" };
+  }
+}
+
+function outcomeSentence(outcome: FeedActionOutcome): string {
+  switch (outcome.verb) {
+    case "approve":
+      return `Approved by ${outcome.actorSession}.`;
+    case "deny":
+      return `Denied by ${outcome.actorSession}${outcome.reason ? `: ${outcome.reason}.` : "."}`;
+    case "route":
+    case "handoff":
+      return outcome.destinationSession
+        ? `Routed by ${outcome.actorSession} to ${outcome.destinationSession}.`
+        : `Routed by ${outcome.actorSession}.`;
+    case "hold":
+      return `Held by ${outcome.actorSession}${outcome.reason ? `: ${outcome.reason}.` : "."}`;
+    case "drop":
+      return `Dropped by ${outcome.actorSession}${outcome.reason ? `: ${outcome.reason}.` : "."}`;
+    case "annotate":
+      return `Annotated by ${outcome.actorSession}.`;
+  }
+}
+
+function ActionOutcomePanel({ outcome }: { outcome: FeedActionOutcome }) {
+  return (
+    <div
+      data-testid="feed-card-action-outcome"
+      className="mt-3 border border-outline-variant bg-white/35 p-2 backdrop-blur-sm"
+    >
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <ProjectPill token={outcomeToken(outcome)} />
+        <DateChip value={outcome.actedAt} />
+      </div>
+      <p className="mt-2 font-mono text-[11px] leading-relaxed text-stone-700">
+        {outcomeSentence(outcome)}
+      </p>
+      {(outcome.verb === "route" || outcome.verb === "handoff") && outcome.destinationSession ? (
+        <div className="mt-2">
+          <FlowChips source={outcome.actorSession} destination={outcome.destinationSession} muted />
+        </div>
+      ) : null}
+    </div>
+  );
 }
 
 export function FeedCard({
   card,
   queueItem,
   proofPreview,
+  actionOutcome,
 }: {
   card: FeedCardModel;
   queueItem?: QueueItemDetail;
   proofPreview?: FeedProofPreview | null;
+  actionOutcome?: FeedActionOutcome | null;
 }) {
   const [selectedScreenshot, setSelectedScreenshot] = useState<string | null>(null);
   const qitemViewerData = qitemViewerDataFromItem(card, queueItem);
@@ -123,6 +239,7 @@ export function FeedCard({
   const source = qitemViewerData?.source ?? card.authorSession;
   const destination = qitemViewerData?.destination;
   const actorSession = destination?.startsWith("human") ? destination : "human@host";
+  const renderedOutcome = actionOutcome ?? fallbackOutcomeFromQueueItem(card.kind, queueItem);
   return (
     <VellumCard
       as="article"
@@ -172,7 +289,8 @@ export function FeedCard({
             </div>
           </div>
         ) : null}
-        {qitemViewerData && isActionableCard(card.kind, queueItem) ? (
+        {renderedOutcome ? <ActionOutcomePanel outcome={renderedOutcome} /> : null}
+        {qitemViewerData && isActionableCard(card.kind, queueItem, renderedOutcome) ? (
           <div
             data-testid={`feed-card-actions-${card.id}`}
             className="mt-3 border border-outline-variant bg-white/35 p-2 backdrop-blur-sm"

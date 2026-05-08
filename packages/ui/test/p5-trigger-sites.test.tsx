@@ -262,6 +262,85 @@ describe("FeedCard P5-1 wiring: show-context QueueItemTrigger", () => {
     expect(queryByTestId("mc-verb-handoff")).toBeNull();
   });
 
+  it("renders approval outcome instead of action controls after an action lands", async () => {
+    const card = makeCard();
+    const { findByTestId, findByText, queryByTestId } = renderWithRouterAndQuery(
+      <FeedCard
+        card={card}
+        queueItem={{
+          qitemId: "qitem-20260506-test",
+          tsCreated: "2026-05-06T18:00:00Z",
+          tsUpdated: "2026-05-06T18:05:00Z",
+          sourceSession: "orch-lead@openrig-velocity",
+          destinationSession: "human-wrandom@kernel",
+          state: "pending",
+          priority: "urgent",
+          tier: "fast",
+          tags: ["approval"],
+          body: "Review this proof packet and choose a queue action.",
+        }}
+        actionOutcome={{
+          verb: "approve",
+          actorSession: "human-wrandom@kernel",
+          actedAt: "2026-05-06T18:06:00Z",
+          state: "done",
+        }}
+      />,
+    );
+
+    expect(await findByTestId("feed-card-action-outcome")).toBeTruthy();
+    expect(await findByText("Approved by human-wrandom@kernel.")).toBeTruthy();
+    expect(queryByTestId(`feed-card-actions-${card.id}`)).toBeNull();
+    expect(queryByTestId("mc-verb-approve")).toBeNull();
+  });
+
+  it("renders route outcome with the destination and hides stale action controls", async () => {
+    const card = makeCard();
+    const { findByText, queryByTestId } = renderWithRouterAndQuery(
+      <FeedCard
+        card={card}
+        actionOutcome={{
+          verb: "route",
+          actorSession: "human@host",
+          actedAt: "2026-05-06T18:06:00Z",
+          state: "handed-off",
+          destinationSession: "driver@openrig-velocity",
+        }}
+      />,
+    );
+
+    expect(await findByText("Routed by human@host to driver@openrig-velocity.")).toBeTruthy();
+    expect(queryByTestId(`feed-card-actions-${card.id}`)).toBeNull();
+  });
+
+  it("hides actions for terminal handed-off queue state even before audit hydration", async () => {
+    const card = makeCard();
+    const { findByTestId, findByText, queryByTestId } = renderWithRouterAndQuery(
+      <FeedCard
+        card={card}
+        queueItem={{
+          qitemId: "qitem-20260506-test",
+          tsCreated: "2026-05-06T18:00:00Z",
+          tsUpdated: "2026-05-06T18:05:00Z",
+          sourceSession: "orch-lead@openrig-velocity",
+          destinationSession: "human@host",
+          state: "handed-off",
+          priority: "urgent",
+          tier: "fast",
+          tags: ["approval"],
+          body: "Review this proof packet and choose a queue action.",
+          closureReason: "handed_off_to",
+          closureTarget: "driver@openrig-velocity",
+          handedOffTo: "driver@openrig-velocity",
+        }}
+      />,
+    );
+
+    expect(await findByTestId("feed-card-action-outcome")).toBeTruthy();
+    expect(await findByText("Routed by human@host to driver@openrig-velocity.")).toBeTruthy();
+    expect(queryByTestId(`feed-card-actions-${card.id}`)).toBeNull();
+  });
+
   it("does not render action controls for completed shipped cards", async () => {
     const card = makeCard({
       id: "queue-shipped-2",
