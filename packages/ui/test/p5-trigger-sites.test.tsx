@@ -191,6 +191,49 @@ describe("FeedCard P5-1 wiring: show-context QueueItemTrigger", () => {
       "orch-lead@openrig-velocity -> driver@openrig-velocity",
     );
   });
+
+  it("prefers hydrated queue body and renders proof screenshots for shipped cards", async () => {
+    const card = makeCard({
+      id: "queue-shipped-1",
+      kind: "shipped",
+      title: "Queue item shipped: qitem-demo",
+      body: "metadata-only fallback",
+      source: {
+        seq: 4,
+        type: "queue.updated",
+        payload: { qitemId: "qitem-demo", toState: "done" },
+        createdAt: "2026-05-07T21:18:52Z",
+        receivedAt: 1_000_000,
+      } as FeedCardModel["source"],
+    });
+    const { findByTestId, findByText } = renderWithRouterAndQuery(
+      <FeedCard
+        card={card}
+        queueItem={{
+          qitemId: "qitem-demo",
+          tsCreated: "2026-05-07T21:18:52Z",
+          tsUpdated: "2026-05-07T21:20:00Z",
+          sourceSession: "driver@rig",
+          destinationSession: "human@host",
+          state: "done",
+          priority: "urgent",
+          tier: "fast",
+          tags: ["idea-ledger-triage-ideas-cycle-4"],
+          body: "Review the completed proof packet and screenshots for the triage slice.",
+        }}
+        proofPreview={{
+          sliceName: "idea-ledger-triage-ideas-cycle-4",
+          displayName: "Idea Ledger triage ideas cycle 4",
+          passFailBadge: "pass",
+          screenshots: ["screenshots/for-you-live-human-pending-final.png"],
+        }}
+      />,
+    );
+    expect(await findByText("Review the completed proof packet and screenshots for the triage slice.")).toBeTruthy();
+    expect(await findByTestId(`feed-card-proof-preview-${card.id}`)).toBeTruthy();
+    const img = await findByTestId("feed-card-proof-screenshot-screenshots/for-you-live-human-pending-final.png") as HTMLImageElement;
+    expect(img.getAttribute("src")).toContain("/api/slices/idea-ledger-triage-ideas-cycle-4/proof-asset/");
+  });
 });
 
 // V1 polish slice Phase 5.1 P5.1-D2: TopologyTreeView SeatLeaf details

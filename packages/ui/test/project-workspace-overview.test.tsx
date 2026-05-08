@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, cleanup } from "@testing-library/react";
+import { fireEvent, render, cleanup } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   createMemoryHistory,
@@ -9,7 +9,8 @@ import {
   createRoute,
   Outlet,
 } from "@tanstack/react-router";
-import { WorkspaceScopePage } from "../src/components/project/ScopePages.js";
+import { MissionScopePage, WorkspaceScopePage } from "../src/components/project/ScopePages.js";
+import type { SliceDetail } from "../src/hooks/useSlices.js";
 
 const mockFetch = vi.fn();
 globalThis.fetch = mockFetch;
@@ -22,7 +23,40 @@ afterEach(() => {
   cleanup();
 });
 
-function renderWorkspaceScope(): ReturnType<typeof render> {
+function makeDetail(name: string, missionId: string | null, qitemIds: string[]): SliceDetail {
+  return {
+    name,
+    missionId,
+    slicePath: `/workspace/${name}`,
+    displayName: name,
+    railItem: missionId,
+    status: "active",
+    rawStatus: "active",
+    qitemIds,
+    commitRefs: ["abc1234"],
+    lastActivityAt: "2026-05-07T22:06:36.083Z",
+    workflowBinding: null,
+    story: { events: [], phaseDefinitions: null },
+    acceptance: { totalItems: 1, doneItems: 1, percentage: 100, items: [], closureCallout: null, currentStep: null },
+    decisions: { rows: [] },
+    docs: { tree: [{ name: "README.md", relPath: "README.md", type: "file", size: 100, mtime: null }] },
+    tests: {
+      proofPackets: [{
+        dirName: `${name}-proof`,
+        primaryMarkdown: { relPath: "proof.md", content: "PASS" },
+        additionalMarkdown: [],
+        screenshots: ["screenshots/proof.png"],
+        videos: [],
+        traces: [],
+        passFailBadge: "pass",
+      }],
+      aggregate: { passCount: 1, failCount: 0 },
+    },
+    topology: { affectedRigs: [{ rigId: "rig-1", rigName: "rig-1", sessionNames: ["driver@rig-1"] }], totalSeats: 1, specGraph: null },
+  };
+}
+
+function installFetchMock() {
   mockFetch.mockImplementation(async (url: string) => {
     if (url.includes("/api/config")) {
       return new Response(
@@ -30,7 +64,27 @@ function renderWorkspaceScope(): ReturnType<typeof render> {
         { status: 200 },
       );
     }
-    if (url.includes("/api/slices")) {
+    if (url.includes("/api/slices/idea-ledger")) {
+      return new Response(JSON.stringify(makeDetail("idea-ledger", "RSI-V2-PROOF", ["qitem-A"])), { status: 200 });
+    }
+    if (url.includes("/api/slices/seed-slice-active")) {
+      return new Response(JSON.stringify(makeDetail("seed-slice-active", null, [])), { status: 200 });
+    }
+    if (url.includes("/api/queue/qitem-A")) {
+      return new Response(JSON.stringify({
+        qitemId: "qitem-A",
+        tsCreated: "2026-05-07T22:06:36.083Z",
+        tsUpdated: "2026-05-07T22:06:36.083Z",
+        sourceSession: "driver@rig",
+        destinationSession: "human@host",
+        state: "done",
+        priority: "urgent",
+        tier: "fast",
+        tags: ["RSI-V2-PROOF"],
+        body: "Full queue body for workspace rollup.",
+      }), { status: 200 });
+    }
+    if (url.includes("/api/slices?")) {
       return new Response(
         JSON.stringify({
           slices: [
@@ -63,6 +117,10 @@ function renderWorkspaceScope(): ReturnType<typeof render> {
     }
     return new Response("[]");
   });
+}
+
+function renderWorkspaceScope(): ReturnType<typeof render> {
+  installFetchMock();
 
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const rootRoute = createRootRoute({ component: () => <Outlet /> });
@@ -88,6 +146,38 @@ function renderWorkspaceScope(): ReturnType<typeof render> {
   );
 }
 
+function renderMissionScope(): ReturnType<typeof render> {
+  installFetchMock();
+
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const rootRoute = createRootRoute({ component: () => <Outlet /> });
+  const missionRoute = createRoute({
+    getParentRoute: () => rootRoute,
+    path: "/project/mission/$missionId",
+    component: () => <MissionScopePage />,
+  });
+  const sliceRoute = createRoute({
+    getParentRoute: () => rootRoute,
+    path: "/project/slice/$sliceId",
+    component: () => null,
+  });
+  const fallbackRoute = createRoute({
+    getParentRoute: () => rootRoute,
+    path: "$",
+    component: () => null,
+  });
+  const router = createRouter({
+    routeTree: rootRoute.addChildren([missionRoute, sliceRoute, fallbackRoute]),
+    history: createMemoryHistory({ initialEntries: ["/project/mission/RSI-V2-PROOF"] }),
+  });
+
+  return render(
+    <QueryClientProvider client={queryClient}>
+      <RouterProvider router={router} />
+    </QueryClientProvider>,
+  );
+}
+
 describe("WorkspaceScopePage overview", () => {
   it("summarizes current qitem-backed work separately from archived slices", async () => {
     const { findByTestId } = renderWorkspaceScope();
@@ -101,5 +191,30 @@ describe("WorkspaceScopePage overview", () => {
 
     const archivedMission = await findByTestId("workspace-overview-mission-unsorted");
     expect(archivedMission.getAttribute("data-mission-bucket")).toBe("archive");
+  });
+
+  it("workspace progress, queue, and topology tabs render aggregate scoped data", async () => {
+    const { findByTestId } = renderWorkspaceScope();
+
+    fireEvent.click(await findByTestId("project-tab-progress"));
+    expect(await findByTestId("scope-progress-rollup")).toBeTruthy();
+
+    fireEvent.click(await findByTestId("project-tab-queue"));
+    expect(await findByTestId("scope-queue-rollup")).toBeTruthy();
+    expect((await findByTestId("scope-queue-trigger-qitem-A")).textContent).toContain("Full queue body");
+
+    fireEvent.click(await findByTestId("project-tab-topology"));
+    expect(await findByTestId("scope-topology-rollup")).toBeTruthy();
+  });
+
+  it("mission scope page filters workspace data to that mission", async () => {
+    const { findByTestId, queryByText } = renderMissionScope();
+
+    expect(await findByTestId("mission-overview-panel")).toBeTruthy();
+    expect((await findByTestId("mission-overview-panel")).textContent).toContain("Idea Ledger RSI v2 proof slice");
+    expect(queryByText("seed-slice-active")).toBeNull();
+
+    fireEvent.click(await findByTestId("project-tab-queue"));
+    expect((await findByTestId("scope-queue-trigger-qitem-A")).textContent).toContain("Full queue body");
   });
 });

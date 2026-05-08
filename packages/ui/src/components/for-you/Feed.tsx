@@ -16,12 +16,25 @@ import { cn } from "../../lib/utils.js";
 import { SectionHeader } from "../ui/section-header.js";
 import { EmptyState } from "../ui/empty-state.js";
 import { useActivityFeed } from "../../hooks/useActivityFeed.js";
-import { classifyFeed, type FeedCardKind } from "../../lib/feed-classifier.js";
+import {
+  classifyFeed,
+  type FeedCard as FeedCardModel,
+  type FeedCardKind,
+} from "../../lib/feed-classifier.js";
+import {
+  useQueueItemMap,
+  useSliceDetails,
+  useSlices,
+  type QueueItemDetail,
+  type SliceDetail,
+  type SliceListEntry,
+} from "../../hooks/useSlices.js";
 import {
   useFeedSubscriptions,
   isCardKindSubscribed,
 } from "../../hooks/useFeedSubscriptions.js";
 import { FeedCard } from "./FeedCard.js";
+import type { FeedProofPreview } from "./FeedCard.js";
 
 const LENS_CHIPS: Array<{ id: FeedCardKind | "all"; label: string }> = [
   { id: "all", label: "All" },
@@ -33,6 +46,60 @@ const LENS_CHIPS: Array<{ id: FeedCardKind | "all"; label: string }> = [
 ];
 
 const HISTORY_LIMIT = 50; // per for-you-feed.md L182
+
+function asString(v: unknown): string | undefined {
+  return typeof v === "string" && v.length > 0 ? v : undefined;
+}
+
+function asStringArray(v: unknown): string[] {
+  return Array.isArray(v) ? v.filter((item): item is string => typeof item === "string") : [];
+}
+
+function qitemIdForCard(card: FeedCardModel): string | null {
+  const payload = (card.source.payload ?? {}) as Record<string, unknown>;
+  return asString(payload.qitemId) ?? asString(payload.qitem_id) ?? null;
+}
+
+function queueTags(card: FeedCardModel, item: QueueItemDetail | undefined): string[] {
+  const payload = (card.source.payload ?? {}) as Record<string, unknown>;
+  return [
+    ...asStringArray(payload.tags),
+    ...(item?.tags ?? []),
+  ];
+}
+
+function sliceForCard(
+  card: FeedCardModel,
+  item: QueueItemDetail | undefined,
+  slices: SliceListEntry[],
+): string | null {
+  const tags = new Set(queueTags(card, item));
+  for (const slice of slices) {
+    if (tags.has(slice.name)) return slice.name;
+  }
+  const haystack = [
+    card.title,
+    card.body,
+    item?.body,
+    ...(item?.tags ?? []),
+  ].filter((value): value is string => Boolean(value)).join("\n");
+  for (const slice of slices) {
+    if (haystack.includes(slice.name)) return slice.name;
+  }
+  return null;
+}
+
+function proofPreviewForSlice(detail: SliceDetail | undefined): FeedProofPreview | null {
+  const packet = detail?.tests.proofPackets.find((candidate) => candidate.screenshots.length > 0)
+    ?? detail?.tests.proofPackets[0];
+  if (!detail || !packet || packet.screenshots.length === 0) return null;
+  return {
+    sliceName: detail.name,
+    displayName: detail.displayName || detail.name,
+    passFailBadge: packet.passFailBadge,
+    screenshots: packet.screenshots,
+  };
+}
 
 export function Feed() {
   const { events } = useActivityFeed();
@@ -49,6 +116,28 @@ export function Feed() {
     const sliced = subscribed.slice(0, HISTORY_LIMIT);
     return lens === "all" ? sliced : sliced.filter((c) => c.kind === lens);
   }, [events, lens, subs.state]);
+  const qitemIds = useMemo(
+    () => cards.map(qitemIdForCard).filter((id): id is string => Boolean(id)),
+    [cards],
+  );
+  const queueItems = useQueueItemMap(qitemIds);
+  const slicesQuery = useSlices("all");
+  const sliceRows = useMemo(() => {
+    if (!slicesQuery.data || "unavailable" in slicesQuery.data) return [];
+    return slicesQuery.data.slices;
+  }, [slicesQuery.data]);
+  const proofSliceNames = useMemo(() => {
+    const names = new Set<string>();
+    for (const card of cards) {
+      if (card.kind !== "shipped") continue;
+      const qitemId = qitemIdForCard(card);
+      const item = qitemId ? queueItems.itemsById.get(qitemId) : undefined;
+      const sliceName = sliceForCard(card, item, sliceRows);
+      if (sliceName) names.add(sliceName);
+    }
+    return Array.from(names);
+  }, [cards, queueItems.itemsById, sliceRows]);
+  const proofSlices = useSliceDetails(proofSliceNames);
 
   return (
     <div data-testid="for-you-feed" className="mx-auto w-full max-w-[720px] px-6 py-8">
@@ -95,9 +184,20 @@ export function Feed() {
         />
       ) : (
         <div data-testid="for-you-feed-cards">
-          {cards.map((c) => (
-            <FeedCard key={c.id} card={c} />
-          ))}
+          {cards.map((c) => {
+            const qitemId = qitemIdForCard(c);
+            const queueItem = qitemId ? queueItems.itemsById.get(qitemId) : undefined;
+            const sliceName = c.kind === "shipped" ? sliceForCard(c, queueItem, sliceRows) : null;
+            const proofPreview = sliceName ? proofPreviewForSlice(proofSlices.itemsByName.get(sliceName)) : null;
+            return (
+              <FeedCard
+                key={c.id}
+                card={c}
+                queueItem={queueItem}
+                proofPreview={proofPreview}
+              />
+            );
+          })}
         </div>
       )}
     </div>

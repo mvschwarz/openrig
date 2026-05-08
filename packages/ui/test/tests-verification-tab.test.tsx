@@ -4,7 +4,7 @@
 // and the video player as regression gates.
 
 import { describe, it, expect, afterEach } from "vitest";
-import { render, screen, cleanup } from "@testing-library/react";
+import { fireEvent, render, screen, cleanup } from "@testing-library/react";
 import { TestsVerificationTab } from "../src/components/slices/tabs/TestsVerificationTab.js";
 import type { SliceDetail, ProofPacketRendered } from "../src/hooks/useSlices.js";
 
@@ -81,6 +81,20 @@ describe("PL-slice-story-view-v0 TestsVerificationTab", () => {
     expect(img1.getAttribute("src")).toContain("/api/slices/my-slice/proof-asset/");
     expect(img1.getAttribute("src")).toContain("mission-control-active-work.png");
     expect(img2.getAttribute("src")).toContain("edge-fired.png");
+  });
+
+  it("opens a large screenshot viewer when a proof screenshot is clicked", () => {
+    const tests = makeTests([makePacket({
+      screenshots: ["screenshots/mission-control-active-work.png"],
+    })]);
+    render(<TestsVerificationTab sliceName="my-slice" tests={tests} />);
+    fireEvent.click(screen.getByTestId("tests-packet-screenshot-open-screenshots/mission-control-active-work.png"));
+    const viewer = screen.getByTestId("tests-screenshot-viewer");
+    expect(viewer.getAttribute("role")).toBe("dialog");
+    const img = screen.getByTestId("tests-screenshot-viewer-image") as HTMLImageElement;
+    expect(img.getAttribute("src")).toContain("/api/slices/my-slice/proof-asset/screenshots/mission-control-active-work.png");
+    fireEvent.click(screen.getByTestId("tests-screenshot-viewer-close"));
+    expect(screen.queryByTestId("tests-screenshot-viewer")).toBeNull();
   });
 
   it("renders <video controls> player for each video path", () => {

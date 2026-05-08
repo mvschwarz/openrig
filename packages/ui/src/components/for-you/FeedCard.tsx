@@ -11,6 +11,7 @@ import { SectionHeader } from "../ui/section-header.js";
 import { AuthorAgentTag } from "./AuthorAgentTag.js";
 import { QueueItemTrigger } from "../drawer-triggers/QueueItemTrigger.js";
 import type { QueueItemViewerData } from "../drawer-viewers/QueueItemViewer.js";
+import { proofAssetUrl, type QueueItemDetail } from "../../hooks/useSlices.js";
 import type { FeedCard as FeedCardModel, FeedCardKind } from "../../lib/feed-classifier.js";
 
 const KIND_LABEL: Record<FeedCardKind, string> = {
@@ -67,8 +68,45 @@ function extractQitemViewerData(card: FeedCardModel): QueueItemViewerData | null
   };
 }
 
-export function FeedCard({ card }: { card: FeedCardModel }) {
-  const qitemViewerData = extractQitemViewerData(card);
+export interface FeedProofPreview {
+  sliceName: string;
+  displayName: string;
+  passFailBadge: string;
+  screenshots: string[];
+}
+
+function qitemViewerDataFromItem(card: FeedCardModel, item: QueueItemDetail | undefined): QueueItemViewerData | null {
+  const fallback = extractQitemViewerData(card);
+  if (!item) return fallback;
+  return {
+    qitemId: item.qitemId,
+    source: item.sourceSession,
+    destination: item.destinationSession,
+    state: item.state,
+    tags: item.tags ?? undefined,
+    createdAt: item.tsCreated,
+    body: item.body || fallback?.body || card.body,
+  };
+}
+
+function compactQueueBody(body: string | undefined): string | undefined {
+  if (!body) return undefined;
+  const trimmed = body.trim();
+  if (trimmed.length <= 520) return trimmed;
+  return `${trimmed.slice(0, 520).trimEnd()}\n...`;
+}
+
+export function FeedCard({
+  card,
+  queueItem,
+  proofPreview,
+}: {
+  card: FeedCardModel;
+  queueItem?: QueueItemDetail;
+  proofPreview?: FeedProofPreview | null;
+}) {
+  const qitemViewerData = qitemViewerDataFromItem(card, queueItem);
+  const body = compactQueueBody(queueItem?.body || card.body);
   return (
     <VellumCard
       as="article"
@@ -83,10 +121,33 @@ export function FeedCard({ card }: { card: FeedCardModel }) {
         <h3 className="mt-1 font-mono text-sm text-stone-900 truncate">
           {card.title}
         </h3>
-        {card.body ? (
+        {body ? (
           <p className="mt-2 font-mono text-xs text-on-surface-variant whitespace-pre-line">
-            {card.body}
+            {body}
           </p>
+        ) : null}
+        {proofPreview && proofPreview.screenshots.length > 0 ? (
+          <div
+            data-testid={`feed-card-proof-preview-${card.id}`}
+            className="mt-3 border border-outline-variant bg-white/20 p-2"
+          >
+            <div className="flex items-center justify-between gap-2 font-mono text-[9px] uppercase tracking-[0.12em] text-stone-600">
+              <span className="truncate">Proof packet · {proofPreview.displayName}</span>
+              <span>{proofPreview.passFailBadge}</span>
+            </div>
+            <div className="mt-2 grid grid-cols-2 gap-2">
+              {proofPreview.screenshots.slice(0, 4).map((rel) => (
+                <img
+                  key={rel}
+                  data-testid={`feed-card-proof-screenshot-${rel}`}
+                  src={proofAssetUrl(proofPreview.sliceName, rel)}
+                  alt={rel}
+                  className="h-24 w-full border border-stone-200 bg-stone-100 object-cover"
+                  loading="lazy"
+                />
+              ))}
+            </div>
+          </div>
         ) : null}
         <div className="mt-3 flex items-center justify-between gap-3 font-mono text-[10px] text-on-surface-variant">
           <div className="flex items-center gap-2 min-w-0">

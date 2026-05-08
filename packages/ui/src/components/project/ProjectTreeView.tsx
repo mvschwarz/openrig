@@ -168,27 +168,35 @@ export function ProjectTreeView() {
         data-testid={`project-mission-${m.id}`}
         data-mission-bucket={bucket}
       >
-        <button
-          type="button"
-          onClick={() =>
-            setExpanded((p) => ({
-              ...p,
-              [`mission-${m.id}`]: !missionExpanded,
-            }))
-          }
-          className="w-full flex items-center gap-1 px-2 py-0.5 hover:bg-surface-low text-left"
-          data-testid={`project-mission-toggle-${m.id}`}
-        >
-          {missionExpanded ? (
-            <ChevronDown className="h-3 w-3 text-on-surface-variant" />
-          ) : (
-            <ChevronRight className="h-3 w-3 text-on-surface-variant" />
-          )}
-          <span className="font-mono text-[11px] text-stone-900 flex-1 truncate">
+        <div className="w-full flex items-center gap-1 px-2 py-0.5 hover:bg-surface-low text-left">
+          <button
+            type="button"
+            aria-label={`${missionExpanded ? "Collapse" : "Expand"} ${m.label}`}
+            onClick={() =>
+              setExpanded((p) => ({
+                ...p,
+                [`mission-${m.id}`]: !missionExpanded,
+              }))
+            }
+            className="flex h-4 w-4 items-center justify-center"
+            data-testid={`project-mission-toggle-${m.id}`}
+          >
+            {missionExpanded ? (
+              <ChevronDown className="h-3 w-3 text-on-surface-variant" />
+            ) : (
+              <ChevronRight className="h-3 w-3 text-on-surface-variant" />
+            )}
+          </button>
+          <Link
+            to="/project/mission/$missionId"
+            params={{ missionId: m.id }}
+            data-testid={`project-mission-link-${m.id}`}
+            className="font-mono text-[11px] text-stone-900 flex-1 truncate hover:underline"
+          >
             {m.label}
-          </span>
+          </Link>
           <LiveMissionStatusBadge mission={m} />
-        </button>
+        </div>
         {missionExpanded ? (
           <ul className="ml-4 border-l border-stone-200">
             {m.slices.length === 0 ? (

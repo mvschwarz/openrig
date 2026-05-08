@@ -251,6 +251,44 @@ export function useSliceDetail(name: string | null) {
   });
 }
 
+export interface SliceDetailsMapResult {
+  itemsByName: Map<string, SliceDetail>;
+  isFetching: boolean;
+  missingNames: string[];
+}
+
+export function useSliceDetails(names: string[]): SliceDetailsMapResult {
+  const uniqueNames = useMemo(
+    () => Array.from(new Set(names.filter((name) => name.length > 0))).sort(),
+    [names],
+  );
+  const queries = useQueries({
+    queries: uniqueNames.map((name) => ({
+      queryKey: ["slices", "detail", name],
+      queryFn: () => fetchSliceDetail(name),
+      staleTime: 30_000,
+    })),
+  });
+
+  return useMemo(() => {
+    const itemsByName = new Map<string, SliceDetail>();
+    const missingNames: string[] = [];
+    uniqueNames.forEach((name, idx) => {
+      const item = queries[idx]?.data;
+      if (item) {
+        itemsByName.set(name, item);
+      } else if (queries[idx]?.isError) {
+        missingNames.push(name);
+      }
+    });
+    return {
+      itemsByName,
+      isFetching: queries.some((query) => query.isFetching),
+      missingNames,
+    };
+  }, [queries, uniqueNames]);
+}
+
 // --- doc body fetcher (Docs tab; lazy on click) ---
 
 export interface SliceDocResponse {
