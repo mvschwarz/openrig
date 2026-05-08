@@ -14,6 +14,7 @@
 // pass/fail extracted from the primary markdown. The actual canonical
 // answer is in the markdown body which is rendered inline.
 
+import { useState } from "react";
 import type { SliceDetail, ProofPacketRendered } from "../../../hooks/useSlices.js";
 import { proofAssetUrl } from "../../../hooks/useSlices.js";
 
@@ -108,6 +109,7 @@ function formatMaybeDate(ts: string | null): string {
 }
 
 function ProofPacketSection({ sliceName, packet }: { sliceName: string; packet: ProofPacketRendered }) {
+  const [selectedScreenshot, setSelectedScreenshot] = useState<string | null>(null);
   return (
     <article
       className="border border-stone-200 bg-white"
@@ -142,13 +144,20 @@ function ProofPacketSection({ sliceName, packet }: { sliceName: string; packet: 
             <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
               {packet.screenshots.map((rel) => (
                 <figure key={rel} className="border border-stone-200">
-                  <img
-                    data-testid={`tests-packet-screenshot-${rel}`}
-                    src={proofAssetUrl(sliceName, rel)}
-                    alt={rel}
-                    loading="lazy"
-                    className="block w-full bg-stone-100"
-                  />
+                  <button
+                    type="button"
+                    data-testid={`tests-packet-screenshot-open-${rel}`}
+                    onClick={() => setSelectedScreenshot(rel)}
+                    className="block w-full text-left"
+                  >
+                    <img
+                      data-testid={`tests-packet-screenshot-${rel}`}
+                      src={proofAssetUrl(sliceName, rel)}
+                      alt={rel}
+                      loading="lazy"
+                      className="block w-full bg-stone-100"
+                    />
+                  </button>
                   <figcaption className="bg-stone-50 px-2 py-1 font-mono text-[9px] text-stone-500 truncate">
                     {rel}
                   </figcaption>
@@ -157,6 +166,38 @@ function ProofPacketSection({ sliceName, packet }: { sliceName: string; packet: 
             </div>
           </section>
         )}
+        {selectedScreenshot ? (
+          <div
+            role="dialog"
+            aria-label="Screenshot preview"
+            data-testid="tests-screenshot-viewer"
+            className="fixed inset-0 z-[1000] flex items-center justify-center bg-black/70 p-6"
+            onClick={() => setSelectedScreenshot(null)}
+          >
+            <div
+              className="max-h-full max-w-[92vw] bg-black/80 p-2"
+              onClick={(event) => event.stopPropagation()}
+            >
+              <img
+                data-testid="tests-screenshot-viewer-image"
+                src={proofAssetUrl(sliceName, selectedScreenshot)}
+                alt={selectedScreenshot}
+                className="max-h-[82vh] max-w-full object-contain"
+              />
+              <div className="mt-2 flex items-center justify-between gap-3 font-mono text-[10px] text-stone-100">
+                <span className="truncate">{selectedScreenshot}</span>
+                <button
+                  type="button"
+                  data-testid="tests-screenshot-viewer-close"
+                  onClick={() => setSelectedScreenshot(null)}
+                  className="border border-white/40 px-2 py-1 uppercase tracking-[0.12em] hover:bg-white/10"
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+          </div>
+        ) : null}
 
         {packet.videos.length > 0 && (
           <section data-testid={`tests-packet-videos-${packet.dirName}`}>

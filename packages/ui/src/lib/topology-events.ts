@@ -14,17 +14,27 @@ type TopologyEventListener = (event: TopologyEvent, rawData: string) => void;
 type TopologyStatusListener = (status: TopologyEventStatus) => void;
 
 const GLOBAL_EVENTS_URL = "/api/events";
+const MAX_REPLAY_EVENTS = 100;
+
+interface CachedTopologyEvent {
+  event: TopologyEvent;
+  rawData: string;
+}
 
 class TopologyEventHub {
   private eventSource: EventSource | null = null;
   private eventListeners = new Set<TopologyEventListener>();
   private statusListeners = new Set<TopologyStatusListener>();
+  private replayEvents: CachedTopologyEvent[] = [];
   private connected = false;
   private reconnecting = false;
 
   subscribe(listener: TopologyEventListener): () => void {
     this.eventListeners.add(listener);
     this.ensureConnected();
+    for (const cached of this.replayEvents) {
+      listener(cached.event, cached.rawData);
+    }
     return () => {
       this.eventListeners.delete(listener);
       this.closeIfIdle();
@@ -77,6 +87,10 @@ class TopologyEventHub {
       }
       if (!parsed || typeof parsed !== "object") return;
       const topologyEvent = parsed as TopologyEvent;
+      this.replayEvents = [
+        ...this.replayEvents,
+        { event: topologyEvent, rawData: data },
+      ].slice(-MAX_REPLAY_EVENTS);
       for (const listener of [...this.eventListeners]) {
         listener(topologyEvent, data);
       }
@@ -89,6 +103,7 @@ class TopologyEventHub {
       this.eventSource.close();
       this.eventSource = null;
     }
+    this.replayEvents = [];
     this.connected = false;
     this.reconnecting = false;
   }

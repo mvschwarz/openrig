@@ -197,6 +197,7 @@ describe("ProjectTreeView P5-5/P5-6 mission discovery", () => {
       slices: [],
     });
     expect(await findByTestId("project-mission-rsi-v2")).toBeTruthy();
+    expect((await findByTestId("project-mission-link-rsi-v2")).getAttribute("href")).toBe("/project/mission/rsi-v2");
     expect(await findByTestId("project-mission-shell-redesign-v1")).toBeTruthy();
   });
 

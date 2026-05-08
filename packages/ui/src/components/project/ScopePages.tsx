@@ -21,14 +21,15 @@ import { Link, useParams } from "@tanstack/react-router";
 import { cn } from "../../lib/utils.js";
 import { SectionHeader } from "../ui/section-header.js";
 import { EmptyState } from "../ui/empty-state.js";
-import { FilesWorkspace } from "../files/FilesWorkspace.js";
 import { useWorkspaceName } from "../../hooks/useWorkspaceName.js";
 import {
   useQueueItemMap,
+  useSliceDetails,
   useSlices,
   useSliceDetail,
   type QueueItemDetail,
   type SliceDetail,
+  type SliceListEntry,
 } from "../../hooks/useSlices.js";
 import {
   deriveMissionStatusFromSlices,
@@ -156,6 +157,204 @@ function formatLastActivity(ts: number): string {
     hour: "2-digit",
     minute: "2-digit",
   });
+}
+
+function sliceMissionKey(slice: SliceListEntry): string {
+  return slice.missionId ?? slice.railItem ?? "unsorted";
+}
+
+function rowsForScope(rows: SliceListEntry[], missionId: string | null): SliceListEntry[] {
+  if (!missionId) return rows;
+  return rows.filter((slice) => sliceMissionKey(slice) === missionId);
+}
+
+function useProjectScopeRollup(missionId: string | null, loadDetails: boolean) {
+  const list = useSlices("all");
+  const rows = useMemo(() => {
+    if (!list.data || "unavailable" in list.data) return [];
+    return rowsForScope(list.data.slices, missionId);
+  }, [list.data, missionId]);
+  const details = useSliceDetails(loadDetails ? rows.map((slice) => slice.name) : []);
+  const qitemIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const detail of details.itemsByName.values()) {
+      if (Array.isArray(detail.qitemIds)) {
+        detail.qitemIds.forEach((qitemId) => ids.add(qitemId));
+      }
+    }
+    return Array.from(ids).sort();
+  }, [details.itemsByName]);
+  const queueItems = useQueueItemMap(loadDetails ? qitemIds : []);
+
+  return { list, rows, details, qitemIds, queueItems };
+}
+
+function ScopeProgressRollup({
+  rows,
+  detailsByName,
+  isLoading,
+}: {
+  rows: SliceListEntry[];
+  detailsByName: Map<string, SliceDetail>;
+  isLoading: boolean;
+}) {
+  if (isLoading && rows.length === 0) {
+    return <PlaceholderTab label="LOADING PROGRESS" description="Reading scoped slice progress." />;
+  }
+  if (rows.length === 0) {
+    return <EmptyState label="NO SCOPED SLICES" description="No slices are indexed for this scope." variant="card" testId="scope-progress-empty" />;
+  }
+  return (
+    <div data-testid="scope-progress-rollup" className="space-y-3">
+      {rows.map((row) => {
+        const detail = detailsByName.get(row.name);
+        return (
+          <article key={row.name} className="border border-outline-variant bg-white/20 p-3">
+            <div className="flex items-start justify-between gap-3 border-b border-outline-variant pb-2">
+              <div className="min-w-0">
+                <Link
+                  to="/project/slice/$sliceId"
+                  params={{ sliceId: row.name }}
+                  className="font-mono text-[12px] uppercase tracking-[0.12em] text-stone-900 hover:underline"
+                >
+                  {row.displayName}
+                </Link>
+                <div className="mt-1 font-mono text-[9px] uppercase tracking-[0.10em] text-stone-500">
+                  {projectSliceMeta(projectSliceFromListEntry(row))}
+                </div>
+              </div>
+              <span className="font-mono text-[10px] uppercase tracking-[0.12em] text-stone-600">
+                {row.status}
+              </span>
+            </div>
+            <div className="mt-3 grid gap-2 font-mono text-[10px] text-stone-700 sm:grid-cols-4">
+              <SliceMetric label="Qitems" value={detail?.qitemIds.length ?? row.qitemCount} />
+              <SliceMetric label="Proof" value={detail ? detail.tests.proofPackets.length : row.hasProofPacket ? 1 : 0} />
+              <SliceMetric label="Progress" value={detail ? `${detail.acceptance.percentage}%` : "unknown"} />
+              <SliceMetric label="Last activity" value={formatMaybeDate(row.lastActivityAt)} />
+            </div>
+          </article>
+        );
+      })}
+    </div>
+  );
+}
+
+function ScopeQueueRollup({
+  qitemIds,
+  queueItemsById,
+  isFetching,
+}: {
+  qitemIds: string[];
+  queueItemsById: Map<string, QueueItemDetail>;
+  isFetching: boolean;
+}) {
+  if (qitemIds.length === 0) {
+    return <EmptyState label="NO QITEMS" description="No queue items are indexed for this scope." variant="card" testId="scope-queue-empty" />;
+  }
+  return (
+    <div data-testid="scope-queue-rollup">
+      {isFetching ? (
+        <div className="mb-2 font-mono text-[10px] uppercase tracking-[0.12em] text-stone-400">
+          Loading queue bodies...
+        </div>
+      ) : null}
+      <ul className="divide-y divide-outline-variant border border-outline-variant">
+        {qitemIds.map((qitemId) => {
+          const item = queueItemsById.get(qitemId);
+          return (
+            <li key={qitemId} className="bg-white/20">
+              <QueueItemTrigger
+                data={queueItemViewerData(qitemId, item)}
+                testId={`scope-queue-trigger-${qitemId}`}
+                className="block w-full px-3 py-2 text-left font-mono text-xs transition-colors hover:bg-stone-100/60"
+              >
+                <span className="block whitespace-pre-wrap break-words text-stone-900">
+                  {queueBodyPreview(qitemId, item)}
+                </span>
+                {item ? (
+                  <span className="mt-1 block text-[10px] text-stone-500">
+                    {qitemId} / {item.sourceSession} -&gt; {item.destinationSession} / {item.state}
+                  </span>
+                ) : null}
+              </QueueItemTrigger>
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+}
+
+function ScopeArtifactsRollup({
+  rows,
+  detailsByName,
+}: {
+  rows: SliceListEntry[];
+  detailsByName: Map<string, SliceDetail>;
+}) {
+  if (rows.length === 0) {
+    return <EmptyState label="NO ARTIFACTS" description="No slices are indexed for this scope." variant="card" testId="scope-artifacts-empty" />;
+  }
+  return (
+    <div data-testid="scope-artifacts-rollup" className="space-y-3">
+      {rows.map((row) => {
+        const detail = detailsByName.get(row.name);
+        const proofCount = detail?.tests.proofPackets.length ?? (row.hasProofPacket ? 1 : 0);
+        const screenshotCount = detail?.tests.proofPackets.reduce((count, packet) => count + packet.screenshots.length, 0) ?? 0;
+        return (
+          <article key={row.name} className="border border-outline-variant bg-white/20 p-3">
+            <Link
+              to="/project/slice/$sliceId"
+              params={{ sliceId: row.name }}
+              className="font-mono text-[12px] uppercase tracking-[0.12em] text-stone-900 hover:underline"
+            >
+              {row.displayName}
+            </Link>
+            <div className="mt-2 grid gap-2 font-mono text-[10px] text-stone-700 sm:grid-cols-4">
+              <SliceMetric label="Files" value={detail?.docs.tree.length ?? "unknown"} />
+              <SliceMetric label="Commits" value={detail?.commitRefs.length ?? "unknown"} />
+              <SliceMetric label="Proof packets" value={proofCount} />
+              <SliceMetric label="Screenshots" value={screenshotCount} />
+            </div>
+          </article>
+        );
+      })}
+    </div>
+  );
+}
+
+function aggregateTopology(detailsByName: Map<string, SliceDetail>): SliceDetail["topology"] {
+  const rigs = new Map<string, { rigId: string; rigName: string; sessionNames: Set<string> }>();
+  for (const detail of detailsByName.values()) {
+    if (!detail.topology || !Array.isArray(detail.topology.affectedRigs)) continue;
+    for (const rig of detail.topology.affectedRigs) {
+      const key = rig.rigName || rig.rigId;
+      if (!rigs.has(key)) {
+        rigs.set(key, { rigId: rig.rigId, rigName: rig.rigName, sessionNames: new Set() });
+      }
+      const aggregate = rigs.get(key)!;
+      rig.sessionNames.forEach((session) => aggregate.sessionNames.add(session));
+    }
+  }
+  const affectedRigs = Array.from(rigs.values()).map((rig) => ({
+    rigId: rig.rigId,
+    rigName: rig.rigName,
+    sessionNames: Array.from(rig.sessionNames).sort(),
+  }));
+  return {
+    affectedRigs,
+    totalSeats: affectedRigs.reduce((count, rig) => count + rig.sessionNames.length, 0),
+    specGraph: null,
+  };
+}
+
+function ScopeTopologyRollup({ detailsByName }: { detailsByName: Map<string, SliceDetail> }) {
+  return (
+    <div data-testid="scope-topology-rollup">
+      <TopologyTab topology={aggregateTopology(detailsByName)} />
+    </div>
+  );
 }
 
 function WorkspaceOverviewPanel() {
@@ -290,6 +489,7 @@ function WorkspaceOverviewPanel() {
 export function WorkspaceScopePage() {
   const [active, setActive] = useState<SharedTab>("overview");
   const workspace = useWorkspaceName();
+  const rollup = useProjectScopeRollup(null, active !== "overview");
 
   // A5 bounce-fix: live-wired workspace name; honest empty-state when unset.
   if (!workspace.isLoading && workspace.name === null) {
@@ -318,14 +518,24 @@ export function WorkspaceScopePage() {
         <WorkspaceOverviewPanel />
       ) : null}
       {active === "progress" ? (
-        <PlaceholderTab label="WORKSPACE PROGRESS" description="Cross-mission rollup." />
+        <ScopeProgressRollup
+          rows={rollup.rows}
+          detailsByName={rollup.details.itemsByName}
+          isLoading={rollup.list.isLoading || rollup.details.isFetching}
+        />
       ) : null}
-      {active === "artifacts" ? <FilesWorkspace /> : null}
+      {active === "artifacts" ? (
+        <ScopeArtifactsRollup rows={rollup.rows} detailsByName={rollup.details.itemsByName} />
+      ) : null}
       {active === "queue" ? (
-        <PlaceholderTab label="WORKSPACE QUEUE" description="All qitems across all rigs in this workspace." />
+        <ScopeQueueRollup
+          qitemIds={rollup.qitemIds}
+          queueItemsById={rollup.queueItems.itemsById}
+          isFetching={rollup.details.isFetching || rollup.queueItems.isFetching}
+        />
       ) : null}
       {active === "topology" ? (
-        <PlaceholderTab label="WORKSPACE TOPOLOGY" description="Full env topology, scoped to this workspace." />
+        <ScopeTopologyRollup detailsByName={rollup.details.itemsByName} />
       ) : null}
     </ScopeShell>
   );
@@ -334,6 +544,7 @@ export function WorkspaceScopePage() {
 export function MissionScopePage() {
   const { missionId } = useParams({ from: "/project/mission/$missionId" });
   const [active, setActive] = useState<SharedTab>("overview");
+  const rollup = useProjectScopeRollup(missionId, active !== "overview");
   return (
     <ScopeShell
       eyebrow="Mission"
@@ -342,7 +553,56 @@ export function MissionScopePage() {
       active={active}
       onSelect={(id) => setActive(id as SharedTab)}
     >
-      <PlaceholderTab label={`MISSION ${active.toUpperCase()}`} description="Mission-scoped view; Phase 5 polish." />
+      {active === "overview" ? (
+        <div data-testid="mission-overview-panel" className="space-y-3">
+          {rollup.rows.length > 0 ? (
+            rollup.rows.map((slice) => (
+              <article key={slice.name} className="border border-outline-variant bg-white/20 p-3">
+                <Link
+                  to="/project/slice/$sliceId"
+                  params={{ sliceId: slice.name }}
+                  className="font-mono text-[12px] uppercase tracking-[0.12em] text-stone-900 hover:underline"
+                >
+                  {slice.displayName}
+                </Link>
+                <div className="mt-2 grid gap-2 font-mono text-[10px] text-stone-700 sm:grid-cols-4">
+                  <SliceMetric label="Status" value={slice.status} />
+                  <SliceMetric label="Qitems" value={slice.qitemCount} />
+                  <SliceMetric label="Proof" value={slice.hasProofPacket ? "yes" : "no"} />
+                  <SliceMetric label="Last activity" value={formatMaybeDate(slice.lastActivityAt)} />
+                </div>
+              </article>
+            ))
+          ) : (
+            <EmptyState
+              label="NO SLICES"
+              description="No indexed slices are attached to this mission."
+              variant="card"
+              testId="mission-overview-empty"
+            />
+          )}
+        </div>
+      ) : null}
+      {active === "progress" ? (
+        <ScopeProgressRollup
+          rows={rollup.rows}
+          detailsByName={rollup.details.itemsByName}
+          isLoading={rollup.list.isLoading || rollup.details.isFetching}
+        />
+      ) : null}
+      {active === "artifacts" ? (
+        <ScopeArtifactsRollup rows={rollup.rows} detailsByName={rollup.details.itemsByName} />
+      ) : null}
+      {active === "queue" ? (
+        <ScopeQueueRollup
+          qitemIds={rollup.qitemIds}
+          queueItemsById={rollup.queueItems.itemsById}
+          isFetching={rollup.details.isFetching || rollup.queueItems.isFetching}
+        />
+      ) : null}
+      {active === "topology" ? (
+        <ScopeTopologyRollup detailsByName={rollup.details.itemsByName} />
+      ) : null}
     </ScopeShell>
   );
 }
