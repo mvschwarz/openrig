@@ -165,7 +165,7 @@ function WorkspaceOverviewPanel() {
     const buckets = new Map<string, ProjectMissionGroup["slices"]>();
     for (const slice of data.slices) {
       const row = projectSliceFromListEntry(slice);
-      const key = row.railItem ?? "unsorted";
+      const key = row.missionId ?? row.railItem ?? "unsorted";
       if (!buckets.has(key)) buckets.set(key, []);
       buckets.get(key)!.push(row);
     }
@@ -645,7 +645,7 @@ export function SliceScopePage() {
           description={
             detailQuery.error instanceof Error
               ? detailQuery.error.message
-              : `Could not load slice "${sliceId}". The slices indexer may not be configured (rig config get workspace.slicesRoot).`
+              : `Could not load slice "${sliceId}". The slices indexer may not be configured (rig config get workspace.slices_root).`
           }
           variant="card"
           testId="slice-scope-error"

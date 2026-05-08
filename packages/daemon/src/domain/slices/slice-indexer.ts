@@ -1,17 +1,17 @@
 // Slice Story View v0 — slice indexer.
 //
-// Reads slice folders from a configured filesystem root (typically
-// substrate-side `shared-docs/openrig-work/.../slices/`), parses each
-// slice's frontmatter + acceptance section markers, and exposes a
+// Reads slice folders from a configured filesystem root. The default
+// workspace contract is `workspace/missions/<mission>/slices/<slice>`;
+// explicitly configured flat roots (`workspace/slices/<slice>`) remain
+// supported for compatibility. The indexer parses each slice's
+// frontmatter + acceptance section markers and exposes a
 // normalized Slice record stitched against already-shipped tables
 // (queue_items, queue_transitions, mission_control_actions) and
 // dogfood-evidence directories.
 //
 // MVP context: single-developer, single-user, single-host. v0 uses the
-// slice folder as the navigable entity (per founder direction —
-// workflow_instances are deferred to v1). NO new SQLite migrations,
-// NO new event types: read-only projection over existing data + the
-// filesystem.
+// slice folder as the navigable entity. NO new SQLite migrations, NO new
+// event types: read-only projection over existing data + the filesystem.
 
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -48,6 +48,10 @@ export interface SliceProofPacket {
 export interface SliceRecord {
   /** Folder name (canonical id). */
   name: string;
+  /** Mission folder id when discovered under missions/<mission>/slices/<slice>. */
+  missionId: string | null;
+  /** Absolute filesystem path of the slice folder. */
+  slicePath: string;
   /** Display name from frontmatter or first H1; falls back to name. */
   displayName: string;
   /** Optional rail-item code (PL-005, PL-019, etc.) parsed from frontmatter. */
@@ -70,6 +74,7 @@ export interface SliceRecord {
 
 export interface SliceListEntry {
   name: string;
+  missionId: string | null;
   displayName: string;
   railItem: string | null;
   status: SliceStatus;
@@ -102,6 +107,12 @@ interface CachedListing {
 interface CachedSlice {
   record: SliceRecord;
   expiresAt: number;
+}
+
+interface SliceLocation {
+  name: string;
+  missionId: string | null;
+  slicePath: string;
 }
 
 const FRONTMATTER_DELIM = "---";
@@ -163,8 +174,8 @@ export class SliceIndexer {
     if (this.listingCache && this.listingCache.expiresAt > now) {
       return this.listingCache.entries;
     }
-    const folderNames = this.readSliceFolderNames();
-    const entries: SliceListEntry[] = folderNames.map((name) => this.toListEntry(name));
+    const locations = this.readSliceLocations();
+    const entries: SliceListEntry[] = locations.map((location) => this.toListEntry(location));
     this.listingCache = { entries, expiresAt: now + this.cacheTtlMs };
     return entries;
   }
@@ -176,46 +187,84 @@ export class SliceIndexer {
     if (cached && cached.expiresAt > now) {
       return cached.record;
     }
-    const slicePath = path.join(this.slicesRoot, name);
-    let stat: fs.Stats;
-    try {
-      stat = fs.statSync(slicePath);
-    } catch {
-      return null;
-    }
-    if (!stat.isDirectory()) return null;
+    const location = this.findSliceLocation(name);
+    if (!location) return null;
 
-    const record = this.buildRecord(name, slicePath);
+    const record = this.buildRecord(location);
     this.detailCache.set(name, { record, expiresAt: now + this.cacheTtlMs });
     return record;
   }
 
   // --- internals ---
 
-  private readSliceFolderNames(): string[] {
+  private readSliceLocations(): SliceLocation[] {
     let entries: fs.Dirent[];
     try {
       entries = fs.readdirSync(this.slicesRoot, { withFileTypes: true });
     } catch {
       return [];
     }
-    return entries
-      .filter((e) => e.isDirectory() && !e.name.startsWith("."))
-      .map((e) => e.name)
-      .sort();
+    const locations: SliceLocation[] = [];
+    const seen = new Set<string>();
+    const addLocation = (location: SliceLocation) => {
+      if (seen.has(location.name)) return;
+      seen.add(location.name);
+      locations.push(location);
+    };
+    for (const entry of entries) {
+      if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
+      const entryPath = path.join(this.slicesRoot, entry.name);
+      const nestedSlicesRoot = path.join(entryPath, "slices");
+      if (this.isDirectory(nestedSlicesRoot)) {
+        let nestedEntries: fs.Dirent[];
+        try {
+          nestedEntries = fs.readdirSync(nestedSlicesRoot, { withFileTypes: true });
+        } catch {
+          nestedEntries = [];
+        }
+        for (const nested of nestedEntries) {
+          if (!nested.isDirectory() || nested.name.startsWith(".")) continue;
+          addLocation({
+            name: nested.name,
+            missionId: entry.name,
+            slicePath: path.join(nestedSlicesRoot, nested.name),
+          });
+        }
+        continue;
+      }
+      addLocation({
+        name: entry.name,
+        missionId: null,
+        slicePath: entryPath,
+      });
+    }
+    return locations.sort((a, b) => a.name.localeCompare(b.name));
   }
 
-  private toListEntry(name: string): SliceListEntry {
-    const slicePath = path.join(this.slicesRoot, name);
+  private findSliceLocation(name: string): SliceLocation | null {
+    return this.readSliceLocations().find((location) => location.name === name) ?? null;
+  }
+
+  private isDirectory(absPath: string): boolean {
+    try {
+      return fs.statSync(absPath).isDirectory();
+    } catch {
+      return false;
+    }
+  }
+
+  private toListEntry(location: SliceLocation): SliceListEntry {
+    const { name, missionId, slicePath } = location;
     const frontmatter = this.readPrimaryFrontmatter(slicePath);
     const status = this.mapStatus(frontmatter["status"] as string | undefined);
-    const railItem = this.extractRailItem(frontmatter);
-    const qitemIds = this.matchQitems(name, railItem);
+    const railItem = this.extractRailItem(frontmatter, missionId);
+    const qitemIds = this.matchQitems(name, railItem, missionId);
     const proofPacket = this.findProofPacket(name);
     const lastActivityAt = this.computeLastActivity(slicePath, qitemIds, proofPacket);
 
     return {
       name,
+      missionId,
       displayName: this.extractDisplayName(slicePath, frontmatter, name),
       railItem,
       status,
@@ -227,11 +276,12 @@ export class SliceIndexer {
     };
   }
 
-  private buildRecord(name: string, slicePath: string): SliceRecord {
+  private buildRecord(location: SliceLocation): SliceRecord {
+    const { name, missionId, slicePath } = location;
     const frontmatter = this.readPrimaryFrontmatter(slicePath);
     const status = this.mapStatus(frontmatter["status"] as string | undefined);
-    const railItem = this.extractRailItem(frontmatter);
-    const qitemIds = this.matchQitems(name, railItem);
+    const railItem = this.extractRailItem(frontmatter, missionId);
+    const qitemIds = this.matchQitems(name, railItem, missionId);
     const proofPacket = this.findProofPacket(name);
     const lastActivityAt = this.computeLastActivity(slicePath, qitemIds, proofPacket);
     const commitRefs = this.extractCommitRefs(frontmatter);
@@ -239,6 +289,8 @@ export class SliceIndexer {
 
     return {
       name,
+      missionId,
+      slicePath,
       displayName: this.extractDisplayName(slicePath, frontmatter, name),
       railItem,
       status,
@@ -297,7 +349,7 @@ export class SliceIndexer {
     return fallback;
   }
 
-  private extractRailItem(frontmatter: Record<string, unknown>): string | null {
+  private extractRailItem(frontmatter: Record<string, unknown>, missionId: string | null): string | null {
     const raw = frontmatter["rail-item"];
     if (typeof raw === "string") {
       // Strip array brackets if YAML parser dropped them as a string ("[PL-008]").
@@ -311,7 +363,7 @@ export class SliceIndexer {
       if (stripped.length > 0) return stripped.split(",")[0]!.trim();
     }
     if (Array.isArray(related) && related.length > 0 && typeof related[0] === "string") return related[0];
-    return null;
+    return missionId;
   }
 
   private extractCommitRefs(frontmatter: Record<string, unknown>): string[] {
@@ -339,23 +391,25 @@ export class SliceIndexer {
     return "active";
   }
 
-  private matchQitems(sliceName: string, railItem: string | null): string[] {
-    // Strategy: union of (a) qitems whose body text mentions the slice name,
-    // (b) qitems whose body mentions the rail item code (PL-005, etc.).
-    // queue_items.tags is also TEXT (likely JSON or comma-list); we don't
-    // rely on it for v0 — body matching is the high-recall signal in the
-    // current corpus.
+  private matchQitems(sliceName: string, railItem: string | null, missionId: string | null): string[] {
+    // Strategy: union qitems whose body or tags mention the slice id,
+    // rail item, or mission id. Body matching preserves the legacy corpus;
+    // tags make the mission-aware default workspace precise for new work.
     const ids = new Set<string>();
+    const terms = Array.from(new Set([sliceName, railItem, missionId].filter((v): v is string => !!v)));
     try {
-      const sliceMatches = this.db.prepare(
-        `SELECT qitem_id FROM queue_items WHERE body LIKE ? LIMIT 500`
-      ).all(`%${sliceName}%`) as Array<{ qitem_id: string }>;
-      for (const r of sliceMatches) ids.add(r.qitem_id);
-      if (railItem) {
-        const railMatches = this.db.prepare(
-          `SELECT qitem_id FROM queue_items WHERE body LIKE ? LIMIT 500`
-        ).all(`%${railItem}%`) as Array<{ qitem_id: string }>;
-        for (const r of railMatches) ids.add(r.qitem_id);
+      for (const term of terms) {
+        try {
+          const rows = this.db.prepare(
+            `SELECT qitem_id FROM queue_items WHERE body LIKE ? OR tags LIKE ? LIMIT 500`
+          ).all(`%${term}%`, `%${term}%`) as Array<{ qitem_id: string }>;
+          for (const r of rows) ids.add(r.qitem_id);
+        } catch {
+          const rows = this.db.prepare(
+            `SELECT qitem_id FROM queue_items WHERE body LIKE ? LIMIT 500`
+          ).all(`%${term}%`) as Array<{ qitem_id: string }>;
+          for (const r of rows) ids.add(r.qitem_id);
+        }
       }
     } catch {
       // queue_items table absent (test harness without the migration); return empty.

@@ -9,9 +9,8 @@
 //   POST   /api/config/init-workspace   → scaffold default workspace dirs
 //
 // The CLI (`rig config get/set/reset/init-workspace`) is the canonical
-// edit surface for operators + agents per founder dialog 2026-05-04.
-// This route exists for the UI; agents stay on CLI-shell-out per the
-// shipped openrig-user-settings skill.
+// edit surface for operators + agents. This route exists for the UI;
+// agents stay on CLI-shell-out per the shipped openrig-user-settings skill.
 
 import { Hono } from "hono";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
@@ -21,50 +20,16 @@ import {
   isSettingsValidKey,
   type SettingsStore,
 } from "../domain/user-settings/settings-store.js";
+import {
+  workspaceScaffoldDirs,
+  workspaceScaffoldFiles,
+} from "../domain/workspace/default-workspace-scaffold.js";
 
 interface InitWorkspaceBody {
   root?: string;
   force?: boolean;
   dryRun?: boolean;
 }
-
-const SUBDIRS = ["slices", "steering", "progress", "field-notes", "specs"] as const;
-
-function readmeContent(subdir: string): string {
-  switch (subdir) {
-    case "slices": return "# slices\n\nYour slice authoring workspace. OpenRig's Slice Story View browses\nthis directory by default.\n";
-    case "steering": return "# steering\n\nThe `STEERING.md` priority-stack lives here. OpenRig's Steering surface\ncomposes the 6-panel view from this file.\n";
-    case "progress": return "# progress\n\nPROGRESS.md tree. OpenRig's Progress browse view scans this directory\nrecursively for PROGRESS.md files.\n";
-    case "field-notes": return "# field-notes\n\nOperator field notes. Free-form markdown notes from your daily work.\n";
-    case "specs": return "# specs\n\nWorkspace specs (rig / agent / workflow specs / context packs).\n";
-    default: return `# ${subdir}\n`;
-  }
-}
-
-const STEERING_PLACEHOLDER = `---
-title: Priority Stack
-status: placeholder
----
-
-# OpenRig Priority Stack
-
-This file is a placeholder created by \`rig config init-workspace\`. Edit
-it to record your top 3 priorities.
-
-## Top 3
-
-1. <priority one>
-2. <priority two>
-3. <priority three>
-
-## In Motion
-
-(Active slices land here.)
-
-## Loop State
-
-(Health gates + loop diagnostics land here.)
-`;
 
 export function configRoutes(): Hono {
   const router = new Hono();
@@ -89,29 +54,22 @@ export function configRoutes(): Hono {
     const rootExists = existsSync(root);
     if (!rootExists && !dryRun) mkdirSync(root, { recursive: true });
 
-    for (const sub of SUBDIRS) {
+    for (const sub of workspaceScaffoldDirs()) {
       const subPath = join(root, sub);
       const subExists = existsSync(subPath);
       if (!subExists && !dryRun) mkdirSync(subPath, { recursive: true });
       subdirs.push({ name: sub, path: subPath, created: !subExists });
-
-      const readmePath = join(subPath, "README.md");
-      const readmeExists = existsSync(readmePath);
-      if (readmeExists && !force) {
-        files.push({ relPath: `${sub}/README.md`, absPath: readmePath, created: false, skipped: "exists" });
-      } else {
-        if (!dryRun) writeFileSync(readmePath, readmeContent(sub), "utf-8");
-        files.push({ relPath: `${sub}/README.md`, absPath: readmePath, created: true, skipped: null });
-      }
     }
 
-    const steeringPath = join(root, "steering", "STEERING.md");
-    const steeringExists = existsSync(steeringPath);
-    if (steeringExists && !force) {
-      files.push({ relPath: "steering/STEERING.md", absPath: steeringPath, created: false, skipped: "exists" });
-    } else {
-      if (!dryRun) writeFileSync(steeringPath, STEERING_PLACEHOLDER, "utf-8");
-      files.push({ relPath: "steering/STEERING.md", absPath: steeringPath, created: true, skipped: null });
+    for (const file of workspaceScaffoldFiles()) {
+      const absPath = join(root, file.relPath);
+      const fileExists = existsSync(absPath);
+      if (fileExists && !force) {
+        files.push({ relPath: file.relPath, absPath, created: false, skipped: "exists" });
+      } else {
+        if (!dryRun) writeFileSync(absPath, file.content, "utf-8");
+        files.push({ relPath: file.relPath, absPath, created: true, skipped: null });
+      }
     }
 
     return c.json({ root, rootCreated: !rootExists, subdirs, files, dryRun });

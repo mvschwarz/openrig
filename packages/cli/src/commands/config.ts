@@ -28,7 +28,7 @@ Examples:
   rig config set workspace.slices_root /path # configure a workspace path
   rig config reset                           # delete config file, revert all to defaults
   rig config reset workspace.slices_root     # clear one key, revert to default
-  rig config init-workspace                  # scaffold ~/.openrig/workspace/ with 5 subdirs
+  rig config init-workspace                  # scaffold ~/.openrig/workspace/ with missions + slices
 
 Keys:
   daemon.*               port, host

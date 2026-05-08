@@ -13,6 +13,7 @@ export type SliceFilter = "all" | "active" | "done" | "blocked";
 
 export interface SliceListEntry {
   name: string;
+  missionId: string | null;
   displayName: string;
   railItem: string | null;
   status: SliceStatus;
@@ -195,6 +196,8 @@ export interface TopologyRigEntry {
 
 export interface SliceDetail {
   name: string;
+  missionId: string | null;
+  slicePath: string;
   displayName: string;
   railItem: string | null;
   status: string;

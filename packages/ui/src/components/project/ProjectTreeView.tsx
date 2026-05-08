@@ -5,7 +5,7 @@
 // and live MissionStatusBadge derived from PROGRESS.md frontmatter via
 // useMissionProgressStatus (over /api/files/read). When the allowlist
 // doesn't expose workspace.root, the tree falls back to the legacy
-// railItem-grouped slice listing.
+// railItem/missionId-grouped slice listing.
 
 import { useState, useMemo } from "react";
 import { Link } from "@tanstack/react-router";
@@ -69,11 +69,11 @@ export function ProjectTreeView() {
   const sliceList: SliceListEntry[] =
     slicesResp && "slices" in slicesResp ? slicesResp.slices : [];
 
-  // Group slices by railItem (the "mission" label they self-report).
-  const slicesByRailItem = useMemo(() => {
+  // Group slices by missionId first, then railItem for legacy flat roots.
+  const slicesByMissionKey = useMemo(() => {
     const buckets = new Map<string, ProjectSliceRow[]>();
     for (const s of sliceList) {
-      const key = s.railItem ?? "unsorted";
+      const key = s.missionId ?? s.railItem ?? "unsorted";
       if (!buckets.has(key)) buckets.set(key, []);
       buckets.get(key)!.push(projectSliceFromListEntry(s));
     }
@@ -81,14 +81,14 @@ export function ProjectTreeView() {
   }, [sliceList]);
 
   // P5-5: when filesystem mission discovery is available, surface the
-  // disk-discovered missions and attach their slices via railItem match.
-  // Otherwise fall back to railItem grouping alone.
+  // disk-discovered missions and attach their slices via missionId match.
+  // Otherwise fall back to missionId/railItem grouping alone.
   const missions = useMemo<GroupedMission[]>(() => {
     if (!discovery.unavailable && discovery.missions.length > 0) {
       const orphanSlices: ProjectSliceRow[] = [];
       const consumedKeys = new Set<string>();
       const discovered: GroupedMission[] = discovery.missions.map((m: DiscoveredMission) => {
-        const matchedSlices = slicesByRailItem.get(m.name) ?? [];
+        const matchedSlices = slicesByMissionKey.get(m.name) ?? [];
         if (matchedSlices.length > 0) consumedKeys.add(m.name);
         return {
           id: m.name,
@@ -99,10 +99,10 @@ export function ProjectTreeView() {
           fsPath: m.path,
         };
       });
-      // Any slice whose railItem doesn't match a disk mission goes into
+      // Any slice whose mission key doesn't match a disk mission goes into
       // "unsorted" so it's still reachable.
-      for (const [railItem, slices] of slicesByRailItem.entries()) {
-        if (!consumedKeys.has(railItem)) orphanSlices.push(...slices);
+      for (const [missionKey, slices] of slicesByMissionKey.entries()) {
+        if (!consumedKeys.has(missionKey)) orphanSlices.push(...slices);
       }
       if (orphanSlices.length > 0) {
         discovered.push({
@@ -114,14 +114,14 @@ export function ProjectTreeView() {
       }
       return discovered;
     }
-    // Fallback: railItem grouping only (Phase 3 behavior).
-    return Array.from(slicesByRailItem.entries()).map(([k, slices]) => ({
+    // Fallback: missionId/railItem grouping only.
+    return Array.from(slicesByMissionKey.entries()).map(([k, slices]) => ({
       id: k,
       label: k === "unsorted" ? "Unsorted" : k,
       status: deriveMissionStatusFromSlices(slices),
       slices,
     }));
-  }, [discovery.unavailable, discovery.missions, slicesByRailItem]);
+  }, [discovery.unavailable, discovery.missions, slicesByMissionKey]);
 
   const missionSections = useMemo(() => {
     return partitionProjectMissions(missions);
@@ -264,7 +264,7 @@ export function ProjectTreeView() {
                   className="px-2 py-1 font-mono text-[9px] text-on-surface-variant italic"
                   title={discovery.hint}
                 >
-                  Filesystem mission discovery unavailable; showing railItem grouping.
+                  Workspace missions folder unavailable; showing indexed slice grouping. Expected workspace/missions/&lt;mission&gt;/slices/&lt;slice&gt;.
                 </li>
               ) : null}
               {missions.length === 0 ? (

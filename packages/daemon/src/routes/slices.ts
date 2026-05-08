@@ -39,7 +39,7 @@ export function slicesRoutes(): Hono {
     if (!deps.indexer.isReady()) {
       return c.json({
         error: "slices_root_not_configured",
-        hint: "Set OPENRIG_SLICES_ROOT to the directory containing slice folders",
+        hint: "Run rig config init-workspace, or set workspace.slices_root to workspace/missions. Supported shape: missions/<mission>/slices/<slice>.",
       }, 503);
     }
     const filter = (c.req.query("filter") ?? "all").toLowerCase();

@@ -81,7 +81,7 @@ interface RenderTreeOpts {
   // Map "<root>:<path>" → file content.
   reads?: Record<string, { content: string; mtime?: string }>;
   // useSlices response.
-  slices?: Array<{ name: string; displayName: string; railItem: string | null; status: string; rawStatus: string | null; qitemCount: number; hasProofPacket: boolean; lastActivityAt: string | null }>;
+  slices?: Array<{ name: string; missionId?: string | null; displayName: string; railItem: string | null; status: string; rawStatus: string | null; qitemCount: number; hasProofPacket: boolean; lastActivityAt: string | null }>;
 }
 
 function setupFetch(opts: RenderTreeOpts) {
@@ -216,7 +216,7 @@ describe("ProjectTreeView P5-5/P5-6 mission discovery", () => {
     expect(queryByTestId("project-mission-README.md")).toBeNull();
   });
 
-  it("falls back to railItem grouping when no allowlist root contains workspace.root", async () => {
+  it("falls back to indexed slice grouping when no allowlist root contains workspace.root", async () => {
     const { findByTestId } = renderTree({
       workspaceRoot: "/Users/admin/.openrig/workspace",
       roots: [{ name: "elsewhere", path: "/Users/admin/code/elsewhere" }],
@@ -237,7 +237,7 @@ describe("ProjectTreeView P5-5/P5-6 mission discovery", () => {
     expect(await findByTestId("project-mission-rsi-v2")).toBeTruthy();
   });
 
-  it("falls back to railItem grouping when allowlist is empty", async () => {
+  it("falls back to indexed slice grouping when allowlist is empty", async () => {
     const { findByTestId } = renderTree({
       workspaceRoot: "/Users/admin/.openrig/workspace",
       roots: [],
@@ -314,7 +314,7 @@ describe("ProjectTreeView P5-5/P5-6 mission discovery", () => {
     expect(await findByTestId("project-no-workspace")).toBeTruthy();
   });
 
-  it("matches slices to filesystem missions by railItem; orphans go to 'unsorted'", async () => {
+  it("matches slices to filesystem missions by missionId first; orphans go to 'unsorted'", async () => {
     const { findByTestId, queryByTestId } = renderTree({
       workspaceRoot: "/Users/admin/.openrig/workspace",
       roots: [{ name: "workspace", path: "/Users/admin/.openrig/workspace" }],
@@ -327,8 +327,9 @@ describe("ProjectTreeView P5-5/P5-6 mission discovery", () => {
       slices: [
         {
           name: "slice-rsi",
+          missionId: "rsi-v2",
           displayName: "RSI Slice",
-          railItem: "rsi-v2",
+          railItem: null,
           status: "active",
           rawStatus: "active",
           qitemCount: 0,

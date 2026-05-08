@@ -829,7 +829,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   //
   // User Settings v0 graduates `OPENRIG_SLICES_ROOT` env-var into the
   // typed `workspace.slices_root` setting (resolution chain: env >
-  // config-file > default `<workspace.root>/slices`). Backward-compat:
+  // config-file > default `<workspace.root>/missions`). Backward-compat:
   // operators with OPENRIG_SLICES_ROOT set continue to work because the
   // settings store reads env in the same resolution slot. Operators
   // setting via `rig config set workspace.slices_root <path>` or via the

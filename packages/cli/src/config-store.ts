@@ -250,15 +250,16 @@ function setNestedValue(obj: Record<string, unknown>, parts: string[], value: un
   current[parts[parts.length - 1]!] = value;
 }
 
-// Per-subdir defaults derived from workspace.root. v0 uses canonical
-// subdir names per founder dialog (slices/ steering/ progress/ field-notes/
-// specs/). Steering is a FILE path (STEERING.md) under the steering subdir.
+// Per-subdir defaults derived from workspace.root. Steering is a FILE path.
+// Slice discovery defaults to the mission-aware workspace/missions contract;
+// the indexer remains backward-compatible with flat slice roots when an
+// operator sets workspace.slices_root explicitly.
 // Files and Progress default to the whole workspace so a fresh
 // `rig config init-workspace` install is browsable without extra env wiring.
 export function deriveWorkspaceDefault(key: ValidKey, workspaceRoot: string): string {
   switch (key) {
-    case "workspace.slices_root":      return join(workspaceRoot, "slices");
-    case "workspace.steering_path":    return join(workspaceRoot, "steering", "STEERING.md");
+    case "workspace.slices_root":      return join(workspaceRoot, "missions");
+    case "workspace.steering_path":    return join(workspaceRoot, "STEERING.md");
     case "workspace.field_notes_root": return join(workspaceRoot, "field-notes");
     case "workspace.specs_root":       return join(workspaceRoot, "specs");
     case "files.allowlist":            return `workspace:${workspaceRoot}`;
