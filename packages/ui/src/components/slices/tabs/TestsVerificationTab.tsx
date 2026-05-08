@@ -17,6 +17,7 @@
 import { useState } from "react";
 import type { SliceDetail, ProofPacketRendered } from "../../../hooks/useSlices.js";
 import { proofAssetUrl } from "../../../hooks/useSlices.js";
+import { ProofImageViewer } from "../../project/ProofImageViewer.js";
 
 const BADGE_CLASSES: Record<ProofPacketRendered["passFailBadge"], string> = {
   pass: "border-emerald-300 bg-emerald-50 text-emerald-900",
@@ -166,38 +167,14 @@ function ProofPacketSection({ sliceName, packet }: { sliceName: string; packet: 
             </div>
           </section>
         )}
-        {selectedScreenshot ? (
-          <div
-            role="dialog"
-            aria-label="Screenshot preview"
-            data-testid="tests-screenshot-viewer"
-            className="fixed inset-0 z-[1000] flex items-center justify-center bg-black/70 p-6"
-            onClick={() => setSelectedScreenshot(null)}
-          >
-            <div
-              className="max-h-full max-w-[92vw] bg-black/80 p-2"
-              onClick={(event) => event.stopPropagation()}
-            >
-              <img
-                data-testid="tests-screenshot-viewer-image"
-                src={proofAssetUrl(sliceName, selectedScreenshot)}
-                alt={selectedScreenshot}
-                className="max-h-[82vh] max-w-full object-contain"
-              />
-              <div className="mt-2 flex items-center justify-between gap-3 font-mono text-[10px] text-stone-100">
-                <span className="truncate">{selectedScreenshot}</span>
-                <button
-                  type="button"
-                  data-testid="tests-screenshot-viewer-close"
-                  onClick={() => setSelectedScreenshot(null)}
-                  className="border border-white/40 px-2 py-1 uppercase tracking-[0.12em] hover:bg-white/10"
-                >
-                  Close
-                </button>
-              </div>
-            </div>
-          </div>
-        ) : null}
+        <ProofImageViewer
+          sliceName={sliceName}
+          relPath={selectedScreenshot}
+          onClose={() => setSelectedScreenshot(null)}
+          testId="tests-screenshot-viewer"
+          imageTestId="tests-screenshot-viewer-image"
+          closeTestId="tests-screenshot-viewer-close"
+        />
 
         {packet.videos.length > 0 && (
           <section data-testid={`tests-packet-videos-${packet.dirName}`}>

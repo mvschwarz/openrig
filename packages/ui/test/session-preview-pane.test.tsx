@@ -89,7 +89,7 @@ describe("SessionPreviewPane", () => {
     const content = await screen.findByTestId("compact-terminal-test-content");
 
     expect(pane.getAttribute("data-variant")).toBe("compact-terminal");
-    expect(content.className).toContain("text-[10px]");
+    expect(content.className).toContain("text-[8px]");
     expect(content.className).toContain("text-stone-50");
     expect(screen.queryByText(/live preview/i)).toBeNull();
     expect(screen.queryByText(/captured/i)).toBeNull();

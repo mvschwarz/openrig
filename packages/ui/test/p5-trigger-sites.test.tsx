@@ -234,6 +234,68 @@ describe("FeedCard P5-1 wiring: show-context QueueItemTrigger", () => {
     const img = await findByTestId("feed-card-proof-screenshot-screenshots/for-you-live-human-pending-final.png") as HTMLImageElement;
     expect(img.getAttribute("src")).toContain("/api/slices/idea-ledger-triage-ideas-cycle-4/proof-asset/");
   });
+
+  it("renders approve, deny, and route actions for actionable human queue cards", async () => {
+    const card = makeCard();
+    const { findByTestId, queryByTestId } = renderWithRouterAndQuery(
+      <FeedCard
+        card={card}
+        queueItem={{
+          qitemId: "qitem-20260506-test",
+          tsCreated: "2026-05-06T18:00:00Z",
+          tsUpdated: "2026-05-06T18:00:00Z",
+          sourceSession: "orch-lead@openrig-velocity",
+          destinationSession: "human@host",
+          state: "human-gate",
+          priority: "urgent",
+          tier: "fast",
+          tags: ["human-review"],
+          body: "Review this proof packet and choose a queue action.",
+        }}
+      />,
+    );
+
+    expect(await findByTestId(`feed-card-actions-${card.id}`)).toBeTruthy();
+    expect(await findByTestId("mc-verb-approve")).toBeTruthy();
+    expect(await findByTestId("mc-verb-deny")).toBeTruthy();
+    expect(await findByTestId("mc-verb-route")).toBeTruthy();
+    expect(queryByTestId("mc-verb-handoff")).toBeNull();
+  });
+
+  it("does not render action controls for completed shipped cards", async () => {
+    const card = makeCard({
+      id: "queue-shipped-2",
+      kind: "shipped",
+      title: "Queue item shipped: qitem-demo",
+      source: {
+        seq: 5,
+        type: "queue.updated",
+        payload: { qitemId: "qitem-demo", toState: "done" },
+        createdAt: "2026-05-07T21:18:52Z",
+        receivedAt: 1_000_000,
+      } as FeedCardModel["source"],
+    });
+    const { findByTestId, queryByTestId } = renderWithRouterAndQuery(
+      <FeedCard
+        card={card}
+        queueItem={{
+          qitemId: "qitem-demo",
+          tsCreated: "2026-05-07T21:18:52Z",
+          tsUpdated: "2026-05-07T21:20:00Z",
+          sourceSession: "driver@rig",
+          destinationSession: "human@host",
+          state: "done",
+          priority: "urgent",
+          tier: "fast",
+          tags: ["proof"],
+          body: "Completed proof packet.",
+        }}
+      />,
+    );
+
+    expect(await findByTestId("feed-card-shipped")).toBeTruthy();
+    expect(queryByTestId(`feed-card-actions-${card.id}`)).toBeNull();
+  });
 });
 
 // V1 polish slice Phase 5.1 P5.1-D2: TopologyTreeView SeatLeaf details

@@ -180,10 +180,13 @@ function classifyEvent(evt: ActivityEvent): FeedCard | null {
       "destination",
     );
     const state = pickString(payload, "state", "toState");
+    const classifiedKind = queueKind(evt.type, state);
     const kind =
-      isHumanSeat(destination)
-        ? "action-required"
-        : queueKind(evt.type, state);
+      classifiedKind === "approval"
+        ? "approval"
+        : isHumanSeat(destination)
+          ? "action-required"
+          : classifiedKind;
     const explicitTitle = pickString(payload, "summary", "title");
     const label =
       kind === "shipped" && evt.type === "queue.updated"

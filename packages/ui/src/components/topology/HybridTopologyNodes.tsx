@@ -114,7 +114,7 @@ export function HybridAgentNode({ data }: { data: HybridAgentNodeData }) {
       data-activity-card-state={activityCard.state}
       data-activity-card-flash={activityCard.flash ?? "none"}
       className={cn(
-        "group relative h-full w-full select-none border bg-white/30 hard-shadow transition-[background-color,border-color,box-shadow] duration-300",
+        "group relative h-full w-full select-none border bg-white/40 backdrop-blur-[8px] hard-shadow transition-[background-color,border-color,box-shadow] duration-300",
         getActivityCardClasses({
           state: activityCard.state,
           flash: activityCard.flash,

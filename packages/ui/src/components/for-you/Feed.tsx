@@ -68,6 +68,25 @@ function queueTags(card: FeedCardModel, item: QueueItemDetail | undefined): stri
   ];
 }
 
+function hydratedCardKind(card: FeedCardModel, item: QueueItemDetail | undefined): FeedCardKind {
+  if (!item) return card.kind;
+  const tags = queueTags(card, item).join(" ").toLowerCase();
+  const state = item.state.toLowerCase();
+  const destination = item.destinationSession.toLowerCase();
+  const body = item.body.toLowerCase();
+  if (
+    tags.includes("approval") ||
+    tags.includes("ratify") ||
+    state.includes("approval") ||
+    body.includes("approval requested")
+  ) {
+    return "approval";
+  }
+  if (state === "done" || state === "closed" || state === "completed") return "shipped";
+  if (destination === "human@host" || destination.startsWith("human-")) return "action-required";
+  return card.kind;
+}
+
 function sliceForCard(
   card: FeedCardModel,
   item: QueueItemDetail | undefined,
@@ -106,21 +125,26 @@ export function Feed() {
   const [lens, setLens] = useState<FeedCardKind | "all">("all");
   const subs = useFeedSubscriptions();
 
-  const cards = useMemo(() => {
-    const classified = classifyFeed(events);
-    // Filter by subscription state FIRST so the feed honors operator
-    // configuration, then apply the transient lens filter on top.
-    const subscribed = classified.filter((c) =>
-      isCardKindSubscribed(c.kind, subs.state),
-    );
-    const sliced = subscribed.slice(0, HISTORY_LIMIT);
-    return lens === "all" ? sliced : sliced.filter((c) => c.kind === lens);
-  }, [events, lens, subs.state]);
+  const rawCards = useMemo(() => classifyFeed(events).slice(0, HISTORY_LIMIT), [events]);
   const qitemIds = useMemo(
-    () => cards.map(qitemIdForCard).filter((id): id is string => Boolean(id)),
-    [cards],
+    () => rawCards.map(qitemIdForCard).filter((id): id is string => Boolean(id)),
+    [rawCards],
   );
   const queueItems = useQueueItemMap(qitemIds);
+  const cards = useMemo(() => {
+    const hydrated = rawCards.map((card) => {
+      const qitemId = qitemIdForCard(card);
+      const item = qitemId ? queueItems.itemsById.get(qitemId) : undefined;
+      const kind = hydratedCardKind(card, item);
+      return kind === card.kind ? card : { ...card, kind };
+    });
+    // Filter by subscription state FIRST so the feed honors operator
+    // configuration, then apply the transient lens filter on top.
+    const subscribed = hydrated.filter((c) =>
+      isCardKindSubscribed(c.kind, subs.state),
+    );
+    return lens === "all" ? subscribed : subscribed.filter((c) => c.kind === lens);
+  }, [rawCards, lens, queueItems.itemsById, subs.state]);
   const slicesQuery = useSlices("all");
   const sliceRows = useMemo(() => {
     if (!slicesQuery.data || "unavailable" in slicesQuery.data) return [];

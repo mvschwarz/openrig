@@ -15,8 +15,9 @@ describe("Dashboard card vellum surface", () => {
       "SettingsCard.tsx",
     ];
 
-    expect(dashboardCardSurfaceClass).toContain("bg-white/30");
-    expect(dashboardCardSurfaceClass).toContain("hover:bg-white/40");
+    expect(dashboardCardSurfaceClass).toContain("bg-white/40");
+    expect(dashboardCardSurfaceClass).toContain("backdrop-blur-[8px]");
+    expect(dashboardCardSurfaceClass).toContain("hover:bg-white/50");
     expect(dashboardCardSurfaceClass).toContain("hover:hard-shadow-hover");
 
     for (const file of cardFiles) {

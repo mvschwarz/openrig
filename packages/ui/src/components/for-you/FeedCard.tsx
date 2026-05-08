@@ -1,26 +1,22 @@
-// V1 attempt-3 Phase 3 — Feed card — single card-shape that renders
-// each of the 5 kinds with kind-specific tone (per for-you-feed.md L82+).
-// Five kinds: ACTION REQUIRED / APPROVAL / SHIPPED / PROGRESS / OBSERVATION.
-//
-// V1 attempt-3 Phase 5 P5-1: "show context" affordance per content-drawer.md
-// L42 — when card.source has a qitem_id, render an inline QueueItemTrigger
-// that opens QueueItemViewer in the drawer with the underlying qitem.
+import { useState } from "react";
 
 import { VellumCard } from "../ui/vellum-card.js";
-import { SectionHeader } from "../ui/section-header.js";
 import { AuthorAgentTag } from "./AuthorAgentTag.js";
 import { QueueItemTrigger } from "../drawer-triggers/QueueItemTrigger.js";
 import type { QueueItemViewerData } from "../drawer-viewers/QueueItemViewer.js";
-import { proofAssetUrl, type QueueItemDetail } from "../../hooks/useSlices.js";
+import type { QueueItemDetail } from "../../hooks/useSlices.js";
 import type { FeedCard as FeedCardModel, FeedCardKind } from "../../lib/feed-classifier.js";
-
-const KIND_LABEL: Record<FeedCardKind, string> = {
-  "action-required": "ACTION REQUIRED",
-  approval: "APPROVAL",
-  shipped: "SHIPPED",
-  progress: "PROGRESS",
-  observation: "OBSERVATION",
-};
+import { VerbActions } from "../mission-control/components/VerbActions.js";
+import {
+  DateChip,
+  FlowChips,
+  ProjectPill,
+  ProofPacketHeader,
+  ProofThumbnailGrid,
+  TagPill,
+  type ProjectToken,
+} from "../project/ProjectMetaPrimitives.js";
+import { ProofImageViewer } from "../project/ProofImageViewer.js";
 
 const KIND_ACCENT: Record<FeedCardKind, string> = {
   "action-required": "border-l-4 border-l-tertiary",
@@ -36,6 +32,14 @@ const KIND_TESTID: Record<FeedCardKind, string> = {
   shipped: "feed-card-shipped",
   progress: "feed-card-progress",
   observation: "feed-card-observation",
+};
+
+const KIND_TOKEN: Record<FeedCardKind, ProjectToken> = {
+  "action-required": { label: "Action required", tone: "danger" },
+  approval: { label: "Approval", tone: "warning" },
+  shipped: { label: "Shipped", tone: "success" },
+  progress: { label: "Progress", tone: "info" },
+  observation: { label: "Observation", tone: "neutral" },
 };
 
 function asString(v: unknown): string | undefined {
@@ -96,6 +100,13 @@ function compactQueueBody(body: string | undefined): string | undefined {
   return `${trimmed.slice(0, 520).trimEnd()}\n...`;
 }
 
+function isActionableCard(kind: FeedCardKind, item: QueueItemDetail | undefined): boolean {
+  if (kind !== "action-required" && kind !== "approval") return false;
+  const state = item?.state?.toLowerCase() ?? "";
+  if (state.includes("done") || state.includes("closed") || state.includes("canceled")) return false;
+  return true;
+}
+
 export function FeedCard({
   card,
   queueItem,
@@ -105,48 +116,75 @@ export function FeedCard({
   queueItem?: QueueItemDetail;
   proofPreview?: FeedProofPreview | null;
 }) {
+  const [selectedScreenshot, setSelectedScreenshot] = useState<string | null>(null);
   const qitemViewerData = qitemViewerDataFromItem(card, queueItem);
   const body = compactQueueBody(queueItem?.body || card.body);
+  const tags = queueItem?.tags ?? qitemViewerData?.tags ?? [];
+  const source = qitemViewerData?.source ?? card.authorSession;
+  const destination = qitemViewerData?.destination;
+  const actorSession = destination?.startsWith("human") ? destination : "human@host";
   return (
     <VellumCard
       as="article"
       testId={KIND_TESTID[card.kind]}
       accentClass={KIND_ACCENT[card.kind]}
-      className="mb-3"
+      className="mb-3 bg-white/50 backdrop-blur-sm"
     >
       <div className="px-4 py-3">
-        <SectionHeader tone={card.kind === "action-required" ? "alert" : "muted"}>
-          {KIND_LABEL[card.kind]}
-        </SectionHeader>
-        <h3 className="mt-1 font-mono text-sm text-stone-900 truncate">
-          {card.title}
-        </h3>
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0 space-y-2">
+            <ProjectPill token={KIND_TOKEN[card.kind]} />
+            <h3 className="font-mono text-sm text-stone-900 truncate">
+              {card.title}
+            </h3>
+          </div>
+          <DateChip value={card.createdAt} />
+        </div>
         {body ? (
-          <p className="mt-2 font-mono text-xs text-on-surface-variant whitespace-pre-line">
+          <p className="mt-3 font-mono text-xs leading-relaxed text-on-surface-variant whitespace-pre-line">
             {body}
           </p>
+        ) : null}
+        <div className="mt-3">
+          <FlowChips source={source} destination={destination} muted />
+        </div>
+        {tags.length > 0 ? (
+          <div className="mt-3 flex flex-wrap gap-1.5">
+            {tags.slice(0, 6).map((tag) => <TagPill key={tag} tag={tag} />)}
+          </div>
         ) : null}
         {proofPreview && proofPreview.screenshots.length > 0 ? (
           <div
             data-testid={`feed-card-proof-preview-${card.id}`}
-            className="mt-3 border border-outline-variant bg-white/20 p-2"
+            className="mt-3 border border-outline-variant bg-white/35 p-2 backdrop-blur-sm"
           >
-            <div className="flex items-center justify-between gap-2 font-mono text-[9px] uppercase tracking-[0.12em] text-stone-600">
-              <span className="truncate">Proof packet · {proofPreview.displayName}</span>
-              <span>{proofPreview.passFailBadge}</span>
+            <ProofPacketHeader
+              title={`Proof packet · ${proofPreview.displayName}`}
+              badge={proofPreview.passFailBadge}
+            />
+            <div className="mt-2">
+              <ProofThumbnailGrid
+                sliceName={proofPreview.sliceName}
+                screenshots={proofPreview.screenshots}
+                onSelect={setSelectedScreenshot}
+                testIdPrefix="feed-card-proof-screenshot"
+              />
             </div>
-            <div className="mt-2 grid grid-cols-2 gap-2">
-              {proofPreview.screenshots.slice(0, 4).map((rel) => (
-                <img
-                  key={rel}
-                  data-testid={`feed-card-proof-screenshot-${rel}`}
-                  src={proofAssetUrl(proofPreview.sliceName, rel)}
-                  alt={rel}
-                  className="h-24 w-full border border-stone-200 bg-stone-100 object-cover"
-                  loading="lazy"
-                />
-              ))}
+          </div>
+        ) : null}
+        {qitemViewerData && isActionableCard(card.kind, queueItem) ? (
+          <div
+            data-testid={`feed-card-actions-${card.id}`}
+            className="mt-3 border border-outline-variant bg-white/35 p-2 backdrop-blur-sm"
+          >
+            <div className="mb-2 font-mono text-[9px] uppercase tracking-[0.12em] text-stone-600">
+              Actions
             </div>
+            <VerbActions
+              qitemId={qitemViewerData.qitemId}
+              actorSession={actorSession}
+              enabledVerbs={["approve", "deny", "route"]}
+            />
           </div>
         ) : null}
         <div className="mt-3 flex items-center justify-between gap-3 font-mono text-[10px] text-on-surface-variant">
@@ -166,11 +204,15 @@ export function FeedCard({
               </QueueItemTrigger>
             ) : null}
           </div>
-          <time dateTime={card.createdAt} className="shrink-0">
-            {card.createdAt ? card.createdAt.slice(11, 19) : ""}
-          </time>
         </div>
       </div>
+      {proofPreview ? (
+        <ProofImageViewer
+          sliceName={proofPreview.sliceName}
+          relPath={selectedScreenshot}
+          onClose={() => setSelectedScreenshot(null)}
+        />
+      ) : null}
     </VellumCard>
   );
 }

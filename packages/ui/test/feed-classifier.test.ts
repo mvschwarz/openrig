@@ -63,6 +63,19 @@ describe("classifyFeed — SC-15 5 card types", () => {
     expect(cards[0]?.body).toContain("qa@openrig-dogfood -> human@host");
   });
 
+  it("queue.created closeout-pending-ratify for a human seat → approval card", () => {
+    const cards = classifyFeed([
+      evt("queue.created", {
+        qitemId: "qitem-approval",
+        sourceSession: "qa@openrig-dogfood",
+        destinationSession: "human@host",
+        state: "closeout-pending-ratify",
+        priority: "urgent",
+      }),
+    ]);
+    expect(cards[0]?.kind).toBe("approval");
+  });
+
   it("queue.updated state=done → shipped card", () => {
     const cards = classifyFeed([
       evt("queue.updated", {
