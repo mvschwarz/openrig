@@ -206,6 +206,8 @@ describe("P5.3 ActivityRing and HotPotatoEdge", () => {
     expect(driverPopover.parentElement).toBe(document.body);
     expect(driverPopover.className).toContain("fixed");
     expect(driverPopover.className).toContain("z-[1000]");
+    expect(driverPopover.className).toContain("w-[112ch]");
+    expect(driverPopover.className).toContain("max-w-[calc(100vw-1rem)]");
     expect(driverPopover.className).toContain("bg-stone-950/65");
     expect(driverPopover.className).toContain("text-stone-50");
     expect(driverPopover.className).toContain("backdrop-blur-sm");

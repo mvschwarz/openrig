@@ -113,10 +113,10 @@ export function SessionPreviewPane({
             data-testid={`${testIdPrefix}-content`}
             onScroll={handleScroll}
             className={cn(
-            "font-mono overflow-y-auto whitespace-pre-wrap break-all",
-            compactTerminal
-                ? "max-h-72 bg-transparent px-1 py-0.5 text-[8px] leading-[1.2] text-stone-50"
-                : "max-h-32 bg-stone-50 px-2 py-1 text-[9px] text-stone-800",
+              "font-mono",
+              compactTerminal
+                ? "max-h-72 overflow-auto whitespace-pre bg-transparent px-1 py-0.5 text-[8px] leading-[1.2] text-stone-50"
+                : "max-h-32 overflow-y-auto whitespace-pre-wrap break-all bg-stone-50 px-2 py-1 text-[9px] text-stone-800",
             )}
           >
             {preview.data.content || "(empty pane)"}

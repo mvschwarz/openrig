@@ -8,7 +8,7 @@ import { cn } from "../../lib/utils.js";
 const TERMINAL_PREVIEW_EVENT = "openrig:topology-terminal-preview";
 const POPOVER_GAP = 8;
 const POPOVER_MARGIN = 8;
-const FALLBACK_POPOVER_WIDTH = 320;
+const FALLBACK_POPOVER_WIDTH = 560;
 const FALLBACK_POPOVER_HEIGHT = 240;
 
 interface TerminalPreviewEventDetail {
@@ -127,7 +127,7 @@ export function TerminalPreviewPopover({
       data-testid={`${testIdPrefix}-terminal-popover`}
       data-reduced-motion={reducedMotion ? "true" : "false"}
       className={cn(
-        "nodrag nopan fixed z-[1000] w-80 bg-stone-950/65 p-1.5 backdrop-blur-sm",
+        "nodrag nopan fixed z-[1000] w-[112ch] max-w-[calc(100vw-1rem)] bg-stone-950/65 p-1.5 backdrop-blur-sm",
         "cursor-default select-text text-stone-50",
         popoverClassName,
       )}
