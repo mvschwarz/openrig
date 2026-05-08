@@ -1,5 +1,4 @@
 import { Handle, Position } from "@xyflow/react";
-import { PanelsTopLeft } from "lucide-react";
 import { displayAgentName, inferPodName } from "../../lib/display-name.js";
 import {
   getActivityAnimationClass,
@@ -16,6 +15,7 @@ import { getActivityCardClasses, getActivityCardSignal } from "./activity-card-v
 import { TerminalPreviewPopover } from "./TerminalPreviewPopover.js";
 import type { TopologyActivityVisual } from "../../lib/topology-activity.js";
 import { formatCompactTokenCount, formatTokenTotalTitle, sumTokenCounts } from "../../lib/token-format.js";
+import { RuntimeBadge, ToolMark } from "../graphics/RuntimeMark.js";
 
 interface HybridPodGroupNodeData {
   podDisplayName?: string | null;
@@ -173,15 +173,26 @@ export function HybridAgentNode({ data }: { data: HybridAgentNodeData }) {
           }}
           className={cn("absolute right-1.5 top-6 z-10", hoverIconClass)}
         >
-          <PanelsTopLeft className="h-3.5 w-3.5" aria-hidden="true" />
+          <ToolMark tool="cmux" size="sm" />
         </button>
       ) : null}
       <div className="space-y-1 px-2 py-1.5">
         <div className="truncate font-mono text-[8px] leading-tight text-stone-500">
           {data.canonicalSessionName ?? data.logicalId}
         </div>
-        <div className="truncate font-mono text-[7px] uppercase tracking-[0.12em] text-stone-400">
-          {runtimeModel || data.resolvedSpecName || data.profile || "runtime unknown"}
+        <div className="min-w-0">
+          <RuntimeBadge
+            runtime={data.runtime}
+            model={data.model}
+            size="xs"
+            compact
+            className="max-w-full bg-white/45"
+          />
+          {!runtimeModel && (data.resolvedSpecName || data.profile) ? (
+            <span className="ml-1 font-mono text-[7px] uppercase tracking-[0.12em] text-stone-400">
+              {data.resolvedSpecName || data.profile}
+            </span>
+          ) : null}
         </div>
         <div className="flex items-end justify-between gap-2 pt-0.5">
           <div

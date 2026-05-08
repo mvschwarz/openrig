@@ -523,8 +523,8 @@ describe("RigGraph", () => {
       // React Flow uses our custom node type — nodes have class react-flow__node-rigNode
       const customNodes = container.querySelectorAll(".react-flow__node-rigNode");
       expect(customNodes.length).toBe(2);
-      // RigNode renders runtime text in the compact card grammar.
-      expect(screen.getByText("claude-code · opus")).toBeDefined();
+      // RigNode renders runtime branding in the compact card grammar.
+      expect(screen.getByRole("img", { name: "Claude" })).toBeDefined();
     });
   });
 });
@@ -547,7 +547,7 @@ describe("RigNode", () => {
     );
 
     expect(screen.getByText("impl")).toBeDefined();
-    expect(screen.getByText("claude-code · opus")).toBeDefined();
+    expect(screen.getByRole("img", { name: "Claude" })).toBeDefined();
     expect(screen.queryByText("WORKER")).toBeNull();
     // PL-019: dot now reflects agentActivity (was startupStatus); no
     // agentActivity attached → "unknown" state, desaturated stone.
