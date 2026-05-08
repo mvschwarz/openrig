@@ -19,7 +19,7 @@ import { SubSpecPreview, type SubSpecPreviewData } from "./drawer-viewers/SubSpe
 import type { ActivityEvent } from "../hooks/useActivityFeed.js";
 
 // V1 polish slice Phase 5.1 P5.1-1 + DRIFT P5.1-D2: 'seat-detail' kind
-// RETIRED at V1 polish per founder direction. Graph node click + tree
+// RETIRED at V1 polish. Graph node click + tree
 // click + table row click all navigate to /topology/seat/$rigId/$logicalId
 // center page (canonical agent-detail surface = LiveNodeDetails).
 // SeatDetailViewer wrapper component DELETED; SeatDetailTrigger primitive
@@ -86,17 +86,29 @@ export function SharedDetailDrawer({
   })();
 
   return (
-    <VellumSheet
-      edge="right"
-      width="wide"
-      onClose={onClose}
-      testId="shared-detail-drawer"
-      // top-14 starts below the universal top bar (h-14, fixed at top); bottom-0
-      // anchors to viewport bottom so the drawer fills the remaining height.
-      // Bounce-fix #3 width-coupling: 38rem (lg:w-[38rem]) per VellumSheet wide preset.
-      className="fixed top-14 right-0 bottom-0 z-30"
+    <div
+      data-testid="shared-detail-drawer-layer"
+      className="fixed top-14 right-0 bottom-0 left-0 z-30 pointer-events-none"
     >
-      {inner}
-    </VellumSheet>
+      <button
+        type="button"
+        aria-label="Close drawer"
+        data-testid="shared-detail-drawer-outside"
+        className="absolute inset-0 cursor-default pointer-events-auto"
+        onPointerDown={onClose}
+      />
+      <VellumSheet
+        edge="right"
+        width="wide"
+        onClose={onClose}
+        testId="shared-detail-drawer"
+        // top-14 starts below the universal top bar (h-14, fixed at top); bottom-0
+        // anchors to viewport bottom so the drawer fills the remaining height.
+        // Bounce-fix #3 width-coupling: 38rem (lg:w-[38rem]) per VellumSheet wide preset.
+        className="absolute top-0 right-0 bottom-0 z-10 pointer-events-auto"
+      >
+        {inner}
+      </VellumSheet>
+    </div>
   );
 }

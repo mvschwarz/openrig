@@ -63,10 +63,16 @@ export function useMissionControlAction() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: postAction,
-    onSuccess: () => {
+    onSuccess: (result, input) => {
       // Invalidate all Mission Control views so the operator sees the
       // post-action state without a manual refresh.
       queryClient.invalidateQueries({ queryKey: ["mission-control", "view"] });
+      queryClient.invalidateQueries({ queryKey: ["mission-control", "audit"] });
+      queryClient.invalidateQueries({ queryKey: ["queue", "item", input.qitemId] });
+      if (result.createdQitemId) {
+        queryClient.invalidateQueries({ queryKey: ["queue", "item", result.createdQitemId] });
+      }
+      queryClient.invalidateQueries({ queryKey: ["slices"] });
     },
   });
 }
