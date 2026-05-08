@@ -46,14 +46,29 @@ import { DecisionsTab } from "../slices/tabs/DecisionsTab.js";
 import { TestsVerificationTab } from "../slices/tabs/TestsVerificationTab.js";
 import { TopologyTab } from "../slices/tabs/TopologyTab.js";
 import { QueueItemTrigger } from "../drawer-triggers/QueueItemTrigger.js";
+import {
+  DateChip,
+  EventBadge,
+  FlowChips,
+  ProjectPill,
+  ProofPacketHeader,
+  ProofThumbnailGrid,
+  TagPill,
+  formatFriendlyDate,
+  scopeToken,
+  stateTone,
+} from "./ProjectMetaPrimitives.js";
+import { ProofImageViewer } from "./ProofImageViewer.js";
 
-type SharedTab = "overview" | "progress" | "artifacts" | "queue" | "topology";
+type SharedTab = "overview" | "story" | "progress" | "artifacts" | "tests" | "queue" | "topology";
 type SliceTab = SharedTab | "story" | "tests";
 
 const SHARED_TABS: { id: SharedTab; label: string }[] = [
   { id: "overview", label: "Overview" },
+  { id: "story", label: "Story" },
   { id: "progress", label: "Progress" },
   { id: "artifacts", label: "Artifacts" },
+  { id: "tests", label: "Tests" },
   { id: "queue", label: "Queue" },
   { id: "topology", label: "Topology" },
 ];
@@ -209,7 +224,7 @@ function ScopeProgressRollup({
       {rows.map((row) => {
         const detail = detailsByName.get(row.name);
         return (
-          <article key={row.name} className="border border-outline-variant bg-white/20 p-3">
+          <article key={row.name} className="border border-outline-variant bg-white/35 p-3 backdrop-blur-sm">
             <div className="flex items-start justify-between gap-3 border-b border-outline-variant pb-2">
               <div className="min-w-0">
                 <Link
@@ -219,13 +234,12 @@ function ScopeProgressRollup({
                 >
                   {row.displayName}
                 </Link>
-                <div className="mt-1 font-mono text-[9px] uppercase tracking-[0.10em] text-stone-500">
-                  {projectSliceMeta(projectSliceFromListEntry(row))}
+                <div className="mt-2 flex flex-wrap gap-1.5">
+                  <ProjectPill token={scopeToken("slice")} compact />
+                  <ProjectPill token={{ label: row.status, tone: stateTone(row.status) }} compact />
+                  <DateChip value={row.lastActivityAt} />
                 </div>
               </div>
-              <span className="font-mono text-[10px] uppercase tracking-[0.12em] text-stone-600">
-                {row.status}
-              </span>
             </div>
             <div className="mt-3 grid gap-2 font-mono text-[10px] text-stone-700 sm:grid-cols-4">
               <SliceMetric label="Qitems" value={detail?.qitemIds.length ?? row.qitemCount} />
@@ -263,18 +277,25 @@ function ScopeQueueRollup({
         {qitemIds.map((qitemId) => {
           const item = queueItemsById.get(qitemId);
           return (
-            <li key={qitemId} className="bg-white/20">
+            <li key={qitemId} className="bg-white/35 backdrop-blur-sm">
               <QueueItemTrigger
                 data={queueItemViewerData(qitemId, item)}
                 testId={`scope-queue-trigger-${qitemId}`}
-                className="block w-full px-3 py-2 text-left font-mono text-xs transition-colors hover:bg-stone-100/60"
+                className="block w-full px-3 py-2 text-left font-mono text-xs transition-colors hover:bg-white/55"
               >
-                <span className="block whitespace-pre-wrap break-words text-stone-900">
+                <span className="flex flex-wrap items-center gap-2">
+                  <EventBadge kind={item?.state ?? "queue.item"} compact />
+                  <DateChip value={item?.tsCreated} />
+                </span>
+                <span className="mt-2 block whitespace-pre-wrap break-words text-stone-900">
                   {queueBodyPreview(qitemId, item)}
                 </span>
                 {item ? (
-                  <span className="mt-1 block text-[10px] text-stone-500">
-                    {qitemId} / {item.sourceSession} -&gt; {item.destinationSession} / {item.state}
+                  <span className="mt-2 block space-y-2">
+                    <FlowChips source={item.sourceSession} destination={item.destinationSession} muted />
+                    <span className="flex flex-wrap gap-1.5">
+                      {(item.tags ?? []).slice(0, 5).map((tag) => <TagPill key={tag} tag={tag} />)}
+                    </span>
                   </span>
                 ) : null}
               </QueueItemTrigger>
@@ -303,7 +324,7 @@ function ScopeArtifactsRollup({
         const proofCount = detail?.tests.proofPackets.length ?? (row.hasProofPacket ? 1 : 0);
         const screenshotCount = detail?.tests.proofPackets.reduce((count, packet) => count + packet.screenshots.length, 0) ?? 0;
         return (
-          <article key={row.name} className="border border-outline-variant bg-white/20 p-3">
+          <article key={row.name} className="border border-outline-variant bg-white/35 p-3 backdrop-blur-sm">
             <Link
               to="/project/slice/$sliceId"
               params={{ sliceId: row.name }}
@@ -311,7 +332,11 @@ function ScopeArtifactsRollup({
             >
               {row.displayName}
             </Link>
-            <div className="mt-2 grid gap-2 font-mono text-[10px] text-stone-700 sm:grid-cols-4">
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              <ProjectPill token={scopeToken("slice")} compact />
+              <ProjectPill token={{ label: row.status, tone: stateTone(row.status) }} compact />
+            </div>
+            <div className="mt-3 grid gap-2 font-mono text-[10px] text-stone-700 sm:grid-cols-4">
               <SliceMetric label="Files" value={detail?.docs.tree.length ?? "unknown"} />
               <SliceMetric label="Commits" value={detail?.commitRefs.length ?? "unknown"} />
               <SliceMetric label="Proof packets" value={proofCount} />
@@ -320,6 +345,129 @@ function ScopeArtifactsRollup({
           </article>
         );
       })}
+    </div>
+  );
+}
+
+function ScopeStoryRollup({
+  rows,
+  detailsByName,
+  queueItemsById,
+  isFetching,
+}: {
+  rows: SliceListEntry[];
+  detailsByName: Map<string, SliceDetail>;
+  queueItemsById: Map<string, QueueItemDetail>;
+  isFetching: boolean;
+}) {
+  const rowByName = useMemo(() => new Map(rows.map((row) => [row.name, row])), [rows]);
+  const events = useMemo(() => {
+    return Array.from(detailsByName.values()).flatMap((detail) => {
+      const row = rowByName.get(detail.name);
+      const sliceLabel = row?.displayName ?? detail.displayName ?? detail.name;
+      return storyEventsForDetail(detail).map((event) => ({
+        ...event,
+        detail: {
+          ...(event.detail ?? {}),
+          sliceLabel,
+          sliceName: detail.name,
+        },
+      }));
+    });
+  }, [detailsByName, rowByName]);
+
+  if (isFetching && events.length === 0) {
+    return <PlaceholderTab label="LOADING STORY" description="Reading scoped story events." />;
+  }
+  if (events.length === 0) {
+    return <EmptyState label="NO STORY EVENTS" description="No story events are indexed for this scope." variant="card" testId="scope-story-empty" />;
+  }
+  return (
+    <div data-testid="scope-story-rollup">
+      <StoryTab events={events} phaseDefinitions={null} queueItemsById={queueItemsById} />
+    </div>
+  );
+}
+
+function storyEventsForDetail(detail: SliceDetail) {
+  const qitemIds = new Set(detail.qitemIds);
+  return detail.story.events.filter((event) => !event.qitemId || qitemIds.has(event.qitemId));
+}
+
+function ScopeTestsRollup({
+  rows,
+  detailsByName,
+  isFetching,
+}: {
+  rows: SliceListEntry[];
+  detailsByName: Map<string, SliceDetail>;
+  isFetching: boolean;
+}) {
+  const [selected, setSelected] = useState<{ sliceName: string; relPath: string } | null>(null);
+  const rowsWithDetails = rows.map((row) => ({ row, detail: detailsByName.get(row.name) }));
+  const proofRows = rowsWithDetails.filter(({ detail }) => detail && detail.tests.proofPackets.length > 0);
+
+  if (isFetching && detailsByName.size === 0) {
+    return <PlaceholderTab label="LOADING TESTS" description="Reading scoped proof packets." />;
+  }
+  if (proofRows.length === 0) {
+    return <EmptyState label="NO PROOF PACKETS" description="No proof evidence is indexed for this scope." variant="card" testId="scope-tests-empty" />;
+  }
+
+  return (
+    <div data-testid="scope-tests-rollup" className="space-y-3">
+      {proofRows.map(({ row, detail }) => {
+        if (!detail) return null;
+        const screenshotCount = detail.tests.proofPackets.reduce((count, packet) => count + packet.screenshots.length, 0);
+        return (
+          <article key={row.name} className="border border-outline-variant bg-white/35 p-3 backdrop-blur-sm">
+            <div className="flex flex-wrap items-start justify-between gap-3 border-b border-outline-variant pb-2">
+              <div className="min-w-0">
+                <Link
+                  to="/project/slice/$sliceId"
+                  params={{ sliceId: row.name }}
+                  className="font-mono text-[12px] uppercase tracking-[0.12em] text-stone-900 hover:underline"
+                >
+                  {row.displayName}
+                </Link>
+                <div className="mt-2 flex flex-wrap gap-1.5">
+                  <ProjectPill token={scopeToken("slice")} compact />
+                  <ProjectPill token={{ label: `${detail.tests.proofPackets.length} packets`, tone: "info" }} compact />
+                  <ProjectPill token={{ label: `${screenshotCount} screenshots`, tone: "success" }} compact />
+                </div>
+              </div>
+              <DateChip value={row.lastActivityAt} />
+            </div>
+            <div className="mt-3 space-y-3">
+              {detail.tests.proofPackets.map((packet) => (
+                <div key={packet.dirName} className="border border-outline-variant bg-white/30 p-2 backdrop-blur-sm">
+                  <ProofPacketHeader title={packet.dirName} badge={packet.passFailBadge} />
+                  {packet.primaryMarkdown?.content ? (
+                    <p className="mt-2 line-clamp-3 font-mono text-[10px] leading-relaxed text-stone-700">
+                      {packet.primaryMarkdown.content}
+                    </p>
+                  ) : null}
+                  {packet.screenshots.length > 0 ? (
+                    <div className="mt-2">
+                      <ProofThumbnailGrid
+                        sliceName={detail.name}
+                        screenshots={packet.screenshots}
+                        onSelect={(relPath) => setSelected({ sliceName: detail.name, relPath })}
+                        testIdPrefix={`scope-proof-screenshot-${detail.name}`}
+                      />
+                    </div>
+                  ) : null}
+                </div>
+              ))}
+            </div>
+          </article>
+        );
+      })}
+      <ProofImageViewer
+        sliceName={selected?.sliceName ?? ""}
+        relPath={selected?.relPath ?? null}
+        onClose={() => setSelected(null)}
+      />
     </div>
   );
 }
@@ -517,6 +665,14 @@ export function WorkspaceScopePage() {
       {active === "overview" ? (
         <WorkspaceOverviewPanel />
       ) : null}
+      {active === "story" ? (
+        <ScopeStoryRollup
+          rows={rollup.rows}
+          detailsByName={rollup.details.itemsByName}
+          queueItemsById={rollup.queueItems.itemsById}
+          isFetching={rollup.details.isFetching || rollup.queueItems.isFetching}
+        />
+      ) : null}
       {active === "progress" ? (
         <ScopeProgressRollup
           rows={rollup.rows}
@@ -526,6 +682,13 @@ export function WorkspaceScopePage() {
       ) : null}
       {active === "artifacts" ? (
         <ScopeArtifactsRollup rows={rollup.rows} detailsByName={rollup.details.itemsByName} />
+      ) : null}
+      {active === "tests" ? (
+        <ScopeTestsRollup
+          rows={rollup.rows}
+          detailsByName={rollup.details.itemsByName}
+          isFetching={rollup.details.isFetching}
+        />
       ) : null}
       {active === "queue" ? (
         <ScopeQueueRollup
@@ -557,7 +720,7 @@ export function MissionScopePage() {
         <div data-testid="mission-overview-panel" className="space-y-3">
           {rollup.rows.length > 0 ? (
             rollup.rows.map((slice) => (
-              <article key={slice.name} className="border border-outline-variant bg-white/20 p-3">
+              <article key={slice.name} className="border border-outline-variant bg-white/35 p-3 backdrop-blur-sm">
                 <Link
                   to="/project/slice/$sliceId"
                   params={{ sliceId: slice.name }}
@@ -565,6 +728,11 @@ export function MissionScopePage() {
                 >
                   {slice.displayName}
                 </Link>
+                <div className="mt-2 flex flex-wrap gap-1.5">
+                  <ProjectPill token={scopeToken("slice")} compact />
+                  <ProjectPill token={{ label: slice.status, tone: stateTone(slice.status) }} compact />
+                  <DateChip value={slice.lastActivityAt} />
+                </div>
                 <div className="mt-2 grid gap-2 font-mono text-[10px] text-stone-700 sm:grid-cols-4">
                   <SliceMetric label="Status" value={slice.status} />
                   <SliceMetric label="Qitems" value={slice.qitemCount} />
@@ -583,6 +751,14 @@ export function MissionScopePage() {
           )}
         </div>
       ) : null}
+      {active === "story" ? (
+        <ScopeStoryRollup
+          rows={rollup.rows}
+          detailsByName={rollup.details.itemsByName}
+          queueItemsById={rollup.queueItems.itemsById}
+          isFetching={rollup.details.isFetching || rollup.queueItems.isFetching}
+        />
+      ) : null}
       {active === "progress" ? (
         <ScopeProgressRollup
           rows={rollup.rows}
@@ -592,6 +768,13 @@ export function MissionScopePage() {
       ) : null}
       {active === "artifacts" ? (
         <ScopeArtifactsRollup rows={rollup.rows} detailsByName={rollup.details.itemsByName} />
+      ) : null}
+      {active === "tests" ? (
+        <ScopeTestsRollup
+          rows={rollup.rows}
+          detailsByName={rollup.details.itemsByName}
+          isFetching={rollup.details.isFetching}
+        />
       ) : null}
       {active === "queue" ? (
         <ScopeQueueRollup
@@ -665,25 +848,29 @@ function SliceQueueTab({
         {qitemIds.map((qitemId) => {
           const item = queueItemsById.get(qitemId);
           return (
-            <li key={qitemId} className="bg-white/20">
+            <li key={qitemId} className="bg-white/35 backdrop-blur-sm">
               <QueueItemTrigger
                 data={queueItemViewerData(qitemId, item)}
                 testId={`slice-queue-trigger-${qitemId}`}
-                className="block w-full px-3 py-2 text-left hover:bg-stone-100/60 transition-colors font-mono text-xs"
+                className="block w-full px-3 py-2 text-left hover:bg-white/55 transition-colors font-mono text-xs"
               >
-                <span className="block whitespace-pre-wrap break-words text-stone-900">
+                <span className="flex flex-wrap items-center gap-2">
+                  <EventBadge kind={item?.state ?? "queue.item"} compact />
+                  <DateChip value={item?.tsCreated} />
+                </span>
+                <span className="mt-2 block whitespace-pre-wrap break-words text-stone-900">
                   {queueBodyPreview(qitemId, item)}
                 </span>
                 {item ? (
                   <span
                     data-testid={`slice-queue-meta-${qitemId}`}
-                    className="mt-1 block text-[10px] text-stone-500"
+                    className="mt-2 block space-y-2 text-[10px] text-stone-500"
                   >
-                    {qitemId}
-                    {" / "}
-                    {item.sourceSession} -&gt; {item.destinationSession}
-                    {" / "}
-                    {item.state}
+                    <FlowChips source={item.sourceSession} destination={item.destinationSession} muted />
+                    <span className="flex flex-wrap gap-1.5">
+                      <TagPill tag={qitemId} />
+                      {(item.tags ?? []).slice(0, 5).map((tag) => <TagPill key={tag} tag={tag} />)}
+                    </span>
                   </span>
                 ) : null}
               </QueueItemTrigger>
@@ -696,15 +883,12 @@ function SliceQueueTab({
 }
 
 function formatMaybeDate(ts: string | null): string {
-  if (!ts) return "unknown";
-  const date = new Date(ts);
-  if (Number.isNaN(date.getTime())) return ts;
-  return date.toLocaleString();
+  return formatFriendlyDate(ts);
 }
 
 function SliceMetric({ label, value }: { label: string; value: string | number }) {
   return (
-    <div className="border border-outline-variant bg-white/30 p-3">
+    <div className="border border-outline-variant bg-white/35 p-3 backdrop-blur-sm">
       <div className="font-mono text-[8px] uppercase tracking-[0.14em] text-on-surface-variant">{label}</div>
       <div className="mt-1 font-mono text-sm font-bold text-stone-900">{value}</div>
     </div>
@@ -926,7 +1110,7 @@ export function SliceScopePage() {
     >
       {active === "story" ? (
         <StoryTab
-          events={detail.story.events}
+          events={storyEventsForDetail(detail)}
           phaseDefinitions={detail.story.phaseDefinitions}
           queueItemsById={queueItemsById}
         />

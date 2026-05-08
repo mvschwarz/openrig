@@ -20,12 +20,13 @@
 
 import { Link } from "@tanstack/react-router";
 import { useState } from "react";
-import type { SliceDetail } from "../../../hooks/useSlices.js";
+import type { SliceDetail, SpecGraphPayload } from "../../../hooks/useSlices.js";
 import { SessionPreviewPane } from "../../preview/SessionPreviewPane.js";
 import { SliceWorkflowGraph } from "./SliceWorkflowGraph.js";
 
 export function TopologyTab({ topology }: { topology: SliceDetail["topology"] }) {
   const { affectedRigs, totalSeats, specGraph } = topology;
+  const runtimeGraph = specGraph ?? deriveRuntimeGraph(affectedRigs);
   const hasAnything = affectedRigs.length > 0 || specGraph !== null;
   if (!hasAnything) {
     return (
@@ -53,11 +54,11 @@ export function TopologyTab({ topology }: { topology: SliceDetail["topology"] })
         </div>
       </header>
 
-      {specGraph && <SliceWorkflowGraph specGraph={specGraph} />}
+      {runtimeGraph && <SliceWorkflowGraph specGraph={runtimeGraph} />}
 
       {affectedRigs.length > 0 && (
         <div data-testid="topology-rig-listing" className="space-y-3">
-          {specGraph && (
+          {runtimeGraph && (
             <div className="font-mono text-[10px] uppercase tracking-[0.10em] text-stone-500">
               Active seats
             </div>
@@ -90,6 +91,30 @@ export function TopologyTab({ topology }: { topology: SliceDetail["topology"] })
       )}
     </div>
   );
+}
+
+function deriveRuntimeGraph(affectedRigs: SliceDetail["topology"]["affectedRigs"]): SpecGraphPayload | null {
+  if (affectedRigs.length === 0) return null;
+  const nodes = affectedRigs.map((rig, index) => ({
+    stepId: rig.rigName || rig.rigId || `rig-${index + 1}`,
+    label: rig.rigName || rig.rigId || `Rig ${index + 1}`,
+    role: `${rig.sessionNames.length} seat${rig.sessionNames.length === 1 ? "" : "s"}`,
+    preferredTarget: rig.sessionNames[0] ?? null,
+    isEntry: index === 0,
+    isCurrent: index === affectedRigs.length - 1,
+    isTerminal: index === affectedRigs.length - 1,
+  }));
+  return {
+    specName: "runtime-handoff-map",
+    specVersion: "derived",
+    nodes,
+    edges: nodes.slice(0, -1).map((node, index) => ({
+      fromStepId: node.stepId,
+      toStepId: nodes[index + 1]!.stepId,
+      routingType: "direct",
+      isLoopBack: false,
+    })),
+  };
 }
 
 // Preview Terminal v0 (PL-018) — clickable seat row.

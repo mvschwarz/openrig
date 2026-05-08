@@ -36,7 +36,18 @@ function makeDetail(name: string, missionId: string | null, qitemIds: string[]):
     commitRefs: ["abc1234"],
     lastActivityAt: "2026-05-07T22:06:36.083Z",
     workflowBinding: null,
-    story: { events: [], phaseDefinitions: null },
+    story: {
+      events: qitemIds[0] ? [{
+        ts: "2026-05-07T22:06:36.083Z",
+        kind: "queue.created",
+        actorSession: "driver@rig",
+        qitemId: qitemIds[0],
+        phase: null,
+        summary: `Created ${qitemIds[0]} for ${name}.`,
+        detail: { sourceSession: "driver@rig", destinationSession: "human@host" },
+      }] : [],
+      phaseDefinitions: null,
+    },
     acceptance: { totalItems: 1, doneItems: 1, percentage: 100, items: [], closureCallout: null, currentStep: null },
     decisions: { rows: [] },
     docs: { tree: [{ name: "README.md", relPath: "README.md", type: "file", size: 100, mtime: null }] },
@@ -196,8 +207,15 @@ describe("WorkspaceScopePage overview", () => {
   it("workspace progress, queue, and topology tabs render aggregate scoped data", async () => {
     const { findByTestId } = renderWorkspaceScope();
 
+    fireEvent.click(await findByTestId("project-tab-story"));
+    expect(await findByTestId("scope-story-rollup")).toBeTruthy();
+    expect((await findByTestId("story-row-queue.created")).textContent).toContain("Full queue body");
+
     fireEvent.click(await findByTestId("project-tab-progress"));
     expect(await findByTestId("scope-progress-rollup")).toBeTruthy();
+
+    fireEvent.click(await findByTestId("project-tab-tests"));
+    expect(await findByTestId("scope-tests-rollup")).toBeTruthy();
 
     fireEvent.click(await findByTestId("project-tab-queue"));
     expect(await findByTestId("scope-queue-rollup")).toBeTruthy();
@@ -216,5 +234,9 @@ describe("WorkspaceScopePage overview", () => {
 
     fireEvent.click(await findByTestId("project-tab-queue"));
     expect((await findByTestId("scope-queue-trigger-qitem-A")).textContent).toContain("Full queue body");
+
+    fireEvent.click(await findByTestId("project-tab-story"));
+    expect(await findByTestId("scope-story-rollup")).toBeTruthy();
+    expect(queryByText("seed-slice-active")).toBeNull();
   });
 });
