@@ -841,7 +841,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   //   OPENRIG_WORKSPACE_SLICES_ROOT   typed-key env override
   //   workspace.slices_root           typed setting in ~/.openrig/config.json
   //   workspace.root                  cascade fallback (default ~/.openrig/workspace)
-  //   OPENRIG_DOGFOOD_EVIDENCE_ROOT   absolute path to dogfood-evidence root
+  //   workspace.dogfood_evidence_root typed setting for proof packet assets
+  //   OPENRIG_DOGFOOD_EVIDENCE_ROOT   env override for compatibility
   //
   // When the resolved slicesRoot path doesn't exist on disk, the indexer
   // is still constructed but isReady() returns false — the routes return
@@ -856,14 +857,24 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     const legacyEnvSlicesRoot = readOpenRigEnv("OPENRIG_SLICES_ROOT", "RIGGED_SLICES_ROOT") ?? "";
     let resolvedSlicesRoot = "";
     let resolvedWorkspaceRoot = "";
+    let resolvedDogfoodRoot = "";
     if (!legacyEnvSlicesRoot) {
       try {
         const { SettingsStore: SettingsStoreCtor } = await import("./domain/user-settings/settings-store.js");
         const resolvedConfig = new SettingsStoreCtor().resolveConfig();
         resolvedSlicesRoot = resolvedConfig.workspaceSlicesRoot;
         resolvedWorkspaceRoot = resolvedConfig.workspaceRoot;
+        resolvedDogfoodRoot = resolvedConfig.workspaceDogfoodEvidenceRoot;
       } catch {
         // SettingsStore unavailable — keep slicesRoot empty; routes return 503.
+      }
+    } else {
+      try {
+        const { SettingsStore: SettingsStoreCtor } = await import("./domain/user-settings/settings-store.js");
+        const resolvedConfig = new SettingsStoreCtor().resolveConfig();
+        resolvedDogfoodRoot = resolvedConfig.workspaceDogfoodEvidenceRoot;
+      } catch {
+        // SettingsStore unavailable — proof packets remain disabled.
       }
     }
     const slicesRoot = legacyEnvSlicesRoot || resolvedSlicesRoot;
@@ -873,13 +884,12 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
           nodePath.join(resolvedWorkspaceRoot, "slices"),
         ].filter((root) => root !== slicesRoot)
       : [];
-    const dogfoodRoot = readOpenRigEnv("OPENRIG_DOGFOOD_EVIDENCE_ROOT", "RIGGED_DOGFOOD_EVIDENCE_ROOT") ?? "";
     const { SliceIndexer } = await import("./domain/slices/slice-indexer.js");
     const { SliceDetailProjector } = await import("./domain/slices/slice-detail-projector.js");
     const sliceIndexer = new SliceIndexer({
       slicesRoot,
       additionalSliceRoots,
-      dogfoodEvidenceRoot: dogfoodRoot || null,
+      dogfoodEvidenceRoot: resolvedDogfoodRoot || null,
       db,
     });
     // Slice Story View v1: pass workflowRuntime.specCache so the

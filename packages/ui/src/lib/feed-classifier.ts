@@ -103,7 +103,7 @@ function queueKind(type: string, state: string | undefined): FeedCardKind {
   if (state === "closeout-pending-ratify") {
     return "approval";
   }
-  if (state === "closed" || state === "completed" || state === "shipped") {
+  if (state === "done" || state === "closed" || state === "completed" || state === "shipped") {
     return "shipped";
   }
   return "progress";
@@ -129,12 +129,17 @@ function queueBody(payload: Record<string, unknown>): string | undefined {
   const meta = [
     pickString(payload, "priority") ? `priority=${pickString(payload, "priority")}` : undefined,
     pickString(payload, "tier") ? `tier=${pickString(payload, "tier")}` : undefined,
-    pickString(payload, "state") ? `state=${pickString(payload, "state")}` : undefined,
+    pickString(payload, "state", "toState") ? `state=${pickString(payload, "state", "toState")}` : undefined,
+    pickString(payload, "closureReason") ? `closure=${pickString(payload, "closureReason")}` : undefined,
   ].filter((item): item is string => Boolean(item));
 
   return [route, meta.length > 0 ? meta.join(" / ") : undefined]
     .filter((item): item is string => Boolean(item))
     .join("\n") || undefined;
+}
+
+function isHumanSeat(session: string | undefined): boolean {
+  return /^human(?:-[A-Za-z0-9._-]+)?@(kernel|host)$/.test(session ?? "");
 }
 
 function classifyEvent(evt: ActivityEvent): FeedCard | null {
@@ -167,17 +172,33 @@ function classifyEvent(evt: ActivityEvent): FeedCard | null {
   }
   if (isQueueVisibilityEvent(evt.type)) {
     const qitemId = pickString(payload, "qitemId", "qitem_id");
+    const destination = pickString(
+      payload,
+      "destinationSession",
+      "destination_session",
+      "toSession",
+      "destination",
+    );
+    const state = pickString(payload, "state", "toState");
+    const kind =
+      isHumanSeat(destination)
+        ? "action-required"
+        : queueKind(evt.type, state);
     const explicitTitle = pickString(payload, "summary", "title");
+    const label =
+      kind === "shipped" && evt.type === "queue.updated"
+        ? "Queue item shipped"
+        : queueEventLabel(evt.type);
     const title =
       explicitTitle ??
-      [queueEventLabel(evt.type), shortQitemId(qitemId)]
+      [label, shortQitemId(qitemId)]
         .filter((item): item is string => Boolean(item))
         .join(": ");
     return {
       ...base,
       title,
       body: asString(payload.body) ?? queueBody(payload),
-      kind: queueKind(evt.type, asString(payload.state)),
+      kind,
     };
   }
   if (evt.type.startsWith("workflow.")) {

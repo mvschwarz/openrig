@@ -30,6 +30,7 @@ export interface RiggedConfig {
     steeringPath: string;
     fieldNotesRoot: string;
     specsRoot: string;
+    dogfoodEvidenceRoot: string;
   };
   // User Settings v0 — UEP env-var graduation.
   // Values are stored as raw named-pair strings ("name:/abs/path,...")
@@ -89,6 +90,7 @@ const DEFAULTS = {
     steeringPath: "",
     fieldNotesRoot: "",
     specsRoot: "",
+    dogfoodEvidenceRoot: "",
   },
   files: { allowlist: "" },
   progress: { scanRoots: "" },
@@ -140,6 +142,7 @@ export const VALID_KEYS = [
   "workspace.steering_path",
   "workspace.field_notes_root",
   "workspace.specs_root",
+  "workspace.dogfood_evidence_root",
   "files.allowlist",
   "progress.scan_roots",
   "ui.preview.refresh_interval_seconds",
@@ -173,6 +176,7 @@ export const ENV_MAP: Record<ValidKey, { primary: string; legacy: string }> = {
   "workspace.steering_path": { primary: "OPENRIG_WORKSPACE_STEERING_PATH", legacy: "RIGGED_WORKSPACE_STEERING_PATH" },
   "workspace.field_notes_root": { primary: "OPENRIG_WORKSPACE_FIELD_NOTES_ROOT", legacy: "RIGGED_WORKSPACE_FIELD_NOTES_ROOT" },
   "workspace.specs_root": { primary: "OPENRIG_WORKSPACE_SPECS_ROOT", legacy: "RIGGED_WORKSPACE_SPECS_ROOT" },
+  "workspace.dogfood_evidence_root": { primary: "OPENRIG_DOGFOOD_EVIDENCE_ROOT", legacy: "RIGGED_DOGFOOD_EVIDENCE_ROOT" },
   // UEP env-var graduation: existing OPENRIG_FILES_ALLOWLIST /
   // OPENRIG_PROGRESS_SCAN_ROOTS become the env override for the new
   // typed keys (no breaking change).
@@ -209,6 +213,7 @@ const KEY_TO_PATH: Record<ValidKey, string[]> = {
   "workspace.steering_path": ["workspace", "steeringPath"],
   "workspace.field_notes_root": ["workspace", "fieldNotesRoot"],
   "workspace.specs_root": ["workspace", "specsRoot"],
+  "workspace.dogfood_evidence_root": ["workspace", "dogfoodEvidenceRoot"],
   "files.allowlist": ["files", "allowlist"],
   "progress.scan_roots": ["progress", "scanRoots"],
   "ui.preview.refresh_interval_seconds": ["ui", "preview", "refreshIntervalSeconds"],
@@ -262,6 +267,7 @@ export function deriveWorkspaceDefault(key: ValidKey, workspaceRoot: string): st
     case "workspace.steering_path":    return join(workspaceRoot, "STEERING.md");
     case "workspace.field_notes_root": return join(workspaceRoot, "field-notes");
     case "workspace.specs_root":       return join(workspaceRoot, "specs");
+    case "workspace.dogfood_evidence_root": return join(workspaceRoot, "dogfood-evidence");
     case "files.allowlist":            return `workspace:${workspaceRoot}`;
     case "progress.scan_roots":        return `workspace:${workspaceRoot}`;
     default: return "";
@@ -281,6 +287,7 @@ const WORKSPACE_DERIVED_KEYS: ReadonlySet<ValidKey> = new Set([
   "workspace.steering_path",
   "workspace.field_notes_root",
   "workspace.specs_root",
+  "workspace.dogfood_evidence_root",
   "files.allowlist",
   "progress.scan_roots",
 ]);
@@ -352,6 +359,7 @@ export class ConfigStore {
         steeringPath: v("workspace.steering_path") as string,
         fieldNotesRoot: v("workspace.field_notes_root") as string,
         specsRoot: v("workspace.specs_root") as string,
+        dogfoodEvidenceRoot: v("workspace.dogfood_evidence_root") as string,
       },
       files: {
         allowlist: v("files.allowlist") as string,
