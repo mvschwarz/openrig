@@ -19,6 +19,7 @@ import { copyText } from "../lib/copy-text.js";
 import { getActivityLabel, getActivityState, getActivityTextClass, isActivityStale } from "../lib/activity-visuals.js";
 import { getRestoreStatusColorClass } from "../lib/restore-status-colors.js";
 import type { AgentSpecReview } from "../hooks/useSpecReview.js";
+import { RuntimeBadge, RuntimeMark, ToolMark } from "./graphics/RuntimeMark.js";
 
 type Tab = "identity" | "agent-spec" | "startup" | "transcript" | "terminal";
 
@@ -134,16 +135,18 @@ function ActionButtonsRow({ rigId, logicalId, data }: { rigId: string; logicalId
       <button
         onClick={handleOpenCmux}
         data-testid="detail-cmux-open"
-        className="px-3 py-1.5 border border-outline-variant bg-white/30 font-mono text-[10px] uppercase tracking-wide text-stone-900 hover:bg-stone-100/60"
+        className="inline-flex items-center gap-1.5 px-3 py-1.5 border border-outline-variant bg-white/30 font-mono text-[10px] uppercase tracking-wide text-stone-900 hover:bg-stone-100/60"
       >
+        <ToolMark tool="cmux" size="sm" />
         Open CMUX
       </button>
       {data.tmuxAttachCommand && (
         <button
           onClick={handleCopyAttach}
           data-testid="detail-copy-attach"
-          className="px-3 py-1.5 border border-outline-variant bg-white/30 font-mono text-[10px] uppercase tracking-wide text-stone-700 hover:bg-stone-100/60"
+          className="inline-flex items-center gap-1.5 px-3 py-1.5 border border-outline-variant bg-white/30 font-mono text-[10px] uppercase tracking-wide text-stone-700 hover:bg-stone-100/60"
         >
+          <ToolMark tool="tmux" size="sm" />
           Copy tmux attach
         </button>
       )}
@@ -151,8 +154,9 @@ function ActionButtonsRow({ rigId, logicalId, data }: { rigId: string; logicalId
         <button
           onClick={handleCopyResume}
           data-testid="detail-copy-resume"
-          className="px-3 py-1.5 border border-outline-variant bg-white/30 font-mono text-[10px] uppercase tracking-wide text-stone-700 hover:bg-stone-100/60"
+          className="inline-flex items-center gap-1.5 px-3 py-1.5 border border-outline-variant bg-white/30 font-mono text-[10px] uppercase tracking-wide text-stone-700 hover:bg-stone-100/60"
         >
+          <RuntimeMark runtime={data.runtime} size="sm" />
           Copy resume command
         </button>
       )}
@@ -314,7 +318,12 @@ function IdentitySummary({ data }: { data: NodeDetailData }) {
     <section data-testid="live-identity-summary" className={SECTION_CLASS}>
       <div className="mb-2 font-mono text-[8px] uppercase tracking-wider text-stone-400">Identity</div>
       <div className="grid gap-1 sm:grid-cols-2">
-        <InfoRow label="Runtime" value={data.runtime} />
+        {data.runtime ? (
+          <div className="flex justify-between gap-3 font-mono text-[10px]">
+            <span className="text-stone-500">Runtime</span>
+            <RuntimeBadge runtime={data.runtime} model={data.model} size="xs" compact variant="inline" className="max-w-[12rem]" />
+          </div>
+        ) : null}
         <InfoRow label="Model" value={data.model} />
         <InfoRow label="Profile" value={data.profile} />
         <InfoRow label="Spec" value={data.resolvedSpecName} />

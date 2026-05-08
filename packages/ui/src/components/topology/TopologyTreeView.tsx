@@ -21,6 +21,7 @@ import { cn } from "../../lib/utils.js";
 import { useRigSummary } from "../../hooks/useRigSummary.js";
 import { useNodeInventory } from "../../hooks/useNodeInventory.js";
 import { displayPodName, inferPodName } from "../../lib/display-name.js";
+import { RuntimeMark } from "../graphics/RuntimeMark.js";
 
 /** Parse the active topology pathname for the seat-scope rigId+logicalId
  *  and (when on a rig/pod URL) the active rigId / podName. Used for
@@ -56,10 +57,11 @@ function useActiveTopologyContext(): {
   return { rigId: null, podName: null, logicalId: null };
 }
 
-function SeatLeaf({ rigId, logicalId, label, isActive }: {
+function SeatLeaf({ rigId, logicalId, label, runtime, isActive }: {
   rigId: string;
   logicalId: string;
   label: string;
+  runtime?: string | null;
   isActive: boolean;
 }) {
   return (
@@ -70,13 +72,14 @@ function SeatLeaf({ rigId, logicalId, label, isActive }: {
         data-testid={`topology-seat-${rigId}-${logicalId}`}
         data-active={isActive}
         className={cn(
-          "block w-full min-w-0 font-mono text-xs truncate",
+          "flex w-full min-w-0 items-center gap-1.5 font-mono text-xs",
           isActive
             ? "text-stone-900 font-bold"
             : "text-on-surface hover:text-stone-900",
         )}
       >
-        {label}
+        <RuntimeMark runtime={runtime} size="xs" />
+        <span className="truncate">{label}</span>
       </Link>
     </li>
   );
@@ -85,7 +88,7 @@ function SeatLeaf({ rigId, logicalId, label, isActive }: {
 function PodBranch({ rigId, podName, seats, activeRigId, activePodName, activeLogicalId }: {
   rigId: string;
   podName: string;
-  seats: Array<{ logicalId: string; label: string }>;
+  seats: Array<{ logicalId: string; label: string; runtime?: string | null }>;
   activeRigId: string | null;
   activePodName: string | null;
   activeLogicalId: string | null;
@@ -124,6 +127,7 @@ function PodBranch({ rigId, podName, seats, activeRigId, activePodName, activeLo
               rigId={rigId}
               logicalId={s.logicalId}
               label={s.label}
+              runtime={s.runtime}
               isActive={activeRigId === rigId && activeLogicalId === s.logicalId}
             />
           ))}
@@ -151,11 +155,15 @@ function RigBranch({ rigId, rigName, activeRigId, activePodName, activeLogicalId
   // even if user lands on a deep URL without manually expanding the rig.
   const eagerFetch = open || shouldAutoExpand;
   const { data: nodes } = useNodeInventory(eagerFetch ? rigId : null);
-  const podsMap = new Map<string, Array<{ logicalId: string; label: string }>>();
+  const podsMap = new Map<string, Array<{ logicalId: string; label: string; runtime?: string | null }>>();
   for (const n of nodes ?? []) {
     const pod = inferPodName(n.logicalId) ?? "default";
     if (!podsMap.has(pod)) podsMap.set(pod, []);
-    podsMap.get(pod)!.push({ logicalId: n.logicalId, label: n.canonicalSessionName ?? n.logicalId });
+    podsMap.get(pod)!.push({
+      logicalId: n.logicalId,
+      label: n.canonicalSessionName ?? n.logicalId,
+      runtime: n.runtime,
+    });
   }
   const pods = Array.from(podsMap.entries());
 

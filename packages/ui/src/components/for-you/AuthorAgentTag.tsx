@@ -12,6 +12,7 @@
 
 import { Link } from "@tanstack/react-router";
 import { useCmuxLaunch } from "../../hooks/useCmuxLaunch.js";
+import { ActorMark } from "../graphics/RuntimeMark.js";
 
 interface AuthorAgentTagProps {
   authorSession: string;
@@ -29,19 +30,26 @@ function parseSeat(authorSession: string): { logicalId: string; rigId: string | 
   };
 }
 
+function isHumanActor(authorSession: string): boolean {
+  const normalized = authorSession.toLowerCase();
+  return normalized.includes("human") || normalized.includes("operator") || normalized.endsWith("@host");
+}
+
 export function AuthorAgentTag({ authorSession, rigId, className, testId }: AuthorAgentTagProps) {
   const parsed = parseSeat(authorSession);
   const targetRigId = rigId ?? parsed.rigId;
   const cmuxLaunch = useCmuxLaunch();
+  const humanActor = isHumanActor(authorSession);
 
   // If we can't resolve a rigId, just show the tag without a link.
   if (!targetRigId) {
     return (
       <span
         data-testid={testId ?? "author-agent-tag"}
-        className={className ?? "font-mono text-[10px] text-on-surface-variant"}
+        className={className ?? "inline-flex items-center gap-1 font-mono text-[10px] text-on-surface-variant"}
       >
-        {authorSession}
+        {humanActor ? <ActorMark actor={authorSession} size="xs" /> : null}
+        <span>{authorSession}</span>
       </span>
     );
   }
@@ -59,10 +67,11 @@ export function AuthorAgentTag({ authorSession, rigId, className, testId }: Auth
       }}
       className={
         className ??
-        "font-mono text-[10px] text-on-surface-variant hover:text-stone-900 hover:underline"
+        "inline-flex items-center gap-1 font-mono text-[10px] text-on-surface-variant hover:text-stone-900 hover:underline"
       }
     >
-      {authorSession}
+      {humanActor ? <ActorMark actor={authorSession} size="xs" /> : null}
+      <span>{authorSession}</span>
     </Link>
   );
 }
