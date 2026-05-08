@@ -6,7 +6,7 @@
 //
 // Behavior:
 //   - Reads workspace.root setting (default ~/.openrig/workspace/).
-//   - Creates canonical subdirs: missions/ progress/ field-notes/ specs/.
+//   - Creates canonical subdirs: missions/ progress/ field-notes/ specs/ dogfood-evidence/.
 //   - Seeds two example missions with multiple slices.
 //   - Drops workspace README.md + STEERING.md.
 //   - --dry-run: report what would be created without acting.
@@ -99,6 +99,7 @@ const WORKSPACE_DIRS = [
   "progress",
   "field-notes",
   "specs",
+  "dogfood-evidence",
   ...DEFAULT_MISSIONS.flatMap((mission) => [
     `missions/${mission.id}`,
     `missions/${mission.id}/slices`,
@@ -116,6 +117,8 @@ function subdirReadmeContent(subdir: string): string {
       return "# field-notes\n\nOperator field notes. Free-form markdown notes from your daily work. OpenRig surfaces these alongside missions and slices for context.\n";
     case "specs":
       return "# specs\n\nWorkspace specs (rig specs / agent specs / workflow specs / context packs / skills). OpenRig's Library browses this directory alongside bundled specs.\n";
+    case "dogfood-evidence":
+      return "# dogfood-evidence\n\nProof packets live here. Each proof packet folder is matched to a Project slice by folder-name tokens and may contain markdown, screenshots, videos, traces, and other verification artifacts.\n";
     default:
       return `# ${subdir}\n`;
   }
@@ -128,6 +131,7 @@ This workspace is file-backed. The Project UI mirrors this structure:
 - \`missions/<mission-id>\` becomes a Project mission.
 - \`missions/<mission-id>/slices/<slice-id>\` becomes a Project slice.
 - Queue items should mention or tag the mission id and slice id so Project can attach live work to the right slice.
+- \`dogfood-evidence/<proof-packet-id>\` becomes Tests proof when the packet id contains the slice id tokens.
 
 Use stable kebab-case ids for mission and slice folders. Keep slice ids unique inside the workspace.
 `;
@@ -261,6 +265,7 @@ function scaffoldFiles(): Array<{ relPath: string; content: string }> {
     { relPath: "progress/README.md", content: subdirReadmeContent("progress") },
     { relPath: "field-notes/README.md", content: subdirReadmeContent("field-notes") },
     { relPath: "specs/README.md", content: subdirReadmeContent("specs") },
+    { relPath: "dogfood-evidence/README.md", content: subdirReadmeContent("dogfood-evidence") },
   ];
   for (const mission of DEFAULT_MISSIONS) {
     files.push(

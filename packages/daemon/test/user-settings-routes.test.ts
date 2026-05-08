@@ -1,7 +1,7 @@
 // User Settings v0 — daemon HTTP route tests.
 //
 // Pins the load-bearing behaviors of /api/config:
-//   - GET /api/config returns all 12 keys with source + default
+//   - GET /api/config returns all settings keys with source + default
 //   - GET /api/config/:key returns one key
 //   - POST /api/config/:key sets the value, persists to disk
 //   - DELETE /api/config/:key reverts one key to default
@@ -20,7 +20,7 @@ import { configRoutes } from "../src/routes/config.js";
 function clearEnv(): () => void {
   const keys = [
     "OPENRIG_PORT", "OPENRIG_FILES_ALLOWLIST", "OPENRIG_PROGRESS_SCAN_ROOTS",
-    "OPENRIG_WORKSPACE_ROOT",
+    "OPENRIG_WORKSPACE_ROOT", "OPENRIG_DOGFOOD_EVIDENCE_ROOT",
   ];
   const saved: Record<string, string | undefined> = {};
   for (const k of keys) {
@@ -67,15 +67,16 @@ describe("config routes (User Settings v0)", () => {
     const res = await app.request("/api/config");
     expect(res.status).toBe(200);
     const body = await res.json() as { settings: Record<string, { value: unknown; source: string }> };
-    // 17 v0 keys + 2 Phase 4 (advisor/operator) + 5 Phase 5 (feed.subscriptions.*)
+    // 18 v0 keys + 2 Phase 4 (advisor/operator) + 5 Phase 5 (feed.subscriptions.*)
     // + 2 V1 pre-release Item 1 (transcripts.lines / transcripts.poll_interval_seconds).
-    expect(Object.keys(body.settings).length).toBe(26);
+    expect(Object.keys(body.settings).length).toBe(27);
     expect(body.settings["daemon.port"]?.source).toBe("default");
     expect(body.settings["ui.preview.refresh_interval_seconds"]?.value).toBe(3);
     expect(body.settings["ui.preview.max_pins"]?.value).toBe(4);
     expect(body.settings["ui.preview.default_lines"]?.value).toBe(50);
     expect(body.settings["recovery.auto_drive_provider_prompts"]?.value).toBe(false);
     expect(body.settings["recovery.provider_auth_env_allowlist"]?.value).toBe("");
+    expect(String(body.settings["workspace.dogfood_evidence_root"]?.value)).toMatch(/dogfood-evidence$/);
   });
 
   it("GET /api/config/:key returns the resolved value", async () => {
@@ -164,10 +165,12 @@ describe("config routes (User Settings v0)", () => {
       "progress",
       "field-notes",
       "specs",
+      "dogfood-evidence",
       "missions/idea-ledger/slices/capture-product-ideas",
       "missions/handoff-loop/slices/verify-loop-evidence",
     ]));
     expect(existsSync(join(root, "missions", "README.md"))).toBe(true);
+    expect(existsSync(join(root, "dogfood-evidence", "README.md"))).toBe(true);
     expect(existsSync(join(root, "missions", "idea-ledger", "slices", "capture-product-ideas", "README.md"))).toBe(true);
     expect(existsSync(join(root, "STEERING.md"))).toBe(true);
   });

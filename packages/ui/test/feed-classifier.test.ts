@@ -50,6 +50,32 @@ describe("classifyFeed — SC-15 5 card types", () => {
     expect(cards[0]?.authorSession).toBe("orch-lead@openrig-velocity");
   });
 
+  it("queue.created for a human seat → action-required card", () => {
+    const cards = classifyFeed([
+      evt("queue.created", {
+        qitemId: "qitem-human-review",
+        sourceSession: "qa@openrig-dogfood",
+        destinationSession: "human@host",
+        priority: "urgent",
+      }),
+    ]);
+    expect(cards[0]?.kind).toBe("action-required");
+    expect(cards[0]?.body).toContain("qa@openrig-dogfood -> human@host");
+  });
+
+  it("queue.updated state=done → shipped card", () => {
+    const cards = classifyFeed([
+      evt("queue.updated", {
+        qitemId: "qitem-shipped",
+        actorSession: "driver@openrig-velocity",
+        toState: "done",
+      }),
+    ]);
+    expect(cards[0]?.kind).toBe("shipped");
+    expect(cards[0]?.title).toBe("Queue item shipped: qitem-shipped");
+    expect(cards[0]?.body).toContain("state=done");
+  });
+
   it("queue.handed_off daemon event → visible progress card", () => {
     const cards = classifyFeed([
       evt("queue.handed_off", {
