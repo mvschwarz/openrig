@@ -116,8 +116,8 @@ describe("SettingsStore (User Settings v0)", () => {
     store.set("workspace.root", "/custom/ws");
     const cfg = store.resolveConfig();
     expect(cfg.workspaceRoot).toBe("/custom/ws");
-    expect(cfg.workspaceSlicesRoot).toBe("/custom/ws/slices");
-    expect(cfg.workspaceSteeringPath).toBe("/custom/ws/steering/STEERING.md");
+    expect(cfg.workspaceSlicesRoot).toBe("/custom/ws/missions");
+    expect(cfg.workspaceSteeringPath).toBe("/custom/ws/STEERING.md");
     expect(cfg.workspaceFieldNotesRoot).toBe("/custom/ws/field-notes");
     expect(cfg.workspaceSpecsRoot).toBe("/custom/ws/specs");
     expect(cfg.filesAllowlistRaw).toBe("workspace:/custom/ws");
@@ -141,9 +141,9 @@ describe("SettingsStore (User Settings v0)", () => {
   it("per-subdir override beats the workspace.root cascade", () => {
     const store = new SettingsStore(configPath);
     store.set("workspace.root", "/ws");
-    store.set("workspace.slices_root", "/founder/slices");
+    store.set("workspace.slices_root", "/custom/slices");
     const cfg = store.resolveConfig();
-    expect(cfg.workspaceSlicesRoot).toBe("/founder/slices");
+    expect(cfg.workspaceSlicesRoot).toBe("/custom/slices");
     // Other subdirs still cascade from workspace.root:
     expect(cfg.workspaceFieldNotesRoot).toBe("/ws/field-notes");
   });
@@ -161,9 +161,9 @@ describe("SettingsStore (User Settings v0)", () => {
 
   it("set + reset round-trips through the file format", () => {
     const store = new SettingsStore(configPath);
-    store.set("workspace.slices_root", "/founder/slices");
+    store.set("workspace.slices_root", "/custom/slices");
     expect(existsSync(configPath)).toBe(true);
-    expect(store.resolveOne("workspace.slices_root").value).toBe("/founder/slices");
+    expect(store.resolveOne("workspace.slices_root").value).toBe("/custom/slices");
 
     store.reset("workspace.slices_root");
     expect(store.resolveOne("workspace.slices_root").source).toBe("default");

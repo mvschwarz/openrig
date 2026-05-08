@@ -5,7 +5,7 @@
 //   - GET /api/config/:key returns one key
 //   - POST /api/config/:key sets the value, persists to disk
 //   - DELETE /api/config/:key reverts one key to default
-//   - POST /api/config/init-workspace creates 5 subdirs + READMEs
+//   - POST /api/config/init-workspace creates mission-aware workspace files
 //   - 503 when settingsStore is unavailable
 //   - 400 on unknown keys / missing body
 
@@ -101,14 +101,14 @@ describe("config routes (User Settings v0)", () => {
     const res = await app.request("/api/config/workspace.slices_root", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ value: "/founder/slices" }),
+      body: JSON.stringify({ value: "/custom/slices" }),
     });
     expect(res.status).toBe(200);
     const body = await res.json() as { ok: boolean; resolved: { value: string } };
     expect(body.ok).toBe(true);
-    expect(body.resolved.value).toBe("/founder/slices");
+    expect(body.resolved.value).toBe("/custom/slices");
     // Disk persisted
-    expect(JSON.parse(readFileSync(configPath, "utf-8")).workspace.slicesRoot).toBe("/founder/slices");
+    expect(JSON.parse(readFileSync(configPath, "utf-8")).workspace.slicesRoot).toBe("/custom/slices");
   });
 
   it("POST /api/config/:key 400s without value field", async () => {
@@ -130,7 +130,7 @@ describe("config routes (User Settings v0)", () => {
     expect(body.resolved.source).toBe("default");
   });
 
-  it("POST /api/config/init-workspace creates 5 subdirs + READMEs", async () => {
+  it("POST /api/config/init-workspace creates mission-aware workspace files", async () => {
     const root = join(tmpDir, "workspace");
     const app = buildApp();
     const res = await app.request("/api/config/init-workspace", {
@@ -141,11 +141,17 @@ describe("config routes (User Settings v0)", () => {
     expect(res.status).toBe(200);
     const body = await res.json() as { root: string; subdirs: Array<{ name: string }>; files: Array<{ relPath: string }> };
     expect(body.root).toBe(root);
-    expect(body.subdirs.map((s) => s.name)).toEqual([
-      "slices", "steering", "progress", "field-notes", "specs",
-    ]);
-    expect(existsSync(join(root, "slices", "README.md"))).toBe(true);
-    expect(existsSync(join(root, "steering", "STEERING.md"))).toBe(true);
+    expect(body.subdirs.map((s) => s.name)).toEqual(expect.arrayContaining([
+      "missions",
+      "progress",
+      "field-notes",
+      "specs",
+      "missions/idea-ledger/slices/capture-product-ideas",
+      "missions/handoff-loop/slices/verify-loop-evidence",
+    ]));
+    expect(existsSync(join(root, "missions", "README.md"))).toBe(true);
+    expect(existsSync(join(root, "missions", "idea-ledger", "slices", "capture-product-ideas", "README.md"))).toBe(true);
+    expect(existsSync(join(root, "STEERING.md"))).toBe(true);
   });
 
   it("POST /api/config/init-workspace --dry-run does not write", async () => {

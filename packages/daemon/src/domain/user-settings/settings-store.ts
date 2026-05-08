@@ -174,8 +174,8 @@ function setNestedValue(obj: Record<string, unknown>, parts: string[], value: un
 
 function deriveWorkspaceDefault(key: SettingsValidKey, workspaceRoot: string): string {
   switch (key) {
-    case "workspace.slices_root":      return path.join(workspaceRoot, "slices");
-    case "workspace.steering_path":    return path.join(workspaceRoot, "steering", "STEERING.md");
+    case "workspace.slices_root":      return path.join(workspaceRoot, "missions");
+    case "workspace.steering_path":    return path.join(workspaceRoot, "STEERING.md");
     case "workspace.field_notes_root": return path.join(workspaceRoot, "field-notes");
     case "workspace.specs_root":       return path.join(workspaceRoot, "specs");
     case "files.allowlist":            return `workspace:${workspaceRoot}`;

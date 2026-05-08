@@ -6,7 +6,7 @@
 // button per setting.
 //
 // Keep this read+write surface small. The CLI (`rig config get/set/reset`)
-// is the canonical agent-edit path per founder dialog.
+// is the canonical agent-edit path.
 
 import { useState, type ReactNode } from "react";
 import {
@@ -192,7 +192,7 @@ export function SettingsTab() {
     <div data-testid="settings-tab" className="flex-1 overflow-y-auto px-4 py-3 space-y-4">
       <Section title="Workspace">
         <SettingsRow label="Workspace root" settingKey="workspace.root" resolved={s["workspace.root"]} testIdPrefix="setting" />
-        <SettingsRow label="Slices root" settingKey="workspace.slices_root" resolved={s["workspace.slices_root"]} testIdPrefix="setting" />
+        <SettingsRow label="Mission/slice root" settingKey="workspace.slices_root" resolved={s["workspace.slices_root"]} testIdPrefix="setting" />
         <SettingsRow label="Steering path" settingKey="workspace.steering_path" resolved={s["workspace.steering_path"]} testIdPrefix="setting" />
         <SettingsRow label="Field notes root" settingKey="workspace.field_notes_root" resolved={s["workspace.field_notes_root"]} testIdPrefix="setting" />
         <SettingsRow label="Specs root" settingKey="workspace.specs_root" resolved={s["workspace.specs_root"]} testIdPrefix="setting" />

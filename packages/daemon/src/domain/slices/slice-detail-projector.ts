@@ -139,6 +139,8 @@ export interface WorkflowBindingPayload {
 
 export interface SliceDetailPayload {
   name: string;
+  missionId: string | null;
+  slicePath: string;
   displayName: string;
   railItem: string | null;
   status: string;
@@ -198,6 +200,8 @@ export class SliceDetailProjector {
 
     return {
       name: slice.name,
+      missionId: slice.missionId,
+      slicePath: slice.slicePath,
       displayName: slice.displayName,
       railItem: slice.railItem,
       status: slice.status,
@@ -379,7 +383,7 @@ export class SliceDetailProjector {
     // — these aren't qitem-bound so they don't trace to a spec step.
     // UI will group them under "Untagged" or render them without a tag.
     try {
-      const sliceDir = path.join(this.indexer.slicesRoot, slice.name);
+      const sliceDir = slice.slicePath;
       const docEntries = fs.readdirSync(sliceDir, { withFileTypes: true });
       for (const entry of docEntries) {
         if (!entry.isFile() || !entry.name.endsWith(".md")) continue;
@@ -427,7 +431,7 @@ export class SliceDetailProjector {
     // Parse README + IMPLEMENTATION-PRD + PROGRESS.md for [ ]/[x] checkbox lines.
     // Source citation = file + 1-based line number so the operator can jump.
     const candidateFiles = ["README.md", "IMPLEMENTATION-PRD.md", "PROGRESS.md", "IMPLEMENTATION.md"];
-    const sliceDir = path.join(this.indexer.slicesRoot, slice.name);
+    const sliceDir = slice.slicePath;
     for (const fname of candidateFiles) {
       const full = path.join(sliceDir, fname);
       if (!fs.existsSync(full)) continue;
@@ -495,7 +499,7 @@ export class SliceDetailProjector {
   // --- Docs tab ---
 
   private buildDocsTree(slice: SliceRecord): DocsTreeEntry[] {
-    const sliceDir = path.join(this.indexer.slicesRoot, slice.name);
+    const sliceDir = slice.slicePath;
     const out: DocsTreeEntry[] = [];
     const walk = (dir: string, relPrefix: string): void => {
       let entries: fs.Dirent[];
@@ -534,7 +538,9 @@ export class SliceDetailProjector {
 
   /** Read a single doc file from the slice folder for the Docs tab. Returns null if missing or outside the slice folder. */
   readDoc(sliceName: string, relPath: string): string | null {
-    const sliceDir = path.join(this.indexer.slicesRoot, sliceName);
+    const slice = this.indexer.get(sliceName);
+    if (!slice) return null;
+    const sliceDir = slice.slicePath;
     const resolved = path.resolve(sliceDir, relPath);
     if (!resolved.startsWith(`${path.resolve(sliceDir)}${path.sep}`) && resolved !== path.resolve(sliceDir)) {
       // Path-traversal guard.

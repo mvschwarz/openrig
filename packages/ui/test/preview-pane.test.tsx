@@ -43,7 +43,7 @@ function settingsResponse(overrides: Record<string, { value: unknown; source: st
     "transcripts.enabled": { value: true, source: "default", defaultValue: true },
     "transcripts.path": { value: "/tmp", source: "default", defaultValue: "/tmp" },
     "workspace.root": { value: "/tmp/ws", source: "default", defaultValue: "/tmp/ws" },
-    "workspace.slices_root": { value: "/tmp/ws/slices", source: "default", defaultValue: "/tmp/ws/slices" },
+    "workspace.slices_root": { value: "/tmp/ws/missions", source: "default", defaultValue: "/tmp/ws/missions" },
     "workspace.steering_path": { value: "/tmp/ws/STEERING.md", source: "default", defaultValue: "/tmp/ws/STEERING.md" },
     "workspace.field_notes_root": { value: "/tmp/ws/field-notes", source: "default", defaultValue: "/tmp/ws/field-notes" },
     "workspace.specs_root": { value: "/tmp/ws/specs", source: "default", defaultValue: "/tmp/ws/specs" },

@@ -9,6 +9,7 @@ export type ProjectSliceRow = {
   qitemCount: number;
   hasProofPacket: boolean;
   lastActivityAt: string | null;
+  missionId?: string | null;
   railItem?: string | null;
 };
 
@@ -32,6 +33,7 @@ export function projectSliceFromListEntry(slice: SliceListEntry): ProjectSliceRo
     qitemCount: slice.qitemCount,
     hasProofPacket: slice.hasProofPacket,
     lastActivityAt: slice.lastActivityAt,
+    missionId: slice.missionId,
     railItem: slice.railItem,
   };
 }
