@@ -91,8 +91,9 @@ describe("SessionPreviewPane", () => {
     expect(pane.getAttribute("data-variant")).toBe("compact-terminal");
     expect(content.className).toContain("text-[8px]");
     expect(content.className).toContain("text-stone-50");
-    expect(content.className).toContain("whitespace-pre");
-    expect(content.className).not.toContain("whitespace-pre-wrap");
+    expect(content.className).toContain("whitespace-pre-wrap");
+    expect(content.className).toContain("break-words");
+    expect(content.className).toContain("overflow-x-hidden");
     expect(content.className).not.toContain("break-all");
     expect(screen.queryByText(/live preview/i)).toBeNull();
     expect(screen.queryByText(/captured/i)).toBeNull();
