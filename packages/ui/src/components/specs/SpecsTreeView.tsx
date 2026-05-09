@@ -207,7 +207,8 @@ export function SpecsTreeView() {
             );
           }
 
-          const Chevron = expanded.skills ? ChevronDown : ChevronRight;
+          const skillsExpanded = expanded.skills || !!activeSkill;
+          const Chevron = skillsExpanded ? ChevronDown : ChevronRight;
           return (
             <li key={def.id} data-testid="specs-section-skills">
               <button
@@ -224,7 +225,7 @@ export function SpecsTreeView() {
                   {skillsLoading ? "..." : skills.length}
                 </span>
               </button>
-              {expanded.skills ? (
+              {skillsExpanded ? (
                 <ul className="ml-5 border-l border-stone-200">
                   {skills.length > 0 ? (
                     skills.map((skill) => {

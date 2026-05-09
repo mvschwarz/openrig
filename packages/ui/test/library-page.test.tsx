@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { SpecsLibraryPage } from "../src/components/specs/SpecsLibraryPage.js";
 import { SkillDetailPage } from "../src/components/specs/SkillDetailPage.js";
+import { SpecsTreeView } from "../src/components/specs/SpecsTreeView.js";
 import { librarySkillFileToken, librarySkillHref, librarySkillToken } from "../src/lib/library-skills-routing.js";
 import { createTestRouter } from "./helpers/test-router.js";
 
@@ -32,6 +33,16 @@ function renderSkillDetail(skillToken: string, fileToken?: string) {
     createTestRouter({
       path: "/",
       component: () => <SkillDetailPage skillToken={skillToken} fileToken={fileToken} />,
+    }),
+  );
+}
+
+function renderSpecsTree(initialPath = "/specs") {
+  return render(
+    createTestRouter({
+      path: "/specs/skills/$skillToken",
+      initialPath,
+      component: () => <SpecsTreeView />,
     }),
   );
 }
@@ -97,7 +108,10 @@ describe("Library page taxonomy", () => {
         return { ok: true, json: async () => fileList([{ name: "SKILL.md", type: "file" }]) };
       }
       if (url === "/api/files/list?root=workspace&path=node_modules%2F%40openrig%2Fdaemon%2Fspecs%2Fagents%2Fshared%2Fskills") {
-        return { status: 404, ok: false, json: async () => ({ error: "not_found" }) };
+        return { ok: true, json: async () => fileList([{ name: "openrig-user", type: "dir" }]) };
+      }
+      if (url === "/api/files/list?root=workspace&path=node_modules%2F%40openrig%2Fdaemon%2Fspecs%2Fagents%2Fshared%2Fskills%2Fopenrig-user") {
+        return { ok: true, json: async () => fileList([{ name: "SKILL.md", type: "file" }]) };
       }
       if (url === "/api/files/read?root=workspace&path=.openrig%2Fskills%2Foperator-skill%2FSKILL.md") {
         return {
@@ -138,6 +152,7 @@ describe("Library page taxonomy", () => {
     const skillLink = screen.getByTestId("library-skill-operator-skill") as HTMLAnchorElement;
     expect(skillLink).toBeDefined();
     expect(skillLink.getAttribute("href")).toBe(librarySkillHref("workspace:workspace:.openrig/skills/operator-skill"));
+    expect(screen.getAllByTestId("library-skill-openrig-user")).toHaveLength(1);
     expect(screen.queryByText("workspace")).toBeNull();
     expect(screen.queryByTestId("library-skill-file-panel")).toBeNull();
     expect(screen.queryByTestId("library-skill-document-panel")).toBeNull();
@@ -241,5 +256,39 @@ describe("Library page taxonomy", () => {
     renderSkillDetail(librarySkillToken(skillId), librarySkillFileToken(".openrig/skills/operator-skill/DETAILS.md"));
 
     expect(await screen.findByText(/Secondary file/)).toBeDefined();
+  });
+
+  it("auto-expands the skills explorer on skill detail routes", async () => {
+    mockFetch.mockImplementation(async (url: string) => {
+      if (url === "/api/specs/library" || url === "/api/context-packs/library" || url === "/api/agent-images/library") {
+        return { ok: true, json: async () => [] };
+      }
+      if (url === "/api/files/roots") {
+        return {
+          ok: true,
+          json: async () => ({ roots: [{ name: "workspace", path: "/workspace" }] }),
+        };
+      }
+      if (url === "/api/files/list?root=workspace&path=.openrig%2Fskills") {
+        return { ok: true, json: async () => fileList([{ name: "operator-skill", type: "dir" }]) };
+      }
+      if (url === "/api/files/list?root=workspace&path=.openrig%2Fskills%2Foperator-skill") {
+        return { ok: true, json: async () => fileList([{ name: "SKILL.md", type: "file" }, { name: "DETAILS.md", type: "file" }]) };
+      }
+      if (url === "/api/files/list?root=workspace&path=packages%2Fdaemon%2Fspecs%2Fagents%2Fshared%2Fskills") {
+        return { status: 404, ok: false, json: async () => ({ error: "not_found" }) };
+      }
+      if (url === "/api/files/list?root=workspace&path=node_modules%2F%40openrig%2Fdaemon%2Fspecs%2Fagents%2Fshared%2Fskills") {
+        return { status: 404, ok: false, json: async () => ({ error: "not_found" }) };
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    });
+
+    const skillId = "workspace:workspace:.openrig/skills/operator-skill";
+    renderSpecsTree(`/specs/skills/${librarySkillToken(skillId)}`);
+
+    expect(await screen.findByTestId("specs-section-skills")).toBeDefined();
+    expect(await screen.findByTestId("specs-leaf-workspace:workspace:.openrig/skills/operator-skill")).toBeDefined();
+    expect(await screen.findByTestId("specs-skill-file-SKILL.md")).toBeDefined();
   });
 });
