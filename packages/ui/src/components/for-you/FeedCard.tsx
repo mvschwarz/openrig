@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { CircleAlert, Clock, History, PackageCheck } from "lucide-react";
+import { ArrowRight, CalendarDays, CircleAlert, Clock, History, PackageCheck } from "lucide-react";
 
 import { VellumCard } from "../ui/vellum-card.js";
 import { AuthorAgentTag } from "./AuthorAgentTag.js";
@@ -9,20 +9,21 @@ import type { QueueItemDetail } from "../../hooks/useSlices.js";
 import type { FeedCard as FeedCardModel, FeedCardKind } from "../../lib/feed-classifier.js";
 import { VerbActions } from "../mission-control/components/VerbActions.js";
 import {
-  ActorChip,
-  DateChip,
-  EventBadge,
-  FlowChips,
-  ProjectPill,
   ProofPacketHeader,
   ProofThumbnailGrid,
-  QueueStateBadge,
   TagPill,
+  compactSessionLabel,
+  eventToken,
+  formatFriendlyDate,
+  queueStateToken,
+  type ProjectMetaTone,
   type ProjectToken,
 } from "../project/ProjectMetaPrimitives.js";
 import { ProofImageViewer } from "../project/ProofImageViewer.js";
 import type { MissionControlVerb } from "../mission-control/hooks/useMissionControlAction.js";
 import { ACTION_VERB_META, actionVerbToken } from "../mission-control/action-verb-meta.js";
+import { ActorMark } from "../graphics/RuntimeMark.js";
+import { cn } from "../../lib/utils.js";
 
 const KIND_ACCENT: Record<FeedCardKind, string> = {
   "action-required": "border-l-4 border-l-tertiary",
@@ -30,6 +31,30 @@ const KIND_ACCENT: Record<FeedCardKind, string> = {
   shipped: "border-l-4 border-l-success",
   progress: "border-l-4 border-l-secondary",
   observation: "border-l-4 border-l-stone-300",
+};
+
+const TONE_ACCENT: Record<ProjectMetaTone, string> = {
+  neutral: "border-l-4 border-l-stone-300",
+  info: "border-l-4 border-l-secondary",
+  success: "border-l-4 border-l-success",
+  warning: "border-l-4 border-l-warning",
+  danger: "border-l-4 border-l-tertiary",
+};
+
+const TONE_TEXT: Record<ProjectMetaTone, string> = {
+  neutral: "text-stone-600",
+  info: "text-sky-800",
+  success: "text-emerald-800",
+  warning: "text-amber-800",
+  danger: "text-rose-800",
+};
+
+const TONE_RECEIPT: Record<ProjectMetaTone, string> = {
+  neutral: "border-stone-300 bg-white/35 text-stone-700",
+  info: "border-sky-300 bg-sky-50/30 text-sky-900",
+  success: "border-emerald-300 bg-emerald-50/30 text-emerald-900",
+  warning: "border-amber-300 bg-amber-50/35 text-amber-900",
+  danger: "border-rose-300 bg-rose-50/35 text-rose-900",
 };
 
 const KIND_TESTID: Record<FeedCardKind, string> = {
@@ -170,6 +195,48 @@ function outcomeToken(outcome: FeedActionOutcome): ProjectToken {
   return actionVerbToken(outcome.verb, "outcome");
 }
 
+function InlineMetaMark({ token }: { token: ProjectToken }) {
+  const Icon = token.icon;
+  return (
+    <span className={cn("inline-flex items-center gap-1 font-mono text-[9px] uppercase tracking-[0.12em]", TONE_TEXT[token.tone])}>
+      {Icon ? <Icon className="h-3 w-3" strokeWidth={1.6} /> : null}
+      {token.label}
+    </span>
+  );
+}
+
+function InlineDateMark({ value }: { value: string | undefined | null }) {
+  return (
+    <time
+      dateTime={value ?? undefined}
+      className="inline-flex items-center gap-1 font-mono text-[10px] text-stone-500"
+    >
+      <CalendarDays className="h-3 w-3" strokeWidth={1.5} />
+      {formatFriendlyDate(value)}
+    </time>
+  );
+}
+
+function InlineActor({ session }: { session: string | undefined | null }) {
+  return (
+    <span className="inline-flex min-w-0 items-center gap-1 font-mono text-[10px] text-stone-600">
+      <ActorMark actor={session} size="xs" decorative />
+      <span className="truncate">{compactSessionLabel(session)}</span>
+    </span>
+  );
+}
+
+function InlineFlow({ source, destination }: { source?: string | null; destination?: string | null }) {
+  if (!source && !destination) return null;
+  return (
+    <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+      <InlineActor session={source ?? "unknown source"} />
+      <ArrowRight className="h-3.5 w-3.5 text-stone-400" strokeWidth={1.4} />
+      <InlineActor session={destination ?? "unresolved target"} />
+    </div>
+  );
+}
+
 function outcomeSentence(outcome: FeedActionOutcome): string {
   switch (outcome.verb) {
     case "approve":
@@ -196,35 +263,34 @@ function ActionOutcomePanel({ outcome }: { outcome: FeedActionOutcome }) {
   return (
     <div
       data-testid="feed-card-action-outcome"
-      className="mt-3 border border-outline-variant bg-white/40 p-3 backdrop-blur-sm"
+      className={cn("mt-3 border-l-2 px-3 py-2 backdrop-blur-sm", TONE_RECEIPT[meta.tone])}
     >
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="flex min-w-0 items-start gap-2">
-          <span className="mt-0.5 inline-flex h-7 w-7 shrink-0 items-center justify-center border border-outline-variant bg-white/55 text-stone-900 hard-shadow">
+          <span className="mt-0.5 inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-white/55 text-current">
             <Icon className="h-4 w-4" strokeWidth={1.8} />
           </span>
           <div className="min-w-0">
-            <div className="flex flex-wrap items-center gap-1.5">
-              <ProjectPill token={outcomeToken(outcome)} />
-              {outcome.state ? <QueueStateBadge state={outcome.state} compact /> : null}
+            <div className="font-mono text-[10px] uppercase tracking-[0.16em]">
+              {meta.outcomeLabel}
             </div>
-            <div className="mt-1 font-mono text-[9px] uppercase tracking-[0.12em] text-stone-500">
+            <div className="mt-0.5 font-mono text-[9px] uppercase tracking-[0.12em] text-stone-500">
               Decision recorded
             </div>
           </div>
         </div>
-        <DateChip value={outcome.actedAt} />
+        <InlineDateMark value={outcome.actedAt} />
       </div>
       <p className="mt-3 font-mono text-[11px] leading-relaxed text-stone-800">
         {outcomeSentence(outcome)}
       </p>
       <div className="mt-2 flex flex-wrap items-center gap-2">
-        <ActorChip session={outcome.actorSession} muted />
+        <InlineActor session={outcome.actorSession} />
         {outcome.reason ? <TagPill tag={outcome.reason} /> : null}
       </div>
       {(outcome.verb === "route" || outcome.verb === "handoff") && outcome.destinationSession ? (
         <div className="mt-2">
-          <FlowChips source={outcome.actorSession} destination={outcome.destinationSession} muted />
+          <InlineFlow source={outcome.actorSession} destination={outcome.destinationSession} />
         </div>
       ) : null}
     </div>
@@ -250,26 +316,31 @@ export function FeedCard({
   const destination = qitemViewerData?.destination;
   const actorSession = destination?.startsWith("human") ? destination : "human@host";
   const renderedOutcome = actionOutcome ?? fallbackOutcomeFromQueueItem(card.kind, queueItem);
+  const primaryToken = renderedOutcome ? outcomeToken(renderedOutcome) : KIND_TOKEN[card.kind];
+  const PrimaryIcon = primaryToken.icon;
   return (
     <VellumCard
       as="article"
       testId={KIND_TESTID[card.kind]}
-      accentClass={KIND_ACCENT[card.kind]}
+      accentClass={renderedOutcome ? TONE_ACCENT[primaryToken.tone] : KIND_ACCENT[card.kind]}
       className="mb-3 bg-white/50 backdrop-blur-sm"
     >
       <div className="px-4 py-3">
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0 space-y-2">
-            <div className="flex flex-wrap items-center gap-1.5">
-              <ProjectPill token={KIND_TOKEN[card.kind]} />
-              <EventBadge kind={card.source.type} compact />
-              {qitemViewerData?.state ? <QueueStateBadge state={qitemViewerData.state} compact /> : null}
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+              <span className={cn("inline-flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-[0.16em]", TONE_TEXT[primaryToken.tone])}>
+                {PrimaryIcon ? <PrimaryIcon className="h-3.5 w-3.5" strokeWidth={1.8} /> : null}
+                {primaryToken.label}
+              </span>
+              <InlineMetaMark token={eventToken(card.source.type)} />
+              {qitemViewerData?.state ? <InlineMetaMark token={queueStateToken(qitemViewerData.state)} /> : null}
             </div>
             <h3 className="font-mono text-sm text-stone-900 truncate">
               {card.title}
             </h3>
           </div>
-          <DateChip value={card.createdAt} />
+          <InlineDateMark value={card.createdAt} />
         </div>
         {body ? (
           <p className="mt-3 font-mono text-xs leading-relaxed text-on-surface-variant whitespace-pre-line">
@@ -277,7 +348,7 @@ export function FeedCard({
           </p>
         ) : null}
         <div className="mt-3">
-          <FlowChips source={source} destination={destination} muted />
+          <InlineFlow source={source} destination={destination} />
         </div>
         {tags.length > 0 ? (
           <div className="mt-3 flex flex-wrap gap-1.5">
@@ -311,14 +382,14 @@ export function FeedCard({
           >
             <div className="mb-2 flex flex-wrap items-start justify-between gap-2">
               <div>
-                <div className="font-mono text-[10px] uppercase tracking-[0.12em] text-rose-900">
+                <div className="inline-flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-[0.14em] text-rose-900">
+                  <CircleAlert className="h-3.5 w-3.5" strokeWidth={1.7} />
                   Your turn
                 </div>
                 <p className="mt-1 max-w-xl font-mono text-[10px] leading-relaxed text-rose-800/80">
                   Review the context, then approve, deny, or route this queue item.
                 </p>
               </div>
-              <ProjectPill token={{ label: "Needs decision", tone: "danger", icon: CircleAlert }} compact />
             </div>
             <VerbActions
               qitemId={qitemViewerData.qitemId}
