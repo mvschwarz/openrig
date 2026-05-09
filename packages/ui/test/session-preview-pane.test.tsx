@@ -93,6 +93,7 @@ describe("SessionPreviewPane", () => {
     expect(content.className).toContain("text-stone-50");
     expect(content.className).toContain("whitespace-pre-wrap");
     expect(content.className).toContain("break-words");
+    expect(content.className).toContain("scrollbar-none");
     expect(content.className).toContain("overflow-x-hidden");
     expect(content.className).not.toContain("break-all");
     expect(screen.queryByText(/live preview/i)).toBeNull();
