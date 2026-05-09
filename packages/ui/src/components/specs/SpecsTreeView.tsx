@@ -10,6 +10,7 @@ import {
   librarySkillSelectionFromPath,
   librarySkillToken,
 } from "../../lib/library-skills-routing.js";
+import { ToolMark } from "../graphics/RuntimeMark.js";
 
 interface TreeEntry {
   id: string;
@@ -269,11 +270,12 @@ export function SpecsTreeView() {
                                       }}
                                       data-testid={`specs-skill-file-${file.name}`}
                                       data-active={activeFile}
-                                      className={`block truncate font-mono text-[11px] hover:bg-surface-low hover:text-stone-900 ${
+                                      className={`flex min-w-0 items-center gap-1 truncate font-mono text-[11px] hover:bg-surface-low hover:text-stone-900 ${
                                         activeFile ? "text-stone-900" : "text-on-surface-variant"
                                       }`}
                                     >
-                                      {file.name}
+                                      <ToolMark tool={file.name} size="xs" title={file.name} />
+                                      <span className="truncate">{file.name}</span>
                                     </Link>
                                   </li>
                                 );

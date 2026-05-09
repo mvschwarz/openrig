@@ -21,6 +21,7 @@
 
 import { useMemo, useState } from "react";
 import type { AcceptanceItem, CurrentStepPayload, SliceDetail } from "../../../hooks/useSlices.js";
+import { ToolMark } from "../../graphics/RuntimeMark.js";
 
 type StatusFilter = "all" | "active" | "done" | "blocked";
 
@@ -161,7 +162,10 @@ function CurrentStepPanel({ currentStep }: { currentStep: CurrentStepPayload }) 
           </div>
           <div className="mt-1 flex flex-wrap gap-1">
             {currentStep.allowedNextSteps.length === 0 ? (
-              <span className="font-mono text-[9px] text-stone-400">(terminal)</span>
+              <span className="inline-flex items-center gap-1 font-mono text-[9px] uppercase tracking-[0.10em] text-stone-500">
+                <ToolMark tool="terminal" size="xs" />
+                terminal
+              </span>
             ) : (
               currentStep.allowedNextSteps.map((next) => (
                 <span
