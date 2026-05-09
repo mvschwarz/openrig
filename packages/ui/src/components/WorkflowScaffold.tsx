@@ -130,7 +130,7 @@ export function WorkflowSummaryGrid({ children }: { children: ReactNode }) {
 
 interface WorkflowSummaryCardProps {
   label: string;
-  value: string | number;
+  value: ReactNode;
   testId: string;
 }
 

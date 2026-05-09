@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, type ReactNode } from "react";
 import { Link } from "@tanstack/react-router";
 import { SectionHeader } from "../ui/section-header.js";
 import { EmptyState } from "../ui/empty-state.js";
@@ -7,7 +7,7 @@ import { useContextPackLibrary, type ContextPackEntry } from "../../hooks/useCon
 import { useAgentImageLibrary, type AgentImageEntry } from "../../hooks/useAgentImageLibrary.js";
 import { useLibrarySkills, type LibrarySkillEntry } from "../../hooks/useLibrarySkills.js";
 import { librarySkillHref } from "../../lib/library-skills-routing.js";
-import { ToolMark } from "../graphics/RuntimeMark.js";
+import { RuntimeBadge, ToolMark } from "../graphics/RuntimeMark.js";
 
 const TOOLBAR_ACTIONS = [
   { label: "+ Add spec", to: "/specs/rig", testId: "specs-toolbar-add" },
@@ -21,6 +21,7 @@ interface LibraryRow {
   id: string;
   label: string;
   meta: string;
+  metaNode?: ReactNode;
   entryId?: string;
 }
 
@@ -46,7 +47,8 @@ function agentImageRow(entry: AgentImageEntry): LibraryRow {
   return {
     id: entry.id,
     label: entry.name,
-    meta: `${entry.version} · ${entry.runtime} · ${entry.sourceType}`,
+    meta: `${entry.version} · ${entry.sourceType}`,
+    metaNode: <RuntimeBadge runtime={entry.runtime} size="xs" compact variant="inline" />,
     entryId: entry.id,
   };
 }
@@ -106,7 +108,10 @@ function LibraryRowContent({ row }: { row: LibraryRow }) {
   return (
     <div className="flex items-baseline justify-between gap-3 font-mono">
       <span className="truncate text-xs font-bold text-stone-900">{row.label}</span>
-      <span className="shrink-0 text-[9px] uppercase tracking-[0.08em] text-stone-500">{row.meta}</span>
+      <span className="flex shrink-0 items-center gap-2 text-[9px] uppercase tracking-[0.08em] text-stone-500">
+        {row.metaNode}
+        <span>{row.meta}</span>
+      </span>
     </div>
   );
 }
@@ -151,7 +156,7 @@ function SkillsSection({
                 className="flex items-center justify-between gap-3 px-3 py-2 font-mono hover:bg-stone-100/50"
               >
                 <span className="flex min-w-0 items-center gap-2">
-                  <ToolMark tool="file" title={`${skill.name} skill`} size="xs" />
+                  <ToolMark tool="file" title={`${skill.name} skill`} size="xs" decorative />
                   <span className="truncate text-xs font-bold text-stone-900">{skill.name}</span>
                 </span>
                 <span className="shrink-0 text-[9px] uppercase tracking-[0.08em] text-stone-500">

@@ -8,6 +8,7 @@ import {
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import type { SpecGraphData } from "../hooks/useSpecReview.js";
+import { RuntimeBadge } from "./graphics/RuntimeMark.js";
 
 interface SpecTopologyPreviewProps {
   graph?: SpecGraphData | null;
@@ -73,7 +74,16 @@ export function SpecTopologyPreview({ graph, testId }: SpecTopologyPreviewProps)
         id: n.id,
         type: "default",
         position: { x: pos.x, y: pos.y },
-        data: { label: `${n.pod ? `${n.pod} / ` : ""}${n.label}` },
+        data: {
+          label: (
+            <div className="flex h-full min-w-0 flex-col justify-center gap-1 font-mono leading-tight">
+              <div className="truncate text-[10px] font-bold text-stone-900">
+                {n.pod ? `${n.pod} / ` : ""}{n.label}
+              </div>
+              <RuntimeBadge runtime={n.runtime} size="xs" compact variant="inline" />
+            </div>
+          ),
+        },
         style: {
           backgroundColor: runtimeColor(n.runtime),
           border: "1px solid #8a8577",

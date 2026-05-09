@@ -9,6 +9,7 @@ export interface RuntimeMarkProps {
   size?: "xs" | "sm" | "md" | "lg";
   className?: string;
   title?: string;
+  decorative?: boolean;
 }
 
 export type OperatorMood = "cool" | "urgent" | "calm";
@@ -60,9 +61,13 @@ const toolToneClass: Record<ToolBrandId, string> = {
 
 const operatorClimberMarkSrc = "/graphics/operator-climber-monochrome.png";
 
-function ClaudeGlyph({ className, title }: { className?: string; title: string }) {
+function glyphA11y(title: string, decorative?: boolean) {
+  return decorative ? { "aria-hidden": true } : { "aria-label": title, role: "img" as const };
+}
+
+function ClaudeGlyph({ className, title, decorative }: { className?: string; title: string; decorative?: boolean }) {
   return (
-    <svg viewBox="0 0 16 16" aria-label={title} role="img" className={className} shapeRendering="crispEdges">
+    <svg viewBox="0 0 16 16" {...glyphA11y(title, decorative)} className={className} shapeRendering="crispEdges">
       <rect x="3" y="2" width="10" height="8" fill="#ad6755" />
       <rect x="1" y="5" width="2" height="3" fill="#ad6755" />
       <rect x="13" y="5" width="2" height="3" fill="#ad6755" />
@@ -75,9 +80,9 @@ function ClaudeGlyph({ className, title }: { className?: string; title: string }
   );
 }
 
-function CodexGlyph({ className, title }: { className?: string; title: string }) {
+function CodexGlyph({ className, title, decorative }: { className?: string; title: string; decorative?: boolean }) {
   return (
-    <svg viewBox="0 0 16 16" aria-label={title} role="img" className={className}>
+    <svg viewBox="0 0 16 16" {...glyphA11y(title, decorative)} className={className}>
       <circle cx="8" cy="8" r="5.7" fill="#fafaf9" stroke="#0c0a09" strokeWidth="1.25" />
       <path d="M5.8 6.35 7.25 8 5.8 9.65" fill="none" stroke="#0c0a09" strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round" />
       <path d="M8.65 9.65h2.25" fill="none" stroke="#0c0a09" strokeWidth="1.25" strokeLinecap="round" />
@@ -85,9 +90,9 @@ function CodexGlyph({ className, title }: { className?: string; title: string })
   );
 }
 
-function TerminalGlyph({ className, title }: { className?: string; title: string }) {
+function TerminalGlyph({ className, title, decorative }: { className?: string; title: string; decorative?: boolean }) {
   return (
-    <svg viewBox="0 0 16 16" aria-label={title} role="img" className={className}>
+    <svg viewBox="0 0 16 16" {...glyphA11y(title, decorative)} className={className}>
       <rect x="2" y="3" width="12" height="10" fill="#1c1917" />
       <path d="M4 6 6 8 4 10" fill="none" stroke="#fafaf9" strokeWidth="1.2" strokeLinecap="square" strokeLinejoin="miter" />
       <path d="M7.5 10h4" fill="none" stroke="#fafaf9" strokeWidth="1.2" strokeLinecap="square" />
@@ -95,9 +100,9 @@ function TerminalGlyph({ className, title }: { className?: string; title: string
   );
 }
 
-function CmuxGlyph({ className, title }: { className?: string; title: string }) {
+function CmuxGlyph({ className, title, decorative }: { className?: string; title: string; decorative?: boolean }) {
   return (
-    <svg viewBox="0 0 16 16" aria-label={title} role="img" className={className}>
+    <svg viewBox="0 0 16 16" {...glyphA11y(title, decorative)} className={className}>
       <defs>
         <linearGradient id="cmux-preview-mark" x1="3" x2="13" y1="3" y2="13" gradientUnits="userSpaceOnUse">
           <stop stopColor="#20d5f4" />
@@ -109,9 +114,9 @@ function CmuxGlyph({ className, title }: { className?: string; title: string }) 
   );
 }
 
-function TmuxGlyph({ className, title }: { className?: string; title: string }) {
+function TmuxGlyph({ className, title, decorative }: { className?: string; title: string; decorative?: boolean }) {
   return (
-    <svg viewBox="0 0 16 16" aria-label={title} role="img" className={className}>
+    <svg viewBox="0 0 16 16" {...glyphA11y(title, decorative)} className={className}>
       <path d="M2.1 3.5c0-.8.6-1.4 1.4-1.4h9c.8 0 1.4.6 1.4 1.4v9c0 .8-.6 1.4-1.4 1.4h-9c-.8 0-1.4-.6-1.4-1.4z" fill="#3a3a39" />
       <path d="M7.5 2.1v8.7M7.5 6.3h6.4" stroke="#f8fafc" strokeWidth="0.7" />
       <path d="M2.1 11.1h11.8v1.4c0 .8-.6 1.4-1.4 1.4h-9c-.8 0-1.4-.6-1.4-1.4z" fill="#14c21a" />
@@ -119,18 +124,18 @@ function TmuxGlyph({ className, title }: { className?: string; title: string }) 
   );
 }
 
-function VSCodeGlyph({ className, title }: { className?: string; title: string }) {
+function VSCodeGlyph({ className, title, decorative }: { className?: string; title: string; decorative?: boolean }) {
   return (
-    <svg viewBox="0 0 16 16" aria-label={title} role="img" className={className}>
+    <svg viewBox="0 0 16 16" {...glyphA11y(title, decorative)} className={className}>
       <path d="M12.5 2.4 6.8 6.7 3.9 4.5 2.4 5.7 5.2 8l-2.8 2.3 1.5 1.2 2.9-2.2 5.7 4.3 1.1-.5V2.9z" fill="#007acc" />
       <path d="M12.3 5.3 8.4 8l3.9 2.7z" fill="#35a9ff" opacity="0.9" />
     </svg>
   );
 }
 
-function FileGlyph({ className, title }: { className?: string; title: string }) {
+function FileGlyph({ className, title, decorative }: { className?: string; title: string; decorative?: boolean }) {
   return (
-    <svg viewBox="0 0 16 16" aria-label={title} role="img" className={className}>
+    <svg viewBox="0 0 16 16" {...glyphA11y(title, decorative)} className={className}>
       <path d="M4 2.5h5.2L12 5.3v8.2H4z" fill="#f5f5f4" stroke="#78716c" strokeWidth="1" />
       <path d="M9.2 2.5v3h2.8" fill="none" stroke="#78716c" strokeWidth="1" />
       <path d="M5.8 8h4.4M5.8 10.1h3.5" fill="none" stroke="#57534e" strokeWidth="0.8" strokeLinecap="square" />
@@ -138,9 +143,9 @@ function FileGlyph({ className, title }: { className?: string; title: string }) 
   );
 }
 
-function ScreenshotGlyph({ className, title }: { className?: string; title: string }) {
+function ScreenshotGlyph({ className, title, decorative }: { className?: string; title: string; decorative?: boolean }) {
   return (
-    <svg viewBox="0 0 16 16" aria-label={title} role="img" className={className}>
+    <svg viewBox="0 0 16 16" {...glyphA11y(title, decorative)} className={className}>
       <rect x="2" y="3" width="12" height="10" fill="#fff7ed" stroke="#9a3412" strokeWidth="0.9" />
       <path d="M2.4 5.2h11.2" stroke="#9a3412" strokeWidth="0.9" />
       <rect x="3.8" y="6.7" width="3.1" height="2.3" fill="#fdba74" />
@@ -153,11 +158,10 @@ function ScreenshotGlyph({ className, title }: { className?: string; title: stri
   );
 }
 
-function OperatorGlyph({ className, title }: { className?: string; title: string }) {
+function OperatorGlyph({ className, title, decorative }: { className?: string; title: string; decorative?: boolean }) {
   return (
     <span
-      role="img"
-      aria-label={title}
+      {...glyphA11y(title, decorative)}
       title={title}
       className={cn(className, "inline-block bg-current")}
       style={{
@@ -174,9 +178,9 @@ function OperatorGlyph({ className, title }: { className?: string; title: string
   );
 }
 
-function UrgentOperatorGlyph({ className, title }: { className?: string; title: string }) {
+function UrgentOperatorGlyph({ className, title, decorative }: { className?: string; title: string; decorative?: boolean }) {
   return (
-    <svg viewBox="0 0 16 16" aria-label={title} role="img" className={className}>
+    <svg viewBox="0 0 16 16" {...glyphA11y(title, decorative)} className={className}>
       <path d="M4.2 4.2c.7-1.5 2-2.2 3.8-2.2 2.3 0 4.1 1.5 4.1 3.9v3.9c0 2-1.6 3.5-3.9 3.5S4.1 11.8 4.1 9.8z" fill="#f8fafc" stroke="#111827" strokeWidth="0.75" />
       <path d="M4.3 4.1c.8-1.4 2.1-2.1 3.8-2.1 1.1 0 2.1.3 2.8.9" fill="none" stroke="#9a5b28" strokeWidth="1.1" strokeLinecap="round" />
       <path d="M5.1 5.7h2.2M8.8 5.7h2.2" stroke="#111827" strokeWidth="0.75" strokeLinecap="round" />
@@ -191,9 +195,9 @@ function UrgentOperatorGlyph({ className, title }: { className?: string; title: 
   );
 }
 
-function CalmOperatorGlyph({ className, title }: { className?: string; title: string }) {
+function CalmOperatorGlyph({ className, title, decorative }: { className?: string; title: string; decorative?: boolean }) {
   return (
-    <svg viewBox="0 0 16 16" aria-label={title} role="img" className={className}>
+    <svg viewBox="0 0 16 16" {...glyphA11y(title, decorative)} className={className}>
       <path d="M4.2 7.2c0-2.8 1.5-4.5 3.9-4.5s3.9 1.7 3.9 4.5v2.2c0 2.5-1.5 4-3.9 4s-3.9-1.5-3.9-4z" fill="#f8fafc" stroke="#111827" strokeWidth="0.75" />
       <path d="M5.2 5.4c.7-.6 1.7-.9 2.9-.9s2.1.3 2.8.9" fill="none" stroke="#111827" strokeWidth="0.6" strokeLinecap="round" />
       <path d="M6.2 7.2h.1M9.7 7.2h.1" stroke="#111827" strokeWidth="0.9" strokeLinecap="round" />
@@ -203,9 +207,9 @@ function CalmOperatorGlyph({ className, title }: { className?: string; title: st
   );
 }
 
-function UnknownGlyph({ className, title }: { className?: string; title: string }) {
+function UnknownGlyph({ className, title, decorative }: { className?: string; title: string; decorative?: boolean }) {
   return (
-    <svg viewBox="0 0 16 16" aria-label={title} role="img" className={className}>
+    <svg viewBox="0 0 16 16" {...glyphA11y(title, decorative)} className={className}>
       <rect x="2" y="2" width="12" height="12" fill="#e7e5e4" stroke="#78716c" strokeWidth="1" />
       <path d="M6.2 6.2c.2-1 1-1.7 2-1.7 1.2 0 2 .7 2 1.8 0 .7-.3 1.1-.9 1.5-.6.4-.8.7-.8 1.4" fill="none" stroke="#57534e" strokeWidth="1.1" />
       <rect x="7.6" y="11" width="1" height="1" fill="#57534e" />
@@ -213,14 +217,14 @@ function UnknownGlyph({ className, title }: { className?: string; title: string 
   );
 }
 
-export function RuntimeMark({ runtime, size = "sm", className, title }: RuntimeMarkProps) {
+export function RuntimeMark({ runtime, size = "sm", className, title, decorative }: RuntimeMarkProps) {
   const id = normalizeRuntimeBrandId(runtime);
   const label = title ?? runtimeBrand(runtime).label;
   const cls = cn(sizeClass[size], "shrink-0", className);
-  if (id === "claude-code") return <ClaudeGlyph className={cls} title={label} />;
-  if (id === "codex") return <CodexGlyph className={cls} title={label} />;
-  if (id === "terminal") return <TerminalGlyph className={cls} title={label} />;
-  return <UnknownGlyph className={cls} title={label} />;
+  if (id === "claude-code") return <ClaudeGlyph className={cls} title={label} decorative={decorative} />;
+  if (id === "codex") return <CodexGlyph className={cls} title={label} decorative={decorative} />;
+  if (id === "terminal") return <TerminalGlyph className={cls} title={label} decorative={decorative} />;
+  return <UnknownGlyph className={cls} title={label} decorative={decorative} />;
 }
 
 export function RuntimeBadge({
@@ -263,22 +267,24 @@ export function ToolMark({
   size = "sm",
   className,
   title,
+  decorative,
 }: {
   tool: string | null | undefined;
   size?: RuntimeMarkProps["size"];
   className?: string;
   title?: string;
+  decorative?: boolean;
 }) {
   const id = normalizeToolBrandId(tool);
   const label = title ?? toolBrand(tool).label;
   const cls = cn(sizeClass[size], "shrink-0", className);
-  if (id === "cmux") return <CmuxGlyph className={cls} title={label} />;
-  if (id === "tmux") return <TmuxGlyph className={cls} title={label} />;
-  if (id === "vscode") return <VSCodeGlyph className={cls} title={label} />;
-  if (id === "terminal") return <TerminalGlyph className={cls} title={label} />;
-  if (id === "file") return <FileGlyph className={cls} title={label} />;
-  if (id === "screenshot") return <ScreenshotGlyph className={cls} title={label} />;
-  return <UnknownGlyph className={cls} title={label} />;
+  if (id === "cmux") return <CmuxGlyph className={cls} title={label} decorative={decorative} />;
+  if (id === "tmux") return <TmuxGlyph className={cls} title={label} decorative={decorative} />;
+  if (id === "vscode") return <VSCodeGlyph className={cls} title={label} decorative={decorative} />;
+  if (id === "terminal") return <TerminalGlyph className={cls} title={label} decorative={decorative} />;
+  if (id === "file") return <FileGlyph className={cls} title={label} decorative={decorative} />;
+  if (id === "screenshot") return <ScreenshotGlyph className={cls} title={label} decorative={decorative} />;
+  return <UnknownGlyph className={cls} title={label} decorative={decorative} />;
 }
 
 export function ToolBadge({
@@ -326,19 +332,21 @@ export function ActorMark({
   size = "sm",
   className,
   title,
+  decorative,
 }: {
   actor: string | null | undefined;
   size?: RuntimeMarkProps["size"];
   className?: string;
   title?: string;
+  decorative?: boolean;
 }) {
   const label = title ?? (actor ? actor : "Operator");
   const cls = cn(sizeClass[size], "shrink-0", className);
-  if (isHumanActor(actor)) return <OperatorGlyph className={cls} title={label} />;
+  if (isHumanActor(actor)) return <OperatorGlyph className={cls} title={label} decorative={decorative} />;
   if (normalizeRuntimeBrandId(actor) !== "unknown") {
-    return <RuntimeMark runtime={actor} size={size} className={className} title={title} />;
+    return <RuntimeMark runtime={actor} size={size} className={className} title={title} decorative={decorative} />;
   }
-  return <TerminalGlyph className={cls} title={label} />;
+  return <TerminalGlyph className={cls} title={label} decorative={decorative} />;
 }
 
 export function OperatorMoodMark({
