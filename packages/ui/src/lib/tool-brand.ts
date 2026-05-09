@@ -80,7 +80,22 @@ export function normalizeToolBrandId(tool: string | null | undefined): ToolBrand
     normalized.endsWith(".jpeg") ||
     normalized.includes("screenshot")
   ) return "screenshot";
-  if (normalized === "file" || normalized === "path" || normalized.includes("artifact")) return "file";
+  if (
+    normalized === "file" ||
+    normalized === "path" ||
+    normalized.includes("artifact") ||
+    normalized.endsWith(".md") ||
+    normalized.endsWith(".mdx") ||
+    normalized.endsWith(".yaml") ||
+    normalized.endsWith(".yml") ||
+    normalized.endsWith(".json") ||
+    normalized.endsWith(".jsonl") ||
+    normalized.endsWith(".txt") ||
+    normalized.endsWith(".ts") ||
+    normalized.endsWith(".tsx") ||
+    normalized.endsWith(".js") ||
+    normalized.endsWith(".jsx")
+  ) return "file";
   return "unknown";
 }
 

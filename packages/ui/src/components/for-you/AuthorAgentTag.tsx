@@ -12,7 +12,7 @@
 
 import { Link } from "@tanstack/react-router";
 import { useCmuxLaunch } from "../../hooks/useCmuxLaunch.js";
-import { ActorMark } from "../graphics/RuntimeMark.js";
+import { ActorMark, isHumanActor } from "../graphics/RuntimeMark.js";
 
 interface AuthorAgentTagProps {
   authorSession: string;
@@ -28,11 +28,6 @@ function parseSeat(authorSession: string): { logicalId: string; rigId: string | 
     logicalId: authorSession.slice(0, at),
     rigId: authorSession.slice(at + 1),
   };
-}
-
-function isHumanActor(authorSession: string): boolean {
-  const normalized = authorSession.toLowerCase();
-  return normalized.includes("human") || normalized.includes("operator") || normalized.endsWith("@host");
 }
 
 export function AuthorAgentTag({ authorSession, rigId, className, testId }: AuthorAgentTagProps) {

@@ -5,6 +5,7 @@
 // here); UI just submits the verb + required fields.
 
 import { useState } from "react";
+import { Check, FilePenLine, Hand, Pause, Route, Send, Trash2, X } from "lucide-react";
 import {
   MISSION_CONTROL_VERBS,
   type MissionControlVerb,
@@ -29,6 +30,16 @@ const VERB_LABELS: Record<MissionControlVerb, string> = {
   drop: "Drop",
   handoff: "Handoff",
 };
+
+const VERB_ICONS = {
+  approve: Check,
+  deny: X,
+  route: Route,
+  annotate: FilePenLine,
+  hold: Pause,
+  drop: Trash2,
+  handoff: Send,
+} satisfies Record<MissionControlVerb, typeof Check>;
 
 export function VerbActions({
   qitemId,
@@ -94,22 +105,26 @@ export function VerbActions({
   return (
     <div data-testid="mc-verb-actions" className="space-y-2">
       <div className="flex flex-wrap gap-1">
-        {enabledVerbs.map((verb) => (
-          <button
-            key={verb}
-            type="button"
-            data-testid={`mc-verb-${verb}`}
-            onClick={() => selectVerb(verb)}
-            disabled={mutation.isPending}
-            className={`border px-2 py-0.5 font-mono text-[9px] uppercase tracking-[0.12em] ${
-              activeVerb === verb
-                ? "border-stone-700 bg-stone-700 text-white"
-                : "border-stone-300 text-stone-700 hover:bg-stone-100"
-            } disabled:opacity-50`}
-          >
-            {VERB_LABELS[verb]}
-          </button>
-        ))}
+        {enabledVerbs.map((verb) => {
+          const Icon = VERB_ICONS[verb];
+          return (
+            <button
+              key={verb}
+              type="button"
+              data-testid={`mc-verb-${verb}`}
+              onClick={() => selectVerb(verb)}
+              disabled={mutation.isPending}
+              className={`inline-flex items-center gap-1 border px-2 py-0.5 font-mono text-[9px] uppercase tracking-[0.12em] ${
+                activeVerb === verb
+                  ? "border-stone-700 bg-stone-700 text-white"
+                  : "border-stone-300 text-stone-700 hover:bg-stone-100"
+              } disabled:opacity-50`}
+            >
+              <Icon className="h-3 w-3" strokeWidth={1.7} />
+              {VERB_LABELS[verb]}
+            </button>
+          );
+        })}
       </div>
       {activeVerb && (
         <div className="space-y-1 border border-stone-200 bg-stone-50 p-2">

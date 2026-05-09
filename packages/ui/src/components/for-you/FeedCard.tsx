@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { CheckCircle2, CircleAlert, Clock, FilePenLine, History, PackageCheck, Route, Trash2, X } from "lucide-react";
 
 import { VellumCard } from "../ui/vellum-card.js";
 import { AuthorAgentTag } from "./AuthorAgentTag.js";
@@ -36,11 +37,11 @@ const KIND_TESTID: Record<FeedCardKind, string> = {
 };
 
 const KIND_TOKEN: Record<FeedCardKind, ProjectToken> = {
-  "action-required": { label: "Action required", tone: "danger" },
-  approval: { label: "Approval", tone: "warning" },
-  shipped: { label: "Shipped", tone: "success" },
-  progress: { label: "Progress", tone: "info" },
-  observation: { label: "Observation", tone: "neutral" },
+  "action-required": { label: "Action required", tone: "danger", icon: CircleAlert },
+  approval: { label: "Approval", tone: "warning", icon: CircleAlert },
+  shipped: { label: "Shipped", tone: "success", icon: PackageCheck },
+  progress: { label: "Progress", tone: "info", icon: History },
+  observation: { label: "Observation", tone: "neutral", icon: Clock },
 };
 
 function asString(v: unknown): string | undefined {
@@ -164,18 +165,18 @@ function fallbackOutcomeFromQueueItem(
 function outcomeToken(outcome: FeedActionOutcome): ProjectToken {
   switch (outcome.verb) {
     case "approve":
-      return { label: "Approved", tone: "success" };
+      return { label: "Approved", tone: "success", icon: CheckCircle2 };
     case "deny":
-      return { label: "Denied", tone: "danger" };
+      return { label: "Denied", tone: "danger", icon: X };
     case "route":
     case "handoff":
-      return { label: "Routed", tone: "info" };
+      return { label: "Routed", tone: "info", icon: Route };
     case "hold":
-      return { label: "Held", tone: "warning" };
+      return { label: "Held", tone: "warning", icon: Clock };
     case "drop":
-      return { label: "Dropped", tone: "neutral" };
+      return { label: "Dropped", tone: "neutral", icon: Trash2 };
     case "annotate":
-      return { label: "Annotated", tone: "neutral" };
+      return { label: "Annotated", tone: "neutral", icon: FilePenLine };
   }
 }
 

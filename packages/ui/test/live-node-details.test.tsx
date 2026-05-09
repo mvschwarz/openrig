@@ -113,6 +113,32 @@ describe("LiveNodeDetails", () => {
     expect(screen.queryByTestId("detail-compact-spec")).toBeNull();
   });
 
+  it("renders identity fields as isolated cells so runtime badges do not collide with adjacent labels", async () => {
+    mockNodeDetail(NODE_DETAIL);
+    renderDetails();
+
+    const runtimeField = await screen.findByTestId("identity-field-runtime");
+    const modelField = screen.getByTestId("identity-field-model");
+    const cwdField = screen.getByTestId("identity-field-cwd");
+
+    expect(runtimeField.className).toContain("bg-white/20");
+    expect(runtimeField.textContent).toContain("Claude");
+    expect(modelField.textContent).toContain("opus");
+    expect(cwdField.className).toContain("xl:col-span-3");
+    expect(cwdField.textContent).toContain("/workspace");
+  });
+
+  it("uses a resume action glyph instead of a runtime mark on the copy resume command", async () => {
+    mockNodeDetail({ ...NODE_DETAIL, resumeCommand: "rig seat resume dev.impl" });
+    renderDetails();
+
+    const resumeButton = await screen.findByTestId("detail-copy-resume");
+
+    expect(resumeButton.textContent).toContain("Copy resume command");
+    expect(resumeButton.textContent).not.toContain("Claude");
+    expect(resumeButton.querySelector("svg")).toBeDefined();
+  });
+
   it("agent spec tab shows unavailable when agentRef is null", async () => {
     mockNodeDetail({ ...NODE_DETAIL, agentRef: null });
     renderDetails();

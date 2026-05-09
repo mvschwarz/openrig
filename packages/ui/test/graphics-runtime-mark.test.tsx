@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { render, screen } from "@testing-library/react";
-import { ActorMark, RuntimeBadge, ToolMark } from "../src/components/graphics/RuntimeMark.js";
+import { ActorMark, RuntimeBadge, ToolMark, isHumanActor } from "../src/components/graphics/RuntimeMark.js";
 import { normalizeRuntimeBrandId, runtimeBrand } from "../src/lib/runtime-brand.js";
 import { normalizeToolBrandId, toolBrand } from "../src/lib/tool-brand.js";
 
@@ -19,6 +19,8 @@ describe("graphics runtime package", () => {
     expect(normalizeToolBrandId("tmux attach")).toBe("tmux");
     expect(normalizeToolBrandId("Visual Studio Code")).toBe("vscode");
     expect(normalizeToolBrandId("proof-image.png")).toBe("screenshot");
+    expect(normalizeToolBrandId("SKILL.md")).toBe("file");
+    expect(normalizeToolBrandId("config.yaml")).toBe("file");
     expect(toolBrand("cmux").actionLabel).toBe("Open in CMUX");
   });
 
@@ -44,6 +46,17 @@ describe("graphics runtime package", () => {
     render(<ActorMark actor="human@host" title="human@host" />);
     const mark = screen.getByRole("img", { name: "human@host" });
     expect(mark.getAttribute("style")).toContain("/graphics/operator-climber-monochrome.png");
+  });
+
+  it("centralizes human actor detection for author and project chips", () => {
+    expect(isHumanActor("human@host")).toBe(true);
+    expect(isHumanActor("operator@local")).toBe(true);
+    expect(isHumanActor("dev.driver@openrig-build")).toBe(false);
+  });
+
+  it("uses a neutral terminal-like mark for non-human session actors without runtime identity", () => {
+    render(<ActorMark actor="dev.driver@openrig-build" />);
+    expect(screen.getByRole("img", { name: "dev.driver@openrig-build" })).toBeTruthy();
   });
 
   it("ships the operator mask asset in public graphics", () => {

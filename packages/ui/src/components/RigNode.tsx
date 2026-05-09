@@ -1,6 +1,5 @@
 import { useRef, useEffect, useState } from "react";
 import { Handle, Position } from "@xyflow/react";
-import { copyText } from "../lib/copy-text.js";
 import { displayAgentName } from "../lib/display-name.js";
 import { cn } from "../lib/utils.js";
 import {
@@ -18,6 +17,7 @@ import { getActivityCardClasses, getActivityCardSignal } from "./topology/activi
 import { TerminalPreviewPopover } from "./topology/TerminalPreviewPopover.js";
 import type { TopologyActivityVisual } from "../lib/topology-activity.js";
 import { formatCompactTokenCount, formatTokenTotalTitle, sumTokenCounts } from "../lib/token-format.js";
+import { formatRuntimeModel } from "../lib/runtime-brand.js";
 import { RuntimeBadge, ToolMark } from "./graphics/RuntimeMark.js";
 
 interface RigNodeData {
@@ -65,7 +65,7 @@ export function RigNode({ data }: { data: RigNodeData }) {
   const prevStatusRef = useRef(data.startupStatus);
   const feedbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [statusChanged, setStatusChanged] = useState(false);
-  const [actionFeedback, setActionFeedback] = useState<"attach" | "resume" | "cmux" | null>(null);
+  const [actionFeedback, setActionFeedback] = useState<"cmux" | null>(null);
   const core = isCore(data.role);
   const isInfra = data.nodeKind === "infrastructure";
 
@@ -87,7 +87,7 @@ export function RigNode({ data }: { data: RigNodeData }) {
     };
   }, []);
 
-  const runtimeModel = [data.runtime, data.model].filter(Boolean).join(" \u00B7 ");
+  const runtimeTitle = data.runtime || data.model ? formatRuntimeModel(data.runtime, data.model) : null;
   const agentName = displayAgentName(data.logicalId);
 
   // PL-019: dot color is now driven by agentActivity.state, not startupStatus.
@@ -117,7 +117,7 @@ export function RigNode({ data }: { data: RigNodeData }) {
   const hoverHintLines = [
     `Activity: ${activityLabel}${activityIsStale ? " (stale sample)" : ""}`,
     data.canonicalSessionName ? `Session: ${data.canonicalSessionName}` : null,
-    runtimeModel ? `Runtime: ${runtimeModel}` : null,
+    runtimeTitle ? `Runtime: ${runtimeTitle}` : null,
     data.resolvedSpecName ? `Spec: ${data.resolvedSpecName}` : null,
     data.profile ? `Profile: ${data.profile}` : null,
     typeof data.edgeCount === "number" ? `Edges: ${data.edgeCount}` : null,
@@ -126,7 +126,7 @@ export function RigNode({ data }: { data: RigNodeData }) {
   ].filter((line): line is string => Boolean(line));
   const hoverHint = hoverHintLines.join("\n");
 
-  const flashFeedback = (kind: "attach" | "resume" | "cmux") => {
+  const flashFeedback = (kind: "cmux") => {
     if (feedbackTimerRef.current) {
       clearTimeout(feedbackTimerRef.current);
     }
@@ -135,15 +135,6 @@ export function RigNode({ data }: { data: RigNodeData }) {
       setActionFeedback((current) => (current === kind ? null : current));
       feedbackTimerRef.current = null;
     }, 900);
-  };
-
-  const handleCopyAttach = async (e: React.MouseEvent) => {
-    e.stopPropagation();
-    const name = data.canonicalSessionName ?? data.binding?.tmuxSession;
-    if (name) {
-      await copyText(`tmux attach -t ${name}`);
-      flashFeedback("attach");
-    }
   };
 
   const handleOpenCmux = async (e: React.MouseEvent) => {
@@ -157,19 +148,7 @@ export function RigNode({ data }: { data: RigNodeData }) {
     } catch { /* best-effort */ }
   };
 
-  const handleCopyResume = async (e: React.MouseEvent) => {
-    e.stopPropagation();
-    if (!data.resumeToken) return;
-    if (data.runtime === "claude-code") {
-      await copyText(`claude --resume ${data.resumeToken}`);
-      flashFeedback("resume");
-    } else if (data.runtime === "codex") {
-      await copyText(`codex resume ${data.resumeToken}`);
-      flashFeedback("resume");
-    }
-  };
-
-  const buttonClass = (kind: "attach" | "resume" | "cmux") =>
+  const buttonClass = (kind: "cmux") =>
     `inline-flex items-center gap-1 px-1.5 py-0.5 border font-mono text-[7px] uppercase transition-colors ${
       actionFeedback === kind
         ? "bg-stone-900 text-white border-stone-900"
@@ -256,7 +235,7 @@ export function RigNode({ data }: { data: RigNodeData }) {
             variant="inline"
             className="max-w-full"
           />
-          {!runtimeModel && data.profile ? (
+          {!runtimeTitle && data.profile ? (
             <span className="ml-1 font-mono text-[8px] uppercase tracking-[0.12em] text-stone-400">
               {data.profile}
             </span>
@@ -332,25 +311,13 @@ export function RigNode({ data }: { data: RigNodeData }) {
           </div>
         )}
 
-        {(data.canonicalSessionName ?? data.binding?.tmuxSession ?? data.resumeToken ?? data.rigId) && (
+        {(terminalSessionName ?? data.rigId) && (
           <div
             data-testid="node-toolbar"
             className="absolute right-2 top-8 z-20 flex flex-wrap justify-end gap-1 opacity-0 transition-opacity group-hover:!opacity-100 group-hover:opacity-100 group-focus-within:!opacity-100 group-focus-within:opacity-100"
             onClick={(e) => e.stopPropagation()}
             onKeyDown={(e) => e.stopPropagation()}
           >
-            {(data.canonicalSessionName ?? data.binding?.tmuxSession) && (
-              <button
-                onClick={handleCopyAttach}
-                data-testid="toolbar-copy-attach"
-                className={buttonClass("attach")}
-                aria-label="Copy tmux attach command"
-                title={`tmux attach -t ${data.canonicalSessionName ?? data.binding?.tmuxSession ?? "?"}`}
-              >
-                <ToolMark tool="tmux" size="xs" />
-                <span>{actionFeedback === "attach" ? "copied" : "tmux"}</span>
-              </button>
-            )}
             {data.rigId && (
               <button
                 onClick={handleOpenCmux}
@@ -372,15 +339,6 @@ export function RigNode({ data }: { data: RigNodeData }) {
                 testIdPrefix={`rig-node-${data.logicalId}`}
                 buttonClassName={toolbarIconButtonClass}
               />
-            )}
-            {data.resumeToken && data.runtime && data.runtime !== "terminal" && (
-              <button
-                onClick={handleCopyResume}
-                data-testid="toolbar-copy-resume"
-                className={buttonClass("resume")}
-              >
-                {actionFeedback === "resume" ? "copied" : "resume"}
-              </button>
             )}
           </div>
         )}

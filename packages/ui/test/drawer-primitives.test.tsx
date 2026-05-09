@@ -70,6 +70,7 @@ describe("Drawer viewers (P4-1) render with canonical props", () => {
     );
     expect(getByTestId("queue-item-viewer")).toBeTruthy();
     expect(getByTestId("qitem-body").textContent).toContain("line 1");
+    expect(getByTestId("queue-item-viewer").querySelector("li svg")).toBeTruthy();
   });
 
   it("QueueItemViewer empty-state when no qitemId", () => {
@@ -83,6 +84,7 @@ describe("Drawer viewers (P4-1) render with canonical props", () => {
     );
     const root = getByTestId("file-viewer");
     expect(root.getAttribute("data-file-kind")).toBe("markdown");
+    expect(root.querySelector("header svg")).toBeTruthy();
   });
 
   it("FileViewer infers kind from path extension when kind omitted", () => {

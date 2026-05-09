@@ -108,7 +108,9 @@ function agentColumns(): ColumnDef<AgentRow>[] {
           className="inline-flex rounded-sm"
           ringClassName="-inset-1"
         >
-          <span className="font-mono text-xs">{row.original.logicalId}</span>
+          <span className="inline-flex min-w-0 items-center gap-1.5 font-mono text-xs">
+            <span className="truncate">{row.original.logicalId}</span>
+          </span>
         </ActivityRing>
       ),
     },
