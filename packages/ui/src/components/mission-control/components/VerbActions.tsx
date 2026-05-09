@@ -5,13 +5,15 @@
 // here); UI just submits the verb + required fields.
 
 import { useState } from "react";
-import { Check, FilePenLine, Hand, Pause, Route, Send, Trash2, X } from "lucide-react";
 import {
   MISSION_CONTROL_VERBS,
   type MissionControlVerb,
   useMissionControlAction,
 } from "../hooks/useMissionControlAction.js";
 import { useMissionControlDestinations } from "../hooks/useMissionControlDestinations.js";
+import { ACTION_VERB_META } from "../action-verb-meta.js";
+import { ProjectPill } from "../../project/ProjectMetaPrimitives.js";
+import { cn } from "../../../lib/utils.js";
 
 export interface VerbActionsProps {
   qitemId: string;
@@ -21,25 +23,36 @@ export interface VerbActionsProps {
   onSettled?: () => void;
 }
 
-const VERB_LABELS: Record<MissionControlVerb, string> = {
-  approve: "Approve",
-  deny: "Deny",
-  route: "Route",
-  annotate: "Annotate",
-  hold: "Hold",
-  drop: "Drop",
-  handoff: "Handoff",
+const verbToneClass: Record<MissionControlVerb, { idle: string; active: string }> = {
+  approve: {
+    idle: "border-emerald-300 bg-emerald-50/70 text-emerald-800 hover:bg-emerald-100/80",
+    active: "border-emerald-700 bg-emerald-700 text-white",
+  },
+  deny: {
+    idle: "border-rose-300 bg-rose-50/75 text-rose-800 hover:bg-rose-100/80",
+    active: "border-rose-700 bg-rose-700 text-white",
+  },
+  route: {
+    idle: "border-sky-300 bg-sky-50/75 text-sky-800 hover:bg-sky-100/80",
+    active: "border-sky-700 bg-sky-700 text-white",
+  },
+  annotate: {
+    idle: "border-stone-300 bg-white/55 text-stone-700 hover:bg-stone-100",
+    active: "border-stone-700 bg-stone-700 text-white",
+  },
+  hold: {
+    idle: "border-amber-300 bg-amber-50/80 text-amber-800 hover:bg-amber-100/80",
+    active: "border-amber-700 bg-amber-700 text-white",
+  },
+  drop: {
+    idle: "border-stone-300 bg-white/55 text-stone-700 hover:bg-stone-100",
+    active: "border-stone-700 bg-stone-700 text-white",
+  },
+  handoff: {
+    idle: "border-sky-300 bg-sky-50/75 text-sky-800 hover:bg-sky-100/80",
+    active: "border-sky-700 bg-sky-700 text-white",
+  },
 };
-
-const VERB_ICONS = {
-  approve: Check,
-  deny: X,
-  route: Route,
-  annotate: FilePenLine,
-  hold: Pause,
-  drop: Trash2,
-  handoff: Send,
-} satisfies Record<MissionControlVerb, typeof Check>;
 
 export function VerbActions({
   qitemId,
@@ -104,9 +117,19 @@ export function VerbActions({
 
   return (
     <div data-testid="mc-verb-actions" className="space-y-2">
+      <div className="flex flex-wrap items-start justify-between gap-2 border border-outline-variant bg-white/40 px-2 py-1.5 backdrop-blur-sm">
+        <div>
+          <div className="font-mono text-[9px] uppercase tracking-[0.12em] text-stone-800">Choose response</div>
+          <div className="mt-0.5 font-mono text-[10px] leading-relaxed text-stone-500">
+            Pick the next move for this queue item.
+          </div>
+        </div>
+        {activeVerb ? <ProjectPill token={{ ...ACTION_VERB_META[activeVerb], label: ACTION_VERB_META[activeVerb].label }} compact /> : null}
+      </div>
       <div className="flex flex-wrap gap-1">
         {enabledVerbs.map((verb) => {
-          const Icon = VERB_ICONS[verb];
+          const meta = ACTION_VERB_META[verb];
+          const Icon = meta.icon;
           return (
             <button
               key={verb}
@@ -114,20 +137,23 @@ export function VerbActions({
               data-testid={`mc-verb-${verb}`}
               onClick={() => selectVerb(verb)}
               disabled={mutation.isPending}
-              className={`inline-flex items-center gap-1 border px-2 py-0.5 font-mono text-[9px] uppercase tracking-[0.12em] ${
-                activeVerb === verb
-                  ? "border-stone-700 bg-stone-700 text-white"
-                  : "border-stone-300 text-stone-700 hover:bg-stone-100"
-              } disabled:opacity-50`}
+              title={meta.description}
+              className={cn(
+                "inline-flex items-center gap-1 border px-2 py-1 font-mono text-[9px] uppercase tracking-[0.12em] transition-colors disabled:opacity-50",
+                activeVerb === verb ? verbToneClass[verb].active : verbToneClass[verb].idle,
+              )}
             >
               <Icon className="h-3 w-3" strokeWidth={1.7} />
-              {VERB_LABELS[verb]}
+              {meta.label}
             </button>
           );
         })}
       </div>
       {activeVerb && (
         <div className="space-y-1 border border-stone-200 bg-stone-50 p-2">
+          <div data-testid="mc-verb-guidance" className="font-mono text-[10px] leading-relaxed text-stone-600">
+            {ACTION_VERB_META[activeVerb].description}
+          </div>
           {needsDestination && (
             <div className="space-y-1">
               {showDestinationSelect ? (
@@ -214,7 +240,7 @@ export function VerbActions({
               }
               className="border border-stone-700 bg-stone-800 px-2 py-0.5 font-mono text-[9px] uppercase tracking-[0.12em] text-white disabled:opacity-50"
             >
-              {mutation.isPending ? "..." : "Submit"}
+              {mutation.isPending ? "..." : `Confirm ${ACTION_VERB_META[activeVerb].label}`}
             </button>
           </div>
           {mutation.isError ? (

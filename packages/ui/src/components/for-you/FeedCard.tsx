@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { CheckCircle2, CircleAlert, Clock, FilePenLine, History, PackageCheck, Route, Trash2, X } from "lucide-react";
+import { CircleAlert, Clock, History, PackageCheck } from "lucide-react";
 
 import { VellumCard } from "../ui/vellum-card.js";
 import { AuthorAgentTag } from "./AuthorAgentTag.js";
@@ -9,6 +9,7 @@ import type { QueueItemDetail } from "../../hooks/useSlices.js";
 import type { FeedCard as FeedCardModel, FeedCardKind } from "../../lib/feed-classifier.js";
 import { VerbActions } from "../mission-control/components/VerbActions.js";
 import {
+  ActorChip,
   DateChip,
   EventBadge,
   FlowChips,
@@ -21,6 +22,7 @@ import {
 } from "../project/ProjectMetaPrimitives.js";
 import { ProofImageViewer } from "../project/ProofImageViewer.js";
 import type { MissionControlVerb } from "../mission-control/hooks/useMissionControlAction.js";
+import { ACTION_VERB_META, actionVerbToken } from "../mission-control/action-verb-meta.js";
 
 const KIND_ACCENT: Record<FeedCardKind, string> = {
   "action-required": "border-l-4 border-l-tertiary",
@@ -39,8 +41,8 @@ const KIND_TESTID: Record<FeedCardKind, string> = {
 };
 
 const KIND_TOKEN: Record<FeedCardKind, ProjectToken> = {
-  "action-required": { label: "Action required", tone: "danger", icon: CircleAlert },
-  approval: { label: "Approval", tone: "warning", icon: CircleAlert },
+  "action-required": { label: "Your turn", tone: "danger", icon: CircleAlert },
+  approval: { label: "Needs approval", tone: "warning", icon: CircleAlert },
   shipped: { label: "Shipped", tone: "success", icon: PackageCheck },
   progress: { label: "Progress", tone: "info", icon: History },
   observation: { label: "Observation", tone: "neutral", icon: Clock },
@@ -165,21 +167,7 @@ function fallbackOutcomeFromQueueItem(
 }
 
 function outcomeToken(outcome: FeedActionOutcome): ProjectToken {
-  switch (outcome.verb) {
-    case "approve":
-      return { label: "Approved", tone: "success", icon: CheckCircle2 };
-    case "deny":
-      return { label: "Denied", tone: "danger", icon: X };
-    case "route":
-    case "handoff":
-      return { label: "Routed", tone: "info", icon: Route };
-    case "hold":
-      return { label: "Held", tone: "warning", icon: Clock };
-    case "drop":
-      return { label: "Dropped", tone: "neutral", icon: Trash2 };
-    case "annotate":
-      return { label: "Annotated", tone: "neutral", icon: FilePenLine };
-  }
+  return actionVerbToken(outcome.verb, "outcome");
 }
 
 function outcomeSentence(outcome: FeedActionOutcome): string {
@@ -203,18 +191,37 @@ function outcomeSentence(outcome: FeedActionOutcome): string {
 }
 
 function ActionOutcomePanel({ outcome }: { outcome: FeedActionOutcome }) {
+  const meta = ACTION_VERB_META[outcome.verb];
+  const Icon = meta.icon;
   return (
     <div
       data-testid="feed-card-action-outcome"
-      className="mt-3 border border-outline-variant bg-white/35 p-2 backdrop-blur-sm"
+      className="mt-3 border border-outline-variant bg-white/40 p-3 backdrop-blur-sm"
     >
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <ProjectPill token={outcomeToken(outcome)} />
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="flex min-w-0 items-start gap-2">
+          <span className="mt-0.5 inline-flex h-7 w-7 shrink-0 items-center justify-center border border-outline-variant bg-white/55 text-stone-900 hard-shadow">
+            <Icon className="h-4 w-4" strokeWidth={1.8} />
+          </span>
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-1.5">
+              <ProjectPill token={outcomeToken(outcome)} />
+              {outcome.state ? <QueueStateBadge state={outcome.state} compact /> : null}
+            </div>
+            <div className="mt-1 font-mono text-[9px] uppercase tracking-[0.12em] text-stone-500">
+              Decision recorded
+            </div>
+          </div>
+        </div>
         <DateChip value={outcome.actedAt} />
       </div>
-      <p className="mt-2 font-mono text-[11px] leading-relaxed text-stone-700">
+      <p className="mt-3 font-mono text-[11px] leading-relaxed text-stone-800">
         {outcomeSentence(outcome)}
       </p>
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        <ActorChip session={outcome.actorSession} muted />
+        {outcome.reason ? <TagPill tag={outcome.reason} /> : null}
+      </div>
       {(outcome.verb === "route" || outcome.verb === "handoff") && outcome.destinationSession ? (
         <div className="mt-2">
           <FlowChips source={outcome.actorSession} destination={outcome.destinationSession} muted />
@@ -300,10 +307,18 @@ export function FeedCard({
         {qitemViewerData && isActionableCard(card.kind, queueItem, renderedOutcome) ? (
           <div
             data-testid={`feed-card-actions-${card.id}`}
-            className="mt-3 border border-outline-variant bg-white/35 p-2 backdrop-blur-sm"
+            className="mt-3 border border-rose-200 bg-rose-50/45 p-3 backdrop-blur-sm"
           >
-            <div className="mb-2 font-mono text-[9px] uppercase tracking-[0.12em] text-stone-600">
-              Actions
+            <div className="mb-2 flex flex-wrap items-start justify-between gap-2">
+              <div>
+                <div className="font-mono text-[10px] uppercase tracking-[0.12em] text-rose-900">
+                  Your turn
+                </div>
+                <p className="mt-1 max-w-xl font-mono text-[10px] leading-relaxed text-rose-800/80">
+                  Review the context, then approve, deny, or route this queue item.
+                </p>
+              </div>
+              <ProjectPill token={{ label: "Needs decision", tone: "danger", icon: CircleAlert }} compact />
             </div>
             <VerbActions
               qitemId={qitemViewerData.qitemId}
