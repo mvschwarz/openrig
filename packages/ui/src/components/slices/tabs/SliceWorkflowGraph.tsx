@@ -14,6 +14,7 @@ import {
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import type { SpecGraphPayload, SpecGraphNode } from "../../../hooks/useSlices.js";
+import { ToolMark } from "../../graphics/RuntimeMark.js";
 import { RegistrationMarks } from "../../ui/registration-marks.js";
 
 const NODE_WIDTH = 200;
@@ -181,8 +182,9 @@ function SliceWorkflowStepNode({ data }: NodeProps<SliceWorkflowNode>) {
           {step.isTerminal && (
             <span
               data-testid={`spec-node-${step.stepId}-terminal-badge`}
-              className="border border-stone-300 bg-stone-100 px-1 text-[8px] uppercase tracking-[0.10em] text-stone-700"
+              className="inline-flex items-center gap-1 border border-stone-300 bg-stone-100 px-1 text-[8px] uppercase tracking-[0.10em] text-stone-700"
             >
+              <ToolMark tool="terminal" size="xs" />
               terminal
             </span>
           )}
