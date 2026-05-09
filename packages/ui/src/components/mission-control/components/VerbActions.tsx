@@ -12,7 +12,6 @@ import {
 } from "../hooks/useMissionControlAction.js";
 import { useMissionControlDestinations } from "../hooks/useMissionControlDestinations.js";
 import { ACTION_VERB_META } from "../action-verb-meta.js";
-import { ProjectPill } from "../../project/ProjectMetaPrimitives.js";
 import { cn } from "../../../lib/utils.js";
 
 export interface VerbActionsProps {
@@ -124,7 +123,11 @@ export function VerbActions({
             Pick the next move for this queue item.
           </div>
         </div>
-        {activeVerb ? <ProjectPill token={{ ...ACTION_VERB_META[activeVerb], label: ACTION_VERB_META[activeVerb].label }} compact /> : null}
+        {activeVerb ? (
+          <div className="font-mono text-[9px] uppercase tracking-[0.12em] text-stone-500">
+            Selected: <span className="text-stone-900">{ACTION_VERB_META[activeVerb].label}</span>
+          </div>
+        ) : null}
       </div>
       <div className="flex flex-wrap gap-1">
         {enabledVerbs.map((verb) => {
