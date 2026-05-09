@@ -18,6 +18,7 @@ import { useState } from "react";
 import type { DocsTreeEntry } from "../../../hooks/useSlices.js";
 import { useSliceDoc } from "../../../hooks/useSlices.js";
 import { MarkdownViewer } from "../../markdown/MarkdownViewer.js";
+import { ToolMark } from "../../graphics/RuntimeMark.js";
 
 export function DocsTab({ sliceName, tree }: { sliceName: string; tree: DocsTreeEntry[] }) {
   const initial = tree.find((e) => e.type === "file" && e.name === "README.md")?.relPath
@@ -48,7 +49,14 @@ export function DocsTab({ sliceName, tree }: { sliceName: string; tree: DocsTree
             }`}
             style={{ paddingLeft: `${(entry.relPath.split("/").length - 1) * 0.75 + 0.25}rem` }}
           >
-            {entry.type === "dir" ? `▸ ${entry.name}` : entry.name}
+            <span className="inline-flex min-w-0 items-center gap-1.5">
+              {entry.type === "dir" ? (
+                <span className="text-stone-400">▸</span>
+              ) : (
+                <ToolMark tool={entry.name} size="xs" />
+              )}
+              <span className="truncate">{entry.name}</span>
+            </span>
           </button>
         ))}
       </aside>

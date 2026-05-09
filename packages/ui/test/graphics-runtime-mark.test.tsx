@@ -19,6 +19,8 @@ describe("graphics runtime package", () => {
     expect(normalizeToolBrandId("tmux attach")).toBe("tmux");
     expect(normalizeToolBrandId("Visual Studio Code")).toBe("vscode");
     expect(normalizeToolBrandId("proof-image.png")).toBe("screenshot");
+    expect(normalizeToolBrandId("SKILL.md")).toBe("file");
+    expect(normalizeToolBrandId("config.yaml")).toBe("file");
     expect(toolBrand("cmux").actionLabel).toBe("Open in CMUX");
   });
 
