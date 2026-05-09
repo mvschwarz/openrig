@@ -1,17 +1,21 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { SpecsLibraryPage } from "../src/components/specs/SpecsLibraryPage.js";
+import { SkillDetailPage } from "../src/components/specs/SkillDetailPage.js";
+import { librarySkillFileToken, librarySkillHref, librarySkillToken } from "../src/lib/library-skills-routing.js";
 import { createTestRouter } from "./helpers/test-router.js";
 
 const mockFetch = vi.fn();
 
 beforeEach(() => {
   globalThis.fetch = mockFetch as unknown as typeof fetch;
+  Object.defineProperty(window, "scrollTo", { configurable: true, value: vi.fn() });
 });
 
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+  window.history.replaceState(null, "", "/");
 });
 
 function renderLibraryPage() {
@@ -19,6 +23,15 @@ function renderLibraryPage() {
     createTestRouter({
       path: "/specs",
       component: () => <SpecsLibraryPage />,
+    }),
+  );
+}
+
+function renderSkillDetail(skillToken: string, fileToken?: string) {
+  return render(
+    createTestRouter({
+      path: "/",
+      component: () => <SkillDetailPage skillToken={skillToken} fileToken={fileToken} />,
     }),
   );
 }
@@ -122,8 +135,111 @@ describe("Library page taxonomy", () => {
 
     expect(screen.getByText("implementer")).toBeDefined();
     expect(screen.getByText("driver-image")).toBeDefined();
-    expect(screen.getByTestId("library-skill-operator-skill")).toBeDefined();
-    expect(screen.getByTestId("library-skill-openrig-user")).toBeDefined();
-    expect(await screen.findByText(/Skill body/)).toBeDefined();
+    const skillLink = screen.getByTestId("library-skill-operator-skill") as HTMLAnchorElement;
+    expect(skillLink).toBeDefined();
+    expect(skillLink.getAttribute("href")).toBe(librarySkillHref("workspace:workspace:.openrig/skills/operator-skill"));
+    expect(screen.queryByText("workspace")).toBeNull();
+    expect(screen.queryByTestId("library-skill-file-panel")).toBeNull();
+    expect(screen.queryByTestId("library-skill-document-panel")).toBeNull();
+    expect(screen.queryByText(/Skill body/)).toBeNull();
+  });
+
+  it("opens a skill as its own viewer and defaults to SKILL.md", async () => {
+    mockFetch.mockImplementation(async (url: string) => {
+      if (url === "/api/specs/library" || url === "/api/context-packs/library" || url === "/api/agent-images/library") {
+        return { ok: true, json: async () => [] };
+      }
+      if (url === "/api/files/roots") {
+        return {
+          ok: true,
+          json: async () => ({ roots: [{ name: "workspace", path: "/workspace" }] }),
+        };
+      }
+      if (url === "/api/files/list?root=workspace&path=.openrig%2Fskills") {
+        return { ok: true, json: async () => fileList([{ name: "operator-skill", type: "dir" }]) };
+      }
+      if (url === "/api/files/list?root=workspace&path=.openrig%2Fskills%2Foperator-skill") {
+        return { ok: true, json: async () => fileList([{ name: "SKILL.md", type: "file" }]) };
+      }
+      if (url === "/api/files/list?root=workspace&path=packages%2Fdaemon%2Fspecs%2Fagents%2Fshared%2Fskills") {
+        return { ok: true, json: async () => fileList([{ name: "openrig-user", type: "dir" }]) };
+      }
+      if (url === "/api/files/list?root=workspace&path=packages%2Fdaemon%2Fspecs%2Fagents%2Fshared%2Fskills%2Fopenrig-user") {
+        return { ok: true, json: async () => fileList([{ name: "SKILL.md", type: "file" }]) };
+      }
+      if (url === "/api/files/list?root=workspace&path=node_modules%2F%40openrig%2Fdaemon%2Fspecs%2Fagents%2Fshared%2Fskills") {
+        return { status: 404, ok: false, json: async () => ({ error: "not_found" }) };
+      }
+      if (url === "/api/files/read?root=workspace&path=packages%2Fdaemon%2Fspecs%2Fagents%2Fshared%2Fskills%2Fopenrig-user%2FSKILL.md") {
+        return {
+          ok: true,
+          json: async () => ({
+            root: "workspace",
+            path: "packages/daemon/specs/agents/shared/skills/openrig-user/SKILL.md",
+            absolutePath: "/workspace/packages/daemon/specs/agents/shared/skills/openrig-user/SKILL.md",
+            content: "# OpenRig User\nPackaged skill.",
+            mtime: "2026-05-07T00:00:00.000Z",
+            contentHash: "hash",
+            size: 32,
+            truncated: false,
+            truncatedAtBytes: null,
+            totalBytes: 32,
+          }),
+        };
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    });
+
+    const packagedSkillId = "openrig-managed:workspace:packages/daemon/specs/agents/shared/skills/openrig-user";
+    renderSkillDetail(librarySkillToken(packagedSkillId));
+
+    expect(await screen.findByTestId("skill-detail-page")).toBeDefined();
+    expect(await screen.findByText(/Packaged skill/)).toBeDefined();
+  });
+
+  it("opens a selected skill file from the route token", async () => {
+    mockFetch.mockImplementation(async (url: string) => {
+      if (url === "/api/files/roots") {
+        return {
+          ok: true,
+          json: async () => ({ roots: [{ name: "workspace", path: "/workspace" }] }),
+        };
+      }
+      if (url === "/api/files/list?root=workspace&path=.openrig%2Fskills") {
+        return { ok: true, json: async () => fileList([{ name: "operator-skill", type: "dir" }]) };
+      }
+      if (url === "/api/files/list?root=workspace&path=.openrig%2Fskills%2Foperator-skill") {
+        return { ok: true, json: async () => fileList([{ name: "SKILL.md", type: "file" }, { name: "DETAILS.md", type: "file" }]) };
+      }
+      if (url === "/api/files/list?root=workspace&path=packages%2Fdaemon%2Fspecs%2Fagents%2Fshared%2Fskills") {
+        return { status: 404, ok: false, json: async () => ({ error: "not_found" }) };
+      }
+      if (url === "/api/files/list?root=workspace&path=node_modules%2F%40openrig%2Fdaemon%2Fspecs%2Fagents%2Fshared%2Fskills") {
+        return { status: 404, ok: false, json: async () => ({ error: "not_found" }) };
+      }
+      if (url === "/api/files/read?root=workspace&path=.openrig%2Fskills%2Foperator-skill%2FDETAILS.md") {
+        return {
+          ok: true,
+          json: async () => ({
+            root: "workspace",
+            path: ".openrig/skills/operator-skill/DETAILS.md",
+            absolutePath: "/workspace/.openrig/skills/operator-skill/DETAILS.md",
+            content: "# Details\nSecondary file.",
+            mtime: "2026-05-07T00:00:00.000Z",
+            contentHash: "hash",
+            size: 28,
+            truncated: false,
+            truncatedAtBytes: null,
+            totalBytes: 28,
+          }),
+        };
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    });
+
+    const skillId = "workspace:workspace:.openrig/skills/operator-skill";
+    renderSkillDetail(librarySkillToken(skillId), librarySkillFileToken(".openrig/skills/operator-skill/DETAILS.md"));
+
+    expect(await screen.findByText(/Secondary file/)).toBeDefined();
   });
 });
