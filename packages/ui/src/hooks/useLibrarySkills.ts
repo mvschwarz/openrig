@@ -58,6 +58,30 @@ function markdownFiles(directoryPath: string, entries: FileEntry[]): LibrarySkil
     });
 }
 
+function skillDedupeKey(skill: LibrarySkillEntry): string {
+  if (skill.source === "workspace") return skill.id;
+  return `${skill.source}:${skill.name}`;
+}
+
+function managedSkillPriority(skill: LibrarySkillEntry): number {
+  if (skill.source === "workspace") return 0;
+  if (skill.root === "openrig" && skill.directoryPath.startsWith("packages/daemon/")) return 1;
+  if (skill.directoryPath.startsWith("packages/daemon/")) return 2;
+  return 3;
+}
+
+function dedupeSkills(skills: LibrarySkillEntry[]): LibrarySkillEntry[] {
+  const bestByKey = new Map<string, LibrarySkillEntry>();
+  for (const skill of skills) {
+    const key = skillDedupeKey(skill);
+    const existing = bestByKey.get(key);
+    if (!existing || managedSkillPriority(skill) < managedSkillPriority(existing)) {
+      bestByKey.set(key, skill);
+    }
+  }
+  return Array.from(bestByKey.values());
+}
+
 async function fetchLibrarySkills(): Promise<LibrarySkillEntry[]> {
   const rootsResponse = await fetchJson<FilesRootsResponse | FilesUnavailable>("/api/files/roots");
   if (!rootsResponse || isUnavailable(rootsResponse)) return [];
@@ -86,7 +110,7 @@ async function fetchLibrarySkills(): Promise<LibrarySkillEntry[]> {
     }
   }
 
-  return skills.sort((a, b) => {
+  return dedupeSkills(skills).sort((a, b) => {
     if (a.source !== b.source) return a.source === "workspace" ? -1 : 1;
     return a.name.localeCompare(b.name);
   });
