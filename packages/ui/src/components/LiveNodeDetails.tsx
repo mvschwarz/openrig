@@ -6,6 +6,7 @@
 // information hierarchy.
 
 import { useState, type ReactNode } from "react";
+import { CirclePlay } from "lucide-react";
 import { useNodeDetail, type NodeDetailData } from "../hooks/useNodeDetail.js";
 import { useSpecLibrary, useLibraryReview } from "../hooks/useSpecLibrary.js";
 import { WorkspacePage } from "./WorkspacePage.js";
@@ -19,7 +20,7 @@ import { copyText } from "../lib/copy-text.js";
 import { getActivityLabel, getActivityState, getActivityTextClass, isActivityStale } from "../lib/activity-visuals.js";
 import { getRestoreStatusColorClass } from "../lib/restore-status-colors.js";
 import type { AgentSpecReview } from "../hooks/useSpecReview.js";
-import { RuntimeBadge, RuntimeMark, ToolMark } from "./graphics/RuntimeMark.js";
+import { RuntimeBadge, ToolMark } from "./graphics/RuntimeMark.js";
 
 type Tab = "identity" | "agent-spec" | "startup" | "transcript" | "terminal";
 
@@ -179,7 +180,7 @@ function ActionButtonsRow({ rigId, logicalId, data }: { rigId: string; logicalId
           data-testid="detail-copy-resume"
           className="inline-flex items-center gap-1.5 px-3 py-1.5 border border-outline-variant bg-white/30 font-mono text-[10px] uppercase tracking-wide text-stone-700 hover:bg-stone-100/60"
         >
-          <RuntimeMark runtime={data.runtime} size="sm" />
+          <CirclePlay aria-hidden="true" className="h-4 w-4 shrink-0" strokeWidth={1.5} />
           Copy resume command
         </button>
       )}
