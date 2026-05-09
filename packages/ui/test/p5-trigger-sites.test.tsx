@@ -120,6 +120,8 @@ describe("FeedCard P5-1 wiring: show-context QueueItemTrigger", () => {
   it("renders show-context trigger when source.payload has qitem_id", async () => {
     const card = makeCard();
     const { findByTestId } = renderWithRouterAndQuery(<FeedCard card={card} />);
+    const cardRoot = await findByTestId("feed-card-action");
+    expect(cardRoot.querySelector("svg")).toBeTruthy();
     expect(await findByTestId(`feed-card-show-context-${card.id}`)).toBeTruthy();
   });
 

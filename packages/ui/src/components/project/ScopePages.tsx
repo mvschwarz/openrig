@@ -59,6 +59,7 @@ import {
   stateTone,
 } from "./ProjectMetaPrimitives.js";
 import { ProofImageViewer } from "./ProofImageViewer.js";
+import { ToolMark } from "../graphics/RuntimeMark.js";
 
 type SharedTab = "overview" | "story" | "progress" | "artifacts" | "tests" | "queue" | "topology";
 type SliceTab = SharedTab | "story" | "tests";
@@ -906,7 +907,10 @@ function SliceArtifactsTab({ detail }: { detail: SliceDetail }) {
           <ul className="mt-3 divide-y divide-outline-variant border border-outline-variant bg-white/30">
             {docsTree.map((entry) => (
               <li key={entry.relPath} className="grid grid-cols-[1fr_auto_auto] gap-3 px-3 py-2 font-mono text-[10px]">
-                <span className="truncate text-stone-900">{entry.relPath}</span>
+                <span className="inline-flex min-w-0 items-center gap-1.5 text-stone-900">
+                  <ToolMark tool={entry.relPath} size="xs" />
+                  <span className="truncate">{entry.relPath}</span>
+                </span>
                 <span className="uppercase tracking-[0.10em] text-stone-500">{entry.type}</span>
                 <span className="text-stone-400">{entry.size == null ? "-" : `${entry.size}b`}</span>
               </li>
@@ -938,8 +942,7 @@ function SliceArtifactsTab({ detail }: { detail: SliceDetail }) {
           <ul className="mt-3 divide-y divide-outline-variant border border-outline-variant bg-white/30">
             {proofPackets.map((packet) => (
               <li key={packet.dirName} className="px-3 py-2 font-mono text-[10px] text-stone-700">
-                <div className="font-bold text-stone-900">{packet.dirName}</div>
-                <div className="mt-1 uppercase tracking-[0.10em] text-stone-500">{packet.passFailBadge}</div>
+                <ProofPacketHeader title={packet.dirName} badge={packet.passFailBadge} />
                 <div className="mt-1 text-stone-400">
                   {packet.screenshots.length} screenshots / {packet.videos.length} videos / {packet.traces.length} traces
                 </div>
@@ -1037,7 +1040,10 @@ function SliceOverviewTab({ detail }: { detail: SliceDetail }) {
           <ul className="mt-3 divide-y divide-outline-variant border border-outline-variant bg-white/30">
             {primaryDocs.map((entry) => (
               <li key={entry.relPath} className="px-3 py-2 font-mono text-[10px] text-stone-900">
-                {entry.relPath}
+                <span className="inline-flex min-w-0 items-center gap-1.5">
+                  <ToolMark tool={entry.relPath} size="xs" />
+                  <span className="truncate">{entry.relPath}</span>
+                </span>
               </li>
             ))}
           </ul>

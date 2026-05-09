@@ -178,13 +178,28 @@ describe("SliceScopePage P5-2 tab content piping", () => {
   it("artifacts tab mounts FOLDED Docs + Decisions sections", async () => {
     const { container, findByTestId } = renderSliceScope({
       sliceId: "idea-ledger",
-      detail: makeDetail(),
+      detail: makeDetail({
+        tests: {
+          aggregate: { passCount: 1, failCount: 0 },
+          proofPackets: [{
+            dirName: "dogfood-evidence-demo",
+            primaryMarkdown: null,
+            additionalMarkdown: [],
+            screenshots: ["screenshots/demo.png"],
+            videos: [],
+            traces: [],
+            passFailBadge: "pass",
+          }],
+        },
+      }),
     });
     await findByTestId("project-tab-nav");
     fireEvent.click(container.querySelector("[data-testid='project-tab-artifacts']")!);
     expect(await findByTestId("slice-artifacts-tab")).toBeTruthy();
     expect(container.querySelector("[data-testid='slice-artifacts-files']")).toBeTruthy();
     expect(container.querySelector("[data-testid='slice-artifacts-commits']")).toBeTruthy();
+    expect(container.querySelector("[data-testid='slice-artifacts-files'] svg")).toBeTruthy();
+    expect(container.querySelector("[data-testid='slice-artifacts-proof'] svg")).toBeTruthy();
     expect(container.querySelector("[data-testid='slice-artifacts-docs']")).toBeTruthy();
     expect(container.querySelector("[data-testid='slice-artifacts-decisions']")).toBeTruthy();
   });
