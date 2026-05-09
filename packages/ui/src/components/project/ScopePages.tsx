@@ -53,6 +53,7 @@ import {
   ProjectPill,
   ProofPacketHeader,
   ProofThumbnailGrid,
+  QueueStateBadge,
   TagPill,
   formatFriendlyDate,
   scopeToken,
@@ -285,7 +286,7 @@ function ScopeQueueRollup({
                 className="block w-full px-3 py-2 text-left font-mono text-xs transition-colors hover:bg-white/55"
               >
                 <span className="flex flex-wrap items-center gap-2">
-                  <EventBadge kind={item?.state ?? "queue.item"} compact />
+                  {item?.state ? <QueueStateBadge state={item.state} compact /> : <EventBadge kind="queue.item" compact />}
                   <DateChip value={item?.tsCreated} />
                 </span>
                 <span className="mt-2 block whitespace-pre-wrap break-words text-stone-900">
@@ -856,7 +857,7 @@ function SliceQueueTab({
                 className="block w-full px-3 py-2 text-left hover:bg-white/55 transition-colors font-mono text-xs"
               >
                 <span className="flex flex-wrap items-center gap-2">
-                  <EventBadge kind={item?.state ?? "queue.item"} compact />
+                  {item?.state ? <QueueStateBadge state={item.state} compact /> : <EventBadge kind="queue.item" compact />}
                   <DateChip value={item?.tsCreated} />
                 </span>
                 <span className="mt-2 block whitespace-pre-wrap break-words text-stone-900">

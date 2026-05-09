@@ -10,10 +10,12 @@ import type { FeedCard as FeedCardModel, FeedCardKind } from "../../lib/feed-cla
 import { VerbActions } from "../mission-control/components/VerbActions.js";
 import {
   DateChip,
+  EventBadge,
   FlowChips,
   ProjectPill,
   ProofPacketHeader,
   ProofThumbnailGrid,
+  QueueStateBadge,
   TagPill,
   type ProjectToken,
 } from "../project/ProjectMetaPrimitives.js";
@@ -251,7 +253,11 @@ export function FeedCard({
       <div className="px-4 py-3">
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0 space-y-2">
-            <ProjectPill token={KIND_TOKEN[card.kind]} />
+            <div className="flex flex-wrap items-center gap-1.5">
+              <ProjectPill token={KIND_TOKEN[card.kind]} />
+              <EventBadge kind={card.source.type} compact />
+              {qitemViewerData?.state ? <QueueStateBadge state={qitemViewerData.state} compact /> : null}
+            </div>
             <h3 className="font-mono text-sm text-stone-900 truncate">
               {card.title}
             </h3>
