@@ -80,12 +80,12 @@ describe("ContextMonitor", () => {
     return { rig, node, sessionName };
   }
 
-  function seedCodexNode() {
+  function seedCodexNode(status: "running" | "detached" = "running") {
     const rig = rigRepo.createRig("test-rig-2");
     const node = rigRepo.addNode(rig.id, "dev.qa", { runtime: "codex" });
     const session = sessionRegistry.registerSession(node.id, "dev-qa@test");
-    db.prepare("UPDATE sessions SET status = 'running', resume_type = 'codex_id', resume_token = ? WHERE id = ?")
-      .run("thread-1", session.id);
+    db.prepare("UPDATE sessions SET status = ?, resume_type = 'codex_id', resume_token = ? WHERE id = ?")
+      .run(status, "thread-1", session.id);
     return { rig, node, sessionName: "dev-qa@test", threadId: "thread-1" };
   }
 
@@ -188,6 +188,18 @@ describe("ContextMonitor", () => {
     expect(usage.totalInputTokens).toBe(227139);
     expect(usage.totalOutputTokens).toBe(611);
     expect(ensureContextCollectorSpy).not.toHaveBeenCalled();
+  });
+
+  it("pollOnce backfills detached Codex sessions from resume tokens", async () => {
+    const { node: codexNode, sessionName, threadId } = seedCodexNode("detached");
+    writeCodexTokenCount(threadId);
+
+    await monitor.pollOnce();
+
+    const usage = store.getForNode(codexNode.id, sessionName);
+    expect(usage.availability).toBe("known");
+    expect(usage.source).toBe("codex_token_count_jsonl");
+    expect(usage.usedPercentage).toBe(88);
   });
 
   // T3: pollOnce persists unknown for missing sidecar

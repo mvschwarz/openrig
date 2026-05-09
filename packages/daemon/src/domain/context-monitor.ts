@@ -83,7 +83,7 @@ export class ContextMonitor {
     }
   }
 
-  /** Query for managed Claude/Codex sessions that are currently running. */
+  /** Query for managed runtime sessions with readable context sources. */
   private getEligibleSessions(): EligibleSession[] {
     return this.db.prepare(`
       SELECT
@@ -98,8 +98,10 @@ export class ContextMonitor {
       JOIN sessions s ON s.node_id = n.id
         AND s.id = (SELECT s2.id FROM sessions s2 WHERE s2.node_id = n.id ORDER BY s2.id DESC LIMIT 1)
       LEFT JOIN bindings b ON b.node_id = n.id
-      WHERE n.runtime IN ('claude-code', 'codex')
-        AND s.status = 'running'
+      WHERE (
+          (n.runtime = 'claude-code' AND s.status = 'running')
+          OR (n.runtime = 'codex' AND s.resume_token IS NOT NULL)
+        )
         AND COALESCE(b.attachment_type, 'tmux') = 'tmux'
         AND COALESCE(b.tmux_session, s.session_name) IS NOT NULL
     `).all() as EligibleSession[];
