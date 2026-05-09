@@ -85,6 +85,8 @@ describe("RigSpecDisplay", () => {
     expect(screen.getByText("impl")).toBeDefined();
     expect(screen.getByText("qa")).toBeDefined();
     expect(screen.getByText("local:agents/impl")).toBeDefined();
+    expect(screen.getByRole("img", { name: "Claude" })).toBeDefined();
+    expect(screen.getByRole("img", { name: "Codex" })).toBeDefined();
   });
 
   it("renders legacy node tables for legacy review data", () => {
@@ -96,6 +98,8 @@ describe("RigSpecDisplay", () => {
     expect(screen.getAllByText("node-1").length).toBeGreaterThan(0);
     expect(screen.getAllByText("node-2").length).toBeGreaterThan(0);
     expect(screen.getByText("lead")).toBeDefined();
+    expect(screen.getByRole("img", { name: "Claude" })).toBeDefined();
+    expect(screen.getByRole("img", { name: "Codex" })).toBeDefined();
   });
 
   it("renders edge table", () => {

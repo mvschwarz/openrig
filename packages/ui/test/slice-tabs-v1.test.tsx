@@ -279,6 +279,8 @@ describe("PL-slice-story-view-v1 TopologyTab", () => {
     await waitFor(() => expect(screen.getByTestId("spec-edge-a-b")).toBeDefined());
     const edge = screen.getByTestId("spec-edge-a-b");
     expect(edge.getAttribute("data-routing-type")).toBe("direct");
+    expect(screen.getByTestId("spec-node-b-terminal-badge")).toBeDefined();
+    expect(screen.getByRole("img", { name: "Terminal" })).toBeDefined();
   });
 
   it("renders empty state only when BOTH specGraph is null AND no rigs are present", async () => {

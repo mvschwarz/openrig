@@ -3,6 +3,7 @@ import { Button } from "@/components/ui/button";
 import { SpecTopologyPreview } from "./SpecTopologyPreview.js";
 import { WorkflowCodePreview } from "./WorkflowScaffold.js";
 import type { RigSpecReview } from "../hooks/useSpecReview.js";
+import { RuntimeBadge } from "./graphics/RuntimeMark.js";
 // V1 attempt-3 Phase 5 P5-1: pod-member agentRef cells become SubSpecTrigger-
 // wrapped — click → SubSpecPreview in drawer (referenced agent spec). Per
 // content-drawer.md L31 sub-spec auto-open trigger contract.
@@ -129,7 +130,9 @@ export function RigSpecDisplay({ review, yaml, testIdPrefix = "", yamlTestId, sh
                           );
                         })()}
                       </td>
-                      <td className="py-1">{m.runtime}</td>
+                      <td className="py-1">
+                        <RuntimeBadge runtime={m.runtime} size="xs" compact variant="inline" />
+                      </td>
                       <td className="py-1 text-stone-500">{m.profile ?? "—"}</td>
                     </tr>
                   ))}
@@ -153,7 +156,9 @@ export function RigSpecDisplay({ review, yaml, testIdPrefix = "", yamlTestId, sh
                   {reviewNodes.map((n) => (
                     <tr key={n.id} className="border-b border-stone-100">
                       <td className="py-1">{n.id}</td>
-                      <td className="py-1">{n.runtime}</td>
+                      <td className="py-1">
+                        <RuntimeBadge runtime={n.runtime} size="xs" compact variant="inline" />
+                      </td>
                       <td className="py-1 text-stone-500">{n.role ?? "—"}</td>
                     </tr>
                   ))}
