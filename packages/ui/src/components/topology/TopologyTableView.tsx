@@ -39,7 +39,7 @@ import {
   type TopologyActivityVisual,
 } from "../../lib/topology-activity.js";
 import { ActivityRing } from "./ActivityRing.js";
-import { RuntimeBadge, RuntimeMark, ToolMark } from "../graphics/RuntimeMark.js";
+import { RuntimeBadge, ToolMark } from "../graphics/RuntimeMark.js";
 
 async function fetchNodeInventory(rigId: string): Promise<NodeInventoryEntry[]> {
   const res = await fetch(`/api/rigs/${encodeURIComponent(rigId)}/nodes`);
@@ -109,7 +109,6 @@ function agentColumns(): ColumnDef<AgentRow>[] {
           ringClassName="-inset-1"
         >
           <span className="inline-flex min-w-0 items-center gap-1.5 font-mono text-xs">
-            <RuntimeMark runtime={row.original.runtime} size="xs" />
             <span className="truncate">{row.original.logicalId}</span>
           </span>
         </ActivityRing>
