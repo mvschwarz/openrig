@@ -694,7 +694,7 @@ describe("RigNode", () => {
     expect(document.body.innerHTML).toContain("Phase B audit");
   });
 
-  it("node actions are visible on the card surface when session commands are available", () => {
+  it("node actions use the compact terminal plus cmux toolbar pattern", () => {
     const data = {
       logicalId: "dev.impl",
       rigId: "rig-1",
@@ -714,9 +714,10 @@ describe("RigNode", () => {
       </ReactFlowProvider>
     );
 
-    expect(screen.getByTestId("toolbar-copy-attach")).toBeDefined();
+    expect(screen.getByTestId("rig-node-dev.impl-terminal-open")).toBeDefined();
     expect(screen.getByTestId("toolbar-cmux-open")).toBeDefined();
-    expect(screen.getByTestId("toolbar-copy-resume")).toBeDefined();
+    expect(screen.queryByTestId("toolbar-copy-attach")).toBeNull();
+    expect(screen.queryByTestId("toolbar-copy-resume")).toBeNull();
   });
 
   it("shows an availability marker when the node can receive a discovered session", () => {
@@ -742,103 +743,7 @@ describe("RigNode", () => {
     expect(screen.getByTestId("placement-chip-dev.impl").textContent).toBe("avail");
   });
 
-  it("copy actions show copied feedback after click", async () => {
-    const writeText = vi.fn().mockResolvedValue(undefined);
-    Object.defineProperty(globalThis.navigator, "clipboard", {
-      configurable: true,
-      value: { writeText },
-    });
-
-    const data = {
-      logicalId: "dev.impl",
-      rigId: "rig-1",
-      role: "worker",
-      runtime: "claude-code",
-      model: null,
-      status: "running",
-      startupStatus: "ready" as const,
-      canonicalSessionName: "dev-impl@test-rig",
-      binding: { tmuxSession: "dev-impl@test-rig", cmuxSurface: null },
-      resumeToken: "abc-123",
-    };
-
-    render(
-      <ReactFlowProvider>
-        <RigNode data={data} />
-      </ReactFlowProvider>
-    );
-
-    fireEvent.click(screen.getByTestId("toolbar-copy-attach"));
-
-    expect(writeText).toHaveBeenCalledWith("tmux attach -t dev-impl@test-rig");
-    await waitFor(() => {
-      expect(screen.getByTestId("toolbar-copy-attach").textContent?.toLowerCase()).toContain("copied");
-    });
-  });
-
-  it("clicking the tmux action copies the attach command", async () => {
-    const writeText = vi.fn().mockResolvedValue(undefined);
-    Object.defineProperty(globalThis.navigator, "clipboard", {
-      configurable: true,
-      value: { writeText },
-    });
-
-    const data = {
-      logicalId: "dev.impl",
-      rigId: "rig-1",
-      role: "worker",
-      runtime: "claude-code",
-      model: null,
-      status: "running",
-      startupStatus: "ready" as const,
-      canonicalSessionName: "dev-impl@test-rig",
-      binding: { tmuxSession: "dev-impl@test-rig", cmuxSurface: null },
-      resumeToken: "abc-123",
-    };
-
-    render(
-      <ReactFlowProvider>
-        <RigNode data={data} />
-      </ReactFlowProvider>
-    );
-
-    fireEvent.click(screen.getByTestId("toolbar-copy-attach"));
-
-    expect(writeText).toHaveBeenCalledWith("tmux attach -t dev-impl@test-rig");
-  });
-
-  it("clicking the resume action copies the resume command", async () => {
-    const writeText = vi.fn().mockResolvedValue(undefined);
-    Object.defineProperty(globalThis.navigator, "clipboard", {
-      configurable: true,
-      value: { writeText },
-    });
-
-    const data = {
-      logicalId: "dev.impl",
-      rigId: "rig-1",
-      role: "worker",
-      runtime: "claude-code",
-      model: null,
-      status: "running",
-      startupStatus: "ready" as const,
-      canonicalSessionName: "dev-impl@test-rig",
-      binding: { tmuxSession: "dev-impl@test-rig", cmuxSurface: null },
-      resumeToken: "abc-123",
-    };
-
-    render(
-      <ReactFlowProvider>
-        <RigNode data={data} />
-      </ReactFlowProvider>
-    );
-
-    fireEvent.click(screen.getByTestId("toolbar-copy-resume"));
-
-    expect(writeText).toHaveBeenCalledWith("claude --resume abc-123");
-  });
-
-  it("toolbar hides resume button when no resumeToken", () => {
+  it("toolbar keeps terminal and cmux actions when no resumeToken", () => {
     const data = {
       logicalId: "dev.impl",
       rigId: "rig-1",
@@ -858,8 +763,9 @@ describe("RigNode", () => {
       </ReactFlowProvider>
     );
 
-    expect(screen.getByTestId("toolbar-copy-attach")).toBeDefined();
+    expect(screen.getByTestId("rig-node-dev.impl-terminal-open")).toBeDefined();
     expect(screen.queryByTestId("toolbar-copy-resume")).toBeNull();
+    expect(screen.queryByTestId("toolbar-copy-attach")).toBeNull();
     // CMUX button should still be present for unbound nodes (open-or-focus)
     expect(screen.getByTestId("toolbar-cmux-open")).toBeDefined();
   });
