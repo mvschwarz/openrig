@@ -5,10 +5,12 @@
 // + Related (clickable refs).
 
 import { useState } from "react";
+import { GitBranch, GitCommitHorizontal, Network } from "lucide-react";
 import { SectionHeader } from "../ui/section-header.js";
 import { StatusPip } from "../ui/status-pip.js";
 import { EmptyState } from "../ui/empty-state.js";
 import { ActorChip, DateChip, TagPill } from "../project/ProjectMetaPrimitives.js";
+import { ToolMark } from "../graphics/RuntimeMark.js";
 
 export interface QueueItemViewerData {
   qitemId: string;
@@ -122,7 +124,8 @@ export function QueueItemViewer({
           <ul className="mt-2 space-y-1 font-mono text-xs">
             {related.map((r, i) => (
               <li key={`${r.kind}-${i}`} className="flex items-baseline gap-2">
-                <span className="text-on-surface-variant text-[10px] uppercase tracking-wide w-12 shrink-0">
+                <span className="inline-flex w-12 shrink-0 items-center gap-1 text-on-surface-variant text-[10px] uppercase tracking-wide">
+                  <RelatedKindIcon kind={r.kind} label={r.label} />
                   {r.kind}
                 </span>
                 {r.href ? (
@@ -137,6 +140,12 @@ export function QueueItemViewer({
       ) : null}
     </div>
   );
+}
+
+function RelatedKindIcon({ kind, label }: { kind: NonNullable<QueueItemViewerData["related"]>[number]["kind"]; label: string }) {
+  if (kind === "file") return <ToolMark tool={label} size="xs" />;
+  const Icon = kind === "commit" ? GitCommitHorizontal : kind === "slice" ? GitBranch : Network;
+  return <Icon className="h-3 w-3 shrink-0" strokeWidth={1.5} aria-hidden="true" />;
 }
 
 function MetaRow({ label, children }: { label: string; children: React.ReactNode }) {
