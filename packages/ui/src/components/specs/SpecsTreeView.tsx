@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import { Link, useRouterState } from "@tanstack/react-router";
 import { ChevronDown, ChevronRight } from "lucide-react";
 import { useSpecLibrary, type SpecLibraryEntry } from "../../hooks/useSpecLibrary.js";
@@ -10,7 +10,7 @@ import {
   librarySkillSelectionFromPath,
   librarySkillToken,
 } from "../../lib/library-skills-routing.js";
-import { ToolMark } from "../graphics/RuntimeMark.js";
+import { RuntimeBadge, ToolMark } from "../graphics/RuntimeMark.js";
 
 interface TreeEntry {
   id: string;
@@ -18,6 +18,7 @@ interface TreeEntry {
   entryId?: string;
   skillId?: string;
   meta?: string;
+  metaNode?: ReactNode;
 }
 
 interface SectionDef {
@@ -89,8 +90,9 @@ function Section({
                   </div>
                 )}
                 {entry.meta ? (
-                  <div className="truncate font-mono text-[9px] text-on-surface-variant">
-                    {entry.meta}
+                  <div className="flex min-w-0 items-center gap-1 truncate font-mono text-[9px] text-on-surface-variant">
+                    {entry.metaNode}
+                    <span className="truncate">{entry.meta}</span>
                   </div>
                 ) : null}
               </li>
@@ -157,7 +159,8 @@ export function SpecsTreeView() {
           id: entry.id,
           name: entry.name,
           entryId: entry.id,
-          meta: `${entry.version} · ${entry.runtime}`,
+          meta: entry.version,
+          metaNode: <RuntimeBadge runtime={entry.runtime} size="xs" compact variant="inline" />,
         })),
         loading: agentImagesLoading,
       },
@@ -274,7 +277,7 @@ export function SpecsTreeView() {
                                         activeFile ? "text-stone-900" : "text-on-surface-variant"
                                       }`}
                                     >
-                                      <ToolMark tool={file.name} size="xs" title={file.name} />
+                                      <ToolMark tool={file.name} size="xs" title={file.name} decorative />
                                       <span className="truncate">{file.name}</span>
                                     </Link>
                                   </li>

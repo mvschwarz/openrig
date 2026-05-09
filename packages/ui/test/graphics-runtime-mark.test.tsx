@@ -1,10 +1,12 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
-import { render, screen } from "@testing-library/react";
-import { ActorMark, RuntimeBadge, ToolMark, isHumanActor } from "../src/components/graphics/RuntimeMark.js";
+import { afterEach, describe, expect, it } from "vitest";
+import { cleanup, render, screen } from "@testing-library/react";
+import { ActorMark, RuntimeBadge, RuntimeMark, ToolMark, isHumanActor } from "../src/components/graphics/RuntimeMark.js";
 import { normalizeRuntimeBrandId, runtimeBrand } from "../src/lib/runtime-brand.js";
 import { normalizeToolBrandId, toolBrand } from "../src/lib/tool-brand.js";
+
+afterEach(() => cleanup());
 
 describe("graphics runtime package", () => {
   it("normalizes runtime brands to human-facing labels", () => {
@@ -30,6 +32,11 @@ describe("graphics runtime package", () => {
     expect(screen.getByRole("img", { name: "Claude" })).toBeTruthy();
   });
 
+  it("keeps standalone runtime marks named for icon-only use", () => {
+    render(<RuntimeMark runtime="claude-code" />);
+    expect(screen.getByRole("img", { name: "Claude" })).toBeTruthy();
+  });
+
   it("renders inline runtime labels without badge chrome", () => {
     const { container } = render(<RuntimeBadge runtime="codex" compact variant="inline" />);
     expect(screen.getByText("Codex")).toBeTruthy();
@@ -40,6 +47,12 @@ describe("graphics runtime package", () => {
   it("renders tool marks as named glyphs", () => {
     render(<ToolMark tool="cmux" title="Open in CMUX" />);
     expect(screen.getByRole("img", { name: "Open in CMUX" })).toBeTruthy();
+  });
+
+  it("allows decorative tool marks when visible text already labels the row", () => {
+    const { container } = render(<ToolMark tool="SKILL.md" title="SKILL.md" decorative />);
+    expect(container.querySelector("svg[aria-hidden='true']")).toBeTruthy();
+    expect(screen.queryByRole("img", { name: "SKILL.md" })).toBeNull();
   });
 
   it("renders the human actor mark through the raster mask asset", () => {

@@ -152,7 +152,7 @@ describe("Library page taxonomy", () => {
     const skillLink = screen.getByTestId("library-skill-operator-skill") as HTMLAnchorElement;
     expect(skillLink).toBeDefined();
     expect(skillLink.getAttribute("href")).toBe(librarySkillHref("workspace:workspace:.openrig/skills/operator-skill"));
-    expect(screen.getByRole("img", { name: "operator-skill skill" })).toBeDefined();
+    expect(screen.queryByRole("img", { name: "operator-skill skill" })).toBeNull();
     expect(screen.getAllByTestId("library-skill-openrig-user")).toHaveLength(1);
     expect(screen.queryByText("workspace")).toBeNull();
     expect(screen.queryByTestId("library-skill-file-panel")).toBeNull();
@@ -291,6 +291,6 @@ describe("Library page taxonomy", () => {
     expect(await screen.findByTestId("specs-section-skills")).toBeDefined();
     expect(await screen.findByTestId("specs-leaf-workspace:workspace:.openrig/skills/operator-skill")).toBeDefined();
     expect(await screen.findByTestId("specs-skill-file-SKILL.md")).toBeDefined();
-    expect(screen.getByRole("img", { name: "SKILL.md" })).toBeDefined();
+    expect(screen.queryByRole("img", { name: "SKILL.md" })).toBeNull();
   });
 });

@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import type { AgentSpecReview } from "../hooks/useSpecReview.js";
 import { WorkflowCodePreview } from "./WorkflowScaffold.js";
 import { FileReferenceTrigger } from "./drawer-triggers/FileReferenceTrigger.js";
+import { ToolMark } from "./graphics/RuntimeMark.js";
 
 interface AgentSpecDisplayProps {
   review?: AgentSpecReview | null;
@@ -81,7 +82,10 @@ export function AgentSpecDisplay({ review, yaml, testIdPrefix = "agent", sourceP
             <div>
               <span className="text-stone-500">Skills:</span>{" "}
               {resources.skills.map((s, i) => (
-                <span key={i} className="inline-block bg-stone-100 px-1.5 py-0.5 mr-1 mb-0.5">{s}</span>
+                <span key={i} className="mr-1 mb-0.5 inline-flex items-center gap-1 bg-stone-100 px-1.5 py-0.5">
+                  <ToolMark tool="file" size="xs" decorative />
+                  {s}
+                </span>
               ))}
             </div>
           )}
@@ -95,7 +99,8 @@ export function AgentSpecDisplay({ review, yaml, testIdPrefix = "agent", sourceP
                   sourcePath={sourcePath}
                   testId={`${testIdPrefix}-guidance-file-trigger-${g}`}
                 >
-                  <span className="inline-block bg-stone-100 px-1.5 py-0.5 mr-1 mb-0.5 underline decoration-dotted decoration-stone-400">
+                  <span className="mr-1 mb-0.5 inline-flex items-center gap-1 bg-stone-100 px-1.5 py-0.5 underline decoration-dotted decoration-stone-400">
+                    <ToolMark tool={g} size="xs" decorative />
                     {g}
                   </span>
                 </FileChip>
@@ -124,7 +129,10 @@ export function AgentSpecDisplay({ review, yaml, testIdPrefix = "agent", sourceP
                     sourcePath={sourcePath}
                     testId={`${testIdPrefix}-startup-file-trigger-${f.path}`}
                   >
-                    <span className="underline decoration-dotted decoration-stone-400">{f.path}</span>
+                    <span className="inline-flex items-center gap-1 underline decoration-dotted decoration-stone-400">
+                      <ToolMark tool={f.path} size="xs" decorative />
+                      {f.path}
+                    </span>
                   </FileChip>{" "}
                   {f.required && <span className="text-red-500 text-[8px]">REQUIRED</span>}
                 </div>
@@ -136,7 +144,11 @@ export function AgentSpecDisplay({ review, yaml, testIdPrefix = "agent", sourceP
               <div className="font-mono text-[9px] text-stone-500 uppercase mb-1">Actions</div>
               {startup.actions.map((a, i) => (
                 <div key={i} className="font-mono text-[10px]">
-                  <span className="text-stone-500">{a.type}:</span> {a.value}
+                  <span className="inline-flex items-center gap-1 text-stone-500">
+                    <ToolMark tool={a.type.includes("command") ? "terminal" : a.type} size="xs" decorative />
+                    {a.type}:
+                  </span>{" "}
+                  {a.value}
                 </div>
               ))}
             </div>

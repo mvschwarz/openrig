@@ -47,6 +47,7 @@ import {
   WorkflowSummaryCard,
   WorkflowSummaryGrid,
 } from "./WorkflowScaffold.js";
+import { RuntimeBadge, ToolMark } from "./graphics/RuntimeMark.js";
 import { AgentSpecDisplay } from "./AgentSpecDisplay.js";
 import { RigSpecDisplay } from "./RigSpecDisplay.js";
 import { buildSetupPrompt } from "../lib/build-setup-prompt.js";
@@ -339,7 +340,10 @@ function WorkflowTopologyGraph({
         data: {
           label: (
             <div className="font-mono text-[10px] leading-tight">
-              <div className="font-bold">{n.stepId}</div>
+              <div className="flex items-center justify-between gap-2 font-bold">
+                <span>{n.stepId}</span>
+                {n.isTerminal ? <ToolMark tool="terminal" size="xs" title="Terminal step" decorative /> : null}
+              </div>
               <div className="text-stone-600">{n.role}</div>
               {n.preferredTarget && <div className="text-[8px] text-stone-500">→ {n.preferredTarget}</div>}
             </div>
@@ -468,8 +472,9 @@ function LibraryWorkflowReviewPage({ review }: { review: LibraryWorkflowReview }
           <WorkflowSummaryCard label="Source" value={review.isBuiltIn ? "built-in" : "user file"} testId="lib-wf-source" />
         </WorkflowSummaryGrid>
 
-        <div data-testid="workflow-terminal-rule" className="border border-stone-300/40 bg-white/10 px-3 py-2 font-mono text-[10px] text-stone-700">
-          <span className="text-stone-500 uppercase tracking-[0.16em] text-[8px] mr-2">Coordination Terminal Turn:</span>
+        <div data-testid="workflow-terminal-rule" className="flex items-center gap-2 border border-stone-300/40 bg-white/10 px-3 py-2 font-mono text-[10px] text-stone-700">
+          <ToolMark tool="terminal" size="xs" decorative />
+          <span className="text-stone-500 uppercase tracking-[0.16em] text-[8px]">Coordination Terminal Turn:</span>
           {review.terminalTurnRule}
         </div>
 
@@ -837,7 +842,11 @@ function AgentImageReviewBody({
         />
 
         <WorkflowSummaryGrid>
-          <WorkflowSummaryCard label="Runtime" value={entry.runtime} testId="lib-image-runtime" />
+          <WorkflowSummaryCard
+            label="Runtime"
+            value={<RuntimeBadge runtime={entry.runtime} size="sm" compact variant="inline" />}
+            testId="lib-image-runtime"
+          />
           <WorkflowSummaryCard label="Forks" value={String(entry.stats.forkCount)} testId="lib-image-forks" />
           <WorkflowSummaryCard label="Tokens (~)" value={String(entry.derivedEstimatedTokens)} testId="lib-image-tokens" />
           <WorkflowSummaryCard label="Size" value={`${entry.stats.estimatedSizeBytes}B`} testId="lib-image-size" />
