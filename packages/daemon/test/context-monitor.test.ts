@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import type Database from "better-sqlite3";
+import BetterSqlite3, { type Database } from "better-sqlite3";
 import { mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -45,6 +45,7 @@ describe("ContextMonitor", () => {
   let ensureContextCollectorSpy: ReturnType<typeof vi.fn>;
   let checkReadySpy: ReturnType<typeof vi.fn>;
   let tmpDir: string;
+  let codexHomeDir: string;
 
   beforeEach(() => {
     db = createDb();
@@ -53,7 +54,9 @@ describe("ContextMonitor", () => {
     sessionRegistry = new SessionRegistry(db);
     tmpDir = join(tmpdir(), `context-monitor-${Date.now()}`);
     mkdirSync(join(tmpDir, "context"), { recursive: true });
-    store = new ContextUsageStore(db, { stateDir: tmpDir });
+    codexHomeDir = join(tmpDir, "codex-home");
+    mkdirSync(join(codexHomeDir, ".codex"), { recursive: true });
+    store = new ContextUsageStore(db, { stateDir: tmpDir, codexHomeDir });
     ensureContextCollectorSpy = vi.fn();
     checkReadySpy = vi.fn(async (): Promise<ReadinessResult> => ({ ready: false, reason: "not_ready", code: "awaiting_runtime" }));
     monitor = new ContextMonitor(db, store, {
@@ -80,8 +83,10 @@ describe("ContextMonitor", () => {
   function seedCodexNode() {
     const rig = rigRepo.createRig("test-rig-2");
     const node = rigRepo.addNode(rig.id, "dev.qa", { runtime: "codex" });
-    sessionRegistry.registerSession(node.id, "dev-qa@test");
-    return { rig, node };
+    const session = sessionRegistry.registerSession(node.id, "dev-qa@test");
+    db.prepare("UPDATE sessions SET status = 'running', resume_type = 'codex_id', resume_token = ? WHERE id = ?")
+      .run("thread-1", session.id);
+    return { rig, node, sessionName: "dev-qa@test", threadId: "thread-1" };
   }
 
   function seedClaimedNode() {
@@ -105,6 +110,37 @@ describe("ContextMonitor", () => {
   function writeSidecar(sessionName: string, data: Record<string, unknown>) {
     const safeName = sessionName.replace(/[^a-zA-Z0-9@._-]/g, "_");
     writeFileSync(join(tmpDir, "context", `${safeName}.json`), JSON.stringify(data));
+  }
+
+  function writeCodexTokenCount(threadId: string) {
+    const codexDir = join(codexHomeDir, ".codex");
+    const rolloutPath = join(codexDir, "sessions", `${threadId}.jsonl`);
+    mkdirSync(join(codexDir, "sessions"), { recursive: true });
+
+    const stateDbPath = join(codexDir, "state_5.sqlite");
+    const stateDb = new BetterSqlite3(stateDbPath);
+    try {
+      stateDb.prepare("CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT NOT NULL)").run();
+      stateDb.prepare("INSERT INTO threads (id, rollout_path) VALUES (?, ?)").run(threadId, rolloutPath);
+    } finally {
+      stateDb.close();
+    }
+
+    writeFileSync(rolloutPath, JSON.stringify({
+      timestamp: new Date().toISOString(),
+      type: "event_msg",
+      payload: {
+        type: "token_count",
+        info: {
+          last_token_usage: {
+            input_tokens: 227139,
+            output_tokens: 611,
+            total_tokens: 227750,
+          },
+          model_context_window: 258400,
+        },
+      },
+    }));
   }
 
   const VALID_SIDECAR = {
@@ -138,15 +174,20 @@ describe("ContextMonitor", () => {
     });
   });
 
-  // T2: pollOnce skips non-Claude runtimes
-  it("pollOnce skips non-Claude runtimes", async () => {
-    const { node: codexNode } = seedCodexNode();
+  // T2: pollOnce discovers running Codex sessions and persists usage from token_count events
+  it("pollOnce discovers running Codex sessions and persists context usage", async () => {
+    const { node: codexNode, sessionName, threadId } = seedCodexNode();
+    writeCodexTokenCount(threadId);
 
     await monitor.pollOnce();
 
-    const usage = store.getForNode(codexNode.id, "dev-qa@test");
-    expect(usage.availability).toBe("unknown");
-    expect(usage.reason).toBe("no_data");
+    const usage = store.getForNode(codexNode.id, sessionName);
+    expect(usage.availability).toBe("known");
+    expect(usage.source).toBe("codex_token_count_jsonl");
+    expect(usage.usedPercentage).toBe(88);
+    expect(usage.totalInputTokens).toBe(227139);
+    expect(usage.totalOutputTokens).toBe(611);
+    expect(ensureContextCollectorSpy).not.toHaveBeenCalled();
   });
 
   // T3: pollOnce persists unknown for missing sidecar
