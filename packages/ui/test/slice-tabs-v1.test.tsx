@@ -189,7 +189,7 @@ describe("PL-slice-story-view-v1 AcceptanceTab", () => {
     expect(screen.getByTestId("acceptance-list")).toBeDefined();
   });
 
-  it("Current Step shows '(terminal)' marker when allowedNextSteps is empty", () => {
+  it("Current Step shows terminal marker when allowedNextSteps is empty", () => {
     const cs: CurrentStepPayload = {
       stepId: "qa",
       role: "qa-tester",
@@ -201,7 +201,8 @@ describe("PL-slice-story-view-v1 AcceptanceTab", () => {
     };
     render(<AcceptanceTab acceptance={acceptanceShape(cs)} />);
     const nextSteps = screen.getByTestId("acceptance-current-step-allowed-next-steps");
-    expect(nextSteps.textContent).toContain("(terminal)");
+    expect(nextSteps.textContent).toContain("terminal");
+    expect(screen.getByRole("img", { name: "Terminal" })).toBeDefined();
   });
 });
 

@@ -7,6 +7,7 @@ import { useContextPackLibrary, type ContextPackEntry } from "../../hooks/useCon
 import { useAgentImageLibrary, type AgentImageEntry } from "../../hooks/useAgentImageLibrary.js";
 import { useLibrarySkills, type LibrarySkillEntry } from "../../hooks/useLibrarySkills.js";
 import { librarySkillHref } from "../../lib/library-skills-routing.js";
+import { ToolMark } from "../graphics/RuntimeMark.js";
 
 const TOOLBAR_ACTIONS = [
   { label: "+ Add spec", to: "/specs/rig", testId: "specs-toolbar-add" },
@@ -147,9 +148,12 @@ function SkillsSection({
               <a
                 href={librarySkillHref(skill.id)}
                 data-testid={`library-skill-${skill.name}`}
-                className="flex items-baseline justify-between gap-3 px-3 py-2 font-mono hover:bg-stone-100/50"
+                className="flex items-center justify-between gap-3 px-3 py-2 font-mono hover:bg-stone-100/50"
               >
-                <span className="truncate text-xs font-bold text-stone-900">{skill.name}</span>
+                <span className="flex min-w-0 items-center gap-2">
+                  <ToolMark tool="file" title={`${skill.name} skill`} size="xs" />
+                  <span className="truncate text-xs font-bold text-stone-900">{skill.name}</span>
+                </span>
                 <span className="shrink-0 text-[9px] uppercase tracking-[0.08em] text-stone-500">
                   {skill.files.length} files
                 </span>
