@@ -27,6 +27,8 @@ import { EmptyState } from "../ui/empty-state.js";
 import { SectionHeader } from "../ui/section-header.js";
 import { cn } from "../../lib/utils.js";
 import { RuntimeBadge } from "../graphics/RuntimeMark.js";
+import { formatCompactTokenCount, formatTokenTotalTitle, sumTokenCounts } from "../../lib/token-format.js";
+import { contextUsageTextClass } from "../ContextUsageRing.js";
 
 const SAFE_N = 12;
 
@@ -43,6 +45,42 @@ function isActiveRunning(seat: NodeInventoryEntry): boolean {
   // agents (output emitted within polling window). The PL-019 agentActivity
   // summary's "running" state is the closest available proxy.
   return seat.agentActivity?.state === "running";
+}
+
+function ContextMetric({ seat }: { seat: NodeInventoryEntry }) {
+  const usage = seat.contextUsage;
+  const known = usage?.availability === "known" && typeof usage.usedPercentage === "number";
+  return (
+    <span
+      data-testid={`terminal-card-context-${seat.rigId}-${seat.logicalId}`}
+      className={`font-mono text-[8px] font-bold uppercase tracking-wide ${contextUsageTextClass(usage?.usedPercentage, usage?.fresh, usage?.availability)}`}
+      title={
+        known
+          ? usage?.fresh === false
+            ? "Context usage (stale sample)"
+            : "Context usage (fresh)"
+          : "Context sample unavailable"
+      }
+    >
+      {known ? `${usage.usedPercentage}%` : "--"}
+    </span>
+  );
+}
+
+function TokenMetric({ seat }: { seat: NodeInventoryEntry }) {
+  const usage = seat.contextUsage;
+  const total = sumTokenCounts(usage?.totalInputTokens, usage?.totalOutputTokens);
+  const label = formatCompactTokenCount(total);
+  const title = formatTokenTotalTitle(usage?.totalInputTokens, usage?.totalOutputTokens);
+  return (
+    <span
+      data-testid={`terminal-card-tokens-${seat.rigId}-${seat.logicalId}`}
+      className={`font-mono text-[8px] font-bold uppercase tracking-wide ${label ? "text-stone-500" : "text-stone-300"}`}
+      title={title ?? "Token sample unavailable"}
+    >
+      {label ?? "--"}
+    </span>
+  );
 }
 
 function SeatTerminalCard({ seat }: { seat: NodeInventoryEntry }) {
@@ -66,11 +104,8 @@ function SeatTerminalCard({ seat }: { seat: NodeInventoryEntry }) {
         </span>
         <span className="inline-flex shrink-0 items-center gap-1">
           <RuntimeBadge runtime={seat.runtime} size="xs" compact variant="inline" />
-          {typeof seat.contextUsage?.usedPercentage === "number" ? (
-            <span className="font-mono text-[8px] uppercase tracking-wide text-on-surface-variant">
-              {seat.contextUsage.usedPercentage}%
-            </span>
-          ) : null}
+          <ContextMetric seat={seat} />
+          <TokenMetric seat={seat} />
         </span>
       </header>
       <SessionPreviewPane
