@@ -239,7 +239,7 @@ describe("FeedCard P5-1 wiring: show-context QueueItemTrigger", () => {
 
   it("renders approve, deny, and route actions for actionable human queue cards", async () => {
     const card = makeCard();
-    const { findByTestId, queryByTestId } = renderWithRouterAndQuery(
+    const { findAllByText, findByTestId, findByText, queryByTestId } = renderWithRouterAndQuery(
       <FeedCard
         card={card}
         queueItem={{
@@ -258,6 +258,8 @@ describe("FeedCard P5-1 wiring: show-context QueueItemTrigger", () => {
     );
 
     expect(await findByTestId(`feed-card-actions-${card.id}`)).toBeTruthy();
+    expect((await findAllByText("Your turn")).length).toBeGreaterThanOrEqual(2);
+    expect(await findByText("Choose response")).toBeTruthy();
     expect(await findByTestId("mc-verb-approve")).toBeTruthy();
     expect(await findByTestId("mc-verb-deny")).toBeTruthy();
     expect(await findByTestId("mc-verb-route")).toBeTruthy();
@@ -291,6 +293,7 @@ describe("FeedCard P5-1 wiring: show-context QueueItemTrigger", () => {
     );
 
     expect(await findByTestId("feed-card-action-outcome")).toBeTruthy();
+    expect(await findByText("Decision recorded")).toBeTruthy();
     expect(await findByText("Approved by human-wrandom@kernel.")).toBeTruthy();
     expect(queryByTestId(`feed-card-actions-${card.id}`)).toBeNull();
     expect(queryByTestId("mc-verb-approve")).toBeNull();

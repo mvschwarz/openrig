@@ -52,6 +52,33 @@ const LENS_CHIPS: Array<{ id: FeedCardKind | "all"; label: string }> = [
 
 const HISTORY_LIMIT = 50; // per for-you-feed.md L182
 
+const EMPTY_COPY: Record<FeedCardKind | "all", { label: string; description: string }> = {
+  all: {
+    label: "All caught up",
+    description: "Nothing needs you right now. New human tasks, approvals, shipped proof, and progress updates will appear here.",
+  },
+  "action-required": {
+    label: "No actions waiting",
+    description: "When a queue item needs your response, it will appear here with approve, deny, and route controls.",
+  },
+  approval: {
+    label: "No approvals waiting",
+    description: "Closeout and ratification requests will collect here when work needs an explicit decision.",
+  },
+  shipped: {
+    label: "No shipped proof yet",
+    description: "Completed work with proof packets and screenshots will appear here when slices close.",
+  },
+  progress: {
+    label: "No progress cards",
+    description: "Fresh queue movement and project updates will appear here as work advances.",
+  },
+  observation: {
+    label: "No audit cards",
+    description: "Observation events are quiet right now. Turn the audit subscription on to watch more verbose activity.",
+  },
+};
+
 function asString(v: unknown): string | undefined {
   return typeof v === "string" && v.length > 0 ? v : undefined;
 }
@@ -262,8 +289,8 @@ export function Feed() {
 
       {cards.length === 0 ? (
         <EmptyState
-          label="ALL CAUGHT UP"
-          description="Nothing needs you right now. Activity from the topology will surface here."
+          label={EMPTY_COPY[lens].label}
+          description={EMPTY_COPY[lens].description}
           variant="card"
           testId="for-you-empty"
         />
