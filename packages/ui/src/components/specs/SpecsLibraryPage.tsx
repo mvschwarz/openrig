@@ -1,12 +1,12 @@
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
 import { Link } from "@tanstack/react-router";
 import { SectionHeader } from "../ui/section-header.js";
 import { EmptyState } from "../ui/empty-state.js";
-import { FileViewer } from "../drawer-viewers/FileViewer.js";
 import { useSpecLibrary, type SpecLibraryEntry } from "../../hooks/useSpecLibrary.js";
 import { useContextPackLibrary, type ContextPackEntry } from "../../hooks/useContextPackLibrary.js";
 import { useAgentImageLibrary, type AgentImageEntry } from "../../hooks/useAgentImageLibrary.js";
-import { useLibrarySkills, type LibrarySkillEntry, type LibrarySkillFile } from "../../hooks/useLibrarySkills.js";
+import { useLibrarySkills, type LibrarySkillEntry } from "../../hooks/useLibrarySkills.js";
+import { librarySkillHref } from "../../lib/library-skills-routing.js";
 
 const TOOLBAR_ACTIONS = [
   { label: "+ Add spec", to: "/specs/rig", testId: "specs-toolbar-add" },
@@ -110,14 +110,6 @@ function LibraryRowContent({ row }: { row: LibraryRow }) {
   );
 }
 
-function SkillSourceLabel({ source }: { source: LibrarySkillEntry["source"] }) {
-  return (
-    <span className="font-mono text-[8px] uppercase tracking-[0.12em] text-stone-500">
-      {source === "workspace" ? "workspace" : "openrig"}
-    </span>
-  );
-}
-
 function SkillsSection({
   skills,
   isLoading,
@@ -125,27 +117,15 @@ function SkillsSection({
   skills: LibrarySkillEntry[];
   isLoading: boolean;
 }) {
-  const [selectedSkillId, setSelectedSkillId] = useState<string | null>(null);
-  const [selectedFilePath, setSelectedFilePath] = useState<string | null>(null);
-  const selectedSkill = skills.find((skill) => skill.id === selectedSkillId) ?? skills[0] ?? null;
-  const selectedFile = selectedSkill
-    ? selectedSkill.files.find((file) => file.path === selectedFilePath) ?? selectedSkill.files[0] ?? null
-    : null;
-
-  const selectSkill = (skill: LibrarySkillEntry) => {
-    setSelectedSkillId(skill.id);
-    setSelectedFilePath(skill.files[0]?.path ?? null);
-  };
-
-  const selectFile = (file: LibrarySkillFile) => {
-    setSelectedFilePath(file.path);
-  };
-
   return (
-    <section data-testid="library-section-skills" className="border border-outline-variant bg-white/25 hard-shadow">
+    <section
+      id="library-skills"
+      data-testid="library-section-skills"
+      className="border border-outline-variant bg-white/25 hard-shadow"
+    >
       <header className="flex items-baseline justify-between border-b border-outline-variant bg-white/30 px-3 py-2">
         <SectionHeader tone="default">Skills</SectionHeader>
-        <span className="font-mono text-[9px] uppercase tracking-[0.12em] text-stone-500">
+        <span className="shrink-0 font-mono text-[9px] uppercase tracking-[0.12em] text-stone-500">
           {isLoading ? "loading" : `${skills.length} folders`}
         </span>
       </header>
@@ -161,74 +141,22 @@ function SkillsSection({
           />
         </div>
       ) : (
-        <div className="grid min-h-[28rem] grid-cols-[18rem_minmax(0,1fr)]">
-          <aside className="border-r border-outline-variant">
-            <ul className="divide-y divide-outline-variant">
-              {skills.map((skill) => (
-                <li key={skill.id}>
-                  <button
-                    type="button"
-                    data-testid={`library-skill-${skill.name}`}
-                    data-active={selectedSkill?.id === skill.id}
-                    onClick={() => selectSkill(skill)}
-                    className={`block w-full px-3 py-2 text-left hover:bg-stone-100/50 ${
-                      selectedSkill?.id === skill.id ? "bg-stone-100/70" : ""
-                    }`}
-                  >
-                    <div className="flex items-baseline justify-between gap-2">
-                      <span className="truncate font-mono text-xs font-bold text-stone-900">{skill.name}</span>
-                      <SkillSourceLabel source={skill.source} />
-                    </div>
-                    <div className="mt-1 font-mono text-[9px] text-stone-500">
-                      {skill.files.length} markdown files
-                    </div>
-                  </button>
-                </li>
-              ))}
-            </ul>
-          </aside>
-          <div className="grid min-w-0 grid-cols-[14rem_minmax(0,1fr)]">
-            <aside className="border-r border-outline-variant bg-white/20">
-              <div className="border-b border-outline-variant px-3 py-2 font-mono text-[9px] uppercase tracking-[0.12em] text-stone-500">
-                Files
-              </div>
-              <ul className="divide-y divide-outline-variant">
-                {selectedSkill?.files.map((file) => (
-                  <li key={file.path}>
-                    <button
-                      type="button"
-                      data-testid={`library-skill-file-${file.name}`}
-                      data-active={selectedFile?.path === file.path}
-                      onClick={() => selectFile(file)}
-                      className={`block w-full px-3 py-2 text-left font-mono text-[10px] hover:bg-stone-100/50 ${
-                        selectedFile?.path === file.path ? "bg-stone-100/70 text-stone-900" : "text-stone-700"
-                      }`}
-                    >
-                      {file.name}
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            </aside>
-            <div className="min-w-0">
-              {selectedSkill && selectedFile ? (
-                <FileViewer
-                  path={`${selectedSkill.name}/${selectedFile.name}`}
-                  root={selectedSkill.root}
-                  readPath={selectedFile.path}
-                  kind="markdown"
-                />
-              ) : (
-                <EmptyState
-                  label="NO FILE SELECTED"
-                  description="Select a skill file to preview it."
-                  variant="card"
-                  testId="library-skill-no-file"
-                />
-              )}
-            </div>
-          </div>
-        </div>
+        <ul className="divide-y divide-outline-variant">
+          {skills.map((skill) => (
+            <li key={skill.id}>
+              <a
+                href={librarySkillHref(skill.id)}
+                data-testid={`library-skill-${skill.name}`}
+                className="flex items-baseline justify-between gap-3 px-3 py-2 font-mono hover:bg-stone-100/50"
+              >
+                <span className="truncate text-xs font-bold text-stone-900">{skill.name}</span>
+                <span className="shrink-0 text-[9px] uppercase tracking-[0.08em] text-stone-500">
+                  {skill.files.length} files
+                </span>
+              </a>
+            </li>
+          ))}
+        </ul>
       )}
     </section>
   );

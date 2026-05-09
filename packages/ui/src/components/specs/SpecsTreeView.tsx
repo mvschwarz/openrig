@@ -1,15 +1,21 @@
 import { useMemo, useState } from "react";
-import { Link } from "@tanstack/react-router";
+import { Link, useRouterState } from "@tanstack/react-router";
 import { ChevronDown, ChevronRight } from "lucide-react";
 import { useSpecLibrary, type SpecLibraryEntry } from "../../hooks/useSpecLibrary.js";
 import { useContextPackLibrary } from "../../hooks/useContextPackLibrary.js";
 import { useAgentImageLibrary } from "../../hooks/useAgentImageLibrary.js";
 import { useLibrarySkills } from "../../hooks/useLibrarySkills.js";
+import {
+  librarySkillFileToken,
+  librarySkillSelectionFromPath,
+  librarySkillToken,
+} from "../../lib/library-skills-routing.js";
 
 interface TreeEntry {
   id: string;
   name: string;
   entryId?: string;
+  skillId?: string;
   meta?: string;
 }
 
@@ -64,6 +70,15 @@ function Section({
                   >
                     {entry.name}
                   </Link>
+                ) : entry.skillId ? (
+                  <Link
+                    to="/specs/skills/$skillToken"
+                    params={{ skillToken: librarySkillToken(entry.skillId) }}
+                    data-testid={`specs-leaf-${entry.id}`}
+                    className="block truncate font-mono text-xs text-on-surface hover:bg-surface-low hover:text-stone-900"
+                  >
+                    {entry.name}
+                  </Link>
                 ) : (
                   <div
                     data-testid={`specs-leaf-${entry.id}`}
@@ -91,10 +106,12 @@ function Section({
 }
 
 export function SpecsTreeView() {
+  const routerState = useRouterState();
   const { data: library = [], isLoading: specsLoading } = useSpecLibrary();
   const { data: contextPacks = [], isLoading: contextPacksLoading } = useContextPackLibrary();
   const { data: agentImages = [], isLoading: agentImagesLoading } = useAgentImageLibrary();
   const { data: skills = [], isLoading: skillsLoading } = useLibrarySkills();
+  const activeSkill = librarySkillSelectionFromPath(routerState.location.pathname);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({
     "rig-specs": true,
     "workspace-specs": false,
@@ -105,8 +122,11 @@ export function SpecsTreeView() {
     applications: false,
     skills: false,
   });
+  const [expandedSkills, setExpandedSkills] = useState<Record<string, boolean>>({});
   const toggle = (id: string) =>
     setExpanded((prev) => ({ ...prev, [id]: !prev[id] }));
+  const toggleSkill = (id: string) =>
+    setExpandedSkills((prev) => ({ ...prev, [id]: !prev[id] }));
 
   const sections = useMemo<SectionDef[]>(() => {
     const rigSpecs = library.filter((entry) => entry.kind === "rig" && !entry.hasServices).map(specEntry);
@@ -147,7 +167,7 @@ export function SpecsTreeView() {
         entries: skills.map((skill) => ({
           id: skill.id,
           name: skill.name,
-          meta: skill.source === "workspace" ? "workspace" : "openrig",
+          skillId: skill.id,
         })),
         loading: skillsLoading,
       },
@@ -175,14 +195,103 @@ export function SpecsTreeView() {
         </Link>
       </div>
       <ul>
-        {sections.map((def) => (
-          <Section
-            key={def.id}
-            def={def}
-            expanded={!!expanded[def.id]}
-            onToggle={() => toggle(def.id)}
-          />
-        ))}
+        {sections.map((def) => {
+          if (def.id !== "skills") {
+            return (
+              <Section
+                key={def.id}
+                def={def}
+                expanded={!!expanded[def.id]}
+                onToggle={() => toggle(def.id)}
+              />
+            );
+          }
+
+          const Chevron = expanded.skills ? ChevronDown : ChevronRight;
+          return (
+            <li key={def.id} data-testid="specs-section-skills">
+              <button
+                type="button"
+                onClick={() => toggle("skills")}
+                data-testid="specs-section-toggle-skills"
+                className="w-full flex items-center gap-1 px-2 py-1 hover:bg-surface-low text-left"
+              >
+                <Chevron className="h-3 w-3 text-on-surface-variant" />
+                <span className="font-mono text-[11px] uppercase tracking-wide text-stone-900 flex-1">
+                  Skills
+                </span>
+                <span className="font-mono text-[10px] text-on-surface-variant">
+                  {skillsLoading ? "..." : skills.length}
+                </span>
+              </button>
+              {expanded.skills ? (
+                <ul className="ml-5 border-l border-stone-200">
+                  {skills.length > 0 ? (
+                    skills.map((skill) => {
+                      const skillOpen = expandedSkills[skill.id] || activeSkill?.skillId === skill.id;
+                      const SkillChevron = skillOpen ? ChevronDown : ChevronRight;
+                      return (
+                        <li key={skill.id} className="px-2 py-0.5">
+                          <div className="flex items-center gap-1">
+                            <button
+                              type="button"
+                              onClick={() => toggleSkill(skill.id)}
+                              aria-label={`${skillOpen ? "Collapse" : "Expand"} ${skill.name}`}
+                              className="inline-flex h-4 w-4 shrink-0 items-center justify-center text-stone-500 hover:text-stone-900"
+                            >
+                              <SkillChevron className="h-3 w-3" />
+                            </button>
+                            <Link
+                              to="/specs/skills/$skillToken"
+                              params={{ skillToken: librarySkillToken(skill.id) }}
+                              data-testid={`specs-leaf-${skill.id}`}
+                              onClick={() => {
+                                setExpandedSkills((prev) => ({ ...prev, [skill.id]: true }));
+                              }}
+                              className="min-w-0 flex-1 truncate font-mono text-xs text-on-surface hover:bg-surface-low hover:text-stone-900"
+                            >
+                              {skill.name}
+                            </Link>
+                          </div>
+                          {skillOpen ? (
+                            <ul className="ml-4 border-l border-stone-200">
+                              {skill.files.map((file) => {
+                                const activeFile = activeSkill?.skillId === skill.id
+                                  && (activeSkill.filePath === file.path || (!activeSkill.filePath && file.name.toLowerCase() === "skill.md"));
+                                return (
+                                  <li key={file.path} className="px-2 py-0.5">
+                                    <Link
+                                      to="/specs/skills/$skillToken/file/$fileToken"
+                                      params={{
+                                        skillToken: librarySkillToken(skill.id),
+                                        fileToken: librarySkillFileToken(file.path),
+                                      }}
+                                      data-testid={`specs-skill-file-${file.name}`}
+                                      data-active={activeFile}
+                                      className={`block truncate font-mono text-[11px] hover:bg-surface-low hover:text-stone-900 ${
+                                        activeFile ? "text-stone-900" : "text-on-surface-variant"
+                                      }`}
+                                    >
+                                      {file.name}
+                                    </Link>
+                                  </li>
+                                );
+                              })}
+                            </ul>
+                          ) : null}
+                        </li>
+                      );
+                    })
+                  ) : (
+                    <li className="px-2 py-1 font-mono text-[10px] text-on-surface-variant italic">
+                      {skillsLoading ? "Loading..." : "No skills yet."}
+                    </li>
+                  )}
+                </ul>
+              ) : null}
+            </li>
+          );
+        })}
       </ul>
     </div>
   );

@@ -40,6 +40,7 @@ import { EmptyState } from "./components/ui/empty-state.js";
 import { Dashboard } from "./components/dashboard/Dashboard.js";
 import { Feed } from "./components/for-you/Feed.js";
 import { SpecsLibraryPage } from "./components/specs/SpecsLibraryPage.js";
+import { SkillDetailPage } from "./components/specs/SkillDetailPage.js";
 import { SettingsCenter } from "./components/system/SettingsCenter.js";
 import {
   HostScopePage,
@@ -137,6 +138,24 @@ const specsApplicationsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/specs/applications",
   component: SpecsLibraryPage,
+});
+
+const specsSkillRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/specs/skills/$skillToken",
+  component: () => {
+    const { skillToken } = useParams({ from: "/specs/skills/$skillToken" });
+    return <SkillDetailPage skillToken={skillToken} />;
+  },
+});
+
+const specsSkillFileRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/specs/skills/$skillToken/file/$fileToken",
+  component: () => {
+    const { skillToken, fileToken } = useParams({ from: "/specs/skills/$skillToken/file/$fileToken" });
+    return <SkillDetailPage skillToken={skillToken} fileToken={fileToken} />;
+  },
 });
 
 // Generic spec detail by kind/name — Phase 4+ wires direct mounts of
@@ -363,6 +382,8 @@ const routeTree = rootRoute.addChildren([
   projectSliceRoute,
   specsLibraryRoute,
   specsApplicationsRoute,
+  specsSkillRoute,
+  specsSkillFileRoute,
   specsKindRoute,
   settingsRoute,
   searchRoute,
