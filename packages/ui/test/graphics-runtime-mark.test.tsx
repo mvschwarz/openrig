@@ -21,9 +21,14 @@ describe("graphics runtime package", () => {
     expect(normalizeToolBrandId("tmux attach")).toBe("tmux");
     expect(normalizeToolBrandId("Visual Studio Code")).toBe("vscode");
     expect(normalizeToolBrandId("proof-image.png")).toBe("screenshot");
-    expect(normalizeToolBrandId("SKILL.md")).toBe("file");
-    expect(normalizeToolBrandId("config.yaml")).toBe("file");
+    expect(normalizeToolBrandId("SKILL.md")).toBe("skill");
+    expect(normalizeToolBrandId("README.md")).toBe("markdown");
+    expect(normalizeToolBrandId("config.yaml")).toBe("config");
+    expect(normalizeToolBrandId("src/App.tsx")).toBe("code");
+    expect(normalizeToolBrandId("capture.log")).toBe("transcript");
+    expect(normalizeToolBrandId("trace.zip")).toBe("trace");
     expect(toolBrand("cmux").actionLabel).toBe("Open in CMUX");
+    expect(toolBrand("proof").label).toBe("Proof");
   });
 
   it("renders compact runtime badges with graphics and short labels", () => {
@@ -53,6 +58,24 @@ describe("graphics runtime package", () => {
     const { container } = render(<ToolMark tool="SKILL.md" title="SKILL.md" decorative />);
     expect(container.querySelector("svg[aria-hidden='true']")).toBeTruthy();
     expect(screen.queryByRole("img", { name: "SKILL.md" })).toBeNull();
+  });
+
+  it("renders artifact marks for proof, markdown, config, code, and traces", () => {
+    const { container } = render(
+      <div>
+        <ToolMark tool="proof" title="Proof packet" />
+        <ToolMark tool="README.md" title="README.md" />
+        <ToolMark tool="config.yaml" title="config.yaml" />
+        <ToolMark tool="App.tsx" title="App.tsx" />
+        <ToolMark tool="trace.zip" title="trace.zip" />
+      </div>,
+    );
+    expect(screen.getByRole("img", { name: "Proof packet" })).toBeTruthy();
+    expect(screen.getByRole("img", { name: "README.md" })).toBeTruthy();
+    expect(screen.getByRole("img", { name: "config.yaml" })).toBeTruthy();
+    expect(screen.getByRole("img", { name: "App.tsx" })).toBeTruthy();
+    expect(screen.getByRole("img", { name: "trace.zip" })).toBeTruthy();
+    expect(container.querySelectorAll("svg").length).toBe(5);
   });
 
   it("renders the human actor mark through the raster mask asset", () => {

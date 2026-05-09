@@ -54,6 +54,16 @@ const toolToneClass: Record<ToolBrandId, string> = {
   tmux: "border-emerald-400/45 bg-emerald-50/75 text-emerald-950",
   vscode: "border-sky-400/45 bg-sky-50/75 text-sky-950",
   screenshot: "border-amber-400/45 bg-amber-50/75 text-amber-950",
+  proof: "border-emerald-400/45 bg-emerald-50/75 text-emerald-950",
+  markdown: "border-stone-300 bg-white/60 text-stone-800",
+  config: "border-sky-300/60 bg-sky-50/70 text-sky-950",
+  code: "border-stone-400/45 bg-stone-900/8 text-stone-900",
+  transcript: "border-stone-400/45 bg-stone-900/8 text-stone-800",
+  commit: "border-emerald-400/45 bg-emerald-50/75 text-emerald-950",
+  folder: "border-stone-300 bg-white/55 text-stone-700",
+  skill: "border-amber-400/45 bg-amber-50/75 text-amber-950",
+  video: "border-sky-400/45 bg-sky-50/75 text-sky-950",
+  trace: "border-stone-400/45 bg-stone-50/75 text-stone-800",
   terminal: "border-stone-400/45 bg-stone-900/8 text-stone-800",
   file: "border-stone-300 bg-white/60 text-stone-700",
   unknown: "border-stone-300 bg-white/55 text-stone-600",
@@ -143,6 +153,38 @@ function FileGlyph({ className, title, decorative }: { className?: string; title
   );
 }
 
+function MarkdownGlyph({ className, title, decorative }: { className?: string; title: string; decorative?: boolean }) {
+  return (
+    <svg viewBox="0 0 16 16" {...glyphA11y(title, decorative)} className={className}>
+      <path d="M3 2.5h10v11H3z" fill="#fafaf9" stroke="#57534e" strokeWidth="0.9" />
+      <path d="M5 6v4M5 6l1.7 2.2L8.4 6v4M10 6v4M9.1 9.1 10 10l.9-.9" fill="none" stroke="#292524" strokeWidth="0.85" strokeLinecap="square" strokeLinejoin="miter" />
+      <path d="M4.6 4.2h6.8" stroke="#a8a29e" strokeWidth="0.65" />
+    </svg>
+  );
+}
+
+function ConfigGlyph({ className, title, decorative }: { className?: string; title: string; decorative?: boolean }) {
+  return (
+    <svg viewBox="0 0 16 16" {...glyphA11y(title, decorative)} className={className}>
+      <path d="M3 2.5h10v11H3z" fill="#eff6ff" stroke="#0369a1" strokeWidth="0.9" />
+      <path d="M5.1 5.3h5.8M5.1 8h5.8M5.1 10.7h5.8" stroke="#075985" strokeWidth="0.75" strokeLinecap="square" />
+      <circle cx="4.2" cy="5.3" r="0.45" fill="#0284c7" />
+      <circle cx="4.2" cy="8" r="0.45" fill="#0284c7" />
+      <circle cx="4.2" cy="10.7" r="0.45" fill="#0284c7" />
+    </svg>
+  );
+}
+
+function CodeGlyph({ className, title, decorative }: { className?: string; title: string; decorative?: boolean }) {
+  return (
+    <svg viewBox="0 0 16 16" {...glyphA11y(title, decorative)} className={className}>
+      <rect x="2.5" y="3" width="11" height="10" fill="#fafaf9" stroke="#292524" strokeWidth="0.9" />
+      <path d="M6.2 6.2 4.6 8l1.6 1.8M9.8 6.2 11.4 8 9.8 9.8" fill="none" stroke="#292524" strokeWidth="0.9" strokeLinecap="square" strokeLinejoin="miter" />
+      <path d="M8.7 5.4 7.3 10.6" stroke="#57534e" strokeWidth="0.75" strokeLinecap="square" />
+    </svg>
+  );
+}
+
 function ScreenshotGlyph({ className, title, decorative }: { className?: string; title: string; decorative?: boolean }) {
   return (
     <svg viewBox="0 0 16 16" {...glyphA11y(title, decorative)} className={className}>
@@ -154,6 +196,77 @@ function ScreenshotGlyph({ className, title, decorative }: { className?: string;
       <path d="M4 11.5h7.8" stroke="#ea580c" strokeWidth="0.9" strokeLinecap="square" />
       <circle cx="4" cy="4.1" r="0.35" fill="#9a3412" />
       <circle cx="5.1" cy="4.1" r="0.35" fill="#9a3412" />
+    </svg>
+  );
+}
+
+function ProofGlyph({ className, title, decorative }: { className?: string; title: string; decorative?: boolean }) {
+  return (
+    <svg viewBox="0 0 16 16" {...glyphA11y(title, decorative)} className={className}>
+      <path d="M3 2.8h10v10.4H3z" fill="#ecfdf5" stroke="#047857" strokeWidth="0.9" />
+      <path d="M5.1 8.1 7 10l4-4.3" fill="none" stroke="#059669" strokeWidth="1.2" strokeLinecap="square" strokeLinejoin="miter" />
+      <path d="M4.7 4.7h6.6" stroke="#6ee7b7" strokeWidth="0.7" />
+      <path d="M4.7 11.6h6.6" stroke="#6ee7b7" strokeWidth="0.7" />
+    </svg>
+  );
+}
+
+function TranscriptGlyph({ className, title, decorative }: { className?: string; title: string; decorative?: boolean }) {
+  return (
+    <svg viewBox="0 0 16 16" {...glyphA11y(title, decorative)} className={className}>
+      <rect x="2.5" y="3" width="11" height="10" fill="#1c1917" />
+      <path d="M4.3 5.5h3.8M4.3 7.6h6.8M4.3 9.7h5.2" stroke="#fafaf9" strokeWidth="0.75" strokeLinecap="square" />
+      <rect x="11.1" y="5.1" width="1" height="5.6" fill="#a8a29e" />
+    </svg>
+  );
+}
+
+function CommitGlyph({ className, title, decorative }: { className?: string; title: string; decorative?: boolean }) {
+  return (
+    <svg viewBox="0 0 16 16" {...glyphA11y(title, decorative)} className={className}>
+      <path d="M2.4 8h11.2" stroke="#064e3b" strokeWidth="1" strokeLinecap="square" />
+      <circle cx="8" cy="8" r="2.6" fill="#ecfdf5" stroke="#047857" strokeWidth="1" />
+      <circle cx="8" cy="8" r="0.8" fill="#10b981" />
+    </svg>
+  );
+}
+
+function FolderGlyph({ className, title, decorative }: { className?: string; title: string; decorative?: boolean }) {
+  return (
+    <svg viewBox="0 0 16 16" {...glyphA11y(title, decorative)} className={className}>
+      <path d="M2.3 5.1h4l1-1.5h6.4v8.8H2.3z" fill="#f5f5f4" stroke="#78716c" strokeWidth="0.9" />
+      <path d="M2.3 6.3h11.4" stroke="#a8a29e" strokeWidth="0.75" />
+    </svg>
+  );
+}
+
+function SkillGlyph({ className, title, decorative }: { className?: string; title: string; decorative?: boolean }) {
+  return (
+    <svg viewBox="0 0 16 16" {...glyphA11y(title, decorative)} className={className}>
+      <path d="M3.2 2.8h7.1L13 5.5v7.7H3.2z" fill="#fffbeb" stroke="#92400e" strokeWidth="0.9" />
+      <path d="M10.3 2.8v2.8H13" fill="none" stroke="#92400e" strokeWidth="0.8" />
+      <path d="M5.1 6.7h5.1M5.1 8.7h4.1" stroke="#b45309" strokeWidth="0.75" strokeLinecap="square" />
+      <path d="M5.1 11.1h2.2" stroke="#f59e0b" strokeWidth="1" strokeLinecap="square" />
+    </svg>
+  );
+}
+
+function VideoGlyph({ className, title, decorative }: { className?: string; title: string; decorative?: boolean }) {
+  return (
+    <svg viewBox="0 0 16 16" {...glyphA11y(title, decorative)} className={className}>
+      <rect x="2.5" y="3.6" width="8.4" height="8.8" fill="#eff6ff" stroke="#0369a1" strokeWidth="0.9" />
+      <path d="M10.9 6.3 13.7 4.9v6.2l-2.8-1.4z" fill="#38bdf8" stroke="#0369a1" strokeWidth="0.75" />
+      <path d="M5.7 6.3v3.4L8.5 8z" fill="#0284c7" />
+    </svg>
+  );
+}
+
+function TraceGlyph({ className, title, decorative }: { className?: string; title: string; decorative?: boolean }) {
+  return (
+    <svg viewBox="0 0 16 16" {...glyphA11y(title, decorative)} className={className}>
+      <rect x="2.7" y="2.7" width="10.6" height="10.6" fill="#fafaf9" stroke="#57534e" strokeWidth="0.9" />
+      <path d="M4.7 10.2c1.1-4.8 2.3-4.8 3.4-.1s2.2 4.7 3.2-.2" fill="none" stroke="#44403c" strokeWidth="0.9" strokeLinecap="square" />
+      <path d="M4.4 5.2h2M9.6 5.2h2" stroke="#a8a29e" strokeWidth="0.7" />
     </svg>
   );
 }
@@ -283,7 +396,17 @@ export function ToolMark({
   if (id === "vscode") return <VSCodeGlyph className={cls} title={label} decorative={decorative} />;
   if (id === "terminal") return <TerminalGlyph className={cls} title={label} decorative={decorative} />;
   if (id === "file") return <FileGlyph className={cls} title={label} decorative={decorative} />;
+  if (id === "markdown") return <MarkdownGlyph className={cls} title={label} decorative={decorative} />;
+  if (id === "config") return <ConfigGlyph className={cls} title={label} decorative={decorative} />;
+  if (id === "code") return <CodeGlyph className={cls} title={label} decorative={decorative} />;
   if (id === "screenshot") return <ScreenshotGlyph className={cls} title={label} decorative={decorative} />;
+  if (id === "proof") return <ProofGlyph className={cls} title={label} decorative={decorative} />;
+  if (id === "transcript") return <TranscriptGlyph className={cls} title={label} decorative={decorative} />;
+  if (id === "commit") return <CommitGlyph className={cls} title={label} decorative={decorative} />;
+  if (id === "folder") return <FolderGlyph className={cls} title={label} decorative={decorative} />;
+  if (id === "skill") return <SkillGlyph className={cls} title={label} decorative={decorative} />;
+  if (id === "video") return <VideoGlyph className={cls} title={label} decorative={decorative} />;
+  if (id === "trace") return <TraceGlyph className={cls} title={label} decorative={decorative} />;
   return <UnknownGlyph className={cls} title={label} decorative={decorative} />;
 }
 

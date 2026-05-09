@@ -51,9 +51,9 @@ export function DocsTab({ sliceName, tree }: { sliceName: string; tree: DocsTree
           >
             <span className="inline-flex min-w-0 items-center gap-1.5">
               {entry.type === "dir" ? (
-                <span className="text-stone-400">▸</span>
+                <ToolMark tool="folder" size="xs" decorative />
               ) : (
-                <ToolMark tool={entry.name} size="xs" />
+                <ToolMark tool={entry.name} size="xs" decorative />
               )}
               <span className="truncate">{entry.name}</span>
             </span>

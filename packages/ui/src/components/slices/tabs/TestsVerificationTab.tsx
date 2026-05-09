@@ -81,7 +81,7 @@ export function TestsVerificationTab({
     <div data-testid="tests-tab" className="p-4 space-y-4">
       <header className="flex items-center justify-between border-b border-stone-200 pb-2">
         <div className="inline-flex items-center gap-1.5 font-mono text-[11px] uppercase tracking-[0.12em] text-stone-700">
-          <ToolMark tool="screenshot" size="xs" />
+          <ToolMark tool="proof" size="xs" />
           Tests / Verification
         </div>
         <div className="font-mono text-[10px] text-stone-500" data-testid="tests-aggregate">
@@ -131,7 +131,7 @@ function ProofPacketSection({ sliceName, packet }: { sliceName: string; packet: 
         {packet.primaryMarkdown && (
           <div data-testid={`tests-packet-primary-md-${packet.dirName}`}>
             <div className="mb-1 font-mono text-[8px] uppercase tracking-[0.12em] text-stone-500">
-              <ToolMark tool={packet.primaryMarkdown.relPath} size="xs" className="mr-1 inline-block align-[-2px]" />
+              <ToolMark tool={packet.primaryMarkdown.relPath} size="xs" className="mr-1 inline-block align-[-2px]" decorative />
               {packet.primaryMarkdown.relPath}
             </div>
             <pre className="whitespace-pre-wrap break-words bg-stone-50 p-3 font-mono text-[10px] text-stone-800">
@@ -143,7 +143,7 @@ function ProofPacketSection({ sliceName, packet }: { sliceName: string; packet: 
         {packet.screenshots.length > 0 && (
           <section data-testid={`tests-packet-screenshots-${packet.dirName}`}>
             <div className="mb-1 font-mono text-[8px] uppercase tracking-[0.12em] text-stone-500">
-              <ToolMark tool="screenshot" size="xs" className="mr-1 inline-block align-[-2px]" />
+              <ToolMark tool="screenshot" size="xs" className="mr-1 inline-block align-[-2px]" decorative />
               Screenshots ({packet.screenshots.length})
             </div>
             <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
@@ -164,7 +164,7 @@ function ProofPacketSection({ sliceName, packet }: { sliceName: string; packet: 
                     />
                   </button>
                   <figcaption className="bg-stone-50 px-2 py-1 font-mono text-[9px] text-stone-500 truncate">
-                    <ToolMark tool={rel} size="xs" className="mr-1 inline-block align-[-2px]" />
+                    <ToolMark tool={rel} size="xs" className="mr-1 inline-block align-[-2px]" decorative />
                     {rel}
                   </figcaption>
                 </figure>
@@ -184,7 +184,7 @@ function ProofPacketSection({ sliceName, packet }: { sliceName: string; packet: 
         {packet.videos.length > 0 && (
           <section data-testid={`tests-packet-videos-${packet.dirName}`}>
             <div className="mb-1 font-mono text-[8px] uppercase tracking-[0.12em] text-stone-500">
-              <ToolMark tool="terminal" size="xs" className="mr-1 inline-block align-[-2px]" />
+              <ToolMark tool="video" size="xs" className="mr-1 inline-block align-[-2px]" decorative />
               Videos ({packet.videos.length})
             </div>
             <div className="space-y-3">
@@ -209,7 +209,7 @@ function ProofPacketSection({ sliceName, packet }: { sliceName: string; packet: 
         {packet.traces.length > 0 && (
           <section data-testid={`tests-packet-traces-${packet.dirName}`}>
             <div className="mb-1 font-mono text-[8px] uppercase tracking-[0.12em] text-stone-500">
-              <ToolMark tool="file" size="xs" className="mr-1 inline-block align-[-2px]" />
+              <ToolMark tool="trace" size="xs" className="mr-1 inline-block align-[-2px]" decorative />
               Traces (download)
             </div>
             <ul className="font-mono text-[10px]">
@@ -218,8 +218,9 @@ function ProofPacketSection({ sliceName, packet }: { sliceName: string; packet: 
                   <a
                     href={proofAssetUrl(sliceName, rel)}
                     download
-                    className="text-blue-700 hover:underline"
+                    className="inline-flex items-center gap-1 text-blue-700 hover:underline"
                   >
+                    <ToolMark tool={rel} size="xs" decorative />
                     {rel}
                   </a>
                 </li>
@@ -236,7 +237,10 @@ function ProofPacketSection({ sliceName, packet }: { sliceName: string; packet: 
             <div className="mt-2 space-y-2">
               {packet.additionalMarkdown.map((md) => (
                 <div key={md.relPath}>
-                  <div className="font-mono text-[8px] uppercase tracking-[0.12em] text-stone-500">{md.relPath}</div>
+                  <div className="inline-flex items-center gap-1 font-mono text-[8px] uppercase tracking-[0.12em] text-stone-500">
+                    <ToolMark tool={md.relPath} size="xs" decorative />
+                    {md.relPath}
+                  </div>
                   <pre className="whitespace-pre-wrap break-words bg-stone-50 p-2 font-mono text-[9px] text-stone-700">{md.content}</pre>
                 </div>
               ))}

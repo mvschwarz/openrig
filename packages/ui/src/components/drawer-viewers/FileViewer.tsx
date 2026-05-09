@@ -13,6 +13,7 @@ import {
   type AllowlistRoot,
 } from "../../hooks/useFiles.js";
 import { ToolMark } from "../graphics/RuntimeMark.js";
+import { toolBrand } from "../../lib/tool-brand.js";
 
 export type FileKind = "markdown" | "text" | "yaml" | "json" | "image" | "binary";
 
@@ -120,8 +121,8 @@ function FileViewerBody({
     <div data-testid="file-viewer" data-file-kind={resolvedKind} className="flex flex-col h-full">
       <header className="px-4 py-3 border-b border-outline-variant">
         <div className="inline-flex items-center gap-1.5">
-          <ToolMark tool={path} size="sm" />
-          <SectionHeader tone="muted">File</SectionHeader>
+          <ToolMark tool={path} size="sm" decorative />
+          <SectionHeader tone="muted">{toolBrand(path).label}</SectionHeader>
         </div>
         <h3 className="mt-1 font-mono text-xs text-stone-900 break-all">{path}</h3>
         {target && (
