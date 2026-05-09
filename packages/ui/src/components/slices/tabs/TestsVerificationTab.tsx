@@ -17,13 +17,15 @@
 import { useState } from "react";
 import type { SliceDetail, ProofPacketRendered } from "../../../hooks/useSlices.js";
 import { proofAssetUrl } from "../../../hooks/useSlices.js";
+import { ToolMark } from "../../graphics/RuntimeMark.js";
+import { ProofPacketHeader } from "../../project/ProjectMetaPrimitives.js";
 import { ProofImageViewer } from "../../project/ProofImageViewer.js";
 
-const BADGE_CLASSES: Record<ProofPacketRendered["passFailBadge"], string> = {
-  pass: "border-emerald-300 bg-emerald-50 text-emerald-900",
-  fail: "border-red-300 bg-red-50 text-red-900",
-  partial: "border-amber-300 bg-amber-50 text-amber-900",
-  unknown: "border-stone-300 bg-stone-50 text-stone-700",
+const BADGE_TEST_TONE_CLASSES: Record<ProofPacketRendered["passFailBadge"], string> = {
+  pass: "text-emerald-900",
+  fail: "text-red-900",
+  partial: "text-amber-900",
+  unknown: "text-stone-700",
 };
 
 export function TestsVerificationTab({
@@ -78,7 +80,8 @@ export function TestsVerificationTab({
   return (
     <div data-testid="tests-tab" className="p-4 space-y-4">
       <header className="flex items-center justify-between border-b border-stone-200 pb-2">
-        <div className="font-mono text-[11px] uppercase tracking-[0.12em] text-stone-700">
+        <div className="inline-flex items-center gap-1.5 font-mono text-[11px] uppercase tracking-[0.12em] text-stone-700">
+          <ToolMark tool="screenshot" size="xs" />
           Tests / Verification
         </div>
         <div className="font-mono text-[10px] text-stone-500" data-testid="tests-aggregate">
@@ -117,18 +120,18 @@ function ProofPacketSection({ sliceName, packet }: { sliceName: string; packet: 
       data-testid={`tests-packet-${packet.dirName}`}
     >
       <header className="flex items-center justify-between border-b border-stone-200 bg-stone-50 px-3 py-2">
-        <div className="font-mono text-[10px] text-stone-700 truncate">{packet.dirName}</div>
-        <span
+        <div
+          className={`min-w-0 flex-1 ${BADGE_TEST_TONE_CLASSES[packet.passFailBadge]}`}
           data-testid={`tests-packet-badge-${packet.dirName}`}
-          className={`border px-2 py-0.5 font-mono text-[9px] uppercase tracking-[0.10em] ${BADGE_CLASSES[packet.passFailBadge]}`}
         >
-          {packet.passFailBadge}
-        </span>
+          <ProofPacketHeader title={packet.dirName} badge={packet.passFailBadge} />
+        </div>
       </header>
       <div className="p-3 space-y-3">
         {packet.primaryMarkdown && (
           <div data-testid={`tests-packet-primary-md-${packet.dirName}`}>
             <div className="mb-1 font-mono text-[8px] uppercase tracking-[0.12em] text-stone-500">
+              <ToolMark tool={packet.primaryMarkdown.relPath} size="xs" className="mr-1 inline-block align-[-2px]" />
               {packet.primaryMarkdown.relPath}
             </div>
             <pre className="whitespace-pre-wrap break-words bg-stone-50 p-3 font-mono text-[10px] text-stone-800">
@@ -140,6 +143,7 @@ function ProofPacketSection({ sliceName, packet }: { sliceName: string; packet: 
         {packet.screenshots.length > 0 && (
           <section data-testid={`tests-packet-screenshots-${packet.dirName}`}>
             <div className="mb-1 font-mono text-[8px] uppercase tracking-[0.12em] text-stone-500">
+              <ToolMark tool="screenshot" size="xs" className="mr-1 inline-block align-[-2px]" />
               Screenshots ({packet.screenshots.length})
             </div>
             <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
@@ -160,6 +164,7 @@ function ProofPacketSection({ sliceName, packet }: { sliceName: string; packet: 
                     />
                   </button>
                   <figcaption className="bg-stone-50 px-2 py-1 font-mono text-[9px] text-stone-500 truncate">
+                    <ToolMark tool={rel} size="xs" className="mr-1 inline-block align-[-2px]" />
                     {rel}
                   </figcaption>
                 </figure>
@@ -179,6 +184,7 @@ function ProofPacketSection({ sliceName, packet }: { sliceName: string; packet: 
         {packet.videos.length > 0 && (
           <section data-testid={`tests-packet-videos-${packet.dirName}`}>
             <div className="mb-1 font-mono text-[8px] uppercase tracking-[0.12em] text-stone-500">
+              <ToolMark tool="terminal" size="xs" className="mr-1 inline-block align-[-2px]" />
               Videos ({packet.videos.length})
             </div>
             <div className="space-y-3">
@@ -203,6 +209,7 @@ function ProofPacketSection({ sliceName, packet }: { sliceName: string; packet: 
         {packet.traces.length > 0 && (
           <section data-testid={`tests-packet-traces-${packet.dirName}`}>
             <div className="mb-1 font-mono text-[8px] uppercase tracking-[0.12em] text-stone-500">
+              <ToolMark tool="file" size="xs" className="mr-1 inline-block align-[-2px]" />
               Traces (download)
             </div>
             <ul className="font-mono text-[10px]">

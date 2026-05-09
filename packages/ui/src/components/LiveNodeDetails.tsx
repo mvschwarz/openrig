@@ -594,6 +594,15 @@ export function LiveNodeDetails({ rigId, logicalId }: LiveNodeDetailsProps) {
           eyebrow="Live Node Details"
           title={data?.canonicalSessionName ?? logicalId}
           description={`${data?.rigName ?? rigId} / ${data?.podNamespace ?? inferPodName(logicalId) ?? displayPodName(data?.podId ?? null)} / ${logicalId}`}
+          actions={data ? (
+            <RuntimeBadge
+              runtime={data.runtime}
+              model={data.model}
+              size="sm"
+              compact
+              className="bg-white/40 backdrop-blur-sm"
+            />
+          ) : null}
         />
 
         {isLoading && <div className="font-mono text-[10px] text-stone-400">Loading...</div>}

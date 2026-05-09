@@ -17,6 +17,7 @@ import {
   FlowChips,
   ProjectPill,
   TagPill,
+  eventToken,
   type ProjectToken,
 } from "../../project/ProjectMetaPrimitives.js";
 
@@ -175,6 +176,8 @@ function StoryStepCard({
   const scopeLabel = detailString(event.detail, ["sliceLabel", "sliceName"]);
   const primaryBody = eventBody(event, queueItem);
   const bodyIsQitem = Boolean(queueItem?.body);
+  const stepToken = eventToken(event.kind);
+  const StepIcon = stepToken.icon;
   const rowBody = (
     <>
       <div className="flex flex-wrap items-center gap-2">
@@ -224,8 +227,10 @@ function StoryStepCard({
       )}
       <div
         data-testid={`story-step-dot-${event.kind}`}
-        className="absolute left-[8px] top-4 h-3 w-3 border border-outline-variant bg-white shadow-[1px_1px_0_rgba(46,52,46,0.12)]"
-      />
+        className="absolute left-[5px] top-3.5 flex h-5 w-5 items-center justify-center border border-outline-variant bg-white text-stone-600 shadow-[1px_1px_0_rgba(46,52,46,0.12)]"
+      >
+        {StepIcon ? <StepIcon className="h-3 w-3" strokeWidth={1.7} /> : null}
+      </div>
       {event.qitemId ? (
         <QueueItemTrigger
           data={qitemViewerData(event, queueItem)}
