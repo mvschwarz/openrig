@@ -7,9 +7,8 @@
 import { useState } from "react";
 import { GitBranch, GitCommitHorizontal, Network } from "lucide-react";
 import { SectionHeader } from "../ui/section-header.js";
-import { StatusPip } from "../ui/status-pip.js";
 import { EmptyState } from "../ui/empty-state.js";
-import { ActorChip, DateChip, TagPill } from "../project/ProjectMetaPrimitives.js";
+import { ActorChip, DateChip, FlowChips, QueueStateBadge, TagPill } from "../project/ProjectMetaPrimitives.js";
 import { ToolMark } from "../graphics/RuntimeMark.js";
 
 export interface QueueItemViewerData {
@@ -24,16 +23,6 @@ export interface QueueItemViewerData {
 }
 
 const PREVIEW_LINES = 30;
-
-function statusFromState(state: string | undefined): React.ComponentProps<typeof StatusPip>["status"] {
-  if (!state) return "info";
-  if (state === "done" || state === "completed") return "active";
-  if (state === "in-progress" || state === "running") return "running";
-  if (state === "failed" || state === "error" || state === "denied") return "error";
-  if (state === "blocked" || state === "human-gate" || state === "pending-approval") return "warning";
-  if (state === "stopped" || state === "canceled") return "stopped";
-  return "info";
-}
 
 export function QueueItemViewer({
   qitemId,
@@ -67,6 +56,11 @@ export function QueueItemViewer({
         <h3 className="mt-1 font-mono text-xs text-stone-900 break-all">{qitemId}</h3>
       </header>
       <div className="px-4 py-3 border-b border-outline-variant space-y-2 font-mono text-xs">
+        {source || destination ? (
+          <MetaRow label="Route">
+            <FlowChips source={source} destination={destination} muted />
+          </MetaRow>
+        ) : null}
         {source ? (
           <MetaRow label="Source">
             <ActorChip session={source} muted />
@@ -78,10 +72,9 @@ export function QueueItemViewer({
           </MetaRow>
         ) : null}
         {state ? (
-          <div className="flex items-center justify-between">
-            <span className="text-on-surface-variant">State</span>
-            <StatusPip status={statusFromState(state)} label={state} variant="pill" testId="qitem-state" />
-          </div>
+          <MetaRow label="State">
+            <QueueStateBadge state={state} testId="qitem-state" />
+          </MetaRow>
         ) : null}
         {tags && tags.length > 0 ? (
           <MetaRow label="Tags">

@@ -1,17 +1,22 @@
 import type { LucideIcon } from "lucide-react";
 import {
   ArrowRight,
+  Ban,
   CalendarDays,
   CheckCircle2,
   CircleAlert,
   CirclePlus,
   Clock,
+  ClipboardCheck,
   GitBranch,
   History,
+  Inbox,
   MessageSquareText,
   PackageCheck,
+  RotateCcw,
   Route,
   Send,
+  UserCheck,
 } from "lucide-react";
 import { cn } from "../../lib/utils.js";
 import { proofAssetUrl } from "../../hooks/useSlices.js";
@@ -35,11 +40,23 @@ const toneClass: Record<ProjectMetaTone, string> = {
 
 export function eventToken(kind: string): ProjectToken {
   const normalized = kind.toLowerCase();
-  if (normalized.includes("action") || normalized.includes("human") || normalized.includes("overdue")) {
-    return { label: "Human action", tone: "danger", icon: CircleAlert };
+  if (normalized.includes("mission_control.action_executed")) {
+    return { label: "Human decision", tone: "success", icon: ClipboardCheck };
+  }
+  if (normalized.includes("closure_overdue") || normalized.includes("overdue")) {
+    return { label: "Overdue", tone: "danger", icon: CircleAlert };
   }
   if (normalized.includes("approval")) {
-    return { label: "Approval", tone: "warning", icon: CircleAlert };
+    return { label: "Needs approval", tone: "warning", icon: ClipboardCheck };
+  }
+  if (normalized.includes("human-gate") || normalized.includes("human")) {
+    return { label: "Human action", tone: "danger", icon: CircleAlert };
+  }
+  if (normalized.includes("inbox.denied")) {
+    return { label: "Inbox denied", tone: "danger", icon: Ban };
+  }
+  if (normalized.includes("inbox.absorbed")) {
+    return { label: "Inbox absorbed", tone: "success", icon: Inbox };
   }
   if (normalized.includes("shipped")) {
     return { label: "Shipped", tone: "success", icon: PackageCheck };
@@ -59,19 +76,55 @@ export function eventToken(kind: string): ProjectToken {
   if (normalized.includes("ship") || normalized.includes("done") || normalized.includes("complete")) {
     return { label: "Completed", tone: "success", icon: CheckCircle2 };
   }
-  if (normalized.includes("claim")) {
-    return { label: "Claimed", tone: "warning", icon: Clock };
+  if (normalized.includes("unclaim")) {
+    return { label: "Released", tone: "neutral", icon: RotateCcw };
   }
-  if (normalized.includes("handoff") || normalized.includes("routed")) {
-    return { label: "Handoff", tone: "neutral", icon: Send };
+  if (normalized.includes("claim")) {
+    return { label: "Claimed", tone: "info", icon: UserCheck };
+  }
+  if (normalized.includes("handoff") || normalized.includes("handed_off") || normalized.includes("routed")) {
+    return { label: "Handoff", tone: "info", icon: Send };
   }
   if (normalized.includes("created")) {
-    return { label: "New queue item", tone: "info", icon: CirclePlus };
+    return { label: "Created", tone: "info", icon: CirclePlus };
+  }
+  if (normalized.includes("queue.updated") || normalized.includes("queue.item.updated")) {
+    return { label: "Queue update", tone: "neutral", icon: History };
   }
   if (normalized.includes("progress")) {
     return { label: "Progress", tone: "info", icon: History };
   }
   return { label: humanizeCodeLabel(kind), tone: "neutral", icon: MessageSquareText };
+}
+
+export function queueStateToken(state: string | undefined | null): ProjectToken {
+  const normalized = state?.toLowerCase().trim() ?? "";
+  if (!normalized) return { label: "Unknown state", tone: "neutral", icon: MessageSquareText };
+  if (normalized.includes("closeout-pending-ratify")) {
+    return { label: "Awaiting approval", tone: "warning", icon: ClipboardCheck };
+  }
+  if (normalized.includes("human-gate") || normalized.includes("pending-approval")) {
+    return { label: "Needs human", tone: "danger", icon: CircleAlert };
+  }
+  if (normalized.includes("blocked") || normalized.includes("failed") || normalized.includes("error") || normalized.includes("denied")) {
+    return { label: humanizeCodeLabel(state ?? ""), tone: "danger", icon: CircleAlert };
+  }
+  if (normalized.includes("handed-off") || normalized.includes("routed")) {
+    return { label: "Routed", tone: "info", icon: Send };
+  }
+  if (normalized.includes("done") || normalized.includes("complete") || normalized.includes("closed") || normalized.includes("shipped")) {
+    return { label: "Done", tone: "success", icon: CheckCircle2 };
+  }
+  if (normalized.includes("in-progress") || normalized.includes("running") || normalized.includes("claimed")) {
+    return { label: "In progress", tone: "info", icon: UserCheck };
+  }
+  if (normalized.includes("pending") || normalized.includes("open") || normalized.includes("queued")) {
+    return { label: "Pending", tone: "warning", icon: Clock };
+  }
+  if (normalized.includes("canceled") || normalized.includes("cancelled") || normalized.includes("stopped")) {
+    return { label: humanizeCodeLabel(state ?? ""), tone: "neutral", icon: Ban };
+  }
+  return { label: humanizeCodeLabel(state ?? ""), tone: "neutral", icon: History };
 }
 
 export function scopeToken(scope: "workspace" | "mission" | "slice"): ProjectToken {
@@ -158,6 +211,10 @@ export function EventBadge({ kind, compact, testId }: { kind: string; compact?: 
   return <ProjectPill token={eventToken(kind)} compact={compact} testId={testId} />;
 }
 
+export function QueueStateBadge({ state, compact, testId }: { state: string | undefined | null; compact?: boolean; testId?: string }) {
+  return <ProjectPill token={queueStateToken(state)} compact={compact} testId={testId} />;
+}
+
 export function TagPill({ tag, compact = true }: { tag: string; compact?: boolean }) {
   const tone: ProjectMetaTone =
     /urgent|blocked|human/i.test(tag) ? "danger" :
@@ -181,7 +238,7 @@ export function ActorChip({
         muted ? "border-stone-200 bg-white/35 text-stone-500" : "border-stone-300 bg-white/55 text-stone-800",
       )}
     >
-      <ActorMark actor={session} size="xs" />
+      <ActorMark actor={session} size="xs" decorative />
       <span className="truncate">{compactSessionLabel(session)}</span>
     </span>
   );
