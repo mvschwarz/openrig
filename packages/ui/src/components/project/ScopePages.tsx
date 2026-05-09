@@ -928,7 +928,10 @@ function SliceArtifactsTab({ detail }: { detail: SliceDetail }) {
           <ul className="mt-3 divide-y divide-outline-variant border border-outline-variant bg-white/30">
             {detail.commitRefs.map((commitRef) => (
               <li key={commitRef} className="px-3 py-2 font-mono text-[10px] text-stone-900">
-                {commitRef}
+                <span className="inline-flex min-w-0 items-center gap-1.5">
+                  <ToolMark tool="commit" size="xs" decorative />
+                  <span className="truncate">{commitRef}</span>
+                </span>
               </li>
             ))}
           </ul>
@@ -944,8 +947,19 @@ function SliceArtifactsTab({ detail }: { detail: SliceDetail }) {
             {proofPackets.map((packet) => (
               <li key={packet.dirName} className="px-3 py-2 font-mono text-[10px] text-stone-700">
                 <ProofPacketHeader title={packet.dirName} badge={packet.passFailBadge} />
-                <div className="mt-1 text-stone-400">
-                  {packet.screenshots.length} screenshots / {packet.videos.length} videos / {packet.traces.length} traces
+                <div className="mt-2 flex flex-wrap items-center gap-2 text-stone-500">
+                  <span className="inline-flex items-center gap-1">
+                    <ToolMark tool="screenshot" size="xs" decorative />
+                    {packet.screenshots.length} screenshots
+                  </span>
+                  <span className="inline-flex items-center gap-1">
+                    <ToolMark tool="video" size="xs" decorative />
+                    {packet.videos.length} videos
+                  </span>
+                  <span className="inline-flex items-center gap-1">
+                    <ToolMark tool="trace" size="xs" decorative />
+                    {packet.traces.length} traces
+                  </span>
                 </div>
               </li>
             ))}

@@ -156,7 +156,7 @@ function SkillsSection({
                 className="flex items-center justify-between gap-3 px-3 py-2 font-mono hover:bg-stone-100/50"
               >
                 <span className="flex min-w-0 items-center gap-2">
-                  <ToolMark tool="file" title={`${skill.name} skill`} size="xs" decorative />
+                  <ToolMark tool="skill" title={`${skill.name} skill`} size="xs" decorative />
                   <span className="truncate text-xs font-bold text-stone-900">{skill.name}</span>
                 </span>
                 <span className="shrink-0 text-[9px] uppercase tracking-[0.08em] text-stone-500">

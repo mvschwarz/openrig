@@ -5,7 +5,6 @@
 // + Related (clickable refs).
 
 import { useState } from "react";
-import { GitBranch, GitCommitHorizontal, Network } from "lucide-react";
 import { SectionHeader } from "../ui/section-header.js";
 import { EmptyState } from "../ui/empty-state.js";
 import { ActorChip, DateChip, FlowChips, QueueStateBadge, TagPill } from "../project/ProjectMetaPrimitives.js";
@@ -137,8 +136,9 @@ export function QueueItemViewer({
 
 function RelatedKindIcon({ kind, label }: { kind: NonNullable<QueueItemViewerData["related"]>[number]["kind"]; label: string }) {
   if (kind === "file") return <ToolMark tool={label} size="xs" />;
-  const Icon = kind === "commit" ? GitCommitHorizontal : kind === "slice" ? GitBranch : Network;
-  return <Icon className="h-3 w-3 shrink-0" strokeWidth={1.5} aria-hidden="true" />;
+  if (kind === "commit") return <ToolMark tool="commit" size="xs" decorative />;
+  if (kind === "slice") return <ToolMark tool="folder" size="xs" decorative />;
+  return <ToolMark tool="terminal" size="xs" decorative />;
 }
 
 function MetaRow({ label, children }: { label: string; children: React.ReactNode }) {

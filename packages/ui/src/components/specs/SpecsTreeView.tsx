@@ -255,7 +255,10 @@ export function SpecsTreeView() {
                               }}
                               className="min-w-0 flex-1 truncate font-mono text-xs text-on-surface hover:bg-surface-low hover:text-stone-900"
                             >
-                              {skill.name}
+                              <span className="inline-flex min-w-0 items-center gap-1.5">
+                                <ToolMark tool="skill" size="xs" title={`${skill.name} skill`} decorative />
+                                <span className="truncate">{skill.name}</span>
+                              </span>
                             </Link>
                           </div>
                           {skillOpen ? (

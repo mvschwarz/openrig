@@ -307,9 +307,13 @@ export function ProofThumbnailGrid({
             key={rel}
             type="button"
             onClick={() => onSelect(rel)}
-            className="block w-full text-left focus:outline-none focus:ring-2 focus:ring-stone-900/20"
+            className="group relative block w-full text-left focus:outline-none focus:ring-2 focus:ring-stone-900/20"
           >
             {image}
+            <span className="absolute left-1.5 top-1.5 inline-flex items-center gap-1 border border-amber-400/45 bg-white/80 px-1.5 py-0.5 font-mono text-[8px] uppercase tracking-[0.10em] text-amber-950 backdrop-blur-sm">
+              <ToolMark tool={rel} size="xs" decorative />
+              Proof image
+            </span>
           </button>
         );
       })}
@@ -327,7 +331,7 @@ export function ProofPacketHeader({
   return (
     <div className="flex items-center justify-between gap-2 font-mono text-[9px] uppercase tracking-[0.12em] text-stone-600">
       <span className="truncate inline-flex items-center gap-1">
-        <ToolMark tool="screenshot" size="xs" />
+        <ToolMark tool="proof" size="xs" />
         {title}
       </span>
       <ProjectPill token={{ label: badge, tone: stateTone(badge) }} compact />
