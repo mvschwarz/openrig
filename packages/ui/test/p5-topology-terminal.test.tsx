@@ -45,6 +45,10 @@ function makeSeat(opts: {
   logicalId: string;
   pod?: string;
   active?: boolean;
+  runtime?: string;
+  contextUsedPercentage?: number;
+  contextTotalInputTokens?: number;
+  contextTotalOutputTokens?: number;
 }): NodeInventoryEntry {
   return {
     rigId: opts.rigId ?? "rig-1",
@@ -54,7 +58,7 @@ function makeSeat(opts: {
     podNamespace: opts.pod ?? "default",
     canonicalSessionName: `${opts.logicalId}@test-rig`,
     nodeKind: "agent",
-    runtime: "claude-code",
+    runtime: opts.runtime ?? "claude-code",
     sessionStatus: "running",
     startupStatus: "ready",
     restoreOutcome: "n-a",
@@ -69,6 +73,18 @@ function makeSeat(opts: {
           sampledAt: "2026-05-06T18:00:00Z",
         }
       : { state: "idle", reason: "test", evidenceSource: "test", sampledAt: "2026-05-06T18:00:00Z" },
+    contextUsage: typeof opts.contextUsedPercentage === "number"
+      ? {
+          usedPercentage: opts.contextUsedPercentage,
+          remainingPercentage: 100 - opts.contextUsedPercentage,
+          contextWindowSize: 320000,
+          availability: "known",
+          sampledAt: "2026-05-09T10:00:00Z",
+          fresh: true,
+          totalInputTokens: opts.contextTotalInputTokens ?? null,
+          totalOutputTokens: opts.contextTotalOutputTokens ?? null,
+        }
+      : undefined,
   };
 }
 
@@ -159,6 +175,37 @@ describe("TopologyTerminalView P5-7 grid", () => {
     expect(container.querySelector("[data-testid='terminal-card-rig-1-orch.lead']")).toBeNull();
     expect(container.querySelector("[data-testid='terminal-card-rig-1-driver.impl']")).toBeTruthy();
     expect(container.querySelector("[data-testid='terminal-card-rig-1-qa.codex']")).toBeTruthy();
+  });
+
+  it("renders Codex context percentage and token total in terminal cards", async () => {
+    const seats = [
+      makeSeat({
+        logicalId: "guard.codex",
+        runtime: "codex",
+        contextUsedPercentage: 21,
+        contextTotalInputTokens: 54000,
+        contextTotalOutputTokens: 615,
+      }),
+    ];
+    setupFetch({ rigs: [{ id: "rig-1", name: "test-rig" }], seatsByRig: { "rig-1": seats } });
+    const { findByTestId } = withQueryClient(
+      <TopologyTerminalView scope="rig" rigId="rig-1" />,
+    );
+    const context = await findByTestId("terminal-card-context-rig-1-guard.codex");
+    const tokens = await findByTestId("terminal-card-tokens-rig-1-guard.codex");
+    expect(context.textContent).toBe("21%");
+    expect(tokens.textContent).toBe("55k");
+    expect(tokens.getAttribute("title")).toContain("Tokens: 54,615");
+  });
+
+  it("renders unknown context affordance when terminal cards have no sample", async () => {
+    const seats = [makeSeat({ logicalId: "orch.lead" })];
+    setupFetch({ rigs: [{ id: "rig-1", name: "test-rig" }], seatsByRig: { "rig-1": seats } });
+    const { findByTestId } = withQueryClient(
+      <TopologyTerminalView scope="rig" rigId="rig-1" />,
+    );
+    expect((await findByTestId("terminal-card-context-rig-1-orch.lead")).textContent).toBe("--");
+    expect((await findByTestId("terminal-card-tokens-rig-1-orch.lead")).textContent).toBe("--");
   });
 
   it("empty state when scope has no agent seats", async () => {

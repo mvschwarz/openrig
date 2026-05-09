@@ -280,7 +280,7 @@ export function PodScopePage() {
               Graph view degrades to table on narrow viewports.
             </p>
           ) : null}
-          <TopologyTableView rigIdScope={rigId} />
+          <TopologyTableView rigIdScope={rigId} podNameScope={podName} />
         </div>
       ) : null}
       {effectiveActive === "terminal" ? (

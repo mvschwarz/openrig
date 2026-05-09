@@ -40,6 +40,8 @@ import {
 } from "../../lib/topology-activity.js";
 import { ActivityRing } from "./ActivityRing.js";
 import { RuntimeBadge, ToolMark } from "../graphics/RuntimeMark.js";
+import { formatCompactTokenCount, formatTokenTotalTitle, sumTokenCounts } from "../../lib/token-format.js";
+import { contextUsageTextClass } from "../ContextUsageRing.js";
 
 async function fetchNodeInventory(rigId: string): Promise<NodeInventoryEntry[]> {
   const res = await fetch(`/api/rigs/${encodeURIComponent(rigId)}/nodes`);
@@ -56,6 +58,7 @@ interface AgentRow {
   runtime: string;
   status: string;
   startupStatus: string | null;
+  contextUsage?: NodeInventoryEntry["contextUsage"] | null;
   agentActivity?: TopologyActivityBaseline["agentActivity"];
   currentQitems?: TopologyActivityBaseline["currentQitems"];
   activityRing?: TopologyActivityVisual;
@@ -91,6 +94,42 @@ function CmuxButton({ row }: { row: AgentRow }) {
   );
 }
 
+function ContextCell({ row }: { row: AgentRow }) {
+  const usage = row.contextUsage;
+  const known = usage?.availability === "known" && typeof usage.usedPercentage === "number";
+  return (
+    <span
+      data-testid={`topology-table-context-${row.logicalId}`}
+      className={`font-mono text-xs font-bold ${contextUsageTextClass(usage?.usedPercentage, usage?.fresh, usage?.availability)}`}
+      title={
+        known
+          ? usage?.fresh === false
+            ? "Context usage (stale sample)"
+            : "Context usage (fresh)"
+          : "Context sample unavailable"
+      }
+    >
+      {known ? `${usage.usedPercentage}%` : "--"}
+    </span>
+  );
+}
+
+function TokenCell({ row }: { row: AgentRow }) {
+  const usage = row.contextUsage;
+  const total = sumTokenCounts(usage?.totalInputTokens, usage?.totalOutputTokens);
+  const tokenLabel = formatCompactTokenCount(total);
+  const tokenTitle = formatTokenTotalTitle(usage?.totalInputTokens, usage?.totalOutputTokens);
+  return (
+    <span
+      data-testid={`topology-table-tokens-${row.logicalId}`}
+      className={`font-mono text-xs font-bold ${tokenLabel ? "text-stone-500" : "text-stone-300"}`}
+      title={tokenTitle ?? "Token sample unavailable"}
+    >
+      {tokenLabel ?? "--"}
+    </span>
+  );
+}
+
 function agentColumns(): ColumnDef<AgentRow>[] {
   return [
     { accessorKey: "rigName", header: "Rig", cell: ({ getValue }) => <span className="font-mono text-xs">{String(getValue())}</span> },
@@ -122,6 +161,22 @@ function agentColumns(): ColumnDef<AgentRow>[] {
       ),
     },
     {
+      id: "context",
+      header: "Context",
+      sortingFn: (a, b) => (a.original.contextUsage?.usedPercentage ?? -1) - (b.original.contextUsage?.usedPercentage ?? -1),
+      cell: ({ row }) => <ContextCell row={row.original} />,
+    },
+    {
+      id: "tokens",
+      header: "Tokens",
+      sortingFn: (a, b) => {
+        const left = sumTokenCounts(a.original.contextUsage?.totalInputTokens, a.original.contextUsage?.totalOutputTokens) ?? -1;
+        const right = sumTokenCounts(b.original.contextUsage?.totalInputTokens, b.original.contextUsage?.totalOutputTokens) ?? -1;
+        return left - right;
+      },
+      cell: ({ row }) => <TokenCell row={row.original} />,
+    },
+    {
       accessorKey: "status",
       header: "Status",
       cell: ({ getValue }) => (
@@ -137,7 +192,7 @@ function agentColumns(): ColumnDef<AgentRow>[] {
   ];
 }
 
-export function TopologyTableView({ rigIdScope }: { rigIdScope?: string }) {
+export function TopologyTableView({ rigIdScope, podNameScope }: { rigIdScope?: string; podNameScope?: string }) {
   // V1 polish slice Phase 5.1 P5.1-7: row click navigates to seat-scope
   // center page (parity with graph node click + Explorer tree click +
   // Topology Tree details-icon-retired contract).
@@ -159,6 +214,7 @@ export function TopologyTableView({ rigIdScope }: { rigIdScope?: string }) {
     queries: scopedRigs.map((r) => ({
       queryKey: ["rig", r.id, "nodes"] as const,
       queryFn: () => fetchNodeInventory(r.id),
+      refetchInterval: 30_000,
     })),
   });
 
@@ -169,7 +225,10 @@ export function TopologyTableView({ rigIdScope }: { rigIdScope?: string }) {
       const result = inventoryResults[i];
       if (!rig || !result) continue;
       const nodes: NodeInventoryEntry[] = result.data ?? [];
-      for (const n of nodes) {
+      const scopedNodes = podNameScope
+        ? nodes.filter((n) => (n.podNamespace ?? n.podId) === podNameScope)
+        : nodes;
+      for (const n of scopedNodes) {
         rows.push({
           rigId: rig.id,
           rigName: rig.name,
@@ -179,13 +238,14 @@ export function TopologyTableView({ rigIdScope }: { rigIdScope?: string }) {
           runtime: (n.runtime ?? "-") as string,
           status: (n.sessionStatus ?? "unknown") as string,
           startupStatus: (n.startupStatus ?? null) as string | null,
+          contextUsage: n.contextUsage ?? null,
           agentActivity: n.agentActivity ?? null,
           currentQitems: n.currentQitems ?? [],
         });
       }
     }
     return rows;
-  }, [scopedRigs, inventoryResults]);
+  }, [scopedRigs, inventoryResults, podNameScope]);
 
   const sessionIndex = useMemo(() => buildTopologySessionIndex(data.map((row) => ({
     nodeId: `${row.rigId}::${row.logicalId}`,
@@ -225,7 +285,8 @@ export function TopologyTableView({ rigIdScope }: { rigIdScope?: string }) {
         r.rigName.toLowerCase().includes(q) ||
         r.podName.toLowerCase().includes(q) ||
         r.logicalId.toLowerCase().includes(q) ||
-        r.runtime.toLowerCase().includes(q)
+        r.runtime.toLowerCase().includes(q) ||
+        r.status.toLowerCase().includes(q)
       );
     },
   });

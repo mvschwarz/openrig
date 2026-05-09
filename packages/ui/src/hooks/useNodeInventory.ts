@@ -37,6 +37,8 @@ export interface NodeInventoryEntry {
     availability: string | null;
     sampledAt: string | null;
     fresh: boolean;
+    totalInputTokens?: number | null;
+    totalOutputTokens?: number | null;
   };
   // PL-019: agent activity attached daemon-side via attachAgentActivity.
   agentActivity?: AgentActivitySummary | null;
@@ -55,5 +57,6 @@ export function useNodeInventory(rigId: string | null) {
     queryKey: ["rig", rigId, "nodes"],
     queryFn: () => fetchNodeInventory(rigId!),
     enabled: !!rigId,
+    refetchInterval: 30_000,
   });
 }

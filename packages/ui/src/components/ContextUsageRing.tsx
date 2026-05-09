@@ -40,6 +40,22 @@ const TIER_BORDER_CLASS: Record<ContextUsageTier, string> = {
   unknown: "border-stone-400 border-dotted",
 };
 
+const TIER_TEXT_CLASS: Record<ContextUsageTier, string> = {
+  critical: "text-red-600",
+  warning: "text-amber-600",
+  low: "text-green-700",
+  unknown: "text-stone-300",
+};
+
+export function contextUsageTextClass(
+  percent: number | null | undefined,
+  fresh?: boolean,
+  availability?: string | null,
+): string {
+  const tier = deriveContextTier(percent, availability ?? undefined);
+  return `${TIER_TEXT_CLASS[tier]}${tier !== "unknown" && fresh === false ? " opacity-50" : ""}`;
+}
+
 export function ContextUsageRing({ percent, fresh, availability, testIdSuffix }: ContextUsageRingProps) {
   const tier = deriveContextTier(percent, availability);
   const titleParts: string[] = [];

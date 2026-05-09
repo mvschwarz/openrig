@@ -43,6 +43,16 @@ beforeEach(() => {
             runtime: "claude-code",
             sessionStatus: "running",
             startupStatus: "ready",
+            contextUsage: {
+              usedPercentage: 42,
+              remainingPercentage: 58,
+              contextWindowSize: 320000,
+              availability: "known",
+              sampledAt: "2026-05-09T10:00:00Z",
+              fresh: true,
+              totalInputTokens: 120000,
+              totalOutputTokens: 14000,
+            },
             restoreOutcome: "n-a",
             tmuxAttachCommand: null,
             resumeCommand: null,
@@ -72,6 +82,15 @@ describe("TopologyTableView P5.1-7 CMUX column + row click", () => {
     expect((cmux as HTMLButtonElement).textContent).toContain("CMUX");
     expect((cmux as HTMLButtonElement).className).toContain("opacity-0");
     expect((cmux as HTMLButtonElement).className).toContain("group-hover:opacity-100");
+  });
+
+  it("renders context percentage and token total from node inventory", async () => {
+    const { findByTestId } = withQueryClient(<TopologyTableView />);
+    const context = await findByTestId("topology-table-context-orch.lead");
+    const tokens = await findByTestId("topology-table-tokens-orch.lead");
+    expect(context.textContent).toBe("42%");
+    expect(tokens.textContent).toBe("134k");
+    expect(tokens.getAttribute("title")).toContain("Tokens: 134,000");
   });
 
   it("CMUX button click POSTs to /api/rigs/.../focus (existing useCmuxLaunch hook)", async () => {
