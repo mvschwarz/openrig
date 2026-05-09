@@ -12,10 +12,12 @@
   "scripts": {
     "build": "npm run build --workspaces",
     "test": "npm run test:repo && npm run test:workspaces",
-    "test:repo": "node --test scripts/*.test.mjs && node scripts/check-docs-guard.mjs",
+    "test:repo": "node --test scripts/*.test.mjs && node scripts/check-docs-guard.mjs && node scripts/mirror-skills.mjs --check",
     "test:workspaces": "npm run test --workspaces",
     "lint": "tsc --noEmit --project packages/daemon/tsconfig.json && tsc --noEmit --project packages/ui/tsconfig.json && tsc --noEmit --project packages/cli/tsconfig.json",
-    "build:package": "bash scripts/build-package.sh"
+    "build:package": "bash scripts/build-package.sh",
+    "mirror-skills": "node scripts/mirror-skills.mjs",
+    "mirror-skills:check": "node scripts/mirror-skills.mjs --check"
   },
   "engines": {
     "node": "^20 || ^22 || ^24"
