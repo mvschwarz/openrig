@@ -310,6 +310,17 @@ export function ToolBadge({
   );
 }
 
+export function isHumanActor(actor: string | null | undefined): boolean {
+  const normalized = actor?.toLowerCase().trim() ?? "";
+  return (
+    normalized === "human" ||
+    normalized.includes("human@") ||
+    normalized.includes("human-") ||
+    normalized.includes("operator") ||
+    normalized.includes("host")
+  );
+}
+
 export function ActorMark({
   actor,
   size = "sm",
@@ -321,17 +332,13 @@ export function ActorMark({
   className?: string;
   title?: string;
 }) {
-  const normalized = actor?.toLowerCase().trim() ?? "";
   const label = title ?? (actor ? actor : "Operator");
   const cls = cn(sizeClass[size], "shrink-0", className);
-  if (
-    normalized === "human" ||
-    normalized.includes("human@") ||
-    normalized.includes("human-") ||
-    normalized.includes("operator") ||
-    normalized.includes("host")
-  ) return <OperatorGlyph className={cls} title={label} />;
-  return <RuntimeMark runtime={actor} size={size} className={className} title={title} />;
+  if (isHumanActor(actor)) return <OperatorGlyph className={cls} title={label} />;
+  if (normalizeRuntimeBrandId(actor) !== "unknown") {
+    return <RuntimeMark runtime={actor} size={size} className={className} title={title} />;
+  }
+  return <TerminalGlyph className={cls} title={label} />;
 }
 
 export function OperatorMoodMark({

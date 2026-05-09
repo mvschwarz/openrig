@@ -1,23 +1,21 @@
 import type { LucideIcon } from "lucide-react";
 import {
   ArrowRight,
-  Bot,
   CalendarDays,
   CheckCircle2,
   CircleAlert,
   CirclePlus,
   Clock,
-  FileImage,
   GitBranch,
   History,
   MessageSquareText,
   PackageCheck,
   Route,
   Send,
-  UserRound,
 } from "lucide-react";
 import { cn } from "../../lib/utils.js";
 import { proofAssetUrl } from "../../hooks/useSlices.js";
+import { ActorMark, ToolMark } from "../graphics/RuntimeMark.js";
 
 export type ProjectMetaTone = "neutral" | "info" | "success" | "warning" | "danger";
 
@@ -176,8 +174,6 @@ export function ActorChip({
   session: string | undefined | null;
   muted?: boolean;
 }) {
-  const isHuman = (session ?? "").includes("human@") || session === "human@host";
-  const Icon = isHuman ? UserRound : Bot;
   return (
     <span
       className={cn(
@@ -185,7 +181,7 @@ export function ActorChip({
         muted ? "border-stone-200 bg-white/35 text-stone-500" : "border-stone-300 bg-white/55 text-stone-800",
       )}
     >
-      <Icon className="h-3 w-3 shrink-0" strokeWidth={1.5} />
+      <ActorMark actor={session} size="xs" />
       <span className="truncate">{compactSessionLabel(session)}</span>
     </span>
   );
@@ -274,7 +270,7 @@ export function ProofPacketHeader({
   return (
     <div className="flex items-center justify-between gap-2 font-mono text-[9px] uppercase tracking-[0.12em] text-stone-600">
       <span className="truncate inline-flex items-center gap-1">
-        <FileImage className="h-3 w-3" strokeWidth={1.5} />
+        <ToolMark tool="screenshot" size="xs" />
         {title}
       </span>
       <ProjectPill token={{ label: badge, tone: stateTone(badge) }} compact />
