@@ -5,9 +5,12 @@
 // + Related (clickable refs).
 
 import { useState } from "react";
+import { GitBranch, GitCommitHorizontal, Network } from "lucide-react";
 import { SectionHeader } from "../ui/section-header.js";
 import { StatusPip } from "../ui/status-pip.js";
 import { EmptyState } from "../ui/empty-state.js";
+import { ActorChip, DateChip, TagPill } from "../project/ProjectMetaPrimitives.js";
+import { ToolMark } from "../graphics/RuntimeMark.js";
 
 export interface QueueItemViewerData {
   qitemId: string;
@@ -63,9 +66,17 @@ export function QueueItemViewer({
         <SectionHeader tone="muted">Queue item</SectionHeader>
         <h3 className="mt-1 font-mono text-xs text-stone-900 break-all">{qitemId}</h3>
       </header>
-      <div className="px-4 py-3 border-b border-outline-variant space-y-1.5 font-mono text-xs">
-        {source ? <Row label="Source" value={source} /> : null}
-        {destination ? <Row label="Dest" value={destination} /> : null}
+      <div className="px-4 py-3 border-b border-outline-variant space-y-2 font-mono text-xs">
+        {source ? (
+          <MetaRow label="Source">
+            <ActorChip session={source} muted />
+          </MetaRow>
+        ) : null}
+        {destination ? (
+          <MetaRow label="Dest">
+            <ActorChip session={destination} muted />
+          </MetaRow>
+        ) : null}
         {state ? (
           <div className="flex items-center justify-between">
             <span className="text-on-surface-variant">State</span>
@@ -73,9 +84,19 @@ export function QueueItemViewer({
           </div>
         ) : null}
         {tags && tags.length > 0 ? (
-          <Row label="Tags" value={tags.join(", ")} />
+          <MetaRow label="Tags">
+            <span className="flex min-w-0 flex-wrap justify-end gap-1">
+              {tags.map((tag) => (
+                <TagPill key={tag} tag={tag} />
+              ))}
+            </span>
+          </MetaRow>
         ) : null}
-        {createdAt ? <Row label="Created" value={createdAt.slice(0, 19).replace("T", " ")} /> : null}
+        {createdAt ? (
+          <MetaRow label="Created">
+            <DateChip value={createdAt} />
+          </MetaRow>
+        ) : null}
       </div>
       <div className="px-4 py-3 border-b border-outline-variant flex-1 min-h-0 overflow-y-auto">
         <SectionHeader tone="muted">Body</SectionHeader>
@@ -103,7 +124,8 @@ export function QueueItemViewer({
           <ul className="mt-2 space-y-1 font-mono text-xs">
             {related.map((r, i) => (
               <li key={`${r.kind}-${i}`} className="flex items-baseline gap-2">
-                <span className="text-on-surface-variant text-[10px] uppercase tracking-wide w-12 shrink-0">
+                <span className="inline-flex w-12 shrink-0 items-center gap-1 text-on-surface-variant text-[10px] uppercase tracking-wide">
+                  <RelatedKindIcon kind={r.kind} label={r.label} />
                   {r.kind}
                 </span>
                 {r.href ? (
@@ -120,11 +142,17 @@ export function QueueItemViewer({
   );
 }
 
-function Row({ label, value }: { label: string; value: string }) {
+function RelatedKindIcon({ kind, label }: { kind: NonNullable<QueueItemViewerData["related"]>[number]["kind"]; label: string }) {
+  if (kind === "file") return <ToolMark tool={label} size="xs" />;
+  const Icon = kind === "commit" ? GitCommitHorizontal : kind === "slice" ? GitBranch : Network;
+  return <Icon className="h-3 w-3 shrink-0" strokeWidth={1.5} aria-hidden="true" />;
+}
+
+function MetaRow({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <div className="flex items-baseline justify-between gap-3">
-      <span className="text-on-surface-variant">{label}</span>
-      <span className="text-stone-900 truncate">{value}</span>
+    <div className="flex items-start justify-between gap-3">
+      <span className="shrink-0 text-on-surface-variant">{label}</span>
+      <span className="min-w-0 text-stone-900">{children}</span>
     </div>
   );
 }

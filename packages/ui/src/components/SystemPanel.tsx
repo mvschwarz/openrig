@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { PanelsTopLeft, ServerCog } from "lucide-react";
+import { ServerCog } from "lucide-react";
 import { LogFeedList } from "./ActivityFeed.js";
 import { SettingsTab } from "./system/SettingsTab.js";
 import type { ActivityEvent } from "../hooks/useActivityFeed.js";
+import { ToolMark } from "./graphics/RuntimeMark.js";
 
 type SystemTab = "log" | "status" | "settings";
 
@@ -122,7 +123,7 @@ export function SystemPanel({ onClose, events, initialTab = "log" }: SystemPanel
               </div>
 
               <div className="flex items-start gap-3">
-                <PanelsTopLeft className={`mt-[1px] h-3.5 w-3.5 shrink-0 ${statusTone(cmuxAvailable)}`} />
+                <ToolMark tool="cmux" size="sm" className={`mt-[1px] ${statusTone(cmuxAvailable)}`} />
                 <div className="min-w-0">
                   <div className="text-stone-900">cmux control</div>
                   <div data-testid="system-cmux-status" className={statusTone(cmuxAvailable)}>

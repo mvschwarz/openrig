@@ -5,7 +5,8 @@
 // and startup content live inside their named tabs so the page has one clear
 // information hierarchy.
 
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
+import { CirclePlay } from "lucide-react";
 import { useNodeDetail, type NodeDetailData } from "../hooks/useNodeDetail.js";
 import { useSpecLibrary, useLibraryReview } from "../hooks/useSpecLibrary.js";
 import { WorkspacePage } from "./WorkspacePage.js";
@@ -19,7 +20,7 @@ import { copyText } from "../lib/copy-text.js";
 import { getActivityLabel, getActivityState, getActivityTextClass, isActivityStale } from "../lib/activity-visuals.js";
 import { getRestoreStatusColorClass } from "../lib/restore-status-colors.js";
 import type { AgentSpecReview } from "../hooks/useSpecReview.js";
-import { RuntimeBadge, RuntimeMark, ToolMark } from "./graphics/RuntimeMark.js";
+import { RuntimeBadge, ToolMark } from "./graphics/RuntimeMark.js";
 
 type Tab = "identity" | "agent-spec" | "startup" | "transcript" | "terminal";
 
@@ -59,6 +60,29 @@ function InfoRow({ label, value }: { label: string; value: string | number | nul
     <div className="flex justify-between gap-3 font-mono text-[10px]">
       <span className="text-stone-500">{label}</span>
       <span className="truncate text-right text-stone-900">{value}</span>
+    </div>
+  );
+}
+
+function IdentityField({
+  label,
+  children,
+  wide = false,
+}: {
+  label: string;
+  children: ReactNode;
+  wide?: boolean;
+}) {
+  if (children === null || children === undefined || children === "") return null;
+  return (
+    <div
+      data-testid={`identity-field-${label.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`}
+      className={`min-w-0 border border-outline-variant/55 bg-white/20 px-2 py-1.5 font-mono ${
+        wide ? "md:col-span-2 xl:col-span-3" : ""
+      }`}
+    >
+      <div className="text-[8px] uppercase tracking-[0.14em] text-stone-400">{label}</div>
+      <div className="mt-1 min-w-0 truncate text-[11px] text-stone-900">{children}</div>
     </div>
   );
 }
@@ -156,7 +180,7 @@ function ActionButtonsRow({ rigId, logicalId, data }: { rigId: string; logicalId
           data-testid="detail-copy-resume"
           className="inline-flex items-center gap-1.5 px-3 py-1.5 border border-outline-variant bg-white/30 font-mono text-[10px] uppercase tracking-wide text-stone-700 hover:bg-stone-100/60"
         >
-          <RuntimeMark runtime={data.runtime} size="sm" />
+          <CirclePlay aria-hidden="true" className="h-4 w-4 shrink-0" strokeWidth={1.5} />
           Copy resume command
         </button>
       )}
@@ -317,18 +341,17 @@ function IdentitySummary({ data }: { data: NodeDetailData }) {
   return (
     <section data-testid="live-identity-summary" className={SECTION_CLASS}>
       <div className="mb-2 font-mono text-[8px] uppercase tracking-wider text-stone-400">Identity</div>
-      <div className="grid gap-1 sm:grid-cols-2">
+      <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
         {data.runtime ? (
-          <div className="flex justify-between gap-3 font-mono text-[10px]">
-            <span className="text-stone-500">Runtime</span>
-            <RuntimeBadge runtime={data.runtime} model={data.model} size="xs" compact variant="inline" className="max-w-[12rem]" />
-          </div>
+          <IdentityField label="Runtime">
+            <RuntimeBadge runtime={data.runtime} model={data.model} size="xs" compact variant="inline" className="max-w-full" />
+          </IdentityField>
         ) : null}
-        <InfoRow label="Model" value={data.model} />
-        <InfoRow label="Profile" value={data.profile} />
-        <InfoRow label="Spec" value={data.resolvedSpecName} />
-        <InfoRow label="Version" value={data.resolvedSpecVersion} />
-        <InfoRow label="CWD" value={data.cwd} />
+        <IdentityField label="Model">{data.model}</IdentityField>
+        <IdentityField label="Profile">{data.profile}</IdentityField>
+        <IdentityField label="Spec">{data.resolvedSpecName}</IdentityField>
+        <IdentityField label="Version">{data.resolvedSpecVersion}</IdentityField>
+        <IdentityField label="CWD" wide>{data.cwd}</IdentityField>
       </div>
     </section>
   );
@@ -594,6 +617,15 @@ export function LiveNodeDetails({ rigId, logicalId }: LiveNodeDetailsProps) {
           eyebrow="Live Node Details"
           title={data?.canonicalSessionName ?? logicalId}
           description={`${data?.rigName ?? rigId} / ${data?.podNamespace ?? inferPodName(logicalId) ?? displayPodName(data?.podId ?? null)} / ${logicalId}`}
+          actions={data ? (
+            <RuntimeBadge
+              runtime={data.runtime}
+              model={data.model}
+              size="sm"
+              compact
+              className="bg-white/40 backdrop-blur-sm"
+            />
+          ) : null}
         />
 
         {isLoading && <div className="font-mono text-[10px] text-stone-400">Loading...</div>}

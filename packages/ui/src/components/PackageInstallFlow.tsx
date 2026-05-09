@@ -12,6 +12,7 @@ import {
   TableHead,
   TableCell,
 } from "@/components/ui/table";
+import { RuntimeBadge } from "./graphics/RuntimeMark.js";
 
 type Step = "enter" | "validating" | "validated" | "configure" | "planning" | "planned" | "applying" | "done" | "error";
 
@@ -297,7 +298,20 @@ export function PackageInstallFlow() {
               <span>Guidance: <span className="font-mono text-foreground-on-dark">{manifest.exportCounts.guidance}</span></span>
               <span>Agents: <span className="font-mono text-foreground-on-dark">{manifest.exportCounts.agents}</span></span>
               <span>Hooks: <span className="font-mono text-foreground-on-dark">{manifest.exportCounts.hooks}</span></span>
-              <span>Runtimes: <span className="font-mono text-foreground-on-dark">{manifest.runtimes.join(", ")}</span></span>
+              <span className="inline-flex min-w-0 items-center gap-1.5">
+                <span>Runtimes:</span>
+                <span className="inline-flex min-w-0 flex-wrap items-center gap-1">
+                  {manifest.runtimes.map((rt) => (
+                    <RuntimeBadge
+                      key={rt}
+                      runtime={rt}
+                      size="xs"
+                      compact
+                      className="border-white/20 bg-white/10 text-foreground-on-dark"
+                    />
+                  ))}
+                </span>
+              </span>
             </div>
           </div>
           <Button variant="tactical" data-testid="configure-btn" onClick={() => setStep("configure")}>
