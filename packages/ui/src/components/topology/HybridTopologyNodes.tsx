@@ -15,6 +15,7 @@ import { getActivityCardClasses, getActivityCardSignal } from "./activity-card-v
 import { TerminalPreviewPopover } from "./TerminalPreviewPopover.js";
 import type { TopologyActivityVisual } from "../../lib/topology-activity.js";
 import { formatCompactTokenCount, formatTokenTotalTitle, sumTokenCounts } from "../../lib/token-format.js";
+import { formatRuntimeModel } from "../../lib/runtime-brand.js";
 import { RuntimeBadge, ToolMark } from "../graphics/RuntimeMark.js";
 
 interface HybridPodGroupNodeData {
@@ -95,7 +96,7 @@ export function HybridAgentNode({ data }: { data: HybridAgentNodeData }) {
   const activityAnimClass = getActivityAnimationClass(activityState);
   const activityStale = isActivityStale(data.agentActivity);
   const activityCard = getActivityCardSignal({ activityRing: data.activityRing, activityState });
-  const runtimeModel = [data.runtime, data.model].filter(Boolean).join(" / ");
+  const runtimeTitle = data.runtime || data.model ? formatRuntimeModel(data.runtime, data.model) : null;
   const contextKnown = data.contextAvailability === "known" && typeof data.contextUsedPercentage === "number";
   const tokenTotal = sumTokenCounts(data.contextTotalInputTokens, data.contextTotalOutputTokens);
   const tokenLabel = formatCompactTokenCount(tokenTotal);
@@ -108,7 +109,7 @@ export function HybridAgentNode({ data }: { data: HybridAgentNodeData }) {
       title={[
         data.canonicalSessionName,
         `activity: ${activityLabel}${activityStale ? " (stale)" : ""}`,
-        runtimeModel || null,
+        runtimeTitle,
         tokenTitle,
       ].filter(Boolean).join("\n")}
       data-activity-card-state={activityCard.state}
@@ -189,7 +190,7 @@ export function HybridAgentNode({ data }: { data: HybridAgentNodeData }) {
             variant="inline"
             className="max-w-full"
           />
-          {!runtimeModel && (data.resolvedSpecName || data.profile) ? (
+          {!runtimeTitle && (data.resolvedSpecName || data.profile) ? (
             <span className="ml-1 font-mono text-[7px] uppercase tracking-[0.12em] text-stone-400">
               {data.resolvedSpecName || data.profile}
             </span>

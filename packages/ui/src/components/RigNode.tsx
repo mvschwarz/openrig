@@ -18,6 +18,7 @@ import { getActivityCardClasses, getActivityCardSignal } from "./topology/activi
 import { TerminalPreviewPopover } from "./topology/TerminalPreviewPopover.js";
 import type { TopologyActivityVisual } from "../lib/topology-activity.js";
 import { formatCompactTokenCount, formatTokenTotalTitle, sumTokenCounts } from "../lib/token-format.js";
+import { formatRuntimeModel } from "../lib/runtime-brand.js";
 import { RuntimeBadge, ToolMark } from "./graphics/RuntimeMark.js";
 
 interface RigNodeData {
@@ -87,7 +88,7 @@ export function RigNode({ data }: { data: RigNodeData }) {
     };
   }, []);
 
-  const runtimeModel = [data.runtime, data.model].filter(Boolean).join(" \u00B7 ");
+  const runtimeTitle = data.runtime || data.model ? formatRuntimeModel(data.runtime, data.model) : null;
   const agentName = displayAgentName(data.logicalId);
 
   // PL-019: dot color is now driven by agentActivity.state, not startupStatus.
@@ -117,7 +118,7 @@ export function RigNode({ data }: { data: RigNodeData }) {
   const hoverHintLines = [
     `Activity: ${activityLabel}${activityIsStale ? " (stale sample)" : ""}`,
     data.canonicalSessionName ? `Session: ${data.canonicalSessionName}` : null,
-    runtimeModel ? `Runtime: ${runtimeModel}` : null,
+    runtimeTitle ? `Runtime: ${runtimeTitle}` : null,
     data.resolvedSpecName ? `Spec: ${data.resolvedSpecName}` : null,
     data.profile ? `Profile: ${data.profile}` : null,
     typeof data.edgeCount === "number" ? `Edges: ${data.edgeCount}` : null,
@@ -256,7 +257,7 @@ export function RigNode({ data }: { data: RigNodeData }) {
             variant="inline"
             className="max-w-full"
           />
-          {!runtimeModel && data.profile ? (
+          {!runtimeTitle && data.profile ? (
             <span className="ml-1 font-mono text-[8px] uppercase tracking-[0.12em] text-stone-400">
               {data.profile}
             </span>

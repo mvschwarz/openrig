@@ -8,6 +8,7 @@ import { useState } from "react";
 import { SectionHeader } from "../ui/section-header.js";
 import { StatusPip } from "../ui/status-pip.js";
 import { EmptyState } from "../ui/empty-state.js";
+import { ActorChip, DateChip, TagPill } from "../project/ProjectMetaPrimitives.js";
 
 export interface QueueItemViewerData {
   qitemId: string;
@@ -63,9 +64,17 @@ export function QueueItemViewer({
         <SectionHeader tone="muted">Queue item</SectionHeader>
         <h3 className="mt-1 font-mono text-xs text-stone-900 break-all">{qitemId}</h3>
       </header>
-      <div className="px-4 py-3 border-b border-outline-variant space-y-1.5 font-mono text-xs">
-        {source ? <Row label="Source" value={source} /> : null}
-        {destination ? <Row label="Dest" value={destination} /> : null}
+      <div className="px-4 py-3 border-b border-outline-variant space-y-2 font-mono text-xs">
+        {source ? (
+          <MetaRow label="Source">
+            <ActorChip session={source} muted />
+          </MetaRow>
+        ) : null}
+        {destination ? (
+          <MetaRow label="Dest">
+            <ActorChip session={destination} muted />
+          </MetaRow>
+        ) : null}
         {state ? (
           <div className="flex items-center justify-between">
             <span className="text-on-surface-variant">State</span>
@@ -73,9 +82,19 @@ export function QueueItemViewer({
           </div>
         ) : null}
         {tags && tags.length > 0 ? (
-          <Row label="Tags" value={tags.join(", ")} />
+          <MetaRow label="Tags">
+            <span className="flex min-w-0 flex-wrap justify-end gap-1">
+              {tags.map((tag) => (
+                <TagPill key={tag} tag={tag} />
+              ))}
+            </span>
+          </MetaRow>
         ) : null}
-        {createdAt ? <Row label="Created" value={createdAt.slice(0, 19).replace("T", " ")} /> : null}
+        {createdAt ? (
+          <MetaRow label="Created">
+            <DateChip value={createdAt} />
+          </MetaRow>
+        ) : null}
       </div>
       <div className="px-4 py-3 border-b border-outline-variant flex-1 min-h-0 overflow-y-auto">
         <SectionHeader tone="muted">Body</SectionHeader>
@@ -120,11 +139,11 @@ export function QueueItemViewer({
   );
 }
 
-function Row({ label, value }: { label: string; value: string }) {
+function MetaRow({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <div className="flex items-baseline justify-between gap-3">
-      <span className="text-on-surface-variant">{label}</span>
-      <span className="text-stone-900 truncate">{value}</span>
+    <div className="flex items-start justify-between gap-3">
+      <span className="shrink-0 text-on-surface-variant">{label}</span>
+      <span className="min-w-0 text-stone-900">{children}</span>
     </div>
   );
 }
