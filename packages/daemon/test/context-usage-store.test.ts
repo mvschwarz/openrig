@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import type Database from "better-sqlite3";
+import BetterSqlite3, { type Database } from "better-sqlite3";
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
 import { coreSchema } from "../src/db/migrations/001_core_schema.js";
@@ -104,6 +104,62 @@ describe("ContextUsageStore", () => {
     expect(usage.currentUsage).toBe(
       JSON.stringify(VALID_SIDECAR_WITH_OBJECT_USAGE.context_window.current_usage),
     );
+  });
+
+  it("Codex token_count JSONL normalizes into known ContextUsage", () => {
+    const codexHome = join(tmpdir(), `codex-context-${Date.now()}`);
+    const codexDir = join(codexHome, ".codex");
+    const rolloutPath = join(codexDir, "sessions", "rollout-thread-1.jsonl");
+    mkdirSync(join(codexDir, "sessions"), { recursive: true });
+
+    const stateDbPath = join(codexDir, "state_5.sqlite");
+    const stateDb = new BetterSqlite3(stateDbPath);
+    try {
+      stateDb.prepare("CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT NOT NULL)").run();
+      stateDb.prepare("INSERT INTO threads (id, rollout_path) VALUES (?, ?)").run("thread-1", rolloutPath);
+    } finally {
+      stateDb.close();
+    }
+
+    writeFileSync(rolloutPath, [
+      JSON.stringify({ type: "event_msg", payload: { type: "other" } }),
+      JSON.stringify({
+        timestamp: new Date().toISOString(),
+        type: "event_msg",
+        payload: {
+          type: "token_count",
+          info: {
+            last_token_usage: {
+              input_tokens: 227139,
+              output_tokens: 611,
+              total_tokens: 227750,
+            },
+            model_context_window: 258400,
+          },
+        },
+      }),
+    ].join("\n"));
+
+    const codexStore = new ContextUsageStore(db, { stateDir: "/tmp/openrig-test", codexHomeDir: codexHome });
+    const usage = codexStore.readCodexAndNormalize({
+      threadId: "thread-1",
+      sessionName: "dev-qa@test-rig",
+    });
+
+    expect(usage.availability).toBe("known");
+    expect(usage.reason).toBeNull();
+    expect(usage.source).toBe("codex_token_count_jsonl");
+    expect(usage.usedPercentage).toBe(88);
+    expect(usage.remainingPercentage).toBe(12);
+    expect(usage.contextWindowSize).toBe(258400);
+    expect(usage.totalInputTokens).toBe(227139);
+    expect(usage.totalOutputTokens).toBe(611);
+    expect(usage.sessionId).toBe("thread-1");
+    expect(usage.sessionName).toBe("dev-qa@test-rig");
+    expect(usage.transcriptPath).toBe(rolloutPath);
+    expect(usage.currentUsage).toContain("\"model_context_window\":258400");
+
+    rmSync(codexHome, { recursive: true, force: true });
   });
 
   // T2: Missing sidecar -> unknown with reason

@@ -1,6 +1,7 @@
-import type Database from "better-sqlite3";
+import Database from "better-sqlite3";
 import { join } from "node:path";
-import { readFileSync, existsSync } from "node:fs";
+import os from "node:os";
+import { closeSync, existsSync, openSync, readFileSync, readSync, readdirSync, statSync } from "node:fs";
 import type { ContextUsage, ContextUnknownReason } from "./types.js";
 
 /** Freshness threshold: samples older than this are considered stale for compact displays. */
@@ -8,6 +9,7 @@ export const FRESHNESS_THRESHOLD_MS = 600_000; // 10 minutes per PM spec
 
 export interface ContextUsageStoreOpts {
   stateDir: string;
+  codexHomeDir?: string | null;
 }
 
 interface SidecarRaw {
@@ -43,13 +45,37 @@ interface ContextUsageRow {
   updated_at: string;
 }
 
+interface CodexThreadRow {
+  id: string;
+  rollout_path: string;
+}
+
+interface CodexTokenUsageRaw {
+  input_tokens?: number;
+  output_tokens?: number;
+  total_tokens?: number;
+}
+
+interface CodexTokenCountEvent {
+  timestamp?: string;
+  payload?: {
+    type?: string;
+    info?: {
+      last_token_usage?: CodexTokenUsageRaw;
+      model_context_window?: number;
+    };
+  };
+}
+
 export class ContextUsageStore {
   readonly db: Database.Database;
   private stateDir: string;
+  private codexHomeDir: string | null;
 
   constructor(db: Database.Database, opts: ContextUsageStoreOpts) {
     this.db = db;
     this.stateDir = opts.stateDir;
+    this.codexHomeDir = opts.codexHomeDir ?? safeHomeDir();
   }
 
   /** Get the sidecar file path for a session. */
@@ -77,6 +103,25 @@ export class ContextUsageStore {
     const result = this.readSidecar(sessionName);
     if (!result.ok) return this.unknownUsage(result.reason);
     return this.normalizeSample(result.data);
+  }
+
+  /** Read the latest Codex token_count event for a thread and normalize it. */
+  readCodexAndNormalize(input: { threadId: string | null | undefined; sessionName: string }): ContextUsage {
+    const threadId = input.threadId?.trim();
+    if (!threadId) return this.unknownUsage("no_data");
+
+    const thread = this.readCodexThread(threadId);
+    if (!thread?.rollout_path) return this.unknownUsage("no_data");
+
+    const tokenEvent = this.readLatestCodexTokenCount(thread.rollout_path);
+    if (!tokenEvent) return this.unknownUsage("no_data");
+
+    return this.normalizeCodexTokenCount({
+      event: tokenEvent,
+      sessionName: input.sessionName,
+      threadId,
+      transcriptPath: thread.rollout_path,
+    });
   }
 
   /** Normalize raw sidecar data into a ContextUsage record. */
@@ -108,6 +153,51 @@ export class ContextUsageStore {
       sessionName: raw.session_name ?? null,
       sampledAt,
       fresh,
+    };
+  }
+
+  /** Normalize a Codex token_count JSONL event into ContextUsage. */
+  private normalizeCodexTokenCount(input: {
+    event: CodexTokenCountEvent;
+    sessionName: string;
+    threadId: string;
+    transcriptPath: string;
+  }): ContextUsage {
+    const info = input.event.payload?.info;
+    const usage = info?.last_token_usage;
+    const contextWindowSize = info?.model_context_window;
+
+    if (!usage || typeof contextWindowSize !== "number" || contextWindowSize <= 0) {
+      return this.unknownUsage("parse_error");
+    }
+
+    const inputTokens = typeof usage.input_tokens === "number" ? usage.input_tokens : null;
+    const outputTokens = typeof usage.output_tokens === "number" ? usage.output_tokens : null;
+    const totalTokens = typeof usage.total_tokens === "number"
+      ? usage.total_tokens
+      : (inputTokens ?? 0) + (outputTokens ?? 0);
+    const usedPercentage = clampPercentage(Math.round((totalTokens / contextWindowSize) * 100));
+    const remainingPercentage = clampPercentage(100 - usedPercentage);
+    const sampledAt = input.event.timestamp ?? null;
+
+    return {
+      availability: "known",
+      reason: null,
+      source: "codex_token_count_jsonl",
+      usedPercentage,
+      remainingPercentage,
+      contextWindowSize,
+      totalInputTokens: inputTokens,
+      totalOutputTokens: outputTokens,
+      currentUsage: this.normalizeCurrentUsage({
+        last_token_usage: usage,
+        model_context_window: contextWindowSize,
+      }),
+      transcriptPath: input.transcriptPath,
+      sessionId: input.threadId,
+      sessionName: input.sessionName,
+      sampledAt,
+      fresh: sampledAt ? this.isFresh(sampledAt) : false,
     };
   }
 
@@ -264,5 +354,103 @@ export class ContextUsageStore {
     } catch {
       return String(value);
     }
+  }
+
+  private readCodexThread(threadId: string): CodexThreadRow | null {
+    for (const dbPath of this.resolveCodexStateDbPaths()) {
+      try {
+        const codexDb = new Database(dbPath, { readonly: true });
+        try {
+          const row = codexDb.prepare(
+            "SELECT id, rollout_path FROM threads WHERE id = ? LIMIT 1",
+          ).get(threadId) as CodexThreadRow | undefined;
+          if (row?.rollout_path) return row;
+        } finally {
+          codexDb.close();
+        }
+      } catch {
+        continue;
+      }
+    }
+    return null;
+  }
+
+  private resolveCodexStateDbPaths(): string[] {
+    if (!this.codexHomeDir) return [];
+
+    const codexDir = join(this.codexHomeDir, ".codex");
+    const discovered: Array<{ version: number; path: string }> = [];
+
+    try {
+      for (const entry of readdirSync(codexDir)) {
+        const match = entry.match(/^state_(\d+)\.sqlite$/);
+        if (!match) continue;
+        discovered.push({
+          version: Number(match[1]),
+          path: join(codexDir, entry),
+        });
+      }
+    } catch {
+      // Best-effort only; fall back to the current common filename below.
+    }
+
+    if (discovered.length === 0) {
+      discovered.push({ version: 5, path: join(codexDir, "state_5.sqlite") });
+    }
+
+    return discovered
+      .sort((a, b) => b.version - a.version)
+      .map((entry) => entry.path)
+      .filter((path, index, paths) => paths.indexOf(path) === index)
+      .filter((path) => existsSync(path));
+  }
+
+  private readLatestCodexTokenCount(rolloutPath: string): CodexTokenCountEvent | null {
+    let content: string;
+    try {
+      content = this.readTail(rolloutPath, 4_000_000);
+    } catch {
+      return null;
+    }
+
+    const lines = content.trimEnd().split("\n").reverse();
+    for (const line of lines) {
+      if (!line.includes("\"token_count\"")) continue;
+      try {
+        const parsed = JSON.parse(line) as CodexTokenCountEvent;
+        if (parsed.payload?.type === "token_count") return parsed;
+      } catch {
+        continue;
+      }
+    }
+
+    return null;
+  }
+
+  private readTail(filePath: string, maxBytes: number): string {
+    const stat = statSync(filePath);
+    const start = Math.max(0, stat.size - maxBytes);
+    const length = stat.size - start;
+    const fd = openSync(filePath, "r");
+    try {
+      const buffer = Buffer.alloc(length);
+      readSync(fd, buffer, 0, length, start);
+      return buffer.toString("utf-8");
+    } finally {
+      closeSync(fd);
+    }
+  }
+}
+
+function clampPercentage(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  return Math.min(100, Math.max(0, value));
+}
+
+function safeHomeDir(): string | null {
+  try {
+    return os.homedir();
+  } catch {
+    return null;
   }
 }
