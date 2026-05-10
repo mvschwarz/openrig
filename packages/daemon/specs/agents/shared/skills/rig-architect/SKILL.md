@@ -37,7 +37,7 @@ Load these before starting any design work. The quality of your output depends o
 
 4. **Host-level doctrine** at `~/code/substrate/shared-docs/HOST-TOPOLOGY.md` (or wherever substrate lives on this host). If this file exists, it supersedes the baseline process below for complex or high-stakes rigs. Specifically:
    - §3 defines the canonical rig classes (kernel, project, ephemeral, infra-build, managed-app). Classify before designing.
-   - §4 defines context-sharing patterns (pods as context domains, pair pattern, HA via mental-model-ha skill + substrate session logs, terminal nodes as common-room, chatroom/substrate/transcripts/Corpus).
+   - §4 defines context-sharing patterns (pods as context domains, pair pattern, continuity via seat handoff records and substrate session logs, terminal nodes as common-room, chatroom/substrate/transcripts/Corpus).
    - **§7 is the canonical 12-step rig-spec authoring SOP for high-stakes rigs — use it instead of the baseline "Design Process" below when the rig is ≥4 members, uses HA, is a managed-app, or will be shared/copied.** The baseline below still applies to small/focused rigs.
    - §10 contains the host's bootstrap sequence so you know where your new rig fits.
    - §12 has the naming canon and vocabulary mapping to shipped terms.

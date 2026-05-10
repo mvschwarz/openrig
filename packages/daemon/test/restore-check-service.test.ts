@@ -1514,7 +1514,7 @@ describe("RestoreCheckService", () => {
     const projectionPath = path.join(os.tmpdir(), "restore-check-projection-source-missing.md");
     const service = new RestoreCheckService(mockDeps({
       getStartupContext: () => startupContextProbe({
-        projectionEntries: [{ absolutePath: projectionPath, effectiveId: "mental-model-ha", category: "guidance" }],
+        projectionEntries: [{ absolutePath: projectionPath, effectiveId: "openrig-user", category: "guidance" }],
       }) as never,
       exists: (p) => p !== projectionPath,
     }));
