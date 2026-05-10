@@ -11,7 +11,7 @@ imports:
 profiles:
   default:
     uses:
-      skills: [using-superpowers, openrig-user, mental-model-ha, systematic-debugging, verification-before-completion, vault-user]
+      skills: [using-superpowers, openrig-user, systematic-debugging, verification-before-completion, vault-user]
       guidance: []
       subagents: []
       hooks: []

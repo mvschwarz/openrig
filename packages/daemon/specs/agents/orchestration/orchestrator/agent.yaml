@@ -11,7 +11,7 @@ imports:
 profiles:
   default:
     uses:
-      skills: [using-superpowers, openrig-user, orchestration-team, mental-model-ha, systematic-debugging, verification-before-completion, writing-plans, executing-plans, brainstorming]
+      skills: [using-superpowers, openrig-user, orchestration-team, systematic-debugging, verification-before-completion, writing-plans, executing-plans, brainstorming]
       guidance: []
       subagents: []
       hooks: []

@@ -9,7 +9,6 @@ Load these packaged skills now before editing:
 - `openrig-user`
 - `development-team`
 - `test-driven-development`
-- `mental-model-ha`
 - `systematic-debugging`
 - `writing-plans`
 - `executing-plans`

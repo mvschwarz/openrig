@@ -1,6 +1,6 @@
 # Product Team — Team Culture
 
-This is the advanced-preview sibling of `demo`. Right now it uses the same core topology: two orchestrators, a development pod with implementation, QA, and design, plus two reviewers.
+This is the human-operated product-development starter. It uses a full product-team topology: two orchestrators, a development pod with implementation, QA, and design, plus two reviewers.
 
 ## Team shape
 
@@ -134,4 +134,4 @@ Follow patterns agents already know: docker, git, kubectl, npm.
 
 ## What this rig is for
 
-This is the advanced preview lane for the full product-team experience. Use it to explore richer coordination patterns and future capabilities without treating it as the ship gate. The human sets direction; the team plans, implements, reviews, and surfaces gaps honestly.
+This is the advanced product-team lane. Use it when the work needs richer coordination than the conveyor starter. The human sets direction; the team plans, implements, reviews, and surfaces gaps honestly.
