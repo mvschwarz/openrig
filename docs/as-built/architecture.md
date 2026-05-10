@@ -174,36 +174,67 @@ The CLI-hosted MCP server exposes 17 tools:
 
 ### UI architecture
 
-The UI is now explorer-first, with a shared drawer plus center-workspace route model:
+The current UI is shell-first, route-first, and primitive-driven. See
+`DESIGN.md` for the brand/design spec and `docs/as-built/ui.md` for the detailed
+as-built UI map.
 
-- `/` renders `WorkspaceHome` (landing page when no rig selected)
-- `AppShell` composes: `Explorer` sidebar + shared drawer selection context + `SharedDetailDrawer` + specs workspace context + activity/system surfaces
-- Selecting a rig in the explorer loads its topology graph in the main area
-- Clicking a node (in explorer or graph) opens the shared detail drawer
-- The shared drawer has five primary surfaces:
-  - **Rig drawer:** identity, node summary, snapshots (relocated from standalone panel), Turn On/Off/Export/Snapshot actions, chat room tab
-  - **Node drawer:** runtime-first identity, peers, edges, transcript helpers, compact spec summary, status (with restore outcome), startup files, recent events, and `Open Full Details`
-  - **Specs drawer:** unified library list with `All / Apps / Rigs / Agents` filters, type/stability badges, draft/spec review routing, and spec authoring entry points
-  - **Discovery drawer:** placement-first adopt/bind/materialize flow
-  - **System drawer:** global event/activity surface replacing the old status-bar role
-- Pod selection opens the rig drawer with pod section expanded (no separate pod drawer)
-- Human-readable IDs are UI-only: pod labels instead of ULIDs in explorer, short ULID tails for glanceability, full IDs in detail views
-- Infrastructure/terminal nodes have distinct visual treatment
-- Graph shows pod grouping via React Flow group nodes, status colors (green=ready, amber=launching, red=failed, gray=stopped), and lightweight hover/runtime hints
-- Service-backed library entries render as `APP` rows instead of generic rigs
-- `LibraryReview` for a managed app shows:
-  - `Library — Managed App`
-  - `Copy Setup Prompt`
-  - a `Specialist Agent` card (canonical example: `vault.specialist`)
-  - a library-only `Environment` tab with compose preview, health gates, and surfaces
-- The rig drawer now has `Info`, `Env`, and `Chat Room` tabs for service-backed rigs
-- `RigEnvPanel` exposes overall env state, per-service health, health gates, surfaces, logs, and explicit env teardown
-- Explicit center-workspace routes now exist for:
-  - `/specs`
-  - `/specs/rig`
-  - `/specs/agent`
-  - `/specs/library/$entryId`
-  - `/rigs/$rigId/nodes/$logicalId`
+High-level shape:
+
+- `AppShell` wraps every route with a desktop rail, route-aware `Explorer`,
+  center workspace, shared right drawer, preview stack, and topology overlay
+  provider.
+- Primary destinations are Dashboard (`/`), Topology (`/topology`), For You
+  (`/for-you`), Project (`/project`), Library (`/specs`), and Settings
+  (`/settings`).
+- Topology uses scoped routes for host, rig, pod, and seat views:
+  `/topology`, `/topology/rig/$rigId`, `/topology/pod/$rigId/$podName`, and
+  `/topology/seat/$rigId/$logicalId`.
+- Project uses scoped routes for workspace, mission, and slice:
+  `/project`, `/project/mission/$missionId`, and `/project/slice/$sliceId`.
+- Library keeps `/specs` as the route but presents the product label
+  `Library`, including skills at `/specs/skills/$skillToken` and
+  `/specs/skills/$skillToken/file/$fileToken`.
+
+Current UI primitives:
+
+- Vellum primitives live in `components/ui`: `VellumCard`, `VellumSheet`,
+  `RegistrationMarks`, `StatusPip`, empty states, tabs, tables, buttons, and
+  form controls.
+- Graphics primitives live in `components/graphics` and `lib`: `RuntimeMark`,
+  `RuntimeBadge`, `ToolMark`, `ToolBadge`, `ActorMark`, `runtime-brand.ts`, and
+  `tool-brand.ts`.
+- Project metadata primitives live in `components/project/ProjectMetaPrimitives`
+  and render event badges, queue state badges, tag pills, actor chips, date
+  chips, flow chips, proof thumbnails, and proof packet headers.
+
+Current topology UI:
+
+- Host topology is a hybrid React Flow graph with soft rig frames, pod frames,
+  compact agent cards, context percentage, token totals, activity card tint,
+  activity rings, hot-potato edge animation, hover/focus CMUX actions, and
+  terminal preview popovers.
+- Topology table and terminal views share the same route-scope model and preserve
+  graph/table/tree navigation parity to seat detail URLs.
+- Terminal preview popovers use black-glass styling and are portaled above the
+  React Flow canvas to avoid node stacking conflicts.
+
+Current project and feed UI:
+
+- Project scopes render Story, Progress, Artifacts, Tests, Queue, and Topology
+  tabs filtered by workspace, mission, or slice.
+- Story is narrative and body-primary; Queue is operational and actionable.
+- For You classifies feed items into action-required, approval, shipped,
+  progress, and observation cards, with body previews, proof thumbnails, action
+  outcomes, actor flow, and queue actions.
+- Proof images use a reusable black-glass viewer.
+
+Current drawer/viewer model:
+
+- `SharedDetailDrawer` remains the shared transient detail surface.
+- Drawer triggers carry root/path provenance for file and queue item viewers.
+- The drawer supports outside-click dismissal.
+- Skill details use Library Explorer navigation plus `FileViewer` in the center
+  workspace instead of a nested three-column browser.
 
 ---
 
@@ -364,7 +395,7 @@ PL-005 Phase A extends `RigEvent` with 3 new types: `mission_control.action_exec
 
 ### Workflow Runtime (PL-004 Phase D)
 
-Daemon-native Workflow Runtime — declarative workflow specs, live instance state, append-only step trails, and the load-bearing transactional-scribe contract. Per PRD § L4 and founder direction (2026-04-22): owner-as-author semantically + workflow-as-transactional-scribe mechanically.
+Daemon-native Workflow Runtime — declarative workflow specs, live instance state, append-only step trails, and the load-bearing transactional-scribe contract. The PRD § L4 operating model is owner-as-author semantically plus workflow-as-transactional-scribe mechanically.
 
 `workflow_specs` is a read-through cache of human-authored markdown/YAML spec files. Sources are workspace-surface; the daemon caches by `(name, version)` with a content `source_hash` so that valid operator edits to the spec file win at next read (workspace-surface reconciliation). Spec authoring stays markdown-authoritative; `workflow_specs` exists for fast lookup and runtime resolution.
 
