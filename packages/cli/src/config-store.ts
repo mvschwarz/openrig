@@ -76,6 +76,14 @@ export interface RiggedConfig {
       auditLog: boolean;
     };
   };
+  // plugin-primitive Phase 3a slice 3.5 — runtime feature flags. Currently
+  // single-flag for Codex; extracts to its own primitive workspace if/when
+  // 3+ flags accumulate (per DESIGN.md §5.8).
+  runtime: {
+    codex: {
+      hooksEnabled: boolean;
+    };
+  };
 }
 
 const DEFAULT_WORKSPACE_ROOT = getDefaultOpenRigPath("workspace");
@@ -401,6 +409,11 @@ export class ConfigStore {
           shipped: v("feed.subscriptions.shipped") as boolean,
           progress: v("feed.subscriptions.progress") as boolean,
           auditLog: v("feed.subscriptions.audit_log") as boolean,
+        },
+      },
+      runtime: {
+        codex: {
+          hooksEnabled: v("runtime.codex.hooks_enabled") as boolean,
         },
       },
     };
