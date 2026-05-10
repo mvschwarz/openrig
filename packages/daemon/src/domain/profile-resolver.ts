@@ -124,12 +124,13 @@ export function resolveNodeConfig(ctx: ResolutionContext): ResolutionResult {
 
   // 2b. Augment the pool with filesystem-discovered skills. Rig-local
   // resources.skills (already in the pool from buildResourcePool) win
-  // over discovered same-id entries — the most-specific-wins
-  // precedence: rig-local > spec-install-dir bundled > rig-cwd
-  // bundled > runtime-specific user library > shared user-spec
-  // library. The internal precedence among discovery roots lives in
+  // over discovered same-id entries. Most-specific-wins precedence:
+  // rig-local agent.yaml > rig-bundled cwd > spec-install-dir >
+  // runtime-specific user library > shared ~/.openrig/skills/. The
+  // internal ordering among discovery roots lives in
   // skill-discovery.listScanRoots; here we only enforce that
-  // rig-local-declared resources are not overwritten.
+  // rig-local declarations are not overwritten by discovery.
+  let rejectedSkillsByBasename: Map<string, { path: string; reason: string }> = new Map();
   if (runtime === "claude-code" || runtime === "codex") {
     const discovery = discoverSkillsForRuntime({
       runtime: runtime as SkillRuntime,
@@ -146,12 +147,32 @@ export function resolveNodeConfig(ctx: ResolutionContext): ResolutionResult {
         resource: discovered,
       }]);
     }
+    // Index rejected skills by directory basename so a profile that
+    // references the same name as a structurally-broken SKILL.md gets
+    // the precise rejection reason instead of a bare "not found in
+    // resource pool" error.
+    for (const r of discovery.rejected) {
+      const base = nodePath.basename(r.path);
+      if (!rejectedSkillsByBasename.has(base)) rejectedSkillsByBasename.set(base, r);
+    }
   }
 
   // 3. Resolve profile uses against the augmented pool
   const selectedResult = resolveProfileUses(profile, pool, spec.name, errors);
   if (errors.length > 0) {
-    return { ok: false, errors };
+    // Augment "skills: \"<id>\" not found in resource pool" errors
+    // with the structural-rejection reason when the basename matches
+    // a discovered-but-rejected SKILL.md directory. Operators see
+    // exactly what to fix instead of a vague pool miss.
+    const enhanced = errors.map((err) => {
+      const m = err.match(/^Profile uses skills: "([^"]+)" not found in resource pool$/);
+      if (!m) return err;
+      const ref = m[1]!;
+      const rejection = rejectedSkillsByBasename.get(ref);
+      if (!rejection) return err;
+      return `Profile uses skills: "${ref}" rejected — ${rejection.reason} (at ${rejection.path})`;
+    });
+    return { ok: false, errors: enhanced };
   }
 
   // 7. Resolve restorePolicy with narrowing
