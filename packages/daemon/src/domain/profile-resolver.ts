@@ -1,4 +1,5 @@
 import nodePath from "node:path";
+import { homedir as osHomedir } from "node:os";
 import type {
   AgentSpec, AgentResources, ProfileSpec, LifecycleDefaults,
   RigSpec, RigSpecPod, RigSpecPodMember, StartupBlock,
@@ -6,6 +7,7 @@ import type {
 } from "./types.js";
 import type { ResolvedAgentSpec, ResourceCollision } from "./agent-resolver.js";
 import { resolveStartup } from "./startup-resolver.js";
+import { discoverSkillsForRuntime, type SkillRuntime } from "./skill-discovery.js";
 
 // -- Types --
 
@@ -48,6 +50,11 @@ export interface ResolutionContext {
   pod: RigSpecPod;
   rig: RigSpec;
   operatorStartup?: StartupBlock;
+  /** V0.3.0 daemon-skill-discovery (SC-29 #7): operator home directory
+   *  used to scan filesystem-discovered skills (~/.openrig/skills/,
+   *  ~/.claude/skills/, ~/.agents/skills/). Defaults to os.homedir()
+   *  in production; tests inject a fixture root. */
+  homedir?: string;
 }
 
 export type ResolutionResult =
@@ -95,29 +102,78 @@ export function resolveNodeConfig(ctx: ResolutionContext): ResolutionResult {
   // 2. Build combined resource pool
   const pool = buildResourcePool(baseSpec, importedSpecs);
 
-  // 3. Resolve profile uses against pool
-  const selectedResult = resolveProfileUses(profile, pool, spec.name, errors);
-  if (errors.length > 0) {
-    return { ok: false, errors };
-  }
-
-  // 4. Resolve runtime (member authoritative)
+  // V0.3.0 daemon-skill-discovery (SC-29 #7): runtime + cwd must be
+  // resolved BEFORE the pool is queried, so the filesystem skill scan
+  // targets the right runtime's path layout (claude-code → .claude/;
+  // codex → .agents/) at the right cwd. Order swapped from prior
+  // versions where runtime/cwd were computed AFTER the pool.
   const runtime = member.runtime
     ?? profile.preferences?.runtime
     ?? spec.defaults?.runtime
     ?? "claude-code";
 
-  // 5. Resolve model (member overrides)
   const model = member.model
     ?? profile.preferences?.model
     ?? spec.defaults?.model;
 
-  // 6. Resolve cwd (member authoritative, required)
   const cwd = ctx.cwdOverride
     ? nodePath.resolve(ctx.cwdOverride)
     : ctx.specRoot
       ? (nodePath.isAbsolute(member.cwd) ? member.cwd : nodePath.resolve(ctx.specRoot, member.cwd))
       : member.cwd;
+
+  // 2b. Augment the pool with filesystem-discovered skills. Rig-local
+  // resources.skills (already in the pool from buildResourcePool) win
+  // over discovered same-id entries. Most-specific-wins precedence:
+  // rig-local agent.yaml > rig-bundled cwd > spec-install-dir >
+  // runtime-specific user library > shared ~/.openrig/skills/. The
+  // internal ordering among discovery roots lives in
+  // skill-discovery.listScanRoots; here we only enforce that
+  // rig-local declarations are not overwritten by discovery.
+  let rejectedSkillsByBasename: Map<string, { path: string; reason: string }> = new Map();
+  if (runtime === "claude-code" || runtime === "codex") {
+    const discovery = discoverSkillsForRuntime({
+      runtime: runtime as SkillRuntime,
+      homedir: ctx.homedir ?? osHomedir(),
+      cwd,
+      specInstallDir: ctx.specRoot,
+    });
+    for (const discovered of discovery.skills) {
+      if (pool.skills.has(discovered.id)) continue; // rig-local-wins
+      pool.skills.set(discovered.id, [{
+        effectiveId: discovered.id,
+        sourceSpec: "discovered",
+        sourcePath: discovered.path,
+        resource: discovered,
+      }]);
+    }
+    // Index rejected skills by directory basename so a profile that
+    // references the same name as a structurally-broken SKILL.md gets
+    // the precise rejection reason instead of a bare "not found in
+    // resource pool" error.
+    for (const r of discovery.rejected) {
+      const base = nodePath.basename(r.path);
+      if (!rejectedSkillsByBasename.has(base)) rejectedSkillsByBasename.set(base, r);
+    }
+  }
+
+  // 3. Resolve profile uses against the augmented pool
+  const selectedResult = resolveProfileUses(profile, pool, spec.name, errors);
+  if (errors.length > 0) {
+    // Augment "skills: \"<id>\" not found in resource pool" errors
+    // with the structural-rejection reason when the basename matches
+    // a discovered-but-rejected SKILL.md directory. Operators see
+    // exactly what to fix instead of a vague pool miss.
+    const enhanced = errors.map((err) => {
+      const m = err.match(/^Profile uses skills: "([^"]+)" not found in resource pool$/);
+      if (!m) return err;
+      const ref = m[1]!;
+      const rejection = rejectedSkillsByBasename.get(ref);
+      if (!rejection) return err;
+      return `Profile uses skills: "${ref}" rejected — ${rejection.reason} (at ${rejection.path})`;
+    });
+    return { ok: false, errors: enhanced };
+  }
 
   // 7. Resolve restorePolicy with narrowing
   const restorePolicyResult = resolveRestorePolicy(spec, profile, member);
