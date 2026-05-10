@@ -189,6 +189,55 @@ describe("PluginVendorService — auto-fetch (HG-2.4 + HG-2.5)", () => {
     const url = httpClient.mock.calls[0]?.[0] as string;
     expect(url).toMatch(/github\.com\/mvschwarz\/openrig-plugins|api\.github\.com.*mvschwarz\/openrig-plugins/);
   });
+
+  it("attemptAutoFetch passes timeoutMs=5000 to httpClient (per IMPL-PRD §2.5 5s timeout)", async () => {
+    const fs = mockFs(VENDORED_OPENRIG_CORE);
+    const httpClient = vi.fn().mockResolvedValue({ ok: false, status: 404 });
+    const svc = new PluginVendorService({
+      vendoredAssetsDir: "/asset-root",
+      userPluginsDir: "/home/test/.openrig/plugins",
+      fs,
+      httpClient,
+      logger: vi.fn(),
+    });
+
+    await svc.attemptAutoFetch("openrig-core");
+
+    expect(httpClient).toHaveBeenCalled();
+    const opts = httpClient.mock.calls[0]?.[1] as { timeoutMs?: number } | undefined;
+    expect(opts?.timeoutMs).toBe(5000);
+  });
+
+  it("attemptAutoFetch v0 success-path is probe-only — does NOT extract tarball or update vendored copy", async () => {
+    // Per slice-3.2 v0 scope (per orch-lead 2026-05-10 + velocity-guard 60344b3 BLOCKING-CONCERN):
+    //   - 404 is the expected normal-state response (repo currently empty per founder authorization)
+    //   - Even on a 200 success, v0 does NOT extract or update — extraction/version-compare/update
+    //     is explicitly scoped to slice 3.6 (marketplace-consumption phase)
+    // This test pins the v0 contract so an accidental "implement extract" lands as a TDD-red
+    // signal in slice 3.6 (where it's intentional) rather than silently in 3.2.
+    const initialUserPlugin = "/home/test/.openrig/plugins/openrig-core/.claude-plugin/plugin.json";
+    const initialContent = '{"name":"openrig-core","version":"0.1.0"}';
+    const fs = mockFs({
+      ...VENDORED_OPENRIG_CORE,
+      [initialUserPlugin]: initialContent,
+    });
+    // Mock a successful 200 response (normally repo returns 404 today)
+    const httpClient = vi.fn().mockResolvedValue({ ok: true, status: 200, body: "would-be-tarball-bytes" });
+    const svc = new PluginVendorService({
+      vendoredAssetsDir: "/asset-root",
+      userPluginsDir: "/home/test/.openrig/plugins",
+      fs,
+      httpClient,
+      logger: vi.fn(),
+    });
+
+    await svc.attemptAutoFetch("openrig-core");
+
+    // User plugin content unchanged — v0 doesn't extract/install on 200
+    expect(fs._store[initialUserPlugin]).toBe(initialContent);
+    // No .version file written either
+    expect(fs._store["/home/test/.openrig/plugins/openrig-core/.version"]).toBeUndefined();
+  });
 });
 
 describe("PluginVendorService — ensureLatest orchestration", () => {
