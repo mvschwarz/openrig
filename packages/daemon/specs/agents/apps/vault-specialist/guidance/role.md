@@ -28,7 +28,6 @@ You have the following skills loaded:
 
 - `using-superpowers` — general agent capabilities
 - `openrig-user` — OpenRig CLI and topology operations
-- `mental-model-ha` — compaction and restore discipline
 - `systematic-debugging` — structured debugging approach
 - `verification-before-completion` — evidence before claims
 - `vault-user` — Vault-specific operations and domain knowledge

@@ -126,7 +126,7 @@ describe("Starter specs", () => {
     expect(summary).toContain("specialist");
   });
 
-  it("starter summaries position conveyor as the generic starter and product-team as the advanced preview", () => {
+  it("starter summaries position conveyor as the generic starter and product-team as the advanced product lane", () => {
     const lib = new SpecLibraryService({
       roots: [{ path: SPECS_ROOT, sourceType: "builtin" }],
       specReviewService,
@@ -144,7 +144,9 @@ describe("Starter specs", () => {
     expect(implementationPair?.summary?.toLowerCase()).toContain("first success");
     expect(demo?.summary?.toLowerCase()).toContain("launch-grade");
     expect(demo?.summary?.toLowerCase()).not.toContain("advanced preview");
-    expect(productTeam?.summary?.toLowerCase()).toContain("advanced preview");
+    expect(productTeam?.summary?.toLowerCase()).toContain("advanced product-development starter");
+    expect(productTeam?.summary?.toLowerCase()).not.toContain("demo");
+    expect(productTeam?.summary?.toLowerCase()).not.toContain("advanced preview");
     expect(productTeam?.summary?.toLowerCase()).not.toContain("happy-path starter");
   });
 
@@ -386,6 +388,18 @@ describe("Starter specs", () => {
       for (const skillId of skills) {
         expect(content).toContain(`\`${skillId}\``);
       }
+    }
+  });
+
+  it("public builtin agent profiles do not reference deprecated mental-model-ha", () => {
+    for (const file of AGENT_SPECS) {
+      const yaml = readFileSync(join(SPECS_ROOT, file), "utf-8");
+      const raw = parseAgentSpec(yaml) as Record<string, unknown>;
+      const profiles = (raw["profiles"] as Record<string, Record<string, unknown>> | undefined) ?? {};
+      const defaultProfile = profiles["default"] ?? {};
+      const uses = (defaultProfile["uses"] as Record<string, unknown> | undefined) ?? {};
+      const skills = (uses["skills"] as string[] | undefined) ?? [];
+      expect(skills).not.toContain("mental-model-ha");
     }
   });
 
