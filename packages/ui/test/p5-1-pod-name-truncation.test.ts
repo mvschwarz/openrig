@@ -31,9 +31,9 @@ describe("displayPodName P5.1-3 regression: human-readable pod names pass throug
     expect(displayPodName("product-lab")).toBe("product-lab");
   });
 
-  it("'recursive-self-improvement-v2' stays full (NOT '-v2')", () => {
-    expect(displayPodName("recursive-self-improvement-v2")).toBe(
-      "recursive-self-improvement-v2",
+  it("'release-readiness-v2' stays full (NOT '-v2')", () => {
+    expect(displayPodName("release-readiness-v2")).toBe(
+      "release-readiness-v2",
     );
   });
 

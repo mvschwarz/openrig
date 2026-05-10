@@ -24,7 +24,7 @@ import { useFilesRoots, useFilesList } from "./useFiles.js";
 import { useWorkspaceName } from "./useWorkspaceName.js";
 
 export interface DiscoveredMission {
-  /** Mission directory name (e.g., "recursive-self-improvement-v2"). */
+  /** Mission directory name (e.g., "release-0-3-0"). */
   name: string;
   /** Allowlist root name to use with /api/files/* endpoints. */
   root: string;
