@@ -45,7 +45,7 @@ Load these before starting any design work. The quality of your output depends o
    - `~/.openrig/reference/agent-spec.md` — canonical AgentSpec YAML reference. Same depth.
    - `~/.openrig/reference/agent-startup-guide.md` — how to think about what goes into agent startup. Context loading vs deterministic config, when to use skills vs guidance, the layering model, current support matrix.
    - `~/.openrig/reference/edge-types.md` — what edges do today vs what they're intended to do.
-   
+
    If `~/.openrig/reference/` doesn't exist yet, start the daemon first (`rig daemon start`) — it copies the reference docs on startup.
 
 **Read as worked examples:**
