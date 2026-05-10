@@ -1,8 +1,8 @@
 // Slice Story View v1 — focused tab tests for the 4 v1 dimensions.
 //
 // Pins:
-//   - StoryTab: spec-driven phase grouping (no v0 hardcoded legacy enum)
-//   - StoryTab: untagged events render with neutral palette + label
+//   - TimelineTab: spec-driven phase grouping (no v0 hardcoded legacy enum)
+//   - TimelineTab: untagged events render with neutral palette + label
 //   - AcceptanceTab: Current Step panel renders when bound; absent when not
 //   - AcceptanceTab: PROGRESS.md checkbox view still renders alongside
 //   - TopologyTab: spec graph renders nodes + edges + isCurrent/isEntry/
@@ -14,7 +14,7 @@ import { describe, it, expect, afterEach, vi } from "vitest";
 import { render, screen, cleanup, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { createTestRouter } from "./helpers/test-router.js";
-import { StoryTab } from "../src/components/slices/tabs/StoryTab.js";
+import { TimelineTab } from "../src/components/slices/tabs/TimelineTab.js";
 import { DrawerSelectionContext } from "../src/components/AppShell.js";
 import { AcceptanceTab } from "../src/components/slices/tabs/AcceptanceTab.js";
 import { TopologyTab } from "../src/components/slices/tabs/TopologyTab.js";
@@ -56,14 +56,14 @@ function renderStory(ui: ReactNode) {
   );
 }
 
-describe("PL-slice-story-view-v1 StoryTab", () => {
+describe("PL-slice-story-view-v1 TimelineTab", () => {
   it("groups events by spec-declared phase labels (NOT v0 hardcoded legacy names)", () => {
     const events = [
       event({ kind: "queue.created", phase: "discovery", qitemId: "q-d" }),
       event({ kind: "queue.handed_off", phase: "delivery", qitemId: "q-x" }),
       event({ kind: "transition.in-progress", phase: "qa", qitemId: "q-q" }),
     ];
-    renderStory(<StoryTab events={events} phaseDefinitions={SPEC_PHASES} />);
+    renderStory(<TimelineTab events={events} phaseDefinitions={SPEC_PHASES} />);
     // Each row's phase chip uses the spec-declared label (which equals
     // the actor_role for v1's projector default).
     expect(screen.getByTestId("story-row-phase-queue.created").textContent).toBe("discovery-router");
@@ -73,7 +73,7 @@ describe("PL-slice-story-view-v1 StoryTab", () => {
 
   it("untagged events render with the neutral 'untagged' label + stone palette", () => {
     const events = [event({ kind: "doc.edited", phase: null, qitemId: null })];
-    renderStory(<StoryTab events={events} phaseDefinitions={SPEC_PHASES} />);
+    renderStory(<TimelineTab events={events} phaseDefinitions={SPEC_PHASES} />);
     const chip = screen.getByTestId("story-row-phase-doc.edited");
     expect(chip.textContent).toBe("untagged");
     expect(chip.getAttribute("data-phase-id")).toBe("untagged");
@@ -87,7 +87,7 @@ describe("PL-slice-story-view-v1 StoryTab", () => {
     // loses its workflow_instance binding — events were tagged at fetch
     // time, definitions weren't.)
     const events = [event({ kind: "queue.created", phase: "step-x" })];
-    renderStory(<StoryTab events={events} phaseDefinitions={null} />);
+    renderStory(<TimelineTab events={events} phaseDefinitions={null} />);
     expect(screen.getByTestId("story-row-phase-queue.created").textContent).toBe("step-x");
   });
 
@@ -96,7 +96,7 @@ describe("PL-slice-story-view-v1 StoryTab", () => {
       event({ kind: "old.event", ts: "2026-05-04T00:00:00.000Z", summary: "older" }),
       event({ kind: "new.event", ts: "2026-05-04T01:00:00.000Z", summary: "newer" }),
     ];
-    renderStory(<StoryTab events={events} phaseDefinitions={null} />);
+    renderStory(<TimelineTab events={events} phaseDefinitions={null} />);
     expect(screen.getByTestId("story-step-tree").getAttribute("data-order")).toBe("newest-first");
     const rows = screen.getAllByTestId(/story-row-/);
     expect(rows[0]?.getAttribute("data-testid")).toBe("story-row-new.event");
@@ -117,7 +117,7 @@ describe("PL-slice-story-view-v1 StoryTab", () => {
       body: "Implement the observability body-first story view.\nInclude acceptance evidence.",
     };
     renderStory(
-      <StoryTab
+      <TimelineTab
         events={[
           event({
             kind: "queue.created",

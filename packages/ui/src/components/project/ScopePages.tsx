@@ -6,7 +6,7 @@
 //
 // V1 attempt-3 Phase 5 P5-2: SliceScopePage tab content piping.
 // Per code-map AFTER tree fold mapping from Phase 5 dispatch:
-//   - StoryTab → story tab (preserved; events + phaseDefinitions props)
+//   - TimelineTab → story tab (preserved; events + phaseDefinitions props)
 //   - TestsVerificationTab → tests tab (preserved; tests prop)
 //   - TopologyTab → topology tab (preserved; topology prop)
 //   - AcceptanceTab → progress tab (FOLDED; canon-7 progress is acceptance + currentStep)
@@ -39,7 +39,7 @@ import {
   projectSliceMeta,
   type ProjectMissionGroup,
 } from "../../lib/project-mission-state.js";
-import { StoryTab } from "../slices/tabs/StoryTab.js";
+import { TimelineTab } from "../slices/tabs/TimelineTab.js";
 import { AcceptanceTab } from "../slices/tabs/AcceptanceTab.js";
 import { DocsTab } from "../slices/tabs/DocsTab.js";
 import { DecisionsTab } from "../slices/tabs/DecisionsTab.js";
@@ -386,7 +386,7 @@ function ScopeStoryRollup({
   }
   return (
     <div data-testid="scope-story-rollup">
-      <StoryTab events={events} phaseDefinitions={null} queueItemsById={queueItemsById} />
+      <TimelineTab events={events} phaseDefinitions={null} queueItemsById={queueItemsById} />
     </div>
   );
 }
@@ -1130,7 +1130,7 @@ export function SliceScopePage() {
       onSelect={(id) => setActive(id as SliceTab)}
     >
       {active === "story" ? (
-        <StoryTab
+        <TimelineTab
           events={storyEventsForDetail(detail)}
           phaseDefinitions={detail.story.phaseDefinitions}
           queueItemsById={queueItemsById}
