@@ -1,4 +1,5 @@
 import nodePath from "node:path";
+import * as os from "node:os";
 import type { StartupBlock } from "./types.js";
 import { classifyResourceProjection } from "./conflict-detector.js";
 import type { ResolvedNodeConfig, QualifiedResource, ResolvedResources } from "./profile-resolver.js";
@@ -95,14 +96,20 @@ export function planProjection(input: ProjectionInput): PlanResult {
         if (rr.runtime !== config.runtime) continue;
       }
 
-      // Plugins use a different shape: { id, source: { kind, path } } — extract path from source
+      // Plugins use a different shape: { id, source: { kind, path } } — extract path from source.
+      // Plugin paths support three forms (per DESIGN.md §5.2):
+      //   1. absolute system path → preserved exactly
+      //   2. tilde-home-prefixed (~/... or bare ~) → expanded to os.homedir()
+      //   3. relative to spec dir → resolved against qr.sourcePath
+      // ~user (with username) is NOT expanded — treated as a literal relative segment
+      // per Node's nodePath convention to avoid surprising operators with implicit
+      // username lookups.
       let resourcePath: string;
       let absolutePath: string;
       if (catKey === "plugins") {
         const pluginSource = (qr.resource as { source: { kind: string; path: string } }).source;
         resourcePath = pluginSource.path;
-        // Plugin paths may be absolute (vendored at ~/.openrig/plugins/) or relative to spec root
-        absolutePath = nodePath.isAbsolute(resourcePath) ? resourcePath : nodePath.resolve(qr.sourcePath, resourcePath);
+        absolutePath = resolvePluginPath(resourcePath, qr.sourcePath);
       } else {
         resourcePath = (qr.resource as { path: string }).path;
         absolutePath = nodePath.resolve(qr.sourcePath, resourcePath);
@@ -215,3 +222,19 @@ function checkAmbiguity(selected: ResolvedResources, collisions: ResourceCollisi
 
 // Classification is now handled via classifyResourceProjection from conflict-detector.ts
 // when resolveTargetPath is provided. Without it, entries default to safe_projection.
+
+/**
+ * Resolve a plugin source.path to a concrete absolute path.
+ * Three forms supported:
+ *   - absolute (`/abs/...`)        → preserved exactly
+ *   - tilde-home (`~/...` or `~`)  → expanded to os.homedir()
+ *   - relative (`plugins/...`)     → resolved against specSourcePath
+ * `~user/...` (with explicit username) is NOT expanded; treated as a
+ * literal relative segment per Node's nodePath convention.
+ */
+function resolvePluginPath(rawPath: string, specSourcePath: string): string {
+  if (rawPath === "~") return os.homedir();
+  if (rawPath.startsWith("~/")) return nodePath.join(os.homedir(), rawPath.slice(2));
+  if (nodePath.isAbsolute(rawPath)) return rawPath;
+  return nodePath.resolve(specSourcePath, rawPath);
+}
