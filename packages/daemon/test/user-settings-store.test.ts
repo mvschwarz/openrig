@@ -79,6 +79,8 @@ describe("SettingsStore (User Settings v0)", () => {
       "feed.subscriptions.shipped",
       "feed.subscriptions.progress",
       "feed.subscriptions.audit_log",
+      // plugin-primitive Phase 3a slice 3.5 — Codex feature flag.
+      "runtime.codex.hooks_enabled",
     ]);
   });
 

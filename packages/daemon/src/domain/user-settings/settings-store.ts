@@ -70,6 +70,12 @@ export const SETTINGS_VALID_KEYS = [
   "feed.subscriptions.shipped",
   "feed.subscriptions.progress",
   "feed.subscriptions.audit_log",
+  // plugin-primitive Phase 3a slice 3.5 — Codex feature flag.
+  // When true (default), daemon ensures `codex_hooks = true` in
+  // ~/.codex/config.toml on launch so plugin-shipped hooks fire on
+  // Codex runtime. When false, operator is managing Codex config
+  // independently — daemon does NOT mutate.
+  "runtime.codex.hooks_enabled",
 ] as const;
 
 export type SettingsValidKey = typeof SETTINGS_VALID_KEYS[number];
@@ -102,6 +108,12 @@ const ENV_MAP: Record<SettingsValidKey, { primary: string; legacy: string }> = {
   "feed.subscriptions.shipped": { primary: "OPENRIG_FEED_SUBSCRIPTIONS_SHIPPED", legacy: "RIGGED_FEED_SUBSCRIPTIONS_SHIPPED" },
   "feed.subscriptions.progress": { primary: "OPENRIG_FEED_SUBSCRIPTIONS_PROGRESS", legacy: "RIGGED_FEED_SUBSCRIPTIONS_PROGRESS" },
   "feed.subscriptions.audit_log": { primary: "OPENRIG_FEED_SUBSCRIPTIONS_AUDIT_LOG", legacy: "RIGGED_FEED_SUBSCRIPTIONS_AUDIT_LOG" },
+  // plugin-primitive Phase 3a slice 3.5 — net-new key post-rename;
+  // OPENRIG_X primary only (no RIGGED_X legacy per banked
+  // feedback_no_rigged_legacy_for_new_keys.md). Legacy field is
+  // empty-string sentinel kept for type-shape uniformity with the
+  // rest of ENV_MAP.
+  "runtime.codex.hooks_enabled": { primary: "OPENRIG_RUNTIME_CODEX_HOOKS_ENABLED", legacy: "" },
 };
 
 const KEY_TO_PATH: Record<SettingsValidKey, string[]> = {
@@ -132,6 +144,7 @@ const KEY_TO_PATH: Record<SettingsValidKey, string[]> = {
   "feed.subscriptions.shipped": ["feed", "subscriptions", "shipped"],
   "feed.subscriptions.progress": ["feed", "subscriptions", "progress"],
   "feed.subscriptions.audit_log": ["feed", "subscriptions", "auditLog"],
+  "runtime.codex.hooks_enabled": ["runtime", "codex", "hooksEnabled"],
 };
 
 export type SettingSource = "env" | "file" | "default";
@@ -240,6 +253,10 @@ function getDefaultValue(key: SettingsValidKey, workspaceRoot: string): string |
     case "feed.subscriptions.shipped": return true;
     case "feed.subscriptions.progress": return true;
     case "feed.subscriptions.audit_log": return false;
+    // plugin-primitive Phase 3a slice 3.5 — Codex feature flag default ON.
+    // Daemon ensures `codex_hooks = true` in ~/.codex/config.toml on
+    // launch unless operator explicitly sets to false.
+    case "runtime.codex.hooks_enabled": return true;
     default: return "";
   }
 }

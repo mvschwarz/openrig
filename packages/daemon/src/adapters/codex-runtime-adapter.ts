@@ -62,6 +62,30 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     this.activityHookRelayAssetPath = deps.activityHookRelayAssetPath ?? null;
   }
 
+  /**
+   * plugin-primitive Phase 3a slice 3.5 — ensure Codex feature flag.
+   *
+   * When `enabled` is true, idempotently writes `codex_hooks = true` under
+   * `[features]` in `~/.codex/config.toml`, creating the file if missing.
+   * When `enabled` is false, makes ZERO modifications — the operator is
+   * managing Codex config independently and the daemon does not touch it.
+   *
+   * Replaces the activity-hook-injection-coupled call to upsertCodexHooksFeature
+   * that lived in provisionActivityHooks() pre-rip.
+   */
+  ensureCodexFeatureFlag(enabled: boolean): void {
+    if (!enabled) return;
+    const homedir = this.fs.homedir;
+    if (!homedir) return;
+    const configPath = nodePath.join(homedir, ".codex", "config.toml");
+    const existing = this.fs.exists(configPath) ? this.fs.readFile(configPath) : "";
+    const updated = upsertCodexHooksFeature(existing);
+    if (updated !== existing) {
+      this.fs.mkdirp(nodePath.dirname(configPath));
+      this.fs.writeFile(configPath, updated);
+    }
+  }
+
   async listInstalled(binding: NodeBinding): Promise<InstalledResource[]> {
     const results: InstalledResource[] = [];
     const skillsDir = nodePath.join(binding.cwd, ".agents", "skills");
