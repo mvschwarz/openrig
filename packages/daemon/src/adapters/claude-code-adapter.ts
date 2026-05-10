@@ -27,7 +27,6 @@ export interface ClaudeAdapterFsOps {
 
 const SHELL_COMMANDS = new Set(["bash", "fish", "nu", "sh", "tmux", "zsh"]);
 
-// PL-016 hardening v0+1 (review-lead live e2e finding 1, 2026-05-04):
 // Real Claude Code binary needs 1-3s to write the new fork session-name
 // file under ~/.claude/sessions/. Poll instead of single-shot lookup.
 // 12 × 500ms = 6s ceiling — comfortably above the observed cold-start
@@ -204,12 +203,10 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       if (!enterResult.ok) {
         return { ok: false, error: `Failed to send Enter: ${enterResult.message}` };
       }
-      // PL-016 hardening (review-lead live e2e finding 1, 2026-05-04):
       // claude needs 1-3s to write the new fork session-name file under
       // ~/.claude/sessions/. The original implementation captured the
       // token IMMEDIATELY after Enter, which always returned undefined
-      // against a real binary — so EVERY claude-code agent_image fork
-      // had been broken since PL-016 merge until this fix. Poll on the
+      // against a real binary. Poll on the
       // verifyResumeLaunch cadence (12 × 500ms = 6s ceiling).
       const newToken = await this.pollForResumeToken(opts.name, FORK_POLL_ATTEMPTS, FORK_POLL_DELAY_MS);
       if (!newToken) {

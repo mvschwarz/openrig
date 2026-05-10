@@ -99,7 +99,7 @@ files: []
     expect(stats.forkCount).toBe(1);
   });
 
-  it("recordConsumption with incrementForkCount: false bumps lastUsedAt only (PL-016 hardening v0+1 finding 4)", () => {
+  it("recordConsumption with incrementForkCount: false bumps lastUsedAt only", () => {
     writeImage(userRoot, "p", `
 name: p
 version: 1

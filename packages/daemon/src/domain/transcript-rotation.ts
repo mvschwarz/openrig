@@ -6,8 +6,7 @@
 // by trailing line count + line-byte ceiling, not by session duration.
 //
 // Tunables (env: OPENRIG_TRANSCRIPTS_LINES / OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS;
-// legacy: RIGGED_*; allowlist keys transcripts.lines / transcripts.poll_interval_seconds
-// declared in SC-29 EXCEPTION #4):
+// allowlist keys transcripts.lines / transcripts.poll_interval_seconds):
 //   - lines:           number of trailing lines to capture per tick (default 1000)
 //   - pollIntervalMs:  millisecond cadence between ticks (default 2000)
 //
@@ -33,8 +32,8 @@ export const DEFAULT_TRANSCRIPT_POLL_INTERVAL_MS = 2000;
  *  via the daemon settings-store at startup; consumers that need the
  *  file-stored value can pass an explicit options object instead. */
 export function getTranscriptRotationOptionsFromEnv(): TranscriptRotationOptions {
-  const linesRaw = readOpenRigEnv("OPENRIG_TRANSCRIPTS_LINES", "RIGGED_TRANSCRIPTS_LINES");
-  const pollRaw = readOpenRigEnv("OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS", "RIGGED_TRANSCRIPTS_POLL_INTERVAL_SECONDS");
+  const linesRaw = readOpenRigEnv("OPENRIG_TRANSCRIPTS_LINES");
+  const pollRaw = readOpenRigEnv("OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS");
   const lines = parsePositiveInt(linesRaw, DEFAULT_TRANSCRIPT_LINES);
   const pollSeconds = parsePositiveInt(pollRaw, DEFAULT_TRANSCRIPT_POLL_INTERVAL_MS / 1000);
   return { lines, pollIntervalMs: pollSeconds * 1000 };

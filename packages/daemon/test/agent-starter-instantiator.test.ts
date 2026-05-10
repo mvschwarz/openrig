@@ -11,8 +11,7 @@
 // - Resolver THROW (any cause: missing entry, malformed YAML, failed
 //   credential scan) aborts the launch BEFORE `startNode` runs — no
 //   adapter `deliverStartup` is called and no STARTER layer lands
-//   downstream. Load-bearing credential-safety contract per M1 R1
-//   finding 2.
+//   downstream. Load-bearing credential-safety contract.
 // - Composition with `session_source.mode: "rebuild"` works
 //   independently (both apply on fresh_start; per slice schema).
 
@@ -202,7 +201,7 @@ describe("Agent Starter v1 vertical — instantiator integration (M2)", () => {
     // Malicious starter (api_key field) → resolver throws
     // AgentStarterCredentialScanFailedError → instantiator returns failed
     // before adapter.deliverStartup runs. Load-bearing credential-safety
-    // contract per M1 R1 finding 2.
+    // contract.
     const ctx = setupWithStarter({ starterContent: MALICIOUS_STARTER });
     try {
       const yaml = RigSpecCodec.serialize(specWithStarterRef());
@@ -292,8 +291,7 @@ describe("Agent Starter v1 vertical — instantiator integration (M2)", () => {
   // (initialized as "fresh" when none are present). A starter-only
   // member must not set any of these, so continuityOutcome stays at
   // "fresh" — proving STARTER is purely an additive guidance layer and
-  // does NOT masquerade as a continuity surface (which would be Finding 1
-  // territory).
+  // does NOT masquerade as a continuity surface.
   it("M2-R2-4: continuityOutcome stays 'fresh' when starter is the only continuity source", async () => {
     const ctx = setupWithStarter({ starterContent: CLEAN_STARTER });
     const startNodeSpy = vi.spyOn(

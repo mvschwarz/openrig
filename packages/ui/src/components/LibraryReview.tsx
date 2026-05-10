@@ -854,8 +854,8 @@ function AgentImageReviewBody({
 
         <div data-testid="lib-image-source" className="font-mono text-[9px] text-stone-500 space-y-0.5">
           <div>source seat: {entry.sourceSeat}</div>
-          {/* PL-016 Finding 2 — surface source_cwd so operators see
-            * WHERE the parent session was created. Pre-Finding-2
+          {/* Surface source_cwd so operators see
+            * WHERE the parent session was created. Older
             * manifests render "(unknown)" honestly. */}
           <div data-testid="lib-image-source-cwd">source cwd: {entry.sourceCwd ?? "(unknown — pre-Finding-2 manifest)"}</div>
           <div>created: {entry.createdAt}</div>

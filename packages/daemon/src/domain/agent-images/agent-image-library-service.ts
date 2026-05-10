@@ -133,8 +133,7 @@ export class AgentImageLibraryService {
    *      fails — operators see "this image was tried" without conflating
    *      attempts with successful forks.
    *   2. Post-launch on success (incrementForkCount: true): increments
-   *      forkCount only when startupResult.ok===true (PL-016 hardening
-   *      v0+1 review-lead live e2e finding 4, 2026-05-04). Prior
+   *      forkCount only when startupResult.ok===true. Prior
    *      behavior incremented on intent regardless of outcome, which
    *      polluted forkCount with failed-launch noise.
    *
@@ -285,8 +284,8 @@ export class AgentImageLibraryService {
       sourceSeat: manifest.sourceSeat,
       sourceSessionId: manifest.sourceSessionId,
       sourceResumeToken: manifest.sourceResumeToken,
-      // PL-016 Finding 2: surface sourceCwd verbatim from the manifest.
-      // null when the manifest predates Finding 2 (back-compat).
+      // Surface sourceCwd verbatim from the manifest.
+      // null when the manifest predates source_cwd support (back-compat).
       sourceCwd: manifest.sourceCwd ?? null,
       notes: manifest.notes ?? null,
       createdAt: manifest.createdAt,
@@ -329,7 +328,7 @@ export class AgentImageLibraryService {
       `source_resume_token: ${quoteIfNeeded(manifest.sourceResumeToken)}`,
       `created_at: ${quoteIfNeeded(manifest.createdAt)}`,
     ];
-    // PL-016 Finding 2: persist sourceCwd to manifest YAML so the
+    // Persist sourceCwd to manifest YAML so the
     // Use-as-starter snippet can emit `cwd: <source_cwd>` from the
     // library entry. Omitted when capture-time cwd was unknown.
     if (manifest.sourceCwd) {

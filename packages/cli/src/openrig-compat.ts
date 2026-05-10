@@ -23,14 +23,16 @@ function warnOnce(key: string, message: string): void {
   console.warn(message);
 }
 
-export function readOpenRigEnv(primary: string, legacy: string): string | undefined {
+export function readOpenRigEnv(primary: string, legacy?: string): string | undefined {
   const primaryValue = process.env[primary];
   if (primaryValue !== undefined && primaryValue !== "") return primaryValue;
 
-  const legacyValue = process.env[legacy];
-  if (legacyValue !== undefined && legacyValue !== "") {
-    warnOnce(`env:${legacy}`, `Warning: ${legacy} is deprecated; use ${primary} instead.`);
-    return legacyValue;
+  if (legacy) {
+    const legacyValue = process.env[legacy];
+    if (legacyValue !== undefined && legacyValue !== "") {
+      warnOnce(`env:${legacy}`, `Warning: ${legacy} is deprecated; use ${primary} instead.`);
+      return legacyValue;
+    }
   }
 
   return undefined;

@@ -14,8 +14,7 @@
 // orphan whitespace inside the 38rem (608px) drawer chrome. Fixed by
 // switching to fill-parent (`relative w-full h-full`).
 //
-// Both regressions break the founder-noticed UX from the V1 ship-gate
-// walk; tests must permanently guard.
+// Both regressions break the V1 ship-gate UX; tests must permanently guard.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, cleanup, waitFor } from "@testing-library/react";

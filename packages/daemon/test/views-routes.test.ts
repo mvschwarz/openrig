@@ -158,10 +158,10 @@ describe("views routes (PL-004 Phase B)", () => {
     }
   });
 
-  // ---- R1 BLOCKER 2: SSE consumer observes view.changed when queue mutates ----
-  // Per guard finding 2: route-level test that mutates queue state and
-  // observes a view.changed event. Wires the view-event-bridge in the test
-  // so the production code path is exercised.
+  // ---- SSE consumer observes view.changed when queue mutates ----
+  // Route-level test that mutates queue state and observes a view.changed
+  // event. Wires the view-event-bridge in the test so the production code
+  // path is exercised.
   it("R1 BLOCKER 2: queue mutation triggers view.changed visible to SSE consumer", async () => {
     // Wire the bridge so queue.created → view.changed flows through the
     // event-bus the SSE handler is subscribed to.
@@ -221,9 +221,9 @@ describe("views routes (PL-004 Phase B)", () => {
     expect(observed).toBe(true);
   });
 
-  // ---- R2 BLOCKER: queue.updated triggers view.changed visible to SSE consumer ----
-  // Per R2 guard finding: pending → blocked / in-progress → done / closure /
-  // escalation transitions through QueueRepository.update() must emit
+  // ---- queue.updated triggers view.changed visible to SSE consumer ----
+  // pending → blocked / in-progress → done / closure / escalation
+  // transitions through QueueRepository.update() must emit
   // queue.updated → view.changed. Without this, normal state mutations
   // never wake SSE consumers on /api/views/:name/sse.
   it("R2 BLOCKER: queue.update mutation triggers view.changed (cause=queue.updated) visible to SSE consumer", async () => {

@@ -1,5 +1,5 @@
 // PL-016 hardening v0+1 — claude-code adapter fork-branch resume-token
-// poll-loop tests (review-lead live e2e finding 1, 2026-05-04).
+// poll-loop tests.
 //
 // Pins:
 //   - poll loop succeeds when the session file appears after N attempts
@@ -79,7 +79,7 @@ function makeBinding(): NodeBinding {
   };
 }
 
-describe("ClaudeCodeAdapter fork branch — resume-token poll loop (PL-016 hardening v0+1 finding 1)", () => {
+describe("ClaudeCodeAdapter fork branch — resume-token poll loop", () => {
   it("succeeds when the session file appears after N polls (deferred-write path real claude exhibits)", async () => {
     const tmux = mockTmux();
     let sleepCalls = 0;
@@ -171,7 +171,7 @@ describe.skipIf(!REAL_CLAUDE_INTEGRATION)(
     it("polls until the real Claude binary writes the new fork session file", async () => {
       // Tester provides parent native_id + a fresh tmux session.
       // This test is intentionally minimal — its existence is the
-      // safety-net for the regression review-lead caught.
+      // safety-net for the real-binary deferred-write regression.
       const parentNativeId = process.env["OPENRIG_PARENT_NATIVE_ID"];
       if (!parentNativeId) {
         throw new Error(

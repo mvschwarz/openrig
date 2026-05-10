@@ -228,7 +228,7 @@ describe("Up API route", () => {
   // but here driven through the HTTP layer). The failed-scan negative
   // proves credential-bearing registry entries refuse the launch with a
   // clear failure and no completed startup_context (load-bearing
-  // credential-safety contract — Finding 2). Schema-composition negatives
+  // credential-safety contract). Schema-composition negatives
   // (fork+starter_ref, terminal+starter_ref) remain plan-mode tests since
   // they reject upfront.
   describe("M2 R2: POST /api/up with starter_ref (end-to-end)", () => {
