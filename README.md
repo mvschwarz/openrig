@@ -57,7 +57,7 @@ Every agent runs in a tmux session you can attach to, inspect, and work with dir
 OpenRig ships with a conveyor starter rig for learning workflow handoff:
 
 ```bash
-rig specs preview conveyor
+rig specs preview conveyor --kind rig
 ```
 
 ```

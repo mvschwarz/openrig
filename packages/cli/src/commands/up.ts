@@ -123,7 +123,7 @@ Examples:
       if (isRigName && !opts.existing) {
         try {
           const { resolveLibrarySpec } = await import("./specs.js");
-          const entry = await resolveLibrarySpec(client, source);
+          const entry = await resolveLibrarySpec(client, source, { kind: "rig" });
           // Library match found — check for existing-rig collision
           // Use /api/rigs/summary which mirrors findRigsByName (includes stopped rigs)
           const rigSummaries = await fetchRigSummaries();

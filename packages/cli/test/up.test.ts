@@ -690,6 +690,42 @@ describe("Up CLI", () => {
     expect(exitCode).toBe(1);
   });
 
+  it("up resolves a same-name rig and workflow to the rig library entry", async () => {
+    const origListeners = server.listeners("request");
+    let lastBody: Record<string, unknown> = {};
+    server.removeAllListeners("request");
+    server.on("request", async (req: http.IncomingMessage, res: http.ServerResponse) => {
+      let body = "";
+      for await (const chunk of req) body += chunk;
+      const url = decodeURIComponent(req.url ?? "");
+      if (url === "/api/specs/library?kind=rig") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify([{ id: "rig1", kind: "rig", name: "conveyor", sourceType: "builtin", sourcePath: "/specs/rigs/conveyor/rig.yaml" }]));
+      } else if (url === "/api/rigs/summary") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify([]));
+      } else if (url === "/api/up" && req.method === "POST") {
+        lastBody = JSON.parse(body);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ status: "planned", runId: "r", stages: [], errors: [] }));
+      } else {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: `unexpected request: ${req.method} ${url}` }));
+      }
+    });
+
+    const { exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "up", "conveyor", "--plan"]);
+    });
+
+    server.removeAllListeners("request");
+    for (const l of origListeners) server.on("request", l as (...args: unknown[]) => void);
+
+    expect(lastBody.sourceRef).toBe("/specs/rigs/conveyor/rig.yaml");
+    expect(lastBody.cwdOverride).toBe(process.cwd());
+    expect(exitCode).toBeUndefined();
+  });
+
   it("up --existing bypasses library-name ambiguity and posts the rig name", async () => {
     const origListeners = server.listeners("request");
     let lastBody: Record<string, unknown> = {};

@@ -20,7 +20,7 @@ import type { StatusDeps } from "./status.js";
 
 interface LibraryEntry {
   id: string;
-  kind: string;
+  kind: "rig" | "agent" | "workflow";
   name: string;
   version: string;
   sourceType: string;
@@ -145,8 +145,9 @@ function installSpecSource(source: AddSpecSource, userRoot: string): string {
 export async function resolveLibrarySpec(
   client: DaemonClient,
   nameOrId: string,
+  opts?: { kind?: LibraryEntry["kind"] },
 ): Promise<LibraryEntry> {
-  const res = await client.get<LibraryEntry[]>("/api/specs/library");
+  const res = await client.get<LibraryEntry[]>(opts?.kind ? `/api/specs/library?kind=${opts.kind}` : "/api/specs/library");
   const entries = res.data ?? [];
 
   // Try exact ID match first
@@ -158,14 +159,16 @@ export async function resolveLibrarySpec(
   if (byName.length === 1) return byName[0]!;
 
   if (byName.length > 1) {
-    const candidates = byName.map((e) => `  ${e.id} — ${e.sourcePath}`).join("\n");
+    const candidates = byName.map((e) => `  ${e.id} (${e.kind}) — ${e.sourcePath}`).join("\n");
+    const scope = opts?.kind ? ` ${opts.kind}` : "";
     throw new Error(
-      `Spec name '${nameOrId}' is ambiguous — ${byName.length} entries match.\nUse the ID instead:\n${candidates}`
+      `Spec name '${nameOrId}' is ambiguous — ${byName.length}${scope} entries match.\nUse the ID instead:\n${candidates}`
     );
   }
 
+  const scope = opts?.kind ? ` ${opts.kind}` : "";
   throw new Error(
-    `Spec '${nameOrId}' not found in library. Run 'rig specs ls' to see available rigs, agents, and managed apps.`
+    `Spec '${nameOrId}' not found in${scope} library. Run 'rig specs ls' to see available rigs, agents, workflows, and managed apps.`
   );
 }
 
@@ -195,7 +198,7 @@ Examples:
   // specs ls
   cmd.command("ls")
     .description("List library rigs, agents, and managed apps")
-    .option("--kind <kind>", "Filter by kind (rig or agent)")
+    .option("--kind <kind>", "Filter by kind (rig, agent, or workflow)")
     .option("--json", "JSON output")
     .action(async (opts: { kind?: string; json?: boolean }) => {
       try {
@@ -227,11 +230,12 @@ Examples:
   cmd.command("show")
     .argument("<name-or-id>", "Spec name or library ID")
     .description("Show spec metadata and path")
+    .option("--kind <kind>", "Disambiguate by kind (rig, agent, or workflow)")
     .option("--json", "JSON output")
-    .action(async (nameOrId: string, opts: { json?: boolean }) => {
+    .action(async (nameOrId: string, opts: { kind?: LibraryEntry["kind"]; json?: boolean }) => {
       try {
         const client = await getClient();
-        const entry = await resolveLibrarySpec(client, nameOrId);
+        const entry = await resolveLibrarySpec(client, nameOrId, opts.kind ? { kind: opts.kind } : undefined);
 
         if (opts.json) {
           console.log(JSON.stringify(entry, null, 2));
@@ -254,11 +258,12 @@ Examples:
   cmd.command("preview")
     .argument("<name-or-id>", "Spec name or library ID")
     .description("Show structured spec review, including managed app details")
+    .option("--kind <kind>", "Disambiguate by kind (rig, agent, or workflow)")
     .option("--json", "JSON output")
-    .action(async (nameOrId: string, opts: { json?: boolean }) => {
+    .action(async (nameOrId: string, opts: { kind?: LibraryEntry["kind"]; json?: boolean }) => {
       try {
         const client = await getClient();
-        const entry = await resolveLibrarySpec(client, nameOrId);
+        const entry = await resolveLibrarySpec(client, nameOrId, opts.kind ? { kind: opts.kind } : undefined);
         const res = await client.get<Record<string, unknown>>(`/api/specs/library/${encodeURIComponent(entry.id)}/review`);
 
         if (opts.json) {

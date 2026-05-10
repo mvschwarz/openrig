@@ -27,7 +27,8 @@ export function importCommand(depsOverride?: ImportDeps): Command {
     .option("--preflight", "Run preflight checks")
     .option("--target-rig <rigId>", "Target existing rig for additive materialization")
     .option("--rig-root <root>", "Root directory for pod-aware resolution")
-    .action(async (filePath: string, opts: { instantiate?: boolean; materializeOnly?: boolean; preflight?: boolean; targetRig?: string; rigRoot?: string }) => {
+    .option("--cwd <path>", "Override launch/materialization working directory for all members")
+    .action(async (filePath: string, opts: { instantiate?: boolean; materializeOnly?: boolean; preflight?: boolean; targetRig?: string; rigRoot?: string; cwd?: string }) => {
       const deps = getDeps();
 
       // Read local file first (before daemon check — fail fast on missing file)
@@ -59,7 +60,11 @@ export function importCommand(depsOverride?: ImportDeps): Command {
       const rigRoot = podAware
         ? (opts.rigRoot ? nodePath.resolve(opts.rigRoot) : nodePath.dirname(nodePath.resolve(filePath)))
         : undefined;
-      const extraHeaders = rigRoot ? { "X-Rig-Root": rigRoot } : undefined;
+      const cwdOverride = opts.cwd ? nodePath.resolve(opts.cwd) : undefined;
+      const extraHeaders = {
+        ...(rigRoot ? { "X-Rig-Root": rigRoot } : {}),
+        ...(cwdOverride ? { "X-Cwd-Override": cwdOverride } : {}),
+      };
 
       if (opts.instantiate && opts.materializeOnly) {
         console.error("Choose either --instantiate or --materialize-only, not both.");
@@ -97,7 +102,7 @@ export function importCommand(depsOverride?: ImportDeps): Command {
           return;
         }
         const headers = {
-          ...(extraHeaders ?? {}),
+          ...extraHeaders,
           ...(opts.targetRig ? { "X-Target-Rig-Id": opts.targetRig } : {}),
         };
         const res = await client.postText<{ rigId: string; specName: string; specVersion: string; nodes: Array<{ logicalId: string; status: string }> } | { ok: false; code: string; errors?: string[]; message?: string }>("/api/rigs/import/materialize", yaml, "text/yaml", headers);

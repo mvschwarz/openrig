@@ -124,6 +124,7 @@ function createMockDaemon() {
     if (req.method === "POST" && url.pathname === "/api/rigs/import") {
       capturedImportHeaders = {
         "x-rig-root": req.headers["x-rig-root"],
+        "x-cwd-override": req.headers["x-cwd-override"],
       };
       let body = "";
       req.on("data", (c: Buffer) => { body += c.toString(); });
@@ -144,6 +145,7 @@ function createMockDaemon() {
       capturedImportHeaders = {
         "x-rig-root": req.headers["x-rig-root"],
         "x-target-rig-id": req.headers["x-target-rig-id"],
+        "x-cwd-override": req.headers["x-cwd-override"],
       };
       res.writeHead(201, { "Content-Type": "application/json" });
       res.end(JSON.stringify({
@@ -298,6 +300,16 @@ describe("rig export + import", () => {
     expect(capturedImportHeaders["x-target-rig-id"]).toBe("rig-123");
   });
 
+  it("import --materialize-only with --cwd forwards absolute cwd override", async () => {
+    capturedImportHeaders = {};
+    const deps = importDeps(`version: "0.2"\nname: test\npods: []\n`);
+    const program = new Command();
+    program.addCommand(importCommand(deps));
+    await captureLogs(() => program.parseAsync(["node", "rig", "import", "rig.yaml", "--materialize-only", "--cwd", "relative/project", "--rig-root", "/tmp"]));
+    expect(capturedImportHeaders["x-cwd-override"]).toMatch(/^\//);
+    expect(String(capturedImportHeaders["x-cwd-override"])).toContain("relative/project");
+  });
+
   // Test 8: import --instantiate with preflight fail (409)
   it("import --instantiate: preflight conflict (409)", async () => {
     const deps = importDeps("CONFLICT");
@@ -421,6 +433,16 @@ describe("rig export + import", () => {
     expect(output).toContain("imported-rig");
     // Verify X-Rig-Root header was sent
     expect(capturedImportHeaders["x-rig-root"]).toMatch(/\/my\/project/);
+  });
+
+  it("import --instantiate with --cwd forwards absolute cwd override", async () => {
+    capturedImportHeaders = {};
+    const deps = importDeps("schema_version: 1\nname: test\npods:\n  - name: pod-a\n");
+    const program = new Command();
+    program.addCommand(importCommand(deps));
+    await captureLogs(() => program.parseAsync(["node", "rig", "import", "rig.yaml", "--instantiate", "--cwd", "relative/project", "--rig-root", "/my/project"]));
+    expect(capturedImportHeaders["x-cwd-override"]).toMatch(/^\//);
+    expect(String(capturedImportHeaders["x-cwd-override"])).toContain("relative/project");
   });
 
   // NS-T14: import --instantiate handoff includes attach command
