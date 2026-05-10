@@ -105,7 +105,7 @@ function makeCard(overrides: Partial<FeedCardModel> = {}): FeedCardModel {
       payload: {
         qitem_id: "qitem-20260506-test",
         source_session: "orch-lead@openrig-velocity",
-        destination: "human-wrandom@kernel",
+        destination: "human-operator@kernel",
         state: "human-gate",
         body: "Authorize v0.3.0 RC tag/push?",
       },
@@ -152,7 +152,7 @@ describe("FeedCard P5-1 wiring: show-context QueueItemTrigger", () => {
     expect(arg.type).toBe("qitem");
     expect(arg.data.qitemId).toBe("qitem-20260506-test");
     expect(arg.data.source).toBe("orch-lead@openrig-velocity");
-    expect(arg.data.destination).toBe("human-wrandom@kernel");
+    expect(arg.data.destination).toBe("human-operator@kernel");
     expect(arg.data.state).toBe("human-gate");
     expect(arg.data.body).toBe("Authorize v0.3.0 RC tag/push?");
   });
@@ -276,7 +276,7 @@ describe("FeedCard P5-1 wiring: show-context QueueItemTrigger", () => {
           tsCreated: "2026-05-06T18:00:00Z",
           tsUpdated: "2026-05-06T18:05:00Z",
           sourceSession: "orch-lead@openrig-velocity",
-          destinationSession: "human-wrandom@kernel",
+          destinationSession: "human-operator@kernel",
           state: "pending",
           priority: "urgent",
           tier: "fast",
@@ -285,7 +285,7 @@ describe("FeedCard P5-1 wiring: show-context QueueItemTrigger", () => {
         }}
         actionOutcome={{
           verb: "approve",
-          actorSession: "human-wrandom@kernel",
+          actorSession: "human-operator@kernel",
           actedAt: "2026-05-06T18:06:00Z",
           state: "done",
         }}
@@ -294,7 +294,7 @@ describe("FeedCard P5-1 wiring: show-context QueueItemTrigger", () => {
 
     expect(await findByTestId("feed-card-action-outcome")).toBeTruthy();
     expect(await findByText("Decision recorded")).toBeTruthy();
-    expect(await findByText("Approved by human-wrandom@kernel.")).toBeTruthy();
+    expect(await findByText("Approved by human-operator@kernel.")).toBeTruthy();
     expect(queryByTestId(`feed-card-actions-${card.id}`)).toBeNull();
     expect(queryByTestId("mc-verb-approve")).toBeNull();
   });

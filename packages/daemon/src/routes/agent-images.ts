@@ -253,14 +253,14 @@ export function agentImagesRoutes(deps: AgentImageRoutesDeps): Hono {
  *  the agent.yaml snippet here so the UI can render it directly with
  *  no client-side templating.
  *
- *  PL-016 Finding 2 (Option 3, founder-confirmed 2026-05-04): when the
+ *  PL-016 source-cwd behavior: when the
  *  manifest carries source_cwd, the snippet emits `cwd: <source_cwd>`
- *  ahead of the session_source block — operator pastes verbatim, fork
+ *  ahead of the session_source block. The fork
  *  starts in the SAME directory the parent session was created in,
  *  Claude's project-dir-scoped session storage works because the jsonl
- *  file lives there. The daemon does NOT override cwd at fork dispatch
- *  (founder direction "respect the provider; no funny business") — if
- *  operator manually changes cwd, fork fails honestly with "no
+ *  file lives there. The daemon relies on provider cwd resolution and
+ *  does NOT override cwd at fork dispatch. If the operator manually
+ *  changes cwd, fork fails honestly with "no
  *  conversation found". Manifests without source_cwd (pre-Finding-2)
  *  render without the cwd line for back-compat. */
 function buildStarterSnippet(entry: AgentImageEntry): string {

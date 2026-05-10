@@ -1,6 +1,6 @@
 // V1 attempt-3 Phase 3 — Dashboard Topology card per dashboard.md L44–L50 + SC-13.
 //
-// **V1 = COUNTS ONLY** (NOT live graph rendering). Founder direction
+// **V1 = COUNTS ONLY** (NOT live graph rendering).
 // 2026-05-05: count fallback as default; live mini-mode RigGraph render
 // is V2 candidate only if a memoized / reduced-dagre variant is cheap
 // enough at audit.

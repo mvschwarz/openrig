@@ -365,7 +365,7 @@ Migration boundary:
 
 ### Mission Control / Queue Observability (PL-005 Phase A)
 
-Daemon-backed Mission Control surface. Per PRD § Acceptance Criteria + founder steering 2026-05-03 (Q1-Q5): seven views + seven verbs + first-class human seats + recent-ships=10 + daemon-backed action audit table; no old-dashboard migration/cutover.
+Daemon-backed Mission Control surface. Per PRD acceptance criteria: seven views, seven verbs, first-class human seats, recent-ships=10, and a daemon-backed action audit table; no old-dashboard migration/cutover.
 
 **Seven views** (`my-queue`, `human-gate`, `fleet`, `active-work`, `recent-ships`, `recently-active`, `recent-observations`) all return rows in the load-bearing 9-field phone-friendly content model (rig/mission name, current phase, active|idle|attention|blocked|degraded, next-action, pending-human-decision, read-cost, last-update timestamp, confidence/freshness, evidence link). The model is non-negotiable across all 7 views; UI may render compact, JSON preserves all 9.
 
@@ -385,7 +385,7 @@ Filesystem fallbacks (`~/.openrig/stream/<date>.jsonl`, raw queue file grep) are
 3. Once-per-session-per-rig logging (`MissionControlFleetCliCapability` deduplicates drift events by `(rig, field)` until daemon restart).
 4. Fleet-level "rigs running stale CLI" indicator (`FleetView` surfaces `staleCliCount` from `/api/mission-control/cli-capabilities`).
 
-**Human seats are first-class product concepts** (founder Q3): the operator's default `human-wrandom@kernel` seat is rendered via `HumanSeatCard` showing identity, pending load, blocked count, and verb capabilities. NOT invisible config-layer convention.
+**Human seats are first-class product concepts**: the operator's default `human-operator@kernel` seat is rendered via `HumanSeatCard` showing identity, pending load, blocked count, and verb capabilities. NOT invisible config-layer convention.
 
 **Mission Control is integrated product UI inside the existing shell** — a new top-level route `/mission-control` registered in `packages/ui/src/routes.tsx` mounting `MissionControlSurface`, NOT a new managed app. An earlier prototype that informed Mission Control's view/verb vocabulary was retired in PL-005 Phase B; git history preserves it as evidence.
 
@@ -1141,4 +1141,4 @@ These are the main intentional limits that still describe the shipped system:
 This document is the architecture-level source of truth.
 
 For file-by-file structure across daemon, CLI, and UI, use:
-- [codemap.md](/Users/mschwarz/code/rigged/docs/as-built/codemap.md)
+- [codemap.md](./codemap.md)

@@ -51,7 +51,7 @@ describe("MissionControlWriteContract (PL-005 Phase A; atomic 7-verb)", () => {
     const result = await writeContract.act({
       verb: "approve",
       qitemId,
-      actorSession: "human-wrandom@kernel",
+      actorSession: "human-operator@kernel",
     });
     expect(result.actionId).toMatch(/^[0-9A-Z]{26}$/);
     expect(queueRepo.getById(qitemId)?.state).toBe("done");

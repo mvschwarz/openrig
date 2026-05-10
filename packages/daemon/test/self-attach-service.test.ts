@@ -92,14 +92,14 @@ describe("SelfAttachService", () => {
     const rig = rigRepo.createRig("rigged-buildout");
     const node = rigRepo.addNode(rig.id, "orch1.lead", {
       runtime: "claude-code",
-      cwd: "/Users/mschwarz/code/rigged",
+      cwd: "/Users/example/code/openrig",
     });
 
     const result = await selfAttachService.attachToNode({
       rigId: rig.id,
       logicalId: "orch1.lead",
       displayName: "orch1-lead@rigged-buildout",
-      cwd: "/Users/mschwarz/code/rigged",
+      cwd: "/Users/example/code/openrig",
     });
 
     expect(result.ok).toBe(true);
@@ -148,7 +148,7 @@ describe("SelfAttachService", () => {
       memberName: "lead",
       runtime: "claude-code",
       displayName: "orch1-lead@rigged-buildout",
-      cwd: "/Users/mschwarz/code/rigged",
+      cwd: "/Users/example/code/openrig",
     });
 
     expect(result.ok).toBe(true);
@@ -231,7 +231,7 @@ describe("SelfAttachService", () => {
     const rig = rigRepo.createRig("rigged-buildout");
     rigRepo.addNode(rig.id, "dev1.impl2", {
       runtime: "claude-code",
-      cwd: "/Users/mschwarz/code/rigged",
+      cwd: "/Users/example/code/openrig",
     });
 
     const result = await selfAttachService.attachToNode({
@@ -245,7 +245,7 @@ describe("SelfAttachService", () => {
 
     expect(result.ok).toBe(true);
     expect(ensureContextCollectorSpy).toHaveBeenCalledWith({
-      cwd: "/Users/mschwarz/code/rigged",
+      cwd: "/Users/example/code/openrig",
       tmuxSession: "dev1-impl2@rigged-buildout",
     });
   });

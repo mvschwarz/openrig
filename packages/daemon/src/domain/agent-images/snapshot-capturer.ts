@@ -85,7 +85,7 @@ export class SnapshotCapturer {
       sourceSeat: sourceSession,
       sourceSessionId: nativeId,
       sourceResumeToken: nativeId,
-      // PL-016 Finding 2 (Option 3, founder-confirmed 2026-05-04):
+      // PL-016 source-cwd behavior:
       // capture source seat's resolved cwd so the Use-as-starter
       // snippet can emit `cwd: <source_cwd>`. nodeCwd may be null when
       // the source node has no recorded cwd (legacy fixture or seat

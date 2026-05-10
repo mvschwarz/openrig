@@ -55,7 +55,7 @@ describe("MissionControlNotificationDispatcher (PL-005 Phase B)", () => {
   it("dispatches on human-gate qitem arrival (mandatory trigger)", async () => {
     await queueRepo.create({
       sourceSession: "src@rig",
-      destinationSession: "human-wrandom@kernel",
+      destinationSession: "human-operator@kernel",
       body: "needs human approval",
       tier: "human-gate",
     });
@@ -78,7 +78,7 @@ describe("MissionControlNotificationDispatcher (PL-005 Phase B)", () => {
 
     const created = await queueRepo.create({
       sourceSession: "src@rig",
-      destinationSession: "human-wrandom@kernel",
+      destinationSession: "human-operator@kernel",
       body: "needs human approval",
       tier: "human-gate",
     });

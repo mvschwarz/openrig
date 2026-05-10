@@ -4,7 +4,7 @@ import type { EventBus } from "./event-bus.js";
 import type { PersistedEvent } from "./types.js";
 
 /**
- * Classifier lease manager (PL-004 Phase B; L2 founder-resolved).
+ * Classifier lease manager (PL-004 Phase B).
  *
  * Daemon-enforced single-writer lease for the project (classifier) primitive.
  * Per PRD § L2 hard rule + slice IMPL § Guard Checkpoint Focus item 2:

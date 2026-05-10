@@ -270,7 +270,7 @@ export function Explorer({
   // When collapsed at desktop: render ONLY a floating toggle button
   // at left=rail-edge (no aside container behind it). The Explorer
   // surface tree is unmounted; the canvas + tabs reflow to fill the
-  // freed width. Founder direction 2026-05-06.
+  // freed width.
   if (isCollapsed) {
     return (
       <button

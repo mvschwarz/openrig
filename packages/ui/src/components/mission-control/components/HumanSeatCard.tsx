@@ -1,9 +1,9 @@
 // PL-005 Phase A: first-class human-seat rendering.
 //
-// Per founder Q3 (2026-05-03): human queues are first-class product
-// concepts, NOT invisible config-layer convention. Mission Control
-// renders the operator's human seat (default `human-wrandom@kernel`)
-// with its own card showing identity + load + capabilities.
+// Human queues are first-class product concepts, NOT invisible config-layer
+// convention. Mission Control renders the operator's human seat
+// (default `human-operator@kernel`) with its own card showing identity,
+// load, and capabilities.
 //
 // V1 attempt-3 Phase 5 P5-8: refactored to compose VellumCard primitive
 // (Phase 1) — replaces the ad-hoc `border border-stone-300 bg-stone-50`
@@ -18,7 +18,7 @@ import { StatusPip } from "../../ui/status-pip.js";
 import type { CompactStatusRow } from "../hooks/useMissionControlView.js";
 
 export interface HumanSeatCardProps {
-  /** Canonical session label, e.g., `human-wrandom@kernel`. */
+  /** Canonical session label, e.g., `human-operator@kernel`. */
   session: string;
   /** Pending human-gate items (for load indication). */
   rows: CompactStatusRow[];

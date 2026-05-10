@@ -249,7 +249,7 @@ export function RigNode({ data }: { data: RigNodeData }) {
           </div>
         )}
 
-        {/* Context usage — prominent big number per founder directive */}
+        {/* Context usage — prominent big number */}
         <div className="flex items-end justify-between gap-3 pt-0.5">
           {data.contextAvailability === "known" && typeof data.contextUsedPercentage === "number" ? (
             <div

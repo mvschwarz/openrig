@@ -32,7 +32,7 @@ describe("MissionControlActionLog (PL-005 Phase A; append-only)", () => {
       const e = log.record({
         actionVerb: verb,
         qitemId: "q-1",
-        actorSession: "human-wrandom@kernel",
+        actorSession: "human-operator@kernel",
         actedAt: "2026-05-04T01:00:00.000Z",
         annotation: verb === "annotate" ? "test annotation" : undefined,
         reason: verb === "hold" || verb === "drop" ? "test reason" : undefined,
