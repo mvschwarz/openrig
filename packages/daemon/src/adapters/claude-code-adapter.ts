@@ -344,6 +344,14 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       return this.mergeGuidance(targetPath, entry.effectiveId, content);
     }
 
+    // HG-1.3 plugin runtime applicability filter (per DESIGN.md §5.1):
+    // explicit pluginType="codex" → skip Claude projection;
+    // pluginType="auto" (or unset) + no .claude-plugin/ manifest dir → skip;
+    // explicit pluginType="claude" → project regardless of manifest presence.
+    if (entry.category === "plugin" && !this.pluginAppliesToClaude(entry)) {
+      return false;
+    }
+
     const targetDir = this.resolveTargetDir(entry, cwd);
     if (!targetDir) return true;
 
@@ -368,6 +376,14 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       this.fs.writeFile(destFile, content);
     }
     return true;
+  }
+
+  private pluginAppliesToClaude(entry: ProjectionEntry): boolean {
+    const explicit = entry.pluginType ?? "auto";
+    if (explicit === "claude") return true;
+    if (explicit === "codex") return false;
+    // auto: detect via .claude-plugin/plugin.json presence in the source tree
+    return this.fs.exists(nodePath.join(entry.absolutePath, ".claude-plugin", "plugin.json"));
   }
 
   private resolveTargetDir(entry: ProjectionEntry, cwd: string): string | null {

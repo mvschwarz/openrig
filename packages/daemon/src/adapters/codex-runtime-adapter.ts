@@ -332,6 +332,14 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       return this.mergeGuidance(targetPath, entry.effectiveId, content);
     }
 
+    // HG-1.3 plugin runtime applicability filter (per DESIGN.md §5.1):
+    // - explicit pluginType="claude" → skip Codex projection
+    // - pluginType="auto" (or unset) + no .codex-plugin/ manifest dir → skip
+    // - explicit pluginType="codex" → project regardless of manifest presence
+    if (entry.category === "plugin" && !this.pluginAppliesToCodex(entry)) {
+      return false;
+    }
+
     const targetDir = this.resolveTargetDir(entry, cwd);
     if (!targetDir) return true;
 
@@ -354,6 +362,14 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       this.fs.writeFile(destFile, content);
     }
     return true;
+  }
+
+  private pluginAppliesToCodex(entry: ProjectionEntry): boolean {
+    const explicit = entry.pluginType ?? "auto";
+    if (explicit === "codex") return true;
+    if (explicit === "claude") return false;
+    // auto: detect via .codex-plugin/plugin.json presence in the source tree
+    return this.fs.exists(nodePath.join(entry.absolutePath, ".codex-plugin", "plugin.json"));
   }
 
   private resolveTargetDir(entry: ProjectionEntry, cwd: string): string | null {
