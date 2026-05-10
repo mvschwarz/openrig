@@ -34,7 +34,7 @@ describe("normalizeStartupBlock — kind: context_pack (PL-014 Item 6)", () => {
   it("parses kind: context_pack entry with name + version", () => {
     const block = normalizeStartupBlock({
       files: [
-        { kind: "context_pack", name: "rsi-v2-priming", version: 1 },
+        { kind: "context_pack", name: "release-priming", version: 1 },
       ],
     });
     const f = block.files[0]! as {
@@ -43,10 +43,10 @@ describe("normalizeStartupBlock — kind: context_pack (PL-014 Item 6)", () => {
       deliveryHint: string;
     };
     expect(f.kind).toBe("context_pack");
-    expect(f.contextPackName).toBe("rsi-v2-priming");
+    expect(f.contextPackName).toBe("release-priming");
     expect(f.contextPackVersion).toBe("1");
     // Synthesized path so downstream identifiers stay meaningful.
-    expect(f.path).toContain("rsi-v2-priming-1.md");
+    expect(f.path).toContain("release-priming-1.md");
     // Default delivery hint is send_text (paste into live seat).
     expect(f.deliveryHint).toBe("send_text");
   });
@@ -205,27 +205,27 @@ describe("expandContextPacks (PL-014 Item 6)", () => {
   afterEach(() => rmSync(tmp, { recursive: true, force: true }));
 
   it("writes the assembled bundle to <rigRoot>/.openrig/resolved-context-packs/<name>-<version>.md and rewrites the entry as kind: file", () => {
-    writePack(libRoot, "rsi-priming", `
-name: rsi-priming
+    writePack(libRoot, "release-priming", `
+name: release-priming
 version: 1
-purpose: RSI priming
+purpose: Release priming
 files:
   - path: notes.md
     role: notes
-`, { "notes.md": "RSI body" });
+`, { "notes.md": "Release body" });
     library.scan();
 
-    const files = [makeStartupFile({ name: "rsi-priming", version: "1" })];
+    const files = [makeStartupFile({ name: "release-priming", version: "1" })];
     expandContextPacks(files, rigRoot, library);
 
     const f = files[0] as unknown as { kind: string; path: string; absolutePath: string; ownerRoot: string };
     expect(f.kind).toBe("file");
-    expect(f.path).toContain(".openrig/resolved-context-packs/rsi-priming-1.md");
+    expect(f.path).toContain(".openrig/resolved-context-packs/release-priming-1.md");
     expect(f.ownerRoot).toBe(rigRoot);
     expect(existsSync(f.absolutePath)).toBe(true);
     const content = readFileSync(f.absolutePath, "utf-8");
-    expect(content).toContain("# OpenRig Context Pack: rsi-priming v1");
-    expect(content).toContain("RSI body");
+    expect(content).toContain("# OpenRig Context Pack: release-priming v1");
+    expect(content).toContain("Release body");
   });
 
   it("throws a structured error when the pack is not found in library", () => {

@@ -98,12 +98,12 @@ export function agentImageCommand(depsOverride?: StatusDeps): Command {
     .addHelpText("after", `
 Examples:
   rig agent-image list
-  rig agent-image show driver-rsi-primed
-  rig agent-image create velocity-driver@openrig-velocity --name driver-rsi-primed --notes "after PL-005 review"
-  rig agent-image preview driver-rsi-primed
-  rig agent-image pin driver-rsi-primed
+  rig agent-image show driver-release-primed
+  rig agent-image create velocity-driver@openrig-velocity --name driver-release-primed --notes "after review"
+  rig agent-image preview driver-release-primed
+  rig agent-image pin driver-release-primed
   rig agent-image prune --dry-run
-  rig agent-image delete driver-rsi-primed --force
+  rig agent-image delete driver-release-primed --force
 `);
 
   const getDeps = (): StatusDeps => depsOverride ?? {

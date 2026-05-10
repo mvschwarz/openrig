@@ -139,8 +139,8 @@ export interface AppDeps {
   watchdogScheduler?: WatchdogScheduler;
   workflowRuntime?: WorkflowRuntime;
   /**
-   * RSI v2 starter v0: absolute path to the daemon's bundled built-in
-   * workflow-specs directory. Used by `GET /api/workflow/specs` to
+   * Absolute path to the daemon's bundled built-in workflow-specs
+   * directory. Used by `GET /api/workflow/specs` to
    * compute the per-row `isBuiltIn` flag (source_path under this dir
    * → built-in; otherwise → operator-authored). Optional: when unset,
    * the route returns isBuiltIn=false for every spec (graceful — the

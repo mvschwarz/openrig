@@ -28,8 +28,8 @@ describe("ActiveLensStore (Workflows in Spec Library v0)", () => {
       filePath,
       now: () => new Date("2026-05-04T12:34:56Z"),
     });
-    const lens = store.set("rsi-v2-hot-potato", "1");
-    expect(lens.specName).toBe("rsi-v2-hot-potato");
+    const lens = store.set("conveyor", "1");
+    expect(lens.specName).toBe("conveyor");
     expect(lens.specVersion).toBe("1");
     expect(lens.activatedAt).toBe("2026-05-04T12:34:56.000Z");
 

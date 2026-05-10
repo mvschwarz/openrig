@@ -1,4 +1,4 @@
-// RSI v2 starter v0 — built-in starter loader tests.
+// Built-in workflow spec loader tests.
 //
 // Drives the loader against a temp builtin directory + an in-memory
 // workflow_specs cache so the test stays deterministic and parallel-safe.
@@ -52,7 +52,7 @@ const BETA_SPEC = `workflow:
       allowed_exits: [handoff]
 `;
 
-describe("RSI v2 starter spec loader", () => {
+describe("built-in workflow spec loader", () => {
   let db: Database.Database;
   let cache: WorkflowSpecCache;
   let builtinDir: string;

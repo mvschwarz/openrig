@@ -5,7 +5,7 @@
   "license": "Apache-2.0",
   "type": "module",
   "scripts": {
-    "build": "tsc && mkdir -p dist/builtins/workflow-specs && cp src/builtins/workflow-specs/*.yaml dist/builtins/workflow-specs/",
+    "build": "tsc && node scripts/copy-workflow-specs.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
     "dev": "tsx watch src/index.ts"

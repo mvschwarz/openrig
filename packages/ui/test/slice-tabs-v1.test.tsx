@@ -1,7 +1,7 @@
 // Slice Story View v1 — focused tab tests for the 4 v1 dimensions.
 //
 // Pins:
-//   - StoryTab: spec-driven phase grouping (no v0 hardcoded RSI-v2 enum)
+//   - StoryTab: spec-driven phase grouping (no v0 hardcoded legacy enum)
 //   - StoryTab: untagged events render with neutral palette + label
 //   - AcceptanceTab: Current Step panel renders when bound; absent when not
 //   - AcceptanceTab: PROGRESS.md checkbox view still renders alongside
@@ -57,7 +57,7 @@ function renderStory(ui: ReactNode) {
 }
 
 describe("PL-slice-story-view-v1 StoryTab", () => {
-  it("groups events by spec-declared phase labels (NOT v0 hardcoded RSI-v2 names)", () => {
+  it("groups events by spec-declared phase labels (NOT v0 hardcoded legacy names)", () => {
     const events = [
       event({ kind: "queue.created", phase: "discovery", qitemId: "q-d" }),
       event({ kind: "queue.handed_off", phase: "delivery", qitemId: "q-x" }),

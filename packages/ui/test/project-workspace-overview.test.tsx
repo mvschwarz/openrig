@@ -76,7 +76,7 @@ function installFetchMock() {
       );
     }
     if (url.includes("/api/slices/idea-ledger")) {
-      return new Response(JSON.stringify(makeDetail("idea-ledger", "RSI-V2-PROOF", ["qitem-A"])), { status: 200 });
+      return new Response(JSON.stringify(makeDetail("idea-ledger", "RELEASE-PROOF", ["qitem-A"])), { status: 200 });
     }
     if (url.includes("/api/slices/seed-slice-active")) {
       return new Response(JSON.stringify(makeDetail("seed-slice-active", null, [])), { status: 200 });
@@ -91,7 +91,7 @@ function installFetchMock() {
         state: "done",
         priority: "urgent",
         tier: "fast",
-        tags: ["RSI-V2-PROOF"],
+        tags: ["RELEASE-PROOF"],
         body: "Full queue body for workspace rollup.",
       }), { status: 200 });
     }
@@ -101,8 +101,8 @@ function installFetchMock() {
           slices: [
             {
               name: "idea-ledger",
-              displayName: "Idea Ledger RSI v2 proof slice",
-              railItem: "RSI-V2-PROOF",
+              displayName: "Idea Ledger release proof slice",
+              railItem: "RELEASE-PROOF",
               status: "done",
               rawStatus: "done",
               qitemCount: 78,
@@ -179,7 +179,7 @@ function renderMissionScope(): ReturnType<typeof render> {
   });
   const router = createRouter({
     routeTree: rootRoute.addChildren([missionRoute, sliceRoute, fallbackRoute]),
-    history: createMemoryHistory({ initialEntries: ["/project/mission/RSI-V2-PROOF"] }),
+    history: createMemoryHistory({ initialEntries: ["/project/mission/RELEASE-PROOF"] }),
   });
 
   return render(
@@ -194,7 +194,7 @@ describe("WorkspaceScopePage overview", () => {
     const { findByTestId } = renderWorkspaceScope();
 
     expect(await findByTestId("workspace-overview-panel")).toBeTruthy();
-    const currentMission = await findByTestId("workspace-overview-mission-RSI-V2-PROOF");
+    const currentMission = await findByTestId("workspace-overview-mission-RELEASE-PROOF");
     expect(currentMission.getAttribute("data-mission-bucket")).toBe("current");
     expect((await findByTestId("workspace-overview-slice-idea-ledger")).textContent).toContain(
       "78 qitems",
@@ -229,7 +229,7 @@ describe("WorkspaceScopePage overview", () => {
     const { findByTestId, queryByText } = renderMissionScope();
 
     expect(await findByTestId("mission-overview-panel")).toBeTruthy();
-    expect((await findByTestId("mission-overview-panel")).textContent).toContain("Idea Ledger RSI v2 proof slice");
+    expect((await findByTestId("mission-overview-panel")).textContent).toContain("Idea Ledger release proof slice");
     expect(queryByText("seed-slice-active")).toBeNull();
 
     fireEvent.click(await findByTestId("project-tab-queue"));
