@@ -128,6 +128,9 @@ Precedence:
 - config file
 - default
 
+Legacy env compatibility: the original runtime keys still accept deprecated
+`RIGGED_*` aliases. New typed config keys use `OPENRIG_*` only.
+
 ### `rig preflight`
 
 Usage: `rig preflight [--json]`

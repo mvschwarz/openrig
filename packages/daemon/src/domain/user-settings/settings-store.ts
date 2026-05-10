@@ -75,6 +75,8 @@ export const SETTINGS_VALID_KEYS = [
 export type SettingsValidKey = typeof SETTINGS_VALID_KEYS[number];
 
 const ENV_MAP: Record<SettingsValidKey, { primary: string; legacy?: string }> = {
+  // Only the original runtime keys keep RIGGED_* aliases for upgrade
+  // compatibility. New typed keys use OPENRIG_* only.
   "daemon.port": { primary: "OPENRIG_PORT", legacy: "RIGGED_PORT" },
   "daemon.host": { primary: "OPENRIG_HOST", legacy: "RIGGED_HOST" },
   "db.path": { primary: "OPENRIG_DB", legacy: "RIGGED_DB" },
