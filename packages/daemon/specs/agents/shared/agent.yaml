@@ -24,8 +24,6 @@ resources:
       path: skills/core/openrig-operator
     - id: claude-compact-in-place
       path: skills/claude-compact-in-place
-    - id: mental-model-ha
-      path: skills/mental-model-ha
     - id: systematic-debugging
       path: skills/process/systematic-debugging
     - id: test-driven-development

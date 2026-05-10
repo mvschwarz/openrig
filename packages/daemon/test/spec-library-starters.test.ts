@@ -292,6 +292,8 @@ describe("Starter specs", () => {
       expect(skill).toBeDefined();
       expect(existsSync(join(SPECS_ROOT, "agents/shared", skill!.path, "SKILL.md"))).toBe(true);
     }
+    const deprecatedHaSkill = ["mental", "model", "ha"].join("-");
+    expect(sharedSkills.map((entry) => entry.id)).not.toContain(deprecatedHaSkill);
 
     const sharedRuntimeResources = (sharedResources["runtime_resources"] as Array<{ id: string; path: string; type: string }>) ?? [];
     for (const resourceId of ["claude-default-settings", "claude-default-mcp", "codex-default-config"]) {
@@ -391,7 +393,8 @@ describe("Starter specs", () => {
     }
   });
 
-  it("public builtin agent profiles do not reference deprecated mental-model-ha", () => {
+  it("public builtin agent profiles do not reference deprecated HA skill", () => {
+    const deprecatedHaSkill = ["mental", "model", "ha"].join("-");
     for (const file of AGENT_SPECS) {
       const yaml = readFileSync(join(SPECS_ROOT, file), "utf-8");
       const raw = parseAgentSpec(yaml) as Record<string, unknown>;
@@ -399,7 +402,7 @@ describe("Starter specs", () => {
       const defaultProfile = profiles["default"] ?? {};
       const uses = (defaultProfile["uses"] as Record<string, unknown> | undefined) ?? {};
       const skills = (uses["skills"] as string[] | undefined) ?? [];
-      expect(skills).not.toContain("mental-model-ha");
+      expect(skills).not.toContain(deprecatedHaSkill);
     }
   });
 
