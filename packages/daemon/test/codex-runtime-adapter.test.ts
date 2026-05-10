@@ -748,48 +748,12 @@ describe("Codex runtime adapter", () => {
     expect(sendText).toHaveBeenCalledWith("r01-qa", expectedProfileResumeCommand("fleet"));
   });
 
-  it("provisions project-local Codex hooks and feature flag without persisting the hook token", async () => {
-    const fs = mockFs({
-      "/daemon/assets/openrig-activity-hook-relay.cjs": "relay script",
-      "/project/.codex/hooks.json": JSON.stringify({
-        hooks: {
-          UserPromptSubmit: [
-            {
-              hooks: [
-                { type: "command", command: "node ./existing-hook.cjs", timeout: 10 },
-              ],
-            },
-          ],
-        },
-      }),
-      "/project/.codex/config.toml": "[features]\ncodex_hooks = false\n",
-    });
-    const adapter = new CodexRuntimeAdapter({
-      tmux: mockTmux(),
-      fsOps: { ...fs, homedir: "/home/test" },
-      activityHookRelayAssetPath: "/daemon/assets/openrig-activity-hook-relay.cjs",
-    });
-
-    await adapter.deliverStartup([], makeBinding());
-    await adapter.deliverStartup([], makeBinding());
-
-    const store = (fs as unknown as { _store: Record<string, string> })._store;
-    expect(store["/project/.openrig/activity-hook-relay.cjs"]).toBe("relay script");
-    expect(store["/project/.codex/config.toml"]).toContain("codex_hooks = true");
-    expect(store["/home/test/.codex/hooks.json"]).toBeUndefined();
-
-    const hooksConfig = JSON.parse(store["/project/.codex/hooks.json"]!);
-    const hookJson = JSON.stringify(hooksConfig);
-    expect(hookJson).toContain("node ./existing-hook.cjs");
-    expect(hookJson).toContain("node '/project/.openrig/activity-hook-relay.cjs'");
-    expect(hookJson).toContain("SessionStart");
-    expect(hookJson).toContain("UserPromptSubmit");
-    expect(hookJson).toContain("Stop");
-    expect(hookJson).not.toContain("secret-token");
-
-    const relayCommandMatches = hookJson.match(/activity-hook-relay\.cjs/g) ?? [];
-    expect(relayCommandMatches).toHaveLength(3);
-  });
+  // Pre-rip 'provisions project-local Codex hooks and feature flag without
+  // persisting the hook token' test removed in plugin-primitive Phase 3a
+  // slice 3.1 — activity-hook auto-injection ripped (provisionActivityHooks
+  // gone). Replacement coverage: codex-hooks-feature-flag.test.ts (slice 3.5
+  // ensureCodexFeatureFlag) + activity-hook-rip-proof.test.ts (negative
+  // assertions on adapter symbol absence + endpoint-stays).
 
   it("launchHarness skips the non-mutating Codex update prompt during resume verification", async () => {
     const updatePrompt = [

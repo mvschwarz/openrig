@@ -42,7 +42,6 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   private readThreadIdByPid: (pid: number) => string | undefined;
   private sleep: (ms: number) => Promise<void>;
   private resolveHomeDirByPid: ResolveHomeDirByPid;
-  private activityHookRelayAssetPath: string | null;
 
   constructor(deps: {
     tmux: TmuxAdapter;
@@ -51,7 +50,6 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     readThreadIdByPid?: (pid: number) => string | undefined;
     resolveHomeDirByPid?: ResolveHomeDirByPid;
     sleep?: (ms: number) => Promise<void>;
-    activityHookRelayAssetPath?: string;
   }) {
     this.tmux = deps.tmux;
     this.fs = deps.fsOps;
@@ -59,7 +57,6 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     this.readThreadIdByPid = deps.readThreadIdByPid ?? ((pid) => this.readThreadIdFromLogs(pid));
     this.resolveHomeDirByPid = deps.resolveHomeDirByPid ?? defaultResolveHomeDirByPid;
     this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
-    this.activityHookRelayAssetPath = deps.activityHookRelayAssetPath ?? null;
   }
 
   /**
@@ -70,8 +67,9 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
    * When `enabled` is false, makes ZERO modifications — the operator is
    * managing Codex config independently and the daemon does not touch it.
    *
-   * Replaces the activity-hook-injection-coupled call to upsertCodexHooksFeature
-   * that lived in provisionActivityHooks() pre-rip.
+   * Replaces the activity-hook-injection-coupled feature-flag set call
+   * that lived inside the auto-injected activity-hook provisioning path
+   * pre-rip (plugin-primitive Phase 3a slice 3.1).
    */
   ensureCodexFeatureFlag(enabled: boolean): void {
     if (!enabled) return;
@@ -126,12 +124,6 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   async deliverStartup(files: ResolvedStartupFile[], binding: NodeBinding): Promise<StartupDeliveryResult> {
     try { this.ensureManagedBootstrap(binding); } catch (err) {
       console.error(`[openrig] codex bootstrap warning: ${(err as Error).message}`);
-    }
-
-    // Best-effort: provision project-local provider hooks. The hook token is
-    // supplied through tmux session env, never written to provider config.
-    try { this.provisionActivityHooks(binding); } catch (err) {
-      console.error(`[openrig] codex activity hook provisioning warning: ${(err as Error).message}`);
     }
 
     let delivered = 0;
@@ -440,31 +432,6 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     this.fs.writeFile(configPath, content);
   }
 
-  private provisionActivityHooks(binding: { cwd?: string | null }): void {
-    if (!binding.cwd || !this.activityHookRelayAssetPath) return;
-
-    const relayDest = nodePath.join(binding.cwd, ".openrig", "activity-hook-relay.cjs");
-    this.fs.mkdirp(nodePath.dirname(relayDest));
-    this.fs.writeFile(relayDest, this.fs.readFile(this.activityHookRelayAssetPath));
-
-    const codexDir = nodePath.join(binding.cwd, ".codex");
-    this.fs.mkdirp(codexDir);
-
-    const hooksPath = nodePath.join(codexDir, "hooks.json");
-    const hooksConfig = this.readJsonObject(hooksPath);
-    const hooks = this.readJsonObjectField(hooksConfig, "hooks");
-    const command = `node ${shellQuote(relayDest)}`;
-    for (const event of ["SessionStart", "UserPromptSubmit", "Stop"]) {
-      upsertCommandHook(hooks, event, command);
-    }
-    hooksConfig["hooks"] = hooks;
-    this.fs.writeFile(hooksPath, `${JSON.stringify(hooksConfig, null, 2)}\n`);
-
-    const configPath = nodePath.join(codexDir, "config.toml");
-    const existingConfig = this.fs.exists(configPath) ? this.fs.readFile(configPath) : "";
-    this.fs.writeFile(configPath, upsertCodexHooksFeature(existingConfig));
-  }
-
   private readJsonObject(path: string): Record<string, unknown> {
     try {
       if (!this.fs.exists(path)) return {};
@@ -700,33 +667,6 @@ function upsertManagedCodexConfigFragment(content: string, id: string, fragment:
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function upsertCommandHook(hooks: Record<string, unknown>, event: string, command: string): void {
-  const eventEntries = Array.isArray(hooks[event]) ? hooks[event] as unknown[] : [];
-  if (eventEntries.some((entry) => hookEntryContainsCommand(entry, command))) {
-    hooks[event] = eventEntries;
-    return;
-  }
-  eventEntries.push({
-    hooks: [
-      { type: "command", command, timeout: 5 },
-    ],
-  });
-  hooks[event] = eventEntries;
-}
-
-function hookEntryContainsCommand(entry: unknown, command: string): boolean {
-  if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return false;
-  const hooks = (entry as Record<string, unknown>)["hooks"];
-  if (!Array.isArray(hooks)) return false;
-  return hooks.some((hook) =>
-    typeof hook === "object" &&
-    hook !== null &&
-    !Array.isArray(hook) &&
-    (hook as Record<string, unknown>)["type"] === "command" &&
-    (hook as Record<string, unknown>)["command"] === command
-  );
 }
 
 function defaultListProcesses(): Array<{ pid: number; ppid: number; command: string }> {
