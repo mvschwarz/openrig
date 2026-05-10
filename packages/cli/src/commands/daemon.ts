@@ -112,6 +112,7 @@ export function daemonCommand(depsOverride?: LifecycleDeps): Command {
             db: opts.db ?? config.db.path,
             transcriptsEnabled: config.transcripts.enabled,
             transcriptsPath: config.transcripts.path,
+            workspaceRoot: config.workspace.root,
             // V1 pre-release CLI/daemon Item 1 — project the
             // ConfigStore-resolved rotation tunables into the daemon
             // process env so file-stored values

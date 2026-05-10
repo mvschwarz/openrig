@@ -10,6 +10,7 @@ import {
   getDaemonPath,
   resolveDaemonPath,
   buildDaemonEnv,
+  ensureWorkspaceScaffold,
   STATE_FILE,
   LOG_FILE,
   OPENRIG_DIR,
@@ -86,6 +87,25 @@ describe("Daemon Lifecycle", () => {
       OPENRIG_DB: "openrig.sqlite",
     });
     expect(opts.detached).toBe(true);
+  });
+
+  it("start: idempotently scaffolds configured workspace before spawning", async () => {
+    const created = new Set<string>();
+    const written = new Map<string, string>();
+    const deps = startableDeps({
+      exists: vi.fn((p: string) => created.has(p) || written.has(p)),
+      mkdirp: vi.fn((p: string) => { created.add(p); }),
+      writeFile: vi.fn((p: string, content: string) => { written.set(p, content); }),
+    });
+    await startDaemon({ port: 7433, db: "openrig.sqlite", workspaceRoot: "/tmp/openrig-workspace" }, deps);
+
+    expect(created.has("/tmp/openrig-workspace")).toBe(true);
+    expect(created.has(path.join("/tmp/openrig-workspace", "missions", "getting-started", "slices", "first-conveyor-run"))).toBe(true);
+    expect(created.has(path.join("/tmp/openrig-workspace", "artifacts"))).toBe(true);
+    expect(created.has(path.join("/tmp/openrig-workspace", "evidence"))).toBe(true);
+    expect(written.get(path.join("/tmp/openrig-workspace", "STEERING.md"))).toContain("Run the `conveyor` starter rig.");
+    expect(written.get(path.join("/tmp/openrig-workspace", "missions", "getting-started", "slices", "first-conveyor-run", "README.md")))
+      .toContain("First Conveyor Run");
   });
 
   // Test 3: start waits for healthz, writes daemon.json with pid+port+db+startedAt
@@ -960,5 +980,31 @@ describe("buildDaemonEnv", () => {
       expect(result["OPENRIG_TRANSCRIPTS_LINES"]).toBe("500");
       expect(result["OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS"]).toBe("5");
     });
+  });
+});
+
+describe("ensureWorkspaceScaffold", () => {
+  it("does not overwrite existing workspace files", () => {
+    const existing = new Set<string>([
+      "/tmp/ws",
+      path.join("/tmp/ws", "STEERING.md"),
+      path.join("/tmp/ws", "missions", "getting-started", "slices", "first-conveyor-run", "README.md"),
+    ]);
+    const deps = mockDeps({
+      exists: vi.fn((p: string) => existing.has(p)),
+      mkdirp: vi.fn((p: string) => { existing.add(p); }),
+      writeFile: vi.fn(),
+    });
+
+    const result = ensureWorkspaceScaffold("/tmp/ws", deps);
+
+    expect(result.rootCreated).toBe(false);
+    expect(result.files.find((f) => f.relPath === "STEERING.md")?.skipped).toBe("exists");
+    expect(result.files.find((f) => f.relPath === "missions/getting-started/slices/first-conveyor-run/README.md")?.skipped)
+      .toBe("exists");
+    expect(deps.writeFile).not.toHaveBeenCalledWith(
+      path.join("/tmp/ws", "STEERING.md"),
+      expect.any(String),
+    );
   });
 });

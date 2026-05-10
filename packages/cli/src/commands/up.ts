@@ -40,7 +40,8 @@ Examples:
         let resolvedConfig: {
           daemon: { port: number; host: string };
           db: { path: string };
-          transcripts: { enabled: boolean; path: string };
+          transcripts: { enabled: boolean; path: string; lines: number; pollIntervalSeconds: number };
+          workspace: { root: string };
         } | null = null;
         try {
           const { ConfigStore } = await import("../config-store.js");
@@ -80,6 +81,9 @@ Examples:
             db: resolvedConfig?.db.path,
             transcriptsEnabled: resolvedConfig?.transcripts.enabled,
             transcriptsPath: resolvedConfig?.transcripts.path,
+            transcriptsLines: resolvedConfig?.transcripts.lines,
+            transcriptsPollIntervalSeconds: resolvedConfig?.transcripts.pollIntervalSeconds,
+            workspaceRoot: resolvedConfig?.workspace.root,
           }, deps.lifecycleDeps);
           status = await getDaemonStatus(deps.lifecycleDeps);
         } catch (err) {

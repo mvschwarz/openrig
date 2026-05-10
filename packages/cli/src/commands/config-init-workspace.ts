@@ -1,8 +1,9 @@
-// User Settings v0 — `rig config init-workspace` operator-explicit scaffolding.
+// User Settings v0 — `rig config init-workspace` workspace scaffolding.
 //
 // Creates the mission-aware default workspace at ~/.openrig/workspace/ (or a
-// caller-supplied --root). Operator-explicit safety stop: never auto-runs on
-// `rig setup` / `rig daemon start` / first `rig up`.
+// caller-supplied --root). The same scaffold is also used idempotently by
+// daemon startup so a fresh install has a browsable Project workspace before
+// the user discovers the explicit command.
 //
 // Behavior:
 //   - Reads workspace.root setting (default ~/.openrig/workspace/).
@@ -53,42 +54,22 @@ type DefaultMission = {
 
 const DEFAULT_MISSIONS: DefaultMission[] = [
   {
-    id: "idea-ledger",
-    title: "Idea Ledger",
+    id: "getting-started",
+    title: "Getting Started",
     status: "active",
-    objective: "Capture, triage, and advance product ideas as queue-backed slices.",
+    objective: "Launch the conveyor starter and learn how OpenRig moves work through queue-backed slices.",
     slices: [
       {
-        id: "capture-product-ideas",
-        title: "Capture Product Ideas",
+        id: "first-conveyor-run",
+        title: "First Conveyor Run",
         status: "active",
-        objective: "Collect useful product ideas into queue items tagged with idea-ledger and this slice id.",
+        objective: "Move one small packet through intake, planning, build, review, and close on the conveyor starter.",
       },
       {
-        id: "triage-product-ideas",
-        title: "Triage Product Ideas",
+        id: "inspect-project-evidence",
+        title: "Inspect Project Evidence",
         status: "draft",
-        objective: "Review captured ideas, select the next slice, and preserve rationale in Project.",
-      },
-    ],
-  },
-  {
-    id: "handoff-loop",
-    title: "Handoff Loop",
-    status: "active",
-    objective: "Demonstrate queue handoffs moving work through a small agent workflow.",
-    slices: [
-      {
-        id: "route-work-packets",
-        title: "Route Work Packets",
-        status: "active",
-        objective: "Create queue packets that move from orchestration to delivery to review.",
-      },
-      {
-        id: "verify-loop-evidence",
-        title: "Verify Loop Evidence",
-        status: "draft",
-        objective: "Collect proof that handoffs, artifacts, and closure decisions are visible in Project.",
+        objective: "Open Project, Queue, Story, and Tests to inspect the evidence created by the first conveyor run.",
       },
     ],
   },
@@ -96,6 +77,8 @@ const DEFAULT_MISSIONS: DefaultMission[] = [
 
 const WORKSPACE_DIRS = [
   "missions",
+  "artifacts",
+  "evidence",
   "progress",
   "field-notes",
   "specs",
@@ -111,6 +94,10 @@ function subdirReadmeContent(subdir: string): string {
   switch (subdir) {
     case "missions":
       return "# missions\n\nProject missions live here. Each mission folder maps to one Project mission in the UI and owns a `slices/` child folder.\n\nExpected shape:\n\n```text\nmissions/<mission-id>/README.md\nmissions/<mission-id>/PROGRESS.md\nmissions/<mission-id>/slices/<slice-id>/README.md\n```\n";
+    case "artifacts":
+      return "# artifacts\n\nWork products live here: plans, drafts, generated outputs, and other files that a slice may reference before closure.\n";
+    case "evidence":
+      return "# evidence\n\nHuman-readable verification notes live here. Use this for compact proof summaries that are not tied to a screenshot or video packet.\n";
     case "progress":
       return "# progress\n\nPROGRESS.md tree. OpenRig's Progress browse view scans this directory recursively for PROGRESS.md files and renders them as a hierarchical tree.\n";
     case "field-notes":
@@ -131,6 +118,8 @@ This workspace is file-backed. The Project UI mirrors this structure:
 - \`missions/<mission-id>\` becomes a Project mission.
 - \`missions/<mission-id>/slices/<slice-id>\` becomes a Project slice.
 - Queue items should mention or tag the mission id and slice id so Project can attach live work to the right slice.
+- \`artifacts/\` is for work products that a slice needs to keep.
+- \`evidence/\` is for proof notes and verification summaries.
 - \`dogfood-evidence/<proof-packet-id>\` becomes Tests proof when the packet id contains the slice id tokens.
 
 Use stable kebab-case ids for mission and slice folders. Keep slice ids unique inside the workspace.
@@ -149,9 +138,9 @@ alongside your Project workspace.
 
 ## Top 3
 
-1. <priority one>
-2. <priority two>
-3. <priority three>
+1. Run the \`conveyor\` starter rig.
+2. Move one packet through \`basic-loop\` or \`conveyor\`.
+3. Inspect the Project, Queue, Story, and Tests surfaces.
 
 ## In Motion
 
@@ -257,11 +246,17 @@ ${slice.objective}
 `;
 }
 
-function scaffoldFiles(): Array<{ relPath: string; content: string }> {
+export function workspaceScaffoldDirs(): string[] {
+  return [...WORKSPACE_DIRS];
+}
+
+export function workspaceScaffoldFiles(): Array<{ relPath: string; content: string }> {
   const files: Array<{ relPath: string; content: string }> = [
     { relPath: "README.md", content: WORKSPACE_README },
     { relPath: "STEERING.md", content: STEERING_PLACEHOLDER },
     { relPath: "missions/README.md", content: subdirReadmeContent("missions") },
+    { relPath: "artifacts/README.md", content: subdirReadmeContent("artifacts") },
+    { relPath: "evidence/README.md", content: subdirReadmeContent("evidence") },
     { relPath: "progress/README.md", content: subdirReadmeContent("progress") },
     { relPath: "field-notes/README.md", content: subdirReadmeContent("field-notes") },
     { relPath: "specs/README.md", content: subdirReadmeContent("specs") },
@@ -332,14 +327,14 @@ export function runInitWorkspace(opts: InitWorkspaceOpts & { configPath?: string
 
   if (!rootExists && !dryRun) mkdirSync(root, { recursive: true });
 
-  for (const sub of WORKSPACE_DIRS) {
+  for (const sub of workspaceScaffoldDirs()) {
     const subPath = join(root, sub);
     const subExists = existsSync(subPath);
     if (!subExists && !dryRun) mkdirSync(subPath, { recursive: true });
     result.subdirs.push({ name: sub, path: subPath, created: !subExists });
   }
 
-  for (const file of scaffoldFiles()) {
+  for (const file of workspaceScaffoldFiles()) {
     const absPath = join(root, file.relPath);
     const exists = existsSync(absPath);
     if (exists && !force) {
