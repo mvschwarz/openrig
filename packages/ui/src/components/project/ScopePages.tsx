@@ -40,6 +40,7 @@ import {
   type ProjectMissionGroup,
 } from "../../lib/project-mission-state.js";
 import { TimelineTab } from "../slices/tabs/TimelineTab.js";
+import { useSliceTimelineMarkdown } from "../../hooks/useSliceTimelineMarkdown.js";
 import { AcceptanceTab } from "../slices/tabs/AcceptanceTab.js";
 import { DocsTab } from "../slices/tabs/DocsTab.js";
 import { DecisionsTab } from "../slices/tabs/DecisionsTab.js";
@@ -1076,6 +1077,14 @@ export function SliceScopePage() {
   const detailQuery = useSliceDetail(sliceId);
   const queueItems = useQueueItemMap(detailQuery.data?.qitemIds ?? []);
   const queueItemsById = useMemo(() => queueItems.itemsById, [queueItems.itemsById]);
+  // 0.3.1 slice 06 — fetch <slicePath>/timeline.md so TimelineTab can
+  // render the curated narrative above the auto-captured event feed.
+  // Default root="workspace" since slices live under workspace.slices_root;
+  // the read fails gracefully (unavailable=true) when the file is absent.
+  const timelineMd = useSliceTimelineMarkdown(
+    "workspace",
+    detailQuery.data?.slicePath ?? null,
+  );
 
   if (detailQuery.isLoading) {
     return (
@@ -1134,6 +1143,7 @@ export function SliceScopePage() {
           events={storyEventsForDetail(detail)}
           phaseDefinitions={detail.story.phaseDefinitions}
           queueItemsById={queueItemsById}
+          timelineMarkdown={timelineMd.content ?? undefined}
         />
       ) : null}
       {active === "overview" ? (

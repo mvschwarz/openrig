@@ -218,7 +218,11 @@ export interface ProgressCardSource {
   oneLiner: string;
   /** 0..100 */
   percent: number;
-  /** What's the active sub-slice doing right now */
+  /** Next-step hint shown on the collapsed view per IMPL-PRD §6
+   *  ("Title + progress bar + next-step"). When omitted, the
+   *  oneLiner stands in. */
+  nextStep?: string;
+  /** What's the active sub-slice doing right now (inline-expanded). */
   activeSlice?: { id: string; label: string; status: string };
 }
 
@@ -229,10 +233,24 @@ export function ProgressCard({ source }: { source: ProgressCardSource }) {
       testId={`feed-card-progress-${source.missionId}`}
       kind="progress"
       title={source.title}
-      oneLiner={source.oneLiner}
+      oneLiner={source.nextStep ?? source.oneLiner}
       accent={ACCENTS.progress}
       drillInHref={`/project/mission/${source.missionId}`}
       drillInLabel="Open mission"
+      leadingAccessory={
+        <div
+          data-testid={`feed-card-progress-${source.missionId}-bar`}
+          data-percent={pct}
+          className="h-1.5 w-16 shrink-0 border border-outline-variant bg-stone-100 overflow-hidden"
+          aria-label={`Progress ${pct}%`}
+        >
+          <div
+            data-testid={`feed-card-progress-${source.missionId}-bar-fill`}
+            className="h-full bg-sky-500"
+            style={{ width: `${pct}%` }}
+          />
+        </div>
+      }
       expanded={
         source.activeSlice ? (
           <div data-testid={`feed-card-progress-${source.missionId}-active-slice`} className="border border-outline-variant bg-stone-50 px-2 py-2">
@@ -244,10 +262,8 @@ export function ProgressCard({ source }: { source: ProgressCardSource }) {
           <div className="text-[11px] text-stone-600">No active slice.</div>
         )
       }
-    >
-    </CardShell>
+    />
   );
-  // (The progress bar lives on the collapsed view; rendered above via title.)
 }
 
 // -----------------------------------------------------------------------------

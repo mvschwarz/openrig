@@ -36,6 +36,10 @@ import {
 import { FeedCard } from "./FeedCard.js";
 import type { FeedActionOutcome, FeedProofPreview } from "./FeedCard.js";
 import {
+  StorytellingFeed,
+  type FeedCardItem as StorytellingFeedItem,
+} from "../feed/cards/storytelling-cards.js";
+import {
   useMissionControlAudit,
   type AuditEntry,
 } from "../mission-control/hooks/useMissionControlAudit.js";
@@ -251,6 +255,45 @@ export function Feed() {
   }, [cards, queueItems.itemsById, sliceRows]);
   const proofSlices = useSliceDetails(proofSliceNames);
 
+  // 0.3.1 slice 06 — adapt the daemon-driven sliceRows into the new
+  // storytelling card primitives so they render in the live For You
+  // surface. Pulls the most recent 3 slices and routes by status:
+  // shipped status → ShippedCard, blocked/in-progress → IncidentCard,
+  // anything else with progress shape → ProgressCard. The legacy
+  // FeedCard list below remains the primary surface; this section is
+  // the storytelling-primitives preview band at the top of the feed.
+  const storytellingItems = useMemo<StorytellingFeedItem[]>(() => {
+    const items: StorytellingFeedItem[] = [];
+    const safeRows = Array.isArray(sliceRows) ? sliceRows : [];
+    for (const slice of safeRows.slice(0, 3)) {
+      const oneLiner = slice.lastActivityAt
+        ? `Last activity ${slice.lastActivityAt}`
+        : `Slice in ${slice.status ?? "unknown"} state`;
+      const title = slice.displayName || slice.name;
+      const sliceId = slice.name;
+      const status = (slice.status ?? "").toLowerCase();
+      if (status === "shipped" || status === "complete" || status === "done") {
+        items.push({ kind: "shipped", source: { sliceId, title, oneLiner } });
+      } else if (status === "blocked" || status === "danger" || status === "failed") {
+        items.push({
+          kind: "incident",
+          source: {
+            sliceId,
+            title,
+            oneLiner,
+            status: status === "blocked" ? "warning" : "danger",
+          },
+        });
+      } else {
+        items.push({
+          kind: "incident",
+          source: { sliceId, title, oneLiner, status: "info" },
+        });
+      }
+    }
+    return items;
+  }, [sliceRows]);
+
   return (
     <div data-testid="for-you-feed" className="mx-auto w-full max-w-[720px] px-6 py-8">
       <header className="border-b border-outline-variant pb-4 mb-4">
@@ -286,6 +329,19 @@ export function Feed() {
           </button>
         ))}
       </div>
+
+      {storytellingItems.length > 0 && (
+        <section
+          data-testid="for-you-storytelling-preview"
+          aria-label="Storytelling preview"
+          className="mb-4"
+        >
+          <SectionHeader tone="muted">Storytelling preview</SectionHeader>
+          <div className="mt-2">
+            <StorytellingFeed items={storytellingItems} />
+          </div>
+        </section>
+      )}
 
       {cards.length === 0 ? (
         <EmptyState
