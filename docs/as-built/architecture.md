@@ -796,7 +796,7 @@ Restore now:
 
 ### Config and preflight flow
 
-- `rig config` reads/writes `~/.openrig/config.json` with legacy fallback from `~/.rigged/config.json`. 5 locked keys: `daemon.port`, `daemon.host`, `db.path`, `transcripts.enabled`, `transcripts.path`
+- `rig config` reads/writes `~/.openrig/config.json` with legacy fallback from `~/.rigged/config.json`. The original runtime env keys retain deprecated `RIGGED_*` aliases for upgrade compatibility: `daemon.port`, `daemon.host`, `db.path`, `transcripts.enabled`, `transcripts.path`. New typed config keys use `OPENRIG_*` only.
 - Precedence: CLI flag > env var > config file > default
 - `rig preflight` checks: Node.js ≥ 20, tmux available, writable home/db/transcript dirs, port available
 - Auto-preflight runs on `rig up` and daemon start
