@@ -41,12 +41,8 @@ export interface AgentStarterResolverOpts {
    * `os.homedir()`).
    */
   homeDirRoot?: string;
-  /**
-   * Substrate fallback consulted last for dogfood proofs. Defaults to
-   * the v0 prototype location at
-   * `~/code/substrate/shared-docs/openrig-work/specs/agent-starters/`.
-   */
-  substrateFallback?: string;
+  /** Optional fallback consulted last when the home registry is absent. */
+  fallbackRoot?: string;
   exists?: ExistsFn;
   readFile?: ReadFileFn;
   /** Test seam: lets unit tests inject a controlled env map. */
@@ -77,15 +73,6 @@ export class AgentStarterCredentialScanFailedError extends Error {
 
 const DEFAULT_ENV_VAR = "OPENRIG_AGENT_STARTER_ROOT";
 const DEFAULT_HOME_SUBPATH = ".openrig/agent-starters";
-const DEFAULT_SUBSTRATE_FALLBACK_PARTS = [
-  "code",
-  "substrate",
-  "shared-docs",
-  "openrig-work",
-  "specs",
-  "agent-starters",
-];
-
 export class AgentStarterResolver {
   private readonly registryRoot: string;
   private readonly exists: ExistsFn;
@@ -104,13 +91,12 @@ export class AgentStarterResolver {
 
   /**
    * Look up the registry root via the documented chain:
-   *   opts.registryRoot > env[envVarName] > homeDirRoot (if exists) > substrateFallback
+   *   opts.registryRoot > env[envVarName] > homeDirRoot (if exists) > fallbackRoot
    *
-   * The first three are explicit; the substrate fallback is the dogfood
-   * default and always returns even if the path doesn't exist (resolveStarter
-   * will throw with a missing-entry error when the fallback is dead). This
-   * keeps the constructor side-effect-free; the file-existence check lives
-   * inside `resolveStarter`.
+   * The fallback returns even if the path doesn't exist. `resolveStarter`
+   * throws a missing-entry error when the selected root is dead. This keeps
+   * the constructor side-effect-free; the file-existence check lives inside
+   * `resolveStarter`.
    */
   static resolveRegistryRoot(
     opts: AgentStarterResolverOpts,
@@ -130,8 +116,7 @@ export class AgentStarterResolver {
     if (exists(homeBase)) {
       return homeBase;
     }
-    return opts.substrateFallback
-      ?? join(env.HOME ?? os.homedir(), ...DEFAULT_SUBSTRATE_FALLBACK_PARTS);
+    return opts.fallbackRoot ?? homeBase;
   }
 
   /**

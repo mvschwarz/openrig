@@ -45,7 +45,7 @@ describe("AgentStarterResolver (M1)", () => {
       registryRoot: "/explicit/root",
       env: { OPENRIG_AGENT_STARTER_ROOT: "/env/root", HOME: "/home/test" },
       homeDirRoot: "/home/test/.openrig/agent-starters",
-      substrateFallback: "/substrate/fallback",
+      fallbackRoot: "/fallback/root",
       ...fs,
     });
     expect(resolver.getRegistryRoot()).toBe("/explicit/root");
@@ -56,7 +56,7 @@ describe("AgentStarterResolver (M1)", () => {
     const resolver = new AgentStarterResolver({
       env: { OPENRIG_AGENT_STARTER_ROOT: "/env/root", HOME: "/home/test" },
       homeDirRoot: "/home/test/.openrig/agent-starters",
-      substrateFallback: "/substrate/fallback",
+      fallbackRoot: "/fallback/root",
       ...fs,
     });
     expect(resolver.getRegistryRoot()).toBe("/env/root");
@@ -67,21 +67,31 @@ describe("AgentStarterResolver (M1)", () => {
     const resolver = new AgentStarterResolver({
       env: { HOME: "/home/test" },
       homeDirRoot: "/home/test/.openrig/agent-starters",
-      substrateFallback: "/substrate/fallback",
+      fallbackRoot: "/fallback/root",
       ...fs,
     });
     expect(resolver.getRegistryRoot()).toBe("/home/test/.openrig/agent-starters");
   });
 
-  it("registry root: substrate fallback wins when registryRoot+env absent AND home dir does NOT exist", () => {
+  it("registry root: configured fallback wins when registryRoot+env absent AND home dir does NOT exist", () => {
     const fs = makeFs({});
     const resolver = new AgentStarterResolver({
       env: { HOME: "/home/test" },
       homeDirRoot: "/home/test/.openrig/agent-starters",
-      substrateFallback: "/substrate/fallback",
+      fallbackRoot: "/fallback/root",
       ...fs,
     });
-    expect(resolver.getRegistryRoot()).toBe("/substrate/fallback");
+    expect(resolver.getRegistryRoot()).toBe("/fallback/root");
+  });
+
+  it("registry root: missing home dir falls back to the portable home path by default", () => {
+    const fs = makeFs({});
+    const resolver = new AgentStarterResolver({
+      env: { HOME: "/home/test" },
+      homeDirRoot: "/home/test/.openrig/agent-starters",
+      ...fs,
+    });
+    expect(resolver.getRegistryRoot()).toBe("/home/test/.openrig/agent-starters");
   });
 
   // === Successful resolve ===
