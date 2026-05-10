@@ -1,0 +1,76 @@
+# OpenRig 0.3.0 starter workflow.
+# A slower walkthrough loop for watching one work packet move end to end.
+workflow:
+  id: basic-loop
+  version: 1
+  objective: >
+    Walk one work packet through the conveyor rig slowly enough for a new user
+    to inspect each handoff.
+  target:
+    rig: conveyor
+  entry:
+    role: intake
+  coordination_terminal_turn_rule: hot_potato
+  roles:
+    intake:
+      skill_refs: [openrig-user, backlog-capture]
+      preferred_targets: [intake-lead@conveyor]
+    planner:
+      skill_refs: [openrig-user, writing-plans]
+      preferred_targets: [plan-planner@conveyor]
+    builder:
+      skill_refs: [openrig-user, executing-plans]
+      preferred_targets: [build-builder@conveyor]
+    reviewer:
+      skill_refs: [openrig-user, review-team]
+      preferred_targets: [review-reviewer@conveyor]
+    closer:
+      skill_refs: [openrig-user, verification-before-completion]
+      preferred_targets: [intake-lead@conveyor]
+  steps:
+    - id: intake
+      actor_role: intake
+      objective: Restate the objective and hand off one packet.
+      allowed_exits: [handoff, waiting, failed]
+      next_hop:
+        mode: require
+        suggested_roles: [planner]
+    - id: plan
+      actor_role: planner
+      objective: Produce a short plan for one build turn.
+      allowed_exits: [handoff, waiting, failed]
+      next_hop:
+        mode: require
+        suggested_roles: [builder]
+    - id: build
+      actor_role: builder
+      objective: Build or draft the planned output.
+      allowed_exits: [handoff, waiting, failed]
+      next_hop:
+        mode: require
+        suggested_roles: [reviewer]
+    - id: review
+      actor_role: reviewer
+      objective: Check the output and clear it for close.
+      allowed_exits: [handoff, waiting, failed]
+      next_hop:
+        mode: require
+        suggested_roles: [closer]
+    - id: close
+      actor_role: closer
+      objective: Close the walkthrough packet.
+      allowed_exits: [done, failed]
+      next_hop:
+        mode: forbid
+  invariants:
+    continuation_required: true
+    preserve_lineage: true
+    closure_required: true
+    allowed_exits: [handoff, waiting, done, failed]
+  loop_guards:
+    max_hops: 10
+    spawn_budget: 0
+  closure:
+    success: Walkthrough packet closed.
+    degraded: Walkthrough stopped with a named blocker.
+    failed: Walkthrough failed with evidence.

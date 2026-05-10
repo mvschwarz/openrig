@@ -1,0 +1,35 @@
+name: conveyor-builder
+version: "1.0"
+description: Conveyor builder - executes the planned packet and prepares proof for review
+
+defaults:
+  runtime: claude-code
+
+imports:
+  - ref: local:../../shared
+
+profiles:
+  default:
+    uses:
+      skills: [openrig-user, development-team, test-driven-development, systematic-debugging, executing-plans, verification-before-completion]
+      guidance: []
+      subagents: []
+      hooks: []
+      runtime_resources: [shared:claude-default-settings, shared:claude-default-mcp, shared:codex-default-config]
+
+resources:
+  guidance:
+    - id: role
+      path: guidance/role.md
+    - id: startup-context
+      path: startup/context.md
+
+startup:
+  files:
+    - path: guidance/role.md
+      delivery_hint: send_text
+      required: true
+    - path: startup/context.md
+      delivery_hint: send_text
+      required: true
+  actions: []
