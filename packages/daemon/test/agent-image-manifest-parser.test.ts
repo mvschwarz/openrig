@@ -5,7 +5,7 @@ import { parseAgentImageManifest } from "../src/domain/agent-images/manifest-par
 import { AgentImageError } from "../src/domain/agent-images/agent-image-types.js";
 
 const validManifest = `
-name: driver-rsi-primed
+name: driver-release-primed
 version: 1
 runtime: claude-code
 source_seat: velocity-driver@openrig-velocity
@@ -26,7 +26,7 @@ lineage:
 describe("parseAgentImageManifest", () => {
   it("parses a valid manifest into the typed shape", () => {
     const m = parseAgentImageManifest(validManifest, "/test/manifest.yaml");
-    expect(m.name).toBe("driver-rsi-primed");
+    expect(m.name).toBe("driver-release-primed");
     expect(m.version).toBe("1");
     expect(m.runtime).toBe("claude-code");
     expect(m.sourceSeat).toBe("velocity-driver@openrig-velocity");

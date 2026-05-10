@@ -22,9 +22,9 @@ import { queueRoutes } from "../src/routes/queue.js";
  * Integration tests across the full coordination stack:
  *   stream emit → hint → inbox drop → absorb → claim → handoff → terminal close.
  *
- * Mirrors the cross-loop POC scenarios used by RSI v2: the same event
- * timeline is reproducible via the daemon path (HTTP) so the upcoming
- * dogfood window can compare apples-to-apples against the filesystem POC.
+ * Mirrors a multi-seat handoff scenario: the same event timeline is
+ * reproducible via the daemon path (HTTP), so dogfood runs can compare
+ * queue behavior against workspace-level coordination.
  */
 
 function buildApp(deps: {
@@ -84,22 +84,22 @@ describe("coordination integration — stream → queue → inbox handoff chain"
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        sourceSession: "loop-discovery@rsi-v2",
-        body: "found regression in product lab handoff",
-        hintDestination: "loop-product-lab@rsi-v2",
+        sourceSession: "intake@conveyor",
+        body: "found regression in planning handoff",
+        hintDestination: "planning@conveyor",
         hintType: "review",
         hintUrgency: "urgent",
       }),
     });
     expect(streamRes.status).toBe(201);
 
-    // 2. Drop into product-lab's inbox (mailbox path; not direct queue write)
+    // 2. Drop into planning's inbox (mailbox path; not direct queue write)
     const dropRes = await app.request("/api/queue/inbox/drop", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        destinationSession: "loop-product-lab@rsi-v2",
-        senderSession: "loop-discovery@rsi-v2",
+        destinationSession: "planning@conveyor",
+        senderSession: "intake@conveyor",
         body: "investigate regression — see stream item",
         urgency: "urgent",
       }),
@@ -111,7 +111,7 @@ describe("coordination integration — stream → queue → inbox handoff chain"
     const absorbRes = await app.request(`/api/queue/inbox/${inboxEntry.inboxId}/absorb`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ receiverSession: "loop-product-lab@rsi-v2" }),
+      body: JSON.stringify({ receiverSession: "planning@conveyor" }),
     });
     expect(absorbRes.status).toBe(200);
     const absorbed = (await absorbRes.json()) as { qitemId: string };
@@ -120,20 +120,20 @@ describe("coordination integration — stream → queue → inbox handoff chain"
     const claimRes = await app.request(`/api/queue/${absorbed.qitemId}/claim`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ destinationSession: "loop-product-lab@rsi-v2" }),
+      body: JSON.stringify({ destinationSession: "planning@conveyor" }),
     });
     expect(claimRes.status).toBe(200);
     const claimed = (await claimRes.json()) as { state: string };
     expect(claimed.state).toBe("in-progress");
 
-    // 5. Handoff to delivery loop (transactional close + create)
+    // 5. Handoff to build station (transactional close + create)
     const handoffRes = await app.request(`/api/queue/${absorbed.qitemId}/handoff`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        fromSession: "loop-product-lab@rsi-v2",
-        toSession: "loop-delivery@rsi-v2",
-        transitionNote: "spec ready for delivery",
+        fromSession: "planning@conveyor",
+        toSession: "build@conveyor",
+        transitionNote: "plan ready for build",
       }),
     });
     expect(handoffRes.status).toBe(201);
@@ -144,18 +144,18 @@ describe("coordination integration — stream → queue → inbox handoff chain"
     expect(handoff.closed.state).toBe("handed-off");
     expect(handoff.closed.closureReason).toBe("handed_off_to");
 
-    // 6. Delivery loop claims + closes terminally
+    // 6. Build station claims + closes terminally
     const newQitem = handoff.created.qitemId;
     await app.request(`/api/queue/${newQitem}/claim`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ destinationSession: "loop-delivery@rsi-v2" }),
+      body: JSON.stringify({ destinationSession: "build@conveyor" }),
     });
     const closeRes = await app.request(`/api/queue/${newQitem}/update`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        actorSession: "loop-delivery@rsi-v2",
+        actorSession: "build@conveyor",
         state: "done",
         closureReason: "no-follow-on",
       }),

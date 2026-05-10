@@ -252,9 +252,9 @@ describe("WorkflowProjector + WorkflowRuntime (PL-004 Phase D; transactional-scr
     expect(events.filter((e) => e.type === "workflow.next_qitem_projected")).toHaveLength(1);
   });
 
-  it("project(handoff) follows next_hop.suggested_roles so a final QA step can loop back to Discovery", async () => {
+  it("project(handoff) follows next_hop.suggested_roles so a final review step can loop back to intake", async () => {
     const loopSpec = `workflow:
-  id: rsi-loop-regression
+  id: loop-regression
   version: 1
   entry:
     role: discovery-router
