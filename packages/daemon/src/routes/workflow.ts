@@ -157,8 +157,8 @@ export function workflowRoutes(): Hono {
     return c.json(getRuntime(c).instanceStore.listAll());
   });
 
-  // RSI v2 starter v0: lists every cached workflow_spec with an
-  // `isBuiltIn` flag computed from whether the spec's source_path is
+  // Lists every cached workflow_spec with an `isBuiltIn` flag computed
+  // from whether the spec's source_path is
   // under the daemon's built-in starter directory. Mounted BEFORE
   // /:instance_id (Phase A R1 SSE route-order lesson) so the literal
   // `/specs` path isn't shadowed by the bare-param catchall.

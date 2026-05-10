@@ -246,7 +246,7 @@ export class WorkflowSpecCache {
 
   /**
    * Lists every cached spec, ordered by name then version. Used by the
-   * `GET /api/workflow/specs` endpoint (RSI v2 starter v0). Cheap —
+   * `GET /api/workflow/specs` endpoint. Cheap —
    * the workflow_specs table is bounded by the number of operator-
    * authored + built-in starter specs (single-host MVP).
    */

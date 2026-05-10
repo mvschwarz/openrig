@@ -2,10 +2,9 @@ version: "0.2"
 name: product-team
 culture_file: CULTURE.md
 summary: >
-  Advanced preview: the experimental sibling of demo, with the same full
-  product-squad topology: two orchestrators, implementation, QA, design,
-  and two independent reviewers. Use this when you want the richer lane,
-  not the release gate.
+  Advanced product-development starter: a human-operated product squad with
+  two orchestrators, implementation, QA, design, and two independent reviewers.
+  Use this when you want richer coordination than the conveyor training rig.
 
 pods:
   - id: orch1

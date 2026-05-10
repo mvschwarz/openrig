@@ -8,7 +8,6 @@ Load these packaged skills now before doing substantive work:
 - `using-superpowers`
 - `openrig-user`
 - `orchestration-team`
-- `mental-model-ha`
 - `systematic-debugging`
 - `brainstorming`
 - `writing-plans`
@@ -39,8 +38,8 @@ Then run:
 
 ## Communication
 
-- Send messages to agents via tmux or rigged send
-- Read agent output via rigged capture
+- Send messages to agents via tmux or `rig send`
+- Read agent output via `rig capture`
 - Use the chatroom for broadcast announcements
 - Keep the human informed of progress at natural milestones
 

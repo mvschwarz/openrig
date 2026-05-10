@@ -242,24 +242,24 @@ describe("LibraryReview", () => {
       }
       if (url === "/api/specs/library/active-lens" && init?.method === "POST") {
         return new Response(JSON.stringify({
-          activeLens: { specName: "rsi-v2-hot-potato", specVersion: "1", activatedAt: "2026-05-04T00:00:00Z" },
+          activeLens: { specName: "conveyor", specVersion: "1", activatedAt: "2026-05-04T00:00:00Z" },
         }), { status: 200 });
       }
 
       const decoded = decodeURIComponent(url);
-      if (decoded === "/api/specs/library/workflow:rsi-v2-hot-potato:1/review") {
+      if (decoded === "/api/specs/library/workflow:conveyor:1/review") {
         return new Response(JSON.stringify({
           kind: "workflow",
-          libraryEntryId: "workflow:rsi-v2-hot-potato:1",
-          name: "rsi-v2-hot-potato",
+          libraryEntryId: "workflow:conveyor:1",
+          name: "conveyor",
           version: "1",
-          purpose: "Hot-potato workflow for RSI",
+          purpose: "Station pipeline for queued work packets",
           targetRig: null,
           terminalTurnRule: "hot_potato",
           rolesCount: 2,
           stepsCount: 2,
           isBuiltIn: true,
-          sourcePath: "/builtins/workflow-specs/rsi-v2-hot-potato.yaml",
+          sourcePath: "/workspace/specs/workflows/conveyor.yaml",
           cachedAt: "2026-05-04T00:00:00Z",
           topology: {
             nodes: [
@@ -279,9 +279,9 @@ describe("LibraryReview", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     render(createAppTestRouter({
-      initialPath: "/specs/library/workflow:rsi-v2-hot-potato:1",
+      initialPath: "/specs/library/workflow:conveyor:1",
       routes: [
-        { path: "/specs/library/workflow:rsi-v2-hot-potato:1", component: () => <LibraryReview entryId="workflow:rsi-v2-hot-potato:1" /> },
+        { path: "/specs/library/workflow:conveyor:1", component: () => <LibraryReview entryId="workflow:conveyor:1" /> },
         { path: "/specs", component: () => <div data-testid="back-route">back</div> },
       ],
     }));
@@ -290,8 +290,8 @@ describe("LibraryReview", () => {
       expect(screen.getByTestId("library-review-workflow")).toBeDefined();
     });
 
-    expect(screen.getByText("rsi-v2-hot-potato v1")).toBeDefined();
-    expect(screen.getByText("Hot-potato workflow for RSI")).toBeDefined();
+    expect(screen.getByText("conveyor v1")).toBeDefined();
+    expect(screen.getByText("Station pipeline for queued work packets")).toBeDefined();
     expect(screen.getByTestId("workflow-topology-graph")).toBeDefined();
     expect(screen.getByTestId("workflow-step-step-1")).toBeDefined();
     expect(screen.getByTestId("workflow-step-step-2")).toBeDefined();

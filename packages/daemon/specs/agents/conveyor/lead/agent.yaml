@@ -1,0 +1,35 @@
+name: conveyor-lead
+version: "1.0"
+description: Conveyor intake lead - receives work, keeps station handoffs clear, and closes packets
+
+defaults:
+  runtime: claude-code
+
+imports:
+  - ref: local:../../shared
+
+profiles:
+  default:
+    uses:
+      skills: [openrig-user, orchestration-team, backlog-capture, writing-plans, executing-plans, verification-before-completion, brainstorming]
+      guidance: []
+      subagents: []
+      hooks: []
+      runtime_resources: [shared:claude-default-settings, shared:claude-default-mcp, shared:codex-default-config]
+
+resources:
+  guidance:
+    - id: role
+      path: guidance/role.md
+    - id: startup-context
+      path: startup/context.md
+
+startup:
+  files:
+    - path: guidance/role.md
+      delivery_hint: send_text
+      required: true
+    - path: startup/context.md
+      delivery_hint: send_text
+      required: true
+  actions: []

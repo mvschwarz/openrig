@@ -91,7 +91,7 @@ export interface StoryEvent {
   /** Spec-defined step.id when bound to a workflow_instance + the
    *  event's qitem maps to a step trail; null when untagged (no
    *  binding, no trail mapping, or non-qitem event). v1 removed the v0
-   *  hardcoded RSI-v2 phase enum. */
+   *  hardcoded legacy phase enum. */
   phase: string | null;
   kind: string;
   actorSession: string | null;

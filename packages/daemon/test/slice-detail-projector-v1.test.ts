@@ -8,7 +8,7 @@
 //   - acceptance.currentStep populated from the bound instance
 //   - topology.specGraph populated when bound
 //   - story.events have phase tags from the trail map (not the v0
-//     hardcoded RSI-v2 enum)
+//     hardcoded legacy enum)
 //   - all v1 fields are null when no instance is bound (v0 fallback)
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
@@ -171,7 +171,7 @@ describe("PL-slice-story-view-v1 SliceDetailProjector — bound workflow_instanc
     expect(payload.topology.specGraph!.nodes.find((n) => n.stepId === "step-c")?.isCurrent).toBe(true);
   });
 
-  it("story events get phase tags from the trail map (NOT from v0 hardcoded RSI-v2 heuristic)", () => {
+  it("story events get phase tags from the trail map (NOT from v0 hardcoded legacy heuristic)", () => {
     writeSliceFolder(slicesRoot, "phased-slice", { slice: "phased-slice", "rail-item": "PL-test" });
     insertQitem(db, "q-A", "phased-slice work A");
     insertQitem(db, "q-B", "phased-slice work B");

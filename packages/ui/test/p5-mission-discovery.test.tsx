@@ -181,14 +181,14 @@ describe("ProjectTreeView P5-5/P5-6 mission discovery", () => {
       roots: [{ name: "workspace", path: "/Users/admin/.openrig/workspace" }],
       listings: {
         "workspace:missions": [
-          { name: "rsi-v2", type: "dir" },
+          { name: "release-readiness", type: "dir" },
           { name: "shell-redesign-v1", type: "dir" },
           { name: "README.md", type: "file" }, // file → filtered out
         ],
       },
       reads: {
-        "workspace:missions/rsi-v2/PROGRESS.md": {
-          content: "---\nstatus: active\n---\n# RSI v2",
+        "workspace:missions/release-readiness/PROGRESS.md": {
+          content: "---\nstatus: active\n---\n# Release readiness",
         },
         "workspace:missions/shell-redesign-v1/PROGRESS.md": {
           content: "---\nstatus: shipped\n---\n# Shell V1",
@@ -196,8 +196,8 @@ describe("ProjectTreeView P5-5/P5-6 mission discovery", () => {
       },
       slices: [],
     });
-    expect(await findByTestId("project-mission-rsi-v2")).toBeTruthy();
-    expect((await findByTestId("project-mission-link-rsi-v2")).getAttribute("href")).toBe("/project/mission/rsi-v2");
+    expect(await findByTestId("project-mission-release-readiness")).toBeTruthy();
+    expect((await findByTestId("project-mission-link-release-readiness")).getAttribute("href")).toBe("/project/mission/release-readiness");
     expect(await findByTestId("project-mission-shell-redesign-v1")).toBeTruthy();
   });
 
@@ -207,13 +207,13 @@ describe("ProjectTreeView P5-5/P5-6 mission discovery", () => {
       roots: [{ name: "workspace", path: "/Users/admin/.openrig/workspace" }],
       listings: {
         "workspace:missions": [
-          { name: "rsi-v2", type: "dir" },
+          { name: "release-readiness", type: "dir" },
           { name: "README.md", type: "file" },
         ],
       },
       slices: [],
     });
-    await findByTestId("project-mission-rsi-v2");
+    await findByTestId("project-mission-release-readiness");
     expect(queryByTestId("project-mission-README.md")).toBeNull();
   });
 
@@ -225,7 +225,7 @@ describe("ProjectTreeView P5-5/P5-6 mission discovery", () => {
         {
           name: "slice-a",
           displayName: "Slice A",
-          railItem: "rsi-v2",
+          railItem: "release-readiness",
           status: "active",
           rawStatus: "active",
           qitemCount: 1,
@@ -235,7 +235,7 @@ describe("ProjectTreeView P5-5/P5-6 mission discovery", () => {
       ],
     });
     expect(await findByTestId("project-discovery-degraded")).toBeTruthy();
-    expect(await findByTestId("project-mission-rsi-v2")).toBeTruthy();
+    expect(await findByTestId("project-mission-release-readiness")).toBeTruthy();
   });
 
   it("falls back to indexed slice grouping when allowlist is empty", async () => {
@@ -266,8 +266,8 @@ describe("ProjectTreeView P5-5/P5-6 mission discovery", () => {
       slices: [
         {
           name: "idea-ledger",
-          displayName: "Idea Ledger RSI v2 proof slice",
-          railItem: "RSI-V2-PROOF",
+          displayName: "Idea Ledger release proof slice",
+          railItem: "RELEASE-PROOF",
           status: "done",
           rawStatus: "done",
           qitemCount: 78,
@@ -295,7 +295,7 @@ describe("ProjectTreeView P5-5/P5-6 mission discovery", () => {
       "Archive · 1",
     );
 
-    const liveMission = await findByTestId("project-mission-RSI-V2-PROOF");
+    const liveMission = await findByTestId("project-mission-RELEASE-PROOF");
     expect(liveMission.getAttribute("data-mission-bucket")).toBe("current");
     expect((await findByTestId("project-slice-idea-ledger-meta")).textContent).toContain(
       "78 qitems",
@@ -320,16 +320,16 @@ describe("ProjectTreeView P5-5/P5-6 mission discovery", () => {
       workspaceRoot: "/Users/admin/.openrig/workspace",
       roots: [{ name: "workspace", path: "/Users/admin/.openrig/workspace" }],
       listings: {
-        "workspace:missions": [{ name: "rsi-v2", type: "dir" }],
+        "workspace:missions": [{ name: "release-readiness", type: "dir" }],
       },
       reads: {
-        "workspace:missions/rsi-v2/PROGRESS.md": { content: "---\nstatus: active\n---" },
+        "workspace:missions/release-readiness/PROGRESS.md": { content: "---\nstatus: active\n---" },
       },
       slices: [
         {
-          name: "slice-rsi",
-          missionId: "rsi-v2",
-          displayName: "RSI Slice",
+          name: "slice-release",
+          missionId: "release-readiness",
+          displayName: "Release Slice",
           railItem: null,
           status: "active",
           rawStatus: "active",
@@ -349,7 +349,7 @@ describe("ProjectTreeView P5-5/P5-6 mission discovery", () => {
         },
       ],
     });
-    expect(await findByTestId("project-mission-rsi-v2")).toBeTruthy();
+    expect(await findByTestId("project-mission-release-readiness")).toBeTruthy();
     expect(await findByTestId("project-mission-no-such-mission")).toBeTruthy();
   });
 
@@ -377,8 +377,8 @@ describe("ProjectTreeView P5-5/P5-6 mission discovery", () => {
         },
         {
           name: "idea-ledger",
-          displayName: "Idea Ledger RSI v2 proof slice",
-          railItem: "RSI-V2-PROOF",
+          displayName: "Idea Ledger release proof slice",
+          railItem: "RELEASE-PROOF",
           status: "done",
           rawStatus: "done",
           qitemCount: 78,
@@ -406,7 +406,7 @@ describe("ProjectTreeView P5-5/P5-6 mission discovery", () => {
     );
     expect(await findByTestId("project-slice-idea-ledger-find-ideas-cycle-4")).toBeTruthy();
     expect((await findByTestId("project-mission-demo-seed")).getAttribute("data-mission-bucket")).toBe("current");
-    expect((await findByTestId("project-mission-RSI-V2-PROOF")).getAttribute("data-mission-bucket")).toBe("current");
+    expect((await findByTestId("project-mission-RELEASE-PROOF")).getAttribute("data-mission-bucket")).toBe("current");
     expect((await findByTestId("project-mission-unsorted")).getAttribute("data-mission-bucket")).toBe("archive");
   });
 });

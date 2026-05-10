@@ -162,16 +162,20 @@ describe("config routes (User Settings v0)", () => {
     expect(body.root).toBe(root);
     expect(body.subdirs.map((s) => s.name)).toEqual(expect.arrayContaining([
       "missions",
+      "artifacts",
+      "evidence",
       "progress",
       "field-notes",
       "specs",
       "dogfood-evidence",
-      "missions/idea-ledger/slices/capture-product-ideas",
-      "missions/handoff-loop/slices/verify-loop-evidence",
+      "missions/getting-started/slices/first-conveyor-run",
+      "missions/getting-started/slices/inspect-project-evidence",
     ]));
     expect(existsSync(join(root, "missions", "README.md"))).toBe(true);
+    expect(existsSync(join(root, "artifacts", "README.md"))).toBe(true);
+    expect(existsSync(join(root, "evidence", "README.md"))).toBe(true);
     expect(existsSync(join(root, "dogfood-evidence", "README.md"))).toBe(true);
-    expect(existsSync(join(root, "missions", "idea-ledger", "slices", "capture-product-ideas", "README.md"))).toBe(true);
+    expect(existsSync(join(root, "missions", "getting-started", "slices", "first-conveyor-run", "README.md"))).toBe(true);
     expect(existsSync(join(root, "STEERING.md"))).toBe(true);
   });
 

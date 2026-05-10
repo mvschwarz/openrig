@@ -61,7 +61,7 @@ Skills are delivered to agents through two parallel paths:
 
 Both paths are important. The spec projection ensures the files are physically present. The startup instruction ensures the agent knows to read them. This redundancy is intentional — it handles cases where one path fails.
 
-Example: An implementer agent's startup guidance says "Load the following skills: openrig-user, test-driven-development, mental-model-ha" — AND the agent spec's profile uses those same skill IDs. The agent gets the files from projection and the instruction to read them from guidance.
+Example: An implementer agent's startup guidance says "Load the following skills: openrig-user, test-driven-development, systematic-debugging" — AND the agent spec's profile uses those same skill IDs. The agent gets the files from projection and the instruction to read them from guidance.
 
 ### The File Types
 
@@ -301,7 +301,7 @@ Don't put project documentation inside the role guidance. The role is about the 
 
 In a startup file or guidance, include a line like:
 ```
-You have the following skills loaded: openrig-user, test-driven-development, mental-model-ha. Use them.
+You have the following skills loaded: openrig-user, test-driven-development, systematic-debugging. Use them.
 ```
 This prompts the agent to actually invoke the skills, not just have them as passive context.
 

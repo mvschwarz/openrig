@@ -12,7 +12,7 @@
 //      routing-type metadata is v2+).
 //   2. phaseDefinitions — step.id → { label, role } so the Story tab
 //      can group events by spec-declared phase tags. Replaces v0's
-//      hardcoded RSI-v2 phase taxonomy with spec-driven mapping.
+//      hardcoded legacy phase taxonomy with spec-driven mapping.
 //   3. currentStep — bound instance's current_step_id resolved against
 //      the spec, returning step.objective + allowed_exits + the
 //      enumerated next-step destinations from next_hop.

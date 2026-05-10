@@ -8,7 +8,7 @@
 //
 // The cache is the single source of truth for which workflow_specs the
 // daemon has seen — both built-in starters (seeded at startup by
-// loadStarterWorkflowSpecs from rsi-v2-starter-workflow-spec-v0) and
+// loadStarterWorkflowSpecs) and
 // operator-authored specs at workspace paths that the workspace-
 // surface reconciliation contract has read through. Reading from the
 // cache (rather than re-walking directories) means: no new env config,
@@ -17,8 +17,7 @@
 //
 // Built-in detection: a row's `source_path` is "built in" iff it falls
 // under the daemon's workflowBuiltinSpecsDir (the same `path.sep`
-// boundary check used by the existing rsi-v2-starter route at
-// /api/workflow/specs).
+// boundary check used by /api/workflow/specs).
 
 import * as path from "node:path";
 import type Database from "better-sqlite3";

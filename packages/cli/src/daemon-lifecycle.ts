@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import type { ChildProcess } from "node:child_process";
 import { ConfigStore } from "./config-store.js";
 import { OPENRIG_HOME, LEGACY_RIGGED_HOME, readOpenRigEnv } from "./openrig-compat.js";
+import { workspaceScaffoldDirs, workspaceScaffoldFiles } from "./commands/config-init-workspace.js";
 
 export interface DaemonState {
   pid: number;
@@ -31,6 +32,8 @@ export interface StartOptions {
   db?: string;
   transcriptsEnabled?: boolean;
   transcriptsPath?: string;
+  /** When set, daemon startup idempotently ensures the default workspace exists. */
+  workspaceRoot?: string;
   // V1 pre-release CLI/daemon Item 1 — capture-pane rotation tunables.
   // Threaded through to the daemon process env so the rotation hook
   // picks up file-stored ConfigStore values, not just shell env.
@@ -68,6 +71,45 @@ const DEFAULT_DB = "openrig.sqlite";
 const HEALTHZ_RETRIES = 20;
 const HEALTHZ_DELAY_MS = 250;
 const HEALTHZ_PROBE_TIMEOUT_MS = 250;
+
+export interface WorkspaceScaffoldResult {
+  root: string;
+  rootCreated: boolean;
+  subdirs: Array<{ name: string; path: string; created: boolean }>;
+  files: Array<{ relPath: string; absPath: string; created: boolean; skipped: "exists" | null }>;
+}
+
+export function ensureWorkspaceScaffold(root: string, deps: LifecycleDeps): WorkspaceScaffoldResult {
+  const rootExists = deps.exists(root);
+  if (!rootExists) deps.mkdirp(root);
+
+  const result: WorkspaceScaffoldResult = {
+    root,
+    rootCreated: !rootExists,
+    subdirs: [],
+    files: [],
+  };
+
+  for (const sub of workspaceScaffoldDirs()) {
+    const subPath = path.join(root, sub);
+    const existed = deps.exists(subPath);
+    if (!existed) deps.mkdirp(subPath);
+    result.subdirs.push({ name: sub, path: subPath, created: !existed });
+  }
+
+  for (const file of workspaceScaffoldFiles()) {
+    const absPath = path.join(root, file.relPath);
+    const existed = deps.exists(absPath);
+    if (existed) {
+      result.files.push({ relPath: file.relPath, absPath, created: false, skipped: "exists" });
+      continue;
+    }
+    deps.writeFile(absPath, file.content);
+    result.files.push({ relPath: file.relPath, absPath, created: true, skipped: null });
+  }
+
+  return result;
+}
 
 class HealthProbeTimeoutError extends Error {
   constructor(url: string) {
@@ -273,6 +315,9 @@ export async function startDaemon(opts: StartOptions, deps: LifecycleDeps): Prom
   const daemonEntry = path.join(getDaemonPath(), "dist/index.js");
 
   deps.mkdirp(OPENRIG_DIR);
+  if (opts.workspaceRoot) {
+    ensureWorkspaceScaffold(opts.workspaceRoot, deps);
+  }
 
   const logFd = deps.openForAppend(LOG_FILE);
 

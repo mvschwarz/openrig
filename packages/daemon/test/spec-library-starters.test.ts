@@ -10,6 +10,7 @@ import { parseAgentSpec, validateAgentSpec } from "../src/domain/agent-manifest.
 const SPECS_ROOT = resolve(import.meta.dirname, "../specs");
 
 const RIG_SPECS = [
+  "rigs/launch/conveyor/rig.yaml",
   "rigs/launch/implementation-pair/rig.yaml",
   "rigs/focused/adversarial-review/rig.yaml",
   "rigs/focused/research-team/rig.yaml",
@@ -20,6 +21,10 @@ const RIG_SPECS = [
 const PROOF_RIG_SPECS: string[] = [];
 
 const AGENT_SPECS = [
+  "agents/conveyor/lead/agent.yaml",
+  "agents/conveyor/planner/agent.yaml",
+  "agents/conveyor/builder/agent.yaml",
+  "agents/conveyor/reviewer/agent.yaml",
   "agents/design/product-designer/agent.yaml",
   "agents/development/implementer/agent.yaml",
   "agents/development/qa/agent.yaml",
@@ -32,6 +37,10 @@ const AGENT_SPECS = [
 
 const SHARED_AGENT_SPEC = "agents/shared/agent.yaml";
 const STARTER_AGENT_SPECS = [
+  "agents/conveyor/lead/agent.yaml",
+  "agents/conveyor/planner/agent.yaml",
+  "agents/conveyor/builder/agent.yaml",
+  "agents/conveyor/reviewer/agent.yaml",
   "agents/design/product-designer/agent.yaml",
   "agents/development/implementer/agent.yaml",
   "agents/development/qa/agent.yaml",
@@ -69,8 +78,9 @@ describe("Starter specs", () => {
     lib.scan();
 
     const rigs = lib.list({ kind: "rig" });
-    expect(rigs.length).toBeGreaterThanOrEqual(6);
+    expect(rigs.length).toBeGreaterThanOrEqual(7);
     const names = rigs.map((e) => e.name);
+    expect(names).toContain("conveyor");
     expect(names).toContain("implementation-pair");
     expect(names).toContain("adversarial-review");
     expect(names).toContain("research-team");
@@ -116,7 +126,7 @@ describe("Starter specs", () => {
     expect(summary).toContain("specialist");
   });
 
-  it("starter summaries position implementation-pair as the first success, demo as the launch-grade starter, and product-team as the advanced preview", () => {
+  it("starter summaries position conveyor as the generic starter and product-team as the advanced product lane", () => {
     const lib = new SpecLibraryService({
       roots: [{ path: SPECS_ROOT, sourceType: "builtin" }],
       specReviewService,
@@ -124,14 +134,19 @@ describe("Starter specs", () => {
     lib.scan();
 
     const rigs = lib.list({ kind: "rig" });
+    const conveyor = rigs.find((entry) => entry.name === "conveyor");
     const implementationPair = rigs.find((entry) => entry.name === "implementation-pair");
     const demo = rigs.find((entry) => entry.name === "demo");
     const productTeam = rigs.find((entry) => entry.name === "product-team");
 
+    expect(conveyor?.summary?.toLowerCase()).toContain("station pipeline");
+    expect(conveyor?.summary?.toLowerCase()).toContain("starter");
     expect(implementationPair?.summary?.toLowerCase()).toContain("first success");
     expect(demo?.summary?.toLowerCase()).toContain("launch-grade");
     expect(demo?.summary?.toLowerCase()).not.toContain("advanced preview");
-    expect(productTeam?.summary?.toLowerCase()).toContain("advanced preview");
+    expect(productTeam?.summary?.toLowerCase()).toContain("advanced product-development starter");
+    expect(productTeam?.summary?.toLowerCase()).not.toContain("demo");
+    expect(productTeam?.summary?.toLowerCase()).not.toContain("advanced preview");
     expect(productTeam?.summary?.toLowerCase()).not.toContain("happy-path starter");
   });
 
@@ -277,6 +292,8 @@ describe("Starter specs", () => {
       expect(skill).toBeDefined();
       expect(existsSync(join(SPECS_ROOT, "agents/shared", skill!.path, "SKILL.md"))).toBe(true);
     }
+    const deprecatedHaSkill = ["mental", "model", "ha"].join("-");
+    expect(sharedSkills.map((entry) => entry.id)).not.toContain(deprecatedHaSkill);
 
     const sharedRuntimeResources = (sharedResources["runtime_resources"] as Array<{ id: string; path: string; type: string }>) ?? [];
     for (const resourceId of ["claude-default-settings", "claude-default-mcp", "codex-default-config"]) {
@@ -305,6 +322,22 @@ describe("Starter specs", () => {
     expect(compactSkillContent).toContain("not for Codex by default");
 
     const expectedAgentSkills = new Map<string, string[]>([
+      [
+        "agents/conveyor/lead/agent.yaml",
+        ["openrig-user", "orchestration-team", "backlog-capture", "writing-plans", "executing-plans", "verification-before-completion", "brainstorming"],
+      ],
+      [
+        "agents/conveyor/planner/agent.yaml",
+        ["openrig-user", "requirements-writer", "context-builder", "writing-plans", "verification-before-completion"],
+      ],
+      [
+        "agents/conveyor/builder/agent.yaml",
+        ["openrig-user", "development-team", "test-driven-development", "systematic-debugging", "executing-plans", "verification-before-completion"],
+      ],
+      [
+        "agents/conveyor/reviewer/agent.yaml",
+        ["openrig-user", "review-team", "plan-review", "systematic-debugging", "verification-before-completion"],
+      ],
       [
         "agents/design/product-designer/agent.yaml",
         ["using-superpowers", "openrig-user", "development-team", "frontend-design", "brainstorming", "writing-plans", "verification-before-completion"],
@@ -357,6 +390,19 @@ describe("Starter specs", () => {
       for (const skillId of skills) {
         expect(content).toContain(`\`${skillId}\``);
       }
+    }
+  });
+
+  it("public builtin agent profiles do not reference deprecated HA skill", () => {
+    const deprecatedHaSkill = ["mental", "model", "ha"].join("-");
+    for (const file of AGENT_SPECS) {
+      const yaml = readFileSync(join(SPECS_ROOT, file), "utf-8");
+      const raw = parseAgentSpec(yaml) as Record<string, unknown>;
+      const profiles = (raw["profiles"] as Record<string, Record<string, unknown>> | undefined) ?? {};
+      const defaultProfile = profiles["default"] ?? {};
+      const uses = (defaultProfile["uses"] as Record<string, unknown> | undefined) ?? {};
+      const skills = (uses["skills"] as string[] | undefined) ?? [];
+      expect(skills).not.toContain(deprecatedHaSkill);
     }
   });
 

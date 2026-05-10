@@ -46,7 +46,7 @@ imports:
 profiles:
   default:
     uses:
-      skills: [using-superpowers, openrig-user, development-team, test-driven-development, mental-model-ha]
+      skills: [using-superpowers, openrig-user, development-team, test-driven-development, systematic-debugging]
       guidance: []
       subagents: []
       hooks: []
@@ -91,7 +91,7 @@ profiles:
     preferences:
       runtime: claude-code
     uses:
-      skills: [openrig-user, mental-model-ha, vault-user]
+      skills: [openrig-user, systematic-debugging, vault-user]
       guidance: []
       subagents: []
       hooks: []
@@ -216,7 +216,7 @@ imports:
   - ref: local:../../shared
 ```
 
-This gives access to the full pool of shared skills (openrig-user, mental-model-ha, development-team, etc.) and agents select the ones they need via profile `uses`.
+This gives access to the full pool of shared skills (openrig-user, systematic-debugging, development-team, etc.) and agents select the ones they need via profile `uses`.
 
 ---
 
@@ -230,7 +230,7 @@ profiles:
       runtime: claude-code
       model: claude-opus-4-6
     uses:
-      skills: [openrig-user, mental-model-ha, vault-user]
+      skills: [openrig-user, systematic-debugging, vault-user]
       guidance: [role]
       subagents: []
       hooks: []
@@ -258,7 +258,7 @@ The `uses` block selects which resources from the `resources` pool (including im
 
 ```yaml
 uses:
-  skills: [openrig-user, mental-model-ha, vault-user]
+  skills: [openrig-user, systematic-debugging, vault-user]
   guidance: [role]
   subagents: []
   hooks: [pre-commit]
@@ -410,9 +410,9 @@ The only required file is `agent.yaml`. Everything else is referenced by paths i
 | Agent | Location | Imports | Profile Skills | Purpose |
 |-------|----------|---------|---------------|---------|
 | `shared` | `specs/agents/shared/` | none | — (resource pool only) | Shared skill pool for all built-in agents |
-| `implementer` | `specs/agents/development/implementer/` | `shared` | openrig-user, development-team, test-driven-development, mental-model-ha, etc. | TDD implementation agent |
+| `implementer` | `specs/agents/development/implementer/` | `shared` | openrig-user, development-team, test-driven-development, systematic-debugging, etc. | TDD implementation agent |
 | `qa` | `specs/agents/development/qa/` | `shared` | openrig-user, development-team, etc. | Quality assurance agent |
 | `orchestrator` | `specs/agents/orchestration/orchestrator/` | `shared` | openrig-user, orchestration-team, etc. | Rig orchestration lead |
 | `reviewer` | `specs/agents/review/reviewer/` | `shared` | openrig-user, review-team, etc. | Independent code reviewer |
-| `vault-specialist` | `specs/agents/apps/vault-specialist/` | `shared` | openrig-user, mental-model-ha, vault-user | Vault domain specialist |
+| `vault-specialist` | `specs/agents/apps/vault-specialist/` | `shared` | openrig-user, systematic-debugging, vault-user | Vault domain specialist |
 | `design` | `specs/agents/design/` | none | — | Product designer |
