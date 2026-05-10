@@ -1,6 +1,6 @@
 # OpenRig CLI Reference
 
-Verified against the shipped CLI on 2026-05-03 (v0.2.0) using:
+Verified against the shipped CLI on 2026-05-10 (v0.3.0) using:
 - `packages/cli/src/index.ts`
 - `packages/cli/src/commands/*.ts`
 - `packages/cli/src/mcp-server.ts`
@@ -11,7 +11,7 @@ This document reflects the current `rig` surface as shipped. Where live help tex
 ## Overview
 
 - Binary: `rig`
-- Top-level command groups: `53`
+- Top-level command groups: `56`
 - Output mode: human-readable by default; many commands also support `--json`
 - Daemon-backed commands fail when the daemon is stopped or unhealthy; `daemon`, `config`, `preflight`, and `doctor` also have local responsibilities
 - Managed apps are launched through the normal spec/library surfaces; the canonical shipped example is `rig up secrets-manager`
@@ -74,6 +74,9 @@ This document reflects the current `rig` surface as shipped. Where live help tex
 | `compact-plan` | Plan Claude compact-in-place candidates without compacting anything |
 | `heartbeat` | Show workflow execution proof state from queue files |
 | `seat` | Inspect OpenRig seat observability state |
+| `agent-image` | Browse, snapshot, and manage agent images |
+| `context-pack` | Browse, preview, send, and install operator-authored context packs |
+| `workspace` | Workspace primitive — typed-kind tooling (frontmatter validation) |
 
 ## Core Daemon and System Commands
 
@@ -110,10 +113,11 @@ Subcommands:
 ### `rig config`
 
 Usage:
-- `rig config [--json]`
-- `rig config get <key>`
+- `rig config [--json] [--with-source]`
+- `rig config get <key> [--show-source]`
 - `rig config set <key> <value>`
-- `rig config reset`
+- `rig config reset [<key>]`
+- `rig config init-workspace [--root <path>] [--force] [--dry-run] [--json]`
 
 Supported keys:
 - `daemon.port`
@@ -121,12 +125,17 @@ Supported keys:
 - `db.path`
 - `transcripts.enabled`
 - `transcripts.path`
+- `workspace.root` (and other workspace-rooted paths used by `init-workspace`)
 
 Precedence:
 - CLI flag
 - environment variable
 - config file
 - default
+
+Notes:
+- `--with-source` (top-level) and `--show-source` (`get`) report per-key source/default for honest provenance.
+- `init-workspace` scaffolds the default workspace at `~/.openrig/workspace/` (or the `--root` override) with mission/slice folders. `--force` overwrites scaffolded files (does NOT remove directories); `--dry-run` previews without writing. New in v0.3.0.
 
 Legacy env compatibility: the original runtime keys still accept deprecated
 `RIGGED_*` aliases. New typed config keys use `OPENRIG_*` only.
@@ -861,6 +870,58 @@ Mission Control is an integrated product UI inside the existing shell, NOT a new
 Mission Control is reached via the product UI at the `/mission-control` route. The HTTP API surface (`/api/mission-control/*`) is documented in `docs/as-built/architecture.md` § Mission Control / Queue Observability. The 7 verbs (`approve`, `deny`, `route`, `annotate`, `hold`, `drop`, `handoff`) execute via `POST /api/mission-control/action`; the 7 views are read via `GET /api/mission-control/views/:view-name`.
 
 Mission Control consumes `rig ps --nodes --json` for fleet roll-up where the canonical CLI source is preferred. Cross-CLI-version drift is handled per the 4 sub-clauses of PRD § Runtime/Source Drift Acceptance: missing fields surface as honest "field unavailable on this rig's daemon version" placeholders; once-per-session-per-rig logging avoids spam; the fleet view shows a top-level "rigs running stale CLI" indicator.
+
+## Agent Images, Context Packs, and Workspace (v0.3.0)
+
+Three top-level commands shipped in v0.3.0 for operator-authored library content (agent images and context packs) and the workspace primitive.
+
+### `rig agent-image`
+
+Usage: `rig agent-image <subcommand>` — browse, snapshot, and manage agent images (PL-016).
+
+Subcommands:
+- `list [options]` — list all agent images in the library.
+- `show <name-or-id> [options]` — show image manifest + statistics.
+- `preview <name-or-id> [options]` — show manifest + sized supplementary file metadata + starter snippet.
+- `create <source-session> [options]` — capture a productive seat's resumable state into a new agent image.
+- `delete <name-or-id> [options]` — delete an agent image (subject to evidence-preservation guard).
+- `pin <name-or-id> [options]` — pin an image so prune cannot delete it.
+- `unpin <name-or-id> [options]` — unpin an image.
+- `prune [options]` — delete evictable images (protected by evidence-preservation guard).
+- `sync [options]` — re-walk discovery roots and refresh the library index.
+
+Notes:
+- Images are an operator-authored library form; deletion is gated by an evidence-preservation guard so productive seat snapshots are not lost accidentally.
+- `pin` / `unpin` are the operator levers for explicit retention; `prune` honours them.
+
+### `rig context-pack`
+
+Usage: `rig context-pack <subcommand>` — browse, preview, send, and install operator-authored context packs.
+
+Subcommands:
+- `list [options]` — list all context packs in the library.
+- `show <name-or-id> [options]` — show pack manifest + per-file metadata.
+- `preview <name-or-id> [options]` — show the assembled bundle (the exact text that would be sent).
+- `sync [options]` — re-walk discovery roots and refresh the library index.
+- `add <source-dir> [options]` — install a context pack from a local directory into `~/.openrig/context-packs/`.
+- `send <name-or-id> <destination-session> [options]` — assemble the pack into one paste-ready bundle and send to a seat.
+
+Notes:
+- Context packs are operator-authored bundles of context (manifest + files) intended to prime a managed seat with a coherent starting context.
+- `preview` is the canonical way to see exactly what `send` will deliver; useful before priming a live seat.
+- `send --dry-run` is supported for preview-then-deliver flows.
+
+### `rig workspace`
+
+Usage: `rig workspace <subcommand>` — Workspace Primitive (PL-007), v0 typed-kind tooling.
+
+Subcommands:
+- `validate [root]` — walk a workspace root, parse each `.md` file's YAML frontmatter, and emit a structured gap report. Advisory only — never modifies files. Default root: `cwd`.
+
+Notes:
+- v0 surface is intentionally narrow (`validate` only) — read-only frontmatter audit.
+- Future versions will add typed-kind authoring/refactor tooling on the same root walker.
+- See `rig config init-workspace` to scaffold a fresh default workspace.
 
 ## Commands Not Present
 
