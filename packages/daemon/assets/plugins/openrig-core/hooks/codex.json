@@ -1,0 +1,37 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CODEX_PLUGIN_ROOT}/hooks/scripts/activity-relay.cjs\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CODEX_PLUGIN_ROOT}/hooks/scripts/activity-relay.cjs\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CODEX_PLUGIN_ROOT}/hooks/scripts/activity-relay.cjs\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}
