@@ -2,7 +2,7 @@ import nodePath from "node:path";
 import type {
   AgentSpec, AgentResources, ProfileSpec, LifecycleDefaults,
   RigSpec, RigSpecPod, RigSpecPodMember, StartupBlock,
-  SkillResource, GuidanceResource, SubagentResource, HookResource, RuntimeResource,
+  SkillResource, GuidanceResource, SubagentResource, RuntimeResource, PluginResource,
 } from "./types.js";
 import type { ResolvedAgentSpec, ResourceCollision } from "./agent-resolver.js";
 import { resolveStartup } from "./startup-resolver.js";
@@ -13,14 +13,14 @@ export interface QualifiedResource {
   effectiveId: string;
   sourceSpec: string;
   sourcePath: string;
-  resource: SkillResource | GuidanceResource | SubagentResource | HookResource | RuntimeResource;
+  resource: SkillResource | GuidanceResource | SubagentResource | RuntimeResource | PluginResource;
 }
 
 export interface ResolvedResources {
   skills: QualifiedResource[];
   guidance: QualifiedResource[];
   subagents: QualifiedResource[];
-  hooks: QualifiedResource[];
+  plugins: QualifiedResource[];
   runtimeResources: QualifiedResource[];
 }
 
@@ -56,14 +56,14 @@ export type ResolutionResult =
 
 // -- Constants --
 
-const RESOURCE_CATEGORIES = ["skills", "guidance", "subagents", "hooks", "runtimeResources"] as const;
+const RESOURCE_CATEGORIES = ["skills", "guidance", "subagents", "plugins", "runtimeResources"] as const;
 type ResourceCategory = typeof RESOURCE_CATEGORIES[number];
 
 const YAML_CATEGORY_MAP: Record<string, ResourceCategory> = {
   skills: "skills",
   guidance: "guidance",
   subagents: "subagents",
-  hooks: "hooks",
+  plugins: "plugins",
   runtime_resources: "runtimeResources",
   runtimeResources: "runtimeResources",
 };
@@ -162,7 +162,7 @@ interface PoolEntry {
   effectiveId: string;
   sourceSpec: string;
   sourcePath: string;
-  resource: SkillResource | GuidanceResource | SubagentResource | HookResource | RuntimeResource;
+  resource: SkillResource | GuidanceResource | SubagentResource | RuntimeResource | PluginResource;
 }
 
 type ResourcePool = Record<ResourceCategory, Map<string, PoolEntry[]>>;
@@ -172,7 +172,7 @@ function buildResourcePool(base: ResolvedAgentSpec, imports: ResolvedAgentSpec[]
     skills: new Map(),
     guidance: new Map(),
     subagents: new Map(),
-    hooks: new Map(),
+    plugins: new Map(),
     runtimeResources: new Map(),
   };
 
@@ -231,7 +231,7 @@ function resolveProfileUses(
     skills: [],
     guidance: [],
     subagents: [],
-    hooks: [],
+    plugins: [],
     runtimeResources: [],
   };
 
@@ -239,7 +239,7 @@ function resolveProfileUses(
     skills: profile.uses.skills,
     guidance: profile.uses.guidance,
     subagents: profile.uses.subagents,
-    hooks: profile.uses.hooks,
+    plugins: profile.uses.plugins,
     runtimeResources: profile.uses.runtimeResources,
   };
 

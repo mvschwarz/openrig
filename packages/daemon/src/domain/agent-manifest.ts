@@ -2,7 +2,8 @@ import { parse as parseYaml } from "yaml";
 import type {
   AgentSpec, ImportSpec, StartupBlock, StartupFile, StartupAction,
   LifecycleDefaults, AgentResources, ProfileSpec,
-  SkillResource, GuidanceResource, SubagentResource, HookResource, RuntimeResource,
+  SkillResource, GuidanceResource, SubagentResource, RuntimeResource,
+  PluginResource, PluginSource,
   ValidationResult,
 } from "./types.js";
 import {
@@ -173,15 +174,22 @@ export function validateAgentSpec(raw: unknown): ValidationResult {
     const res = obj["resources"] as Record<string, unknown>;
     const allLocalIds: Record<string, Set<string>> = {};
 
-    for (const category of ["skills", "guidance", "subagents", "hooks", "runtime_resources"]) {
+    for (const category of ["skills", "guidance", "subagents", "plugins", "runtime_resources"]) {
       const items = res[category];
       if (items !== undefined) {
         if (!Array.isArray(items)) {
           errors.push(`resources.${category}: must be an array`);
         } else {
           const entries = items as Array<Record<string, unknown>>;
-          errors.push(...validateResourcePaths(entries as Array<{ id: string; path: string }>, category));
-          allLocalIds[category] = new Set(entries.map((e) => e["id"] as string).filter(Boolean));
+
+          if (category === "plugins") {
+            // Plugin entries have a different shape (id + source object) — validate inline
+            errors.push(...validatePluginResources(entries));
+            allLocalIds[category] = new Set(entries.map((e) => e["id"] as string).filter(Boolean));
+          } else {
+            errors.push(...validateResourcePaths(entries as Array<{ id: string; path: string }>, category));
+            allLocalIds[category] = new Set(entries.map((e) => e["id"] as string).filter(Boolean));
+          }
 
           // runtime_resources must have runtime field
           if (category === "runtime_resources") {
@@ -207,7 +215,7 @@ export function validateAgentSpec(raw: unknown): ValidationResult {
           const p = profileRaw as Record<string, unknown>;
           if (p["uses"] && typeof p["uses"] === "object") {
             const uses = p["uses"] as Record<string, unknown>;
-            for (const category of ["skills", "guidance", "subagents", "hooks", "runtime_resources"]) {
+            for (const category of ["skills", "guidance", "subagents", "plugins", "runtime_resources"]) {
               const refs = uses[category];
               if (Array.isArray(refs)) {
                 for (const ref of refs as string[]) {
@@ -300,7 +308,7 @@ function normalizeLifecycle(raw: Record<string, unknown>): LifecycleDefaults {
 
 function normalizeResources(raw: unknown): AgentResources {
   if (!raw || typeof raw !== "object") {
-    return { skills: [], guidance: [], subagents: [], hooks: [], runtimeResources: [] };
+    return { skills: [], guidance: [], subagents: [], plugins: [], runtimeResources: [] };
   }
   const obj = raw as Record<string, unknown>;
 
@@ -317,11 +325,8 @@ function normalizeResources(raw: unknown): AgentResources {
     subagents: Array.isArray(obj["subagents"])
       ? (obj["subagents"] as Record<string, unknown>[]).map((s) => ({ id: s["id"] as string, path: s["path"] as string }))
       : [],
-    hooks: Array.isArray(obj["hooks"])
-      ? (obj["hooks"] as Record<string, unknown>[]).map((h) => ({
-          id: h["id"] as string, path: h["path"] as string,
-          runtimes: Array.isArray(h["runtimes"]) ? h["runtimes"] as string[] : undefined,
-        }))
+    plugins: Array.isArray(obj["plugins"])
+      ? (obj["plugins"] as Record<string, unknown>[]).map(normalizePluginResource)
       : [],
     runtimeResources: Array.isArray(obj["runtime_resources"])
       ? (obj["runtime_resources"] as Record<string, unknown>[]).map((r) => ({
@@ -330,6 +335,63 @@ function normalizeResources(raw: unknown): AgentResources {
         }))
       : [],
   };
+}
+
+function normalizePluginResource(raw: Record<string, unknown>): PluginResource {
+  const sourceRaw = (raw["source"] ?? {}) as Record<string, unknown>;
+  const source: PluginSource = {
+    kind: "local",
+    path: sourceRaw["path"] as string,
+  };
+  const result: PluginResource = {
+    id: raw["id"] as string,
+    source,
+  };
+  const pluginType = raw["plugin_type"] ?? raw["pluginType"];
+  if (pluginType === "claude" || pluginType === "codex" || pluginType === "auto") {
+    result.pluginType = pluginType;
+  }
+  return result;
+}
+
+function validatePluginResources(entries: Array<Record<string, unknown>>): string[] {
+  const errors: string[] = [];
+  const ids = new Set<string>();
+  for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i]!;
+    if (!entry["id"] || typeof entry["id"] !== "string") {
+      errors.push(`resources.plugins[${i}].id: must be a non-empty string`);
+    } else if (ids.has(entry["id"] as string)) {
+      errors.push(`resources.plugins: duplicate id "${entry["id"]}"`);
+    } else {
+      ids.add(entry["id"] as string);
+    }
+
+    const source = entry["source"];
+    if (!source || typeof source !== "object" || Array.isArray(source)) {
+      errors.push(`resources.plugins[${i}].source: must be an object with kind + source-specific fields`);
+      continue;
+    }
+    const sourceObj = source as Record<string, unknown>;
+    const kind = sourceObj["kind"];
+    if (kind !== "local") {
+      errors.push(`resources.plugins[${i}].source.kind: only "local" is supported in v0 (got "${String(kind)}")`);
+      continue;
+    }
+    // Plugin paths may be absolute (e.g. ~/.openrig/plugins/<id> for vendored
+     // plugins, or absolute project paths). Skip the safe-path check used for
+     // in-spec resources; plugin sources are explicit operator-managed paths.
+    const pluginPath = sourceObj["path"];
+    if (!pluginPath || typeof pluginPath !== "string") {
+      errors.push(`resources.plugins[${i}].source.path: must be a non-empty string`);
+    }
+
+    const pluginType = entry["plugin_type"] ?? entry["pluginType"];
+    if (pluginType !== undefined && pluginType !== "claude" && pluginType !== "codex" && pluginType !== "auto") {
+      errors.push(`resources.plugins[${i}].plugin_type: must be "claude" | "codex" | "auto" (got "${String(pluginType)}")`);
+    }
+  }
+  return errors;
 }
 
 function normalizeProfile(raw: Record<string, unknown>): ProfileSpec {
@@ -343,7 +405,7 @@ function normalizeProfile(raw: Record<string, unknown>): ProfileSpec {
       skills: Array.isArray(uses?.["skills"]) ? uses["skills"] as string[] : [],
       guidance: Array.isArray(uses?.["guidance"]) ? uses["guidance"] as string[] : [],
       subagents: Array.isArray(uses?.["subagents"]) ? uses["subagents"] as string[] : [],
-      hooks: Array.isArray(uses?.["hooks"]) ? uses["hooks"] as string[] : [],
+      plugins: Array.isArray(uses?.["plugins"]) ? uses["plugins"] as string[] : [],
       runtimeResources: Array.isArray(uses?.["runtime_resources"]) ? uses["runtime_resources"] as string[] : [],
     },
   };

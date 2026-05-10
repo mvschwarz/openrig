@@ -345,7 +345,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       case "skill": return nodePath.join(cwd, ".agents", "skills", entry.effectiveId);
       case "guidance": return null; // handled via merge
       case "subagent": return nodePath.join(cwd, ".agents"); // .agents/{id}.yaml per preserved contract
-      case "hook": return nodePath.join(cwd, ".agents", "hooks");
+      case "plugin": return nodePath.join(cwd, ".codex", "plugins", entry.effectiveId);
       case "runtime_resource": return nodePath.join(cwd, ".agents", "extensions", entry.effectiveId);
       default: return null;
     }

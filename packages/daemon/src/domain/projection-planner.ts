@@ -9,7 +9,7 @@ import type { ResourceCollision } from "./agent-resolver.js";
 export type ProjectionClassification = "safe_projection" | "managed_merge" | "hash_conflict" | "no_op";
 
 export interface ProjectionEntry {
-  category: "skill" | "guidance" | "subagent" | "hook" | "runtime_resource";
+  category: "skill" | "guidance" | "subagent" | "plugin" | "runtime_resource";
   effectiveId: string;
   sourceSpec: string;
   sourcePath: string;
@@ -55,7 +55,7 @@ const CATEGORY_MAP: Record<string, ProjectionEntry["category"]> = {
   skills: "skill",
   guidance: "guidance",
   subagents: "subagent",
-  hooks: "hook",
+  plugins: "plugin",
   runtimeResources: "runtime_resource",
 };
 
@@ -95,8 +95,18 @@ export function planProjection(input: ProjectionInput): PlanResult {
         if (rr.runtime !== config.runtime) continue;
       }
 
-      const resourcePath = (qr.resource as { path: string }).path;
-      const absolutePath = nodePath.resolve(qr.sourcePath, resourcePath);
+      // Plugins use a different shape: { id, source: { kind, path } } — extract path from source
+      let resourcePath: string;
+      let absolutePath: string;
+      if (catKey === "plugins") {
+        const pluginSource = (qr.resource as { source: { kind: string; path: string } }).source;
+        resourcePath = pluginSource.path;
+        // Plugin paths may be absolute (vendored at ~/.openrig/plugins/) or relative to spec root
+        absolutePath = nodePath.isAbsolute(resourcePath) ? resourcePath : nodePath.resolve(qr.sourcePath, resourcePath);
+      } else {
+        resourcePath = (qr.resource as { path: string }).path;
+        absolutePath = nodePath.resolve(qr.sourcePath, resourcePath);
+      }
 
       const entry: ProjectionEntry = {
         category: catSingular,
@@ -176,7 +186,7 @@ function checkAmbiguity(selected: ResolvedResources, collisions: ResourceCollisi
     { category: "skills", resources: selected.skills },
     { category: "guidance", resources: selected.guidance },
     { category: "subagents", resources: selected.subagents },
-    { category: "hooks", resources: selected.hooks },
+    { category: "plugins", resources: selected.plugins },
     { category: "runtimeResources", resources: selected.runtimeResources },
   ];
 

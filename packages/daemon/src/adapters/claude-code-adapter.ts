@@ -384,7 +384,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       case "skill": return nodePath.join(cwd, ".claude", "skills", entry.effectiveId);
       case "guidance": return null; // handled via merge
       case "subagent": return nodePath.join(cwd, ".claude", "agents");
-      case "hook": return nodePath.join(cwd, ".claude", "hooks");
+      case "plugin": return nodePath.join(cwd, ".claude", "plugins", entry.effectiveId);
       case "runtime_resource": return nodePath.join(cwd, ".claude", "extensions", entry.effectiveId);
       default: return null;
     }

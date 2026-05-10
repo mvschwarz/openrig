@@ -34,7 +34,7 @@ export type ResolveResult =
 // -- Resource category keys --
 
 const RESOURCE_CATEGORIES: (keyof AgentResources)[] = [
-  "skills", "guidance", "subagents", "hooks", "runtimeResources",
+  "skills", "guidance", "subagents", "plugins", "runtimeResources",
 ];
 
 // -- Public API --

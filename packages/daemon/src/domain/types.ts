@@ -511,14 +511,22 @@ export interface LifecycleDefaults {
 export interface SkillResource { id: string; path: string; }
 export interface GuidanceResource { id: string; path: string; target: string; merge: "managed_block" | "append"; }
 export interface SubagentResource { id: string; path: string; }
-export interface HookResource { id: string; path: string; runtimes?: string[]; }
 export interface RuntimeResource { id: string; path: string; runtime: string; type: string; }
+
+export type PluginSource =
+  | { kind: "local"; path: string };
+
+export interface PluginResource {
+  id: string;
+  source: PluginSource;
+  pluginType?: "claude" | "codex" | "auto";
+}
 
 export interface AgentResources {
   skills: SkillResource[];
   guidance: GuidanceResource[];
   subagents: SubagentResource[];
-  hooks: HookResource[];
+  plugins: PluginResource[];
   runtimeResources: RuntimeResource[];
 }
 
@@ -531,7 +539,7 @@ export interface ProfileSpec {
     skills: string[];
     guidance: string[];
     subagents: string[];
-    hooks: string[];
+    plugins: string[];
     runtimeResources: string[];
   };
 }
