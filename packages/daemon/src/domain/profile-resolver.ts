@@ -1,4 +1,5 @@
 import nodePath from "node:path";
+import { homedir as osHomedir } from "node:os";
 import type {
   AgentSpec, AgentResources, ProfileSpec, LifecycleDefaults,
   RigSpec, RigSpecPod, RigSpecPodMember, StartupBlock,
@@ -6,6 +7,7 @@ import type {
 } from "./types.js";
 import type { ResolvedAgentSpec, ResourceCollision } from "./agent-resolver.js";
 import { resolveStartup } from "./startup-resolver.js";
+import { discoverSkillsForRuntime, type SkillRuntime } from "./skill-discovery.js";
 
 // -- Types --
 
@@ -48,6 +50,11 @@ export interface ResolutionContext {
   pod: RigSpecPod;
   rig: RigSpec;
   operatorStartup?: StartupBlock;
+  /** V0.3.0 daemon-skill-discovery (SC-29 #7): operator home directory
+   *  used to scan filesystem-discovered skills (~/.openrig/skills/,
+   *  ~/.claude/skills/, ~/.agents/skills/). Defaults to os.homedir()
+   *  in production; tests inject a fixture root. */
+  homedir?: string;
 }
 
 export type ResolutionResult =
@@ -95,29 +102,57 @@ export function resolveNodeConfig(ctx: ResolutionContext): ResolutionResult {
   // 2. Build combined resource pool
   const pool = buildResourcePool(baseSpec, importedSpecs);
 
-  // 3. Resolve profile uses against pool
-  const selectedResult = resolveProfileUses(profile, pool, spec.name, errors);
-  if (errors.length > 0) {
-    return { ok: false, errors };
-  }
-
-  // 4. Resolve runtime (member authoritative)
+  // V0.3.0 daemon-skill-discovery (SC-29 #7): runtime + cwd must be
+  // resolved BEFORE the pool is queried, so the filesystem skill scan
+  // targets the right runtime's path layout (claude-code → .claude/;
+  // codex → .agents/) at the right cwd. Order swapped from prior
+  // versions where runtime/cwd were computed AFTER the pool.
   const runtime = member.runtime
     ?? profile.preferences?.runtime
     ?? spec.defaults?.runtime
     ?? "claude-code";
 
-  // 5. Resolve model (member overrides)
   const model = member.model
     ?? profile.preferences?.model
     ?? spec.defaults?.model;
 
-  // 6. Resolve cwd (member authoritative, required)
   const cwd = ctx.cwdOverride
     ? nodePath.resolve(ctx.cwdOverride)
     : ctx.specRoot
       ? (nodePath.isAbsolute(member.cwd) ? member.cwd : nodePath.resolve(ctx.specRoot, member.cwd))
       : member.cwd;
+
+  // 2b. Augment the pool with filesystem-discovered skills. Rig-local
+  // resources.skills (already in the pool from buildResourcePool) win
+  // over discovered same-id entries — the most-specific-wins
+  // precedence: rig-local > spec-install-dir bundled > rig-cwd
+  // bundled > runtime-specific user library > shared user-spec
+  // library. The internal precedence among discovery roots lives in
+  // skill-discovery.listScanRoots; here we only enforce that
+  // rig-local-declared resources are not overwritten.
+  if (runtime === "claude-code" || runtime === "codex") {
+    const discovery = discoverSkillsForRuntime({
+      runtime: runtime as SkillRuntime,
+      homedir: ctx.homedir ?? osHomedir(),
+      cwd,
+      specInstallDir: ctx.specRoot,
+    });
+    for (const discovered of discovery.skills) {
+      if (pool.skills.has(discovered.id)) continue; // rig-local-wins
+      pool.skills.set(discovered.id, [{
+        effectiveId: discovered.id,
+        sourceSpec: "discovered",
+        sourcePath: discovered.path,
+        resource: discovered,
+      }]);
+    }
+  }
+
+  // 3. Resolve profile uses against the augmented pool
+  const selectedResult = resolveProfileUses(profile, pool, spec.name, errors);
+  if (errors.length > 0) {
+    return { ok: false, errors };
+  }
 
   // 7. Resolve restorePolicy with narrowing
   const restorePolicyResult = resolveRestorePolicy(spec, profile, member);
