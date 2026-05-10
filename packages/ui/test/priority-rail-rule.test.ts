@@ -39,7 +39,7 @@ describe("OSR v0 — classifyPriorityRailLevel", () => {
   });
 
   it("missions/<m>/PROGRESS.md → 'mission'", () => {
-    expect(classifyPriorityRailLevel(makeFile({ relPath: "missions/recursive-self-improvement-v2/PROGRESS.md" })))
+    expect(classifyPriorityRailLevel(makeFile({ relPath: "missions/release-0-3-0/PROGRESS.md" })))
       .toBe("mission");
   });
 
