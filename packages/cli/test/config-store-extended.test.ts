@@ -419,12 +419,14 @@ describe("init-workspace runner", () => {
     expect(result.dryRun).toBe(true);
     expect(result.subdirs.map((s) => s.name)).toEqual(expect.arrayContaining([
       "missions",
+      "artifacts",
+      "evidence",
       "progress",
       "field-notes",
       "specs",
       "dogfood-evidence",
-      "missions/idea-ledger/slices/capture-product-ideas",
-      "missions/handoff-loop/slices/route-work-packets",
+      "missions/getting-started/slices/first-conveyor-run",
+      "missions/getting-started/slices/inspect-project-evidence",
     ]));
     expect(existsSync(workspaceRoot)).toBe(false);
   });
@@ -443,7 +445,7 @@ describe("init-workspace runner", () => {
     const parsed = JSON.parse(logs.join("\n")) as { root: string; dryRun: boolean; subdirs: Array<{ name: string }> };
     expect(parsed.root).toBe(workspaceRoot);
     expect(parsed.dryRun).toBe(true);
-    expect(parsed.subdirs.map((s) => s.name)).toContain("missions/idea-ledger/slices/capture-product-ideas");
+    expect(parsed.subdirs.map((s) => s.name)).toContain("missions/getting-started/slices/first-conveyor-run");
   });
 
   it("rig-level --json emits parseable JSON for config init-workspace", async () => {
@@ -473,39 +475,39 @@ describe("init-workspace runner", () => {
     const parsed = JSON.parse(logs.join("\n")) as { root: string; dryRun: boolean; subdirs: Array<{ name: string }> };
     expect(parsed.root).toBe(workspaceRoot);
     expect(parsed.dryRun).toBe(true);
-    expect(parsed.subdirs.map((s) => s.name)).toContain("missions/handoff-loop/slices/route-work-packets");
+    expect(parsed.subdirs.map((s) => s.name)).toContain("missions/getting-started/slices/inspect-project-evidence");
   });
 
   it("creates mission-aware workspace files + STEERING placeholder", () => {
     const result = runInitWorkspace({ root: workspaceRoot, configPath });
     expect(result.dryRun).toBe(false);
     expect(existsSync(workspaceRoot)).toBe(true);
-    for (const sub of ["missions", "progress", "field-notes", "specs", "dogfood-evidence"]) {
+    for (const sub of ["missions", "artifacts", "evidence", "progress", "field-notes", "specs", "dogfood-evidence"]) {
       expect(existsSync(join(workspaceRoot, sub))).toBe(true);
       expect(existsSync(join(workspaceRoot, sub, "README.md"))).toBe(true);
     }
-    expect(existsSync(join(workspaceRoot, "missions", "idea-ledger", "slices", "capture-product-ideas", "README.md"))).toBe(true);
-    expect(existsSync(join(workspaceRoot, "missions", "handoff-loop", "slices", "verify-loop-evidence", "IMPLEMENTATION-PRD.md"))).toBe(true);
+    expect(existsSync(join(workspaceRoot, "missions", "getting-started", "slices", "first-conveyor-run", "README.md"))).toBe(true);
+    expect(existsSync(join(workspaceRoot, "missions", "getting-started", "slices", "inspect-project-evidence", "IMPLEMENTATION-PRD.md"))).toBe(true);
     const steeringMd = readFileSync(join(workspaceRoot, "STEERING.md"), "utf-8");
     expect(steeringMd).toContain("OpenRig Priority Stack");
   });
 
   it("is idempotent: running twice without --force is a no-op for existing files", () => {
     runInitWorkspace({ root: workspaceRoot, configPath });
-    const sliceReadme = join(workspaceRoot, "missions", "idea-ledger", "slices", "capture-product-ideas", "README.md");
+    const sliceReadme = join(workspaceRoot, "missions", "getting-started", "slices", "first-conveyor-run", "README.md");
     writeFileSync(sliceReadme, "operator-edited content", "utf-8");
 
     const second = runInitWorkspace({ root: workspaceRoot, configPath });
-    const sliceFile = second.files.find((f) => f.relPath === "missions/idea-ledger/slices/capture-product-ideas/README.md");
+    const sliceFile = second.files.find((f) => f.relPath === "missions/getting-started/slices/first-conveyor-run/README.md");
     expect(sliceFile?.skipped).toBe("exists");
     expect(readFileSync(sliceReadme, "utf-8")).toBe("operator-edited content");
   });
 
   it("--force overwrites existing files but never deletes operator content under directories", () => {
     runInitWorkspace({ root: workspaceRoot, configPath });
-    const operatorFile = join(workspaceRoot, "missions", "idea-ledger", "slices", "capture-product-ideas", "operator-note.md");
+    const operatorFile = join(workspaceRoot, "missions", "getting-started", "slices", "first-conveyor-run", "operator-note.md");
     writeFileSync(operatorFile, "my work", "utf-8");
-    const operatorReadme = join(workspaceRoot, "missions", "idea-ledger", "slices", "capture-product-ideas", "README.md");
+    const operatorReadme = join(workspaceRoot, "missions", "getting-started", "slices", "first-conveyor-run", "README.md");
     writeFileSync(operatorReadme, "edited", "utf-8");
 
     runInitWorkspace({ root: workspaceRoot, force: true, configPath });
@@ -513,7 +515,7 @@ describe("init-workspace runner", () => {
     expect(existsSync(operatorFile)).toBe(true);
     expect(readFileSync(operatorFile, "utf-8")).toBe("my work");
     // README is overwritten
-    expect(readFileSync(operatorReadme, "utf-8")).toContain("# Capture Product Ideas");
+    expect(readFileSync(operatorReadme, "utf-8")).toContain("# First Conveyor Run");
   });
 
   it("--root override beats configured workspace.root", () => {

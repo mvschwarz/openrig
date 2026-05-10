@@ -15,32 +15,28 @@ npm install -g @openrig/cli
 # Prepare the machine (attempts tmux, cmux, Claude Code, Codex, tmux defaults — reports what worked)
 rig setup
 
-# Boot the demo rig (3 pods, 8 nodes, mixed runtimes)
-rig up demo
+# Boot the conveyor starter rig (4 seats, mixed runtimes)
+rig up conveyor
 
 # Open the UI
 rig ui open
 ```
 
-After the demo boots, open the UI and click **orch1.lead** in the topology graph. Use **Open CMUX** to jump into a terminal for that node. If cmux is not available, use the tmux attach command shown in the node detail panel instead.
+After the conveyor rig boots, open the UI and click **intake.lead** in the topology graph. Use **Open CMUX** to jump into a terminal for that node. If cmux is not available, use the tmux attach command shown in the node detail panel instead.
 
 ## Launch Walkthrough
 
 The launch path above has been walked end-to-end on fresh macOS VMs. The only thing your agent can't do would be the oauth logins for claude and openai and dealing with permission prompts.
 
-### 1. Open the demo rig
+### 1. Open the conveyor rig
 
-When the UI opens, the explorer is already visible on the left. Click the `demo` rig to load its live topology.
+When the UI opens, the explorer is already visible on the left. Click the `conveyor` rig to load its live topology.
 
-![Step 1: Click the demo rig in the explorer.](assets/ui/screenshots/launch-happy-path/guide-step-01-open-demo.png)
+### 2. Click `CMUX` on `intake.lead`
 
-### 2. Click `CMUX` on `orch1.lead`
+Once the topology loads, go to the `intake.lead` node and click its `CMUX` button. That opens the intake terminal directly.
 
-Once the topology loads, go to the `orch1.lead` node and click its `CMUX` button. That opens the orchestrator terminal directly.
-
-![Step 2: Click CMUX on orch1.lead in the topology.](assets/ui/screenshots/launch-happy-path/guide-step-02-open-cmux.png)
-
-> From here just talk to the orchestrator and tell it what you want it to build...
+> From here, give the intake agent a packet of work and watch it move through planning, build, review, and closeout.
 
 ## What It Does
 
@@ -56,33 +52,36 @@ OpenRig is a multi-agent harness — it manages the system that coding agents fo
 
 Every agent runs in a tmux session you can attach to, inspect, and work with directly.
 
-## Demo Rig
+## Starter Rigs
 
-OpenRig ships with a demo rig you can boot in seconds:
+OpenRig ships with a conveyor starter rig for learning workflow handoff:
 
 ```bash
-rig specs preview demo
+rig specs preview conveyor --kind rig
 ```
 
 ```
-demo (rig, pod_aware)
-  Launch-grade starter: a stable full product squad with two
-  orchestrators, implementation, QA, design, and two independent
-  reviewers.
+conveyor (rig, pod_aware)
+  Starter workflow rig: a station pipeline that can move multiple
+  work packets at once, with queue depth acting as natural backpressure.
 
-  Pod: orch1 (2 members)
+  Pod: intake (1 member)
     lead — claude-code
-    peer — codex
-  Pod: dev1 (3 members)
-    impl — claude-code
-    qa — codex
-    design — claude-code
-  Pod: rev1 (2 members)
-    r1 — claude-code
-    r2 — codex
+  Pod: plan (1 member)
+    planner — codex
+  Pod: build (1 member)
+    builder — claude-code
+  Pod: review (1 member)
+    reviewer — codex
 ```
 
-Also ships: `implementation-pair`, `adversarial-review`, `research-team`, `product-team`, and `secrets-manager` (HashiCorp Vault managed by a specialist agent).
+For a larger human-operated product-development topology, inspect `product-team`:
+
+```bash
+rig specs preview product-team
+```
+
+Also ships: `implementation-pair`, `adversarial-review`, `research-team`, and `secrets-manager` (HashiCorp Vault managed by a specialist agent).
 
 Browse the library: `rig specs ls`
 

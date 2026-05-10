@@ -28,7 +28,7 @@ const baseRig = {
         mode: "agent_image",
         ref: {
           kind: "image_name",
-          value: "driver-rsi-primed",
+          value: "driver-release-primed",
         },
       },
     }],
@@ -98,7 +98,7 @@ describe("RigSpec validation — session_source: mode: agent_image (PL-016 Item 
       mode: "agent_image",
       ref: {
         kind: "image_name",
-        value: "driver-rsi-primed",
+        value: "driver-release-primed",
       },
     });
   });

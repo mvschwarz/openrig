@@ -43,7 +43,7 @@ function insertInstance(db: Database.Database, opts: {
      ) VALUES (?, ?, ?, 'creator@r', ?, ?, ?, ?, ?)`
   ).run(
     opts.instanceId,
-    opts.workflowName ?? "rsi-v2-hot-potato",
+    opts.workflowName ?? "conveyor",
     opts.workflowVersion ?? "1",
     opts.createdAt ?? "2026-05-04T00:00:00.000Z",
     opts.status ?? "active",
@@ -126,7 +126,7 @@ describe("PL-slice-story-view-v1 findSliceWorkflowBinding", () => {
     insertTrail(db, { trailId: "t1", instanceId: "inst-1", stepId: "discovery", stepRole: "discovery-router", priorQitemId: "q-slice-1" });
     const result = findSliceWorkflowBinding(db, ["q-slice-1"]);
     expect(result.primary?.instanceId).toBe("inst-1");
-    expect(result.primary?.workflowName).toBe("rsi-v2-hot-potato");
+    expect(result.primary?.workflowName).toBe("conveyor");
     expect(result.primary?.currentStepId).toBe("qa");
     expect(result.primary?.hopCount).toBe(4);
     expect(result.additionalInstanceIds).toEqual([]);

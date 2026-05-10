@@ -184,8 +184,8 @@ describe("contextPackId / parseContextPackId", () => {
   });
 
   it("splits on the LAST colon so names with colons round-trip", () => {
-    const id = contextPackId("rsi:v2", "3");
-    expect(parseContextPackId(id)).toEqual({ name: "rsi:v2", version: "3" });
+    const id = contextPackId("project:alpha", "3");
+    expect(parseContextPackId(id)).toEqual({ name: "project:alpha", version: "3" });
   });
 
   it("returns null for non-context-pack ids", () => {

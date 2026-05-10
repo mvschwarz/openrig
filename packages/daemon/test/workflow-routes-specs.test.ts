@@ -1,4 +1,4 @@
-// RSI v2 starter v0 — GET /api/workflow/specs route tests.
+// Built-in workflow specs — GET /api/workflow/specs route tests.
 //
 // Drives the new specs route against a hand-mounted Hono app with a
 // bare WorkflowRuntime + the new isBuiltIn computation. Pins the
@@ -56,7 +56,7 @@ function buildApp(opts: { runtime: WorkflowRuntime; eventBus: EventBus; builtinD
   return app;
 }
 
-describe("RSI v2 starter v0 — GET /api/workflow/specs", () => {
+describe("GET /api/workflow/specs", () => {
   let db: Database.Database;
   let runtime: WorkflowRuntime;
   let eventBus: EventBus;

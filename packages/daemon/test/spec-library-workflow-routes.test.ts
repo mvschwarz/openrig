@@ -110,15 +110,15 @@ describe("workflow library routes (Workflows in Spec Library v0)", () => {
     const post = await app.request("/api/specs/library/active-lens", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ specName: "rsi", specVersion: "1" }),
+      body: JSON.stringify({ specName: "conveyor", specVersion: "1" }),
     });
     expect(post.status).toBe(200);
     const postBody = await post.json() as { activeLens: { specName: string } };
-    expect(postBody.activeLens.specName).toBe("rsi");
+    expect(postBody.activeLens.specName).toBe("conveyor");
 
     const get = await app.request("/api/specs/library/active-lens");
     const getBody = await get.json() as { activeLens: { specName: string; specVersion: string } };
-    expect(getBody.activeLens.specName).toBe("rsi");
+    expect(getBody.activeLens.specName).toBe("conveyor");
     expect(getBody.activeLens.specVersion).toBe("1");
   });
 
@@ -127,7 +127,7 @@ describe("workflow library routes (Workflows in Spec Library v0)", () => {
     const res = await app.request("/api/specs/library/active-lens", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ specName: "rsi" }),
+      body: JSON.stringify({ specName: "conveyor" }),
     });
     expect(res.status).toBe(400);
   });

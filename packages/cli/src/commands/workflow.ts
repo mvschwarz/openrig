@@ -140,10 +140,10 @@ export function workflowCommand(depsOverride?: WorkflowDeps): Command {
       });
     });
 
-  // RSI v2 starter v0: list cached workflow_specs (NOT instances). The
-  // existing `rig workflow list` lists instances; this is the
-  // complementary surface for inspecting which specs are registered,
-  // including the new built-in starter(s) shipped at daemon startup.
+  // List cached workflow_specs (NOT instances). The existing
+  // `rig workflow list` lists instances; this is the complementary
+  // surface for inspecting which specs are registered, including any
+  // built-in starter(s) shipped at daemon startup.
   // Built-in rows display a `(built-in)` indicator in human output and
   // an `isBuiltIn: true` field in JSON output.
   cmd

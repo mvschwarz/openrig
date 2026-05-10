@@ -300,7 +300,7 @@ function WorkflowTopologyGraph({
       for (const child of next) {
         // Only assign depth on first visit. The `< d+1` relaxation
         // condition the prior version used loops forever on cyclic
-        // specs (e.g. rsi-v2-hot-potato has `qa → discovery`). Standard
+        // specs (e.g. a review step routing back to intake). Standard
         // BFS visit-once handles cycles correctly + still produces a
         // shortest-path-from-entry depth assignment.
         if (!depth.has(child)) {

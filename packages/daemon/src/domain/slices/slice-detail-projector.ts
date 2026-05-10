@@ -13,7 +13,7 @@
 // step + allowed exits in Acceptance, routing-type edge metadata
 // (default `direct` only at v1 per audit-row-6 carve-out).
 //
-// v0 hardcoded RSI-v2 phase taxonomy ("discovery"/"product-lab"/
+// v0 hardcoded legacy phase taxonomy ("discovery"/"product-lab"/
 // "delivery"/"lifecycle"/"qa"/"other") is REMOVED at v1 per PRD § Write
 // Set Sketch. StoryEvent.phase is now an open-ended string-or-null:
 // when bound to a workflow_instance, the value is the spec-defined
@@ -42,7 +42,7 @@ export interface StoryEvent {
   /** Spec-defined step.id when the event traces back through a workflow
    *  step trail; null when the event is untagged (no trail mapping or
    *  the slice has no bound workflow_instance). v1 removed the v0
-   *  hardcoded RSI-v2 phase enum. */
+   *  hardcoded legacy phase enum. */
   phase: string | null;
   kind: string;
   actorSession: string | null;
@@ -288,7 +288,7 @@ export class SliceDetailProjector {
   private buildStory(slice: SliceRecord, trailQitemToStep: Map<string, string>): StoryEvent[] {
     const events: StoryEvent[] = [];
     // v1: phase tag = spec step.id from trail mapping (when bound),
-    // null otherwise. v0's hardcoded RSI-v2 phase taxonomy is gone.
+    // null otherwise. v0's hardcoded legacy phase taxonomy is gone.
     const phaseFor = (qitemId: string | null): string | null =>
       qitemId ? trailQitemToStep.get(qitemId) ?? null : null;
 
@@ -678,7 +678,7 @@ export class SliceDetailProjector {
   // v1: classifyPhase() heuristic removed — phase tagging is now
   // spec-driven (via workflow_step_trails join in buildTrailQitemToStepMap)
   // or null (untagged) when no workflow_instance is bound. The v0
-  // hardcoded RSI-v2 phase taxonomy ("discovery"/"product-lab"/"delivery"/
+  // hardcoded legacy phase taxonomy ("discovery"/"product-lab"/"delivery"/
   // "lifecycle"/"qa"/"other" inferred from session-name substrings) is
   // gone. Per slices/slice-story-view-v1/IMPLEMENTATION-PRD.md § Write
   // Set Sketch — explicit deletion noted in commit message.

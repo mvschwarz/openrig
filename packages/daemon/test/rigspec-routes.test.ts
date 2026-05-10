@@ -320,6 +320,22 @@ pods:
 edges: []
 `;
 
+const MATERIALIZE_RELATIVE_CWD_YAML = `
+version: "0.2"
+name: cwd-override-topology
+pods:
+  - id: research
+    label: Research
+    members:
+      - id: scout
+        agent_ref: "builtin:terminal"
+        profile: none
+        runtime: terminal
+        cwd: /openrig-install-should-not-be-used
+    edges: []
+edges: []
+`;
+
 const MATERIALIZE_FRAGMENT_YAML = `
 version: "0.2"
 name: research-fragment
@@ -438,6 +454,19 @@ describe("Rigspec import routes (pod-aware dual-stack)", () => {
     const body = await res.json();
     expect(body.rigId).toBeDefined();
     expect(body.nodes).toEqual([{ logicalId: "research.scout", status: "materialized" }]);
+  });
+
+  it("POST /api/rigs/import/materialize honors X-Cwd-Override", async () => {
+    const setup = createTestApp(db);
+    const res = await setup.app.request("/api/rigs/import/materialize", {
+      method: "POST",
+      headers: { "Content-Type": "text/plain", "X-Rig-Root": "/tmp", "X-Cwd-Override": "/tmp" },
+      body: MATERIALIZE_RELATIVE_CWD_YAML,
+    });
+    expect(res.status).toBe(201);
+    const body = await res.json();
+    const rig = setup.rigRepo.getRig(body.rigId);
+    expect(rig?.nodes.find((node) => node.logicalId === "research.scout")?.cwd).toBe("/tmp");
   });
 
   it("POST /api/rigs/import/materialize can target an existing rig", async () => {

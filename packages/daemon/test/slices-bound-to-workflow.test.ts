@@ -120,7 +120,7 @@ describe("GET /api/slices?boundToWorkflow=<name>:<version>", () => {
 
     insertInstance(db, {
       instanceId: "inst-alpha",
-      workflowName: "rsi-v2-hot-potato",
+      workflowName: "conveyor",
       workflowVersion: "1",
       currentFrontier: [qBound],
     });
@@ -131,14 +131,14 @@ describe("GET /api/slices?boundToWorkflow=<name>:<version>", () => {
       currentFrontier: [qOther],
     });
 
-    const res = await app.request("/api/slices?boundToWorkflow=rsi-v2-hot-potato:1");
+    const res = await app.request("/api/slices?boundToWorkflow=conveyor:1");
     expect(res.status).toBe(200);
     const body = await res.json() as {
       slices: Array<{ name: string }>;
       boundToWorkflow: { specName: string; specVersion: string; matched: number; total: number };
     };
     expect(body.slices.map((s) => s.name)).toEqual(["alpha"]);
-    expect(body.boundToWorkflow.specName).toBe("rsi-v2-hot-potato");
+    expect(body.boundToWorkflow.specName).toBe("conveyor");
     expect(body.boundToWorkflow.specVersion).toBe("1");
     expect(body.boundToWorkflow.matched).toBe(1);
   });

@@ -1,4 +1,4 @@
-// RSI v2 starter v0 — built-in workflow-spec loader.
+// Built-in workflow-spec loader.
 //
 // Walks a built-in starter directory at daemon startup and seeds each
 // spec file into PL-004 Phase D's WorkflowSpecCache. Idempotent: on
@@ -145,8 +145,8 @@ export function loadStarterWorkflowSpecs(opts: StarterSpecLoaderOpts): StarterSp
  * Resolves the default built-in starter directory relative to this
  * loader file's location on disk. Works in both dev (running from
  * `src/`) and prod (running from `dist/`) — the build step copies the
- * .yaml files to `dist/builtins/workflow-specs/` so the resolved path
- * exists in both layouts.
+ * workflow spec files to `dist/builtins/workflow-specs/` when bundled
+ * specs are present, so the resolved path works in both layouts.
  *
  * Layout: this file is at `<pkg>/{src|dist}/domain/workflow/`. The
  * built-in dir is at `<pkg>/{src|dist}/builtins/workflow-specs/`. Two

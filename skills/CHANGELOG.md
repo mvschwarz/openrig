@@ -10,13 +10,25 @@ binary version.
 
 ---
 
+## 2026-05-10 — 0.3.0 starter-skill curation
+
+Removed the deprecated HA-oriented skill from the bundled starter skill set.
+Starter agents now rely on narrower role, process, and compact-in-place
+skills that match their shipped startup guidance.
+
+Mechanism: removed the skill from `packages/daemon/specs/agents/shared/`,
+updated the shared AgentSpec resource pool, and mirrored the updated
+canonical inventory to `skills/_canonical/`.
+
+---
+
 ## 2026-05-09 — Initial publish: skills hub bootstrap
 
 First mirror of canonical skills from
 `packages/daemon/specs/agents/shared/skills/` to `<repo-root>/skills/_canonical/`.
 27 skills published across 4 categories (`core/`, `pm/`, `pods/`,
-`process/`) plus 3 uncategorized at the top level
-(`claude-compact-in-place/`, `mental-model-ha/`, `rig-architect/`).
+`process/`) plus uncategorized top-level skills such as
+`claude-compact-in-place/` and `rig-architect/`.
 
 Mechanism: `npm run mirror-skills` (a node script at
 `scripts/mirror-skills.mjs` invoking rsync), with `npm run mirror-skills:check`

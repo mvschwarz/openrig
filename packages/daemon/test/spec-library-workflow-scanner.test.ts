@@ -236,8 +236,8 @@ describe("workflowLibraryId / parseWorkflowLibraryId", () => {
   });
 
   it("splits on the LAST colon so names with colons round-trip", () => {
-    const id = workflowLibraryId("rsi-v2-hot-potato", "1.2.3");
-    expect(parseWorkflowLibraryId(id)).toEqual({ name: "rsi-v2-hot-potato", version: "1.2.3" });
+    const id = workflowLibraryId("conveyor", "1.2.3");
+    expect(parseWorkflowLibraryId(id)).toEqual({ name: "conveyor", version: "1.2.3" });
   });
 
   it("returns null for non-workflow ids", () => {
