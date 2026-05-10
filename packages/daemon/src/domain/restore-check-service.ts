@@ -1,4 +1,5 @@
 import { existsSync, accessSync, constants } from "node:fs";
+import { homedir } from "node:os";
 import { isAbsolute, join, relative } from "node:path";
 import { getCompatibleOpenRigPath } from "../openrig-compat.js";
 
@@ -198,9 +199,29 @@ interface HostInfraCheckResult {
 // --- Service ---
 
 const DAEMON_HEALTHY_PATTERN = /^Daemon running\b/m;
-const CLAUDE_SESSION_START_COMPACT_COMMAND = "/Users/wrandom/code/substrate/shared-docs/control-plane/services/claude-hooks/bin/session-start-compact-context.sh";
-const CLAUDE_USER_PROMPT_SUBMIT_COMMAND = "/Users/wrandom/code/substrate/shared-docs/control-plane/services/claude-hooks/bin/userpromptsubmit-queue-attention.sh";
-const CLAUDE_HOOK_FRAGMENT_PATH = "/Users/wrandom/code/substrate/shared-docs/control-plane/services/claude-hooks/config/settings.fragment.json";
+const SUBSTRATE_SHARED_DOCS_ROOT = process.env["OPENRIG_SUBSTRATE_SHARED_DOCS"]
+  ?? join(homedir(), "code", "substrate", "shared-docs");
+const CLAUDE_HOOKS_ROOT = join(
+  SUBSTRATE_SHARED_DOCS_ROOT,
+  "control-plane",
+  "services",
+  "claude-hooks",
+);
+const CLAUDE_SESSION_START_COMPACT_COMMAND = join(
+  CLAUDE_HOOKS_ROOT,
+  "bin",
+  "session-start-compact-context.sh",
+);
+const CLAUDE_USER_PROMPT_SUBMIT_COMMAND = join(
+  CLAUDE_HOOKS_ROOT,
+  "bin",
+  "userpromptsubmit-queue-attention.sh",
+);
+const CLAUDE_HOOK_FRAGMENT_PATH = join(
+  CLAUDE_HOOKS_ROOT,
+  "config",
+  "settings.fragment.json",
+);
 
 interface ClaudeSettingsCandidate {
   path: string;

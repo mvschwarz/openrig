@@ -16,8 +16,8 @@ Annotated README walkthrough:
 
 Archived proof/source bundle:
 - raw proof captures and guide source were moved out of the repo to:
-  - `/Users/wrandom/code/substrate/shared-docs/rigs/openrig-build/state/missions/artifacts/launch-happy-path-2026-04-13/repo-offload/raw-proof/`
-  - `/Users/wrandom/code/substrate/shared-docs/rigs/openrig-build/state/missions/artifacts/launch-happy-path-2026-04-13/repo-offload/guide-src/`
+  - `<substrate-shared-docs>/rigs/openrig-build/state/missions/artifacts/launch-happy-path-2026-04-13/repo-offload/raw-proof/`
+  - `<substrate-shared-docs>/rigs/openrig-build/state/missions/artifacts/launch-happy-path-2026-04-13/repo-offload/guide-src/`
 
 Notes:
 - The README should use the annotated walkthrough files.

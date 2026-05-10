@@ -77,8 +77,14 @@ export class AgentStarterCredentialScanFailedError extends Error {
 
 const DEFAULT_ENV_VAR = "OPENRIG_AGENT_STARTER_ROOT";
 const DEFAULT_HOME_SUBPATH = ".openrig/agent-starters";
-const DEFAULT_SUBSTRATE_FALLBACK =
-  "/Users/wrandom/code/substrate/shared-docs/openrig-work/specs/agent-starters";
+const DEFAULT_SUBSTRATE_FALLBACK_PARTS = [
+  "code",
+  "substrate",
+  "shared-docs",
+  "openrig-work",
+  "specs",
+  "agent-starters",
+];
 
 export class AgentStarterResolver {
   private readonly registryRoot: string;
@@ -124,7 +130,8 @@ export class AgentStarterResolver {
     if (exists(homeBase)) {
       return homeBase;
     }
-    return opts.substrateFallback ?? DEFAULT_SUBSTRATE_FALLBACK;
+    return opts.substrateFallback
+      ?? join(env.HOME ?? os.homedir(), ...DEFAULT_SUBSTRATE_FALLBACK_PARTS);
   }
 
   /**

@@ -3,7 +3,7 @@ name: conveyor
 summary: >
   Launch-grade starter for OpenRig 0.3.0: a compact station pipeline with
   intake, planning, build, and review seats. Use it to watch queued work move
-  through handoffs without inheriting any internal release or recursion recipe.
+  through handoffs without inheriting any internal release coupling.
 
 culture_file: CULTURE.md
 
