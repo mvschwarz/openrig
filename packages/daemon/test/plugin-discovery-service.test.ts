@@ -214,6 +214,75 @@ describe("PluginDiscoveryService", () => {
       expect(service.listPlugins()).toEqual([]);
     });
 
+    it("slice 3.3 fix-C — scans rig-bundled cwd plugin roots when cwdScanRoots provided", () => {
+      // velocity-qa VM verify failure #3 — DESIGN §5.4 union-of-sources
+      // must include rig-bundled <cwd>/.claude/plugins/* and
+      // <cwd>/.codex/plugins/* (the projection target from IMPL-PRD §1.2).
+      // Implementation: PluginDiscoveryService accepts optional
+      // cwdScanRoots (constructor + per-call); each scanned cwd contributes
+      // discoveries with `rig-cwd:` source label.
+      const rigCwd = join(dirs.root, "rig-cwd-1");
+      const claudeBundleDir = join(rigCwd, ".claude", "plugins");
+      const codexBundleDir = join(rigCwd, ".codex", "plugins");
+      mkdirSync(claudeBundleDir, { recursive: true });
+      mkdirSync(codexBundleDir, { recursive: true });
+      writeClaudePluginManifest(join(claudeBundleDir, "rig-tool"), {
+        name: "rig-tool",
+        version: "1.0.0",
+        description: "Rig-bundled tool",
+      });
+      writeCodexPluginManifest(join(codexBundleDir, "rig-codex-tool"), {
+        name: "rig-codex-tool",
+        version: "1.0.0",
+        description: "Rig-bundled codex tool",
+      });
+
+      const service = new PluginDiscoveryService({
+        openrigPluginsDir: dirs.openrigPluginsDir,
+        claudeCacheDir: dirs.claudeCacheDir,
+        codexCacheDir: dirs.codexCacheDir,
+        specLibraryDir: dirs.specLibraryDir,
+        cwdScanRoots: [rigCwd],
+      });
+      const plugins = service.listPlugins();
+      // Two plugins: one claude-side, one codex-side; both labeled rig-cwd.
+      const cwdPlugins = plugins.filter((p) => p.source === "rig-cwd");
+      expect(cwdPlugins).toHaveLength(2);
+      const names = cwdPlugins.map((p) => p.name).sort();
+      expect(names).toEqual(["rig-codex-tool", "rig-tool"]);
+      // Source labels embed the rig cwd tail for disambiguation;
+      // each plugin's label contains its name (order-independent).
+      const labels = cwdPlugins.map((p) => p.sourceLabel);
+      expect(labels.some((l) => /^rig-cwd:.*rig-tool$/.test(l))).toBe(true);
+      expect(labels.some((l) => /^rig-cwd:.*rig-codex-tool$/.test(l))).toBe(true);
+    });
+
+    it("slice 3.3 fix-C — per-call cwdScanRoots overrides constructor option", () => {
+      // Allows the API layer to pass ?cwd=<path> dynamically without
+      // mutating the service singleton.
+      const rigCwd = join(dirs.root, "rig-cwd-dyn");
+      const claudeBundleDir = join(rigCwd, ".claude", "plugins");
+      mkdirSync(claudeBundleDir, { recursive: true });
+      writeClaudePluginManifest(join(claudeBundleDir, "ephemeral-tool"), {
+        name: "ephemeral-tool",
+        version: "0.1.0",
+        description: "dynamic",
+      });
+
+      const service = new PluginDiscoveryService({
+        openrigPluginsDir: dirs.openrigPluginsDir,
+        claudeCacheDir: dirs.claudeCacheDir,
+        codexCacheDir: dirs.codexCacheDir,
+        specLibraryDir: dirs.specLibraryDir,
+      });
+      // No cwds at construction.
+      expect(service.listPlugins().filter((p) => p.source === "rig-cwd")).toEqual([]);
+      // Per-call cwd surfaces the bundled plugin.
+      const withCwd = service.listPlugins({ cwdScanRoots: [rigCwd] });
+      expect(withCwd.filter((p) => p.source === "rig-cwd")).toHaveLength(1);
+      expect(withCwd.find((p) => p.name === "ephemeral-tool")).toBeDefined();
+    });
+
     it("filters by runtime when requested", () => {
       writeClaudePluginManifest(join(dirs.openrigPluginsDir, "claude-only"), {
         name: "claude-only",
@@ -250,6 +319,52 @@ describe("PluginDiscoveryService", () => {
         specLibraryDir: dirs.specLibraryDir,
       });
       expect(service.getPlugin("nonexistent")).toBeNull();
+    });
+
+    it("returns MCP server summaries from manifest mcpServers field (slice 3.3 fix-A)", () => {
+      // velocity-qa VM verify failure #1: PluginViewer needs an MCP section
+      // per DESIGN §5.7 + IMPL-PRD §3.2. Manifest's mcpServers field is
+      // an object keyed by server-name → server-config. Discovery returns
+      // one PluginMcpServerSummary per key (best-effort; we surface name +
+      // declared command/transport metadata if present).
+      const corePluginDir = join(dirs.openrigPluginsDir, "openrig-mcp");
+      writeClaudePluginManifest(corePluginDir, {
+        name: "openrig-mcp",
+        version: "0.1.0",
+        description: "MCP-bearing plugin",
+        mcpServers: {
+          "github-mcp": { command: "node", args: ["server.js"], transport: "stdio" },
+          "linear-mcp": { command: "linear-mcp", transport: "http" },
+        },
+      });
+      const service = new PluginDiscoveryService({
+        openrigPluginsDir: dirs.openrigPluginsDir,
+        claudeCacheDir: dirs.claudeCacheDir,
+        codexCacheDir: dirs.codexCacheDir,
+        specLibraryDir: dirs.specLibraryDir,
+      });
+      const result = service.getPlugin("openrig-mcp");
+      expect(result).not.toBeNull();
+      expect(result?.mcpServers).toHaveLength(2);
+      const serverNames = result?.mcpServers.map((s) => s.name).sort();
+      expect(serverNames).toEqual(["github-mcp", "linear-mcp"]);
+      expect(result?.mcpServers.find((s) => s.name === "github-mcp")?.runtime).toBe("claude");
+    });
+
+    it("returns empty mcpServers when manifest has no mcpServers field", () => {
+      const corePluginDir = join(dirs.openrigPluginsDir, "openrig-no-mcp");
+      writeClaudePluginManifest(corePluginDir, {
+        name: "openrig-no-mcp",
+        version: "0.1.0",
+        description: "no mcp",
+      });
+      const service = new PluginDiscoveryService({
+        openrigPluginsDir: dirs.openrigPluginsDir,
+        claudeCacheDir: dirs.claudeCacheDir,
+        codexCacheDir: dirs.codexCacheDir,
+        specLibraryDir: dirs.specLibraryDir,
+      });
+      expect(service.getPlugin("openrig-no-mcp")?.mcpServers).toEqual([]);
     });
 
     it("returns full manifest + tree summary for a discovered plugin", () => {

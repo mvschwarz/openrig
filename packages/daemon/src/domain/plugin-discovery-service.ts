@@ -33,7 +33,10 @@ import { join, basename } from "node:path";
 import { parse as parseYaml } from "yaml";
 
 export type PluginRuntime = "claude" | "codex";
-export type PluginSourceKind = "vendored" | "claude-cache" | "codex-cache";
+// Slice 3.3 fix-C — `rig-cwd` source per DESIGN §5.4 union (4th category):
+// rig-bundled `<cwd>/.claude/plugins/*` + `<cwd>/.codex/plugins/*` (the
+// projection target from IMPL-PRD §1.2). velocity-qa VM verify failure #3.
+export type PluginSourceKind = "vendored" | "claude-cache" | "codex-cache" | "rig-cwd";
 
 export interface PluginEntry {
   /** Stable id for routing (`openrig-core`, `<marketplace>:<plugin>:<version>`). */
@@ -93,6 +96,24 @@ export interface PluginHookSummary {
   events: string[];
 }
 
+// Slice 3.3 fix-A — MCP server discovery (DESIGN §5.7 + IMPL-PRD §3.2).
+// MCP servers shipped via plugins are handled by the runtime's plugin
+// loader; OpenRig only surfaces what the manifest declares so the UI
+// viewer can list "this plugin ships these MCP servers." Implementation:
+// read manifest.mcpServers (Claude/Codex spec key) and emit one summary
+// per declared server. Best-effort: when the field is missing or shaped
+// differently, we return [] rather than throwing.
+export interface PluginMcpServerSummary {
+  /** Which runtime manifest declared this MCP server. */
+  runtime: PluginRuntime;
+  /** Server name (object key in the manifest's mcpServers map). */
+  name: string;
+  /** Declared command if the entry is a stdio-style spec. */
+  command: string | null;
+  /** Declared transport (stdio/http/etc) if the entry exposes it. */
+  transport: string | null;
+}
+
 export interface PluginDetail {
   /** The list-view entry. */
   entry: PluginEntry;
@@ -104,6 +125,11 @@ export interface PluginDetail {
   skills: PluginSkillSummary[];
   /** Hook configs shipped under `<plugin>/hooks/`. */
   hooks: PluginHookSummary[];
+  /**
+   * MCP server declarations from claude/codex manifest's `mcpServers`
+   * field. Slice 3.3 fix-A — velocity-qa VM verify failure #1.
+   */
+  mcpServers: PluginMcpServerSummary[];
 }
 
 export interface AgentReference {
@@ -129,6 +155,15 @@ export interface PluginDiscoveryServiceOpts {
    * its full root list through.
    */
   specLibraryDir: string;
+  /**
+   * Slice 3.3 fix-C — optional rig cwd roots whose `.claude/plugins/*` +
+   * `.codex/plugins/*` subdirectories get scanned for rig-bundled
+   * plugins (the projection target from IMPL-PRD §1.2). Default empty.
+   * Population at v0 is per-call via listPlugins({ cwdScanRoots }) from
+   * the API layer (?cwd=<path>); future slices may add automatic
+   * enumeration from running-rig state.
+   */
+  cwdScanRoots?: string[];
 }
 
 export interface ListPluginsOpts {
@@ -136,6 +171,13 @@ export interface ListPluginsOpts {
   runtimeFilter?: PluginRuntime;
   /** Filter to plugins from a specific source root. */
   sourceFilter?: PluginSourceKind;
+  /**
+   * Slice 3.3 fix-C — per-call rig cwd roots; overrides constructor option.
+   * Each cwd contributes `<cwd>/.claude/plugins/*` + `<cwd>/.codex/plugins/*`
+   * discoveries labeled `rig-cwd:<plugin>`. The API layer passes a single
+   * `?cwd=<path>` query param down here.
+   */
+  cwdScanRoots?: string[];
 }
 
 const CLAUDE_MANIFEST_REL = ".claude-plugin/plugin.json";
@@ -201,6 +243,16 @@ export class PluginDiscoveryService {
       }
     }
 
+    // 4. Slice 3.3 fix-C — rig-bundled cwd plugin roots.
+    // Per-call opts override constructor opts; effective cwd set is the
+    // union when both are present (per-call wins by replacement, NOT
+    // append-to-constructor, because the API layer's ?cwd=<path> intent
+    // is "ALL plugins this specific rig sees" — predictable + cacheable).
+    const effectiveCwds = filterOpts.cwdScanRoots ?? this.opts.cwdScanRoots ?? [];
+    for (const cwd of effectiveCwds) {
+      this.scanCwdBundledPlugins(cwd, out);
+    }
+
     let filtered = out;
     if (filterOpts.runtimeFilter) {
       filtered = filtered.filter((p) => p.runtimes.includes(filterOpts.runtimeFilter!));
@@ -209,6 +261,37 @@ export class PluginDiscoveryService {
       filtered = filtered.filter((p) => p.source === filterOpts.sourceFilter);
     }
     return filtered;
+  }
+
+  // Slice 3.3 fix-C — scan a single rig cwd for `.claude/plugins/*` +
+  // `.codex/plugins/*` bundles. Emits one PluginEntry per discovered
+  // plugin manifest (matches the same detection rule as the other
+  // source roots: presence of `.claude-plugin/plugin.json` and/or
+  // `.codex-plugin/plugin.json` inside the plugin folder).
+  private scanCwdBundledPlugins(cwd: string, out: PluginEntry[]): void {
+    if (!existsSync(cwd)) return;
+    const claudePluginsDir = join(cwd, ".claude", "plugins");
+    if (existsSync(claudePluginsDir)) {
+      for (const entry of safeReaddir(claudePluginsDir)) {
+        const pluginPath = join(claudePluginsDir, entry);
+        if (!isDir(pluginPath)) continue;
+        const id = `rig-cwd:${cwd}/.claude/plugins/${entry}`;
+        const sourceLabel = `rig-cwd:${basename(cwd)}/${entry}`;
+        const detected = this.detectPlugin(pluginPath, "rig-cwd", id, sourceLabel);
+        if (detected) out.push(detected);
+      }
+    }
+    const codexPluginsDir = join(cwd, ".codex", "plugins");
+    if (existsSync(codexPluginsDir)) {
+      for (const entry of safeReaddir(codexPluginsDir)) {
+        const pluginPath = join(codexPluginsDir, entry);
+        if (!isDir(pluginPath)) continue;
+        const id = `rig-cwd:${cwd}/.codex/plugins/${entry}`;
+        const sourceLabel = `rig-cwd:${basename(cwd)}/${entry}`;
+        const detected = this.detectPlugin(pluginPath, "rig-cwd", id, sourceLabel);
+        if (detected) out.push(detected);
+      }
+    }
   }
 
   getPlugin(id: string): PluginDetail | null {
@@ -253,7 +336,13 @@ export class PluginDiscoveryService {
       }
     }
 
-    return { entry, claudeManifest, codexManifest, skills, hooks };
+    // Slice 3.3 fix-A — MCP server discovery from each runtime's manifest.
+    const mcpServers: PluginMcpServerSummary[] = [
+      ...readMcpServers(claudeManifest, "claude"),
+      ...readMcpServers(codexManifest, "codex"),
+    ];
+
+    return { entry, claudeManifest, codexManifest, skills, hooks, mcpServers };
   }
 
   findUsedBy(pluginId: string): AgentReference[] {
@@ -359,6 +448,35 @@ function readManifest(manifestPath: string): PluginManifestSummary | null {
   } catch {
     return null;
   }
+}
+
+// Slice 3.3 fix-A — read MCP server declarations from a manifest's
+// `mcpServers` field. The Claude/Codex plugin spec convention is
+// mcpServers: { <name>: { command, args, transport, ... } }. We
+// surface the names + best-effort command/transport for the UI.
+function readMcpServers(
+  manifest: PluginManifestSummary | null,
+  runtime: PluginRuntime,
+): PluginMcpServerSummary[] {
+  if (!manifest) return [];
+  const raw = manifest.raw;
+  if (!raw || typeof raw !== "object") return [];
+  const mcpServers = (raw as Record<string, unknown>)["mcpServers"];
+  if (!mcpServers || typeof mcpServers !== "object" || Array.isArray(mcpServers)) {
+    return [];
+  }
+  const out: PluginMcpServerSummary[] = [];
+  for (const [name, value] of Object.entries(mcpServers as Record<string, unknown>)) {
+    let command: string | null = null;
+    let transport: string | null = null;
+    if (value && typeof value === "object") {
+      const config = value as Record<string, unknown>;
+      if (typeof config.command === "string") command = config.command;
+      if (typeof config.transport === "string") transport = config.transport;
+    }
+    out.push({ runtime, name, command, transport });
+  }
+  return out;
 }
 
 function extractHookEvents(hooksJsonPath: string): string[] {

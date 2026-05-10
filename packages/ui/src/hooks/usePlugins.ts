@@ -46,12 +46,22 @@ export interface PluginHookSummary {
   events: string[];
 }
 
+// Slice 3.3 fix-A — MCP server summary mirrors daemon shape.
+export interface PluginMcpServerSummary {
+  runtime: PluginRuntime;
+  name: string;
+  command: string | null;
+  transport: string | null;
+}
+
 export interface PluginDetail {
   entry: PluginEntry;
   claudeManifest: PluginManifestSummary | null;
   codexManifest: PluginManifestSummary | null;
   skills: PluginSkillSummary[];
   hooks: PluginHookSummary[];
+  /** Slice 3.3 fix-A — MCP servers declared in manifest(s). */
+  mcpServers: PluginMcpServerSummary[];
 }
 
 export interface PluginAgentReference {

@@ -48,7 +48,14 @@ export function pluginsRoutes(): Hono {
     if (!service) return c.json({ error: "plugin_discovery_unavailable" }, 503);
     const runtimeFilter = parseRuntimeFilter(c.req.query("runtime"));
     const sourceFilter = parseSourceFilter(c.req.query("source"));
-    const plugins = service.listPlugins({ runtimeFilter, sourceFilter });
+    // Slice 3.3 fix-C — DESIGN §5.4 union 4th category: rig-bundled
+    // <cwd>/.claude/plugins/* + <cwd>/.codex/plugins/*. The API caller
+    // (UI in rig context, CLI in slice 3.4) passes ?cwd=<path> when
+    // they want the rig-cwd discoveries included; the Library page
+    // omits it (cross-cutting view).
+    const cwd = c.req.query("cwd");
+    const cwdScanRoots = cwd ? [cwd] : undefined;
+    const plugins = service.listPlugins({ runtimeFilter, sourceFilter, cwdScanRoots });
     return c.json(plugins);
   });
 

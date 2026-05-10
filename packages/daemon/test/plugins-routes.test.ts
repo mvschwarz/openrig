@@ -133,6 +133,34 @@ describe("plugins HTTP routes", () => {
       expect(codexBody.map((p) => p.name)).toEqual(["codex-only"]);
     });
 
+    it("slice 3.3 fix-C — supports rig-cwd discovery via ?cwd=<path> query param", async () => {
+      // velocity-qa VM verify failure #3 — DESIGN §5.4 union 4th category
+      // (rig-bundled cwd plugin roots). API exposes the per-call cwd scan
+      // via ?cwd=<path>; service emits discoveries with rig-cwd source.
+      const rigCwd = join(env.root, "rig-cwd-api");
+      const claudeBundleDir = join(rigCwd, ".claude", "plugins");
+      mkdirSync(claudeBundleDir, { recursive: true });
+      writeClaudePluginManifest(join(claudeBundleDir, "rig-tool"), {
+        name: "rig-tool",
+        version: "1.0.0",
+        description: "rig-bundled tool",
+      });
+
+      // Without ?cwd — no rig-cwd discoveries.
+      const baseRes = await createApp(env.service).request("/api/plugins");
+      const base = await baseRes.json() as Array<{ source: string }>;
+      expect(base.some((p) => p.source === "rig-cwd")).toBe(false);
+
+      // With ?cwd=<path> — rig-tool surfaces.
+      const cwdRes = await createApp(env.service).request(
+        `/api/plugins?cwd=${encodeURIComponent(rigCwd)}`,
+      );
+      const cwdPlugins = await cwdRes.json() as Array<{ name: string; source: string }>;
+      const rigCwdSubset = cwdPlugins.filter((p) => p.source === "rig-cwd");
+      expect(rigCwdSubset).toHaveLength(1);
+      expect(rigCwdSubset[0]?.name).toBe("rig-tool");
+    });
+
     it("supports source filter via query string", async () => {
       writeClaudePluginManifest(join(env.openrigPluginsDir, "vended"), {
         name: "vended",

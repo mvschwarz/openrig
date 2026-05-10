@@ -90,6 +90,10 @@ export function PluginDetailPage({ pluginId }: PluginDetailPageProps) {
         <ManifestSection detail={detail} />
         <SkillsSection skills={detail.skills} />
         <HooksSection hooks={detail.hooks} />
+        {/* Slice 3.3 fix-A — MCP Servers section per dispatch §3.2
+            (manifest preview + skills/hooks/MCP sections + Used-by).
+            velocity-qa VM verify failure #1 closed. */}
+        <McpServersSection mcpServers={detail.mcpServers} />
         <UsedBySection
           usedBy={usedBy}
           isLoading={usedByLoading}
@@ -220,6 +224,71 @@ function HooksSection({ hooks }: { hooks: NonNullable<ReturnType<typeof usePlugi
                       {event}
                     </span>
                   ))}
+                </div>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+// Slice 3.3 fix-A — McpServersSection per dispatch §3.2.
+// velocity-qa VM verify failure #1 — PluginViewer needs an MCP section
+// rendering the plugin's MCP server declarations (or empty state if no
+// MCP servers declared). DESIGN §5.7 covers MCP routing via plugins.
+function McpServersSection({
+  mcpServers,
+}: {
+  mcpServers: NonNullable<ReturnType<typeof usePlugin>["data"]>["mcpServers"];
+}) {
+  return (
+    <section
+      data-testid="plugin-detail-mcp-servers"
+      className="border border-outline-variant bg-white/25 hard-shadow"
+    >
+      <header className="flex items-baseline justify-between border-b border-outline-variant bg-white/30 px-3 py-2">
+        <SectionHeader tone="default">MCP Servers</SectionHeader>
+        <span className="font-mono text-[9px] uppercase tracking-[0.12em] text-stone-500">
+          {mcpServers.length} {mcpServers.length === 1 ? "server" : "servers"}
+        </span>
+      </header>
+      {mcpServers.length === 0 ? (
+        <div className="px-3 py-4">
+          <EmptyState
+            label="NO MCP SERVERS"
+            description="This plugin does not declare MCP servers in its manifest mcpServers field."
+            variant="card"
+            testId="plugin-mcp-servers-empty"
+          />
+        </div>
+      ) : (
+        <ul className="divide-y divide-outline-variant">
+          {mcpServers.map((server) => (
+            <li
+              key={`${server.runtime}:${server.name}`}
+              data-testid={`plugin-mcp-server-${server.name}`}
+              className="px-3 py-2 font-mono text-[11px]"
+            >
+              <div className="flex items-baseline justify-between gap-3">
+                <span className="font-bold text-stone-900">{server.name}</span>
+                <span className="font-mono text-[9px] uppercase tracking-[0.10em] text-stone-500">
+                  {server.runtime}
+                </span>
+              </div>
+              {(server.command || server.transport) && (
+                <div className="mt-1 flex flex-wrap gap-2 font-mono text-[9px] uppercase tracking-[0.10em] text-stone-600">
+                  {server.command && (
+                    <span className="border border-outline-variant px-1.5 py-0.5">
+                      cmd: {server.command}
+                    </span>
+                  )}
+                  {server.transport && (
+                    <span className="border border-outline-variant px-1.5 py-0.5">
+                      transport: {server.transport}
+                    </span>
+                  )}
                 </div>
               )}
             </li>

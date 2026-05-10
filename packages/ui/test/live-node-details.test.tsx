@@ -219,6 +219,42 @@ describe("LiveNodeDetails", () => {
     });
   });
 
+  it("slice 3.3 fix-B — agent-spec tab includes Plugins section between Skills and Startup Files", async () => {
+    // velocity-qa VM verify failure #2 — Plugins section must be visible
+    // in current build per dispatch §3.2. Empty state is acceptable on
+    // main without plugin-primitive-v0 merged in (no agent.yaml carries
+    // resources.plugins[] until merge); the section's PRESENCE is the
+    // load-bearing assertion.
+    mockFetch.mockImplementation(async (url: string) => {
+      if (typeof url === "string" && url.includes("/nodes/")) {
+        return { ok: true, json: async () => NODE_DETAIL };
+      }
+      if (typeof url === "string" && url === "/api/specs/library?kind=agent") {
+        return { ok: true, json: async () => [{ id: "agent-1", kind: "agent", name: "impl", version: "1.0.0", sourceType: "builtin", sourcePath: "/x/agent.yaml", relativePath: "x/agent.yaml" }] };
+      }
+      if (typeof url === "string" && url.includes("/api/specs/library/agent-1/review")) {
+        return { ok: true, json: async () => ({ kind: "agent", name: "impl", version: "1.0.0", raw: "", sourcePath: "/x/agent.yaml", sourceState: "library_item", libraryEntryId: "agent-1", description: null, profiles: [], resources: { plugins: [], skills: [], guidance: [], hooks: [] }, startup: { files: [], actions: [] } }) };
+      }
+      if (typeof url === "string" && url.startsWith("/api/specs/library")) {
+        return { ok: true, json: async () => [] };
+      }
+      if (typeof url === "string" && url === "/api/plugins") {
+        return { ok: true, json: async () => [] };
+      }
+      return { ok: true, json: async () => ({}) };
+    });
+    renderDetails();
+    // Switch to the agent-spec tab to see the Plugins section.
+    const agentSpecTab = await screen.findByTestId("live-tab-agent-spec");
+    fireEvent.click(agentSpecTab);
+    // Section present (drives the visual proof the dispatch + velocity-qa want).
+    await waitFor(() => {
+      expect(screen.getByTestId("live-agent-plugins-section")).toBeDefined();
+    });
+    // Empty state body when no plugins declared.
+    expect(screen.getByTestId("agent-plugins-empty")).toBeDefined();
+  });
+
   it("PL-019: full details shows activity and current qitems from node detail", async () => {
     mockNodeDetail(NODE_DETAIL);
     renderDetails();

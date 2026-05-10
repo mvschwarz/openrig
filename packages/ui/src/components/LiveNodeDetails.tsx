@@ -12,6 +12,11 @@ import { useSpecLibrary, useLibraryReview } from "../hooks/useSpecLibrary.js";
 import { WorkspacePage } from "./WorkspacePage.js";
 import { WorkflowHeader } from "./WorkflowScaffold.js";
 import { AgentSpecDisplay } from "./AgentSpecDisplay.js";
+// Slice 3.3 fix-B — Plugins section per dispatch §3.2 / velocity-qa
+// VM verify failure #2. Reads plugin IDs from the agent spec review
+// defensively (the resources.plugins field is owned by batch 1 on
+// plugin-primitive-v0; on main it's absent and we render empty state).
+import { AgentPluginsList } from "./specs/AgentPluginsList.js";
 import { PreviewPane } from "./preview/PreviewPane.js";
 import { SessionPreviewPane } from "./preview/SessionPreviewPane.js";
 import { FileReferenceTrigger } from "./drawer-triggers/FileReferenceTrigger.js";
@@ -126,15 +131,55 @@ function AgentSpecSection({ data }: { data: NodeDetailData }) {
       ) : !review || review.kind !== "agent" ? (
         <div data-testid="agent-spec-unavailable" className="p-4 font-mono text-[10px] text-stone-400">No agent spec available</div>
       ) : (
-        <AgentSpecDisplay
-          review={review as AgentSpecReview}
-          yaml={review.raw}
-          testIdPrefix="live-agent"
-          sourcePath={review.sourcePath}
-        />
+        <>
+          <AgentSpecDisplay
+            review={review as AgentSpecReview}
+            yaml={review.raw}
+            testIdPrefix="live-agent"
+            sourcePath={review.sourcePath}
+          />
+          {/* Slice 3.3 fix-B — Plugins section sits between AgentSpecDisplay
+              (which renders Skills among other things) and the surrounding
+              tabs' Startup Files block. Extracts plugin IDs from review
+              defensively: the field is owned by batch 1 on plugin-primitive-v0;
+              renders empty state on main + populated state post-merge. */}
+          <section
+            data-testid="live-agent-plugins-section"
+            className="border border-outline-variant bg-white/30 p-3"
+          >
+            <div className="mb-2 font-mono text-[8px] uppercase tracking-wider text-stone-400">
+              Plugins
+            </div>
+            <AgentPluginsList pluginIds={extractAgentPluginIds(review)} />
+          </section>
+        </>
       )}
     </div>
   );
+}
+
+// Slice 3.3 fix-B — read plugin IDs from an agent review defensively.
+// On main without batch 1 merged, AgentSpecReview doesn't have
+// resources.plugins; we read via duck-typed any-cast so the field is
+// optional. Post-merge into plugin-primitive-v0, the typed
+// resources.plugins[] populates this naturally. The function also
+// tolerates the shorthand string form for forward-compat with future
+// agent.yaml shapes.
+function extractAgentPluginIds(review: unknown): string[] {
+  if (!review || typeof review !== "object") return [];
+  const resources = (review as Record<string, unknown>)["resources"];
+  if (!resources || typeof resources !== "object") return [];
+  const plugins = (resources as Record<string, unknown>)["plugins"];
+  if (!Array.isArray(plugins)) return [];
+  const ids: string[] = [];
+  for (const p of plugins) {
+    if (p && typeof p === "object" && typeof (p as Record<string, unknown>).id === "string") {
+      ids.push((p as Record<string, unknown>).id as string);
+    } else if (typeof p === "string") {
+      ids.push(p);
+    }
+  }
+  return ids;
 }
 
 function ActionButtonsRow({ rigId, logicalId, data }: { rigId: string; logicalId: string; data: NodeDetailData }) {

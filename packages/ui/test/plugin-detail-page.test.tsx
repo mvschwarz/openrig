@@ -80,6 +80,10 @@ describe("PluginDetailPage", () => {
             hooks: [
               { runtime: "claude", relativePath: "hooks/claude.json", events: ["SessionStart", "Stop"] },
             ],
+            mcpServers: [
+              { runtime: "claude", name: "github-mcp", command: "node", transport: "stdio" },
+              { runtime: "claude", name: "linear-mcp", command: "linear-mcp", transport: "http" },
+            ],
           }),
         };
       }
@@ -120,6 +124,11 @@ describe("PluginDetailPage", () => {
     expect(screen.getByText(/SessionStart/)).toBeDefined();
     expect(screen.getByText(/Stop/)).toBeDefined();
 
+    // Slice 3.3 fix-A — MCP servers section visible with both servers.
+    expect(screen.getByTestId("plugin-detail-mcp-servers")).toBeDefined();
+    expect(screen.getByTestId("plugin-mcp-server-github-mcp")).toBeDefined();
+    expect(screen.getByTestId("plugin-mcp-server-linear-mcp")).toBeDefined();
+
     // Used-by list — both agents visible.
     await waitFor(() => {
       expect(screen.getByTestId("plugin-used-by-advisor-lead")).toBeDefined();
@@ -148,6 +157,7 @@ describe("PluginDetailPage", () => {
             codexManifest: null,
             skills: [],
             hooks: [],
+            mcpServers: [],
           }),
         };
       }
@@ -160,6 +170,7 @@ describe("PluginDetailPage", () => {
     expect(await screen.findByTestId("plugin-detail-page")).toBeDefined();
     expect(screen.getByTestId("plugin-skills-empty")).toBeDefined();
     expect(screen.getByTestId("plugin-hooks-empty")).toBeDefined();
+    expect(screen.getByTestId("plugin-mcp-servers-empty")).toBeDefined();
     expect(screen.getByTestId("plugin-used-by-empty")).toBeDefined();
   });
 });
