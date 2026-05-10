@@ -91,7 +91,7 @@ export function AuditHistoryView() {
         <input
           type="text"
           data-testid="mc-audit-filter-actor-session"
-          placeholder="actor_session (e.g., human-wrandom@kernel)"
+          placeholder="actor_session (e.g., human-operator@kernel)"
           value={actorSession}
           onChange={(e) => setActorSession(e.target.value)}
           className="border border-stone-300 px-2 py-1 font-mono text-xs"

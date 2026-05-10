@@ -10,7 +10,7 @@ import type { ClassifierLeaseManager } from "./classifier-lease-manager.js";
  * - Lease validation via classifier-lease-manager (single-writer contract).
  * - Idempotency via UNIQUE constraint on stream_item_id (re-projection → 409).
  * - Daemon does NOT enforce taxonomies on classification fields — those are
- *   agent-authoritative per the founder direction. Daemon only owns the
+ *   agent-authoritative. Daemon only owns the
  *   contract (lease + idempotency + reclaim).
  * - Emits project.classified event after the row is committed.
  *

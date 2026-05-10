@@ -43,7 +43,7 @@ export interface FilesRoutesDeps {
 }
 
 /** Operator Surface Reconciliation v0 item 5: file-read truncation
- *  cap. PRD § Item 5 picks 1 MB (founder Q6 option b). The dashboard
+ *  cap. PRD § Item 5 picks 1 MB. The dashboard
  *  precedent was 200 KB; the v0 ceiling is 1 MB so the operator can
  *  read most workspace canon files in full. */
 export const FILE_READ_TRUNCATION_BYTES = 1_048_576;

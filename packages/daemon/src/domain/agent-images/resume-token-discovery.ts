@@ -19,7 +19,7 @@ export interface DiscoveryResult {
    *  external_session_name for external-CLI Codex seats). null when
    *  the daemon can't surface one yet. */
   nativeId: string | null;
-  /** PL-016 Finding 2 (Option 3, founder-confirmed 2026-05-04): source
+  /** PL-016 source-cwd behavior: source
    *  seat's resolved cwd from the nodes table. Captured here so
    *  SnapshotCapturer (and any future fork route) can persist it on
    *  the manifest without an additional query. null when the source

@@ -1,7 +1,7 @@
 // V1 polish slice Phase 5.1 P5.1-7: TopologyTableView CMUX column +
 // row click navigation regression guard.
 //
-// Founder-walk direction requires a cmux launch affordance and row-click
+// The table requires a cmux launch affordance and row-click
 // navigation to the agent detail page.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";

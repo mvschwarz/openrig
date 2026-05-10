@@ -9,7 +9,7 @@
 //   - active-work         → queue_items where state in (pending, in-progress,
 //                            blocked) sorted by priority
 //   - recent-ships        → queue_items where state in (done, handed-off)
-//                            ORDER BY ts_updated DESC LIMIT 10 (founder Q4)
+//                            ORDER BY ts_updated DESC LIMIT 10
 //   - recently-active     → PL-004 Phase B ViewProjector built-in view
 //   - recent-observations → stream_items table (Phase A daemon-backed source)
 //                            with ~/.openrig/stream/<date>.jsonl as graceful
@@ -20,7 +20,7 @@
 //
 // Source-of-truth integration: PL-004 daemon-backed coordination services
 // are the primary read path. Filesystem/CLI fallbacks are for graceful
-// degradation only (per founder steering 2026-05-03).
+// degradation only.
 
 import type Database from "better-sqlite3";
 import type { QueueRepository, QueueItem, QueueState } from "../queue-repository.js";
@@ -101,7 +101,7 @@ interface ReadLayerDeps {
   now?: () => Date;
 }
 
-const DEFAULT_OPERATOR_SESSION = "human-wrandom@kernel";
+const DEFAULT_OPERATOR_SESSION = "human-operator@kernel";
 const RECENT_SHIPS_LIMIT = 10;
 const ACTIVE_WORK_LIMIT = 50;
 const RECENT_OBSERVATIONS_LIMIT = 50;

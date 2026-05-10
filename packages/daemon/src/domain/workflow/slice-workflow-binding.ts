@@ -13,7 +13,7 @@
 // most-recent instance when multiple bind to the slice (per PRD: "when
 // a slice has more than one workflow_instance, v1 picks the most recent
 // or surfaces a 'multiple instances' indicator; driver picks the exact
-// UX with founder review at audit time"). The picked-most-recent
+// UX with review at audit time"). The picked-most-recent
 // behavior is the operator-friendly default; the multiple-instance
 // indicator is exposed via the `additionalInstanceIds` field so the UI
 // can surface a "+N more" hint without losing data.

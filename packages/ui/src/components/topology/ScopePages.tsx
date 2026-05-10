@@ -55,8 +55,8 @@ function ScopeShell({
   tabsNav,
   children,
 }: {
-  /** Eyebrow + title are no longer rendered — founder direction
-   *  2026-05-06: tabs only, anchored to right of Explorer. The scope
+  /** Eyebrow + title are no longer rendered: tabs only, anchored to
+   *  the right of Explorer. The scope
    *  identity reads from the URL + Explorer tree active state, so the
    *  big DISCOVERY.INTAKE-ROUTER style title in the canvas is redundant.
    *  Keeping the prop names for now in case Phase 5 wants to revive a
@@ -176,10 +176,6 @@ export function RigScopePage() {
 
 /** V1 polish slice Phase 5.1 P5.1-6 — Rig overview tab.
  *
- *  Founder direction at V1 founder-walk:
- *  > "Topology page, there's an overview tab that says 'rig overview
- *  > existing rig spec detail page mounted here in phase five polish.'"
- *
  *  Mounts the existing canonical RigSpecDisplay component (from
  *  /specs/rig/$id) sourced via useSpecLibrary("rig") + useLibraryReview.
  *  Matches the rig name against the library entries (per
@@ -251,8 +247,8 @@ export function PodScopePage() {
   // RigGraph's new podScope prop (filters nodes + edges + pod groups
   // to the matching pod only). Default tab moved to "graph" so the
   // graph view-mode is the landing surface (matches host/rig scope
-  // pattern; founder direction "I noticed that there's no graph view
-  // when you click on a pod").
+  // pattern; pod scope should honor the same graph/table/terminal
+  // grammar as other scopes.
   const { rigId, podName } = useParams({ from: "/topology/pod/$rigId/$podName" });
   const [active, setActive] = useState<TopologyRigPodScopeTab>("graph");
   const { isWideLayout } = useShellViewport();
@@ -297,8 +293,8 @@ export function PodScopePage() {
 
 export function SeatScopePage() {
   // V1 polish slice Phase 5.1 P5.1-1 + DRIFT P5.1-D1: outer scope tabs
-  // (detail / transcript / terminal) RETIRED at V1 polish per founder
-  // direction. LiveNodeDetails owns the canonical 5-tab body row inline
+  // (detail / transcript / terminal) RETIRED at V1 polish.
+  // LiveNodeDetails owns the canonical 5-tab body row inline
   // (Identity / Agent Spec / Startup / Transcript / Terminal). The
   // ScopeShell wrapper is dropped too — LiveNodeDetails is the page.
   const { rigId, logicalId } = useParams({ from: "/topology/seat/$rigId/$logicalId" });

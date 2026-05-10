@@ -4,7 +4,7 @@
 // node ("localhost") above all rigs; V2 adds remote host registration.
 //
 // V1 polish slice Phase 5.1 P5.1-2 + DRIFT P5.1-D2: SeatLeaf details
-// icon (P5-1) RETIRED at V1 polish. Founder direction: graph node
+// icon (P5-1) RETIRED at V1 polish. Graph node
 // click + tree click + table row click all navigate to the canonical
 // /topology/seat/$rigId/$logicalId center page. The drawer-as-seat-
 // detail mode is gone; SeatDetailTrigger primitive deleted.

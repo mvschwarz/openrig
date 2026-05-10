@@ -65,7 +65,7 @@ describe("MissionControlReadLayer (PL-005 Phase A; 7 views)", () => {
     // Seed varied content so every view has at least one row.
     await queueRepo.create({
       sourceSession: "src@rig",
-      destinationSession: "human-wrandom@kernel",
+      destinationSession: "human-operator@kernel",
       body: "needs human approval",
       tier: "human-gate",
     });
@@ -106,7 +106,7 @@ describe("MissionControlReadLayer (PL-005 Phase A; 7 views)", () => {
   it("my-queue filters to operator's human-gate items only", async () => {
     await queueRepo.create({
       sourceSession: "src@rig",
-      destinationSession: "human-wrandom@kernel",
+      destinationSession: "human-operator@kernel",
       body: "for the operator",
       tier: "human-gate",
     });
@@ -117,18 +117,18 @@ describe("MissionControlReadLayer (PL-005 Phase A; 7 views)", () => {
     });
     await queueRepo.create({
       sourceSession: "src@rig",
-      destinationSession: "human-wrandom@kernel",
+      destinationSession: "human-operator@kernel",
       body: "non-human-gate from operator",
     });
     const result = await readLayer.readView("my-queue");
     expect(result.rows).toHaveLength(1);
-    expect(result.rows[0]?.rigOrMissionName).toBe("human-wrandom@kernel");
+    expect(result.rows[0]?.rigOrMissionName).toBe("human-operator@kernel");
   });
 
   it("qitem-backed rows preserve the queue body for phone human-gate decisions", async () => {
     await queueRepo.create({
       sourceSession: "src@rig",
-      destinationSession: "human-wrandom@kernel",
+      destinationSession: "human-operator@kernel",
       body: "Approve the release candidate after checking the phone notification path.",
       tier: "human-gate",
     });
@@ -139,7 +139,7 @@ describe("MissionControlReadLayer (PL-005 Phase A; 7 views)", () => {
     expect(row.qitemSummary).toContain("Approve the release candidate");
   });
 
-  it("recent-ships caps at 10 (founder Q4 default)", async () => {
+  it("recent-ships caps at 10", async () => {
     for (let i = 0; i < 15; i++) {
       const created = await queueRepo.create({
         sourceSession: "src@rig",

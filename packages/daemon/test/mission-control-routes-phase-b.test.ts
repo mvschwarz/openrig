@@ -250,7 +250,7 @@ describe("mission-control routes Phase B (PL-005)", () => {
       const { app } = buildApp({ bus, queueRepo, bearerToken: "secret", withDispatcher: false });
       await queueRepo.create({
         sourceSession: "velocity.qa@openrig-velocity",
-        destinationSession: "human-wrandom@kernel",
+        destinationSession: "human-operator@kernel",
         body: "x",
         tier: "human-gate",
       });
@@ -261,7 +261,7 @@ describe("mission-control routes Phase B (PL-005)", () => {
         destinations: Array<{ sessionName: string; source: string; label: string }>;
       };
       expect(body.destinations.some((d) => d.sessionName === "velocity.qa@openrig-velocity")).toBe(true);
-      expect(body.destinations.some((d) => d.sessionName === "human-wrandom@kernel")).toBe(true);
+      expect(body.destinations.some((d) => d.sessionName === "human-operator@kernel")).toBe(true);
       expect(body.destinations.every((d) => d.label.length > 0)).toBe(true);
     });
 

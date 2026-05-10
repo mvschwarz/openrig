@@ -25,7 +25,7 @@ const SESSIONS: DiscoveredSession[] = [
     tmuxWindow: "0",
     tmuxPane: "%7",
     pid: 111,
-    cwd: "/Users/mschwarz/code/rig",
+    cwd: "/Users/example/code/openrig",
     activeCommand: "codex",
     runtimeHint: "codex",
     confidence: "high",

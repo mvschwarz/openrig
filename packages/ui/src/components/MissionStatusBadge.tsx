@@ -1,6 +1,6 @@
 // V1 attempt-3 Phase 3 — MissionStatusBadge per project-tree.md L132–L133 (SC-26).
 //
-// Per founder direction 2026-05-05: status derives from `PROGRESS.md`
+// Status derives from `PROGRESS.md`
 // frontmatter or top-level `status:` field. No daemon work; matches the
 // file-system-as-truth pattern OpenRig uses for slices and missions.
 // V1 takes the status as an externally-provided prop (caller resolves

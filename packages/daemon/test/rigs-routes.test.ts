@@ -165,7 +165,7 @@ describe("Rig CRUD routes", () => {
       body: JSON.stringify({
         logicalId: "orch1.lead",
         displayName: "orch1-lead@rigged-buildout",
-        cwd: "/Users/mschwarz/code/rigged",
+        cwd: "/Users/example/code/openrig",
       }),
     });
 

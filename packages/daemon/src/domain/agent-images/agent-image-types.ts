@@ -29,7 +29,7 @@ export interface AgentImageManifest {
    *  identity from a runtime-resume token without breaking older
    *  manifests. */
   sourceResumeToken: string;
-  /** PL-016 Finding 2 (Option 3, founder-confirmed 2026-05-04): the
+  /** PL-016 source-cwd behavior: the
    *  source seat's resolved cwd at snapshot time. Captured so the
    *  Use-as-starter snippet can emit `cwd: <source_cwd>` and the fork
    *  starts in the SAME directory the parent session was created in

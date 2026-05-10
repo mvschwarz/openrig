@@ -3,7 +3,7 @@
 //
 // Originally Phase 5 P5-4 negative-assertion that the legacy 'node' kind
 // had been retired from DrawerSelection in favor of 'seat-detail'. At V1
-// polish Phase 5.1, founder direction supersedes the seat-detail-as-drawer
+// polish Phase 5.1 supersedes the seat-detail-as-drawer
 // pattern entirely: graph + tree + table all navigate to the canonical
 // /topology/seat/$rigId/$logicalId center page (LiveNodeDetails). The
 // drawer surface is reserved for content viewers (qitem / file / sub-spec)

@@ -33,7 +33,7 @@ export function TopologyViewModeTabs<T extends string>({
   return (
     // Internal tablist — div, not <nav>, so SC-1 left-chrome count
     // (querySelectorAll("nav, aside")) stays at exactly 2. No wrapper
-    // line border — founder direction 2026-05-06: only the active tab
+    // line border — only the active tab
     // carries an underline; the rest of the tablist breathes over the
     // canvas.
     <div

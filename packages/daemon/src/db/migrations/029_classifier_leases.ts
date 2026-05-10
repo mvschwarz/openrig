@@ -1,7 +1,7 @@
 import type { Migration } from "../migrate.js";
 
 /**
- * Classifier leases (PL-004 Phase B; L2 founder-resolved single-writer lease).
+ * Classifier leases (PL-004 Phase B; single-writer lease).
  *
  * Per PRD § L2: agent-backed classifier with daemon-enforced single-writer
  * lease (TTL-based) + deadness detection (via whoami-service / node-inventory)

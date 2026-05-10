@@ -99,7 +99,7 @@ export function parseAgentImageManifest(rawYaml: string, sourcePath: string): Ag
 
   const notes = typeof obj["notes"] === "string" ? (obj["notes"] as string) : undefined;
 
-  // PL-016 Finding 2 (Option 3, founder-confirmed 2026-05-04): optional
+  // PL-016 source-cwd behavior: optional
   // source_cwd captured at snapshot time. Manifests authored before this
   // fix omit the field; consumers fall back to "no cwd line" rendering
   // (back-compat).

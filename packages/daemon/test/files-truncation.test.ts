@@ -83,7 +83,7 @@ describe("Operator Surface Reconciliation v0 — /api/files/read truncation", ()
     expect(body.contentHash).toBe(fullHash);
   });
 
-  it("FILE_READ_TRUNCATION_BYTES is exactly 1 MB per PRD § Item 5 (founder Q6 option b)", () => {
+  it("FILE_READ_TRUNCATION_BYTES is exactly 1 MB per PRD § Item 5", () => {
     expect(FILE_READ_TRUNCATION_BYTES).toBe(1_048_576);
   });
 });

@@ -1,7 +1,6 @@
-// PL-016 Finding 2 (Option 3, founder-confirmed 2026-05-04) — source_cwd
-// roundtrip tests.
+// PL-016 source-cwd roundtrip tests.
 //
-// Pins (from founder dispatch):
+// Pins:
 //   - manifest captures source_cwd at create (snapshot capturer reads
 //     source seat's cwd from the nodes table)
 //   - snippet generator emits cwd: <source_cwd> in the rendered
@@ -373,8 +372,7 @@ source_resume_token: t
 // Test 4 — operator-override safety: NO daemon-side cwd rewriting exists
 // ============================================================================
 //
-// Founder direction: "respect the provider; no funny business". The
-// daemon must NOT override cwd at fork dispatch — operator's chosen
+// The daemon must NOT override cwd at fork dispatch — operator's chosen
 // cwd in the rig.yaml is honored verbatim. If wrong, Claude returns
 // "no conversation found" and the operator gets an honest error.
 //

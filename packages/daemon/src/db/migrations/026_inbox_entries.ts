@@ -3,7 +3,7 @@ import type { Migration } from "../migrate.js";
 /**
  * Inbox entries (PL-004 Phase A; mailbox-style asynchronous deposit).
  *
- * Per founder-resolved direction: inbox is the canonical async/bulk path,
+ * Inbox is the canonical async/bulk path,
  * NOT a contention fallback. Any authenticated sender may inbox-drop with
  * attribution + audit. Receiver chooses absorb (promote to main queue) or
  * deny (reject with reason). Idempotent on inbox_id.

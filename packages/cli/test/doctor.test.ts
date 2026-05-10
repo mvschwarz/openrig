@@ -34,10 +34,10 @@ function makeDeps(overrides?: Partial<DoctorDeps>): DoctorDeps {
 describe("runDoctorChecks", () => {
   it("monorepo command-dir base resolves via the same daemon root seam as daemon start", () => {
     const deps = makeDeps({
-      baseDir: "/Users/mschwarz/code/rigged/packages/cli/src/commands",
+      baseDir: "/Users/example/code/openrig/packages/cli/src/commands",
       exists: (p) =>
-        p === "/Users/mschwarz/code/rigged/packages/daemon/dist/index.js"
-        || p === "/Users/mschwarz/code/rigged/packages/ui/dist/index.html",
+        p === "/Users/example/code/openrig/packages/daemon/dist/index.js"
+        || p === "/Users/example/code/openrig/packages/ui/dist/index.html",
     });
 
     const { checks } = runDoctorChecks(deps);

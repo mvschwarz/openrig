@@ -80,7 +80,7 @@ describe("createDaemon startup composition", () => {
 
     const canonical = await deps.queueRepo.create({
       sourceSession: "dev-qa@implementation-pair",
-      destinationSession: "human-wrandom@kernel",
+      destinationSession: "human-operator@kernel",
       body: "human gate smoke",
       tier: "human-gate",
       nudge: false,
@@ -93,7 +93,7 @@ describe("createDaemon startup composition", () => {
       nudge: false,
     });
 
-    expect(canonical.destinationSession).toBe("human-wrandom@kernel");
+    expect(canonical.destinationSession).toBe("human-operator@kernel");
     expect(generic.destinationSession).toBe("human@host");
     await expect(
       deps.queueRepo.create({

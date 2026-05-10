@@ -31,7 +31,7 @@ describe("HumanSeatCard P5-8 VellumCard composition", () => {
   it("composes VellumCard chrome (registration marks present)", () => {
     const { container } = render(
       <HumanSeatCard
-        session="human-wrandom@kernel"
+        session="human-operator@kernel"
         rows={[makeRow("idle"), makeRow("attention")]}
       />,
     );
@@ -45,7 +45,7 @@ describe("HumanSeatCard P5-8 VellumCard composition", () => {
   it("renders pending count + StatusPip 'pending' when no blocked rows", () => {
     const { container, getByTestId } = render(
       <HumanSeatCard
-        session="human-wrandom@kernel"
+        session="human-operator@kernel"
         rows={[makeRow("idle"), makeRow("attention")]}
       />,
     );
@@ -57,7 +57,7 @@ describe("HumanSeatCard P5-8 VellumCard composition", () => {
   it("surfaces blocked-count via StatusPip when any row is blocked (warning tone)", () => {
     const { getByTestId } = render(
       <HumanSeatCard
-        session="human-wrandom@kernel"
+        session="human-operator@kernel"
         rows={[makeRow("blocked"), makeRow("idle")]}
       />,
     );
@@ -68,7 +68,7 @@ describe("HumanSeatCard P5-8 VellumCard composition", () => {
   it("renders capability pills with outline-variant border (vellum aesthetic)", () => {
     const { container } = render(
       <HumanSeatCard
-        session="human-wrandom@kernel"
+        session="human-operator@kernel"
         rows={[]}
         capabilities={["approve", "deny"]}
       />,
