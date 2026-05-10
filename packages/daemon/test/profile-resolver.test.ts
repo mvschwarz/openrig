@@ -442,4 +442,70 @@ describe("V0.3.0 daemon-skill-discovery — filesystem-discovered skills join th
       }
     });
   });
+
+  it("surfaces the structural rejection reason when a profile references a skill whose dirname matches a rejected SKILL.md", () => {
+    withFsFixture(() => {
+      // Operator dropped a SKILL.md with no frontmatter at the
+      // ~/.claude/skills/broken-skill/ path. The profile references
+      // "broken-skill" — instead of the bare "not found in resource
+      // pool" error, the operator should see "rejected because
+      // <reason> at <path>" so they know exactly what to fix.
+      const dir = path.join(homedir, ".claude/skills/broken-skill");
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, "SKILL.md"), "no frontmatter here\n", "utf-8");
+
+      const baseSpec = makeSpec({
+        resources: { skills: [], guidance: [], subagents: [], hooks: [], runtimeResources: [] },
+        profiles: {
+          default: { uses: { skills: ["broken-skill"], guidance: [], subagents: [], hooks: [], runtimeResources: [] } },
+        },
+      });
+      const ctx = makeCtx({
+        baseSpec: makeResolved(baseSpec),
+        member: makeMember({ cwd }),
+        homedir,
+      });
+      const result = resolveNodeConfig(ctx);
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        const msg = result.errors.find((e) => e.includes("broken-skill"));
+        expect(msg).toBeDefined();
+        expect(msg).toMatch(/rejected/i);
+        expect(msg).toMatch(/frontmatter/i);
+        expect(msg).toContain(dir);
+      }
+    });
+  });
+
+  it("does not falsely tie an unrelated rejected SKILL.md to a missing-skill error (basename match only)", () => {
+    withFsFixture(() => {
+      // Operator has a broken skill at ~/.claude/skills/foo/ (rejected)
+      // and a profile that references "bar" (which exists nowhere).
+      // The "bar" error should NOT be conflated with foo's rejection.
+      const dir = path.join(homedir, ".claude/skills/foo");
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, "SKILL.md"), "no frontmatter\n", "utf-8");
+
+      const baseSpec = makeSpec({
+        resources: { skills: [], guidance: [], subagents: [], hooks: [], runtimeResources: [] },
+        profiles: {
+          default: { uses: { skills: ["bar"], guidance: [], subagents: [], hooks: [], runtimeResources: [] } },
+        },
+      });
+      const ctx = makeCtx({
+        baseSpec: makeResolved(baseSpec),
+        member: makeMember({ cwd }),
+        homedir,
+      });
+      const result = resolveNodeConfig(ctx);
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        const msg = result.errors.find((e) => e.includes("bar"));
+        expect(msg).toBeDefined();
+        // Plain "not found in resource pool" — not "rejected".
+        expect(msg).toMatch(/not found/);
+        expect(msg).not.toMatch(/rejected/);
+      }
+    });
+  });
 });
