@@ -307,3 +307,139 @@ describe("Profile resolver + precedence engine", () => {
     }
   });
 });
+
+describe("V0.3.0 daemon-skill-discovery — filesystem-discovered skills join the resource pool", () => {
+  // Helper to set up a tmp homedir + cwd with skill folders for the
+  // resolver-integration tests. These use real fs because the resolver
+  // calls into discoverSkillsForRuntime synchronously, and a stub layer
+  // would only test the wiring trivially. mkdtemp / rmSync keep each
+  // case isolated.
+  const fs = require("node:fs") as typeof import("node:fs");
+  const path = require("node:path") as typeof import("node:path");
+  const os = require("node:os") as typeof import("node:os");
+
+  let tmpRoot: string;
+  let homedir: string;
+  let cwd: string;
+
+  function writeSkill(dir: string, name: string, description: string): void {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, "SKILL.md"), `---\nname: ${name}\ndescription: ${description}\n---\n\nBody.\n`, "utf-8");
+  }
+
+  function withFsFixture<T>(fn: () => T): T {
+    tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "profile-resolver-disc-"));
+    homedir = path.join(tmpRoot, "home");
+    cwd = path.join(tmpRoot, "rig-cwd");
+    fs.mkdirSync(homedir, { recursive: true });
+    fs.mkdirSync(cwd, { recursive: true });
+    try { return fn(); } finally { fs.rmSync(tmpRoot, { recursive: true, force: true }); }
+  }
+
+  it("accepts a profile.uses.skills entry that resolves only via the discovered ~/.claude/skills/ path", () => {
+    withFsFixture(() => {
+      writeSkill(path.join(homedir, ".claude/skills/openrig-architect"), "openrig-architect", "Architect rigs");
+      const baseSpec = makeSpec({
+        // Note: NO `openrig-architect` in resources.skills; the only way
+        // for the profile to resolve it is via filesystem discovery.
+        resources: { skills: [], guidance: [], subagents: [], hooks: [], runtimeResources: [] },
+        profiles: {
+          default: { uses: { skills: ["openrig-architect"], guidance: [], subagents: [], hooks: [], runtimeResources: [] } },
+        },
+      });
+      const ctx = makeCtx({
+        baseSpec: makeResolved(baseSpec),
+        member: makeMember({ cwd }),
+        homedir,
+      });
+      const result = resolveNodeConfig(ctx);
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        const found = result.config.selectedResources.skills.find((s) => s.effectiveId === "openrig-architect");
+        expect(found).toBeDefined();
+        expect(found!.sourcePath).toBe(path.join(homedir, ".claude/skills/openrig-architect"));
+      }
+    });
+  });
+
+  it("accepts a profile.uses.skills entry resolving via a rig-bundled <cwd>/.claude/skills/<name>/", () => {
+    withFsFixture(() => {
+      writeSkill(path.join(cwd, ".claude/skills/web-design-guidelines"), "web-design-guidelines", "Web design checks");
+      const baseSpec = makeSpec({
+        resources: { skills: [], guidance: [], subagents: [], hooks: [], runtimeResources: [] },
+        profiles: {
+          default: { uses: { skills: ["web-design-guidelines"], guidance: [], subagents: [], hooks: [], runtimeResources: [] } },
+        },
+      });
+      const ctx = makeCtx({
+        baseSpec: makeResolved(baseSpec),
+        member: makeMember({ cwd }),
+        homedir,
+      });
+      const result = resolveNodeConfig(ctx);
+      expect(result.ok).toBe(true);
+    });
+  });
+
+  it("rig-local resources.skills wins over a same-id discovered skill (most-specific-wins precedence)", () => {
+    withFsFixture(() => {
+      writeSkill(path.join(homedir, ".claude/skills/skill-a"), "skill-a", "Discovered version");
+      // makeSpec already declares { id: 'skill-a', path: 'skills/a' } in
+      // resources.skills; the rig-local version should win.
+      const ctx = makeCtx({
+        baseSpec: makeResolved(makeSpec()),
+        member: makeMember({ cwd }),
+        homedir,
+      });
+      const result = resolveNodeConfig(ctx);
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        const skillA = result.config.selectedResources.skills.find((s) => s.effectiveId === "skill-a");
+        expect(skillA).toBeDefined();
+        // rig-local sourcePath (the agent spec's sourcePath), NOT the
+        // homedir-discovered SKILL.md directory.
+        expect(skillA!.sourcePath).toBe("/agents/test");
+      }
+    });
+  });
+
+  it("scans the codex .agents/skills/ tree when the runtime is codex", () => {
+    withFsFixture(() => {
+      writeSkill(path.join(homedir, ".agents/skills/openrig-architect"), "openrig-architect", "Architect rigs");
+      const baseSpec = makeSpec({
+        resources: { skills: [], guidance: [], subagents: [], hooks: [], runtimeResources: [] },
+        profiles: {
+          default: { uses: { skills: ["openrig-architect"], guidance: [], subagents: [], hooks: [], runtimeResources: [] } },
+        },
+      });
+      const ctx = makeCtx({
+        baseSpec: makeResolved(baseSpec),
+        member: makeMember({ cwd, runtime: "codex" }),
+        homedir,
+      });
+      const result = resolveNodeConfig(ctx);
+      expect(result.ok).toBe(true);
+    });
+  });
+
+  it("preserves the existing 'skill not found' error when a profile references a skill that exists at neither the rig-local nor the discovered paths", () => {
+    withFsFixture(() => {
+      const baseSpec = makeSpec({
+        resources: { skills: [], guidance: [], subagents: [], hooks: [], runtimeResources: [] },
+        profiles: {
+          default: { uses: { skills: ["nope-not-anywhere"], guidance: [], subagents: [], hooks: [], runtimeResources: [] } },
+        },
+      });
+      const ctx = makeCtx({
+        baseSpec: makeResolved(baseSpec),
+        member: makeMember({ cwd }),
+        homedir,
+      });
+      const result = resolveNodeConfig(ctx);
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.errors.some((e) => e.includes("nope-not-anywhere"))).toBe(true);
+      }
+    });
+  });
+});
