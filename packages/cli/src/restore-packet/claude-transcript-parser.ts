@@ -29,7 +29,7 @@ import type {
 } from "./types.js";
 
 const PATH_PATTERNS: readonly RegExp[] = [
-  /\/Users\/wrandom\/[A-Za-z0-9._~:/@%+=,\- ]+/g,
+  /\/(?:Users|home)\/[^/\s]+\/[A-Za-z0-9._~:/@%+=,\- ]+/g,
   /\b(?:packages|docs|scripts|test|tests|src|openrig-work|rigs|control-plane)\/[A-Za-z0-9._~:/@%+=,\-]+/g,
 ];
 

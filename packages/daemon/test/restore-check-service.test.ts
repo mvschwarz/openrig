@@ -4,8 +4,25 @@ import os from "node:os";
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { RestoreCheckService, type RestoreCheckDeps, type NodeInventoryEntry } from "../src/domain/restore-check-service.js";
 
-const REQUIRED_SESSION_START_COMPACT_COMMAND = "~/.openrig/shared-docs/control-plane/services/claude-hooks/bin/session-start-compact-context.sh";
-const REQUIRED_USER_PROMPT_SUBMIT_COMMAND = "~/.openrig/shared-docs/control-plane/services/claude-hooks/bin/userpromptsubmit-queue-attention.sh";
+const CLAUDE_HOOKS_ROOT = path.join(
+  os.homedir(),
+  "code",
+  "substrate",
+  "shared-docs",
+  "control-plane",
+  "services",
+  "claude-hooks",
+);
+const REQUIRED_SESSION_START_COMPACT_COMMAND = path.join(
+  CLAUDE_HOOKS_ROOT,
+  "bin",
+  "session-start-compact-context.sh",
+);
+const REQUIRED_USER_PROMPT_SUBMIT_COMMAND = path.join(
+  CLAUDE_HOOKS_ROOT,
+  "bin",
+  "userpromptsubmit-queue-attention.sh",
+);
 
 const VALID_HOST_INFRA_DECLARATION = JSON.stringify({
   schemaVersion: 1,

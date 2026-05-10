@@ -52,10 +52,10 @@ function validSummary(): Record<string, unknown> {
     source_session_id: "velocity-driver@openrig-velocity",
     source_rig: "openrig-velocity",
     source_runtime: "claude-code",
-    source_cwd: "~/code/projects/openrig-hub",
+    source_cwd: "/Users/example/code/projects/openrig-hub",
     target_rig: "openrig-velocity",
     target_runtime: "claude-code",
-    target_workspace_root: "~/code/projects/openrig-hub",
+    target_workspace_root: "/Users/example/code/projects/openrig-hub",
     default_target_repo: null,
     role_pointer: "rigs/openrig-velocity/state/velocity/driver-role.md",
     bounded_latest_transcript: {
@@ -472,11 +472,11 @@ describe("M2b runtime-detect", () => {
 
 describe("M2b codex-jsonl-parser", () => {
   it("parses session_meta + response_item messages into StructuredTranscript", () => {
-    const content = `{"type":"session_meta","payload":{"cwd":"~/code/projects/openrig-hub","id":"abc-123"}}
+    const content = `{"type":"session_meta","payload":{"cwd":"/Users/example/code/projects/openrig-hub","id":"abc-123"}}
 {"type":"response_item","timestamp":"2026-05-02T01:00:00Z","payload":{"type":"message","role":"user","content":"Hello world"}}
 {"type":"response_item","timestamp":"2026-05-02T01:00:01Z","payload":{"type":"message","role":"assistant","content":[{"type":"text","text":"Hi back"}]}}`;
     const result = parseCodexJsonl(content);
-    expect(result.sessionMeta?.cwd).toBe("~/code/projects/openrig-hub");
+    expect(result.sessionMeta?.cwd).toBe("/Users/example/code/projects/openrig-hub");
     expect(result.sessionMeta?.sessionId).toBe("abc-123");
     expect(result.messageCount).toBe(2);
     expect(result.messages[0]!.role).toBe("user");
@@ -488,7 +488,7 @@ describe("M2b codex-jsonl-parser", () => {
 
   it("filters reasoning + function_call + custom_tool_call records and counts them", () => {
     const content = `{"type":"response_item","payload":{"type":"reasoning","content":"<thinking>"}}
-{"type":"response_item","payload":{"type":"function_call","arguments":"{\\"path\\":\\"~/x.txt\\"}"}}
+{"type":"response_item","payload":{"type":"function_call","arguments":"{\\"path\\":\\"/Users/example/x.txt\\"}"}}
 {"type":"response_item","payload":{"type":"custom_tool_call","input":"some input"}}
 {"type":"response_item","payload":{"type":"message","role":"user","content":"kept"}}`;
     const result = parseCodexJsonl(content);
@@ -526,7 +526,7 @@ not valid json garbage line
 
   it("extracts paths from message content and tool args; sorts by frequency", () => {
     const content = `{"type":"response_item","payload":{"type":"message","role":"user","content":"see packages/cli/src/index.ts and packages/cli/src/index.ts again"}}
-{"type":"response_item","payload":{"type":"function_call","arguments":"{\\"path\\":\\"~/code/projects/openrig-hub/README.md\\"}"}}`;
+{"type":"response_item","payload":{"type":"function_call","arguments":"{\\"path\\":\\"/Users/example/code/projects/openrig-hub/README.md\\"}"}}`;
     const result = parseCodexJsonl(content);
     expect(result.paths.length).toBeGreaterThan(0);
     const indexEntry = result.paths.find((p) => p.path === "packages/cli/src/index.ts");
@@ -549,15 +549,15 @@ describe("M2b claude-transcript-parser", () => {
 
   it("captures sessionMeta from the first record carrying cwd + sessionId", () => {
     const content = `{"type":"customTitle","customTitle":"x","sessionId":"sess-2"}
-{"type":"user","message":{"role":"user","content":"first"},"cwd":"~/code","sessionId":"sess-2"}`;
+{"type":"user","message":{"role":"user","content":"first"},"cwd":"/Users/example/code","sessionId":"sess-2"}`;
     const result = parseClaudeTranscript(content);
-    expect(result.sessionMeta?.cwd).toBe("~/code");
+    expect(result.sessionMeta?.cwd).toBe("/Users/example/code");
     expect(result.sessionMeta?.sessionId).toBe("sess-2");
   });
 
   it("filters attachments → raw_tool_outputs counter", () => {
     const content = `{"type":"user","message":{"role":"user","content":"see attached"},"cwd":"/x","sessionId":"s"}
-{"type":"attachment","attachment":{"path":"~/x.txt","content":"file body"},"cwd":"/x","sessionId":"s"}`;
+{"type":"attachment","attachment":{"path":"/Users/example/x.txt","content":"file body"},"cwd":"/x","sessionId":"s"}`;
     const result = parseClaudeTranscript(content);
     expect(result.messageCount).toBe(1);
     expect(result.omittedCounts.raw_tool_outputs).toBe(1);
@@ -658,7 +658,7 @@ describe("M2b R2 Claude parser nested-content-part handling", () => {
           {
             type: "tool_result",
             tool_use_id: "toolu_1",
-            content: "~/code/projects/openrig-hub",
+            content: "/Users/example/code/projects/openrig-hub",
           },
         ],
       },
@@ -673,7 +673,7 @@ describe("M2b R2 Claude parser nested-content-part handling", () => {
     // messages but the nested tool_result must STILL be counted.)
     expect(r.omittedCounts.function_call_output).toBe(1);
     expect(r.omittedCounts.raw_tool_outputs).toBe(1);
-    expect(r.paths.some((p) => p.path === "~/code/projects/openrig-hub")).toBe(true);
+    expect(r.paths.some((p) => p.path === "/Users/example/code/projects/openrig-hub")).toBe(true);
   });
 
   it("counts each tool_use part in a multi-tool assistant turn", () => {
@@ -683,7 +683,7 @@ describe("M2b R2 Claude parser nested-content-part handling", () => {
         role: "assistant",
         content: [
           { type: "tool_use", id: "t1", name: "Bash", input: { cmd: "ls" } },
-          { type: "tool_use", id: "t2", name: "Read", input: { path: "~/code/x.md" } },
+          { type: "tool_use", id: "t2", name: "Read", input: { path: "/Users/example/code/x.md" } },
           { type: "text", text: "running both" },
         ],
       },
@@ -692,12 +692,12 @@ describe("M2b R2 Claude parser nested-content-part handling", () => {
     });
     const r = parseClaudeTranscript(content);
     expect(r.omittedCounts.function_call_output).toBe(2);
-    expect(r.paths.some((p) => p.path === "~/code/x.md")).toBe(true);
+    expect(r.paths.some((p) => p.path === "/Users/example/code/x.md")).toBe(true);
   });
 
   it("counts each tool_result part in a multi-result user turn", () => {
     // Note: the Velocity-prior-art path pattern is greedy on the
-    // ~ prefix and includes trailing whitespace and word
+    // /Users/example prefix and includes trailing whitespace and word
     // chars until end-of-line; using \n separators here so each path
     // is matched cleanly.
     const content = JSON.stringify({
@@ -705,8 +705,8 @@ describe("M2b R2 Claude parser nested-content-part handling", () => {
       message: {
         role: "user",
         content: [
-          { type: "tool_result", tool_use_id: "t1", content: "~/code/a.md\nrunning" },
-          { type: "tool_result", tool_use_id: "t2", content: "~/code/b.md\nrunning" },
+          { type: "tool_result", tool_use_id: "t1", content: "/Users/example/code/a.md\nrunning" },
+          { type: "tool_result", tool_use_id: "t2", content: "/Users/example/code/b.md\nrunning" },
         ],
       },
       cwd: "/x",
@@ -714,8 +714,8 @@ describe("M2b R2 Claude parser nested-content-part handling", () => {
     });
     const r = parseClaudeTranscript(content);
     expect(r.omittedCounts.raw_tool_outputs).toBe(2);
-    expect(r.paths.some((p) => p.path === "~/code/a.md")).toBe(true);
-    expect(r.paths.some((p) => p.path === "~/code/b.md")).toBe(true);
+    expect(r.paths.some((p) => p.path === "/Users/example/code/a.md")).toBe(true);
+    expect(r.paths.some((p) => p.path === "/Users/example/code/b.md")).toBe(true);
   });
 
   it("mixed text + tool_use: visible text kept; tool_use counted", () => {
@@ -754,7 +754,7 @@ describe("M2b R2 Claude parser nested-content-part handling", () => {
     });
     const r = parseClaudeTranscript(content);
     expect(r.omittedCounts.function_call_output).toBe(1);
-    // No ~ or recognized prefix path in the input.
+    // No /Users/example or recognized prefix path in the input.
     expect(r.paths.length).toBe(0);
   });
 
@@ -787,7 +787,7 @@ describe("M2b R2 Claude parser nested-content-part handling", () => {
             type: "tool_result",
             tool_use_id: "t1",
             content: [
-              { type: "text", text: "found at ~/code/projects/openrig-hub/README.md" },
+              { type: "text", text: "found at /Users/example/code/projects/openrig-hub/README.md" },
             ],
           },
         ],
@@ -797,7 +797,7 @@ describe("M2b R2 Claude parser nested-content-part handling", () => {
     });
     const r = parseClaudeTranscript(content);
     expect(r.omittedCounts.raw_tool_outputs).toBe(1);
-    expect(r.paths.some((p) => p.path === "~/code/projects/openrig-hub/README.md")).toBe(true);
+    expect(r.paths.some((p) => p.path === "/Users/example/code/projects/openrig-hub/README.md")).toBe(true);
   });
 
   it("kept text-only assistant turn (no tools): counters stay at zero", () => {
@@ -846,14 +846,14 @@ describe("M2c-CLI packet-writer atomic emission", () => {
   function buildBaselineOpts(targetDir: string): Record<string, unknown> {
     return {
       targetDir,
-      structured: parseCodexJsonl(`{"type":"session_meta","payload":{"cwd":"~/code/projects/openrig-hub","id":"src-session-id"}}
+      structured: parseCodexJsonl(`{"type":"session_meta","payload":{"cwd":"/Users/example/code/projects/openrig-hub","id":"src-session-id"}}
 {"type":"response_item","timestamp":"2026-05-02T01:00:00Z","payload":{"type":"message","role":"user","content":"Walk through the M1 contract"}}
 {"type":"response_item","timestamp":"2026-05-02T01:00:01Z","payload":{"type":"message","role":"assistant","content":[{"type":"text","text":"Per § 2.1 the schema requires 21 fields"}]}}`),
       sourceRuntime: "codex" as const,
       targetRig: "openrig-velocity-claude",
       targetRuntime: "claude-code" as const,
-      targetWorkspaceRoot: "~/code/projects/openrig-hub",
-      defaultTargetRepo: "~/code/projects/openrig-hub/openrig",
+      targetWorkspaceRoot: "/Users/example/code/projects/openrig-hub",
+      defaultTargetRepo: "/Users/example/code/projects/openrig-hub/openrig",
       rolePointer: "rigs/openrig-velocity-claude/state/velocity/driver-role.md",
       currentWorkSummary: "Working on Restore-Packet vertical M2c-CLI chunk.",
       nextOwner: "self",
@@ -862,7 +862,7 @@ describe("M2c-CLI packet-writer atomic emission", () => {
       sourceTrustRanking: ["rig_whoami", "bounded_latest_transcript"],
       sourceSessionId: "velocity-driver@openrig-velocity",
       sourceRig: "openrig-velocity",
-      sourceCwd: "~/code/projects/openrig-hub",
+      sourceCwd: "/Users/example/code/projects/openrig-hub",
       generatorVersion: "rig-restore-packet@0.1.0",
       includeFullTranscript: false,
     };
@@ -1008,7 +1008,7 @@ describe("M2c-CLI Velocity-shape round-trip (synthetic 4-role fixtures)", () => 
   // + reasoning records + a credential-pattern needle for redaction.
   function syntheticCodexJsonlFor(role: string): string {
     return [
-      `{"type":"session_meta","payload":{"cwd":"~/code/projects/openrig-hub","id":"velocity-${role}@openrig-velocity-code"}}`,
+      `{"type":"session_meta","payload":{"cwd":"/Users/example/code/projects/openrig-hub","id":"velocity-${role}@openrig-velocity-code"}}`,
       `{"type":"response_item","payload":{"type":"reasoning","content":"<thinking>"}}`,
       `{"type":"response_item","payload":{"type":"function_call","arguments":"{\\"path\\":\\"packages/cli/src/index.ts\\"}"}}`,
       `{"type":"response_item","timestamp":"2026-04-23T18:08:00Z","payload":{"type":"message","role":"user","content":"${role}: please review the diff"}}`,
@@ -1038,8 +1038,8 @@ describe("M2c-CLI Velocity-shape round-trip (synthetic 4-role fixtures)", () => 
         sourceRuntime: "codex",
         targetRig: "openrig-velocity-claude",
         targetRuntime: "claude-code",
-        targetWorkspaceRoot: "~/code/projects/openrig-hub",
-        defaultTargetRepo: "~/code/projects/openrig-hub/openrig",
+        targetWorkspaceRoot: "/Users/example/code/projects/openrig-hub",
+        defaultTargetRepo: "/Users/example/code/projects/openrig-hub/openrig",
         rolePointer: `rigs/openrig-velocity-claude/state/velocity/${role}-role.md`,
         currentWorkSummary: `Synthetic ${role} round-trip for Velocity-shape parity.`,
         nextOwner: "self",
@@ -1048,7 +1048,7 @@ describe("M2c-CLI Velocity-shape round-trip (synthetic 4-role fixtures)", () => 
         sourceTrustRanking: ["rig_whoami", "bounded_latest_transcript"],
         sourceSessionId: `velocity-${role}@openrig-velocity-code`,
         sourceRig: "openrig-velocity-code",
-        sourceCwd: "~/code/projects/openrig-hub",
+        sourceCwd: "/Users/example/code/projects/openrig-hub",
         generatorVersion: "rig-restore-packet@0.1.0",
         includeFullTranscript: true,
       });
@@ -1058,7 +1058,7 @@ describe("M2c-CLI Velocity-shape round-trip (synthetic 4-role fixtures)", () => 
       expect(validation.valid, JSON.stringify(validation.errors)).toBe(true);
       // Provenance preserved at relevant fields:
       expect(summary.source_session_id).toBe(`velocity-${role}@openrig-velocity-code`);
-      expect(summary.source_cwd).toBe("~/code/projects/openrig-hub");
+      expect(summary.source_cwd).toBe("/Users/example/code/projects/openrig-hub");
       expect(summary.bounded_latest_transcript.message_count).toBe(2);
       // Omitted-class enumeration matches what the parser counted:
       expect(summary.omitted_classes).toContain("reasoning_records");
@@ -1101,7 +1101,7 @@ describe("M2c-CLI redaction + omitted-record round-trip end-to-end", () => {
       postExpectText: vi.fn(async () => { throw new Error("mock-daemon: postExpectText should not be called"); }),
     };
     // Synthetic Codex JSONL the mock-daemon serves on the new full-read route.
-    const fixtureContent = `{"type":"session_meta","payload":{"cwd":"~/code/x","id":"src-session"}}
+    const fixtureContent = `{"type":"session_meta","payload":{"cwd":"/Users/example/code/x","id":"src-session"}}
 {"type":"response_item","payload":{"type":"message","role":"user","content":"hello from session"}}
 {"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"text","text":"reply"}]}}`;
 
@@ -1111,7 +1111,7 @@ describe("M2c-CLI redaction + omitted-record round-trip end-to-end", () => {
         get: vi.fn(async (p: string) => {
           requestedPaths.push(p);
           if (p === "/api/transcripts/src-session/full") {
-            return { status: 200, data: { content: fixtureContent, cwd: "~/code/x" } };
+            return { status: 200, data: { content: fixtureContent, cwd: "/Users/example/code/x" } };
           }
           return { status: 404, data: { error: "not found" } };
         }),
@@ -1163,17 +1163,17 @@ describe("M2c-CLI redaction + omitted-record round-trip end-to-end", () => {
           { type: "text", text: "checking now" },
         ],
       },
-      cwd: "~/code/projects/openrig-hub",
+      cwd: "/Users/example/code/projects/openrig-hub",
       sessionId: "claude-session-id",
     }) + "\n" + JSON.stringify({
       type: "user",
       message: {
         role: "user",
         content: [
-          { type: "tool_result", tool_use_id: "toolu_1", content: "~/code/projects/openrig-hub" },
+          { type: "tool_result", tool_use_id: "toolu_1", content: "/Users/example/code/projects/openrig-hub" },
         ],
       },
-      cwd: "~/code/projects/openrig-hub",
+      cwd: "/Users/example/code/projects/openrig-hub",
       sessionId: "claude-session-id",
     });
     const structured = parseClaudeTranscript(content);
@@ -1185,7 +1185,7 @@ describe("M2c-CLI redaction + omitted-record round-trip end-to-end", () => {
       sourceRuntime: "claude-code",
       targetRig: "openrig-velocity-claude",
       targetRuntime: "claude-code",
-      targetWorkspaceRoot: "~/code/projects/openrig-hub",
+      targetWorkspaceRoot: "/Users/example/code/projects/openrig-hub",
       defaultTargetRepo: null,
       rolePointer: "rigs/openrig-velocity-claude/state/velocity/driver-role.md",
       currentWorkSummary: "Nested-content round-trip for M2c-CLI.",
@@ -1195,7 +1195,7 @@ describe("M2c-CLI redaction + omitted-record round-trip end-to-end", () => {
       sourceTrustRanking: ["rig_whoami"],
       sourceSessionId: "claude-session-id",
       sourceRig: "openrig-velocity-claude",
-      sourceCwd: "~/code/projects/openrig-hub",
+      sourceCwd: "/Users/example/code/projects/openrig-hub",
       generatorVersion: "rig-restore-packet@0.1.0",
       includeFullTranscript: false,
     });
@@ -1205,7 +1205,7 @@ describe("M2c-CLI redaction + omitted-record round-trip end-to-end", () => {
     expect(summary.omitted_classes).toContain("raw_tool_outputs");
     // Touched-files inventory captured the path from the omitted tool_result.
     expect(summary.touched_files.top_paths.some((p: { path: string }) =>
-      p.path === "~/code/projects/openrig-hub")).toBe(true);
+      p.path === "/Users/example/code/projects/openrig-hub")).toBe(true);
   });
 });
 
@@ -1245,7 +1245,7 @@ describe("M2c-CLI R2 --source-jsonl provenance from parsed session_meta", () => 
       JSON.stringify({
         type: "session_meta",
         payload: {
-          cwd: "~/code/projects/openrig-hub",
+          cwd: "/Users/example/code/projects/openrig-hub",
           id: "velocity-driver@openrig-velocity",
         },
       }),
@@ -1314,7 +1314,7 @@ describe("M2c-CLI R2 --source-jsonl provenance from parsed session_meta", () => 
     // Bug reproducer's expected values per BLOCK artifact:
     expect(summary.source_session_id).toBe("velocity-driver@openrig-velocity");
     expect(summary.source_rig).toBe("openrig-velocity");
-    expect(summary.source_cwd).toBe("~/code/projects/openrig-hub");
+    expect(summary.source_cwd).toBe("/Users/example/code/projects/openrig-hub");
     // session_session_id MUST NOT be the file path.
     expect(summary.source_session_id).not.toContain("/source.jsonl");
     expect(summary.source_session_id).not.toContain(tmpRoot);
@@ -1468,7 +1468,7 @@ describe("M2c-CLI R2 --source-jsonl provenance from parsed session_meta", () => 
 
 describe("M2c-Daemon final regression — Velocity 4-pack round-trip via CLI", () => {
   let tmpRoot: string;
-  const VELOCITY_ROOT = "~/.openrig/shared-docs/openrig-work/field-notes/2026-04-27-velocity-claude-from-codex-restore";
+  const VELOCITY_ROOT = "/Users/example/code/substrate/shared-docs/openrig-work/field-notes/2026-04-27-velocity-claude-from-codex-restore";
 
   beforeEach(async () => {
     const fs = await import("node:fs");
@@ -1641,7 +1641,7 @@ describe("M2c-Daemon final regression — CLI-surface redaction + omitted round-
             { type: "text", text: "checking now" },
           ],
         },
-        cwd: "~/code/projects/openrig-hub",
+        cwd: "/Users/example/code/projects/openrig-hub",
         sessionId: "claude-final@openrig-velocity-claude",
       }),
       JSON.stringify({
@@ -1649,10 +1649,10 @@ describe("M2c-Daemon final regression — CLI-surface redaction + omitted round-
         message: {
           role: "user",
           content: [
-            { type: "tool_result", tool_use_id: "toolu_1", content: "~/code/projects/openrig-hub" },
+            { type: "tool_result", tool_use_id: "toolu_1", content: "/Users/example/code/projects/openrig-hub" },
           ],
         },
-        cwd: "~/code/projects/openrig-hub",
+        cwd: "/Users/example/code/projects/openrig-hub",
         sessionId: "claude-final@openrig-velocity-claude",
       }),
     ].join("\n"), "utf8");
@@ -1679,10 +1679,10 @@ describe("M2c-Daemon final regression — CLI-surface redaction + omitted round-
     // Provenance from session_meta-equivalent (Claude per-record sessionId).
     expect(summary.source_session_id).toBe("claude-final@openrig-velocity-claude");
     expect(summary.source_rig).toBe("openrig-velocity-claude");
-    expect(summary.source_cwd).toBe("~/code/projects/openrig-hub");
+    expect(summary.source_cwd).toBe("/Users/example/code/projects/openrig-hub");
     // Touched-files inventory captured the path from the omitted tool_result.
     expect(summary.touched_files.top_paths.some((p: { path: string }) =>
-      p.path === "~/code/projects/openrig-hub")).toBe(true);
+      p.path === "/Users/example/code/projects/openrig-hub")).toBe(true);
   });
 });
 
@@ -1718,7 +1718,7 @@ describe("M3 restore-packet read + validate", () => {
     fs.writeFileSync(src, [
       JSON.stringify({
         type: "session_meta",
-        payload: { cwd: "~/code/projects/openrig-hub", id: "m3-driver@m3-rig" },
+        payload: { cwd: "/Users/example/code/projects/openrig-hub", id: "m3-driver@m3-rig" },
       }),
       JSON.stringify({
         type: "response_item",

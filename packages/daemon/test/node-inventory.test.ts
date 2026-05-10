@@ -196,7 +196,7 @@ describe("Node Inventory Projection", () => {
     db.prepare("INSERT INTO pods (id, rig_id, namespace, label) VALUES (?, ?, ?, ?)").run("pod-2", "rig-2", "platform", "Platform");
     db.prepare(
       "INSERT INTO nodes (id, rig_id, logical_id, runtime, codex_config_profile, cwd, pod_id, agent_ref, profile, resolved_spec_name, resolved_spec_version, resolved_spec_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-    ).run("node-codex", "rig-2", "platform.mac-admin", "codex", "sysadmin", "~", "pod-2", "local:agents/mac-admin", "default", "mac-admin", "1.0.0", "hash");
+    ).run("node-codex", "rig-2", "platform.mac-admin", "codex", "sysadmin", "/Users/example", "pod-2", "local:agents/mac-admin", "default", "mac-admin", "1.0.0", "hash");
     seedSession(db, "node-codex", "platform-mac-admin@kernel", {
       resumeType: "codex_id",
       resumeToken: "sess-456",

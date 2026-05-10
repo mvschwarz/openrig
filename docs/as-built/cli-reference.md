@@ -492,8 +492,8 @@ members:
       ref:
         kind: artifact_set      # v1 rebuild mode supports "artifact_set" only
         value:                  # ordered list, highest-trust first
-          - ~/.openrig/shared-docs/rigs/<rig>/CULTURE.md
-          - ~/.openrig/shared-docs/specs/agents/<role>.md
+          - <substrate-shared-docs>/rigs/<rig>/CULTURE.md
+          - <substrate-shared-docs>/specs/agents/<role>.md
           - /path/to/handover-packet.md
           - /path/to/state/<pod>/<member>.queue.md
           - /path/to/state/<pod>/shared.session.log
