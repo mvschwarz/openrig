@@ -89,6 +89,9 @@ describe("Library page taxonomy", () => {
           ],
         };
       }
+      if (url === "/api/plugins") {
+        return { ok: true, json: async () => [] };
+      }
       if (url === "/api/files/roots") {
         return {
           ok: true,
@@ -145,6 +148,8 @@ describe("Library page taxonomy", () => {
       expect(screen.getByTestId("library-section-agent-images")).toBeDefined();
       expect(screen.getByTestId("library-section-applications")).toBeDefined();
       expect(screen.getByTestId("library-section-skills")).toBeDefined();
+      // Phase 3a slice 3.3 — Plugins category alongside Skills.
+      expect(screen.getByTestId("library-section-plugins")).toBeDefined();
     });
 
     expect(screen.getByText("implementer")).toBeDefined();
@@ -163,6 +168,9 @@ describe("Library page taxonomy", () => {
   it("opens a skill as its own viewer and defaults to SKILL.md", async () => {
     mockFetch.mockImplementation(async (url: string) => {
       if (url === "/api/specs/library" || url === "/api/context-packs/library" || url === "/api/agent-images/library") {
+        return { ok: true, json: async () => [] };
+      }
+      if (url === "/api/plugins") {
         return { ok: true, json: async () => [] };
       }
       if (url === "/api/files/roots") {
@@ -259,9 +267,70 @@ describe("Library page taxonomy", () => {
     expect(await screen.findByText(/Secondary file/)).toBeDefined();
   });
 
+  it("renders Plugins section with discovered plugins (Phase 3a slice 3.3)", async () => {
+    mockFetch.mockImplementation(async (url: string) => {
+      if (url === "/api/specs/library" || url === "/api/context-packs/library" || url === "/api/agent-images/library") {
+        return { ok: true, json: async () => [] };
+      }
+      if (url === "/api/plugins") {
+        return {
+          ok: true,
+          json: async () => [
+            {
+              id: "openrig-core",
+              name: "openrig-core",
+              version: "0.1.0",
+              description: "Canonical OpenRig content",
+              source: "vendored",
+              sourceLabel: "vendored:openrig-core",
+              runtimes: ["claude", "codex"],
+              path: "/x/openrig-core",
+              lastSeenAt: null,
+            },
+            {
+              id: "claude-cache:anthropics/github/1.0.0",
+              name: "github",
+              version: "1.0.0",
+              description: "GitHub integration",
+              source: "claude-cache",
+              sourceLabel: "claude-cache:anthropics/github/1.0.0",
+              runtimes: ["claude"],
+              path: "/y/github",
+              lastSeenAt: null,
+            },
+          ],
+        };
+      }
+      if (url === "/api/files/roots") {
+        return { ok: true, json: async () => ({ roots: [{ name: "workspace", path: "/workspace" }] }) };
+      }
+      // Skill scans return empty so the Skills section doesn't add noise here.
+      if (url.startsWith("/api/files/list")) {
+        return { status: 404, ok: false, json: async () => ({ error: "not_found" }) };
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    });
+
+    renderLibraryPage();
+
+    // Section renders with both plugins listed; source labels distinguish layers.
+    await waitFor(() => {
+      expect(screen.getByTestId("library-section-plugins")).toBeDefined();
+    });
+    expect(await screen.findByTestId("library-plugin-openrig-core")).toBeDefined();
+    expect(await screen.findByTestId("library-plugin-claude-cache:anthropics/github/1.0.0")).toBeDefined();
+
+    // Source labels visible (distinct per source kind — drift discriminator).
+    expect(screen.getByText("vendored:openrig-core")).toBeDefined();
+    expect(screen.getByText("claude-cache:anthropics/github/1.0.0")).toBeDefined();
+  });
+
   it("auto-expands the skills explorer on skill detail routes", async () => {
     mockFetch.mockImplementation(async (url: string) => {
       if (url === "/api/specs/library" || url === "/api/context-packs/library" || url === "/api/agent-images/library") {
+        return { ok: true, json: async () => [] };
+      }
+      if (url === "/api/plugins") {
         return { ok: true, json: async () => [] };
       }
       if (url === "/api/files/roots") {

@@ -53,6 +53,11 @@ import { askRoutes } from "./routes/ask.js";
 import type { AskService } from "./domain/ask-service.js";
 import { specReviewRoutes } from "./routes/spec-review.js";
 import { specLibraryRoutes } from "./routes/spec-library.js";
+// Phase 3a slice 3.3 — plugin discovery routes (read-only).
+// SC-29 EXCEPTION #8 verbatim: see packages/daemon/src/routes/plugins.ts
+// header for full declaration.
+import { pluginsRoutes } from "./routes/plugins.js";
+import type { PluginDiscoveryService } from "./domain/plugin-discovery-service.js";
 import { configRoutes } from "./routes/config.js";
 import { contextPacksRoutes } from "./routes/context-packs.js";
 import { agentImagesRoutes } from "./routes/agent-images.js";
@@ -183,6 +188,12 @@ export interface AppDeps {
   missionControlBearerToken?: string | null;
   specReviewService?: SpecReviewService;
   specLibraryService?: SpecLibraryService;
+  /**
+   * Phase 3a slice 3.3 — plugin discovery service (filesystem-scan over
+   * vendored + claude-cache + codex-cache; reads agent.yaml for used-by).
+   * Read-only; no SQL. SC-29 #8 verbatim declaration in routes/plugins.ts.
+   */
+  pluginDiscoveryService?: PluginDiscoveryService;
   /** Workflows in Spec Library v0 — active workflow lens persistence. */
   activeLensStore?: import("./domain/active-lens-store.js").ActiveLensStore;
   /** Rig Context / Composable Context Injection v0 (PL-014) — context_packs library service. */
@@ -370,6 +381,7 @@ export function createApp(deps: AppDeps): Hono {
     c.set("missionControlNotificationDispatcher" as never, deps.missionControlNotificationDispatcher);
     c.set("specReviewService" as never, deps.specReviewService);
     c.set("specLibraryService" as never, deps.specLibraryService);
+    c.set("pluginDiscoveryService" as never, deps.pluginDiscoveryService);
     c.set("activeLensStore" as never, deps.activeLensStore);
     c.set("contextPackLibrary" as never, deps.contextPackLibrary);
     c.set("agentImageLibrary" as never, deps.agentImageLibrary);
@@ -415,6 +427,7 @@ export function createApp(deps: AppDeps): Hono {
   app.route("/api/ask", askRoutes);
   app.route("/api/specs/review", specReviewRoutes());
   app.route("/api/specs/library", specLibraryRoutes());
+  app.route("/api/plugins", pluginsRoutes());
   app.route("/api/config", configRoutes());
   app.route("/api/context-packs", contextPacksRoutes());
   app.route("/api/agent-images", agentImagesRoutes({

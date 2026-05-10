@@ -8,6 +8,8 @@ import { useAgentImageLibrary, type AgentImageEntry } from "../../hooks/useAgent
 import { useLibrarySkills, type LibrarySkillEntry } from "../../hooks/useLibrarySkills.js";
 import { librarySkillHref } from "../../lib/library-skills-routing.js";
 import { RuntimeBadge, ToolMark } from "../graphics/RuntimeMark.js";
+// Phase 3a slice 3.3 — plugins library category.
+import { usePlugins, type PluginEntry } from "../../hooks/usePlugins.js";
 
 const TOOLBAR_ACTIONS = [
   { label: "+ Add spec", to: "/specs/rig", testId: "specs-toolbar-add" },
@@ -116,6 +118,80 @@ function LibraryRowContent({ row }: { row: LibraryRow }) {
   );
 }
 
+// Phase 3a slice 3.3 — Plugins library section.
+//
+// Mirrors SkillsSection's chrome (border + hard-shadow + header with count),
+// renders one row per discovered plugin with name, version, runtime support
+// badges (claude/codex), source label provenance. Each row links to the
+// plugin detail viewer at /plugins/:id.
+function PluginsSection({
+  plugins,
+  isLoading,
+}: {
+  plugins: PluginEntry[];
+  isLoading: boolean;
+}) {
+  return (
+    <section
+      id="library-plugins"
+      data-testid="library-section-plugins"
+      className="border border-outline-variant bg-white/25 hard-shadow"
+    >
+      <header className="flex items-baseline justify-between border-b border-outline-variant bg-white/30 px-3 py-2">
+        <SectionHeader tone="default">Plugins</SectionHeader>
+        <span className="shrink-0 font-mono text-[9px] uppercase tracking-[0.12em] text-stone-500">
+          {isLoading ? "loading" : `${plugins.length} plugins`}
+        </span>
+      </header>
+      {plugins.length === 0 ? (
+        <div className="px-3 py-4">
+          <EmptyState
+            label={isLoading ? "LOADING" : "NO PLUGINS DISCOVERED"}
+            description={isLoading
+              ? "Loading plugins..."
+              : "Install a Claude Code or Codex plugin (or wait for openrig-core to vendor) to see it appear here."}
+            variant="card"
+            testId="library-plugins-empty"
+          />
+        </div>
+      ) : (
+        <ul className="divide-y divide-outline-variant">
+          {plugins.map((plugin) => (
+            <li key={plugin.id}>
+              <Link
+                to="/plugins/$pluginId"
+                params={{ pluginId: plugin.id }}
+                data-testid={`library-plugin-${plugin.id}`}
+                className="flex items-center justify-between gap-3 px-3 py-2 font-mono hover:bg-stone-100/50"
+              >
+                <span className="flex min-w-0 items-center gap-2">
+                  <ToolMark tool="skill" title={`${plugin.name} plugin`} size="xs" decorative />
+                  <span className="truncate text-xs font-bold text-stone-900">{plugin.name}</span>
+                  <span className="shrink-0 text-[9px] uppercase tracking-[0.08em] text-stone-500">
+                    v{plugin.version}
+                  </span>
+                </span>
+                <span className="flex shrink-0 items-center gap-2 text-[9px] uppercase tracking-[0.08em] text-stone-500">
+                  {plugin.runtimes.map((rt) => (
+                    <span
+                      key={rt}
+                      data-testid={`plugin-runtime-${rt}`}
+                      className="inline-block border border-outline-variant px-1.5 py-0.5 font-mono"
+                    >
+                      {rt}
+                    </span>
+                  ))}
+                  <span title={plugin.path}>{plugin.sourceLabel}</span>
+                </span>
+              </Link>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
 function SkillsSection({
   skills,
   isLoading,
@@ -176,6 +252,8 @@ export function SpecsLibraryPage() {
   const { data: contextPacks = [], isLoading: contextPacksLoading } = useContextPackLibrary();
   const { data: agentImages = [], isLoading: agentImagesLoading } = useAgentImageLibrary();
   const { data: skills = [], isLoading: skillsLoading } = useLibrarySkills();
+  // Phase 3a slice 3.3 — plugins category.
+  const { data: plugins = [], isLoading: pluginsLoading } = usePlugins();
 
   const sections = useMemo(() => {
     const rigSpecs = specs.filter((entry) => entry.kind === "rig" && !entry.hasServices).map(specRow);
@@ -281,7 +359,12 @@ export function SpecsLibraryPage() {
         />
       </div>
 
-      <div className="mt-4">
+      <div className="mt-4 space-y-4">
+        {/* Phase 3a slice 3.3 — Plugins category sits between the spec
+            grid and the Skills folder roundup; both are wide single-
+            column sections rather than grid columns because their row
+            count varies more dramatically than the spec categories. */}
+        <PluginsSection plugins={plugins} isLoading={pluginsLoading} />
         <SkillsSection skills={skills} isLoading={skillsLoading} />
       </div>
     </div>

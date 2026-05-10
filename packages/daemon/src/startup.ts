@@ -75,6 +75,8 @@ import { WorkflowRuntime } from "./domain/workflow-runtime.js";
 import { makeWorkflowKeepalivePolicy } from "./domain/policies/workflow-keepalive.js";
 import { SpecReviewService } from "./domain/spec-review-service.js";
 import { SpecLibraryService } from "./domain/spec-library-service.js";
+// Phase 3a slice 3.3 — plugin discovery service.
+import { PluginDiscoveryService } from "./domain/plugin-discovery-service.js";
 import { ContextPackLibraryService } from "./domain/context-packs/context-pack-library-service.js";
 import { AgentImageLibraryService } from "./domain/agent-images/agent-image-library-service.js";
 import { SnapshotCapturer } from "./domain/agent-images/snapshot-capturer.js";
@@ -653,6 +655,19 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       lib.scan();
       return lib;
     })(),
+    // Phase 3a slice 3.3 — plugin discovery service.
+    // SC-29 EXCEPTION #8 verbatim: see packages/daemon/src/routes/plugins.ts
+    // header. Filesystem-scan over 3 source roots + agent.yaml-parse for
+    // used-by reverse query. No SQL; no mutation. Spec library directory
+    // for used-by uses the same default user spec root as SpecLibraryService
+    // above; one root at v0 (multi-root expansion deferred to a later slice
+    // when spec library hooks its full root list through to discovery).
+    pluginDiscoveryService: new PluginDiscoveryService({
+      openrigPluginsDir: nodePath.join(os.homedir(), ".openrig", "plugins"),
+      claudeCacheDir: nodePath.join(os.homedir(), ".claude", "plugins", "cache"),
+      codexCacheDir: nodePath.join(os.homedir(), ".codex", "plugins", "cache"),
+      specLibraryDir: getDefaultOpenRigPath("specs"),
+    }),
     // PL-014 Item 6: same instance hoisted earlier so the
     // PodRigInstantiator can resolve `kind: context_pack` startup_files
     // entries — sharing the cache means /api/context-packs/* + the
