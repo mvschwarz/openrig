@@ -42,10 +42,11 @@ resources:
   subagents:
     - id: diff-auditor
       path: subagents/diff-auditor.yaml
-  hooks:
-    - id: checkpoint-on-idle
-      path: hooks/checkpoint-on-idle.yaml
-      runtimes: [claude-code]
+  plugins:
+    - id: openrig-core
+      source:
+        kind: local
+        path: ~/.openrig/plugins/openrig-core
   runtime_resources:
     - id: codex-review-toolbar
       path: extensions/codex-review-toolbar/
@@ -70,7 +71,7 @@ profiles:
       skills: [deep-pr-review, acme-standards:repo-rules]
       guidance: [tdd-rules]
       subagents: [diff-auditor]
-      hooks: [checkpoint-on-idle]
+      plugins: [openrig-core]
       runtime_resources: []
 `;
 
@@ -378,7 +379,7 @@ profiles:
       skills: [openrig-user]
       guidance: []
       subagents: []
-      hooks: []
+      plugins: []
       runtime_resources: []
 `);
     const result = validateAgentSpec(raw);

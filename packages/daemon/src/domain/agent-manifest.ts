@@ -170,9 +170,27 @@ export function validateAgentSpec(raw: unknown): ValidationResult {
   }
 
   // Resources
+  // allLocalIds is also used for profile.uses validation below; build it
+  // unconditionally (empty maps when resources block absent) so profiles can
+  // be validated even on specs with no resources block.
+  const allLocalIds: Record<string, Set<string>> = {
+    skills: new Set(),
+    guidance: new Set(),
+    subagents: new Set(),
+    plugins: new Set(),
+    runtime_resources: new Set(),
+  };
+
   if (obj["resources"] && typeof obj["resources"] === "object") {
     const res = obj["resources"] as Record<string, unknown>;
-    const allLocalIds: Record<string, Set<string>> = {};
+
+    // Reject legacy resources.hooks field with explicit migration error.
+    // Per redo-guard-2 BLOCKING-CONCERN 2026-05-10: silent-drop in normalize
+    // is not adequate backward-compat — operator must get clear error
+    // pointing at the migration target so they update their spec.
+    if (res["hooks"] !== undefined) {
+      errors.push(`resources.hooks: removed in plugin-primitive (Phase 3a). Hooks now ship inside plugins; declare a plugin under resources.plugins[] instead. See plugin-primitive DESIGN.md §3.`);
+    }
 
     for (const category of ["skills", "guidance", "subagents", "plugins", "runtime_resources"]) {
       const items = res[category];
@@ -203,34 +221,41 @@ export function validateAgentSpec(raw: unknown): ValidationResult {
             }
           }
         }
-      } else {
-        allLocalIds[category] = new Set();
       }
     }
+  }
 
-    // Profile uses validation
-    if (obj["profiles"] && typeof obj["profiles"] === "object" && !Array.isArray(obj["profiles"])) {
-      for (const [profileName, profileRaw] of Object.entries(obj["profiles"] as Record<string, unknown>)) {
-        if (profileRaw && typeof profileRaw === "object") {
-          const p = profileRaw as Record<string, unknown>;
-          if (p["uses"] && typeof p["uses"] === "object") {
-            const uses = p["uses"] as Record<string, unknown>;
-            for (const category of ["skills", "guidance", "subagents", "plugins", "runtime_resources"]) {
-              const refs = uses[category];
-              if (Array.isArray(refs)) {
-                for (const ref of refs as string[]) {
-                  // Qualified refs (namespace:id) are accepted for later resolution
-                  if (typeof ref === "string" && ref.includes(":")) {
-                    const parts = ref.split(":");
-                    if (parts.length < 2 || !parts[0] || !parts[1]) {
-                      errors.push(`profiles.${profileName}.uses.${category}: invalid qualified ref "${ref}" (must be namespace:id)`);
-                    }
-                    // Otherwise accepted — import resolution in AS-T03
-                  } else if (typeof ref === "string") {
-                    // Unqualified ref must exist in local declarations
-                    if (!allLocalIds[category]?.has(ref) && !hasImports) {
-                      errors.push(`profiles.${profileName}.uses.${category}: resource "${ref}" not found in declared resources`);
-                    }
+  // Profile uses validation — runs even when no resources block declared so
+  // legacy profile.uses.hooks rejection + missing-ref detection cover all
+  // spec shapes.
+  if (obj["profiles"] && typeof obj["profiles"] === "object" && !Array.isArray(obj["profiles"])) {
+    for (const [profileName, profileRaw] of Object.entries(obj["profiles"] as Record<string, unknown>)) {
+      if (profileRaw && typeof profileRaw === "object") {
+        const p = profileRaw as Record<string, unknown>;
+        if (p["uses"] && typeof p["uses"] === "object") {
+          const uses = p["uses"] as Record<string, unknown>;
+
+          // Reject legacy profile.uses.hooks field with explicit migration error.
+          // Per redo-guard-2 BLOCKING-CONCERN 2026-05-10.
+          if (uses["hooks"] !== undefined) {
+            errors.push(`profiles.${profileName}.uses.hooks: removed in plugin-primitive (Phase 3a). Reference plugins via profiles.${profileName}.uses.plugins[] instead.`);
+          }
+
+          for (const category of ["skills", "guidance", "subagents", "plugins", "runtime_resources"]) {
+            const refs = uses[category];
+            if (Array.isArray(refs)) {
+              for (const ref of refs as string[]) {
+                // Qualified refs (namespace:id) are accepted for later resolution
+                if (typeof ref === "string" && ref.includes(":")) {
+                  const parts = ref.split(":");
+                  if (parts.length < 2 || !parts[0] || !parts[1]) {
+                    errors.push(`profiles.${profileName}.uses.${category}: invalid qualified ref "${ref}" (must be namespace:id)`);
+                  }
+                  // Otherwise accepted — import resolution in AS-T03
+                } else if (typeof ref === "string") {
+                  // Unqualified ref must exist in local declarations
+                  if (!allLocalIds[category]?.has(ref) && !hasImports) {
+                    errors.push(`profiles.${profileName}.uses.${category}: resource "${ref}" not found in declared resources`);
                   }
                 }
               }

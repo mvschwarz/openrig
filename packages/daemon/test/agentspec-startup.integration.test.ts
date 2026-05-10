@@ -214,7 +214,6 @@ profiles:
       skills: [openrig-user]
       guidance: []
       subagents: []
-      hooks: []
       runtime_resources: []
 `.trim(),
       [`${rigRoot}/agents/shared/agent.yaml`]: `
