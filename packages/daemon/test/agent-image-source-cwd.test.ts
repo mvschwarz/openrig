@@ -63,7 +63,7 @@ function writeImage(root: string, name: string, manifest: string): void {
 // Test 1 — manifest captures source_cwd at create (snapshot capturer)
 // ============================================================================
 
-describe("PL-016 Finding 2 — snapshot capturer captures source_cwd", () => {
+describe("agent image source_cwd — snapshot capturer captures cwd", () => {
   function setupDb(): { db: Database.Database; rigRepo: RigRepository; sessionRegistry: SessionRegistry } {
     const db = createDb();
     migrate(db, [
@@ -230,7 +230,7 @@ describe("PL-016 Finding 2 — snapshot capturer captures source_cwd", () => {
 // Test 2 — snippet generator emits cwd in the Use-as-starter YAML
 // ============================================================================
 
-describe("PL-016 Finding 2 — snippet generator emits cwd:<source_cwd>", () => {
+describe("agent image source_cwd — snippet generator emits cwd", () => {
   function buildApp(library: AgentImageLibraryService): Hono {
     const app = new Hono();
     app.use("*", async (c, next) => {
@@ -291,7 +291,7 @@ files: []
     expect(body.starterSnippet).toContain("session_source:");
   });
 
-  it("library entry surfaces sourceCwd verbatim (null when manifest predates Finding 2)", async () => {
+  it("library entry surfaces sourceCwd verbatim when present and null for older manifests", async () => {
     writeImage(userRoot, "with-cwd", `
 name: with-cwd
 version: 1
@@ -328,7 +328,7 @@ files: []
 // Test 3 — parser back-compat (snake + camel + missing)
 // ============================================================================
 
-describe("PL-016 Finding 2 — manifest parser back-compat", () => {
+describe("agent image source_cwd — manifest parser back-compat", () => {
   it("accepts source_cwd (snake_case)", () => {
     const manifest = parseAgentImageManifest(`
 name: x
@@ -381,7 +381,7 @@ source_resume_token: t
 // a documented red flag: if some future patch adds an override here,
 // the test fails and the author must explicitly justify.
 
-describe("PL-016 Finding 2 — operator-override safety (no daemon cwd magic)", () => {
+describe("agent image source_cwd — operator-override safety", () => {
   it("rigspec-instantiator does NOT mutate member.cwd from agent_image manifest", async () => {
     const fs = await import("node:fs/promises");
     const src = await fs.readFile(

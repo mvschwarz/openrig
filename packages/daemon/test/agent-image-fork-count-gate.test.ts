@@ -1,5 +1,5 @@
 // PL-016 hardening v0+1 — fork_count gating integration test
-// (review-lead live e2e finding 4, 2026-05-04).
+// for failed-launch accounting.
 //
 // Pins: when an agent_image-backed launch FAILS at the
 // startupOrchestrator stage, the AgentImageLibraryService receives
@@ -136,7 +136,7 @@ function makeStubLibrary(): AgentImageLibraryService {
   return lib;
 }
 
-describe("agent_image fork_count gating on launch outcome (PL-016 hardening v0+1 finding 4)", () => {
+describe("agent_image fork_count gating on launch outcome", () => {
   it("FAILED launch: recordConsumption called once with { incrementForkCount: false } only", async () => {
     const db = createFullTestDb();
     const rigRepo = new RigRepository(db);

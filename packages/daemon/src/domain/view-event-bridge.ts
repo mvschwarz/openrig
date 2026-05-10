@@ -13,9 +13,8 @@ import { BUILT_IN_VIEW_NAMES } from "./view-projector.js";
  * because nothing in production wires queue/project mutations to the
  * view.changed event source.
  *
- * Per PRD § L5 acceptance criterion: "view-projector emits view.changed
- * when underlying state changes" + slice IMPL § Guard Checkpoint Focus
- * item 8 + R1 guard finding 2.
+ * PRD § L5 acceptance criterion: "view-projector emits view.changed
+ * when underlying state changes".
  *
  * Mapping (event type → affected built-in views):
  * - queue.created            → recently-active, founder, pod-load, activity

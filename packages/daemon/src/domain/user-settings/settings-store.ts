@@ -74,34 +74,34 @@ export const SETTINGS_VALID_KEYS = [
 
 export type SettingsValidKey = typeof SETTINGS_VALID_KEYS[number];
 
-const ENV_MAP: Record<SettingsValidKey, { primary: string; legacy: string }> = {
+const ENV_MAP: Record<SettingsValidKey, { primary: string; legacy?: string }> = {
   "daemon.port": { primary: "OPENRIG_PORT", legacy: "RIGGED_PORT" },
   "daemon.host": { primary: "OPENRIG_HOST", legacy: "RIGGED_HOST" },
   "db.path": { primary: "OPENRIG_DB", legacy: "RIGGED_DB" },
   "transcripts.enabled": { primary: "OPENRIG_TRANSCRIPTS_ENABLED", legacy: "RIGGED_TRANSCRIPTS_ENABLED" },
   "transcripts.path": { primary: "OPENRIG_TRANSCRIPTS_PATH", legacy: "RIGGED_TRANSCRIPTS_PATH" },
-  "transcripts.lines": { primary: "OPENRIG_TRANSCRIPTS_LINES", legacy: "RIGGED_TRANSCRIPTS_LINES" },
-  "transcripts.poll_interval_seconds": { primary: "OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS", legacy: "RIGGED_TRANSCRIPTS_POLL_INTERVAL_SECONDS" },
-  "workspace.root": { primary: "OPENRIG_WORKSPACE_ROOT", legacy: "RIGGED_WORKSPACE_ROOT" },
-  "workspace.slices_root": { primary: "OPENRIG_WORKSPACE_SLICES_ROOT", legacy: "RIGGED_WORKSPACE_SLICES_ROOT" },
-  "workspace.steering_path": { primary: "OPENRIG_WORKSPACE_STEERING_PATH", legacy: "RIGGED_WORKSPACE_STEERING_PATH" },
-  "workspace.field_notes_root": { primary: "OPENRIG_WORKSPACE_FIELD_NOTES_ROOT", legacy: "RIGGED_WORKSPACE_FIELD_NOTES_ROOT" },
-  "workspace.specs_root": { primary: "OPENRIG_WORKSPACE_SPECS_ROOT", legacy: "RIGGED_WORKSPACE_SPECS_ROOT" },
-  "workspace.dogfood_evidence_root": { primary: "OPENRIG_DOGFOOD_EVIDENCE_ROOT", legacy: "RIGGED_DOGFOOD_EVIDENCE_ROOT" },
-  "files.allowlist": { primary: "OPENRIG_FILES_ALLOWLIST", legacy: "RIGGED_FILES_ALLOWLIST" },
-  "progress.scan_roots": { primary: "OPENRIG_PROGRESS_SCAN_ROOTS", legacy: "RIGGED_PROGRESS_SCAN_ROOTS" },
-  "ui.preview.refresh_interval_seconds": { primary: "OPENRIG_UI_PREVIEW_REFRESH_INTERVAL_SECONDS", legacy: "RIGGED_UI_PREVIEW_REFRESH_INTERVAL_SECONDS" },
-  "ui.preview.max_pins": { primary: "OPENRIG_UI_PREVIEW_MAX_PINS", legacy: "RIGGED_UI_PREVIEW_MAX_PINS" },
-  "ui.preview.default_lines": { primary: "OPENRIG_UI_PREVIEW_DEFAULT_LINES", legacy: "RIGGED_UI_PREVIEW_DEFAULT_LINES" },
-  "recovery.auto_drive_provider_prompts": { primary: "OPENRIG_RECOVERY_AUTO_DRIVE_PROVIDER_PROMPTS", legacy: "RIGGED_RECOVERY_AUTO_DRIVE_PROVIDER_PROMPTS" },
-  "recovery.provider_auth_env_allowlist": { primary: "OPENRIG_RECOVERY_PROVIDER_AUTH_ENV_ALLOWLIST", legacy: "RIGGED_RECOVERY_PROVIDER_AUTH_ENV_ALLOWLIST" },
-  "agents.advisor_session": { primary: "OPENRIG_AGENTS_ADVISOR_SESSION", legacy: "RIGGED_AGENTS_ADVISOR_SESSION" },
-  "agents.operator_session": { primary: "OPENRIG_AGENTS_OPERATOR_SESSION", legacy: "RIGGED_AGENTS_OPERATOR_SESSION" },
-  "feed.subscriptions.action_required": { primary: "OPENRIG_FEED_SUBSCRIPTIONS_ACTION_REQUIRED", legacy: "RIGGED_FEED_SUBSCRIPTIONS_ACTION_REQUIRED" },
-  "feed.subscriptions.approvals": { primary: "OPENRIG_FEED_SUBSCRIPTIONS_APPROVALS", legacy: "RIGGED_FEED_SUBSCRIPTIONS_APPROVALS" },
-  "feed.subscriptions.shipped": { primary: "OPENRIG_FEED_SUBSCRIPTIONS_SHIPPED", legacy: "RIGGED_FEED_SUBSCRIPTIONS_SHIPPED" },
-  "feed.subscriptions.progress": { primary: "OPENRIG_FEED_SUBSCRIPTIONS_PROGRESS", legacy: "RIGGED_FEED_SUBSCRIPTIONS_PROGRESS" },
-  "feed.subscriptions.audit_log": { primary: "OPENRIG_FEED_SUBSCRIPTIONS_AUDIT_LOG", legacy: "RIGGED_FEED_SUBSCRIPTIONS_AUDIT_LOG" },
+  "transcripts.lines": { primary: "OPENRIG_TRANSCRIPTS_LINES" },
+  "transcripts.poll_interval_seconds": { primary: "OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS" },
+  "workspace.root": { primary: "OPENRIG_WORKSPACE_ROOT" },
+  "workspace.slices_root": { primary: "OPENRIG_WORKSPACE_SLICES_ROOT" },
+  "workspace.steering_path": { primary: "OPENRIG_WORKSPACE_STEERING_PATH" },
+  "workspace.field_notes_root": { primary: "OPENRIG_WORKSPACE_FIELD_NOTES_ROOT" },
+  "workspace.specs_root": { primary: "OPENRIG_WORKSPACE_SPECS_ROOT" },
+  "workspace.dogfood_evidence_root": { primary: "OPENRIG_DOGFOOD_EVIDENCE_ROOT" },
+  "files.allowlist": { primary: "OPENRIG_FILES_ALLOWLIST" },
+  "progress.scan_roots": { primary: "OPENRIG_PROGRESS_SCAN_ROOTS" },
+  "ui.preview.refresh_interval_seconds": { primary: "OPENRIG_UI_PREVIEW_REFRESH_INTERVAL_SECONDS" },
+  "ui.preview.max_pins": { primary: "OPENRIG_UI_PREVIEW_MAX_PINS" },
+  "ui.preview.default_lines": { primary: "OPENRIG_UI_PREVIEW_DEFAULT_LINES" },
+  "recovery.auto_drive_provider_prompts": { primary: "OPENRIG_RECOVERY_AUTO_DRIVE_PROVIDER_PROMPTS" },
+  "recovery.provider_auth_env_allowlist": { primary: "OPENRIG_RECOVERY_PROVIDER_AUTH_ENV_ALLOWLIST" },
+  "agents.advisor_session": { primary: "OPENRIG_AGENTS_ADVISOR_SESSION" },
+  "agents.operator_session": { primary: "OPENRIG_AGENTS_OPERATOR_SESSION" },
+  "feed.subscriptions.action_required": { primary: "OPENRIG_FEED_SUBSCRIPTIONS_ACTION_REQUIRED" },
+  "feed.subscriptions.approvals": { primary: "OPENRIG_FEED_SUBSCRIPTIONS_APPROVALS" },
+  "feed.subscriptions.shipped": { primary: "OPENRIG_FEED_SUBSCRIPTIONS_SHIPPED" },
+  "feed.subscriptions.progress": { primary: "OPENRIG_FEED_SUBSCRIPTIONS_PROGRESS" },
+  "feed.subscriptions.audit_log": { primary: "OPENRIG_FEED_SUBSCRIPTIONS_AUDIT_LOG" },
 };
 
 const KEY_TO_PATH: Record<SettingsValidKey, string[]> = {
@@ -146,11 +146,13 @@ export function isSettingsValidKey(key: string): key is SettingsValidKey {
   return (SETTINGS_VALID_KEYS as readonly string[]).includes(key);
 }
 
-function readEnv(primary: string, legacy: string): string | undefined {
+function readEnv(primary: string, legacy?: string): string | undefined {
   const p = process.env[primary];
   if (p !== undefined && p !== "") return p;
-  const l = process.env[legacy];
-  if (l !== undefined && l !== "") return l;
+  if (legacy) {
+    const l = process.env[legacy];
+    if (l !== undefined && l !== "") return l;
+  }
   return undefined;
 }
 

@@ -8,8 +8,7 @@ import type { ResolvedStartupFile } from "./runtime-adapter.js";
  * Mirrors the v0 wrapper-tier `bin/agent-starter-resolve` semantics:
  * read the named registry entry; run the path-aware no-credentials scan;
  * THROW on a failed scan (the orchestrator MUST treat any throw as a
- * hard launch failure — see review-independent finding 2 in the slice
- * IMPL); on a clean scan, emit a `ResolvedStartupFile[]` rooted at the
+ * hard launch failure); on a clean scan, emit a `ResolvedStartupFile[]` rooted at the
  * registry directory.
  *
  * v0 wrapper references:
@@ -55,8 +54,8 @@ export interface AgentStarterResolveResult {
 }
 
 /**
- * Thrown by `resolveStarter` when the no-credentials scan fails. Per
- * review-independent finding 2, the resolver MUST throw rather than
+ * Thrown by `resolveStarter` when the no-credentials scan fails. The
+ * resolver MUST throw rather than
  * return a structured "ok: false" result the orchestrator could ignore;
  * a failed scan is a hard refusal point that aborts the launch.
  */
@@ -172,8 +171,8 @@ export class AgentStarterResolver {
 
     // Path-aware + content-aware credential scan. Mirrors the v0 wrapper
     // helper at `specs/agent-starters/lib/agent-starter-helpers.sh`
-    // `scan_starter_file`. THROWS on match (per finding 2: refuse, do
-    // not return).
+    // `scan_starter_file`. THROWS on match instead of returning a
+    // recoverable result.
     const scanResult = scanForCredentials(content, registryPath);
     if (!scanResult.ok) {
       throw new AgentStarterCredentialScanFailedError(name, scanResult.reason);
@@ -247,7 +246,7 @@ function scanForCredentials(
     // the deny-list is meant to catch. Operators see refusal code + line
     // number + file path; that's enough to triage. Closes the v0 wrapper
     // diagnostic-`match`-field caveat at the daemon-tier productization
-    // layer (per M1 Revision 2 finding 3).
+    // layer.
     for (const literal of CRED_PATH_LITERALS) {
       if (line.includes(literal)) {
         return {

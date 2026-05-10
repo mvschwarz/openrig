@@ -1,11 +1,10 @@
 // V1 polish slice Phase 5.1 P5.1-3 — pod name truncation regression guard.
 //
-// Founder noticed pod names rendering as "covery" / "anning" / etc.
-// at the live VM walk post-V1-ship. Root cause: displayPodName was
-// calling shortId(podId, 6) which returns the LAST 6 chars of any
-// input — designed for 26-char ULIDs but WRONG for human-readable pod
-// namespaces. The fix returns podId verbatim. This test permanently
-// guards the symptoms the founder reported plus the underlying contract.
+// Pod names were rendering as "covery" / "anning" / etc. Root cause:
+// displayPodName was calling shortId(podId, 6), which returns the LAST
+// 6 chars of any input — designed for 26-char ULIDs but WRONG for
+// human-readable pod namespaces. The fix returns podId verbatim. This
+// test permanently guards the symptom plus the underlying contract.
 
 import { describe, it, expect } from "vitest";
 import { displayPodName, inferPodName, displayAgentName } from "../src/lib/display-name.js";

@@ -1,6 +1,6 @@
 // V1 polish slice Phase 5.1 P5.1-3: pod name truncation bug fix.
-// Founder noticed pod names rendering as "covery" / "anning" — first 2-3
-// chars cut. Root cause: displayPodName was calling shortId(podId, 6)
+// Pod names were rendering as "covery" / "anning" — first 2-3 chars
+// cut. Root cause: displayPodName was calling shortId(podId, 6)
 // which returns the LAST 6 chars of any string — fine for 26-char ULIDs
 // (random tail more distinguishable than timestamp head) but WRONG for
 // human-readable pod namespaces ("discovery" / "planning" / "kernel"

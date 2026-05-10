@@ -1,8 +1,8 @@
 // User Settings v0 — UI hooks for the daemon /api/config route.
 //
 // Consumed by the System drawer Settings tab. Bypasses CLI shell-out
-// per founder dialog (CLI is the canonical agent-edit path; UI uses
-// the daemon HTTP route directly).
+// because the CLI remains the canonical agent-edit path while UI reads
+// and writes settings through the daemon HTTP route directly.
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 

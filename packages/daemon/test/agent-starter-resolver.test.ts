@@ -1,8 +1,8 @@
 // Tier 1 proof for the Agent Starter v1 vertical M1 resolver:
 // AgentStarterResolver class + AgentStarterCredentialScanFailedError.
 // Per slice IMPL § File: agent-starter-resolver.ts: the resolver MUST
-// throw on a failed no-credentials scan (review-independent finding 2 —
-// resolver does NOT return a "result" the orchestrator can ignore).
+// throw on a failed no-credentials scan; it does NOT return a "result"
+// the orchestrator can ignore.
 
 import { describe, it, expect } from "vitest";
 import {
@@ -110,7 +110,7 @@ describe("AgentStarterResolver (M1)", () => {
     expect(file.required).toBe(true);
   });
 
-  // === Credential-scan refusal (Finding 2: THROWS, does not return) ===
+  // === Credential-scan refusal: THROWS, does not return ===
 
   it("THROWS AgentStarterCredentialScanFailedError on credential-path match", () => {
     const malicious = CLEAN_ENTRY.replace(

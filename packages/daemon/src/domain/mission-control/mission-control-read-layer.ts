@@ -211,7 +211,6 @@ export class MissionControlReadLayer {
   }
 
   private readRecentShips(): MissionControlReadResult {
-    // Founder Q4: 10 by default.
     const done = this.queueRepo.list({
       state: ["done", "handed-off"],
       limit: RECENT_SHIPS_LIMIT * 4,

@@ -1072,8 +1072,7 @@ export class PodRigInstantiator {
     // fork using the image's resume token). Mutually exclusive on a member.
     let forkSourceOpt: { forkSource: { kind: "native_id" | "artifact_path" | "name" | "last"; value?: string } } | undefined;
     let rebuildArtifactsOpt: { rebuildArtifacts: import("./runtime-adapter.js").ResolvedStartupFile[] } | undefined;
-    // PL-016 hardening v0+1 (review-lead live e2e finding 4): the
-    // consumed image id + library handle stash so the post-launch block
+    // Stash the consumed image id + library handle so the post-launch block
     // can bump fork_count only on startupResult.ok===true (lastUsedAt
     // already bumped optimistically in the dispatch branch).
     let consumedAgentImageId: string | undefined;
@@ -1125,8 +1124,7 @@ export class PodRigInstantiator {
       forkSourceOpt = {
         forkSource: { kind: "native_id", value: image.sourceResumeToken },
       };
-      // PL-016 hardening v0+1 (review-lead live e2e finding 4, 2026-05-04):
-      // pre-launch bump of lastUsedAt only — records the operator's
+      // Pre-launch bump of lastUsedAt only — records the operator's
       // INTENT to consume the image. forkCount increments later, gated
       // on startupResult.ok===true (see post-startNode block below).
       // Best-effort: stat-write failures don't abort launch.
@@ -1147,8 +1145,7 @@ export class PodRigInstantiator {
     // layer chain). The resolver THROWS on a failed credential scan, missing
     // registry entry, or malformed YAML; on any throw we abort the launch
     // BEFORE `startNode` runs (no STARTER layer added; no adapter
-    // `deliverStartup` called) — load-bearing credential-safety contract per
-    // M1 R1 finding 2.
+    // `deliverStartup` called) — load-bearing credential-safety contract.
     let starterArtifacts: import("./runtime-adapter.js").ResolvedStartupFile[] | undefined;
     if (input.member.starterRef) {
       const { AgentStarterResolver } = await import("./agent-starter-resolver.js");
@@ -1198,8 +1195,7 @@ export class PodRigInstantiator {
       ...(rebuildArtifactsOpt ?? {}),
     });
 
-    // PL-016 hardening v0+1 (review-lead live e2e finding 4, 2026-05-04):
-    // bump fork_count only on launch success. lastUsedAt already
+    // Bump fork_count only on launch success. lastUsedAt already
     // updated optimistically in the agent_image dispatch branch above.
     if (startupResult.ok && consumedAgentImageId && consumedAgentImageLibrary) {
       try {

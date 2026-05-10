@@ -17,7 +17,7 @@ const widthClass: Record<VellumSheetWidth, string> = {
   // V1 calibration 2026-05-06 (universal-shell.md L36 + content-drawer.md L9):
   // 38rem (~608px) = iPad-portrait reading width. Wide enough for markdown /
   // spec docs, narrow enough to keep center workspace visible behind it.
-  // Original spec was 45rem; calibrated after founder walk.
+  // Original spec was 45rem; later calibrated to the current shell width.
   wide: "w-full lg:w-[38rem] lg:max-w-[80vw]",
   narrow: "w-full lg:w-[22rem] lg:max-w-[60vw]",
 };

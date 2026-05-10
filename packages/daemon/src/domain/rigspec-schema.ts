@@ -423,9 +423,9 @@ function validateMember(member: Record<string, unknown>, index: number, podPrefi
   // - Rejects malformed name.
   // - Rejects terminal runtime (analogous to terminal session_source rejection;
   //   terminal `deliverStartup` is a no-op so a starter has nothing to seed).
-  // - Rejects starter_ref + session_source.mode=fork composition (per slice
-  //   review-independent finding 1; the v1+ "Real native-fork-from-registered-
-  //   thread-id starter proof" trigger covers that case).
+  // - Rejects starter_ref + session_source.mode=fork composition; the v1+
+  //   "Real native-fork-from-registered-thread-id starter proof" trigger
+  //   covers that case.
   // - Accepts starter_ref + session_source.mode=rebuild (additive: both
   //   apply on fresh_start; rebuild artifacts and starter artifacts compose
   //   independently in the launch pipeline).

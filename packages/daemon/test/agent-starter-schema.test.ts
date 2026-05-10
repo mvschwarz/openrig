@@ -2,10 +2,9 @@
 // vertical M1: types.ts adds StarterRefSpec + starterRef? on
 // RigSpecPodMember; rigspec-schema.ts adds validateStarterRef +
 // normalizeStarterRef. The packet enforces three rejection rules at v0:
-// (1) starter_ref + session_source.mode="fork" — review-independent
-// finding 1; (2) terminal runtime + starter_ref — secondary cleanup;
-// (3) malformed starter_ref.name. Composition with mode="rebuild" is
-// accepted; starter_ref alone is accepted.
+// (1) starter_ref + session_source.mode="fork"; (2) terminal runtime +
+// starter_ref; (3) malformed starter_ref.name. Composition with
+// mode="rebuild" is accepted; starter_ref alone is accepted.
 
 import { describe, it, expect } from "vitest";
 import { RigSpecSchema } from "../src/domain/rigspec-schema.js";
@@ -123,7 +122,7 @@ describe("RigSpec starter_ref schema (M1)", () => {
     expect(result.errors.some((e) => e.includes("starter_ref") && e.includes("object"))).toBe(true);
   });
 
-  // === Rejection: composition with session_source.mode='fork' (Finding 1) ===
+  // === Rejection: composition with session_source.mode='fork' ===
 
   it("REJECTS starter_ref + session_source.mode='fork' (v1+ named-trigger covers this composition)", () => {
     const rig = rigWithMember({

@@ -1,8 +1,8 @@
 // Tier 1 proof for the Agent Starter v1 vertical M2 Revision 2 — real
 // `ClaudeCodeAdapter` proof. M2 R1 used a mock RuntimeAdapter and only
 // asserted the spy received a STARTER ResolvedStartupFile, which is
-// caller-wiring proof, not adapter behavior. Guard blocked on this
-// (Finding 1). M2 R2 instantiates the real `ClaudeCodeAdapter` and
+// caller-wiring proof, not adapter behavior. M2 R2 instantiates the real
+// `ClaudeCodeAdapter` and
 // mocks at the tmux boundary; the proof is that real `deliverStartup`
 // exercises `guidance_merge` and writes the starter content into the
 // per-seat CLAUDE.md managed block.

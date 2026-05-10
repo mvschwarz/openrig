@@ -812,10 +812,9 @@ export class QueueRepository {
    * on /api/views/:name/sse for normal state transitions (pending → blocked,
    * in-progress → done, closure, escalation). Phase A write semantics are
    * UNCHANGED — only an additional event emission inside the existing
-   * transaction. Per slice IMPL § Guard Checkpoint Focus item 9, this is
-   * an explicit narrow event-only extension to a Phase A write surface,
-   * justified by the R2 guard finding that update-path mutations were
-   * invisible to the view bridge.
+   * transaction. This is an explicit narrow event-only extension to a
+   * Phase A write surface so update-path mutations are visible to the
+   * view bridge.
    */
   update(input: QueueUpdateInput): QueueItem {
     const txn = this.db.transaction(() => this.updateInTransactionalContext(input));

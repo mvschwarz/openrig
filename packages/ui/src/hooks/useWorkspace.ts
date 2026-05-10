@@ -10,7 +10,7 @@
 //     gracefully — surfaces simply skip the badge column)
 //
 // Defensive: every consumer must Array.isArray-guard `repos[]` before
-// iteration (founder rule for cross-CLI drift).
+// iteration so cross-CLI-version drift degrades gracefully.
 //
 // Note: /api/whoami requires either nodeId or sessionName query param.
 // In a UI session that has no node identity (browser tab not bound to

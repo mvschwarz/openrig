@@ -261,9 +261,8 @@ export function Explorer({
   //   (.vellum class from globals.css L113-117 — rgba(255,255,255,0.4)
   //   + backdrop-blur(8px)) with elevated z-index so the graph canvas
   //   underneath shows through. Sheets-of-vellum-layered aesthetic per
-  //   universal-shell.md L48. Founder calibration 2026-05-06: vellum
-  //   (40%) reads coherent with the baseline 3.5% opacity Phase 2 had;
-  //   vellum-heavy (70%) was too dense.
+  //   universal-shell.md L48. Vellum (40%) reads coherent with the
+  //   baseline 3.5% opacity Phase 2 had; vellum-heavy (70%) was too dense.
   const isOverlay = overlayMode === "overlay";
   const isCollapsed = desktopMode === "hidden";
 

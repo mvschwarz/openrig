@@ -969,8 +969,8 @@ describe("Up CLI", () => {
   // stage with the resolved starter ResolvedStartupFile shape; the CLI's
   // --json mode renders the full daemon response, so the starter content
   // surfaces verbatim in plan output. M2 R1 only asserted argument
-  // forwarding — Guard Finding 3 — which proved nothing about plan
-  // visibility of starter resolution.
+  // forwarding, which proved nothing about plan visibility of starter
+  // resolution.
   it("M2 R2: rig up --plan --json against a starter_ref fixture spec surfaces resolved starter contents", async () => {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const fs = await import("node:fs");

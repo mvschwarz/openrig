@@ -46,8 +46,7 @@ import type { Migration } from "../migrate.js";
  * Archive policy hooks: not implemented as automatic v1; the table is
  * append-only and grows unbounded. Future archive can move rows older
  * than N days into a sibling archive table OR export to filesystem.
- * Founder Q5 explicitly defers JSONL mirror unless a concrete
- * durability need surfaces in dogfood.
+ * JSONL mirror is deferred unless a concrete durability need surfaces.
  */
 export const missionControlActionsSchema: Migration = {
   name: "037_mission_control_actions.sql",

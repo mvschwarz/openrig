@@ -37,7 +37,7 @@ export interface AgentImageManifest {
    *  jsonl file lives there. The daemon does NOT override cwd at fork
    *  dispatch — if operator manually changes the rig.yaml cwd, fork
    *  fails honestly with "no conversation found". Optional: manifests
-   *  authored before Finding 2 omit this field; snippet renders
+   *  authored before source_cwd support omit this field; snippet renders
    *  without cwd line for back-compat. */
   sourceCwd?: string;
   createdAt: string;
@@ -89,8 +89,8 @@ export interface AgentImageEntry {
   runtime: AgentImageRuntime;
   sourceSeat: string;
   sourceSessionId: string;
-  /** PL-016 Finding 2 — source seat's cwd at snapshot time. null when
-   *  manifest predates Finding 2 fix (back-compat surface). Consumed
+  /** Source seat's cwd at snapshot time. null when the manifest predates
+   *  source_cwd support (back-compat surface). Consumed
    *  by the Use-as-starter snippet generator. */
   sourceCwd: string | null;
   notes: string | null;

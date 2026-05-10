@@ -1,5 +1,5 @@
 // PL-016 hardening v0+1 — `rig agent-image create` --image-version flag
-// test (review-lead live e2e finding 3, 2026-05-04).
+// regression test.
 //
 // Pins:
 //   - --image-version <v> propagates as body.version on the snapshot POST
@@ -89,7 +89,7 @@ function createMockDaemon(captured: CapturedCall[]) {
   };
 }
 
-describe("rig agent-image create — --image-version flag (PL-016 hardening v0+1 finding 3)", () => {
+describe("rig agent-image create — --image-version flag", () => {
   const captured: CapturedCall[] = [];
   let srv: ReturnType<typeof createMockDaemon>;
   let port: number;

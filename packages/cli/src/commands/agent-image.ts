@@ -217,8 +217,7 @@ Examples:
     .argument("<source-session>", "Source session canonical name (e.g., velocity-driver@openrig-velocity)")
     .description("Capture a productive seat's resumable state into a new agent image")
     .requiredOption("--name <name>", "Image name (used as the directory name and library id)")
-    // PL-016 hardening v0+1 (review-lead live e2e finding 3, 2026-05-04):
-    // renamed from --version to --image-version because Commander.js
+    // Use --image-version instead of --version because Commander.js
     // intercepts the global --version flag (prints CLI version + exits
     // 0 silently). Per-command name resolves the collision without
     // losing the global --version surface.

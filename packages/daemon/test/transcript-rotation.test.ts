@@ -41,8 +41,6 @@ afterEach(() => {
   // Clear env var overrides set by individual tests.
   delete process.env.OPENRIG_TRANSCRIPTS_LINES;
   delete process.env.OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS;
-  delete process.env.RIGGED_TRANSCRIPTS_LINES;
-  delete process.env.RIGGED_TRANSCRIPTS_POLL_INTERVAL_SECONDS;
 });
 
 describe("startTranscriptRotation — capture-pane invocation contract", () => {
@@ -186,14 +184,6 @@ describe("getTranscriptRotationOptionsFromEnv — env override + defaults", () =
     const opts = getTranscriptRotationOptionsFromEnv();
     expect(opts.lines).toBe(500);
     expect(opts.pollIntervalMs).toBe(5000);
-  });
-
-  it("falls back to legacy RIGGED_* env vars when OPENRIG_* unset", () => {
-    process.env.RIGGED_TRANSCRIPTS_LINES = "250";
-    process.env.RIGGED_TRANSCRIPTS_POLL_INTERVAL_SECONDS = "10";
-    const opts = getTranscriptRotationOptionsFromEnv();
-    expect(opts.lines).toBe(250);
-    expect(opts.pollIntervalMs).toBe(10_000);
   });
 
   it("rejects non-positive / non-numeric values and uses defaults", () => {
