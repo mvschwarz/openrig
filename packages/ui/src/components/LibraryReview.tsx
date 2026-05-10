@@ -68,7 +68,7 @@ function ProvenanceBadge({ sourcePath, sourceState }: { sourcePath: string; sour
 function LibraryAgentReviewPage({ review }: { review: LibraryAgentReview }) {
   const navigate = useNavigate();
   const profiles = review.profiles ?? [];
-  const resources = review.resources ?? { skills: [], guidance: [], hooks: [], subagents: [] };
+  const resources = review.resources ?? { skills: [], guidance: [], plugins: [], subagents: [] };
 
   return (
     <WorkspacePage>

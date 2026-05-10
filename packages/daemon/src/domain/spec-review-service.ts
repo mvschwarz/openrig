@@ -78,7 +78,7 @@ export interface AgentSpecReview {
   resources: {
     skills: string[];
     guidance: string[];
-    hooks: string[];
+    plugins: string[];
     subagents: string[];
   };
   startup: {
@@ -330,10 +330,23 @@ export class SpecReviewService {
       }).filter(Boolean);
     };
 
+    // Plugin entries have a different shape: { id, source: { kind, path } }.
+    // The id is the human-readable handle for the review surface (operator
+    // recognizes "openrig-core" not "/Users/op/.openrig/plugins/openrig-core").
+    const extractPluginIds = (raw: unknown): string[] => {
+      if (!Array.isArray(raw)) return [];
+      return raw.map((item) => {
+        if (typeof item === "object" && item !== null) {
+          return (item as Record<string, unknown>)["id"] as string ?? "";
+        }
+        return "";
+      }).filter(Boolean);
+    };
+
     const resources = {
       skills: extractPaths(rawResources["skills"]),
       guidance: extractPaths(rawResources["guidance"]),
-      hooks: extractPaths(rawResources["hooks"]),
+      plugins: extractPluginIds(rawResources["plugins"]),
       subagents: extractPaths(rawResources["subagents"]),
     };
 
