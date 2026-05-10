@@ -13,12 +13,12 @@ function makeSpec(overrides?: Partial<AgentSpec>): AgentSpec {
       skills: [{ id: "skill-a", path: "skills/a" }],
       guidance: [],
       subagents: [],
-      hooks: [],
+      plugins: [],
       runtimeResources: [],
     },
     profiles: {
       default: {
-        uses: { skills: ["skill-a"], guidance: [], subagents: [], hooks: [], runtimeResources: [] },
+        uses: { skills: ["skill-a"], guidance: [], subagents: [], plugins: [], runtimeResources: [] },
       },
     },
     ...overrides,
@@ -60,13 +60,13 @@ describe("Profile resolver + precedence engine", () => {
   it("profile selects from combined base+import pool with effectiveId and sourcePath", () => {
     const importSpec = makeSpec({
       name: "lib",
-      resources: { skills: [{ id: "lib-skill", path: "skills/lib" }], guidance: [], subagents: [], hooks: [], runtimeResources: [] },
+      resources: { skills: [{ id: "lib-skill", path: "skills/lib" }], guidance: [], subagents: [], plugins: [], runtimeResources: [] },
       profiles: {},
     });
     const ctx = makeCtx({
       baseSpec: makeResolved(makeSpec({
         profiles: {
-          default: { uses: { skills: ["skill-a", "lib:lib-skill"], guidance: [], subagents: [], hooks: [], runtimeResources: [] } },
+          default: { uses: { skills: ["skill-a", "lib:lib-skill"], guidance: [], subagents: [], plugins: [], runtimeResources: [] } },
         },
       })),
       importedSpecs: [makeResolved(importSpec, "/agents/lib")],
@@ -89,18 +89,18 @@ describe("Profile resolver + precedence engine", () => {
   it("unqualified ambiguous resource reference from two imports fails", () => {
     const importA = makeSpec({
       name: "lib-a",
-      resources: { skills: [{ id: "shared", path: "skills/shared" }], guidance: [], subagents: [], hooks: [], runtimeResources: [] },
+      resources: { skills: [{ id: "shared", path: "skills/shared" }], guidance: [], subagents: [], plugins: [], runtimeResources: [] },
       profiles: {},
     });
     const importB = makeSpec({
       name: "lib-b",
-      resources: { skills: [{ id: "shared", path: "skills/shared" }], guidance: [], subagents: [], hooks: [], runtimeResources: [] },
+      resources: { skills: [{ id: "shared", path: "skills/shared" }], guidance: [], subagents: [], plugins: [], runtimeResources: [] },
       profiles: {},
     });
     const ctx = makeCtx({
       baseSpec: makeResolved(makeSpec({
-        resources: { skills: [], guidance: [], subagents: [], hooks: [], runtimeResources: [] },
-        profiles: { default: { uses: { skills: ["shared"], guidance: [], subagents: [], hooks: [], runtimeResources: [] } } },
+        resources: { skills: [], guidance: [], subagents: [], plugins: [], runtimeResources: [] },
+        profiles: { default: { uses: { skills: ["shared"], guidance: [], subagents: [], plugins: [], runtimeResources: [] } } },
       })),
       importedSpecs: [makeResolved(importA, "/agents/lib-a"), makeResolved(importB, "/agents/lib-b")],
     });
@@ -116,7 +116,7 @@ describe("Profile resolver + precedence engine", () => {
   it("base/import collision: base keeps unqualified id, no ambiguity", () => {
     const importSpec = makeSpec({
       name: "lib",
-      resources: { skills: [{ id: "skill-a", path: "skills/a-lib" }], guidance: [], subagents: [], hooks: [], runtimeResources: [] },
+      resources: { skills: [{ id: "skill-a", path: "skills/a-lib" }], guidance: [], subagents: [], plugins: [], runtimeResources: [] },
       profiles: {},
     });
     const ctx = makeCtx({
@@ -137,13 +137,13 @@ describe("Profile resolver + precedence engine", () => {
   it("qualified colliding reference succeeds with sourcePath", () => {
     const importSpec = makeSpec({
       name: "lib",
-      resources: { skills: [{ id: "skill-a", path: "skills/a-lib" }], guidance: [], subagents: [], hooks: [], runtimeResources: [] },
+      resources: { skills: [{ id: "skill-a", path: "skills/a-lib" }], guidance: [], subagents: [], plugins: [], runtimeResources: [] },
       profiles: {},
     });
     const ctx = makeCtx({
       baseSpec: makeResolved(makeSpec({
         profiles: {
-          default: { uses: { skills: ["lib:skill-a"], guidance: [], subagents: [], hooks: [], runtimeResources: [] } },
+          default: { uses: { skills: ["lib:skill-a"], guidance: [], subagents: [], plugins: [], runtimeResources: [] } },
         },
       })),
       importedSpecs: [makeResolved(importSpec, "/agents/lib")],
@@ -161,14 +161,14 @@ describe("Profile resolver + precedence engine", () => {
   it("single imported unqualified skill keeps the unqualified effectiveId", () => {
     const importSpec = makeSpec({
       name: "shared",
-      resources: { skills: [{ id: "openrig-user", path: "skills/openrig-user" }], guidance: [], subagents: [], hooks: [], runtimeResources: [] },
+      resources: { skills: [{ id: "openrig-user", path: "skills/openrig-user" }], guidance: [], subagents: [], plugins: [], runtimeResources: [] },
       profiles: {},
     });
     const ctx = makeCtx({
       baseSpec: makeResolved(makeSpec({
-        resources: { skills: [], guidance: [], subagents: [], hooks: [], runtimeResources: [] },
+        resources: { skills: [], guidance: [], subagents: [], plugins: [], runtimeResources: [] },
         profiles: {
-          default: { uses: { skills: ["openrig-user"], guidance: [], subagents: [], hooks: [], runtimeResources: [] } },
+          default: { uses: { skills: ["openrig-user"], guidance: [], subagents: [], plugins: [], runtimeResources: [] } },
         },
       })),
       importedSpecs: [makeResolved(importSpec, "/agents/shared")],
@@ -189,7 +189,7 @@ describe("Profile resolver + precedence engine", () => {
     const ctx = makeCtx({
       baseSpec: makeResolved(makeSpec({
         defaults: { runtime: "codex" },
-        profiles: { default: { preferences: { runtime: "codex" }, uses: { skills: ["skill-a"], guidance: [], subagents: [], hooks: [], runtimeResources: [] } } },
+        profiles: { default: { preferences: { runtime: "codex" }, uses: { skills: ["skill-a"], guidance: [], subagents: [], plugins: [], runtimeResources: [] } } },
       })),
       member: makeMember({ runtime: "claude-code" }),
     });
@@ -204,7 +204,7 @@ describe("Profile resolver + precedence engine", () => {
     const ctx = makeCtx({
       baseSpec: makeResolved(makeSpec({
         defaults: { model: "sonnet" },
-        profiles: { default: { preferences: { model: "haiku" }, uses: { skills: ["skill-a"], guidance: [], subagents: [], hooks: [], runtimeResources: [] } } },
+        profiles: { default: { preferences: { model: "haiku" }, uses: { skills: ["skill-a"], guidance: [], subagents: [], plugins: [], runtimeResources: [] } } },
       })),
       member: makeMember({ model: "opus" }),
     });
@@ -254,7 +254,7 @@ describe("Profile resolver + precedence engine", () => {
     const ctx = makeCtx({
       baseSpec: makeResolved(makeSpec({
         defaults: { lifecycle: { executionMode: "interactive_resident", compactionStrategy: "harness_native", restorePolicy: "resume_if_possible" } },
-        profiles: { default: { uses: { skills: ["skill-a"], guidance: [], subagents: [], hooks: [], runtimeResources: [] } } },
+        profiles: { default: { uses: { skills: ["skill-a"], guidance: [], subagents: [], plugins: [], runtimeResources: [] } } },
       })),
       member: makeMember({ restorePolicy: "relaunch_fresh" }),
     });
@@ -269,7 +269,7 @@ describe("Profile resolver + precedence engine", () => {
     const ctx = makeCtx({
       baseSpec: makeResolved(makeSpec({
         defaults: { lifecycle: { executionMode: "interactive_resident", compactionStrategy: "harness_native", restorePolicy: "checkpoint_only" } },
-        profiles: { default: { uses: { skills: ["skill-a"], guidance: [], subagents: [], hooks: [], runtimeResources: [] } } },
+        profiles: { default: { uses: { skills: ["skill-a"], guidance: [], subagents: [], plugins: [], runtimeResources: [] } } },
       })),
       member: makeMember({ restorePolicy: "resume_if_possible" }),
     });
