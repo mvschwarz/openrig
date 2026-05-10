@@ -1,0 +1,80 @@
+# OpenRig 0.3.0 starter workflow.
+# Generic station pipeline. Multiple workflow instances may run at once; queue
+# depth at each station is the backpressure signal.
+workflow:
+  id: conveyor
+  version: 1
+  objective: >
+    Move a work packet through intake, planning, build, review, and close on
+    the generic conveyor starter rig.
+  target:
+    rig: conveyor
+  entry:
+    role: intake
+  coordination_terminal_turn_rule: hot_potato
+  roles:
+    intake:
+      skill_refs: [openrig-user, backlog-capture, orchestration-team]
+      preferred_targets: [intake-lead@conveyor]
+    planner:
+      skill_refs: [openrig-user, requirements-writer, writing-plans]
+      preferred_targets: [plan-planner@conveyor]
+    builder:
+      skill_refs: [openrig-user, development-team, test-driven-development]
+      preferred_targets: [build-builder@conveyor]
+    reviewer:
+      skill_refs: [openrig-user, review-team, plan-review]
+      preferred_targets: [review-reviewer@conveyor]
+    closer:
+      skill_refs: [openrig-user, orchestration-team, verification-before-completion]
+      preferred_targets: [intake-lead@conveyor]
+  steps:
+    - id: intake
+      actor_role: intake
+      objective: Clarify the request, create a small packet, and hand it to planning.
+      allowed_exits: [handoff, waiting, failed]
+      next_hop:
+        mode: require
+        suggested_roles: [planner]
+    - id: plan
+      actor_role: planner
+      objective: Turn the packet into an executable plan with verification.
+      allowed_exits: [handoff, waiting, failed]
+      next_hop:
+        mode: require
+        suggested_roles: [builder]
+    - id: build
+      actor_role: builder
+      objective: Execute the plan and produce proof for review.
+      allowed_exits: [handoff, waiting, failed]
+      next_hop:
+        mode: require
+        suggested_roles: [reviewer]
+    - id: review
+      actor_role: reviewer
+      objective: >
+        Check the build output. Use ordinary queue handoff to send targeted
+        rework back to build when needed; use the workflow handoff path when
+        the packet is ready to close.
+      allowed_exits: [handoff, waiting, failed]
+      next_hop:
+        mode: require
+        suggested_roles: [closer, builder]
+    - id: close
+      actor_role: closer
+      objective: Close the packet with evidence and any follow-up notes.
+      allowed_exits: [done, failed]
+      next_hop:
+        mode: forbid
+  invariants:
+    continuation_required: true
+    preserve_lineage: true
+    closure_required: true
+    allowed_exits: [handoff, waiting, done, failed]
+  loop_guards:
+    max_hops: 20
+    spawn_budget: 0
+  closure:
+    success: Packet closed with evidence.
+    degraded: Packet stopped with a named blocker or follow-up.
+    failed: Packet failed; preserve the review finding and owner.

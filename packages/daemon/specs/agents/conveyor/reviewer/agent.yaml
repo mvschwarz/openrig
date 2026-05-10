@@ -1,0 +1,35 @@
+name: conveyor-reviewer
+version: "1.0"
+description: Conveyor reviewer - checks build output, asks for rework, or clears the packet for close
+
+defaults:
+  runtime: codex
+
+imports:
+  - ref: local:../../shared
+
+profiles:
+  default:
+    uses:
+      skills: [openrig-user, review-team, plan-review, systematic-debugging, verification-before-completion]
+      guidance: []
+      subagents: []
+      hooks: []
+      runtime_resources: [shared:claude-default-settings, shared:claude-default-mcp, shared:codex-default-config]
+
+resources:
+  guidance:
+    - id: role
+      path: guidance/role.md
+    - id: startup-context
+      path: startup/context.md
+
+startup:
+  files:
+    - path: guidance/role.md
+      delivery_hint: send_text
+      required: true
+    - path: startup/context.md
+      delivery_hint: send_text
+      required: true
+  actions: []

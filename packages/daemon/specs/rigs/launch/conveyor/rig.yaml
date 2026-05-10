@@ -1,0 +1,72 @@
+version: "0.2"
+name: conveyor
+summary: >
+  Launch-grade starter for OpenRig 0.3.0: a compact station pipeline with
+  intake, planning, build, and review seats. Use it to watch queued work move
+  through handoffs without inheriting any internal release or recursion recipe.
+
+culture_file: CULTURE.md
+
+pods:
+  - id: intake
+    label: Intake
+    members:
+      - id: lead
+        agent_ref: "local:../../../agents/conveyor/lead"
+        runtime: claude-code
+        profile: default
+        cwd: "."
+    edges: []
+
+  - id: plan
+    label: Planning
+    members:
+      - id: planner
+        agent_ref: "local:../../../agents/conveyor/planner"
+        runtime: codex
+        profile: default
+        cwd: "."
+    edges: []
+
+  - id: build
+    label: Build
+    members:
+      - id: builder
+        agent_ref: "local:../../../agents/conveyor/builder"
+        runtime: claude-code
+        profile: default
+        cwd: "."
+    edges: []
+
+  - id: review
+    label: Review
+    members:
+      - id: reviewer
+        agent_ref: "local:../../../agents/conveyor/reviewer"
+        runtime: codex
+        profile: default
+        cwd: "."
+    edges: []
+
+edges:
+  - kind: delegates_to
+    from: intake.lead
+    to: plan.planner
+  - kind: delegates_to
+    from: plan.planner
+    to: build.builder
+  - kind: delegates_to
+    from: build.builder
+    to: review.reviewer
+  - kind: delegates_to
+    from: review.reviewer
+    to: build.builder
+  - kind: can_observe
+    from: review.reviewer
+    to: intake.lead
+  - kind: can_observe
+    from: intake.lead
+    to: build.builder
+  - kind: can_observe
+    from: intake.lead
+    to: review.reviewer
