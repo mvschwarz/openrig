@@ -365,7 +365,7 @@ export class PodRigInstantiator {
   async materialize(
     rigSpecYaml: string,
     rigRoot: string,
-    opts?: { targetRigId?: string; suppressSummaryEvent?: boolean },
+    opts?: { targetRigId?: string; suppressSummaryEvent?: boolean; cwdOverride?: string },
   ): Promise<MaterializeOutcome> {
     let raw: unknown;
     try {
@@ -390,6 +390,7 @@ export class PodRigInstantiator {
     const preflight = rigPreflight({
       rigSpecYaml,
       rigRoot,
+      cwdOverride: opts?.cwdOverride,
       fsOps: this.deps.fsOps,
       rigNameOverride: targetRig?.rig.name,
       externalQualifiedIds: targetRig?.nodes.map((node) => node.logicalId),
@@ -452,11 +453,12 @@ export class PodRigInstantiator {
 
           for (const member of pod.members) {
             const qualifiedId = `${pod.id}.${member.id}`;
+            const effectiveCwd = resolveLaunchCwd(member.cwd, rigRoot, opts?.cwdOverride);
             const node = this.deps.rigRepo.addNode(materializedRigId, qualifiedId, {
               runtime: member.runtime,
               model: member.model,
               codexConfigProfile: member.codexConfigProfile,
-              cwd: member.cwd,
+              cwd: effectiveCwd,
               restorePolicy: member.restorePolicy,
               podId: podRecord.id,
               agentRef: member.agentRef,

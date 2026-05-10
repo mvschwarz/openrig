@@ -80,8 +80,9 @@ rigspecImportRoutes.post("/", async (c) => {
   if (isPodAware) {
     const rigRoot = c.req.header("X-Rig-Root");
     if (!rigRoot) return c.json({ error: "X-Rig-Root header required for pod-aware specs", code: "missing_rig_root" }, 400);
+    const cwdOverride = c.req.header("X-Cwd-Override") ?? undefined;
 
-    const outcome = await podInstantiator.instantiate(body, rigRoot);
+    const outcome = await podInstantiator.instantiate(body, rigRoot, { cwdOverride });
     if (!outcome.ok) {
       const status = outcome.code === "validation_failed" ? 400
         : outcome.code === "preflight_failed" ? 409
@@ -133,7 +134,8 @@ rigspecImportRoutes.post("/materialize", async (c) => {
   if (!rigRoot) return c.json({ error: "X-Rig-Root header required for pod-aware specs", code: "missing_rig_root" }, 400);
 
   const targetRigId = c.req.header("X-Target-Rig-Id") ?? undefined;
-  const outcome = await podInstantiator.materialize(body, rigRoot, { targetRigId });
+  const cwdOverride = c.req.header("X-Cwd-Override") ?? undefined;
+  const outcome = await podInstantiator.materialize(body, rigRoot, { targetRigId, cwdOverride });
   if (!outcome.ok) {
     const status = outcome.code === "validation_failed" ? 400
       : outcome.code === "preflight_failed" ? 409
@@ -181,8 +183,9 @@ rigspecImportRoutes.post("/preflight", async (c) => {
   if (isPodAware) {
     const rigRoot = c.req.header("X-Rig-Root");
     if (!rigRoot) return c.json({ ready: false, errors: ["X-Rig-Root header required for pod-aware specs"], warnings: [] }, 400);
+    const cwdOverride = c.req.header("X-Cwd-Override") ?? undefined;
     const fsOps = { readFile: (p: string) => fs.readFileSync(p, "utf-8"), exists: (p: string) => fs.existsSync(p) };
-    const result = rigPreflight({ rigSpecYaml: body, rigRoot, fsOps });
+    const result = rigPreflight({ rigSpecYaml: body, rigRoot, cwdOverride, fsOps });
     return c.json(result);
   }
 
