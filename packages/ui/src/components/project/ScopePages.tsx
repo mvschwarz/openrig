@@ -50,6 +50,7 @@ import { DocsTab } from "../slices/tabs/DocsTab.js";
 import { DecisionsTab } from "../slices/tabs/DecisionsTab.js";
 import { TestsVerificationTab } from "../slices/tabs/TestsVerificationTab.js";
 import { TopologyTab } from "../slices/tabs/TopologyTab.js";
+import { HostMultiRigGraph } from "../topology/HostMultiRigGraph.js";
 import { QueueItemTrigger } from "../drawer-triggers/QueueItemTrigger.js";
 import {
   DateChip,
@@ -725,7 +726,12 @@ export function WorkspaceScopePage() {
         />
       ) : null}
       {active === "topology" ? (
-        <ScopeTopologyRollup detailsByName={rollup.details.itemsByName} />
+        <div
+          data-testid="workspace-topology-hostmultirig"
+          className="flex-1 min-h-0 relative h-[60vh]"
+        >
+          <HostMultiRigGraph />
+        </div>
       ) : null}
     </ScopeShell>
   );

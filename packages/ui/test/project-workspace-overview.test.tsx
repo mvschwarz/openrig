@@ -10,6 +10,7 @@ import {
   Outlet,
 } from "@tanstack/react-router";
 import { MissionScopePage, WorkspaceScopePage } from "../src/components/project/ScopePages.js";
+import { TopologyOverlayProvider } from "../src/components/topology/topology-overlay-context.js";
 import type { SliceDetail } from "../src/hooks/useSlices.js";
 
 const mockFetch = vi.fn();
@@ -67,13 +68,49 @@ function makeDetail(name: string, missionId: string | null, qitemIds: string[]):
   };
 }
 
-function installFetchMock() {
+// V0.3.1 slice 12.5 — workspace topology now renders via
+// HostMultiRigGraph; tests may override /api/ps to exercise the N=1 vs
+// N=2 rig-clustering paths.
+type PsEntry = {
+  rigId: string;
+  name: string;
+  nodeCount: number;
+  runningCount: number;
+  status: "running" | "partial" | "stopped";
+  uptime: null;
+  latestSnapshot: null;
+};
+
+const SINGLE_RIG_PS: PsEntry[] = [
+  {
+    rigId: "rig-1",
+    name: "rig-1",
+    nodeCount: 1,
+    runningCount: 1,
+    status: "running",
+    uptime: null,
+    latestSnapshot: null,
+  },
+];
+
+function installFetchMock(opts: { psEntries?: PsEntry[] } = {}) {
+  const psEntries = opts.psEntries ?? SINGLE_RIG_PS;
   mockFetch.mockImplementation(async (url: string) => {
     if (url.includes("/api/config")) {
       return new Response(
         JSON.stringify({ settings: { "workspace.root": { value: "/Users/admin/.openrig/workspace" } } }),
         { status: 200 },
       );
+    }
+    // HostMultiRigGraph fetches /api/ps for rig inventory + per-rig
+    // /api/rigs/<id>/graph for expanded rig contents. Provide minimal
+    // responses so the swap test renders without network errors.
+    if (url === "/api/ps" || url.startsWith("/api/ps?")) {
+      return new Response(JSON.stringify(psEntries), { status: 200 });
+    }
+    const rigGraphMatch = url.match(/\/api\/rigs\/([^/]+)\/graph/);
+    if (rigGraphMatch) {
+      return new Response(JSON.stringify({ nodes: [], edges: [] }), { status: 200 });
     }
     if (url.includes("/api/slices/idea-ledger")) {
       return new Response(JSON.stringify(makeDetail("idea-ledger", "RELEASE-PROOF", ["qitem-A"])), { status: 200 });
@@ -130,11 +167,22 @@ function installFetchMock() {
   });
 }
 
-function renderWorkspaceScope(): ReturnType<typeof render> {
-  installFetchMock();
+function renderWorkspaceScope(
+  opts: { psEntries?: PsEntry[] } = {},
+): ReturnType<typeof render> {
+  installFetchMock(opts);
 
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  const rootRoute = createRootRoute({ component: () => <Outlet /> });
+  // V0.3.1 slice 12.5 — TopologyOverlayProvider must be INSIDE the
+  // router (HostMultiRigGraph's useRouterState dependency), so wrap
+  // <Outlet /> in the root route component, not the RouterProvider.
+  const rootRoute = createRootRoute({
+    component: () => (
+      <TopologyOverlayProvider>
+        <Outlet />
+      </TopologyOverlayProvider>
+    ),
+  });
   const projectRoute = createRoute({
     getParentRoute: () => rootRoute,
     path: "/project",
@@ -161,7 +209,19 @@ function renderMissionScope(): ReturnType<typeof render> {
   installFetchMock();
 
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  const rootRoute = createRootRoute({ component: () => <Outlet /> });
+  // V0.3.1 slice 12.5 — mission scope topology fallback still uses
+  // ScopeTopologyRollup when no specGraph is declared, so the
+  // TopologyOverlayProvider isn't strictly required here. Wrap anyway
+  // for symmetry with the workspace helper above (and so future tests
+  // that exercise HostMultiRigGraph-shaped fallbacks have a working
+  // context).
+  const rootRoute = createRootRoute({
+    component: () => (
+      <TopologyOverlayProvider>
+        <Outlet />
+      </TopologyOverlayProvider>
+    ),
+  });
   const missionRoute = createRoute({
     getParentRoute: () => rootRoute,
     path: "/project/mission/$missionId",
@@ -241,8 +301,58 @@ describe("WorkspaceScopePage overview", () => {
     expect(await findByTestId("scope-queue-rollup")).toBeTruthy();
     expect((await findByTestId("scope-queue-trigger-qitem-A")).textContent).toContain("Full queue body");
 
+    // V0.3.1 slice 12.5 — workspace topology now renders via
+    // HostMultiRigGraph (rigs as distinct visual clusters) instead of
+    // the flat session-name ScopeTopologyRollup. Mission-scope topology
+    // fallback continues to use ScopeTopologyRollup when no specGraph
+    // is declared.
     fireEvent.click(await findByTestId("project-tab-topology"));
-    expect(await findByTestId("scope-topology-rollup")).toBeTruthy();
+    expect(await findByTestId("workspace-topology-hostmultirig")).toBeTruthy();
+    expect(await findByTestId("host-multi-rig-graph")).toBeTruthy();
+  });
+
+  // V0.3.1 slice 12.5 HG-3 — N=1 rig fixture renders cleanly as a
+  // single rig cluster on the workspace topology surface (no flat
+  // session-name aggregation).
+  it("slice 12.5 HG-3: single-rig workspace renders a single rig cluster on /topology", async () => {
+    const { findByTestId, queryByTestId } = renderWorkspaceScope({
+      psEntries: SINGLE_RIG_PS,
+    });
+    fireEvent.click(await findByTestId("project-tab-topology"));
+    expect(await findByTestId("workspace-topology-hostmultirig")).toBeTruthy();
+    expect(await findByTestId("host-multi-rig-graph")).toBeTruthy();
+    expect(await findByTestId("rig-group-node-rig-1")).toBeTruthy();
+    expect(queryByTestId("rig-group-node-rig-2")).toBeNull();
+    // Back-compat: the legacy flat session-name rollup is NOT mounted
+    // for the workspace topology surface anymore.
+    expect(queryByTestId("scope-topology-rollup")).toBeNull();
+  });
+
+  // V0.3.1 slice 12.5 HG-2 — N=2+ rig fixture renders distinct visual
+  // rig clusters. Compounds with slice 05 (kernel-rig-as-default ships
+  // multi-rig workspaces): without rig-clustering, kernel agents make
+  // the flat view noisier; with rig-clustering, structure stays legible
+  // as rigs multiply.
+  it("slice 12.5 HG-2: multi-rig workspace renders distinct rig clusters on /topology", async () => {
+    const { findByTestId } = renderWorkspaceScope({
+      psEntries: [
+        ...SINGLE_RIG_PS,
+        {
+          rigId: "rig-2",
+          name: "openrig-kernel",
+          nodeCount: 2,
+          runningCount: 2,
+          status: "running",
+          uptime: null,
+          latestSnapshot: null,
+        },
+      ],
+    });
+    fireEvent.click(await findByTestId("project-tab-topology"));
+    expect(await findByTestId("workspace-topology-hostmultirig")).toBeTruthy();
+    expect(await findByTestId("host-multi-rig-graph")).toBeTruthy();
+    expect(await findByTestId("rig-group-node-rig-1")).toBeTruthy();
+    expect(await findByTestId("rig-group-node-rig-2")).toBeTruthy();
   });
 
   it("mission scope page filters workspace data to that mission", async () => {
