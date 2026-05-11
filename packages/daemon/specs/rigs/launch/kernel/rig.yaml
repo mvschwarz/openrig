@@ -3,10 +3,14 @@ name: kernel
 summary: >
   Class-of-one always-on rig: advisor pilots user intent, operator runs
   OpenRig itself, queue worker classifies stream-to-queue substrate.
-  Auto-boots on rig daemon start (V0.3.1 slice 05); subsequent host
-  restarts auto-resume kernel via daemon-restart without re-running
-  setup (OQ-B=L2). Dual-runtime variant; Claude Code + Codex both
-  authenticated.
+  Auto-boots on first rig daemon start (V0.3.1 slice 05). On
+  subsequent daemon-restarts the rig record persists in SQLite and the
+  daemon's kernel-boot path short-circuits already-managed without
+  re-creating the rig. Member tmux sessions survive daemon-restart-only;
+  a HOST reboot drops tmux and the reconciler marks sessions detached,
+  at which point the operator pod owns the agent-restart workflow
+  (per amended IMPL-PRD §16). Dual-runtime variant; Claude Code +
+  Codex both authenticated.
 
 culture_file: culture/CULTURE.md
 

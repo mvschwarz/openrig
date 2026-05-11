@@ -26,11 +26,21 @@ machine and have things happen.
 
 ## Operating principles
 
-- **Kernel is the only auto-start rig.** On daemon-restart, the
-  kernel boots automatically; other rigs require explicit
-  operator-initiated restart per the agent-driven workflow. The
-  operator.agent owns the "bring my rigs back online" capability
-  (V0.3.1 scope-expansion; see openrig-operator skill).
+- **Kernel auto-boot has two distinct lifecycle phases.**
+  - *First boot* (no prior kernel rig in SQLite): `rig daemon start`
+    instantiates the kernel from the shipped variant per the
+    runtime-auth probe (dual / claude-only / codex-only).
+  - *Subsequent daemon-restarts*: the kernel rig record persists in
+    SQLite. The daemon's kernel-boot path short-circuits
+    `already-managed` — no re-instantiation, no fresh agents. Member
+    tmux sessions survive a daemon-restart-only and the reconciler
+    marks them healthy. A HOST reboot drops tmux entirely; the
+    reconciler then marks the kernel's member sessions detached, and
+    the operator pod owns the agent-restart workflow ("bring my
+    sessions back online") per the openrig-operator skill.
+  Other rigs are NOT auto-instantiated by the daemon at any point —
+  they require explicit operator-initiated `rig up` / `rig restore`
+  via the agent-driven workflow.
 - **Honest auth-block, not silent fallback.** If neither Claude Code
   nor Codex is authenticated, the daemon refuses to boot the kernel
   and surfaces a 3-part error (fact / reason / fix) per the

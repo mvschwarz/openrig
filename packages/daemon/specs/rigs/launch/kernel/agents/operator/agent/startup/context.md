@@ -9,31 +9,51 @@ Run `rig whoami --json` to confirm identity, then settle into a
 listening posture. The user will route asks via the advisor lead or
 via direct rig-send / qitem — both surface in your terminal.
 
-## On first daemon-restart after host reboot
+## On daemon-restart (precise semantics)
 
-The kernel is the only rig the daemon auto-starts. Other rigs that
-were running before the reboot are NOT automatically resumed. If the
-user asks you to bring those rigs back online:
+The kernel rig record PERSISTS in SQLite across daemon-restarts. On
+restart:
 
-1. `rig ps --json --all` (or the operator-saved roster, if you've
-   been maintaining one)
-2. List the rigs the user had running before the reboot.
-3. Confirm which to restart.
-4. Restart each. `rig up <spec>` is the cold-start path; `rig restore
-   <snapshot> --rig <name>` is the warm-restore path when a snapshot
-   exists.
-5. `rig ps --nodes --rig <name>` to verify healthy.
+1. The daemon's kernel-boot path runs. Because the kernel rig
+   already exists in the `rigs` table, the path short-circuits
+   `already-managed` — no fresh instantiation, no new agents.
+2. The reconciler walks every managed rig (kernel + any others
+   that persisted) and probes member tmux sessions. If a session
+   survived (daemon-restart-only, host stayed up) → marked healthy.
+   If tmux is gone (host reboot) → marked detached.
 
-This is the agent-driven workflow that replaces silent auto-restore.
+If the host rebooted (not just the daemon), the kernel's member
+tmux sessions are gone. You own the agent-restart workflow:
+
+1. `rig ps --nodes --rig kernel --json` shows which kernel members
+   are detached.
+2. Re-launch each detached member via the normal launch path
+   (the canonical commands live in the `openrig-operator` skill).
+3. `rig ps --nodes --rig kernel --json` again to confirm healthy.
+
+Other rigs (project rigs the user spun up) are NEVER auto-instantiated
+by the daemon. If the user asks you to bring those back:
+
+1. `rig ps --json --all` shows which rigs are persisted but with
+   detached sessions.
+2. Confirm with the user which subset to restart.
+3. `rig up <spec>` for cold-start; `rig restore <snapshot> --rig
+   <name>` for warm-restore when a snapshot exists.
+4. `rig ps --nodes --rig <name>` to verify healthy.
+
+This is the agent-driven workflow replacing silent auto-restore.
 See the `openrig-operator` skill for the canonical script.
 
 ## What's already running
 
 - The kernel rig itself (you, advisor.lead, queue.worker, the human
   marker).
-- Whatever was running on the host before the daemon restarted that
-  is NOT a project rig has already been culled per the
-  kernel-only-auto-start policy.
+- Whatever non-kernel rigs were running before the daemon restarted
+  have their rig records persisted in SQLite (the daemon does NOT
+  cull rigs on restart) but their member sessions are likely
+  detached per the reconciler's tmux-survival probe. They sit in
+  pending-restart state until the user asks the operator to bring
+  them back online.
 
 ## Authentication awareness
 
