@@ -29,7 +29,7 @@ export interface RiggedConfig {
   // workspace's operator seat session name (default
   // `operator-${USER}@kernel`). Read by mission-control read layer and
   // 2 UI cosmetic sites to replace the legacy hardcoded
-  // "human-wrandom@kernel" / "human-operator@kernel" constants.
+  // "human-operator@kernel" constant.
   workspace: {
     root: string;
     slicesRoot: string;

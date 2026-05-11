@@ -23,7 +23,7 @@ pods:
       - id: human
         agent_ref: "builtin:terminal"
         runtime: terminal
-        profile: default
+        profile: none
         cwd: "."
       - id: agent
         agent_ref: "local:agents/operator/agent"
