@@ -175,7 +175,7 @@ The CLI-hosted MCP server exposes 17 tools:
 ### UI architecture
 
 The current UI is shell-first, route-first, and primitive-driven. See
-`DESIGN.md` for the brand/design spec and `docs/as-built/ui.md` for the detailed
+`docs/DESIGN.md` for the brand/design spec and `docs/as-built/ui.md` for the detailed
 as-built UI map.
 
 High-level shape:

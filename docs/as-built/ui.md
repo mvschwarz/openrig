@@ -1,7 +1,7 @@
 # OpenRig UI As-Built
 
 This document describes the current UI architecture and component system. The
-brand/design rules live in `DESIGN.md`; this file focuses on how the shipped UI
+brand/design rules live in `docs/DESIGN.md`; this file focuses on how the shipped UI
 is assembled.
 
 ## Package Shape
