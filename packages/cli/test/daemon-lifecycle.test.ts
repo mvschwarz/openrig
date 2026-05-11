@@ -981,6 +981,60 @@ describe("buildDaemonEnv", () => {
     });
   });
 
+  // Slice 22 founder-walk-vm-populated-env: --openrig-home / OPENRIG_HOME
+  // flag flows through buildDaemonEnv so two daemons in one VM can have
+  // fully isolated state directories (OQ-4 resolved to (a) fully isolated).
+  describe("slice 22: openrigHome (OPENRIG_HOME) env projection", () => {
+    it("omits OPENRIG_HOME when openrigHome opt is undefined (shell-env passthrough wins)", () => {
+      const baseEnv: Record<string, string> = { HOME: "/Users/tester", PATH: "/usr/bin" };
+      const result = buildDaemonEnv(baseEnv, {
+        port: 7433,
+        db: "/tmp/test.db",
+      });
+      expect(result["OPENRIG_HOME"]).toBeUndefined();
+    });
+
+    it("sets OPENRIG_HOME when openrigHome opt is defined (operator opt-in)", () => {
+      const baseEnv: Record<string, string> = { HOME: "/Users/tester", PATH: "/usr/bin" };
+      const result = buildDaemonEnv(baseEnv, {
+        port: 7433,
+        db: "/tmp/test.db",
+        openrigHome: "/Users/example/.openrig-blank",
+      });
+      expect(result["OPENRIG_HOME"]).toBe("/Users/example/.openrig-blank");
+    });
+
+    it("preserves shell-set OPENRIG_HOME through baseEnv when opt is undefined", () => {
+      const baseEnv: Record<string, string> = {
+        HOME: "/Users/tester",
+        PATH: "/usr/bin",
+        OPENRIG_HOME: "/Users/example/.openrig-shell",
+      };
+      const result = buildDaemonEnv(baseEnv, {
+        port: 7433,
+        db: "/tmp/test.db",
+      });
+      expect(result["OPENRIG_HOME"]).toBe("/Users/example/.openrig-shell");
+    });
+
+    it("opt-set OPENRIG_HOME overrides shell-set baseEnv value (distinct-value discriminator)", () => {
+      // Per banked feedback_poc_regression_must_discriminate — distinct
+      // values so we can prove the override branch fired and didn't pass
+      // vacuously through baseEnv-passthrough.
+      const baseEnv: Record<string, string> = {
+        HOME: "/Users/tester",
+        PATH: "/usr/bin",
+        OPENRIG_HOME: "/Users/example/.openrig-shell-blank",
+      };
+      const result = buildDaemonEnv(baseEnv, {
+        port: 7433,
+        db: "/tmp/test.db",
+        openrigHome: "/Users/example/.openrig-opt-populated",
+      });
+      expect(result["OPENRIG_HOME"]).toBe("/Users/example/.openrig-opt-populated");
+    });
+  });
+
   describe("V1 pre-release CLI/daemon Item 1 — transcript rotation tunables projection", () => {
     it("projects transcriptsLines + transcriptsPollIntervalSeconds into OPENRIG_* env vars when provided", () => {
       const baseEnv: Record<string, string> = { HOME: "/Users/tester", PATH: "/usr/bin" };

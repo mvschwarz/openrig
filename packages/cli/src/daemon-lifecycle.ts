@@ -44,6 +44,10 @@ export interface StartOptions {
   // Exposed at the CLI as `rig daemon start --no-kernel`; projected
   // into the daemon process env as OPENRIG_NO_KERNEL.
   skipKernelBoot?: boolean;
+  // Slice 22 founder-walk-vm-populated-env — operator-explicit
+  // OPENRIG_HOME directory for the daemon child process. Enables two
+  // daemons in one VM to have fully isolated state (OQ-4 (a)).
+  openrigHome?: string;
 }
 
 export interface LifecycleDeps {
@@ -269,6 +273,17 @@ export function buildDaemonEnv(
     // V0.3.1 slice 05 — projected via OPENRIG_NO_KERNEL env var so
     // the daemon's startup.ts kernel-boot path honors the flag.
     skipKernelBoot?: boolean;
+    /**
+     * Slice 22 founder-walk-vm-populated-env: operator-explicit
+     * OPENRIG_HOME directory. When defined, sets OPENRIG_HOME in the
+     * child process so the daemon writes its state (transcripts,
+     * plugins, context-packs, agent-images, specs) under the chosen
+     * directory. When undefined, the env-passthrough loop preserves
+     * whatever OPENRIG_HOME the operator's shell already had (their
+     * shell-level opt-in still wins). Enables two daemons in the same
+     * VM to have fully isolated state per OQ-4 (a).
+     */
+    openrigHome?: string;
   },
 ): Record<string, string> {
   const env: Record<string, string> = {};
@@ -296,6 +311,9 @@ export function buildDaemonEnv(
   }
   if (opts.transcriptsPollIntervalSeconds !== undefined) {
     env["OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS"] = String(opts.transcriptsPollIntervalSeconds);
+  }
+  if (opts.openrigHome !== undefined) {
+    env["OPENRIG_HOME"] = opts.openrigHome;
   }
   if (opts.skipKernelBoot) {
     env["OPENRIG_NO_KERNEL"] = "1";
@@ -361,6 +379,7 @@ export async function startDaemon(opts: StartOptions, deps: LifecycleDeps): Prom
       transcriptsLines: opts.transcriptsLines,
       transcriptsPollIntervalSeconds: opts.transcriptsPollIntervalSeconds,
       skipKernelBoot: opts.skipKernelBoot,
+      openrigHome: opts.openrigHome,
     }),
     stdio: ["ignore", logFd, logFd],
     detached: true,

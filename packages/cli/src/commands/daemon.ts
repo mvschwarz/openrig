@@ -77,6 +77,11 @@ export function daemonCommand(depsOverride?: LifecycleDeps): Command {
     .option("--port <port>", "Port to listen on")
     .option("--host <host>", "Host to bind on")
     .option("--db <path>", "Database path")
+    // Slice 22 founder-walk-vm-populated-env — operator-explicit
+    // OPENRIG_HOME directory. Enables running two daemons in the same
+    // VM with fully isolated state (e.g., blank-slate vs populated
+    // preview environments).
+    .option("--openrig-home <path>", "OPENRIG_HOME directory for daemon state (transcripts, plugins, specs, etc.)")
     // V0.3.1 slice 05 kernel-rig-as-default — skip the kernel auto-boot
     // path. Used by test fixtures, headless CI, and operators who want
     // a no-kernel daemon for ad-hoc topology work. The daemon proceeds
@@ -91,7 +96,7 @@ export function daemonCommand(depsOverride?: LifecycleDeps): Command {
     // weaker "daemon-ready". Default 60s; override with --wait-for-kernel-ms.
     .option("--wait-for-kernel", "After daemon binds, also wait for kernel-agent readiness (default timeout 60s)")
     .option("--wait-for-kernel-ms <ms>", "Override --wait-for-kernel timeout in milliseconds")
-    .action(async (opts: { port?: string; host?: string; db?: string; kernel?: boolean; waitForKernel?: boolean; waitForKernelMs?: string }) => {
+    .action(async (opts: { port?: string; host?: string; db?: string; openrigHome?: string; kernel?: boolean; waitForKernel?: boolean; waitForKernelMs?: string }) => {
       try {
         const { ConfigStore } = await import("../config-store.js");
         const { SystemPreflight } = await import("../system-preflight.js");
@@ -147,6 +152,10 @@ export function daemonCommand(depsOverride?: LifecycleDeps): Command {
             // OPENRIG_NO_KERNEL env var so the daemon's kernel-boot
             // check in startup.ts honors the flag.
             skipKernelBoot: skipKernel,
+            // Slice 22 founder-walk-vm-populated-env — operator-explicit
+            // OPENRIG_HOME directory (omit when undefined so the daemon
+            // falls through to its built-in default ~/.openrig).
+            openrigHome: opts.openrigHome,
           },
           getDeps(),
         );
