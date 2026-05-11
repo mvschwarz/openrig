@@ -981,6 +981,127 @@ describe("buildDaemonEnv", () => {
     });
   });
 
+  // Slice 22 founder-walk-vm-populated-env forward-fix #1: the slice
+  // intentionally drops a `--openrig-home` CLI flag in favor of using
+  // the process-env-pattern (each `rig` invocation gets its own
+  // OPENRIG_HOME via the shell). The slice's "fully isolated state"
+  // claim depends on the env contract being honored at module load
+  // time — specifically that getOpenRigHome() returns the current
+  // env value (not a hardcoded default) and that getDefaultOpenRigPath
+  // threads it into derived paths. The module-level constants
+  // (OPENRIG_DIR / STATE_FILE / LOG_FILE) are a single snapshot of
+  // these functions at load.
+  //
+  // These regression tests prove the function contract with distinct-
+  // value discriminators per banked feedback_poc_regression_must_discriminate.
+  describe("slice 22: OPENRIG_HOME env contract for per-process state isolation", () => {
+    it("getOpenRigHome respects process.env.OPENRIG_HOME (distinct values yield distinct paths)", async () => {
+      const { getOpenRigHome } = await import("../src/openrig-compat.js");
+      const saved = process.env["OPENRIG_HOME"];
+      try {
+        process.env["OPENRIG_HOME"] = "/Users/example/.openrig-blank";
+        const blank = getOpenRigHome();
+        process.env["OPENRIG_HOME"] = "/Users/example/.openrig-populated";
+        const populated = getOpenRigHome();
+        expect(blank).toBe("/Users/example/.openrig-blank");
+        expect(populated).toBe("/Users/example/.openrig-populated");
+        expect(blank).not.toBe(populated);
+      } finally {
+        if (saved === undefined) delete process.env["OPENRIG_HOME"];
+        else process.env["OPENRIG_HOME"] = saved;
+      }
+    });
+
+    it("getDefaultOpenRigPath threads env-resolved OPENRIG_HOME into derived paths (daemon.json + log)", async () => {
+      const { getDefaultOpenRigPath } = await import("../src/openrig-compat.js");
+      const saved = process.env["OPENRIG_HOME"];
+      try {
+        process.env["OPENRIG_HOME"] = "/Users/example/.openrig-blank";
+        const blankState = getDefaultOpenRigPath("daemon.json");
+        const blankLog = getDefaultOpenRigPath("daemon.log");
+        process.env["OPENRIG_HOME"] = "/Users/example/.openrig-populated";
+        const populatedState = getDefaultOpenRigPath("daemon.json");
+        const populatedLog = getDefaultOpenRigPath("daemon.log");
+        expect(blankState).toBe("/Users/example/.openrig-blank/daemon.json");
+        expect(populatedState).toBe("/Users/example/.openrig-populated/daemon.json");
+        expect(blankLog).toBe("/Users/example/.openrig-blank/daemon.log");
+        expect(populatedLog).toBe("/Users/example/.openrig-populated/daemon.log");
+        expect(blankState).not.toBe(populatedState);
+        expect(blankLog).not.toBe(populatedLog);
+      } finally {
+        if (saved === undefined) delete process.env["OPENRIG_HOME"];
+        else process.env["OPENRIG_HOME"] = saved;
+      }
+    });
+
+    it("empty OPENRIG_HOME falls back to homedir default (not the literal empty string)", async () => {
+      const { getOpenRigHome } = await import("../src/openrig-compat.js");
+      const { homedir } = await import("node:os");
+      const saved = process.env["OPENRIG_HOME"];
+      try {
+        process.env["OPENRIG_HOME"] = "";
+        const result = getOpenRigHome();
+        expect(result).toBe(`${homedir()}/.openrig`);
+      } finally {
+        if (saved === undefined) delete process.env["OPENRIG_HOME"];
+        else process.env["OPENRIG_HOME"] = saved;
+      }
+    });
+
+    // FF2 regression test (per qitem-20260511115845-ee9a4775): the
+    // prior 3 tests verify the openrig-compat function contract but
+    // do NOT prove daemon-lifecycle's module-level OPENRIG_DIR /
+    // STATE_FILE / LOG_FILE constants pick up OPENRIG_HOME at import
+    // time. Future code could hardcode "~/.openrig" in
+    // daemon-lifecycle.ts:66-69 and the prior tests would still pass.
+    //
+    // This test imports daemon-lifecycle FRESH twice via
+    // vi.resetModules + dynamic import, with distinct OPENRIG_HOME
+    // values per import. Discriminator-distinct paths (per banked
+    // feedback_poc_regression_must_discriminate) prove each module
+    // load reflects the env that was set at that moment. Will fail
+    // if a future contributor hardcodes a literal path or otherwise
+    // bypasses openrig-compat helpers at module level.
+    it("daemon-lifecycle module-level constants reflect OPENRIG_HOME at import time (slice 22 FF2)", async () => {
+      const saved = process.env["OPENRIG_HOME"];
+      try {
+        // First import — OPENRIG_HOME = blank-slate value
+        process.env["OPENRIG_HOME"] = "/Users/example/.openrig-vm-blank-fresh";
+        vi.resetModules();
+        const blank = await import("../src/daemon-lifecycle.js");
+
+        // Second import — OPENRIG_HOME = populated value (distinct dir;
+        // not equal, not a symlink prefix). vi.resetModules clears the
+        // module cache so the second import re-evaluates module-level
+        // constants under the new env.
+        process.env["OPENRIG_HOME"] = "/Users/example/.openrig-vm-populated-fresh";
+        vi.resetModules();
+        const populated = await import("../src/daemon-lifecycle.js");
+
+        // OPENRIG_DIR — direct snapshot of getOpenRigHome() at module load
+        expect(blank.OPENRIG_DIR).toBe("/Users/example/.openrig-vm-blank-fresh");
+        expect(populated.OPENRIG_DIR).toBe("/Users/example/.openrig-vm-populated-fresh");
+        expect(blank.OPENRIG_DIR).not.toBe(populated.OPENRIG_DIR);
+
+        // STATE_FILE / LOG_FILE — derived as path.join(OPENRIG_DIR, "daemon.{json,log}")
+        expect(blank.STATE_FILE).toBe("/Users/example/.openrig-vm-blank-fresh/daemon.json");
+        expect(populated.STATE_FILE).toBe("/Users/example/.openrig-vm-populated-fresh/daemon.json");
+        expect(blank.STATE_FILE).not.toBe(populated.STATE_FILE);
+
+        expect(blank.LOG_FILE).toBe("/Users/example/.openrig-vm-blank-fresh/daemon.log");
+        expect(populated.LOG_FILE).toBe("/Users/example/.openrig-vm-populated-fresh/daemon.log");
+        expect(blank.LOG_FILE).not.toBe(populated.LOG_FILE);
+      } finally {
+        if (saved === undefined) delete process.env["OPENRIG_HOME"];
+        else process.env["OPENRIG_HOME"] = saved;
+        // Re-reset modules so subsequent tests (and the file-top
+        // import of daemon-lifecycle at line 4-19) aren't holding
+        // stale references to a module instance bound to a temp env.
+        vi.resetModules();
+      }
+    });
+  });
+
   describe("V1 pre-release CLI/daemon Item 1 — transcript rotation tunables projection", () => {
     it("projects transcriptsLines + transcriptsPollIntervalSeconds into OPENRIG_* env vars when provided", () => {
       const baseEnv: Record<string, string> = { HOME: "/Users/tester", PATH: "/usr/bin" };
