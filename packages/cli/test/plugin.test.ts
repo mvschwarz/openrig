@@ -638,5 +638,144 @@ describe("rig plugin CLI (slice 3.4)", () => {
       expect(exitCode).toBe(1);
       expect(errLogs.join("\n").toLowerCase()).toMatch(/not found|does not exist|enoent/);
     });
+
+    // ============================================================
+    // velocity-guard 3.4.C BLOCKING-CONCERN regressions:
+    // regex-based validation could stamp `name: ""` quoted-empty as
+    // valid; YAML-parser-based validation catches it. Also null/non-
+    // object manifest results.
+    // ============================================================
+
+    it("BLOCKING-FIX: skill with quoted-empty name FAILS (regex would have passed)", async () => {
+      writeManifest(".claude-plugin/plugin.json", { name: "test-plugin", version: "1.0.0" });
+      writeSkill("empty-name", `name: ""\ndescription: A real description`);
+
+      const program = new Command();
+      program.exitOverride();
+      program.addCommand(pluginCommand());
+
+      const { exitCode, errLogs } = await captureLogs(async () => {
+        await program.parseAsync(["node", "rig", "plugin", "validate", tmpRoot]);
+      });
+
+      expect(exitCode).toBe(1);
+      const err = errLogs.join("\n").toLowerCase();
+      expect(err).toMatch(/empty-name/);
+      expect(err).toMatch(/name/);
+    });
+
+    it("BLOCKING-FIX: skill with quoted-empty description FAILS (regex would have passed)", async () => {
+      writeManifest(".claude-plugin/plugin.json", { name: "test-plugin", version: "1.0.0" });
+      writeSkill("empty-desc", `name: empty-desc\ndescription: ""`);
+
+      const program = new Command();
+      program.exitOverride();
+      program.addCommand(pluginCommand());
+
+      const { exitCode, errLogs } = await captureLogs(async () => {
+        await program.parseAsync(["node", "rig", "plugin", "validate", tmpRoot]);
+      });
+
+      expect(exitCode).toBe(1);
+      const err = errLogs.join("\n").toLowerCase();
+      expect(err).toMatch(/empty-desc/);
+      expect(err).toMatch(/description/);
+    });
+
+    it("BLOCKING-FIX: skill with malformed YAML frontmatter FAILS (not parseable as object)", async () => {
+      writeManifest(".claude-plugin/plugin.json", { name: "test-plugin", version: "1.0.0" });
+      // Malformed: unclosed bracket
+      writeSkill("bad-yaml", `name: foo\ndescription: [unclosed`);
+
+      const program = new Command();
+      program.exitOverride();
+      program.addCommand(pluginCommand());
+
+      const { exitCode, errLogs } = await captureLogs(async () => {
+        await program.parseAsync(["node", "rig", "plugin", "validate", tmpRoot]);
+      });
+
+      expect(exitCode).toBe(1);
+      const err = errLogs.join("\n").toLowerCase();
+      expect(err).toMatch(/bad-yaml/);
+      expect(err).toMatch(/yaml|parse|invalid/);
+    });
+
+    it("BLOCKING-FIX: skill with non-object frontmatter (e.g. just a string) FAILS", async () => {
+      writeManifest(".claude-plugin/plugin.json", { name: "test-plugin", version: "1.0.0" });
+      // YAML scalar — parses as string, not object
+      writeSkill("not-object", `just a string`);
+
+      const program = new Command();
+      program.exitOverride();
+      program.addCommand(pluginCommand());
+
+      const { exitCode, errLogs } = await captureLogs(async () => {
+        await program.parseAsync(["node", "rig", "plugin", "validate", tmpRoot]);
+      });
+
+      expect(exitCode).toBe(1);
+      const err = errLogs.join("\n").toLowerCase();
+      expect(err).toMatch(/not-object/);
+      expect(err).toMatch(/object|map/);
+    });
+
+    it("BLOCKING-FIX: skill name as non-string (e.g. number) FAILS", async () => {
+      writeManifest(".claude-plugin/plugin.json", { name: "test-plugin", version: "1.0.0" });
+      // YAML parses 42 as a number, not string
+      writeSkill("number-name", `name: 42\ndescription: A skill`);
+
+      const program = new Command();
+      program.exitOverride();
+      program.addCommand(pluginCommand());
+
+      const { exitCode, errLogs } = await captureLogs(async () => {
+        await program.parseAsync(["node", "rig", "plugin", "validate", tmpRoot]);
+      });
+
+      expect(exitCode).toBe(1);
+      const err = errLogs.join("\n").toLowerCase();
+      expect(err).toMatch(/number-name/);
+      expect(err).toMatch(/name/);
+    });
+
+    it("BLOCKING-FIX: manifest plugin.json containing null FAILS (not crashes)", async () => {
+      // Write literal "null" as the manifest body — JSON.parse returns null
+      const claudeManifestPath = join(tmpRoot, ".claude-plugin", "plugin.json");
+      mkdirSync(dirname(claudeManifestPath), { recursive: true });
+      writeFileSync(claudeManifestPath, "null");
+      writeSkill("foo", `name: foo\ndescription: A skill`);
+
+      const program = new Command();
+      program.exitOverride();
+      program.addCommand(pluginCommand());
+
+      const { exitCode, errLogs } = await captureLogs(async () => {
+        await program.parseAsync(["node", "rig", "plugin", "validate", tmpRoot]);
+      });
+
+      expect(exitCode).toBe(1);
+      const err = errLogs.join("\n").toLowerCase();
+      expect(err).toMatch(/manifest|object/);
+    });
+
+    it("BLOCKING-FIX: manifest plugin.json containing array FAILS (must be object)", async () => {
+      const claudeManifestPath = join(tmpRoot, ".claude-plugin", "plugin.json");
+      mkdirSync(dirname(claudeManifestPath), { recursive: true });
+      writeFileSync(claudeManifestPath, JSON.stringify(["not", "an", "object"]));
+      writeSkill("foo", `name: foo\ndescription: A skill`);
+
+      const program = new Command();
+      program.exitOverride();
+      program.addCommand(pluginCommand());
+
+      const { exitCode, errLogs } = await captureLogs(async () => {
+        await program.parseAsync(["node", "rig", "plugin", "validate", tmpRoot]);
+      });
+
+      expect(exitCode).toBe(1);
+      const err = errLogs.join("\n").toLowerCase();
+      expect(err).toMatch(/manifest|object/);
+    });
   });
 });

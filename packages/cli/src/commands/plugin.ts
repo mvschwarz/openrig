@@ -47,6 +47,7 @@
 import { Command } from "commander";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { parse as parseYaml } from "yaml";
 import { DaemonClient } from "../client.js";
 import { getDaemonStatus, getDaemonUrl } from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
@@ -400,26 +401,37 @@ function validatePluginTree(pluginPath: string): string[] {
 
 function validateManifest(manifestPath: string, runtime: "claude" | "codex"): string[] {
   const errors: string[] = [];
-  let raw: Record<string, unknown>;
+  let parsed: unknown;
   try {
-    raw = JSON.parse(readFileSync(manifestPath, "utf-8")) as Record<string, unknown>;
+    parsed = JSON.parse(readFileSync(manifestPath, "utf-8"));
   } catch (err) {
     errors.push(`${runtime} manifest parse error at ${manifestPath}: ${(err as Error).message}`);
     return errors;
   }
-  if (!raw["name"] || typeof raw["name"] !== "string") {
+  // Guard non-object/null parse results — JSON.parse('null') returns null,
+  // JSON.parse('[1,2]') returns an array — both must fail validation, not crash.
+  if (!isPlainObject(parsed)) {
+    errors.push(`${runtime} manifest at ${manifestPath} must be a JSON object (got ${parsed === null ? "null" : Array.isArray(parsed) ? "array" : typeof parsed})`);
+    return errors;
+  }
+  const raw = parsed;
+  if (typeof raw["name"] !== "string" || raw["name"].trim().length === 0) {
     errors.push(`${runtime} manifest missing required field: name (must be non-empty string)`);
   }
-  if (!raw["version"] || typeof raw["version"] !== "string") {
+  if (typeof raw["version"] !== "string" || raw["version"].trim().length === 0) {
     errors.push(`${runtime} manifest missing required field: version (must be non-empty string)`);
   }
   // Codex spec: description is REQUIRED. Claude spec: description is recommended but
   // not a hard requirement; we treat missing description as a warning by NOT erroring
   // on Claude-only-missing-description while erroring on Codex-missing-description.
-  if (runtime === "codex" && (!raw["description"] || typeof raw["description"] !== "string")) {
+  if (runtime === "codex" && (typeof raw["description"] !== "string" || raw["description"].trim().length === 0)) {
     errors.push(`codex manifest missing required field: description (Codex spec requires it)`);
   }
   return errors;
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function validateSkillFrontmatter(skillPath: string, skillId: string): string[] {
@@ -439,22 +451,32 @@ function validateSkillFrontmatter(skillPath: string, skillId: string): string[] 
   }
   const fmBody = fmMatch[1] ?? "";
 
-  // Required: name (non-empty single-line string)
-  const nameMatch = fmBody.match(/^name:\s*(.+)$/m);
-  if (!nameMatch || !nameMatch[1]?.trim()) {
-    errors.push(`skill "${skillId}": frontmatter missing required field: name`);
+  // Parse frontmatter as YAML — regex-based validation can pass quoted-empty
+  // values and miss type errors per velocity-guard 3.4.C BLOCKING-CONCERN.
+  let parsed: unknown;
+  try {
+    parsed = parseYaml(fmBody);
+  } catch (err) {
+    errors.push(`skill "${skillId}": invalid YAML frontmatter: ${(err as Error).message}`);
+    return errors;
+  }
+  if (!isPlainObject(parsed)) {
+    errors.push(`skill "${skillId}": frontmatter must be a YAML object/map (got ${parsed === null ? "null" : Array.isArray(parsed) ? "array" : typeof parsed})`);
+    return errors;
   }
 
-  // Required: description (non-empty; supports multi-line YAML block scalar)
-  // Match either inline `description: ...` or block-scalar `description: |` / `description: >`
-  const descBlockMatch = fmBody.match(/^description:\s*(?:>|\|)?\s*\n?([\s\S]*?)(?=\n\w[\w-]*:|\n*$)/m);
-  if (!descBlockMatch || !descBlockMatch[1]?.trim()) {
-    errors.push(`skill "${skillId}": frontmatter missing required field: description`);
-  } else {
-    const descText = descBlockMatch[1].trim();
-    if (descText.length > 1024) {
-      errors.push(`skill "${skillId}": description length ${descText.length} chars exceeds agentskills.io limit of 1024`);
-    }
+  // Required: name (non-empty string after trim)
+  const name = parsed["name"];
+  if (typeof name !== "string" || name.trim().length === 0) {
+    errors.push(`skill "${skillId}": frontmatter missing required field: name (must be non-empty string)`);
+  }
+
+  // Required: description (non-empty string after trim; ≤1024 chars per agentskills.io)
+  const description = parsed["description"];
+  if (typeof description !== "string" || description.trim().length === 0) {
+    errors.push(`skill "${skillId}": frontmatter missing required field: description (must be non-empty string)`);
+  } else if (description.trim().length > 1024) {
+    errors.push(`skill "${skillId}": description length ${description.trim().length} chars exceeds agentskills.io limit of 1024`);
   }
 
   return errors;
