@@ -17,6 +17,14 @@ const SENDER_FALLBACK = "<unknown sender>";
  * pane has both the sender's identity and a copy-pasteable reply hint.
  * Cross-host sends do NOT wrap locally: the remote rig wraps when it
  * runs the same command, and double-wrapping would nest envelopes.
+ *
+ * V0.3.1 slice 23 parity contract: `packages/daemon/src/lib/pane-envelope.ts`
+ * exports `wrapPaneEnvelope` with BYTE-IDENTICAL output for the same
+ * inputs. The two implementations live in separate packages because
+ * cli + daemon don't cross-import today. Daemon-side nudges from
+ * `rig queue create|handoff` use the daemon helper so queue nudges
+ * render the same envelope as peer-to-peer `rig send`. If you update
+ * this function, update wrapPaneEnvelope in lockstep.
  */
 export function wrapSendBody(sender: string | undefined, recipient: string, body: string): string {
   const senderLabel = sender && sender.trim().length > 0 ? sender : SENDER_FALLBACK;

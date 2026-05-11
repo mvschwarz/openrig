@@ -227,7 +227,9 @@ export class MissionControlWriteContract {
     let notifyResult: string | null = null;
     if (createdQitemId && createdDestination && (input.verb === "route" || input.verb === "handoff")) {
       try {
-        await this.queueRepo.maybeNudge(createdQitemId, createdDestination, createdNudge);
+        // V0.3.1 slice 23: thread actorSession as the source so the
+        // nudge envelope shows where the route/handoff came from.
+        await this.queueRepo.maybeNudge(createdQitemId, createdDestination, createdNudge, input.actorSession);
         notifyAttempted = createdNudge !== false;
         notifyResult = notifyAttempted ? "attempted-best-effort" : "skipped";
       } catch (err) {
