@@ -281,7 +281,10 @@ function ActionOutcomePanel({ outcome }: { outcome: FeedActionOutcome }) {
         </div>
         <InlineDateMark value={outcome.actedAt} />
       </div>
-      <p className="mt-3 font-mono text-[11px] leading-relaxed text-stone-800">
+      {/* Slice 16: action-outcome sentence is prose narrative.
+          Per DESIGN §Typography line 237: don't make page-level
+          content read like a raw terminal log; font-body for prose. */}
+      <p className="mt-3 font-body text-[12px] leading-relaxed text-stone-800">
         {outcomeSentence(outcome)}
       </p>
       <div className="mt-2 flex flex-wrap items-center gap-2">
@@ -366,11 +369,15 @@ export function FeedCard({
   const primaryToken = renderedOutcome ? outcomeToken(renderedOutcome) : KIND_TOKEN[card.kind];
   const PrimaryIcon = primaryToken.icon;
   return (
+    /* Slice 16: vellum opacity moved from bg-white/50 into the DESIGN
+       §Vellum range of bg-white/25 – bg-white/40. Matches DashboardCard
+       + ProjectCard intensity; paper-grid backdrop reads through the
+       surface. */
     <VellumCard
       as="article"
       testId={KIND_TESTID[card.kind]}
       accentClass={renderedOutcome ? TONE_ACCENT[primaryToken.tone] : KIND_ACCENT[card.kind]}
-      className="mb-3 bg-white/50 backdrop-blur-sm group"
+      className="mb-3 bg-white/35 backdrop-blur-sm group"
       {...(onDismiss
         ? {
             tabIndex: 0,
@@ -411,7 +418,9 @@ export function FeedCard({
           </div>
         </div>
         {body ? (
-          <p className="mt-3 font-mono text-xs leading-relaxed text-on-surface-variant whitespace-pre-line">
+          // Slice 16: qitem / event body is prose. Per DESIGN
+          // §Typography: prose stays font-body Inter.
+          <p className="mt-3 font-body text-xs leading-relaxed text-on-surface-variant whitespace-pre-line">
             {body}
           </p>
         ) : null}
@@ -454,7 +463,8 @@ export function FeedCard({
                   <CircleAlert className="h-3.5 w-3.5" strokeWidth={1.7} />
                   Your turn
                 </div>
-                <p className="mt-1 max-w-xl font-mono text-[10px] leading-relaxed text-rose-800/80">
+                {/* Slice 16: hint copy is prose; stays font-body. */}
+                <p className="mt-1 max-w-xl font-body text-[11px] leading-relaxed text-rose-800/80">
                   Review the context, then approve, deny, or route this queue item.
                 </p>
               </div>
