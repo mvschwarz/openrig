@@ -1,0 +1,51 @@
+/*
+ * V0.3.1 slice 14 walk-item 15 — active-row shimmer.
+ *
+ * Subtle left-to-right gradient sweep on the "active" status label
+ * in TopologyTableView. Animates the background-position of a
+ * background-clip:text gradient so the text itself shimmers; the
+ * green dot in the StatusPip stays static.
+ *
+ * Accessibility: animation is suppressed under
+ * `prefers-reduced-motion: reduce` per DESIGN.md §Motion. The
+ * fallback static color matches the underlying `text-success` tone
+ * so the label stays legible at the same visual weight.
+ */
+
+.topology-table-active-shimmer {
+  background: linear-gradient(
+    90deg,
+    currentColor 0%,
+    currentColor 35%,
+    rgba(255, 255, 255, 0.9) 50%,
+    currentColor 65%,
+    currentColor 100%
+  );
+  background-size: 200% 100%;
+  background-position: 100% 0;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+  animation: topology-table-active-shimmer-sweep 2.4s linear infinite;
+}
+
+@keyframes topology-table-active-shimmer-sweep {
+  0% {
+    background-position: 100% 0;
+  }
+  100% {
+    background-position: -100% 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .topology-table-active-shimmer {
+    background: none;
+    -webkit-background-clip: initial;
+    background-clip: initial;
+    -webkit-text-fill-color: currentColor;
+    color: inherit;
+    animation: none;
+  }
+}
