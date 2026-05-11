@@ -981,57 +981,71 @@ describe("buildDaemonEnv", () => {
     });
   });
 
-  // Slice 22 founder-walk-vm-populated-env: --openrig-home / OPENRIG_HOME
-  // flag flows through buildDaemonEnv so two daemons in one VM can have
-  // fully isolated state directories (OQ-4 resolved to (a) fully isolated).
-  describe("slice 22: openrigHome (OPENRIG_HOME) env projection", () => {
-    it("omits OPENRIG_HOME when openrigHome opt is undefined (shell-env passthrough wins)", () => {
-      const baseEnv: Record<string, string> = { HOME: "/Users/tester", PATH: "/usr/bin" };
-      const result = buildDaemonEnv(baseEnv, {
-        port: 7433,
-        db: "/tmp/test.db",
-      });
-      expect(result["OPENRIG_HOME"]).toBeUndefined();
+  // Slice 22 founder-walk-vm-populated-env forward-fix #1: the slice
+  // intentionally drops a `--openrig-home` CLI flag in favor of using
+  // the process-env-pattern (each `rig` invocation gets its own
+  // OPENRIG_HOME via the shell). The slice's "fully isolated state"
+  // claim depends on the env contract being honored at module load
+  // time — specifically that getOpenRigHome() returns the current
+  // env value (not a hardcoded default) and that getDefaultOpenRigPath
+  // threads it into derived paths. The module-level constants
+  // (OPENRIG_DIR / STATE_FILE / LOG_FILE) are a single snapshot of
+  // these functions at load.
+  //
+  // These regression tests prove the function contract with distinct-
+  // value discriminators per banked feedback_poc_regression_must_discriminate.
+  describe("slice 22: OPENRIG_HOME env contract for per-process state isolation", () => {
+    it("getOpenRigHome respects process.env.OPENRIG_HOME (distinct values yield distinct paths)", async () => {
+      const { getOpenRigHome } = await import("../src/openrig-compat.js");
+      const saved = process.env["OPENRIG_HOME"];
+      try {
+        process.env["OPENRIG_HOME"] = "/Users/example/.openrig-blank";
+        const blank = getOpenRigHome();
+        process.env["OPENRIG_HOME"] = "/Users/example/.openrig-populated";
+        const populated = getOpenRigHome();
+        expect(blank).toBe("/Users/example/.openrig-blank");
+        expect(populated).toBe("/Users/example/.openrig-populated");
+        expect(blank).not.toBe(populated);
+      } finally {
+        if (saved === undefined) delete process.env["OPENRIG_HOME"];
+        else process.env["OPENRIG_HOME"] = saved;
+      }
     });
 
-    it("sets OPENRIG_HOME when openrigHome opt is defined (operator opt-in)", () => {
-      const baseEnv: Record<string, string> = { HOME: "/Users/tester", PATH: "/usr/bin" };
-      const result = buildDaemonEnv(baseEnv, {
-        port: 7433,
-        db: "/tmp/test.db",
-        openrigHome: "/Users/example/.openrig-blank",
-      });
-      expect(result["OPENRIG_HOME"]).toBe("/Users/example/.openrig-blank");
+    it("getDefaultOpenRigPath threads env-resolved OPENRIG_HOME into derived paths (daemon.json + log)", async () => {
+      const { getDefaultOpenRigPath } = await import("../src/openrig-compat.js");
+      const saved = process.env["OPENRIG_HOME"];
+      try {
+        process.env["OPENRIG_HOME"] = "/Users/example/.openrig-blank";
+        const blankState = getDefaultOpenRigPath("daemon.json");
+        const blankLog = getDefaultOpenRigPath("daemon.log");
+        process.env["OPENRIG_HOME"] = "/Users/example/.openrig-populated";
+        const populatedState = getDefaultOpenRigPath("daemon.json");
+        const populatedLog = getDefaultOpenRigPath("daemon.log");
+        expect(blankState).toBe("/Users/example/.openrig-blank/daemon.json");
+        expect(populatedState).toBe("/Users/example/.openrig-populated/daemon.json");
+        expect(blankLog).toBe("/Users/example/.openrig-blank/daemon.log");
+        expect(populatedLog).toBe("/Users/example/.openrig-populated/daemon.log");
+        expect(blankState).not.toBe(populatedState);
+        expect(blankLog).not.toBe(populatedLog);
+      } finally {
+        if (saved === undefined) delete process.env["OPENRIG_HOME"];
+        else process.env["OPENRIG_HOME"] = saved;
+      }
     });
 
-    it("preserves shell-set OPENRIG_HOME through baseEnv when opt is undefined", () => {
-      const baseEnv: Record<string, string> = {
-        HOME: "/Users/tester",
-        PATH: "/usr/bin",
-        OPENRIG_HOME: "/Users/example/.openrig-shell",
-      };
-      const result = buildDaemonEnv(baseEnv, {
-        port: 7433,
-        db: "/tmp/test.db",
-      });
-      expect(result["OPENRIG_HOME"]).toBe("/Users/example/.openrig-shell");
-    });
-
-    it("opt-set OPENRIG_HOME overrides shell-set baseEnv value (distinct-value discriminator)", () => {
-      // Per banked feedback_poc_regression_must_discriminate — distinct
-      // values so we can prove the override branch fired and didn't pass
-      // vacuously through baseEnv-passthrough.
-      const baseEnv: Record<string, string> = {
-        HOME: "/Users/tester",
-        PATH: "/usr/bin",
-        OPENRIG_HOME: "/Users/example/.openrig-shell-blank",
-      };
-      const result = buildDaemonEnv(baseEnv, {
-        port: 7433,
-        db: "/tmp/test.db",
-        openrigHome: "/Users/example/.openrig-opt-populated",
-      });
-      expect(result["OPENRIG_HOME"]).toBe("/Users/example/.openrig-opt-populated");
+    it("empty OPENRIG_HOME falls back to homedir default (not the literal empty string)", async () => {
+      const { getOpenRigHome } = await import("../src/openrig-compat.js");
+      const { homedir } = await import("node:os");
+      const saved = process.env["OPENRIG_HOME"];
+      try {
+        process.env["OPENRIG_HOME"] = "";
+        const result = getOpenRigHome();
+        expect(result).toBe(`${homedir()}/.openrig`);
+      } finally {
+        if (saved === undefined) delete process.env["OPENRIG_HOME"];
+        else process.env["OPENRIG_HOME"] = saved;
+      }
     });
   });
 

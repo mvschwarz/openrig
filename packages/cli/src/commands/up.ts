@@ -31,10 +31,7 @@ Examples:
     .option("--target <root>", "Target root directory for package installation (.rigbundle only; does not change agent cwd)")
     .option("--existing", "Treat <source> as an existing rig name; bypass library-spec name resolution")
     .option("--json", "JSON output for agents")
-    // Slice 22 founder-walk-vm-populated-env — operator-explicit
-    // OPENRIG_HOME for the auto-started daemon's state directory.
-    .option("--openrig-home <path>", "OPENRIG_HOME directory for the auto-started daemon (state, transcripts, plugins, specs)")
-    .action(async (source: string, opts: { plan?: boolean; yes?: boolean; cwd?: string; target?: string; existing?: boolean; json?: boolean; openrigHome?: string }) => {
+    .action(async (source: string, opts: { plan?: boolean; yes?: boolean; cwd?: string; target?: string; existing?: boolean; json?: boolean }) => {
       const deps = getDepsF();
 
       // Run preflight before auto-start
@@ -99,10 +96,6 @@ Examples:
             transcriptsLines: resolvedConfig?.transcripts.lines,
             transcriptsPollIntervalSeconds: resolvedConfig?.transcripts.pollIntervalSeconds,
             workspaceRoot: resolvedConfig?.workspace.root,
-            // Slice 22 founder-walk-vm-populated-env — operator-explicit
-            // OPENRIG_HOME (omit when undefined so the daemon's default
-            // homedir-relative ~/.openrig still applies).
-            openrigHome: opts.openrigHome,
           }, deps.lifecycleDeps);
           status = await getDaemonStatus(deps.lifecycleDeps);
         } catch (err) {

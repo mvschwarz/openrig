@@ -33,7 +33,11 @@ Fixture YAML files use the canonical placeholder paths per banked
 
 Slice 22 (release-0.3.1) ships the INFRASTRUCTURE for the two-daemon model:
 
-- `--openrig-home` CLI flag on `rig daemon start` and `rig up`
+- **Process-env pattern**: `OPENRIG_HOME=<dir> rig daemon start ...` — each
+  `rig` invocation gets its own state directory at process import time.
+  No CLI flag (an earlier attempt at `--openrig-home` was dropped because
+  it only threaded into the spawned child, not the parent-side lifecycle
+  bookkeeping; see substrate convention doc for the architecture note).
 - Bootstrap script (`scripts/vm-bootstrap/two-daemon-start.sh`)
 - This fixtures directory + a sample workflow YAML
 - Convention doc in substrate
