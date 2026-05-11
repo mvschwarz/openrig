@@ -286,7 +286,11 @@ function Rail({
         title={spec.label}
         onClick={onMobileClose}
         className={cn(
-          "relative flex h-10 w-10 items-center justify-center transition-colors",
+          // Slice 20 mobile: tap-target meets iOS HIG minimum (44px)
+          // on mobile (default `h-11 w-11`) and restores the original
+          // 40px hitbox at `lg:` (desktop) where mouse precision is
+          // the input model, not thumbs.
+          "relative flex h-11 w-11 items-center justify-center transition-colors lg:h-10 lg:w-10",
           "focus-visible:outline focus-visible:outline-2 focus-visible:outline-stone-900 focus-visible:outline-offset-2",
           active
             ? "bg-stone-900 text-stone-50"
@@ -557,7 +561,10 @@ function AppShellInner({ children }: AppShellProps) {
                       explorerOpen ? "translate-x-0" : "-translate-x-full",
                     )}
                   >
-                    <Rail pathname={pathname} vertical={false} onMobileClose={() => setExplorerOpen(false)} />
+                    {/* Slice 20 mobile: mobile slide-over rail is
+                        vertical (one item per row) — thumb-friendly stack
+                        instead of the prior horizontal scroll. */}
+                    <Rail pathname={pathname} vertical onMobileClose={() => setExplorerOpen(false)} />
                   </div>
                 </>
               )}
