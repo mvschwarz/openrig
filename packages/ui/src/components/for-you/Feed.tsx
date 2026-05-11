@@ -33,6 +33,7 @@ import {
   useFeedSubscriptions,
   isCardKindSubscribed,
 } from "../../hooks/useFeedSubscriptions.js";
+import { useDismissedSeqs } from "../../hooks/useDismissedSeqs.js";
 import { FeedCard } from "./FeedCard.js";
 import type { FeedActionOutcome, FeedProofPreview } from "./FeedCard.js";
 import {
@@ -214,6 +215,8 @@ export function Feed() {
   const subs = useFeedSubscriptions();
 
   const rawCards = useMemo(() => classifyFeed(events).slice(0, HISTORY_LIMIT), [events]);
+  const rawCardSeqs = useMemo(() => rawCards.map((c) => c.source.seq), [rawCards]);
+  const { dismissedSeqs } = useDismissedSeqs(rawCardSeqs);
   const qitemIds = useMemo(
     () => rawCards.map(qitemIdForCard).filter((id): id is string => Boolean(id)),
     [rawCards],
@@ -233,12 +236,14 @@ export function Feed() {
       return kind === card.kind ? card : { ...card, kind };
     });
     // Filter by subscription state FIRST so the feed honors operator
-    // configuration, then apply the transient lens filter on top.
+    // configuration, then apply the transient lens filter, then drop
+    // anything the operator has soft-dismissed via per-event-seq.
     const subscribed = hydrated.filter((c) =>
       isCardKindSubscribed(c.kind, subs.state),
     );
-    return lens === "all" ? subscribed : subscribed.filter((c) => c.kind === lens);
-  }, [rawCards, lens, queueItems.itemsById, actionOutcomes, subs.state]);
+    const lensFiltered = lens === "all" ? subscribed : subscribed.filter((c) => c.kind === lens);
+    return lensFiltered.filter((c) => !dismissedSeqs.has(c.source.seq));
+  }, [rawCards, lens, queueItems.itemsById, actionOutcomes, subs.state, dismissedSeqs]);
   const slicesQuery = useSlices("all");
   const sliceRows = useMemo(() => {
     if (!slicesQuery.data || "unavailable" in slicesQuery.data) return [];
