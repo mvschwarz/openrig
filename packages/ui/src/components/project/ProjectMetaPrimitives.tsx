@@ -38,7 +38,7 @@ const toneClass: Record<ProjectMetaTone, string> = {
   danger: "border-rose-300 bg-rose-50/80 text-rose-800",
 };
 
-const statusDotClass: Record<ProjectMetaTone, string> = {
+export const statusDotClass: Record<ProjectMetaTone, string> = {
   neutral: "border-stone-400 bg-stone-300",
   info: "border-sky-400 bg-sky-200",
   success: "border-emerald-500 bg-emerald-400",

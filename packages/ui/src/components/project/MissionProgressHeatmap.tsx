@@ -19,7 +19,7 @@
 // some slices have them. Acceptance items work for every slice.
 //
 // All colors derive from existing DESIGN.md status tokens via the
-// `stateTone` + `cellToneClass` mappings; no new color system.
+// shared slice-status tone + status-dot class mappings; no new color system.
 
 import type { ReactNode } from "react";
 import { Link } from "@tanstack/react-router";
@@ -27,45 +27,17 @@ import { EmptyState } from "../ui/empty-state.js";
 import { ProjectPill } from "./ProjectMetaPrimitives.js";
 import {
   type ProjectMetaTone,
-  stateTone,
+  sliceStatusTone,
+  statusDotClass,
 } from "./ProjectMetaPrimitives.js";
 import type { SliceDetail } from "../../hooks/useSlices.js";
 import type { SliceListEntry } from "../../hooks/useSlices.js";
-
-/** Maps a ProjectMetaTone to a single SOLID-fill cell class. Pairs
- *  with the existing toneClass map in ProjectMetaPrimitives.tsx (which
- *  is private to that module). Heat-map cells need a denser fill than
- *  the muted-bg pill chrome — these classes lift the existing palette
- *  to a "checked checkbox" feel without inventing new tokens. */
-const cellToneClass: Record<ProjectMetaTone, string> = {
-  neutral: "border-stone-400 bg-stone-300",
-  info: "border-sky-400 bg-sky-200",
-  success: "border-emerald-500 bg-emerald-400",
-  warning: "border-amber-400 bg-amber-300",
-  danger: "border-rose-400 bg-rose-300",
-};
-
-/** Heat-map-local tone resolution. Wraps the shared `stateTone` but
- *  overrides for `SliceStatus` values whose canonical UI tone differs
- *  from what `stateTone` infers from generic state strings.
- *
- *  Specifically: `stateTone("active")` returns `"neutral"` (no keyword
- *  match), which would make active slices' done cells fall through to
- *  the `success` tone. That collapses the at-a-glance distinction
- *  between an in-flight active slice's done items vs a shipped done
- *  slice's done items. Override `"active"` → `"info"` so the heat-map
- *  shows the canonical SliceStatus differentiation. Other status
- *  strings flow through `stateTone` unchanged. */
-function heatmapTone(status: string | undefined): ProjectMetaTone {
-  if (status === "active") return "info";
-  return stateTone(status);
-}
 
 /** Resolution rule used by both the heat-map cells AND the legend so
  *  the legend swatch class is always EXACTLY the same string the cell
  *  would render. Pure function of tone; no side effects. */
 function doneCellClass(tone: ProjectMetaTone): string {
-  return cellToneClass[tone === "neutral" ? "success" : tone];
+  return statusDotClass[tone === "neutral" ? "success" : tone];
 }
 
 interface HeatmapRow {
@@ -159,7 +131,7 @@ export function MissionProgressHeatmap({
 }
 
 function HeatmapSliceRow({ row }: { row: HeatmapRow }) {
-  const tone = heatmapTone(row.status);
+  const tone = sliceStatusTone(row.status);
   return (
     <article
       data-testid={`mission-progress-heatmap-row-${row.name}`}
@@ -200,7 +172,7 @@ function Cells({ row }: { row: HeatmapRow }) {
       </div>
     );
   }
-  const tone = heatmapTone(row.status);
+  const tone = sliceStatusTone(row.status);
   // Done cells take the slice's status tone (info for active, success
   // for done, danger for blocked, etc.) so the heat-map reads both
   // per-cell + per-row at-a-glance. Not-done cells stay outline-only

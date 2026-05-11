@@ -173,10 +173,10 @@ describe("MissionProgressHeatmap (slice 13.5)", () => {
     );
     const row = await findByTestId("mission-progress-heatmap-row-alpha");
     expect(row.getAttribute("data-status")).toBe("active");
-    // The heat-map's local heatmapTone() overrides stateTone for the
-    // canonical SliceStatus value "active" -> "info", so done cells on
-    // an active slice are visually distinct from done cells on a
-    // shipped done slice. This matches the legend.
+    // The shared sliceStatusTone() maps the canonical SliceStatus
+    // value "active" -> "info", so done cells on an active slice are
+    // visually distinct from done cells on a shipped done slice.
+    // This matches the legend.
     expect(row.getAttribute("data-tone")).toBe("info");
 
     const doneCell = await findByTestId("mission-progress-heatmap-cell-alpha-0");
@@ -208,6 +208,20 @@ describe("MissionProgressHeatmap (slice 13.5)", () => {
     expect(row.getAttribute("data-tone")).toBe("danger");
     const doneCell = await findByTestId("mission-progress-heatmap-cell-blockedSlice-0");
     expect(doneCell.className).toMatch(/bg-rose-300/);
+  });
+
+  it("HG-2 (case-insensitive slice status): capitalized Active still renders info-toned cells", async () => {
+    const rows = [makeRow("capitalActive", "Active")];
+    const detailsByName = new Map<string, SliceDetail>([
+      ["capitalActive", makeDetail("capitalActive", [{ text: "a1", done: true }])],
+    ]);
+    const { findByTestId } = withRouter(
+      <MissionProgressHeatmap rows={rows} detailsByName={detailsByName} />,
+    );
+    const row = await findByTestId("mission-progress-heatmap-row-capitalActive");
+    expect(row.getAttribute("data-tone")).toBe("info");
+    const doneCell = await findByTestId("mission-progress-heatmap-cell-capitalActive-0");
+    expect(doneCell.className).toMatch(/bg-sky-200/);
   });
 
   it("HG-2 (legend): legend renders all five state -> color samples", async () => {
