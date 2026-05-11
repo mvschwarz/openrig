@@ -1,0 +1,58 @@
+version: "0.2"
+name: kernel
+summary: >
+  Codex-only kernel variant: all three agents run on Codex. Selected
+  by rig daemon start when codex login status is green but claude auth
+  status fails.
+
+culture_file: culture/CULTURE.md
+
+pods:
+  - id: advisor
+    label: Advisor
+    members:
+      - id: lead
+        agent_ref: "local:agents/advisor/lead"
+        runtime: codex
+        profile: default
+        cwd: "."
+
+  - id: operator
+    label: Operator
+    members:
+      - id: human
+        agent_ref: "builtin:terminal"
+        profile: default
+        cwd: "."
+      - id: agent
+        agent_ref: "local:agents/operator/agent"
+        runtime: codex
+        profile: default
+        cwd: "."
+    edges:
+      - kind: collaborates_with
+        from: agent
+        to: human
+      - kind: escalates_to
+        from: agent
+        to: human
+
+  - id: queue
+    label: Queue
+    members:
+      - id: worker
+        agent_ref: "local:agents/queue/worker"
+        runtime: codex
+        profile: default
+        cwd: "."
+
+edges:
+  - kind: delegates_to
+    from: advisor.lead
+    to: operator.agent
+  - kind: delegates_to
+    from: advisor.lead
+    to: queue.worker
+  - kind: escalates_to
+    from: queue.worker
+    to: advisor.lead
