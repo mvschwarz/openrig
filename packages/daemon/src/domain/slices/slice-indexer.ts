@@ -407,21 +407,51 @@ export class SliceIndexer {
   }
 
   private matchQitems(sliceName: string, railItem: string | null, missionId: string | null): string[] {
-    // Strategy: union qitems whose body or tags mention the slice id,
-    // rail item, or mission id. Body matching preserves the legacy corpus;
-    // tags make the mission-aware default workspace precise for new work.
+    // V0.3.1 slice 17 founder-walk-workspace-state-correctness (founder
+    // item 3): the previous implementation unioned substring matches on
+    // [sliceName, railItem, missionId]. The missionId term over-matched
+    // — every qitem tagged `mission:<id>` appeared under EVERY slice in
+    // that mission. Fix: when typed `slice:<name>` tag rows exist for
+    // this slice, the missionId substring term is dropped from the
+    // union; the typed tag is the authoritative slice membership signal.
+    // Substring fallback (including the missionId term) is preserved for
+    // slices whose qitem corpus pre-dates the typed-tag convention so
+    // legacy mission-aware workspaces don't regress.
     const ids = new Set<string>();
-    const terms = Array.from(new Set([sliceName, railItem, missionId].filter((v): v is string => !!v)));
     try {
-      for (const term of terms) {
+      // 1. Typed-tag matches: tags JSON contains `slice:<sliceName>` literal.
+      // Both the `"slice:..."` JSON-array form and the comma-separated
+      // form (legacy CLI tags) are caught by a wildcard on the slice id.
+      let typedTagMatchCount = 0;
+      try {
+        const rows = this.db.prepare(
+          `SELECT qitem_id FROM queue_items WHERE tags LIKE ? LIMIT 500`,
+        ).all(`%slice:${sliceName}%`) as Array<{ qitem_id: string }>;
+        for (const r of rows) ids.add(r.qitem_id);
+        typedTagMatchCount = rows.length;
+      } catch {
+        // queue_items present but `tags` column missing (older test
+        // harness): fall through to substring path with full term set.
+      }
+
+      // 2. Substring matches. Terms are chosen so the missionId term
+      // is INCLUDED only when no typed-tag rows exist (legacy
+      // compatibility); otherwise the slice-specific terms (sliceName +
+      // railItem) drive matching. railItem stays in both branches
+      // because it's slice-scoped, not mission-scoped.
+      const substringTerms = (typedTagMatchCount > 0
+        ? [sliceName, railItem]
+        : [sliceName, railItem, missionId]
+      ).filter((v): v is string => !!v);
+      for (const term of Array.from(new Set(substringTerms))) {
         try {
           const rows = this.db.prepare(
-            `SELECT qitem_id FROM queue_items WHERE body LIKE ? OR tags LIKE ? LIMIT 500`
+            `SELECT qitem_id FROM queue_items WHERE body LIKE ? OR tags LIKE ? LIMIT 500`,
           ).all(`%${term}%`, `%${term}%`) as Array<{ qitem_id: string }>;
           for (const r of rows) ids.add(r.qitem_id);
         } catch {
           const rows = this.db.prepare(
-            `SELECT qitem_id FROM queue_items WHERE body LIKE ? LIMIT 500`
+            `SELECT qitem_id FROM queue_items WHERE body LIKE ? LIMIT 500`,
           ).all(`%${term}%`) as Array<{ qitem_id: string }>;
           for (const r of rows) ids.add(r.qitem_id);
         }

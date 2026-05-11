@@ -319,4 +319,43 @@ describe("PL-slice-story-view-v0 slices routes", () => {
       expect(res.headers.get("content-type")).toBe("image/png");
     });
   });
+
+  // V0.3.1 slice 17 founder-walk-workspace-state-correctness (founder
+  // item 8 — Explorer auto-show). POST /api/slices/refresh drops both
+  // indexer caches so newly-created slice / mission folders show up
+  // without a daemon restart.
+  describe("POST /api/slices/refresh", () => {
+    it("returns 200 + drops the listing cache so freshly-created slices appear", async () => {
+      writeSlice(slicesRoot, "before-slice", { "README.md": "---\n---\n" });
+      // Prime the cache via a list call
+      const first = await app.request("/api/slices");
+      const firstList = (await first.json()) as { slices: Array<{ name: string }> };
+      expect(firstList.slices.map((s) => s.name)).toEqual(["before-slice"]);
+
+      // Add another slice on disk AFTER cache primed
+      writeSlice(slicesRoot, "after-slice", { "README.md": "---\n---\n" });
+      // Without refresh, the cached list should still be stale
+      const stale = await app.request("/api/slices");
+      const staleList = (await stale.json()) as { slices: Array<{ name: string }> };
+      expect(staleList.slices.map((s) => s.name).sort()).toEqual(["before-slice"]);
+
+      // Trigger refresh
+      const refresh = await app.request("/api/slices/refresh", { method: "POST" });
+      expect(refresh.status).toBe(200);
+      const refreshBody = (await refresh.json()) as { ok: boolean };
+      expect(refreshBody.ok).toBe(true);
+
+      // Now the list call picks up the new slice
+      const fresh = await app.request("/api/slices");
+      const freshList = (await fresh.json()) as { slices: Array<{ name: string }> };
+      expect(freshList.slices.map((s) => s.name).sort()).toEqual(["after-slice", "before-slice"]);
+    });
+
+    it("returns 503 when indexer is not wired", async () => {
+      const bareApp = new Hono();
+      bareApp.route("/api/slices", slicesRoutes());
+      const res = await bareApp.request("/api/slices/refresh", { method: "POST" });
+      expect(res.status).toBe(503);
+    });
+  });
 });

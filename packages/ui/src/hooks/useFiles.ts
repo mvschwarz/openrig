@@ -73,6 +73,11 @@ export function useFilesList(root: string | null, path: string | null) {
     queryFn: () => fetchList(root!, path ?? ""),
     enabled: !!root,
     staleTime: 15_000,
+    // V0.3.1 slice 17 founder-walk-workspace-state-correctness — founder
+    // item 8 (Explorer auto-show): refetch on window focus so new files
+    // / folders created while the operator was off-tab appear without a
+    // manual refresh click.
+    refetchOnWindowFocus: true,
   });
 }
 

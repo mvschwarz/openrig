@@ -281,6 +281,67 @@ describe("PL-slice-story-view-v0 SliceIndexer", () => {
       expect(slice.qitemIds.sort()).toEqual(["q-by-mission-body", "q-by-slice-tag"]);
     });
 
+    // V0.3.1 slice 17 founder-walk-workspace-state-correctness — founder item 3.
+    // The over-match bug: a qitem tagged ONLY mission:<missionId>
+    // (no `slice:` tag, no slice-name body mention) was returning
+    // under EVERY slice in that mission because matchQitems unioned
+    // the missionId substring term across all slices. Fix: when at
+    // least one qitem has the typed `slice:<sliceName>` tag, the
+    // missionId substring term is dropped from the union so
+    // mission-tagged-only qitems no longer pollute the slice's queue.
+    // Substring fallback is preserved for slices without typed-tag
+    // qitems (legacy corpus compatibility — HG-2).
+    it("when typed slice:<name> tag matches exist, mission-tagged-only qitems are NOT included", () => {
+      // Production shape: slices/missions root with a mission folder
+      // containing the slice. missionId resolves to the mission folder
+      // name; railItem defaults to missionId when frontmatter doesn't
+      // specify one. The over-match bug was about the missionId
+      // substring term polluting per-slice queue results.
+      const missionsRoot = path.join(cleanup, "missions");
+      writeSlice(path.join(missionsRoot, "release-fake", "slices"), "fake-slice-17", {
+        // Explicit rail-item disambiguates from missionId so the fix's
+        // "drop missionId, keep railItem" branch can be exercised
+        // without the railItem-equals-missionId collision.
+        "README.md": "---\nstatus: active\nrail-item: WALK-17\n---\n# Fake 17\n",
+      });
+      insertQitem(db, {
+        qitemId: "q-typed-slice-tag",
+        body: "Body without slice name.",
+        tags: ["slice:fake-slice-17"],
+      });
+      insertQitem(db, {
+        qitemId: "q-mission-tag-only",
+        body: "Body without slice name.",
+        tags: ["mission:release-fake"],
+      });
+      insertQitem(db, {
+        qitemId: "q-by-slice-name-body",
+        body: "fake-slice-17 mention in body.",
+        tags: [],
+      });
+      const indexer = new SliceIndexer({ slicesRoot: missionsRoot, dogfoodEvidenceRoot: null, db });
+      const slice = indexer.get("fake-slice-17")!;
+      expect(slice.qitemIds.sort()).toEqual(["q-by-slice-name-body", "q-typed-slice-tag"]);
+      expect(slice.qitemIds).not.toContain("q-mission-tag-only");
+    });
+
+    it("preserves legacy substring fallback (including mission body) when NO typed slice: tag exists", () => {
+      // When no qitem has the typed `slice:<name>` tag, the indexer
+      // falls back to the pre-fix three-term substring union so older
+      // dogfood corpora keep matching the way they did before this
+      // slice landed.
+      const missionsRoot = path.join(cleanup, "missions");
+      writeSlice(path.join(missionsRoot, "legacy-mission", "slices"), "legacy-slice", {
+        "README.md": "---\nstatus: active\nrail-item: LEGACY-RAIL\n---\n",
+      });
+      insertQitem(db, { qitemId: "q-legacy-by-mission", body: "advance the legacy-mission mission", tags: [] });
+      insertQitem(db, { qitemId: "q-legacy-by-name", body: "legacy-slice work item", tags: [] });
+      const indexer = new SliceIndexer({ slicesRoot: missionsRoot, dogfoodEvidenceRoot: null, db });
+      const slice = indexer.get("legacy-slice")!;
+      // Both match: mission body via missionId substring, name body via sliceName substring.
+      expect(slice.qitemIds.sort()).toEqual(["q-legacy-by-mission", "q-legacy-by-name"]);
+    });
+
     it("returns empty qitem set when queue_items table is absent", () => {
       // Re-create db without queue_items to simulate the test-harness gap.
       const bareDb = createDb();
