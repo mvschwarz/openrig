@@ -81,16 +81,14 @@ export function useSlices(filter: SliceFilter, boundToWorkflow: BoundToWorkflowF
     ],
     queryFn: () => fetchSlicesList(filter, boundToWorkflow),
     staleTime: 30_000,
-    // V0.3.1 slice 17 founder-walk-workspace-state-correctness — founder
-    // item 8 (Explorer auto-show): refetch on window focus so an operator
+    // V0.3.1 slice 17 founder-walk-workspace-state-correctness — walk item 8 (Explorer auto-show): refetch on window focus so an operator
     // who switches away to `mkdir slices/...` and comes back sees the
     // new folder without manually clicking refresh.
     refetchOnWindowFocus: true,
   });
 }
 
-// V0.3.1 slice 17 founder-walk-workspace-state-correctness — founder
-// item 8 (Explorer auto-show). Mutation hook for the Explorer header's
+// V0.3.1 slice 17 founder-walk-workspace-state-correctness — walk item 8 (Explorer auto-show). Mutation hook for the Explorer header's
 // manual refresh button: POSTs to /api/slices/refresh to drop the
 // daemon-side indexer cache, then invalidates the react-query slices
 // + files caches so the next render hits the fresh data.

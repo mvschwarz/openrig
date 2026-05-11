@@ -266,8 +266,7 @@ function ScopeQueueRollup({
   queueItemsById: Map<string, QueueItemDetail>;
   isFetching: boolean;
 }) {
-  // V0.3.1 slice 17 founder-walk-workspace-state-correctness — founder
-  // item 10 (slice queue descending order). Latest qitem at top. Prefer
+  // V0.3.1 slice 17 founder-walk-workspace-state-correctness — walk item 10 (slice queue descending order). Latest qitem at top. Prefer
   // tsCreated when the loaded detail is available; fall back to the
   // qitem-id (which encodes a timestamp prefix `qitem-YYYYMMDD...`) so
   // sort works before queueItemsById has finished loading.

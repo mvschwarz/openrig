@@ -91,8 +91,7 @@ export function slicesRoutes(): Hono {
     });
   });
 
-  // V0.3.1 slice 17 founder-walk-workspace-state-correctness (founder
-  // item 8 — Explorer auto-show): explicit cache invalidation surface.
+  // V0.3.1 slice 17 founder-walk-workspace-state-correctness (walk item 8 — Explorer auto-show): explicit cache invalidation surface.
   // POST /api/slices/refresh drops both indexer caches so newly-created
   // slice / mission folders are picked up without a daemon restart.
   // Registered BEFORE the dynamic /:name routes so it isn't shadowed.

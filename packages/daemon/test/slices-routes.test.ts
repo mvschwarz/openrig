@@ -320,8 +320,7 @@ describe("PL-slice-story-view-v0 slices routes", () => {
     });
   });
 
-  // V0.3.1 slice 17 founder-walk-workspace-state-correctness (founder
-  // item 8 — Explorer auto-show). POST /api/slices/refresh drops both
+  // V0.3.1 slice 17 founder-walk-workspace-state-correctness (walk item 8 — Explorer auto-show). POST /api/slices/refresh drops both
   // indexer caches so newly-created slice / mission folders show up
   // without a daemon restart.
   describe("POST /api/slices/refresh", () => {

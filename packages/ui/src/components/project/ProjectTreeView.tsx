@@ -260,8 +260,7 @@ export function ProjectTreeView() {
   return (
     <div data-testid="project-tree-view" className="flex-1 overflow-y-auto py-2">
       {/*
-        V0.3.1 slice 17 founder-walk-workspace-state-correctness — founder
-        item 8 (Explorer auto-show). Manual refresh button drops the
+        V0.3.1 slice 17 founder-walk-workspace-state-correctness — walk item 8 (Explorer auto-show). Manual refresh button drops the
         daemon-side indexer cache and react-query slice/file caches so
         newly-created slice / mission folders appear without restarting
         the daemon. Window-focus refetch in useSlices / useFilesList

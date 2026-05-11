@@ -281,7 +281,7 @@ describe("PL-slice-story-view-v0 SliceIndexer", () => {
       expect(slice.qitemIds.sort()).toEqual(["q-by-mission-body", "q-by-slice-tag"]);
     });
 
-    // V0.3.1 slice 17 founder-walk-workspace-state-correctness — founder item 3.
+    // V0.3.1 slice 17 founder-walk-workspace-state-correctness — walk item 3.
     // The over-match bug: a qitem tagged ONLY mission:<missionId>
     // (no `slice:` tag, no slice-name body mention) was returning
     // under EVERY slice in that mission because matchQitems unioned
@@ -340,6 +340,42 @@ describe("PL-slice-story-view-v0 SliceIndexer", () => {
       const slice = indexer.get("legacy-slice")!;
       // Both match: mission body via missionId substring, name body via sliceName substring.
       expect(slice.qitemIds.sort()).toEqual(["q-legacy-by-mission", "q-legacy-by-name"]);
+    });
+
+    // V0.3.1 slice 17 walk item 10 — forward-fix #1. The slice-detail
+    // Queue tab consumes `detail.qitemIds` unchanged from the backend,
+    // so the DESC-by-ts_created order has to be applied by the indexer
+    // itself (the Phase A frontend rollup sort only covers the
+    // workspace/mission rollup view). Three distinct ts_created values
+    // discriminate the ordering per banked
+    // feedback_poc_regression_must_discriminate.
+    it("matchQitems returns qitemIds sorted DESC by ts_created (slice tab consumes this order unchanged)", () => {
+      const missionsRoot = path.join(cleanup, "missions");
+      writeSlice(path.join(missionsRoot, "fwx-mission", "slices"), "fwx-slice", {
+        "README.md": "---\nstatus: active\nrail-item: FWX-RAIL\n---\n",
+      });
+      insertQitem(db, {
+        qitemId: "q-oldest",
+        body: "tagged for fwx-slice",
+        tags: ["slice:fwx-slice"],
+        tsCreated: "2026-05-11T09:00:00.000Z",
+      });
+      insertQitem(db, {
+        qitemId: "q-middle",
+        body: "tagged for fwx-slice",
+        tags: ["slice:fwx-slice"],
+        tsCreated: "2026-05-11T10:00:00.000Z",
+      });
+      insertQitem(db, {
+        qitemId: "q-newest",
+        body: "tagged for fwx-slice",
+        tags: ["slice:fwx-slice"],
+        tsCreated: "2026-05-11T11:00:00.000Z",
+      });
+      const indexer = new SliceIndexer({ slicesRoot: missionsRoot, dogfoodEvidenceRoot: null, db });
+      const slice = indexer.get("fwx-slice")!;
+      // Strict order: newest first, oldest last. NOT alphabetic by id.
+      expect(slice.qitemIds).toEqual(["q-newest", "q-middle", "q-oldest"]);
     });
 
     it("returns empty qitem set when queue_items table is absent", () => {

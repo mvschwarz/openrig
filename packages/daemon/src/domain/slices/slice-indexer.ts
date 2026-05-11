@@ -407,8 +407,7 @@ export class SliceIndexer {
   }
 
   private matchQitems(sliceName: string, railItem: string | null, missionId: string | null): string[] {
-    // V0.3.1 slice 17 founder-walk-workspace-state-correctness (founder
-    // item 3): the previous implementation unioned substring matches on
+    // V0.3.1 slice 17 founder-walk-workspace-state-correctness (walk item 3): the previous implementation unioned substring matches on
     // [sliceName, railItem, missionId]. The missionId term over-matched
     // — every qitem tagged `mission:<id>` appeared under EVERY slice in
     // that mission. Fix: when typed `slice:<name>` tag rows exist for
@@ -460,7 +459,35 @@ export class SliceIndexer {
       // queue_items table absent (test harness without the migration); return empty.
       return [];
     }
-    return Array.from(ids);
+    // V0.3.1 slice 17 walk item 10 — forward-fix #1. Sort qitemIds DESC
+    // by ts_created so the slice-detail Queue tab renders newest first
+    // (HG-5). The ScopePages.ScopeQueueRollup frontend sort still runs
+    // as a belt-and-suspenders measure for code paths that bypass this
+    // helper, but the backend is the authoritative consistency point.
+    // Fallback to qitem-id lex DESC when ts_created is unavailable (the
+    // id encodes the timestamp prefix `qitem-YYYYMMDDHHMMSS-...`).
+    const idsArr = Array.from(ids);
+    if (idsArr.length <= 1) return idsArr;
+    try {
+      const placeholders = idsArr.map(() => "?").join(",");
+      const tsRows = this.db.prepare(
+        `SELECT qitem_id, ts_created FROM queue_items WHERE qitem_id IN (${placeholders})`,
+      ).all(...idsArr) as Array<{ qitem_id: string; ts_created: string | null }>;
+      const tsByQitemId = new Map<string, string>();
+      for (const r of tsRows) if (r.ts_created) tsByQitemId.set(r.qitem_id, r.ts_created);
+      idsArr.sort((a, b) => {
+        const tsA = tsByQitemId.get(a) ?? a;
+        const tsB = tsByQitemId.get(b) ?? b;
+        if (tsA === tsB) return 0;
+        return tsA < tsB ? 1 : -1; // DESC
+      });
+    } catch {
+      // Sort failure (e.g. ts_created column absent): fall back to
+      // qitem-id lex DESC. id format encodes the timestamp so this
+      // still yields newest-first in practice.
+      idsArr.sort((a, b) => (a < b ? 1 : a > b ? -1 : 0));
+    }
+    return idsArr;
   }
 
   private findProofPacket(sliceName: string): SliceProofPacket | null {
