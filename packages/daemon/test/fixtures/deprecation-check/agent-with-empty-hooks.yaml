@@ -1,0 +1,19 @@
+# bug-fix slice deprecation-check-keys-widening — fixture.
+# Reproduces the e3bfc08 scenario: profiles.<name>.uses.hooks: []
+# placeholder. validateAgentSpec must reject this (the strict validator
+# returned invalid in the slice 05 forward-fix path that motivated the
+# 2026-05-11 hotfix). T5: regression coverage for that class.
+name: agent-with-empty-hooks
+version: "1.0"
+
+defaults:
+  runtime: claude-code
+
+profiles:
+  default:
+    uses:
+      skills: []
+      guidance: []
+      subagents: []
+      hooks: []
+      runtime_resources: []

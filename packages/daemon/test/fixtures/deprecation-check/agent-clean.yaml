@@ -1,0 +1,18 @@
+# bug-fix slice deprecation-check-keys-widening — fixture.
+# Minimal valid agent.yaml shape with NO deprecated keys + NO empty-array
+# placeholders that the strict validator rejects. T7 baseline: must pass
+# both the DEPRECATED_KEY_PATHS check AND validateAgentSpec.
+name: agent-clean
+version: "1.0"
+
+defaults:
+  runtime: claude-code
+
+profiles:
+  default:
+    uses:
+      skills: []
+      guidance: []
+      subagents: []
+      plugins: []
+      runtime_resources: []

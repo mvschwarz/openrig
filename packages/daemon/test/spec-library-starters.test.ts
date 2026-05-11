@@ -36,6 +36,35 @@ const AGENT_SPECS = [
 ];
 
 const SHARED_AGENT_SPEC = "agents/shared/agent.yaml";
+
+// V0.3.1 slice 05 kernel-rig-as-default + bug-fix slice
+// deprecation-check-keys-widening: kernel agents are built-in product
+// surface and pass through the same deprecation regression gates as
+// starter agents. Hoisted from the prior inline declaration so the
+// new key-path check (below) can walk both lists from a single source.
+const KERNEL_AGENT_SPECS = [
+  "rigs/launch/kernel/agents/advisor/lead/agent.yaml",
+  "rigs/launch/kernel/agents/operator/agent/agent.yaml",
+  "rigs/launch/kernel/agents/queue/worker/agent.yaml",
+];
+
+// bug-fix slice deprecation-check-keys-widening — IMPL-PRD §1.2 + §3.
+// Allowlist of removed/deprecated KEY paths the spec library MUST NOT
+// carry. Each entry uses dot-path notation with `*` as a profile-name
+// wildcard. New deprecations append; commit message references this
+// slice's IMPL-PRD as the authoritative taxonomy.
+//
+// v0 seed: the two keys the strict validator (agent-manifest.ts
+// validateAgentSpec lines 191 + 240) already rejects with explicit
+// plugin-primitive Phase 3a migration errors. The widening here is
+// the regression gate — the validator's rejection is the runtime fix;
+// this allowlist guarantees a static fail if a future contributor
+// reintroduces the placeholder pattern that the e3bfc08 hotfix had
+// to scrub from kernel agent.yaml files.
+const DEPRECATED_KEY_PATHS: string[] = [
+  "resources.hooks",
+  "profiles.*.uses.hooks",
+];
 const STARTER_AGENT_SPECS = [
   "agents/conveyor/lead/agent.yaml",
   "agents/conveyor/planner/agent.yaml",
@@ -399,11 +428,6 @@ describe("Starter specs", () => {
     // built-in product surface and must respect the same deprecation
     // curation as starter agents. Caught at Phase 05d forward-fix #2
     // when advisor.lead reintroduced the deprecated skill reference.
-    const KERNEL_AGENT_SPECS = [
-      "rigs/launch/kernel/agents/advisor/lead/agent.yaml",
-      "rigs/launch/kernel/agents/operator/agent/agent.yaml",
-      "rigs/launch/kernel/agents/queue/worker/agent.yaml",
-    ];
     for (const file of [...AGENT_SPECS, ...KERNEL_AGENT_SPECS]) {
       const yaml = readFileSync(join(SPECS_ROOT, file), "utf-8");
       const raw = parseAgentSpec(yaml) as Record<string, unknown>;
@@ -413,6 +437,132 @@ describe("Starter specs", () => {
       const skills = (uses["skills"] as string[] | undefined) ?? [];
       expect(skills).not.toContain(deprecatedHaSkill);
     }
+  });
+
+  // bug-fix slice deprecation-check-keys-widening — IMPL-PRD §4 +
+  // §5. The deprecation-check pattern previously only enforced
+  // against deprecated SKILL refs in profile.uses.skills. After the
+  // 2026-05-10 hotfix at e3bfc08 (which had to scrub `hooks: []`
+  // placeholders from kernel agent.yaml because the strict validator
+  // rejected them), the regression class is open — a future
+  // contributor can reintroduce that placeholder pattern or add a
+  // newly-deprecated KEY path and the test won't catch it. The block
+  // below widens to two new check categories: KEY-path allowlist +
+  // strict-validator inline invocation.
+  describe("deprecated KEY path + strict-validator gate", () => {
+    function hasDeprecatedKeyPath(obj: Record<string, unknown>, path: string): boolean {
+      // path uses dot-notation with `*` as a profile-name wildcard.
+      // Walk the object honoring the wildcard at the matching segment.
+      const segments = path.split(".");
+      function walk(node: unknown, idx: number): boolean {
+        if (idx >= segments.length) return node !== undefined;
+        if (!node || typeof node !== "object" || Array.isArray(node)) return false;
+        const seg = segments[idx]!;
+        const map = node as Record<string, unknown>;
+        if (seg === "*") {
+          for (const v of Object.values(map)) {
+            if (walk(v, idx + 1)) return true;
+          }
+          return false;
+        }
+        if (!(seg in map)) return false;
+        return walk(map[seg], idx + 1);
+      }
+      return walk(obj, 0);
+    }
+
+    it("DEPRECATED_KEY_PATHS is non-empty + references the IMPL-PRD", () => {
+      // T1: documentation gate — the allowlist must be discoverable
+      // (greppable) and must point at this slice's IMPL-PRD so future
+      // contributors know where to append.
+      expect(DEPRECATED_KEY_PATHS.length).toBeGreaterThan(0);
+      const fileText = readFileSync(__filename, "utf-8");
+      expect(fileText).toContain("deprecation-check-keys-widening");
+    });
+
+    it("AGENT_SPECS + kernel agent.yaml carry no deprecated KEY paths", () => {
+      // T2 + T3: every shipped agent spec is scanned against the
+      // DEPRECATED_KEY_PATHS allowlist. A hit fails the test with the
+      // file + path so the operator can locate and remove it.
+      const offenders: string[] = [];
+      for (const file of [...AGENT_SPECS, ...KERNEL_AGENT_SPECS]) {
+        const yaml = readFileSync(join(SPECS_ROOT, file), "utf-8");
+        const raw = parseAgentSpec(yaml) as Record<string, unknown>;
+        for (const path of DEPRECATED_KEY_PATHS) {
+          if (hasDeprecatedKeyPath(raw, path)) {
+            offenders.push(`${file}: ${path}`);
+          }
+        }
+      }
+      if (offenders.length > 0) {
+        throw new Error(
+          `Deprecated KEY paths found in shipped agent specs:\n  - ${offenders.join("\n  - ")}\n` +
+            `These keys are listed in DEPRECATED_KEY_PATHS at the top of this test file. Remove them from the spec or — if the key is no longer deprecated — drop the entry from the allowlist.`,
+        );
+      }
+    });
+
+    it("AGENT_SPECS + kernel agent.yaml pass validateAgentSpec strict validator", () => {
+      // T4: the strict validator is the authoritative runtime gate.
+      // Running it inline at test time catches empty-array
+      // placeholders (e.g., resources.hooks: [] / profiles.*.uses.hooks: [])
+      // the moment they appear in a shipped spec — without waiting
+      // for kernel auto-boot to surface them via daemon start failure
+      // (which is exactly how e3bfc08 was discovered).
+      const offenders: string[] = [];
+      for (const file of [...AGENT_SPECS, ...KERNEL_AGENT_SPECS]) {
+        const yaml = readFileSync(join(SPECS_ROOT, file), "utf-8");
+        const raw = parseAgentSpec(yaml);
+        const result = validateAgentSpec(raw);
+        if (!result.valid) {
+          offenders.push(`${file}:\n    - ${result.errors.join("\n    - ")}`);
+        }
+      }
+      if (offenders.length > 0) {
+        throw new Error(`validateAgentSpec rejected shipped specs:\n  - ${offenders.join("\n  - ")}`);
+      }
+    });
+
+    const FIXTURE_DIR = join(__dirname, "fixtures", "deprecation-check");
+
+    it("regression fixture with empty-hooks placeholder is rejected by strict validator (T5: e3bfc08 coverage)", () => {
+      // T5: discriminator for the empty-array-placeholder failure
+      // class. If this fixture starts passing the validator (e.g.,
+      // someone loosens the strict check), the regression coverage
+      // for the hotfix scenario is gone — the test will flag it.
+      const yaml = readFileSync(join(FIXTURE_DIR, "agent-with-empty-hooks.yaml"), "utf-8");
+      const result = validateAgentSpec(parseAgentSpec(yaml));
+      expect(result.valid).toBe(false);
+      // Specifically the profiles.<name>.uses.hooks error message
+      // from agent-manifest.ts line 240 — anchors the discrimination
+      // to the same code path that the runtime invokes.
+      expect(result.errors.some((e) => /uses\.hooks/.test(e))).toBe(true);
+    });
+
+    it("regression fixture with deprecated KEY path is flagged by the allowlist (T6)", () => {
+      // T6: discriminator for the KEY-path allowlist. The fixture
+      // carries resources.hooks (a removed key per plugin-primitive
+      // Phase 3a). The allowlist walker must report this entry as
+      // an offender even if validateAgentSpec is not invoked.
+      const yaml = readFileSync(join(FIXTURE_DIR, "agent-with-removed-key.yaml"), "utf-8");
+      const raw = parseAgentSpec(yaml) as Record<string, unknown>;
+      const hits = DEPRECATED_KEY_PATHS.filter((p) => hasDeprecatedKeyPath(raw, p));
+      expect(hits).toContain("resources.hooks");
+    });
+
+    it("clean fixture passes both checks (T7: no false positives)", () => {
+      // T7: baseline. A minimal valid agent.yaml must clear both the
+      // allowlist scan and the strict validator. Guards against the
+      // allowlist or the validator drifting too aggressive.
+      const yaml = readFileSync(join(FIXTURE_DIR, "agent-clean.yaml"), "utf-8");
+      const raw = parseAgentSpec(yaml) as Record<string, unknown>;
+      const hits = DEPRECATED_KEY_PATHS.filter((p) => hasDeprecatedKeyPath(raw, p));
+      expect(hits).toEqual([]);
+      const result = validateAgentSpec(raw);
+      if (!result.valid) {
+        throw new Error(`clean fixture failed strict validator:\n  - ${result.errors.join("\n  - ")}`);
+      }
+    });
   });
 
   it("built-in library scan discovers vault-specialist agent", () => {
