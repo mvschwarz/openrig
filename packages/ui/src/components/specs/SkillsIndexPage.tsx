@@ -56,6 +56,7 @@ export function SkillsIndexPage() {
       emptyState={<SkillsEmptyState />}
       onItemClick={handleSkillClick}
       isLoading={isLoading}
+      isUserDefined={(skill) => skill.source === "workspace"}
     />
   );
 }

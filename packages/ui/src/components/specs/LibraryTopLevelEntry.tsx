@@ -30,6 +30,15 @@ export interface LibraryTopLevelEntryProps<T extends LibraryItem> {
   onItemClick: (item: T) => void;
   formatFolderLabel?: (folder: unknown) => string;
   isLoading?: boolean;
+  /**
+   * Predicate identifying user-defined items (vs. built-ins). When
+   * provided, emptyState renders whenever NO item satisfies the
+   * predicate — surfacing guidance for adding user content even
+   * when built-ins are present. Without the predicate, emptyState
+   * renders only when items is empty (back-compat for consumers
+   * that don't care about the user/built-in distinction).
+   */
+  isUserDefined?: (item: T) => boolean;
 }
 
 interface FolderGroup<T extends LibraryItem> {
@@ -63,8 +72,19 @@ export function LibraryTopLevelEntry<T extends LibraryItem>({
   onItemClick,
   formatFolderLabel,
   isLoading,
+  isUserDefined,
 }: LibraryTopLevelEntryProps<T>) {
   const folders = useMemo(() => groupItems(items, folderField), [items, folderField]);
+  const userDefinedCount = useMemo(() => {
+    if (!isUserDefined) return items.length;
+    let count = 0;
+    for (const item of items) {
+      if (isUserDefined(item)) count += 1;
+    }
+    return count;
+  }, [items, isUserDefined]);
+  const showEmptyState = userDefinedCount === 0;
+  const showFolders = items.length > 0;
 
   return (
     <div
@@ -78,9 +98,12 @@ export function LibraryTopLevelEntry<T extends LibraryItem>({
         </h1>
       </header>
 
-      {items.length === 0 ? (
-        <div data-testid={`library-top-level-${slug}-empty`}>{emptyState}</div>
-      ) : (
+      {showEmptyState ? (
+        <div data-testid={`library-top-level-${slug}-empty`} className="mb-4">
+          {emptyState}
+        </div>
+      ) : null}
+      {showFolders ? (
         <div className="space-y-4">
           {folders.map((folder) => {
             const label = formatFolderLabel
@@ -122,7 +145,7 @@ export function LibraryTopLevelEntry<T extends LibraryItem>({
             );
           })}
         </div>
-      )}
+      ) : null}
     </div>
   );
 }

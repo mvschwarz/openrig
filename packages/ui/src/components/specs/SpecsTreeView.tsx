@@ -201,13 +201,16 @@ export function SpecsTreeView() {
 
       {/* Slice 18 — top-level Library entries (Skills + Plugins) sit
           above the grouped tree as direct navigation to the index pages.
-          The existing Section tree below continues to group entries for
-          browsing in place. */}
+          Clicking the link both navigates AND expands the matching
+          section below (per IMPL-PRD §3.3 + T7 — "click expands list
+          below + opens page"). The existing Section tree below continues
+          to group entries for browsing in place. */}
       <ul className="px-2 mb-2 space-y-0.5">
         <li>
           <Link
             to="/specs/skills"
             data-testid="sidebar-skills-top-level"
+            onClick={() => setExpanded((prev) => ({ ...prev, skills: true }))}
             className="block font-mono text-[11px] uppercase tracking-wide text-stone-700 hover:text-stone-900 hover:bg-surface-low px-2 py-1"
           >
             {"> "}Skills

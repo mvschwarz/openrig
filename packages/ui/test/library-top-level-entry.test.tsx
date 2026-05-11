@@ -174,4 +174,86 @@ describe("LibraryTopLevelEntry", () => {
     );
     expect(screen.getByTestId("library-top-level-demo")).toBeTruthy();
   });
+
+  // velocity-guard 18.C BLOCKING-CONCERN repair (Blocker 1):
+  // isUserDefined predicate must surface emptyState guidance when no
+  // item satisfies the predicate, even if built-ins are present.
+  describe("isUserDefined predicate (user-defined-aware empty state)", () => {
+    interface SkillLike extends DemoItem {
+      source: "workspace" | "openrig-managed";
+    }
+    const builtInsOnly: SkillLike[] = [
+      { id: "b1", name: "built-in 1", group: "managed", source: "openrig-managed" },
+      { id: "b2", name: "built-in 2", group: "managed", source: "openrig-managed" },
+    ];
+    const withUserDefined: SkillLike[] = [
+      { id: "u1", name: "user 1", group: "user", source: "workspace" },
+      { id: "b1", name: "built-in 1", group: "managed", source: "openrig-managed" },
+    ];
+
+    it("renders emptyState guidance when ALL items are built-ins (no user-defined)", () => {
+      render(
+        <LibraryTopLevelEntry<SkillLike>
+          slug="skills"
+          displayName="Skills"
+          iconKind="skill"
+          items={builtInsOnly}
+          folderField="source"
+          emptyState={<div data-testid="empty-guidance">add a skill to .openrig/skills/</div>}
+          onItemClick={() => {}}
+          isUserDefined={(s) => s.source === "workspace"}
+        />,
+      );
+      expect(screen.getByTestId("empty-guidance")).toBeTruthy();
+    });
+
+    it("STILL renders the built-in folder list alongside emptyState (built-ins remain browsable)", () => {
+      render(
+        <LibraryTopLevelEntry<SkillLike>
+          slug="skills"
+          displayName="Skills"
+          iconKind="skill"
+          items={builtInsOnly}
+          folderField="source"
+          emptyState={<div data-testid="empty-guidance">guidance</div>}
+          onItemClick={() => {}}
+          isUserDefined={(s) => s.source === "workspace"}
+        />,
+      );
+      expect(screen.getByTestId("library-folder-openrig-managed")).toBeTruthy();
+      expect(screen.getByTestId("library-item-b1")).toBeTruthy();
+    });
+
+    it("does NOT render emptyState when at least one item is user-defined", () => {
+      render(
+        <LibraryTopLevelEntry<SkillLike>
+          slug="skills"
+          displayName="Skills"
+          iconKind="skill"
+          items={withUserDefined}
+          folderField="source"
+          emptyState={<div data-testid="empty-guidance">guidance</div>}
+          onItemClick={() => {}}
+          isUserDefined={(s) => s.source === "workspace"}
+        />,
+      );
+      expect(screen.queryByTestId("empty-guidance")).toBeNull();
+    });
+
+    it("without isUserDefined predicate, emptyState is hidden when items has anything (back-compat)", () => {
+      render(
+        <LibraryTopLevelEntry<SkillLike>
+          slug="skills"
+          displayName="Skills"
+          iconKind="skill"
+          items={builtInsOnly}
+          folderField="source"
+          emptyState={<div data-testid="empty-guidance">guidance</div>}
+          onItemClick={() => {}}
+          // no isUserDefined → falls back to items.length === 0 semantics
+        />,
+      );
+      expect(screen.queryByTestId("empty-guidance")).toBeNull();
+    });
+  });
 });
