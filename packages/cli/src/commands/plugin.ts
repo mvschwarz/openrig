@@ -3,25 +3,45 @@
 // Per IMPL-PRD §4 plugin-primitive Phase 3a slice 3.4 + DESIGN.md §6
 // (CLI minimalism: 4 read-only inspection commands).
 //
-// Subcommands:
-//   list                    — aggregated view of discoverable plugins
-//                             flags: --runtime claude|codex|both
-//                                    --used (only those referenced by an agent)
-//                                    --source vendored|claude-cache|codex-cache|rig-cwd
-//                                    --json
-//   show <id>               — inspect manifest + contents per plugin
-//                             flags: --tree, --json
-//   used-by <id>            — which agents reference this plugin
-//                             flags: --json
-//   validate <path>         — local file validation; manifest + skill frontmatter
-//                             flags: --json
+// Subcommands at slice 3.4 scope (this commit):
+//   list                — aggregated view of discoverable plugins
+//                         flags: --runtime claude|codex
+//                                --source vendored|claude-cache|codex-cache
+//                                --json
+//   show <id>           — inspect manifest + skills + hooks + mcp servers
+//                         flags: --json
 //
-// list/show/used-by consume slice 3.3 daemon HTTP routes (GET /api/plugins[/...]).
-// validate is local file inspection; reuses agent-manifest's plugin
-// validation path + skill frontmatter checks.
+// Pending in later checkpoints of slice 3.4:
+//   used-by <id>        — agents referencing this plugin (3.4.B)
+//   validate <path>     — local file inspection (3.4.C)
+//
+// list/show consume slice 3.3 daemon HTTP routes (GET /api/plugins[/...]).
 //
 // All commands ship --json output for agent consumption per banked
 // building-agent-software + IMPL-PRD §4.4 HG-4.5.
+//
+// Wire shapes mirror slice 3.3 PluginDiscoveryService exports verbatim
+// (packages/daemon/src/domain/plugin-discovery-service.ts L41-132). Types
+// here are the wire contract; any drift from daemon source means the
+// daemon shape changed and this file must update in lockstep.
+//
+// Flags NOT supported at v0 (deferred per velocity-guard 3.4.A blocker):
+//   --used  — declared in PRD §4.2 but daemon route doesn't expose a
+//             "filter to plugins referenced by an agent" filter; would
+//             require client-side post-filter against /api/plugins +
+//             /api/plugins/:id/used-by N+1 calls. Not in v0 scope.
+//   --tree  — declared in PRD §4.2 but show output already prints the
+//             tree structure (manifests + skills + hooks + mcp).
+//             Distinct tree-only mode is post-v0 polish.
+//   --source rig-cwd — daemon route's parseSourceFilter doesn't accept
+//             rig-cwd; rig-cwd scan is enabled via separate ?cwd=<path>
+//             query (out of scope for v0 since CLI doesn't have a "scan
+//             this rig's cwd" surface yet).
+//   --runtime both — daemon parseRuntimeFilter accepts only claude|codex;
+//             omitting --runtime returns all (the "both" semantic is
+//             default no-filter).
+// Each of these surfaces in a future slice; CLI flag declarations are
+// tightly scoped to what the daemon actually supports.
 
 import { Command } from "commander";
 import { DaemonClient } from "../client.js";
@@ -29,60 +49,61 @@ import { getDaemonStatus, getDaemonUrl } from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 
-// Wire shapes — mirror slice 3.3 PluginDiscoveryService exports
-// (packages/daemon/src/domain/plugin-discovery-service.ts).
+// ============================================================
+// Wire shapes — must mirror PluginDiscoveryService verbatim
+// (packages/daemon/src/domain/plugin-discovery-service.ts L41-132)
+// ============================================================
+
+type PluginRuntime = "claude" | "codex";
+type PluginSourceKind = "vendored" | "claude-cache" | "codex-cache" | "rig-cwd";
 
 interface PluginEntryWire {
   id: string;
   name: string;
   version: string;
   description: string | null;
-  source: "vendored" | "claude-cache" | "codex-cache" | "rig-cwd";
+  source: PluginSourceKind;
   sourceLabel: string;
-  runtimes: Array<"claude" | "codex">;
-  rootPath: string;
-  skillCount: number;
-  hookEventCount: number;
-  mcpServerCount: number;
-}
-
-interface PluginManifestWire {
-  name: string;
-  version: string;
-  description: string | null;
-  skillsRef?: string;
-  hooksRef?: string;
-}
-
-interface PluginSkillWire {
-  id: string;
+  runtimes: PluginRuntime[];
   path: string;
+  lastSeenAt: string | null;
+}
+
+interface PluginManifestSummaryWire {
+  raw: Record<string, unknown>;
+  name: string | null;
+  version: string | null;
   description: string | null;
+  homepage: string | null;
+  repository: string | null;
+  license: string | null;
 }
 
-interface PluginHookWire {
-  runtime: "claude" | "codex";
-  eventCount: number;
-}
-
-interface PluginMcpServerWire {
-  runtime: "claude" | "codex";
+interface PluginSkillSummaryWire {
   name: string;
+  relativePath: string;
+}
+
+interface PluginHookSummaryWire {
+  runtime: PluginRuntime;
+  relativePath: string;
+  events: string[];
+}
+
+interface PluginMcpServerSummaryWire {
+  runtime: PluginRuntime;
+  name: string;
+  command: string | null;
+  transport: string | null;
 }
 
 interface PluginDetailWire {
   entry: PluginEntryWire;
-  claudeManifest: PluginManifestWire | null;
-  codexManifest: PluginManifestWire | null;
-  skills: PluginSkillWire[];
-  hooks: PluginHookWire[];
-  mcpServers: PluginMcpServerWire[];
-}
-
-interface AgentReferenceWire {
-  agentName: string;
-  sourcePath: string;
-  profiles: string[];
+  claudeManifest: PluginManifestSummaryWire | null;
+  codexManifest: PluginManifestSummaryWire | null;
+  skills: PluginSkillSummaryWire[];
+  hooks: PluginHookSummaryWire[];
+  mcpServers: PluginMcpServerSummaryWire[];
 }
 
 export function pluginCommand(depsOverride?: StatusDeps): Command {
@@ -106,11 +127,10 @@ export function pluginCommand(depsOverride?: StatusDeps): Command {
   // -- rig plugin list --
   cmd.command("list")
     .description("List discoverable plugins (aggregated across vendored + runtime caches)")
-    .option("--runtime <runtime>", "Filter by runtime support (claude | codex)")
-    .option("--source <source>", "Filter by source (vendored | claude-cache | codex-cache | rig-cwd)")
-    .option("--used", "Only show plugins referenced by some agent")
+    .option("--runtime <runtime>", "Filter by runtime support: claude | codex (omit for all)")
+    .option("--source <source>", "Filter by source: vendored | claude-cache | codex-cache")
     .option("--json", "JSON output")
-    .action(async (opts: { runtime?: string; source?: string; used?: boolean; json?: boolean }) => {
+    .action(async (opts: { runtime?: string; source?: string; json?: boolean }) => {
       try {
         const client = await getClient();
         const params: string[] = [];
@@ -132,10 +152,11 @@ export function pluginCommand(depsOverride?: StatusDeps): Command {
 
         for (const e of entries) {
           const runtimesStr = e.runtimes.join(",");
+          // Real fields only: id, version, runtimes, sourceLabel, path
           console.log(
             `${e.id.padEnd(28)} v${String(e.version).padEnd(8)} ` +
             `[${runtimesStr.padEnd(13)}] ${e.sourceLabel.padEnd(36)} ` +
-            `${String(e.skillCount).padStart(2)} skills`
+            `${e.path}`
           );
         }
       } catch (err) {
@@ -148,9 +169,8 @@ export function pluginCommand(depsOverride?: StatusDeps): Command {
   cmd.command("show")
     .argument("<id>", "Plugin id (e.g., openrig-core)")
     .description("Show plugin manifest + skills + hooks + mcp servers")
-    .option("--tree", "File tree only")
     .option("--json", "JSON output")
-    .action(async (id: string, opts: { tree?: boolean; json?: boolean }) => {
+    .action(async (id: string, opts: { json?: boolean }) => {
       try {
         const client = await getClient();
         const res = await client.get<PluginDetailWire>(`/api/plugins/${encodeURIComponent(id)}`);
@@ -167,44 +187,56 @@ export function pluginCommand(depsOverride?: StatusDeps): Command {
           return;
         }
 
-        console.log(`Id:          ${detail.entry.id}`);
-        console.log(`Name:        ${detail.entry.name}`);
-        console.log(`Version:     ${detail.entry.version}`);
-        console.log(`Description: ${detail.entry.description ?? "(none)"}`);
-        console.log(`Source:      ${detail.entry.sourceLabel}`);
-        console.log(`Root:        ${detail.entry.rootPath}`);
-        console.log(`Runtimes:    ${detail.entry.runtimes.join(", ")}`);
+        const entry = detail.entry;
+        console.log(`Id:          ${entry.id}`);
+        console.log(`Name:        ${entry.name}`);
+        console.log(`Version:     ${entry.version}`);
+        console.log(`Description: ${entry.description ?? "(none)"}`);
+        console.log(`Source:      ${entry.sourceLabel}`);
+        console.log(`Path:        ${entry.path}`);
+        console.log(`Runtimes:    ${entry.runtimes.join(", ")}`);
+        if (entry.lastSeenAt) {
+          console.log(`Last seen:   ${entry.lastSeenAt}`);
+        }
         console.log("");
 
-        // Manifests
+        // Manifests — real PluginManifestSummary fields
         console.log("Manifests:");
         if (detail.claudeManifest) {
-          console.log(`  claude:    ${detail.claudeManifest.name}@${detail.claudeManifest.version}` +
-            `${detail.claudeManifest.skillsRef ? ` skills=${detail.claudeManifest.skillsRef}` : ""}` +
-            `${detail.claudeManifest.hooksRef ? ` hooks=${detail.claudeManifest.hooksRef}` : ""}`);
+          const m = detail.claudeManifest;
+          const parts: string[] = [];
+          if (m.name) parts.push(`name=${m.name}`);
+          if (m.version) parts.push(`version=${m.version}`);
+          if (m.license) parts.push(`license=${m.license}`);
+          if (m.repository) parts.push(`repo=${m.repository}`);
+          console.log(`  claude:    ${parts.join(" ") || "(present)"}`);
         }
         if (detail.codexManifest) {
-          console.log(`  codex:     ${detail.codexManifest.name}@${detail.codexManifest.version}` +
-            `${detail.codexManifest.skillsRef ? ` skills=${detail.codexManifest.skillsRef}` : ""}` +
-            `${detail.codexManifest.hooksRef ? ` hooks=${detail.codexManifest.hooksRef}` : ""}`);
+          const m = detail.codexManifest;
+          const parts: string[] = [];
+          if (m.name) parts.push(`name=${m.name}`);
+          if (m.version) parts.push(`version=${m.version}`);
+          if (m.license) parts.push(`license=${m.license}`);
+          if (m.repository) parts.push(`repo=${m.repository}`);
+          console.log(`  codex:     ${parts.join(" ") || "(present)"}`);
         }
         if (!detail.claudeManifest && !detail.codexManifest) {
           console.log("  (none)");
         }
 
-        // Skills
+        // Skills — PluginSkillSummary has name + relativePath only
         console.log("");
         console.log(`Skills (${detail.skills.length}):`);
         for (const s of detail.skills) {
-          console.log(`  ${s.id.padEnd(40)} ${s.path}`);
-          if (s.description) console.log(`    ${s.description}`);
+          console.log(`  ${s.name.padEnd(40)} ${s.relativePath}`);
         }
 
-        // Hooks
+        // Hooks — PluginHookSummary has runtime + relativePath + events[]
         console.log("");
         console.log(`Hooks (${detail.hooks.length}):`);
         for (const h of detail.hooks) {
-          console.log(`  ${h.runtime.padEnd(10)} ${h.eventCount} events`);
+          const eventList = h.events.length > 0 ? h.events.join(",") : "(none)";
+          console.log(`  ${h.runtime.padEnd(10)} ${String(h.events.length).padStart(2)} events  [${eventList}]  ${h.relativePath}`);
         }
 
         // MCP servers
@@ -212,7 +244,10 @@ export function pluginCommand(depsOverride?: StatusDeps): Command {
           console.log("");
           console.log(`MCP servers (${detail.mcpServers.length}):`);
           for (const m of detail.mcpServers) {
-            console.log(`  ${m.runtime.padEnd(10)} ${m.name}`);
+            const detail2: string[] = [];
+            if (m.transport) detail2.push(`transport=${m.transport}`);
+            if (m.command) detail2.push(`command=${m.command}`);
+            console.log(`  ${m.runtime.padEnd(10)} ${m.name.padEnd(28)} ${detail2.join(" ")}`);
           }
         }
       } catch (err) {

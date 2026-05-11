@@ -69,7 +69,11 @@ function runningDeps(port: number): StatusDeps {
   };
 }
 
-// Per slice 3.3 PluginEntry + PluginDetail + AgentReference shapes
+// Fixtures mirror the slice 3.3 PluginDiscoveryService wire shape verbatim
+// (packages/daemon/src/domain/plugin-discovery-service.ts L41-132). Any drift
+// from that source means the daemon contract changed and these fixtures
+// must update in lockstep with the CLI wire types in plugin.ts.
+
 const FIXTURE_PLUGIN_ENTRY = {
   id: "openrig-core",
   name: "openrig-core",
@@ -78,34 +82,37 @@ const FIXTURE_PLUGIN_ENTRY = {
   source: "vendored" as const,
   sourceLabel: "vendored:openrig-core",
   runtimes: ["claude", "codex"] as const,
-  rootPath: "/home/op/.openrig/plugins/openrig-core",
-  skillCount: 11,
-  hookEventCount: 7,
-  mcpServerCount: 0,
+  path: "/home/op/.openrig/plugins/openrig-core",
+  lastSeenAt: "2026-05-11T05:00:00Z",
 };
 
 const FIXTURE_PLUGIN_DETAIL = {
   entry: FIXTURE_PLUGIN_ENTRY,
   claudeManifest: {
+    raw: { name: "openrig-core", version: "0.1.0", description: "OpenRig canonical skills and hooks", license: "Apache-2.0", repository: "github:mvschwarz/openrig-plugins" },
     name: "openrig-core",
     version: "0.1.0",
     description: "OpenRig canonical skills and hooks",
-    skillsRef: "./skills",
-    hooksRef: "./hooks/claude.json",
+    homepage: null,
+    repository: "github:mvschwarz/openrig-plugins",
+    license: "Apache-2.0",
   },
   codexManifest: {
+    raw: { name: "openrig-core", version: "0.1.0", description: "OpenRig canonical skills and hooks", license: "Apache-2.0" },
     name: "openrig-core",
     version: "0.1.0",
     description: "OpenRig canonical skills and hooks",
-    skillsRef: "./skills",
-    hooksRef: "./hooks/codex.json",
+    homepage: null,
+    repository: null,
+    license: "Apache-2.0",
   },
   skills: [
-    { id: "openrig-user", path: "skills/openrig-user/SKILL.md", description: "Use when..." },
+    { name: "openrig-user", relativePath: "skills/openrig-user" },
+    { name: "openrig-architect", relativePath: "skills/openrig-architect" },
   ],
   hooks: [
-    { runtime: "claude" as const, eventCount: 4 },
-    { runtime: "codex" as const, eventCount: 3 },
+    { runtime: "claude" as const, relativePath: "hooks/claude.json", events: ["SessionStart", "UserPromptSubmit", "Stop", "Notification"] },
+    { runtime: "codex" as const, relativePath: "hooks/codex.json", events: ["SessionStart", "UserPromptSubmit", "Stop"] },
   ],
   mcpServers: [],
 };
@@ -187,7 +194,7 @@ describe("rig plugin CLI (slice 3.4)", () => {
       expect(parsed[0]?.id).toBe("openrig-core");
     });
 
-    it("default (table) output prints id + version + runtimes + source label", async () => {
+    it("default (table) output prints id + version + runtimes + source label + path (real PluginEntry fields)", async () => {
       const program = new Command();
       program.exitOverride();
       program.addCommand(pluginCommand(runningDeps(port)));
@@ -201,6 +208,12 @@ describe("rig plugin CLI (slice 3.4)", () => {
       expect(out).toContain("openrig-core");
       expect(out).toContain("0.1.0");
       expect(out).toContain("vendored:openrig-core");
+      // Regression: real path field, not invented rootPath
+      expect(out).toContain("/home/op/.openrig/plugins/openrig-core");
+      // Regression: must NOT print invented count fields (they don't exist on PluginEntry)
+      expect(out).not.toMatch(/\bskillCount\b/);
+      expect(out).not.toMatch(/\bhookEventCount\b/);
+      expect(out).not.toMatch(/\bmcpServerCount\b/);
     });
 
     it("--runtime claude passes runtime filter to the daemon route", async () => {
@@ -243,12 +256,14 @@ describe("rig plugin CLI (slice 3.4)", () => {
       });
 
       expect(exitCode).toBeUndefined();
-      const parsed = JSON.parse(logs.join("\n")) as { entry: { id: string }; skills: unknown[] };
+      const parsed = JSON.parse(logs.join("\n")) as { entry: { id: string; path: string; lastSeenAt: string | null }; skills: unknown[]; hooks: unknown[] };
       expect(parsed.entry.id).toBe("openrig-core");
-      expect(parsed.skills).toHaveLength(1);
+      expect(parsed.entry.path).toBe("/home/op/.openrig/plugins/openrig-core"); // real PluginEntry.path
+      expect(parsed.skills).toHaveLength(2);
+      expect(parsed.hooks).toHaveLength(2);
     });
 
-    it("default (pretty) output prints manifest summary + skills + hooks counts", async () => {
+    it("default (pretty) output uses REAL PluginDetail fields (name + relativePath + events array)", async () => {
       const program = new Command();
       program.exitOverride();
       program.addCommand(pluginCommand(runningDeps(port)));
@@ -259,14 +274,32 @@ describe("rig plugin CLI (slice 3.4)", () => {
 
       expect(exitCode).toBeUndefined();
       const out = logs.join("\n");
+
+      // PluginEntry fields
       expect(out).toContain("openrig-core");
       expect(out).toContain("0.1.0");
-      // Manifest presence indicators
-      expect(out).toContain("claude");
-      expect(out).toContain("codex");
-      // Skills section heading + at least one skill id
-      expect(out.toLowerCase()).toContain("skill");
+      expect(out).toContain("/home/op/.openrig/plugins/openrig-core"); // entry.path
+      expect(out).toContain("2026-05-11T05:00:00Z"); // entry.lastSeenAt
+
+      // Manifests — real PluginManifestSummary fields
+      expect(out).toMatch(/claude:/);
+      expect(out).toMatch(/codex:/);
+      expect(out).toContain("Apache-2.0");
+      expect(out).toContain("github:mvschwarz/openrig-plugins");
+
+      // Skills — uses skill.name + skill.relativePath (not invented id/path/description)
       expect(out).toContain("openrig-user");
+      expect(out).toContain("openrig-architect");
+      expect(out).toContain("skills/openrig-user");
+      expect(out).toContain("skills/openrig-architect");
+
+      // Hooks — uses runtime + events array (not invented eventCount alone) +
+      // relativePath
+      expect(out).toContain("hooks/claude.json");
+      expect(out).toContain("hooks/codex.json");
+      expect(out).toContain("SessionStart");
+      expect(out).toContain("UserPromptSubmit");
+      expect(out).toContain("Notification"); // Claude event count = 4, includes Notification
     });
 
     it("missing plugin id returns non-zero exit + error to stderr", async () => {
