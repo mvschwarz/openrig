@@ -1,0 +1,35 @@
+name: queue.worker
+version: "1.0"
+description: Queue worker — classifies stream-to-queue substrate; turns raw stream items into durable queue items with destinations, priorities, tags
+
+defaults:
+  runtime: codex
+
+imports:
+  - ref: local:../../../../../../agents/shared
+
+profiles:
+  default:
+    uses:
+      skills: [openrig-user, intake-routing, control-plane-queue]
+      guidance: [role]
+      subagents: []
+      hooks: []
+      runtime_resources: [shared:claude-default-settings, shared:claude-default-mcp, shared:codex-default-config]
+
+resources:
+  guidance:
+    - id: role
+      path: guidance/role.md
+      target: AGENTS.md
+      merge: managed_block
+
+startup:
+  files:
+    - path: guidance/role.md
+      delivery_hint: send_text
+      required: true
+    - path: startup/context.md
+      delivery_hint: send_text
+      required: true
+  actions: []

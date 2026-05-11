@@ -139,6 +139,12 @@ export type RigEvent =
   | { type: "node.startup_failed"; rigId: string; nodeId: string; error: string }
   | { type: "continuity.sync"; rigId: string; podId: string; nodeId: string }
   | { type: "continuity.degraded"; rigId: string; podId: string; nodeId: string; reason: string }
+  // V0.3.1 slice 05 kernel-rig-as-default — forward-fix #3 architectural.
+  // Emitted exactly once by KernelBootTracker when the kernel rig fails to
+  // reach ready / partial_ready within the configurable degraded-timer
+  // window (default 90s). Observability signal that healthz bound cleanly
+  // but the kernel itself is stuck — operator triage with `rig ps --rig kernel`.
+  | { type: "kernel.agent.degraded"; agents: Array<{ sessionName: string; runtime: string; startupStatus: string }>; firstUnreadySince: string | null; detail: string | null }
   // Chat events
   | { type: "chat.message"; rigId: string; messageId: string; sender: string; kind: string; body: string; topic?: string }
   // Expansion events

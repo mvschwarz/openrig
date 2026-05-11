@@ -77,7 +77,21 @@ export function daemonCommand(depsOverride?: LifecycleDeps): Command {
     .option("--port <port>", "Port to listen on")
     .option("--host <host>", "Host to bind on")
     .option("--db <path>", "Database path")
-    .action(async (opts: { port?: string; host?: string; db?: string }) => {
+    // V0.3.1 slice 05 kernel-rig-as-default — skip the kernel auto-boot
+    // path. Used by test fixtures, headless CI, and operators who want
+    // a no-kernel daemon for ad-hoc topology work. The daemon proceeds
+    // and serves its HTTP API normally; just doesn't materialize the
+    // kernel rig.
+    .option("--no-kernel", "Skip kernel auto-boot (daemon serves without the kernel rig)")
+    // V0.3.1 slice 05 kernel-rig-as-default — forward-fix #3 architectural.
+    // After the daemon's healthz binds (current behavior preserved),
+    // additionally poll /api/kernel/status until kernel_state is
+    // ready / partial_ready, or the timeout elapses. Used by operators
+    // who want a "kernel-ready" signal at start-time rather than the
+    // weaker "daemon-ready". Default 60s; override with --wait-for-kernel-ms.
+    .option("--wait-for-kernel", "After daemon binds, also wait for kernel-agent readiness (default timeout 60s)")
+    .option("--wait-for-kernel-ms <ms>", "Override --wait-for-kernel timeout in milliseconds")
+    .action(async (opts: { port?: string; host?: string; db?: string; kernel?: boolean; waitForKernel?: boolean; waitForKernelMs?: string }) => {
       try {
         const { ConfigStore } = await import("../config-store.js");
         const { SystemPreflight } = await import("../system-preflight.js");
@@ -112,6 +126,8 @@ export function daemonCommand(depsOverride?: LifecycleDeps): Command {
           return;
         }
 
+        // V0.3.1 slice 05 — Commander's --no-kernel inverts to opts.kernel === false.
+        const skipKernel = opts.kernel === false;
         const state = await startDaemon(
           {
             port: effectivePort,
@@ -127,10 +143,41 @@ export function daemonCommand(depsOverride?: LifecycleDeps): Command {
             // reach the rotation hook.
             transcriptsLines: config.transcripts.lines,
             transcriptsPollIntervalSeconds: config.transcripts.pollIntervalSeconds,
+            // V0.3.1 slice 05 kernel-rig-as-default — propagated via
+            // OPENRIG_NO_KERNEL env var so the daemon's kernel-boot
+            // check in startup.ts honors the flag.
+            skipKernelBoot: skipKernel,
           },
           getDeps(),
         );
         console.log(`Daemon started on port ${state.port} (pid ${state.pid})`);
+
+        // V0.3.1 slice 05 forward-fix #3 architectural — --wait-for-kernel
+        // post-bind polling. Kernel boot is fire-and-forget after the
+        // daemon binds healthz, so without this flag the CLI doesn't
+        // know whether the kernel itself reached ready. Operators who
+        // need a kernel-ready signal opt in here.
+        if (opts.waitForKernel) {
+          const { waitForKernelReady } = await import("../daemon-lifecycle.js");
+          const timeoutMs = opts.waitForKernelMs && /^\d+$/.test(opts.waitForKernelMs)
+            ? parseInt(opts.waitForKernelMs, 10)
+            : 60_000;
+          const baseUrl = `http://${state.host}:${state.port}`;
+          const result = await waitForKernelReady(baseUrl, timeoutMs);
+          if (result.ok) {
+            console.log(`Kernel ${result.kernelState}; variant=${result.variant ?? "(none)"}`);
+          } else {
+            // Honest 3-part error per banked discipline.
+            console.error(
+              `Error: kernel did not reach ready / partial_ready within ${timeoutMs}ms.\n` +
+                `Reason: kernel_state=${result.kernelState ?? "unknown"}` +
+                (result.detail ? `; ${result.detail}` : "") +
+                "\n" +
+                "Fix: inspect `rig ps --rig kernel` for stalled agents, or run `claude auth status` / `codex login status` to confirm runtime auth.",
+            );
+            process.exitCode = 1;
+          }
+        }
       } catch (err) {
         console.error(err instanceof Error ? err.message : String(err));
         process.exitCode = 1;

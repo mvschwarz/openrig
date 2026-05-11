@@ -101,7 +101,10 @@ export function missionControlRoutes(opts?: MissionControlRoutesOpts): Hono {
     return Boolean(row);
   }
 
-  function listDestinations(db: Database.Database): MissionControlDestination[] {
+  function listDestinations(
+    db: Database.Database,
+    operatorSeatFallback?: string | null,
+  ): MissionControlDestination[] {
     const destinations = new Map<string, MissionControlDestination>();
     const addDestination = (candidate: MissionControlDestination) => {
       const sessionName = candidate.sessionName.trim();
@@ -184,6 +187,24 @@ export function missionControlRoutes(opts?: MissionControlRoutesOpts): Hono {
       }
     }
 
+    // V0.3.1 slice 05 — belt-and-suspenders for kernel-down state: if
+    // the configured operator seat isn't in the topology + queue
+    // history yet (fresh install, kernel hasn't booted, or kernel
+    // crashed), still include it so the picker can route to the
+    // seat the rest of the daemon's mission-control read layer will
+    // resolve. Source label intentionally stays "queue" so the picker
+    // sort order keeps live topology entries on top.
+    if (operatorSeatFallback) {
+      const trimmed = operatorSeatFallback.trim();
+      if (trimmed && !destinations.has(trimmed)) {
+        destinations.set(trimmed, {
+          sessionName: trimmed,
+          label: trimmed,
+          source: "queue",
+        });
+      }
+    }
+
     return [...destinations.values()].sort((a, b) => {
       if (a.source !== b.source) return a.source === "topology" ? -1 : 1;
       return a.label.localeCompare(b.label);
@@ -233,10 +254,16 @@ export function missionControlRoutes(opts?: MissionControlRoutesOpts): Hono {
 
   // GET /destinations — phone-friendly route/handoff candidates. MUST precede
   // /views/:view-name catchall with the other Mission Control literal routes.
+  // V0.3.1 slice 05 — resolve the operator-seat fallback from the
+  // mission-control read layer's defaultOperatorSession (which itself
+  // tracks the workspace.operator_seat_name setting) so the picker
+  // always offers the configured operator seat even when the kernel
+  // hasn't booted yet.
   app.get("/destinations", (c) => {
     const db = getDb(c);
     if (!db) return c.json({ destinations: [] });
-    return c.json({ destinations: listDestinations(db) });
+    const operatorSeat = getReadLayer(c).getDefaultOperatorSession();
+    return c.json({ destinations: listDestinations(db, operatorSeat) });
   });
 
   // SSE for mission_control.* events. MUST precede /views/:view-name

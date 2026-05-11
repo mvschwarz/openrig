@@ -546,6 +546,53 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     serviceOrchestrator, rigRepo,
   });
 
+  // V0.3.1 slice 05 kernel-rig-as-default — auto-boot the kernel rig
+  // on daemon-start. Forward-fix #3 architectural: the bootstrap is
+  // FIRED in the background, not awaited. createDaemon completes as
+  // soon as the tracker is created so server.ts can bind healthz
+  // independent of kernel-agent readiness. A broken kernel agent no
+  // longer keeps the daemon HTTP surface from starting.
+  //
+  // Tracker state is exposed via /api/kernel/status (route below) and
+  // the CLI's `rig daemon start --wait-for-kernel` flag polls it.
+  // After the configurable degraded-timer window (default 90s; env
+  // override OPENRIG_KERNEL_DEGRADED_MS for ops + test fixtures), the
+  // tracker emits a single `kernel.agent.degraded` event for
+  // observability. The kernel rig is still the only rig the daemon
+  // auto-boots; other rigs require explicit operator-initiated
+  // `rig up` / `rig restore` per amended IMPL-PRD §16.2.
+  let kernelBootTracker: import("./domain/kernel-boot-tracker.js").KernelBootTracker | undefined;
+  try {
+    const { bootKernelIfNeeded } = await import("./domain/kernel-boot.js");
+    const degradedRaw = readOpenRigEnv("OPENRIG_KERNEL_DEGRADED_MS");
+    const degradedTimeoutMs = degradedRaw && /^\d+$/.test(degradedRaw)
+      ? parseInt(degradedRaw, 10)
+      : undefined;
+    kernelBootTracker = await bootKernelIfNeeded({
+      rigRepo,
+      sessionRegistry,
+      eventBus,
+      bootstrapOrchestrator,
+      specsDir: nodePath.resolve(nodePath.dirname(new URL(import.meta.url).pathname), "..", "specs"),
+      // V0.3.1 slice 05 — kernel members run against the operator's
+      // workspace, not the daemon installation tree. Without this
+      // cwdOverride, BootstrapOrchestrator refuses with
+      // "cwd is inside the OpenRig installation". Use the resolved
+      // workspace.root setting as the per-operator default.
+      cwdOverride: runtimeSettings.workspaceRoot,
+      degradedTimeoutMs,
+    });
+    try {
+      // eslint-disable-next-line no-console
+      console.log(`kernel-boot: tracker-state=${kernelBootTracker.getStatus().kernelState}`);
+    } catch { /* logging must never throw */ }
+  } catch (err) {
+    try {
+      // eslint-disable-next-line no-console
+      console.warn(`kernel-boot: skipped due to error: ${err instanceof Error ? err.message : String(err)}`);
+    } catch { /* logging must never throw */ }
+  }
+
   // Discovery services
   const tmuxScanner = new TmuxDiscoveryScanner({ tmuxAdapter });
   const sessionFingerprinter = new SessionFingerprinter({
@@ -697,6 +744,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     contextUsageStore,
     serviceOrchestrator,
     composeAdapter,
+    kernelBootTracker,
     specReviewService,
     specLibraryService: (() => {
       const userSpecsRoot = getDefaultOpenRigPath("specs");
@@ -859,12 +907,20 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       // present.
       probeRig: makeLocalCliCapabilityProbe(),
     });
+    // V0.3.1 slice 05 kernel-rig-as-default — cascade the resolved
+    // workspace.operator_seat_name setting into the mission-control
+    // read layer so my-queue routes to the operator's configured seat
+    // (default `operator-${USER}@kernel`) instead of the legacy
+    // hardcoded constant. The setting reads OPENRIG_WORKSPACE_OPERATOR_SEAT_NAME
+    // env var first, then ~/.openrig/config.json, then the derived
+    // default — same cascade as every other typed setting.
     const mcReadLayer = new MissionControlReadLayer({
       db,
       queueRepo: deps.queueRepo,
       viewProjector: deps.viewProjector,
       streamStore: deps.streamStore,
       fleetCliCapability: mcFleetCliCapability,
+      defaultOperatorSession: runtimeSettings.workspaceOperatorSeatName,
     });
     deps.missionControlActionLog = mcActionLog;
     deps.missionControlWriteContract = mcWriteContract;

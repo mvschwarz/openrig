@@ -395,7 +395,16 @@ describe("Starter specs", () => {
 
   it("public builtin agent profiles do not reference deprecated HA skill", () => {
     const deprecatedHaSkill = ["mental", "model", "ha"].join("-");
-    for (const file of AGENT_SPECS) {
+    // V0.3.1 slice 05 kernel-rig-as-default: kernel agents are now
+    // built-in product surface and must respect the same deprecation
+    // curation as starter agents. Caught at Phase 05d forward-fix #2
+    // when advisor.lead reintroduced the deprecated skill reference.
+    const KERNEL_AGENT_SPECS = [
+      "rigs/launch/kernel/agents/advisor/lead/agent.yaml",
+      "rigs/launch/kernel/agents/operator/agent/agent.yaml",
+      "rigs/launch/kernel/agents/queue/worker/agent.yaml",
+    ];
+    for (const file of [...AGENT_SPECS, ...KERNEL_AGENT_SPECS]) {
       const yaml = readFileSync(join(SPECS_ROOT, file), "utf-8");
       const raw = parseAgentSpec(yaml) as Record<string, unknown>;
       const profiles = (raw["profiles"] as Record<string, Record<string, unknown>> | undefined) ?? {};

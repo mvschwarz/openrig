@@ -59,6 +59,15 @@ export const SETTINGS_VALID_KEYS = [
   // endpoints / event types.
   "agents.advisor_session",
   "agents.operator_session",
+  // V0.3.1 slice 05 kernel-rig-as-default — operator seat name read by
+  // mission-control read layer + 2 UI sites. Default derived as
+  // `operator-${USER}@kernel` (os.userInfo().username) at daemon
+  // resolution time; operator override via `rig config set
+  // workspace.operator_seat_name <session>` writes to
+  // ~/.openrig/config.json same as other workspace.* settings.
+  // OPENRIG_WORKSPACE_OPERATOR_SEAT_NAME only — no RIGGED_* legacy
+  // alias (new key per banked feedback_no_rigged_legacy_for_new_keys).
+  "workspace.operator_seat_name",
   // V1 attempt-3 Phase 5 P5-3 — For You feed subscription toggles per
   // for-you-feed.md L144–L151. SC-29 EXCEPTION declared in Phase 5
   // dispatch ACK §5 (DRIFT P5-D2; same scope as Phase 4: allowlist-only;
@@ -105,6 +114,7 @@ const ENV_MAP: Record<SettingsValidKey, { primary: string; legacy?: string }> = 
   "recovery.provider_auth_env_allowlist": { primary: "OPENRIG_RECOVERY_PROVIDER_AUTH_ENV_ALLOWLIST" },
   "agents.advisor_session": { primary: "OPENRIG_AGENTS_ADVISOR_SESSION" },
   "agents.operator_session": { primary: "OPENRIG_AGENTS_OPERATOR_SESSION" },
+  "workspace.operator_seat_name": { primary: "OPENRIG_WORKSPACE_OPERATOR_SEAT_NAME" },
   "feed.subscriptions.action_required": { primary: "OPENRIG_FEED_SUBSCRIPTIONS_ACTION_REQUIRED" },
   "feed.subscriptions.approvals": { primary: "OPENRIG_FEED_SUBSCRIPTIONS_APPROVALS" },
   "feed.subscriptions.shipped": { primary: "OPENRIG_FEED_SUBSCRIPTIONS_SHIPPED" },
@@ -139,6 +149,7 @@ const KEY_TO_PATH: Record<SettingsValidKey, string[]> = {
   "recovery.provider_auth_env_allowlist": ["recovery", "providerAuthEnvAllowlist"],
   "agents.advisor_session": ["agents", "advisorSession"],
   "agents.operator_session": ["agents", "operatorSession"],
+  "workspace.operator_seat_name": ["workspace", "operatorSeatName"],
   "feed.subscriptions.action_required": ["feed", "subscriptions", "actionRequired"],
   "feed.subscriptions.approvals": ["feed", "subscriptions", "approvals"],
   "feed.subscriptions.shipped": ["feed", "subscriptions", "shipped"],
@@ -234,6 +245,10 @@ function getDefaultValue(key: SettingsValidKey, workspaceRoot: string): string |
     // V1 pre-release CLI/daemon Item 1 — capture-pane rotation defaults.
     case "transcripts.lines": return 1000;
     case "transcripts.poll_interval_seconds": return 2;
+    // V0.3.1 slice 05 — `operator-${USER}@kernel` derives from the OS
+    // username at resolution time; operator override via `rig config
+    // set` persists to ~/.openrig/config.json.
+    case "workspace.operator_seat_name": return `operator-${os.userInfo().username}@kernel`;
     case "workspace.root": return DEFAULT_WORKSPACE_ROOT;
     // Preview Terminal v0 (PL-018) defaults — match cli/src/config-store.ts.
     case "ui.preview.refresh_interval_seconds": return 3;
@@ -285,6 +300,11 @@ export interface ResolvedConfig {
   workspaceFieldNotesRoot: string;
   workspaceSpecsRoot: string;
   workspaceDogfoodEvidenceRoot: string;
+  // V0.3.1 slice 05 — operator seat name read by mission-control read
+  // layer (replacing the legacy hardcoded `DEFAULT_OPERATOR_SESSION`
+  // constant) and 2 UI cosmetic sites. Default
+  // `operator-${USER}@kernel` derived from os.userInfo().username.
+  workspaceOperatorSeatName: string;
   filesAllowlistRaw: string;
   progressScanRootsRaw: string;
   // Preview Terminal v0 (PL-018) — UI preview preferences.
@@ -342,6 +362,7 @@ export class SettingsStore {
       workspaceFieldNotesRoot: this.resolveOne("workspace.field_notes_root", fc, wr).value as string,
       workspaceSpecsRoot: this.resolveOne("workspace.specs_root", fc, wr).value as string,
       workspaceDogfoodEvidenceRoot: this.resolveOne("workspace.dogfood_evidence_root", fc, wr).value as string,
+      workspaceOperatorSeatName: this.resolveOne("workspace.operator_seat_name", fc, wr).value as string,
       filesAllowlistRaw: this.resolveOne("files.allowlist", fc, wr).value as string,
       progressScanRootsRaw: this.resolveOne("progress.scan_roots", fc, wr).value as string,
       uiPreviewRefreshIntervalSeconds: this.resolveOne("ui.preview.refresh_interval_seconds", fc, wr).value as number,

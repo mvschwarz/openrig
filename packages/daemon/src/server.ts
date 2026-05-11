@@ -43,6 +43,7 @@ import type { UpCommandRouter } from "./domain/up-command-router.js";
 import type { RigTeardownOrchestrator } from "./domain/rig-teardown.js";
 import { upRoutes } from "./routes/up.js";
 import { downRoutes } from "./routes/down.js";
+import { kernelStatusRoutes } from "./routes/kernel-status.js";
 import type { TranscriptStore } from "./domain/transcript-store.js";
 import type { SessionTransport } from "./domain/session-transport.js";
 import type { AgentActivityStore } from "./domain/agent-activity-store.js";
@@ -224,6 +225,12 @@ export interface AppDeps {
   serviceOrchestrator?: import("./domain/service-orchestrator.js").ServiceOrchestrator;
   composeAdapter?: import("./adapters/compose-services-adapter.js").ComposeServicesAdapter;
   uiDistDir?: string | null;
+  /** V0.3.1 slice 05 kernel-rig-as-default — forward-fix #3 architectural.
+   *  Tracker exposed via GET /api/kernel/status. Optional because tests
+   *  + custom daemon compositions may construct AppDeps without auto-
+   *  booting the kernel; the route returns 503 with a clear message
+   *  when the tracker isn't wired. */
+  kernelBootTracker?: import("./domain/kernel-boot-tracker.js").KernelBootTracker;
 }
 
 const MIME_TYPES: Record<string, string> = {
@@ -406,6 +413,7 @@ export function createApp(deps: AppDeps): Hono {
     c.set("activityHookToken" as never, deps.activityHookToken);
     c.set("serviceOrchestrator" as never, deps.serviceOrchestrator);
     c.set("composeAdapter" as never, deps.composeAdapter);
+    c.set("kernelBootTracker" as never, deps.kernelBootTracker);
     c.set("db" as never, deps.rigRepo.db);
     await next();
   });
@@ -433,6 +441,7 @@ export function createApp(deps: AppDeps): Hono {
   app.route("/api/ps", psRoutes);
   app.route("/api/up", upRoutes);
   app.route("/api/down", downRoutes);
+  app.route("/api/kernel", kernelStatusRoutes);
   app.route("/api/transcripts", transcriptRoutes());
   app.route("/api/transport", transportRoutes());
   app.route("/api/activity", activityRoutes);

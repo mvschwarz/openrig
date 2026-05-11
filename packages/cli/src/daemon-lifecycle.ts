@@ -39,6 +39,11 @@ export interface StartOptions {
   // picks up file-stored ConfigStore values, not just shell env.
   transcriptsLines?: number;
   transcriptsPollIntervalSeconds?: number;
+  // V0.3.1 slice 05 kernel-rig-as-default — when true, daemon startup
+  // skips the kernel auto-boot path (kernel rig is not materialized).
+  // Exposed at the CLI as `rig daemon start --no-kernel`; projected
+  // into the daemon process env as OPENRIG_NO_KERNEL.
+  skipKernelBoot?: boolean;
 }
 
 export interface LifecycleDeps {
@@ -261,6 +266,9 @@ export function buildDaemonEnv(
     // shell env.
     transcriptsLines?: number;
     transcriptsPollIntervalSeconds?: number;
+    // V0.3.1 slice 05 — projected via OPENRIG_NO_KERNEL env var so
+    // the daemon's startup.ts kernel-boot path honors the flag.
+    skipKernelBoot?: boolean;
   },
 ): Record<string, string> {
   const env: Record<string, string> = {};
@@ -288,6 +296,9 @@ export function buildDaemonEnv(
   }
   if (opts.transcriptsPollIntervalSeconds !== undefined) {
     env["OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS"] = String(opts.transcriptsPollIntervalSeconds);
+  }
+  if (opts.skipKernelBoot) {
+    env["OPENRIG_NO_KERNEL"] = "1";
   }
 
   return env;
@@ -349,6 +360,7 @@ export async function startDaemon(opts: StartOptions, deps: LifecycleDeps): Prom
       transcriptsPath: opts.transcriptsPath,
       transcriptsLines: opts.transcriptsLines,
       transcriptsPollIntervalSeconds: opts.transcriptsPollIntervalSeconds,
+      skipKernelBoot: opts.skipKernelBoot,
     }),
     stdio: ["ignore", logFd, logFd],
     detached: true,
@@ -523,4 +535,60 @@ async function fetchDaemonProbe(deps: LifecycleDeps, url: string): Promise<{ ok:
       setTimeout(() => reject(new HealthProbeTimeoutError(url)), HEALTHZ_PROBE_TIMEOUT_MS);
     }),
   ]);
+}
+
+// V0.3.1 slice 05 kernel-rig-as-default — forward-fix #3 architectural.
+// Poll GET /api/kernel/status until kernel_state reaches ready or
+// partial_ready (the two "operator can use the kernel" states) or the
+// timeout elapses. Used by `rig daemon start --wait-for-kernel`.
+//
+// Returns { ok: true, ... } on success; { ok: false, ... } with the
+// last observed kernelState + detail for the CLI's 3-part error.
+export interface KernelReadyResult {
+  ok: boolean;
+  kernelState: string | null;
+  variant: string | null;
+  detail: string | null;
+}
+
+export async function waitForKernelReady(
+  baseUrl: string,
+  timeoutMs: number,
+  pollIntervalMs = 500,
+): Promise<KernelReadyResult> {
+  const deadline = Date.now() + timeoutMs;
+  let last: KernelReadyResult = { ok: false, kernelState: null, variant: null, detail: null };
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch(`${baseUrl}/api/kernel/status`);
+      if (res.ok) {
+        const body = (await res.json()) as {
+          kernel_state?: string;
+          variant?: string | null;
+          detail?: string | null;
+        };
+        last = {
+          ok: body.kernel_state === "ready" || body.kernel_state === "partial_ready",
+          kernelState: body.kernel_state ?? null,
+          variant: body.variant ?? null,
+          detail: body.detail ?? null,
+        };
+        if (last.ok) return last;
+        // Terminal non-ready states: don't keep polling.
+        if (
+          body.kernel_state === "auth_blocked" ||
+          body.kernel_state === "spec_missing" ||
+          body.kernel_state === "bootstrap_failed" ||
+          body.kernel_state === "degraded" ||
+          body.kernel_state === "skipped"
+        ) {
+          return last;
+        }
+      }
+    } catch {
+      // Transient fetch failure; keep polling until the deadline.
+    }
+    await new Promise((r) => setTimeout(r, pollIntervalMs));
+  }
+  return last;
 }

@@ -47,6 +47,14 @@ describe("MissionControlReadLayer (PL-005 Phase A; 7 views)", () => {
       viewProjector,
       streamStore,
       fleetCliCapability: fleetCli,
+      // V0.3.1 slice 05 kernel-rig-as-default — the ReadLayer's
+      // defaultOperatorSession is now injected from the resolved
+      // workspace.operator_seat_name setting (rather than a hardcoded
+      // constant). Existing fixtures use "human-operator@kernel" as the
+      // destinationSession; preserve that here so the fixture data
+      // and the my-queue routing align. Production startup.ts injects
+      // the SettingsStore-resolved value.
+      defaultOperatorSession: "human-operator@kernel",
     });
   });
 

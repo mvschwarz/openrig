@@ -1,0 +1,35 @@
+name: advisor.lead
+version: "1.0"
+description: Advisor lead — pilots user intent; figures out what to do, asks the operator or queue worker to actually do it
+
+defaults:
+  runtime: claude-code
+
+imports:
+  - ref: local:../../../../../../agents/shared
+
+profiles:
+  default:
+    uses:
+      skills: [openrig-user, openrig-architect, brainstorming, requirements-writer]
+      guidance: [role]
+      subagents: []
+      hooks: []
+      runtime_resources: [shared:claude-default-settings, shared:claude-default-mcp, shared:codex-default-config]
+
+resources:
+  guidance:
+    - id: role
+      path: guidance/role.md
+      target: CLAUDE.md
+      merge: managed_block
+
+startup:
+  files:
+    - path: guidance/role.md
+      delivery_hint: send_text
+      required: true
+    - path: startup/context.md
+      delivery_hint: send_text
+      required: true
+  actions: []
