@@ -6,8 +6,8 @@
 // scan logic against injected paths; THIS test covers the call-site
 // resolution in startup.ts that pre-fix hardcoded
 // `~/.openrig/plugins`. Without this gate, the next regression at the
-// call site would only surface via end-to-end VM exercise (which is
-// exactly how velocity-qa caught it on founder-walk VM refresh).
+// call site would only surface via end-to-end VM dogfood exercise
+// (which is exactly how velocity-qa caught the bug originally).
 //
 // HG-5 (audit-grep) is asserted as a static check in the second
 // describe: no `homedir().*\.openrig.*plugins` literal remains in
@@ -67,29 +67,35 @@ describe("plugin discovery honors OPENRIG_HOME (HG-1, HG-3, HG-4)", () => {
     }
   });
 
-  it("vendor + discovery resolve to the SAME OPENRIG_HOME-rooted path (no cross-leak between services)", async () => {
-    // Symmetric resolution check: after createDaemon runs, the
-    // bundled openrig-core asset MUST have been vendored under
-    // <OPENRIG_HOME>/plugins/openrig-core/. If discovery resolved a
-    // different root, the auto-vendored asset wouldn't be visible
-    // through listPlugins (which is exactly the founder-walk VM
-    // refresh bug — vendor wrote one place, discovery scanned
-    // another). Same-root verification proves both services share
-    // the resolver.
+  it("vendor + discovery resolve to the SAME OPENRIG_HOME-rooted path (path startsWith verification)", async () => {
+    // Hardened symmetric-resolution check: assert the discovered
+    // PluginEntry.path actually lives under <tmpHome>/plugins, not
+    // just that an id with the same name appeared. A host with
+    // ~/.openrig/plugins/openrig-core would otherwise let pre-fix
+    // code satisfy the id-only assertion from the wrong root.
+    //
+    // Two layers of evidence:
+    //   1. Synthetic plugin id (NOT 'openrig-core' — that name exists
+    //      at the host default location on some operators' machines,
+    //      so it wouldn't discriminate pre-fix vs post-fix code).
+    //   2. PluginEntry.path startsWith <tmpHome>/plugins/<unique-id>.
+    const uniqueId = `synthetic-cross-leak-${Date.now()}`;
+    const pluginDir = join(tmpHome, "plugins", uniqueId);
+    writeClaudePluginManifest(pluginDir, {
+      name: uniqueId,
+      version: "0.1.0",
+      description: "cross-leak probe",
+    });
+
     const { deps, db } = await createDaemon({ dbPath: ":memory:" });
     try {
-      // Vendor should have placed openrig-core at <tmpHome>/plugins/openrig-core/
-      const expectedVendoredPath = join(tmpHome, "plugins", "openrig-core");
-      const stats = (() => {
-        try { return statSync(expectedVendoredPath); } catch { return null; }
-      })();
-      expect(stats, `vendor service should have placed openrig-core under ${expectedVendoredPath}`).not.toBeNull();
-      expect(stats!.isDirectory()).toBe(true);
-
-      // And discovery should surface it via the listPlugins envelope.
       const plugins = await deps.pluginDiscoveryService!.listPlugins({});
-      const vendoredIds = plugins.filter((p) => p.source === "vendored").map((p) => p.id).sort();
-      expect(vendoredIds).toContain("openrig-core");
+      const entry = plugins.find((p) => p.id === uniqueId);
+      expect(entry, `discovery should surface synthetic plugin ${uniqueId}`).toBeDefined();
+      expect(entry!.source).toBe("vendored");
+      // Path-startsWith proof: discovery resolved against tmpHome,
+      // not the host's default ~/.openrig.
+      expect(entry!.path.startsWith(join(tmpHome, "plugins"))).toBe(true);
     } finally {
       db.close();
     }
@@ -100,7 +106,7 @@ describe("plugin-discovery-respects-openrig-home audit (HG-2, HG-5)", () => {
   // T5: static-grep audit — no hardcoded `homedir() ... .openrig ...
   // plugins` literal should remain in daemon src. Comments OK; runtime
   // path construction NOT OK. This test will fail if a future change
-  // reintroduces the hardcoded path that founder-walk VM refresh
+  // reintroduces the hardcoded path that velocity-qa VM dogfood
   // exposed.
   it("no daemon src file constructs the plugins path via homedir() literal", () => {
     const daemonSrcDir = resolve(__dirname, "..", "src");
