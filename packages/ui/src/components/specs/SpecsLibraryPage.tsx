@@ -23,9 +23,23 @@ interface LibraryRow {
   meta: string;
   metaNode?: ReactNode;
   entryId?: string;
+  /** Slice 11 — diagnostic state for unparseable YAML in the workflows
+   *  folder. "error" rows render non-navigable with the parser/validator
+   *  message inline so the operator can fix the file in place. */
+  status?: "valid" | "error";
 }
 
 function specRow(entry: SpecLibraryEntry): LibraryRow {
+  if (entry.status === "error") {
+    // Diagnostic row: no entryId → non-navigable; meta carries the
+    // parse/validate reason so the operator sees it inline.
+    return {
+      id: entry.id,
+      label: entry.name,
+      meta: entry.errorMessage ?? "Invalid workflow YAML",
+      status: "error",
+    };
+  }
   return {
     id: entry.id,
     label: entry.name,
@@ -88,7 +102,11 @@ function LibrarySection({
                   <LibraryRowContent row={row} />
                 </Link>
               ) : (
-                <div data-testid={`library-row-${id}-${row.id}`} className="px-3 py-2">
+                <div
+                  data-testid={`library-row-${id}-${row.id}`}
+                  data-status={row.status}
+                  className={`px-3 py-2 ${row.status === "error" ? "bg-red-50/40 text-red-900" : ""}`}
+                >
                   <LibraryRowContent row={row} />
                 </div>
               )}

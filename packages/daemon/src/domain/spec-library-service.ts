@@ -21,6 +21,12 @@ export interface SpecLibraryEntry {
   stepsCount?: number;
   terminalTurnRule?: string;
   targetRig?: string | null;
+  /** Slice 11 (workflow-spec-folder-discovery) — diagnostic state for
+   *  workflow entries surfaced from the folder scan. "error" rows came
+   *  from malformed YAML and carry the parse/validate reason in
+   *  errorMessage so the Library UI can render a diagnostic row. */
+  status?: "valid" | "error";
+  errorMessage?: string | null;
 }
 
 export interface SpecLibraryOpts {

@@ -20,8 +20,11 @@
 // boundary check used by /api/workflow/specs).
 
 import * as path from "node:path";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
 import type Database from "better-sqlite3";
 import type { WorkflowSpec } from "./workflow-types.js";
+import type { WorkflowSpecCache } from "./workflow-spec-cache.js";
 
 export interface SpecLibraryWorkflowEntry {
   id: string;
@@ -41,6 +44,16 @@ export interface SpecLibraryWorkflowEntry {
   stepsCount: number;
   terminalTurnRule: string;
   targetRig: string | null;
+  /**
+   * Slice 11 (workflow-spec-folder-discovery) — diagnostic state.
+   * "valid" rows have parsed payload and are operable.
+   * "error" rows came from a malformed YAML in the workflows folder
+   * scan; Library UI renders them with error styling and surfaces
+   * the errorMessage so the operator can fix the file in place.
+   */
+  status: "valid" | "error";
+  /** Populated only when status === "error" — concrete parse/validate diagnostic. */
+  errorMessage: string | null;
 }
 
 export interface SpecLibraryWorkflowReview {
@@ -104,6 +117,11 @@ interface SpecRow {
   source_path: string;
   source_hash: string;
   cached_at: string;
+  // Slice 11 — diagnostic columns from migration 040. May be missing
+  // when the test harness applies only the 033 schema; treat absence
+  // as status='valid', error_message=null to preserve back-compat.
+  status?: string;
+  error_message?: string | null;
 }
 
 export function scanWorkflowSpecs(opts: ScanWorkflowSpecsOpts): SpecLibraryWorkflowEntry[] {
@@ -121,6 +139,39 @@ export function scanWorkflowSpecs(opts: ScanWorkflowSpecsOpts): SpecLibraryWorkf
 
   const out: SpecLibraryWorkflowEntry[] = [];
   for (const row of rows) {
+    const status: "valid" | "error" = row.status === "error" ? "error" : "valid";
+    const isBuiltIn = opts.workflowBuiltinSpecsDir
+      ? isUnderDir(row.source_path, opts.workflowBuiltinSpecsDir)
+      : false;
+
+    // Slice 11 — diagnostic rows render without parsed payload. Use the
+    // file basename as the row label (already stored in name by
+    // writeDiagnostic) and zero counts; errorMessage carries the reason.
+    if (status === "error") {
+      out.push({
+        // Diagnostic rows don't have stable name+version (version is
+        // empty when YAML couldn't be parsed); the library id falls
+        // back to source_path so the UI can route uniquely.
+        id: `workflow:error:${row.source_path}`,
+        kind: "workflow",
+        name: row.name,
+        version: row.version,
+        sourceType: isBuiltIn ? "builtin" : "user_file",
+        sourcePath: row.source_path,
+        relativePath: row.source_path,
+        updatedAt: row.cached_at,
+        summary: row.error_message ?? undefined,
+        isBuiltIn,
+        rolesCount: 0,
+        stepsCount: 0,
+        terminalTurnRule: row.coordination_terminal_turn_rule || "hot_potato",
+        targetRig: null,
+        status: "error",
+        errorMessage: row.error_message ?? null,
+      });
+      continue;
+    }
+
     let roles: WorkflowSpec["roles"];
     let steps: WorkflowSpec["steps"];
     try {
@@ -131,9 +182,6 @@ export function scanWorkflowSpecs(opts: ScanWorkflowSpecsOpts): SpecLibraryWorkf
       // /api/workflow/specs surface will surface the row anyway.
       continue;
     }
-    const isBuiltIn = opts.workflowBuiltinSpecsDir
-      ? isUnderDir(row.source_path, opts.workflowBuiltinSpecsDir)
-      : false;
     out.push({
       // Stable id derived from name+version so the SpecLibrary's review
       // endpoint can resolve workflow entries the same way it resolves
@@ -152,6 +200,8 @@ export function scanWorkflowSpecs(opts: ScanWorkflowSpecsOpts): SpecLibraryWorkf
       stepsCount: Array.isArray(steps) ? steps.length : 0,
       terminalTurnRule: row.coordination_terminal_turn_rule || "hot_potato",
       targetRig: row.target_rig,
+      status: "valid",
+      errorMessage: null,
     });
   }
   return out;
@@ -260,4 +310,154 @@ function isUnderDir(childPath: string, parentDir: string): boolean {
   if (child === parent) return false;
   const parentWithSep = parent.endsWith(path.sep) ? parent : `${parent}${path.sep}`;
   return child.startsWith(parentWithSep);
+}
+
+// =================================================================
+// Slice 11 (release-0.3.1 workflow-spec-folder-discovery)
+// =================================================================
+//
+// scanWorkflowSpecFolder — filesystem walk that turns workspace.specs_root/
+// workflows/ into an installable user primitive. The Library route calls
+// this opportunistically on each list request (OQ-3 decision); valid YAML
+// gets cached via WorkflowSpecCache.readThrough (existing path), invalid
+// YAML gets cached via writeDiagnostic (slice 11 path), and files that
+// disappear since the last scan get removed via removeBySourcePath
+// (OQ-4 decision; deletion + audit log).
+//
+// OQ-3 mtime check: a file is skipped when its mtime is <= the cache row's
+// cached_at (no parse work needed). Otherwise it's re-parsed via the cache
+// (which itself hashes the content and returns the prior row when the
+// hash matches — second layer of skip for content-stable files whose
+// mtime nonetheless advanced, e.g., touch).
+
+export interface ScanWorkflowSpecFolderOpts {
+  /** SQLite handle (used for direct lookups). */
+  db: Database.Database;
+  /** Cache handle for readThrough / writeDiagnostic / removeBySourcePath. */
+  cache: WorkflowSpecCache;
+  /** Absolute path to the workspace's workflows folder
+   *  (typically `<workspace.specs_root>/workflows`). Missing folder
+   *  → empty scan summary; not an error. */
+  folder: string;
+  /** Daemon's bundled builtin starter dir; used to skip removal logic
+   *  for built-in rows (the scanner only owns the folder it walks). */
+  builtinDir: string | null;
+}
+
+export interface ScanWorkflowSpecFolderResult {
+  /** Total YAML/YML files found in folder. */
+  scanned: number;
+  /** Files parsed + cached successfully on this scan. */
+  valid: number;
+  /** Files that failed parse/validate; recorded as diagnostic rows. */
+  errors: number;
+  /** Cache rows removed because their source_path no longer exists. */
+  removed: number;
+  /** Files skipped via mtime check (unchanged since last scan). */
+  skipped: number;
+}
+
+function isWorkflowYamlFile(name: string): boolean {
+  return /\.ya?ml$/i.test(name);
+}
+
+export function scanWorkflowSpecFolder(
+  opts: ScanWorkflowSpecFolderOpts,
+): ScanWorkflowSpecFolderResult {
+  const result: ScanWorkflowSpecFolderResult = {
+    scanned: 0,
+    valid: 0,
+    errors: 0,
+    removed: 0,
+    skipped: 0,
+  };
+  if (!existsSync(opts.folder)) return result;
+
+  let entries: string[] = [];
+  try {
+    entries = readdirSync(opts.folder);
+  } catch {
+    return result;
+  }
+
+  const seenPaths = new Set<string>();
+  for (const entry of entries) {
+    if (!isWorkflowYamlFile(entry)) continue;
+    const filePath = path.join(opts.folder, entry);
+    let mtimeMs = 0;
+    try {
+      const stat = statSync(filePath);
+      if (!stat.isFile()) continue;
+      mtimeMs = stat.mtimeMs;
+    } catch {
+      continue;
+    }
+    seenPaths.add(filePath);
+    result.scanned += 1;
+
+    // mtime check (OQ-3): if the cache has a row at this source_path
+    // whose cached_at is at or after the file's mtime, the file is
+    // unchanged since last scan — skip the re-parse work entirely.
+    //
+    // Compare at second-resolution because some filesystems (HFS+, FAT)
+    // round mtime down to whole seconds while cached_at carries ms
+    // precision; without this floor a freshly-written file whose mtime
+    // is `T - 999ms` would always look "newer" than its cached_at at
+    // exactly `T` and never skip.
+    const cachedAt = opts.db
+      .prepare(`SELECT cached_at FROM workflow_specs WHERE source_path = ?`)
+      .get(filePath) as { cached_at: string } | undefined;
+    if (cachedAt) {
+      const cachedAtMs = Date.parse(cachedAt.cached_at);
+      const cachedAtSec = Math.floor(cachedAtMs / 1000);
+      const mtimeSec = Math.floor(mtimeMs / 1000);
+      if (Number.isFinite(cachedAtMs) && cachedAtSec >= mtimeSec) {
+        result.skipped += 1;
+        continue;
+      }
+    }
+
+    // Parse + validate via cache. If readThrough throws (parse or
+    // validation error), record a diagnostic row keyed by source_path
+    // so the Library UI can render the error inline.
+    try {
+      opts.cache.readThrough(filePath);
+      result.valid += 1;
+    } catch (err) {
+      // Diagnostic: hash the raw content best-effort so we can detect
+      // edits that fix the error (mtime alone is fine; this is for
+      // bookkeeping). Use the empty string when content is unreadable.
+      const message = err instanceof Error ? err.message : String(err);
+      let sourceHash = "";
+      try {
+        sourceHash = createHash("sha256").update(readFileSync(filePath, "utf-8")).digest("hex");
+      } catch {
+        // unreadable / disappeared between stat and read; treat as
+        // empty hash so the next scan re-evaluates
+        sourceHash = "";
+      }
+      opts.cache.writeDiagnostic({
+        sourcePath: filePath,
+        sourceHash,
+        errorMessage: message,
+      });
+      result.errors += 1;
+    }
+  }
+
+  // OQ-4 deletion: cache rows whose source_path lives under the scanned
+  // folder AND whose file is no longer present on disk get removed. We
+  // scope the removal by source_path prefix to avoid touching built-in
+  // rows or rows the scanner doesn't own (e.g., other workflows folders).
+  const folderPrefix = opts.folder.endsWith(path.sep) ? opts.folder : `${opts.folder}${path.sep}`;
+  const cachedUnderFolder = opts.db
+    .prepare(`SELECT source_path FROM workflow_specs WHERE source_path LIKE ?`)
+    .all(`${folderPrefix}%`) as Array<{ source_path: string }>;
+  for (const { source_path } of cachedUnderFolder) {
+    if (seenPaths.has(source_path)) continue;
+    const removed = opts.cache.removeBySourcePath(source_path);
+    if (removed > 0) result.removed += removed;
+  }
+
+  return result;
 }

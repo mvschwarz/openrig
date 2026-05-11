@@ -20,6 +20,10 @@ export interface SpecLibraryEntry {
   stepsCount?: number;
   terminalTurnRule?: string;
   targetRig?: string | null;
+  // Slice 11 (workflow-spec-folder-discovery) — diagnostic state for
+  // workflow rows surfaced by the operator's specs/workflows folder.
+  status?: "valid" | "error";
+  errorMessage?: string | null;
 }
 
 export interface LibraryReview {
