@@ -24,6 +24,9 @@
 
 import { useMemo, useState } from "react";
 import { SyntaxHighlight } from "./SyntaxHighlight.js";
+import { extractKind, isFencedBlockLanguage } from "./storytelling-primitives.js";
+import { FencedBlockRenderer } from "./blocks.js";
+import { KindFrame } from "./kind-frame.js";
 
 export interface MarkdownViewerProps {
   content: string;
@@ -84,14 +87,34 @@ export function MarkdownViewer({ content, assetBasePath, hideFrontmatter = false
           {content}
         </pre>
       ) : (
-        <div className="space-y-3" data-testid="markdown-viewer-rendered">
-          {parsed.blocks.map((block, idx) => (
-            <BlockRenderer key={idx} block={block} assetBasePath={assetBasePath} />
-          ))}
-        </div>
+        <RenderedBody parsed={parsed} assetBasePath={assetBasePath} />
       )}
     </article>
   );
+}
+
+/** 0.3.1 slice 06 — kind-aware rendered body. When the frontmatter
+ *  declares a known `kind:`, the body is wrapped in a KindFrame so
+ *  the viewer presents a header chrome + optional TL;DR slate + the
+ *  rest of the body. Unknown kind or missing frontmatter falls
+ *  through to the plain block flow — the same rendering that's been
+ *  in place since UI Enhancement Pack v0. Fenced-block grammars
+ *  (timeline / stats / risk-table / compare / slate) are intercepted
+ *  inside BlockRenderer regardless of whether a kind is set so the
+ *  primitives are usable from any markdown surface. */
+function RenderedBody({ parsed, assetBasePath }: { parsed: ParsedDocument; assetBasePath?: string }) {
+  const kind = extractKind(parsed.frontmatter);
+  const body = (
+    <div className="space-y-3" data-testid="markdown-viewer-rendered">
+      {parsed.blocks.map((block, idx) => (
+        <BlockRenderer key={idx} block={block} assetBasePath={assetBasePath} />
+      ))}
+    </div>
+  );
+  if (kind && parsed.frontmatter) {
+    return <KindFrame kind={kind} frontmatter={parsed.frontmatter}>{body}</KindFrame>;
+  }
+  return body;
 }
 
 interface ParsedDocument {
@@ -115,8 +138,9 @@ function parseMarkdown(content: string): ParsedDocument {
   while (i < lines.length) {
     const line = lines[i]!;
 
-    // Fenced code block.
-    const fence = line.match(/^```(\w*)\s*$/);
+    // Fenced code block. Language matcher accepts hyphens so 0.3.1
+    // slice 06 fenced-block grammars like `risk-table` parse cleanly.
+    const fence = line.match(/^```([\w-]*)\s*$/);
     if (fence) {
       const language = fence[1] || null;
       const isMermaid = language?.toLowerCase() === "mermaid";
@@ -246,6 +270,12 @@ function BlockRenderer({ block, assetBasePath }: { block: Block; assetBasePath?:
     return <p data-testid="md-paragraph" className="text-[12px] leading-relaxed text-stone-800">{renderInline(block.text, assetBasePath)}</p>;
   }
   if (block.type === "code") {
+    // 0.3.1 slice 06 — intercept fenced-block grammars before the
+    // generic SyntaxHighlight fallback. Unknown languages fall
+    // through to SyntaxHighlight, preserving the original behavior.
+    if (isFencedBlockLanguage(block.language)) {
+      return <FencedBlockRenderer language={block.language} text={block.text} />;
+    }
     if (block.isMermaid) {
       return (
         <div data-testid="md-mermaid-placeholder" className="border border-amber-300 bg-amber-50 p-3">

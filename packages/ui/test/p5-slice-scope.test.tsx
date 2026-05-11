@@ -149,7 +149,7 @@ describe("SliceScopePage P5-2 tab content piping", () => {
     expect(await findByTestId("slice-scope-error")).toBeTruthy();
   });
 
-  it("default landing tab is 'story'; mounts StoryTab with events + phaseDefinitions", async () => {
+  it("default landing tab is 'story'; mounts TimelineTab with events + phaseDefinitions", async () => {
     const { container, findByTestId } = renderSliceScope({
       sliceId: "idea-ledger",
       detail: makeDetail(),

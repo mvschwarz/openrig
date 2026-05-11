@@ -6,7 +6,7 @@
 //
 // V1 attempt-3 Phase 5 P5-2: SliceScopePage tab content piping.
 // Per code-map AFTER tree fold mapping from Phase 5 dispatch:
-//   - StoryTab → story tab (preserved; events + phaseDefinitions props)
+//   - TimelineTab → story tab (preserved; events + phaseDefinitions props)
 //   - TestsVerificationTab → tests tab (preserved; tests prop)
 //   - TopologyTab → topology tab (preserved; topology prop)
 //   - AcceptanceTab → progress tab (FOLDED; canon-7 progress is acceptance + currentStep)
@@ -39,7 +39,8 @@ import {
   projectSliceMeta,
   type ProjectMissionGroup,
 } from "../../lib/project-mission-state.js";
-import { StoryTab } from "../slices/tabs/StoryTab.js";
+import { TimelineTab } from "../slices/tabs/TimelineTab.js";
+import { useSliceTimelineMarkdown } from "../../hooks/useSliceTimelineMarkdown.js";
 import { AcceptanceTab } from "../slices/tabs/AcceptanceTab.js";
 import { DocsTab } from "../slices/tabs/DocsTab.js";
 import { DecisionsTab } from "../slices/tabs/DecisionsTab.js";
@@ -386,7 +387,7 @@ function ScopeStoryRollup({
   }
   return (
     <div data-testid="scope-story-rollup">
-      <StoryTab events={events} phaseDefinitions={null} queueItemsById={queueItemsById} />
+      <TimelineTab events={events} phaseDefinitions={null} queueItemsById={queueItemsById} />
     </div>
   );
 }
@@ -1076,6 +1077,15 @@ export function SliceScopePage() {
   const detailQuery = useSliceDetail(sliceId);
   const queueItems = useQueueItemMap(detailQuery.data?.qitemIds ?? []);
   const queueItemsById = useMemo(() => queueItems.itemsById, [queueItems.itemsById]);
+  // 0.3.1 slice 06 — fetch <slicePath>/timeline.md so TimelineTab can
+  // render the curated narrative above the auto-captured event feed.
+  // SliceDetail.slicePath is an ABSOLUTE filesystem path; the hook
+  // resolves it against the daemon's allowlist roots and issues the
+  // /api/files/read call with the correct relative path. When no
+  // allowlist root contains the slice, the hook returns
+  // unavailable=true and TimelineTab degrades to the auto-captured
+  // event feed alone.
+  const timelineMd = useSliceTimelineMarkdown(detailQuery.data?.slicePath ?? null);
 
   if (detailQuery.isLoading) {
     return (
@@ -1130,10 +1140,11 @@ export function SliceScopePage() {
       onSelect={(id) => setActive(id as SliceTab)}
     >
       {active === "story" ? (
-        <StoryTab
+        <TimelineTab
           events={storyEventsForDetail(detail)}
           phaseDefinitions={detail.story.phaseDefinitions}
           queueItemsById={queueItemsById}
+          timelineMarkdown={timelineMd.content ?? undefined}
         />
       ) : null}
       {active === "overview" ? (

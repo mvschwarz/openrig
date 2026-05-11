@@ -1,8 +1,17 @@
-// Slice Story View v1.
+// 0.3.1 slice 06 — TimelineTab (rename + augmentation of the prior
+// StoryTab). Shows the slice lifecycle as a newest-first connected
+// step tree. The dot column is colored per derived event status so
+// the thread reads at a glance. When the parent passes a
+// `timelineMarkdown` blob (typically loaded from `<slice-dir>/timeline.md`
+// via /api/files/read), it renders above the event feed via
+// MarkdownViewer so the curated narrative augments — never replaces —
+// the auto-captured event trail.
 //
-// Shows the slice lifecycle as a newest-first connected step tree. Each step
-// keeps the spec-defined phase chip and expandable detail from the prior flat
-// timeline, while adding visible flow cues for event-to-event handoff reading.
+// Internal data-testid prefixes (`story-row-*`, `story-step-*`,
+// `story-tab`, etc.) are preserved to keep the existing test surface
+// backward-compatible; the exported symbol + filename + dot accents
+// + optional markdown header are what changed at the slice-06
+// boundary.
 
 import { useMemo, useState } from "react";
 import type {
@@ -20,6 +29,29 @@ import {
   eventToken,
   type ProjectToken,
 } from "../../project/ProjectMetaPrimitives.js";
+import { MarkdownViewer } from "../../markdown/MarkdownViewer.js";
+
+/** Derive a visual status from an event kind so the dot column reads
+ *  at a glance. Conservative mapping: only kinds that clearly signal
+ *  success/failure/warning get a strong color; everything else stays
+ *  neutral info-blue or muted. */
+export type TimelineDotStatus = "success" | "warning" | "danger" | "info" | "muted";
+export function statusFromEventKind(kind: string): TimelineDotStatus {
+  const k = kind.toLowerCase();
+  if (k.includes("complete") || k.includes("shipped") || k.includes("handed_off") || k.includes("merged") || k.includes("done")) return "success";
+  if (k.includes("fail") || k.includes("error") || k.includes("blocked") || k.includes("rejected")) return "danger";
+  if (k.includes("warn") || k.includes("attention") || k.includes("flagged")) return "warning";
+  if (k.includes("created") || k.includes("started") || k.includes("in_progress") || k.includes("in-progress") || k.includes("transition") || k.includes("edited") || k.includes("updated")) return "info";
+  return "muted";
+}
+
+const DOT_TOKENS: Record<TimelineDotStatus, string> = {
+  success: "bg-emerald-500",
+  warning: "bg-amber-500",
+  danger:  "bg-red-500",
+  info:    "bg-sky-500",
+  muted:   "bg-stone-300",
+};
 
 const PHASE_PALETTE: string[] = [
   "bg-amber-100 text-amber-800 border-amber-300",
@@ -34,14 +66,19 @@ const PHASE_PALETTE: string[] = [
 const UNTAGGED_CLASS = "bg-stone-100 text-stone-700 border-stone-300";
 const PAGE_SIZE = 12;
 
-export function StoryTab({
+export function TimelineTab({
   events,
   phaseDefinitions,
   queueItemsById,
+  timelineMarkdown,
 }: {
   events: StoryEvent[];
   phaseDefinitions: PhaseDefinition[] | null;
   queueItemsById?: Map<string, QueueItemDetail>;
+  /** Optional `<slice-dir>/timeline.md` content; rendered above the
+   *  event feed when present. Parent owns the fetch via
+   *  /api/files/read. */
+  timelineMarkdown?: string;
 }) {
   const [page, setPage] = useState(0);
   const phaseMeta = useMemo(() => {
@@ -66,12 +103,35 @@ export function StoryTab({
   const safePage = Math.min(page, totalPages - 1);
   const pagedEvents = sortedEvents.slice(safePage * PAGE_SIZE, safePage * PAGE_SIZE + PAGE_SIZE);
 
-  if (events.length === 0) {
-    return <div className="p-4 font-mono text-[10px] text-stone-400" data-testid="story-empty">No events captured for this slice yet.</div>;
+  const hasMarkdown = typeof timelineMarkdown === "string" && timelineMarkdown.trim().length > 0;
+  const hasEvents = events.length > 0;
+
+  if (!hasEvents && !hasMarkdown) {
+    return (
+      <div
+        data-testid="story-empty"
+        className="border border-dashed border-outline-variant bg-white/35 p-4 font-mono text-[10px] leading-relaxed text-stone-500"
+      >
+        <div className="mb-1 uppercase tracking-[0.12em] text-stone-400">No timeline yet</div>
+        <div className="text-stone-700">
+          Author one at <span className="font-mono text-stone-900">&lt;slice-dir&gt;/timeline.md</span> with frontmatter
+          <span className="font-mono text-stone-900"> kind: incident-timeline</span> and a <span className="font-mono text-stone-900">```timeline```</span> fenced block.
+        </div>
+      </div>
+    );
   }
 
   return (
-    <div data-testid="story-tab" className="space-y-0">
+    <div data-testid="story-tab" className="space-y-3">
+      {hasMarkdown && (
+        <div
+          data-testid="story-timeline-markdown"
+          className="border border-outline-variant bg-white/35 p-3 backdrop-blur-sm"
+        >
+          <MarkdownViewer content={timelineMarkdown!} hideFrontmatter hideRawToggle />
+        </div>
+      )}
+      {hasEvents && (
       <div data-testid="story-step-tree" data-order="newest-first" className="relative border border-outline-variant bg-white/35 p-3 backdrop-blur-sm">
         {pagedEvents.map((event, idx) => (
           <StoryStepCard
@@ -83,6 +143,7 @@ export function StoryTab({
           />
         ))}
       </div>
+      )}
       {totalPages > 1 ? (
         <div className="mt-3 flex items-center justify-between border border-outline-variant bg-white/35 px-3 py-2 font-mono text-[10px] uppercase tracking-[0.12em] text-stone-600">
           <button
@@ -227,7 +288,8 @@ function StoryStepCard({
       )}
       <div
         data-testid={`story-step-dot-${event.kind}`}
-        className="absolute left-[5px] top-3.5 flex h-5 w-5 items-center justify-center border border-outline-variant bg-white text-stone-600 shadow-[1px_1px_0_rgba(46,52,46,0.12)]"
+        data-dot-status={statusFromEventKind(event.kind)}
+        className={`absolute left-[5px] top-3.5 flex h-5 w-5 items-center justify-center border border-outline-variant text-white shadow-[1px_1px_0_rgba(46,52,46,0.12)] ${DOT_TOKENS[statusFromEventKind(event.kind)]}`}
       >
         {StepIcon ? <StepIcon className="h-3 w-3" strokeWidth={1.7} /> : null}
       </div>

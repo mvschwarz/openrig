@@ -12,8 +12,8 @@ describe("polish-8 demo-readiness source guards", () => {
     expect(src).toContain("bg-stone-950/65");
   });
 
-  it("StoryTab renders a newest-first connected step tree", () => {
-    const src = read("../src/components/slices/tabs/StoryTab.tsx");
+  it("TimelineTab renders a newest-first connected step tree", () => {
+    const src = read("../src/components/slices/tabs/TimelineTab.tsx");
     expect(src).toContain("data-testid=\"story-step-tree\"");
     expect(src).toContain("data-order=\"newest-first\"");
     expect(src).toContain("story-step-connector");

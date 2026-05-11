@@ -36,6 +36,12 @@ import {
 import { FeedCard } from "./FeedCard.js";
 import type { FeedActionOutcome, FeedProofPreview } from "./FeedCard.js";
 import {
+  StorytellingFeed,
+  buildStorytellingFeedItems,
+  type FeedCardItem as StorytellingFeedItem,
+} from "../feed/cards/storytelling-cards.js";
+import { useMissionDiscovery } from "../../hooks/useMissionDiscovery.js";
+import {
   useMissionControlAudit,
   type AuditEntry,
 } from "../mission-control/hooks/useMissionControlAudit.js";
@@ -251,6 +257,30 @@ export function Feed() {
   }, [cards, queueItems.itemsById, sliceRows]);
   const proofSlices = useSliceDetails(proofSliceNames);
 
+  // 0.3.1 slice 06 — adapt the daemon-driven sliceRows + missions
+  // into the new storytelling card primitives so they render in the
+  // live For You surface. Each of the 5 card types is mounted by a
+  // distinct data adapter so the production wire is the real one,
+  // not a stub. The legacy FeedCard list below remains the primary
+  // surface; this section is the storytelling-primitives preview
+  // band at the top of the feed.
+  //
+  // Adapters:
+  //   - Missions (useMissionDiscovery) → ProgressCard for the first 2
+  //     missions; drill-in routes to /project/mission/<id>. Percent
+  //     defaults to 0 at v0 (mission-level percent computation moves
+  //     in a follow-up slice via PROGRESS.md checkbox count).
+  //   - Slices (useSlices) → ShippedCard for status=shipped/done,
+  //     IncidentCard for everything else, capped at 3.
+  const missionsResult = useMissionDiscovery();
+  const storytellingItems = useMemo<StorytellingFeedItem[]>(
+    () => buildStorytellingFeedItems(
+      Array.isArray(missionsResult.missions) ? missionsResult.missions : [],
+      Array.isArray(sliceRows) ? sliceRows : [],
+    ),
+    [missionsResult.missions, sliceRows],
+  );
+
   return (
     <div data-testid="for-you-feed" className="mx-auto w-full max-w-[720px] px-6 py-8">
       <header className="border-b border-outline-variant pb-4 mb-4">
@@ -286,6 +316,19 @@ export function Feed() {
           </button>
         ))}
       </div>
+
+      {storytellingItems.length > 0 && (
+        <section
+          data-testid="for-you-storytelling-preview"
+          aria-label="Storytelling preview"
+          className="mb-4"
+        >
+          <SectionHeader tone="muted">Storytelling preview</SectionHeader>
+          <div className="mt-2">
+            <StorytellingFeed items={storytellingItems} />
+          </div>
+        </section>
+      )}
 
       {cards.length === 0 ? (
         <EmptyState
