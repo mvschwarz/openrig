@@ -204,6 +204,26 @@ describe("WorkspaceScopePage overview", () => {
     expect(archivedMission.getAttribute("data-mission-bucket")).toBe("archive");
   });
 
+  // Slice 19: workspace-overview slice items render single-row
+  // (flex layout) with meta inline + title/aria-label for hover +
+  // screen-reader discovery. HG-1/2/3/5 of slice 19.
+  it("slice 19: workspace-overview slice items are single-row with meta inline + a11y attributes", async () => {
+    const { findByTestId } = renderWorkspaceScope();
+    const link = await findByTestId("workspace-overview-slice-idea-ledger");
+    // Single-row flex layout (not stacked `block` spans)
+    expect(link.className).toMatch(/\bflex\b/);
+    expect(link.className).not.toMatch(/\bblock\b/);
+    // Meta carried via title + aria-label so hover + screen readers
+    // surface the version/status detail that left the visible row.
+    expect(link.getAttribute("title")).toContain("78 qitems");
+    expect(link.getAttribute("aria-label")).toContain("78 qitems");
+    // Meta span preserved with its own testid for downstream assertions.
+    const meta = await findByTestId("workspace-overview-slice-idea-ledger-meta");
+    expect(meta.className).toMatch(/\bshrink-0\b/);
+    expect(meta.className).not.toMatch(/\bblock\b/);
+    expect(meta.textContent).toContain("78 qitems");
+  });
+
   it("workspace progress, queue, and topology tabs render aggregate scoped data", async () => {
     const { findByTestId } = renderWorkspaceScope();
 

@@ -231,20 +231,23 @@ export function ProjectTreeView() {
             ) : (
               m.slices.map((s) => {
                 const sliceBucket = isCurrentProjectSlice(s) ? "current" : "archive";
+                const meta = projectSliceMeta(s);
                 return (
                   <li key={s.name} data-slice-bucket={sliceBucket}>
                     <Link
                       to="/project/slice/$sliceId"
                       params={{ sliceId: s.name }}
                       data-testid={`project-slice-${s.name}`}
-                      className="block px-2 py-1 font-mono text-xs text-on-surface hover:text-stone-900 hover:bg-surface-low"
+                      title={`${s.displayName} — ${meta}`}
+                      aria-label={`${s.displayName} (${meta})`}
+                      className="flex items-baseline gap-2 px-2 py-1 font-mono text-xs text-on-surface hover:text-stone-900 hover:bg-surface-low"
                     >
-                      <span className="block truncate">{s.displayName}</span>
+                      <span className="min-w-0 flex-1 truncate">{s.displayName}</span>
                       <span
                         data-testid={`project-slice-${s.name}-meta`}
-                        className="block truncate text-[9px] uppercase tracking-[0.12em] text-stone-500"
+                        className="shrink-0 text-[9px] uppercase tracking-[0.12em] text-stone-500"
                       >
-                        {projectSliceMeta(s)}
+                        {meta}
                       </span>
                     </Link>
                   </li>
