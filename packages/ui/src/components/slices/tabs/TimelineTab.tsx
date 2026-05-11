@@ -110,9 +110,12 @@ export function TimelineTab({
     return (
       <div
         data-testid="story-empty"
-        className="border border-dashed border-outline-variant bg-white/35 p-4 font-mono text-[10px] leading-relaxed text-stone-500"
+        className="border border-dashed border-outline-variant bg-white/35 p-4 font-body text-[11px] leading-relaxed text-stone-500"
       >
-        <div className="mb-1 uppercase tracking-[0.12em] text-stone-400">No timeline yet</div>
+        {/* Slice 16: empty-state copy is prose; the file-path / frontmatter /
+            fence-block markers stay font-mono as code identifiers per
+            DESIGN §Typography. */}
+        <div className="mb-1 font-mono uppercase tracking-[0.12em] text-stone-400">No timeline yet</div>
         <div className="text-stone-700">
           Author one at <span className="font-mono text-stone-900">&lt;slice-dir&gt;/timeline.md</span> with frontmatter
           <span className="font-mono text-stone-900"> kind: incident-timeline</span> and a <span className="font-mono text-stone-900">```timeline```</span> fenced block.
@@ -254,10 +257,14 @@ function StoryStepCard({
         <EventBadge kind={event.kind} compact />
         <DateChip value={event.ts} />
       </div>
+      {/* Slice 16: event body is prose (qitem body OR event summary).
+          Per DESIGN §Typography: prose stays in font-body Inter; the
+          `<pre>` element is retained so newlines in the source are
+          preserved via whitespace-pre-wrap, but the font is body. */}
       <pre
         data-testid={`story-row-body-${event.kind}`}
         data-source={bodyIsQitem ? "qitem" : "event"}
-        className="mt-2 whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-stone-950"
+        className="mt-2 whitespace-pre-wrap break-words font-body text-[12px] leading-relaxed text-stone-950"
       >
         {previewText(primaryBody)}
       </pre>

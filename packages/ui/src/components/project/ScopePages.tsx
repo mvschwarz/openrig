@@ -463,7 +463,9 @@ function ScopeTestsRollup({
                 <div key={packet.dirName} className="border border-outline-variant bg-white/30 p-2 backdrop-blur-sm">
                   <ProofPacketHeader title={packet.dirName} badge={packet.passFailBadge} />
                   {packet.primaryMarkdown?.content ? (
-                    <p className="mt-2 line-clamp-3 font-mono text-[10px] leading-relaxed text-stone-700">
+                    // Slice 16: proof-packet markdown body is prose.
+                    // Per DESIGN §Typography prose stays font-body Inter.
+                    <p className="mt-2 line-clamp-3 font-body text-[11px] leading-relaxed text-stone-700">
                       {packet.primaryMarkdown.content}
                     </p>
                   ) : null}
