@@ -325,6 +325,29 @@ describe("PL-slice-story-view-v0 SliceIndexer", () => {
       expect(slice.qitemIds).not.toContain("q-mission-tag-only");
     });
 
+    it("does not re-include mission-only qitems when railItem defaults to missionId", () => {
+      const missionsRoot = path.join(cleanup, "missions");
+      writeSlice(path.join(missionsRoot, "release-fake-default-rail", "slices"), "fake-slice-default-rail", {
+        "README.md": "---\nstatus: active\n---\n# Fake default rail\n",
+      });
+      insertQitem(db, {
+        qitemId: "q-default-rail-typed-slice-tag",
+        body: "Body without slice name.",
+        tags: ["slice:fake-slice-default-rail"],
+      });
+      insertQitem(db, {
+        qitemId: "q-default-rail-mission-tag-only",
+        body: "Body without slice name.",
+        tags: ["mission:release-fake-default-rail"],
+      });
+
+      const indexer = new SliceIndexer({ slicesRoot: missionsRoot, dogfoodEvidenceRoot: null, db });
+      const slice = indexer.get("fake-slice-default-rail")!;
+      expect(slice.railItem).toBe("release-fake-default-rail");
+      expect(slice.qitemIds).toEqual(["q-default-rail-typed-slice-tag"]);
+      expect(slice.qitemIds).not.toContain("q-default-rail-mission-tag-only");
+    });
+
     it("preserves legacy substring fallback (including mission body) when NO typed slice: tag exists", () => {
       // When no qitem has the typed `slice:<name>` tag, the indexer
       // falls back to the pre-fix three-term substring union so older

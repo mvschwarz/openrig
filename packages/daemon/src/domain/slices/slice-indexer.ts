@@ -435,11 +435,13 @@ export class SliceIndexer {
 
       // 2. Substring matches. Terms are chosen so the missionId term
       // is INCLUDED only when no typed-tag rows exist (legacy
-      // compatibility); otherwise the slice-specific terms (sliceName +
-      // railItem) drive matching. railItem stays in both branches
-      // because it's slice-scoped, not mission-scoped.
+      // compatibility); otherwise the slice-specific terms drive
+      // matching. In mission-folder workspaces, railItem defaults to
+      // missionId when no explicit rail item is authored, so the typed-tag
+      // branch must not blindly keep that fallback or mission-only qitems
+      // leak back into every slice in the mission.
       const substringTerms = (typedTagMatchCount > 0
-        ? [sliceName, railItem]
+        ? [sliceName, railItem === missionId ? null : railItem]
         : [sliceName, railItem, missionId]
       ).filter((v): v is string => !!v);
       for (const term of Array.from(new Set(substringTerms))) {
