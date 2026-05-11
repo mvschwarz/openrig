@@ -1079,12 +1079,13 @@ export function SliceScopePage() {
   const queueItemsById = useMemo(() => queueItems.itemsById, [queueItems.itemsById]);
   // 0.3.1 slice 06 — fetch <slicePath>/timeline.md so TimelineTab can
   // render the curated narrative above the auto-captured event feed.
-  // Default root="workspace" since slices live under workspace.slices_root;
-  // the read fails gracefully (unavailable=true) when the file is absent.
-  const timelineMd = useSliceTimelineMarkdown(
-    "workspace",
-    detailQuery.data?.slicePath ?? null,
-  );
+  // SliceDetail.slicePath is an ABSOLUTE filesystem path; the hook
+  // resolves it against the daemon's allowlist roots and issues the
+  // /api/files/read call with the correct relative path. When no
+  // allowlist root contains the slice, the hook returns
+  // unavailable=true and TimelineTab degrades to the auto-captured
+  // event feed alone.
+  const timelineMd = useSliceTimelineMarkdown(detailQuery.data?.slicePath ?? null);
 
   if (detailQuery.isLoading) {
     return (

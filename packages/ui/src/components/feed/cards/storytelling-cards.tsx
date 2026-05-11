@@ -392,6 +392,60 @@ export type FeedCardItem =
   | { kind: "approval"; source: ApprovalCardSource }
   | { kind: "concept"; source: ConceptCardSource };
 
+/** 0.3.1 slice 06 forward-fix #2 — pure adapter that converts the
+ *  daemon-driven mission + slice rows into FeedCardItem[]. Exported
+ *  for unit-test surface: callers can verify the production wire's
+ *  routing (missions → ProgressCard; shipped slices → ShippedCard;
+ *  everything else → IncidentCard with derived status) without
+ *  mounting the full Feed.tsx surface. */
+export interface AdapterMissionRow {
+  name: string;
+  path: string;
+}
+export interface AdapterSliceRow {
+  name: string;
+  displayName?: string;
+  status?: string | null;
+  lastActivityAt?: string | null;
+}
+export function buildStorytellingFeedItems(
+  missions: AdapterMissionRow[],
+  slices: AdapterSliceRow[],
+): FeedCardItem[] {
+  const items: FeedCardItem[] = [];
+  for (const mission of (missions ?? []).slice(0, 2)) {
+    items.push({
+      kind: "progress",
+      source: {
+        missionId: mission.name,
+        title: mission.name,
+        oneLiner: `Mission at ${mission.path}`,
+        nextStep: `Open mission for live status + active slices.`,
+        percent: 0,
+      },
+    });
+  }
+  for (const slice of (slices ?? []).slice(0, 3)) {
+    const oneLiner = slice.lastActivityAt
+      ? `Last activity ${slice.lastActivityAt}`
+      : `Slice in ${slice.status ?? "unknown"} state`;
+    const title = slice.displayName || slice.name;
+    const sliceId = slice.name;
+    const status = (slice.status ?? "").toLowerCase();
+    if (status === "shipped" || status === "complete" || status === "done") {
+      items.push({ kind: "shipped", source: { sliceId, title, oneLiner } });
+    } else if (status === "blocked" || status === "danger" || status === "failed") {
+      items.push({
+        kind: "incident",
+        source: { sliceId, title, oneLiner, status: status === "blocked" ? "warning" : "danger" },
+      });
+    } else {
+      items.push({ kind: "incident", source: { sliceId, title, oneLiner, status: "info" } });
+    }
+  }
+  return items;
+}
+
 export function StorytellingFeed({ items }: { items: FeedCardItem[] }) {
   if (items.length === 0) {
     return (
