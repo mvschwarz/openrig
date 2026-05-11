@@ -496,6 +496,12 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       rigRepo,
       bootstrapOrchestrator,
       specsDir: nodePath.resolve(nodePath.dirname(new URL(import.meta.url).pathname), "..", "specs"),
+      // V0.3.1 slice 05 — kernel members run against the operator's
+      // workspace, not the daemon installation tree. Without this
+      // cwdOverride, BootstrapOrchestrator refuses with
+      // "cwd is inside the OpenRig installation". Use the resolved
+      // workspace.root setting as the per-operator default.
+      cwdOverride: runtimeSettings.workspaceRoot,
     });
     try {
       // eslint-disable-next-line no-console

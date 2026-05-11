@@ -100,6 +100,7 @@ describe("bootKernelIfNeeded — short-circuit branches", () => {
       rigRepo: makeRigRepo([]),
       bootstrapOrchestrator: makeBootstrapMock(),
       specsDir: tmpSpecsDir,
+      cwdOverride: tmpSpecsDir,
       probeRuntimes: async () => ({ claudeCode: "ok", codex: "ok" }),
       log: () => {},
     };
@@ -113,6 +114,7 @@ describe("bootKernelIfNeeded — short-circuit branches", () => {
       rigRepo: makeRigRepo([{ name: "kernel" }]),
       bootstrapOrchestrator: makeBootstrapMock(),
       specsDir: tmpSpecsDir,
+      cwdOverride: tmpSpecsDir,
       probeRuntimes: async () => ({ claudeCode: "ok", codex: "ok" }),
       log: () => {},
     };
@@ -126,6 +128,7 @@ describe("bootKernelIfNeeded — short-circuit branches", () => {
       rigRepo: makeRigRepo([]),
       bootstrapOrchestrator: makeBootstrapMock(),
       specsDir: tmpSpecsDir,
+      cwdOverride: tmpSpecsDir,
       probeRuntimes: async () => ({ claudeCode: "unavailable", codex: "unavailable" }),
       log: () => {},
     };
@@ -141,6 +144,7 @@ describe("bootKernelIfNeeded — short-circuit branches", () => {
       rigRepo: makeRigRepo([]),
       bootstrapOrchestrator: makeBootstrapMock(),
       specsDir: tmpSpecsDir,
+      cwdOverride: tmpSpecsDir,
       probeRuntimes: async () => ({ claudeCode: "ok", codex: "ok" }),
       log: () => {},
     };
@@ -156,6 +160,7 @@ describe("bootKernelIfNeeded — happy path", () => {
       rigRepo: makeRigRepo([]),
       bootstrapOrchestrator: bootstrap,
       specsDir: tmpSpecsDir,
+      cwdOverride: tmpSpecsDir,
       probeRuntimes: async () => ({ claudeCode: "ok", codex: "ok" }),
       log: () => {},
     };
@@ -169,6 +174,10 @@ describe("bootKernelIfNeeded — happy path", () => {
     expect(opts.sourceRef).toBe(join(tmpSpecsDir, "rigs/launch/kernel", "rig.yaml"));
     expect(opts.sourceKind).toBe("rig_spec");
     expect(opts.autoApprove).toBe(true);
+    // V0.3.1 slice 05 forward-fix: cwdOverride threads through to
+    // bootstrap so kernel members run against the operator's
+    // workspace, not the daemon installation tree.
+    expect(opts.cwdOverride).toBe(tmpSpecsDir);
   });
 
   it("returns bootstrap_failed and surfaces error detail when orchestrator reports errors", async () => {
@@ -176,6 +185,7 @@ describe("bootKernelIfNeeded — happy path", () => {
       rigRepo: makeRigRepo([]),
       bootstrapOrchestrator: makeBootstrapMock({ errors: ["preflight: tmux missing"] }),
       specsDir: tmpSpecsDir,
+      cwdOverride: tmpSpecsDir,
       probeRuntimes: async () => ({ claudeCode: "ok", codex: "ok" }),
       log: () => {},
     };
@@ -189,6 +199,7 @@ describe("bootKernelIfNeeded — happy path", () => {
       rigRepo: makeRigRepo([]),
       bootstrapOrchestrator: makeBootstrapMock({ throwError: new Error("network blip") }),
       specsDir: tmpSpecsDir,
+      cwdOverride: tmpSpecsDir,
       probeRuntimes: async () => ({ claudeCode: "ok", codex: "ok" }),
       log: () => {},
     };
@@ -203,6 +214,7 @@ describe("bootKernelIfNeeded — happy path", () => {
       rigRepo: makeRigRepo([]),
       bootstrapOrchestrator: bootstrap,
       specsDir: tmpSpecsDir,
+      cwdOverride: tmpSpecsDir,
       probeRuntimes: async () => ({ claudeCode: "ok", codex: "unavailable" }),
       log: () => {},
     };
@@ -217,6 +229,7 @@ describe("bootKernelIfNeeded — happy path", () => {
       rigRepo: makeRigRepo([]),
       bootstrapOrchestrator: bootstrap,
       specsDir: tmpSpecsDir,
+      cwdOverride: tmpSpecsDir,
       probeRuntimes: async () => ({ claudeCode: "unavailable", codex: "ok" }),
       log: () => {},
     };

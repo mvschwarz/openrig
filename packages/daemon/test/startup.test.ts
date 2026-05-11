@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -33,6 +33,20 @@ function seedDbWithStaleSessions(dbPath: string, rigs: { rigName: string; logica
 }
 
 describe("createDaemon startup composition", () => {
+  // V0.3.1 slice 05 kernel-rig-as-default — startup tests construct
+  // the daemon without booting the kernel rig. The kernel-boot path
+  // is exercised separately in kernel-boot.test.ts (unit) +
+  // kernel-rig-spec-validate.test.ts (variant gate); these tests
+  // assert the surrounding daemon-composition contract, so the
+  // OPENRIG_NO_KERNEL=1 escape hatch keeps them fast + deterministic
+  // regardless of the host's runtime-auth state.
+  beforeAll(() => {
+    process.env.OPENRIG_NO_KERNEL = "1";
+  });
+  afterAll(() => {
+    delete process.env.OPENRIG_NO_KERNEL;
+  });
+
   it("calls cmuxAdapter.connect() during startup", async () => {
     const connectCalled = vi.fn();
     const cmuxFactory: CmuxTransportFactory = async () => {

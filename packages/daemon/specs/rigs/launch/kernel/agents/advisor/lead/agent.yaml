@@ -6,7 +6,7 @@ defaults:
   runtime: claude-code
 
 imports:
-  - ref: local:../../../../../agents/shared
+  - ref: local:../../../../../../agents/shared
 
 profiles:
   default:

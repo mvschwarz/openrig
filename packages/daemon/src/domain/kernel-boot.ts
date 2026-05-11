@@ -30,6 +30,13 @@ export interface KernelBootDeps {
    *  inject a fixture root). Production callsite resolves to the
    *  packaged `packages/daemon/specs/` location. */
   specsDir: string;
+  /** cwdOverride passed to BootstrapOrchestrator.bootstrap. Kernel
+   *  members run against the operator's environment, not the daemon
+   *  installation tree — without this override, the bootstrap path
+   *  refuses with `cwd is inside the OpenRig installation`. Production
+   *  callsite passes the resolved workspace.root setting; tests inject
+   *  a fixture path. */
+  cwdOverride: string;
   /** Runtime auth probe — defaults to live shellouts; tests inject. */
   probeRuntimes?: () => Promise<RuntimeProbeResult>;
   /** Logger sink; defaults to console.log/warn so daemon stdout/stderr
@@ -56,8 +63,18 @@ export async function bootKernelIfNeeded(deps: KernelBootDeps): Promise<KernelBo
   const log = deps.log ?? defaultLog;
 
   // 1. --no-kernel opt-out (CLI flag projected via OPENRIG_NO_KERNEL).
-  if (process.env["OPENRIG_NO_KERNEL"] === "1") {
-    log("info", "kernel-boot: OPENRIG_NO_KERNEL=1 — skipping kernel auto-boot");
+  // VITEST env additionally short-circuits the live runtime probe
+  // path so daemon-composition tests don't block 5s+ on shelled-out
+  // claude/codex CLI calls — real production probes complete in
+  // ~100ms; this is an explicit test-fast escape hatch so individual
+  // test files don't each have to remember to set OPENRIG_NO_KERNEL=1.
+  // The auto-skip is suppressed when deps.probeRuntimes is injected:
+  // kernel-boot's own unit tests inject a fast deterministic probe
+  // and explicitly want to exercise the full logic.
+  const probeInjected = typeof deps.probeRuntimes === "function";
+  if (process.env["OPENRIG_NO_KERNEL"] === "1" || (process.env["VITEST"] === "true" && !probeInjected)) {
+    const reason = process.env["OPENRIG_NO_KERNEL"] === "1" ? "OPENRIG_NO_KERNEL=1" : "VITEST=true";
+    log("info", `kernel-boot: ${reason} — skipping kernel auto-boot`);
     return { outcome: "skipped_no_kernel_flag" };
   }
 
@@ -93,6 +110,7 @@ export async function bootKernelIfNeeded(deps: KernelBootDeps): Promise<KernelBo
       sourceRef: specPath,
       sourceKind: "rig_spec",
       autoApprove: true,
+      cwdOverride: deps.cwdOverride,
     });
     if (result.errors && result.errors.length > 0) {
       log("warn", `kernel-boot: bootstrap finished with errors: ${result.errors.join("; ")}`);
