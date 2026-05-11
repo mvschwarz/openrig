@@ -11,7 +11,7 @@
 // Lens chips remain a transient ad-hoc filter on top of subscription-
 // filtered cards.
 
-import { useState, useMemo } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { cn } from "../../lib/utils.js";
 import { SectionHeader } from "../ui/section-header.js";
 import { EmptyState } from "../ui/empty-state.js";
@@ -33,7 +33,11 @@ import {
   useFeedSubscriptions,
   isCardKindSubscribed,
 } from "../../hooks/useFeedSubscriptions.js";
+import { useDismissedSeqs } from "../../hooks/useDismissedSeqs.js";
+import { useCompletedMissions } from "../../hooks/useCompletedMissions.js";
+import { useMissionStatuses } from "../../hooks/useMissionStatuses.js";
 import { FeedCard } from "./FeedCard.js";
+import { UndoToast } from "./UndoToast.js";
 import type { FeedActionOutcome, FeedProofPreview } from "./FeedCard.js";
 import {
   StorytellingFeed,
@@ -214,6 +218,26 @@ export function Feed() {
   const subs = useFeedSubscriptions();
 
   const rawCards = useMemo(() => classifyFeed(events).slice(0, HISTORY_LIMIT), [events]);
+  const rawCardSeqs = useMemo(() => rawCards.map((c) => c.source.seq), [rawCards]);
+  const { dismissedSeqs, dismiss, undismiss } = useDismissedSeqs(rawCardSeqs);
+  const [pendingUndoSeq, setPendingUndoSeq] = useState<number | null>(null);
+
+  const handleDismiss = useCallback(
+    (seq: number) => {
+      dismiss(seq);
+      setPendingUndoSeq(seq);
+    },
+    [dismiss],
+  );
+
+  const handleUndo = useCallback(() => {
+    if (pendingUndoSeq !== null) undismiss(pendingUndoSeq);
+    setPendingUndoSeq(null);
+  }, [pendingUndoSeq, undismiss]);
+
+  const handleUndoExpire = useCallback(() => {
+    setPendingUndoSeq(null);
+  }, []);
   const qitemIds = useMemo(
     () => rawCards.map(qitemIdForCard).filter((id): id is string => Boolean(id)),
     [rawCards],
@@ -233,12 +257,14 @@ export function Feed() {
       return kind === card.kind ? card : { ...card, kind };
     });
     // Filter by subscription state FIRST so the feed honors operator
-    // configuration, then apply the transient lens filter on top.
+    // configuration, then apply the transient lens filter, then drop
+    // anything the operator has soft-dismissed via per-event-seq.
     const subscribed = hydrated.filter((c) =>
       isCardKindSubscribed(c.kind, subs.state),
     );
-    return lens === "all" ? subscribed : subscribed.filter((c) => c.kind === lens);
-  }, [rawCards, lens, queueItems.itemsById, actionOutcomes, subs.state]);
+    const lensFiltered = lens === "all" ? subscribed : subscribed.filter((c) => c.kind === lens);
+    return lensFiltered.filter((c) => !dismissedSeqs.has(c.source.seq));
+  }, [rawCards, lens, queueItems.itemsById, actionOutcomes, subs.state, dismissedSeqs]);
   const slicesQuery = useSlices("all");
   const sliceRows = useMemo(() => {
     if (!slicesQuery.data || "unavailable" in slicesQuery.data) return [];
@@ -273,12 +299,46 @@ export function Feed() {
   //   - Slices (useSlices) → ShippedCard for status=shipped/done,
   //     IncidentCard for everything else, capped at 3.
   const missionsResult = useMissionDiscovery();
+  const { completedMissionIds, markCompleted } = useCompletedMissions();
+  const discoveredMissionIds = useMemo(
+    () => (Array.isArray(missionsResult.missions) ? missionsResult.missions.map((m) => m.name) : []),
+    [missionsResult.missions],
+  );
+  const { statuses: missionStatuses } = useMissionStatuses(discoveredMissionIds);
+  // Slice 18 §3.5 — thread the daemon-derived status onto each mission
+  // row so buildStorytellingFeedItems filters durably on `status ===
+  // "complete"` (survives browser/localStorage reset).
+  const missionsWithStatus = useMemo(
+    () => (Array.isArray(missionsResult.missions) ? missionsResult.missions : []).map((m) => ({
+      ...m,
+      status: missionStatuses.get(m.name) ?? null,
+    })),
+    [missionsResult.missions, missionStatuses],
+  );
   const storytellingItems = useMemo<StorytellingFeedItem[]>(
     () => buildStorytellingFeedItems(
-      Array.isArray(missionsResult.missions) ? missionsResult.missions : [],
+      missionsWithStatus,
       Array.isArray(sliceRows) ? sliceRows : [],
+      completedMissionIds,
     ),
-    [missionsResult.missions, sliceRows],
+    [missionsWithStatus, sliceRows, completedMissionIds],
+  );
+
+  // Slice 18 §3.5 — Getting Started complete-and-hide. Optimistic local
+  // hide via useCompletedMissions; best-effort daemon write to
+  // POST /api/missions/:missionId/complete for the audit trail. Network
+  // errors are swallowed silently (audit is best-effort, UI stays
+  // responsive) so a partial-air-gapped daemon doesn't block the hide.
+  const handleMarkMissionComplete = useCallback(
+    (missionId: string) => {
+      markCompleted(missionId);
+      void fetch(`/api/missions/${encodeURIComponent(missionId)}/complete`, {
+        method: "POST",
+      }).catch(() => {
+        // Swallow — local optimistic state is the user-visible truth.
+      });
+    },
+    [markCompleted],
   );
 
   return (
@@ -325,7 +385,7 @@ export function Feed() {
         >
           <SectionHeader tone="muted">Storytelling preview</SectionHeader>
           <div className="mt-2">
-            <StorytellingFeed items={storytellingItems} />
+            <StorytellingFeed items={storytellingItems} onMarkMissionComplete={handleMarkMissionComplete} />
           </div>
         </section>
       )}
@@ -352,11 +412,21 @@ export function Feed() {
                 queueItem={queueItem}
                 proofPreview={proofPreview}
                 actionOutcome={actionOutcome}
+                onDismiss={handleDismiss}
               />
             );
           })}
         </div>
       )}
+      {pendingUndoSeq !== null ? (
+        <UndoToast
+          key={pendingUndoSeq}
+          label="Card dismissed"
+          onUndo={handleUndo}
+          onExpire={handleUndoExpire}
+          durationMs={5000}
+        />
+      ) : null}
     </div>
   );
 }

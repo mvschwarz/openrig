@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { ArrowRight, CalendarDays, CircleAlert, Clock, History, PackageCheck } from "lucide-react";
+import { useRef, useState } from "react";
+import { ArrowRight, CalendarDays, CircleAlert, Clock, History, PackageCheck, X } from "lucide-react";
 
 import { VellumCard } from "../ui/vellum-card.js";
 import { AuthorAgentTag } from "./AuthorAgentTag.js";
@@ -297,18 +297,65 @@ function ActionOutcomePanel({ outcome }: { outcome: FeedActionOutcome }) {
   );
 }
 
+const SWIPE_DISMISS_THRESHOLD = 0.5; // fraction of card width
+
 export function FeedCard({
   card,
   queueItem,
   proofPreview,
   actionOutcome,
+  onDismiss,
 }: {
   card: FeedCardModel;
   queueItem?: QueueItemDetail;
   proofPreview?: FeedProofPreview | null;
   actionOutcome?: FeedActionOutcome | null;
+  onDismiss?: (seq: number) => void;
 }) {
   const [selectedScreenshot, setSelectedScreenshot] = useState<string | null>(null);
+  const dragStateRef = useRef<{ startX: number; pointerId: number; isTouch: boolean } | null>(null);
+
+  const handleKeyDown: React.KeyboardEventHandler<HTMLElement> = (event) => {
+    if (!onDismiss) return;
+    // Only honor Backspace/Delete when the article itself is the focused
+    // element — without this guard, the same keys typed into a nested
+    // interactive control (dismiss button, VerbActions, QueueItemTrigger,
+    // proof thumbnails) would bubble up and soft-dismiss the whole card.
+    if (event.target !== event.currentTarget) return;
+    if (event.key === "Backspace" || event.key === "Delete") {
+      event.preventDefault();
+      onDismiss(card.source.seq);
+    }
+  };
+
+  const handleTouchStart: React.TouchEventHandler<HTMLElement> = (event) => {
+    if (!onDismiss) return;
+    const touch = event.touches[0];
+    if (!touch) return;
+    dragStateRef.current = { startX: touch.clientX, pointerId: touch.identifier, isTouch: true };
+  };
+
+  const handleTouchEnd: React.TouchEventHandler<HTMLElement> = (event) => {
+    const drag = dragStateRef.current;
+    dragStateRef.current = null;
+    if (!onDismiss || !drag) return;
+    const touch = event.changedTouches[0];
+    if (!touch) return;
+    const deltaX = touch.clientX - drag.startX;
+    if (deltaX <= 0) return;
+    const target = event.currentTarget;
+    const rect = target.getBoundingClientRect();
+    if (rect.width <= 0) return;
+    if (deltaX / rect.width >= SWIPE_DISMISS_THRESHOLD) {
+      onDismiss(card.source.seq);
+    }
+  };
+
+  const handleDismissClick: React.MouseEventHandler<HTMLButtonElement> = (event) => {
+    event.stopPropagation();
+    if (!onDismiss) return;
+    onDismiss(card.source.seq);
+  };
   const qitemViewerData = qitemViewerDataFromItem(card, queueItem);
   const body = compactQueueBody(queueItem?.body || card.body);
   const tags = queueItem?.tags ?? qitemViewerData?.tags ?? [];
@@ -323,7 +370,15 @@ export function FeedCard({
       as="article"
       testId={KIND_TESTID[card.kind]}
       accentClass={renderedOutcome ? TONE_ACCENT[primaryToken.tone] : KIND_ACCENT[card.kind]}
-      className="mb-3 bg-white/50 backdrop-blur-sm"
+      className="mb-3 bg-white/50 backdrop-blur-sm group"
+      {...(onDismiss
+        ? {
+            tabIndex: 0,
+            onKeyDown: handleKeyDown,
+            onTouchStart: handleTouchStart,
+            onTouchEnd: handleTouchEnd,
+          }
+        : {})}
     >
       <div className="px-4 py-3">
         <div className="flex items-start justify-between gap-3">
@@ -340,7 +395,20 @@ export function FeedCard({
               {card.title}
             </h3>
           </div>
-          <InlineDateMark value={card.createdAt} />
+          <div className="flex items-start gap-2">
+            <InlineDateMark value={card.createdAt} />
+            {onDismiss ? (
+              <button
+                type="button"
+                data-testid="feed-card-dismiss"
+                aria-label="Dismiss card"
+                onClick={handleDismissClick}
+                className="opacity-0 group-hover:opacity-100 focus:opacity-100 focus:outline-none focus:ring-1 focus:ring-stone-400 transition-opacity inline-flex h-5 w-5 items-center justify-center border border-stone-300 bg-white/80 text-stone-600 hover:text-stone-900 hover:border-stone-500"
+              >
+                <X className="h-3 w-3" strokeWidth={1.8} />
+              </button>
+            ) : null}
+          </div>
         </div>
         {body ? (
           <p className="mt-3 font-mono text-xs leading-relaxed text-on-surface-variant whitespace-pre-line">
