@@ -54,7 +54,11 @@ async function fetchSlicesList(
   filter: SliceFilter,
   boundToWorkflow: BoundToWorkflowFilter | null,
 ): Promise<SliceListResponse | SlicesUnavailable> {
-  const params = new URLSearchParams({ filter });
+  // Explorer auto-show needs a daemon-side cache bypass as well as a
+  // React Query refetch. Otherwise a focus refetch can still receive the
+  // indexer's stale in-memory listing immediately after a slice folder is
+  // created.
+  const params = new URLSearchParams({ filter, refresh: "1" });
   if (boundToWorkflow) {
     params.set("boundToWorkflow", `${boundToWorkflow.specName}:${boundToWorkflow.specVersion}`);
   }

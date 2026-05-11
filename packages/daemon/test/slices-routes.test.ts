@@ -357,4 +357,22 @@ describe("PL-slice-story-view-v0 slices routes", () => {
       expect(res.status).toBe(503);
     });
   });
+
+  describe("GET /api/slices?refresh=1", () => {
+    it("drops the listing cache before returning the list", async () => {
+      writeSlice(slicesRoot, "before-slice", { "README.md": "---\n---\n" });
+      const first = await app.request("/api/slices");
+      const firstList = (await first.json()) as { slices: Array<{ name: string }> };
+      expect(firstList.slices.map((s) => s.name)).toEqual(["before-slice"]);
+
+      writeSlice(slicesRoot, "after-slice", { "README.md": "---\n---\n" });
+      const stale = await app.request("/api/slices");
+      const staleList = (await stale.json()) as { slices: Array<{ name: string }> };
+      expect(staleList.slices.map((s) => s.name)).toEqual(["before-slice"]);
+
+      const fresh = await app.request("/api/slices?refresh=1");
+      const freshList = (await fresh.json()) as { slices: Array<{ name: string }> };
+      expect(freshList.slices.map((s) => s.name).sort()).toEqual(["after-slice", "before-slice"]);
+    });
+  });
 });

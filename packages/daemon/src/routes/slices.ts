@@ -49,6 +49,10 @@ export function slicesRoutes(): Hono {
         hint: `Unknown filter '${filter}'. Allowed: ${[...VALID_FILTERS].sort().join(", ")}.`,
       }, 400);
     }
+    const refresh = c.req.query("refresh");
+    if (refresh === "1" || refresh === "true") {
+      deps.indexer.invalidate();
+    }
     const all = deps.indexer.list();
     let filtered = filter === "all" ? all : all.filter((s) => s.status === filter);
     // Workflows in Spec Library v0: optional lens filter — narrow to
