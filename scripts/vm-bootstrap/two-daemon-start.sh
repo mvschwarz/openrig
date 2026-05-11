@@ -42,6 +42,31 @@ BLANK_PORT="${BLANK_PORT:-7433}"
 POPULATED_PORT="${POPULATED_PORT:-7434}"
 FIXTURE_DIR="${FIXTURE_DIR:-$(dirname "$0")/../../packages/daemon/assets/vm-preview-fixtures}"
 
+print_reset_instructions() {
+  cat <<EOF
+==> RESET (when you want a clean start):
+    OPENRIG_HOME=$BLANK_HOME rig daemon stop
+    OPENRIG_HOME=$POPULATED_HOME rig daemon stop
+    rm -rf $BLANK_HOME $POPULATED_HOME
+EOF
+}
+
+start_daemon_or_explain_reset() {
+  local label="$1"
+  local home="$2"
+  local port="$3"
+
+  echo "==> Starting $label daemon (port $port)"
+  if ! OPENRIG_HOME="$home" rig daemon start \
+    --port "$port" \
+    --db "$home/openrig.sqlite"; then
+    echo
+    echo "ERROR: $label daemon did not start. If a preview daemon is already running, clean it up and rerun:" >&2
+    print_reset_instructions >&2
+    exit 1
+  fi
+}
+
 echo "==> VM preview two-daemon bootstrap"
 echo "    BLANK_HOME=$BLANK_HOME (port $BLANK_PORT)"
 echo "    POPULATED_HOME=$POPULATED_HOME (port $POPULATED_PORT)"
@@ -52,17 +77,11 @@ mkdir -p "$BLANK_HOME" "$POPULATED_HOME"
 # Start the blank-slate daemon — pristine first-launch UX. OPENRIG_HOME
 # env (NOT a CLI flag) ensures both the spawned daemon AND the CLI's
 # own state writes (daemon.json, daemon.log) land under $BLANK_HOME.
-echo "==> Starting blank-slate daemon (port $BLANK_PORT)"
-OPENRIG_HOME="$BLANK_HOME" rig daemon start \
-  --port "$BLANK_PORT" \
-  --db "$BLANK_HOME/openrig.sqlite"
+start_daemon_or_explain_reset "blank-slate" "$BLANK_HOME" "$BLANK_PORT"
 
 # Start the populated daemon — runs alongside the blank one with its own
 # OPENRIG_HOME so neither sees the other's state.
-echo "==> Starting populated daemon (port $POPULATED_PORT)"
-OPENRIG_HOME="$POPULATED_HOME" rig daemon start \
-  --port "$POPULATED_PORT" \
-  --db "$POPULATED_HOME/openrig.sqlite"
+start_daemon_or_explain_reset "populated" "$POPULATED_HOME" "$POPULATED_PORT"
 
 echo
 echo "==> Both daemons up. Seed the populated daemon with sample data:"
@@ -78,9 +97,6 @@ echo "==> Operator UI access:"
 echo "    Blank-slate:  http://127.0.0.1:$BLANK_PORT"
 echo "    Populated:    http://127.0.0.1:$POPULATED_PORT"
 echo
-echo "==> RESET (when you want a clean start):"
-echo "    OPENRIG_HOME=$BLANK_HOME rig daemon stop"
-echo "    OPENRIG_HOME=$POPULATED_HOME rig daemon stop"
-echo "    rm -rf $BLANK_HOME $POPULATED_HOME"
+print_reset_instructions
 echo
 echo "==> See conventions/vm-preview/README.md for the full workflow + how to extend."
