@@ -42,6 +42,7 @@ import {
 import { TimelineTab } from "../slices/tabs/TimelineTab.js";
 import { useSliceTimelineMarkdown } from "../../hooks/useSliceTimelineMarkdown.js";
 import { useScopeMarkdown } from "../../hooks/useScopeMarkdown.js";
+import { FileLink } from "../ui/FileLink.js";
 import { useMission } from "../../hooks/useMission.js";
 import { MarkdownViewer } from "../markdown/MarkdownViewer.js";
 import { AcceptanceTab } from "../slices/tabs/AcceptanceTab.js";
@@ -965,16 +966,38 @@ function SliceArtifactsTab({ detail }: { detail: SliceDetail }) {
         <SectionHeader tone="muted">Files</SectionHeader>
         {docsTree.length > 0 ? (
           <ul className="mt-3 divide-y divide-outline-variant border border-outline-variant bg-white/30">
-            {docsTree.map((entry) => (
-              <li key={entry.relPath} className="grid grid-cols-[1fr_auto_auto] gap-3 px-3 py-2 font-mono text-[10px]">
-                <span className="inline-flex min-w-0 items-center gap-1.5 text-stone-900">
-                  <ToolMark tool={entry.relPath} size="xs" />
-                  <span className="truncate">{entry.relPath}</span>
-                </span>
-                <span className="uppercase tracking-[0.10em] text-stone-500">{entry.type}</span>
-                <span className="text-stone-400">{entry.size == null ? "-" : `${entry.size}b`}</span>
-              </li>
-            ))}
+            {docsTree.map((entry) => {
+              // V0.3.1 slice 15 walk-items 6 + 11 — file entries
+              // become FileLink triggers. Click opens the
+              // SharedDetailDrawer with FileViewer (images render as
+              // images via FileViewer.inferKind). Directories stay
+              // inert (non-clickable) since FileViewer would 404 on
+              // a directory read.
+              const isFile = entry.type === "file";
+              const absolutePath = `${detail.slicePath}/${entry.relPath}`;
+              return (
+                <li key={entry.relPath} className="grid grid-cols-[1fr_auto_auto] gap-3 px-3 py-2 font-mono text-[10px]">
+                  {isFile ? (
+                    <FileLink
+                      path={entry.relPath}
+                      absolutePath={absolutePath}
+                      className="inline-flex min-w-0 items-center gap-1.5 text-stone-900 hover:underline text-left"
+                      testId={`slice-artifacts-file-${entry.relPath}`}
+                    >
+                      <ToolMark tool={entry.relPath} size="xs" />
+                      <span className="truncate">{entry.relPath}</span>
+                    </FileLink>
+                  ) : (
+                    <span className="inline-flex min-w-0 items-center gap-1.5 text-stone-500">
+                      <ToolMark tool="folder" size="xs" decorative />
+                      <span className="truncate">{entry.relPath}</span>
+                    </span>
+                  )}
+                  <span className="uppercase tracking-[0.10em] text-stone-500">{entry.type}</span>
+                  <span className="text-stone-400">{entry.size == null ? "-" : `${entry.size}b`}</span>
+                </li>
+              );
+            })}
           </ul>
         ) : (
           <div className="mt-3 font-mono text-[10px] text-stone-400">No slice files indexed.</div>
