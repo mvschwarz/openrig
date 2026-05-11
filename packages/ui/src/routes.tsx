@@ -56,6 +56,7 @@ import {
   SliceScopePage,
 } from "./components/project/ScopePages.js";
 import { ProjectGraphicsPreview } from "./components/lab/ProjectGraphicsPreview.js";
+import { CardPreviewsLab } from "./components/lab/CardPreviewsLab.js";
 
 // Root route — wraps everything in AppShell
 const rootRoute = createRootRoute({
@@ -200,6 +201,14 @@ const projectGraphicsPreviewRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/lab/project-graphics-preview",
   component: ProjectGraphicsPreview,
+});
+
+// V0.3.1 slice 21 onboarding-conveyor — for-you card kind variant
+// gallery. Matches the `/lab/project-graphics-preview` pattern.
+const cardPreviewsLabRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/lab/card-previews",
+  component: CardPreviewsLab,
 });
 
 // =====================================================================
@@ -403,6 +412,7 @@ const routeTree = rootRoute.addChildren([
   settingsRoute,
   searchRoute,
   projectGraphicsPreviewRoute,
+  cardPreviewsLabRoute,
   // Preserved existing routes
   rigDetailRoute,
   liveNodeDetailsRoute,
