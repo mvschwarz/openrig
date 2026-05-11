@@ -80,7 +80,63 @@ export function missionsRoutes(): Hono {
     });
   });
 
+  // Slice 18 §3.5 — Mark mission complete (Getting Started complete-and-hide).
+  // Writes `status: complete` to the mission README.md frontmatter; the UI
+  // storytelling preview gates on this so completed missions disappear from
+  // the band. The daemon is the audit-trail surface; the UI maintains
+  // an optimistic local mirror via localStorage so the hide is instant.
+  app.post("/:missionId/complete", (c) => {
+    const indexer = c.get("sliceIndexer" as never) as SliceIndexer | undefined;
+    if (!indexer) {
+      return c.json({ error: "slices_indexer_unavailable" }, 503);
+    }
+    const missionId = c.req.param("missionId");
+    const allSlices = indexer.list();
+    const slices = allSlices.filter((s) => s.missionId === missionId);
+    if (slices.length === 0) {
+      return c.json({ error: "mission_not_found", missionId }, 404);
+    }
+    const missionPath = computeMissionPath(slices[0]!);
+    try {
+      writeMissionStatusComplete(missionPath);
+    } catch (err) {
+      return c.json(
+        {
+          error: "mission_complete_write_failed",
+          missionId,
+          message: (err as Error).message,
+        },
+        500,
+      );
+    }
+    return c.json({ missionId, status: "complete" });
+  });
+
   return app;
+}
+
+/** Slice 18 §3.5 — write `status: complete` to a mission README's
+ *  frontmatter, creating the frontmatter block when absent and
+ *  replacing an existing status field when present. Idempotent.
+ *  Preserves unrelated frontmatter fields. */
+function writeMissionStatusComplete(missionPath: string): void {
+  const readmePath = path.join(missionPath, "README.md");
+  let body = fs.existsSync(readmePath) ? fs.readFileSync(readmePath, "utf-8") : "";
+  const fmMatch = body.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+  if (fmMatch) {
+    const fmInner = fmMatch[1] ?? "";
+    const statusLineRegex = /^\s*status\s*:\s*[^\r\n]*$/m;
+    let newFm: string;
+    if (statusLineRegex.test(fmInner)) {
+      newFm = fmInner.replace(statusLineRegex, "status: complete");
+    } else {
+      newFm = fmInner.trimEnd() + "\nstatus: complete";
+    }
+    body = body.replace(fmMatch[0], `---\n${newFm}\n---`);
+  } else {
+    body = `---\nstatus: complete\n---\n${body}`;
+  }
+  fs.writeFileSync(readmePath, body);
 }
 
 /** Derive the mission folder's absolute path from any slice's

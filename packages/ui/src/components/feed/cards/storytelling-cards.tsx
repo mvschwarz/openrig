@@ -226,8 +226,32 @@ export interface ProgressCardSource {
   activeSlice?: { id: string; label: string; status: string };
 }
 
-export function ProgressCard({ source }: { source: ProgressCardSource }) {
+export function ProgressCard({
+  source,
+  onMarkComplete,
+}: {
+  source: ProgressCardSource;
+  /**
+   * Slice 18 §3.5 — when provided, ProgressCard renders a "Mark complete"
+   * inline action. Click fires onMarkComplete(missionId). Parent owns the
+   * actual mutation (daemon endpoint + local optimistic state).
+   */
+  onMarkComplete?: (missionId: string) => void;
+}) {
   const pct = Math.max(0, Math.min(100, Math.round(source.percent)));
+  const inlineActions = onMarkComplete ? (
+    <button
+      type="button"
+      data-testid="progress-card-mark-complete"
+      onClick={(event) => {
+        event.stopPropagation();
+        onMarkComplete(source.missionId);
+      }}
+      className="border border-stone-300 bg-white/80 px-2 py-0.5 font-mono text-[10px] uppercase tracking-wide text-stone-700 hover:bg-stone-100 hover:text-stone-900 focus:outline-none focus:ring-1 focus:ring-stone-400"
+    >
+      Mark complete
+    </button>
+  ) : undefined;
   return (
     <CardShell
       testId={`feed-card-progress-${source.missionId}`}
@@ -237,6 +261,7 @@ export function ProgressCard({ source }: { source: ProgressCardSource }) {
       accent={ACCENTS.progress}
       drillInHref={`/project/mission/${source.missionId}`}
       drillInLabel="Open mission"
+      inlineActions={inlineActions}
       leadingAccessory={
         <div
           data-testid={`feed-card-progress-${source.missionId}-bar`}
@@ -411,9 +436,19 @@ export interface AdapterSliceRow {
 export function buildStorytellingFeedItems(
   missions: AdapterMissionRow[],
   slices: AdapterSliceRow[],
+  /**
+   * Slice 18 §3.5 — when supplied, missions whose name is in the set are
+   * filtered out of the progress preview. Powers the Getting Started
+   * complete-and-hide flow (operator click → mark complete → mission
+   * disappears from the storytelling band).
+   */
+  completedMissionIds?: Set<string>,
 ): FeedCardItem[] {
   const items: FeedCardItem[] = [];
-  for (const mission of (missions ?? []).slice(0, 2)) {
+  const eligibleMissions = (missions ?? []).filter(
+    (m) => !completedMissionIds || !completedMissionIds.has(m.name),
+  );
+  for (const mission of eligibleMissions.slice(0, 2)) {
     items.push({
       kind: "progress",
       source: {
@@ -446,7 +481,15 @@ export function buildStorytellingFeedItems(
   return items;
 }
 
-export function StorytellingFeed({ items }: { items: FeedCardItem[] }) {
+export function StorytellingFeed({
+  items,
+  onMarkMissionComplete,
+}: {
+  items: FeedCardItem[];
+  /** Slice 18 §3.5 — when supplied, threaded through to ProgressCards
+   *  so the operator can hide a completed mission from the band. */
+  onMarkMissionComplete?: (missionId: string) => void;
+}) {
   if (items.length === 0) {
     return (
       <div data-testid="storytelling-feed-empty" className="border border-dashed border-outline-variant bg-white/35 p-4 font-mono text-[10px] text-stone-500">
@@ -459,7 +502,7 @@ export function StorytellingFeed({ items }: { items: FeedCardItem[] }) {
       {items.map((item, i) => {
         if (item.kind === "shipped")  return <ShippedCard key={i}  source={item.source} />;
         if (item.kind === "incident") return <IncidentCard key={i} source={item.source} />;
-        if (item.kind === "progress") return <ProgressCard key={i} source={item.source} />;
+        if (item.kind === "progress") return <ProgressCard key={i} source={item.source} onMarkComplete={onMarkMissionComplete} />;
         if (item.kind === "approval") return <ApprovalCard key={i} source={item.source} />;
         return <ConceptCard key={i} source={item.source} />;
       })}

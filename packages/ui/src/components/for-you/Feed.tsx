@@ -34,6 +34,7 @@ import {
   isCardKindSubscribed,
 } from "../../hooks/useFeedSubscriptions.js";
 import { useDismissedSeqs } from "../../hooks/useDismissedSeqs.js";
+import { useCompletedMissions } from "../../hooks/useCompletedMissions.js";
 import { FeedCard } from "./FeedCard.js";
 import { UndoToast } from "./UndoToast.js";
 import type { FeedActionOutcome, FeedProofPreview } from "./FeedCard.js";
@@ -297,12 +298,31 @@ export function Feed() {
   //   - Slices (useSlices) → ShippedCard for status=shipped/done,
   //     IncidentCard for everything else, capped at 3.
   const missionsResult = useMissionDiscovery();
+  const { completedMissionIds, markCompleted } = useCompletedMissions();
   const storytellingItems = useMemo<StorytellingFeedItem[]>(
     () => buildStorytellingFeedItems(
       Array.isArray(missionsResult.missions) ? missionsResult.missions : [],
       Array.isArray(sliceRows) ? sliceRows : [],
+      completedMissionIds,
     ),
-    [missionsResult.missions, sliceRows],
+    [missionsResult.missions, sliceRows, completedMissionIds],
+  );
+
+  // Slice 18 §3.5 — Getting Started complete-and-hide. Optimistic local
+  // hide via useCompletedMissions; best-effort daemon write to
+  // POST /api/missions/:missionId/complete for the audit trail. Network
+  // errors are swallowed silently (audit is best-effort, UI stays
+  // responsive) so a partial-air-gapped daemon doesn't block the hide.
+  const handleMarkMissionComplete = useCallback(
+    (missionId: string) => {
+      markCompleted(missionId);
+      void fetch(`/api/missions/${encodeURIComponent(missionId)}/complete`, {
+        method: "POST",
+      }).catch(() => {
+        // Swallow — local optimistic state is the user-visible truth.
+      });
+    },
+    [markCompleted],
   );
 
   return (
@@ -349,7 +369,7 @@ export function Feed() {
         >
           <SectionHeader tone="muted">Storytelling preview</SectionHeader>
           <div className="mt-2">
-            <StorytellingFeed items={storytellingItems} />
+            <StorytellingFeed items={storytellingItems} onMarkMissionComplete={handleMarkMissionComplete} />
           </div>
         </section>
       )}
