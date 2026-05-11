@@ -6,24 +6,30 @@
 # `workflow_spec: openrig-velocity@1.0` and projected onto the mission
 # Topology tab by the missions route.
 #
-# Flow (one slice end-to-end):
-#   orch dispatches → advisor refines (optional) → driver implements
-#   → guard narrowly reviews → qa exercises in disposable VM → orch
-#   merges + closes. Single frontier (v1 projector contract).
+# Flow (one slice end-to-end, linear single-frontier chain):
+#   orch-dispatch → advisor (refine) → driver (implement) →
+#   guard (review) → qa (vm-verify) → orch-merge.
+#
+# Roles are uniquely named per step so the projector's role→step
+# resolution doesn't collapse two orch steps onto the same node (the
+# projector keeps the FIRST step per actor_role; identical roles on
+# two steps would orphan the second). orch-dispatch + orch-merge both
+# preferred_targets to orch-lead@openrig-velocity since the same human
+# seat performs both roles in practice.
 workflow:
   id: openrig-velocity
   version: "1.0"
   objective: >
     Drive one slice from dispatch through merge using the
-    openrig-velocity rig's role chain (orch / advisor / driver /
-    guard / qa).
+    openrig-velocity rig's role chain (orch-dispatch / advisor / driver /
+    guard / qa / orch-merge).
   target:
     rig: openrig-velocity
   entry:
-    role: orch
+    role: orch-dispatch
   coordination_terminal_turn_rule: hot_potato
   roles:
-    orch:
+    orch-dispatch:
       skill_refs: [openrig-user, orchestration-team]
       preferred_targets: [orch-lead@openrig-velocity]
     advisor:
@@ -38,14 +44,17 @@ workflow:
     qa:
       skill_refs: [openrig-user, dogfood, verification-before-completion]
       preferred_targets: [velocity-qa@openrig-velocity]
+    orch-merge:
+      skill_refs: [openrig-user, orchestration-team]
+      preferred_targets: [orch-lead@openrig-velocity]
   steps:
     - id: dispatch
-      actor_role: orch
-      objective: Author the dispatch packet + queue handoff to driver.
+      actor_role: orch-dispatch
+      objective: Author the dispatch packet + queue handoff to advisor or driver.
       allowed_exits: [handoff, waiting, failed]
       next_hop:
         mode: require
-        suggested_roles: [driver]
+        suggested_roles: [advisor]
     - id: refine
       actor_role: advisor
       objective: Author or refine the IMPL-PRD before driver picks up.
@@ -73,9 +82,9 @@ workflow:
       allowed_exits: [handoff, waiting, failed]
       next_hop:
         mode: require
-        suggested_roles: [orch]
+        suggested_roles: [orch-merge]
     - id: merge
-      actor_role: orch
+      actor_role: orch-merge
       objective: Merge the slice to main + close the dispatch loop.
       allowed_exits: [done, failed]
       next_hop:

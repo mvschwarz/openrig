@@ -25,6 +25,7 @@ import { coreSchema } from "../src/db/migrations/001_core_schema.js";
 import { workflowSpecsSchema } from "../src/db/migrations/033_workflow_specs.js";
 import { WorkflowSpecCache } from "../src/domain/workflow-spec-cache.js";
 import { loadStarterWorkflowSpecs, defaultBuiltinSpecsDir } from "../src/domain/workflow/starter-spec-loader.js";
+import { projectSpecGraph } from "../src/domain/workflow/slice-workflow-projection.js";
 
 const ALPHA_SPEC = `workflow:
   id: alpha-spec
@@ -156,19 +157,61 @@ describe("built-in workflow spec loader", () => {
   });
 
   // V0.3.1 slice 13 walk-item 7 — load the actual shipped builtins
-  // directory and assert openrig-velocity@1.0 is in it. This is what
-  // release-0.3.1/README.md's frontmatter declares; without the spec
-  // present, the mission Topology tab falls back to the session-name
-  // union (velocity-qa VM caught exactly this on tip ef3e94d).
-  it("shipped builtins include openrig-velocity@1.0 (mission Topology acceptance for slice 13)", () => {
+  // directory and assert openrig-velocity@1.0 projects to a coherent
+  // linear graph. velocity-qa VM caught the missing-spec case on
+  // ef3e94d; guard re-review on 10ed741 caught the role-collision
+  // case (two steps sharing actor_role 'orch' → projector kept only
+  // the first → orphan nodes). This test is the projection-shape
+  // discriminator per banked feedback_poc_regression_must_discriminate:
+  // exact edge chain + zero orphans + entry/terminal placement.
+  it("shipped openrig-velocity@1.0 projects to a 6-node linear chain with no orphans (mission Topology acceptance)", () => {
     const shippedDir = defaultBuiltinSpecsDir();
     const result = loadStarterWorkflowSpecs({ cache, builtinDir: shippedDir });
     expect(result.errors).toEqual([]);
     const row = cache.getByNameVersion("openrig-velocity", "1.0");
     expect(row).not.toBeNull();
-    expect(row!.spec.steps.length).toBeGreaterThan(0);
-    // Discriminate against the basic-loop spec (which is also in the
-    // shipped dir): openrig-velocity must have a 'guard' role.
-    expect(Object.keys(row!.spec.roles)).toContain("guard");
+
+    const graph = projectSpecGraph(row!.spec, null);
+
+    // Six declared steps; six projected nodes.
+    expect(graph.nodes.map((n) => n.stepId)).toEqual([
+      "dispatch",
+      "refine",
+      "implement",
+      "guard-review",
+      "vm-verify",
+      "merge",
+    ]);
+
+    // Linear chain — exact edges (newer→older permitted only at the
+    // terminal merge step which has no outgoing edge).
+    expect(
+      graph.edges.map((e) => `${e.fromStepId}→${e.toStepId}`),
+    ).toEqual([
+      "dispatch→refine",
+      "refine→implement",
+      "implement→guard-review",
+      "guard-review→vm-verify",
+      "vm-verify→merge",
+    ]);
+
+    // Entry + terminal placement.
+    const entryNodes = graph.nodes.filter((n) => n.isEntry).map((n) => n.stepId);
+    expect(entryNodes).toEqual(["dispatch"]);
+    const terminalNodes = graph.nodes.filter((n) => n.isTerminal).map((n) => n.stepId);
+    expect(terminalNodes).toEqual(["merge"]);
+
+    // No orphans: every non-entry node has at least one incoming edge
+    // and every non-terminal node has at least one outgoing edge.
+    const incoming = new Set(graph.edges.map((e) => e.toStepId));
+    const outgoing = new Set(graph.edges.map((e) => e.fromStepId));
+    for (const node of graph.nodes) {
+      if (!node.isEntry) {
+        expect(incoming.has(node.stepId), `${node.stepId} has no incoming edge`).toBe(true);
+      }
+      if (!node.isTerminal) {
+        expect(outgoing.has(node.stepId), `${node.stepId} has no outgoing edge`).toBe(true);
+      }
+    }
   });
 });
