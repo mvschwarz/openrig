@@ -51,6 +51,7 @@ import { DecisionsTab } from "../slices/tabs/DecisionsTab.js";
 import { TestsVerificationTab } from "../slices/tabs/TestsVerificationTab.js";
 import { TopologyTab } from "../slices/tabs/TopologyTab.js";
 import { HostMultiRigGraph } from "../topology/HostMultiRigGraph.js";
+import { MissionProgressHeatmap } from "./MissionProgressHeatmap.js";
 import { QueueItemTrigger } from "../drawer-triggers/QueueItemTrigger.js";
 import {
   DateChip,
@@ -808,6 +809,11 @@ export function MissionScopePage() {
       ) : null}
       {active === "progress" ? (
         <div data-testid="mission-progress-panel" className="space-y-6">
+          <MissionProgressHeatmap
+            rows={rollup.rows}
+            detailsByName={rollup.details.itemsByName}
+            isLoading={rollup.list.isLoading || rollup.details.isFetching}
+          />
           {missionProgress.content && (
             <section data-testid="mission-progress-readme" className="border border-outline-variant bg-white/20 p-4">
               <MarkdownViewer content={missionProgress.content} hideFrontmatter hideRawToggle />
