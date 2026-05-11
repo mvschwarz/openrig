@@ -81,10 +81,19 @@ export function useSlices(filter: SliceFilter, boundToWorkflow: BoundToWorkflowF
     ],
     queryFn: () => fetchSlicesList(filter, boundToWorkflow),
     staleTime: 30_000,
-    // V0.3.1 slice 17 founder-walk-workspace-state-correctness — walk item 8 (Explorer auto-show): refetch on window focus so an operator
-    // who switches away to `mkdir slices/...` and comes back sees the
-    // new folder without manually clicking refresh.
-    refetchOnWindowFocus: true,
+    // V0.3.1 slice 17 walk-item 8 (Explorer auto-show): refetch on
+    // window focus so an operator who switches away to `mkdir slices/...`
+    // and comes back sees the new folder without manually clicking
+    // refresh.
+    //
+    // Forward-fix #2 (2026-05-11 velocity-qa VM verify CONCERNING):
+    // the value MUST be 'always' instead of plain `true`. With this
+    // query's local staleTime: 30_000 (30 seconds), plain `true` gates
+    // the refetch on the staleness predicate — short refocus tests
+    // within the stale window observed no refetch. The 'always'
+    // variant ignores staleness and refetches on every focus, which
+    // is the actual intent: see new folders the operator JUST created.
+    refetchOnWindowFocus: "always",
   });
 }
 
