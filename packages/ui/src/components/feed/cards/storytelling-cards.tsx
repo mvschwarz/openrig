@@ -426,6 +426,14 @@ export type FeedCardItem =
 export interface AdapterMissionRow {
   name: string;
   path: string;
+  /**
+   * Slice 18 §3.5 — mission frontmatter status from the daemon
+   * (GET /api/missions/:id). When "complete", the mission is filtered
+   * out of the storytelling preview band even when not in the local
+   * completedMissionIds set — durable source of truth survives
+   * browser/localStorage reset.
+   */
+  status?: string | null;
 }
 export interface AdapterSliceRow {
   name: string;
@@ -445,9 +453,16 @@ export function buildStorytellingFeedItems(
   completedMissionIds?: Set<string>,
 ): FeedCardItem[] {
   const items: FeedCardItem[] = [];
-  const eligibleMissions = (missions ?? []).filter(
-    (m) => !completedMissionIds || !completedMissionIds.has(m.name),
-  );
+  // Two filters: (1) localStorage optimistic hide set; (2) durable
+  // frontmatter status === "complete" (read by the caller from
+  // GET /api/missions/:id and threaded onto the row). The status
+  // filter is the source-of-truth survival across browser/localStorage
+  // reset; the local set is the instant-feedback mirror.
+  const eligibleMissions = (missions ?? []).filter((m) => {
+    if (m.status === "complete") return false;
+    if (completedMissionIds && completedMissionIds.has(m.name)) return false;
+    return true;
+  });
   for (const mission of eligibleMissions.slice(0, 2)) {
     items.push({
       kind: "progress",

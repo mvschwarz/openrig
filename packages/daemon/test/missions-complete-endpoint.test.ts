@@ -78,7 +78,6 @@ describe("POST /api/missions/:missionId/complete", () => {
       "---\nid: getting-started\nstatus: active\n---\n# Getting Started\n",
     );
     writeSliceInMission(missionsRoot, "getting-started", "intro");
-    indexer.scan();
 
     const app = buildApp(indexer);
     const res = await app.request("/api/missions/getting-started/complete", { method: "POST" });
@@ -100,7 +99,6 @@ describe("POST /api/missions/:missionId/complete", () => {
       "---\nid: demo-mission\n---\n# Demo Mission\n",
     );
     writeSliceInMission(missionsRoot, "demo-mission", "first");
-    indexer.scan();
 
     const app = buildApp(indexer);
     const res = await app.request("/api/missions/demo-mission/complete", { method: "POST" });
@@ -114,7 +112,6 @@ describe("POST /api/missions/:missionId/complete", () => {
   it("creates a frontmatter block when README has no frontmatter at all", async () => {
     writeMissionReadme(missionsRoot, "no-fm", "# A mission with no frontmatter\n");
     writeSliceInMission(missionsRoot, "no-fm", "only-slice");
-    indexer.scan();
 
     const app = buildApp(indexer);
     const res = await app.request("/api/missions/no-fm/complete", { method: "POST" });
@@ -133,7 +130,6 @@ describe("POST /api/missions/:missionId/complete", () => {
       "---\nid: idempotent-mission\nstatus: active\n---\n# Body\n",
     );
     writeSliceInMission(missionsRoot, "idempotent-mission", "s");
-    indexer.scan();
 
     const app = buildApp(indexer);
     const res1 = await app.request("/api/missions/idempotent-mission/complete", { method: "POST" });
@@ -146,8 +142,56 @@ describe("POST /api/missions/:missionId/complete", () => {
     expect(occurrences).toBe(1);
   });
 
+  it("GET /api/missions/:missionId returns status from frontmatter (slice 18 status surfacing)", async () => {
+    writeMissionReadme(
+      missionsRoot,
+      "has-status",
+      "---\nid: has-status\nstatus: complete\n---\n# body\n",
+    );
+    writeSliceInMission(missionsRoot, "has-status", "s");
+    const app = buildApp(indexer);
+    const res = await app.request("/api/missions/has-status", { method: "GET" });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { status: string | null };
+    expect(body.status).toBe("complete");
+  });
+
+  it("GET /api/missions/:missionId returns status=null when frontmatter has no status field", async () => {
+    writeMissionReadme(
+      missionsRoot,
+      "no-status",
+      "---\nid: no-status\n---\n# body\n",
+    );
+    writeSliceInMission(missionsRoot, "no-status", "s");
+    const app = buildApp(indexer);
+    const res = await app.request("/api/missions/no-status", { method: "GET" });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { status: string | null };
+    expect(body.status).toBeNull();
+  });
+
+  it("after POST complete, subsequent GET returns status=complete (durable round-trip)", async () => {
+    writeMissionReadme(
+      missionsRoot,
+      "round-trip",
+      "---\nid: round-trip\nstatus: active\n---\n# body\n",
+    );
+    writeSliceInMission(missionsRoot, "round-trip", "s");
+    const app = buildApp(indexer);
+
+    const before = await app.request("/api/missions/round-trip", { method: "GET" });
+    const beforeBody = (await before.json()) as { status: string | null };
+    expect(beforeBody.status).toBe("active");
+
+    const post = await app.request("/api/missions/round-trip/complete", { method: "POST" });
+    expect(post.status).toBe(200);
+
+    const after = await app.request("/api/missions/round-trip", { method: "GET" });
+    const afterBody = (await after.json()) as { status: string | null };
+    expect(afterBody.status).toBe("complete");
+  });
+
   it("returns 404 when mission does not exist", async () => {
-    indexer.scan();
     const app = buildApp(indexer);
     const res = await app.request("/api/missions/nonexistent-mission/complete", { method: "POST" });
     expect(res.status).toBe(404);
@@ -169,7 +213,6 @@ describe("POST /api/missions/:missionId/complete", () => {
       "---\nid: preserves\nworkflow_spec: my-workflow@1\nstatus: active\nlabel: keep me\n---\n# Body\n",
     );
     writeSliceInMission(missionsRoot, "preserves", "s");
-    indexer.scan();
 
     const app = buildApp(indexer);
     const res = await app.request("/api/missions/preserves/complete", { method: "POST" });

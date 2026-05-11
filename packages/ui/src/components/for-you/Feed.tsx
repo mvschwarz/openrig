@@ -35,6 +35,7 @@ import {
 } from "../../hooks/useFeedSubscriptions.js";
 import { useDismissedSeqs } from "../../hooks/useDismissedSeqs.js";
 import { useCompletedMissions } from "../../hooks/useCompletedMissions.js";
+import { useMissionStatuses } from "../../hooks/useMissionStatuses.js";
 import { FeedCard } from "./FeedCard.js";
 import { UndoToast } from "./UndoToast.js";
 import type { FeedActionOutcome, FeedProofPreview } from "./FeedCard.js";
@@ -299,13 +300,28 @@ export function Feed() {
   //     IncidentCard for everything else, capped at 3.
   const missionsResult = useMissionDiscovery();
   const { completedMissionIds, markCompleted } = useCompletedMissions();
+  const discoveredMissionIds = useMemo(
+    () => (Array.isArray(missionsResult.missions) ? missionsResult.missions.map((m) => m.name) : []),
+    [missionsResult.missions],
+  );
+  const { statuses: missionStatuses } = useMissionStatuses(discoveredMissionIds);
+  // Slice 18 §3.5 — thread the daemon-derived status onto each mission
+  // row so buildStorytellingFeedItems filters durably on `status ===
+  // "complete"` (survives browser/localStorage reset).
+  const missionsWithStatus = useMemo(
+    () => (Array.isArray(missionsResult.missions) ? missionsResult.missions : []).map((m) => ({
+      ...m,
+      status: missionStatuses.get(m.name) ?? null,
+    })),
+    [missionsResult.missions, missionStatuses],
+  );
   const storytellingItems = useMemo<StorytellingFeedItem[]>(
     () => buildStorytellingFeedItems(
-      Array.isArray(missionsResult.missions) ? missionsResult.missions : [],
+      missionsWithStatus,
       Array.isArray(sliceRows) ? sliceRows : [],
       completedMissionIds,
     ),
-    [missionsResult.missions, sliceRows, completedMissionIds],
+    [missionsWithStatus, sliceRows, completedMissionIds],
   );
 
   // Slice 18 §3.5 — Getting Started complete-and-hide. Optimistic local

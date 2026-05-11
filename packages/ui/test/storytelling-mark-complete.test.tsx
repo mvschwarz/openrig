@@ -10,6 +10,7 @@ import {
 interface MissionRow {
   name: string;
   path: string;
+  status?: string | null;
 }
 interface SliceRow {
   name: string;
@@ -85,5 +86,57 @@ describe("buildStorytellingFeedItems — filter completed missions (slice 18 Che
   it("empty completed set behaves identically to no completed set", () => {
     const items = buildStorytellingFeedItems(missions, slices, new Set());
     expect(items.filter((i) => i.kind === "progress")).toHaveLength(2);
+  });
+
+  // velocity-guard 18.E BLOCKING-CONCERN repair (Blocker 2):
+  // PRD T8 requires status: complete frontmatter to hide the mission
+  // durably (survives localStorage reset). buildStorytellingFeedItems
+  // now filters on m.status === "complete" in addition to the local set.
+  describe("durable status-backed filter (slice 18.E repair)", () => {
+    it("filters out missions with status === 'complete' even when localStorage is empty", () => {
+      const withStatus: MissionRow[] = [
+        { name: "getting-started", path: "/m/getting-started", status: "complete" },
+        { name: "release-0-3-1", path: "/m/release-0-3-1", status: "active" },
+      ];
+      const items = buildStorytellingFeedItems(withStatus, slices);
+      const progressItems = items.filter((i) => i.kind === "progress");
+      expect(progressItems).toHaveLength(1);
+      expect(
+        (progressItems[0] as { source: { missionId: string } }).source.missionId,
+      ).toBe("release-0-3-1");
+    });
+
+    it("missions with status: 'active' / 'draft' / null / undefined ARE NOT filtered", () => {
+      const mixed: MissionRow[] = [
+        { name: "active-mission", path: "/m/active", status: "active" },
+        { name: "draft-mission", path: "/m/draft", status: "draft" },
+      ];
+      const items = buildStorytellingFeedItems(mixed, slices);
+      expect(items.filter((i) => i.kind === "progress")).toHaveLength(2);
+    });
+
+    it("status === 'complete' filter applies even when missionId is NOT in the local completedMissionIds set", () => {
+      // Survives localStorage clear: status: complete alone is enough to hide.
+      const withStatus: MissionRow[] = [
+        { name: "getting-started", path: "/m/getting-started", status: "complete" },
+      ];
+      const items = buildStorytellingFeedItems(withStatus, slices, new Set());
+      expect(items.filter((i) => i.kind === "progress")).toHaveLength(0);
+    });
+
+    it("BOTH filters (status: complete AND localStorage set) compose correctly", () => {
+      const missions3: MissionRow[] = [
+        { name: "m1", path: "/m/1", status: "complete" },
+        { name: "m2", path: "/m/2", status: "active" },
+        { name: "m3", path: "/m/3", status: "active" },
+      ];
+      const localCompleted = new Set(["m2"]);
+      const items = buildStorytellingFeedItems(missions3, slices, localCompleted);
+      const progressItems = items.filter((i) => i.kind === "progress");
+      expect(progressItems).toHaveLength(1);
+      expect(
+        (progressItems[0] as { source: { missionId: string } }).source.missionId,
+      ).toBe("m3");
+    });
   });
 });

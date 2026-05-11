@@ -71,12 +71,14 @@ export function missionsRoutes(): Hono {
       workflowSpec,
       c.get("workflowSpecCache" as never) as WorkflowSpecCache | undefined,
     );
+    const status = readMissionStatus(missionPath);
     return c.json({
       missionId,
       missionPath,
       slices,
       workflow_spec: workflowSpec,
       topology,
+      status,
     });
   });
 
@@ -145,6 +147,21 @@ function writeMissionStatusComplete(missionPath: string): void {
  *  contract, so going up two levels yields the mission folder. */
 function computeMissionPath(slice: SliceListEntry): string {
   return path.resolve(slice.slicePath, "..", "..");
+}
+
+/** Slice 18 §3.5 — parse the `status` field from the mission README's
+ *  frontmatter. Returns the string when present (no enum validation —
+ *  v0 callers care primarily about the "complete" value but other
+ *  workflow states may appear), or null when the README is missing /
+ *  the field is absent. Powers the durable storytelling-filter for
+ *  Getting Started complete-and-hide. */
+function readMissionStatus(missionPath: string): string | null {
+  const readmePath = path.join(missionPath, "README.md");
+  if (!fs.existsSync(readmePath)) return null;
+  const raw = fs.readFileSync(readmePath, "utf-8");
+  const fm = parseSimpleFrontmatter(raw);
+  const value = fm["status"];
+  return typeof value === "string" && value.length > 0 ? value : null;
 }
 
 /** V0.3.1 slice 13 walk-item 7 — parse `workflow_spec` from the mission
