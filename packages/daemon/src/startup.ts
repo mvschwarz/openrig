@@ -773,8 +773,16 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     // for used-by uses the same default user spec root as SpecLibraryService
     // above; one root at v0 (multi-root expansion deferred to a later slice
     // when spec library hooks its full root list through to discovery).
+    // bug-fix slice plugin-discovery-respects-openrig-home: route the
+    // openrigPluginsDir through the OPENRIG_HOME-aware resolver so
+    // discovery + vendor (which already uses the helper at line 428)
+    // resolve to the same root. Operator-level test isolation + the
+    // slice 22 populated-VM-env story both depend on this symmetry.
+    // claudeCacheDir / codexCacheDir remain homedir-anchored because
+    // those cache locations belong to the runtime tools, not to the
+    // OpenRig state root.
     pluginDiscoveryService: new PluginDiscoveryService({
-      openrigPluginsDir: nodePath.join(os.homedir(), ".openrig", "plugins"),
+      openrigPluginsDir: getDefaultOpenRigPath("plugins"),
       claudeCacheDir: nodePath.join(os.homedir(), ".claude", "plugins", "cache"),
       codexCacheDir: nodePath.join(os.homedir(), ".codex", "plugins", "cache"),
       specLibraryDir: getDefaultOpenRigPath("specs"),
