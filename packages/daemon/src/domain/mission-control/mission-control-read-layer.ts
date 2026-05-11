@@ -22,6 +22,7 @@
 // are the primary read path. Filesystem/CLI fallbacks are for graceful
 // degradation only.
 
+import { userInfo } from "node:os";
 import type Database from "better-sqlite3";
 import type { QueueRepository, QueueItem, QueueState } from "../queue-repository.js";
 import type { ViewProjector } from "../view-projector.js";
@@ -101,7 +102,13 @@ interface ReadLayerDeps {
   now?: () => Date;
 }
 
-const DEFAULT_OPERATOR_SESSION = "human-operator@kernel";
+// V0.3.1 slice 05 kernel-rig-as-default — operator seat resolution
+// now cascades through the workspace.operator_seat_name typed setting
+// (deps.defaultOperatorSession injected by startup.ts which resolves
+// the setting via SettingsStore.resolveConfig()). The ultimate fallback
+// derives `operator-${USER}@kernel` from the OS username so a daemon
+// booted without the setting still routes my-queue cleanly. The
+// previous hardcoded "human-operator@kernel" literal is gone; HG-12.
 const RECENT_SHIPS_LIMIT = 10;
 const ACTIVE_WORK_LIMIT = 50;
 const RECENT_OBSERVATIONS_LIMIT = 50;
@@ -125,7 +132,7 @@ export class MissionControlReadLayer {
     this.viewProjector = deps.viewProjector;
     this.streamStore = deps.streamStore;
     this.fleetCliCapability = deps.fleetCliCapability;
-    this.defaultOperatorSession = deps.defaultOperatorSession ?? DEFAULT_OPERATOR_SESSION;
+    this.defaultOperatorSession = deps.defaultOperatorSession ?? `operator-${userInfo().username}@kernel`;
   }
 
   async readView(

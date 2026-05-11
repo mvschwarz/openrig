@@ -1,5 +1,6 @@
 import { readFileSync, writeFileSync, mkdirSync, unlinkSync, existsSync } from "node:fs";
 import { join, dirname } from "node:path";
+import { userInfo } from "node:os";
 import {
   getCompatibleOpenRigPath,
   getDefaultOpenRigPath,
@@ -24,6 +25,11 @@ export interface RiggedConfig {
     pollIntervalSeconds: number;
   };
   // User Settings v0 — workspace paths.
+  // V0.3.1 slice 05 kernel-rig-as-default — operatorSeatName carries the
+  // workspace's operator seat session name (default
+  // `operator-${USER}@kernel`). Read by mission-control read layer and
+  // 2 UI cosmetic sites to replace the legacy hardcoded
+  // "human-wrandom@kernel" / "human-operator@kernel" constants.
   workspace: {
     root: string;
     slicesRoot: string;
@@ -31,6 +37,7 @@ export interface RiggedConfig {
     fieldNotesRoot: string;
     specsRoot: string;
     dogfoodEvidenceRoot: string;
+    operatorSeatName: string;
   };
   // User Settings v0 — UEP env-var graduation.
   // Values are stored as raw named-pair strings ("name:/abs/path,...")
@@ -91,6 +98,11 @@ const DEFAULTS = {
     fieldNotesRoot: "",
     specsRoot: "",
     dogfoodEvidenceRoot: "",
+    // V0.3.1 slice 05 — empty default; resolve() picks up the derived
+    // `operator-${USER}@kernel` at read time via the deriveWorkspaceDefault
+    // helper so the default tracks the OS username without caching at
+    // module-load time.
+    operatorSeatName: "",
   },
   files: { allowlist: "" },
   progress: { scanRoots: "" },
@@ -153,6 +165,11 @@ export const VALID_KEYS = [
   // V1 Phase 4 SC-29 exception — allowlist-only additions.
   "agents.advisor_session",
   "agents.operator_session",
+  // V0.3.1 slice 05 kernel-rig-as-default — operator seat name used by
+  // mission-control read layer + 2 UI sites; default
+  // `operator-${USER}@kernel` derived in resolve(). OPENRIG_* only;
+  // no RIGGED_* legacy alias.
+  "workspace.operator_seat_name",
   // V1 Phase 5 P5-3 SC-29 exception — allowlist-only additions.
   "feed.subscriptions.action_required",
   "feed.subscriptions.approvals",
@@ -191,6 +208,7 @@ export const ENV_MAP: Record<ValidKey, { primary: string; legacy?: string }> = {
   "recovery.provider_auth_env_allowlist": { primary: "OPENRIG_RECOVERY_PROVIDER_AUTH_ENV_ALLOWLIST" },
   "agents.advisor_session": { primary: "OPENRIG_AGENTS_ADVISOR_SESSION" },
   "agents.operator_session": { primary: "OPENRIG_AGENTS_OPERATOR_SESSION" },
+  "workspace.operator_seat_name": { primary: "OPENRIG_WORKSPACE_OPERATOR_SEAT_NAME" },
   "feed.subscriptions.action_required": { primary: "OPENRIG_FEED_SUBSCRIPTIONS_ACTION_REQUIRED" },
   "feed.subscriptions.approvals": { primary: "OPENRIG_FEED_SUBSCRIPTIONS_APPROVALS" },
   "feed.subscriptions.shipped": { primary: "OPENRIG_FEED_SUBSCRIPTIONS_SHIPPED" },
@@ -225,6 +243,7 @@ const KEY_TO_PATH: Record<ValidKey, string[]> = {
   "recovery.provider_auth_env_allowlist": ["recovery", "providerAuthEnvAllowlist"],
   "agents.advisor_session": ["agents", "advisorSession"],
   "agents.operator_session": ["agents", "operatorSession"],
+  "workspace.operator_seat_name": ["workspace", "operatorSeatName"],
   "feed.subscriptions.action_required": ["feed", "subscriptions", "actionRequired"],
   "feed.subscriptions.approvals": ["feed", "subscriptions", "approvals"],
   "feed.subscriptions.shipped": ["feed", "subscriptions", "shipped"],
@@ -272,6 +291,11 @@ export function deriveWorkspaceDefault(key: ValidKey, workspaceRoot: string): st
     case "workspace.dogfood_evidence_root": return join(workspaceRoot, "dogfood-evidence");
     case "files.allowlist":            return `workspace:${workspaceRoot}`;
     case "progress.scan_roots":        return `workspace:${workspaceRoot}`;
+    // V0.3.1 slice 05 — `operator-${USER}@kernel` derived from the
+    // OS username at resolve() time. Lockstep with the daemon's
+    // settings-store getDefaultValue("workspace.operator_seat_name")
+    // case so both sides resolve to the same default.
+    case "workspace.operator_seat_name": return `operator-${userInfo().username}@kernel`;
     default: return "";
   }
 }
@@ -292,6 +316,7 @@ const WORKSPACE_DERIVED_KEYS: ReadonlySet<ValidKey> = new Set([
   "workspace.dogfood_evidence_root",
   "files.allowlist",
   "progress.scan_roots",
+  "workspace.operator_seat_name",
 ]);
 
 function getDefaultValue(key: ValidKey, workspaceRoot: string): string | number | boolean {
@@ -362,6 +387,7 @@ export class ConfigStore {
         fieldNotesRoot: v("workspace.field_notes_root") as string,
         specsRoot: v("workspace.specs_root") as string,
         dogfoodEvidenceRoot: v("workspace.dogfood_evidence_root") as string,
+        operatorSeatName: v("workspace.operator_seat_name") as string,
       },
       files: {
         allowlist: v("files.allowlist") as string,

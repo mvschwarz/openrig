@@ -765,12 +765,20 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       // present.
       probeRig: makeLocalCliCapabilityProbe(),
     });
+    // V0.3.1 slice 05 kernel-rig-as-default — cascade the resolved
+    // workspace.operator_seat_name setting into the mission-control
+    // read layer so my-queue routes to the operator's configured seat
+    // (default `operator-${USER}@kernel`) instead of the legacy
+    // hardcoded constant. The setting reads OPENRIG_WORKSPACE_OPERATOR_SEAT_NAME
+    // env var first, then ~/.openrig/config.json, then the derived
+    // default — same cascade as every other typed setting.
     const mcReadLayer = new MissionControlReadLayer({
       db,
       queueRepo: deps.queueRepo,
       viewProjector: deps.viewProjector,
       streamStore: deps.streamStore,
       fleetCliCapability: mcFleetCliCapability,
+      defaultOperatorSession: runtimeSettings.workspaceOperatorSeatName,
     });
     deps.missionControlActionLog = mcActionLog;
     deps.missionControlWriteContract = mcWriteContract;

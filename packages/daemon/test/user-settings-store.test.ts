@@ -78,6 +78,10 @@ describe("SettingsStore (User Settings v0)", () => {
       "recovery.provider_auth_env_allowlist",
       // V1 attempt-3 Phase 4 — Advisor/Operator placeholders.
       "agents.advisor_session", "agents.operator_session",
+      // V0.3.1 slice 05 kernel-rig-as-default — operator seat name read
+      // by mission-control read layer + 2 UI sites; default
+      // `operator-${USER}@kernel`.
+      "workspace.operator_seat_name",
       // V1 attempt-3 Phase 5 P5-3 — For You feed subscription toggles.
       "feed.subscriptions.action_required",
       "feed.subscriptions.approvals",

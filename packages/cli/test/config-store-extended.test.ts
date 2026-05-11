@@ -86,6 +86,10 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
       "recovery.provider_auth_env_allowlist",
       // V1 attempt-3 Phase 4 — Advisor/Operator placeholders.
       "agents.advisor_session", "agents.operator_session",
+      // V0.3.1 slice 05 kernel-rig-as-default — operator seat name
+      // read by daemon mission-control + UI; default
+      // `operator-${USER}@kernel` derived in resolve().
+      "workspace.operator_seat_name",
       // V1 attempt-3 Phase 5 P5-3 — For You feed subscription toggles.
       "feed.subscriptions.action_required",
       "feed.subscriptions.approvals",
@@ -94,6 +98,33 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
       "feed.subscriptions.audit_log",
     ];
     expect([...VALID_KEYS]).toEqual(expected);
+  });
+
+  it("workspace.operator_seat_name roundtrip — default derives operator-${USER}@kernel; set → resolve reflects override", () => {
+    const store = new ConfigStore(configPath);
+    const before = store.resolve();
+    // Default cascade derives from OS username at resolve() time.
+    expect(before.workspace.operatorSeatName).toMatch(/^operator-.+@kernel$/);
+
+    store.set("workspace.operator_seat_name", "operator-test@kernel");
+    const after = store.resolve();
+    expect(after.workspace.operatorSeatName).toBe("operator-test@kernel");
+
+    store.reset("workspace.operator_seat_name");
+    const reset = store.resolve();
+    expect(reset.workspace.operatorSeatName).toMatch(/^operator-.+@kernel$/);
+  });
+
+  it("workspace.operator_seat_name env override beats file-stored value", () => {
+    const store = new ConfigStore(configPath);
+    store.set("workspace.operator_seat_name", "operator-file@kernel");
+    process.env.OPENRIG_WORKSPACE_OPERATOR_SEAT_NAME = "operator-env@kernel";
+    try {
+      const resolved = store.resolve();
+      expect(resolved.workspace.operatorSeatName).toBe("operator-env@kernel");
+    } finally {
+      delete process.env.OPENRIG_WORKSPACE_OPERATOR_SEAT_NAME;
+    }
   });
 
   it("transcripts.lines + transcripts.poll_interval_seconds roundtrip — set → resolve reflects file-stored values for daemon launch projection", () => {

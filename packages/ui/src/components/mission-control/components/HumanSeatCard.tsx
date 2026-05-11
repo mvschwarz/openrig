@@ -2,8 +2,9 @@
 //
 // Human queues are first-class product concepts, NOT invisible config-layer
 // convention. Mission Control renders the operator's human seat
-// (default `human-operator@kernel`) with its own card showing identity,
-// load, and capabilities.
+// (default `operator-${USER}@kernel`, where ${USER} is the OS username
+// from `workspace.operator_seat_name` setting; V0.3.1 slice 05) with its
+// own card showing identity, load, and capabilities.
 //
 // V1 attempt-3 Phase 5 P5-8: refactored to compose VellumCard primitive
 // (Phase 1) — replaces the ad-hoc `border border-stone-300 bg-stone-50`
@@ -18,7 +19,9 @@ import { StatusPip } from "../../ui/status-pip.js";
 import type { CompactStatusRow } from "../hooks/useMissionControlView.js";
 
 export interface HumanSeatCardProps {
-  /** Canonical session label, e.g., `human-operator@kernel`. */
+  /** Canonical session label, e.g., `operator-alex@kernel` (default
+   *  derived from the OS username via the `workspace.operator_seat_name`
+   *  setting; V0.3.1 slice 05). */
   session: string;
   /** Pending human-gate items (for load indication). */
   rows: CompactStatusRow[];
