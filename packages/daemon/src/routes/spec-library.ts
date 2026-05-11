@@ -10,7 +10,10 @@ import {
   getWorkflowReview,
   parseWorkflowLibraryId,
   scanWorkflowSpecs,
+  scanWorkflowSpecFolder,
 } from "../domain/spec-library-workflow-scanner.js";
+import type { WorkflowSpecCache } from "../domain/workflow-spec-cache.js";
+import type { EventBus } from "../domain/event-bus.js";
 
 export function specLibraryRoutes(): Hono {
   const router = new Hono();
@@ -21,6 +24,20 @@ export function specLibraryRoutes(): Hono {
       ?? (c.get("rigRepo" as never) as { db: Database.Database } | undefined)?.db;
     const builtinDir = c.get("workflowBuiltinSpecsDir" as never) as string | undefined;
     if (db) {
+      // Slice 11 (workflow-spec-folder-discovery) — opportunistically
+      // walk the operator's workspace workflows folder (if wired) so
+      // newly-dropped YAML files materialize as cache rows (valid or
+      // diagnostic) before the cache read below. Folder scan is gated
+      // on context wiring; pre-slice-11 callers still get the
+      // cache-only behavior.
+      const cache = c.get("workflowSpecCache" as never) as WorkflowSpecCache | undefined;
+      const folder = c.get("workflowsFolderDir" as never) as string | undefined;
+      const eventBus = c.get("eventBus" as never) as EventBus | undefined;
+      if (cache && folder) {
+        try {
+          scanWorkflowSpecFolder({ db, cache, folder, builtinDir: builtinDir ?? null, eventBus });
+        } catch { /* best-effort — folder scan failure must not break Library list */ }
+      }
       // Re-scan workflow specs on each list request — cheap (single
       // SELECT against the workflow_specs cache) and means lens-driven
       // surfaces always see the freshest cache state without a separate

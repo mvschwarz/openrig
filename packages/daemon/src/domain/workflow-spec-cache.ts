@@ -257,6 +257,75 @@ export class WorkflowSpecCache {
     return rows.map((row) => rowToWorkflowSpec(row));
   }
 
+  /**
+   * Slice 11 (workflow-spec-folder-discovery) — diagnostic row writer.
+   * Used by scanWorkflowSpecFolder when YAML parse / validation fails
+   * so the Library UI can render an error row at the same path the
+   * user dropped a malformed workflow YAML into. The row's name field
+   * falls back to the source file basename so the Library has a
+   * stable label even when the YAML couldn't be parsed.
+   *
+   * Single-row-per-source_path semantics: writeDiagnostic on a path
+   * that already has a row (valid or diagnostic) UPDATES the row's
+   * status to 'error', error_message, source_hash, cached_at, and
+   * resets the parsed payload fields to empty (the prior YAML is no
+   * longer trusted). Round-trip between 'valid' and 'error' is
+   * supported via the same path: a passing readThrough flips the
+   * row back to 'valid' with parsed payload restored.
+   */
+  writeDiagnostic(opts: {
+    sourcePath: string;
+    sourceHash: string;
+    errorMessage: string;
+  }): void {
+    const cachedAt = this.now().toISOString();
+    const fallbackName = opts.sourcePath.split("/").pop() ?? opts.sourcePath;
+    const existing = this.db
+      .prepare(`SELECT spec_id FROM workflow_specs WHERE source_path = ?`)
+      .get(opts.sourcePath) as { spec_id: string } | undefined;
+    if (existing) {
+      this.db
+        .prepare(
+          `UPDATE workflow_specs SET
+             status = 'error',
+             error_message = ?,
+             name = ?,
+             version = '',
+             purpose = NULL,
+             target_rig = NULL,
+             roles_json = '{}',
+             steps_json = '[]',
+             coordination_terminal_turn_rule = 'hot_potato',
+             source_hash = ?,
+             cached_at = ?
+           WHERE spec_id = ?`,
+        )
+        .run(opts.errorMessage, fallbackName, opts.sourceHash, cachedAt, existing.spec_id);
+      return;
+    }
+    this.db
+      .prepare(
+        `INSERT INTO workflow_specs (
+           spec_id, name, version, purpose, target_rig,
+           roles_json, steps_json, coordination_terminal_turn_rule,
+           source_path, source_hash, cached_at, status, error_message
+         ) VALUES (?, ?, '', NULL, NULL, '{}', '[]', 'hot_potato', ?, ?, ?, 'error', ?)`,
+      )
+      .run(ulid(), fallbackName, opts.sourcePath, opts.sourceHash, cachedAt, opts.errorMessage);
+  }
+
+  /**
+   * Slice 11 — remove cache row by source_path (used when scanner
+   * detects a workflow YAML was deleted from disk). Returns the
+   * number of rows removed (0 when no row exists for that path).
+   */
+  removeBySourcePath(sourcePath: string): number {
+    const result = this.db
+      .prepare(`DELETE FROM workflow_specs WHERE source_path = ?`)
+      .run(sourcePath);
+    return result.changes;
+  }
+
   getByIdOrThrow(specId: string): WorkflowSpecRow {
     const row = this.db
       .prepare(`SELECT * FROM workflow_specs WHERE spec_id = ?`)

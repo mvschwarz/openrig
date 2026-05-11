@@ -124,6 +124,10 @@ import { watchdogPolicyEnumExtensionSchema } from "./db/migrations/036_watchdog_
 import { missionControlActionsSchema } from "./db/migrations/037_mission_control_actions.js";
 import { workspacePrimitiveSchema } from "./db/migrations/038_workspace_primitive.js";
 import { queueTargetRepoSchema } from "./db/migrations/039_queue_target_repo.js";
+// Slice 11 (release-0.3.1 workflow-spec-folder-discovery) — adds
+// status + error_message columns to workflow_specs so the scanner
+// can record diagnostic rows. SC-29 #10 declared verbatim in commit body.
+import { workflowSpecsDiagnosticSchema } from "./db/migrations/040_workflow_specs_diagnostic.js";
 import { MissionControlActionLog } from "./domain/mission-control/mission-control-action-log.js";
 import { MissionControlWriteContract } from "./domain/mission-control/mission-control-write-contract.js";
 import { MissionControlReadLayer } from "./domain/mission-control/mission-control-read-layer.js";
@@ -197,7 +201,7 @@ export function collectAllowlistedProviderAuthEnv(
 export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> {
   const dbPath = opts?.dbPath ?? ":memory:";
   const db = createDb(dbPath);
-  migrate(db, [coreSchema, bindingsSessionsSchema, eventsSchema, snapshotsSchema, checkpointsSchema, resumeMetadataSchema, nodeSpecFieldsSchema, packagesSchema, installJournalSchema, journalSeqSchema, bootstrapSchema, discoverySchema, discoveryFkFix, agentspecRebootSchema, startupContextSchema, chatMessagesSchema, podNamespaceSchema, contextUsageSchema, externalCliAttachmentSchema, rigServicesSchema, seatHandoverObservabilitySchema, nodeCodexConfigProfileSchema, streamItemsSchema, queueItemsSchema, queueTransitionsSchema, inboxEntriesSchema, outboxEntriesSchema, projectClassificationsSchema, classifierLeasesSchema, viewsCustomSchema, watchdogJobsSchema, watchdogHistorySchema, workflowSpecsSchema, workflowInstancesSchema, workflowStepTrailsSchema, watchdogPolicyEnumExtensionSchema, missionControlActionsSchema, workspacePrimitiveSchema, queueTargetRepoSchema]);
+  migrate(db, [coreSchema, bindingsSessionsSchema, eventsSchema, snapshotsSchema, checkpointsSchema, resumeMetadataSchema, nodeSpecFieldsSchema, packagesSchema, installJournalSchema, journalSeqSchema, bootstrapSchema, discoverySchema, discoveryFkFix, agentspecRebootSchema, startupContextSchema, chatMessagesSchema, podNamespaceSchema, contextUsageSchema, externalCliAttachmentSchema, rigServicesSchema, seatHandoverObservabilitySchema, nodeCodexConfigProfileSchema, streamItemsSchema, queueItemsSchema, queueTransitionsSchema, inboxEntriesSchema, outboxEntriesSchema, projectClassificationsSchema, classifierLeasesSchema, viewsCustomSchema, watchdogJobsSchema, watchdogHistorySchema, workflowSpecsSchema, workflowInstancesSchema, workflowStepTrailsSchema, watchdogPolicyEnumExtensionSchema, missionControlActionsSchema, workspacePrimitiveSchema, queueTargetRepoSchema, workflowSpecsDiagnosticSchema]);
 
   const rigRepo = new RigRepository(db);
   const sessionRegistry = new SessionRegistry(db);
@@ -805,6 +809,22 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     // Surface the resolved path to the routes layer so
     // GET /api/workflow/specs can compute the per-row isBuiltIn flag.
     deps.workflowBuiltinSpecsDir = builtinSpecsDir;
+
+    // Slice 11 (workflow-spec-folder-discovery) — expose the shared
+    // WorkflowSpecCache + the resolved workspace workflows folder so
+    // GET /api/specs/library can opportunistically discover operator-
+    // dropped YAML on each list request. Folder path is
+    // `<workspace.specs_root>/workflows`; SettingsStore resolves
+    // workspaceSpecsRoot from env > config > workspace-default.
+    deps.workflowSpecCache = workflowRuntime.specCache;
+    try {
+      const settingsStore = new ContextPackSettingsStore();
+      const cfg = settingsStore.resolveConfig();
+      if (cfg.workspaceSpecsRoot) {
+        deps.workflowsFolderDir = nodePath.join(cfg.workspaceSpecsRoot, "workflows");
+      }
+    } catch { /* settings unavailable — folder scan stays disabled */ }
+
     if (starterResult.errors.length > 0) {
       console.warn(
         `[starter-spec-loader] ${starterResult.errors.length} spec(s) failed to load:`,

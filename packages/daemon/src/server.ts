@@ -152,6 +152,16 @@ export interface AppDeps {
    * surface still works, just without the indicator).
    */
   workflowBuiltinSpecsDir?: string;
+  /** Slice 11 (workflow-spec-folder-discovery) — workspace workflows
+   *  folder absolute path (typically `<workspace.specs_root>/workflows`).
+   *  When set, GET /api/specs/library opportunistically scans this dir
+   *  on each list request and surfaces valid + diagnostic rows. Unset
+   *  → no folder scan (cache-only behavior). */
+  workflowsFolderDir?: string;
+  /** Slice 11 — WorkflowSpecCache instance for the folder scanner to
+   *  read-through valid YAML and writeDiagnostic for invalid YAML.
+   *  Same singleton as workflowRuntime.specCache. */
+  workflowSpecCache?: import("./domain/workflow-spec-cache.js").WorkflowSpecCache;
   missionControlReadLayer?: import("./domain/mission-control/mission-control-read-layer.js").MissionControlReadLayer;
   missionControlWriteContract?: import("./domain/mission-control/mission-control-write-contract.js").MissionControlWriteContract;
   missionControlActionLog?: import("./domain/mission-control/mission-control-action-log.js").MissionControlActionLog;
@@ -365,6 +375,8 @@ export function createApp(deps: AppDeps): Hono {
     c.set("watchdogScheduler" as never, deps.watchdogScheduler);
     c.set("workflowRuntime" as never, deps.workflowRuntime);
     c.set("workflowBuiltinSpecsDir" as never, deps.workflowBuiltinSpecsDir);
+    c.set("workflowsFolderDir" as never, deps.workflowsFolderDir);
+    c.set("workflowSpecCache" as never, deps.workflowSpecCache);
     c.set("missionControlReadLayer" as never, deps.missionControlReadLayer);
     c.set("missionControlWriteContract" as never, deps.missionControlWriteContract);
     c.set("missionControlActionLog" as never, deps.missionControlActionLog);
