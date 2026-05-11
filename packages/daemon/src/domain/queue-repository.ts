@@ -2,6 +2,7 @@ import type Database from "better-sqlite3";
 import type { EventBus } from "./event-bus.js";
 import type { PersistedEvent } from "./types.js";
 import { QueueTransitionLog } from "./queue-transition-log.js";
+import { wrapPaneEnvelope } from "../lib/pane-envelope.js";
 import {
   computeClosureRequiredAt,
   validateClosure,
@@ -277,15 +278,24 @@ export class QueueRepository {
    * Phase D extension point (orch-ratified): public so workflow-projector
    * can invoke after its outer transaction commits, completing the
    * createWithinTransaction()'s deferred post-commit side effects.
+   *
+   * V0.3.1 slice 23 founder-walk-queue-handoff-envelope: the nudge body
+   * is now wrapped with the same From/To/---/body/---/↩ Reply envelope
+   * that `rig send` uses. `sourceSession` is the seat that triggered
+   * the create/handoff so the recipient pane shows where the nudge
+   * came from + a reply hint. When undefined, the envelope falls back
+   * to the canonical "<unknown sender>" marker (matches wrapPaneEnvelope).
    */
   async maybeNudge(
     qitemId: string,
     destinationSession: string,
     nudgeOpt: boolean | undefined,
+    sourceSession?: string,
   ): Promise<void> {
     if (nudgeOpt === false) return;
     if (!this.transport) return;
-    const text = `Queue handoff: ${qitemId} - check your queue.`;
+    const bareBody = `Queue handoff: ${qitemId} - check your queue.`;
+    const text = wrapPaneEnvelope(sourceSession, destinationSession, bareBody);
     try {
       const res = await this.transport.send(destinationSession, text, { verify: true });
       const result = res.ok
@@ -309,7 +319,7 @@ export class QueueRepository {
     const txn = this.db.transaction(() => this.createInTransactionalContext(input));
     const { qitemId: id, persistedEvent } = txn();
     this.eventBus.notifySubscribers(persistedEvent);
-    await this.maybeNudge(id, input.destinationSession, input.nudge);
+    await this.maybeNudge(id, input.destinationSession, input.nudge, input.sourceSession);
     return this.getByIdOrThrow(id);
   }
 
@@ -523,7 +533,7 @@ export class QueueRepository {
       this.eventBus.notifySubscribers(e.payload as import("./types.js").PersistedEvent);
     }
 
-    await this.maybeNudge(newId, input.toSession, input.nudge);
+    await this.maybeNudge(newId, input.toSession, input.nudge, input.fromSession);
 
     return {
       closed: this.getByIdOrThrow(source.qitemId),
@@ -644,7 +654,7 @@ export class QueueRepository {
       this.eventBus.notifySubscribers(e.payload as import("./types.js").PersistedEvent);
     }
 
-    await this.maybeNudge(newId, input.toSession, input.nudge);
+    await this.maybeNudge(newId, input.toSession, input.nudge, input.fromSession);
 
     return {
       closed: this.getByIdOrThrow(source.qitemId),
