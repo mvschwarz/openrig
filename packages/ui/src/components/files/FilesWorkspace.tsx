@@ -67,8 +67,13 @@ export function FilesWorkspace() {
         <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-stone-500">Workspace</div>
         <h1 className="font-headline text-xl font-bold tracking-tight text-stone-900">Files</h1>
       </header>
-      <div className="flex flex-1 min-h-0">
-        <aside data-testid="files-tree-pane" className="w-72 shrink-0 overflow-y-auto border-r border-stone-200 bg-stone-50">
+      {/* Slice 20 mobile: at narrow viewports the two-pane
+          shape stacks vertically so the document panel claims full width
+          on a phone. Tree pane caps at max-h-48 on mobile so the user
+          can scroll past it to the content. Desktop (sm:) layout
+          unchanged — horizontal flex + 288px tree column. */}
+      <div className="flex flex-1 min-h-0 flex-col sm:flex-row">
+        <aside data-testid="files-tree-pane" className="w-full max-h-48 shrink-0 overflow-y-auto border-b border-stone-200 bg-stone-50 sm:w-72 sm:max-h-none sm:border-b-0 sm:border-r">
           <RootSelector roots={roots.data} isLoading={roots.isLoading} selectedRoot={selectedRoot} onSelect={setSelectedRoot} workspace={workspace.data ?? null} />
           {selectedRoot && (
             <>

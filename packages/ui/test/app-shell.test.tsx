@@ -258,6 +258,51 @@ describe("AppShell — Phase 2 chrome", () => {
       expect(tray).toBeTruthy();
       expect(tray.className).toContain("-translate-x-full");
     });
+
+    // Slice 20 mobile: hamburger menu items stack vertically
+    // (not horizontally) so each route is a thumb-tappable row. The Rail
+    // inside the mobile slide-over now renders with `vertical=true`.
+    // The slide-over tray is closed by default; we assert against the
+    // rendered DOM regardless of open state (className is fixed at mount).
+    it("slice 20: mobile slide-over Rail renders vertical (flex-col) — not horizontal scroll", async () => {
+      const { router } = await import("../src/routes.js");
+      Object.defineProperty(window, "innerWidth", { configurable: true, value: 375, writable: true });
+      window.dispatchEvent(new Event("resize"));
+      const memoryHistory = createMemoryHistory({ initialEntries: ["/"] });
+      const memoryRouter = createRouter({ routeTree: router.routeTree, history: memoryHistory });
+      const { container } = render(<RouterProvider router={memoryRouter} />);
+      await waitFor(() => {
+        expect(container.querySelector("[data-testid='mobile-rail-tray']")).toBeTruthy();
+      });
+      const tray = container.querySelector("[data-testid='mobile-rail-tray']") as HTMLElement;
+      const rail = tray.querySelector("[data-testid='app-rail']") as HTMLElement;
+      expect(rail, "rail nav inside mobile slide-over tray").toBeTruthy();
+      // Vertical Rail mode adds flex-col + w-12 + border-r; horizontal
+      // mode adds flex-row + w-full + border-b + overflow-x-auto.
+      expect(rail.className).toMatch(/\bflex-col\b/);
+      expect(rail.className).not.toMatch(/\bflex-row\b/);
+      expect(rail.className).not.toMatch(/\boverflow-x-auto\b/);
+    });
+
+    // Slice 20 mobile: rail icon tap targets meet iOS HIG minimum
+    // (44px) on mobile, AND restore the prior 40px hitbox at lg: width
+    // so desktop hover precision is preserved. The className carries
+    // both shapes: `h-11 w-11` (mobile default) + `lg:h-10 lg:w-10`
+    // (desktop override). Tailwind's mobile-first cascade ensures the
+    // larger square only paints at < lg: viewports.
+    it("slice 20: rail icon tap targets are ≥44px on mobile + restored to 40px at lg:", async () => {
+      const { container } = await renderAt("/");
+      const dashIcon = container.querySelector(
+        "[data-testid='rail-dashboard']",
+      ) as HTMLElement;
+      expect(dashIcon, "rail dashboard icon link").toBeTruthy();
+      // Mobile default: 44px square.
+      expect(dashIcon.className).toMatch(/\bh-11\b/);
+      expect(dashIcon.className).toMatch(/\bw-11\b/);
+      // Desktop override: lg: prefix restores the 40px hitbox.
+      expect(dashIcon.className).toMatch(/\blg:h-10\b/);
+      expect(dashIcon.className).toMatch(/\blg:w-10\b/);
+    });
   });
 
   // Phase 2 BOUNCE-FIX #3 — width-coupling regression (guard-3 catch).
