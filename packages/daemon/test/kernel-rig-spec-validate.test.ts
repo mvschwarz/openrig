@@ -18,6 +18,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { validateRigSpecFromYaml } from "../src/domain/spec-validation-service.js";
+import { parseAgentSpec, validateAgentSpec } from "../src/domain/agent-manifest.js";
 
 const SHIPPED_VARIANTS = [
   "rig.yaml",
@@ -26,6 +27,12 @@ const SHIPPED_VARIANTS = [
 ] as const;
 
 const KERNEL_DIR = join(__dirname, "..", "specs", "rigs", "launch", "kernel");
+const KERNEL_AGENTS_DIR = join(KERNEL_DIR, "agents");
+const KERNEL_AGENT_PATHS = [
+  join(KERNEL_AGENTS_DIR, "advisor", "lead", "agent.yaml"),
+  join(KERNEL_AGENTS_DIR, "operator", "agent", "agent.yaml"),
+  join(KERNEL_AGENTS_DIR, "queue", "worker", "agent.yaml"),
+];
 
 describe("kernel rig variants — rig spec validate", () => {
   for (const variant of SHIPPED_VARIANTS) {
@@ -66,13 +73,6 @@ describe("kernel agents — profile.uses references resolve against shared pool"
   const SHARED_AGENT_YAML = join(
     __dirname, "..", "specs", "agents", "shared", "agent.yaml",
   );
-  const KERNEL_AGENTS_DIR = join(KERNEL_DIR, "agents");
-  const KERNEL_AGENT_PATHS = [
-    join(KERNEL_AGENTS_DIR, "advisor", "lead", "agent.yaml"),
-    join(KERNEL_AGENTS_DIR, "operator", "agent", "agent.yaml"),
-    join(KERNEL_AGENTS_DIR, "queue", "worker", "agent.yaml"),
-  ];
-
   function poolIds(yamlPath: string, kind: "skills" | "runtime_resources"): Set<string> {
     const doc = parseYaml(readFileSync(yamlPath, "utf-8")) as {
       resources?: { skills?: { id: string; path: string }[]; runtime_resources?: { id: string }[] };
@@ -134,6 +134,28 @@ describe("kernel agents — profile.uses references resolve against shared pool"
           `${label} references skills not in shared pool:\n  - ${missing.join("\n  - ")}`,
         );
       }
+    });
+  }
+});
+
+describe("kernel agents — nested AgentSpec validation", () => {
+  for (const agentPath of KERNEL_AGENT_PATHS) {
+    const label = agentPath
+      .replace(KERNEL_AGENTS_DIR + "/", "")
+      .replace("/agent.yaml", "")
+      .replace("/", ".");
+
+    it(`${label}: agent.yaml passes AgentSpec validation`, () => {
+      const yaml = readFileSync(agentPath, "utf-8");
+      const raw = parseAgentSpec(yaml);
+      const result = validateAgentSpec(raw);
+      if (!result.valid) {
+        throw new Error(
+          `AgentSpec validation failed for ${label}:\n  - ${result.errors.join("\n  - ")}`,
+        );
+      }
+      expect(result.valid).toBe(true);
+      expect(result.errors).toEqual([]);
     });
   }
 });

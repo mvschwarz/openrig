@@ -14,7 +14,7 @@ profiles:
       skills: [openrig-user, openrig-operator, local-sysadmin, rig-lifecycle, systematic-debugging, verification-before-completion, openrig-installer]
       guidance: [role]
       subagents: []
-      hooks: []
+      plugins: []
       runtime_resources: [shared:claude-default-settings, shared:claude-default-mcp, shared:codex-default-config]
 
 resources:
