@@ -167,7 +167,7 @@ const RAIL_ICONS: RailIconSpec[] = [
     label: "Library",
     to: "/specs",
     icon: FileText,
-    activeWhen: (p) => p.startsWith("/specs"),
+    activeWhen: (p) => p.startsWith("/specs") || p.startsWith("/plugins"),
     testId: "rail-specs",
     group: "destination",
   },
@@ -235,7 +235,7 @@ function resolveChatTo(session: string, role: "advisor" | "operator"): string {
 function surfaceForPath(pathname: string): ExplorerSurface {
   if (pathname.startsWith("/topology") || pathname.startsWith("/rigs/")) return "topology";
   if (pathname.startsWith("/project")) return "project";
-  if (pathname.startsWith("/specs")) return "specs";
+  if (pathname.startsWith("/specs") || pathname.startsWith("/plugins")) return "specs";
   if (pathname.startsWith("/for-you")) return "for-you";
   return "none";
 }

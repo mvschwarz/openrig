@@ -256,32 +256,29 @@ describe("WorkspaceScopePage overview", () => {
     expect(await findByTestId("workspace-overview-panel")).toBeTruthy();
     const currentMission = await findByTestId("workspace-overview-mission-RELEASE-PROOF");
     expect(currentMission.getAttribute("data-mission-bucket")).toBe("current");
-    expect((await findByTestId("workspace-overview-slice-idea-ledger")).textContent).toContain(
-      "78 qitems",
-    );
+    expect((await findByTestId("workspace-overview-slice-idea-ledger-qitems")).textContent).toContain("78");
 
     const archivedMission = await findByTestId("workspace-overview-mission-unsorted");
     expect(archivedMission.getAttribute("data-mission-bucket")).toBe("archive");
   });
 
-  // Slice 19: workspace-overview slice items render single-row
-  // (flex layout) with meta inline + title/aria-label for hover +
-  // screen-reader discovery. HG-1/2/3/5 of slice 19.
-  it("slice 19: workspace-overview slice items are single-row with meta inline + a11y attributes", async () => {
+  // Slice 19 follow-up: workspace-overview slice items keep title/aria
+  // metadata but replace prose meta with compact qitem/status icons.
+  it("slice 19 follow-up: workspace-overview slice items use wrapped names with queue/status icons", async () => {
     const { findByTestId } = renderWorkspaceScope();
     const link = await findByTestId("workspace-overview-slice-idea-ledger");
-    // Single-row flex layout (not stacked `block` spans)
     expect(link.className).toMatch(/\bflex\b/);
     expect(link.className).not.toMatch(/\bblock\b/);
-    // Meta carried via title + aria-label so hover + screen readers
-    // surface the version/status detail that left the visible row.
     expect(link.getAttribute("title")).toContain("78 qitems");
     expect(link.getAttribute("aria-label")).toContain("78 qitems");
-    // Meta span preserved with its own testid for downstream assertions.
     const meta = await findByTestId("workspace-overview-slice-idea-ledger-meta");
-    expect(meta.className).toMatch(/\bshrink-0\b/);
+    expect(meta.className).toMatch(/\bflex\b/);
     expect(meta.className).not.toMatch(/\bblock\b/);
-    expect(meta.textContent).toContain("78 qitems");
+    expect(meta.textContent).toBe("78");
+    expect((await findByTestId("workspace-overview-slice-idea-ledger-qitems")).getAttribute("aria-label")).toBe("78 qitems");
+    expect((await findByTestId("workspace-overview-slice-idea-ledger-status")).getAttribute("data-tone")).toBe("success");
+    expect(link.textContent).not.toContain("qitems");
+    expect(link.firstElementChild?.className).toContain("whitespace-normal");
   });
 
   it("workspace progress, queue, and topology tabs render aggregate scoped data", async () => {
@@ -360,6 +357,8 @@ describe("WorkspaceScopePage overview", () => {
 
     expect(await findByTestId("mission-overview-panel")).toBeTruthy();
     expect((await findByTestId("mission-overview-panel")).textContent).toContain("Idea Ledger release proof slice");
+    expect((await findByTestId("mission-overview-slice-idea-ledger-qitems")).textContent).toContain("78");
+    expect((await findByTestId("mission-overview-slice-idea-ledger-status")).getAttribute("data-tone")).toBe("success");
     expect(queryByText("seed-slice-active")).toBeNull();
 
     fireEvent.click(await findByTestId("project-tab-queue"));

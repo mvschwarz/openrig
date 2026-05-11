@@ -297,21 +297,18 @@ describe("ProjectTreeView P5-5/P5-6 mission discovery", () => {
 
     const liveMission = await findByTestId("project-mission-RELEASE-PROOF");
     expect(liveMission.getAttribute("data-mission-bucket")).toBe("current");
-    expect((await findByTestId("project-slice-idea-ledger-meta")).textContent).toContain(
-      "78 qitems",
-    );
+    expect((await findByTestId("project-slice-idea-ledger-qitems")).textContent).toContain("78");
 
     const archiveMission = await findByTestId("project-mission-unsorted");
     expect(archiveMission.getAttribute("data-mission-bucket")).toBe("archive");
     expect(queryByTestId("project-slice-seed-slice-active")).toBeNull();
   });
 
-  // Slice 19: list-density collapse. Slice items in the Project tree
-  // are single-row (flex layout) with the meta inline + a `title`
-  // attribute + `aria-label` carrying the full readable content for
-  // screen readers and hover discovery. HG-1/2/3/5 of slice 19's
-  // density audit applies here.
-  it("slice 19: project tree slice items render single-row with meta inline + a11y attributes", async () => {
+  // Slice 19 follow-up: slice items in the Project tree keep readable
+  // title/aria metadata but replace inline prose metadata with two
+  // compact icons: qitem count + status dot. Names can wrap for long
+  // mission/slice identifiers.
+  it("slice 19 follow-up: project tree slice items render wrapped names with queue/status icons", async () => {
     const { findByTestId } = renderTree({
       workspaceRoot: "/Users/example/workspace",
       slices: [
@@ -330,19 +327,19 @@ describe("ProjectTreeView P5-5/P5-6 mission discovery", () => {
     });
 
     const sliceLink = await findByTestId("project-slice-density-slice");
-    // HG-1: single-row flex layout (not stacked `block` spans).
     expect(sliceLink.className).toMatch(/\bflex\b/);
     expect(sliceLink.className).not.toMatch(/\bblock\b/);
-    // HG-3 + HG-5: meta content preserved in DOM via testid AND
-    // accessible via title + aria-label for hover + screen readers.
     expect(sliceLink.getAttribute("title")).toContain("42 qitems");
     expect(sliceLink.getAttribute("aria-label")).toContain("42 qitems");
     const meta = await findByTestId("project-slice-density-slice-meta");
-    // Meta still present but now flows inline (shrink-0, not block).
-    expect(meta.className).toMatch(/\bshrink-0\b/);
+    expect(meta.className).toMatch(/\bflex\b/);
     expect(meta.className).not.toMatch(/\bblock\b/);
-    expect(meta.textContent).toContain("42 qitems");
-    expect(meta.textContent).toContain("proof");
+    expect(meta.textContent).toBe("42");
+    expect((await findByTestId("project-slice-density-slice-qitems")).getAttribute("aria-label")).toBe("42 qitems");
+    expect((await findByTestId("project-slice-density-slice-status")).getAttribute("data-tone")).toBe("info");
+    expect(sliceLink.textContent).not.toContain("qitems");
+    expect(sliceLink.textContent).not.toContain("proof");
+    expect(sliceLink.firstElementChild?.className).toContain("whitespace-normal");
   });
 
   it("workspace.root unconfigured renders the no-workspace empty-state (Phase 3 A5 behavior preserved)", async () => {

@@ -18,6 +18,7 @@ import {
 } from "../../hooks/useMissionDiscovery.js";
 import { useMissionProgressStatus } from "../../hooks/useMissionProgressStatus.js";
 import { MissionStatusBadge, type MissionStatus } from "../MissionStatusBadge.js";
+import { QueueCountIcon, StatusDot, sliceStatusTone } from "./ProjectMetaPrimitives.js";
 import {
   deriveMissionStatusFromSlices,
   isCurrentProjectSlice,
@@ -240,14 +241,19 @@ export function ProjectTreeView() {
                       data-testid={`project-slice-${s.name}`}
                       title={`${s.displayName} — ${meta}`}
                       aria-label={`${s.displayName} (${meta})`}
-                      className="flex items-baseline gap-2 px-2 py-1 font-mono text-xs text-on-surface hover:text-stone-900 hover:bg-surface-low"
+                      className="flex items-start gap-2 px-2 py-1 font-mono text-xs text-on-surface hover:text-stone-900 hover:bg-surface-low"
                     >
-                      <span className="min-w-0 flex-1 truncate">{s.displayName}</span>
+                      <span className="min-w-0 flex-1 whitespace-normal break-words leading-snug">{s.displayName}</span>
                       <span
                         data-testid={`project-slice-${s.name}-meta`}
-                        className="shrink-0 text-[9px] uppercase tracking-[0.12em] text-stone-500"
+                        className="flex shrink-0 items-center gap-1.5"
                       >
-                        {meta}
+                        <QueueCountIcon count={s.qitemCount} testId={`project-slice-${s.name}-qitems`} />
+                        <StatusDot
+                          tone={sliceStatusTone(s.status)}
+                          label={s.status}
+                          testId={`project-slice-${s.name}-status`}
+                        />
                       </span>
                     </Link>
                   </li>

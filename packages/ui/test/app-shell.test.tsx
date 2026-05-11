@@ -192,6 +192,14 @@ describe("AppShell — Phase 2 chrome", () => {
       expect(explorer?.getAttribute("data-surface")).toBe("specs");
     });
 
+    it("Plugin detail routes keep the Library Explorer mounted", async () => {
+      const { container } = await renderAt("/plugins/openrig-core");
+      const explorer = container.querySelector("[data-testid='explorer']") as HTMLElement;
+      const railSpecs = container.querySelector("[data-testid='rail-specs']") as HTMLAnchorElement;
+      expect(explorer?.getAttribute("data-surface")).toBe("specs");
+      expect(railSpecs?.getAttribute("data-active")).toBe("true");
+    });
+
     it("For You route sets surface=for-you", async () => {
       const { container } = await renderAt("/for-you");
       const explorer = container.querySelector("[data-testid='explorer']") as HTMLElement;

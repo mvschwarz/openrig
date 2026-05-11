@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import { SpecsLibraryPage } from "../src/components/specs/SpecsLibraryPage.js";
 import { SkillDetailPage } from "../src/components/specs/SkillDetailPage.js";
 import { SpecsTreeView } from "../src/components/specs/SpecsTreeView.js";
@@ -154,6 +154,14 @@ describe("Library page taxonomy", () => {
 
     expect(screen.getByText("implementer")).toBeDefined();
     expect(screen.getByText("driver-image")).toBeDefined();
+    const rigRow = screen.getByTestId("library-row-rig-specs-rig-1");
+    expect(rigRow.textContent).toContain("openrig-build");
+    expect(rigRow.textContent).not.toContain("builtin");
+    expect(rigRow.textContent).not.toContain("1");
+    const contextPackRow = screen.getByTestId("library-row-context-packs-context-pack:demo:1");
+    expect(contextPackRow.textContent).toBe("demo-pack");
+    const imageRow = screen.getByTestId("library-row-agent-images-agent-image:driver:1");
+    expect(imageRow.textContent).toBe("driver-image");
     const skillLink = screen.getByTestId("library-skill-operator-skill") as HTMLAnchorElement;
     expect(skillLink).toBeDefined();
     expect(skillLink.getAttribute("href")).toBe(librarySkillHref("workspace:workspace:.openrig/skills/operator-skill"));
@@ -313,16 +321,20 @@ describe("Library page taxonomy", () => {
 
     renderLibraryPage();
 
-    // Section renders with both plugins listed; source labels distinguish layers.
+    // Section renders with both plugins listed, but list rows stay name-only.
     await waitFor(() => {
       expect(screen.getByTestId("library-section-plugins")).toBeDefined();
     });
-    expect(await screen.findByTestId("library-plugin-openrig-core")).toBeDefined();
-    expect(await screen.findByTestId("library-plugin-claude-cache:anthropics/github/1.0.0")).toBeDefined();
+    const openrigPlugin = await screen.findByTestId("library-plugin-openrig-core");
+    const githubPlugin = await screen.findByTestId("library-plugin-claude-cache:anthropics/github/1.0.0");
+    expect(openrigPlugin).toBeDefined();
+    expect(githubPlugin).toBeDefined();
 
-    // Source labels visible (distinct per source kind — drift discriminator).
-    expect(screen.getByText("vendored:openrig-core")).toBeDefined();
-    expect(screen.getByText("claude-cache:anthropics/github/1.0.0")).toBeDefined();
+    expect(within(openrigPlugin).getByText("openrig-core")).toBeDefined();
+    expect(openrigPlugin.textContent).not.toContain("0.1.0");
+    expect(openrigPlugin.textContent).not.toContain("vendored:openrig-core");
+    expect(githubPlugin.textContent).not.toContain("1.0.0");
+    expect(githubPlugin.textContent).not.toContain("claude-cache:anthropics/github/1.0.0");
   });
 
   it("auto-expands the skills explorer on skill detail routes", async () => {

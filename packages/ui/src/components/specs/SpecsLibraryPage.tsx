@@ -1,4 +1,4 @@
-import { useMemo, type ReactNode } from "react";
+import { useMemo } from "react";
 import { Link } from "@tanstack/react-router";
 import { SectionHeader } from "../ui/section-header.js";
 import { EmptyState } from "../ui/empty-state.js";
@@ -7,7 +7,7 @@ import { useContextPackLibrary, type ContextPackEntry } from "../../hooks/useCon
 import { useAgentImageLibrary, type AgentImageEntry } from "../../hooks/useAgentImageLibrary.js";
 import { useLibrarySkills, type LibrarySkillEntry } from "../../hooks/useLibrarySkills.js";
 import { librarySkillHref } from "../../lib/library-skills-routing.js";
-import { RuntimeBadge, ToolMark } from "../graphics/RuntimeMark.js";
+import { ToolMark } from "../graphics/RuntimeMark.js";
 // Phase 3a slice 3.3 — plugins library category.
 import { usePlugins, type PluginEntry } from "../../hooks/usePlugins.js";
 
@@ -22,8 +22,7 @@ const TOOLBAR_ACTIONS = [
 interface LibraryRow {
   id: string;
   label: string;
-  meta: string;
-  metaNode?: ReactNode;
+  meta?: string;
   entryId?: string;
   /** Slice 11 — diagnostic state for unparseable YAML in the workflows
    *  folder. "error" rows render non-navigable with the parser/validator
@@ -45,7 +44,6 @@ function specRow(entry: SpecLibraryEntry): LibraryRow {
   return {
     id: entry.id,
     label: entry.name,
-    meta: `${entry.version} · ${entry.sourceType}`,
     entryId: entry.id,
   };
 }
@@ -54,7 +52,6 @@ function contextPackRow(entry: ContextPackEntry): LibraryRow {
   return {
     id: entry.id,
     label: entry.name,
-    meta: `${entry.version} · ${entry.sourceType} · ~${entry.derivedEstimatedTokens} tokens`,
     entryId: entry.id,
   };
 }
@@ -63,8 +60,6 @@ function agentImageRow(entry: AgentImageEntry): LibraryRow {
   return {
     id: entry.id,
     label: entry.name,
-    meta: `${entry.version} · ${entry.sourceType}`,
-    metaNode: <RuntimeBadge runtime={entry.runtime} size="xs" compact variant="inline" />,
     entryId: entry.id,
   };
 }
@@ -126,12 +121,13 @@ function LibrarySection({
 
 function LibraryRowContent({ row }: { row: LibraryRow }) {
   return (
-    <div className="flex items-baseline justify-between gap-3 font-mono">
+    <div className="flex min-w-0 items-baseline justify-between gap-3 font-mono">
       <span className="truncate text-xs font-bold text-stone-900">{row.label}</span>
-      <span className="flex shrink-0 items-center gap-2 text-[9px] uppercase tracking-[0.08em] text-stone-500">
-        {row.metaNode}
-        <span>{row.meta}</span>
-      </span>
+      {row.meta ? (
+        <span className="shrink-0 text-[9px] uppercase tracking-[0.08em] text-stone-500">
+          {row.meta}
+        </span>
+      ) : null}
     </div>
   );
 }
@@ -180,26 +176,11 @@ function PluginsSection({
                 to="/plugins/$pluginId"
                 params={{ pluginId: plugin.id }}
                 data-testid={`library-plugin-${plugin.id}`}
-                className="flex items-center justify-between gap-3 px-3 py-2 font-mono hover:bg-stone-100/50"
+                className="flex items-center gap-3 px-3 py-2 font-mono hover:bg-stone-100/50"
               >
                 <span className="flex min-w-0 items-center gap-2">
                   <ToolMark tool="skill" title={`${plugin.name} plugin`} size="xs" decorative />
                   <span className="truncate text-xs font-bold text-stone-900">{plugin.name}</span>
-                  <span className="shrink-0 text-[9px] uppercase tracking-[0.08em] text-stone-500">
-                    v{plugin.version}
-                  </span>
-                </span>
-                <span className="flex shrink-0 items-center gap-2 text-[9px] uppercase tracking-[0.08em] text-stone-500">
-                  {plugin.runtimes.map((rt) => (
-                    <span
-                      key={rt}
-                      data-testid={`plugin-runtime-${rt}`}
-                      className="inline-block border border-outline-variant px-1.5 py-0.5 font-mono"
-                    >
-                      {rt}
-                    </span>
-                  ))}
-                  <span title={plugin.path}>{plugin.sourceLabel}</span>
                 </span>
               </Link>
             </li>

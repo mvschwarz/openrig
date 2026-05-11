@@ -60,7 +60,10 @@ import {
   ProjectPill,
   ProofPacketHeader,
   ProofThumbnailGrid,
+  QueueCountIcon,
   QueueStateBadge,
+  sliceStatusTone,
+  StatusDot,
   TagPill,
   formatFriendlyDate,
   scopeToken,
@@ -602,14 +605,19 @@ function WorkspaceOverviewPanel() {
                 data-testid={`workspace-overview-slice-${slice.name}`}
                 title={`${slice.displayName} — ${meta}`}
                 aria-label={`${slice.displayName} (${meta})`}
-                className="flex items-baseline gap-2 px-2 py-1 font-mono text-[11px] text-on-surface hover:bg-surface-low hover:text-stone-900"
+                className="flex items-start gap-2 px-2 py-1 font-mono text-[11px] text-on-surface hover:bg-surface-low hover:text-stone-900"
               >
-                <span className="min-w-0 flex-1 truncate">{slice.displayName}</span>
+                <span className="min-w-0 flex-1 whitespace-normal break-words leading-snug">{slice.displayName}</span>
                 <span
                   data-testid={`workspace-overview-slice-${slice.name}-meta`}
-                  className="shrink-0 text-[9px] uppercase tracking-[0.12em] text-stone-500"
+                  className="flex shrink-0 items-center gap-1.5"
                 >
-                  {meta}
+                  <QueueCountIcon count={slice.qitemCount} testId={`workspace-overview-slice-${slice.name}-qitems`} />
+                  <StatusDot
+                    tone={sliceStatusTone(slice.status)}
+                    label={slice.status}
+                    testId={`workspace-overview-slice-${slice.name}-status`}
+                  />
                 </span>
               </Link>
             </li>
@@ -770,24 +778,36 @@ export function MissionScopePage() {
           )}
           <div className="space-y-3">
             {rollup.rows.length > 0 ? (
-              rollup.rows.map((slice) => (
-                <article key={slice.name} className="border border-outline-variant bg-white/35 p-3 backdrop-blur-sm">
-                  <Link
-                    to="/project/slice/$sliceId"
-                    params={{ sliceId: slice.name }}
-                    className="font-mono text-[12px] uppercase tracking-[0.12em] text-stone-900 hover:underline"
-                  >
-                    {slice.displayName}
-                  </Link>
-                  <div className="mt-2 flex flex-wrap items-center gap-1.5 font-mono text-[10px] text-stone-600">
-                    <ProjectPill token={scopeToken("slice")} compact />
-                    <ProjectPill token={{ label: slice.status, tone: stateTone(slice.status) }} compact />
-                    <DateChip value={slice.lastActivityAt} />
-                    <span>· {slice.qitemCount} qitems</span>
-                    {slice.hasProofPacket && <span>· proof</span>}
-                  </div>
-                </article>
-              ))
+              rollup.rows.map((slice) => {
+                const meta = projectSliceMeta(slice);
+                return (
+                  <article key={slice.name} className="border border-outline-variant bg-white/35 p-3 backdrop-blur-sm">
+                    <div className="flex items-start gap-3">
+                      <Link
+                        to="/project/slice/$sliceId"
+                        params={{ sliceId: slice.name }}
+                        data-testid={`mission-overview-slice-${slice.name}`}
+                        title={`${slice.displayName} — ${meta}`}
+                        aria-label={`${slice.displayName} (${meta})`}
+                        className="min-w-0 flex-1 whitespace-normal break-words font-mono text-[12px] uppercase leading-snug tracking-[0.12em] text-stone-900 hover:underline"
+                      >
+                        {slice.displayName}
+                      </Link>
+                      <span
+                        data-testid={`mission-overview-slice-${slice.name}-meta`}
+                        className="flex shrink-0 items-center gap-1.5"
+                      >
+                        <QueueCountIcon count={slice.qitemCount} testId={`mission-overview-slice-${slice.name}-qitems`} />
+                        <StatusDot
+                          tone={sliceStatusTone(slice.status)}
+                          label={slice.status}
+                          testId={`mission-overview-slice-${slice.name}-status`}
+                        />
+                      </span>
+                    </div>
+                  </article>
+                );
+              })
             ) : (
               <EmptyState
                 label="NO SLICES"

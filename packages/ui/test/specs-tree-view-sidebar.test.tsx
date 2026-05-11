@@ -104,7 +104,7 @@ describe("SpecsTreeView — top-level sidebar Plugins link (slice 18 Checkpoint 
 });
 
 describe("SpecsTreeView — slice 19 sidebar density follow-up", () => {
-  it("renders Library Explorer spec/plugin entries as single-row leaves with inline meta + a11y labels", async () => {
+  it("renders Library Explorer spec/plugin entries as single-row name-only leaves with metadata kept out of visible text", async () => {
     mockFetch.mockImplementation(async (url: string) => {
       if (url === "/api/specs/library") {
         return {
@@ -169,14 +169,12 @@ describe("SpecsTreeView — slice 19 sidebar density follow-up", () => {
         fireEvent.click(await screen.findByTestId(`specs-section-toggle-${entry.section}`));
       }
       const leaf = await within(section).findByTestId(`specs-leaf-${entry.leaf}`);
-      const meta = await within(section).findByTestId(`specs-leaf-${entry.leaf}-meta`);
 
       expect(leaf.parentElement?.children).toHaveLength(1);
       expect(leaf.className).toMatch(/\bflex\b/);
       expect(leaf.className).not.toMatch(/\bblock\b/);
-      expect(meta.className).toMatch(/\bshrink-0\b/);
-      expect(meta.className).not.toMatch(/\bblock\b/);
-      expect(meta.textContent).toContain(entry.meta);
+      expect(within(section).queryByTestId(`specs-leaf-${entry.leaf}-meta`)).toBeNull();
+      expect(leaf.textContent).not.toContain(entry.meta);
       expect(leaf.getAttribute("title")).toContain(entry.meta);
       expect(leaf.getAttribute("aria-label")).toContain(entry.meta);
     }

@@ -38,6 +38,14 @@ const toneClass: Record<ProjectMetaTone, string> = {
   danger: "border-rose-300 bg-rose-50/80 text-rose-800",
 };
 
+const statusDotClass: Record<ProjectMetaTone, string> = {
+  neutral: "border-stone-400 bg-stone-300",
+  info: "border-sky-400 bg-sky-200",
+  success: "border-emerald-500 bg-emerald-400",
+  warning: "border-amber-400 bg-amber-300",
+  danger: "border-rose-400 bg-rose-300",
+};
+
 export function eventToken(kind: string): ProjectToken {
   const normalized = kind.toLowerCase();
   if (normalized.includes("mission_control.action_executed")) {
@@ -142,6 +150,12 @@ export function stateTone(state: string | undefined): ProjectMetaTone {
   return "neutral";
 }
 
+export function sliceStatusTone(state: string | undefined): ProjectMetaTone {
+  const normalized = state?.toLowerCase() ?? "";
+  if (normalized === "active" || normalized === "in-flight") return "info";
+  return stateTone(state);
+}
+
 export function humanizeCodeLabel(value: string): string {
   return value
     .replace(/[_./-]+/g, " ")
@@ -213,6 +227,48 @@ export function EventBadge({ kind, compact, testId }: { kind: string; compact?: 
 
 export function QueueStateBadge({ state, compact, testId }: { state: string | undefined | null; compact?: boolean; testId?: string }) {
   return <ProjectPill token={queueStateToken(state)} compact={compact} testId={testId} />;
+}
+
+export function QueueCountIcon({
+  count,
+  testId,
+}: {
+  count: number;
+  testId?: string;
+}) {
+  const label = `${count} qitem${count === 1 ? "" : "s"}`;
+  return (
+    <span
+      data-testid={testId}
+      title={label}
+      aria-label={label}
+      className="inline-flex shrink-0 items-center gap-1 border border-stone-200 bg-white/45 px-1.5 py-0.5 font-mono text-[9px] tabular-nums text-stone-600"
+    >
+      <Inbox className="h-3 w-3" strokeWidth={1.5} aria-hidden="true" />
+      <span>{count}</span>
+    </span>
+  );
+}
+
+export function StatusDot({
+  tone,
+  label,
+  testId,
+}: {
+  tone: ProjectMetaTone;
+  label: string;
+  testId?: string;
+}) {
+  return (
+    <span
+      data-testid={testId}
+      data-tone={tone}
+      title={label}
+      aria-label={label}
+      role="img"
+      className={cn("inline-block h-2.5 w-2.5 shrink-0 rounded-full border", statusDotClass[tone])}
+    />
+  );
 }
 
 export function TagPill({ tag, compact = true }: { tag: string; compact?: boolean }) {

@@ -40,18 +40,7 @@ function entryAccessibleLabel(entry: TreeEntry): string {
 
 function LeafContent({ entry }: { entry: TreeEntry }) {
   return (
-    <>
-      <span className="min-w-0 flex-1 truncate">{entry.name}</span>
-      {entry.meta ? (
-        <span
-          data-testid={`specs-leaf-${entry.id}-meta`}
-          className="flex shrink-0 items-center gap-1 truncate text-[9px] uppercase tracking-[0.08em] text-on-surface-variant"
-        >
-          {entry.metaNode}
-          <span className="truncate">{entry.meta}</span>
-        </span>
-      ) : null}
-    </>
+    <span className="min-w-0 flex-1 truncate">{entry.name}</span>
   );
 }
 
