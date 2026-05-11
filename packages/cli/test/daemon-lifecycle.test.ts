@@ -938,6 +938,49 @@ describe("buildDaemonEnv", () => {
     expect(result["OPENRIG_DB"]).toBe("/new/path.db");
   });
 
+  // bug-fix slice auth-bearer-tailscale-trust forward-fix:
+  // Default-product-launch must NOT export OPENRIG_HOST so daemon's
+  // index.ts falls through to the loopback+tailscale multi-bind path.
+  describe("auth-bearer-tailscale-trust: explicit-vs-default host signal", () => {
+    it("omits OPENRIG_HOST when opts.host is undefined (default-product-launch)", () => {
+      const baseEnv: Record<string, string> = { HOME: "/Users/tester", PATH: "/usr/bin" };
+      const result = buildDaemonEnv(baseEnv, {
+        port: 7433,
+        db: "/tmp/test.db",
+        // host intentionally omitted — operator never set it (default path)
+      });
+      expect(result["OPENRIG_HOST"]).toBeUndefined();
+      // port + db still flow through
+      expect(result["OPENRIG_PORT"]).toBe("7433");
+      expect(result["OPENRIG_DB"]).toBe("/tmp/test.db");
+    });
+
+    it("sets OPENRIG_HOST when opts.host is explicit (user opt-in)", () => {
+      const baseEnv: Record<string, string> = { HOME: "/Users/tester", PATH: "/usr/bin" };
+      const result = buildDaemonEnv(baseEnv, {
+        port: 7433,
+        host: "0.0.0.0",
+        db: "/tmp/test.db",
+      });
+      expect(result["OPENRIG_HOST"]).toBe("0.0.0.0");
+    });
+
+    it("does NOT scrub OPENRIG_HOST from baseEnv when opts.host is undefined (operator shell env wins)", () => {
+      // If the operator has OPENRIG_HOST set in their shell, that's an
+      // explicit signal — preserve it through the env-passthrough loop.
+      const baseEnv: Record<string, string> = {
+        HOME: "/Users/tester",
+        PATH: "/usr/bin",
+        OPENRIG_HOST: "0.0.0.0",
+      };
+      const result = buildDaemonEnv(baseEnv, {
+        port: 7433,
+        db: "/tmp/test.db",
+      });
+      expect(result["OPENRIG_HOST"]).toBe("0.0.0.0");
+    });
+  });
+
   describe("V1 pre-release CLI/daemon Item 1 — transcript rotation tunables projection", () => {
     it("projects transcriptsLines + transcriptsPollIntervalSeconds into OPENRIG_* env vars when provided", () => {
       const baseEnv: Record<string, string> = { HOME: "/Users/tester", PATH: "/usr/bin" };

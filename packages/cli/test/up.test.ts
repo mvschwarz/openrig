@@ -618,6 +618,100 @@ describe("Up CLI", () => {
     expect(clientBaseUrl).toBe("http://127.0.0.1:7461");
   });
 
+  // bug-fix slice auth-bearer-tailscale-trust forward-fix #2: `rig up`
+  // auto-start path was the second product launch path materializing
+  // the default daemon.host into OPENRIG_HOST. The discriminator below
+  // proves source=default → omit (so daemon multi-binds); source=env
+  // → preserve (operator opt-in).
+  describe("auth-bearer-tailscale-trust: up auto-start respects daemon.host source", () => {
+    function makeAutoStartDeps(captureSpawn: (env: Record<string, string>) => void): StatusDeps {
+      let daemonState: DaemonState | null = null;
+      let daemonStarted = false;
+      return {
+        lifecycleDeps: {
+          ...mockLifecycleDeps(),
+          exists: vi.fn((p: string) => p === STATE_FILE ? daemonState !== null : false),
+          readFile: vi.fn((p: string) => p === STATE_FILE && daemonState ? JSON.stringify(daemonState) : null),
+          writeFile: vi.fn((p: string, content: string) => {
+            if (p === STATE_FILE) daemonState = JSON.parse(content) as DaemonState;
+          }),
+          openForAppend: vi.fn(() => 3),
+          mkdirp: vi.fn(),
+          spawn: vi.fn((cmd, args, opts) => {
+            daemonStarted = true;
+            captureSpawn(opts.env as Record<string, string>);
+            return { pid: 999, unref: vi.fn() } as never;
+          }),
+          fetch: vi.fn(async (url: string) => {
+            if (!daemonStarted) throw new Error(`refused:${url}`);
+            return { ok: url.includes("/healthz") };
+          }),
+        },
+        clientFactory: () => ({
+          post: vi.fn(async () => ({
+            status: 201,
+            data: { status: "completed", rigId: "rig-1", stages: [], errors: [], warnings: [] },
+          })),
+        } as unknown as DaemonClient),
+      };
+    }
+
+    it("default (no env, no config) does NOT export OPENRIG_HOST so daemon multi-binds", async () => {
+      const savedHost = process.env["OPENRIG_HOST"];
+      const savedPort = process.env["OPENRIG_PORT"];
+      delete process.env["OPENRIG_HOST"];
+      process.env["OPENRIG_PORT"] = "7471";
+
+      let spawnedEnv: Record<string, string> = {};
+      const deps = makeAutoStartDeps((env) => { spawnedEnv = env; });
+
+      const prog = new Command();
+      prog.exitOverride();
+      prog.addCommand(upCommand({ ...deps, preflightExec: healthyPreflightExec }));
+
+      await captureLogs(async () => {
+        await prog.parseAsync(["node", "rig", "up", "/tmp/test.yaml"]);
+      });
+
+      if (savedHost === undefined) delete process.env["OPENRIG_HOST"];
+      else process.env["OPENRIG_HOST"] = savedHost;
+      if (savedPort === undefined) delete process.env["OPENRIG_PORT"];
+      else process.env["OPENRIG_PORT"] = savedPort;
+
+      expect(spawnedEnv["OPENRIG_HOST"]).toBeUndefined();
+      expect(spawnedEnv["OPENRIG_PORT"]).toBe("7471");
+    });
+
+    it("env-explicit OPENRIG_HOST is preserved into spawn env (distinct value discriminator)", async () => {
+      const savedHost = process.env["OPENRIG_HOST"];
+      const savedPort = process.env["OPENRIG_PORT"];
+      // Use a distinct value so the discriminator can't pass vacuously:
+      // 100.64.55.66 is a tailscale CGNAT address — operator-explicit
+      // bind would normally be honored as-is.
+      process.env["OPENRIG_HOST"] = "100.64.55.66";
+      process.env["OPENRIG_PORT"] = "7472";
+
+      let spawnedEnv: Record<string, string> = {};
+      const deps = makeAutoStartDeps((env) => { spawnedEnv = env; });
+
+      const prog = new Command();
+      prog.exitOverride();
+      prog.addCommand(upCommand({ ...deps, preflightExec: healthyPreflightExec }));
+
+      await captureLogs(async () => {
+        await prog.parseAsync(["node", "rig", "up", "/tmp/test.yaml"]);
+      });
+
+      if (savedHost === undefined) delete process.env["OPENRIG_HOST"];
+      else process.env["OPENRIG_HOST"] = savedHost;
+      if (savedPort === undefined) delete process.env["OPENRIG_PORT"];
+      else process.env["OPENRIG_PORT"] = savedPort;
+
+      expect(spawnedEnv["OPENRIG_HOST"]).toBe("100.64.55.66");
+      expect(spawnedEnv["OPENRIG_PORT"]).toBe("7472");
+    });
+  });
+
   it("up surfaces the real daemon auto-start failure instead of a generic hint", async () => {
     const savedPort = process.env["OPENRIG_PORT"];
     process.env["OPENRIG_PORT"] = "7463";

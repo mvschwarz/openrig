@@ -85,7 +85,14 @@ export function daemonCommand(depsOverride?: LifecycleDeps): Command {
         const configStore = new ConfigStore();
         const config = configStore.resolve();
         const effectivePort = opts.port ? parseInt(opts.port, 10) : config.daemon.port;
+        // bug-fix slice auth-bearer-tailscale-trust: distinguish
+        // user-explicit from default-fallback so the daemon can
+        // multi-bind (loopback + tailscale auto-detect) when the operator
+        // never opted in to a specific host.
+        const hostResolution = configStore.resolveWithSource("daemon.host");
+        const hostUserExplicit = opts.host !== undefined || hostResolution.source !== "default";
         const effectiveHost = opts.host ?? config.daemon.host;
+        const hostForDaemon = hostUserExplicit ? effectiveHost : undefined;
 
         // Run preflight before starting
           const preflight = new SystemPreflight({
@@ -108,7 +115,7 @@ export function daemonCommand(depsOverride?: LifecycleDeps): Command {
         const state = await startDaemon(
           {
             port: effectivePort,
-            host: effectiveHost,
+            host: hostForDaemon,
             db: opts.db ?? config.db.path,
             transcriptsEnabled: config.transcripts.enabled,
             transcriptsPath: config.transcripts.path,

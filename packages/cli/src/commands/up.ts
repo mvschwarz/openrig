@@ -43,6 +43,14 @@ Examples:
           transcripts: { enabled: boolean; path: string; lines: number; pollIntervalSeconds: number };
           workspace: { root: string };
         } | null = null;
+        // bug-fix slice auth-bearer-tailscale-trust: track whether
+        // daemon.host was operator-explicit (env or config file) vs
+        // default-fallback. The daemon's multi-bind path (loopback +
+        // tailscale auto-detect) only runs when OPENRIG_HOST is NOT
+        // exported to the child, so we omit it on the default path.
+        // Hoisted to function scope so the startDaemon block below can
+        // read it after the preflight try-catch.
+        let hostForDaemon: string | undefined;
         try {
           const { ConfigStore } = await import("../config-store.js");
           const { SystemPreflight } = await import("../system-preflight.js");
@@ -50,6 +58,10 @@ Examples:
           const { OPENRIG_DIR } = await import("../daemon-lifecycle.js");
           const configStore = new ConfigStore();
           resolvedConfig = configStore.resolve();
+          const hostResolution = configStore.resolveWithSource("daemon.host");
+          hostForDaemon = hostResolution.source === "default"
+            ? undefined
+            : resolvedConfig.daemon.host;
           const preflightExec = depsOverride?.preflightExec ?? (async (cmd: string) =>
             execSync(cmd, { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] }));
           const preflight = new SystemPreflight({
@@ -77,7 +89,7 @@ Examples:
         try {
           await startDaemon({
             port: resolvedConfig?.daemon.port,
-            host: resolvedConfig?.daemon.host,
+            host: hostForDaemon,
             db: resolvedConfig?.db.path,
             transcriptsEnabled: resolvedConfig?.transcripts.enabled,
             transcriptsPath: resolvedConfig?.transcripts.path,
