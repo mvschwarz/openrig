@@ -1,0 +1,94 @@
+# V0.3.1 slice 13 walk-item 7 — openrig-velocity workflow spec.
+#
+# Built-in spec for the openrig-velocity rig (the slice-development
+# topology this product is built with). Referenced by
+# substrate/openrig-work/missions/release-0.3.1/README.md frontmatter
+# `workflow_spec: openrig-velocity@1.0` and projected onto the mission
+# Topology tab by the missions route.
+#
+# Flow (one slice end-to-end):
+#   orch dispatches → advisor refines (optional) → driver implements
+#   → guard narrowly reviews → qa exercises in disposable VM → orch
+#   merges + closes. Single frontier (v1 projector contract).
+workflow:
+  id: openrig-velocity
+  version: "1.0"
+  objective: >
+    Drive one slice from dispatch through merge using the
+    openrig-velocity rig's role chain (orch / advisor / driver /
+    guard / qa).
+  target:
+    rig: openrig-velocity
+  entry:
+    role: orch
+  coordination_terminal_turn_rule: hot_potato
+  roles:
+    orch:
+      skill_refs: [openrig-user, orchestration-team]
+      preferred_targets: [orch-lead@openrig-velocity]
+    advisor:
+      skill_refs: [openrig-user, brainstorming, requirements-writer]
+      preferred_targets: [advisor-lead@openrig-velocity]
+    driver:
+      skill_refs: [openrig-user, executing-plans, test-driven-development]
+      preferred_targets: [redo3-driver-3@openrig-velocity]
+    guard:
+      skill_refs: [openrig-user, review-team, systematic-debugging]
+      preferred_targets: [redo3-guard-3@openrig-velocity]
+    qa:
+      skill_refs: [openrig-user, dogfood, verification-before-completion]
+      preferred_targets: [velocity-qa@openrig-velocity]
+  steps:
+    - id: dispatch
+      actor_role: orch
+      objective: Author the dispatch packet + queue handoff to driver.
+      allowed_exits: [handoff, waiting, failed]
+      next_hop:
+        mode: require
+        suggested_roles: [driver]
+    - id: refine
+      actor_role: advisor
+      objective: Author or refine the IMPL-PRD before driver picks up.
+      allowed_exits: [handoff, waiting, failed]
+      next_hop:
+        mode: require
+        suggested_roles: [driver]
+    - id: implement
+      actor_role: driver
+      objective: TDD-first implementation; commit on slice branch; hand off to guard.
+      allowed_exits: [handoff, waiting, failed]
+      next_hop:
+        mode: require
+        suggested_roles: [guard]
+    - id: guard-review
+      actor_role: guard
+      objective: Narrow re-review of the slice branch tip; CLEAR / CONCERNING / BLOCKING.
+      allowed_exits: [handoff, waiting, failed]
+      next_hop:
+        mode: require
+        suggested_roles: [qa]
+    - id: vm-verify
+      actor_role: qa
+      objective: Exercise the slice on a disposable VM; PASS / CONCERNING / FAIL.
+      allowed_exits: [handoff, waiting, failed]
+      next_hop:
+        mode: require
+        suggested_roles: [orch]
+    - id: merge
+      actor_role: orch
+      objective: Merge the slice to main + close the dispatch loop.
+      allowed_exits: [done, failed]
+      next_hop:
+        mode: forbid
+  invariants:
+    continuation_required: true
+    preserve_lineage: true
+    closure_required: true
+    allowed_exits: [handoff, waiting, done, failed]
+  loop_guards:
+    max_hops: 24
+    spawn_budget: 0
+  closure:
+    success: Slice merged + close-out packet authored.
+    degraded: Slice paused with a named blocker; forward-fix queued.
+    failed: Slice rolled back with evidence.

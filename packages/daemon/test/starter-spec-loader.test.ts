@@ -24,7 +24,7 @@ import { migrate } from "../src/db/migrate.js";
 import { coreSchema } from "../src/db/migrations/001_core_schema.js";
 import { workflowSpecsSchema } from "../src/db/migrations/033_workflow_specs.js";
 import { WorkflowSpecCache } from "../src/domain/workflow-spec-cache.js";
-import { loadStarterWorkflowSpecs } from "../src/domain/workflow/starter-spec-loader.js";
+import { loadStarterWorkflowSpecs, defaultBuiltinSpecsDir } from "../src/domain/workflow/starter-spec-loader.js";
 
 const ALPHA_SPEC = `workflow:
   id: alpha-spec
@@ -153,5 +153,22 @@ describe("built-in workflow spec loader", () => {
     writeFileSync(join(builtinDir, "beta.yml"), BETA_SPEC);
     const result = loadStarterWorkflowSpecs({ cache, builtinDir });
     expect(result.loaded.map((r) => r.name).sort()).toEqual(["alpha-spec", "beta-spec"]);
+  });
+
+  // V0.3.1 slice 13 walk-item 7 — load the actual shipped builtins
+  // directory and assert openrig-velocity@1.0 is in it. This is what
+  // release-0.3.1/README.md's frontmatter declares; without the spec
+  // present, the mission Topology tab falls back to the session-name
+  // union (velocity-qa VM caught exactly this on tip ef3e94d).
+  it("shipped builtins include openrig-velocity@1.0 (mission Topology acceptance for slice 13)", () => {
+    const shippedDir = defaultBuiltinSpecsDir();
+    const result = loadStarterWorkflowSpecs({ cache, builtinDir: shippedDir });
+    expect(result.errors).toEqual([]);
+    const row = cache.getByNameVersion("openrig-velocity", "1.0");
+    expect(row).not.toBeNull();
+    expect(row!.spec.steps.length).toBeGreaterThan(0);
+    // Discriminate against the basic-loop spec (which is also in the
+    // shipped dir): openrig-velocity must have a 'guard' role.
+    expect(Object.keys(row!.spec.roles)).toContain("guard");
   });
 });
