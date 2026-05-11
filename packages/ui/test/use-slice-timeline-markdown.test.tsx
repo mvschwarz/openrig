@@ -75,8 +75,8 @@ describe("useSliceTimelineMarkdown — production wire calls /api/files/read wit
       if (url.startsWith("/api/files/roots")) {
         return new Response(JSON.stringify({
           roots: [
-            { name: "substrate", path: "~/code/substrate" },
-            { name: "workspace", path: "~/.openrig/shared-docs/openrig-work" },
+            { name: "substrate", path: "/Users/example/code/substrate" },
+            { name: "workspace", path: "/Users/example/code/substrate/shared-docs/openrig-work" },
           ],
         }), { status: 200, headers: { "Content-Type": "application/json" } });
       }
@@ -84,7 +84,7 @@ describe("useSliceTimelineMarkdown — production wire calls /api/files/read wit
         return new Response(JSON.stringify({
           root: "workspace",
           path: "missions/release-0.3.1/slices/06-storytelling-primitives/timeline.md",
-          absolutePath: "~/.openrig/shared-docs/openrig-work/missions/release-0.3.1/slices/06-storytelling-primitives/timeline.md",
+          absolutePath: "/Users/example/code/substrate/shared-docs/openrig-work/missions/release-0.3.1/slices/06-storytelling-primitives/timeline.md",
           content: "---\nkind: incident-timeline\n---\n\nBody.\n",
           mtime: "2026-05-10T00:00:00Z",
           contentHash: "abc",
@@ -94,7 +94,7 @@ describe("useSliceTimelineMarkdown — production wire calls /api/files/read wit
       return new Response("not found", { status: 404 });
     });
 
-    const absoluteSlicePath = "~/.openrig/shared-docs/openrig-work/missions/release-0.3.1/slices/06-storytelling-primitives";
+    const absoluteSlicePath = "/Users/example/code/substrate/shared-docs/openrig-work/missions/release-0.3.1/slices/06-storytelling-primitives";
     const { result } = renderHook(
       () => useSliceTimelineMarkdown(absoluteSlicePath),
       { wrapper: makeWrapper() },
@@ -122,7 +122,7 @@ describe("useSliceTimelineMarkdown — production wire calls /api/files/read wit
     fetchSpy.mockImplementation(async (url: string) => {
       if (url.startsWith("/api/files/roots")) {
         return new Response(JSON.stringify({
-          roots: [{ name: "ws", path: "~/code/openrig-work" }],
+          roots: [{ name: "ws", path: "/Users/example/code/openrig-work" }],
         }), { status: 200 });
       }
       return new Response("not found", { status: 404 });
@@ -147,7 +147,7 @@ describe("useSliceTimelineMarkdown — production wire calls /api/files/read wit
     fetchSpy.mockImplementation(async (url: string) => {
       if (url.startsWith("/api/files/roots")) {
         return new Response(JSON.stringify({
-          roots: [{ name: "workspace", path: "~/code/openrig-work" }],
+          roots: [{ name: "workspace", path: "/Users/example/code/openrig-work" }],
         }), { status: 200 });
       }
       if (url.startsWith("/api/files/read")) {
@@ -156,7 +156,7 @@ describe("useSliceTimelineMarkdown — production wire calls /api/files/read wit
       return new Response("?", { status: 500 });
     });
     const { result } = renderHook(
-      () => useSliceTimelineMarkdown("~/code/openrig-work/slices/some-slice"),
+      () => useSliceTimelineMarkdown("/Users/example/code/openrig-work/slices/some-slice"),
       { wrapper: makeWrapper() },
     );
     await waitFor(() => expect(result.current.isLoading).toBe(false));
