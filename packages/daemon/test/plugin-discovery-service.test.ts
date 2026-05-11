@@ -367,6 +367,74 @@ describe("PluginDiscoveryService", () => {
       expect(service.getPlugin("openrig-no-mcp")?.mcpServers).toEqual([]);
     });
 
+    it("slice 3.3 fix-iteration — getPlugin self-resolves rig-cwd: IDs (claude side) without external cwd state", () => {
+      // redo-guard-2 BLOCK item 1: /api/plugins?cwd=... lists rig-cwd
+      // plugins but /api/plugins/:id detail call 404s because listPlugins()
+      // without cwdScanRoots doesn't re-scan the cwd, so getPlugin can't
+      // find the entry by id. Fix: parse the cwd out of the rig-cwd: id
+      // prefix, re-scan that cwd, resolve the entry. ID format:
+      //   rig-cwd:<cwd>/.claude/plugins/<plugin>
+      //   rig-cwd:<cwd>/.codex/plugins/<plugin>
+      const rigCwd = join(dirs.root, "rig-cwd-self-resolve");
+      const claudeBundleDir = join(rigCwd, ".claude", "plugins");
+      mkdirSync(claudeBundleDir, { recursive: true });
+      writeClaudePluginManifest(join(claudeBundleDir, "rig-tool"), {
+        name: "rig-tool",
+        version: "1.0.0",
+        description: "rig-bundled tool",
+      });
+      const service = new PluginDiscoveryService({
+        openrigPluginsDir: dirs.openrigPluginsDir,
+        claudeCacheDir: dirs.claudeCacheDir,
+        codexCacheDir: dirs.codexCacheDir,
+        specLibraryDir: dirs.specLibraryDir,
+      });
+      const listed = service.listPlugins({ cwdScanRoots: [rigCwd] });
+      const rigToolEntry = listed.find((p) => p.source === "rig-cwd");
+      expect(rigToolEntry).toBeDefined();
+      const rigToolId = rigToolEntry!.id;
+      // Call getPlugin with that id directly (no cwd opts) — must resolve.
+      const detail = service.getPlugin(rigToolId);
+      expect(detail).not.toBeNull();
+      expect(detail?.entry.name).toBe("rig-tool");
+      expect(detail?.entry.source).toBe("rig-cwd");
+    });
+
+    it("slice 3.3 fix-iteration — getPlugin self-resolves rig-cwd: codex IDs too", () => {
+      const rigCwd = join(dirs.root, "rig-cwd-self-resolve-codex");
+      const codexBundleDir = join(rigCwd, ".codex", "plugins");
+      mkdirSync(codexBundleDir, { recursive: true });
+      writeCodexPluginManifest(join(codexBundleDir, "codex-tool"), {
+        name: "codex-tool",
+        version: "2.0.0",
+        description: "rig-bundled codex tool",
+      });
+      const service = new PluginDiscoveryService({
+        openrigPluginsDir: dirs.openrigPluginsDir,
+        claudeCacheDir: dirs.claudeCacheDir,
+        codexCacheDir: dirs.codexCacheDir,
+        specLibraryDir: dirs.specLibraryDir,
+      });
+      const listed = service.listPlugins({ cwdScanRoots: [rigCwd] });
+      const codexToolEntry = listed.find((p) => p.name === "codex-tool");
+      expect(codexToolEntry).toBeDefined();
+      const detail = service.getPlugin(codexToolEntry!.id);
+      expect(detail).not.toBeNull();
+      expect(detail?.entry.name).toBe("codex-tool");
+    });
+
+    it("slice 3.3 fix-iteration — getPlugin returns null for malformed rig-cwd: ids", () => {
+      // Negative: garbled prefix or unresolvable cwd → null (not throw).
+      const service = new PluginDiscoveryService({
+        openrigPluginsDir: dirs.openrigPluginsDir,
+        claudeCacheDir: dirs.claudeCacheDir,
+        codexCacheDir: dirs.codexCacheDir,
+        specLibraryDir: dirs.specLibraryDir,
+      });
+      expect(service.getPlugin("rig-cwd:notapath")).toBeNull();
+      expect(service.getPlugin("rig-cwd:/nonexistent/.claude/plugins/x")).toBeNull();
+    });
+
     it("returns full manifest + tree summary for a discovered plugin", () => {
       const corePluginDir = join(dirs.openrigPluginsDir, "openrig-core");
       writeClaudePluginManifest(corePluginDir, {

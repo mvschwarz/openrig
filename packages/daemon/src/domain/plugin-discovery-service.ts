@@ -295,7 +295,18 @@ export class PluginDiscoveryService {
   }
 
   getPlugin(id: string): PluginDetail | null {
-    const entry = this.listPlugins().find((p) => p.id === id);
+    // Slice 3.3 fix-iteration — rig-cwd: IDs are self-resolvable.
+    // Pre-fix, getPlugin called this.listPlugins() (no opts), which
+    // excluded rig-cwd entries because cwdScanRoots is empty by default.
+    // Result: /api/plugins?cwd= returned a rig-cwd id, /api/plugins/:id
+    // 404'd on the same id (redo-guard-2 BLOCK item 1). Fix: parse the
+    // cwd out of the rig-cwd: prefix and pass it as cwdScanRoots so
+    // the entry is in the list. ID format constructed in
+    // scanCwdBundledPlugins:
+    //   rig-cwd:<cwd>/.claude/plugins/<plugin>
+    //   rig-cwd:<cwd>/.codex/plugins/<plugin>
+    const cwdScanRoots = extractCwdFromRigCwdId(id);
+    const entry = this.listPlugins(cwdScanRoots ? { cwdScanRoots } : {}).find((p) => p.id === id);
     if (!entry) return null;
 
     const claudeManifestPath = join(entry.path, CLAUDE_MANIFEST_REL);
@@ -414,6 +425,31 @@ export class PluginDiscoveryService {
       lastSeenAt,
     };
   }
+}
+
+// Slice 3.3 fix-iteration — parse cwd from a rig-cwd: id so getPlugin
+// can re-scan that cwd before the lookup. Returns the cwd in a
+// single-element array (caller passes as cwdScanRoots) or null when
+// the id is not a rig-cwd: id, can't be parsed, or both manifest dir
+// markers are absent. Tolerant of both `/.claude/plugins/` and
+// `/.codex/plugins/` markers (whichever appears first wins; in the
+// canonical id one of them is always present).
+const RIG_CWD_PREFIX = "rig-cwd:";
+const CLAUDE_MARKER = "/.claude/plugins/";
+const CODEX_MARKER = "/.codex/plugins/";
+function extractCwdFromRigCwdId(id: string): string[] | null {
+  if (!id.startsWith(RIG_CWD_PREFIX)) return null;
+  const rest = id.slice(RIG_CWD_PREFIX.length);
+  const claudeIdx = rest.indexOf(CLAUDE_MARKER);
+  const codexIdx = rest.indexOf(CODEX_MARKER);
+  let cwd: string | null = null;
+  if (claudeIdx >= 0 && (codexIdx < 0 || claudeIdx < codexIdx)) {
+    cwd = rest.slice(0, claudeIdx);
+  } else if (codexIdx >= 0) {
+    cwd = rest.slice(0, codexIdx);
+  }
+  if (!cwd) return null;
+  return [cwd];
 }
 
 function safeReaddir(dir: string): string[] {

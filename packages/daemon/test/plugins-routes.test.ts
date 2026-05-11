@@ -161,6 +161,39 @@ describe("plugins HTTP routes", () => {
       expect(rigCwdSubset[0]?.name).toBe("rig-tool");
     });
 
+    it("slice 3.3 fix-iteration — list ?cwd= + detail roundtrip for rig-cwd plugin (no 404)", async () => {
+      // redo-guard-2 BLOCK item 1: /api/plugins?cwd= lists;
+      // /api/plugins/<encoded-rig-cwd-id> must 200 not 404. Fix lands in
+      // PluginDiscoveryService.getPlugin via self-resolve from id prefix.
+      const rigCwd = join(env.root, "rig-cwd-roundtrip");
+      const claudeBundleDir = join(rigCwd, ".claude", "plugins");
+      mkdirSync(claudeBundleDir, { recursive: true });
+      writeClaudePluginManifest(join(claudeBundleDir, "roundtrip-tool"), {
+        name: "roundtrip-tool",
+        version: "1.0.0",
+        description: "roundtrip",
+      });
+
+      // Step 1: list with ?cwd= — captures id.
+      const listRes = await createApp(env.service).request(
+        `/api/plugins?cwd=${encodeURIComponent(rigCwd)}`,
+      );
+      expect(listRes.status).toBe(200);
+      const list = await listRes.json() as Array<{ id: string; source: string }>;
+      const rigCwdEntry = list.find((p) => p.source === "rig-cwd");
+      expect(rigCwdEntry).toBeDefined();
+      const rigCwdId = rigCwdEntry!.id;
+
+      // Step 2: detail call with that id — must 200 (was 404 pre-fix).
+      const detailRes = await createApp(env.service).request(
+        `/api/plugins/${encodeURIComponent(rigCwdId)}`,
+      );
+      expect(detailRes.status).toBe(200);
+      const detail = await detailRes.json() as { entry: { name: string; source: string } };
+      expect(detail.entry.name).toBe("roundtrip-tool");
+      expect(detail.entry.source).toBe("rig-cwd");
+    });
+
     it("supports source filter via query string", async () => {
       writeClaudePluginManifest(join(env.openrigPluginsDir, "vended"), {
         name: "vended",
