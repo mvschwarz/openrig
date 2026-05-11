@@ -242,7 +242,17 @@ export function buildDaemonEnv(
   baseEnv: Record<string, string>,
   opts: {
     port: number;
-    host: string;
+    /**
+     * Operator-explicit bind host. When undefined the CLI is signaling
+     * "no operator opt-in" so the daemon's index.ts can fall through to
+     * the default loopback+tailscale-auto multi-bind path (bug-fix slice
+     * auth-bearer-tailscale-trust). When defined, the daemon takes the
+     * explicit-host branch and applies the bearer invariant to it.
+     * If undefined here AND the operator shell already has OPENRIG_HOST
+     * set in baseEnv, the env-passthrough loop preserves that value
+     * (their shell-level opt-in still wins).
+     */
+    host?: string;
     db: string;
     transcriptsEnabled?: boolean;
     transcriptsPath?: string;
@@ -263,7 +273,9 @@ export function buildDaemonEnv(
 
   // Explicit OPENRIG_* overrides — always win over inherited values
   env["OPENRIG_PORT"] = String(opts.port);
-  env["OPENRIG_HOST"] = opts.host;
+  if (opts.host !== undefined) {
+    env["OPENRIG_HOST"] = opts.host;
+  }
   env["OPENRIG_DB"] = opts.db;
   if (opts.transcriptsEnabled !== undefined) {
     env["OPENRIG_TRANSCRIPTS_ENABLED"] = String(opts.transcriptsEnabled);
@@ -283,8 +295,15 @@ export function buildDaemonEnv(
 
 export async function startDaemon(opts: StartOptions, deps: LifecycleDeps): Promise<DaemonState> {
   const port = opts.port ?? DEFAULT_PORT;
-  const host = opts.host ?? DEFAULT_HOST;
   const db = opts.db ?? DEFAULT_DB;
+  // bug-fix slice auth-bearer-tailscale-trust: preserve the
+  // user-explicit-vs-default distinction. `opts.host` is undefined when
+  // the operator never opted in; in that case healthz probes still use
+  // the loopback default, but buildDaemonEnv must NOT export
+  // OPENRIG_HOST so the daemon falls through to the multi-bind default
+  // (loopback + tailscale auto-detect).
+  const explicitHost = opts.host;
+  const probeHost = explicitHost ?? DEFAULT_HOST;
 
   // Check if already running
   const existing = readState(deps);
@@ -301,7 +320,7 @@ export async function startDaemon(opts: StartOptions, deps: LifecycleDeps): Prom
   } else {
     let recoveredRunning = false;
     try {
-      await fetchDaemonProbe(deps, `http://${host}:${port}/healthz`);
+      await fetchDaemonProbe(deps, `http://${probeHost}:${port}/healthz`);
       recoveredRunning = true;
     } catch (err) {
       if (err instanceof HealthProbeTimeoutError) {
@@ -324,7 +343,7 @@ export async function startDaemon(opts: StartOptions, deps: LifecycleDeps): Prom
   const child = deps.spawn(process.execPath, [daemonEntry], {
     env: buildDaemonEnv(process.env as Record<string, string>, {
       port,
-      host,
+      host: explicitHost,
       db,
       transcriptsEnabled: opts.transcriptsEnabled,
       transcriptsPath: opts.transcriptsPath,
@@ -339,8 +358,9 @@ export async function startDaemon(opts: StartOptions, deps: LifecycleDeps): Prom
 
   const pid = child.pid!;
 
-  // Poll healthz
-  const healthzUrl = `http://${host}:${port}/healthz`;
+  // Poll healthz against the configured probe host (loopback default
+  // when operator didn't opt in to a specific bind).
+  const healthzUrl = `http://${probeHost}:${port}/healthz`;
   let healthy = false;
   for (let i = 0; i < HEALTHZ_RETRIES; i++) {
     try {
@@ -364,7 +384,10 @@ export async function startDaemon(opts: StartOptions, deps: LifecycleDeps): Prom
   const state: DaemonState = {
     pid,
     port,
-    host,
+    // Persist the probe host (operator-explicit when set, loopback
+    // default otherwise) so subsequent status reads can reach the
+    // daemon regardless of whether tailscale was added at multi-bind.
+    host: probeHost,
     db,
     startedAt: new Date().toISOString(),
   };
