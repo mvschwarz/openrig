@@ -11,7 +11,7 @@ imports:
 profiles:
   default:
     uses:
-      skills: [openrig-user, openrig-architect, brainstorming, requirements-writer, mental-model-ha]
+      skills: [openrig-user, openrig-architect, brainstorming, requirements-writer]
       guidance: [role]
       subagents: []
       hooks: []

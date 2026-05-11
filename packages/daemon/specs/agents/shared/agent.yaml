@@ -24,10 +24,20 @@ resources:
       path: skills/core/openrig-operator
     - id: openrig-installer
       path: skills/core/openrig-installer
+    - id: openrig-architect
+      path: skills/core/openrig-architect
+    - id: rig-lifecycle
+      path: skills/core/rig-lifecycle
     - id: claude-compact-in-place
       path: skills/claude-compact-in-place
     - id: systematic-debugging
       path: skills/process/systematic-debugging
+    - id: local-sysadmin
+      path: skills/process/local-sysadmin
+    - id: intake-routing
+      path: skills/process/intake-routing
+    - id: control-plane-queue
+      path: skills/process/control-plane-queue
     - id: test-driven-development
       path: skills/process/test-driven-development
     - id: verification-before-completion
