@@ -821,7 +821,31 @@ export function MissionScopePage() {
         />
       ) : null}
       {active === "topology" ? (
-        <ScopeTopologyRollup detailsByName={rollup.details.itemsByName} />
+        (() => {
+          // V0.3.1 slice 13 walk-item 7 — when the mission declares
+          // `workflow_spec: <name>@<version>` in its README frontmatter
+          // AND the spec is in the WorkflowSpecCache, the missions
+          // route returns a projected spec graph. Render it via
+          // TopologyTab (same component the slice scope uses). Fall
+          // back to the session-name aggregation when the declaration
+          // is absent or the spec isn't cached.
+          const missionTopology =
+            missionData.data && "topology" in missionData.data
+              ? missionData.data.topology
+              : null;
+          if (missionTopology?.specGraph) {
+            return (
+              <TopologyTab
+                topology={{
+                  affectedRigs: [],
+                  totalSeats: 0,
+                  specGraph: missionTopology.specGraph,
+                }}
+              />
+            );
+          }
+          return <ScopeTopologyRollup detailsByName={rollup.details.itemsByName} />;
+        })()
       ) : null}
     </ScopeShell>
   );

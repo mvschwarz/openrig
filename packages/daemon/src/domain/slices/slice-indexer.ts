@@ -45,6 +45,16 @@ export interface SliceProofPacket {
   mtime: string;
 }
 
+/** V0.3.1 slice 13 walk-item 7 — `workflow_spec: <name>@<version>`
+ *  frontmatter declaration. When set, the Topology tab projects a
+ *  spec graph from this declaration via WorkflowSpecCache.getByName-
+ *  Version + projectSpecGraph, even when no live workflow_instance
+ *  is bound. Null when the field is absent or malformed. */
+export interface WorkflowSpecRef {
+  name: string;
+  version: string;
+}
+
 export interface SliceRecord {
   /** Folder name (canonical id). */
   name: string;
@@ -70,6 +80,8 @@ export interface SliceRecord {
   lastActivityAt: string | null;
   /** Sources cited in frontmatter (e.g. PRDs, planner-briefs). */
   files: string[];
+  /** Parsed `workflow_spec: <name>@<version>` frontmatter declaration; null when absent or malformed. */
+  workflowSpec: WorkflowSpecRef | null;
 }
 
 export interface SliceListEntry {
@@ -77,6 +89,8 @@ export interface SliceListEntry {
   missionId: string | null;
   displayName: string;
   railItem: string | null;
+  /** Mirrors SliceRecord.workflowSpec; null when absent or malformed. */
+  workflowSpec: WorkflowSpecRef | null;
   status: SliceStatus;
   rawStatus: string | null;
   qitemCount: number;
@@ -282,6 +296,7 @@ export class SliceIndexer {
       missionId,
       displayName: this.extractDisplayName(slicePath, frontmatter, name),
       railItem,
+      workflowSpec: parseWorkflowSpecRef(frontmatter["workflow_spec"]),
       status,
       rawStatus: (frontmatter["status"] as string | undefined) ?? null,
       qitemCount: qitemIds.length,
@@ -315,6 +330,7 @@ export class SliceIndexer {
       proofPacket,
       lastActivityAt,
       files,
+      workflowSpec: parseWorkflowSpecRef(frontmatter["workflow_spec"]),
     };
   }
 
@@ -647,4 +663,21 @@ export function parseFrontmatter(content: string): Record<string, unknown> {
     out[key] = value;
   }
   return out;
+}
+
+/** V0.3.1 slice 13 walk-item 7 — parse `workflow_spec: <name>@<version>`
+ *  frontmatter into a structured ref. Returns null when the value is
+ *  missing, non-string, or doesn't match the `<name>@<version>` shape.
+ *  Exported so the missions route can reuse the same parser on the
+ *  mission README's frontmatter. */
+export function parseWorkflowSpecRef(raw: unknown): WorkflowSpecRef | null {
+  if (typeof raw !== "string") return null;
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  const atIdx = trimmed.lastIndexOf("@");
+  if (atIdx <= 0 || atIdx === trimmed.length - 1) return null;
+  const name = trimmed.slice(0, atIdx).trim();
+  const version = trimmed.slice(atIdx + 1).trim();
+  if (!name || !version) return null;
+  return { name, version };
 }

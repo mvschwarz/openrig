@@ -231,6 +231,41 @@ describe("PL-slice-story-view-v0 SliceIndexer", () => {
     });
   });
 
+  // V0.3.1 slice 13 walk-item 7 — workflow_spec frontmatter parsing.
+  // The mission Topology tab (and slice Topology fallback) projects
+  // a spec graph from this declaration even when no live workflow
+  // instance is bound. Format: `workflow_spec: <name>@<version>`.
+  describe("workflow_spec frontmatter", () => {
+    it("parses workflow_spec: <name>@<version> from frontmatter onto SliceRecord + SliceListEntry", () => {
+      writeSlice(slicesRoot, "topo-slice", {
+        "README.md": "---\nstatus: active\nworkflow_spec: openrig-velocity@1.0\n---\n# Topo\n",
+      });
+      const indexer = new SliceIndexer({ slicesRoot, dogfoodEvidenceRoot: null, db });
+      const list = indexer.list();
+      expect(list[0]!.workflowSpec).toEqual({ name: "openrig-velocity", version: "1.0" });
+      const record = indexer.get("topo-slice")!;
+      expect(record.workflowSpec).toEqual({ name: "openrig-velocity", version: "1.0" });
+    });
+
+    it("returns workflowSpec: null when the frontmatter field is absent", () => {
+      writeSlice(slicesRoot, "no-topo-slice", {
+        "README.md": "---\nstatus: active\n---\n# Plain\n",
+      });
+      const indexer = new SliceIndexer({ slicesRoot, dogfoodEvidenceRoot: null, db });
+      const list = indexer.list();
+      expect(list[0]!.workflowSpec).toBeNull();
+      expect(indexer.get("no-topo-slice")!.workflowSpec).toBeNull();
+    });
+
+    it("ignores malformed workflow_spec values that do not match <name>@<version>", () => {
+      writeSlice(slicesRoot, "bad-topo-slice", {
+        "README.md": "---\nstatus: active\nworkflow_spec: not-a-valid-spec-ref\n---\n",
+      });
+      const indexer = new SliceIndexer({ slicesRoot, dogfoodEvidenceRoot: null, db });
+      expect(indexer.list()[0]!.workflowSpec).toBeNull();
+    });
+  });
+
   describe("qitem matching", () => {
     it("matches qitems by slice-name body substring", () => {
       writeSlice(slicesRoot, "mission-control-phase-a", { "README.md": "---\nstatus: shipped\n---\n" });

@@ -25,16 +25,38 @@ import { eventsSchema } from "../src/db/migrations/003_events.js";
 import { streamItemsSchema } from "../src/db/migrations/023_stream_items.js";
 import { queueItemsSchema } from "../src/db/migrations/024_queue_items.js";
 import { SliceIndexer } from "../src/domain/slices/slice-indexer.js";
+import { WorkflowSpecCache } from "../src/domain/workflow-spec-cache.js";
+import { workflowSpecsSchema } from "../src/db/migrations/033_workflow_specs.js";
 import { missionsRoutes } from "../src/routes/missions.js";
 
-function buildApp(indexer: SliceIndexer): Hono {
+function buildApp(
+  indexer: SliceIndexer,
+  specCache?: WorkflowSpecCache,
+): Hono {
   const app = new Hono();
   app.use("*", async (c, next) => {
     c.set("sliceIndexer" as never, indexer);
+    c.set("workflowSpecCache" as never, specCache);
     await next();
   });
   app.route("/api/missions", missionsRoutes());
   return app;
+}
+
+function writeMissionReadme(
+  missionsRoot: string,
+  missionId: string,
+  frontmatter: Record<string, string> = {},
+): void {
+  const dir = path.join(missionsRoot, missionId);
+  fs.mkdirSync(dir, { recursive: true });
+  const fm = Object.entries(frontmatter)
+    .map(([k, v]) => `${k}: ${v}`)
+    .join("\n");
+  fs.writeFileSync(
+    path.join(dir, "README.md"),
+    `---\n${fm}\n---\n# ${missionId}\n`,
+  );
 }
 
 function writeSliceInMission(
@@ -133,5 +155,96 @@ describe("GET /api/missions/:missionId", () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as { slices: Array<{ name: string }> };
     expect(body.slices.map((s) => s.name)).toEqual(["slice-a"]);
+  });
+
+  // V0.3.1 slice 13 walk-item 7 — mission frontmatter workflow_spec
+  // declaration + projected topology.
+  describe("workflow_spec + topology (slice 13)", () => {
+    it("returns workflow_spec from mission README frontmatter when declared", async () => {
+      writeMissionReadme(missionsRoot, "getting-started", {
+        status: "active",
+        workflow_spec: "openrig-velocity@1.0",
+      });
+      writeSliceInMission(missionsRoot, "getting-started", "first-slice", { status: "active" });
+
+      const res = await app.request("/api/missions/getting-started");
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        workflow_spec: { name: string; version: string } | null;
+      };
+      expect(body.workflow_spec).toEqual({ name: "openrig-velocity", version: "1.0" });
+    });
+
+    it("returns workflow_spec: null when mission README has no declaration", async () => {
+      writeMissionReadme(missionsRoot, "plain-mission", { status: "active" });
+      writeSliceInMission(missionsRoot, "plain-mission", "child-slice", { status: "active" });
+
+      const res = await app.request("/api/missions/plain-mission");
+      const body = (await res.json()) as { workflow_spec: unknown };
+      expect(body.workflow_spec).toBeNull();
+    });
+
+    it("returns topology.specGraph when workflow_spec declared AND the spec is in the cache", async () => {
+      // Migrate workflow_specs table for the spec cache to use.
+      migrate(db, [workflowSpecsSchema]);
+      const specCache = new WorkflowSpecCache(db);
+
+      // Hand-author a minimal spec file + cache it through.
+      const specPath = path.join(cleanupRoot, "openrig-velocity.workflow.yaml");
+      fs.writeFileSync(specPath, [
+        "workflow:",
+        "  id: openrig-velocity",
+        "  version: \"1.0\"",
+        "  objective: \"Demo\"",
+        "  target:",
+        "    rig: openrig-velocity",
+        "  roles:",
+        "    role-a: {}",
+        "  entry:",
+        "    role: role-a",
+        "  steps:",
+        "    - id: step-a",
+        "      actor_role: role-a",
+        "      next_hop:",
+        "        suggested_roles: []",
+        "",
+      ].join("\n"));
+      specCache.readThrough(specPath);
+
+      writeMissionReadme(missionsRoot, "mission-with-spec", {
+        status: "active",
+        workflow_spec: "openrig-velocity@1.0",
+      });
+      writeSliceInMission(missionsRoot, "mission-with-spec", "slice-a", { status: "active" });
+      const appWithCache = buildApp(indexer, specCache);
+
+      const res = await appWithCache.request("/api/missions/mission-with-spec");
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        topology: { specGraph: { specName: string; specVersion: string; nodes: unknown[] } | null };
+      };
+      expect(body.topology).not.toBeNull();
+      expect(body.topology.specGraph).not.toBeNull();
+      expect(body.topology.specGraph!.specName).toBe("openrig-velocity");
+      expect(body.topology.specGraph!.specVersion).toBe("1.0");
+      expect(body.topology.specGraph!.nodes.length).toBeGreaterThan(0);
+    });
+
+    it("returns topology: { specGraph: null } when workflow_spec declared but spec NOT in cache", async () => {
+      writeMissionReadme(missionsRoot, "unbound-mission", {
+        status: "active",
+        workflow_spec: "ghost-spec@9.9",
+      });
+      writeSliceInMission(missionsRoot, "unbound-mission", "child-slice", { status: "active" });
+
+      // No spec cache wired; the route falls through to specGraph: null.
+      const res = await app.request("/api/missions/unbound-mission");
+      const body = (await res.json()) as {
+        workflow_spec: { name: string } | null;
+        topology: { specGraph: unknown } | null;
+      };
+      expect(body.workflow_spec?.name).toBe("ghost-spec");
+      expect(body.topology?.specGraph).toBeNull();
+    });
   });
 });
