@@ -187,4 +187,64 @@ describe("PL-slice-story-view-v1 findSliceWorkflowBinding", () => {
     expect(result.primary?.instanceId).toBe("inst-both");
     expect(result.additionalInstanceIds).toEqual([]);
   });
+
+  // V0.3.1 slice 13 walk-item 7 — declaration-fallback path. When the
+  // slice/mission frontmatter declares `workflow_spec: <name>@<ver>`
+  // but no live instance touches the slice, the binding falls back to
+  // a synthetic record so the downstream projector can render the
+  // spec graph (currentStepId: null → projectSpecGraph(spec, null)).
+  describe("declaration-fallback binding (slice 13)", () => {
+    it("returns synthetic binding when declaration provided + no live instance", () => {
+      const result = findSliceWorkflowBinding(db, ["q-no-instance"], {
+        name: "openrig-velocity",
+        version: "1.0",
+      });
+      expect(result.primary).not.toBeNull();
+      expect(result.primary?.instanceId).toBeNull();
+      expect(result.primary?.workflowName).toBe("openrig-velocity");
+      expect(result.primary?.workflowVersion).toBe("1.0");
+      expect(result.primary?.currentStepId).toBeNull();
+      expect(result.primary?.currentFrontier).toEqual([]);
+      expect(result.primary?.status).toBe("declared");
+      expect(result.additionalInstanceIds).toEqual([]);
+    });
+
+    it("declaration is IGNORED when a live instance already binds (live signal wins)", () => {
+      insertInstance(db, {
+        instanceId: "inst-live",
+        currentFrontier: ["q-live"],
+        workflowName: "different-spec",
+        workflowVersion: "2.0",
+      });
+      insertTrail(db, {
+        trailId: "t-live",
+        instanceId: "inst-live",
+        stepId: "x",
+        stepRole: "r",
+        priorQitemId: "q-live",
+      });
+      const result = findSliceWorkflowBinding(db, ["q-live"], {
+        name: "openrig-velocity",
+        version: "1.0",
+      });
+      // Live wins; declaration metadata is not surfaced when a real
+      // instance is present.
+      expect(result.primary?.instanceId).toBe("inst-live");
+      expect(result.primary?.workflowName).toBe("different-spec");
+    });
+
+    it("no declaration AND no live instance → null binding (current behavior preserved)", () => {
+      const result = findSliceWorkflowBinding(db, ["q-no-instance"]);
+      expect(result.primary).toBeNull();
+    });
+
+    it("empty qitemIds + declaration provided → still returns synthetic binding (mission case)", () => {
+      const result = findSliceWorkflowBinding(db, [], {
+        name: "openrig-velocity",
+        version: "1.0",
+      });
+      expect(result.primary?.workflowName).toBe("openrig-velocity");
+      expect(result.primary?.instanceId).toBeNull();
+    });
+  });
 });
