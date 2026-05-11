@@ -306,6 +306,45 @@ describe("ProjectTreeView P5-5/P5-6 mission discovery", () => {
     expect(queryByTestId("project-slice-seed-slice-active")).toBeNull();
   });
 
+  // Slice 19: list-density collapse. Slice items in the Project tree
+  // are single-row (flex layout) with the meta inline + a `title`
+  // attribute + `aria-label` carrying the full readable content for
+  // screen readers and hover discovery. HG-1/2/3/5 of slice 19's
+  // density audit applies here.
+  it("slice 19: project tree slice items render single-row with meta inline + a11y attributes", async () => {
+    const { findByTestId } = renderTree({
+      workspaceRoot: "/Users/example/workspace",
+      slices: [
+        {
+          name: "density-slice",
+          mission: "release-proof",
+          slicePath: "/Users/example/workspace/missions/release-proof/slices/density-slice",
+          missionPath: "/Users/example/workspace/missions/release-proof",
+          status: "active",
+          rawStatus: "active",
+          qitemCount: 42,
+          hasProofPacket: true,
+          lastActivityAt: "2030-01-01T00:00:00.000Z",
+        },
+      ],
+    });
+
+    const sliceLink = await findByTestId("project-slice-density-slice");
+    // HG-1: single-row flex layout (not stacked `block` spans).
+    expect(sliceLink.className).toMatch(/\bflex\b/);
+    expect(sliceLink.className).not.toMatch(/\bblock\b/);
+    // HG-3 + HG-5: meta content preserved in DOM via testid AND
+    // accessible via title + aria-label for hover + screen readers.
+    expect(sliceLink.getAttribute("title")).toContain("42 qitems");
+    expect(sliceLink.getAttribute("aria-label")).toContain("42 qitems");
+    const meta = await findByTestId("project-slice-density-slice-meta");
+    // Meta still present but now flows inline (shrink-0, not block).
+    expect(meta.className).toMatch(/\bshrink-0\b/);
+    expect(meta.className).not.toMatch(/\bblock\b/);
+    expect(meta.textContent).toContain("42 qitems");
+    expect(meta.textContent).toContain("proof");
+  });
+
   it("workspace.root unconfigured renders the no-workspace empty-state (Phase 3 A5 behavior preserved)", async () => {
     const { findByTestId } = renderTree({
       workspaceRoot: null,

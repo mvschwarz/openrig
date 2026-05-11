@@ -588,21 +588,29 @@ function WorkspaceOverviewPanel() {
         </span>
       </div>
       <ul className="mt-2 space-y-1">
-        {mission.slices.map((slice) => (
-          <li key={slice.name}>
-            <Link
-              to="/project/slice/$sliceId"
-              params={{ sliceId: slice.name }}
-              data-testid={`workspace-overview-slice-${slice.name}`}
-              className="block px-2 py-1 font-mono text-[11px] text-on-surface hover:bg-surface-low hover:text-stone-900"
-            >
-              <span className="block truncate">{slice.displayName}</span>
-              <span className="block truncate text-[9px] uppercase tracking-[0.12em] text-stone-500">
-                {projectSliceMeta(slice)}
-              </span>
-            </Link>
-          </li>
-        ))}
+        {mission.slices.map((slice) => {
+          const meta = projectSliceMeta(slice);
+          return (
+            <li key={slice.name}>
+              <Link
+                to="/project/slice/$sliceId"
+                params={{ sliceId: slice.name }}
+                data-testid={`workspace-overview-slice-${slice.name}`}
+                title={`${slice.displayName} — ${meta}`}
+                aria-label={`${slice.displayName} (${meta})`}
+                className="flex items-baseline gap-2 px-2 py-1 font-mono text-[11px] text-on-surface hover:bg-surface-low hover:text-stone-900"
+              >
+                <span className="min-w-0 flex-1 truncate">{slice.displayName}</span>
+                <span
+                  data-testid={`workspace-overview-slice-${slice.name}-meta`}
+                  className="shrink-0 text-[9px] uppercase tracking-[0.12em] text-stone-500"
+                >
+                  {meta}
+                </span>
+              </Link>
+            </li>
+          );
+        })}
       </ul>
     </article>
   );
