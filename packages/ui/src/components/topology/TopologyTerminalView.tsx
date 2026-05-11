@@ -29,6 +29,7 @@ import { cn } from "../../lib/utils.js";
 import { RuntimeBadge } from "../graphics/RuntimeMark.js";
 import { formatCompactTokenCount, formatTokenTotalTitle, sumTokenCounts } from "../../lib/token-format.js";
 import { contextUsageTextClass } from "../ContextUsageRing.js";
+import { TerminalPreviewPopover } from "./TerminalPreviewPopover.js";
 
 const SAFE_N = 12;
 
@@ -83,23 +84,61 @@ function TokenMetric({ seat }: { seat: NodeInventoryEntry }) {
   );
 }
 
+// V0.3.1 slice 14 walk-item 17 — TerminalView card.
+// Click-through opens TerminalPreviewPopover (same black-glass shell
+// used by the graph view), and the card font shrinks via the existing
+// type scale: header text-[10px] → text-[8px] (~20% reduction). The
+// preview pane font hint scales with parent.
+const TERMINAL_PREVIEW_EVENT = "openrig:topology-terminal-preview";
+
 function SeatTerminalCard({ seat }: { seat: NodeInventoryEntry }) {
   const sessionName = seat.canonicalSessionName ?? seat.logicalId;
   const active = isActiveRunning(seat);
   const memberName = displayAgentName(seat.logicalId);
+  const previewKey = `${seat.rigId ?? "unknown"}:${seat.logicalId}`;
+  const handleCardClick = () => {
+    window.dispatchEvent(
+      new CustomEvent(TERMINAL_PREVIEW_EVENT, { detail: { key: previewKey } }),
+    );
+  };
   return (
     <div
       data-testid={`terminal-card-${seat.rigId}-${seat.logicalId}`}
       data-active={active ? "true" : "false"}
       className={cn(
-        "border bg-white/40 p-2 flex flex-col gap-2",
+        "relative border bg-white/40 p-2 flex flex-col gap-2",
         active
           ? "border-secondary terminal-card-active"
           : "border-outline-variant",
       )}
     >
-      <header className="flex items-center justify-between gap-2">
-        <span className="font-mono text-[10px] font-semibold uppercase tracking-[0.10em] text-stone-900 truncate">
+      <button
+        type="button"
+        onClick={handleCardClick}
+        aria-label={`Open ${memberName} terminal preview`}
+        className="absolute inset-0 z-10 cursor-pointer bg-transparent focus:outline-none focus:ring-2 focus:ring-stone-900/20"
+        data-testid={`terminal-card-trigger-${seat.rigId}-${seat.logicalId}`}
+      />
+      {/*
+        TerminalPreviewPopover renders its own sr-only button + popover
+        portal. The card-level button above dispatches the open event;
+        this component listens for the matching key + renders the
+        positioned popover anchored to the wrapper div (top-right of
+        the card via wrapperClassName).
+      */}
+      {seat.rigId ? (
+        <TerminalPreviewPopover
+          rigId={seat.rigId}
+          logicalId={seat.logicalId}
+          sessionName={sessionName}
+          reducedMotion={false}
+          testIdPrefix={`terminal-grid-${seat.rigId}-${seat.logicalId}`}
+          wrapperClassName="absolute right-1 top-1 z-20"
+          renderTrigger={false}
+        />
+      ) : null}
+      <header className="relative z-0 flex items-center justify-between gap-2 pointer-events-none">
+        <span className="font-mono text-[8px] font-semibold uppercase tracking-[0.10em] text-stone-900 truncate">
           {memberName}
         </span>
         <span className="inline-flex shrink-0 items-center gap-1">
@@ -108,11 +147,13 @@ function SeatTerminalCard({ seat }: { seat: NodeInventoryEntry }) {
           <TokenMetric seat={seat} />
         </span>
       </header>
-      <SessionPreviewPane
-        sessionName={sessionName}
-        lines={20}
-        testIdPrefix={`terminal-preview-${seat.rigId}-${seat.logicalId}`}
-      />
+      <div className="relative z-0 pointer-events-none">
+        <SessionPreviewPane
+          sessionName={sessionName}
+          lines={20}
+          testIdPrefix={`terminal-preview-${seat.rigId}-${seat.logicalId}`}
+        />
+      </div>
     </div>
   );
 }

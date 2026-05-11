@@ -39,6 +39,8 @@ import {
   type TopologyActivityVisual,
 } from "../../lib/topology-activity.js";
 import { ActivityRing } from "./ActivityRing.js";
+import { TerminalPreviewPopover } from "./TerminalPreviewPopover.js";
+import "./topology-table-shimmer.css";
 import { RuntimeBadge, ToolMark } from "../graphics/RuntimeMark.js";
 import { formatCompactTokenCount, formatTokenTotalTitle, sumTokenCounts } from "../../lib/token-format.js";
 import { contextUsageTextClass } from "../ContextUsageRing.js";
@@ -75,6 +77,10 @@ function statusToSemanticPip(s: string): "active" | "running" | "stopped" | "war
 }
 
 function CmuxButton({ row }: { row: AgentRow }) {
+  // V0.3.1 slice 14 walk-item 16: action column buttons stay visible
+  // unconditionally (no hover/focus gate). Prior implementation used
+  // `opacity-0` + `group-hover:!opacity-100` which hid the affordance
+  // off-mouse — operators kept missing the cmux launcher.
   const cmuxLaunch = useCmuxLaunch();
   return (
     <button
@@ -86,11 +92,33 @@ function CmuxButton({ row }: { row: AgentRow }) {
       }}
       aria-label={`Open ${row.logicalId} in cmux`}
       title="Open in cmux"
-      className="inline-flex h-7 w-7 items-center justify-center border border-outline-variant bg-white/65 text-stone-700 opacity-0 shadow-[1px_1px_0_rgba(46,52,46,0.12)] transition-opacity hover:bg-stone-100 hover:text-stone-950 focus:!opacity-100 focus:opacity-100 focus:outline-none focus:ring-2 focus:ring-stone-900/20 group-hover:!opacity-100 group-hover:opacity-100 group-focus-within:!opacity-100 group-focus-within:opacity-100"
+      className="inline-flex h-7 w-7 items-center justify-center border border-outline-variant bg-white/65 text-stone-700 shadow-[1px_1px_0_rgba(46,52,46,0.12)] transition-colors hover:bg-stone-100 hover:text-stone-950 focus:outline-none focus:ring-2 focus:ring-stone-900/20"
     >
       <ToolMark tool="cmux" size="sm" />
       <span className="sr-only">CMUX</span>
     </button>
+  );
+}
+
+/** V0.3.1 slice 14 walk-item 15 — status label split. When the row's
+ *  activity ring is in the `active` state the cell shows "active" with
+ *  a subtle left-to-right shimmer; otherwise it shows "idle" (or the
+ *  raw status string for non-running states like "starting" / "failed").
+ *  Honors `prefers-reduced-motion: reduce` via CSS — see
+ *  `topology-shimmer` in `topology-table-shimmer.css`. */
+function StatusCell({ status, activityState }: { status: string; activityState: string | undefined }) {
+  const semantic = statusToSemanticPip(status);
+  // Only split the "running" status into active/idle. Other statuses
+  // (starting / stopped / failed / unknown) keep their raw label.
+  const isRunning = status === "running" || status === "ready";
+  const isActive = isRunning && activityState === "active";
+  const isIdle = isRunning && !isActive;
+  const label = isActive ? "active" : isIdle ? "idle" : status;
+  const labelClass = isActive ? "topology-table-active-shimmer" : "";
+  return (
+    <span data-testid={`topology-table-status-${activityState ?? "unknown"}`} data-activity-state={activityState ?? null}>
+      <StatusPip status={semantic} label={label} variant="pill" labelClassName={labelClass} />
+    </span>
   );
 }
 
@@ -179,15 +207,35 @@ function agentColumns(): ColumnDef<AgentRow>[] {
     {
       accessorKey: "status",
       header: "Status",
-      cell: ({ getValue }) => (
-        <StatusPip status={statusToSemanticPip(String(getValue()))} label={String(getValue())} variant="pill" />
+      cell: ({ getValue, row }) => (
+        <StatusCell
+          status={String(getValue())}
+          activityState={row.original.activityRing?.state}
+        />
       ),
     },
     {
       id: "actions",
-      header: "",
+      header: "Actions",
       enableSorting: false,
-      cell: ({ row }) => <CmuxButton row={row.original} />,
+      // V0.3.1 slice 14 walk-item 16: action column shows cmux +
+      // terminal-preview side-by-side, no hover gate. Both buttons
+      // render at all times for predictable affordances.
+      cell: ({ row }) => (
+        <span className="inline-flex items-center gap-1.5" data-testid={`topology-table-actions-${row.original.logicalId}`}>
+          <CmuxButton row={row.original} />
+          {row.original.rigId ? (
+            <TerminalPreviewPopover
+              rigId={row.original.rigId}
+              logicalId={row.original.logicalId}
+              sessionName={row.original.sessionName ?? null}
+              reducedMotion={false}
+              testIdPrefix={`topology-table-${row.original.logicalId}`}
+              buttonClassName="inline-flex h-7 w-7 items-center justify-center border border-outline-variant bg-white/65 text-stone-700 shadow-[1px_1px_0_rgba(46,52,46,0.12)] transition-colors hover:bg-stone-100 hover:text-stone-950 focus:outline-none focus:ring-2 focus:ring-stone-900/20"
+            />
+          ) : null}
+        </span>
+      ),
     },
   ];
 }

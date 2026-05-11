@@ -16,6 +16,12 @@ export interface StatusPipProps {
   label?: string;
   variant?: StatusPipVariant;
   className?: string;
+  /** V0.3.1 slice 14 walk-item 15 — optional class applied to the
+   *  label text only (NOT the dot). Used by TopologyTableView to add
+   *  a shimmer animation to active rows while keeping the green dot
+   *  static. Mounting in StatusPip (rather than wrapping externally)
+   *  keeps the label markup consistent across variants. */
+  labelClassName?: string;
   testId?: string;
 }
 
@@ -42,8 +48,10 @@ export function StatusPip({
   label,
   variant = "dot",
   className,
+  labelClassName,
   testId,
 }: StatusPipProps) {
+  const labelText = label ?? status;
   if (variant === "pill") {
     return (
       <span
@@ -54,10 +62,10 @@ export function StatusPip({
           className,
         )}
         role="status"
-        aria-label={label ?? status}
+        aria-label={labelText}
       >
         <span className={cn("w-1.5 h-1.5 rounded-full", toneDot[status])} aria-hidden="true" />
-        {label ?? status}
+        <span className={labelClassName}>{labelText}</span>
       </span>
     );
   }
@@ -66,11 +74,11 @@ export function StatusPip({
       data-testid={testId}
       className={cn("inline-flex items-center gap-1.5", className)}
       role="status"
-      aria-label={label ?? status}
+      aria-label={labelText}
     >
       <span className={cn("w-2 h-2 rounded-full", toneDot[status])} aria-hidden="true" />
       {label ? (
-        <span className="font-mono text-[9px] uppercase tracking-wide text-on-surface-variant">
+        <span className={cn("font-mono text-[9px] uppercase tracking-wide text-on-surface-variant", labelClassName)}>
           {label}
         </span>
       ) : null}

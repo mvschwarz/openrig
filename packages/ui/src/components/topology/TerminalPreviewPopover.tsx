@@ -41,6 +41,13 @@ interface TerminalPreviewPopoverProps {
   buttonClassName?: string;
   popoverClassName?: string;
   testIdPrefix: string;
+  /** V0.3.1 slice 14 forward-fix #1 (a11y): when false, the popover
+   *  does NOT render its own trigger button. Used by surfaces that
+   *  own the trigger externally (e.g., TerminalView cards where the
+   *  whole card acts as the trigger) so the popover doesn't add a
+   *  duplicate keyboard tab stop. Default true preserves the
+   *  existing graph-view + table-view button rendering. */
+  renderTrigger?: boolean;
 }
 
 function rectFromElement(el: HTMLElement | null): AnchorRect {
@@ -90,6 +97,7 @@ export function TerminalPreviewPopover({
   buttonClassName,
   popoverClassName,
   testIdPrefix,
+  renderTrigger = true,
 }: TerminalPreviewPopoverProps) {
   const key = `${rigId ?? "unknown"}:${logicalId}`;
   const rootRef = useRef<HTMLDivElement | null>(null);
@@ -188,16 +196,18 @@ export function TerminalPreviewPopover({
 
   return (
     <div ref={rootRef} className={cn("relative inline-flex", wrapperClassName)}>
-      <button
-        type="button"
-        data-testid={`${testIdPrefix}-terminal-open`}
-        aria-label={`View ${logicalId} terminal`}
-        title="View terminal"
-        onClick={openPreview}
-        className={buttonClassName}
-      >
-        <ToolMark tool="terminal" size="sm" />
-      </button>
+      {renderTrigger ? (
+        <button
+          type="button"
+          data-testid={`${testIdPrefix}-terminal-open`}
+          aria-label={`View ${logicalId} terminal`}
+          title="View terminal"
+          onClick={openPreview}
+          className={buttonClassName}
+        >
+          <ToolMark tool="terminal" size="sm" />
+        </button>
+      ) : null}
       {popover}
     </div>
   );
