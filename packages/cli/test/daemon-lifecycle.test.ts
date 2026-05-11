@@ -1047,6 +1047,59 @@ describe("buildDaemonEnv", () => {
         else process.env["OPENRIG_HOME"] = saved;
       }
     });
+
+    // FF2 regression test (per qitem-20260511115845-ee9a4775): the
+    // prior 3 tests verify the openrig-compat function contract but
+    // do NOT prove daemon-lifecycle's module-level OPENRIG_DIR /
+    // STATE_FILE / LOG_FILE constants pick up OPENRIG_HOME at import
+    // time. Future code could hardcode "~/.openrig" in
+    // daemon-lifecycle.ts:66-69 and the prior tests would still pass.
+    //
+    // This test imports daemon-lifecycle FRESH twice via
+    // vi.resetModules + dynamic import, with distinct OPENRIG_HOME
+    // values per import. Discriminator-distinct paths (per banked
+    // feedback_poc_regression_must_discriminate) prove each module
+    // load reflects the env that was set at that moment. Will fail
+    // if a future contributor hardcodes a literal path or otherwise
+    // bypasses openrig-compat helpers at module level.
+    it("daemon-lifecycle module-level constants reflect OPENRIG_HOME at import time (slice 22 FF2)", async () => {
+      const saved = process.env["OPENRIG_HOME"];
+      try {
+        // First import — OPENRIG_HOME = blank-slate value
+        process.env["OPENRIG_HOME"] = "/Users/example/.openrig-vm-blank-fresh";
+        vi.resetModules();
+        const blank = await import("../src/daemon-lifecycle.js");
+
+        // Second import — OPENRIG_HOME = populated value (distinct dir;
+        // not equal, not a symlink prefix). vi.resetModules clears the
+        // module cache so the second import re-evaluates module-level
+        // constants under the new env.
+        process.env["OPENRIG_HOME"] = "/Users/example/.openrig-vm-populated-fresh";
+        vi.resetModules();
+        const populated = await import("../src/daemon-lifecycle.js");
+
+        // OPENRIG_DIR — direct snapshot of getOpenRigHome() at module load
+        expect(blank.OPENRIG_DIR).toBe("/Users/example/.openrig-vm-blank-fresh");
+        expect(populated.OPENRIG_DIR).toBe("/Users/example/.openrig-vm-populated-fresh");
+        expect(blank.OPENRIG_DIR).not.toBe(populated.OPENRIG_DIR);
+
+        // STATE_FILE / LOG_FILE — derived as path.join(OPENRIG_DIR, "daemon.{json,log}")
+        expect(blank.STATE_FILE).toBe("/Users/example/.openrig-vm-blank-fresh/daemon.json");
+        expect(populated.STATE_FILE).toBe("/Users/example/.openrig-vm-populated-fresh/daemon.json");
+        expect(blank.STATE_FILE).not.toBe(populated.STATE_FILE);
+
+        expect(blank.LOG_FILE).toBe("/Users/example/.openrig-vm-blank-fresh/daemon.log");
+        expect(populated.LOG_FILE).toBe("/Users/example/.openrig-vm-populated-fresh/daemon.log");
+        expect(blank.LOG_FILE).not.toBe(populated.LOG_FILE);
+      } finally {
+        if (saved === undefined) delete process.env["OPENRIG_HOME"];
+        else process.env["OPENRIG_HOME"] = saved;
+        // Re-reset modules so subsequent tests (and the file-top
+        // import of daemon-lifecycle at line 4-19) aren't holding
+        // stale references to a module instance bound to a temp env.
+        vi.resetModules();
+      }
+    });
   });
 
   describe("V1 pre-release CLI/daemon Item 1 — transcript rotation tunables projection", () => {
