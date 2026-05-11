@@ -1,3 +1,8 @@
+// V0.3.1 slice 21 onboarding-conveyor: rich narrative content for the
+// getting-started mission's two slices (the click-through-to-learn
+// teaching surface).
+import { GETTING_STARTED_NARRATIVE } from "./getting-started-narrative.js";
+
 type DefaultSlice = {
   id: string;
   title: string;
@@ -146,6 +151,21 @@ mission: ${mission.id}
 }
 
 function sliceReadme(mission: DefaultMission, slice: DefaultSlice): string {
+  // V0.3.1 slice 21: getting-started slices ship rich narrative
+  // content that teaches both "what a conveyor is" and "what each
+  // tab does". Other slices keep the boilerplate.
+  const narrative = GETTING_STARTED_NARRATIVE[slice.id];
+  if (narrative) {
+    return `---
+title: ${slice.title}
+status: ${slice.status}
+mission: ${mission.id}
+rail-item: ${mission.id}
+slice: ${slice.id}
+---
+
+${narrative.readme}`;
+  }
   return `---
 title: ${slice.title}
 status: ${slice.status}
@@ -169,7 +189,22 @@ This lets Project attach queue activity to the slice story, queue, tests, and to
 `;
 }
 
+/** V0.3.1 slice 21: getting-started slices emit a timeline.md that
+ *  the slice Story tab renders via the slice-06 useSliceTimelineMarkdown
+ *  hook. Returns null when no narrative is defined for the slice id
+ *  (default mission slices don't ship a timeline). */
+function sliceTimeline(mission: DefaultMission, slice: DefaultSlice): string | null {
+  const narrative = GETTING_STARTED_NARRATIVE[slice.id];
+  if (!narrative) return null;
+  return narrative.timeline;
+}
+
 function sliceProgress(mission: DefaultMission, slice: DefaultSlice): string {
+  // V0.3.1 slice 21: getting-started slices ship the worked-example
+  // PROGRESS narrative (acceptance criteria for a mocked conveyor run
+  // / inspection); other slices keep the boilerplate.
+  const narrative = GETTING_STARTED_NARRATIVE[slice.id];
+  if (narrative) return narrative.progress;
   return `---
 title: ${slice.title} Progress
 status: ${slice.status}
@@ -232,6 +267,16 @@ export function workspaceScaffoldFiles(): Array<{ relPath: string; content: stri
         { relPath: `missions/${mission.id}/slices/${slice.id}/PROGRESS.md`, content: sliceProgress(mission, slice) },
         { relPath: `missions/${mission.id}/slices/${slice.id}/IMPLEMENTATION-PRD.md`, content: slicePrd(mission, slice) },
       );
+      // V0.3.1 slice 21: getting-started slices ship a timeline.md
+      // so the Story tab renders the worked-example narrative via
+      // slice-06's useSliceTimelineMarkdown hook.
+      const timeline = sliceTimeline(mission, slice);
+      if (timeline) {
+        files.push({
+          relPath: `missions/${mission.id}/slices/${slice.id}/timeline.md`,
+          content: timeline,
+        });
+      }
     }
   }
   return files;
