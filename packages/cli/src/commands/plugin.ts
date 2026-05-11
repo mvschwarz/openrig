@@ -12,9 +12,9 @@
 //                         flags: --json
 //   used-by <id>        — agents referencing this plugin
 //                         flags: --json
-//
-// Pending in later checkpoints of slice 3.4:
-//   validate <path>     — local file inspection (3.4.C)
+//   validate <path>     — local file inspection of a plugin source tree
+//                         (manifest shape + skill frontmatter per agentskills.io)
+//                         flags: --json
 //
 // list/show consume slice 3.3 daemon HTTP routes (GET /api/plugins[/...]).
 //
@@ -45,10 +45,19 @@
 // tightly scoped to what the daemon actually supports.
 
 import { Command } from "commander";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { join } from "node:path";
 import { DaemonClient } from "../client.js";
 import { getDaemonStatus, getDaemonUrl } from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
+
+// Filter-value enums per slice-3.3 daemon route validation
+// (packages/daemon/src/routes/plugins.ts L37-58). CLI-side validation
+// gives operators clear errors instead of silent pass-through where the
+// daemon ignores unknown values.
+const VALID_RUNTIMES = ["claude", "codex"] as const;
+const VALID_SOURCES = ["vendored", "claude-cache", "codex-cache"] as const;
 
 // ============================================================
 // Wire shapes — must mirror PluginDiscoveryService verbatim
@@ -140,6 +149,16 @@ export function pluginCommand(depsOverride?: StatusDeps): Command {
     .option("--json", "JSON output")
     .action(async (opts: { runtime?: string; source?: string; json?: boolean }) => {
       try {
+        // CLI-side filter-value validation per pre-close punch from velocity-guard
+        // 3.4.A repair verdict: typos like --source rig-cwd should fail loud,
+        // not silently be ignored by the daemon route.
+        if (opts.runtime && !(VALID_RUNTIMES as readonly string[]).includes(opts.runtime)) {
+          throw new Error(`Invalid --runtime value "${opts.runtime}". Valid: ${VALID_RUNTIMES.join(" | ")} (omit flag for all)`);
+        }
+        if (opts.source && !(VALID_SOURCES as readonly string[]).includes(opts.source)) {
+          throw new Error(`Invalid --source value "${opts.source}". Valid: ${VALID_SOURCES.join(" | ")}`);
+        }
+
         const client = await getClient();
         const params: string[] = [];
         if (opts.runtime) params.push(`runtime=${encodeURIComponent(opts.runtime)}`);
@@ -298,5 +317,145 @@ export function pluginCommand(depsOverride?: StatusDeps): Command {
       }
     });
 
+  // -- rig plugin validate <path> --
+  // Local file inspection — no daemon dependency; useful when authoring
+  // a plugin in a feature branch where the daemon may not yet have
+  // discovered it. Validates manifest shape (per Claude/Codex specs)
+  // + skill frontmatter (per agentskills.io: name + description ≤1024 chars).
+  cmd.command("validate")
+    .argument("<path>", "Plugin source directory to validate")
+    .description("Validate plugin manifest + skill frontmatter against agentskills.io spec")
+    .option("--json", "JSON output ({ valid: boolean, errors: string[] })")
+    .action((path: string, opts: { json?: boolean }) => {
+      const errors = validatePluginTree(path);
+      const valid = errors.length === 0;
+
+      if (opts.json) {
+        console.log(JSON.stringify({ valid, errors }, null, 2));
+        process.exitCode = valid ? undefined : 1;
+        return;
+      }
+
+      if (valid) {
+        console.log(`Plugin at ${path}: valid`);
+        return;
+      }
+
+      console.error(`Plugin at ${path}: INVALID (${errors.length} error${errors.length === 1 ? "" : "s"})`);
+      for (const err of errors) {
+        console.error(`  - ${err}`);
+      }
+      process.exitCode = 1;
+    });
+
   return cmd;
+}
+
+// ============================================================
+// validate plumbing — local file inspection
+// ============================================================
+
+function validatePluginTree(pluginPath: string): string[] {
+  const errors: string[] = [];
+
+  if (!existsSync(pluginPath)) {
+    errors.push(`Plugin path does not exist: ${pluginPath}`);
+    return errors;
+  }
+  if (!statSync(pluginPath).isDirectory()) {
+    errors.push(`Plugin path is not a directory: ${pluginPath}`);
+    return errors;
+  }
+
+  const claudeManifestPath = join(pluginPath, ".claude-plugin", "plugin.json");
+  const codexManifestPath = join(pluginPath, ".codex-plugin", "plugin.json");
+  const hasClaude = existsSync(claudeManifestPath);
+  const hasCodex = existsSync(codexManifestPath);
+
+  if (!hasClaude && !hasCodex) {
+    errors.push("No plugin manifest found: expected .claude-plugin/plugin.json and/or .codex-plugin/plugin.json");
+    return errors;
+  }
+
+  if (hasClaude) {
+    errors.push(...validateManifest(claudeManifestPath, "claude"));
+  }
+  if (hasCodex) {
+    errors.push(...validateManifest(codexManifestPath, "codex"));
+  }
+
+  // Validate skill frontmatter
+  const skillsDir = join(pluginPath, "skills");
+  if (existsSync(skillsDir) && statSync(skillsDir).isDirectory()) {
+    for (const skillId of readdirSync(skillsDir)) {
+      const skillMdPath = join(skillsDir, skillId, "SKILL.md");
+      if (existsSync(skillMdPath)) {
+        errors.push(...validateSkillFrontmatter(skillMdPath, skillId));
+      }
+    }
+  }
+
+  return errors;
+}
+
+function validateManifest(manifestPath: string, runtime: "claude" | "codex"): string[] {
+  const errors: string[] = [];
+  let raw: Record<string, unknown>;
+  try {
+    raw = JSON.parse(readFileSync(manifestPath, "utf-8")) as Record<string, unknown>;
+  } catch (err) {
+    errors.push(`${runtime} manifest parse error at ${manifestPath}: ${(err as Error).message}`);
+    return errors;
+  }
+  if (!raw["name"] || typeof raw["name"] !== "string") {
+    errors.push(`${runtime} manifest missing required field: name (must be non-empty string)`);
+  }
+  if (!raw["version"] || typeof raw["version"] !== "string") {
+    errors.push(`${runtime} manifest missing required field: version (must be non-empty string)`);
+  }
+  // Codex spec: description is REQUIRED. Claude spec: description is recommended but
+  // not a hard requirement; we treat missing description as a warning by NOT erroring
+  // on Claude-only-missing-description while erroring on Codex-missing-description.
+  if (runtime === "codex" && (!raw["description"] || typeof raw["description"] !== "string")) {
+    errors.push(`codex manifest missing required field: description (Codex spec requires it)`);
+  }
+  return errors;
+}
+
+function validateSkillFrontmatter(skillPath: string, skillId: string): string[] {
+  const errors: string[] = [];
+  let content: string;
+  try {
+    content = readFileSync(skillPath, "utf-8");
+  } catch (err) {
+    errors.push(`skill "${skillId}": failed to read SKILL.md: ${(err as Error).message}`);
+    return errors;
+  }
+  // Frontmatter: file MUST start with `---\n` and contain a closing `---` line
+  const fmMatch = content.match(/^---\n([\s\S]*?)\n---/);
+  if (!fmMatch) {
+    errors.push(`skill "${skillId}": SKILL.md missing frontmatter (must open with --- ... ---)`);
+    return errors;
+  }
+  const fmBody = fmMatch[1] ?? "";
+
+  // Required: name (non-empty single-line string)
+  const nameMatch = fmBody.match(/^name:\s*(.+)$/m);
+  if (!nameMatch || !nameMatch[1]?.trim()) {
+    errors.push(`skill "${skillId}": frontmatter missing required field: name`);
+  }
+
+  // Required: description (non-empty; supports multi-line YAML block scalar)
+  // Match either inline `description: ...` or block-scalar `description: |` / `description: >`
+  const descBlockMatch = fmBody.match(/^description:\s*(?:>|\|)?\s*\n?([\s\S]*?)(?=\n\w[\w-]*:|\n*$)/m);
+  if (!descBlockMatch || !descBlockMatch[1]?.trim()) {
+    errors.push(`skill "${skillId}": frontmatter missing required field: description`);
+  } else {
+    const descText = descBlockMatch[1].trim();
+    if (descText.length > 1024) {
+      errors.push(`skill "${skillId}": description length ${descText.length} chars exceeds agentskills.io limit of 1024`);
+    }
+  }
+
+  return errors;
 }

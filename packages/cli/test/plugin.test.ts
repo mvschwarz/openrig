@@ -12,8 +12,11 @@
 // Test pattern follows context-pack.test.ts (slice 3.4 mirror) — in-memory
 // http.createServer daemon mock + Commander.parseAsync via captureLogs.
 
-import { describe, it, expect, vi, beforeAll, afterAll, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } from "vitest";
 import http from "node:http";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { tmpdir } from "node:os";
 import { Command } from "commander";
 import { pluginCommand } from "../src/commands/plugin.js";
 import { DaemonClient } from "../src/client.js";
@@ -392,6 +395,248 @@ describe("rig plugin CLI (slice 3.4)", () => {
       expect(exitCode).toBeUndefined();
       const parsed = JSON.parse(logs.join("\n")) as unknown[];
       expect(parsed).toEqual([]);
+    });
+  });
+
+  // ============================================================
+  // rig plugin list — filter-value validation (pre-close punch from
+  // velocity-guard 3.4.A repair verdict)
+  //
+  // CLI-side validation so typos like --source rig-cwd don't look
+  // filtered while the daemon silently returns all plugins.
+  // ============================================================
+
+  describe("rig plugin list — filter validation", () => {
+    it("rejects invalid --runtime value with clear error + non-zero exit", async () => {
+      const program = new Command();
+      program.exitOverride();
+      program.addCommand(pluginCommand(runningDeps(port)));
+
+      const { errLogs, exitCode } = await captureLogs(async () => {
+        await program.parseAsync(["node", "rig", "plugin", "list", "--runtime", "bogus"]);
+      });
+
+      expect(exitCode).toBe(1);
+      const err = errLogs.join("\n");
+      expect(err).toMatch(/--runtime/);
+      expect(err).toMatch(/bogus/);
+      // Should name the allowed values so operator can correct
+      expect(err.toLowerCase()).toMatch(/claude|codex/);
+    });
+
+    it("rejects invalid --source value (rig-cwd typo case) with clear error + non-zero exit", async () => {
+      const program = new Command();
+      program.exitOverride();
+      program.addCommand(pluginCommand(runningDeps(port)));
+
+      const { errLogs, exitCode } = await captureLogs(async () => {
+        await program.parseAsync(["node", "rig", "plugin", "list", "--source", "rig-cwd"]);
+      });
+
+      expect(exitCode).toBe(1);
+      const err = errLogs.join("\n");
+      expect(err).toMatch(/--source/);
+      expect(err).toMatch(/rig-cwd/);
+      // Should name the allowed values
+      expect(err).toMatch(/vendored|claude-cache|codex-cache/);
+    });
+
+    it("accepts valid --runtime + --source values (regression: still passes through correctly)", async () => {
+      const program = new Command();
+      program.exitOverride();
+      program.addCommand(pluginCommand(runningDeps(port)));
+
+      const { exitCode } = await captureLogs(async () => {
+        await program.parseAsync(["node", "rig", "plugin", "list", "--runtime", "claude", "--source", "vendored", "--json"]);
+      });
+
+      expect(exitCode).toBeUndefined();
+      expect(lastQuery.runtime).toBe("claude");
+      expect(lastQuery.source).toBe("vendored");
+    });
+  });
+
+  // ============================================================
+  // rig plugin validate <path> (HG-4.4)
+  //
+  // Local file inspection — does NOT require daemon. Validates:
+  //   - .claude-plugin/plugin.json + .codex-plugin/plugin.json shape
+  //     (name + version required; description required on Codex)
+  //   - At least one manifest dir is present
+  //   - Each skills/<id>/SKILL.md has frontmatter with name (non-empty)
+  //     + description (non-empty, ≤1024 chars per agentskills.io)
+  //
+  // Output: error list; exit code 0 when valid, 1 when any errors.
+  // ============================================================
+
+  describe("rig plugin validate <path>", () => {
+    let tmpRoot: string;
+
+    beforeEach(() => {
+      tmpRoot = mkdtempSync(join(tmpdir(), "plugin-validate-"));
+    });
+
+    afterEach(() => {
+      rmSync(tmpRoot, { recursive: true, force: true });
+    });
+
+    function writeManifest(relativePath: string, contents: Record<string, unknown>) {
+      const fullPath = join(tmpRoot, relativePath);
+      mkdirSync(dirname(fullPath), { recursive: true });
+      writeFileSync(fullPath, JSON.stringify(contents, null, 2));
+    }
+
+    function writeSkill(skillId: string, frontmatter: string, body = "# body\n") {
+      const skillPath = join(tmpRoot, "skills", skillId, "SKILL.md");
+      mkdirSync(dirname(skillPath), { recursive: true });
+      writeFileSync(skillPath, `---\n${frontmatter}\n---\n\n${body}`);
+    }
+
+    it("valid dual-manifest plugin tree passes validation (exit 0)", async () => {
+      writeManifest(".claude-plugin/plugin.json", {
+        name: "test-plugin", version: "1.0.0", description: "Test",
+      });
+      writeManifest(".codex-plugin/plugin.json", {
+        name: "test-plugin", version: "1.0.0", description: "Test",
+      });
+      writeSkill("foo", "name: foo\ndescription: A foo skill");
+
+      const program = new Command();
+      program.exitOverride();
+      program.addCommand(pluginCommand());
+
+      const { exitCode, logs } = await captureLogs(async () => {
+        await program.parseAsync(["node", "rig", "plugin", "validate", tmpRoot]);
+      });
+
+      expect(exitCode).toBeUndefined();
+      expect(logs.join("\n").toLowerCase()).toMatch(/valid|ok|pass/);
+    });
+
+    it("plugin with no manifest dirs at all FAILS validation", async () => {
+      writeSkill("foo", "name: foo\ndescription: A foo skill");
+      // No .claude-plugin/ + no .codex-plugin/
+
+      const program = new Command();
+      program.exitOverride();
+      program.addCommand(pluginCommand());
+
+      const { exitCode, errLogs } = await captureLogs(async () => {
+        await program.parseAsync(["node", "rig", "plugin", "validate", tmpRoot]);
+      });
+
+      expect(exitCode).toBe(1);
+      expect(errLogs.join("\n").toLowerCase()).toMatch(/manifest|plugin\.json/);
+    });
+
+    it("Codex manifest missing description FAILS (Codex requires description)", async () => {
+      writeManifest(".codex-plugin/plugin.json", {
+        name: "test-plugin", version: "1.0.0",
+        // description MISSING
+      });
+
+      const program = new Command();
+      program.exitOverride();
+      program.addCommand(pluginCommand());
+
+      const { exitCode, errLogs } = await captureLogs(async () => {
+        await program.parseAsync(["node", "rig", "plugin", "validate", tmpRoot]);
+      });
+
+      expect(exitCode).toBe(1);
+      expect(errLogs.join("\n").toLowerCase()).toMatch(/codex.*description|description.*codex/);
+    });
+
+    it("manifest missing required name FAILS", async () => {
+      writeManifest(".claude-plugin/plugin.json", {
+        version: "1.0.0", description: "Test",
+        // name MISSING
+      });
+
+      const program = new Command();
+      program.exitOverride();
+      program.addCommand(pluginCommand());
+
+      const { exitCode, errLogs } = await captureLogs(async () => {
+        await program.parseAsync(["node", "rig", "plugin", "validate", tmpRoot]);
+      });
+
+      expect(exitCode).toBe(1);
+      expect(errLogs.join("\n").toLowerCase()).toMatch(/name/);
+    });
+
+    it("skill missing frontmatter name FAILS", async () => {
+      writeManifest(".claude-plugin/plugin.json", {
+        name: "test-plugin", version: "1.0.0",
+      });
+      writeSkill("bad-skill", "description: a description but no name");
+
+      const program = new Command();
+      program.exitOverride();
+      program.addCommand(pluginCommand());
+
+      const { exitCode, errLogs } = await captureLogs(async () => {
+        await program.parseAsync(["node", "rig", "plugin", "validate", tmpRoot]);
+      });
+
+      expect(exitCode).toBe(1);
+      const err = errLogs.join("\n").toLowerCase();
+      expect(err).toMatch(/bad-skill/);
+      expect(err).toMatch(/name/);
+    });
+
+    it("skill frontmatter description >1024 chars FAILS (agentskills.io limit)", async () => {
+      writeManifest(".claude-plugin/plugin.json", {
+        name: "test-plugin", version: "1.0.0",
+      });
+      const longDescription = "x".repeat(1100);
+      writeSkill("verbose", `name: verbose\ndescription: ${longDescription}`);
+
+      const program = new Command();
+      program.exitOverride();
+      program.addCommand(pluginCommand());
+
+      const { exitCode, errLogs } = await captureLogs(async () => {
+        await program.parseAsync(["node", "rig", "plugin", "validate", tmpRoot]);
+      });
+
+      expect(exitCode).toBe(1);
+      const err = errLogs.join("\n").toLowerCase();
+      expect(err).toMatch(/verbose/);
+      expect(err).toMatch(/1024|description.*length|too long/);
+    });
+
+    it("--json output returns structured { valid, errors } shape", async () => {
+      writeManifest(".claude-plugin/plugin.json", {
+        name: "test-plugin", version: "1.0.0",
+      });
+      writeSkill("foo", "name: foo\ndescription: A foo skill");
+
+      const program = new Command();
+      program.exitOverride();
+      program.addCommand(pluginCommand());
+
+      const { exitCode, logs } = await captureLogs(async () => {
+        await program.parseAsync(["node", "rig", "plugin", "validate", tmpRoot, "--json"]);
+      });
+
+      expect(exitCode).toBeUndefined();
+      const parsed = JSON.parse(logs.join("\n")) as { valid: boolean; errors: string[] };
+      expect(parsed.valid).toBe(true);
+      expect(parsed.errors).toEqual([]);
+    });
+
+    it("non-existent path FAILS with clear error", async () => {
+      const program = new Command();
+      program.exitOverride();
+      program.addCommand(pluginCommand());
+
+      const { exitCode, errLogs } = await captureLogs(async () => {
+        await program.parseAsync(["node", "rig", "plugin", "validate", join(tmpRoot, "nonexistent")]);
+      });
+
+      expect(exitCode).toBe(1);
+      expect(errLogs.join("\n").toLowerCase()).toMatch(/not found|does not exist|enoent/);
     });
   });
 });
