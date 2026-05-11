@@ -56,7 +56,7 @@ export function CardShell({ testId, kind, title, oneLiner, accent, expanded, dri
       data-testid={testId}
       data-card-kind={kind}
       data-expanded={open}
-      className={`border border-outline-variant border-l-4 ${accent.stripe} bg-white/85 hard-shadow`}
+      className={`border border-outline-variant border-l-4 ${accent.stripe} bg-white/35 hard-shadow`}
     >
       <div
         role="button"
@@ -78,7 +78,7 @@ export function CardShell({ testId, kind, title, oneLiner, accent, expanded, dri
             {leadingAccessory}
             <span className="truncate">{title}</span>
           </h3>
-          <p data-testid={`${testId}-one-liner`} className="mt-0.5 text-[11px] leading-relaxed text-stone-700 line-clamp-2">
+          <p data-testid={`${testId}-one-liner`} className="mt-0.5 font-body text-[11px] leading-relaxed text-stone-700 line-clamp-2">
             {oneLiner}
           </p>
         </div>
@@ -343,7 +343,7 @@ export function ApprovalCard({ source }: { source: ApprovalCardSource }) {
       }
       expanded={
         source.bodyPreview ? (
-          <pre data-testid={`feed-card-approval-${source.qitemId}-body`} className="overflow-x-auto whitespace-pre-wrap break-words bg-stone-50 p-2 font-mono text-[10px] text-stone-800">
+          <pre data-testid={`feed-card-approval-${source.qitemId}-body`} className="overflow-x-auto whitespace-pre-wrap break-words bg-stone-50 p-2 font-body text-[11px] leading-relaxed text-stone-800">
             {source.bodyPreview}
           </pre>
         ) : (
@@ -437,6 +437,7 @@ export interface AdapterMissionRow {
 }
 export interface AdapterSliceRow {
   name: string;
+  missionId?: string | null;
   displayName?: string;
   status?: string | null;
   lastActivityAt?: string | null;
@@ -458,10 +459,14 @@ export function buildStorytellingFeedItems(
   // GET /api/missions/:id and threaded onto the row). The status
   // filter is the source-of-truth survival across browser/localStorage
   // reset; the local set is the instant-feedback mirror.
+  const hiddenMissionIds = new Set(completedMissionIds ? Array.from(completedMissionIds) : []);
+  for (const mission of missions ?? []) {
+    if ((mission.status ?? "").toLowerCase() === "complete") {
+      hiddenMissionIds.add(mission.name);
+    }
+  }
   const eligibleMissions = (missions ?? []).filter((m) => {
-    if (m.status === "complete") return false;
-    if (completedMissionIds && completedMissionIds.has(m.name)) return false;
-    return true;
+    return !hiddenMissionIds.has(m.name);
   });
   for (const mission of eligibleMissions.slice(0, 2)) {
     items.push({
@@ -475,7 +480,10 @@ export function buildStorytellingFeedItems(
       },
     });
   }
-  for (const slice of (slices ?? []).slice(0, 3)) {
+  const eligibleSlices = (slices ?? []).filter((slice) => {
+    return !slice.missionId || !hiddenMissionIds.has(slice.missionId);
+  });
+  for (const slice of eligibleSlices.slice(0, 3)) {
     const oneLiner = slice.lastActivityAt
       ? `Last activity ${slice.lastActivityAt}`
       : `Slice in ${slice.status ?? "unknown"} state`;
@@ -507,7 +515,7 @@ export function StorytellingFeed({
 }) {
   if (items.length === 0) {
     return (
-      <div data-testid="storytelling-feed-empty" className="border border-dashed border-outline-variant bg-white/35 p-4 font-mono text-[10px] text-stone-500">
+      <div data-testid="storytelling-feed-empty" className="border border-dashed border-outline-variant bg-white/35 p-4 font-body text-[11px] text-stone-500">
         No items in the feed.
       </div>
     );

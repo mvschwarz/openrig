@@ -58,6 +58,22 @@ describe("slice 16: FeedCard typography + vellum density", () => {
   });
 });
 
+describe("slice 16: Storytelling preview typography + vellum density", () => {
+  it("Storytelling CardShell vellum opacity is in DESIGN §Vellum range", async () => {
+    const source = await readSource("src/components/feed/cards/storytelling-cards.tsx");
+    expect(source).toMatch(/bg-white\/35 hard-shadow/);
+    expect(source).not.toMatch(/bg-white\/85 hard-shadow/);
+  });
+
+  it("Storytelling prose preview uses font-body while metadata labels stay font-mono", async () => {
+    const source = await readSource("src/components/feed/cards/storytelling-cards.tsx");
+    expect(source).toMatch(/font-body text-\[11px\] leading-relaxed text-stone-700 line-clamp-2/);
+    expect(source).toMatch(/inline-block border px-2 py-0\.5 font-mono text-\[8px\] uppercase/);
+    expect(source).toMatch(/whitespace-pre-wrap break-words bg-stone-50 p-2 font-body text-\[11px\] leading-relaxed/);
+    expect(source).not.toMatch(/whitespace-pre-wrap break-words bg-stone-50 p-2 font-mono text-\[10px\] text-stone-800/);
+  });
+});
+
 describe("slice 16: TimelineTab event body is prose font-body", () => {
   it("event body <pre> uses font-body (preserves whitespace via whitespace-pre-wrap, font is body)", async () => {
     const source = await readSource("src/components/slices/tabs/TimelineTab.tsx");

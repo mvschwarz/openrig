@@ -14,6 +14,7 @@ interface MissionRow {
 }
 interface SliceRow {
   name: string;
+  missionId?: string | null;
   displayName?: string;
   status?: string;
   lastActivityAt?: string;
@@ -137,6 +138,68 @@ describe("buildStorytellingFeedItems — filter completed missions (slice 18 Che
       expect(
         (progressItems[0] as { source: { missionId: string } }).source.missionId,
       ).toBe("m3");
+    });
+
+    it("filters slice-derived cards from missions with status === 'complete'", () => {
+      const withStatus: MissionRow[] = [
+        { name: "getting-started", path: "/m/getting-started", status: "complete" },
+        { name: "release-0-3-1", path: "/m/release-0-3-1", status: "active" },
+      ];
+      const slicesWithMissions: SliceRow[] = [
+        {
+          name: "first-conveyor-run",
+          missionId: "getting-started",
+          displayName: "First Conveyor Run",
+          status: "blocked",
+        },
+        {
+          name: "slice-16-typography",
+          missionId: "release-0-3-1",
+          displayName: "Slice 16 Typography",
+          status: "done",
+        },
+      ];
+
+      const items = buildStorytellingFeedItems(withStatus, slicesWithMissions);
+
+      expect(items).not.toContainEqual(
+        expect.objectContaining({
+          source: expect.objectContaining({ sliceId: "first-conveyor-run" }),
+        }),
+      );
+      expect(items).toContainEqual(
+        expect.objectContaining({
+          source: expect.objectContaining({ sliceId: "slice-16-typography" }),
+        }),
+      );
+    });
+
+    it("filters slice-derived cards from locally completed missions before durable status loads", () => {
+      const activeMissions: MissionRow[] = [
+        { name: "getting-started", path: "/m/getting-started", status: "active" },
+        { name: "release-0-3-1", path: "/m/release-0-3-1", status: "active" },
+      ];
+      const slicesWithMissions: SliceRow[] = [
+        { name: "intro", missionId: "getting-started", status: "active" },
+        { name: "ship", missionId: "release-0-3-1", status: "shipped" },
+      ];
+
+      const items = buildStorytellingFeedItems(
+        activeMissions,
+        slicesWithMissions,
+        new Set(["getting-started"]),
+      );
+
+      expect(items).not.toContainEqual(
+        expect.objectContaining({
+          source: expect.objectContaining({ sliceId: "intro" }),
+        }),
+      );
+      expect(items).toContainEqual(
+        expect.objectContaining({
+          source: expect.objectContaining({ sliceId: "ship" }),
+        }),
+      );
     });
   });
 });

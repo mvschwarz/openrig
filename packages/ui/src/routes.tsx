@@ -45,6 +45,7 @@ import { SkillsIndexPage } from "./components/specs/SkillsIndexPage.js";
 import { PluginsIndexPage } from "./components/specs/PluginsIndexPage.js";
 // Phase 3a slice 3.3 — plugin detail page route.
 import { PluginDetailPage } from "./components/specs/PluginDetailPage.js";
+import { FilesWorkspace } from "./components/files/FilesWorkspace.js";
 import { SettingsCenter } from "./components/system/SettingsCenter.js";
 import {
   HostScopePage,
@@ -177,6 +178,12 @@ const specsPluginsIndexRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/specs/plugins",
   component: PluginsIndexPage,
+});
+
+const filesRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/files",
+  component: FilesWorkspace,
 });
 
 // Phase 3a slice 3.3 — Plugin detail page mounted at /plugins/:pluginId.
@@ -428,6 +435,7 @@ const routeTree = rootRoute.addChildren([
   specsSkillRoute,
   specsSkillFileRoute,
   pluginDetailRoute,
+  filesRoute,
   specsKindRoute,
   settingsRoute,
   searchRoute,

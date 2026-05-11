@@ -1,11 +1,13 @@
 // Slice 20 mobile regression tests.
 //
-// Two surfaces fixed:
+// Three surfaces fixed:
 //   (a) FilesWorkspace two-pane shape stacks vertically on narrow
 //       viewports (< sm breakpoint) so the document panel claims full
 //       width on a phone.
 //   (b) AppShell mobile slide-over Rail renders vertical (already
 //       covered by app-shell.test.tsx slice-20 cases).
+//   (c) Slice Artifacts Docs Browser uses the same responsive two-pane
+//       shape; this is the actual rendered path under /project/slice/:id.
 //
 // (a) is asserted here via source-level scan (the component fetches
 // data via hooks; full DOM render would require deep mocking). Source
@@ -26,6 +28,12 @@ async function readSource(packageRelPath: string): Promise<string> {
 }
 
 describe("slice 20: FilesWorkspace responsive two-pane shape", () => {
+  it("/files route mounts FilesWorkspace instead of falling through to Not Found", async () => {
+    const source = await readSource("src/routes.tsx");
+    expect(source).toMatch(/import \{ FilesWorkspace \} from "\.\/components\/files\/FilesWorkspace\.js";/);
+    expect(source).toMatch(/path: "\/files",\n\s+component: FilesWorkspace/);
+  });
+
   it("outer container uses flex-col on mobile + sm:flex-row on desktop", async () => {
     const source = await readSource("src/components/files/FilesWorkspace.tsx");
     // The outer flex parent that owns the two-pane shape now stacks
@@ -42,6 +50,22 @@ describe("slice 20: FilesWorkspace responsive two-pane shape", () => {
     expect(source).toMatch(/sm:max-h-none/);
     // Desktop keeps a right border between tree + content; mobile uses
     // a bottom border instead. Both shapes documented in className.
+    expect(source).toMatch(/border-b border-stone-200/);
+    expect(source).toMatch(/sm:border-b-0 sm:border-r/);
+  });
+});
+
+describe("slice 20: DocsTab responsive two-pane shape", () => {
+  it("slice Artifacts Docs Browser stacks vertically on mobile + restores row at sm:", async () => {
+    const source = await readSource("src/components/slices/tabs/DocsTab.tsx");
+    expect(source).toMatch(/className="flex h-full flex-col sm:flex-row"/);
+  });
+
+  it("docs tree pane is full-width on mobile + capped + scrollable; restores w-56 at sm:", async () => {
+    const source = await readSource("src/components/slices/tabs/DocsTab.tsx");
+    expect(source).toMatch(/w-full max-h-48 shrink-0 overflow-y-auto/);
+    expect(source).toMatch(/sm:w-56/);
+    expect(source).toMatch(/sm:max-h-none/);
     expect(source).toMatch(/border-b border-stone-200/);
     expect(source).toMatch(/sm:border-b-0 sm:border-r/);
   });

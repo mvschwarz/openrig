@@ -29,8 +29,8 @@ export function DocsTab({ sliceName, tree }: { sliceName: string; tree: DocsTree
   const doc = useSliceDoc(sliceName, selected);
 
   return (
-    <div data-testid="docs-tab" className="flex h-full">
-      <aside className="w-56 shrink-0 overflow-y-auto border-r border-stone-200 bg-stone-50 p-2" data-testid="docs-tree">
+    <div data-testid="docs-tab" className="flex h-full flex-col sm:flex-row">
+      <aside className="w-full max-h-48 shrink-0 overflow-y-auto border-b border-stone-200 bg-stone-50 p-2 sm:w-56 sm:max-h-none sm:border-b-0 sm:border-r" data-testid="docs-tree">
         {tree.length === 0 && (
           <div className="font-mono text-[10px] text-stone-400">Empty slice folder.</div>
         )}
