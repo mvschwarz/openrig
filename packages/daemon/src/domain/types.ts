@@ -193,6 +193,12 @@ export type RigEvent =
   | { type: "workflow.completed"; instanceId: string; workflowName: string }
   | { type: "workflow.failed"; instanceId: string; workflowName: string; reason: string }
   | { type: "workflow.routing_table_changed"; rigName: string; cause: string }
+  // Slice 11 (release-0.3.1 workflow-spec-folder-discovery): folder-scan
+  // deletion path. Emitted once per workflow_specs cache row removed
+  // because its source file disappeared from the scanned workflows folder.
+  // Provides a traceable audit-log entry for OQ-4 ("Remove cache row when
+  // file disappears + audit-log entry. Clean Library + traceable.").
+  | { type: "workflow_spec.removed"; sourcePath: string; specId: string | null; specName: string | null; specVersion: string | null; reason: "file_disappeared" }
   // PL-005 Phase A: Mission Control / Queue Observability events.
   // Action audit + cross-CLI-version drift detection. view_refreshed
   // is emitted when a Mission Control view is recomputed (SSE

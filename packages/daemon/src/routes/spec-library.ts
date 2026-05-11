@@ -13,6 +13,7 @@ import {
   scanWorkflowSpecFolder,
 } from "../domain/spec-library-workflow-scanner.js";
 import type { WorkflowSpecCache } from "../domain/workflow-spec-cache.js";
+import type { EventBus } from "../domain/event-bus.js";
 
 export function specLibraryRoutes(): Hono {
   const router = new Hono();
@@ -31,9 +32,10 @@ export function specLibraryRoutes(): Hono {
       // cache-only behavior.
       const cache = c.get("workflowSpecCache" as never) as WorkflowSpecCache | undefined;
       const folder = c.get("workflowsFolderDir" as never) as string | undefined;
+      const eventBus = c.get("eventBus" as never) as EventBus | undefined;
       if (cache && folder) {
         try {
-          scanWorkflowSpecFolder({ db, cache, folder, builtinDir: builtinDir ?? null });
+          scanWorkflowSpecFolder({ db, cache, folder, builtinDir: builtinDir ?? null, eventBus });
         } catch { /* best-effort — folder scan failure must not break Library list */ }
       }
       // Re-scan workflow specs on each list request — cheap (single

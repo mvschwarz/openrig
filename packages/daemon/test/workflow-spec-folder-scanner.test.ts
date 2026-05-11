@@ -12,10 +12,12 @@ import type Database from "better-sqlite3";
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
 import { coreSchema } from "../src/db/migrations/001_core_schema.js";
+import { eventsSchema } from "../src/db/migrations/003_events.js";
 import { workflowSpecsSchema } from "../src/db/migrations/033_workflow_specs.js";
 import { workflowSpecsDiagnosticSchema } from "../src/db/migrations/040_workflow_specs_diagnostic.js";
 import { WorkflowSpecCache } from "../src/domain/workflow-spec-cache.js";
 import { scanWorkflowSpecFolder } from "../src/domain/spec-library-workflow-scanner.js";
+import { EventBus } from "../src/domain/event-bus.js";
 
 const VALID_YAML = `workflow:
   id: folder-test
@@ -76,7 +78,7 @@ describe("scanWorkflowSpecFolder (slice 11)", () => {
 
   beforeEach(() => {
     db = createDb();
-    migrate(db, [coreSchema, workflowSpecsSchema, workflowSpecsDiagnosticSchema]);
+    migrate(db, [coreSchema, eventsSchema, workflowSpecsSchema, workflowSpecsDiagnosticSchema]);
     cache = new WorkflowSpecCache(db);
     folder = mkdtempSync(join(tmpdir(), "wf-folder-"));
   });
@@ -176,6 +178,64 @@ describe("scanWorkflowSpecFolder (slice 11)", () => {
     expect(result.removed).toBe(0);
     expect(cache.listAll().some((r) => r.name === "external-spec")).toBe(true);
     rmSync(externalPath);
+  });
+
+  it("emits workflow_spec.removed audit event for each deleted file (HG-3)", () => {
+    // OQ-4 acceptance criterion: deletion produces BOTH cache row removal
+    // AND audit-log entry. Without the event emission, the Library shows a
+    // clean state but operators can't trace WHICH spec disappeared WHEN.
+    writeFileSync(join(folder, "wf.yaml"), VALID_YAML);
+    writeFileSync(join(folder, "wf2.yaml"), VALID_YAML_TWO);
+    const eventBus = new EventBus(db);
+    scanWorkflowSpecFolder({ db, cache, folder, builtinDir: null, eventBus });
+
+    rmSync(join(folder, "wf.yaml"));
+    const removedFilePath = join(folder, "wf.yaml");
+    const result = scanWorkflowSpecFolder({ db, cache, folder, builtinDir: null, eventBus });
+    expect(result.removed).toBe(1);
+
+    const events = db
+      .prepare(`SELECT type, payload FROM events WHERE type = 'workflow_spec.removed'`)
+      .all() as Array<{ type: string; payload: string }>;
+    expect(events).toHaveLength(1);
+    const payload = JSON.parse(events[0]!.payload) as { type: string; sourcePath: string; reason: string };
+    expect(payload.type).toBe("workflow_spec.removed");
+    expect(payload.sourcePath).toBe(removedFilePath);
+    expect(payload.reason).toBe("file_disappeared");
+  });
+
+  it("emits one workflow_spec.removed event per file when multiple disappear", () => {
+    // Drift-discriminator for the emission loop: two distinct deletions must
+    // produce two distinct events with distinct sourcePaths (not one batched
+    // event nor one repeated).
+    writeFileSync(join(folder, "a.yaml"), VALID_YAML);
+    writeFileSync(join(folder, "b.yaml"), VALID_YAML_TWO);
+    const eventBus = new EventBus(db);
+    scanWorkflowSpecFolder({ db, cache, folder, builtinDir: null, eventBus });
+
+    rmSync(join(folder, "a.yaml"));
+    rmSync(join(folder, "b.yaml"));
+    const result = scanWorkflowSpecFolder({ db, cache, folder, builtinDir: null, eventBus });
+    expect(result.removed).toBe(2);
+
+    const events = db
+      .prepare(`SELECT payload FROM events WHERE type = 'workflow_spec.removed' ORDER BY seq`)
+      .all() as Array<{ payload: string }>;
+    expect(events).toHaveLength(2);
+    const paths = events.map((e) => (JSON.parse(e.payload) as { sourcePath: string }).sourcePath).sort();
+    expect(paths).toEqual([join(folder, "a.yaml"), join(folder, "b.yaml")]);
+  });
+
+  it("does NOT emit workflow_spec.removed when eventBus is omitted (back-compat)", () => {
+    writeFileSync(join(folder, "wf.yaml"), VALID_YAML);
+    scanWorkflowSpecFolder({ db, cache, folder, builtinDir: null });
+    rmSync(join(folder, "wf.yaml"));
+    const result = scanWorkflowSpecFolder({ db, cache, folder, builtinDir: null });
+    expect(result.removed).toBe(1);
+    const events = db
+      .prepare(`SELECT COUNT(*) as n FROM events WHERE type = 'workflow_spec.removed'`)
+      .get() as { n: number };
+    expect(events.n).toBe(0);
   });
 
   it("drift-discriminator: same scan emits 3 distinct outcomes for 3 distinct files", () => {

@@ -25,6 +25,7 @@ import { createHash } from "node:crypto";
 import type Database from "better-sqlite3";
 import type { WorkflowSpec } from "./workflow-types.js";
 import type { WorkflowSpecCache } from "./workflow-spec-cache.js";
+import type { EventBus } from "./event-bus.js";
 
 export interface SpecLibraryWorkflowEntry {
   id: string;
@@ -342,6 +343,11 @@ export interface ScanWorkflowSpecFolderOpts {
   /** Daemon's bundled builtin starter dir; used to skip removal logic
    *  for built-in rows (the scanner only owns the folder it walks). */
   builtinDir: string | null;
+  /** Optional EventBus — when wired, the scanner emits a
+   *  workflow_spec.removed audit event for each cache row removed because
+   *  its source file disappeared (OQ-4 acceptance: deletion + audit log).
+   *  Omitted in unit tests that don't care about emission. */
+  eventBus?: EventBus;
 }
 
 export interface ScanWorkflowSpecFolderResult {
@@ -451,12 +457,37 @@ export function scanWorkflowSpecFolder(
   // rows or rows the scanner doesn't own (e.g., other workflows folders).
   const folderPrefix = opts.folder.endsWith(path.sep) ? opts.folder : `${opts.folder}${path.sep}`;
   const cachedUnderFolder = opts.db
-    .prepare(`SELECT source_path FROM workflow_specs WHERE source_path LIKE ?`)
-    .all(`${folderPrefix}%`) as Array<{ source_path: string }>;
-  for (const { source_path } of cachedUnderFolder) {
-    if (seenPaths.has(source_path)) continue;
-    const removed = opts.cache.removeBySourcePath(source_path);
-    if (removed > 0) result.removed += removed;
+    .prepare(
+      `SELECT source_path, spec_id, name, version FROM workflow_specs WHERE source_path LIKE ?`,
+    )
+    .all(`${folderPrefix}%`) as Array<{
+      source_path: string;
+      spec_id: string | null;
+      name: string | null;
+      version: string | null;
+    }>;
+  for (const row of cachedUnderFolder) {
+    if (seenPaths.has(row.source_path)) continue;
+    const removed = opts.cache.removeBySourcePath(row.source_path);
+    if (removed > 0) {
+      result.removed += removed;
+      // OQ-4 audit-log: record the disappearance so operators can trace
+      // which spec was reaped when. Emission failures must not abort the
+      // scan — the cache row is already gone and the next scan would be
+      // a no-op for this path.
+      if (opts.eventBus) {
+        try {
+          opts.eventBus.emit({
+            type: "workflow_spec.removed",
+            sourcePath: row.source_path,
+            specId: row.spec_id ?? null,
+            specName: row.name ?? null,
+            specVersion: row.version ?? null,
+            reason: "file_disappeared",
+          });
+        } catch { /* best-effort audit emission */ }
+      }
+    }
   }
 
   return result;
