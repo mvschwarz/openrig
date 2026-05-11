@@ -34,6 +34,27 @@ function specEntry(entry: SpecLibraryEntry): TreeEntry {
   return { id: entry.id, name: entry.name, entryId: entry.id, meta: entry.version };
 }
 
+function entryAccessibleLabel(entry: TreeEntry): string {
+  return entry.meta ? `${entry.name} · ${entry.meta}` : entry.name;
+}
+
+function LeafContent({ entry }: { entry: TreeEntry }) {
+  return (
+    <>
+      <span className="min-w-0 flex-1 truncate">{entry.name}</span>
+      {entry.meta ? (
+        <span
+          data-testid={`specs-leaf-${entry.id}-meta`}
+          className="flex shrink-0 items-center gap-1 truncate text-[9px] uppercase tracking-[0.08em] text-on-surface-variant"
+        >
+          {entry.metaNode}
+          <span className="truncate">{entry.meta}</span>
+        </span>
+      ) : null}
+    </>
+  );
+}
+
 function Section({
   def,
   expanded,
@@ -70,42 +91,44 @@ function Section({
                     to="/specs/library/$entryId"
                     params={{ entryId: entry.entryId }}
                     data-testid={`specs-leaf-${entry.id}`}
-                    className="block truncate font-mono text-xs text-on-surface hover:bg-surface-low hover:text-stone-900"
+                    title={entryAccessibleLabel(entry)}
+                    aria-label={entryAccessibleLabel(entry)}
+                    className="flex min-w-0 items-center justify-between gap-2 truncate font-mono text-xs text-on-surface hover:bg-surface-low hover:text-stone-900"
                   >
-                    {entry.name}
+                    <LeafContent entry={entry} />
                   </Link>
                 ) : entry.skillId ? (
                   <Link
                     to="/specs/skills/$skillToken"
                     params={{ skillToken: librarySkillToken(entry.skillId) }}
                     data-testid={`specs-leaf-${entry.id}`}
-                    className="block truncate font-mono text-xs text-on-surface hover:bg-surface-low hover:text-stone-900"
+                    title={entryAccessibleLabel(entry)}
+                    aria-label={entryAccessibleLabel(entry)}
+                    className="flex min-w-0 items-center justify-between gap-2 truncate font-mono text-xs text-on-surface hover:bg-surface-low hover:text-stone-900"
                   >
-                    {entry.name}
+                    <LeafContent entry={entry} />
                   </Link>
                 ) : entry.pluginId ? (
                   <Link
                     to="/plugins/$pluginId"
                     params={{ pluginId: entry.pluginId }}
                     data-testid={`specs-leaf-${entry.id}`}
-                    className="block truncate font-mono text-xs text-on-surface hover:bg-surface-low hover:text-stone-900"
+                    title={entryAccessibleLabel(entry)}
+                    aria-label={entryAccessibleLabel(entry)}
+                    className="flex min-w-0 items-center justify-between gap-2 truncate font-mono text-xs text-on-surface hover:bg-surface-low hover:text-stone-900"
                   >
-                    {entry.name}
+                    <LeafContent entry={entry} />
                   </Link>
                 ) : (
                   <div
                     data-testid={`specs-leaf-${entry.id}`}
-                    className="truncate font-mono text-xs text-on-surface"
+                    title={entryAccessibleLabel(entry)}
+                    aria-label={entryAccessibleLabel(entry)}
+                    className="flex min-w-0 items-center justify-between gap-2 truncate font-mono text-xs text-on-surface"
                   >
-                    {entry.name}
+                    <LeafContent entry={entry} />
                   </div>
                 )}
-                {entry.meta ? (
-                  <div className="flex min-w-0 items-center gap-1 truncate font-mono text-[9px] text-on-surface-variant">
-                    {entry.metaNode}
-                    <span className="truncate">{entry.meta}</span>
-                  </div>
-                ) : null}
               </li>
             ))
           ) : (
