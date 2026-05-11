@@ -73,6 +73,17 @@ export function useFilesList(root: string | null, path: string | null) {
     queryFn: () => fetchList(root!, path ?? ""),
     enabled: !!root,
     staleTime: 15_000,
+    // V0.3.1 slice 17 walk-item 8 (Explorer auto-show): refetch on
+    // window focus so new files / folders created while the operator
+    // was off-tab appear without a manual refresh click.
+    //
+    // Forward-fix #2: 'always' instead of `true`. With staleTime:
+    // 15_000, plain `true` gates the refetch on staleness — short
+    // refocus within the 15-second window observed no refetch in the
+    // VM proof. 'always' refetches on every focus regardless of
+    // staleness. This is the load-bearing hook for the Explorer
+    // sidebar (driven via useMissionDiscovery + ProjectTreeView).
+    refetchOnWindowFocus: "always",
   });
 }
 

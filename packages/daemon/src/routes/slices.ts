@@ -49,6 +49,10 @@ export function slicesRoutes(): Hono {
         hint: `Unknown filter '${filter}'. Allowed: ${[...VALID_FILTERS].sort().join(", ")}.`,
       }, 400);
     }
+    const refresh = c.req.query("refresh");
+    if (refresh === "1" || refresh === "true") {
+      deps.indexer.invalidate();
+    }
     const all = deps.indexer.list();
     let filtered = filter === "all" ? all : all.filter((s) => s.status === filter);
     // Workflows in Spec Library v0: optional lens filter — narrow to
@@ -89,6 +93,17 @@ export function slicesRoutes(): Hono {
       filter,
       boundToWorkflow: boundDiagnostic,
     });
+  });
+
+  // V0.3.1 slice 17 founder-walk-workspace-state-correctness (walk item 8 — Explorer auto-show): explicit cache invalidation surface.
+  // POST /api/slices/refresh drops both indexer caches so newly-created
+  // slice / mission folders are picked up without a daemon restart.
+  // Registered BEFORE the dynamic /:name routes so it isn't shadowed.
+  app.post("/refresh", (c) => {
+    const deps = getDeps(c);
+    if (!deps) return c.json({ error: "slices_indexer_unavailable" }, 503);
+    deps.indexer.invalidate();
+    return c.json({ ok: true });
   });
 
   // 2) Proof asset serving — registered BEFORE /:name to keep /:name from

@@ -6,7 +6,7 @@
 // instead of the raw 503.
 
 import { useMemo } from "react";
-import { useQueries, useQuery } from "@tanstack/react-query";
+import { useQueries, useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 
 export type SliceStatus = "active" | "done" | "blocked" | "draft";
 export type SliceFilter = "all" | "active" | "done" | "blocked";
@@ -54,7 +54,11 @@ async function fetchSlicesList(
   filter: SliceFilter,
   boundToWorkflow: BoundToWorkflowFilter | null,
 ): Promise<SliceListResponse | SlicesUnavailable> {
-  const params = new URLSearchParams({ filter });
+  // Explorer auto-show needs a daemon-side cache bypass as well as a
+  // React Query refetch. Otherwise a focus refetch can still receive the
+  // indexer's stale in-memory listing immediately after a slice folder is
+  // created.
+  const params = new URLSearchParams({ filter, refresh: "1" });
   if (boundToWorkflow) {
     params.set("boundToWorkflow", `${boundToWorkflow.specName}:${boundToWorkflow.specVersion}`);
   }
@@ -81,6 +85,38 @@ export function useSlices(filter: SliceFilter, boundToWorkflow: BoundToWorkflowF
     ],
     queryFn: () => fetchSlicesList(filter, boundToWorkflow),
     staleTime: 30_000,
+    // V0.3.1 slice 17 walk-item 8 (Explorer auto-show): refetch on
+    // window focus so an operator who switches away to `mkdir slices/...`
+    // and comes back sees the new folder without manually clicking
+    // refresh.
+    //
+    // Forward-fix #2 (2026-05-11 velocity-qa VM verify CONCERNING):
+    // the value MUST be 'always' instead of plain `true`. With this
+    // query's local staleTime: 30_000 (30 seconds), plain `true` gates
+    // the refetch on the staleness predicate — short refocus tests
+    // within the stale window observed no refetch. The 'always'
+    // variant ignores staleness and refetches on every focus, which
+    // is the actual intent: see new folders the operator JUST created.
+    refetchOnWindowFocus: "always",
+  });
+}
+
+// V0.3.1 slice 17 founder-walk-workspace-state-correctness — walk item 8 (Explorer auto-show). Mutation hook for the Explorer header's
+// manual refresh button: POSTs to /api/slices/refresh to drop the
+// daemon-side indexer cache, then invalidates the react-query slices
+// + files caches so the next render hits the fresh data.
+export function useRefreshSlices() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async () => {
+      const res = await fetch("/api/slices/refresh", { method: "POST" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return (await res.json()) as { ok: boolean };
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["slices"] });
+      queryClient.invalidateQueries({ queryKey: ["files"] });
+    },
   });
 }
 

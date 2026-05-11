@@ -407,21 +407,52 @@ export class SliceIndexer {
   }
 
   private matchQitems(sliceName: string, railItem: string | null, missionId: string | null): string[] {
-    // Strategy: union qitems whose body or tags mention the slice id,
-    // rail item, or mission id. Body matching preserves the legacy corpus;
-    // tags make the mission-aware default workspace precise for new work.
+    // V0.3.1 slice 17 founder-walk-workspace-state-correctness (walk item 3): the previous implementation unioned substring matches on
+    // [sliceName, railItem, missionId]. The missionId term over-matched
+    // — every qitem tagged `mission:<id>` appeared under EVERY slice in
+    // that mission. Fix: when typed `slice:<name>` tag rows exist for
+    // this slice, the missionId substring term is dropped from the
+    // union; the typed tag is the authoritative slice membership signal.
+    // Substring fallback (including the missionId term) is preserved for
+    // slices whose qitem corpus pre-dates the typed-tag convention so
+    // legacy mission-aware workspaces don't regress.
     const ids = new Set<string>();
-    const terms = Array.from(new Set([sliceName, railItem, missionId].filter((v): v is string => !!v)));
     try {
-      for (const term of terms) {
+      // 1. Typed-tag matches: tags JSON contains `slice:<sliceName>` literal.
+      // Both the `"slice:..."` JSON-array form and the comma-separated
+      // form (legacy CLI tags) are caught by a wildcard on the slice id.
+      let typedTagMatchCount = 0;
+      try {
+        const rows = this.db.prepare(
+          `SELECT qitem_id FROM queue_items WHERE tags LIKE ? LIMIT 500`,
+        ).all(`%slice:${sliceName}%`) as Array<{ qitem_id: string }>;
+        for (const r of rows) ids.add(r.qitem_id);
+        typedTagMatchCount = rows.length;
+      } catch {
+        // queue_items present but `tags` column missing (older test
+        // harness): fall through to substring path with full term set.
+      }
+
+      // 2. Substring matches. Terms are chosen so the missionId term
+      // is INCLUDED only when no typed-tag rows exist (legacy
+      // compatibility); otherwise the slice-specific terms drive
+      // matching. In mission-folder workspaces, railItem defaults to
+      // missionId when no explicit rail item is authored, so the typed-tag
+      // branch must not blindly keep that fallback or mission-only qitems
+      // leak back into every slice in the mission.
+      const substringTerms = (typedTagMatchCount > 0
+        ? [sliceName, railItem === missionId ? null : railItem]
+        : [sliceName, railItem, missionId]
+      ).filter((v): v is string => !!v);
+      for (const term of Array.from(new Set(substringTerms))) {
         try {
           const rows = this.db.prepare(
-            `SELECT qitem_id FROM queue_items WHERE body LIKE ? OR tags LIKE ? LIMIT 500`
+            `SELECT qitem_id FROM queue_items WHERE body LIKE ? OR tags LIKE ? LIMIT 500`,
           ).all(`%${term}%`, `%${term}%`) as Array<{ qitem_id: string }>;
           for (const r of rows) ids.add(r.qitem_id);
         } catch {
           const rows = this.db.prepare(
-            `SELECT qitem_id FROM queue_items WHERE body LIKE ? LIMIT 500`
+            `SELECT qitem_id FROM queue_items WHERE body LIKE ? LIMIT 500`,
           ).all(`%${term}%`) as Array<{ qitem_id: string }>;
           for (const r of rows) ids.add(r.qitem_id);
         }
@@ -430,7 +461,35 @@ export class SliceIndexer {
       // queue_items table absent (test harness without the migration); return empty.
       return [];
     }
-    return Array.from(ids);
+    // V0.3.1 slice 17 walk item 10 — forward-fix #1. Sort qitemIds DESC
+    // by ts_created so the slice-detail Queue tab renders newest first
+    // (HG-5). The ScopePages.ScopeQueueRollup frontend sort still runs
+    // as a belt-and-suspenders measure for code paths that bypass this
+    // helper, but the backend is the authoritative consistency point.
+    // Fallback to qitem-id lex DESC when ts_created is unavailable (the
+    // id encodes the timestamp prefix `qitem-YYYYMMDDHHMMSS-...`).
+    const idsArr = Array.from(ids);
+    if (idsArr.length <= 1) return idsArr;
+    try {
+      const placeholders = idsArr.map(() => "?").join(",");
+      const tsRows = this.db.prepare(
+        `SELECT qitem_id, ts_created FROM queue_items WHERE qitem_id IN (${placeholders})`,
+      ).all(...idsArr) as Array<{ qitem_id: string; ts_created: string | null }>;
+      const tsByQitemId = new Map<string, string>();
+      for (const r of tsRows) if (r.ts_created) tsByQitemId.set(r.qitem_id, r.ts_created);
+      idsArr.sort((a, b) => {
+        const tsA = tsByQitemId.get(a) ?? a;
+        const tsB = tsByQitemId.get(b) ?? b;
+        if (tsA === tsB) return 0;
+        return tsA < tsB ? 1 : -1; // DESC
+      });
+    } catch {
+      // Sort failure (e.g. ts_created column absent): fall back to
+      // qitem-id lex DESC. id format encodes the timestamp so this
+      // still yields newest-first in practice.
+      idsArr.sort((a, b) => (a < b ? 1 : a > b ? -1 : 0));
+    }
+    return idsArr;
   }
 
   private findProofPacket(sliceName: string): SliceProofPacket | null {

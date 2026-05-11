@@ -9,8 +9,8 @@
 
 import { useState, useMemo } from "react";
 import { Link } from "@tanstack/react-router";
-import { ChevronDown, ChevronRight } from "lucide-react";
-import { useSlices, type SliceListEntry } from "../../hooks/useSlices.js";
+import { ChevronDown, ChevronRight, RefreshCw } from "lucide-react";
+import { useSlices, useRefreshSlices, type SliceListEntry } from "../../hooks/useSlices.js";
 import { useWorkspaceName } from "../../hooks/useWorkspaceName.js";
 import {
   useMissionDiscovery,
@@ -27,6 +27,31 @@ import {
   type ProjectMissionBucket,
   type ProjectSliceRow,
 } from "../../lib/project-mission-state.js";
+
+function ProjectTreeRefreshHeader() {
+  const refresh = useRefreshSlices();
+  return (
+    <div className="flex items-center justify-between px-2 pb-2 border-b border-stone-200">
+      <span className="font-mono text-[9px] uppercase tracking-[0.16em] text-stone-500">
+        Project
+      </span>
+      <button
+        type="button"
+        data-testid="project-tree-refresh"
+        title="Refresh slice + file caches"
+        onClick={() => refresh.mutate()}
+        disabled={refresh.isPending}
+        className="flex items-center gap-1 px-1 py-0.5 text-on-surface-variant hover:text-stone-900 disabled:opacity-50"
+      >
+        <RefreshCw
+          className={`h-3 w-3 ${refresh.isPending ? "animate-spin" : ""}`}
+          aria-hidden="true"
+        />
+        <span className="font-mono text-[9px] uppercase tracking-wide">refresh</span>
+      </button>
+    </div>
+  );
+}
 
 type GroupedMission = {
   id: string;
@@ -234,6 +259,16 @@ export function ProjectTreeView() {
 
   return (
     <div data-testid="project-tree-view" className="flex-1 overflow-y-auto py-2">
+      {/*
+        V0.3.1 slice 17 founder-walk-workspace-state-correctness — walk item 8 (Explorer auto-show). Manual refresh button drops the
+        daemon-side indexer cache and react-query slice/file caches so
+        newly-created slice / mission folders appear without restarting
+        the daemon. Window-focus refetch in useSlices / useFilesList
+        handles the common "switched away to mkdir + came back" case;
+        this button is the explicit fallback when window-focus doesn't
+        fire (e.g., a fast operator who never blurs the tab).
+      */}
+      <ProjectTreeRefreshHeader />
       <ul>
         <li data-testid="project-workspace-node">
           <button

@@ -269,7 +269,19 @@ function ScopeQueueRollup({
   queueItemsById: Map<string, QueueItemDetail>;
   isFetching: boolean;
 }) {
-  if (qitemIds.length === 0) {
+  // V0.3.1 slice 17 founder-walk-workspace-state-correctness — walk item 10 (slice queue descending order). Latest qitem at top. Prefer
+  // tsCreated when the loaded detail is available; fall back to the
+  // qitem-id (which encodes a timestamp prefix `qitem-YYYYMMDD...`) so
+  // sort works before queueItemsById has finished loading.
+  const sortedQitemIds = [...qitemIds].sort((a, b) => {
+    const itemA = queueItemsById.get(a);
+    const itemB = queueItemsById.get(b);
+    const tsA = itemA?.tsCreated ?? a;
+    const tsB = itemB?.tsCreated ?? b;
+    if (tsA === tsB) return 0;
+    return tsA < tsB ? 1 : -1; // DESC
+  });
+  if (sortedQitemIds.length === 0) {
     return <EmptyState label="NO QITEMS" description="No queue items are indexed for this scope." variant="card" testId="scope-queue-empty" />;
   }
   return (
@@ -280,7 +292,7 @@ function ScopeQueueRollup({
         </div>
       ) : null}
       <ul className="divide-y divide-outline-variant border border-outline-variant">
-        {qitemIds.map((qitemId) => {
+        {sortedQitemIds.map((qitemId) => {
           const item = queueItemsById.get(qitemId);
           return (
             <li key={qitemId} className="bg-white/35 backdrop-blur-sm">
