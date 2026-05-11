@@ -10,6 +10,7 @@
 // Visual: 1px outline-variant border (universal-shell.md L43-L48 doctrine)
 // + RegistrationMarks at 4 corners + font-mono uppercase rig tab.
 
+import { memo } from "react";
 import { Link } from "@tanstack/react-router";
 import { ArrowUpRight, ChevronRight } from "lucide-react";
 import { Handle, Position } from "@xyflow/react";
@@ -39,7 +40,7 @@ function statusToPip(s: RigGroupNodeData["status"]): React.ComponentProps<typeof
   return "warning"; // partial
 }
 
-export function RigGroupNode({ data }: { data: RigGroupNodeData }) {
+function RigGroupNodeInner({ data }: { data: RigGroupNodeData }) {
   const { rigId, rigName, collapsed, status, nodeCount, runningCount, podCount, recentActivity, onToggle } = data;
   return (
     <div
@@ -126,3 +127,28 @@ export function RigGroupNode({ data }: { data: RigGroupNodeData }) {
     </div>
   );
 }
+
+/** V0.3.1 bug-fix slice topology-perf — graph CPU win.
+ *
+ * Wrap with React.memo + custom equality on the visual fields. The
+ * data prop reference changes every `useTopologyActivity` bump (1s
+ * interval + per-stream-event) because HostMultiRigGraph rebuilds the
+ * node array via `.map(...)` to thread `recentActivity` in. Without
+ * memoization, every bump re-renders every rig group. With memo, we
+ * skip the re-render unless something user-visible actually changed. */
+export const RigGroupNode = memo(RigGroupNodeInner, (prev, next) => {
+  const a = prev.data;
+  const b = next.data;
+  return (
+    a.rigId === b.rigId &&
+    a.rigName === b.rigName &&
+    a.collapsed === b.collapsed &&
+    a.status === b.status &&
+    a.nodeCount === b.nodeCount &&
+    a.runningCount === b.runningCount &&
+    a.podCount === b.podCount &&
+    a.recentActivity === b.recentActivity &&
+    a.onToggle === b.onToggle
+  );
+});
+RigGroupNode.displayName = "RigGroupNode";

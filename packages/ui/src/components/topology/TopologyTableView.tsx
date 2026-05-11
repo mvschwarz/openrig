@@ -13,7 +13,7 @@
 // rigs data is available. Switched to `useQueries` from React Query:
 // single hook call regardless of array length.
 
-import { useMemo, useState } from "react";
+import { memo, useMemo, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import {
   type ColumnDef,
@@ -105,8 +105,13 @@ function CmuxButton({ row }: { row: AgentRow }) {
  *  a subtle left-to-right shimmer; otherwise it shows "idle" (or the
  *  raw status string for non-running states like "starting" / "failed").
  *  Honors `prefers-reduced-motion: reduce` via CSS — see
- *  `topology-shimmer` in `topology-table-shimmer.css`. */
-function StatusCell({ status, activityState }: { status: string; activityState: string | undefined }) {
+ *  `topology-shimmer` in `topology-table-shimmer.css`.
+ *
+ *  V0.3.1 bug-fix slice topology-perf: memoized so that
+ *  useTopologyActivity bumps (1s interval + per-stream-event) don't
+ *  re-render every active-status cell across a large topology when
+ *  only one row's activityState changed. */
+const StatusCell = memo(function StatusCell({ status, activityState }: { status: string; activityState: string | undefined }) {
   const semantic = statusToSemanticPip(status);
   // Only split the "running" status into active/idle. Other statuses
   // (starting / stopped / failed / unknown) keep their raw label.
@@ -120,9 +125,13 @@ function StatusCell({ status, activityState }: { status: string; activityState: 
       <StatusPip status={semantic} label={label} variant="pill" labelClassName={labelClass} />
     </span>
   );
-}
+});
+StatusCell.displayName = "StatusCell";
 
-function ContextCell({ row }: { row: AgentRow }) {
+/** V0.3.1 bug-fix slice topology-perf: memoized to skip re-render when
+ *  the parent table rebuilds rows for a 1s activity bump but this
+ *  row's context-usage payload didn't change. */
+const ContextCell = memo(function ContextCell({ row }: { row: AgentRow }) {
   const usage = row.contextUsage;
   const known = usage?.availability === "known" && typeof usage.usedPercentage === "number";
   return (
@@ -140,9 +149,22 @@ function ContextCell({ row }: { row: AgentRow }) {
       {known ? `${usage.usedPercentage}%` : "--"}
     </span>
   );
-}
+}, (prev, next) => {
+  const a = prev.row.contextUsage;
+  const b = next.row.contextUsage;
+  return (
+    prev.row.logicalId === next.row.logicalId &&
+    a?.availability === b?.availability &&
+    a?.usedPercentage === b?.usedPercentage &&
+    a?.fresh === b?.fresh
+  );
+});
+ContextCell.displayName = "ContextCell";
 
-function TokenCell({ row }: { row: AgentRow }) {
+/** V0.3.1 bug-fix slice topology-perf: memoized; token cell content
+ *  only depends on the (input, output) token pair which is stable
+ *  across most bumps. */
+const TokenCell = memo(function TokenCell({ row }: { row: AgentRow }) {
   const usage = row.contextUsage;
   const total = sumTokenCounts(usage?.totalInputTokens, usage?.totalOutputTokens);
   const tokenLabel = formatCompactTokenCount(total);
@@ -156,7 +178,16 @@ function TokenCell({ row }: { row: AgentRow }) {
       {tokenLabel ?? "--"}
     </span>
   );
-}
+}, (prev, next) => {
+  const a = prev.row.contextUsage;
+  const b = next.row.contextUsage;
+  return (
+    prev.row.logicalId === next.row.logicalId &&
+    a?.totalInputTokens === b?.totalInputTokens &&
+    a?.totalOutputTokens === b?.totalOutputTokens
+  );
+});
+TokenCell.displayName = "TokenCell";
 
 function agentColumns(): ColumnDef<AgentRow>[] {
   return [

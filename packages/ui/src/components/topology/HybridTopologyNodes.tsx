@@ -1,3 +1,4 @@
+import { memo } from "react";
 import { Handle, Position } from "@xyflow/react";
 import { displayAgentName, inferPodName } from "../../lib/display-name.js";
 import {
@@ -63,7 +64,7 @@ function contextClass(percent: number | null | undefined, fresh: boolean | undef
   return fresh === false ? `${tone} opacity-50` : tone;
 }
 
-export function HybridPodGroupNode({ data }: { data: HybridPodGroupNodeData }) {
+function HybridPodGroupNodeInner({ data }: { data: HybridPodGroupNodeData }) {
   const label = data.podDisplayName
     ?? data.podNamespace
     ?? inferPodName(data.logicalId ?? null)
@@ -86,7 +87,27 @@ export function HybridPodGroupNode({ data }: { data: HybridPodGroupNodeData }) {
   );
 }
 
-export function HybridAgentNode({ data }: { data: HybridAgentNodeData }) {
+/** V0.3.1 bug-fix slice topology-perf — graph CPU win. Pod-group node
+ *  content depends only on label fields + agent count; data reference
+ *  churns on every topology-activity bump but the visible content
+ *  doesn't. Memoize on the fields the renderer reads. */
+export const HybridPodGroupNode = memo(
+  HybridPodGroupNodeInner,
+  (prev, next) => {
+    const a = prev.data;
+    const b = next.data;
+    return (
+      a.podDisplayName === b.podDisplayName &&
+      a.podNamespace === b.podNamespace &&
+      a.podId === b.podId &&
+      a.logicalId === b.logicalId &&
+      a.agentCount === b.agentCount
+    );
+  },
+);
+HybridPodGroupNode.displayName = "HybridPodGroupNode";
+
+function HybridAgentNodeInner({ data }: { data: HybridAgentNodeData }) {
   const cmuxLaunch = useCmuxLaunch();
   const core = isCoreRole(data.role);
   const isInfra = data.nodeKind === "infrastructure";
@@ -230,3 +251,47 @@ export function HybridAgentNode({ data }: { data: HybridAgentNodeData }) {
     </ActivityRing>
   );
 }
+
+/** V0.3.1 bug-fix slice topology-perf — graph CPU win.
+ *
+ * HybridAgentNode is the per-seat card on the workspace topology graph.
+ * Its `data` prop reference changes on every `useTopologyActivity` bump
+ * (1s interval + per-stream-event in HostMultiRigGraph.activeNodes) but
+ * most fields are stable across bumps for any given seat. Without
+ * memoization we re-render the full card — including `useCmuxLaunch`,
+ * `TerminalPreviewPopover`, multiple format calls, ActivityRing — on
+ * every tick for every visible seat. Slice 12.5 made this acute by
+ * mounting the graph at workspace scope (many rigs × many seats).
+ *
+ * Custom equality compares all fields the renderer reads (visible
+ * content + activity-ring shape + flash). The `currentQitems` array is
+ * compared by length (sufficient signal; deep-equal would re-introduce
+ * work). */
+export const HybridAgentNode = memo(HybridAgentNodeInner, (prev, next) => {
+  const a = prev.data;
+  const b = next.data;
+  return (
+    a.logicalId === b.logicalId &&
+    a.role === b.role &&
+    a.runtime === b.runtime &&
+    a.model === b.model &&
+    a.status === b.status &&
+    a.nodeKind === b.nodeKind &&
+    a.startupStatus === b.startupStatus &&
+    a.canonicalSessionName === b.canonicalSessionName &&
+    a.resolvedSpecName === b.resolvedSpecName &&
+    a.profile === b.profile &&
+    a.contextUsedPercentage === b.contextUsedPercentage &&
+    a.contextFresh === b.contextFresh &&
+    a.contextAvailability === b.contextAvailability &&
+    a.contextTotalInputTokens === b.contextTotalInputTokens &&
+    a.contextTotalOutputTokens === b.contextTotalOutputTokens &&
+    a.agentActivity === b.agentActivity &&
+    (a.currentQitems?.length ?? 0) === (b.currentQitems?.length ?? 0) &&
+    a.rigId === b.rigId &&
+    a.activityRing?.state === b.activityRing?.state &&
+    a.activityRing?.flash === b.activityRing?.flash &&
+    a.reducedMotion === b.reducedMotion
+  );
+});
+HybridAgentNode.displayName = "HybridAgentNode";
