@@ -135,6 +135,14 @@ export class MissionControlReadLayer {
     this.defaultOperatorSession = deps.defaultOperatorSession ?? `operator-${userInfo().username}@kernel`;
   }
 
+  /** V0.3.1 slice 05 — public getter for the resolved operator seat
+   *  session. Route handlers (listDestinations, audit history) read
+   *  this so the picker + audit filter always offer the configured
+   *  operator seat even when the kernel rig isn't booted yet. */
+  getDefaultOperatorSession(): string {
+    return this.defaultOperatorSession;
+  }
+
   async readView(
     viewName: MissionControlViewName,
     opts?: { operatorSession?: string },

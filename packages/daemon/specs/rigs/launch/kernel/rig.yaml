@@ -28,6 +28,7 @@ pods:
         # startup actions. Real human interaction routes through the
         # operator agent + the host shell.
         agent_ref: "builtin:terminal"
+        runtime: terminal
         profile: default
         cwd: "."
       - id: agent

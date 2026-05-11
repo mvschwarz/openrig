@@ -39,6 +39,11 @@ export interface StartOptions {
   // picks up file-stored ConfigStore values, not just shell env.
   transcriptsLines?: number;
   transcriptsPollIntervalSeconds?: number;
+  // V0.3.1 slice 05 kernel-rig-as-default — when true, daemon startup
+  // skips the kernel auto-boot path (kernel rig is not materialized).
+  // Exposed at the CLI as `rig daemon start --no-kernel`; projected
+  // into the daemon process env as OPENRIG_NO_KERNEL.
+  skipKernelBoot?: boolean;
 }
 
 export interface LifecycleDeps {
@@ -251,6 +256,9 @@ export function buildDaemonEnv(
     // shell env.
     transcriptsLines?: number;
     transcriptsPollIntervalSeconds?: number;
+    // V0.3.1 slice 05 — projected via OPENRIG_NO_KERNEL env var so
+    // the daemon's startup.ts kernel-boot path honors the flag.
+    skipKernelBoot?: boolean;
   },
 ): Record<string, string> {
   const env: Record<string, string> = {};
@@ -276,6 +284,9 @@ export function buildDaemonEnv(
   }
   if (opts.transcriptsPollIntervalSeconds !== undefined) {
     env["OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS"] = String(opts.transcriptsPollIntervalSeconds);
+  }
+  if (opts.skipKernelBoot) {
+    env["OPENRIG_NO_KERNEL"] = "1";
   }
 
   return env;
@@ -330,6 +341,7 @@ export async function startDaemon(opts: StartOptions, deps: LifecycleDeps): Prom
       transcriptsPath: opts.transcriptsPath,
       transcriptsLines: opts.transcriptsLines,
       transcriptsPollIntervalSeconds: opts.transcriptsPollIntervalSeconds,
+      skipKernelBoot: opts.skipKernelBoot,
     }),
     stdio: ["ignore", logFd, logFd],
     detached: true,

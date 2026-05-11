@@ -77,7 +77,13 @@ export function daemonCommand(depsOverride?: LifecycleDeps): Command {
     .option("--port <port>", "Port to listen on")
     .option("--host <host>", "Host to bind on")
     .option("--db <path>", "Database path")
-    .action(async (opts: { port?: string; host?: string; db?: string }) => {
+    // V0.3.1 slice 05 kernel-rig-as-default — skip the kernel auto-boot
+    // path. Used by test fixtures, headless CI, and operators who want
+    // a no-kernel daemon for ad-hoc topology work. The daemon proceeds
+    // and serves its HTTP API normally; just doesn't materialize the
+    // kernel rig.
+    .option("--no-kernel", "Skip kernel auto-boot (daemon serves without the kernel rig)")
+    .action(async (opts: { port?: string; host?: string; db?: string; kernel?: boolean }) => {
       try {
         const { ConfigStore } = await import("../config-store.js");
         const { SystemPreflight } = await import("../system-preflight.js");
@@ -105,6 +111,8 @@ export function daemonCommand(depsOverride?: LifecycleDeps): Command {
           return;
         }
 
+        // V0.3.1 slice 05 — Commander's --no-kernel inverts to opts.kernel === false.
+        const skipKernel = opts.kernel === false;
         const state = await startDaemon(
           {
             port: effectivePort,
@@ -120,6 +128,10 @@ export function daemonCommand(depsOverride?: LifecycleDeps): Command {
             // reach the rotation hook.
             transcriptsLines: config.transcripts.lines,
             transcriptsPollIntervalSeconds: config.transcripts.pollIntervalSeconds,
+            // V0.3.1 slice 05 kernel-rig-as-default — propagated via
+            // OPENRIG_NO_KERNEL env var so the daemon's kernel-boot
+            // check in startup.ts honors the flag.
+            skipKernelBoot: skipKernel,
           },
           getDeps(),
         );
