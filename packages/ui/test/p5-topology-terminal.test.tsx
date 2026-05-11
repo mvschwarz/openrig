@@ -223,6 +223,41 @@ describe("TopologyTerminalView P5-7 grid", () => {
   });
 });
 
+// V0.3.1 slice 14 walk-item 17 forward-fix #1 (a11y): each terminal
+// card exposes EXACTLY ONE tabbable trigger control. The TerminalPreview-
+// Popover instance is mounted with `renderTrigger={false}` so the card's
+// full-card overlay button is the sole interaction surface; a duplicate
+// invisible-but-reachable sr-only popover button would fail
+// sensible-tab-order a11y review.
+describe("TerminalView card a11y (slice 14 FF#1)", () => {
+  it("each terminal card exposes exactly one tab-reachable trigger button (no duplicate sr-only popover button)", async () => {
+    const seats = [
+      makeSeat({ logicalId: "alpha" }),
+      makeSeat({ logicalId: "beta" }),
+    ];
+    setupFetch({ rigs: [{ id: "rig-1", name: "test-rig" }], seatsByRig: { "rig-1": seats } });
+    const { findByTestId, container } = withQueryClient(
+      <TopologyTerminalView scope="rig" rigId="rig-1" />,
+    );
+    await findByTestId("topology-terminal-grid");
+
+    // Exactly one card-level trigger button per seat.
+    const cardTriggers = container.querySelectorAll(
+      "button[data-testid^='terminal-card-trigger-']",
+    );
+    expect(cardTriggers).toHaveLength(2);
+
+    // ZERO duplicate sr-only popover buttons — the FF removes them.
+    // Pre-fix: each card mounted a `terminal-grid-<rig>-<seat>-terminal-open`
+    // button via the popover's default trigger render. With
+    // renderTrigger={false} the popover skips its button entirely.
+    const popoverTriggerButtons = container.querySelectorAll(
+      "button[data-testid$='-terminal-open']",
+    );
+    expect(popoverTriggerButtons).toHaveLength(0);
+  });
+});
+
 describe("globals.css pulsing-ring CSS contract (ritual #7 pseudo-element-paint)", () => {
   const cssPath = path.resolve(__dirname, "../src/globals.css");
   it("globals.css declares @keyframes terminal-card-active-frames", () => {

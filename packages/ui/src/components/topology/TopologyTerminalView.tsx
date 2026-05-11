@@ -134,7 +134,7 @@ function SeatTerminalCard({ seat }: { seat: NodeInventoryEntry }) {
           reducedMotion={false}
           testIdPrefix={`terminal-grid-${seat.rigId}-${seat.logicalId}`}
           wrapperClassName="absolute right-1 top-1 z-20"
-          buttonClassName="sr-only"
+          renderTrigger={false}
         />
       ) : null}
       <header className="relative z-0 flex items-center justify-between gap-2 pointer-events-none">
