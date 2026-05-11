@@ -2,7 +2,13 @@
 //
 // Renders a top-level Library page index: title header + folder-grouped
 // flat list. Each item triggers onItemClick (consumer supplies routing).
-// Consumers provide an emptyState slot rendered when items is empty.
+//
+// emptyState semantics: when an isUserDefined predicate is provided,
+// emptyState renders whenever NO item satisfies it (so the user-facing
+// guidance copy still surfaces when only built-ins are present). The
+// folder list always renders alongside emptyState when items.length > 0,
+// so built-ins remain browsable. Without the predicate the legacy
+// items.length === 0 fallback applies.
 //
 // Two applications in this slice: Skills + Plugins. Future Library
 // surfaces (specs, applications, context-packs) can adopt the same

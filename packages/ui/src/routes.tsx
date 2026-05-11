@@ -42,6 +42,7 @@ import { Feed } from "./components/for-you/Feed.js";
 import { SpecsLibraryPage } from "./components/specs/SpecsLibraryPage.js";
 import { SkillDetailPage } from "./components/specs/SkillDetailPage.js";
 import { SkillsIndexPage } from "./components/specs/SkillsIndexPage.js";
+import { PluginsIndexPage } from "./components/specs/PluginsIndexPage.js";
 // Phase 3a slice 3.3 — plugin detail page route.
 import { PluginDetailPage } from "./components/specs/PluginDetailPage.js";
 import { SettingsCenter } from "./components/system/SettingsCenter.js";
@@ -167,6 +168,14 @@ const specsSkillFileRoute = createRoute({
     const { skillToken, fileToken } = useParams({ from: "/specs/skills/$skillToken/file/$fileToken" });
     return <SkillDetailPage skillToken={skillToken} fileToken={fileToken} />;
   },
+});
+
+// Slice 18 — Plugins top-level Library index page mounted at /specs/plugins.
+// The detail route /plugins/$pluginId below remains unchanged.
+const specsPluginsIndexRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/specs/plugins",
+  component: PluginsIndexPage,
 });
 
 // Phase 3a slice 3.3 — Plugin detail page mounted at /plugins/:pluginId.
@@ -406,6 +415,7 @@ const routeTree = rootRoute.addChildren([
   specsLibraryRoute,
   specsApplicationsRoute,
   specsSkillsIndexRoute,
+  specsPluginsIndexRoute,
   specsSkillRoute,
   specsSkillFileRoute,
   pluginDetailRoute,

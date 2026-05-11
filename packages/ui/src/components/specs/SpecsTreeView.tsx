@@ -5,6 +5,7 @@ import { useSpecLibrary, type SpecLibraryEntry } from "../../hooks/useSpecLibrar
 import { useContextPackLibrary } from "../../hooks/useContextPackLibrary.js";
 import { useAgentImageLibrary } from "../../hooks/useAgentImageLibrary.js";
 import { useLibrarySkills } from "../../hooks/useLibrarySkills.js";
+import { usePlugins } from "../../hooks/usePlugins.js";
 import {
   librarySkillFileToken,
   librarySkillSelectionFromPath,
@@ -17,6 +18,7 @@ interface TreeEntry {
   name: string;
   entryId?: string;
   skillId?: string;
+  pluginId?: string;
   meta?: string;
   metaNode?: ReactNode;
 }
@@ -81,6 +83,15 @@ function Section({
                   >
                     {entry.name}
                   </Link>
+                ) : entry.pluginId ? (
+                  <Link
+                    to="/plugins/$pluginId"
+                    params={{ pluginId: entry.pluginId }}
+                    data-testid={`specs-leaf-${entry.id}`}
+                    className="block truncate font-mono text-xs text-on-surface hover:bg-surface-low hover:text-stone-900"
+                  >
+                    {entry.name}
+                  </Link>
                 ) : (
                   <div
                     data-testid={`specs-leaf-${entry.id}`}
@@ -114,6 +125,7 @@ export function SpecsTreeView() {
   const { data: contextPacks = [], isLoading: contextPacksLoading } = useContextPackLibrary();
   const { data: agentImages = [], isLoading: agentImagesLoading } = useAgentImageLibrary();
   const { data: skills = [], isLoading: skillsLoading } = useLibrarySkills();
+  const { data: plugins = [], isLoading: pluginsLoading } = usePlugins();
   const activeSkill = librarySkillSelectionFromPath(routerState.location.pathname);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({
     "rig-specs": true,
@@ -124,6 +136,7 @@ export function SpecsTreeView() {
     "agent-images": false,
     applications: false,
     skills: false,
+    plugins: false,
   });
   const [expandedSkills, setExpandedSkills] = useState<Record<string, boolean>>({});
   const toggle = (id: string) =>
@@ -175,6 +188,17 @@ export function SpecsTreeView() {
         })),
         loading: skillsLoading,
       },
+      {
+        id: "plugins",
+        label: "Plugins",
+        entries: plugins.map((plugin) => ({
+          id: plugin.id,
+          name: plugin.name,
+          pluginId: plugin.id,
+          meta: plugin.version,
+        })),
+        loading: pluginsLoading,
+      },
     ];
   }, [
     agentImages,
@@ -182,6 +206,8 @@ export function SpecsTreeView() {
     contextPacks,
     contextPacksLoading,
     library,
+    plugins,
+    pluginsLoading,
     skills,
     skillsLoading,
     specsLoading,
@@ -214,6 +240,16 @@ export function SpecsTreeView() {
             className="block font-mono text-[11px] uppercase tracking-wide text-stone-700 hover:text-stone-900 hover:bg-surface-low px-2 py-1"
           >
             {"> "}Skills
+          </Link>
+        </li>
+        <li>
+          <Link
+            to="/specs/plugins"
+            data-testid="sidebar-plugins-top-level"
+            onClick={() => setExpanded((prev) => ({ ...prev, plugins: true }))}
+            className="block font-mono text-[11px] uppercase tracking-wide text-stone-700 hover:text-stone-900 hover:bg-surface-low px-2 py-1"
+          >
+            {"> "}Plugins
           </Link>
         </li>
       </ul>

@@ -71,3 +71,34 @@ describe("SpecsTreeView — top-level sidebar Skills link", () => {
     });
   });
 });
+
+describe("SpecsTreeView — top-level sidebar Plugins link (slice 18 Checkpoint D)", () => {
+  it("renders a Plugins top-level link in the sidebar", async () => {
+    renderTree();
+    await waitFor(() => {
+      expect(screen.getByTestId("sidebar-plugins-top-level")).toBeTruthy();
+    });
+  });
+
+  it("Plugins section is collapsed by default (placeholder absent)", async () => {
+    renderTree();
+    await waitFor(() => {
+      expect(screen.getByTestId("specs-section-plugins")).toBeTruthy();
+    });
+    expect(screen.queryByText(/no plugins yet/i)).toBeNull();
+  });
+
+  it("clicking the sidebar Plugins top-level link expands the Plugins section below", async () => {
+    renderTree();
+    await waitFor(() => {
+      expect(screen.getByTestId("sidebar-plugins-top-level")).toBeTruthy();
+    });
+    expect(screen.queryByText(/no plugins yet/i)).toBeNull();
+
+    fireEvent.click(screen.getByTestId("sidebar-plugins-top-level"));
+
+    await waitFor(() => {
+      expect(screen.getByText(/no plugins yet/i)).toBeTruthy();
+    });
+  });
+});
