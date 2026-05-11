@@ -2,10 +2,10 @@
 //
 // Covers HG-2 (variant selection), HG-3 (auth-block 3-part error),
 // HG-4 (already-managed short-circuit), HG-6 (--no-kernel flag via
-// OPENRIG_NO_KERNEL env). Lifecycle in production is bootstrap-driven
-// (BootstrapOrchestrator.bootstrap()); these tests inject a mocked
-// orchestrator + probe so the logic is exercised without invoking the
-// in-process bootstrap pipeline.
+// OPENRIG_NO_KERNEL env). Forward-fix #3 architectural amendment:
+// bootKernelIfNeeded now returns a KernelBootTracker; the bootstrap
+// runs in the background. Tests await microtasks to observe the
+// post-bootstrap tracker state.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
@@ -17,13 +17,34 @@ import {
   kernelAlreadyManaged,
   authBlockMessage,
   type KernelBootDeps,
-  type RuntimeProbeResult,
 } from "../src/domain/kernel-boot.js";
 import type { RigRepository } from "../src/domain/rig-repository.js";
 import type { BootstrapOrchestrator } from "../src/domain/bootstrap-orchestrator.js";
+import type { SessionRegistry } from "../src/domain/session-registry.js";
+import type { EventBus } from "../src/domain/event-bus.js";
 
-function makeRigRepo(existingRigs: Array<{ name: string }>): RigRepository {
-  return { listRigs: () => existingRigs } as unknown as RigRepository;
+function makeRigRepo(existingRigs: Array<{ id?: string; name: string }>): RigRepository {
+  return {
+    listRigs: () => existingRigs,
+    findRigsByName: (name: string) => existingRigs.filter((r) => r.name === name),
+  } as unknown as RigRepository;
+}
+
+function makeSessionRegistry(sessionsByRig: Record<string, Array<{ sessionName: string; runtime?: string; startupStatus: string }>> = {}): SessionRegistry {
+  return {
+    getSessionsForRig: (rigId: string) => sessionsByRig[rigId] ?? [],
+  } as unknown as SessionRegistry;
+}
+
+function makeEventBus(): { bus: EventBus; emitted: Array<{ type: string }> } {
+  const emitted: Array<{ type: string }> = [];
+  const bus = {
+    emit: (event: { type: string }) => {
+      emitted.push(event);
+      return event;
+    },
+  } as unknown as EventBus;
+  return { bus, emitted };
 }
 
 function makeBootstrapMock(result?: { errors?: string[]; throwError?: Error }) {
@@ -41,11 +62,35 @@ function makeBootstrapMock(result?: { errors?: string[]; throwError?: Error }) {
   } as unknown as BootstrapOrchestrator;
 }
 
+/** Await pending microtasks so tracker's bootstrap-promise handlers can
+ *  fire before status is read. The setImmediate hop is enough for
+ *  vi.fn-wrapped async mocks that resolve in the same tick. */
+async function flushPromises(): Promise<void> {
+  await new Promise<void>((resolve) => setImmediate(resolve));
+}
+
+function makeBaseDeps(
+  overrides: Partial<KernelBootDeps>,
+  specsDir: string,
+): KernelBootDeps {
+  return {
+    rigRepo: makeRigRepo([]),
+    sessionRegistry: makeSessionRegistry(),
+    eventBus: makeEventBus().bus,
+    bootstrapOrchestrator: makeBootstrapMock(),
+    specsDir,
+    cwdOverride: specsDir,
+    probeRuntimes: async () => ({ claudeCode: "ok", codex: "ok" }),
+    log: () => {},
+    degradedTimeoutMs: 0, // disable degraded timer for default tests
+    ...overrides,
+  };
+}
+
 let tmpSpecsDir: string;
 
 beforeEach(() => {
   tmpSpecsDir = mkdtempSync(join(tmpdir(), "kernel-boot-"));
-  // Populate the 3 variant files so existsSync(specPath) succeeds.
   const kernelDir = join(tmpSpecsDir, "rigs/launch/kernel");
   mkdirSync(kernelDir, { recursive: true });
   writeFileSync(join(kernelDir, "rig.yaml"), "name: kernel\n");
@@ -94,147 +139,108 @@ describe("authBlockMessage — 3-part error contract", () => {
 });
 
 describe("bootKernelIfNeeded — short-circuit branches", () => {
-  it("skips with outcome=skipped_no_kernel_flag when OPENRIG_NO_KERNEL=1", async () => {
+  it("returns skipped tracker when OPENRIG_NO_KERNEL=1", async () => {
     process.env.OPENRIG_NO_KERNEL = "1";
-    const deps: KernelBootDeps = {
-      rigRepo: makeRigRepo([]),
-      bootstrapOrchestrator: makeBootstrapMock(),
-      specsDir: tmpSpecsDir,
-      cwdOverride: tmpSpecsDir,
-      probeRuntimes: async () => ({ claudeCode: "ok", codex: "ok" }),
-      log: () => {},
-    };
-    const result = await bootKernelIfNeeded(deps);
-    expect(result.outcome).toBe("skipped_no_kernel_flag");
-    expect((deps.bootstrapOrchestrator as unknown as { bootstrap: ReturnType<typeof vi.fn> }).bootstrap).not.toHaveBeenCalled();
+    const bootstrap = makeBootstrapMock();
+    const tracker = await bootKernelIfNeeded(makeBaseDeps({ bootstrapOrchestrator: bootstrap }, tmpSpecsDir));
+    expect(tracker.getStatus().kernelState).toBe("skipped");
+    expect(tracker.getStatus().detail).toBe("OPENRIG_NO_KERNEL=1");
+    expect((bootstrap as unknown as { bootstrap: ReturnType<typeof vi.fn> }).bootstrap).not.toHaveBeenCalled();
   });
 
-  it("skips with outcome=skipped_already_managed when a kernel rig already exists", async () => {
-    const deps: KernelBootDeps = {
+  it("returns skipped tracker when a kernel rig is already managed", async () => {
+    const bootstrap = makeBootstrapMock();
+    const tracker = await bootKernelIfNeeded(makeBaseDeps({
       rigRepo: makeRigRepo([{ name: "kernel" }]),
-      bootstrapOrchestrator: makeBootstrapMock(),
-      specsDir: tmpSpecsDir,
-      cwdOverride: tmpSpecsDir,
-      probeRuntimes: async () => ({ claudeCode: "ok", codex: "ok" }),
-      log: () => {},
-    };
-    const result = await bootKernelIfNeeded(deps);
-    expect(result.outcome).toBe("skipped_already_managed");
-    expect((deps.bootstrapOrchestrator as unknown as { bootstrap: ReturnType<typeof vi.fn> }).bootstrap).not.toHaveBeenCalled();
+      bootstrapOrchestrator: bootstrap,
+    }, tmpSpecsDir));
+    expect(tracker.getStatus().kernelState).toBe("skipped");
+    expect(tracker.getStatus().detail).toContain("already managed");
+    expect((bootstrap as unknown as { bootstrap: ReturnType<typeof vi.fn> }).bootstrap).not.toHaveBeenCalled();
   });
 
-  it("returns auth_blocked when neither runtime is available", async () => {
-    const deps: KernelBootDeps = {
-      rigRepo: makeRigRepo([]),
-      bootstrapOrchestrator: makeBootstrapMock(),
-      specsDir: tmpSpecsDir,
-      cwdOverride: tmpSpecsDir,
+  it("returns auth_blocked tracker when neither runtime is available", async () => {
+    const bootstrap = makeBootstrapMock();
+    const tracker = await bootKernelIfNeeded(makeBaseDeps({
+      bootstrapOrchestrator: bootstrap,
       probeRuntimes: async () => ({ claudeCode: "unavailable", codex: "unavailable" }),
-      log: () => {},
-    };
-    const result = await bootKernelIfNeeded(deps);
-    expect(result.outcome).toBe("auth_blocked");
-    expect(result.detail).toMatch(/^Error: Kernel rig cannot boot/);
-    expect((deps.bootstrapOrchestrator as unknown as { bootstrap: ReturnType<typeof vi.fn> }).bootstrap).not.toHaveBeenCalled();
+    }, tmpSpecsDir));
+    const status = tracker.getStatus();
+    expect(status.kernelState).toBe("auth_blocked");
+    expect(status.detail).toMatch(/^Error: Kernel rig cannot boot/);
+    expect((bootstrap as unknown as { bootstrap: ReturnType<typeof vi.fn> }).bootstrap).not.toHaveBeenCalled();
   });
 
-  it("returns spec_missing when the chosen variant file doesn't exist", async () => {
+  it("returns spec_missing tracker when the chosen variant file doesn't exist", async () => {
     rmSync(join(tmpSpecsDir, "rigs/launch/kernel/rig.yaml"));
-    const deps: KernelBootDeps = {
-      rigRepo: makeRigRepo([]),
-      bootstrapOrchestrator: makeBootstrapMock(),
-      specsDir: tmpSpecsDir,
-      cwdOverride: tmpSpecsDir,
-      probeRuntimes: async () => ({ claudeCode: "ok", codex: "ok" }),
-      log: () => {},
-    };
-    const result = await bootKernelIfNeeded(deps);
-    expect(result.outcome).toBe("spec_missing");
+    const bootstrap = makeBootstrapMock();
+    const tracker = await bootKernelIfNeeded(makeBaseDeps({ bootstrapOrchestrator: bootstrap }, tmpSpecsDir));
+    expect(tracker.getStatus().kernelState).toBe("spec_missing");
+    expect((bootstrap as unknown as { bootstrap: ReturnType<typeof vi.fn> }).bootstrap).not.toHaveBeenCalled();
   });
 });
 
-describe("bootKernelIfNeeded — happy path", () => {
-  it("invokes BootstrapOrchestrator.bootstrap with the dual variant when both runtimes available", async () => {
-    const bootstrap = makeBootstrapMock();
-    const deps: KernelBootDeps = {
-      rigRepo: makeRigRepo([]),
-      bootstrapOrchestrator: bootstrap,
-      specsDir: tmpSpecsDir,
-      cwdOverride: tmpSpecsDir,
-      probeRuntimes: async () => ({ claudeCode: "ok", codex: "ok" }),
-      log: () => {},
-    };
-    const result = await bootKernelIfNeeded(deps);
-    expect(result.outcome).toBe("booted");
-    expect(result.variant).toBe("rig.yaml");
-    const bootstrapMock = (bootstrap as unknown as { bootstrap: ReturnType<typeof vi.fn> }).bootstrap;
-    expect(bootstrapMock).toHaveBeenCalledOnce();
-    const opts = bootstrapMock.mock.calls[0]![0];
+describe("bootKernelIfNeeded — fire-and-forget bootstrap", () => {
+  it("fires bootstrap in the background with the resolved variant + correct opts", async () => {
+    // Hold the bootstrap mock open so we can observe the in-flight
+    // booting state deterministically before the promise resolves.
+    let release: () => void = () => {};
+    const blocked = new Promise<void>((r) => { release = r; });
+    const bootstrap = {
+      bootstrap: vi.fn(async () => {
+        await blocked;
+        return { runId: "t", status: "ok", stages: [], errors: [], warnings: [] };
+      }),
+    } as unknown as BootstrapOrchestrator;
+    const tracker = await bootKernelIfNeeded(makeBaseDeps({ bootstrapOrchestrator: bootstrap }, tmpSpecsDir));
+    expect(tracker.getStatus().kernelState).toBe("booting");
+    expect(tracker.getStatus().variant).toBe("rig.yaml");
+    expect((bootstrap as unknown as { bootstrap: ReturnType<typeof vi.fn> }).bootstrap).toHaveBeenCalledOnce();
+    const opts = (bootstrap as unknown as { bootstrap: ReturnType<typeof vi.fn> }).bootstrap.mock.calls[0]![0];
     expect(opts.mode).toBe("apply");
     expect(opts.sourceRef).toBe(join(tmpSpecsDir, "rigs/launch/kernel", "rig.yaml"));
     expect(opts.sourceKind).toBe("rig_spec");
     expect(opts.autoApprove).toBe(true);
-    // V0.3.1 slice 05 forward-fix: cwdOverride threads through to
-    // bootstrap so kernel members run against the operator's
-    // workspace, not the daemon installation tree.
     expect(opts.cwdOverride).toBe(tmpSpecsDir);
+    release();
+    tracker.stop();
   });
 
-  it("returns bootstrap_failed and surfaces error detail when orchestrator reports errors", async () => {
-    const deps: KernelBootDeps = {
-      rigRepo: makeRigRepo([]),
+  it("transitions to bootstrap_failed when orchestrator returns errors (post-flush)", async () => {
+    const tracker = await bootKernelIfNeeded(makeBaseDeps({
       bootstrapOrchestrator: makeBootstrapMock({ errors: ["preflight: tmux missing"] }),
-      specsDir: tmpSpecsDir,
-      cwdOverride: tmpSpecsDir,
-      probeRuntimes: async () => ({ claudeCode: "ok", codex: "ok" }),
-      log: () => {},
-    };
-    const result = await bootKernelIfNeeded(deps);
-    expect(result.outcome).toBe("bootstrap_failed");
-    expect(result.detail).toContain("tmux missing");
+    }, tmpSpecsDir));
+    await flushPromises();
+    const status = tracker.getStatus();
+    expect(status.kernelState).toBe("bootstrap_failed");
+    expect(status.detail).toContain("tmux missing");
+    tracker.stop();
   });
 
-  it("returns bootstrap_failed and surfaces thrown error message", async () => {
-    const deps: KernelBootDeps = {
-      rigRepo: makeRigRepo([]),
+  it("transitions to bootstrap_failed and surfaces thrown error message (post-flush)", async () => {
+    const tracker = await bootKernelIfNeeded(makeBaseDeps({
       bootstrapOrchestrator: makeBootstrapMock({ throwError: new Error("network blip") }),
-      specsDir: tmpSpecsDir,
-      cwdOverride: tmpSpecsDir,
-      probeRuntimes: async () => ({ claudeCode: "ok", codex: "ok" }),
-      log: () => {},
-    };
-    const result = await bootKernelIfNeeded(deps);
-    expect(result.outcome).toBe("bootstrap_failed");
-    expect(result.detail).toBe("network blip");
+    }, tmpSpecsDir));
+    await flushPromises();
+    const status = tracker.getStatus();
+    expect(status.kernelState).toBe("bootstrap_failed");
+    expect(status.detail).toBe("network blip");
+    tracker.stop();
   });
 
   it("uses the claude-only variant when only Claude is available", async () => {
-    const bootstrap = makeBootstrapMock();
-    const deps: KernelBootDeps = {
-      rigRepo: makeRigRepo([]),
-      bootstrapOrchestrator: bootstrap,
-      specsDir: tmpSpecsDir,
-      cwdOverride: tmpSpecsDir,
+    const tracker = await bootKernelIfNeeded(makeBaseDeps({
       probeRuntimes: async () => ({ claudeCode: "ok", codex: "unavailable" }),
-      log: () => {},
-    };
-    const result = await bootKernelIfNeeded(deps);
-    expect(result.outcome).toBe("booted");
-    expect(result.variant).toBe("rig-claude-only.yaml");
+    }, tmpSpecsDir));
+    expect(tracker.getStatus().variant).toBe("rig-claude-only.yaml");
+    tracker.stop();
   });
 
   it("uses the codex-only variant when only Codex is available", async () => {
-    const bootstrap = makeBootstrapMock();
-    const deps: KernelBootDeps = {
-      rigRepo: makeRigRepo([]),
-      bootstrapOrchestrator: bootstrap,
-      specsDir: tmpSpecsDir,
-      cwdOverride: tmpSpecsDir,
+    const tracker = await bootKernelIfNeeded(makeBaseDeps({
       probeRuntimes: async () => ({ claudeCode: "unavailable", codex: "ok" }),
-      log: () => {},
-    };
-    const result = await bootKernelIfNeeded(deps);
-    expect(result.outcome).toBe("booted");
-    expect(result.variant).toBe("rig-codex-only.yaml");
+    }, tmpSpecsDir));
+    expect(tracker.getStatus().variant).toBe("rig-codex-only.yaml");
+    tracker.stop();
   });
 });

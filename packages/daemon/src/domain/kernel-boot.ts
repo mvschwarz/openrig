@@ -2,19 +2,27 @@
 //
 // Composes into rig daemon start per IMPL-PRD §6.1: probes runtime
 // auth state, selects a variant (dual / claude-only / codex-only),
-// and bootstraps the kernel rig via the in-process bootstrap pipeline.
+// and fires the in-process bootstrap pipeline IN THE BACKGROUND.
 // Short-circuits cleanly when:
 //   - OPENRIG_NO_KERNEL=1 is set (operator opt-out / test fixture)
 //   - A managed rig named `kernel` already exists in the DB
-// Surfaces a 3-part-error (fact / reason / fix) when neither Claude
-// Code nor Codex is authenticated. Failures during the bootstrap
-// itself are logged but do NOT crash the daemon — the daemon serves
-// without the kernel and the operator can retry manually.
+//   - Both runtimes are unauthenticated (auth_blocked terminal state)
+//   - The selected variant's spec file is missing
+//
+// Forward-fix #3 architectural amendment (IMPL-PRD §16 amended):
+// The bootstrap promise is NOT awaited. KernelBootTracker is returned
+// immediately so createDaemon can finish + server.ts can bind healthz.
+// A broken kernel agent therefore can no longer keep the daemon's HTTP
+// surface from starting — operators see "daemon ready; kernel <state>"
+// rather than "daemon failed to start".
 
 import nodePath from "node:path";
 import { existsSync } from "node:fs";
 import type { RigRepository } from "./rig-repository.js";
 import type { BootstrapOrchestrator } from "./bootstrap-orchestrator.js";
+import type { EventBus } from "./event-bus.js";
+import type { SessionRegistry } from "./session-registry.js";
+import { KernelBootTracker } from "./kernel-boot-tracker.js";
 
 export type RuntimeAuthStatus = "ok" | "unavailable";
 
@@ -25,6 +33,8 @@ export interface RuntimeProbeResult {
 
 export interface KernelBootDeps {
   rigRepo: RigRepository;
+  sessionRegistry: SessionRegistry;
+  eventBus: EventBus;
   bootstrapOrchestrator: BootstrapOrchestrator;
   /** Absolute path to the daemon's specs dir (passed in so tests can
    *  inject a fixture root). Production callsite resolves to the
@@ -42,25 +52,25 @@ export interface KernelBootDeps {
   /** Logger sink; defaults to console.log/warn so daemon stdout/stderr
    *  carry the boot trace. */
   log?: (level: "info" | "warn" | "error", message: string) => void;
+  /** Degraded-timer override (ms). Forward-fix #3 default 90s; tests
+   *  pass short values to exercise the timer path quickly. */
+  degradedTimeoutMs?: number;
 }
 
-export interface KernelBootResult {
-  outcome:
-    | "booted"
-    | "skipped_no_kernel_flag"
-    | "skipped_already_managed"
-    | "auth_blocked"
-    | "spec_missing"
-    | "bootstrap_failed";
-  /** Variant filename used when outcome=booted; null otherwise. */
-  variant?: string | null;
-  /** Human-readable detail for logs + tests. */
-  detail?: string;
-}
-
-/** Entry point. Idempotent: safe to call on every daemon startup. */
-export async function bootKernelIfNeeded(deps: KernelBootDeps): Promise<KernelBootResult> {
+/** Entry point. Idempotent: safe to call on every daemon startup.
+ *  Returns the tracker immediately; bootstrap (if fired) runs in the
+ *  background. Callers should NOT await the tracker's internal
+ *  bootstrap promise — that's the whole point of the architectural
+ *  decoupling. Tracker state is observable via getStatus() and the
+ *  /api/kernel/status route. */
+export async function bootKernelIfNeeded(deps: KernelBootDeps): Promise<KernelBootTracker> {
   const log = deps.log ?? defaultLog;
+  const tracker = new KernelBootTracker({
+    eventBus: deps.eventBus,
+    sessionRegistry: deps.sessionRegistry,
+    rigRepo: deps.rigRepo,
+    degradedTimeoutMs: deps.degradedTimeoutMs,
+  });
 
   // 1. --no-kernel opt-out (CLI flag projected via OPENRIG_NO_KERNEL).
   // VITEST env additionally short-circuits the live runtime probe
@@ -75,7 +85,8 @@ export async function bootKernelIfNeeded(deps: KernelBootDeps): Promise<KernelBo
   if (process.env["OPENRIG_NO_KERNEL"] === "1" || (process.env["VITEST"] === "true" && !probeInjected)) {
     const reason = process.env["OPENRIG_NO_KERNEL"] === "1" ? "OPENRIG_NO_KERNEL=1" : "VITEST=true";
     log("info", `kernel-boot: ${reason} — skipping kernel auto-boot`);
-    return { outcome: "skipped_no_kernel_flag" };
+    tracker.setSkipped(reason);
+    return tracker;
   }
 
   // 2. Already-managed short-circuit. If a rig named `kernel` exists
@@ -83,15 +94,18 @@ export async function bootKernelIfNeeded(deps: KernelBootDeps): Promise<KernelBo
   // the builtin path stays out of the way.
   if (kernelAlreadyManaged(deps.rigRepo)) {
     log("info", "kernel-boot: kernel rig already managed; skipping builtin boot");
-    return { outcome: "skipped_already_managed" };
+    tracker.setSkipped("kernel rig already managed");
+    return tracker;
   }
 
   // 3. Probe runtime auth state to pick a variant.
   const probe = await (deps.probeRuntimes ?? defaultProbeRuntimes)();
 
   if (probe.claudeCode === "unavailable" && probe.codex === "unavailable") {
-    log("error", authBlockMessage());
-    return { outcome: "auth_blocked", detail: authBlockMessage() };
+    const msg = authBlockMessage();
+    log("error", msg);
+    tracker.setAuthBlocked(msg);
+    return tracker;
   }
 
   const variant = selectVariant(probe);
@@ -99,29 +113,21 @@ export async function bootKernelIfNeeded(deps: KernelBootDeps): Promise<KernelBo
 
   if (!existsSync(specPath)) {
     log("warn", `kernel-boot: spec missing at ${specPath} — skipping`);
-    return { outcome: "spec_missing", detail: specPath };
+    tracker.setSpecMissing(specPath);
+    return tracker;
   }
 
-  // 4. Cold boot via the in-process bootstrap pipeline.
-  try {
-    log("info", `kernel-boot: booting kernel rig from ${variant}`);
-    const result = await deps.bootstrapOrchestrator.bootstrap({
-      mode: "apply",
-      sourceRef: specPath,
-      sourceKind: "rig_spec",
-      autoApprove: true,
-      cwdOverride: deps.cwdOverride,
-    });
-    if (result.errors && result.errors.length > 0) {
-      log("warn", `kernel-boot: bootstrap finished with errors: ${result.errors.join("; ")}`);
-      return { outcome: "bootstrap_failed", detail: result.errors.join("; ") };
-    }
-    return { outcome: "booted", variant };
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    log("warn", `kernel-boot: bootstrap threw: ${msg}`);
-    return { outcome: "bootstrap_failed", detail: msg };
-  }
+  // 4. Cold boot via the in-process bootstrap pipeline — FIRED, not awaited.
+  log("info", `kernel-boot: booting kernel rig from ${variant}`);
+  const bootstrapPromise = deps.bootstrapOrchestrator.bootstrap({
+    mode: "apply",
+    sourceRef: specPath,
+    sourceKind: "rig_spec",
+    autoApprove: true,
+    cwdOverride: deps.cwdOverride,
+  });
+  tracker.startBooting(variant, bootstrapPromise);
+  return tracker;
 }
 
 /** True when a rig named `kernel` already exists in the DB. */

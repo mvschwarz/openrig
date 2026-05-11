@@ -482,18 +482,31 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   });
 
   // V0.3.1 slice 05 kernel-rig-as-default — auto-boot the kernel rig
-  // on daemon-start. Idempotent: --no-kernel (OPENRIG_NO_KERNEL=1)
-  // skips; an already-managed `kernel` rig short-circuits; the
-  // variant (dual / claude-only / codex-only) is selected by probing
-  // `claude auth status` + `codex login status`; both-unavailable
-  // surfaces a 3-part-error and the daemon continues without the
-  // kernel. The kernel rig is the only rig the daemon auto-boots —
-  // other rigs require explicit operator-initiated `rig up` /
-  // `rig restore` (per amended IMPL-PRD §16.2).
+  // on daemon-start. Forward-fix #3 architectural: the bootstrap is
+  // FIRED in the background, not awaited. createDaemon completes as
+  // soon as the tracker is created so server.ts can bind healthz
+  // independent of kernel-agent readiness. A broken kernel agent no
+  // longer keeps the daemon HTTP surface from starting.
+  //
+  // Tracker state is exposed via /api/kernel/status (route below) and
+  // the CLI's `rig daemon start --wait-for-kernel` flag polls it.
+  // After the configurable degraded-timer window (default 90s; env
+  // override OPENRIG_KERNEL_DEGRADED_MS for ops + test fixtures), the
+  // tracker emits a single `kernel.agent.degraded` event for
+  // observability. The kernel rig is still the only rig the daemon
+  // auto-boots; other rigs require explicit operator-initiated
+  // `rig up` / `rig restore` per amended IMPL-PRD §16.2.
+  let kernelBootTracker: import("./domain/kernel-boot-tracker.js").KernelBootTracker | undefined;
   try {
     const { bootKernelIfNeeded } = await import("./domain/kernel-boot.js");
-    const kernelBootResult = await bootKernelIfNeeded({
+    const degradedRaw = readOpenRigEnv("OPENRIG_KERNEL_DEGRADED_MS");
+    const degradedTimeoutMs = degradedRaw && /^\d+$/.test(degradedRaw)
+      ? parseInt(degradedRaw, 10)
+      : undefined;
+    kernelBootTracker = await bootKernelIfNeeded({
       rigRepo,
+      sessionRegistry,
+      eventBus,
       bootstrapOrchestrator,
       specsDir: nodePath.resolve(nodePath.dirname(new URL(import.meta.url).pathname), "..", "specs"),
       // V0.3.1 slice 05 — kernel members run against the operator's
@@ -502,10 +515,11 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       // "cwd is inside the OpenRig installation". Use the resolved
       // workspace.root setting as the per-operator default.
       cwdOverride: runtimeSettings.workspaceRoot,
+      degradedTimeoutMs,
     });
     try {
       // eslint-disable-next-line no-console
-      console.log(`kernel-boot: outcome=${kernelBootResult.outcome}${kernelBootResult.variant ? ` variant=${kernelBootResult.variant}` : ""}`);
+      console.log(`kernel-boot: tracker-state=${kernelBootTracker.getStatus().kernelState}`);
     } catch { /* logging must never throw */ }
   } catch (err) {
     try {
@@ -665,6 +679,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     contextUsageStore,
     serviceOrchestrator,
     composeAdapter,
+    kernelBootTracker,
     specReviewService,
     specLibraryService: (() => {
       const userSpecsRoot = getDefaultOpenRigPath("specs");

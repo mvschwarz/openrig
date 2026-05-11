@@ -513,3 +513,59 @@ async function fetchDaemonProbe(deps: LifecycleDeps, url: string): Promise<{ ok:
     }),
   ]);
 }
+
+// V0.3.1 slice 05 kernel-rig-as-default — forward-fix #3 architectural.
+// Poll GET /api/kernel/status until kernel_state reaches ready or
+// partial_ready (the two "operator can use the kernel" states) or the
+// timeout elapses. Used by `rig daemon start --wait-for-kernel`.
+//
+// Returns { ok: true, ... } on success; { ok: false, ... } with the
+// last observed kernelState + detail for the CLI's 3-part error.
+export interface KernelReadyResult {
+  ok: boolean;
+  kernelState: string | null;
+  variant: string | null;
+  detail: string | null;
+}
+
+export async function waitForKernelReady(
+  baseUrl: string,
+  timeoutMs: number,
+  pollIntervalMs = 500,
+): Promise<KernelReadyResult> {
+  const deadline = Date.now() + timeoutMs;
+  let last: KernelReadyResult = { ok: false, kernelState: null, variant: null, detail: null };
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch(`${baseUrl}/api/kernel/status`);
+      if (res.ok) {
+        const body = (await res.json()) as {
+          kernel_state?: string;
+          variant?: string | null;
+          detail?: string | null;
+        };
+        last = {
+          ok: body.kernel_state === "ready" || body.kernel_state === "partial_ready",
+          kernelState: body.kernel_state ?? null,
+          variant: body.variant ?? null,
+          detail: body.detail ?? null,
+        };
+        if (last.ok) return last;
+        // Terminal non-ready states: don't keep polling.
+        if (
+          body.kernel_state === "auth_blocked" ||
+          body.kernel_state === "spec_missing" ||
+          body.kernel_state === "bootstrap_failed" ||
+          body.kernel_state === "degraded" ||
+          body.kernel_state === "skipped"
+        ) {
+          return last;
+        }
+      }
+    } catch {
+      // Transient fetch failure; keep polling until the deadline.
+    }
+    await new Promise((r) => setTimeout(r, pollIntervalMs));
+  }
+  return last;
+}
