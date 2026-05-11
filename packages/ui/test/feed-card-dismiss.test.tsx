@@ -79,13 +79,11 @@ describe("FeedCard dismiss surfaces", () => {
     render(<FeedCard card={makeCard()} onDismiss={onDismiss} />);
     const article = screen.getByTestId("feed-card-progress");
 
-    // Stub the article's bounding rect so the threshold math is deterministic
     article.getBoundingClientRect = () =>
       ({ width: 400, left: 0, right: 400, top: 0, bottom: 100, height: 100, x: 0, y: 0, toJSON: () => ({}) }) as DOMRect;
 
-    fireEvent.pointerDown(article, { pointerType: "touch", clientX: 50, clientY: 50, pointerId: 1 });
-    fireEvent.pointerMove(article, { pointerType: "touch", clientX: 300, clientY: 50, pointerId: 1 });
-    fireEvent.pointerUp(article, { pointerType: "touch", clientX: 300, clientY: 50, pointerId: 1 });
+    fireEvent.touchStart(article, { touches: [{ clientX: 50, clientY: 50, identifier: 1 }] });
+    fireEvent.touchEnd(article, { changedTouches: [{ clientX: 300, clientY: 50, identifier: 1 }] });
 
     expect(onDismiss).toHaveBeenCalledWith(42);
   });
@@ -97,23 +95,21 @@ describe("FeedCard dismiss surfaces", () => {
     article.getBoundingClientRect = () =>
       ({ width: 400, left: 0, right: 400, top: 0, bottom: 100, height: 100, x: 0, y: 0, toJSON: () => ({}) }) as DOMRect;
 
-    fireEvent.pointerDown(article, { pointerType: "touch", clientX: 50, clientY: 50, pointerId: 1 });
-    fireEvent.pointerMove(article, { pointerType: "touch", clientX: 100, clientY: 50, pointerId: 1 });
-    fireEvent.pointerUp(article, { pointerType: "touch", clientX: 100, clientY: 50, pointerId: 1 });
+    fireEvent.touchStart(article, { touches: [{ clientX: 50, clientY: 50, identifier: 1 }] });
+    fireEvent.touchEnd(article, { changedTouches: [{ clientX: 100, clientY: 50, identifier: 1 }] });
 
     expect(onDismiss).not.toHaveBeenCalled();
   });
 
-  it("mouse pointerType pointer events do NOT trigger swipe dismiss (button-only for desktop)", () => {
+  it("leftward swipe does NOT trigger onDismiss (only right-swipe dismisses)", () => {
     const onDismiss = vi.fn();
     render(<FeedCard card={makeCard()} onDismiss={onDismiss} />);
     const article = screen.getByTestId("feed-card-progress");
     article.getBoundingClientRect = () =>
       ({ width: 400, left: 0, right: 400, top: 0, bottom: 100, height: 100, x: 0, y: 0, toJSON: () => ({}) }) as DOMRect;
 
-    fireEvent.pointerDown(article, { pointerType: "mouse", clientX: 50, clientY: 50, pointerId: 1 });
-    fireEvent.pointerMove(article, { pointerType: "mouse", clientX: 300, clientY: 50, pointerId: 1 });
-    fireEvent.pointerUp(article, { pointerType: "mouse", clientX: 300, clientY: 50, pointerId: 1 });
+    fireEvent.touchStart(article, { touches: [{ clientX: 300, clientY: 50, identifier: 1 }] });
+    fireEvent.touchEnd(article, { changedTouches: [{ clientX: 50, clientY: 50, identifier: 1 }] });
 
     expect(onDismiss).not.toHaveBeenCalled();
   });

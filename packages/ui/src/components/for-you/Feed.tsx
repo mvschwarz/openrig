@@ -11,7 +11,7 @@
 // Lens chips remain a transient ad-hoc filter on top of subscription-
 // filtered cards.
 
-import { useState, useMemo } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { cn } from "../../lib/utils.js";
 import { SectionHeader } from "../ui/section-header.js";
 import { EmptyState } from "../ui/empty-state.js";
@@ -35,6 +35,7 @@ import {
 } from "../../hooks/useFeedSubscriptions.js";
 import { useDismissedSeqs } from "../../hooks/useDismissedSeqs.js";
 import { FeedCard } from "./FeedCard.js";
+import { UndoToast } from "./UndoToast.js";
 import type { FeedActionOutcome, FeedProofPreview } from "./FeedCard.js";
 import {
   StorytellingFeed,
@@ -216,7 +217,25 @@ export function Feed() {
 
   const rawCards = useMemo(() => classifyFeed(events).slice(0, HISTORY_LIMIT), [events]);
   const rawCardSeqs = useMemo(() => rawCards.map((c) => c.source.seq), [rawCards]);
-  const { dismissedSeqs } = useDismissedSeqs(rawCardSeqs);
+  const { dismissedSeqs, dismiss, undismiss } = useDismissedSeqs(rawCardSeqs);
+  const [pendingUndoSeq, setPendingUndoSeq] = useState<number | null>(null);
+
+  const handleDismiss = useCallback(
+    (seq: number) => {
+      dismiss(seq);
+      setPendingUndoSeq(seq);
+    },
+    [dismiss],
+  );
+
+  const handleUndo = useCallback(() => {
+    if (pendingUndoSeq !== null) undismiss(pendingUndoSeq);
+    setPendingUndoSeq(null);
+  }, [pendingUndoSeq, undismiss]);
+
+  const handleUndoExpire = useCallback(() => {
+    setPendingUndoSeq(null);
+  }, []);
   const qitemIds = useMemo(
     () => rawCards.map(qitemIdForCard).filter((id): id is string => Boolean(id)),
     [rawCards],
@@ -357,11 +376,21 @@ export function Feed() {
                 queueItem={queueItem}
                 proofPreview={proofPreview}
                 actionOutcome={actionOutcome}
+                onDismiss={handleDismiss}
               />
             );
           })}
         </div>
       )}
+      {pendingUndoSeq !== null ? (
+        <UndoToast
+          key={pendingUndoSeq}
+          label="Card dismissed"
+          onUndo={handleUndo}
+          onExpire={handleUndoExpire}
+          durationMs={5000}
+        />
+      ) : null}
     </div>
   );
 }
