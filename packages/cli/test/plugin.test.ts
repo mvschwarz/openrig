@@ -150,6 +150,11 @@ describe("rig plugin CLI (slice 3.4)", () => {
         res.end(JSON.stringify(FIXTURE_USED_BY));
         return;
       }
+      if (url.pathname === "/api/plugins/unreferenced/used-by" && req.method === "GET") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify([]));
+        return;
+      }
       if (url.pathname === "/api/plugins/missing" && req.method === "GET") {
         res.writeHead(404, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "plugin_not_found" }));
@@ -313,6 +318,80 @@ describe("rig plugin CLI (slice 3.4)", () => {
 
       expect(exitCode).toBe(1);
       expect(errLogs.join("\n")).toMatch(/not.*found|404|missing/i);
+    });
+  });
+
+  // ============================================================
+  // rig plugin used-by <id> (HG-4.3)
+  //
+  // Reverse query: AgentReference[] = { agentName, sourcePath, profiles[] }
+  // (PluginDiscoveryService L134-141 verbatim shape).
+  // Daemon route: GET /api/plugins/:id/used-by
+  // ============================================================
+
+  describe("rig plugin used-by <id>", () => {
+    it("--json returns the AgentReference[] from /api/plugins/:id/used-by", async () => {
+      const program = new Command();
+      program.exitOverride();
+      program.addCommand(pluginCommand(runningDeps(port)));
+
+      const { logs, exitCode } = await captureLogs(async () => {
+        await program.parseAsync(["node", "rig", "plugin", "used-by", "openrig-core", "--json"]);
+      });
+
+      expect(exitCode).toBeUndefined();
+      const parsed = JSON.parse(logs.join("\n")) as Array<{ agentName: string; sourcePath: string; profiles: string[] }>;
+      expect(parsed).toHaveLength(1);
+      expect(parsed[0]?.agentName).toBe("advisor-lead");
+      expect(parsed[0]?.sourcePath).toBe("/home/op/.openrig/specs/agents/advisor/lead/agent.yaml");
+      expect(parsed[0]?.profiles).toEqual(["default"]);
+    });
+
+    it("default (pretty) output prints agentName + sourcePath + profiles for each reference", async () => {
+      const program = new Command();
+      program.exitOverride();
+      program.addCommand(pluginCommand(runningDeps(port)));
+
+      const { logs, exitCode } = await captureLogs(async () => {
+        await program.parseAsync(["node", "rig", "plugin", "used-by", "openrig-core"]);
+      });
+
+      expect(exitCode).toBeUndefined();
+      const out = logs.join("\n");
+      // Real AgentReference fields verbatim — no invented fields
+      expect(out).toContain("advisor-lead");
+      expect(out).toContain("/home/op/.openrig/specs/agents/advisor/lead/agent.yaml");
+      expect(out).toContain("default");
+    });
+
+    it("empty result (no agents reference the plugin) is honest — does NOT exit non-zero", async () => {
+      const program = new Command();
+      program.exitOverride();
+      program.addCommand(pluginCommand(runningDeps(port)));
+
+      const { logs, exitCode } = await captureLogs(async () => {
+        // Use 'unreferenced' which the http server returns [] for
+        await program.parseAsync(["node", "rig", "plugin", "used-by", "unreferenced"]);
+      });
+
+      expect(exitCode).toBeUndefined();
+      const out = logs.join("\n");
+      // Some honest message acknowledging zero refs (not crash, not silent empty)
+      expect(out.toLowerCase()).toMatch(/no agent|0|none|not referenced/);
+    });
+
+    it("--json on empty result returns []", async () => {
+      const program = new Command();
+      program.exitOverride();
+      program.addCommand(pluginCommand(runningDeps(port)));
+
+      const { logs, exitCode } = await captureLogs(async () => {
+        await program.parseAsync(["node", "rig", "plugin", "used-by", "unreferenced", "--json"]);
+      });
+
+      expect(exitCode).toBeUndefined();
+      const parsed = JSON.parse(logs.join("\n")) as unknown[];
+      expect(parsed).toEqual([]);
     });
   });
 });

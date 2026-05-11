@@ -10,9 +10,10 @@
 //                                --json
 //   show <id>           — inspect manifest + skills + hooks + mcp servers
 //                         flags: --json
+//   used-by <id>        — agents referencing this plugin
+//                         flags: --json
 //
 // Pending in later checkpoints of slice 3.4:
-//   used-by <id>        — agents referencing this plugin (3.4.B)
 //   validate <path>     — local file inspection (3.4.C)
 //
 // list/show consume slice 3.3 daemon HTTP routes (GET /api/plugins[/...]).
@@ -104,6 +105,13 @@ interface PluginDetailWire {
   skills: PluginSkillSummaryWire[];
   hooks: PluginHookSummaryWire[];
   mcpServers: PluginMcpServerSummaryWire[];
+}
+
+// AgentReference per PluginDiscoveryService L134-141 verbatim.
+interface AgentReferenceWire {
+  agentName: string;
+  sourcePath: string;
+  profiles: string[];
 }
 
 export function pluginCommand(depsOverride?: StatusDeps): Command {
@@ -249,6 +257,40 @@ export function pluginCommand(depsOverride?: StatusDeps): Command {
             if (m.command) detail2.push(`command=${m.command}`);
             console.log(`  ${m.runtime.padEnd(10)} ${m.name.padEnd(28)} ${detail2.join(" ")}`);
           }
+        }
+      } catch (err) {
+        console.error((err as Error).message);
+        process.exitCode = 1;
+      }
+    });
+
+  // -- rig plugin used-by <id> --
+  cmd.command("used-by")
+    .argument("<id>", "Plugin id (e.g., openrig-core)")
+    .description("List agents referencing this plugin in their profile.uses.plugins[]")
+    .option("--json", "JSON output")
+    .action(async (id: string, opts: { json?: boolean }) => {
+      try {
+        const client = await getClient();
+        const res = await client.get<AgentReferenceWire[]>(`/api/plugins/${encodeURIComponent(id)}/used-by`);
+        if (res.status !== 200) {
+          throw new Error(`Daemon returned HTTP ${res.status}`);
+        }
+        const refs = res.data ?? [];
+
+        if (opts.json) {
+          console.log(JSON.stringify(refs, null, 2));
+          return;
+        }
+
+        if (refs.length === 0) {
+          console.log(`No agents reference plugin "${id}".`);
+          return;
+        }
+
+        for (const r of refs) {
+          const profilesStr = r.profiles.length > 0 ? r.profiles.join(",") : "(none)";
+          console.log(`${r.agentName.padEnd(36)} [${profilesStr.padEnd(20)}] ${r.sourcePath}`);
         }
       } catch (err) {
         console.error((err as Error).message);
