@@ -42,6 +42,7 @@ import { askCommand } from "./commands/ask.js";
 import { chatroomCommand } from "./commands/chatroom.js";
 import { specsCommand } from "./commands/specs.js";
 import { contextPackCommand } from "./commands/context-pack.js";
+import { pluginCommand } from "./commands/plugin.js";
 import { agentImageCommand } from "./commands/agent-image.js";
 import { workspaceCommand, type WorkspaceDeps } from "./commands/workspace.js";
 import { whoamiCommand } from "./commands/whoami.js";
@@ -97,6 +98,7 @@ export interface ProgramDeps {
   chatroomDeps?: StatusDeps;
   specsDeps?: StatusDeps;
   contextPackDeps?: StatusDeps;
+  pluginDeps?: StatusDeps;
   agentImageDeps?: StatusDeps;
   workspaceDeps?: WorkspaceDeps;
   whoamiDeps?: StatusDeps;
@@ -158,6 +160,7 @@ export function createProgram(depsOverride?: ProgramDeps): Command {
   program.addCommand(chatroomCommand(depsOverride?.chatroomDeps));
   program.addCommand(specsCommand(depsOverride?.specsDeps));
   program.addCommand(contextPackCommand(depsOverride?.contextPackDeps));
+  program.addCommand(pluginCommand(depsOverride?.pluginDeps));
   program.addCommand(agentImageCommand(depsOverride?.agentImageDeps));
   program.addCommand(workspaceCommand(depsOverride?.workspaceDeps));
   program.addCommand(whoamiCommand(depsOverride?.whoamiDeps));
