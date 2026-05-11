@@ -41,6 +41,7 @@ import { Dashboard } from "./components/dashboard/Dashboard.js";
 import { Feed } from "./components/for-you/Feed.js";
 import { SpecsLibraryPage } from "./components/specs/SpecsLibraryPage.js";
 import { SkillDetailPage } from "./components/specs/SkillDetailPage.js";
+import { SkillsIndexPage } from "./components/specs/SkillsIndexPage.js";
 // Phase 3a slice 3.3 — plugin detail page route.
 import { PluginDetailPage } from "./components/specs/PluginDetailPage.js";
 import { SettingsCenter } from "./components/system/SettingsCenter.js";
@@ -140,6 +141,14 @@ const specsApplicationsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/specs/applications",
   component: SpecsLibraryPage,
+});
+
+// Slice 18 — Skills top-level Library index page mounted at /specs/skills.
+// The detail route /specs/skills/$skillToken remains unchanged below.
+const specsSkillsIndexRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/specs/skills",
+  component: SkillsIndexPage,
 });
 
 const specsSkillRoute = createRoute({
@@ -396,6 +405,7 @@ const routeTree = rootRoute.addChildren([
   projectSliceRoute,
   specsLibraryRoute,
   specsApplicationsRoute,
+  specsSkillsIndexRoute,
   specsSkillRoute,
   specsSkillFileRoute,
   pluginDetailRoute,
