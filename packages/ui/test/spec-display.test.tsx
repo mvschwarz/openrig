@@ -58,7 +58,7 @@ const AGENT_REVIEW: AgentSpecReview = {
   resources: {
     skills: ["tdd", "debugging"],
     guidance: ["code-style.md"],
-    hooks: ["pre-commit"],
+    plugins: ["openrig-core"],
     subagents: [],
   },
   startup: {

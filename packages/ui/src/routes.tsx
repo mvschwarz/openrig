@@ -41,6 +41,8 @@ import { Dashboard } from "./components/dashboard/Dashboard.js";
 import { Feed } from "./components/for-you/Feed.js";
 import { SpecsLibraryPage } from "./components/specs/SpecsLibraryPage.js";
 import { SkillDetailPage } from "./components/specs/SkillDetailPage.js";
+// Phase 3a slice 3.3 — plugin detail page route.
+import { PluginDetailPage } from "./components/specs/PluginDetailPage.js";
 import { SettingsCenter } from "./components/system/SettingsCenter.js";
 import {
   HostScopePage,
@@ -155,6 +157,18 @@ const specsSkillFileRoute = createRoute({
   component: () => {
     const { skillToken, fileToken } = useParams({ from: "/specs/skills/$skillToken/file/$fileToken" });
     return <SkillDetailPage skillToken={skillToken} fileToken={fileToken} />;
+  },
+});
+
+// Phase 3a slice 3.3 — Plugin detail page mounted at /plugins/:pluginId.
+// Library Explorer's Plugins section links here; AgentSpec Plugins block
+// (Batch 1) navigates here too via the "view in library" affordance.
+const pluginDetailRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/plugins/$pluginId",
+  component: () => {
+    const { pluginId } = useParams({ from: "/plugins/$pluginId" });
+    return <PluginDetailPage pluginId={pluginId} />;
   },
 });
 
@@ -384,6 +398,7 @@ const routeTree = rootRoute.addChildren([
   specsApplicationsRoute,
   specsSkillRoute,
   specsSkillFileRoute,
+  pluginDetailRoute,
   specsKindRoute,
   settingsRoute,
   searchRoute,
