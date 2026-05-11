@@ -68,6 +68,26 @@ describe("FeedCard dismiss surfaces", () => {
     expect(onDismiss).not.toHaveBeenCalled();
   });
 
+  // BLOCKING-CONCERN repair from velocity-guard 15f8252: bubbled Backspace/
+  // Delete from nested interactive descendants (dismiss button itself,
+  // VerbActions, QueueItemTrigger, proof thumbnails) must NOT soft-dismiss
+  // the card. Only article-focused keypress qualifies.
+  it("Backspace from nested button does NOT bubble up to dismiss the card", () => {
+    const onDismiss = vi.fn();
+    render(<FeedCard card={makeCard()} onDismiss={onDismiss} />);
+    const dismissButton = screen.getByTestId("feed-card-dismiss");
+    fireEvent.keyDown(dismissButton, { key: "Backspace" });
+    expect(onDismiss).not.toHaveBeenCalled();
+  });
+
+  it("Delete from nested button does NOT bubble up to dismiss the card", () => {
+    const onDismiss = vi.fn();
+    render(<FeedCard card={makeCard()} onDismiss={onDismiss} />);
+    const dismissButton = screen.getByTestId("feed-card-dismiss");
+    fireEvent.keyDown(dismissButton, { key: "Delete" });
+    expect(onDismiss).not.toHaveBeenCalled();
+  });
+
   it("article has tabIndex=0 when onDismiss provided so it can receive focus", () => {
     render(<FeedCard card={makeCard()} onDismiss={() => {}} />);
     const article = screen.getByTestId("feed-card-progress");

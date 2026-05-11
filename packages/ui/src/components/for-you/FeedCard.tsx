@@ -317,6 +317,11 @@ export function FeedCard({
 
   const handleKeyDown: React.KeyboardEventHandler<HTMLElement> = (event) => {
     if (!onDismiss) return;
+    // Only honor Backspace/Delete when the article itself is the focused
+    // element — without this guard, the same keys typed into a nested
+    // interactive control (dismiss button, VerbActions, QueueItemTrigger,
+    // proof thumbnails) would bubble up and soft-dismiss the whole card.
+    if (event.target !== event.currentTarget) return;
     if (event.key === "Backspace" || event.key === "Delete") {
       event.preventDefault();
       onDismiss(card.source.seq);
