@@ -14,7 +14,6 @@ profiles:
       skills: [using-superpowers, openrig-user, systematic-debugging, verification-before-completion, vault-user]
       guidance: []
       subagents: []
-      hooks: []
       runtime_resources: [shared:claude-default-settings, shared:claude-default-mcp, shared:codex-default-config]
 
 resources:

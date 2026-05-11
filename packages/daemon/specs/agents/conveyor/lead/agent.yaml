@@ -14,7 +14,6 @@ profiles:
       skills: [openrig-user, orchestration-team, backlog-capture, writing-plans, executing-plans, verification-before-completion, brainstorming]
       guidance: []
       subagents: []
-      hooks: []
       runtime_resources: [shared:claude-default-settings, shared:claude-default-mcp, shared:codex-default-config]
 
 resources:

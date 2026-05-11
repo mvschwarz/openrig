@@ -76,6 +76,14 @@ export interface RiggedConfig {
       auditLog: boolean;
     };
   };
+  // plugin-primitive Phase 3a slice 3.5 — runtime feature flags. Currently
+  // single-flag for Codex; extracts to its own primitive workspace if/when
+  // 3+ flags accumulate (per DESIGN.md §5.8).
+  runtime: {
+    codex: {
+      hooksEnabled: boolean;
+    };
+  };
 }
 
 const DEFAULT_WORKSPACE_ROOT = getDefaultOpenRigPath("workspace");
@@ -125,6 +133,12 @@ const DEFAULTS = {
       auditLog: false,
     },
   },
+  // plugin-primitive Phase 3a slice 3.5 — Codex feature flag default ON.
+  runtime: {
+    codex: {
+      hooksEnabled: true,
+    },
+  },
 } as const;
 
 export const VALID_KEYS = [
@@ -159,6 +173,8 @@ export const VALID_KEYS = [
   "feed.subscriptions.shipped",
   "feed.subscriptions.progress",
   "feed.subscriptions.audit_log",
+  // plugin-primitive Phase 3a slice 3.5 — Codex feature flag.
+  "runtime.codex.hooks_enabled",
 ] as const;
 
 export type ValidKey = typeof VALID_KEYS[number];
@@ -196,6 +212,9 @@ export const ENV_MAP: Record<ValidKey, { primary: string; legacy?: string }> = {
   "feed.subscriptions.shipped": { primary: "OPENRIG_FEED_SUBSCRIPTIONS_SHIPPED" },
   "feed.subscriptions.progress": { primary: "OPENRIG_FEED_SUBSCRIPTIONS_PROGRESS" },
   "feed.subscriptions.audit_log": { primary: "OPENRIG_FEED_SUBSCRIPTIONS_AUDIT_LOG" },
+  // Net-new key post-rename: OPENRIG_X primary only per the 5-key
+  // boundary doctrine (no RIGGED_X legacy on net-new keys).
+  "runtime.codex.hooks_enabled": { primary: "OPENRIG_RUNTIME_CODEX_HOOKS_ENABLED" },
 };
 
 // Maps dotted-string config keys to the camelCase RiggedConfig path.
@@ -230,6 +249,7 @@ const KEY_TO_PATH: Record<ValidKey, string[]> = {
   "feed.subscriptions.shipped": ["feed", "subscriptions", "shipped"],
   "feed.subscriptions.progress": ["feed", "subscriptions", "progress"],
   "feed.subscriptions.audit_log": ["feed", "subscriptions", "auditLog"],
+  "runtime.codex.hooks_enabled": ["runtime", "codex", "hooksEnabled"],
 };
 
 function isValidKey(key: string): key is ValidKey {
@@ -391,6 +411,11 @@ export class ConfigStore {
           shipped: v("feed.subscriptions.shipped") as boolean,
           progress: v("feed.subscriptions.progress") as boolean,
           auditLog: v("feed.subscriptions.audit_log") as boolean,
+        },
+      },
+      runtime: {
+        codex: {
+          hooksEnabled: v("runtime.codex.hooks_enabled") as boolean,
         },
       },
     };

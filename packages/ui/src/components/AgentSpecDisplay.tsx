@@ -54,7 +54,7 @@ function FileChip({
 
 export function AgentSpecDisplay({ review, yaml, testIdPrefix = "agent", sourcePath }: AgentSpecDisplayProps) {
   const profiles = review?.profiles ?? [];
-  const resources = review?.resources ?? { skills: [], guidance: [], hooks: [], subagents: [] };
+  const resources = review?.resources ?? { skills: [], guidance: [], plugins: [], subagents: [] };
   const startup = review?.startup ?? { files: [], actions: [] };
 
   return (
@@ -107,9 +107,15 @@ export function AgentSpecDisplay({ review, yaml, testIdPrefix = "agent", sourceP
               ))}
             </div>
           )}
-          {resources.hooks.length > 0 && (
+          {resources.plugins.length > 0 && (
             <div>
-              <span className="text-stone-500">Hooks:</span> {resources.hooks.join(", ")}
+              <span className="text-stone-500">Plugins:</span>{" "}
+              {resources.plugins.map((p, i) => (
+                <span key={`${p}-${i}`} className="mr-1 mb-0.5 inline-flex items-center gap-1 bg-stone-100 px-1.5 py-0.5">
+                  <ToolMark tool="file" size="xs" decorative />
+                  {p}
+                </span>
+              ))}
             </div>
           )}
         </div>

@@ -66,7 +66,7 @@ export interface AgentSpecReview {
   resources: {
     skills: string[];
     guidance: string[];
-    hooks: string[];
+    plugins: string[];
     subagents: string[];
   };
   startup: {

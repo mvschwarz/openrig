@@ -20,8 +20,12 @@ function makeRuntimeResourceQR(id: string, path: string, runtime: string, type =
   return { effectiveId: id, sourceSpec: "base", sourcePath: "/agents/base", resource: { id, path, runtime, type } as QualifiedResource["resource"] };
 }
 
+function makePluginQR(id: string, path: string, sourceSpec = "base", sourcePath = "/agents/base"): QualifiedResource {
+  return { effectiveId: id, sourceSpec, sourcePath, resource: { id, source: { kind: "local", path } } as QualifiedResource["resource"] };
+}
+
 function emptyResources(): ResolvedResources {
-  return { skills: [], guidance: [], subagents: [], hooks: [], runtimeResources: [] };
+  return { skills: [], guidance: [], subagents: [], plugins: [], runtimeResources: [] };
 }
 
 function makeConfig(overrides?: Partial<ResolvedNodeConfig>): ResolvedNodeConfig {
@@ -241,7 +245,7 @@ describe("Projection planner", () => {
       selectedResources: {
         ...emptyResources(),
         skills: [makeQR("b-skill", "skills/b"), makeQR("a-skill", "skills/a")],
-        hooks: [makeQR("hook-z", "hooks/z")],
+        plugins: [makePluginQR("plugin-z", "/abs/plugins/z")],
       },
     });
     const input: ProjectionInput = { config, collisions: [], fsOps: mockFs() };
@@ -249,8 +253,8 @@ describe("Projection planner", () => {
     const r2 = planProjection(input);
     expect(r1).toEqual(r2);
     if (r1.ok && r2.ok) {
-      // Verify sorted order
-      expect(r1.plan.entries[0]!.category).toBe("hook");
+      // Verify sorted order: plugin (p) < skill (s) alphabetically
+      expect(r1.plan.entries[0]!.category).toBe("plugin");
       expect(r1.plan.entries[1]!.effectiveId).toBe("a-skill");
       expect(r1.plan.entries[2]!.effectiveId).toBe("b-skill");
     }

@@ -46,7 +46,6 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   private sleep: (ms: number) => Promise<void>;
   private stateDir: string | null;
   private collectorAssetPath: string | null;
-  private activityHookRelayAssetPath: string | null;
   private autoDriveProviderPrompts: boolean;
 
   constructor(deps: {
@@ -56,7 +55,6 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     sleep?: (ms: number) => Promise<void>;
     stateDir?: string;
     collectorAssetPath?: string;
-    activityHookRelayAssetPath?: string;
     autoDriveProviderPrompts?: boolean;
   }) {
     this.tmux = deps.tmux;
@@ -65,7 +63,6 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.stateDir = deps.stateDir ?? null;
     this.collectorAssetPath = deps.collectorAssetPath ?? null;
-    this.activityHookRelayAssetPath = deps.activityHookRelayAssetPath ?? null;
     this.autoDriveProviderPrompts = deps.autoDriveProviderPrompts ?? false;
   }
 
@@ -115,12 +112,6 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     try { this.ensureContextCollector(binding); } catch (err) {
       // Log but don't fail — collector provisioning is best-effort
       console.error(`[openrig] context collector provisioning warning: ${(err as Error).message}`);
-    }
-
-    // Best-effort: provision project-local activity hooks. The hook token is
-    // supplied through tmux session env, never written to provider settings.
-    try { this.provisionActivityHooks(binding); } catch (err) {
-      console.error(`[openrig] claude activity hook provisioning warning: ${(err as Error).message}`);
     }
 
     let delivered = 0;
@@ -350,6 +341,14 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       return this.mergeGuidance(targetPath, entry.effectiveId, content);
     }
 
+    // HG-1.3 plugin runtime applicability filter (per DESIGN.md §5.1):
+    // explicit pluginType="codex" → skip Claude projection;
+    // pluginType="auto" (or unset) + no .claude-plugin/ manifest dir → skip;
+    // explicit pluginType="claude" → project regardless of manifest presence.
+    if (entry.category === "plugin" && !this.pluginAppliesToClaude(entry)) {
+      return false;
+    }
+
     const targetDir = this.resolveTargetDir(entry, cwd);
     if (!targetDir) return true;
 
@@ -376,12 +375,20 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     return true;
   }
 
+  private pluginAppliesToClaude(entry: ProjectionEntry): boolean {
+    const explicit = entry.pluginType ?? "auto";
+    if (explicit === "claude") return true;
+    if (explicit === "codex") return false;
+    // auto: detect via .claude-plugin/plugin.json presence in the source tree
+    return this.fs.exists(nodePath.join(entry.absolutePath, ".claude-plugin", "plugin.json"));
+  }
+
   private resolveTargetDir(entry: ProjectionEntry, cwd: string): string | null {
     switch (entry.category) {
       case "skill": return nodePath.join(cwd, ".claude", "skills", entry.effectiveId);
       case "guidance": return null; // handled via merge
       case "subagent": return nodePath.join(cwd, ".claude", "agents");
-      case "hook": return nodePath.join(cwd, ".claude", "hooks");
+      case "plugin": return nodePath.join(cwd, ".claude", "plugins", entry.effectiveId);
       case "runtime_resource": return nodePath.join(cwd, ".claude", "extensions", entry.effectiveId);
       default: return null;
     }
@@ -640,26 +647,6 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     this.fs.writeFile(settingsPath, JSON.stringify(existing, null, 2));
   }
 
-  private provisionActivityHooks(binding: { cwd?: string | null }): void {
-    if (!binding.cwd || !this.activityHookRelayAssetPath) return;
-
-    const relayDest = nodePath.join(binding.cwd, ".openrig", "activity-hook-relay.cjs");
-    this.fs.mkdirp(nodePath.dirname(relayDest));
-    this.fs.writeFile(relayDest, this.fs.readFile(this.activityHookRelayAssetPath));
-
-    const settingsPath = nodePath.join(binding.cwd, ".claude", "settings.local.json");
-    this.fs.mkdirp(nodePath.dirname(settingsPath));
-    const settings = this.readJsonObject(settingsPath);
-    const hooks = this.readJsonObjectField(settings, "hooks");
-    const command = `node ${shellQuote(relayDest)}`;
-
-    for (const event of ["SessionStart", "UserPromptSubmit", "Stop", "Notification"]) {
-      upsertCommandHook(hooks, event, command);
-    }
-
-    settings["hooks"] = hooks;
-    this.fs.writeFile(settingsPath, JSON.stringify(settings, null, 2));
-  }
 }
 
 function hashContent(content: string): string {
@@ -707,36 +694,4 @@ function stableJsonKey(value: unknown): string {
     sorted[key] = value[key];
   }
   return JSON.stringify(sorted);
-}
-
-/** Shell-quote a string using single quotes (POSIX-safe). */
-function shellQuote(s: string): string {
-  return "'" + s.replace(/'/g, "'\"'\"'") + "'";
-}
-
-function upsertCommandHook(hooks: Record<string, unknown>, event: string, command: string): void {
-  const eventEntries = Array.isArray(hooks[event]) ? hooks[event] as unknown[] : [];
-  if (eventEntries.some((entry) => hookEntryContainsCommand(entry, command))) {
-    hooks[event] = eventEntries;
-    return;
-  }
-  eventEntries.push({
-    hooks: [
-      { type: "command", command, timeout: 5 },
-    ],
-  });
-  hooks[event] = eventEntries;
-}
-
-function hookEntryContainsCommand(entry: unknown, command: string): boolean {
-  if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return false;
-  const hooks = (entry as Record<string, unknown>)["hooks"];
-  if (!Array.isArray(hooks)) return false;
-  return hooks.some((hook) =>
-    typeof hook === "object" &&
-    hook !== null &&
-    !Array.isArray(hook) &&
-    (hook as Record<string, unknown>)["type"] === "command" &&
-    (hook as Record<string, unknown>)["command"] === command
-  );
 }

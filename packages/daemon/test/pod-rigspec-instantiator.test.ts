@@ -197,7 +197,6 @@ profiles:
       skills: []
       guidance: [role]
       subagents: []
-      hooks: []
       runtime_resources: []
 `.trim(),
       [`${RIG_ROOT}/agents/impl/guidance/role.md`]: "# role",

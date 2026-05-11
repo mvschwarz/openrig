@@ -1,4 +1,5 @@
 import nodePath from "node:path";
+import * as os from "node:os";
 import type { StartupBlock } from "./types.js";
 import { classifyResourceProjection } from "./conflict-detector.js";
 import type { ResolvedNodeConfig, QualifiedResource, ResolvedResources } from "./profile-resolver.js";
@@ -9,7 +10,7 @@ import type { ResourceCollision } from "./agent-resolver.js";
 export type ProjectionClassification = "safe_projection" | "managed_merge" | "hash_conflict" | "no_op";
 
 export interface ProjectionEntry {
-  category: "skill" | "guidance" | "subagent" | "hook" | "runtime_resource";
+  category: "skill" | "guidance" | "subagent" | "plugin" | "runtime_resource";
   effectiveId: string;
   sourceSpec: string;
   sourcePath: string;
@@ -20,6 +21,12 @@ export interface ProjectionEntry {
   conflictDetail?: { reason: string; existingHash?: string; sourceHash?: string };
   mergeStrategy?: "managed_block" | "append";
   target?: string;
+  /** Plugin runtime applicability hint. Only meaningful for category=plugin.
+   *  - "claude" / "codex": explicit operator override; only the named runtime adapter projects
+   *  - "auto" or undefined: adapter detects manifest dirs (.claude-plugin/ vs .codex-plugin/)
+   *    and projects only when its runtime-specific manifest is present
+   */
+  pluginType?: "claude" | "codex" | "auto";
 }
 
 export interface ProjectionPlan {
@@ -55,7 +62,7 @@ const CATEGORY_MAP: Record<string, ProjectionEntry["category"]> = {
   skills: "skill",
   guidance: "guidance",
   subagents: "subagent",
-  hooks: "hook",
+  plugins: "plugin",
   runtimeResources: "runtime_resource",
 };
 
@@ -95,8 +102,24 @@ export function planProjection(input: ProjectionInput): PlanResult {
         if (rr.runtime !== config.runtime) continue;
       }
 
-      const resourcePath = (qr.resource as { path: string }).path;
-      const absolutePath = nodePath.resolve(qr.sourcePath, resourcePath);
+      // Plugins use a different shape: { id, source: { kind, path } } — extract path from source.
+      // Plugin paths support three forms (per DESIGN.md §5.2):
+      //   1. absolute system path → preserved exactly
+      //   2. tilde-home-prefixed (~/... or bare ~) → expanded to os.homedir()
+      //   3. relative to spec dir → resolved against qr.sourcePath
+      // ~user (with username) is NOT expanded — treated as a literal relative segment
+      // per Node's nodePath convention to avoid surprising operators with implicit
+      // username lookups.
+      let resourcePath: string;
+      let absolutePath: string;
+      if (catKey === "plugins") {
+        const pluginSource = (qr.resource as { source: { kind: string; path: string } }).source;
+        resourcePath = pluginSource.path;
+        absolutePath = resolvePluginPath(resourcePath, qr.sourcePath);
+      } else {
+        resourcePath = (qr.resource as { path: string }).path;
+        absolutePath = nodePath.resolve(qr.sourcePath, resourcePath);
+      }
 
       const entry: ProjectionEntry = {
         category: catSingular,
@@ -110,6 +133,11 @@ export function planProjection(input: ProjectionInput): PlanResult {
 
       if (catKey === "runtimeResources") {
         entry.resourceType = (qr.resource as { type?: string }).type;
+      }
+
+      if (catKey === "plugins") {
+        const pluginRes = qr.resource as { pluginType?: "claude" | "codex" | "auto" };
+        entry.pluginType = pluginRes.pluginType ?? "auto";
       }
 
       // Guidance-specific
@@ -176,7 +204,7 @@ function checkAmbiguity(selected: ResolvedResources, collisions: ResourceCollisi
     { category: "skills", resources: selected.skills },
     { category: "guidance", resources: selected.guidance },
     { category: "subagents", resources: selected.subagents },
-    { category: "hooks", resources: selected.hooks },
+    { category: "plugins", resources: selected.plugins },
     { category: "runtimeResources", resources: selected.runtimeResources },
   ];
 
@@ -205,3 +233,19 @@ function checkAmbiguity(selected: ResolvedResources, collisions: ResourceCollisi
 
 // Classification is now handled via classifyResourceProjection from conflict-detector.ts
 // when resolveTargetPath is provided. Without it, entries default to safe_projection.
+
+/**
+ * Resolve a plugin source.path to a concrete absolute path.
+ * Three forms supported:
+ *   - absolute (`/abs/...`)        → preserved exactly
+ *   - tilde-home (`~/...` or `~`)  → expanded to os.homedir()
+ *   - relative (`plugins/...`)     → resolved against specSourcePath
+ * `~user/...` (with explicit username) is NOT expanded; treated as a
+ * literal relative segment per Node's nodePath convention.
+ */
+function resolvePluginPath(rawPath: string, specSourcePath: string): string {
+  if (rawPath === "~") return os.homedir();
+  if (rawPath.startsWith("~/")) return nodePath.join(os.homedir(), rawPath.slice(2));
+  if (nodePath.isAbsolute(rawPath)) return rawPath;
+  return nodePath.resolve(specSourcePath, rawPath);
+}

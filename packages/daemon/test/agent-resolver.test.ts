@@ -6,7 +6,7 @@ function validAgentYaml(overrides?: { name?: string; version?: string; imports?:
   const name = overrides?.name ?? "test-agent";
   const version = overrides?.version ?? "1.0.0";
   const imports = overrides?.imports ?? "";
-  const resources = overrides?.resources ?? "resources:\n  skills: []\n  guidance: []\n  subagents: []\n  hooks: []\n  runtime_resources: []";
+  const resources = overrides?.resources ?? "resources:\n  skills: []\n  guidance: []\n  subagents: []\n  plugins: []\n  runtime_resources: []";
   return `name: ${name}\nversion: "${version}"\n${imports}\n${resources}\nprofiles: {}`;
 }
 

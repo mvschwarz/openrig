@@ -75,6 +75,8 @@ import { WorkflowRuntime } from "./domain/workflow-runtime.js";
 import { makeWorkflowKeepalivePolicy } from "./domain/policies/workflow-keepalive.js";
 import { SpecReviewService } from "./domain/spec-review-service.js";
 import { SpecLibraryService } from "./domain/spec-library-service.js";
+// Phase 3a slice 3.3 — plugin discovery service.
+import { PluginDiscoveryService } from "./domain/plugin-discovery-service.js";
 import { ContextPackLibraryService } from "./domain/context-packs/context-pack-library-service.js";
 import { AgentImageLibraryService } from "./domain/agent-images/agent-image-library-service.js";
 import { SnapshotCapturer } from "./domain/agent-images/snapshot-capturer.js";
@@ -395,10 +397,69 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const { CodexRuntimeAdapter } = await import("./adapters/codex-runtime-adapter.js");
 
   const startupOrchestrator = new StartupOrchestrator({ db, sessionRegistry, eventBus, tmuxAdapter, readFile: (p: string) => fs.readFileSync(p, "utf-8") });
-  const activityHookRelayAssetPath = nodePath.resolve(import.meta.dirname, "../assets/openrig-activity-hook-relay.cjs");
   const runtimeSettings = new ContextPackSettingsStore().resolveConfig();
-  const claudeAdapter = new ClaudeCodeAdapter({ tmux: tmuxAdapter, fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"), exists: (p: string) => fs.existsSync(p), mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }), copyFile: (src: string, dest: string) => fs.copyFileSync(src, dest), listFiles: (dir: string) => { const r: string[] = []; function w(d: string, pre: string) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.isDirectory()) w(nodePath.join(d, e.name), nodePath.join(pre, e.name)); else r.push(pre ? nodePath.join(pre, e.name) : e.name); } } w(dir, ""); return r; }, readdir: (dir: string) => fs.readdirSync(dir), homedir: os.homedir() }, stateDir: OPENRIG_HOME, collectorAssetPath: nodePath.resolve(import.meta.dirname, "../assets/claude-statusline-context.cjs"), activityHookRelayAssetPath, autoDriveProviderPrompts: runtimeSettings.recoveryAutoDriveProviderPrompts });
-  const codexAdapter = new CodexRuntimeAdapter({ tmux: tmuxAdapter, fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"), exists: (p: string) => fs.existsSync(p), mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }), listFiles: (dir: string) => { const r: string[] = []; function w(d: string, pre: string) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.isDirectory()) w(nodePath.join(d, e.name), nodePath.join(pre, e.name)); else r.push(pre ? nodePath.join(pre, e.name) : e.name); } } w(dir, ""); return r; } }, activityHookRelayAssetPath });
+  const claudeAdapter = new ClaudeCodeAdapter({ tmux: tmuxAdapter, fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"), exists: (p: string) => fs.existsSync(p), mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }), copyFile: (src: string, dest: string) => fs.copyFileSync(src, dest), listFiles: (dir: string) => { const r: string[] = []; function w(d: string, pre: string) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.isDirectory()) w(nodePath.join(d, e.name), nodePath.join(pre, e.name)); else r.push(pre ? nodePath.join(pre, e.name) : e.name); } } w(dir, ""); return r; }, readdir: (dir: string) => fs.readdirSync(dir), homedir: os.homedir() }, stateDir: OPENRIG_HOME, collectorAssetPath: nodePath.resolve(import.meta.dirname, "../assets/claude-statusline-context.cjs"), autoDriveProviderPrompts: runtimeSettings.recoveryAutoDriveProviderPrompts });
+  const codexAdapter = new CodexRuntimeAdapter({ tmux: tmuxAdapter, fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"), exists: (p: string) => fs.existsSync(p), mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }), listFiles: (dir: string) => { const r: string[] = []; function w(d: string, pre: string) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.isDirectory()) w(nodePath.join(d, e.name), nodePath.join(pre, e.name)); else r.push(pre ? nodePath.join(pre, e.name) : e.name); } } w(dir, ""); return r; }, homedir: os.homedir() } });
+
+  // plugin-primitive Phase 3a slice 3.5 — ensure Codex feature flag
+  // codex_hooks = true is set in ~/.codex/config.toml so plugin-shipped
+  // hooks fire on Codex runtime. Operator can disable via OPENRIG_RUNTIME_CODEX_HOOKS_ENABLED
+  // or rig config set runtime.codex.hooks_enabled false.
+  try {
+    const settingsStore = new (await import("./domain/user-settings/settings-store.js")).SettingsStore();
+    const enabled = settingsStore.resolveOne("runtime.codex.hooks_enabled").value as boolean;
+    codexAdapter.ensureCodexFeatureFlag(enabled);
+  } catch (err) {
+    console.error(`[openrig] codex feature flag setup warning: ${(err as Error).message}`);
+  }
+
+  // plugin-primitive Phase 3a slice 3.2 — vendor openrig-core plugin to
+  // ~/.openrig/plugins/openrig-core/ on first launch. Auto-fetch from
+  // github.com/mvschwarz/openrig-plugins is best-effort + 404-tolerant
+  // (repo currently empty per founder authorization 2026-05-10; vendored
+  // copy is the source of truth at v0).
+  try {
+    const { PluginVendorService } = await import("./domain/plugin-vendor-service.js");
+    const vendoredAssetsDir = nodePath.resolve(import.meta.dirname, "../assets/plugins");
+    const userPluginsDir = getDefaultOpenRigPath("plugins");
+    const realFs = {
+      readFile: (p: string) => fs.readFileSync(p, "utf-8"),
+      writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"),
+      exists: (p: string) => fs.existsSync(p),
+      mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }),
+      listFiles: (dir: string) => {
+        const r: string[] = [];
+        function w(d: string, pre: string) {
+          for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+            if (e.isDirectory()) w(nodePath.join(d, e.name), nodePath.join(pre, e.name));
+            else r.push(pre ? nodePath.join(pre, e.name) : e.name);
+          }
+        }
+        w(dir, "");
+        return r;
+      },
+    };
+    const httpClient = async (url: string, opts?: { timeoutMs?: number }) => {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), opts?.timeoutMs ?? 5000);
+      try {
+        const resp = await fetch(url, { signal: ctrl.signal });
+        return { ok: resp.ok, status: resp.status };
+      } finally {
+        clearTimeout(timer);
+      }
+    };
+    const vendorService = new PluginVendorService({
+      vendoredAssetsDir,
+      userPluginsDir,
+      fs: realFs,
+      httpClient,
+      logger: (...args) => console.log("[openrig]", ...args),
+    });
+    await vendorService.ensureLatest("openrig-core");
+  } catch (err) {
+    console.error(`[openrig] plugin vendor setup warning: ${(err as Error).message}`);
+  }
 
   // PL-014 Item 6: hoist ContextPackLibraryService construction so the
   // PodRigInstantiator can resolve `kind: context_pack` startup_files
@@ -653,6 +714,19 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       lib.scan();
       return lib;
     })(),
+    // Phase 3a slice 3.3 — plugin discovery service.
+    // SC-29 EXCEPTION #8 verbatim: see packages/daemon/src/routes/plugins.ts
+    // header. Filesystem-scan over 3 source roots + agent.yaml-parse for
+    // used-by reverse query. No SQL; no mutation. Spec library directory
+    // for used-by uses the same default user spec root as SpecLibraryService
+    // above; one root at v0 (multi-root expansion deferred to a later slice
+    // when spec library hooks its full root list through to discovery).
+    pluginDiscoveryService: new PluginDiscoveryService({
+      openrigPluginsDir: nodePath.join(os.homedir(), ".openrig", "plugins"),
+      claudeCacheDir: nodePath.join(os.homedir(), ".claude", "plugins", "cache"),
+      codexCacheDir: nodePath.join(os.homedir(), ".codex", "plugins", "cache"),
+      specLibraryDir: getDefaultOpenRigPath("specs"),
+    }),
     // PL-014 Item 6: same instance hoisted earlier so the
     // PodRigInstantiator can resolve `kind: context_pack` startup_files
     // entries — sharing the cache means /api/context-packs/* + the

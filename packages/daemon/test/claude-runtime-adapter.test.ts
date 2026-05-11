@@ -700,56 +700,13 @@ describe("Claude Code runtime adapter", () => {
     expect(settings.mcpServers).toEqual({ context7: {} });
   });
 
-  it("provisions project-local Claude hooks without clobbering existing local settings or persisting the hook token", async () => {
-    const fs = mockFs({
-      "/daemon/assets/openrig-activity-hook-relay.cjs": "relay script",
-      "/project/.claude/settings.local.json": JSON.stringify({
-        statusLine: { type: "command", command: "node .openrig/context-collector.cjs" },
-        permissions: {
-          allow: ["Bash(existing:*)"],
-          deny: ["Bash(rm -rf *)"],
-        },
-        enabledMcpjsonServers: ["existing-mcp"],
-        hooks: {
-          Stop: [
-            {
-              hooks: [
-                { type: "command", command: "node ./existing-stop-hook.cjs", timeout: 10 },
-              ],
-            },
-          ],
-        },
-      }),
-    });
-    const adapter = new ClaudeCodeAdapter({
-      tmux: mockTmux(),
-      fsOps: { ...fs, homedir: "/home/test" },
-      activityHookRelayAssetPath: "/daemon/assets/openrig-activity-hook-relay.cjs",
-    });
-
-    await adapter.deliverStartup([], makeBinding());
-    await adapter.deliverStartup([], makeBinding());
-
-    const store = (fs as unknown as { _store: Record<string, string> })._store;
-    expect(store["/project/.openrig/activity-hook-relay.cjs"]).toBe("relay script");
-    const settings = JSON.parse(store["/project/.claude/settings.local.json"]!);
-
-    expect(settings.statusLine.command).toBe("node .openrig/context-collector.cjs");
-    expect(settings.permissions.allow).toEqual(["Bash(existing:*)"]);
-    expect(settings.permissions.ask).toBeUndefined();
-    expect(settings.permissions.deny).toEqual(["Bash(rm -rf *)"]);
-    expect(settings.enabledMcpjsonServers).toEqual(["existing-mcp"]);
-
-    const hookJson = JSON.stringify(settings.hooks);
-    expect(hookJson).toContain("node ./existing-stop-hook.cjs");
-    expect(hookJson).toContain("node '/project/.openrig/activity-hook-relay.cjs'");
-    expect(hookJson).toContain("SessionStart");
-    expect(hookJson).toContain("UserPromptSubmit");
-    expect(hookJson).toContain("Stop");
-    expect(hookJson).toContain("Notification");
-    expect(hookJson).not.toContain("secret-token");
-
-    const relayCommandMatches = hookJson.match(/activity-hook-relay\.cjs/g) ?? [];
-    expect(relayCommandMatches).toHaveLength(4);
-  });
+  // Pre-rip 'provisions project-local Claude hooks without clobbering
+  // existing local settings or persisting the hook token' test removed in
+  // plugin-primitive Phase 3a slice 3.1 — activity-hook auto-injection
+  // ripped (provisionActivityHooks gone). Replacement coverage:
+  // activity-hook-rip-proof.test.ts asserts (a) no .openrig/activity-hook-relay.cjs
+  // file written; (b) no OpenRig-injected hook entries in settings.local.json;
+  // (c) pre-existing user-authored hooks PRESERVED untouched; (d) source
+  // grep confirms provisionActivityHooks/upsertCommandHook/etc. removed
+  // from adapter source.
 });

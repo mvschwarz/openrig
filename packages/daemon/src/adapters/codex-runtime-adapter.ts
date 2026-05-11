@@ -42,7 +42,6 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   private readThreadIdByPid: (pid: number) => string | undefined;
   private sleep: (ms: number) => Promise<void>;
   private resolveHomeDirByPid: ResolveHomeDirByPid;
-  private activityHookRelayAssetPath: string | null;
 
   constructor(deps: {
     tmux: TmuxAdapter;
@@ -51,7 +50,6 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     readThreadIdByPid?: (pid: number) => string | undefined;
     resolveHomeDirByPid?: ResolveHomeDirByPid;
     sleep?: (ms: number) => Promise<void>;
-    activityHookRelayAssetPath?: string;
   }) {
     this.tmux = deps.tmux;
     this.fs = deps.fsOps;
@@ -59,7 +57,31 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     this.readThreadIdByPid = deps.readThreadIdByPid ?? ((pid) => this.readThreadIdFromLogs(pid));
     this.resolveHomeDirByPid = deps.resolveHomeDirByPid ?? defaultResolveHomeDirByPid;
     this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
-    this.activityHookRelayAssetPath = deps.activityHookRelayAssetPath ?? null;
+  }
+
+  /**
+   * plugin-primitive Phase 3a slice 3.5 — ensure Codex feature flag.
+   *
+   * When `enabled` is true, idempotently writes `codex_hooks = true` under
+   * `[features]` in `~/.codex/config.toml`, creating the file if missing.
+   * When `enabled` is false, makes ZERO modifications — the operator is
+   * managing Codex config independently and the daemon does not touch it.
+   *
+   * Replaces the activity-hook-injection-coupled feature-flag set call
+   * that lived inside the auto-injected activity-hook provisioning path
+   * pre-rip (plugin-primitive Phase 3a slice 3.1).
+   */
+  ensureCodexFeatureFlag(enabled: boolean): void {
+    if (!enabled) return;
+    const homedir = this.fs.homedir;
+    if (!homedir) return;
+    const configPath = nodePath.join(homedir, ".codex", "config.toml");
+    const existing = this.fs.exists(configPath) ? this.fs.readFile(configPath) : "";
+    const updated = upsertCodexHooksFeature(existing);
+    if (updated !== existing) {
+      this.fs.mkdirp(nodePath.dirname(configPath));
+      this.fs.writeFile(configPath, updated);
+    }
   }
 
   async listInstalled(binding: NodeBinding): Promise<InstalledResource[]> {
@@ -102,12 +124,6 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   async deliverStartup(files: ResolvedStartupFile[], binding: NodeBinding): Promise<StartupDeliveryResult> {
     try { this.ensureManagedBootstrap(binding); } catch (err) {
       console.error(`[openrig] codex bootstrap warning: ${(err as Error).message}`);
-    }
-
-    // Best-effort: provision project-local provider hooks. The hook token is
-    // supplied through tmux session env, never written to provider config.
-    try { this.provisionActivityHooks(binding); } catch (err) {
-      console.error(`[openrig] codex activity hook provisioning warning: ${(err as Error).message}`);
     }
 
     let delivered = 0;
@@ -316,6 +332,14 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       return this.mergeGuidance(targetPath, entry.effectiveId, content);
     }
 
+    // HG-1.3 plugin runtime applicability filter (per DESIGN.md §5.1):
+    // - explicit pluginType="claude" → skip Codex projection
+    // - pluginType="auto" (or unset) + no .codex-plugin/ manifest dir → skip
+    // - explicit pluginType="codex" → project regardless of manifest presence
+    if (entry.category === "plugin" && !this.pluginAppliesToCodex(entry)) {
+      return false;
+    }
+
     const targetDir = this.resolveTargetDir(entry, cwd);
     if (!targetDir) return true;
 
@@ -340,12 +364,20 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     return true;
   }
 
+  private pluginAppliesToCodex(entry: ProjectionEntry): boolean {
+    const explicit = entry.pluginType ?? "auto";
+    if (explicit === "codex") return true;
+    if (explicit === "claude") return false;
+    // auto: detect via .codex-plugin/plugin.json presence in the source tree
+    return this.fs.exists(nodePath.join(entry.absolutePath, ".codex-plugin", "plugin.json"));
+  }
+
   private resolveTargetDir(entry: ProjectionEntry, cwd: string): string | null {
     switch (entry.category) {
       case "skill": return nodePath.join(cwd, ".agents", "skills", entry.effectiveId);
       case "guidance": return null; // handled via merge
       case "subagent": return nodePath.join(cwd, ".agents"); // .agents/{id}.yaml per preserved contract
-      case "hook": return nodePath.join(cwd, ".agents", "hooks");
+      case "plugin": return nodePath.join(cwd, ".codex", "plugins", entry.effectiveId);
       case "runtime_resource": return nodePath.join(cwd, ".agents", "extensions", entry.effectiveId);
       default: return null;
     }
@@ -414,31 +446,6 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     }
 
     this.fs.writeFile(configPath, content);
-  }
-
-  private provisionActivityHooks(binding: { cwd?: string | null }): void {
-    if (!binding.cwd || !this.activityHookRelayAssetPath) return;
-
-    const relayDest = nodePath.join(binding.cwd, ".openrig", "activity-hook-relay.cjs");
-    this.fs.mkdirp(nodePath.dirname(relayDest));
-    this.fs.writeFile(relayDest, this.fs.readFile(this.activityHookRelayAssetPath));
-
-    const codexDir = nodePath.join(binding.cwd, ".codex");
-    this.fs.mkdirp(codexDir);
-
-    const hooksPath = nodePath.join(codexDir, "hooks.json");
-    const hooksConfig = this.readJsonObject(hooksPath);
-    const hooks = this.readJsonObjectField(hooksConfig, "hooks");
-    const command = `node ${shellQuote(relayDest)}`;
-    for (const event of ["SessionStart", "UserPromptSubmit", "Stop"]) {
-      upsertCommandHook(hooks, event, command);
-    }
-    hooksConfig["hooks"] = hooks;
-    this.fs.writeFile(hooksPath, `${JSON.stringify(hooksConfig, null, 2)}\n`);
-
-    const configPath = nodePath.join(codexDir, "config.toml");
-    const existingConfig = this.fs.exists(configPath) ? this.fs.readFile(configPath) : "";
-    this.fs.writeFile(configPath, upsertCodexHooksFeature(existingConfig));
   }
 
   private readJsonObject(path: string): Record<string, unknown> {
@@ -676,33 +683,6 @@ function upsertManagedCodexConfigFragment(content: string, id: string, fragment:
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function upsertCommandHook(hooks: Record<string, unknown>, event: string, command: string): void {
-  const eventEntries = Array.isArray(hooks[event]) ? hooks[event] as unknown[] : [];
-  if (eventEntries.some((entry) => hookEntryContainsCommand(entry, command))) {
-    hooks[event] = eventEntries;
-    return;
-  }
-  eventEntries.push({
-    hooks: [
-      { type: "command", command, timeout: 5 },
-    ],
-  });
-  hooks[event] = eventEntries;
-}
-
-function hookEntryContainsCommand(entry: unknown, command: string): boolean {
-  if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return false;
-  const hooks = (entry as Record<string, unknown>)["hooks"];
-  if (!Array.isArray(hooks)) return false;
-  return hooks.some((hook) =>
-    typeof hook === "object" &&
-    hook !== null &&
-    !Array.isArray(hook) &&
-    (hook as Record<string, unknown>)["type"] === "command" &&
-    (hook as Record<string, unknown>)["command"] === command
-  );
 }
 
 function defaultListProcesses(): Array<{ pid: number; ppid: number; command: string }> {

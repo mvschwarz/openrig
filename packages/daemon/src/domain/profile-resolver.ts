@@ -3,7 +3,7 @@ import { homedir as osHomedir } from "node:os";
 import type {
   AgentSpec, AgentResources, ProfileSpec, LifecycleDefaults,
   RigSpec, RigSpecPod, RigSpecPodMember, StartupBlock,
-  SkillResource, GuidanceResource, SubagentResource, HookResource, RuntimeResource,
+  SkillResource, GuidanceResource, SubagentResource, RuntimeResource, PluginResource,
 } from "./types.js";
 import type { ResolvedAgentSpec, ResourceCollision } from "./agent-resolver.js";
 import { resolveStartup } from "./startup-resolver.js";
@@ -15,14 +15,14 @@ export interface QualifiedResource {
   effectiveId: string;
   sourceSpec: string;
   sourcePath: string;
-  resource: SkillResource | GuidanceResource | SubagentResource | HookResource | RuntimeResource;
+  resource: SkillResource | GuidanceResource | SubagentResource | RuntimeResource | PluginResource;
 }
 
 export interface ResolvedResources {
   skills: QualifiedResource[];
   guidance: QualifiedResource[];
   subagents: QualifiedResource[];
-  hooks: QualifiedResource[];
+  plugins: QualifiedResource[];
   runtimeResources: QualifiedResource[];
 }
 
@@ -63,14 +63,14 @@ export type ResolutionResult =
 
 // -- Constants --
 
-const RESOURCE_CATEGORIES = ["skills", "guidance", "subagents", "hooks", "runtimeResources"] as const;
+const RESOURCE_CATEGORIES = ["skills", "guidance", "subagents", "plugins", "runtimeResources"] as const;
 type ResourceCategory = typeof RESOURCE_CATEGORIES[number];
 
 const YAML_CATEGORY_MAP: Record<string, ResourceCategory> = {
   skills: "skills",
   guidance: "guidance",
   subagents: "subagents",
-  hooks: "hooks",
+  plugins: "plugins",
   runtime_resources: "runtimeResources",
   runtimeResources: "runtimeResources",
 };
@@ -218,7 +218,7 @@ interface PoolEntry {
   effectiveId: string;
   sourceSpec: string;
   sourcePath: string;
-  resource: SkillResource | GuidanceResource | SubagentResource | HookResource | RuntimeResource;
+  resource: SkillResource | GuidanceResource | SubagentResource | RuntimeResource | PluginResource;
 }
 
 type ResourcePool = Record<ResourceCategory, Map<string, PoolEntry[]>>;
@@ -228,13 +228,13 @@ function buildResourcePool(base: ResolvedAgentSpec, imports: ResolvedAgentSpec[]
     skills: new Map(),
     guidance: new Map(),
     subagents: new Map(),
-    hooks: new Map(),
+    plugins: new Map(),
     runtimeResources: new Map(),
   };
 
   // Base spec resources (unqualified id)
   for (const cat of RESOURCE_CATEGORIES) {
-    const resources = base.spec.resources[cat] as Array<{ id: string }>;
+    const resources = (base.spec.resources[cat] as Array<{ id: string }> | undefined) ?? [];
     for (const r of resources) {
       const entries = pool[cat].get(r.id) ?? [];
       entries.push({ effectiveId: r.id, sourceSpec: base.spec.name, sourcePath: base.sourcePath, resource: r as PoolEntry["resource"] });
@@ -247,7 +247,7 @@ function buildResourcePool(base: ResolvedAgentSpec, imports: ResolvedAgentSpec[]
   // "colliding imported resources remain addressable only by qualified id"
   for (const imp of imports) {
     for (const cat of RESOURCE_CATEGORIES) {
-      const resources = imp.spec.resources[cat] as Array<{ id: string }>;
+      const resources = (imp.spec.resources[cat] as Array<{ id: string }> | undefined) ?? [];
       for (const r of resources) {
         const qualifiedId = `${imp.spec.name}:${r.id}`;
         // Index under qualified id only
@@ -287,7 +287,7 @@ function resolveProfileUses(
     skills: [],
     guidance: [],
     subagents: [],
-    hooks: [],
+    plugins: [],
     runtimeResources: [],
   };
 
@@ -295,7 +295,7 @@ function resolveProfileUses(
     skills: profile.uses.skills,
     guidance: profile.uses.guidance,
     subagents: profile.uses.subagents,
-    hooks: profile.uses.hooks,
+    plugins: profile.uses.plugins,
     runtimeResources: profile.uses.runtimeResources,
   };
 

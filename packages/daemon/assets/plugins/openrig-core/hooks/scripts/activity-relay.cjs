@@ -1,6 +1,18 @@
 #!/usr/bin/env node
 "use strict";
 
+// OpenRig activity-relay hook script.
+// Reads a hook event payload from stdin, normalizes it, and POSTs to the
+// OpenRig daemon's /api/activity/hooks endpoint for real-time UI seat-status.
+// Best-effort only: 1.5s timeout, errors swallowed, never blocks the agent loop.
+//
+// Required environment (injected by the OpenRig daemon when launching the agent):
+//   OPENRIG_SESSION_NAME or RIGGED_SESSION_NAME  - tmux session id
+//   OPENRIG_NODE_ID      or RIGGED_NODE_ID       - node id in the rig topology
+//   OPENRIG_RUNTIME      or RIGGED_RUNTIME       - "claude-code" | "codex" | etc.
+//   OPENRIG_URL          or RIGGED_URL           - daemon base URL
+//   OPENRIG_ACTIVITY_HOOK_TOKEN or RIGGED_ACTIVITY_HOOK_TOKEN - bearer auth
+
 async function readStdin() {
   return new Promise((resolve) => {
     let data = "";
