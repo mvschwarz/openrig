@@ -25,11 +25,8 @@
 import type Database from "better-sqlite3";
 
 export interface SliceWorkflowBinding {
-  /** The most recent workflow_instance touching the slice's qitem set.
-   *  V0.3.1 slice 13: nullable when binding is synthetic (declaration-
-   *  fallback path — slice/mission frontmatter declared workflow_spec
-   *  but no live instance is bound). */
-  instanceId: string | null;
+  /** The most recent workflow_instance touching the slice's qitem set. */
+  instanceId: string;
   workflowName: string;
   workflowVersion: string;
   status: string;
@@ -37,8 +34,7 @@ export interface SliceWorkflowBinding {
   /** Frontier qitem_ids parsed from the JSON column. */
   currentFrontier: string[];
   hopCount: number;
-  /** ISO timestamp from the live instance row; null for synthetic bindings. */
-  createdAt: string | null;
+  createdAt: string;
   completedAt: string | null;
 }
 
@@ -60,29 +56,11 @@ interface InstanceRow {
   completed_at: string | null;
 }
 
-/** V0.3.1 slice 13 walk-item 7 — frontmatter `workflow_spec: <name>@<version>`
- *  declaration. When passed AND no live instance binds the slice's
- *  qitems, findSliceWorkflowBinding returns a synthetic binding so
- *  the Topology projector can render the spec graph for a slice that
- *  has no live qitem activity yet. Live instances always win over
- *  declarations: declared metadata is a fallback, not an override. */
-export interface WorkflowSpecDeclaration {
-  name: string;
-  version: string;
-}
-
 export function findSliceWorkflowBinding(
   db: Database.Database,
   qitemIds: string[],
-  declaration?: WorkflowSpecDeclaration | null,
 ): SliceWorkflowBindingResult {
-  // V0.3.1 slice 13 — empty-qitemIds path also honors declaration so
-  // mission-level callers (no qitem corpus) can still get a synthetic
-  // binding from their frontmatter declaration.
-  if (qitemIds.length === 0) {
-    if (declaration) return { primary: syntheticBinding(declaration), additionalInstanceIds: [] };
-    return { primary: null, additionalInstanceIds: [] };
-  }
+  if (qitemIds.length === 0) return { primary: null, additionalInstanceIds: [] };
 
   const instanceIds = new Set<string>();
 
@@ -117,11 +95,7 @@ export function findSliceWorkflowBinding(
     // workflow_instances absent — skip
   }
 
-  // V0.3.1 slice 13 — declaration-fallback when no live instance binds.
-  if (instanceIds.size === 0) {
-    if (declaration) return { primary: syntheticBinding(declaration), additionalInstanceIds: [] };
-    return { primary: null, additionalInstanceIds: [] };
-  }
+  if (instanceIds.size === 0) return { primary: null, additionalInstanceIds: [] };
 
   // Resolve full rows; sort by created_at DESC; pick most recent as primary.
   const idList = Array.from(instanceIds);
@@ -145,25 +119,6 @@ export function findSliceWorkflowBinding(
   const primary = rowToBinding(rows[0]!);
   const additional = rows.slice(1).map((r) => r.instance_id);
   return { primary, additionalInstanceIds: additional };
-}
-
-/** V0.3.1 slice 13 — synthetic binding for the frontmatter-declared
- *  workflow_spec when no live instance is bound. The projector reads
- *  `currentStepId` (null here) to skip "current step" highlighting;
- *  `instanceId: null` signals to the UI that this is a declared-only
- *  binding (no live instance). */
-function syntheticBinding(declaration: WorkflowSpecDeclaration): SliceWorkflowBinding {
-  return {
-    instanceId: null,
-    workflowName: declaration.name,
-    workflowVersion: declaration.version,
-    status: "declared",
-    currentStepId: null,
-    currentFrontier: [],
-    hopCount: 0,
-    createdAt: null,
-    completedAt: null,
-  };
 }
 
 function rowToBinding(row: InstanceRow): SliceWorkflowBinding {
