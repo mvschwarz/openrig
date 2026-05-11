@@ -30,8 +30,18 @@ hand off.
 
 - `openrig-architect` skill is your reference for designing pods +
   edges + agent profiles for new rigs.
-- `mental-model-ha` skill is your reference for surviving compaction
-  cleanly — externalize state, recover from durable artifacts.
+
+## Surviving compaction
+
+Long advising sessions hit context limits. The discipline is
+externalize-state-to-durable-substrate, not in-context recall:
+recover identity via `rig whoami --json`; recover recent peer
+context via `rig transcript <session> --tail` / `--grep`; recover
+in-flight work via `rig queue list --as <me>`. Hand off load-bearing
+decisions to the queue so a fresh-context advisor can pick them up.
+If the operator has installed a richer compaction-survival skill on
+this host (substrate skill path or `~/.openrig/skills/`), load it
+for more detail.
 
 ## When you are uncertain
 
