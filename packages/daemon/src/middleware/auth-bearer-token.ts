@@ -23,6 +23,8 @@
 
 import { Buffer } from "node:buffer";
 import { timingSafeEqual } from "node:crypto";
+import { promises as dns } from "node:dns";
+import { networkInterfaces, type NetworkInterfaceInfo } from "node:os";
 import type { MiddlewareHandler } from "hono";
 
 /**
@@ -137,6 +139,88 @@ export function isLoopbackBind(host: string | undefined | null): boolean {
   return false;
 }
 
+/**
+ * Detect tailscale CGNAT IPv4 (100.64.0.0/10) and ULA IPv6 prefix
+ * (fd7a:115c:a1e0::/48). Returns true for tailnet-literal IP addresses
+ * only; hostname callers must first resolve via {@link resolveToIpOrNull}.
+ *
+ * Rationale: tailscale's WireGuard mesh + ACLs ARE the auth boundary, so
+ * a tailnet-bound daemon does not need an additional bearer token. The
+ * CGNAT IPv4 range and ULA IPv6 prefix are reserved by tailscale and
+ * documented; collisions on real-world networks are essentially zero.
+ *
+ * Boundary semantics for HG-3: CGNAT is 100.64.0.0/10 → first octet
+ * exactly 100, second octet 64..127 inclusive. 100.63.x.x and
+ * 100.128.x.x are NOT tailnet.
+ */
+export function isTailscaleBind(host: string | undefined | null): boolean {
+  if (!host) return false;
+  const trimmed = host.trim().toLowerCase();
+  const ipv4Match = /^(\d+)\.(\d+)\.(\d+)\.(\d+)$/.exec(trimmed);
+  if (ipv4Match) {
+    const first = parseInt(ipv4Match[1]!, 10);
+    const second = parseInt(ipv4Match[2]!, 10);
+    if (first === 100 && second >= 64 && second <= 127) return true;
+    return false;
+  }
+  const cleaned = trimmed.replace(/^\[|\]$/g, "");
+  if (cleaned.startsWith("fd7a:115c:a1e0:")) return true;
+  return false;
+}
+
+/**
+ * Pure helper for {@link detectTailscaleInterface}: takes a NetworkInterfaces
+ * dictionary (the shape returned by os.networkInterfaces()) and returns the
+ * first non-internal address that matches the tailnet IP ranges, or null.
+ * Factored out so tests can supply synthetic interface fixtures without
+ * mocking node:os.
+ */
+export function findTailscaleIpInInterfaces(
+  interfaces: NodeJS.Dict<NetworkInterfaceInfo[]>,
+): string | null {
+  for (const addrs of Object.values(interfaces)) {
+    if (!addrs) continue;
+    for (const addr of addrs) {
+      if (addr.internal) continue;
+      if (isTailscaleBind(addr.address)) return addr.address;
+    }
+  }
+  return null;
+}
+
+/**
+ * Probe the host's network interfaces and return the first tailscale-IP
+ * address found (CGNAT IPv4 or tailnet ULA IPv6), or null when no tailnet
+ * interface is currently active. Used at daemon startup to decide whether
+ * to multi-bind (loopback + tailnet) or loopback-only. Detection is
+ * IP-based, not interface-name-based, so it survives platform differences
+ * in how tailscale names its tun device.
+ */
+export function detectTailscaleInterface(): string | null {
+  return findTailscaleIpInInterfaces(networkInterfaces());
+}
+
+/**
+ * Resolve a hostname to its first IP via node:dns/promises lookup.
+ * Returns null on resolution failure (DNS error, timeout, no such host).
+ * Wrapped with a 5s race-timeout per Risk 9.2 in the slice IMPL-PRD so an
+ * unresponsive resolver does not stall daemon startup indefinitely.
+ */
+export async function resolveToIpOrNull(host: string): Promise<string | null> {
+  try {
+    const timeout = new Promise<null>((resolve) => {
+      setTimeout(() => resolve(null), 5000).unref();
+    });
+    const lookup = dns
+      .lookup(host, { all: false })
+      .then((r) => r.address)
+      .catch(() => null);
+    return await Promise.race([lookup, timeout]);
+  } catch {
+    return null;
+  }
+}
+
 export class AuthBearerTokenStartupError extends Error {
   constructor(message: string) {
     super(message);
@@ -146,20 +230,35 @@ export class AuthBearerTokenStartupError extends Error {
 
 /**
  * Startup-side check (HARD-GATE audit row 8). Throws an explicit
- * AuthBearerTokenStartupError when the bind interface is non-loopback
- * AND the bearer token is empty. Called from index.ts BEFORE
- * `serve()` listens, so the daemon refuses to start in the unsafe
- * configuration.
+ * AuthBearerTokenStartupError when the bind interface is genuinely
+ * public/LAN AND the bearer token is empty. Loopback or tailscale-IP
+ * binds short-circuit (the tailnet is the auth boundary). Hostname
+ * binds resolve via DNS first; if resolution yields a loopback or
+ * tailnet IP, the same short-circuit applies. Public/LAN binds without
+ * a bearer throw and the daemon refuses to start.
  */
-export function assertBindAuthInvariant(opts: {
+export async function assertBindAuthInvariant(opts: {
   host: string;
   bearerToken: string | null;
-}): void {
+}): Promise<void> {
   if (isLoopbackBind(opts.host)) return;
+  if (isTailscaleBind(opts.host)) return;
+
+  let resolvedIp: string | null = null;
+  // Hostname (non-IP literal) — resolve and re-check.
+  if (!/^[\d.]+$/.test(opts.host) && !opts.host.includes(":")) {
+    resolvedIp = await resolveToIpOrNull(opts.host);
+    if (resolvedIp) {
+      if (isLoopbackBind(resolvedIp)) return;
+      if (isTailscaleBind(resolvedIp)) return;
+    }
+  }
+
   if (opts.bearerToken && opts.bearerToken.length > 0) return;
   throw new AuthBearerTokenStartupError(
-    `daemon refusing to start: bind host '${opts.host}' is non-loopback but auth.bearerToken (env OPENRIG_AUTH_BEARER_TOKEN) is empty. ` +
-      `Either bind to 127.0.0.1 / localhost, OR set OPENRIG_AUTH_BEARER_TOKEN to a non-empty value before start. ` +
-      `Mission Control write verbs require bearer auth on any non-loopback bind because tailnet/public exposure without auth would let any peer on the network mutate operator state.`,
+    `daemon refusing to start: bind host '${opts.host}'${resolvedIp ? ` (resolves to ${resolvedIp})` : ""} is not loopback or tailscale, ` +
+      `and auth.bearerToken (env OPENRIG_AUTH_BEARER_TOKEN) is empty. ` +
+      `Either: (a) bind to 127.0.0.1 / localhost, (b) bind to a tailscale interface (100.64.0.0/10 IPv4 or fd7a:115c:a1e0::/48 IPv6), ` +
+      `or (c) set OPENRIG_AUTH_BEARER_TOKEN to a non-empty value before starting the daemon.`,
   );
 }
