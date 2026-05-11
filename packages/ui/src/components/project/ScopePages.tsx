@@ -41,6 +41,9 @@ import {
 } from "../../lib/project-mission-state.js";
 import { TimelineTab } from "../slices/tabs/TimelineTab.js";
 import { useSliceTimelineMarkdown } from "../../hooks/useSliceTimelineMarkdown.js";
+import { useScopeMarkdown } from "../../hooks/useScopeMarkdown.js";
+import { useMission } from "../../hooks/useMission.js";
+import { MarkdownViewer } from "../markdown/MarkdownViewer.js";
 import { AcceptanceTab } from "../slices/tabs/AcceptanceTab.js";
 import { DocsTab } from "../slices/tabs/DocsTab.js";
 import { DecisionsTab } from "../slices/tabs/DecisionsTab.js";
@@ -711,6 +714,15 @@ export function MissionScopePage() {
   const { missionId } = useParams({ from: "/project/mission/$missionId" });
   const [active, setActive] = useState<SharedTab>("overview");
   const rollup = useProjectScopeRollup(missionId, active !== "overview");
+  // V0.3.1 slice 12 walk-item 1 — fetch aggregated mission metadata
+  // (missionPath for README/PROGRESS lookup; slices already covered
+  // by rollup). README + PROGRESS render via useScopeMarkdown above
+  // the existing slice rail.
+  const missionData = useMission(missionId);
+  const missionPath =
+    missionData.data && "missionPath" in missionData.data ? missionData.data.missionPath : null;
+  const missionReadme = useScopeMarkdown(missionPath, "README.md");
+  const missionProgress = useScopeMarkdown(missionPath, "PROGRESS.md");
   return (
     <ScopeShell
       eyebrow="Mission"
@@ -720,38 +732,41 @@ export function MissionScopePage() {
       onSelect={(id) => setActive(id as SharedTab)}
     >
       {active === "overview" ? (
-        <div data-testid="mission-overview-panel" className="space-y-3">
-          {rollup.rows.length > 0 ? (
-            rollup.rows.map((slice) => (
-              <article key={slice.name} className="border border-outline-variant bg-white/35 p-3 backdrop-blur-sm">
-                <Link
-                  to="/project/slice/$sliceId"
-                  params={{ sliceId: slice.name }}
-                  className="font-mono text-[12px] uppercase tracking-[0.12em] text-stone-900 hover:underline"
-                >
-                  {slice.displayName}
-                </Link>
-                <div className="mt-2 flex flex-wrap gap-1.5">
-                  <ProjectPill token={scopeToken("slice")} compact />
-                  <ProjectPill token={{ label: slice.status, tone: stateTone(slice.status) }} compact />
-                  <DateChip value={slice.lastActivityAt} />
-                </div>
-                <div className="mt-2 grid gap-2 font-mono text-[10px] text-stone-700 sm:grid-cols-4">
-                  <SliceMetric label="Status" value={slice.status} />
-                  <SliceMetric label="Qitems" value={slice.qitemCount} />
-                  <SliceMetric label="Proof" value={slice.hasProofPacket ? "yes" : "no"} />
-                  <SliceMetric label="Last activity" value={formatMaybeDate(slice.lastActivityAt)} />
-                </div>
-              </article>
-            ))
-          ) : (
-            <EmptyState
-              label="NO SLICES"
-              description="No indexed slices are attached to this mission."
-              variant="card"
-              testId="mission-overview-empty"
-            />
+        <div data-testid="mission-overview-panel" className="space-y-6">
+          {missionReadme.content && (
+            <section data-testid="mission-overview-readme" className="border border-outline-variant bg-white/20 p-4">
+              <MarkdownViewer content={missionReadme.content} hideFrontmatter hideRawToggle />
+            </section>
           )}
+          <div className="space-y-3">
+            {rollup.rows.length > 0 ? (
+              rollup.rows.map((slice) => (
+                <article key={slice.name} className="border border-outline-variant bg-white/35 p-3 backdrop-blur-sm">
+                  <Link
+                    to="/project/slice/$sliceId"
+                    params={{ sliceId: slice.name }}
+                    className="font-mono text-[12px] uppercase tracking-[0.12em] text-stone-900 hover:underline"
+                  >
+                    {slice.displayName}
+                  </Link>
+                  <div className="mt-2 flex flex-wrap items-center gap-1.5 font-mono text-[10px] text-stone-600">
+                    <ProjectPill token={scopeToken("slice")} compact />
+                    <ProjectPill token={{ label: slice.status, tone: stateTone(slice.status) }} compact />
+                    <DateChip value={slice.lastActivityAt} />
+                    <span>· {slice.qitemCount} qitems</span>
+                    {slice.hasProofPacket && <span>· proof</span>}
+                  </div>
+                </article>
+              ))
+            ) : (
+              <EmptyState
+                label="NO SLICES"
+                description="No indexed slices are attached to this mission."
+                variant="card"
+                testId="mission-overview-empty"
+              />
+            )}
+          </div>
         </div>
       ) : null}
       {active === "story" ? (
@@ -763,11 +778,18 @@ export function MissionScopePage() {
         />
       ) : null}
       {active === "progress" ? (
-        <ScopeProgressRollup
-          rows={rollup.rows}
-          detailsByName={rollup.details.itemsByName}
-          isLoading={rollup.list.isLoading || rollup.details.isFetching}
-        />
+        <div data-testid="mission-progress-panel" className="space-y-6">
+          {missionProgress.content && (
+            <section data-testid="mission-progress-readme" className="border border-outline-variant bg-white/20 p-4">
+              <MarkdownViewer content={missionProgress.content} hideFrontmatter hideRawToggle />
+            </section>
+          )}
+          <ScopeProgressRollup
+            rows={rollup.rows}
+            detailsByName={rollup.details.itemsByName}
+            isLoading={rollup.list.isLoading || rollup.details.isFetching}
+          />
+        </div>
       ) : null}
       {active === "artifacts" ? (
         <ScopeArtifactsRollup rows={rollup.rows} detailsByName={rollup.details.itemsByName} />
@@ -989,9 +1011,11 @@ function SliceArtifactsTab({ detail }: { detail: SliceDetail }) {
 
 function SliceOverviewTab({ detail }: { detail: SliceDetail }) {
   const currentStep = detail.acceptance.currentStep;
-  const primaryDocs = detail.docs.tree.filter((entry) =>
-    entry.type === "file" && /(^|\/)(README|IMPLEMENTATION-PRD|PROGRESS)\.md$/i.test(entry.relPath),
-  );
+  // V0.3.1 slice 12 walk-item 1 — render slice README via the
+  // generalized scope-markdown reader; the Primary Docs filename
+  // duplication section is dropped (the README itself + the Docs tab
+  // tree are sufficient).
+  const readmeMd = useScopeMarkdown(detail.slicePath ?? null, "README.md");
 
   return (
     <div data-testid="slice-overview-tab" className="space-y-6">
@@ -1001,6 +1025,12 @@ function SliceOverviewTab({ detail }: { detail: SliceDetail }) {
         <SliceMetric label="Qitems" value={detail.qitemIds.length} />
         <SliceMetric label="Last Activity" value={formatMaybeDate(detail.lastActivityAt)} />
       </section>
+
+      {readmeMd.content && (
+        <section data-testid="slice-overview-readme" className="border border-outline-variant bg-white/20 p-4">
+          <MarkdownViewer content={readmeMd.content} hideFrontmatter hideRawToggle />
+        </section>
+      )}
 
       <section data-testid="slice-overview-current-step" className="border border-outline-variant bg-white/20 p-4">
         <SectionHeader tone="muted">Current Step</SectionHeader>
@@ -1049,31 +1079,16 @@ function SliceOverviewTab({ detail }: { detail: SliceDetail }) {
           )}
         </div>
       </section>
-
-      <section data-testid="slice-overview-docs" className="border border-outline-variant bg-white/20 p-4">
-        <SectionHeader tone="muted">Primary Docs</SectionHeader>
-        {primaryDocs.length > 0 ? (
-          <ul className="mt-3 divide-y divide-outline-variant border border-outline-variant bg-white/30">
-            {primaryDocs.map((entry) => (
-              <li key={entry.relPath} className="px-3 py-2 font-mono text-[10px] text-stone-900">
-                <span className="inline-flex min-w-0 items-center gap-1.5">
-                  <ToolMark tool={entry.relPath} size="xs" />
-                  <span className="truncate">{entry.relPath}</span>
-                </span>
-              </li>
-            ))}
-          </ul>
-        ) : (
-          <div className="mt-3 font-mono text-[10px] text-stone-400">No README, implementation PRD, or progress file indexed.</div>
-        )}
-      </section>
     </div>
   );
 }
 
 export function SliceScopePage() {
   const { sliceId } = useParams({ from: "/project/slice/$sliceId" });
-  const [active, setActive] = useState<SliceTab>("story");
+  // V0.3.1 slice 12 walk-item 1 — default tab is Overview (README +
+  // current step + readiness) instead of Story; the first thing the
+  // operator should see on a slice is its README, not a metric grid.
+  const [active, setActive] = useState<SliceTab>("overview");
   const detailQuery = useSliceDetail(sliceId);
   const queueItems = useQueueItemMap(detailQuery.data?.qitemIds ?? []);
   const queueItemsById = useMemo(() => queueItems.itemsById, [queueItems.itemsById]);

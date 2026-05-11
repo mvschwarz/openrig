@@ -77,6 +77,7 @@ import { watchdogRoutes } from "./routes/watchdog.js";
 import { workflowRoutes } from "./routes/workflow.js";
 import { missionControlRoutes } from "./routes/mission-control.js";
 import { slicesRoutes } from "./routes/slices.js";
+import { missionsRoutes } from "./routes/missions.js";
 import { filesRoutes } from "./routes/files.js";
 import { progressRoutes } from "./routes/progress.js";
 import { steeringRoutes } from "./routes/steering.js";
@@ -470,6 +471,10 @@ export function createApp(deps: AppDeps): Hono {
   );
   // Slice Story View v0 — slice indexer + per-tab payload routes.
   app.route("/api/slices", slicesRoutes());
+  // V0.3.1 slice 12 walk-item 1 — mission scope data layer
+  // (aggregated mission metadata + slices filter; pairs with
+  // useScopeMarkdown for README / PROGRESS content via /api/files/read).
+  app.route("/api/missions", missionsRoutes());
   // UI Enhancement Pack v0 — files (item 3 + item 4) + progress (item 1B) routes.
   app.route("/api/files", filesRoutes());
   app.route("/api/progress", progressRoutes());
