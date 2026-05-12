@@ -7,6 +7,7 @@
 // State managed via React (useState in scope page); URL stays at the
 // scope path (/topology, /topology/rig/$rigId, etc).
 
+import type { ReactNode } from "react";
 import { cn } from "../../lib/utils.js";
 
 export type TopologyHostScopeTab = "graph" | "table" | "terminal";
@@ -22,6 +23,13 @@ interface TopologyViewModeTabsProps<T extends string> {
   active: T;
   onSelect: (id: T) => void;
   testIdPrefix?: string;
+  /**
+   * Slice 24 — optional trailing slot rendered with ml-auto inside the
+   * tab-bar flex container. Used by RigScopePage to render the
+   * "Launch in CMUX" button at the tab-bar far right per README §Button
+   * placement Option C (persistent across all rig-scope view-mode tabs).
+   */
+  trailing?: ReactNode;
 }
 
 export function TopologyViewModeTabs<T extends string>({
@@ -29,6 +37,7 @@ export function TopologyViewModeTabs<T extends string>({
   active,
   onSelect,
   testIdPrefix = "topology-view-mode",
+  trailing,
 }: TopologyViewModeTabsProps<T>) {
   return (
     // Internal tablist — div, not <nav>, so SC-1 left-chrome count
@@ -40,7 +49,7 @@ export function TopologyViewModeTabs<T extends string>({
       role="tablist"
       aria-label="Topology view modes"
       data-testid={`${testIdPrefix}-tabs`}
-      className="flex gap-6"
+      className="flex gap-6 items-center"
     >
       {tabs.map((t) => (
         <button
@@ -61,6 +70,11 @@ export function TopologyViewModeTabs<T extends string>({
           {t.label}
         </button>
       ))}
+      {trailing ? (
+        <div data-testid={`${testIdPrefix}-trailing`} className="ml-auto">
+          {trailing}
+        </div>
+      ) : null}
     </div>
   );
 }

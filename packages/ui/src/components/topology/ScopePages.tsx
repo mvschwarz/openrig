@@ -17,6 +17,7 @@ import {
   type TopologySeatScopeTab,
 } from "./TopologyViewModeTabs.js";
 import { TopologyTableView } from "./TopologyTableView.js";
+import { LaunchCmuxButton } from "./LaunchCmuxButton.js";
 import { TopologyTerminalView } from "./TopologyTerminalView.js";
 import { SectionHeader } from "../ui/section-header.js";
 import { EmptyState } from "../ui/empty-state.js";
@@ -148,7 +149,15 @@ export function RigScopePage() {
     <ScopeShell
       eyebrow="Topology · Rig"
       title={rig?.name ?? rigId}
-      tabsNav={<TopologyViewModeTabs tabs={RIG_POD_SCOPE_TABS} active={active} onSelect={setActive} testIdPrefix="topology-rig" />}
+      tabsNav={
+        <TopologyViewModeTabs
+          tabs={RIG_POD_SCOPE_TABS}
+          active={active}
+          onSelect={setActive}
+          testIdPrefix="topology-rig"
+          trailing={<LaunchCmuxButton rigId={rigId} />}
+        />
+      }
     >
       {effectiveActive === "graph" ? (
         <div className="flex-1 min-h-0 relative">
