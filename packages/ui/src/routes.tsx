@@ -47,6 +47,9 @@ import { PluginsIndexPage } from "./components/specs/PluginsIndexPage.js";
 import { PluginDetailPage } from "./components/specs/PluginDetailPage.js";
 import { FilesWorkspace } from "./components/files/FilesWorkspace.js";
 import { SettingsCenter } from "./components/system/SettingsCenter.js";
+import { PoliciesPage } from "./components/system/PoliciesPage.js";
+import { LogPage } from "./components/system/LogPage.js";
+import { StatusPage } from "./components/system/StatusPage.js";
 import {
   HostScopePage,
   RigScopePage,
@@ -214,6 +217,25 @@ const settingsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/settings",
   component: SettingsCenter,
+});
+
+// Slice 26 — Settings destination becomes a 4-item Explorer (Settings /
+// Policies / Log / Status). Each item is its own route under the
+// settings prefix; the Explorer sidebar handles navigation.
+const settingsPoliciesRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/settings/policies",
+  component: PoliciesPage,
+});
+const settingsLogRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/settings/log",
+  component: LogPage,
+});
+const settingsStatusRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/settings/status",
+  component: StatusPage,
 });
 
 const searchRoute = createRoute({
@@ -438,6 +460,9 @@ const routeTree = rootRoute.addChildren([
   filesRoute,
   specsKindRoute,
   settingsRoute,
+  settingsPoliciesRoute,
+  settingsLogRoute,
+  settingsStatusRoute,
   searchRoute,
   projectGraphicsPreviewRoute,
   cardPreviewsLabRoute,

@@ -189,7 +189,9 @@ function ExplorerKindIcon({
 
 // Surface-routed body. Phase 2 lays placeholders for non-topology
 // surfaces; Phase 3 fills tree contents + lens chips. "none" surface
-// (Dashboard / Settings) means Explorer is not rendered at all.
+// (Dashboard only — slice 26 promoted Settings to a 4-destination
+// Explorer peer with its own SettingsExplorer surface) means Explorer
+// is not rendered at all.
 function SurfaceBody({
   surface,
   rigs,
@@ -255,7 +257,8 @@ export function Explorer({
 
   const psMap = new Map((psEntries ?? []).map((entry) => [entry.rigId, entry]));
 
-  // Surface "none" (Dashboard / Settings) — Explorer is not rendered.
+  // Surface "none" (Dashboard only — Settings has its own Explorer
+  // surface as of slice 26) — Explorer is not rendered.
   if (surface === "none") return null;
 
   // Class B: overlay vs opaque background grammar.
