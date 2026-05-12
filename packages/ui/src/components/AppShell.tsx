@@ -41,7 +41,7 @@ import {
   Sparkles,
   Wrench,
 } from "lucide-react";
-import { Explorer, type ExplorerSurface } from "./Explorer.js";
+import { Explorer, shouldSuppressExplorerMount, type ExplorerSurface } from "./Explorer.js";
 import { SharedDetailDrawer, type DrawerSelection } from "./SharedDetailDrawer.js";
 import { PreviewStack } from "./preview/PreviewStack.js";
 import type { DiscoveryPlacementTarget } from "./DiscoveryPanel.js";
@@ -436,6 +436,14 @@ function AppShellInner({ children }: AppShellProps) {
   useGlobalEvents();
 
   const explorerVisible = surface !== "none";
+  // Slice 26.D OPT-D3 Topology mobile mount-suppression: rule lives
+  // in shouldSuppressExplorerMount() (Explorer.tsx). Pre-existing
+  // renderer-spin in Topology mobile render path pegs the browser
+  // when Explorer mounts at 375px; only mount-suppression sidesteps
+  // the peg trigger. Other 4 destinations mount normally regardless
+  // of viewport. 0.3.2 fixes Topology mobile render path; this
+  // suppression reverts at that time.
+  const explorerMounted = explorerVisible && !shouldSuppressExplorerMount(surface, isWideLayout);
   const drawerOpen = Boolean(selectionState);
 
   // V1 attempt-3 Phase 3 bounce-fix — Class B fixed-anchor + selective overlay.
@@ -572,9 +580,11 @@ function AppShellInner({ children }: AppShellProps) {
 
               {/* Explorer — desktop column or mobile slide-over.
                   In overlay mode (topology graph): vellum-translucent + z-30
-                  so it floats over the canvas. In opaque mode: default
-                  Phase 2 behavior (z-20, opaque background). */}
-              {explorerVisible && (
+                  so it floats over the canvas. In opaque mode: z-40
+                  per slice 26.B OPT-B (above rail-tray on mobile).
+                  Slice 26.D OPT-D3: Topology Explorer doesn't mount
+                  on mobile (suppressTopologyMobileExplorer above). */}
+              {explorerMounted && (
                 <Explorer
                   open={explorerOpen}
                   onClose={() => setExplorerOpen(false)}

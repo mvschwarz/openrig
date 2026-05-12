@@ -21,7 +21,7 @@
 
 import { describe, it, expect, afterEach } from "vitest";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
-import { Explorer } from "../src/components/Explorer.js";
+import { Explorer, shouldSuppressExplorerMount } from "../src/components/Explorer.js";
 import type { ExplorerSurface } from "../src/components/Explorer.js";
 import { createAppTestRouter } from "./helpers/test-router.js";
 
@@ -138,82 +138,41 @@ describe("Explorer mobile drawer z-index layering (slice 26.B HG-8 OPT-B repair)
     });
   });
 
-  // Slice 26.C OPT-C3 Topology mobile carve-out: opaque-mode Topology
-  // Explorer is intentionally pinned to z-20 (pre-OPT-B baseline) so
-  // mobile-rail-tray covers it — sidesteps the pre-existing
-  // TopologyTableView renderer-spin that pegs the browser when the
-  // mobile drawer becomes visible at 375px. The 0.3.2 Topology mobile
-  // refactor will fix the renderer-spin; this carve-out reverts then.
-  describe("surface=topology (opaque-mode OPT-C3 carve-out)", () => {
-    it("opaque-mode Topology Explorer pins to z-20 (BELOW mobile-rail-tray z-30)", async () => {
-      render(
-        createAppTestRouter({
-          initialPath: "/topology",
-          routes: [
-            {
-              path: "/topology",
-              component: () => (
-                <Explorer
-                  open={true}
-                  onClose={() => {}}
-                  selection={null}
-                  onSelect={() => {}}
-                  desktopMode="full"
-                  surface="topology"
-                  overlayMode="opaque"
-                />
-              ),
-            },
-          ],
-        }),
-      );
-      await waitFor(() => {
-        expect(screen.getByTestId("explorer")).toBeTruthy();
-      });
-      const explorer = screen.getByTestId("explorer");
-      // POSITIVE: z-20 present (the carve-out value; restores
-      // pre-OPT-B baseline for Topology mobile)
-      expect(explorer.className).toMatch(/\bz-20\b/);
-      // NEGATIVE: z-40 absent (the OPT-B fix that applies to other
-      // destinations is intentionally NOT applied to Topology — the
-      // carve-out discriminator)
-      expect(explorer.className).not.toMatch(/\bz-40\b/);
-    });
+});
 
-    it("NUMERIC LAYERING INVARIANT: Topology opaque-mode z-index is LESS THAN mobile-rail-tray z-30", async () => {
-      render(
-        createAppTestRouter({
-          initialPath: "/topology",
-          routes: [
-            {
-              path: "/topology",
-              component: () => (
-                <Explorer
-                  open={true}
-                  onClose={() => {}}
-                  selection={null}
-                  onSelect={() => {}}
-                  desktopMode="full"
-                  surface="topology"
-                  overlayMode="opaque"
-                />
-              ),
-            },
-          ],
-        }),
-      );
-      await waitFor(() => {
-        expect(screen.getByTestId("explorer")).toBeTruthy();
-      });
-      const explorer = screen.getByTestId("explorer");
-      const zMatch = explorer.className.match(/\bz-(\d+)\b/);
-      expect(zMatch).toBeTruthy();
-      const explorerZ = Number(zMatch![1]);
-      // Topology mobile drawer must be BELOW rail-tray (z-30) to
-      // remain covered + prevent the renderer-peg path. Inverts the
-      // other-destinations invariant where Explorer must be above.
-      expect(explorerZ).toBeLessThan(MOBILE_RAIL_TRAY_Z);
-      expect(explorerZ).toBe(20);
+// Slice 26.D OPT-D3 Topology mobile Explorer mount-suppression.
+//
+// OPT-C3 z-index carve-out was invalidated by velocity-qa recheck:
+// z-index suppresses visibility but NOT React MOUNT. The peg trigger
+// is the Explorer drawer MOUNTING on hamburger click, which causes
+// adjacent Topology re-render cascade — independent of whether the
+// drawer is visible. OPT-D3 suppresses the mount itself for Topology
+// at narrow viewports. Pure predicate; trivially testable.
+
+describe("shouldSuppressExplorerMount (slice 26.D OPT-D3 mount-suppression predicate)", () => {
+  it("Topology + narrow viewport (isWideLayout=false) → SUPPRESS mount (true)", () => {
+    expect(shouldSuppressExplorerMount("topology", false)).toBe(true);
+  });
+
+  it("Topology + wide viewport (isWideLayout=true) → mount normally (false)", () => {
+    expect(shouldSuppressExplorerMount("topology", true)).toBe(false);
+  });
+
+  // Cross-destination preservation: all 4 other Explorer-bearing
+  // surfaces mount regardless of viewport. The carve-out is
+  // Topology-specific.
+  const otherSurfaces: ExplorerSurface[] = ["settings", "project", "specs", "for-you"];
+  for (const surface of otherSurfaces) {
+    it(`${surface} + narrow viewport → mount normally (false)`, () => {
+      expect(shouldSuppressExplorerMount(surface, false)).toBe(false);
     });
+    it(`${surface} + wide viewport → mount normally (false)`, () => {
+      expect(shouldSuppressExplorerMount(surface, true)).toBe(false);
+    });
+  }
+
+  it("'none' surface → never suppressed (consistent with Explorer not mounting anyway via explorerVisible gate)", () => {
+    expect(shouldSuppressExplorerMount("none", false)).toBe(false);
+    expect(shouldSuppressExplorerMount("none", true)).toBe(false);
   });
 });
