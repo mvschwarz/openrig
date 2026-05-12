@@ -71,6 +71,12 @@ function makeMockAdapter(opts: {
   splitOk?: boolean;
   createOk?: boolean;
   failOn?: "createWorkspace" | "splitSurface" | "sendText" | "listWorkspaces";
+  /**
+   * If set, makes createWorkspace fail ONLY when given this specific name.
+   * Enables "chunk 0 succeeds, chunk 1 fails" tests for partial-response
+   * discrimination (slice 24.C carry-forward concern).
+   */
+  failOnWorkspaceName?: string;
 }): CmuxAdapter {
   const existing = opts.existingWorkspaces ?? [];
   const adapter = {
@@ -86,6 +92,9 @@ function makeMockAdapter(opts: {
     createWorkspace: async (name: string): Promise<CmuxResult<string>> => {
       if (opts.failOn === "createWorkspace") {
         return { ok: false, code: "request_failed", message: "duplicate name" };
+      }
+      if (opts.failOnWorkspaceName === name) {
+        return { ok: false, code: "request_failed", message: `cmux refused workspace "${name}"` };
       }
       return { ok: true, data: `workspace:new-${name}` };
     },
@@ -363,6 +372,49 @@ describe("POST /api/rigs/:rigId/cmux/launch", () => {
     // is filtered out. Without the sessionStatus filter, this would
     // include "b@mixed-rig" and the assertion would fail.
     expect(body.workspaces[0]!.agents).toEqual(["a@mixed-rig", "c@mixed-rig"]);
+  });
+
+  // velocity-guard 24.C-repair ADVISORY-OK carry-forward:
+  // partial-workspace claim wasn't discriminated by prior tests
+  // (failOn:"splitSurface" fails on the FIRST workspace, so partial[]
+  // is always empty in those cases). This test proves the partial[]
+  // payload accumulates successfully-built workspaces before the failure.
+
+  it("500 partial-workspace info DISCRIMINATING: chunk 0 succeeds + chunk 1 fails → partial contains chunk-0 info", async () => {
+    // 13 agents → 2 chunks: "fanout" (12 agents) + "fanout-2" (1 agent).
+    // failOnWorkspaceName="fanout-2" lets the FIRST createWorkspace
+    // succeed (with all its splits + sends), then fails the SECOND
+    // createWorkspace at chunk 1. The response should include the
+    // built workspace from chunk 0 under `partial[]`.
+    const nodes = Array.from({ length: 13 }, (_, i) => ({
+      logicalId: `a${i + 1}`,
+      podId: "p1",
+      canonicalSessionName: `a${i + 1}@fanout`,
+    }));
+    const app = buildApp({
+      rigs: { "rig-1": { id: "rig-1", name: "fanout", nodes } },
+      adapter: makeMockAdapter({
+        available: true,
+        failOnWorkspaceName: "fanout-2",
+      }),
+    });
+    const res = await app.request("/api/rigs/rig-1/cmux/launch", { method: "POST" });
+    expect(res.status).toBe(500);
+    const body = (await res.json()) as {
+      error: string;
+      message: string;
+      partial: Array<{ name: string; agents: string[]; blanks: number }>;
+    };
+    expect(body.error).toBe("build_workspace_failed");
+    // CRITICAL ASSERTION: partial contains the successfully-built
+    // first workspace ("fanout" with 12 agents). Under a broken impl
+    // that doesn't accumulate partial, this would be undefined or [].
+    expect(body.partial).toHaveLength(1);
+    expect(body.partial[0]!.name).toBe("fanout");
+    expect(body.partial[0]!.agents).toHaveLength(12);
+    expect(body.partial[0]!.blanks).toBe(0);
+    // The failure message references the second workspace.
+    expect(body.message.toLowerCase()).toMatch(/fanout-2/);
   });
 
   it("412 rig_not_running when attachmentType is non-tmux even if sessionStatus is running (defensive)", async () => {
