@@ -154,25 +154,95 @@ describe("LiveNodeDetails (slice 25 Overview + Details)", () => {
     expect(terminal.compareDocumentPosition(activity)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
   });
 
-  // HG-3 — 7 info-table fields. Every row testid present.
-  it("HG-3: info table renders all 7 fields (runtime, model, profile, spec, cwd, context%, total tokens)", async () => {
+  // HG-3 — 9 info-table fields (7 compact + 2 full-width). Every row
+  // testid present.
+  it("HG-3: info table renders all 9 fields (7 compact + 2 full-width)", async () => {
     mockNodeDetail(NODE_DETAIL);
     renderDetails();
     await screen.findByTestId("seat-overview-table");
 
-    expect(screen.getByTestId("seat-overview-row-runtime")).toBeDefined();
-    expect(screen.getByTestId("seat-overview-row-model")).toBeDefined();
-    expect(screen.getByTestId("seat-overview-row-profile")).toBeDefined();
-    expect(screen.getByTestId("seat-overview-row-spec")).toBeDefined();
-    expect(screen.getByTestId("seat-overview-row-cwd")).toBeDefined();
-    expect(screen.getByTestId("seat-overview-row-context-percent")).toBeDefined();
-    expect(screen.getByTestId("seat-overview-row-total-tokens")).toBeDefined();
+    // 7 compact rows
+    expect(screen.getByTestId("seat-overview-row-runtime").getAttribute("data-row-shape")).toBe("compact");
+    expect(screen.getByTestId("seat-overview-row-model").getAttribute("data-row-shape")).toBe("compact");
+    expect(screen.getByTestId("seat-overview-row-profile").getAttribute("data-row-shape")).toBe("compact");
+    expect(screen.getByTestId("seat-overview-row-spec").getAttribute("data-row-shape")).toBe("compact");
+    expect(screen.getByTestId("seat-overview-row-activity").getAttribute("data-row-shape")).toBe("compact");
+    expect(screen.getByTestId("seat-overview-row-context-percent").getAttribute("data-row-shape")).toBe("compact");
+    expect(screen.getByTestId("seat-overview-row-total-tokens").getAttribute("data-row-shape")).toBe("compact");
+    // 2 full-width rows
+    expect(screen.getByTestId("seat-overview-row-cwd").getAttribute("data-row-shape")).toBe("full-width");
+    expect(screen.getByTestId("seat-overview-row-current-work").getAttribute("data-row-shape")).toBe("full-width");
 
     expect(screen.getByTestId("seat-overview-cell-model").textContent).toContain("opus");
     expect(screen.getByTestId("seat-overview-cell-profile").textContent).toContain("default");
     expect(screen.getByTestId("seat-overview-cell-spec").textContent).toContain("impl@1.0.0");
     expect(screen.getByTestId("seat-overview-cell-cwd").textContent).toContain("/workspace");
     expect(screen.getByTestId("seat-overview-cell-context-percent").textContent).toContain("42%");
+  });
+
+  // HG-3a — activity row wires to data.agentActivity via
+  // getActivityState (the SAME helper LiveNodeCurrentState uses; the
+  // SAME source the topology baseline reads). When agentActivity.state
+  // is "running", the cell shows label "active" matching topology
+  // graph/table naming.
+  it("HG-3a: activity row wires live and shows 'active' for state=running with shimmer", async () => {
+    mockNodeDetail(NODE_DETAIL);
+    renderDetails();
+    await screen.findByTestId("seat-overview-table");
+
+    const cell = screen.getByTestId("seat-overview-cell-activity");
+    expect(cell.textContent?.trim()).toContain("active");
+    const stateEl = screen.getByTestId("seat-overview-activity-state");
+    expect(stateEl.getAttribute("data-activity-state")).toBe("running");
+    // HG-3c shimmer reuse: slice-14 shimmer class applied on active.
+    expect(stateEl.className).toContain("topology-table-active-shimmer");
+  });
+
+  it("HG-3a: activity row shows 'idle' label and NO shimmer when agentActivity.state=idle", async () => {
+    mockNodeDetail({
+      ...NODE_DETAIL,
+      agentActivity: { ...NODE_DETAIL.agentActivity, state: "idle" },
+    });
+    renderDetails();
+    await screen.findByTestId("seat-overview-table");
+    const cell = screen.getByTestId("seat-overview-cell-activity");
+    expect(cell.textContent?.trim()).toContain("idle");
+    const stateEl = screen.getByTestId("seat-overview-activity-state");
+    expect(stateEl.getAttribute("data-activity-state")).toBe("idle");
+    expect(stateEl.className).not.toContain("topology-table-active-shimmer");
+  });
+
+  // HG-3b — current-work row wires live to data.currentQitems[0].
+  // Shows qitemId + bodyExcerpt when present.
+  it("HG-3b: current-work row wires live and surfaces the in-progress qitem", async () => {
+    mockNodeDetail(NODE_DETAIL);
+    renderDetails();
+    await screen.findByTestId("seat-overview-table");
+    const cell = screen.getByTestId("seat-overview-cell-current-work");
+    expect(cell.textContent).toContain("qitem-20260504001234-driver");
+    expect(cell.textContent).toContain("Implement PL-019 edge activity pulse");
+  });
+
+  it("HG-3b: current-work row renders em-dash when no in-progress qitem", async () => {
+    mockNodeDetail({ ...NODE_DETAIL, currentQitems: [] });
+    renderDetails();
+    await screen.findByTestId("seat-overview-table");
+    const cell = screen.getByTestId("seat-overview-cell-current-work");
+    expect(cell.textContent).toContain("—");
+  });
+
+  // HG-3d — cwd full-width with truncate-ellipsis + title attribute.
+  it("HG-3d: cwd renders as full-width row with truncate-ellipsis + tooltip", async () => {
+    const longCwd = "/Users/example/very/long/workspace/path/that/should/truncate/at/the/end";
+    mockNodeDetail({ ...NODE_DETAIL, cwd: longCwd });
+    renderDetails();
+    const row = await screen.findByTestId("seat-overview-row-cwd");
+    expect(row.getAttribute("data-row-shape")).toBe("full-width");
+    const cell = screen.getByTestId("seat-overview-cell-cwd");
+    expect(cell.getAttribute("title")).toBe(longCwd);
+    // The inner truncate span carries the truncate class so the cwd
+    // doesn't overflow the row.
+    expect(cell.innerHTML).toContain("truncate");
   });
 
   // HG-4 — model graceful absence: row visible with em-dash, NOT
