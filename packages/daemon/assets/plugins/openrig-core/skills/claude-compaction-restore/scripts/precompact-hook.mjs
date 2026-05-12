@@ -9,6 +9,13 @@ const restoreScript = path.join(skillRoot, "scripts", "restore-from-jsonl.mjs");
 const outRoot = "/tmp/claude-compaction-restore";
 const defaultRestoreInstruction =
   "After compaction, restore continuity by reading the OpenRig restore packet and any referenced files. Then state the active task, current evidence state, blockers/caveats, and next step before continuing.";
+const defaultRestoreInstructionRelativePath = [
+  "plugins",
+  "openrig-core",
+  "skills",
+  "openrig-compaction-instructions",
+  "COMPACTION.md",
+];
 
 function emit(payload) {
   process.stdout.write(`${JSON.stringify(payload)}\n`);
@@ -22,6 +29,27 @@ function readHookInput() {
 
 function getOpenRigHome() {
   return process.env.OPENRIG_HOME || process.env.RIGGED_HOME || path.join(os.homedir(), ".openrig");
+}
+
+function expandInstructionPath(filePath) {
+  if (filePath.startsWith("~/")) return path.join(os.homedir(), filePath.slice(2));
+  if (filePath.startsWith("${OPENRIG_HOME}/")) {
+    return path.join(getOpenRigHome(), filePath.slice("${OPENRIG_HOME}/".length));
+  }
+  if (filePath.startsWith("$OPENRIG_HOME/")) {
+    return path.join(getOpenRigHome(), filePath.slice("$OPENRIG_HOME/".length));
+  }
+  return filePath;
+}
+
+function defaultRestoreInstructionFilePath() {
+  return path.join(getOpenRigHome(), ...defaultRestoreInstructionRelativePath);
+}
+
+function readInstructionFile(filePath) {
+  const expanded = expandInstructionPath(filePath);
+  if (!fs.existsSync(expanded)) return "";
+  return fs.readFileSync(expanded, "utf8");
 }
 
 function sessionKey(input) {
@@ -98,17 +126,18 @@ function readClaudeCompactionMessage() {
   if (inline && inline.length > 0) return inline;
   if (filePath && filePath.length > 0) {
     try {
-      const expanded = filePath.startsWith("~/")
-        ? path.join(os.homedir(), filePath.slice(2))
-        : filePath;
-      if (fs.existsSync(expanded)) {
-        return fs.readFileSync(expanded, "utf8");
-      }
+      return readInstructionFile(filePath);
     } catch {
       return "";
     }
   }
   if (policyEnabled && !inlineConfigured && !filePathConfigured) {
+    try {
+      const defaultFileText = readInstructionFile(defaultRestoreInstructionFilePath());
+      if (defaultFileText) return defaultFileText;
+    } catch {
+      // Fall through to the built-in text fallback below.
+    }
     return defaultRestoreInstruction;
   }
   return "";

@@ -69,13 +69,21 @@ The script writes:
 - `restore-instructions.md` — checklist for the compacted agent
 - `restore-summary.json` — machine-readable summary
 
-## Operator Instruction Templates
+## Operator Instruction Files
 
-OpenRig ships default operator-facing templates for the two editable
-Claude auto-compaction policy fields:
+OpenRig ships `openrig-compaction-instructions` as the default
+file-backed restore prompt surface. The daemon's default
+`policies.claude_compaction.message_file_path` resolves to:
+
+```text
+$OPENRIG_HOME/plugins/openrig-core/skills/openrig-compaction-instructions/COMPACTION.md
+```
+
+The local `templates/` files in this skill are reference snippets for the two
+policy fields:
 
 - `templates/compact-instruction.md` — instruction passed as `/compact <instruction>`.
-- `templates/post-compact-restore-instruction.md` — restore directive delivered by compaction hooks after the summary boundary.
+- `templates/post-compact-restore-instruction.md` — minimal restore directive for older configs that did not point at a file.
 
 These templates are deliberately continuity/procedure-shaped. Avoid
 testing compaction with "say this exact phrase" or persona-style

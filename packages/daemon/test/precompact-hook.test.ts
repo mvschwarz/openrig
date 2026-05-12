@@ -195,6 +195,23 @@ describe("precompact-hook.mjs (slice 27 custom message append)", () => {
     expect(payload.systemMessage).toContain("Read from disk on every compaction.");
   });
 
+  it("HG-7: file-path supports ${OPENRIG_HOME} expansion", () => {
+    const messageDir = join(openrigHome, "instructions");
+    mkdirSync(messageDir, { recursive: true });
+    writeFileSync(join(messageDir, "restore.md"), "Read from OPENRIG_HOME-relative path.");
+    writePolicyConfig(openrigHome, {
+      messageInline: "",
+      messageFilePath: "${OPENRIG_HOME}/instructions/restore.md",
+    });
+
+    const { stdout, status } = runHook(openrigHome);
+    expect(status).toBe(0);
+    const payload = JSON.parse(stdout.trim());
+    expect(payload.continue).toBe(true);
+    expect(payload.systemMessage).toContain(APPEND_MARKER);
+    expect(payload.systemMessage).toContain("Read from OPENRIG_HOME-relative path.");
+  });
+
   it("HG-8: neither inline nor file-path set → no custom append (existing restore-instructions preserved)", () => {
     writePolicyConfig(openrigHome, { messageInline: "", messageFilePath: "" });
 
@@ -218,6 +235,32 @@ describe("precompact-hook.mjs (slice 27 custom message append)", () => {
     expect(payload.continue).toBe(true);
     expect(payload.systemMessage).toContain(APPEND_MARKER);
     expect(payload.systemMessage).toContain("After compaction, restore continuity");
+  });
+
+  it("uses the shipped compaction instruction file when policy is enabled and no restore text is configured", () => {
+    const defaultInstructionDir = join(
+      openrigHome,
+      "plugins",
+      "openrig-core",
+      "skills",
+      "openrig-compaction-instructions",
+    );
+    mkdirSync(defaultInstructionDir, { recursive: true });
+    writeFileSync(
+      join(defaultInstructionDir, "COMPACTION.md"),
+      "Read the default OpenRig compaction instruction file.",
+    );
+    writePartialPolicyConfig(openrigHome, {
+      enabled: true,
+      thresholdPercent: 80,
+    });
+
+    const { stdout, status } = runHook(openrigHome);
+    expect(status).toBe(0);
+    const payload = JSON.parse(stdout.trim());
+    expect(payload.continue).toBe(true);
+    expect(payload.systemMessage).toContain(APPEND_MARKER);
+    expect(payload.systemMessage).toContain("Read the default OpenRig compaction instruction file.");
   });
 
   it("inline wins when both are set", () => {

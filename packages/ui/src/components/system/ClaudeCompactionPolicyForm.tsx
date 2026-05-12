@@ -7,8 +7,8 @@
 // inject the operator's `message_inline` (or contents of
 // `message_file_path`) alongside the standard restore-instructions.
 //
-// Opt-in default-off. Empty instruction + inline + file path preserves
-// standard restore behavior.
+// Opt-in default-off. Inline is an override; the default file path points
+// at the shipped openrig-compaction-instructions skill.
 
 import { useState } from "react";
 import type { FormEvent } from "react";
@@ -200,7 +200,8 @@ function PolicyFormBody({ data, setSetting }: PolicyFormBodyProps) {
             className="border border-outline-variant px-2 py-1 font-mono text-sm"
           />
           <span className="text-xs text-on-surface-variant">
-            This controls the compaction summary itself.
+            This controls the compaction summary itself. Keep it concise and
+            evidence-shaped.
           </span>
         </div>
 
@@ -214,9 +215,13 @@ function PolicyFormBody({ data, setSetting }: PolicyFormBodyProps) {
             rows={4}
             value={form.messageInline}
             onChange={(e) => setForm((s) => ({ ...s, messageInline: e.target.value }))}
-            placeholder="Optional. Appended to the restore directive after compaction."
+            placeholder="Optional override. Leave blank to use the instruction file path below."
             className="border border-outline-variant px-2 py-1 font-mono text-sm"
           />
+          <span className="text-xs text-on-surface-variant">
+            Inline text wins when set. Leave blank to use the canonical skill
+            file path below.
+          </span>
         </div>
 
         <div className="flex flex-col gap-1">
@@ -229,12 +234,13 @@ function PolicyFormBody({ data, setSetting }: PolicyFormBodyProps) {
             type="text"
             value={form.messageFilePath}
             onChange={(e) => setForm((s) => ({ ...s, messageFilePath: e.target.value }))}
-            placeholder="Optional. Path read at hook-fire time; ignored when inline is set."
+            placeholder="Path read at hook-fire time; ignored when inline is set."
             className="border border-outline-variant px-2 py-1 font-mono text-sm"
           />
           <span className="text-xs text-on-surface-variant">
-            When both fields are set, inline wins. When neither is set, only
-            the standard restore packet is injected.
+            Default points at the shipped OpenRig compaction-instructions
+            skill. Point this at another file to test alternate restore
+            prompts without changing OpenRig source.
           </span>
         </div>
 
