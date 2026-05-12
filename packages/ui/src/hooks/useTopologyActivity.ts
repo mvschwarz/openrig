@@ -43,6 +43,12 @@ function createStore(): TopologyActivityStore {
   };
 }
 
+let sharedTopologyActivityStore: TopologyActivityStore = createStore();
+
+export function resetTopologyActivityStoreForTests(): void {
+  sharedTopologyActivityStore = createStore();
+}
+
 function recordNodeActivity(
   store: TopologyActivityStore,
   nodeId: string,
@@ -95,7 +101,7 @@ function pruneStore(store: TopologyActivityStore, nowMs: number): boolean {
 export function useTopologyActivity(index: TopologySessionIndex): TopologyActivitySnapshot {
   const [version, setVersion] = useState(0);
   const indexRef = useRef(index);
-  const storeRef = useRef<TopologyActivityStore>(createStore());
+  const storeRef = useRef<TopologyActivityStore>(sharedTopologyActivityStore);
   indexRef.current = index;
 
   const bump = useCallback(() => {

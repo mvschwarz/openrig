@@ -89,11 +89,24 @@ describe("P5.1-D2 retirement regression: drawer-as-seat-detail removed", () => {
     expect(codeOnly).not.toMatch(/setSelection\s*\(\s*\{\s*type:\s*["']seat-detail["']/);
   });
 
-  it("LiveNodeDetails.tsx renders the 5-tab body row (single canonical surface per DRIFT P5.1-D1)", () => {
+  it("LiveNodeDetails.tsx renders the 2-tab Overview + Details body row (single canonical surface per slice 25)", () => {
     const src = readFileSync(path.join(SRC, "components/LiveNodeDetails.tsx"), "utf8");
-    // Tab union literal carries all 5 canonical tab keys.
-    expect(src).toMatch(/type\s+Tab\s*=\s*"identity"\s*\|\s*"agent-spec"\s*\|\s*"startup"\s*\|\s*"transcript"\s*\|\s*"terminal"/);
-    // FileReferenceTrigger wraps startup files (P5.1-1a).
+    // V0.3.1 slice 25 forward-fix-1 — anchored discriminator. The
+    // earlier `/type\s+Tab\s*=\s*"overview"\s*\|\s*"details"/` regex
+    // matched as a prefix and would not have failed if a third tab
+    // was reintroduced (e.g., `"overview" | "details" | "terminal"`).
+    // Two assertions together prove exact 2-member shape:
+    //   (1) positive — the declaration ends at the second member with
+    //       a trailing `;` (or `\n`) so the union cannot extend silently
+    //   (2) negative — no 3-or-more-member string union exists anywhere
+    //       in the file at the top-level Tab declaration position.
+    expect(src).toMatch(/type\s+Tab\s*=\s*"overview"\s*\|\s*"details"\s*;/);
+    // Negative: the legacy 5-tab literal is gone.
+    expect(src).not.toMatch(/"identity"\s*\|\s*"agent-spec"\s*\|\s*"startup"\s*\|\s*"transcript"\s*\|\s*"terminal"/);
+    // Negative: NO Tab union literal with 3+ string members. Catches a
+    // silent reintroduction like `"overview" | "details" | "anything"`.
+    expect(src).not.toMatch(/type\s+Tab\s*=\s*"[^"]+"\s*\|\s*"[^"]+"\s*\|\s*"[^"]+"/);
+    // FileReferenceTrigger wraps startup files (P5.1-1a preserved).
     expect(src).toMatch(/import\s*\{[^}]*FileReferenceTrigger[^}]*\}\s*from/);
     expect(src).toMatch(/<FileReferenceTrigger/);
   });
