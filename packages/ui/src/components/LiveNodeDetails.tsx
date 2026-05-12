@@ -32,10 +32,13 @@ import { AgentPluginsList } from "./specs/AgentPluginsList.js";
 // surfaces in the codebase; this file simply doesn't reference it.
 import { SessionPreviewPane } from "./preview/SessionPreviewPane.js";
 import { SeatOverviewTable } from "./SeatOverviewTable.js";
+import { SeatNotificationBanner } from "./SeatNotificationBanner.js";
 import { FileReferenceTrigger } from "./drawer-triggers/FileReferenceTrigger.js";
 import { displayPodName, inferPodName } from "../lib/display-name.js";
 import { copyText } from "../lib/copy-text.js";
-import { getActivityLabel, getActivityState, getActivityTextClass, isActivityStale } from "../lib/activity-visuals.js";
+// V0.3.1 slice 25 follow-on — activity helpers no longer imported here
+// (LiveNodeCurrentState was removed; SeatOverviewTable + StatusSection
+// own their own activity rendering paths).
 import {
   buildTopologySessionIndex,
   type TopologyActivityVisual,
@@ -314,77 +317,11 @@ function StatusSection({ data }: { data: NodeDetailData }) {
   );
 }
 
-function activityLabelFromVisual(activityVisual: TopologyActivityVisual): string {
-  if (activityVisual.state === "active") return "active";
-  if (activityVisual.state === "needs_input") return "needs input";
-  return activityVisual.state;
-}
-
-function activityTextClassFromVisual(activityVisual: TopologyActivityVisual): string {
-  switch (activityVisual.state) {
-    case "active":
-      return "text-emerald-600";
-    case "needs_input":
-      return "text-amber-600";
-    case "blocked":
-      return "text-red-600";
-    case "idle":
-      return "text-stone-400";
-  }
-}
-
-function LiveNodeCurrentState({
-  data,
-  activityVisual,
-}: {
-  data: NodeDetailData;
-  activityVisual?: TopologyActivityVisual | null;
-}) {
-  const fallbackActivityState = getActivityState(data.agentActivity);
-  const activityLabel = activityVisual
-    ? activityLabelFromVisual(activityVisual)
-    : getActivityLabel(fallbackActivityState);
-  const activityTextClass = activityVisual
-    ? activityTextClassFromVisual(activityVisual)
-    : getActivityTextClass(fallbackActivityState);
-  const activityStale = activityVisual ? false : isActivityStale(data.agentActivity);
-  const qitems = data.currentQitems ?? [];
-
-  return (
-    <section
-      data-testid="live-node-current-state"
-      className="grid gap-3 border border-outline-variant bg-white/30 p-3 sm:grid-cols-2"
-    >
-      <div>
-        <div className="font-mono text-[8px] uppercase tracking-wider text-stone-400">Activity</div>
-        <div
-          data-testid="live-node-agent-activity"
-          className={`mt-1 font-mono text-[11px] font-bold uppercase ${activityTextClass}`}
-        >
-          {activityLabel}{activityStale ? " stale" : ""}
-        </div>
-        {data.agentActivity?.reason && (
-          <div className="mt-1 font-mono text-[9px] text-stone-500">{data.agentActivity.reason}</div>
-        )}
-      </div>
-
-      <div>
-        <div className="font-mono text-[8px] uppercase tracking-wider text-stone-400">Current Work</div>
-        <div data-testid="live-node-current-qitems" className="mt-1 space-y-1">
-          {qitems.length > 0 ? qitems.map((qitem) => (
-            <div key={qitem.qitemId} className="font-mono text-[9px] leading-4 text-stone-700">
-              <div className="font-bold text-stone-900">{qitem.qitemId}</div>
-              <div>{qitem.bodyExcerpt}</div>
-              {qitem.tier && <div className="text-[8px] uppercase tracking-wider text-stone-400">{qitem.tier}</div>}
-            </div>
-          )) : (
-            <div className="font-mono text-[9px] text-stone-400">No current qitems</div>
-          )}
-        </div>
-      </div>
-    </section>
-  );
-}
+// V0.3.1 slice 25 follow-on — LiveNodeCurrentState removed.
+// Activity now lives as a column in SeatOverviewTable; current-work
+// lives as a full-width row in the same table. The standalone card
+// was redundant and dropped from the Overview tab. Grep confirmed no
+// external callers in packages/ui/src/ at the time of removal.
 
 function RecentEventsSection({ data }: { data: NodeDetailData }) {
   if (!data.recentEvents || data.recentEvents.length === 0) return null;
@@ -483,24 +420,30 @@ function ContextUsageSection({ data }: { data: NodeDetailData }) {
   );
 }
 
-// V0.3.1 slice 25 — Overview tab. Dense info-table (9 fields) on top;
-// inline black-glass terminal below; Activity + Recent Events cards
-// at the bottom. Composes the at-a-glance answer to operators
-// landing on the seat page from topology.
+// V0.3.1 slice 25 follow-on — Overview tab. Stack order:
+//   1. Notification banner (renders only when active message exists)
+//   2. Info table (column-oriented; cwd + current-work full-width)
+//   3. Inline black-glass terminal
+//   4. Recent Events card (at bottom)
+//
+// LiveNodeCurrentState was REMOVED from Overview in the follow-on
+// (activity is a column in the table; current-work is a full-width
+// row in the same table — the standalone card was redundant).
 function OverviewTab({ data, activityVisual }: { data: NodeDetailData; activityVisual?: TopologyActivityVisual | null }) {
   return (
     <div data-testid="live-overview-section" className="space-y-4">
+      <SeatNotificationBanner data={data} />
       <SeatOverviewTable data={data} activityVisual={activityVisual} />
       <InlineTerminal data={data} />
-      <LiveNodeCurrentState data={data} activityVisual={activityVisual} />
       <RecentEventsSection data={data} />
     </div>
   );
 }
 
-// V0.3.1 slice 25 — Details tab. Holds Edges + Peers + ContextUsage
-// detail + AgentSpec content (for agents) + Startup content sans
-// preview + Transcript. Everything-else for the seat detail page.
+// V0.3.1 slice 25 follow-on — Details tab. Re-ordered to put
+// Startup first (operator's go-to triage view), then the
+// spec/topology group (AgentSpec + Edges + Peers + Context usage
+// detail), then Transcript at the bottom.
 function DetailsTab({
   rigId,
   logicalId,
@@ -514,11 +457,11 @@ function DetailsTab({
 }) {
   return (
     <div data-testid="live-details-section" className="space-y-4">
+      <StartupContent rigId={rigId} logicalId={logicalId} data={data} />
+      {isAgent ? <AgentSpecSection data={data} /> : null}
       <EdgesSection data={data} />
       <PeersSection data={data} />
       <ContextUsageSection data={data} />
-      {isAgent ? <AgentSpecSection data={data} /> : null}
-      <StartupContent rigId={rigId} logicalId={logicalId} data={data} />
       <TranscriptContent data={data} />
     </div>
   );

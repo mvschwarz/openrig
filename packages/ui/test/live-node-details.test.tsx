@@ -164,42 +164,63 @@ describe("LiveNodeDetails (slice 25 Overview + Details)", () => {
     expect(screen.getByTestId("live-tab-details")).toBeDefined();
   });
 
-  // HG-2 — Overview stack order: info table -> terminal -> Activity +
-  // Recent Events. Asserts DOM order via compareDocumentPosition.
-  it("HG-2: Overview tab DOM order is info table -> terminal -> activity -> recent events", async () => {
-    mockNodeDetail(NODE_DETAIL);
+  // HG-2 (follow-on) — Overview stack order: notification banner
+  // (optional) -> info table -> inline terminal -> recent events
+  // (at bottom). LiveNodeCurrentState is REMOVED. Order asserted via
+  // compareDocumentPosition between always-rendered elements.
+  it("HG-2: Overview tab DOM order is notification -> info table -> terminal -> recent events", async () => {
+    // Inject a startupStatus that surfaces the notification banner so
+    // the assertion covers the full 4-element order.
+    mockNodeDetail({
+      ...NODE_DETAIL,
+      startupStatus: "attention_required",
+      latestError: "synthetic attention",
+      recentEvents: [
+        { type: "agent.activity", createdAt: "2026-05-12T00:00:00Z" },
+      ],
+    });
     renderDetails();
 
+    const banner = await screen.findByTestId("seat-notification-banner");
     const table = await screen.findByTestId("seat-overview-table");
     const terminal = await screen.findByTestId("live-terminal-shell");
-    const activity = await screen.findByTestId("live-node-current-state");
-    // Recent events only renders when there's at least one event;
-    // NODE_DETAIL has recentEvents: [] so this section is conditional.
-    // The order assertion focuses on the always-rendered trio.
+    const events = await screen.findByTestId("live-node-recent-events");
 
+    expect(banner.compareDocumentPosition(table)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
     expect(table.compareDocumentPosition(terminal)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
-    expect(terminal.compareDocumentPosition(activity)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+    expect(terminal.compareDocumentPosition(events)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+
+    // HG-4: LiveNodeCurrentState no longer mounts inside Overview.
+    expect(screen.queryByTestId("live-node-current-state")).toBeNull();
   });
 
-  // HG-3 — 9 info-table fields (7 compact + 2 full-width). Every row
-  // testid present.
-  it("HG-3: info table renders all 9 fields (7 compact + 2 full-width)", async () => {
+  // HG-1 (follow-on) — info table renders as column-headers + data
+  // row for the 7 compact fields, plus 2 full-width rows below.
+  it("HG-1: info table renders column-headers + single data row (7 fields)", async () => {
     mockNodeDetail(NODE_DETAIL);
     renderDetails();
     await screen.findByTestId("seat-overview-table");
 
-    // 7 compact rows
-    expect(screen.getByTestId("seat-overview-row-runtime").getAttribute("data-row-shape")).toBe("compact");
-    expect(screen.getByTestId("seat-overview-row-model").getAttribute("data-row-shape")).toBe("compact");
-    expect(screen.getByTestId("seat-overview-row-profile").getAttribute("data-row-shape")).toBe("compact");
-    expect(screen.getByTestId("seat-overview-row-spec").getAttribute("data-row-shape")).toBe("compact");
-    expect(screen.getByTestId("seat-overview-row-activity").getAttribute("data-row-shape")).toBe("compact");
-    expect(screen.getByTestId("seat-overview-row-context-percent").getAttribute("data-row-shape")).toBe("compact");
-    expect(screen.getByTestId("seat-overview-row-total-tokens").getAttribute("data-row-shape")).toBe("compact");
-    // 2 full-width rows
+    // 7 column headers + 1 data row in the column-oriented section.
+    const headerRow = screen.getByTestId("seat-overview-header-row");
+    expect(headerRow).toBeDefined();
+    expect(screen.getByTestId("seat-overview-header-runtime")).toBeDefined();
+    expect(screen.getByTestId("seat-overview-header-model")).toBeDefined();
+    expect(screen.getByTestId("seat-overview-header-profile")).toBeDefined();
+    expect(screen.getByTestId("seat-overview-header-spec")).toBeDefined();
+    expect(screen.getByTestId("seat-overview-header-activity")).toBeDefined();
+    expect(screen.getByTestId("seat-overview-header-context-percent")).toBeDefined();
+    expect(screen.getByTestId("seat-overview-header-total-tokens")).toBeDefined();
+
+    const dataRow = screen.getByTestId("seat-overview-data-row");
+    expect(dataRow.getAttribute("data-row-shape")).toBe("data");
+
+    // HG-2 (follow-on) — cwd + current-work remain in the same table
+    // primitive as full-width rows below the data row.
     expect(screen.getByTestId("seat-overview-row-cwd").getAttribute("data-row-shape")).toBe("full-width");
     expect(screen.getByTestId("seat-overview-row-current-work").getAttribute("data-row-shape")).toBe("full-width");
 
+    // Data-cell content reads from the same NodeDetailData fields.
     expect(screen.getByTestId("seat-overview-cell-model").textContent).toContain("opus");
     expect(screen.getByTestId("seat-overview-cell-profile").textContent).toContain("default");
     expect(screen.getByTestId("seat-overview-cell-spec").textContent).toContain("impl@1.0.0");
@@ -303,20 +324,20 @@ describe("LiveNodeDetails (slice 25 Overview + Details)", () => {
     expect(cell.innerHTML).toContain("truncate");
   });
 
-  // HG-4 — model graceful absence: row visible with em-dash, NOT
-  // "undefined" rendered as a string.
-  it("HG-4: model row renders em-dash gracefully when model field is absent", async () => {
+  // HG-4 (preserved) — model graceful absence: column cell shows
+  // em-dash, NOT "undefined". The header row remains; the model cell
+  // in the data row carries the placeholder.
+  it("HG-4: model cell renders em-dash gracefully when model field is absent", async () => {
     mockNodeDetail({ ...NODE_DETAIL, model: null });
     renderDetails();
     await screen.findByTestId("seat-overview-table");
 
+    // Header row still present for model.
+    expect(screen.getByTestId("seat-overview-header-model")).toBeDefined();
+    // Data cell carries placeholder, not literal "undefined".
     const modelCell = screen.getByTestId("seat-overview-cell-model");
     expect(modelCell).toBeDefined();
-    // Row still visible.
-    expect(screen.getByTestId("seat-overview-row-model")).toBeDefined();
-    // No literal "undefined".
     expect(modelCell.textContent).not.toContain("undefined");
-    // Em-dash placeholder.
     expect(modelCell.textContent).toContain("—");
   });
 
@@ -337,9 +358,11 @@ describe("LiveNodeDetails (slice 25 Overview + Details)", () => {
     expect(overview.contains(terminalShell)).toBe(true);
   });
 
-  // HG-6 — Details tab contains edges, peers, agent spec, startup
-  // content (no preview), transcript content.
-  it("HG-6: Details tab composes edges + peers + agent spec + startup (no preview) + transcript", async () => {
+  // HG-6 (follow-on) — Details tab re-ordered. New top-to-bottom
+  // order: Startup → AgentSpec → Edges → Peers → (Context usage) →
+  // Transcript. Asserted via DOM order between always-rendered
+  // section testids.
+  it("HG-6: Details tab order is Startup -> Spec/Topology (AgentSpec + Edges + Peers) -> Transcript", async () => {
     mockNodeDetail(NODE_DETAIL);
     renderDetails();
     fireEvent.click(await screen.findByTestId("live-tab-details"));
@@ -347,13 +370,53 @@ describe("LiveNodeDetails (slice 25 Overview + Details)", () => {
     await waitFor(() => {
       expect(screen.getByTestId("live-details-section")).toBeDefined();
     });
-    expect(screen.getByTestId("detail-edges")).toBeDefined();
-    expect(screen.getByTestId("detail-peers")).toBeDefined();
-    expect(screen.getByTestId("live-startup-section")).toBeDefined();
-    expect(screen.getByTestId("live-transcript-section")).toBeDefined();
-    // PreviewPane is intentionally absent from Startup in slice 25
-    // (terminal moved to Overview).
+    const startup = screen.getByTestId("live-startup-section");
+    const agentSpec = screen.getByTestId("live-agent-spec-section");
+    const edges = screen.getByTestId("detail-edges");
+    const peers = screen.getByTestId("detail-peers");
+    const transcript = screen.getByTestId("live-transcript-section");
+
+    expect(startup.compareDocumentPosition(agentSpec)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+    expect(agentSpec.compareDocumentPosition(edges)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+    expect(edges.compareDocumentPosition(peers)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+    expect(peers.compareDocumentPosition(transcript)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+
+    // PreviewPane is intentionally absent from Startup (terminal lives
+    // in Overview; preserved invariant from the slice-25 baseline).
     expect(screen.queryByTestId("live-node-preview")).toBeNull();
+  });
+
+  // HG-3 (follow-on) — Notification banner renders only when an
+  // active message exists; nothing renders otherwise.
+  it("HG-3: notification banner renders when latestError + attention_required is set", async () => {
+    mockNodeDetail({
+      ...NODE_DETAIL,
+      startupStatus: "attention_required",
+      latestError: "Synthetic test error.",
+      recoveryGuidance: {
+        summary: "Synthetic guidance summary.",
+        commands: ["rig restore <snap>"],
+        notes: [],
+      },
+    });
+    renderDetails();
+    const banner = await screen.findByTestId("seat-notification-banner");
+    expect(banner.getAttribute("data-startup-status")).toBe("attention_required");
+    expect(screen.getByTestId("seat-notification-headline").textContent).toContain("Attention required");
+    expect(screen.getByTestId("seat-notification-error").textContent).toContain("Synthetic test error");
+    expect(screen.getByTestId("seat-notification-guidance").textContent).toContain("Synthetic guidance summary");
+  });
+
+  it("HG-3: notification banner does NOT render when no active message", async () => {
+    mockNodeDetail({
+      ...NODE_DETAIL,
+      startupStatus: "ready",
+      latestError: null,
+      recoveryGuidance: null,
+    });
+    renderDetails();
+    await screen.findByTestId("seat-overview-table");
+    expect(screen.queryByTestId("seat-notification-banner")).toBeNull();
   });
 
   // Infrastructure nodes still have the same 2-tab structure; the
@@ -458,17 +521,23 @@ describe("LiveNodeDetails (slice 25 Overview + Details)", () => {
     expect(screen.getByTestId("agent-plugins-empty")).toBeDefined();
   });
 
-  // PL-019 preserved — activity + current qitems surface in the
-  // Overview tab (LiveNodeCurrentState now sits under the terminal).
-  it("PL-019 preserved: Overview shows activity + current qitems from node detail", async () => {
+  // PL-019 preserved (follow-on) — activity + current-work surface
+  // in the Overview info table now (LiveNodeCurrentState card removed
+  // in the follow-on). Activity is the column cell; current-work is
+  // the full-width row.
+  it("PL-019 preserved: Overview info table surfaces activity + current qitem", async () => {
     mockNodeDetail(NODE_DETAIL);
     renderDetails();
-    await waitFor(() => {
-      expect(screen.getByTestId("live-node-current-state")).toBeDefined();
-    });
-    expect(screen.getByTestId("live-node-agent-activity").textContent).toContain("active");
-    expect(screen.getByTestId("live-node-current-qitems").textContent).toContain("04001234-driver");
-    expect(screen.getByTestId("live-node-current-qitems").textContent).toContain("Implement PL-019 edge activity pulse");
+    await screen.findByTestId("seat-overview-table");
+
+    // Activity column cell carries the active label (topology naming).
+    expect(screen.getByTestId("seat-overview-cell-activity").textContent?.trim()).toContain("active");
+    // Current-work full-width row carries the qitem id + body excerpt.
+    const cwCell = screen.getByTestId("seat-overview-cell-current-work");
+    expect(cwCell.textContent).toContain("04001234-driver");
+    expect(cwCell.textContent).toContain("Implement PL-019 edge activity pulse");
+    // LiveNodeCurrentState card removed.
+    expect(screen.queryByTestId("live-node-current-state")).toBeNull();
   });
 
   // Resume action glyph remains independent of tab structure.
