@@ -136,6 +136,27 @@ function buildCommand(
     };
   }
 
+  // Slice 24 — generic RPC pass-through for layout methods (splitSurface,
+  // createWorkspace, closeWorkspace, listPaneSurfaces). cmux exposes a
+  // `cmux rpc <method> '<json-params>'` subcommand that delegates directly
+  // to the daemon RPC. Spike confirmed these methods accept snake_case
+  // params (the adapter passes them in already snake_cased). Generic
+  // path is cleaner than per-method CLI mapping for methods that have a
+  // 1:1 RPC correspondence; reserves the version-adaptive buildCommand
+  // branches above for legacy methods that have CLI-only shapes.
+  if (
+    method === "surface.split" ||
+    method === "workspace.create" ||
+    method === "workspace.close" ||
+    method === "pane.surfaces"
+  ) {
+    const paramsJson = params ? JSON.stringify(params) : "";
+    const cmd = paramsJson
+      ? `cmux rpc ${method} ${shellQuote(paramsJson)}`
+      : `cmux rpc ${method}`;
+    return { cmd, json: true };
+  }
+
   throw new Error(`Unknown cmux method: ${method}`);
 }
 
