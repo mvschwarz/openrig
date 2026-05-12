@@ -66,6 +66,9 @@ function buildCommand(
     return { cmd: "cmux capabilities --json", json: true };
   }
   if (method === "workspace.list") {
+    if (ctx.supported.has("rpc")) {
+      return { cmd: "cmux rpc workspace.list", json: true };
+    }
     return { cmd: "cmux list-workspaces --json", json: true };
   }
   if (method === "workspace.current") {
@@ -163,10 +166,21 @@ function buildCommand(
 /**
  * Normalize JSON payloads from version-adaptive commands so downstream
  * consumers see one stable shape regardless of which cmux command actually
- * answered. Currently aliases `panels` (cmux ≥0.63 `list-panels`) onto
- * `surfaces` (legacy `list-surfaces`); leaves other shapes untouched.
+ * answered.
  */
 function normalizePayload(method: string, raw: unknown): unknown {
+  if (method === "workspace.list") {
+    if (raw === null || typeof raw !== "object") return raw;
+    const obj = raw as Record<string, unknown>;
+    if (!Array.isArray(obj.workspaces)) return raw;
+    return {
+      ...obj,
+      workspaces: obj.workspaces
+        .map(normalizeWorkspaceRow)
+        .filter((workspace): workspace is { id: string; name: string } => workspace !== null),
+    };
+  }
+
   if (method !== "surface.list") return raw;
   if (raw === null || typeof raw !== "object") return raw;
   const obj = raw as Record<string, unknown>;
@@ -180,6 +194,29 @@ function normalizePayload(method: string, raw: unknown): unknown {
     return { ...rest, surfaces: pane_surfaces };
   }
   return raw;
+}
+
+function normalizeWorkspaceRow(row: unknown): { id: string; name: string } | null {
+  if (row === null || typeof row !== "object") return null;
+  const obj = row as Record<string, unknown>;
+  const id =
+    typeof obj.ref === "string"
+      ? obj.ref
+      : typeof obj.workspace_ref === "string"
+        ? obj.workspace_ref
+        : typeof obj.id === "string"
+          ? obj.id
+          : typeof obj.workspace_id === "string"
+            ? obj.workspace_id
+            : "";
+  if (!id) return null;
+  const name =
+    typeof obj.name === "string" && obj.name.trim()
+      ? obj.name.trim()
+      : typeof obj.title === "string" && obj.title.trim()
+        ? obj.title.trim()
+        : id;
+  return { id, name };
 }
 
 /**
@@ -262,7 +299,35 @@ function legacyJsonFallback(method: string, output: string): unknown | null {
     }
   }
 
+  if (method === "workspace.list") {
+    const workspaces = parsePlainTextWorkspaceRows(trimmed);
+    if (workspaces) {
+      return { workspaces };
+    }
+  }
+
   return null;
+}
+
+function parsePlainTextWorkspaceRows(output: string): Array<{ id: string; name: string }> | null {
+  const workspaces: Array<{ id: string; name: string }> = [];
+
+  for (const rawLine of output.split("\n")) {
+    const line = rawLine.trim();
+    if (!line) continue;
+
+    const rowMatch = line.match(/^(?:\*\s+)?(workspace:[^\s]+)(?:\s+(.*?))?\s*$/);
+    if (!rowMatch || !rowMatch[1]) {
+      return null;
+    }
+    const rawName = (rowMatch[2] ?? "").replace(/\s+\[[^\]]+\]\s*$/g, "").trim();
+    workspaces.push({
+      id: rowMatch[1],
+      name: rawName || rowMatch[1],
+    });
+  }
+
+  return workspaces;
 }
 
 function parsePlainTextSurfaceRows(output: string): Array<{ id: string; title: string; type: string }> | null {
