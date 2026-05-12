@@ -16,6 +16,7 @@ import {
 import { EmptyState } from "./ui/empty-state.js";
 import { ProjectTreeView } from "./project/ProjectTreeView.js";
 import { SpecsTreeView } from "./specs/SpecsTreeView.js";
+import { SettingsExplorer } from "./system/SettingsExplorer.js";
 import { TopologyTreeView } from "./topology/TopologyTreeView.js";
 import { SubscriptionToggleList } from "./for-you/SubscriptionToggleList.js";
 
@@ -33,6 +34,7 @@ export type ExplorerSurface =
   | "project"
   | "specs"
   | "for-you"
+  | "settings"
   | "none";
 
 interface ExplorerProps {
@@ -213,6 +215,9 @@ function SurfaceBody({
   }
   if (surface === "specs") {
     return <SpecsTreeView />;
+  }
+  if (surface === "settings") {
+    return <SettingsExplorer />;
   }
   if (surface === "for-you") {
     // Subscription affordance — settings-shaped surface per for-you-feed.md L134-L140.

@@ -237,6 +237,7 @@ function surfaceForPath(pathname: string): ExplorerSurface {
   if (pathname.startsWith("/project")) return "project";
   if (pathname.startsWith("/specs") || pathname.startsWith("/plugins")) return "specs";
   if (pathname.startsWith("/for-you")) return "for-you";
+  if (pathname.startsWith("/settings")) return "settings";
   return "none";
 }
 
