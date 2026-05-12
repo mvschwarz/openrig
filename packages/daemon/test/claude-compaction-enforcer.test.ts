@@ -163,18 +163,30 @@ describe("ClaudeCompactionEnforcer", () => {
     });
     expect(third).toEqual({ triggered: false, reason: "already_triggered_above_threshold" });
 
-    const below = await enforcer.maybeAutoCompact({
+    const belowBoundary = await enforcer.maybeAutoCompact({
       sessionName: "claude-seat@rig",
       runtime: "claude-code",
       usedPercentage: 20,
       transcriptPath: "/tmp/claude.jsonl",
     });
-    expect(below).toEqual({ triggered: true });
+    expect(belowBoundary).toEqual({ triggered: true });
+    expect(send).toHaveBeenLastCalledWith(
+      "claude-seat@rig",
+      expect.stringContaining("OpenRig post-compaction turn boundary"),
+    );
+
+    const belowRestore = await enforcer.maybeAutoCompact({
+      sessionName: "claude-seat@rig",
+      runtime: "claude-code",
+      usedPercentage: 20,
+      transcriptPath: "/tmp/claude.jsonl",
+    });
+    expect(belowRestore).toEqual({ triggered: true });
     expect(send).toHaveBeenLastCalledWith(
       "claude-seat@rig",
       expect.stringContaining("/tmp/openrig-test-home/compaction/restore-pending/claude-seat@rig.json"),
     );
-    expect(send.mock.calls[1]![1]).toContain("/tmp/claude.jsonl");
+    expect(send.mock.calls[2]![1]).toContain("/tmp/claude.jsonl");
 
     now += 61_000;
     const fourth = await enforcer.maybeAutoCompact({
@@ -184,7 +196,7 @@ describe("ClaudeCompactionEnforcer", () => {
     });
     expect(fourth).toEqual({ triggered: true });
 
-    expect(send).toHaveBeenCalledTimes(3);
+    expect(send).toHaveBeenCalledTimes(4);
   });
 
   it("runtime filter: only claude-code triggers (codex sessions return runtime_filter without invoking send)", async () => {
@@ -247,7 +259,7 @@ describe("ClaudeCompactionEnforcer", () => {
     expect(send).toHaveBeenCalledTimes(2);
   });
 
-  it("post-compact restore send-failure stays pending and retries on the next below-threshold tick", async () => {
+  it("post-compact turn-boundary send-failure stays pending and retries on the next below-threshold tick", async () => {
     const settings = makeSettingsStore(POLICY_ENABLED_AT_80);
     const { transport, send } = makeSessionTransport();
     const enforcer = new ClaudeCompactionEnforcer(settings, transport, {
@@ -278,9 +290,51 @@ describe("ClaudeCompactionEnforcer", () => {
     })).toEqual({ triggered: true });
 
     expect(send).toHaveBeenCalledTimes(3);
-    expect(send.mock.calls[1]![1]).toContain("Please respond to this normal user message now");
-    expect(send.mock.calls[2]![1]).toContain("/tmp/openrig-test-home/compaction/restore-pending/claude-seat@rig.json");
-    expect(send.mock.calls[2]![1]).toContain("/tmp/claude.jsonl");
+    expect(send.mock.calls[1]![1]).toContain("OpenRig post-compaction turn boundary");
+    expect(send.mock.calls[2]![1]).toContain("OpenRig post-compaction turn boundary");
+  });
+
+  it("post-compact restore send-failure stays pending after turn-boundary succeeds", async () => {
+    const settings = makeSettingsStore(POLICY_ENABLED_AT_80);
+    const { transport, send } = makeSessionTransport();
+    const enforcer = new ClaudeCompactionEnforcer(settings, transport, {
+      dedupWindowMs: 60_000,
+      openrigHome: "/tmp/openrig-test-home",
+    });
+
+    expect(await enforcer.maybeAutoCompact({
+      sessionName: "claude-seat@rig",
+      runtime: "claude-code",
+      usedPercentage: 95,
+    })).toEqual({ triggered: true });
+
+    expect(await enforcer.maybeAutoCompact({
+      sessionName: "claude-seat@rig",
+      runtime: "claude-code",
+      usedPercentage: 0,
+    })).toEqual({ triggered: true });
+
+    send.mockImplementationOnce(async () => ({ ok: false }));
+    expect(await enforcer.maybeAutoCompact({
+      sessionName: "claude-seat@rig",
+      runtime: "claude-code",
+      usedPercentage: 0,
+      transcriptPath: "/tmp/claude.jsonl",
+    })).toEqual({ triggered: false, reason: "send_failed" });
+
+    send.mockImplementationOnce(async () => ({ ok: true }));
+    expect(await enforcer.maybeAutoCompact({
+      sessionName: "claude-seat@rig",
+      runtime: "claude-code",
+      usedPercentage: 0,
+      transcriptPath: "/tmp/claude.jsonl",
+    })).toEqual({ triggered: true });
+
+    expect(send).toHaveBeenCalledTimes(4);
+    expect(send.mock.calls[1]![1]).toContain("OpenRig post-compaction turn boundary");
+    expect(send.mock.calls[2]![1]).toContain("Please respond to this normal user message now");
+    expect(send.mock.calls[3]![1]).toContain("/tmp/openrig-test-home/compaction/restore-pending/claude-seat@rig.json");
+    expect(send.mock.calls[3]![1]).toContain("/tmp/claude.jsonl");
   });
 
   it("post-compact restore prompt carries the configured operator restore instruction", async () => {
@@ -306,9 +360,17 @@ describe("ClaudeCompactionEnforcer", () => {
       transcriptPath: "/tmp/claude.jsonl",
     })).toEqual({ triggered: true });
 
-    expect(send).toHaveBeenCalledTimes(2);
-    expect(send.mock.calls[1]![1]).toContain("Operator post-compaction instruction");
-    expect(send.mock.calls[1]![1]).toContain("Read the active queue item and restate the exact next action.");
+    expect(await enforcer.maybeAutoCompact({
+      sessionName: "claude-seat@rig",
+      runtime: "claude-code",
+      usedPercentage: 0,
+      transcriptPath: "/tmp/claude.jsonl",
+    })).toEqual({ triggered: true });
+
+    expect(send).toHaveBeenCalledTimes(3);
+    expect(send.mock.calls[1]![1]).toContain("OpenRig post-compaction turn boundary");
+    expect(send.mock.calls[2]![1]).toContain("Operator post-compaction instruction");
+    expect(send.mock.calls[2]![1]).toContain("Read the active queue item and restate the exact next action.");
   });
 
   it("post-compact restore prompt falls back to configured instruction file when inline is empty", async () => {
@@ -334,8 +396,14 @@ describe("ClaudeCompactionEnforcer", () => {
       usedPercentage: 0,
     })).toEqual({ triggered: true });
 
-    expect(send.mock.calls[1]![1]).toContain("Operator post-compaction instruction file");
-    expect(send.mock.calls[1]![1]).toContain("/tmp/openrig-restore-instruction.md");
+    expect(await enforcer.maybeAutoCompact({
+      sessionName: "claude-seat@rig",
+      runtime: "claude-code",
+      usedPercentage: 0,
+    })).toEqual({ triggered: true });
+
+    expect(send.mock.calls[2]![1]).toContain("Operator post-compaction instruction file");
+    expect(send.mock.calls[2]![1]).toContain("/tmp/openrig-restore-instruction.md");
   });
 
   it("dedup keyed per-session: two distinct seats do not block each other", async () => {

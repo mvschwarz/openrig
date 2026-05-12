@@ -31,7 +31,8 @@ import * as path from "node:path";
  *   successful send, so a transient send failure can retry on the next
  *   polling tick.
  * - Post-compact restore: after a successful auto-compact, the enforcer
- *   sends one normal prompt once context usage drops below threshold.
+ *   first sends a turn-boundary handshake once context usage drops below
+ *   threshold, then sends the restore prompt on a later polling tick.
  *   This is intentionally active because Claude hooks can provide
  *   context, but they do not create a new assistant turn by themselves.
  */
@@ -112,6 +113,16 @@ function buildPostCompactRestorePrompt(input: {
   return pieces.join(" ");
 }
 
+function buildPostCompactTurnBoundaryPrompt(): string {
+  return [
+    "OpenRig post-compaction turn boundary.",
+    "Please acknowledge this message briefly.",
+    "Do not restore yet; the next normal user message will contain the restore instructions.",
+  ].join(" ");
+}
+
+type PendingPostCompactStage = "turn_boundary" | "restore_prompt";
+
 export class ClaudeCompactionEnforcer {
   private readonly settingsStore: SettingsStore;
   private readonly sessionTransport: SessionTransport;
@@ -119,7 +130,7 @@ export class ClaudeCompactionEnforcer {
   private readonly openrigHome: string;
   private readonly lastAutoCompactAt = new Map<string, number>();
   private readonly triggeredAboveThreshold = new Set<string>();
-  private readonly pendingPostCompactRestore = new Set<string>();
+  private readonly pendingPostCompactRestore = new Map<string, PendingPostCompactStage>();
 
   constructor(
     settingsStore: SettingsStore,
@@ -166,7 +177,19 @@ export class ClaudeCompactionEnforcer {
       return { triggered: false, reason: "invalid_policy" };
     }
     if (input.usedPercentage < policy.thresholdPercent) {
-      if (this.pendingPostCompactRestore.has(input.sessionName)) {
+      const pendingStage = this.pendingPostCompactRestore.get(input.sessionName);
+      if (pendingStage === "turn_boundary") {
+        const boundary = await this.sessionTransport.send(
+          input.sessionName,
+          buildPostCompactTurnBoundaryPrompt(),
+        );
+        if (!boundary.ok) {
+          return { triggered: false, reason: "send_failed" };
+        }
+        this.pendingPostCompactRestore.set(input.sessionName, "restore_prompt");
+        return { triggered: true };
+      }
+      if (pendingStage === "restore_prompt") {
         const restore = await this.sessionTransport.send(
           input.sessionName,
           buildPostCompactRestorePrompt({
@@ -207,7 +230,7 @@ export class ClaudeCompactionEnforcer {
     }
     this.lastAutoCompactAt.set(input.sessionName, now);
     this.triggeredAboveThreshold.add(input.sessionName);
-    this.pendingPostCompactRestore.add(input.sessionName);
+    this.pendingPostCompactRestore.set(input.sessionName, "turn_boundary");
     return { triggered: true };
   }
 }
