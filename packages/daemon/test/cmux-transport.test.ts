@@ -8,7 +8,7 @@ import type { ExecFn } from "../src/adapters/tmux.js";
  * has removed the older `list-surfaces` and `agent-pids` commands.
  * cmux <0.63 exposed `list-surfaces` and `agent-pids` instead.
  */
-function helpText(opts: { modern?: boolean; legacy?: boolean }): string {
+function helpText(opts: { modern?: boolean; legacy?: boolean; rpc?: boolean }): string {
   const lines = [
     "cmux - control cmux via Unix socket",
     "",
@@ -31,6 +31,9 @@ function helpText(opts: { modern?: boolean; legacy?: boolean }): string {
   if (opts.legacy) {
     lines.push("  list-surfaces", "  agent-pids");
   }
+  if (opts.rpc) {
+    lines.push("  rpc <method> [json-params]");
+  }
   return lines.join("\n") + "\n";
 }
 
@@ -42,6 +45,7 @@ function helpText(opts: { modern?: boolean; legacy?: boolean }): string {
 function mockExec(opts: {
   modern?: boolean;
   legacy?: boolean;
+  rpc?: boolean;
   overrides?: Record<string, string | ((cmd: string) => string)>;
 } = {}): ExecFn {
   const impl = async (cmd: string): Promise<string> => {
@@ -86,13 +90,55 @@ describe("cmux CLI transport — stable commands (unchanged across versions)", (
     expect(exec).toHaveBeenCalledWith("cmux capabilities --json");
   });
 
-  it("request('workspace.list') -> exact: cmux list-workspaces --json", async () => {
+  it("request('workspace.list') prefers rpc when available and maps titles to names", async () => {
+    const exec = mockExec({
+      modern: true,
+      rpc: true,
+      overrides: {
+        "cmux rpc workspace.list":
+          '{"workspaces":[{"ref":"workspace:7","title":"qa6-cmux"},{"id":"workspace-uuid","name":"manual-name"}]}',
+      },
+    });
+    const transport = await createCmuxCliTransport(exec)();
+
+    const result = await transport.request("workspace.list");
+
+    expect(exec).toHaveBeenCalledWith("cmux rpc workspace.list");
+    expect(result).toEqual({
+      workspaces: [
+        { id: "workspace:7", name: "qa6-cmux" },
+        { id: "workspace-uuid", name: "manual-name" },
+      ],
+    });
+  });
+
+  it("request('workspace.list') falls back to list-workspaces when rpc is unavailable", async () => {
     const exec = mockExec({ modern: true, overrides: { "cmux list-workspaces --json": '{"workspaces":[]}' } });
     const transport = await createCmuxCliTransport(exec)();
 
     await transport.request("workspace.list");
 
     expect(exec).toHaveBeenCalledWith("cmux list-workspaces --json");
+  });
+
+  it("request('workspace.list') falls back to plain-text rows when list-workspaces --json prints text", async () => {
+    const exec = mockExec({
+      modern: true,
+      overrides: {
+        "cmux list-workspaces --json":
+          "* workspace:1  qa-rig  [selected]\n  workspace:2  tmux attach -t qa-rig@openrig\n",
+      },
+    });
+    const transport = await createCmuxCliTransport(exec)();
+
+    const result = await transport.request("workspace.list");
+
+    expect(result).toEqual({
+      workspaces: [
+        { id: "workspace:1", name: "qa-rig" },
+        { id: "workspace:2", name: "tmux attach -t qa-rig@openrig" },
+      ],
+    });
   });
 
   it("request('workspace.current') -> exact: cmux current-workspace --json", async () => {

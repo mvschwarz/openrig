@@ -78,6 +78,9 @@ import { workflowRoutes } from "./routes/workflow.js";
 import { missionControlRoutes } from "./routes/mission-control.js";
 import { slicesRoutes } from "./routes/slices.js";
 import { missionsRoutes } from "./routes/missions.js";
+import { rigCmuxRoutes } from "./routes/rig-cmux.js";
+import { CmuxLayoutService } from "./domain/cmux-layout-service.js";
+import { getNodeInventory } from "./domain/node-inventory.js";
 import { filesRoutes } from "./routes/files.js";
 import { progressRoutes } from "./routes/progress.js";
 import { steeringRoutes } from "./routes/steering.js";
@@ -342,6 +345,15 @@ export function createApp(deps: AppDeps): Hono {
     c.set("nodeLauncher" as never, deps.nodeLauncher);
     c.set("tmuxAdapter" as never, deps.tmuxAdapter);
     c.set("cmuxAdapter" as never, deps.cmuxAdapter);
+    // Slice 24 — per-rig CMUX workspace launcher wiring.
+    c.set(
+      "cmuxLayoutService" as never,
+      new CmuxLayoutService(deps.cmuxAdapter),
+    );
+    c.set(
+      "nodeInventoryFn" as never,
+      (rigId: string) => getNodeInventory(deps.rigRepo.db, rigId),
+    );
     c.set("snapshotCapture" as never, deps.snapshotCapture);
     c.set("snapshotRepo" as never, deps.snapshotRepo);
     c.set("restoreOrchestrator" as never, deps.restoreOrchestrator);
@@ -425,6 +437,8 @@ export function createApp(deps: AppDeps): Hono {
 
   app.route("/api/rigs", rigsRoutes);
   app.route("/api/rigs/:rigId/sessions", sessionsRoutes);
+  // Slice 24 — per-rig CMUX workspace launcher.
+  app.route("/api/rigs/:rigId/cmux", rigCmuxRoutes);
   app.route("/api/rigs/:rigId/nodes", nodesRoutes);
   app.route("/api/sessions", sessionAdminRoutes);
   app.route("/api/adapters", adaptersRoutes);
