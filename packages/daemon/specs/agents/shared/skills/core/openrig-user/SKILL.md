@@ -25,9 +25,14 @@ Default posture:
 
 - Treat daemon `rig queue`, `rig stream`, `rig project`, `rig view`, `rig watchdog`, and
   `rig workflow` as the product coordination surfaces when the active daemon is v0.2.0 or newer.
+- **CANONICAL SURFACE NOTE (2026-05-11)**: `rig queue` (daemon-backed SQLite) is the
+  canonical surface for queue routing since the 2026-05-11 host-CLI fix landed. Use
+  `rig queue create / handoff / update / show / list` for all substantive work.
 - Use temporary substrate overlays such as `rigx queue`, `rigx stream`, `rigx project`, and
   `rigx view-proto` only where the current OpenRig workstream explicitly says that legacy/control
-  layer is still in use.
+  layer is still in use. For queue specifically, `rigx queue` is recovery-only fallback;
+  qitems written via `rigx queue` are invisible to daemon-backed reads and break fleet-wide
+  routing discipline.
 - If a daemon-backed coordination command fails, debug the command/runtime/schema edge directly;
   do not assume the right workaround is to drop back to a config-layer primitive.
 - Do not perform daemon stop/start, production DB copy/mutation, release, publish, or other

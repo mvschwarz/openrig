@@ -9,6 +9,15 @@ canonical-artifact: substrate/shared-docs/control-plane/services/queue/README.md
 
 # Control-plane queue
 
+> **CANONICAL SURFACE NOTE (2026-05-11)** — `rig queue` (daemon-backed SQLite) is the
+> canonical surface for all substantive work routing since the 2026-05-11 host-CLI
+> fix landed. `rigx queue` (filesystem v0 prototype) is **recovery-only fallback**.
+> Where this skill says `rigx queue`, prefer `rig queue` — the command shape is
+> identical (`rig queue create`, `rig queue handoff`, `rig queue update`,
+> `rig queue show`, `rig queue list`, etc.). qitems written via `rigx queue` are
+> invisible to daemon-backed reads (`rig queue show <id>` returns `qitem_not_found`);
+> fleet-wide routing discipline requires the daemon surface.
+
 Use this skill when you need the queue control-plane as an operational surface rather than just the doctrine of attention queues.
 
 This skill is about the command surface and service boundary.

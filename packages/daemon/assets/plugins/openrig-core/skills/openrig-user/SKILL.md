@@ -47,9 +47,14 @@ Default posture on this host now:
 
 - Treat daemon `rig queue`, `rig stream`, `rig project`, `rig view`, `rig watchdog`, and
   `rig workflow` as active-host coordination surfaces for PL-004-backed work.
+- **CANONICAL SURFACE NOTE (2026-05-11)**: `rig queue` (daemon-backed SQLite) is the
+  canonical surface for queue routing since the 2026-05-11 host-CLI fix landed. Use
+  `rig queue create / handoff / update / show / list` for all substantive work.
 - Use substrate `rigx queue`, `rigx stream`, `rigx project`, and `rigx view-proto` only where the
   current workflow is still explicitly operating on the temporary substrate coordination layer or
-  a legacy artifact has not migrated.
+  a legacy artifact has not migrated. For queue specifically, `rigx queue` is recovery-only
+  fallback; qitems written via `rigx queue` are invisible to daemon-backed reads and break
+  fleet-wide routing discipline.
 - If a daemon-backed coordination command fails, debug the command/runtime/schema edge directly;
   do not fall back to stale pre-upgrade assumptions about this host.
 - Do not run daemon stop/start, wrapper mutation, production DB copy/mutation, git push, tags, npm

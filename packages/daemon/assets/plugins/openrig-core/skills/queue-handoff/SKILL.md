@@ -9,7 +9,7 @@ metadata:
     source_evidence: |
       Translated from openrig-work/primitives/coordination/queue-handoff-and-hot-potato.md (config-layer-dogfood, 81 lines, 2026-04-29).
       Hot-potato terminal-turn-rule originally codified in field-notes/2026-04-28-hot-potato-terminal-turn-rule.md.
-      Daemon-backed `rig queue` shipped in v0.2.0 (PL-004 Phase A) with the same handed-off-to / handed-off-from / state field shape as the rigx config-layer surface. Both surfaces coexist; daemon enforces hot-potato strict-rejection at the API.
+      Daemon-backed `rig queue` shipped in v0.2.0 (PL-004 Phase A) with the same handed-off-to / handed-off-from / state field shape as the rigx config-layer surface. `rig queue` is canonical for new work; `rigx queue` is recovery-only fallback. The daemon enforces hot-potato strict-rejection at the API.
     sibling_skills:
       - workflow-runtime
       - watchdog
@@ -32,6 +32,11 @@ metadata:
 ---
 
 # Queue Handoff
+
+> **CANONICAL SURFACE NOTE (2026-05-11)** — `rig queue` (daemon-backed SQLite) is the
+> canonical surface for all substantive work routing. `rigx queue` (filesystem v0
+> prototype) is **recovery-only fallback**; qitems written via `rigx queue` are
+> invisible to daemon-backed reads and break fleet-wide routing discipline.
 
 Durable work handoff via queue items. Lets the system keep moving
 through compactions, missed messages, and interruptions by passing the
@@ -86,7 +91,7 @@ every surface (CLI, MCP, future UI) inherits the same guarantee.
 | `rig queue create` | yes | New qitem created from scratch |
 | `rig queue handoff` | yes | Transactional close-as-handed-off + create-new |
 | `rig queue handoff-and-complete` | **no — requires `--notify`** | Inside a self-driving loop where motion matters |
-| `rigx queue handoff` (config-layer) | yes | Same shape as daemon, config-layer dogfood |
+| `rigx queue handoff` (filesystem v0 prototype; **recovery-only fallback since 2026-05-11**) | yes | Legacy artifact; qitems invisible to daemon-backed reads. Use `rig queue handoff` for all new substantive work. |
 
 **Footgun**: `handoff-and-complete` is cold unless `--notify` is passed.
 In a self-driving loop, an agent that closes with
@@ -116,16 +121,16 @@ Every qitem carries:
 - `state` — one of: `pending | in-progress | done | blocked | failed | denied | canceled | handed-off`
 - `closure_reason` + `closure_target` — set on terminal closure per hot-potato rule
 
-The fields are auditable across both `rigx queue` (config-layer) and
-`rig queue` (daemon-shipped) surfaces. Watchdog policies and workflow
-runtime project new owners off these fields.
+The same field shape exists in legacy `rigx queue` artifacts and the daemon-shipped
+`rig queue` surface, but new queue reads and writes should use `rig queue`. Watchdog
+policies and workflow runtime project new owners off these fields.
 
 ## Two surfaces (same shape)
 
 | Surface | Status | When to use |
 |---|---|---|
 | `rig queue ...` (daemon-shipped, v0.2.0) | Active host coordination surface | Daemon-backed PL-004 work; SQLite-canonical |
-| `rigx queue ...` (config-layer dogfood) | Coexists with daemon | Workflows still operating on the temporary substrate coordination layer; legacy artifacts |
+| `rigx queue ...` (filesystem v0 prototype) | Recovery-only fallback | Legacy recovery for artifacts that have not migrated; not for new substantive work because daemon-backed reads cannot see those qitems |
 
 Default posture: prefer daemon `rig queue` for new work. If a
 daemon-backed coordination command fails, debug the command/runtime/schema

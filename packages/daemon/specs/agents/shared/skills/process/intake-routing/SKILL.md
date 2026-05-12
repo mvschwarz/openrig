@@ -101,6 +101,11 @@ just because the dedicated seat is offline.
 
 ## Stream, Intake, Queue, View, Progress
 
+> **CANONICAL SURFACE NOTE (2026-05-11)** — for queue ownership and routing, use
+> `rig queue` (daemon-backed SQLite). `rigx queue` is recovery-only fallback;
+> qitems written via `rigx queue` are invisible to daemon-backed reads and break
+> fleet-wide routing discipline.
+
 Use the coordination layers for different jobs:
 
 - `rigx stream` records **what happened**. Raw, append-only runtime

@@ -29,6 +29,11 @@ metadata:
 This skill covers host/runtime/operator triage around OpenRig itself.
 Use it when the problem may be the daemon, the shell/runtime surface, or stale helper processes rather than the product workflow you are trying to run.
 
+> **CANONICAL SURFACE NOTE (2026-05-11)** — for durable queue routing while doing
+> operator triage, use `rig queue` (daemon-backed SQLite). `rigx queue` is
+> recovery-only fallback; qitems written there are invisible to daemon-backed
+> reads and should not be used for new substantive work.
+
 ## When to Use
 
 Use this skill when you see:
