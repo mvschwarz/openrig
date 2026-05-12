@@ -44,23 +44,30 @@ vi.mock("../src/hooks/useConfig.js", async (importOriginal) => {
   };
 });
 
-describe("PoliciesPage (HG-5: empty-state placeholder)", () => {
+describe("PoliciesPage (Claude auto-compaction form)", () => {
   it("renders Policies title chrome", () => {
-    render(<PoliciesPage />);
+    render(
+      <Wrapper>
+        <PoliciesPage />
+      </Wrapper>,
+    );
     expect(screen.getByTestId("settings-page-policies")).toBeTruthy();
     expect(screen.getByRole("heading", { name: /policies/i })).toBeTruthy();
   });
 
-  it("renders empty-state placeholder with operator-facing copy (no slice/release internals)", () => {
-    render(<PoliciesPage />);
-    const empty = screen.getByTestId("policies-empty-state");
-    expect(empty).toBeTruthy();
-    // Empty-state copy mentions compaction policy + policies generally
-    expect(empty.textContent?.toLowerCase()).toMatch(/compaction|policy|policies/i);
+  it("renders operator-facing intro copy (no slice/release internals)", () => {
+    render(
+      <Wrapper>
+        <PoliciesPage />
+      </Wrapper>,
+    );
+    const page = screen.getByTestId("settings-page-policies");
+    // Intro paragraph mentions policy/policies + opt-in default-off framing
+    expect(page.textContent?.toLowerCase()).toMatch(/policy|policies/i);
     // No internal-release references in user-facing UI copy (per
     // velocity-guard 26.B carry-forward concern: slice-number tokens
     // are implementation detail; should not leak into product UI).
-    expect(empty.textContent).not.toMatch(/slice\s*\d+/i);
+    expect(page.textContent).not.toMatch(/slice\s*\d+/i);
   });
 });
 
