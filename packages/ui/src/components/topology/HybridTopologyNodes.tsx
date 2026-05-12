@@ -187,13 +187,15 @@ function HybridAgentNodeInner({ data }: { data: HybridAgentNodeData }) {
         <button
           type="button"
           data-testid={`hybrid-cmux-open-${data.logicalId}`}
-          aria-label={`Open ${data.logicalId} in cmux`}
-          title="Open in cmux"
+          aria-busy={cmuxLaunch.isPending || undefined}
+          aria-label={`${cmuxLaunch.isPending ? "Opening" : "Open"} ${data.logicalId} in cmux`}
+          title={cmuxLaunch.isPending ? "Opening in cmux" : "Open in cmux"}
+          disabled={cmuxLaunch.isPending}
           onClick={(event) => {
             event.stopPropagation();
             cmuxLaunch.mutate({ rigId: data.rigId!, logicalId: data.logicalId });
           }}
-          className={cn("absolute right-1.5 top-6 z-10", hoverIconClass)}
+          className={cn("absolute right-1.5 top-6 z-10 disabled:cursor-wait disabled:opacity-60", hoverIconClass)}
         >
           <ToolMark tool="cmux" size="sm" />
         </button>

@@ -90,9 +90,11 @@ function CmuxButton({ row }: { row: AgentRow }) {
         e.stopPropagation();
         cmuxLaunch.mutate({ rigId: row.rigId, logicalId: row.logicalId });
       }}
-      aria-label={`Open ${row.logicalId} in cmux`}
-      title="Open in cmux"
-      className="inline-flex h-7 w-7 items-center justify-center border border-outline-variant bg-white/65 text-stone-700 shadow-[1px_1px_0_rgba(46,52,46,0.12)] transition-colors hover:bg-stone-100 hover:text-stone-950 focus:outline-none focus:ring-2 focus:ring-stone-900/20"
+      aria-busy={cmuxLaunch.isPending || undefined}
+      aria-label={`${cmuxLaunch.isPending ? "Opening" : "Open"} ${row.logicalId} in cmux`}
+      title={cmuxLaunch.isPending ? "Opening in cmux" : "Open in cmux"}
+      disabled={cmuxLaunch.isPending}
+      className="inline-flex h-7 w-7 items-center justify-center border border-outline-variant bg-white/65 text-stone-700 shadow-[1px_1px_0_rgba(46,52,46,0.12)] transition-colors hover:bg-stone-100 hover:text-stone-950 focus:outline-none focus:ring-2 focus:ring-stone-900/20 disabled:cursor-wait disabled:opacity-60"
     >
       <ToolMark tool="cmux" size="sm" />
       <span className="sr-only">CMUX</span>

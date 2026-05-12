@@ -29,6 +29,9 @@ beforeEach(() => {
     if (url.includes("/api/rigs/summary")) {
       return new Response(JSON.stringify([{ id: "rig-1", name: "test-rig" }]));
     }
+    if (url.includes("/open-cmux")) {
+      return new Response(JSON.stringify({ ok: true, action: "created_new" }));
+    }
     if (url.includes("/api/rigs/rig-1/nodes")) {
       return new Response(
         JSON.stringify([
@@ -80,8 +83,7 @@ describe("TopologyTableView P5.1-7 CMUX column + row click", () => {
     const cmux = await findByTestId("topology-table-cmux-orch.lead");
     expect(cmux).toBeTruthy();
     expect((cmux as HTMLButtonElement).textContent).toContain("CMUX");
-    expect((cmux as HTMLButtonElement).className).toContain("opacity-0");
-    expect((cmux as HTMLButtonElement).className).toContain("group-hover:opacity-100");
+    expect((cmux as HTMLButtonElement).className).not.toContain("opacity-0");
   });
 
   it("renders context percentage and token total from node inventory", async () => {
@@ -93,16 +95,16 @@ describe("TopologyTableView P5.1-7 CMUX column + row click", () => {
     expect(tokens.getAttribute("title")).toContain("Tokens: 134,000");
   });
 
-  it("CMUX button click POSTs to /api/rigs/.../focus (existing useCmuxLaunch hook)", async () => {
+  it("CMUX button click POSTs to /api/rigs/.../open-cmux (open-or-create launcher)", async () => {
     const { findByTestId } = withQueryClient(<TopologyTableView />);
     const cmux = await findByTestId("topology-table-cmux-orch.lead");
     fireEvent.click(cmux);
     await waitFor(() => {
-      const focusCall = mockFetch.mock.calls.find(
-        (c: unknown[]) => typeof c[0] === "string" && (c[0] as string).includes("/focus"),
+      const openCall = mockFetch.mock.calls.find(
+        (c: unknown[]) => typeof c[0] === "string" && (c[0] as string).includes("/open-cmux"),
       );
-      expect(focusCall).toBeDefined();
-      expect(focusCall![0]).toBe("/api/rigs/rig-1/nodes/orch.lead/focus");
+      expect(openCall).toBeDefined();
+      expect(openCall![0]).toBe("/api/rigs/rig-1/nodes/orch.lead/open-cmux");
     });
   });
 

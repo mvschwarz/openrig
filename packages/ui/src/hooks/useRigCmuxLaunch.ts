@@ -5,8 +5,8 @@
 // workspaces array from the daemon's response on success; throws an
 // Error carrying the daemon's honest 3-part message on 4xx/5xx.
 //
-// Distinct from the existing useCmuxLaunch.ts which targets the
-// per-NODE focus endpoint POST /api/rigs/:rigId/nodes/:logicalId/focus.
+// Distinct from useCmuxLaunch.ts which targets a single node's
+// open-or-focus endpoint POST /api/rigs/:rigId/nodes/:logicalId/open-cmux.
 
 import { useMutation } from "@tanstack/react-query";
 
