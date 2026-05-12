@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import http from "node:http";
 import { Command } from "commander";
-import { ConfigStore } from "../src/config-store.js";
+import { ConfigStore, VALID_KEYS } from "../src/config-store.js";
 import { configCommand } from "../src/commands/config.js";
 import { DaemonClient } from "../src/client.js";
 import { STATE_FILE, type DaemonState } from "../src/daemon-lifecycle.js";
@@ -266,6 +266,28 @@ describe("Config CLI", () => {
     expect(logs.join("\n")).toContain("transcripts");
   });
 
+  it("rig config get <key> --json prints value with source metadata", async () => {
+    const savedHost = process.env["OPENRIG_HOST"];
+    delete process.env["OPENRIG_HOST"];
+    const cmd = configCommand(join(tmpDir, "config.json"));
+    const prog = new Command();
+    prog.exitOverride();
+    prog.addCommand(cmd);
+
+    try {
+      const { logs } = await captureLogs(async () => {
+        await prog.parseAsync(["node", "rig", "config", "get", "daemon.host", "--json"]);
+      });
+      const parsed = JSON.parse(logs.join("\n"));
+      expect(parsed.value).toBe("127.0.0.1");
+      expect(parsed.source).toBe("default");
+      expect(parsed.defaultValue).toBe("127.0.0.1");
+    } finally {
+      if (savedHost === undefined) delete process.env["OPENRIG_HOST"];
+      else process.env["OPENRIG_HOST"] = savedHost;
+    }
+  });
+
   // Test 10
   it("rig config --help includes subcommands and examples", () => {
     const cmd = configCommand(join(tmpDir, "config.json"));
@@ -280,5 +302,59 @@ describe("Config CLI", () => {
     // Commander stores addHelpText content internally; verify our examples are in the command
     // by checking description and options contain the essential info
     expect(coreHelp).toContain("config");
+  });
+
+  // V0.3.1 slice 08 — HG-6: rig config --help text must enumerate every
+  // top-level dotted-prefix used in VALID_KEYS. The slice 08 verification
+  // pass caught a drift where ui.preview.* / agents.* / feed.subscriptions.* /
+  // runtime.codex.* + workspace.dogfood_evidence_root +
+  // workspace.operator_seat_name + transcripts.lines +
+  // transcripts.poll_interval_seconds were missing from the help "Keys:"
+  // section. This regression test extracts every top-level prefix from
+  // VALID_KEYS and asserts each appears (or its parent group appears) in
+  // the addHelpText after-text — guards against silent drift when new
+  // keys are added without updating help text.
+  it("HG-6: rig config --help enumerates every VALID_KEYS top-level prefix", () => {
+    const cmd = configCommand(join(tmpDir, "config.json"));
+    // Commander's `addHelpText("after", ...)` text is NOT included by
+    // `helpInformation()` — it's emitted via lifecycle hooks at help
+    // display time. Capture the full displayed help by routing
+    // `outputHelp()` through a custom writer.
+    let combined = "";
+    cmd.configureOutput({
+      writeOut: (text) => {
+        combined += text;
+      },
+      writeErr: () => {},
+    });
+    cmd.outputHelp();
+
+    // Top-level prefixes are the first dotted segment OR first-two
+    // segments for grouped namespaces like `ui.preview.*`,
+    // `feed.subscriptions.*`, `runtime.codex.*`.
+    const prefixes = new Set<string>();
+    for (const key of VALID_KEYS) {
+      const parts = key.split(".");
+      // Group sub-namespaces under their second segment when there are
+      // 3+ segments (e.g. ui.preview.refresh_interval_seconds → "ui.preview").
+      if (parts.length >= 3) {
+        prefixes.add(`${parts[0]}.${parts[1]}`);
+      } else {
+        prefixes.add(parts[0]!);
+      }
+    }
+    // Single-segment leaves (db.path, files.allowlist, progress.scan_roots)
+    // also appear in the help; the test allows either bare prefix OR
+    // the full leaf to satisfy the assertion.
+    const knownLeaves: Record<string, string[]> = {
+      "db": ["db.path"],
+      "files": ["files.allowlist"],
+      "progress": ["progress.scan_roots"],
+    };
+    for (const prefix of prefixes) {
+      const accepted = [prefix, ...(knownLeaves[prefix] ?? [])];
+      const found = accepted.some((needle) => combined.includes(needle));
+      expect(found, `rig config --help text must mention "${prefix}" (or one of ${accepted.join(", ")})`).toBe(true);
+    }
   });
 });
