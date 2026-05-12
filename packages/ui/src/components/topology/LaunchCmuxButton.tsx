@@ -10,7 +10,7 @@
 // tabs); hidden below the lg breakpoint via Tailwind responsive classes.
 
 import { useEffect, useRef } from "react";
-import { launchRigCmux } from "../../hooks/useRigCmuxLaunch.js";
+import { launchRigCmux } from "../../hooks/launchRigCmux.js";
 
 interface LaunchCmuxButtonProps {
   rigId: string;
