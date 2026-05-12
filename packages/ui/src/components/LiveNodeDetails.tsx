@@ -198,7 +198,7 @@ function ActionButtonsRow({ rigId, logicalId, data }: { rigId: string; logicalId
       <button
         onClick={handleOpenCmux}
         data-testid="detail-cmux-open"
-        className="inline-flex items-center gap-1.5 px-3 py-1.5 border border-outline-variant bg-white/30 font-mono text-[10px] uppercase tracking-wide text-stone-900 hover:bg-stone-100/60"
+        className="inline-flex min-h-11 items-center gap-1.5 px-3 py-2 border border-outline-variant bg-white/30 font-mono text-[10px] uppercase tracking-wide text-stone-900 hover:bg-stone-100/60"
       >
         <ToolMark tool="cmux" size="sm" />
         Open CMUX
@@ -207,7 +207,7 @@ function ActionButtonsRow({ rigId, logicalId, data }: { rigId: string; logicalId
         <button
           onClick={handleCopyAttach}
           data-testid="detail-copy-attach"
-          className="inline-flex items-center gap-1.5 px-3 py-1.5 border border-outline-variant bg-white/30 font-mono text-[10px] uppercase tracking-wide text-stone-700 hover:bg-stone-100/60"
+          className="inline-flex min-h-11 items-center gap-1.5 px-3 py-2 border border-outline-variant bg-white/30 font-mono text-[10px] uppercase tracking-wide text-stone-700 hover:bg-stone-100/60"
         >
           <ToolMark tool="tmux" size="sm" />
           Copy tmux attach
@@ -217,7 +217,7 @@ function ActionButtonsRow({ rigId, logicalId, data }: { rigId: string; logicalId
         <button
           onClick={handleCopyResume}
           data-testid="detail-copy-resume"
-          className="inline-flex items-center gap-1.5 px-3 py-1.5 border border-outline-variant bg-white/30 font-mono text-[10px] uppercase tracking-wide text-stone-700 hover:bg-stone-100/60"
+          className="inline-flex min-h-11 items-center gap-1.5 px-3 py-2 border border-outline-variant bg-white/30 font-mono text-[10px] uppercase tracking-wide text-stone-700 hover:bg-stone-100/60"
         >
           <CirclePlay aria-hidden="true" className="h-4 w-4 shrink-0" strokeWidth={1.5} />
           Copy resume command
@@ -662,7 +662,7 @@ function TabNav({
           aria-selected={activeTab === tab}
           data-testid={`live-tab-${tab}`}
           onClick={() => onSelect(tab)}
-          className={`px-3 py-1.5 font-mono text-[10px] uppercase tracking-wider transition-colors ${
+          className={`min-h-11 px-3 py-2 font-mono text-[10px] uppercase tracking-wider transition-colors ${
             activeTab === tab
               ? "border-b-2 border-stone-900 text-stone-900 font-bold -mb-px"
               : "text-stone-500 hover:text-stone-700"

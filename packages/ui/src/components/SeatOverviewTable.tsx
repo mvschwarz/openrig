@@ -214,7 +214,7 @@ export function SeatOverviewTable({ data, activityVisual }: SeatOverviewTablePro
       <div className="border-b border-outline-variant px-3 py-2 font-mono text-[8px] uppercase tracking-[0.16em] text-stone-400">
         Overview
       </div>
-      <table className="w-full text-left">
+      <table className="w-full table-fixed text-left">
         <tbody>
           {rows.map((row) =>
             row.shape === "compact" ? (
