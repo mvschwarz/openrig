@@ -84,7 +84,7 @@ Precedence: CLI flag > environment variable > config file > default`)
     .description("Read a single config value")
     .action((key: string, opts: { json?: boolean; showSource?: boolean }) => {
       try {
-        if (opts.json) {
+        if (opts.json || cmd.opts<{ json?: boolean }>().json) {
           console.log(JSON.stringify(store.resolveWithSource(key), null, 2));
           return;
         }

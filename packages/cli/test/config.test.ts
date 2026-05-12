@@ -266,6 +266,28 @@ describe("Config CLI", () => {
     expect(logs.join("\n")).toContain("transcripts");
   });
 
+  it("rig config get <key> --json prints value with source metadata", async () => {
+    const savedHost = process.env["OPENRIG_HOST"];
+    delete process.env["OPENRIG_HOST"];
+    const cmd = configCommand(join(tmpDir, "config.json"));
+    const prog = new Command();
+    prog.exitOverride();
+    prog.addCommand(cmd);
+
+    try {
+      const { logs } = await captureLogs(async () => {
+        await prog.parseAsync(["node", "rig", "config", "get", "daemon.host", "--json"]);
+      });
+      const parsed = JSON.parse(logs.join("\n"));
+      expect(parsed.value).toBe("127.0.0.1");
+      expect(parsed.source).toBe("default");
+      expect(parsed.defaultValue).toBe("127.0.0.1");
+    } finally {
+      if (savedHost === undefined) delete process.env["OPENRIG_HOST"];
+      else process.env["OPENRIG_HOST"] = savedHost;
+    }
+  });
+
   // Test 10
   it("rig config --help includes subcommands and examples", () => {
     const cmd = configCommand(join(tmpDir, "config.json"));
