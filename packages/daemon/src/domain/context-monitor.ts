@@ -93,6 +93,8 @@ export class ContextMonitor {
         sessionName: session.session_name,
         runtime: session.runtime,
         usedPercentage: usage.usedPercentage,
+        transcriptPath: usage.transcriptPath,
+        sessionId: usage.sessionId,
       });
     } catch {
       // Defensive: enforcer should not throw, but absorb here so the

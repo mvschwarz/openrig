@@ -41,6 +41,8 @@ export interface EnforcerInput {
   sessionName: string;
   runtime: string | null;
   usedPercentage: number | null;
+  transcriptPath?: string | null;
+  sessionId?: string | null;
 }
 
 export type EnforcerOutcome =
@@ -73,6 +75,10 @@ function defaultOpenRigHome(): string {
 function buildPostCompactRestorePrompt(input: {
   sessionName: string;
   openrigHome: string;
+  transcriptPath?: string | null;
+  sessionId?: string | null;
+  postCompactInstruction?: string | null;
+  postCompactInstructionFilePath?: string | null;
 }): string {
   const markerPath = path.join(
     input.openrigHome,
@@ -80,12 +86,26 @@ function buildPostCompactRestorePrompt(input: {
     "restore-pending",
     `${sanitizeSessionKey(input.sessionName)}.json`,
   );
-  return [
+  const pieces = [
     "OpenRig post-compaction restore is required for this session.",
     `Read the pending restore marker at ${markerPath}.`,
-    "If that marker is missing, inspect the newest matching packet under /tmp/claude-compaction-restore/ for this Claude session.",
-    "Load/read the claude-compaction-restore skill, follow the marker's restoreInstruction and postCompactInstruction, read the restore packet files, then report exactly: restored from packet at <path>; resumed at step <X>.",
-  ].join(" ");
+  ];
+  if (input.transcriptPath) {
+    pieces.push(`If the marker is missing, rebuild a packet from this Claude JSONL transcript: ${input.transcriptPath}.`);
+  } else if (input.sessionId) {
+    pieces.push(`If the marker is missing, inspect the newest matching packet under /tmp/claude-compaction-restore/ for session id ${input.sessionId}.`);
+  } else {
+    pieces.push("If the marker is missing, inspect the newest matching packet under /tmp/claude-compaction-restore/ for this Claude session.");
+  }
+  const inlineInstruction = input.postCompactInstruction?.trim();
+  const instructionFilePath = input.postCompactInstructionFilePath?.trim();
+  if (inlineInstruction) {
+    pieces.push(`Operator post-compaction instruction: ${inlineInstruction}`);
+  } else if (instructionFilePath) {
+    pieces.push(`Operator post-compaction instruction file: ${instructionFilePath}. Read it before restoring.`);
+  }
+  pieces.push("Load/read the claude-compaction-restore skill, follow the marker's restoreInstruction and postCompactInstruction when present, read the restore packet files, then report exactly: restored from packet at <path>; resumed at step <X>.");
+  return pieces.join(" ");
 }
 
 export class ClaudeCompactionEnforcer {
@@ -148,6 +168,10 @@ export class ClaudeCompactionEnforcer {
           buildPostCompactRestorePrompt({
             sessionName: input.sessionName,
             openrigHome: this.openrigHome,
+            transcriptPath: input.transcriptPath,
+            sessionId: input.sessionId,
+            postCompactInstruction: policy.messageInline,
+            postCompactInstructionFilePath: policy.messageFilePath,
           }),
         );
         if (!restore.ok) {
