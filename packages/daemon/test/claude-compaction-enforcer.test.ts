@@ -273,7 +273,7 @@ describe("ClaudeCompactionEnforcer", () => {
     })).toEqual({ triggered: true });
 
     expect(send).toHaveBeenCalledTimes(3);
-    expect(send.mock.calls[1]![1]).toContain("OpenRig post-compaction restore is required");
+    expect(send.mock.calls[1]![1]).toContain("Please respond to this message now");
     expect(send.mock.calls[2]![1]).toContain("/tmp/openrig-test-home/compaction/restore-pending/claude-seat@rig.json");
     expect(send.mock.calls[2]![1]).toContain("/tmp/claude.jsonl");
   });

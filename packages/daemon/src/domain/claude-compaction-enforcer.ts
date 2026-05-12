@@ -87,8 +87,8 @@ function buildPostCompactRestorePrompt(input: {
     `${sanitizeSessionKey(input.sessionName)}.json`,
   );
   const pieces = [
-    "OpenRig post-compaction restore is required for this session.",
-    `Read the pending restore marker at ${markerPath}.`,
+    "Please respond to this message now by restoring this Claude session after compaction.",
+    `First, look for the pending restore marker at ${markerPath}.`,
   ];
   if (input.transcriptPath) {
     pieces.push(`If the marker is missing, rebuild a packet from this Claude JSONL transcript: ${input.transcriptPath}.`);
@@ -104,7 +104,7 @@ function buildPostCompactRestorePrompt(input: {
   } else if (instructionFilePath) {
     pieces.push(`Operator post-compaction instruction file: ${instructionFilePath}. Read it before restoring.`);
   }
-  pieces.push("Load/read the claude-compaction-restore skill, follow the marker's restoreInstruction and postCompactInstruction when present, read the restore packet files, then report exactly: restored from packet at <path>; resumed at step <X>.");
+  pieces.push("Load/read the claude-compaction-restore skill, follow the marker's restoreInstruction and postCompactInstruction when present, read the restore packet files, then reply with: restored from packet at <path>; resumed at step <X>.");
   return pieces.join(" ");
 }
 
