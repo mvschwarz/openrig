@@ -3,8 +3,8 @@
 // Per agent-chat-surface.md L13–L21 V1 default: click → topology seat
 // detail with cmux launcher button. Phase 3 stubbed the navigation;
 // Phase 4 wires the cmux launcher itself via useCmuxLaunch (POST to
-// /api/rigs/$rigId/nodes/$logicalId/focus — existing pre-Phase-2
-// endpoint per architecture.md L88; no new daemon endpoint).
+// /api/rigs/$rigId/nodes/$logicalId/open-cmux — open-or-focus cmux
+// surface semantics).
 //
 // Click semantics: Tag click → cmux launches (foregrounds the seat
 // in cmux). The label stays a Link so right-click / cmd-click still
