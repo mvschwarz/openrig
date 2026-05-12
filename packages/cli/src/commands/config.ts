@@ -33,11 +33,16 @@ Examples:
 Keys:
   daemon.*               port, host
   db.path
-  transcripts.*          enabled, path
-  workspace.*            root, slices_root, steering_path, field_notes_root, specs_root
+  transcripts.*          enabled, path, lines, poll_interval_seconds
+  workspace.*            root, slices_root, steering_path, field_notes_root,
+                         specs_root, dogfood_evidence_root, operator_seat_name
   files.allowlist        name:/abs/path,name:/abs/path
   progress.scan_roots    name:/abs/path,name:/abs/path
+  ui.preview.*           refresh_interval_seconds, max_pins, default_lines
   recovery.*             auto_drive_provider_prompts, provider_auth_env_allowlist
+  agents.*               advisor_session, operator_session
+  feed.subscriptions.*   action_required, approvals, shipped, progress, audit_log
+  runtime.codex.*        hooks_enabled
 
 Precedence: CLI flag > environment variable > config file > default`)
     .action((opts: { json?: boolean; withSource?: boolean }) => {

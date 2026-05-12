@@ -8,6 +8,36 @@ deprecations, and behavioral changes. Breaking changes are called out explicitly
 
 ---
 
+## [0.3.1] - unreleased
+
+**Status**: in-flight; draft notes accumulate per shipped slice.
+
+### Config + settings
+
+- `rig config get/set/reset/list` continues to be the canonical CLI surface
+  for the typed config keys. No new keys added in 0.3.1; no breaking changes.
+- 29 allowlisted keys total. CLI `VALID_KEYS` and daemon `SETTINGS_VALID_KEYS`
+  are byte-identical sets (verified in slice 08; lockstep contract holds).
+- Env override precedence is `OPENRIG_<KEY>` env var > `~/.openrig/config.json`
+  > derived default. The 5 original runtime keys (`daemon.port`, `daemon.host`,
+  `db.path`, `transcripts.enabled`, `transcripts.path`) additionally accept
+  their `RIGGED_<KEY>` legacy alias for upgrade compatibility from pre-rename
+  installs; new typed keys are `OPENRIG_<KEY>` only.
+- `rig config --help` text refreshed to enumerate every top-level key
+  namespace: `daemon.*`, `db.path`, `transcripts.*` (including the
+  rotation-tuning keys `lines` + `poll_interval_seconds`), `workspace.*`
+  (including `dogfood_evidence_root` + `operator_seat_name`), `files.allowlist`,
+  `progress.scan_roots`, `ui.preview.*`, `recovery.*`, `agents.*`,
+  `feed.subscriptions.*`, `runtime.codex.*`. A regression test asserts the
+  help text continues to enumerate every namespace as new keys land.
+- No new SC-29 EXCEPTIONs introduced by the slice 08 validation pass.
+
+### Other slices
+
+(slice notes accumulate here as each slice ships.)
+
+---
+
 ## [0.3.0] - 2026-05-10
 
 **Status**: release candidate for public publish. This entry documents the
