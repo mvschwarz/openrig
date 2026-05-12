@@ -109,6 +109,13 @@ under `/tmp/claude-compaction-restore/`, writes a pending marker under
 `$OPENRIG_HOME/compaction/restore-pending/`, and returns a
 `systemMessage` telling the compacted agent what to read.
 
+The hook and bridge provide context, but they do not create an
+assistant turn by themselves. OpenRig's daemon-side compaction enforcer
+therefore sends one normal post-compaction restore prompt after context
+usage drops below the configured threshold. That prompt points at the
+pending marker and restore packet so the seat actively runs the restore
+protocol instead of sitting idle after `/compact`.
+
 To wire the hook, add to `~/.claude/settings.json`:
 
 ```json

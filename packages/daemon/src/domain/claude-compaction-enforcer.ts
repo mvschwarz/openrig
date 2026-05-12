@@ -1,5 +1,7 @@
 import type { SessionTransport } from "./session-transport.js";
 import type { SettingsStore } from "./user-settings/settings-store.js";
+import * as os from "node:os";
+import * as path from "node:path";
 
 /**
  * Slice 27 — Claude auto-compaction policy enforcer.
@@ -28,6 +30,10 @@ import type { SettingsStore } from "./user-settings/settings-store.js";
  *   reason; does not throw. The dedup timestamp is only set on
  *   successful send, so a transient send failure can retry on the next
  *   polling tick.
+ * - Post-compact restore: after a successful auto-compact, the enforcer
+ *   sends one normal prompt once context usage drops below threshold.
+ *   This is intentionally active because Claude hooks can provide
+ *   context, but they do not create a new assistant turn by themselves.
  */
 export const DEDUP_WINDOW_MS_DEFAULT = 60_000;
 
@@ -56,21 +62,50 @@ function buildCompactCommand(compactInstruction: string): string {
   return normalized.length > 0 ? `/compact ${normalized}` : "/compact";
 }
 
+function sanitizeSessionKey(value: string): string {
+  return value.replace(/[^a-zA-Z0-9_.@-]/g, "_");
+}
+
+function defaultOpenRigHome(): string {
+  return process.env["OPENRIG_HOME"] || process.env["RIGGED_HOME"] || path.join(os.homedir(), ".openrig");
+}
+
+function buildPostCompactRestorePrompt(input: {
+  sessionName: string;
+  openrigHome: string;
+}): string {
+  const markerPath = path.join(
+    input.openrigHome,
+    "compaction",
+    "restore-pending",
+    `${sanitizeSessionKey(input.sessionName)}.json`,
+  );
+  return [
+    "OpenRig post-compaction restore is required for this session.",
+    `Read the pending restore marker at ${markerPath}.`,
+    "If that marker is missing, inspect the newest matching packet under /tmp/claude-compaction-restore/ for this Claude session.",
+    "Load/read the claude-compaction-restore skill, follow the marker's restoreInstruction and postCompactInstruction, read the restore packet files, then report exactly: restored from packet at <path>; resumed at step <X>.",
+  ].join(" ");
+}
+
 export class ClaudeCompactionEnforcer {
   private readonly settingsStore: SettingsStore;
   private readonly sessionTransport: SessionTransport;
   private readonly dedupWindowMs: number;
+  private readonly openrigHome: string;
   private readonly lastAutoCompactAt = new Map<string, number>();
   private readonly triggeredAboveThreshold = new Set<string>();
+  private readonly pendingPostCompactRestore = new Set<string>();
 
   constructor(
     settingsStore: SettingsStore,
     sessionTransport: SessionTransport,
-    opts?: { dedupWindowMs?: number },
+    opts?: { dedupWindowMs?: number; openrigHome?: string },
   ) {
     this.settingsStore = settingsStore;
     this.sessionTransport = sessionTransport;
     this.dedupWindowMs = opts?.dedupWindowMs ?? DEDUP_WINDOW_MS_DEFAULT;
+    this.openrigHome = opts?.openrigHome ?? defaultOpenRigHome();
   }
 
   /**
@@ -107,6 +142,21 @@ export class ClaudeCompactionEnforcer {
       return { triggered: false, reason: "invalid_policy" };
     }
     if (input.usedPercentage < policy.thresholdPercent) {
+      if (this.pendingPostCompactRestore.has(input.sessionName)) {
+        const restore = await this.sessionTransport.send(
+          input.sessionName,
+          buildPostCompactRestorePrompt({
+            sessionName: input.sessionName,
+            openrigHome: this.openrigHome,
+          }),
+        );
+        if (!restore.ok) {
+          return { triggered: false, reason: "send_failed" };
+        }
+        this.pendingPostCompactRestore.delete(input.sessionName);
+        this.triggeredAboveThreshold.delete(input.sessionName);
+        return { triggered: true };
+      }
       this.triggeredAboveThreshold.delete(input.sessionName);
       return { triggered: false, reason: "below_threshold" };
     }
@@ -129,6 +179,7 @@ export class ClaudeCompactionEnforcer {
     }
     this.lastAutoCompactAt.set(input.sessionName, now);
     this.triggeredAboveThreshold.add(input.sessionName);
+    this.pendingPostCompactRestore.add(input.sessionName);
     return { triggered: true };
   }
 }

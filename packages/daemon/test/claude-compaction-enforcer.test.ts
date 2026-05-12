@@ -124,10 +124,13 @@ describe("ClaudeCompactionEnforcer", () => {
     expect(send).not.toHaveBeenCalled();
   });
 
-  it("HG-4: repeated high usage stays suppressed until usage drops below threshold and re-arms", async () => {
+  it("HG-4: repeated high usage stays suppressed until usage drops below threshold and re-arms after post-compact restore prompt", async () => {
     const settings = makeSettingsStore(POLICY_ENABLED_AT_80);
     const { transport, send } = makeSessionTransport();
-    const enforcer = new ClaudeCompactionEnforcer(settings, transport, { dedupWindowMs: 60_000 });
+    const enforcer = new ClaudeCompactionEnforcer(settings, transport, {
+      dedupWindowMs: 60_000,
+      openrigHome: "/tmp/openrig-test-home",
+    });
 
     let now = 1_700_000_000_000;
     vi.spyOn(Date, "now").mockImplementation(() => now);
@@ -160,7 +163,11 @@ describe("ClaudeCompactionEnforcer", () => {
       runtime: "claude-code",
       usedPercentage: 20,
     });
-    expect(below).toEqual({ triggered: false, reason: "below_threshold" });
+    expect(below).toEqual({ triggered: true });
+    expect(send).toHaveBeenLastCalledWith(
+      "claude-seat@rig",
+      expect.stringContaining("/tmp/openrig-test-home/compaction/restore-pending/claude-seat@rig.json"),
+    );
 
     now += 61_000;
     const fourth = await enforcer.maybeAutoCompact({
@@ -170,7 +177,7 @@ describe("ClaudeCompactionEnforcer", () => {
     });
     expect(fourth).toEqual({ triggered: true });
 
-    expect(send).toHaveBeenCalledTimes(2);
+    expect(send).toHaveBeenCalledTimes(3);
   });
 
   it("runtime filter: only claude-code triggers (codex sessions return runtime_filter without invoking send)", async () => {
@@ -231,6 +238,39 @@ describe("ClaudeCompactionEnforcer", () => {
     });
     expect(second).toEqual({ triggered: true });
     expect(send).toHaveBeenCalledTimes(2);
+  });
+
+  it("post-compact restore send-failure stays pending and retries on the next below-threshold tick", async () => {
+    const settings = makeSettingsStore(POLICY_ENABLED_AT_80);
+    const { transport, send } = makeSessionTransport();
+    const enforcer = new ClaudeCompactionEnforcer(settings, transport, {
+      dedupWindowMs: 60_000,
+      openrigHome: "/tmp/openrig-test-home",
+    });
+
+    expect(await enforcer.maybeAutoCompact({
+      sessionName: "claude-seat@rig",
+      runtime: "claude-code",
+      usedPercentage: 95,
+    })).toEqual({ triggered: true });
+
+    send.mockImplementationOnce(async () => ({ ok: false }));
+    expect(await enforcer.maybeAutoCompact({
+      sessionName: "claude-seat@rig",
+      runtime: "claude-code",
+      usedPercentage: 0,
+    })).toEqual({ triggered: false, reason: "send_failed" });
+
+    send.mockImplementationOnce(async () => ({ ok: true }));
+    expect(await enforcer.maybeAutoCompact({
+      sessionName: "claude-seat@rig",
+      runtime: "claude-code",
+      usedPercentage: 0,
+    })).toEqual({ triggered: true });
+
+    expect(send).toHaveBeenCalledTimes(3);
+    expect(send.mock.calls[1]![1]).toContain("OpenRig post-compaction restore is required");
+    expect(send.mock.calls[2]![1]).toContain("/tmp/openrig-test-home/compaction/restore-pending/claude-seat@rig.json");
   });
 
   it("dedup keyed per-session: two distinct seats do not block each other", async () => {

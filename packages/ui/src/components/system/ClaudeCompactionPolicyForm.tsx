@@ -142,7 +142,8 @@ function PolicyFormBody({ data, setSetting }: PolicyFormBodyProps) {
         OpenRig arms an automatic compaction and sends
         <code className="font-mono text-[12px]"> /compact</code> once the seat is idle
         with an empty prompt. Compaction instructions are sent with that slash
-        command, while restore guidance is delivered through the compaction hooks.
+        command. After compaction, OpenRig sends one restore prompt that points
+        the seat at its restore packet.
       </p>
 
       <form
