@@ -5,7 +5,7 @@
 // resolution, same file format. Drift between the two would mean the
 // daemon's UI route surfaces a different value than the CLI.
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -32,6 +32,12 @@ function clearEnv(): () => void {
     "OPENRIG_FEED_SUBSCRIPTIONS_ACTION_REQUIRED", "OPENRIG_FEED_SUBSCRIPTIONS_APPROVALS",
     "OPENRIG_FEED_SUBSCRIPTIONS_SHIPPED", "OPENRIG_FEED_SUBSCRIPTIONS_PROGRESS",
     "OPENRIG_FEED_SUBSCRIPTIONS_AUDIT_LOG",
+    "OPENRIG_RUNTIME_CODEX_HOOKS_ENABLED",
+    // Slice 27 — Claude auto-compaction policy env-map.
+    "OPENRIG_POLICIES_CLAUDE_COMPACTION_ENABLED",
+    "OPENRIG_POLICIES_CLAUDE_COMPACTION_THRESHOLD_PERCENT",
+    "OPENRIG_POLICIES_CLAUDE_COMPACTION_MESSAGE_INLINE",
+    "OPENRIG_POLICIES_CLAUDE_COMPACTION_MESSAGE_FILE_PATH",
     "RIGGED_PORT", "RIGGED_HOST", "RIGGED_DB",
     "RIGGED_TRANSCRIPTS_ENABLED", "RIGGED_TRANSCRIPTS_PATH",
   ];
@@ -90,6 +96,11 @@ describe("SettingsStore (User Settings v0)", () => {
       "feed.subscriptions.audit_log",
       // plugin-primitive Phase 3a slice 3.5 — Codex feature flag.
       "runtime.codex.hooks_enabled",
+      // Slice 27 — Claude auto-compaction policy. SC-29 EXCEPTION #10.
+      "policies.claude_compaction.enabled",
+      "policies.claude_compaction.threshold_percent",
+      "policies.claude_compaction.message_inline",
+      "policies.claude_compaction.message_file_path",
     ]);
   });
 
@@ -234,6 +245,201 @@ describe("SettingsStore (User Settings v0)", () => {
     expect(raw.workspace.slicesRoot).toBe("/x");
     expect(raw.daemon.port).toBe(1234);
   });
+
+  // Slice 27 — Claude auto-compaction policy resolution.
+  it("HG-5 + HG-10: resolveClaudeCompactionPolicy returns defaults when no file/env present (opt-in default-off)", () => {
+    const store = new SettingsStore(configPath);
+    const policy = store.resolveClaudeCompactionPolicy();
+    expect(policy.enabled).toBe(false);
+    expect(policy.thresholdPercent).toBe(80);
+    expect(policy.messageInline).toBe("");
+    expect(policy.messageFilePath).toBe("");
+  });
+
+  it("HG-10: resolveClaudeCompactionPolicy picks up direct config.json edits without daemon restart (single resolve call rereads file)", () => {
+    const store = new SettingsStore(configPath);
+    expect(store.resolveClaudeCompactionPolicy().enabled).toBe(false);
+
+    writeFileSync(
+      configPath,
+      JSON.stringify({
+        policies: {
+          claudeCompaction: {
+            enabled: true,
+            thresholdPercent: 65,
+            messageInline: "carry-forward note",
+            messageFilePath: "",
+          },
+        },
+      }),
+    );
+
+    const updated = store.resolveClaudeCompactionPolicy();
+    expect(updated.enabled).toBe(true);
+    expect(updated.thresholdPercent).toBe(65);
+    expect(updated.messageInline).toBe("carry-forward note");
+    expect(updated.messageFilePath).toBe("");
+  });
+
+  it("HG-1: set/get round-trip for each policy key persists to disk and reads back", () => {
+    const store = new SettingsStore(configPath);
+
+    store.set("policies.claude_compaction.enabled", "true");
+    store.set("policies.claude_compaction.threshold_percent", "60");
+    store.set("policies.claude_compaction.message_inline", "rehydrate the agent");
+    store.set("policies.claude_compaction.message_file_path", "/tmp/msg.txt");
+
+    const raw = JSON.parse(require("node:fs").readFileSync(configPath, "utf-8"));
+    expect(raw.policies.claudeCompaction.enabled).toBe(true);
+    expect(raw.policies.claudeCompaction.thresholdPercent).toBe(60);
+    expect(raw.policies.claudeCompaction.messageInline).toBe("rehydrate the agent");
+    expect(raw.policies.claudeCompaction.messageFilePath).toBe("/tmp/msg.txt");
+
+    expect(store.resolveOne("policies.claude_compaction.enabled").value).toBe(true);
+    expect(store.resolveOne("policies.claude_compaction.threshold_percent").value).toBe(60);
+    expect(store.resolveOne("policies.claude_compaction.message_inline").value).toBe("rehydrate the agent");
+    expect(store.resolveOne("policies.claude_compaction.message_file_path").value).toBe("/tmp/msg.txt");
+  });
+
+  it("HG-1: invalid threshold rejected by coerceValue (non-numeric raises)", () => {
+    const store = new SettingsStore(configPath);
+    expect(() => store.set("policies.claude_compaction.threshold_percent", "not-a-number")).toThrow(/expected a number/);
+  });
+
+  // Slice 27 BLOCKING-FIX-2 — env + file source resolution must also
+  // reject invalid threshold values. Without this, an env override
+  // (OPENRIG_POLICIES_CLAUDE_COMPACTION_THRESHOLD_PERCENT=80abc) or a
+  // hand-edited config.json poisons the trigger contract because the
+  // write-path validators are bypassed entirely.
+  //
+  // Behavior on bad input: drop the override, warn to stderr, fall
+  // through to file/default (env layer) or default (file layer).
+  describe("BLOCKING-FIX-2: env + file source validation", () => {
+    const reject = ["0", "101", "-1", "80abc", "80.5", "NaN", "Infinity"];
+
+    for (const raw of reject) {
+      it(`env=${JSON.stringify(raw)} → resolveOne returns default 80 (env rejected, NOT coerced)`, () => {
+        process.env["OPENRIG_POLICIES_CLAUDE_COMPACTION_THRESHOLD_PERCENT"] = raw;
+        const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+        try {
+          const store = new SettingsStore(configPath);
+          const resolved = store.resolveOne("policies.claude_compaction.threshold_percent");
+          // Default value (80), source falls through to "default"
+          expect(resolved.value).toBe(80);
+          expect(resolved.source).toBe("default");
+          // Warning emitted (operator visibility)
+          const calls = stderrSpy.mock.calls.map((c) => String(c[0]));
+          expect(calls.some((c) => c.includes("env override for policies.claude_compaction.threshold_percent rejected"))).toBe(true);
+        } finally {
+          stderrSpy.mockRestore();
+          delete process.env["OPENRIG_POLICIES_CLAUDE_COMPACTION_THRESHOLD_PERCENT"];
+        }
+      });
+    }
+
+    it("discriminator: env=80abc (rejected → source=default, warning emitted) vs env=80 (accepted → source=env, no warning)", () => {
+      // Case A: rejected env
+      process.env["OPENRIG_POLICIES_CLAUDE_COMPACTION_THRESHOLD_PERCENT"] = "80abc";
+      let stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+      try {
+        const a = new SettingsStore(configPath).resolveOne("policies.claude_compaction.threshold_percent");
+        expect(a.value).toBe(80);
+        expect(a.source).toBe("default");
+        const warnCount = stderrSpy.mock.calls
+          .map((c) => String(c[0]))
+          .filter((c) => c.includes("env override for policies.claude_compaction.threshold_percent rejected"))
+          .length;
+        expect(warnCount).toBe(1);
+      } finally {
+        stderrSpy.mockRestore();
+        delete process.env["OPENRIG_POLICIES_CLAUDE_COMPACTION_THRESHOLD_PERCENT"];
+      }
+
+      // Case B: accepted env — same RESOLVED VALUE (80) but DIFFERENT
+      // observable: source=env, no warning. This is the discriminator.
+      process.env["OPENRIG_POLICIES_CLAUDE_COMPACTION_THRESHOLD_PERCENT"] = "80";
+      stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+      try {
+        const b = new SettingsStore(configPath).resolveOne("policies.claude_compaction.threshold_percent");
+        expect(b.value).toBe(80);
+        expect(b.source).toBe("env");
+        const warnCount = stderrSpy.mock.calls
+          .map((c) => String(c[0]))
+          .filter((c) => c.includes("rejected"))
+          .length;
+        expect(warnCount).toBe(0);
+      } finally {
+        stderrSpy.mockRestore();
+        delete process.env["OPENRIG_POLICIES_CLAUDE_COMPACTION_THRESHOLD_PERCENT"];
+      }
+    });
+
+    const fileReject: Array<{ name: string; written: unknown }> = [
+      { name: "0", written: 0 },
+      { name: "101", written: 101 },
+      { name: "-1", written: -1 },
+      { name: "80.5 (non-integer JSON number)", written: 80.5 },
+      { name: '"80abc" (JSON string)', written: "80abc" },
+    ];
+
+    for (const { name, written } of fileReject) {
+      it(`file thresholdPercent=${name} → resolveOne returns default 80 + warning`, () => {
+        writeFileSync(configPath, JSON.stringify({
+          policies: { claudeCompaction: { thresholdPercent: written } },
+        }));
+        const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+        try {
+          const resolved = new SettingsStore(configPath).resolveOne("policies.claude_compaction.threshold_percent");
+          expect(resolved.value).toBe(80);
+          expect(resolved.source).toBe("default");
+          const calls = stderrSpy.mock.calls.map((c) => String(c[0]));
+          expect(calls.some((c) => c.includes("file value for policies.claude_compaction.threshold_percent rejected"))).toBe(true);
+        } finally {
+          stderrSpy.mockRestore();
+        }
+      });
+    }
+  });
+
+  // Slice 27 BLOCKING-FIX — strict accept/reject matrix for
+  // threshold_percent. Per banked feedback_static_gates_mirror_runtime_validators,
+  // the runtime validator is the source of truth; this test invokes the
+  // same `set()` path the daemon's /api/config POST handler uses so a
+  // future drift gets caught at CI.
+  describe("HG-1 strict threshold validation matrix", () => {
+    const cases = {
+      accept: ["1", "2", "50", "80", "99", "100"],
+      reject: [
+        { raw: "0", reason: /must be in \[1, 100\]/ },
+        { raw: "101", reason: /must be in \[1, 100\]/ },
+        { raw: "-1", reason: /must be in \[1, 100\]/ },
+        { raw: "80abc", reason: /expected an integer/ },
+        { raw: "abc80", reason: /expected a number|expected an integer/ },
+        { raw: "80.5", reason: /expected an integer/ },
+        { raw: "", reason: /expected a number|expected an integer/ },
+        { raw: " ", reason: /expected a number|expected an integer/ },
+        { raw: "NaN", reason: /expected a number|expected an integer/ },
+        { raw: "Infinity", reason: /expected a number|expected an integer/ },
+      ],
+    };
+
+    for (const value of cases.accept) {
+      it(`accepts ${JSON.stringify(value)}`, () => {
+        const store = new SettingsStore(configPath);
+        expect(() => store.set("policies.claude_compaction.threshold_percent", value)).not.toThrow();
+        expect(store.resolveOne("policies.claude_compaction.threshold_percent").value).toBe(Number(value));
+      });
+    }
+
+    for (const { raw, reason } of cases.reject) {
+      it(`rejects ${JSON.stringify(raw)}`, () => {
+        const store = new SettingsStore(configPath);
+        expect(() => store.set("policies.claude_compaction.threshold_percent", raw)).toThrow(reason);
+      });
+    }
+  });
+
+  void existsSync;
 });
 
 describe("parseNamedPairs (daemon copy)", () => {

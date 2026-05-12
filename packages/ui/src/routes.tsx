@@ -221,7 +221,8 @@ const settingsRoute = createRoute({
 
 // Slice 26 — Settings destination becomes a 4-item Explorer (Settings /
 // Policies / Log / Status). Each item is its own route under the
-// settings prefix; the Explorer sidebar handles navigation.
+// settings prefix; the Explorer sidebar handles navigation. Slice 27
+// fills the Policies page with the Claude auto-compaction policy form.
 const settingsPoliciesRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/settings/policies",

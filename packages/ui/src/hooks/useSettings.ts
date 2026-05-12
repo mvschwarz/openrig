@@ -34,7 +34,12 @@ export type SettingsKey =
   | "feed.subscriptions.approvals"
   | "feed.subscriptions.shipped"
   | "feed.subscriptions.progress"
-  | "feed.subscriptions.audit_log";
+  | "feed.subscriptions.audit_log"
+  // Slice 27 — Claude auto-compaction policy keys (SC-29 EXCEPTION #10).
+  | "policies.claude_compaction.enabled"
+  | "policies.claude_compaction.threshold_percent"
+  | "policies.claude_compaction.message_inline"
+  | "policies.claude_compaction.message_file_path";
 
 export interface SettingsResponse {
   settings: Record<SettingsKey, ResolvedSetting>;

@@ -43,6 +43,8 @@ Keys:
   agents.*               advisor_session, operator_session
   feed.subscriptions.*   action_required, approvals, shipped, progress, audit_log
   runtime.codex.*        hooks_enabled
+  policies.claude_compaction.*
+                         enabled, threshold_percent, message_inline, message_file_path
 
 Precedence: CLI flag > environment variable > config file > default`)
     .action((opts: { json?: boolean; withSource?: boolean }) => {

@@ -9,7 +9,7 @@
 //   - parseNamedPairs decodes the named-pair format
 //   - init-workspace creates mission-aware workspace files; idempotent
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Command } from "commander";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -98,6 +98,11 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
       "feed.subscriptions.audit_log",
       // plugin-primitive Phase 3a slice 3.5 — Codex feature flag.
       "runtime.codex.hooks_enabled",
+      // Slice 27 — Claude auto-compaction policy. SC-29 EXCEPTION #10.
+      "policies.claude_compaction.enabled",
+      "policies.claude_compaction.threshold_percent",
+      "policies.claude_compaction.message_inline",
+      "policies.claude_compaction.message_file_path",
     ];
     expect([...VALID_KEYS]).toEqual(expected);
   });
@@ -379,6 +384,128 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
     store.set("recovery.auto_drive_provider_prompts", "true");
     expect(store.get("recovery.auto_drive_provider_prompts")).toBe(true);
     expect(store.resolve().recovery.autoDriveProviderPrompts).toBe(true);
+  });
+
+  // Slice 27 BLOCKING-FIX-2 — env override + file value validation.
+  // Bypass-prevention at the RESOLVE path: an env override like
+  // OPENRIG_POLICIES_CLAUDE_COMPACTION_THRESHOLD_PERCENT=80abc previously
+  // parseInt-coerced to 80 and shipped through resolveOne as a "valid"
+  // env-sourced value. With BLOCKING-FIX-2 the env resolution validates;
+  // bad env drops the override (falls to file/default) and warns on stderr.
+  describe("BLOCKING-FIX-2: env + file source validation", () => {
+    const reject = ["0", "101", "-1", "80abc", "80.5", "NaN", "Infinity"];
+
+    for (const raw of reject) {
+      it(`env=${JSON.stringify(raw)} → resolve returns default 80; warning emitted`, () => {
+        process.env["OPENRIG_POLICIES_CLAUDE_COMPACTION_THRESHOLD_PERCENT"] = raw;
+        const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+        try {
+          const store = new ConfigStore(configPath);
+          const resolved = store.resolve();
+          expect(resolved.policies.claudeCompaction.thresholdPercent).toBe(80);
+          const calls = stderrSpy.mock.calls.map((c) => String(c[0]));
+          expect(calls.some((c) => c.includes("env override for policies.claude_compaction.threshold_percent rejected"))).toBe(true);
+        } finally {
+          stderrSpy.mockRestore();
+          delete process.env["OPENRIG_POLICIES_CLAUDE_COMPACTION_THRESHOLD_PERCENT"];
+        }
+      });
+    }
+
+    it("discriminator: env=80abc (rejected, source falls to default, warning) vs env=80 (accepted, source=env, no warning)", () => {
+      // Case A: rejected → source=default, warning emitted
+      process.env["OPENRIG_POLICIES_CLAUDE_COMPACTION_THRESHOLD_PERCENT"] = "80abc";
+      let stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+      try {
+        const a = new ConfigStore(configPath).resolveWithSource("policies.claude_compaction.threshold_percent");
+        expect(a.value).toBe(80);
+        expect(a.source).toBe("default");
+        const warns = stderrSpy.mock.calls
+          .map((c) => String(c[0]))
+          .filter((c) => c.includes("env override for policies.claude_compaction.threshold_percent rejected"));
+        expect(warns.length).toBe(1);
+      } finally {
+        stderrSpy.mockRestore();
+        delete process.env["OPENRIG_POLICIES_CLAUDE_COMPACTION_THRESHOLD_PERCENT"];
+      }
+
+      // Case B: accepted → SAME numeric value (80) but source=env, NO warning
+      process.env["OPENRIG_POLICIES_CLAUDE_COMPACTION_THRESHOLD_PERCENT"] = "80";
+      stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+      try {
+        const b = new ConfigStore(configPath).resolveWithSource("policies.claude_compaction.threshold_percent");
+        expect(b.value).toBe(80);
+        expect(b.source).toBe("env");
+        const warns = stderrSpy.mock.calls
+          .map((c) => String(c[0]))
+          .filter((c) => c.includes("rejected"));
+        expect(warns.length).toBe(0);
+      } finally {
+        stderrSpy.mockRestore();
+        delete process.env["OPENRIG_POLICIES_CLAUDE_COMPACTION_THRESHOLD_PERCENT"];
+      }
+    });
+
+    const fileReject: Array<{ name: string; written: unknown }> = [
+      { name: "0", written: 0 },
+      { name: "101", written: 101 },
+      { name: "-1", written: -1 },
+      { name: "80.5 (JSON non-integer)", written: 80.5 },
+      { name: '"80abc" (JSON string)', written: "80abc" },
+    ];
+
+    for (const { name, written } of fileReject) {
+      it(`file thresholdPercent=${name} → resolve returns default 80; warning emitted`, () => {
+        writeFileSync(configPath, JSON.stringify({
+          policies: { claudeCompaction: { thresholdPercent: written } },
+        }));
+        const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+        try {
+          const resolved = new ConfigStore(configPath).resolve();
+          expect(resolved.policies.claudeCompaction.thresholdPercent).toBe(80);
+          const calls = stderrSpy.mock.calls.map((c) => String(c[0]));
+          expect(calls.some((c) => c.includes("file value for policies.claude_compaction.threshold_percent rejected"))).toBe(true);
+        } finally {
+          stderrSpy.mockRestore();
+        }
+      });
+    }
+  });
+
+  // Slice 27 BLOCKING-FIX — strict accept/reject matrix for
+  // policies.claude_compaction.threshold_percent. The contract is
+  // integer in [1, 100]. parseInt's permissive coercion would otherwise
+  // accept "80abc" → 80, "80.5" → 80, and even 0 / 101 / -1 which would
+  // break the trigger's safety contract (0 = compact every tick).
+  describe("policies.claude_compaction.threshold_percent strict validation matrix", () => {
+    const accept = ["1", "2", "50", "80", "99", "100"];
+    const reject: Array<{ raw: string; reason: RegExp }> = [
+      { raw: "0", reason: /must be in \[1, 100\]/ },
+      { raw: "101", reason: /must be in \[1, 100\]/ },
+      { raw: "-1", reason: /must be in \[1, 100\]/ },
+      { raw: "80abc", reason: /expected an integer/ },
+      { raw: "abc80", reason: /expected a number|expected an integer/ },
+      { raw: "80.5", reason: /expected an integer/ },
+      { raw: "", reason: /expected a number|expected an integer/ },
+      { raw: " ", reason: /expected a number|expected an integer/ },
+      { raw: "NaN", reason: /expected a number|expected an integer/ },
+      { raw: "Infinity", reason: /expected a number|expected an integer/ },
+    ];
+
+    for (const value of accept) {
+      it(`accepts ${JSON.stringify(value)}`, () => {
+        const store = new ConfigStore(configPath);
+        expect(() => store.set("policies.claude_compaction.threshold_percent", value)).not.toThrow();
+        expect(store.get("policies.claude_compaction.threshold_percent")).toBe(Number(value));
+      });
+    }
+
+    for (const { raw, reason } of reject) {
+      it(`rejects ${JSON.stringify(raw)}`, () => {
+        const store = new ConfigStore(configPath);
+        expect(() => store.set("policies.claude_compaction.threshold_percent", raw)).toThrow(reason);
+      });
+    }
   });
 });
 

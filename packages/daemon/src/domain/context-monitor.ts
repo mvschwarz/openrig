@@ -1,10 +1,12 @@
 import type Database from "better-sqlite3";
+import type { ClaudeCompactionEnforcer } from "./claude-compaction-enforcer.js";
 import type { ContextUsageStore } from "./context-usage-store.js";
 import {
   isAttentionRequiredReadinessCode,
   type NodeBinding,
   type ReadinessResult,
 } from "./runtime-adapter.js";
+import type { ContextUsage } from "./types.js";
 
 /** Default polling interval: 30 seconds. */
 export const DEFAULT_POLL_INTERVAL_MS = 30_000;
@@ -28,31 +30,41 @@ interface ClaudeContextProvisioner {
  * Polls known managed runtime context sources and persists the latest
  * normalized telemetry. Scheduler-only: no queries, no response shaping,
  * no in-memory truth.
+ *
+ * Slice 27: optional `compactionEnforcer` participates in each polling
+ * tick after persistence so policy-driven /compact triggers fire on the
+ * same observation the operator sees in the UI. Without an enforcer
+ * provided, polling behavior is unchanged.
  */
 export class ContextMonitor {
   private db: Database.Database;
   private store: ContextUsageStore;
   private claudeContextProvisioner: ClaudeContextProvisioner | null;
+  private compactionEnforcer: ClaudeCompactionEnforcer | null;
   private timer: ReturnType<typeof setInterval> | null = null;
 
   constructor(
     db: Database.Database,
     store: ContextUsageStore,
     claudeContextProvisioner?: ClaudeContextProvisioner,
+    compactionEnforcer?: ClaudeCompactionEnforcer,
   ) {
     this.db = db;
     this.store = store;
     this.claudeContextProvisioner = claudeContextProvisioner ?? null;
+    this.compactionEnforcer = compactionEnforcer ?? null;
   }
 
   /** Discover active managed Claude sessions and poll their sidecar files. */
   async pollOnce(): Promise<void> {
     const sessions = this.getEligibleSessions();
     for (const session of sessions) {
+      let observed: ContextUsage | null = null;
       try {
-        const usage = this.readContextUsage(session);
-        this.store.persist(session.node_id, usage);
+        observed = this.readContextUsage(session);
+        this.store.persist(session.node_id, observed);
       } catch {
+        observed = null;
         // One bad session must not crash polling for others
         try {
           this.store.persist(session.node_id, this.store.unknownUsage("parse_error"));
@@ -60,6 +72,31 @@ export class ContextMonitor {
       }
 
       await this.normalizeStartupStatus(session);
+      await this.maybeAutoCompact(session, observed);
+    }
+  }
+
+  /**
+   * Slice 27 — invoke the enforcer with the latest observation. The
+   * enforcer owns policy + dedup + send; ContextMonitor only relays
+   * data and absorbs enforcer errors so a trigger-path fault never
+   * crashes telemetry polling.
+   */
+  private async maybeAutoCompact(
+    session: EligibleSession,
+    usage: ContextUsage | null,
+  ): Promise<void> {
+    if (!this.compactionEnforcer) return;
+    if (!usage || usage.availability !== "known") return;
+    try {
+      await this.compactionEnforcer.maybeAutoCompact({
+        sessionName: session.session_name,
+        runtime: session.runtime,
+        usedPercentage: usage.usedPercentage,
+      });
+    } catch {
+      // Defensive: enforcer should not throw, but absorb here so the
+      // polling loop continues to make progress for remaining sessions.
     }
   }
 

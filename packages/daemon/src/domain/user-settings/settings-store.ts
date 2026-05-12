@@ -85,6 +85,16 @@ export const SETTINGS_VALID_KEYS = [
   // Codex runtime. When false, operator is managing Codex config
   // independently — daemon does NOT mutate.
   "runtime.codex.hooks_enabled",
+  // Slice 27 — Claude auto-compaction policy. SC-29 EXCEPTION #10:
+  // 4 new keys (lockstep with cli/src/config-store.ts VALID_KEYS).
+  // Opt-in default-off; daemon ContextMonitor reads `enabled` +
+  // `threshold_percent` to decide when to send /compact; PreCompact
+  // hook reads `message_inline` + `message_file_path` to inject a
+  // custom message alongside the existing restore-instructions.
+  "policies.claude_compaction.enabled",
+  "policies.claude_compaction.threshold_percent",
+  "policies.claude_compaction.message_inline",
+  "policies.claude_compaction.message_file_path",
 ] as const;
 
 export type SettingsValidKey = typeof SETTINGS_VALID_KEYS[number];
@@ -124,6 +134,12 @@ const ENV_MAP: Record<SettingsValidKey, { primary: string; legacy?: string }> = 
   // OPENRIG_X primary only per the post-rename 5-key boundary doctrine
   // (no RIGGED_X legacy on net-new keys).
   "runtime.codex.hooks_enabled": { primary: "OPENRIG_RUNTIME_CODEX_HOOKS_ENABLED" },
+  // Slice 27 — Claude auto-compaction policy. Net-new keys; OPENRIG_X
+  // primary only.
+  "policies.claude_compaction.enabled": { primary: "OPENRIG_POLICIES_CLAUDE_COMPACTION_ENABLED" },
+  "policies.claude_compaction.threshold_percent": { primary: "OPENRIG_POLICIES_CLAUDE_COMPACTION_THRESHOLD_PERCENT" },
+  "policies.claude_compaction.message_inline": { primary: "OPENRIG_POLICIES_CLAUDE_COMPACTION_MESSAGE_INLINE" },
+  "policies.claude_compaction.message_file_path": { primary: "OPENRIG_POLICIES_CLAUDE_COMPACTION_MESSAGE_FILE_PATH" },
 };
 
 const KEY_TO_PATH: Record<SettingsValidKey, string[]> = {
@@ -156,6 +172,10 @@ const KEY_TO_PATH: Record<SettingsValidKey, string[]> = {
   "feed.subscriptions.progress": ["feed", "subscriptions", "progress"],
   "feed.subscriptions.audit_log": ["feed", "subscriptions", "auditLog"],
   "runtime.codex.hooks_enabled": ["runtime", "codex", "hooksEnabled"],
+  "policies.claude_compaction.enabled": ["policies", "claudeCompaction", "enabled"],
+  "policies.claude_compaction.threshold_percent": ["policies", "claudeCompaction", "thresholdPercent"],
+  "policies.claude_compaction.message_inline": ["policies", "claudeCompaction", "messageInline"],
+  "policies.claude_compaction.message_file_path": ["policies", "claudeCompaction", "messageFilePath"],
 };
 
 export type SettingSource = "env" | "file" | "default";
@@ -274,6 +294,15 @@ function getDefaultValue(key: SettingsValidKey, workspaceRoot: string): string |
     // Daemon ensures `codex_hooks = true` in ~/.codex/config.toml on
     // launch unless operator explicitly sets to false.
     case "runtime.codex.hooks_enabled": return true;
+    // Slice 27 — Claude auto-compaction policy defaults. Opt-in
+    // default-off; threshold 80% per spec. Empty-string defaults on
+    // message_inline / message_file_path mean "not set" (consistent
+    // with agents.operator_session pattern; hook treats empty as
+    // "skip custom message").
+    case "policies.claude_compaction.enabled": return false;
+    case "policies.claude_compaction.threshold_percent": return 80;
+    case "policies.claude_compaction.message_inline": return "";
+    case "policies.claude_compaction.message_file_path": return "";
     default: return "";
   }
 }
@@ -291,6 +320,71 @@ function coerceValue(key: SettingsValidKey, raw: string, workspaceRoot: string):
     throw new Error(`Invalid value for ${key}: expected true/false, got "${raw}"`);
   }
   return raw;
+}
+
+// Slice 27 — strict per-key constraint validators applied AFTER coerceValue
+// in `set()`. Lockstep with cli/src/config-store.ts KEY_CONSTRAINTS so the
+// daemon's HTTP write surface (/api/config POST) rejects the same input
+// the CLI rejects.
+const KEY_CONSTRAINTS: Partial<Record<SettingsValidKey, (raw: string, coerced: string | number | boolean) => void>> = {
+  // Policy threshold: integer in [1, 100]. Documented contract from
+  // slice 27 README. parseInt's permissive coercion ("80abc" → 80;
+  // "80.5" → 80) is not safe for a key the daemon's compaction trigger
+  // reads at every poll tick; runtime validator rejects what the
+  // contract forbids per banked feedback_static_gates_mirror_runtime_validators.
+  "policies.claude_compaction.threshold_percent": (raw, coerced) => {
+    const trimmed = (raw ?? "").trim();
+    if (!/^-?\d+$/.test(trimmed)) {
+      throw new Error(
+        `Invalid value for policies.claude_compaction.threshold_percent: expected an integer in [1, 100], got "${raw}"`,
+      );
+    }
+    if (typeof coerced !== "number" || !Number.isInteger(coerced)) {
+      throw new Error(
+        `Invalid value for policies.claude_compaction.threshold_percent: expected an integer in [1, 100], got "${raw}"`,
+      );
+    }
+    if (coerced < 1 || coerced > 100) {
+      throw new Error(
+        `Invalid value for policies.claude_compaction.threshold_percent: must be in [1, 100], got ${coerced}`,
+      );
+    }
+  },
+};
+
+function validateKeyConstraints(key: SettingsValidKey, raw: string, coerced: string | number | boolean): void {
+  const check = KEY_CONSTRAINTS[key];
+  if (check) check(raw, coerced);
+}
+
+// Slice 27 BLOCKING-FIX-2 — shared coerce + validate. Used by set()
+// (daemon write path), resolveOne env-source branch, and via
+// validateTypedFileValue by the resolveOne file-source branch. Lockstep
+// with cli/src/config-store.ts so every input layer applies the same
+// contract per banked feedback_audit_every_layer_function_and_module_constants.
+function coerceAndValidate(key: SettingsValidKey, raw: string, workspaceRoot: string): string | number | boolean {
+  const coerced = coerceValue(key, raw, workspaceRoot);
+  validateKeyConstraints(key, raw, coerced);
+  return coerced;
+}
+
+function validateTypedFileValue(key: SettingsValidKey, value: string | number | boolean): void {
+  const check = KEY_CONSTRAINTS[key];
+  if (!check) return;
+  const raw = typeof value === "string" ? value : String(value);
+  check(raw, value);
+}
+
+/**
+ * Slice 27 — projected Claude auto-compaction policy. ContextMonitor
+ * consumes this snapshot per-poll; the PreCompact hook reads the same
+ * shape via direct config.json read (without depending on the daemon).
+ */
+export interface ClaudeCompactionPolicy {
+  enabled: boolean;
+  thresholdPercent: number;
+  messageInline: string;
+  messageFilePath: string;
 }
 
 export interface ResolvedConfig {
@@ -326,9 +420,20 @@ export class SettingsStore {
     const fc = fileConfig ?? this.readConfigFile();
     const wr = workspaceRoot ?? this.resolveWorkspaceRootRaw(fc);
     const defaultValue = getDefaultValue(key, wr);
+    // Slice 27 BLOCKING-FIX-2 — env override is validated; on invalid
+    // env, drop the override + warn so the operator sees the
+    // misconfiguration on daemon stderr (which captures-pane / log
+    // surfaces). Bad env never poisons the resolved value.
     const envVal = readEnv(ENV_MAP[key].primary, ENV_MAP[key].legacy);
     if (envVal !== undefined && envVal !== "") {
-      return { value: coerceValue(key, envVal, wr), source: "env", defaultValue };
+      try {
+        return { value: coerceAndValidate(key, envVal, wr), source: "env", defaultValue };
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err);
+        process.stderr.write(
+          `[openrig-settings] env override for ${key} rejected: ${reason}; falling back to file/default\n`,
+        );
+      }
     }
     const fileVal = getNestedValue(fc, KEY_TO_PATH[key]);
     if (fileVal !== undefined && fileVal !== null && fileVal !== "") {
@@ -336,7 +441,18 @@ export class SettingsStore {
       if (legacyDefault !== null && fileVal === legacyDefault) {
         return { value: defaultValue, source: "default", defaultValue };
       }
-      return { value: fileVal as string | number | boolean, source: "file", defaultValue };
+      // Validate the file-source value too. Hand-edited config.json
+      // with a bad threshold (0, "80abc", 80.5, etc.) falls back to
+      // default rather than poisoning the trigger contract.
+      try {
+        validateTypedFileValue(key, fileVal as string | number | boolean);
+        return { value: fileVal as string | number | boolean, source: "file", defaultValue };
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err);
+        process.stderr.write(
+          `[openrig-settings] file value for ${key} rejected: ${reason}; falling back to default\n`,
+        );
+      }
     }
     return { value: defaultValue, source: "default", defaultValue };
   }
@@ -373,13 +489,29 @@ export class SettingsStore {
     };
   }
 
+  /**
+   * Slice 27 — read the Claude auto-compaction policy as a typed snapshot.
+   * Called per-poll by ContextMonitor so live edits to ~/.openrig/config.json
+   * take effect within one polling interval without daemon restart.
+   */
+  resolveClaudeCompactionPolicy(): ClaudeCompactionPolicy {
+    const fc = this.readConfigFile();
+    const wr = this.resolveWorkspaceRootRaw(fc);
+    return {
+      enabled: this.resolveOne("policies.claude_compaction.enabled", fc, wr).value as boolean,
+      thresholdPercent: this.resolveOne("policies.claude_compaction.threshold_percent", fc, wr).value as number,
+      messageInline: this.resolveOne("policies.claude_compaction.message_inline", fc, wr).value as string,
+      messageFilePath: this.resolveOne("policies.claude_compaction.message_file_path", fc, wr).value as string,
+    };
+  }
+
   set(key: string, value: string): void {
     if (!isSettingsValidKey(key)) {
       throw new Error(`Unknown config key "${key}". Valid keys: ${SETTINGS_VALID_KEYS.join(", ")}`);
     }
     const fc = this.readConfigFile();
     const wr = this.resolveWorkspaceRootRaw(fc);
-    const coerced = coerceValue(key, value, wr);
+    const coerced = coerceAndValidate(key, value, wr);
     setNestedValue(fc, KEY_TO_PATH[key], coerced);
     mkdirSync(path.dirname(this.configPath), { recursive: true });
     writeFileSync(this.configPath, JSON.stringify(fc, null, 2) + "\n", "utf-8");
