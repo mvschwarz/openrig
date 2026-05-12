@@ -139,9 +139,10 @@ function PolicyFormBody({ data, setSetting }: PolicyFormBodyProps) {
       </h2>
       <p className="mt-2 text-sm text-on-surface-variant max-w-prose">
         When a Claude seat's context usage crosses the configured threshold,
-        OpenRig sends <code className="font-mono text-[12px]">/compact</code> to the seat.
-        Optional compaction instructions are sent with that slash command,
-        while the restore guidance is delivered through the compaction hooks.
+        OpenRig arms an automatic compaction and sends
+        <code className="font-mono text-[12px]"> /compact</code> once the seat is idle
+        with an empty prompt. Compaction instructions are sent with that slash
+        command, while restore guidance is delivered through the compaction hooks.
       </p>
 
       <form

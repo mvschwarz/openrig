@@ -15,6 +15,9 @@ import {
   parseNamedPairs,
 } from "../src/domain/user-settings/settings-store.js";
 
+const DEFAULT_COMPACT_INSTRUCTION_FRAGMENT = "Create a concise continuity summary";
+const DEFAULT_RESTORE_INSTRUCTION_FRAGMENT = "After compaction, restore continuity";
+
 function clearEnv(): () => void {
   const keys = [
     "OPENRIG_PORT", "OPENRIG_HOST", "OPENRIG_DB",
@@ -254,8 +257,8 @@ describe("SettingsStore (User Settings v0)", () => {
     const policy = store.resolveClaudeCompactionPolicy();
     expect(policy.enabled).toBe(false);
     expect(policy.thresholdPercent).toBe(80);
-    expect(policy.compactInstruction).toBe("");
-    expect(policy.messageInline).toBe("");
+    expect(policy.compactInstruction).toContain(DEFAULT_COMPACT_INSTRUCTION_FRAGMENT);
+    expect(policy.messageInline).toContain(DEFAULT_RESTORE_INSTRUCTION_FRAGMENT);
     expect(policy.messageFilePath).toBe("");
   });
 

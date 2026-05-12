@@ -77,6 +77,28 @@ describe("agent pane activity classifier", () => {
     expect(result.reason).toBe("idle_status_bar");
   });
 
+  it("classifies typed Claude prompt text above an idle footer as attention, not idle", () => {
+    const result = classifyPaneActivity([
+      "❯ I am still typing a message",
+      "  ⏵⏵ accept edits on (shift+tab to cycle)",
+    ].join("\n"));
+
+    expect(result.state).toBe("attention");
+    expect(result.reason).toBe("prompt_draft");
+    expect(result.evidence).toContain("still typing");
+  });
+
+  it("does not treat a prior submitted Codex prompt separated from the footer by a blank as a draft", () => {
+    const result = classifyPaneActivity([
+      "› Summarize recent commits",
+      "",
+      "  gpt-5.5 xhigh fast · Context [████ ] · ~/code/projects/openrig",
+    ].join("\n"));
+
+    expect(result.state).toBe("agent_idle");
+    expect(result.reason).toBe("idle_status_bar");
+  });
+
   it("does not classify stale active scrollback as active when current idle footer is below it", () => {
     const result = classifyPaneActivity([
       "◦ Working (9m 26s • esc to interrupt) · 6 background terminals running",
@@ -848,6 +870,22 @@ describe("SessionTransport", () => {
     const transport = createTransport(tmux);
 
     const result = await transport.send("dev-impl@my-rig", "hello");
+
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe("mid_work");
+  });
+
+  it("send refuses when a Claude prompt draft is present above an idle footer", async () => {
+    seedCanonicalRig();
+    const tmux = mockTmux({
+      capturePaneContent: async () => [
+        "❯ I am typing a human message",
+        "  ⏵⏵ accept edits on (shift+tab to cycle)",
+      ].join("\n"),
+    });
+    const transport = createTransport(tmux);
+
+    const result = await transport.send("dev-impl@my-rig", "/compact Preserve current task.");
 
     expect(result.ok).toBe(false);
     expect(result.reason).toBe("mid_work");

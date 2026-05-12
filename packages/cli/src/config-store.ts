@@ -100,10 +100,10 @@ export interface RiggedConfig {
   // empty) alongside the standard restore-instructions in the
   // post-compact systemMessage.
   //
-  // Defaults: opt-in default-off (enabled=false). Empty string on
-  // compact_instruction / message_inline / message_file_path means "not
-  // set" (consistent with agents.operator_session pattern; ConfigStore
-  // schema avoids nullable strings at the file layer).
+  // Defaults: opt-in default-off (enabled=false). The instruction fields
+  // ship with state/procedure-shaped templates so first-time operator
+  // tests avoid prompt-injection-shaped output commands. Empty string is
+  // still a valid explicit operator override.
   policies: {
     claudeCompaction: {
       enabled: boolean;
@@ -116,6 +116,12 @@ export interface RiggedConfig {
 }
 
 const DEFAULT_WORKSPACE_ROOT = getDefaultOpenRigPath("workspace");
+
+const DEFAULT_CLAUDE_COMPACTION_COMPACT_INSTRUCTION =
+  "Create a concise continuity summary for this OpenRig session. Preserve the active task, queue item IDs, decisions, changed files, commands/tests run, blockers, caveats, and next concrete step.";
+
+const DEFAULT_CLAUDE_COMPACTION_RESTORE_INSTRUCTION =
+  "After compaction, restore continuity by reading the OpenRig restore packet and any referenced files. Then state the active task, current evidence state, blockers/caveats, and next step before continuing.";
 
 const DEFAULTS = {
   daemon: { port: 7433, host: "127.0.0.1" },
@@ -178,8 +184,8 @@ const DEFAULTS = {
     claudeCompaction: {
       enabled: false,
       thresholdPercent: 80,
-      compactInstruction: "",
-      messageInline: "",
+      compactInstruction: DEFAULT_CLAUDE_COMPACTION_COMPACT_INSTRUCTION,
+      messageInline: DEFAULT_CLAUDE_COMPACTION_RESTORE_INSTRUCTION,
       messageFilePath: "",
     },
   },

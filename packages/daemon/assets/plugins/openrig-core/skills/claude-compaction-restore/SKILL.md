@@ -69,6 +69,19 @@ The script writes:
 - `restore-instructions.md` — checklist for the compacted agent
 - `restore-summary.json` — machine-readable summary
 
+## Operator Instruction Templates
+
+OpenRig ships default operator-facing templates for the two editable
+Claude auto-compaction policy fields:
+
+- `templates/compact-instruction.md` — instruction passed as `/compact <instruction>`.
+- `templates/post-compact-restore-instruction.md` — restore directive delivered by compaction hooks after the summary boundary.
+
+These templates are deliberately continuity/procedure-shaped. Avoid
+testing compaction with "say this exact phrase" or persona-style
+commands; Claude may correctly treat those as prompt-injection-shaped
+hook output rather than useful lifecycle instructions.
+
 ## Restore Protocol
 
 1. Read `restore-instructions.md`.

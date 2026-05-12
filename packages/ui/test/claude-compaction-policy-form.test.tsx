@@ -13,6 +13,10 @@ import { createTestRouter } from "./helpers/test-router.js";
 import { ClaudeCompactionPolicyForm } from "../src/components/system/ClaudeCompactionPolicyForm.js";
 
 const mockFetch = vi.fn();
+const DEFAULT_COMPACT_INSTRUCTION =
+  "Create a concise continuity summary for this OpenRig session. Preserve the active task, queue item IDs, decisions, changed files, commands/tests run, blockers, caveats, and next concrete step.";
+const DEFAULT_RESTORE_INSTRUCTION =
+  "After compaction, restore continuity by reading the OpenRig restore packet and any referenced files. Then state the active task, current evidence state, blockers/caveats, and next step before continuing.";
 
 beforeEach(() => {
   globalThis.fetch = mockFetch as unknown as typeof fetch;
@@ -47,14 +51,14 @@ function makeSettingsResponse(overrides: Partial<{
         defaultValue: 80,
       },
       "policies.claude_compaction.compact_instruction": {
-        value: overrides.compactInstruction ?? "",
+        value: overrides.compactInstruction ?? DEFAULT_COMPACT_INSTRUCTION,
         source: "default",
-        defaultValue: "",
+        defaultValue: DEFAULT_COMPACT_INSTRUCTION,
       },
       "policies.claude_compaction.message_inline": {
-        value: overrides.messageInline ?? "",
+        value: overrides.messageInline ?? DEFAULT_RESTORE_INSTRUCTION,
         source: "default",
-        defaultValue: "",
+        defaultValue: DEFAULT_RESTORE_INSTRUCTION,
       },
       "policies.claude_compaction.message_file_path": {
         value: overrides.messageFilePath ?? "",
@@ -79,9 +83,9 @@ describe("ClaudeCompactionPolicyForm — slice 27", () => {
     const threshold = screen.getByTestId("claude-compaction-threshold") as HTMLInputElement;
     expect(threshold.value).toBe("80");
     const compactInstruction = screen.getByTestId("claude-compaction-compact-instruction") as HTMLTextAreaElement;
-    expect(compactInstruction.value).toBe("");
+    expect(compactInstruction.value).toBe(DEFAULT_COMPACT_INSTRUCTION);
     const inline = screen.getByTestId("claude-compaction-message-inline") as HTMLTextAreaElement;
-    expect(inline.value).toBe("");
+    expect(inline.value).toBe(DEFAULT_RESTORE_INSTRUCTION);
     const filePath = screen.getByTestId("claude-compaction-message-file-path") as HTMLInputElement;
     expect(filePath.value).toBe("");
   });

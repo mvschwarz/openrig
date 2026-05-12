@@ -107,6 +107,18 @@ function writePolicyConfig(home: string, policy: {
   );
 }
 
+function writePartialPolicyConfig(home: string, policy: Record<string, unknown>): void {
+  mkdirSync(home, { recursive: true });
+  writeFileSync(
+    join(home, "config.json"),
+    JSON.stringify({
+      policies: {
+        claudeCompaction: policy,
+      },
+    }),
+  );
+}
+
 describe("precompact-hook.mjs (slice 27 custom message append)", () => {
   let tmpDir: string;
   let openrigHome: string;
@@ -192,6 +204,20 @@ describe("precompact-hook.mjs (slice 27 custom message append)", () => {
     expect(payload.continue).toBe(true);
     expect(payload.systemMessage).not.toContain(APPEND_MARKER);
     expect(payload.systemMessage).toContain("Pre-compaction restore seed packet prepared");
+  });
+
+  it("uses the default restore instruction when compaction policy is enabled but restore text is not configured", () => {
+    writePartialPolicyConfig(openrigHome, {
+      enabled: true,
+      thresholdPercent: 80,
+    });
+
+    const { stdout, status } = runHook(openrigHome);
+    expect(status).toBe(0);
+    const payload = JSON.parse(stdout.trim());
+    expect(payload.continue).toBe(true);
+    expect(payload.systemMessage).toContain(APPEND_MARKER);
+    expect(payload.systemMessage).toContain("After compaction, restore continuity");
   });
 
   it("inline wins when both are set", () => {

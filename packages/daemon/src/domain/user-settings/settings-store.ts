@@ -256,6 +256,12 @@ const WORKSPACE_DERIVED_KEYS: ReadonlySet<SettingsValidKey> = new Set([
   "progress.scan_roots",
 ]);
 
+const DEFAULT_CLAUDE_COMPACTION_COMPACT_INSTRUCTION =
+  "Create a concise continuity summary for this OpenRig session. Preserve the active task, queue item IDs, decisions, changed files, commands/tests run, blockers, caveats, and next concrete step.";
+
+const DEFAULT_CLAUDE_COMPACTION_RESTORE_INSTRUCTION =
+  "After compaction, restore continuity by reading the OpenRig restore packet and any referenced files. Then state the active task, current evidence state, blockers/caveats, and next step before continuing.";
+
 function getDefaultValue(key: SettingsValidKey, workspaceRoot: string): string | number | boolean {
   if (WORKSPACE_DERIVED_KEYS.has(key)) {
     return deriveWorkspaceDefault(key, workspaceRoot);
@@ -299,13 +305,13 @@ function getDefaultValue(key: SettingsValidKey, workspaceRoot: string): string |
     // launch unless operator explicitly sets to false.
     case "runtime.codex.hooks_enabled": return true;
     // Slice 27 — Claude auto-compaction policy defaults. Opt-in
-    // default-off; threshold 80% per spec. Empty-string defaults on
-    // compact_instruction / message_inline / message_file_path mean
-    // "not set" (consistent with agents.operator_session pattern).
+    // default-off; threshold 80% per spec. Instruction defaults are
+    // state/procedure-shaped so first-time operator tests do not start
+    // with prompt-injection-shaped output commands.
     case "policies.claude_compaction.enabled": return false;
     case "policies.claude_compaction.threshold_percent": return 80;
-    case "policies.claude_compaction.compact_instruction": return "";
-    case "policies.claude_compaction.message_inline": return "";
+    case "policies.claude_compaction.compact_instruction": return DEFAULT_CLAUDE_COMPACTION_COMPACT_INSTRUCTION;
+    case "policies.claude_compaction.message_inline": return DEFAULT_CLAUDE_COMPACTION_RESTORE_INSTRUCTION;
     case "policies.claude_compaction.message_file_path": return "";
     default: return "";
   }

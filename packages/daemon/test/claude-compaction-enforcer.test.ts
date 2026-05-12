@@ -327,7 +327,10 @@ describe("ClaudeCompactionEnforcer", () => {
         // Env was rejected; file (threshold=80) wins; 99 >= 80 → trigger
         expect(outcome).toEqual({ triggered: true });
         expect(send).toHaveBeenCalledTimes(1);
-        expect(send).toHaveBeenCalledWith("claude-seat@rig", "/compact");
+        expect(send).toHaveBeenCalledWith(
+          "claude-seat@rig",
+          expect.stringContaining("/compact Create a concise continuity summary"),
+        );
       } finally {
         stderrSpy.mockRestore();
         delete process.env["OPENRIG_POLICIES_CLAUDE_COMPACTION_THRESHOLD_PERCENT"];

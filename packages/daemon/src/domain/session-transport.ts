@@ -21,6 +21,10 @@ const IDLE_PROMPT_PATTERNS = [
   /^[❯›]\s*$/,  // prompt char + optional whitespace + end-of-line only
 ];
 
+const PROMPT_DRAFT_PATTERNS = [
+  /^[❯›]\s+\S/,
+];
+
 // Status-bar patterns that ONLY appear when the harness is at its idle
 // prompt. These are more reliable than the prompt char alone because they
 // are never rendered during active tool execution.
@@ -57,6 +61,29 @@ function findPatternEvidence(lines: string[], patterns: RegExp[]): string | null
   return null;
 }
 
+function findPromptDraftBeforeFooter(paneContent: string): string | null {
+  const rawLines = paneContent.split("\n").map((line) => line.trimEnd());
+  let lastLineIndex = rawLines.length - 1;
+  while (lastLineIndex >= 0 && rawLines[lastLineIndex]!.trim().length === 0) {
+    lastLineIndex--;
+  }
+  if (lastLineIndex <= 0) return null;
+
+  const footerLine = rawLines[lastLineIndex]!.trim();
+  const footerIsIdle = IDLE_STATUS_BAR_PATTERNS.some((pattern) => pattern.test(footerLine));
+  if (!footerIsIdle) return null;
+
+  const priorLine = rawLines[lastLineIndex - 1]!;
+  if (priorLine.trim().length === 0) return null;
+
+  const priorTrimmed = priorLine.trim();
+  const looksLikeDraft = PROMPT_DRAFT_PATTERNS.some((pattern) => pattern.test(priorTrimmed));
+  const looksLikeSelection = /^[❯›]\s*\d+\.\s/.test(priorTrimmed);
+  if (!looksLikeDraft || looksLikeSelection) return null;
+
+  return truncateEvidence(priorTrimmed);
+}
+
 export function classifyPaneActivity(paneContent: string): PaneActivityClassification {
   const lastNonBlank = trimPaneLines(paneContent);
   if (lastNonBlank.length === 0) {
@@ -79,6 +106,15 @@ export function classifyPaneActivity(paneContent: string): PaneActivityClassific
       state: "attention",
       reason: "selection_prompt",
       evidence: selectionPromptEvidence,
+    };
+  }
+
+  const promptDraftEvidence = findPromptDraftBeforeFooter(paneContent);
+  if (promptDraftEvidence) {
+    return {
+      state: "attention",
+      reason: "prompt_draft",
+      evidence: promptDraftEvidence,
     };
   }
 

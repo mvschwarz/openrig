@@ -7,6 +7,8 @@ import { spawnSync } from "node:child_process";
 const skillRoot = path.resolve(new URL("..", import.meta.url).pathname);
 const restoreScript = path.join(skillRoot, "scripts", "restore-from-jsonl.mjs");
 const outRoot = "/tmp/claude-compaction-restore";
+const defaultRestoreInstruction =
+  "After compaction, restore continuity by reading the OpenRig restore packet and any referenced files. Then state the active task, current evidence state, blockers/caveats, and next step before continuing.";
 
 function emit(payload) {
   process.stdout.write(`${JSON.stringify(payload)}\n`);
@@ -63,19 +65,31 @@ function writePendingRestoreMarker(input, parsed, restoreInstruction, customMess
 // Slice 27 — read the OpenRig config directly (no daemon HTTP dependency
 // so the hook still works when the daemon isn't running or isn't
 // reachable from this process). Returns "" for either field when the
-// config is missing, malformed, or the policy isn't set.
+// config is missing, malformed, or the policy isn't set. If the policy is
+// enabled but restore text has not been written yet, use OpenRig's default
+// continuity-shaped restore instruction.
 function readClaudeCompactionMessage() {
   const configPath = path.join(getOpenRigHome(), "config.json");
   let inline = "";
   let filePath = "";
+  let inlineConfigured = false;
+  let filePathConfigured = false;
+  let policyEnabled = false;
   try {
     if (!fs.existsSync(configPath)) return "";
     const raw = fs.readFileSync(configPath, "utf8");
     const parsed = JSON.parse(raw);
     const policy = parsed?.policies?.claudeCompaction;
     if (policy && typeof policy === "object") {
-      if (typeof policy.messageInline === "string") inline = policy.messageInline;
-      if (typeof policy.messageFilePath === "string") filePath = policy.messageFilePath;
+      policyEnabled = policy.enabled === true;
+      if (typeof policy.messageInline === "string") {
+        inlineConfigured = true;
+        inline = policy.messageInline;
+      }
+      if (typeof policy.messageFilePath === "string") {
+        filePathConfigured = true;
+        filePath = policy.messageFilePath;
+      }
     }
   } catch {
     return "";
@@ -93,6 +107,9 @@ function readClaudeCompactionMessage() {
     } catch {
       return "";
     }
+  }
+  if (policyEnabled && !inlineConfigured && !filePathConfigured) {
+    return defaultRestoreInstruction;
   }
   return "";
 }
