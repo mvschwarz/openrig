@@ -32,6 +32,7 @@ import { AgentPluginsList } from "./specs/AgentPluginsList.js";
 // surfaces in the codebase; this file simply doesn't reference it.
 import { SessionPreviewPane } from "./preview/SessionPreviewPane.js";
 import { SeatOverviewTable } from "./SeatOverviewTable.js";
+import { SeatOverviewSecondary } from "./SeatOverviewSecondary.js";
 import { SeatNotificationBanner } from "./SeatNotificationBanner.js";
 import { FileReferenceTrigger } from "./drawer-triggers/FileReferenceTrigger.js";
 import { displayPodName, inferPodName } from "../lib/display-name.js";
@@ -426,14 +427,19 @@ function ContextUsageSection({ data }: { data: NodeDetailData }) {
 //   3. Inline black-glass terminal
 //   4. Recent Events card (at bottom)
 //
-// LiveNodeCurrentState was REMOVED from Overview in the follow-on
-// (activity is a column in the table; current-work is a full-width
-// row in the same table — the standalone card was redundant).
+// V0.3.1 slice 25 follow-on-2 — Overview stack:
+//   1. SeatNotificationBanner (real-alert-only; hidden for normal seats)
+//   2. SeatOverviewTable (column-headers + data row; vertical grid lines)
+//   3. SeatOverviewSecondary (cwd + current-work, visually separated
+//      from the column table above)
+//   4. InlineTerminal (black-glass)
+//   5. RecentEventsSection (at bottom)
 function OverviewTab({ data, activityVisual }: { data: NodeDetailData; activityVisual?: TopologyActivityVisual | null }) {
   return (
     <div data-testid="live-overview-section" className="space-y-4">
       <SeatNotificationBanner data={data} />
       <SeatOverviewTable data={data} activityVisual={activityVisual} />
+      <SeatOverviewSecondary data={data} />
       <InlineTerminal data={data} />
       <RecentEventsSection data={data} />
     </div>

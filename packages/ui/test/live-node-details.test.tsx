@@ -164,13 +164,14 @@ describe("LiveNodeDetails (slice 25 Overview + Details)", () => {
     expect(screen.getByTestId("live-tab-details")).toBeDefined();
   });
 
-  // HG-2 (follow-on) — Overview stack order: notification banner
-  // (optional) -> info table -> inline terminal -> recent events
-  // (at bottom). LiveNodeCurrentState is REMOVED. Order asserted via
+  // HG-2 (follow-on-2) — Overview stack order: notification banner
+  // (optional, real-alert-only) -> info table -> secondary (cwd +
+  // current-work) -> inline terminal -> recent events (at bottom).
+  // LiveNodeCurrentState is REMOVED. Order asserted via
   // compareDocumentPosition between always-rendered elements.
-  it("HG-2: Overview tab DOM order is notification -> info table -> terminal -> recent events", async () => {
+  it("HG-2: Overview tab DOM order is notification -> table -> secondary -> terminal -> recent events", async () => {
     // Inject a startupStatus that surfaces the notification banner so
-    // the assertion covers the full 4-element order.
+    // the assertion covers the full 5-element order.
     mockNodeDetail({
       ...NODE_DETAIL,
       startupStatus: "attention_required",
@@ -183,25 +184,29 @@ describe("LiveNodeDetails (slice 25 Overview + Details)", () => {
 
     const banner = await screen.findByTestId("seat-notification-banner");
     const table = await screen.findByTestId("seat-overview-table");
+    const secondary = await screen.findByTestId("seat-overview-secondary");
     const terminal = await screen.findByTestId("live-terminal-shell");
     const events = await screen.findByTestId("live-node-recent-events");
 
     expect(banner.compareDocumentPosition(table)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
-    expect(table.compareDocumentPosition(terminal)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+    expect(table.compareDocumentPosition(secondary)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+    expect(secondary.compareDocumentPosition(terminal)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
     expect(terminal.compareDocumentPosition(events)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
 
-    // HG-4: LiveNodeCurrentState no longer mounts inside Overview.
+    // LiveNodeCurrentState no longer mounts inside Overview (follow-on-1
+    // invariant preserved).
     expect(screen.queryByTestId("live-node-current-state")).toBeNull();
   });
 
-  // HG-1 (follow-on) — info table renders as column-headers + data
-  // row for the 7 compact fields, plus 2 full-width rows below.
-  it("HG-1: info table renders column-headers + single data row (7 fields)", async () => {
+  // HG-1 (follow-on-2) — info table renders column-headers + single
+  // data row for 7 fields. The "OVERVIEW" section header row is
+  // removed; column headers are the first row.
+  it("HG-1: info table renders column-headers + single data row (7 fields); no OVERVIEW row", async () => {
     mockNodeDetail(NODE_DETAIL);
     renderDetails();
-    await screen.findByTestId("seat-overview-table");
+    const table = await screen.findByTestId("seat-overview-table");
 
-    // 7 column headers + 1 data row in the column-oriented section.
+    // 7 column headers
     const headerRow = screen.getByTestId("seat-overview-header-row");
     expect(headerRow).toBeDefined();
     expect(screen.getByTestId("seat-overview-header-runtime")).toBeDefined();
@@ -212,20 +217,81 @@ describe("LiveNodeDetails (slice 25 Overview + Details)", () => {
     expect(screen.getByTestId("seat-overview-header-context-percent")).toBeDefined();
     expect(screen.getByTestId("seat-overview-header-total-tokens")).toBeDefined();
 
+    // HG-6 (follow-on-2): header label is "tokens" not "total tokens".
+    expect(screen.getByTestId("seat-overview-header-total-tokens").textContent).toBe("tokens");
+
     const dataRow = screen.getByTestId("seat-overview-data-row");
     expect(dataRow.getAttribute("data-row-shape")).toBe("data");
 
-    // HG-2 (follow-on) — cwd + current-work remain in the same table
-    // primitive as full-width rows below the data row.
-    expect(screen.getByTestId("seat-overview-row-cwd").getAttribute("data-row-shape")).toBe("full-width");
-    expect(screen.getByTestId("seat-overview-row-current-work").getAttribute("data-row-shape")).toBe("full-width");
+    // HG-3 (follow-on-2) section-header row removed — no element with
+    // "OVERVIEW" / "Overview" as its only content inside the table.
+    const tableText = table.textContent ?? "";
+    // The activity COLUMN may show "active" but the legacy section
+    // header was the string "Overview" as standalone div text.
+    expect(tableText.toLowerCase()).not.toContain("overview");
 
-    // Data-cell content reads from the same NodeDetailData fields.
+    // HG-5 (follow-on-2) cwd + current-work moved OUT of the table.
+    // No full-width rows inside the column table anymore.
+    expect(screen.queryByTestId("seat-overview-row-cwd")).toBeNull();
+    expect(screen.queryByTestId("seat-overview-row-current-work")).toBeNull();
+
+    // Data-cell content reads from NodeDetailData fields.
     expect(screen.getByTestId("seat-overview-cell-model").textContent).toContain("opus");
     expect(screen.getByTestId("seat-overview-cell-profile").textContent).toContain("default");
     expect(screen.getByTestId("seat-overview-cell-spec").textContent).toContain("impl@1.0.0");
-    expect(screen.getByTestId("seat-overview-cell-cwd").textContent).toContain("/workspace");
     expect(screen.getByTestId("seat-overview-cell-context-percent").textContent).toContain("42%");
+  });
+
+  // HG-4 (follow-on-2) — vertical grid lines between column cells.
+  // Every column cell except the last carries `border-r border-outline-variant`.
+  it("HG-4: column cells have vertical grid lines (border-r between columns)", async () => {
+    mockNodeDetail(NODE_DETAIL);
+    renderDetails();
+    await screen.findByTestId("seat-overview-table");
+
+    // Header cells (first 6 of 7 carry border-r; last does not).
+    const headers = [
+      "runtime",
+      "model",
+      "profile",
+      "spec",
+      "activity",
+      "context-percent",
+    ];
+    for (const key of headers) {
+      const cell = screen.getByTestId(`seat-overview-header-${key}`);
+      expect(cell.className).toContain("border-r");
+      expect(cell.className).toContain("border-outline-variant");
+    }
+    // Last header (tokens) — no trailing border-r.
+    expect(screen.getByTestId("seat-overview-header-total-tokens").className).not.toContain("border-r");
+
+    // Data cells mirror.
+    for (const key of headers) {
+      const cell = screen.getByTestId(`seat-overview-cell-${key}`);
+      expect(cell.className).toContain("border-r");
+      expect(cell.className).toContain("border-outline-variant");
+    }
+    expect(screen.getByTestId("seat-overview-cell-total-tokens").className).not.toContain("border-r");
+  });
+
+  // HG-5 (follow-on-2) — cwd + current-work moved into a separate
+  // primitive below the column table; not via colSpan inside the
+  // same table.
+  it("HG-5: cwd + current-work render in a separate primitive (seat-overview-secondary)", async () => {
+    mockNodeDetail(NODE_DETAIL);
+    renderDetails();
+
+    const secondary = await screen.findByTestId("seat-overview-secondary");
+    expect(secondary).toBeDefined();
+    // Separate primitive — distinct from the column table.
+    const table = screen.getByTestId("seat-overview-table");
+    expect(table.contains(secondary)).toBe(false);
+    expect(secondary.contains(table)).toBe(false);
+
+    // Rows present inside the secondary primitive.
+    expect(screen.getByTestId("seat-overview-secondary-row-cwd")).toBeDefined();
+    expect(screen.getByTestId("seat-overview-secondary-row-current-work")).toBeDefined();
   });
 
   // HG-3a — activity row wires to data.agentActivity via
@@ -291,37 +357,36 @@ describe("LiveNodeDetails (slice 25 Overview + Details)", () => {
     expect(stateEl.className).toContain("topology-table-active-shimmer");
   });
 
-  // HG-3b — current-work row wires live to data.currentQitems[0].
-  // Shows qitemId + bodyExcerpt when present.
-  it("HG-3b: current-work row wires live and surfaces the in-progress qitem", async () => {
+  // HG-3b (follow-on-2) — current-work wires live in the secondary
+  // primitive below the column table.
+  it("HG-3b: current-work cell wires live and surfaces the in-progress qitem", async () => {
     mockNodeDetail(NODE_DETAIL);
     renderDetails();
-    await screen.findByTestId("seat-overview-table");
-    const cell = screen.getByTestId("seat-overview-cell-current-work");
+    await screen.findByTestId("seat-overview-secondary");
+    const cell = screen.getByTestId("seat-overview-secondary-cell-current-work");
     expect(cell.textContent).toContain("qitem-20260504001234-driver");
     expect(cell.textContent).toContain("Implement PL-019 edge activity pulse");
   });
 
-  it("HG-3b: current-work row renders em-dash when no in-progress qitem", async () => {
+  it("HG-3b: current-work cell renders em-dash when no in-progress qitem", async () => {
     mockNodeDetail({ ...NODE_DETAIL, currentQitems: [] });
     renderDetails();
-    await screen.findByTestId("seat-overview-table");
-    const cell = screen.getByTestId("seat-overview-cell-current-work");
+    await screen.findByTestId("seat-overview-secondary");
+    const cell = screen.getByTestId("seat-overview-secondary-cell-current-work");
     expect(cell.textContent).toContain("—");
   });
 
-  // HG-3d — cwd full-width with truncate-ellipsis + title attribute.
-  it("HG-3d: cwd renders as full-width row with truncate-ellipsis + tooltip", async () => {
+  // HG-3d (follow-on-2) — cwd renders in the secondary primitive
+  // with truncate + title tooltip on the row.
+  it("HG-3d: cwd renders in the secondary primitive with truncate + tooltip", async () => {
     const longCwd = "/Users/example/very/long/workspace/path/that/should/truncate/at/the/end";
     mockNodeDetail({ ...NODE_DETAIL, cwd: longCwd });
     renderDetails();
-    const row = await screen.findByTestId("seat-overview-row-cwd");
-    expect(row.getAttribute("data-row-shape")).toBe("full-width");
-    const cell = screen.getByTestId("seat-overview-cell-cwd");
-    expect(cell.getAttribute("title")).toBe(longCwd);
-    // The inner truncate span carries the truncate class so the cwd
-    // doesn't overflow the row.
-    expect(cell.innerHTML).toContain("truncate");
+    const row = await screen.findByTestId("seat-overview-secondary-row-cwd");
+    expect(row.getAttribute("title")).toBe(longCwd);
+    const cell = screen.getByTestId("seat-overview-secondary-cell-cwd");
+    // The cell carries the truncate class so the cwd doesn't overflow.
+    expect(cell.className).toContain("truncate");
   });
 
   // HG-4 (preserved) — model graceful absence: column cell shows
@@ -417,6 +482,59 @@ describe("LiveNodeDetails (slice 25 Overview + Details)", () => {
     renderDetails();
     await screen.findByTestId("seat-overview-table");
     expect(screen.queryByTestId("seat-notification-banner")).toBeNull();
+  });
+
+  // HG-2 (follow-on-2 critical) — banner does NOT render when only
+  // generic recoveryGuidance is present (no failed / attention_required
+  // / latestError). recoveryGuidance is documentation of recovery
+  // steps, NOT an alert. The follow-on-1 banner triggered on guidance
+  // alone, producing false alerts on every normal seat; this test
+  // guards that regression class.
+  it("HG-2: notification banner does NOT render for normal seat with generic recoveryGuidance only", async () => {
+    mockNodeDetail({
+      ...NODE_DETAIL,
+      startupStatus: "ready",
+      latestError: null,
+      recoveryGuidance: {
+        summary: "Generic recovery guidance documentation.",
+        commands: ["rig restore <snap>"],
+        notes: [],
+      },
+    });
+    renderDetails();
+    await screen.findByTestId("seat-overview-table");
+    // Banner must NOT mount — recoveryGuidance alone is not an alert.
+    expect(screen.queryByTestId("seat-notification-banner")).toBeNull();
+  });
+
+  // HG-2 — banner DOES render for each alert-triggering condition:
+  // failed startupStatus, attention_required startupStatus, or
+  // latestError present (even when startupStatus is "ready").
+  it("HG-2: notification banner renders for startupStatus=failed", async () => {
+    mockNodeDetail({
+      ...NODE_DETAIL,
+      startupStatus: "failed",
+      latestError: null,
+      recoveryGuidance: null,
+    });
+    renderDetails();
+    const banner = await screen.findByTestId("seat-notification-banner");
+    expect(banner.getAttribute("data-startup-status")).toBe("failed");
+    expect(screen.getByTestId("seat-notification-headline").textContent).toContain("Startup failed");
+  });
+
+  it("HG-2: notification banner renders for latestError alone (no startupStatus alert)", async () => {
+    mockNodeDetail({
+      ...NODE_DETAIL,
+      startupStatus: "ready",
+      latestError: "Runtime error occurred.",
+      recoveryGuidance: null,
+    });
+    renderDetails();
+    const banner = await screen.findByTestId("seat-notification-banner");
+    expect(banner.getAttribute("data-startup-status")).toBe("ready");
+    expect(screen.getByTestId("seat-notification-headline").textContent).toContain("Error");
+    expect(screen.getByTestId("seat-notification-error").textContent).toContain("Runtime error occurred");
   });
 
   // Infrastructure nodes still have the same 2-tab structure; the
@@ -521,22 +639,21 @@ describe("LiveNodeDetails (slice 25 Overview + Details)", () => {
     expect(screen.getByTestId("agent-plugins-empty")).toBeDefined();
   });
 
-  // PL-019 preserved (follow-on) — activity + current-work surface
-  // in the Overview info table now (LiveNodeCurrentState card removed
-  // in the follow-on). Activity is the column cell; current-work is
-  // the full-width row.
-  it("PL-019 preserved: Overview info table surfaces activity + current qitem", async () => {
+  // PL-019 preserved (follow-on-2) — activity surfaces in the
+  // Overview info table (column cell); current-work surfaces in the
+  // secondary primitive below the table.
+  it("PL-019 preserved: Overview surfaces activity + current qitem", async () => {
     mockNodeDetail(NODE_DETAIL);
     renderDetails();
     await screen.findByTestId("seat-overview-table");
 
     // Activity column cell carries the active label (topology naming).
     expect(screen.getByTestId("seat-overview-cell-activity").textContent?.trim()).toContain("active");
-    // Current-work full-width row carries the qitem id + body excerpt.
-    const cwCell = screen.getByTestId("seat-overview-cell-current-work");
+    // Current-work in the secondary primitive carries qitem + excerpt.
+    const cwCell = screen.getByTestId("seat-overview-secondary-cell-current-work");
     expect(cwCell.textContent).toContain("04001234-driver");
     expect(cwCell.textContent).toContain("Implement PL-019 edge activity pulse");
-    // LiveNodeCurrentState card removed.
+    // LiveNodeCurrentState card removed (preserved invariant).
     expect(screen.queryByTestId("live-node-current-state")).toBeNull();
   });
 

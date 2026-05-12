@@ -40,11 +40,17 @@ function variantFor(data: NodeDetailData): "default" | "destructive" {
 
 export function SeatNotificationBanner({ data }: SeatNotificationBannerProps) {
   const headline = headlineFor(data);
+
+  // V0.3.1 slice 25 follow-on-2 — banner renders ONLY for real alert
+  // states (failed / attention_required / latestError). Generic
+  // recoveryGuidance alone does NOT qualify; it's documentation of
+  // recovery steps, not an attention event. The follow-on-1 rendered
+  // the banner on guidance alone, producing false alerts on every
+  // normal seat — the dispatch corrected the intent to alert-only.
+  if (!headline) return null;
+
   const hasError = !!data.latestError;
   const hasGuidance = !!data.recoveryGuidance;
-
-  // Nothing to surface — render nothing (takes no space).
-  if (!headline && !hasError && !hasGuidance) return null;
 
   return (
     <Alert
@@ -52,11 +58,12 @@ export function SeatNotificationBanner({ data }: SeatNotificationBannerProps) {
       data-startup-status={data.startupStatus ?? "unknown"}
       variant={variantFor(data)}
     >
-      {headline ? (
-        <AlertTitle data-testid="seat-notification-headline" className="font-mono text-[11px] uppercase tracking-[0.08em]">
-          {headline}
-        </AlertTitle>
-      ) : null}
+      <AlertTitle
+        data-testid="seat-notification-headline"
+        className="font-mono text-[11px] uppercase tracking-[0.08em]"
+      >
+        {headline}
+      </AlertTitle>
       {hasError ? (
         <AlertDescription
           data-testid="seat-notification-error"
