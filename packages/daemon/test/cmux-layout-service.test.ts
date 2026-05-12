@@ -393,37 +393,87 @@ describe("CmuxLayoutService.buildWorkspace", () => {
   // next column.
 
   describe("fill order (column-major per README §52)", () => {
-    it("for N=3 in 2×2 grid: agents 1,2,3 fill (col0,row0) → (col0,row1) → (col1,row0); blank at (col1,row1)", async () => {
-      const splitSurfaceIds: string[] = [];
+    it("for N=3 in 2×2 grid: agent-2 → first down-split (col0,row1); agent-3 → right-split (col1,row0); blank at (col1,row1) — DISCRIMINATING for column-major", async () => {
+      // Split sequence per impl: (1) right-split off initial first,
+      // (2) then for r=1: down-split off col0/row0=initial, then
+      // down-split off col1/row0=right-split.
+      const splitCalls: Array<{ src: string; dir: string }> = [];
       let surfaceCounter = 100;
       const { adapter, calls } = makeMockAdapter({
-        splitSurfaceFn: async (_src, _dir) => {
+        splitSurfaceFn: async (src, dir) => {
           const id = `surface:${++surfaceCounter}`;
-          splitSurfaceIds.push(id);
+          splitCalls.push({ src, dir });
           return { ok: true, data: id };
         },
-        listSurfacesFn: async () => ({ ok: true, data: [{ id: "surface:initial", title: "", type: "terminal" }] }),
+        listSurfacesFn: async () => ({
+          ok: true,
+          data: [{ id: "surface:initial", title: "", type: "terminal" }],
+        }),
       });
       const { sleep } = makeSleepRecorder();
       const service = new CmuxLayoutService(adapter as never, { sleep });
       await service.buildWorkspace("my-rig", "/cwd", ["agent-1", "agent-2", "agent-3"]);
 
-      // Three sends; surfaces in send order:
-      // - send 1 → col0 row0 = initial surface
-      // - send 2 → col0 row1 = first DOWN split off col0 row0
-      // - send 3 → col1 row0 = the RIGHT split (col 2 expansion)
+      // Verify the split sequence: 1 right + 2 downs.
+      expect(splitCalls).toHaveLength(3);
+      expect(splitCalls[0]).toEqual({ src: "surface:initial", dir: "right" });
+      // splitCalls[0] returns surface:101 = col1/row0 (right-split)
+      // splitCalls[1] returns surface:102 (down off col0/row0 = col0/row1)
+      // splitCalls[2] returns surface:103 (down off col1/row0 = col1/row1)
+      expect(splitCalls[1]!.dir).toBe("down");
+      expect(splitCalls[1]!.src).toBe("surface:initial"); // down off col 0 row 0
+      expect(splitCalls[2]!.dir).toBe("down");
+      expect(splitCalls[2]!.src).toBe("surface:101"); // down off col 1 row 0 (the right-split surface)
+
       const sends = calls.filter((c) => c.method === "sendText");
       expect(sends).toHaveLength(3);
 
-      // Inspect arg 0 (surfaceId) and arg 1 (text)
-      expect((sends[0]!.args[1] as string)).toContain("agent-1");
+      // COLUMN-MAJOR fill expectations (these assertions DISCRIMINATE
+      // the row-major-to-column-major switch — they would fail under
+      // the prior row-major impl):
+      //   agent-1 → col 0 / row 0 = "surface:initial"
+      //   agent-2 → col 0 / row 1 = "surface:102" (FIRST down-split)
+      //   agent-3 → col 1 / row 0 = "surface:101" (right-split)
+      // Under row-major, agent-2 would land on "surface:101"
+      // (col 1 / row 0) and agent-3 would land on "surface:102"
+      // (col 0 / row 1) — both surface-id assertions below would
+      // flip and fail.
       expect(sends[0]!.args[0]).toBe("surface:initial");
+      expect((sends[0]!.args[1] as string)).toContain("agent-1");
 
+      expect(sends[1]!.args[0]).toBe("surface:102");
       expect((sends[1]!.args[1] as string)).toContain("agent-2");
-      // agent-2 lands on the DOWN-split surface off the initial (col 0, row 1)
 
+      expect(sends[2]!.args[0]).toBe("surface:101");
       expect((sends[2]!.args[1] as string)).toContain("agent-3");
-      // agent-3 lands on the RIGHT-split surface (col 1, row 0)
+    });
+
+    it("for N=4 in 2×2 grid: send order (col-major) is initial → first-down → right → second-down", async () => {
+      // Same impl produces splits in the same order; for N=4 all four
+      // surfaces are populated. Under column-major:
+      //   send 0: col0/row0 = initial
+      //   send 1: col0/row1 = first down-split (off initial) = surface:102
+      //   send 2: col1/row0 = right-split = surface:101
+      //   send 3: col1/row1 = second down-split (off right-split) = surface:103
+      // Under row-major the order would be initial → 101 → 102 → 103.
+      let surfaceCounter = 100;
+      const { adapter, calls } = makeMockAdapter({
+        splitSurfaceFn: async (_src, _dir) => ({ ok: true, data: `surface:${++surfaceCounter}` }),
+        listSurfacesFn: async () => ({
+          ok: true,
+          data: [{ id: "surface:initial", title: "", type: "terminal" }],
+        }),
+      });
+      const { sleep } = makeSleepRecorder();
+      const service = new CmuxLayoutService(adapter as never, { sleep });
+      await service.buildWorkspace("my-rig", "/cwd", ["a1", "a2", "a3", "a4"]);
+      const sends = calls.filter((c) => c.method === "sendText");
+      expect(sends.map((s) => s.args[0])).toEqual([
+        "surface:initial",
+        "surface:102",
+        "surface:101",
+        "surface:103",
+      ]);
     });
 
     it("for N=2 in 2×1 grid: agent 1 → col0 row0; agent 2 → col1 row0", async () => {
