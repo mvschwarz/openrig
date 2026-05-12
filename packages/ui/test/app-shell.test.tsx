@@ -12,8 +12,10 @@
 // - SC-6 — drawer default-closed (selection=null → null render)
 // - SC-7 — Settings rail icon links to /settings (center, not drawer)
 // - SC-8 — mobile rail collapses to top-bar menu (hamburger present at <lg)
-// - Surface routing — Explorer renders for tree/lens destinations;
-//   not for Dashboard / Settings (surface=none)
+// - Surface routing — Explorer renders for tree/lens destinations
+//   AND Settings (slice 26: settings became a 4-destination Explorer
+//   peer to Topology / Project / Library / For-You). Only Dashboard
+//   remains surface=none (no Explorer).
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, cleanup, waitFor } from "@testing-library/react";
@@ -90,10 +92,15 @@ describe("AppShell — Phase 2 chrome", () => {
       expect(container.querySelector("[data-testid='explorer']")).toBeNull();
     });
 
-    it("Settings surface (/settings) renders rail but NO Explorer (surface=none)", async () => {
+    // Slice 26 — Settings is now an Explorer destination (peer to
+    // Topology / Project / Library / For-You). The Explorer renders
+    // alongside the rail and contains the 4-item SettingsExplorer
+    // (Settings / Policies / Log / Status).
+    it("Settings surface (/settings) renders rail AND Explorer (surface=settings)", async () => {
       const { container } = await renderAt("/settings");
       expect(container.querySelector("[data-testid='app-rail']")).toBeTruthy();
-      expect(container.querySelector("[data-testid='explorer']")).toBeNull();
+      expect(container.querySelector("[data-testid='explorer']")).toBeTruthy();
+      expect(container.querySelector("[data-testid='settings-explorer']")).toBeTruthy();
     });
   });
 

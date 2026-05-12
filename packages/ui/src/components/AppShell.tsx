@@ -41,7 +41,7 @@ import {
   Sparkles,
   Wrench,
 } from "lucide-react";
-import { Explorer, type ExplorerSurface } from "./Explorer.js";
+import { Explorer, shouldSuppressExplorerMount, type ExplorerSurface } from "./Explorer.js";
 import { SharedDetailDrawer, type DrawerSelection } from "./SharedDetailDrawer.js";
 import { PreviewStack } from "./preview/PreviewStack.js";
 import type { DiscoveryPlacementTarget } from "./DiscoveryPanel.js";
@@ -237,6 +237,7 @@ function surfaceForPath(pathname: string): ExplorerSurface {
   if (pathname.startsWith("/project")) return "project";
   if (pathname.startsWith("/specs") || pathname.startsWith("/plugins")) return "specs";
   if (pathname.startsWith("/for-you")) return "for-you";
+  if (pathname.startsWith("/settings")) return "settings";
   return "none";
 }
 
@@ -435,6 +436,14 @@ function AppShellInner({ children }: AppShellProps) {
   useGlobalEvents();
 
   const explorerVisible = surface !== "none";
+  // Slice 26.D OPT-D3 Topology mobile mount-suppression: rule lives
+  // in shouldSuppressExplorerMount() (Explorer.tsx). Pre-existing
+  // renderer-spin in Topology mobile render path pegs the browser
+  // when Explorer mounts at 375px; only mount-suppression sidesteps
+  // the peg trigger. Other 4 destinations mount normally regardless
+  // of viewport. 0.3.2 fixes Topology mobile render path; this
+  // suppression reverts at that time.
+  const explorerMounted = explorerVisible && !shouldSuppressExplorerMount(surface, isWideLayout);
   const drawerOpen = Boolean(selectionState);
 
   // V1 attempt-3 Phase 3 bounce-fix — Class B fixed-anchor + selective overlay.
@@ -499,17 +508,35 @@ function AppShellInner({ children }: AppShellProps) {
               className="h-14 flex items-center justify-between px-4 bg-background border-b border-outline-variant shrink-0 relative z-30"
             >
               <div className="flex items-center gap-3">
-                <button
-                  type="button"
-                  data-testid="mobile-menu-toggle"
-                  onClick={() => setExplorerOpen((open) => !open)}
-                  aria-label="Toggle navigation"
-                  className="flex flex-col gap-[3px] p-2 lg:hidden"
-                >
-                  <span className="block w-4 h-[1.5px] bg-stone-900" />
-                  <span className="block w-4 h-[1.5px] bg-stone-900" />
-                  <span className="block w-3 h-[1.5px] bg-stone-900" />
-                </button>
+                {/* Slice 26.E OPT-E Topology mobile toggle carve-out: at
+                    narrow viewports on /topology the menu toggle does
+                    not render. Clicking it flips explorerOpen state
+                    which re-renders AppShellInner's children; the
+                    Topology mobile render path (TopologyTableView +
+                    TopologyTreeView) has a pre-existing render-cost
+                    that pegs the browser on that cascade — independent
+                    of whether the Explorer drawer itself mounts (OPT-D3
+                    already suppresses that). Hiding the entry point
+                    prevents the state-flip trigger. Pre-existing
+                    renderer-spin scheduled for 0.3.2 dedicated render-
+                    path slice; 0.3.1 carve-out preserves Topology
+                    mobile usability (degraded table still loads +
+                    navigable; brand-home-link reachable in topbar).
+                    Reuses shouldSuppressExplorerMount predicate — same
+                    underlying carve-out scenario. */}
+                {!shouldSuppressExplorerMount(surface, isWideLayout) && (
+                  <button
+                    type="button"
+                    data-testid="mobile-menu-toggle"
+                    onClick={() => setExplorerOpen((open) => !open)}
+                    aria-label="Toggle navigation"
+                    className="flex flex-col gap-[3px] p-2 lg:hidden"
+                  >
+                    <span className="block w-4 h-[1.5px] bg-stone-900" />
+                    <span className="block w-4 h-[1.5px] bg-stone-900" />
+                    <span className="block w-3 h-[1.5px] bg-stone-900" />
+                  </button>
+                )}
                 <Link
                   to="/"
                   data-testid="brand-home-link"
@@ -571,9 +598,11 @@ function AppShellInner({ children }: AppShellProps) {
 
               {/* Explorer — desktop column or mobile slide-over.
                   In overlay mode (topology graph): vellum-translucent + z-30
-                  so it floats over the canvas. In opaque mode: default
-                  Phase 2 behavior (z-20, opaque background). */}
-              {explorerVisible && (
+                  so it floats over the canvas. In opaque mode: z-40
+                  per slice 26.B OPT-B (above rail-tray on mobile).
+                  Slice 26.D OPT-D3: Topology Explorer doesn't mount
+                  on mobile (suppressTopologyMobileExplorer above). */}
+              {explorerMounted && (
                 <Explorer
                   open={explorerOpen}
                   onClose={() => setExplorerOpen(false)}

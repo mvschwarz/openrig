@@ -16,6 +16,7 @@ import {
 import { EmptyState } from "./ui/empty-state.js";
 import { ProjectTreeView } from "./project/ProjectTreeView.js";
 import { SpecsTreeView } from "./specs/SpecsTreeView.js";
+import { SettingsExplorer } from "./system/SettingsExplorer.js";
 import { TopologyTreeView } from "./topology/TopologyTreeView.js";
 import { SubscriptionToggleList } from "./for-you/SubscriptionToggleList.js";
 
@@ -33,7 +34,28 @@ export type ExplorerSurface =
   | "project"
   | "specs"
   | "for-you"
+  | "settings"
   | "none";
+
+/**
+ * Slice 26.D OPT-D3 Topology mobile Explorer mount-suppression rule.
+ *
+ * Returns true when the Explorer for a given surface should NOT MOUNT
+ * at the current viewport. The single carve-out: Topology surface at
+ * narrow viewports (isWideLayout=false). Pre-existing renderer-spin
+ * in the Topology mobile render path (TopologyTableView +
+ * TopologyTreeView combined) pegs the browser when Explorer mounts
+ * at 375px; mount-suppression sidesteps the peg trigger.
+ *
+ * 0.3.2 fixes the Topology mobile render path; this carve-out
+ * returns false for all surfaces at that time.
+ */
+export function shouldSuppressExplorerMount(
+  surface: ExplorerSurface,
+  isWideLayout: boolean,
+): boolean {
+  return surface === "topology" && !isWideLayout;
+}
 
 interface ExplorerProps {
   open: boolean;
@@ -187,7 +209,9 @@ function ExplorerKindIcon({
 
 // Surface-routed body. Phase 2 lays placeholders for non-topology
 // surfaces; Phase 3 fills tree contents + lens chips. "none" surface
-// (Dashboard / Settings) means Explorer is not rendered at all.
+// (Dashboard only — slice 26 promoted Settings to a 4-destination
+// Explorer peer with its own SettingsExplorer surface) means Explorer
+// is not rendered at all.
 function SurfaceBody({
   surface,
   rigs,
@@ -213,6 +237,9 @@ function SurfaceBody({
   }
   if (surface === "specs") {
     return <SpecsTreeView />;
+  }
+  if (surface === "settings") {
+    return <SettingsExplorer />;
   }
   if (surface === "for-you") {
     // Subscription affordance — settings-shaped surface per for-you-feed.md L134-L140.
@@ -250,7 +277,8 @@ export function Explorer({
 
   const psMap = new Map((psEntries ?? []).map((entry) => [entry.rigId, entry]));
 
-  // Surface "none" (Dashboard / Settings) — Explorer is not rendered.
+  // Surface "none" (Dashboard only — Settings has its own Explorer
+  // surface as of slice 26) — Explorer is not rendered.
   if (surface === "none") return null;
 
   // Class B: overlay vs opaque background grammar.
@@ -301,9 +329,32 @@ export function Explorer({
         // 1px outline-variant ghost line for inter-region edges.
         "border-r border-outline-variant flex overflow-hidden",
         // Background grammar by mode:
+        //
+        // Slice 26.B HG-8 mobile-drawer-layering repair (OPT-B per
+        // orch routing): opaque-mode Explorer mobile drawer must
+        // layer ABOVE the mobile-rail-tray (AppShell.tsx z-30) so
+        // click hits register on Explorer items. Pre-repair value
+        // was z-20 (below rail-tray) — pre-existing bug exposed by
+        // slice 26 because Settings was the 5th Explorer-bearing
+        // destination on mobile. Opaque-mode bumped to z-40 for all
+        // surfaces; overlay-mode stays z-30 (Topology graph behavior
+        // preserved; rail-tray and overlay-mode Explorer paint at
+        // same z, DOM order resolves Explorer above since it renders
+        // later in AppShell). Rail-tray remains reachable via backdrop
+        // dismissal on mobile.
+        //
+        // Slice 26.D OPT-D3 carve-out (separate gate in AppShell.tsx,
+        // NOT here): Topology mobile Explorer doesn't MOUNT on
+        // viewport < lg (avoids pre-existing TopologyTableView
+        // renderer-spin that pegs the browser when Explorer mounts
+        // at 375px). The mount-gate is in AppShell.tsx ~line 577;
+        // this z-index block is reached only when Explorer is
+        // actually mounted, so no conditional is needed here. 0.3.2
+        // will fix the Topology mobile render path; the AppShell
+        // mount-gate reverts at that time.
         isOverlay
           ? "vellum z-30 shadow-[6px_0_14px_rgba(46,52,46,0.06)]"
-          : "z-20 bg-[rgba(250,249,245,0.035)] supports-[backdrop-filter]:bg-[rgba(250,249,245,0.018)] backdrop-blur-[14px] backdrop-saturate-75 shadow-[6px_0_14px_rgba(46,52,46,0.04)]",
+          : "z-40 bg-[rgba(250,249,245,0.035)] supports-[backdrop-filter]:bg-[rgba(250,249,245,0.018)] backdrop-blur-[14px] backdrop-saturate-75 shadow-[6px_0_14px_rgba(46,52,46,0.04)]",
         // Mobile: slide-over from left below the top-bar header (h-14).
         "fixed top-14 bottom-0 left-0 transition-transform duration-200 ease-tactical w-72 max-w-[80vw]",
         open ? "translate-x-0" : "-translate-x-full",
