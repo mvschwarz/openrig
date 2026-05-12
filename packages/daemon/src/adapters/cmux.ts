@@ -186,6 +186,97 @@ export class CmuxAdapter {
     }
   }
 
+  // Slice 24 layout primitives — see slice 24 pre-scaffold spike result.
+  // cmux RPC accepts these methods with snake_case params (verified via
+  // `cmux rpc workspace.close` probe). New methods adopt snake_case
+  // explicitly; existing camelCase callers (sendText, focus, etc.) are
+  // unchanged at this checkpoint.
+
+  async splitSurface(
+    surfaceId: string,
+    direction: "left" | "right" | "up" | "down",
+    workspaceId?: string,
+  ): Promise<CmuxResult<string>> {
+    if (!this.transport) {
+      return { ok: false, code: "unavailable", message: "cmux is not connected" };
+    }
+    try {
+      const params: Record<string, unknown> = {
+        surface_id: surfaceId,
+        direction,
+      };
+      if (workspaceId != null) params["workspace_id"] = workspaceId;
+      const raw = (await this.transport.request("surface.split", params)) as Record<string, unknown>;
+      const handle = [
+        raw["created_surface_ref"],
+        raw["created_surface_id"],
+        raw["surface_ref"],
+        raw["surface_id"],
+        raw["id"],
+      ]
+        .map((value) => normalizeHandle("surface", value))
+        .find((value): value is string => Boolean(value));
+      if (!handle) {
+        return { ok: false, code: "request_failed", message: "cmux surface.split returned no surface handle" };
+      }
+      return { ok: true, data: handle };
+    } catch (err) {
+      return { ok: false, code: "request_failed", message: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  async createWorkspace(name: string, cwd?: string): Promise<CmuxResult<string>> {
+    if (!this.transport) {
+      return { ok: false, code: "unavailable", message: "cmux is not connected" };
+    }
+    try {
+      const params: Record<string, unknown> = { name };
+      if (cwd != null) params["cwd"] = cwd;
+      const raw = (await this.transport.request("workspace.create", params)) as Record<string, unknown>;
+      const handle = [
+        raw["workspace_ref"],
+        raw["workspace_id"],
+        raw["id"],
+      ]
+        .map((value) => normalizeHandle("workspace", value))
+        .find((value): value is string => Boolean(value));
+      if (!handle) {
+        return { ok: false, code: "request_failed", message: "cmux workspace.create returned no workspace handle" };
+      }
+      return { ok: true, data: handle };
+    } catch (err) {
+      return { ok: false, code: "request_failed", message: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  async closeWorkspace(workspaceId: string): Promise<CmuxResult<void>> {
+    if (!this.transport) {
+      return { ok: false, code: "unavailable", message: "cmux is not connected" };
+    }
+    try {
+      await this.transport.request("workspace.close", { workspace_id: workspaceId });
+      return { ok: true, data: undefined };
+    } catch (err) {
+      return { ok: false, code: "request_failed", message: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  async listPaneSurfaces(paneId: string, workspaceId?: string): Promise<CmuxResult<CmuxSurface[]>> {
+    if (!this.transport) {
+      return { ok: false, code: "unavailable", message: "cmux is not connected" };
+    }
+    try {
+      const params: Record<string, unknown> = { pane_id: paneId };
+      if (workspaceId != null) params["workspace_id"] = workspaceId;
+      const result = (await this.transport.request("pane.surfaces", params)) as {
+        surfaces?: CmuxSurface[];
+      };
+      return { ok: true, data: result.surfaces ?? [] };
+    } catch (err) {
+      return { ok: false, code: "request_failed", message: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
   /** Query cmux for agent PIDs (sidebar metadata). Returns Map<pid, { runtime, pid }>. */
   async queryAgentPIDs(): Promise<CmuxResult<Map<number, { runtime: string; pid: number }>>> {
     if (!this.transport) {
