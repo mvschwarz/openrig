@@ -309,9 +309,21 @@ export function Explorer({
         // 1px outline-variant ghost line for inter-region edges.
         "border-r border-outline-variant flex overflow-hidden",
         // Background grammar by mode:
+        //
+        // Slice 26.B HG-8 mobile-drawer-layering repair (OPT-B per
+        // orch routing): opaque-mode Explorer mobile drawer must
+        // layer ABOVE the mobile-rail-tray (AppShell.tsx z-30)
+        // so click hits register on Explorer items. Pre-repair value
+        // was z-20 (below rail-tray) — pre-existing bug exposed by
+        // slice 26 because Settings was the 5th Explorer-bearing
+        // destination on mobile. Bumped to z-40. Overlay-mode stays
+        // z-30 (Topology graph behavior preserved; rail-tray and
+        // overlay-mode Explorer paint at same z, DOM order resolves
+        // Explorer above since it renders later in AppShell). Rail-tray
+        // remains reachable via backdrop dismissal on mobile.
         isOverlay
           ? "vellum z-30 shadow-[6px_0_14px_rgba(46,52,46,0.06)]"
-          : "z-20 bg-[rgba(250,249,245,0.035)] supports-[backdrop-filter]:bg-[rgba(250,249,245,0.018)] backdrop-blur-[14px] backdrop-saturate-75 shadow-[6px_0_14px_rgba(46,52,46,0.04)]",
+          : "z-40 bg-[rgba(250,249,245,0.035)] supports-[backdrop-filter]:bg-[rgba(250,249,245,0.018)] backdrop-blur-[14px] backdrop-saturate-75 shadow-[6px_0_14px_rgba(46,52,46,0.04)]",
         // Mobile: slide-over from left below the top-bar header (h-14).
         "fixed top-14 bottom-0 left-0 transition-transform duration-200 ease-tactical w-72 max-w-[80vw]",
         open ? "translate-x-0" : "-translate-x-full",
