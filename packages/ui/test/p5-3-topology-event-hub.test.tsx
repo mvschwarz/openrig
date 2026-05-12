@@ -5,7 +5,10 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { useActivityFeed } from "../src/hooks/useActivityFeed.js";
 import { useGlobalEvents } from "../src/hooks/useGlobalEvents.js";
-import { useTopologyActivity } from "../src/hooks/useTopologyActivity.js";
+import {
+  resetTopologyActivityStoreForTests,
+  useTopologyActivity,
+} from "../src/hooks/useTopologyActivity.js";
 import { useTopologyEdgeActivity } from "../src/hooks/useTopologyEdgeActivity.js";
 import { buildTopologySessionIndex } from "../src/lib/topology-activity.js";
 import { createMockEventSourceClass, instances } from "./helpers/mock-event-source.js";
@@ -55,6 +58,7 @@ function renderHarness() {
 
 describe("P5.3 shared topology event hub", () => {
   beforeEach(() => {
+    resetTopologyActivityStoreForTests();
     OriginalEventSource = globalThis.EventSource;
     globalThis.EventSource = createMockEventSourceClass() as unknown as typeof EventSource;
   });
