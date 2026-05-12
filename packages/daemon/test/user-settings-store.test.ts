@@ -306,6 +306,44 @@ describe("SettingsStore (User Settings v0)", () => {
     expect(() => store.set("policies.claude_compaction.threshold_percent", "not-a-number")).toThrow(/expected a number/);
   });
 
+  // Slice 27 BLOCKING-FIX — strict accept/reject matrix for
+  // threshold_percent. Per banked feedback_static_gates_mirror_runtime_validators,
+  // the runtime validator is the source of truth; this test invokes the
+  // same `set()` path the daemon's /api/config POST handler uses so a
+  // future drift gets caught at CI.
+  describe("HG-1 strict threshold validation matrix", () => {
+    const cases = {
+      accept: ["1", "2", "50", "80", "99", "100"],
+      reject: [
+        { raw: "0", reason: /must be in \[1, 100\]/ },
+        { raw: "101", reason: /must be in \[1, 100\]/ },
+        { raw: "-1", reason: /must be in \[1, 100\]/ },
+        { raw: "80abc", reason: /expected an integer/ },
+        { raw: "abc80", reason: /expected a number|expected an integer/ },
+        { raw: "80.5", reason: /expected an integer/ },
+        { raw: "", reason: /expected a number|expected an integer/ },
+        { raw: " ", reason: /expected a number|expected an integer/ },
+        { raw: "NaN", reason: /expected a number|expected an integer/ },
+        { raw: "Infinity", reason: /expected a number|expected an integer/ },
+      ],
+    };
+
+    for (const value of cases.accept) {
+      it(`accepts ${JSON.stringify(value)}`, () => {
+        const store = new SettingsStore(configPath);
+        expect(() => store.set("policies.claude_compaction.threshold_percent", value)).not.toThrow();
+        expect(store.resolveOne("policies.claude_compaction.threshold_percent").value).toBe(Number(value));
+      });
+    }
+
+    for (const { raw, reason } of cases.reject) {
+      it(`rejects ${JSON.stringify(raw)}`, () => {
+        const store = new SettingsStore(configPath);
+        expect(() => store.set("policies.claude_compaction.threshold_percent", raw)).toThrow(reason);
+      });
+    }
+  });
+
   void existsSync;
 });
 

@@ -322,6 +322,41 @@ function coerceValue(key: SettingsValidKey, raw: string, workspaceRoot: string):
   return raw;
 }
 
+// Slice 27 — strict per-key constraint validators applied AFTER coerceValue
+// in `set()`. Lockstep with cli/src/config-store.ts KEY_CONSTRAINTS so the
+// daemon's HTTP write surface (/api/config POST) rejects the same input
+// the CLI rejects.
+const KEY_CONSTRAINTS: Partial<Record<SettingsValidKey, (raw: string, coerced: string | number | boolean) => void>> = {
+  // Policy threshold: integer in [1, 100]. Documented contract from
+  // slice 27 README. parseInt's permissive coercion ("80abc" → 80;
+  // "80.5" → 80) is not safe for a key the daemon's compaction trigger
+  // reads at every poll tick; runtime validator rejects what the
+  // contract forbids per banked feedback_static_gates_mirror_runtime_validators.
+  "policies.claude_compaction.threshold_percent": (raw, coerced) => {
+    const trimmed = (raw ?? "").trim();
+    if (!/^-?\d+$/.test(trimmed)) {
+      throw new Error(
+        `Invalid value for policies.claude_compaction.threshold_percent: expected an integer in [1, 100], got "${raw}"`,
+      );
+    }
+    if (typeof coerced !== "number" || !Number.isInteger(coerced)) {
+      throw new Error(
+        `Invalid value for policies.claude_compaction.threshold_percent: expected an integer in [1, 100], got "${raw}"`,
+      );
+    }
+    if (coerced < 1 || coerced > 100) {
+      throw new Error(
+        `Invalid value for policies.claude_compaction.threshold_percent: must be in [1, 100], got ${coerced}`,
+      );
+    }
+  },
+};
+
+function validateKeyConstraints(key: SettingsValidKey, raw: string, coerced: string | number | boolean): void {
+  const check = KEY_CONSTRAINTS[key];
+  if (check) check(raw, coerced);
+}
+
 /**
  * Slice 27 — projected Claude auto-compaction policy. ContextMonitor
  * consumes this snapshot per-poll; the PreCompact hook reads the same
@@ -437,6 +472,7 @@ export class SettingsStore {
     const fc = this.readConfigFile();
     const wr = this.resolveWorkspaceRootRaw(fc);
     const coerced = coerceValue(key, value, wr);
+    validateKeyConstraints(key, value, coerced);
     setNestedValue(fc, KEY_TO_PATH[key], coerced);
     mkdirSync(path.dirname(this.configPath), { recursive: true });
     writeFileSync(this.configPath, JSON.stringify(fc, null, 2) + "\n", "utf-8");

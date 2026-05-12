@@ -45,7 +45,8 @@ export type EnforcerSkipReason =
   | "disabled"
   | "below_threshold"
   | "dedup_window"
-  | "send_failed";
+  | "send_failed"
+  | "invalid_policy";
 
 export class ClaudeCompactionEnforcer {
   private readonly settingsStore: SettingsStore;
@@ -79,6 +80,22 @@ export class ClaudeCompactionEnforcer {
     const policy = this.settingsStore.resolveClaudeCompactionPolicy();
     if (!policy.enabled) {
       return { triggered: false, reason: "disabled" };
+    }
+    // Defense in depth: the CLI + daemon set() paths reject invalid
+    // threshold values, but a hand-edited ~/.openrig/config.json could
+    // still inject 0, 101, NaN, or a non-integer. The enforcer treats
+    // out-of-contract policy as disabled (safer-failure direction) so
+    // compaction lifecycle remains operator-controlled even on bad
+    // config. Mirrors the per-key constraint in
+    // user-settings/settings-store.ts KEY_CONSTRAINTS.
+    if (
+      typeof policy.thresholdPercent !== "number"
+      || !Number.isFinite(policy.thresholdPercent)
+      || !Number.isInteger(policy.thresholdPercent)
+      || policy.thresholdPercent < 1
+      || policy.thresholdPercent > 100
+    ) {
+      return { triggered: false, reason: "invalid_policy" };
     }
     if (input.usedPercentage < policy.thresholdPercent) {
       return { triggered: false, reason: "below_threshold" };

@@ -385,6 +385,42 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
     expect(store.get("recovery.auto_drive_provider_prompts")).toBe(true);
     expect(store.resolve().recovery.autoDriveProviderPrompts).toBe(true);
   });
+
+  // Slice 27 BLOCKING-FIX — strict accept/reject matrix for
+  // policies.claude_compaction.threshold_percent. The contract is
+  // integer in [1, 100]. parseInt's permissive coercion would otherwise
+  // accept "80abc" → 80, "80.5" → 80, and even 0 / 101 / -1 which would
+  // break the trigger's safety contract (0 = compact every tick).
+  describe("policies.claude_compaction.threshold_percent strict validation matrix", () => {
+    const accept = ["1", "2", "50", "80", "99", "100"];
+    const reject: Array<{ raw: string; reason: RegExp }> = [
+      { raw: "0", reason: /must be in \[1, 100\]/ },
+      { raw: "101", reason: /must be in \[1, 100\]/ },
+      { raw: "-1", reason: /must be in \[1, 100\]/ },
+      { raw: "80abc", reason: /expected an integer/ },
+      { raw: "abc80", reason: /expected a number|expected an integer/ },
+      { raw: "80.5", reason: /expected an integer/ },
+      { raw: "", reason: /expected a number|expected an integer/ },
+      { raw: " ", reason: /expected a number|expected an integer/ },
+      { raw: "NaN", reason: /expected a number|expected an integer/ },
+      { raw: "Infinity", reason: /expected a number|expected an integer/ },
+    ];
+
+    for (const value of accept) {
+      it(`accepts ${JSON.stringify(value)}`, () => {
+        const store = new ConfigStore(configPath);
+        expect(() => store.set("policies.claude_compaction.threshold_percent", value)).not.toThrow();
+        expect(store.get("policies.claude_compaction.threshold_percent")).toBe(Number(value));
+      });
+    }
+
+    for (const { raw, reason } of reject) {
+      it(`rejects ${JSON.stringify(raw)}`, () => {
+        const store = new ConfigStore(configPath);
+        expect(() => store.set("policies.claude_compaction.threshold_percent", raw)).toThrow(reason);
+      });
+    }
+  });
 });
 
 describe("parseNamedPairs", () => {

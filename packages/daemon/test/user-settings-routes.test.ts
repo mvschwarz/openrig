@@ -143,6 +143,39 @@ describe("config routes (User Settings v0)", () => {
     expect(res.status).toBe(400);
   });
 
+  // Slice 27 BLOCKING-FIX — /api/config POST must reject invalid
+  // threshold_percent input. The route catches the error thrown by
+  // SettingsStore.set and maps it to 400; the integration test asserts
+  // the contract end-to-end so a future drift gets caught at CI.
+  describe("POST /api/config/policies.claude_compaction.threshold_percent strict validation", () => {
+    const rejectCases = ["0", "101", "-1", "80abc", "80.5", "", " ", "NaN", "Infinity"];
+
+    for (const raw of rejectCases) {
+      it(`returns 400 for ${JSON.stringify(raw)}`, async () => {
+        const app = buildApp();
+        const res = await app.request("/api/config/policies.claude_compaction.threshold_percent", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ value: raw }),
+        });
+        expect(res.status).toBe(400);
+        const body = await res.json() as { error?: string };
+        expect(body.error).toMatch(/integer|number|in \[1, 100\]/);
+      });
+    }
+
+    it("accepts valid integer in range and persists to disk", async () => {
+      const app = buildApp();
+      const res = await app.request("/api/config/policies.claude_compaction.threshold_percent", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ value: "60" }),
+      });
+      expect(res.status).toBe(200);
+      expect(JSON.parse(readFileSync(configPath, "utf-8")).policies.claudeCompaction.thresholdPercent).toBe(60);
+    });
+  });
+
   it("DELETE /api/config/:key resets to default", async () => {
     store.set("workspace.slices_root", "/x");
     const app = buildApp();

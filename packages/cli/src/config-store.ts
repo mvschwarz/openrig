@@ -405,6 +405,44 @@ function coerceValue(key: ValidKey, raw: string, workspaceRoot: string): string 
   return raw;
 }
 
+// Slice 27 — strict per-key constraint validators applied AFTER coerceValue
+// in `set()`. The generic coerce uses parseInt which accepts partial
+// parses (e.g., "80abc" → 80) and truncates fractions ("80.5" → 80); for
+// keys with documented range/integer contracts this is unsafe. Per
+// banked feedback_static_gates_mirror_runtime_validators, the runtime
+// validator is the source of truth and must reject what the contract
+// forbids.
+const KEY_CONSTRAINTS: Partial<Record<ValidKey, (raw: string, coerced: string | number | boolean) => void>> = {
+  // Policy threshold: integer in [1, 100]. Documented contract from
+  // slice 27 README §"What the operator gets" — operator can lower to
+  // e.g. 50 = compact earlier; range is 1-100 inclusive. A value of 0
+  // would fire /compact on every poll tick (catastrophic without
+  // default-off as backstop).
+  "policies.claude_compaction.threshold_percent": (raw, coerced) => {
+    const trimmed = (raw ?? "").trim();
+    if (!/^-?\d+$/.test(trimmed)) {
+      throw new Error(
+        `Invalid value for policies.claude_compaction.threshold_percent: expected an integer in [1, 100], got "${raw}"`,
+      );
+    }
+    if (typeof coerced !== "number" || !Number.isInteger(coerced)) {
+      throw new Error(
+        `Invalid value for policies.claude_compaction.threshold_percent: expected an integer in [1, 100], got "${raw}"`,
+      );
+    }
+    if (coerced < 1 || coerced > 100) {
+      throw new Error(
+        `Invalid value for policies.claude_compaction.threshold_percent: must be in [1, 100], got ${coerced}`,
+      );
+    }
+  },
+};
+
+function validateKeyConstraints(key: ValidKey, raw: string, coerced: string | number | boolean): void {
+  const check = KEY_CONSTRAINTS[key];
+  if (check) check(raw, coerced);
+}
+
 export type SettingSource = "env" | "file" | "default";
 
 export interface ResolvedSetting {
@@ -557,6 +595,7 @@ export class ConfigStore {
       || readOpenRigEnv(ENV_MAP["workspace.root"].primary, ENV_MAP["workspace.root"].legacy)
       || DEFAULT_WORKSPACE_ROOT;
     const coerced = coerceValue(key, value, workspaceRoot);
+    validateKeyConstraints(key, value, coerced);
     setNestedValue(fileConfig, KEY_TO_PATH[key], coerced);
     mkdirSync(dirname(this.configPath), { recursive: true });
     writeFileSync(this.configPath, JSON.stringify(fileConfig, null, 2) + "\n", "utf-8");

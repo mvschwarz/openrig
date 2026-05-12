@@ -209,4 +209,45 @@ describe("ClaudeCompactionEnforcer", () => {
     expect(send.mock.calls[0]![0]).toBe("a@rig");
     expect(send.mock.calls[1]![0]).toBe("b@rig");
   });
+
+  // Slice 27 BLOCKING-FIX — defense-in-depth at the enforcer.
+  //
+  // The CLI + daemon set() paths reject invalid threshold input, but a
+  // hand-edited ~/.openrig/config.json could still inject 0, 101, NaN,
+  // or a non-integer (the file read path passes the value through
+  // without re-validation by design). The enforcer is the last
+  // safety net before send: it MUST treat an out-of-contract
+  // thresholdPercent as disabled (returns `invalid_policy`, no send).
+  describe("BLOCKING-FIX: defense-in-depth on hand-edited bad policy values", () => {
+    const cases: Array<{ name: string; thresholdPercent: number }> = [
+      { name: "0 (would trigger on every tick)", thresholdPercent: 0 },
+      { name: "101 (above range)", thresholdPercent: 101 },
+      { name: "-1 (below range)", thresholdPercent: -1 },
+      { name: "80.5 (non-integer)", thresholdPercent: 80.5 },
+      { name: "NaN", thresholdPercent: Number.NaN },
+      { name: "Infinity", thresholdPercent: Number.POSITIVE_INFINITY },
+    ];
+
+    for (const c of cases) {
+      it(`treats threshold=${c.name} as invalid_policy; never sends`, async () => {
+        const settings = makeSettingsStore({
+          enabled: true,
+          thresholdPercent: c.thresholdPercent,
+          messageInline: "",
+          messageFilePath: "",
+        });
+        const { transport, send } = makeSessionTransport();
+        const enforcer = new ClaudeCompactionEnforcer(settings, transport);
+
+        const outcome = await enforcer.maybeAutoCompact({
+          sessionName: "claude-seat@rig",
+          runtime: "claude-code",
+          usedPercentage: 99, // would trigger if policy were valid
+        });
+
+        expect(outcome).toEqual({ triggered: false, reason: "invalid_policy" });
+        expect(send).not.toHaveBeenCalled();
+      });
+    }
+  });
 });
