@@ -37,7 +37,7 @@ interface RigCmuxLaunchErrorBody {
   partial?: CmuxLaunchedWorkspace[];
 }
 
-async function postRigCmuxLaunch({ rigId }: RigCmuxLaunchInput): Promise<RigCmuxLaunchSuccess> {
+export async function launchRigCmux({ rigId }: RigCmuxLaunchInput): Promise<RigCmuxLaunchSuccess> {
   const res = await fetch(`/api/rigs/${encodeURIComponent(rigId)}/cmux/launch`, {
     method: "POST",
   });
@@ -60,7 +60,7 @@ export function useRigCmuxLaunch() {
   const mutateAsync = useCallback(async (input: RigCmuxLaunchInput) => {
     setState({ status: "pending" });
     try {
-      const data = await postRigCmuxLaunch(input);
+      const data = await launchRigCmux(input);
       setState({ status: "success", data });
       return data;
     } catch (err) {

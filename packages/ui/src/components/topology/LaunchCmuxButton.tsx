@@ -9,57 +9,94 @@
 // bar (Option C placement, persistent across all rig-scope view-mode
 // tabs); hidden below the lg breakpoint via Tailwind responsive classes.
 
-import { useEffect, useState } from "react";
-import { useRigCmuxLaunch } from "../../hooks/useRigCmuxLaunch.js";
+import { useEffect, useRef } from "react";
+import { launchRigCmux } from "../../hooks/useRigCmuxLaunch.js";
 
 interface LaunchCmuxButtonProps {
   rigId: string;
-}
-
-type StatusKind = "idle" | "loading" | "success" | "error";
-
-interface StatusState {
-  kind: StatusKind;
-  message?: string;
 }
 
 const SUCCESS_TOAST_TIMEOUT_MS = 6000;
 const ERROR_TOAST_TIMEOUT_MS = 8000;
 
 export function LaunchCmuxButton({ rigId }: LaunchCmuxButtonProps) {
-  const mutation = useRigCmuxLaunch();
-  const [status, setStatus] = useState<StatusState>({ kind: "idle" });
+  // Keep this launcher's transient state out of React rendering. The
+  // topology table view can renderer-spin when this sibling button
+  // schedules React state during click handling; the cmux launch is an
+  // external side effect, so a tiny uncontrolled status island is safer.
+  const buttonRef = useRef<HTMLButtonElement | null>(null);
+  const statusRef = useRef<HTMLSpanElement | null>(null);
+  const inFlightRef = useRef(false);
+  const clearTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
-    if (status.kind === "idle" || status.kind === "loading") return;
-    const timeout = status.kind === "success" ? SUCCESS_TOAST_TIMEOUT_MS : ERROR_TOAST_TIMEOUT_MS;
-    const t = window.setTimeout(() => setStatus({ kind: "idle" }), timeout);
-    return () => window.clearTimeout(t);
-  }, [status]);
+    return () => {
+      if (clearTimerRef.current !== null) {
+        window.clearTimeout(clearTimerRef.current);
+      }
+    };
+  }, []);
+
+  const setPendingUi = (pending: boolean) => {
+    const button = buttonRef.current;
+    if (!button) return;
+    button.disabled = pending;
+    button.setAttribute("aria-busy", pending ? "true" : "false");
+    button.textContent = pending ? "Launching..." : "Launch in CMUX";
+  };
+
+  const clearStatus = () => {
+    const status = statusRef.current;
+    if (!status) return;
+    status.hidden = true;
+    status.textContent = "";
+    status.removeAttribute("data-status-kind");
+  };
+
+  const showStatus = (kind: "success" | "error", message: string) => {
+    const status = statusRef.current;
+    if (!status) return;
+    status.hidden = false;
+    status.textContent = message;
+    status.setAttribute("data-status-kind", kind);
+    status.className =
+      kind === "error"
+        ? "font-mono text-[10px] text-rose-700 max-w-2xl leading-relaxed whitespace-normal break-words"
+        : "font-mono text-[10px] text-emerald-700 max-w-2xl leading-relaxed whitespace-normal break-words";
+    if (clearTimerRef.current !== null) {
+      window.clearTimeout(clearTimerRef.current);
+    }
+    clearTimerRef.current = window.setTimeout(
+      clearStatus,
+      kind === "success" ? SUCCESS_TOAST_TIMEOUT_MS : ERROR_TOAST_TIMEOUT_MS,
+    );
+  };
 
   const handleClick = () => {
-    if (mutation.isPending) return;
-    setStatus({ kind: "loading" });
-    mutation
-      .mutateAsync({ rigId })
+    if (inFlightRef.current) return;
+    inFlightRef.current = true;
+    setPendingUi(true);
+    clearStatus();
+    launchRigCmux({ rigId })
       .then((result) => {
         const workspaceCount = result.workspaces.length;
         const agentCount = result.workspaces.reduce((sum, w) => sum + w.agents.length, 0);
         const names = result.workspaces.map((w) => w.name).join(", ");
-        setStatus({
-          kind: "success",
-          message:
-            workspaceCount === 1
-              ? `Launched cmux workspace "${names}" with ${agentCount} agent${agentCount === 1 ? "" : "s"}.`
-              : `Launched ${workspaceCount} cmux workspaces (${names}) with ${agentCount} agents total.`,
-        });
+        showStatus(
+          "success",
+          workspaceCount === 1
+            ? `Launched cmux workspace "${names}" with ${agentCount} agent${agentCount === 1 ? "" : "s"}.`
+            : `Launched ${workspaceCount} cmux workspaces (${names}) with ${agentCount} agents total.`,
+        );
       })
       .catch((err: Error) => {
-        setStatus({ kind: "error", message: err.message });
+        showStatus("error", err.message);
+      })
+      .finally(() => {
+        inFlightRef.current = false;
+        setPendingUi(false);
       });
   };
-
-  const buttonLabel = mutation.isPending ? "Launching…" : "Launch in CMUX";
 
   return (
     <div
@@ -67,35 +104,22 @@ export function LaunchCmuxButton({ rigId }: LaunchCmuxButtonProps) {
       className="hidden lg:inline-flex items-center gap-3 ml-auto"
     >
       <button
+        ref={buttonRef}
         type="button"
         data-testid="launch-cmux-button"
         onClick={handleClick}
-        disabled={mutation.isPending}
         className="border border-stone-700 bg-white px-3 py-2 font-mono text-[10px] uppercase tracking-[0.18em] text-stone-900 hover:bg-stone-100 disabled:opacity-50 disabled:cursor-not-allowed focus:outline-none focus:ring-1 focus:ring-stone-400"
       >
-        {buttonLabel}
+        Launch in CMUX
       </button>
-      {status.kind !== "idle" && status.message ? (
-        <span
-          data-testid="launch-cmux-status"
-          data-status-kind={status.kind}
-          role="status"
-          aria-live="polite"
-          className={
-            // Slice 24.D repair (velocity-guard BLOCKING-CONCERN):
-            // do NOT truncate the daemon's honest 3-part error
-            // messages. Operator must see the action phrase
-            // (e.g., "cmux ping", "rig up <name>") to recover.
-            // Width-bound the wrapper instead and let text wrap
-            // naturally onto multiple lines.
-            status.kind === "error"
-              ? "font-mono text-[10px] text-rose-700 max-w-2xl leading-relaxed whitespace-normal break-words"
-              : "font-mono text-[10px] text-emerald-700 max-w-2xl leading-relaxed whitespace-normal break-words"
-          }
-        >
-          {status.message}
-        </span>
-      ) : null}
+      <span
+        ref={statusRef}
+        hidden
+        data-testid="launch-cmux-status"
+        role="status"
+        aria-live="polite"
+        className="font-mono text-[10px] text-emerald-700 max-w-2xl leading-relaxed whitespace-normal break-words"
+      />
     </div>
   );
 }
