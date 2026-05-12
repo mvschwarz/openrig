@@ -51,6 +51,7 @@ import {
   getActivityState,
   type ActivityState,
 } from "../lib/activity-visuals.js";
+import type { TopologyActivityVisual } from "../lib/topology-activity.js";
 // Slice 14 shimmer CSS — reused on the activity value when state is
 // "running" so the seat-page activity reads with the same visual
 // vocabulary as the topology table.
@@ -58,6 +59,7 @@ import "./topology/topology-table-shimmer.css";
 
 interface SeatOverviewTableProps {
   data: NodeDetailData;
+  activityVisual?: TopologyActivityVisual | null;
 }
 
 type RowShape = "compact" | "full-width";
@@ -95,10 +97,21 @@ function activityLabelFromState(state: ActivityState): string {
   return getActivityLabel(state);
 }
 
-export function SeatOverviewTable({ data }: SeatOverviewTableProps) {
-  const activityState = getActivityState(data.agentActivity);
-  const activityLabel = activityLabelFromState(activityState);
-  const activityIsActive = activityState === "running";
+function activityLabelFromVisualState(state: TopologyActivityVisual["state"]): string {
+  if (state === "active") return "active";
+  if (state === "needs_input") return "needs input";
+  return state;
+}
+
+export function SeatOverviewTable({ data, activityVisual }: SeatOverviewTableProps) {
+  const fallbackActivityState = getActivityState(data.agentActivity);
+  const activityState = activityVisual?.state ?? fallbackActivityState;
+  const activityLabel = activityVisual
+    ? activityLabelFromVisualState(activityVisual.state)
+    : activityLabelFromState(fallbackActivityState);
+  const activityIsActive = activityVisual
+    ? activityVisual.state === "active"
+    : fallbackActivityState === "running";
 
   const contextPercentage =
     data.contextUsage?.availability === "known" &&

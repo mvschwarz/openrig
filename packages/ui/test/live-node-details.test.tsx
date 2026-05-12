@@ -3,8 +3,15 @@ import { render, screen, cleanup, waitFor, fireEvent } from "@testing-library/re
 import { createTestRouter } from "./helpers/test-router.js";
 import { LiveNodeDetails } from "../src/components/LiveNodeDetails.js";
 import { DrawerSelectionContext, type DrawerSelection } from "../src/components/AppShell.js";
+import {
+  resetTopologyActivityStoreForTests,
+  useTopologyActivity,
+} from "../src/hooks/useTopologyActivity.js";
+import { buildTopologySessionIndex } from "../src/lib/topology-activity.js";
+import { createMockEventSourceClass, instances } from "./helpers/mock-event-source.js";
 
 const mockFetch = vi.fn();
+let OriginalEventSource: typeof EventSource | undefined;
 
 // V0.3.1 slice 25 — seat detail page now uses a 2-tab Overview +
 // Details layout. Tests target the new structure.
@@ -65,12 +72,21 @@ const INFRA_DETAIL = {
 
 describe("LiveNodeDetails (slice 25 Overview + Details)", () => {
   beforeEach(() => {
+    OriginalEventSource = globalThis.EventSource;
+    globalThis.EventSource = createMockEventSourceClass() as unknown as typeof EventSource;
+    resetTopologyActivityStoreForTests();
     globalThis.fetch = mockFetch as unknown as typeof fetch;
   });
 
   afterEach(() => {
     cleanup();
     vi.restoreAllMocks();
+    if (OriginalEventSource) {
+      globalThis.EventSource = OriginalEventSource;
+    } else {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      delete (globalThis as any).EventSource;
+    }
   });
 
   function mockNodeDetail(detail: Record<string, unknown>) {
@@ -106,6 +122,17 @@ describe("LiveNodeDetails (slice 25 Overview + Details)", () => {
         path: "/test",
       }),
     );
+  }
+
+  function TopologyActivityWarmup() {
+    useTopologyActivity(buildTopologySessionIndex([{
+      nodeId: "rig-1::dev.impl",
+      rigId: "rig-1",
+      rigName: "test-rig",
+      logicalId: "dev.impl",
+      canonicalSessionName: "dev-impl@test-rig",
+    }]));
+    return <div data-testid="activity-warmup" />;
   }
 
   // HG-1 — default tab is Overview.
@@ -193,7 +220,7 @@ describe("LiveNodeDetails (slice 25 Overview + Details)", () => {
     const cell = screen.getByTestId("seat-overview-cell-activity");
     expect(cell.textContent?.trim()).toContain("active");
     const stateEl = screen.getByTestId("seat-overview-activity-state");
-    expect(stateEl.getAttribute("data-activity-state")).toBe("running");
+    expect(stateEl.getAttribute("data-activity-state")).toBe("active");
     // HG-3c shimmer reuse: slice-14 shimmer class applied on active.
     expect(stateEl.className).toContain("topology-table-active-shimmer");
   });
@@ -202,6 +229,7 @@ describe("LiveNodeDetails (slice 25 Overview + Details)", () => {
     mockNodeDetail({
       ...NODE_DETAIL,
       agentActivity: { ...NODE_DETAIL.agentActivity, state: "idle" },
+      currentQitems: [],
     });
     renderDetails();
     await screen.findByTestId("seat-overview-table");
@@ -210,6 +238,36 @@ describe("LiveNodeDetails (slice 25 Overview + Details)", () => {
     const stateEl = screen.getByTestId("seat-overview-activity-state");
     expect(stateEl.getAttribute("data-activity-state")).toBe("idle");
     expect(stateEl.className).not.toContain("topology-table-active-shimmer");
+  });
+
+  it("HG-3a: seat page reuses recent topology activity across graph/table -> seat navigation", async () => {
+    const warmup = render(<TopologyActivityWarmup />);
+    await waitFor(() => {
+      expect(instances).toHaveLength(1);
+    });
+
+    instances[0]!.simulateMessage(JSON.stringify({
+      type: "agent.activity",
+      sessionName: "dev-impl@test-rig",
+      activity: { state: "running" },
+    }));
+    warmup.unmount();
+
+    mockNodeDetail({
+      ...NODE_DETAIL,
+      agentActivity: {
+        ...NODE_DETAIL.agentActivity,
+        state: "unknown",
+        reason: "no_activity_signal",
+        fallback: true,
+      },
+      currentQitems: [],
+    });
+    renderDetails();
+    const stateEl = await screen.findByTestId("seat-overview-activity-state");
+    expect(stateEl.textContent).toBe("active");
+    expect(stateEl.getAttribute("data-activity-state")).toBe("active");
+    expect(stateEl.className).toContain("topology-table-active-shimmer");
   });
 
   // HG-3b — current-work row wires live to data.currentQitems[0].
@@ -408,7 +466,7 @@ describe("LiveNodeDetails (slice 25 Overview + Details)", () => {
     await waitFor(() => {
       expect(screen.getByTestId("live-node-current-state")).toBeDefined();
     });
-    expect(screen.getByTestId("live-node-agent-activity").textContent).toContain("running");
+    expect(screen.getByTestId("live-node-agent-activity").textContent).toContain("active");
     expect(screen.getByTestId("live-node-current-qitems").textContent).toContain("04001234-driver");
     expect(screen.getByTestId("live-node-current-qitems").textContent).toContain("Implement PL-019 edge activity pulse");
   });

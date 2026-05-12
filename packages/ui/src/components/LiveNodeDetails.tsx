@@ -2,7 +2,7 @@
 //
 // V0.3.1 slice 25 reshapes the seat-detail page into a 2-tab
 // Overview + Details layout. Overview is the default and answers the
-// most-common at-a-glance questions: a dense 7-field info table at
+// most-common at-a-glance questions: a dense 9-field info table at
 // the top, the black-glass smoked terminal inline below it, then the
 // Activity + Recent Events cards. Details holds everything else
 // (edges, peers, agent spec, startup content sans preview, transcript).
@@ -13,9 +13,10 @@
 // Startup section in Details no longer shows the preview pane (since
 // the terminal moved up to Overview).
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { CirclePlay } from "lucide-react";
 import { useNodeDetail, type NodeDetailData } from "../hooks/useNodeDetail.js";
+import { useTopologyActivity } from "../hooks/useTopologyActivity.js";
 import { useSpecLibrary, useLibraryReview } from "../hooks/useSpecLibrary.js";
 import { WorkspacePage } from "./WorkspacePage.js";
 import { WorkflowHeader } from "./WorkflowScaffold.js";
@@ -35,6 +36,10 @@ import { FileReferenceTrigger } from "./drawer-triggers/FileReferenceTrigger.js"
 import { displayPodName, inferPodName } from "../lib/display-name.js";
 import { copyText } from "../lib/copy-text.js";
 import { getActivityLabel, getActivityState, getActivityTextClass, isActivityStale } from "../lib/activity-visuals.js";
+import {
+  buildTopologySessionIndex,
+  type TopologyActivityVisual,
+} from "../lib/topology-activity.js";
 import { getRestoreStatusColorClass } from "../lib/restore-status-colors.js";
 import type { AgentSpecReview } from "../hooks/useSpecReview.js";
 import { RuntimeBadge, ToolMark } from "./graphics/RuntimeMark.js";
@@ -309,11 +314,40 @@ function StatusSection({ data }: { data: NodeDetailData }) {
   );
 }
 
-function LiveNodeCurrentState({ data }: { data: NodeDetailData }) {
-  const activityState = getActivityState(data.agentActivity);
-  const activityLabel = getActivityLabel(activityState);
-  const activityTextClass = getActivityTextClass(activityState);
-  const activityStale = isActivityStale(data.agentActivity);
+function activityLabelFromVisual(activityVisual: TopologyActivityVisual): string {
+  if (activityVisual.state === "active") return "active";
+  if (activityVisual.state === "needs_input") return "needs input";
+  return activityVisual.state;
+}
+
+function activityTextClassFromVisual(activityVisual: TopologyActivityVisual): string {
+  switch (activityVisual.state) {
+    case "active":
+      return "text-emerald-600";
+    case "needs_input":
+      return "text-amber-600";
+    case "blocked":
+      return "text-red-600";
+    case "idle":
+      return "text-stone-400";
+  }
+}
+
+function LiveNodeCurrentState({
+  data,
+  activityVisual,
+}: {
+  data: NodeDetailData;
+  activityVisual?: TopologyActivityVisual | null;
+}) {
+  const fallbackActivityState = getActivityState(data.agentActivity);
+  const activityLabel = activityVisual
+    ? activityLabelFromVisual(activityVisual)
+    : getActivityLabel(fallbackActivityState);
+  const activityTextClass = activityVisual
+    ? activityTextClassFromVisual(activityVisual)
+    : getActivityTextClass(fallbackActivityState);
+  const activityStale = activityVisual ? false : isActivityStale(data.agentActivity);
   const qitems = data.currentQitems ?? [];
 
   return (
@@ -372,7 +406,8 @@ function RecentEventsSection({ data }: { data: NodeDetailData }) {
 }
 
 // V0.3.1 slice 25 — IdentitySummary card is replaced by SeatOverviewTable
-// (dense 7-field info table at the top of Overview).
+// (dense 9-field info table at the top of Overview; 7 compact rows
+// + 2 full-width rows per the slice 25 scope amendment).
 
 function EdgesSection({ data }: { data: NodeDetailData }) {
   const { outgoing, incoming } = data.edges;
@@ -448,16 +483,16 @@ function ContextUsageSection({ data }: { data: NodeDetailData }) {
   );
 }
 
-// V0.3.1 slice 25 — Overview tab. Dense info-table (7 fields) on top;
+// V0.3.1 slice 25 — Overview tab. Dense info-table (9 fields) on top;
 // inline black-glass terminal below; Activity + Recent Events cards
 // at the bottom. Composes the at-a-glance answer to operators
 // landing on the seat page from topology.
-function OverviewTab({ data }: { data: NodeDetailData }) {
+function OverviewTab({ data, activityVisual }: { data: NodeDetailData; activityVisual?: TopologyActivityVisual | null }) {
   return (
     <div data-testid="live-overview-section" className="space-y-4">
-      <SeatOverviewTable data={data} />
+      <SeatOverviewTable data={data} activityVisual={activityVisual} />
       <InlineTerminal data={data} />
-      <LiveNodeCurrentState data={data} />
+      <LiveNodeCurrentState data={data} activityVisual={activityVisual} />
       <RecentEventsSection data={data} />
     </div>
   );
@@ -642,6 +677,24 @@ function TabNav({
 
 export function LiveNodeDetails({ rigId, logicalId }: LiveNodeDetailsProps) {
   const { data, isLoading, error } = useNodeDetail(rigId, logicalId);
+  const sessionIndex = useMemo(() => buildTopologySessionIndex(data ? [{
+    nodeId: `${data.rigId}::${data.logicalId}`,
+    rigId: data.rigId,
+    rigName: data.rigName,
+    logicalId: data.logicalId,
+    canonicalSessionName: data.canonicalSessionName,
+    agentActivity: data.agentActivity ?? null,
+    currentQitems: data.currentQitems ?? null,
+    startupStatus: data.startupStatus,
+  }] : []), [data]);
+  const topologyActivity = useTopologyActivity(sessionIndex);
+  const activityVisual = data
+    ? topologyActivity.getNodeActivity(`${data.rigId}::${data.logicalId}`, {
+      agentActivity: data.agentActivity ?? null,
+      currentQitems: data.currentQitems ?? null,
+      startupStatus: data.startupStatus,
+    })
+    : null;
   // V0.3.1 slice 25 — 2-tab Overview/Details restructure. Default
   // tab is Overview so operators landing from topology see the
   // at-a-glance info table + inline terminal without tab-switching.
@@ -681,7 +734,7 @@ export function LiveNodeDetails({ rigId, logicalId }: LiveNodeDetailsProps) {
             <ActionButtonsRow rigId={rigId} logicalId={logicalId} data={data} />
             <TabNav tabs={tabs} activeTab={activeTab} onSelect={setActiveTab} />
             <div data-testid="live-node-tab-body" className="space-y-4">
-              {activeTab === "overview" && <OverviewTab data={data} />}
+              {activeTab === "overview" && <OverviewTab data={data} activityVisual={activityVisual} />}
               {activeTab === "details" && (
                 <DetailsTab rigId={rigId} logicalId={logicalId} data={data} isAgent={isAgent} />
               )}
