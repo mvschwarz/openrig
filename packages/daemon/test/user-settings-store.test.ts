@@ -5,7 +5,7 @@
 // resolution, same file format. Drift between the two would mean the
 // daemon's UI route surfaces a different value than the CLI.
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -304,6 +304,101 @@ describe("SettingsStore (User Settings v0)", () => {
   it("HG-1: invalid threshold rejected by coerceValue (non-numeric raises)", () => {
     const store = new SettingsStore(configPath);
     expect(() => store.set("policies.claude_compaction.threshold_percent", "not-a-number")).toThrow(/expected a number/);
+  });
+
+  // Slice 27 BLOCKING-FIX-2 — env + file source resolution must also
+  // reject invalid threshold values. Without this, an env override
+  // (OPENRIG_POLICIES_CLAUDE_COMPACTION_THRESHOLD_PERCENT=80abc) or a
+  // hand-edited config.json poisons the trigger contract because the
+  // write-path validators are bypassed entirely.
+  //
+  // Behavior on bad input: drop the override, warn to stderr, fall
+  // through to file/default (env layer) or default (file layer).
+  describe("BLOCKING-FIX-2: env + file source validation", () => {
+    const reject = ["0", "101", "-1", "80abc", "80.5", "NaN", "Infinity"];
+
+    for (const raw of reject) {
+      it(`env=${JSON.stringify(raw)} → resolveOne returns default 80 (env rejected, NOT coerced)`, () => {
+        process.env["OPENRIG_POLICIES_CLAUDE_COMPACTION_THRESHOLD_PERCENT"] = raw;
+        const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+        try {
+          const store = new SettingsStore(configPath);
+          const resolved = store.resolveOne("policies.claude_compaction.threshold_percent");
+          // Default value (80), source falls through to "default"
+          expect(resolved.value).toBe(80);
+          expect(resolved.source).toBe("default");
+          // Warning emitted (operator visibility)
+          const calls = stderrSpy.mock.calls.map((c) => String(c[0]));
+          expect(calls.some((c) => c.includes("env override for policies.claude_compaction.threshold_percent rejected"))).toBe(true);
+        } finally {
+          stderrSpy.mockRestore();
+          delete process.env["OPENRIG_POLICIES_CLAUDE_COMPACTION_THRESHOLD_PERCENT"];
+        }
+      });
+    }
+
+    it("discriminator: env=80abc (rejected → source=default, warning emitted) vs env=80 (accepted → source=env, no warning)", () => {
+      // Case A: rejected env
+      process.env["OPENRIG_POLICIES_CLAUDE_COMPACTION_THRESHOLD_PERCENT"] = "80abc";
+      let stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+      try {
+        const a = new SettingsStore(configPath).resolveOne("policies.claude_compaction.threshold_percent");
+        expect(a.value).toBe(80);
+        expect(a.source).toBe("default");
+        const warnCount = stderrSpy.mock.calls
+          .map((c) => String(c[0]))
+          .filter((c) => c.includes("env override for policies.claude_compaction.threshold_percent rejected"))
+          .length;
+        expect(warnCount).toBe(1);
+      } finally {
+        stderrSpy.mockRestore();
+        delete process.env["OPENRIG_POLICIES_CLAUDE_COMPACTION_THRESHOLD_PERCENT"];
+      }
+
+      // Case B: accepted env — same RESOLVED VALUE (80) but DIFFERENT
+      // observable: source=env, no warning. This is the discriminator.
+      process.env["OPENRIG_POLICIES_CLAUDE_COMPACTION_THRESHOLD_PERCENT"] = "80";
+      stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+      try {
+        const b = new SettingsStore(configPath).resolveOne("policies.claude_compaction.threshold_percent");
+        expect(b.value).toBe(80);
+        expect(b.source).toBe("env");
+        const warnCount = stderrSpy.mock.calls
+          .map((c) => String(c[0]))
+          .filter((c) => c.includes("rejected"))
+          .length;
+        expect(warnCount).toBe(0);
+      } finally {
+        stderrSpy.mockRestore();
+        delete process.env["OPENRIG_POLICIES_CLAUDE_COMPACTION_THRESHOLD_PERCENT"];
+      }
+    });
+
+    const fileReject: Array<{ name: string; written: unknown }> = [
+      { name: "0", written: 0 },
+      { name: "101", written: 101 },
+      { name: "-1", written: -1 },
+      { name: "80.5 (non-integer JSON number)", written: 80.5 },
+      { name: '"80abc" (JSON string)', written: "80abc" },
+    ];
+
+    for (const { name, written } of fileReject) {
+      it(`file thresholdPercent=${name} → resolveOne returns default 80 + warning`, () => {
+        writeFileSync(configPath, JSON.stringify({
+          policies: { claudeCompaction: { thresholdPercent: written } },
+        }));
+        const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+        try {
+          const resolved = new SettingsStore(configPath).resolveOne("policies.claude_compaction.threshold_percent");
+          expect(resolved.value).toBe(80);
+          expect(resolved.source).toBe("default");
+          const calls = stderrSpy.mock.calls.map((c) => String(c[0]));
+          expect(calls.some((c) => c.includes("file value for policies.claude_compaction.threshold_percent rejected"))).toBe(true);
+        } finally {
+          stderrSpy.mockRestore();
+        }
+      });
+    }
   });
 
   // Slice 27 BLOCKING-FIX — strict accept/reject matrix for

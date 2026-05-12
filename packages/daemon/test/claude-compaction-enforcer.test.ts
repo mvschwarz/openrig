@@ -210,6 +210,94 @@ describe("ClaudeCompactionEnforcer", () => {
     expect(send.mock.calls[1]![0]).toBe("b@rig");
   });
 
+  // Slice 27 BLOCKING-FIX-2 — env-source bypass integration check.
+  //
+  // With BLOCKING-FIX-2's resolve-path validation, an env override like
+  // OPENRIG_POLICIES_CLAUDE_COMPACTION_THRESHOLD_PERCENT=80abc is
+  // dropped at SettingsStore.resolveOne and the enforcer sees the
+  // default (80). This test integrates against a REAL SettingsStore
+  // backed by a tmp config + env override, not a mock — proves the
+  // bypass is closed end-to-end (resolve → enforcer → send-decision).
+  describe("BLOCKING-FIX-2 integration: env-source bypass cannot poison enforcer", () => {
+    it("env=80abc with policy enabled at threshold>= the seat percentage → does NOT trigger /compact (env rejected; falls to default 80; seat at 79% below threshold)", async () => {
+      const { SettingsStore } = await import("../src/domain/user-settings/settings-store.js");
+      const { mkdtempSync, rmSync, writeFileSync } = await import("node:fs");
+      const { join } = await import("node:path");
+      const { tmpdir } = await import("node:os");
+
+      const tmpDir = mkdtempSync(join(tmpdir(), "enforcer-env-bypass-"));
+      const configPath = join(tmpDir, "config.json");
+      // File enables the policy at default 80. Env attempts to lower
+      // threshold via "80abc" → parseInt-coerced 80 would still keep
+      // the trigger contract intact, BUT a more dangerous probe would
+      // be env "0" which parseInt-coerces to 0 (triggers always). With
+      // BLOCKING-FIX-2, env "0" is rejected at resolve and falls to
+      // default 80. Test asserts both observable outcomes simultaneously.
+      writeFileSync(configPath, JSON.stringify({
+        policies: { claudeCompaction: { enabled: true, thresholdPercent: 80 } },
+      }));
+      const settings = new SettingsStore(configPath);
+
+      process.env["OPENRIG_POLICIES_CLAUDE_COMPACTION_THRESHOLD_PERCENT"] = "0";
+      const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+      try {
+        const { transport, send } = makeSessionTransport();
+        const enforcer = new ClaudeCompactionEnforcer(settings, transport);
+
+        const outcome = await enforcer.maybeAutoCompact({
+          sessionName: "claude-seat@rig",
+          runtime: "claude-code",
+          usedPercentage: 79, // 79 < default 80 → no trigger; 79 >= env 0 would trigger if env were honored
+        });
+
+        expect(outcome).toEqual({ triggered: false, reason: "below_threshold" });
+        expect(send).not.toHaveBeenCalled();
+        const warns = stderrSpy.mock.calls.map((c) => String(c[0]));
+        expect(warns.some((w) => w.includes("env override for policies.claude_compaction.threshold_percent rejected"))).toBe(true);
+      } finally {
+        stderrSpy.mockRestore();
+        delete process.env["OPENRIG_POLICIES_CLAUDE_COMPACTION_THRESHOLD_PERCENT"];
+        rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it("env=80abc + file at threshold 80 + seat at 99% → triggers (env rejected; file 80 wins via fallback; 99 >= 80)", async () => {
+      const { SettingsStore } = await import("../src/domain/user-settings/settings-store.js");
+      const { mkdtempSync, rmSync, writeFileSync } = await import("node:fs");
+      const { join } = await import("node:path");
+      const { tmpdir } = await import("node:os");
+
+      const tmpDir = mkdtempSync(join(tmpdir(), "enforcer-env-bypass-2-"));
+      const configPath = join(tmpDir, "config.json");
+      writeFileSync(configPath, JSON.stringify({
+        policies: { claudeCompaction: { enabled: true, thresholdPercent: 80 } },
+      }));
+      const settings = new SettingsStore(configPath);
+
+      process.env["OPENRIG_POLICIES_CLAUDE_COMPACTION_THRESHOLD_PERCENT"] = "80abc";
+      const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+      try {
+        const { transport, send } = makeSessionTransport();
+        const enforcer = new ClaudeCompactionEnforcer(settings, transport);
+
+        const outcome = await enforcer.maybeAutoCompact({
+          sessionName: "claude-seat@rig",
+          runtime: "claude-code",
+          usedPercentage: 99,
+        });
+
+        // Env was rejected; file (threshold=80) wins; 99 >= 80 → trigger
+        expect(outcome).toEqual({ triggered: true });
+        expect(send).toHaveBeenCalledTimes(1);
+        expect(send).toHaveBeenCalledWith("claude-seat@rig", "/compact");
+      } finally {
+        stderrSpy.mockRestore();
+        delete process.env["OPENRIG_POLICIES_CLAUDE_COMPACTION_THRESHOLD_PERCENT"];
+        rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+  });
+
   // Slice 27 BLOCKING-FIX — defense-in-depth at the enforcer.
   //
   // The CLI + daemon set() paths reject invalid threshold input, but a

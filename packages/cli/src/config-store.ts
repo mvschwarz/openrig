@@ -443,6 +443,30 @@ function validateKeyConstraints(key: ValidKey, raw: string, coerced: string | nu
   if (check) check(raw, coerced);
 }
 
+// Slice 27 BLOCKING-FIX-2 — shared coerce + validate, used by every
+// surface that turns operator-supplied input into a typed config value:
+// set() (CLI + daemon write paths), resolveOne env-source branch, and
+// (indirectly via validateTypedValue) the resolveOne file-source branch.
+// Per banked feedback_audit_every_layer_function_and_module_constants:
+// validation must run at every LAYER that ingests untrusted input, not
+// just at write-time.
+function coerceAndValidate(key: ValidKey, raw: string, workspaceRoot: string): string | number | boolean {
+  const coerced = coerceValue(key, raw, workspaceRoot);
+  validateKeyConstraints(key, raw, coerced);
+  return coerced;
+}
+
+// File-source values arrive already typed (JSON-parsed). The constraint
+// closure expects (raw, coerced) to drive its regex check too; pass the
+// stringified value so a string-typed file value (e.g., "80abc" written
+// directly into config.json) still trips the regex.
+function validateTypedFileValue(key: ValidKey, value: string | number | boolean): void {
+  const check = KEY_CONSTRAINTS[key];
+  if (!check) return;
+  const raw = typeof value === "string" ? value : String(value);
+  check(raw, value);
+}
+
 export type SettingSource = "env" | "file" | "default";
 
 export interface ResolvedSetting {
@@ -564,10 +588,20 @@ export class ConfigStore {
 
   private resolveOne(key: ValidKey, fileConfig: Record<string, unknown>, workspaceRoot: string): ResolvedSetting {
     const defaultValue = getDefaultValue(key, workspaceRoot);
-    // 1. Environment variable
+    // 1. Environment variable — validate. On invalid env, drop the
+    //    override and fall through to file/default (safer-failure than
+    //    crashing or accepting a bad value). Warn so the operator sees
+    //    the misconfigured env on stderr.
     const envVal = readOpenRigEnv(ENV_MAP[key].primary, ENV_MAP[key].legacy);
     if (envVal !== undefined && envVal !== "") {
-      return { value: coerceValue(key, envVal, workspaceRoot), source: "env", defaultValue };
+      try {
+        return { value: coerceAndValidate(key, envVal, workspaceRoot), source: "env", defaultValue };
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err);
+        process.stderr.write(
+          `[openrig-config] env override for ${key} rejected: ${reason}; falling back to file/default\n`,
+        );
+      }
     }
     // 2. Config file
     const fileVal = getNestedValue(fileConfig, KEY_TO_PATH[key]);
@@ -576,7 +610,18 @@ export class ConfigStore {
       if (legacyDefault !== null && fileVal === legacyDefault) {
         return { value: defaultValue, source: "default", defaultValue };
       }
-      return { value: fileVal as string | number | boolean, source: "file", defaultValue };
+      // Validate the file-source value too. Hand-edited config.json with
+      // a bad threshold (e.g. thresholdPercent: 0 or "80abc") falls back
+      // to default rather than poisoning the trigger contract.
+      try {
+        validateTypedFileValue(key, fileVal as string | number | boolean);
+        return { value: fileVal as string | number | boolean, source: "file", defaultValue };
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err);
+        process.stderr.write(
+          `[openrig-config] file value for ${key} rejected: ${reason}; falling back to default\n`,
+        );
+      }
     }
     // 3. Default
     return { value: defaultValue, source: "default", defaultValue };
@@ -594,8 +639,7 @@ export class ConfigStore {
     const workspaceRoot = (getNestedValue(fileConfig, KEY_TO_PATH["workspace.root"]) as string | undefined)
       || readOpenRigEnv(ENV_MAP["workspace.root"].primary, ENV_MAP["workspace.root"].legacy)
       || DEFAULT_WORKSPACE_ROOT;
-    const coerced = coerceValue(key, value, workspaceRoot);
-    validateKeyConstraints(key, value, coerced);
+    const coerced = coerceAndValidate(key, value, workspaceRoot);
     setNestedValue(fileConfig, KEY_TO_PATH[key], coerced);
     mkdirSync(dirname(this.configPath), { recursive: true });
     writeFileSync(this.configPath, JSON.stringify(fileConfig, null, 2) + "\n", "utf-8");

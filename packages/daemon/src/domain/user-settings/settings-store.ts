@@ -357,6 +357,24 @@ function validateKeyConstraints(key: SettingsValidKey, raw: string, coerced: str
   if (check) check(raw, coerced);
 }
 
+// Slice 27 BLOCKING-FIX-2 — shared coerce + validate. Used by set()
+// (daemon write path), resolveOne env-source branch, and via
+// validateTypedFileValue by the resolveOne file-source branch. Lockstep
+// with cli/src/config-store.ts so every input layer applies the same
+// contract per banked feedback_audit_every_layer_function_and_module_constants.
+function coerceAndValidate(key: SettingsValidKey, raw: string, workspaceRoot: string): string | number | boolean {
+  const coerced = coerceValue(key, raw, workspaceRoot);
+  validateKeyConstraints(key, raw, coerced);
+  return coerced;
+}
+
+function validateTypedFileValue(key: SettingsValidKey, value: string | number | boolean): void {
+  const check = KEY_CONSTRAINTS[key];
+  if (!check) return;
+  const raw = typeof value === "string" ? value : String(value);
+  check(raw, value);
+}
+
 /**
  * Slice 27 — projected Claude auto-compaction policy. ContextMonitor
  * consumes this snapshot per-poll; the PreCompact hook reads the same
@@ -402,9 +420,20 @@ export class SettingsStore {
     const fc = fileConfig ?? this.readConfigFile();
     const wr = workspaceRoot ?? this.resolveWorkspaceRootRaw(fc);
     const defaultValue = getDefaultValue(key, wr);
+    // Slice 27 BLOCKING-FIX-2 — env override is validated; on invalid
+    // env, drop the override + warn so the operator sees the
+    // misconfiguration on daemon stderr (which captures-pane / log
+    // surfaces). Bad env never poisons the resolved value.
     const envVal = readEnv(ENV_MAP[key].primary, ENV_MAP[key].legacy);
     if (envVal !== undefined && envVal !== "") {
-      return { value: coerceValue(key, envVal, wr), source: "env", defaultValue };
+      try {
+        return { value: coerceAndValidate(key, envVal, wr), source: "env", defaultValue };
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err);
+        process.stderr.write(
+          `[openrig-settings] env override for ${key} rejected: ${reason}; falling back to file/default\n`,
+        );
+      }
     }
     const fileVal = getNestedValue(fc, KEY_TO_PATH[key]);
     if (fileVal !== undefined && fileVal !== null && fileVal !== "") {
@@ -412,7 +441,18 @@ export class SettingsStore {
       if (legacyDefault !== null && fileVal === legacyDefault) {
         return { value: defaultValue, source: "default", defaultValue };
       }
-      return { value: fileVal as string | number | boolean, source: "file", defaultValue };
+      // Validate the file-source value too. Hand-edited config.json
+      // with a bad threshold (0, "80abc", 80.5, etc.) falls back to
+      // default rather than poisoning the trigger contract.
+      try {
+        validateTypedFileValue(key, fileVal as string | number | boolean);
+        return { value: fileVal as string | number | boolean, source: "file", defaultValue };
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err);
+        process.stderr.write(
+          `[openrig-settings] file value for ${key} rejected: ${reason}; falling back to default\n`,
+        );
+      }
     }
     return { value: defaultValue, source: "default", defaultValue };
   }
@@ -471,8 +511,7 @@ export class SettingsStore {
     }
     const fc = this.readConfigFile();
     const wr = this.resolveWorkspaceRootRaw(fc);
-    const coerced = coerceValue(key, value, wr);
-    validateKeyConstraints(key, value, coerced);
+    const coerced = coerceAndValidate(key, value, wr);
     setNestedValue(fc, KEY_TO_PATH[key], coerced);
     mkdirSync(path.dirname(this.configPath), { recursive: true });
     writeFileSync(this.configPath, JSON.stringify(fc, null, 2) + "\n", "utf-8");
