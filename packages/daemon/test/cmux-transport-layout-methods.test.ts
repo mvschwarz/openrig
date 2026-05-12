@@ -88,36 +88,37 @@ describe("cmux CLI transport — layout RPC method pass-through (slice 24.A repa
   });
 
   describe("workspace.create", () => {
-    it("emits `cmux rpc workspace.create` with name + optional cwd as snake_case JSON", async () => {
+    it("emits `cmux rpc workspace.create` with visible title + optional cwd as snake_case JSON", async () => {
       const captured: string[] = [];
       const exec = mockExec(captured, {});
       const factory = createCmuxCliTransport(exec);
       const transport = await factory();
 
       await transport.request("workspace.create", {
-        name: "my-rig",
+        title: "my-rig",
         cwd: "/path/to/cwd",
       });
 
       const cmd = captured.find((c) => c.startsWith("cmux rpc workspace.create"));
       expect(cmd).toBeTruthy();
-      expect(cmd).toMatch(/"name"/);
+      expect(cmd).toMatch(/"title"/);
       expect(cmd).toMatch(/"my-rig"/);
       expect(cmd).toMatch(/"cwd"/);
       expect(cmd).toMatch(/"\/path\/to\/cwd"/);
     });
 
-    it("handles workspace.create with only name (no cwd)", async () => {
+    it("handles workspace.create with only title (no cwd)", async () => {
       const captured: string[] = [];
       const exec = mockExec(captured, {});
       const factory = createCmuxCliTransport(exec);
       const transport = await factory();
 
-      await transport.request("workspace.create", { name: "my-rig" });
+      await transport.request("workspace.create", { title: "my-rig" });
 
       const cmd = captured.find((c) => c.startsWith("cmux rpc workspace.create"));
       expect(cmd).toBeTruthy();
-      expect(cmd).toMatch(/"name"/);
+      expect(cmd).toMatch(/"title"/);
+      expect(cmd).not.toMatch(/"name"/);
       expect(cmd).not.toMatch(/"cwd"/);
     });
   });

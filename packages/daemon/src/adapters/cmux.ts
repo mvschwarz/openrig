@@ -230,7 +230,7 @@ export class CmuxAdapter {
       return { ok: false, code: "unavailable", message: "cmux is not connected" };
     }
     try {
-      const params: Record<string, unknown> = { name };
+      const params: Record<string, unknown> = { title: name };
       if (cwd != null) params["cwd"] = cwd;
       const raw = (await this.transport.request("workspace.create", params)) as Record<string, unknown>;
       const handle = [
