@@ -134,6 +134,7 @@ describe("ClaudeCompactionEnforcer", () => {
     const { transport, send } = makeSessionTransport();
     const enforcer = new ClaudeCompactionEnforcer(settings, transport, {
       dedupWindowMs: 60_000,
+      postCompactRestoreCooldownMs: 0,
       openrigHome: "/tmp/openrig-test-home",
     });
 
@@ -196,6 +197,56 @@ describe("ClaudeCompactionEnforcer", () => {
     });
     expect(fourth).toEqual({ triggered: true });
 
+    expect(send).toHaveBeenCalledTimes(4);
+  });
+
+  it("post-compact restore prompt starts a cooldown so restore work cannot immediately trigger another /compact", async () => {
+    const settings = makeSettingsStore(POLICY_ENABLED_AT_80);
+    const { transport, send } = makeSessionTransport();
+    const enforcer = new ClaudeCompactionEnforcer(settings, transport, {
+      dedupWindowMs: 0,
+      postCompactRestoreCooldownMs: 60_000,
+      openrigHome: "/tmp/openrig-test-home",
+    });
+
+    let now = 1_700_000_000_000;
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+
+    expect(await enforcer.maybeAutoCompact({
+      sessionName: "claude-seat@rig",
+      runtime: "claude-code",
+      usedPercentage: 95,
+    })).toEqual({ triggered: true });
+
+    now += 1_000;
+    expect(await enforcer.maybeAutoCompact({
+      sessionName: "claude-seat@rig",
+      runtime: "claude-code",
+      usedPercentage: 20,
+    })).toEqual({ triggered: true });
+
+    now += 1_000;
+    expect(await enforcer.maybeAutoCompact({
+      sessionName: "claude-seat@rig",
+      runtime: "claude-code",
+      usedPercentage: 20,
+      transcriptPath: "/tmp/claude.jsonl",
+    })).toEqual({ triggered: true });
+
+    now += 1_000;
+    expect(await enforcer.maybeAutoCompact({
+      sessionName: "claude-seat@rig",
+      runtime: "claude-code",
+      usedPercentage: 95,
+    })).toEqual({ triggered: false, reason: "post_restore_cooldown" });
+    expect(send).toHaveBeenCalledTimes(3);
+
+    now += 60_000;
+    expect(await enforcer.maybeAutoCompact({
+      sessionName: "claude-seat@rig",
+      runtime: "claude-code",
+      usedPercentage: 95,
+    })).toEqual({ triggered: true });
     expect(send).toHaveBeenCalledTimes(4);
   });
 

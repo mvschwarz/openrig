@@ -37,6 +37,7 @@ import * as path from "node:path";
  *   context, but they do not create a new assistant turn by themselves.
  */
 export const DEDUP_WINDOW_MS_DEFAULT = 60_000;
+export const POST_COMPACT_RESTORE_COOLDOWN_MS_DEFAULT = 10 * 60_000;
 
 export interface EnforcerInput {
   sessionName: string;
@@ -57,6 +58,7 @@ export type EnforcerSkipReason =
   | "below_threshold"
   | "already_triggered_above_threshold"
   | "dedup_window"
+  | "post_restore_cooldown"
   | "send_failed"
   | "invalid_policy";
 
@@ -127,19 +129,22 @@ export class ClaudeCompactionEnforcer {
   private readonly settingsStore: SettingsStore;
   private readonly sessionTransport: SessionTransport;
   private readonly dedupWindowMs: number;
+  private readonly postCompactRestoreCooldownMs: number;
   private readonly openrigHome: string;
   private readonly lastAutoCompactAt = new Map<string, number>();
+  private readonly postCompactRestoreCooldownUntil = new Map<string, number>();
   private readonly triggeredAboveThreshold = new Set<string>();
   private readonly pendingPostCompactRestore = new Map<string, PendingPostCompactStage>();
 
   constructor(
     settingsStore: SettingsStore,
     sessionTransport: SessionTransport,
-    opts?: { dedupWindowMs?: number; openrigHome?: string },
+    opts?: { dedupWindowMs?: number; openrigHome?: string; postCompactRestoreCooldownMs?: number },
   ) {
     this.settingsStore = settingsStore;
     this.sessionTransport = sessionTransport;
     this.dedupWindowMs = opts?.dedupWindowMs ?? DEDUP_WINDOW_MS_DEFAULT;
+    this.postCompactRestoreCooldownMs = opts?.postCompactRestoreCooldownMs ?? POST_COMPACT_RESTORE_COOLDOWN_MS_DEFAULT;
     this.openrigHome = opts?.openrigHome ?? defaultOpenRigHome();
   }
 
@@ -205,6 +210,10 @@ export class ClaudeCompactionEnforcer {
           return { triggered: false, reason: "send_failed" };
         }
         this.pendingPostCompactRestore.delete(input.sessionName);
+        this.postCompactRestoreCooldownUntil.set(
+          input.sessionName,
+          Date.now() + this.postCompactRestoreCooldownMs,
+        );
         this.triggeredAboveThreshold.delete(input.sessionName);
         return { triggered: true };
       }
@@ -213,6 +222,14 @@ export class ClaudeCompactionEnforcer {
     }
 
     const now = Date.now();
+    const postRestoreCooldownUntil = this.postCompactRestoreCooldownUntil.get(input.sessionName);
+    if (postRestoreCooldownUntil !== undefined) {
+      if (now < postRestoreCooldownUntil) {
+        return { triggered: false, reason: "post_restore_cooldown" };
+      }
+      this.postCompactRestoreCooldownUntil.delete(input.sessionName);
+    }
+
     const last = this.lastAutoCompactAt.get(input.sessionName);
     if (last !== undefined && now - last < this.dedupWindowMs) {
       return { triggered: false, reason: "dedup_window" };
