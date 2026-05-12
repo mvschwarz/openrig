@@ -70,8 +70,9 @@ describe("config routes (User Settings v0)", () => {
     // 18 v0 keys + 2 Phase 4 (advisor/operator) + 5 Phase 5 (feed.subscriptions.*)
     // + 2 V1 pre-release Item 1 (transcripts.lines / transcripts.poll_interval_seconds)
     // + 1 plugin-primitive Phase 3a slice 3.5 (runtime.codex.hooks_enabled)
-    // + 1 V0.3.1 slice 05 (workspace.operator_seat_name).
-    expect(Object.keys(body.settings).length).toBe(29);
+    // + 1 V0.3.1 slice 05 (workspace.operator_seat_name)
+    // + 4 slice 27 (policies.claude_compaction.*) → 33 total.
+    expect(Object.keys(body.settings).length).toBe(33);
     expect(body.settings["daemon.port"]?.source).toBe("default");
     expect(body.settings["ui.preview.refresh_interval_seconds"]?.value).toBe(3);
     expect(body.settings["ui.preview.max_pins"]?.value).toBe(4);

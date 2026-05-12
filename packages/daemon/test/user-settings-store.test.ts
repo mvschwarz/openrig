@@ -32,6 +32,12 @@ function clearEnv(): () => void {
     "OPENRIG_FEED_SUBSCRIPTIONS_ACTION_REQUIRED", "OPENRIG_FEED_SUBSCRIPTIONS_APPROVALS",
     "OPENRIG_FEED_SUBSCRIPTIONS_SHIPPED", "OPENRIG_FEED_SUBSCRIPTIONS_PROGRESS",
     "OPENRIG_FEED_SUBSCRIPTIONS_AUDIT_LOG",
+    "OPENRIG_RUNTIME_CODEX_HOOKS_ENABLED",
+    // Slice 27 — Claude auto-compaction policy env-map.
+    "OPENRIG_POLICIES_CLAUDE_COMPACTION_ENABLED",
+    "OPENRIG_POLICIES_CLAUDE_COMPACTION_THRESHOLD_PERCENT",
+    "OPENRIG_POLICIES_CLAUDE_COMPACTION_MESSAGE_INLINE",
+    "OPENRIG_POLICIES_CLAUDE_COMPACTION_MESSAGE_FILE_PATH",
     "RIGGED_PORT", "RIGGED_HOST", "RIGGED_DB",
     "RIGGED_TRANSCRIPTS_ENABLED", "RIGGED_TRANSCRIPTS_PATH",
   ];
@@ -90,6 +96,11 @@ describe("SettingsStore (User Settings v0)", () => {
       "feed.subscriptions.audit_log",
       // plugin-primitive Phase 3a slice 3.5 — Codex feature flag.
       "runtime.codex.hooks_enabled",
+      // Slice 27 — Claude auto-compaction policy. SC-29 EXCEPTION #10.
+      "policies.claude_compaction.enabled",
+      "policies.claude_compaction.threshold_percent",
+      "policies.claude_compaction.message_inline",
+      "policies.claude_compaction.message_file_path",
     ]);
   });
 
@@ -234,6 +245,68 @@ describe("SettingsStore (User Settings v0)", () => {
     expect(raw.workspace.slicesRoot).toBe("/x");
     expect(raw.daemon.port).toBe(1234);
   });
+
+  // Slice 27 — Claude auto-compaction policy resolution.
+  it("HG-5 + HG-10: resolveClaudeCompactionPolicy returns defaults when no file/env present (opt-in default-off)", () => {
+    const store = new SettingsStore(configPath);
+    const policy = store.resolveClaudeCompactionPolicy();
+    expect(policy.enabled).toBe(false);
+    expect(policy.thresholdPercent).toBe(80);
+    expect(policy.messageInline).toBe("");
+    expect(policy.messageFilePath).toBe("");
+  });
+
+  it("HG-10: resolveClaudeCompactionPolicy picks up direct config.json edits without daemon restart (single resolve call rereads file)", () => {
+    const store = new SettingsStore(configPath);
+    expect(store.resolveClaudeCompactionPolicy().enabled).toBe(false);
+
+    writeFileSync(
+      configPath,
+      JSON.stringify({
+        policies: {
+          claudeCompaction: {
+            enabled: true,
+            thresholdPercent: 65,
+            messageInline: "carry-forward note",
+            messageFilePath: "",
+          },
+        },
+      }),
+    );
+
+    const updated = store.resolveClaudeCompactionPolicy();
+    expect(updated.enabled).toBe(true);
+    expect(updated.thresholdPercent).toBe(65);
+    expect(updated.messageInline).toBe("carry-forward note");
+    expect(updated.messageFilePath).toBe("");
+  });
+
+  it("HG-1: set/get round-trip for each policy key persists to disk and reads back", () => {
+    const store = new SettingsStore(configPath);
+
+    store.set("policies.claude_compaction.enabled", "true");
+    store.set("policies.claude_compaction.threshold_percent", "60");
+    store.set("policies.claude_compaction.message_inline", "rehydrate the agent");
+    store.set("policies.claude_compaction.message_file_path", "/tmp/msg.txt");
+
+    const raw = JSON.parse(require("node:fs").readFileSync(configPath, "utf-8"));
+    expect(raw.policies.claudeCompaction.enabled).toBe(true);
+    expect(raw.policies.claudeCompaction.thresholdPercent).toBe(60);
+    expect(raw.policies.claudeCompaction.messageInline).toBe("rehydrate the agent");
+    expect(raw.policies.claudeCompaction.messageFilePath).toBe("/tmp/msg.txt");
+
+    expect(store.resolveOne("policies.claude_compaction.enabled").value).toBe(true);
+    expect(store.resolveOne("policies.claude_compaction.threshold_percent").value).toBe(60);
+    expect(store.resolveOne("policies.claude_compaction.message_inline").value).toBe("rehydrate the agent");
+    expect(store.resolveOne("policies.claude_compaction.message_file_path").value).toBe("/tmp/msg.txt");
+  });
+
+  it("HG-1: invalid threshold rejected by coerceValue (non-numeric raises)", () => {
+    const store = new SettingsStore(configPath);
+    expect(() => store.set("policies.claude_compaction.threshold_percent", "not-a-number")).toThrow(/expected a number/);
+  });
+
+  void existsSync;
 });
 
 describe("parseNamedPairs (daemon copy)", () => {

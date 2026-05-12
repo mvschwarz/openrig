@@ -85,6 +85,16 @@ export const SETTINGS_VALID_KEYS = [
   // Codex runtime. When false, operator is managing Codex config
   // independently — daemon does NOT mutate.
   "runtime.codex.hooks_enabled",
+  // Slice 27 — Claude auto-compaction policy. SC-29 EXCEPTION #10:
+  // 4 new keys (lockstep with cli/src/config-store.ts VALID_KEYS).
+  // Opt-in default-off; daemon ContextMonitor reads `enabled` +
+  // `threshold_percent` to decide when to send /compact; PreCompact
+  // hook reads `message_inline` + `message_file_path` to inject a
+  // custom message alongside the existing restore-instructions.
+  "policies.claude_compaction.enabled",
+  "policies.claude_compaction.threshold_percent",
+  "policies.claude_compaction.message_inline",
+  "policies.claude_compaction.message_file_path",
 ] as const;
 
 export type SettingsValidKey = typeof SETTINGS_VALID_KEYS[number];
@@ -124,6 +134,12 @@ const ENV_MAP: Record<SettingsValidKey, { primary: string; legacy?: string }> = 
   // OPENRIG_X primary only per the post-rename 5-key boundary doctrine
   // (no RIGGED_X legacy on net-new keys).
   "runtime.codex.hooks_enabled": { primary: "OPENRIG_RUNTIME_CODEX_HOOKS_ENABLED" },
+  // Slice 27 — Claude auto-compaction policy. Net-new keys; OPENRIG_X
+  // primary only.
+  "policies.claude_compaction.enabled": { primary: "OPENRIG_POLICIES_CLAUDE_COMPACTION_ENABLED" },
+  "policies.claude_compaction.threshold_percent": { primary: "OPENRIG_POLICIES_CLAUDE_COMPACTION_THRESHOLD_PERCENT" },
+  "policies.claude_compaction.message_inline": { primary: "OPENRIG_POLICIES_CLAUDE_COMPACTION_MESSAGE_INLINE" },
+  "policies.claude_compaction.message_file_path": { primary: "OPENRIG_POLICIES_CLAUDE_COMPACTION_MESSAGE_FILE_PATH" },
 };
 
 const KEY_TO_PATH: Record<SettingsValidKey, string[]> = {
@@ -156,6 +172,10 @@ const KEY_TO_PATH: Record<SettingsValidKey, string[]> = {
   "feed.subscriptions.progress": ["feed", "subscriptions", "progress"],
   "feed.subscriptions.audit_log": ["feed", "subscriptions", "auditLog"],
   "runtime.codex.hooks_enabled": ["runtime", "codex", "hooksEnabled"],
+  "policies.claude_compaction.enabled": ["policies", "claudeCompaction", "enabled"],
+  "policies.claude_compaction.threshold_percent": ["policies", "claudeCompaction", "thresholdPercent"],
+  "policies.claude_compaction.message_inline": ["policies", "claudeCompaction", "messageInline"],
+  "policies.claude_compaction.message_file_path": ["policies", "claudeCompaction", "messageFilePath"],
 };
 
 export type SettingSource = "env" | "file" | "default";
@@ -274,6 +294,15 @@ function getDefaultValue(key: SettingsValidKey, workspaceRoot: string): string |
     // Daemon ensures `codex_hooks = true` in ~/.codex/config.toml on
     // launch unless operator explicitly sets to false.
     case "runtime.codex.hooks_enabled": return true;
+    // Slice 27 — Claude auto-compaction policy defaults. Opt-in
+    // default-off; threshold 80% per spec. Empty-string defaults on
+    // message_inline / message_file_path mean "not set" (consistent
+    // with agents.operator_session pattern; hook treats empty as
+    // "skip custom message").
+    case "policies.claude_compaction.enabled": return false;
+    case "policies.claude_compaction.threshold_percent": return 80;
+    case "policies.claude_compaction.message_inline": return "";
+    case "policies.claude_compaction.message_file_path": return "";
     default: return "";
   }
 }
@@ -291,6 +320,18 @@ function coerceValue(key: SettingsValidKey, raw: string, workspaceRoot: string):
     throw new Error(`Invalid value for ${key}: expected true/false, got "${raw}"`);
   }
   return raw;
+}
+
+/**
+ * Slice 27 — projected Claude auto-compaction policy. ContextMonitor
+ * consumes this snapshot per-poll; the PreCompact hook reads the same
+ * shape via direct config.json read (without depending on the daemon).
+ */
+export interface ClaudeCompactionPolicy {
+  enabled: boolean;
+  thresholdPercent: number;
+  messageInline: string;
+  messageFilePath: string;
 }
 
 export interface ResolvedConfig {
@@ -370,6 +411,22 @@ export class SettingsStore {
       uiPreviewDefaultLines: this.resolveOne("ui.preview.default_lines", fc, wr).value as number,
       recoveryAutoDriveProviderPrompts: this.resolveOne("recovery.auto_drive_provider_prompts", fc, wr).value as boolean,
       recoveryProviderAuthEnvAllowlistRaw: this.resolveOne("recovery.provider_auth_env_allowlist", fc, wr).value as string,
+    };
+  }
+
+  /**
+   * Slice 27 — read the Claude auto-compaction policy as a typed snapshot.
+   * Called per-poll by ContextMonitor so live edits to ~/.openrig/config.json
+   * take effect within one polling interval without daemon restart.
+   */
+  resolveClaudeCompactionPolicy(): ClaudeCompactionPolicy {
+    const fc = this.readConfigFile();
+    const wr = this.resolveWorkspaceRootRaw(fc);
+    return {
+      enabled: this.resolveOne("policies.claude_compaction.enabled", fc, wr).value as boolean,
+      thresholdPercent: this.resolveOne("policies.claude_compaction.threshold_percent", fc, wr).value as number,
+      messageInline: this.resolveOne("policies.claude_compaction.message_inline", fc, wr).value as string,
+      messageFilePath: this.resolveOne("policies.claude_compaction.message_file_path", fc, wr).value as string,
     };
   }
 

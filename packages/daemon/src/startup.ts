@@ -1155,8 +1155,18 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
 
   // Context monitor — constructed before createApp so routes can access pollOnce for refresh.
   // Caller (index.ts) starts polling after listen.
+  // Slice 27: wire ClaudeCompactionEnforcer when sessionTransport is
+  // available (it always is in the assembled deps; the conditional keeps
+  // the type narrow for downstream consumers).
   const { ContextMonitor } = await import("./domain/context-monitor.js");
-  const contextMonitor = new ContextMonitor(db, contextUsageStore, claudeAdapter);
+  const { ClaudeCompactionEnforcer } = await import("./domain/claude-compaction-enforcer.js");
+  const compactionEnforcer = deps.sessionTransport
+    ? new ClaudeCompactionEnforcer(
+        new ContextPackSettingsStore(),
+        deps.sessionTransport,
+      )
+    : undefined;
+  const contextMonitor = new ContextMonitor(db, contextUsageStore, claudeAdapter, compactionEnforcer);
   deps.contextMonitor = contextMonitor;
 
   const app = createApp(deps);

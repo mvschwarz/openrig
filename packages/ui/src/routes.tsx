@@ -47,6 +47,9 @@ import { PluginsIndexPage } from "./components/specs/PluginsIndexPage.js";
 import { PluginDetailPage } from "./components/specs/PluginDetailPage.js";
 import { FilesWorkspace } from "./components/files/FilesWorkspace.js";
 import { SettingsCenter } from "./components/system/SettingsCenter.js";
+// Slice 27 — Policies page (temporary mount at /settings/policies until
+// slice 26's Settings explorer ships the canonical route shell).
+import { PoliciesPage } from "./components/system/PoliciesPage.js";
 import {
   HostScopePage,
   RigScopePage,
@@ -214,6 +217,18 @@ const settingsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/settings",
   component: SettingsCenter,
+});
+
+// Slice 27 — Policies page; mounts the Claude auto-compaction form. The
+// route is a temporary integration point until slice 26's Settings
+// explorer ships the canonical Policies destination — once it does, this
+// route either delegates to the slice 26 shell or is removed in favor of
+// slice 26's mount; either way, the form component (ClaudeCompactionPolicyForm)
+// stays at its current path.
+const settingsPoliciesRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/settings/policies",
+  component: PoliciesPage,
 });
 
 const searchRoute = createRoute({
@@ -438,6 +453,7 @@ const routeTree = rootRoute.addChildren([
   filesRoute,
   specsKindRoute,
   settingsRoute,
+  settingsPoliciesRoute,
   searchRoute,
   projectGraphicsPreviewRoute,
   cardPreviewsLabRoute,

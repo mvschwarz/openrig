@@ -91,6 +91,25 @@ export interface RiggedConfig {
       hooksEnabled: boolean;
     };
   };
+  // Slice 27 — Claude auto-compaction policy. Operator-configurable
+  // pre-compaction trigger: when a Claude seat's context usage crosses
+  // `thresholdPercent`, daemon sends /compact via SessionTransport and
+  // the existing PreCompact hook injects `messageInline` (or contents of
+  // `messageFilePath` if inline is empty) alongside the standard
+  // restore-instructions in the post-compact systemMessage.
+  //
+  // Defaults: opt-in default-off (enabled=false). Empty string on
+  // message_inline / message_file_path means "not set" (consistent with
+  // agents.operator_session pattern; ConfigStore schema avoids nullable
+  // strings at the file layer).
+  policies: {
+    claudeCompaction: {
+      enabled: boolean;
+      thresholdPercent: number;
+      messageInline: string;
+      messageFilePath: string;
+    };
+  };
 }
 
 const DEFAULT_WORKSPACE_ROOT = getDefaultOpenRigPath("workspace");
@@ -151,6 +170,15 @@ const DEFAULTS = {
       hooksEnabled: true,
     },
   },
+  // Slice 27 — opt-in default-off. Threshold default 80% per spec.
+  policies: {
+    claudeCompaction: {
+      enabled: false,
+      thresholdPercent: 80,
+      messageInline: "",
+      messageFilePath: "",
+    },
+  },
 } as const;
 
 export const VALID_KEYS = [
@@ -192,6 +220,12 @@ export const VALID_KEYS = [
   "feed.subscriptions.audit_log",
   // plugin-primitive Phase 3a slice 3.5 — Codex feature flag.
   "runtime.codex.hooks_enabled",
+  // Slice 27 — Claude auto-compaction policy. SC-29 EXCEPTION #10:
+  // 4 new ConfigStore keys (lockstep with daemon SETTINGS_VALID_KEYS).
+  "policies.claude_compaction.enabled",
+  "policies.claude_compaction.threshold_percent",
+  "policies.claude_compaction.message_inline",
+  "policies.claude_compaction.message_file_path",
 ] as const;
 
 export type ValidKey = typeof VALID_KEYS[number];
@@ -233,6 +267,12 @@ export const ENV_MAP: Record<ValidKey, { primary: string; legacy?: string }> = {
   // Net-new key post-rename: OPENRIG_X primary only per the 5-key
   // boundary doctrine (no RIGGED_X legacy on net-new keys).
   "runtime.codex.hooks_enabled": { primary: "OPENRIG_RUNTIME_CODEX_HOOKS_ENABLED" },
+  // Slice 27 — Claude auto-compaction policy. OPENRIG_X primary only
+  // (net-new keys, no legacy).
+  "policies.claude_compaction.enabled": { primary: "OPENRIG_POLICIES_CLAUDE_COMPACTION_ENABLED" },
+  "policies.claude_compaction.threshold_percent": { primary: "OPENRIG_POLICIES_CLAUDE_COMPACTION_THRESHOLD_PERCENT" },
+  "policies.claude_compaction.message_inline": { primary: "OPENRIG_POLICIES_CLAUDE_COMPACTION_MESSAGE_INLINE" },
+  "policies.claude_compaction.message_file_path": { primary: "OPENRIG_POLICIES_CLAUDE_COMPACTION_MESSAGE_FILE_PATH" },
 };
 
 // Maps dotted-string config keys to the camelCase RiggedConfig path.
@@ -269,6 +309,10 @@ const KEY_TO_PATH: Record<ValidKey, string[]> = {
   "feed.subscriptions.progress": ["feed", "subscriptions", "progress"],
   "feed.subscriptions.audit_log": ["feed", "subscriptions", "auditLog"],
   "runtime.codex.hooks_enabled": ["runtime", "codex", "hooksEnabled"],
+  "policies.claude_compaction.enabled": ["policies", "claudeCompaction", "enabled"],
+  "policies.claude_compaction.threshold_percent": ["policies", "claudeCompaction", "thresholdPercent"],
+  "policies.claude_compaction.message_inline": ["policies", "claudeCompaction", "messageInline"],
+  "policies.claude_compaction.message_file_path": ["policies", "claudeCompaction", "messageFilePath"],
 };
 
 function isValidKey(key: string): key is ValidKey {
@@ -442,6 +486,14 @@ export class ConfigStore {
       runtime: {
         codex: {
           hooksEnabled: v("runtime.codex.hooks_enabled") as boolean,
+        },
+      },
+      policies: {
+        claudeCompaction: {
+          enabled: v("policies.claude_compaction.enabled") as boolean,
+          thresholdPercent: v("policies.claude_compaction.threshold_percent") as number,
+          messageInline: v("policies.claude_compaction.message_inline") as string,
+          messageFilePath: v("policies.claude_compaction.message_file_path") as string,
         },
       },
     };
