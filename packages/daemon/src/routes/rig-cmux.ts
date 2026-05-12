@@ -24,7 +24,9 @@ export const rigCmuxRoutes = new Hono();
 
 interface NodeInventoryStubEntry {
   logicalId: string;
-  canonicalSessionName: string;
+  canonicalSessionName: string | null;
+  sessionStatus: string | null;
+  attachmentType: string | null;
 }
 
 type NodeInventoryFn = (rigId: string) => NodeInventoryStubEntry[];
@@ -81,9 +83,21 @@ rigCmuxRoutes.post("/launch", async (c) => {
   }
 
   const inventory = nodeInventoryFn(rigId);
-  const sessionByLogical = new Map(
-    inventory.map((e) => [e.logicalId, e.canonicalSessionName]),
-  );
+  // Filter inventory: a node is launchable for cmux attach only if
+  // (a) it has a canonicalSessionName recorded AND (b) sessionStatus
+  // is "running" AND (c) the attachment is tmux-compatible (default
+  // when attachmentType is null/undefined; falsey-strict reject only
+  // when an explicit non-tmux value is present). Stale entries with
+  // a recorded session name but sessionStatus="exited"/"detached"/
+  // null would attach-to-a-dead-tmux-session inside the cmux panel
+  // and fail silently — violates README HG-6 / R5 honest-failure.
+  const launchableByLogical = new Map<string, string>();
+  for (const entry of inventory) {
+    if (!entry.canonicalSessionName) continue;
+    if (entry.sessionStatus !== "running") continue;
+    if (entry.attachmentType != null && entry.attachmentType !== "tmux") continue;
+    launchableByLogical.set(entry.logicalId, entry.canonicalSessionName);
+  }
 
   // rig.nodes is in DB ORDER BY created_at, which corresponds to spec
   // pod-then-member declaration order (pods created first, members
@@ -91,7 +105,7 @@ rigCmuxRoutes.post("/launch", async (c) => {
   // agent ordering — no name-based sorting per README §52.
   const orderedSessions: string[] = [];
   for (const node of rigWithRelations.nodes) {
-    const session = sessionByLogical.get(node.logicalId);
+    const session = launchableByLogical.get(node.logicalId);
     if (session) orderedSessions.push(session);
   }
 

@@ -18,7 +18,13 @@ import type Database from "better-sqlite3";
 interface FakeRigOpts {
   id: string;
   name: string;
-  nodes: Array<{ logicalId: string; podId: string | null; canonicalSessionName: string | null }>;
+  nodes: Array<{
+    logicalId: string;
+    podId: string | null;
+    canonicalSessionName: string | null;
+    sessionStatus?: string | null;
+    attachmentType?: string | null;
+  }>;
 }
 
 function makeRigRepoStub(rigs: Record<string, FakeRigOpts>): RigRepository {
@@ -45,13 +51,17 @@ function makeNodeInventoryStub(rigs: Record<string, FakeRigOpts>) {
   return (rigId: string) => {
     const rig = rigs[rigId];
     if (!rig) return [];
-    return rig.nodes
-      .filter((n) => n.canonicalSessionName != null)
-      .map((n) => ({
-        logicalId: n.logicalId,
-        canonicalSessionName: n.canonicalSessionName!,
-        podId: n.podId,
-      })) as never;
+    // Mirror getNodeInventory: emits one entry per node (including
+    // detached/exited ones — sessionStatus distinguishes). Default
+    // sessionStatus = "running" + attachmentType = "tmux" so existing
+    // happy-path tests stay green.
+    return rig.nodes.map((n) => ({
+      logicalId: n.logicalId,
+      canonicalSessionName: n.canonicalSessionName,
+      sessionStatus: n.sessionStatus ?? (n.canonicalSessionName ? "running" : null),
+      attachmentType: n.attachmentType ?? "tmux",
+      podId: n.podId,
+    })) as never;
   };
 }
 
@@ -278,6 +288,104 @@ describe("POST /api/rigs/:rigId/cmux/launch", () => {
     const body = (await res.json()) as { error: string; message: string };
     expect(body.error).toBe("build_workspace_failed");
     expect(body.message.toLowerCase()).toMatch(/split failed/);
+  });
+
+  // velocity-guard 24.C BLOCKING-CONCERN repair regressions:
+  // canonicalSessionName presence is INSUFFICIENT — the session may be
+  // detached/exited but still have a name recorded in node-inventory.
+  // Route must filter on sessionStatus === "running" too.
+
+  it("412 rig_not_running when nodes have canonicalSessionName but sessionStatus is 'exited' (BLOCKING-FIX)", async () => {
+    const app = buildApp({
+      rigs: {
+        "rig-1": {
+          id: "rig-1",
+          name: "stale-rig",
+          nodes: [
+            {
+              logicalId: "a",
+              podId: "p1",
+              canonicalSessionName: "a@stale-rig",
+              sessionStatus: "exited", // stale: session NAME recorded but session has exited
+            },
+            {
+              logicalId: "b",
+              podId: "p1",
+              canonicalSessionName: "b@stale-rig",
+              sessionStatus: "detached", // detached: same story
+            },
+          ],
+        },
+      },
+      adapter: makeMockAdapter({ available: true }),
+    });
+    const res = await app.request("/api/rigs/rig-1/cmux/launch", { method: "POST" });
+    expect(res.status).toBe(412);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe("rig_not_running");
+  });
+
+  it("mixed stale+running: only running sessions are attached (BLOCKING-FIX discriminator)", async () => {
+    const app = buildApp({
+      rigs: {
+        "rig-1": {
+          id: "rig-1",
+          name: "mixed-rig",
+          nodes: [
+            {
+              logicalId: "a",
+              podId: "p1",
+              canonicalSessionName: "a@mixed-rig",
+              sessionStatus: "running",
+            },
+            {
+              logicalId: "b",
+              podId: "p1",
+              canonicalSessionName: "b@mixed-rig",
+              sessionStatus: "exited", // stale
+            },
+            {
+              logicalId: "c",
+              podId: "p2",
+              canonicalSessionName: "c@mixed-rig",
+              sessionStatus: "running",
+            },
+          ],
+        },
+      },
+      adapter: makeMockAdapter({ available: true }),
+    });
+    const res = await app.request("/api/rigs/rig-1/cmux/launch", { method: "POST" });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { workspaces: Array<{ agents: string[] }> };
+    expect(body.workspaces).toHaveLength(1);
+    // Only the two RUNNING sessions are attached; the exited one (b)
+    // is filtered out. Without the sessionStatus filter, this would
+    // include "b@mixed-rig" and the assertion would fail.
+    expect(body.workspaces[0]!.agents).toEqual(["a@mixed-rig", "c@mixed-rig"]);
+  });
+
+  it("412 rig_not_running when attachmentType is non-tmux even if sessionStatus is running (defensive)", async () => {
+    const app = buildApp({
+      rigs: {
+        "rig-1": {
+          id: "rig-1",
+          name: "non-tmux-rig",
+          nodes: [
+            {
+              logicalId: "a",
+              podId: "p1",
+              canonicalSessionName: "a@non-tmux",
+              sessionStatus: "running",
+              attachmentType: "ssh", // non-tmux: can't 'tmux attach -t'
+            },
+          ],
+        },
+      },
+      adapter: makeMockAdapter({ available: true }),
+    });
+    const res = await app.request("/api/rigs/rig-1/cmux/launch", { method: "POST" });
+    expect(res.status).toBe(412);
   });
 
   it("rig.nodes order (DB ORDER BY created_at = pod-then-member) is preserved in agents array", async () => {
