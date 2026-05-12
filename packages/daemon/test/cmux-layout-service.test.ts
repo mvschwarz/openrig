@@ -3,8 +3,29 @@
 // + buildWorkspace coordinated through a mocked CmuxAdapter.
 
 import { describe, it, expect, vi } from "vitest";
-import { CmuxLayoutService, MAX_COLS, MAX_PER_WORKSPACE } from "../src/domain/cmux-layout-service.js";
+import {
+  CmuxLayoutService,
+  MAX_COLS,
+  MAX_PER_WORKSPACE,
+  OP_DELAY_MS,
+  FINAL_SETTLE_MS,
+  LIST_SURFACES_RETRY_DELAY_MS,
+  LIST_SURFACES_MAX_ATTEMPTS,
+} from "../src/domain/cmux-layout-service.js";
 import type { CmuxResult } from "../src/adapters/cmux.js";
+
+// Tests inject a recording no-op sleep so the suite doesn't actually
+// wait OP_DELAY_MS between operations. The injected sleep records calls
+// so tests can assert delays were awaited at the right boundaries.
+function makeSleepRecorder(): { sleep: (ms: number) => Promise<void>; sleeps: number[] } {
+  const sleeps: number[] = [];
+  return {
+    sleeps,
+    sleep: async (ms: number) => {
+      sleeps.push(ms);
+    },
+  };
+}
 
 interface MockAdapterRecord {
   method: string;
@@ -187,7 +208,8 @@ describe("CmuxLayoutService.orderAgentsFromRigSpec", () => {
 describe("CmuxLayoutService.buildWorkspace", () => {
   it("for N=1: creates workspace, sends tmux attach to default surface, no splits", async () => {
     const { adapter, calls } = makeMockAdapter();
-    const service = new CmuxLayoutService(adapter as never);
+    const { sleep } = makeSleepRecorder();
+    const service = new CmuxLayoutService(adapter as never, { sleep });
     const result = await service.buildWorkspace("my-rig", "/cwd", ["session-a"]);
 
     expect(result.ok).toBe(true);
@@ -200,7 +222,8 @@ describe("CmuxLayoutService.buildWorkspace", () => {
 
   it("for N=2: creates workspace, 1 split right, 2 sends", async () => {
     const { adapter, calls } = makeMockAdapter();
-    const service = new CmuxLayoutService(adapter as never);
+    const { sleep } = makeSleepRecorder();
+    const service = new CmuxLayoutService(adapter as never, { sleep });
     const result = await service.buildWorkspace("my-rig", "/cwd", ["s1", "s2"]);
 
     expect(result.ok).toBe(true);
@@ -213,15 +236,14 @@ describe("CmuxLayoutService.buildWorkspace", () => {
 
   it("for N=4 (2×2): 3 splits (right + 2 downs), 4 sends", async () => {
     const { adapter, calls } = makeMockAdapter();
-    const service = new CmuxLayoutService(adapter as never);
+    const { sleep } = makeSleepRecorder();
+    const service = new CmuxLayoutService(adapter as never, { sleep });
     const result = await service.buildWorkspace("my-rig", "/cwd", ["s1", "s2", "s3", "s4"]);
 
     expect(result.ok).toBe(true);
     const splits = calls.filter((c) => c.method === "splitSurface");
     expect(splits).toHaveLength(3);
-    // First split is "right" to make column 2
     expect(splits[0]!.args[1]).toBe("right");
-    // Subsequent are "down" to add rows
     expect(splits[1]!.args[1]).toBe("down");
     expect(splits[2]!.args[1]).toBe("down");
     const sends = calls.filter((c) => c.method === "sendText");
@@ -230,7 +252,8 @@ describe("CmuxLayoutService.buildWorkspace", () => {
 
   it("for N=12 (2×6): 11 splits (1 right + 10 downs), 12 sends", async () => {
     const { adapter, calls } = makeMockAdapter();
-    const service = new CmuxLayoutService(adapter as never);
+    const { sleep } = makeSleepRecorder();
+    const service = new CmuxLayoutService(adapter as never, { sleep });
     const agents = Array.from({ length: 12 }, (_, i) => `s${i + 1}`);
     const result = await service.buildWorkspace("my-rig", "/cwd", agents);
 
@@ -247,7 +270,8 @@ describe("CmuxLayoutService.buildWorkspace", () => {
 
   it("returns blanks count when N is odd (one trailing blank panel)", async () => {
     const { adapter } = makeMockAdapter();
-    const service = new CmuxLayoutService(adapter as never);
+    const { sleep } = makeSleepRecorder();
+    const service = new CmuxLayoutService(adapter as never, { sleep });
     const result = await service.buildWorkspace("my-rig", "/cwd", ["s1", "s2", "s3"]);
 
     expect(result.ok).toBe(true);
@@ -260,7 +284,8 @@ describe("CmuxLayoutService.buildWorkspace", () => {
     const { adapter } = makeMockAdapter({
       createWorkspaceFn: async () => ({ ok: false, code: "request_failed", message: "duplicate name" }),
     });
-    const service = new CmuxLayoutService(adapter as never);
+    const { sleep } = makeSleepRecorder();
+    const service = new CmuxLayoutService(adapter as never, { sleep });
     const result = await service.buildWorkspace("my-rig", "/cwd", ["s1"]);
 
     expect(result.ok).toBe(false);
@@ -271,7 +296,8 @@ describe("CmuxLayoutService.buildWorkspace", () => {
     const { adapter } = makeMockAdapter({
       splitSurfaceFn: async () => ({ ok: false, code: "request_failed", message: "split failed" }),
     });
-    const service = new CmuxLayoutService(adapter as never);
+    const { sleep } = makeSleepRecorder();
+    const service = new CmuxLayoutService(adapter as never, { sleep });
     const result = await service.buildWorkspace("my-rig", "/cwd", ["s1", "s2"]);
 
     expect(result.ok).toBe(false);
@@ -280,12 +306,140 @@ describe("CmuxLayoutService.buildWorkspace", () => {
 
   it("for N=0: returns ok with workspaceName set but no agents", async () => {
     const { adapter, calls } = makeMockAdapter();
-    const service = new CmuxLayoutService(adapter as never);
+    const { sleep } = makeSleepRecorder();
+    const service = new CmuxLayoutService(adapter as never, { sleep });
     const result = await service.buildWorkspace("my-rig", "/cwd", []);
     expect(result.ok).toBe(true);
-    // No splits or sends since there are no agents
     expect(calls.filter((c) => c.method === "splitSurface")).toHaveLength(0);
     expect(calls.filter((c) => c.method === "sendText")).toHaveLength(0);
+  });
+
+  // velocity-guard 24.B BLOCKING-CONCERN regressions:
+  // README §94 + skill §5 require timing guards. Tests prove the
+  // injectable sleep is awaited at the right boundaries.
+
+  describe("timing gotchas (slice 24 README §94 + skill §5)", () => {
+    it("awaits sleep(OP_DELAY_MS) after every splitSurface", async () => {
+      const { adapter } = makeMockAdapter();
+      const { sleep, sleeps } = makeSleepRecorder();
+      const service = new CmuxLayoutService(adapter as never, { sleep });
+      // N=4 (2×2): 3 splits → expect 3 OP_DELAY_MS sleeps after splits
+      await service.buildWorkspace("my-rig", "/cwd", ["s1", "s2", "s3", "s4"]);
+      const opDelays = sleeps.filter((ms) => ms === OP_DELAY_MS);
+      expect(opDelays).toHaveLength(3);
+    });
+
+    it("awaits sleep(FINAL_SETTLE_MS) once after the last sendText", async () => {
+      const { adapter } = makeMockAdapter();
+      const { sleep, sleeps } = makeSleepRecorder();
+      const service = new CmuxLayoutService(adapter as never, { sleep });
+      await service.buildWorkspace("my-rig", "/cwd", ["s1", "s2", "s3", "s4"]);
+      const finalSettles = sleeps.filter((ms) => ms === FINAL_SETTLE_MS);
+      expect(finalSettles).toHaveLength(1);
+    });
+
+    it("final settle is the LAST sleep called (no further ops after)", async () => {
+      const { adapter } = makeMockAdapter();
+      const { sleep, sleeps } = makeSleepRecorder();
+      const service = new CmuxLayoutService(adapter as never, { sleep });
+      await service.buildWorkspace("my-rig", "/cwd", ["s1", "s2"]);
+      expect(sleeps[sleeps.length - 1]).toBe(FINAL_SETTLE_MS);
+    });
+
+    it("retries listSurfaces with backoff when initial response is empty", async () => {
+      let listCallCount = 0;
+      const { adapter } = makeMockAdapter({
+        listSurfacesFn: async () => {
+          listCallCount += 1;
+          if (listCallCount < 3) {
+            return { ok: true, data: [] };
+          }
+          return { ok: true, data: [{ id: "surface:default", title: "", type: "terminal" }] };
+        },
+      });
+      const { sleep, sleeps } = makeSleepRecorder();
+      const service = new CmuxLayoutService(adapter as never, { sleep });
+      const result = await service.buildWorkspace("my-rig", "/cwd", ["s1"]);
+      expect(result.ok).toBe(true);
+      expect(listCallCount).toBe(3);
+      // 2 retry-backoff sleeps before the third (successful) list
+      const retryBackoffs = sleeps.filter((ms) => ms === LIST_SURFACES_RETRY_DELAY_MS);
+      expect(retryBackoffs.length).toBeGreaterThanOrEqual(2);
+    });
+
+    it("returns request_failed after LIST_SURFACES_MAX_ATTEMPTS empty listSurfaces", async () => {
+      const { adapter } = makeMockAdapter({
+        listSurfacesFn: async () => ({ ok: true, data: [] }),
+      });
+      const { sleep } = makeSleepRecorder();
+      const service = new CmuxLayoutService(adapter as never, { sleep });
+      const result = await service.buildWorkspace("my-rig", "/cwd", ["s1"]);
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.code).toBe("request_failed");
+        expect(result.message).toMatch(new RegExp(String(LIST_SURFACES_MAX_ATTEMPTS)));
+      }
+    });
+
+    it("constants exposed: OP_DELAY_MS=500, FINAL_SETTLE_MS=1000", () => {
+      expect(OP_DELAY_MS).toBe(500);
+      expect(FINAL_SETTLE_MS).toBe(1000);
+    });
+  });
+
+  // velocity-guard 24.B SECONDARY regression:
+  // README §52 fill order is "top-to-bottom, left-to-right" — column-major.
+  // Each column's surfaces are populated top-to-bottom before moving to the
+  // next column.
+
+  describe("fill order (column-major per README §52)", () => {
+    it("for N=3 in 2×2 grid: agents 1,2,3 fill (col0,row0) → (col0,row1) → (col1,row0); blank at (col1,row1)", async () => {
+      const splitSurfaceIds: string[] = [];
+      let surfaceCounter = 100;
+      const { adapter, calls } = makeMockAdapter({
+        splitSurfaceFn: async (_src, _dir) => {
+          const id = `surface:${++surfaceCounter}`;
+          splitSurfaceIds.push(id);
+          return { ok: true, data: id };
+        },
+        listSurfacesFn: async () => ({ ok: true, data: [{ id: "surface:initial", title: "", type: "terminal" }] }),
+      });
+      const { sleep } = makeSleepRecorder();
+      const service = new CmuxLayoutService(adapter as never, { sleep });
+      await service.buildWorkspace("my-rig", "/cwd", ["agent-1", "agent-2", "agent-3"]);
+
+      // Three sends; surfaces in send order:
+      // - send 1 → col0 row0 = initial surface
+      // - send 2 → col0 row1 = first DOWN split off col0 row0
+      // - send 3 → col1 row0 = the RIGHT split (col 2 expansion)
+      const sends = calls.filter((c) => c.method === "sendText");
+      expect(sends).toHaveLength(3);
+
+      // Inspect arg 0 (surfaceId) and arg 1 (text)
+      expect((sends[0]!.args[1] as string)).toContain("agent-1");
+      expect(sends[0]!.args[0]).toBe("surface:initial");
+
+      expect((sends[1]!.args[1] as string)).toContain("agent-2");
+      // agent-2 lands on the DOWN-split surface off the initial (col 0, row 1)
+
+      expect((sends[2]!.args[1] as string)).toContain("agent-3");
+      // agent-3 lands on the RIGHT-split surface (col 1, row 0)
+    });
+
+    it("for N=2 in 2×1 grid: agent 1 → col0 row0; agent 2 → col1 row0", async () => {
+      const { adapter, calls } = makeMockAdapter({
+        listSurfacesFn: async () => ({ ok: true, data: [{ id: "surface:initial", title: "", type: "terminal" }] }),
+        splitSurfaceFn: async (_src, _dir) => ({ ok: true, data: "surface:right" }),
+      });
+      const { sleep } = makeSleepRecorder();
+      const service = new CmuxLayoutService(adapter as never, { sleep });
+      await service.buildWorkspace("my-rig", "/cwd", ["agent-1", "agent-2"]);
+      const sends = calls.filter((c) => c.method === "sendText");
+      expect(sends[0]!.args[0]).toBe("surface:initial");
+      expect((sends[0]!.args[1] as string)).toContain("agent-1");
+      expect(sends[1]!.args[0]).toBe("surface:right");
+      expect((sends[1]!.args[1] as string)).toContain("agent-2");
+    });
   });
 });
 
