@@ -508,17 +508,35 @@ function AppShellInner({ children }: AppShellProps) {
               className="h-14 flex items-center justify-between px-4 bg-background border-b border-outline-variant shrink-0 relative z-30"
             >
               <div className="flex items-center gap-3">
-                <button
-                  type="button"
-                  data-testid="mobile-menu-toggle"
-                  onClick={() => setExplorerOpen((open) => !open)}
-                  aria-label="Toggle navigation"
-                  className="flex flex-col gap-[3px] p-2 lg:hidden"
-                >
-                  <span className="block w-4 h-[1.5px] bg-stone-900" />
-                  <span className="block w-4 h-[1.5px] bg-stone-900" />
-                  <span className="block w-3 h-[1.5px] bg-stone-900" />
-                </button>
+                {/* Slice 26.E OPT-E Topology mobile toggle carve-out: at
+                    narrow viewports on /topology the menu toggle does
+                    not render. Clicking it flips explorerOpen state
+                    which re-renders AppShellInner's children; the
+                    Topology mobile render path (TopologyTableView +
+                    TopologyTreeView) has a pre-existing render-cost
+                    that pegs the browser on that cascade — independent
+                    of whether the Explorer drawer itself mounts (OPT-D3
+                    already suppresses that). Hiding the entry point
+                    prevents the state-flip trigger. Pre-existing
+                    renderer-spin scheduled for 0.3.2 dedicated render-
+                    path slice; 0.3.1 carve-out preserves Topology
+                    mobile usability (degraded table still loads +
+                    navigable; brand-home-link reachable in topbar).
+                    Reuses shouldSuppressExplorerMount predicate — same
+                    underlying carve-out scenario. */}
+                {!shouldSuppressExplorerMount(surface, isWideLayout) && (
+                  <button
+                    type="button"
+                    data-testid="mobile-menu-toggle"
+                    onClick={() => setExplorerOpen((open) => !open)}
+                    aria-label="Toggle navigation"
+                    className="flex flex-col gap-[3px] p-2 lg:hidden"
+                  >
+                    <span className="block w-4 h-[1.5px] bg-stone-900" />
+                    <span className="block w-4 h-[1.5px] bg-stone-900" />
+                    <span className="block w-3 h-[1.5px] bg-stone-900" />
+                  </button>
+                )}
                 <Link
                   to="/"
                   data-testid="brand-home-link"

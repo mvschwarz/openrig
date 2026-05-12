@@ -176,3 +176,64 @@ describe("shouldSuppressExplorerMount (slice 26.D OPT-D3 mount-suppression predi
     expect(shouldSuppressExplorerMount("none", true)).toBe(false);
   });
 });
+
+// Slice 26.E OPT-E Topology mobile menu-toggle carve-out.
+//
+// OPT-D3 (mount-suppression) was invalidated by velocity-qa recheck:
+// the peg trigger is NOT Explorer mount but the click handler on the
+// mobile-menu-toggle itself. setExplorerOpen flips state, which re-
+// renders AppShellInner's children including the Topology mobile
+// render path. OPT-E suppresses the toggle button on Topology mobile
+// surface so the state-flip cascade can never be triggered. Reuses
+// shouldSuppressExplorerMount predicate (same underlying carve-out
+// condition). 0.3.2 will fix the Topology render-path; this carve-out
+// reverts at that time.
+//
+// JSX-shape discriminator: mirrors AppShell.tsx's conditional render
+// of the toggle button. Predicate logic is already covered by OPT-D3
+// tests above; these tests verify the JSX wiring uses the predicate
+// correctly (negative + positive assertions per surface).
+
+function MenuToggleProbe({
+  surface,
+  isWideLayout,
+}: {
+  surface: ExplorerSurface;
+  isWideLayout: boolean;
+}) {
+  return (
+    <div>
+      {!shouldSuppressExplorerMount(surface, isWideLayout) && (
+        <button data-testid="mobile-menu-toggle" type="button" aria-label="Toggle navigation" />
+      )}
+    </div>
+  );
+}
+
+describe("OPT-E mobile-menu-toggle conditional render (slice 26.E)", () => {
+  it("Topology + narrow viewport → toggle button is ABSENT (peg-trigger entry suppressed)", () => {
+    render(<MenuToggleProbe surface="topology" isWideLayout={false} />);
+    expect(screen.queryByTestId("mobile-menu-toggle")).toBeNull();
+  });
+
+  it("Topology + wide viewport → toggle button is PRESENT (lg:hidden handles visibility; no peg path on desktop)", () => {
+    render(<MenuToggleProbe surface="topology" isWideLayout={true} />);
+    expect(screen.queryByTestId("mobile-menu-toggle")).not.toBeNull();
+  });
+
+  // Cross-destination preservation: 4 other Explorer-bearing surfaces
+  // keep the toggle button at narrow viewports so users can open the
+  // Explorer drawer (OPT-B + OPT-D3 fixes apply normally).
+  const otherSurfaces: ExplorerSurface[] = ["settings", "project", "specs", "for-you"];
+  for (const surface of otherSurfaces) {
+    it(`${surface} + narrow viewport → toggle button is PRESENT (cross-destination preservation)`, () => {
+      render(<MenuToggleProbe surface={surface} isWideLayout={false} />);
+      expect(screen.queryByTestId("mobile-menu-toggle")).not.toBeNull();
+    });
+  }
+
+  it("'none' surface + narrow viewport → toggle button is PRESENT (no Explorer-bearing carve-out applies)", () => {
+    render(<MenuToggleProbe surface="none" isWideLayout={false} />);
+    expect(screen.queryByTestId("mobile-menu-toggle")).not.toBeNull();
+  });
+});
