@@ -82,9 +82,15 @@ export function LaunchCmuxButton({ rigId }: LaunchCmuxButtonProps) {
           role="status"
           aria-live="polite"
           className={
+            // Slice 24.D repair (velocity-guard BLOCKING-CONCERN):
+            // do NOT truncate the daemon's honest 3-part error
+            // messages. Operator must see the action phrase
+            // (e.g., "cmux ping", "rig up <name>") to recover.
+            // Width-bound the wrapper instead and let text wrap
+            // naturally onto multiple lines.
             status.kind === "error"
-              ? "font-mono text-[10px] text-rose-700 max-w-md truncate"
-              : "font-mono text-[10px] text-emerald-700 max-w-md truncate"
+              ? "font-mono text-[10px] text-rose-700 max-w-2xl leading-relaxed whitespace-normal break-words"
+              : "font-mono text-[10px] text-emerald-700 max-w-2xl leading-relaxed whitespace-normal break-words"
           }
         >
           {status.message}

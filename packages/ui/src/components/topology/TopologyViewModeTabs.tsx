@@ -39,12 +39,14 @@ export function TopologyViewModeTabs<T extends string>({
   testIdPrefix = "topology-view-mode",
   trailing,
 }: TopologyViewModeTabsProps<T>) {
-  return (
-    // Internal tablist — div, not <nav>, so SC-1 left-chrome count
-    // (querySelectorAll("nav, aside")) stays at exactly 2. No wrapper
-    // line border — only the active tab
-    // carries an underline; the rest of the tablist breathes over the
-    // canvas.
+  // Slice 24.D repair (velocity-guard secondary concern):
+  // keep tablist children scoped to tabs only — outer flex wrapper
+  // hosts both the tablist AND the trailing slot as siblings.
+  // Internal tablist — div, not <nav>, so SC-1 left-chrome count
+  // (querySelectorAll("nav, aside")) stays at exactly 2. No wrapper
+  // line border — only the active tab carries an underline; the rest
+  // of the tablist breathes over the canvas.
+  const tablist = (
     <div
       role="tablist"
       aria-label="Topology view modes"
@@ -70,11 +72,20 @@ export function TopologyViewModeTabs<T extends string>({
           {t.label}
         </button>
       ))}
-      {trailing ? (
-        <div data-testid={`${testIdPrefix}-trailing`} className="ml-auto">
-          {trailing}
-        </div>
-      ) : null}
+    </div>
+  );
+
+  if (!trailing) return tablist;
+
+  return (
+    <div
+      data-testid={`${testIdPrefix}-tab-bar`}
+      className="flex items-center"
+    >
+      {tablist}
+      <div data-testid={`${testIdPrefix}-trailing`} className="ml-auto">
+        {trailing}
+      </div>
     </div>
   );
 }

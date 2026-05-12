@@ -166,4 +166,78 @@ describe("LaunchCmuxButton", () => {
       expect(toast.textContent?.toLowerCase()).toMatch(/cmux|install|ping/);
     });
   });
+
+  // velocity-guard 24.D BLOCKING-CONCERN repair (primary):
+  // honest 3-part error must NOT be visually truncated. Operators
+  // need to see the action phrase (e.g., "cmux ping", "rig up <name>")
+  // to recover. Truncation would only show the FACT but hide the
+  // ACTION guidance, violating HG-10/HG-13 honest-error contract.
+
+  it("error status does NOT have truncate class (full message visible) — DISCRIMINATING", async () => {
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ok: false,
+      status: 503,
+      json: async () => ({
+        error: "cmux_unavailable",
+        message: "cmux is not available on this host — can't launch workspace — install cmux from https://cmux.io and run: cmux ping",
+      }),
+    });
+    render(
+      <Wrapper>
+        <LaunchCmuxButton rigId="my-rig" />
+      </Wrapper>,
+    );
+    fireEvent.click(screen.getByTestId("launch-cmux-button"));
+    await waitFor(() => {
+      const toast = screen.getByTestId("launch-cmux-status");
+      expect(toast.className).not.toMatch(/\btruncate\b/);
+      expect(toast.className).not.toMatch(/\boverflow-hidden\b/);
+      expect(toast.className).toMatch(/\bwhitespace-normal\b|\bwhitespace-pre-line\b/);
+    });
+  });
+
+  it("error status text content includes the daemon's full action phrase ('cmux ping')", async () => {
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ok: false,
+      status: 503,
+      json: async () => ({
+        error: "cmux_unavailable",
+        message: "cmux is not available on this host — can't launch workspace — install cmux from https://cmux.io and run: cmux ping",
+      }),
+    });
+    render(
+      <Wrapper>
+        <LaunchCmuxButton rigId="my-rig" />
+      </Wrapper>,
+    );
+    fireEvent.click(screen.getByTestId("launch-cmux-button"));
+    await waitFor(() => {
+      const toast = screen.getByTestId("launch-cmux-status");
+      // Full 3-part message in DOM text: fact + consequence + action.
+      // The action phrase 'cmux ping' must be present, not just the
+      // opening fact 'cmux is not available...'.
+      expect(toast.textContent).toContain("cmux ping");
+    });
+  });
+
+  it("error status text content includes 'rig up' action phrase for rig_not_running", async () => {
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ok: false,
+      status: 412,
+      json: async () => ({
+        error: "rig_not_running",
+        message: "Rig 'my-rig' has no running tmux sessions — can't attach to anything — run: rig up my-rig",
+      }),
+    });
+    render(
+      <Wrapper>
+        <LaunchCmuxButton rigId="my-rig" />
+      </Wrapper>,
+    );
+    fireEvent.click(screen.getByTestId("launch-cmux-button"));
+    await waitFor(() => {
+      const toast = screen.getByTestId("launch-cmux-status");
+      expect(toast.textContent).toContain("rig up my-rig");
+    });
+  });
 });
