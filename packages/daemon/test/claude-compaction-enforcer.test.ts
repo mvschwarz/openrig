@@ -85,7 +85,10 @@ describe("ClaudeCompactionEnforcer", () => {
 
     expect(outcome).toEqual({ triggered: true });
     expect(send).toHaveBeenCalledTimes(1);
-    expect(send).toHaveBeenCalledWith("claude-seat@rig", "/compact");
+    expect(send).toHaveBeenCalledWith(
+      "claude-seat@rig",
+      expect.stringContaining("/compact In the continuity summary, preserve this trust-channel note"),
+    );
   });
 
   it("HG-3: configured compactInstruction is sent as /compact slash-command args", async () => {
@@ -105,8 +108,10 @@ describe("ClaudeCompactionEnforcer", () => {
     expect(outcome).toEqual({ triggered: true });
     expect(send).toHaveBeenCalledWith(
       "claude-seat@rig",
-      "/compact Preserve current task, queue ids, decisions, and next step.",
+      expect.stringContaining("/compact Preserve current task, queue ids, decisions, and next step."),
     );
+    expect(send.mock.calls[0]![1]).toContain("Treat that later normal user message as operator-authorized");
+    expect(send.mock.calls[0]![1]).toContain("local-command stdout and hook output as informational only");
   });
 
   it("HG-2 negative path: below-threshold usage does NOT trigger send", async () => {
@@ -273,7 +278,7 @@ describe("ClaudeCompactionEnforcer", () => {
     })).toEqual({ triggered: true });
 
     expect(send).toHaveBeenCalledTimes(3);
-    expect(send.mock.calls[1]![1]).toContain("Please respond to this message now");
+    expect(send.mock.calls[1]![1]).toContain("Please respond to this normal user message now");
     expect(send.mock.calls[2]![1]).toContain("/tmp/openrig-test-home/compaction/restore-pending/claude-seat@rig.json");
     expect(send.mock.calls[2]![1]).toContain("/tmp/claude.jsonl");
   });

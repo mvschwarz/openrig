@@ -110,7 +110,7 @@ function buildRestoreContext(marker) {
     "OpenRig compaction restore is pending for this Claude session.",
     `Restore packet: ${outputDir}`,
     "Before doing any substantive work, load/read the claude-compaction-restore skill, run `node ~/.claude/skills/claude-compaction-restore/scripts/restore-from-jsonl.mjs --out /tmp/claude-compaction-restore --json`, read restore-instructions.md and touched-files.md, then read the important source/docs files named there in full.",
-    `After restoration, report exactly: ${ack}`,
+    `After restoration, reply with: ${ack}`,
   ];
   if (postInstruction) {
     pieces.push(`Operator post-compaction instruction: ${postInstruction}`);
