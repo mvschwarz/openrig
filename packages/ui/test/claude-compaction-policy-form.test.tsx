@@ -30,6 +30,7 @@ function jsonResponse(body: unknown, status = 200): Response {
 function makeSettingsResponse(overrides: Partial<{
   enabled: boolean;
   thresholdPercent: number;
+  compactInstruction: string;
   messageInline: string;
   messageFilePath: string;
 }> = {}) {
@@ -44,6 +45,11 @@ function makeSettingsResponse(overrides: Partial<{
         value: overrides.thresholdPercent ?? 80,
         source: "default",
         defaultValue: 80,
+      },
+      "policies.claude_compaction.compact_instruction": {
+        value: overrides.compactInstruction ?? "",
+        source: "default",
+        defaultValue: "",
       },
       "policies.claude_compaction.message_inline": {
         value: overrides.messageInline ?? "",
@@ -72,6 +78,8 @@ describe("ClaudeCompactionPolicyForm — slice 27", () => {
     expect(enabled.checked).toBe(false);
     const threshold = screen.getByTestId("claude-compaction-threshold") as HTMLInputElement;
     expect(threshold.value).toBe("80");
+    const compactInstruction = screen.getByTestId("claude-compaction-compact-instruction") as HTMLTextAreaElement;
+    expect(compactInstruction.value).toBe("");
     const inline = screen.getByTestId("claude-compaction-message-inline") as HTMLTextAreaElement;
     expect(inline.value).toBe("");
     const filePath = screen.getByTestId("claude-compaction-message-file-path") as HTMLInputElement;
@@ -82,6 +90,7 @@ describe("ClaudeCompactionPolicyForm — slice 27", () => {
     mockFetch.mockResolvedValue(jsonResponse(makeSettingsResponse({
       enabled: true,
       thresholdPercent: 65,
+      compactInstruction: "Keep decisions and active queue ids.",
       messageInline: "stay calm",
       messageFilePath: "/tmp/m.txt",
     })));
@@ -91,6 +100,7 @@ describe("ClaudeCompactionPolicyForm — slice 27", () => {
       expect((screen.getByTestId("claude-compaction-enabled") as HTMLInputElement).checked).toBe(true);
     });
     expect((screen.getByTestId("claude-compaction-threshold") as HTMLInputElement).value).toBe("65");
+    expect((screen.getByTestId("claude-compaction-compact-instruction") as HTMLTextAreaElement).value).toBe("Keep decisions and active queue ids.");
     expect((screen.getByTestId("claude-compaction-message-inline") as HTMLTextAreaElement).value).toBe("stay calm");
     expect((screen.getByTestId("claude-compaction-message-file-path") as HTMLInputElement).value).toBe("/tmp/m.txt");
   });
@@ -110,6 +120,9 @@ describe("ClaudeCompactionPolicyForm — slice 27", () => {
 
     fireEvent.click(screen.getByTestId("claude-compaction-enabled"));
     fireEvent.change(screen.getByTestId("claude-compaction-threshold"), { target: { value: "70" } });
+    fireEvent.change(screen.getByTestId("claude-compaction-compact-instruction"), {
+      target: { value: "Summarize decisions first." },
+    });
     fireEvent.change(screen.getByTestId("claude-compaction-message-inline"), {
       target: { value: "Reload the slice doc before resuming." },
     });
@@ -120,18 +133,31 @@ describe("ClaudeCompactionPolicyForm — slice 27", () => {
     fireEvent.click(screen.getByTestId("claude-compaction-policy-submit"));
 
     await waitFor(() => {
-      expect(calls.filter((c) => c.init?.method === "POST").length).toBeGreaterThanOrEqual(4);
+      expect(calls.filter((c) => c.init?.method === "POST").length).toBeGreaterThanOrEqual(5);
     });
 
     const postCalls = calls.filter((c) => c.init?.method === "POST");
     const findKey = (key: string) => postCalls.find((c) => c.url.includes(encodeURIComponent(key)));
     expect(findKey("policies.claude_compaction.enabled")?.init?.body as string).toContain("true");
     expect(findKey("policies.claude_compaction.threshold_percent")?.init?.body as string).toContain("70");
+    expect(findKey("policies.claude_compaction.compact_instruction")?.init?.body as string).toContain("Summarize decisions first.");
     expect(findKey("policies.claude_compaction.message_inline")?.init?.body as string).toContain("Reload the slice doc before resuming.");
     // message_file_path posted even when empty (clears any prior value).
     expect(findKey("policies.claude_compaction.message_file_path")).toBeDefined();
 
     await waitFor(() => expect(screen.getByTestId("claude-compaction-policy-saved")).toBeDefined());
+  });
+
+  it("HG-9: threshold field is directly editable while typing", async () => {
+    mockFetch.mockResolvedValue(jsonResponse(makeSettingsResponse()));
+    render(createTestRouter({ component: () => <ClaudeCompactionPolicyForm />, path: "/" }));
+    await waitFor(() => expect(screen.getByTestId("claude-compaction-enabled")).toBeDefined());
+
+    const threshold = screen.getByTestId("claude-compaction-threshold") as HTMLInputElement;
+    fireEvent.change(threshold, { target: { value: "" } });
+    expect(threshold.value).toBe("");
+    fireEvent.change(threshold, { target: { value: "5" } });
+    expect(threshold.value).toBe("5");
   });
 
   it("HG-9: threshold validation rejects out-of-range values without issuing POSTs", async () => {

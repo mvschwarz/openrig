@@ -18,15 +18,54 @@ function readHookInput() {
   return JSON.parse(raw);
 }
 
+function getOpenRigHome() {
+  return process.env.OPENRIG_HOME || process.env.RIGGED_HOME || path.join(os.homedir(), ".openrig");
+}
+
+function sessionKey(input) {
+  const raw = [
+    process.env.OPENRIG_SESSION_NAME,
+    process.env.RIGGED_SESSION_NAME,
+    input.session_id,
+    input.sessionId,
+    input.session_name,
+    input.sessionName,
+    input.transcript_path ? path.basename(input.transcript_path, ".jsonl") : "",
+  ].find((value) => typeof value === "string" && value.trim().length > 0) || "unknown-session";
+  return raw.replace(/[^a-zA-Z0-9_.@-]/g, "_");
+}
+
+function pendingMarkerPath(input) {
+  return path.join(getOpenRigHome(), "compaction", "restore-pending", `${sessionKey(input)}.json`);
+}
+
+function writePendingRestoreMarker(input, parsed, restoreInstruction, customMessage) {
+  const markerPath = pendingMarkerPath(input);
+  fs.mkdirSync(path.dirname(markerPath), { recursive: true });
+  const payload = {
+    version: 1,
+    createdAt: new Date().toISOString(),
+    sessionName: process.env.OPENRIG_SESSION_NAME || process.env.RIGGED_SESSION_NAME || null,
+    sessionId: input.session_id || input.sessionId || null,
+    transcriptPath: input.transcript_path || null,
+    cwd: input.cwd || null,
+    outputDir: parsed.outputDir,
+    restoreInstruction,
+    postCompactInstruction: customMessage || "",
+    expectedAck: "restored from packet at <path>; resumed at step <X>",
+    deliveredAt: null,
+    deliveryCount: 0,
+  };
+  fs.writeFileSync(markerPath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+  return markerPath;
+}
+
 // Slice 27 — read the OpenRig config directly (no daemon HTTP dependency
 // so the hook still works when the daemon isn't running or isn't
 // reachable from this process). Returns "" for either field when the
 // config is missing, malformed, or the policy isn't set.
 function readClaudeCompactionMessage() {
-  const configPath = path.join(
-    process.env.OPENRIG_HOME || process.env.RIGGED_HOME || path.join(os.homedir(), ".openrig"),
-    "config.json",
-  );
+  const configPath = path.join(getOpenRigHome(), "config.json");
   let inline = "";
   let filePath = "";
   try {
@@ -60,7 +99,7 @@ function readClaudeCompactionMessage() {
 
 function buildSystemMessage(restoreInstruction, customMessage) {
   if (!customMessage) return restoreInstruction;
-  return `${restoreInstruction}\n\n--- Operator-configured pre-compaction message ---\n${customMessage}`;
+  return `${restoreInstruction}\n\n--- Operator-configured post-compaction restore instruction ---\n${customMessage}`;
 }
 
 try {
@@ -85,9 +124,10 @@ try {
 
   const parsed = JSON.parse(result.stdout);
   const baseRestore = `Pre-compaction restore seed packet prepared at ${parsed.outputDir}. After compaction, immediately restore before doing any other work: load/read the claude-compaction-restore skill, run "node ~/.claude/skills/claude-compaction-restore/scripts/restore-from-jsonl.mjs --out /tmp/claude-compaction-restore --json" yourself, read the generated restore-instructions.md, read the generated touched-files.md, identify remembered important files, read those files in full, read root/as-built/codemap docs before real work, then report exactly "restored from packet at <path>; resumed at step <X>" with the files you read in full. If any step fails, report the failure explicitly.`;
+  const markerPath = writePendingRestoreMarker(input, parsed, baseRestore, customMessage);
   emit({
     continue: true,
-    systemMessage: buildSystemMessage(baseRestore, customMessage),
+    systemMessage: buildSystemMessage(`${baseRestore} OpenRig also wrote a pending restore marker at ${markerPath}.`, customMessage),
   });
 } catch (error) {
   emit({

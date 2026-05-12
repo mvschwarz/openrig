@@ -53,7 +53,7 @@ export const SETTINGS_VALID_KEYS = [
   "ui.preview.default_lines",
   "recovery.auto_drive_provider_prompts",
   "recovery.provider_auth_env_allowlist",
-  // V1 attempt-3 Phase 4 — Advisor / Operator rail icon V1 placeholders
+  // V1 attempt-3 Phase 4 - Advisor / Operator rail icon V1 placeholders
   // per universal-shell.md L82–L84. SC-29 EXCEPTION declared in
   // dispatch ACK §4: allowlist-only edit; no migrations / new
   // endpoints / event types.
@@ -86,13 +86,15 @@ export const SETTINGS_VALID_KEYS = [
   // independently — daemon does NOT mutate.
   "runtime.codex.hooks_enabled",
   // Slice 27 — Claude auto-compaction policy. SC-29 EXCEPTION #10:
-  // 4 new keys (lockstep with cli/src/config-store.ts VALID_KEYS).
+  // 5 keys (lockstep with cli/src/config-store.ts VALID_KEYS).
   // Opt-in default-off; daemon ContextMonitor reads `enabled` +
-  // `threshold_percent` to decide when to send /compact; PreCompact
-  // hook reads `message_inline` + `message_file_path` to inject a
-  // custom message alongside the existing restore-instructions.
+  // `threshold_percent` to decide when to send /compact. The daemon
+  // passes `compact_instruction` as slash-command args for the actual
+  // compaction phase; PreCompact hook reads `message_inline` +
+  // `message_file_path` for post-compaction restore guidance.
   "policies.claude_compaction.enabled",
   "policies.claude_compaction.threshold_percent",
+  "policies.claude_compaction.compact_instruction",
   "policies.claude_compaction.message_inline",
   "policies.claude_compaction.message_file_path",
 ] as const;
@@ -138,6 +140,7 @@ const ENV_MAP: Record<SettingsValidKey, { primary: string; legacy?: string }> = 
   // primary only.
   "policies.claude_compaction.enabled": { primary: "OPENRIG_POLICIES_CLAUDE_COMPACTION_ENABLED" },
   "policies.claude_compaction.threshold_percent": { primary: "OPENRIG_POLICIES_CLAUDE_COMPACTION_THRESHOLD_PERCENT" },
+  "policies.claude_compaction.compact_instruction": { primary: "OPENRIG_POLICIES_CLAUDE_COMPACTION_COMPACT_INSTRUCTION" },
   "policies.claude_compaction.message_inline": { primary: "OPENRIG_POLICIES_CLAUDE_COMPACTION_MESSAGE_INLINE" },
   "policies.claude_compaction.message_file_path": { primary: "OPENRIG_POLICIES_CLAUDE_COMPACTION_MESSAGE_FILE_PATH" },
 };
@@ -174,6 +177,7 @@ const KEY_TO_PATH: Record<SettingsValidKey, string[]> = {
   "runtime.codex.hooks_enabled": ["runtime", "codex", "hooksEnabled"],
   "policies.claude_compaction.enabled": ["policies", "claudeCompaction", "enabled"],
   "policies.claude_compaction.threshold_percent": ["policies", "claudeCompaction", "thresholdPercent"],
+  "policies.claude_compaction.compact_instruction": ["policies", "claudeCompaction", "compactInstruction"],
   "policies.claude_compaction.message_inline": ["policies", "claudeCompaction", "messageInline"],
   "policies.claude_compaction.message_file_path": ["policies", "claudeCompaction", "messageFilePath"],
 };
@@ -296,11 +300,11 @@ function getDefaultValue(key: SettingsValidKey, workspaceRoot: string): string |
     case "runtime.codex.hooks_enabled": return true;
     // Slice 27 — Claude auto-compaction policy defaults. Opt-in
     // default-off; threshold 80% per spec. Empty-string defaults on
-    // message_inline / message_file_path mean "not set" (consistent
-    // with agents.operator_session pattern; hook treats empty as
-    // "skip custom message").
+    // compact_instruction / message_inline / message_file_path mean
+    // "not set" (consistent with agents.operator_session pattern).
     case "policies.claude_compaction.enabled": return false;
     case "policies.claude_compaction.threshold_percent": return 80;
+    case "policies.claude_compaction.compact_instruction": return "";
     case "policies.claude_compaction.message_inline": return "";
     case "policies.claude_compaction.message_file_path": return "";
     default: return "";
@@ -383,6 +387,7 @@ function validateTypedFileValue(key: SettingsValidKey, value: string | number | 
 export interface ClaudeCompactionPolicy {
   enabled: boolean;
   thresholdPercent: number;
+  compactInstruction: string;
   messageInline: string;
   messageFilePath: string;
 }
@@ -500,6 +505,7 @@ export class SettingsStore {
     return {
       enabled: this.resolveOne("policies.claude_compaction.enabled", fc, wr).value as boolean,
       thresholdPercent: this.resolveOne("policies.claude_compaction.threshold_percent", fc, wr).value as number,
+      compactInstruction: this.resolveOne("policies.claude_compaction.compact_instruction", fc, wr).value as string,
       messageInline: this.resolveOne("policies.claude_compaction.message_inline", fc, wr).value as string,
       messageFilePath: this.resolveOne("policies.claude_compaction.message_file_path", fc, wr).value as string,
     };

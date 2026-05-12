@@ -2,14 +2,13 @@
 //
 // Operator-configurable pre-compaction trigger: when a Claude seat's
 // context usage crosses `threshold_percent`, the daemon's ContextMonitor
-// dispatches `/compact` via SessionTransport; the existing PreCompact
-// hook injects the operator's `message_inline` (or contents of
+// dispatches `/compact` via SessionTransport, optionally with
+// `compact_instruction` as slash-command args. The compaction hooks
+// inject the operator's `message_inline` (or contents of
 // `message_file_path`) alongside the standard restore-instructions.
 //
-// Opt-in default-off. Empty inline + file path = standard restore behavior
-// preserved. Designed to land on the slice 26 `/settings/policies` route
-// once the route shell ships; while slice 26 is in flight, the form is
-// also reachable from a temporary mount at `/settings/policies` here.
+// Opt-in default-off. Empty instruction + inline + file path preserves
+// standard restore behavior.
 
 import { useState } from "react";
 import type { FormEvent } from "react";
@@ -18,13 +17,15 @@ import { useSettings, useSetSetting } from "../../hooks/useSettings.js";
 
 type FormState = {
   enabled: boolean;
-  thresholdPercent: number;
+  thresholdPercent: string;
+  compactInstruction: string;
   messageInline: string;
   messageFilePath: string;
 };
 
 const KEY_ENABLED = "policies.claude_compaction.enabled" as const;
 const KEY_THRESHOLD = "policies.claude_compaction.threshold_percent" as const;
+const KEY_COMPACT_INSTRUCTION = "policies.claude_compaction.compact_instruction" as const;
 const KEY_INLINE = "policies.claude_compaction.message_inline" as const;
 const KEY_FILE_PATH = "policies.claude_compaction.message_file_path" as const;
 
@@ -89,7 +90,8 @@ interface PolicyFormBodyProps {
 function PolicyFormBody({ data, setSetting }: PolicyFormBodyProps) {
   const [form, setForm] = useState<FormState>(() => ({
     enabled: coerceBoolean(data[KEY_ENABLED]?.value, false),
-    thresholdPercent: coerceNumber(data[KEY_THRESHOLD]?.value, 80),
+    thresholdPercent: String(coerceNumber(data[KEY_THRESHOLD]?.value, 80)),
+    compactInstruction: coerceString(data[KEY_COMPACT_INSTRUCTION]?.value),
     messageInline: coerceString(data[KEY_INLINE]?.value),
     messageFilePath: coerceString(data[KEY_FILE_PATH]?.value),
   }));
@@ -101,7 +103,9 @@ function PolicyFormBody({ data, setSetting }: PolicyFormBodyProps) {
     event.preventDefault();
     setSubmitOk(false);
     setSubmitError(null);
-    if (form.thresholdPercent < 1 || form.thresholdPercent > 100 || !Number.isInteger(form.thresholdPercent)) {
+    const thresholdRaw = form.thresholdPercent.trim();
+    const thresholdValue = Number(thresholdRaw);
+    if (!/^\d+$/.test(thresholdRaw) || thresholdValue < 1 || thresholdValue > 100) {
       setThresholdError("Threshold must be an integer between 1 and 100.");
       return;
     }
@@ -109,7 +113,8 @@ function PolicyFormBody({ data, setSetting }: PolicyFormBodyProps) {
 
     const updates: Array<{ key: Parameters<typeof setSetting.mutateAsync>[0]["key"]; value: string }> = [
       { key: KEY_ENABLED, value: form.enabled ? "true" : "false" },
-      { key: KEY_THRESHOLD, value: String(form.thresholdPercent) },
+      { key: KEY_THRESHOLD, value: String(thresholdValue) },
+      { key: KEY_COMPACT_INSTRUCTION, value: form.compactInstruction },
       { key: KEY_INLINE, value: form.messageInline },
       { key: KEY_FILE_PATH, value: form.messageFilePath },
     ];
@@ -135,9 +140,8 @@ function PolicyFormBody({ data, setSetting }: PolicyFormBodyProps) {
       <p className="mt-2 text-sm text-on-surface-variant max-w-prose">
         When a Claude seat's context usage crosses the configured threshold,
         OpenRig sends <code className="font-mono text-[12px]">/compact</code> to the seat.
-        The existing pre-compaction hook continues to emit the standard
-        restore packet; the optional custom message below is appended to the
-        post-compaction system message.
+        Optional compaction instructions are sent with that slash command,
+        while the restore guidance is delivered through the compaction hooks.
       </p>
 
       <form
@@ -162,10 +166,11 @@ function PolicyFormBody({ data, setSetting }: PolicyFormBodyProps) {
           <input
             id="claude-compaction-threshold"
             data-testid="claude-compaction-threshold"
-            type="number"
-            step={1}
+            type="text"
+            inputMode="numeric"
+            pattern="[0-9]*"
             value={form.thresholdPercent}
-            onChange={(e) => setForm((s) => ({ ...s, thresholdPercent: Number(e.target.value) }))}
+            onChange={(e) => setForm((s) => ({ ...s, thresholdPercent: e.target.value }))}
             className="border border-outline-variant px-2 py-1 w-32 font-mono text-sm"
             aria-describedby="claude-compaction-threshold-hint"
           />
@@ -180,8 +185,26 @@ function PolicyFormBody({ data, setSetting }: PolicyFormBodyProps) {
         </div>
 
         <div className="flex flex-col gap-1">
+          <label htmlFor="claude-compaction-compact-instruction" className="text-sm font-medium text-stone-900">
+            Compaction instruction
+          </label>
+          <textarea
+            id="claude-compaction-compact-instruction"
+            data-testid="claude-compaction-compact-instruction"
+            rows={3}
+            value={form.compactInstruction}
+            onChange={(e) => setForm((s) => ({ ...s, compactInstruction: e.target.value }))}
+            placeholder="Optional. Sent as /compact <instruction> when OpenRig triggers compaction."
+            className="border border-outline-variant px-2 py-1 font-mono text-sm"
+          />
+          <span className="text-xs text-on-surface-variant">
+            This controls the compaction summary itself.
+          </span>
+        </div>
+
+        <div className="flex flex-col gap-1">
           <label htmlFor="claude-compaction-inline" className="text-sm font-medium text-stone-900">
-            Custom message (inline)
+            Post-compaction restore instruction (inline)
           </label>
           <textarea
             id="claude-compaction-inline"
@@ -189,14 +212,14 @@ function PolicyFormBody({ data, setSetting }: PolicyFormBodyProps) {
             rows={4}
             value={form.messageInline}
             onChange={(e) => setForm((s) => ({ ...s, messageInline: e.target.value }))}
-            placeholder="Optional. Appended to the restore-instructions in the post-compaction system message."
+            placeholder="Optional. Appended to the restore directive after compaction."
             className="border border-outline-variant px-2 py-1 font-mono text-sm"
           />
         </div>
 
         <div className="flex flex-col gap-1">
           <label htmlFor="claude-compaction-file" className="text-sm font-medium text-stone-900">
-            Custom message (file path)
+            Post-compaction restore instruction (file path)
           </label>
           <input
             id="claude-compaction-file"

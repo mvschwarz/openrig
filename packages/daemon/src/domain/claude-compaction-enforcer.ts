@@ -17,11 +17,13 @@ import type { SettingsStore } from "./user-settings/settings-store.js";
  * - Runtime filter: triggers only when runtime === "claude-code". Codex
  *   compacts cleanly via its own runtime per agent-startup-guide; other
  *   runtimes are out of scope.
- * - Dedup: in-memory per-session window (default 60s) prevents a
- *   flapping percentage from firing repeated /compact sends. State is
- *   intentionally NOT persisted; daemon restart resets the window which
- *   is the safer-failure direction (might re-compact once on restart in
- *   rare cases, won't lock out forever).
+ * - Re-arm: after a successful /compact send, the session must drop
+ *   below threshold before another auto-compact can fire. The dedup
+ *   window still blocks immediate flaps; the threshold crossing rule
+ *   prevents one high-usage session from receiving /compact every 60s.
+ *   State is intentionally NOT persisted; daemon restart resets the
+ *   window which is the safer-failure direction (might re-compact once
+ *   on restart in rare cases, won't lock out forever).
  * - Send-failure graceful-degrade: returns { triggered: false } with a
  *   reason; does not throw. The dedup timestamp is only set on
  *   successful send, so a transient send failure can retry on the next
@@ -44,15 +46,22 @@ export type EnforcerSkipReason =
   | "no_usage_data"
   | "disabled"
   | "below_threshold"
+  | "already_triggered_above_threshold"
   | "dedup_window"
   | "send_failed"
   | "invalid_policy";
+
+function buildCompactCommand(compactInstruction: string): string {
+  const normalized = compactInstruction.trim().replace(/\s+/g, " ");
+  return normalized.length > 0 ? `/compact ${normalized}` : "/compact";
+}
 
 export class ClaudeCompactionEnforcer {
   private readonly settingsStore: SettingsStore;
   private readonly sessionTransport: SessionTransport;
   private readonly dedupWindowMs: number;
   private readonly lastAutoCompactAt = new Map<string, number>();
+  private readonly triggeredAboveThreshold = new Set<string>();
 
   constructor(
     settingsStore: SettingsStore,
@@ -98,6 +107,7 @@ export class ClaudeCompactionEnforcer {
       return { triggered: false, reason: "invalid_policy" };
     }
     if (input.usedPercentage < policy.thresholdPercent) {
+      this.triggeredAboveThreshold.delete(input.sessionName);
       return { triggered: false, reason: "below_threshold" };
     }
 
@@ -106,12 +116,19 @@ export class ClaudeCompactionEnforcer {
     if (last !== undefined && now - last < this.dedupWindowMs) {
       return { triggered: false, reason: "dedup_window" };
     }
+    if (this.triggeredAboveThreshold.has(input.sessionName)) {
+      return { triggered: false, reason: "already_triggered_above_threshold" };
+    }
 
-    const result = await this.sessionTransport.send(input.sessionName, "/compact");
+    const result = await this.sessionTransport.send(
+      input.sessionName,
+      buildCompactCommand(policy.compactInstruction),
+    );
     if (!result.ok) {
       return { triggered: false, reason: "send_failed" };
     }
     this.lastAutoCompactAt.set(input.sessionName, now);
+    this.triggeredAboveThreshold.add(input.sessionName);
     return { triggered: true };
   }
 }

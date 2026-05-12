@@ -118,12 +118,12 @@ describe("openrig-core plugin — skills (HG-2.1 skill content per agentskills.i
 });
 
 describe("openrig-core plugin — hooks (HG-2.6 + HG-2.7)", () => {
-  it("hooks/claude.json declares 4 events (SessionStart, UserPromptSubmit, Stop, Notification)", () => {
+  it("hooks/claude.json declares Claude activity + compaction bridge events", () => {
     const content = fs.readFileSync(nodePath.join(PLUGIN_ROOT, "hooks", "claude.json"), "utf-8");
     const config = JSON.parse(content) as { hooks: Record<string, unknown> };
     expect(config.hooks).toBeDefined();
     expect(Object.keys(config.hooks).sort()).toEqual([
-      "Notification", "SessionStart", "Stop", "UserPromptSubmit",
+      "Notification", "PostCompact", "SessionStart", "Stop", "UserPromptSubmit",
     ]);
   });
 
@@ -146,11 +146,20 @@ describe("openrig-core plugin — hooks (HG-2.6 + HG-2.7)", () => {
     expect(content).toMatch(/activity\/hooks|activity-hooks/i);
   });
 
+  it("hooks/scripts/compaction-restore-bridge.cjs exists (Claude post-compact restore bridge)", () => {
+    const bridgePath = nodePath.join(PLUGIN_ROOT, "hooks", "scripts", "compaction-restore-bridge.cjs");
+    expect(fs.existsSync(bridgePath)).toBe(true);
+    const content = fs.readFileSync(bridgePath, "utf-8");
+    expect(content).toMatch(/compaction restore is pending/i);
+    expect(content).toMatch(/additionalContext/);
+  });
+
   it("Claude hook commands reference ${CLAUDE_PLUGIN_ROOT} (Claude path substitution convention)", () => {
     const content = fs.readFileSync(nodePath.join(PLUGIN_ROOT, "hooks", "claude.json"), "utf-8");
     expect(content).toMatch(/\$\{CLAUDE_PLUGIN_ROOT\}/);
     // Should point at the relay script via substitution
     expect(content).toMatch(/CLAUDE_PLUGIN_ROOT.*activity-relay\.cjs/);
+    expect(content).toMatch(/CLAUDE_PLUGIN_ROOT.*compaction-restore-bridge\.cjs/);
   });
 
   it("Codex hook commands reference ${CODEX_PLUGIN_ROOT} (Codex path substitution convention)", () => {

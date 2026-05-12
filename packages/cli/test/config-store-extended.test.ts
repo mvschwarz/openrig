@@ -40,6 +40,12 @@ function clearEnv(): () => void {
     "OPENRIG_FEED_SUBSCRIPTIONS_ACTION_REQUIRED", "OPENRIG_FEED_SUBSCRIPTIONS_APPROVALS",
     "OPENRIG_FEED_SUBSCRIPTIONS_SHIPPED", "OPENRIG_FEED_SUBSCRIPTIONS_PROGRESS",
     "OPENRIG_FEED_SUBSCRIPTIONS_AUDIT_LOG",
+    "OPENRIG_RUNTIME_CODEX_HOOKS_ENABLED",
+    "OPENRIG_POLICIES_CLAUDE_COMPACTION_ENABLED",
+    "OPENRIG_POLICIES_CLAUDE_COMPACTION_THRESHOLD_PERCENT",
+    "OPENRIG_POLICIES_CLAUDE_COMPACTION_COMPACT_INSTRUCTION",
+    "OPENRIG_POLICIES_CLAUDE_COMPACTION_MESSAGE_INLINE",
+    "OPENRIG_POLICIES_CLAUDE_COMPACTION_MESSAGE_FILE_PATH",
     "RIGGED_PORT", "RIGGED_HOST", "RIGGED_DB",
     "RIGGED_TRANSCRIPTS_ENABLED", "RIGGED_TRANSCRIPTS_PATH",
   ];
@@ -101,6 +107,7 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
       // Slice 27 — Claude auto-compaction policy. SC-29 EXCEPTION #10.
       "policies.claude_compaction.enabled",
       "policies.claude_compaction.threshold_percent",
+      "policies.claude_compaction.compact_instruction",
       "policies.claude_compaction.message_inline",
       "policies.claude_compaction.message_file_path",
     ];

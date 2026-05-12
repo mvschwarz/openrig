@@ -36,6 +36,7 @@ function clearEnv(): () => void {
     // Slice 27 — Claude auto-compaction policy env-map.
     "OPENRIG_POLICIES_CLAUDE_COMPACTION_ENABLED",
     "OPENRIG_POLICIES_CLAUDE_COMPACTION_THRESHOLD_PERCENT",
+    "OPENRIG_POLICIES_CLAUDE_COMPACTION_COMPACT_INSTRUCTION",
     "OPENRIG_POLICIES_CLAUDE_COMPACTION_MESSAGE_INLINE",
     "OPENRIG_POLICIES_CLAUDE_COMPACTION_MESSAGE_FILE_PATH",
     "RIGGED_PORT", "RIGGED_HOST", "RIGGED_DB",
@@ -99,6 +100,7 @@ describe("SettingsStore (User Settings v0)", () => {
       // Slice 27 — Claude auto-compaction policy. SC-29 EXCEPTION #10.
       "policies.claude_compaction.enabled",
       "policies.claude_compaction.threshold_percent",
+      "policies.claude_compaction.compact_instruction",
       "policies.claude_compaction.message_inline",
       "policies.claude_compaction.message_file_path",
     ]);
@@ -252,6 +254,7 @@ describe("SettingsStore (User Settings v0)", () => {
     const policy = store.resolveClaudeCompactionPolicy();
     expect(policy.enabled).toBe(false);
     expect(policy.thresholdPercent).toBe(80);
+    expect(policy.compactInstruction).toBe("");
     expect(policy.messageInline).toBe("");
     expect(policy.messageFilePath).toBe("");
   });
@@ -267,6 +270,7 @@ describe("SettingsStore (User Settings v0)", () => {
           claudeCompaction: {
             enabled: true,
             thresholdPercent: 65,
+            compactInstruction: "preserve current task and decisions",
             messageInline: "carry-forward note",
             messageFilePath: "",
           },
@@ -277,6 +281,7 @@ describe("SettingsStore (User Settings v0)", () => {
     const updated = store.resolveClaudeCompactionPolicy();
     expect(updated.enabled).toBe(true);
     expect(updated.thresholdPercent).toBe(65);
+    expect(updated.compactInstruction).toBe("preserve current task and decisions");
     expect(updated.messageInline).toBe("carry-forward note");
     expect(updated.messageFilePath).toBe("");
   });
@@ -286,17 +291,20 @@ describe("SettingsStore (User Settings v0)", () => {
 
     store.set("policies.claude_compaction.enabled", "true");
     store.set("policies.claude_compaction.threshold_percent", "60");
+    store.set("policies.claude_compaction.compact_instruction", "summarize with decisions first");
     store.set("policies.claude_compaction.message_inline", "rehydrate the agent");
     store.set("policies.claude_compaction.message_file_path", "/tmp/msg.txt");
 
     const raw = JSON.parse(require("node:fs").readFileSync(configPath, "utf-8"));
     expect(raw.policies.claudeCompaction.enabled).toBe(true);
     expect(raw.policies.claudeCompaction.thresholdPercent).toBe(60);
+    expect(raw.policies.claudeCompaction.compactInstruction).toBe("summarize with decisions first");
     expect(raw.policies.claudeCompaction.messageInline).toBe("rehydrate the agent");
     expect(raw.policies.claudeCompaction.messageFilePath).toBe("/tmp/msg.txt");
 
     expect(store.resolveOne("policies.claude_compaction.enabled").value).toBe(true);
     expect(store.resolveOne("policies.claude_compaction.threshold_percent").value).toBe(60);
+    expect(store.resolveOne("policies.claude_compaction.compact_instruction").value).toBe("summarize with decisions first");
     expect(store.resolveOne("policies.claude_compaction.message_inline").value).toBe("rehydrate the agent");
     expect(store.resolveOne("policies.claude_compaction.message_file_path").value).toBe("/tmp/msg.txt");
   });

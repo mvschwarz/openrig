@@ -110,13 +110,26 @@ describe("ConfigStore", () => {
 
 describe("DaemonClient config integration", () => {
   let tmpDir: string;
+  let savedEnv: Record<string, string | undefined>;
 
   beforeEach(() => {
     tmpDir = mkdtempSync(join(tmpdir(), "client-config-"));
+    savedEnv = {
+      OPENRIG_PORT: process.env["OPENRIG_PORT"],
+      OPENRIG_HOST: process.env["OPENRIG_HOST"],
+      OPENRIG_DB: process.env["OPENRIG_DB"],
+    };
+    delete process.env["OPENRIG_PORT"];
+    delete process.env["OPENRIG_HOST"];
+    delete process.env["OPENRIG_DB"];
   });
 
   afterEach(() => {
     rmSync(tmpDir, { recursive: true, force: true });
+    for (const [key, value] of Object.entries(savedEnv)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
   });
 
   it("ConfigStore resolves non-default host/port from config file", async () => {

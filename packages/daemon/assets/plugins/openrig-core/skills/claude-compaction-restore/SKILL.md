@@ -81,18 +81,20 @@ The script writes:
 
 ## Hook Usage
 
-Claude Code currently has a `PreCompact` hook, not a dependable
-post-compact hook. Use the pre-compact hook to prepare the packet
-before compaction and inject the packet path into the compacted
-context:
+Claude Code exposes compaction lifecycle hooks. OpenRig uses
+`PreCompact` to prepare the packet before compaction, plus
+`SessionStart` with matcher `compact` and `UserPromptSubmit` as the
+post-compact bridge that injects the pending restore directive if the
+summary alone did not carry enough context.
 
 ```bash
 node ~/.claude/skills/claude-compaction-restore/scripts/precompact-hook.mjs
 ```
 
 The hook reads Claude hook JSON from stdin, creates a restore packet
-under `/tmp/claude-compaction-restore/`, and returns a `systemMessage`
-telling the compacted agent what to read.
+under `/tmp/claude-compaction-restore/`, writes a pending marker under
+`$OPENRIG_HOME/compaction/restore-pending/`, and returns a
+`systemMessage` telling the compacted agent what to read.
 
 To wire the hook, add to `~/.claude/settings.json`:
 
@@ -106,6 +108,27 @@ To wire the hook, add to `~/.claude/settings.json`:
           {
             "type": "command",
             "command": "node ~/.claude/skills/claude-compaction-restore/scripts/precompact-hook.mjs"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/compaction-restore-bridge.cjs\""
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/compaction-restore-bridge.cjs\""
           }
         ]
       }

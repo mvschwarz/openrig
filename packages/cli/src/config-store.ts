@@ -94,18 +94,21 @@ export interface RiggedConfig {
   // Slice 27 — Claude auto-compaction policy. Operator-configurable
   // pre-compaction trigger: when a Claude seat's context usage crosses
   // `thresholdPercent`, daemon sends /compact via SessionTransport and
-  // the existing PreCompact hook injects `messageInline` (or contents of
-  // `messageFilePath` if inline is empty) alongside the standard
-  // restore-instructions in the post-compact systemMessage.
+  // passes `compactInstruction` as slash-command args for the actual
+  // compaction phase. The existing PreCompact hook injects
+  // `messageInline` (or contents of `messageFilePath` if inline is
+  // empty) alongside the standard restore-instructions in the
+  // post-compact systemMessage.
   //
   // Defaults: opt-in default-off (enabled=false). Empty string on
-  // message_inline / message_file_path means "not set" (consistent with
-  // agents.operator_session pattern; ConfigStore schema avoids nullable
-  // strings at the file layer).
+  // compact_instruction / message_inline / message_file_path means "not
+  // set" (consistent with agents.operator_session pattern; ConfigStore
+  // schema avoids nullable strings at the file layer).
   policies: {
     claudeCompaction: {
       enabled: boolean;
       thresholdPercent: number;
+      compactInstruction: string;
       messageInline: string;
       messageFilePath: string;
     };
@@ -175,6 +178,7 @@ const DEFAULTS = {
     claudeCompaction: {
       enabled: false,
       thresholdPercent: 80,
+      compactInstruction: "",
       messageInline: "",
       messageFilePath: "",
     },
@@ -221,9 +225,10 @@ export const VALID_KEYS = [
   // plugin-primitive Phase 3a slice 3.5 — Codex feature flag.
   "runtime.codex.hooks_enabled",
   // Slice 27 — Claude auto-compaction policy. SC-29 EXCEPTION #10:
-  // 4 new ConfigStore keys (lockstep with daemon SETTINGS_VALID_KEYS).
+  // 5 ConfigStore keys (lockstep with daemon SETTINGS_VALID_KEYS).
   "policies.claude_compaction.enabled",
   "policies.claude_compaction.threshold_percent",
+  "policies.claude_compaction.compact_instruction",
   "policies.claude_compaction.message_inline",
   "policies.claude_compaction.message_file_path",
 ] as const;
@@ -271,6 +276,7 @@ export const ENV_MAP: Record<ValidKey, { primary: string; legacy?: string }> = {
   // (net-new keys, no legacy).
   "policies.claude_compaction.enabled": { primary: "OPENRIG_POLICIES_CLAUDE_COMPACTION_ENABLED" },
   "policies.claude_compaction.threshold_percent": { primary: "OPENRIG_POLICIES_CLAUDE_COMPACTION_THRESHOLD_PERCENT" },
+  "policies.claude_compaction.compact_instruction": { primary: "OPENRIG_POLICIES_CLAUDE_COMPACTION_COMPACT_INSTRUCTION" },
   "policies.claude_compaction.message_inline": { primary: "OPENRIG_POLICIES_CLAUDE_COMPACTION_MESSAGE_INLINE" },
   "policies.claude_compaction.message_file_path": { primary: "OPENRIG_POLICIES_CLAUDE_COMPACTION_MESSAGE_FILE_PATH" },
 };
@@ -311,6 +317,7 @@ const KEY_TO_PATH: Record<ValidKey, string[]> = {
   "runtime.codex.hooks_enabled": ["runtime", "codex", "hooksEnabled"],
   "policies.claude_compaction.enabled": ["policies", "claudeCompaction", "enabled"],
   "policies.claude_compaction.threshold_percent": ["policies", "claudeCompaction", "thresholdPercent"],
+  "policies.claude_compaction.compact_instruction": ["policies", "claudeCompaction", "compactInstruction"],
   "policies.claude_compaction.message_inline": ["policies", "claudeCompaction", "messageInline"],
   "policies.claude_compaction.message_file_path": ["policies", "claudeCompaction", "messageFilePath"],
 };
@@ -554,6 +561,7 @@ export class ConfigStore {
         claudeCompaction: {
           enabled: v("policies.claude_compaction.enabled") as boolean,
           thresholdPercent: v("policies.claude_compaction.threshold_percent") as number,
+          compactInstruction: v("policies.claude_compaction.compact_instruction") as string,
           messageInline: v("policies.claude_compaction.message_inline") as string,
           messageFilePath: v("policies.claude_compaction.message_file_path") as string,
         },

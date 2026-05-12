@@ -15,7 +15,7 @@
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join, resolve, dirname } from "node:path";
 import { tmpdir } from "node:os";
@@ -32,7 +32,17 @@ const HOOK_SCRIPT = resolve(
   "scripts",
   "precompact-hook.mjs",
 );
-const APPEND_MARKER = "Operator-configured pre-compaction message";
+const BRIDGE_SCRIPT = resolve(
+  HERE,
+  "..",
+  "assets",
+  "plugins",
+  "openrig-core",
+  "hooks",
+  "scripts",
+  "compaction-restore-bridge.cjs",
+);
+const APPEND_MARKER = "Operator-configured post-compaction restore instruction";
 
 function runHook(openrigHome: string): { stdout: string; stderr: string; status: number | null } {
   const result = spawnSync(process.execPath, [HOOK_SCRIPT], {
@@ -41,7 +51,28 @@ function runHook(openrigHome: string): { stdout: string; stderr: string; status:
     env: {
       ...process.env,
       OPENRIG_HOME: openrigHome,
+      OPENRIG_SESSION_NAME: "test-seat@kernel",
       // Ensure RIGGED_HOME doesn't pre-empt OPENRIG_HOME selection.
+      RIGGED_HOME: undefined,
+    } as NodeJS.ProcessEnv,
+  });
+  return {
+    stdout: result.stdout || "",
+    stderr: result.stderr || "",
+    status: result.status,
+  };
+}
+
+function runBridge(openrigHome: string, input: Record<string, unknown> = {
+  hook_event_name: "UserPromptSubmit",
+}): { stdout: string; stderr: string; status: number | null } {
+  const result = spawnSync(process.execPath, [BRIDGE_SCRIPT], {
+    input: JSON.stringify(input),
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      OPENRIG_HOME: openrigHome,
+      OPENRIG_SESSION_NAME: "test-seat@kernel",
       RIGGED_HOME: undefined,
     } as NodeJS.ProcessEnv,
   });
@@ -55,6 +86,7 @@ function runHook(openrigHome: string): { stdout: string; stderr: string; status:
 function writePolicyConfig(home: string, policy: {
   enabled?: boolean;
   thresholdPercent?: number;
+  compactInstruction?: string;
   messageInline?: string;
   messageFilePath?: string;
 }): void {
@@ -66,6 +98,7 @@ function writePolicyConfig(home: string, policy: {
         claudeCompaction: {
           enabled: policy.enabled ?? false,
           thresholdPercent: policy.thresholdPercent ?? 80,
+          compactInstruction: policy.compactInstruction ?? "",
           messageInline: policy.messageInline ?? "",
           messageFilePath: policy.messageFilePath ?? "",
         },
@@ -97,6 +130,41 @@ describe("precompact-hook.mjs (slice 27 custom message append)", () => {
     expect(payload.continue).toBe(true);
     expect(payload.systemMessage).toContain(APPEND_MARKER);
     expect(payload.systemMessage).toContain("Operator says hi — remember the migration step.");
+  });
+
+  it("writes a pending restore marker and bridge injects restore context once", () => {
+    writePolicyConfig(openrigHome, {
+      messageInline: "Read the queue before resuming.",
+    });
+
+    const { stdout, status } = runHook(openrigHome);
+    expect(status).toBe(0);
+    const payload = JSON.parse(stdout.trim());
+    expect(payload.systemMessage).toContain("pending restore marker");
+
+    const markerDir = join(openrigHome, "compaction", "restore-pending");
+    const markerPath = join(markerDir, "test-seat@kernel.json");
+    expect(existsSync(markerPath)).toBe(true);
+    const marker = JSON.parse(readFileSync(markerPath, "utf8"));
+    expect(marker.outputDir).toMatch(/^\/tmp\/claude-compaction-restore\//);
+    expect(marker.postCompactInstruction).toBe("Read the queue before resuming.");
+    expect(marker.deliveryCount).toBe(0);
+
+    const bridge = runBridge(openrigHome);
+    expect(bridge.status).toBe(0);
+    const bridgePayload = JSON.parse(bridge.stdout.trim());
+    expect(bridgePayload.hookSpecificOutput.hookEventName).toBe("UserPromptSubmit");
+    expect(bridgePayload.hookSpecificOutput.additionalContext).toContain("OpenRig compaction restore is pending");
+    expect(bridgePayload.hookSpecificOutput.additionalContext).toContain(marker.outputDir);
+    expect(bridgePayload.hookSpecificOutput.additionalContext).toContain("Read the queue before resuming.");
+
+    const delivered = JSON.parse(readFileSync(markerPath, "utf8"));
+    expect(delivered.deliveryCount).toBe(1);
+    expect(delivered.deliveredAt).toBeTruthy();
+
+    const secondBridge = runBridge(openrigHome);
+    expect(secondBridge.status).toBe(0);
+    expect(secondBridge.stdout).toBe("");
   });
 
   it("HG-7: file-path message is read + appended when inline is empty", () => {

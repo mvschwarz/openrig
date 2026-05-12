@@ -2,8 +2,8 @@
 //
 // Hard-gate coverage:
 //   HG-2  threshold-check fires when usedPercentage >= threshold + policy enabled
-//   HG-3  send('/compact') routed via SessionTransport with canonical session name
-//   HG-4  dedup window blocks repeated triggers within the configured interval
+//   HG-3  send('/compact ...') routed via SessionTransport with canonical session name
+//   HG-4  repeated triggers require usage to drop below threshold before re-arming
 //   HG-5  opt-in default-off — with policy disabled the enforcer must NOT fire
 //         (REGRESSION GATE for compaction lifecycle blast radius)
 //
@@ -35,12 +35,14 @@ function makeSessionTransport(sendResult: { ok: boolean } = { ok: true }): {
 const POLICY_DISABLED: ClaudeCompactionPolicy = {
   enabled: false,
   thresholdPercent: 80,
+  compactInstruction: "",
   messageInline: "",
   messageFilePath: "",
 };
 const POLICY_ENABLED_AT_80: ClaudeCompactionPolicy = {
   enabled: true,
   thresholdPercent: 80,
+  compactInstruction: "",
   messageInline: "",
   messageFilePath: "",
 };
@@ -86,6 +88,27 @@ describe("ClaudeCompactionEnforcer", () => {
     expect(send).toHaveBeenCalledWith("claude-seat@rig", "/compact");
   });
 
+  it("HG-3: configured compactInstruction is sent as /compact slash-command args", async () => {
+    const settings = makeSettingsStore({
+      ...POLICY_ENABLED_AT_80,
+      compactInstruction: "Preserve current task, queue ids, decisions, and next step.",
+    });
+    const { transport, send } = makeSessionTransport();
+    const enforcer = new ClaudeCompactionEnforcer(settings, transport);
+
+    const outcome = await enforcer.maybeAutoCompact({
+      sessionName: "claude-seat@rig",
+      runtime: "claude-code",
+      usedPercentage: 91,
+    });
+
+    expect(outcome).toEqual({ triggered: true });
+    expect(send).toHaveBeenCalledWith(
+      "claude-seat@rig",
+      "/compact Preserve current task, queue ids, decisions, and next step.",
+    );
+  });
+
   it("HG-2 negative path: below-threshold usage does NOT trigger send", async () => {
     const settings = makeSettingsStore(POLICY_ENABLED_AT_80);
     const { transport, send } = makeSessionTransport();
@@ -101,7 +124,7 @@ describe("ClaudeCompactionEnforcer", () => {
     expect(send).not.toHaveBeenCalled();
   });
 
-  it("HG-4: dedup window blocks repeated trigger within interval (default 60s)", async () => {
+  it("HG-4: repeated high usage stays suppressed until usage drops below threshold and re-arms", async () => {
     const settings = makeSettingsStore(POLICY_ENABLED_AT_80);
     const { transport, send } = makeSessionTransport();
     const enforcer = new ClaudeCompactionEnforcer(settings, transport, { dedupWindowMs: 60_000 });
@@ -130,7 +153,22 @@ describe("ClaudeCompactionEnforcer", () => {
       runtime: "claude-code",
       usedPercentage: 95,
     });
-    expect(third).toEqual({ triggered: true });
+    expect(third).toEqual({ triggered: false, reason: "already_triggered_above_threshold" });
+
+    const below = await enforcer.maybeAutoCompact({
+      sessionName: "claude-seat@rig",
+      runtime: "claude-code",
+      usedPercentage: 20,
+    });
+    expect(below).toEqual({ triggered: false, reason: "below_threshold" });
+
+    now += 61_000;
+    const fourth = await enforcer.maybeAutoCompact({
+      sessionName: "claude-seat@rig",
+      runtime: "claude-code",
+      usedPercentage: 95,
+    });
+    expect(fourth).toEqual({ triggered: true });
 
     expect(send).toHaveBeenCalledTimes(2);
   });
@@ -321,6 +359,7 @@ describe("ClaudeCompactionEnforcer", () => {
         const settings = makeSettingsStore({
           enabled: true,
           thresholdPercent: c.thresholdPercent,
+          compactInstruction: "",
           messageInline: "",
           messageFilePath: "",
         });
