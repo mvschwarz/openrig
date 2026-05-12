@@ -1,11 +1,19 @@
 // V1 agent-detail canonical surface.
 //
-// Polish-8 keeps the title and action row at the top, then makes the tab row
-// the only body switcher. Status, preview, current work, transcript, terminal,
-// and startup content live inside their named tabs so the page has one clear
-// information hierarchy.
+// V0.3.1 slice 25 reshapes the seat-detail page into a 2-tab
+// Overview + Details layout. Overview is the default and answers the
+// most-common at-a-glance questions: a dense 7-field info table at
+// the top, the black-glass smoked terminal inline below it, then the
+// Activity + Recent Events cards. Details holds everything else
+// (edges, peers, agent spec, startup content sans preview, transcript).
+//
+// Previous 5-tab structure (identity / agent-spec / startup /
+// transcript / terminal) collapses into the 2 new tabs. The terminal
+// is no longer in its own tab — it lives inline in Overview. The
+// Startup section in Details no longer shows the preview pane (since
+// the terminal moved up to Overview).
 
-import { useState, type ReactNode } from "react";
+import { useState } from "react";
 import { CirclePlay } from "lucide-react";
 import { useNodeDetail, type NodeDetailData } from "../hooks/useNodeDetail.js";
 import { useSpecLibrary, useLibraryReview } from "../hooks/useSpecLibrary.js";
@@ -17,8 +25,12 @@ import { AgentSpecDisplay } from "./AgentSpecDisplay.js";
 // defensively (the resources.plugins field is owned by batch 1 on
 // plugin-primitive-v0; on main it's absent and we render empty state).
 import { AgentPluginsList } from "./specs/AgentPluginsList.js";
-import { PreviewPane } from "./preview/PreviewPane.js";
+// V0.3.1 slice 25 — PreviewPane no longer rendered (Startup section
+// in Details tab drops the preview; the terminal moved up to Overview
+// via SessionPreviewPane). PreviewPane is still owned by other
+// surfaces in the codebase; this file simply doesn't reference it.
 import { SessionPreviewPane } from "./preview/SessionPreviewPane.js";
+import { SeatOverviewTable } from "./SeatOverviewTable.js";
 import { FileReferenceTrigger } from "./drawer-triggers/FileReferenceTrigger.js";
 import { displayPodName, inferPodName } from "../lib/display-name.js";
 import { copyText } from "../lib/copy-text.js";
@@ -27,7 +39,7 @@ import { getRestoreStatusColorClass } from "../lib/restore-status-colors.js";
 import type { AgentSpecReview } from "../hooks/useSpecReview.js";
 import { RuntimeBadge, ToolMark } from "./graphics/RuntimeMark.js";
 
-type Tab = "identity" | "agent-spec" | "startup" | "transcript" | "terminal";
+type Tab = "overview" | "details";
 
 interface LiveNodeDetailsProps {
   rigId: string;
@@ -65,29 +77,6 @@ function InfoRow({ label, value }: { label: string; value: string | number | nul
     <div className="flex justify-between gap-3 font-mono text-[10px]">
       <span className="text-stone-500">{label}</span>
       <span className="truncate text-right text-stone-900">{value}</span>
-    </div>
-  );
-}
-
-function IdentityField({
-  label,
-  children,
-  wide = false,
-}: {
-  label: string;
-  children: ReactNode;
-  wide?: boolean;
-}) {
-  if (children === null || children === undefined || children === "") return null;
-  return (
-    <div
-      data-testid={`identity-field-${label.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`}
-      className={`min-w-0 border border-outline-variant/55 bg-white/20 px-2 py-1.5 font-mono ${
-        wide ? "md:col-span-2 xl:col-span-3" : ""
-      }`}
-    >
-      <div className="text-[8px] uppercase tracking-[0.14em] text-stone-400">{label}</div>
-      <div className="mt-1 min-w-0 truncate text-[11px] text-stone-900">{children}</div>
     </div>
   );
 }
@@ -382,25 +371,8 @@ function RecentEventsSection({ data }: { data: NodeDetailData }) {
   );
 }
 
-function IdentitySummary({ data }: { data: NodeDetailData }) {
-  return (
-    <section data-testid="live-identity-summary" className={SECTION_CLASS}>
-      <div className="mb-2 font-mono text-[8px] uppercase tracking-wider text-stone-400">Identity</div>
-      <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
-        {data.runtime ? (
-          <IdentityField label="Runtime">
-            <RuntimeBadge runtime={data.runtime} model={data.model} size="xs" compact variant="inline" className="max-w-full" />
-          </IdentityField>
-        ) : null}
-        <IdentityField label="Model">{data.model}</IdentityField>
-        <IdentityField label="Profile">{data.profile}</IdentityField>
-        <IdentityField label="Spec">{data.resolvedSpecName}</IdentityField>
-        <IdentityField label="Version">{data.resolvedSpecVersion}</IdentityField>
-        <IdentityField label="CWD" wide>{data.cwd}</IdentityField>
-      </div>
-    </section>
-  );
-}
+// V0.3.1 slice 25 — IdentitySummary card is replaced by SeatOverviewTable
+// (dense 7-field info table at the top of Overview).
 
 function EdgesSection({ data }: { data: NodeDetailData }) {
   const { outgoing, incoming } = data.edges;
@@ -476,35 +448,77 @@ function ContextUsageSection({ data }: { data: NodeDetailData }) {
   );
 }
 
-function IdentityTab({ data }: { data: NodeDetailData }) {
+// V0.3.1 slice 25 — Overview tab. Dense info-table (7 fields) on top;
+// inline black-glass terminal below; Activity + Recent Events cards
+// at the bottom. Composes the at-a-glance answer to operators
+// landing on the seat page from topology.
+function OverviewTab({ data }: { data: NodeDetailData }) {
   return (
-    <div data-testid="live-identity-section" className="space-y-4">
-      <IdentitySummary data={data} />
+    <div data-testid="live-overview-section" className="space-y-4">
+      <SeatOverviewTable data={data} />
+      <InlineTerminal data={data} />
       <LiveNodeCurrentState data={data} />
       <RecentEventsSection data={data} />
-      <EdgesSection data={data} />
-      <PeersSection data={data} />
-      <ContextUsageSection data={data} />
     </div>
   );
 }
 
-function StartupTab({ rigId, logicalId, data }: { rigId: string; logicalId: string; data: NodeDetailData }) {
+// V0.3.1 slice 25 — Details tab. Holds Edges + Peers + ContextUsage
+// detail + AgentSpec content (for agents) + Startup content sans
+// preview + Transcript. Everything-else for the seat detail page.
+function DetailsTab({
+  rigId,
+  logicalId,
+  data,
+  isAgent,
+}: {
+  rigId: string;
+  logicalId: string;
+  data: NodeDetailData;
+  isAgent: boolean;
+}) {
+  return (
+    <div data-testid="live-details-section" className="space-y-4">
+      <EdgesSection data={data} />
+      <PeersSection data={data} />
+      <ContextUsageSection data={data} />
+      {isAgent ? <AgentSpecSection data={data} /> : null}
+      <StartupContent rigId={rigId} logicalId={logicalId} data={data} />
+      <TranscriptContent data={data} />
+    </div>
+  );
+}
+
+// V0.3.1 slice 25 — Inline black-glass terminal. Renders the same
+// SessionPreviewPane the old Terminal tab rendered, but embedded
+// directly in Overview rather than behind a tab. The black-glass
+// chrome class is preserved verbatim so the visual feel matches the
+// pre-slice-25 terminal tab.
+function InlineTerminal({ data }: { data: NodeDetailData }) {
+  if (!data.canonicalSessionName) {
+    return (
+      <div className="font-mono text-[10px] text-stone-400 p-4">
+        No canonical session name; terminal preview unavailable.
+      </div>
+    );
+  }
+  return (
+    <div data-testid="live-terminal-shell" className="bg-stone-950/65 p-2 text-stone-50 backdrop-blur-sm">
+      <SessionPreviewPane
+        sessionName={data.canonicalSessionName}
+        lines={80}
+        testIdPrefix="live-terminal-preview"
+        variant="compact-terminal"
+      />
+    </div>
+  );
+}
+
+function StartupContent({ rigId: _rigId, logicalId: _logicalId, data }: { rigId: string; logicalId: string; data: NodeDetailData }) {
+  void _rigId; void _logicalId;
   return (
     <div data-testid="live-startup-section" className="space-y-4">
       <StatusSection data={data} />
-
-      {data.canonicalSessionName && (
-        <section data-testid="live-node-preview" className={SECTION_CLASS}>
-          <div className="font-mono text-[8px] uppercase tracking-wider text-stone-400 mb-2">Preview</div>
-          <PreviewPane
-            rigId={rigId}
-            rigName={data.rigName}
-            logicalId={logicalId}
-            testIdPrefix="detail-preview"
-          />
-        </section>
-      )}
 
       {data.infrastructureStartupCommand && (
         <section data-testid="live-node-infra-startup" className={SECTION_CLASS}>
@@ -567,7 +581,7 @@ function StartupTab({ rigId, logicalId, data }: { rigId: string; logicalId: stri
   );
 }
 
-function TranscriptTab({ data }: { data: NodeDetailData }) {
+function TranscriptContent({ data }: { data: NodeDetailData }) {
   if (!data.transcript.enabled) {
     return (
       <div data-testid="live-transcript-section" className="font-mono text-[10px] text-stone-400 p-4">
@@ -591,27 +605,6 @@ function TranscriptTab({ data }: { data: NodeDetailData }) {
           </button>
         )}
       </section>
-    </div>
-  );
-}
-
-function TerminalTab({ data }: { data: NodeDetailData }) {
-  return (
-    <div data-testid="live-terminal-section" className="space-y-4">
-      {data.canonicalSessionName ? (
-        <div data-testid="live-terminal-shell" className="bg-stone-950/65 p-2 text-stone-50 backdrop-blur-sm">
-          <SessionPreviewPane
-            sessionName={data.canonicalSessionName}
-            lines={80}
-            testIdPrefix="live-terminal-preview"
-            variant="compact-terminal"
-          />
-        </div>
-      ) : (
-        <div className="font-mono text-[10px] text-stone-400 p-4">
-          No canonical session name; terminal preview unavailable.
-        </div>
-      )}
     </div>
   );
 }
@@ -649,11 +642,14 @@ function TabNav({
 
 export function LiveNodeDetails({ rigId, logicalId }: LiveNodeDetailsProps) {
   const { data, isLoading, error } = useNodeDetail(rigId, logicalId);
-  const [activeTab, setActiveTab] = useState<Tab>("identity");
+  // V0.3.1 slice 25 — 2-tab Overview/Details restructure. Default
+  // tab is Overview so operators landing from topology see the
+  // at-a-glance info table + inline terminal without tab-switching.
+  // Analogous to slice 12's project-scope default-tab flip
+  // (story → overview).
+  const [activeTab, setActiveTab] = useState<Tab>("overview");
   const isAgent = data ? data.nodeKind !== "infrastructure" : true;
-  const tabs: Tab[] = isAgent
-    ? ["identity", "agent-spec", "startup", "transcript", "terminal"]
-    : ["identity", "startup", "transcript", "terminal"];
+  const tabs: Tab[] = ["overview", "details"];
 
   return (
     <WorkspacePage>
@@ -685,11 +681,10 @@ export function LiveNodeDetails({ rigId, logicalId }: LiveNodeDetailsProps) {
             <ActionButtonsRow rigId={rigId} logicalId={logicalId} data={data} />
             <TabNav tabs={tabs} activeTab={activeTab} onSelect={setActiveTab} />
             <div data-testid="live-node-tab-body" className="space-y-4">
-              {activeTab === "identity" && <IdentityTab data={data} />}
-              {activeTab === "agent-spec" && isAgent && <AgentSpecSection data={data} />}
-              {activeTab === "startup" && <StartupTab rigId={rigId} logicalId={logicalId} data={data} />}
-              {activeTab === "transcript" && <TranscriptTab data={data} />}
-              {activeTab === "terminal" && <TerminalTab data={data} />}
+              {activeTab === "overview" && <OverviewTab data={data} />}
+              {activeTab === "details" && (
+                <DetailsTab rigId={rigId} logicalId={logicalId} data={data} isAgent={isAgent} />
+              )}
             </div>
           </>
         )}

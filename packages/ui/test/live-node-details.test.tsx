@@ -6,6 +6,8 @@ import { DrawerSelectionContext, type DrawerSelection } from "../src/components/
 
 const mockFetch = vi.fn();
 
+// V0.3.1 slice 25 — seat detail page now uses a 2-tab Overview +
+// Details layout. Tests target the new structure.
 const NODE_DETAIL = {
   rigId: "rig-1", rigName: "test-rig", logicalId: "dev.impl", podId: "dev",
   canonicalSessionName: "dev-impl@test-rig", nodeKind: "agent", runtime: "claude-code",
@@ -43,6 +45,16 @@ const NODE_DETAIL = {
       tier: "mode-2",
     },
   ],
+  contextUsage: {
+    availability: "known",
+    usedPercentage: 42,
+    remainingPercentage: 58,
+    contextWindowSize: 320000,
+    sampledAt: "2026-05-04T07:58:31.057Z",
+    fresh: true,
+    totalInputTokens: 120000,
+    totalOutputTokens: 14000,
+  },
 };
 
 const INFRA_DETAIL = {
@@ -51,7 +63,7 @@ const INFRA_DETAIL = {
   compactSpec: { name: null, version: null, profile: null, skillCount: 0, guidanceCount: 0 },
 };
 
-describe("LiveNodeDetails", () => {
+describe("LiveNodeDetails (slice 25 Overview + Details)", () => {
   beforeEach(() => {
     globalThis.fetch = mockFetch as unknown as typeof fetch;
   });
@@ -96,103 +108,181 @@ describe("LiveNodeDetails", () => {
     );
   }
 
-  it("renders with identity section showing peers and edges", async () => {
+  // HG-1 — default tab is Overview.
+  it("HG-1: default tab is Overview on landing", async () => {
     mockNodeDetail(NODE_DETAIL);
     renderDetails();
 
-    await waitFor(() => {
-      // Wait for data to load — peers section proves data arrived
-      expect(screen.getByTestId("detail-peers")).toBeDefined();
-    });
+    const overviewTab = await screen.findByTestId("live-tab-overview");
+    expect(overviewTab.getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByTestId("live-overview-section")).toBeDefined();
+    // Details exists but is not active on first paint.
+    const detailsTab = screen.getByTestId("live-tab-details");
+    expect(detailsTab.getAttribute("aria-selected")).toBe("false");
+  });
 
-    expect(screen.getByText("Live Node Details")).toBeDefined();
+  // HG-7 — Terminal tab no longer exists; identity / agent-spec /
+  // startup / transcript tabs no longer exist as named tabs either.
+  it("HG-7: legacy 5-tab structure is gone — only overview + details remain", async () => {
+    mockNodeDetail(NODE_DETAIL);
+    renderDetails();
+    await screen.findByTestId("live-tab-overview");
+
+    expect(screen.queryByTestId("live-tab-terminal")).toBeNull();
+    expect(screen.queryByTestId("live-tab-identity")).toBeNull();
+    expect(screen.queryByTestId("live-tab-agent-spec")).toBeNull();
+    expect(screen.queryByTestId("live-tab-startup")).toBeNull();
+    expect(screen.queryByTestId("live-tab-transcript")).toBeNull();
+    expect(screen.getByTestId("live-tab-overview")).toBeDefined();
+    expect(screen.getByTestId("live-tab-details")).toBeDefined();
+  });
+
+  // HG-2 — Overview stack order: info table -> terminal -> Activity +
+  // Recent Events. Asserts DOM order via compareDocumentPosition.
+  it("HG-2: Overview tab DOM order is info table -> terminal -> activity -> recent events", async () => {
+    mockNodeDetail(NODE_DETAIL);
+    renderDetails();
+
+    const table = await screen.findByTestId("seat-overview-table");
+    const terminal = await screen.findByTestId("live-terminal-shell");
+    const activity = await screen.findByTestId("live-node-current-state");
+    // Recent events only renders when there's at least one event;
+    // NODE_DETAIL has recentEvents: [] so this section is conditional.
+    // The order assertion focuses on the always-rendered trio.
+
+    expect(table.compareDocumentPosition(terminal)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+    expect(terminal.compareDocumentPosition(activity)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+  });
+
+  // HG-3 — 7 info-table fields. Every row testid present.
+  it("HG-3: info table renders all 7 fields (runtime, model, profile, spec, cwd, context%, total tokens)", async () => {
+    mockNodeDetail(NODE_DETAIL);
+    renderDetails();
+    await screen.findByTestId("seat-overview-table");
+
+    expect(screen.getByTestId("seat-overview-row-runtime")).toBeDefined();
+    expect(screen.getByTestId("seat-overview-row-model")).toBeDefined();
+    expect(screen.getByTestId("seat-overview-row-profile")).toBeDefined();
+    expect(screen.getByTestId("seat-overview-row-spec")).toBeDefined();
+    expect(screen.getByTestId("seat-overview-row-cwd")).toBeDefined();
+    expect(screen.getByTestId("seat-overview-row-context-percent")).toBeDefined();
+    expect(screen.getByTestId("seat-overview-row-total-tokens")).toBeDefined();
+
+    expect(screen.getByTestId("seat-overview-cell-model").textContent).toContain("opus");
+    expect(screen.getByTestId("seat-overview-cell-profile").textContent).toContain("default");
+    expect(screen.getByTestId("seat-overview-cell-spec").textContent).toContain("impl@1.0.0");
+    expect(screen.getByTestId("seat-overview-cell-cwd").textContent).toContain("/workspace");
+    expect(screen.getByTestId("seat-overview-cell-context-percent").textContent).toContain("42%");
+  });
+
+  // HG-4 — model graceful absence: row visible with em-dash, NOT
+  // "undefined" rendered as a string.
+  it("HG-4: model row renders em-dash gracefully when model field is absent", async () => {
+    mockNodeDetail({ ...NODE_DETAIL, model: null });
+    renderDetails();
+    await screen.findByTestId("seat-overview-table");
+
+    const modelCell = screen.getByTestId("seat-overview-cell-model");
+    expect(modelCell).toBeDefined();
+    // Row still visible.
+    expect(screen.getByTestId("seat-overview-row-model")).toBeDefined();
+    // No literal "undefined".
+    expect(modelCell.textContent).not.toContain("undefined");
+    // Em-dash placeholder.
+    expect(modelCell.textContent).toContain("—");
+  });
+
+  // HG-5 — black-glass terminal renders inline in Overview (not in a
+  // separate tab). The terminal shell wrapper carries the black-glass
+  // chrome class.
+  it("HG-5: black-glass terminal renders inline in Overview", async () => {
+    mockNodeDetail(NODE_DETAIL);
+    renderDetails();
+    const terminalShell = await screen.findByTestId("live-terminal-shell");
+    expect(terminalShell.className).toContain("bg-stone-950/65");
+    await waitFor(() => {
+      expect(screen.getByTestId("live-terminal-preview-pane").getAttribute("data-variant")).toBe("compact-terminal");
+    });
+    // The terminal sits inside the Overview section, NOT a separate
+    // tab body. The Overview section wraps it.
+    const overview = screen.getByTestId("live-overview-section");
+    expect(overview.contains(terminalShell)).toBe(true);
+  });
+
+  // HG-6 — Details tab contains edges, peers, agent spec, startup
+  // content (no preview), transcript content.
+  it("HG-6: Details tab composes edges + peers + agent spec + startup (no preview) + transcript", async () => {
+    mockNodeDetail(NODE_DETAIL);
+    renderDetails();
+    fireEvent.click(await screen.findByTestId("live-tab-details"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("live-details-section")).toBeDefined();
+    });
     expect(screen.getByTestId("detail-edges")).toBeDefined();
-    expect(screen.getByTestId("live-node-actions").nextElementSibling?.getAttribute("data-testid")).toBe("live-node-tabs");
-    expect(screen.queryByTestId("live-node-status")).toBeNull();
-    expect(screen.queryByTestId("detail-transcript")).toBeNull();
-    expect(screen.queryByTestId("detail-compact-spec")).toBeNull();
+    expect(screen.getByTestId("detail-peers")).toBeDefined();
+    expect(screen.getByTestId("live-startup-section")).toBeDefined();
+    expect(screen.getByTestId("live-transcript-section")).toBeDefined();
+    // PreviewPane is intentionally absent from Startup in slice 25
+    // (terminal moved to Overview).
+    expect(screen.queryByTestId("live-node-preview")).toBeNull();
   });
 
-  it("renders identity fields as isolated cells so runtime badges do not collide with adjacent labels", async () => {
-    mockNodeDetail(NODE_DETAIL);
-    renderDetails();
-
-    const runtimeField = await screen.findByTestId("identity-field-runtime");
-    const modelField = screen.getByTestId("identity-field-model");
-    const cwdField = screen.getByTestId("identity-field-cwd");
-
-    expect(runtimeField.className).toContain("bg-white/20");
-    expect(runtimeField.textContent).toContain("Claude");
-    expect(modelField.textContent).toContain("opus");
-    expect(cwdField.className).toContain("xl:col-span-3");
-    expect(cwdField.textContent).toContain("/workspace");
-  });
-
-  it("uses a resume action glyph instead of a runtime mark on the copy resume command", async () => {
-    mockNodeDetail({ ...NODE_DETAIL, resumeCommand: "rig seat resume dev.impl" });
-    renderDetails();
-
-    const resumeButton = await screen.findByTestId("detail-copy-resume");
-
-    expect(resumeButton.textContent).toContain("Copy resume command");
-    expect(resumeButton.textContent).not.toContain("Claude");
-    expect(resumeButton.querySelector("svg")).toBeDefined();
-  });
-
-  it("agent spec tab shows unavailable when agentRef is null", async () => {
-    mockNodeDetail({ ...NODE_DETAIL, agentRef: null });
-    renderDetails();
-
-    fireEvent.click(await screen.findByTestId("live-tab-agent-spec"));
-
-    await waitFor(() => {
-      expect(screen.getByTestId("agent-spec-unavailable")).toBeDefined();
-    });
-  });
-
-  it("agent spec tab shows unavailable when agentRef is non-local form", async () => {
-    mockNodeDetail({ ...NODE_DETAIL, agentRef: "remote:agents/impl" });
-    renderDetails();
-
-    fireEvent.click(await screen.findByTestId("live-tab-agent-spec"));
-
-    await waitFor(() => {
-      expect(screen.getByTestId("agent-spec-unavailable")).toBeDefined();
-    });
-  });
-
-  it("infrastructure node does not show agent-spec tab", async () => {
+  // Infrastructure nodes still have the same 2-tab structure; the
+  // agent-spec section just doesn't render inside Details.
+  it("infrastructure node renders Overview + Details (no agent-spec card inside Details)", async () => {
     mockNodeDetail(INFRA_DETAIL);
     renderDetails("infra.server");
-
-    // Wait for data to load and re-render without agent-spec tab
-    await screen.findByTestId("live-tab-identity");
-
+    await screen.findByTestId("live-tab-overview");
+    expect(screen.getByTestId("live-tab-overview")).toBeDefined();
+    expect(screen.getByTestId("live-tab-details")).toBeDefined();
     expect(screen.queryByTestId("live-tab-agent-spec")).toBeNull();
-    expect(screen.getByTestId("live-tab-identity")).toBeDefined();
-    expect(screen.getByTestId("live-tab-startup")).toBeDefined();
+
+    fireEvent.click(screen.getByTestId("live-tab-details"));
+    await waitFor(() => {
+      expect(screen.getByTestId("live-details-section")).toBeDefined();
+    });
+    // No live-agent-spec-section for infra nodes.
+    expect(screen.queryByTestId("live-agent-spec-section")).toBeNull();
   });
 
-  it("startup tab shows startup files", async () => {
+  // Agent spec unavailable cases — switch to Details, then exercise the
+  // null + non-local agentRef shapes.
+  it("Details tab: agent spec section shows unavailable when agentRef is null", async () => {
+    mockNodeDetail({ ...NODE_DETAIL, agentRef: null });
+    renderDetails();
+    fireEvent.click(await screen.findByTestId("live-tab-details"));
+    await waitFor(() => {
+      expect(screen.getByTestId("agent-spec-unavailable")).toBeDefined();
+    });
+  });
+
+  it("Details tab: agent spec section shows unavailable when agentRef is non-local form", async () => {
+    mockNodeDetail({ ...NODE_DETAIL, agentRef: "remote:agents/impl" });
+    renderDetails();
+    fireEvent.click(await screen.findByTestId("live-tab-details"));
+    await waitFor(() => {
+      expect(screen.getByTestId("agent-spec-unavailable")).toBeDefined();
+    });
+  });
+
+  // Startup files surface inside Details > Startup section.
+  it("Details tab: Startup section shows startup files", async () => {
     mockNodeDetail(NODE_DETAIL);
     renderDetails();
-
-    fireEvent.click(await screen.findByTestId("live-tab-startup"));
-
+    fireEvent.click(await screen.findByTestId("live-tab-details"));
     await waitFor(() => {
       expect(screen.getByTestId("live-startup-section")).toBeDefined();
       expect(screen.getByTestId("live-node-status")).toBeDefined();
-      expect(screen.getByTestId("live-node-preview")).toBeDefined();
       expect(screen.getByText(/role\.md/)).toBeDefined();
     });
   });
 
-  it("startup file trigger includes resolved file provenance for drawer loading", async () => {
+  it("Details tab: Startup file trigger threads file provenance for drawer loading", async () => {
     const setSelection = vi.fn();
     mockNodeDetail(NODE_DETAIL);
     renderDetailsWithDrawerSelection(setSelection as (sel: DrawerSelection) => void);
-
-    fireEvent.click(await screen.findByTestId("live-tab-startup"));
+    fireEvent.click(await screen.findByTestId("live-tab-details"));
     fireEvent.click(await screen.findByTestId("live-startup-file-trigger-role.md"));
 
     expect(setSelection).toHaveBeenCalledWith({
@@ -204,27 +294,16 @@ describe("LiveNodeDetails", () => {
     });
   });
 
-  it("transcript and terminal tabs own their named content", async () => {
+  it("Details tab: Transcript section owns transcript content", async () => {
     mockNodeDetail(NODE_DETAIL);
     renderDetails();
-
-    fireEvent.click(await screen.findByTestId("live-tab-transcript"));
+    fireEvent.click(await screen.findByTestId("live-tab-details"));
     expect(await screen.findByTestId("detail-transcript")).toBeDefined();
-
-    fireEvent.click(screen.getByTestId("live-tab-terminal"));
-    const terminalShell = await screen.findByTestId("live-terminal-shell");
-    expect(terminalShell.className).toContain("bg-stone-950/65");
-    await waitFor(() => {
-      expect(screen.getByTestId("live-terminal-preview-pane").getAttribute("data-variant")).toBe("compact-terminal");
-    });
   });
 
-  it("slice 3.3 fix-B — agent-spec tab includes Plugins section between Skills and Startup Files", async () => {
-    // velocity-qa VM verify failure #2 — Plugins section must be visible
-    // in current build per dispatch §3.2. Empty state is acceptable on
-    // main without plugin-primitive-v0 merged in (no agent.yaml carries
-    // resources.plugins[] until merge); the section's PRESENCE is the
-    // load-bearing assertion.
+  // Slice 3.3 fix-B preserved — Plugins section inside Details > Agent
+  // spec area. Renders empty state on builds without batch 1.
+  it("slice 3.3 fix-B preserved: Plugins section in Details tab agent-spec area", async () => {
     mockFetch.mockImplementation(async (url: string) => {
       if (typeof url === "string" && url.includes("/nodes/")) {
         return { ok: true, json: async () => NODE_DETAIL };
@@ -244,27 +323,33 @@ describe("LiveNodeDetails", () => {
       return { ok: true, json: async () => ({}) };
     });
     renderDetails();
-    // Switch to the agent-spec tab to see the Plugins section.
-    const agentSpecTab = await screen.findByTestId("live-tab-agent-spec");
-    fireEvent.click(agentSpecTab);
-    // Section present (drives the visual proof the dispatch + velocity-qa want).
+    fireEvent.click(await screen.findByTestId("live-tab-details"));
     await waitFor(() => {
       expect(screen.getByTestId("live-agent-plugins-section")).toBeDefined();
     });
-    // Empty state body when no plugins declared.
     expect(screen.getByTestId("agent-plugins-empty")).toBeDefined();
   });
 
-  it("PL-019: full details shows activity and current qitems from node detail", async () => {
+  // PL-019 preserved — activity + current qitems surface in the
+  // Overview tab (LiveNodeCurrentState now sits under the terminal).
+  it("PL-019 preserved: Overview shows activity + current qitems from node detail", async () => {
     mockNodeDetail(NODE_DETAIL);
     renderDetails();
-
     await waitFor(() => {
       expect(screen.getByTestId("live-node-current-state")).toBeDefined();
     });
-
     expect(screen.getByTestId("live-node-agent-activity").textContent).toContain("running");
     expect(screen.getByTestId("live-node-current-qitems").textContent).toContain("04001234-driver");
     expect(screen.getByTestId("live-node-current-qitems").textContent).toContain("Implement PL-019 edge activity pulse");
+  });
+
+  // Resume action glyph remains independent of tab structure.
+  it("uses a resume action glyph instead of a runtime mark on the copy resume command", async () => {
+    mockNodeDetail({ ...NODE_DETAIL, resumeCommand: "rig seat resume dev.impl" });
+    renderDetails();
+    const resumeButton = await screen.findByTestId("detail-copy-resume");
+    expect(resumeButton.textContent).toContain("Copy resume command");
+    expect(resumeButton.textContent).not.toContain("Claude");
+    expect(resumeButton.querySelector("svg")).toBeDefined();
   });
 });

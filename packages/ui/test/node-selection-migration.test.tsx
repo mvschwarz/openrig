@@ -89,11 +89,14 @@ describe("P5.1-D2 retirement regression: drawer-as-seat-detail removed", () => {
     expect(codeOnly).not.toMatch(/setSelection\s*\(\s*\{\s*type:\s*["']seat-detail["']/);
   });
 
-  it("LiveNodeDetails.tsx renders the 5-tab body row (single canonical surface per DRIFT P5.1-D1)", () => {
+  it("LiveNodeDetails.tsx renders the 2-tab Overview + Details body row (single canonical surface per slice 25)", () => {
     const src = readFileSync(path.join(SRC, "components/LiveNodeDetails.tsx"), "utf8");
-    // Tab union literal carries all 5 canonical tab keys.
-    expect(src).toMatch(/type\s+Tab\s*=\s*"identity"\s*\|\s*"agent-spec"\s*\|\s*"startup"\s*\|\s*"transcript"\s*\|\s*"terminal"/);
-    // FileReferenceTrigger wraps startup files (P5.1-1a).
+    // Tab union literal carries the 2 canonical tab keys after the
+    // slice 25 consolidation.
+    expect(src).toMatch(/type\s+Tab\s*=\s*"overview"\s*\|\s*"details"/);
+    // Negative: the legacy 5-tab literal is gone.
+    expect(src).not.toMatch(/"identity"\s*\|\s*"agent-spec"\s*\|\s*"startup"\s*\|\s*"transcript"\s*\|\s*"terminal"/);
+    // FileReferenceTrigger wraps startup files (P5.1-1a preserved).
     expect(src).toMatch(/import\s*\{[^}]*FileReferenceTrigger[^}]*\}\s*from/);
     expect(src).toMatch(/<FileReferenceTrigger/);
   });
