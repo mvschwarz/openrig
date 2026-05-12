@@ -1,6 +1,10 @@
-// Slice 26 Checkpoint B — Settings sub-route page tests.
-// Covers PoliciesPage (empty scaffold) + LogPage + StatusPage +
-// SettingsCenter refactor verification (HG-7: top-row tabs removed).
+// Slice 26 Checkpoint B — Settings page tests.
+// Covers PoliciesPage (HG-5 empty-state) + SettingsCenter refactor
+// (HG-7 top-row tabs removed discriminator). LogPage + StatusPage
+// route mounts are verified by static route registration in routes.tsx
+// + structural inspection; their component-level rendering is QA
+// walk scope (operator clicks /settings/log + /settings/status on the
+// founder-walk VM).
 
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { cleanup, render, screen } from "@testing-library/react";
@@ -47,12 +51,16 @@ describe("PoliciesPage (HG-5: empty-state placeholder)", () => {
     expect(screen.getByRole("heading", { name: /policies/i })).toBeTruthy();
   });
 
-  it("renders empty-state placeholder mentioning future slice 27 wire", () => {
+  it("renders empty-state placeholder with operator-facing copy (no slice/release internals)", () => {
     render(<PoliciesPage />);
     const empty = screen.getByTestId("policies-empty-state");
     expect(empty).toBeTruthy();
-    // Empty-state copy mentions compaction policy (per dispatch + README §3.5)
+    // Empty-state copy mentions compaction policy + policies generally
     expect(empty.textContent?.toLowerCase()).toMatch(/compaction|policy|policies/i);
+    // No internal-release references in user-facing UI copy (per
+    // velocity-guard 26.B carry-forward concern: slice-number tokens
+    // are implementation detail; should not leak into product UI).
+    expect(empty.textContent).not.toMatch(/slice\s*\d+/i);
   });
 });
 

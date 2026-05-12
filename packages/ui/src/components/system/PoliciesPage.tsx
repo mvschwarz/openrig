@@ -13,7 +13,7 @@ export function PoliciesPage() {
     <SettingsPageShell testId="settings-page-policies" title="Policies">
       <EmptyState
         label="NO POLICIES CONFIGURED"
-        description="The first policy — Claude session compaction — lands in slice 27. Once configured, policies will be listed here and editable in place."
+        description="Policies control automated agent behaviors — when to compact a Claude session, how to escalate stale work, and similar runtime rules. Configured policies will be listed here and editable in place."
         variant="card"
         testId="policies-empty-state"
       />
