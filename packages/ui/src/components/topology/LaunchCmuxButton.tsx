@@ -1,7 +1,7 @@
 // Slice 24 — LaunchCmuxButton.
 //
 // Rig-scope "Launch in CMUX" button. Click → POST /api/rigs/:rigId/cmux/launch
-// via useRigCmuxLaunch. Renders inline status (loading / success / error)
+// via launchRigCmux. Renders inline status (loading / success / error)
 // directly adjacent to the button rather than via a separate toast
 // primitive — keeps the rig-scope tab-bar self-contained.
 //
