@@ -59,6 +59,10 @@ import { specLibraryRoutes } from "./routes/spec-library.js";
 // header for full declaration.
 import { pluginsRoutes } from "./routes/plugins.js";
 import type { PluginDiscoveryService } from "./domain/plugin-discovery-service.js";
+// Slice 28 Checkpoint C-3 — skill-library discovery routes (read-only).
+// SC-29 EXCEPTION #11 cumulative; full declaration in routes/plugins.ts header.
+import { skillsRoutes } from "./routes/skills.js";
+import type { SkillLibraryDiscoveryService } from "./domain/skill-library-discovery.js";
 import { configRoutes } from "./routes/config.js";
 import { contextPacksRoutes } from "./routes/context-packs.js";
 import { agentImagesRoutes } from "./routes/agent-images.js";
@@ -209,6 +213,13 @@ export interface AppDeps {
    * Read-only; no SQL. SC-29 #8 verbatim declaration in routes/plugins.ts.
    */
   pluginDiscoveryService?: PluginDiscoveryService;
+  /**
+   * Slice 28 Checkpoint C-3 — skill-library discovery service.
+   * Consolidates workspace + openrig-managed skill sources; resolves
+   * shared-skills via daemon install path (independent of operator's
+   * OPENRIG_FILES_ALLOWLIST). Read-only; no SQL. SC-29 #11.
+   */
+  skillLibraryDiscoveryService?: SkillLibraryDiscoveryService;
   /** Workflows in Spec Library v0 — active workflow lens persistence. */
   activeLensStore?: import("./domain/active-lens-store.js").ActiveLensStore;
   /** Rig Context / Composable Context Injection v0 (PL-014) — context_packs library service. */
@@ -414,6 +425,7 @@ export function createApp(deps: AppDeps): Hono {
     c.set("specReviewService" as never, deps.specReviewService);
     c.set("specLibraryService" as never, deps.specLibraryService);
     c.set("pluginDiscoveryService" as never, deps.pluginDiscoveryService);
+    c.set("skillLibraryDiscoveryService" as never, deps.skillLibraryDiscoveryService);
     c.set("activeLensStore" as never, deps.activeLensStore);
     c.set("contextPackLibrary" as never, deps.contextPackLibrary);
     c.set("agentImageLibrary" as never, deps.agentImageLibrary);
@@ -464,6 +476,8 @@ export function createApp(deps: AppDeps): Hono {
   app.route("/api/specs/review", specReviewRoutes());
   app.route("/api/specs/library", specLibraryRoutes());
   app.route("/api/plugins", pluginsRoutes());
+  // Slice 28 C-3 — skill-library + per-skill file endpoints (SC-29 #11).
+  app.route("/api/skills", skillsRoutes());
   app.route("/api/config", configRoutes());
   app.route("/api/context-packs", contextPacksRoutes());
   app.route("/api/agent-images", agentImagesRoutes({
