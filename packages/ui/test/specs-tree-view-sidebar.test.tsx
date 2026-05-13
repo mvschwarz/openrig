@@ -206,15 +206,13 @@ describe("SpecsTreeView — slice 19 sidebar density follow-up", () => {
         return {
           ok: true,
           json: async () => [
-            { id: "openrig-core", name: "openrig-core", version: "0.1.0", description: "Core plugin", source: "vendored", sourceLabel: "vendored:openrig-core", runtimes: ["claude", "codex"], path: "/plugins/openrig-core", lastSeenAt: null },
+            { id: "openrig-core", name: "openrig-core", version: "0.1.0", description: "Core plugin", source: "vendored", sourceLabel: "vendored:openrig-core", runtimes: ["claude", "codex"], path: "/plugins/openrig-core", lastSeenAt: null, skillCount: 0 },
           ],
         };
       }
-      if (url === "/api/files/roots") {
-        return { ok: true, json: async () => ({ roots: [] }) };
-      }
-      if (url.startsWith("/api/files/list?")) {
-        return { ok: true, json: async () => ({ root: "workspace", path: "", entries: [] }) };
+      // C-4: useLibrarySkills consumes /api/skills/library (daemon-owned).
+      if (url === "/api/skills/library") {
+        return { ok: true, json: async () => [] };
       }
       throw new Error(`unexpected fetch ${url}`);
     });

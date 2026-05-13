@@ -67,43 +67,58 @@ function renderPluginDetail(pluginId: string) {
   );
 }
 
-describe("SkillDetailPage — slice 28 HG-7 + HG-8 docs-browser (real file tree)", () => {
+describe("SkillDetailPage — slice 28 HG-7 + HG-8 docs-browser (daemon skill-library API)", () => {
+  // C-4: mocks /api/skills/library + /api/skills/:id/files/{list,read}
+  // (daemon-owned skill discovery; SC-29 #11 cumulative).
   function mockOneSkill(opts: {
     rootFiles?: Array<{ name: string; type: "file" | "dir" }>;
     subFolders?: Record<string, Array<{ name: string; type: "file" | "dir" }>>;
     fileContent?: Record<string, string>;
   }) {
     mockFetch.mockImplementation(async (url: string) => {
-      if (url === "/api/files/roots") {
-        return { ok: true, json: async () => ({ roots: [{ name: "workspace", path: "/workspace" }] }) };
+      if (url === "/api/skills/library") {
+        return {
+          ok: true,
+          json: async () => [
+            {
+              id: "openrig-managed:core/openrig-user",
+              name: "openrig-user",
+              source: "openrig-managed",
+              files: [{ name: "SKILL.md", path: "SKILL.md", size: 42, mtime: "2026-05-12T00:00:00.000Z" }],
+            },
+          ],
+        };
       }
-      // useLibrarySkills probes for the skill folder.
-      if (url === "/api/files/list?root=workspace&path=.openrig%2Fskills") return NOT_FOUND;
-      if (url === "/api/files/list?root=workspace&path=node_modules%2F%40openrig%2Fdaemon%2Fspecs%2Fagents%2Fshared%2Fskills") return NOT_FOUND;
-      if (url === "/api/files/list?root=workspace&path=packages%2Fdaemon%2Fspecs%2Fagents%2Fshared%2Fskills") {
-        return { ok: true, json: async () => fileList([{ name: "openrig-user", type: "dir" }]) };
+      if (url === "/api/skills/openrig-managed%3Acore%2Fopenrig-user/files/list?path=") {
+        return {
+          ok: true,
+          json: async () => ({
+            skillId: "openrig-managed:core/openrig-user",
+            path: "",
+            ...fileList(opts.rootFiles ?? [{ name: "SKILL.md", type: "file" }]),
+          }),
+        };
       }
-      // SkillDetailPage's in-page file tree lists the skill folder itself.
-      if (url === "/api/files/list?root=workspace&path=packages%2Fdaemon%2Fspecs%2Fagents%2Fshared%2Fskills%2Fopenrig-user") {
-        return { ok: true, json: async () => fileList(opts.rootFiles ?? [{ name: "SKILL.md", type: "file" }]) };
-      }
-      // Subfolder listings inside the skill (sub-folders go in opts.subFolders by relative path).
       for (const [subPath, entries] of Object.entries(opts.subFolders ?? {})) {
-        const fullPath = `packages/daemon/specs/agents/shared/skills/openrig-user/${subPath}`;
-        if (url === `/api/files/list?root=workspace&path=${encodeURIComponent(fullPath)}`) {
-          return { ok: true, json: async () => fileList(entries) };
-        }
-      }
-      // File reads.
-      for (const [filePath, content] of Object.entries(opts.fileContent ?? {})) {
-        const fullPath = `packages/daemon/specs/agents/shared/skills/openrig-user/${filePath}`;
-        if (url === `/api/files/read?root=workspace&path=${encodeURIComponent(fullPath)}`) {
+        if (url === `/api/skills/openrig-managed%3Acore%2Fopenrig-user/files/list?path=${encodeURIComponent(subPath)}`) {
           return {
             ok: true,
             json: async () => ({
-              root: "workspace",
-              path: fullPath,
-              absolutePath: `/workspace/${fullPath}`,
+              skillId: "openrig-managed:core/openrig-user",
+              path: subPath,
+              ...fileList(entries),
+            }),
+          };
+        }
+      }
+      for (const [filePath, content] of Object.entries(opts.fileContent ?? {})) {
+        if (url === `/api/skills/openrig-managed%3Acore%2Fopenrig-user/files/read?path=${encodeURIComponent(filePath)}`) {
+          return {
+            ok: true,
+            json: async () => ({
+              skillId: "openrig-managed:core/openrig-user",
+              path: filePath,
+              absolutePath: `/abs/${filePath}`,
               content,
               mtime: "2026-05-12T00:00:00.000Z",
               contentHash: "hash",
@@ -119,7 +134,7 @@ describe("SkillDetailPage — slice 28 HG-7 + HG-8 docs-browser (real file tree)
     });
   }
 
-  const skillId = "openrig-managed:workspace:packages/daemon/specs/agents/shared/skills/openrig-user";
+  const skillId = "openrig-managed:core/openrig-user";
 
   it("renders the docs-browser shell (tree + viewer testids)", async () => {
     mockOneSkill({

@@ -3,8 +3,8 @@ import { EmptyState } from "../ui/empty-state.js";
 import { SectionHeader } from "../ui/section-header.js";
 import { MarkdownViewer } from "../markdown/MarkdownViewer.js";
 import { SyntaxHighlight } from "../markdown/SyntaxHighlight.js";
-import { useLibrarySkills, type LibrarySkillEntry } from "../../hooks/useLibrarySkills.js";
-import { useFilesList, useFilesRead, type FileEntry } from "../../hooks/useFiles.js";
+import { useLibrarySkills } from "../../hooks/useLibrarySkills.js";
+import { useSkillFilesList, useSkillFilesRead } from "../../hooks/useSkillFiles.js";
 import {
   librarySkillFilePathFromToken,
   librarySkillIdFromToken,
@@ -33,14 +33,6 @@ function joinPath(parent: string, child: string): string {
   return parent ? `${parent}/${child}` : child;
 }
 
-// Auto-selection on entry: SKILL.md if present at the skill root. The
-// fileToken route param wins over this default if provided.
-function pickDefaultRootFile(entries: FileEntry[]): string | null {
-  const skillMd = entries.find((e) => e.type === "file" && /^skill\.md$/i.test(e.name));
-  if (skillMd) return skillMd.name;
-  return null;
-}
-
 export function SkillDetailPage({
   skillToken,
   fileToken,
@@ -53,44 +45,35 @@ export function SkillDetailPage({
   const skill = skillId ? skills.find((entry) => entry.id === skillId) ?? null : null;
 
   // Relative path within the skill folder. Empty string = skill root.
-  // Resolved from the fileToken (when provided) once useLibrarySkills
-  // surfaces the skill — useEffect, not useState init, because the
-  // skill data is async.
   const [currentPath, setCurrentPath] = useState<string>("");
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
   const [defaultPicked, setDefaultPicked] = useState(false);
 
   // Resolve fileToken into currentPath + selectedFile once the skill is
-  // available. Runs once per token change.
+  // available. fileToken's encoded path is relative to skill root post-C4
+  // (e.g., "SKILL.md" or "examples/basic.md").
   useEffect(() => {
     if (!fileToken || !skill) return;
-    const requestedFilePath = librarySkillFilePathFromToken(fileToken);
-    if (!requestedFilePath) return;
-    const prefix = `${skill.directoryPath}/`;
-    if (!requestedFilePath.startsWith(prefix)) return;
-    const rel = requestedFilePath.slice(prefix.length);
-    setCurrentPath(parentPath(rel));
-    setSelectedFile(rel);
+    const requestedRelPath = librarySkillFilePathFromToken(fileToken);
+    if (!requestedRelPath) return;
+    setCurrentPath(parentPath(requestedRelPath));
+    setSelectedFile(requestedRelPath);
     setDefaultPicked(true);
   }, [fileToken, skill]);
 
-  // Build the daemon /api/files path = <skill directoryPath>/<currentPath>
-  // The skill is rooted at an allowlist root (skill.root) so we reuse the
-  // generic /api/files surface that the existing FilesWorkspace + slice
-  // 18 code path already uses.
-  const listPath = useMemo(() => {
-    if (!skill) return null;
-    return currentPath ? `${skill.directoryPath}/${currentPath}` : skill.directoryPath;
-  }, [skill, currentPath]);
-  const list = useFilesList(skill?.root ?? null, listPath);
+  // Daemon /api/skills/:id/files/list call (replaces /api/files/list).
+  const list = useSkillFilesList(skill?.id ?? null, currentPath);
 
-  // Auto-select SKILL.md at the skill root on first load (when no fileToken).
+  // Auto-select SKILL.md at the skill root on first load (when no fileToken
+  // resolution happened).
   useEffect(() => {
     if (defaultPicked) return;
     if (currentPath !== "") return;
     if (!list.data) return;
-    const pick = pickDefaultRootFile(list.data.entries);
-    if (pick) setSelectedFile(pick);
+    const skillMd = list.data.entries.find(
+      (e) => e.type === "file" && /^skill\.md$/i.test(e.name),
+    );
+    if (skillMd) setSelectedFile(skillMd.name);
     setDefaultPicked(true);
   }, [list.data, currentPath, defaultPicked]);
 
@@ -99,7 +82,7 @@ export function SkillDetailPage({
       <div className="h-full bg-paper-grid px-6 py-5 lg:pl-[var(--workspace-left-offset,0px)] lg:pr-[var(--workspace-right-offset,0px)]">
         <EmptyState
           label="LOADING SKILL"
-          description="Loading skill files from configured library roots."
+          description="Loading skill files from the daemon skill library."
           variant="card"
           testId="skill-detail-loading"
         />
@@ -112,7 +95,7 @@ export function SkillDetailPage({
       <div className="h-full bg-paper-grid px-6 py-5 lg:pl-[var(--workspace-left-offset,0px)] lg:pr-[var(--workspace-right-offset,0px)]">
         <EmptyState
           label="SKILL NOT FOUND"
-          description="The selected skill is not visible through the configured library roots."
+          description="The selected skill is not discoverable through the daemon skill library."
           variant="card"
           testId="skill-detail-not-found"
         />
@@ -134,7 +117,6 @@ export function SkillDetailPage({
           <span
             data-testid="skill-detail-source"
             className="font-mono text-[10px] uppercase tracking-[0.12em] text-stone-500"
-            title={skill.directoryPath}
           >
             {skill.source}
           </span>
@@ -218,11 +200,7 @@ export function SkillDetailPage({
               Select a file from the tree.
             </div>
           ) : (
-            <SkillFileContent
-              root={skill.root}
-              path={`${skill.directoryPath}/${selectedFile}`}
-              displayPath={selectedFile}
-            />
+            <SkillFileContent skillId={skill.id} path={selectedFile} />
           )}
         </main>
       </div>
@@ -262,8 +240,8 @@ function Breadcrumbs({
   );
 }
 
-function SkillFileContent({ root, path, displayPath }: { root: string; path: string; displayPath: string }) {
-  const read = useFilesRead(root, path);
+function SkillFileContent({ skillId, path }: { skillId: string; path: string }) {
+  const read = useSkillFilesRead(skillId, path);
   const ext = useMemo(() => pathExtension(path), [path]);
 
   if (read.isLoading) {
@@ -285,7 +263,7 @@ function SkillFileContent({ root, path, displayPath }: { root: string; path: str
   return (
     <div data-testid="skill-detail-viewer-content" className="flex h-full flex-col">
       <header className="flex items-baseline justify-between border-b border-outline-variant bg-white/30 px-3 py-2 font-mono text-[10px]">
-        <div data-testid="skill-detail-viewer-path" className="text-stone-700">{displayPath}</div>
+        <div data-testid="skill-detail-viewer-path" className="text-stone-700">{path}</div>
         <div className="flex items-baseline gap-3 text-stone-500">
           <span>{read.data.size}b</span>
           <span>{read.data.mtime}</span>

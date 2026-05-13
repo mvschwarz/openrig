@@ -66,21 +66,20 @@ function renderPluginsIndex() {
 }
 
 describe("SkillsIndexPage — slice 28 HG-9 (rolled-up flat rows)", () => {
+  // C-4: mocks the new /api/skills/library endpoint (daemon-owned discovery).
   function mockSkillsFetch(skillNames: string[]) {
     mockFetch.mockImplementation(async (url: string) => {
-      if (url === "/api/files/roots") {
-        return { ok: true, json: async () => ({ roots: [{ name: "workspace", path: "/workspace" }] }) };
-      }
-      if (url === "/api/files/list?root=workspace&path=.openrig%2Fskills") return NOT_FOUND;
-      if (url === "/api/files/list?root=workspace&path=node_modules%2F%40openrig%2Fdaemon%2Fspecs%2Fagents%2Fshared%2Fskills") return NOT_FOUND;
-      if (url === "/api/files/list?root=workspace&path=packages%2Fdaemon%2Fspecs%2Fagents%2Fshared%2Fskills") {
-        return { ok: true, json: async () => fileList(skillNames.map((name) => ({ name, type: "dir" as const }))) };
-      }
-      for (const name of skillNames) {
-        const skillPath = `packages/daemon/specs/agents/shared/skills/${name}`;
-        if (url === `/api/files/list?root=workspace&path=${encodeURIComponent(skillPath)}`) {
-          return { ok: true, json: async () => fileList([{ name: "SKILL.md", type: "file" }]) };
-        }
+      if (url === "/api/skills/library") {
+        return {
+          ok: true,
+          json: async () =>
+            skillNames.map((name) => ({
+              id: `openrig-managed:${name}`,
+              name,
+              source: "openrig-managed",
+              files: [{ name: "SKILL.md", path: "SKILL.md", size: 42, mtime: "2026-05-12T00:00:00.000Z" }],
+            })),
+        };
       }
       throw new Error(`unexpected fetch ${url}`);
     });
@@ -92,18 +91,14 @@ describe("SkillsIndexPage — slice 28 HG-9 (rolled-up flat rows)", () => {
     await waitFor(() => {
       expect(screen.getByTestId("skills-index-rows")).toBeTruthy();
     });
-    expect(
-      screen.getByTestId(`skills-index-row-openrig-managed:workspace:packages/daemon/specs/agents/shared/skills/alpha-skill`),
-    ).toBeTruthy();
-    expect(
-      screen.getByTestId(`skills-index-row-openrig-managed:workspace:packages/daemon/specs/agents/shared/skills/beta-skill`),
-    ).toBeTruthy();
+    expect(screen.getByTestId("skills-index-row-openrig-managed:alpha-skill")).toBeTruthy();
+    expect(screen.getByTestId("skills-index-row-openrig-managed:beta-skill")).toBeTruthy();
   });
 
   it("each row navigates to /specs/skills/$skillToken (anchor with correct href)", async () => {
     mockSkillsFetch(["alpha-skill"]);
     renderSkillsIndex();
-    const id = "openrig-managed:workspace:packages/daemon/specs/agents/shared/skills/alpha-skill";
+    const id = "openrig-managed:alpha-skill";
     await waitFor(() => {
       expect(screen.getByTestId(`skills-index-row-${id}`)).toBeTruthy();
     });
@@ -115,7 +110,7 @@ describe("SkillsIndexPage — slice 28 HG-9 (rolled-up flat rows)", () => {
   it("each row includes source label + file-count columns", async () => {
     mockSkillsFetch(["alpha-skill"]);
     renderSkillsIndex();
-    const id = "openrig-managed:workspace:packages/daemon/specs/agents/shared/skills/alpha-skill";
+    const id = "openrig-managed:alpha-skill";
     await waitFor(() => {
       expect(screen.getByTestId(`skills-index-row-${id}-source`)).toBeTruthy();
     });
@@ -129,7 +124,6 @@ describe("SkillsIndexPage — slice 28 HG-9 (rolled-up flat rows)", () => {
     await waitFor(() => {
       expect(screen.getByTestId("skills-index-rows")).toBeTruthy();
     });
-    // Pre-slice-28 testids must be gone (the grouped-folder shape is removed).
     expect(screen.queryByTestId("library-top-level-skills")).toBeNull();
     expect(screen.queryByTestId("library-folder-workspace")).toBeNull();
     expect(screen.queryByTestId("library-folder-openrig-managed")).toBeNull();
