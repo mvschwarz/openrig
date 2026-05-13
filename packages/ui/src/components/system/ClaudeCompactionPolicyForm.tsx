@@ -2,7 +2,9 @@
 //
 // Operator-configurable pre-compaction trigger: when a Claude seat's
 // context usage crosses `threshold_percent`, the daemon's ContextMonitor
-// dispatches `/compact` via SessionTransport, optionally with
+// first sends a normal preparation prompt asking Claude to create a
+// mental-model restore map, then dispatches `/compact` via
+// SessionTransport on the next eligible observation, optionally with
 // `compact_instruction` as slash-command args. The compaction hooks
 // inject the operator's `message_inline` plus contents of
 // `message_file_path` alongside the standard restore-instructions.
@@ -139,11 +141,11 @@ function PolicyFormBody({ data, setSetting }: PolicyFormBodyProps) {
       </h2>
       <p className="mt-2 text-sm text-on-surface-variant max-w-prose">
         When a Claude seat's context usage crosses the configured threshold,
-        OpenRig arms an automatic compaction and sends
-        <code className="font-mono text-[12px]"> /compact</code> once the seat is idle
-        with an empty prompt. Compaction instructions are sent with that slash
-        command. After compaction, OpenRig sends one restore prompt that points
-        the seat at its restore packet, followed by a read-depth audit prompt.
+        OpenRig first asks it to create a mental-model restore map, then sends
+        <code className="font-mono text-[12px]"> /compact</code> on the next
+        eligible observation. After compaction, OpenRig sends one restore prompt
+        that points the seat at its restore packet, followed by a read-depth
+        audit prompt.
       </p>
 
       <form
@@ -177,7 +179,7 @@ function PolicyFormBody({ data, setSetting }: PolicyFormBodyProps) {
             aria-describedby="claude-compaction-threshold-hint"
           />
           <span className="text-xs text-on-surface-variant">
-            Fires when context usage at-or-above this percentage (1–100).
+            Preparation starts when context usage is at-or-above this percentage (1–100).
           </span>
           {thresholdError && (
             <span className="text-xs text-error" data-testid="claude-compaction-threshold-error">
@@ -201,7 +203,7 @@ function PolicyFormBody({ data, setSetting }: PolicyFormBodyProps) {
           />
           <span className="text-xs text-on-surface-variant">
             This controls the compaction summary itself. Keep it concise and
-            evidence-shaped.
+            preserve the restore-map path when one was created.
           </span>
         </div>
 

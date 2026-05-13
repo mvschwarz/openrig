@@ -117,7 +117,7 @@ export interface RiggedConfig {
 const DEFAULT_WORKSPACE_ROOT = getDefaultOpenRigPath("workspace");
 
 const DEFAULT_CLAUDE_COMPACTION_COMPACT_INSTRUCTION =
-  "Create a concise continuity summary for this OpenRig session. Preserve the active task, queue item IDs, decisions, changed files, commands/tests run, blockers, caveats, and next concrete step.";
+  "Create a concise continuity summary for this OpenRig session. Preserve the active task, queue item IDs, decisions, changed files, commands/tests run, blockers, caveats, next concrete step, and the path to any mental-model restore map or handoff file created before compaction.";
 
 const DEFAULT_CLAUDE_COMPACTION_RESTORE_INSTRUCTION =
   "Load/read the claude-compaction-restore skill and follow its post-compaction restore protocol.";

@@ -49,24 +49,34 @@ Prepare durable continuity before the context boundary.
    current working directory.
 2. Record the current state: decisions made, files changed, commands/tests run,
    evidence produced, blockers, caveats, and the next concrete step.
-3. Build a reading list for the post-compaction session. Include:
+3. Create or update a durable mental-model restore map. This map is the main
+   artifact future-you will use to rebuild context after compaction.
+4. In the restore map, write an ASCII file/folder tree of every path that
+   mattered to your working mental model during this session. Include:
    - the active queue item or mission packet;
    - mission notes, progress, decisions, and evidence files;
+   - Claude memory/project notes you used or wrote, especially when the memory
+     folder is shared by many agents;
    - files with active edits or recently inspected source;
    - root instructions such as `AGENTS.md`, `CLAUDE.md`, or `README.md`;
-   - as-built docs, codemaps, or conventions needed before code/review work.
-4. Write or update a durable handoff note when there is an obvious project or
-   mission state file. If no safe file target is obvious, put the handoff and
-   reading list directly in the compaction summary.
-5. In the compaction summary, state which files are required reading after
-   compaction and how they relate to the task.
+   - as-built docs, codemaps, conventions, skills, and product docs needed
+     before code/review work;
+   - source files, tests, scripts, UI evidence, screenshots, logs, or reports
+     that shaped your current state.
+5. For every file or folder in the tree, add a short note explaining why it
+   matters and whether it is required reading after compaction.
+6. Write any important glue context that is not already on disk into the
+   handoff/restore map. This includes assumptions, partial conclusions, failed
+   paths, and why the listed files fit together.
+7. In the compaction summary, include the restore map path and the top required
+   reading paths from that map.
 
 ## If You Just Compacted
 
 Treat your memory as unreliable until you restore from durable evidence.
 
-1. Read any restore prompt, marker path, packet path, transcript path, or extra
-   instruction file named by the operator or OpenRig.
+1. Read any restore prompt, marker path, packet path, transcript path, restore
+   map, or extra instruction file named by the operator or OpenRig.
 2. Run the restore script from this skill:
 
 ```bash
@@ -81,12 +91,16 @@ node ~/.claude/skills/claude-compaction-restore/scripts/restore-from-jsonl.mjs /
 
 3. Read the generated `restore-instructions.md`.
 4. Read the generated `touched-files.md`.
-5. Identify the important files for the active task. The touched-file list is
+5. Find and read the mental-model restore map if one exists. Treat it as the
+   highest-value guide to which memory files, mission files, source files, and
+   docs mattered before compaction.
+6. Identify the important files for the active task. The touched-file list is
    a triage aid, not a complete inventory.
-6. Read every important file in full. Prioritize Markdown state/planning files,
-   queue/mission packets, source files with active edits, root instruction
-   files, and as-built or codemap docs.
-7. Only resume task work after you can state:
+7. Read every important file in full. Prioritize the restore map, Claude memory
+   files named in the map, Markdown state/planning files, queue/mission packets,
+   source files with active edits, root instruction files, and as-built or
+   codemap docs.
+8. Only resume task work after you can state:
 
 ```text
 restored from packet at <path>; resumed at step <X>
@@ -98,8 +112,8 @@ Include the main files you read in full when you make that statement.
 
 After the first restore pass, audit yourself before continuing.
 
-1. List every file, packet, marker, instruction file, and source document you
-   were asked to read during restore.
+1. List every file, packet, marker, restore map, instruction file, and source
+   document you were asked to read during restore.
 2. Mark each item as `FULL`, `PARTIAL`, or `NOT_READ`.
 3. You will be given a task where all of these files are required reading in
    order to understand the task.
