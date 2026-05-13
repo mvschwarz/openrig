@@ -25,8 +25,8 @@ operator workflow and the rationale behind the two-daemon model.
 Fixture YAML files use the canonical placeholder paths per banked
 `feedback_test_fixture_example_path_placeholder.md`:
 
-- Username-bearing paths: `/Users/example/...` (never `wrandom` or other
-  contributor usernames)
+- Username-bearing paths: `/Users/example/...` (never a real contributor
+  username)
 - Substrate-relative refs: `<substrate-shared-docs>/...`
 
 ## v0 scope
