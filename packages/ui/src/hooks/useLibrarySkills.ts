@@ -1,6 +1,25 @@
 import { useQuery } from "@tanstack/react-query";
 import type { FileEntry, FilesListResponse, FilesRootsResponse, FilesUnavailable } from "./useFiles.js";
 
+// Slice 28 — skill discovery recurses into one level of category
+// folders. Pre-slice-28, the hook listed each candidate skills base
+// path, treated every top-level dir as a candidate skill folder, and
+// dropped any dir that didn't have markdown files at its immediate
+// level. That worked for flat layouts like
+// `packages/daemon/specs/agents/shared/skills/claude-compact-in-place/SKILL.md`
+// but missed every NESTED skill (e.g.
+// `packages/daemon/specs/agents/shared/skills/core/openrig-user/SKILL.md`
+// — `core/` has no .md children, so the entire category was skipped).
+// HG-5 root cause.
+//
+// MAX_NESTING_DEPTH=1 recurses exactly one level when a candidate
+// folder has no markdown but has subdirs. depth 0 = base path's
+// direct children; depth 1 = one-level-nested children (category
+// contents). The shared skills tree observed on disk only nests one
+// level deep, so depth 1 is sufficient. Cap prevents pathological
+// runaway on unexpected directory structures.
+const MAX_NESTING_DEPTH = 1;
+
 export type LibrarySkillSource = "workspace" | "openrig-managed";
 
 export interface LibrarySkillFile {
@@ -82,6 +101,43 @@ function dedupeSkills(skills: LibrarySkillEntry[]): LibrarySkillEntry[] {
   return Array.from(bestByKey.values());
 }
 
+// Recursively collect skill entries from a directory listing. A
+// "skill" is a directory containing one or more markdown files (SKILL.md
+// or other .md/.mdx). A "category" is a directory with no markdown
+// but with subdirs (e.g. `core/`, `pm/`). Categories recurse one level;
+// skills become leaves. See MAX_NESTING_DEPTH comment for the why.
+async function collectSkillsFromListing(
+  rootName: string,
+  basePath: string,
+  listing: FilesListResponse,
+  source: LibrarySkillSource,
+  depth: number,
+): Promise<LibrarySkillEntry[]> {
+  const result: LibrarySkillEntry[] = [];
+  const subdirs = listing.entries.filter((entry) => entry.type === "dir");
+  for (const subdir of subdirs) {
+    const subdirPath = `${basePath}/${subdir.name}`;
+    const subdirListing = await listDirectory(rootName, subdirPath);
+    if (!subdirListing) continue;
+    const mdFiles = markdownFiles(subdirPath, subdirListing.entries);
+    if (mdFiles.length > 0) {
+      result.push({
+        id: `${source}:${rootName}:${subdirPath}`,
+        name: subdir.name,
+        source,
+        root: rootName,
+        directoryPath: subdirPath,
+        files: mdFiles,
+      });
+    } else if (depth < MAX_NESTING_DEPTH) {
+      const nested = await collectSkillsFromListing(rootName, subdirPath, subdirListing, source, depth + 1);
+      result.push(...nested);
+    }
+    // else: no markdown + cannot recurse further → skip
+  }
+  return result;
+}
+
 async function fetchLibrarySkills(): Promise<LibrarySkillEntry[]> {
   const rootsResponse = await fetchJson<FilesRootsResponse | FilesUnavailable>("/api/files/roots");
   if (!rootsResponse || isUnavailable(rootsResponse)) return [];
@@ -91,22 +147,14 @@ async function fetchLibrarySkills(): Promise<LibrarySkillEntry[]> {
     for (const candidate of SKILL_DIRECTORIES) {
       const directory = await listDirectory(root.name, candidate.path);
       if (!directory) continue;
-      const skillDirs = directory.entries.filter((entry) => entry.type === "dir");
-      for (const skillDir of skillDirs) {
-        const skillPath = `${candidate.path}/${skillDir.name}`;
-        const skillFiles = await listDirectory(root.name, skillPath);
-        if (!skillFiles) continue;
-        const files = markdownFiles(skillPath, skillFiles.entries);
-        if (files.length === 0) continue;
-        skills.push({
-          id: `${candidate.source}:${root.name}:${skillPath}`,
-          name: skillDir.name,
-          source: candidate.source,
-          root: root.name,
-          directoryPath: skillPath,
-          files,
-        });
-      }
+      const collected = await collectSkillsFromListing(
+        root.name,
+        candidate.path,
+        directory,
+        candidate.source,
+        0,
+      );
+      skills.push(...collected);
     }
   }
 
