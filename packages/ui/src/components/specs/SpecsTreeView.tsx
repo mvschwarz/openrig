@@ -48,28 +48,62 @@ function Section({
   def,
   expanded,
   onToggle,
+  navigateTo,
+  onNavigate,
 }: {
   def: SectionDef;
   expanded: boolean;
   onToggle: () => void;
+  // Slice 28 — dual-action sections. When `navigateTo` is provided,
+  // the section header is split: chevron-button toggles expand-only;
+  // label Link navigates to the index page AND expands the tree.
+  // Used by SKILLS + PLUGINS sections; other sections render the
+  // single-button full-row toggle (legacy behavior).
+  navigateTo?: "/specs/skills" | "/specs/plugins";
+  onNavigate?: () => void;
 }) {
   const Chevron = expanded ? ChevronDown : ChevronRight;
   return (
     <li data-testid={`specs-section-${def.id}`}>
-      <button
-        type="button"
-        onClick={onToggle}
-        data-testid={`specs-section-toggle-${def.id}`}
-        className="w-full flex items-center gap-1 px-2 py-1 hover:bg-surface-low text-left"
-      >
-        <Chevron className="h-3 w-3 text-on-surface-variant" />
-        <span className="font-mono text-[11px] uppercase tracking-wide text-stone-900 flex-1">
-          {def.label}
-        </span>
-        <span className="font-mono text-[10px] text-on-surface-variant">
-          {def.loading ? "..." : def.entries.length}
-        </span>
-      </button>
+      {navigateTo ? (
+        <div className="w-full flex items-center gap-1 px-2 py-1 hover:bg-surface-low text-left">
+          <button
+            type="button"
+            onClick={onToggle}
+            data-testid={`specs-section-toggle-${def.id}`}
+            aria-label={`${expanded ? "Collapse" : "Expand"} ${def.label}`}
+            className="inline-flex h-4 w-4 shrink-0 items-center justify-center text-stone-500 hover:text-stone-900"
+          >
+            <Chevron className="h-3 w-3" />
+          </button>
+          <Link
+            to={navigateTo}
+            data-testid={`specs-section-link-${def.id}`}
+            onClick={onNavigate}
+            className="font-mono text-[11px] uppercase tracking-wide text-stone-900 flex-1 hover:underline"
+          >
+            {def.label}
+          </Link>
+          <span className="font-mono text-[10px] text-on-surface-variant">
+            {def.loading ? "..." : def.entries.length}
+          </span>
+        </div>
+      ) : (
+        <button
+          type="button"
+          onClick={onToggle}
+          data-testid={`specs-section-toggle-${def.id}`}
+          className="w-full flex items-center gap-1 px-2 py-1 hover:bg-surface-low text-left"
+        >
+          <Chevron className="h-3 w-3 text-on-surface-variant" />
+          <span className="font-mono text-[11px] uppercase tracking-wide text-stone-900 flex-1">
+            {def.label}
+          </span>
+          <span className="font-mono text-[10px] text-on-surface-variant">
+            {def.loading ? "..." : def.entries.length}
+          </span>
+        </button>
+      )}
       {expanded ? (
         <ul className="ml-5 border-l border-stone-200">
           {def.entries.length > 0 ? (
@@ -190,16 +224,8 @@ export function SpecsTreeView() {
         loading: agentImagesLoading,
       },
       { id: "applications", label: "Applications", entries: applications, loading: specsLoading },
-      {
-        id: "skills",
-        label: "Skills",
-        entries: skills.map((skill) => ({
-          id: skill.id,
-          name: skill.name,
-          skillId: skill.id,
-        })),
-        loading: skillsLoading,
-      },
+      // Slice 28 — Plugins above Skills per founder direction (Skills
+      // list will be larger; Plugins user-priority).
       {
         id: "plugins",
         label: "Plugins",
@@ -210,6 +236,16 @@ export function SpecsTreeView() {
           meta: plugin.version,
         })),
         loading: pluginsLoading,
+      },
+      {
+        id: "skills",
+        label: "Skills",
+        entries: skills.map((skill) => ({
+          id: skill.id,
+          name: skill.name,
+          skillId: skill.id,
+        })),
+        loading: skillsLoading,
       },
     ];
   }, [
@@ -237,43 +273,24 @@ export function SpecsTreeView() {
         </Link>
       </div>
 
-      {/* Slice 18 — top-level Library entries (Skills + Plugins) sit
-          above the grouped tree as direct navigation to the index pages.
-          Clicking the link both navigates AND expands the matching
-          section below (per IMPL-PRD §3.3 + T7 — "click expands list
-          below + opens page"). The existing Section tree below continues
-          to group entries for browsing in place. */}
-      <ul className="px-2 mb-2 space-y-0.5">
-        <li>
-          <Link
-            to="/specs/skills"
-            data-testid="sidebar-skills-top-level"
-            onClick={() => setExpanded((prev) => ({ ...prev, skills: true }))}
-            className="block font-mono text-[11px] uppercase tracking-wide text-stone-700 hover:text-stone-900 hover:bg-surface-low px-2 py-1"
-          >
-            {"> "}Skills
-          </Link>
-        </li>
-        <li>
-          <Link
-            to="/specs/plugins"
-            data-testid="sidebar-plugins-top-level"
-            onClick={() => setExpanded((prev) => ({ ...prev, plugins: true }))}
-            className="block font-mono text-[11px] uppercase tracking-wide text-stone-700 hover:text-stone-900 hover:bg-surface-low px-2 py-1"
-          >
-            {"> "}Plugins
-          </Link>
-        </li>
-      </ul>
+      {/* Slice 28 — top-level Skills + Plugins duplicates removed.
+          The grouped tree below carries those entries with dual-action
+          (label navigates to index page + expands the subtree). */}
       <ul>
         {sections.map((def) => {
           if (def.id !== "skills") {
+            // Slice 28 dual-action: plugins section label navigates
+            // to /specs/plugins AND expands the tree. Other sections
+            // (rig-specs, agent-specs, etc.) keep legacy toggle-only.
+            const navigateTo = def.id === "plugins" ? "/specs/plugins" : undefined;
             return (
               <Section
                 key={def.id}
                 def={def}
                 expanded={!!expanded[def.id]}
                 onToggle={() => toggle(def.id)}
+                navigateTo={navigateTo}
+                onNavigate={navigateTo ? () => setExpanded((prev) => ({ ...prev, [def.id]: true })) : undefined}
               />
             );
           }
@@ -282,20 +299,30 @@ export function SpecsTreeView() {
           const Chevron = skillsExpanded ? ChevronDown : ChevronRight;
           return (
             <li key={def.id} data-testid="specs-section-skills">
-              <button
-                type="button"
-                onClick={() => toggle("skills")}
-                data-testid="specs-section-toggle-skills"
-                className="w-full flex items-center gap-1 px-2 py-1 hover:bg-surface-low text-left"
-              >
-                <Chevron className="h-3 w-3 text-on-surface-variant" />
-                <span className="font-mono text-[11px] uppercase tracking-wide text-stone-900 flex-1">
+              {/* Slice 28 dual-action header: chevron toggles expand;
+                  label Link navigates to /specs/skills AND expands. */}
+              <div className="w-full flex items-center gap-1 px-2 py-1 hover:bg-surface-low text-left">
+                <button
+                  type="button"
+                  onClick={() => toggle("skills")}
+                  data-testid="specs-section-toggle-skills"
+                  aria-label={`${skillsExpanded ? "Collapse" : "Expand"} Skills`}
+                  className="inline-flex h-4 w-4 shrink-0 items-center justify-center text-stone-500 hover:text-stone-900"
+                >
+                  <Chevron className="h-3 w-3" />
+                </button>
+                <Link
+                  to="/specs/skills"
+                  data-testid="specs-section-link-skills"
+                  onClick={() => setExpanded((prev) => ({ ...prev, skills: true }))}
+                  className="font-mono text-[11px] uppercase tracking-wide text-stone-900 flex-1 hover:underline"
+                >
                   Skills
-                </span>
+                </Link>
                 <span className="font-mono text-[10px] text-on-surface-variant">
                   {skillsLoading ? "..." : skills.length}
                 </span>
-              </button>
+              </div>
               {skillsExpanded ? (
                 <ul className="ml-5 border-l border-stone-200">
                   {skills.length > 0 ? (

@@ -3,9 +3,16 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import { SpecsTreeView } from "../src/components/specs/SpecsTreeView.js";
 import { createTestRouter } from "./helpers/test-router.js";
 
-// velocity-guard 18.C BLOCKING-CONCERN repair (Blocker 2):
-// Top-level "Skills" sidebar link must both navigate to /specs/skills
-// AND expand the Skills section below (per IMPL-PRD §3.3 + T7).
+// Slice 28 — Library Explorer Finishing.
+//
+// Slice 18 originally landed Library Explorer with top-level
+// duplicates: `> Skills` and `> Plugins` Links sat above the grouped
+// tree as separate sidebar entries. Founder-walk feedback flagged this
+// as a duplicate UI affordance — the grouped sections below already
+// carry those entries. Slice 28 removes the top-level duplicates and
+// migrates the dual-action behavior (navigate to index + expand the
+// subtree) to the SKILLS + PLUGINS section labels themselves. Also
+// reorders the bottom sections so PLUGINS sits above SKILLS.
 
 const mockFetch = vi.fn();
 
@@ -37,31 +44,68 @@ function renderTree() {
   );
 }
 
-describe("SpecsTreeView — top-level sidebar Skills link", () => {
-  it("renders a Skills top-level link in the sidebar", async () => {
-    renderTree();
-    await waitFor(() => {
-      expect(screen.getByTestId("sidebar-skills-top-level")).toBeTruthy();
-    });
-  });
-
-  it("Skills section is collapsed by default (chevron right; no placeholder visible)", async () => {
+describe("SpecsTreeView — slice 28 HG-1 (top-level duplicates removed)", () => {
+  it("does NOT render the legacy `sidebar-skills-top-level` link", async () => {
     renderTree();
     await waitFor(() => {
       expect(screen.getByTestId("specs-section-skills")).toBeTruthy();
     });
-    // Default expanded state for "skills" is false; placeholder not rendered.
+    // Pre-slice-28 testid; must be absent. Discriminator vs slice 18 shape.
+    expect(screen.queryByTestId("sidebar-skills-top-level")).toBeNull();
+  });
+
+  it("does NOT render the legacy `sidebar-plugins-top-level` link", async () => {
+    renderTree();
+    await waitFor(() => {
+      expect(screen.getByTestId("specs-section-plugins")).toBeTruthy();
+    });
+    expect(screen.queryByTestId("sidebar-plugins-top-level")).toBeNull();
+  });
+});
+
+describe("SpecsTreeView — slice 28 HG-4 (PLUGINS above SKILLS in section order)", () => {
+  it("PLUGINS section appears before SKILLS section in DOM order", async () => {
+    renderTree();
+    await waitFor(() => {
+      expect(screen.getByTestId("specs-section-plugins")).toBeTruthy();
+      expect(screen.getByTestId("specs-section-skills")).toBeTruthy();
+    });
+    const plugins = screen.getByTestId("specs-section-plugins");
+    const skills = screen.getByTestId("specs-section-skills");
+    // DOCUMENT_POSITION_FOLLOWING = 4. If plugins precedes skills,
+    // plugins.compareDocumentPosition(skills) includes that bit.
+    expect(plugins.compareDocumentPosition(skills) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+});
+
+describe("SpecsTreeView — slice 28 HG-2 (SKILLS section dual-action label)", () => {
+  it("renders a navigable SKILLS section label (testid `specs-section-link-skills`)", async () => {
+    renderTree();
+    await waitFor(() => {
+      expect(screen.getByTestId("specs-section-link-skills")).toBeTruthy();
+    });
+    // Anchor element (Link) — must have href to /specs/skills.
+    const link = screen.getByTestId("specs-section-link-skills") as HTMLAnchorElement;
+    expect(link.tagName).toBe("A");
+    expect(link.getAttribute("href")).toBe("/specs/skills");
+  });
+
+  it("SKILLS section is collapsed by default (placeholder absent)", async () => {
+    renderTree();
+    await waitFor(() => {
+      expect(screen.getByTestId("specs-section-skills")).toBeTruthy();
+    });
     expect(screen.queryByText(/no skills yet/i)).toBeNull();
   });
 
-  it("clicking the sidebar Skills top-level link expands the Skills section below", async () => {
+  it("clicking the SKILLS section label expands the Skills section below (placeholder visible)", async () => {
     renderTree();
     await waitFor(() => {
-      expect(screen.getByTestId("sidebar-skills-top-level")).toBeTruthy();
+      expect(screen.getByTestId("specs-section-link-skills")).toBeTruthy();
     });
     expect(screen.queryByText(/no skills yet/i)).toBeNull();
 
-    fireEvent.click(screen.getByTestId("sidebar-skills-top-level"));
+    fireEvent.click(screen.getByTestId("specs-section-link-skills"));
 
     await waitFor(() => {
       // After the click, the section's expanded body renders. Because
@@ -70,17 +114,31 @@ describe("SpecsTreeView — top-level sidebar Skills link", () => {
       expect(screen.getByText(/no skills yet/i)).toBeTruthy();
     });
   });
-});
 
-describe("SpecsTreeView — top-level sidebar Plugins link (slice 18 Checkpoint D)", () => {
-  it("renders a Plugins top-level link in the sidebar", async () => {
+  it("chevron toggle still works independently of the label Link (expand-only side)", async () => {
     renderTree();
     await waitFor(() => {
-      expect(screen.getByTestId("sidebar-plugins-top-level")).toBeTruthy();
+      expect(screen.getByTestId("specs-section-toggle-skills")).toBeTruthy();
+    });
+    fireEvent.click(screen.getByTestId("specs-section-toggle-skills"));
+    await waitFor(() => {
+      expect(screen.getByText(/no skills yet/i)).toBeTruthy();
     });
   });
+});
 
-  it("Plugins section is collapsed by default (placeholder absent)", async () => {
+describe("SpecsTreeView — slice 28 HG-3 (PLUGINS section dual-action label)", () => {
+  it("renders a navigable PLUGINS section label (testid `specs-section-link-plugins`)", async () => {
+    renderTree();
+    await waitFor(() => {
+      expect(screen.getByTestId("specs-section-link-plugins")).toBeTruthy();
+    });
+    const link = screen.getByTestId("specs-section-link-plugins") as HTMLAnchorElement;
+    expect(link.tagName).toBe("A");
+    expect(link.getAttribute("href")).toBe("/specs/plugins");
+  });
+
+  it("PLUGINS section is collapsed by default (placeholder absent)", async () => {
     renderTree();
     await waitFor(() => {
       expect(screen.getByTestId("specs-section-plugins")).toBeTruthy();
@@ -88,15 +146,26 @@ describe("SpecsTreeView — top-level sidebar Plugins link (slice 18 Checkpoint 
     expect(screen.queryByText(/no plugins yet/i)).toBeNull();
   });
 
-  it("clicking the sidebar Plugins top-level link expands the Plugins section below", async () => {
+  it("clicking the PLUGINS section label expands the Plugins section below (placeholder visible)", async () => {
     renderTree();
     await waitFor(() => {
-      expect(screen.getByTestId("sidebar-plugins-top-level")).toBeTruthy();
+      expect(screen.getByTestId("specs-section-link-plugins")).toBeTruthy();
     });
     expect(screen.queryByText(/no plugins yet/i)).toBeNull();
 
-    fireEvent.click(screen.getByTestId("sidebar-plugins-top-level"));
+    fireEvent.click(screen.getByTestId("specs-section-link-plugins"));
 
+    await waitFor(() => {
+      expect(screen.getByText(/no plugins yet/i)).toBeTruthy();
+    });
+  });
+
+  it("chevron toggle still works independently of the label Link (expand-only side)", async () => {
+    renderTree();
+    await waitFor(() => {
+      expect(screen.getByTestId("specs-section-toggle-plugins")).toBeTruthy();
+    });
+    fireEvent.click(screen.getByTestId("specs-section-toggle-plugins"));
     await waitFor(() => {
       expect(screen.getByText(/no plugins yet/i)).toBeTruthy();
     });
