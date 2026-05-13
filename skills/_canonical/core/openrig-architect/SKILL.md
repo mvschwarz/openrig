@@ -7,8 +7,6 @@ metadata:
     last_verified: "2026-05-04"
     distribution_scope: product-bound
     source_evidence: |
-      Imported 2026-05-02 from openrig/packages/daemon/specs/agents/shared/skills/rig-architect/SKILL.md (349 lines).
-      Product built-in is the only source — substrate/shared-docs/skills/rig-architect/ does not exist.
       Bootstrap skill — NPM install lands this in personal homes (~/.claude/skills/, ~/.agents/skills/) for users authoring their own rigs.
     sibling_skills:
       - openrig-user
@@ -56,12 +54,7 @@ Load these before starting any design work. The quality of your output depends o
 
 **Read if present on this host:**
 
-4. **Host-level doctrine** at `~/code/substrate/shared-docs/HOST-TOPOLOGY.md` (or wherever substrate lives on this host). If this file exists, it supersedes the baseline process below for complex or high-stakes rigs. Specifically:
-   - §3 defines the canonical rig classes (kernel, project, ephemeral, infra-build, managed-app). Classify before designing.
-   - §4 defines context-sharing patterns (pods as context domains, pair pattern, HA via mental-model-ha skill + substrate session logs, terminal nodes as common-room, chatroom/substrate/transcripts/Corpus).
-   - **§7 is the canonical 12-step rig-spec authoring SOP for high-stakes rigs — use it instead of the baseline "Design Process" below when the rig is ≥4 members, uses HA, is a managed-app, or will be shared/copied.** The baseline below still applies to small/focused rigs.
-   - §10 contains the host's bootstrap sequence so you know where your new rig fits.
-   - §12 has the naming canon and vocabulary mapping to shipped terms.
+4. **Host-level doctrine file** (if your team maintains one — e.g., a HOST-TOPOLOGY doc that defines canonical rig classes, context-sharing patterns, and authoring SOPs for high-stakes rigs). If present, it supersedes the baseline process below for complex or high-stakes rigs (≥4 members, HA, managed-app, or shared/copied). Solo operators and small/focused rigs use the baseline below directly.
 5. **`building-agent-software` skill** if available in your skill catalog. Design principles for agent-facing tools and surfaces. Relevant when your rig ships a new CLI, service, or managed app.
 
 **Load as needed:**

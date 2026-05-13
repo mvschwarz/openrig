@@ -7,7 +7,8 @@ metadata:
     last_verified: "2026-05-04"
     distribution_scope: product-bound
     source_evidence: |
-      Translated from openrig-work/primitives/runtime-control/rig-lifecycle.md (102 lines, matrix-proof-complete-tier-1-with-tier-2-human-gated). Lifecycle Reboot/Recovery Scenario Matrix slice closed at openrig ab01331 (2026-04-30); Codex auth-refusal → attention_required closed at 53e9409 same day.
+      Lifecycle Reboot/Recovery Scenario Matrix (Tier 1 complete; Tier 2
+      human-gated). Codex auth-refusal surfaces as attention_required.
     sibling_skills:
       - topology-mutation-and-seat-management
       - seat-scaling-and-specialization

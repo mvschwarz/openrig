@@ -86,10 +86,10 @@ Resolution order for workspace per-subdir keys: per-subdir override >
 > set the per-subdir workspace overrides explicitly:
 >
 > ```bash
-> rig config set workspace.slices_root /Users/me/code/substrate/.../missions
-> rig config set workspace.steering_path /Users/me/code/substrate/openrig-work/STEERING.md
-> rig config set workspace.progress_scan_roots 'work:/Users/me/code/substrate/openrig-work,missions:/Users/me/code/substrate/openrig-work/missions'
-> rig config set workspace.field_notes_root /Users/me/code/substrate/openrig-work/field-notes
+> rig config set workspace.slices_root /path/to/your/workspace/missions
+> rig config set workspace.steering_path /path/to/your/workspace/STEERING.md
+> rig config set workspace.progress_scan_roots 'work:/path/to/your/workspace,missions:/path/to/your/workspace/missions'
+> rig config set workspace.field_notes_root /path/to/your/workspace/field-notes
 > ```
 >
 > No restart needed for the CLI; for the daemon's reads to pick up
