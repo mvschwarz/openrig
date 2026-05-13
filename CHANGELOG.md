@@ -10,31 +10,265 @@ deprecations, and behavioral changes. Breaking changes are called out explicitly
 
 ## [0.3.1] - unreleased
 
-**Status**: in-flight; draft notes accumulate per shipped slice.
+**Status**: release candidate; awaiting lifecycle-rig staging + host upgrade.
 
-### Config + settings
+### Summary For Installing Agents
 
-- `rig config get/set/reset/list` continues to be the canonical CLI surface
-  for the typed config keys. No new keys added in 0.3.1; no breaking changes.
-- 29 allowlisted keys total. CLI `VALID_KEYS` and daemon `SETTINGS_VALID_KEYS`
-  are byte-identical sets (verified in slice 08; lockstep contract holds).
-- Env override precedence is `OPENRIG_<KEY>` env var > `~/.openrig/config.json`
-  > derived default. The 5 original runtime keys (`daemon.port`, `daemon.host`,
-  `db.path`, `transcripts.enabled`, `transcripts.path`) additionally accept
-  their `RIGGED_<KEY>` legacy alias for upgrade compatibility from pre-rename
-  installs; new typed keys are `OPENRIG_<KEY>` only.
-- `rig config --help` text refreshed to enumerate every top-level key
-  namespace: `daemon.*`, `db.path`, `transcripts.*` (including the
-  rotation-tuning keys `lines` + `poll_interval_seconds`), `workspace.*`
-  (including `dogfood_evidence_root` + `operator_seat_name`), `files.allowlist`,
-  `progress.scan_roots`, `ui.preview.*`, `recovery.*`, `agents.*`,
-  `feed.subscriptions.*`, `runtime.codex.*`. A regression test asserts the
-  help text continues to enumerate every namespace as new keys land.
-- No new SC-29 EXCEPTIONs introduced by the slice 08 validation pass.
+- **Package version**: package metadata bumped at release-manager step; CLI
+  reports the new version after `npm publish`.
+- **Migrations**: no schema-breaking migrations in 0.3.1. Existing databases
+  upgrade by running `rig daemon start`.
+- **Node engines**: unchanged from 0.3.0 (CLI accepts Node `>=20`).
+- **Backward compatibility**: existing CLI argument shapes, daemon route
+  paths, RigSpec/AgentSpec schemas, and persisted settings remain backward
+  compatible. New routes are additive. New ConfigStore keys are opt-in
+  default-off.
 
-### Other slices
+### Claude Auto-Compaction Policy
 
-(slice notes accumulate here as each slice ships.)
+The headline 0.3.1 feature: operator-configurable Claude session
+auto-compaction with safe defaults.
+
+- **Opt-in default-off**: with no policy configured, no behavior change. The
+  daemon never sends an auto-`/compact` until the operator explicitly enables
+  the policy.
+- **7 new ConfigStore keys** in the `policies.claude_compaction.*` namespace
+  (lockstep across CLI VALID_KEYS + daemon SETTINGS_VALID_KEYS): `enabled`,
+  `threshold_percent` (strict integer 1-100), `compact_instruction` (default
+  empty; appended to `/compact` slash-command args when set),
+  `message_inline`, `message_file_path`, `pre_compact_instruction`,
+  `post_restore_audit_instruction`. Strict validation across all source
+  layers (`set/POST/env/file`) — invalid env values fall back to defaults
+  with a warning to stderr rather than silently coercing.
+- **5 operator-editable prompt surfaces** rendered in the
+  Settings → Policies UI form: pre-compaction prep, compact instruction,
+  post-compaction restore (inline), restore file path, post-restore audit.
+  Daemon-owned wrappers (usage/threshold framing, trust-channel preservation,
+  marker paths, read-depth enforcement, turn-boundary handshake, dedup +
+  cooldown) are non-editable.
+- **6-stage daemon-to-LLM lifecycle**:
+  1. Pre-compact prep prompt — full-context Claude writes a mental-model
+     restore map (annotated ASCII file/folder tree) before compaction
+     ("save game before quit").
+  2. `/compact` with operator instructions + trust-channel preservation
+     embedded in args.
+  3. Post-compact turn-boundary handshake — non-restorative acknowledgment
+     creates an assistant-turn boundary so the subsequent restore prompt
+     lands in the correct trust context.
+  4. Restore prompt — explicit user-request shape; defense-in-depth
+     fallback chain (marker → JSONL transcript path → session-id → generic).
+  5. Compliance prompt — forces FULL/PARTIAL/NOT_READ read-depth audit
+     table; counters Claude's deferred-execution + token-conservation
+     instincts.
+  6. Cooldown (10-minute default) — prevents re-fire while restore work
+     is still consuming context.
+- **PreCompact hook + SessionStart/UserPromptSubmit bridge**: the openrig-core
+  plugin ships a marker-bridge that picks up pending-restore markers
+  post-compaction and injects restore directives once. Templates live in
+  the `claude-compaction-restore` skill and ship with the plugin.
+- **Safety hardening**: SessionTransport classifies typed prompt drafts as
+  attention state — auto-`/compact` retries later instead of overwriting
+  human input. Send-failure does not advance dedup state (transient retry).
+  Re-arm requires threshold-crossing (session must drop below threshold
+  before next auto-compact).
+
+### Library Explorer Finishing
+
+The Library destination (skills + plugins + specs) became a fully
+operator-facing surface:
+
+- **No duplicate top-level entries**: `> SKILLS` and `> PLUGINS` rows
+  removed from the top of `SpecsTreeView`. Bottom-row clicks now do
+  dual-action (navigate to the matching index page + expand the tree).
+- **Reorder**: Plugins above Skills.
+- **OpenRig-managed skills discovery**: 32 shared skills now visible in
+  the tree + on `/specs/skills` index. Previously the workspace-relative
+  path lookup returned empty in production VM environments.
+- **Daemon-owned library discovery API** (new):
+  - `GET /api/skills/library` → consolidated `LibrarySkillPublic[]`
+    (workspace + openrig-managed sources; absolute paths not leaked).
+  - `GET /api/skills/:id/files/list?path=<rel>` + `/api/skills/:id/files/read?path=<rel>` —
+    skill folder browse + content read.
+  - `GET /api/plugins/:id/files/list?path=<rel>` + `/api/plugins/:id/files/read?path=<rel>` —
+    plugin folder browse + content read.
+  - `PluginEntry.skillCount` field added to plugin discovery
+    serialization.
+- **Real file-browser docs-browser on plugin and skill detail pages**:
+  detail pages mount a `DirectoryTree` + `FileContentPanel` against the
+  real plugin/skill folder. Markdown auto-renders; non-markdown files
+  (e.g. `.ts`, `.json`) render as text. Folder navigation works (entering
+  subfolders + listing files).
+- **Rolled-up index pages**: `/specs/skills` lists all skills as flat rows
+  with source label + file count + entry link. `/specs/plugins` lists all
+  plugins as rows with version + runtimes + skill-count + entry link.
+
+### Plugin Primitive v0
+
+- **Plugin discovery**: vendored plugins under `$OPENRIG_HOME/plugins/`
+  (default `~/.openrig/plugins/`) are discovered, validated, and
+  surfaced through `rig plugin list` + `/api/plugins`.
+- **Plugin install (v0)**: explicit operator copy or symlink to
+  `$OPENRIG_HOME/plugins/<plugin-id>/`. A `rig plugin install
+  <substrate-path>` verb is deferred to 0.3.2; see `OPENRIG-INSTALL.md`
+  inside each plugin's source for the documented copy/symlink workflow.
+- **CLI**: `rig plugin list` / `show` / `used-by` / `validate` subcommands
+  available. No `install` subcommand at v0.
+- **Plugins shipped as substrate references** (for plugin authors to
+  copy-install): `gstack` (45 skills), `obra-superpowers` (14 skills).
+  `openrig-core` ships bundled with the daemon (11 skills).
+
+### Settings Destination Explorer
+
+Settings became a 4-item Explorer destination matching Topology /
+Project / Library / For-You pattern:
+
+- `/settings` (general config keys form), `/settings/policies`,
+  `/settings/log`, `/settings/status`.
+- Old top-row tab nav removed.
+- Shared `SettingsPageShell` chrome across all 4 sub-routes.
+- Policies page is the home for the Claude auto-compaction policy form
+  (see above).
+
+### CMUX Launcher
+
+- **Launch in CMUX button** on the rig-scope topology tab-bar trailing
+  slot. Opens a cmux workspace for the rig with appropriate title +
+  cwd parameters. Powered by new daemon route + cmux adapter
+  extensions.
+
+### Node-Page Overview + Details
+
+- **Seat overview table** consolidated as 7-column horizontal layout with
+  vertical grid lines (Claude/Codex agent + status + context + tokens +
+  uptime + cwd + current-work).
+- **Tab consolidation** + activity alignment on the node-detail surface.
+- **Alert-only notification banner** (renders only on real-alert states:
+  `failed`, `attention_required`, or `latestError !== null`); generic
+  `recoveryGuidance` no longer triggers a banner on every seat.
+- **cwd / current-work separation**: factored into a `SeatOverviewSecondary`
+  primitive below the column table.
+
+### Mobile Drawer Behavior
+
+The Explorer drawer at 375px viewports now layers above the mobile rail
+tray for Settings / Project / Library / For-You destinations
+(previously hidden behind rail-tray; visible click path didn't register
+on Explorer items). Topology mobile drawer is intentionally hidden in
+0.3.1 (clicking the hamburger triggered a pre-existing
+TopologyTableView renderer cascade); the topology mobile drawer is
+scheduled for full restoration in 0.3.2 via a dedicated
+TopologyTableView render-path slice.
+
+### Plugins And Skills On The VM (Operator Note)
+
+Operators dogfood-testing 0.3.1 should expect:
+
+- **Stock VM install**: only `openrig-core` plugin is bundled. The
+  `/specs/plugins` UI list will show one plugin until the operator
+  installs additional plugins per the v0 copy workflow.
+- **Skills**: 32 OpenRig-managed shared skills ship under
+  `packages/daemon/specs/agents/shared/skills/` (discovered via the
+  daemon skill-library API; no operator action required).
+- **User-installed skills**: skills the operator installs under
+  `~/.openrig/skills/` or the workspace `.openrig/skills/` directory
+  surface in the same list.
+
+### Config + Settings
+
+Continues from 0.3.0 with the slice 08 validation pass:
+
+- `rig config get/set/reset/list` remains the canonical CLI surface.
+- Lockstep CLI `VALID_KEYS` + daemon `SETTINGS_VALID_KEYS` byte-identical
+  sets (verified in slice 08).
+- Help-drift CI gate from slice 08 honored across all new keys added in
+  0.3.1.
+
+### SC-29 Exceptions
+
+The SC-29 exception process tracks explicit scope expansions to release
+contracts. Exceptions declared in 0.3.1:
+
+- **#10 (slice 24)**: cmux launcher — `POST /api/rigs/:rigId/cmux/launch`
+  + CmuxLayoutService + 4 CmuxAdapter RPC methods.
+- **#10 (slice 27, numbering collision)**: Claude auto-compaction policy
+  — 7 `policies.claude_compaction.*` ConfigStore keys. (Numbering
+  collision with #10 above is a process-only inconsistency; both code
+  scopes are correctly merged. Canonical `SC29-LEDGER.md` and ledger
+  hygiene scheduled for 0.3.2.)
+- **#11 (slice 28)**: Library Explorer daemon API — 5 new daemon GET
+  endpoints (`/api/skills/library`, `/api/skills/:id/files/list`,
+  `/api/skills/:id/files/read`, `/api/plugins/:id/files/list`,
+  `/api/plugins/:id/files/read`) + 2 response shape additions
+  (`PluginEntry.skillCount`, `LibrarySkillPublic`).
+
+### Known Carry-Forwards (0.3.2 Candidates)
+
+- **`rig plugin install <substrate-path>` verb**: explicitly deferred.
+  Documented copy/symlink workflow is the v0 install path.
+- **Topology mobile drawer**: hidden in 0.3.1 to avoid a pre-existing
+  TopologyTableView renderer cascade at 375px viewports. Full
+  restoration scheduled for 0.3.2 via dedicated render-path slice.
+- **Plugin source-label taxonomy**: copy-installed plugins currently
+  land in the `vendored` source kind; UI label says "No user-installed
+  plugins" while listing them. Taxonomy refinement scheduled for 0.3.2.
+- **`SC29-LEDGER.md`**: canonical SC-29 numbering ledger document.
+  Authors currently self-assign exception numbers; documented ledger
+  prevents collisions like the slice 24/27 #10.
+- **VM PreCompact hook installer**: the documented install path for the
+  `claude-compaction-restore` skill is operator-manual at v0; an
+  automated installer is a 0.3.2 candidate.
+- **`docs/DESIGN.md` docs-guard violation**: pre-existing
+  `npm run test:repo` failure; tracked doc outside allowed paths;
+  cleanup scheduled for 0.3.2 documentation hygiene pass.
+- **Environment-dependent tests**: a small number of vitest suites fail
+  on developer hosts due to port-conflicts (preflight) or live host
+  Claude hook state (restore-check); focused-test gates pass these
+  suites; cumulative-workspace runs surface the gaps. Isolation cleanup
+  scheduled for 0.3.2.
+
+### Banked Discipline Patterns
+
+0.3.1 surfaced a number of canonical agent-software-design patterns
+during the Claude compaction iteration cycle and Library Explorer
+finishing work. These are banked in operator-skill documentation for
+agent-prompt design + daemon-to-LLM trust establishment:
+
+- **Channel model**: normal user message is the only authorized action
+  surface; hook stdout is informational-only; `/compact` args carry
+  trust contracts that the post-compact prompt invokes.
+- **Turn-boundary handshake**: when a daemon-driven action request
+  would land too adjacent to local-command output, insert a
+  non-committing acknowledgment message first to create an
+  assistant-turn boundary.
+- **Save-game-before-quit pattern**: full-context agent writes
+  restoration breadcrumb before forced context loss; context-loss
+  agent reads it on restore.
+- **Structured-output forces completeness**: ask LLMs for explicit
+  FULL/PARTIAL/NOT_READ accounting when thoroughness matters; counters
+  token-conservation instincts.
+- **Daemon-owned shared-resource discovery**: skill/plugin discovery
+  belongs at the daemon layer with HTTP endpoint surfaces; UI consumes
+  via typed API. Avoids workspace-cwd-relative path-resolution
+  brittleness.
+
+### Quick Verification Commands
+
+```bash
+# Confirm CLI version after the release-manager version bump
+rig --version
+
+# Confirm daemon starts cleanly
+rig daemon start
+
+# Confirm new Claude compaction policy keys are visible
+rig config list | grep policies.claude_compaction
+
+# Confirm plugins discoverable
+rig plugin list
+
+# Confirm skills discoverable
+curl -s http://localhost:7433/api/skills/library | jq 'length'
+```
 
 ---
 
