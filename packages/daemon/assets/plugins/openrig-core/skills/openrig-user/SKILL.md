@@ -7,8 +7,6 @@ metadata:
     last_verified: "2026-05-04"
     distribution_scope: product-bound
     source_evidence: |
-      Synced 2026-05-04 from substrate/shared-docs/skills/openrig-user/SKILL.md (substrate-root canonical, v0.2.0 released by lifecycle team). Originally imported 2026-05-02 from openrig/packages/daemon/specs/agents/shared/skills/core/openrig-user/SKILL.md.
-      Lifecycle team rsync'd the new version into substrate root for their own work; factory's job is to keep the openrig-work/skills/ workspace version in sync as new releases land.
       Bootstrap skill — NPM install lands this in personal homes (~/.claude/skills/, ~/.agents/skills/) so agents have it at every boot.
     sibling_skills:
       - openrig-operator

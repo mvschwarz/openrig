@@ -7,18 +7,13 @@ metadata:
     last_verified: "2026-05-04"
     distribution_scope: product-bound
     source_evidence: |
-      Translated from openrig-work/primitives/knowledge-and-context/agent-startup-and-context-ingestion.md (68 lines, design-consolidation). Cross-references the cross-runtime restore/reentry packet standard v0 + externalized memory surfaces convention.
+      Cross-runtime restore/reentry packet standard + externalized memory
+      surfaces convention. Load at agent start; revisit after compaction.
     sibling_skills:
       - claude-compaction-restore
       - mental-model-ha
       - scope-recovery
-      - session-compaction-and-restore
-      - agent-starters
-      - composable-priming-packs
-      - session-source-fork
       - seat-continuity-and-handover
-      - claude-compact-in-place
-      - pre-maintenance-agent-preservation
     transfer_test: pending
 ---
 
@@ -50,7 +45,7 @@ is scattered or stale, agents execute the wrong thing very efficiently.
 ## Don't use this when
 
 - The agent is being created via Agent Starter — the starter's manifest carries startup context
-- The work is artifact-backed mental-model rebuild from a packet — that's `session-compaction-and-restore`
+- The work is artifact-backed mental-model rebuild from a packet — that's `claude-compaction-restore`
 - The intent is to ship reusable startup content as a skill — that's `writing-skills-for-openrig`
 
 ## Failure modes (4)
@@ -84,7 +79,7 @@ Per the externalized-memory-surfaces convention's 13-row inventory:
 - **Row 3** — startup replay context (primary)
 - **Row 12** — restore/reentry packets and Agent Starters (cross-runtime startup path)
 
-The umbrella's authority-rank + permission-posture columns govern which
+The umbrella's authority-rank + read-vs-write columns govern which
 surfaces a startup ingestion path can write vs only read.
 
 ## Startup files vs skills (the distinction)
@@ -106,9 +101,5 @@ culture / pod / member / operator) handles the layering.
 
 - `writing-skills-for-openrig` skill — authoring discipline for skill content (what doesn't belong in startup)
 - `forming-an-openrig-mental-model` skill — orientation for new agents
-- `session-compaction-and-restore` skill — restore-time startup ingestion
-- `agent-starters` skill — reusable starter manifests that compose startup context
-- `composable-priming-packs` skill — manifests that produce primed sessions
-- `externalized-memory-surfaces` skill — umbrella convention for memory surfaces this primitive consumes
-- `openrig/docs/reference/agent-startup-guide.md` (product reference doc; not a skill) — the 7-layer additive startup model + delivery hints
-- `agent-startup-and-context-ingestion` skill — primitive dossier with current-state notes + next-slice scope
+- `claude-compaction-restore` skill — restore-time startup ingestion after compaction
+- `seat-continuity-and-handover` skill — packet shape that survives seat resets

@@ -7,15 +7,12 @@ metadata:
     last_verified: "2026-05-04"
     distribution_scope: product-bound
     source_evidence: |
-      Translated from openrig-work/primitives/coordination/queue-handoff-and-hot-potato.md (config-layer-dogfood, 81 lines, 2026-04-29).
-      Hot-potato terminal-turn-rule originally codified in field-notes/2026-04-28-hot-potato-terminal-turn-rule.md.
-      Daemon-backed `rig queue` shipped in v0.2.0 (PL-004 Phase A) with the same handed-off-to / handed-off-from / state field shape as the rigx config-layer surface. `rig queue` is canonical for new work; `rigx queue` is recovery-only fallback. The daemon enforces hot-potato strict-rejection at the API.
+      Daemon-backed `rig queue` shipped in v0.2.0 (PL-004 Phase A) with handed-off-to / handed-off-from / state field shape. `rig queue` is canonical for new work; `rigx queue` is recovery-only fallback. The daemon enforces hot-potato strict-rejection at the API.
     sibling_skills:
       - workflow-runtime
       - watchdog
       - alignment-trace
       - looping-workflows
-      - intake-routing
       - human-in-the-loop
       - attention-queue
       - dispatching-parallel-agents
@@ -139,6 +136,4 @@ edge directly — don't fall back to stale pre-upgrade assumptions.
 ## See also
 
 - `looping-workflows` skill — operating discipline for self-driving rig-shaped loops; queue-handoff is its current handoff substrate
-- `intake-routing` skill — how raw signals enter the system and become routed work that flows through the queue
-- `substrate/shared-docs/openrig-work/primitives/coordination/queue-handoff-and-hot-potato.md` — primitive dossier with v0 codified-doctrine record + slice closure history
-- `substrate/shared-docs/openrig-work/field-notes/2026-04-28-hot-potato-terminal-turn-rule.md` — field note where the rule was first surfaced
+- `rig queue --help` — full CLI surface for queue items, handoffs, and closure-reason discipline

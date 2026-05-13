@@ -8,9 +8,7 @@ metadata:
     last_verified: "2026-05-04"
     distribution_scope: product-bound
     source_evidence: |
-      Graduated 2026-05-04 from openrig-work/skills/workspace/from-product/openrig-operator/.
-      Originally imported from openrig/packages/daemon/specs/agents/shared/skills/core/openrig-operator/
-      (product built-in). Bootstrap skill — NPM install lands this in personal homes.
+      Bootstrap skill — NPM install lands this in personal homes (~/.claude/skills/, ~/.agents/skills/).
       Companion to openrig-user (daily CLI surface) — this skill is host-side troubleshooting.
     transfer_test: pending
     sibling_skills:
@@ -191,12 +189,12 @@ Field note: as of Codex CLI `0.125.0`, top-level `[sandbox_workspace_write]` was
 
 If the task requires writing load-bearing knowledge or behavior and the intended target is not writable, stop and escalate. Do not silently write to `state/`, `/tmp`, or a nearby writable folder.
 
-Use the intended durable home:
-- `skills/` for operating rules and refocus behavior
-- `openrig-work/field-notes/` for durable observations and investigations
-- `openrig-work/lab/` for experiments and external project research
-- `openrig-work/missions/` for PM specs, roadmap packets, and workstream canon
-- product repo for shipped OpenRig daemon/CLI/config/spec/test behavior
+Use the intended durable home for the kind of content:
+- `skills/` (e.g. `~/.claude/skills/`, `~/.agents/skills/`, or your team's
+  shared skill folder) for operating rules and refocus behavior
+- Your team's workstream notebook (field notes, lab experiments, mission
+  packets, etc.) for durable observations and PM canon
+- The product repo for shipped OpenRig daemon/CLI/config/spec/test behavior
 
 A runtime mirror under a rig `state/` path may be used only as a temporary live patch, must be labeled as non-canonical, and must have a canonical sync follow-up.
 

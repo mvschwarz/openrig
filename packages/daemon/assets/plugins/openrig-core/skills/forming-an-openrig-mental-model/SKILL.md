@@ -170,13 +170,12 @@ cost when you reach for one.
 |---|---|
 | `<rig-cwd>/.claude/skills/`, `<rig-cwd>/.agents/skills/` | Where the harness actually loads from. Populated by `rig up`. |
 | `~/.claude/skills/`, `~/.agents/skills/` | Your personal/global skills + OpenRig bootstrap (openrig-user, openrig-operator, openrig-builder, openrig-architect, openrig-upgrade, forming-an-openrig-mental-model, mental-model-ha). |
-| `openrig/packages/daemon/specs/agents/shared/skills/` | Product built-in skills that ship with OpenRig. |
-| `~/.openrig/skills/` | Future runtime install home for OpenRig-shipped skills. |
-| `substrate/shared-docs/openrig-work/skills/` | Skill factory authoring workspace (not runtime-loaded). |
+| openrig-core plugin skills | Product built-in skills that ship with OpenRig (installed via the openrig-core plugin). |
+| `~/.openrig/skills/` | Runtime install home for OpenRig-shipped skills. |
 
-The harness only sees the first two. Other locations are authoring,
-shipping, and source-of-truth — they reach the harness via projection or
-NPM install, not directly.
+The harness only sees the first two. Other locations are shipping and
+source-of-truth — they reach the harness via projection or NPM install,
+not directly.
 
 ---
 
@@ -255,18 +254,11 @@ For real depth, these are the load-bearing canonical docs:
 | `openrig/docs/reference/rig-spec.md` | The RigSpec YAML format — pods, members, edges, all fields |
 | `openrig/docs/reference/agent-spec.md` | The AgentSpec YAML format — resources, profiles, imports |
 | `openrig/docs/reference/agent-startup-guide.md` | The 7-layer startup layering model; delivery hints |
-| `openrig-internal/product/taxonomy.md` | Canonical vocabulary (read literally) |
-| `substrate/shared-docs/HOST-TOPOLOGY.md` | Host-level doctrine — rig classes, context patterns, lifecycle, authoring SOP |
-| `substrate/shared-docs/SUBSTRATE-CONVENTIONS.md` | Filesystem layout doctrine for substrate |
 | `https://agentskills.io/specification` | The cross-runtime skill standard |
 
-If you're going to be authoring rigs, read `HOST-TOPOLOGY.md` §7 (the
-authoring SOP) before touching YAML.
-
-If you're going to be doing skill work, read
-`substrate/shared-docs/openrig-work/skills/FACTORY-DESIGN.md` and the
-`operating-the-skill-library` skill that lives in
-`substrate/shared-docs/rigs/skill-library/agents/shared/skills/`.
+If your team maintains a host-level topology doc (rig classes, context
+patterns, authoring SOPs), read its rig-authoring section before
+touching YAML for high-stakes rigs.
 
 ---
 
@@ -296,7 +288,7 @@ that fit your actual work.
 | "I should manage Codex's compaction the way I manage Claude's" | No. Codex auto-compacts cleanly; Claude doesn't. Different runtimes, different lifecycles. |
 | "MEMORY.md auto-loads, so I don't need to read it" | Maybe. Sometimes MEMORY.md auto-loads via system reminders; sometimes not. Don't assume. If your work touches the topics it covers, read it explicitly. |
 | "Skills inherit from a parent or compose like classes" | No. Skills are flat artifacts; composition happens via AgentSpec `profile.uses.skills` (structural) or soft cross-references in skill bodies (advisory). Not via OO-style inheritance. |
-| "The substrate `shared-docs/skills/` folder is the canonical runtime path" | No. The harness doesn't read there. It's an authoring workspace. Runtime loads from `.claude/skills/`, `.agents/skills/`, and product built-in. |
+| "Any folder I keep skill files in is the canonical runtime path" | No. The harness only loads from `<rig-cwd>/.claude/skills/`, `<rig-cwd>/.agents/skills/`, and the runtime-installed plugin skills. Other folders are authoring or source-of-truth. |
 
 ---
 

@@ -7,32 +7,14 @@ metadata:
     last_verified: "2026-05-04"
     distribution_scope: product-bound
     source_evidence: |
-      Graduated 2026-05-04 from openrig-work/skills/workspace/from-home-skills/claude-compaction-restore/
-      (which was a verbatim copy of ~/.agents/skills/claude-compaction-restore/).
-      Originally authored as a personal skill; promoted as load-bearing for any
-      OpenRig seat that may compact. PreCompact hook is actively wired at
-      ~/.claude/settings.json on the primary host.
-    transfer_test: practical-passed-2026-05-04
-    transfer_test_notes: |
-      Skill was actively used during the 2026-05-04 conversation by the
-      compacted skills-architect@skill-library seat. The PreCompact hook
-      generated the restore packet; the post-compaction agent ran
-      restore-from-jsonl.mjs, read restore-instructions.md and touched-files.md,
-      identified important files, and reported "restored from packet at <path>;
-      resumed at step <X>." That's a real-work transfer-test pass; formal
-      pressure-scenario sub-agent test still pending per writing-skills TDD
-      discipline.
+      Load-bearing for any OpenRig seat that may compact. PreCompact hook
+      is wired into Claude Code's settings (e.g. ~/.claude/settings.json)
+      so the restore packet is generated automatically before compaction.
     sibling_skills:
       - mental-model-ha
       - scope-recovery
-      - session-compaction-and-restore
       - agent-startup-and-context-ingestion
-      - agent-starters
-      - composable-priming-packs
-      - session-source-fork
       - seat-continuity-and-handover
-      - claude-compact-in-place
-      - pre-maintenance-agent-preservation
 ---
 
 # Claude Compaction Restore
