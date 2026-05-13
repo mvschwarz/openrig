@@ -37,93 +37,66 @@ metadata:
 
 # Claude Compaction Restore
 
-## Situation
+Use this skill to preserve continuity before Claude Code compacts and to
+restore continuity after compaction. Do the work described here; do not merely
+explain the protocol.
 
-You have just been compacted, or you are preparing a Claude Code session
-for compaction. Treat memory after compaction as unreliable. Do not
-continue real work from vibes.
+## If You Are About To Compact
 
-Restore from durable evidence:
-- the Claude JSONL transcript
-- files touched during the session, especially Markdown state/planning files
-- project root docs and as-built documentation
-- repo code maps before code/review work
+Prepare durable continuity before the context boundary.
 
-## Fast Path
+1. Identify the active task, queue item, mission/slice, branch or commit, and
+   current working directory.
+2. Record the current state: decisions made, files changed, commands/tests run,
+   evidence produced, blockers, caveats, and the next concrete step.
+3. Build a reading list for the post-compaction session. Include:
+   - the active queue item or mission packet;
+   - mission notes, progress, decisions, and evidence files;
+   - files with active edits or recently inspected source;
+   - root instructions such as `AGENTS.md`, `CLAUDE.md`, or `README.md`;
+   - as-built docs, codemaps, or conventions needed before code/review work.
+4. Write or update a durable handoff note when there is an obvious project or
+   mission state file. If no safe file target is obvious, put the handoff and
+   reading list directly in the compaction summary.
+5. In the compaction summary, state which files are required reading after
+   compaction and how they relate to the task.
 
-Run the restore script from this skill:
+## If You Just Compacted
+
+Treat your memory as unreliable until you restore from durable evidence.
+
+1. Read any restore prompt, marker path, packet path, transcript path, or extra
+   instruction file named by the operator or OpenRig.
+2. Run the restore script from this skill:
 
 ```bash
 node ~/.claude/skills/claude-compaction-restore/scripts/restore-from-jsonl.mjs --out /tmp/claude-compaction-restore
 ```
 
-If you know the JSONL path, pass it explicitly:
+If the prompt names a specific Claude JSONL transcript, pass it explicitly:
 
 ```bash
 node ~/.claude/skills/claude-compaction-restore/scripts/restore-from-jsonl.mjs /path/to/session.jsonl --out /tmp/claude-compaction-restore
 ```
 
-The script writes:
-- `transcript.txt` — readable transcript reconstructed from JSONL
-- `touched-files.md` — ranked file list, with Markdown and written files highlighted
-- `restore-instructions.md` — checklist for the compacted agent
-- `restore-summary.json` — machine-readable summary
+3. Read the generated `restore-instructions.md`.
+4. Read the generated `touched-files.md`.
+5. Identify the important files for the active task. The touched-file list is
+   a triage aid, not a complete inventory.
+6. Read every important file in full. Prioritize Markdown state/planning files,
+   queue/mission packets, source files with active edits, root instruction
+   files, and as-built or codemap docs.
+7. Only resume task work after you can state:
 
-## Policy Surfaces
+```text
+restored from packet at <path>; resumed at step <X>
+```
 
-OpenRig's Claude auto-compaction policy has two post-compaction customization
-surfaces:
+Include the main files you read in full when you make that statement.
 
-- `message_inline`: the default says to load/read this skill and follow its
-  restore protocol.
-- `message_file_path`: an additional user-owned file for mission-specific
-  reading lists or extra restore notes. The daemon creates a placeholder at:
-  `$OPENRIG_HOME/compaction/post-compact-extra.md`.
+## Required Read-Depth Audit
 
-The local `templates/` files in this skill are reference snippets for the
-editable policy fields:
-
-- `templates/compact-instruction.md` — instruction passed as `/compact <instruction>`.
-- `templates/post-compact-restore-instruction.md` — default inline restore directive.
-
-These templates are deliberately continuity/procedure-shaped. Avoid
-testing compaction with "say this exact phrase" or persona-style
-commands; Claude may correctly treat those as prompt-injection-shaped
-hook output rather than useful lifecycle instructions.
-
-## Pre-Compaction Preparation
-
-When a Claude Code seat is about to compact and can still act, prepare a
-compact handoff before the boundary:
-
-1. Write or update a short session handoff note with the active task, queue
-   item IDs, decisions, blockers, changed files, tests/commands run, and next
-   concrete step.
-2. Create a reading list of files that future-you must read after compaction.
-   Include mission notes, queue packets, touched docs, source files with active
-   edits, root docs such as `AGENTS.md` or `CLAUDE.md`, and any as-built or
-   codemap docs needed before code/review work.
-3. State how the breadcrumbs relate: which file is the mission state, which
-   file is the implementation state, which files are evidence, and which
-   files are optional background.
-4. Prefer durable files over memory. If a fact matters after compaction, write
-   it down or ensure it is named in the reading list.
-
-## Restore Protocol
-
-1. Read `restore-instructions.md`.
-2. Read `touched-files.md`.
-3. Pause and answer: which files do you recognize as important to the work and project state?
-4. Read each important file in full. Prioritize Markdown files that were written or tracked by file-history snapshots.
-5. Read project root docs in full when present: `CLAUDE.md`, `AGENTS.md`, `README.md`.
-6. Read as-built docs and code maps in full before product work, code review, or architecture decisions. Common paths: `docs/as-built/`, `docs/codemap*`, `docs/architecture*`.
-7. Only resume work after stating: "restored from packet at <path>; resumed at step <X>."
-
-## Read-Depth Audit
-
-Claude often sounds restored after reading only part of the requested context.
-The operator or daemon should follow the restore request with a normal
-user-channel audit prompt:
+After the first restore pass, audit yourself before continuing.
 
 1. List every file, packet, marker, instruction file, and source document you
    were asked to read during restore.
@@ -131,83 +104,28 @@ user-channel audit prompt:
 3. You will be given a task where all of these files are required reading in
    order to understand the task.
 4. Do not optimize for token conservation.
-5. Read every `PARTIAL` or `NOT_READ` item in full now, then report the final
-   read-depth table before continuing.
-
-## Hook Usage
-
-Claude Code exposes compaction lifecycle hooks. OpenRig uses
-`PreCompact` to prepare the packet before compaction, plus
-`SessionStart` with matcher `compact` and `UserPromptSubmit` as the
-post-compact bridge that can expose marker context.
-
-```bash
-node ~/.claude/skills/claude-compaction-restore/scripts/precompact-hook.mjs
-```
-
-The hook reads Claude hook JSON from stdin, creates a restore packet
-under `/tmp/claude-compaction-restore/`, writes a pending marker under
-`$OPENRIG_HOME/compaction/restore-pending/`, and returns a
-`systemMessage` that is informational context.
-
-The hook and bridge provide evidence and markers; they are not the reliable
-action channel. OpenRig's daemon-side compaction enforcer therefore sends
-normal post-compaction user-channel prompts after context usage drops below the
-configured threshold: first a short boundary, then the restore request, then a
-read-depth audit follow-up. Those visible prompts are what ask Claude to act.
-
-To wire the hook, add to `~/.claude/settings.json`:
-
-```json
-{
-  "hooks": {
-    "PreCompact": [
-      {
-        "matcher": "*",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "node ~/.claude/skills/claude-compaction-restore/scripts/precompact-hook.mjs"
-          }
-        ]
-      }
-    ],
-    "SessionStart": [
-      {
-        "matcher": "compact",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/compaction-restore-bridge.cjs\""
-          }
-        ]
-      }
-    ],
-    "UserPromptSubmit": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/compaction-restore-bridge.cjs\""
-          }
-        ]
-      }
-    ]
-  }
-}
-```
+5. Read every `PARTIAL` or `NOT_READ` item in full now.
+6. Report the final read-depth table before doing any substantive task work.
 
 ## Guardrails
 
 - Do not silently launch fresh after compaction.
-- Do not trust fuzzy recollection over files.
-- Do not skip as-built docs or codemaps before code/review work.
-- Do not treat a generated touched-file list as perfect. It is a triage aid; the agent must still recognize and select important files.
-- Do not skip the explicit "restored from packet at <path>; resumed at step <X>" announcement. It's the sentinel that signals genuine restoration vs performed restoration.
+- Do not continue from memory when restore evidence exists.
+- Do not skip root instructions, as-built docs, or codemaps before product
+  code/review work.
+- Do not treat the generated touched-file list as exhaustive.
+- Do not mark a file `FULL` unless you actually read the full file content
+  after compaction.
+- Do not resume task work until the restore sentinel and read-depth audit are
+  complete.
 
-## Common Failure Modes (load-bearing — read these)
+## Failure Modes To Avoid
 
-1. **Confidently-wrong restoration**: agent claims to have restored but actually only read the touched-files list, not the files themselves. The "restored from packet" announcement should be backed by specific file content cited in subsequent work. If the agent's first post-restore turn is generic / doesn't reference specific file content, restoration didn't actually happen.
-2. **Skipping the project root docs**: agent reads only the touched-files list; misses `CLAUDE.md` / `AGENTS.md` / `README.md` which carry persistent context. The restore-instructions.md checklist explicitly names these — follow it.
-3. **Reading partial then continuing**: agent reads 2-3 files and starts working before reading all important ones. Better to over-read than to drift on partial recovery.
-4. **Treating the restore packet as exhaustive**: the packet is a triage aid. Important state may live in files NOT in the touched-files list (e.g., recently-relevant skills, doctrine docs, mission state). Use the packet as a starting point, not a complete inventory.
+1. **Confidently-wrong restoration**: claiming restoration after reading only
+   the touched-file list or summary.
+2. **Partial restore**: reading the first few files, then continuing before the
+   full reading list is complete.
+3. **Skipping project instructions**: missing `AGENTS.md`, `CLAUDE.md`,
+   `README.md`, as-built docs, or codemaps that govern the task.
+4. **Treating the packet as exhaustive**: ignoring mission or workspace files
+   that are important but were not discovered by the script.
