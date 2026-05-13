@@ -23,6 +23,9 @@ export interface PluginEntry {
   runtimes: PluginRuntime[];
   path: string;
   lastSeenAt: string | null;
+  /** Slice 28 — subdirectory count under <plugin>/skills/. Populated by
+   *  daemon detectPlugin via readdir of skills/ (SC-29 EXCEPTION #11). */
+  skillCount: number;
 }
 
 export interface PluginManifestSummary {

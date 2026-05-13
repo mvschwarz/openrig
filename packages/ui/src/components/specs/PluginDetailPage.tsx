@@ -1,29 +1,72 @@
-// Phase 3a slice 3.3 — PluginDetailPage.
-//
-// Mounts at /plugins/:pluginId. Reads usePlugin + usePluginUsedBy and
-// renders:
-//   - Top section: name + version + description + runtime support badges +
-//     source label + provenance metadata.
-//   - Manifest section: rendered manifest fields (claude + codex when both).
-//   - Skills section: list of skill folders the plugin ships.
-//   - Hooks section: list of hook configs (per-runtime) + declared events.
-//   - Used-by section: list of agents in spec library that reference this plugin.
-//
-// Visual chrome mirrors SpecsLibraryPage section pattern (border + bg + hard-shadow)
-// for taxonomic consistency with the Library.
-
-import { Link } from "@tanstack/react-router";
+import { useEffect, useMemo, useState } from "react";
 import { EmptyState } from "../ui/empty-state.js";
 import { SectionHeader } from "../ui/section-header.js";
+import { MarkdownViewer } from "../markdown/MarkdownViewer.js";
+import { SyntaxHighlight } from "../markdown/SyntaxHighlight.js";
 import { usePlugin, usePluginUsedBy } from "../../hooks/usePlugins.js";
+import { usePluginFilesList, usePluginFilesRead } from "../../hooks/usePluginFiles.js";
+import type { FileEntry } from "../../hooks/useFiles.js";
 
 interface PluginDetailPageProps {
   pluginId: string;
 }
 
+const TEXT_LIKE_EXTENSIONS = new Set([
+  ".md", ".mdx", ".txt", ".log",
+  ".yaml", ".yml", ".json",
+  ".js", ".jsx", ".ts", ".tsx",
+  ".py", ".sh", ".bash",
+  ".css", ".html",
+]);
+
+function pathExtension(p: string): string {
+  const idx = p.lastIndexOf(".");
+  if (idx === -1) return "";
+  return p.slice(idx).toLowerCase();
+}
+
+function parentPath(p: string): string {
+  const idx = p.lastIndexOf("/");
+  return idx === -1 ? "" : p.slice(0, idx);
+}
+
+function joinPath(parent: string, child: string): string {
+  return parent ? `${parent}/${child}` : child;
+}
+
+function isMarkdownFile(name: string): boolean {
+  const ext = pathExtension(name);
+  return ext === ".md" || ext === ".mdx";
+}
+
+// Auto-selection priority for the root-level default file: README.md
+// at the plugin root if present. Falls back to any other markdown,
+// then nothing.
+function pickDefaultRootFile(entries: FileEntry[]): string | null {
+  const readme = entries.find((e) => e.type === "file" && /^readme\.(md|mdx)$/i.test(e.name));
+  if (readme) return readme.name;
+  const anyMd = entries.find((e) => e.type === "file" && isMarkdownFile(e.name));
+  if (anyMd) return anyMd.name;
+  return null;
+}
+
 export function PluginDetailPage({ pluginId }: PluginDetailPageProps) {
   const { data: detail, isLoading: detailLoading, error: detailError } = usePlugin(pluginId);
-  const { data: usedBy = [], isLoading: usedByLoading } = usePluginUsedBy(pluginId);
+  const { data: usedBy = [] } = usePluginUsedBy(pluginId);
+  const [currentPath, setCurrentPath] = useState<string>("");
+  const [selectedFile, setSelectedFile] = useState<string | null>(null);
+  const [defaultPicked, setDefaultPicked] = useState(false);
+  const list = usePluginFilesList(pluginId, currentPath);
+
+  // Auto-select README.md (or any markdown) at the plugin root on first load.
+  useEffect(() => {
+    if (defaultPicked) return;
+    if (currentPath !== "") return;
+    if (!list.data) return;
+    const pick = pickDefaultRootFile(list.data.entries);
+    if (pick) setSelectedFile(pick);
+    setDefaultPicked(true);
+  }, [list.data, currentPath, defaultPicked]);
 
   if (detailLoading) {
     return (
@@ -52,13 +95,15 @@ export function PluginDetailPage({ pluginId }: PluginDetailPageProps) {
   }
 
   const entry = detail.entry;
+  const skillCount = entry.skillCount;
+  const usedByCount = usedBy.length;
 
   return (
     <div
       data-testid="plugin-detail-page"
-      className="h-full overflow-y-auto bg-paper-grid px-6 py-5 lg:pl-[var(--workspace-left-offset,0px)] lg:pr-[var(--workspace-right-offset,0px)]"
+      className="h-full overflow-hidden bg-paper-grid px-6 py-5 lg:pl-[var(--workspace-left-offset,0px)] lg:pr-[var(--workspace-right-offset,0px)]"
     >
-      <header className="mb-5">
+      <header className="mb-4">
         <SectionHeader tone="muted">Plugin</SectionHeader>
         <div className="mt-1 flex flex-wrap items-baseline gap-3">
           <h1 className="font-headline text-2xl font-bold tracking-tight text-stone-900">
@@ -80,268 +125,194 @@ export function PluginDetailPage({ pluginId }: PluginDetailPageProps) {
           >
             {entry.sourceLabel}
           </span>
+          <span
+            data-testid="plugin-detail-skill-count"
+            className="font-mono text-[10px] uppercase tracking-[0.12em] text-stone-500"
+          >
+            {skillCount} {skillCount === 1 ? "skill" : "skills"}
+          </span>
+          <span
+            data-testid="plugin-detail-used-by-count"
+            className="font-mono text-[10px] uppercase tracking-[0.12em] text-stone-500"
+          >
+            used by {usedByCount} {usedByCount === 1 ? "agent" : "agents"}
+          </span>
         </div>
         {entry.description && (
           <p className="mt-2 max-w-3xl text-sm text-stone-600">{entry.description}</p>
         )}
       </header>
 
-      <div className="grid gap-4 xl:grid-cols-2">
-        <ManifestSection detail={detail} />
-        <SkillsSection skills={detail.skills} />
-        <HooksSection hooks={detail.hooks} />
-        {/* Slice 3.3 fix-A — MCP Servers section per dispatch §3.2
-            (manifest preview + skills/hooks/MCP sections + Used-by).
-            velocity-qa VM verify failure #1 closed. */}
-        <McpServersSection mcpServers={detail.mcpServers} />
-        <UsedBySection
-          usedBy={usedBy}
-          isLoading={usedByLoading}
-        />
+      <div
+        data-testid="plugin-detail-docs-browser"
+        className="flex h-[calc(100%-7rem)] flex-col border border-outline-variant bg-white/25 hard-shadow sm:flex-row"
+      >
+        <aside
+          data-testid="plugin-detail-tree"
+          className="w-full max-h-64 shrink-0 overflow-y-auto border-b border-outline-variant bg-white/30 sm:w-72 sm:max-h-none sm:border-b-0 sm:border-r"
+        >
+          <Breadcrumbs
+            testId="plugin-detail-breadcrumbs"
+            pluginName={entry.name}
+            path={currentPath}
+            onNavigate={(rel) => { setCurrentPath(rel); setSelectedFile(null); }}
+          />
+          {list.isLoading ? (
+            <div data-testid="plugin-detail-tree-loading" className="p-3 font-mono text-[10px] text-stone-400">
+              Loading…
+            </div>
+          ) : list.isError ? (
+            <div data-testid="plugin-detail-tree-error" className="p-3 font-mono text-[10px] text-red-600">
+              {(list.error as Error)?.message ?? "Error loading directory."}
+            </div>
+          ) : !list.data || list.data.entries.length === 0 ? (
+            <div data-testid="plugin-detail-tree-empty" className="p-3 font-mono text-[10px] text-stone-400">
+              Empty directory.
+            </div>
+          ) : (
+            <ul className="p-1">
+              {currentPath && (
+                <li>
+                  <button
+                    type="button"
+                    data-testid="plugin-detail-tree-up"
+                    onClick={() => { setCurrentPath(parentPath(currentPath)); setSelectedFile(null); }}
+                    className="block w-full px-2 py-1 text-left font-mono text-[10px] text-stone-500 hover:bg-stone-100"
+                  >
+                    ..
+                  </button>
+                </li>
+              )}
+              {list.data.entries.map((fileEntry) => {
+                const rel = joinPath(currentPath, fileEntry.name);
+                const isFile = fileEntry.type === "file";
+                const isSelected = selectedFile === rel;
+                return (
+                  <li key={rel}>
+                    <button
+                      type="button"
+                      data-testid={`plugin-detail-tree-entry-${rel}`}
+                      data-type={fileEntry.type}
+                      data-active={isSelected}
+                      onClick={() => {
+                        if (isFile) setSelectedFile(rel);
+                        else if (fileEntry.type === "dir") { setCurrentPath(rel); setSelectedFile(null); }
+                      }}
+                      disabled={fileEntry.type === "other"}
+                      className={`block w-full px-2 py-1 text-left font-mono text-[10px] ${
+                        fileEntry.type === "other"
+                          ? "text-stone-400"
+                          : `hover:bg-stone-100 ${isSelected ? "bg-stone-200/80 text-stone-900" : "text-stone-700"}`
+                      }`}
+                    >
+                      {fileEntry.type === "dir" ? `▸ ${fileEntry.name}` : fileEntry.name}
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </aside>
+
+        <main data-testid="plugin-detail-viewer" className="flex-1 min-w-0 overflow-y-auto bg-white">
+          {!selectedFile ? (
+            <div data-testid="plugin-detail-viewer-no-selection" className="p-4 font-mono text-[10px] text-stone-400">
+              Select a file from the tree.
+            </div>
+          ) : (
+            <PluginFileContent pluginId={pluginId} path={selectedFile} />
+          )}
+        </main>
       </div>
     </div>
   );
 }
 
-function ManifestSection({ detail }: { detail: NonNullable<ReturnType<typeof usePlugin>["data"]> }) {
-  return (
-    <section
-      data-testid="plugin-detail-manifest"
-      className="border border-outline-variant bg-white/25 hard-shadow"
-    >
-      <header className="border-b border-outline-variant bg-white/30 px-3 py-2">
-        <SectionHeader tone="default">Manifest</SectionHeader>
-      </header>
-      <dl className="grid grid-cols-[7rem_1fr] gap-x-3 gap-y-1 px-3 py-3 font-mono text-[11px]">
-        <ManifestRow label="claude" value={detail.claudeManifest ? `${detail.claudeManifest.name ?? "—"} v${detail.claudeManifest.version ?? "—"}` : "(not declared)"} />
-        <ManifestRow label="codex" value={detail.codexManifest ? `${detail.codexManifest.name ?? "—"} v${detail.codexManifest.version ?? "—"}` : "(not declared)"} />
-        {detail.claudeManifest?.homepage && (
-          <ManifestRow label="homepage" value={detail.claudeManifest.homepage} />
-        )}
-        {detail.claudeManifest?.repository && (
-          <ManifestRow label="repository" value={detail.claudeManifest.repository} />
-        )}
-        {detail.claudeManifest?.license && (
-          <ManifestRow label="license" value={detail.claudeManifest.license} />
-        )}
-        {detail.entry.lastSeenAt && (
-          <ManifestRow label="last seen" value={detail.entry.lastSeenAt} />
-        )}
-      </dl>
-    </section>
-  );
-}
-
-function ManifestRow({ label, value }: { label: string; value: string }) {
-  return (
-    <>
-      <dt className="font-mono text-[10px] uppercase tracking-[0.10em] text-stone-500">{label}</dt>
-      <dd className="font-mono text-[11px] text-stone-900">{value}</dd>
-    </>
-  );
-}
-
-function SkillsSection({ skills }: { skills: NonNullable<ReturnType<typeof usePlugin>["data"]>["skills"] }) {
-  return (
-    <section
-      data-testid="plugin-detail-skills"
-      className="border border-outline-variant bg-white/25 hard-shadow"
-    >
-      <header className="flex items-baseline justify-between border-b border-outline-variant bg-white/30 px-3 py-2">
-        <SectionHeader tone="default">Skills</SectionHeader>
-        <span className="font-mono text-[9px] uppercase tracking-[0.12em] text-stone-500">
-          {skills.length} {skills.length === 1 ? "skill" : "skills"}
-        </span>
-      </header>
-      {skills.length === 0 ? (
-        <div className="px-3 py-4">
-          <EmptyState
-            label="NO SKILLS"
-            description="This plugin does not ship any skills under its skills/ folder."
-            variant="card"
-            testId="plugin-skills-empty"
-          />
-        </div>
-      ) : (
-        <ul className="divide-y divide-outline-variant">
-          {skills.map((skill) => (
-            <li
-              key={skill.name}
-              data-testid={`plugin-skill-${skill.name}`}
-              className="flex items-baseline justify-between gap-3 px-3 py-2 font-mono"
-            >
-              <span className="truncate text-xs text-stone-900">{skill.name}</span>
-              <span className="font-mono text-[9px] uppercase tracking-[0.10em] text-stone-500">
-                {skill.relativePath}
-              </span>
-            </li>
-          ))}
-        </ul>
-      )}
-    </section>
-  );
-}
-
-function HooksSection({ hooks }: { hooks: NonNullable<ReturnType<typeof usePlugin>["data"]>["hooks"] }) {
-  return (
-    <section
-      data-testid="plugin-detail-hooks"
-      className="border border-outline-variant bg-white/25 hard-shadow"
-    >
-      <header className="flex items-baseline justify-between border-b border-outline-variant bg-white/30 px-3 py-2">
-        <SectionHeader tone="default">Hooks</SectionHeader>
-        <span className="font-mono text-[9px] uppercase tracking-[0.12em] text-stone-500">
-          {hooks.length} {hooks.length === 1 ? "config" : "configs"}
-        </span>
-      </header>
-      {hooks.length === 0 ? (
-        <div className="px-3 py-4">
-          <EmptyState
-            label="NO HOOKS"
-            description="This plugin does not ship hook configurations."
-            variant="card"
-            testId="plugin-hooks-empty"
-          />
-        </div>
-      ) : (
-        <ul className="divide-y divide-outline-variant">
-          {hooks.map((hook) => (
-            <li
-              key={hook.runtime}
-              data-testid={`plugin-hook-${hook.runtime}`}
-              className="px-3 py-2 font-mono text-[11px]"
-            >
-              <div className="flex items-baseline justify-between">
-                <span className="font-bold uppercase text-stone-900">{hook.runtime}</span>
-                <span className="font-mono text-[9px] uppercase tracking-[0.10em] text-stone-500">
-                  {hook.relativePath}
-                </span>
-              </div>
-              {hook.events.length > 0 && (
-                <div className="mt-1 flex flex-wrap gap-1 font-mono text-[9px] uppercase tracking-[0.10em] text-stone-600">
-                  {hook.events.map((event) => (
-                    <span key={event} className="border border-outline-variant px-1.5 py-0.5">
-                      {event}
-                    </span>
-                  ))}
-                </div>
-              )}
-            </li>
-          ))}
-        </ul>
-      )}
-    </section>
-  );
-}
-
-// Slice 3.3 fix-A — McpServersSection per dispatch §3.2.
-// velocity-qa VM verify failure #1 — PluginViewer needs an MCP section
-// rendering the plugin's MCP server declarations (or empty state if no
-// MCP servers declared). DESIGN §5.7 covers MCP routing via plugins.
-function McpServersSection({
-  mcpServers,
+function Breadcrumbs({
+  testId,
+  pluginName,
+  path,
+  onNavigate,
 }: {
-  mcpServers: NonNullable<ReturnType<typeof usePlugin>["data"]>["mcpServers"];
+  testId: string;
+  pluginName: string;
+  path: string;
+  onNavigate: (path: string) => void;
 }) {
+  const segments = path ? path.split("/") : [];
   return (
-    <section
-      data-testid="plugin-detail-mcp-servers"
-      className="border border-outline-variant bg-white/25 hard-shadow"
-    >
-      <header className="flex items-baseline justify-between border-b border-outline-variant bg-white/30 px-3 py-2">
-        <SectionHeader tone="default">MCP Servers</SectionHeader>
-        <span className="font-mono text-[9px] uppercase tracking-[0.12em] text-stone-500">
-          {mcpServers.length} {mcpServers.length === 1 ? "server" : "servers"}
-        </span>
-      </header>
-      {mcpServers.length === 0 ? (
-        <div className="px-3 py-4">
-          <EmptyState
-            label="NO MCP SERVERS"
-            description="This plugin does not declare MCP servers in its manifest mcpServers field."
-            variant="card"
-            testId="plugin-mcp-servers-empty"
-          />
-        </div>
-      ) : (
-        <ul className="divide-y divide-outline-variant">
-          {mcpServers.map((server) => (
-            <li
-              key={`${server.runtime}:${server.name}`}
-              data-testid={`plugin-mcp-server-${server.name}`}
-              className="px-3 py-2 font-mono text-[11px]"
-            >
-              <div className="flex items-baseline justify-between gap-3">
-                <span className="font-bold text-stone-900">{server.name}</span>
-                <span className="font-mono text-[9px] uppercase tracking-[0.10em] text-stone-500">
-                  {server.runtime}
-                </span>
-              </div>
-              {(server.command || server.transport) && (
-                <div className="mt-1 flex flex-wrap gap-2 font-mono text-[9px] uppercase tracking-[0.10em] text-stone-600">
-                  {server.command && (
-                    <span className="border border-outline-variant px-1.5 py-0.5">
-                      cmd: {server.command}
-                    </span>
-                  )}
-                  {server.transport && (
-                    <span className="border border-outline-variant px-1.5 py-0.5">
-                      transport: {server.transport}
-                    </span>
-                  )}
-                </div>
-              )}
-            </li>
-          ))}
-        </ul>
-      )}
-    </section>
+    <nav data-testid={testId} className="flex flex-wrap items-baseline gap-1 border-b border-outline-variant px-2 py-1 font-mono text-[10px] text-stone-700">
+      <button type="button" onClick={() => onNavigate("")} className="font-bold hover:underline">
+        {pluginName}
+      </button>
+      {segments.map((seg, idx) => {
+        const accumulated = segments.slice(0, idx + 1).join("/");
+        return (
+          <span key={accumulated}>
+            <span className="mx-0.5 text-stone-400">/</span>
+            <button type="button" onClick={() => onNavigate(accumulated)} className="hover:underline">
+              {seg}
+            </button>
+          </span>
+        );
+      })}
+    </nav>
   );
 }
 
-function UsedBySection({
-  usedBy,
-  isLoading,
-}: {
-  usedBy: { agentName: string; sourcePath: string; profiles: string[] }[];
-  isLoading: boolean;
-}) {
+function PluginFileContent({ pluginId, path }: { pluginId: string; path: string }) {
+  const read = usePluginFilesRead(pluginId, path);
+  const ext = useMemo(() => pathExtension(path), [path]);
+
+  if (read.isLoading) {
+    return (
+      <div data-testid="plugin-detail-viewer-loading" className="p-4 font-mono text-[10px] text-stone-400">
+        Loading…
+      </div>
+    );
+  }
+  if (read.isError) {
+    return (
+      <div data-testid="plugin-detail-viewer-error" className="p-4 font-mono text-[10px] text-red-600">
+        {(read.error as Error)?.message ?? "Error loading file."}
+      </div>
+    );
+  }
+  if (!read.data) return null;
+
   return (
-    <section
-      data-testid="plugin-detail-used-by"
-      className="border border-outline-variant bg-white/25 hard-shadow"
-    >
-      <header className="flex items-baseline justify-between border-b border-outline-variant bg-white/30 px-3 py-2">
-        <SectionHeader tone="default">Used by</SectionHeader>
-        <span className="font-mono text-[9px] uppercase tracking-[0.12em] text-stone-500">
-          {isLoading ? "loading" : `${usedBy.length} ${usedBy.length === 1 ? "agent" : "agents"}`}
-        </span>
-      </header>
-      {usedBy.length === 0 ? (
-        <div className="px-3 py-4">
-          <EmptyState
-            label="NOT USED"
-            description="No agent.yaml in the spec library currently references this plugin."
-            variant="card"
-            testId="plugin-used-by-empty"
-          />
+    <div data-testid="plugin-detail-viewer-content" className="flex h-full flex-col">
+      <header className="flex items-baseline justify-between border-b border-outline-variant bg-white/30 px-3 py-2 font-mono text-[10px]">
+        <div data-testid="plugin-detail-viewer-path" className="text-stone-700">{path}</div>
+        <div className="flex items-baseline gap-3 text-stone-500">
+          <span>{read.data.size}b</span>
+          <span>{read.data.mtime}</span>
         </div>
-      ) : (
-        <ul className="divide-y divide-outline-variant">
-          {usedBy.map((ref) => (
-            <li
-              key={ref.agentName}
-              data-testid={`plugin-used-by-${ref.agentName}`}
-              className="flex items-baseline justify-between gap-3 px-3 py-2 font-mono"
-            >
-              <span className="truncate text-xs text-stone-900">{ref.agentName}</span>
-              <span className="font-mono text-[9px] uppercase tracking-[0.10em] text-stone-500">
-                {ref.profiles.join(", ")}
-              </span>
-            </li>
-          ))}
-        </ul>
-      )}
-    </section>
+      </header>
+      <div className="flex-1 min-h-0 overflow-y-auto">
+        {read.data.truncated && (
+          <div
+            data-testid="plugin-detail-viewer-truncated"
+            className="mb-3 mx-4 mt-4 border border-amber-400 bg-amber-50 px-3 py-2 font-mono text-[10px] text-amber-900"
+          >
+            ⚠ Truncated at {Math.round((read.data.truncatedAtBytes ?? 0) / 1024)} KB — file is{" "}
+            {Math.round((read.data.totalBytes ?? read.data.size) / 1024)} KB total.
+          </div>
+        )}
+        {ext === ".md" || ext === ".mdx" ? (
+          <div className="p-4">
+            <MarkdownViewer content={read.data.content} />
+          </div>
+        ) : TEXT_LIKE_EXTENSIONS.has(ext) ? (
+          <div className="p-4">
+            <SyntaxHighlight code={read.data.content} language={ext.slice(1)} />
+          </div>
+        ) : (
+          <pre data-testid="plugin-detail-viewer-text-fallback" className="p-4 whitespace-pre-wrap break-words font-mono text-[10px] text-stone-800">
+            {read.data.content}
+          </pre>
+        )}
+      </div>
+    </div>
   );
 }

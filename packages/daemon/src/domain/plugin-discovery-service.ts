@@ -66,6 +66,18 @@ export interface PluginEntry {
    * scope at v0).
    */
   lastSeenAt: string | null;
+  /**
+   * Slice 28 — number of skill folders shipped under `<plugin>/skills/`.
+   * Surfaced in the list response so the PluginsIndexPage can render a
+   * skill-count column without an N+1 detail fetch per plugin row.
+   * Counted at detectPlugin time (one readdir of skills/).
+   *
+   * SC-29 EXCEPTION #11 (slice 28 library-explorer-finishing):
+   * adds skillCount field to PluginEntry — additive shape change to
+   * the plugin discovery API contract. Per banked inline-ledger
+   * discipline; declared verbatim in routes/plugins.ts header.
+   */
+  skillCount: number;
 }
 
 export interface PluginManifestSummary {
@@ -413,6 +425,19 @@ export class PluginDiscoveryService {
       lastSeenAt = null;
     }
 
+    // Slice 28 — skillCount: count subdirectories under <plugin>/skills/.
+    // Matches the detail-side enumeration in getPlugin() which also
+    // collects subdirs under that path (no .md filtering at this level
+    // — every shipped skill folder counts, whether or not it has
+    // landed a SKILL.md yet).
+    let skillCount = 0;
+    const skillsDir = join(pluginPath, "skills");
+    if (existsSync(skillsDir)) {
+      for (const entry of safeReaddir(skillsDir)) {
+        if (isDir(join(skillsDir, entry))) skillCount += 1;
+      }
+    }
+
     return {
       id: explicitId,
       name,
@@ -423,6 +448,7 @@ export class PluginDiscoveryService {
       runtimes,
       path: pluginPath,
       lastSeenAt,
+      skillCount,
     };
   }
 }

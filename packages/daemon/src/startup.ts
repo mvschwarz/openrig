@@ -77,6 +77,8 @@ import { SpecReviewService } from "./domain/spec-review-service.js";
 import { SpecLibraryService } from "./domain/spec-library-service.js";
 // Phase 3a slice 3.3 — plugin discovery service.
 import { PluginDiscoveryService } from "./domain/plugin-discovery-service.js";
+// Slice 28 Checkpoint C-3 — skill-library discovery (SC-29 #11 cumulative).
+import { SkillLibraryDiscoveryService } from "./domain/skill-library-discovery.js";
 import { ContextPackLibraryService } from "./domain/context-packs/context-pack-library-service.js";
 import { AgentImageLibraryService } from "./domain/agent-images/agent-image-library-service.js";
 import { SnapshotCapturer } from "./domain/agent-images/snapshot-capturer.js";
@@ -794,6 +796,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       codexCacheDir: nodePath.join(os.homedir(), ".codex", "plugins", "cache"),
       specLibraryDir: getDefaultOpenRigPath("specs"),
     }),
+    // Slice 28 Checkpoint C-3 — skillLibraryDiscoveryService is constructed
+    // AFTER filesAllowlist resolution below (deps.skillLibraryDiscoveryService
+    // assignment near filesAllowlist binding).
     // PL-014 Item 6: same instance hoisted earlier so the
     // PodRigInstantiator can resolve `kind: context_pack` startup_files
     // entries — sharing the cache means /api/context-packs/* + the
@@ -1110,6 +1115,24 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
           auditFilePath: nodePath.join(OPENRIG_HOME, "file-edit-audit.jsonl"),
         })
       : null;
+    // Slice 28 Checkpoint C-3 — SkillLibraryDiscoveryService. sharedSkillsDir
+    // resolves to the daemon's bundled `specs/agents/shared/skills/`
+    // directory via import.meta.url (independent of operator allowlist
+    // configuration; closes HG-5 on the founder-walk VM where the operator
+    // allowlist doesn't include the daemon source tree). filesAllowlist
+    // is also passed so workspace `.openrig/skills/` skills surface via
+    // the same daemon endpoint.
+    deps.skillLibraryDiscoveryService = new SkillLibraryDiscoveryService({
+      sharedSkillsDir: nodePath.resolve(
+        nodePath.dirname(new URL(import.meta.url).pathname),
+        "..",
+        "specs",
+        "agents",
+        "shared",
+        "skills",
+      ),
+      filesAllowlist,
+    });
     deps.progressIndexer = new ProgressIndexer({ roots: decodeProgressScanRoots(cfg.progressScanRootsRaw) });
 
     // Operator Surface Reconciliation v0 — steering composer (item 1).

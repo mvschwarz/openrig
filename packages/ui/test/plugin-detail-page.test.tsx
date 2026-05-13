@@ -1,7 +1,19 @@
-// Phase 3a slice 3.3 — PluginDetailPage tests (TDD red→green).
+// PluginDetailPage state + content tests.
+//
+// Slice 28 Checkpoint C-2 refactored PluginDetailPage to use the new
+// daemon endpoints /api/plugins/:id/files/{list,read} (SC-29 EXCEPTION
+// #11) to render a real file-browser tree of the plugin folder. The
+// virtual structured-data tree from C-shell is gone; structured data
+// (manifest fields, hook events, MCP servers, used-by list) appears
+// via direct file viewing OR via the header strip metadata (skillCount
+// + usedBy count).
+//
+// Loading + not-found tests preserved. Content tests rewritten for the
+// real-file-tree shape. Comprehensive docs-browser coverage (folder
+// navigation, viewer content) lives in slice-28-detail-pages.test.tsx.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { PluginDetailPage } from "../src/components/specs/PluginDetailPage.js";
 import { createTestRouter } from "./helpers/test-router.js";
 
@@ -25,6 +37,16 @@ function renderPluginDetail(pluginId: string) {
   );
 }
 
+function fileList(entries: Array<{ name: string; type: "dir" | "file" }>) {
+  return {
+    entries: entries.map((entry) => ({
+      ...entry,
+      size: entry.type === "file" ? 42 : null,
+      mtime: "2026-05-12T00:00:00.000Z",
+    })),
+  };
+}
+
 describe("PluginDetailPage", () => {
   it("shows loading state while plugin detail is fetching", async () => {
     mockFetch.mockImplementation(async () => {
@@ -46,7 +68,7 @@ describe("PluginDetailPage", () => {
     expect(await screen.findByTestId("plugin-detail-not-found")).toBeDefined();
   });
 
-  it("renders manifest summary, skills, hooks, runtime badges, and source label", async () => {
+  it("renders header (name + version + runtime badges + source + skill-count + used-by-count) and surfaces plugin folder files via real file-browser tree", async () => {
     mockFetch.mockImplementation(async (url: string) => {
       if (url === "/api/plugins/openrig-core") {
         return {
@@ -62,28 +84,16 @@ describe("PluginDetailPage", () => {
               runtimes: ["claude", "codex"],
               path: "/x/openrig-core",
               lastSeenAt: "2026-05-10T00:00:00.000Z",
+              skillCount: 2,
             },
-            claudeManifest: {
-              raw: { name: "openrig-core" },
-              name: "openrig-core",
-              version: "0.1.0",
-              description: "Canonical content",
-              homepage: "https://github.com/mvschwarz/openrig-plugins",
-              repository: null,
-              license: "MIT",
-            },
+            claudeManifest: null,
             codexManifest: null,
             skills: [
               { name: "openrig-user", relativePath: "skills/openrig-user" },
               { name: "queue-handoff", relativePath: "skills/queue-handoff" },
             ],
-            hooks: [
-              { runtime: "claude", relativePath: "hooks/claude.json", events: ["SessionStart", "Stop"] },
-            ],
-            mcpServers: [
-              { runtime: "claude", name: "github-mcp", command: "node", transport: "stdio" },
-              { runtime: "claude", name: "linear-mcp", command: "linear-mcp", transport: "http" },
-            ],
+            hooks: [{ runtime: "claude", relativePath: "hooks/claude.json", events: ["SessionStart"] }],
+            mcpServers: [],
           }),
         };
       }
@@ -96,47 +106,65 @@ describe("PluginDetailPage", () => {
           ],
         };
       }
+      if (url === "/api/plugins/openrig-core/files/list?path=") {
+        return {
+          ok: true,
+          json: async () => ({
+            pluginId: "openrig-core",
+            path: "",
+            ...fileList([
+              { name: ".claude-plugin", type: "dir" },
+              { name: "hooks", type: "dir" },
+              { name: "skills", type: "dir" },
+              { name: "README.md", type: "file" },
+            ]),
+          }),
+        };
+      }
+      if (url === "/api/plugins/openrig-core/files/read?path=README.md") {
+        return {
+          ok: true,
+          json: async () => ({
+            pluginId: "openrig-core",
+            path: "README.md",
+            absolutePath: "/x/openrig-core/README.md",
+            content: "# OpenRig Core\nCanonical content.",
+            mtime: "2026-05-10T00:00:00.000Z",
+            contentHash: "h",
+            size: 30,
+          }),
+        };
+      }
       throw new Error(`unexpected ${url}`);
     });
     renderPluginDetail("openrig-core");
 
     expect(await screen.findByTestId("plugin-detail-page")).toBeDefined();
-    // Manifest summary visible
-    expect(screen.getByText("openrig-core")).toBeDefined();
+    // Header content preserved across the C-2 refactor.
+    expect(screen.getByRole("heading", { name: "openrig-core" })).toBeDefined();
     expect(screen.getByText("v0.1.0")).toBeDefined();
     expect(screen.getByText("Canonical OpenRig content")).toBeDefined();
-
-    // Runtime badges (drift discriminator: each runtime renders own badge).
     expect(screen.getByTestId("plugin-detail-runtime-claude")).toBeDefined();
     expect(screen.getByTestId("plugin-detail-runtime-codex")).toBeDefined();
-
-    // Source label visible.
     expect(screen.getByText("vendored:openrig-core")).toBeDefined();
+    expect(screen.getByTestId("plugin-detail-skill-count").textContent).toBe("2 skills");
+    expect(screen.getByTestId("plugin-detail-used-by-count").textContent).toBe("used by 2 agents");
 
-    // Skills list — both skills shown.
+    // Real file-browser tree lists plugin root files/dirs from daemon.
     await waitFor(() => {
-      expect(screen.getByTestId("plugin-skill-openrig-user")).toBeDefined();
-      expect(screen.getByTestId("plugin-skill-queue-handoff")).toBeDefined();
+      expect(screen.getByTestId("plugin-detail-tree-entry-README.md")).toBeDefined();
     });
+    expect(screen.getByTestId("plugin-detail-tree-entry-skills")).toBeDefined();
+    expect(screen.getByTestId("plugin-detail-tree-entry-hooks")).toBeDefined();
+    expect(screen.getByTestId("plugin-detail-tree-entry-.claude-plugin")).toBeDefined();
 
-    // Hooks list — claude hook visible with events.
-    expect(screen.getByTestId("plugin-hook-claude")).toBeDefined();
-    expect(screen.getByText(/SessionStart/)).toBeDefined();
-    expect(screen.getByText(/Stop/)).toBeDefined();
-
-    // Slice 3.3 fix-A — MCP servers section visible with both servers.
-    expect(screen.getByTestId("plugin-detail-mcp-servers")).toBeDefined();
-    expect(screen.getByTestId("plugin-mcp-server-github-mcp")).toBeDefined();
-    expect(screen.getByTestId("plugin-mcp-server-linear-mcp")).toBeDefined();
-
-    // Used-by list — both agents visible.
+    // README.md auto-selected on entry; markdown body visible.
     await waitFor(() => {
-      expect(screen.getByTestId("plugin-used-by-advisor-lead")).toBeDefined();
-      expect(screen.getByTestId("plugin-used-by-velocity-driver")).toBeDefined();
+      expect(screen.getByText(/Canonical content/)).toBeDefined();
     });
   });
 
-  it("renders empty Skills section when plugin ships no skills", async () => {
+  it("renders empty plugin folder gracefully", async () => {
     mockFetch.mockImplementation(async (url: string) => {
       if (url === "/api/plugins/skinny") {
         return {
@@ -152,8 +180,9 @@ describe("PluginDetailPage", () => {
               runtimes: ["claude"],
               path: "/x/skinny",
               lastSeenAt: null,
+              skillCount: 0,
             },
-            claudeManifest: { raw: {}, name: "skinny", version: "0.0.1", description: null, homepage: null, repository: null, license: null },
+            claudeManifest: null,
             codexManifest: null,
             skills: [],
             hooks: [],
@@ -164,13 +193,74 @@ describe("PluginDetailPage", () => {
       if (url === "/api/plugins/skinny/used-by") {
         return { ok: true, json: async () => [] };
       }
+      if (url === "/api/plugins/skinny/files/list?path=") {
+        return { ok: true, json: async () => ({ pluginId: "skinny", path: "", entries: [] }) };
+      }
       throw new Error(`unexpected ${url}`);
     });
     renderPluginDetail("skinny");
     expect(await screen.findByTestId("plugin-detail-page")).toBeDefined();
-    expect(screen.getByTestId("plugin-skills-empty")).toBeDefined();
-    expect(screen.getByTestId("plugin-hooks-empty")).toBeDefined();
-    expect(screen.getByTestId("plugin-mcp-servers-empty")).toBeDefined();
-    expect(screen.getByTestId("plugin-used-by-empty")).toBeDefined();
+    expect(screen.getByTestId("plugin-detail-skill-count").textContent).toBe("0 skills");
+    expect(screen.getByTestId("plugin-detail-used-by-count").textContent).toBe("used by 0 agents");
+    await waitFor(() => {
+      expect(screen.getByTestId("plugin-detail-tree-empty")).toBeDefined();
+    });
+    expect(screen.getByTestId("plugin-detail-viewer-no-selection")).toBeDefined();
+  });
+
+  it("folder navigation: clicking a directory enters it; '..' returns to parent", async () => {
+    mockFetch.mockImplementation(async (url: string) => {
+      if (url === "/api/plugins/openrig-core") {
+        return {
+          ok: true,
+          json: async () => ({
+            entry: {
+              id: "openrig-core",
+              name: "openrig-core",
+              version: "0.1.0",
+              description: null,
+              source: "vendored",
+              sourceLabel: "vendored:openrig-core",
+              runtimes: ["claude"],
+              path: "/x/openrig-core",
+              lastSeenAt: null,
+              skillCount: 1,
+            },
+            claudeManifest: null,
+            codexManifest: null,
+            skills: [],
+            hooks: [],
+            mcpServers: [],
+          }),
+        };
+      }
+      if (url === "/api/plugins/openrig-core/used-by") return { ok: true, json: async () => [] };
+      if (url === "/api/plugins/openrig-core/files/list?path=") {
+        return {
+          ok: true,
+          json: async () => ({ pluginId: "openrig-core", path: "", ...fileList([{ name: "skills", type: "dir" }]) }),
+        };
+      }
+      if (url === "/api/plugins/openrig-core/files/list?path=skills") {
+        return {
+          ok: true,
+          json: async () => ({ pluginId: "openrig-core", path: "skills", ...fileList([{ name: "openrig-user", type: "dir" }]) }),
+        };
+      }
+      throw new Error(`unexpected ${url}`);
+    });
+    renderPluginDetail("openrig-core");
+    await waitFor(() => {
+      expect(screen.getByTestId("plugin-detail-tree-entry-skills")).toBeDefined();
+    });
+    fireEvent.click(screen.getByTestId("plugin-detail-tree-entry-skills"));
+    await waitFor(() => {
+      expect(screen.getByTestId("plugin-detail-tree-entry-skills/openrig-user")).toBeDefined();
+    });
+    expect(screen.getByTestId("plugin-detail-tree-up")).toBeDefined();
+    fireEvent.click(screen.getByTestId("plugin-detail-tree-up"));
+    await waitFor(() => {
+      expect(screen.getByTestId("plugin-detail-tree-entry-skills")).toBeDefined();
+    });
   });
 });
