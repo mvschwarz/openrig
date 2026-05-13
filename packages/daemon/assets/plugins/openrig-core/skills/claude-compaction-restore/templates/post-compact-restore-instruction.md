@@ -1,1 +1,1 @@
-After compaction, restore continuity by reading the OpenRig restore packet and any referenced files. Then state the active task, current evidence state, blockers/caveats, and next step before continuing.
+Load/read the claude-compaction-restore skill and follow its post-compaction restore protocol.

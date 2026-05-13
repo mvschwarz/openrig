@@ -69,26 +69,45 @@ The script writes:
 - `restore-instructions.md` — checklist for the compacted agent
 - `restore-summary.json` — machine-readable summary
 
-## Operator Instruction Files
+## Policy Surfaces
 
-OpenRig ships `openrig-compaction-instructions` as the default
-file-backed restore prompt surface. The daemon's default
-`policies.claude_compaction.message_file_path` resolves to:
+OpenRig's Claude auto-compaction policy has two post-compaction customization
+surfaces:
 
-```text
-$OPENRIG_HOME/plugins/openrig-core/skills/openrig-compaction-instructions/COMPACTION.md
-```
+- `message_inline`: the default says to load/read this skill and follow its
+  restore protocol.
+- `message_file_path`: an additional user-owned file for mission-specific
+  reading lists or extra restore notes. The daemon creates a placeholder at:
+  `$OPENRIG_HOME/compaction/post-compact-extra.md`.
 
-The local `templates/` files in this skill are reference snippets for the two
-policy fields:
+The local `templates/` files in this skill are reference snippets for the
+editable policy fields:
 
 - `templates/compact-instruction.md` — instruction passed as `/compact <instruction>`.
-- `templates/post-compact-restore-instruction.md` — minimal restore directive for older configs that did not point at a file.
+- `templates/post-compact-restore-instruction.md` — default inline restore directive.
 
 These templates are deliberately continuity/procedure-shaped. Avoid
 testing compaction with "say this exact phrase" or persona-style
 commands; Claude may correctly treat those as prompt-injection-shaped
 hook output rather than useful lifecycle instructions.
+
+## Pre-Compaction Preparation
+
+When a Claude Code seat is about to compact and can still act, prepare a
+compact handoff before the boundary:
+
+1. Write or update a short session handoff note with the active task, queue
+   item IDs, decisions, blockers, changed files, tests/commands run, and next
+   concrete step.
+2. Create a reading list of files that future-you must read after compaction.
+   Include mission notes, queue packets, touched docs, source files with active
+   edits, root docs such as `AGENTS.md` or `CLAUDE.md`, and any as-built or
+   codemap docs needed before code/review work.
+3. State how the breadcrumbs relate: which file is the mission state, which
+   file is the implementation state, which files are evidence, and which
+   files are optional background.
+4. Prefer durable files over memory. If a fact matters after compaction, write
+   it down or ensure it is named in the reading list.
 
 ## Restore Protocol
 
@@ -100,13 +119,27 @@ hook output rather than useful lifecycle instructions.
 6. Read as-built docs and code maps in full before product work, code review, or architecture decisions. Common paths: `docs/as-built/`, `docs/codemap*`, `docs/architecture*`.
 7. Only resume work after stating: "restored from packet at <path>; resumed at step <X>."
 
+## Read-Depth Audit
+
+Claude often sounds restored after reading only part of the requested context.
+The operator or daemon should follow the restore request with a normal
+user-channel audit prompt:
+
+1. List every file, packet, marker, instruction file, and source document you
+   were asked to read during restore.
+2. Mark each item as `FULL`, `PARTIAL`, or `NOT_READ`.
+3. You will be given a task where all of these files are required reading in
+   order to understand the task.
+4. Do not optimize for token conservation.
+5. Read every `PARTIAL` or `NOT_READ` item in full now, then report the final
+   read-depth table before continuing.
+
 ## Hook Usage
 
 Claude Code exposes compaction lifecycle hooks. OpenRig uses
 `PreCompact` to prepare the packet before compaction, plus
 `SessionStart` with matcher `compact` and `UserPromptSubmit` as the
-post-compact bridge that injects the pending restore directive if the
-summary alone did not carry enough context.
+post-compact bridge that can expose marker context.
 
 ```bash
 node ~/.claude/skills/claude-compaction-restore/scripts/precompact-hook.mjs
@@ -115,14 +148,13 @@ node ~/.claude/skills/claude-compaction-restore/scripts/precompact-hook.mjs
 The hook reads Claude hook JSON from stdin, creates a restore packet
 under `/tmp/claude-compaction-restore/`, writes a pending marker under
 `$OPENRIG_HOME/compaction/restore-pending/`, and returns a
-`systemMessage` telling the compacted agent what to read.
+`systemMessage` that is informational context.
 
-The hook and bridge provide context, but they do not create an
-assistant turn by themselves. OpenRig's daemon-side compaction enforcer
-therefore sends one normal post-compaction restore prompt after context
-usage drops below the configured threshold. That prompt points at the
-pending marker and restore packet so the seat actively runs the restore
-protocol instead of sitting idle after `/compact`.
+The hook and bridge provide evidence and markers; they are not the reliable
+action channel. OpenRig's daemon-side compaction enforcer therefore sends
+normal post-compaction user-channel prompts after context usage drops below the
+configured threshold: first a short boundary, then the restore request, then a
+read-depth audit follow-up. Those visible prompts are what ask Claude to act.
 
 To wire the hook, add to `~/.claude/settings.json`:
 

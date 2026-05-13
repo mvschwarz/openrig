@@ -8,14 +8,7 @@ const skillRoot = path.resolve(new URL("..", import.meta.url).pathname);
 const restoreScript = path.join(skillRoot, "scripts", "restore-from-jsonl.mjs");
 const outRoot = "/tmp/claude-compaction-restore";
 const defaultRestoreInstruction =
-  "After compaction, restore continuity by reading the OpenRig restore packet and any referenced files. Then state the active task, current evidence state, blockers/caveats, and next step before continuing.";
-const defaultRestoreInstructionRelativePath = [
-  "plugins",
-  "openrig-core",
-  "skills",
-  "openrig-compaction-instructions",
-  "COMPACTION.md",
-];
+  "Load/read the claude-compaction-restore skill and follow its post-compaction restore protocol.";
 
 function emit(payload) {
   process.stdout.write(`${JSON.stringify(payload)}\n`);
@@ -40,10 +33,6 @@ function expandInstructionPath(filePath) {
     return path.join(getOpenRigHome(), filePath.slice("$OPENRIG_HOME/".length));
   }
   return filePath;
-}
-
-function defaultRestoreInstructionFilePath() {
-  return path.join(getOpenRigHome(), ...defaultRestoreInstructionRelativePath);
 }
 
 function readInstructionFile(filePath) {
@@ -95,7 +84,8 @@ function writePendingRestoreMarker(input, parsed, restoreInstruction, customMess
 // reachable from this process). Returns "" for either field when the
 // config is missing, malformed, or the policy isn't set. If the policy is
 // enabled but restore text has not been written yet, use OpenRig's default
-// continuity-shaped restore instruction.
+// instruction to load the canonical restore skill. Inline instructions and
+// file-path content are both included when both are configured.
 function readClaudeCompactionMessage() {
   const configPath = path.join(getOpenRigHome(), "config.json");
   let inline = "";
@@ -123,21 +113,22 @@ function readClaudeCompactionMessage() {
     return "";
   }
 
-  if (inline && inline.length > 0) return inline;
+  const parts = [];
+  if (inline && inline.length > 0) {
+    parts.push(`Inline restore instruction:\n${inline}`);
+  }
   if (filePath && filePath.length > 0) {
     try {
-      return readInstructionFile(filePath);
+      const fileText = readInstructionFile(filePath);
+      if (fileText) {
+        parts.push(`Additional restore instruction file (${filePath}):\n${fileText}`);
+      }
     } catch {
-      return "";
+      // Keep any inline instruction; unreadable extra files degrade quietly.
     }
   }
+  if (parts.length > 0) return parts.join("\n\n");
   if (policyEnabled && !inlineConfigured && !filePathConfigured) {
-    try {
-      const defaultFileText = readInstructionFile(defaultRestoreInstructionFilePath());
-      if (defaultFileText) return defaultFileText;
-    } catch {
-      // Fall through to the built-in text fallback below.
-    }
     return defaultRestoreInstruction;
   }
   return "";

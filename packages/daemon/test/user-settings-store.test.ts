@@ -12,12 +12,15 @@ import { tmpdir } from "node:os";
 import {
   SettingsStore,
   SETTINGS_VALID_KEYS,
+  DEFAULT_CLAUDE_COMPACTION_EXTRA_INSTRUCTION_FILE_CONTENT,
+  defaultClaudeCompactionExtraInstructionFilePath,
+  ensureDefaultClaudeCompactionFiles,
   parseNamedPairs,
 } from "../src/domain/user-settings/settings-store.js";
 
 const DEFAULT_COMPACT_INSTRUCTION_FRAGMENT = "Create a concise continuity summary";
-const DEFAULT_RESTORE_INSTRUCTION_FILE_SUFFIX =
-  "plugins/openrig-core/skills/openrig-compaction-instructions/COMPACTION.md";
+const DEFAULT_RESTORE_INSTRUCTION_FRAGMENT = "Load/read the claude-compaction-restore skill";
+const DEFAULT_EXTRA_INSTRUCTION_FILE_SUFFIX = "compaction/post-compact-extra.md";
 
 function clearEnv(): () => void {
   const keys = [
@@ -259,9 +262,9 @@ describe("SettingsStore (User Settings v0)", () => {
     expect(policy.enabled).toBe(false);
     expect(policy.thresholdPercent).toBe(80);
     expect(policy.compactInstruction).toContain(DEFAULT_COMPACT_INSTRUCTION_FRAGMENT);
-    expect(policy.messageInline).toBe("");
+    expect(policy.messageInline).toContain(DEFAULT_RESTORE_INSTRUCTION_FRAGMENT);
     expect(policy.messageFilePath).toMatch(/^\//);
-    expect(policy.messageFilePath.endsWith(DEFAULT_RESTORE_INSTRUCTION_FILE_SUFFIX)).toBe(true);
+    expect(policy.messageFilePath.endsWith(DEFAULT_EXTRA_INSTRUCTION_FILE_SUFFIX)).toBe(true);
   });
 
   it("HG-10: resolveClaudeCompactionPolicy picks up direct config.json edits without daemon restart (single resolve call rereads file)", () => {
@@ -288,7 +291,21 @@ describe("SettingsStore (User Settings v0)", () => {
     expect(updated.thresholdPercent).toBe(65);
     expect(updated.compactInstruction).toBe("preserve current task and decisions");
     expect(updated.messageInline).toBe("carry-forward note");
-    expect(updated.messageFilePath.endsWith(DEFAULT_RESTORE_INSTRUCTION_FILE_SUFFIX)).toBe(true);
+    expect(updated.messageFilePath.endsWith(DEFAULT_EXTRA_INSTRUCTION_FILE_SUFFIX)).toBe(true);
+  });
+
+  it("Slice 27: ensureDefaultClaudeCompactionFiles creates the user-owned extra instruction placeholder without overwriting edits", () => {
+    const openrigHome = join(tmpDir, ".openrig-placeholder");
+    const filePath = ensureDefaultClaudeCompactionFiles(openrigHome);
+    expect(filePath).toBe(defaultClaudeCompactionExtraInstructionFilePath(openrigHome));
+    expect(existsSync(filePath)).toBe(true);
+    expect(require("node:fs").readFileSync(filePath, "utf-8")).toBe(
+      DEFAULT_CLAUDE_COMPACTION_EXTRA_INSTRUCTION_FILE_CONTENT,
+    );
+
+    writeFileSync(filePath, "operator edits\n", "utf-8");
+    ensureDefaultClaudeCompactionFiles(openrigHome);
+    expect(require("node:fs").readFileSync(filePath, "utf-8")).toBe("operator edits\n");
   });
 
   it("HG-1: set/get round-trip for each policy key persists to disk and reads back", () => {

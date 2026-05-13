@@ -259,14 +259,35 @@ const WORKSPACE_DERIVED_KEYS: ReadonlySet<SettingsValidKey> = new Set([
 const DEFAULT_CLAUDE_COMPACTION_COMPACT_INSTRUCTION =
   "Create a concise continuity summary for this OpenRig session. Preserve the active task, queue item IDs, decisions, changed files, commands/tests run, blockers, caveats, and next concrete step.";
 
-const DEFAULT_CLAUDE_COMPACTION_RESTORE_INSTRUCTION_FILE_PATH = path.join(
-  path.dirname(DEFAULT_CONFIG_PATH),
-  "plugins",
-  "openrig-core",
-  "skills",
-  "openrig-compaction-instructions",
-  "COMPACTION.md",
+const DEFAULT_CLAUDE_COMPACTION_RESTORE_INSTRUCTION =
+  "Load/read the claude-compaction-restore skill and follow its post-compaction restore protocol.";
+
+const DEFAULT_CLAUDE_COMPACTION_EXTRA_INSTRUCTION_RELATIVE_PATH = path.join(
+  "compaction",
+  "post-compact-extra.md",
 );
+
+export const DEFAULT_CLAUDE_COMPACTION_EXTRA_INSTRUCTION_FILE_CONTENT = `# OpenRig Post-Compact Extra Instructions
+
+No mission-specific extra restore instructions are configured yet.
+
+Add additional file paths, reading lists, or mission-specific restore notes here
+when this session needs more context than the canonical claude-compaction-restore
+skill provides.
+`;
+
+export function defaultClaudeCompactionExtraInstructionFilePath(openrigHome = path.dirname(DEFAULT_CONFIG_PATH)): string {
+  return path.join(openrigHome, DEFAULT_CLAUDE_COMPACTION_EXTRA_INSTRUCTION_RELATIVE_PATH);
+}
+
+export function ensureDefaultClaudeCompactionFiles(openrigHome = path.dirname(DEFAULT_CONFIG_PATH)): string {
+  const filePath = defaultClaudeCompactionExtraInstructionFilePath(openrigHome);
+  if (!existsSync(filePath)) {
+    mkdirSync(path.dirname(filePath), { recursive: true });
+    writeFileSync(filePath, DEFAULT_CLAUDE_COMPACTION_EXTRA_INSTRUCTION_FILE_CONTENT, "utf-8");
+  }
+  return filePath;
+}
 
 function getDefaultValue(key: SettingsValidKey, workspaceRoot: string): string | number | boolean {
   if (WORKSPACE_DERIVED_KEYS.has(key)) {
@@ -314,13 +335,13 @@ function getDefaultValue(key: SettingsValidKey, workspaceRoot: string): string |
     // default-off; threshold 80% per spec. Instruction defaults are
     // state/procedure-shaped so first-time operator tests do not start
     // with prompt-injection-shaped output commands. Post-compaction
-    // restore uses a shipped skill file by default; inline text is an
-    // operator override when set.
+    // restore defaults to the canonical restore skill plus a user-owned
+    // extra instruction file path for mission-specific reading lists.
     case "policies.claude_compaction.enabled": return false;
     case "policies.claude_compaction.threshold_percent": return 80;
     case "policies.claude_compaction.compact_instruction": return DEFAULT_CLAUDE_COMPACTION_COMPACT_INSTRUCTION;
-    case "policies.claude_compaction.message_inline": return "";
-    case "policies.claude_compaction.message_file_path": return DEFAULT_CLAUDE_COMPACTION_RESTORE_INSTRUCTION_FILE_PATH;
+    case "policies.claude_compaction.message_inline": return DEFAULT_CLAUDE_COMPACTION_RESTORE_INSTRUCTION;
+    case "policies.claude_compaction.message_file_path": return defaultClaudeCompactionExtraInstructionFilePath();
     default: return "";
   }
 }

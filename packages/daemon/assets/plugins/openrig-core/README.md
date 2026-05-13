@@ -4,7 +4,7 @@ Canonical OpenRig skills and hooks for cross-runtime agent topology coordination
 
 ## What this plugin ships
 
-**Skills (12):** the canonical OpenRig operating knowledge — how to use the `rig` CLI, how to design rig topologies, how to recover from compaction, how to hand work off durably between agents, how to reason about permission posture, and more.
+**Skills (11):** the canonical OpenRig operating knowledge — how to use the `rig` CLI, how to design rig topologies, how to recover from compaction, how to hand work off durably between agents, how to reason about permission posture, and more.
 
 **Hooks:** activity-tracking hooks (Claude Code: 4 events; Codex: 3 events) that POST agent state to the OpenRig daemon for real-time UI seat-status updates.
 
@@ -15,10 +15,9 @@ This plugin ships dual-manifest packaging — both `.claude-plugin/` and `.codex
 - **Claude Code** — install via `/plugin` after the OpenRig daemon vendors `openrig-core/` to `~/.openrig/plugins/openrig-core/` on first run, or install the plugin directly through Claude Code's own plugin commands when remote distribution is available
 - **Codex CLI** — install via `/plugins` after the same vendoring step, or directly through Codex's own plugin commands
 
-Three skills target Claude Code's compaction behavior specifically:
+Two skills target Claude Code's compaction behavior specifically:
 - `claude-compaction-restore` — used to rebuild a Claude Code agent's working mental model after `/compact`, from JSONL transcripts and touched files
 - `claude-compact-in-place` — verification + recovery SOP for an in-place compacted Claude Code seat
-- `openrig-compaction-instructions` — the default file-backed restore prompt surface that OpenRig's Claude compaction policy points at
 
 These are NOT Codex-self-targeting (Codex's compaction is handled internally and doesn't need rebuild SOPs). But Codex agents acting as orchestrators frequently invoke these skills when restoring a peer Claude that has compacted — that's exactly when they're needed. Both runtimes ship them.
 

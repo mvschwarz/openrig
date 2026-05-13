@@ -108,11 +108,23 @@ function buildPostCompactRestorePrompt(input: {
   const instructionFilePath = input.postCompactInstructionFilePath?.trim();
   if (inlineInstruction) {
     pieces.push(`Operator post-compaction instruction: ${inlineInstruction}`);
-  } else if (instructionFilePath) {
-    pieces.push(`Operator post-compaction instruction file: ${instructionFilePath}. Read it before restoring.`);
+  }
+  if (instructionFilePath) {
+    pieces.push(`Additional post-compaction instruction file: ${instructionFilePath}. Read it before restoring; it may contain mission-specific reading lists or file paths.`);
   }
   pieces.push("Load/read the claude-compaction-restore skill, follow the marker's restoreInstruction and postCompactInstruction when present, read the restore packet files, then reply with: restored from packet at <path>; resumed at step <X>.");
   return pieces.join(" ");
+}
+
+function buildPostCompactCompliancePrompt(): string {
+  return [
+    "Now audit your compaction restore before doing any other work.",
+    "List every file, packet, marker, instruction file, and source document you were asked to read during restore.",
+    "For each item, mark read depth as FULL, PARTIAL, or NOT_READ.",
+    "You will be given a task where all of these files are required reading in order to understand the task.",
+    "Do not optimize for token conservation.",
+    "Read every PARTIAL or NOT_READ item in full now, then report the final read-depth table before continuing.",
+  ].join(" ");
 }
 
 function buildPostCompactTurnBoundaryPrompt(): string {
@@ -123,7 +135,7 @@ function buildPostCompactTurnBoundaryPrompt(): string {
   ].join(" ");
 }
 
-type PendingPostCompactStage = "turn_boundary" | "restore_prompt";
+type PendingPostCompactStage = "turn_boundary" | "restore_prompt" | "compliance_prompt";
 
 export class ClaudeCompactionEnforcer {
   private readonly settingsStore: SettingsStore;
@@ -207,6 +219,17 @@ export class ClaudeCompactionEnforcer {
           }),
         );
         if (!restore.ok) {
+          return { triggered: false, reason: "send_failed" };
+        }
+        this.pendingPostCompactRestore.set(input.sessionName, "compliance_prompt");
+        return { triggered: true };
+      }
+      if (pendingStage === "compliance_prompt") {
+        const compliance = await this.sessionTransport.send(
+          input.sessionName,
+          buildPostCompactCompliancePrompt(),
+        );
+        if (!compliance.ok) {
           return { triggered: false, reason: "send_failed" };
         }
         this.pendingPostCompactRestore.delete(input.sessionName);

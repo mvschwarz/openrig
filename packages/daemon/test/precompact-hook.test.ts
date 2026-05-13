@@ -9,9 +9,9 @@
 //
 // Hard-gate coverage:
 //   HG-6  inline message appended to systemMessage
-//   HG-7  file-path message read + appended when inline is empty
+//   HG-7  file-path message read + appended
 //   HG-8  neither set → existing restore-instructions only (no custom append)
-//   Inline wins when both set
+//   Inline + file both contribute when both are set
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { spawnSync } from "node:child_process";
@@ -159,14 +159,16 @@ describe("precompact-hook.mjs (slice 27 custom message append)", () => {
     expect(existsSync(markerPath)).toBe(true);
     const marker = JSON.parse(readFileSync(markerPath, "utf8"));
     expect(marker.outputDir).toMatch(/^\/tmp\/claude-compaction-restore\//);
-    expect(marker.postCompactInstruction).toBe("Read the queue before resuming.");
+    expect(marker.postCompactInstruction).toContain("Inline restore instruction");
+    expect(marker.postCompactInstruction).toContain("Read the queue before resuming.");
     expect(marker.deliveryCount).toBe(0);
 
     const bridge = runBridge(openrigHome);
     expect(bridge.status).toBe(0);
     const bridgePayload = JSON.parse(bridge.stdout.trim());
     expect(bridgePayload.hookSpecificOutput.hookEventName).toBe("UserPromptSubmit");
-    expect(bridgePayload.hookSpecificOutput.additionalContext).toContain("OpenRig compaction restore is pending");
+    expect(bridgePayload.hookSpecificOutput.additionalContext).toContain("OpenRig compaction restore packet is available");
+    expect(bridgePayload.hookSpecificOutput.additionalContext).toContain("informational context");
     expect(bridgePayload.hookSpecificOutput.additionalContext).toContain(marker.outputDir);
     expect(bridgePayload.hookSpecificOutput.additionalContext).toContain("Read the queue before resuming.");
 
@@ -234,48 +236,22 @@ describe("precompact-hook.mjs (slice 27 custom message append)", () => {
     const payload = JSON.parse(stdout.trim());
     expect(payload.continue).toBe(true);
     expect(payload.systemMessage).toContain(APPEND_MARKER);
-    expect(payload.systemMessage).toContain("After compaction, restore continuity");
+    expect(payload.systemMessage).toContain("Load/read the claude-compaction-restore skill");
   });
 
-  it("uses the shipped compaction instruction file when policy is enabled and no restore text is configured", () => {
-    const defaultInstructionDir = join(
-      openrigHome,
-      "plugins",
-      "openrig-core",
-      "skills",
-      "openrig-compaction-instructions",
-    );
-    mkdirSync(defaultInstructionDir, { recursive: true });
-    writeFileSync(
-      join(defaultInstructionDir, "COMPACTION.md"),
-      "Read the default OpenRig compaction instruction file.",
-    );
-    writePartialPolicyConfig(openrigHome, {
-      enabled: true,
-      thresholdPercent: 80,
-    });
-
-    const { stdout, status } = runHook(openrigHome);
-    expect(status).toBe(0);
-    const payload = JSON.parse(stdout.trim());
-    expect(payload.continue).toBe(true);
-    expect(payload.systemMessage).toContain(APPEND_MARKER);
-    expect(payload.systemMessage).toContain("Read the default OpenRig compaction instruction file.");
-  });
-
-  it("inline wins when both are set", () => {
+  it("inline and file-path both contribute when both are set", () => {
     const messageFile = join(tmpDir, "msg.txt");
-    writeFileSync(messageFile, "FILE WINS NOT");
+    writeFileSync(messageFile, "FILE ALSO INCLUDED");
     writePolicyConfig(openrigHome, {
-      messageInline: "INLINE WINS",
+      messageInline: "INLINE INCLUDED",
       messageFilePath: messageFile,
     });
 
     const { stdout, status } = runHook(openrigHome);
     expect(status).toBe(0);
     const payload = JSON.parse(stdout.trim());
-    expect(payload.systemMessage).toContain("INLINE WINS");
-    expect(payload.systemMessage).not.toContain("FILE WINS NOT");
+    expect(payload.systemMessage).toContain("INLINE INCLUDED");
+    expect(payload.systemMessage).toContain("FILE ALSO INCLUDED");
   });
 
   it("file-path with missing file degrades gracefully (no append, no error)", () => {

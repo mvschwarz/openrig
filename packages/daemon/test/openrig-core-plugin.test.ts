@@ -19,14 +19,13 @@ import * as nodePath from "node:path";
 const PLUGIN_ROOT = nodePath.resolve(import.meta.dirname, "../assets/plugins/openrig-core");
 
 // Skills shipping in openrig-core v0 (per IMPL-PRD §2.6 + advisor draft):
-// 12 skills total. These are vendored canonical OpenRig skills that any
+// 11 skills total. These are vendored canonical OpenRig skills that any
 // OpenRig agent can load via the plugin pathway.
 const EXPECTED_SKILLS = [
   "agent-startup-and-context-ingestion",
   "claude-compact-in-place",
   "claude-compaction-restore",
   "forming-an-openrig-mental-model",
-  "openrig-compaction-instructions",
   "openrig-architect",
   "openrig-operator",
   "openrig-user",
@@ -109,34 +108,13 @@ describe("openrig-core plugin — skills (HG-2.1 skill content per agentskills.i
     expect(desc.length).toBeLessThanOrEqual(1024);
   });
 
-  it("ships exactly the 12 expected skills (no drift; no missing skills)", () => {
+  it("ships exactly the 11 expected skills (no drift; no missing skills)", () => {
     const skillsDir = nodePath.join(PLUGIN_ROOT, "skills");
     const actual = fs.readdirSync(skillsDir).filter((f) =>
-      fs.statSync(nodePath.join(skillsDir, f)).isDirectory(),
+      fs.statSync(nodePath.join(skillsDir, f)).isDirectory()
+      && fs.existsSync(nodePath.join(skillsDir, f, "SKILL.md")),
     );
     expect(actual.sort()).toEqual([...EXPECTED_SKILLS].sort());
-  });
-
-  it("openrig-compaction-instructions ships the default compaction instruction files", () => {
-    const compactPath = nodePath.join(
-      PLUGIN_ROOT,
-      "skills",
-      "openrig-compaction-instructions",
-      "COMPACT.md",
-    );
-    const restorePath = nodePath.join(
-      PLUGIN_ROOT,
-      "skills",
-      "openrig-compaction-instructions",
-      "COMPACTION.md",
-    );
-    expect(fs.existsSync(compactPath)).toBe(true);
-    expect(fs.existsSync(restorePath)).toBe(true);
-    const compact = fs.readFileSync(compactPath, "utf-8");
-    const restore = fs.readFileSync(restorePath, "utf-8");
-    expect(compact).toContain("OpenRig Claude Compact Summary Prompt");
-    expect(restore).toContain("OpenRig Claude Compaction Restore Prompt");
-    expect(restore).toContain("claude-compaction-restore");
   });
 });
 
@@ -173,7 +151,7 @@ describe("openrig-core plugin — hooks (HG-2.6 + HG-2.7)", () => {
     const bridgePath = nodePath.join(PLUGIN_ROOT, "hooks", "scripts", "compaction-restore-bridge.cjs");
     expect(fs.existsSync(bridgePath)).toBe(true);
     const content = fs.readFileSync(bridgePath, "utf-8");
-    expect(content).toMatch(/compaction restore is pending/i);
+    expect(content).toMatch(/compaction restore packet is available/i);
     expect(content).toMatch(/additionalContext/);
   });
 

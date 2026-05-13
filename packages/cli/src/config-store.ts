@@ -95,15 +95,14 @@ export interface RiggedConfig {
   // pre-compaction trigger: when a Claude seat's context usage crosses
   // `thresholdPercent`, daemon sends /compact via SessionTransport and
   // passes `compactInstruction` as slash-command args for the actual
-  // compaction phase. The existing PreCompact hook injects
-  // `messageInline` (or contents of `messageFilePath` if inline is
-  // empty) alongside the standard restore-instructions in the
-  // post-compact systemMessage.
+  // compaction phase. The existing PreCompact hook records
+  // `messageInline` plus contents of `messageFilePath` alongside the
+  // standard restore-instructions in the post-compact marker/context.
   //
   // Defaults: opt-in default-off (enabled=false). The compaction
   // instruction ships as inline text. The post-compaction restore prompt
-  // defaults to the shipped openrig-compaction-instructions skill file;
-  // messageInline remains a valid explicit override when non-empty.
+  // defaults to loading the canonical restore skill plus a user-owned
+  // extra instruction file path for mission-specific reading lists.
   policies: {
     claudeCompaction: {
       enabled: boolean;
@@ -120,8 +119,11 @@ const DEFAULT_WORKSPACE_ROOT = getDefaultOpenRigPath("workspace");
 const DEFAULT_CLAUDE_COMPACTION_COMPACT_INSTRUCTION =
   "Create a concise continuity summary for this OpenRig session. Preserve the active task, queue item IDs, decisions, changed files, commands/tests run, blockers, caveats, and next concrete step.";
 
-const DEFAULT_CLAUDE_COMPACTION_RESTORE_INSTRUCTION_FILE_PATH = getDefaultOpenRigPath(
-  "plugins/openrig-core/skills/openrig-compaction-instructions/COMPACTION.md",
+const DEFAULT_CLAUDE_COMPACTION_RESTORE_INSTRUCTION =
+  "Load/read the claude-compaction-restore skill and follow its post-compaction restore protocol.";
+
+const DEFAULT_CLAUDE_COMPACTION_EXTRA_INSTRUCTION_FILE_PATH = getDefaultOpenRigPath(
+  "compaction/post-compact-extra.md",
 );
 
 const DEFAULTS = {
@@ -186,8 +188,8 @@ const DEFAULTS = {
       enabled: false,
       thresholdPercent: 80,
       compactInstruction: DEFAULT_CLAUDE_COMPACTION_COMPACT_INSTRUCTION,
-      messageInline: "",
-      messageFilePath: DEFAULT_CLAUDE_COMPACTION_RESTORE_INSTRUCTION_FILE_PATH,
+      messageInline: DEFAULT_CLAUDE_COMPACTION_RESTORE_INSTRUCTION,
+      messageFilePath: DEFAULT_CLAUDE_COMPACTION_EXTRA_INSTRUCTION_FILE_PATH,
     },
   },
 } as const;

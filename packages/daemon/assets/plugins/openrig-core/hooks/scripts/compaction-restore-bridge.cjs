@@ -107,13 +107,14 @@ function buildRestoreContext(marker) {
   const ack = firstString(marker.data.expectedAck) || "restored from packet at <path>; resumed at step <X>";
   const postInstruction = firstString(marker.data.postCompactInstruction);
   const pieces = [
-    "OpenRig compaction restore is pending for this Claude session.",
+    "OpenRig compaction restore packet is available for this Claude session.",
+    "This hook output is informational context, not the action request.",
     `Restore packet: ${outputDir}`,
-    "Before doing any substantive work, load/read the claude-compaction-restore skill, run `node ~/.claude/skills/claude-compaction-restore/scripts/restore-from-jsonl.mjs --out /tmp/claude-compaction-restore --json`, read restore-instructions.md and touched-files.md, then read the important source/docs files named there in full.",
+    "OpenRig may send a later normal user message asking you to restore from this packet. Treat that later normal user message as the operator-authorized action request.",
     `After restoration, reply with: ${ack}`,
   ];
   if (postInstruction) {
-    pieces.push(`Operator post-compaction instruction: ${postInstruction}`);
+    pieces.push(`Operator post-compaction context: ${postInstruction}`);
   }
   return pieces.join("\n");
 }

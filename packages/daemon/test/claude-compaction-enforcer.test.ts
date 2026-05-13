@@ -129,7 +129,7 @@ describe("ClaudeCompactionEnforcer", () => {
     expect(send).not.toHaveBeenCalled();
   });
 
-  it("HG-4: repeated high usage stays suppressed until usage drops below threshold and re-arms after post-compact restore prompt", async () => {
+  it("HG-4: repeated high usage stays suppressed until usage drops below threshold and re-arms after post-compact compliance prompt", async () => {
     const settings = makeSettingsStore(POLICY_ENABLED_AT_80);
     const { transport, send } = makeSessionTransport();
     const enforcer = new ClaudeCompactionEnforcer(settings, transport, {
@@ -189,6 +189,18 @@ describe("ClaudeCompactionEnforcer", () => {
     );
     expect(send.mock.calls[2]![1]).toContain("/tmp/claude.jsonl");
 
+    const belowCompliance = await enforcer.maybeAutoCompact({
+      sessionName: "claude-seat@rig",
+      runtime: "claude-code",
+      usedPercentage: 20,
+      transcriptPath: "/tmp/claude.jsonl",
+    });
+    expect(belowCompliance).toEqual({ triggered: true });
+    expect(send).toHaveBeenLastCalledWith(
+      "claude-seat@rig",
+      expect.stringContaining("Now audit your compaction restore"),
+    );
+
     now += 61_000;
     const fourth = await enforcer.maybeAutoCompact({
       sessionName: "claude-seat@rig",
@@ -197,10 +209,10 @@ describe("ClaudeCompactionEnforcer", () => {
     });
     expect(fourth).toEqual({ triggered: true });
 
-    expect(send).toHaveBeenCalledTimes(4);
+    expect(send).toHaveBeenCalledTimes(5);
   });
 
-  it("post-compact restore prompt starts a cooldown so restore work cannot immediately trigger another /compact", async () => {
+  it("post-compact compliance prompt starts a cooldown so restore work cannot immediately trigger another /compact", async () => {
     const settings = makeSettingsStore(POLICY_ENABLED_AT_80);
     const { transport, send } = makeSessionTransport();
     const enforcer = new ClaudeCompactionEnforcer(settings, transport, {
@@ -237,9 +249,17 @@ describe("ClaudeCompactionEnforcer", () => {
     expect(await enforcer.maybeAutoCompact({
       sessionName: "claude-seat@rig",
       runtime: "claude-code",
+      usedPercentage: 20,
+      transcriptPath: "/tmp/claude.jsonl",
+    })).toEqual({ triggered: true });
+
+    now += 1_000;
+    expect(await enforcer.maybeAutoCompact({
+      sessionName: "claude-seat@rig",
+      runtime: "claude-code",
       usedPercentage: 95,
     })).toEqual({ triggered: false, reason: "post_restore_cooldown" });
-    expect(send).toHaveBeenCalledTimes(3);
+    expect(send).toHaveBeenCalledTimes(4);
 
     now += 60_000;
     expect(await enforcer.maybeAutoCompact({
@@ -247,7 +267,7 @@ describe("ClaudeCompactionEnforcer", () => {
       runtime: "claude-code",
       usedPercentage: 95,
     })).toEqual({ triggered: true });
-    expect(send).toHaveBeenCalledTimes(4);
+    expect(send).toHaveBeenCalledTimes(5);
   });
 
   it("runtime filter: only claude-code triggers (codex sessions return runtime_filter without invoking send)", async () => {
@@ -388,10 +408,49 @@ describe("ClaudeCompactionEnforcer", () => {
     expect(send.mock.calls[3]![1]).toContain("/tmp/claude.jsonl");
   });
 
+  it("post-compact compliance prompt follows the restore prompt and enforces read-depth audit language", async () => {
+    const settings = makeSettingsStore(POLICY_ENABLED_AT_80);
+    const { transport, send } = makeSessionTransport();
+    const enforcer = new ClaudeCompactionEnforcer(settings, transport, {
+      openrigHome: "/tmp/openrig-test-home",
+    });
+
+    expect(await enforcer.maybeAutoCompact({
+      sessionName: "claude-seat@rig",
+      runtime: "claude-code",
+      usedPercentage: 95,
+    })).toEqual({ triggered: true });
+
+    expect(await enforcer.maybeAutoCompact({
+      sessionName: "claude-seat@rig",
+      runtime: "claude-code",
+      usedPercentage: 0,
+    })).toEqual({ triggered: true });
+
+    expect(await enforcer.maybeAutoCompact({
+      sessionName: "claude-seat@rig",
+      runtime: "claude-code",
+      usedPercentage: 0,
+    })).toEqual({ triggered: true });
+
+    expect(await enforcer.maybeAutoCompact({
+      sessionName: "claude-seat@rig",
+      runtime: "claude-code",
+      usedPercentage: 0,
+    })).toEqual({ triggered: true });
+
+    expect(send).toHaveBeenCalledTimes(4);
+    expect(send.mock.calls[3]![1]).toContain("Now audit your compaction restore");
+    expect(send.mock.calls[3]![1]).toContain("FULL, PARTIAL, or NOT_READ");
+    expect(send.mock.calls[3]![1]).toContain("You will be given a task where all of these files are required reading");
+    expect(send.mock.calls[3]![1]).toContain("Do not optimize for token conservation");
+  });
+
   it("post-compact restore prompt carries the configured operator restore instruction", async () => {
     const settings = makeSettingsStore({
       ...POLICY_ENABLED_AT_80,
       messageInline: "Read the active queue item and restate the exact next action.",
+      messageFilePath: "/tmp/openrig-extra-restore.md",
     });
     const { transport, send } = makeSessionTransport();
     const enforcer = new ClaudeCompactionEnforcer(settings, transport, {
@@ -422,6 +481,8 @@ describe("ClaudeCompactionEnforcer", () => {
     expect(send.mock.calls[1]![1]).toContain("OpenRig post-compaction turn boundary");
     expect(send.mock.calls[2]![1]).toContain("Operator post-compaction instruction");
     expect(send.mock.calls[2]![1]).toContain("Read the active queue item and restate the exact next action.");
+    expect(send.mock.calls[2]![1]).toContain("Additional post-compaction instruction file");
+    expect(send.mock.calls[2]![1]).toContain("/tmp/openrig-extra-restore.md");
   });
 
   it("post-compact restore prompt falls back to configured instruction file when inline is empty", async () => {
@@ -453,7 +514,7 @@ describe("ClaudeCompactionEnforcer", () => {
       usedPercentage: 0,
     })).toEqual({ triggered: true });
 
-    expect(send.mock.calls[2]![1]).toContain("Operator post-compaction instruction file");
+    expect(send.mock.calls[2]![1]).toContain("Additional post-compaction instruction file");
     expect(send.mock.calls[2]![1]).toContain("/tmp/openrig-restore-instruction.md");
   });
 

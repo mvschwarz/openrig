@@ -4,11 +4,11 @@
 // context usage crosses `threshold_percent`, the daemon's ContextMonitor
 // dispatches `/compact` via SessionTransport, optionally with
 // `compact_instruction` as slash-command args. The compaction hooks
-// inject the operator's `message_inline` (or contents of
-// `message_file_path`) alongside the standard restore-instructions.
+// inject the operator's `message_inline` plus contents of
+// `message_file_path` alongside the standard restore-instructions.
 //
-// Opt-in default-off. Inline is an override; the default file path points
-// at the shipped openrig-compaction-instructions skill.
+// Opt-in default-off. Inline points at the canonical restore skill; the
+// file path points at a user-owned extra-instructions placeholder.
 
 import { useState } from "react";
 import type { FormEvent } from "react";
@@ -143,7 +143,7 @@ function PolicyFormBody({ data, setSetting }: PolicyFormBodyProps) {
         <code className="font-mono text-[12px]"> /compact</code> once the seat is idle
         with an empty prompt. Compaction instructions are sent with that slash
         command. After compaction, OpenRig sends one restore prompt that points
-        the seat at its restore packet.
+        the seat at its restore packet, followed by a read-depth audit prompt.
       </p>
 
       <form
@@ -219,8 +219,9 @@ function PolicyFormBody({ data, setSetting }: PolicyFormBodyProps) {
             className="border border-outline-variant px-2 py-1 font-mono text-sm"
           />
           <span className="text-xs text-on-surface-variant">
-            Inline text wins when set. Leave blank to use the canonical skill
-            file path below.
+            Default asks Claude to load/read the canonical
+            claude-compaction-restore skill. Edit this for general restore
+            behavior.
           </span>
         </div>
 
@@ -234,13 +235,13 @@ function PolicyFormBody({ data, setSetting }: PolicyFormBodyProps) {
             type="text"
             value={form.messageFilePath}
             onChange={(e) => setForm((s) => ({ ...s, messageFilePath: e.target.value }))}
-            placeholder="Path read at hook-fire time; ignored when inline is set."
+            placeholder="Path read at hook-fire time for extra restore instructions."
             className="border border-outline-variant px-2 py-1 font-mono text-sm"
           />
           <span className="text-xs text-on-surface-variant">
-            Default points at the shipped OpenRig compaction-instructions
-            skill. Point this at another file to test alternate restore
-            prompts without changing OpenRig source.
+            Default points at a user-owned placeholder file. Put
+            mission-specific reading lists or extra restore notes there
+            without changing the canonical skill.
           </span>
         </div>
 

@@ -407,14 +407,21 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
 
   // plugin-primitive Phase 3a slice 3.5 — ensure Codex feature flag
   // codex_hooks = true is set in ~/.codex/config.toml so plugin-shipped
-  // hooks fire on Codex runtime. Operator can disable via OPENRIG_RUNTIME_CODEX_HOOKS_ENABLED
+  // hooks fire on Codex runtime. Slice 27 also creates the default
+  // user-owned Claude compaction extra-instructions placeholder.
+  // Operator can disable Codex hooks via OPENRIG_RUNTIME_CODEX_HOOKS_ENABLED
   // or rig config set runtime.codex.hooks_enabled false.
   try {
-    const settingsStore = new (await import("./domain/user-settings/settings-store.js")).SettingsStore();
+    const {
+      SettingsStore,
+      ensureDefaultClaudeCompactionFiles,
+    } = await import("./domain/user-settings/settings-store.js");
+    ensureDefaultClaudeCompactionFiles(OPENRIG_HOME);
+    const settingsStore = new SettingsStore();
     const enabled = settingsStore.resolveOne("runtime.codex.hooks_enabled").value as boolean;
     codexAdapter.ensureCodexFeatureFlag(enabled);
   } catch (err) {
-    console.error(`[openrig] codex feature flag setup warning: ${(err as Error).message}`);
+    console.error(`[openrig] runtime setup warning: ${(err as Error).message}`);
   }
 
   // plugin-primitive Phase 3a slice 3.2 — vendor openrig-core plugin to

@@ -15,8 +15,10 @@ import { ClaudeCompactionPolicyForm } from "../src/components/system/ClaudeCompa
 const mockFetch = vi.fn();
 const DEFAULT_COMPACT_INSTRUCTION =
   "Create a concise continuity summary for this OpenRig session. Preserve the active task, queue item IDs, decisions, changed files, commands/tests run, blockers, caveats, and next concrete step.";
-const DEFAULT_RESTORE_INSTRUCTION_FILE_PATH =
-  "/Users/test/.openrig/plugins/openrig-core/skills/openrig-compaction-instructions/COMPACTION.md";
+const DEFAULT_RESTORE_INSTRUCTION =
+  "Load/read the claude-compaction-restore skill and follow its post-compaction restore protocol.";
+const DEFAULT_EXTRA_INSTRUCTION_FILE_PATH =
+  "/Users/test/.openrig/compaction/post-compact-extra.md";
 
 beforeEach(() => {
   globalThis.fetch = mockFetch as unknown as typeof fetch;
@@ -56,14 +58,14 @@ function makeSettingsResponse(overrides: Partial<{
         defaultValue: DEFAULT_COMPACT_INSTRUCTION,
       },
       "policies.claude_compaction.message_inline": {
-        value: overrides.messageInline ?? "",
+        value: overrides.messageInline ?? DEFAULT_RESTORE_INSTRUCTION,
         source: "default",
-        defaultValue: "",
+        defaultValue: DEFAULT_RESTORE_INSTRUCTION,
       },
       "policies.claude_compaction.message_file_path": {
-        value: overrides.messageFilePath ?? DEFAULT_RESTORE_INSTRUCTION_FILE_PATH,
+        value: overrides.messageFilePath ?? DEFAULT_EXTRA_INSTRUCTION_FILE_PATH,
         source: "default",
-        defaultValue: DEFAULT_RESTORE_INSTRUCTION_FILE_PATH,
+        defaultValue: DEFAULT_EXTRA_INSTRUCTION_FILE_PATH,
       },
     },
   };
@@ -85,9 +87,9 @@ describe("ClaudeCompactionPolicyForm — slice 27", () => {
     const compactInstruction = screen.getByTestId("claude-compaction-compact-instruction") as HTMLTextAreaElement;
     expect(compactInstruction.value).toBe(DEFAULT_COMPACT_INSTRUCTION);
     const inline = screen.getByTestId("claude-compaction-message-inline") as HTMLTextAreaElement;
-    expect(inline.value).toBe("");
+    expect(inline.value).toBe(DEFAULT_RESTORE_INSTRUCTION);
     const filePath = screen.getByTestId("claude-compaction-message-file-path") as HTMLInputElement;
-    expect(filePath.value).toBe(DEFAULT_RESTORE_INSTRUCTION_FILE_PATH);
+    expect(filePath.value).toBe(DEFAULT_EXTRA_INSTRUCTION_FILE_PATH);
   });
 
   it("HG-9: loads existing non-default values from /api/config when present", async () => {
@@ -148,7 +150,7 @@ describe("ClaudeCompactionPolicyForm — slice 27", () => {
     expect(findKey("policies.claude_compaction.message_inline")?.init?.body as string).toContain("Reload the slice doc before resuming.");
     // message_file_path posted with its default canonical skill file path.
     expect(findKey("policies.claude_compaction.message_file_path")?.init?.body as string).toContain(
-      DEFAULT_RESTORE_INSTRUCTION_FILE_PATH,
+      DEFAULT_EXTRA_INSTRUCTION_FILE_PATH,
     );
 
     await waitFor(() => expect(screen.getByTestId("claude-compaction-policy-saved")).toBeDefined());
