@@ -13,10 +13,13 @@ import { createTestRouter } from "./helpers/test-router.js";
 import { ClaudeCompactionPolicyForm } from "../src/components/system/ClaudeCompactionPolicyForm.js";
 
 const mockFetch = vi.fn();
-const DEFAULT_COMPACT_INSTRUCTION =
-  "Create a concise continuity summary for this OpenRig session. Preserve the active task, queue item IDs, decisions, changed files, commands/tests run, blockers, caveats, and next concrete step.";
+const DEFAULT_PRE_COMPACT_INSTRUCTION =
+  "Read the claude-compaction-restore skill and follow its \"If You Are About To Compact\" protocol.";
+const DEFAULT_COMPACT_INSTRUCTION = "";
 const DEFAULT_RESTORE_INSTRUCTION =
-  "Load/read the claude-compaction-restore skill and follow its post-compaction restore protocol.";
+  "Read the claude-compaction-restore skill and follow its \"If You Just Compacted\" protocol.";
+const DEFAULT_AUDIT_INSTRUCTION =
+  "Read the claude-compaction-restore skill and follow its \"Required Read-Depth Audit\" protocol.";
 const DEFAULT_EXTRA_INSTRUCTION_FILE_PATH =
   "/Users/test/.openrig/compaction/post-compact-extra.md";
 
@@ -36,9 +39,11 @@ function jsonResponse(body: unknown, status = 200): Response {
 function makeSettingsResponse(overrides: Partial<{
   enabled: boolean;
   thresholdPercent: number;
+  preCompactInstruction: string;
   compactInstruction: string;
   messageInline: string;
   messageFilePath: string;
+  postRestoreAuditInstruction: string;
 }> = {}) {
   return {
     settings: {
@@ -51,6 +56,11 @@ function makeSettingsResponse(overrides: Partial<{
         value: overrides.thresholdPercent ?? 80,
         source: "default",
         defaultValue: 80,
+      },
+      "policies.claude_compaction.pre_compact_instruction": {
+        value: overrides.preCompactInstruction ?? DEFAULT_PRE_COMPACT_INSTRUCTION,
+        source: "default",
+        defaultValue: DEFAULT_PRE_COMPACT_INSTRUCTION,
       },
       "policies.claude_compaction.compact_instruction": {
         value: overrides.compactInstruction ?? DEFAULT_COMPACT_INSTRUCTION,
@@ -66,6 +76,11 @@ function makeSettingsResponse(overrides: Partial<{
         value: overrides.messageFilePath ?? DEFAULT_EXTRA_INSTRUCTION_FILE_PATH,
         source: "default",
         defaultValue: DEFAULT_EXTRA_INSTRUCTION_FILE_PATH,
+      },
+      "policies.claude_compaction.post_restore_audit_instruction": {
+        value: overrides.postRestoreAuditInstruction ?? DEFAULT_AUDIT_INSTRUCTION,
+        source: "default",
+        defaultValue: DEFAULT_AUDIT_INSTRUCTION,
       },
     },
   };
@@ -84,21 +99,27 @@ describe("ClaudeCompactionPolicyForm — slice 27", () => {
     expect(enabled.checked).toBe(false);
     const threshold = screen.getByTestId("claude-compaction-threshold") as HTMLInputElement;
     expect(threshold.value).toBe("80");
+    const preCompactInstruction = screen.getByTestId("claude-compaction-pre-compact-instruction") as HTMLTextAreaElement;
+    expect(preCompactInstruction.value).toBe(DEFAULT_PRE_COMPACT_INSTRUCTION);
     const compactInstruction = screen.getByTestId("claude-compaction-compact-instruction") as HTMLTextAreaElement;
     expect(compactInstruction.value).toBe(DEFAULT_COMPACT_INSTRUCTION);
     const inline = screen.getByTestId("claude-compaction-message-inline") as HTMLTextAreaElement;
     expect(inline.value).toBe(DEFAULT_RESTORE_INSTRUCTION);
     const filePath = screen.getByTestId("claude-compaction-message-file-path") as HTMLInputElement;
     expect(filePath.value).toBe(DEFAULT_EXTRA_INSTRUCTION_FILE_PATH);
+    const auditInstruction = screen.getByTestId("claude-compaction-post-restore-audit-instruction") as HTMLTextAreaElement;
+    expect(auditInstruction.value).toBe(DEFAULT_AUDIT_INSTRUCTION);
   });
 
   it("HG-9: loads existing non-default values from /api/config when present", async () => {
     mockFetch.mockResolvedValue(jsonResponse(makeSettingsResponse({
       enabled: true,
       thresholdPercent: 65,
+      preCompactInstruction: "prep now",
       compactInstruction: "Keep decisions and active queue ids.",
       messageInline: "stay calm",
       messageFilePath: "/tmp/m.txt",
+      postRestoreAuditInstruction: "audit hard",
     })));
     render(createTestRouter({ component: () => <ClaudeCompactionPolicyForm />, path: "/" }));
 
@@ -106,9 +127,11 @@ describe("ClaudeCompactionPolicyForm — slice 27", () => {
       expect((screen.getByTestId("claude-compaction-enabled") as HTMLInputElement).checked).toBe(true);
     });
     expect((screen.getByTestId("claude-compaction-threshold") as HTMLInputElement).value).toBe("65");
+    expect((screen.getByTestId("claude-compaction-pre-compact-instruction") as HTMLTextAreaElement).value).toBe("prep now");
     expect((screen.getByTestId("claude-compaction-compact-instruction") as HTMLTextAreaElement).value).toBe("Keep decisions and active queue ids.");
     expect((screen.getByTestId("claude-compaction-message-inline") as HTMLTextAreaElement).value).toBe("stay calm");
     expect((screen.getByTestId("claude-compaction-message-file-path") as HTMLInputElement).value).toBe("/tmp/m.txt");
+    expect((screen.getByTestId("claude-compaction-post-restore-audit-instruction") as HTMLTextAreaElement).value).toBe("audit hard");
   });
 
   it("HG-9: submit POSTs each key to /api/config/:key with the user's value", async () => {
@@ -126,11 +149,17 @@ describe("ClaudeCompactionPolicyForm — slice 27", () => {
 
     fireEvent.click(screen.getByTestId("claude-compaction-enabled"));
     fireEvent.change(screen.getByTestId("claude-compaction-threshold"), { target: { value: "70" } });
+    fireEvent.change(screen.getByTestId("claude-compaction-pre-compact-instruction"), {
+      target: { value: "Read the claude-compaction-restore skill before compacting." },
+    });
     fireEvent.change(screen.getByTestId("claude-compaction-compact-instruction"), {
       target: { value: "Summarize decisions first." },
     });
     fireEvent.change(screen.getByTestId("claude-compaction-message-inline"), {
       target: { value: "Reload the slice doc before resuming." },
+    });
+    fireEvent.change(screen.getByTestId("claude-compaction-post-restore-audit-instruction"), {
+      target: { value: "Check every requested file." },
     });
 
     expect((screen.getByTestId("claude-compaction-enabled") as HTMLInputElement).checked).toBe(true);
@@ -139,19 +168,21 @@ describe("ClaudeCompactionPolicyForm — slice 27", () => {
     fireEvent.click(screen.getByTestId("claude-compaction-policy-submit"));
 
     await waitFor(() => {
-      expect(calls.filter((c) => c.init?.method === "POST").length).toBeGreaterThanOrEqual(5);
+      expect(calls.filter((c) => c.init?.method === "POST").length).toBeGreaterThanOrEqual(7);
     });
 
     const postCalls = calls.filter((c) => c.init?.method === "POST");
     const findKey = (key: string) => postCalls.find((c) => c.url.includes(encodeURIComponent(key)));
     expect(findKey("policies.claude_compaction.enabled")?.init?.body as string).toContain("true");
     expect(findKey("policies.claude_compaction.threshold_percent")?.init?.body as string).toContain("70");
+    expect(findKey("policies.claude_compaction.pre_compact_instruction")?.init?.body as string).toContain("Read the claude-compaction-restore skill before compacting.");
     expect(findKey("policies.claude_compaction.compact_instruction")?.init?.body as string).toContain("Summarize decisions first.");
     expect(findKey("policies.claude_compaction.message_inline")?.init?.body as string).toContain("Reload the slice doc before resuming.");
     // message_file_path posted with its default canonical skill file path.
     expect(findKey("policies.claude_compaction.message_file_path")?.init?.body as string).toContain(
       DEFAULT_EXTRA_INSTRUCTION_FILE_PATH,
     );
+    expect(findKey("policies.claude_compaction.post_restore_audit_instruction")?.init?.body as string).toContain("Check every requested file.");
 
     await waitFor(() => expect(screen.getByTestId("claude-compaction-policy-saved")).toBeDefined());
   });

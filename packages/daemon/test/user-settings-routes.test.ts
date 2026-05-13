@@ -21,6 +21,13 @@ function clearEnv(): () => void {
   const keys = [
     "OPENRIG_PORT", "OPENRIG_FILES_ALLOWLIST", "OPENRIG_PROGRESS_SCAN_ROOTS",
     "OPENRIG_WORKSPACE_ROOT", "OPENRIG_DOGFOOD_EVIDENCE_ROOT",
+    "OPENRIG_POLICIES_CLAUDE_COMPACTION_ENABLED",
+    "OPENRIG_POLICIES_CLAUDE_COMPACTION_THRESHOLD_PERCENT",
+    "OPENRIG_POLICIES_CLAUDE_COMPACTION_PRE_COMPACT_INSTRUCTION",
+    "OPENRIG_POLICIES_CLAUDE_COMPACTION_COMPACT_INSTRUCTION",
+    "OPENRIG_POLICIES_CLAUDE_COMPACTION_MESSAGE_INLINE",
+    "OPENRIG_POLICIES_CLAUDE_COMPACTION_MESSAGE_FILE_PATH",
+    "OPENRIG_POLICIES_CLAUDE_COMPACTION_POST_RESTORE_AUDIT_INSTRUCTION",
   ];
   const saved: Record<string, string | undefined> = {};
   for (const k of keys) {
@@ -71,8 +78,8 @@ describe("config routes (User Settings v0)", () => {
     // + 2 V1 pre-release Item 1 (transcripts.lines / transcripts.poll_interval_seconds)
     // + 1 plugin-primitive Phase 3a slice 3.5 (runtime.codex.hooks_enabled)
     // + 1 V0.3.1 slice 05 (workspace.operator_seat_name)
-    // + 5 slice 27 (policies.claude_compaction.*) → 34 total.
-    expect(Object.keys(body.settings).length).toBe(34);
+    // + 7 slice 27 (policies.claude_compaction.*) → 36 total.
+    expect(Object.keys(body.settings).length).toBe(36);
     expect(body.settings["daemon.port"]?.source).toBe("default");
     expect(body.settings["ui.preview.refresh_interval_seconds"]?.value).toBe(3);
     expect(body.settings["ui.preview.max_pins"]?.value).toBe(4);

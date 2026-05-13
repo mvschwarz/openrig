@@ -8,7 +8,7 @@ const skillRoot = path.resolve(new URL("..", import.meta.url).pathname);
 const restoreScript = path.join(skillRoot, "scripts", "restore-from-jsonl.mjs");
 const outRoot = "/tmp/claude-compaction-restore";
 const defaultRestoreInstruction =
-  "Load/read the claude-compaction-restore skill and follow its post-compaction restore protocol.";
+  "Read the claude-compaction-restore skill and follow its \"If You Just Compacted\" protocol.";
 
 function emit(payload) {
   process.stdout.write(`${JSON.stringify(payload)}\n`);

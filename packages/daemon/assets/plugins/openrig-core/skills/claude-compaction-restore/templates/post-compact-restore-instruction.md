@@ -1,1 +1,1 @@
-Load/read the claude-compaction-restore skill and follow its post-compaction restore protocol.
+Read the claude-compaction-restore skill and follow its "If You Just Compacted" protocol.

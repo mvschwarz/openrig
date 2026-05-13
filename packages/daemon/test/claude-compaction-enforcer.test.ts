@@ -15,6 +15,11 @@ import { ClaudeCompactionEnforcer } from "../src/domain/claude-compaction-enforc
 import type { SessionTransport } from "../src/domain/session-transport.js";
 import type { ClaudeCompactionPolicy, SettingsStore } from "../src/domain/user-settings/settings-store.js";
 
+const DEFAULT_PRE_COMPACT_TEST_INSTRUCTION =
+  "Read the claude-compaction-restore skill and create or update the mental-model restore map.";
+const DEFAULT_AUDIT_TEST_INSTRUCTION =
+  "Read the claude-compaction-restore skill and audit restore read depth.";
+
 function makeSettingsStore(policy: ClaudeCompactionPolicy): SettingsStore {
   return {
     resolveClaudeCompactionPolicy: vi.fn(() => policy),
@@ -35,16 +40,20 @@ function makeSessionTransport(sendResult: { ok: boolean } = { ok: true }): {
 const POLICY_DISABLED: ClaudeCompactionPolicy = {
   enabled: false,
   thresholdPercent: 80,
+  preCompactInstruction: "",
   compactInstruction: "",
   messageInline: "",
   messageFilePath: "",
+  postRestoreAuditInstruction: "",
 };
 const POLICY_ENABLED_AT_80: ClaudeCompactionPolicy = {
   enabled: true,
   thresholdPercent: 80,
+  preCompactInstruction: DEFAULT_PRE_COMPACT_TEST_INSTRUCTION,
   compactInstruction: "",
   messageInline: "",
   messageFilePath: "",
+  postRestoreAuditInstruction: DEFAULT_AUDIT_TEST_INSTRUCTION,
 };
 
 describe("ClaudeCompactionEnforcer", () => {
@@ -90,8 +99,9 @@ describe("ClaudeCompactionEnforcer", () => {
       expect.stringContaining("OpenRig automatic compaction preparation is now required"),
     );
     expect(send.mock.calls[0]![1]).toContain("Current context usage is 80%; configured compaction threshold is 80%");
+    expect(send.mock.calls[0]![1]).toContain("Operator pre-compaction instruction");
+    expect(send.mock.calls[0]![1]).toContain("Read the claude-compaction-restore skill");
     expect(send.mock.calls[0]![1]).toContain("mental-model restore map");
-    expect(send.mock.calls[0]![1]).toContain("ASCII file/folder tree");
 
     const compact = await enforcer.maybeAutoCompact({
       sessionName: "claude-seat@rig",
@@ -495,6 +505,7 @@ describe("ClaudeCompactionEnforcer", () => {
 
     expect(send).toHaveBeenCalledTimes(5);
     expect(send.mock.calls[4]![1]).toContain("Now audit your compaction restore");
+    expect(send.mock.calls[4]![1]).toContain("Operator post-restore audit instruction");
     expect(send.mock.calls[4]![1]).toContain("restore map");
     expect(send.mock.calls[4]![1]).toContain("FULL, PARTIAL, or NOT_READ");
     expect(send.mock.calls[4]![1]).toContain("You will be given a task where all of these files are required reading");
@@ -694,7 +705,7 @@ describe("ClaudeCompactionEnforcer", () => {
         expect(send).toHaveBeenCalledTimes(2);
         expect(send).toHaveBeenLastCalledWith(
           "claude-seat@rig",
-          expect.stringContaining("/compact Create a concise continuity summary"),
+          expect.stringContaining("/compact In the continuity summary"),
         );
       } finally {
         stderrSpy.mockRestore();
@@ -727,9 +738,11 @@ describe("ClaudeCompactionEnforcer", () => {
         const settings = makeSettingsStore({
           enabled: true,
           thresholdPercent: c.thresholdPercent,
+          preCompactInstruction: "",
           compactInstruction: "",
           messageInline: "",
           messageFilePath: "",
+          postRestoreAuditInstruction: "",
         });
         const { transport, send } = makeSessionTransport();
         const enforcer = new ClaudeCompactionEnforcer(settings, transport);

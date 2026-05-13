@@ -38,9 +38,11 @@ export type SettingsKey =
   // Slice 27 — Claude auto-compaction policy keys (SC-29 EXCEPTION #10).
   | "policies.claude_compaction.enabled"
   | "policies.claude_compaction.threshold_percent"
+  | "policies.claude_compaction.pre_compact_instruction"
   | "policies.claude_compaction.compact_instruction"
   | "policies.claude_compaction.message_inline"
-  | "policies.claude_compaction.message_file_path";
+  | "policies.claude_compaction.message_file_path"
+  | "policies.claude_compaction.post_restore_audit_instruction";
 
 export interface SettingsResponse {
   settings: Record<SettingsKey, ResolvedSetting>;

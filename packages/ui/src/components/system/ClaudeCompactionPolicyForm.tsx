@@ -2,12 +2,13 @@
 //
 // Operator-configurable pre-compaction trigger: when a Claude seat's
 // context usage crosses `threshold_percent`, the daemon's ContextMonitor
-// first sends a normal preparation prompt asking Claude to create a
-// mental-model restore map, then dispatches `/compact` via
+// first sends a fixed-wrapper preparation prompt plus operator-editable
+// `pre_compact_instruction`, then dispatches `/compact` via
 // SessionTransport on the next eligible observation, optionally with
-// `compact_instruction` as slash-command args. The compaction hooks
-// inject the operator's `message_inline` plus contents of
-// `message_file_path` alongside the standard restore-instructions.
+// `compact_instruction` as slash-command args. The restore phase uses
+// `message_inline`, `message_file_path`, and an editable
+// `post_restore_audit_instruction` wrapped by daemon-owned trust
+// framing.
 //
 // Opt-in default-off. Inline points at the canonical restore skill; the
 // file path points at a user-owned extra-instructions placeholder.
@@ -20,16 +21,20 @@ import { useSettings, useSetSetting } from "../../hooks/useSettings.js";
 type FormState = {
   enabled: boolean;
   thresholdPercent: string;
+  preCompactInstruction: string;
   compactInstruction: string;
   messageInline: string;
   messageFilePath: string;
+  postRestoreAuditInstruction: string;
 };
 
 const KEY_ENABLED = "policies.claude_compaction.enabled" as const;
 const KEY_THRESHOLD = "policies.claude_compaction.threshold_percent" as const;
+const KEY_PRE_COMPACT_INSTRUCTION = "policies.claude_compaction.pre_compact_instruction" as const;
 const KEY_COMPACT_INSTRUCTION = "policies.claude_compaction.compact_instruction" as const;
 const KEY_INLINE = "policies.claude_compaction.message_inline" as const;
 const KEY_FILE_PATH = "policies.claude_compaction.message_file_path" as const;
+const KEY_POST_RESTORE_AUDIT = "policies.claude_compaction.post_restore_audit_instruction" as const;
 
 function coerceBoolean(value: unknown, fallback: boolean): boolean {
   if (typeof value === "boolean") return value;
@@ -93,9 +98,11 @@ function PolicyFormBody({ data, setSetting }: PolicyFormBodyProps) {
   const [form, setForm] = useState<FormState>(() => ({
     enabled: coerceBoolean(data[KEY_ENABLED]?.value, false),
     thresholdPercent: String(coerceNumber(data[KEY_THRESHOLD]?.value, 80)),
+    preCompactInstruction: coerceString(data[KEY_PRE_COMPACT_INSTRUCTION]?.value),
     compactInstruction: coerceString(data[KEY_COMPACT_INSTRUCTION]?.value),
     messageInline: coerceString(data[KEY_INLINE]?.value),
     messageFilePath: coerceString(data[KEY_FILE_PATH]?.value),
+    postRestoreAuditInstruction: coerceString(data[KEY_POST_RESTORE_AUDIT]?.value),
   }));
   const [thresholdError, setThresholdError] = useState<string | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -116,9 +123,11 @@ function PolicyFormBody({ data, setSetting }: PolicyFormBodyProps) {
     const updates: Array<{ key: Parameters<typeof setSetting.mutateAsync>[0]["key"]; value: string }> = [
       { key: KEY_ENABLED, value: form.enabled ? "true" : "false" },
       { key: KEY_THRESHOLD, value: String(thresholdValue) },
+      { key: KEY_PRE_COMPACT_INSTRUCTION, value: form.preCompactInstruction },
       { key: KEY_COMPACT_INSTRUCTION, value: form.compactInstruction },
       { key: KEY_INLINE, value: form.messageInline },
       { key: KEY_FILE_PATH, value: form.messageFilePath },
+      { key: KEY_POST_RESTORE_AUDIT, value: form.postRestoreAuditInstruction },
     ];
     try {
       for (const update of updates) {
@@ -141,7 +150,7 @@ function PolicyFormBody({ data, setSetting }: PolicyFormBodyProps) {
       </h2>
       <p className="mt-2 text-sm text-on-surface-variant max-w-prose">
         When a Claude seat's context usage crosses the configured threshold,
-        OpenRig first asks it to create a mental-model restore map, then sends
+        OpenRig first sends a preparation message, then sends
         <code className="font-mono text-[12px]"> /compact</code> on the next
         eligible observation. After compaction, OpenRig sends one restore prompt
         that points the seat at its restore packet, followed by a read-depth
@@ -189,6 +198,25 @@ function PolicyFormBody({ data, setSetting }: PolicyFormBodyProps) {
         </div>
 
         <div className="flex flex-col gap-1">
+          <label htmlFor="claude-compaction-pre-compact-instruction" className="text-sm font-medium text-stone-900">
+            Pre-compaction prep message
+          </label>
+          <textarea
+            id="claude-compaction-pre-compact-instruction"
+            data-testid="claude-compaction-pre-compact-instruction"
+            rows={4}
+            value={form.preCompactInstruction}
+            onChange={(e) => setForm((s) => ({ ...s, preCompactInstruction: e.target.value }))}
+            placeholder="Read the claude-compaction-restore skill and prepare for compaction."
+            className="border border-outline-variant px-2 py-1 font-mono text-sm"
+          />
+          <span className="text-xs text-on-surface-variant">
+            OpenRig wraps this with the current context usage, threshold, and
+            operator-authorized user-channel framing.
+          </span>
+        </div>
+
+        <div className="flex flex-col gap-1">
           <label htmlFor="claude-compaction-compact-instruction" className="text-sm font-medium text-stone-900">
             Compaction instruction
           </label>
@@ -202,8 +230,8 @@ function PolicyFormBody({ data, setSetting }: PolicyFormBodyProps) {
             className="border border-outline-variant px-2 py-1 font-mono text-sm"
           />
           <span className="text-xs text-on-surface-variant">
-            This controls the compaction summary itself. Keep it concise and
-            preserve the restore-map path when one was created.
+            Optional advanced override. Leave blank to rely on Claude's native
+            compaction summary; OpenRig still appends a trust-channel note.
           </span>
         </div>
 
@@ -221,9 +249,9 @@ function PolicyFormBody({ data, setSetting }: PolicyFormBodyProps) {
             className="border border-outline-variant px-2 py-1 font-mono text-sm"
           />
           <span className="text-xs text-on-surface-variant">
-            Default asks Claude to load/read the canonical
-            claude-compaction-restore skill. Edit this for general restore
-            behavior.
+            Default asks Claude to read the claude-compaction-restore skill.
+            OpenRig wraps this with marker, transcript, and current-task
+            framing.
           </span>
         </div>
 
@@ -244,6 +272,25 @@ function PolicyFormBody({ data, setSetting }: PolicyFormBodyProps) {
             Default points at a user-owned placeholder file. Put
             mission-specific reading lists or extra restore notes there
             without changing the canonical skill.
+          </span>
+        </div>
+
+        <div className="flex flex-col gap-1">
+          <label htmlFor="claude-compaction-post-restore-audit" className="text-sm font-medium text-stone-900">
+            Post-restore audit message
+          </label>
+          <textarea
+            id="claude-compaction-post-restore-audit"
+            data-testid="claude-compaction-post-restore-audit-instruction"
+            rows={4}
+            value={form.postRestoreAuditInstruction}
+            onChange={(e) => setForm((s) => ({ ...s, postRestoreAuditInstruction: e.target.value }))}
+            placeholder="Read the claude-compaction-restore skill and audit restore read depth."
+            className="border border-outline-variant px-2 py-1 font-mono text-sm"
+          />
+          <span className="text-xs text-on-surface-variant">
+            OpenRig wraps this with the required FULL/PARTIAL/NOT_READ table
+            and no-token-conservation language.
           </span>
         </div>
 

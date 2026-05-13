@@ -43,9 +43,11 @@ function clearEnv(): () => void {
     "OPENRIG_RUNTIME_CODEX_HOOKS_ENABLED",
     "OPENRIG_POLICIES_CLAUDE_COMPACTION_ENABLED",
     "OPENRIG_POLICIES_CLAUDE_COMPACTION_THRESHOLD_PERCENT",
+    "OPENRIG_POLICIES_CLAUDE_COMPACTION_PRE_COMPACT_INSTRUCTION",
     "OPENRIG_POLICIES_CLAUDE_COMPACTION_COMPACT_INSTRUCTION",
     "OPENRIG_POLICIES_CLAUDE_COMPACTION_MESSAGE_INLINE",
     "OPENRIG_POLICIES_CLAUDE_COMPACTION_MESSAGE_FILE_PATH",
+    "OPENRIG_POLICIES_CLAUDE_COMPACTION_POST_RESTORE_AUDIT_INSTRUCTION",
     "RIGGED_PORT", "RIGGED_HOST", "RIGGED_DB",
     "RIGGED_TRANSCRIPTS_ENABLED", "RIGGED_TRANSCRIPTS_PATH",
   ];
@@ -107,9 +109,11 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
       // Slice 27 — Claude auto-compaction policy. SC-29 EXCEPTION #10.
       "policies.claude_compaction.enabled",
       "policies.claude_compaction.threshold_percent",
+      "policies.claude_compaction.pre_compact_instruction",
       "policies.claude_compaction.compact_instruction",
       "policies.claude_compaction.message_inline",
       "policies.claude_compaction.message_file_path",
+      "policies.claude_compaction.post_restore_audit_instruction",
     ];
     expect([...VALID_KEYS]).toEqual(expected);
   });

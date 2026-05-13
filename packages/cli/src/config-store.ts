@@ -93,11 +93,13 @@ export interface RiggedConfig {
   };
   // Slice 27 — Claude auto-compaction policy. Operator-configurable
   // pre-compaction trigger: when a Claude seat's context usage crosses
-  // `thresholdPercent`, daemon sends /compact via SessionTransport and
-  // passes `compactInstruction` as slash-command args for the actual
-  // compaction phase. The existing PreCompact hook records
-  // `messageInline` plus contents of `messageFilePath` alongside the
-  // standard restore-instructions in the post-compact marker/context.
+  // `thresholdPercent`, daemon sends a pre-compact prep prompt, then
+  // sends /compact via SessionTransport and passes `compactInstruction`
+  // as slash-command args for the actual compaction phase. The existing
+  // PreCompact hook records `messageInline` plus contents of
+  // `messageFilePath` alongside the standard restore-instructions in
+  // the post-compact marker/context. The daemon then sends
+  // `postRestoreAuditInstruction` as the editable read-depth nudge.
   //
   // Defaults: opt-in default-off (enabled=false). The compaction
   // instruction ships as inline text. The post-compaction restore prompt
@@ -107,20 +109,27 @@ export interface RiggedConfig {
     claudeCompaction: {
       enabled: boolean;
       thresholdPercent: number;
+      preCompactInstruction: string;
       compactInstruction: string;
       messageInline: string;
       messageFilePath: string;
+      postRestoreAuditInstruction: string;
     };
   };
 }
 
 const DEFAULT_WORKSPACE_ROOT = getDefaultOpenRigPath("workspace");
 
-const DEFAULT_CLAUDE_COMPACTION_COMPACT_INSTRUCTION =
-  "Create a concise continuity summary for this OpenRig session. Preserve the active task, queue item IDs, decisions, changed files, commands/tests run, blockers, caveats, next concrete step, and the path to any mental-model restore map or handoff file created before compaction.";
+const DEFAULT_CLAUDE_COMPACTION_PRE_COMPACT_INSTRUCTION =
+  "Read the claude-compaction-restore skill and follow its \"If You Are About To Compact\" protocol. Create or update the mental-model restore map before compaction. If you are in the middle of a tiny atomic step, finish that step first; otherwise this preparation is the next priority.";
+
+const DEFAULT_CLAUDE_COMPACTION_COMPACT_INSTRUCTION = "";
 
 const DEFAULT_CLAUDE_COMPACTION_RESTORE_INSTRUCTION =
-  "Load/read the claude-compaction-restore skill and follow its post-compaction restore protocol.";
+  "Read the claude-compaction-restore skill and follow its \"If You Just Compacted\" protocol.";
+
+const DEFAULT_CLAUDE_COMPACTION_POST_RESTORE_AUDIT_INSTRUCTION =
+  "Read the claude-compaction-restore skill and follow its \"Required Read-Depth Audit\" protocol.";
 
 const DEFAULT_CLAUDE_COMPACTION_EXTRA_INSTRUCTION_FILE_PATH = getDefaultOpenRigPath(
   "compaction/post-compact-extra.md",
@@ -187,9 +196,11 @@ const DEFAULTS = {
     claudeCompaction: {
       enabled: false,
       thresholdPercent: 80,
+      preCompactInstruction: DEFAULT_CLAUDE_COMPACTION_PRE_COMPACT_INSTRUCTION,
       compactInstruction: DEFAULT_CLAUDE_COMPACTION_COMPACT_INSTRUCTION,
       messageInline: DEFAULT_CLAUDE_COMPACTION_RESTORE_INSTRUCTION,
       messageFilePath: DEFAULT_CLAUDE_COMPACTION_EXTRA_INSTRUCTION_FILE_PATH,
+      postRestoreAuditInstruction: DEFAULT_CLAUDE_COMPACTION_POST_RESTORE_AUDIT_INSTRUCTION,
     },
   },
 } as const;
@@ -234,12 +245,14 @@ export const VALID_KEYS = [
   // plugin-primitive Phase 3a slice 3.5 — Codex feature flag.
   "runtime.codex.hooks_enabled",
   // Slice 27 — Claude auto-compaction policy. SC-29 EXCEPTION #10:
-  // 5 ConfigStore keys (lockstep with daemon SETTINGS_VALID_KEYS).
+  // 7 ConfigStore keys (lockstep with daemon SETTINGS_VALID_KEYS).
   "policies.claude_compaction.enabled",
   "policies.claude_compaction.threshold_percent",
+  "policies.claude_compaction.pre_compact_instruction",
   "policies.claude_compaction.compact_instruction",
   "policies.claude_compaction.message_inline",
   "policies.claude_compaction.message_file_path",
+  "policies.claude_compaction.post_restore_audit_instruction",
 ] as const;
 
 export type ValidKey = typeof VALID_KEYS[number];
@@ -285,9 +298,11 @@ export const ENV_MAP: Record<ValidKey, { primary: string; legacy?: string }> = {
   // (net-new keys, no legacy).
   "policies.claude_compaction.enabled": { primary: "OPENRIG_POLICIES_CLAUDE_COMPACTION_ENABLED" },
   "policies.claude_compaction.threshold_percent": { primary: "OPENRIG_POLICIES_CLAUDE_COMPACTION_THRESHOLD_PERCENT" },
+  "policies.claude_compaction.pre_compact_instruction": { primary: "OPENRIG_POLICIES_CLAUDE_COMPACTION_PRE_COMPACT_INSTRUCTION" },
   "policies.claude_compaction.compact_instruction": { primary: "OPENRIG_POLICIES_CLAUDE_COMPACTION_COMPACT_INSTRUCTION" },
   "policies.claude_compaction.message_inline": { primary: "OPENRIG_POLICIES_CLAUDE_COMPACTION_MESSAGE_INLINE" },
   "policies.claude_compaction.message_file_path": { primary: "OPENRIG_POLICIES_CLAUDE_COMPACTION_MESSAGE_FILE_PATH" },
+  "policies.claude_compaction.post_restore_audit_instruction": { primary: "OPENRIG_POLICIES_CLAUDE_COMPACTION_POST_RESTORE_AUDIT_INSTRUCTION" },
 };
 
 // Maps dotted-string config keys to the camelCase RiggedConfig path.
@@ -326,9 +341,11 @@ const KEY_TO_PATH: Record<ValidKey, string[]> = {
   "runtime.codex.hooks_enabled": ["runtime", "codex", "hooksEnabled"],
   "policies.claude_compaction.enabled": ["policies", "claudeCompaction", "enabled"],
   "policies.claude_compaction.threshold_percent": ["policies", "claudeCompaction", "thresholdPercent"],
+  "policies.claude_compaction.pre_compact_instruction": ["policies", "claudeCompaction", "preCompactInstruction"],
   "policies.claude_compaction.compact_instruction": ["policies", "claudeCompaction", "compactInstruction"],
   "policies.claude_compaction.message_inline": ["policies", "claudeCompaction", "messageInline"],
   "policies.claude_compaction.message_file_path": ["policies", "claudeCompaction", "messageFilePath"],
+  "policies.claude_compaction.post_restore_audit_instruction": ["policies", "claudeCompaction", "postRestoreAuditInstruction"],
 };
 
 function isValidKey(key: string): key is ValidKey {
@@ -570,9 +587,11 @@ export class ConfigStore {
         claudeCompaction: {
           enabled: v("policies.claude_compaction.enabled") as boolean,
           thresholdPercent: v("policies.claude_compaction.threshold_percent") as number,
+          preCompactInstruction: v("policies.claude_compaction.pre_compact_instruction") as string,
           compactInstruction: v("policies.claude_compaction.compact_instruction") as string,
           messageInline: v("policies.claude_compaction.message_inline") as string,
           messageFilePath: v("policies.claude_compaction.message_file_path") as string,
+          postRestoreAuditInstruction: v("policies.claude_compaction.post_restore_audit_instruction") as string,
         },
       },
     };

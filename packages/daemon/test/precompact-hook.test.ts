@@ -86,9 +86,11 @@ function runBridge(openrigHome: string, input: Record<string, unknown> = {
 function writePolicyConfig(home: string, policy: {
   enabled?: boolean;
   thresholdPercent?: number;
+  preCompactInstruction?: string;
   compactInstruction?: string;
   messageInline?: string;
   messageFilePath?: string;
+  postRestoreAuditInstruction?: string;
 }): void {
   mkdirSync(home, { recursive: true });
   writeFileSync(
@@ -98,9 +100,11 @@ function writePolicyConfig(home: string, policy: {
         claudeCompaction: {
           enabled: policy.enabled ?? false,
           thresholdPercent: policy.thresholdPercent ?? 80,
+          preCompactInstruction: policy.preCompactInstruction ?? "",
           compactInstruction: policy.compactInstruction ?? "",
           messageInline: policy.messageInline ?? "",
           messageFilePath: policy.messageFilePath ?? "",
+          postRestoreAuditInstruction: policy.postRestoreAuditInstruction ?? "",
         },
       },
     }),
@@ -236,7 +240,7 @@ describe("precompact-hook.mjs (slice 27 custom message append)", () => {
     const payload = JSON.parse(stdout.trim());
     expect(payload.continue).toBe(true);
     expect(payload.systemMessage).toContain(APPEND_MARKER);
-    expect(payload.systemMessage).toContain("Load/read the claude-compaction-restore skill");
+    expect(payload.systemMessage).toContain("Read the claude-compaction-restore skill");
   });
 
   it("inline and file-path both contribute when both are set", () => {

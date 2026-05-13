@@ -86,17 +86,21 @@ export const SETTINGS_VALID_KEYS = [
   // independently — daemon does NOT mutate.
   "runtime.codex.hooks_enabled",
   // Slice 27 — Claude auto-compaction policy. SC-29 EXCEPTION #10:
-  // 5 keys (lockstep with cli/src/config-store.ts VALID_KEYS).
+  // 7 keys (lockstep with cli/src/config-store.ts VALID_KEYS).
   // Opt-in default-off; daemon ContextMonitor reads `enabled` +
-  // `threshold_percent` to decide when to send /compact. The daemon
-  // passes `compact_instruction` as slash-command args for the actual
-  // compaction phase; PreCompact hook reads `message_inline` +
-  // `message_file_path` for post-compaction restore guidance.
+  // `threshold_percent` to decide when to send pre-compact prep +
+  // /compact. The daemon wraps `pre_compact_instruction` with usage
+  // variables, passes `compact_instruction` as slash-command args for
+  // the actual compaction phase, uses `message_inline` +
+  // `message_file_path` for post-compaction restore guidance, then
+  // wraps `post_restore_audit_instruction` as the read-depth nudge.
   "policies.claude_compaction.enabled",
   "policies.claude_compaction.threshold_percent",
+  "policies.claude_compaction.pre_compact_instruction",
   "policies.claude_compaction.compact_instruction",
   "policies.claude_compaction.message_inline",
   "policies.claude_compaction.message_file_path",
+  "policies.claude_compaction.post_restore_audit_instruction",
 ] as const;
 
 export type SettingsValidKey = typeof SETTINGS_VALID_KEYS[number];
@@ -140,9 +144,11 @@ const ENV_MAP: Record<SettingsValidKey, { primary: string; legacy?: string }> = 
   // primary only.
   "policies.claude_compaction.enabled": { primary: "OPENRIG_POLICIES_CLAUDE_COMPACTION_ENABLED" },
   "policies.claude_compaction.threshold_percent": { primary: "OPENRIG_POLICIES_CLAUDE_COMPACTION_THRESHOLD_PERCENT" },
+  "policies.claude_compaction.pre_compact_instruction": { primary: "OPENRIG_POLICIES_CLAUDE_COMPACTION_PRE_COMPACT_INSTRUCTION" },
   "policies.claude_compaction.compact_instruction": { primary: "OPENRIG_POLICIES_CLAUDE_COMPACTION_COMPACT_INSTRUCTION" },
   "policies.claude_compaction.message_inline": { primary: "OPENRIG_POLICIES_CLAUDE_COMPACTION_MESSAGE_INLINE" },
   "policies.claude_compaction.message_file_path": { primary: "OPENRIG_POLICIES_CLAUDE_COMPACTION_MESSAGE_FILE_PATH" },
+  "policies.claude_compaction.post_restore_audit_instruction": { primary: "OPENRIG_POLICIES_CLAUDE_COMPACTION_POST_RESTORE_AUDIT_INSTRUCTION" },
 };
 
 const KEY_TO_PATH: Record<SettingsValidKey, string[]> = {
@@ -177,9 +183,11 @@ const KEY_TO_PATH: Record<SettingsValidKey, string[]> = {
   "runtime.codex.hooks_enabled": ["runtime", "codex", "hooksEnabled"],
   "policies.claude_compaction.enabled": ["policies", "claudeCompaction", "enabled"],
   "policies.claude_compaction.threshold_percent": ["policies", "claudeCompaction", "thresholdPercent"],
+  "policies.claude_compaction.pre_compact_instruction": ["policies", "claudeCompaction", "preCompactInstruction"],
   "policies.claude_compaction.compact_instruction": ["policies", "claudeCompaction", "compactInstruction"],
   "policies.claude_compaction.message_inline": ["policies", "claudeCompaction", "messageInline"],
   "policies.claude_compaction.message_file_path": ["policies", "claudeCompaction", "messageFilePath"],
+  "policies.claude_compaction.post_restore_audit_instruction": ["policies", "claudeCompaction", "postRestoreAuditInstruction"],
 };
 
 export type SettingSource = "env" | "file" | "default";
@@ -256,11 +264,16 @@ const WORKSPACE_DERIVED_KEYS: ReadonlySet<SettingsValidKey> = new Set([
   "progress.scan_roots",
 ]);
 
-const DEFAULT_CLAUDE_COMPACTION_COMPACT_INSTRUCTION =
-  "Create a concise continuity summary for this OpenRig session. Preserve the active task, queue item IDs, decisions, changed files, commands/tests run, blockers, caveats, next concrete step, and the path to any mental-model restore map or handoff file created before compaction.";
+const DEFAULT_CLAUDE_COMPACTION_PRE_COMPACT_INSTRUCTION =
+  "Read the claude-compaction-restore skill and follow its \"If You Are About To Compact\" protocol. Create or update the mental-model restore map before compaction. If you are in the middle of a tiny atomic step, finish that step first; otherwise this preparation is the next priority.";
+
+const DEFAULT_CLAUDE_COMPACTION_COMPACT_INSTRUCTION = "";
 
 const DEFAULT_CLAUDE_COMPACTION_RESTORE_INSTRUCTION =
-  "Load/read the claude-compaction-restore skill and follow its post-compaction restore protocol.";
+  "Read the claude-compaction-restore skill and follow its \"If You Just Compacted\" protocol.";
+
+const DEFAULT_CLAUDE_COMPACTION_POST_RESTORE_AUDIT_INSTRUCTION =
+  "Read the claude-compaction-restore skill and follow its \"Required Read-Depth Audit\" protocol.";
 
 const DEFAULT_CLAUDE_COMPACTION_EXTRA_INSTRUCTION_RELATIVE_PATH = path.join(
   "compaction",
@@ -332,16 +345,17 @@ function getDefaultValue(key: SettingsValidKey, workspaceRoot: string): string |
     // launch unless operator explicitly sets to false.
     case "runtime.codex.hooks_enabled": return true;
     // Slice 27 — Claude auto-compaction policy defaults. Opt-in
-    // default-off; threshold 80% per spec. Instruction defaults are
-    // state/procedure-shaped so first-time operator tests do not start
-    // with prompt-injection-shaped output commands. Post-compaction
-    // restore defaults to the canonical restore skill plus a user-owned
-    // extra instruction file path for mission-specific reading lists.
+    // default-off; threshold 80% per spec. Pre/post defaults point at
+    // the canonical restore skill; compact_instruction is intentionally
+    // blank because Claude's native compact summary is less reliable
+    // than the explicit pre-compact and post-compact user-channel flow.
     case "policies.claude_compaction.enabled": return false;
     case "policies.claude_compaction.threshold_percent": return 80;
+    case "policies.claude_compaction.pre_compact_instruction": return DEFAULT_CLAUDE_COMPACTION_PRE_COMPACT_INSTRUCTION;
     case "policies.claude_compaction.compact_instruction": return DEFAULT_CLAUDE_COMPACTION_COMPACT_INSTRUCTION;
     case "policies.claude_compaction.message_inline": return DEFAULT_CLAUDE_COMPACTION_RESTORE_INSTRUCTION;
     case "policies.claude_compaction.message_file_path": return defaultClaudeCompactionExtraInstructionFilePath();
+    case "policies.claude_compaction.post_restore_audit_instruction": return DEFAULT_CLAUDE_COMPACTION_POST_RESTORE_AUDIT_INSTRUCTION;
     default: return "";
   }
 }
@@ -422,9 +436,11 @@ function validateTypedFileValue(key: SettingsValidKey, value: string | number | 
 export interface ClaudeCompactionPolicy {
   enabled: boolean;
   thresholdPercent: number;
+  preCompactInstruction: string;
   compactInstruction: string;
   messageInline: string;
   messageFilePath: string;
+  postRestoreAuditInstruction: string;
 }
 
 export interface ResolvedConfig {
@@ -540,9 +556,11 @@ export class SettingsStore {
     return {
       enabled: this.resolveOne("policies.claude_compaction.enabled", fc, wr).value as boolean,
       thresholdPercent: this.resolveOne("policies.claude_compaction.threshold_percent", fc, wr).value as number,
+      preCompactInstruction: this.resolveOne("policies.claude_compaction.pre_compact_instruction", fc, wr).value as string,
       compactInstruction: this.resolveOne("policies.claude_compaction.compact_instruction", fc, wr).value as string,
       messageInline: this.resolveOne("policies.claude_compaction.message_inline", fc, wr).value as string,
       messageFilePath: this.resolveOne("policies.claude_compaction.message_file_path", fc, wr).value as string,
+      postRestoreAuditInstruction: this.resolveOne("policies.claude_compaction.post_restore_audit_instruction", fc, wr).value as string,
     };
   }
 

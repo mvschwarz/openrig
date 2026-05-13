@@ -1,1 +1,1 @@
-Create a concise continuity summary for this OpenRig session. Preserve the active task, queue item IDs, decisions, changed files, commands/tests run, blockers, caveats, next concrete step, and the path to any mental-model restore map or handoff file created before compaction.
+Optional. Leave blank to use Claude Code's native compaction summary behavior; OpenRig's pre-compaction preparation and post-compaction restore prompts carry the durable continuity protocol.

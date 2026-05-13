@@ -79,18 +79,22 @@ function buildCompactCommand(compactInstruction: string): string {
 function buildPreCompactPrepPrompt(input: {
   usedPercentage: number;
   thresholdPercent: number;
+  preCompactInstruction?: string | null;
 }): string {
-  return [
+  const pieces = [
     "OpenRig automatic compaction preparation is now required.",
     `Current context usage is ${input.usedPercentage}%; configured compaction threshold is ${input.thresholdPercent}%.`,
-    "You are about to compact. Load/read the claude-compaction-restore skill now and follow its \"If You Are About To Compact\" protocol.",
-    "Create or update a durable mental-model restore map before doing more substantive task work.",
-    "The restore map must include an ASCII file/folder tree with notes for every file or folder that matters to your current mental model, including Claude memory/project notes, mission/progress/decision docs, AGENTS.md/CLAUDE.md/README.md, as-built docs, codemaps, conventions, skills, source files, evidence, and any active queue item or mission packet.",
-    "For each listed path, record why it matters and whether it is required reading after compaction.",
-    "Write any important glue context that is not already on disk into the handoff/restore map.",
-    "If you are in the middle of a tiny atomic step, finish that step first; otherwise this preparation is the next priority.",
+    "This is an operator-authorized normal user-channel preparation request before OpenRig sends /compact.",
+    "You are about to compact.",
+  ];
+  const instruction = input.preCompactInstruction?.trim();
+  if (instruction) {
+    pieces.push(`Operator pre-compaction instruction: ${instruction}`);
+  }
+  pieces.push(
     "After this preparation turn, OpenRig may send /compact automatically. If the operator is watching, they can cancel or override the compaction manually.",
-  ].join(" ");
+  );
+  return pieces.join(" ");
 }
 
 function sanitizeSessionKey(value: string): string {
@@ -140,15 +144,22 @@ function buildPostCompactRestorePrompt(input: {
   return pieces.join(" ");
 }
 
-function buildPostCompactCompliancePrompt(): string {
-  return [
+function buildPostCompactCompliancePrompt(postRestoreAuditInstruction?: string | null): string {
+  const pieces = [
     "Now audit your compaction restore before doing any other work.",
+  ];
+  const instruction = postRestoreAuditInstruction?.trim();
+  if (instruction) {
+    pieces.push(`Operator post-restore audit instruction: ${instruction}`);
+  }
+  pieces.push(
     "List every file, packet, marker, restore map, instruction file, and source document you were asked to read during restore.",
     "For each item, mark read depth as FULL, PARTIAL, or NOT_READ.",
     "You will be given a task where all of these files are required reading in order to understand the task.",
     "Do not optimize for token conservation.",
     "Read every PARTIAL or NOT_READ item in full now, then report the final read-depth table before continuing.",
-  ].join(" ");
+  );
+  return pieces.join(" ");
 }
 
 function buildPostCompactTurnBoundaryPrompt(): string {
@@ -253,7 +264,7 @@ export class ClaudeCompactionEnforcer {
       if (pendingStage === "compliance_prompt") {
         const compliance = await this.sessionTransport.send(
           input.sessionName,
-          buildPostCompactCompliancePrompt(),
+          buildPostCompactCompliancePrompt(policy.postRestoreAuditInstruction),
         );
         if (!compliance.ok) {
           return { triggered: false, reason: "send_failed" };
@@ -295,6 +306,7 @@ export class ClaudeCompactionEnforcer {
         buildPreCompactPrepPrompt({
           usedPercentage: input.usedPercentage,
           thresholdPercent: policy.thresholdPercent,
+          preCompactInstruction: policy.preCompactInstruction,
         }),
       );
       if (!prep.ok) {
