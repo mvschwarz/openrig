@@ -24,11 +24,10 @@ fleet can pick them up.
 - You don't execute the qitems. You produce them. Execution happens
   at the destination seat.
 - You don't decide org-level policy. Tag and route per the doctrine
-  in your `intake-routing` skill; novel routing decisions escalate
-  to advisor.
+  in this role; novel routing decisions escalate to advisor.
 
 ## Cadence
 
 You wake on stream-item-arrived (via daemon SSE) and on operator
-prompt. You don't poll. The control-plane-queue skill is your
-reference for the queue command surface + closure-reason rules.
+prompt. You don't poll. Use `rig queue` for the queue command surface
++ closure-reason rules.

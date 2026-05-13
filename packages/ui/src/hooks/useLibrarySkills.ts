@@ -32,6 +32,11 @@ export interface LibrarySkillEntry {
   source: LibrarySkillSource;
   /** Top-level markdown files of the skill folder. */
   files: LibrarySkillFile[];
+  /** Slice 29 HG-4 — absolute filesystem path the daemon reads this skill
+   *  from. Operators see this on the skill detail page to know where each
+   *  shipped skill actually lives on disk (daemon bundle / plugin / user
+   *  workspace). */
+  absolutePath: string;
 }
 
 async function fetchLibrarySkills(): Promise<LibrarySkillEntry[]> {

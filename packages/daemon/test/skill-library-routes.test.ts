@@ -137,11 +137,12 @@ describe("SkillLibraryDiscoveryService — discovery (slice 28 HG-5 fix)", () =>
     }
   });
 
-  it("listLibrarySkillsPublic: omits absolutePath from response shape", () => {
-    makeSkill(env.sharedSkillsDir, "claude-compact-in-place", [{ name: "SKILL.md", content: "# body" }]);
+  it("listLibrarySkillsPublic: INCLUDES absolutePath (slice 29 HG-4 file-path discoverability)", () => {
+    makeSkill(env.sharedSkillsDir, "alpha-skill", [{ name: "SKILL.md", content: "# body" }]);
     const pub = env.service.listLibrarySkillsPublic();
     expect(pub).toHaveLength(1);
-    expect("absolutePath" in (pub[0] ?? {})).toBe(false);
+    expect("absolutePath" in (pub[0] ?? {})).toBe(true);
+    expect(pub[0]?.absolutePath).toContain("alpha-skill");
   });
 });
 
@@ -150,19 +151,22 @@ describe("GET /api/skills/library (slice 28)", () => {
   beforeEach(() => { env = setup(); });
   afterEach(() => { rmSync(env.root, { recursive: true, force: true }); });
 
-  it("returns the consolidated skill list", async () => {
-    makeSkill(env.sharedSkillsDir, "claude-compact-in-place", [{ name: "SKILL.md", content: "# top" }]);
+  it("returns the consolidated skill list with absolutePath surfaced (slice 29 HG-4)", async () => {
+    makeSkill(env.sharedSkillsDir, "alpha-skill", [{ name: "SKILL.md", content: "# top" }]);
     makeSkill(env.sharedSkillsDir, "core/openrig-user", [{ name: "SKILL.md", content: "# nested" }]);
     const res = await createApp(env.service).request("/api/skills/library");
     expect(res.status).toBe(200);
-    const body = (await res.json()) as Array<{ id: string; source: string }>;
+    const body = (await res.json()) as Array<{ id: string; source: string; absolutePath: string }>;
     const ids = body.map((s) => s.id).sort();
     expect(ids).toEqual([
-      "openrig-managed:claude-compact-in-place",
+      "openrig-managed:alpha-skill",
       "openrig-managed:core/openrig-user",
     ]);
-    // Public shape: absolutePath stripped.
-    expect("absolutePath" in (body[0] ?? {})).toBe(false);
+    // Slice 29 HG-4: absolutePath is now surfaced in the public response
+    // so the skill detail page can show operators where each skill lives
+    // on disk.
+    expect("absolutePath" in (body[0] ?? {})).toBe(true);
+    expect(body.every((s) => typeof s.absolutePath === "string" && s.absolutePath.length > 0)).toBe(true);
   });
 
   it("returns 503 when service is not provisioned in context", async () => {

@@ -7,7 +7,6 @@ import { useAgentImageLibrary } from "../../hooks/useAgentImageLibrary.js";
 import { useLibrarySkills } from "../../hooks/useLibrarySkills.js";
 import { usePlugins } from "../../hooks/usePlugins.js";
 import {
-  librarySkillFileToken,
   librarySkillSelectionFromPath,
   librarySkillToken,
 } from "../../lib/library-skills-routing.js";
@@ -324,78 +323,120 @@ export function SpecsTreeView() {
                 </span>
               </div>
               {skillsExpanded ? (
-                <ul className="ml-5 border-l border-stone-200">
-                  {skills.length > 0 ? (
-                    skills.map((skill) => {
-                      const skillOpen = expandedSkills[skill.id] || activeSkill?.skillId === skill.id;
-                      const SkillChevron = skillOpen ? ChevronDown : ChevronRight;
-                      return (
-                        <li key={skill.id} className="px-2 py-0.5">
-                          <div className="flex items-center gap-1">
-                            <button
-                              type="button"
-                              onClick={() => toggleSkill(skill.id)}
-                              aria-label={`${skillOpen ? "Collapse" : "Expand"} ${skill.name}`}
-                              className="inline-flex h-4 w-4 shrink-0 items-center justify-center text-stone-500 hover:text-stone-900"
-                            >
-                              <SkillChevron className="h-3 w-3" />
-                            </button>
-                            <Link
-                              to="/specs/skills/$skillToken"
-                              params={{ skillToken: librarySkillToken(skill.id) }}
-                              data-testid={`specs-leaf-${skill.id}`}
-                              onClick={() => {
-                                setExpandedSkills((prev) => ({ ...prev, [skill.id]: true }));
-                              }}
-                              className="min-w-0 flex-1 truncate font-mono text-xs text-on-surface hover:bg-surface-low hover:text-stone-900"
-                            >
-                              <span className="inline-flex min-w-0 items-center gap-1.5">
-                                <ToolMark tool="skill" size="xs" title={`${skill.name} skill`} decorative />
-                                <span className="truncate">{skill.name}</span>
-                              </span>
-                            </Link>
-                          </div>
-                          {skillOpen ? (
-                            <ul className="ml-4 border-l border-stone-200">
-                              {skill.files.map((file) => {
-                                const activeFile = activeSkill?.skillId === skill.id
-                                  && (activeSkill.filePath === file.path || (!activeSkill.filePath && file.name.toLowerCase() === "skill.md"));
-                                return (
-                                  <li key={file.path} className="px-2 py-0.5">
-                                    <Link
-                                      to="/specs/skills/$skillToken/file/$fileToken"
-                                      params={{
-                                        skillToken: librarySkillToken(skill.id),
-                                        fileToken: librarySkillFileToken(file.path),
-                                      }}
-                                      data-testid={`specs-skill-file-${file.name}`}
-                                      data-active={activeFile}
-                                      className={`flex min-w-0 items-center gap-1 truncate font-mono text-[11px] hover:bg-surface-low hover:text-stone-900 ${
-                                        activeFile ? "text-stone-900" : "text-on-surface-variant"
-                                      }`}
-                                    >
-                                      <ToolMark tool={file.name} size="xs" title={file.name} decorative />
-                                      <span className="truncate">{file.name}</span>
-                                    </Link>
-                                  </li>
-                                );
-                              })}
-                            </ul>
-                          ) : null}
-                        </li>
-                      );
-                    })
-                  ) : (
-                    <li className="px-2 py-1 font-mono text-[10px] text-on-surface-variant italic">
-                      {skillsLoading ? "Loading..." : "No skills yet."}
-                    </li>
-                  )}
-                </ul>
+                <SkillsTree
+                  skills={skills}
+                  loading={skillsLoading}
+                  activeSkillId={activeSkill?.skillId ?? null}
+                  expandedCategories={expandedSkills}
+                  onToggleCategory={toggleSkill}
+                />
               ) : null}
             </li>
           );
         })}
       </ul>
     </div>
+  );
+}
+
+// Slice 29 HG-3 — skills section restructure.
+//
+// Category-folder grouping: parse the skill id's path segment (after
+// "openrig-managed:" or "workspace:<root>:") for a category prefix like
+// "core/" / "pm/" / "pods/" / "process/". Skills with a category render
+// under that folder; flat skills (e.g. workspace skills with no nested
+// path) render under a synthetic "uncategorized" group.
+//
+// Skill rows are SINGLE-ROW (NOT folder-expandable into files). The
+// docs-browser on the skill detail page surfaces files; the sidebar
+// stays at one level of nesting (categories → skills). This is the
+// intentional asymmetry with plugin tree rows: plugins legitimately
+// contain N skills and stay expandable; canonical skills don't.
+
+interface SkillsTreeProps {
+  skills: Array<{ id: string; name: string; source: string; files: Array<{ name: string; path: string }> }>;
+  loading: boolean;
+  activeSkillId: string | null;
+  expandedCategories: Record<string, boolean>;
+  onToggleCategory: (key: string) => void;
+}
+
+function extractCategory(skillId: string): string {
+  // id shapes:
+  //   openrig-managed:claude-compact-in-place       → "(top-level)"
+  //   openrig-managed:core/openrig-user             → "core"
+  //   openrig-managed:pm/requirements-writer        → "pm"
+  //   workspace:<root>:operator-skill               → "workspace"
+  const afterSource = skillId.replace(/^[^:]+:/, "");
+  if (afterSource.startsWith("workspace:") || skillId.startsWith("workspace:")) {
+    return "workspace";
+  }
+  const slash = afterSource.indexOf("/");
+  if (slash === -1) return "(uncategorized)";
+  return afterSource.slice(0, slash);
+}
+
+function SkillsTree({ skills, loading, activeSkillId, expandedCategories, onToggleCategory }: SkillsTreeProps) {
+  if (loading && skills.length === 0) {
+    return (
+      <ul className="ml-5 border-l border-stone-200">
+        <li className="px-2 py-1 font-mono text-[10px] text-on-surface-variant italic">Loading...</li>
+      </ul>
+    );
+  }
+  if (skills.length === 0) {
+    return (
+      <ul className="ml-5 border-l border-stone-200">
+        <li className="px-2 py-1 font-mono text-[10px] text-on-surface-variant italic">No skills yet.</li>
+      </ul>
+    );
+  }
+  const byCategory = new Map<string, typeof skills>();
+  for (const skill of skills) {
+    const cat = extractCategory(skill.id);
+    const list = byCategory.get(cat) ?? [];
+    list.push(skill);
+    byCategory.set(cat, list);
+  }
+  const categories = Array.from(byCategory.entries()).sort(([a], [b]) => a.localeCompare(b));
+  return (
+    <ul className="ml-5 border-l border-stone-200" data-testid="skills-category-tree">
+      {categories.map(([category, items]) => {
+        const categoryKey = `category:${category}`;
+        const isOpen = !!expandedCategories[categoryKey] || items.some((s) => s.id === activeSkillId);
+        const CategoryChevron = isOpen ? ChevronDown : ChevronRight;
+        return (
+          <li key={category} data-testid={`skills-category-${category}`}>
+            <button
+              type="button"
+              onClick={() => onToggleCategory(categoryKey)}
+              data-testid={`skills-category-toggle-${category}`}
+              className="w-full flex items-center gap-1 px-2 py-0.5 hover:bg-surface-low text-left"
+            >
+              <CategoryChevron className="h-3 w-3 text-on-surface-variant" />
+              <span className="font-mono text-[10px] uppercase tracking-wide text-stone-700 flex-1">{category}</span>
+              <span className="font-mono text-[9px] text-on-surface-variant">{items.length}</span>
+            </button>
+            {isOpen && (
+              <ul className="ml-4 border-l border-stone-200">
+                {items.map((skill) => (
+                  <li key={skill.id} className="px-2 py-0.5">
+                    <Link
+                      to="/specs/skills/$skillToken"
+                      params={{ skillToken: librarySkillToken(skill.id) }}
+                      data-testid={`specs-leaf-${skill.id}`}
+                      className="flex min-w-0 items-center gap-1.5 truncate font-mono text-xs text-on-surface hover:bg-surface-low hover:text-stone-900"
+                    >
+                      <ToolMark tool="skill" size="xs" title={`${skill.name} skill`} decorative />
+                      <span className="truncate">{skill.name}</span>
+                    </Link>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </li>
+        );
+      })}
+    </ul>
   );
 }

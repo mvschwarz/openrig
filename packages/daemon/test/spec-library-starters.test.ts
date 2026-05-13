@@ -298,10 +298,11 @@ describe("Starter specs", () => {
     const sharedResources = (sharedRaw["resources"] ?? {}) as Record<string, unknown>;
     const sharedSkills = (sharedResources["skills"] as Array<{ id: string; path: string }>) ?? [];
     const expectedSharedSkills = [
+      // Slice 29 deletions removed: claude-compact-in-place,
+      // containerized-e2e, control-plane-queue, intake-routing,
+      // local-sysadmin (mis-imports or internal-only doctrine).
       "agent-browser",
       "brainstorming",
-      "claude-compact-in-place",
-      "containerized-e2e",
       "dogfood",
       "executing-plans",
       "frontend-design",
@@ -336,19 +337,8 @@ describe("Starter specs", () => {
     expect(claudeSettings.permissions.ask).toEqual(["Bash(rig up:*)", "Bash(rig down:*)"]);
     expect(claudeSettings.permissions.deny).toBeUndefined();
 
-    const compactSkill = sharedSkills.find((entry) => entry.id === "claude-compact-in-place");
-    expect(compactSkill).toBeDefined();
-    const compactSkillContent = readFileSync(join(SPECS_ROOT, "agents/shared", compactSkill!.path, "SKILL.md"), "utf-8");
-    expect(compactSkillContent).toContain("asked-vs-read-depth");
-    for (const depth of ["FULL", "TARGETED", "GREP", "INJECTED", "NOT-READ", "NOT-PRESENT"]) {
-      expect(compactSkillContent).toContain(depth);
-    }
-    expect(compactSkillContent).toContain("marshal acceptance");
-    expect(compactSkillContent).toContain("RESTORED");
-    expect(compactSkillContent).toContain("400k");
-    expect(compactSkillContent).toContain("policy target");
-    expect(compactSkillContent).toContain("not an automatic action");
-    expect(compactSkillContent).toContain("not for Codex by default");
+    // Slice 29: claude-compact-in-place skill DELETED (was mis-imported as a
+    // skill; its content remains in skill-spec docs not under skills/).
 
     const expectedAgentSkills = new Map<string, string[]>([
       [

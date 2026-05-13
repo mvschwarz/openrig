@@ -115,7 +115,6 @@ The development pod has access to browser automation and structured dogfood test
 
 - **`agent-browser`** — browser automation CLI. Navigate to the daemon UI, snapshot interactive elements, take annotated screenshots, record repro videos. Use `agent-browser open <url>`, `agent-browser snapshot -i`, `agent-browser screenshot --annotate`.
 - **`dogfood`** — structured exploratory testing workflow. Produces a report with screenshots, repro videos, and step-by-step evidence for every finding.
-- **`containerized-e2e`** — Docker-based clean-install testing. Simulates a fresh user environment.
 
 QA typically drives browser and dogfood testing, but both impl and QA should know these tools exist and can use them. When dogfooding UI:
 1. Load `/agent-browser` and `/dogfood`

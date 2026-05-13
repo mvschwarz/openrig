@@ -11,7 +11,7 @@ imports:
 profiles:
   default:
     uses:
-      skills: [openrig-user, intake-routing, control-plane-queue]
+      skills: [openrig-user]
       guidance: [role]
       subagents: []
       plugins: []

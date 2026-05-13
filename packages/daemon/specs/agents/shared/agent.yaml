@@ -8,8 +8,6 @@ resources:
       path: skills/process/agent-browser
     - id: brainstorming
       path: skills/process/brainstorming
-    - id: containerized-e2e
-      path: skills/process/containerized-e2e
     - id: dogfood
       path: skills/process/dogfood
     - id: executing-plans
@@ -28,16 +26,8 @@ resources:
       path: skills/core/openrig-architect
     - id: rig-lifecycle
       path: skills/core/rig-lifecycle
-    - id: claude-compact-in-place
-      path: skills/claude-compact-in-place
     - id: systematic-debugging
       path: skills/process/systematic-debugging
-    - id: local-sysadmin
-      path: skills/process/local-sysadmin
-    - id: intake-routing
-      path: skills/process/intake-routing
-    - id: control-plane-queue
-      path: skills/process/control-plane-queue
     - id: test-driven-development
       path: skills/process/test-driven-development
     - id: verification-before-completion
@@ -50,8 +40,6 @@ resources:
       path: skills/pods/development-team
     - id: review-team
       path: skills/pods/review-team
-    - id: rig-architect
-      path: skills/rig-architect
     # PM skills
     - id: office-hours
       path: skills/pm/office-hours
