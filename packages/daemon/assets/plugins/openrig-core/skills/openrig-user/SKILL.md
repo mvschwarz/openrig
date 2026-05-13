@@ -1,6 +1,6 @@
 ---
 name: openrig-user
-description: Use when operating OpenRig with the `rig` CLI and you need the shipped command surface for identity, inventory, communication, lifecycle, specs, recovery, or agent-facing JSON output. NOT for debugging host-side runtime issues (use openrig-operator) or for changing OpenRig itself (use openrig-builder).
+description: Use when operating OpenRig with the `rig` CLI and you need the shipped command surface for identity, inventory, communication, lifecycle, specs, recovery, or agent-facing JSON output. NOT for debugging host-side runtime issues (use openrig-operator) or for changing OpenRig itself (work in the openrig product repo).
 metadata:
   openrig:
     stage: factory-approved
@@ -263,7 +263,7 @@ Source `>= 6af2754` lets a RigSpec member set:
 
 ```yaml
 starter_ref:
-  name: openrig-builder-base--claude-code
+  name: my-team-starter--claude-code
 ```
 
 The daemon resolves the named entry from the Agent Starter registry, applies the

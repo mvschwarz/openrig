@@ -71,14 +71,15 @@ reentry case, distinct from reusable Agent Starters / priming packs):
 
 ## Memory surfaces consumed at startup
 
-Per the externalized-memory-surfaces convention's 13-row inventory:
+The primary surfaces a startup ingestion path reads:
 
-- **Row 7** — AGENTS/role/CULTURE/startup overlays (primary)
-- **Row 3** — startup replay context (primary)
-- **Row 12** — restore/reentry packets and Agent Starters (cross-runtime startup path)
+- AGENTS / role / CULTURE / startup overlays (the per-seat identity layer)
+- startup replay context (what the agent did before the current boot)
+- restore / reentry packets and Agent Starters (cross-runtime startup path)
 
-The umbrella's authority-rank + read-vs-write columns govern which
-surfaces a startup ingestion path can write vs only read.
+Authority-rank + read-vs-write posture governs which surfaces a
+startup-ingestion path can write vs only read; treat overlays as
+write-restricted unless your role explicitly authors them.
 
 ## Startup files vs skills (the distinction)
 
@@ -88,7 +89,7 @@ Per `agent-startup-guide.md` (product reference doc) and the team handbook:
 |---|---|
 | Rig-specific, role-specific identity | Reusable SOPs / methodology / knowledge |
 | Tell agent WHO it is, WHAT it's working on, HOW this team operates | Tell agent HOW to do something (transferable across rigs) |
-| Examples: `role.md`, `CULTURE.md`, `startup/context.md` | Examples: `openrig-user`, `test-driven-development`, `vault-user` |
+| Examples: `role.md`, `CULTURE.md`, `startup/context.md` | Examples: `openrig-user`, `test-driven-development`, `dogfood` |
 | Authored per-rig | Authored once, used everywhere |
 
 Don't put skill content in startup files. Don't put identity content

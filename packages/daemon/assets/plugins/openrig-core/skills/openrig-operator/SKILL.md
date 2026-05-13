@@ -1,7 +1,7 @@
 ---
 name: openrig-operator
 description: |
-  Use when debugging host-side OpenRig runtime issues: daemon reachability, Codex permission or writable-root failures, command approval friction, rate limits/account switches, helper cleanup, or topology health confusion. NOT for ordinary CLI operation (use openrig-user) or for changing OpenRig itself (use openrig-builder).
+  Use when debugging host-side OpenRig runtime issues: daemon reachability, Codex permission or writable-root failures, command approval friction, rate limits/account switches, helper cleanup, or topology health confusion. NOT for ordinary CLI operation (use openrig-user) or for changing OpenRig itself (work in the openrig product repo).
 metadata:
   openrig:
     stage: factory-approved

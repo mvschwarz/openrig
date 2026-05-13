@@ -1,7 +1,7 @@
 ---
 name: forming-an-openrig-mental-model
 description: |
-  Use when an agent is newly oriented to OpenRig and needs to form an accurate mental model of the system fast — what rigs are, how skills load, what the topology shapes mean, what the product loop is. For agents booting into a new seat or returning to OpenRig work after time away. NOT for HA pair compaction recovery (use mental-model-ha for that) or for specific operational procedures.
+  Use when an agent is newly oriented to OpenRig and needs to form an accurate mental model of the system fast — what rigs are, how skills load, what the topology shapes mean, what the product loop is. For agents booting into a new seat or returning to OpenRig work after time away. NOT for HA-pair compaction recovery (that's the pair-of-seats coordination pattern; orientation is a solo task) or for specific operational procedures.
 metadata:
   openrig:
     stage: factory-approved
@@ -165,7 +165,7 @@ cost when you reach for one.
 | Home | Purpose |
 |---|---|
 | `<rig-cwd>/.claude/skills/`, `<rig-cwd>/.agents/skills/` | Where the harness actually loads from. Populated by `rig up`. |
-| `~/.claude/skills/`, `~/.agents/skills/` | Your personal/global skills + OpenRig bootstrap (openrig-user, openrig-operator, openrig-builder, openrig-architect, openrig-upgrade, forming-an-openrig-mental-model, mental-model-ha). |
+| `~/.claude/skills/`, `~/.agents/skills/` | Your personal/global skills + the OpenRig bootstrap set (openrig-user, openrig-operator, openrig-architect, forming-an-openrig-mental-model, plus the rest of the openrig-core plugin skills). |
 | openrig-core plugin skills | Product built-in skills that ship with OpenRig (installed via the openrig-core plugin). |
 | `~/.openrig/skills/` | Runtime install home for OpenRig-shipped skills. |
 
