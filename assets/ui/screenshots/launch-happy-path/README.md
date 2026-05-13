@@ -2,8 +2,8 @@
 
 Source capture:
 - packaged OpenRig UI on the clean rerun against the authenticated VM lane
-- host-forwarded UI: `http://127.0.0.1:17439`
-- guest daemon: `192.168.64.9:7433`
+- host-forwarded UI: `http://127.0.0.1:<host-port>`
+- guest daemon: `<guest-ip>:<guest-port>`
 
 Purpose:
 - README walkthrough

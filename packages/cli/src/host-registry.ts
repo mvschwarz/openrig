@@ -39,7 +39,7 @@ export function defaultHostRegistryPath(): string {
  *       - id: vm-claude-test
  *         transport: ssh
  *         target: vm-claude-test.local
- *         user: your-username        # optional
+ *         user: your-username  # optional
  *         notes: "Tart VM"     # optional
  *
  * Operator-managed; v0 does NOT auto-write or auto-modify this file. A missing

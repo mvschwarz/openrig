@@ -627,7 +627,7 @@ hosts:
   - id: vm-claude-test
     transport: ssh
     target: vm-claude-test.local
-    user: your-username        # optional
+    user: your-username  # optional
     notes: "Tart VM"     # optional
   - id: laptop-b
     transport: ssh

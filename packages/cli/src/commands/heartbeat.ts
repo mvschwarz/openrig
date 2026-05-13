@@ -1,6 +1,5 @@
 import { execFile } from "node:child_process";
 import fs from "node:fs";
-import os from "node:os";
 import nodePath from "node:path";
 import { Command } from "commander";
 
@@ -293,10 +292,6 @@ function resolveSharedDocsRoot(env: NodeJS.ProcessEnv): string | null {
     const value = env[key];
     if (value && fs.existsSync(nodePath.join(value, "rigs"))) return value;
   }
-
-  const home = env["HOME"] ?? os.homedir();
-  const wellKnown = nodePath.join(home, "code", "substrate", "shared-docs");
-  if (fs.existsSync(nodePath.join(wellKnown, "rigs"))) return wellKnown;
   return null;
 }
 

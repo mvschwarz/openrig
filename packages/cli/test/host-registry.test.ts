@@ -35,7 +35,7 @@ hosts:
   - id: vm-claude-test
     transport: ssh
     target: vm-claude-test.local
-    user: your-username
+    user: tester
     notes: "Tart VM"
 `, (path) => {
       const r = loadHostRegistry(path);
@@ -46,7 +46,7 @@ hosts:
           id: "vm-claude-test",
           transport: "ssh",
           target: "vm-claude-test.local",
-          user: "wrandom",
+          user: "tester",
           notes: "Tart VM",
         });
       }
@@ -62,14 +62,14 @@ hosts:
   - id: laptop-b
     transport: ssh
     target: laptop-b.tail-scale-net
-    user: your-username
+    user: tester
 `, (path) => {
       const r = loadHostRegistry(path);
       expect(r.ok).toBe(true);
       if (r.ok) {
         expect(r.registry.hosts.map((h) => h.id)).toEqual(["vm-a", "laptop-b"]);
         expect(r.registry.hosts[0]?.user).toBeUndefined();
-        expect(r.registry.hosts[1]?.user).toBe("wrandom");
+        expect(r.registry.hosts[1]?.user).toBe("tester");
       }
     });
   });
