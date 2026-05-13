@@ -1,24 +1,21 @@
-// Slice 28 Checkpoint C — Detail page docs-browser layout (HG-6 + HG-7 + HG-8).
+// Slice 28 Checkpoint C — Detail pages docs-browser (real file tree).
 //
-// Pre-slice-28 PluginDetailPage rendered a grid of sections (manifest +
-// skills + hooks + MCP + used-by) and SkillDetailPage rendered just the
-// FileViewer. Founder-walk feedback: docs-browser pattern — left tree of
-// entries + right content viewer — on both detail pages, mirroring
-// FilesWorkspace's two-pane shape.
+// Checkpoint C-1 added daemon endpoints
+//   GET /api/plugins/:id/files/list?path=<rel>
+//   GET /api/plugins/:id/files/read?path=<rel>
+// + PluginEntry.skillCount enrichment. SC-29 EXCEPTION #11.
 //
-// SkillDetailPage (HG-7): in-page tree of skill files; SKILL.md
-// auto-selected; clicking another file navigates via fileToken route.
-//
-// PluginDetailPage (HG-6): virtual tree built from PluginDetail's
-// structured data (manifest / skills/ / hooks/ / mcp servers / used by).
-// Click switches the right viewer panel. Full file-content browsing of
-// the plugin path is a separate scope question surfaced to orch;
-// docs-browser SHELL is the v0 deliverable.
-//
-// HG-8 (folder navigation): the plugin docs-browser supports expanding
-// the skills/ + hooks/ + mcp roots to reveal child entries. Skill detail
-// docs-browser is flat (skills are typically SKILL.md only); folder
-// navigation gate is tested via the plugin tree's expand-on-select shape.
+// Checkpoint C-2 (this file) rewires the UI:
+//   SkillDetailPage: in-page file tree using existing /api/files/list +
+//     /read, rooted at skill.directoryPath under the discovered allowlist
+//     root. SKILL.md auto-selected; subfolder navigation supported via
+//     currentPath + entry-click.
+//   PluginDetailPage: in-page file tree using new usePluginFiles hook
+//     (wrapping the new daemon endpoints). README.md auto-selected at
+//     plugin root; subfolder navigation supported.
+// Both pages preserve the header strip with structured metadata (manifest
+// version + runtimes + source + skill-count + used-by-count for plugins;
+// source + name for skills).
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
@@ -42,8 +39,6 @@ afterEach(() => {
 
 function fileList(entries: Array<{ name: string; type: "dir" | "file" }>) {
   return {
-    root: "workspace",
-    path: "",
     entries: entries.map((entry) => ({
       ...entry,
       size: entry.type === "file" ? 42 : null,
@@ -72,36 +67,53 @@ function renderPluginDetail(pluginId: string) {
   );
 }
 
-describe("SkillDetailPage — slice 28 HG-7 docs-browser layout", () => {
-  function mockOneSkill(files: Array<{ name: string; type: "file" }>) {
+describe("SkillDetailPage — slice 28 HG-7 + HG-8 docs-browser (real file tree)", () => {
+  function mockOneSkill(opts: {
+    rootFiles?: Array<{ name: string; type: "file" | "dir" }>;
+    subFolders?: Record<string, Array<{ name: string; type: "file" | "dir" }>>;
+    fileContent?: Record<string, string>;
+  }) {
     mockFetch.mockImplementation(async (url: string) => {
       if (url === "/api/files/roots") {
         return { ok: true, json: async () => ({ roots: [{ name: "workspace", path: "/workspace" }] }) };
       }
+      // useLibrarySkills probes for the skill folder.
       if (url === "/api/files/list?root=workspace&path=.openrig%2Fskills") return NOT_FOUND;
       if (url === "/api/files/list?root=workspace&path=node_modules%2F%40openrig%2Fdaemon%2Fspecs%2Fagents%2Fshared%2Fskills") return NOT_FOUND;
       if (url === "/api/files/list?root=workspace&path=packages%2Fdaemon%2Fspecs%2Fagents%2Fshared%2Fskills") {
         return { ok: true, json: async () => fileList([{ name: "openrig-user", type: "dir" }]) };
       }
+      // SkillDetailPage's in-page file tree lists the skill folder itself.
       if (url === "/api/files/list?root=workspace&path=packages%2Fdaemon%2Fspecs%2Fagents%2Fshared%2Fskills%2Fopenrig-user") {
-        return { ok: true, json: async () => fileList(files) };
+        return { ok: true, json: async () => fileList(opts.rootFiles ?? [{ name: "SKILL.md", type: "file" }]) };
       }
-      if (url === "/api/files/read?root=workspace&path=packages%2Fdaemon%2Fspecs%2Fagents%2Fshared%2Fskills%2Fopenrig-user%2FSKILL.md") {
-        return {
-          ok: true,
-          json: async () => ({
-            root: "workspace",
-            path: "packages/daemon/specs/agents/shared/skills/openrig-user/SKILL.md",
-            absolutePath: "/workspace/packages/daemon/specs/agents/shared/skills/openrig-user/SKILL.md",
-            content: "# OpenRig User Skill body",
-            mtime: "2026-05-12T00:00:00.000Z",
-            contentHash: "hash",
-            size: 30,
-            truncated: false,
-            truncatedAtBytes: null,
-            totalBytes: 30,
-          }),
-        };
+      // Subfolder listings inside the skill (sub-folders go in opts.subFolders by relative path).
+      for (const [subPath, entries] of Object.entries(opts.subFolders ?? {})) {
+        const fullPath = `packages/daemon/specs/agents/shared/skills/openrig-user/${subPath}`;
+        if (url === `/api/files/list?root=workspace&path=${encodeURIComponent(fullPath)}`) {
+          return { ok: true, json: async () => fileList(entries) };
+        }
+      }
+      // File reads.
+      for (const [filePath, content] of Object.entries(opts.fileContent ?? {})) {
+        const fullPath = `packages/daemon/specs/agents/shared/skills/openrig-user/${filePath}`;
+        if (url === `/api/files/read?root=workspace&path=${encodeURIComponent(fullPath)}`) {
+          return {
+            ok: true,
+            json: async () => ({
+              root: "workspace",
+              path: fullPath,
+              absolutePath: `/workspace/${fullPath}`,
+              content,
+              mtime: "2026-05-12T00:00:00.000Z",
+              contentHash: "hash",
+              size: content.length,
+              truncated: false,
+              truncatedAtBytes: null,
+              totalBytes: content.length,
+            }),
+          };
+        }
       }
       throw new Error(`unexpected fetch ${url}`);
     });
@@ -109,8 +121,11 @@ describe("SkillDetailPage — slice 28 HG-7 docs-browser layout", () => {
 
   const skillId = "openrig-managed:workspace:packages/daemon/specs/agents/shared/skills/openrig-user";
 
-  it("renders the docs-browser shell (testid `skill-detail-docs-browser` with tree + viewer)", async () => {
-    mockOneSkill([{ name: "SKILL.md", type: "file" }]);
+  it("renders the docs-browser shell (tree + viewer testids)", async () => {
+    mockOneSkill({
+      rootFiles: [{ name: "SKILL.md", type: "file" }],
+      fileContent: { "SKILL.md": "# OpenRig User Skill body" },
+    });
     renderSkillDetail(librarySkillToken(skillId));
     await waitFor(() => {
       expect(screen.getByTestId("skill-detail-docs-browser")).toBeTruthy();
@@ -119,101 +134,208 @@ describe("SkillDetailPage — slice 28 HG-7 docs-browser layout", () => {
     expect(screen.getByTestId("skill-detail-viewer")).toBeTruthy();
   });
 
-  it("tree lists each skill file as a navigable entry", async () => {
-    mockOneSkill([
-      { name: "SKILL.md", type: "file" },
-      { name: "DETAILS.md", type: "file" },
-    ]);
+  it("tree lists each skill file/dir entry (HG-7 surface — ALL files, not just markdown)", async () => {
+    mockOneSkill({
+      rootFiles: [
+        { name: "SKILL.md", type: "file" },
+        { name: "examples", type: "dir" },
+        { name: "config.json", type: "file" },
+        { name: "fixture.yaml", type: "file" },
+      ],
+      fileContent: { "SKILL.md": "# body" },
+    });
     renderSkillDetail(librarySkillToken(skillId));
     await waitFor(() => {
-      expect(screen.getByTestId("skill-detail-tree-file-SKILL.md")).toBeTruthy();
+      expect(screen.getByTestId("skill-detail-tree-entry-SKILL.md")).toBeTruthy();
     });
-    expect(screen.getByTestId("skill-detail-tree-file-DETAILS.md")).toBeTruthy();
+    // HG-7 DISCRIMINATOR: non-markdown files appear in the tree (pre-C2
+    // useLibrarySkills filtered to .md/.mdx only; the new in-page tree
+    // uses /api/files/list which returns ALL entries).
+    expect(screen.getByTestId("skill-detail-tree-entry-config.json")).toBeTruthy();
+    expect(screen.getByTestId("skill-detail-tree-entry-fixture.yaml")).toBeTruthy();
+    expect(screen.getByTestId("skill-detail-tree-entry-examples")).toBeTruthy();
   });
 
-  it("SKILL.md is auto-selected (active state) on entry when no fileToken given", async () => {
-    mockOneSkill([
-      { name: "SKILL.md", type: "file" },
-      { name: "DETAILS.md", type: "file" },
-    ]);
+  it("SKILL.md auto-selected on entry (HG-7 default)", async () => {
+    mockOneSkill({
+      rootFiles: [
+        { name: "SKILL.md", type: "file" },
+        { name: "DETAILS.md", type: "file" },
+      ],
+      fileContent: { "SKILL.md": "# default body", "DETAILS.md": "# secondary" },
+    });
     renderSkillDetail(librarySkillToken(skillId));
     await waitFor(() => {
-      expect(screen.getByTestId("skill-detail-tree-file-SKILL.md")).toBeTruthy();
+      expect(screen.getByText(/default body/)).toBeTruthy();
     });
-    expect(screen.getByTestId("skill-detail-tree-file-SKILL.md").getAttribute("data-active")).toBe("true");
-    expect(screen.getByTestId("skill-detail-tree-file-DETAILS.md").getAttribute("data-active")).toBe("false");
   });
 
-  it("clicking a non-default file navigates to the file route (anchor href shape)", async () => {
-    mockOneSkill([
-      { name: "SKILL.md", type: "file" },
-      { name: "DETAILS.md", type: "file" },
-    ]);
+  it("HG-8 folder navigation: clicking a dir enters it; tree updates to subfolder contents", async () => {
+    mockOneSkill({
+      rootFiles: [
+        { name: "SKILL.md", type: "file" },
+        { name: "examples", type: "dir" },
+      ],
+      subFolders: {
+        examples: [
+          { name: "basic.md", type: "file" },
+          { name: "advanced.md", type: "file" },
+        ],
+      },
+      fileContent: {
+        "SKILL.md": "# root",
+        "examples/basic.md": "# basic example",
+      },
+    });
     renderSkillDetail(librarySkillToken(skillId));
     await waitFor(() => {
-      expect(screen.getByTestId("skill-detail-tree-file-DETAILS.md")).toBeTruthy();
+      expect(screen.getByTestId("skill-detail-tree-entry-examples")).toBeTruthy();
     });
-    const detailsLink = screen.getByTestId("skill-detail-tree-file-DETAILS.md") as HTMLAnchorElement;
-    expect(detailsLink.tagName).toBe("A");
-    expect(detailsLink.getAttribute("href")).toMatch(/^\/specs\/skills\/.+\/file\/.+$/);
+    fireEvent.click(screen.getByTestId("skill-detail-tree-entry-examples"));
+    await waitFor(() => {
+      expect(screen.getByTestId("skill-detail-tree-entry-examples/basic.md")).toBeTruthy();
+    });
+    expect(screen.getByTestId("skill-detail-tree-entry-examples/advanced.md")).toBeTruthy();
+    // 'up' (..) entry visible when not at the skill root.
+    expect(screen.getByTestId("skill-detail-tree-up")).toBeTruthy();
   });
 
-  it("renders SKILL.md content in the viewer pane (markdown body visible)", async () => {
-    mockOneSkill([{ name: "SKILL.md", type: "file" }]);
+  it("HG-8 folder navigation: clicking '..' returns to parent folder", async () => {
+    mockOneSkill({
+      rootFiles: [
+        { name: "SKILL.md", type: "file" },
+        { name: "examples", type: "dir" },
+      ],
+      subFolders: { examples: [{ name: "basic.md", type: "file" }] },
+      fileContent: { "SKILL.md": "# root" },
+    });
     renderSkillDetail(librarySkillToken(skillId));
     await waitFor(() => {
-      expect(screen.getByText(/OpenRig User Skill body/)).toBeTruthy();
+      expect(screen.getByTestId("skill-detail-tree-entry-examples")).toBeTruthy();
+    });
+    fireEvent.click(screen.getByTestId("skill-detail-tree-entry-examples"));
+    await waitFor(() => {
+      expect(screen.getByTestId("skill-detail-tree-up")).toBeTruthy();
+    });
+    fireEvent.click(screen.getByTestId("skill-detail-tree-up"));
+    await waitFor(() => {
+      expect(screen.getByTestId("skill-detail-tree-entry-SKILL.md")).toBeTruthy();
+    });
+  });
+
+  it("clicking a non-default file in the tree switches the viewer content", async () => {
+    mockOneSkill({
+      rootFiles: [
+        { name: "SKILL.md", type: "file" },
+        { name: "DETAILS.md", type: "file" },
+      ],
+      fileContent: { "SKILL.md": "# root body", "DETAILS.md": "# details body" },
+    });
+    renderSkillDetail(librarySkillToken(skillId));
+    await waitFor(() => {
+      expect(screen.getByText(/root body/)).toBeTruthy();
+    });
+    fireEvent.click(screen.getByTestId("skill-detail-tree-entry-DETAILS.md"));
+    await waitFor(() => {
+      expect(screen.getByText(/details body/)).toBeTruthy();
     });
   });
 });
 
-describe("PluginDetailPage — slice 28 HG-6 docs-browser layout", () => {
-  function mockPluginDetail(detail: {
-    id: string;
+describe("PluginDetailPage — slice 28 HG-6 + HG-8 docs-browser (real file tree via daemon endpoints)", () => {
+  function mockPluginDetail(opts: {
+    pluginId: string;
     name: string;
     version: string;
     runtimes: ("claude" | "codex")[];
-    skills?: Array<{ name: string; relativePath: string }>;
-    hooks?: Array<{ runtime: "claude" | "codex"; relativePath: string; events: string[] }>;
-    mcpServers?: Array<{ runtime: "claude" | "codex"; name: string; command: string | null; transport: string | null }>;
+    skillCount?: number;
+    rootFiles?: Array<{ name: string; type: "file" | "dir" }>;
+    subFolders?: Record<string, Array<{ name: string; type: "file" | "dir" }>>;
+    fileContent?: Record<string, string>;
+    usedBy?: Array<{ agentName: string; sourcePath: string; profiles: string[] }>;
   }) {
     mockFetch.mockImplementation(async (url: string) => {
-      if (url === `/api/plugins/${detail.id}`) {
+      if (url === `/api/plugins/${opts.pluginId}`) {
         return {
           ok: true,
           json: async () => ({
             entry: {
-              id: detail.id,
-              name: detail.name,
-              version: detail.version,
+              id: opts.pluginId,
+              name: opts.name,
+              version: opts.version,
               description: null,
               source: "vendored",
-              sourceLabel: `vendored:${detail.name}`,
-              runtimes: detail.runtimes,
-              path: `/plugins/${detail.id}`,
+              sourceLabel: `vendored:${opts.name}`,
+              runtimes: opts.runtimes,
+              path: `/plugins/${opts.pluginId}`,
               lastSeenAt: null,
+              skillCount: opts.skillCount ?? 0,
             },
-            claudeManifest: detail.runtimes.includes("claude")
-              ? { raw: {}, name: detail.name, version: detail.version, description: null, homepage: null, repository: null, license: null }
-              : null,
-            codexManifest: detail.runtimes.includes("codex")
-              ? { raw: {}, name: detail.name, version: detail.version, description: null, homepage: null, repository: null, license: null }
-              : null,
-            skills: detail.skills ?? [],
-            hooks: detail.hooks ?? [],
-            mcpServers: detail.mcpServers ?? [],
+            claudeManifest: null,
+            codexManifest: null,
+            skills: [],
+            hooks: [],
+            mcpServers: [],
           }),
         };
       }
-      if (url === `/api/plugins/${detail.id}/used-by`) {
-        return { ok: true, json: async () => [] };
+      if (url === `/api/plugins/${opts.pluginId}/used-by`) {
+        return { ok: true, json: async () => opts.usedBy ?? [] };
+      }
+      if (url === `/api/plugins/${opts.pluginId}/files/list?path=`) {
+        return {
+          ok: true,
+          json: async () => ({
+            pluginId: opts.pluginId,
+            path: "",
+            ...fileList(opts.rootFiles ?? []),
+          }),
+        };
+      }
+      for (const [subPath, entries] of Object.entries(opts.subFolders ?? {})) {
+        if (url === `/api/plugins/${opts.pluginId}/files/list?path=${encodeURIComponent(subPath)}`) {
+          return {
+            ok: true,
+            json: async () => ({
+              pluginId: opts.pluginId,
+              path: subPath,
+              ...fileList(entries),
+            }),
+          };
+        }
+      }
+      for (const [filePath, content] of Object.entries(opts.fileContent ?? {})) {
+        if (url === `/api/plugins/${opts.pluginId}/files/read?path=${encodeURIComponent(filePath)}`) {
+          return {
+            ok: true,
+            json: async () => ({
+              pluginId: opts.pluginId,
+              path: filePath,
+              absolutePath: `/plugins/${opts.pluginId}/${filePath}`,
+              content,
+              mtime: "2026-05-12T00:00:00.000Z",
+              contentHash: "hash",
+              size: content.length,
+              truncated: false,
+              truncatedAtBytes: null,
+              totalBytes: content.length,
+            }),
+          };
+        }
       }
       throw new Error(`unexpected fetch ${url}`);
     });
   }
 
-  it("renders the docs-browser shell (testid `plugin-detail-docs-browser` with tree + viewer)", async () => {
-    mockPluginDetail({ id: "openrig-core", name: "openrig-core", version: "0.1.0", runtimes: ["claude"] });
+  it("renders the docs-browser shell (tree + viewer testids)", async () => {
+    mockPluginDetail({
+      pluginId: "openrig-core",
+      name: "openrig-core",
+      version: "0.1.0",
+      runtimes: ["claude"],
+      rootFiles: [{ name: "README.md", type: "file" }],
+      fileContent: { "README.md": "# body" },
+    });
     renderPluginDetail("openrig-core");
     await waitFor(() => {
       expect(screen.getByTestId("plugin-detail-docs-browser")).toBeTruthy();
@@ -222,144 +344,146 @@ describe("PluginDetailPage — slice 28 HG-6 docs-browser layout", () => {
     expect(screen.getByTestId("plugin-detail-viewer")).toBeTruthy();
   });
 
-  it("tree lists manifest + skills/ + hooks/ + used-by entries", async () => {
+  it("header strip preserves plugin metadata (name + version + runtimes + skill-count + used-by-count + source)", async () => {
     mockPluginDetail({
-      id: "openrig-core",
+      pluginId: "openrig-core",
       name: "openrig-core",
       version: "0.1.0",
       runtimes: ["claude", "codex"],
-      skills: [{ name: "openrig-user", relativePath: "skills/openrig-user" }],
-      hooks: [{ runtime: "claude", relativePath: "hooks/claude.json", events: ["pre-commit"] }],
-    });
-    renderPluginDetail("openrig-core");
-    await waitFor(() => {
-      expect(screen.getByTestId("plugin-detail-tree-manifest")).toBeTruthy();
-    });
-    expect(screen.getByTestId("plugin-detail-tree-skills-root")).toBeTruthy();
-    expect(screen.getByTestId("plugin-detail-tree-hooks-root")).toBeTruthy();
-    expect(screen.getByTestId("plugin-detail-tree-used-by")).toBeTruthy();
-  });
-
-  it("default selection is `manifest` — viewer renders manifest panel", async () => {
-    mockPluginDetail({ id: "openrig-core", name: "openrig-core", version: "0.1.0", runtimes: ["claude"] });
-    renderPluginDetail("openrig-core");
-    await waitFor(() => {
-      expect(screen.getByTestId("plugin-viewer-manifest")).toBeTruthy();
-    });
-    expect(screen.getByTestId("plugin-detail-tree-manifest").getAttribute("data-active")).toBe("true");
-  });
-
-  it("HG-8 folder navigation: clicking skills/ root expands child skills + switches viewer to skills root", async () => {
-    mockPluginDetail({
-      id: "openrig-core",
-      name: "openrig-core",
-      version: "0.1.0",
-      runtimes: ["claude"],
-      skills: [
-        { name: "openrig-user", relativePath: "skills/openrig-user" },
-        { name: "openrig-architect", relativePath: "skills/openrig-architect" },
+      skillCount: 5,
+      usedBy: [
+        { agentName: "advisor", sourcePath: "/x", profiles: ["default"] },
+        { agentName: "driver", sourcePath: "/y", profiles: ["default"] },
       ],
+      rootFiles: [{ name: "README.md", type: "file" }],
+      fileContent: { "README.md": "doc" },
     });
     renderPluginDetail("openrig-core");
     await waitFor(() => {
-      expect(screen.getByTestId("plugin-detail-tree-skills-root")).toBeTruthy();
+      // Heading + breadcrumbs both contain plugin name; pin to the h1 via role.
+      expect(screen.getByRole("heading", { name: "openrig-core" })).toBeTruthy();
     });
-    // Pre-click: skills root is collapsed, sub-entries absent in DOM.
-    expect(screen.queryByTestId("plugin-detail-tree-skill:openrig-user")).toBeNull();
-    fireEvent.click(screen.getByTestId("plugin-detail-tree-skills-root"));
-    await waitFor(() => {
-      expect(screen.getByTestId("plugin-detail-tree-skill:openrig-user")).toBeTruthy();
-    });
-    expect(screen.getByTestId("plugin-detail-tree-skill:openrig-architect")).toBeTruthy();
-    expect(screen.getByTestId("plugin-viewer-skills-root")).toBeTruthy();
+    expect(screen.getByText("v0.1.0")).toBeTruthy();
+    expect(screen.getByTestId("plugin-detail-runtime-claude")).toBeTruthy();
+    expect(screen.getByTestId("plugin-detail-runtime-codex")).toBeTruthy();
+    expect(screen.getByText("vendored:openrig-core")).toBeTruthy();
+    expect(screen.getByTestId("plugin-detail-skill-count").textContent).toBe("5 skills");
+    expect(screen.getByTestId("plugin-detail-used-by-count").textContent).toBe("used by 2 agents");
   });
 
-  it("HG-8 folder navigation: clicking a child skill switches viewer to that skill panel", async () => {
+  it("HG-6 tree lists plugin root entries from daemon /files/list endpoint", async () => {
     mockPluginDetail({
-      id: "openrig-core",
+      pluginId: "openrig-core",
       name: "openrig-core",
       version: "0.1.0",
       runtimes: ["claude"],
-      skills: [{ name: "openrig-user", relativePath: "skills/openrig-user" }],
-    });
-    renderPluginDetail("openrig-core");
-    await waitFor(() => {
-      expect(screen.getByTestId("plugin-detail-tree-skills-root")).toBeTruthy();
-    });
-    fireEvent.click(screen.getByTestId("plugin-detail-tree-skills-root"));
-    await waitFor(() => {
-      expect(screen.getByTestId("plugin-detail-tree-skill:openrig-user")).toBeTruthy();
-    });
-    fireEvent.click(screen.getByTestId("plugin-detail-tree-skill:openrig-user"));
-    await waitFor(() => {
-      expect(screen.getByTestId("plugin-viewer-skill-openrig-user")).toBeTruthy();
-    });
-  });
-
-  it("clicking hooks/ root + child reveals hook config events panel", async () => {
-    mockPluginDetail({
-      id: "openrig-core",
-      name: "openrig-core",
-      version: "0.1.0",
-      runtimes: ["claude", "codex"],
-      hooks: [
-        { runtime: "claude", relativePath: "hooks/claude.json", events: ["pre-commit", "post-merge"] },
-        { runtime: "codex", relativePath: "hooks/codex.json", events: [] },
+      rootFiles: [
+        { name: ".claude-plugin", type: "dir" },
+        { name: "hooks", type: "dir" },
+        { name: "skills", type: "dir" },
+        { name: "README.md", type: "file" },
       ],
+      fileContent: { "README.md": "# body" },
     });
     renderPluginDetail("openrig-core");
     await waitFor(() => {
-      expect(screen.getByTestId("plugin-detail-tree-hooks-root")).toBeTruthy();
+      expect(screen.getByTestId("plugin-detail-tree-entry-README.md")).toBeTruthy();
     });
-    fireEvent.click(screen.getByTestId("plugin-detail-tree-hooks-root"));
-    await waitFor(() => {
-      expect(screen.getByTestId("plugin-detail-tree-hook:claude")).toBeTruthy();
-    });
-    fireEvent.click(screen.getByTestId("plugin-detail-tree-hook:claude"));
-    await waitFor(() => {
-      expect(screen.getByTestId("plugin-viewer-hook-claude")).toBeTruthy();
-    });
-    expect(screen.getByTestId("plugin-viewer-hook-claude").textContent).toContain("pre-commit");
+    expect(screen.getByTestId("plugin-detail-tree-entry-skills")).toBeTruthy();
+    expect(screen.getByTestId("plugin-detail-tree-entry-hooks")).toBeTruthy();
+    expect(screen.getByTestId("plugin-detail-tree-entry-.claude-plugin")).toBeTruthy();
   });
 
-  it("MCP server tree renders only when servers are declared", async () => {
+  it("HG-6 README.md auto-selected on entry (content visible in viewer)", async () => {
     mockPluginDetail({
-      id: "openrig-core",
+      pluginId: "openrig-core",
       name: "openrig-core",
       version: "0.1.0",
       runtimes: ["claude"],
-      mcpServers: [{ runtime: "claude", name: "github", command: "github-mcp", transport: "stdio" }],
+      rootFiles: [{ name: "README.md", type: "file" }, { name: "LICENSE", type: "file" }],
+      fileContent: { "README.md": "# Canonical OpenRig plugin", "LICENSE": "MIT" },
     });
     renderPluginDetail("openrig-core");
     await waitFor(() => {
-      expect(screen.getByTestId("plugin-detail-tree-mcp-root")).toBeTruthy();
-    });
-    fireEvent.click(screen.getByTestId("plugin-detail-tree-mcp-root"));
-    await waitFor(() => {
-      expect(screen.getByTestId("plugin-detail-tree-mcp:claude:github")).toBeTruthy();
+      expect(screen.getByText(/Canonical OpenRig plugin/)).toBeTruthy();
     });
   });
 
-  it("MCP server tree ABSENT when no servers declared (no empty branch in tree)", async () => {
-    mockPluginDetail({ id: "openrig-core", name: "openrig-core", version: "0.1.0", runtimes: ["claude"] });
+  it("HG-8 folder navigation: clicking skills/ enters subfolder; child skill folders visible", async () => {
+    mockPluginDetail({
+      pluginId: "openrig-core",
+      name: "openrig-core",
+      version: "0.1.0",
+      runtimes: ["claude"],
+      rootFiles: [{ name: "skills", type: "dir" }],
+      subFolders: {
+        skills: [
+          { name: "openrig-user", type: "dir" },
+          { name: "openrig-architect", type: "dir" },
+        ],
+      },
+    });
+    renderPluginDetail("openrig-core");
+    await waitFor(() => {
+      expect(screen.getByTestId("plugin-detail-tree-entry-skills")).toBeTruthy();
+    });
+    fireEvent.click(screen.getByTestId("plugin-detail-tree-entry-skills"));
+    await waitFor(() => {
+      expect(screen.getByTestId("plugin-detail-tree-entry-skills/openrig-user")).toBeTruthy();
+    });
+    expect(screen.getByTestId("plugin-detail-tree-entry-skills/openrig-architect")).toBeTruthy();
+    expect(screen.getByTestId("plugin-detail-tree-up")).toBeTruthy();
+  });
+
+  it("HG-8 folder navigation: nested file content visible (skills/openrig-user/SKILL.md)", async () => {
+    mockPluginDetail({
+      pluginId: "openrig-core",
+      name: "openrig-core",
+      version: "0.1.0",
+      runtimes: ["claude"],
+      rootFiles: [{ name: "skills", type: "dir" }],
+      subFolders: {
+        skills: [{ name: "openrig-user", type: "dir" }],
+        "skills/openrig-user": [{ name: "SKILL.md", type: "file" }],
+      },
+      fileContent: { "skills/openrig-user/SKILL.md": "# OpenRig User skill body" },
+    });
+    renderPluginDetail("openrig-core");
+    await waitFor(() => {
+      expect(screen.getByTestId("plugin-detail-tree-entry-skills")).toBeTruthy();
+    });
+    fireEvent.click(screen.getByTestId("plugin-detail-tree-entry-skills"));
+    await waitFor(() => {
+      expect(screen.getByTestId("plugin-detail-tree-entry-skills/openrig-user")).toBeTruthy();
+    });
+    fireEvent.click(screen.getByTestId("plugin-detail-tree-entry-skills/openrig-user"));
+    await waitFor(() => {
+      expect(screen.getByTestId("plugin-detail-tree-entry-skills/openrig-user/SKILL.md")).toBeTruthy();
+    });
+    fireEvent.click(screen.getByTestId("plugin-detail-tree-entry-skills/openrig-user/SKILL.md"));
+    await waitFor(() => {
+      expect(screen.getByText(/OpenRig User skill body/)).toBeTruthy();
+    });
+  });
+
+  it("DISCRIMINATOR: virtual-tree testids from pre-C2 shell ABSENT", async () => {
+    mockPluginDetail({
+      pluginId: "openrig-core",
+      name: "openrig-core",
+      version: "0.1.0",
+      runtimes: ["claude"],
+      rootFiles: [{ name: "README.md", type: "file" }],
+      fileContent: { "README.md": "doc" },
+    });
     renderPluginDetail("openrig-core");
     await waitFor(() => {
       expect(screen.getByTestId("plugin-detail-tree")).toBeTruthy();
     });
-    expect(screen.queryByTestId("plugin-detail-tree-mcp-root")).toBeNull();
-  });
-
-  it("DISCRIMINATOR: pre-slice-28 grid-section testids ABSENT", async () => {
-    mockPluginDetail({ id: "openrig-core", name: "openrig-core", version: "0.1.0", runtimes: ["claude"] });
-    renderPluginDetail("openrig-core");
-    await waitFor(() => {
-      expect(screen.getByTestId("plugin-detail-docs-browser")).toBeTruthy();
-    });
-    // Pre-slice-28 had separate section cards laid out in a grid; those testids are gone
-    expect(screen.queryByTestId("plugin-detail-manifest")).toBeNull();
-    expect(screen.queryByTestId("plugin-detail-skills")).toBeNull();
-    expect(screen.queryByTestId("plugin-detail-hooks")).toBeNull();
-    expect(screen.queryByTestId("plugin-detail-used-by")).toBeNull();
-    expect(screen.queryByTestId("plugin-detail-mcp-servers")).toBeNull();
+    // The virtual-tree shape from the pre-C2 (HG-6 SHELL) approach used
+    // these testids; the real-file-tree replaces them.
+    expect(screen.queryByTestId("plugin-detail-tree-manifest")).toBeNull();
+    expect(screen.queryByTestId("plugin-detail-tree-skills-root")).toBeNull();
+    expect(screen.queryByTestId("plugin-detail-tree-hooks-root")).toBeNull();
+    expect(screen.queryByTestId("plugin-detail-tree-used-by")).toBeNull();
   });
 });

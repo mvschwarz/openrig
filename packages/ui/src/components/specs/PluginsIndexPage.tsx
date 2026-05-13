@@ -62,6 +62,9 @@ export function PluginsIndexPage() {
                       </span>
                     ))}
                   </span>
+                  <span data-testid={`plugins-index-row-${plugin.id}-skillcount`}>
+                    {plugin.skillCount} {plugin.skillCount === 1 ? "skill" : "skills"}
+                  </span>
                   <span data-testid={`plugins-index-row-${plugin.id}-source`}>
                     {plugin.sourceLabel}
                   </span>

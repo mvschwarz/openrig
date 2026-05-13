@@ -145,7 +145,7 @@ describe("SkillsIndexPage — slice 28 HG-9 (rolled-up flat rows)", () => {
 });
 
 describe("PluginsIndexPage — slice 28 HG-10 (rolled-up flat rows)", () => {
-  function mockPluginsFetch(plugins: Array<{ id: string; name: string; version: string; runtimes: ("claude" | "codex")[]; source?: string; sourceLabel?: string }>) {
+  function mockPluginsFetch(plugins: Array<{ id: string; name: string; version: string; runtimes: ("claude" | "codex")[]; source?: string; sourceLabel?: string; skillCount?: number }>) {
     mockFetch.mockImplementation(async (url: string) => {
       if (url === "/api/plugins") {
         return {
@@ -161,6 +161,7 @@ describe("PluginsIndexPage — slice 28 HG-10 (rolled-up flat rows)", () => {
               runtimes: p.runtimes,
               path: `/plugins/${p.id}`,
               lastSeenAt: null,
+              skillCount: p.skillCount ?? 0,
             })),
         };
       }
@@ -192,7 +193,7 @@ describe("PluginsIndexPage — slice 28 HG-10 (rolled-up flat rows)", () => {
     expect(row.getAttribute("href")).toBe("/plugins/openrig-core");
   });
 
-  it("each row includes version + runtimes + source columns", async () => {
+  it("each row includes version + runtimes + skill-count + source columns (HG-10)", async () => {
     mockPluginsFetch([
       {
         id: "openrig-core",
@@ -201,6 +202,7 @@ describe("PluginsIndexPage — slice 28 HG-10 (rolled-up flat rows)", () => {
         runtimes: ["claude", "codex"],
         source: "vendored",
         sourceLabel: "vendored:openrig-core",
+        skillCount: 5,
       },
     ]);
     renderPluginsIndex();
@@ -211,7 +213,21 @@ describe("PluginsIndexPage — slice 28 HG-10 (rolled-up flat rows)", () => {
     const runtimesEl = screen.getByTestId("plugins-index-row-openrig-core-runtimes");
     expect(runtimesEl.textContent).toContain("claude");
     expect(runtimesEl.textContent).toContain("codex");
+    expect(screen.getByTestId("plugins-index-row-openrig-core-skillcount").textContent).toBe("5 skills");
     expect(screen.getByTestId("plugins-index-row-openrig-core-source").textContent).toContain("vendored");
+  });
+
+  it("HG-10 skill-count column singular/plural pluralization", async () => {
+    mockPluginsFetch([
+      { id: "single", name: "single", version: "1.0.0", runtimes: ["claude"], skillCount: 1 },
+      { id: "zero", name: "zero", version: "1.0.0", runtimes: ["claude"], skillCount: 0 },
+    ]);
+    renderPluginsIndex();
+    await waitFor(() => {
+      expect(screen.getByTestId("plugins-index-row-single-skillcount")).toBeTruthy();
+    });
+    expect(screen.getByTestId("plugins-index-row-single-skillcount").textContent).toBe("1 skill");
+    expect(screen.getByTestId("plugins-index-row-zero-skillcount").textContent).toBe("0 skills");
   });
 
   it("DISCRIMINATOR: legacy LibraryTopLevelEntry testids ABSENT in DOM", async () => {

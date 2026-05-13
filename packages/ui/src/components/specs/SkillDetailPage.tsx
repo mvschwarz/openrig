@@ -1,18 +1,44 @@
-import { Link } from "@tanstack/react-router";
+import { useEffect, useMemo, useState } from "react";
 import { EmptyState } from "../ui/empty-state.js";
 import { SectionHeader } from "../ui/section-header.js";
-import { ToolMark } from "../graphics/RuntimeMark.js";
-import { FileViewer } from "../drawer-viewers/FileViewer.js";
-import { useLibrarySkills, type LibrarySkillFile } from "../../hooks/useLibrarySkills.js";
+import { MarkdownViewer } from "../markdown/MarkdownViewer.js";
+import { SyntaxHighlight } from "../markdown/SyntaxHighlight.js";
+import { useLibrarySkills, type LibrarySkillEntry } from "../../hooks/useLibrarySkills.js";
+import { useFilesList, useFilesRead, type FileEntry } from "../../hooks/useFiles.js";
 import {
   librarySkillFilePathFromToken,
-  librarySkillFileToken,
   librarySkillIdFromToken,
-  librarySkillToken,
 } from "../../lib/library-skills-routing.js";
 
-function preferredSkillFile(files: LibrarySkillFile[]): LibrarySkillFile | null {
-  return files.find((file) => file.name.toLowerCase() === "skill.md") ?? files[0] ?? null;
+const TEXT_LIKE_EXTENSIONS = new Set([
+  ".md", ".mdx", ".txt", ".log",
+  ".yaml", ".yml", ".json",
+  ".js", ".jsx", ".ts", ".tsx",
+  ".py", ".sh", ".bash",
+  ".css", ".html",
+]);
+
+function pathExtension(p: string): string {
+  const idx = p.lastIndexOf(".");
+  if (idx === -1) return "";
+  return p.slice(idx).toLowerCase();
+}
+
+function parentPath(p: string): string {
+  const idx = p.lastIndexOf("/");
+  return idx === -1 ? "" : p.slice(0, idx);
+}
+
+function joinPath(parent: string, child: string): string {
+  return parent ? `${parent}/${child}` : child;
+}
+
+// Auto-selection on entry: SKILL.md if present at the skill root. The
+// fileToken route param wins over this default if provided.
+function pickDefaultRootFile(entries: FileEntry[]): string | null {
+  const skillMd = entries.find((e) => e.type === "file" && /^skill\.md$/i.test(e.name));
+  if (skillMd) return skillMd.name;
+  return null;
 }
 
 export function SkillDetailPage({
@@ -24,12 +50,49 @@ export function SkillDetailPage({
 }) {
   const { data: skills = [], isLoading } = useLibrarySkills();
   const skillId = librarySkillIdFromToken(skillToken);
-  const requestedFilePath = fileToken ? librarySkillFilePathFromToken(fileToken) : null;
   const skill = skillId ? skills.find((entry) => entry.id === skillId) ?? null : null;
-  const defaultFile = skill ? preferredSkillFile(skill.files) : null;
-  const selectedFile = skill
-    ? skill.files.find((file) => file.path === requestedFilePath) ?? (requestedFilePath ? null : defaultFile)
-    : null;
+
+  // Relative path within the skill folder. Empty string = skill root.
+  // Resolved from the fileToken (when provided) once useLibrarySkills
+  // surfaces the skill — useEffect, not useState init, because the
+  // skill data is async.
+  const [currentPath, setCurrentPath] = useState<string>("");
+  const [selectedFile, setSelectedFile] = useState<string | null>(null);
+  const [defaultPicked, setDefaultPicked] = useState(false);
+
+  // Resolve fileToken into currentPath + selectedFile once the skill is
+  // available. Runs once per token change.
+  useEffect(() => {
+    if (!fileToken || !skill) return;
+    const requestedFilePath = librarySkillFilePathFromToken(fileToken);
+    if (!requestedFilePath) return;
+    const prefix = `${skill.directoryPath}/`;
+    if (!requestedFilePath.startsWith(prefix)) return;
+    const rel = requestedFilePath.slice(prefix.length);
+    setCurrentPath(parentPath(rel));
+    setSelectedFile(rel);
+    setDefaultPicked(true);
+  }, [fileToken, skill]);
+
+  // Build the daemon /api/files path = <skill directoryPath>/<currentPath>
+  // The skill is rooted at an allowlist root (skill.root) so we reuse the
+  // generic /api/files surface that the existing FilesWorkspace + slice
+  // 18 code path already uses.
+  const listPath = useMemo(() => {
+    if (!skill) return null;
+    return currentPath ? `${skill.directoryPath}/${currentPath}` : skill.directoryPath;
+  }, [skill, currentPath]);
+  const list = useFilesList(skill?.root ?? null, listPath);
+
+  // Auto-select SKILL.md at the skill root on first load (when no fileToken).
+  useEffect(() => {
+    if (defaultPicked) return;
+    if (currentPath !== "") return;
+    if (!list.data) return;
+    const pick = pickDefaultRootFile(list.data.entries);
+    if (pick) setSelectedFile(pick);
+    setDefaultPicked(true);
+  }, [list.data, currentPath, defaultPicked]);
 
   if (isLoading) {
     return (
@@ -86,34 +149,62 @@ export function SkillDetailPage({
           data-testid="skill-detail-tree"
           className="w-full max-h-48 shrink-0 overflow-y-auto border-b border-outline-variant bg-white/30 sm:w-64 sm:max-h-none sm:border-b-0 sm:border-r"
         >
-          <div className="border-b border-outline-variant px-3 py-2 font-mono text-[10px] uppercase tracking-[0.18em] text-stone-500">
-            Files
-          </div>
-          {skill.files.length === 0 ? (
+          <Breadcrumbs
+            testId="skill-detail-breadcrumbs"
+            skillName={skill.name}
+            path={currentPath}
+            onNavigate={(rel) => { setCurrentPath(rel); setSelectedFile(null); }}
+          />
+          {list.isLoading ? (
+            <div data-testid="skill-detail-tree-loading" className="p-3 font-mono text-[10px] text-stone-400">
+              Loading…
+            </div>
+          ) : list.isError ? (
+            <div data-testid="skill-detail-tree-error" className="p-3 font-mono text-[10px] text-red-600">
+              {(list.error as Error)?.message ?? "Error loading directory."}
+            </div>
+          ) : !list.data || list.data.entries.length === 0 ? (
             <div data-testid="skill-detail-tree-empty" className="p-3 font-mono text-[10px] text-stone-400">
-              No files in this skill folder.
+              Empty directory.
             </div>
           ) : (
             <ul className="p-1">
-              {skill.files.map((file) => {
-                const isActive = selectedFile?.path === file.path;
+              {currentPath && (
+                <li>
+                  <button
+                    type="button"
+                    data-testid="skill-detail-tree-up"
+                    onClick={() => { setCurrentPath(parentPath(currentPath)); setSelectedFile(null); }}
+                    className="block w-full px-2 py-1 text-left font-mono text-[10px] text-stone-500 hover:bg-stone-100"
+                  >
+                    ..
+                  </button>
+                </li>
+              )}
+              {list.data.entries.map((fileEntry) => {
+                const rel = joinPath(currentPath, fileEntry.name);
+                const isFile = fileEntry.type === "file";
+                const isSelected = selectedFile === rel;
                 return (
-                  <li key={file.path}>
-                    <Link
-                      to="/specs/skills/$skillToken/file/$fileToken"
-                      params={{
-                        skillToken: librarySkillToken(skill.id),
-                        fileToken: librarySkillFileToken(file.path),
+                  <li key={rel}>
+                    <button
+                      type="button"
+                      data-testid={`skill-detail-tree-entry-${rel}`}
+                      data-type={fileEntry.type}
+                      data-active={isSelected}
+                      onClick={() => {
+                        if (isFile) setSelectedFile(rel);
+                        else if (fileEntry.type === "dir") { setCurrentPath(rel); setSelectedFile(null); }
                       }}
-                      data-testid={`skill-detail-tree-file-${file.name}`}
-                      data-active={isActive}
-                      className={`flex w-full items-center gap-1.5 px-2 py-1 text-left font-mono text-[10px] hover:bg-stone-100 ${
-                        isActive ? "bg-stone-200/80 text-stone-900" : "text-stone-700"
+                      disabled={fileEntry.type === "other"}
+                      className={`block w-full px-2 py-1 text-left font-mono text-[10px] ${
+                        fileEntry.type === "other"
+                          ? "text-stone-400"
+                          : `hover:bg-stone-100 ${isSelected ? "bg-stone-200/80 text-stone-900" : "text-stone-700"}`
                       }`}
                     >
-                      <ToolMark tool={file.name} size="xs" title={file.name} decorative />
-                      <span className="truncate">{file.name}</span>
-                    </Link>
+                      {fileEntry.type === "dir" ? `▸ ${fileEntry.name}` : fileEntry.name}
+                    </button>
                   </li>
                 );
               })}
@@ -123,27 +214,106 @@ export function SkillDetailPage({
 
         <main data-testid="skill-detail-viewer" className="flex-1 min-w-0 overflow-y-auto bg-white">
           {!selectedFile ? (
-            <div data-testid="skill-detail-file-missing" className="p-4">
-              <EmptyState
-                label={requestedFilePath ? "FILE NOT FOUND" : "SKILL.md NOT FOUND"}
-                description={
-                  requestedFilePath
-                    ? "That file is not present in this skill folder."
-                    : "This skill does not include a SKILL.md file. Pick another file from the tree."
-                }
-                variant="card"
-                testId="skill-detail-file-missing-empty-state"
-              />
+            <div data-testid="skill-detail-viewer-no-selection" className="p-4 font-mono text-[10px] text-stone-400">
+              Select a file from the tree.
             </div>
           ) : (
-            <FileViewer
-              path={`${skill.name}/${selectedFile.name}`}
+            <SkillFileContent
               root={skill.root}
-              readPath={selectedFile.path}
-              kind="markdown"
+              path={`${skill.directoryPath}/${selectedFile}`}
+              displayPath={selectedFile}
             />
           )}
         </main>
+      </div>
+    </div>
+  );
+}
+
+function Breadcrumbs({
+  testId,
+  skillName,
+  path,
+  onNavigate,
+}: {
+  testId: string;
+  skillName: string;
+  path: string;
+  onNavigate: (path: string) => void;
+}) {
+  const segments = path ? path.split("/") : [];
+  return (
+    <nav data-testid={testId} className="flex flex-wrap items-baseline gap-1 border-b border-outline-variant px-2 py-1 font-mono text-[10px] text-stone-700">
+      <button type="button" onClick={() => onNavigate("")} className="font-bold hover:underline">
+        {skillName}
+      </button>
+      {segments.map((seg, idx) => {
+        const accumulated = segments.slice(0, idx + 1).join("/");
+        return (
+          <span key={accumulated}>
+            <span className="mx-0.5 text-stone-400">/</span>
+            <button type="button" onClick={() => onNavigate(accumulated)} className="hover:underline">
+              {seg}
+            </button>
+          </span>
+        );
+      })}
+    </nav>
+  );
+}
+
+function SkillFileContent({ root, path, displayPath }: { root: string; path: string; displayPath: string }) {
+  const read = useFilesRead(root, path);
+  const ext = useMemo(() => pathExtension(path), [path]);
+
+  if (read.isLoading) {
+    return (
+      <div data-testid="skill-detail-viewer-loading" className="p-4 font-mono text-[10px] text-stone-400">
+        Loading…
+      </div>
+    );
+  }
+  if (read.isError) {
+    return (
+      <div data-testid="skill-detail-viewer-error" className="p-4 font-mono text-[10px] text-red-600">
+        {(read.error as Error)?.message ?? "Error loading file."}
+      </div>
+    );
+  }
+  if (!read.data) return null;
+
+  return (
+    <div data-testid="skill-detail-viewer-content" className="flex h-full flex-col">
+      <header className="flex items-baseline justify-between border-b border-outline-variant bg-white/30 px-3 py-2 font-mono text-[10px]">
+        <div data-testid="skill-detail-viewer-path" className="text-stone-700">{displayPath}</div>
+        <div className="flex items-baseline gap-3 text-stone-500">
+          <span>{read.data.size}b</span>
+          <span>{read.data.mtime}</span>
+        </div>
+      </header>
+      <div className="flex-1 min-h-0 overflow-y-auto">
+        {read.data.truncated && (
+          <div
+            data-testid="skill-detail-viewer-truncated"
+            className="mb-3 mx-4 mt-4 border border-amber-400 bg-amber-50 px-3 py-2 font-mono text-[10px] text-amber-900"
+          >
+            ⚠ Truncated at {Math.round((read.data.truncatedAtBytes ?? 0) / 1024)} KB — file is{" "}
+            {Math.round((read.data.totalBytes ?? read.data.size) / 1024)} KB total.
+          </div>
+        )}
+        {ext === ".md" || ext === ".mdx" ? (
+          <div className="p-4">
+            <MarkdownViewer content={read.data.content} />
+          </div>
+        ) : TEXT_LIKE_EXTENSIONS.has(ext) ? (
+          <div className="p-4">
+            <SyntaxHighlight code={read.data.content} language={ext.slice(1)} />
+          </div>
+        ) : (
+          <pre data-testid="skill-detail-viewer-text-fallback" className="p-4 whitespace-pre-wrap break-words font-mono text-[10px] text-stone-800">
+            {read.data.content}
+          </pre>
+        )}
       </div>
     </div>
   );

@@ -1,31 +1,72 @@
-import { useMemo, useState } from "react";
-import { Link } from "@tanstack/react-router";
+import { useEffect, useMemo, useState } from "react";
 import { EmptyState } from "../ui/empty-state.js";
 import { SectionHeader } from "../ui/section-header.js";
-import { ToolMark } from "../graphics/RuntimeMark.js";
+import { MarkdownViewer } from "../markdown/MarkdownViewer.js";
+import { SyntaxHighlight } from "../markdown/SyntaxHighlight.js";
 import { usePlugin, usePluginUsedBy } from "../../hooks/usePlugins.js";
+import { usePluginFilesList, usePluginFilesRead } from "../../hooks/usePluginFiles.js";
+import type { FileEntry } from "../../hooks/useFiles.js";
 
 interface PluginDetailPageProps {
   pluginId: string;
 }
 
-// Virtual tree node tokens. Each token maps to a viewer panel; the
-// docs-browser shell drives selection by token. Skills sub-tokens follow
-// the shape `skill:<name>` so each skill row is its own selectable entry.
-type NodeToken =
-  | "manifest"
-  | "skills-root"
-  | `skill:${string}`
-  | "hooks-root"
-  | `hook:${string}`
-  | "mcp-root"
-  | `mcp:${string}`
-  | "used-by";
+const TEXT_LIKE_EXTENSIONS = new Set([
+  ".md", ".mdx", ".txt", ".log",
+  ".yaml", ".yml", ".json",
+  ".js", ".jsx", ".ts", ".tsx",
+  ".py", ".sh", ".bash",
+  ".css", ".html",
+]);
+
+function pathExtension(p: string): string {
+  const idx = p.lastIndexOf(".");
+  if (idx === -1) return "";
+  return p.slice(idx).toLowerCase();
+}
+
+function parentPath(p: string): string {
+  const idx = p.lastIndexOf("/");
+  return idx === -1 ? "" : p.slice(0, idx);
+}
+
+function joinPath(parent: string, child: string): string {
+  return parent ? `${parent}/${child}` : child;
+}
+
+function isMarkdownFile(name: string): boolean {
+  const ext = pathExtension(name);
+  return ext === ".md" || ext === ".mdx";
+}
+
+// Auto-selection priority for the root-level default file: README.md
+// at the plugin root if present. Falls back to any other markdown,
+// then nothing.
+function pickDefaultRootFile(entries: FileEntry[]): string | null {
+  const readme = entries.find((e) => e.type === "file" && /^readme\.(md|mdx)$/i.test(e.name));
+  if (readme) return readme.name;
+  const anyMd = entries.find((e) => e.type === "file" && isMarkdownFile(e.name));
+  if (anyMd) return anyMd.name;
+  return null;
+}
 
 export function PluginDetailPage({ pluginId }: PluginDetailPageProps) {
   const { data: detail, isLoading: detailLoading, error: detailError } = usePlugin(pluginId);
-  const { data: usedBy = [], isLoading: usedByLoading } = usePluginUsedBy(pluginId);
-  const [selected, setSelected] = useState<NodeToken>("manifest");
+  const { data: usedBy = [] } = usePluginUsedBy(pluginId);
+  const [currentPath, setCurrentPath] = useState<string>("");
+  const [selectedFile, setSelectedFile] = useState<string | null>(null);
+  const [defaultPicked, setDefaultPicked] = useState(false);
+  const list = usePluginFilesList(pluginId, currentPath);
+
+  // Auto-select README.md (or any markdown) at the plugin root on first load.
+  useEffect(() => {
+    if (defaultPicked) return;
+    if (currentPath !== "") return;
+    if (!list.data) return;
+    const pick = pickDefaultRootFile(list.data.entries);
+    if (pick) setSelectedFile(pick);
+    setDefaultPicked(true);
+  }, [list.data, currentPath, defaultPicked]);
 
   if (detailLoading) {
     return (
@@ -54,6 +95,8 @@ export function PluginDetailPage({ pluginId }: PluginDetailPageProps) {
   }
 
   const entry = detail.entry;
+  const skillCount = entry.skillCount;
+  const usedByCount = usedBy.length;
 
   return (
     <div
@@ -82,6 +125,18 @@ export function PluginDetailPage({ pluginId }: PluginDetailPageProps) {
           >
             {entry.sourceLabel}
           </span>
+          <span
+            data-testid="plugin-detail-skill-count"
+            className="font-mono text-[10px] uppercase tracking-[0.12em] text-stone-500"
+          >
+            {skillCount} {skillCount === 1 ? "skill" : "skills"}
+          </span>
+          <span
+            data-testid="plugin-detail-used-by-count"
+            className="font-mono text-[10px] uppercase tracking-[0.12em] text-stone-500"
+          >
+            used by {usedByCount} {usedByCount === 1 ? "agent" : "agents"}
+          </span>
         </div>
         {entry.description && (
           <p className="mt-2 max-w-3xl text-sm text-stone-600">{entry.description}</p>
@@ -96,403 +151,168 @@ export function PluginDetailPage({ pluginId }: PluginDetailPageProps) {
           data-testid="plugin-detail-tree"
           className="w-full max-h-64 shrink-0 overflow-y-auto border-b border-outline-variant bg-white/30 sm:w-72 sm:max-h-none sm:border-b-0 sm:border-r"
         >
-          <PluginTree detail={detail} selected={selected} onSelect={setSelected} usedByCount={usedBy.length} />
-        </aside>
-        <main data-testid="plugin-detail-viewer" className="flex-1 min-w-0 overflow-y-auto bg-white">
-          <PluginViewer
-            detail={detail}
-            selected={selected}
-            usedBy={usedBy}
-            usedByLoading={usedByLoading}
+          <Breadcrumbs
+            testId="plugin-detail-breadcrumbs"
+            pluginName={entry.name}
+            path={currentPath}
+            onNavigate={(rel) => { setCurrentPath(rel); setSelectedFile(null); }}
           />
+          {list.isLoading ? (
+            <div data-testid="plugin-detail-tree-loading" className="p-3 font-mono text-[10px] text-stone-400">
+              Loading…
+            </div>
+          ) : list.isError ? (
+            <div data-testid="plugin-detail-tree-error" className="p-3 font-mono text-[10px] text-red-600">
+              {(list.error as Error)?.message ?? "Error loading directory."}
+            </div>
+          ) : !list.data || list.data.entries.length === 0 ? (
+            <div data-testid="plugin-detail-tree-empty" className="p-3 font-mono text-[10px] text-stone-400">
+              Empty directory.
+            </div>
+          ) : (
+            <ul className="p-1">
+              {currentPath && (
+                <li>
+                  <button
+                    type="button"
+                    data-testid="plugin-detail-tree-up"
+                    onClick={() => { setCurrentPath(parentPath(currentPath)); setSelectedFile(null); }}
+                    className="block w-full px-2 py-1 text-left font-mono text-[10px] text-stone-500 hover:bg-stone-100"
+                  >
+                    ..
+                  </button>
+                </li>
+              )}
+              {list.data.entries.map((fileEntry) => {
+                const rel = joinPath(currentPath, fileEntry.name);
+                const isFile = fileEntry.type === "file";
+                const isSelected = selectedFile === rel;
+                return (
+                  <li key={rel}>
+                    <button
+                      type="button"
+                      data-testid={`plugin-detail-tree-entry-${rel}`}
+                      data-type={fileEntry.type}
+                      data-active={isSelected}
+                      onClick={() => {
+                        if (isFile) setSelectedFile(rel);
+                        else if (fileEntry.type === "dir") { setCurrentPath(rel); setSelectedFile(null); }
+                      }}
+                      disabled={fileEntry.type === "other"}
+                      className={`block w-full px-2 py-1 text-left font-mono text-[10px] ${
+                        fileEntry.type === "other"
+                          ? "text-stone-400"
+                          : `hover:bg-stone-100 ${isSelected ? "bg-stone-200/80 text-stone-900" : "text-stone-700"}`
+                      }`}
+                    >
+                      {fileEntry.type === "dir" ? `▸ ${fileEntry.name}` : fileEntry.name}
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </aside>
+
+        <main data-testid="plugin-detail-viewer" className="flex-1 min-w-0 overflow-y-auto bg-white">
+          {!selectedFile ? (
+            <div data-testid="plugin-detail-viewer-no-selection" className="p-4 font-mono text-[10px] text-stone-400">
+              Select a file from the tree.
+            </div>
+          ) : (
+            <PluginFileContent pluginId={pluginId} path={selectedFile} />
+          )}
         </main>
       </div>
     </div>
   );
 }
 
-function PluginTree({
-  detail,
-  selected,
-  onSelect,
-  usedByCount,
+function Breadcrumbs({
+  testId,
+  pluginName,
+  path,
+  onNavigate,
 }: {
-  detail: NonNullable<ReturnType<typeof usePlugin>["data"]>;
-  selected: NodeToken;
-  onSelect: (token: NodeToken) => void;
-  usedByCount: number;
+  testId: string;
+  pluginName: string;
+  path: string;
+  onNavigate: (path: string) => void;
 }) {
-  const skills = detail.skills;
-  const hooks = detail.hooks;
-  const mcpServers = detail.mcpServers;
-  const skillsOpen = useMemo(() => selected === "skills-root" || selected.startsWith("skill:"), [selected]);
-  const hooksOpen = useMemo(() => selected === "hooks-root" || selected.startsWith("hook:"), [selected]);
-  const mcpOpen = useMemo(() => selected === "mcp-root" || selected.startsWith("mcp:"), [selected]);
-
+  const segments = path ? path.split("/") : [];
   return (
-    <ul className="p-1 font-mono text-[10px]">
-      <TreeRow
-        token="manifest"
-        label="manifest"
-        selected={selected}
-        onSelect={onSelect}
-        meta={detail.claudeManifest || detail.codexManifest ? null : "(none)"}
-      />
-      <TreeRow
-        token="skills-root"
-        label="skills/"
-        selected={selected}
-        onSelect={onSelect}
-        meta={`${skills.length}`}
-        expanded={skillsOpen}
-      />
-      {skillsOpen && skills.length > 0 && (
-        <ul className="ml-4 border-l border-outline-variant">
-          {skills.map((skill) => (
-            <TreeRow
-              key={`skill:${skill.name}`}
-              token={`skill:${skill.name}`}
-              label={skill.name}
-              selected={selected}
-              onSelect={onSelect}
-              indent
-              meta={null}
-            />
-          ))}
-        </ul>
-      )}
-      <TreeRow
-        token="hooks-root"
-        label="hooks/"
-        selected={selected}
-        onSelect={onSelect}
-        meta={`${hooks.length}`}
-        expanded={hooksOpen}
-      />
-      {hooksOpen && hooks.length > 0 && (
-        <ul className="ml-4 border-l border-outline-variant">
-          {hooks.map((hook) => (
-            <TreeRow
-              key={`hook:${hook.runtime}`}
-              token={`hook:${hook.runtime}`}
-              label={hook.runtime}
-              selected={selected}
-              onSelect={onSelect}
-              indent
-              meta={null}
-            />
-          ))}
-        </ul>
-      )}
-      {mcpServers.length > 0 && (
-        <>
-          <TreeRow
-            token="mcp-root"
-            label="mcp servers"
-            selected={selected}
-            onSelect={onSelect}
-            meta={`${mcpServers.length}`}
-            expanded={mcpOpen}
-          />
-          {mcpOpen && (
-            <ul className="ml-4 border-l border-outline-variant">
-              {mcpServers.map((server) => (
-                <TreeRow
-                  key={`mcp:${server.runtime}:${server.name}`}
-                  token={`mcp:${server.runtime}:${server.name}`}
-                  label={`${server.runtime}/${server.name}`}
-                  selected={selected}
-                  onSelect={onSelect}
-                  indent
-                  meta={null}
-                />
-              ))}
-            </ul>
-          )}
-        </>
-      )}
-      <TreeRow
-        token="used-by"
-        label="used by"
-        selected={selected}
-        onSelect={onSelect}
-        meta={`${usedByCount}`}
-      />
-    </ul>
-  );
-}
-
-function TreeRow({
-  token,
-  label,
-  selected,
-  onSelect,
-  meta,
-  indent,
-  expanded,
-}: {
-  token: NodeToken;
-  label: string;
-  selected: NodeToken;
-  onSelect: (token: NodeToken) => void;
-  meta?: string | null;
-  indent?: boolean;
-  expanded?: boolean;
-}) {
-  const isSelected = selected === token;
-  return (
-    <li>
-      <button
-        type="button"
-        data-testid={`plugin-detail-tree-${token}`}
-        data-active={isSelected}
-        data-expanded={expanded ?? false}
-        onClick={() => onSelect(token)}
-        className={`flex w-full items-center justify-between gap-2 px-2 py-1 text-left hover:bg-stone-100 ${
-          isSelected ? "bg-stone-200/80 text-stone-900" : "text-stone-700"
-        } ${indent ? "pl-3" : ""}`}
-      >
-        <span className="flex min-w-0 items-center gap-1.5 truncate">
-          <ToolMark tool={label} size="xs" title={label} decorative />
-          <span className="truncate">{label}</span>
-        </span>
-        {meta && (
-          <span className="font-mono text-[9px] uppercase tracking-[0.10em] text-stone-500">{meta}</span>
-        )}
+    <nav data-testid={testId} className="flex flex-wrap items-baseline gap-1 border-b border-outline-variant px-2 py-1 font-mono text-[10px] text-stone-700">
+      <button type="button" onClick={() => onNavigate("")} className="font-bold hover:underline">
+        {pluginName}
       </button>
-    </li>
+      {segments.map((seg, idx) => {
+        const accumulated = segments.slice(0, idx + 1).join("/");
+        return (
+          <span key={accumulated}>
+            <span className="mx-0.5 text-stone-400">/</span>
+            <button type="button" onClick={() => onNavigate(accumulated)} className="hover:underline">
+              {seg}
+            </button>
+          </span>
+        );
+      })}
+    </nav>
   );
 }
 
-function PluginViewer({
-  detail,
-  selected,
-  usedBy,
-  usedByLoading,
-}: {
-  detail: NonNullable<ReturnType<typeof usePlugin>["data"]>;
-  selected: NodeToken;
-  usedBy: { agentName: string; sourcePath: string; profiles: string[] }[];
-  usedByLoading: boolean;
-}) {
-  if (selected === "manifest") return <ManifestPanel detail={detail} />;
-  if (selected === "skills-root") return <SkillsRootPanel detail={detail} />;
-  if (selected.startsWith("skill:")) return <SkillPanel detail={detail} skillName={selected.slice("skill:".length)} />;
-  if (selected === "hooks-root") return <HooksRootPanel detail={detail} />;
-  if (selected.startsWith("hook:")) return <HookPanel detail={detail} runtime={selected.slice("hook:".length)} />;
-  if (selected === "mcp-root") return <McpRootPanel detail={detail} />;
-  if (selected.startsWith("mcp:")) {
-    const [runtime = "", ...nameParts] = selected.slice("mcp:".length).split(":");
-    return <McpServerPanel detail={detail} runtime={runtime} name={nameParts.join(":")} />;
-  }
-  if (selected === "used-by") return <UsedByPanel usedBy={usedBy} isLoading={usedByLoading} />;
-  return null;
-}
+function PluginFileContent({ pluginId, path }: { pluginId: string; path: string }) {
+  const read = usePluginFilesRead(pluginId, path);
+  const ext = useMemo(() => pathExtension(path), [path]);
 
-function ManifestPanel({ detail }: { detail: NonNullable<ReturnType<typeof usePlugin>["data"]> }) {
-  return (
-    <section data-testid="plugin-viewer-manifest" className="p-4">
-      <SectionHeader tone="default">Manifest</SectionHeader>
-      <dl className="mt-3 grid grid-cols-[7rem_1fr] gap-x-3 gap-y-1 font-mono text-[11px]">
-        <ManifestRow label="claude" value={detail.claudeManifest ? `${detail.claudeManifest.name ?? "—"} v${detail.claudeManifest.version ?? "—"}` : "(not declared)"} />
-        <ManifestRow label="codex" value={detail.codexManifest ? `${detail.codexManifest.name ?? "—"} v${detail.codexManifest.version ?? "—"}` : "(not declared)"} />
-        {detail.claudeManifest?.homepage && <ManifestRow label="homepage" value={detail.claudeManifest.homepage} />}
-        {detail.claudeManifest?.repository && <ManifestRow label="repository" value={detail.claudeManifest.repository} />}
-        {detail.claudeManifest?.license && <ManifestRow label="license" value={detail.claudeManifest.license} />}
-        {detail.entry.lastSeenAt && <ManifestRow label="last seen" value={detail.entry.lastSeenAt} />}
-      </dl>
-    </section>
-  );
-}
-
-function ManifestRow({ label, value }: { label: string; value: string }) {
-  return (
-    <>
-      <dt className="font-mono text-[10px] uppercase tracking-[0.10em] text-stone-500">{label}</dt>
-      <dd className="font-mono text-[11px] text-stone-900">{value}</dd>
-    </>
-  );
-}
-
-function SkillsRootPanel({ detail }: { detail: NonNullable<ReturnType<typeof usePlugin>["data"]> }) {
-  return (
-    <section data-testid="plugin-viewer-skills-root" className="p-4">
-      <SectionHeader tone="default">Skills</SectionHeader>
-      <p className="mt-2 text-sm text-stone-600">
-        {detail.skills.length === 0
-          ? "This plugin does not ship any skills under its skills/ folder."
-          : `This plugin ships ${detail.skills.length} ${detail.skills.length === 1 ? "skill" : "skills"}. Select one from the tree to view details.`}
-      </p>
-      {detail.skills.length > 0 && (
-        <ul className="mt-3 divide-y divide-outline-variant border border-outline-variant bg-white/30">
-          {detail.skills.map((skill) => (
-            <li
-              key={skill.name}
-              data-testid={`plugin-viewer-skill-row-${skill.name}`}
-              className="flex items-baseline justify-between gap-3 px-3 py-2 font-mono text-xs"
-            >
-              <span className="truncate text-stone-900">{skill.name}</span>
-              <span className="font-mono text-[9px] uppercase tracking-[0.10em] text-stone-500">{skill.relativePath}</span>
-            </li>
-          ))}
-        </ul>
-      )}
-    </section>
-  );
-}
-
-function SkillPanel({ detail, skillName }: { detail: NonNullable<ReturnType<typeof usePlugin>["data"]>; skillName: string }) {
-  const skill = detail.skills.find((s) => s.name === skillName);
-  if (!skill) {
+  if (read.isLoading) {
     return (
-      <section data-testid="plugin-viewer-skill-missing" className="p-4">
-        <EmptyState label="SKILL MISSING" description={`No skill named "${skillName}" in this plugin.`} variant="card" />
-      </section>
+      <div data-testid="plugin-detail-viewer-loading" className="p-4 font-mono text-[10px] text-stone-400">
+        Loading…
+      </div>
     );
   }
-  return (
-    <section data-testid={`plugin-viewer-skill-${skill.name}`} className="p-4">
-      <SectionHeader tone="default">Skill</SectionHeader>
-      <h2 className="mt-2 font-headline text-lg font-bold tracking-tight text-stone-900">{skill.name}</h2>
-      <p className="mt-1 font-mono text-[10px] uppercase tracking-[0.10em] text-stone-500">{skill.relativePath}</p>
-      <p className="mt-3 text-sm text-stone-600">
-        This skill ships inside <code className="font-mono">{detail.entry.name}</code>. To view its SKILL.md and
-        navigate the skill folder, open the Skills Library entry.
-      </p>
-      <Link
-        to="/specs/skills"
-        data-testid={`plugin-viewer-skill-${skill.name}-open-library`}
-        className="mt-3 inline-block border border-stone-400 bg-white px-2 py-1 font-mono text-[10px] uppercase tracking-[0.12em] text-stone-700 hover:bg-stone-100"
-      >
-        Open Skills Library →
-      </Link>
-    </section>
-  );
-}
-
-function HooksRootPanel({ detail }: { detail: NonNullable<ReturnType<typeof usePlugin>["data"]> }) {
-  return (
-    <section data-testid="plugin-viewer-hooks-root" className="p-4">
-      <SectionHeader tone="default">Hooks</SectionHeader>
-      {detail.hooks.length === 0 ? (
-        <p className="mt-2 text-sm text-stone-600">This plugin does not ship hook configurations.</p>
-      ) : (
-        <p className="mt-2 text-sm text-stone-600">
-          {detail.hooks.length} hook {detail.hooks.length === 1 ? "config" : "configs"}. Select a runtime from the tree to view declared events.
-        </p>
-      )}
-    </section>
-  );
-}
-
-function HookPanel({ detail, runtime }: { detail: NonNullable<ReturnType<typeof usePlugin>["data"]>; runtime: string }) {
-  const hook = detail.hooks.find((h) => h.runtime === runtime);
-  if (!hook) {
+  if (read.isError) {
     return (
-      <section data-testid="plugin-viewer-hook-missing" className="p-4">
-        <EmptyState label="HOOK MISSING" description={`No hook config for runtime "${runtime}".`} variant="card" />
-      </section>
+      <div data-testid="plugin-detail-viewer-error" className="p-4 font-mono text-[10px] text-red-600">
+        {(read.error as Error)?.message ?? "Error loading file."}
+      </div>
     );
   }
+  if (!read.data) return null;
+
   return (
-    <section data-testid={`plugin-viewer-hook-${hook.runtime}`} className="p-4">
-      <SectionHeader tone="default">Hook · {hook.runtime}</SectionHeader>
-      <p className="mt-1 font-mono text-[10px] uppercase tracking-[0.10em] text-stone-500">{hook.relativePath}</p>
-      {hook.events.length > 0 ? (
-        <div className="mt-3">
-          <h3 className="font-mono text-[10px] uppercase tracking-[0.10em] text-stone-500">Events</h3>
-          <ul className="mt-1 flex flex-wrap gap-1 font-mono text-[10px] uppercase tracking-[0.10em] text-stone-700">
-            {hook.events.map((event) => (
-              <li key={event} className="border border-outline-variant px-1.5 py-0.5">
-                {event}
-              </li>
-            ))}
-          </ul>
+    <div data-testid="plugin-detail-viewer-content" className="flex h-full flex-col">
+      <header className="flex items-baseline justify-between border-b border-outline-variant bg-white/30 px-3 py-2 font-mono text-[10px]">
+        <div data-testid="plugin-detail-viewer-path" className="text-stone-700">{path}</div>
+        <div className="flex items-baseline gap-3 text-stone-500">
+          <span>{read.data.size}b</span>
+          <span>{read.data.mtime}</span>
         </div>
-      ) : (
-        <p className="mt-3 text-sm text-stone-600">No events declared in this hook config.</p>
-      )}
-    </section>
-  );
-}
-
-function McpRootPanel({ detail }: { detail: NonNullable<ReturnType<typeof usePlugin>["data"]> }) {
-  return (
-    <section data-testid="plugin-viewer-mcp-root" className="p-4">
-      <SectionHeader tone="default">MCP Servers</SectionHeader>
-      {detail.mcpServers.length === 0 ? (
-        <p className="mt-2 text-sm text-stone-600">This plugin does not declare MCP servers.</p>
-      ) : (
-        <p className="mt-2 text-sm text-stone-600">
-          {detail.mcpServers.length} MCP server {detail.mcpServers.length === 1 ? "declared" : "declarations"}. Select one from the tree for details.
-        </p>
-      )}
-    </section>
-  );
-}
-
-function McpServerPanel({ detail, runtime, name }: { detail: NonNullable<ReturnType<typeof usePlugin>["data"]>; runtime: string; name: string }) {
-  const server = detail.mcpServers.find((s) => s.runtime === runtime && s.name === name);
-  if (!server) {
-    return (
-      <section data-testid="plugin-viewer-mcp-missing" className="p-4">
-        <EmptyState label="MCP SERVER MISSING" description={`No MCP server "${name}" for runtime "${runtime}".`} variant="card" />
-      </section>
-    );
-  }
-  return (
-    <section data-testid={`plugin-viewer-mcp-${server.runtime}-${server.name}`} className="p-4">
-      <SectionHeader tone="default">MCP · {server.runtime}/{server.name}</SectionHeader>
-      <dl className="mt-3 grid grid-cols-[7rem_1fr] gap-x-3 gap-y-1 font-mono text-[11px]">
-        <dt className="font-mono text-[10px] uppercase tracking-[0.10em] text-stone-500">runtime</dt>
-        <dd className="font-mono text-[11px] text-stone-900">{server.runtime}</dd>
-        <dt className="font-mono text-[10px] uppercase tracking-[0.10em] text-stone-500">name</dt>
-        <dd className="font-mono text-[11px] text-stone-900">{server.name}</dd>
-        {server.command && (
-          <>
-            <dt className="font-mono text-[10px] uppercase tracking-[0.10em] text-stone-500">command</dt>
-            <dd className="font-mono text-[11px] text-stone-900">{server.command}</dd>
-          </>
+      </header>
+      <div className="flex-1 min-h-0 overflow-y-auto">
+        {read.data.truncated && (
+          <div
+            data-testid="plugin-detail-viewer-truncated"
+            className="mb-3 mx-4 mt-4 border border-amber-400 bg-amber-50 px-3 py-2 font-mono text-[10px] text-amber-900"
+          >
+            ⚠ Truncated at {Math.round((read.data.truncatedAtBytes ?? 0) / 1024)} KB — file is{" "}
+            {Math.round((read.data.totalBytes ?? read.data.size) / 1024)} KB total.
+          </div>
         )}
-        {server.transport && (
-          <>
-            <dt className="font-mono text-[10px] uppercase tracking-[0.10em] text-stone-500">transport</dt>
-            <dd className="font-mono text-[11px] text-stone-900">{server.transport}</dd>
-          </>
+        {ext === ".md" || ext === ".mdx" ? (
+          <div className="p-4">
+            <MarkdownViewer content={read.data.content} />
+          </div>
+        ) : TEXT_LIKE_EXTENSIONS.has(ext) ? (
+          <div className="p-4">
+            <SyntaxHighlight code={read.data.content} language={ext.slice(1)} />
+          </div>
+        ) : (
+          <pre data-testid="plugin-detail-viewer-text-fallback" className="p-4 whitespace-pre-wrap break-words font-mono text-[10px] text-stone-800">
+            {read.data.content}
+          </pre>
         )}
-      </dl>
-    </section>
-  );
-}
-
-function UsedByPanel({
-  usedBy,
-  isLoading,
-}: {
-  usedBy: { agentName: string; sourcePath: string; profiles: string[] }[];
-  isLoading: boolean;
-}) {
-  return (
-    <section data-testid="plugin-viewer-used-by" className="p-4">
-      <SectionHeader tone="default">Used By</SectionHeader>
-      {isLoading ? (
-        <p className="mt-2 font-mono text-[10px] uppercase tracking-[0.10em] text-stone-500">Loading…</p>
-      ) : usedBy.length === 0 ? (
-        <p className="mt-2 text-sm text-stone-600">No agent.yaml in the spec library currently references this plugin.</p>
-      ) : (
-        <ul className="mt-3 divide-y divide-outline-variant border border-outline-variant bg-white/30">
-          {usedBy.map((ref) => (
-            <li
-              key={ref.agentName}
-              data-testid={`plugin-viewer-used-by-${ref.agentName}`}
-              className="flex items-baseline justify-between gap-3 px-3 py-2 font-mono text-xs"
-            >
-              <span className="truncate text-stone-900">{ref.agentName}</span>
-              <span className="font-mono text-[9px] uppercase tracking-[0.10em] text-stone-500">{ref.profiles.join(", ")}</span>
-            </li>
-          ))}
-        </ul>
-      )}
-    </section>
+      </div>
+    </div>
   );
 }
