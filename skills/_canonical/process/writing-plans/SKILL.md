@@ -107,9 +107,9 @@ After saving the plan, offer execution choice:
 **Which approach?"**
 
 **If Subagent-Driven chosen:**
-- **REQUIRED SUB-SKILL:** Use superpowers:subagent-driven-development
+- Spawn a fresh subagent for each task; code-review the result before merging
 - Stay in this session
-- Fresh subagent per task + code review
+- Pair with whatever subagent-orchestration skill your runtime provides (e.g., the Obra Superpowers plugin ships one if you have that plugin installed)
 
 **If Parallel Session chosen:**
 - Guide them to open new session in worktree

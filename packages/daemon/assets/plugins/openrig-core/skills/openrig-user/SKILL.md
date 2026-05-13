@@ -1,22 +1,17 @@
 ---
 name: openrig-user
-description: Use when operating OpenRig with the `rig` CLI and you need the shipped command surface for identity, inventory, communication, lifecycle, specs, recovery, or agent-facing JSON output. NOT for debugging host-side runtime issues (use openrig-operator) or for changing OpenRig itself (use openrig-builder).
+description: Use when operating OpenRig with the `rig` CLI and you need the shipped command surface for identity, inventory, communication, lifecycle, specs, recovery, or agent-facing JSON output. NOT for debugging host-side runtime issues (use openrig-operator) or for changing OpenRig itself (work in the openrig product repo).
 metadata:
   openrig:
     stage: factory-approved
     last_verified: "2026-05-04"
     distribution_scope: product-bound
     source_evidence: |
-      Synced 2026-05-04 from substrate/shared-docs/skills/openrig-user/SKILL.md (substrate-root canonical, v0.2.0 released by lifecycle team). Originally imported 2026-05-02 from openrig/packages/daemon/specs/agents/shared/skills/core/openrig-user/SKILL.md.
-      Lifecycle team rsync'd the new version into substrate root for their own work; factory's job is to keep the openrig-work/skills/ workspace version in sync as new releases land.
       Bootstrap skill — NPM install lands this in personal homes (~/.claude/skills/, ~/.agents/skills/) so agents have it at every boot.
     sibling_skills:
       - openrig-operator
-      - openrig-builder
       - openrig-architect
-      - openrig-upgrade
       - forming-an-openrig-mental-model
-      - ai-dev-workflows
     transfer_test: pending
     notes: |
       Description was already correct (starts with "Use when..."; lists triggering domains without summarizing workflow). No frontmatter rewrite needed.
@@ -29,8 +24,9 @@ metadata:
 This is an as-built guide to the shipped `rig` CLI.
 Use current code and `rig ... --help` as ground truth if anything here ever conflicts with older planning docs.
 
-This is not the config-layer or builder guide. Use `control-plane-capabilities` for `rigx` and
-experimental overlays. Use `openrig-builder` when changing OpenRig behavior or doctrine.
+This is the daily-driving CLI guide for an OpenRig operator. It is not
+a guide to OpenRig internals or to changing OpenRig behavior — for that,
+work in the openrig product repo.
 
 ## Runtime-Gated Coordination Primitives
 
@@ -267,7 +263,7 @@ Source `>= 6af2754` lets a RigSpec member set:
 
 ```yaml
 starter_ref:
-  name: openrig-builder-base--claude-code
+  name: my-team-starter--claude-code
 ```
 
 The daemon resolves the named entry from the Agent Starter registry, applies the

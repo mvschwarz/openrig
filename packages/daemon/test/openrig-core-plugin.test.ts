@@ -18,21 +18,22 @@ import * as nodePath from "node:path";
 
 const PLUGIN_ROOT = nodePath.resolve(import.meta.dirname, "../assets/plugins/openrig-core");
 
-// Skills shipping in openrig-core v0 (per IMPL-PRD §2.6 + advisor draft):
-// 11 skills total. These are vendored canonical OpenRig skills that any
-// OpenRig agent can load via the plugin pathway.
+// Skills shipping in openrig-core v0. Slice 29 deleted 4 skills that were
+// mis-imports or duplicates:
+//   - claude-compact-in-place (was a SPEC, not a skill)
+//   - session-compaction-and-restore (replaced by claude-compaction-restore)
+//   - permission-posture (internal-only doctrine, not operator-facing)
+//   - openrig-compaction-instructions (empty leftover from slice 27)
+// Remaining: 7 operator-facing skills (was 11).
 const EXPECTED_SKILLS = [
   "agent-startup-and-context-ingestion",
-  "claude-compact-in-place",
   "claude-compaction-restore",
   "forming-an-openrig-mental-model",
   "openrig-architect",
   "openrig-operator",
   "openrig-user",
-  "permission-posture",
   "queue-handoff",
   "seat-continuity-and-handover",
-  "session-compaction-and-restore",
 ];
 
 describe("openrig-core plugin — vendored tree shape (HG-2.1)", () => {
@@ -108,7 +109,7 @@ describe("openrig-core plugin — skills (HG-2.1 skill content per agentskills.i
     expect(desc.length).toBeLessThanOrEqual(1024);
   });
 
-  it("ships exactly the 11 expected skills (no drift; no missing skills)", () => {
+  it("ships exactly the 8 expected skills (no drift; no missing skills; slice 29 deleted 4)", () => {
     const skillsDir = nodePath.join(PLUGIN_ROOT, "skills");
     const actual = fs.readdirSync(skillsDir).filter((f) =>
       fs.statSync(nodePath.join(skillsDir, f)).isDirectory()

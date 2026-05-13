@@ -1,27 +1,18 @@
 ---
 name: openrig-architect
-description: Use when designing multi-agent topologies that run ON OpenRig — authoring RigSpec and AgentSpec files for new rigs, creating agent startup content (guidance / skills / culture), or diagnosing why a launched rig's agents aren't behaving as intended. NOT for changing OpenRig itself (use openrig-builder); NOT for ordinary CLI operation of an existing rig (use openrig-user). Covers the full authoring lifecycle from user intent to validated, launchable rig.
+description: Use when designing multi-agent topologies that run ON OpenRig — authoring RigSpec and AgentSpec files for new rigs, creating agent startup content (guidance / skills / culture), or diagnosing why a launched rig's agents aren't behaving as intended. NOT for changing OpenRig itself (work in the openrig product repo); NOT for ordinary CLI operation of an existing rig (use openrig-user). Covers the full authoring lifecycle from user intent to validated, launchable rig.
 metadata:
   openrig:
     stage: factory-approved
     last_verified: "2026-05-04"
     distribution_scope: product-bound
     source_evidence: |
-      Imported 2026-05-02 from openrig/packages/daemon/specs/agents/shared/skills/rig-architect/SKILL.md (349 lines).
-      Product built-in is the only source — substrate/shared-docs/skills/rig-architect/ does not exist.
       Bootstrap skill — NPM install lands this in personal homes (~/.claude/skills/, ~/.agents/skills/) for users authoring their own rigs.
     sibling_skills:
       - openrig-user
       - openrig-operator
-      - openrig-builder
-      - openrig-upgrade
       - forming-an-openrig-mental-model
-      - ai-dev-workflows
     transfer_test: pending
-    notes: |
-      Description was already correct (starts with "Use when..."; lists specific authoring triggers including the diagnose-bad-rig case). Final sentence ("Covers the full authoring lifecycle from user intent to validated, launchable rig.") is workflow-summary-adjacent; on next iteration, consider trimming. For factory-adoption cycle, kept as-is to match product source-of-truth.
-    naming_note: |
-      Founder noted (2026-05-02 conversation): "openrig-architect is actually called rig-architect but it's meant to be openrig-architect." The factory/canonical-home skill name is now `openrig-architect` (renamed during Phase 3c graduation; sibling_skills lists across N1 reflect this). Product source path remains `openrig/packages/daemon/specs/agents/shared/skills/rig-architect/` until a coordinated product-source rename — that change requires updating product source + AgentSpec uses.skills references + downstream consumers; defer to a dedicated coordination cycle.
 ---
 
 # OpenRig Architect
@@ -56,13 +47,8 @@ Load these before starting any design work. The quality of your output depends o
 
 **Read if present on this host:**
 
-4. **Host-level doctrine** at `~/code/substrate/shared-docs/HOST-TOPOLOGY.md` (or wherever substrate lives on this host). If this file exists, it supersedes the baseline process below for complex or high-stakes rigs. Specifically:
-   - §3 defines the canonical rig classes (kernel, project, ephemeral, infra-build, managed-app). Classify before designing.
-   - §4 defines context-sharing patterns (pods as context domains, pair pattern, HA via mental-model-ha skill + substrate session logs, terminal nodes as common-room, chatroom/substrate/transcripts/Corpus).
-   - **§7 is the canonical 12-step rig-spec authoring SOP for high-stakes rigs — use it instead of the baseline "Design Process" below when the rig is ≥4 members, uses HA, is a managed-app, or will be shared/copied.** The baseline below still applies to small/focused rigs.
-   - §10 contains the host's bootstrap sequence so you know where your new rig fits.
-   - §12 has the naming canon and vocabulary mapping to shipped terms.
-5. **`building-agent-software` skill** if available in your skill catalog. Design principles for agent-facing tools and surfaces. Relevant when your rig ships a new CLI, service, or managed app.
+4. **Host-level doctrine file** (if your team maintains one — e.g., a HOST-TOPOLOGY doc that defines canonical rig classes, context-sharing patterns, and authoring SOPs for high-stakes rigs). If present, it supersedes the baseline process below for complex or high-stakes rigs (≥4 members, HA, managed-app, or shared/copied). Solo operators and small/focused rigs use the baseline below directly.
+5. **Agent-facing software design principles** if your rig ships a new CLI, service, or managed app that agents will operate. Treat the operating surface as a context-engineering problem: every error message and help text gives the agent information to act on.
 
 **Load as needed:**
 - Domain-specific skills when designing specialist agents — find shipped skills inside the OpenRig installation under the `specs/agents/` tree

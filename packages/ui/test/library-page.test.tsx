@@ -367,8 +367,14 @@ describe("Library page taxonomy", () => {
     renderSpecsTree(`/specs/skills/${librarySkillToken(skillId)}`);
 
     expect(await screen.findByTestId("specs-section-skills")).toBeDefined();
+    // Slice 29 HG-3: skills sidebar is category-folder grouped. Workspace
+    // skills bucket under category "workspace"; click expands category;
+    // skill row is a single non-expandable Link (file drill-in removed
+    // — that's the detail page's job per HG-3).
+    expect(await screen.findByTestId("skills-category-workspace")).toBeDefined();
     expect(await screen.findByTestId("specs-leaf-workspace:workspace:operator-skill")).toBeDefined();
-    expect(await screen.findByTestId("specs-skill-file-SKILL.md")).toBeDefined();
-    expect(screen.queryByRole("img", { name: "SKILL.md" })).toBeNull();
+    // No more in-tree file drill-down (HG-3 anti-pattern); skill detail
+    // page surfaces files via the docs-browser.
+    expect(screen.queryByTestId("specs-skill-file-SKILL.md")).toBeNull();
   });
 });

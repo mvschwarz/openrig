@@ -7,18 +7,11 @@ metadata:
     last_verified: "2026-05-04"
     distribution_scope: product-bound
     source_evidence: |
-      Translated from openrig-work/primitives/knowledge-and-context/agent-startup-and-context-ingestion.md (68 lines, design-consolidation). Cross-references the cross-runtime restore/reentry packet standard v0 + externalized memory surfaces convention.
+      Cross-runtime restore/reentry packet standard + externalized memory
+      surfaces convention. Load at agent start; revisit after compaction.
     sibling_skills:
       - claude-compaction-restore
-      - mental-model-ha
-      - scope-recovery
-      - session-compaction-and-restore
-      - agent-starters
-      - composable-priming-packs
-      - session-source-fork
       - seat-continuity-and-handover
-      - claude-compact-in-place
-      - pre-maintenance-agent-preservation
     transfer_test: pending
 ---
 
@@ -50,8 +43,8 @@ is scattered or stale, agents execute the wrong thing very efficiently.
 ## Don't use this when
 
 - The agent is being created via Agent Starter — the starter's manifest carries startup context
-- The work is artifact-backed mental-model rebuild from a packet — that's `session-compaction-and-restore`
-- The intent is to ship reusable startup content as a skill — that's `writing-skills-for-openrig`
+- The work is artifact-backed mental-model rebuild from a packet — that's `claude-compaction-restore`
+- The intent is to ship reusable startup content as a skill — write the skill against the agentskills.io specification, not as inline startup prose
 
 ## Failure modes (4)
 
@@ -78,14 +71,15 @@ reentry case, distinct from reusable Agent Starters / priming packs):
 
 ## Memory surfaces consumed at startup
 
-Per the externalized-memory-surfaces convention's 13-row inventory:
+The primary surfaces a startup ingestion path reads:
 
-- **Row 7** — AGENTS/role/CULTURE/startup overlays (primary)
-- **Row 3** — startup replay context (primary)
-- **Row 12** — restore/reentry packets and Agent Starters (cross-runtime startup path)
+- AGENTS / role / CULTURE / startup overlays (the per-seat identity layer)
+- startup replay context (what the agent did before the current boot)
+- restore / reentry packets and Agent Starters (cross-runtime startup path)
 
-The umbrella's authority-rank + permission-posture columns govern which
-surfaces a startup ingestion path can write vs only read.
+Authority-rank + read-vs-write posture governs which surfaces a
+startup-ingestion path can write vs only read; treat overlays as
+write-restricted unless your role explicitly authors them.
 
 ## Startup files vs skills (the distinction)
 
@@ -95,7 +89,7 @@ Per `agent-startup-guide.md` (product reference doc) and the team handbook:
 |---|---|
 | Rig-specific, role-specific identity | Reusable SOPs / methodology / knowledge |
 | Tell agent WHO it is, WHAT it's working on, HOW this team operates | Tell agent HOW to do something (transferable across rigs) |
-| Examples: `role.md`, `CULTURE.md`, `startup/context.md` | Examples: `openrig-user`, `test-driven-development`, `vault-user` |
+| Examples: `role.md`, `CULTURE.md`, `startup/context.md` | Examples: `openrig-user`, `test-driven-development`, `dogfood` |
 | Authored per-rig | Authored once, used everywhere |
 
 Don't put skill content in startup files. Don't put identity content
@@ -104,11 +98,7 @@ culture / pod / member / operator) handles the layering.
 
 ## See also
 
-- `writing-skills-for-openrig` skill — authoring discipline for skill content (what doesn't belong in startup)
 - `forming-an-openrig-mental-model` skill — orientation for new agents
-- `session-compaction-and-restore` skill — restore-time startup ingestion
-- `agent-starters` skill — reusable starter manifests that compose startup context
-- `composable-priming-packs` skill — manifests that produce primed sessions
-- `externalized-memory-surfaces` skill — umbrella convention for memory surfaces this primitive consumes
-- `openrig/docs/reference/agent-startup-guide.md` (product reference doc; not a skill) — the 7-layer additive startup model + delivery hints
-- `agent-startup-and-context-ingestion` skill — primitive dossier with current-state notes + next-slice scope
+- `claude-compaction-restore` skill — restore-time startup ingestion after compaction
+- `seat-continuity-and-handover` skill — packet shape that survives seat resets
+- https://agentskills.io/specification — the cross-runtime skill standard (what skill content should and shouldn't be)

@@ -7,19 +7,12 @@ metadata:
     last_verified: "2026-05-04"
     distribution_scope: product-bound
     source_evidence: |
-      Translated from openrig-work/primitives/continuity/seat-continuity-and-handover.md (311 lines, primitive-mvp).
-      Option A rebuild MVP shipped 2026-04-30 at openrig 578bd5c (Tier 1 proof complete; Tier 2 deferred). Option B (full code-direct seat handover + SeatHandoverService daemon module) named Mode 3 follow-on.
+      Option A rebuild MVP shipped 2026-04-30. Option B (full code-direct
+      seat handover via SeatHandoverService daemon module) is a future
+      follow-on.
     sibling_skills:
       - claude-compaction-restore
-      - mental-model-ha
-      - scope-recovery
-      - session-compaction-and-restore
       - agent-startup-and-context-ingestion
-      - agent-starters
-      - composable-priming-packs
-      - session-source-fork
-      - claude-compact-in-place
-      - pre-maintenance-agent-preservation
     transfer_test: pending
 ---
 
@@ -140,8 +133,5 @@ enough to receive new work or needs re-handover.
 
 ## See also
 
-- `session-source-fork` skill — `fork` occupant-creation primitive (sibling)
-- `agent-starters` skill — composes occupant-creation + binding into named reusable starting points
-- `cross-host-rig-commands` skill — multi-host handover (deferred)
-- `seat-continuity-and-handover` skill — primitive dossier with proof-matrix + Option A shipping evidence + Option B deferred sub-mission scope
-- `substrate/shared-docs/openrig-work/field-notes/2026-04-19-seat-handover-and-rebuild-design.md` — primary design packet
+- `claude-compaction-restore` skill — packet-driven restore after Claude compaction
+- `agent-startup-and-context-ingestion` skill — ingestion path for restore packets at agent boot

@@ -46,14 +46,16 @@ export interface LibrarySkill {
   source: LibrarySkillSource;
   /** Top-level markdown files in the skill folder (SKILL.md first if present). */
   files: LibrarySkillFile[];
-  /** Internal: absolute filesystem path to the skill folder. NOT serialized
-   *  in the public API response. The routes layer uses this for the
+  /** Absolute filesystem path to the skill folder. Slice 29 HG-4: surfaced
+   *  in the public response so operators see where the daemon reads each
+   *  skill from. The routes layer also uses this for the
    *  /api/skills/:id/files/{list,read} endpoints. */
   absolutePath: string;
 }
 
-/** Public response shape (omits absolutePath). */
-export type LibrarySkillPublic = Omit<LibrarySkill, "absolutePath">;
+/** Public response shape — preserves absolutePath for operator visibility
+ *  (slice 29 HG-4 file-path discoverability). */
+export type LibrarySkillPublic = LibrarySkill;
 
 export interface SkillLibraryDiscoveryOpts {
   /**
@@ -212,6 +214,6 @@ export class SkillLibraryDiscoveryService {
 
   /** Public-facing list (strips absolutePath from each entry). */
   listLibrarySkillsPublic(): LibrarySkillPublic[] {
-    return this.listLibrarySkills().map(({ absolutePath: _absolutePath, ...rest }) => rest);
+    return this.listLibrarySkills();
   }
 }

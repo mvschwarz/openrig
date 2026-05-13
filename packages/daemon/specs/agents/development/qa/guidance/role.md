@@ -51,8 +51,6 @@ For UI dogfooding, load the `/agent-browser` and `/dogfood` skills. These give y
 - `agent-browser record start/stop` — record repro videos for issues
 - The `/dogfood` skill provides a structured exploration workflow with a report template
 
-For containerized end-to-end testing (fresh install simulation), also load `/containerized-e2e`. This gives you Docker-based testing with `agent-browser` inside a clean container.
-
 ### Dogfood report format
 
 When reporting findings, use:

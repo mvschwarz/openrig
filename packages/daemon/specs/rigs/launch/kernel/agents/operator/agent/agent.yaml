@@ -11,7 +11,7 @@ imports:
 profiles:
   default:
     uses:
-      skills: [openrig-user, openrig-operator, local-sysadmin, rig-lifecycle, systematic-debugging, verification-before-completion, openrig-installer]
+      skills: [openrig-user, openrig-operator, rig-lifecycle, systematic-debugging, verification-before-completion, openrig-installer]
       guidance: [role]
       subagents: []
       plugins: []

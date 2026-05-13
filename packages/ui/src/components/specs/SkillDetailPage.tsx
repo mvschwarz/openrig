@@ -121,6 +121,15 @@ export function SkillDetailPage({
             {skill.source}
           </span>
         </div>
+        {/* Slice 29 HG-4 — surface the absolute on-disk path so operators
+            see where the daemon reads each skill from. */}
+        <div
+          data-testid="skill-detail-absolute-path"
+          className="mt-1 font-mono text-[10px] text-stone-500 truncate"
+          title={skill.absolutePath}
+        >
+          {skill.absolutePath}
+        </div>
       </header>
 
       <div

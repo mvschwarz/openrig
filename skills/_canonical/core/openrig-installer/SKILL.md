@@ -51,9 +51,9 @@ Or click the CMUX button on the topology graph in the UI at
 
 ## V0.3.1 upgrade ceremony (one-time migration)
 
-Operators with an existing substrate-rooted kernel at
-`~/code/substrate/shared-docs/rigs/kernel/` (the pre-V0.3.1 layout)
-must migrate to the daemon-managed location
+Operators with a kernel spec stored outside the daemon-managed
+location (any pre-V0.3.1 layout, typically wherever you kept your
+own `rigs/kernel/` directory) must migrate to
 `~/.openrig/specs/rigs/kernel/` as a one-time step during the V0.3.1
 upgrade. The V0.3.1 upgrade IS the migration moment; it's not a
 separate ceremony.
@@ -74,12 +74,12 @@ separate ceremony.
    rig down kernel --snapshot
    ```
 
-3. **Copy the substrate kernel spec** into the daemon-managed
+3. **Copy your existing kernel spec** into the daemon-managed
    location:
 
    ```bash
    mkdir -p ~/.openrig/specs/rigs/kernel
-   cp -r ~/code/substrate/shared-docs/rigs/kernel/* ~/.openrig/specs/rigs/kernel/
+   cp -r /path/to/old/kernel-spec/* ~/.openrig/specs/rigs/kernel/
    ```
 
 4. **Upgrade the CLI + daemon**:
@@ -101,11 +101,11 @@ separate ceremony.
    rig ps --nodes --rig kernel --json
    ```
 
-6. **Decommission the substrate copy** (only after verifying the
+6. **Decommission the old copy** (only after verifying the
    daemon-managed copy works):
 
    ```bash
-   rm -rf ~/code/substrate/shared-docs/rigs/kernel
+   rm -rf /path/to/old/kernel-spec
    ```
 
 ### If migration fails
