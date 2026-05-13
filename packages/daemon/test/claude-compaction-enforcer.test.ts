@@ -213,6 +213,8 @@ describe("ClaudeCompactionEnforcer", () => {
       expect.stringContaining("/tmp/openrig-test-home/compaction/restore-pending/claude-seat@rig.json"),
     );
     expect(send.mock.calls[3]![1]).toContain("/tmp/claude.jsonl");
+    expect(send.mock.calls[3]![1]).toContain("Restoration is the current task");
+    expect(send.mock.calls[3]![1]).toContain("Do not wait for a future user request");
 
     const belowCompliance = await enforcer.maybeAutoCompact({
       sessionName: "claude-seat@rig",
@@ -493,6 +495,7 @@ describe("ClaudeCompactionEnforcer", () => {
 
     expect(send).toHaveBeenCalledTimes(5);
     expect(send.mock.calls[4]![1]).toContain("Now audit your compaction restore");
+    expect(send.mock.calls[4]![1]).toContain("restore map");
     expect(send.mock.calls[4]![1]).toContain("FULL, PARTIAL, or NOT_READ");
     expect(send.mock.calls[4]![1]).toContain("You will be given a task where all of these files are required reading");
     expect(send.mock.calls[4]![1]).toContain("Do not optimize for token conservation");

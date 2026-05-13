@@ -74,6 +74,8 @@ Prepare durable continuity before the context boundary.
 ## If You Just Compacted
 
 Treat your memory as unreliable until you restore from durable evidence.
+Restoration is your current task. Do not wait for a future user request or a
+new task assignment before reading the required files.
 
 1. Read any restore prompt, marker path, packet path, transcript path, restore
    map, or extra instruction file named by the operator or OpenRig.
@@ -100,7 +102,7 @@ node ~/.claude/skills/claude-compaction-restore/scripts/restore-from-jsonl.mjs /
    files named in the map, Markdown state/planning files, queue/mission packets,
    source files with active edits, root instruction files, and as-built or
    codemap docs.
-8. Only resume task work after you can state:
+8. After the required reads are complete, state:
 
 ```text
 restored from packet at <path>; resumed at step <X>
@@ -125,6 +127,8 @@ After the first restore pass, audit yourself before continuing.
 
 - Do not silently launch fresh after compaction.
 - Do not continue from memory when restore evidence exists.
+- Do not defer required restore reading until a later user task. The restore is
+  the current task.
 - Do not skip root instructions, as-built docs, or codemaps before product
   code/review work.
 - Do not treat the generated touched-file list as exhaustive.
@@ -143,3 +147,5 @@ After the first restore pass, audit yourself before continuing.
    `README.md`, as-built docs, or codemaps that govern the task.
 4. **Treating the packet as exhaustive**: ignoring mission or workspace files
    that are important but were not discovered by the script.
+5. **Waiting for the next task**: treating restore reading as conditional on a
+   future user assignment instead of completing it immediately.

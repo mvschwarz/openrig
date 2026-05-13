@@ -118,6 +118,7 @@ function buildPostCompactRestorePrompt(input: {
   const pieces = [
     "Please respond to this normal user message now by restoring this Claude session after compaction.",
     "This is the operator-authorized OpenRig restore request referenced by the compact summary; it is not local-command stdout or hook output.",
+    "Restoration is the current task. Do not wait for a future user request or task assignment before reading the required files.",
     `First, look for the pending restore marker at ${markerPath}.`,
   ];
   if (input.transcriptPath) {
