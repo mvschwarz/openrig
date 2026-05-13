@@ -11,8 +11,6 @@ metadata:
       is wired into Claude Code's settings (e.g. ~/.claude/settings.json)
       so the restore packet is generated automatically before compaction.
     sibling_skills:
-      - mental-model-ha
-      - scope-recovery
       - agent-startup-and-context-ingestion
       - seat-continuity-and-handover
 ---

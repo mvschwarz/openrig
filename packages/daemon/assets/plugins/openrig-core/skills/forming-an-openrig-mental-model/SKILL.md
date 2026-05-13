@@ -9,17 +9,13 @@ metadata:
     distribution_scope: product-bound
     source_evidence: |
       Authored 2026-05-02 in response to founder-observed pattern: agents
-      reaching for mental-model-ha on the words "mental model" when they're
-      actually trying to form an initial mental model of OpenRig. This skill
-      serves the legitimate need that mental-model-ha was being mis-routed for.
-      See lab/skill-management-research/cycles/2026-05-02-forming-an-openrig-mental-model.md.
+      Distinct from HA-pair mental-model preservation (which is a
+      pair-of-seats coordination pattern). This skill serves the legitimate
+      need to form an initial mental model of OpenRig as a system.
     sibling_skills:
       - openrig-user
       - openrig-operator
-      - openrig-builder
       - openrig-architect
-      - openrig-upgrade
-      - ai-dev-workflows
     transfer_test: pending
 ---
 
@@ -264,8 +260,9 @@ touching YAML for high-stakes rigs.
 
 ## What this skill is NOT for
 
-- **HA pair compaction recovery.** That's `mental-model-ha`. Different
-  skill, different scenario.
+- **HA pair compaction recovery.** Forming an initial mental model is a
+  solo orientation task — different from the pair-of-seats coordination
+  pattern that preserves a shared mental model across compactions.
 - **Operating a specific rig.** Specific rigs have their own DESIGN.md and
   CULTURE.md. Read those.
 - **Authoring a new rig.** Use the `openrig-architect` skill for that.

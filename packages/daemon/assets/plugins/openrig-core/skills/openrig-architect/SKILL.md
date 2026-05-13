@@ -11,15 +11,8 @@ metadata:
     sibling_skills:
       - openrig-user
       - openrig-operator
-      - openrig-builder
-      - openrig-upgrade
       - forming-an-openrig-mental-model
-      - ai-dev-workflows
     transfer_test: pending
-    notes: |
-      Description was already correct (starts with "Use when..."; lists specific authoring triggers including the diagnose-bad-rig case). Final sentence ("Covers the full authoring lifecycle from user intent to validated, launchable rig.") is workflow-summary-adjacent; on next iteration, consider trimming. For factory-adoption cycle, kept as-is to match product source-of-truth.
-    naming_note: |
-      Founder noted (2026-05-02 conversation): "openrig-architect is actually called rig-architect but it's meant to be openrig-architect." The factory/canonical-home skill name is now `openrig-architect` (renamed during Phase 3c graduation; sibling_skills lists across N1 reflect this). Product source path remains `openrig/packages/daemon/specs/agents/shared/skills/rig-architect/` until a coordinated product-source rename — that change requires updating product source + AgentSpec uses.skills references + downstream consumers; defer to a dedicated coordination cycle.
 ---
 
 # OpenRig Architect
@@ -55,7 +48,7 @@ Load these before starting any design work. The quality of your output depends o
 **Read if present on this host:**
 
 4. **Host-level doctrine file** (if your team maintains one — e.g., a HOST-TOPOLOGY doc that defines canonical rig classes, context-sharing patterns, and authoring SOPs for high-stakes rigs). If present, it supersedes the baseline process below for complex or high-stakes rigs (≥4 members, HA, managed-app, or shared/copied). Solo operators and small/focused rigs use the baseline below directly.
-5. **`building-agent-software` skill** if available in your skill catalog. Design principles for agent-facing tools and surfaces. Relevant when your rig ships a new CLI, service, or managed app.
+5. **Agent-facing software design principles** if your rig ships a new CLI, service, or managed app that agents will operate. Treat the operating surface as a context-engineering problem: every error message and help text gives the agent information to act on.
 
 **Load as needed:**
 - Domain-specific skills when designing specialist agents — find shipped skills inside the OpenRig installation under the `specs/agents/` tree

@@ -11,8 +11,6 @@ metadata:
       surfaces convention. Load at agent start; revisit after compaction.
     sibling_skills:
       - claude-compaction-restore
-      - mental-model-ha
-      - scope-recovery
       - seat-continuity-and-handover
     transfer_test: pending
 ---
@@ -46,7 +44,7 @@ is scattered or stale, agents execute the wrong thing very efficiently.
 
 - The agent is being created via Agent Starter — the starter's manifest carries startup context
 - The work is artifact-backed mental-model rebuild from a packet — that's `claude-compaction-restore`
-- The intent is to ship reusable startup content as a skill — that's `writing-skills-for-openrig`
+- The intent is to ship reusable startup content as a skill — write the skill against the agentskills.io specification, not as inline startup prose
 
 ## Failure modes (4)
 
@@ -99,7 +97,7 @@ culture / pod / member / operator) handles the layering.
 
 ## See also
 
-- `writing-skills-for-openrig` skill — authoring discipline for skill content (what doesn't belong in startup)
 - `forming-an-openrig-mental-model` skill — orientation for new agents
 - `claude-compaction-restore` skill — restore-time startup ingestion after compaction
 - `seat-continuity-and-handover` skill — packet shape that survives seat resets
+- https://agentskills.io/specification — the cross-runtime skill standard (what skill content should and shouldn't be)

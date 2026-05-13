@@ -13,11 +13,8 @@ metadata:
     transfer_test: pending
     sibling_skills:
       - openrig-user
-      - openrig-builder
       - openrig-architect
-      - openrig-upgrade
       - forming-an-openrig-mental-model
-      - ai-dev-workflows
 ---
 
 # OpenRig Operator
@@ -45,8 +42,10 @@ Use this skill when you see:
 
 Do not use this skill for normal product workflow routing, queue handling, or ordinary peer communication. Use `openrig-user` for that.
 
-Do not use this skill to decide how to change OpenRig behavior. Use `openrig-builder` for build
-lane selection, feature lifecycle, doctrine rollout, and topology/build-system decisions.
+Do not use this skill to decide how to change OpenRig behavior. Changes
+to the OpenRig product (CLI, daemon, UI, specs) happen in the openrig
+product repo — operate that as a normal software project, not via
+this troubleshooting skill.
 
 ## First Checks
 

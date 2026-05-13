@@ -10,11 +10,8 @@ metadata:
       Bootstrap skill — NPM install lands this in personal homes (~/.claude/skills/, ~/.agents/skills/) so agents have it at every boot.
     sibling_skills:
       - openrig-operator
-      - openrig-builder
       - openrig-architect
-      - openrig-upgrade
       - forming-an-openrig-mental-model
-      - ai-dev-workflows
     transfer_test: pending
     notes: |
       Description was already correct (starts with "Use when..."; lists triggering domains without summarizing workflow). No frontmatter rewrite needed.
@@ -27,8 +24,9 @@ metadata:
 This is an as-built guide to the shipped `rig` CLI.
 Use current code and `rig ... --help` as ground truth if anything here ever conflicts with older planning docs.
 
-This is not the config-layer or builder guide. Use `control-plane-capabilities` for `rigx` and
-experimental overlays. Use `openrig-builder` when changing OpenRig behavior or doctrine.
+This is the daily-driving CLI guide for an OpenRig operator. It is not
+a guide to OpenRig internals or to changing OpenRig behavior — for that,
+work in the openrig product repo.
 
 ## Runtime-Gated Coordination Primitives
 

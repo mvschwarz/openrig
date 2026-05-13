@@ -8,23 +8,7 @@ metadata:
     distribution_scope: product-bound
     source_evidence: |
       Daemon-backed `rig queue` shipped in v0.2.0 (PL-004 Phase A) with handed-off-to / handed-off-from / state field shape. `rig queue` is canonical for new work; `rigx queue` is recovery-only fallback. The daemon enforces hot-potato strict-rejection at the API.
-    sibling_skills:
-      - workflow-runtime
-      - watchdog
-      - alignment-trace
-      - looping-workflows
-      - human-in-the-loop
-      - attention-queue
-      - dispatching-parallel-agents
-      - subagent-driven-development
-      - structured-ack-dispatch
-      - control-plane-capabilities
-      - status-not-chat-orchestrator
-      - control-plane-queue
-      - control-plane-watchdog
-      - control-plane-workflows
-      - control-plane-delivery-loop
-      - control-plane-rollout-manager
+    sibling_skills: []
     transfer_test: pending
 ---
 
@@ -135,5 +119,4 @@ edge directly — don't fall back to stale pre-upgrade assumptions.
 
 ## See also
 
-- `looping-workflows` skill — operating discipline for self-driving rig-shaped loops; queue-handoff is its current handoff substrate
 - `rig queue --help` — full CLI surface for queue items, handoffs, and closure-reason discipline

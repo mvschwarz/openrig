@@ -12,8 +12,6 @@ metadata:
       follow-on.
     sibling_skills:
       - claude-compaction-restore
-      - mental-model-ha
-      - scope-recovery
       - agent-startup-and-context-ingestion
     transfer_test: pending
 ---
@@ -136,5 +134,4 @@ enough to receive new work or needs re-handover.
 ## See also
 
 - `claude-compaction-restore` skill — packet-driven restore after Claude compaction
-- `mental-model-ha` skill — HA-pair pattern for preserving mental model across seat resets
 - `agent-startup-and-context-ingestion` skill — ingestion path for restore packets at agent boot
