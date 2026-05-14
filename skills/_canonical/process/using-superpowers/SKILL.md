@@ -1,6 +1,17 @@
 ---
 name: using-superpowers
 description: Use when starting any conversation - establishes how to find and use skills, requiring Skill tool invocation before ANY response including clarifying questions
+metadata:
+  openrig:
+    vendored_from: "Obra Superpowers (https://github.com/obra/superpowers)"
+    vendoring_pattern: modify-the-file
+    last_upstream_check: "2026-05-13 (diff against plugin source pulled 2026-05-11)"
+    divergence_notes: |
+      Removed multi-platform-specific sections (Copilot CLI, Gemini CLI,
+      Platform Adaptation) — OpenRig targets Claude Code + Codex. Removed
+      the SUBAGENT-STOP block and Instruction Priority section — OpenRig
+      handles those concerns at the rig/agent-spec layer.
+      See OPENRIG.md for full divergence details.
 ---
 
 <EXTREMELY-IMPORTANT>

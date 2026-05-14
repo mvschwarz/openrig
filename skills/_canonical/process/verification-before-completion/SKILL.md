@@ -1,6 +1,11 @@
 ---
 name: verification-before-completion
 description: Use when about to claim work is complete, fixed, or passing, before committing or creating PRs - requires running verification commands and confirming output before making any success claims; evidence before assertions always
+metadata:
+  openrig:
+    vendored_from: "Obra Superpowers (https://github.com/obra/superpowers)"
+    vendoring_pattern: vendored-as-is
+    last_upstream_check: "2026-05-13 (diff against plugin source pulled 2026-05-11 = identical)"
 ---
 
 # Verification Before Completion

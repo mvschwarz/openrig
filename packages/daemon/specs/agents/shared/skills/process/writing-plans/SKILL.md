@@ -1,6 +1,16 @@
 ---
 name: writing-plans
 description: Use when you have a spec or requirements for a multi-step task, before touching code
+metadata:
+  openrig:
+    vendored_from: "Obra Superpowers (https://github.com/obra/superpowers)"
+    vendoring_pattern: modify-the-file
+    last_upstream_check: "2026-05-13 (diff against plugin source pulled 2026-05-11)"
+    divergence_notes: |
+      Removed the Scope Check + File Structure sections, the subagent-driven-
+      development sub-skill pointer, and the checkbox-tracking syntax for
+      steps. Changed plan-doc save path from docs/superpowers/plans/ to
+      docs/plans/. See OPENRIG.md for full divergence details.
 ---
 
 # Writing Plans

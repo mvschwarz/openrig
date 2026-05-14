@@ -1,6 +1,11 @@
 ---
 name: systematic-debugging
 description: Use when encountering any bug, test failure, or unexpected behavior, before proposing fixes
+metadata:
+  openrig:
+    vendored_from: "Obra Superpowers (https://github.com/obra/superpowers)"
+    vendoring_pattern: vendored-as-is
+    last_upstream_check: "2026-05-13 (diff against plugin source pulled 2026-05-11 = identical)"
 ---
 
 # Systematic Debugging

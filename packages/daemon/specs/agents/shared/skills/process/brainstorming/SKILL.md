@@ -1,6 +1,17 @@
 ---
 name: brainstorming
 description: "You MUST use this before any creative work - creating features, building components, adding functionality, or modifying behavior. Explores user intent, requirements and design before implementation."
+metadata:
+  openrig:
+    vendored_from: "Obra Superpowers (https://github.com/obra/superpowers)"
+    vendoring_pattern: modify-the-file
+    last_upstream_check: "2026-05-13 (diff against plugin source pulled 2026-05-11)"
+    divergence_notes: |
+      Simplified the process flow. Removed the Visual Companion offer step,
+      the Spec self-review step, and the User-reviews-spec step (those gates
+      are handled at the rig/orchestration layer in OpenRig). Changed plan-
+      doc save path from docs/superpowers/specs/ to docs/plans/.
+      See OPENRIG.md for full divergence details.
 ---
 
 # Brainstorming Ideas Into Designs

@@ -1,6 +1,11 @@
 ---
 name: test-driven-development
 description: Use when implementing any feature or bugfix, before writing implementation code
+metadata:
+  openrig:
+    vendored_from: "Obra Superpowers (https://github.com/obra/superpowers)"
+    vendoring_pattern: vendored-as-is
+    last_upstream_check: "2026-05-13 (diff against plugin source pulled 2026-05-11 = identical)"
 ---
 
 # Test-Driven Development (TDD)
