@@ -154,6 +154,89 @@
   .hard-shadow-hover:hover { box-shadow: 1px 1px 0px #2e342e; translate: 1px 1px; }
 }
 
+/* === VELLUM BACK-LAYER AMBIENT DRIFT ===
+   Slow continuous translate/rotate animations for back-layer shapes
+   in the Dashboard / VellumLab. Defined OUTSIDE any @layer wrapper —
+   Tailwind's tree-shaker can drop keyframes-inside-@layer in some
+   PostCSS configurations, causing the animation to never apply.
+   Three variants so shapes drift independently. */
+
+@keyframes vellum-drift-a {
+  0%, 100% { transform: translate3d(0, 0, 0) rotate(0deg) scale(1); }
+  50%      { transform: translate3d(50px, -36px, 0) rotate(2deg) scale(1.04); }
+}
+@keyframes vellum-drift-b {
+  0%, 100% { transform: translate3d(0, 0, 0) rotate(0deg) scale(1); }
+  50%      { transform: translate3d(-44px, 42px, 0) rotate(-2.5deg) scale(1.05); }
+}
+@keyframes vellum-drift-c {
+  0%, 100% { transform: translate3d(0, 0, 0) rotate(0deg) scale(1); }
+  50%      { transform: translate3d(36px, 48px, 0) rotate(1.6deg) scale(0.96); }
+}
+
+.vellum-drift-a { animation: vellum-drift-a 18s ease-in-out infinite; will-change: transform; transform-origin: center; }
+.vellum-drift-b { animation: vellum-drift-b 24s ease-in-out infinite; will-change: transform; transform-origin: center; }
+.vellum-drift-c { animation: vellum-drift-c 21s ease-in-out infinite; will-change: transform; transform-origin: center; }
+
+/* Seamless horizontal scroll for back-layer patterns. The pattern
+   author makes the SVG 2× viewport-wide with a periodic wave whose
+   period equals viewport width — translating by -50% (= -1 period)
+   moves the second half into the first half's position, looping
+   without a visible seam. */
+@keyframes vellum-scroll-x {
+  from { transform: translate3d(0, 0, 0); }
+  to   { transform: translate3d(-50%, 0, 0); }
+}
+.vellum-scroll-x { animation: vellum-scroll-x 60s linear infinite; will-change: transform; }
+
+@media (prefers-reduced-motion: reduce) {
+  .vellum-scroll-x { animation: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .vellum-drift-a,
+  .vellum-drift-b,
+  .vellum-drift-c {
+    animation: none;
+  }
+}
+
+/* === INKY VELLUM PRINT (Vellum Lab + showcase dashboard) === */
+
+@layer components {
+  /* Subtle paper-grain "ink-on-vellum" texture for top-layer card
+     surfaces. Uses a faint SVG-noise tile so cards feel printed
+     rather than rendered. The grain is very subtle by design — it
+     must NOT compete with text legibility, only set the haptic
+     paper feel that the founder reference (declassified vellum
+     dossier) implies. */
+  .vellum-card-inky {
+    background-image:
+      url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='80' height='80'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='1.4' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 0.06 0'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
+    background-blend-mode: multiply;
+  }
+
+  /* Inky text — micro text-shadow that mimics the way laser-printer
+     ink bleeds slightly into vellum paper fibers. Not a glow; the
+     bleed is asymmetric (offset by ~0.3px) and dark, so the eye
+     reads it as physical ink, not a UI effect. */
+  .inky-text {
+    text-shadow:
+      0.3px 0.3px 0 rgba(0, 0, 0, 0.18),
+      -0.2px -0.2px 0 rgba(0, 0, 0, 0.06);
+  }
+
+  /* Heavier ink-bleed for very large display headlines (the WELCOME
+     BACK / RIG·OS scale). The reference's massive ANGEL(s*) word
+     has visible ink-grain — this is our static approximation. */
+  .inky-display {
+    text-shadow:
+      0.6px 0.6px 0 rgba(0, 0, 0, 0.22),
+      -0.4px -0.4px 0 rgba(0, 0, 0, 0.08),
+      0 0 0.5px rgba(0, 0, 0, 0.4);
+  }
+}
+
 /* === STAMPS === */
 
 @layer components {

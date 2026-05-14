@@ -63,6 +63,12 @@ import {
 } from "./components/project/ScopePages.js";
 import { ProjectGraphicsPreview } from "./components/lab/ProjectGraphicsPreview.js";
 import { CardPreviewsLab } from "./components/lab/CardPreviewsLab.js";
+import { VellumLab } from "./components/lab/VellumLab.js";
+import {
+  VellumBgLarge,
+  VellumBgSmall,
+  VellumBgAllover,
+} from "./components/lab/VellumBackgroundLab.js";
 
 // Root route — wraps everything in AppShell
 const rootRoute = createRootRoute({
@@ -257,6 +263,37 @@ const cardPreviewsLabRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/lab/card-previews",
   component: CardPreviewsLab,
+});
+
+// 2026-05-13 — vellum showcase design experiment. Static dashboard-shape
+// for iterating the layered-vellum technique without touching the
+// production dashboard. Once dialed in, port the recipe back to
+// packages/ui/src/components/dashboard/.
+const vellumLabRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/lab/vellum-lab",
+  component: VellumLab,
+});
+
+// 2026-05-14 iter 2 — back-layer "all-over-print" spike per founder
+// dispatch with reference photos. Iter 1 (tactical marks) was wrong
+// direction; this iter uses large faded abstract graphic SHAPES
+// (corporate-emblem / radiation-symbol / serif typography) at three
+// size/density treatments.
+const vellumBgLargeRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/lab/vellum-bg/a-large",
+  component: VellumBgLarge,
+});
+const vellumBgSmallRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/lab/vellum-bg/b-small",
+  component: VellumBgSmall,
+});
+const vellumBgAlloverRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/lab/vellum-bg/c-allover",
+  component: VellumBgAllover,
 });
 
 // =====================================================================
@@ -467,6 +504,10 @@ const routeTree = rootRoute.addChildren([
   searchRoute,
   projectGraphicsPreviewRoute,
   cardPreviewsLabRoute,
+  vellumLabRoute,
+  vellumBgLargeRoute,
+  vellumBgSmallRoute,
+  vellumBgAlloverRoute,
   // Preserved existing routes
   rigDetailRoute,
   liveNodeDetailsRoute,
