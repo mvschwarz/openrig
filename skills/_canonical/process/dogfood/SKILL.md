@@ -2,6 +2,11 @@
 name: dogfood
 description: Systematically explore and test a web application to find bugs, UX issues, and other problems. Use when asked to "dogfood", "QA", "exploratory test", "find issues", "bug hunt", "test this app/site/platform", or review the quality of a web application. Produces a structured report with full reproduction evidence -- step-by-step screenshots, repro videos, and detailed repro steps for every issue -- so findings can be handed directly to the responsible teams.
 allowed-tools: Bash(agent-browser:*), Bash(npx agent-browser:*)
+metadata:
+  openrig:
+    vendored_from: "Vercel agent-browser ecosystem (https://github.com/vercel/agent-browser)"
+    vendoring_pattern: vendored-as-is
+    last_upstream_check: "2026-05-13 (diff against ~/.agents/skills/dogfood = identical)"
 ---
 
 # Dogfood
