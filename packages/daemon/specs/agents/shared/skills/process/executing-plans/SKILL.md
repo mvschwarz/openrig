@@ -1,6 +1,16 @@
 ---
 name: executing-plans
 description: Use when you have a written implementation plan to execute in a separate session with review checkpoints
+metadata:
+  openrig:
+    vendored_from: "Obra Superpowers (https://github.com/obra/superpowers)"
+    vendoring_pattern: modify-the-file
+    last_upstream_check: "2026-05-13 (initial vendoring declaration)"
+    divergence_notes: |
+      Restructured from upstream's all-tasks-at-once execution into batch-with-
+      checkpoint execution (default 3 tasks per batch + report + continue cycle).
+      Removed the upstream suggestion to use superpowers:subagent-driven-development
+      as an alternative. See OPENRIG.md for full divergence details.
 ---
 
 # Executing Plans
