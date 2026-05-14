@@ -54,14 +54,11 @@ describe("0.3.0 conveyor starter workflow specs", () => {
     });
 
     expect(result.errors).toEqual([]);
-    // V0.3.1 slice 13 walk-item 7 — openrig-velocity@1.0 added as a
-    // built-in spec so release-0.3.1's mission Topology tab projects
-    // it. Keep this list in sync with
+    // Keep this list in sync with
     // packages/daemon/src/builtins/workflow-specs/*.yaml.
     expect(result.loaded.map((s) => s.name).sort()).toEqual([
       "basic-loop",
       "conveyor",
-      "openrig-velocity",
     ]);
     expect(result.skipped).toEqual([]);
   });
