@@ -149,16 +149,25 @@ describe("SliceScopePage P5-2 tab content piping", () => {
     expect(await findByTestId("slice-scope-error")).toBeTruthy();
   });
 
-  it("default landing tab is 'story'; mounts TimelineTab with events + phaseDefinitions", async () => {
+  it("default landing tab is 'overview' (slice 12 walk-item 1: README before metric grid); story tab still mounts TimelineTab when activated", async () => {
     const { container, findByTestId } = renderSliceScope({
       sliceId: "idea-ledger",
       detail: makeDetail(),
     });
     // ScopeShell mounts; project-tab-nav rendered.
     await findByTestId("project-tab-nav");
-    // Story is the default active tab.
-    const storyTab = container.querySelector("[data-testid='project-tab-story']");
-    expect(storyTab?.getAttribute("data-active")).toBe("true");
+    // V0.3.1 slice 12 walk-item 1 — default tab was changed from
+    // 'story' to 'overview' so the first thing the operator sees on
+    // a slice is its README (current step + readiness), not a metric
+    // grid. Test now reflects the deliberate landing-tab choice.
+    const overviewTab = container.querySelector("[data-testid='project-tab-overview']");
+    const storyTabBefore = container.querySelector("[data-testid='project-tab-story']");
+    expect(overviewTab?.getAttribute("data-active")).toBe("true");
+    expect(storyTabBefore?.getAttribute("data-active")).toBe("false");
+    // Clicking the story tab still activates the TimelineTab panel.
+    fireEvent.click(storyTabBefore!);
+    const storyTabAfter = container.querySelector("[data-testid='project-tab-story']");
+    expect(storyTabAfter?.getAttribute("data-active")).toBe("true");
   });
 
   it("progress tab mounts AcceptanceTab (FOLDED per code-map)", async () => {

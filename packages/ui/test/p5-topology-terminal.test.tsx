@@ -272,8 +272,17 @@ describe("globals.css pulsing-ring CSS contract (ritual #7 pseudo-element-paint)
     const src = readFileSync(cssPath, "utf8");
     // Reduced-motion block must include .terminal-card-active so the pulse
     // animation is suppressed for users with motion-sensitivity preferences.
-    const reducedMotion = src.match(/@media \(prefers-reduced-motion: reduce\)\s*\{[\s\S]*?\}\s*\}/);
-    expect(reducedMotion).not.toBeNull();
-    expect(reducedMotion![0]).toMatch(/\.terminal-card-active/);
+    //
+    // globals.css has multiple @media (prefers-reduced-motion: reduce)
+    // blocks (one per animation cluster — vellum drift, activity rings,
+    // terminal cards, etc). Scan ALL of them — the prior single-match
+    // regex picked the first block (vellum-scroll-x) which doesn't
+    // include .terminal-card-active even though a later block does.
+    const blocks = Array.from(
+      src.matchAll(/@media \(prefers-reduced-motion: reduce\)\s*\{[\s\S]*?\}\s*\}/g),
+    );
+    expect(blocks.length).toBeGreaterThan(0);
+    const anyBlockHasTerminal = blocks.some((m) => /\.terminal-card-active/.test(m[0]));
+    expect(anyBlockHasTerminal).toBe(true);
   });
 });
