@@ -320,8 +320,9 @@ export function Feed() {
       missionsWithStatus,
       Array.isArray(sliceRows) ? sliceRows : [],
       completedMissionIds,
+      rawCards,
     ),
-    [missionsWithStatus, sliceRows, completedMissionIds],
+    [missionsWithStatus, sliceRows, completedMissionIds, rawCards],
   );
 
   // Slice 18 §3.5 — Getting Started complete-and-hide. Optimistic local
