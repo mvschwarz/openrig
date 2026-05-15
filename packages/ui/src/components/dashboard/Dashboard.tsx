@@ -10,8 +10,6 @@
 //   window.location → hostname (classification eyebrow + Field Report)
 
 import {
-  BackLayerContent,
-  BackVellumSheet,
   MidLayerContent,
   TopLayerContent,
   DestinationsLayer,
@@ -20,6 +18,13 @@ import { useRigSummary } from "../../hooks/useRigSummary.js";
 import { usePsEntries } from "../../hooks/usePsEntries.js";
 import { useSpecLibrary } from "../../hooks/useSpecLibrary.js";
 
+// Simplified per founder dispatch 2026-05-15: removed BackLayerContent
+// (the bold-black OPERATOR / OS·Ø tactical anchors) and BackVellumSheet
+// (the heavy translucent paper sheet). Dashboard now sits on the
+// page-level cream paper-grid background. Cards + top chrome + mid
+// marginalia carry the tactical character without the heavy back-layer
+// production. Matches the rest of the site better while preserving the
+// vellum vocabulary (corner brackets, glitch marks, inky display, etc).
 export function Dashboard() {
   const { data: rigs } = useRigSummary();
   const { data: psEntries } = usePsEntries();
@@ -34,8 +39,6 @@ export function Dashboard() {
 
   return (
     <div data-testid="dashboard-surface" className="relative min-h-screen overflow-hidden">
-      <BackLayerContent hostname={hostname} />
-      <BackVellumSheet />
       <MidLayerContent hostname={hostname} />
       <TopLayerContent
         hostname={hostname}

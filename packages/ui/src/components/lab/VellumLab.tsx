@@ -11,15 +11,20 @@
 
 import type { ReactNode } from "react";
 import {
-  BackLayerContent,
-  BackVellumSheet,
   MidLayerContent,
   TopLayerContent,
   DestinationsLayer,
 } from "../dashboard/vellum/index.js";
 
 interface VellumLabProps {
+  /** Optional back-content override — only renders if provided.
+   *  Default lab page is the SIMPLIFIED version (no back layer). The
+   *  /lab/vellum-bg/* experiment routes pass overrides to test
+   *  alternative back-layer compositions (topo lines / line art / etc). */
   backLayerOverride?: ReactNode;
+  /** Optional back-vellum-sheet override — only renders if provided.
+   *  Default lab page has no back sheet; experiment routes use this
+   *  to test diffusion levels paired with their back-layer override. */
   vellumSheetOverride?: ReactNode;
 }
 
@@ -32,19 +37,17 @@ export function VellumLab({
       data-testid="vellum-lab"
       className="relative min-h-screen overflow-hidden"
     >
-      {/* LAYER 0 — back content (bold black, full bleed) */}
-      {backLayerOverride ?? <BackLayerContent />}
+      {/* Optional back layers — render only if explicitly provided */}
+      {backLayerOverride}
+      {vellumSheetOverride}
 
-      {/* LAYER 1 — back vellum sheet (heavy blur on most of canvas) */}
-      {vellumSheetOverride ?? <BackVellumSheet />}
-
-      {/* LAYER 2 — mid content (smaller; peeks through back sheet) */}
+      {/* Mid content (marginalia + scattered marks) */}
       <MidLayerContent />
 
-      {/* LAYER 4 — top crisp fine-line elements (the printed top of stack) */}
+      {/* Top chrome (eyebrow, hero, footer, EYES EVERYWHERE, marks) */}
       <TopLayerContent />
 
-      {/* LAYER 5 — DESTINATIONS (clickable launcher elements). */}
+      {/* Destinations (clickable launcher cards) */}
       <DestinationsLayer />
     </div>
   );

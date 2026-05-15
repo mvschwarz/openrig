@@ -48,7 +48,7 @@ export function DestinationsLayer({ librarySize }: DestinationsLayerProps = {}) 
         layout="numeral"
         callouts={["HOST", "RIG", "POD", "SEAT"]}
         tint="stone"
-        shadow="none"
+        shadow="ambient"
       />
 
       <VellumDestinationCard
@@ -64,7 +64,7 @@ export function DestinationsLayer({ librarySize }: DestinationsLayerProps = {}) 
         callouts={["WORKSPACE", "MISSION", "SLICE", "TASK"]}
         washed
         tint="stone"
-        shadow="none"
+        shadow="ambient"
       />
 
       <VellumDestinationCard
@@ -80,7 +80,7 @@ export function DestinationsLayer({ librarySize }: DestinationsLayerProps = {}) 
         callouts={["NEEDS YOU", "SHIPPED", "IN-FLIGHT", "BLOCKED"]}
         accent
         tint="stone"
-        shadow="none"
+        shadow="ambient"
       />
 
       <VellumDestinationCard
@@ -95,7 +95,7 @@ export function DestinationsLayer({ librarySize }: DestinationsLayerProps = {}) 
         layout="numeral"
         callouts={["SPECS", "PLUGINS", "SKILLS", "PACKS"]}
         tint="stone"
-        shadow="none"
+        shadow="ambient"
       />
 
       <VellumDestinationCard
@@ -110,7 +110,7 @@ export function DestinationsLayer({ librarySize }: DestinationsLayerProps = {}) 
         layout="numeral"
         callouts={["AUDIT", "HISTORY", "QUERY", "FILTER"]}
         tint="stone"
-        shadow="none"
+        shadow="ambient"
       />
 
       <VellumDestinationCard
@@ -125,7 +125,7 @@ export function DestinationsLayer({ librarySize }: DestinationsLayerProps = {}) 
         layout="numeral"
         callouts={["CONFIG", "POLICY", "LOG", "STATUS"]}
         tint="stone"
-        shadow="none"
+        shadow="ambient"
       />
     </div>
   );
