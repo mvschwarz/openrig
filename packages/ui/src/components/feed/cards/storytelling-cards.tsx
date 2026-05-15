@@ -1,18 +1,20 @@
 // 0.3.1 slice 06 — For You storytelling card primitives.
 //
 // Mobile-first cards for the For You feed: collapsed (~80px) → tap
-// for inline-expanded preview → tap "Open" for drill-in to the
-// existing center route. Each card type carries its own data shape
-// + accent color but shares the CardShell chrome so the feed reads
-// as a rhythm of comparable tiles.
+// for inline-expanded preview → tap "Open" for drill-in.
 //
-// Tap target = entire card surface; all actionable elements ≥44px
-// touch target per IMPL-PRD §6 + HG-8.
+// Iter 2026-05-15 — vellum-coherent redesign per founder dispatch.
+// Cards now use the same vellum surface vocabulary as the dashboard
+// destination cards (translucent stone tint, backdrop-blur, ambient
+// shadow, L-shaped corner brackets) but with a LEGIBILITY-FIRST
+// content layout because For You is the human attention queue —
+// readability beats decoration.
 
 import { useState, type ReactNode } from "react";
+import { CornerBracket } from "../../dashboard/vellum/index.js";
 
 // -----------------------------------------------------------------------------
-// CardShell — shared chrome (header, accent stripe, collapse toggle)
+// CardShell — shared chrome
 // -----------------------------------------------------------------------------
 
 export interface CardShellProps {
@@ -24,18 +26,16 @@ export interface CardShellProps {
   expanded: ReactNode;
   drillInHref?: string;
   drillInLabel?: string;
-  /** Inline action row rendered at the top-right of the collapsed
-   *  view (e.g. Approve / Deny on the Approval-needed card). */
+  /** Inline action row rendered at the top-right of the collapsed view. */
   inlineActions?: ReactNode;
-  /** Optional accessory rendered to the left of the title — currently
-   *  used by IncidentCard to show a status dot on the collapsed view. */
+  /** Optional accessory rendered to the left of the title (status dot, bar). */
   leadingAccessory?: ReactNode;
 }
 
 export type CardKind = "shipped" | "incident" | "progress" | "approval" | "concept";
 
 interface CardAccent {
-  stripe: string;
+  stripe: string; // legacy — preserved for backwards compatibility
   pill: string;
   ink: string;
   label: string;
@@ -49,54 +49,113 @@ export const ACCENTS: Record<CardKind, CardAccent> = {
   concept:  { stripe: "border-l-violet-600",  pill: "bg-violet-50 border-violet-300",   ink: "text-violet-800",  label: "CONCEPT" },
 };
 
-export function CardShell({ testId, kind, title, oneLiner, accent, expanded, drillInHref, drillInLabel, inlineActions, leadingAccessory }: CardShellProps) {
+// Per-kind colored leading dot — uses design tokens (success/warning/
+// tertiary) NOT off-brand bg-emerald-50 etc. The dot is the ONLY color
+// on the kind tag; the rest is mono black for legibility.
+const KIND_DOT: Record<CardKind, string> = {
+  shipped:  "bg-success",
+  incident: "bg-tertiary",
+  progress: "bg-secondary",
+  approval: "bg-warning",
+  concept:  "bg-stone-500",
+};
+
+const KIND_LABEL: Record<CardKind, string> = {
+  shipped:  "Shipped",
+  incident: "Incident",
+  progress: "Progress",
+  approval: "Approval",
+  concept:  "Concept",
+};
+
+// Ambient shadow — multi-stop, defines card edges on all 4 sides.
+// Same recipe as the dashboard destination cards.
+const AMBIENT_SHADOW = {
+  boxShadow: [
+    "0 2px 4px rgba(0, 0, 0, 0.14)",
+    "0 8px 20px rgba(0, 0, 0, 0.16)",
+    "0 0 40px rgba(0, 0, 0, 0.12)",
+  ].join(", "),
+};
+
+export function CardShell({ testId, kind, title, oneLiner, expanded, drillInHref, drillInLabel, inlineActions, leadingAccessory }: CardShellProps) {
   const [open, setOpen] = useState(false);
   return (
     <article
       data-testid={testId}
       data-card-kind={kind}
       data-expanded={open}
-      className={`border border-outline-variant border-l-4 ${accent.stripe} bg-white/35 hard-shadow`}
+      style={AMBIENT_SHADOW}
+      className="relative bg-stone-100/45 backdrop-blur-[10px] overflow-hidden"
     >
+      {/* L-shaped corner brackets register the card bounds without a hard
+          border — vellum vocabulary from the dashboard. */}
+      <CornerBracket position="tl" />
+      <CornerBracket position="tr" />
+      <CornerBracket position="bl" />
+      <CornerBracket position="br" />
+
       <div
         role="button"
         tabIndex={0}
         data-testid={`${testId}-toggle`}
         onClick={() => setOpen((o) => !o)}
         onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setOpen((o) => !o); } }}
-        className="flex w-full min-h-[80px] cursor-pointer items-start gap-3 px-3 py-3 text-left"
+        className="flex w-full min-h-[80px] cursor-pointer items-start gap-4 px-5 py-4 text-left"
         aria-expanded={open}
       >
         <div className="flex-1 min-w-0">
+          {/* Kind tag — mono uppercase with leading colored dot. NOT a
+              colored pill; the only color is the dot. */}
           <div
             data-testid={`${testId}-pill`}
-            className={`inline-block border px-2 py-0.5 font-mono text-[8px] uppercase tracking-[0.18em] ${accent.pill} ${accent.ink}`}
+            className="flex items-center gap-2 font-mono text-[10px] uppercase tracking-[0.18em] text-stone-700"
           >
-            {accent.label}
+            <span aria-hidden="true" className={`inline-block w-1.5 h-1.5 rounded-full ${KIND_DOT[kind]}`} />
+            <span>{KIND_LABEL[kind]}</span>
           </div>
-          <h3 data-testid={`${testId}-title`} className="mt-1 flex items-center gap-2 text-[13px] font-bold text-stone-900">
+
+          {/* Title — display weight, sized for legibility (north star) */}
+          <h3
+            data-testid={`${testId}-title`}
+            className="mt-2 flex items-center gap-2 font-headline text-[16px] font-bold leading-tight text-stone-900"
+          >
             {leadingAccessory}
             <span className="truncate">{title}</span>
           </h3>
-          <p data-testid={`${testId}-one-liner`} className="mt-0.5 font-body text-[11px] leading-relaxed text-stone-700 line-clamp-2">
+
+          {/* One-liner — clear body text */}
+          <p
+            data-testid={`${testId}-one-liner`}
+            className="mt-1.5 font-body text-[12px] leading-relaxed text-stone-700 line-clamp-2"
+          >
             {oneLiner}
           </p>
         </div>
+
         {inlineActions && (
-          <div data-testid={`${testId}-inline-actions`} className="flex shrink-0 items-center gap-2" onClick={(e) => e.stopPropagation()}>
+          <div
+            data-testid={`${testId}-inline-actions`}
+            className="flex shrink-0 items-center gap-2"
+            onClick={(e) => e.stopPropagation()}
+          >
             {inlineActions}
           </div>
         )}
       </div>
+
       {open && (
-        <div data-testid={`${testId}-expanded`} className="border-t border-outline-variant px-3 py-3">
+        <div
+          data-testid={`${testId}-expanded`}
+          className="border-t border-outline-variant/40 px-5 py-4"
+        >
           {expanded}
           {drillInHref && (
             <div className="mt-3 flex justify-end">
               <a
                 data-testid={`${testId}-drill-in`}
                 href={drillInHref}
-                className="inline-block min-h-[44px] border border-stone-700 bg-stone-700 px-3 py-2 font-mono text-[10px] uppercase tracking-[0.12em] text-white hover:bg-stone-800"
+                className="inline-flex items-center gap-1 min-h-[44px] border border-stone-700 px-3 py-2 font-mono text-[10px] uppercase tracking-[0.12em] text-stone-700 hover:bg-stone-900 hover:text-white transition-colors"
                 onClick={(e) => e.stopPropagation()}
               >
                 {drillInLabel ?? "Open"} →
@@ -247,7 +306,7 @@ export function ProgressCard({
         event.stopPropagation();
         onMarkComplete(source.missionId);
       }}
-      className="border border-stone-300 bg-white/80 px-2 py-0.5 font-mono text-[10px] uppercase tracking-wide text-stone-700 hover:bg-stone-100 hover:text-stone-900 focus:outline-none focus:ring-1 focus:ring-stone-400"
+      className="min-h-[36px] border border-stone-700 px-3 py-1.5 font-mono text-[10px] uppercase tracking-[0.12em] text-stone-700 hover:bg-stone-900 hover:text-white transition-colors focus:outline-none focus:ring-1 focus:ring-stone-700"
     >
       Mark complete
     </button>
@@ -324,7 +383,7 @@ export function ApprovalCard({ source }: { source: ApprovalCardSource }) {
               type="button"
               data-testid={`feed-card-approval-${source.qitemId}-approve`}
               onClick={source.onApprove}
-              className="min-h-[44px] min-w-[44px] border border-emerald-700 bg-emerald-600 px-2 py-1 font-mono text-[10px] uppercase tracking-[0.12em] text-white"
+              className="min-h-[44px] border border-success px-3 py-1.5 font-mono text-[10px] uppercase tracking-[0.12em] text-success hover:bg-success hover:text-white transition-colors"
             >
               Approve
             </button>
@@ -334,7 +393,7 @@ export function ApprovalCard({ source }: { source: ApprovalCardSource }) {
               type="button"
               data-testid={`feed-card-approval-${source.qitemId}-deny`}
               onClick={source.onDeny}
-              className="min-h-[44px] min-w-[44px] border border-stone-400 bg-white px-2 py-1 font-mono text-[10px] uppercase tracking-[0.12em] text-stone-700"
+              className="min-h-[44px] border border-stone-700 px-3 py-1.5 font-mono text-[10px] uppercase tracking-[0.12em] text-stone-700 hover:bg-stone-900 hover:text-white transition-colors"
             >
               Deny
             </button>
