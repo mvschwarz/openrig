@@ -22,34 +22,41 @@ export interface VerbActionsProps {
   onSettled?: () => void;
 }
 
+// Vellum-coherent verb buttons: bordered-no-fill at rest; hover inverts
+// to filled. Active state stays filled to signal the operator's
+// selection while filling out the verb's required fields.
+//
+// Tone classes are mapped to design tokens (success / warning / tertiary
+// / secondary / stone-900) — never off-brand emerald/rose/sky/amber
+// utilities.
 const verbToneClass: Record<MissionControlVerb, { idle: string; active: string }> = {
   approve: {
-    idle: "border-emerald-300 bg-emerald-50/70 text-emerald-800 hover:bg-emerald-100/80",
-    active: "border-emerald-700 bg-emerald-700 text-white",
+    idle: "border-success text-success hover:bg-success hover:text-white",
+    active: "border-success bg-success text-white",
   },
   deny: {
-    idle: "border-rose-300 bg-rose-50/75 text-rose-800 hover:bg-rose-100/80",
-    active: "border-rose-700 bg-rose-700 text-white",
+    idle: "border-tertiary text-tertiary hover:bg-tertiary hover:text-white",
+    active: "border-tertiary bg-tertiary text-white",
   },
   route: {
-    idle: "border-sky-300 bg-sky-50/75 text-sky-800 hover:bg-sky-100/80",
-    active: "border-sky-700 bg-sky-700 text-white",
+    idle: "border-stone-700 text-stone-700 hover:bg-stone-900 hover:text-white",
+    active: "border-stone-900 bg-stone-900 text-white",
   },
   annotate: {
-    idle: "border-stone-300 bg-white/55 text-stone-700 hover:bg-stone-100",
-    active: "border-stone-700 bg-stone-700 text-white",
+    idle: "border-stone-700 text-stone-700 hover:bg-stone-900 hover:text-white",
+    active: "border-stone-900 bg-stone-900 text-white",
   },
   hold: {
-    idle: "border-amber-300 bg-amber-50/80 text-amber-800 hover:bg-amber-100/80",
-    active: "border-amber-700 bg-amber-700 text-white",
+    idle: "border-warning text-warning hover:bg-warning hover:text-white",
+    active: "border-warning bg-warning text-white",
   },
   drop: {
-    idle: "border-stone-300 bg-white/55 text-stone-700 hover:bg-stone-100",
-    active: "border-stone-700 bg-stone-700 text-white",
+    idle: "border-stone-700 text-stone-700 hover:bg-stone-900 hover:text-white",
+    active: "border-stone-900 bg-stone-900 text-white",
   },
   handoff: {
-    idle: "border-sky-300 bg-sky-50/75 text-sky-800 hover:bg-sky-100/80",
-    active: "border-sky-700 bg-sky-700 text-white",
+    idle: "border-stone-700 text-stone-700 hover:bg-stone-900 hover:text-white",
+    active: "border-stone-900 bg-stone-900 text-white",
   },
 };
 
@@ -142,7 +149,7 @@ export function VerbActions({
               disabled={mutation.isPending}
               title={meta.description}
               className={cn(
-                "inline-flex items-center gap-1 border px-2 py-1 font-mono text-[9px] uppercase tracking-[0.12em] transition-colors disabled:opacity-50",
+                "inline-flex min-h-[44px] items-center gap-1 border px-3 py-1.5 font-mono text-[10px] uppercase tracking-[0.12em] transition-colors disabled:opacity-50",
                 activeVerb === verb ? verbToneClass[verb].active : verbToneClass[verb].idle,
               )}
             >

@@ -1,7 +1,7 @@
 import { useRef, useState } from "react";
 import { ArrowRight, CalendarDays, CircleAlert, Clock, History, PackageCheck, X } from "lucide-react";
 
-import { VellumCard } from "../ui/vellum-card.js";
+import { CornerBracket } from "../dashboard/vellum/index.js";
 import { AuthorAgentTag } from "./AuthorAgentTag.js";
 import { QueueItemTrigger } from "../drawer-triggers/QueueItemTrigger.js";
 import type { QueueItemViewerData } from "../drawer-viewers/QueueItemViewer.js";
@@ -25,36 +25,25 @@ import { ACTION_VERB_META, actionVerbToken } from "../mission-control/action-ver
 import { ActorMark } from "../graphics/RuntimeMark.js";
 import { cn } from "../../lib/utils.js";
 
-const KIND_ACCENT: Record<FeedCardKind, string> = {
-  "action-required": "border-l-4 border-l-tertiary",
-  approval: "border-l-4 border-l-warning",
-  shipped: "border-l-4 border-l-success",
-  progress: "border-l-4 border-l-secondary",
-  observation: "border-l-4 border-l-stone-300",
+/**
+ * Vellum-coherent kind indicator. Mono uppercase tag + leading colored
+ * dot, mapped to the design tokens (success / warning / tertiary /
+ * secondary / stone-500). Replaces the old colored-pill chrome.
+ */
+const KIND_DOT: Record<FeedCardKind, string> = {
+  "action-required": "bg-tertiary",
+  approval: "bg-warning",
+  shipped: "bg-success",
+  progress: "bg-secondary",
+  observation: "bg-stone-500",
 };
 
-const TONE_ACCENT: Record<ProjectMetaTone, string> = {
-  neutral: "border-l-4 border-l-stone-300",
-  info: "border-l-4 border-l-secondary",
-  success: "border-l-4 border-l-success",
-  warning: "border-l-4 border-l-warning",
-  danger: "border-l-4 border-l-tertiary",
-};
-
-const TONE_TEXT: Record<ProjectMetaTone, string> = {
-  neutral: "text-stone-600",
-  info: "text-sky-800",
-  success: "text-emerald-800",
-  warning: "text-amber-800",
-  danger: "text-rose-800",
-};
-
-const TONE_RECEIPT: Record<ProjectMetaTone, string> = {
-  neutral: "border-stone-300 bg-white/35 text-stone-700",
-  info: "border-sky-300 bg-sky-50/30 text-sky-900",
-  success: "border-emerald-300 bg-emerald-50/30 text-emerald-900",
-  warning: "border-amber-300 bg-amber-50/35 text-amber-900",
-  danger: "border-rose-300 bg-rose-50/35 text-rose-900",
+const TONE_DOT: Record<ProjectMetaTone, string> = {
+  neutral: "bg-stone-500",
+  info: "bg-secondary",
+  success: "bg-success",
+  warning: "bg-warning",
+  danger: "bg-tertiary",
 };
 
 const KIND_TESTID: Record<FeedCardKind, string> = {
@@ -71,6 +60,23 @@ const KIND_TOKEN: Record<FeedCardKind, ProjectToken> = {
   shipped: { label: "Shipped", tone: "success", icon: PackageCheck },
   progress: { label: "Progress", tone: "info", icon: History },
   observation: { label: "Observation", tone: "neutral", icon: Clock },
+};
+
+/**
+ * Card surface — vellum-coherent. Matches CardShell in
+ * storytelling-cards.tsx so /for-you reads as one surface.
+ *   bg-stone-100/45 + backdrop-blur-[10px]
+ *   ambient 3-stop box-shadow defines the card edges through the vellum
+ *   no left-stripe, no outline border
+ */
+const CARD_SURFACE_CLASS =
+  "relative bg-stone-100/45 backdrop-blur-[10px] overflow-hidden group";
+const CARD_SHADOW_STYLE: React.CSSProperties = {
+  boxShadow: [
+    "0 2px 4px rgba(0, 0, 0, 0.14)",
+    "0 8px 20px rgba(0, 0, 0, 0.16)",
+    "0 0 40px rgba(0, 0, 0, 0.12)",
+  ].join(", "),
 };
 
 function asString(v: unknown): string | undefined {
@@ -195,11 +201,11 @@ function outcomeToken(outcome: FeedActionOutcome): ProjectToken {
   return actionVerbToken(outcome.verb, "outcome");
 }
 
+/** Inline meta mark: mono uppercase pill replacement — colored dot + label. */
 function InlineMetaMark({ token }: { token: ProjectToken }) {
-  const Icon = token.icon;
   return (
-    <span className={cn("inline-flex items-center gap-1 font-mono text-[9px] uppercase tracking-[0.12em]", TONE_TEXT[token.tone])}>
-      {Icon ? <Icon className="h-3 w-3" strokeWidth={1.6} /> : null}
+    <span className="inline-flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-[0.12em] text-stone-700">
+      <span aria-hidden="true" className={cn("inline-block w-1.5 h-1.5 rounded-full shrink-0", TONE_DOT[token.tone])} />
       {token.label}
     </span>
   );
@@ -257,21 +263,27 @@ function outcomeSentence(outcome: FeedActionOutcome): string {
   }
 }
 
+/**
+ * Action-outcome receipt strip — vellum-coherent.
+ *   subtle bg-stone-50/40 across all tones
+ *   leading colored dot indicates the tone, NOT the whole strip color
+ */
 function ActionOutcomePanel({ outcome }: { outcome: FeedActionOutcome }) {
   const meta = ACTION_VERB_META[outcome.verb];
   const Icon = meta.icon;
   return (
     <div
       data-testid="feed-card-action-outcome"
-      className={cn("mt-3 border-l-2 px-3 py-2 backdrop-blur-sm", TONE_RECEIPT[meta.tone])}
+      className="mt-3 bg-stone-50/40 px-3 py-2"
     >
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="flex min-w-0 items-start gap-2">
-          <span className="mt-0.5 inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-white/55 text-current">
+          <span aria-hidden="true" className={cn("mt-2 inline-block w-1.5 h-1.5 rounded-full shrink-0", TONE_DOT[meta.tone])} />
+          <span className="mt-0.5 inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-white/55 text-stone-800">
             <Icon className="h-4 w-4" strokeWidth={1.8} />
           </span>
           <div className="min-w-0">
-            <div className="font-mono text-[10px] uppercase tracking-[0.16em]">
+            <div className="font-mono text-[10px] uppercase tracking-[0.16em] text-stone-700">
               {meta.outcomeLabel}
             </div>
             <div className="mt-0.5 font-mono text-[9px] uppercase tracking-[0.12em] text-stone-500">
@@ -281,9 +293,6 @@ function ActionOutcomePanel({ outcome }: { outcome: FeedActionOutcome }) {
         </div>
         <InlineDateMark value={outcome.actedAt} />
       </div>
-      {/* Slice 16: action-outcome sentence is prose narrative.
-          Per DESIGN §Typography line 237: don't make page-level
-          content read like a raw terminal log; font-body for prose. */}
       <p className="mt-3 font-body text-[12px] leading-relaxed text-stone-800">
         {outcomeSentence(outcome)}
       </p>
@@ -320,10 +329,6 @@ export function FeedCard({
 
   const handleKeyDown: React.KeyboardEventHandler<HTMLElement> = (event) => {
     if (!onDismiss) return;
-    // Only honor Backspace/Delete when the article itself is the focused
-    // element — without this guard, the same keys typed into a nested
-    // interactive control (dismiss button, VerbActions, QueueItemTrigger,
-    // proof thumbnails) would bubble up and soft-dismiss the whole card.
     if (event.target !== event.currentTarget) return;
     if (event.key === "Backspace" || event.key === "Delete") {
       event.preventDefault();
@@ -367,17 +372,14 @@ export function FeedCard({
   const actorSession = destination?.startsWith("human") ? destination : "human@host";
   const renderedOutcome = actionOutcome ?? fallbackOutcomeFromQueueItem(card.kind, queueItem);
   const primaryToken = renderedOutcome ? outcomeToken(renderedOutcome) : KIND_TOKEN[card.kind];
-  const PrimaryIcon = primaryToken.icon;
+  const primaryDotClass = renderedOutcome
+    ? TONE_DOT[primaryToken.tone]
+    : KIND_DOT[card.kind];
   return (
-    /* Slice 16: vellum opacity moved from bg-white/50 into the DESIGN
-       §Vellum range of bg-white/25 – bg-white/40. Matches DashboardCard
-       + ProjectCard intensity; paper-grid backdrop reads through the
-       surface. */
-    <VellumCard
-      as="article"
-      testId={KIND_TESTID[card.kind]}
-      accentClass={renderedOutcome ? TONE_ACCENT[primaryToken.tone] : KIND_ACCENT[card.kind]}
-      className="mb-3 bg-white/35 backdrop-blur-sm group"
+    <article
+      data-testid={KIND_TESTID[card.kind]}
+      style={CARD_SHADOW_STYLE}
+      className={cn(CARD_SURFACE_CLASS, "mb-3")}
       {...(onDismiss
         ? {
             tabIndex: 0,
@@ -387,18 +389,28 @@ export function FeedCard({
           }
         : {})}
     >
+      {/* 4 corner brackets — register the card bounds through the vellum
+          without a hard border. */}
+      <CornerBracket position="tl" />
+      <CornerBracket position="tr" />
+      <CornerBracket position="bl" />
+      <CornerBracket position="br" />
+
       <div className="px-4 py-3">
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0 space-y-2">
             <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
-              <span className={cn("inline-flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-[0.16em]", TONE_TEXT[primaryToken.tone])}>
-                {PrimaryIcon ? <PrimaryIcon className="h-3.5 w-3.5" strokeWidth={1.8} /> : null}
+              {/* Kind tag — mono uppercase + leading colored dot. Replaces
+                  the old colored-pill chrome. */}
+              <span className="inline-flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-[0.16em] text-stone-700">
+                <span aria-hidden="true" className={cn("inline-block w-1.5 h-1.5 rounded-full shrink-0", primaryDotClass)} />
                 {primaryToken.label}
               </span>
               <InlineMetaMark token={eventToken(card.source.type)} />
               {qitemViewerData?.state ? <InlineMetaMark token={queueStateToken(qitemViewerData.state)} /> : null}
             </div>
-            <h3 className="font-mono text-sm text-stone-900 truncate">
+            {/* Title — legibility north star: 16px headline bold. */}
+            <h3 className="font-headline text-[16px] font-bold leading-tight text-stone-900 truncate">
               {card.title}
             </h3>
           </div>
@@ -418,9 +430,8 @@ export function FeedCard({
           </div>
         </div>
         {body ? (
-          // Slice 16: qitem / event body is prose. Per DESIGN
-          // §Typography: prose stays font-body Inter.
-          <p className="mt-3 font-body text-xs leading-relaxed text-on-surface-variant whitespace-pre-line">
+          // Qitem / event body is prose. 12px body for legibility.
+          <p className="mt-3 font-body text-[12px] leading-relaxed text-stone-700 whitespace-pre-line">
             {body}
           </p>
         ) : null}
@@ -435,7 +446,7 @@ export function FeedCard({
         {proofPreview && proofPreview.screenshots.length > 0 ? (
           <div
             data-testid={`feed-card-proof-preview-${card.id}`}
-            className="mt-3 border border-outline-variant bg-white/35 p-2 backdrop-blur-sm"
+            className="mt-3 bg-stone-50/40 p-2"
           >
             <ProofPacketHeader
               title={`Proof packet · ${proofPreview.displayName}`}
@@ -455,16 +466,15 @@ export function FeedCard({
         {qitemViewerData && isActionableCard(card.kind, queueItem, renderedOutcome) ? (
           <div
             data-testid={`feed-card-actions-${card.id}`}
-            className="mt-3 border border-rose-200 bg-rose-50/45 p-3 backdrop-blur-sm"
+            className="mt-3 bg-stone-50/40 p-3"
           >
             <div className="mb-2 flex flex-wrap items-start justify-between gap-2">
               <div>
-                <div className="inline-flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-[0.14em] text-rose-900">
-                  <CircleAlert className="h-3.5 w-3.5" strokeWidth={1.7} />
+                <div className="inline-flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-[0.14em] text-stone-700">
+                  <span aria-hidden="true" className={cn("inline-block w-1.5 h-1.5 rounded-full shrink-0", TONE_DOT.danger)} />
                   Your turn
                 </div>
-                {/* Slice 16: hint copy is prose; stays font-body. */}
-                <p className="mt-1 max-w-xl font-body text-[11px] leading-relaxed text-rose-800/80">
+                <p className="mt-1 max-w-xl font-body text-[12px] leading-relaxed text-stone-700">
                   Review the context, then approve, deny, or route this queue item.
                 </p>
               </div>
@@ -476,7 +486,7 @@ export function FeedCard({
             />
           </div>
         ) : null}
-        <div className="mt-3 flex items-center justify-between gap-3 font-mono text-[10px] text-on-surface-variant">
+        <div className="mt-3 flex items-center justify-between gap-3 font-mono text-[10px] text-stone-500">
           <div className="flex items-center gap-2 min-w-0">
             {card.authorSession ? (
               <AuthorAgentTag authorSession={card.authorSession} rigId={card.rigId} />
@@ -502,6 +512,6 @@ export function FeedCard({
           onClose={() => setSelectedScreenshot(null)}
         />
       ) : null}
-    </VellumCard>
+    </article>
   );
 }

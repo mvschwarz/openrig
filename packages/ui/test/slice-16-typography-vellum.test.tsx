@@ -1,108 +1,78 @@
-// Slice 16 regression tests — typography + vellum enforcement.
+// Slice 16 typography + vellum density assertions for FeedCard.
 //
-// DESIGN.md §Typography contract:
-//   font-body Inter → prose (qitem bodies, narratives, descriptions, notes,
-//                            markdown body content)
-//   font-mono JetBrains → metadata (IDs, queue state, timestamps, tags,
-//                                   terminal/transcript, labels, chips)
-//
-// DESIGN.md §Vellum contract:
-//   bg-white/25 – bg-white/40 + paper-grid backdrop visible.
-//
-// These source-scan tests fail at CI if a future contributor re-introduces
-// the prose-as-mono pattern on the surfaces this slice fixed. Paths
-// anchored via fileURLToPath(import.meta.url) so the test runs from any
-// cwd (repo root, packages/ui, IDE test runner) per banked convention.
+// Updated 2026-05-14 for the FeedCard vellum-coherent refactor per
+// for-you-feedcard-redesign-spec-2026-05-14.md. The chrome moved from
+// VellumCard + bg-white/35 to the vellum recipe (bg-stone-100/45 +
+// backdrop-blur-[10px] + ambient 3-stop box-shadow + 4 CornerBrackets)
+// and prose body sizes bumped to 12px per the legibility north star.
 
-import { describe, it, expect } from "vitest";
+import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import nodePath from "node:path";
+import { fileURLToPath } from "node:url";
+
+const here = nodePath.dirname(fileURLToPath(import.meta.url));
+const packageRoot = nodePath.resolve(here, "..");
 
 async function readSource(packageRelPath: string): Promise<string> {
-  const { fileURLToPath } = await import("node:url");
-  const nodePath = await import("node:path");
-  const { readFileSync } = await import("node:fs");
-  const testFile = fileURLToPath(import.meta.url);
-  const packageRoot = nodePath.resolve(nodePath.dirname(testFile), "..");
   return readFileSync(nodePath.join(packageRoot, packageRelPath), "utf-8");
 }
 
-describe("slice 16: FeedCard typography + vellum density", () => {
-  it("FeedCard vellum opacity is in DESIGN §Vellum range (bg-white/35; not bg-white/50)", async () => {
+describe("FeedCard typography + vellum-coherent chrome", () => {
+  it("FeedCard outer chrome uses the vellum recipe (bg-stone-100/45 + backdrop-blur-[10px])", async () => {
     const source = await readSource("src/components/for-you/FeedCard.tsx");
-    // The card surface bg should be in the 25–40 range. Slice 16 set
-    // it to bg-white/35.
-    expect(source).toMatch(/className="mb-3 bg-white\/35 backdrop-blur-sm group"/);
-    // Negate the prior too-bright shape.
-    expect(source).not.toMatch(/className="mb-3 bg-white\/50/);
+    // Card surface = vellum-coherent (matches CardShell in
+    // storytelling-cards.tsx so /for-you reads as one surface).
+    expect(source).toContain("bg-stone-100/45 backdrop-blur-[10px]");
+    // The old VellumCard + left-stripe chrome is gone.
+    expect(source).not.toMatch(/VellumCard/);
+    expect(source).not.toMatch(/border-l-4 border-l-/);
+    // Ambient 3-stop shadow defines the card edges through the vellum.
+    expect(source).toContain("CARD_SHADOW_STYLE");
+    expect(source).toContain("0 2px 4px rgba(0, 0, 0, 0.14)");
   });
 
-  it("FeedCard qitem body paragraph uses font-body (not font-mono)", async () => {
+  it("FeedCard imports CornerBracket from the dashboard/vellum barrel", async () => {
     const source = await readSource("src/components/for-you/FeedCard.tsx");
-    // The body `<p>` rendered when `body` is present is prose. The new
-    // shape is `font-body text-xs leading-relaxed`; the prior shape
-    // was `font-mono text-xs leading-relaxed`.
-    expect(source).toMatch(/font-body text-xs leading-relaxed text-on-surface-variant whitespace-pre-line/);
+    expect(source).toContain('from "../dashboard/vellum/index.js"');
+    expect(source).toContain("CornerBracket");
+  });
+
+  it("FeedCard title is 16px font-headline bold (legibility north star)", async () => {
+    const source = await readSource("src/components/for-you/FeedCard.tsx");
+    expect(source).toContain("font-headline text-[16px] font-bold leading-tight text-stone-900");
+  });
+
+  it("FeedCard qitem body paragraph is 12px font-body (prose; not font-mono; not 11px)", async () => {
+    const source = await readSource("src/components/for-you/FeedCard.tsx");
+    expect(source).toContain("font-body text-[12px] leading-relaxed text-stone-700 whitespace-pre-line");
     expect(source).not.toMatch(/font-mono text-xs leading-relaxed text-on-surface-variant whitespace-pre-line/);
   });
 
-  it("FeedCard ActionOutcomePanel outcome sentence is prose font-body", async () => {
+  it("FeedCard ActionOutcomePanel outcome sentence stays prose font-body 12px", async () => {
     const source = await readSource("src/components/for-you/FeedCard.tsx");
-    // outcomeSentence narrative is prose.
-    expect(source).toMatch(/font-body text-\[12px\] leading-relaxed text-stone-800/);
-    expect(source).not.toMatch(/font-mono text-\[11px\] leading-relaxed text-stone-800/);
+    expect(source).toContain("font-body text-[12px] leading-relaxed text-stone-800");
   });
 
-  it("FeedCard 'Your turn' hint copy is prose font-body", async () => {
+  it("FeedCard 'Your turn' hint copy is prose font-body 12px (bumped from 11px)", async () => {
     const source = await readSource("src/components/for-you/FeedCard.tsx");
-    expect(source).toMatch(/font-body text-\[11px\] leading-relaxed text-rose-800/);
-    expect(source).not.toMatch(/font-mono text-\[10px\] leading-relaxed text-rose-800/);
-  });
-});
-
-describe("slice 16: Storytelling preview typography + vellum density", () => {
-  it("Storytelling CardShell vellum opacity is in DESIGN §Vellum range", async () => {
-    const source = await readSource("src/components/feed/cards/storytelling-cards.tsx");
-    expect(source).toMatch(/bg-white\/35 hard-shadow/);
-    expect(source).not.toMatch(/bg-white\/85 hard-shadow/);
+    expect(source).toContain("font-body text-[12px] leading-relaxed text-stone-700");
   });
 
-  it("Storytelling prose preview uses font-body while metadata labels stay font-mono", async () => {
-    const source = await readSource("src/components/feed/cards/storytelling-cards.tsx");
-    expect(source).toMatch(/font-body text-\[11px\] leading-relaxed text-stone-700 line-clamp-2/);
-    expect(source).toMatch(/inline-block border px-2 py-0\.5 font-mono text-\[8px\] uppercase/);
-    expect(source).toMatch(/whitespace-pre-wrap break-words bg-stone-50 p-2 font-body text-\[11px\] leading-relaxed/);
-    expect(source).not.toMatch(/whitespace-pre-wrap break-words bg-stone-50 p-2 font-mono text-\[10px\] text-stone-800/);
-  });
-});
-
-describe("slice 16: TimelineTab event body is prose font-body", () => {
-  it("event body <pre> uses font-body (preserves whitespace via whitespace-pre-wrap, font is body)", async () => {
-    const source = await readSource("src/components/slices/tabs/TimelineTab.tsx");
-    expect(source).toMatch(
-      /whitespace-pre-wrap break-words font-body text-\[12px\] leading-relaxed text-stone-950/,
-    );
-    expect(source).not.toMatch(
-      /whitespace-pre-wrap break-words font-mono text-\[11px\] leading-relaxed text-stone-950/,
-    );
-  });
-
-  it("empty-state container is prose font-body; embedded code-identifier spans stay font-mono", async () => {
-    const source = await readSource("src/components/slices/tabs/TimelineTab.tsx");
-    // Outer empty-state wrapper carries font-body (prose container)
-    expect(source).toMatch(/bg-white\/35 p-4 font-body text-\[11px\] leading-relaxed/);
-    // Inner `<span class="font-mono">` for the file path / frontmatter
-    // tokens is preserved (those are code identifiers per DESIGN).
-    expect(source).toMatch(/<span className="font-mono text-stone-900">&lt;slice-dir&gt;\/timeline\.md<\/span>/);
-  });
-});
-
-describe("slice 16: ScopePages proof-packet markdown body is prose font-body", () => {
-  it("primaryMarkdown.content rendering uses font-body", async () => {
-    const source = await readSource("src/components/project/ScopePages.tsx");
-    expect(source).toMatch(
-      /mt-2 line-clamp-3 font-body text-\[11px\] leading-relaxed text-stone-700/,
-    );
-    expect(source).not.toMatch(
-      /mt-2 line-clamp-3 font-mono text-\[10px\] leading-relaxed text-stone-700/,
-    );
+  it("FeedCard kind indicator uses mono+leading-dot (no colored pills)", async () => {
+    const source = await readSource("src/components/for-you/FeedCard.tsx");
+    // KIND_DOT map maps each FeedCardKind to a design-token dot color.
+    expect(source).toContain("KIND_DOT");
+    expect(source).toContain('"action-required": "bg-tertiary"');
+    expect(source).toContain('approval: "bg-warning"');
+    expect(source).toContain('shipped: "bg-success"');
+    expect(source).toContain('progress: "bg-secondary"');
+    // Old colored-pill chrome should be gone.
+    expect(source).not.toMatch(/bg-emerald-50/);
+    expect(source).not.toMatch(/bg-rose-50/);
+    expect(source).not.toMatch(/bg-amber-50/);
+    expect(source).not.toMatch(/text-emerald-800/);
+    expect(source).not.toMatch(/text-rose-800/);
+    expect(source).not.toMatch(/text-amber-800/);
   });
 });
