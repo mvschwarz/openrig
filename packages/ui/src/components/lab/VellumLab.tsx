@@ -256,6 +256,7 @@ function DestinationsLayer() {
       {/* SHADOW SPIKE iter 22 — one shadow approach per card for
           side-by-side comparison. Once a winner is picked, all 6 cards
           unify on that style. */}
+      {/* Reverted to iter-15 mixed layouts per founder rollback. */}
       <VellumDestinationCard
         to="/topology"
         num="01"
@@ -265,10 +266,10 @@ function DestinationsLayer() {
         body="Host · Rig · Pod · Seat tree — live edges + runtimes; drill into any rig's pod graph."
         positionClass="top-[22%] left-[5%]"
         graphic={<TreeGraphic />}
-        layout="schematic"
+        layout="numeral"
         callouts={["HOST", "RIG", "POD", "SEAT"]}
         tint="stone"
-        shadow="ambient"
+        shadow="none"
       />
 
       <VellumDestinationCard
@@ -280,11 +281,11 @@ function DestinationsLayer() {
         body="Workspace · Mission · Slice. Browse all in-flight work by what agents are doing, not by repo."
         positionClass="top-[22%] left-[36%]"
         graphic={<StratigraphicGraphic />}
-        layout="schematic"
+        layout="numeral"
         callouts={["WORKSPACE", "MISSION", "SLICE", "TASK"]}
         washed
         tint="stone"
-        shadow="ambient"
+        shadow="none"
       />
 
       <VellumDestinationCard
@@ -296,11 +297,11 @@ function DestinationsLayer() {
         body="Action feed → what needs you · what shipped · what's in flight. Prioritized for the operator."
         positionClass="top-[22%] left-[67%]"
         graphic={<PulseGraphic />}
-        layout="schematic"
+        layout="numeral"
         callouts={["NEEDS YOU", "SHIPPED", "IN-FLIGHT", "BLOCKED"]}
         accent
         tint="stone"
-        shadow="ambient"
+        shadow="none"
       />
 
       <VellumDestinationCard
@@ -312,10 +313,10 @@ function DestinationsLayer() {
         body="Specs · Plugins · Skills · Context packs. Field catalog 0.3.1 — 38 active artifacts."
         positionClass="top-[55%] left-[5%]"
         graphic={<SphereGraphic />}
-        layout="schematic"
+        layout="numeral"
         callouts={["SPECS", "PLUGINS", "SKILLS", "PACKS"]}
         tint="stone"
-        shadow="ambient"
+        shadow="none"
       />
 
       <VellumDestinationCard
@@ -327,10 +328,10 @@ function DestinationsLayer() {
         body="Audit history · full artifact explorer. V1 placeholder; the full surface ships in V2."
         positionClass="top-[55%] left-[36%]"
         graphic={<MagnifierGraphic />}
-        layout="schematic"
+        layout="numeral"
         callouts={["AUDIT", "HISTORY", "QUERY", "FILTER"]}
         tint="stone"
-        shadow="ambient"
+        shadow="none"
       />
 
       <VellumDestinationCard
@@ -342,10 +343,10 @@ function DestinationsLayer() {
         body="Config · Policy · Log · Status. Operator-grade controls; ConfigStore-backed; reversible."
         positionClass="top-[55%] left-[67%]"
         graphic={<GearGraphic />}
-        layout="schematic"
+        layout="numeral"
         callouts={["CONFIG", "POLICY", "LOG", "STATUS"]}
         tint="stone"
-        shadow="ambient"
+        shadow="none"
       />
     </div>
   );
@@ -539,19 +540,15 @@ function VellumDestinationCard(props: VellumDestinationCardProps) {
   // Subtle tints — each is a different paper grade. All at ~/35–/40
   // alpha so backdrop-blur still does the vellum work but the surface
   // picks up a soft warm/cool cast.
-  // Iter 30 — diagnosed: the back vellum (white/25 + blur-8px) was
-  // ALREADY blurring the topo lines, then the card's blur-10px +
-  // tint /15 doubled the diffusion + tint, leaving cards near-opaque.
-  // Fix: drop card tints to ~/8 + drop card backdrop-blur to 2px so
-  // the topo lines flowing through the cards are clearly visible.
+  // Restored to iter-15 values per founder rollback request 2026-05-14.
   const tintBg: Record<string, string> = {
-    white: "bg-white/6",
-    cream: "bg-amber-50/10",
-    stone: "bg-stone-100/8",
-    rose:  "bg-rose-50/10",
-    slate: "bg-slate-50/10",
-    sepia: "bg-yellow-50/10",
-    mint:  "bg-emerald-50/8",
+    white: "bg-white/30",
+    cream: "bg-amber-50/45",
+    stone: "bg-stone-100/45",
+    rose:  "bg-rose-50/45",
+    slate: "bg-slate-50/50",
+    sepia: "bg-yellow-50/45",
+    mint:  "bg-emerald-50/40",
   };
   // Iter 23 — AMBIENT shadow (all 4 sides defined). Multi-stop combo:
   // tiny downward key shadow for natural weight + non-directional
@@ -584,7 +581,7 @@ function VellumDestinationCard(props: VellumDestinationCardProps) {
       <article
         data-testid={`destination-${num}`}
         style={shadowStyle[shadow]}
-        className={`relative h-full ${tintBg[tint]} backdrop-blur-[2px] overflow-hidden transition-transform duration-300 ease-tactical group-hover:-translate-y-0.5 motion-reduce:transition-none motion-reduce:group-hover:translate-y-0`}
+        className={`relative h-full ${tintBg[tint]} backdrop-blur-[10px] overflow-hidden transition-transform duration-300 ease-tactical group-hover:-translate-y-0.5 motion-reduce:transition-none motion-reduce:group-hover:translate-y-0`}
       >
         {/* 90° corner brackets at all four corners */}
         <CornerBracket position="tl" />
@@ -642,7 +639,11 @@ interface NumeralLayoutProps {
 function NumeralLayout({ big, numClass, graphic, body, label, icon, to, accent, textClass }: NumeralLayoutProps) {
   return (
     <>
-      <span className="absolute top-[100px] left-[40%] font-mono text-[10px] text-stone-600 select-none">[?]</span>
+      {/* Per-card annotation mark removed iter 32 — its uniform position
+          on every card made it read as intentional UI rather than the
+          intended "glitch / artifact" feel. Floating marks live in
+          TopLayerContent's FloatingTopMarks instead, where they're
+          scattered at random-looking positions. */}
       <div className={`absolute top-7 left-3 font-headline font-black text-[110px] leading-[0.82] tracking-[-0.06em] text-stone-900 select-none ${numClass}`}>
         {big[0]}
         <sup className="text-[55px] tracking-tight align-super">{big[1]}</sup>
@@ -996,7 +997,9 @@ function TopLayerContent() {
 function FloatingTopMarks() {
   const marks: Array<{ pos: string; text: string; size?: string }> = [
     { pos: "top-[18%] left-[36%]", text: "▪ 03°", size: "text-[10px]" },
-    { pos: "top-[28%] left-[28%]", text: "[?]", size: "text-sm" },
+    // [?] at top-[28%] left-[28%] removed iter 32 — was covering the
+    // TOPOLOGY card's tree diagram. The other floating marks stay so
+    // the dashboard still has the scattered "glitch artifact" feel.
     { pos: "top-[24%] right-[34%]", text: "**", size: "text-base" },
     { pos: "top-[44%] left-[44%]", text: "+", size: "text-sm" },
     { pos: "top-[52%] right-[36%]", text: "(A)", size: "text-[10px]" },
