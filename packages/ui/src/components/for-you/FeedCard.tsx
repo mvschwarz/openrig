@@ -317,12 +317,19 @@ export function FeedCard({
   proofPreview,
   actionOutcome,
   onDismiss,
+  onOptimisticOutcome,
 }: {
   card: FeedCardModel;
   queueItem?: QueueItemDetail;
   proofPreview?: FeedProofPreview | null;
   actionOutcome?: FeedActionOutcome | null;
   onDismiss?: (seq: number) => void;
+  /**
+   * 0.3.1 demo-bug fix — fired by VerbActions on mutation success
+   * so the parent (Feed.tsx) can render the ActionOutcomePanel
+   * optimistically without waiting for the audit-log re-fetch.
+   */
+  onOptimisticOutcome?: (qitemId: string, outcome: FeedActionOutcome) => void;
 }) {
   const [selectedScreenshot, setSelectedScreenshot] = useState<string | null>(null);
   const dragStateRef = useRef<{ startX: number; pointerId: number; isTouch: boolean } | null>(null);
@@ -483,6 +490,11 @@ export function FeedCard({
               qitemId={qitemViewerData.qitemId}
               actorSession={actorSession}
               enabledVerbs={["approve", "deny", "route"]}
+              onOptimisticOutcome={
+                onOptimisticOutcome
+                  ? (outcome) => onOptimisticOutcome(qitemViewerData.qitemId, outcome)
+                  : undefined
+              }
             />
           </div>
         ) : null}
