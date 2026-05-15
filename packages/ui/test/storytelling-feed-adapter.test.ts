@@ -7,6 +7,40 @@
 
 import { describe, it, expect } from "vitest";
 import { buildStorytellingFeedItems } from "../src/components/feed/cards/storytelling-cards.js";
+import type { FeedCard } from "../src/lib/feed-classifier.js";
+import type { ActivityEvent } from "../src/hooks/useActivityFeed.js";
+
+function makeApprovalFeedCard(opts: {
+  qitemId?: string;
+  altKey?: "qitem_id";
+  title?: string;
+  body?: string;
+  authorSession?: string;
+  id?: string;
+}): FeedCard {
+  const payload: Record<string, unknown> = {};
+  if (opts.qitemId !== undefined) {
+    if (opts.altKey === "qitem_id") payload.qitem_id = opts.qitemId;
+    else payload.qitemId = opts.qitemId;
+  }
+  const evt: ActivityEvent = {
+    seq: 1,
+    type: "queue.created",
+    payload,
+    createdAt: "2026-05-15T00:00:00.000Z",
+    receivedAt: 1_700_000_000_000,
+  };
+  return {
+    id: opts.id ?? "queue.created-1",
+    kind: "approval",
+    title: opts.title ?? "Approval needed",
+    body: opts.body,
+    authorSession: opts.authorSession,
+    receivedAt: evt.receivedAt,
+    createdAt: evt.createdAt,
+    source: evt,
+  };
+}
 
 describe("buildStorytellingFeedItems — production adapter", () => {
   it("routes missions into ProgressCard items (Finding 2 fix: ProgressCard now wired)", () => {
@@ -99,5 +133,78 @@ describe("buildStorytellingFeedItems — production adapter", () => {
     // @ts-expect-error — intentional shape mismatch to verify defensive
     // guards against runtime data drift (daemon could return null).
     expect(buildStorytellingFeedItems(null, undefined)).toEqual([]);
+  });
+
+  it("routes approval-kind FeedCards into ApprovalCard items with qitemId extracted from payload", () => {
+    const items = buildStorytellingFeedItems(
+      [],
+      [],
+      undefined,
+      [
+        makeApprovalFeedCard({ qitemId: "qitem-abc", title: "Approve this", body: "body text", authorSession: "advisor@rig" }),
+        makeApprovalFeedCard({ qitemId: "qitem-def", altKey: "qitem_id", title: "Approve that" }),
+      ],
+    );
+    expect(items).toHaveLength(2);
+    expect(items.every((i) => i.kind === "approval")).toBe(true);
+    if (items[0]!.kind === "approval") {
+      expect(items[0]!.source.qitemId).toBe("qitem-abc");
+      expect(items[0]!.source.title).toBe("Approve this");
+      expect(items[0]!.source.oneLiner).toContain("advisor@rig");
+      expect(items[0]!.source.bodyPreview).toBe("body text");
+      expect(items[0]!.source.drillInHref).toBe("/for-you");
+    }
+    if (items[1]!.kind === "approval") {
+      // Snake-case payload key also resolves.
+      expect(items[1]!.source.qitemId).toBe("qitem-def");
+    }
+  });
+
+  it("caps approvals at 2 to keep the preview band tight", () => {
+    const items = buildStorytellingFeedItems(
+      [],
+      [],
+      undefined,
+      [
+        makeApprovalFeedCard({ qitemId: "q1" }),
+        makeApprovalFeedCard({ qitemId: "q2" }),
+        makeApprovalFeedCard({ qitemId: "q3" }),
+        makeApprovalFeedCard({ qitemId: "q4" }),
+      ],
+    );
+    expect(items.filter((i) => i.kind === "approval")).toHaveLength(2);
+  });
+
+  it("ignores non-approval FeedCards (Shipped / Progress / Incident come from missions+slices, not from feedCards)", () => {
+    const nonApproval: FeedCard[] = [
+      { ...makeApprovalFeedCard({ qitemId: "x1" }), kind: "shipped" },
+      { ...makeApprovalFeedCard({ qitemId: "x2" }), kind: "progress" },
+      { ...makeApprovalFeedCard({ qitemId: "x3" }), kind: "action-required" },
+      { ...makeApprovalFeedCard({ qitemId: "x4" }), kind: "observation" },
+    ];
+    const items = buildStorytellingFeedItems([], [], undefined, nonApproval);
+    // No approval inputs ⇒ no approval outputs. Non-approval FeedCards
+    // are NOT routed through this adapter (mission/slice rows are the
+    // source for those kinds).
+    expect(items).toEqual([]);
+  });
+
+  it("never emits concept-kind items — ConceptCard is deferred to a 0.3.2 slice", () => {
+    const items = buildStorytellingFeedItems(
+      [{ name: "m1", path: "missions/m1" }],
+      [{ name: "s1", status: "shipped" }, { name: "s2", status: "blocked" }],
+      undefined,
+      [makeApprovalFeedCard({ qitemId: "q1" })],
+    );
+    expect(items.some((i) => i.kind === "concept")).toBe(false);
+  });
+
+  it("falls back to FeedCard.id when payload has no qitemId/qitem_id key", () => {
+    const card = makeApprovalFeedCard({ id: "queue.created-42" });
+    const items = buildStorytellingFeedItems([], [], undefined, [card]);
+    expect(items).toHaveLength(1);
+    if (items[0]!.kind === "approval") {
+      expect(items[0]!.source.qitemId).toBe("queue.created-42");
+    }
   });
 });

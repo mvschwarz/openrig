@@ -12,6 +12,7 @@
 
 import { useState, type ReactNode } from "react";
 import { CornerBracket } from "../../dashboard/vellum/index.js";
+import type { FeedCard } from "../../../lib/feed-classifier.js";
 
 // -----------------------------------------------------------------------------
 // CardShell — shared chrome
@@ -501,6 +502,17 @@ export interface AdapterSliceRow {
   status?: string | null;
   lastActivityAt?: string | null;
 }
+// Wired card kinds (post 0.3.1 storytelling-adapter wire-up):
+//   - progress  ← missions (mapped from useMissionDiscovery rows)
+//   - shipped   ← slices with status shipped/complete/done
+//   - incident  ← slices with status blocked/failed/danger/etc.
+//   - approval  ← FeedCard items with kind === "approval" (from
+//                 useActivityFeed → classifyFeed) — caller threads in
+//                 via the 4th arg.
+// Deferred: concept — ConceptCard component is preserved for a 0.3.2
+// slice that picks a deliberate data source; until then the adapter
+// never emits concept items and the production switch in
+// StorytellingFeed has no concept branch.
 export function buildStorytellingFeedItems(
   missions: AdapterMissionRow[],
   slices: AdapterSliceRow[],
@@ -511,6 +523,14 @@ export function buildStorytellingFeedItems(
    * disappears from the storytelling band).
    */
   completedMissionIds?: Set<string>,
+  /**
+   * 0.3.1 storytelling-adapter wire-up — already-classified FeedCard
+   * items from useActivityFeed/classifyFeed. The adapter filters to
+   * `kind === "approval"` and emits up to 2 ApprovalCards in the
+   * preview band. Other kinds are ignored here (FeedCard.tsx continues
+   * to render the long-form list below).
+   */
+  feedCards?: FeedCard[],
 ): FeedCardItem[] {
   const items: FeedCardItem[] = [];
   // Two filters: (1) localStorage optimistic hide set; (2) durable
@@ -560,6 +580,38 @@ export function buildStorytellingFeedItems(
       items.push({ kind: "incident", source: { sliceId, title, oneLiner, status: "info" } });
     }
   }
+  // Approval wire-up: classified FeedCards with kind === "approval" are
+  // mapped to ApprovalCardSource. qitemId lives in the source event
+  // payload (FeedCard.id is `${type}-${seq}`, not the qitem id); fall
+  // back to FeedCard.id only if neither key is present so each card
+  // still has a stable React key. Cap at 2 to match the band's tight
+  // preview budget.
+  const approvals = (feedCards ?? []).filter((c) => c.kind === "approval");
+  for (const card of approvals.slice(0, 2)) {
+    const payload = (card.source.payload ?? {}) as Record<string, unknown>;
+    const fromPayload =
+      (typeof payload.qitemId === "string" && payload.qitemId.length > 0)
+        ? payload.qitemId
+        : (typeof payload.qitem_id === "string" && payload.qitem_id.length > 0)
+          ? payload.qitem_id
+          : null;
+    const qitemId = fromPayload ?? card.id;
+    const author = card.authorSession ? ` from ${card.authorSession}` : "";
+    const bodyPreview =
+      card.body && card.body.length > 240
+        ? `${card.body.slice(0, 237)}...`
+        : card.body;
+    items.push({
+      kind: "approval",
+      source: {
+        qitemId,
+        title: card.title,
+        oneLiner: `Needs approval${author}`,
+        bodyPreview,
+        drillInHref: "/for-you",
+      },
+    });
+  }
   return items;
 }
 
@@ -582,11 +634,14 @@ export function StorytellingFeed({
   return (
     <div data-testid="storytelling-feed" className="flex flex-col gap-4">
       {items.map((item, i) => {
+        // ConceptCard is preserved as a component but is not reachable
+        // here — the adapter never emits `kind: "concept"`. A 0.3.2
+        // slice will pick a data source and re-add the branch.
         if (item.kind === "shipped")  return <ShippedCard key={i}  source={item.source} />;
         if (item.kind === "incident") return <IncidentCard key={i} source={item.source} />;
         if (item.kind === "progress") return <ProgressCard key={i} source={item.source} onMarkComplete={onMarkMissionComplete} />;
         if (item.kind === "approval") return <ApprovalCard key={i} source={item.source} />;
-        return <ConceptCard key={i} source={item.source} />;
+        return null;
       })}
     </div>
   );
