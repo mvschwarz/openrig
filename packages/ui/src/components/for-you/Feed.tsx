@@ -216,6 +216,24 @@ export function Feed() {
   const { events } = useActivityFeed();
   const [lens, setLens] = useState<FeedCardKind | "all">("all");
   const subs = useFeedSubscriptions();
+  // Demo-bug fix #1 — optimistic action outcomes keyed by qitemId.
+  // VerbActions fires onOptimisticOutcome on mutation success; the
+  // ActionOutcomePanel reads from here first, falling back to the
+  // audit-derived map below. Audit re-fetch eventually surfaces the
+  // same shape, but the user-visible state is instant.
+  const [optimisticOutcomes, setOptimisticOutcomes] = useState<Map<string, FeedActionOutcome>>(
+    () => new Map(),
+  );
+  const setOptimisticOutcome = useCallback(
+    (qitemId: string, outcome: FeedActionOutcome) => {
+      setOptimisticOutcomes((prev) => {
+        const next = new Map(prev);
+        next.set(qitemId, outcome);
+        return next;
+      });
+    },
+    [],
+  );
 
   const rawCards = useMemo(() => classifyFeed(events).slice(0, HISTORY_LIMIT), [events]);
   const rawCardSeqs = useMemo(() => rawCards.map((c) => c.source.seq), [rawCards]);
@@ -405,7 +423,9 @@ export function Feed() {
             const queueItem = qitemId ? queueItems.itemsById.get(qitemId) : undefined;
             const sliceName = c.kind === "shipped" ? sliceForCard(c, queueItem, sliceRows) : null;
             const proofPreview = sliceName ? proofPreviewForSlice(proofSlices.itemsByName.get(sliceName)) : null;
-            const actionOutcome = qitemId ? actionOutcomes.get(qitemId) ?? null : null;
+            const actionOutcome = qitemId
+              ? optimisticOutcomes.get(qitemId) ?? actionOutcomes.get(qitemId) ?? null
+              : null;
             return (
               <FeedCard
                 key={c.id}
@@ -414,6 +434,7 @@ export function Feed() {
                 proofPreview={proofPreview}
                 actionOutcome={actionOutcome}
                 onDismiss={handleDismiss}
+                onOptimisticOutcome={setOptimisticOutcome}
               />
             );
           })}

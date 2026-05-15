@@ -13,6 +13,7 @@ import {
 import { useMissionControlDestinations } from "../hooks/useMissionControlDestinations.js";
 import { ACTION_VERB_META } from "../action-verb-meta.js";
 import { cn } from "../../../lib/utils.js";
+import type { FeedActionOutcome } from "../../for-you/FeedCard.js";
 
 export interface VerbActionsProps {
   qitemId: string;
@@ -20,6 +21,21 @@ export interface VerbActionsProps {
   /** Restrict the verbs offered (e.g., my-queue may only show approve/deny). */
   enabledVerbs?: MissionControlVerb[];
   onSettled?: () => void;
+  /**
+   * 0.3.1 demo-bug fix — optimistic outcome callback. Fires on
+   * mutation success with a FeedActionOutcome built from the input
+   * verb + destination + actor. Parent (Feed.tsx) stashes this in a
+   * local Map so the ActionOutcomePanel renders instantly without
+   * waiting for the audit-log roundtrip. The audit query re-fetch
+   * reconciles to the same shape later.
+   */
+  onOptimisticOutcome?: (outcome: FeedActionOutcome) => void;
+}
+
+function extractMutationErrorMessage(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  if (typeof err === "string") return err;
+  return "Action failed.";
 }
 
 // Vellum-coherent verb buttons: bordered-no-fill at rest; hover inverts
@@ -65,6 +81,7 @@ export function VerbActions({
   actorSession,
   enabledVerbs = [...MISSION_CONTROL_VERBS],
   onSettled,
+  onOptimisticOutcome,
 }: VerbActionsProps) {
   const mutation = useMissionControlAction();
   const [activeVerb, setActiveVerb] = useState<MissionControlVerb | null>(null);
@@ -72,6 +89,10 @@ export function VerbActions({
   const [manualDestination, setManualDestination] = useState(false);
   const [annotation, setAnnotation] = useState("");
   const [reason, setReason] = useState("");
+  // Demo-bug fix #2 — inline error state. Cleared on verb selection +
+  // explicit reset; held across mutation state transitions so the
+  // operator sees what failed instead of a silent revert.
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   const needsDestination = activeVerb === "route" || activeVerb === "handoff";
   const needsAnnotation = activeVerb === "annotate";
@@ -83,6 +104,7 @@ export function VerbActions({
     setManualDestination(false);
     setAnnotation("");
     setReason("");
+    setErrorMessage(null);
   }
 
   function selectVerb(verb: MissionControlVerb) {
@@ -91,23 +113,41 @@ export function VerbActions({
     setManualDestination(false);
     setAnnotation("");
     setReason("");
+    setErrorMessage(null);
   }
 
   function submit() {
     if (!activeVerb) return;
+    const verb = activeVerb;
+    const dest = needsDestination ? destinationSession : undefined;
+    const reasonText = needsReason ? reason : undefined;
     mutation.mutate(
       {
-        verb: activeVerb,
+        verb,
         qitemId,
         actorSession,
-        destinationSession: needsDestination ? destinationSession : undefined,
+        destinationSession: dest,
         annotation: needsAnnotation ? annotation : undefined,
-        reason: needsReason ? reason : undefined,
+        reason: reasonText,
       },
       {
-        onSettled: () => {
+        // Demo-bug fix #1 — split onSuccess / onError so the error
+        // path doesn't reset the selection (silent-revert symptom).
+        // Optimistic outcome fires on success so ActionOutcomePanel
+        // renders without waiting for the audit-log roundtrip.
+        onSuccess: () => {
+          onOptimisticOutcome?.({
+            verb,
+            actorSession,
+            actedAt: new Date().toISOString(),
+            destinationSession: dest ?? null,
+            reason: reasonText ?? null,
+          });
           reset();
           onSettled?.();
+        },
+        onError: (err) => {
+          setErrorMessage(extractMutationErrorMessage(err));
         },
       },
     );
@@ -253,13 +293,18 @@ export function VerbActions({
               {mutation.isPending ? "..." : `Confirm ${ACTION_VERB_META[activeVerb].label}`}
             </button>
           </div>
-          {mutation.isError ? (
-            <div data-testid="mc-verb-error" className="font-mono text-[10px] text-red-700">
-              error: {mutation.error.message}
-            </div>
-          ) : null}
         </div>
       )}
+      {errorMessage ? (
+        <div
+          data-testid="mc-verb-error"
+          role="alert"
+          className="truncate border border-tertiary bg-stone-50/40 px-3 py-2 font-mono text-[10px] uppercase tracking-[0.12em] text-tertiary"
+          title={errorMessage}
+        >
+          {errorMessage}
+        </div>
+      ) : null}
     </div>
   );
 }
