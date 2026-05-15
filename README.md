@@ -94,7 +94,7 @@ CLI / UI / MCP
       |
 Hono HTTP daemon
       |
-  Domain services (52)
+  Domain services
       |
   SQLite + tmux + runtime adapters
 ```
