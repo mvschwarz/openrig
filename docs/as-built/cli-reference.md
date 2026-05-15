@@ -1,6 +1,6 @@
 # OpenRig CLI Reference
 
-Verified against the shipped CLI on 2026-05-10 (v0.3.0) using:
+Verified against the shipped CLI on 2026-05-15 (v0.3.1) using:
 - `packages/cli/src/index.ts`
 - `packages/cli/src/commands/*.ts`
 - `packages/cli/src/mcp-server.ts`
@@ -11,7 +11,7 @@ This document reflects the current `rig` surface as shipped. Where live help tex
 ## Overview
 
 - Binary: `rig`
-- Top-level command groups: `56`
+- Top-level command groups: `57`
 - Output mode: human-readable by default; many commands also support `--json`
 - Daemon-backed commands fail when the daemon is stopped or unhealthy; `daemon`, `config`, `preflight`, and `doctor` also have local responsibilities
 - Managed apps are launched through the normal spec/library surfaces; the canonical shipped example is `rig up secrets-manager`
@@ -77,6 +77,7 @@ This document reflects the current `rig` surface as shipped. Where live help tex
 | `agent-image` | Browse, snapshot, and manage agent images |
 | `context-pack` | Browse, preview, send, and install operator-authored context packs |
 | `workspace` | Workspace primitive — typed-kind tooling (frontmatter validation) |
+| `plugin` | Inspect plugins (read-only) — list, show, used-by, validate |
 
 ## Core Daemon and System Commands
 
@@ -922,6 +923,28 @@ Notes:
 - v0 surface is intentionally narrow (`validate` only) — read-only frontmatter audit.
 - Future versions will add typed-kind authoring/refactor tooling on the same root walker.
 - See `rig config init-workspace` to scaffold a fresh default workspace.
+
+## Plugin Inspection (v0.3.1)
+
+One read-only top-level command added in v0.3.1 to inspect plugins
+discovered from `$OPENRIG_HOME/plugins/` (default `~/.openrig/plugins/`).
+No `install` verb at v0 — installation is explicit operator copy or
+symlink per each plugin's `OPENRIG-INSTALL.md`.
+
+### `rig plugin`
+
+Usage: `rig plugin <subcommand>` — read-only plugin inspection.
+
+Subcommands:
+- `list [options]` — list discoverable plugins (aggregated across vendored + runtime caches).
+- `show <id> [options]` — show plugin manifest + skills + hooks + mcp servers.
+- `used-by <id> [options]` — list agents referencing this plugin in their `profile.uses.plugins[]`.
+- `validate <path> [options]` — validate plugin manifest + skill frontmatter against the agentskills.io spec.
+
+Notes:
+- Plugin discovery aggregates `$OPENRIG_HOME/plugins/` (vendored at runtime by the operator) with the daemon's bundled plugin cache.
+- `openrig-core` ships bundled with the daemon (11 skills). Additional plugins (`gstack` — 45 skills; `obra-superpowers` — 14 skills) ship as substrate references for plugin authors to copy-install per the `OPENRIG-INSTALL.md` workflow inside each plugin's source tree.
+- A first-class `rig plugin install <substrate-path>` verb is deferred to 0.3.2.
 
 ## Commands Not Present
 

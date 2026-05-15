@@ -8,9 +8,10 @@ deprecations, and behavioral changes. Breaking changes are called out explicitly
 
 ---
 
-## [0.3.1] - unreleased
+## [0.3.1] - 2026-05-15
 
-**Status**: release candidate; awaiting lifecycle-rig staging + host upgrade.
+**Status**: released. npm `@openrig/cli@0.3.1` (latest); GitHub Release
+`v0.3.1`; git tag `v0.3.1`.
 
 ### Summary For Installing Agents
 
