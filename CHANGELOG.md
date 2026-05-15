@@ -159,6 +159,100 @@ TopologyTableView renderer cascade); the topology mobile drawer is
 scheduled for full restoration in 0.3.2 via a dedicated
 TopologyTableView render-path slice.
 
+### Dashboard And For You Visual Refresh
+
+The Dashboard (`/`) and For You (`/for-you`) destinations got a coordinated
+visual refresh to a "vellum" surface language — translucent stone-tinted
+cards over a paper-grid background, ambient multi-stop shadow, mono+dot
+kind indicators, and L-shaped corner-bracket registration marks. The
+chrome vocabulary is consistent across destination cards (Dashboard) and
+both feed-card systems (For You).
+
+- **Dashboard** — full rewrite of `/` into a thin composition over new
+  `dashboard/vellum/` primitives (`BackVellumSheet`, `MidLayerContent`,
+  `TopLayerContent`, `DestinationsLayer`, `VellumDestinationCard`,
+  `CornerBracket`, `graphics.tsx`, `marks.tsx`). Hero typography ("WELCOME
+  BACK") at display-lg + headline-bold; tactical instrument-panel stats
+  line with tabular numerals and a success-token active count. Six
+  destination cards (Topology / Project / For You / Library / Search /
+  Settings) share the same numeral-layout treatment. Real-data hooks
+  thread through (`useRigSummary`, `usePsEntries`, `useSpecLibrary`,
+  `window.location.hostname`).
+- **For You** — both card systems unified to the same vellum recipe:
+  - Storytelling band: `CardShell` rewritten to bg-stone-100/45 +
+    backdrop-blur-[10px] + ambient shadow + corner brackets; design-token
+    leading dots replace prior bg-emerald-50 / bg-amber-50 / etc.
+    off-brand utilities. Title at 16px headline-bold; body at 12px.
+  - Queue-item `FeedCard.tsx`: same outer chrome; `KIND_DOT` + `TONE_DOT`
+    design-token maps; vellum bordered-no-fill action buttons
+    (Approve/Deny/Route/Hold/Drop/Annotate/Handoff) with hover-invert and
+    44px touch targets; `TONE_RECEIPT` strip is a subtle bg-stone-50/40
+    with a leading colored dot.
+- **Single source of truth** — `/dashboard` and `/lab/vellum-lab` both
+  import from `packages/ui/src/components/dashboard/vellum/index.js`.
+  Future visual changes hit one location.
+- **Lab routes** — `/lab/card-previews`, `/lab/vellum-lab`,
+  `/lab/vellum-bg/{a-large,b-small,c-allover}` are checked-in experiment
+  surfaces for designer iteration. Reachable in production by direct URL;
+  not linked from main nav. Useful when iterating on the visual system.
+
+### For You Storytelling Adapter
+
+The storytelling band (top of `/for-you`) now wires four card kinds to
+real data:
+
+- **Progress** — from `useMissionDiscovery` (first 2 active missions)
+- **Shipped** — from `useSlices` (status = shipped/complete/done; capped at 3)
+- **Incident** — from `useSlices` (status = blocked/failed/danger or fallback "info"; capped at 3)
+- **Approval** — from `useActivityFeed` + `classifyFeed` (kind === "approval";
+  capped at 2; qitemId extracted from event payload with snake_case alt
+  and `FeedCard.id` fallback). Surfaces real queue items waiting on
+  approval in a high-visibility band.
+
+`ConceptCard` component is preserved in source but not emitted by the
+production adapter — a deliberate data-source decision is scheduled for
+0.3.2.
+
+### Action Outcome And Inline Error Surface
+
+Queue-item action buttons (`VerbActions` — Approve/Deny/Route/Hold/Drop/
+Annotate/Handoff) now render outcomes immediately and surface failures
+without silently reverting:
+
+- **Optimistic outcome** — on mutation success, the
+  `ActionOutcomePanel` ("Approved by X" / "Routed by X to Y") renders
+  immediately. Audit-log roundtrip reconciles in background. Operator
+  no longer waits for a query refetch to see what happened.
+- **Inline error surface** — on mutation error, a tertiary-bordered
+  error block renders below the verb buttons with the daemon's error
+  message; verb-selection state is preserved so the operator can
+  correct and retry. Replaces the prior silent-revert UX where errors
+  were never displayed.
+- **React-query callback discipline** — `submit()` split into separate
+  `onSuccess` (optimistic outcome + reset selection) and `onError`
+  (set error message; do NOT reset). Regression test guards the
+  silent-revert class explicitly.
+
+### Vendored Skill Provenance
+
+Vendored skills shipped in `packages/daemon/specs/agents/shared/skills/`
+now declare their upstream lineage via `metadata.openrig` frontmatter
+and (when modifications exist) a companion `OPENRIG.md` sidecar:
+
+- **vendoring_pattern**: `vendored-as-is` | `modify-the-file` |
+  `add-supplementary-files`
+- **vendored_from**: upstream source identifier
+- **last_upstream_check**: most recent diff date
+- **divergence_notes**: human-readable summary of OpenRig-specific changes
+
+Applied to all 10 process-skill surfaces (agent-browser, executing-plans,
+brainstorming, systematic-debugging, test-driven-development,
+using-superpowers, verification-before-completion, writing-plans,
+frontend-design, dogfood). `OPENRIG.md` sidecars added where the file
+has been modified or supplemented (agent-browser + executing-plans +
+brainstorming + using-superpowers + writing-plans). Convention is
+documented in the `writing-skills-for-openrig` skill.
+
 ### Plugins And Skills On The VM (Operator Note)
 
 Operators dogfood-testing 0.3.1 should expect:
@@ -225,6 +319,19 @@ contracts. Exceptions declared in 0.3.1:
   Claude hook state (restore-check); focused-test gates pass these
   suites; cumulative-workspace runs surface the gaps. Isolation cleanup
   scheduled for 0.3.2.
+- **Cross-daemon route awareness**: the VerbActions destination dropdown
+  on `/for-you` currently lists session names without checking whether
+  the local daemon can reach them. Routing to a non-local destination
+  surfaces as an inline error (per the new error surface above) but the
+  dropdown should ideally filter to local-daemon seats. 0.3.2 candidate.
+- **ConceptCard data source**: `ConceptCard` component is preserved in
+  source but not wired in the production adapter. A 0.3.2 slice will
+  pick a deliberate data source (likely shaped backlog candidates or
+  early-stage discovery items).
+- **Warm error messages on demo surfaces**: daemon error strings (e.g.,
+  "queue item not found") surface verbatim through the inline error
+  surface. Demo-grade polish to humanize these on user-facing surfaces
+  is scheduled for 0.3.2.
 
 ### Banked Discipline Patterns
 
