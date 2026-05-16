@@ -50,6 +50,7 @@ import { RigExpansionService } from "./domain/rig-expansion-service.js";
 import { LegacyBundleSourceResolver as BundleSourceResolver } from "./domain/bundle-source-resolver.js";
 import { PodBundleSourceResolver } from "./domain/bundle-source-resolver.js";
 import { PsProjectionService } from "./domain/ps-projection.js";
+import { SeatActivityService } from "./domain/seat-activity-service.js";
 import { UpCommandRouter } from "./domain/up-command-router.js";
 import { RigTeardownOrchestrator } from "./domain/rig-teardown.js";
 import { ResumeMetadataRefresher } from "./domain/resume-metadata-refresher.js";
@@ -249,6 +250,17 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const watchdogHistoryLogInstance = new WatchdogHistoryLog(db);
 
   const tmuxAdapter = new TmuxAdapter(opts?.tmuxExec ?? execCommand);
+
+  // Slice 15 — Seat-activity service for the `terminal-active` primitive.
+  // Lives at module scope so the projection chain (PsProjectionService,
+  // node-inventory enrichment) reads from one source. Default silence
+  // window: 3s per slice 15 README; per-seat override comes from
+  // AgentSpec.profile.activity.silenceWindowSeconds at seat-up time.
+  const seatActivityService = new SeatActivityService({
+    tmux: tmuxAdapter,
+    defaultWindowSeconds: 3,
+    eventBus,
+  });
   // cmuxFactory takes precedence (for tests), then cmuxExec-based CLI transport, then default
   const cmuxFactory = opts?.cmuxFactory
     ?? createCmuxCliTransport(opts?.cmuxExec ?? execCommand);
@@ -662,7 +674,12 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     selfAttachService,
     rigLifecycleService,
     rigExpansionService,
-    psProjectionService: new PsProjectionService({ db }),
+    // Slice 15 — SeatActivityService owns the `terminal-active` primitive
+    // (tmux byte-stream). Wired into PsProjectionService so `rig ps`
+    // + UI surfaces read the latest observation per seat. NEVER reads
+    // queue/assignment state (non-inference contract; see slice 15 IMPL-PRD §2.3).
+    seatActivityService,
+    psProjectionService: new PsProjectionService({ db, seatActivity: seatActivityService }),
     upRouter: new UpCommandRouter({
       fsOps: {
         exists: (p: string) => fs.existsSync(p),

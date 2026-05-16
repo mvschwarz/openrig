@@ -130,6 +130,13 @@ export interface AppDeps {
   selfAttachService?: SelfAttachService;
   rigExpansionService?: import("./domain/rig-expansion-service.js").RigExpansionService;
   rigLifecycleService?: RigLifecycleService;
+  /**
+   * Slice 15 — Seat-activity service (terminal-active primitive). The
+   * daemon owns one instance and wires it into PsProjectionService and
+   * the per-node enrichment. Optional so existing test harnesses that
+   * construct AppDeps directly don't need to provide one.
+   */
+  seatActivityService?: import("./domain/seat-activity-service.js").SeatActivityService;
   psProjectionService: PsProjectionService;
   upRouter: UpCommandRouter;
   teardownOrchestrator: RigTeardownOrchestrator;
