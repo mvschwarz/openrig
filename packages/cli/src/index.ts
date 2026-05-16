@@ -17,6 +17,7 @@ import { attachCommand } from "./commands/attach.js";
 import { bindCommand } from "./commands/bind.js";
 import { adoptCommand, type AdoptDeps } from "./commands/adopt.js";
 import { bundleCommand } from "./commands/bundle.js";
+import { scopeCommand } from "./commands/scope.js";
 import { upCommand } from "./commands/up.js";
 import { downCommand } from "./commands/down.js";
 import { psCommand } from "./commands/ps.js";
@@ -182,6 +183,8 @@ export function createProgram(depsOverride?: ProgramDeps): Command {
   program.addCommand(compactPlanCommand(depsOverride?.compactPlanDeps));
   program.addCommand(heartbeatCommand(depsOverride?.heartbeatDeps));
   program.addCommand(seatCommand(depsOverride?.seatDeps));
+  // release-0.3.2 slice 12 — rig scope CLI primitive.
+  program.addCommand(scopeCommand());
 
   return program;
 }
