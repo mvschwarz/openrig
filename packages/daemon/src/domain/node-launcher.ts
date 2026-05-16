@@ -20,6 +20,14 @@ export type LaunchResult =
 interface LaunchOpts {
   sessionName?: string;
   cwd?: string;
+  /**
+   * Slice 15 — per-seat silence window override (seconds). The daemon
+   * configures tmux's `monitor-silence` on the seat's pane so the
+   * `terminal-active` primitive flips at this threshold. Falls back to
+   * the launcher's default (typically 3) when not provided. Caller
+   * (StartupOrchestrator) plumbs this from AgentSpec.profile.activity.
+   */
+  silenceWindowSeconds?: number;
 }
 
 interface NodeLauncherDeps {
@@ -30,6 +38,9 @@ interface NodeLauncherDeps {
   tmuxAdapter: TmuxAdapter;
   transcriptStore?: TranscriptStore;
   sessionEnv?: Record<string, string | undefined>;
+  /** Slice 15 — default monitor-silence window (seconds). Defaults to 3
+   *  per slice 15 README §v0. Per-seat override via LaunchOpts. */
+  defaultSilenceWindowSeconds?: number;
 }
 
 export class NodeLauncher {
@@ -40,6 +51,7 @@ export class NodeLauncher {
   private tmuxAdapter: TmuxAdapter;
   private transcriptStore: TranscriptStore | null;
   private sessionEnv: Record<string, string>;
+  private defaultSilenceWindowSeconds: number;
 
   constructor(deps: NodeLauncherDeps) {
     // Hard runtime invariant: all domain services must share the same db handle.
@@ -61,6 +73,7 @@ export class NodeLauncher {
     this.tmuxAdapter = deps.tmuxAdapter;
     this.transcriptStore = deps.transcriptStore ?? null;
     this.sessionEnv = compactEnv(deps.sessionEnv ?? {});
+    this.defaultSilenceWindowSeconds = deps.defaultSilenceWindowSeconds ?? 3;
   }
 
   async launchNode(
@@ -108,6 +121,21 @@ export class NodeLauncher {
     }
     if (!tmuxResult.ok) {
       return { ok: false, code: tmuxResult.code, message: tmuxResult.message };
+    }
+
+    // 3a. Slice 15 — configure tmux monitor-silence on the new session
+    // so the runtime maintains a per-pane silence_flag that the daemon's
+    // SeatActivityService reads on its poll tick. Best-effort: a tmux
+    // misfire here does not abort seat launch — the seat still functions,
+    // we just won't have a terminal-active signal for it until a
+    // subsequent seat-up retry. Threshold: per-seat override (from
+    // AgentSpec.profile.activity.silenceWindowSeconds via LaunchOpts)
+    // falls back to the launcher default (3s per slice 15 README).
+    const silenceWindowSeconds = opts?.silenceWindowSeconds ?? this.defaultSilenceWindowSeconds;
+    try {
+      await this.tmuxAdapter.setMonitorSilence(sessionName, silenceWindowSeconds);
+    } catch {
+      // Best-effort; absorbed.
     }
 
     // 3b. Start transcript rotation (V1 pre-release CLI/daemon Item 1:

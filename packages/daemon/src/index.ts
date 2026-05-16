@@ -51,6 +51,11 @@ export async function startServer(port?: number) {
         // tree post-bind so the HTTP surface is ready before the first
         // tick (matches contextMonitor pattern).
         deps.watchdogScheduler?.start();
+        // Slice 15 — start the seat-activity scheduler (1Hz default).
+        // Polls every running tmux-bound seat's silence_flag so
+        // PsProjectionService + node-inventory enrichment serve
+        // fresh data on each request.
+        deps.seatActivityService?.start(deps.rigRepo.db);
       }
     });
     servers.push(srv);
@@ -65,6 +70,11 @@ export async function startServer(port?: number) {
       await deps.watchdogScheduler?.stop();
     } catch (err) {
       console.error("[watchdog] shutdown error", err);
+    }
+    try {
+      deps.seatActivityService?.stop();
+    } catch (err) {
+      console.error("[seat-activity] shutdown error", err);
     }
     await Promise.all(
       servers.map(
