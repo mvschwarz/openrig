@@ -159,4 +159,19 @@ describe("BLOCK 1 — tier-aware validation (isMissionDotId / isSliceDotId)", ()
     expect(id!.version).toBe("0.3.2");
     expect(id!.n).toBeUndefined();
   });
+
+  it("BC-2 BLOCK 1: escape band rejects [99, !0, n] mission ver (only [99, 0, n] is valid)", () => {
+    // §1 fixes the escape band as <PFX>.99.0.<n> — the `0` is FIXED.
+    // Previously the depth-3 check accepted OPR.99.7.8 as a mission;
+    // now require the middle 0.
+    expect(isMissionDotId("OPR.99.7.8")).toBe(false);
+    expect(isMissionDotId("OPR.99.1.0")).toBe(false);
+    expect(isMissionDotId("OPR.99.0.42")).toBe(true);    // still valid
+    expect(isMissionDotId("OPR.99.0.1")).toBe(true);     // still valid
+  });
+
+  it("BC-2 BLOCK 1: escape-band slice parent must also satisfy the [99,0,n] rule", () => {
+    expect(isSliceDotId("OPR.99.7.8.1")).toBe(false);    // parent=99.7.8 invalid
+    expect(isSliceDotId("OPR.99.0.42.7")).toBe(true);    // parent=99.0.42 valid
+  });
 });

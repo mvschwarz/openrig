@@ -180,7 +180,10 @@ function pickIdFromFrontmatter(fm: Record<string, unknown>): string | null {
 }
 
 /** Resolve a mission by name OR path relative to the missions root.
- *  Throws ScopeCliError on miss. */
+ *  Throws ScopeCliError on miss OR when the directory exists but
+ *  lacks a README.md (consistent with listMissions' README gate per
+ *  PRD §2.1 / HG-8 — README-less dirs are scratch/junk, not declared
+ *  missions, so mutation commands must not silently target them). */
 export function findMission(missionsRoot: string, identifier: string): MissionInfo {
   const candidates = [
     path.join(missionsRoot, identifier),
@@ -188,6 +191,14 @@ export function findMission(missionsRoot: string, identifier: string): MissionIn
   ];
   for (const candidate of candidates) {
     if (fs.existsSync(candidate) && fs.statSync(candidate).isDirectory()) {
+      const readmePath = path.join(candidate, "README.md");
+      if (!fs.existsSync(readmePath)) {
+        throw new ScopeCliError({
+          fact: `Directory "${identifier}" exists at ${candidate} but contains no README.md.`,
+          consequence: "It is not a declared mission. Command did not run.",
+          action: "Create it as a mission with: rig scope mission create " + identifier + ". Or add a README.md if the folder is intended to be a mission.",
+        });
+      }
       return buildMissionInfo(missionsRoot, candidate);
     }
   }

@@ -64,41 +64,49 @@ export function parseDotId(
   return { project, version: verSegs.join("."), n: Number(nSeg), m: Number(mSeg) };
 }
 
+/** Validate a mission-ver segments array against the §1 escape-band
+ *  rule. The convention defines the non-release escape band as
+ *  `<PFX>.99.0.<n>` — the `0` after `99` is FIXED. A version like
+ *  `99.7.8` does NOT conform. Shared between isMissionDotId and the
+ *  parent-version check inside isSliceDotId so both surfaces stay in
+ *  lockstep. */
+function isValidMissionVerSegments(segs: string[]): boolean {
+  if (segs.length < 2 || segs.length > 3) return false;
+  if (segs[0] === "99") {
+    // Escape band: exactly [99, "0", "<ordinal>"]. The `0` segment is
+    // fixed; `<ordinal>` must be a non-empty numeric string.
+    return segs.length === 3 && segs[1] === "0" && /^\d+$/.test(segs[2] ?? "");
+  }
+  return true;
+}
+
 /** Depth-based tier discriminator. Per §1 the positional grammar
  *  is fixed:
  *    mission   = <PFX>.<ver>           (ver = 2-3 numeric segments;
- *                                       escape band is 99.x.y → 3)
+ *                                       escape band is exactly 99.0.n)
  *    slice     = <PFX>.<ver>.<n>       (3-4 numeric segments)
  *    sub-slice = <PFX>.<ver>.<n>.<m>   (4-5 numeric segments)
  *  Where a mission shape OVERLAPS with a slice shape (e.g. release
  *  X.Y mission has 2 segments; release X.Y.Z mission has 3 segments
  *  which is also the slice shape for release X.Y missions) the tier
  *  is resolved by depth: mission caps at 3 numeric segments; slice
- *  always has 3-4; sub-slice has 4-5. Escape band cases are
- *  unambiguous because the 99-prefixed ver is exactly 3 segments. */
+ *  always has 3-4; sub-slice has 4-5. Escape band is fully unambiguous
+ *  because §1 fixes both the 99 marker AND the 0 segment that follows. */
 export function isMissionDotId(raw: unknown): boolean {
   if (typeof raw !== "string") return false;
   const parsed = parseDotId(raw, "mission");
   if (!parsed) return false;
-  const segs = parsed.version.split(".");
-  if (segs.length < 2 || segs.length > 3) return false;
-  // Escape-band mission must have exactly 3 ver segments where the
-  // first is "99" — guards against e.g. OPR.99.0 being mis-classified
-  // as a 3-segment release ver.
-  if (segs[0] === "99") return segs.length === 3;
-  return true;
+  return isValidMissionVerSegments(parsed.version.split("."));
 }
 
 export function isSliceDotId(raw: unknown): boolean {
   if (typeof raw !== "string") return false;
   const parsed = parseDotId(raw, "slice");
   if (!parsed) return false;
-  const segs = parsed.version.split(".");
   // Slice = mission-ver + 1 ordinal. Parent ver must itself be a
-  // valid mission shape.
-  if (segs.length < 2 || segs.length > 3) return false;
-  if (segs[0] === "99") return segs.length === 3;
-  return true;
+  // valid mission shape (including the escape-band exact-[99.0.n]
+  // rule — a parent like 99.7.8 is not a real mission).
+  return isValidMissionVerSegments(parsed.version.split("."));
 }
 
 /** Render a DotId back to its canonical dot-string. */

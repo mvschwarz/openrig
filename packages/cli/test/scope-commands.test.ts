@@ -382,6 +382,75 @@ describe("rig scope mission create (HG-14 + HG-15)", () => {
     expect(rel.exitCode).toBe(0);
     expect(JSON.parse(rel.stdout).mission.id).toBe("OPR.0.6.0");
   });
+
+  it("BC-2 BLOCK 1 discriminator: rejects escape-band with non-zero middle segment (OPR.99.7.8)", async () => {
+    const r = await run([
+      "mission", "create", "bad-eb",
+      "--id", "OPR.99.7.8", "--json",
+    ], env.missionsRoot);
+    expect(r.exitCode).toBe(1);
+    expect(JSON.parse(r.stdout).ok).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------
+// BC-2 BLOCK 2: README-less dirs are rejected at every mutation surface
+// ---------------------------------------------------------------------
+
+describe("BC-2 BLOCK 2 — README-less dirs are not declared missions at any mutation surface", () => {
+  let env: { root: string; missionsRoot: string };
+
+  beforeEach(() => {
+    env = seedSubstrate();
+    // Sneak a README-less directory into missions/ to verify every
+    // surface rejects it consistently with listMissions.
+    fs.mkdirSync(path.join(env.missionsRoot, "no-readme"), { recursive: true });
+  });
+  afterEach(() => { fs.rmSync(env.root, { recursive: true, force: true }); });
+
+  it("mission ls omits no-readme (already in HG-8 above; sanity check here)", async () => {
+    const r = await run(["mission", "ls", "--json"], env.missionsRoot);
+    const parsed = JSON.parse(r.stdout);
+    expect(parsed.missions.map((m: { name: string }) => m.name)).not.toContain("no-readme");
+  });
+
+  it("mission show no-readme exits 1 with the 3-part 'not a declared mission' error", async () => {
+    const r = await run(["mission", "show", "no-readme", "--json"], env.missionsRoot);
+    expect(r.exitCode).toBe(1);
+    const parsed = JSON.parse(r.stdout);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.error.fact).toMatch(/no README\.md|not a declared mission/);
+  });
+
+  it("slice create no-readme exits 1 + does NOT create slices/foo/", async () => {
+    const r = await run([
+      "slice", "create", "no-readme", "foo", "--json",
+    ], env.missionsRoot);
+    expect(r.exitCode).toBe(1);
+    expect(fs.existsSync(path.join(env.missionsRoot, "no-readme", "slices", "01-foo"))).toBe(false);
+  });
+
+  it("slice ship to no-readme target exits 1; source slice unmoved", async () => {
+    const srcAbs = path.join(env.missionsRoot, "backlog", "slices", "01-debt-foo");
+    expect(fs.existsSync(srcAbs)).toBe(true);
+    const r = await run([
+      "slice", "ship", "01-debt-foo", "no-readme",
+      "--mission", "backlog", "--json",
+    ], env.missionsRoot);
+    expect(r.exitCode).toBe(1);
+    // Source unchanged.
+    expect(fs.existsSync(srcAbs)).toBe(true);
+  });
+
+  it("slice move to no-readme target exits 1; source slice unmoved", async () => {
+    const srcAbs = path.join(env.missionsRoot, "backlog", "slices", "01-debt-foo");
+    const r = await run([
+      "slice", "move", "01-debt-foo", "no-readme",
+      "--mission", "backlog", "--json",
+    ], env.missionsRoot);
+    expect(r.exitCode).toBe(1);
+    expect(fs.existsSync(srcAbs)).toBe(true);
+  });
 });
 
 // ---------------------------------------------------------------------

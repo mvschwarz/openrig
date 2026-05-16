@@ -182,6 +182,31 @@ describe("findSlice + resolution variants", () => {
   });
 });
 
+describe("BC-2 BLOCK 2 — findMission rejects README-less directories", () => {
+  let root: string;
+  let missionsRoot: string;
+  beforeEach(() => {
+    root = mktemp();
+    missionsRoot = path.join(root, "missions");
+    fs.mkdirSync(missionsRoot, { recursive: true });
+    writeFile(
+      path.join(missionsRoot, "release-0.3.2", "README.md"),
+      "---\nid: OPR.0.3.2\n---\n",
+    );
+    // README-less directory next to a real mission — scratch/junk.
+    fs.mkdirSync(path.join(missionsRoot, "no-readme"));
+  });
+  afterEach(() => { fs.rmSync(root, { recursive: true, force: true }); });
+
+  it("findMission throws 3-part error when target directory has no README.md", () => {
+    expect(() => findMission(missionsRoot, "no-readme")).toThrow(/not a declared mission|no README/);
+  });
+
+  it("findMission still resolves declared missions normally", () => {
+    expect(findMission(missionsRoot, "release-0.3.2").name).toBe("release-0.3.2");
+  });
+});
+
 describe("ensureMissionId", () => {
   let root: string;
   let missionsRoot: string;
