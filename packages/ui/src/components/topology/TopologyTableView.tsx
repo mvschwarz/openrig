@@ -63,6 +63,9 @@ interface AgentRow {
   contextUsage?: NodeInventoryEntry["contextUsage"] | null;
   agentActivity?: TopologyActivityBaseline["agentActivity"];
   currentQitems?: TopologyActivityBaseline["currentQitems"];
+  terminalActive?: boolean | null;
+  hasAssignedWork?: boolean;
+  pendingWorkCount?: number;
   activityRing?: TopologyActivityVisual;
   reducedMotion?: boolean;
 }
@@ -322,6 +325,9 @@ export function TopologyTableView({ rigIdScope, podNameScope }: { rigIdScope?: s
           contextUsage: n.contextUsage ?? null,
           agentActivity: n.agentActivity ?? null,
           currentQitems: n.currentQitems ?? [],
+          terminalActive: n.terminalActive,
+          hasAssignedWork: n.hasAssignedWork ?? false,
+          pendingWorkCount: n.pendingWorkCount ?? 0,
         });
       }
     }
@@ -337,6 +343,9 @@ export function TopologyTableView({ rigIdScope, podNameScope }: { rigIdScope?: s
     agentActivity: row.agentActivity ?? null,
     currentQitems: row.currentQitems ?? null,
     startupStatus: row.startupStatus,
+    terminalActive: row.terminalActive,
+    hasAssignedWork: row.hasAssignedWork ?? false,
+    pendingWorkCount: row.pendingWorkCount ?? 0,
   }))), [data]);
   const topologyActivity = useTopologyActivity(sessionIndex);
   const activityData = useMemo(() => data.map((row) => ({

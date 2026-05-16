@@ -44,6 +44,9 @@ export interface NodeInventoryEntry {
   agentActivity?: AgentActivitySummary | null;
   // PL-019: in-progress qitems joined daemon-side on node-detail responses.
   currentQitems?: CurrentQitemSummary[];
+  terminalActive?: boolean | null;
+  hasAssignedWork?: boolean;
+  pendingWorkCount?: number;
 }
 
 async function fetchNodeInventory(rigId: string): Promise<NodeInventoryEntry[]> {

@@ -102,7 +102,16 @@ nodesRoutes.get("/:logicalId", async (c) => {
     : getNodeDetail(deps.rigRepo.db, rigId, logicalId);
   if (!detail) return c.json({ error: `Node "${logicalId}" not found in rig "${rigId}". Check node IDs with: rig ps --nodes` }, 404);
   const [detailWithActivity] = await attachAgentActivity([detail], { tmuxAdapter: deps.tmuxAdapter, activityStore: deps.agentActivityStore });
-  Object.assign(detail, { agentActivity: detailWithActivity?.agentActivity });
+  const [detailWithTerminalAndWork] = attachTerminalActivityAndWork(detailWithActivity ? [detailWithActivity] : [detail], {
+    db: deps.rigRepo.db,
+    seatActivity: deps.seatActivityService,
+  });
+  Object.assign(detail, {
+    agentActivity: detailWithTerminalAndWork?.agentActivity,
+    terminalActive: detailWithTerminalAndWork?.terminalActive,
+    hasAssignedWork: detailWithTerminalAndWork?.hasAssignedWork,
+    pendingWorkCount: detailWithTerminalAndWork?.pendingWorkCount,
+  });
 
   // PL-019 item 5: surface in-progress qitems on node-detail when the
   // node has a session name (matches /graph payload's enrichment shape).

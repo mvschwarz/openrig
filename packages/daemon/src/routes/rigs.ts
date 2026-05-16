@@ -7,9 +7,15 @@ import type { SnapshotRepository } from "../domain/snapshot-repository.js";
 import type { SnapshotCapture } from "../domain/snapshot-capture.js";
 import type { RestoreOrchestrator } from "../domain/restore-orchestrator.js";
 import { projectRigToGraph, type InventoryOverlay, type CurrentQitemSummary } from "../domain/graph-projection.js";
-import { getNodeInventory, getNodeInventoryWithContext, attachAgentActivity } from "../domain/node-inventory.js";
+import {
+  getNodeInventory,
+  getNodeInventoryWithContext,
+  attachAgentActivity,
+  attachTerminalActivityAndWork,
+} from "../domain/node-inventory.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import type { AgentActivityStore } from "../domain/agent-activity-store.js";
+import type { SeatActivityService } from "../domain/seat-activity-service.js";
 import { deriveRigLifecycleState } from "../domain/ps-projection.js";
 import { assessCurrentStateRehydrateEligibility } from "../domain/rehydrate-eligibility.js";
 import type { ContextUsageStore } from "../domain/context-usage-store.js";
@@ -205,9 +211,14 @@ rigsRoutes.get("/:id/graph", async (c) => {
   // /api/rigs/:id/nodes round-trip just to color the topology dots).
   const tmuxAdapter = c.get("tmuxAdapter" as never) as TmuxAdapter | undefined;
   const agentActivityStore = c.get("agentActivityStore" as never) as AgentActivityStore | undefined;
-  const inventoryWithActivity = tmuxAdapter
+  const inventoryWithActivityOnly = tmuxAdapter
     ? await attachAgentActivity(inventory, { tmuxAdapter, activityStore: agentActivityStore })
     : inventory;
+  const seatActivityService = c.get("seatActivityService" as never) as SeatActivityService | undefined;
+  const inventoryWithActivity = attachTerminalActivityAndWork(inventoryWithActivityOnly, {
+    db: getRepo(c).db,
+    seatActivity: seatActivityService,
+  });
 
   // PL-019 item 5: read-side join for active-qitem enrichment. Cheap by
   // virtue of the existing idx_queue_items_destination_state index. The
@@ -237,6 +248,9 @@ rigsRoutes.get("/:id/graph", async (c) => {
     currentQitems: n.canonicalSessionName
       ? currentQitemsBySession.get(n.canonicalSessionName) ?? []
       : [],
+    terminalActive: n.terminalActive,
+    hasAssignedWork: n.hasAssignedWork ?? false,
+    pendingWorkCount: n.pendingWorkCount ?? 0,
   }));
   const projectedPods: Pod[] = pods.map((pod) => ({
     id: pod.id,

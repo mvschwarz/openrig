@@ -138,6 +138,30 @@ describe("PL-019 projectRigToGraph: agentActivity + currentQitems", () => {
     expect(data.currentQitems?.[0].tier).toBe("mode2");
   });
 
+  it("projects slice 15 terminal/work primitives onto running nodes when overlay carries them", () => {
+    const input = makeRig(
+      [{ id: "n1", logicalId: "alpha", role: "worker" }],
+      [],
+      [makeRunningSession("n1")]
+    );
+    const overlay: InventoryOverlay[] = [
+      {
+        logicalId: "alpha",
+        startupStatus: "ready",
+        canonicalSessionName: "r01-alpha",
+        restoreOutcome: "n-a",
+        terminalActive: true,
+        hasAssignedWork: false,
+        pendingWorkCount: 0,
+      },
+    ];
+    const result = projectRigToGraph(input, overlay);
+    const data = result.nodes[0].data;
+    expect(data.terminalActive).toBe(true);
+    expect(data.hasAssignedWork).toBe(false);
+    expect(data.pendingWorkCount).toBe(0);
+  });
+
   it("defaults currentQitems to [] when overlay omits them", () => {
     const input = makeRig(
       [{ id: "n1", logicalId: "alpha", role: "worker" }],

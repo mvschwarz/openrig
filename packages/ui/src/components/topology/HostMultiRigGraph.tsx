@@ -244,6 +244,9 @@ export function HostMultiRigGraph() {
           agentActivity?: TopologyActivityBaseline["agentActivity"];
           currentQitems?: TopologyActivityBaseline["currentQitems"];
           startupStatus?: string | null;
+          terminalActive?: boolean | null;
+          hasAssignedWork?: boolean;
+          pendingWorkCount?: number;
         } | undefined;
         return {
           nodeId: node.id,
@@ -254,6 +257,9 @@ export function HostMultiRigGraph() {
           agentActivity: data?.agentActivity ?? null,
           currentQitems: data?.currentQitems ?? null,
           startupStatus: data?.startupStatus ?? null,
+          terminalActive: data?.terminalActive,
+          hasAssignedWork: data?.hasAssignedWork ?? false,
+          pendingWorkCount: data?.pendingWorkCount ?? 0,
         };
       }),
   ), [mergedNodes]);

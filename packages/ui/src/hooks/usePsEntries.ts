@@ -34,5 +34,6 @@ export function usePsEntries() {
   return useQuery({
     queryKey: ["ps"],
     queryFn: fetchPsEntries,
+    refetchInterval: 3_000,
   });
 }

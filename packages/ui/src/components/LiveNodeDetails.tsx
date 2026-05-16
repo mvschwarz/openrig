@@ -635,6 +635,9 @@ export function LiveNodeDetails({ rigId, logicalId }: LiveNodeDetailsProps) {
     agentActivity: data.agentActivity ?? null,
     currentQitems: data.currentQitems ?? null,
     startupStatus: data.startupStatus,
+    terminalActive: data.terminalActive,
+    hasAssignedWork: data.hasAssignedWork ?? false,
+    pendingWorkCount: data.pendingWorkCount ?? 0,
   }] : []), [data]);
   const topologyActivity = useTopologyActivity(sessionIndex);
   const activityVisual = data
@@ -642,6 +645,9 @@ export function LiveNodeDetails({ rigId, logicalId }: LiveNodeDetailsProps) {
       agentActivity: data.agentActivity ?? null,
       currentQitems: data.currentQitems ?? null,
       startupStatus: data.startupStatus,
+      terminalActive: data.terminalActive,
+      hasAssignedWork: data.hasAssignedWork ?? false,
+      pendingWorkCount: data.pendingWorkCount ?? 0,
     })
     : null;
   // V0.3.1 slice 25 — 2-tab Overview/Details restructure. Default

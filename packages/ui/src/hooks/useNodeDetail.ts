@@ -69,6 +69,9 @@ export interface NodeDetailData {
   compactSpec: NodeDetailCompactSpec;
   agentActivity?: AgentActivitySummary | null;
   currentQitems?: CurrentQitemSummary[];
+  terminalActive?: boolean | null;
+  hasAssignedWork?: boolean;
+  pendingWorkCount?: number;
   contextUsage?: {
     availability: string;
     reason?: string | null;

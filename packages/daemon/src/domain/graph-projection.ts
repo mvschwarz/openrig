@@ -37,6 +37,9 @@ interface RFNodeData {
   contextTotalOutputTokens: number | null;
   agentActivity?: AgentActivity | null;
   currentQitems?: CurrentQitemSummary[];
+  terminalActive?: boolean | null;
+  hasAssignedWork?: boolean;
+  pendingWorkCount?: number;
 }
 
 interface RFNode {
@@ -73,6 +76,9 @@ export interface InventoryOverlay {
   contextTotalOutputTokens?: number | null;
   agentActivity?: AgentActivity | null;
   currentQitems?: CurrentQitemSummary[];
+  terminalActive?: boolean | null;
+  hasAssignedWork?: boolean;
+  pendingWorkCount?: number;
 }
 
 export function projectRigToGraph(input: RigGraphInput, inventoryOverlay?: InventoryOverlay[]): ReactFlowGraph {
@@ -133,6 +139,9 @@ export function projectRigToGraph(input: RigGraphInput, inventoryOverlay?: Inven
         contextTotalOutputTokens: overlay?.contextTotalOutputTokens ?? null,
         agentActivity: overlay?.agentActivity ?? null,
         currentQitems: overlay?.currentQitems ?? [],
+        terminalActive: overlay?.terminalActive,
+        hasAssignedWork: overlay?.hasAssignedWork ?? false,
+        pendingWorkCount: overlay?.pendingWorkCount ?? 0,
       },
     };
   });
@@ -170,6 +179,9 @@ export function projectRigToGraph(input: RigGraphInput, inventoryOverlay?: Inven
         contextTotalOutputTokens: null,
         agentActivity: null,
         currentQitems: [],
+        terminalActive: null,
+        hasAssignedWork: false,
+        pendingWorkCount: 0,
       },
     });
   }

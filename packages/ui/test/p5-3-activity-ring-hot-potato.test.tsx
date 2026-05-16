@@ -276,9 +276,11 @@ describe("P5.3 ActivityRing and HotPotatoEdge", () => {
 
     expect(host).toMatch(/useTopologyActivity/);
     expect(host).toMatch(/applyHotPotatoEdges/);
+    expect(host).toMatch(/terminalActive: data\?\.terminalActive/);
     expect(host).toMatch(/edgeTypes=\{edgeTypes\}/);
     expect(rigGraph).toMatch(/useTopologyActivity/);
     expect(rigGraph).toMatch(/applyHotPotatoEdges/);
+    expect(rigGraph).toMatch(/terminalActive: data\?\.terminalActive/);
     expect(rigGraph).toMatch(/edgeTypes=\{edgeTypes\}/);
     expect(hybridNodes).toMatch(/ActivityRing/);
     expect(hybridNodes).toMatch(/getActivityCardClasses/);
@@ -311,6 +313,8 @@ describe("P5.3 ActivityRing and HotPotatoEdge", () => {
     expect(css).not.toMatch(/background-color: rgba\(255, 255, 255, 0\.96\)/);
     expect(rigGraph).toMatch(/activityRing/);
     expect(table).toMatch(/ActivityRing/);
+    expect(table).toMatch(/terminalActive: n\.terminalActive/);
+    expect(table).toMatch(/terminalActive: row\.terminalActive/);
     // 0.3.1 slice 14 walk-item 16 deliberately removed the hover-
     // gated `opacity-0` + `group-hover:opacity-100` pattern from
     // action-column buttons — operators kept missing the cmux
