@@ -422,6 +422,34 @@ export interface NodeInventoryEntry {
   startupCompletedAt: string | null;
   agentActivity?: AgentActivity;
   contextUsage?: ContextUsage;
+  /**
+   * Slice 15 — `terminal-active` primitive (tmux byte-stream).
+   *
+   *   true  → seat is currently producing tmux output (pane silence
+   *           flag = 0, within configured silence window)
+   *   false → seat is silent past the threshold
+   *   null  → no signal (not tmux-bound, monitor-silence not configured,
+   *           or transient read error). Distinct from `false`: consumers
+   *           treat `null` as "no observation right now", not "definitely
+   *           idle".
+   *
+   * MUST NOT be derived from `hasAssignedWork` or queue/assignment state.
+   * The non-inference contract (slice 15 README + IMPL-PRD §2.3) is the
+   * core correctness item: this field is computed independently from
+   * `hasAssignedWork`.
+   */
+  terminalActive?: boolean | null;
+  /**
+   * Slice 15 — `has-work-to-do` primitive. Derived from queue/assignment
+   * projection (pending qitems whose `destination_session` matches this
+   * seat's `canonicalSessionName`).
+   *
+   * MUST NOT be derived from `terminalActive` or tmux output. Two
+   * orthogonal primitives, never one inferred from the other.
+   */
+  hasAssignedWork?: boolean;
+  /** Optional count of pending qitems assigned to this seat (cheap aggregate). */
+  pendingWorkCount?: number;
   /** PL-007: per-node workspace block when the rig declares a workspace.
    *  workspaceRoot mirrors RigSpec.workspace.workspaceRoot. activeRepo is
    *  the repo whose path contains the node's cwd, or RigSpec.workspace.
@@ -429,6 +457,28 @@ export interface NodeInventoryEntry {
    *  the active repo, or `knowledge` when cwd is under knowledgeRoot.
    *  null when the rig does not declare a workspace. */
   workspace?: NodeWorkspaceInfo | null;
+}
+
+/**
+ * Slice 15 — `terminal-active` observation for a single seat's pane.
+ *
+ * Sourced from tmux's per-window `monitor-silence` mechanism, read via
+ * `pane_silence_flag`. The service that produces these records polls
+ * the flag at a configurable cadence and keeps the latest per pane.
+ *
+ * `isActiveWithinWindow` is the inverse of the runtime silence flag:
+ * tmux's flag is "silent" semantics; we expose "active" semantics so
+ * the boolean tracks the natural UI question "is the seat working".
+ */
+export interface SeatActivity {
+  /** tmux pane id OR canonical session name — whatever the daemon binds. */
+  paneId: string;
+  /** True ⟺ pane has produced output within `silenceWindowSeconds`. */
+  isActiveWithinWindow: boolean;
+  /** Configured threshold at observation time. */
+  silenceWindowSeconds: number;
+  /** ISO timestamp of the most recent observation. */
+  lastObservedAt: string;
 }
 
 export interface NodeWorkspaceInfo {
