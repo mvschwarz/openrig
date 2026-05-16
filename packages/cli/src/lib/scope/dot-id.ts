@@ -24,31 +24,81 @@ export const DEFAULT_PROJECT_PREFIX = "OPR";
 
 const RELEASE_NAME_RE = /^release-(\d+\.\d+(?:\.\d+)?)$/;
 // Strict positional grammar: every segment is a number except for the
-// 2-3 letter project prefix at position 0.
-const DOT_ID_RE = /^([A-Z]{2,3})\.(\d+(?:\.\d+){0,3})$/;
+// 2-3 letter project prefix at position 0. Accepts 2-5 numeric
+// segments after the prefix (mission has 2-3, slice has 3-4, sub-slice
+// has 4-5). Tier-aware parse helpers below split version/n/m correctly.
+const DOT_ID_RE = /^([A-Z]{2,3})\.(\d+(?:\.\d+){1,4})$/;
 
 /** Parse a dot-ID string into structured parts; returns null when the
- *  string doesn't conform to the §1 positional grammar. */
-export function parseDotId(raw: string): DotId | null {
+ *  string doesn't conform to the §1 positional grammar. When `tier`
+ *  is supplied, the trailing segments are peeled off into `n` (slice)
+ *  or `n` + `m` (sub-slice). With no tier, all numeric segments are
+ *  returned as `version` for backwards compatibility. */
+export function parseDotId(
+  raw: string,
+  tier?: "mission" | "slice" | "sub-slice",
+): DotId | null {
   if (typeof raw !== "string") return null;
   const trimmed = raw.trim();
   const m = DOT_ID_RE.exec(trimmed);
   if (!m) return null;
   const project = m[1]!;
   const segments = m[2]!.split(".");
-  // version is "ver" portion (first 1-3 numeric segments depending on
-  // whether the ID is for a mission / slice / sub-slice). We treat
-  // version as the prefix that excludes the last segment for slice IDs
-  // and the last two for sub-slice IDs. Without context, we cannot
-  // distinguish "0.3.2" mission from "0.3.2 slice (with empty n)". The
-  // caller asks for `expected: "mission" | "slice" | "sub-slice"` if
-  // it cares. By default we return all segments as `version`.
-  return {
-    project,
-    version: segments.join("."),
-    n: undefined,
-    m: undefined,
-  };
+  if (!tier) {
+    return { project, version: segments.join("."), n: undefined, m: undefined };
+  }
+  if (tier === "mission") {
+    return { project, version: segments.join("."), n: undefined, m: undefined };
+  }
+  if (tier === "slice") {
+    if (segments.length < 3) return null; // slice = ver(>=2) + n
+    const verSegs = segments.slice(0, -1);
+    const nSeg = segments[segments.length - 1]!;
+    return { project, version: verSegs.join("."), n: Number(nSeg), m: undefined };
+  }
+  // sub-slice
+  if (segments.length < 4) return null;
+  const verSegs = segments.slice(0, -2);
+  const nSeg = segments[segments.length - 2]!;
+  const mSeg = segments[segments.length - 1]!;
+  return { project, version: verSegs.join("."), n: Number(nSeg), m: Number(mSeg) };
+}
+
+/** Depth-based tier discriminator. Per §1 the positional grammar
+ *  is fixed:
+ *    mission   = <PFX>.<ver>           (ver = 2-3 numeric segments;
+ *                                       escape band is 99.x.y → 3)
+ *    slice     = <PFX>.<ver>.<n>       (3-4 numeric segments)
+ *    sub-slice = <PFX>.<ver>.<n>.<m>   (4-5 numeric segments)
+ *  Where a mission shape OVERLAPS with a slice shape (e.g. release
+ *  X.Y mission has 2 segments; release X.Y.Z mission has 3 segments
+ *  which is also the slice shape for release X.Y missions) the tier
+ *  is resolved by depth: mission caps at 3 numeric segments; slice
+ *  always has 3-4; sub-slice has 4-5. Escape band cases are
+ *  unambiguous because the 99-prefixed ver is exactly 3 segments. */
+export function isMissionDotId(raw: unknown): boolean {
+  if (typeof raw !== "string") return false;
+  const parsed = parseDotId(raw, "mission");
+  if (!parsed) return false;
+  const segs = parsed.version.split(".");
+  if (segs.length < 2 || segs.length > 3) return false;
+  // Escape-band mission must have exactly 3 ver segments where the
+  // first is "99" — guards against e.g. OPR.99.0 being mis-classified
+  // as a 3-segment release ver.
+  if (segs[0] === "99") return segs.length === 3;
+  return true;
+}
+
+export function isSliceDotId(raw: unknown): boolean {
+  if (typeof raw !== "string") return false;
+  const parsed = parseDotId(raw, "slice");
+  if (!parsed) return false;
+  const segs = parsed.version.split(".");
+  // Slice = mission-ver + 1 ordinal. Parent ver must itself be a
+  // valid mission shape.
+  if (segs.length < 2 || segs.length > 3) return false;
+  if (segs[0] === "99") return segs.length === 3;
+  return true;
 }
 
 /** Render a DotId back to its canonical dot-string. */
@@ -106,7 +156,10 @@ export function nextEscapeBandOrdinal(
   return max + 1;
 }
 
-/** Does this candidate string parse as a valid §1 dot-ID? */
+/** Does this candidate string parse as a valid §1 dot-ID at ANY
+ *  tier? Prefer the tier-specific isMissionDotId/isSliceDotId at use
+ *  sites where the tier is known — depth alone doesn't disambiguate
+ *  mission vs slice for release IDs with overlapping shapes. */
 export function isConformantDotId(raw: unknown): boolean {
   return typeof raw === "string" && parseDotId(raw) !== null;
 }

@@ -7,6 +7,8 @@ import {
   formatDotId,
   inferMissionDotId,
   isConformantDotId,
+  isMissionDotId,
+  isSliceDotId,
   nextEscapeBandOrdinal,
   parseDotId,
   sliceIdFromMission,
@@ -90,5 +92,71 @@ describe("isConformantDotId", () => {
     expect(isConformantDotId("")).toBe(false);
     expect(isConformantDotId(42)).toBe(false);
     expect(isConformantDotId("opr.0.3.2")).toBe(false);
+  });
+});
+
+describe("BLOCK 1 — tier-aware validation (isMissionDotId / isSliceDotId)", () => {
+  it("isMissionDotId accepts release-shaped IDs (2-3 numeric segments)", () => {
+    expect(isMissionDotId("OPR.0.3.2")).toBe(true);
+    expect(isMissionDotId("OPR.1.0")).toBe(true);
+  });
+
+  it("isMissionDotId accepts the escape-band shape (99.x.y, exactly 3 segments)", () => {
+    expect(isMissionDotId("OPR.99.0.1")).toBe(true);
+    expect(isMissionDotId("OPR.99.0.42")).toBe(true);
+  });
+
+  it("isMissionDotId REJECTS slice-shaped IDs (4+ numeric segments) — guard BC discriminator", () => {
+    // The crux of BLOCK 1: a slice-depth ID like OPR.0.3.2.12 must
+    // not pass mission validation, even though it parses as a valid
+    // dot-ID at SOME tier.
+    expect(isMissionDotId("OPR.0.3.2.12")).toBe(false);
+    expect(isMissionDotId("OPR.99.0.1.5")).toBe(false);
+  });
+
+  it("isMissionDotId rejects malformed inputs (alpha / wrong prefix shape)", () => {
+    expect(isMissionDotId("OPR.A.1")).toBe(false);
+    expect(isMissionDotId("opr.0.3.2")).toBe(false);
+    expect(isMissionDotId(42 as unknown)).toBe(false);
+    expect(isMissionDotId("OPR.99.0")).toBe(false); // escape band must be exactly 3
+  });
+
+  it("isSliceDotId accepts slice-shaped IDs (3-4 numeric segments)", () => {
+    expect(isSliceDotId("OPR.0.3.2.12")).toBe(true); // release-X.Y.Z slice
+    expect(isSliceDotId("OPR.1.0.5")).toBe(true);    // release-X.Y slice
+    expect(isSliceDotId("OPR.99.0.1.7")).toBe(true); // escape-band slice
+  });
+
+  it("isSliceDotId admits the inherent depth-3 overlap (release X.Y.Z mission shape = slice for an X.Y parent)", () => {
+    // The convention's positional grammar can't distinguish a
+    // release-X.Y.Z mission from a slice of a release-X.Y mission
+    // by depth alone. Both shapes are accepted by isSliceDotId; the
+    // CLI disambiguates by tier at use sites (mission create uses
+    // isMissionDotId; slice IDs are minted from a parent + ordinal,
+    // never user-typed).
+    expect(isSliceDotId("OPR.0.3.2")).toBe(true);   // release X.Y.Z OR slice of X.Y
+    // Escape-band IDs are UNAMBIGUOUS by depth: an escape-band mission
+    // is depth-3 (OPR.99.0.1); an escape-band slice is depth-4
+    // (OPR.99.0.1.5). Depth-3 with leading 99 is mission-only.
+    expect(isSliceDotId("OPR.99.0.1")).toBe(false);
+    // The strictly-impossible-slice case is depth 2 (X.Y only) — no
+    // parent can have a sub-NN-segment of "Y".
+    expect(isSliceDotId("OPR.1.0")).toBe(false);
+  });
+
+  it("parseDotId(s, 'slice') peels the last segment off as `n`", () => {
+    // Per guard discriminator: parsing OPR.0.3.2.12 as a slice must
+    // yield version=0.3.2 and n=12, not version=0.3.2.12.
+    const id = parseDotId("OPR.0.3.2.12", "slice");
+    expect(id).not.toBeNull();
+    expect(id!.version).toBe("0.3.2");
+    expect(id!.n).toBe(12);
+  });
+
+  it("parseDotId(s, 'mission') keeps all numeric segments as version", () => {
+    const id = parseDotId("OPR.0.3.2", "mission");
+    expect(id).not.toBeNull();
+    expect(id!.version).toBe("0.3.2");
+    expect(id!.n).toBeUndefined();
   });
 });

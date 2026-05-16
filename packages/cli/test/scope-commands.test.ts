@@ -353,6 +353,104 @@ describe("rig scope mission create (HG-14 + HG-15)", () => {
     ], env.missionsRoot);
     expect(bad.exitCode).toBe(1);
   });
+
+  it("BLOCK 1 discriminator: mission create rejects slice-depth --id (OPR.0.3.2.12)", async () => {
+    // Per guard BC verdict: a 4-segment slice-shape must NOT pass
+    // mission --id validation. Without tier-aware validation this
+    // would succeed and create a mission with a slice-shaped id.
+    const r = await run([
+      "mission", "create", "wrong-tier",
+      "--id", "OPR.0.3.2.12", "--json",
+    ], env.missionsRoot);
+    expect(r.exitCode).toBe(1);
+    const parsed = JSON.parse(r.stdout);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.error.fact).toMatch(/not a mission-tier dot-ID/);
+  });
+
+  it("BLOCK 1 follow-up: mission create still accepts valid mission shapes (escape band + release)", async () => {
+    const eb = await run([
+      "mission", "create", "exp-band",
+      "--id", "OPR.99.0.42", "--json",
+    ], env.missionsRoot);
+    expect(eb.exitCode).toBe(0);
+    expect(JSON.parse(eb.stdout).mission.id).toBe("OPR.99.0.42");
+
+    const rel = await run([
+      "mission", "create", "release-0.6.0", "--json",
+    ], env.missionsRoot);
+    expect(rel.exitCode).toBe(0);
+    expect(JSON.parse(rel.stdout).mission.id).toBe("OPR.0.6.0");
+  });
+});
+
+// ---------------------------------------------------------------------
+// BLOCK 3 discriminator: ship + move persist target.id back to target README
+// ---------------------------------------------------------------------
+
+describe("BLOCK 3 — ship/move persist target mission id into target README", () => {
+  let env: { root: string; missionsRoot: string };
+
+  beforeEach(() => {
+    env = seedSubstrate();
+    // Replace release-0.3.2/README.md with an ID-LESS variant so we
+    // can observe the lazy-adopt-and-persist behavior.
+    fs.writeFileSync(
+      path.join(env.missionsRoot, "release-0.3.2", "README.md"),
+      "# release-0.3.2\n\n(no id frontmatter yet)\n",
+      "utf8",
+    );
+    execFileSync("git", ["-C", env.root, "add", "."], { stdio: "ignore" });
+    execFileSync("git", ["-C", env.root, "commit", "-m", "strip-target-id", "-q"], { stdio: "ignore" });
+  });
+  afterEach(() => { fs.rmSync(env.root, { recursive: true, force: true }); });
+
+  it("slice ship: target mission gains a persisted id; child id = targetId.NN", async () => {
+    const r = await run([
+      "slice", "ship", "01-debt-foo", "release-0.3.2",
+      "--mission", "backlog", "--json",
+    ], env.missionsRoot);
+    const parsed = JSON.parse(r.stdout);
+    expect(parsed.ok).toBe(true);
+    // Target README now has id: OPR.0.3.2 written back.
+    const targetFm = readFrontmatter(path.join(env.missionsRoot, "release-0.3.2", "README.md"));
+    expect(targetFm.id).toBe("OPR.0.3.2");
+    // Child id matches parent.NN.
+    expect(parsed.shipped.to.id).toBe("OPR.0.3.2.2");
+  });
+
+  it("slice move: target mission gains a persisted id; child id = targetId.NN", async () => {
+    const r = await run([
+      "slice", "move", "01-debt-foo", "release-0.3.2",
+      "--mission", "backlog", "--json",
+    ], env.missionsRoot);
+    const parsed = JSON.parse(r.stdout);
+    expect(parsed.ok).toBe(true);
+    const targetFm = readFrontmatter(path.join(env.missionsRoot, "release-0.3.2", "README.md"));
+    expect(targetFm.id).toBe("OPR.0.3.2");
+    expect(parsed.moved.to.id).toBe("OPR.0.3.2.2");
+  });
+
+  it("sibling missions without id remain UNCHANGED after a ship/move (narrow lazy adoption, not mass-migrate)", async () => {
+    // Spawn an unrelated id-less mission alongside; assert it survives
+    // untouched through a ship to a different mission.
+    fs.mkdirSync(path.join(env.missionsRoot, "untouched-mission"), { recursive: true });
+    fs.writeFileSync(
+      path.join(env.missionsRoot, "untouched-mission", "README.md"),
+      "# untouched\n",
+      "utf8",
+    );
+    execFileSync("git", ["-C", env.root, "add", "."], { stdio: "ignore" });
+    execFileSync("git", ["-C", env.root, "commit", "-m", "seed-sibling", "-q"], { stdio: "ignore" });
+    const before = fs.readFileSync(path.join(env.missionsRoot, "untouched-mission", "README.md"), "utf8");
+    await run([
+      "slice", "ship", "01-debt-foo", "release-0.3.2",
+      "--mission", "backlog", "--json",
+    ], env.missionsRoot);
+    const after = fs.readFileSync(path.join(env.missionsRoot, "untouched-mission", "README.md"), "utf8");
+    expect(after).toBe(before);
+    expect(readFrontmatter(path.join(env.missionsRoot, "untouched-mission", "README.md")).id).toBeUndefined();
+  });
 });
 
 // ---------------------------------------------------------------------

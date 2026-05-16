@@ -109,13 +109,27 @@ describe("listMissions + listSlices + nextSliceNN", () => {
     fs.rmSync(root, { recursive: true, force: true });
   });
 
-  it("lists missions sorted by name with slice counts (HG-8)", () => {
+  it("lists missions sorted by name with slice counts; SKIPS dirs without README.md (HG-8)", () => {
     const missions = listMissions(missionsRoot);
-    expect(missions.map((m) => m.name)).toEqual(["no-readme", "release-0.3.2"]);
+    // no-readme/ has no README.md and must NOT appear (HG-8 / PRD §2.1).
+    expect(missions.map((m) => m.name)).toEqual(["release-0.3.2"]);
     const r = missions.find((m) => m.name === "release-0.3.2")!;
     expect(r.activeSliceCount).toBe(2);
     expect(r.closedSliceCount).toBe(1);
     expect(r.id).toBe("OPR.0.3.2");
+  });
+
+  it("HG-8 discriminator: 3 dirs / 1 without README → exactly 2 missions listed", () => {
+    // Seed a third mission alongside the existing fixture for a clear
+    // make-it-fail-first signal per guard BC verdict.
+    writeFile(
+      path.join(missionsRoot, "backlog", "README.md"),
+      "---\nid: OPR.99.0.1\n---\n# backlog\n",
+    );
+    const missions = listMissions(missionsRoot);
+    expect(missions.map((m) => m.name).sort()).toEqual(["backlog", "release-0.3.2"]);
+    // The README-less directory survives on disk but does not show up.
+    expect(fs.existsSync(path.join(missionsRoot, "no-readme"))).toBe(true);
   });
 
   it("listSlices active filter excludes closed/shipped (HG-1)", () => {
@@ -267,5 +281,34 @@ describe("moveSlice — git mv preserves history (HG-5) + refuses dirty tree (HG
     expect(result.usedGit).toBe(false);
     expect(fs.existsSync(dest)).toBe(true);
     fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("BLOCK 4 discriminator: handles symlinked src/dest paths without escaping the repo (macOS /var↔/private/var class)", () => {
+    // Build a parallel tree of symlinks pointing at the real repo
+    // tree. Without realpath normalization inside moveSlice, path.relative
+    // would resolve to ../.. and git mv would reject with "outside
+    // repository". With normalization, git mv succeeds and history
+    // follows the move via --follow.
+    const linkParent = mktemp();
+    const linkRoot = path.join(linkParent, "linked-substrate");
+    fs.symlinkSync(root, linkRoot);
+    // Sanity: the symlinked tree resolves to a different absolute path
+    // than the real tree (covers the /var↔/private/var class on macOS
+    // and any other path-resolving symlink class on other OSes).
+    expect(fs.realpathSync(linkRoot)).not.toBe(linkRoot);
+    const src = path.join(linkRoot, "missions", "backlog", "slices", "01-foo");
+    const dest = path.join(linkRoot, "missions", "release-0.3.2", "slices", "01-foo");
+    const result = moveSlice(src, dest);
+    expect(result.usedGit).toBe(true);
+    expect(result.repoRoot).toBe(fs.realpathSync(root)); // git returned the realpath
+    // git mv staged a rename; history follows.
+    execFileSync("git", ["-C", root, "commit", "-m", "ship-via-symlink", "-q"], { stdio: "ignore" });
+    const log = execFileSync("git", [
+      "-C", root, "log", "--follow", "--pretty=format:%s", "--",
+      "missions/release-0.3.2/slices/01-foo/README.md",
+    ], { encoding: "utf8" });
+    expect(log).toMatch(/seed/);
+    expect(log).toMatch(/ship-via-symlink/);
+    fs.rmSync(linkParent, { recursive: true, force: true });
   });
 });

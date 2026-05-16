@@ -133,7 +133,9 @@ export function resolveMissionsRoot(opts: {
 }
 
 /** List mission folders under the missions root. A mission is any
- *  top-level folder containing a README.md. */
+ *  top-level folder containing a README.md (per IMPLEMENTATION-PRD
+ *  §2.1 / HG-8). Directories without a README.md are skipped — they
+ *  represent scratch/junk, not declared missions. */
 export function listMissions(missionsRoot: string): MissionInfo[] {
   if (!fs.existsSync(missionsRoot)) return [];
   const entries = fs.readdirSync(missionsRoot, { withFileTypes: true });
@@ -143,7 +145,8 @@ export function listMissions(missionsRoot: string): MissionInfo[] {
     const absPath = path.join(missionsRoot, entry.name);
     const readmePath = path.join(absPath, "README.md");
     const hasReadme = fs.existsSync(readmePath);
-    const frontmatter = hasReadme ? readFrontmatter(readmePath) : {};
+    if (!hasReadme) continue;
+    const frontmatter = readFrontmatter(readmePath);
     const slicesDir = path.join(absPath, "slices");
     const closedDir = path.join(absPath, "closed");
     const activeSliceCount = countSliceDirs(slicesDir);
@@ -362,6 +365,27 @@ export function ensureMissionId(
   const peers = listMissions(missionsRoot).filter((m) => m.name !== mission.name);
   const ordinal = nextEscapeBandOrdinal(peers.map((p) => p.id));
   return inferMissionDotId(mission.name, ordinal);
+}
+
+/** Same as ensureMissionId, but ALSO writes the inferred id back into
+ *  the mission's README frontmatter when it was absent. Use this at
+ *  every site that mints a child id (slice create / ship / move target)
+ *  — per the convention's lazy-adoption rule: when a child is created
+ *  under a pre-existing parent with no id, assign the parent's id
+ *  on-demand at the same time. Narrow, single-parent, create-triggered;
+ *  never mass-migration. */
+export function ensureMissionIdPersisted(
+  mission: MissionInfo,
+  missionsRoot: string,
+): string {
+  const id = ensureMissionId(mission, missionsRoot);
+  if (!mission.id && mission.readmePath) {
+    updateFrontmatter(mission.readmePath, { id });
+    // Reflect the write on the in-memory MissionInfo so subsequent
+    // callers in the same command don't re-mint a different ordinal.
+    mission.id = id;
+  }
+  return id;
 }
 
 // ---------------------------------------------------------------------

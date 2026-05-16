@@ -23,12 +23,12 @@ import {
 import {
   DEFAULT_PROJECT_PREFIX,
   inferMissionDotId,
-  isConformantDotId,
+  isMissionDotId,
   nextEscapeBandOrdinal,
   sliceIdFromMission,
 } from "../lib/scope/dot-id.js";
 import {
-  ensureMissionId,
+  ensureMissionIdPersisted,
   findMission,
   findSlice,
   listMissions,
@@ -248,7 +248,11 @@ function buildSliceCreateCommand(): Command {
         }
         const missionsRoot = resolveMissionsRoot({ override: getOpts(command).workspace });
         const mission = findMission(missionsRoot, missionName);
-        const missionId = ensureMissionId(mission, missionsRoot);
+        // Persist the parent mission's id back into its README at the
+        // SAME moment we mint the child's id (per convention §1
+        // lazy-adoption rule + guard BC BLOCK 3 — every child-mint site
+        // must persist the parent's id, not just slice create).
+        const missionId = ensureMissionIdPersisted(mission, missionsRoot);
         const nn = nextSliceNN(mission.absPath);
         const sliceFolder = `${pad2(nn)}-${slug}`;
         const sliceAbs = path.join(mission.absPath, "slices", sliceFolder);
@@ -272,11 +276,6 @@ function buildSliceCreateCommand(): Command {
         fs.mkdirSync(sliceAbs, { recursive: true });
         const readmePath = path.join(sliceAbs, "README.md");
         fs.writeFileSync(readmePath, body, "utf8");
-        // If the mission has no `id:` yet, mint it now so future slice
-        // creates short-circuit to the cached value (auto-adopt).
-        if (mission.readmePath && !mission.id) {
-          updateFrontmatter(mission.readmePath, { id: missionId });
-        }
         const payload = {
           ok: true,
           slice: {
@@ -325,7 +324,7 @@ function buildSliceShipCommand(): Command {
         const newName = `${pad2(newNN)}-${slug}`;
         const destAbs = path.join(targetSlicesDir, newName);
         const { usedGit, repoRoot } = moveSlice(slice.absPath, destAbs);
-        const targetId = ensureMissionId(target, missionsRoot);
+        const targetId = ensureMissionIdPersisted(target, missionsRoot);
         const newSliceId = sliceIdFromMission(targetId, newNN);
         const newReadme = path.join(destAbs, "README.md");
         if (fs.existsSync(newReadme)) {
@@ -443,7 +442,7 @@ function buildSliceMoveCommand(): Command {
         const newName = `${pad2(newNN)}-${slug}`;
         const destAbs = path.join(targetSlicesDir, newName);
         const { usedGit, repoRoot } = moveSlice(slice.absPath, destAbs);
-        const targetId = ensureMissionId(target, missionsRoot);
+        const targetId = ensureMissionIdPersisted(target, missionsRoot);
         const newSliceId = sliceIdFromMission(targetId, newNN);
         const newReadme = path.join(destAbs, "README.md");
         if (fs.existsSync(newReadme)) {
@@ -595,11 +594,16 @@ function buildMissionCreateCommand(): Command {
         // Mint the dot-ID.
         let id: string;
         if (opts.id) {
-          if (!isConformantDotId(opts.id)) {
+          // Tier-aware validation per guard BC verdict (BLOCK 1).
+          // A mission ID has 2-3 numeric segments after the prefix
+          // (release X.Y or X.Y.Z; escape-band 99.x.y). Reject
+          // slice-shaped IDs (4 segments) so the parent identity stays
+          // unambiguous.
+          if (!isMissionDotId(opts.id)) {
             throw new ScopeCliError({
-              fact: `Supplied --id "${opts.id}" does not match the §1 grammar (<PFX>.<ver>[.n][.m]).`,
-              consequence: "Mission not created.",
-              action: "Use a conformant dot-ID like OPR.0.3.2 or OPR.99.0.1.",
+              fact: `Supplied --id "${opts.id}" is not a mission-tier dot-ID.`,
+              consequence: "Mission not created. A mission ID has the shape <PFX>.<ver> (2-3 numeric segments), not a slice shape <PFX>.<ver>.<n>.",
+              action: "Use a mission-shaped dot-ID like OPR.0.3.2 (release) or OPR.99.0.1 (escape band). For slice IDs, scope automatically mints them when you create a slice.",
             });
           }
           id = opts.id;
