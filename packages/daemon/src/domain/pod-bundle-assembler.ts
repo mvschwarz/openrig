@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { RigSpecCodec } from "./rigspec-codec.js";
 import { RigSpecSchema } from "./rigspec-schema.js";
 import { resolveAgentRef, type AgentResolverFsOps } from "./agent-resolver.js";
-import { serializePodBundleManifest, type PodBundleManifest, type PodBundleAgentEntry, type PodBundleAgentImportEntry } from "./bundle-types.js";
+import { serializePodBundleManifest, type PodBundleManifest, type PodBundleAgentEntry, type PodBundleAgentImportEntry, type BundleProvenance } from "./bundle-types.js";
 import type { RigSpec, StartupBlock } from "./types.js";
 
 export interface PodAssemblerFsOps extends AgentResolverFsOps {
@@ -19,6 +19,15 @@ export interface PodAssembleOptions {
   outputDir: string;
   bundleName: string;
   bundleVersion: string;
+  /**
+   * Optional Item-1 provenance input. Caller fills the fields it knows
+   * (sourceHost, authorSession, daemonVersion, cliVersion, sourceRigId,
+   * sourceRigName, notes). The assembler mirrors root createdAt into
+   * provenance.createdAt unless caller pre-set it (caller value wins
+   * for test determinism). Missing block = no provenance recorded
+   * (backward compat).
+   */
+  provenance?: BundleProvenance;
 }
 
 export interface PodAssembleResult {
@@ -163,15 +172,22 @@ export class PodBundleAssembler {
     this.fs.writeFile(nodePath.join(opts.outputDir, "rig.yaml"), rewrittenRigYaml);
 
     // 4. Build manifest
+    const createdAt = new Date().toISOString();
     const manifest: PodBundleManifest = {
       schemaVersion: 2,
       name: opts.bundleName,
       version: opts.bundleVersion,
-      createdAt: new Date().toISOString(),
+      createdAt,
       rigSpec: "rig.yaml",
       agents: agentEntries,
       cultureFile: rigSpec.cultureFile,
     };
+    if (opts.provenance) {
+      manifest.provenance = {
+        ...opts.provenance,
+        createdAt: opts.provenance.createdAt ?? createdAt,
+      };
+    }
 
     // Write manifest
     this.fs.writeFile(

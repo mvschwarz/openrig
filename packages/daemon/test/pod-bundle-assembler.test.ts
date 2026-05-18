@@ -505,6 +505,81 @@ describe("PodBundleAssembler", () => {
 
   // Deferred: full golden-path integration (assemble -> validate -> preflight -> instantiate)
   // will be verified at Checkpoint 2 when AS-T11 + AS-T08b land
+
+  // Item 1 — provenance capture (slice-05 Checkpoint 2 part 2)
+  it("v2: captures provenance from opts into manifest", () => {
+    const spec = makeRigSpec();
+    const files: Record<string, string> = {
+      [`${RIG_ROOT}/rig.yaml`]: rigSpecYaml(spec),
+      [`${RIG_ROOT}/agents/impl/agent.yaml`]: validAgentYaml("impl"),
+    };
+    const fs = mockFs(files);
+    const assembler = new PodBundleAssembler({ fsOps: fs });
+
+    const result = assembler.assemble({
+      rigRoot: RIG_ROOT,
+      rigSpecPath: `${RIG_ROOT}/rig.yaml`,
+      outputDir: "/tmp/bundle-staging-prov",
+      bundleName: "test-bundle",
+      bundleVersion: "1.0.0",
+      provenance: {
+        sourceHost: "test-host",
+        authorSession: "velocity-driver@openrig-velocity",
+        daemonVersion: "0.3.2",
+        cliVersion: "0.3.2",
+        notes: "v2 capture fixture",
+      },
+    });
+
+    expect(result.manifest.provenance).toBeDefined();
+    expect(result.manifest.provenance?.sourceHost).toBe("test-host");
+    expect(result.manifest.provenance?.authorSession).toBe("velocity-driver@openrig-velocity");
+    expect(result.manifest.provenance?.daemonVersion).toBe("0.3.2");
+    expect(result.manifest.provenance?.notes).toBe("v2 capture fixture");
+    // createdAt mirrors root
+    expect(result.manifest.provenance?.createdAt).toBe(result.manifest.createdAt);
+  });
+
+  it("v2: respects opts.provenance.createdAt when pre-set (test determinism)", () => {
+    const spec = makeRigSpec();
+    const files: Record<string, string> = {
+      [`${RIG_ROOT}/rig.yaml`]: rigSpecYaml(spec),
+      [`${RIG_ROOT}/agents/impl/agent.yaml`]: validAgentYaml("impl"),
+    };
+    const fs = mockFs(files);
+    const assembler = new PodBundleAssembler({ fsOps: fs });
+
+    const fixedCreatedAt = "2026-01-01T00:00:00Z";
+    const result = assembler.assemble({
+      rigRoot: RIG_ROOT,
+      rigSpecPath: `${RIG_ROOT}/rig.yaml`,
+      outputDir: "/tmp/bundle-staging-fixed-createdat",
+      bundleName: "test", bundleVersion: "1.0",
+      provenance: { createdAt: fixedCreatedAt, sourceHost: "h" },
+    });
+
+    expect(result.manifest.provenance?.createdAt).toBe(fixedCreatedAt);
+    expect(result.manifest.createdAt).not.toBe(fixedCreatedAt);
+  });
+
+  it("v2: omits provenance when opts.provenance not provided (backward compat)", () => {
+    const spec = makeRigSpec();
+    const files: Record<string, string> = {
+      [`${RIG_ROOT}/rig.yaml`]: rigSpecYaml(spec),
+      [`${RIG_ROOT}/agents/impl/agent.yaml`]: validAgentYaml("impl"),
+    };
+    const fs = mockFs(files);
+    const assembler = new PodBundleAssembler({ fsOps: fs });
+
+    const result = assembler.assemble({
+      rigRoot: RIG_ROOT,
+      rigSpecPath: `${RIG_ROOT}/rig.yaml`,
+      outputDir: "/tmp/bundle-staging-no-prov",
+      bundleName: "test", bundleVersion: "1.0",
+    });
+
+    expect(result.manifest.provenance).toBeUndefined();
+  });
 });
 
 describe("PodBundleManifest validation", () => {

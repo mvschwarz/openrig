@@ -2,7 +2,7 @@ import nodePath from "node:path";
 import { LegacyRigSpecCodec as RigSpecCodec } from "./rigspec-codec.js"; // TODO: AS-T08b — migrate to pod-aware RigSpec
 import { LegacyRigSpecSchema as RigSpecSchema } from "./rigspec-schema.js"; // TODO: AS-T08b — migrate to pod-aware RigSpec
 // TODO: AS-T12 — migrate to pod-aware bundle types
-import { serializeLegacyBundleManifest as serializeBundleManifest, type LegacyBundleManifest as BundleManifest } from "./bundle-types.js";
+import { serializeLegacyBundleManifest as serializeBundleManifest, type LegacyBundleManifest as BundleManifest, type BundleProvenance } from "./bundle-types.js";
 
 export interface AssemblerFsOps {
   readFile: (path: string) => string;
@@ -26,6 +26,15 @@ export interface AssembleOptions {
   outputDir: string;
   bundleName: string;
   bundleVersion: string;
+  /**
+   * Optional Item-1 provenance input. Caller fills the fields it knows
+   * (sourceHost, authorSession, daemonVersion, cliVersion, sourceRigId,
+   * sourceRigName, notes). The assembler mirrors root createdAt into
+   * provenance.createdAt unless caller pre-set it (caller value wins
+   * for test determinism). Missing block = no provenance recorded
+   * (backward compat).
+   */
+  provenance?: BundleProvenance;
 }
 
 /**
@@ -104,14 +113,21 @@ export class LegacyBundleAssembler {
     }
 
     // Generate manifest (no integrity — P7-T02 adds it)
+    const createdAt = new Date().toISOString();
     const manifest: BundleManifest = {
       schemaVersion: 1,
       name: opts.bundleName,
       version: opts.bundleVersion,
-      createdAt: new Date().toISOString(),
+      createdAt,
       rigSpec: "rig.yaml",
       packages: packageEntries,
     };
+    if (opts.provenance) {
+      manifest.provenance = {
+        ...opts.provenance,
+        createdAt: opts.provenance.createdAt ?? createdAt,
+      };
+    }
 
     // Write bundle.yaml
     this.fs.writeFile(

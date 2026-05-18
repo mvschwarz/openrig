@@ -5,7 +5,7 @@ import os from "node:os";
 // TODO: AS-T12 — migrate to pod-aware bundle assembler
 import { LegacyBundleAssembler as BundleAssembler, type AssemblerFsOps } from "../src/domain/bundle-assembler.js";
 // TODO: AS-T12 — migrate to pod-aware bundle types
-import { parseLegacyBundleManifest as parseBundleManifest, validateLegacyBundleManifest as validateBundleManifest, normalizeLegacyBundleManifest as normalizeBundleManifest } from "../src/domain/bundle-types.js";
+import { parseLegacyBundleManifest as parseBundleManifest, validateLegacyBundleManifest as validateBundleManifest, normalizeLegacyBundleManifest as normalizeBundleManifest, type BundleProvenance } from "../src/domain/bundle-types.js";
 
 const VALID_SPEC = `
 schema_version: 1
@@ -240,5 +240,81 @@ describe("BundleAssembler", () => {
     expect(validation.valid).toBe(true);
     const normalized = normalizeBundleManifest(parsed);
     expect(normalized.packages[0]!.originalSources).toEqual(["local:./a", "local:./b"]);
+  });
+
+  // Item 1 — provenance capture (slice-05 Checkpoint 2 part 2)
+  it("captures full provenance from opts into manifest", () => {
+    const specPath = writeSpec();
+    const pkgDir = writePkg("pkg", { "package.yaml": "name: pkg" });
+    const outputDir = path.join(tmpDir, "staging");
+    const assembler = new BundleAssembler({ fsOps: realFsOps() });
+
+    const provenance: BundleProvenance = {
+      sourceHost: "test-host.local",
+      authorSession: "velocity-driver@openrig-velocity",
+      sourceRigId: "01KQEQPN4MQJN0DHBM5CQ0N8D7",
+      sourceRigName: "openrig-velocity",
+      daemonVersion: "0.3.2",
+      cliVersion: "0.3.2",
+      notes: "checkpoint-2-part-2 fixture",
+    };
+    const manifest = assembler.assemble({
+      specPath, outputDir, bundleName: "test", bundleVersion: "1.0",
+      packages: [{ name: "pkg", version: "1.0", sourcePath: pkgDir, originalSource: "local:./pkg", manifestHash: "h1" }],
+      provenance,
+    });
+
+    expect(manifest.provenance).toBeDefined();
+    expect(manifest.provenance?.sourceHost).toBe("test-host.local");
+    expect(manifest.provenance?.authorSession).toBe("velocity-driver@openrig-velocity");
+    expect(manifest.provenance?.daemonVersion).toBe("0.3.2");
+    expect(manifest.provenance?.cliVersion).toBe("0.3.2");
+    expect(manifest.provenance?.notes).toBe("checkpoint-2-part-2 fixture");
+    // createdAt mirrors root when opts.provenance.createdAt unset
+    expect(manifest.provenance?.createdAt).toBe(manifest.createdAt);
+
+    // Round-trip via the on-disk bundle.yaml
+    const diskYaml = fs.readFileSync(path.join(outputDir, "bundle.yaml"), "utf-8");
+    const parsed = parseBundleManifest(diskYaml);
+    const validation = validateBundleManifest(parsed, { requireIntegrity: false });
+    expect(validation.valid).toBe(true);
+    const normalized = normalizeBundleManifest(parsed);
+    expect(normalized.provenance?.sourceHost).toBe("test-host.local");
+    expect(normalized.provenance?.notes).toBe("checkpoint-2-part-2 fixture");
+  });
+
+  it("respects opts.provenance.createdAt when caller pre-sets it (test determinism)", () => {
+    const specPath = writeSpec();
+    const pkgDir = writePkg("pkg", { "package.yaml": "name: pkg" });
+    const outputDir = path.join(tmpDir, "staging");
+    const assembler = new BundleAssembler({ fsOps: realFsOps() });
+
+    const fixedCreatedAt = "2026-01-01T00:00:00Z";
+    const manifest = assembler.assemble({
+      specPath, outputDir, bundleName: "test", bundleVersion: "1.0",
+      packages: [{ name: "pkg", version: "1.0", sourcePath: pkgDir, originalSource: "local:./pkg", manifestHash: "h1" }],
+      provenance: { createdAt: fixedCreatedAt, sourceHost: "h" },
+    });
+
+    expect(manifest.provenance?.createdAt).toBe(fixedCreatedAt);
+    // root createdAt is independent (real-time stamp)
+    expect(manifest.createdAt).not.toBe(fixedCreatedAt);
+  });
+
+  it("omits provenance when opts.provenance not provided (backward compat)", () => {
+    const specPath = writeSpec();
+    const pkgDir = writePkg("pkg", { "package.yaml": "name: pkg" });
+    const outputDir = path.join(tmpDir, "staging");
+    const assembler = new BundleAssembler({ fsOps: realFsOps() });
+
+    const manifest = assembler.assemble({
+      specPath, outputDir, bundleName: "test", bundleVersion: "1.0",
+      packages: [{ name: "pkg", version: "1.0", sourcePath: pkgDir, originalSource: "local:./pkg", manifestHash: "h1" }],
+    });
+
+    expect(manifest.provenance).toBeUndefined();
+    // on-disk yaml must not contain provenance section
+    const diskYaml = fs.readFileSync(path.join(outputDir, "bundle.yaml"), "utf-8");
+    expect(diskYaml).not.toContain("provenance:");
   });
 });
