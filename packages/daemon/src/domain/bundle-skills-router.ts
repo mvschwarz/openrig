@@ -68,13 +68,15 @@ export interface RouteSkillsResult {
 export function routeSkills(input: RouteSkillsInput, fs: SkillsRouterFsOps): RouteSkillsResult {
   const records: RoutedSkillRecord[] = [];
   const bundleRootResolved = nodePath.resolve(input.bundleRoot);
+  const targetRootResolved = nodePath.resolve(input.targetSkillsDir);
   fs.mkdirp(input.targetSkillsDir);
 
   for (const declared of input.declaredSkills) {
     const sourceAbs = nodePath.resolve(input.bundleRoot, declared);
-    // Defense-in-depth path-containment (mirrors bundle-source-resolver pattern;
-    // the manifest validator already rejects unsafe paths via isRelativeSafePath
-    // but we re-check here in case the input bypassed validation upstream).
+    // Defense-in-depth path-containment on SOURCE (mirrors bundle-source-
+    // resolver pattern; the manifest validator already rejects unsafe paths
+    // via isRelativeSafePath but we re-check here in case the input bypassed
+    // validation upstream).
     if (sourceAbs !== bundleRootResolved && !sourceAbs.startsWith(bundleRootResolved + nodePath.sep)) {
       records.push({
         declaredPath: declared,
@@ -98,6 +100,23 @@ export function routeSkills(input: RouteSkillsInput, fs: SkillsRouterFsOps): Rou
     // root of the operator's skill tree.
     const declaredTrimmed = declared.startsWith("skills/") ? declared.slice("skills/".length) : declared;
     const targetAbs = nodePath.resolve(input.targetSkillsDir, declaredTrimmed);
+    // Defense-in-depth path-containment on TARGET (B1 repair on
+    // qitem-20260518215234-f84fff45). The leading "skills/" strip can promote
+    // a relative segment that looks safe under bundleRoot (e.g.
+    // "skills/../outside/SKILL.md" passes source-containment because the bundle
+    // tree may contain "outside/SKILL.md", but stripping yields
+    // "../outside/SKILL.md" which would escape targetSkillsDir). Reject if the
+    // target resolves outside the target library. Banked lesson:
+    // feedback_pre_existing_trust_boundary_reuse_canonical_helper — contain
+    // BOTH source and target when handling untrusted path input.
+    if (targetAbs !== targetRootResolved && !targetAbs.startsWith(targetRootResolved + nodePath.sep)) {
+      records.push({
+        declaredPath: declared,
+        status: "unsafe",
+        detail: `skill target path for '${declared}' escapes target skills library; rejected`,
+      });
+      continue;
+    }
     fs.mkdirp(nodePath.dirname(targetAbs));
     const content = fs.readFile(sourceAbs);
     fs.writeFile(targetAbs, content);

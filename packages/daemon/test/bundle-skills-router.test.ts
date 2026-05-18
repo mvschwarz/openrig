@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import nodePath from "node:path";
 import { routeSkills, type SkillsRouterFsOps, type RouteSkillsInput } from "../src/domain/bundle-skills-router.js";
 
 // Item 6 / slice-05 Checkpoint 7.2: bundle-skills-router pure-function tests.
@@ -116,7 +117,34 @@ describe("routeSkills", () => {
     expect(result.records[2]!.status).toBe("unsafe");
   });
 
-  // R7: non-"skills/" prefixed declared path is honored as-is (no leading strip)
+  // R7-B1: target-side path containment (B1 repair on
+  // qitem-20260518215234-f84fff45). Declared path "skills/../outside/SKILL.md"
+  // passes SOURCE containment (resolves under bundleRoot since the leading
+  // "skills/" segment is consumed before ../) but after the leading "skills/"
+  // strip becomes "../outside/SKILL.md" which would escape targetSkillsDir.
+  // Must be rejected.
+  it("declared path that would escape target skills dir after prefix strip is rejected", () => {
+    // Source file exists under bundleRoot (passes source containment) but the
+    // resolved target after strip escapes target dir.
+    const fs = mockFs({
+      // Source is reachable from bundleRoot via "skills/../outside/SKILL.md"
+      // which resolves to "<bundleRoot>/outside/SKILL.md".
+      [`${BUNDLE_ROOT}/outside/SKILL.md`]: "would-escape-target",
+    });
+    const result = routeSkills(
+      makeInput({ declaredSkills: ["skills/../outside/SKILL.md"] }),
+      fs,
+    );
+    expect(result.routedCount).toBe(0);
+    expect(result.rejectedCount).toBe(1);
+    expect(result.records[0]!.status).toBe("unsafe");
+    expect(result.records[0]!.detail).toContain("escapes target skills library");
+    // Crucially: no write happened outside target.
+    expect(fs._written.has(`${TARGET}/../outside/SKILL.md`)).toBe(false);
+    expect(fs._written.has(nodePath.resolve(`${TARGET}/../outside/SKILL.md`))).toBe(false);
+  });
+
+  // R8: non-"skills/" prefixed declared path is honored as-is (no leading strip)
   it("declared path without leading skills/ prefix routes verbatim", () => {
     const fs = mockFs({
       [`${BUNDLE_ROOT}/custom/path/X.md`]: "x",
