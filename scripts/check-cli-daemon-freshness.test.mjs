@@ -68,13 +68,20 @@ test("baseline-fix-packaging guard: vendored daemon dist carries slice-09 rig-po
 });
 
 test("baseline-fix-packaging guard: vendored conveyor spec carries slice-01 can_observe edge when assembled (qitem-20260518054046)", () => {
-  if (!fs.existsSync(path.join(VEND_SPECS, "rigs/launch/conveyor/rig.yaml"))) {
+  // Skip ONLY when no vendored bundle has been assembled at all
+  // (fresh clone / clean state). Per guard verdict
+  // qitem-20260518055713: an assembled bundle (dist present) that is
+  // missing the conveyor spec is a stale/incomplete artifact and MUST
+  // fail this gate, not skip silently.
+  if (!vendoredAssembled()) {
     return;
   }
-  const vendoredSpec = fs.readFileSync(
-    path.join(VEND_SPECS, "rigs/launch/conveyor/rig.yaml"),
-    "utf-8",
+  const vendoredSpecPath = path.join(VEND_SPECS, "rigs/launch/conveyor/rig.yaml");
+  assert.ok(
+    fs.existsSync(vendoredSpecPath),
+    `Vendored daemon dist is assembled but packages/cli/daemon/specs/rigs/launch/conveyor/rig.yaml is missing. scripts/build-package.sh assembles BOTH dist + specs; an assembled bundle without specs is an incomplete artifact that would break \`rig up conveyor\`. Re-run scripts/build-package.sh.`,
   );
+  const vendoredSpec = fs.readFileSync(vendoredSpecPath, "utf-8");
 
   // Slice 01's review feedback fix: review.reviewer → build.builder is
   // can_observe (NOT delegates_to). A vendored spec that still says
@@ -134,10 +141,17 @@ test("baseline-fix-packaging guard: vendored daemon dist+specs match source when
   }
 
   // Same check for the conveyor spec (the slice-01-aware artifact).
+  // Per guard verdict qitem-20260518055713: when the bundle is
+  // assembled and source has the spec, vendored MUST have it too —
+  // missing = fail, not skip.
   const conveyorRel = "rigs/launch/conveyor/rig.yaml";
   const srcConveyor = path.join(SRC_SPECS, conveyorRel);
   const vendConveyor = path.join(VEND_SPECS, conveyorRel);
-  if (fs.existsSync(srcConveyor) && fs.existsSync(vendConveyor)) {
+  if (fs.existsSync(srcConveyor)) {
+    assert.ok(
+      fs.existsSync(vendConveyor),
+      `Source conveyor spec exists but vendored copy at packages/cli/daemon/specs/${conveyorRel} is missing. Assembled bundle is incomplete; run scripts/build-package.sh to assemble both dist + specs.`,
+    );
     assert.strictEqual(
       fs.readFileSync(vendConveyor, "utf-8"),
       fs.readFileSync(srcConveyor, "utf-8"),
