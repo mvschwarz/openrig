@@ -1299,6 +1299,82 @@ describe("Bundle API routes", () => {
     }
   });
 
+  // Item 6 / Checkpoint 7.3a / guard B1 repair (qitem-20260518220247): skills
+  // routing must fire even when operator uses BOTH --skip-version-check and
+  // --force pre-check overrides. The routing is independent of the pre-check
+  // extraction gate. Discriminator: re-coupling routeSkillsAfterBootstrap to
+  // installMeta would make this test fail (skillsRouting undefined when both
+  // override flags are set).
+  it("POST /api/bundles/install routes declared skills even when both --skip-version-check and --force are set (B1 repair)", async () => {
+    const origHome = process.env.OPENRIG_HOME;
+    const auditHome = fs.mkdtempSync(path.join(os.tmpdir(), "bundle-skills-dual-override-"));
+    process.env.OPENRIG_HOME = auditHome;
+    const origBootstrap = setup.bootstrapOrchestrator.bootstrap.bind(setup.bootstrapOrchestrator);
+    try {
+      const { specPath } = seedPackage();
+      const bundlePath = path.join(tmpDir, "dual-override.rigbundle");
+      const targetRoot = fs.mkdtempSync(path.join(os.tmpdir(), "dual-override-target-"));
+      try {
+        const skillSourceDir = path.join(tmpDir, "test-pkg", "skills");
+        fs.mkdirSync(skillSourceDir, { recursive: true });
+        fs.writeFileSync(path.join(skillSourceDir, "DUAL.md"), "# dual-override skill body");
+
+        await app.request("/api/bundles/create", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ specPath, bundleName: "dual-override", bundleVersion: "0.1.0", outputPath: bundlePath }),
+        });
+
+        const stagingDir = fs.mkdtempSync(path.join(os.tmpdir(), "dual-override-stage-"));
+        try {
+          const tar = await import("tar");
+          await tar.extract({ file: bundlePath, cwd: stagingDir });
+          const bundleYamlPath = path.join(stagingDir, "bundle.yaml");
+          const original = fs.readFileSync(bundleYamlPath, "utf-8");
+          const tampered = `${original}\nskills:\n  - packages/test-pkg/skills/DUAL.md\n`;
+          fs.writeFileSync(bundleYamlPath, tampered);
+          const { pack } = await import("../src/domain/bundle-archive.js");
+          await pack(stagingDir, bundlePath);
+        } finally {
+          fs.rmSync(stagingDir, { recursive: true, force: true });
+        }
+
+        const stub = vi.fn().mockResolvedValue({
+          status: "completed",
+          runId: "test-run-dual-override",
+          rigId: "01H000000000000000DUAL0001",
+          stages: [{ stage: "resolve_spec", status: "ok" }],
+          errors: [],
+        });
+        (setup.bootstrapOrchestrator as unknown as { bootstrap: typeof stub }).bootstrap = stub;
+
+        // Critical: both override flags set — this triggered the B1 bug
+        const installRes = await app.request("/api/bundles/install", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            bundlePath, targetRoot, autoApprove: true,
+            skipVersionCheck: true, force: true,
+          }),
+        });
+        const body = await installRes.json();
+        expect(body.skillsRouting).toBeDefined();
+        expect(body.skillsRouting.routedCount).toBe(1);
+        expect(body.skillsRouting.records[0].status).toBe("routed");
+        const expectedTarget = path.join(auditHome, "skills", "packages", "test-pkg", "skills", "DUAL.md");
+        expect(fs.existsSync(expectedTarget)).toBe(true);
+        expect(fs.readFileSync(expectedTarget, "utf-8")).toBe("# dual-override skill body");
+      } finally {
+        fs.rmSync(targetRoot, { recursive: true, force: true });
+      }
+    } finally {
+      (setup.bootstrapOrchestrator as unknown as { bootstrap: typeof origBootstrap }).bootstrap = origBootstrap;
+      if (origHome === undefined) delete process.env.OPENRIG_HOME;
+      else process.env.OPENRIG_HOME = origHome;
+      fs.rmSync(auditHome, { recursive: true, force: true });
+    }
+  });
+
   it("POST /api/bundles/install does NOT include skillsRouting when bundle has no skills[]", async () => {
     const origHome = process.env.OPENRIG_HOME;
     const auditHome = fs.mkdtempSync(path.join(os.tmpdir(), "bundle-skills-no-test-"));

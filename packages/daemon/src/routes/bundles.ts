@@ -290,24 +290,33 @@ function skillsRouterFsOps(): SkillsRouterFsOps {
 /**
  * Item 6 / slice-05 Checkpoint 7.3: extract the bundle safely (banked unpack
  * trust boundary) and route any declared skills to the operator skills
- * library. Returns null when manifest has no skills[] (no-op). Called from
- * /install completed branch — skills routing is independent of rig install
- * state but only fires when install succeeded (partial/failed semantics
- * deferred: keep skills routing tied to successful install outcome for v0).
+ * library. Returns null when bundle has no skills[] (no-op).
+ *
+ * B1 repair (qitem-20260518220247-22f5257a): takes bundlePath only and does
+ * its own safe unpack + parse. Previously coupled to installMeta from the
+ * pre-check extraction, which is null when operator passes --skip-version-
+ * check AND --force together; that incorrectly suppressed post-install
+ * skills routing on the dual-override path. Skills routing is independent
+ * of the pre-check decisions and should fire whenever an install completes
+ * successfully with a bundle that declares skills.
+ *
+ * Best-effort: returns null on any extract/parse failure (caller has the
+ * outer try/catch). Single unpack call per invocation; the manifest re-parse
+ * is cheap vs. the unpack cost which is required either way to access the
+ * skill source files for routing.
  */
-async function routeSkillsAfterBootstrap(opts: {
-  bundlePath: string;
-  manifest: Record<string, unknown> | undefined;
-}): Promise<RouteSkillsResult | null> {
-  if (!opts.manifest) return null;
-  const rawSkills = opts.manifest["skills"];
-  if (!Array.isArray(rawSkills) || rawSkills.length === 0) return null;
-  const declaredSkills = rawSkills.filter((s): s is string => typeof s === "string" && s.length > 0);
-  if (declaredSkills.length === 0) return null;
-
+async function routeSkillsAfterBootstrap(bundlePath: string): Promise<RouteSkillsResult | null> {
   const tmpDir = fs.mkdtempSync(nodePath.join(os.tmpdir(), "bundle-skills-route-"));
   try {
-    await unpack(opts.bundlePath, tmpDir);
+    await unpack(bundlePath, tmpDir);
+    const manifestPath = nodePath.join(tmpDir, "bundle.yaml");
+    if (!fs.existsSync(manifestPath)) return null;
+    const manifestYaml = fs.readFileSync(manifestPath, "utf-8");
+    const manifest = parsePodBundleManifest(manifestYaml) as Record<string, unknown>;
+    const rawSkills = manifest["skills"];
+    if (!Array.isArray(rawSkills) || rawSkills.length === 0) return null;
+    const declaredSkills = rawSkills.filter((s): s is string => typeof s === "string" && s.length > 0);
+    if (declaredSkills.length === 0) return null;
     return routeSkills(
       {
         bundleRoot: tmpDir,
@@ -752,9 +761,7 @@ bundleRoutes.post("/install", async (c) => {
       // so operators see what landed.
       let skillsRouting: RouteSkillsResult | null = null;
       try {
-        skillsRouting = await routeSkillsAfterBootstrap({
-          bundlePath, manifest: installMeta?.bundleManifest,
-        });
+        skillsRouting = await routeSkillsAfterBootstrap(bundlePath);
       } catch {
         // Side-channel failure; install already succeeded
       }
