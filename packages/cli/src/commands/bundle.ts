@@ -176,5 +176,48 @@ export function bundleCommand(depsOverride?: StatusDeps): Command {
       if (res.data["rigId"]) console.log(`Rig: ${res.data["rigId"]}`);
     });
 
+  // rig bundle history — Item 4 / slice-05 Checkpoint 5.2
+  cmd.command("history")
+    .description("List bundle install audit records from ~/.openrig/bundle-audit.jsonl")
+    .option("--rig <name>", "Filter to records whose targetRigName matches")
+    .option("--since <iso>", "Filter to records installedAt >= this ISO timestamp")
+    .option("--json", "JSON output")
+    .action(async (opts: { rig?: string; since?: string; json?: boolean }) => {
+      const deps = getDepsF();
+      const client = await getClient(deps);
+      if (!client) { process.exitCode = 1; return; }
+
+      const qs = new URLSearchParams();
+      if (opts.rig) qs.set("rig", opts.rig);
+      if (opts.since) qs.set("since", opts.since);
+      const query = qs.toString();
+      const path = query.length > 0 ? `/api/bundles/history?${query}` : "/api/bundles/history";
+
+      const res = await client.get<Record<string, unknown>>(path);
+      if (opts.json) {
+        console.log(JSON.stringify(res.data));
+        if (res.status >= 400) process.exitCode = 2;
+        return;
+      }
+      if (res.status >= 400) {
+        console.error(res.data["error"] ?? "History fetch failed");
+        process.exitCode = 2;
+        return;
+      }
+      const records = Array.isArray(res.data["records"]) ? res.data["records"] as Array<Record<string, unknown>> : [];
+      if (records.length === 0) {
+        console.log("No bundle install audit records found.");
+        return;
+      }
+      console.log(`Bundle install history (${records.length} record${records.length === 1 ? "" : "s"}):`);
+      for (const r of records) {
+        const at = r["installedAt"] ?? "?";
+        const rig = r["targetRigName"] ?? "?";
+        const outcome = r["outcome"] ?? "?";
+        const bundle = r["bundlePath"] ?? "?";
+        console.log(`  ${at}  ${outcome.toString().padEnd(8)}  rig=${rig}  ${bundle}`);
+      }
+    });
+
   return cmd;
 }

@@ -19,6 +19,8 @@ import type { PodBundleManifest, BundleProvenance, BundleCompatibility } from ".
 import { fileURLToPath } from "node:url";
 import { detectBundleConflicts, type BundleConflict } from "../domain/bundle-conflict-detector.js";
 import type { RigRepository } from "../domain/rig-repository.js";
+import { BundleAuditReader, type BundleAuditFsOps } from "../domain/bundle-audit.js";
+import { getDefaultOpenRigPath } from "../openrig-compat.js";
 
 /**
  * Read the daemon's own package.json version at call time (Item 1 / slice-05).
@@ -274,6 +276,25 @@ function podAssemblerFsOps(): PodAssemblerFsOps {
   };
 }
 
+/** Item 4 / slice-05 Checkpoint 5.2: real BundleAuditFsOps backed by node:fs. */
+function auditFsOps(): BundleAuditFsOps {
+  return {
+    appendFile: (p, c) => fs.appendFileSync(p, c, "utf-8"),
+    readFile: (p) => fs.readFileSync(p, "utf-8"),
+    exists: (p) => fs.existsSync(p),
+    mkdirp: (p) => fs.mkdirSync(p, { recursive: true }),
+  };
+}
+
+/**
+ * Audit file path resolved at call time via getDefaultOpenRigPath
+ * ("bundle-audit.jsonl"). Function-level read (no module-level constant)
+ * so OPENRIG_HOME env changes between requests / tests are honored.
+ */
+function bundleAuditPath(): string {
+  return getDefaultOpenRigPath("bundle-audit.jsonl");
+}
+
 // POST /api/bundles/create
 bundleRoutes.post("/create", async (c) => {
   const { eventBus } = getDeps(c);
@@ -486,6 +507,25 @@ bundleRoutes.post("/inspect", async (c) => {
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
+});
+
+// GET /api/bundles/history — Item 4 / slice-05 Checkpoint 5.2
+// Returns the install audit JSONL records (optionally filtered by rig name
+// and / or since timestamp). Read-only — no audit-write side effects.
+// Empty audit file returns []. Reader fails-open on malformed JSONL lines
+// (forward-compat with future record-shape evolutions).
+bundleRoutes.get("/history", async (c) => {
+  const rig = c.req.query("rig");
+  const since = c.req.query("since");
+  const reader = new BundleAuditReader({
+    opts: { auditPath: bundleAuditPath() },
+    fsOps: auditFsOps(),
+  });
+  const records = reader.list({
+    rig: typeof rig === "string" && rig.length > 0 ? rig : undefined,
+    since: typeof since === "string" && since.length > 0 ? since : undefined,
+  });
+  return c.json({ records, total: records.length }, 200);
 });
 
 // POST /api/bundles/install — reuses full bootstrap lifecycle

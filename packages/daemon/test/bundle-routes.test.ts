@@ -968,6 +968,74 @@ describe("Bundle API routes", () => {
     }
   });
 
+  // Item 4 / slice-05 Checkpoint 5.2: GET /api/bundles/history surfaces the
+  // bundle-audit JSONL records (optionally filtered). Empty file -> []; rig
+  // filter scopes; since filter scopes.
+  it("GET /api/bundles/history returns empty list when no audit records exist", async () => {
+    const origHome = process.env.OPENRIG_HOME;
+    const auditHome = fs.mkdtempSync(path.join(os.tmpdir(), "bundle-history-test-"));
+    process.env.OPENRIG_HOME = auditHome;
+    try {
+      const res = await app.request("/api/bundles/history");
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.records).toEqual([]);
+      expect(body.total).toBe(0);
+    } finally {
+      if (origHome === undefined) delete process.env.OPENRIG_HOME;
+      else process.env.OPENRIG_HOME = origHome;
+      fs.rmSync(auditHome, { recursive: true, force: true });
+    }
+  });
+
+  it("GET /api/bundles/history returns records from the audit file with filters honored", async () => {
+    const origHome = process.env.OPENRIG_HOME;
+    const auditHome = fs.mkdtempSync(path.join(os.tmpdir(), "bundle-history-test-"));
+    process.env.OPENRIG_HOME = auditHome;
+    try {
+      // Seed the audit JSONL directly (bypasses any writer; tests the reader path)
+      const auditPath = path.join(auditHome, "bundle-audit.jsonl");
+      const recs = [
+        { installedAt: "2026-05-18T10:00:00Z", bundlePath: "/tmp/a.rigbundle", targetRigName: "alpha", outcome: "success" },
+        { installedAt: "2026-05-18T11:00:00Z", bundlePath: "/tmp/b.rigbundle", targetRigName: "beta", outcome: "failed" },
+        { installedAt: "2026-05-18T12:00:00Z", bundlePath: "/tmp/c.rigbundle", targetRigName: "alpha", outcome: "partial" },
+      ];
+      fs.writeFileSync(auditPath, recs.map((r) => JSON.stringify(r)).join("\n") + "\n", "utf-8");
+
+      // Unfiltered: all 3
+      const all = await app.request("/api/bundles/history");
+      expect(all.status).toBe(200);
+      const allBody = await all.json();
+      expect(allBody.total).toBe(3);
+      expect(allBody.records).toHaveLength(3);
+
+      // Filter rig=alpha: 2 records
+      const alpha = await app.request("/api/bundles/history?rig=alpha");
+      const alphaBody = await alpha.json();
+      expect(alphaBody.total).toBe(2);
+      expect(alphaBody.records.every((r: { targetRigName: string }) => r.targetRigName === "alpha")).toBe(true);
+
+      // Filter since=11:00: 2 records (the 11:00 and 12:00 ones)
+      const since = await app.request("/api/bundles/history?since=2026-05-18T11:00:00Z");
+      const sinceBody = await since.json();
+      expect(sinceBody.total).toBe(2);
+      expect(sinceBody.records.map((r: { installedAt: string }) => r.installedAt)).toEqual([
+        "2026-05-18T11:00:00Z",
+        "2026-05-18T12:00:00Z",
+      ]);
+
+      // Combined rig=alpha + since=11:00: 1 record (the 12:00 alpha one)
+      const combo = await app.request("/api/bundles/history?rig=alpha&since=2026-05-18T11:00:00Z");
+      const comboBody = await combo.json();
+      expect(comboBody.total).toBe(1);
+      expect(comboBody.records[0].installedAt).toBe("2026-05-18T12:00:00Z");
+    } finally {
+      if (origHome === undefined) delete process.env.OPENRIG_HOME;
+      else process.env.OPENRIG_HOME = origHome;
+      fs.rmSync(auditHome, { recursive: true, force: true });
+    }
+  });
+
   // T11: Install concurrency lock
   it("concurrent bundle install returns 409", async () => {
     // Acquire lock manually

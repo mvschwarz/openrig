@@ -105,6 +105,17 @@ describe("Bundle CLI", () => {
           res.writeHead(201, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ status: "completed", runId: "run-2", rigId: "rig-1" }));
         }
+      } else if (req.url?.startsWith("/api/bundles/history") && req.method === "GET") {
+        // Capture query for assertion if needed; for now return a static fixture
+        const url = new URL(req.url, "http://x");
+        const rigFilter = url.searchParams.get("rig");
+        const allRecs = [
+          { installedAt: "2026-05-18T10:00:00Z", bundlePath: "/tmp/a.rigbundle", targetRigName: "alpha", outcome: "success" },
+          { installedAt: "2026-05-18T11:00:00Z", bundlePath: "/tmp/b.rigbundle", targetRigName: "beta", outcome: "failed" },
+        ];
+        const recs = rigFilter ? allRecs.filter((r) => r.targetRigName === rigFilter) : allRecs;
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ records: recs, total: recs.length }));
       } else {
         res.writeHead(404, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "not found" }));
@@ -349,6 +360,36 @@ describe("Bundle CLI", () => {
     const installBody = capturedInstallBodies[capturedInstallBodies.length - 1];
     expect(installBody).toBeTruthy();
     expect(installBody!["force"]).toBe(false);
+  });
+
+  // Item 4 / slice-05 Checkpoint 5.2: rig bundle history subcommand
+  it("bundle history renders records as text by default", async () => {
+    const { logs } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "bundle", "history"]);
+    });
+    expect(logs.some((l) => l.includes("Bundle install history"))).toBe(true);
+    expect(logs.some((l) => l.includes("alpha"))).toBe(true);
+    expect(logs.some((l) => l.includes("beta"))).toBe(true);
+    expect(logs.some((l) => l.includes("success"))).toBe(true);
+  });
+
+  it("bundle history --json outputs parseable JSON with records array", async () => {
+    const { logs } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "bundle", "history", "--json"]);
+    });
+    const parsed = JSON.parse(logs.join(""));
+    expect(Array.isArray(parsed.records)).toBe(true);
+    expect(parsed.records.length).toBe(2);
+    expect(parsed.total).toBe(2);
+  });
+
+  it("bundle history --rig filter passes through to the query string", async () => {
+    const { logs } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "bundle", "history", "--rig", "alpha", "--json"]);
+    });
+    const parsed = JSON.parse(logs.join(""));
+    expect(parsed.records).toHaveLength(1);
+    expect(parsed.records[0].targetRigName).toBe("alpha");
   });
 
   // Item 2 / slice-05: no flags → compatibility omitted (no empty object sent)
