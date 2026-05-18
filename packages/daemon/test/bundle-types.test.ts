@@ -9,6 +9,7 @@ import {
   type LegacyBundleManifest as BundleManifest,
   type BundleProvenance,
   type BundleCompatibility,
+  type BundlePluginReference,
 } from "../src/domain/bundle-types.js";
 
 const VALID_RAW = {
@@ -437,6 +438,100 @@ describe("Bundle types", () => {
     const parsed = parseBundleManifest(yaml);
     const normalized = normalizeBundleManifest(parsed);
     expect(normalized.skills).toBeUndefined();
+  });
+
+  // -- Item 6 plugins block tests (slice-05 Checkpoint 7.3b) --
+
+  it("missing plugins block passes validation (backward compat)", () => {
+    const raw = { ...VALID_RAW };
+    const result = validateBundleManifest(raw);
+    expect(result.valid).toBe(true);
+  });
+
+  it("plugins as array of valid {id, source} entries passes validation", () => {
+    const raw = {
+      ...VALID_RAW,
+      plugins: [
+        { id: "gstack", source: { kind: "local", path: "plugins/gstack" } },
+        { id: "obra-superpowers", source: { kind: "local", path: "plugins/obra-superpowers" } },
+      ],
+    };
+    const result = validateBundleManifest(raw);
+    expect(result.valid).toBe(true);
+  });
+
+  it("plugins as non-array rejected", () => {
+    const raw = { ...VALID_RAW, plugins: "gstack" };
+    const result = validateBundleManifest(raw);
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.includes("plugins must be an array"))).toBe(true);
+  });
+
+  it("plugin entry missing id is rejected", () => {
+    const raw = { ...VALID_RAW, plugins: [{ source: { kind: "local", path: "plugins/gstack" } }] };
+    const result = validateBundleManifest(raw);
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.includes("plugins[0].id"))).toBe(true);
+  });
+
+  it("plugin entry with non-local source.kind rejected", () => {
+    const raw = { ...VALID_RAW, plugins: [{ id: "x", source: { kind: "remote", path: "plugins/x" } }] };
+    const result = validateBundleManifest(raw);
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.includes("source.kind must be 'local'"))).toBe(true);
+  });
+
+  it("plugin entry with unsafe source.path rejected", () => {
+    const raw = { ...VALID_RAW, plugins: [{ id: "x", source: { kind: "local", path: "../escape" } }] };
+    const result = validateBundleManifest(raw);
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.includes("plugins[0].source.path"))).toBe(true);
+    expect(result.errors.some((e) => e.includes("not safe"))).toBe(true);
+  });
+
+  it("round-trip preserves plugins through serialize → parse → normalize", () => {
+    const plugins: BundlePluginReference[] = [
+      { id: "gstack", source: { kind: "local", path: "plugins/gstack" } },
+    ];
+    const manifest: BundleManifest = {
+      schemaVersion: 1,
+      name: "rt-plugins",
+      version: "1.0.0",
+      createdAt: "2026-05-18T12:00:00Z",
+      rigSpec: "rig.yaml",
+      packages: [{ name: "pkg", version: "1.0.0", path: "packages/pkg", originalSource: "local:./pkg" }],
+      integrity: {
+        algorithm: "sha256",
+        files: { "rig.yaml": "5".repeat(64), "packages/pkg/package.yaml": "6".repeat(64) },
+      },
+      plugins,
+    };
+    const yaml = serializeBundleManifest(manifest);
+    expect(yaml).toContain("plugins:");
+    expect(yaml).toContain("id: gstack");
+    expect(yaml).toContain("plugins/gstack");
+    const parsed = parseBundleManifest(yaml);
+    const validation = validateBundleManifest(parsed);
+    expect(validation.valid).toBe(true);
+    const normalized = normalizeBundleManifest(parsed);
+    expect(normalized.plugins).toBeDefined();
+    expect(normalized.plugins).toEqual(plugins);
+  });
+
+  it("missing plugins round-trips cleanly (no field emitted in YAML)", () => {
+    const manifest: BundleManifest = {
+      schemaVersion: 1,
+      name: "no-plugins",
+      version: "1.0.0",
+      createdAt: "2026-05-18T00:00:00Z",
+      rigSpec: "rig.yaml",
+      packages: [{ name: "pkg", version: "1.0", path: "packages/pkg", originalSource: "local:./pkg" }],
+    };
+    const yaml = serializeBundleManifest(manifest);
+    expect(yaml).not.toContain("plugins:");
+    const parsed = parseBundleManifest(yaml);
+    const normalized = normalizeBundleManifest(parsed);
+    expect(normalized.plugins).toBeUndefined();
   });
 });
 

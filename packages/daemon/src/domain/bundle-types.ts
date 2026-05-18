@@ -81,6 +81,70 @@ function provenanceToYamlRecord(p: BundleProvenance): Record<string, unknown> {
  * level field; missing kinds keep backward compat.
  */
 
+/**
+ * Plugin reference — Item 6 / slice-05 Checkpoint 7.3b. Bundle manifest may
+ * declare plugin references the bundle includes (in HYBRID mode the bundle
+ * REFERENCES the existing 0.3.1 plugin rather than forking its content; per
+ * orch-ratified decision doc).
+ */
+export interface BundlePluginReference {
+  /** Plugin id (matches the plugin primitive's id surface). */
+  id: string;
+  /** Where to resolve the plugin from. v0 supports local-path source. */
+  source: { kind: "local"; path: string };
+}
+
+/** Validate optional plugins[] block. Appends to errors if present-but-malformed. */
+function validatePluginsBlock(raw: unknown, errors: string[]): void {
+  if (raw === undefined) return;
+  if (!Array.isArray(raw)) {
+    errors.push("plugins must be an array");
+    return;
+  }
+  for (let i = 0; i < raw.length; i++) {
+    const entry = raw[i];
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      errors.push(`plugins[${i}] must be an object`);
+      continue;
+    }
+    const p = entry as Record<string, unknown>;
+    if (typeof p["id"] !== "string" || !p["id"]) {
+      errors.push(`plugins[${i}].id is required`);
+    }
+    const source = p["source"];
+    if (!source || typeof source !== "object" || Array.isArray(source)) {
+      errors.push(`plugins[${i}].source must be an object`);
+      continue;
+    }
+    const s = source as Record<string, unknown>;
+    if (s["kind"] !== "local") {
+      errors.push(`plugins[${i}].source.kind must be 'local' (other kinds reserved for future)`);
+    }
+    if (typeof s["path"] !== "string" || !s["path"]) {
+      errors.push(`plugins[${i}].source.path is required`);
+    } else if (!isRelativeSafePath(s["path"] as string)) {
+      errors.push(`plugins[${i}].source.path is not safe: '${s["path"]}'`);
+    }
+  }
+}
+
+/** Normalize raw plugins[] block (defensive copy). */
+function normalizePluginsBlock(raw: unknown): BundlePluginReference[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const result: BundlePluginReference[] = [];
+  for (const entry of raw) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+    const p = entry as Record<string, unknown>;
+    const s = p["source"];
+    if (typeof p["id"] !== "string" || !p["id"]) continue;
+    if (!s || typeof s !== "object" || Array.isArray(s)) continue;
+    const src = s as Record<string, unknown>;
+    if (src["kind"] !== "local" || typeof src["path"] !== "string" || !src["path"]) continue;
+    result.push({ id: p["id"], source: { kind: "local", path: src["path"] } });
+  }
+  return result.length > 0 ? result : undefined;
+}
+
 /** Validate optional skills[] block. Appends to errors if present-but-malformed. */
 function validateSkillsBlock(raw: unknown, errors: string[]): void {
   if (raw === undefined) return;
@@ -224,6 +288,8 @@ export interface PodBundleManifest {
   compatibility?: BundleCompatibility;
   /** Item 6 cross-primitive bundling: skill paths to route to the operator skills library on install. */
   skills?: string[];
+  /** Item 6 cross-primitive bundling: plugin references to install via the plugin primitive (HYBRID-mode bundles reference existing plugins rather than forking content). */
+  plugins?: BundlePluginReference[];
 }
 
 export function validatePodBundleManifest(raw: unknown): { valid: boolean; errors: string[] } {
@@ -253,6 +319,7 @@ export function validatePodBundleManifest(raw: unknown): { valid: boolean; error
   validateProvenanceBlock(m["provenance"], errors);
   validateCompatibilityBlock(m["compatibility"], errors);
   validateSkillsBlock(m["skills"], errors);
+  validatePluginsBlock(m["plugins"], errors);
 
   return { valid: errors.length === 0, errors };
 }
@@ -284,6 +351,7 @@ export function serializePodBundleManifest(manifest: PodBundleManifest): string 
   if (manifest.provenance) doc["provenance"] = provenanceToYamlRecord(manifest.provenance);
   if (manifest.compatibility) doc["compatibility"] = compatibilityToYamlRecord(manifest.compatibility);
   if (manifest.skills && manifest.skills.length > 0) doc["skills"] = manifest.skills;
+  if (manifest.plugins && manifest.plugins.length > 0) doc["plugins"] = manifest.plugins.map((p) => ({ id: p.id, source: { kind: p.source.kind, path: p.source.path } }));
   return stringifyYaml(doc);
 }
 
@@ -323,6 +391,8 @@ export interface LegacyBundleManifest {
   compatibility?: BundleCompatibility;
   /** Item 6 cross-primitive bundling: skill paths to route to the operator skills library on install. */
   skills?: string[];
+  /** Item 6 cross-primitive bundling: plugin references to install via the plugin primitive (HYBRID-mode bundles reference existing plugins rather than forking content). */
+  plugins?: BundlePluginReference[];
 }
 
 /** Validation options */
@@ -416,6 +486,7 @@ export function validateLegacyBundleManifest(
   validateProvenanceBlock(m["provenance"], errors);
   validateCompatibilityBlock(m["compatibility"], errors);
   validateSkillsBlock(m["skills"], errors);
+  validatePluginsBlock(m["plugins"], errors);
 
   return { valid: errors.length === 0, errors };
 }
@@ -467,6 +538,9 @@ export function normalizeLegacyBundleManifest(raw: unknown): LegacyBundleManifes
   const skills = normalizeSkillsBlock(m["skills"]);
   if (skills) result.skills = skills;
 
+  const plugins = normalizePluginsBlock(m["plugins"]);
+  if (plugins) result.plugins = plugins;
+
   return result;
 }
 
@@ -499,6 +573,7 @@ export function serializeLegacyBundleManifest(manifest: LegacyBundleManifest): s
   if (manifest.compatibility) doc["compatibility"] = compatibilityToYamlRecord(manifest.compatibility);
 
   if (manifest.skills && manifest.skills.length > 0) doc["skills"] = manifest.skills;
+  if (manifest.plugins && manifest.plugins.length > 0) doc["plugins"] = manifest.plugins.map((p) => ({ id: p.id, source: { kind: p.source.kind, path: p.source.path } }));
 
   return stringifyYaml(doc);
 }

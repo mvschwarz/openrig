@@ -830,6 +830,65 @@ describe("PodBundleManifest validation", () => {
     expect(result.errors.some((e) => e.includes("skills[0]") && e.includes("not safe"))).toBe(true);
   });
 
+  // -- Item 6 plugins block tests for v2 (slice-05 Checkpoint 7.3b) --
+
+  it("v2: missing plugins block passes validation", () => {
+    const raw = {
+      schema_version: 2, name: "no-plugins", version: "1.0",
+      created_at: "2026-05-18T00:00:00Z", rig_spec: "rig.yaml",
+      agents: [{ name: "impl", version: "1.0", path: "agents/impl", original_ref: "local:agents/impl", hash: "abc", import_entries: [] }],
+    };
+    const result = validatePodBundleManifest(raw);
+    expect(result.valid).toBe(true);
+  });
+
+  it("v2: plugins as valid {id, source} array passes validation", () => {
+    const raw = {
+      schema_version: 2, name: "with-plugins", version: "1.0",
+      created_at: "2026-05-18T00:00:00Z", rig_spec: "rig.yaml",
+      agents: [{ name: "impl", version: "1.0", path: "agents/impl", original_ref: "local:agents/impl", hash: "abc", import_entries: [] }],
+      plugins: [{ id: "gstack", source: { kind: "local", path: "plugins/gstack" } }],
+    };
+    const result = validatePodBundleManifest(raw);
+    expect(result.valid).toBe(true);
+  });
+
+  it("v2: plugin entry with unsafe source.path rejected", () => {
+    const raw = {
+      schema_version: 2, name: "bad-plugins", version: "1.0",
+      created_at: "2026-05-18T00:00:00Z", rig_spec: "rig.yaml",
+      agents: [{ name: "impl", version: "1.0", path: "agents/impl", original_ref: "local:agents/impl", hash: "abc", import_entries: [] }],
+      plugins: [{ id: "x", source: { kind: "local", path: "../escape" } }],
+    };
+    const result = validatePodBundleManifest(raw);
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.includes("plugins[0].source.path") && e.includes("not safe"))).toBe(true);
+  });
+
+  it("v2: round-trip preserves plugins through serialize -> parse", () => {
+    const manifest: PodBundleManifest = {
+      schemaVersion: 2, name: "rt-plugins-v2", version: "2.0",
+      createdAt: "2026-05-18T00:00:00Z", rigSpec: "rig.yaml",
+      agents: [{
+        name: "impl", version: "1.0", path: "agents/impl",
+        originalRef: "local:agents/impl", hash: "def",
+        importEntries: [],
+      }],
+      plugins: [{ id: "gstack", source: { kind: "local", path: "plugins/gstack" } }],
+    };
+    const yaml = serializePodBundleManifest(manifest);
+    expect(yaml).toContain("plugins:");
+    expect(yaml).toContain("id: gstack");
+    const parsed = parsePodBundleManifest(yaml);
+    const validation = validatePodBundleManifest(parsed);
+    expect(validation.valid).toBe(true);
+    const m = parsed as Record<string, unknown>;
+    const ps = m["plugins"] as Array<Record<string, unknown>>;
+    expect(ps).toHaveLength(1);
+    expect(ps[0]!["id"]).toBe("gstack");
+    expect((ps[0]!["source"] as Record<string, unknown>)["path"]).toBe("plugins/gstack");
+  });
+
   it("v2: round-trip preserves skills through serialize -> parse", () => {
     const manifest: PodBundleManifest = {
       schemaVersion: 2, name: "rt-skills-v2", version: "2.0",
