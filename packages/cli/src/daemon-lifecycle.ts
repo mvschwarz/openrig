@@ -155,12 +155,42 @@ export function resolveCliBaseDir(baseDir: string): string {
   return path.basename(baseDir) === "commands" ? path.resolve(baseDir, "..") : baseDir;
 }
 
-/** Pure resolver: prefers bundled daemon (npm install layout), falls back to monorepo. */
+/**
+ * Pure resolver: prefers monorepo source when present (dev checkout
+ * where `packages/daemon/dist` is the source of truth), falls back to
+ * the bundled/vendored copy at `packages/cli/daemon` (the npm-install
+ * layout).
+ *
+ * Why this order: in a monorepo dev checkout BOTH paths exist:
+ *   - packages/daemon/dist                ← refreshed by
+ *                                            `npm run build --workspace
+ *                                            @openrig/daemon` (frequent;
+ *                                            source of truth)
+ *   - packages/cli/daemon/dist            ← refreshed only by
+ *                                            `scripts/build-package.sh`
+ *                                            (rare; for npm publish)
+ *
+ * Picking the vendored copy first (the prior order) means devs run a
+ * stale daemon through `rig daemon start` whenever they've rebuilt
+ * `@openrig/daemon` but haven't rerun `build-package.sh`. That hid the
+ * fact that QA on local main 55e01f2e was getting a daemon WITHOUT the
+ * shipped slice-09 `/api/rig-policy/*` routes (qitem-20260518054224).
+ *
+ * In an npm-install layout `packages/daemon/dist` does not exist
+ * (only the bundled `packages/cli/daemon` lives next to the cli);
+ * the fallback handles that case unchanged.
+ */
 export function resolveDaemonPath(baseDir: string, exists: (p: string) => boolean): string {
   const cliBaseDir = resolveCliBaseDir(baseDir);
+  const monorepo = path.resolve(cliBaseDir, "../../daemon");
+  if (exists(path.join(monorepo, "dist/index.js"))) return monorepo;
   const bundled = path.resolve(cliBaseDir, "../daemon");
   if (exists(path.join(bundled, "dist/index.js"))) return bundled;
-  return path.resolve(cliBaseDir, "../../daemon");
+  // Last-resort: return the monorepo path so callers get a meaningful
+  // error rather than crashing on undefined. The caller validates
+  // existence elsewhere (doctor / start) and surfaces "daemon dist not
+  // found at <path>".
+  return monorepo;
 }
 
 export function getDaemonPath(): string {

@@ -787,13 +787,38 @@ describe("Daemon Lifecycle", () => {
 });
 
 describe("resolveDaemonPath", () => {
-  it("returns bundled path when ../daemon/dist/index.js exists", () => {
+  // QA BLOCKING qitem-20260518054224 — the resolver previously preferred
+  // the bundled (vendored) copy, so monorepo dev workflows ran a stale
+  // packaged daemon when packages/cli/daemon hadn't been re-assembled
+  // via scripts/build-package.sh. After the fix the resolver prefers
+  // the monorepo source (packages/daemon) when present, ensuring
+  // `node packages/cli/dist/bin-wrapper.js daemon start` always
+  // launches the daemon source-of-truth in development.
+
+  it("returns monorepo source path when packages/daemon/dist/index.js exists (DEV — both paths present)", () => {
+    // Simulates a monorepo checkout: BOTH paths have dist/index.js
+    // (vendored bundle assembled via scripts/build-package.sh + source
+    // daemon built via @openrig/daemon). The resolver picks source.
     const exists = (p: string) => p.endsWith("daemon/dist/index.js");
+    const result = resolveDaemonPath("/repo/packages/cli/dist", exists);
+    expect(result).toBe(path.resolve("/repo/packages/cli/dist", "../../daemon"));
+  });
+
+  it("falls back to bundled path when only ../daemon/dist exists (NPM-INSTALL — single path)", () => {
+    // Simulates `npm install -g @openrig/cli` layout:
+    //   node_modules/@openrig/cli/{dist,daemon,ui}
+    // Only ../daemon (sibling to cli/dist) exists; ../../daemon doesn't.
+    const exists = (p: string) => {
+      // monorepo path absent; bundled present
+      if (p === path.resolve("/install/cli/dist", "../../daemon", "dist/index.js")) return false;
+      if (p === path.resolve("/install/cli/dist", "../daemon", "dist/index.js")) return true;
+      return false;
+    };
     const result = resolveDaemonPath("/install/cli/dist", exists);
     expect(result).toBe(path.resolve("/install/cli/dist", "../daemon"));
   });
 
-  it("falls back to monorepo path when bundled does not exist", () => {
+  it("returns the monorepo path even when nothing exists, so callers can surface a clear error", () => {
     const exists = () => false;
     const result = resolveDaemonPath("/repo/packages/cli/dist", exists);
     expect(result).toBe(path.resolve("/repo/packages/cli/dist", "../../daemon"));
