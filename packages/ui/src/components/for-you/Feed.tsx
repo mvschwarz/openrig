@@ -16,11 +16,16 @@ import { cn } from "../../lib/utils.js";
 import { SectionHeader } from "../ui/section-header.js";
 import { EmptyState } from "../ui/empty-state.js";
 import { useActivityFeed } from "../../hooks/useActivityFeed.js";
+import { useAttentionItems } from "../../hooks/useAttentionItems.js";
 import {
   classifyFeed,
   type FeedCard as FeedCardModel,
   type FeedCardKind,
 } from "../../lib/feed-classifier.js";
+import {
+  attentionItemToFeedCard,
+  mergeAttentionIntoFeed,
+} from "../../lib/attention-feed.js";
 import {
   useQueueItemMap,
   useSliceDetails,
@@ -235,7 +240,23 @@ export function Feed() {
     [],
   );
 
-  const rawCards = useMemo(() => classifyFeed(events).slice(0, HISTORY_LIMIT), [events]);
+  // OPR.0.3.2.20 — For You priority windowing.
+  // Action-required + Approval lenses source from the daemon's
+  // durable open-attention query (window-independent), then merge
+  // with event-derived cards. Queue-derived attention cards
+  // SUPERSEDE event-derived cards with the same qitemId. Other
+  // kinds (shipped/progress/observation) stay event-derived
+  // (HG-6 no regression).
+  const attentionQuery = useAttentionItems();
+  const queueDerivedAttention = useMemo<FeedCardModel[]>(
+    () => (attentionQuery.data ?? []).map(attentionItemToFeedCard),
+    [attentionQuery.data],
+  );
+  const eventDerivedCards = useMemo(() => classifyFeed(events).slice(0, HISTORY_LIMIT), [events]);
+  const rawCards = useMemo(
+    () => mergeAttentionIntoFeed(eventDerivedCards, queueDerivedAttention),
+    [eventDerivedCards, queueDerivedAttention],
+  );
   const rawCardSeqs = useMemo(() => rawCards.map((c) => c.source.seq), [rawCards]);
   const { dismissedSeqs, dismiss, undismiss } = useDismissedSeqs(rawCardSeqs);
   const [pendingUndoSeq, setPendingUndoSeq] = useState<number | null>(null);

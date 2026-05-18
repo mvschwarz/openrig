@@ -18,6 +18,34 @@ import type { OutboxHandler } from "../domain/outbox-handler.js";
  * Hot-potato strict-rejection happens in the domain layer; routes surface
  * structured errors with the validReasons enum so CLIs can render help.
  */
+
+/**
+ * OPR.0.3.2.20 — attention-class predicate for the `/list?attention=1`
+ * filter. Mirrors the mission-control read layer's semantics so the
+ * For You Action-required + Approval lenses agree with the
+ * single-pane view:
+ *
+ *   - approval class  → tier === "human-gate"
+ *   - action-required → destinationSession matches
+ *                       /^human(?:-[A-Za-z0-9._-]+)?@(kernel|host)$/
+ *
+ * Exported so the predicate is a discrete, testable surface. The route
+ * layer composes this with the open-state default so only unresolved
+ * items appear — closed/done attention items are not surfaced.
+ */
+export function isAttentionItem(q: { tier: string | null; destinationSession: string }): boolean {
+  if (q.tier === "human-gate") return true;
+  return /^human(?:-[A-Za-z0-9._-]+)?@(kernel|host)$/.test(q.destinationSession ?? "");
+}
+
+/**
+ * OPR.0.3.2.20 — internal fetch cap for the attention filter so an
+ * attention item can't be evicted past the repo's default list limit
+ * by routine churn. Far above realistic open-attention set sizes and
+ * well below SQL pagination concerns.
+ */
+const ATTENTION_FETCH_BOUND = 1000;
+
 export function queueRoutes(): Hono {
   const app = new Hono();
 
@@ -302,15 +330,63 @@ export function queueRoutes(): Hono {
   });
 
   // GET /list — list with filters. MUST precede /:qitemId so the literal path wins.
+  //
+  // OPR.0.3.2.20 — `?attention=1` filter for the For You priority
+  // windowing slice. Returns OPEN attention-class qitems (the durable
+  // source of truth for the UI Action-required + Approval lenses) so
+  // those surfaces don't depend on the lossy ephemeral client event
+  // FIFO. Class membership matches the mission-control read layer
+  // semantics: tier='human-gate' OR destination matches
+  // /^human(?:-[A-Za-z0-9._-]+)?@(kernel|host)$/. Open state defaults
+  // to pending|in-progress|blocked (callers can still override via
+  // `state=...`). Composable with destinationSession/sourceSession/
+  // targetRepo/limit.
   app.get("/list", (c) => {
     const destinationSession = c.req.query("destinationSession") || undefined;
     const sourceSession = c.req.query("sourceSession") || undefined;
     const stateRaw = c.req.query("state") || undefined;
     const targetRepo = c.req.query("targetRepo") || undefined;
-    const limit = c.req.query("limit") ? Number.parseInt(c.req.query("limit")!, 10) : undefined;
-    const state = stateRaw ? (stateRaw.split(",") as QueueState[]) : undefined;
-    const items = getRepo(c).list({ destinationSession, sourceSession, state, targetRepo, limit });
-    return c.json(items);
+    const userLimit = c.req.query("limit") ? Number.parseInt(c.req.query("limit")!, 10) : undefined;
+    const attention = c.req.query("attention") === "1";
+
+    const state: QueueState[] | undefined = stateRaw
+      ? (stateRaw.split(",") as QueueState[])
+      : attention
+        ? ["pending", "in-progress", "blocked"]
+        : undefined;
+
+    if (!attention) {
+      const items = getRepo(c).list({
+        destinationSession,
+        sourceSession,
+        state,
+        targetRepo,
+        limit: userLimit,
+      });
+      return c.json(items);
+    }
+
+    // OPR.0.3.2.20 — attention query fetch-then-filter. The repo's
+    // default list() limit (100) sorts by ts_created DESC and can
+    // evict an older attention item when 100+ routine qitems land
+    // after it — the exact eviction defect this slice fixes. Fetch
+    // with a generous internal cap (ATTENTION_FETCH_BOUND) so attention
+    // items are not missed; apply the operator's `limit` AFTER
+    // filtering. The attention set is small by nature (PRD §1.5
+    // "sane bound") — a 1000-row internal cap is well above realistic
+    // open-attention sizes and well below SQL-pagination cost concerns.
+    const items = getRepo(c).list({
+      destinationSession,
+      sourceSession,
+      state,
+      targetRepo,
+      limit: ATTENTION_FETCH_BOUND,
+    });
+    let filtered = items.filter(isAttentionItem);
+    if (userLimit !== undefined && Number.isFinite(userLimit) && userLimit > 0) {
+      filtered = filtered.slice(0, userLimit);
+    }
+    return c.json(filtered);
   });
 
   // GET /overdue — surfaces in-progress qitems past closure_required_at.

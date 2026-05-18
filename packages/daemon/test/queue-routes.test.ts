@@ -236,6 +236,158 @@ describe("queue routes", () => {
     expect(data).toHaveLength(1);
   });
 
+  // OPR.0.3.2.20 — `?attention=1` filter for the For You priority
+  // windowing slice. Returns OPEN attention-class qitems (the durable
+  // source of truth) so the UI Action-required + Approval lenses don't
+  // depend on the lossy ephemeral event FIFO. HG-4 verified against
+  // the mission-control read layer's canonical attention semantics:
+  //   - approval class: tier === "human-gate"
+  //   - action-required class: destinationSession is human-*@kernel|host
+  //   - open state: pending | in-progress | blocked
+  describe("OPR.0.3.2.20 GET /api/queue/list?attention=1 — open attention-class items", () => {
+    it("HG-4 positive (approval class): tier='human-gate' open qitem is returned", async () => {
+      await app.request("/api/queue/create", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sourceSession: "a@r",
+          destinationSession: "b@r",
+          body: "approve please",
+          tier: "human-gate",
+        }),
+      });
+      const res = await app.request("/api/queue/list?attention=1");
+      expect(res.status).toBe(200);
+      const data = (await res.json()) as Array<{ tier: string | null; body: string }>;
+      expect(data).toHaveLength(1);
+      expect(data[0]!.tier).toBe("human-gate");
+    });
+
+    it("HG-4 positive (action-required class): destination=human-foo@kernel open qitem is returned", async () => {
+      await app.request("/api/queue/create", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sourceSession: "a@r",
+          destinationSession: "human-bob@kernel",
+          body: "needs human",
+        }),
+      });
+      const res = await app.request("/api/queue/list?attention=1");
+      const data = (await res.json()) as Array<{ destinationSession: string }>;
+      expect(data).toHaveLength(1);
+      expect(data[0]!.destinationSession).toBe("human-bob@kernel");
+    });
+
+    it("HG-4 positive: destination=human@host (bare human prefix) open qitem is returned", async () => {
+      await app.request("/api/queue/create", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sourceSession: "a@r",
+          destinationSession: "human@host",
+          body: "needs human attention",
+        }),
+      });
+      const res = await app.request("/api/queue/list?attention=1");
+      const data = (await res.json()) as unknown[];
+      expect(data).toHaveLength(1);
+    });
+
+    it("HG-4 negative: routine pending qitem (non-attention tier + non-human destination) is NOT returned", async () => {
+      await app.request("/api/queue/create", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sourceSession: "a@r",
+          destinationSession: "b@r",
+          body: "routine work",
+        }),
+      });
+      const res = await app.request("/api/queue/list?attention=1");
+      const data = (await res.json()) as unknown[];
+      expect(data).toHaveLength(0);
+    });
+
+    it("HG-4 negative: closed attention qitem (state=done) is NOT returned", async () => {
+      const create = await app.request("/api/queue/create", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sourceSession: "a@r",
+          destinationSession: "human-x@kernel",
+          body: "done already",
+        }),
+      });
+      const item = (await create.json()) as { qitemId: string };
+      await app.request(`/api/queue/${item.qitemId}/update`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          actorSession: "human-x@kernel",
+          state: "done",
+          closureReason: "no-follow-on",
+        }),
+      });
+      const res = await app.request("/api/queue/list?attention=1");
+      const data = (await res.json()) as unknown[];
+      expect(data).toHaveLength(0);
+    });
+
+    it("HG-5/HG-7 sane bound: ?attention=1&limit=N caps the result", async () => {
+      // Seed 5 attention-class qitems
+      for (let i = 0; i < 5; i++) {
+        await app.request("/api/queue/create", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            sourceSession: "a@r",
+            destinationSession: `human-${i}@kernel`,
+            body: `attn ${i}`,
+          }),
+        });
+      }
+      const res = await app.request("/api/queue/list?attention=1&limit=3");
+      const data = (await res.json()) as unknown[];
+      expect(data.length).toBeLessThanOrEqual(3);
+    });
+
+    it("HG-2 (the headline): attention-class items survive >100 unrelated routine qitems being created (queue is durable source)", async () => {
+      // Seed ONE attention-class item first
+      await app.request("/api/queue/create", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sourceSession: "a@r",
+          destinationSession: "b@r",
+          body: "approve me",
+          tier: "human-gate",
+        }),
+      });
+      // Then create >100 routine qitems (no attention markers); these
+      // would saturate any FIFO window in the UI but the queue is the
+      // durable source — the attention filter must still surface the
+      // human-gate item.
+      for (let i = 0; i < 110; i++) {
+        await app.request("/api/queue/create", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            sourceSession: `routine-${i}@r`,
+            destinationSession: `other-${i}@r`,
+            body: `noise ${i}`,
+          }),
+        });
+      }
+      const res = await app.request("/api/queue/list?attention=1");
+      const data = (await res.json()) as Array<{ tier: string | null }>;
+      // Attention item still present despite 110 routine qitems written
+      // after it.
+      expect(data.length).toBeGreaterThanOrEqual(1);
+      expect(data.some((q) => q.tier === "human-gate")).toBe(true);
+    });
+  });
+
   // ---- PL-004 Phase A revision (R1) route tests ----
 
   describe("R1 cross-rig validation rejection", () => {
