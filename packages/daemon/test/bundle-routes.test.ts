@@ -908,6 +908,66 @@ describe("Bundle API routes", () => {
     }
   });
 
+  // Item 3 / slice-05 Checkpoint 4.2 / guard B1 repair: install rejects bundle
+  // whose bundle.yaml carries an unsafe rig_spec value (../traversal) via the
+  // manifest validator at extractInstallTimeMetadata. Discriminator: removing
+  // the validator block makes the test fail (no validation error; path
+  // containment still triggers but with a different error string than the
+  // validator-rejection assertion).
+  it("POST /api/bundles/install rejects bundle whose rig_spec is unsafe via the manifest validator (B1 repair)", async () => {
+    const { specPath } = seedPackage();
+    const goodBundlePath = path.join(tmpDir, "good.rigbundle");
+    const tamperedBundlePath = path.join(tmpDir, "tampered.rigbundle");
+
+    // Build a normal valid bundle via /create (gives us valid integrity + digest)
+    const createRes = await app.request("/api/bundles/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ specPath, bundleName: "tamper-test", bundleVersion: "0.1.0", outputPath: goodBundlePath }),
+    });
+    expect(createRes.status).toBe(201);
+
+    // Unpack, modify bundle.yaml to inject unsafe rig_spec (bundle.yaml itself
+    // isn't in integrity.files — its hash can't reference itself — so editing
+    // it doesn't break verifyIntegrity).
+    const stagingDir = fs.mkdtempSync(path.join(os.tmpdir(), "bundle-tamper-staging-"));
+    try {
+      const tar = await import("tar");
+      await tar.extract({ file: goodBundlePath, cwd: stagingDir });
+      const bundleYamlPath = path.join(stagingDir, "bundle.yaml");
+      const original = fs.readFileSync(bundleYamlPath, "utf-8");
+      // Replace rig_spec line. Original is `rig_spec: rig.yaml` (from /create).
+      const tampered = original.replace(/^rig_spec:.*$/m, 'rig_spec: "../escape.yaml"');
+      expect(tampered).toContain('rig_spec: "../escape.yaml"');
+      fs.writeFileSync(bundleYamlPath, tampered);
+
+      // Re-pack via pack() which writes valid sibling .sha256
+      const { pack } = await import("../src/domain/bundle-archive.js");
+      await pack(stagingDir, tamperedBundlePath);
+
+      // Install attempt
+      const installRes = await app.request("/api/bundles/install", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ bundlePath: tamperedBundlePath, plan: true }),
+      });
+      expect(installRes.status).toBe(400);
+      const body = await installRes.json();
+      // The validator runs inside extractInstallTimeMetadata which is called
+      // from the route's try/catch. The error path wraps it as the
+      // "could not run (extraction failed)" shape with the validator message
+      // in detail.
+      const text = JSON.stringify(body);
+      expect(text).toMatch(/Invalid v1 bundle manifest|Invalid v2 bundle manifest|rig_spec.*not.*safe|escapes bundle workspace/i);
+      // Negative — bootstrap must NOT have entered. The conflict-check error
+      // shape would mean we got past the validator into conflict detection;
+      // assert it didn't.
+      expect(body.error).not.toBe("Bundle install conflict check failed");
+    } finally {
+      fs.rmSync(stagingDir, { recursive: true, force: true });
+    }
+  });
+
   // T11: Install concurrency lock
   it("concurrent bundle install returns 409", async () => {
     // Acquire lock manually

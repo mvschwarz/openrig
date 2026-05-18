@@ -14,7 +14,7 @@ import { LegacyRigSpecCodec } from "../domain/rigspec-codec.js";
 import { LegacyRigSpecSchema } from "../domain/rigspec-schema.js";
 import { RigSpecCodec } from "../domain/rigspec-codec.js";
 import { RigSpecSchema } from "../domain/rigspec-schema.js";
-import { parseLegacyBundleManifest as parseBundleManifest, normalizeLegacyBundleManifest as normalizeBundleManifest, serializePodBundleManifest, parsePodBundleManifest, validatePodBundleManifest, normalizeProvenanceBlock, normalizeCompatibilityBlock } from "../domain/bundle-types.js";
+import { parseLegacyBundleManifest as parseBundleManifest, normalizeLegacyBundleManifest as normalizeBundleManifest, serializePodBundleManifest, parsePodBundleManifest, validatePodBundleManifest, validateLegacyBundleManifest, normalizeProvenanceBlock, normalizeCompatibilityBlock } from "../domain/bundle-types.js";
 import type { PodBundleManifest, BundleProvenance, BundleCompatibility } from "../domain/bundle-types.js";
 import { fileURLToPath } from "node:url";
 import { detectBundleConflicts, type BundleConflict } from "../domain/bundle-conflict-detector.js";
@@ -128,13 +128,42 @@ async function extractInstallTimeMetadata(bundlePath: string): Promise<{
     if (!fs.existsSync(manifestPath)) throw new Error("Bundle missing bundle.yaml");
     const manifestYaml = fs.readFileSync(manifestPath, "utf-8");
     const bundleManifest = parsePodBundleManifest(manifestYaml) as Record<string, unknown>;
+
+    // B1 safety repair (slice-05 Checkpoint 4.2 / qitem-20260518204906): validate
+    // the parsed manifest BEFORE trusting any of its fields. The validators
+    // reject unsafe rig_spec values (isRelativeSafePath: no absolute, no ../,
+    // no backslash, no empty segments). Schema-version-aware: v2 uses pod-aware
+    // validator; everything else falls back to the v1 legacy validator. This is
+    // the same trust-boundary reuse as the unpack/B1 fix in Item 2.
+    const schemaVersion = bundleManifest["schema_version"];
+    if (schemaVersion === 2) {
+      const v2Validation = validatePodBundleManifest(bundleManifest);
+      if (!v2Validation.valid) {
+        throw new Error(`Invalid v2 bundle manifest: ${v2Validation.errors.join("; ")}`);
+      }
+    } else {
+      const v1Validation = validateLegacyBundleManifest(bundleManifest, { requireIntegrity: false });
+      if (!v1Validation.valid) {
+        throw new Error(`Invalid v1 bundle manifest: ${v1Validation.errors.join("; ")}`);
+      }
+    }
+
     // Rig name lives in the bundle's rig.yaml (path referenced by bundle.yaml's
     // rig_spec field; defaults to rig.yaml for legacy bundles). Read + parse;
     // missing-or-malformed rig name leaves rigName undefined which the detector
     // fail-opens on (no rig name to compare).
+    //
+    // B1 safety repair (defense-in-depth alongside the validator above): resolve
+    // rig_spec inside tmpDir and require the result to stay inside tmpDir
+    // before reading, mirroring bundle-source-resolver.ts:60-63. The validator
+    // should have already rejected unsafe rig_spec; this is the second line.
     let rigName: string | undefined;
     const rigSpecRel = typeof bundleManifest["rig_spec"] === "string" ? bundleManifest["rig_spec"] : "rig.yaml";
-    const rigSpecPath = nodePath.join(tmpDir, rigSpecRel);
+    const rigSpecPath = nodePath.resolve(tmpDir, rigSpecRel);
+    const tmpDirResolved = nodePath.resolve(tmpDir);
+    if (rigSpecPath !== tmpDirResolved && !rigSpecPath.startsWith(tmpDirResolved + nodePath.sep)) {
+      throw new Error(`Rig spec path '${rigSpecRel}' escapes bundle workspace`);
+    }
     if (fs.existsSync(rigSpecPath)) {
       try {
         const rigYaml = fs.readFileSync(rigSpecPath, "utf-8");
