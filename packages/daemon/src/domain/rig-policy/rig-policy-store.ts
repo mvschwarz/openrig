@@ -5,11 +5,16 @@
 // write time). NO parallel/forked store (HG-5).
 //
 // The store exposes:
-//   - setBinding(scope, qualifier, record)  → upserts a row
-//   - getBinding(scope, qualifier)          → reads one row
-//   - listBindings()                        → all rows (for show)
-//   - resolveEffective(readContext)         → most-specific binding
-//   - deleteBinding(scope, qualifier)       → unset
+//   - setBinding(scope, qualifier, mode, record)  → upserts a row
+//                                                    (mode is binding-level
+//                                                    Component-2 identity;
+//                                                    record is the frozen
+//                                                    10-field Component-3
+//                                                    settings)
+//   - getBinding(scope, qualifier)                → reads one row
+//   - listBindings()                              → all rows (for show)
+//   - resolveEffective(readContext)               → most-specific binding
+//   - deleteBinding(scope, qualifier)             → unset
 //
 // Update authority is operator-only: setBinding hard-codes
 // `set_by = 'operator'`. The HTTP route + CLI are the only authoring

@@ -269,6 +269,72 @@ describe("rig policy cite — convention citation rules", () => {
   });
 });
 
+describe("normalizeScopeQualifier (CLI mirror of daemon-route parseScopeAndQualifier)", () => {
+  const { normalizeScopeQualifier } = __test__;
+  it("global_host + no explicit qualifier → ok with null", () => {
+    const r = normalizeScopeQualifier("global_host", undefined);
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.qualifier).toBeNull();
+  });
+  it("global_host + explicit qualifier → REJECTED (no silent drop)", () => {
+    const r = normalizeScopeQualifier("global_host", "unexpected");
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.message).toMatch(/Global-host bindings cannot carry a qualifier/);
+  });
+  it("rig + qualifier → ok with the qualifier", () => {
+    const r = normalizeScopeQualifier("rig", "rig-a");
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.qualifier).toBe("rig-a");
+  });
+  it("rig + no qualifier → rejected (qualifier_required)", () => {
+    const r = normalizeScopeQualifier("rig", undefined);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.message).toMatch(/requires a qualifier/);
+  });
+});
+
+describe("BLOCKING re-verify (qitem-20260518044650): set --scope global_host --qualifier <X> rejected at CLI before any daemon call", () => {
+  it("WITHOUT --confirm: exits 1; daemon NOT contacted (no GET defaults, no restate, no PUT)", async () => {
+    const { client, calls } = fakeClient({});
+    const cmd = rigPolicyCommand(deps(client));
+    await cmd.parseAsync(["node", "rig", "set", "sleep", "--scope", "global_host", "--qualifier", "unexpected"]);
+    expect(process.exitCode).toBe(1);
+    expect(calls.filter((c) => c.method === "PUT")).toHaveLength(0);
+    expect(errs.join("\n")).toMatch(/Global-host bindings cannot carry a qualifier/);
+    // CRITICAL: no misleading "Proposed binding" restate happens.
+    expect(logs.join("\n")).not.toContain("Proposed binding");
+  });
+
+  it("WITH --confirm: exits 1; daemon NOT contacted (no PUT)", async () => {
+    const { client, calls } = fakeClient({});
+    const cmd = rigPolicyCommand(deps(client));
+    await cmd.parseAsync(["node", "rig", "set", "sleep", "--scope", "global_host", "--qualifier", "unexpected", "--confirm"]);
+    expect(process.exitCode).toBe(1);
+    expect(calls.filter((c) => c.method === "PUT")).toHaveLength(0);
+    expect(errs.join("\n")).toMatch(/Global-host bindings cannot carry a qualifier/);
+  });
+
+  it("WITH --json: emits ok:false + qualifier_invalid; no PUT", async () => {
+    const { client, calls } = fakeClient({});
+    const cmd = rigPolicyCommand(deps(client));
+    await cmd.parseAsync(["node", "rig", "set", "sleep", "--scope", "global_host", "--qualifier", "unexpected", "--json"]);
+    expect(process.exitCode).toBe(1);
+    expect(calls.filter((c) => c.method === "PUT")).toHaveLength(0);
+    const parsed = JSON.parse(logs.join("\n"));
+    expect(parsed.ok).toBe(false);
+    expect(parsed.error).toBe("qualifier_invalid");
+  });
+
+  it("Positive: set sleep without --qualifier targets /bindings/global_host (no trailing segment)", async () => {
+    const { client, calls } = fakeClient({});
+    const cmd = rigPolicyCommand(deps(client));
+    await cmd.parseAsync(["node", "rig", "set", "sleep", "--scope", "global_host", "--confirm"]);
+    expect(process.exitCode).toBeUndefined();
+    const put = calls.find((c) => c.method === "PUT")!;
+    expect(put.path).toBe("/api/rig-policy/bindings/global_host");
+  });
+});
+
 describe("rig policy unset — operator-only DELETE", () => {
   it("calls DELETE with Authorization when --bearer is provided", async () => {
     const { client, calls } = fakeClient({});
@@ -285,5 +351,26 @@ describe("rig policy unset — operator-only DELETE", () => {
     await cmd.parseAsync(["node", "rig", "unset", "banana", "x"]);
     expect(process.exitCode).toBe(1);
     expect(calls.filter((c) => c.method === "DELETE")).toHaveLength(0);
+  });
+
+  // BLOCKING re-verify (qitem-20260518044650): `unset global_host
+  // <qualifier>` must NOT silently drop the qualifier and delete the
+  // host row. Same shape as set; same shared helper.
+  it("BLOCKING re-verify: unset global_host unexpected → exits 1; daemon NOT called", async () => {
+    const { client, calls } = fakeClient({});
+    const cmd = rigPolicyCommand(deps(client));
+    await cmd.parseAsync(["node", "rig", "unset", "global_host", "unexpected"]);
+    expect(process.exitCode).toBe(1);
+    expect(calls.filter((c) => c.method === "DELETE")).toHaveLength(0);
+    expect(errs.join("\n")).toMatch(/Global-host bindings cannot carry a qualifier/);
+  });
+
+  it("Positive: unset global_host (no qualifier) targets /bindings/global_host", async () => {
+    const { client, calls } = fakeClient({});
+    const cmd = rigPolicyCommand(deps(client));
+    await cmd.parseAsync(["node", "rig", "unset", "global_host"]);
+    expect(process.exitCode).toBeUndefined();
+    const del = calls.find((c) => c.method === "DELETE")!;
+    expect(del.path).toBe("/api/rig-policy/bindings/global_host");
   });
 });

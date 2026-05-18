@@ -108,6 +108,38 @@ function emitRecord(label: string, record: Record<string, string>): void {
   }
 }
 
+/**
+ * Mirror of the daemon route's parseScopeAndQualifier semantics on the
+ * CLI side. The CLI is the operator's authoring surface; the convention's
+ * scope rule applies at invocation, NOT only at raw HTTP URL parsing.
+ *
+ * Reject:
+ *   - explicit qualifier with global_host (BLOCKING re-verify finding from
+ *     guard qitem-20260518044650): operators who type
+ *     `--scope global_host --qualifier <id>` get an error and the daemon
+ *     is never contacted. The CLI does NOT silently drop the qualifier.
+ *   - missing qualifier for any non-global scope.
+ */
+type NormalizedScope = { ok: true; qualifier: string | null } | { ok: false; message: string };
+function normalizeScopeQualifier(scope: Scope, explicitQualifier: string | undefined): NormalizedScope {
+  if (scope === "global_host") {
+    if (explicitQualifier !== undefined && explicitQualifier !== "") {
+      return {
+        ok: false,
+        message: `Global-host bindings cannot carry a qualifier (got "${explicitQualifier}"). Either drop --qualifier OR change --scope to rig / workstream / qitem.`,
+      };
+    }
+    return { ok: true, qualifier: null };
+  }
+  if (explicitQualifier === undefined || explicitQualifier === "") {
+    return {
+      ok: false,
+      message: `Scope ${scope} requires a qualifier (rigId / workstreamId / qitemId). Pass --qualifier <id>.`,
+    };
+  }
+  return { ok: true, qualifier: explicitQualifier };
+}
+
 function formatCitation(b: BindingResponse["binding"]): string {
   const qualifierPart = b.qualifier ? `:${b.qualifier}` : "";
   const scope = b.record.scope as Scope;
@@ -185,7 +217,21 @@ export function rigPolicyCommand(depsOverride?: RigPolicyDeps): Command {
           process.exitCode = 1;
           return;
         }
-        const qualifier = scope === "global_host" ? null : (opts.qualifier ?? null);
+        // BLOCKING re-verify (qitem-20260518044650): never silently drop
+        // an explicit operator-supplied qualifier on global_host. Reject
+        // BEFORE the proposed-binding restate so the operator sees the
+        // input error rather than a misleading proposed binding.
+        const normalized = normalizeScopeQualifier(scope, opts.qualifier);
+        if (!normalized.ok) {
+          if (opts.json) {
+            console.log(JSON.stringify({ ok: false, error: "qualifier_invalid", hint: normalized.message }, null, 2));
+          } else {
+            console.error(normalized.message);
+          }
+          process.exitCode = 1;
+          return;
+        }
+        const qualifier = normalized.qualifier;
         const perMode = defaults.recommendedModeDefaults[mode];
         // Component 3 — exactly the 10 settings fields. `mode` is the
         // binding's identity (Component 2) and lives at the top level
@@ -369,12 +415,20 @@ export function rigPolicyCommand(depsOverride?: RigPolicyDeps): Command {
         return;
       }
       const scope = scopeArg as Scope;
-      const qualifier = scope === "global_host" ? null : qualifierArg ?? null;
-      if (scope !== "global_host" && !qualifier) {
-        console.error(`Scope ${scope} requires a qualifier.`);
+      // BLOCKING re-verify (qitem-20260518044650): never silently drop
+      // an explicit operator-supplied qualifier on global_host on unset.
+      // Same hazard class as set; same shared helper.
+      const normalized = normalizeScopeQualifier(scope, qualifierArg);
+      if (!normalized.ok) {
+        if (opts.json) {
+          console.log(JSON.stringify({ ok: false, error: "qualifier_invalid", hint: normalized.message }, null, 2));
+        } else {
+          console.error(normalized.message);
+        }
         process.exitCode = 1;
         return;
       }
+      const qualifier = normalized.qualifier;
       const deps = getDeps();
       await withClient(deps, async (client) => {
         const qualifierPath = qualifier ? `/${encodeURIComponent(qualifier)}` : "";
@@ -428,5 +482,5 @@ export function rigPolicyCommand(depsOverride?: RigPolicyDeps): Command {
   return cmd;
 }
 
-// Re-export for unit-testability of the disambiguation helper.
-export const __test__ = { disambiguateModeInvocation, formatCitation };
+// Re-export for unit-testability of pure helpers.
+export const __test__ = { disambiguateModeInvocation, formatCitation, normalizeScopeQualifier };
