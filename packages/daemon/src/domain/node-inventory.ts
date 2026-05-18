@@ -8,6 +8,7 @@ import type { TmuxAdapter } from "../adapters/tmux.js";
 import { probeSessionActivity } from "./session-transport.js";
 import { findLatestUsableSnapshot } from "./rig-repository.js";
 import { resolveNodeWorkspace } from "./workspace/workspace-resolver.js";
+import { deriveCanonicalSessionName } from "./session-name.js";
 
 // -- Row types for SQL results --
 
@@ -656,9 +657,7 @@ export function attachTerminalActivityAndWork(
       const obs = seatActivity.getSeatActivity(entry.canonicalSessionName);
       terminalActive = obs ? obs.isActiveWithinWindow : null;
     }
-    const pendingCount = entry.canonicalSessionName
-      ? (pendingByDest.get(entry.canonicalSessionName) ?? 0)
-      : 0;
+    const pendingCount = countPendingForEntry(entry, pendingByDest);
     return {
       ...entry,
       terminalActive,
@@ -666,6 +665,61 @@ export function attachTerminalActivityAndWork(
       pendingWorkCount: pendingCount,
     };
   });
+}
+
+/**
+ * QA baseline-deep-dogfood BLOCKING-A2 (qitem-20260518063900-85745917):
+ * adopted/live-session rigs do NOT surface assigned queue work because
+ * the prior lookup matched destination_session ONLY against
+ * canonicalSessionName.
+ *
+ * For MANAGED seats, canonicalSessionName equals the canonical form
+ * `{pod}-{member}@{rig}` (set by deriveCanonicalSessionName at
+ * materialize time) and queue operators address them by that form, so
+ * the single-key lookup works.
+ *
+ * For ADOPTED seats, canonicalSessionName is the RAW tmux session
+ * name (whatever the adopter chose, e.g., `my-existing-claude`).
+ * Operators address adopted seats by the canonical form (logical
+ * `{pod}-{member}@{rig}`) through `rig queue create --destination`,
+ * so the single-key lookup misses.
+ *
+ * Resolve via BOTH forms:
+ *   1. entry.canonicalSessionName (covers managed + adopted-by-raw)
+ *   2. derived `{pod}-{member}@{rig}` from logicalId + rigName
+ *      (covers adopted-by-canonical)
+ *
+ * The logicalId is the pod-aware `pod.member` form (dot-separated).
+ * The canonical session form replaces the dot with a dash to match the
+ * convention from deriveCanonicalSessionName (so `redo.driver-2` in
+ * rig `openrig-velocity` becomes `redo-driver-2@openrig-velocity`).
+ *
+ * Sums distinct destination_session keys to avoid double-counting
+ * when both forms are identical (managed seats whose
+ * canonicalSessionName already equals the derived canonical form).
+ */
+function countPendingForEntry(
+  entry: NodeInventoryEntry,
+  pendingByDest: Map<string, number>,
+): number {
+  const keys = new Set<string>();
+  if (entry.canonicalSessionName) keys.add(entry.canonicalSessionName);
+  const derived = deriveCanonicalFromEntry(entry);
+  if (derived) keys.add(derived);
+  let count = 0;
+  for (const key of keys) {
+    count += pendingByDest.get(key) ?? 0;
+  }
+  return count;
+}
+
+function deriveCanonicalFromEntry(entry: NodeInventoryEntry): string | null {
+  if (!entry.rigName || !entry.logicalId) return null;
+  const dotIdx = entry.logicalId.indexOf(".");
+  if (dotIdx <= 0 || dotIdx === entry.logicalId.length - 1) return null;
+  const pod = entry.logicalId.slice(0, dotIdx);
+  const member = entry.logicalId.slice(dotIdx + 1);
+  return deriveCanonicalSessionName(pod, member, entry.rigName);
 }
 
 function readPendingWorkBySession(db: Database.Database): Map<string, number> {

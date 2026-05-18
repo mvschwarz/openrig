@@ -161,6 +161,99 @@ describe("attachTerminalActivityAndWork — slice 15 per-node enrichment", () =>
     expect(entry!.pendingWorkCount).toBe(3);
   });
 
+  // QA baseline-deep-dogfood BLOCKING-A2 (qitem-20260518063900-85745917):
+  // adopted/live-session rigs do not surface assigned queue work because
+  // hasAssignedWork only matches destination_session against
+  // canonicalSessionName. For ADOPTED seats canonicalSessionName is the
+  // raw tmux session name (e.g., `my-existing-claude`); operators
+  // address adopted seats via the canonical `{pod}-{member}@{rig}` form
+  // through `rig queue create --destination <pod>-<member>@<rig>`.
+  // The match therefore fails for adopted, succeeds for managed (where
+  // canonicalSessionName is already the canonical form).
+  //
+  // Fix: resolve pending work by BOTH forms — entry.canonicalSessionName
+  // (covers managed + adopted users who queue by raw tmux name) AND the
+  // derived `{pod}-{member}@{rig}` form (covers adopted users who queue
+  // by canonical id). Discriminators below pin both directions.
+
+  it("BLOCKING-A2: adopted-style entry (canonicalSessionName=raw tmux name) — queue dest=canonical form matches → hasAssignedWork=true", () => {
+    const rig = seedRig(db, "my-rig");
+    const n = seedNode(db, rig, "default.dev");
+    // Adopted node: session name is the raw tmux session, NOT the
+    // canonical {pod}-{member}@{rig} form.
+    seedSession(db, n, "raw-tmux-name", "running");
+    // Operator queues by the canonical form (`rig queue create
+    // --destination default-dev@my-rig`).
+    seedPendingQitem(db, "default-dev@my-rig");
+
+    const [entry] = attachTerminalActivityAndWork(getNodeInventory(db, rig), { db });
+    expect(entry!.canonicalSessionName).toBe("raw-tmux-name");
+    expect(entry!.hasAssignedWork).toBe(true);
+    expect(entry!.pendingWorkCount).toBe(1);
+  });
+
+  it("BLOCKING-A2: adopted-style entry — queue dest=raw tmux name still matches (back-compat path)", () => {
+    const rig = seedRig(db, "my-rig");
+    const n = seedNode(db, rig, "default.dev");
+    seedSession(db, n, "raw-tmux-name", "running");
+    seedPendingQitem(db, "raw-tmux-name");
+
+    const [entry] = attachTerminalActivityAndWork(getNodeInventory(db, rig), { db });
+    expect(entry!.hasAssignedWork).toBe(true);
+    expect(entry!.pendingWorkCount).toBe(1);
+  });
+
+  it("BLOCKING-A2: managed-style entry (canonicalSessionName IS canonical form) — unchanged behavior", () => {
+    const rig = seedRig(db, "my-rig");
+    const n = seedNode(db, rig, "default.dev");
+    seedSession(db, n, "default-dev@my-rig", "running");
+    seedPendingQitem(db, "default-dev@my-rig");
+
+    const [entry] = attachTerminalActivityAndWork(getNodeInventory(db, rig), { db });
+    expect(entry!.hasAssignedWork).toBe(true);
+    expect(entry!.pendingWorkCount).toBe(1);
+  });
+
+  it("BLOCKING-A2: no double-count when canonicalSessionName already equals derived canonical form", () => {
+    const rig = seedRig(db, "my-rig");
+    const n = seedNode(db, rig, "default.dev");
+    seedSession(db, n, "default-dev@my-rig", "running");
+    // ONE pending qitem at the canonical destination — the entry's
+    // canonicalSessionName equals the derived canonical form, so
+    // looking up by both must not double-count.
+    seedPendingQitem(db, "default-dev@my-rig");
+
+    const [entry] = attachTerminalActivityAndWork(getNodeInventory(db, rig), { db });
+    expect(entry!.pendingWorkCount).toBe(1);
+  });
+
+  it("BLOCKING-A2: separate queue dests at raw + canonical forms sum correctly (each item counted once)", () => {
+    const rig = seedRig(db, "my-rig");
+    const n = seedNode(db, rig, "default.dev");
+    seedSession(db, n, "raw-tmux-name", "running");
+    seedPendingQitem(db, "raw-tmux-name");
+    seedPendingQitem(db, "default-dev@my-rig");
+    seedPendingQitem(db, "default-dev@my-rig");
+
+    const [entry] = attachTerminalActivityAndWork(getNodeInventory(db, rig), { db });
+    expect(entry!.hasAssignedWork).toBe(true);
+    // Total = 1 (raw) + 2 (canonical) = 3
+    expect(entry!.pendingWorkCount).toBe(3);
+  });
+
+  it("BLOCKING-A2: logical IDs with dots are normalized to dashes for canonical form (matches deriveCanonicalSessionName)", () => {
+    const rig = seedRig(db, "openrig-velocity");
+    const n = seedNode(db, rig, "redo.driver-2");
+    seedSession(db, n, "raw-name-X", "running");
+    // The convention is `{pod}-{member}@{rig}` so logicalId
+    // "redo.driver-2" becomes "redo-driver-2".
+    seedPendingQitem(db, "redo-driver-2@openrig-velocity");
+
+    const [entry] = attachTerminalActivityAndWork(getNodeInventory(db, rig), { db });
+    expect(entry!.hasAssignedWork).toBe(true);
+    expect(entry!.pendingWorkCount).toBe(1);
+  });
+
   it("non-pending qitems do NOT count toward pendingWorkCount", () => {
     const rig = seedRig(db, "states");
     const n = seedNode(db, rig, "dev");
