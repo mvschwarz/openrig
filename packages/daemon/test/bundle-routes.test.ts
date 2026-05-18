@@ -487,6 +487,100 @@ describe("Bundle API routes", () => {
     expect(body.digestValid).toBe(true);
   });
 
+  // Item 2 / slice-05 / Checkpoint 3.2: v1 create -> inspect compatibility round-trip.
+  // Discriminator: removing the v1 inspect normalizer's compatibility surfacing
+  // OR the route /create compatibility-extraction must make this test fail.
+  it("POST /api/bundles/create accepts compatibility + /inspect surfaces it (v1 round-trip)", async () => {
+    const { specPath } = seedPackage();
+    const bundlePath = path.join(tmpDir, "compat-test.rigbundle");
+
+    const createRes = await app.request("/api/bundles/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        specPath, bundleName: "compat-test", bundleVersion: "0.1.0", outputPath: bundlePath,
+        compatibility: { minDaemonVersion: "0.3.2", minCliVersion: "0.3.2", schemaVersion: 1 },
+      }),
+    });
+    expect(createRes.status).toBe(201);
+
+    const inspectRes = await app.request("/api/bundles/inspect", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ bundlePath }),
+    });
+    expect(inspectRes.status).toBe(200);
+    const inspectBody = await inspectRes.json();
+    expect(inspectBody.manifest.compatibility).toBeDefined();
+    expect(inspectBody.manifest.compatibility.minDaemonVersion).toBe("0.3.2");
+    expect(inspectBody.manifest.compatibility.minCliVersion).toBe("0.3.2");
+    expect(inspectBody.manifest.compatibility.schemaVersion).toBe(1);
+    // Negative — snake_case keys must NOT be present (camelCase contract)
+    expect(inspectBody.manifest.compatibility.min_daemon_version).toBeUndefined();
+  });
+
+  // Item 2 / slice-05 / Checkpoint 3.2: v2 create -> inspect compatibility round-trip.
+  // Avoids the B1 trap from Item 1: this test ships in the SAME commit as the v2 inspect
+  // compatibility projection in routes/bundles.ts. Discriminator: removing the v2
+  // compatibility-projection line must make this test fail.
+  it("POST /api/bundles/inspect with v2 bundle surfaces compatibility in camelCase (create -> inspect round-trip)", async () => {
+    const agentsDir = path.join(tmpDir, "agents", "impl");
+    fs.mkdirSync(agentsDir, { recursive: true });
+    fs.writeFileSync(path.join(agentsDir, "agent.yaml"), [
+      'name: impl-agent',
+      'version: "1.0.0"',
+      'resources:',
+      '  skills: []',
+      'profiles:',
+      '  default:',
+      '    uses:',
+      '      skills: []',
+    ].join("\n"));
+
+    const specPath = path.join(tmpDir, "rig.yaml");
+    fs.writeFileSync(specPath, [
+      'version: "0.2"',
+      'name: v2-compat-test',
+      'pods:',
+      '  - id: dev',
+      '    label: Dev',
+      '    members:',
+      '      - id: impl',
+      '        agent_ref: "local:agents/impl"',
+      '        profile: default',
+      '        runtime: claude-code',
+      '        cwd: .',
+      '    edges: []',
+      'edges: []',
+    ].join("\n"));
+
+    const bundlePath = path.join(tmpDir, "v2-compat.rigbundle");
+    const createRes = await app.request("/api/bundles/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        specPath, bundleName: "v2-compat", bundleVersion: "0.1.0", outputPath: bundlePath,
+        compatibility: { minDaemonVersion: "0.3.2", minCliVersion: "0.3.2" },
+      }),
+    });
+    expect(createRes.status).toBe(201);
+
+    const inspectRes = await app.request("/api/bundles/inspect", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ bundlePath }),
+    });
+    expect(inspectRes.status).toBe(200);
+    const inspectBody = await inspectRes.json();
+    expect(inspectBody.manifest.schemaVersion).toBe(2);
+    expect(inspectBody.manifest.compatibility).toBeDefined();
+    expect(inspectBody.manifest.compatibility.minDaemonVersion).toBe("0.3.2");
+    expect(inspectBody.manifest.compatibility.minCliVersion).toBe("0.3.2");
+    // Negative — snake_case keys must NOT be present (camelCase contract)
+    expect(inspectBody.manifest.compatibility.min_daemon_version).toBeUndefined();
+    expect(inspectBody.manifest.compatibility.min_cli_version).toBeUndefined();
+  });
+
   // Item 1 / slice-05 / guard B1 repair: pod-aware (v2) create -> inspect provenance round-trip.
   // Asserts the inspect response surfaces provenance in normalized camelCase,
   // matching the v1 contract. Discriminator: removing the v2 inspect projection

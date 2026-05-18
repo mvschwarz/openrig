@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { RigSpecCodec } from "./rigspec-codec.js";
 import { RigSpecSchema } from "./rigspec-schema.js";
 import { resolveAgentRef, type AgentResolverFsOps } from "./agent-resolver.js";
-import { serializePodBundleManifest, type PodBundleManifest, type PodBundleAgentEntry, type PodBundleAgentImportEntry, type BundleProvenance } from "./bundle-types.js";
+import { serializePodBundleManifest, type PodBundleManifest, type PodBundleAgentEntry, type PodBundleAgentImportEntry, type BundleProvenance, type BundleCompatibility } from "./bundle-types.js";
 import type { RigSpec, StartupBlock } from "./types.js";
 
 export interface PodAssemblerFsOps extends AgentResolverFsOps {
@@ -28,6 +28,12 @@ export interface PodAssembleOptions {
    * (backward compat).
    */
   provenance?: BundleProvenance;
+  /**
+   * Optional Item-2 compatibility input. Caller declares minimum
+   * daemon + CLI versions and optional schema_version reaffirmation.
+   * Missing block = no compatibility recorded (backward compat).
+   */
+  compatibility?: BundleCompatibility;
 }
 
 export interface PodAssembleResult {
@@ -187,6 +193,9 @@ export class PodBundleAssembler {
         ...opts.provenance,
         createdAt: opts.provenance.createdAt ?? createdAt,
       };
+    }
+    if (opts.compatibility) {
+      manifest.compatibility = { ...opts.compatibility };
     }
 
     // Write manifest

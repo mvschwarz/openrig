@@ -5,7 +5,7 @@ import os from "node:os";
 // TODO: AS-T12 — migrate to pod-aware bundle assembler
 import { LegacyBundleAssembler as BundleAssembler, type AssemblerFsOps } from "../src/domain/bundle-assembler.js";
 // TODO: AS-T12 — migrate to pod-aware bundle types
-import { parseLegacyBundleManifest as parseBundleManifest, validateLegacyBundleManifest as validateBundleManifest, normalizeLegacyBundleManifest as normalizeBundleManifest, type BundleProvenance } from "../src/domain/bundle-types.js";
+import { parseLegacyBundleManifest as parseBundleManifest, validateLegacyBundleManifest as validateBundleManifest, normalizeLegacyBundleManifest as normalizeBundleManifest, type BundleProvenance, type BundleCompatibility } from "../src/domain/bundle-types.js";
 
 const VALID_SPEC = `
 schema_version: 1
@@ -316,5 +316,54 @@ describe("BundleAssembler", () => {
     // on-disk yaml must not contain provenance section
     const diskYaml = fs.readFileSync(path.join(outputDir, "bundle.yaml"), "utf-8");
     expect(diskYaml).not.toContain("provenance:");
+  });
+
+  // Item 2 — compatibility capture (slice-05 Checkpoint 3.2)
+  it("captures full compatibility from opts into manifest", () => {
+    const specPath = writeSpec();
+    const pkgDir = writePkg("pkg", { "package.yaml": "name: pkg" });
+    const outputDir = path.join(tmpDir, "staging");
+    const assembler = new BundleAssembler({ fsOps: realFsOps() });
+
+    const compatibility: BundleCompatibility = {
+      minDaemonVersion: "0.3.2",
+      minCliVersion: "0.3.2",
+      schemaVersion: 1,
+    };
+    const manifest = assembler.assemble({
+      specPath, outputDir, bundleName: "test", bundleVersion: "1.0",
+      packages: [{ name: "pkg", version: "1.0", sourcePath: pkgDir, originalSource: "local:./pkg", manifestHash: "h1" }],
+      compatibility,
+    });
+
+    expect(manifest.compatibility).toBeDefined();
+    expect(manifest.compatibility?.minDaemonVersion).toBe("0.3.2");
+    expect(manifest.compatibility?.minCliVersion).toBe("0.3.2");
+    expect(manifest.compatibility?.schemaVersion).toBe(1);
+
+    // Round-trip via the on-disk bundle.yaml
+    const diskYaml = fs.readFileSync(path.join(outputDir, "bundle.yaml"), "utf-8");
+    const parsed = parseBundleManifest(diskYaml);
+    const validation = validateBundleManifest(parsed, { requireIntegrity: false });
+    expect(validation.valid).toBe(true);
+    const normalized = normalizeBundleManifest(parsed);
+    expect(normalized.compatibility?.minDaemonVersion).toBe("0.3.2");
+    expect(normalized.compatibility?.minCliVersion).toBe("0.3.2");
+  });
+
+  it("omits compatibility when opts.compatibility not provided (backward compat)", () => {
+    const specPath = writeSpec();
+    const pkgDir = writePkg("pkg", { "package.yaml": "name: pkg" });
+    const outputDir = path.join(tmpDir, "staging");
+    const assembler = new BundleAssembler({ fsOps: realFsOps() });
+
+    const manifest = assembler.assemble({
+      specPath, outputDir, bundleName: "test", bundleVersion: "1.0",
+      packages: [{ name: "pkg", version: "1.0", sourcePath: pkgDir, originalSource: "local:./pkg", manifestHash: "h1" }],
+    });
+
+    expect(manifest.compatibility).toBeUndefined();
+    const diskYaml = fs.readFileSync(path.join(outputDir, "bundle.yaml"), "utf-8");
+    expect(diskYaml).not.toContain("compatibility:");
   });
 });

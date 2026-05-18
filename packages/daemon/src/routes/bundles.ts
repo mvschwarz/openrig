@@ -14,8 +14,8 @@ import { LegacyRigSpecCodec } from "../domain/rigspec-codec.js";
 import { LegacyRigSpecSchema } from "../domain/rigspec-schema.js";
 import { RigSpecCodec } from "../domain/rigspec-codec.js";
 import { RigSpecSchema } from "../domain/rigspec-schema.js";
-import { parseLegacyBundleManifest as parseBundleManifest, normalizeLegacyBundleManifest as normalizeBundleManifest, serializePodBundleManifest, parsePodBundleManifest, validatePodBundleManifest, normalizeProvenanceBlock } from "../domain/bundle-types.js";
-import type { PodBundleManifest, BundleProvenance } from "../domain/bundle-types.js";
+import { parseLegacyBundleManifest as parseBundleManifest, normalizeLegacyBundleManifest as normalizeBundleManifest, serializePodBundleManifest, parsePodBundleManifest, validatePodBundleManifest, normalizeProvenanceBlock, normalizeCompatibilityBlock } from "../domain/bundle-types.js";
+import type { PodBundleManifest, BundleProvenance, BundleCompatibility } from "../domain/bundle-types.js";
 import { fileURLToPath } from "node:url";
 
 /**
@@ -33,6 +33,21 @@ function getDaemonVersion(): string {
   } catch {
     return "unknown";
   }
+}
+
+/**
+ * Sanitize raw compatibility from request body into a BundleCompatibility
+ * object. Only known typed fields accepted; unknown fields dropped silently.
+ * Returns undefined if input is missing or has no usable fields.
+ */
+function compatibilityFromRequestBody(raw: unknown): BundleCompatibility | undefined {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const c = raw as Record<string, unknown>;
+  const result: BundleCompatibility = {};
+  if (typeof c["minDaemonVersion"] === "string") result.minDaemonVersion = c["minDaemonVersion"];
+  if (typeof c["minCliVersion"] === "string") result.minCliVersion = c["minCliVersion"];
+  if (typeof c["schemaVersion"] === "number") result.schemaVersion = c["schemaVersion"];
+  return Object.keys(result).length > 0 ? result : undefined;
 }
 
 /**
@@ -129,6 +144,9 @@ bundleRoutes.post("/create", async (c) => {
     ? { ...clientProvenance, daemonVersion: getDaemonVersion() }
     : undefined;
 
+  // Item 2 / slice-05: build compatibility from request body (no server-side fields)
+  const compatibility = compatibilityFromRequestBody(body["compatibility"]);
+
   if (!specPath || !bundleName || !bundleVersion || !outputPath) {
     return c.json({ error: "specPath, bundleName, bundleVersion, and outputPath are required" }, 400);
   }
@@ -148,7 +166,7 @@ bundleRoutes.post("/create", async (c) => {
       const tmpStaging = fs.mkdtempSync(nodePath.join(os.tmpdir(), "pod-bundle-create-"));
       try {
         const assembler = new PodBundleAssembler({ fsOps: podAssemblerFsOps() });
-        const result = assembler.assemble({ rigRoot: effectiveRigRoot, rigSpecPath: nodePath.resolve(specPath), outputDir: tmpStaging, bundleName, bundleVersion, provenance });
+        const result = assembler.assemble({ rigRoot: effectiveRigRoot, rigSpecPath: nodePath.resolve(specPath), outputDir: tmpStaging, bundleName, bundleVersion, provenance, compatibility });
 
         const integrity = computeIntegrity(tmpStaging, integrityFsOps());
         result.manifest.integrity = integrity;
@@ -205,7 +223,7 @@ bundleRoutes.post("/create", async (c) => {
     try {
       const assembler = new BundleAssembler({ fsOps: assemblerFsOps() });
       const manifest = assembler.assemble({
-        specPath: nodePath.resolve(specPath), packages, outputDir: tmpStaging, bundleName, bundleVersion, provenance,
+        specPath: nodePath.resolve(specPath), packages, outputDir: tmpStaging, bundleName, bundleVersion, provenance, compatibility,
       });
 
       const integrity = computeIntegrity(tmpStaging, integrityFsOps());
@@ -291,6 +309,10 @@ bundleRoutes.post("/inspect", async (c) => {
         // (v1 path normalizes through normalizeLegacyBundleManifest below).
         // Field is optional; undefined when bundle has no provenance.
         provenance: normalizeProvenanceBlock(rawParsed["provenance"]),
+        // Item 2 / slice-05: surface compatibility normalized to camelCase
+        // (same single-contract reason as provenance above). v1 already
+        // surfaces via the normalizer at the end of this handler.
+        compatibility: normalizeCompatibilityBlock(rawParsed["compatibility"]),
       };
       const integrityCompat = integritySection ? {
         schemaVersion: 2,

@@ -580,6 +580,54 @@ describe("PodBundleAssembler", () => {
 
     expect(result.manifest.provenance).toBeUndefined();
   });
+
+  // Item 2 — compatibility capture (slice-05 Checkpoint 3.2)
+  it("v2: captures compatibility from opts into manifest", () => {
+    const spec = makeRigSpec();
+    const files: Record<string, string> = {
+      [`${RIG_ROOT}/rig.yaml`]: rigSpecYaml(spec),
+      [`${RIG_ROOT}/agents/impl/agent.yaml`]: validAgentYaml("impl"),
+    };
+    const fs = mockFs(files);
+    const assembler = new PodBundleAssembler({ fsOps: fs });
+
+    const result = assembler.assemble({
+      rigRoot: RIG_ROOT,
+      rigSpecPath: `${RIG_ROOT}/rig.yaml`,
+      outputDir: "/tmp/bundle-staging-compat",
+      bundleName: "test-bundle",
+      bundleVersion: "1.0.0",
+      compatibility: {
+        minDaemonVersion: "0.3.2",
+        minCliVersion: "0.3.2",
+        schemaVersion: 2,
+      },
+    });
+
+    expect(result.manifest.compatibility).toBeDefined();
+    expect(result.manifest.compatibility?.minDaemonVersion).toBe("0.3.2");
+    expect(result.manifest.compatibility?.minCliVersion).toBe("0.3.2");
+    expect(result.manifest.compatibility?.schemaVersion).toBe(2);
+  });
+
+  it("v2: omits compatibility when opts.compatibility not provided (backward compat)", () => {
+    const spec = makeRigSpec();
+    const files: Record<string, string> = {
+      [`${RIG_ROOT}/rig.yaml`]: rigSpecYaml(spec),
+      [`${RIG_ROOT}/agents/impl/agent.yaml`]: validAgentYaml("impl"),
+    };
+    const fs = mockFs(files);
+    const assembler = new PodBundleAssembler({ fsOps: fs });
+
+    const result = assembler.assemble({
+      rigRoot: RIG_ROOT,
+      rigSpecPath: `${RIG_ROOT}/rig.yaml`,
+      outputDir: "/tmp/bundle-staging-no-compat",
+      bundleName: "test", bundleVersion: "1.0",
+    });
+
+    expect(result.manifest.compatibility).toBeUndefined();
+  });
 });
 
 describe("PodBundleManifest validation", () => {

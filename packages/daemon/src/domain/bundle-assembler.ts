@@ -2,7 +2,7 @@ import nodePath from "node:path";
 import { LegacyRigSpecCodec as RigSpecCodec } from "./rigspec-codec.js"; // TODO: AS-T08b — migrate to pod-aware RigSpec
 import { LegacyRigSpecSchema as RigSpecSchema } from "./rigspec-schema.js"; // TODO: AS-T08b — migrate to pod-aware RigSpec
 // TODO: AS-T12 — migrate to pod-aware bundle types
-import { serializeLegacyBundleManifest as serializeBundleManifest, type LegacyBundleManifest as BundleManifest, type BundleProvenance } from "./bundle-types.js";
+import { serializeLegacyBundleManifest as serializeBundleManifest, type LegacyBundleManifest as BundleManifest, type BundleProvenance, type BundleCompatibility } from "./bundle-types.js";
 
 export interface AssemblerFsOps {
   readFile: (path: string) => string;
@@ -35,6 +35,14 @@ export interface AssembleOptions {
    * (backward compat).
    */
   provenance?: BundleProvenance;
+  /**
+   * Optional Item-2 compatibility input. Caller declares minimum
+   * daemon + CLI versions and optional schema_version reaffirmation.
+   * Missing block = no compatibility recorded (backward compat); the
+   * install-time version check at /api/bundles/install (Checkpoint 3.3)
+   * is a no-op for bundles without compatibility.
+   */
+  compatibility?: BundleCompatibility;
 }
 
 /**
@@ -127,6 +135,9 @@ export class LegacyBundleAssembler {
         ...opts.provenance,
         createdAt: opts.provenance.createdAt ?? createdAt,
       };
+    }
+    if (opts.compatibility) {
+      manifest.compatibility = { ...opts.compatibility };
     }
 
     // Write bundle.yaml

@@ -251,6 +251,57 @@ describe("Bundle CLI", () => {
     expect(provenance!["notes"]).toBeUndefined();
   });
 
+  // Item 2 / slice-05: --min-daemon-version + --min-cli-version flags wire into request body compatibility
+  it("bundle create --min-daemon-version and --min-cli-version wire into request body compatibility", async () => {
+    capturedCreateBodies = [];
+    await captureLogs(async () => {
+      await makeCmd().parseAsync([
+        "node", "rig", "bundle", "create", "/tmp/rig.yaml",
+        "-o", "/tmp/test.rigbundle",
+        "--min-daemon-version", "0.3.2",
+        "--min-cli-version", "0.3.2",
+      ]);
+    });
+    const createBody = capturedCreateBodies[capturedCreateBodies.length - 1];
+    expect(createBody).toBeTruthy();
+    const compatibility = createBody!["compatibility"] as Record<string, unknown> | undefined;
+    expect(compatibility).toBeTruthy();
+    expect(compatibility!["minDaemonVersion"]).toBe("0.3.2");
+    expect(compatibility!["minCliVersion"]).toBe("0.3.2");
+  });
+
+  // Item 2 / slice-05: --min-daemon-version alone (partial) still wires
+  it("bundle create --min-daemon-version alone wires partial compatibility into request body", async () => {
+    capturedCreateBodies = [];
+    await captureLogs(async () => {
+      await makeCmd().parseAsync([
+        "node", "rig", "bundle", "create", "/tmp/rig.yaml",
+        "-o", "/tmp/test.rigbundle",
+        "--min-daemon-version", "0.3.2",
+      ]);
+    });
+    const createBody = capturedCreateBodies[capturedCreateBodies.length - 1];
+    expect(createBody).toBeTruthy();
+    const compatibility = createBody!["compatibility"] as Record<string, unknown> | undefined;
+    expect(compatibility).toBeTruthy();
+    expect(compatibility!["minDaemonVersion"]).toBe("0.3.2");
+    expect(compatibility!["minCliVersion"]).toBeUndefined();
+  });
+
+  // Item 2 / slice-05: no flags → compatibility omitted (no empty object sent)
+  it("bundle create with neither min-version flag omits compatibility from request body", async () => {
+    capturedCreateBodies = [];
+    await captureLogs(async () => {
+      await makeCmd().parseAsync([
+        "node", "rig", "bundle", "create", "/tmp/rig.yaml",
+        "-o", "/tmp/test.rigbundle",
+      ]);
+    });
+    const createBody = capturedCreateBodies[capturedCreateBodies.length - 1];
+    expect(createBody).toBeTruthy();
+    expect(createBody!["compatibility"]).toBeUndefined();
+  });
+
   // Item 1 / slice-05: authorSession populates when OPENRIG_SESSION_NAME env is set
   it("bundle create includes authorSession when OPENRIG_SESSION_NAME env is set", async () => {
     capturedCreateBodies = [];

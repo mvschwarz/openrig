@@ -63,17 +63,27 @@ export function bundleCommand(depsOverride?: StatusDeps): Command {
     .option("--include-packages <refs...>", "Package refs to include (default: all from spec)")
     .option("--rig-root <root>", "Root directory for pod-aware resolution")
     .option("--notes <text>", "Operator notes captured in bundle provenance metadata")
+    .option("--min-daemon-version <ver>", "Minimum daemon version required to install this bundle (Item 2 compatibility)")
+    .option("--min-cli-version <ver>", "Minimum CLI version required to install this bundle (Item 2 compatibility)")
     .option("--json", "JSON output")
-    .action(async (spec: string, opts: { output: string; name: string; bundleVersion: string; includePackages?: string[]; rigRoot?: string; notes?: string; json?: boolean }) => {
+    .action(async (spec: string, opts: { output: string; name: string; bundleVersion: string; includePackages?: string[]; rigRoot?: string; notes?: string; minDaemonVersion?: string; minCliVersion?: string; json?: boolean }) => {
       const deps = getDepsF();
       const client = await getClient(deps);
       if (!client) { process.exitCode = 1; return; }
+
+      // Item 2 / slice-05: build compatibility from operator flags. Only included
+      // in the request body when at least one of the two flags is set.
+      const compatibility: Record<string, string> = {};
+      if (opts.minDaemonVersion) compatibility.minDaemonVersion = opts.minDaemonVersion;
+      if (opts.minCliVersion) compatibility.minCliVersion = opts.minCliVersion;
+      const hasCompatibility = Object.keys(compatibility).length > 0;
 
       const res = await client.post<Record<string, unknown>>("/api/bundles/create", {
         specPath: spec, bundleName: opts.name, bundleVersion: opts.bundleVersion, outputPath: opts.output,
         includePackages: opts.includePackages,
         rigRoot: opts.rigRoot ? nodePath.resolve(opts.rigRoot) : undefined,
         provenance: buildClientProvenance(opts.notes),
+        ...(hasCompatibility ? { compatibility } : {}),
       });
 
       if (opts.json) {
