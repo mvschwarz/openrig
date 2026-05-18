@@ -1257,4 +1257,210 @@ edges: []
     expect(result.rigId).toBe("rig-pod-1");
     expect(mockPodInstantiator.instantiate).toHaveBeenCalledTimes(1);
   });
+
+  // --- Conveyor-Trust Minimal Fix (OPR.0.3.2.CT) — guard verdict
+  //     qitem-20260518082933 BLOCKER 1: mixed launched+attention_required
+  //     must NOT be surfaced as "completed"; orchestrator must route
+  //     attention_required nodes through a partial+blocked import_rig
+  //     stage carrying attentionNodes so the route can build the
+  //     3-part error.
+
+  it("OPR.0.3.2.CT BLOCKER-1: mixed launched + attention_required → status=partial, import_rig stage=blocked with attentionNodes", async () => {
+    const podSpecYaml = `
+version: "0.2"
+name: pod-mixed-rig
+pods:
+  - id: dev
+    label: Dev
+    members:
+      - id: impl
+        agent_ref: "local:agents/impl"
+        profile: default
+        runtime: claude-code
+        cwd: .
+      - id: qa
+        agent_ref: "local:agents/qa"
+        profile: default
+        runtime: claude-code
+        cwd: .
+    edges: []
+edges: []
+`.trim();
+    const specPath = path.join(tmpDir, "pod-mixed-spec.yaml");
+    fs.writeFileSync(specPath, podSpecYaml);
+
+    const mockPodInstantiator = {
+      db,
+      instantiate: vi.fn(async () => ({
+        ok: true as const,
+        result: {
+          rigId: "rig-mixed-1",
+          specName: "pod-mixed-rig",
+          specVersion: "0.2",
+          nodes: [
+            { logicalId: "dev.impl", status: "launched" as const, sessionName: "dev-impl@pod-mixed-rig" },
+            { logicalId: "dev.qa", status: "attention_required" as const, error: "trust_gate on qa", sessionName: "dev-qa@pod-mixed-rig", evidence: "trust prompt visible" },
+          ],
+        },
+      })),
+    };
+
+    const orch = new BootstrapOrchestrator({
+      db,
+      bootstrapRepo: new BootstrapRepository(db),
+      runtimeVerifier: new RuntimeVerifier({ exec: createMockExec({}), db }),
+      probeRegistry: new RequirementsProbeRegistry(createMockExec({})),
+      installPlanner: new ExternalInstallPlanner(),
+      installExecutor: new ExternalInstallExecutor({ exec: createMockExec({}), db }),
+      packageInstallService: new PackageInstallService({
+        packageRepo: new PackageRepository(db),
+        installRepo: new InstallRepository(db),
+        installEngine: new InstallEngine(new InstallRepository(db), realEngineFsOps()),
+        installVerifier: new InstallVerifier(new InstallRepository(db), new PackageRepository(db), {
+          readFile: (p) => fs.readFileSync(p, "utf-8"), exists: (p) => fs.existsSync(p),
+        }),
+      }),
+      rigInstantiator: createMockInstantiator(db) as any,
+      fsOps: realFsOps(),
+      bundleSourceResolver: null,
+      podInstantiator: mockPodInstantiator as any,
+    });
+
+    const result = await orch.bootstrap({ mode: "apply", sourceRef: specPath, sourceKind: "rig_spec" });
+
+    // BLOCKER-1: NOT "completed" when any node attention_required.
+    expect(result.status).toBe("partial");
+    expect(result.rigId).toBe("rig-mixed-1");
+    const importStage = result.stages.find((s) => s.stage === "import_rig");
+    expect(importStage).toBeDefined();
+    expect(importStage!.status).toBe("blocked");
+    const detail = importStage!.detail as { code: string; attentionNodes: Array<{ logicalId: string; sessionName: string; evidence?: string }> };
+    expect(detail.code).toBe("attention_required");
+    expect(detail.attentionNodes.length).toBe(1);
+    expect(detail.attentionNodes[0]!.logicalId).toBe("dev.qa");
+    expect(detail.attentionNodes[0]!.sessionName).toBe("dev-qa@pod-mixed-rig");
+    expect(detail.attentionNodes[0]!.evidence).toBe("trust prompt visible");
+  });
+
+  it("OPR.0.3.2.CT BLOCKER-1: all-launched (no attention, no failed) → status=completed, import_rig=ok (no regression)", async () => {
+    const podSpecYaml = `
+version: "0.2"
+name: pod-clean-rig
+pods:
+  - id: dev
+    label: Dev
+    members:
+      - id: impl
+        agent_ref: "local:agents/impl"
+        profile: default
+        runtime: claude-code
+        cwd: .
+    edges: []
+edges: []
+`.trim();
+    const specPath = path.join(tmpDir, "pod-clean-spec.yaml");
+    fs.writeFileSync(specPath, podSpecYaml);
+
+    const mockPodInstantiator = {
+      db,
+      instantiate: vi.fn(async () => ({
+        ok: true as const,
+        result: {
+          rigId: "rig-clean-1",
+          specName: "pod-clean-rig",
+          specVersion: "0.2",
+          nodes: [{ logicalId: "dev.impl", status: "launched" as const, sessionName: "dev-impl@pod-clean-rig" }],
+        },
+      })),
+    };
+
+    const orch = new BootstrapOrchestrator({
+      db,
+      bootstrapRepo: new BootstrapRepository(db),
+      runtimeVerifier: new RuntimeVerifier({ exec: createMockExec({}), db }),
+      probeRegistry: new RequirementsProbeRegistry(createMockExec({})),
+      installPlanner: new ExternalInstallPlanner(),
+      installExecutor: new ExternalInstallExecutor({ exec: createMockExec({}), db }),
+      packageInstallService: new PackageInstallService({
+        packageRepo: new PackageRepository(db),
+        installRepo: new InstallRepository(db),
+        installEngine: new InstallEngine(new InstallRepository(db), realEngineFsOps()),
+        installVerifier: new InstallVerifier(new InstallRepository(db), new PackageRepository(db), {
+          readFile: (p) => fs.readFileSync(p, "utf-8"), exists: (p) => fs.existsSync(p),
+        }),
+      }),
+      rigInstantiator: createMockInstantiator(db) as any,
+      fsOps: realFsOps(),
+      bundleSourceResolver: null,
+      podInstantiator: mockPodInstantiator as any,
+    });
+
+    const result = await orch.bootstrap({ mode: "apply", sourceRef: specPath, sourceKind: "rig_spec" });
+    expect(result.status).toBe("completed");
+    const importStage = result.stages.find((s) => s.stage === "import_rig");
+    expect(importStage!.status).toBe("ok");
+  });
+
+  it("OPR.0.3.2.CT BLOCKER-1: all-attention_required outcome → status=partial, import_rig=blocked, rigId preserved", async () => {
+    const podSpecYaml = `
+version: "0.2"
+name: pod-all-attention-rig
+pods:
+  - id: dev
+    label: Dev
+    members:
+      - id: impl
+        agent_ref: "local:agents/impl"
+        profile: default
+        runtime: claude-code
+        cwd: .
+    edges: []
+edges: []
+`.trim();
+    const specPath = path.join(tmpDir, "pod-all-attention-spec.yaml");
+    fs.writeFileSync(specPath, podSpecYaml);
+
+    // PodRigInstantiator returns the new attention_required outcome
+    // (ok:false with rigId + attentionNodes) when ALL nodes are parked.
+    const mockPodInstantiator = {
+      db,
+      instantiate: vi.fn(async () => ({
+        ok: false as const,
+        code: "attention_required" as const,
+        message: "1 node requires attention before becoming interactive (rig parked, NOT failed; approve and resume to proceed).",
+        rigId: "rig-all-attention-1",
+        attentionNodes: [{ logicalId: "dev.impl", sessionName: "dev-impl@pod-all-attention-rig", evidence: "trust prompt", reason: "trust_gate" }],
+      })),
+    };
+
+    const orch = new BootstrapOrchestrator({
+      db,
+      bootstrapRepo: new BootstrapRepository(db),
+      runtimeVerifier: new RuntimeVerifier({ exec: createMockExec({}), db }),
+      probeRegistry: new RequirementsProbeRegistry(createMockExec({})),
+      installPlanner: new ExternalInstallPlanner(),
+      installExecutor: new ExternalInstallExecutor({ exec: createMockExec({}), db }),
+      packageInstallService: new PackageInstallService({
+        packageRepo: new PackageRepository(db),
+        installRepo: new InstallRepository(db),
+        installEngine: new InstallEngine(new InstallRepository(db), realEngineFsOps()),
+        installVerifier: new InstallVerifier(new InstallRepository(db), new PackageRepository(db), {
+          readFile: (p) => fs.readFileSync(p, "utf-8"), exists: (p) => fs.existsSync(p),
+        }),
+      }),
+      rigInstantiator: createMockInstantiator(db) as any,
+      fsOps: realFsOps(),
+      bundleSourceResolver: null,
+      podInstantiator: mockPodInstantiator as any,
+    });
+
+    const result = await orch.bootstrap({ mode: "apply", sourceRef: specPath, sourceKind: "rig_spec" });
+    expect(result.status).toBe("partial");
+    expect(result.rigId).toBe("rig-all-attention-1");
+    const importStage = result.stages.find((s) => s.stage === "import_rig");
+    expect(importStage!.status).toBe("blocked");
+    const detail = importStage!.detail as { code: string; attentionNodes: Array<{ logicalId: string }> };
+    expect(detail.code).toBe("attention_required");
+    expect(detail.attentionNodes.length).toBe(1);
+  });
 });

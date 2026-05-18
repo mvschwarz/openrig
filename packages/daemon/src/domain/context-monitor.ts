@@ -26,6 +26,10 @@ interface ClaudeContextProvisioner {
   checkReady?(binding: NodeBinding): Promise<ReadinessResult>;
 }
 
+interface RuntimeReadinessChecker {
+  checkReady?(binding: NodeBinding): Promise<ReadinessResult>;
+}
+
 /**
  * Polls known managed runtime context sources and persists the latest
  * normalized telemetry. Scheduler-only: no queries, no response shaping,
@@ -41,6 +45,7 @@ export class ContextMonitor {
   private store: ContextUsageStore;
   private claudeContextProvisioner: ClaudeContextProvisioner | null;
   private compactionEnforcer: ClaudeCompactionEnforcer | null;
+  private readinessCheckers: Record<string, RuntimeReadinessChecker | undefined>;
   private timer: ReturnType<typeof setInterval> | null = null;
 
   constructor(
@@ -48,11 +53,16 @@ export class ContextMonitor {
     store: ContextUsageStore,
     claudeContextProvisioner?: ClaudeContextProvisioner,
     compactionEnforcer?: ClaudeCompactionEnforcer,
+    readinessCheckers?: Record<string, RuntimeReadinessChecker | undefined>,
   ) {
     this.db = db;
     this.store = store;
     this.claudeContextProvisioner = claudeContextProvisioner ?? null;
     this.compactionEnforcer = compactionEnforcer ?? null;
+    this.readinessCheckers = readinessCheckers ?? {};
+    if (claudeContextProvisioner && !this.readinessCheckers["claude-code"]) {
+      this.readinessCheckers["claude-code"] = claudeContextProvisioner;
+    }
   }
 
   /** Discover active managed Claude sessions and poll their sidecar files. */
@@ -60,15 +70,18 @@ export class ContextMonitor {
     const sessions = this.getEligibleSessions();
     for (const session of sessions) {
       let observed: ContextUsage | null = null;
-      try {
-        observed = this.readContextUsage(session);
-        this.store.persist(session.node_id, observed);
-      } catch {
-        observed = null;
-        // One bad session must not crash polling for others
+      const canReadContextUsage = session.runtime !== "codex" || !!session.resume_token;
+      if (canReadContextUsage) {
         try {
-          this.store.persist(session.node_id, this.store.unknownUsage("parse_error"));
-        } catch { /* give up on this session */ }
+          observed = this.readContextUsage(session);
+          this.store.persist(session.node_id, observed);
+        } catch {
+          observed = null;
+          // One bad session must not crash polling for others
+          try {
+            this.store.persist(session.node_id, this.store.unknownUsage("parse_error"));
+          } catch { /* give up on this session */ }
+        }
       }
 
       await this.normalizeStartupStatus(session);
@@ -139,7 +152,13 @@ export class ContextMonitor {
       LEFT JOIN bindings b ON b.node_id = n.id
       WHERE (
           (n.runtime = 'claude-code' AND s.status = 'running')
-          OR (n.runtime = 'codex' AND s.resume_token IS NOT NULL)
+          OR (
+            n.runtime = 'codex'
+            AND (
+              s.resume_token IS NOT NULL
+              OR s.startup_status IN ('failed', 'attention_required')
+            )
+          )
         )
         AND COALESCE(b.attachment_type, 'tmux') = 'tmux'
         AND COALESCE(b.tmux_session, s.session_name) IS NOT NULL
@@ -162,12 +181,12 @@ export class ContextMonitor {
   }
 
   private async normalizeStartupStatus(session: EligibleSession): Promise<void> {
-    if (session.runtime !== "claude-code") return;
-    if (!this.claudeContextProvisioner?.checkReady) return;
+    const checker = session.runtime ? this.readinessCheckers[session.runtime] : undefined;
+    if (!checker?.checkReady) return;
     if (session.startup_status !== "failed" && session.startup_status !== "attention_required") return;
 
     try {
-      const readiness = await this.claudeContextProvisioner.checkReady({
+      const readiness = await checker.checkReady({
         id: `context-monitor:${session.session_id}`,
         nodeId: session.node_id,
         attachmentType: "tmux",

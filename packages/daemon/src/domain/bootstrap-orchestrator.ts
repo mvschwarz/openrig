@@ -624,6 +624,34 @@ export class BootstrapOrchestrator {
     const outcome = await podInstantiator.instantiate(rigSpecYaml, rigRoot, { cwdOverride: opts.cwdOverride, prelaunchHook });
 
     if (!outcome.ok) {
+      // OPR.0.3.2.CT — attention_required is a recoverable outcome
+      // (rig + sessions preserved). Surface it distinctly from terminal
+      // failure so the route can return a 3-part error pointing the
+      // operator at the approve→resume path. The bootstrap run status
+      // is `partial` (not `failed`) because the rig exists and is
+      // operator-actionable.
+      if (outcome.code === "attention_required") {
+        const attentionMsg = (outcome as { message: string }).message;
+        const attentionNodes = (outcome as { attentionNodes: import("./types.js").AttentionNode[] }).attentionNodes;
+        stages.push({
+          stage: "import_rig",
+          status: "blocked",
+          detail: {
+            code: "attention_required",
+            message: attentionMsg,
+            attentionNodes,
+          },
+        });
+        this.deps.bootstrapRepo.updateRunStatus(run.id, "partial", { rigId: (outcome as { rigId: string }).rigId });
+        return {
+          runId: run.id,
+          status: "partial",
+          stages,
+          rigId: (outcome as { rigId: string }).rigId,
+          errors: [attentionMsg],
+          warnings,
+        };
+      }
       const outErrors = outcome.code === "validation_failed" || outcome.code === "preflight_failed"
         ? (outcome as { errors: string[] }).errors
         : [(outcome as { message: string }).message];
@@ -635,13 +663,49 @@ export class BootstrapOrchestrator {
 
     const result = outcome.result;
     const anyFailed = result.nodes.some((n) => n.status === "failed");
-    const finalStatus: BootstrapStatus = anyFailed ? "partial" : "completed";
+    const anyAttention = result.nodes.some((n) => n.status === "attention_required");
 
-    stages.push({
-      stage: "import_rig",
-      status: anyFailed ? "failed" : "ok",
-      detail: { rigId: result.rigId, specName: result.specName, nodes: result.nodes },
-    });
+    // OPR.0.3.2.CT (guard verdict qitem-20260518082933 BLOCKER 1):
+    // attention_required nodes are recoverable but NOT done — the
+    // launch is partial and the operator needs the same approve→resume
+    // surface the all-attention path already gets. Treating mixed
+    // launched+attention as "completed" would hide the parked seat
+    // behind a 201 success response. finalStatus is partial whenever
+    // any node is failed OR attention_required; the import_rig stage
+    // is "blocked" (not "ok") with attentionNodes detail so the route
+    // can build the 3-part error from the same path the all-attention
+    // case uses.
+    const finalStatus: BootstrapStatus = anyFailed || anyAttention ? "partial" : "completed";
+
+    if (anyAttention) {
+      const attentionNodes: import("./types.js").AttentionNode[] = result.nodes
+        .filter((n) => n.status === "attention_required")
+        .map((n) => ({
+          logicalId: n.logicalId,
+          sessionName: n.sessionName ?? "",
+          evidence: n.evidence,
+          reason: n.error ?? "node awaiting attention",
+        }));
+      const message = `${attentionNodes.length} node${attentionNodes.length === 1 ? "" : "s"} require attention before becoming interactive (rig parked, NOT failed; approve and resume to proceed).`;
+      stages.push({
+        stage: "import_rig",
+        status: "blocked",
+        detail: {
+          code: "attention_required",
+          message,
+          rigId: result.rigId,
+          specName: result.specName,
+          nodes: result.nodes,
+          attentionNodes,
+        },
+      });
+    } else {
+      stages.push({
+        stage: "import_rig",
+        status: anyFailed ? "failed" : "ok",
+        detail: { rigId: result.rigId, specName: result.specName, nodes: result.nodes },
+      });
+    }
     if (result.warnings?.length) {
       warnings.push(...result.warnings);
     }

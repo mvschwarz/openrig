@@ -12,6 +12,56 @@ import { assessCurrentStateRehydrateEligibility } from "../domain/rehydrate-elig
 
 export const upRoutes = new Hono();
 
+/**
+ * OPR.0.3.2.CT — assemble the 3-part error response body
+ * (fact / consequence / action) when a bootstrap result carries an
+ * import_rig stage with status='blocked' and detail.code ===
+ * 'attention_required'. Returns null when the result is not in that
+ * shape (caller falls through to the normal partial-success path).
+ *
+ * Exported for narrow unit tests so the HG-4 shape is pinned without
+ * needing the full daemon harness. Pure on the result shape.
+ */
+export function buildAttentionResponse(result: {
+  rigId?: string;
+  stages: Array<{ stage: string; status: string; detail?: unknown }>;
+}): {
+  error: { fact: string; consequence: string; action: string };
+  attentionNodes: import("../domain/types.js").AttentionNode[];
+} | null {
+  const attentionStage = result.stages.find(
+    (s) => s.stage === "import_rig"
+      && s.status === "blocked"
+      && (s.detail as { code?: string } | undefined)?.code === "attention_required",
+  );
+  if (!attentionStage) return null;
+  const detail = attentionStage.detail as {
+    code: string;
+    message: string;
+    attentionNodes: import("../domain/types.js").AttentionNode[];
+  };
+  const nodeCount = detail.attentionNodes.length;
+  const sessionAttachHints = detail.attentionNodes
+    .filter((n) => n.sessionName)
+    .map((n) => `tmux attach -t ${n.sessionName}`)
+  const visibleAttachHints = sessionAttachHints.slice(0, 3).join(" ; ");
+  const remainingAttachHintCount = Math.max(0, sessionAttachHints.length - 3);
+  const attachHintText = visibleAttachHints
+    ? `${visibleAttachHints}${remainingAttachHintCount > 0 ? ` ; plus ${remainingAttachHintCount} more listed in attentionNodes` : ""}`
+    : "see `rig ps`";
+  const rigIdDisplay = result.rigId ?? "(rigId unavailable)";
+  return {
+    error: {
+      fact: detail.message,
+      consequence: `Rig ${rigIdDisplay} is created and listable via \`rig ps\`. Sessions are running with startup_status='attention_required'. Tmux panes show the runtime's trust/approval prompt — answering it in-pane completes the launch.`,
+      action: nodeCount === 1
+        ? `Attach to the session and answer the prompt: ${attachHintText}.`
+        : `Attach to each parked session listed in attentionNodes and answer its prompt: ${attachHintText}.`,
+    },
+    attentionNodes: detail.attentionNodes,
+  };
+}
+
 function getDeps(c: { get: (key: string) => unknown }) {
   return {
     bootstrapOrchestrator: c.get("bootstrapOrchestrator" as never) as BootstrapOrchestrator,
@@ -226,6 +276,18 @@ upRoutes.post("/", async (c) => {
           const inventory = getNodeInventory(bootstrapRepo.db, result.rigId);
           const firstRunning = inventory.find((n) => n.canonicalSessionName && n.sessionStatus === "running");
           attachCommand = firstRunning?.tmuxAttachCommand ?? inventory.find((n) => n.canonicalSessionName)?.tmuxAttachCommand ?? null;
+        }
+
+        // OPR.0.3.2.CT — when the partial outcome carries an
+        // attention_required import_rig stage (either the all-attention
+        // path from the instantiator's new outcome variant OR the
+        // mixed launched+attention path the orchestrator routes the
+        // same way), surface a 3-part error so the operator sees the
+        // actionable approve→resume path. The rig + sessions are
+        // PRESERVED on disk; `rig ps` lists them. PRD HG-4.
+        const attentionResponse = buildAttentionResponse(result);
+        if (attentionResponse) {
+          return c.json({ ...result, attachCommand, ...attentionResponse }, 409);
         }
 
         return c.json({ ...result, attachCommand }, 200);

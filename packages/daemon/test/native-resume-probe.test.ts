@@ -221,6 +221,35 @@ describe("native resume probe", () => {
     });
   });
 
+  it("classifies Codex as active when the current TUI appears below an old trust prompt in scrollback", () => {
+    expect(
+      assessNativeResumeProbe({
+        runtime: "codex",
+        paneCommand: "codex-aarch64-a",
+        paneContent: [
+          "> You are in /some/workspace",
+          "",
+          "  Do you trust the contents of this directory? Working with untrusted contents",
+          "",
+          "› 1. Yes, continue",
+          "  2. No, quit",
+          "",
+          "╭────────────────────────────────────────────────────╮",
+          "│ >_ OpenAI Codex (v0.130.0)                         │",
+          "╰────────────────────────────────────────────────────╯",
+          "",
+          "› Write tests for @filename",
+          "",
+          "  gpt-5.5 xhigh fast · Context 0% used · Fast on",
+        ].join("\n"),
+      })
+    ).toEqual({
+      status: "resumed",
+      code: "active_runtime",
+      detail: "Codex is running with an active interactive TUI in the probe pane.",
+    });
+  });
+
   it("classifies Codex update prompts as inconclusive", () => {
     expect(
       assessNativeResumeProbe({

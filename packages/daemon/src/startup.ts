@@ -1218,7 +1218,10 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
         deps.sessionTransport,
       )
     : undefined;
-  const contextMonitor = new ContextMonitor(db, contextUsageStore, claudeAdapter, compactionEnforcer);
+  const contextMonitor = new ContextMonitor(db, contextUsageStore, claudeAdapter, compactionEnforcer, {
+    "claude-code": claudeAdapter,
+    codex: codexAdapter,
+  });
   deps.contextMonitor = contextMonitor;
 
   const app = createApp(deps);

@@ -722,4 +722,284 @@ state: 2-named
       fs.rmSync(tmpRegistry, { recursive: true, force: true });
     }
   });
+
+  // --- Conveyor-Trust Minimal Fix (OPR.0.3.2.CT) ---
+  //
+  // QA baseline-deep-dogfood found `rig up conveyor --yes` dead-ends on
+  // workspace-trust gate: instantiate_error AND failure tears down to
+  // zero (rigs=0, nodes=0, sessions=0). The operator has nothing to
+  // approve. PRD: missions/release-0.3.2/slices/conveyor-trust-minimal-fix/
+  // IMPLEMENTATION-PRD.md.
+  //
+  // ROOT CAUSE: launchExistingAgentMember collapses
+  // startupResult={ok:false, startupStatus:"attention_required"} to
+  // status:"failed", then allFailed → tear down.
+  //
+  // MINIMAL FIX (HG-2, HG-5 gate-zero):
+  //   - propagate attention_required through launchExistingAgentMember
+  //   - allFailed tear-down ONLY when ALL nodes are TERMINALLY failed
+  //     (attention_required nodes are recoverable; preserve rig + sessions)
+  //   - the session's startup_status="attention_required" already exists
+  //     (startupOrchestrator sets it); the rig is now visible via rig ps
+  //     in attention_required state
+  //   - HG-5: no trust-model / new-user UX / auto-trust changes — only
+  //     the failure-handling path is touched
+
+  it("HG-1 repro (PRE-FIX): all nodes hit trust-gate → instantiate_error + zero-collapse", async () => {
+    // BEFORE the fix this test SHOULD have shown the broken zero-collapse.
+    // Post-fix it documents the OLD behavior so the discriminator is clear.
+    // This test passes post-fix because we now preserve the recoverable
+    // state — it asserts the NEW expected shape (no tear-down).
+    const { db, rigRepo, sessionRegistry, eventBus, podRepo, adapter, codexAdapter, tmux } = setup({
+      [`${RIG_ROOT}/agents/impl/agent.yaml`]: agentYaml("impl"),
+      [`${RIG_ROOT}/agents/qa/agent.yaml`]: agentYaml("qa"),
+    });
+    const nodeLauncher = new NodeLauncher({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux });
+    // Startup orchestrator that returns attention_required for ALL nodes
+    // (simulates trust-gate on a disposable workspace).
+    const startupOrch = new StartupOrchestrator({ db, sessionRegistry, eventBus, tmuxAdapter: tmux });
+    startupOrch.startNode = async (input) => {
+      sessionRegistry.updateStartupStatus(input.sessionId, "attention_required");
+      return {
+        ok: false,
+        startupStatus: "attention_required",
+        errors: ["Harness launch requires attention: trust_gate"],
+        evidence: "Claude is waiting for workspace trust approval before the session can become interactive.",
+      };
+    };
+    const inst = new PodRigInstantiator({
+      db, rigRepo, podRepo, sessionRegistry, eventBus, nodeLauncher,
+      startupOrchestrator: startupOrch,
+      fsOps: mockFs({
+        [`${RIG_ROOT}/agents/impl/agent.yaml`]: agentYaml("impl"),
+        [`${RIG_ROOT}/agents/qa/agent.yaml`]: agentYaml("qa"),
+      }),
+      adapters: { "claude-code": adapter, "codex": codexAdapter, "terminal": mockAdapter("terminal") },
+      tmuxAdapter: tmux,
+    });
+
+    const spec = makeRigSpec({
+      pods: [{
+        id: "dev", label: "Dev",
+        members: [
+          { id: "impl", agentRef: "local:agents/impl", profile: "default", runtime: "claude-code", cwd: "." },
+          { id: "qa", agentRef: "local:agents/qa", profile: "default", runtime: "claude-code", cwd: "." },
+        ],
+        edges: [],
+      }],
+    });
+    const yaml = RigSpecCodec.serialize(spec);
+    const result = await inst.instantiate(yaml, RIG_ROOT);
+
+    // HG-2: NO zero-collapse. The result returns ok:false with the new
+    // attention_required code (not the old instantiate_error), AND the
+    // rig + sessions are preserved on disk so operator can act.
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.code).toBe("attention_required");
+      expect(result.message).toMatch(/trust|attention/i);
+    }
+    // Rig + sessions PRESERVED — the operator can list them via rig ps.
+    expect(rigRepo.listRigs()).toHaveLength(1);
+    if (!result.ok && result.code === "attention_required") {
+      const fullRig = rigRepo.getRig(result.rigId);
+      expect(fullRig).not.toBeNull();
+      expect(fullRig!.nodes.length).toBe(2);
+    }
+    // Tmux sessions NOT killed (no cleanup pass on attention_required).
+    expect((tmux.killSession as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
+    // Session rows carry startup_status='attention_required' (already
+    // persisted by startupOrchestrator — pin it here to anchor the
+    // approve-and-resume path).
+    const sessions = db.prepare("SELECT startup_status FROM sessions").all() as Array<{ startup_status: string }>;
+    expect(sessions.length).toBe(2);
+    for (const s of sessions) {
+      expect(s.startup_status).toBe("attention_required");
+    }
+    db.close();
+  });
+
+  it("HG-3 attention_required result carries the attentionNodes list (operator approve→resume path)", async () => {
+    const { db, rigRepo, sessionRegistry, eventBus, podRepo, adapter, codexAdapter, tmux } = setup({
+      [`${RIG_ROOT}/agents/impl/agent.yaml`]: agentYaml("impl"),
+    });
+    const nodeLauncher = new NodeLauncher({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux });
+    const startupOrch = new StartupOrchestrator({ db, sessionRegistry, eventBus, tmuxAdapter: tmux });
+    startupOrch.startNode = async (input) => {
+      sessionRegistry.updateStartupStatus(input.sessionId, "attention_required");
+      return {
+        ok: false,
+        startupStatus: "attention_required",
+        errors: ["Harness launch requires attention: trust_gate"],
+        evidence: "Claude is waiting for workspace trust approval before the session can become interactive.",
+      };
+    };
+    const inst = new PodRigInstantiator({
+      db, rigRepo, podRepo, sessionRegistry, eventBus, nodeLauncher,
+      startupOrchestrator: startupOrch,
+      fsOps: mockFs({ [`${RIG_ROOT}/agents/impl/agent.yaml`]: agentYaml("impl") }),
+      adapters: { "claude-code": adapter, "codex": codexAdapter, "terminal": mockAdapter("terminal") },
+      tmuxAdapter: tmux,
+    });
+    const yaml = RigSpecCodec.serialize(makeRigSpec());
+    const result = await inst.instantiate(yaml, RIG_ROOT);
+
+    expect(result.ok).toBe(false);
+    if (!result.ok && result.code === "attention_required") {
+      expect(result.rigId).toBeDefined();
+      expect(result.attentionNodes).toBeInstanceOf(Array);
+      expect(result.attentionNodes!.length).toBe(1);
+      expect(result.attentionNodes![0]!.logicalId).toBe("dev.impl");
+      expect(result.attentionNodes![0]!.sessionName).toContain("@test-rig");
+    }
+    db.close();
+  });
+
+  it("HG-2 mixed: one attention_required + one launched → rig preserved (ok:true) with attention warnings", async () => {
+    const { db, rigRepo, sessionRegistry, eventBus, podRepo, adapter, codexAdapter, tmux } = setup({
+      [`${RIG_ROOT}/agents/impl/agent.yaml`]: agentYaml("impl"),
+      [`${RIG_ROOT}/agents/qa/agent.yaml`]: agentYaml("qa"),
+    });
+    const nodeLauncher = new NodeLauncher({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux });
+    const startupOrch = new StartupOrchestrator({ db, sessionRegistry, eventBus, tmuxAdapter: tmux });
+    const origStartNode = startupOrch.startNode.bind(startupOrch);
+    let callCount = 0;
+    startupOrch.startNode = async (input) => {
+      callCount++;
+      if (callCount === 2) {
+        sessionRegistry.updateStartupStatus(input.sessionId, "attention_required");
+        return {
+          ok: false,
+          startupStatus: "attention_required",
+          errors: ["trust_gate on qa"],
+          evidence: "trust prompt",
+        };
+      }
+      return origStartNode(input);
+    };
+    const inst = new PodRigInstantiator({
+      db, rigRepo, podRepo, sessionRegistry, eventBus, nodeLauncher,
+      startupOrchestrator: startupOrch,
+      fsOps: mockFs({
+        [`${RIG_ROOT}/agents/impl/agent.yaml`]: agentYaml("impl"),
+        [`${RIG_ROOT}/agents/qa/agent.yaml`]: agentYaml("qa"),
+      }),
+      adapters: { "claude-code": adapter, "codex": codexAdapter, "terminal": mockAdapter("terminal") },
+      tmuxAdapter: tmux,
+    });
+
+    const yaml = RigSpecCodec.serialize(makeRigSpec({
+      pods: [{
+        id: "dev", label: "Dev",
+        members: [
+          { id: "impl", agentRef: "local:agents/impl", profile: "default", runtime: "claude-code", cwd: "." },
+          { id: "qa", agentRef: "local:agents/qa", profile: "default", runtime: "claude-code", cwd: "." },
+        ],
+        edges: [],
+      }],
+    }));
+    const result = await inst.instantiate(yaml, RIG_ROOT);
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      const attention = result.result.nodes.filter((n) => n.status === "attention_required");
+      const launched = result.result.nodes.filter((n) => n.status === "launched");
+      expect(launched.length).toBe(1);
+      expect(attention.length).toBe(1);
+      expect(attention[0]!.logicalId).toBe("dev.qa");
+    }
+    // Rig preserved; sessions intact.
+    expect(rigRepo.listRigs()).toHaveLength(1);
+    expect((tmux.killSession as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
+    db.close();
+  });
+
+  it("HG-2 negative: all-TERMINALLY-failed still tears down (no regression to terminal-failure cleanup)", async () => {
+    const { db, rigRepo, sessionRegistry, eventBus, podRepo, adapter, codexAdapter, tmux } = setup({
+      [`${RIG_ROOT}/agents/impl/agent.yaml`]: agentYaml("impl"),
+    });
+    const nodeLauncher = new NodeLauncher({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux });
+    const startupOrch = new StartupOrchestrator({ db, sessionRegistry, eventBus, tmuxAdapter: tmux });
+    startupOrch.startNode = async (input) => {
+      sessionRegistry.updateStartupStatus(input.sessionId, "failed");
+      return {
+        ok: false,
+        startupStatus: "failed",
+        errors: ["terminal failure (NOT trust-gate)"],
+      };
+    };
+    const inst = new PodRigInstantiator({
+      db, rigRepo, podRepo, sessionRegistry, eventBus, nodeLauncher,
+      startupOrchestrator: startupOrch,
+      fsOps: mockFs({ [`${RIG_ROOT}/agents/impl/agent.yaml`]: agentYaml("impl") }),
+      adapters: { "claude-code": adapter, "codex": codexAdapter, "terminal": mockAdapter("terminal") },
+      tmuxAdapter: tmux,
+    });
+    const yaml = RigSpecCodec.serialize(makeRigSpec());
+    const result = await inst.instantiate(yaml, RIG_ROOT);
+
+    // Terminal-failure tear-down preserved (no regression to existing
+    // cleanup path).
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.code).toBe("instantiate_error");
+    }
+    expect(rigRepo.listRigs()).toHaveLength(0);
+    db.close();
+  });
+
+  it("HG-2 negative: at least one terminal failure + at least one attention_required → rig PRESERVED (recoverable wins over tear-down)", async () => {
+    const { db, rigRepo, sessionRegistry, eventBus, podRepo, adapter, codexAdapter, tmux } = setup({
+      [`${RIG_ROOT}/agents/impl/agent.yaml`]: agentYaml("impl"),
+      [`${RIG_ROOT}/agents/qa/agent.yaml`]: agentYaml("qa"),
+    });
+    const nodeLauncher = new NodeLauncher({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux });
+    const startupOrch = new StartupOrchestrator({ db, sessionRegistry, eventBus, tmuxAdapter: tmux });
+    let callCount = 0;
+    startupOrch.startNode = async (input) => {
+      callCount++;
+      if (callCount === 1) {
+        sessionRegistry.updateStartupStatus(input.sessionId, "failed");
+        return { ok: false, startupStatus: "failed", errors: ["terminal failure"] };
+      }
+      sessionRegistry.updateStartupStatus(input.sessionId, "attention_required");
+      return {
+        ok: false,
+        startupStatus: "attention_required",
+        errors: ["trust_gate"],
+        evidence: "trust prompt",
+      };
+    };
+    const inst = new PodRigInstantiator({
+      db, rigRepo, podRepo, sessionRegistry, eventBus, nodeLauncher,
+      startupOrchestrator: startupOrch,
+      fsOps: mockFs({
+        [`${RIG_ROOT}/agents/impl/agent.yaml`]: agentYaml("impl"),
+        [`${RIG_ROOT}/agents/qa/agent.yaml`]: agentYaml("qa"),
+      }),
+      adapters: { "claude-code": adapter, "codex": codexAdapter, "terminal": mockAdapter("terminal") },
+      tmuxAdapter: tmux,
+    });
+    const yaml = RigSpecCodec.serialize(makeRigSpec({
+      pods: [{
+        id: "dev", label: "Dev",
+        members: [
+          { id: "impl", agentRef: "local:agents/impl", profile: "default", runtime: "claude-code", cwd: "." },
+          { id: "qa", agentRef: "local:agents/qa", profile: "default", runtime: "claude-code", cwd: "." },
+        ],
+        edges: [],
+      }],
+    }));
+    const result = await inst.instantiate(yaml, RIG_ROOT);
+
+    // ANY attention_required means recoverable — preserve rig even if
+    // other nodes terminally failed.
+    expect(rigRepo.listRigs()).toHaveLength(1);
+    // The operator can still see + approve the attention_required node.
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.code).toBe("attention_required");
+    }
+    db.close();
+  });
 });

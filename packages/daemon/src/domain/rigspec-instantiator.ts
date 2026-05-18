@@ -335,7 +335,7 @@ export type MaterializeOutcome =
 export interface LaunchMaterializedNodeResult {
   logicalId: string;
   nodeId: string;
-  status: "launched" | "failed";
+  status: "launched" | "failed" | "attention_required";
   error?: string;
   sessionName?: string;
 }
@@ -668,7 +668,7 @@ export class PodRigInstantiator {
     }
 
     // 5. Create pods + nodes + edges, then launch in topological order
-    const nodeResults: { logicalId: string; status: "launched" | "failed"; error?: string }[] = [];
+    const nodeResults: { logicalId: string; status: "launched" | "failed" | "attention_required"; error?: string; evidence?: string; sessionName?: string }[] = [];
     const nodeIdMap: Record<string, string> = {}; // "pod.member" -> node DB id
     const launchedSessionNames: string[] = []; // Track for orphan cleanup on total failure
     const podInstantiateWarnings: string[] = [];
@@ -794,6 +794,8 @@ export class PodRigInstantiator {
           logicalId: qualifiedId,
           status: launched.status,
           error: launched.error,
+          evidence: launched.evidence,
+          sessionName: launched.sessionName,
         });
       }
 
@@ -821,9 +823,24 @@ export class PodRigInstantiator {
       }
     }
 
-    // Check for total failure — kill orphan tmux sessions and clean up rig
-    const allFailed = nodeResults.length > 0 && nodeResults.every((n) => n.status === "failed");
-    if (allFailed) {
+    // OPR.0.3.2.CT (conveyor-trust-minimal-fix):
+    // Distinguish recoverable attention_required (e.g., workspace trust
+    // gate) from terminal failure. ANY attention_required node means
+    // the rig is operator-recoverable — do NOT tear down. Only when
+    // every node is TERMINALLY failed (status === "failed") does the
+    // tear-down run, preserving the existing failure-cleanup behavior.
+    //
+    // For all-attention_required (no successful launch, no terminal
+    // failure), surface an attention_required outcome that carries
+    // the actionable per-node detail. The route returns a 3-part
+    // error pointing the operator at the approve→resume path. Sessions
+    // remain in startup_status='attention_required' so `rig ps` lists
+    // them and tmux panes are NOT killed.
+    const hasAttention = nodeResults.some((n) => n.status === "attention_required");
+    const hasLaunched = nodeResults.some((n) => n.status === "launched");
+    const allTerminal = nodeResults.length > 0 && nodeResults.every((n) => n.status === "failed");
+
+    if (allTerminal) {
       // Kill orphan tmux sessions
       if (this.deps.tmuxAdapter) {
         for (const sessionName of launchedSessionNames) {
@@ -835,14 +852,56 @@ export class PodRigInstantiator {
       return { ok: false, code: "instantiate_error", message: `all node launches/startups failed — ${details}` };
     }
 
+    if (hasAttention && !hasLaunched) {
+      // All-attention_required path — rig + sessions PRESERVED; no
+      // tear-down. The operator's path: attach to a session via
+      // `tmux attach -t <session>` and answer the runtime prompt. NO
+      // new trust primitive
+      // introduced (HG-5); reuses the runtime's shipped in-pane
+      // trust-grant prompt.
+      const attentionNodes = nodeResults
+        .filter((n) => n.status === "attention_required")
+        .map((n) => ({
+          logicalId: n.logicalId,
+          sessionName: n.sessionName ?? "",
+          evidence: n.evidence,
+          reason: n.error ?? "node awaiting attention",
+        }));
+      // Emit rig.imported so callers see the rig exists; nodes are
+      // attention_required, not "launched", so `rig ps` shows the
+      // correct lifecycle state.
+      try {
+        this.deps.eventBus.emit({ type: "rig.imported", rigId, specName: rigSpec.name, specVersion: rigSpec.version });
+      } catch { /* best-effort */ }
+      return {
+        ok: false,
+        code: "attention_required",
+        message: `${attentionNodes.length} node${attentionNodes.length === 1 ? "" : "s"} require attention before becoming interactive (rig parked, NOT failed; approve and resume to proceed).`,
+        rigId,
+        attentionNodes,
+      };
+    }
+
     // Emit rig.imported
     try {
       this.deps.eventBus.emit({ type: "rig.imported", rigId, specName: rigSpec.name, specVersion: rigSpec.version });
     } catch { /* best-effort */ }
 
+    // Carry sessionName + evidence through to InstantiateResult.nodes
+    // so BootstrapOrchestrator can build AttentionNode[] in the mixed
+    // launched+attention_required path (guard verdict
+    // qitem-20260518082933 BLOCKER 1).
+    const resultNodes = nodeResults.map((n) => ({
+      logicalId: n.logicalId,
+      status: n.status,
+      error: n.error,
+      sessionName: n.sessionName,
+      evidence: n.evidence,
+    }));
+
     return {
       ok: true,
-      result: { rigId, specName: rigSpec.name, specVersion: rigSpec.version, nodes: nodeResults, warnings: podInstantiateWarnings.length > 0 ? podInstantiateWarnings : undefined },
+      result: { rigId, specName: rigSpec.name, specVersion: rigSpec.version, nodes: resultNodes, warnings: podInstantiateWarnings.length > 0 ? podInstantiateWarnings : undefined },
     };
   }
 
@@ -986,7 +1045,7 @@ export class PodRigInstantiator {
     cwdOverride?: string;
     resolveResult?: ReturnType<typeof resolveAgentRef> extends infer T ? T : never;
     configResult?: ReturnType<typeof resolveNodeConfig> extends infer T ? T : never;
-  }): Promise<{ status: "launched" | "failed"; error?: string; sessionName?: string; warnings?: string[] }> {
+  }): Promise<{ status: "launched" | "failed" | "attention_required"; error?: string; evidence?: string; sessionName?: string; warnings?: string[] }> {
     const resolveResult = input.resolveResult ?? resolveAgentRef(input.member.agentRef, input.rigRoot, this.deps.fsOps);
     if (!resolveResult.ok) {
       const msg = resolveResult.code === "validation_failed"
@@ -1215,9 +1274,22 @@ export class PodRigInstantiator {
       }
     }
 
+    // OPR.0.3.2.CT — preserve the attention_required distinction so
+    // the instantiator can leave a recoverable rig + sessions instead
+    // of zero-collapsing. The session row's startup_status was already
+    // persisted by startupOrchestrator.fail() (see startup-orchestrator.ts
+    // lines 223-225, 241-243).
+    if (startupResult.ok) {
+      return {
+        status: "launched",
+        sessionName: canonicalSessionName,
+        warnings: launchResult.warnings,
+      };
+    }
     return {
-      status: startupResult.ok ? "launched" : "failed",
-      error: startupResult.ok ? undefined : startupResult.errors.join("; "),
+      status: startupResult.startupStatus === "attention_required" ? "attention_required" : "failed",
+      error: startupResult.errors.join("; "),
+      evidence: startupResult.evidence,
       sessionName: canonicalSessionName,
       warnings: launchResult.warnings,
     };

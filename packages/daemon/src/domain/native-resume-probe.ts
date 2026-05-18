@@ -126,13 +126,6 @@ export function assessNativeResumeProbe(
         detail: "Codex could not refresh the stored access token; an operator must sign in again before the session can resume.",
       };
     }
-    if (looksLikeCodexTrustPrompt(paneContent)) {
-      return {
-        status: "inconclusive",
-        code: "trust_gate",
-        detail: "Codex is waiting for workspace trust approval before the session can become interactive.",
-      };
-    }
     if (looksLikeCodexModelSelectionPrompt(paneContent)) {
       return {
         status: "inconclusive",
@@ -145,6 +138,13 @@ export function assessNativeResumeProbe(
         status: "resumed",
         code: "active_runtime",
         detail: "Codex is running with an active interactive TUI in the probe pane.",
+      };
+    }
+    if (looksLikeCodexTrustPrompt(paneContent)) {
+      return {
+        status: "inconclusive",
+        code: "trust_gate",
+        detail: "Codex is waiting for workspace trust approval before the session can become interactive.",
       };
     }
     if (paneContent.includes("Update available!") || paneContent.includes("Updating Codex")) {

@@ -937,13 +937,51 @@ export type InstantiateOutcome =
   | { ok: false; code: "preflight_failed"; errors: string[]; warnings: string[] }
   | { ok: false; code: "instantiate_error"; message: string }
   | { ok: false; code: "cycle_error"; message: string }
-  | { ok: false; code: "service_boot_failed"; message: string };
+  | { ok: false; code: "service_boot_failed"; message: string }
+  // OPR.0.3.2.CT (conveyor-trust-minimal-fix):
+  // When every launched node reaches a recoverable attention_required
+  // state (e.g., workspace-trust prompt), do NOT tear the rig down.
+  // The rig + sessions are preserved, listable, and approvable; the
+  // operator's path is "approve trust → resume". `attentionNodes`
+  // carries the actionable per-node detail for the route's 3-part
+  // error response.
+  | {
+      ok: false;
+      code: "attention_required";
+      message: string;
+      rigId: string;
+      attentionNodes: AttentionNode[];
+    };
+
+export interface AttentionNode {
+  logicalId: string;
+  sessionName: string;
+  evidence?: string;
+  reason: string;
+}
 
 export interface InstantiateResult {
   rigId: string;
   specName: string;
   specVersion: string;
-  nodes: { logicalId: string; status: "launched" | "failed"; error?: string }[];
+  // Per-node startup status — `launched` and `failed` are the legacy
+  // terminal states; `attention_required` (OPR.0.3.2.CT) marks a
+  // recoverable parked node awaiting operator action (e.g., trust
+  // approval). The session row's startup_status carries the same
+  // signal so `rig ps` surfaces it.
+  //
+  // `sessionName` + `evidence` carry runtime detail needed by
+  // BootstrapOrchestrator to construct AttentionNode[] for the mixed
+  // launched+attention_required path (the route's 3-part error
+  // response needs sessionName for the tmux-attach hint). Optional
+  // because legacy callers don't supply them on terminal-only paths.
+  nodes: {
+    logicalId: string;
+    status: "launched" | "failed" | "attention_required";
+    error?: string;
+    sessionName?: string;
+    evidence?: string;
+  }[];
   warnings?: string[];
 }
 
@@ -985,7 +1023,11 @@ export interface ExpansionRequest {
 export interface ExpansionNodeOutcome {
   logicalId: string;
   nodeId: string;
-  status: "launched" | "failed";
+  // OPR.0.3.2.CT — `attention_required` is a recoverable parked state
+  // (e.g., workspace-trust prompt awaiting operator action). The
+  // session row's startup_status carries the same signal so `rig ps`
+  // surfaces it. Distinct from `failed` (terminal).
+  status: "launched" | "failed" | "attention_required";
   error?: string;
   sessionName?: string;
 }

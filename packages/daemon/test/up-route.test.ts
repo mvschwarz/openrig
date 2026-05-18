@@ -7,6 +7,7 @@ import type { RigRepository } from "../src/domain/rig-repository.js";
 import type { SessionRegistry } from "../src/domain/session-registry.js";
 import type { SnapshotCapture } from "../src/domain/snapshot-capture.js";
 import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
+import { buildAttentionResponse } from "../src/routes/up.js";
 
 const VALID_SPEC = `
 schema_version: 1
@@ -496,6 +497,301 @@ edges: []
       expect(res.status).toBe(400);
       const body = await res.json();
       expect(body.error).toContain("not a valid rig spec");
+    });
+  });
+
+  // --- Conveyor-Trust Minimal Fix (OPR.0.3.2.CT) — guard verdict
+  //     qitem-20260518082933 BLOCKER 2: HG-4 route response shape must
+  //     be pinned by tests. buildAttentionResponse is the pure
+  //     helper that constructs the 3-part error from a bootstrap
+  //     result with a blocked/attention_required import_rig stage; the
+  //     route returns 409 with that body. These tests pin the shape
+  //     without needing the full daemon harness.
+
+  describe("OPR.0.3.2.CT BLOCKER-2: HG-4 3-part error shape", () => {
+    it("returns null when no import_rig stage is blocked/attention_required (normal partial path)", () => {
+      const result = {
+        rigId: "rig-1",
+        stages: [
+          { stage: "resolve_spec", status: "ok" },
+          { stage: "import_rig", status: "ok", detail: { rigId: "rig-1", nodes: [] } },
+        ],
+      };
+      expect(buildAttentionResponse(result)).toBeNull();
+    });
+
+    it("returns null on a 'failed' import_rig stage (no attention_required code)", () => {
+      const result = {
+        rigId: "rig-1",
+        stages: [
+          { stage: "import_rig", status: "failed", detail: { code: "instantiate_error" } },
+        ],
+      };
+      expect(buildAttentionResponse(result)).toBeNull();
+    });
+
+    it("HG-4: blocked + attention_required stage → fact/consequence/action with attentionNodes", () => {
+      const result = {
+        rigId: "rig-conveyor-1",
+        stages: [
+          {
+            stage: "import_rig",
+            status: "blocked",
+            detail: {
+              code: "attention_required",
+              message: "1 node requires attention before becoming interactive (rig parked, NOT failed; approve and resume to proceed).",
+              attentionNodes: [
+                { logicalId: "dev.impl", sessionName: "dev-impl@conveyor", evidence: "trust prompt", reason: "trust_gate" },
+              ],
+            },
+          },
+        ],
+      };
+      const r = buildAttentionResponse(result);
+      expect(r).not.toBeNull();
+      expect(r!.error.fact).toMatch(/requires attention/i);
+      expect(r!.error.consequence).toMatch(/rig-conveyor-1/);
+      expect(r!.error.consequence).toMatch(/rig ps/);
+      expect(r!.error.consequence).toMatch(/attention_required/);
+      expect(r!.error.action).toMatch(/tmux attach -t dev-impl@conveyor/);
+      expect(r!.error.action).not.toMatch(/rig setup --cwd/);
+      // Singular phrasing for a 1-node case
+      expect(r!.error.action).toMatch(/^Attach to the session/);
+      expect(r!.attentionNodes).toHaveLength(1);
+      expect(r!.attentionNodes[0]!.logicalId).toBe("dev.impl");
+    });
+
+    it("HG-4: multi-node action message uses plural phrasing + lists multiple tmux attach hints", () => {
+      const result = {
+        rigId: "rig-conveyor-2",
+        stages: [
+          {
+            stage: "import_rig",
+            status: "blocked",
+            detail: {
+              code: "attention_required",
+              message: "3 nodes require attention before becoming interactive.",
+              attentionNodes: [
+                { logicalId: "dev.impl", sessionName: "dev-impl@conveyor", reason: "trust_gate" },
+                { logicalId: "dev.qa", sessionName: "dev-qa@conveyor", reason: "trust_gate" },
+                { logicalId: "dev.review", sessionName: "dev-review@conveyor", reason: "trust_gate" },
+              ],
+            },
+          },
+        ],
+      };
+      const r = buildAttentionResponse(result);
+      expect(r).not.toBeNull();
+      // Plural phrasing
+      expect(r!.error.action).toMatch(/^Attach to each parked session/);
+      // First 3 hints listed
+      expect(r!.error.action).toContain("tmux attach -t dev-impl@conveyor");
+      expect(r!.error.action).toContain("tmux attach -t dev-qa@conveyor");
+      expect(r!.error.action).toContain("tmux attach -t dev-review@conveyor");
+      expect(r!.attentionNodes).toHaveLength(3);
+    });
+
+    it("HG-4: multi-node action message points to attentionNodes when attach hints are abbreviated", () => {
+      const result = {
+        rigId: "rig-conveyor-4",
+        stages: [
+          {
+            stage: "import_rig",
+            status: "blocked",
+            detail: {
+              code: "attention_required",
+              message: "4 nodes require attention before becoming interactive.",
+              attentionNodes: [
+                { logicalId: "intake.lead", sessionName: "intake-lead@conveyor", reason: "trust_gate" },
+                { logicalId: "plan.planner", sessionName: "plan-planner@conveyor", reason: "trust_gate" },
+                { logicalId: "build.builder", sessionName: "build-builder@conveyor", reason: "trust_gate" },
+                { logicalId: "review.reviewer", sessionName: "review-reviewer@conveyor", reason: "trust_gate" },
+              ],
+            },
+          },
+        ],
+      };
+      const r = buildAttentionResponse(result);
+      expect(r).not.toBeNull();
+      expect(r!.error.action).toMatch(/^Attach to each parked session listed in attentionNodes/);
+      expect(r!.error.action).toContain("tmux attach -t intake-lead@conveyor");
+      expect(r!.error.action).toContain("tmux attach -t plan-planner@conveyor");
+      expect(r!.error.action).toContain("tmux attach -t build-builder@conveyor");
+      expect(r!.error.action).toContain("plus 1 more listed in attentionNodes");
+      expect(r!.error.action).not.toContain("review-reviewer@conveyor");
+      expect(r!.attentionNodes).toHaveLength(4);
+    });
+
+    it("HG-4: when no sessionName is present on any node, action falls back to 'see rig ps' (defense)", () => {
+      const result = {
+        rigId: "rig-conveyor-3",
+        stages: [
+          {
+            stage: "import_rig",
+            status: "blocked",
+            detail: {
+              code: "attention_required",
+              message: "1 node requires attention.",
+              attentionNodes: [
+                { logicalId: "dev.impl", sessionName: "", reason: "trust_gate" },
+              ],
+            },
+          },
+        ],
+      };
+      const r = buildAttentionResponse(result);
+      expect(r!.error.action).toContain("see `rig ps`");
+    });
+
+    it("HG-4: result without rigId still produces a valid response (defense)", () => {
+      const result = {
+        stages: [
+          {
+            stage: "import_rig",
+            status: "blocked",
+            detail: {
+              code: "attention_required",
+              message: "1 node requires attention.",
+              attentionNodes: [
+                { logicalId: "dev.impl", sessionName: "dev-impl@x", reason: "trust_gate" },
+              ],
+            },
+          },
+        ],
+      };
+      const r = buildAttentionResponse(result);
+      expect(r).not.toBeNull();
+      expect(r!.error.consequence).toContain("(rigId unavailable)");
+    });
+  });
+
+  // OPR.0.3.2.CT — route-level POST /api/up discriminator
+  //
+  // Guard re-verify (qitem-20260518083805) BLOCKER: the prior
+  // forward-fix added pure helper tests on buildAttentionResponse,
+  // but those would still pass even if the route stopped calling
+  // the helper or dropped 409. This test exercises the real route
+  // by stubbing bootstrapOrchestrator.bootstrap with a
+  // partial+blocked+attention result; it fails red if up.ts returns
+  // 200 (normal partial path) or 201 (completed path) instead of
+  // 409 with a 3-part body.
+  describe("OPR.0.3.2.CT BLOCKER-2 (route-level): POST /api/up surfaces 409 with 3-part body on attention_required partial", () => {
+    it("attention_required partial → 409 with error.fact / error.consequence / error.action / attentionNodes", async () => {
+      // Build a fresh app instance so we can monkey-patch the
+      // orchestrator without leaking state into other tests.
+      db.close();
+      const freshDb = createFullTestDb();
+      // Use real-fs upRouter so the spec file we write is resolvable.
+      const setup = createTestApp(freshDb, {
+        upRouterFsOps: {
+          exists: (p: string) => fs.existsSync(p),
+          readFile: (p: string) => fs.readFileSync(p, "utf-8"),
+          readHead: (p: string, n: number) => {
+            const fd = fs.openSync(p, "r");
+            try {
+              const buf = Buffer.alloc(n);
+              const bytes = fs.readSync(fd, buf, 0, n, 0);
+              return buf.subarray(0, bytes);
+            } finally {
+              fs.closeSync(fd);
+            }
+          },
+        },
+      });
+      const freshApp = setup.app;
+      const bootstrapOrch = setup.bootstrapOrchestrator;
+
+      // Write a valid pod spec file so the route's pre-bootstrap
+      // resolution path succeeds and reaches the bootstrap() call.
+      const podSpecYaml = `
+version: "0.2"
+name: conveyor-attention-route-test
+pods:
+  - id: dev
+    label: Dev
+    members:
+      - id: impl
+        agent_ref: "local:agents/impl"
+        profile: default
+        runtime: claude-code
+        cwd: .
+    edges: []
+edges: []
+`.trim();
+      const specPath = path.join(tmpDir, "attention-route-spec.yaml");
+      fs.writeFileSync(specPath, podSpecYaml);
+
+      // Stub the orchestrator's bootstrap to emit the
+      // partial+blocked+attention shape we expect from a real
+      // trust-gated launch. The route MUST translate this to 409.
+      const stubResult = {
+        runId: "run-stub-1",
+        status: "partial" as const,
+        rigId: "rig-stub-1",
+        stages: [
+          { stage: "resolve_spec" as const, status: "ok" as const, detail: {} },
+          {
+            stage: "import_rig" as const,
+            status: "blocked" as const,
+            detail: {
+              code: "attention_required",
+              message: "1 node requires attention before becoming interactive (rig parked, NOT failed; approve and resume to proceed).",
+              rigId: "rig-stub-1",
+              specName: "conveyor-attention-route-test",
+              nodes: [{ logicalId: "dev.impl", status: "attention_required" as const, sessionName: "dev-impl@conveyor-attention-route-test", evidence: "trust prompt" }],
+              attentionNodes: [
+                { logicalId: "dev.impl", sessionName: "dev-impl@conveyor-attention-route-test", evidence: "trust prompt", reason: "trust_gate" },
+              ],
+            },
+          },
+        ],
+        errors: ["1 node requires attention before becoming interactive (rig parked, NOT failed; approve and resume to proceed)."],
+        warnings: [],
+      };
+      const origBootstrap = bootstrapOrch.bootstrap.bind(bootstrapOrch);
+      bootstrapOrch.bootstrap = (async () => stubResult) as typeof bootstrapOrch.bootstrap;
+      // Also stub release() so we don't try to release an unknown
+      // sourceRef key in the orchestrator's internal map.
+      const origRelease = bootstrapOrch.release.bind(bootstrapOrch);
+      bootstrapOrch.release = (() => undefined) as typeof bootstrapOrch.release;
+
+      try {
+        const res = await freshApp.request("/api/up", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ sourceRef: specPath }),
+        });
+
+        // BLOCKER-2 from re-verify: route MUST return 409 (not 200
+        // partial-success, not 201 completed).
+        expect(res.status).toBe(409);
+        const body = await res.json();
+        // HG-4 3-part error shape.
+        expect(body.error).toBeDefined();
+        expect(body.error.fact).toMatch(/require[s]? attention/i);
+        expect(body.error.consequence).toMatch(/rig-stub-1/);
+        expect(body.error.consequence).toMatch(/rig ps/);
+        expect(body.error.action).toMatch(/tmux attach -t dev-impl@conveyor-attention-route-test/);
+        expect(body.error.action).not.toMatch(/rig setup --cwd/);
+        // attentionNodes array carried through to operator
+        expect(body.attentionNodes).toBeInstanceOf(Array);
+        expect(body.attentionNodes).toHaveLength(1);
+        expect(body.attentionNodes[0].logicalId).toBe("dev.impl");
+        // The bootstrap's partial result still carries the rigId
+        // for `rig ps` lookups
+        expect(body.rigId).toBe("rig-stub-1");
+        // status remains "partial" so downstream tooling can branch
+        expect(body.status).toBe("partial");
+      } finally {
+        bootstrapOrch.bootstrap = origBootstrap;
+        bootstrapOrch.release = origRelease;
+        freshDb.close();
+      }
+      // Restore db so afterEach's close() doesn't double-close —
+      // but afterEach closes the original `db` which we already
+      // closed above. Replace it with a no-op stub for the rest of
+      // teardown.
+      db = { close: () => undefined } as unknown as Database.Database;
     });
   });
 });

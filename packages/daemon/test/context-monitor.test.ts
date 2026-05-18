@@ -355,6 +355,37 @@ describe("ContextMonitor", () => {
     expect(refreshed.startup_status).toBe("failed");
   });
 
+  it("pollOnce normalizes stale Codex attention_required state after the trust prompt is cleared", async () => {
+    const rig = rigRepo.createRig("test-rig-codex-trust");
+    const node = rigRepo.addNode(rig.id, "dev.qa", { runtime: "codex", cwd: "/project" });
+    const session = sessionRegistry.registerSession(node.id, "dev-qa-trust@test");
+    db.prepare("UPDATE sessions SET status = 'running', startup_status = 'attention_required', resume_token = NULL WHERE id = ?")
+      .run(session.id);
+
+    const codexReadySpy = vi.fn(async (): Promise<ReadinessResult> => ({ ready: true }));
+    monitor = new ContextMonitor(db, store, {
+      ensureContextCollector: ensureContextCollectorSpy,
+      checkReady: checkReadySpy,
+    }, undefined, {
+      "claude-code": { checkReady: checkReadySpy },
+      codex: { checkReady: codexReadySpy },
+    });
+
+    await monitor.pollOnce();
+
+    const refreshed = db.prepare("SELECT startup_status, startup_completed_at FROM sessions WHERE id = ?").get(session.id) as {
+      startup_status: string;
+      startup_completed_at: string | null;
+    };
+    expect(refreshed.startup_status).toBe("ready");
+    expect(refreshed.startup_completed_at).toBeTruthy();
+    expect(codexReadySpy).toHaveBeenCalledWith(expect.objectContaining({
+      nodeId: session.nodeId,
+      tmuxSession: "dev-qa-trust@test",
+      cwd: "/project",
+    }));
+  });
+
   it("pollOnce does not overwrite pending Claude startup state", async () => {
     const { sessionName, session } = (() => {
       const rig = rigRepo.createRig("test-rig-6");
