@@ -88,6 +88,75 @@ export function BundleInspector() {
             </>
           )}
 
+          {/* Item 1 / slice-05: Provenance block (rendered when bundle carries it) */}
+          {result.manifest.provenance && (
+            <>
+              <h3 className="text-headline-md uppercase mb-spacing-3">PROVENANCE</h3>
+              <div className="card-dark p-spacing-4 mb-spacing-4 space-y-spacing-1" data-testid="provenance-block">
+                {result.manifest.provenance.createdAt && (
+                  <div className="text-label-sm font-mono" data-testid="provenance-createdAt">
+                    <span className="text-foreground-muted-on-dark">Created: </span>{result.manifest.provenance.createdAt}
+                  </div>
+                )}
+                {result.manifest.provenance.sourceHost && (
+                  <div className="text-label-sm font-mono" data-testid="provenance-sourceHost">
+                    <span className="text-foreground-muted-on-dark">Host: </span>{result.manifest.provenance.sourceHost}
+                  </div>
+                )}
+                {result.manifest.provenance.authorSession && (
+                  <div className="text-label-sm font-mono" data-testid="provenance-authorSession">
+                    <span className="text-foreground-muted-on-dark">Author: </span>{result.manifest.provenance.authorSession}
+                  </div>
+                )}
+                {result.manifest.provenance.sourceRigName && (
+                  <div className="text-label-sm font-mono" data-testid="provenance-sourceRigName">
+                    <span className="text-foreground-muted-on-dark">Rig: </span>{result.manifest.provenance.sourceRigName}
+                    {result.manifest.provenance.sourceRigId && (
+                      <span className="text-foreground-muted-on-dark"> ({result.manifest.provenance.sourceRigId})</span>
+                    )}
+                  </div>
+                )}
+                {(result.manifest.provenance.daemonVersion || result.manifest.provenance.cliVersion) && (
+                  <div className="text-label-sm font-mono" data-testid="provenance-versions">
+                    <span className="text-foreground-muted-on-dark">Built with: </span>
+                    {result.manifest.provenance.daemonVersion && <>daemon {result.manifest.provenance.daemonVersion}</>}
+                    {result.manifest.provenance.daemonVersion && result.manifest.provenance.cliVersion && " / "}
+                    {result.manifest.provenance.cliVersion && <>cli {result.manifest.provenance.cliVersion}</>}
+                  </div>
+                )}
+                {result.manifest.provenance.notes && (
+                  <div className="text-label-sm font-mono whitespace-pre-wrap mt-spacing-2" data-testid="provenance-notes">
+                    <span className="text-foreground-muted-on-dark">Notes: </span>{result.manifest.provenance.notes}
+                  </div>
+                )}
+              </div>
+            </>
+          )}
+
+          {/* Item 2 / slice-05: Compatibility block (rendered when bundle carries it). Live "compatible against this daemon" comparison is deferred — UI surfaces the bundle's stated minimums; the install-time check at /api/bundles/install enforces actual compatibility with the running daemon. */}
+          {result.manifest.compatibility && (
+            <>
+              <h3 className="text-headline-md uppercase mb-spacing-3">COMPATIBILITY</h3>
+              <div className="card-dark p-spacing-4 mb-spacing-4 space-y-spacing-1" data-testid="compatibility-block">
+                {result.manifest.compatibility.minDaemonVersion && (
+                  <div className="text-label-sm font-mono" data-testid="compatibility-minDaemonVersion">
+                    <span className="text-foreground-muted-on-dark">Min daemon: </span>{result.manifest.compatibility.minDaemonVersion}
+                  </div>
+                )}
+                {result.manifest.compatibility.minCliVersion && (
+                  <div className="text-label-sm font-mono" data-testid="compatibility-minCliVersion">
+                    <span className="text-foreground-muted-on-dark">Min CLI: </span>{result.manifest.compatibility.minCliVersion}
+                  </div>
+                )}
+                {result.manifest.compatibility.schemaVersion !== undefined && (
+                  <div className="text-label-sm font-mono" data-testid="compatibility-schemaVersion">
+                    <span className="text-foreground-muted-on-dark">Schema: </span>v{result.manifest.compatibility.schemaVersion}
+                  </div>
+                )}
+              </div>
+            </>
+          )}
+
           {/* Per-file integrity */}
           {result.integrityResult && (
             <>

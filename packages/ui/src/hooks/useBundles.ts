@@ -1,5 +1,24 @@
 import { useMutation } from "@tanstack/react-query";
 
+/** Item 1 / slice-05: provenance metadata surfaced by /api/bundles/inspect (camelCase contract per both v1 + v2 routes). */
+export interface InspectProvenance {
+  createdAt?: string;
+  sourceHost?: string;
+  authorSession?: string;
+  sourceRigId?: string;
+  sourceRigName?: string;
+  daemonVersion?: string;
+  cliVersion?: string;
+  notes?: string;
+}
+
+/** Item 2 / slice-05: compatibility block surfaced by /api/bundles/inspect (camelCase contract). */
+export interface InspectCompatibility {
+  minDaemonVersion?: string;
+  minCliVersion?: string;
+  schemaVersion?: number;
+}
+
 export interface InspectResult {
   manifest: {
     name: string;
@@ -8,6 +27,10 @@ export interface InspectResult {
     schemaVersion?: number;
     packages?: Array<{ name: string; version: string; path: string }>;
     agents?: Array<{ name: string; version: string; path: string }>;
+    /** Item 1 provenance block (when bundle carries it). */
+    provenance?: InspectProvenance;
+    /** Item 2 compatibility block (when bundle carries it). */
+    compatibility?: InspectCompatibility;
   };
   digestValid: boolean;
   integrityResult: { passed: boolean; mismatches: string[]; missing: string[]; extra: string[]; errors: string[] };
