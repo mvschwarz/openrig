@@ -795,6 +795,62 @@ describe("PodBundleManifest validation", () => {
     expect(result.errors.some((e) => e.includes("compatibility.min_daemon_version"))).toBe(true);
   });
 
+  // -- Item 6 skills block tests for v2 (slice-05 Checkpoint 7.1) --
+
+  it("v2: missing skills block passes validation (backward compat)", () => {
+    const raw = {
+      schema_version: 2, name: "no-skills", version: "1.0",
+      created_at: "2026-05-18T00:00:00Z", rig_spec: "rig.yaml",
+      agents: [{ name: "impl", version: "1.0", path: "agents/impl", original_ref: "local:agents/impl", hash: "abc", import_entries: [] }],
+    };
+    const result = validatePodBundleManifest(raw);
+    expect(result.valid).toBe(true);
+  });
+
+  it("v2: skills as string array passes validation", () => {
+    const raw = {
+      schema_version: 2, name: "with-skills", version: "1.0",
+      created_at: "2026-05-18T00:00:00Z", rig_spec: "rig.yaml",
+      agents: [{ name: "impl", version: "1.0", path: "agents/impl", original_ref: "local:agents/impl", hash: "abc", import_entries: [] }],
+      skills: ["skills/foo/SKILL.md", "skills/bar/SKILL.md"],
+    };
+    const result = validatePodBundleManifest(raw);
+    expect(result.valid).toBe(true);
+  });
+
+  it("v2: unsafe skill path rejected", () => {
+    const raw = {
+      schema_version: 2, name: "bad-skills", version: "1.0",
+      created_at: "2026-05-18T00:00:00Z", rig_spec: "rig.yaml",
+      agents: [{ name: "impl", version: "1.0", path: "agents/impl", original_ref: "local:agents/impl", hash: "abc", import_entries: [] }],
+      skills: ["../escape/skill.md"],
+    };
+    const result = validatePodBundleManifest(raw);
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.includes("skills[0]") && e.includes("not safe"))).toBe(true);
+  });
+
+  it("v2: round-trip preserves skills through serialize -> parse", () => {
+    const manifest: PodBundleManifest = {
+      schemaVersion: 2, name: "rt-skills-v2", version: "2.0",
+      createdAt: "2026-05-18T00:00:00Z", rigSpec: "rig.yaml",
+      agents: [{
+        name: "impl", version: "1.0", path: "agents/impl",
+        originalRef: "local:agents/impl", hash: "def",
+        importEntries: [],
+      }],
+      skills: ["skills/v2-foo/SKILL.md", "skills/v2-bar/SKILL.md"],
+    };
+    const yaml = serializePodBundleManifest(manifest);
+    expect(yaml).toContain("skills:");
+    expect(yaml).toContain("skills/v2-foo/SKILL.md");
+    const parsed = parsePodBundleManifest(yaml);
+    const validation = validatePodBundleManifest(parsed);
+    expect(validation.valid).toBe(true);
+    const m = parsed as Record<string, unknown>;
+    expect(m["skills"]).toEqual(["skills/v2-foo/SKILL.md", "skills/v2-bar/SKILL.md"]);
+  });
+
   it("v2: round-trip preserves compatibility through serialize -> parse", () => {
     const manifest: PodBundleManifest = {
       schemaVersion: 2, name: "rt-compat", version: "2.0",

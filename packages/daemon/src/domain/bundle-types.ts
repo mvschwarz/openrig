@@ -68,6 +68,49 @@ function provenanceToYamlRecord(p: BundleProvenance): Record<string, unknown> {
 }
 
 /**
+ * Cross-primitive bundling — Item 6 / slice-05 Checkpoint 7.1.
+ *
+ * Manifest may optionally declare typed sibling primitives the bundle should
+ * route to their respective libraries on install. v0 ships the `skills` kind
+ * (Checkpoint 7.1). Plugins + workflow_specs + context_packs + agent_images
+ * land additively in subsequent checkpoints as their libraries are reachable.
+ *
+ * PRD §Item 6: bundles list these alongside the existing rig + agents +
+ * packages fields (no `contents:` re-grouping — that would be a schema
+ * reorg violating the no-bump constraint). Each kind is an optional top-
+ * level field; missing kinds keep backward compat.
+ */
+
+/** Validate optional skills[] block. Appends to errors if present-but-malformed. */
+function validateSkillsBlock(raw: unknown, errors: string[]): void {
+  if (raw === undefined) return;
+  if (!Array.isArray(raw)) {
+    errors.push("skills must be an array");
+    return;
+  }
+  for (let i = 0; i < raw.length; i++) {
+    const entry = raw[i];
+    if (typeof entry !== "string") {
+      errors.push(`skills[${i}] must be a string`);
+      continue;
+    }
+    if (!isRelativeSafePath(entry)) {
+      errors.push(`skills[${i}] path is not safe: '${entry}'`);
+    }
+  }
+}
+
+/** Normalize raw skills[] block (defensive copy + string filter). */
+function normalizeSkillsBlock(raw: unknown): string[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const result: string[] = [];
+  for (const entry of raw) {
+    if (typeof entry === "string" && entry.length > 0) result.push(entry);
+  }
+  return result.length > 0 ? result : undefined;
+}
+
+/**
  * Compatibility block — operator-declared install-time requirements for a
  * bundle artifact. All fields optional; missing block keeps backward compat
  * (bundles install unchanged). Install-time version check (Item 2 Checkpoint
@@ -179,6 +222,8 @@ export interface PodBundleManifest {
   integrity?: BundleIntegrity;
   provenance?: BundleProvenance;
   compatibility?: BundleCompatibility;
+  /** Item 6 cross-primitive bundling: skill paths to route to the operator skills library on install. */
+  skills?: string[];
 }
 
 export function validatePodBundleManifest(raw: unknown): { valid: boolean; errors: string[] } {
@@ -207,6 +252,7 @@ export function validatePodBundleManifest(raw: unknown): { valid: boolean; error
 
   validateProvenanceBlock(m["provenance"], errors);
   validateCompatibilityBlock(m["compatibility"], errors);
+  validateSkillsBlock(m["skills"], errors);
 
   return { valid: errors.length === 0, errors };
 }
@@ -237,6 +283,7 @@ export function serializePodBundleManifest(manifest: PodBundleManifest): string 
   if (manifest.integrity) doc["integrity"] = { algorithm: manifest.integrity.algorithm, files: manifest.integrity.files };
   if (manifest.provenance) doc["provenance"] = provenanceToYamlRecord(manifest.provenance);
   if (manifest.compatibility) doc["compatibility"] = compatibilityToYamlRecord(manifest.compatibility);
+  if (manifest.skills && manifest.skills.length > 0) doc["skills"] = manifest.skills;
   return stringifyYaml(doc);
 }
 
@@ -274,6 +321,8 @@ export interface LegacyBundleManifest {
   integrity?: BundleIntegrity;
   provenance?: BundleProvenance;
   compatibility?: BundleCompatibility;
+  /** Item 6 cross-primitive bundling: skill paths to route to the operator skills library on install. */
+  skills?: string[];
 }
 
 /** Validation options */
@@ -366,6 +415,7 @@ export function validateLegacyBundleManifest(
 
   validateProvenanceBlock(m["provenance"], errors);
   validateCompatibilityBlock(m["compatibility"], errors);
+  validateSkillsBlock(m["skills"], errors);
 
   return { valid: errors.length === 0, errors };
 }
@@ -414,6 +464,9 @@ export function normalizeLegacyBundleManifest(raw: unknown): LegacyBundleManifes
   const compatibility = normalizeCompatibilityBlock(m["compatibility"]);
   if (compatibility) result.compatibility = compatibility;
 
+  const skills = normalizeSkillsBlock(m["skills"]);
+  if (skills) result.skills = skills;
+
   return result;
 }
 
@@ -444,6 +497,8 @@ export function serializeLegacyBundleManifest(manifest: LegacyBundleManifest): s
   if (manifest.provenance) doc["provenance"] = provenanceToYamlRecord(manifest.provenance);
 
   if (manifest.compatibility) doc["compatibility"] = compatibilityToYamlRecord(manifest.compatibility);
+
+  if (manifest.skills && manifest.skills.length > 0) doc["skills"] = manifest.skills;
 
   return stringifyYaml(doc);
 }
