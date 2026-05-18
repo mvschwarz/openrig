@@ -53,7 +53,7 @@ states.
 
 **Failed resume is FAILED loudly.** No automatic fresh fallback. Fresh
 launch is **explicit follow-up only.** This is enforced architecturally
-at the daemon level (per `architecture.md` §7 rule 15).
+at the daemon level (per `docs/as-built/architecture/architecture-rules-and-event-system.md` rule 15).
 
 The locked restore-outcome vocabulary:
 
@@ -113,4 +113,4 @@ different claims; don't conflate.
 - `openrig-user` skill — CLI surface for `rig up / down / restore / etc.`
 - `openrig-operator` skill — operator-level discipline for OpenRig itself
 - `seat-continuity-and-handover` skill — occupant-creation modes for restore (`resume` / `rebuild` / `fresh` / `failed`)
-- `openrig/docs/as-built/architecture.md` (product reference doc) — daemon enforcement of restore-honesty rule
+- `openrig/docs/as-built/architecture/lifecycle-snapshot-restore.md` (product reference doc) — daemon enforcement of restore-honesty rule

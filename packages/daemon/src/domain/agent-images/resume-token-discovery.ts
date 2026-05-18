@@ -7,7 +7,7 @@
 // fork without snapshot side effect).
 //
 // Honest failure mode: returns null when no token is available rather
-// than fabricating one (architecture.md § Resume honesty).
+// than fabricating one (docs/as-built/architecture/adapters-and-runtimes.md § Resume honesty).
 
 import type Database from "better-sqlite3";
 

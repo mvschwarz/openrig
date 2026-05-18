@@ -1104,7 +1104,8 @@ export class PodRigInstantiator {
     } else if (input.member.sessionSource?.mode === "agent_image") {
       // PL-016 Item 4: agent_image → resolve via library + dispatch
       // through the native-fork code path so nativeResumeProbe
-      // semantics are preserved (architecture.md § Resume honesty).
+      // semantics are preserved
+      // (docs/as-built/architecture/adapters-and-runtimes.md § Resume honesty).
       const library = this.deps.agentImageLibrary;
       if (!library) {
         return {

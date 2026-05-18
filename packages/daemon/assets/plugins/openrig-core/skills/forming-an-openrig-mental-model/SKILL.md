@@ -245,7 +245,7 @@ For real depth, these are the load-bearing canonical docs:
 
 | Reference | What it covers |
 |---|---|
-| `openrig/docs/as-built/architecture.md` | Daemon architecture; system overview; package boundaries |
+| `openrig/docs/as-built/README.md` | As-built map of territory — daemon architecture, system overview, package boundaries; routes to the 13 `architecture/` + 4 `ui/` modules via `codemap.md` |
 | `openrig/docs/as-built/cli-reference.md` | The full `rig` CLI surface with all subcommands and flags |
 | `openrig/docs/reference/rig-spec.md` | The RigSpec YAML format — pods, members, edges, all fields |
 | `openrig/docs/reference/agent-spec.md` | The AgentSpec YAML format — resources, profiles, imports |

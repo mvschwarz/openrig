@@ -8,7 +8,8 @@
 // Resume-token discovery routes through resume-token-discovery.ts so
 // the same logic is shared with the /api/agent-images/fork route.
 //
-// Failure modes surface honest errors per architecture.md § Resume
+// Failure modes surface honest errors per
+// docs/as-built/architecture/adapters-and-runtimes.md § Resume
 // honesty (no fabricated tokens; no auto-fallback to fresh).
 
 import type Database from "better-sqlite3";

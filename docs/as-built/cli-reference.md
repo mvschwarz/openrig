@@ -1,3 +1,18 @@
+---
+kind: as-built
+title: OpenRig CLI Reference — Full rig Command Surface
+status: active
+topics: [runtime-control, agent-runtime]
+domains: [operating-advisor, engineering-advisor, orchestrator]
+applies-when: |
+  Need the exact rig CLI surface — command groups, subcommands, flags,
+  JSON output, cross-host, coordination primitives.
+siblings: [README.md, architecture/daemon-core.md]
+prerequisite-reads: [README.md]
+last-verified-against-source: 7eaf524c
+last-updated: 2026-05-16
+---
+
 # OpenRig CLI Reference
 
 Verified against the shipped CLI on 2026-05-15 (v0.3.1) using:
@@ -11,7 +26,7 @@ This document reflects the current `rig` surface as shipped. Where live help tex
 ## Overview
 
 - Binary: `rig`
-- Top-level command groups: `57`
+- Top-level command groups: `58`
 - Output mode: human-readable by default; many commands also support `--json`
 - Daemon-backed commands fail when the daemon is stopped or unhealthy; `daemon`, `config`, `preflight`, and `doctor` also have local responsibilities
 - Managed apps are launched through the normal spec/library surfaces; the canonical shipped example is `rig up secrets-manager`
@@ -78,6 +93,7 @@ This document reflects the current `rig` surface as shipped. Where live help tex
 | `context-pack` | Browse, preview, send, and install operator-authored context packs |
 | `workspace` | Workspace primitive — typed-kind tooling (frontmatter validation) |
 | `plugin` | Inspect plugins (read-only) — list, show, used-by, validate |
+| `scope` | Scope tree primitive — missions, slices, sub-slices |
 
 ## Core Daemon and System Commands
 
@@ -868,7 +884,7 @@ Notes:
 
 Mission Control is an integrated product UI inside the existing shell, NOT a new `rig` command. Per PL-005 PRD line 301: "no new commands at v0; the `rig ps --nodes --json` surface is consumed read-only."
 
-Mission Control is reached via the product UI at the `/mission-control` route. The HTTP API surface (`/api/mission-control/*`) is documented in `docs/as-built/architecture.md` § Mission Control / Queue Observability. The 7 verbs (`approve`, `deny`, `route`, `annotate`, `hold`, `drop`, `handoff`) execute via `POST /api/mission-control/action`; the 7 views are read via `GET /api/mission-control/views/:view-name`.
+Mission Control is reached via the product UI at the `/mission-control` route. The HTTP API surface (`/api/mission-control/*`) is documented in `docs/as-built/architecture/mission-control.md`. The 7 verbs (`approve`, `deny`, `route`, `annotate`, `hold`, `drop`, `handoff`) execute via `POST /api/mission-control/action`; the 7 views are read via `GET /api/mission-control/views/:view-name`.
 
 Mission Control consumes `rig ps --nodes --json` for fleet roll-up where the canonical CLI source is preferred. Cross-CLI-version drift is handled per the 4 sub-clauses of PRD § Runtime/Source Drift Acceptance: missing fields surface as honest "field unavailable on this rig's daemon version" placeholders; once-per-session-per-rig logging avoids spam; the fleet view shows a top-level "rigs running stale CLI" indicator.
 
@@ -945,6 +961,40 @@ Notes:
 - Plugin discovery aggregates `$OPENRIG_HOME/plugins/` (vendored at runtime by the operator) with the daemon's bundled plugin cache.
 - `openrig-core` ships bundled with the daemon (11 skills). Additional plugins (`gstack` — 45 skills; `obra-superpowers` — 14 skills) ship as substrate references for plugin authors to copy-install per the `OPENRIG-INSTALL.md` workflow inside each plugin's source tree.
 - A first-class `rig plugin install <substrate-path>` verb is deferred to 0.3.2.
+
+## Scope Tree Primitive (release-0.3.2)
+
+One top-level command added post-0.3.1 (`scopeCommand`,
+`packages/cli/src/index.ts:20,187`; defined in
+`packages/cli/src/commands/scope.ts`; added by `0b77cba4`, release-0.3.2
+slice 12). Operates the scope tree (missions, slices, sub-slices) per
+`conventions/scope-and-versioning`. This is the 58th command group at HEAD
+(`v0.3.1` shipped 57; see overview).
+
+### `rig scope`
+
+Usage: `rig scope <subcommand>` — scope tree primitive: missions, slices, sub-slices.
+
+Top-level option:
+- `--workspace <path>` — override workspace root (otherwise inferred from cwd or `$OPENRIG_WORK_ROOT`).
+
+Two subcommand groups: `slice` and `mission`.
+
+`rig scope slice <subcommand>` — slice-tier commands:
+- `ls [--mission <name>] [--state <state>] [--json]` — list slices in a mission (or across all missions). `--state` filter: `active | closed | shipped | all` (default `active`).
+- `show <slice-path> [--mission <name>] [--json]` — inspect a single slice (frontmatter + README + children). `slice-path` is absolute, relative-to-substrate, or `NN-slug`; `--mission` hints the mission when path is just `NN-slug`.
+- `create <mission> <slug> [--template <kind>] [--title <text>] [--json]` — create a new slice in a mission. `--template` default `placeholder`.
+- `ship <slice-path> <release-mission> [--mission <name>] [--json]` — ship a slice to a release mission (preserves git history).
+- `close <slice-path> [--note <text>] [--mission <name>] [--json]` — close a slice (move to `<mission>/closed/`, update status). `--note` is an optional closure note.
+- `move <slice-path> <dest-mission> [--mission <name>] [--json]` — move a slice between missions (re-numbers in destination).
+
+`rig scope mission <subcommand>` — mission-tier commands:
+- `ls [--json]` — list missions (top-level folders with `README.md`).
+- `show <mission> [--json]` — inspect a single mission.
+- `create <name> [--template <kind>] [--id <dot-id>] [--title <text>] [--json]` — create a new mission (mints a stable dot-ID into frontmatter). `--template` auto-selects when name matches `release-X.Y.Z`; `--id` overrides name-pattern inference.
+
+Notes:
+- Surface source-verified against `packages/cli/src/commands/scope.ts` @HEAD `7eaf524c`; not in `v0.3.1`.
 
 ## Commands Not Present
 
