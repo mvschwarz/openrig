@@ -49,6 +49,63 @@ function parseScope(raw: string): OperatorContextScope | null {
   return VALID_SCOPES.has(raw) ? (raw as OperatorContextScope) : null;
 }
 
+interface ScopeQualifierOk {
+  ok: true;
+  scope: OperatorContextScope;
+  qualifier: string | null;
+}
+interface ScopeQualifierErr {
+  ok: false;
+  status: 400;
+  body: { error: string; hint: string };
+}
+
+/**
+ * Parse + validate `:scope` / `:qualifier` path params. Rejects:
+ *   - unknown scope name                          → scope_invalid
+ *   - global_host scope WITH a non-empty qualifier → qualifier_forbidden
+ *     (prevents hidden scope inference / mutation on the global-host
+ *     binding — guard BLOCKER 2)
+ *   - non-global scope WITHOUT a qualifier        → qualifier_required
+ *
+ * Used by every route verb so GET / PUT / DELETE share the exact same
+ * parse rules. No silent qualifier-dropping anywhere on a write path.
+ */
+function parseScopeAndQualifier(scopeRaw: string, qualifierRaw: string | undefined): ScopeQualifierOk | ScopeQualifierErr {
+  const scope = parseScope(scopeRaw);
+  if (!scope) {
+    return {
+      ok: false,
+      status: 400,
+      body: { error: "scope_invalid", hint: `Unknown scope. Allowed: ${OPERATOR_CONTEXT_SCOPES.join(", ")}.` },
+    };
+  }
+  if (scope === "global_host") {
+    if (qualifierRaw !== undefined && qualifierRaw.length > 0) {
+      return {
+        ok: false,
+        status: 400,
+        body: {
+          error: "qualifier_forbidden",
+          hint: "Global-host bindings cannot carry a qualifier. Use /api/rig-policy/bindings/global_host with no trailing path segment.",
+        },
+      };
+    }
+    return { ok: true, scope, qualifier: null };
+  }
+  if (qualifierRaw === undefined || qualifierRaw.length === 0) {
+    return {
+      ok: false,
+      status: 400,
+      body: {
+        error: "qualifier_required",
+        hint: `Scope ${scope} requires a qualifier (rigId / workstreamId / qitemId).`,
+      },
+    };
+  }
+  return { ok: true, scope, qualifier: qualifierRaw };
+}
+
 function getStore(c: { get: (key: string) => unknown }): RigPolicyStore | null {
   const store = c.get("rigPolicyStore" as never) as RigPolicyStore | undefined;
   return store ?? null;
@@ -98,22 +155,9 @@ export function rigPolicyRoutes(opts?: RigPolicyRoutesOpts): Hono {
   router.get("/bindings/:scope/:qualifier?", (c) => {
     const store = getStore(c);
     if (!store) return c.json({ error: "rig_policy_store_unavailable" }, 503);
-    const scope = parseScope(c.req.param("scope"));
-    if (!scope) {
-      return c.json({
-        error: "scope_invalid",
-        hint: `Unknown scope. Allowed: ${OPERATOR_CONTEXT_SCOPES.join(", ")}.`,
-      }, 400);
-    }
-    const qualifierRaw = c.req.param("qualifier");
-    const qualifier = scope === "global_host" ? null : (qualifierRaw ?? null);
-    if (scope !== "global_host" && (qualifier === null || qualifier.length === 0)) {
-      return c.json({
-        error: "qualifier_required",
-        hint: `Scope ${scope} requires a qualifier (rigId / workstreamId / qitemId).`,
-      }, 400);
-    }
-    const binding = store.getBinding(scope, qualifier);
+    const parsed = parseScopeAndQualifier(c.req.param("scope"), c.req.param("qualifier"));
+    if (!parsed.ok) return c.json(parsed.body, parsed.status);
+    const binding = store.getBinding(parsed.scope, parsed.qualifier);
     if (!binding) return c.json({ error: "not_found" }, 404);
     return c.json({ binding });
   });
@@ -122,23 +166,23 @@ export function rigPolicyRoutes(opts?: RigPolicyRoutesOpts): Hono {
   router.put("/bindings/:scope/:qualifier?", requireOperator, async (c) => {
     const store = getStore(c);
     if (!store) return c.json({ error: "rig_policy_store_unavailable" }, 503);
-    const scope = parseScope(c.req.param("scope"));
-    if (!scope) {
-      return c.json({
-        error: "scope_invalid",
-        hint: `Unknown scope. Allowed: ${OPERATOR_CONTEXT_SCOPES.join(", ")}.`,
-      }, 400);
-    }
-    const qualifierRaw = c.req.param("qualifier");
-    const qualifier = scope === "global_host" ? null : (qualifierRaw ?? null);
+    const parsed = parseScopeAndQualifier(c.req.param("scope"), c.req.param("qualifier"));
+    if (!parsed.ok) return c.json(parsed.body, parsed.status);
     const body = await c.req.json().catch(() => null);
     if (body === null || typeof body !== "object") {
       return c.json({
         error: "body_required",
-        hint: "PUT body must be the 10-field OperatorContextModeRecord (JSON object).",
+        hint: "PUT body must be { mode: <one of six>, record: <10-field OperatorContextModeRecord> }.",
       }, 400);
     }
-    const result = store.setBinding(scope, qualifier, (body as { record?: unknown }).record ?? body);
+    const { mode, record } = body as { mode?: unknown; record?: unknown };
+    if (mode === undefined || record === undefined) {
+      return c.json({
+        error: "body_shape_invalid",
+        hint: "PUT body must be { mode: <one of six>, record: <10-field OperatorContextModeRecord> }.",
+      }, 400);
+    }
+    const result = store.setBinding(parsed.scope, parsed.qualifier, mode, record);
     if (!result.ok) {
       return c.json({ error: "validation_failed", errors: result.errors }, 400);
     }
@@ -149,16 +193,9 @@ export function rigPolicyRoutes(opts?: RigPolicyRoutesOpts): Hono {
   router.delete("/bindings/:scope/:qualifier?", requireOperator, (c) => {
     const store = getStore(c);
     if (!store) return c.json({ error: "rig_policy_store_unavailable" }, 503);
-    const scope = parseScope(c.req.param("scope"));
-    if (!scope) {
-      return c.json({
-        error: "scope_invalid",
-        hint: `Unknown scope. Allowed: ${OPERATOR_CONTEXT_SCOPES.join(", ")}.`,
-      }, 400);
-    }
-    const qualifierRaw = c.req.param("qualifier");
-    const qualifier = scope === "global_host" ? null : (qualifierRaw ?? null);
-    const removed = store.deleteBinding(scope, qualifier);
+    const parsed = parseScopeAndQualifier(c.req.param("scope"), c.req.param("qualifier"));
+    if (!parsed.ok) return c.json(parsed.body, parsed.status);
+    const removed = store.deleteBinding(parsed.scope, parsed.qualifier);
     return c.json({ removed });
   });
 

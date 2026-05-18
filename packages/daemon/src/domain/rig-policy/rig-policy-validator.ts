@@ -58,9 +58,13 @@ const ALLOWED_CONCURRENCY_LIMITS: readonly ConcurrencyLimit[] = ["serial", "2", 
  * The 10 required fields of an OperatorContextModeRecord. Used by
  * validateRecord to enumerate field-set integrity (HG-2) — both
  * presence and exhaustiveness.
+ *
+ * NOTE: `mode` is NOT in this list. Mode is the binding selector
+ * (Component 2 vocabulary), not part of the Component-3 settings
+ * record. The store/route validate mode separately at the binding
+ * boundary; this validator enforces only the 10 Component-3 fields.
  */
 export const REQUIRED_RECORD_FIELDS: readonly (keyof OperatorContextModeRecord)[] = [
-  "mode",
   "autonomy_scope",
   "heartbeat_cadence",
   "inspection_depth",
@@ -179,12 +183,6 @@ export function validateRecord(raw: unknown): ValidationResult {
   // noise.
   if (errors.length > 0) return { ok: false, errors };
 
-  const mode = checkEnum<OperatorContextMode>(
-    "mode",
-    raw["mode"],
-    OPERATOR_CONTEXT_MODES,
-    errors,
-  );
   const autonomy_scope = checkEnum<AutonomyScope>(
     "autonomy_scope",
     raw["autonomy_scope"],
@@ -269,7 +267,6 @@ export function validateRecord(raw: unknown): ValidationResult {
 
   if (
     errors.length > 0
-    || mode === null
     || autonomy_scope === null
     || heartbeat_cadence === null
     || inspection_depth === null
@@ -286,7 +283,6 @@ export function validateRecord(raw: unknown): ValidationResult {
   return {
     ok: true,
     record: {
-      mode,
       autonomy_scope,
       heartbeat_cadence,
       inspection_depth,
@@ -299,6 +295,22 @@ export function validateRecord(raw: unknown): ValidationResult {
       evidence_citation: (evidence_citation_raw as string).trim(),
     },
   };
+}
+
+/**
+ * Validate an operator-supplied mode name. Mode lives outside the
+ * 10-field record (Component 2 vocabulary, not Component 3 settings).
+ * The route + store call this at the binding boundary; the
+ * disambiguator below (for invocation parsing) is separate.
+ */
+export function validateModeName(raw: unknown): { ok: true; mode: OperatorContextMode } | { ok: false; error: string } {
+  if (typeof raw !== "string") {
+    return { ok: false, error: threePart(`mode is not a string (got ${typeof raw})`, OPERATOR_CONTEXT_MODES.join(", "), "Provide one of the six reserved mode names.") };
+  }
+  if (!(OPERATOR_CONTEXT_MODES as readonly string[]).includes(raw)) {
+    return { ok: false, error: threePart(`mode="${raw}" is not a recognized mode name`, OPERATOR_CONTEXT_MODES.join(", "), "Provide one of the six reserved mode names. See convention §Component 2.") };
+  }
+  return { ok: true, mode: raw as OperatorContextMode };
 }
 
 /**

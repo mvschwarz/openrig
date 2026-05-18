@@ -69,6 +69,7 @@ interface RecommendedDefaultsResponse {
 interface BindingResponse {
   binding: {
     id: string;
+    mode: Mode;
     record: Record<string, string>;
     qualifier: string | null;
     setAt: string;
@@ -110,7 +111,7 @@ function emitRecord(label: string, record: Record<string, string>): void {
 function formatCitation(b: BindingResponse["binding"]): string {
   const qualifierPart = b.qualifier ? `:${b.qualifier}` : "";
   const scope = b.record.scope as Scope;
-  return `Operating in \`${b.record.mode}\` mode at \`${scope}${qualifierPart}\` per operator (set_at ${b.setAt})`;
+  return `Operating in \`${b.mode}\` mode at \`${scope}${qualifierPart}\` per operator (set_at ${b.setAt})`;
 }
 
 export function rigPolicyCommand(depsOverride?: RigPolicyDeps): Command {
@@ -138,7 +139,7 @@ export function rigPolicyCommand(depsOverride?: RigPolicyDeps): Command {
     .option("--update-detail <v>")
     .option("--escalation-threshold <v>")
     .option("--concurrency-limit <v>")
-    .option("--permission-prompt-posture <v>", "One of: normal | batch_for_human | strict_step_through (auto_accept is FORBIDDEN by convention).")
+    .option("--permission-prompt-posture <v>", "One of: normal | batch_for_human | do_not_prompt_unless_blocked (auto_accept is FORBIDDEN by convention).")
     .option("--expiry-or-stale-rule <v>")
     .option("--evidence <citation>", "Free-text citation (operator message id, file pointer, chatroom topic, etc.).")
     .option("--confirm", "Confirm the proposed binding and apply it. Without this flag, set is restate-only.")
@@ -186,8 +187,10 @@ export function rigPolicyCommand(depsOverride?: RigPolicyDeps): Command {
         }
         const qualifier = scope === "global_host" ? null : (opts.qualifier ?? null);
         const perMode = defaults.recommendedModeDefaults[mode];
+        // Component 3 — exactly the 10 settings fields. `mode` is the
+        // binding's identity (Component 2) and lives at the top level
+        // of the PUT body, NOT inside the record.
         const record = {
-          mode,
           autonomy_scope: opts.autonomyScope ?? perMode.autonomy_scope,
           heartbeat_cadence: opts.heartbeatCadence ?? perMode.heartbeat_cadence,
           inspection_depth: opts.inspectionDepth ?? perMode.inspection_depth,
@@ -203,9 +206,10 @@ export function rigPolicyCommand(depsOverride?: RigPolicyDeps): Command {
         if (!opts.confirm) {
           // Restate-and-confirm (HG-7). No daemon write.
           if (opts.json) {
-            console.log(JSON.stringify({ ok: false, proposed: { scope, qualifier, record }, confirm_required: true }, null, 2));
+            console.log(JSON.stringify({ ok: false, proposed: { mode, scope, qualifier, record }, confirm_required: true }, null, 2));
           } else {
             console.log(`Proposed binding (restate-and-confirm — NOT applied):`);
+            console.log(`  mode:      ${mode}`);
             console.log(`  scope:     ${scope}${qualifier ? ` (${qualifier})` : ""}`);
             emitRecord(`  record:`, record);
             console.log(`\nRe-run with --confirm to apply.`);
@@ -220,7 +224,7 @@ export function rigPolicyCommand(depsOverride?: RigPolicyDeps): Command {
         const qualifierPath = qualifier ? `/${encodeURIComponent(qualifier)}` : "";
         const res = await client.put<BindingResponse | { error: string; errors?: string[] }>(
           `/api/rig-policy/bindings/${scope}${qualifierPath}`,
-          record,
+          { mode, record },
           { headers },
         );
         if (res.status === 401) {
@@ -248,6 +252,7 @@ export function rigPolicyCommand(depsOverride?: RigPolicyDeps): Command {
           console.log(JSON.stringify({ ok: true, binding: body.binding }, null, 2));
         } else {
           console.log(`Set: ${body.binding.id}`);
+          console.log(`  mode:    ${body.binding.mode}`);
           emitRecord(`  record:`, body.binding.record);
           console.log(`  set_by:  ${body.binding.setBy}`);
           console.log(`  set_at:  ${body.binding.setAt}`);
@@ -279,7 +284,7 @@ export function rigPolicyCommand(depsOverride?: RigPolicyDeps): Command {
           return;
         }
         for (const b of res.data.bindings) {
-          console.log(`${b.id}  [${b.record.mode}]  set_at=${b.setAt}`);
+          console.log(`${b.id}  [${b.mode}]  set_at=${b.setAt}`);
         }
       });
     });
@@ -316,7 +321,7 @@ export function rigPolicyCommand(depsOverride?: RigPolicyDeps): Command {
           return;
         }
         const b = res.data.effective.binding;
-        console.log(`Effective: ${b.record.mode} (resolved scope: ${res.data.effective.resolvedScope})`);
+        console.log(`Effective: ${b.mode} (resolved scope: ${res.data.effective.resolvedScope})`);
         emitRecord(`  record:`, b.record);
         console.log(`  set_by:  ${b.setBy}`);
         console.log(`  set_at:  ${b.setAt}`);

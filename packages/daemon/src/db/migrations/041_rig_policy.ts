@@ -36,6 +36,7 @@ export const rigPolicySchema: Migration = {
       id TEXT PRIMARY KEY,
       scope TEXT NOT NULL CHECK (scope IN ('global_host', 'rig', 'workstream', 'qitem')),
       qualifier TEXT,
+      mode TEXT NOT NULL CHECK (mode IN ('sleep', 'desk', 'mobile', 'away', 'focus', 'debug')),
       record_json TEXT NOT NULL,
       set_at TEXT NOT NULL,
       set_by TEXT NOT NULL CHECK (set_by = 'operator')

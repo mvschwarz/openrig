@@ -62,7 +62,8 @@ function fakeClient(opts: {
     }),
     put: vi.fn(async (path: string, body: unknown, options?: { headers?: Record<string, string> }) => {
       calls.push({ method: "PUT", path, body, options });
-      return opts.putResponse ?? { status: 200, data: { binding: { id: "qitem:q-1", record: body as Record<string, string>, qualifier: "q-1", setAt: "2026-05-17T00:00:00.000Z", setBy: "operator" } } };
+      const reqBody = body as { mode: string; record: Record<string, string> };
+      return opts.putResponse ?? { status: 200, data: { binding: { id: "qitem:q-1", mode: reqBody.mode, record: reqBody.record, qualifier: "q-1", setAt: "2026-05-17T00:00:00.000Z", setBy: "operator" } } };
     }),
     delete: vi.fn(async (path: string, options?: { headers?: Record<string, string> }) => {
       calls.push({ method: "DELETE", path, options });
@@ -117,10 +118,11 @@ describe("disambiguateModeInvocation (Component 4 bare-word rule)", () => {
 
 describe("formatCitation (Component 5)", () => {
   const { formatCitation } = __test__;
-  it("emits mode + scope(:qualifier) + operator source + set_at", () => {
+  it("emits mode + scope(:qualifier) + operator source + set_at — mode is binding-level", () => {
     const line = formatCitation({
       id: "qitem:q-1",
-      record: { mode: "debug", scope: "qitem" } as Record<string, string>,
+      mode: "debug",
+      record: { scope: "qitem" } as Record<string, string>,
       qualifier: "q-1",
       setAt: "2026-05-17T00:00:00.000Z",
       setBy: "operator",
@@ -133,7 +135,8 @@ describe("formatCitation (Component 5)", () => {
   it("omits qualifier when null (global_host)", () => {
     const line = formatCitation({
       id: "global_host:host",
-      record: { mode: "sleep", scope: "global_host" } as Record<string, string>,
+      mode: "sleep",
+      record: { scope: "global_host" } as Record<string, string>,
       qualifier: null,
       setAt: "2026-05-17T00:00:00.000Z",
       setBy: "operator",
@@ -164,11 +167,12 @@ describe("rig policy set — restate-and-confirm gate (HG-7)", () => {
     const parsed = JSON.parse(joined);
     expect(parsed.ok).toBe(false);
     expect(parsed.confirm_required).toBe(true);
-    expect(parsed.proposed.record.mode).toBe("debug");
+    expect(parsed.proposed.mode).toBe("debug");
+    expect(parsed.proposed.record.mode).toBeUndefined();
     expect(calls.filter((c) => c.method === "PUT")).toHaveLength(0);
   });
 
-  it("WITH --confirm: PUTs to the daemon and prints citation", async () => {
+  it("WITH --confirm: PUTs { mode, record } to the daemon and prints citation", async () => {
     const { client, calls } = fakeClient({});
     const cmd = rigPolicyCommand(deps(client));
     await cmd.parseAsync(["node", "rig", "set", "debug", "--qualifier", "q-1", "--confirm"]);
@@ -176,8 +180,11 @@ describe("rig policy set — restate-and-confirm gate (HG-7)", () => {
     const puts = calls.filter((c) => c.method === "PUT");
     expect(puts).toHaveLength(1);
     expect(puts[0]!.path).toBe("/api/rig-policy/bindings/qitem/q-1");
-    expect((puts[0]!.body as { mode: string }).mode).toBe("debug");
-    expect((puts[0]!.body as { scope: string }).scope).toBe("qitem");
+    const putBody = puts[0]!.body as { mode: string; record: Record<string, string> };
+    expect(putBody.mode).toBe("debug");
+    // BLOCKING-1: record must NOT carry `mode` inside.
+    expect(putBody.record.mode).toBeUndefined();
+    expect(putBody.record.scope).toBe("qitem");
     expect(logs.join("\n")).toContain("Operating in `debug` mode at `qitem:q-1`");
   });
 
@@ -194,8 +201,9 @@ describe("rig policy set — restate-and-confirm gate (HG-7)", () => {
     const cmd = rigPolicyCommand(deps(client));
     await cmd.parseAsync(["node", "rig", "set", "mode:focus", "--qualifier", "ws-1", "--confirm"]);
     const put = calls.find((c) => c.method === "PUT")!;
-    expect((put.body as { mode: string }).mode).toBe("focus");
-    expect((put.body as { scope: string }).scope).toBe("workstream");
+    const body = put.body as { mode: string; record: Record<string, string> };
+    expect(body.mode).toBe("focus");
+    expect(body.record.scope).toBe("workstream");
     expect(put.path).toBe("/api/rig-policy/bindings/workstream/ws-1");
   });
 
@@ -244,7 +252,8 @@ describe("rig policy cite — convention citation rules", () => {
             resolvedScope: "qitem",
             binding: {
               id: "qitem:q-1",
-              record: { mode: "debug", scope: "qitem" },
+              mode: "debug",
+              record: { scope: "qitem" },
               qualifier: "q-1",
               setAt: "2026-05-17T00:00:00.000Z",
               setBy: "operator",

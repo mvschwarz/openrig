@@ -9,6 +9,15 @@
 //   - resolveEffective returns more-specific binding (HG-3).
 //   - source grep: route file contains no permission-allowlist / auth
 //     / tmux / lifecycle identifier (HG-SAFE source-level).
+//
+// BLOCKING-1 fix (guard verdict qitem-20260518043346): PUT body shape
+// is `{ mode, record }`; record itself is the 10-field schema with no
+// `mode` inside.
+//
+// BLOCKING-2 fix (guard verdict qitem-20260518043346): the route
+// REJECTS `global_host` with a non-empty qualifier as
+// `qualifier_forbidden` on GET / PUT / DELETE. No hidden scope
+// inference; no global-host mutation via a stray path segment.
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { Hono } from "hono";
@@ -16,11 +25,10 @@ import type Database from "better-sqlite3";
 import { createFullTestDb } from "./helpers/test-app.js";
 import { RigPolicyStore } from "../src/domain/rig-policy/rig-policy-store.js";
 import { rigPolicyRoutes } from "../src/routes/rig-policy.js";
-import type { OperatorContextModeRecord } from "../src/domain/rig-policy/rig-policy-types.js";
+import type { OperatorContextMode, OperatorContextModeRecord } from "../src/domain/rig-policy/rig-policy-types.js";
 
 function makeRecord(overrides?: Partial<OperatorContextModeRecord>): OperatorContextModeRecord {
   return {
-    mode: "debug",
     autonomy_scope: "bounded_continuation",
     heartbeat_cadence: "fast",
     inspection_depth: "forensic",
@@ -33,6 +41,10 @@ function makeRecord(overrides?: Partial<OperatorContextModeRecord>): OperatorCon
     evidence_citation: "operator confirmed debug",
     ...overrides,
   };
+}
+
+function putBody(mode: OperatorContextMode, recordOverrides?: Partial<OperatorContextModeRecord>): unknown {
+  return { mode, record: makeRecord(recordOverrides) };
 }
 
 function buildApp(db: Database.Database, bearer: string | null): { app: Hono; store: RigPolicyStore } {
@@ -76,12 +88,12 @@ describe("rig-policy HTTP routes — slice 09", () => {
     const res = await app.request("/api/rig-policy/bindings/qitem/q-1", {
       method: "PUT",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify(makeRecord()),
+      body: JSON.stringify(putBody("debug")),
     });
     expect(res.status).toBe(401);
   });
 
-  it("HG-4: PUT accepts a valid record with the correct bearer; round-trips via GET", async () => {
+  it("HG-4 (BLOCKING-1): PUT accepts { mode, record } and round-trips via GET", async () => {
     const { app } = buildApp(db, "operator-token");
     const put = await app.request("/api/rig-policy/bindings/qitem/q-1", {
       method: "PUT",
@@ -89,17 +101,45 @@ describe("rig-policy HTTP routes — slice 09", () => {
         "content-type": "application/json",
         authorization: "Bearer operator-token",
       },
-      body: JSON.stringify(makeRecord()),
+      body: JSON.stringify(putBody("debug")),
     });
     expect(put.status).toBe(200);
-    const putBody = (await put.json()) as { binding: { setBy: string; record: { mode: string } } };
-    expect(putBody.binding.setBy).toBe("operator");
-    expect(putBody.binding.record.mode).toBe("debug");
+    const putBodyResp = (await put.json()) as { binding: { mode: string; setBy: string; record: Record<string, unknown> } };
+    expect(putBodyResp.binding.setBy).toBe("operator");
+    expect(putBodyResp.binding.mode).toBe("debug");
+    // The record itself does NOT carry `mode`.
+    expect(putBodyResp.binding.record.mode).toBeUndefined();
 
     const get = await app.request("/api/rig-policy/bindings/qitem/q-1");
     expect(get.status).toBe(200);
-    const getBody = (await get.json()) as { binding: { record: { mode: string } } };
-    expect(getBody.binding.record.mode).toBe("debug");
+    const getBody = (await get.json()) as { binding: { mode: string; record: Record<string, unknown> } };
+    expect(getBody.binding.mode).toBe("debug");
+    expect(getBody.binding.record.mode).toBeUndefined();
+  });
+
+  it("BLOCKING-1: PUT body missing `mode` is rejected with body_shape_invalid", async () => {
+    const { app } = buildApp(db, null);
+    const res = await app.request("/api/rig-policy/bindings/qitem/q-1", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ record: makeRecord() }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe("body_shape_invalid");
+  });
+
+  it("BLOCKING-1: PUT body that smuggles `mode` inside record is rejected as Unknown field", async () => {
+    const { app } = buildApp(db, null);
+    const res = await app.request("/api/rig-policy/bindings/qitem/q-1", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ mode: "debug", record: { ...makeRecord(), mode: "debug" } }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string; errors?: string[] };
+    expect(body.error).toBe("validation_failed");
+    expect(body.errors?.some((e) => e.includes(`Unknown field "mode"`))).toBe(true);
   });
 
   it("HG-SAFE: PUT with permission_prompt_posture='auto_accept' is rejected (runtime defense)", async () => {
@@ -107,7 +147,10 @@ describe("rig-policy HTTP routes — slice 09", () => {
     const res = await app.request("/api/rig-policy/bindings/qitem/q-1", {
       method: "PUT",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ ...makeRecord(), permission_prompt_posture: "auto_accept" }),
+      body: JSON.stringify({
+        mode: "debug",
+        record: { ...makeRecord(), permission_prompt_posture: "auto_accept" },
+      }),
     });
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error: string; errors?: string[] };
@@ -117,20 +160,20 @@ describe("rig-policy HTTP routes — slice 09", () => {
 
   it("HG-3 effective-resolution: qitem wins over global_host", async () => {
     const { app, store } = buildApp(db, null);
-    store.setBinding("global_host", null, makeRecord({ mode: "sleep", scope: "global_host" }));
-    store.setBinding("qitem", "q-1", makeRecord({ mode: "debug", scope: "qitem" }));
+    store.setBinding("global_host", null, "sleep", makeRecord({ scope: "global_host" }));
+    store.setBinding("qitem", "q-1", "debug", makeRecord({ scope: "qitem" }));
 
     const r1 = await app.request("/api/rig-policy/effective?qitem=q-1");
     expect(r1.status).toBe(200);
-    const r1body = (await r1.json()) as { effective: { resolvedScope: string; binding: { record: { mode: string } } }; posture: string };
+    const r1body = (await r1.json()) as { effective: { resolvedScope: string; binding: { mode: string } }; posture: string };
     expect(r1body.effective.resolvedScope).toBe("qitem");
-    expect(r1body.effective.binding.record.mode).toBe("debug");
+    expect(r1body.effective.binding.mode).toBe("debug");
     expect(r1body.posture).toBe("known");
 
     const r2 = await app.request("/api/rig-policy/effective?qitem=q-other");
-    const r2body = (await r2.json()) as { effective: { resolvedScope: string; binding: { record: { mode: string } } } };
+    const r2body = (await r2.json()) as { effective: { resolvedScope: string; binding: { mode: string } } };
     expect(r2body.effective.resolvedScope).toBe("global_host");
-    expect(r2body.effective.binding.record.mode).toBe("sleep");
+    expect(r2body.effective.binding.mode).toBe("sleep");
   });
 
   it("Q6 unknown_posture: GET /effective with no matching binding returns null + unknown_posture", async () => {
@@ -144,8 +187,8 @@ describe("rig-policy HTTP routes — slice 09", () => {
 
   it("GET /bindings returns all bindings", async () => {
     const { app, store } = buildApp(db, null);
-    store.setBinding("global_host", null, makeRecord({ mode: "sleep", scope: "global_host" }));
-    store.setBinding("rig", "rig-a", makeRecord({ mode: "focus", scope: "rig" }));
+    store.setBinding("global_host", null, "sleep", makeRecord({ scope: "global_host" }));
+    store.setBinding("rig", "rig-a", "focus", makeRecord({ scope: "rig" }));
     const res = await app.request("/api/rig-policy/bindings");
     expect(res.status).toBe(200);
     const body = (await res.json()) as { bindings: Array<{ id: string }> };
@@ -154,7 +197,7 @@ describe("rig-policy HTTP routes — slice 09", () => {
 
   it("HG-4: DELETE requires operator bearer when configured", async () => {
     const { app, store } = buildApp(db, "operator-token");
-    store.setBinding("rig", "rig-a", makeRecord({ scope: "rig" }));
+    store.setBinding("rig", "rig-a", "focus", makeRecord({ scope: "rig" }));
     const noAuth = await app.request("/api/rig-policy/bindings/rig/rig-a", { method: "DELETE" });
     expect(noAuth.status).toBe(401);
     const auth = await app.request("/api/rig-policy/bindings/rig/rig-a", {
@@ -171,7 +214,7 @@ describe("rig-policy HTTP routes — slice 09", () => {
     const res = await app.request("/api/rig-policy/bindings/banana/x", {
       method: "PUT",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify(makeRecord()),
+      body: JSON.stringify(putBody("debug")),
     });
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error: string };
@@ -188,17 +231,60 @@ describe("rig-policy HTTP routes — slice 09", () => {
 
   it("GET /bindings/global_host (no qualifier) reads the host binding", async () => {
     const { app, store } = buildApp(db, null);
-    store.setBinding("global_host", null, makeRecord({ mode: "sleep", scope: "global_host" }));
+    store.setBinding("global_host", null, "sleep", makeRecord({ scope: "global_host" }));
     const res = await app.request("/api/rig-policy/bindings/global_host");
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { binding: { record: { mode: string } } };
-    expect(body.binding.record.mode).toBe("sleep");
+    const body = (await res.json()) as { binding: { mode: string } };
+    expect(body.binding.mode).toBe("sleep");
   });
 
   it("404 on a missing binding", async () => {
     const { app } = buildApp(db, null);
     const res = await app.request("/api/rig-policy/bindings/rig/rig-not-there");
     expect(res.status).toBe(404);
+  });
+
+  // BLOCKING-2 — global_host with a non-empty qualifier MUST be
+  // rejected at every verb. The route does NOT silently drop the
+  // qualifier into null (that would be hidden scope inference + a
+  // write/delete path against the host binding via a typo'd URL).
+  describe("BLOCKING-2: global_host + non-empty qualifier rejected (no hidden inference)", () => {
+    it("GET /bindings/global_host/unexpected → 400 qualifier_forbidden", async () => {
+      const { app } = buildApp(db, null);
+      const res = await app.request("/api/rig-policy/bindings/global_host/unexpected");
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error: string };
+      expect(body.error).toBe("qualifier_forbidden");
+    });
+
+    it("PUT /bindings/global_host/unexpected → 400 qualifier_forbidden; the global-host row does NOT mutate", async () => {
+      const { app, store } = buildApp(db, null);
+      store.setBinding("global_host", null, "sleep", makeRecord({ scope: "global_host" }));
+      const before = store.getBinding("global_host", null)!;
+      const res = await app.request("/api/rig-policy/bindings/global_host/unexpected", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(putBody("debug", { scope: "global_host" })),
+      });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error: string };
+      expect(body.error).toBe("qualifier_forbidden");
+      const after = store.getBinding("global_host", null)!;
+      expect(after.mode).toBe("sleep");
+      expect(after.setAt).toBe(before.setAt);
+    });
+
+    it("DELETE /bindings/global_host/unexpected → 400 qualifier_forbidden; the global-host row is NOT removed", async () => {
+      const { app, store } = buildApp(db, null);
+      store.setBinding("global_host", null, "sleep", makeRecord({ scope: "global_host" }));
+      const res = await app.request("/api/rig-policy/bindings/global_host/unexpected", {
+        method: "DELETE",
+      });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error: string };
+      expect(body.error).toBe("qualifier_forbidden");
+      expect(store.getBinding("global_host", null)).not.toBeNull();
+    });
   });
 
   // HG-SAFE source-level — the route file does NOT reference permission

@@ -90,17 +90,19 @@ describe("rig-policy defaults — slice 09 §Component 3 + §Component 4", () =>
   // default scope + the default stale rule passes the validator.
   // This is the executable proof that the defaults compose into a
   // valid v0 record (no silent dropped/extra fields).
-  it("HG-6 executable proof: defaults + default scope + DEFAULT_STALE_RULE compose into a validator-valid record for every mode", () => {
+  it("HG-6 executable proof: defaults + default scope + DEFAULT_STALE_RULE compose into a validator-valid record for every mode (10-field record; mode lives at the binding, NOT in the record)", () => {
     for (const mode of OPERATOR_CONTEXT_MODES) {
       const defaults = RECOMMENDED_MODE_DEFAULTS[mode];
       const scope = RECOMMENDED_DEFAULT_SCOPE[mode];
       const record = {
-        mode,
         ...defaults,
         scope,
         expiry_or_stale_rule: DEFAULT_STALE_RULE,
         evidence_citation: `operator confirmed ${mode}`,
       };
+      // The record itself must be exactly 10 fields (Component-3 frozen
+      // contract). Verify count to anchor field-set integrity here too.
+      expect(Object.keys(record).length).toBe(10);
       const result = validateRecord(record);
       expect(result.ok).toBe(true);
     }

@@ -24,18 +24,20 @@
 import type Database from "better-sqlite3";
 import {
   type EffectiveOperatorContextMode,
+  type OperatorContextMode,
   type OperatorContextModeBinding,
   type OperatorContextModeRecord,
   type OperatorContextReadContext,
   type OperatorContextScope,
   SCOPE_SPECIFICITY,
 } from "./rig-policy-types.js";
-import { validateRecord } from "./rig-policy-validator.js";
+import { validateModeName, validateRecord } from "./rig-policy-validator.js";
 
 interface BindingRow {
   id: string;
   scope: OperatorContextScope;
   qualifier: string | null;
+  mode: OperatorContextMode;
   record_json: string;
   set_at: string;
   set_by: string;
@@ -44,6 +46,7 @@ interface BindingRow {
 function rowToBinding(row: BindingRow): OperatorContextModeBinding {
   return {
     id: row.id,
+    mode: row.mode,
     record: JSON.parse(row.record_json) as OperatorContextModeRecord,
     qualifier: row.qualifier,
     setAt: row.set_at,
@@ -92,7 +95,8 @@ export class RigPolicyStore {
   setBinding(
     scope: OperatorContextScope,
     qualifier: string | null,
-    candidate: unknown,
+    mode: unknown,
+    candidateRecord: unknown,
   ): SetBindingResult | SetBindingError {
     const errors: string[] = [];
     if (scope === "global_host" && qualifier !== null) {
@@ -105,11 +109,15 @@ export class RigPolicyStore {
         `${scope} bindings require a qualifier (rigId / workstreamId / qitemId). Got ${JSON.stringify(qualifier)}.`,
       );
     }
-    const validation = validateRecord(candidate);
+    const modeCheck = validateModeName(mode);
+    if (!modeCheck.ok) errors.push(modeCheck.error);
+    const validation = validateRecord(candidateRecord);
     if (!validation.ok) errors.push(...validation.errors);
-    if (errors.length > 0) return { ok: false, errors };
+    if (errors.length > 0 || !modeCheck.ok || !validation.ok) {
+      return { ok: false, errors };
+    }
 
-    const record = (validation as { ok: true; record: OperatorContextModeRecord }).record;
+    const record = validation.record;
     if (record.scope !== scope) {
       return {
         ok: false,
@@ -122,17 +130,19 @@ export class RigPolicyStore {
     const id = bindingId(scope, qualifier);
     const setAt = this.now().toISOString();
     this.db.prepare(`
-      INSERT INTO operator_context_mode_bindings (id, scope, qualifier, record_json, set_at, set_by)
-      VALUES (?, ?, ?, ?, ?, 'operator')
+      INSERT INTO operator_context_mode_bindings (id, scope, qualifier, mode, record_json, set_at, set_by)
+      VALUES (?, ?, ?, ?, ?, ?, 'operator')
       ON CONFLICT(id) DO UPDATE SET
+        mode = excluded.mode,
         record_json = excluded.record_json,
         set_at = excluded.set_at
-    `).run(id, scope, qualifier, JSON.stringify(record), setAt);
+    `).run(id, scope, qualifier, modeCheck.mode, JSON.stringify(record), setAt);
 
     return {
       ok: true,
       binding: {
         id,
+        mode: modeCheck.mode,
         record,
         qualifier,
         setAt,
@@ -146,7 +156,7 @@ export class RigPolicyStore {
     qualifier: string | null,
   ): OperatorContextModeBinding | null {
     const row = this.db.prepare(`
-      SELECT id, scope, qualifier, record_json, set_at, set_by
+      SELECT id, scope, qualifier, mode, record_json, set_at, set_by
       FROM operator_context_mode_bindings
       WHERE id = ?
     `).get(bindingId(scope, qualifier)) as BindingRow | undefined;
@@ -155,7 +165,7 @@ export class RigPolicyStore {
 
   listBindings(): OperatorContextModeBinding[] {
     const rows = this.db.prepare(`
-      SELECT id, scope, qualifier, record_json, set_at, set_by
+      SELECT id, scope, qualifier, mode, record_json, set_at, set_by
       FROM operator_context_mode_bindings
       ORDER BY scope, qualifier NULLS FIRST, id
     `).all() as BindingRow[];

@@ -4,12 +4,16 @@ import { describe, it, expect } from "vitest";
 import {
   REQUIRED_RECORD_FIELDS,
   disambiguateModeInvocation,
+  validateModeName,
   validateRecord,
 } from "../src/domain/rig-policy/rig-policy-validator.js";
 
+// Per guard BLOCKING-1: the record is the FROZEN Component-3 10-field
+// settings schema. `mode` (Component 2 vocabulary) lives at the binding
+// layer, NOT inside this record. validRecord() therefore has exactly
+// 10 fields and no `mode`.
 function validRecord(): Record<string, unknown> {
   return {
-    mode: "debug",
     autonomy_scope: "bounded_continuation",
     heartbeat_cadence: "fast",
     inspection_depth: "forensic",
@@ -29,6 +33,26 @@ describe("validateRecord — slice 09 frozen contract", () => {
     expect(result.ok).toBe(true);
     if (result.ok) {
       expect(REQUIRED_RECORD_FIELDS.every((f) => f in result.record)).toBe(true);
+    }
+  });
+
+  // BLOCKING-1 discriminator from guard verdict qitem-20260518043346:
+  // the record MUST be exactly the 10 Component-3 settings fields.
+  // Adding `mode` to the record is rejected as an unknown extra field
+  // (mode lives at the binding boundary, not in the record).
+  it("HG-2: exactly 10 required fields, none named `mode` (Component 3 contract)", () => {
+    expect(REQUIRED_RECORD_FIELDS.length).toBe(10);
+    expect(REQUIRED_RECORD_FIELDS as readonly string[]).not.toContain("mode");
+    const valid = validRecord();
+    expect(Object.keys(valid).length).toBe(10);
+    expect(Object.keys(valid)).not.toContain("mode");
+  });
+
+  it("HG-2: a record that includes `mode` is rejected as an unknown field (mode is a binding-level field)", () => {
+    const result = validateRecord({ ...validRecord(), mode: "debug" });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors.some((e) => e.includes(`Unknown field "mode"`))).toBe(true);
     }
   });
 
@@ -60,30 +84,38 @@ describe("validateRecord — slice 09 frozen contract", () => {
   // even though the type system already blocks them at compile time.
   // This is the defense-in-depth for inputs from outside the typed
   // surface — JSON files, env vars, HTTP bodies.
-  it("HG-1 runtime negative: synonyms (`dnd`, `ooo`, `bed`) are rejected", () => {
+  it("HG-1 runtime negative: synonyms (`dnd`, `ooo`, `bed`) are rejected by validateModeName", () => {
     for (const bad of ["dnd", "ooo", "bed", "office", "commute"]) {
-      const result = validateRecord({ ...validRecord(), mode: bad });
+      const result = validateModeName(bad);
       expect(result.ok).toBe(false);
       if (!result.ok) {
-        expect(result.errors.some((e) => e.includes(`mode="${bad}"`))).toBe(true);
+        expect(result.error.includes(`mode="${bad}"`)).toBe(true);
       }
     }
   });
 
-  it("HG-1 runtime negative: numeric / namespaced-numeric aliases are rejected", () => {
+  it("HG-1 runtime negative: numeric / namespaced-numeric aliases are rejected by validateModeName", () => {
     for (const bad of ["L0", "L1", "L2", "L3", "operator:L0", "operator:L2"]) {
-      const result = validateRecord({ ...validRecord(), mode: bad });
+      const result = validateModeName(bad);
       expect(result.ok).toBe(false);
       if (!result.ok) {
-        expect(result.errors.some((e) => e.includes(`mode="${bad}"`))).toBe(true);
+        expect(result.error.includes(`mode="${bad}"`)).toBe(true);
       }
     }
   });
 
-  it("HG-1 runtime negative: case variants rejected (lowercase single-word vocabulary)", () => {
+  it("HG-1 runtime negative: case variants rejected by validateModeName (lowercase single-word vocabulary)", () => {
     for (const bad of ["Sleep", "DEBUG", "Mobile", "FOCUS"]) {
-      const result = validateRecord({ ...validRecord(), mode: bad });
+      const result = validateModeName(bad);
       expect(result.ok).toBe(false);
+    }
+  });
+
+  it("HG-1 positive: validateModeName accepts each of the six reserved modes", () => {
+    for (const m of ["sleep", "desk", "mobile", "away", "focus", "debug"]) {
+      const result = validateModeName(m);
+      expect(result.ok).toBe(true);
+      if (result.ok) expect(result.mode).toBe(m);
     }
   });
 
@@ -146,9 +178,9 @@ describe("validateRecord — slice 09 frozen contract", () => {
   it("reports multiple errors in one pass (all-at-once collection)", () => {
     const record = {
       ...validRecord(),
-      mode: "BadMode",
       scope: "BadScope",
       permission_prompt_posture: "auto_accept",
+      heartbeat_cadence: "instant",
     };
     const result = validateRecord(record);
     expect(result.ok).toBe(false);

@@ -141,15 +141,18 @@ export const STALE_RULES = [
 ] as const satisfies readonly ExpiryOrStaleRule[];
 
 /**
- * Component 3 — the 10-field schema. ALL fields are required by the
- * validator; none may be merged or dropped. Reviewer field-set
+ * Component 3 — the 10-field SETTINGS schema. ALL fields are required
+ * by the validator; none may be merged or dropped. Reviewer field-set
  * integrity check (HG-2).
+ *
+ * **`mode` is NOT in this record.** Mode is the binding's identity
+ * (Component 2 — the name of the named bundle); the record parameterizes
+ * how that named mode shapes ergonomics. The binding wrapper
+ * (OperatorContextModeBinding) carries `mode` at the top level so the
+ * frozen 10-field settings record stays exactly 10 fields, as declared
+ * by the convention's §Component 3 table.
  */
 export interface OperatorContextModeRecord {
-  /** Component 2 — one of the six reserved mode names. */
-  mode: OperatorContextMode;
-  /** Component 3 fields (the 10): mode + the seven settings + scope +
-   *  stale rule + citation. */
   autonomy_scope: AutonomyScope;
   heartbeat_cadence: HeartbeatCadence;
   inspection_depth: InspectionDepth;
@@ -176,6 +179,10 @@ export interface OperatorContextModeRecord {
 export interface OperatorContextModeBinding {
   /** Stable identifier — `${scope}:${qualifier ?? "host"}` v0. */
   id: string;
+  /** Component 2 — the named mode this binding selects. Lives at the
+   *  binding (not in the 10-field settings record) so the frozen
+   *  Component-3 record stays exactly 10 fields. */
+  mode: OperatorContextMode;
   record: OperatorContextModeRecord;
   /** Qualifier value (rigId, workstreamId, qitemId) — null when scope is global_host. */
   qualifier: string | null;

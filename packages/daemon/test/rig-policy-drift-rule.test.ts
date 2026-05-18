@@ -28,7 +28,6 @@ import { validateRecord } from "../src/domain/rig-policy/rig-policy-validator.js
 
 function makeRecord(overrides?: Partial<OperatorContextModeRecord>): OperatorContextModeRecord {
   return {
-    mode: "debug",
     autonomy_scope: "bounded_continuation",
     heartbeat_cadence: "fast",
     inspection_depth: "forensic",
@@ -78,19 +77,19 @@ describe("HG-8 — store reads NEVER mutate bindings (no silent switch path)", (
   });
 
   it("resolveEffective is pure: repeated reads return the same binding (same setAt)", () => {
-    store.setBinding("qitem", "q-1", makeRecord({ mode: "debug", scope: "qitem" }));
+    store.setBinding("qitem", "q-1", "debug", makeRecord({ scope: "qitem" }));
     const r1 = store.resolveEffective({ qitemId: "q-1" });
     const r2 = store.resolveEffective({ qitemId: "q-1" });
     const r3 = store.resolveEffective({ qitemId: "q-1" });
     expect(r1).not.toBeNull();
     expect(r2!.binding.setAt).toBe(r1!.binding.setAt);
     expect(r3!.binding.setAt).toBe(r1!.binding.setAt);
-    expect(r1!.binding.record.mode).toBe("debug");
-    expect(r2!.binding.record.mode).toBe("debug");
+    expect(r1!.binding.mode).toBe("debug");
+    expect(r2!.binding.mode).toBe("debug");
   });
 
   it("getBinding is pure: repeated reads return the same record", () => {
-    store.setBinding("rig", "rig-a", makeRecord({ mode: "focus", scope: "rig" }));
+    store.setBinding("rig", "rig-a", "focus", makeRecord({ scope: "rig" }));
     const first = store.getBinding("rig", "rig-a");
     const second = store.getBinding("rig", "rig-a");
     expect(first!.setAt).toBe(second!.setAt);
@@ -98,8 +97,8 @@ describe("HG-8 — store reads NEVER mutate bindings (no silent switch path)", (
   });
 
   it("listBindings is pure: count and identities stable across reads", () => {
-    store.setBinding("global_host", null, makeRecord({ mode: "sleep", scope: "global_host" }));
-    store.setBinding("rig", "rig-a", makeRecord({ mode: "focus", scope: "rig" }));
+    store.setBinding("global_host", null, "sleep", makeRecord({ scope: "global_host" }));
+    store.setBinding("rig", "rig-a", "focus", makeRecord({ scope: "rig" }));
     const a = store.listBindings();
     const b = store.listBindings();
     expect(a.map((x) => x.id).sort()).toEqual(b.map((x) => x.id).sort());
