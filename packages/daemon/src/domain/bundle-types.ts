@@ -205,6 +205,38 @@ function normalizeWorkflowSpecsBlock(raw: unknown): string[] | undefined {
   return result.length > 0 ? result : undefined;
 }
 
+/** Validate optional context_packs[] block. Item 6 / slice-05 Checkpoint 7.3f.
+ * Each entry is a relative-safe path to a context-pack's manifest.yaml inside
+ * the bundle (per PRD §Item 6). The router copies the parent directory of
+ * each manifest path to the operator context-packs library on install. */
+function validateContextPacksBlock(raw: unknown, errors: string[]): void {
+  if (raw === undefined) return;
+  if (!Array.isArray(raw)) {
+    errors.push("context_packs must be an array");
+    return;
+  }
+  for (let i = 0; i < raw.length; i++) {
+    const entry = raw[i];
+    if (typeof entry !== "string") {
+      errors.push(`context_packs[${i}] must be a string`);
+      continue;
+    }
+    if (!isRelativeSafePath(entry)) {
+      errors.push(`context_packs[${i}] path is not safe: '${entry}'`);
+    }
+  }
+}
+
+/** Normalize raw context_packs[] block (defensive copy + string filter). */
+function normalizeContextPacksBlock(raw: unknown): string[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const result: string[] = [];
+  for (const entry of raw) {
+    if (typeof entry === "string" && entry.length > 0) result.push(entry);
+  }
+  return result.length > 0 ? result : undefined;
+}
+
 /**
  * Compatibility block — operator-declared install-time requirements for a
  * bundle artifact. All fields optional; missing block keeps backward compat
@@ -323,6 +355,8 @@ export interface PodBundleManifest {
   plugins?: BundlePluginReference[];
   /** Item 6 cross-primitive bundling: workflow spec YAML paths to route to the operator workflow-specs library on install (Checkpoint 7.3e). */
   workflowSpecs?: string[];
+  /** Item 6 cross-primitive bundling: paths to context-pack manifest.yaml files; router copies the parent dir to the operator context-packs library on install (Checkpoint 7.3f). */
+  contextPacks?: string[];
 }
 
 export function validatePodBundleManifest(raw: unknown): { valid: boolean; errors: string[] } {
@@ -354,6 +388,7 @@ export function validatePodBundleManifest(raw: unknown): { valid: boolean; error
   validateSkillsBlock(m["skills"], errors);
   validatePluginsBlock(m["plugins"], errors);
   validateWorkflowSpecsBlock(m["workflow_specs"], errors);
+  validateContextPacksBlock(m["context_packs"], errors);
 
   return { valid: errors.length === 0, errors };
 }
@@ -387,6 +422,7 @@ export function serializePodBundleManifest(manifest: PodBundleManifest): string 
   if (manifest.skills && manifest.skills.length > 0) doc["skills"] = manifest.skills;
   if (manifest.plugins && manifest.plugins.length > 0) doc["plugins"] = manifest.plugins.map((p) => ({ id: p.id, source: { kind: p.source.kind, path: p.source.path } }));
   if (manifest.workflowSpecs && manifest.workflowSpecs.length > 0) doc["workflow_specs"] = manifest.workflowSpecs;
+  if (manifest.contextPacks && manifest.contextPacks.length > 0) doc["context_packs"] = manifest.contextPacks;
   return stringifyYaml(doc);
 }
 
@@ -430,6 +466,8 @@ export interface LegacyBundleManifest {
   plugins?: BundlePluginReference[];
   /** Item 6 cross-primitive bundling: workflow spec YAML paths to route to the operator workflow-specs library on install (Checkpoint 7.3e). */
   workflowSpecs?: string[];
+  /** Item 6 cross-primitive bundling: paths to context-pack manifest.yaml files; router copies the parent dir to the operator context-packs library on install (Checkpoint 7.3f). */
+  contextPacks?: string[];
 }
 
 /** Validation options */
@@ -525,6 +563,7 @@ export function validateLegacyBundleManifest(
   validateSkillsBlock(m["skills"], errors);
   validatePluginsBlock(m["plugins"], errors);
   validateWorkflowSpecsBlock(m["workflow_specs"], errors);
+  validateContextPacksBlock(m["context_packs"], errors);
 
   return { valid: errors.length === 0, errors };
 }
@@ -582,6 +621,9 @@ export function normalizeLegacyBundleManifest(raw: unknown): LegacyBundleManifes
   const workflowSpecs = normalizeWorkflowSpecsBlock(m["workflow_specs"]);
   if (workflowSpecs) result.workflowSpecs = workflowSpecs;
 
+  const contextPacks = normalizeContextPacksBlock(m["context_packs"]);
+  if (contextPacks) result.contextPacks = contextPacks;
+
   return result;
 }
 
@@ -616,6 +658,7 @@ export function serializeLegacyBundleManifest(manifest: LegacyBundleManifest): s
   if (manifest.skills && manifest.skills.length > 0) doc["skills"] = manifest.skills;
   if (manifest.plugins && manifest.plugins.length > 0) doc["plugins"] = manifest.plugins.map((p) => ({ id: p.id, source: { kind: p.source.kind, path: p.source.path } }));
   if (manifest.workflowSpecs && manifest.workflowSpecs.length > 0) doc["workflow_specs"] = manifest.workflowSpecs;
+  if (manifest.contextPacks && manifest.contextPacks.length > 0) doc["context_packs"] = manifest.contextPacks;
 
   return stringifyYaml(doc);
 }

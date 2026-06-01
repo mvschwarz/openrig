@@ -1014,6 +1014,86 @@ describe("PodBundleManifest validation", () => {
     expect(ps[0]!["id"]).toBe("co-plugin");
   });
 
+  // -- Item 6 context_packs block tests for v2 (slice-05 Checkpoint 7.3f) --
+
+  it("v2: missing context_packs block passes validation (backward compat)", () => {
+    const raw = {
+      schema_version: 2, name: "no-context-packs", version: "1.0",
+      created_at: "2026-05-18T00:00:00Z", rig_spec: "rig.yaml",
+      agents: [{ name: "impl", version: "1.0", path: "agents/impl", original_ref: "local:agents/impl", hash: "abc", import_entries: [] }],
+    };
+    const result = validatePodBundleManifest(raw);
+    expect(result.valid).toBe(true);
+  });
+
+  it("v2: context_packs as string array passes validation", () => {
+    const raw = {
+      schema_version: 2, name: "with-context-packs", version: "1.0",
+      created_at: "2026-05-18T00:00:00Z", rig_spec: "rig.yaml",
+      agents: [{ name: "impl", version: "1.0", path: "agents/impl", original_ref: "local:agents/impl", hash: "abc", import_entries: [] }],
+      context_packs: ["context-packs/intent/manifest.yaml", "context-packs/persona/manifest.yaml"],
+    };
+    const result = validatePodBundleManifest(raw);
+    expect(result.valid).toBe(true);
+  });
+
+  it("v2: context_packs as non-array rejected", () => {
+    const raw = {
+      schema_version: 2, name: "bad-context-packs", version: "1.0",
+      created_at: "2026-05-18T00:00:00Z", rig_spec: "rig.yaml",
+      agents: [{ name: "impl", version: "1.0", path: "agents/impl", original_ref: "local:agents/impl", hash: "abc", import_entries: [] }],
+      context_packs: "context-packs/a/manifest.yaml",
+    };
+    const result = validatePodBundleManifest(raw);
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.includes("context_packs must be an array"))).toBe(true);
+  });
+
+  it("v2: non-string context_packs entry rejected", () => {
+    const raw = {
+      schema_version: 2, name: "bad-context-packs", version: "1.0",
+      created_at: "2026-05-18T00:00:00Z", rig_spec: "rig.yaml",
+      agents: [{ name: "impl", version: "1.0", path: "agents/impl", original_ref: "local:agents/impl", hash: "abc", import_entries: [] }],
+      context_packs: [42, "context-packs/ok/manifest.yaml"],
+    };
+    const result = validatePodBundleManifest(raw);
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.includes("context_packs[0]") && e.includes("must be a string"))).toBe(true);
+  });
+
+  it("v2: unsafe context_packs path rejected", () => {
+    const raw = {
+      schema_version: 2, name: "bad-context-packs", version: "1.0",
+      created_at: "2026-05-18T00:00:00Z", rig_spec: "rig.yaml",
+      agents: [{ name: "impl", version: "1.0", path: "agents/impl", original_ref: "local:agents/impl", hash: "abc", import_entries: [] }],
+      context_packs: ["../escape/manifest.yaml"],
+    };
+    const result = validatePodBundleManifest(raw);
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.includes("context_packs[0]") && e.includes("not safe"))).toBe(true);
+  });
+
+  it("v2: round-trip preserves context_packs through serialize -> parse", () => {
+    const manifest: PodBundleManifest = {
+      schemaVersion: 2, name: "rt-context-packs-v2", version: "2.0",
+      createdAt: "2026-05-18T00:00:00Z", rigSpec: "rig.yaml",
+      agents: [{
+        name: "impl", version: "1.0", path: "agents/impl",
+        originalRef: "local:agents/impl", hash: "def",
+        importEntries: [],
+      }],
+      contextPacks: ["context-packs/v2-intent/manifest.yaml", "context-packs/v2-persona/manifest.yaml"],
+    };
+    const yaml = serializePodBundleManifest(manifest);
+    expect(yaml).toContain("context_packs:");
+    expect(yaml).toContain("context-packs/v2-intent/manifest.yaml");
+    const parsed = parsePodBundleManifest(yaml);
+    const validation = validatePodBundleManifest(parsed);
+    expect(validation.valid).toBe(true);
+    const m = parsed as Record<string, unknown>;
+    expect(m["context_packs"]).toEqual(["context-packs/v2-intent/manifest.yaml", "context-packs/v2-persona/manifest.yaml"]);
+  });
+
   it("v2: round-trip preserves compatibility through serialize -> parse", () => {
     const manifest: PodBundleManifest = {
       schemaVersion: 2, name: "rt-compat", version: "2.0",

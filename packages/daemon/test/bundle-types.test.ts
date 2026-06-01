@@ -610,6 +610,83 @@ describe("Bundle types", () => {
     const normalized = normalizeBundleManifest(parsed);
     expect(normalized.workflowSpecs).toBeUndefined();
   });
+
+  // -- Item 6 context_packs block tests (slice-05 Checkpoint 7.3f) --
+
+  it("missing context_packs block passes validation (backward compat)", () => {
+    const raw = { ...VALID_RAW };
+    const result = validateBundleManifest(raw);
+    expect(result.valid).toBe(true);
+  });
+
+  it("context_packs as a string array of safe relative paths passes validation", () => {
+    const raw = { ...VALID_RAW, context_packs: ["context-packs/intent/manifest.yaml", "context-packs/persona/manifest.yaml"] };
+    const result = validateBundleManifest(raw);
+    expect(result.valid).toBe(true);
+  });
+
+  it("context_packs as a non-array rejected", () => {
+    const raw = { ...VALID_RAW, context_packs: "context-packs/intent/manifest.yaml" };
+    const result = validateBundleManifest(raw);
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.includes("context_packs must be an array"))).toBe(true);
+  });
+
+  it("non-string context_packs entry rejected", () => {
+    const raw = { ...VALID_RAW, context_packs: [42, "context-packs/ok/manifest.yaml"] };
+    const result = validateBundleManifest(raw);
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.includes("context_packs[0]") && e.includes("must be a string"))).toBe(true);
+  });
+
+  it("unsafe context_packs path (dot-dot traversal) rejected", () => {
+    const raw = { ...VALID_RAW, context_packs: ["../escape/manifest.yaml"] };
+    const result = validateBundleManifest(raw);
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.includes("context_packs[0]"))).toBe(true);
+    expect(result.errors.some((e) => e.includes("not safe"))).toBe(true);
+  });
+
+  it("round-trip preserves context_packs through serialize → parse → normalize", () => {
+    const manifest: BundleManifest = {
+      schemaVersion: 1,
+      name: "rt-context-packs",
+      version: "1.0.0",
+      createdAt: "2026-05-18T12:00:00Z",
+      rigSpec: "rig.yaml",
+      packages: [{ name: "pkg", version: "1.0.0", path: "packages/pkg", originalSource: "local:./pkg" }],
+      integrity: {
+        algorithm: "sha256",
+        files: { "rig.yaml": "c".repeat(64), "packages/pkg/package.yaml": "d".repeat(64) },
+      },
+      contextPacks: ["context-packs/intent/manifest.yaml", "context-packs/persona/manifest.yaml"],
+    };
+    const yaml = serializeBundleManifest(manifest);
+    expect(yaml).toContain("context_packs:");
+    expect(yaml).toContain("context-packs/intent/manifest.yaml");
+    const parsed = parseBundleManifest(yaml);
+    const validation = validateBundleManifest(parsed);
+    expect(validation.valid).toBe(true);
+    const normalized = normalizeBundleManifest(parsed);
+    expect(normalized.contextPacks).toBeDefined();
+    expect(normalized.contextPacks).toEqual(["context-packs/intent/manifest.yaml", "context-packs/persona/manifest.yaml"]);
+  });
+
+  it("missing context_packs round-trips cleanly (no field emitted in YAML)", () => {
+    const manifest: BundleManifest = {
+      schemaVersion: 1,
+      name: "no-context-packs",
+      version: "1.0.0",
+      createdAt: "2026-05-18T00:00:00Z",
+      rigSpec: "rig.yaml",
+      packages: [{ name: "pkg", version: "1.0", path: "packages/pkg", originalSource: "local:./pkg" }],
+    };
+    const yaml = serializeBundleManifest(manifest);
+    expect(yaml).not.toContain("context_packs:");
+    const parsed = parseBundleManifest(yaml);
+    const normalized = normalizeBundleManifest(parsed);
+    expect(normalized.contextPacks).toBeUndefined();
+  });
 });
 
 describe("isRelativeSafePath", () => {
