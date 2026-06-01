@@ -156,6 +156,21 @@ export function routeContextPacks(
       });
       continue;
     }
+    // Manifest-type check (banked B2 from d491eca9 guard catch): exists()
+    // returns true for both files AND directories. If sourceAbs exists as
+    // a directory (named manifest.yaml, but a dir not a file), the live
+    // consumer's readFileSync(manifestPath) throws and scan() records an
+    // error diagnostic instead of indexing a visible pack — false-positive
+    // routedCount class. Reject pre-write so routedCount stays truthful at
+    // the consumer-visible boundary.
+    if (fs.isDirectory(sourceAbs)) {
+      records.push({
+        declaredPath: declared,
+        status: "not_manifest",
+        detail: `context_pack manifest '${declared}' exists but is a directory, not a file; consumer requires manifest.yaml to be a readable file`,
+      });
+      continue;
+    }
     const sourcePackDir = nodePath.dirname(sourceAbs);
     if (!fs.isDirectory(sourcePackDir)) {
       records.push({

@@ -226,6 +226,35 @@ describe("routeContextPacks", () => {
     expect(result.records[5]!.status).toBe("conflict");
   });
 
+  // C11 (degenerate-input / banked guard catch on d491eca9):
+  // manifest.yaml exists at the declared path but is a DIRECTORY, not a
+  // file. fs.exists returns true for both shapes; the live consumer
+  // (context-pack-library-service.ts:135 readFileSync) throws on a dir
+  // path and scan() records an error diagnostic instead of indexing the
+  // pack. Router must reject pre-write so routedCount stays truthful.
+  it("manifest.yaml exists but is a directory → status=not_manifest (no false-positive routed)", () => {
+    const fs = mockFs({
+      // Parent dir IS a directory, AND manifest.yaml is ALSO a directory
+      // (not a file). The bare exists check would pass; isDirectory check
+      // catches this.
+      dirs: [
+        `${BUNDLE_ROOT}/context-packs/dirpack`,
+        `${BUNDLE_ROOT}/context-packs/dirpack/manifest.yaml`,
+      ],
+    });
+    const result = routeContextPacks(
+      makeInput({ declaredContextPacks: ["context-packs/dirpack/manifest.yaml"] }),
+      fs,
+    );
+    expect(result.records).toHaveLength(1);
+    expect(result.routedCount).toBe(0);
+    expect(result.rejectedCount).toBe(1);
+    expect(result.records[0]!.status).toBe("not_manifest");
+    expect(result.records[0]!.detail).toContain("directory");
+    // CRUCIAL: no copyDir fires (consumer-invisible pack must not route)
+    expect(fs._copyCalls).toHaveLength(0);
+  });
+
   // C10 (degenerate-input / banked guard catch on a0e7e0e1):
   // parent dir exists but manifest.yaml file itself is absent —
   // ContextPackLibraryService.scan skips packs missing manifest.yaml
