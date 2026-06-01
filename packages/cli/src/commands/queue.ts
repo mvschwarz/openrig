@@ -143,9 +143,11 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     .requiredOption("--destination <session>", "Destination session (the seat that owns the work)")
     .option("--body <text>", "Qitem body inline (use - to read from stdin; mutually exclusive with --body-file)")
     .option("--body-file <path>", "Read qitem body from a file path (use - for stdin; mutually exclusive with --body). Kills the backtick-shell-corruption class for multiline bodies.")
+    .option("--mission <id>", "First-class mission scope; translated to a mission:<id> tag (composes with --tags)")
+    .option("--slice <id>", "First-class slice scope; translated to a slice:<id> tag (composes with --tags)")
     .option("--priority <priority>", "Priority: routine | urgent | critical", "routine")
     .option("--tier <tier>", "Tier (e.g. fast, routine, deep, critical) — drives SLA")
-    .option("--tags <tags>", "Comma-separated tags")
+    .option("--tags <tags>", "Comma-separated tags (composes with --mission and --slice)")
     .option("--expires-at <iso>", "ISO timestamp at which the qitem expires")
     .option("--id <qitemId>", "Idempotent qitem_id (skip if not provided)")
     .option("--target-repo <name>", "PL-007: typed repo scope (must match a repo in the source rig's RigSpec.workspace.repos[])")
@@ -156,6 +158,8 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
       destination: string;
       body?: string;
       bodyFile?: string;
+      mission?: string;
+      slice?: string;
       priority: string;
       tier?: string;
       tags?: string;
@@ -175,7 +179,19 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
         return;
       }
       const deps = getDeps();
-      const tags = opts.tags ? opts.tags.split(",").map((s) => s.trim()).filter(Boolean) : undefined;
+      // OPR.0.3.2.21.FR-4(b) — first-class --mission / --slice flags
+      // translate to canonical mission:<id> / slice:<id> tags. Composes
+      // with --tags (any flag-derived tags prepend; explicit --tags
+      // append). De-duplicates so passing both --mission X and
+      // --tags mission:X yields one mission:X tag.
+      const fromTagsArg = opts.tags ? opts.tags.split(",").map((s) => s.trim()).filter(Boolean) : [];
+      const fromFlags: string[] = [];
+      if (opts.mission) fromFlags.push(`mission:${opts.mission}`);
+      if (opts.slice) fromFlags.push(`slice:${opts.slice}`);
+      const merged = [...fromFlags, ...fromTagsArg];
+      const seen = new Set<string>();
+      const dedupedTags = merged.filter((t) => { if (seen.has(t)) return false; seen.add(t); return true; });
+      const tags = dedupedTags.length > 0 ? dedupedTags : undefined;
       await withClient(deps, async (client) => {
         const res = await client.post<Record<string, unknown>>("/api/queue/create", {
           qitemId: opts.id,

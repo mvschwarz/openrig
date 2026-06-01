@@ -282,6 +282,111 @@ describe("rig queue CLI", () => {
     });
   });
 
+  // OPR.0.3.2.21.FR-4(b) — --mission / --slice first-class flags
+  // translate to mission:<id> / slice:<id> tags and compose with --tags.
+  // This is tag-formalization only — no schema change; the qitem still
+  // stores tags as a flat list.
+  describe("FR-4(b) — --mission / --slice first-class flag-formalization", () => {
+    it("--mission translates to a mission:<id> tag", async () => {
+      const { deps, calls } = makeDeps({
+        routes: { "POST /api/queue/create": { status: 201, data: { qitemId: "q-fr4b-1" } } },
+      });
+      const program = createProgram({ queueDeps: deps });
+      program.exitOverride();
+      await program.parseAsync([
+        "node", "rig", "queue", "create",
+        "--source", "alice@rig",
+        "--destination", "bob@rig",
+        "--body", "x",
+        "--mission", "release-0.3.2",
+        "--json",
+      ]);
+      const create = calls.find((c) => c.path === "/api/queue/create");
+      expect((create!.body as { tags: string[] }).tags).toEqual(["mission:release-0.3.2"]);
+    });
+
+    it("--slice translates to a slice:<id> tag", async () => {
+      const { deps, calls } = makeDeps({
+        routes: { "POST /api/queue/create": { status: 201, data: { qitemId: "q-fr4b-2" } } },
+      });
+      const program = createProgram({ queueDeps: deps });
+      program.exitOverride();
+      await program.parseAsync([
+        "node", "rig", "queue", "create",
+        "--source", "alice@rig",
+        "--destination", "bob@rig",
+        "--body", "x",
+        "--slice", "21-fr-4-queue-ergonomics",
+        "--json",
+      ]);
+      const create = calls.find((c) => c.path === "/api/queue/create");
+      expect((create!.body as { tags: string[] }).tags).toEqual(["slice:21-fr-4-queue-ergonomics"]);
+    });
+
+    it("--mission + --slice + --tags merges all three sets (mission/slice first, --tags appended) and de-duplicates", async () => {
+      const { deps, calls } = makeDeps({
+        routes: { "POST /api/queue/create": { status: 201, data: { qitemId: "q-fr4b-3" } } },
+      });
+      const program = createProgram({ queueDeps: deps });
+      program.exitOverride();
+      await program.parseAsync([
+        "node", "rig", "queue", "create",
+        "--source", "alice@rig",
+        "--destination", "bob@rig",
+        "--body", "x",
+        "--mission", "release-0.3.2",
+        "--slice", "21-fr-4-queue-ergonomics",
+        "--tags", "gate:guard,handoff:per-commit",
+        "--json",
+      ]);
+      const create = calls.find((c) => c.path === "/api/queue/create");
+      expect((create!.body as { tags: string[] }).tags).toEqual([
+        "mission:release-0.3.2",
+        "slice:21-fr-4-queue-ergonomics",
+        "gate:guard",
+        "handoff:per-commit",
+      ]);
+    });
+
+    it("--mission release-0.3.2 + --tags mission:release-0.3.2 de-duplicates the redundant tag (one mission:X kept)", async () => {
+      const { deps, calls } = makeDeps({
+        routes: { "POST /api/queue/create": { status: 201, data: { qitemId: "q-fr4b-4" } } },
+      });
+      const program = createProgram({ queueDeps: deps });
+      program.exitOverride();
+      await program.parseAsync([
+        "node", "rig", "queue", "create",
+        "--source", "alice@rig",
+        "--destination", "bob@rig",
+        "--body", "x",
+        "--mission", "release-0.3.2",
+        "--tags", "mission:release-0.3.2,gate:guard",
+        "--json",
+      ]);
+      const create = calls.find((c) => c.path === "/api/queue/create");
+      const tags = (create!.body as { tags: string[] }).tags;
+      expect(tags.filter((t) => t === "mission:release-0.3.2")).toHaveLength(1);
+      expect(tags).toContain("gate:guard");
+    });
+
+    it("no --mission/--slice/--tags → tags is undefined on the wire (legacy behavior preserved)", async () => {
+      const { deps, calls } = makeDeps({
+        routes: { "POST /api/queue/create": { status: 201, data: { qitemId: "q-fr4b-5" } } },
+      });
+      const program = createProgram({ queueDeps: deps });
+      program.exitOverride();
+      await program.parseAsync([
+        "node", "rig", "queue", "create",
+        "--source", "alice@rig",
+        "--destination", "bob@rig",
+        "--body", "x",
+        "--json",
+      ]);
+      const create = calls.find((c) => c.path === "/api/queue/create");
+      expect((create!.body as { tags?: string[] }).tags).toBeUndefined();
+    });
+  });
+
   it("update --state done WITHOUT --closure-reason renders structured hot-potato error and exits non-zero", async () => {
     const { deps } = makeDeps({
       routes: {
