@@ -178,15 +178,18 @@ rig config init-workspace --dry-run --json
 configured `workspace.root` (default `~/.openrig/workspace`):
 
 - `missions/` — release missions + slices
+- `artifacts/` — work artifacts produced inside the workspace
+- `evidence/` — non-dogfood evidence (release evidence, proof packets, etc.)
 - `progress/` — progress index + per-mission rails
 - `field-notes/` — operator + agent observations
 - `specs/` — spec library (rig + agent + workflow YAML lives here)
-- `dogfood-evidence/` — proof packets + dogfood artifacts
+- `dogfood-evidence/` — dogfood proof packets + run artifacts
 
-The scaffold seeds two example missions and drops a workspace README.md +
-STEERING.md so a fresh install has browsable Project content. `--root <path>`
-targets a non-default root for this call; `--dry-run` reports what would be
-created without writing. `--force` overwrites existing FILES but never deletes
+The scaffold seeds one example mission (`getting-started`) with multiple
+slices, and drops a workspace README.md + STEERING.md so a fresh install has
+browsable Project content. `--root <path>` targets a non-default root for
+this call; `--dry-run` reports what would be created without writing.
+`--force` overwrites existing FILES but never deletes
 directories — operator content is safe.
 
 ### Redirect the workspace root
@@ -247,8 +250,18 @@ Once written:
 
 ```bash
 rig workflow validate <workspace_root>/specs/workflows/<name>.yaml --json
-rig workflow instantiate <workspace_root>/specs/workflows/<name>.yaml --json
+
+rig workflow instantiate <workspace_root>/specs/workflows/<name>.yaml \
+  --root-objective "<one-line objective for the run>" \
+  --created-by <your-session>@<your-rig> \
+  --json
 ```
+
+Both `--root-objective <text>` and `--created-by <session>` are REQUIRED
+on `instantiate` — omitting either yields a Commander required-option
+error before the daemon is contacted. `--entry-owner <session>` is an
+optional override for the entry-step owner; default routing is per the
+workflow spec.
 
 `validate` returns a structured ok/error report; `instantiate` creates a
 workflow instance + entry-step qitem. Inspect existing surface state with:
