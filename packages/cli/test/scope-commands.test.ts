@@ -391,6 +391,89 @@ describe("rig scope mission create (HG-14 + HG-15)", () => {
     expect(r.exitCode).toBe(1);
     expect(JSON.parse(r.stdout).ok).toBe(false);
   });
+
+  // OPR.0.3.2.21.FR-3 — auto-scaffold MISSION_NOTES.md alongside README.
+  it("FR-3: mission create auto-scaffolds MISSION_NOTES.md with placeholders substituted (default ON; built-in template)", async () => {
+    const r = await run(["mission", "create", "release-0.6.0", "--json"], env.missionsRoot);
+    expect(r.exitCode).toBe(0);
+    const parsed = JSON.parse(r.stdout);
+    expect(parsed.mission.missionNotesPath).toBeTruthy();
+    expect(parsed.mission.missionNotesResolvedFrom).toBe("built-in");
+    const mnPath = parsed.mission.missionNotesPath as string;
+    expect(fs.existsSync(mnPath)).toBe(true);
+    const content = fs.readFileSync(mnPath, "utf8");
+    // Placeholders must be substituted.
+    expect(content).not.toMatch(/\{\{mission_id\}\}/);
+    expect(content).not.toMatch(/\{\{mission_name\}\}/);
+    expect(content).not.toMatch(/\{\{created_date\}\}/);
+    // Substituted values present.
+    expect(content).toMatch(/mission: OPR\.0\.6\.0/);
+    // titleFromSlug("0.6.0") → "0.6.0" (no separators to titlecase); the
+    // bare version string is what lands in mission_name.
+    expect(content).toMatch(/name: 0\.6\.0/);
+    expect(content).toMatch(/cont\.0 — mission scaffolded/);
+    // Canonical structure markers.
+    expect(content).toMatch(/## §1\. Top-of-mind context/);
+    expect(content).toMatch(/## §10\. What NOT to reconstruct/);
+    expect(content).toMatch(/## §A\. <first-seat>@<rig> notes/);
+  });
+
+  it("FR-3: --no-mission-notes opts out — README created, MISSION_NOTES.md is NOT", async () => {
+    const r = await run([
+      "mission", "create", "release-0.7.0",
+      "--no-mission-notes", "--json",
+    ], env.missionsRoot);
+    expect(r.exitCode).toBe(0);
+    const parsed = JSON.parse(r.stdout);
+    expect(parsed.ok).toBe(true);
+    // README still produced.
+    expect(fs.existsSync(parsed.mission.readmePath)).toBe(true);
+    // MISSION_NOTES suppressed.
+    expect(parsed.mission.missionNotesPath).toBeNull();
+    expect(parsed.mission.missionNotesResolvedFrom).toBeNull();
+    expect(fs.existsSync(path.join(parsed.mission.path, "MISSION_NOTES.md"))).toBe(false);
+  });
+
+  it("FR-3: OPENRIG_MISSION_NOTES_TEMPLATE_PATH env var overrides the built-in template", async () => {
+    // Write a custom template at a temp path containing a distinctive marker.
+    const customTemplatePath = path.join(env.root, "custom-mission-notes-template.md");
+    fs.writeFileSync(
+      customTemplatePath,
+      "---\nmission: {{mission_id}}\n---\n\n# CUSTOM TEMPLATE — {{mission_name}}\n\nCREATED ON {{created_date}}\n",
+      "utf8",
+    );
+    const prior = process.env.OPENRIG_MISSION_NOTES_TEMPLATE_PATH;
+    process.env.OPENRIG_MISSION_NOTES_TEMPLATE_PATH = customTemplatePath;
+    try {
+      const r = await run(["mission", "create", "release-0.8.0", "--json"], env.missionsRoot);
+      expect(r.exitCode).toBe(0);
+      const parsed = JSON.parse(r.stdout);
+      expect(parsed.mission.missionNotesResolvedFrom).toBe("env");
+      const content = fs.readFileSync(parsed.mission.missionNotesPath as string, "utf8");
+      expect(content).toMatch(/CUSTOM TEMPLATE — 0\.8\.0/);
+      expect(content).toMatch(/mission: OPR\.0\.8\.0/);
+      // Built-in canonical sections must NOT appear (proves we used the custom one).
+      expect(content).not.toMatch(/## §1\. Top-of-mind context/);
+    } finally {
+      if (prior === undefined) delete process.env.OPENRIG_MISSION_NOTES_TEMPLATE_PATH;
+      else process.env.OPENRIG_MISSION_NOTES_TEMPLATE_PATH = prior;
+    }
+  });
+
+  it("FR-3: OPENRIG_MISSION_NOTES_TEMPLATE_PATH pointing at a missing file fails with a 3-part error and no mission dir leaked", async () => {
+    const prior = process.env.OPENRIG_MISSION_NOTES_TEMPLATE_PATH;
+    process.env.OPENRIG_MISSION_NOTES_TEMPLATE_PATH = path.join(env.root, "does-not-exist.md");
+    try {
+      const r = await run(["mission", "create", "release-0.9.0", "--json"], env.missionsRoot);
+      expect(r.exitCode).toBe(1);
+      const parsed = JSON.parse(r.stdout);
+      expect(parsed.ok).toBe(false);
+      expect(parsed.error.fact).toMatch(/OPENRIG_MISSION_NOTES_TEMPLATE_PATH/);
+    } finally {
+      if (prior === undefined) delete process.env.OPENRIG_MISSION_NOTES_TEMPLATE_PATH;
+      else process.env.OPENRIG_MISSION_NOTES_TEMPLATE_PATH = prior;
+    }
+  });
 });
 
 // ---------------------------------------------------------------------

@@ -42,6 +42,7 @@ import {
   updateFrontmatter,
 } from "../lib/scope/scope-fs.js";
 import {
+  renderMissionNotesTemplate,
   renderMissionTemplate,
   renderSliceTemplate,
   titleFromSlug,
@@ -558,6 +559,7 @@ function buildMissionCreateCommand(): Command {
     .option("--template <kind>", `Template: ${MISSION_TEMPLATE_KINDS.join(" | ")} (auto when name matches release-X.Y.Z)`, "")
     .option("--id <dot-id>", "Explicit dot-ID. Overrides name-pattern inference.")
     .option("--title <text>", "Display title (defaults to titlecased name)")
+    .option("--no-mission-notes", "Skip the auto-scaffold of MISSION_NOTES.md (rare; default is to scaffold from conventions/mission-notes/TEMPLATE.md)")
     .option("--json", "Machine-readable output")
     .action(async (rawName: string, opts, command) => {
       const out = makeStdout();
@@ -629,6 +631,30 @@ function buildMissionCreateCommand(): Command {
         });
         const readmePath = path.join(absPath, "README.md");
         fs.writeFileSync(readmePath, body, "utf8");
+        // OPR.0.3.2.21.FR-3 — auto-scaffold MISSION_NOTES.md from the
+        // mission-notes template (env-var override > built-in bundled).
+        // `--no-mission-notes` opts out (rare).
+        let missionNotesPath: string | null = null;
+        let missionNotesResolvedFrom: "env" | "built-in" | null = null;
+        if (opts.missionNotes !== false) {
+          const rendered = renderMissionNotesTemplate({
+            mission_id: id,
+            mission_name: title,
+            created_date: todayDateISO(),
+          });
+          missionNotesPath = path.join(absPath, "MISSION_NOTES.md");
+          fs.writeFileSync(missionNotesPath, rendered.rendered, "utf8");
+          missionNotesResolvedFrom = rendered.resolvedFrom;
+        }
+        const humanLines = [
+          `Created mission ${name}`,
+          `  id: ${id}`,
+          `  template: ${templateKind}`,
+          `  path: ${absPath}`,
+        ];
+        if (missionNotesPath) {
+          humanLines.push(`  mission-notes: ${missionNotesPath} (template: ${missionNotesResolvedFrom})`);
+        }
         emit(out, {
           ok: true,
           mission: {
@@ -637,13 +663,10 @@ function buildMissionCreateCommand(): Command {
             template: templateKind,
             path: absPath,
             readmePath,
+            missionNotesPath,
+            missionNotesResolvedFrom,
           },
-        }, json, [
-          `Created mission ${name}`,
-          `  id: ${id}`,
-          `  template: ${templateKind}`,
-          `  path: ${absPath}`,
-        ]);
+        }, json, humanLines);
       } catch (err) {
         fail(err, json, out);
       }

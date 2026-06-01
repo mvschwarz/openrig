@@ -72,6 +72,70 @@ export function renderMissionTemplate(kind: MissionTemplateKind, opts: RenderOpt
   return applyPlaceholders(raw, opts);
 }
 
+// OPR.0.3.2.21.FR-3 — MISSION_NOTES.md scaffold support.
+//
+// `rig scope mission create` auto-copies a MISSION_NOTES.md alongside
+// the README. The template lives at scope-templates/mission-notes.md
+// by default; the operator can override via the
+// OPENRIG_MISSION_NOTES_TEMPLATE_PATH env var (banked env-var-pivot
+// pattern: env > built-in fallback).
+
+export interface MissionNotesRenderOpts {
+  mission_id: string;
+  mission_name: string;
+  created_date: string;
+}
+
+function applyMissionNotesPlaceholders(content: string, opts: MissionNotesRenderOpts): string {
+  return content
+    .replace(/\{\{mission_id\}\}/g, opts.mission_id)
+    .replace(/\{\{mission_name\}\}/g, opts.mission_name)
+    .replace(/\{\{created_date\}\}/g, opts.created_date);
+}
+
+/**
+ * Resolve the MISSION_NOTES.md template absolute path.
+ * Env-var override > built-in bundled fallback (scope-templates/mission-notes.md).
+ * Returns the absolute path; the caller reads the file content.
+ */
+export function resolveMissionNotesTemplatePath(envValue?: string): string {
+  const fromEnv = envValue ?? process.env.OPENRIG_MISSION_NOTES_TEMPLATE_PATH;
+  if (fromEnv && fromEnv.trim().length > 0) {
+    const absPath = path.resolve(fromEnv.trim());
+    if (!fs.existsSync(absPath)) {
+      throw new ScopeCliError({
+        fact: `OPENRIG_MISSION_NOTES_TEMPLATE_PATH points at "${fromEnv}", which does not exist.`,
+        consequence: "MISSION_NOTES.md not scaffolded.",
+        action: "Set OPENRIG_MISSION_NOTES_TEMPLATE_PATH to an absolute path to a readable template file, or unset it to use the built-in bundled fallback.",
+      });
+    }
+    return absPath;
+  }
+  return resolveTemplate("mission-notes.md");
+}
+
+/**
+ * Render a MISSION_NOTES.md by reading the resolved template + substituting
+ * the three placeholders (mission_id / mission_name / created_date).
+ *
+ * Surfaces the resolution decision (env-override vs built-in) for callers
+ * that want to log or test the path.
+ */
+export function renderMissionNotesTemplate(
+  opts: MissionNotesRenderOpts,
+  envValue?: string,
+): { rendered: string; resolvedFrom: "env" | "built-in"; absPath: string } {
+  const envVal = envValue ?? process.env.OPENRIG_MISSION_NOTES_TEMPLATE_PATH;
+  const usedEnv = Boolean(envVal && envVal.trim().length > 0);
+  const absPath = resolveMissionNotesTemplatePath(envValue);
+  const raw = fs.readFileSync(absPath, "utf8");
+  return {
+    rendered: applyMissionNotesPlaceholders(raw, opts),
+    resolvedFrom: usedEnv ? "env" : "built-in",
+    absPath,
+  };
+}
+
 /** Convert a folder-slug to a title-cased display name. */
 export function titleFromSlug(slug: string): string {
   return slug
