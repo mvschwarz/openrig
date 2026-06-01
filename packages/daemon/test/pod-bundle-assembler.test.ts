@@ -1111,7 +1111,7 @@ describe("PodBundleManifest validation", () => {
       schema_version: 2, name: "with-agent-images", version: "1.0",
       created_at: "2026-05-18T00:00:00Z", rig_spec: "rig.yaml",
       agents: [{ name: "impl", version: "1.0", path: "agents/impl", original_ref: "local:agents/impl", hash: "abc", import_entries: [] }],
-      agent_images: ["agent-images/seat-a/manifest.yaml", "agent-images/seat-b/manifest.yaml"],
+      agent_images: ["agent-images/seat-a", "agent-images/seat-b"],
     };
     const result = validatePodBundleManifest(raw);
     expect(result.valid).toBe(true);
@@ -1122,7 +1122,7 @@ describe("PodBundleManifest validation", () => {
       schema_version: 2, name: "bad-agent-images", version: "1.0",
       created_at: "2026-05-18T00:00:00Z", rig_spec: "rig.yaml",
       agents: [{ name: "impl", version: "1.0", path: "agents/impl", original_ref: "local:agents/impl", hash: "abc", import_entries: [] }],
-      agent_images: "agent-images/a/manifest.yaml",
+      agent_images: "agent-images/a",
     };
     const result = validatePodBundleManifest(raw);
     expect(result.valid).toBe(false);
@@ -1134,7 +1134,7 @@ describe("PodBundleManifest validation", () => {
       schema_version: 2, name: "bad-agent-images", version: "1.0",
       created_at: "2026-05-18T00:00:00Z", rig_spec: "rig.yaml",
       agents: [{ name: "impl", version: "1.0", path: "agents/impl", original_ref: "local:agents/impl", hash: "abc", import_entries: [] }],
-      agent_images: [99, "agent-images/ok/manifest.yaml"],
+      agent_images: [99, "agent-images/ok"],
     };
     const result = validatePodBundleManifest(raw);
     expect(result.valid).toBe(false);
@@ -1146,7 +1146,7 @@ describe("PodBundleManifest validation", () => {
       schema_version: 2, name: "bad-agent-images", version: "1.0",
       created_at: "2026-05-18T00:00:00Z", rig_spec: "rig.yaml",
       agents: [{ name: "impl", version: "1.0", path: "agents/impl", original_ref: "local:agents/impl", hash: "abc", import_entries: [] }],
-      agent_images: ["../escape/manifest.yaml"],
+      agent_images: ["../escape"],
     };
     const result = validatePodBundleManifest(raw);
     expect(result.valid).toBe(false);
@@ -1162,16 +1162,16 @@ describe("PodBundleManifest validation", () => {
         originalRef: "local:agents/impl", hash: "def",
         importEntries: [],
       }],
-      agentImages: ["agent-images/v2-seat-a/manifest.yaml", "agent-images/v2-seat-b/manifest.yaml"],
+      agentImages: ["agent-images/v2-seat-a", "agent-images/v2-seat-b"],
     };
     const yaml = serializePodBundleManifest(manifest);
     expect(yaml).toContain("agent_images:");
-    expect(yaml).toContain("agent-images/v2-seat-a/manifest.yaml");
+    expect(yaml).toContain("agent-images/v2-seat-a");
     const parsed = parsePodBundleManifest(yaml);
     const validation = validatePodBundleManifest(parsed);
     expect(validation.valid).toBe(true);
     const m = parsed as Record<string, unknown>;
-    expect(m["agent_images"]).toEqual(["agent-images/v2-seat-a/manifest.yaml", "agent-images/v2-seat-b/manifest.yaml"]);
+    expect(m["agent_images"]).toEqual(["agent-images/v2-seat-a", "agent-images/v2-seat-b"]);
   });
 
   it("v2: round-trip preserves compatibility through serialize -> parse", () => {

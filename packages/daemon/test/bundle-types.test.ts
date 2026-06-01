@@ -697,27 +697,27 @@ describe("Bundle types", () => {
   });
 
   it("agent_images as a string array of safe relative paths passes validation", () => {
-    const raw = { ...VALID_RAW, agent_images: ["agent-images/seat-a/manifest.yaml", "agent-images/seat-b/manifest.yaml"] };
+    const raw = { ...VALID_RAW, agent_images: ["agent-images/seat-a", "agent-images/seat-b"] };
     const result = validateBundleManifest(raw);
     expect(result.valid).toBe(true);
   });
 
   it("agent_images as a non-array rejected", () => {
-    const raw = { ...VALID_RAW, agent_images: "agent-images/x/manifest.yaml" };
+    const raw = { ...VALID_RAW, agent_images: "agent-images/x" };
     const result = validateBundleManifest(raw);
     expect(result.valid).toBe(false);
     expect(result.errors.some((e) => e.includes("agent_images must be an array"))).toBe(true);
   });
 
   it("non-string agent_images entry rejected", () => {
-    const raw = { ...VALID_RAW, agent_images: [99, "agent-images/ok/manifest.yaml"] };
+    const raw = { ...VALID_RAW, agent_images: [99, "agent-images/ok"] };
     const result = validateBundleManifest(raw);
     expect(result.valid).toBe(false);
     expect(result.errors.some((e) => e.includes("agent_images[0]") && e.includes("must be a string"))).toBe(true);
   });
 
   it("unsafe agent_images path (dot-dot traversal) rejected", () => {
-    const raw = { ...VALID_RAW, agent_images: ["../escape/manifest.yaml"] };
+    const raw = { ...VALID_RAW, agent_images: ["../escape"] };
     const result = validateBundleManifest(raw);
     expect(result.valid).toBe(false);
     expect(result.errors.some((e) => e.includes("agent_images[0]"))).toBe(true);
@@ -736,17 +736,17 @@ describe("Bundle types", () => {
         algorithm: "sha256",
         files: { "rig.yaml": "e".repeat(64), "packages/pkg/package.yaml": "f".repeat(64) },
       },
-      agentImages: ["agent-images/seat-a/manifest.yaml", "agent-images/seat-b/manifest.yaml"],
+      agentImages: ["agent-images/seat-a", "agent-images/seat-b"],
     };
     const yaml = serializeBundleManifest(manifest);
     expect(yaml).toContain("agent_images:");
-    expect(yaml).toContain("agent-images/seat-a/manifest.yaml");
+    expect(yaml).toContain("agent-images/seat-a");
     const parsed = parseBundleManifest(yaml);
     const validation = validateBundleManifest(parsed);
     expect(validation.valid).toBe(true);
     const normalized = normalizeBundleManifest(parsed);
     expect(normalized.agentImages).toBeDefined();
-    expect(normalized.agentImages).toEqual(["agent-images/seat-a/manifest.yaml", "agent-images/seat-b/manifest.yaml"]);
+    expect(normalized.agentImages).toEqual(["agent-images/seat-a", "agent-images/seat-b"]);
   });
 
   it("missing agent_images round-trips cleanly (no field emitted in YAML)", () => {

@@ -238,11 +238,12 @@ function normalizeContextPacksBlock(raw: unknown): string[] | undefined {
 }
 
 /** Validate optional agent_images[] block. Item 6 / slice-05 Checkpoint 7.3g.
- * Each entry is a relative-safe path to an agent-image's manifest.yaml inside
- * the bundle (per PRD §Item 6 line 197 — agent_images: [path/to/agent-image-
- * name/, ...] — interpreted as the manifest.yaml path per the consumer
- * contract). The router copies the parent directory of each manifest path to
- * the operator agent-images library on install. */
+ * Each entry is a relative-safe path to an agent-image DIRECTORY inside the
+ * bundle (per PRD §Item 6 line 197: agent_images: [path/to/agent-image-name/,
+ * ...]). The router copies the declared directory itself to the operator
+ * agent-images library on install. The consumer
+ * (agent-image-library-service.ts:77-95) requires manifest.yaml to exist
+ * inside each routed image dir; the router enforces that at copy time. */
 function validateAgentImagesBlock(raw: unknown, errors: string[]): void {
   if (raw === undefined) return;
   if (!Array.isArray(raw)) {
@@ -391,7 +392,7 @@ export interface PodBundleManifest {
   workflowSpecs?: string[];
   /** Item 6 cross-primitive bundling: paths to context-pack manifest.yaml files; router copies the parent dir to the operator context-packs library on install (Checkpoint 7.3f). */
   contextPacks?: string[];
-  /** Item 6 cross-primitive bundling: paths to agent-image manifest.yaml files; router copies the parent dir to the operator agent-images library on install (Checkpoint 7.3g). */
+  /** Item 6 cross-primitive bundling: paths to agent-image DIRECTORIES (per PRD §Item 6 line 197); router copies the declared directory to the operator agent-images library on install. Consumer requires manifest.yaml inside each image dir. (Checkpoint 7.3g) */
   agentImages?: string[];
 }
 
@@ -506,7 +507,7 @@ export interface LegacyBundleManifest {
   workflowSpecs?: string[];
   /** Item 6 cross-primitive bundling: paths to context-pack manifest.yaml files; router copies the parent dir to the operator context-packs library on install (Checkpoint 7.3f). */
   contextPacks?: string[];
-  /** Item 6 cross-primitive bundling: paths to agent-image manifest.yaml files; router copies the parent dir to the operator agent-images library on install (Checkpoint 7.3g). */
+  /** Item 6 cross-primitive bundling: paths to agent-image DIRECTORIES (per PRD §Item 6 line 197); router copies the declared directory to the operator agent-images library on install. Consumer requires manifest.yaml inside each image dir. (Checkpoint 7.3g) */
   agentImages?: string[];
 }
 
