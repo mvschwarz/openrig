@@ -7,6 +7,14 @@ import type { StatusDeps } from "./status.js";
 
 const LONG_RUNNING_UP_TIMEOUT_MS = 120_000;
 
+// OPR.0.3.2.22 Bug 3 helper — mirrors cwd-resolution.isPathInsideRoot in
+// the daemon so the CLI can decide whether a path-form sourceRef lives
+// inside the daemon install root without importing the daemon package.
+function isPathInsideRoot(candidate: string, root: string): boolean {
+  const relative = nodePath.relative(nodePath.resolve(root), nodePath.resolve(candidate));
+  return relative === "" || (!relative.startsWith("..") && !nodePath.isAbsolute(relative));
+}
+
 export function upCommand(
   depsOverride?: StatusDeps & {
     lifecycleDeps?: LifecycleDeps;
@@ -188,6 +196,46 @@ Examples:
 
       const isRigBundle = !isRigName && /\.rigbundle$/i.test(sourceRef);
       const targetRoot = opts.target ?? (isRigBundle ? process.cwd() : undefined);
+
+      // OPR.0.3.2.22 Bug 3 — extend the bare `rig up <builtin>` default-cwd
+      // treatment to path-form. Builtin starter specs declare member-level
+      // cwd: "." which resolves to the spec directory (inside the daemon's
+      // install root). Without --cwd that trips getOpenRigInstallCwdError
+      // at preflight. Bare-name form is already rescued at the
+      // resolveLibrarySpec branch above (entry.sourceType === "builtin");
+      // path-form `rig up <install-internal-spec>` is the remaining gap.
+      //
+      // Detection: source is path-form (not isRigName, not isRigBundle),
+      // no --cwd was given, no defaultLibraryCwdOverride was set by the
+      // bare-name branch above, AND the resolved path lives inside the
+      // daemon's install root (fetched via /api/info). When all hold,
+      // default cwdOverride to process.cwd() so the operator's project
+      // dir is used as launch cwd, and print a one-line notice. If
+      // /api/info is unavailable, fall through silently — the daemon
+      // preflight will still surface the install-cwd error.
+      //
+      // Structural redesign of how builtin starter specs declare cwd is
+      // out of scope (deferred to 0.3.3 per the slice triage).
+      if (!opts.cwd && !isRigName && !isRigBundle && defaultLibraryCwdOverride === undefined) {
+        try {
+          // Short timeout: a healthy daemon answers /api/info in <100ms; if
+          // it doesn't, fall through to the daemon's own preflight error
+          // rather than adding a multi-second stall to every rig up.
+          const infoRes = await client.get<{ installRoot?: string }>("/api/info", { timeoutMs: 2000 });
+          const installRoot = infoRes.data?.installRoot;
+          if (installRoot && isPathInsideRoot(sourceRef, installRoot)) {
+            defaultLibraryCwdOverride = process.cwd();
+            if (!opts.json) {
+              console.log("Defaulting cwd to current directory because the spec lives inside the OpenRig install.");
+            }
+          }
+        } catch {
+          // /api/info unavailable — fall through. The daemon preflight
+          // returns getOpenRigInstallCwdError if this is in fact the
+          // install-internal case; the operator gets the same hint they
+          // would have gotten pre-Bug-3.
+        }
+      }
 
       const res = await client.post<Record<string, unknown>>("/api/up", {
         sourceRef,
