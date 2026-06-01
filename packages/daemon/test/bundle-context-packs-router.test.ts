@@ -7,23 +7,32 @@ import { routeContextPacks, type ContextPacksRouterFsOps, type RouteContextPacks
 // contract (context-pack-library-service.scan walks pack dirs whose
 // immediate child is manifest.yaml).
 
-function mockFs(initial: { dirs?: string[] } = {}): ContextPacksRouterFsOps & {
+function mockFs(initial: { dirs?: string[]; files?: string[] } = {}): ContextPacksRouterFsOps & {
   _copyCalls: Array<{ src: string; dest: string }>;
   _mkdirpCalls: string[];
   _dirs: Set<string>;
+  _files: Set<string>;
 } {
   const dirs = new Set<string>(initial.dirs ?? []);
+  const files = new Set<string>(initial.files ?? []);
   const copyCalls: Array<{ src: string; dest: string }> = [];
   const mkdirpCalls: string[] = [];
   return {
     _copyCalls: copyCalls,
     _mkdirpCalls: mkdirpCalls,
     _dirs: dirs,
-    exists: (p: string) => dirs.has(p),
+    _files: files,
+    // exists() respects both dirs and files (matches node:fs.existsSync semantics)
+    exists: (p: string) => dirs.has(p) || files.has(p),
     isDirectory: (p: string) => dirs.has(p),
     mkdirp: (p: string) => { mkdirpCalls.push(p); dirs.add(p); },
     copyDir: (src: string, dest: string) => { copyCalls.push({ src, dest }); dirs.add(dest); },
   };
+}
+
+/** Convenience: build a complete pack fixture (parent dir + manifest.yaml file). */
+function packFixture(packParentDir: string): { dirs: string[]; files: string[] } {
+  return { dirs: [packParentDir], files: [`${packParentDir}/manifest.yaml`] };
 }
 
 const BUNDLE_ROOT = "/bundle/root";
@@ -51,7 +60,7 @@ describe("routeContextPacks", () => {
 
   // C2: routes one pack: copyDir from sourceParentDir to target/<dirname>
   it("routes one context_pack: parent dir copied to target/<dirname>", () => {
-    const fs = mockFs({ dirs: [`${BUNDLE_ROOT}/context-packs/intent`] });
+    const fs = mockFs(packFixture(`${BUNDLE_ROOT}/context-packs/intent`));
     const result = routeContextPacks(
       makeInput({ declaredContextPacks: ["context-packs/intent/manifest.yaml"] }),
       fs,
@@ -70,6 +79,7 @@ describe("routeContextPacks", () => {
   it("routes multiple distinct context_packs each to target/<dirname>", () => {
     const fs = mockFs({
       dirs: [`${BUNDLE_ROOT}/context-packs/intent`, `${BUNDLE_ROOT}/context-packs/persona`],
+      files: [`${BUNDLE_ROOT}/context-packs/intent/manifest.yaml`, `${BUNDLE_ROOT}/context-packs/persona/manifest.yaml`],
     });
     const result = routeContextPacks(
       makeInput({
@@ -84,7 +94,8 @@ describe("routeContextPacks", () => {
     expect(fs._copyCalls).toHaveLength(2);
   });
 
-  // C4: missing source pack dir skipped honestly
+  // C4: missing source pack dir → status=missing (the manifest.yaml file
+  // itself is absent because the parent isn't there either)
   it("missing source pack dir → status=missing (honest-scoping)", () => {
     const fs = mockFs();
     const result = routeContextPacks(
@@ -112,7 +123,10 @@ describe("routeContextPacks", () => {
   // C6 (degenerate-input): basename not manifest.yaml — consumer-invisible
   // class. Per banked PRE-handoff degenerate-input dogfood discipline.
   it("declared path with non-manifest.yaml basename → status=not_manifest", () => {
-    const fs = mockFs({ dirs: [`${BUNDLE_ROOT}/context-packs/oddpack`] });
+    const fs = mockFs({
+      dirs: [`${BUNDLE_ROOT}/context-packs/oddpack`],
+      files: [`${BUNDLE_ROOT}/context-packs/oddpack/pack.yaml`, `${BUNDLE_ROOT}/context-packs/oddpack/manifest.txt`],
+    });
     const result = routeContextPacks(
       makeInput({
         declaredContextPacks: [
@@ -134,10 +148,8 @@ describe("routeContextPacks", () => {
   // second flagged conflict. Banked workflow_specs B1 lesson applied.
   it("two declared packs sharing parent-dir basename → first routed, second conflict", () => {
     const fs = mockFs({
-      dirs: [
-        `${BUNDLE_ROOT}/a/intent`,
-        `${BUNDLE_ROOT}/b/intent`,
-      ],
+      dirs: [`${BUNDLE_ROOT}/a/intent`, `${BUNDLE_ROOT}/b/intent`],
+      files: [`${BUNDLE_ROOT}/a/intent/manifest.yaml`, `${BUNDLE_ROOT}/b/intent/manifest.yaml`],
     });
     const result = routeContextPacks(
       makeInput({
@@ -164,13 +176,9 @@ describe("routeContextPacks", () => {
   // C8: pack source path exists but is a file not a directory — edge case
   // (unusual; manifest.yaml dirname resolved to a file). Skipped honestly.
   it("source parent exists but is a file (not directory) → status=not_directory", () => {
-    // mockFs treats anything in dirs[] as a dir; for this case construct
-    // an exists-but-not-isDirectory state by overriding isDirectory.
-    const fs = mockFs();
-    fs._dirs.add(`${BUNDLE_ROOT}/oddpath`); // exists
-    // Override isDirectory just for this path:
-    const origIsDir = fs.isDirectory;
-    fs.isDirectory = (p: string) => p === `${BUNDLE_ROOT}/oddpath` ? false : origIsDir(p);
+    // Make manifest file exist (so the file-existence check passes) but the
+    // parent is registered as a FILE not a directory.
+    const fs = mockFs({ files: [`${BUNDLE_ROOT}/oddpath`, `${BUNDLE_ROOT}/oddpath/manifest.yaml`] });
     const result = routeContextPacks(
       makeInput({ declaredContextPacks: ["oddpath/manifest.yaml"] }),
       fs,
@@ -187,6 +195,11 @@ describe("routeContextPacks", () => {
         `${BUNDLE_ROOT}/context-packs/ok`,
         `${BUNDLE_ROOT}/context-packs/dup`,
         `${BUNDLE_ROOT}/elsewhere/dup`,
+      ],
+      files: [
+        `${BUNDLE_ROOT}/context-packs/ok/manifest.yaml`,
+        `${BUNDLE_ROOT}/context-packs/dup/manifest.yaml`,
+        `${BUNDLE_ROOT}/elsewhere/dup/manifest.yaml`,
       ],
     });
     const result = routeContextPacks(
@@ -211,5 +224,30 @@ describe("routeContextPacks", () => {
     expect(result.records[3]!.status).toBe("not_manifest");
     expect(result.records[4]!.status).toBe("routed");
     expect(result.records[5]!.status).toBe("conflict");
+  });
+
+  // C10 (degenerate-input / banked guard catch on a0e7e0e1):
+  // parent dir exists but manifest.yaml file itself is absent —
+  // ContextPackLibraryService.scan skips packs missing manifest.yaml
+  // (context-pack-library-service.ts:76). The router must check the
+  // manifest FILE existence, not just the parent dir, or routedCount
+  // claims a consumer-invisible pack.
+  it("parent dir exists but manifest.yaml file missing → status=missing (no false-positive routed)", () => {
+    const fs = mockFs({
+      // Parent dir is present + isDirectory, BUT manifest.yaml is NOT in
+      // files (consumer requires the file itself).
+      dirs: [`${BUNDLE_ROOT}/context-packs/halfpack`],
+    });
+    const result = routeContextPacks(
+      makeInput({ declaredContextPacks: ["context-packs/halfpack/manifest.yaml"] }),
+      fs,
+    );
+    expect(result.records).toHaveLength(1);
+    expect(result.routedCount).toBe(0);
+    expect(result.rejectedCount).toBe(1);
+    expect(result.records[0]!.status).toBe("missing");
+    expect(result.records[0]!.detail).toContain("not present");
+    // CRUCIAL: no copyDir fires (operator-invisible pack must not route)
+    expect(fs._copyCalls).toHaveLength(0);
   });
 });

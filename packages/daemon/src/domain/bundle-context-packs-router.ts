@@ -141,15 +141,22 @@ export function routeContextPacks(
       });
       continue;
     }
-    const sourcePackDir = nodePath.dirname(sourceAbs);
-    if (!fs.exists(sourcePackDir)) {
+    // Manifest-file existence check (banked B1 from a0e7e0e1 guard catch):
+    // the consumer (context-pack-library-service.scan, line 76) skips any
+    // pack dir whose manifest.yaml is absent. A parent-dir-exists-but-
+    // manifest-missing pack would route as status=routed but be invisible
+    // to the consumer — false-positive routedCount class. Check the file
+    // ITSELF, not just the parent, to keep routedCount truthful at the
+    // consumer-visible boundary.
+    if (!fs.exists(sourceAbs)) {
       records.push({
         declaredPath: declared,
         status: "missing",
-        detail: `context_pack source dir '${nodePath.dirname(declared)}' not present in bundle; skipped`,
+        detail: `context_pack manifest '${declared}' not present in bundle; skipped (consumer requires the file itself)`,
       });
       continue;
     }
+    const sourcePackDir = nodePath.dirname(sourceAbs);
     if (!fs.isDirectory(sourcePackDir)) {
       records.push({
         declaredPath: declared,
