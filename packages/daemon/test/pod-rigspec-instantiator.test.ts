@@ -604,6 +604,66 @@ profiles:
     db.close();
   });
 
+  // OPR.0.3.2.22 Bug 2 — no orphan rig record on cycle_error.
+  // Reorder fix: computePodLaunchOrder must run BEFORE createRig so a
+  // detected cycle returns before any DB write happens. Before the fix,
+  // every failed `rig up <builtin>` attempt left an orphan stopped-state
+  // rig record that made retries report "ambiguous library-spec vs
+  // restore-target" — the second-order UX trap behind the openrig-comms
+  // hero-flow paper-cut.
+  it("cycle_error: no orphan rig record persists (Bug 2 reorder)", async () => {
+    const files = {
+      [`${RIG_ROOT}/agents/a/agent.yaml`]: agentYaml("a"),
+      [`${RIG_ROOT}/agents/b/agent.yaml`]: agentYaml("b"),
+    };
+    const { db, rigRepo, inst } = setup(files);
+    const specName = "orphan-cycle-test-rig";
+    const spec = makeRigSpec({
+      name: specName,
+      pods: [{
+        id: "dev", label: "Dev",
+        members: [
+          { id: "a", agentRef: "local:agents/a", profile: "default", runtime: "claude-code", cwd: "." },
+          { id: "b", agentRef: "local:agents/b", profile: "default", runtime: "claude-code", cwd: "." },
+        ],
+        edges: [
+          { kind: "delegates_to", from: "a", to: "b" },
+          { kind: "delegates_to", from: "b", to: "a" },
+        ],
+      }],
+    });
+    const yaml = RigSpecCodec.serialize(spec);
+    const result = await inst.instantiate(yaml, RIG_ROOT);
+    expect(result.ok).toBe(false);
+    if (!result.ok && "code" in result) {
+      expect(result.code).toBe("cycle_error");
+    }
+    // Load-bearing: no rig record persisted under the spec name.
+    const orphans = rigRepo.findRigsByName(specName);
+    expect(orphans, `expected no orphan rig records after cycle_error, found ${JSON.stringify(orphans)}`).toHaveLength(0);
+    db.close();
+  });
+
+  // OPR.0.3.2.22 Bug 2 — rollback on service_boot_failed (prelaunch-hook
+  // failure). Unlike cycle_error, the rig record + pods have been created
+  // by the time the hook runs (the hook needs rigId), so the fix wraps
+  // the failure return with rigRepo.deleteRig(rigId).
+  it("service_boot_failed: rolls back the created rig record (Bug 2 prelaunch-hook rollback)", async () => {
+    const { db, rigRepo, inst } = setup();
+    const specName = "orphan-prelaunch-test-rig";
+    const yaml = RigSpecCodec.serialize(makeRigSpec({ name: specName }));
+    const result = await inst.instantiate(yaml, RIG_ROOT, {
+      prelaunchHook: async () => ({ ok: false, code: "service_boot_failed", message: "test: service boot refused" }),
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok && "code" in result) {
+      expect(result.code).toBe("service_boot_failed");
+    }
+    const orphans = rigRepo.findRigsByName(specName);
+    expect(orphans, `expected no orphan rig records after service_boot_failed, found ${JSON.stringify(orphans)}`).toHaveLength(0);
+    db.close();
+  });
+
   // NS-T05: orphan tmux sessions killed on total failure
   it("kills orphan tmux sessions on total failure", async () => {
     const files = {

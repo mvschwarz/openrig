@@ -169,4 +169,29 @@ describe("SpecLibraryService", () => {
     expect(rigs).toHaveLength(1);
     expect(rigs[0]!.relativePath).toBe("rigs/launch/demo/rig.yaml");
   });
+
+  // OPR.0.3.2.22 Bug 4 — walkYamlFiles now skips noise directories
+  // (.worktrees, node_modules, .git, dist, build, .turbo, .next). The
+  // conveyor.yaml under .worktrees/release-0.3.0-... is the load-bearing
+  // case from the openrig-comms paper-cut report; this pins the
+  // SKIP_DIRS guard at the SpecLibraryService.scan() seam.
+  it("scan skips yaml files inside noise directories (SKIP_DIRS)", () => {
+    writeFileSync(join(tmpDir, "canonical.yaml"), VALID_RIG_YAML);
+
+    const NOISE_DIRS = [".worktrees", "node_modules", ".git", "dist", "build", ".turbo", ".next"];
+    for (const dir of NOISE_DIRS) {
+      mkdirSync(join(tmpDir, dir, "deeper"), { recursive: true });
+      writeFileSync(join(tmpDir, dir, "deeper", "noise.yaml"), VALID_RIG_YAML.replace("test-rig", `noise-${dir}`));
+    }
+
+    const lib = createLibrary();
+    lib.scan();
+
+    const entries = lib.list();
+    expect(entries, `expected only canonical rig (got ${JSON.stringify(entries.map((e) => e.relativePath))})`).toHaveLength(1);
+    expect(entries[0]!.sourcePath).toContain("canonical.yaml");
+    for (const dir of NOISE_DIRS) {
+      expect(entries.every((e) => !e.sourcePath.includes(`/${dir}/`)), `entry from ${dir} leaked through SKIP_DIRS`).toBe(true);
+    }
+  });
 });

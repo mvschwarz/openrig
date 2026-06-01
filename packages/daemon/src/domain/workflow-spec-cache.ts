@@ -326,6 +326,46 @@ export class WorkflowSpecCache {
     return result.changes;
   }
 
+  /**
+   * OPR.0.3.2.22 Bug 4 — prune cached rows whose source_path lives in
+   * noise directories that the post-Bug-4 walkYamlFiles SKIP_DIRS
+   * guard now refuses to scan. Without this prune, rows that were
+   * inserted before the SKIP_DIRS guard landed would survive forever
+   * (the scanner cleanup at spec-library-workflow-scanner.ts only
+   * fires for paths starting with the workspace `workflows/` folder
+   * prefix). Called once at startup. Returns the number of rows
+   * removed.
+   *
+   * installRoot guard (Bug 4 follow-up): when supplied, rows whose
+   * source_path starts with the install root are PRESERVED even if
+   * they match a noise pattern. This is the load-bearing safety for
+   * shipped built-in workflow specs that live at
+   * `<pkg>/dist/builtins/workflow-specs/` in production npm-published
+   * daemons — without this guard the unscoped DELETE would nuke
+   * every shipped built-in on every boot. Pass
+   * `getOpenRigInstallRoot()` from cwd-resolution at the call site.
+   * When omitted, no install-root preservation is applied (test-only
+   * convenience for tests that operate fully outside any install).
+   */
+  pruneNoiseDirRows(installRoot?: string): number {
+    const guardClause = installRoot ? ` AND source_path NOT LIKE ? || '%'` : "";
+    const params: string[] = installRoot ? [installRoot] : [];
+    const result = this.db
+      .prepare(
+        `DELETE FROM workflow_specs WHERE (
+           source_path LIKE '%/.worktrees/%'
+           OR source_path LIKE '%/node_modules/%'
+           OR source_path LIKE '%/.git/%'
+           OR source_path LIKE '%/dist/%'
+           OR source_path LIKE '%/build/%'
+           OR source_path LIKE '%/.turbo/%'
+           OR source_path LIKE '%/.next/%'
+         )${guardClause}`,
+      )
+      .run(...params);
+    return result.changes;
+  }
+
   getByIdOrThrow(specId: string): WorkflowSpecRow {
     const row = this.db
       .prepare(`SELECT * FROM workflow_specs WHERE spec_id = ?`)

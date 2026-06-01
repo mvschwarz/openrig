@@ -137,7 +137,13 @@ describe("Up CLI", () => {
         lastBody = JSON.parse(body);
         res.writeHead(201, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ status: "completed", runId: "r", rigId: "g", stages: [], errors: [] }));
+        return;
       }
+      // OPR.0.3.2.22 Bug 3 — path-form sourceRef triggers a /api/info
+      // call for install-root awareness; respond with a 404 so the CLI
+      // falls through (this test does not exercise the install-internal
+      // path-form gate).
+      res.writeHead(404).end();
     });
 
     await captureLogs(async () => {
@@ -220,7 +226,10 @@ describe("Up CLI", () => {
         lastBody = JSON.parse(body);
         res.writeHead(201, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ status: "completed", runId: "r", rigId: "g", stages: [], errors: [] }));
+        return;
       }
+      // OPR.0.3.2.22 Bug 3 /api/info fallback (404 → CLI falls through).
+      res.writeHead(404).end();
     });
 
     await captureLogs(async () => {
@@ -362,6 +371,104 @@ describe("Up CLI", () => {
 
     server.removeAllListeners("request");
     for (const l of origListeners) server.on("request", l as (...args: unknown[]) => void);
+  });
+
+  // OPR.0.3.2.22 Bug 3 — path-form `rig up <spec-inside-install>` without
+  // --cwd should default cwdOverride to process.cwd() so the spec's
+  // member-level cwd: "." does not resolve into the OpenRig install root
+  // and trip getOpenRigInstallCwdError at preflight. The bare-name form
+  // is already rescued at the resolveLibrarySpec branch (covered by the
+  // earlier library-name test); this pins the path-form gap.
+  it("up path-form spec inside install root defaults cwdOverride to caller cwd and prints notice", async () => {
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const os = await import("node:os");
+
+    const installRoot = fs.mkdtempSync(path.join(os.tmpdir(), "up-bug3-install-"));
+    const specPath = path.join(installRoot, "rigs", "demo", "rig.yaml");
+    fs.mkdirSync(path.dirname(specPath), { recursive: true });
+    fs.writeFileSync(specPath, "version: '0.2'\nname: demo\npods: []\nedges: []\n");
+
+    let lastBody: Record<string, unknown> = {};
+    let infoCalls = 0;
+    const origListeners = server.listeners("request");
+    server.removeAllListeners("request");
+    server.on("request", async (req: http.IncomingMessage, res: http.ServerResponse) => {
+      let body = "";
+      for await (const chunk of req) body += chunk;
+      if (req.url === "/api/info" && req.method === "GET") {
+        infoCalls += 1;
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ installRoot }));
+        return;
+      }
+      if (req.url === "/api/up" && req.method === "POST") {
+        lastBody = JSON.parse(body);
+        res.writeHead(201, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ status: "completed", runId: "r", rigId: "g", stages: [], errors: [] }));
+        return;
+      }
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "not found" }));
+    });
+
+    try {
+      const { logs } = await captureLogs(async () => {
+        await makeCmd().parseAsync(["node", "rig", "up", specPath]);
+      });
+      expect(infoCalls, "expected /api/info to be queried for install-root awareness").toBe(1);
+      expect(lastBody.cwdOverride).toBe(process.cwd());
+      expect(logs.some((l) => l.includes("Defaulting cwd to current directory because the spec lives inside the OpenRig install"))).toBe(true);
+    } finally {
+      server.removeAllListeners("request");
+      for (const l of origListeners) server.on("request", l as (...args: unknown[]) => void);
+      fs.rmSync(installRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("up path-form spec OUTSIDE install root leaves cwdOverride undefined", async () => {
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const os = await import("node:os");
+
+    const installRoot = fs.mkdtempSync(path.join(os.tmpdir(), "up-bug3-install-"));
+    const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), "up-bug3-project-"));
+    const specPath = path.join(projectRoot, "rig.yaml");
+    fs.writeFileSync(specPath, "version: '0.2'\nname: outside-rig\npods: []\nedges: []\n");
+
+    let lastBody: Record<string, unknown> = {};
+    const origListeners = server.listeners("request");
+    server.removeAllListeners("request");
+    server.on("request", async (req: http.IncomingMessage, res: http.ServerResponse) => {
+      let body = "";
+      for await (const chunk of req) body += chunk;
+      if (req.url === "/api/info" && req.method === "GET") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ installRoot }));
+        return;
+      }
+      if (req.url === "/api/up" && req.method === "POST") {
+        lastBody = JSON.parse(body);
+        res.writeHead(201, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ status: "completed", runId: "r", rigId: "g", stages: [], errors: [] }));
+        return;
+      }
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "not found" }));
+    });
+
+    try {
+      const { logs } = await captureLogs(async () => {
+        await makeCmd().parseAsync(["node", "rig", "up", specPath]);
+      });
+      expect(lastBody.cwdOverride).toBeUndefined();
+      expect(logs.some((l) => l.includes("Defaulting cwd to current directory because the spec lives inside the OpenRig install"))).toBe(false);
+    } finally {
+      server.removeAllListeners("request");
+      for (const l of origListeners) server.on("request", l as (...args: unknown[]) => void);
+      fs.rmSync(installRoot, { recursive: true, force: true });
+      fs.rmSync(projectRoot, { recursive: true, force: true });
+    }
   });
 
   it("up apply uses a long-running daemon timeout budget", async () => {

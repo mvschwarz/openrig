@@ -42,6 +42,7 @@ import type { PsProjectionService } from "./domain/ps-projection.js";
 import type { UpCommandRouter } from "./domain/up-command-router.js";
 import type { RigTeardownOrchestrator } from "./domain/rig-teardown.js";
 import { upRoutes } from "./routes/up.js";
+import { infoRoutes } from "./routes/info.js";
 import { downRoutes } from "./routes/down.js";
 import { kernelStatusRoutes } from "./routes/kernel-status.js";
 import type { TranscriptStore } from "./domain/transcript-store.js";
@@ -483,6 +484,7 @@ export function createApp(deps: AppDeps): Hono {
   app.route("/api/bundles", bundleRoutes);
   app.route("/api/ps", psRoutes);
   app.route("/api/up", upRoutes);
+  app.route("/api/info", infoRoutes());
   app.route("/api/down", downRoutes);
   app.route("/api/kernel", kernelStatusRoutes);
   app.route("/api/transcripts", transcriptRoutes());

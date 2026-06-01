@@ -185,12 +185,83 @@ pods:
     // Service boot stage should show failed
     const serviceStage = result.stages.find((s) => s.stage === "service_boot");
     expect(serviceStage).toBeDefined();
-    // No agent sessions should have been launched
-    const createdRig = rigRepo.findRigsByName("failing-services-rig")[0];
-    expect(createdRig).toBeDefined();
-    const sessions = createdRig ? setup.sessionRegistry.getSessionsForRig(createdRig.id) : [];
-    expect(sessions).toHaveLength(0);
+    // OPR.0.3.2.22 Bug 2: pre-fix, a service_boot_failed left an orphan rig
+    // record (no sessions, but the rig existed) that produced the
+    // "ambiguous library-spec vs restore-target" UX trap on the next retry.
+    // Post-fix, the prelaunch-hook failure rolls back the rig record, so
+    // the spec name stays free for a clean retry — and the "no agent
+    // sessions launched" guarantee follows transitively from "no rig".
+    const orphans = rigRepo.findRigsByName("failing-services-rig");
+    expect(orphans, `expected no orphan rig records after service_boot_failed, found ${JSON.stringify(orphans)}`).toHaveLength(0);
     expect(serviceStage!.status).toBe("failed");
+  });
+
+  // OPR.0.3.2.22 Bug 2 follow-up (guard BLOCKING on a29c7883) — when
+  // boot returns ok:false after compose may have started (e.g.
+  // wait_timeout), the prelaunch-hook MUST call teardown best-effort
+  // before the rig record is deleted. Otherwise compose resources
+  // orphan: rig_services cascade-removes with the rig, taking the
+  // normal teardown handle with it. Discriminator: assert teardown
+  // was called on boot failure AND the rig record is still removed.
+  it("service boot failure tears down compose before rig record is deleted (no compose orphan)", async () => {
+    const composePath = path.join(tmpDir, "docker-compose.yml");
+    fs.writeFileSync(composePath, "version: '3'\nservices:\n  vault:\n    image: vault:1.15\n");
+
+    const specPath = writeSpec(`
+version: "0.2"
+name: teardown-on-boot-failure-rig
+services:
+  kind: compose
+  compose_file: docker-compose.yml
+  wait_for:
+    - url: http://localhost:8200/v1/sys/health
+pods:
+  - id: infra
+    label: Infra
+    members:
+      - id: server
+        runtime: terminal
+        agent_ref: "builtin:terminal"
+        profile: none
+        cwd: /tmp
+    edges: []
+`);
+
+    const composeAdapter = new ComposeServicesAdapter(mockExec());
+    const rigRepo = new RigRepository(db);
+    const serviceOrch = new ServiceOrchestrator({ rigRepo, composeAdapter });
+
+    vi.spyOn(serviceOrch, "boot").mockResolvedValue({
+      ok: false,
+      code: "wait_timeout",
+      error: "Service wait targets not healthy after 30s: HTTP probe failed: http://localhost:8200/v1/sys/health",
+      receipt: {
+        kind: "compose",
+        composeFile: "docker-compose.yml",
+        projectName: "teardown-on-boot-failure-rig",
+        services: [{ name: "vault", status: "running", health: "starting" }],
+        waitFor: [{ target: { url: "http://localhost:8200/v1/sys/health" }, status: "unhealthy", detail: "HTTP probe failed" }],
+        capturedAt: new Date().toISOString(),
+      },
+    });
+    const teardownSpy = vi.spyOn(serviceOrch, "teardown").mockResolvedValue({ ok: true });
+
+    const setup = createTestApp(db);
+    (setup.bootstrapOrchestrator as any).deps.serviceOrchestrator = serviceOrch;
+    (setup.bootstrapOrchestrator as any).deps.rigRepo = rigRepo;
+
+    const result = await setup.bootstrapOrchestrator.bootstrap({
+      sourceRef: specPath,
+      mode: "apply",
+    });
+
+    expect(result.status).toBe("failed");
+    // Discriminator: teardown MUST be called when boot fails — that is
+    // the bug guard caught (compose orphan downstream of rig deletion).
+    expect(teardownSpy, "expected serviceOrch.teardown to be called best-effort on boot failure").toHaveBeenCalledTimes(1);
+    // And the rig record is still rolled back (Bug 2 original contract).
+    const orphans = rigRepo.findRigsByName("teardown-on-boot-failure-rig");
+    expect(orphans).toHaveLength(0);
   });
 
   it("plan mode does not boot services", async () => {

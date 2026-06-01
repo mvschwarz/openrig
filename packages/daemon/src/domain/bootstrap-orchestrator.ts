@@ -777,6 +777,21 @@ export class BootstrapOrchestrator {
           status: "failed",
           detail: { code: bootResult.code, error: bootResult.error, receipt: bootResult.receipt },
         });
+        // OPR.0.3.2.22 Bug 2 follow-up — serviceOrch.boot can already have
+        // started compose resources before failing during status/wait. The
+        // PodRigInstantiator will delete the rig record next, which cascades
+        // away rig_services and the normal teardown handle — so any
+        // already-started compose containers would orphan. Tear them down
+        // here best-effort while the rig handle still exists. Teardown
+        // errors are swallowed so they cannot mask the boot failure that
+        // is the load-bearing return.
+        try {
+          await serviceOrch.teardown(rigId);
+        } catch {
+          // Best-effort. If teardown also fails, the boot-failure error
+          // is what the operator needs; manual `docker compose down`
+          // remains available with the compose file path from the spec.
+        }
         return { ok: false, code: "service_boot_failed", message: `Service boot failed: ${bootResult.error}` };
       }
 

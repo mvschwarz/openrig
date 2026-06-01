@@ -794,4 +794,115 @@ edges: []
       db = { close: () => undefined } as unknown as Database.Database;
     });
   });
+
+  // --- OPR.0.3.2.22 Bug 1 BONUS — import_rig stage failures with known codes
+  //     (cycle_error, preflight_failed, validation_failed, service_boot_failed)
+  //     surface as HTTP 4xx with the code at the TOP LEVEL of the response
+  //     body. CLI up.ts:208-227 already branches on res.data["code"] for
+  //     these codes — the daemon just has to put the code where the CLI
+  //     looks, instead of leaving operators staring at a bare 500 with the
+  //     real cause buried in stages[N].detail.code.
+  //
+  //     The conveyor delegates_to cycle (f3449baf already on main) is the
+  //     direct manifestation reported by the openrig-comms hero-flow
+  //     dogfood. This regression also pins the more general contract.
+  describe("OPR.0.3.2.22 Bug 1 BONUS: import_rig stage failures map to HTTP 4xx with top-level code", () => {
+    let specDir: string;
+    let app3: ReturnType<typeof createTestApp>["app"];
+    let db3: Database.Database;
+
+    beforeEach(() => {
+      specDir = fs.mkdtempSync(path.join(os.tmpdir(), "up-route-import-rig-fail-"));
+
+      for (const name of ["builder", "reviewer"]) {
+        const agentDir = path.join(specDir, "agents", name);
+        fs.mkdirSync(agentDir, { recursive: true });
+        fs.writeFileSync(
+          path.join(agentDir, "agent.yaml"),
+          `name: ${name}\nversion: "1.0.0"\nresources:\n  skills: []\nprofiles:\n  default:\n    uses:\n      skills: []\n`,
+        );
+      }
+
+      db3 = createFullTestDb();
+      const realRouterFsOps = {
+        exists: (p: string) => fs.existsSync(p),
+        readFile: (p: string) => fs.readFileSync(p, "utf-8"),
+        readHead: (p: string, n: number) => {
+          const buf = Buffer.alloc(n);
+          const fd = fs.openSync(p, "r");
+          try { fs.readSync(fd, buf, 0, n, 0); } finally { fs.closeSync(fd); }
+          return buf;
+        },
+      };
+      const realInstantiatorFsOps = {
+        exists: (p: string) => fs.existsSync(p),
+        readFile: (p: string) => fs.readFileSync(p, "utf-8"),
+      };
+      const setup3 = createTestApp(db3, {
+        upRouterFsOps: realRouterFsOps,
+        podInstantiatorFsOps: realInstantiatorFsOps,
+      });
+      app3 = setup3.app;
+    });
+
+    afterEach(() => {
+      db3.close();
+      fs.rmSync(specDir, { recursive: true, force: true });
+    });
+
+    it("apply-mode delegates_to cycle returns HTTP 400 with code=cycle_error at top level", async () => {
+      const yaml = `version: "0.2"
+name: cycle-bug-rig
+pods:
+  - id: build
+    label: Build
+    members:
+      - id: builder
+        agent_ref: local:agents/builder
+        profile: default
+        runtime: claude-code
+        cwd: .
+    edges: []
+  - id: review
+    label: Review
+    members:
+      - id: reviewer
+        agent_ref: local:agents/reviewer
+        profile: default
+        runtime: claude-code
+        cwd: .
+    edges: []
+edges:
+  - from: build.builder
+    to: review.reviewer
+    kind: delegates_to
+  - from: review.reviewer
+    to: build.builder
+    kind: delegates_to
+`;
+      const specPath = path.join(specDir, "cycle.yaml");
+      fs.writeFileSync(specPath, yaml, "utf-8");
+
+      const res = await app3.request("/api/up", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sourceRef: specPath }),
+      });
+
+      const bodyForDebug = await res.clone().json();
+      expect(res.status, `expected 400 for import_rig cycle_error, got ${res.status} with body ${JSON.stringify(bodyForDebug)}`).toBe(400);
+      const body = await res.json() as { code?: string; stages?: Array<{ stage: string; status: string; detail?: { code?: string } }> };
+
+      // The load-bearing fix: code surfaces at TOP LEVEL where CLI looks.
+      expect(body.code, `expected top-level code=cycle_error, got body=${JSON.stringify(body)}`).toBe("cycle_error");
+
+      // Provenance discriminator — proves the code came from import_rig stage
+      // (not a resolve_spec misclassification that the existing 400-mapping
+      // path was already handling).
+      const importRigStage = (body.stages ?? []).find((s) => s.stage === "import_rig");
+      expect(importRigStage, `expected import_rig stage in body.stages, got ${JSON.stringify(body.stages)}`).toBeDefined();
+      expect(importRigStage!.status).toBe("failed");
+      expect(importRigStage!.detail?.code).toBe("cycle_error");
+    });
+  });
 });

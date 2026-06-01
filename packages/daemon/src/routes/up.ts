@@ -294,12 +294,29 @@ upRoutes.post("/", async (c) => {
       }
       eventBus.emit({ type: "bootstrap.failed", runId: result.runId, sourceRef, error: result.errors[0] ?? "failed" });
       const hasBlocked = result.stages.some((s) => s.status === "blocked");
+      // OPR.0.3.2.22 Bug 1 BONUS — surface the failure code at the TOP LEVEL
+      // and include import_rig-stage codes (cycle_error, preflight_failed,
+      // validation_failed, service_boot_failed) in the 4xx map. CLI up.ts
+      // already branches on res.data["code"] for these codes; before this
+      // fix the daemon left the code buried in stages[N].detail.code and
+      // returned a bare 500, which is exactly what the openrig-comms
+      // hero-flow dogfood hit on a fresh 0.3.1 install.
+      let topLevelCode: string | undefined;
       const hasBadRequest = result.stages.some((s) => {
-        if (s.stage !== "resolve_spec") return false;
+        if (s.status !== "failed") return false;
         const detail = s.detail as { code?: string } | undefined;
-        return detail?.code === "file_not_found" || detail?.code === "parse_error" || detail?.code === "validation_failed" || detail?.code === "bundle_error" || detail?.code === "cycle_error" || detail?.code === "invalid_cwd";
+        const code = detail?.code;
+        if (!code) return false;
+        const isResolveSpec4xx = s.stage === "resolve_spec" && (code === "file_not_found" || code === "parse_error" || code === "validation_failed" || code === "bundle_error" || code === "cycle_error" || code === "invalid_cwd");
+        const isImportRig4xx = s.stage === "import_rig" && (code === "validation_failed" || code === "preflight_failed" || code === "cycle_error" || code === "service_boot_failed");
+        if (isResolveSpec4xx || isImportRig4xx) {
+          topLevelCode ??= code;
+          return true;
+        }
+        return false;
       });
-      return c.json(result, hasBlocked ? 409 : hasBadRequest ? 400 : 500);
+      const failedBody = topLevelCode ? { ...result, code: topLevelCode } : result;
+      return c.json(failedBody, hasBlocked ? 409 : hasBadRequest ? 400 : 500);
     } catch (err) {
       bootstrapRepo.updateRunStatus(run.id, "failed");
       eventBus.emit({ type: "bootstrap.failed", runId: run.id, sourceRef, error: (err as Error).message });

@@ -645,7 +645,21 @@ export class PodRigInstantiator {
       return { ok: false, code: "preflight_failed", errors: preflight.errors, warnings: preflight.warnings };
     }
 
-    // 3. Create rig
+    // 3. Compute launch order from edges (rejects cycles)
+    //
+    // OPR.0.3.2.22 Bug 2: this MUST run BEFORE createRig. Pre-fix, a
+    // cycle in the spec left an orphan stopped-state rig record because
+    // createRig had already committed before the cycle check ran. The
+    // operator-facing consequence was the "ambiguous library-spec vs
+    // restore-target" UX trap on the very next `rig up <builtin>` retry.
+    let launchOrder: string[];
+    try {
+      launchOrder = this.computePodLaunchOrder(rigSpec);
+    } catch (err) {
+      return { ok: false, code: "cycle_error", message: (err as Error).message };
+    }
+
+    // 4. Create rig (after cycle check passes)
     let rigId: string;
     try {
       const rig = this.deps.rigRepo.createRig(rigSpec.name);
@@ -657,14 +671,6 @@ export class PodRigInstantiator {
       }
     } catch (err) {
       return { ok: false, code: "instantiate_error", message: (err as Error).message };
-    }
-
-    // 4. Compute launch order from edges (rejects cycles)
-    let launchOrder: string[];
-    try {
-      launchOrder = this.computePodLaunchOrder(rigSpec);
-    } catch (err) {
-      return { ok: false, code: "cycle_error", message: (err as Error).message };
     }
 
     // 5. Create pods + nodes + edges, then launch in topological order
@@ -701,10 +707,15 @@ export class PodRigInstantiator {
     const orderMap = new Map(launchOrder.map((id, i) => [id, i]));
     memberEntries.sort((a, b) => (orderMap.get(a.qualifiedId) ?? 999) - (orderMap.get(b.qualifiedId) ?? 999));
 
-    // Prelaunch hook: service gate runs after topology setup, before any node launch
+    // Prelaunch hook: service gate runs after topology setup, before any node launch.
+    //
+    // OPR.0.3.2.22 Bug 2: if the hook fails, roll back the rig record so
+    // the spec name is left free for a clean retry. Pods rely on rigs
+    // via ON DELETE CASCADE so deleting the rig is sufficient.
     if (opts?.prelaunchHook) {
       const hookResult = await opts.prelaunchHook(rigId);
       if (!hookResult.ok) {
+        this.deps.rigRepo.deleteRig(rigId);
         return { ok: false, code: "service_boot_failed", message: hookResult.message };
       }
     }
