@@ -67,4 +67,22 @@ describe("getting-started narrative parity — slice 21", () => {
       "inspect-project-evidence",
     ]);
   });
+
+  // FR-5e A1 (parity) — CLI and daemon both now emit MISSION_NOTES.md
+  // for each getting-started mission. Body content must be byte-
+  // identical so UI-driven init lands the same scaffold as CLI-
+  // driven init. The CLI reads from
+  // packages/cli/src/lib/scope-templates/mission-notes.md; the
+  // daemon embeds the same template content as MISSION_NOTES_BUILT_IN
+  // in default-workspace-scaffold.ts. This test catches drift.
+  it("CLI and daemon emit byte-identical missions/getting-started/MISSION_NOTES.md", () => {
+    const cliFiles = cliScaffold();
+    const daemonFiles = daemonScaffold();
+    const rel = "missions/getting-started/MISSION_NOTES.md";
+    const cliContent = findContent(cliFiles, rel);
+    const daemonContent = findContent(daemonFiles, rel);
+    expect(cliContent, `CLI scaffold missing ${rel}`).toBeDefined();
+    expect(daemonContent, `daemon scaffold missing ${rel}`).toBeDefined();
+    expect(cliContent).toBe(daemonContent);
+  });
 });

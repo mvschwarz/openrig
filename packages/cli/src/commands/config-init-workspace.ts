@@ -612,6 +612,17 @@ export function runInitWorkspace(opts: InitWorkspaceOpts & { configPath?: string
   const dryRun = !!opts.dryRun;
   const force = !!opts.force;
 
+  // FR-5e BLOCKER-1 — precompute the full scaffold file list BEFORE
+  // any filesystem mutation. workspaceScaffoldFiles() now invokes
+  // renderMissionNotesTemplate(), which throws on invalid
+  // OPENRIG_MISSION_NOTES_TEMPLATE_PATH. If we mkdir first then
+  // throw on render, the operator is left with a half-created
+  // workspace that the next `rig workspace doctor` will misread as
+  // partially-initialized. Verify-first-then-write (banked from
+  // FR-3 self-lesson) — fail before any side effect.
+  const scaffoldFiles = workspaceScaffoldFiles();
+  const scaffoldDirs = workspaceScaffoldDirs();
+
   const rootExists = existsSync(root);
   const result: InitWorkspaceResult = {
     root,
@@ -623,14 +634,14 @@ export function runInitWorkspace(opts: InitWorkspaceOpts & { configPath?: string
 
   if (!rootExists && !dryRun) mkdirSync(root, { recursive: true });
 
-  for (const sub of workspaceScaffoldDirs()) {
+  for (const sub of scaffoldDirs) {
     const subPath = join(root, sub);
     const subExists = existsSync(subPath);
     if (!subExists && !dryRun) mkdirSync(subPath, { recursive: true });
     result.subdirs.push({ name: sub, path: subPath, created: !subExists });
   }
 
-  for (const file of workspaceScaffoldFiles()) {
+  for (const file of scaffoldFiles) {
     const absPath = join(root, file.relPath);
     const exists = existsSync(absPath);
     if (exists && !force) {

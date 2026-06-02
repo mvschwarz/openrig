@@ -48,20 +48,37 @@ export function configRoutes(): Hono {
     const dryRun = !!body.dryRun;
     const force = !!body.force;
 
+    // FR-5e BLOCKER-1 — precompute the full scaffold file list BEFORE
+    // any filesystem mutation. workspaceScaffoldFiles() invokes
+    // renderMissionNotesTemplate() which can throw on invalid
+    // OPENRIG_MISSION_NOTES_TEMPLATE_PATH. Failing the route with a
+    // structured 400 BEFORE mkdir keeps the daemon's init surface
+    // symmetric with the CLI runner's verify-first-then-write
+    // posture (banked from FR-3 self-lesson).
+    let scaffoldFiles: ReturnType<typeof workspaceScaffoldFiles>;
+    let scaffoldDirs: ReturnType<typeof workspaceScaffoldDirs>;
+    try {
+      scaffoldFiles = workspaceScaffoldFiles();
+      scaffoldDirs = workspaceScaffoldDirs();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return c.json({ error: "init_workspace_scaffold_unavailable", message }, 400);
+    }
+
     const subdirs: Array<{ name: string; path: string; created: boolean }> = [];
     const files: Array<{ relPath: string; absPath: string; created: boolean; skipped: "exists" | null }> = [];
 
     const rootExists = existsSync(root);
     if (!rootExists && !dryRun) mkdirSync(root, { recursive: true });
 
-    for (const sub of workspaceScaffoldDirs()) {
+    for (const sub of scaffoldDirs) {
       const subPath = join(root, sub);
       const subExists = existsSync(subPath);
       if (!subExists && !dryRun) mkdirSync(subPath, { recursive: true });
       subdirs.push({ name: sub, path: subPath, created: !subExists });
     }
 
-    for (const file of workspaceScaffoldFiles()) {
+    for (const file of scaffoldFiles) {
       const absPath = join(root, file.relPath);
       const fileExists = existsSync(absPath);
       if (fileExists && !force) {

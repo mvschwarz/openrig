@@ -100,4 +100,30 @@ describe("FR-5e A1 — init-workspace scaffolds MISSION_NOTES.md", () => {
     expect(notesFile?.skipped).toBe("exists");
     expect(fs.readFileSync(notesPath, "utf-8")).toBe("operator hand-edited content");
   });
+
+  // GUARD/FR-5e BLOCKER-1 discriminator
+  // (qitem-20260602045638-1a6e964c): invalid
+  // OPENRIG_MISSION_NOTES_TEMPLATE_PATH must fail BEFORE any
+  // filesystem mutation. The previous (pre-fix) flow created
+  // workspace root + subdirs first, then threw on render, leaving a
+  // half-initialized workspace. With the verify-first-then-write
+  // reorder, the throw fires before any mkdir.
+  it("invalid OPENRIG_MISSION_NOTES_TEMPLATE_PATH fails BEFORE any filesystem mutation", () => {
+    const wsRoot = path.join(dir, "leak-target-workspace");
+    expect(fs.existsSync(wsRoot)).toBe(false);
+    const original = process.env.OPENRIG_MISSION_NOTES_TEMPLATE_PATH;
+    process.env.OPENRIG_MISSION_NOTES_TEMPLATE_PATH = path.join(dir, "definitely-not-a-real-template.md");
+    try {
+      expect(() => runInitWorkspace({ root: wsRoot, configPath })).toThrow(
+        /OPENRIG_MISSION_NOTES_TEMPLATE_PATH/,
+      );
+      // Mutation-target: if scaffoldFiles were called AFTER mkdir,
+      // the workspace root would exist on disk. The fix asserts it
+      // does NOT exist.
+      expect(fs.existsSync(wsRoot)).toBe(false);
+    } finally {
+      if (original === undefined) delete process.env.OPENRIG_MISSION_NOTES_TEMPLATE_PATH;
+      else process.env.OPENRIG_MISSION_NOTES_TEMPLATE_PATH = original;
+    }
+  });
 });

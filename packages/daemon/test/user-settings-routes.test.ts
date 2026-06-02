@@ -240,4 +240,38 @@ describe("config routes (User Settings v0)", () => {
     const res = await app.request("/api/config");
     expect(res.status).toBe(503);
   });
+
+  // GUARD/FR-5e BLOCKER-1 discriminator
+  // (qitem-20260602045638-1a6e964c): invalid
+  // OPENRIG_MISSION_NOTES_TEMPLATE_PATH must fail the
+  // /api/config/init-workspace route BEFORE any mkdir on the target
+  // workspace root. The pre-fix flow mkdir'd the root + subdirs
+  // first, then threw on render, leaving a half-initialized
+  // workspace. Verify-first-then-write (banked from FR-3 self-lesson)
+  // — the route now precomputes scaffoldFiles + scaffoldDirs and
+  // returns 400 on render failure with NO filesystem mutation.
+  it("invalid OPENRIG_MISSION_NOTES_TEMPLATE_PATH returns 400 BEFORE any mkdir", async () => {
+    const root = join(tmpDir, "route-leak-target-workspace");
+    expect(existsSync(root)).toBe(false);
+    const original = process.env.OPENRIG_MISSION_NOTES_TEMPLATE_PATH;
+    process.env.OPENRIG_MISSION_NOTES_TEMPLATE_PATH = join(tmpDir, "does-not-exist.md");
+    try {
+      const app = buildApp();
+      const res = await app.request("/api/config/init-workspace", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ root }),
+      });
+      expect(res.status).toBe(400);
+      const body = await res.json() as { error: string; message: string };
+      expect(body.error).toBe("init_workspace_scaffold_unavailable");
+      expect(body.message).toMatch(/OPENRIG_MISSION_NOTES_TEMPLATE_PATH/);
+      // Mutation-target: if precompute were after mkdir, root would
+      // exist on disk. The fix asserts it does NOT exist.
+      expect(existsSync(root)).toBe(false);
+    } finally {
+      if (original === undefined) delete process.env.OPENRIG_MISSION_NOTES_TEMPLATE_PATH;
+      else process.env.OPENRIG_MISSION_NOTES_TEMPLATE_PATH = original;
+    }
+  });
 });
