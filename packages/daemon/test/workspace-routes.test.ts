@@ -100,8 +100,14 @@ describe("workspace doctor HTTP route (slice-21 FR-5)", () => {
     // shape (value/source/defaultValue).
     configPath = path.join(doctorDir, ".test-config.json");
     fs.writeFileSync(configPath, "{}");
-    const oldMtime = new Date(Date.now() - 60_000);
-    fs.utimesSync(configPath, oldMtime, oldMtime);
+    // Config-file mtime is forced to epoch (1970-01-01) so the route's
+    // process.uptime()-derived daemon start is GUARANTEED newer than
+    // the config mtime regardless of Vitest worker uptime. A relative
+    // offset like Date.now() - 60_000 flips check #5 to warn when the
+    // worker has been alive longer than the offset (banked guard
+    // BLOCKER on FR-5c qitem-20260602042720-e27ec982).
+    const epochMtime = new Date(0);
+    fs.utimesSync(configPath, epochMtime, epochMtime);
 
     const stubStore = {
       configPath,
@@ -204,5 +210,45 @@ describe("workspace doctor HTTP route (slice-21 FR-5)", () => {
     expect(res.status).toBe(200);
     const body = await res.json() as { workspaceRoot: string };
     expect(body.workspaceRoot).toBe(doctorDir);
+  });
+
+  // GUARD BLOCKER-1 (qitem-20260602042720-e27ec982) determinism
+  // discriminator: even under a long process.uptime() (simulating a
+  // long-running Vitest worker), the healthy fixture must still
+  // return summary {ok:7, warn:0, fail:0}. A regression where the
+  // route-test config mtime was set relative to Date.now() instead
+  // of an absolute-old epoch would flip check #5 to warn under any
+  // worker uptime greater than the relative offset.
+  it("POST /doctor stays healthy under simulated long worker uptime", async () => {
+    const origUptime = process.uptime;
+    // Force daemon start to a far past time (≈10 years ago at the
+    // current Date.now()); the epoch-1970 config mtime must still be
+    // older.
+    Object.defineProperty(process, "uptime", {
+      value: () => 60 * 60 * 24 * 365 * 10,
+      writable: true,
+      configurable: true,
+    });
+    try {
+      const res = await doctorApp.request("/api/workspace/doctor", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      expect(res.status).toBe(200);
+      const body = await res.json() as {
+        summary: { ok: number; warn: number; fail: number };
+        checks: Array<{ check: string; status: string }>;
+      };
+      expect(body.summary).toEqual({ ok: 7, warn: 0, fail: 0 });
+      const reload = body.checks.find((c) => c.check === "daemon_reload_needed");
+      expect(reload?.status).toBe("ok");
+    } finally {
+      Object.defineProperty(process, "uptime", {
+        value: origUptime,
+        writable: true,
+        configurable: true,
+      });
+    }
   });
 });
