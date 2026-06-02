@@ -19,6 +19,7 @@ import { Command } from "commander";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { ConfigStore } from "../config-store.js";
+import { renderMissionNotesTemplate } from "../lib/scope/templates.js";
 
 export interface InitWorkspaceOpts {
   root?: string;
@@ -539,6 +540,20 @@ export function workspaceScaffoldFiles(): Array<{ relPath: string; content: stri
     files.push(
       { relPath: `missions/${mission.id}/README.md`, content: missionReadme(mission) },
       { relPath: `missions/${mission.id}/PROGRESS.md`, content: missionProgress(mission) },
+      // FR-5e A1 — reuse the FR-3 MISSION_NOTES scaffold helper so a
+      // fresh `rig config init-workspace` produces a getting-started
+      // mission that doctor check #7 (mission_notes_presence) marks
+      // ok. Same env-var-pivot (OPENRIG_MISSION_NOTES_TEMPLATE_PATH >
+      // built-in bundled template) FR-3's `rig scope mission create`
+      // honors.
+      {
+        relPath: `missions/${mission.id}/MISSION_NOTES.md`,
+        content: renderMissionNotesTemplate({
+          mission_id: mission.dotId,
+          mission_name: mission.title,
+          created_date: new Date().toISOString().slice(0, 10),
+        }).rendered,
+      },
     );
     for (const slice of mission.slices) {
       files.push(
@@ -597,6 +612,17 @@ export function runInitWorkspace(opts: InitWorkspaceOpts & { configPath?: string
   const dryRun = !!opts.dryRun;
   const force = !!opts.force;
 
+  // FR-5e BLOCKER-1 — precompute the full scaffold file list BEFORE
+  // any filesystem mutation. workspaceScaffoldFiles() now invokes
+  // renderMissionNotesTemplate(), which throws on invalid
+  // OPENRIG_MISSION_NOTES_TEMPLATE_PATH. If we mkdir first then
+  // throw on render, the operator is left with a half-created
+  // workspace that the next `rig workspace doctor` will misread as
+  // partially-initialized. Verify-first-then-write (banked from
+  // FR-3 self-lesson) — fail before any side effect.
+  const scaffoldFiles = workspaceScaffoldFiles();
+  const scaffoldDirs = workspaceScaffoldDirs();
+
   const rootExists = existsSync(root);
   const result: InitWorkspaceResult = {
     root,
@@ -608,14 +634,14 @@ export function runInitWorkspace(opts: InitWorkspaceOpts & { configPath?: string
 
   if (!rootExists && !dryRun) mkdirSync(root, { recursive: true });
 
-  for (const sub of workspaceScaffoldDirs()) {
+  for (const sub of scaffoldDirs) {
     const subPath = join(root, sub);
     const subExists = existsSync(subPath);
     if (!subExists && !dryRun) mkdirSync(subPath, { recursive: true });
     result.subdirs.push({ name: sub, path: subPath, created: !subExists });
   }
 
-  for (const file of workspaceScaffoldFiles()) {
+  for (const file of scaffoldFiles) {
     const absPath = join(root, file.relPath);
     const exists = existsSync(absPath);
     if (exists && !force) {
