@@ -328,8 +328,10 @@ describe("TmuxAdapter", () => {
       await adapter.sendText("r01-dev1-impl", "hello world");
 
       expect(exec).toHaveBeenCalledOnce();
+      // OPR.0.3.3.17: the inline path now carries the `--` end-of-options
+      // sentinel; inert for non-dash content (only delta vs pre-fix is `-- `).
       expect(exec.mock.calls[0]![0]).toBe(
-        "tmux send-keys -t 'r01-dev1-impl' -l 'hello world'"
+        "tmux send-keys -t 'r01-dev1-impl' -l -- 'hello world'"
       );
     });
 
@@ -340,8 +342,27 @@ describe("TmuxAdapter", () => {
       await adapter.sendText("r01-dev1-impl", "echo \"hello\" && $HOME's dir");
 
       expect(exec).toHaveBeenCalledOnce();
+      // OPR.0.3.3.17: `-- ` inserted before the quoted text; quoting unchanged.
       expect(exec.mock.calls[0]![0]).toBe(
-        "tmux send-keys -t 'r01-dev1-impl' -l 'echo \"hello\" && $HOME'\"'\"'s dir'"
+        "tmux send-keys -t 'r01-dev1-impl' -l -- 'echo \"hello\" && $HOME'\"'\"'s dir'"
+      );
+    });
+
+    // OPR.0.3.3.17 AC-1/AC-4 DISCRIMINATOR (flip-proven): dash-prefixed inline
+    // content (--- YAML frontmatter, the norm for per-seat packs) must carry the
+    // -- end-of-options sentinel before the text, else tmux send-keys parses the
+    // content as flags and the delivery fails (seat boots blind). This assertion
+    // FAILS against the pre-fix `-l '<text>'` construction and PASSES after the
+    // fix `-l -- '<text>'`. A test that passes against both forms is false coverage.
+    it("inserts the -- end-of-options sentinel before dash-prefixed (--- frontmatter) content", async () => {
+      const exec = vi.fn<ExecFn>().mockResolvedValue("");
+      const adapter = new TmuxAdapter(exec);
+
+      await adapter.sendText("r01-dev1-impl", "---\ntitle: pack\n---");
+
+      expect(exec).toHaveBeenCalledOnce();
+      expect(exec.mock.calls[0]![0]).toBe(
+        "tmux send-keys -t 'r01-dev1-impl' -l -- '---\ntitle: pack\n---'"
       );
     });
 
@@ -521,8 +542,9 @@ describe("TmuxAdapter", () => {
 
       // sendText targeting canonical name
       await adapter.sendText("dev-impl@auth-feats", "hello");
+      // OPR.0.3.3.17: inline path now carries the `--` end-of-options sentinel.
       expect(exec.mock.calls[2]![0]).toBe(
-        "tmux send-keys -t 'dev-impl@auth-feats' -l 'hello'"
+        "tmux send-keys -t 'dev-impl@auth-feats' -l -- 'hello'"
       );
     });
   });
@@ -818,7 +840,9 @@ describe("TmuxAdapter", () => {
       await adapter.sendText("dev@rig", "hello world");
 
       expect(exec).toHaveBeenCalledOnce();
-      expect(exec.mock.calls[0]![0]).toBe("tmux send-keys -t 'dev@rig' -l 'hello world'");
+      // OPR.0.3.3.17: inline path now carries the `--` end-of-options sentinel;
+      // still the inline path (no buffer, no temp file) for a small payload.
+      expect(exec.mock.calls[0]![0]).toBe("tmux send-keys -t 'dev@rig' -l -- 'hello world'");
       expect(writeFile).not.toHaveBeenCalled();
     });
 

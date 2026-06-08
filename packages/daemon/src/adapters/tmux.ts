@@ -247,7 +247,9 @@ export class TmuxAdapter {
     if (Buffer.byteLength(text, "utf8") > LARGE_PAYLOAD_THRESHOLD_BYTES) {
       return this.sendTextViaBuffer(target, text);
     }
-    const cmd = `tmux send-keys -t ${shellQuote(target)} -l ${shellQuote(text)}`;
+    // `--` (end-of-options) is required so text beginning with `-` (e.g. `---`
+    // YAML frontmatter) is taken literally, not parsed as flags. OPR.0.3.3.17.
+    const cmd = `tmux send-keys -t ${shellQuote(target)} -l -- ${shellQuote(text)}`;
     try {
       await this.exec(cmd);
       return { ok: true };
