@@ -1132,7 +1132,9 @@ describe("Up CLI", () => {
 
     const output = logs.join("\n");
     expect(output).toContain('Rig "tidy-me" is archived');
-    expect(output).toContain("rig unarchive tidy-me");
+    // Remediation must name the rig ID (rig unarchive resolves by id, not name).
+    expect(output).toContain("rig unarchive r-arc");
+    expect(output).not.toContain("rig unarchive tidy-me");
     expect(upHit).toBe(false); // no silent restore
     expect(exitCode).toBe(1);
   });
@@ -1170,7 +1172,51 @@ describe("Up CLI", () => {
 
     const parsed = JSON.parse(logs.join(""));
     expect(parsed.error).toBe("rig_archived");
-    expect(parsed.action).toBe("rig unarchive tidy-me");
+    // Action targets the rig ID (rig unarchive resolves by id, not name).
+    expect(parsed.action).toBe("rig unarchive r-arc");
+    expect(parsed.archivedRigIds).toEqual(["r-arc"]);
+    expect(upHit).toBe(false);
+    expect(exitCode).toBe(1);
+  });
+
+  // OPR.0.3.3.19 AC-7 (ambiguous): a name shared by multiple archived rigs must
+  // surface the id list, not guess a single (wrong) target.
+  it("up <archived-name> with multiple archived id matches lists each id, never posts /api/up", async () => {
+    const origListeners = server.listeners("request");
+    let upHit = false;
+    server.removeAllListeners("request");
+    server.on("request", async (req: http.IncomingMessage, res: http.ServerResponse) => {
+      let body = "";
+      for await (const chunk of req) body += chunk;
+      if (req.url === "/api/rigs/summary" && req.method === "GET") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify([]));
+      } else if (req.url === "/api/rigs/summary?archived=only" && req.method === "GET") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify([
+          { id: "r-arc-1", name: "dupe", nodeCount: 1 },
+          { id: "r-arc-2", name: "dupe", nodeCount: 1 },
+        ]));
+      } else if (req.url === "/api/up" && req.method === "POST") {
+        upHit = true;
+        res.writeHead(201, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ status: "completed" }));
+      } else {
+        res.writeHead(404);
+        res.end();
+      }
+    });
+
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "up", "dupe"]);
+    });
+
+    server.removeAllListeners("request");
+    for (const l of origListeners) server.on("request", l as (...args: unknown[]) => void);
+
+    const output = logs.join("\n");
+    expect(output).toContain("rig unarchive r-arc-1");
+    expect(output).toContain("rig unarchive r-arc-2");
     expect(upHit).toBe(false);
     expect(exitCode).toBe(1);
   });

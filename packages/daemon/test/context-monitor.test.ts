@@ -22,6 +22,7 @@ import { agentspecRebootSchema } from "../src/db/migrations/014_agentspec_reboot
 import { podNamespaceSchema } from "../src/db/migrations/017_pod_namespace.js";
 import { contextUsageSchema } from "../src/db/migrations/018_context_usage.js";
 import { externalCliAttachmentSchema } from "../src/db/migrations/019_external_cli_attachment.js";
+import { rigArchiveSchema } from "../src/db/migrations/042_rig_archive.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { ContextUsageStore } from "../src/domain/context-usage-store.js";
@@ -34,6 +35,10 @@ const ALL_MIGRATIONS = [
   packagesSchema, installJournalSchema, journalSeqSchema, bootstrapSchema,
   discoverySchema, discoveryFkFix, agentspecRebootSchema, podNamespaceSchema,
   contextUsageSchema, externalCliAttachmentSchema,
+  // OPR.0.3.3.19: rig-repository.listRigs now filters `archived_at IS NULL`, so
+  // any real-DB fixture exercising listRigs/getRigSummaries must install the
+  // archive migration or hit `no such column: archived_at`.
+  rigArchiveSchema,
 ];
 
 describe("ContextMonitor", () => {

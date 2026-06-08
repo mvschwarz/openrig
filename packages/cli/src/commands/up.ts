@@ -153,18 +153,31 @@ Examples:
             const archRes = await client.get<Array<{ id: string; name: string }>>(
               "/api/rigs/summary?archived=only",
             );
-            const archivedMatch = (archRes.data ?? []).some((r) => r.name === source);
-            if (archivedMatch) {
+            const archivedMatches = (archRes.data ?? []).filter((r) => r.name === source);
+            if (archivedMatches.length > 0) {
+              // `rig unarchive` resolves by rig ID, not name (it posts to
+              // /api/rigs/<rigId>/unarchive), so the remediation MUST name the
+              // id - telling the operator `rig unarchive <name>` would 404. If
+              // the name is ambiguous across multiple archived rigs, surface the
+              // id list rather than guessing a single target.
+              const ids = archivedMatches.map((r) => r.id);
               if (opts.json) {
                 console.log(JSON.stringify({
                   error: "rig_archived",
                   rig: source,
-                  action: `rig unarchive ${source}`,
+                  archivedRigIds: ids,
+                  action: ids.length === 1
+                    ? `rig unarchive ${ids[0]}`
+                    : `rig unarchive <rigId> (archived rigs named '${source}': ${ids.join(", ")})`,
                 }));
-              } else {
+              } else if (ids.length === 1) {
                 console.error(`Rig "${source}" is archived, so it is hidden from 'rig up' name resolution.`);
-                console.error(`  Bring it back first: rig unarchive ${source}`);
+                console.error(`  Bring it back first: rig unarchive ${ids[0]}`);
                 console.error(`  Then power it on:    rig up ${source}`);
+              } else {
+                console.error(`${ids.length} archived rigs are named "${source}"; they are hidden from 'rig up' name resolution.`);
+                console.error(`  Unarchive the one you want by id (then 'rig up'):`);
+                for (const id of ids) console.error(`    rig unarchive ${id}`);
               }
               process.exitCode = 1;
               return;
