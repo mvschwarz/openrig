@@ -26,6 +26,11 @@ interface PsEntry {
   lifecycleState?: "running" | "recoverable" | "stopped" | "degraded" | "attention_required";
   uptime: string | null;
   latestSnapshot: string | null;
+  /** OPR.0.3.3.19 - ISO timestamp when archived, or null if active. Present
+   *  only when the daemon supports archive; optional for back-compat. */
+  archivedAt?: string | null;
+  /** OPR.0.3.3.19 - convenience flag; true iff the rig is archived. */
+  isArchived?: boolean;
 }
 
 interface NodeEntry {
@@ -167,6 +172,9 @@ interface PsCliOptions {
   filter?: string;
   host?: string;
   active?: boolean;
+  /** OPR.0.3.3.19 - include archived rigs (default excludes them). Parity
+   *  with `rig stream list --include-archived`. */
+  includeArchived?: boolean;
 }
 
 export interface PsDeps extends StatusDeps {
@@ -352,6 +360,13 @@ function applyNodeFilter(entries: NodeEntry[], filter: ParsedFilter): NodeEntry[
   });
 }
 
+// OPR.0.3.3.19 - build the /api/ps path, opting archived rigs back in when
+// --include-archived is set. Default (no flag) leaves the daemon's
+// archived-excluding default in force.
+function psApiPath(opts: PsCliOptions): string {
+  return opts.includeArchived ? "/api/ps?includeArchived=true" : "/api/ps";
+}
+
 function selectFields<T extends Record<string, unknown>>(entries: T[], fields: string[]): Array<Record<string, unknown>> {
   return entries.map((e) => {
     const out: Record<string, unknown> = {};
@@ -443,6 +458,7 @@ Examples:
   rig ps --filter name-prefix=demo                Filter by rig-name prefix
   rig ps --nodes                                  Per-node detail (human; truncated to ${HUMAN_NODE_BUDGET})
   rig ps --nodes --json --limit 50                Bounded per-node JSON envelope
+  rig ps --include-archived                       Include archived rigs (marked with *); hidden by default
   rig ps --nodes --active                         Show only nodes whose agentActivity.state == running (PL-019)
   rig ps --nodes --filter agentActivity.state=running
                                                   Same as --active (the explicit form)
@@ -488,6 +504,7 @@ Exit codes:
     .option("--summary", "Emit aggregate-only output (counts by status/lifecycle)")
     .option("--filter <key=value>", "Filter entries; supported keys: status, lifecycleState, name-prefix, name, agentActivity.state")
     .option("--active", "Shortcut for --filter agentActivity.state=running (PL-019)")
+    .option("--include-archived", "Include archived rigs (default hides them); parity with 'rig stream list --include-archived'")
     .option("--host <id>", "Run on a remote host declared in ~/.openrig/hosts.yaml (CLI-side ssh shell-out)")
     .action(async (opts: PsCliOptions) => {
       const deps = getDepsF();
@@ -568,7 +585,7 @@ Exit codes:
         return;
       }
 
-      const res = await client.get<PsEntry[]>("/api/ps");
+      const res = await client.get<PsEntry[]>(psApiPath(opts));
 
       if (res.status >= 400) {
         console.error(`Failed to fetch rig list from daemon (HTTP ${res.status}). Check daemon status with: rig status`);
@@ -633,9 +650,14 @@ Exit codes:
 
       const header = padRigRow("RIG", "NODES", "RUNNING", "ACTIVE", "WORK", "STATUS", "LIFECYCLE", "UPTIME", "SNAPSHOT");
       console.log(header);
+      let anyArchivedShown = false;
       for (const e of humanList as PsEntry[]) {
+        // OPR.0.3.3.19 - archived rigs only appear under --include-archived;
+        // mark them with a trailing "*" (legend footer below) so the operator
+        // can tell archived from active at a glance.
+        if (e.isArchived) anyArchivedShown = true;
         console.log(padRigRow(
-          e.rigName ?? e.name,
+          e.isArchived ? `${e.rigName ?? e.name} *` : (e.rigName ?? e.name),
           String(e.nodeCount),
           String(e.runningCount),
           // Slice 15 — "—" when daemon predates the field; honest absence.
@@ -646,6 +668,9 @@ Exit codes:
           e.uptime ?? "—",
           e.latestSnapshot ?? "—",
         ));
+      }
+      if (anyArchivedShown) {
+        console.log("* = archived (hidden from the default view; shown via --include-archived). Reverse with: rig unarchive <rig>");
       }
       if (humanTruncated) {
         const remaining = filtered.length - HUMAN_RIG_BUDGET;
@@ -668,7 +693,7 @@ async function handleNodes(
   fields: string[] | null,
   useEnvelope: boolean,
 ): Promise<void> {
-  const rigRes = await client.get<PsEntry[]>("/api/ps");
+  const rigRes = await client.get<PsEntry[]>(psApiPath(opts));
   if (rigRes.status >= 400) {
     console.error(`Failed to fetch rig list from daemon (HTTP ${rigRes.status}). Check daemon status with: rig status`);
     process.exitCode = 2;
@@ -881,6 +906,7 @@ async function runCrossHostPs(
   if (opts.fields !== undefined) argv.push("--fields", opts.fields);
   if (opts.summary) argv.push("--summary");
   if (opts.filter !== undefined) argv.push("--filter", opts.filter);
+  if (opts.includeArchived) argv.push("--include-archived");
   if (opts.json) argv.push("--json");
 
   const result = await runner(host, argv);

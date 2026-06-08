@@ -20,6 +20,8 @@ import { bundleCommand } from "./commands/bundle.js";
 import { scopeCommand } from "./commands/scope.js";
 import { upCommand } from "./commands/up.js";
 import { downCommand } from "./commands/down.js";
+import { archiveCommand } from "./commands/archive.js";
+import { unarchiveCommand } from "./commands/unarchive.js";
 import { psCommand } from "./commands/ps.js";
 import { mcpCommand } from "./commands/mcp.js";
 import { agentCommand, type AgentDeps } from "./commands/agent.js";
@@ -82,6 +84,8 @@ export interface ProgramDeps {
   bundleDeps?: StatusDeps;
   upDeps?: StatusDeps;
   downDeps?: StatusDeps;
+  archiveDeps?: StatusDeps;
+  unarchiveDeps?: StatusDeps;
   psDeps?: StatusDeps;
   mcpDeps?: StatusDeps;
   agentDeps?: AgentDeps;
@@ -145,6 +149,9 @@ export function createProgram(depsOverride?: ProgramDeps): Command {
   program.addCommand(bundleCommand(depsOverride?.bundleDeps));
   program.addCommand(upCommand(depsOverride?.upDeps));
   program.addCommand(downCommand(depsOverride?.downDeps));
+  // OPR.0.3.3.19 - rig archive affordance (soft, reversible; NOT a delete).
+  program.addCommand(archiveCommand(depsOverride?.archiveDeps));
+  program.addCommand(unarchiveCommand(depsOverride?.unarchiveDeps));
   program.addCommand(psCommand(depsOverride?.psDeps));
   program.addCommand(mcpCommand(depsOverride?.mcpDeps));
   program.addCommand(agentCommand(depsOverride?.agentDeps));

@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, waitFor, cleanup, act } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { useRigSummary } from "../src/hooks/useRigSummary.js";
+import { useArchivedRigs } from "../src/hooks/useArchivedRigs.js";
 import { useRigGraph } from "../src/hooks/useRigGraph.js";
 import { useSnapshots } from "../src/hooks/useSnapshots.js";
 import { useCreateSnapshot, useRestoreSnapshot, useImportRig } from "../src/hooks/mutations.js";
@@ -34,6 +35,14 @@ function SummaryHarness() {
   if (isPending) return <div data-testid="state">pending</div>;
   if (error) return <div data-testid="state">error: {error.message}</div>;
   return <div data-testid="state">data: {data?.length}</div>;
+}
+
+// OPR.0.3.3.19 - harness for useArchivedRigs (archived-only section feed).
+function ArchivedHarness({ enabled }: { enabled?: boolean }) {
+  const { data, isPending, error } = useArchivedRigs({ enabled });
+  if (error) return <div data-testid="state">error: {error.message}</div>;
+  if (isPending) return <div data-testid="state">pending</div>;
+  return <div data-testid="state">archived: {data?.length}</div>;
 }
 
 // Test harness for useRigGraph
@@ -104,6 +113,27 @@ describe("TanStack Query hooks", () => {
 
     // Then data
     await waitFor(() => expect(screen.getByTestId("state").textContent).toBe("data: 1"));
+  });
+
+  // OPR.0.3.3.19: useArchivedRigs hits the archived-only endpoint.
+  it("useArchivedRigs fetches /api/rigs/summary?archived=only", async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => [{ id: "r-arc", name: "tidy-me", nodeCount: 2, latestSnapshotAt: null, latestSnapshotId: null }],
+    });
+    render(<Wrapper><ArchivedHarness /></Wrapper>);
+    await waitFor(() => expect(screen.getByTestId("state").textContent).toBe("archived: 1"));
+    expect(mockFetch).toHaveBeenCalledWith("/api/rigs/summary?archived=only");
+  });
+
+  // OPR.0.3.3.19: lazy fan-out - disabled query never fetches (collapsed
+  // Archive section costs nothing).
+  it("useArchivedRigs does not fetch when disabled", async () => {
+    mockFetch.mockResolvedValue({ ok: true, json: async () => [] });
+    render(<Wrapper><ArchivedHarness enabled={false} /></Wrapper>);
+    // Give react-query a tick; the query must stay idle (no fetch).
+    await waitFor(() => expect(screen.getByTestId("state")).toBeTruthy());
+    expect(mockFetch).not.toHaveBeenCalled();
   });
 
   // Test 3: useRigGraph returns graph data

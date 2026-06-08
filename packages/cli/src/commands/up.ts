@@ -140,6 +140,41 @@ Examples:
         }
         return rigSummariesCache;
       };
+      // OPR.0.3.3.19 (AC-7): archived rigs are excluded from default `rig up`
+      // name resolution. If <source> matches ONLY an archived rig (no active
+      // rig of that name), refuse with an honest error pointing at
+      // `rig unarchive` - never silently restore an archived rig, never
+      // silently fall through. Applies to both default and --existing paths.
+      if (isRigName) {
+        const activeSummaries = await fetchRigSummaries();
+        const activeMatch = activeSummaries.some((r) => r.name === source);
+        if (!activeMatch) {
+          try {
+            const archRes = await client.get<Array<{ id: string; name: string }>>(
+              "/api/rigs/summary?archived=only",
+            );
+            const archivedMatch = (archRes.data ?? []).some((r) => r.name === source);
+            if (archivedMatch) {
+              if (opts.json) {
+                console.log(JSON.stringify({
+                  error: "rig_archived",
+                  rig: source,
+                  action: `rig unarchive ${source}`,
+                }));
+              } else {
+                console.error(`Rig "${source}" is archived, so it is hidden from 'rig up' name resolution.`);
+                console.error(`  Bring it back first: rig unarchive ${source}`);
+                console.error(`  Then power it on:    rig up ${source}`);
+              }
+              process.exitCode = 1;
+              return;
+            }
+          } catch {
+            // Archived-summary probe failed (e.g. older daemon) - fall through
+            // to normal resolution; there are no archive semantics to enforce.
+          }
+        }
+      }
       if (isRigName && !opts.existing) {
         try {
           const { resolveLibrarySpec } = await import("./specs.js");

@@ -16,9 +16,10 @@
 
 import { useEffect, useState } from "react";
 import { Link, useRouterState } from "@tanstack/react-router";
-import { ChevronDown, ChevronRight, Globe } from "lucide-react";
+import { Archive, ChevronDown, ChevronRight, Globe } from "lucide-react";
 import { cn } from "../../lib/utils.js";
 import { useRigSummary } from "../../hooks/useRigSummary.js";
+import { useArchivedRigs } from "../../hooks/useArchivedRigs.js";
 import { useNodeInventory } from "../../hooks/useNodeInventory.js";
 import { displayPodName, inferPodName } from "../../lib/display-name.js";
 import { RuntimeMark } from "../graphics/RuntimeMark.js";
@@ -209,6 +210,56 @@ function RigBranch({ rigId, rigName, activeRigId, activePodName, activeLogicalId
   );
 }
 
+// OPR.0.3.3.19 - the per-host "Archive" section. Archived rigs are hidden from
+// the default tree above; this collapsible section (default collapsed) lists
+// them so they stay discoverable + reversible. Fetch is LAZY: the archived-only
+// query only fires once the section is expanded, so a collapsed archive costs
+// nothing (mirrors the lazy per-rig graph fan-out elsewhere in the tree).
+function ArchiveSection({ activeRigId, activePodName, activeLogicalId }: {
+  activeRigId: string | null;
+  activePodName: string | null;
+  activeLogicalId: string | null;
+}) {
+  const [open, setOpen] = useState(false);
+  const { data: archived } = useArchivedRigs({ enabled: open });
+  const count = archived?.length ?? 0;
+
+  return (
+    <li data-testid="topology-archive-section">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className="w-full flex items-center gap-1 px-2 py-1 hover:bg-surface-low text-left"
+      >
+        {open ? <ChevronDown className="h-3 w-3 text-on-surface-variant" /> : <ChevronRight className="h-3 w-3 text-on-surface-variant" />}
+        <Archive className="h-3 w-3 text-on-surface-variant" />
+        <span className="font-mono text-[11px] uppercase text-on-surface-variant flex-1">Archive</span>
+        {open ? <span className="font-mono text-[9px] text-on-surface-variant">{count}</span> : null}
+      </button>
+      {open ? (
+        <ul className="ml-5">
+          {count === 0 ? (
+            <li className="px-2 py-1 font-mono text-[10px] text-on-surface-variant italic">
+              No archived rigs.
+            </li>
+          ) : (
+            archived!.map((r) => (
+              <RigBranch
+                key={r.id}
+                rigId={r.id}
+                rigName={r.name}
+                activeRigId={activeRigId}
+                activePodName={activePodName}
+                activeLogicalId={activeLogicalId}
+              />
+            ))
+          )}
+        </ul>
+      ) : null}
+    </li>
+  );
+}
+
 export function TopologyTreeView() {
   const { data: rigs } = useRigSummary();
   const [hostOpen, setHostOpen] = useState(true);
@@ -255,6 +306,13 @@ export function TopologyTreeView() {
                   No rigs.
                 </li>
               )}
+              {/* OPR.0.3.3.19 - archived rigs nest under this host, below the
+                  active rigs, keeping the model host-scoped for multi-host. */}
+              <ArchiveSection
+                activeRigId={activeRigId}
+                activePodName={activePodName}
+                activeLogicalId={activeLogicalId}
+              />
             </ul>
           ) : null}
         </li>

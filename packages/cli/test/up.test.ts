@@ -1096,6 +1096,85 @@ describe("Up CLI", () => {
     expect(() => JSON.parse(joined)).not.toThrow();
   });
 
+  // OPR.0.3.3.19 AC-7: a name matching ONLY an archived rig is refused with an
+  // honest error pointing at `rig unarchive` - never a silent restore.
+  it("up <archived-name> refuses with an honest unarchive error and never posts /api/up", async () => {
+    const origListeners = server.listeners("request");
+    let upHit = false;
+    server.removeAllListeners("request");
+    server.on("request", async (req: http.IncomingMessage, res: http.ServerResponse) => {
+      let body = "";
+      for await (const chunk of req) body += chunk;
+      if (req.url === "/api/rigs/summary" && req.method === "GET") {
+        // No ACTIVE rig of this name (default summary excludes archived).
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify([]));
+      } else if (req.url === "/api/rigs/summary?archived=only" && req.method === "GET") {
+        // The name matches an archived rig.
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify([{ id: "r-arc", name: "tidy-me", nodeCount: 2 }]));
+      } else if (req.url === "/api/up" && req.method === "POST") {
+        upHit = true;
+        res.writeHead(201, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ status: "completed", rigId: "r-arc", stages: [], errors: [], warnings: [] }));
+      } else {
+        res.writeHead(404);
+        res.end();
+      }
+    });
+
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "up", "tidy-me"]);
+    });
+
+    server.removeAllListeners("request");
+    for (const l of origListeners) server.on("request", l as (...args: unknown[]) => void);
+
+    const output = logs.join("\n");
+    expect(output).toContain('Rig "tidy-me" is archived');
+    expect(output).toContain("rig unarchive tidy-me");
+    expect(upHit).toBe(false); // no silent restore
+    expect(exitCode).toBe(1);
+  });
+
+  // OPR.0.3.3.19 AC-7 (json): same refusal, machine-readable.
+  it("up <archived-name> --json emits a rig_archived error object and exits 1", async () => {
+    const origListeners = server.listeners("request");
+    let upHit = false;
+    server.removeAllListeners("request");
+    server.on("request", async (req: http.IncomingMessage, res: http.ServerResponse) => {
+      let body = "";
+      for await (const chunk of req) body += chunk;
+      if (req.url === "/api/rigs/summary" && req.method === "GET") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify([]));
+      } else if (req.url === "/api/rigs/summary?archived=only" && req.method === "GET") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify([{ id: "r-arc", name: "tidy-me", nodeCount: 2 }]));
+      } else if (req.url === "/api/up" && req.method === "POST") {
+        upHit = true;
+        res.writeHead(201, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ status: "completed" }));
+      } else {
+        res.writeHead(404);
+        res.end();
+      }
+    });
+
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "up", "tidy-me", "--json"]);
+    });
+
+    server.removeAllListeners("request");
+    for (const l of origListeners) server.on("request", l as (...args: unknown[]) => void);
+
+    const parsed = JSON.parse(logs.join(""));
+    expect(parsed.error).toBe("rig_archived");
+    expect(parsed.action).toBe("rig unarchive tidy-me");
+    expect(upHit).toBe(false);
+    expect(exitCode).toBe(1);
+  });
+
   // L3b: manual-fallback note printed when restore came from a non-auto-pre-down snapshot.
   it("L3b: prints manual-fallback note when daemon restored from a manual snapshot", async () => {
     const origListeners = server.listeners("request");
