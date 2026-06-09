@@ -271,7 +271,10 @@ Success modes:
 
 ### `rig down`
 
-Usage: `rig down <rigId> [--delete] [--force] [--snapshot] [--json]`
+Usage: `rig down <rig> [--delete] [--force] [--snapshot] [--json]`
+
+`<rig>` accepts a rig **name or id**, symmetric with `rig up`. A name is
+resolved to its id via the active (non-archived) rig summary before teardown.
 
 Flags:
 - `--delete`: delete the rig record after teardown
@@ -281,8 +284,9 @@ Flags:
 Notes:
 - When `--snapshot` succeeds, human output includes the restore command.
 - If the rig name is uniquely reusable, the handoff prefers `rig up <rigName>`.
-- v0.2.0 known issue: `rig down <name> --delete` can return HTTP 404; use
-  `rig ps` to find the rig ID and run `rig down <rigId> --delete`.
+- Destructive-op safety: if a name matches more than one rig, `rig down`
+  refuses to tear down any of them and lists the matching ids - re-run with
+  `rig down <id>`. An id always resolves directly (ids are never ambiguous).
 
 ### `rig env`
 

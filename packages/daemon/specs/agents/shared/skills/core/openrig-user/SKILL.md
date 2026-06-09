@@ -302,8 +302,10 @@ this host's active daemon ship `policies.claude_compaction.*` ConfigStore keys,
 but no behavior changes unless the operator enables the policy.
 
 Known v0.3.0/v0.3.1 caveats:
-- `rig down <name> --delete` still returns 404 in the known D1 path; use
-  `rig ps` to find the rig ID and then `rig down <rigId> --delete`.
+- `rig down` now accepts a rig name or id (symmetric with `rig up`): the earlier
+  name-to-404 caveat (the D1 path) is resolved in v0.3.3. An ambiguous name
+  matching more than one active rig is refused with the matching ids; re-run
+  with `rig down <id>`.
 - `rig queue` / `rig view` JSON and limit compatibility drift is an open
   follow-up from host-adoption proof; treat it as a compatibility caveat, not a
   daemon-health failure.
@@ -547,11 +549,11 @@ rig requirements <spec> [--json]
 ### Tear a rig down
 
 ```bash
-rig down <rigId>
-rig down <rigId> --snapshot
-rig down <rigId> --delete
-rig down <rigId> --force
-rig down <rigId> --json
+rig down <rig>            # <rig> = rig name or id (active rig)
+rig down <rig> --snapshot
+rig down <rig> --delete
+rig down <rig> --force
+rig down <rig> --json
 ```
 
 If `--snapshot` succeeds, human output includes the restore hint.
