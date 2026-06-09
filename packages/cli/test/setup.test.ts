@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { Command } from "commander";
-import { setupCommand, runSetup, type SetupDeps, type SetupResult } from "../src/commands/setup.js";
+import { setupCommand, runSetup, goldenPathNextSteps, type SetupDeps, type SetupResult } from "../src/commands/setup.js";
 import type { DoctorDeps } from "../src/commands/doctor.js";
 import { resolveCmuxSettingsPath } from "../src/cmux-config.js";
 
@@ -205,6 +205,25 @@ describe("rig setup", () => {
 
     const verify = result.steps.find((s) => s.id === "verify");
     expect(verify?.status).toBe("pass");
+  });
+
+  // OPR.0.3.3.04.2 (AC-1): the ONE canonical ordered golden path over EXISTING
+  // verbs (no mega-command), in sequence, with the durable doc reference.
+  it("AC-1: goldenPathNextSteps is the ordered sequence over existing verbs, with the durable doc", () => {
+    const out = goldenPathNextSteps().join("\n");
+    const upIdx = out.indexOf("rig up");
+    const statusIdx = out.indexOf("rig status");
+    const wsIdx = out.indexOf("rig workspace doctor");
+    const wfIdx = out.indexOf("rig workflow instantiate");
+    const scopeIdx = out.indexOf("rig scope");
+    expect(upIdx).toBeGreaterThan(-1);
+    expect(statusIdx).toBeGreaterThan(upIdx);
+    expect(wsIdx).toBeGreaterThan(statusIdx);
+    expect(wfIdx).toBeGreaterThan(wsIdx);
+    expect(scopeIdx).toBeGreaterThan(wfIdx);
+    expect(out).toContain("docs/reference/getting-started.md");
+    // no magic mega-command - the path is existing verbs only
+    expect(out).not.toMatch(/rig (journey|onboarding)\b/);
   });
 
   it("fails setup honestly when tmux is installed but the default control socket is unhealthy", async () => {

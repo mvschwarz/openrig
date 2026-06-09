@@ -106,6 +106,13 @@ export function statusCommand(depsOverride?: StatusDeps): Command {
     // cmux status
     const cmuxAvailable = cmuxRes?.data?.available ?? false;
     console.log(`cmux: ${cmuxAvailable ? "available" : "unavailable"}`);
+
+    // OPR.0.3.3.04.2 (AC-1): reinforcing HINT back to the one canonical ordered
+    // path - status does not re-author the sequence (that lives in `rig setup`
+    // next-steps + docs/reference/getting-started.md).
+    if (rigs.length === 0) {
+      console.log("\nNext: launch a rig with `rig up <rig-spec>`. Guided path: `rig setup` output or docs/reference/getting-started.md");
+    }
   });
 
   return cmd;

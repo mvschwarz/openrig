@@ -599,6 +599,23 @@ function buildDefaultDoctorDeps(setupDeps: SetupDeps): DoctorDeps {
   };
 }
 
+/**
+ * OPR.0.3.3.04.2 (AC-1): the ONE canonical ordered golden path over EXISTING
+ * verbs - no magic mega-command, no hidden state. `rig setup` prints this as its
+ * next-steps; `rig status`/`rig doctor` only HINT back to it; the durable
+ * reference is docs/reference/getting-started.md. Returns the lines to print.
+ */
+export function goldenPathNextSteps(): string[] {
+  return [
+    "Next steps (the guided path; full reference: docs/reference/getting-started.md):",
+    "  1. rig up <rig-spec>                Launch a rig (auto-starts the daemon; the kernel boots on daemon-start)",
+    "  2. rig status                       See daemon port, kernel readiness, and your effective workspace root",
+    "  3. rig workspace doctor             Check your workspace is ready",
+    "  4. rig workflow instantiate <name>  Start a workflow by its discovered name (e.g. conveyor); 'rig workflow list' shows built-ins",
+    "  5. rig scope ...                    Browse the durable mission/slice artifacts the workflow coordinates",
+  ];
+}
+
 export function setupCommand(depsOverride?: SetupDeps): Command {
   const cmd = new Command("setup").description("Prepare the machine for OpenRig");
 
@@ -632,7 +649,16 @@ export function setupCommand(depsOverride?: SetupDeps): Command {
         if (step.fixHint) console.log(`       Fix: ${step.fixHint}`);
       }
 
-      console.log(`\n${result.ready ? "Setup complete." : "Some steps need attention. Run `rig doctor` for detailed diagnostics."}`);
+      // OPR.0.3.3.04.2 (AC-1): the canonical ordered golden path. `rig setup` is
+      // the primary surface for the new-operator sequence (status/doctor only
+      // HINT back to it; the durable reference is docs/reference/getting-started.md).
+      if (result.ready) {
+        console.log("\nSetup complete.\n");
+        for (const line of goldenPathNextSteps()) console.log(line);
+      } else {
+        console.log("\nSome steps need attention. Run `rig doctor` for detailed diagnostics.");
+        console.log("Once setup is healthy, follow the guided path: docs/reference/getting-started.md");
+      }
       if (!opts.dryRun && !result.ready) process.exitCode = 1;
     });
 
