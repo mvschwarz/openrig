@@ -26,6 +26,46 @@ export function getDaemonUrl(status: DaemonStatus): string {
   return `http://${status.host ?? DEFAULT_HOST}:${status.port}`;
 }
 
+/**
+ * OPR.0.3.3.04.2 (AC-4): the ONE shared honest daemon-not-running error for the
+ * daemon-dependent journey verbs (bootstrap / discover / workspace / workflow).
+ * Mirrors the repo's 3-part fact / consequence / action convention
+ * (commands/archive.ts, commands/queue.ts) so the daemon-dependency UX is
+ * consistent across the new-operator journey instead of four divergent bare
+ * dead-ends. Bounded to the daemon-not-running path - NOT a general
+ * error-framework (that would be its own slice).
+ */
+export interface DaemonNotRunningError {
+  fact: string;
+  consequence: string;
+  action: string;
+}
+
+export function daemonNotRunningError(): DaemonNotRunningError {
+  return {
+    fact: "Daemon not running.",
+    consequence: "This command needs a running daemon.",
+    action: "Run 'rig up' (it auto-starts the daemon), or 'rig daemon start'.",
+  };
+}
+
+/**
+ * Print the shared daemon-not-running error and set a failing exit code. Pass
+ * `{ json: true }` for the agent-facing `{ error: { fact, consequence, action } }`
+ * envelope (matching commands/queue.ts JSON output).
+ */
+export function printDaemonNotRunning(opts?: { json?: boolean }): void {
+  const err = daemonNotRunningError();
+  if (opts?.json) {
+    console.log(JSON.stringify({ error: err }));
+  } else {
+    console.error(`Error: ${err.fact}`);
+    console.error(`  ${err.consequence}`);
+    console.error(`  ${err.action}`);
+  }
+  process.exitCode = 1;
+}
+
 export interface StartOptions {
   port?: number;
   host?: string;

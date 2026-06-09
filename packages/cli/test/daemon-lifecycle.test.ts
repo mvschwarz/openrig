@@ -11,6 +11,8 @@ import {
   resolveDaemonPath,
   buildDaemonEnv,
   ensureWorkspaceScaffold,
+  daemonNotRunningError,
+  printDaemonNotRunning,
   STATE_FILE,
   LOG_FILE,
   OPENRIG_DIR,
@@ -1195,5 +1197,55 @@ describe("ensureWorkspaceScaffold", () => {
       path.join("/tmp/ws", "STEERING.md"),
       expect.any(String),
     );
+  });
+});
+
+// OPR.0.3.3.04.2 (AC-4): the ONE shared daemon-not-running honest error used by
+// the daemon-dependent journey verbs (bootstrap/discover/workspace/workflow).
+describe("daemonNotRunningError / printDaemonNotRunning (AC-4 shared honest error)", () => {
+  it("daemonNotRunningError is the 3-part fact/consequence/action shape pointing to rig up / rig daemon start", () => {
+    const err = daemonNotRunningError();
+    expect(err.fact).toContain("Daemon not running");
+    expect(err.consequence).toContain("needs a running daemon");
+    expect(err.action).toContain("rig up");
+    expect(err.action).toContain("rig daemon start");
+  });
+
+  it("printDaemonNotRunning (human) emits all three parts on stderr and sets exit code 1", () => {
+    const lines: string[] = [];
+    const origErr = console.error;
+    const origExit = process.exitCode;
+    console.error = (...a: unknown[]) => { lines.push(a.join(" ")); };
+    process.exitCode = undefined;
+    try {
+      printDaemonNotRunning();
+    } finally {
+      console.error = origErr;
+    }
+    const exit = process.exitCode;
+    process.exitCode = origExit;
+    const out = lines.join("\n");
+    expect(out).toContain("Daemon not running");
+    expect(out).toContain("needs a running daemon");
+    expect(out).toContain("rig up");
+    expect(exit).toBe(1);
+  });
+
+  it("printDaemonNotRunning({ json: true }) emits the { error: { fact, consequence, action } } envelope", () => {
+    const lines: string[] = [];
+    const origLog = console.log;
+    const origExit = process.exitCode;
+    console.log = (...a: unknown[]) => { lines.push(a.join(" ")); };
+    process.exitCode = undefined;
+    try {
+      printDaemonNotRunning({ json: true });
+    } finally {
+      console.log = origLog;
+    }
+    process.exitCode = origExit;
+    const parsed = JSON.parse(lines.join("")) as { error: { fact: string; consequence: string; action: string } };
+    expect(parsed.error.fact).toContain("Daemon not running");
+    expect(parsed.error.consequence).toContain("needs a running daemon");
+    expect(parsed.error.action).toContain("rig up");
   });
 });
