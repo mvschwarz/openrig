@@ -1,0 +1,343 @@
+# OPR.0.3.3.13.2 - AC-3b expected affected-skills set for the v0.3.1->v0.3.2 release diff.
+#
+# Self-contained FROZEN snapshot so the lookup test is deterministic + portable
+# (no dependency on the substrate skills-corpus path). `skills` is the v0.3.2-era
+# metadata.cli_surfaces_referenced backfill across the 45 CLI-referencing canonical
+# skills; `affected_skills` is the expected output of
+# computeAffectedSkills(release-surface-diff.v0.3.1-v0.3.2.yaml, skills). The test
+# recomputes from `skills` and asserts it equals `affected_skills` - so it proves
+# BOTH zero false-negatives (all 11 affected present) AND zero false-positives (the
+# other 34 absent). Regenerate when the v0.3.2 backfill changes.
+release_from: v0.3.1
+release_to: v0.3.2
+affected_skills:
+  - context-architecture
+  - control-plane-queue
+  - openrig-operator
+  - openrig-user
+  - parent-qitem-coordinator
+  - queue-handoff
+  - rig-bundles-and-shareable-artifacts
+  - rsi-orchestrator-operating
+  - specification-system
+  - vm-e2e
+  - workspace-root-and-repo-context
+skills:
+  agent-startup-and-context-ingestion:
+    - context
+    - whoami
+  attention-queue:
+    - chatroom
+    - send
+  building-agent-software:
+    - adopt
+    - discover
+    - down
+    - export
+    - import
+    - ps
+    - restore
+    - status
+    - up
+  claude-compact-in-place:
+    - send
+    - transcript
+    - whoami
+  cmux-rig-layout:
+    - cmux-layout
+    - send
+    - up
+  codex-seat-auth-refresh:
+    - launch
+    - ps
+  containerized-e2e:
+    - daemon start
+    - daemon stop
+    - doctor
+    - down
+    - expand
+    - export
+    - preflight
+    - ps
+    - restore
+    - snapshot list
+    - up
+  context-architecture:
+    - chatroom
+    - context-pack send
+    - queue
+    - send
+  control-plane-capabilities:
+    - chatroom
+    - send
+  control-plane-queue:
+    - queue create
+    - queue handoff
+    - queue list
+    - queue show
+    - queue update
+    - send
+  control-plane-workflows:
+    - ps
+  cross-host-rig-commands:
+    - capture
+    - daemon start
+    - host list
+    - host show
+    - ps
+    - send
+    - whoami
+  extension-and-user-workspace:
+    - workflow
+  externalized-memory-surfaces:
+    - ask
+    - down
+    - transcript
+    - up
+  feature-rollout:
+    - broadcast
+    - send
+  forming-an-openrig-mental-model:
+    - ask
+    - capture
+    - down
+    - ps
+    - send
+    - transcript
+    - up
+    - whoami
+  high-velocity-implementation-pair:
+    - capture
+    - send
+    - whoami
+  human-agent-operator-posture:
+    - bootstrap
+    - destroy
+    - ps
+    - queue handoff
+    - queue handoff-and-complete
+  looping-workflows:
+    - queue handoff
+    - queue handoff-and-complete
+    - send
+    - up
+  native-session-file-lab-boundary:
+    - send
+    - transcript
+  openrig-architect:
+    - agent validate
+    - capture
+    - daemon start
+    - ps
+    - send
+    - spec validate
+    - specs ls
+    - up
+    - whoami
+  openrig-conventions-codemap:
+    - send
+  openrig-operator:
+    - capture
+    - config get
+    - daemon status
+    - ps
+    - queue
+    - queue create
+    - queue show
+    - queue-legacy
+    - send
+    - whoami
+  openrig-upgrade:
+    - capture
+    - daemon adopt-state
+    - daemon start
+    - daemon status
+    - daemon stop
+    - down
+    - ps
+    - restore-check
+    - snapshot
+    - up
+    - upgrade backup
+    - upgrade preflight
+    - upgrade promote-runtime
+    - upgrade verify
+    - version
+  openrig-user:
+    - adopt
+    - agent validate
+    - ask
+    - attach
+    - bind
+    - bootstrap
+    - broadcast
+    - bundle create
+    - bundle inspect
+    - bundle install
+    - capture
+    - chatroom clear
+    - chatroom history
+    - chatroom send
+    - chatroom topic
+    - chatroom wait
+    - chatroom watch
+    - config
+    - daemon status
+    - discover
+    - doctor
+    - down
+    - env
+    - expand
+    - export
+    - import
+    - launch
+    - mcp serve
+    - package install
+    - package list
+    - package plan
+    - package rollback
+    - package validate
+    - preflight
+    - project
+    - ps
+    - queue
+    - queue create
+    - release
+    - remove
+    - requirements
+    - restore
+    - send
+    - shrink
+    - snapshot
+    - snapshot list
+    - spec preflight
+    - spec validate
+    - specs add
+    - specs ls
+    - specs preview
+    - specs remove
+    - specs rename
+    - specs show
+    - specs sync
+    - status
+    - stream
+    - transcript
+    - unclaim
+    - up
+    - view
+    - watchdog
+    - whoami
+    - workflow
+  parent-qitem-coordinator:
+    - queue
+    - queue create
+  permission-posture:
+    - down
+    - up
+  primitive-workspace:
+    - capture
+    - send
+  queue-handoff:
+    - queue
+    - queue create
+    - queue handoff
+    - queue handoff-and-complete
+  research-task:
+    - send
+    - teleport codex
+  rig-bundles-and-shareable-artifacts:
+    - bundle create
+    - bundle inspect
+    - bundle install
+  rig-lifecycle:
+    - destroy
+    - down
+    - ps
+    - release
+    - restore
+    - restore-check
+    - resume
+    - snapshot
+    - unclaim
+    - up
+  rsi-orchestrator-operating:
+    - capture
+    - queue
+    - queue handoff
+    - send
+  runtime-evidence-vocabulary:
+    - ask
+    - ps
+    - restore-check
+  seat-scaling-and-specialization:
+    - adopt
+    - attach
+    - bind
+    - expand
+    - launch
+    - ps
+    - remove
+    - shrink
+    - whoami
+  seating-live-claude-session-into-rig:
+    - bind
+    - capture
+    - discover
+    - ps
+    - restore
+    - whoami
+  security-and-consequence-boundary-policy:
+    - destroy
+    - down
+    - up
+  session-compaction-and-restore:
+    - whoami
+  specification-system:
+    - agent
+    - bundle
+    - spec
+    - specs
+  status-not-chat-orchestrator:
+    - capture
+    - send
+  topology-mutation-and-seat-management:
+    - adopt
+    - attach
+    - bind
+    - discover
+    - expand
+    - launch
+    - ps
+    - release
+    - remove
+    - shrink
+    - unclaim
+    - up
+    - whoami
+  velocity-team-shared:
+    - send
+  vm-e2e:
+    - capture
+    - daemon
+    - daemon start
+    - daemon status
+    - daemon stop
+    - doctor
+    - ps
+    - queue
+    - send
+    - setup
+    - up
+  workflow-runtime:
+    - workflow continue
+    - workflow instantiate
+    - workflow list
+    - workflow project
+    - workflow show
+    - workflow trace
+    - workflow validate
+  workspace-root-and-repo-context:
+    - bundle install
+    - ps
+    - up
+    - whoami
