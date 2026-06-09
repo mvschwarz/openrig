@@ -119,6 +119,44 @@ describe("workflow routes (PL-004 Phase D)", () => {
     expect(body.entryQitemId).toBeDefined();
   });
 
+  // OPR.0.3.3.04.1 (AC-3) discriminator-flip: a discovered spec must be
+  // instantiable BY NAME (no hidden file path). Pre-fix, instantiate fed the
+  // bare name to readThrough -> spec_file_missing (404); post-fix it resolves
+  // the name against the seeded cache to the stored sourcePath -> 201.
+  it("POST /instantiate resolves a seeded spec BY NAME (AC-3 reachability), not just a literal path", async () => {
+    // Seed the spec into the cache the way the starter-spec-loader does at seed
+    // time: a readThrough caches `routes-fixture` by name with its sourcePath.
+    const seed = await app.request("/api/workflow/validate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ specPath }),
+    });
+    expect(seed.status).toBe(200);
+    // Instantiate by the discovered NAME (no path).
+    const res = await app.request("/api/workflow/instantiate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ specPath: "routes-fixture", rootObjective: "by-name", createdBySession: "ops@rig" }),
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { instance: { instanceId: string }; entryQitemId: string };
+    expect(body.instance.instanceId).toMatch(/^[0-9A-Z]{26}$/);
+    expect(body.entryQitemId).toBeDefined();
+  });
+
+  // OPR.0.3.3.04.1: literal-sourcePath fallback preserved. An identifier that is
+  // neither a cached name nor an existing file resolves as a literal path and
+  // 404s honestly (spec_file_missing) - name-resolution does not mask real
+  // missing-path errors.
+  it("POST /instantiate falls back to literal sourcePath for an unmatched name (honest 404)", async () => {
+    const res = await app.request("/api/workflow/instantiate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ specPath: "no-such-name", rootObjective: "x", createdBySession: "ops@rig" }),
+    });
+    expect(res.status).toBe(404);
+  });
+
   it("POST /instantiate surfaces queue destination validation as 400", async () => {
     const rejectingQueueRepo = new QueueRepository(db, bus, { validateRig: () => false });
     const rejectingRuntime = new WorkflowRuntime({

@@ -245,6 +245,35 @@ export class WorkflowSpecCache {
   }
 
   /**
+   * OPR.0.3.3.04.1: resolve a passed identifier to a cached spec's STORED
+   * (already-resolved) sourcePath by NAME / cache-key. Returns the source_path
+   * of the named valid spec (latest version when several exist), or null when no
+   * cached spec carries that name.
+   *
+   * Used so `workflow instantiate <discovered-name>` works for a fresh operator
+   * without a hidden file path: the seeded built-ins are cached by name with the
+   * sourcePath the starter-spec-loader already resolved at seed time (e.g.
+   * `dist/builtins/workflow-specs/...` in a shipped install). Resolution returns
+   * that STORED path verbatim - it does NOT re-derive a path from source-tree
+   * assumptions, so it stays production-layout safe (cf. the slice-16
+   * source-tree-vs-dist lesson). The `version != ''` guard excludes slice-11
+   * diagnostic rows (keyed by file basename with an empty version); valid specs
+   * always carry a version (parseWorkflowSpec requires workflow.version). We
+   * filter on `version` rather than the slice-11 `status` column so resolution
+   * does not depend on a later migration being present.
+   */
+  resolveSourcePathByName(name: string): string | null {
+    const row = this.db
+      .prepare(
+        `SELECT source_path FROM workflow_specs
+           WHERE name = ? AND version != ''
+           ORDER BY version DESC LIMIT 1`,
+      )
+      .get(name) as { source_path: string } | undefined;
+    return row?.source_path ?? null;
+  }
+
+  /**
    * Lists every cached spec, ordered by name then version. Used by the
    * `GET /api/workflow/specs` endpoint. Cheap —
    * the workflow_specs table is bounded by the number of operator-

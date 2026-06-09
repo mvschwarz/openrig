@@ -101,7 +101,15 @@ export class WorkflowRuntime {
    * see the workflow.instantiated + queue.created events together.
    */
   async instantiate(input: InstantiateInput): Promise<InstantiateResult> {
-    const specRow = this.specCache.readThrough(input.specPath);
+    // OPR.0.3.3.04.1 (AC-3 reachability): a fresh operator runs
+    // `workflow instantiate <discovered-name>` (e.g. `conveyor`), not a hidden
+    // file path. Resolve the identifier against the seeded spec cache BY NAME
+    // first (using the cache's already-resolved stored sourcePath), falling back
+    // to treating it as a literal sourcePath only when no named spec matches (an
+    // operator-authored spec at an explicit path). Before this, instantiate fed
+    // the bare name straight to readThrough -> spec_file_missing.
+    const resolvedSpecPath = this.specCache.resolveSourcePathByName(input.specPath) ?? input.specPath;
+    const specRow = this.specCache.readThrough(resolvedSpecPath);
     const validation = this.validator.validate(specRow.spec);
     if (!validation.ok) {
       throw new WorkflowProjectorError(

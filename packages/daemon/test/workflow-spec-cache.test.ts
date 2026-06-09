@@ -109,6 +109,31 @@ describe("WorkflowSpecCache (PL-004 Phase D)", () => {
     }
   });
 
+  // OPR.0.3.3.04.1 (AC-3): resolve a discovered built-in BY NAME to its stored,
+  // already-resolved sourcePath - the seam that lets `workflow instantiate
+  // <name>` work without a hidden file path.
+  it("resolveSourcePathByName returns the cached spec's stored sourcePath; null for an unknown name", () => {
+    const path = join(tmp, "spec.yaml");
+    writeFileSync(path, SAMPLE_SPEC); // caches `test-three-step` with source_path=path
+    cache.readThrough(path);
+    expect(cache.resolveSourcePathByName("test-three-step")).toBe(path);
+    expect(cache.resolveSourcePathByName("no-such-spec")).toBeNull();
+  });
+
+  it("resolveSourcePathByName excludes empty-version rows (slice-11 diagnostic shape)", () => {
+    // Slice-11 diagnostic rows are keyed by file basename with an EMPTY version.
+    // Inserted directly here (base workflow_specs schema, no status column) so
+    // the test proves the `version != ''` guard without needing the slice-11
+    // diagnostic migration. Name-resolution must NOT return such a row's path.
+    db.prepare(
+      `INSERT INTO workflow_specs
+         (spec_id, name, version, purpose, target_rig, roles_json, steps_json,
+          coordination_terminal_turn_rule, source_path, source_hash, cached_at)
+       VALUES (?, ?, '', NULL, NULL, '{}', '[]', 'hot_potato', ?, ?, ?)`,
+    ).run("diag-1", "broken.yaml", join(tmp, "broken.yaml"), "deadbeef", new Date().toISOString());
+    expect(cache.resolveSourcePathByName("broken.yaml")).toBeNull();
+  });
+
   it("parseWorkflowSpec throws spec_yaml_invalid on broken YAML", () => {
     try {
       parseWorkflowSpec("workflow:\n  id: x\n  bad: : :", "/x");
