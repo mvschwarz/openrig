@@ -19,6 +19,7 @@ const LONG_RUNNING_TIMEOUT_MS = 45_000;
 interface RigSummaryEntry {
   id: string;
   name: string;
+  archivedAt?: string | null;
   lifecycleState?: string;
 }
 
@@ -44,21 +45,26 @@ type HandleResolution =
  * handle to an id.
  *
  * Safety order (destructive-op):
- *  1. id-exact-match FIRST - an id is unique, so it is never ambiguous.
- *  2. else name-filter over the summary candidate set:
- *     - exactly 1 match  -> resolve to that id;
- *     - >1 matches       -> AMBIGUOUS: halt, never guess (load-bearing AC-3);
- *     - 0 matches        -> NOT_FOUND: halt, honest error (AC-4).
+ *  1. id-exact-match FIRST, across ALL rigs incl. archived - an id is unique, so
+ *     it is never ambiguous, and an archived rig's id must still reach the
+ *     canonical teardown id path (AC-2 unchanged).
+ *  2. else name-filter over ACTIVE (non-archived) rigs only:
+ *     - exactly 1 active match -> resolve to that id;
+ *     - >1 active matches      -> AMBIGUOUS: halt, never guess (load-bearing AC-3);
+ *     - 0 active matches       -> NOT_FOUND: halt, honest error (AC-4).
  *
- * Note: `/api/rigs/summary` includes archived rigs and exposes no archived flag
- * (rig-repository.ts getRigSummaries has no archived_at filter), so the >1-match
- * halt is strictly fail-safe and also halts a rare active+archived same-name
- * pair (forcing id use) rather than risk guessing.
+ * `/api/rigs/summary` defaults to ACTIVE-only and exposes `archivedAt`; we fetch
+ * with `includeArchived=true` so an archived id still id-matches, then filter
+ * names to active. So an active+archived same-name pair is NOT ambiguous (only
+ * the active candidate counts), and an archived-only name does not resolve by
+ * name (use the id, or the archive path).
  */
 async function resolveRigHandle(client: DaemonClient, handle: string): Promise<HandleResolution> {
   let summaries: RigSummaryEntry[];
   try {
-    const res = await client.get<RigSummaryEntry[]>("/api/rigs/summary");
+    // includeArchived=true so an archived rig's id still id-matches below
+    // (preserving today's `rig down <id>` path); names are filtered to active.
+    const res = await client.get<RigSummaryEntry[]>("/api/rigs/summary?includeArchived=true");
     if (res.status !== 200 || !Array.isArray(res.data)) {
       return { kind: "passthrough", handle };
     }
@@ -67,18 +73,19 @@ async function resolveRigHandle(client: DaemonClient, handle: string): Promise<H
     return { kind: "passthrough", handle };
   }
 
-  // 1. id-exact-match first (AC-2: down by id, unchanged; ids are never ambiguous).
+  // 1. id-exact-match first, across ALL rigs incl. archived (AC-2: down by id,
+  //    unchanged; ids are never ambiguous; archived ids still reach teardown).
   if (summaries.some((r) => r.id === handle)) {
     return { kind: "resolved", id: handle };
   }
 
-  // 2. name-filter (AC-1 / AC-3 / AC-4).
-  const nameMatches = summaries.filter((r) => r.name === handle);
-  if (nameMatches.length === 1) {
-    return { kind: "resolved", id: nameMatches[0]!.id };
+  // 2. name-filter over ACTIVE (non-archived) rigs only, symmetric with `up`.
+  const activeNameMatches = summaries.filter((r) => r.name === handle && r.archivedAt == null);
+  if (activeNameMatches.length === 1) {
+    return { kind: "resolved", id: activeNameMatches[0]!.id };
   }
-  if (nameMatches.length > 1) {
-    return { kind: "ambiguous", name: handle, ids: nameMatches.map((r) => r.id) };
+  if (activeNameMatches.length > 1) {
+    return { kind: "ambiguous", name: handle, ids: activeNameMatches.map((r) => r.id) };
   }
   return { kind: "not_found", handle };
 }

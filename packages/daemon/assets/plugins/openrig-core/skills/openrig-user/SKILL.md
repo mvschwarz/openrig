@@ -281,16 +281,16 @@ runtime at or after `6af2754` is active, `rig up --plan --json` should expose a
 ### Tear a rig down
 
 ```bash
-rig down <rigId>
-rig down <rigId> --snapshot
-rig down <rigId> --delete
-rig down <rigId> --force
-rig down <rigId> --json
+rig down <rig>            # <rig> = rig name or id (active rig)
+rig down <rig> --snapshot
+rig down <rig> --delete
+rig down <rig> --force
+rig down <rig> --json
 ```
 
-Known v0.2.0 public-release caveat: `rig down <name> --delete` can return HTTP 404 even when
-`rig ps --json` exposes the rig name. Use `rig ps` to find the rig ID, then run
-`rig down <rigId> --delete` until `rig-down-name-lookup-404` is fixed.
+`rig down` accepts a rig name or id (symmetric with `rig up`); the earlier
+name-to-404 caveat is resolved in v0.3.3. An ambiguous name matching more than
+one active rig is refused with the matching ids; re-run with `rig down <id>`.
 
 If `--snapshot` succeeds, human output includes the restore hint.
 
