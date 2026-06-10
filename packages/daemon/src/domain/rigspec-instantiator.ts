@@ -453,26 +453,17 @@ export class PodRigInstantiator {
 
           for (const member of pod.members) {
             const qualifiedId = `${pod.id}.${member.id}`;
-            const effectiveCwd = resolveLaunchCwd(member.cwd, rigRoot, opts?.cwdOverride);
-            const node = this.deps.rigRepo.addNode(materializedRigId, qualifiedId, {
-              runtime: member.runtime,
-              model: member.model,
-              codexConfigProfile: member.codexConfigProfile,
-              cwd: effectiveCwd,
-              restorePolicy: member.restorePolicy,
+            const { node, event } = this.createMemberNode({
+              rigId: materializedRigId,
+              qualifiedId,
+              member,
               podId: podRecord.id,
-              agentRef: member.agentRef,
-              profile: member.profile,
-              label: member.label,
+              rigRoot,
+              cwdOverride: opts?.cwdOverride,
             });
             logicalIdToNodeId.set(qualifiedId, node.id);
             nodeResults.push({ logicalId: qualifiedId, status: "materialized" });
-            persistedEvents.push(this.deps.eventBus.persistWithinTransaction({
-              type: "node.added",
-              rigId: materializedRigId,
-              nodeId: node.id,
-              logicalId: qualifiedId,
-            }));
+            persistedEvents.push(event);
           }
         }
 
@@ -1033,6 +1024,44 @@ export class PodRigInstantiator {
     const pod = rigSpec.pods.find((entry) => entry.id === podId);
     const member = pod?.members.find((entry) => entry.id === memberId);
     return pod && member ? { pod, member } : null;
+  }
+
+  /**
+   * create-node primitive (OPR.0.3.3.24): mint a fresh node row for one member
+   * (fresh stable id + fresh qualified logical id, `pod_id` = the given pod) plus
+   * the matching `node.added` event. Extracted from materialize's loop so the
+   * `add_member` converge op and a de-YAML'd `expand` create a member node
+   * WITHOUT fabricating a synthetic rig spec. Identity-migration-FREE: addNode
+   * mints a brand-new identity; nothing existing re-keys. The caller pushes the
+   * returned `event` into its transaction's persisted-events list.
+   */
+  createMemberNode(input: {
+    rigId: string;
+    qualifiedId: string;
+    member: RigSpecPodMember;
+    podId: string;
+    rigRoot: string;
+    cwdOverride?: string;
+  }) {
+    const effectiveCwd = resolveLaunchCwd(input.member.cwd, input.rigRoot, input.cwdOverride);
+    const node = this.deps.rigRepo.addNode(input.rigId, input.qualifiedId, {
+      runtime: input.member.runtime,
+      model: input.member.model,
+      codexConfigProfile: input.member.codexConfigProfile,
+      cwd: effectiveCwd,
+      restorePolicy: input.member.restorePolicy,
+      podId: input.podId,
+      agentRef: input.member.agentRef,
+      profile: input.member.profile,
+      label: input.member.label,
+    });
+    const event = this.deps.eventBus.persistWithinTransaction({
+      type: "node.added",
+      rigId: input.rigId,
+      nodeId: node.id,
+      logicalId: input.qualifiedId,
+    });
+    return { node, event };
   }
 
   /**
