@@ -1,5 +1,7 @@
 # OpenRig
 
+A harness wraps a model. A rig wraps your harnesses. Define your agent team in YAML, boot it with one command. Claude Code and Codex in the same rig, managed as one system.
+
 OpenRig turns AI coding agents from a pile of terminal sessions into a persistent, organized team. A rig is the team that doesn't go away. If you've got tabs full of agents you're afraid to close, this is the layer you're missing: it's open source, it's local, and you're four commands away.
 
 ```bash
