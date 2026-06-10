@@ -422,6 +422,39 @@ export function createMcpServer(client: DaemonClient): McpServer {
     },
   );
 
+  // 18. rig_add — add a single member to an existing pod (the add_member
+  // converge op). Agent parity for `rig add`: the ergonomics live ON the
+  // converge interface, so every future reshape verb inherits this surface.
+  server.tool(
+    "rig_add",
+    "Add a single member to an existing pod in a running rig (the add_member converge op). Identity-migration-free: mints a fresh seat, nothing existing re-keys.",
+    {
+      rigId: z.string().describe("Target rig identifier"),
+      podNamespace: z.string().describe("Namespace of the existing pod to add the member to"),
+      member: z.record(z.string(), z.unknown()).describe("Member fragment with spec snake_case fields: id, runtime, agent_ref, profile, cwd (and optional model, codex_config_profile, restore_policy, label)"),
+      rigRoot: z.string().optional().describe("Root directory for agent resolution"),
+    },
+    async ({ rigId, podNamespace, member, rigRoot }) => {
+      try {
+        const body: Record<string, unknown> = { member };
+        if (rigRoot) body["rigRoot"] = rigRoot;
+        const res = await client.post(
+          `/api/rigs/${encodeURIComponent(rigId)}/pods/${encodeURIComponent(podNamespace)}/members`,
+          body,
+        );
+        // Structural failure: the add persisted (201) but the new node did not
+        // fully launch (failed / attention_required) — surface it as an error so
+        // the agent knows the seat is not live, mirroring the CLI non-zero exit.
+        return mapResult(res, (data) => {
+          const result = data["result"] as { node?: { status?: string } } | undefined;
+          return result?.node?.status !== undefined && result.node.status !== "launched";
+        });
+      } catch (err) {
+        return { content: [{ type: "text" as const, text: (err as Error).message }], isError: true as const };
+      }
+    },
+  );
+
   return server;
 }
 
