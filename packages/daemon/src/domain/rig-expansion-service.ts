@@ -5,7 +5,7 @@ import type { NodeLauncher } from "./node-launcher.js";
 import type { PodRigInstantiator } from "./rigspec-instantiator.js";
 import type { SessionRegistry } from "./session-registry.js";
 import type { ExpansionRequest, ExpansionResult, ExpansionNodeOutcome } from "./types.js";
-import { stringify as stringifyYaml } from "yaml";
+import { RigSpecSchema as PodRigSpecSchema } from "./rigspec-schema.js";
 
 interface RigExpansionServiceDeps {
   db: Database.Database;
@@ -34,13 +34,16 @@ export class RigExpansionService {
       return { ok: false, code: "rig_not_found", error: `Rig "${request.rigId}" not found` };
     }
 
-    // 2. Build synthetic rig spec YAML for the new pod
+    // 2. Build the one-pod spec as a structured OBJECT (OPR.0.3.3.24: no
+    // synthetic-spec YAML round-trip). It flows through the materialize
+    // structured-front (validate + preflight + persistence core) and the launch
+    // core directly.
     const pod = request.pod;
-    const syntheticSpec = this.buildSyntheticSpec(rig.rig.name, pod, request.crossPodEdges);
+    const specObject = this.buildExpansionSpecObject(rig.rig.name, pod, request.crossPodEdges);
 
     // 3. Materialize topology (suppress rig.imported event)
-    const materializeResult = await this.deps.podInstantiator.materialize(
-      syntheticSpec,
+    const materializeResult = await this.deps.podInstantiator.materializeStructured(
+      specObject,
       request.rigRoot ?? ".",
       { targetRigId: request.rigId, suppressSummaryEvent: true },
     );
@@ -66,9 +69,10 @@ export class RigExpansionService {
     const podId = newPod ?? "";
     const podNamespace = pod.id;
 
-    // 5. Launch and fully start the newly created nodes via the pod-aware seam
-    const launchOutcome = await this.deps.podInstantiator.launchMaterialized(
-      syntheticSpec,
+    // 5. Launch and fully start the newly created nodes via the launch core on
+    // the structured spec (no YAML round-trip; normalize is pure).
+    const launchOutcome = await this.deps.podInstantiator.launchValidatedSpec(
+      PodRigSpecSchema.normalize(specObject as Record<string, unknown>),
       request.rigRoot ?? ".",
       request.rigId,
     );
@@ -119,11 +123,11 @@ export class RigExpansionService {
     };
   }
 
-  private buildSyntheticSpec(
+  private buildExpansionSpecObject(
     rigName: string,
     pod: ExpansionRequest["pod"],
     crossPodEdges?: ExpansionRequest["crossPodEdges"],
-  ): string {
+  ): Record<string, unknown> {
     const syntheticSpec: Record<string, unknown> = {
       version: "0.2",
       name: rigName,
@@ -169,8 +173,6 @@ export class RigExpansionService {
       })),
     };
 
-    return stringifyYaml(syntheticSpec, {
-      lineWidth: 0,
-    });
+    return syntheticSpec;
   }
 }

@@ -282,7 +282,7 @@ export class RigInstantiator {
 
 import { RigSpecCodec as PodRigSpecCodec } from "./rigspec-codec.js";
 import { RigSpecSchema as PodRigSpecSchema } from "./rigspec-schema.js";
-import { rigPreflight } from "./rigspec-preflight.js";
+import { rigPreflight, preflightValidatedSpec } from "./rigspec-preflight.js";
 import { resolveAgentRef, type AgentResolverFsOps } from "./agent-resolver.js";
 import { resolveNodeConfig } from "./profile-resolver.js";
 import { resolveStartup } from "./startup-resolver.js";
@@ -403,6 +403,48 @@ export class PodRigInstantiator {
     // persistence CORE (createPod + create-node + edges + events, in one tx)
     // takes the already-parsed+validated spec so `expand` and the `add_member`
     // converge op compose it WITHOUT fabricating a synthetic rig spec.
+    return this.materializeValidatedSpec(rigSpec, rigRoot, opts);
+  }
+
+  /**
+   * materialize with a STRUCTURED front (OPR.0.3.3.24): the YAML-free sibling of
+   * materialize(). Runs the SAME front-end (validate + preflight, via the
+   * preflight CORE using this adapter's fsOps) on an already-built raw spec
+   * OBJECT, then the persistence core - so `expand` (and the add_member op) drop
+   * the synthetic-spec YAML round-trip. Byte-identical to materialize(yaml): same
+   * validate(externalQualifiedIds), same preflight checks, same MaterializeOutcome
+   * error codes (validation_failed / preflight_failed / target_rig_not_found /
+   * materialize_conflict). fsOps stays encapsulated here (the expansion service
+   * has none) - this wrapper is mechanics only, no behaviour/layering change.
+   */
+  async materializeStructured(
+    raw: unknown,
+    rigRoot: string,
+    opts?: { targetRigId?: string; suppressSummaryEvent?: boolean; cwdOverride?: string },
+  ): Promise<MaterializeOutcome> {
+    const targetRig = opts?.targetRigId ? this.deps.rigRepo.getRig(opts.targetRigId) : null;
+    if (opts?.targetRigId && !targetRig) {
+      return { ok: false, code: "target_rig_not_found", message: `Rig "${opts.targetRigId}" not found` };
+    }
+
+    const validation = PodRigSpecSchema.validate(raw, {
+      externalQualifiedIds: targetRig?.nodes.map((node) => node.logicalId),
+    });
+    if (!validation.valid) {
+      return { ok: false, code: "validation_failed", errors: validation.errors };
+    }
+
+    const rigSpec = PodRigSpecSchema.normalize(raw as Record<string, unknown>);
+    const preflight = preflightValidatedSpec(rigSpec, {
+      rigRoot,
+      cwdOverride: opts?.cwdOverride,
+      fsOps: this.deps.fsOps,
+      rigNameOverride: targetRig?.rig.name,
+    });
+    if (!preflight.ready) {
+      return { ok: false, code: "preflight_failed", errors: preflight.errors, warnings: preflight.warnings };
+    }
+
     return this.materializeValidatedSpec(rigSpec, rigRoot, opts);
   }
 

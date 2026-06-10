@@ -322,9 +322,9 @@ describe("RigExpansionService", () => {
   // Strategy: spy on podInstantiator.materialize to capture the
   // synthetic YAML it receives; assert the YAML contains `starter_ref:`
   // and the starter name.
-  it("preserves starterRef across expansion → buildSyntheticSpec → synthetic YAML (R2)", async () => {
+  it("preserves starterRef across expansion into the structured materialize spec (R2)", async () => {
     const rig = seedRig();
-    const materializeSpy = vi.spyOn(setup.podInstantiator, "materialize");
+    const materializeSpy = vi.spyOn(setup.podInstantiator, "materializeStructured");
     const podWithStarter: ExpansionRequest["pod"] = {
       id: "infra",
       label: "Infrastructure",
@@ -343,21 +343,23 @@ describe("RigExpansionService", () => {
     await service.expand({ rigId: rig.id, pod: podWithStarter });
 
     expect(materializeSpy).toHaveBeenCalled();
-    // First arg to materialize is the synthetic YAML string.
-    const syntheticYaml = materializeSpy.mock.calls[0]![0] as string;
-    expect(syntheticYaml).toContain("starter_ref:");
-    expect(syntheticYaml).toContain("openrig-builder-base--claude-code");
+    // OPR.0.3.3.24: expand passes a structured spec OBJECT (no synthetic YAML).
+    // starterRef flows through as snake-case starter_ref on the member.
+    const specObject = materializeSpy.mock.calls[0]![0] as { pods: Array<{ members: Array<Record<string, unknown>> }> };
+    const member = specObject.pods[0]!.members[0]!;
+    expect(member["starter_ref"]).toBeDefined();
+    expect((member["starter_ref"] as { name: string }).name).toBe("openrig-builder-base--claude-code");
 
     materializeSpy.mockRestore();
   });
 
-  it("absent starterRef does not leak starter_ref into synthetic YAML (negative regression)", async () => {
+  it("absent starterRef does not leak starter_ref into the structured spec (negative regression)", async () => {
     const rig = seedRig();
-    const materializeSpy = vi.spyOn(setup.podInstantiator, "materialize");
+    const materializeSpy = vi.spyOn(setup.podInstantiator, "materializeStructured");
     await service.expand({ rigId: rig.id, pod: terminalPodFragment() });
 
-    const syntheticYaml = materializeSpy.mock.calls[0]![0] as string;
-    expect(syntheticYaml).not.toContain("starter_ref:");
+    const specObject = materializeSpy.mock.calls[0]![0] as { pods: Array<{ members: Array<Record<string, unknown>> }> };
+    expect(specObject.pods[0]!.members[0]!["starter_ref"]).toBeUndefined();
     materializeSpy.mockRestore();
   });
 });
