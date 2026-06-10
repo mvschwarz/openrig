@@ -569,6 +569,22 @@ export class PodRigInstantiator {
     }
 
     const rigSpec = PodRigSpecSchema.normalize(raw as Record<string, unknown>);
+    return this.launchValidatedSpec(rigSpec, rigRoot, targetRigId);
+  }
+
+  /**
+   * launch CORE (OPR.0.3.3.24): given an already-parsed+validated spec whose
+   * nodes are already materialized, compute launch order and bring each node
+   * live via the launch-binding primitive. Extracted from launchMaterialized so
+   * `expand` (and the add_member op) launch a structured spec WITHOUT a YAML
+   * round-trip; launchMaterialized(yaml) is the parse/validate/normalize front
+   * over it. Behaviour identical (loop body relocated verbatim).
+   */
+  async launchValidatedSpec(
+    rigSpec: PodRigSpec,
+    rigRoot: string,
+    targetRigId: string,
+  ): Promise<LaunchMaterializedOutcome> {
     const launchOrder = this.computePodLaunchOrder(rigSpec);
     const podWarnings: string[] = [];
     const nodeResults: LaunchMaterializedNodeResult[] = [];
