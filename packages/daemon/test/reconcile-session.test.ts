@@ -178,6 +178,52 @@ describe("ClaimService.reconcileSession (OPR.0.3.4.3)", () => {
     expect(result.message).toContain("rig discover");
   });
 
+  it("IDENTITY BOUNDARY: explicit --rig/--node cannot bind an arbitrary never-managed session (re-key bypass)", async () => {
+    // Guard re-review finding: a live session named outside the node's
+    // canonical/managed name, with NO daemon-history mapping, must be refused
+    // even with explicit --rig/--node. tmux hasSession is true (spy default).
+    const rig = setup.rigRepo.createRig("bypass-rig");
+    const podId = "pod-bypass";
+    db.prepare("INSERT INTO pods (id, rig_id, namespace, label) VALUES (?, ?, ?, ?)").run(podId, rig.id, "dev", "Dev");
+    const node = setup.rigRepo.addNode(rig.id, "dev.impl", { runtime: "terminal", podId });
+
+    const result = await setup.claimService.reconcileSession({
+      sessionName: "stranger@nowhere",
+      rigId: rig.id,
+      logicalId: "dev.impl",
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.code).toBe("node_mismatch");
+    expect(result.message).toContain("dev-impl@bypass-rig"); // points at the canonical name
+    expect(result.message).toContain("rig discover");
+    // NOTHING mutated: no binding, no session row, no event.
+    expect(setup.sessionRegistry.getBindingForNode(node.id)).toBeNull();
+    expect(db.prepare("SELECT 1 FROM sessions WHERE node_id = ?").all(node.id)).toHaveLength(0);
+    expect(db.prepare("SELECT 1 FROM events WHERE type = 'node.reconciled'").all()).toHaveLength(0);
+  });
+
+  it("explicit --rig/--node WITH no history mapping still works for the node's OWN canonical name", async () => {
+    // Positive: history purged but the operator names the node's exact
+    // canonical session - explicit disambiguation is allowed.
+    const rig = setup.rigRepo.createRig("canon-rig");
+    const podId = "pod-canon";
+    db.prepare("INSERT INTO pods (id, rig_id, namespace, label) VALUES (?, ?, ?, ?)").run(podId, rig.id, "dev", "Dev");
+    const node = setup.rigRepo.addNode(rig.id, "dev.impl", { runtime: "terminal", podId });
+
+    const result = await setup.claimService.reconcileSession({
+      sessionName: "dev-impl@canon-rig",
+      rigId: rig.id,
+      logicalId: "dev.impl",
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.result.nodeId).toBe(node.id);
+    expect(setup.sessionRegistry.getBindingForNode(node.id)?.tmuxSession).toBe("dev-impl@canon-rig");
+  });
+
   it("node_mismatch when explicit --rig/--node disagrees with the daemon's session mapping", async () => {
     const { rig, sessionName } = await seedDetachedSeat();
     // A second node in the same rig that does NOT map to this session.
@@ -310,5 +356,18 @@ describe("POST /api/sessions/:sessionName/reconcile (OPR.0.3.4.3)", () => {
   it("returns 400 when only one of rigId/logicalId is given", async () => {
     const res = await post("dev-impl@route-rig3", { rigId: "some-rig" });
     expect(res.status).toBe(400);
+  });
+
+  it("returns 409 for the explicit-rig/node arbitrary-session re-key bypass (nothing mutated)", async () => {
+    const rig = setup.rigRepo.createRig("route-bypass");
+    const podId = "pod-rb";
+    db.prepare("INSERT INTO pods (id, rig_id, namespace, label) VALUES (?, ?, ?, ?)").run(podId, rig.id, "dev", "Dev");
+    const node = setup.rigRepo.addNode(rig.id, "dev.impl", { runtime: "terminal", podId });
+
+    const res = await post("stranger@nowhere", { rigId: rig.id, logicalId: "dev.impl" });
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body.code).toBe("node_mismatch");
+    expect(setup.sessionRegistry.getBindingForNode(node.id)).toBeNull();
   });
 });

@@ -282,6 +282,21 @@ export class ClaimService {
           message: `Session "${sessionName}" maps to a different persisted node than ${opts.logicalId}. Re-check --rig/--node, or omit them to use the daemon's mapping.`,
         };
       }
+      // IDENTITY BOUNDARY (guard re-review): with NO daemon-history mapping,
+      // explicit --rig/--node may only adopt the node's OWN canonical/managed
+      // session name. Binding an arbitrary never-managed name to a node would
+      // be an adopt/re-key path, not a reconcile — those go through
+      // rig discover + rig bind.
+      if (!mapped) {
+        const expected = await this.expectedManagedSessionName(node.logicalId, node.podId ?? null, rig.rig.name);
+        if (sessionName !== expected) {
+          return {
+            ok: false,
+            code: "node_mismatch",
+            message: `Session "${sessionName}" is not ${opts.logicalId}'s managed session name (expected "${expected}") and the daemon has no history mapping it to this node. Reconcile only re-adopts a node's own canonical session; to manage a new/unmanaged session, use rig discover + rig bind.`,
+          };
+        }
+      }
     } else {
       const mappedNodeId = this.resolveNodeIdForSessionName(sessionName);
       if (!mappedNodeId) {
@@ -402,6 +417,21 @@ export class ClaimService {
     } catch (err) {
       return { ok: false, code: "reconcile_error", message: (err as Error).message };
     }
+  }
+
+  /** The session name a managed node is EXPECTED to live at — pod-aware nodes
+   *  derive `{pod}-{member}@{rigName}`; legacy flat nodes use the legacy
+   *  derivation. Used to fence the explicit --rig/--node reconcile branch when
+   *  the daemon has no history mapping for the supplied name. */
+  private async expectedManagedSessionName(logicalId: string, podId: string | null, rigName: string): Promise<string> {
+    const { deriveCanonicalSessionName, deriveSessionName } = await import("./session-name.js");
+    if (podId) {
+      const parts = logicalId.split(".");
+      if (parts.length >= 2) {
+        return deriveCanonicalSessionName(parts[0]!, parts.slice(1).join("."), rigName);
+      }
+    }
+    return deriveSessionName(rigName, logicalId);
   }
 
   /** Map a canonical session name to its persisted node via the daemon's own
