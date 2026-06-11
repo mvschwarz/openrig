@@ -23,12 +23,13 @@ export interface VerbActionsProps {
   /**
    * OPR.0.3.3.20 — verbs that submit DIRECTLY on click (no select+confirm
    * step), firing the same mutation + optimistic-receipt + held-error paths.
-   * Structurally limited to verbs that need NO input: a verb requiring a
-   * destination/annotation/reason is NEVER one-clicked even if listed here
-   * (it falls back to the controlled select+confirm flow). For-You passes
-   * ["approve"]; route/deny stay controlled.
+   * APPROVE-ONLY by contract (PRD scope + section S): the type narrows the
+   * prop to "approve", and ONE_CLICK_SAFE_VERBS enforces the same allowlist
+   * at runtime — a verb outside it (including input-free verbs like deny)
+   * is NEVER one-clicked even if a caller forces it in; it falls back to the
+   * controlled select+confirm flow. For-You passes ["approve"].
    */
-  oneClickVerbs?: MissionControlVerb[];
+  oneClickVerbs?: Array<Extract<MissionControlVerb, "approve">>;
   onSettled?: () => void;
   /**
    * 0.3.1 demo-bug fix — optimistic outcome callback. Fires on
@@ -41,12 +42,11 @@ export interface VerbActionsProps {
   onOptimisticOutcome?: (outcome: FeedActionOutcome) => void;
 }
 
-/** Verbs whose submit requires operator input (destination / annotation /
- *  reason). These can never be one-click: firing them without their input
- *  would act consequentially on missing data. */
-function verbNeedsInput(verb: MissionControlVerb): boolean {
-  return verb === "route" || verb === "handoff" || verb === "annotate" || verb === "hold" || verb === "drop";
-}
+/** The one-click ALLOWLIST (OPR.0.3.3.20, approve-only by scope ruling).
+ *  Being input-free is necessary but NOT sufficient — deny needs no input yet
+ *  stays in the controlled select+confirm flow. A verb one-clicks only if the
+ *  caller lists it AND it is in this set. */
+const ONE_CLICK_SAFE_VERBS: ReadonlySet<MissionControlVerb> = new Set(["approve"]);
 
 function extractMutationErrorMessage(err: unknown): string {
   if (err instanceof Error) return err.message;
@@ -178,10 +178,11 @@ export function VerbActions({
     });
   }
 
-  // OPR.0.3.3.20 — one-click submit for input-free verbs (e.g. approve).
-  // Act-driven: fires on the operator's click, never on a timer.
+  // OPR.0.3.3.20 — one-click submit, approve-only: both the caller's list AND
+  // the ONE_CLICK_SAFE_VERBS allowlist must contain the verb. Act-driven:
+  // fires on the operator's click, never on a timer.
   function isOneClick(verb: MissionControlVerb): boolean {
-    return Boolean(oneClickVerbs?.includes(verb)) && !verbNeedsInput(verb);
+    return Boolean((oneClickVerbs as MissionControlVerb[] | undefined)?.includes(verb)) && ONE_CLICK_SAFE_VERBS.has(verb);
   }
 
   const destinationsQuery = useMissionControlDestinations(needsDestination);

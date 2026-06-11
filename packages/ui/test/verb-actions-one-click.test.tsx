@@ -114,20 +114,38 @@ describe("VerbActions — one-click approve (OPR.0.3.3.20)", () => {
     expect(actionCalls).toHaveLength(0);
   });
 
-  it("STRUCTURAL GUARD: an input-needing verb listed in oneClickVerbs is NOT one-clicked", async () => {
+  it("ALLOWLIST GUARD: route forced into oneClickVerbs is NOT one-clicked (runtime refusal)", async () => {
     const actionCalls = stubActionFetch();
     const { getByTestId, queryByTestId } = renderVerbActions({
       qitemId: "qitem-guard",
       actorSession: "human@host",
       enabledVerbs: ["approve", "deny", "route"],
-      // Misuse on purpose: route needs a destination; the component must
-      // refuse to one-click it.
-      oneClickVerbs: ["route"],
+      // Misuse on purpose: the prop TYPE is approve-only, so misuse requires a
+      // cast — and the runtime allowlist must still refuse it.
+      oneClickVerbs: ["route"] as unknown as Parameters<typeof VerbActions>[0]["oneClickVerbs"],
     });
 
     fireEvent.click(getByTestId("mc-verb-route"));
 
     // Fell back to the controlled flow: selected, not fired.
+    expect(queryByTestId("mc-verb-submit")).not.toBeNull();
+    expect(actionCalls).toHaveLength(0);
+  });
+
+  it("ALLOWLIST GUARD: deny forced into oneClickVerbs is NOT one-clicked (input-free is not sufficient)", async () => {
+    const actionCalls = stubActionFetch();
+    const { getByTestId, queryByTestId } = renderVerbActions({
+      qitemId: "qitem-guard-deny",
+      actorSession: "human@host",
+      enabledVerbs: ["approve", "deny", "route"],
+      // deny needs NO input — the approve-only ALLOWLIST (not the input rule)
+      // is what must refuse it (PRD scope + section S: approve-only).
+      oneClickVerbs: ["deny"] as unknown as Parameters<typeof VerbActions>[0]["oneClickVerbs"],
+    });
+
+    fireEvent.click(getByTestId("mc-verb-deny"));
+
+    // Controlled select+confirm flow appeared; NO action call was made.
     expect(queryByTestId("mc-verb-submit")).not.toBeNull();
     expect(actionCalls).toHaveLength(0);
   });
