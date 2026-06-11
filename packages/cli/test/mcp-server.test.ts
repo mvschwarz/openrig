@@ -41,12 +41,13 @@ describe("MCP Server", () => {
     if (cleanup) await cleanup();
   });
 
-  // T1: MCP server lists all 17 tools
-  it("lists all 17 tools", async () => {
+  // T1: MCP server lists all 18 tools
+  it("lists all 18 tools", async () => {
     await setup();
     const result = await mcpClient.listTools();
     const names = result.tools.map((t) => t.name).sort();
     expect(names).toEqual([
+      "rig_add",
       "rig_agent_validate",
       "rig_bind",
       "rig_bundle_inspect",
@@ -65,6 +66,93 @@ describe("MCP Server", () => {
       "rig_status",
       "rig_up",
     ]);
+    await cleanup();
+  });
+
+  // rig_add: posts the member fragment to the pod-members route.
+  it("rig_add posts to the pod-members route and returns the added node", async () => {
+    const postFn = vi.fn(async () => ({
+      status: 201,
+      data: {
+        ok: true,
+        result: {
+          podId: "pod-1",
+          podNamespace: "infra",
+          node: { logicalId: "infra.server2", nodeId: "n2", status: "launched", sessionName: "infra-server2@r" },
+          warnings: [],
+        },
+      },
+    }));
+    await setup({ post: postFn });
+
+    const member = { id: "server2", runtime: "terminal", agent_ref: "builtin:terminal", profile: "none", cwd: "/tmp" };
+    const result = await mcpClient.callTool({
+      name: "rig_add",
+      arguments: { rigId: "rig-1", podNamespace: "infra", member },
+    });
+
+    expect(postFn).toHaveBeenCalledWith("/api/rigs/rig-1/pods/infra/members", { member });
+    const content = result.content as Array<{ type: string; text: string }>;
+    const parsed = JSON.parse(content[0].text);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.result.node.logicalId).toBe("infra.server2");
+    expect(result.isError).toBeFalsy();
+    await cleanup();
+  });
+
+  it("rig_add forwards optional pod-local edges in the request body", async () => {
+    const postFn = vi.fn(async () => ({
+      status: 201,
+      data: { ok: true, result: { podId: "pod-1", podNamespace: "infra", node: { logicalId: "infra.server2", nodeId: "n2", status: "launched" }, edges: [{ from: "infra.server2", to: "infra.server", kind: "delegates_to" }] } },
+    }));
+    await setup({ post: postFn });
+
+    const member = { id: "server2", runtime: "terminal", agent_ref: "builtin:terminal", profile: "none", cwd: "/tmp" };
+    const edges = [{ from: "server2", to: "server", kind: "delegates_to" }];
+    await mcpClient.callTool({ name: "rig_add", arguments: { rigId: "rig-1", podNamespace: "infra", member, edges } });
+
+    expect(postFn).toHaveBeenCalledWith("/api/rigs/rig-1/pods/infra/members", { member, edges });
+    await cleanup();
+  });
+
+  it("rig_add surfaces a member_conflict (HTTP 409) as isError", async () => {
+    const postFn = vi.fn(async () => ({
+      status: 409,
+      data: { ok: false, code: "member_conflict", message: 'Member "infra.server" already exists' },
+    }));
+    await setup({ post: postFn });
+
+    const result = await mcpClient.callTool({
+      name: "rig_add",
+      arguments: { rigId: "rig-1", podNamespace: "infra", member: { id: "server" } },
+    });
+
+    expect(result.isError).toBe(true);
+    const content = result.content as Array<{ type: string; text: string }>;
+    expect(JSON.parse(content[0].text).code).toBe("member_conflict");
+    await cleanup();
+  });
+
+  it("rig_add flags a persisted-but-not-launched node as isError", async () => {
+    const postFn = vi.fn(async () => ({
+      status: 201,
+      data: {
+        ok: true,
+        result: {
+          podId: "pod-1",
+          podNamespace: "infra",
+          node: { logicalId: "infra.server2", nodeId: "n2", status: "failed", error: "harness launch failed" },
+        },
+      },
+    }));
+    await setup({ post: postFn });
+
+    const result = await mcpClient.callTool({
+      name: "rig_add",
+      arguments: { rigId: "rig-1", podNamespace: "infra", member: { id: "server2" } },
+    });
+
+    expect(result.isError).toBe(true);
     await cleanup();
   });
 
@@ -206,7 +294,7 @@ describe("MCP Server", () => {
 
     // Verify server is responsive
     const result = await mcpClient.listTools();
-    expect(result.tools.length).toBe(17);
+    expect(result.tools.length).toBe(18);
 
     // Clean disconnect
     await cleanup();
@@ -220,7 +308,7 @@ describe("MCP Server", () => {
     await client2.connect(ct2);
 
     const result2 = await client2.listTools();
-    expect(result2.tools.length).toBe(17);
+    expect(result2.tools.length).toBe(18);
 
     await client2.close();
     await server2.close();

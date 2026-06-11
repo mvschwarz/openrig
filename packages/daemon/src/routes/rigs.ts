@@ -21,6 +21,8 @@ import { assessCurrentStateRehydrateEligibility } from "../domain/rehydrate-elig
 import type { ContextUsageStore } from "../domain/context-usage-store.js";
 import type { Pod, ExpansionPodFragment } from "../domain/types.js";
 import type { RigExpansionService } from "../domain/rig-expansion-service.js";
+import type { PodRigInstantiator } from "../domain/rigspec-instantiator.js";
+import { convergeOp } from "../domain/topology-converge.js";
 import type { RigLifecycleService } from "../domain/rig-lifecycle-service.js";
 import type { SelfAttachService } from "../domain/self-attach-service.js";
 
@@ -575,6 +577,70 @@ rigsRoutes.post("/:rigId/expand", async (c) => {
 
   const httpStatus = result.status === "ok" ? 201 : 207;
   return c.json(result, httpStatus);
+});
+
+// POST /api/rigs/:rigId/pods/:podNamespace/members — add a single member to an
+// EXISTING pod (OPR.0.3.3.24, the add_member converge op). Imperative sugar over
+// the converge interface; identity-migration-free. The member fragment uses the
+// spec snake_case field names (id, runtime, agent_ref, profile, cwd, ...).
+rigsRoutes.post("/:rigId/pods/:podNamespace/members", async (c) => {
+  const rigId = c.req.param("rigId")!;
+  const podNamespace = decodeURIComponent(c.req.param("podNamespace")!);
+  const podInstantiator = c.get("podInstantiator" as never) as PodRigInstantiator | undefined;
+  if (!podInstantiator) {
+    return c.json({ error: "Pod instantiator not available" }, 500);
+  }
+
+  const body: Record<string, unknown> = await c.req.json().catch(() => ({}));
+  const member = body["member"];
+  if (!member || typeof member !== "object" || Array.isArray(member)) {
+    return c.json({ error: "member is required (a member fragment with id, runtime, agent_ref)" }, 400);
+  }
+  const rigRoot = typeof body["rigRoot"] === "string" ? body["rigRoot"] : ".";
+  // Optional pod-local edges (from/to are member ids within the pod). Carried
+  // through to the converge op so declared topology intent is not dropped; the
+  // domain validates kinds + resolves endpoints + persists them (no edge-runtime
+  // behavior yet). A PRESENT-but-non-array edges field is rejected honestly,
+  // never silently treated as absent (governance FM2 no-silent-drop).
+  const rawEdges = body["edges"];
+  if (rawEdges !== undefined && rawEdges !== null && !Array.isArray(rawEdges)) {
+    return c.json({ ok: false, code: "validation_failed", errors: ["edges: must be an array of { from, to, kind }"] }, 400);
+  }
+  const edges = Array.isArray(rawEdges)
+    ? (rawEdges as Array<{ from: string; to: string; kind: string }>)
+    : undefined;
+
+  const converged = await convergeOp(
+    podInstantiator,
+    rigId,
+    { kind: "add_member", pod: podNamespace, member: member as Record<string, unknown>, edges },
+    rigRoot,
+  );
+  // add_member is the one supported converge kind; the route is its sugar.
+  if (converged.kind !== "add_member" || !converged.supported) {
+    return c.json({ error: "Unexpected converge result for add_member" }, 500);
+  }
+  const outcome = converged.outcome;
+
+  if (!outcome.ok) {
+    switch (outcome.code) {
+      case "rig_not_found":
+      case "pod_not_found":
+        return c.json(outcome, 404);
+      case "member_conflict":
+        return c.json(outcome, 409);
+      case "edge_unresolved":
+      case "validation_failed":
+      case "preflight_failed":
+        return c.json(outcome, 400);
+      default:
+        return c.json(outcome, 500);
+    }
+  }
+
+  // 201 created. The node may still be failed/attention_required at launch; that
+  // is carried in outcome.result.node.status (mirrors expand's per-node status).
+  return c.json(outcome, 201);
 });
 
 // DELETE /api/rigs/:rigId/pods/:podRef

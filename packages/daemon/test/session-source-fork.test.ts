@@ -612,21 +612,25 @@ describe("StartupOrchestrator forkSource integration", () => {
 });
 
 // ============================================================================
-// rig-expansion-service buildSyntheticSpec pass-through
+// rig-expansion-service session_source pass-through (structured spec)
 // ============================================================================
 
-describe("rig-expansion buildSyntheticSpec session_source pass-through", () => {
-  it("includes session_source in the synthetic YAML when member.sessionSource is set", async () => {
+// OPR.0.3.3.24: expand passes a structured spec OBJECT (no synthetic YAML
+// round-trip) through materializeStructured + launchValidatedSpec. This is the
+// session_source analogue of the realigned starterRef pass-through tests: assert
+// snake_case session_source on the structured spec member, not a YAML string.
+describe("rig-expansion session_source pass-through (structured spec)", () => {
+  it("emits session_source on the structured spec member when member.sessionSource is set", async () => {
     const { RigExpansionService } = await import("../src/domain/rig-expansion-service.js");
     const fakeRigRepo = { getRig: () => ({ rig: { name: "rig-x" }, nodes: [] }) } as never;
     const fakeEventBus = { emit: () => {} } as never;
-    const podSpecs: string[] = [];
+    const capturedSpecs: Array<Record<string, unknown>> = [];
     const fakePodInstantiator = {
-      materialize: async (specYaml: string) => {
-        podSpecs.push(specYaml);
+      materializeStructured: async (raw: Record<string, unknown>) => {
+        capturedSpecs.push(raw);
         return { ok: true as const, result: { nodes: [] } };
       },
-      launchMaterialized: async () => ({ ok: true as const, result: { nodes: [], warnings: [] } }),
+      launchValidatedSpec: async () => ({ ok: true as const, result: { nodes: [], warnings: [] } }),
     } as never;
 
     const svc = new RigExpansionService({
@@ -654,12 +658,14 @@ describe("rig-expansion buildSyntheticSpec session_source pass-through", () => {
       },
     });
     expect(result.ok).toBe(true);
-    expect(podSpecs).toHaveLength(1);
-    const yaml = podSpecs[0]!;
-    expect(yaml).toContain("session_source:");
-    expect(yaml).toContain("mode: fork");
-    expect(yaml).toContain("kind: native_id");
-    expect(yaml).toContain("fork-source-id");
+    expect(capturedSpecs).toHaveLength(1);
+    const spec = capturedSpecs[0]! as { pods: Array<{ members: Array<Record<string, unknown>> }> };
+    const member = spec.pods[0]!.members[0]!;
+    const ss = member["session_source"] as { mode: string; ref: { kind: string; value: string } } | undefined;
+    expect(ss).toBeDefined();
+    expect(ss!.mode).toBe("fork");
+    expect(ss!.ref.kind).toBe("native_id");
+    expect(ss!.ref.value).toBe("fork-source-id");
   });
 });
 

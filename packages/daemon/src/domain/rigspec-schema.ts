@@ -20,7 +20,10 @@ import * as path from "node:path";
 
 // -- Canonical pod-aware RigSpec validation (AgentSpec reboot) --
 
-const VALID_EDGE_KINDS = new Set(["delegates_to", "spawned_by", "can_observe", "collaborates_with", "escalates_to"]);
+// OPR.0.3.3.24: exported so the add_member converge op validates pod-local edge
+// kinds against the SAME canonical set as a rigspec pod-local edge (no second,
+// looser edge input path).
+export const VALID_EDGE_KINDS = new Set(["delegates_to", "spawned_by", "can_observe", "collaborates_with", "escalates_to"]);
 const VALID_SYNC_TRIGGERS = new Set(["pre_compaction", "pre_shutdown", "manual", "milestone"]);
 const VALID_RESTORE_POLICIES = new Set(["resume_if_possible", "relaunch_fresh", "checkpoint_only"]);
 const VALID_IMPORT_PREFIXES = ["local:", "path:"];

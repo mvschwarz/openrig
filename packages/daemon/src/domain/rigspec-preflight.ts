@@ -134,6 +134,17 @@ export interface RigPreflightInput {
 }
 
 /**
+ * OPR.0.3.3.24: the non-YAML context the preflight CORE needs alongside an
+ * already-parsed+validated spec. (YAML is only the input adapter at the front.)
+ */
+export interface PreflightSpecContext {
+  rigRoot: string;
+  cwdOverride?: string;
+  fsOps: AgentResolverFsOps;
+  rigNameOverride?: string;
+}
+
+/**
  * Rebooted rig preflight: validates rig spec, resolves all agent refs + profiles,
  * checks runtimes and cwd. Pure domain, no side effects beyond filesystem reads.
  * Returns the existing PreflightResult shape (ready + warnings[] + errors[]).
@@ -141,24 +152,43 @@ export interface RigPreflightInput {
  * @returns PreflightResult
  */
 export function rigPreflight(input: RigPreflightInput): PreflightResult {
-  const errors: string[] = [];
-  const warnings: string[] = [];
-
-  // 1. Parse + validate RigSpec
+  // FRONT-END (OPR.0.3.3.24): YAML is only the input adapter. Parse + validate +
+  // normalize, then delegate every actual check to the structured core so
+  // callers holding an already-parsed+validated spec (expand / add_member)
+  // preflight it WITHOUT a YAML round-trip. Mirrors the materialize-core split.
   let rigSpec: PodRigSpec;
   try {
     const raw = RigSpecCodec.parse(input.rigSpecYaml);
     const validation = RigSpecSchema.validate(raw, { externalQualifiedIds: input.externalQualifiedIds });
     if (!validation.valid) {
-      return { ready: false, errors: validation.errors, warnings };
+      return { ready: false, errors: validation.errors, warnings: [] };
     }
     rigSpec = RigSpecSchema.normalize(raw as Record<string, unknown>);
   } catch (err) {
-    return { ready: false, errors: [`Parse error: ${(err as Error).message}`], warnings };
+    return { ready: false, errors: [`Parse error: ${(err as Error).message}`], warnings: [] };
   }
 
+  return preflightValidatedSpec(rigSpec, {
+    rigRoot: input.rigRoot,
+    cwdOverride: input.cwdOverride,
+    fsOps: input.fsOps,
+    rigNameOverride: input.rigNameOverride,
+  });
+}
+
+/**
+ * preflight CORE (OPR.0.3.3.24): every preflight check operates on the
+ * normalized spec + non-YAML context (session-name components, agent_ref/profile
+ * resolution, runtime, cwd). Extracted from rigPreflight with byte-identical
+ * checks/order/error-strings so expand/add_member preflight a structured spec
+ * with no YAML round-trip; rigPreflight(yaml) is the parse/normalize front over it.
+ */
+export function preflightValidatedSpec(rigSpec: PodRigSpec, preflightCtx: PreflightSpecContext): PreflightResult {
+  const errors: string[] = [];
+  const warnings: string[] = [];
+
   // 2. Validate session name components for all pod members
-  const effectiveRigName = input.rigNameOverride ?? rigSpec.name;
+  const effectiveRigName = preflightCtx.rigNameOverride ?? rigSpec.name;
   for (const pod of rigSpec.pods) {
     for (const member of pod.members) {
       const nameErrors = validateSessionComponents(pod.id, member.id, effectiveRigName);
@@ -180,8 +210,8 @@ export function rigPreflight(input: RigPreflightInput): PreflightResult {
         if (!member.cwd) {
           errors.push(`${pod.id}.${member.id}: cwd is required`);
         }
-        const terminalCwd = resolveLaunchCwd(member.cwd, input.rigRoot, input.cwdOverride);
-        const terminalCwdError = getOpenRigInstallCwdError(terminalCwd, input.cwdOverride);
+        const terminalCwd = resolveLaunchCwd(member.cwd, preflightCtx.rigRoot, preflightCtx.cwdOverride);
+        const terminalCwdError = getOpenRigInstallCwdError(terminalCwd, preflightCtx.cwdOverride);
         if (terminalCwdError) {
           errors.push(`${pod.id}.${member.id}: ${terminalCwdError}`);
         }
@@ -189,7 +219,7 @@ export function rigPreflight(input: RigPreflightInput): PreflightResult {
       }
 
       // Resolve agent_ref
-      const resolveResult = resolveAgentRef(member.agentRef, input.rigRoot, input.fsOps);
+      const resolveResult = resolveAgentRef(member.agentRef, preflightCtx.rigRoot, preflightCtx.fsOps);
       if (!resolveResult.ok) {
         const msg = resolveResult.code === "validation_failed"
           ? (resolveResult as { errors: string[] }).errors.join("; ")
@@ -215,8 +245,8 @@ export function rigPreflight(input: RigPreflightInput): PreflightResult {
         importedSpecs: resolveResult.imports,
         collisions: resolveResult.collisions,
         profileName: member.profile,
-        specRoot: input.rigRoot,
-        cwdOverride: input.cwdOverride,
+        specRoot: preflightCtx.rigRoot,
+        cwdOverride: preflightCtx.cwdOverride,
         member,
         pod,
         rig: rigSpec,
@@ -238,7 +268,7 @@ export function rigPreflight(input: RigPreflightInput): PreflightResult {
       if (!member.cwd) {
         errors.push(`${pod.id}.${member.id}: cwd is required`);
       }
-      const cwdError = getOpenRigInstallCwdError(configResult.config.cwd, input.cwdOverride);
+      const cwdError = getOpenRigInstallCwdError(configResult.config.cwd, preflightCtx.cwdOverride);
       if (cwdError) {
         errors.push(`${pod.id}.${member.id}: ${cwdError}`);
       }

@@ -313,18 +313,16 @@ describe("RigExpansionService", () => {
     expect(events).toHaveLength(0);
   });
 
-  // Agent Starter v1 vertical M1 R2 — expansion pass-through. Guard
-  // finding: ExpansionPodFragment.members had no `starterRef?` field
-  // and `buildSyntheticSpec` had no `starter_ref` emission, so an
-  // expansion request couldn't carry `starterRef` through the same
-  // route that already carries `sessionSource`. R2 fix: add the field
-  // + emit snake-case `starter_ref` in `buildSyntheticSpec`.
-  // Strategy: spy on podInstantiator.materialize to capture the
-  // synthetic YAML it receives; assert the YAML contains `starter_ref:`
-  // and the starter name.
-  it("preserves starterRef across expansion → buildSyntheticSpec → synthetic YAML (R2)", async () => {
+  // Agent Starter v1 vertical M1 R2 — expansion pass-through. An expansion
+  // request must carry `starterRef` through the same route that already carries
+  // `sessionSource`: ExpansionPodFragment.members has the `starterRef?` field and
+  // the structured expansion spec emits snake-case `starter_ref` on the member.
+  // Strategy (OPR.0.3.3.24): spy on podInstantiator.materializeStructured to
+  // capture the structured spec OBJECT it receives, and assert the member carries
+  // `starter_ref` and the starter name (the synthetic-YAML round-trip is gone).
+  it("preserves starterRef across expansion into the structured materialize spec (R2)", async () => {
     const rig = seedRig();
-    const materializeSpy = vi.spyOn(setup.podInstantiator, "materialize");
+    const materializeSpy = vi.spyOn(setup.podInstantiator, "materializeStructured");
     const podWithStarter: ExpansionRequest["pod"] = {
       id: "infra",
       label: "Infrastructure",
@@ -343,21 +341,23 @@ describe("RigExpansionService", () => {
     await service.expand({ rigId: rig.id, pod: podWithStarter });
 
     expect(materializeSpy).toHaveBeenCalled();
-    // First arg to materialize is the synthetic YAML string.
-    const syntheticYaml = materializeSpy.mock.calls[0]![0] as string;
-    expect(syntheticYaml).toContain("starter_ref:");
-    expect(syntheticYaml).toContain("openrig-builder-base--claude-code");
+    // OPR.0.3.3.24: expand passes a structured spec OBJECT (no synthetic YAML).
+    // starterRef flows through as snake-case starter_ref on the member.
+    const specObject = materializeSpy.mock.calls[0]![0] as { pods: Array<{ members: Array<Record<string, unknown>> }> };
+    const member = specObject.pods[0]!.members[0]!;
+    expect(member["starter_ref"]).toBeDefined();
+    expect((member["starter_ref"] as { name: string }).name).toBe("openrig-builder-base--claude-code");
 
     materializeSpy.mockRestore();
   });
 
-  it("absent starterRef does not leak starter_ref into synthetic YAML (negative regression)", async () => {
+  it("absent starterRef does not leak starter_ref into the structured spec (negative regression)", async () => {
     const rig = seedRig();
-    const materializeSpy = vi.spyOn(setup.podInstantiator, "materialize");
+    const materializeSpy = vi.spyOn(setup.podInstantiator, "materializeStructured");
     await service.expand({ rigId: rig.id, pod: terminalPodFragment() });
 
-    const syntheticYaml = materializeSpy.mock.calls[0]![0] as string;
-    expect(syntheticYaml).not.toContain("starter_ref:");
+    const specObject = materializeSpy.mock.calls[0]![0] as { pods: Array<{ members: Array<Record<string, unknown>> }> };
+    expect(specObject.pods[0]!.members[0]!["starter_ref"]).toBeUndefined();
     materializeSpy.mockRestore();
   });
 });
