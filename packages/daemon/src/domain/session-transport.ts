@@ -311,6 +311,21 @@ export interface SendResult {
   ok: boolean;
   sessionName: string;
   verified?: boolean;
+  /**
+   * OPR.99.0.6.3 — honest delivery-outcome vocabulary (additive; `verified`
+   * keeps its exact semantics for existing parsers). Three distinguishable
+   * states, mirroring the restore honest-outcome style:
+   * - `delivered`: text + Enter landed AND the post-send capture re-confirmed
+   *   the snippet (the strong positive; was `Verified: yes`).
+   * - `rendered-unconfirmed`: text + Enter BOTH succeeded (the message landed)
+   *   but the post-send capture raced a TUI redraw and could not re-confirm
+   *   the snippet. Landed-but-unconfirmable, NOT a failure — confirm with
+   *   `rig capture` if it matters. (Was collapsed into `Verified: no`.)
+   * - `failed`: the transport itself failed (paste or Enter did not land) —
+   *   set on the send_failed / submit_failed returns for vocabulary symmetry;
+   *   their `ok:false` + HTTP mapping is unchanged.
+   */
+  outcome?: "delivered" | "rendered-unconfirmed" | "failed";
   warning?: string;
   error?: string;
   reason?: string;
@@ -706,6 +721,7 @@ export class SessionTransport {
         ok: false,
         sessionName,
         reason: "send_failed",
+        outcome: "failed",
         error: `Failed to send text to '${sessionName}': ${textResult.message}`,
         ...(waitMode ? { sent: false, ...waitEvidence } : {}),
       };
@@ -721,12 +737,16 @@ export class SessionTransport {
         ok: false,
         sessionName,
         reason: "submit_failed",
+        outcome: "failed",
         error: `Text is visible in '${sessionName}' but was not submitted (Enter failed). The agent may need manual attention.`,
         ...(waitMode ? { sent: true, ...waitEvidence } : {}),
       };
     }
 
-    // 6. Verify if requested
+    // 6. Verify if requested. At this point text + Enter BOTH succeeded, so the
+    // message LANDED; the capture only re-confirms the render. Not re-confirming
+    // (a TUI redraw race, or the capture throwing) is therefore the honest
+    // middle outcome `rendered-unconfirmed` — never a failure (OPR.99.0.6.3).
     if (opts?.verify) {
       await this.sleep(500);
       try {
@@ -735,9 +755,9 @@ export class SessionTransport {
         const preCount = countOccurrences(preVerifyContent ?? "", snippet);
         const postCount = countOccurrences(content ?? "", snippet);
         const verified = postCount > preCount;
-        return { ok: true, sessionName, verified, ...(waitMode ? { sent: true, ...waitEvidence } : {}) };
+        return { ok: true, sessionName, verified, outcome: verified ? "delivered" : "rendered-unconfirmed", ...(waitMode ? { sent: true, ...waitEvidence } : {}) };
       } catch {
-        return { ok: true, sessionName, verified: false, ...(waitMode ? { sent: true, ...waitEvidence } : {}) };
+        return { ok: true, sessionName, verified: false, outcome: "rendered-unconfirmed", ...(waitMode ? { sent: true, ...waitEvidence } : {}) };
       }
     }
 

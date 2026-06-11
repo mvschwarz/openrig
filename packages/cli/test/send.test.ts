@@ -69,6 +69,15 @@ describe("Send CLI", () => {
           if (parsed.session === "dev-impl@my-rig") {
             res.writeHead(200, { "Content-Type": "application/json" });
             res.end(JSON.stringify({ ok: true, sessionName: "dev-impl@my-rig" }));
+          } else if (parsed.session === "verified-session") {
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ ok: true, sessionName: "verified-session", verified: true, outcome: "delivered" }));
+          } else if (parsed.session === "racy-session") {
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ ok: true, sessionName: "racy-session", verified: false, outcome: "rendered-unconfirmed" }));
+          } else if (parsed.session === "dead-session") {
+            res.writeHead(502, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ ok: false, sessionName: "dead-session", reason: "submit_failed", outcome: "failed", error: "Text is visible in 'dead-session' but was not submitted (Enter failed)." }));
           } else if (parsed.session === "busy-session") {
             res.writeHead(409, { "Content-Type": "application/json" });
             res.end(JSON.stringify({ ok: false, sessionName: "busy-session", reason: "mid_work", error: "Target pane appears mid-task. Use force: true to send anyway." }));
@@ -111,6 +120,52 @@ describe("Send CLI", () => {
     });
     expect(logs.join("\n")).toContain("mid-task");
     expect(exitCode).toBe(1);
+  });
+
+  // OPR.99.0.6.3 — honest delivery-outcome vocabulary; legacy Verified: line preserved.
+  it("verify confirmed prints Delivery: delivered AND the legacy Verified: yes", async () => {
+    const { logs } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "send", "verified-session", "hello", "--verify"]);
+    });
+    const output = logs.join("\n");
+    expect(output).toContain("Sent to verified-session");
+    expect(output).toContain("Verified: yes");
+    expect(output).toContain("Delivery: delivered");
+  });
+
+  it("verify redraw-race prints Delivery: rendered-unconfirmed (landed, with capture guidance) AND legacy Verified: no", async () => {
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "send", "racy-session", "hello", "--verify"]);
+    });
+    const output = logs.join("\n");
+    expect(output).toContain("Sent to racy-session");
+    expect(output).toContain("Verified: no");
+    expect(output).toContain("Delivery: rendered-unconfirmed");
+    expect(output).toContain("landed");
+    expect(output).toContain("rig capture racy-session");
+    // The middle is NOT dressed as failure: exit stays clean.
+    expect(exitCode).toBeUndefined();
+  });
+
+  it("verify genuine transport failure stays an error path, distinct from the middle (discriminator)", async () => {
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "send", "dead-session", "hello", "--verify"]);
+    });
+    const output = logs.join("\n");
+    // HTTP 502 -> error branch; no success lines, exit non-zero.
+    expect(output).not.toContain("Sent to dead-session");
+    expect(output).not.toContain("Delivery: rendered-unconfirmed");
+    expect(output).toContain("not submitted");
+    expect(exitCode).toBe(2);
+  });
+
+  it("verify --json passes the additive outcome field through", async () => {
+    const { logs } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "send", "racy-session", "hello", "--verify", "--json"]);
+    });
+    const parsed = JSON.parse(logs.join("\n"));
+    expect(parsed.verified).toBe(false);
+    expect(parsed.outcome).toBe("rendered-unconfirmed");
   });
 
   it("send --json prints raw JSON", async () => {

@@ -334,6 +334,8 @@ describe("SessionTransport", () => {
     const result = await transport.send("dev-impl@my-rig", "hello", { verify: true });
     expect(result.ok).toBe(true);
     expect(result.verified).toBe(true);
+    // OPR.99.0.6.3: a confirmed render is the strong positive outcome.
+    expect(result.outcome).toBe("delivered");
   });
 
   it("send with verify does not false-positive on pre-existing pane content", async () => {
@@ -347,6 +349,79 @@ describe("SessionTransport", () => {
 
     expect(result.ok).toBe(true);
     expect(result.verified).toBe(false);
+    // OPR.99.0.6.3: text + Enter both succeeded, only the render re-confirm
+    // missed — the honest middle, NOT a failure.
+    expect(result.outcome).toBe("rendered-unconfirmed");
+  });
+
+  // OPR.99.0.6.3 — honest delivery-outcome vocabulary
+  it("verify capture throwing after a successful send is the middle outcome, not a failure", async () => {
+    seedCanonicalRig();
+    let captureCount = 0;
+    const tmux = mockTmux({
+      capturePaneContent: async () => {
+        captureCount++;
+        // Pre-verify + mid-work captures succeed; the post-send verify capture throws
+        // (e.g. pane busy mid-redraw).
+        if (captureCount >= 3) throw new Error("pane busy");
+        return "some output\n❯ ";
+      },
+    });
+    const transport = createTransport(tmux);
+
+    const result = await transport.send("dev-impl@my-rig", "hello", { verify: true });
+    expect(result.ok).toBe(true);
+    expect(result.verified).toBe(false);
+    expect(result.outcome).toBe("rendered-unconfirmed");
+  });
+
+  it("DISCRIMINATOR: a redraw-race send and a genuine transport failure surface differently", async () => {
+    seedCanonicalRig();
+    // Redraw-race: send + submit succeed, post-capture cannot re-confirm.
+    const racyTmux = mockTmux({
+      capturePaneContent: async () => "prior output\nhello\n❯ ",
+    });
+    const middle = await createTransport(racyTmux).send("dev-impl@my-rig", "hello", { verify: true });
+
+    // Genuine transport failure: Enter does not land.
+    const brokenTmux = mockTmux({
+      sendKeys: async () => ({ ok: false, code: "session_not_found", message: "session died" }),
+    });
+    const failure = await createTransport(brokenTmux).send("dev-impl@my-rig", "hello", { verify: true });
+
+    // The acceptance criterion: the two states are NOT equal in surfaced outcome.
+    expect(middle.ok).toBe(true);
+    expect(middle.outcome).toBe("rendered-unconfirmed");
+    expect(failure.ok).toBe(false);
+    expect(failure.outcome).toBe("failed");
+    expect(middle.outcome).not.toBe(failure.outcome);
+  });
+
+  it("send_failed and submit_failed carry outcome 'failed' (vocabulary symmetry, ok:false unchanged)", async () => {
+    seedCanonicalRig();
+    const noPaste = mockTmux({
+      sendText: async () => ({ ok: false, code: "session_not_found", message: "gone" }),
+    });
+    const sendFailed = await createTransport(noPaste).send("dev-impl@my-rig", "hello");
+    expect(sendFailed.ok).toBe(false);
+    expect(sendFailed.reason).toBe("send_failed");
+    expect(sendFailed.outcome).toBe("failed");
+
+    const noEnter = mockTmux({
+      sendKeys: async () => ({ ok: false, code: "session_not_found", message: "gone" }),
+    });
+    const submitFailed = await createTransport(noEnter).send("dev-impl@my-rig", "hello");
+    expect(submitFailed.ok).toBe(false);
+    expect(submitFailed.reason).toBe("submit_failed");
+    expect(submitFailed.outcome).toBe("failed");
+  });
+
+  it("send without verify carries no outcome field (additive, verify-scoped)", async () => {
+    seedCanonicalRig();
+    const transport = createTransport(mockTmux());
+    const result = await transport.send("dev-impl@my-rig", "hello");
+    expect(result.ok).toBe(true);
+    expect(result.outcome).toBeUndefined();
   });
 
   // Test 7: send with mid-work detected → refusal

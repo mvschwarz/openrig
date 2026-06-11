@@ -139,8 +139,18 @@ via single-hop ssh. SSH success is NOT verify success: the remote rig's
 
       console.log(`Sent to ${session}`);
       if (opts.verify) {
+        // Legacy line preserved verbatim (existing scripts grep `Verified:`);
+        // the Delivery line below carries the honest three-outcome vocabulary
+        // (OPR.99.0.6.3): `Verified: no` alone collapsed a landed-but-redraw-
+        // raced send into the same line as a miss.
         const verified = res.data["verified"] as boolean | undefined;
         console.log(`Verified: ${verified ? "yes" : "no"}`);
+        const outcome = res.data["outcome"] as string | undefined;
+        if (outcome === "delivered") {
+          console.log("Delivery: delivered (message landed; render confirmed)");
+        } else if (outcome === "rendered-unconfirmed") {
+          console.log(`Delivery: rendered-unconfirmed (landed; pane re-render not confirmed - confirm with: rig capture ${session})`);
+        }
       }
     });
 

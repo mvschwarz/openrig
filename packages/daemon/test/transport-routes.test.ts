@@ -116,6 +116,53 @@ describe("transport routes", () => {
     expect(body.sessionName).toBe("dev-impl@my-rig");
   });
 
+  // OPR.99.0.6.3 — the additive outcome field auto-surfaces through the
+  // c.json(result) passthrough; failure HTTP mapping unchanged.
+  it("POST /send with verify surfaces the outcome field in the JSON response (passthrough)", async () => {
+    seedRig();
+    // Pre-existing pane content means the post-capture cannot re-confirm:
+    // the redraw-race middle outcome.
+    const tmux = {
+      ...mockTmux(),
+      capturePaneContent: async () => "idle\nhello\n❯ ",
+    } as unknown as TmuxAdapter;
+    const transport = new SessionTransport({ db, rigRepo, sessionRegistry, tmuxAdapter: tmux });
+    const app = createApp({ sessionTransport: transport });
+
+    const res = await app.request("/api/transport/send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session: "dev-impl@my-rig", text: "hello", verify: true }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.ok).toBe(true);
+    expect(body.verified).toBe(false);
+    expect(body.outcome).toBe("rendered-unconfirmed");
+  });
+
+  it("POST /send verify failure stays HTTP-error-distinct from the middle outcome (discriminator)", async () => {
+    seedRig();
+    const tmux = {
+      ...mockTmux(),
+      sendKeys: async () => ({ ok: false as const, code: "session_not_found", message: "session died" }),
+    } as unknown as TmuxAdapter;
+    const transport = new SessionTransport({ db, rigRepo, sessionRegistry, tmuxAdapter: tmux });
+    const app = createApp({ sessionTransport: transport });
+
+    const res = await app.request("/api/transport/send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session: "dev-impl@my-rig", text: "hello", verify: true }),
+    });
+    // submit_failed maps to 502 (unchanged); the middle outcome above is 200.
+    expect(res.status).toBe(502);
+    const body = await res.json();
+    expect(body.ok).toBe(false);
+    expect(body.reason).toBe("submit_failed");
+    expect(body.outcome).toBe("failed");
+  });
+
   it("POST /send with mid-work refusal returns 409", async () => {
     seedRig();
     const tmux = {
