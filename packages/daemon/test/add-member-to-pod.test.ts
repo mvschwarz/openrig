@@ -98,6 +98,7 @@ describe("PodRigInstantiator.addMemberToPod", () => {
     const mateBefore = setup.rigRepo.getRig(rig.id)!.nodes.find((n) => n.logicalId === "infra.server")!;
     const mateNodeIdBefore = mateBefore.id;
     const matePodIdBefore = mateBefore.podId;
+    const mateSessionBefore = setup.sessionRegistry.getSessionsForRig(rig.id).find((s) => s.nodeId === mateNodeIdBefore);
 
     const result = await setup.podInstantiator.addMemberToPod(rig.id, "infra", terminalMember("server2"), ".");
     expect(result.ok).toBe(true);
@@ -110,6 +111,12 @@ describe("PodRigInstantiator.addMemberToPod", () => {
     expect(mateAfter.logicalId).toBe("infra.server");
     expect(mateAfter.podId).toBe(matePodIdBefore);
     expect(result.result.node.nodeId).not.toBe(mateNodeIdBefore);
+
+    // The pod-mate's session is not re-keyed: same session id + name.
+    const mateSessionAfter = setup.sessionRegistry.getSessionsForRig(rig.id).find((s) => s.nodeId === mateNodeIdBefore);
+    expect(mateSessionAfter?.id).toBe(mateSessionBefore?.id);
+    expect(mateSessionAfter?.sessionName).toBe(mateSessionBefore?.sessionName);
+    // (LIVE-RIG QA additionally proves continuity_state + queue routing untouched.)
   });
 
   it("rejects a duplicate member id in the target pod (AC-3, dup guard KEPT)", async () => {
