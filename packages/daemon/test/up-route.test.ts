@@ -223,6 +223,47 @@ describe("Up API route", () => {
     });
   });
 
+  // OPR.0.3.4.9 — Option Y: auto-periodic co-equal with auto-pre-down in restore selection.
+  describe("OPR.0.3.4.9 Option Y restore selection via /api/up", () => {
+    it("stale auto-pre-down + newer auto-periodic -> restores from auto-periodic", async () => {
+      const rig = rigRepo.createRig("option-y-rig");
+      rigRepo.addNode(rig.id, "worker", { role: "worker" });
+      snapshotCapture.captureSnapshot(rig.id, "auto-pre-down");
+      // Wait a tick so created_at differs
+      await new Promise((r) => setTimeout(r, 10));
+      snapshotCapture.captureSnapshot(rig.id, "auto-periodic");
+
+      const res = await app.request("/api/up", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sourceRef: "option-y-rig" }),
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.status).toBe("restored");
+      expect(body.snapshotKind).toBe("auto-periodic");
+    });
+
+    it("fresher auto-pre-down + older auto-periodic -> restores from auto-pre-down", async () => {
+      const rig = rigRepo.createRig("option-y-rig2");
+      rigRepo.addNode(rig.id, "worker", { role: "worker" });
+      snapshotCapture.captureSnapshot(rig.id, "auto-periodic");
+      await new Promise((r) => setTimeout(r, 10));
+      snapshotCapture.captureSnapshot(rig.id, "auto-pre-down");
+
+      const res = await app.request("/api/up", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sourceRef: "option-y-rig2" }),
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.snapshotKind).toBe("auto-pre-down");
+    });
+  });
+
   // OPR.0.3.4.4 — `--plan` must be READ-ONLY on the rig_name restore path.
   // The rig_name branch early-returned BEFORE the bootstrap plan gate, so
   // `rig up --existing <rig> --plan` mutated (recreated sessions, flipped

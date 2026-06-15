@@ -43,6 +43,12 @@ export interface PsEntry {
   archivedAt: string | null;
   /** OPR.0.3.3.19 - convenience flag; true iff `archivedAt !== null`. */
   isArchived: boolean;
+  /** OPR.0.3.4.9 — periodic snapshot floor: whether the scheduler is active. */
+  periodicSnapshotActive: boolean;
+  /** OPR.0.3.4.9 — periodic snapshot interval in seconds (0 if inactive). */
+  periodicSnapshotIntervalSeconds: number;
+  /** OPR.0.3.4.9 — count of auto-periodic snapshots for this rig. */
+  autoPeriodicSnapshotCount: number;
 }
 
 /**
@@ -83,10 +89,17 @@ export function deriveRigLifecycleState(nodeStates: NodeLifecycleState[]): RigLi
 export class PsProjectionService {
   readonly db: Database.Database;
   private readonly seatActivity: SeatActivityService | null;
+  private periodicSnapshotActive = false;
+  private periodicSnapshotIntervalSeconds = 0;
 
   constructor(deps: { db: Database.Database; seatActivity?: SeatActivityService }) {
     this.db = deps.db;
     this.seatActivity = deps.seatActivity ?? null;
+  }
+
+  setPeriodicSnapshotState(active: boolean, intervalSeconds: number): void {
+    this.periodicSnapshotActive = active;
+    this.periodicSnapshotIntervalSeconds = intervalSeconds;
   }
 
   getEntries(filter?: RigArchiveFilter): PsEntry[] {
@@ -108,7 +121,8 @@ export class PsProjectionService {
           WHERE n.rig_id = r.id AND s.status = 'running'
           AND s.id = (SELECT s2.id FROM sessions s2 WHERE s2.node_id = s.node_id ORDER BY s2.created_at DESC, s2.id DESC LIMIT 1)
         ) as earliest_running_at,
-        (SELECT snap.created_at FROM snapshots snap WHERE snap.rig_id = r.id ORDER BY snap.created_at DESC, snap.id DESC LIMIT 1) as latest_snapshot_at
+        (SELECT snap.created_at FROM snapshots snap WHERE snap.rig_id = r.id ORDER BY snap.created_at DESC, snap.id DESC LIMIT 1) as latest_snapshot_at,
+        (SELECT COUNT(*) FROM snapshots snap WHERE snap.rig_id = r.id AND snap.kind = 'auto-periodic') as auto_periodic_count
       FROM rigs r
       ${where}
       ORDER BY r.name
@@ -120,6 +134,7 @@ export class PsProjectionService {
       running_count: number;
       earliest_running_at: string | null;
       latest_snapshot_at: string | null;
+      auto_periodic_count: number;
     }>;
 
     const now = Date.now();
@@ -170,6 +185,9 @@ export class PsProjectionService {
         latestSnapshot: r.latest_snapshot_at ? formatAge(now - new Date(r.latest_snapshot_at + "Z").getTime()) : null,
         archivedAt: r.archived_at,
         isArchived: r.archived_at !== null,
+        periodicSnapshotActive: this.periodicSnapshotActive,
+        periodicSnapshotIntervalSeconds: this.periodicSnapshotIntervalSeconds,
+        autoPeriodicSnapshotCount: r.auto_periodic_count,
       };
     });
   }

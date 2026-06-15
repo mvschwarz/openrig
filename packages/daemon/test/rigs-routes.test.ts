@@ -632,6 +632,20 @@ describe("Rig CRUD routes", () => {
     expect(body.error).not.toContain("auto-pre-down snapshot");
   });
 
+  // OPR.0.3.4.9 — Option Y: auto-periodic co-equal with auto-pre-down via Explorer /:id/up.
+  it("OPR.0.3.4.9 Option Y: stale auto-pre-down + newer auto-periodic -> restores from auto-periodic via /:id/up", async () => {
+    const rig = repo.createRig("option-y-explorer");
+    repo.addNode(rig.id, "worker", { role: "worker" });
+    snapshotCapture.captureSnapshot(rig.id, "auto-pre-down");
+    await new Promise((r) => setTimeout(r, 10));
+    snapshotCapture.captureSnapshot(rig.id, "auto-periodic");
+
+    const res = await app.request(`/api/rigs/${rig.id}/up`, { method: "POST" });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.snapshotKind).toBe("auto-periodic");
+  });
+
   // OPR.0.3.4.4 — the Explorer restore route is INDEPENDENT of /api/up (it
   // parsed no body at all), so plan:true was silently ignored and the route
   // always mutated. These tests pin the daemon-level read-only gate here too.

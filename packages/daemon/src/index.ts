@@ -56,6 +56,16 @@ export async function startServer(port?: number) {
         // PsProjectionService + node-inventory enrichment serve
         // fresh data on each request.
         deps.seatActivityService?.start(deps.rigRepo.db);
+        // OPR.0.3.4.9 — start the periodic snapshot scheduler (crash-insurance).
+        if (deps.periodicSnapshotScheduler) {
+          const settingsStore = deps.settingsStore;
+          const enabled = settingsStore ? settingsStore.resolveOne("snapshots.periodic.enabled").value === true : true;
+          if (enabled) {
+            const intervalS = settingsStore ? (settingsStore.resolveOne("snapshots.periodic.interval_seconds").value as number) : 300;
+            const retentionKeep = settingsStore ? (settingsStore.resolveOne("snapshots.periodic.retention_keep").value as number) : 10;
+            deps.periodicSnapshotScheduler.start(intervalS * 1000, retentionKeep);
+          }
+        }
       }
     });
     servers.push(srv);
@@ -75,6 +85,11 @@ export async function startServer(port?: number) {
       deps.seatActivityService?.stop();
     } catch (err) {
       console.error("[seat-activity] shutdown error", err);
+    }
+    try {
+      deps.periodicSnapshotScheduler?.stop();
+    } catch (err) {
+      console.error("[periodic-snapshot] shutdown error", err);
     }
     await Promise.all(
       servers.map(

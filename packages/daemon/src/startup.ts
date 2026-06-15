@@ -1245,6 +1245,11 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   });
   deps.contextMonitor = contextMonitor;
 
+  // OPR.0.3.4.9 — periodic snapshot scheduler (crash-insurance floor).
+  const { PeriodicSnapshotScheduler } = await import("./domain/periodic-snapshot-scheduler.js");
+  const periodicSnapshotScheduler = new PeriodicSnapshotScheduler({ db, snapshotCapture, snapshotRepo });
+  deps.periodicSnapshotScheduler = periodicSnapshotScheduler;
+
   const app = createApp(deps);
 
   return { app, db, deps, contextMonitor };
