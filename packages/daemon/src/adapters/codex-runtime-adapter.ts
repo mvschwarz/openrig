@@ -257,7 +257,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     await this.dismissSkippableCodexUpdatePrompt(binding.tmuxSession);
 
     if (opts.resumeToken) {
-      const verification = await this.verifyResumeLaunch(binding.tmuxSession);
+      const verification = await this.verifyResumeLaunch(binding.tmuxSession, { resumeToken: opts.resumeToken });
       if (!verification.ok) return verification;
       return { ok: true, resumeToken: opts.resumeToken, resumeType: "codex_id" };
     }
@@ -517,21 +517,35 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     return undefined;
   }
 
-  private async verifyResumeLaunch(tmuxSession: string): Promise<HarnessLaunchResult> {
-    const attempts = 6;
+  private async verifyResumeLaunch(tmuxSession: string, opts?: { resumeToken?: string }): Promise<HarnessLaunchResult> {
+    const quickAttempts = 6;
+    const extendedAttempts = 24;
+    const quickSleepMs = 200;
+    const extendedSleepMs = 500;
 
     // OPR.0.3.3.21 (FR-2): process-alive is NOT proof of a restored
     // conversation. verifyResumeLaunch must NOT return ok:true unless the probe
     // proves `resumed`. Unresolved operator-action gates (update/trust/model)
     // and a bounded poll that never reaches `resumed` are `attention_required`,
-    // not launch success. The readiness loop (checkReady) remains the SECOND
-    // check that upgrades the seat to ready once it genuinely reaches the TUI.
-    // We remember the most recent unresolved gate so the poll-exhaustion path
-    // surfaces an honest reason instead of laundering inconclusive into ok:true.
+    // not launch success.
+    //
+    // OPR.0.3.4.13: a slow-but-valid Codex resume (boot-in-progress on the
+    // original thread, no real gate) gets an extended poll window (~15s) beyond
+    // the quick 1.2s. Genuine gates (auth/trust/model/update) still classify
+    // within the quick window. Only the awaiting_runtime boot case extends.
     let lastUnresolved: NativeResumeProbeResult | null = null;
     let lastPaneContent = "";
+    let sawRealGate = false;
 
-    for (let attempt = 0; attempt < attempts; attempt++) {
+    const totalAttempts = quickAttempts + extendedAttempts;
+
+    for (let attempt = 0; attempt < totalAttempts; attempt++) {
+      // After the quick phase, only continue if we're in the boot-in-progress
+      // case (awaiting_runtime, no real gate). Real gates won't self-resolve.
+      if (attempt >= quickAttempts && (sawRealGate || lastUnresolved?.code !== "awaiting_runtime")) {
+        break;
+      }
+
       const paneCommand = await this.tmux.getPaneCommand(tmuxSession);
       const paneContent = (await this.tmux.capturePaneContent(tmuxSession, 40)) ?? "";
       lastPaneContent = paneContent;
@@ -557,11 +571,6 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
         };
       }
 
-      // Codex auth-refusal: stored OAuth token can no longer be refreshed.
-      // Recoverable — operator runs `codex login` and the seat continues.
-      // Mirror Claude's evidence shape (last 12 pane lines per
-      // claude-resume.ts:97). Closes the guard-blocked pod-aware-path gap
-      // alongside the legacy CodexResumeAdapter path patched at 63ee206.
       if (probe.status === "attention_required") {
         return {
           ok: false,
@@ -572,38 +581,35 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       }
 
       if (probe.status === "resumed") {
-        return { ok: true };
+        return {
+          ok: true,
+          resumeToken: opts?.resumeToken,
+          resumeType: opts?.resumeToken ? "codex_id" : undefined,
+        };
       }
 
       if (probe.code === "update_gate") {
-        // Preserve the working auto-dismiss: a skippable update we CAN dismiss
-        // clears the gate and we keep polling toward `resumed`. An update gate
-        // we cannot dismiss stays unresolved and fails loudly after the poll.
         const dismissed = await this.dismissSkippableCodexUpdatePrompt(tmuxSession, 1);
         if (dismissed) {
           lastUnresolved = null;
-          if (attempt < attempts - 1) {
-            await this.sleep(200);
-          }
+          sawRealGate = false;
+          const sleepMs = attempt < quickAttempts ? quickSleepMs : extendedSleepMs;
+          if (attempt < totalAttempts - 1) await this.sleep(sleepMs);
           continue;
         }
         lastUnresolved = probe;
+        sawRealGate = true;
       } else if (probe.status === "inconclusive") {
-        // trust_gate / model_selection_gate (operator-action — won't self-resolve)
-        // and awaiting_runtime (transient — may still reach `resumed`). Keep
-        // polling within bounded boot, but remember it so we fail honestly if
-        // the poll exhausts without ever proving a restored conversation.
         lastUnresolved = probe;
+        if (probe.code !== "awaiting_runtime") {
+          sawRealGate = true;
+        }
       }
 
-      if (attempt < attempts - 1) {
-        await this.sleep(200);
-      }
+      const sleepMs = attempt < quickAttempts ? quickSleepMs : extendedSleepMs;
+      if (attempt < totalAttempts - 1) await this.sleep(sleepMs);
     }
 
-    // Bounded poll exhausted without ever observing `resumed`. Honor the probe's
-    // inconclusive result as attention_required (operator action required) —
-    // never launch success on process-alive alone.
     return {
       ok: false,
       error: lastUnresolved?.detail

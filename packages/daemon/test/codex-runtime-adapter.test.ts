@@ -980,6 +980,57 @@ describe("Codex runtime adapter", () => {
     }
   });
 
+  // OPR.0.3.4.13 — slow-but-valid Codex resume: boot-in-progress for several
+  // ticks then the pane becomes a ready Codex TUI → must classify `resumed`
+  // with resume metadata, not `attention_required`.
+  it("OPR.0.3.4.13: slow Codex resume boot-in-progress then ready TUI classifies resumed with metadata", async () => {
+    let callCount = 0;
+    const tmux = mockTmux({
+      getPaneCommand: vi.fn(async () => {
+        callCount++;
+        return callCount <= 10 ? "node" : "codex";
+      }),
+      capturePaneContent: vi.fn(async () => {
+        if (callCount <= 10) return "codex resume 019ecd3b-test-thread\nCodex v0.128.0\nloading...";
+        return "OpenAI Codex (v0.128.0)\n  gpt-5.5 · session 019ecd3b-test-thread\n› ";
+      }),
+    });
+    const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {} });
+
+    const result = await adapter.launchHarness(makeBinding(), {
+      name: "dev-worker@test-rig",
+      resumeToken: "019ecd3b-test-thread",
+    });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.resumeToken).toBe("019ecd3b-test-thread");
+      expect(result.resumeType).toBe("codex_id");
+    }
+  });
+
+  // OPR.0.3.4.13: genuine gates still classify fast — trust gate does NOT
+  // get the extended boot-in-progress window.
+  it("OPR.0.3.4.13: trust gate still classifies attention_required without extended delay", async () => {
+    let pollCount = 0;
+    const trustGate = "Do you trust the contents of this directory?\n› 1. Yes, continue\n  2. No, exit";
+    const tmux = mockTmux({
+      getPaneCommand: vi.fn(async () => { pollCount++; return "codex"; }),
+      capturePaneContent: vi.fn(async () => trustGate),
+    });
+    const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {} });
+
+    const result = await adapter.launchHarness(makeBinding(), { name: "dev-qa@test-rig", resumeToken: "sess-456" });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.recovery).toBe("attention_required");
+    }
+    // Trust gate should NOT enter the extended phase (30 attempts).
+    // Quick phase = 6 attempts; trust gate breaks out after quick phase.
+    expect(pollCount).toBeLessThanOrEqual(7);
+  });
+
   // Guard against breaking the working auto-dismiss: a skippable update gate
   // still auto-dismisses and continues to success (covered end-to-end by
   // "launchHarness skips the non-mutating Codex update prompt during resume
