@@ -258,7 +258,7 @@ function deriveRestoreOutcome(db: Database.Database, rigId: string, nodeId: stri
   return "n-a";
 }
 
-function deriveHeldReason(db: Database.Database, nodeId: string, sessionStatus: string | null): string | null {
+function deriveHeldReason(db: Database.Database, rigId: string, nodeId: string, sessionStatus: string | null): string | null {
   if (sessionStatus === "running") return null;
 
   const heldRow = db.prepare(
@@ -266,11 +266,18 @@ function deriveHeldReason(db: Database.Database, nodeId: string, sessionStatus: 
   ).get(nodeId) as { seq: number; payload: string } | undefined;
   if (!heldRow) return null;
 
-  // Superseded by a later restore.subset_completed or restore.completed containing this node
-  const laterLaunch = db.prepare(
-    "SELECT seq FROM events WHERE node_id = ? AND type IN ('restore.completed', 'restore.subset_completed') AND seq > ? ORDER BY seq DESC LIMIT 1"
-  ).get(nodeId, heldRow.seq) as { seq: number } | undefined;
-  if (laterLaunch) return null;
+  // Superseded by a later rig-scoped restore event containing this node.
+  // restore.completed/restore.subset_completed are rig-scoped (no top-level nodeId),
+  // so query by rig_id and parse payloads for node containment.
+  const laterRestoreRows = db.prepare(
+    "SELECT payload FROM events WHERE rig_id = ? AND type IN ('restore.completed', 'restore.subset_completed') AND seq > ? ORDER BY seq DESC"
+  ).all(rigId, heldRow.seq) as { payload: string }[];
+  for (const row of laterRestoreRows) {
+    try {
+      const event = JSON.parse(row.payload) as { result: { nodes: Array<{ nodeId: string }> } };
+      if (event.result?.nodes?.some((n) => n.nodeId === nodeId)) return null;
+    } catch { continue; }
+  }
 
   try {
     const parsed = JSON.parse(heldRow.payload) as { reason?: string };
@@ -426,7 +433,7 @@ export function getNodeInventory(db: Database.Database, rigId: string): NodeInve
       // from cwd against the rig's typed workspace block. null when the
       // rig has no workspace declaration.
       workspace: resolveNodeWorkspace({ spec: workspaceSpec, cwd: row.cwd }),
-      heldReason: deriveHeldReason(db, row.node_id, row.session_status),
+      heldReason: deriveHeldReason(db, rigId, row.node_id, row.session_status),
     };
   });
 }

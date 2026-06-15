@@ -177,6 +177,10 @@ nodesRoutes.post("/:logicalId/launch", async (c) => {
     if (!result.ok) {
       return c.json(result, result.code === "rig_not_found" ? 404 : result.code === "no_matching_nodes" ? 404 : 500);
     }
+    const failedTarget = result.failedTargets?.find((n) => n.logicalId === logicalId);
+    if (failedTarget) {
+      return c.json({ ok: false, code: "target_liveness_unknown", error: `Target '${logicalId}' tmux probe failed (fail-closed). Cannot determine if seat is live.`, failedTargets: result.failedTargets }, 503);
+    }
     const launchedNode = result.launched?.[0];
     if (launchedNode) {
       return c.json({ ok: true, rigId, nodeId: launchedNode.nodeId, logicalId: launchedNode.logicalId, launched: result.launched, held: result.held, alreadyRunning: result.alreadyRunning }, 201);

@@ -656,17 +656,20 @@ describe("Node Inventory Projection", () => {
       expect(entry?.heldReason).toBeNull();
     });
 
-    it("heldReason is superseded by a newer restore.subset_completed containing the node", () => {
+    it("heldReason is superseded by a newer restore.subset_completed containing the node (rig-scoped event, no node_id)", () => {
       seedPodAwareRig(db);
-      // First: held
+      // First: held (node-scoped)
       seedEvent(db, "rig-1", "node-1", "node.held", {
         rigId: "rig-1",
         nodeId: "node-1",
         logicalId: "dev.impl",
         reason: "excluded_from_subset",
       });
-      // Then: launched via subset
-      seedEvent(db, "rig-1", "node-1", "restore.subset_completed", {
+      // Then: launched via subset — rig-scoped event (node_id NULL in production)
+      db.prepare(
+        "INSERT INTO events (rig_id, node_id, type, payload) VALUES (?, NULL, ?, ?)"
+      ).run("rig-1", "restore.subset_completed", JSON.stringify({
+        type: "restore.subset_completed",
         rigId: "rig-1",
         snapshotId: "snap-2",
         result: {
@@ -676,7 +679,7 @@ describe("Node Inventory Projection", () => {
           ],
           warnings: [],
         },
-      });
+      }));
 
       const entries = getNodeInventory(db, "rig-1");
       const entry = entries.find((e) => e.logicalId === "dev.impl");

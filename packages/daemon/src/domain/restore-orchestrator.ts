@@ -282,6 +282,7 @@ export class RestoreOrchestrator {
     launched?: RestoreNodeResult[];
     held?: Array<{ nodeId: string; logicalId: string; reason: string }>;
     alreadyRunning?: Array<{ nodeId: string; logicalId: string }>;
+    failedTargets?: Array<{ nodeId: string; logicalId: string; reason: string }>;
   }> {
     const rig = this.rigRepo.getRig(rigId);
     if (!rig) return { ok: false, code: "rig_not_found", message: `Rig ${rigId} not found` };
@@ -346,7 +347,7 @@ export class RestoreOrchestrator {
       this.eventBus.emit({ type: "restore.subset_completed", rigId, snapshotId: snapshot.id, result: subsetResult });
     }
 
-    // Emit node.held for non-running held non-targets
+    // Emit node.held for non-running held non-targets (tri-state: running/unknown/held)
     const held: Array<{ nodeId: string; logicalId: string; reason: string }> = [];
     const holdReasonText = opts?.holdReason ?? "excluded_from_subset";
     for (const node of nonTargetNodes) {
@@ -354,25 +355,28 @@ export class RestoreOrchestrator {
         .filter((s) => s.nodeId === node.id && s.status === "running");
 
       let running = false;
+      let unknown = false;
       for (const session of sessions) {
         try {
           if (await this.tmuxAdapter.hasSession(session.sessionName)) { running = true; break; }
-        } catch { /* fail-closed: don't emit held for unknown */ }
+        } catch {
+          unknown = true;
+        }
       }
 
-      if (!running) {
-        this.eventBus.emit({
-          type: "node.held",
-          rigId,
-          nodeId: node.id,
-          logicalId: node.logicalId,
-          reason: holdReasonText,
-        });
-        held.push({ nodeId: node.id, logicalId: node.logicalId, reason: holdReasonText });
-      }
+      if (running || unknown) continue;
+
+      this.eventBus.emit({
+        type: "node.held",
+        rigId,
+        nodeId: node.id,
+        logicalId: node.logicalId,
+        reason: holdReasonText,
+      });
+      held.push({ nodeId: node.id, logicalId: node.logicalId, reason: holdReasonText });
     }
 
-    return { ok: true, launched, held, alreadyRunning };
+    return { ok: true, launched, held, alreadyRunning, failedTargets };
   }
 
   private validatePreRestore(

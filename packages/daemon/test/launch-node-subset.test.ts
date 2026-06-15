@@ -207,7 +207,7 @@ describe("RestoreOrchestrator.launchNodeSubset", () => {
     expect(events).toHaveLength(0);
   });
 
-  it("fail-closed on tmux probe error — does not launch", async () => {
+  it("fail-closed on tmux probe error — does not launch, returns failedTargets", async () => {
     const { rigId, nodeIds } = seedPodAwareRig();
     seedSnapshot(rigId, nodeIds);
     const session = sessionRegistry.registerSession(nodeIds[0]!, "dev-driver@test-rig");
@@ -219,5 +219,25 @@ describe("RestoreOrchestrator.launchNodeSubset", () => {
     expect(result.ok).toBe(true);
     expect(result.launched).toHaveLength(0);
     expect(result.alreadyRunning).toHaveLength(0);
+    expect(result.failedTargets).toHaveLength(1);
+    expect(result.failedTargets![0].logicalId).toBe("dev.driver");
+    expect(result.failedTargets![0].reason).toBe("tmux_probe_error");
+  });
+
+  // B1 regression: non-target with tmux probe error does NOT get node.held
+  it("does not emit node.held for non-target with tmux probe error (fail-closed)", async () => {
+    const { rigId, nodeIds } = seedPodAwareRig();
+    seedSnapshot(rigId, nodeIds);
+    const session = sessionRegistry.registerSession(nodeIds[1]!, "dev-guard@test-rig");
+    sessionRegistry.updateStatus(session.id, "running");
+    tmux.hasSession.mockImplementation(async (name: string) => {
+      if (name === "dev-guard@test-rig") throw new Error("tmux unavailable");
+      return false;
+    });
+
+    await orchestrator.launchNodeSubset(rigId, ["dev.driver"]);
+
+    const events = db.prepare("SELECT payload FROM events WHERE type = 'node.held'").all();
+    expect(events).toHaveLength(0);
   });
 });

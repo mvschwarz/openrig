@@ -58,6 +58,8 @@ interface NodeEntry {
   hasAssignedWork?: boolean;
   /** Slice 15 — pending qitem count for this seat (cheap aggregate). */
   pendingWorkCount?: number;
+  /** OPR.0.3.4.11 — held reason from node.held event. */
+  heldReason?: string | null;
   agentActivity?: {
     state: "running" | "needs_input" | "idle" | "unknown";
     reason: string;
@@ -160,6 +162,7 @@ const ALLOWED_NODE_FIELDS = new Set([
   "pendingWorkCount",
   "agentActivity",
   "contextUsage",
+  "heldReason",
 ]);
 
 interface PsCliOptions {
@@ -778,7 +781,7 @@ async function handleNodes(
       formatActivity(n.agentActivity),
       formatContextUsage(n.contextUsage),
       n.restoreOutcome,
-      n.latestError ? truncate(n.latestError, 30) : "—",
+      n.latestError ? truncate(n.latestError, 30) : n.heldReason ? `held: ${truncate(n.heldReason, 25)}` : "—",
     ));
   }
   if (humanTruncated) {
