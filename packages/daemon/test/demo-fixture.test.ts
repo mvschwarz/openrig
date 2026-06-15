@@ -90,7 +90,7 @@ describe("Demo fixture validation", () => {
       readFile: (p: string) => fs.readFileSync(p, "utf-8"),
       exists: (p: string) => fs.existsSync(p),
     };
-    const result = rigPreflight({ rigSpecYaml: yaml, rigRoot: DEMO_ROOT, fsOps });
+    const result = await rigPreflight({ rigSpecYaml: yaml, rigRoot: DEMO_ROOT, fsOps });
     const agentErrors = result.errors.filter((e: string) => e.includes("agent_ref resolution failed"));
     expect(agentErrors).toHaveLength(0);
     // Full preflight should pass (may have runtime warnings in test env, but ready should be true

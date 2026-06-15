@@ -247,7 +247,7 @@ describe("Starter specs", () => {
     expect(productTeam?.summary?.toLowerCase()).not.toContain("happy-path starter");
   });
 
-  it("all rig specs pass canonical rigPreflight with explicit cwdOverride", () => {
+  it("all rig specs pass canonical rigPreflight with explicit cwdOverride", async () => {
     const fsOps = {
       readFile: (p: string) => readFileSync(p, "utf-8"),
       exists: (p: string) => existsSync(p),
@@ -262,7 +262,7 @@ describe("Starter specs", () => {
         fsOps,
       };
 
-      const result = rigPreflight(input);
+      const result = await rigPreflight(input);
       // Should be ready with no blocking errors (warnings are acceptable)
       expect(result.ready).toBe(true);
       if (result.errors.length > 0) {
@@ -279,7 +279,7 @@ describe("Starter specs", () => {
     }
   });
 
-  it("service-backed proof rigs pass canonical rigPreflight with explicit cwdOverride", () => {
+  it("service-backed proof rigs pass canonical rigPreflight with explicit cwdOverride", async () => {
     const fsOps = {
       readFile: (p: string) => readFileSync(p, "utf-8"),
       exists: (p: string) => existsSync(p),
@@ -294,7 +294,7 @@ describe("Starter specs", () => {
         fsOps,
       };
 
-      const result = rigPreflight(input);
+      const result = await rigPreflight(input);
       expect(result.ready).toBe(true);
       if (result.errors.length > 0) {
         throw new Error(`Preflight failed for ${file}: ${result.errors.join("; ")}`);

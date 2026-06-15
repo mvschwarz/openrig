@@ -22,7 +22,10 @@ export async function verifyCodexProfileLoads(
     await exec(cmd);
     return { ok: true, profile };
   } catch (err) {
-    const stderr = err instanceof Error ? err.message : String(err);
+    const stderrField = (err as { stderr?: string | Buffer })?.stderr;
+    const stderr = stderrField
+      ? (typeof stderrField === "string" ? stderrField : stderrField.toString()).trim()
+      : (err instanceof Error ? err.message : String(err));
     const isLegacyTable = /legacy.*profiles?\./i.test(stderr) ||
       /cannot be used while.*contains legacy/i.test(stderr) ||
       /failed to load configuration/i.test(stderr);

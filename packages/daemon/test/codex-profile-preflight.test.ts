@@ -37,6 +37,18 @@ describe("verifyCodexProfileLoads", () => {
     expect(result.migrationHint).toContain("[profiles.openrig_pm]");
   });
 
+  it("FAIL: captures stderr from execSync-style errors (err.stderr)", async () => {
+    const exec = vi.fn(async () => {
+      const err = new Error("Command failed") as Error & { stderr: string };
+      err.stderr = "Error: failed to load configuration: --profile test cannot be used while config.toml contains legacy [profiles.test] config";
+      throw err;
+    });
+    const result = await verifyCodexProfileLoads("test", exec);
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("failed to load");
+    expect(result.migrationHint).toContain("Move the profile settings");
+  });
+
   it("honest failure: unknown error carries generic hint", async () => {
     const exec = vi.fn(async () => { throw new Error("permission denied"); });
     const result = await verifyCodexProfileLoads("test", exec);

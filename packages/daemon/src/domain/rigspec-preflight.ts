@@ -142,6 +142,10 @@ export interface PreflightSpecContext {
   cwdOverride?: string;
   fsOps: AgentResolverFsOps;
   rigNameOverride?: string;
+  /** OPR.0.3.4.7 — exec for async probes (Codex profile-LOAD). When omitted,
+   *  the Codex profile probe is skipped (backwards-compatible for callers that
+   *  cannot provide exec, e.g. legacy sync-only test paths). */
+  exec?: (cmd: string) => Promise<string>;
 }
 
 /**
@@ -151,7 +155,7 @@ export interface PreflightSpecContext {
  * @param input - rig spec YAML, rig root, and filesystem ops
  * @returns PreflightResult
  */
-export function rigPreflight(input: RigPreflightInput): PreflightResult {
+export async function rigPreflight(input: RigPreflightInput & { exec?: (cmd: string) => Promise<string> }): Promise<PreflightResult> {
   // FRONT-END (OPR.0.3.3.24): YAML is only the input adapter. Parse + validate +
   // normalize, then delegate every actual check to the structured core so
   // callers holding an already-parsed+validated spec (expand / add_member)
@@ -173,6 +177,7 @@ export function rigPreflight(input: RigPreflightInput): PreflightResult {
     cwdOverride: input.cwdOverride,
     fsOps: input.fsOps,
     rigNameOverride: input.rigNameOverride,
+    exec: input.exec,
   });
 }
 
@@ -183,7 +188,7 @@ export function rigPreflight(input: RigPreflightInput): PreflightResult {
  * checks/order/error-strings so expand/add_member preflight a structured spec
  * with no YAML round-trip; rigPreflight(yaml) is the parse/normalize front over it.
  */
-export function preflightValidatedSpec(rigSpec: PodRigSpec, preflightCtx: PreflightSpecContext): PreflightResult {
+export async function preflightValidatedSpec(rigSpec: PodRigSpec, preflightCtx: PreflightSpecContext): Promise<PreflightResult> {
   const errors: string[] = [];
   const warnings: string[] = [];
 
@@ -273,6 +278,13 @@ export function preflightValidatedSpec(rigSpec: PodRigSpec, preflightCtx: Prefli
         errors.push(`${pod.id}.${member.id}: ${cwdError}`);
       }
     }
+  }
+
+  // OPR.0.3.4.7 — Codex profile-LOAD probe, integrated into preflight.
+  // Runs only when exec is provided and the sync checks passed.
+  if (errors.length === 0 && preflightCtx.exec) {
+    const profileErrors = await verifyCodexProfiles(rigSpec, preflightCtx.exec);
+    errors.push(...profileErrors);
   }
 
   return { ready: errors.length === 0, errors, warnings };

@@ -596,19 +596,9 @@ export class BootstrapOrchestrator {
         const spec = PodSchema.normalize(raw as Record<string, unknown>);
         stages.push({ stage: "resolve_spec", status: "ok", detail: { specName: spec.name, specVersion: spec.version } });
 
-        const preflight = rigPreflight({ rigSpecYaml, rigRoot, cwdOverride: opts.cwdOverride, fsOps: podInstantiator["deps"].fsOps });
-
-        // OPR.0.3.4.7 — async Codex profile-LOAD probe (post-sync preflight).
-        if (preflight.ready) {
-          const { verifyCodexProfiles } = await import("./rigspec-preflight.js");
-          const { execSync } = await import("node:child_process");
-          const execFn = async (cmd: string) => execSync(cmd, { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"], timeout: 10_000 });
-          const profileErrors = await verifyCodexProfiles(spec, execFn);
-          if (profileErrors.length > 0) {
-            preflight.ready = false;
-            preflight.errors.push(...profileErrors);
-          }
-        }
+        const { execSync } = await import("node:child_process");
+        const execFn = async (cmd: string) => execSync(cmd, { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"], timeout: 10_000 });
+        const preflight = await rigPreflight({ rigSpecYaml, rigRoot, cwdOverride: opts.cwdOverride, fsOps: podInstantiator["deps"].fsOps, exec: execFn });
 
         stages.push({
           stage: "preflight",

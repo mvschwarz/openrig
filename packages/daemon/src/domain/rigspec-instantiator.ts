@@ -315,6 +315,7 @@ interface PodInstantiatorDeps {
    *  image's resume token. Optional — when absent, agent_image session
    *  source surfaces a structured error at instantiation time. */
   agentImageLibrary?: import("./agent-images/agent-image-library-service.js").AgentImageLibraryService;
+  exec?: (cmd: string) => Promise<string>;
 }
 
 export interface MaterializeResult {
@@ -429,13 +430,14 @@ export class PodRigInstantiator {
     }
 
     const rigSpec = PodRigSpecSchema.normalize(raw as Record<string, unknown>);
-    const preflight = rigPreflight({
+    const preflight = await rigPreflight({
       rigSpecYaml,
       rigRoot,
       cwdOverride: opts?.cwdOverride,
       fsOps: this.deps.fsOps,
       rigNameOverride: targetRig?.rig.name,
       externalQualifiedIds: targetRig?.nodes.map((node) => node.logicalId),
+      exec: this.deps.exec,
     });
     if (!preflight.ready) {
       return { ok: false, code: "preflight_failed", errors: preflight.errors, warnings: preflight.warnings };
@@ -477,11 +479,12 @@ export class PodRigInstantiator {
     }
 
     const rigSpec = PodRigSpecSchema.normalize(raw as Record<string, unknown>);
-    const preflight = preflightValidatedSpec(rigSpec, {
+    const preflight = await preflightValidatedSpec(rigSpec, {
       rigRoot,
       cwdOverride: opts?.cwdOverride,
       fsOps: this.deps.fsOps,
       rigNameOverride: targetRig?.rig.name,
+      exec: this.deps.exec,
     });
     if (!preflight.ready) {
       return { ok: false, code: "preflight_failed", errors: preflight.errors, warnings: preflight.warnings };
@@ -814,11 +817,12 @@ export class PodRigInstantiator {
     // materialize front runs, via the core, using this adapter's fsOps).
     // rigNameOverride suppresses the rig-name-collision check (we are appending
     // to an existing rig, exactly like expand's structured path).
-    const preflight = preflightValidatedSpec(rigSpec, {
+    const preflight = await preflightValidatedSpec(rigSpec, {
       rigRoot,
       cwdOverride: opts?.cwdOverride,
       fsOps: this.deps.fsOps,
       rigNameOverride: rig.rig.name,
+      exec: this.deps.exec,
     });
     if (!preflight.ready) {
       return { ok: false, code: "preflight_failed", errors: preflight.errors, warnings: preflight.warnings };
@@ -939,7 +943,7 @@ export class PodRigInstantiator {
     }
 
     // 2. Preflight
-    const preflight = rigPreflight({ rigSpecYaml, rigRoot, cwdOverride: opts?.cwdOverride, fsOps: this.deps.fsOps });
+    const preflight = await rigPreflight({ rigSpecYaml, rigRoot, cwdOverride: opts?.cwdOverride, fsOps: this.deps.fsOps, exec: this.deps.exec });
     if (!preflight.ready) {
       return { ok: false, code: "preflight_failed", errors: preflight.errors, warnings: preflight.warnings };
     }

@@ -278,17 +278,17 @@ const RIG_ROOT = "/project/rigs/my-rig";
 
 describe("Rebooted rig preflight", () => {
   // T5: resolves all agent refs
-  it("resolves all agent refs successfully", () => {
+  it("resolves all agent refs successfully", async () => {
     const files: Record<string, string> = {
       [`${RIG_ROOT}/agents/impl/agent.yaml`]: validAgentYaml("impl"),
     };
-    const result = rigPreflight({ rigSpecYaml: makeRigYaml(), rigRoot: RIG_ROOT, fsOps: mockFs(files) });
+    const result = await rigPreflight({ rigSpecYaml: makeRigYaml(), rigRoot: RIG_ROOT, fsOps: mockFs(files) });
     expect(result.ready).toBe(true);
     expect(result.errors).toEqual([]);
   });
 
   // T5b: missing profile surfaces in preflight
-  it("catches missing profile", () => {
+  it("catches missing profile", async () => {
     const files: Record<string, string> = {
       [`${RIG_ROOT}/agents/impl/agent.yaml`]: validAgentYaml("impl"),
     };
@@ -299,13 +299,13 @@ describe("Rebooted rig preflight", () => {
         edges: [],
       }],
     });
-    const result = rigPreflight({ rigSpecYaml: rigYaml, rigRoot: RIG_ROOT, fsOps: mockFs(files) });
+    const result = await rigPreflight({ rigSpecYaml: rigYaml, rigRoot: RIG_ROOT, fsOps: mockFs(files) });
     expect(result.ready).toBe(false);
     expect(result.errors.some((e) => e.includes("nonexistent") && e.includes("not found"))).toBe(true);
   });
 
   // T5c: invalid restore-policy narrowing surfaces
-  it("catches invalid restore-policy narrowing", () => {
+  it("catches invalid restore-policy narrowing", async () => {
     const agentYaml = `name: impl\nversion: "1.0.0"\ndefaults:\n  lifecycle:\n    compaction_strategy: harness_native\n    restore_policy: checkpoint_only\nresources:\n  skills: []\nprofiles:\n  default:\n    uses:\n      skills: []`;
     const files: Record<string, string> = {
       [`${RIG_ROOT}/agents/impl/agent.yaml`]: agentYaml,
@@ -317,13 +317,13 @@ describe("Rebooted rig preflight", () => {
         edges: [],
       }],
     });
-    const result = rigPreflight({ rigSpecYaml: rigYaml, rigRoot: RIG_ROOT, fsOps: mockFs(files) });
+    const result = await rigPreflight({ rigSpecYaml: rigYaml, rigRoot: RIG_ROOT, fsOps: mockFs(files) });
     expect(result.ready).toBe(false);
     expect(result.errors.some((e) => e.includes("broadens"))).toBe(true);
   });
 
   // T6: unsupported runtime
-  it("reports unsupported runtime", () => {
+  it("reports unsupported runtime", async () => {
     const files: Record<string, string> = {
       [`${RIG_ROOT}/agents/impl/agent.yaml`]: validAgentYaml("impl"),
     };
@@ -334,13 +334,13 @@ describe("Rebooted rig preflight", () => {
         edges: [],
       }],
     });
-    const result = rigPreflight({ rigSpecYaml: rigYaml, rigRoot: RIG_ROOT, fsOps: mockFs(files) });
+    const result = await rigPreflight({ rigSpecYaml: rigYaml, rigRoot: RIG_ROOT, fsOps: mockFs(files) });
     expect(result.ready).toBe(false);
     expect(result.errors.some((e) => e.includes("unsupported runtime"))).toBe(true);
   });
 
   // T7: missing cwd
-  it("reports missing cwd", () => {
+  it("reports missing cwd", async () => {
     const files: Record<string, string> = {
       [`${RIG_ROOT}/agents/impl/agent.yaml`]: validAgentYaml("impl"),
     };
@@ -348,13 +348,13 @@ describe("Rebooted rig preflight", () => {
     // Actually, cwd is required on RigSpecPodMember, so an empty cwd would fail schema validation.
     // Let's verify the schema catches it.
     const rigYaml = `version: "0.2"\nname: test-rig\npods:\n  - id: dev\n    label: Dev\n    members:\n      - id: impl\n        agent_ref: "local:agents/impl"\n        profile: default\n        runtime: claude-code\n    edges: []\nedges: []`;
-    const result = rigPreflight({ rigSpecYaml: rigYaml, rigRoot: RIG_ROOT, fsOps: mockFs(files) });
+    const result = await rigPreflight({ rigSpecYaml: rigYaml, rigRoot: RIG_ROOT, fsOps: mockFs(files) });
     expect(result.ready).toBe(false);
     expect(result.errors.some((e) => e.includes("cwd"))).toBe(true);
   });
 
   // T8: import collision as warning
-  it("rejects invalid session name characters in authored pod/member/rig names with per-component error", () => {
+  it("rejects invalid session name characters in authored pod/member/rig names with per-component error", async () => {
     const rigYaml = makeRigYaml({
       name: "my rig",
       pods: [{
@@ -366,7 +366,7 @@ describe("Rebooted rig preflight", () => {
     const files: Record<string, string> = {
       [`${RIG_ROOT}/agents/impl/agent.yaml`]: validAgentYaml("impl"),
     };
-    const result = rigPreflight({ rigSpecYaml: rigYaml, rigRoot: RIG_ROOT, fsOps: mockFs(files) });
+    const result = await rigPreflight({ rigSpecYaml: rigYaml, rigRoot: RIG_ROOT, fsOps: mockFs(files) });
     expect(result.ready).toBe(false);
     // Per-component errors for pod, member, and rig name
     expect(result.errors.some((e) => e.includes("pod name") && e.includes("dev 1") && e.includes(" "))).toBe(true);
@@ -374,33 +374,33 @@ describe("Rebooted rig preflight", () => {
     expect(result.errors.some((e) => e.includes("rig name") && e.includes("my rig") && e.includes(" "))).toBe(true);
   });
 
-  it("reports import collision as warning", () => {
+  it("reports import collision as warning", async () => {
     const files: Record<string, string> = {
       [`${RIG_ROOT}/agents/impl/agent.yaml`]: `name: impl\nversion: "1.0.0"\nimports:\n  - ref: local:../lib\nresources:\n  skills:\n    - id: shared\n      path: skills/shared\nprofiles:\n  default:\n    uses:\n      skills: [shared]`,
       [`${RIG_ROOT}/agents/lib/agent.yaml`]: `name: lib\nversion: "1.0.0"\nresources:\n  skills:\n    - id: shared\n      path: skills/shared\nprofiles: {}`,
     };
-    const result = rigPreflight({ rigSpecYaml: makeRigYaml(), rigRoot: RIG_ROOT, fsOps: mockFs(files) });
+    const result = await rigPreflight({ rigSpecYaml: makeRigYaml(), rigRoot: RIG_ROOT, fsOps: mockFs(files) });
     expect(result.ready).toBe(true);
     expect(result.warnings.some((w) => w.includes("collision"))).toBe(true);
   });
 
-  it("fails honestly when builtin/library cwd resolves inside the OpenRig install without --cwd", () => {
+  it("fails honestly when builtin/library cwd resolves inside the OpenRig install without --cwd", async () => {
     const builtinRoot = nodePath.resolve(import.meta.dirname, "../src/../specs");
     const files: Record<string, string> = {
       [`${builtinRoot}/agents/impl/agent.yaml`]: validAgentYaml("impl"),
     };
-    const result = rigPreflight({ rigSpecYaml: makeRigYaml(), rigRoot: builtinRoot, fsOps: mockFs(files) });
+    const result = await rigPreflight({ rigSpecYaml: makeRigYaml(), rigRoot: builtinRoot, fsOps: mockFs(files) });
     expect(result.ready).toBe(false);
     expect(result.errors.some((e) => e.includes("inside the OpenRig installation"))).toBe(true);
     expect(result.errors.some((e) => e.includes("--cwd"))).toBe(true);
   });
 
-  it("accepts builtin/library specs when cwdOverride is provided", () => {
+  it("accepts builtin/library specs when cwdOverride is provided", async () => {
     const builtinRoot = nodePath.resolve(import.meta.dirname, "../src/../specs");
     const files: Record<string, string> = {
       [`${builtinRoot}/agents/impl/agent.yaml`]: validAgentYaml("impl"),
     };
-    const result = rigPreflight({
+    const result = await rigPreflight({
       rigSpecYaml: makeRigYaml(),
       rigRoot: builtinRoot,
       cwdOverride: "/workspace/project",
