@@ -101,6 +101,9 @@ export const SETTINGS_VALID_KEYS = [
   "policies.claude_compaction.message_inline",
   "policies.claude_compaction.message_file_path",
   "policies.claude_compaction.post_restore_audit_instruction",
+  "snapshots.periodic.enabled",
+  "snapshots.periodic.interval_seconds",
+  "snapshots.periodic.retention_keep",
 ] as const;
 
 export type SettingsValidKey = typeof SETTINGS_VALID_KEYS[number];
@@ -149,6 +152,9 @@ const ENV_MAP: Record<SettingsValidKey, { primary: string; legacy?: string }> = 
   "policies.claude_compaction.message_inline": { primary: "OPENRIG_POLICIES_CLAUDE_COMPACTION_MESSAGE_INLINE" },
   "policies.claude_compaction.message_file_path": { primary: "OPENRIG_POLICIES_CLAUDE_COMPACTION_MESSAGE_FILE_PATH" },
   "policies.claude_compaction.post_restore_audit_instruction": { primary: "OPENRIG_POLICIES_CLAUDE_COMPACTION_POST_RESTORE_AUDIT_INSTRUCTION" },
+  "snapshots.periodic.enabled": { primary: "OPENRIG_SNAPSHOTS_PERIODIC_ENABLED" },
+  "snapshots.periodic.interval_seconds": { primary: "OPENRIG_SNAPSHOTS_PERIODIC_INTERVAL_SECONDS" },
+  "snapshots.periodic.retention_keep": { primary: "OPENRIG_SNAPSHOTS_PERIODIC_RETENTION_KEEP" },
 };
 
 const KEY_TO_PATH: Record<SettingsValidKey, string[]> = {
@@ -188,6 +194,9 @@ const KEY_TO_PATH: Record<SettingsValidKey, string[]> = {
   "policies.claude_compaction.message_inline": ["policies", "claudeCompaction", "messageInline"],
   "policies.claude_compaction.message_file_path": ["policies", "claudeCompaction", "messageFilePath"],
   "policies.claude_compaction.post_restore_audit_instruction": ["policies", "claudeCompaction", "postRestoreAuditInstruction"],
+  "snapshots.periodic.enabled": ["snapshots", "periodic", "enabled"],
+  "snapshots.periodic.interval_seconds": ["snapshots", "periodic", "intervalSeconds"],
+  "snapshots.periodic.retention_keep": ["snapshots", "periodic", "retentionKeep"],
 };
 
 export type SettingSource = "env" | "file" | "default";
@@ -356,6 +365,9 @@ function getDefaultValue(key: SettingsValidKey, workspaceRoot: string): string |
     case "policies.claude_compaction.message_inline": return DEFAULT_CLAUDE_COMPACTION_RESTORE_INSTRUCTION;
     case "policies.claude_compaction.message_file_path": return defaultClaudeCompactionExtraInstructionFilePath();
     case "policies.claude_compaction.post_restore_audit_instruction": return DEFAULT_CLAUDE_COMPACTION_POST_RESTORE_AUDIT_INSTRUCTION;
+    case "snapshots.periodic.enabled": return true;
+    case "snapshots.periodic.interval_seconds": return 300;
+    case "snapshots.periodic.retention_keep": return 10;
     default: return "";
   }
 }
@@ -400,6 +412,20 @@ const KEY_CONSTRAINTS: Partial<Record<SettingsValidKey, (raw: string, coerced: s
     if (coerced < 1 || coerced > 100) {
       throw new Error(
         `Invalid value for policies.claude_compaction.threshold_percent: must be in [1, 100], got ${coerced}`,
+      );
+    }
+  },
+  "snapshots.periodic.interval_seconds": (raw, coerced) => {
+    if (typeof coerced !== "number" || !Number.isInteger(coerced) || coerced < 60) {
+      throw new Error(
+        `Invalid value for snapshots.periodic.interval_seconds: must be >= 60, got ${raw}`,
+      );
+    }
+  },
+  "snapshots.periodic.retention_keep": (raw, coerced) => {
+    if (typeof coerced !== "number" || !Number.isInteger(coerced) || coerced < 1) {
+      throw new Error(
+        `Invalid value for snapshots.periodic.retention_keep: must be >= 1, got ${raw}`,
       );
     }
   },

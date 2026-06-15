@@ -46,6 +46,7 @@ Keys:
   policies.claude_compaction.*
                          enabled, threshold_percent, compact_instruction,
                          message_inline, message_file_path
+  snapshots.periodic.*   enabled, interval_seconds, retention_keep
 
 Precedence: CLI flag > environment variable > config file > default`)
     .action((opts: { json?: boolean; withSource?: boolean }) => {

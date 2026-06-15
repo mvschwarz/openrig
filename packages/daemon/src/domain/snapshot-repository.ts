@@ -63,7 +63,7 @@ export class SnapshotRepository {
   findLatestRestoreUsable(rigId: string): Snapshot | null {
     const rows = this.db
       .prepare(
-        "SELECT * FROM snapshots WHERE rig_id = ? ORDER BY (kind = 'auto-pre-down') DESC, created_at DESC, id DESC"
+        "SELECT * FROM snapshots WHERE rig_id = ? ORDER BY (kind IN ('auto-pre-down', 'auto-periodic')) DESC, created_at DESC, id DESC"
       )
       .all(rigId) as SnapshotRow[];
 
@@ -126,6 +126,34 @@ export class SnapshotRepository {
 
     const toDelete = all.filter((r) => !keepIds.has(r.id));
 
+    if (toDelete.length === 0) return 0;
+
+    const placeholders = toDelete.map(() => "?").join(",");
+    this.db
+      .prepare(`DELETE FROM snapshots WHERE id IN (${placeholders})`)
+      .run(...toDelete.map((r) => r.id));
+
+    return toDelete.length;
+  }
+
+  /** OPR.0.3.4.9 — kind-scoped retention. Keeps the newest `keepCount` rows
+   *  of the given kind and deletes only older rows of THAT kind. Never touches
+   *  other kinds. Hard floor: keepCount >= 1 (never prune to zero). */
+  pruneSnapshotsByKind(rigId: string, kind: string, keepCount: number): number {
+    const effectiveKeep = Math.max(1, keepCount);
+    const keepers = this.db
+      .prepare(
+        "SELECT id FROM snapshots WHERE rig_id = ? AND kind = ? ORDER BY created_at DESC LIMIT ?"
+      )
+      .all(rigId, kind, effectiveKeep) as { id: string }[];
+
+    const keepIds = new Set(keepers.map((r) => r.id));
+
+    const all = this.db
+      .prepare("SELECT id FROM snapshots WHERE rig_id = ? AND kind = ?")
+      .all(rigId, kind) as { id: string }[];
+
+    const toDelete = all.filter((r) => !keepIds.has(r.id));
     if (toDelete.length === 0) return 0;
 
     const placeholders = toDelete.map(() => "?").join(",");

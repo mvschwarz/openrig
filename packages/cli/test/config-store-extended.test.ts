@@ -114,6 +114,9 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
       "policies.claude_compaction.message_inline",
       "policies.claude_compaction.message_file_path",
       "policies.claude_compaction.post_restore_audit_instruction",
+      "snapshots.periodic.enabled",
+      "snapshots.periodic.interval_seconds",
+      "snapshots.periodic.retention_keep",
     ];
     expect([...VALID_KEYS]).toEqual(expected);
   });

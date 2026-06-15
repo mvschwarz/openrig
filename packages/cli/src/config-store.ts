@@ -253,6 +253,9 @@ export const VALID_KEYS = [
   "policies.claude_compaction.message_inline",
   "policies.claude_compaction.message_file_path",
   "policies.claude_compaction.post_restore_audit_instruction",
+  "snapshots.periodic.enabled",
+  "snapshots.periodic.interval_seconds",
+  "snapshots.periodic.retention_keep",
 ] as const;
 
 export type ValidKey = typeof VALID_KEYS[number];
@@ -303,6 +306,9 @@ export const ENV_MAP: Record<ValidKey, { primary: string; legacy?: string }> = {
   "policies.claude_compaction.message_inline": { primary: "OPENRIG_POLICIES_CLAUDE_COMPACTION_MESSAGE_INLINE" },
   "policies.claude_compaction.message_file_path": { primary: "OPENRIG_POLICIES_CLAUDE_COMPACTION_MESSAGE_FILE_PATH" },
   "policies.claude_compaction.post_restore_audit_instruction": { primary: "OPENRIG_POLICIES_CLAUDE_COMPACTION_POST_RESTORE_AUDIT_INSTRUCTION" },
+  "snapshots.periodic.enabled": { primary: "OPENRIG_SNAPSHOTS_PERIODIC_ENABLED" },
+  "snapshots.periodic.interval_seconds": { primary: "OPENRIG_SNAPSHOTS_PERIODIC_INTERVAL_SECONDS" },
+  "snapshots.periodic.retention_keep": { primary: "OPENRIG_SNAPSHOTS_PERIODIC_RETENTION_KEEP" },
 };
 
 // Maps dotted-string config keys to the camelCase RiggedConfig path.
@@ -346,6 +352,9 @@ const KEY_TO_PATH: Record<ValidKey, string[]> = {
   "policies.claude_compaction.message_inline": ["policies", "claudeCompaction", "messageInline"],
   "policies.claude_compaction.message_file_path": ["policies", "claudeCompaction", "messageFilePath"],
   "policies.claude_compaction.post_restore_audit_instruction": ["policies", "claudeCompaction", "postRestoreAuditInstruction"],
+  "snapshots.periodic.enabled": ["snapshots", "periodic", "enabled"],
+  "snapshots.periodic.interval_seconds": ["snapshots", "periodic", "intervalSeconds"],
+  "snapshots.periodic.retention_keep": ["snapshots", "periodic", "retentionKeep"],
 };
 
 function isValidKey(key: string): key is ValidKey {
