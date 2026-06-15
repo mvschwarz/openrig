@@ -284,5 +284,48 @@ Examples:
       }
     });
 
+  // OPR.0.3.4.10 — clear stuck attention_required / failed startup_status.
+  cmd
+    .command("clear-attention")
+    .argument("<session>", "Canonical session name (e.g. dev-impl@my-rig)")
+    .option("--reason <text>", "Operator attestation override (skip evidence gate)")
+    .option("--json", "JSON output for agents")
+    .description("Clear stuck attention_required startup status with evidence or operator attestation")
+    .addHelpText("after", `
+Examples:
+  rig seat clear-attention dev-impl@my-rig
+  rig seat clear-attention dev-impl@my-rig --reason "founder re-authed, confirmed live"
+  rig seat clear-attention dev-impl@my-rig --json
+`)
+    .action(async (session: string, opts: { reason?: string; json?: boolean }) => {
+      const deps = getDeps();
+      const status = await getDaemonStatus(deps.lifecycleDeps);
+      if (status.state !== "running") {
+        console.error("Daemon not running.");
+        process.exitCode = 1;
+        return;
+      }
+      const client = deps.clientFactory(getDaemonUrl(status));
+      const res = await client.post<Record<string, unknown>>(
+        `/api/sessions/${encodeURIComponent(session)}/clear-attention`,
+        opts.reason ? { reason: opts.reason } : {},
+      );
+      if (opts.json) {
+        console.log(JSON.stringify(res.data));
+        if (res.status >= 400) process.exitCode = 1;
+        return;
+      }
+      if (res.status >= 400) {
+        const code = res.data["code"] as string | undefined;
+        const detail = res.data["detail"] as string | undefined;
+        console.error(`${code ?? "error"}: ${detail ?? String(res.data["error"] ?? "unknown")}`);
+        process.exitCode = 1;
+        return;
+      }
+      const clearedBy = res.data["clearedBy"] as string | undefined;
+      const from = res.data["from"] as string | undefined;
+      console.log(`Cleared ${session}: ${from} -> ready (${clearedBy})`);
+    });
+
   return cmd;
 }

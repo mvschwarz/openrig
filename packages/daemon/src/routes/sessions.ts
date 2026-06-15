@@ -411,6 +411,22 @@ sessionAdminRoutes.post("/:sessionName/reconcile", async (c) => {
   return c.json(outcome, 200);
 });
 
+// POST /api/sessions/:sessionName/clear-attention — OPR.0.3.4.10.
+sessionAdminRoutes.post("/:sessionName/clear-attention", async (c) => {
+  const sessionName = decodeURIComponent(c.req.param("sessionName")!);
+  const reconciler = c.get("seatAttentionReconciler" as never) as import("../domain/seat-attention-reconciler.js").SeatAttentionReconciler | undefined;
+  if (!reconciler) {
+    return c.json({ error: "Seat attention reconciler not configured on this daemon." }, 503);
+  }
+  const body: Record<string, unknown> = await c.req.json().catch(() => ({}));
+  const reason = typeof body["reason"] === "string" ? body["reason"].trim() : undefined;
+  const result = await reconciler.clearAttention(sessionName, reason ? { reason } : undefined);
+  if (!result.ok) {
+    return c.json(result, result.code === "not_in_attention" ? 409 : 422);
+  }
+  return c.json(result, 200);
+});
+
 // POST /api/sessions/:sessionRef/unclaim
 sessionAdminRoutes.post("/:sessionRef/unclaim", async (c) => {
   const sessionRef = decodeURIComponent(c.req.param("sessionRef")!);

@@ -246,6 +246,7 @@ export interface AppDeps {
   contextMonitor?: { pollOnce(): Promise<void> };
   nodeCmuxService?: import("./domain/node-cmux-service.js").NodeCmuxService;
   agentActivityStore?: AgentActivityStore;
+  seatAttentionReconciler?: import("./domain/seat-attention-reconciler.js").SeatAttentionReconciler;
   activityHookToken?: string;
   serviceOrchestrator?: import("./domain/service-orchestrator.js").ServiceOrchestrator;
   composeAdapter?: import("./adapters/compose-services-adapter.js").ComposeServicesAdapter;
@@ -448,6 +449,7 @@ export function createApp(deps: AppDeps): Hono {
     c.set("contextMonitor" as never, deps.contextMonitor);
     c.set("nodeCmuxService" as never, deps.nodeCmuxService);
     c.set("agentActivityStore" as never, deps.agentActivityStore);
+    c.set("seatAttentionReconciler" as never, deps.seatAttentionReconciler);
     // Slice 15 — wire seatActivityService into request context so the
     // /api/rigs/:id/nodes route can enrich entries with terminalActive +
     // hasAssignedWork via attachTerminalActivityAndWork.
