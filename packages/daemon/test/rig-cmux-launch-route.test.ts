@@ -518,7 +518,7 @@ describe("POST /api/rigs/:rigId/cmux/launch", () => {
     expect(body.missing).toBeDefined();
     expect(body.missing).toHaveLength(1);
     expect(body.missing[0]!.logicalId).toBe("b");
-    expect(body.missing[0]!.reason).toBe("still-booting");
+    expect(body.missing[0]!.reason).toBe("session-missing");
   });
 
   it("OPR.0.3.4.8: stale dead session (hasSession false) is NOT attached, listed as missing", async () => {

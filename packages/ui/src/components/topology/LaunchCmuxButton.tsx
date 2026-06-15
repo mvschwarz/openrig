@@ -25,9 +25,11 @@ export function LaunchCmuxButton({ rigId }: LaunchCmuxButtonProps) {
   // schedules React state during click handling; the cmux launch is an
   // external side effect, so a tiny uncontrolled status island is safer.
   const buttonRef = useRef<HTMLButtonElement | null>(null);
+  const openMissingRef = useRef<HTMLButtonElement | null>(null);
   const statusRef = useRef<HTMLSpanElement | null>(null);
   const inFlightRef = useRef(false);
   const clearTimerRef = useRef<number | null>(null);
+  const lastMissingRef = useRef<string[]>([]);
 
   useEffect(() => {
     return () => {
@@ -77,18 +79,23 @@ export function LaunchCmuxButton({ rigId }: LaunchCmuxButtonProps) {
     inFlightRef.current = true;
     setPendingUi(true);
     clearStatus();
+    if (openMissingRef.current) openMissingRef.current.hidden = true;
     launchRigCmux({ rigId })
       .then((result) => {
         const workspaceCount = result.workspaces.length;
         const agentCount = result.workspaces.reduce((sum, w) => sum + w.agents.length, 0);
         const names = result.workspaces.map((w) => w.name).join(", ");
-        const missing = result.missing ?? [];
-        if (missing.length > 0) {
-          const missingNames = missing.map((m) => `${m.logicalId} (${m.reason})`).join(", ");
+        const missingSeats = result.missing ?? [];
+        if (missingSeats.length > 0) {
+          const missingNames = missingSeats.map((m) => `${m.logicalId} (${m.reason})`).join(", ");
           showStatus(
             "error",
-            `Opened ${agentCount} of ${agentCount + missing.length} seats. Missing: ${missingNames}`,
+            `Opened ${agentCount} of ${agentCount + missingSeats.length} seats. Missing: ${missingNames}`,
           );
+          lastMissingRef.current = missingSeats.map((m) => m.logicalId);
+          if (openMissingRef.current) {
+            openMissingRef.current.hidden = false;
+          }
         } else {
           showStatus(
             "success",
@@ -120,6 +127,35 @@ export function LaunchCmuxButton({ rigId }: LaunchCmuxButtonProps) {
         className="border border-stone-700 bg-white px-3 py-2 font-mono text-[10px] uppercase tracking-[0.18em] text-stone-900 hover:bg-stone-100 disabled:opacity-50 disabled:cursor-not-allowed focus:outline-none focus:ring-1 focus:ring-stone-400"
       >
         Launch in CMUX
+      </button>
+      <button
+        ref={openMissingRef}
+        type="button"
+        hidden
+        data-testid="open-missing-button"
+        onClick={() => {
+          const ids = lastMissingRef.current;
+          if (ids.length === 0) return;
+          if (openMissingRef.current) openMissingRef.current.disabled = true;
+          Promise.allSettled(
+            ids.map((logicalId) =>
+              fetch(`/api/rigs/${encodeURIComponent(rigId)}/nodes/${encodeURIComponent(logicalId)}/open-cmux`, { method: "POST" }),
+            ),
+          ).then((results) => {
+            const opened = results.filter((r) => r.status === "fulfilled" && (r as PromiseFulfilledResult<Response>).value.ok).length;
+            const failed = ids.length - opened;
+            if (failed > 0) {
+              showStatus("error", `Opened ${opened} of ${ids.length} missing seats; ${failed} still unavailable.`);
+            } else {
+              showStatus("success", `Opened ${opened} missing seat${opened === 1 ? "" : "s"}.`);
+              if (openMissingRef.current) openMissingRef.current.hidden = true;
+            }
+            if (openMissingRef.current) openMissingRef.current.disabled = false;
+          });
+        }}
+        className="border border-stone-700 bg-white px-3 py-2 font-mono text-[10px] uppercase tracking-[0.18em] text-stone-900 hover:bg-stone-100 disabled:opacity-50 disabled:cursor-not-allowed focus:outline-none focus:ring-1 focus:ring-stone-400"
+      >
+        Open missing seats
       </button>
       <span
         ref={statusRef}

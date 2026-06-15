@@ -91,36 +91,56 @@ rigCmuxRoutes.post("/launch", async (c) => {
   // safety invariant from the original running-only filter.
   const launchableByLogical = new Map<string, string>();
   const missing: MissingSeat[] = [];
+  const nonTmuxIds = new Set<string>();
+  const STALE_STATUSES = new Set(["exited", "detached"]);
 
   // Collect candidates: seats with a tmux-compatible canonical name.
-  const candidates: Array<{ logicalId: string; sessionName: string }> = [];
+  // Track original sessionStatus for reason classification.
+  interface Candidate { logicalId: string; sessionName: string; sessionStatus: string | null }
+  const candidates: Candidate[] = [];
+  const noSessionIds = new Set<string>();
+
   for (const entry of inventory) {
     if (!entry.canonicalSessionName) {
-      missing.push({ logicalId: entry.logicalId, reason: "no-session" });
+      noSessionIds.add(entry.logicalId);
       continue;
     }
     if (entry.attachmentType != null && entry.attachmentType !== "tmux") {
+      nonTmuxIds.add(entry.logicalId);
       missing.push({ logicalId: entry.logicalId, reason: "non-tmux" });
       continue;
     }
-    candidates.push({ logicalId: entry.logicalId, sessionName: entry.canonicalSessionName });
+    candidates.push({ logicalId: entry.logicalId, sessionName: entry.canonicalSessionName, sessionStatus: entry.sessionStatus });
   }
 
-  // Bounded readiness wait: for each candidate, check tmux liveness.
-  // Poll still-booting seats until live or timeout. If a full poll
-  // cycle finds zero new live sessions, stop early (no point waiting
-  // for sessions that are consistently dead).
+  // Bounded readiness wait with re-read for no-session seats.
+  // Poll candidates for tmux liveness AND re-read inventory to discover
+  // newly-appeared sessions for no-session seats.
   const deadline = Date.now() + READINESS_TIMEOUT_MS;
-  const pending = new Map(candidates.map((c) => [c.logicalId, c.sessionName]));
+  const pending = new Map(candidates.map((c) => [c.logicalId, c]));
   let firstPass = true;
 
-  while (pending.size > 0 && Date.now() < deadline) {
+  while ((pending.size > 0 || noSessionIds.size > 0) && Date.now() < deadline) {
     let foundThisCycle = 0;
-    for (const [logicalId, sessionName] of [...pending]) {
+
+    // Re-read inventory for no-session seats to discover newly-appeared sessions.
+    if (noSessionIds.size > 0) {
+      const freshInventory = nodeInventoryFn(rigId);
+      for (const entry of freshInventory) {
+        if (!noSessionIds.has(entry.logicalId)) continue;
+        if (entry.canonicalSessionName && (entry.attachmentType == null || entry.attachmentType === "tmux")) {
+          noSessionIds.delete(entry.logicalId);
+          pending.set(entry.logicalId, { logicalId: entry.logicalId, sessionName: entry.canonicalSessionName, sessionStatus: entry.sessionStatus });
+        }
+      }
+    }
+
+    // Check tmux liveness for all pending candidates.
+    for (const [logicalId, candidate] of [...pending]) {
       try {
-        const alive = await tmuxAdapter.hasSession(sessionName);
+        const alive = await tmuxAdapter.hasSession(candidate.sessionName);
         if (alive) {
-          launchableByLogical.set(logicalId, sessionName);
+          launchableByLogical.set(logicalId, candidate.sessionName);
           pending.delete(logicalId);
           foundThisCycle++;
         }
@@ -128,10 +148,7 @@ rigCmuxRoutes.post("/launch", async (c) => {
         // Probe failed — treat as not-yet-live this cycle.
       }
     }
-    if (pending.size === 0) break;
-    // After the first pass, if no NEW sessions became live this cycle,
-    // the remaining pending are consistently dead — stop early instead
-    // of polling dead sessions for the full timeout.
+    if (pending.size === 0 && noSessionIds.size === 0) break;
     if (!firstPass && foundThisCycle === 0) break;
     firstPass = false;
     if (Date.now() < deadline) {
@@ -139,9 +156,13 @@ rigCmuxRoutes.post("/launch", async (c) => {
     }
   }
 
-  // Any still-pending after timeout -> missing with reason.
-  for (const [logicalId] of pending) {
-    missing.push({ logicalId, reason: "still-booting" });
+  // Classify remaining pending/no-session with reason fidelity.
+  for (const [logicalId, candidate] of pending) {
+    const isStale = STALE_STATUSES.has(candidate.sessionStatus ?? "");
+    missing.push({ logicalId, reason: isStale ? "session-missing" : "still-booting" });
+  }
+  for (const logicalId of noSessionIds) {
+    missing.push({ logicalId, reason: "no-session" });
   }
 
   // rig.nodes is in DB ORDER BY created_at — deterministic agent ordering.
