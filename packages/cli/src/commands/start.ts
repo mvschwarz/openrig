@@ -391,6 +391,26 @@ Examples:
             plan: false,
           }, { timeoutMs: LONG_RUNNING_UP_TIMEOUT_MS });
 
+          // Guard BLOCKING 25661f72: check HTTP status before treating the response
+          // as a success. The daemon returns non-2xx JSON payloads (rig_not_stopped,
+          // pre_restore_validation_failed, ambiguous_name) without throwing.
+          if (res.status >= 400) {
+            const code = res.data["code"] as string | undefined;
+            const errorText = String(res.data["error"] ?? "restore failed");
+            if (code === "pre_restore_validation_failed") {
+              console.error(`  ${rigName}: restore blocked (pre-validation failed)`);
+              const blockers = (res.data["blockers"] as Array<{ message: string; remediation: string }>) ?? [];
+              for (const b of blockers) {
+                console.error(`    ${b.message}`);
+                console.error(`      fix: ${b.remediation}`);
+              }
+            } else {
+              console.error(`  ${rigName}: ${errorText} (${code ?? `HTTP ${res.status}`})`);
+            }
+            results.push({ rigName, status: code ?? "error", nodes: [] });
+            continue;
+          }
+
           const resStatus = res.data["status"] as string;
           const nodes = (res.data["nodes"] as Array<{ logicalId: string; status: string; error?: string }>) ?? [];
           const rigResult = res.data["rigResult"] as string | undefined;
@@ -425,9 +445,14 @@ Examples:
                     plan: false,
                     freshLogicalIds: accepted,
                   }, { timeoutMs: LONG_RUNNING_UP_TIMEOUT_MS });
-                  const freshNodes = (freshRes.data["nodes"] as Array<{ logicalId: string; status: string }>) ?? [];
-                  for (const fn of freshNodes.filter((fn) => accepted.includes(fn.logicalId))) {
-                    if (!opts.json) console.log(`    ${fn.logicalId}: ${fn.status}`);
+                  if (freshRes.status >= 400) {
+                    const freshError = String(freshRes.data["error"] ?? "fresh-prime failed");
+                    console.error(`    Fresh-prime for ${rigName}: ${freshError} (HTTP ${freshRes.status})`);
+                  } else {
+                    const freshNodes = (freshRes.data["nodes"] as Array<{ logicalId: string; status: string }>) ?? [];
+                    for (const fn of freshNodes.filter((fn) => accepted.includes(fn.logicalId))) {
+                      if (!opts.json) console.log(`    ${fn.logicalId}: ${fn.status}`);
+                    }
                   }
                 } catch (err) {
                   if (err instanceof DaemonConnectionError) {
@@ -469,9 +494,11 @@ Examples:
         }));
       }
 
-      // Exit code: 1 if any rig has non-clean outcome.
+      // Exit code: 1 if any rig has non-clean outcome. Include HTTP error codes
+      // and non-clean rigResult values (partially_restored, failed, not_attempted).
+      const NON_CLEAN_STATUSES = new Set(["timeout", "error", "skipped", "partially_restored", "failed", "not_attempted", "rig_not_stopped", "ambiguous_name", "pre_restore_validation_failed"]);
       const hasFailure = results.some((r) =>
-        r.status === "timeout" || r.status === "error" ||
+        NON_CLEAN_STATUSES.has(r.status) ||
         r.nodes.some((n) => n.status === "failed" || n.status === "awaiting-decision"),
       );
       if (hasFailure) process.exitCode = 1;

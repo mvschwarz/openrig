@@ -348,6 +348,114 @@ describe("rig start (OPR.0.3.4.1)", () => {
     }
   });
 
+  // ---- NON-2XX ERROR HANDLING (guard BLOCKING 25661f72) ----
+
+  it("non-2xx /api/up (rig_not_stopped) -> honest error output, nonzero exit, not undefined success", async () => {
+    routes["/api/rigs/summary"] = () => [{ id: "r1", name: "live-rig", nodeCount: 1, lifecycleState: "detached" }];
+    routes["/api/rigs/:id"] = () => ({ sessions: [] });
+    let planDone = false;
+    routes["/api/up"] = (_req, body) => {
+      if (body.plan === true && !planDone) {
+        planDone = true;
+        return {
+          status: "plan", mode: "restore", rigId: "r1", rigName: "live-rig",
+          snapshot: { id: "s1", kind: "auto-pre-down", createdAt: "2026-06-14T00:00:00Z" },
+          wouldCaptureCurrentState: false,
+          nodes: [{ logicalId: "w", intendedAction: "resume-original" }],
+          mutated: false,
+        };
+      }
+      // Apply returns 409 rig_not_stopped (simulate live sessions blocking restore).
+      return "__409__" as never;
+    };
+    // Override server to return 409 for the apply call.
+    const origRouteHandler = routes["/api/up"];
+    server.removeAllListeners("request");
+    server.on("request", (req, res) => {
+      let raw = "";
+      req.on("data", (c: Buffer) => { raw += c; });
+      req.on("end", () => {
+        const body = raw ? JSON.parse(raw) : {};
+        const url = req.url ?? "";
+        const method = req.method ?? "GET";
+        if (method === "GET" && url === "/healthz") { res.writeHead(200).end(JSON.stringify({ ok: true })); return; }
+        if (method === "GET" && url === "/api/kernel/status") { res.writeHead(200).end(JSON.stringify({ kernel_state: "ready" })); return; }
+        if (method === "GET" && url === "/api/rigs/summary") { res.writeHead(200).end(JSON.stringify(routes["/api/rigs/summary"]!(req, body))); return; }
+        if (method === "GET" && url.match(/^\/api\/rigs\/[^/]+$/)) { res.writeHead(200).end(JSON.stringify({ sessions: [] })); return; }
+        if (method === "POST" && url === "/api/up") {
+          upBodies.push(body);
+          if (body.plan === true) {
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({
+              status: "plan", mode: "restore", rigId: "r1", rigName: "live-rig",
+              snapshot: { id: "s1", kind: "auto-pre-down", createdAt: "2026-06-14T00:00:00Z" },
+              wouldCaptureCurrentState: false,
+              nodes: [{ logicalId: "w", intendedAction: "resume-original" }],
+              mutated: false,
+            }));
+            return;
+          }
+          res.writeHead(409, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Rig r1 has live sessions", code: "rig_not_stopped" }));
+          return;
+        }
+        res.writeHead(404).end();
+      });
+    });
+
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "start", "--last"]);
+    });
+    const output = logs.join("\n");
+    expect(output).toContain("live-rig");
+    expect(output).toContain("rig_not_stopped");
+    expect(output).not.toContain("undefined");
+    expect(exitCode).toBe(1);
+
+    // Restore the original server handler for subsequent tests.
+    server.removeAllListeners("request");
+    server.on("request", (req, res) => {
+      let raw = "";
+      req.on("data", (c: Buffer) => { raw += c; });
+      req.on("end", () => {
+        const body = raw ? JSON.parse(raw) : {};
+        const url = req.url ?? "";
+        const method = req.method ?? "GET";
+        if (method === "GET" && url === "/healthz") { res.writeHead(200).end(JSON.stringify({ ok: true })); return; }
+        if (method === "GET" && url === "/api/kernel/status") { const h = routes["/api/kernel/status"]; res.writeHead(200).end(JSON.stringify(h ? h(req, body) : { kernel_state: "ready" })); return; }
+        if (method === "GET" && url === "/api/rigs/summary") { const h = routes["/api/rigs/summary"]; res.writeHead(200).end(JSON.stringify(h ? h(req, body) : [])); return; }
+        if (method === "GET" && url.match(/^\/api\/rigs\/[^/]+$/)) { const h = routes["/api/rigs/:id"]; res.writeHead(200).end(JSON.stringify(h ? h(req, body) : { sessions: [] })); return; }
+        if (method === "POST" && url === "/api/up") { upBodies.push(body); const h = routes["/api/up"]; const d = h ? h(req, body) : {}; res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(d)); return; }
+        res.writeHead(404).end();
+      });
+    });
+  });
+
+  it("partially_restored rigResult -> nonzero exit (not treated as clean)", async () => {
+    setupCandidateRig("partial-rig");
+    routes["/api/up"] = (_req, body) => {
+      if (body.plan === true) {
+        return {
+          status: "plan", mode: "restore", rigId: "rig-1", rigName: "partial-rig",
+          snapshot: { id: "s1", kind: "auto-pre-down", createdAt: "2026-06-14T00:00:00Z" },
+          wouldCaptureCurrentState: false,
+          nodes: [{ logicalId: "dev.impl", intendedAction: "resume-original" }],
+          mutated: false,
+        };
+      }
+      return {
+        status: "restored", rigResult: "partially_restored",
+        nodes: [{ logicalId: "dev.impl", status: "fresh-primed" }],
+        warnings: [],
+      };
+    };
+
+    const { exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "start", "--last"]);
+    });
+    expect(exitCode).toBe(1);
+  });
+
   // ---- JSON OUTPUT ----
 
   it("--json outputs structured result", async () => {
