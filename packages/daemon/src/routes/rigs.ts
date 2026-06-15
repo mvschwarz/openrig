@@ -481,6 +481,11 @@ rigsRoutes.post("/:id/up", async (c) => {
   // NO body, so plan:true was silently ignored and the route always mutated.
   const body: Record<string, unknown> = await c.req.json().catch(() => ({}));
   const plan = body["plan"] === true;
+  // OPR.0.3.4.1 — thread freshLogicalIds so the id-based route supports
+  // the awaiting-decision fresh-prime retry (operation B).
+  const freshLogicalIds = Array.isArray(body["freshLogicalIds"])
+    ? (body["freshLogicalIds"] as unknown[]).filter((v): v is string => typeof v === "string")
+    : undefined;
 
   const snapshotRepo = c.get("snapshotRepo" as never) as SnapshotRepository;
   const snapshotCapture = c.get("snapshotCapture" as never) as SnapshotCapture;
@@ -518,6 +523,7 @@ rigsRoutes.post("/:id/up", async (c) => {
   const result = await restoreOrch.restore(snapshot.id, {
     adapters: adapters ?? {},
     fsOps: { exists: (p: string) => fs.existsSync(p) },
+    freshLogicalIds,
   });
   if (!result.ok) {
     if (result.code === "pre_restore_validation_failed") {

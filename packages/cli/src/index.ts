@@ -34,6 +34,7 @@ import { projectCommand, type ProjectDeps } from "./commands/project.js";
 import { viewCommand, type ViewDeps } from "./commands/view.js";
 import { watchdogCommand, type WatchdogDeps } from "./commands/watchdog.js";
 import { workflowCommand, type WorkflowDeps } from "./commands/workflow.js";
+import { startCommand, type StartDeps } from "./commands/start.js";
 import { captureCommand } from "./commands/capture.js";
 import { broadcastCommand } from "./commands/broadcast.js";
 import { configCommand } from "./commands/config.js";
@@ -125,6 +126,7 @@ export interface ProgramDeps {
   heartbeatDeps?: HeartbeatDeps;
   seatDeps?: SeatDeps;
   rigPolicyDeps?: RigPolicyDeps;
+  startDeps?: StartDeps;
   configPath?: string;
 }
 
@@ -136,6 +138,7 @@ export function createProgram(depsOverride?: ProgramDeps): Command {
     .description("CLI for the OpenRig local control plane")
     .version(CLI_VERSION);
 
+  program.addCommand(startCommand(depsOverride?.startDeps));
   program.addCommand(daemonCommand(depsOverride?.daemonDeps));
   program.addCommand(statusCommand(depsOverride?.statusDeps));
   program.addCommand(snapshotCommand(depsOverride?.snapshotDeps));
