@@ -56,6 +56,13 @@ describe("verifyCodexProfileLoads", () => {
     expect(result.migrationHint).toContain("manually to diagnose");
   });
 
+  it("FAIL: probe is bounded by timeout (never hangs indefinitely)", async () => {
+    const exec = vi.fn(() => new Promise<string>(() => {}));
+    const result = await verifyCodexProfileLoads("stuck", exec, 50);
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("timed out");
+  });
+
   it("profile name with special characters is shell-quoted", async () => {
     const exec = vi.fn(async () => "");
     await verifyCodexProfileLoads("my profile", exec);

@@ -16,10 +16,16 @@ const PROFILE_PROBE_TIMEOUT_MS = 10_000;
 export async function verifyCodexProfileLoads(
   profile: string,
   exec: (cmd: string) => Promise<string>,
+  timeoutMs: number = PROFILE_PROBE_TIMEOUT_MS,
 ): Promise<CodexProfileProbeResult> {
   const cmd = `codex -p ${shellQuote(profile)} mcp list`;
   try {
-    await exec(cmd);
+    await Promise.race([
+      exec(cmd),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error(`Codex profile probe timed out after ${timeoutMs}ms`)), timeoutMs),
+      ),
+    ]);
     return { ok: true, profile };
   } catch (err) {
     const stderrField = (err as { stderr?: string | Buffer })?.stderr;
