@@ -653,7 +653,14 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const nodeCmuxService = new NodeCmuxService(rigRepo, sessionRegistry, cmuxAdapter, tmuxAdapter);
   const agentActivityStore = new AgentActivityStore({ db, eventBus });
   const { SeatAttentionReconciler } = await import("./domain/seat-attention-reconciler.js");
-  const seatAttentionReconciler = new SeatAttentionReconciler({ sessionRegistry, eventBus, agentActivityStore });
+  const seatAttentionReconciler = new SeatAttentionReconciler({
+    sessionRegistry, eventBus, agentActivityStore,
+    sendVerify: async (session, text, opts) => {
+      const transport = deps.sessionTransport;
+      if (!transport) return { ok: false, outcome: "failed" };
+      return transport.send(session, text, { verify: opts?.verify });
+    },
+  });
 
   const deps: AppDeps = {
     rigRepo,

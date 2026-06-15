@@ -18,10 +18,15 @@ export interface ClearAttentionResult {
   previousError?: string | null;
 }
 
+export interface SendVerifyFn {
+  (sessionName: string, text: string, opts?: { verify?: boolean }): Promise<{ ok: boolean; outcome?: string; verified?: boolean }>;
+}
+
 interface ClearAttentionDeps {
   sessionRegistry: SessionRegistry;
   eventBus: EventBus;
   agentActivityStore: AgentActivityStore;
+  sendVerify?: SendVerifyFn;
 }
 
 const POSITIVE_STATES = new Set(["running", "idle"]);
@@ -106,12 +111,47 @@ export class SeatAttentionReconciler {
       };
     }
 
+    // Second evidence path: active send-verify round-trip.
+    if (this.deps.sendVerify) {
+      try {
+        const probeText = `# OpenRig attention-clear liveness probe ${Date.now()}`;
+        const sendResult = await this.deps.sendVerify(sessionName, probeText, { verify: true });
+        if (sendResult.ok && (sendResult.outcome === "delivered" || sendResult.verified === true)) {
+          sessionRegistry.updateStartupStatus(session.id, "ready", new Date().toISOString());
+          eventBus.emit({
+            type: "seat.attention_cleared",
+            rigId: session.rigId,
+            nodeId: session.nodeId,
+            sessionName,
+            from: session.startupStatus,
+            to: "ready",
+            clearedBy: "evidence",
+            evidence: { kind: "send_verify_roundtrip", state: sendResult.outcome ?? "delivered" },
+            previousError,
+          });
+          return {
+            ok: true,
+            code: "cleared",
+            from: session.startupStatus,
+            to: "ready",
+            clearedBy: "evidence",
+            evidence: { kind: "send_verify_roundtrip", state: sendResult.outcome ?? "delivered" },
+            previousError,
+          };
+        }
+        // rendered-unconfirmed without capture confirmation: could-not-confirm, NOT dead.
+        // failed: transport did not land. Neither clears.
+      } catch {
+        // Send failed — transport error. Do not clear.
+      }
+    }
+
     return {
       ok: false,
       code: "not_demonstrably_responsive",
       detail: activity
-        ? `Latest activity: state='${activity.state}', stale=${activity.stale ?? false}, reason='${activity.reason}' -- not positive evidence`
-        : "No recent agent activity found",
+        ? `Latest activity: state='${activity.state}', stale=${activity.stale ?? false}, reason='${activity.reason}' -- not positive evidence; send-verify also not confirmed`
+        : "No recent agent activity found; send-verify also not confirmed",
     };
   }
 

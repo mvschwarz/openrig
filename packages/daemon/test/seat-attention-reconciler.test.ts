@@ -1,6 +1,6 @@
 // OPR.0.3.4.10 — seat attention reconciler tests.
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type Database from "better-sqlite3";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
@@ -175,6 +175,64 @@ describe("SeatAttentionReconciler", () => {
     const payload = JSON.parse(events[0]!.payload);
     expect(payload.clearedBy).toBe("operator_attestation");
     expect(payload.reason).toBe("manual check");
+  });
+
+  // Send-verify evidence branch
+  it("clears on positive send-verify (outcome:delivered) when no fresh activity", async () => {
+    const { rigId, nodeId, sessionId } = seedAttentionSeat("r-send", "worker@r-send");
+    const sendVerify = vi.fn(async () => ({ ok: true, outcome: "delivered" as const, verified: true }));
+    const sendReconciler = new SeatAttentionReconciler({
+      sessionRegistry, eventBus, agentActivityStore: activityStore, sendVerify,
+    });
+
+    const result = await sendReconciler.clearAttention("worker@r-send");
+
+    expect(result.ok).toBe(true);
+    expect(result.clearedBy).toBe("evidence");
+    expect(result.evidence?.kind).toBe("send_verify_roundtrip");
+    expect(sendVerify).toHaveBeenCalledWith("worker@r-send", expect.stringContaining("liveness probe"), { verify: true });
+  });
+
+  it("does NOT clear on send-verify rendered-unconfirmed (without capture confirmation)", async () => {
+    seedAttentionSeat("r-unconf", "worker@r-unconf");
+    const sendVerify = vi.fn(async () => ({ ok: true, outcome: "rendered-unconfirmed" as const, verified: false }));
+    const sendReconciler = new SeatAttentionReconciler({
+      sessionRegistry, eventBus, agentActivityStore: activityStore, sendVerify,
+    });
+
+    const result = await sendReconciler.clearAttention("worker@r-unconf");
+
+    expect(result.ok).toBe(false);
+    expect(result.code).toBe("not_demonstrably_responsive");
+  });
+
+  it("does NOT clear on send-verify failure", async () => {
+    seedAttentionSeat("r-fail", "worker@r-fail");
+    const sendVerify = vi.fn(async () => ({ ok: false, outcome: "failed" as const }));
+    const sendReconciler = new SeatAttentionReconciler({
+      sessionRegistry, eventBus, agentActivityStore: activityStore, sendVerify,
+    });
+
+    const result = await sendReconciler.clearAttention("worker@r-fail");
+
+    expect(result.ok).toBe(false);
+    expect(result.code).toBe("not_demonstrably_responsive");
+  });
+
+  it("send-verify audit event has distinct evidence kind", async () => {
+    seedAttentionSeat("r-audit-send", "worker@r-audit-send");
+    const sendVerify = vi.fn(async () => ({ ok: true, outcome: "delivered" as const, verified: true }));
+    const sendReconciler = new SeatAttentionReconciler({
+      sessionRegistry, eventBus, agentActivityStore: activityStore, sendVerify,
+    });
+
+    await sendReconciler.clearAttention("worker@r-audit-send");
+
+    const events = db.prepare("SELECT payload FROM events WHERE type = 'seat.attention_cleared'").all() as { payload: string }[];
+    expect(events).toHaveLength(1);
+    const payload = JSON.parse(events[0]!.payload);
+    expect(payload.clearedBy).toBe("evidence");
+    expect(payload.evidence.kind).toBe("send_verify_roundtrip");
   });
 
   // No event on no-op
