@@ -194,6 +194,54 @@ describe("ClaudeResumeAdapter", () => {
       expect(result).toEqual({ ok: true });
     });
 
+    // OPR.0.3.4.5 — regression guard behavior 05: CONSUMER human gate.
+    // On a Claude resume-selection menu, the REAL consumer sends ZERO
+    // selection keystrokes and returns attention_required. This is
+    // safety-critical: auto-keying the menu is governance BLOCKING.
+    it("OPR.0.3.4.5 guard (05): resume-selection menu -> attention_required, ZERO selection keystrokes sent", async () => {
+      const sendText = vi.fn(async () => ({ ok: true as const }));
+      const sendKeys = vi.fn(async () => ({ ok: true as const }));
+      const getPaneCommand = vi.fn(async () => "claude");
+      const capturePaneContent = vi.fn(async () => [
+        "Choose a conversation to resume:",
+        "",
+        "  1. project-foo",
+        "  2. project-bar",
+        "  3. project-baz",
+        "",
+        "Enter your choice (1-3):",
+      ].join("\n"));
+      const adapter = new ClaudeResumeAdapter(
+        mockTmux({ sendText, sendKeys, getPaneCommand, capturePaneContent }),
+        { pollMs: 0, maxWaitMs: 0, sleep: async () => {} },
+      );
+
+      const result = await adapter.resume("r99-worker", "claude_name", "my-session", "/repo");
+
+      // attention_required, not failed
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.code).toBe("attention_required");
+        expect(result.message).toBeTruthy();
+      }
+      // THE GUARD: no numeric selection keystroke was sent.
+      // sendText has only the initial `claude --resume ...` command.
+      // sendKeys has only the initial Enter. Nothing else — no "1", no "2".
+      const allSendTextArgs = sendText.mock.calls.map((c) => String(c[1] ?? ""));
+      const allSendKeysArgs = sendKeys.mock.calls.flatMap((c) => {
+        const arg = c[1];
+        return Array.isArray(arg) ? arg : [String(arg ?? "")];
+      });
+      for (const s of [...allSendTextArgs, ...allSendKeysArgs]) {
+        expect(s).not.toMatch(/^[0-9]+$/);
+      }
+      // Explicitly: only the launch command + Enter were sent.
+      expect(sendText).toHaveBeenCalledTimes(1);
+      expect(sendText.mock.calls[0]![1]).toContain("claude --resume");
+      expect(sendKeys).toHaveBeenCalledTimes(1);
+      expect(sendKeys.mock.calls[0]![1]).toEqual(["Enter"]);
+    });
+
     it("treats the edit-approval footer as a live Claude TUI during resume verification", async () => {
       const getPaneCommand = vi
         .fn<(_: string) => Promise<string | null>>()
