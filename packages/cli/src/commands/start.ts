@@ -256,22 +256,22 @@ Examples:
         return;
       }
 
-      // Filter to kernel rig name so we skip it in the candidate set.
+      // Guard BLOCKING f359e3a3: use the id-based Explorer route for candidate
+      // preview (POST /api/rigs/:id/up with plan:true) instead of the name-based
+      // POST /api/up which 409s on same-name rigs and silently drops them.
       const candidates: StartCandidate[] = [];
       for (const rig of allSummaries) {
         if (rig.name === "kernel") continue;
         if (rig.lifecycleState === "running") continue;
 
-        // Check restore-usable snapshot via the plan preview (read-only, slice-04).
         try {
-          const planRes = await client.post<Record<string, unknown>>("/api/up", {
-            sourceRef: rig.name,
-            plan: true,
-          });
+          const planRes = await client.post<Record<string, unknown>>(
+            `/api/rigs/${encodeURIComponent(rig.id)}/up`,
+            { plan: true },
+          );
           if (planRes.status === 200 && planRes.data["status"] === "plan") {
             const preview = planRes.data as unknown as PlanPreviewResponse;
 
-            // Derive last-activity from sessions.last_seen_at via /api/rigs/:id (contains sessions).
             let lastActivity: string | null = null;
             try {
               const rigDetail = await client.get<{ sessions?: Array<{ lastSeenAt?: string | null }> }>(`/api/rigs/${rig.id}`);
@@ -288,9 +288,17 @@ Examples:
               lastActivity,
               preview,
             });
+          } else if (planRes.status === 404) {
+            // no_snapshot or not found — this rig is not a candidate (expected exclusion).
+          } else {
+            // Unexpected non-2xx: surface honestly, do not silently omit.
+            const code = planRes.data["code"] as string | undefined;
+            const errorText = String(planRes.data["error"] ?? "preview failed");
+            if (!opts.json) console.error(`  ${rig.name}: candidate preview failed — ${errorText} (${code ?? `HTTP ${planRes.status}`})`);
           }
         } catch {
-          // Plan call failed (e.g., no snapshot, ineligible) — this rig is not a candidate.
+          // Transport error — degrade: skip this candidate with a warning.
+          if (!opts.json) console.error(`  ${rig.name}: candidate preview unavailable (transport error)`);
         }
       }
 

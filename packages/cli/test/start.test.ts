@@ -89,6 +89,16 @@ describe("rig start (OPR.0.3.4.1)", () => {
           res.end(JSON.stringify(data));
           return;
         }
+        // Id-based plan preview: POST /api/rigs/:id/up (used by rig start candidate discovery)
+        const rigUpMatch = method === "POST" && url.match(/^\/api\/rigs\/([^/]+)\/up$/);
+        if (rigUpMatch) {
+          upBodies.push({ ...body, _rigIdRoute: rigUpMatch[1] });
+          const handler = routes["/api/rigs/:id/up"] ?? routes["/api/up"];
+          const data = handler ? handler(req, { ...body, _rigId: rigUpMatch[1] }) : {};
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify(data));
+          return;
+        }
         res.writeHead(404).end();
       });
     });
@@ -132,19 +142,19 @@ describe("rig start (OPR.0.3.4.1)", () => {
       { id: "rig-1", name, nodeCount: 2, lifecycleState },
     ];
     routes["/api/rigs/:id"] = () => ({ sessions: [{ lastSeenAt: "2026-06-14T12:00:00Z" }] });
-    routes["/api/up"] = (_req, body) => {
-      if (body.plan === true) {
-        return {
-          status: "plan", mode: "restore", rigId: "rig-1", rigName: name,
-          snapshot: { id: "snap-1", kind: "auto-pre-down", createdAt: "2026-06-14T11:00:00Z" },
-          wouldCaptureCurrentState: false,
-          nodes: [
-            { logicalId: "dev.impl", intendedAction: hasToken ? "resume-original" : "awaiting-decision", ...(hasToken ? {} : { reason: "no token available" }) },
-            { logicalId: "dev.qa", intendedAction: "resume-original" },
-          ],
-          mutated: false,
-        };
-      }
+    // Plan preview via id-based route (candidate discovery uses POST /api/rigs/:id/up).
+    routes["/api/rigs/:id/up"] = () => ({
+      status: "plan", mode: "restore", rigId: "rig-1", rigName: name,
+      snapshot: { id: "snap-1", kind: "auto-pre-down", createdAt: "2026-06-14T11:00:00Z" },
+      wouldCaptureCurrentState: false,
+      nodes: [
+        { logicalId: "dev.impl", intendedAction: hasToken ? "resume-original" : "awaiting-decision", ...(hasToken ? {} : { reason: "no token available" }) },
+        { logicalId: "dev.qa", intendedAction: "resume-original" },
+      ],
+      mutated: false,
+    });
+    // Apply via name-based route (restore uses POST /api/up).
+    routes["/api/up"] = () => {
       return {
         status: "restored", rigId: "rig-1", rigName: name,
         rigResult: "fully_restored",
@@ -190,18 +200,14 @@ describe("rig start (OPR.0.3.4.1)", () => {
       { id: "rig-2", name: "beta", nodeCount: 1, lifecycleState: "recoverable" },
     ];
     routes["/api/rigs/:id"] = () => ({ sessions: [] });
-    routes["/api/up"] = (_req, body) => {
-      if (body.plan === true) {
-        return {
-          status: "plan", mode: "restore", rigId: "rig-x", rigName: body.sourceRef,
-          snapshot: { id: "snap-1", kind: "auto-pre-down", createdAt: "2026-06-14T00:00:00Z" },
-          wouldCaptureCurrentState: false,
-          nodes: [{ logicalId: "w", intendedAction: "resume-original" }],
-          mutated: false,
-        };
-      }
-      return { status: "restored", rigResult: "fully_restored", nodes: [{ logicalId: "w", status: "resumed" }], warnings: [] };
-    };
+    routes["/api/rigs/:id/up"] = () => ({
+      status: "plan", mode: "restore", rigId: "rig-x", rigName: "rig",
+      snapshot: { id: "snap-1", kind: "auto-pre-down", createdAt: "2026-06-14T00:00:00Z" },
+      wouldCaptureCurrentState: false,
+      nodes: [{ logicalId: "w", intendedAction: "resume-original" }],
+      mutated: false,
+    });
+    routes["/api/up"] = () => ({ status: "restored", rigResult: "fully_restored", nodes: [{ logicalId: "w", status: "resumed" }], warnings: [] });
 
     const { logs } = await captureLogs(async () => {
       await makeCmd().parseAsync(["node", "rig", "start", "--rigs", "alpha"]);
@@ -313,30 +319,26 @@ describe("rig start (OPR.0.3.4.1)", () => {
     const validTerms = ["resumed", "fresh-primed", "awaiting-decision", "attention_required", "failed"];
     routes["/api/rigs/summary"] = () => [{ id: "r1", name: "term-rig", nodeCount: 3, lifecycleState: "recoverable" }];
     routes["/api/rigs/:id"] = () => ({ sessions: [] });
-    routes["/api/up"] = (_req, body) => {
-      if (body.plan === true) {
-        return {
-          status: "plan", mode: "restore", rigId: "r1", rigName: "term-rig",
-          snapshot: { id: "s1", kind: "auto-pre-down", createdAt: "2026-06-14T00:00:00Z" },
-          wouldCaptureCurrentState: false,
-          nodes: [
-            { logicalId: "a", intendedAction: "resume-original" },
-            { logicalId: "b", intendedAction: "awaiting-decision", reason: "no token" },
-            { logicalId: "c", intendedAction: "fresh-primed" },
-          ],
-          mutated: false,
-        };
-      }
-      return {
-        status: "restored", rigResult: "partially_restored",
-        nodes: [
-          { logicalId: "a", status: "resumed" },
-          { logicalId: "b", status: "awaiting-decision", error: "no token" },
-          { logicalId: "c", status: "fresh-primed" },
-        ],
-        warnings: [],
-      };
-    };
+    routes["/api/rigs/:id/up"] = () => ({
+      status: "plan", mode: "restore", rigId: "r1", rigName: "term-rig",
+      snapshot: { id: "s1", kind: "auto-pre-down", createdAt: "2026-06-14T00:00:00Z" },
+      wouldCaptureCurrentState: false,
+      nodes: [
+        { logicalId: "a", intendedAction: "resume-original" },
+        { logicalId: "b", intendedAction: "awaiting-decision", reason: "no token" },
+        { logicalId: "c", intendedAction: "fresh-primed" },
+      ],
+      mutated: false,
+    });
+    routes["/api/up"] = () => ({
+      status: "restored", rigResult: "partially_restored",
+      nodes: [
+        { logicalId: "a", status: "resumed" },
+        { logicalId: "b", status: "awaiting-decision", error: "no token" },
+        { logicalId: "c", status: "fresh-primed" },
+      ],
+      warnings: [],
+    });
 
     const { logs } = await captureLogs(async () => {
       await makeCmd().parseAsync(["node", "rig", "start", "--last"]);
@@ -346,6 +348,41 @@ describe("rig start (OPR.0.3.4.1)", () => {
     for (const term of statusMatches) {
       expect(validTerms).toContain(term);
     }
+  });
+
+  // ---- SAME-NAME RIG CANDIDATE DISCOVERY (guard BLOCKING f359e3a3) ----
+
+  it("two stopped rigs with the same name are BOTH listed as candidates (id-grounded preview, no ambiguous_name drop)", async () => {
+    routes["/api/rigs/summary"] = () => [
+      { id: "rig-1", name: "foo", nodeCount: 1, lifecycleState: "detached" },
+      { id: "rig-2", name: "foo", nodeCount: 1, lifecycleState: "detached" },
+    ];
+    routes["/api/rigs/:id"] = () => ({ sessions: [] });
+    routes["/api/rigs/:id/up"] = (_req, body) => ({
+      status: "plan", mode: "restore",
+      rigId: body._rigId ?? "unknown", rigName: "foo",
+      snapshot: { id: "s1", kind: "auto-pre-down", createdAt: "2026-06-14T00:00:00Z" },
+      wouldCaptureCurrentState: false,
+      nodes: [{ logicalId: "w", intendedAction: "resume-original" }],
+      mutated: false,
+    });
+    routes["/api/up"] = () => ({
+      status: "restored", rigResult: "fully_restored",
+      nodes: [{ logicalId: "w", status: "resumed" }],
+      warnings: [],
+    });
+
+    const { logs } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "start", "--all"]);
+    });
+    const output = logs.join("\n");
+    // Both should appear — never "No rigs to restore".
+    expect(output).not.toContain("No rigs to restore");
+    // The id-based preview route was used (verify via upBodies).
+    const planBodies = upBodies.filter((b) => b.plan === true);
+    expect(planBodies.length).toBe(2);
+    expect(planBodies.some((b) => b._rigIdRoute === "rig-1")).toBe(true);
+    expect(planBodies.some((b) => b._rigIdRoute === "rig-2")).toBe(true);
   });
 
   // ---- NON-2XX ERROR HANDLING (guard BLOCKING 25661f72) ----
@@ -382,19 +419,21 @@ describe("rig start (OPR.0.3.4.1)", () => {
         if (method === "GET" && url === "/api/kernel/status") { res.writeHead(200).end(JSON.stringify({ kernel_state: "ready" })); return; }
         if (method === "GET" && url === "/api/rigs/summary") { res.writeHead(200).end(JSON.stringify(routes["/api/rigs/summary"]!(req, body))); return; }
         if (method === "GET" && url.match(/^\/api\/rigs\/[^/]+$/)) { res.writeHead(200).end(JSON.stringify({ sessions: [] })); return; }
+        const rigUpMatch2 = method === "POST" && url.match(/^\/api\/rigs\/([^/]+)\/up$/);
+        if (rigUpMatch2) {
+          upBodies.push({ ...body, _rigIdRoute: rigUpMatch2[1] });
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({
+            status: "plan", mode: "restore", rigId: rigUpMatch2[1], rigName: "live-rig",
+            snapshot: { id: "s1", kind: "auto-pre-down", createdAt: "2026-06-14T00:00:00Z" },
+            wouldCaptureCurrentState: false,
+            nodes: [{ logicalId: "w", intendedAction: "resume-original" }],
+            mutated: false,
+          }));
+          return;
+        }
         if (method === "POST" && url === "/api/up") {
           upBodies.push(body);
-          if (body.plan === true) {
-            res.writeHead(200, { "Content-Type": "application/json" });
-            res.end(JSON.stringify({
-              status: "plan", mode: "restore", rigId: "r1", rigName: "live-rig",
-              snapshot: { id: "s1", kind: "auto-pre-down", createdAt: "2026-06-14T00:00:00Z" },
-              wouldCaptureCurrentState: false,
-              nodes: [{ logicalId: "w", intendedAction: "resume-original" }],
-              mutated: false,
-            }));
-            return;
-          }
           res.writeHead(409, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: "Rig r1 has live sessions", code: "rig_not_stopped" }));
           return;
@@ -426,6 +465,8 @@ describe("rig start (OPR.0.3.4.1)", () => {
         if (method === "GET" && url === "/api/rigs/summary") { const h = routes["/api/rigs/summary"]; res.writeHead(200).end(JSON.stringify(h ? h(req, body) : [])); return; }
         if (method === "GET" && url.match(/^\/api\/rigs\/[^/]+$/)) { const h = routes["/api/rigs/:id"]; res.writeHead(200).end(JSON.stringify(h ? h(req, body) : { sessions: [] })); return; }
         if (method === "POST" && url === "/api/up") { upBodies.push(body); const h = routes["/api/up"]; const d = h ? h(req, body) : {}; res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(d)); return; }
+        const rigUpRestore = method === "POST" && url.match(/^\/api\/rigs\/([^/]+)\/up$/);
+        if (rigUpRestore) { upBodies.push({ ...body, _rigIdRoute: rigUpRestore[1] }); const h = routes["/api/rigs/:id/up"] ?? routes["/api/up"]; const d = h ? h(req, { ...body, _rigId: rigUpRestore[1] }) : {}; res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(d)); return; }
         res.writeHead(404).end();
       });
     });
@@ -433,22 +474,12 @@ describe("rig start (OPR.0.3.4.1)", () => {
 
   it("partially_restored rigResult -> nonzero exit (not treated as clean)", async () => {
     setupCandidateRig("partial-rig");
-    routes["/api/up"] = (_req, body) => {
-      if (body.plan === true) {
-        return {
-          status: "plan", mode: "restore", rigId: "rig-1", rigName: "partial-rig",
-          snapshot: { id: "s1", kind: "auto-pre-down", createdAt: "2026-06-14T00:00:00Z" },
-          wouldCaptureCurrentState: false,
-          nodes: [{ logicalId: "dev.impl", intendedAction: "resume-original" }],
-          mutated: false,
-        };
-      }
-      return {
-        status: "restored", rigResult: "partially_restored",
-        nodes: [{ logicalId: "dev.impl", status: "fresh-primed" }],
-        warnings: [],
-      };
-    };
+    // Override apply response only; the id-based plan preview from setupCandidateRig is fine.
+    routes["/api/up"] = () => ({
+      status: "restored", rigResult: "partially_restored",
+      nodes: [{ logicalId: "dev.impl", status: "fresh-primed" }],
+      warnings: [],
+    });
 
     const { exitCode } = await captureLogs(async () => {
       await makeCmd().parseAsync(["node", "rig", "start", "--last"]);
