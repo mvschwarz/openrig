@@ -292,6 +292,47 @@ describe("LaunchCmuxButton", () => {
     });
   });
 
+  it("open-missing treats /open-cmux HTTP 200 {ok:false} as failed (no false success)", async () => {
+    const fetchCalls: string[] = [];
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation(async (url: string, opts?: RequestInit) => {
+      fetchCalls.push(`${opts?.method ?? "GET"} ${url}`);
+      if (url.includes("/cmux/launch")) {
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            workspaces: [{ name: "w1", agents: ["a@rig"], blanks: 0 }],
+            missing: [{ logicalId: "b", reason: "session-missing" }],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      if (url.includes("/open-cmux")) {
+        return new Response(
+          JSON.stringify({ ok: false, error: "session_not_found", message: "tmux session not found" }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      return new Response("not found", { status: 404 });
+    });
+
+    render(
+      <Wrapper>
+        <LaunchCmuxButton rigId="my-rig" />
+      </Wrapper>,
+    );
+    fireEvent.click(screen.getByTestId("launch-cmux-button"));
+    await waitFor(() => {
+      expect(screen.getByTestId("launch-cmux-status").textContent).toContain("Missing");
+    });
+
+    fireEvent.click(screen.getByTestId("open-missing-button"));
+    await waitFor(() => {
+      const toast = screen.getByTestId("launch-cmux-status");
+      expect(toast.textContent).toContain("still unavailable");
+      expect(toast.textContent).not.toContain("Opened 1 missing seat");
+    });
+  });
+
   it("partial launch shows missing seat names in status message", async () => {
     (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
       new Response(

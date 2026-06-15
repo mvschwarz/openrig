@@ -138,11 +138,14 @@ export function LaunchCmuxButton({ rigId }: LaunchCmuxButtonProps) {
           if (ids.length === 0) return;
           if (openMissingRef.current) openMissingRef.current.disabled = true;
           Promise.allSettled(
-            ids.map((logicalId) =>
-              fetch(`/api/rigs/${encodeURIComponent(rigId)}/nodes/${encodeURIComponent(logicalId)}/open-cmux`, { method: "POST" }),
-            ),
+            ids.map(async (logicalId) => {
+              const res = await fetch(`/api/rigs/${encodeURIComponent(rigId)}/nodes/${encodeURIComponent(logicalId)}/open-cmux`, { method: "POST" });
+              if (!res.ok) return { ok: false };
+              const body = await res.json().catch(() => ({})) as { ok?: boolean };
+              return { ok: body.ok === true };
+            }),
           ).then((results) => {
-            const opened = results.filter((r) => r.status === "fulfilled" && (r as PromiseFulfilledResult<Response>).value.ok).length;
+            const opened = results.filter((r) => r.status === "fulfilled" && (r as PromiseFulfilledResult<{ ok: boolean }>).value.ok).length;
             const failed = ids.length - opened;
             if (failed > 0) {
               showStatus("error", `Opened ${opened} of ${ids.length} missing seats; ${failed} still unavailable.`);
