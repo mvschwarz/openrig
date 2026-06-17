@@ -39,12 +39,24 @@ function isExempt(frontmatter: Record<string, unknown>, body: string): boolean {
   return false;
 }
 
-function extractVerified(frontmatter: Record<string, unknown>): VerifiedStatus {
+function isSelfReferential(source: string, skillPath: string): boolean {
+  const normalized = source.trim();
+  const skillMd = join(skillPath, "SKILL.md");
+  if (normalized === skillMd || normalized === skillPath) return true;
+  if (normalized === "SKILL.md" || normalized === "./SKILL.md") return true;
+  if (normalized.endsWith("/SKILL.md") && skillMd.endsWith(normalized)) return true;
+  return false;
+}
+
+function extractVerified(frontmatter: Record<string, unknown>, skillPath: string): VerifiedStatus {
   const topVerified = frontmatter.verified;
   if (typeof topVerified === "string") {
     const match = /^(\d{4}-\d{2}-\d{2})\s+against\s+(.+)$/i.exec(topVerified.trim());
-    if (match) {
+    if (match && !isSelfReferential(match[2]!, skillPath)) {
       return checkStaleness(match[1]!, match[2]!.trim());
+    }
+    if (match) {
+      return { status: "bare_verified", date: match[1]! };
     }
   }
 
@@ -55,7 +67,7 @@ function extractVerified(frontmatter: Record<string, unknown>): VerifiedStatus {
 
   const dateStr = String(lastVerified).trim();
   const source = openrig?.source_evidence ?? openrig?.sourced_from;
-  if (!source || String(source).trim().length === 0) {
+  if (!source || String(source).trim().length === 0 || isSelfReferential(String(source), skillPath)) {
     return { status: "bare_verified", date: dateStr };
   }
 
@@ -119,7 +131,7 @@ export function auditSkills(entries: SkillProvenanceEntry[], opts?: { mirrorDrif
     const stage = openrig?.stage ? String(openrig.stage) : null;
     const owner = openrig?.owner ? String(openrig.owner) : null;
     const sourceRef = openrig?.source_ref ?? openrig?.version ? String(openrig.source_ref ?? openrig?.version) : null;
-    const verified = extractVerified(fm);
+    const verified = extractVerified(fm, entry.path);
     const contentHash = hashSkillFolder(entry.path);
     const exempt = isExempt(fm, entry.body);
 

@@ -81,6 +81,42 @@ describe("skill-audit", () => {
     expect(result!.findings.some((f) => f.class === "bare_verified")).toBe(true);
   });
 
+  it("(b) source_evidence equal to own SKILL.md path fails as bare_verified", () => {
+    const entry = makeEntry({
+      path: "/tmp/skills/test-skill",
+      fmOverrides: {
+        metadata: {
+          openrig: {
+            stage: "factory-approved",
+            last_verified: "2026-06-15",
+            source_evidence: "/tmp/skills/test-skill/SKILL.md",
+          },
+        },
+      },
+    });
+
+    const { entries: [result] } = auditSkills([entry]);
+    expect(result!.verified.status).toBe("bare_verified");
+    expect(result!.findings.some((f) => f.class === "bare_verified")).toBe(true);
+  });
+
+  it("(b) source_evidence 'SKILL.md' (bare filename) fails as bare_verified", () => {
+    const entry = makeEntry({
+      fmOverrides: {
+        metadata: {
+          openrig: {
+            stage: "factory-approved",
+            last_verified: "2026-06-15",
+            source_evidence: "SKILL.md",
+          },
+        },
+      },
+    });
+
+    const { entries: [result] } = auditSkills([entry]);
+    expect(result!.verified.status).toBe("bare_verified");
+  });
+
   it("(c) NO-DATE: no verified date fails as missing_verified", () => {
     const entry = makeEntry({
       fmOverrides: {
