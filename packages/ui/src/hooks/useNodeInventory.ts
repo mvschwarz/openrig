@@ -47,6 +47,9 @@ export interface NodeInventoryEntry {
   terminalActive?: boolean | null;
   hasAssignedWork?: boolean;
   pendingWorkCount?: number;
+  agentRef?: string | null;
+  profile?: string | null;
+  codexConfigProfile?: string | null;
 }
 
 async function fetchNodeInventory(rigId: string): Promise<NodeInventoryEntry[]> {

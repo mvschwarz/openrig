@@ -57,11 +57,27 @@ function contextPackRow(entry: ContextPackEntry): LibraryRow {
 }
 
 function agentImageRow(entry: AgentImageEntry): LibraryRow {
+  const parts: string[] = [`v${entry.version}`];
+  if (entry.derivedEstimatedTokens > 0) parts.push(`~${entry.derivedEstimatedTokens} tok`);
+  if (entry.stats.forkCount > 0) parts.push(`forks: ${entry.stats.forkCount}`);
+  if (entry.stats.lastUsedAt) parts.push(`used: ${formatRelativeAge(entry.stats.lastUsedAt)}`);
   return {
     id: entry.id,
     label: entry.name,
+    meta: parts.join(" · "),
     entryId: entry.id,
   };
+}
+
+function formatRelativeAge(iso: string): string {
+  const ms = Date.now() - new Date(iso).getTime();
+  if (ms < 0) return "just now";
+  const mins = Math.floor(ms / 60_000);
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  const days = Math.floor(hrs / 24);
+  return `${days}d ago`;
 }
 
 function LibrarySection({

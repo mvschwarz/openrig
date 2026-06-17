@@ -17,6 +17,7 @@ import { WorkspacePage } from "./WorkspacePage.js";
 // data-fetch wiring may add live content); FileViewer empty-state covers
 // the no-content interim.
 import { FileReferenceTrigger } from "./drawer-triggers/FileReferenceTrigger.js";
+import { ForkNowAction } from "./agent-images/ForkNowAction.js";
 import {
   useLibraryReview,
   useSpecLibrary,
@@ -874,6 +875,8 @@ function AgentImageReviewBody({
             </div>
           </section>
         )}
+
+        <ForkNowAction entry={entry} />
 
         <section data-testid="lib-image-starter-snippet" className="border border-stone-400 bg-white px-3 py-3 space-y-2">
           <div className="flex items-center justify-between">
