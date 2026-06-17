@@ -5,10 +5,27 @@ import { usePsEntries } from "@/hooks/usePsEntries";
 import { useNodeInventory } from "@/hooks/useNodeInventory";
 import type { AgentImageEntry } from "@/hooks/useAgentImageLibrary";
 
+interface AddMemberResponse {
+  ok: boolean;
+  message?: string;
+  errors?: string[];
+  code?: string;
+  result?: {
+    node?: {
+      logicalId: string;
+      status: string;
+      error?: string;
+      sessionName?: string;
+    };
+    warnings?: string[];
+  };
+}
+
 interface ForkNowResult {
   ok: boolean;
+  status?: string;
   error?: string;
-  node?: { logicalId: string; sessionName?: string };
+  logicalId?: string;
 }
 
 export function ForkNowAction({ entry }: { entry: AgentImageEntry }) {
@@ -30,7 +47,7 @@ export function ForkNowAction({ entry }: { entry: AgentImageEntry }) {
 
   const pods = [...new Set(nodes.filter((n) => n.podId).map((n) => n.podNamespace ?? n.podId!))];
   const podNodes = selectedPod
-    ? nodes.filter((n) => (n.podNamespace ?? n.podId) === selectedPod && n.runtime === entry.runtime)
+    ? nodes.filter((n) => (n.podNamespace ?? n.podId) === selectedPod && n.runtime === entry.runtime && !!n.agentRef && !!n.profile)
     : [];
 
   const selectedSiblingNode = podNodes.find((n) => n.logicalId === selectedSibling);
@@ -64,11 +81,24 @@ export function ForkNowAction({ entry }: { entry: AgentImageEntry }) {
           body: JSON.stringify({ member }),
         },
       );
-      const data = await res.json();
+      const data: AddMemberResponse = await res.json();
       if (!res.ok || !data.ok) {
-        throw new Error(data.error ?? data.message ?? `HTTP ${res.status}`);
+        throw new Error(data.message ?? data.errors?.join("; ") ?? data.code ?? `HTTP ${res.status}`);
       }
-      return data as ForkNowResult;
+      const nodeStatus = data.result?.node?.status;
+      if (nodeStatus === "failed" || nodeStatus === "attention_required") {
+        return {
+          ok: false,
+          status: nodeStatus,
+          error: data.result?.node?.error ?? `Launch ${nodeStatus}`,
+          logicalId: data.result?.node?.logicalId,
+        };
+      }
+      return {
+        ok: true,
+        status: nodeStatus ?? "launched",
+        logicalId: data.result?.node?.logicalId ?? newMemberId.trim(),
+      };
     },
     onSuccess: (data) => {
       setResult(data);
@@ -200,8 +230,8 @@ export function ForkNowAction({ entry }: { entry: AgentImageEntry }) {
               className={`font-mono text-[9px] ${result.ok ? "text-green-700" : "text-red-600"}`}
             >
               {result.ok
-                ? `Forked: ${result.node?.logicalId ?? newMemberId} launched from image "${entry.name}"`
-                : `Fork failed: ${result.error}`}
+                ? `Forked: ${result.logicalId ?? newMemberId} launched from image "${entry.name}" (${result.status})`
+                : `Fork failed: ${result.status ? `[${result.status}] ` : ""}${result.error}`}
             </div>
           )}
         </div>
