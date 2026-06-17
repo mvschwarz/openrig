@@ -86,6 +86,22 @@ export function checkMode(exec = execFileSync) {
   return { stale: changes.length > 0, changes, output };
 }
 
+export function checkModeAbsolute(sourceDir, targetDir, exec = execFileSync) {
+  const args = [
+    "-a", "--delete", "--delete-excluded", "--itemize-changes",
+    "-n", "--checksum",
+    ...EXCLUDES.map((p) => `--exclude=${p}`),
+    sourceDir.endsWith("/") ? sourceDir : sourceDir + "/",
+    targetDir.endsWith("/") ? targetDir : targetDir + "/",
+  ];
+  const output = exec("rsync", args, {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "inherit"],
+  });
+  const changes = parseChanges(output);
+  return { stale: changes.length > 0, changes, output };
+}
+
 export function applyMode(exec = execFileSync) {
   ensureTargetExists();
   return runRsync({ dryRun: false }, exec);

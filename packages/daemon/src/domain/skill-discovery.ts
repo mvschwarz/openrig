@@ -54,6 +54,23 @@ export interface SkillDiscoveryResult {
   rejected: SkillRejection[];
 }
 
+export type SourceKind = "rig_bundled" | "spec_install" | "runtime_user" | "shared_user";
+
+export interface SkillProvenanceEntry {
+  id: string;
+  path: string;
+  sourceRoot: string;
+  sourceKind: SourceKind;
+  frontmatter: SkillFrontmatter;
+  body: string;
+  shadowed: boolean;
+}
+
+export interface SkillProvenanceResult {
+  skills: SkillProvenanceEntry[];
+  rejected: SkillRejection[];
+}
+
 const FRONTMATTER_RE = /^---\s*\n([\s\S]*?)\n---\s*\n?([\s\S]*)$/;
 
 /** Parse a SKILL.md document into frontmatter + body, validating the
@@ -191,4 +208,64 @@ function listScanRoots(paths: SkillDiscoveryPaths): string[] {
   roots.push(join(homedir, ".openrig", "skills"));
 
   return roots;
+}
+
+function rootToSourceKind(root: string, paths: SkillDiscoveryPaths): SourceKind {
+  const runtimeDir = paths.runtime === "claude-code" ? ".claude" : ".agents";
+  const rigBundled = join(paths.cwd, runtimeDir, "skills");
+  if (root === rigBundled) return "rig_bundled";
+  if (paths.specInstallDir && root === join(paths.specInstallDir, "skills")) return "spec_install";
+  const runtimeUser = join(paths.homedir, runtimeDir, "skills");
+  if (root === runtimeUser) return "runtime_user";
+  return "shared_user";
+}
+
+export function discoverSkillsWithProvenance(paths: SkillDiscoveryPaths): SkillProvenanceResult {
+  const scanRoots = listScanRoots(paths);
+  const skills: SkillProvenanceEntry[] = [];
+  const rejected: SkillRejection[] = [];
+  const seenIds = new Set<string>();
+
+  for (const root of scanRoots) {
+    if (!existsSync(root)) continue;
+    let entries: string[];
+    try { entries = readdirSync(root); } catch { continue; }
+
+    for (const entry of entries) {
+      const skillDir = join(root, entry);
+      let stat;
+      try { stat = statSync(skillDir); } catch { continue; }
+      if (!stat.isDirectory()) continue;
+
+      const skillFile = join(skillDir, "SKILL.md");
+      if (!existsSync(skillFile)) continue;
+
+      let content: string;
+      try { content = readFileSync(skillFile, "utf-8"); } catch (err) {
+        rejected.push({ path: skillDir, reason: `SKILL.md read error: ${err instanceof Error ? err.message : String(err)}` });
+        continue;
+      }
+
+      const parsed = parseSkillFrontmatter(content);
+      if (!parsed.ok) {
+        rejected.push({ path: skillDir, reason: parsed.reason });
+        continue;
+      }
+
+      const id = parsed.frontmatter.name;
+      const sourceKind = rootToSourceKind(root, paths);
+      skills.push({
+        id,
+        path: skillDir,
+        sourceRoot: root,
+        sourceKind,
+        frontmatter: parsed.frontmatter,
+        body: parsed.body,
+        shadowed: seenIds.has(id),
+      });
+      seenIds.add(id);
+    }
+  }
+
+  return { skills, rejected };
 }

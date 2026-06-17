@@ -148,5 +148,53 @@ export function skillsRoutes(): Hono {
     }
   });
 
+  router.get("/audit", async (c) => {
+    const service = getService(c);
+    if (!service) return c.json({ ok: false, error: "skill_library_unavailable" }, 503);
+
+    const { discoverSkillsWithProvenance } = await import("../domain/skill-discovery.js");
+    const { auditSkills } = await import("../domain/skill-audit.js");
+
+    const homedir = c.get("homedir" as never) as string | undefined ?? process.env.HOME ?? "/tmp";
+    const cwd = c.get("cwd" as never) as string | undefined ?? process.cwd();
+
+    const claudeResult = discoverSkillsWithProvenance({ runtime: "claude-code", homedir, cwd });
+    const codexResult = discoverSkillsWithProvenance({ runtime: "codex", homedir, cwd });
+
+    const seenPaths = new Set<string>();
+    const allSkills: typeof claudeResult.skills = [];
+    for (const s of claudeResult.skills) {
+      seenPaths.add(s.path);
+      allSkills.push(s);
+    }
+    for (const s of codexResult.skills) {
+      if (!seenPaths.has(s.path)) {
+        seenPaths.add(s.path);
+        allSkills.push(s);
+      }
+    }
+
+    let mirrorDrift: { stale: boolean; changes: string[] } | undefined;
+    let mirrorDriftError: string | undefined;
+    try {
+      const { checkMirrorDriftSafe } = await import("../domain/skill-mirror-drift.js");
+      const driftResult = await checkMirrorDriftSafe();
+      if (driftResult.ok) {
+        mirrorDrift = { stale: driftResult.stale, changes: driftResult.changes };
+      } else {
+        mirrorDriftError = driftResult.reason;
+      }
+    } catch (err) {
+      mirrorDriftError = `Mirror drift check unavailable: ${err instanceof Error ? err.message : String(err)}`;
+    }
+
+    const auditResult = auditSkills(allSkills, { mirrorDrift });
+    const totalFindings = auditResult.entries.filter((e) => !e.shadowed).reduce((sum, e) => sum + e.findings.length, 0)
+      + auditResult.mirrorDriftFindings.length;
+    const rejected = [...claudeResult.rejected, ...codexResult.rejected];
+
+    return c.json({ ok: true, entries: auditResult.entries, mirrorDriftFindings: auditResult.mirrorDriftFindings, mirrorDriftError, totalFindings, rejected });
+  });
+
   return router;
 }
