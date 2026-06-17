@@ -437,4 +437,35 @@ describe("SeatAttentionReconciler", () => {
     expect(payload.evidence.runtimeCwdVerified).toBe(false);
     expect(payload.evidence.source).toBe("operator_attestation");
   });
+
+  it("OPR.0.4.0.16: clearAttention result includes derivedEvidence with runtimeCwdVerified for JSON surface", async () => {
+    const { rigId, nodeId } = seedDerivedAttentionSeat("r-derived-surface", "worker@r-derived-surface");
+    emitActivity(rigId, nodeId, "worker@r-derived-surface", "running");
+    const surfaceReconciler = new SeatAttentionReconciler({
+      sessionRegistry, eventBus, agentActivityStore: activityStore, db,
+    });
+
+    const result = await surfaceReconciler.clearAttention("worker@r-derived-surface");
+
+    expect(result.ok).toBe(true);
+    expect(result.clearedClasses).toContain("restore_outcome");
+    expect(result.derivedEvidence).toBeDefined();
+    expect(result.derivedEvidence!.runtimeCwdVerified).toBe(false);
+    expect(result.derivedEvidence!.source).toBe("clear_attention_evidence");
+    expect(result.derivedEvidence!.kind).toBe("fresh_activity");
+  });
+
+  it("OPR.0.4.0.16: operator attestation result includes derivedEvidence for JSON surface", async () => {
+    seedDerivedAttentionSeat("r-derived-attest-surface", "worker@r-derived-attest-surface");
+    const surfaceReconciler = new SeatAttentionReconciler({
+      sessionRegistry, eventBus, agentActivityStore: activityStore, db,
+    });
+
+    const result = await surfaceReconciler.clearAttention("worker@r-derived-attest-surface", { reason: "verified manually" });
+
+    expect(result.ok).toBe(true);
+    expect(result.derivedEvidence).toBeDefined();
+    expect(result.derivedEvidence!.runtimeCwdVerified).toBe(false);
+    expect(result.derivedEvidence!.source).toBe("operator_attestation");
+  });
 });

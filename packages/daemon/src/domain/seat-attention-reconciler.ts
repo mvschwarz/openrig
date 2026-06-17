@@ -18,6 +18,7 @@ export interface ClearAttentionResult {
   detail?: string;
   previousError?: string | null;
   clearedClasses?: ("startup_status" | "restore_outcome")[];
+  derivedEvidence?: { source: string; kind?: string; state?: string; reason?: string; runtimeCwdVerified: boolean };
 }
 
 export interface SendVerifyFn {
@@ -106,6 +107,7 @@ export class SeatAttentionReconciler {
         reason: opts.reason,
         previousError,
         clearedClasses,
+        derivedEvidence: derivedOutcome ? { source: "operator_attestation", reason: opts.reason, runtimeCwdVerified: false } : undefined,
       };
     }
 
@@ -200,6 +202,7 @@ export class SeatAttentionReconciler {
       evidence,
       previousError,
       clearedClasses,
+      derivedEvidence: derivedOutcome ? { source: "clear_attention_evidence", kind: evidence.kind, state: evidence.state, runtimeCwdVerified: false } : undefined,
     };
   }
 
