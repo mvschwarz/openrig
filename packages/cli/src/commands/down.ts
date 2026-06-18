@@ -110,11 +110,24 @@ export function downCommand(depsOverride?: StatusDeps): Command {
       const deps = getDepsF();
 
       if (opts.host) {
-        const { runRemoteHttpOp } = await import("../remote-host-ops.js");
-        const result = await runRemoteHttpOp(opts.host, "POST", `/api/down`, { rigId: rigHandle, delete: opts.delete, force: opts.force, snapshot: opts.snapshot }, deps, opts);
-        if (opts.json) console.log(JSON.stringify(result));
-        else if (result.ok) console.log(JSON.stringify(result.data, null, 2));
-        else { console.error(`Error on host ${opts.host}: ${result.error}`); process.exitCode = 1; }
+        const { runRemoteHttpOp, resolveRemoteRigId } = await import("../remote-host-ops.js");
+        const rigIdResult = await resolveRemoteRigId(opts.host, rigHandle, deps);
+        if (!rigIdResult.ok) {
+          if (opts.json) console.log(JSON.stringify(rigIdResult));
+          else console.error(`Error: ${rigIdResult.error}`);
+          process.exitCode = 1;
+          return;
+        }
+        const result = await runRemoteHttpOp(opts.host, "POST", `/api/down`, { rigId: rigIdResult.rigId, delete: opts.delete, force: opts.force, snapshot: opts.snapshot }, deps, opts);
+        if (opts.json) {
+          console.log(JSON.stringify(result));
+          if (!result.ok) process.exitCode = 1;
+        } else if (result.ok) {
+          console.log(JSON.stringify(result.data, null, 2));
+        } else {
+          console.error(`Error on host ${opts.host}: ${result.error}`);
+          process.exitCode = 1;
+        }
         return;
       }
 

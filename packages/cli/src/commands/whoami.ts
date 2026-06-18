@@ -350,18 +350,31 @@ async function runHttpWhoami(
     return;
   }
 
-  const client = new (await import("../client.js")).DaemonClient(host.url);
+  const { classifyHttpFailedStep: classifyStatus } = await import("../host-registry.js");
+  const client = deps.clientFactory(host.url);
   const headers = { Authorization: `Bearer ${bearerResult.token}` };
 
   try {
-    const infoRes = await client.get<{ version?: string; hostname?: string }>("/api/info", { headers });
+    const infoRes = await client.get<{ installRoot?: string }>("/api/info", { headers });
+    const infoStep = classifyStatus(infoRes.status);
+    if (infoStep !== "none") {
+      emitCrossHostError(host.id, infoStep, `Remote /api/info returned HTTP ${infoRes.status}`, opts.json);
+      process.exitCode = 1;
+      return;
+    }
+
     const psRes = await client.get<Array<{ rigId: string; name: string }>>("/api/ps", { headers });
+    const psStep = classifyStatus(psRes.status);
+    if (psStep !== "none") {
+      emitCrossHostError(host.id, psStep, `Remote /api/ps returned HTTP ${psRes.status}`, opts.json);
+      process.exitCode = 1;
+      return;
+    }
 
     const identity = {
       host: host.id,
       url: host.url,
-      daemonVersion: infoRes.data?.version ?? "unknown",
-      hostname: infoRes.data?.hostname ?? "unknown",
+      installRoot: infoRes.data?.installRoot ?? "unknown",
       rigs: Array.isArray(psRes.data) ? psRes.data.map((r) => ({ id: r.rigId, name: r.name })) : [],
     };
 
@@ -369,8 +382,7 @@ async function runHttpWhoami(
       console.log(JSON.stringify(identity));
     } else {
       console.log(`Host:     ${identity.host} (${identity.url})`);
-      console.log(`Daemon:   ${identity.daemonVersion}`);
-      console.log(`Hostname: ${identity.hostname}`);
+      console.log(`Install:  ${identity.installRoot}`);
       console.log(`Rigs:     ${identity.rigs.length > 0 ? identity.rigs.map((r) => r.name).join(", ") : "(none)"}`);
     }
   } catch (err) {

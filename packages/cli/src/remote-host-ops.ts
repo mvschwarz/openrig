@@ -1,7 +1,5 @@
 import { DaemonClient } from "./client.js";
-import { loadHostRegistry, resolveHost, resolveRemoteBearer, classifyHttpFailedStep, classifyHttpError, hostDisplayTarget, type HttpHostEntry } from "./host-registry.js";
-import { runCrossHostCommand } from "./cross-host-executor.js";
-import { emitCrossHostError, emitCrossHostFailure } from "./cross-host-cli-helpers.js";
+import { loadHostRegistry, resolveHost, resolveRemoteBearer, classifyHttpFailedStep, classifyHttpError, type HttpHostEntry } from "./host-registry.js";
 import type { FailedStep } from "./cross-host-types.js";
 
 export interface RemoteHostDeps {
@@ -61,4 +59,25 @@ export async function runRemoteHttpOp(
   } catch (err) {
     return { ok: false, failedStep: classifyHttpError(err), error: (err as Error).message };
   }
+}
+
+export async function resolveRemoteRigId(
+  hostId: string,
+  handle: string,
+  deps: RemoteHostDeps,
+): Promise<{ ok: true; rigId: string } | { ok: false; error: string }> {
+  const psResult = await runRemoteHttpOp(hostId, "GET", "/api/ps?includeArchived=true", undefined, deps, {});
+  if (!psResult.ok) return { ok: false, error: `cannot resolve rig on host ${hostId}: ${psResult.error}` };
+
+  const rigs = psResult.data as Array<{ rigId: string; name: string; archivedAt?: string | null }>;
+
+  const exactId = rigs.find((r) => r.rigId === handle);
+  if (exactId) return { ok: true, rigId: exactId.rigId };
+
+  const byName = rigs.filter((r) => r.name === handle && !r.archivedAt);
+  if (byName.length === 1) return { ok: true, rigId: byName[0]!.rigId };
+  if (byName.length > 1) {
+    return { ok: false, error: `ambiguous rig name "${handle}" on host ${hostId}: ${byName.length} active rigs share that name. Use the rig id instead.` };
+  }
+  return { ok: false, error: `rig "${handle}" not found on host ${hostId}` };
 }

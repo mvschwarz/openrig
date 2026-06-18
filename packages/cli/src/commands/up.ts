@@ -62,10 +62,25 @@ Examples:
 
       if (opts.host) {
         const { runRemoteHttpOp } = await import("../remote-host-ops.js");
-        const result = await runRemoteHttpOp(opts.host, "POST", "/api/up", { source, plan: opts.plan, cwd: opts.cwd, target: opts.target, existing: opts.existing, fresh: opts.fresh }, deps, opts);
-        if (opts.json) console.log(JSON.stringify(result));
-        else if (result.ok) console.log(JSON.stringify(result.data, null, 2));
-        else { console.error(`Error on host ${opts.host}: ${result.error}`); process.exitCode = 1; }
+        const body = {
+          sourceRef: source,
+          plan: opts.plan,
+          autoApprove: opts.yes,
+          cwdOverride: opts.cwd,
+          targetRoot: opts.target,
+          existing: opts.existing,
+          freshLogicalIds: opts.fresh,
+        };
+        const result = await runRemoteHttpOp(opts.host, "POST", "/api/up", body, deps, opts);
+        if (opts.json) {
+          console.log(JSON.stringify(result));
+          if (!result.ok) process.exitCode = 1;
+        } else if (result.ok) {
+          console.log(JSON.stringify(result.data, null, 2));
+        } else {
+          console.error(`Error on host ${opts.host}: ${result.error}`);
+          process.exitCode = 1;
+        }
         return;
       }
 
