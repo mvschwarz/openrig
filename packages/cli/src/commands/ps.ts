@@ -946,6 +946,10 @@ async function runCrossHostPs(
   emitCrossHostFailure(host.id, hostDisplayTarget(host), result, false);
 }
 
+function buildRemoteHeaders(token: string): Record<string, string> {
+  return { Authorization: `Bearer ${token}` };
+}
+
 async function runHttpPs(
   host: HttpHostEntry,
   opts: PsCliOptions,
@@ -959,21 +963,39 @@ async function runHttpPs(
   }
 
   const client = deps.clientFactory(host.url);
+  const headers = buildRemoteHeaders(bearerResult.token);
   try {
-    const res = await client.get<unknown>("/api/ps", {
-      headers: { Authorization: `Bearer ${bearerResult.token}` },
-    });
+    const psQuery = opts.includeArchived ? "?includeArchived=true" : "";
+    const res = await client.get<unknown[]>(`/api/ps${psQuery}`, { headers });
     const failedStep = classifyHttpFailedStep(res.status);
     if (failedStep !== "none") {
       emitCrossHostError(host.id, failedStep, `HTTP ${res.status}`, opts.json);
       process.exitCode = 1;
       return;
     }
+
+    let data: unknown = res.data;
+
+    if (opts.nodes && Array.isArray(res.data)) {
+      const rigsWithNodes = await Promise.all(
+        (res.data as Array<{ id?: string }>).map(async (rig) => {
+          if (!rig.id) return rig;
+          try {
+            const nodesRes = await client.get<unknown[]>(`/api/rigs/${encodeURIComponent(rig.id)}/nodes`, { headers });
+            return { ...rig, nodes: nodesRes.data };
+          } catch {
+            return { ...rig, nodes: [] };
+          }
+        }),
+      );
+      data = rigsWithNodes;
+    }
+
     if (opts.json) {
-      console.log(JSON.stringify({ cross_host: { host: host.id, target: host.url }, data: res.data }));
+      console.log(JSON.stringify({ cross_host: { host: host.id, target: host.url }, data }));
     } else {
       console.log(`[via host=${host.id} (${host.url})]`);
-      console.log(JSON.stringify(res.data, null, 2));
+      console.log(JSON.stringify(data, null, 2));
     }
   } catch (err) {
     const failedStep = classifyHttpError(err);
@@ -999,34 +1021,45 @@ async function runFanOutPs(opts: PsCliOptions, deps: PsDeps): Promise<void> {
     return;
   }
 
-  let targetHosts = registry.registry.hosts.filter((h) => h.transport === "http") as HttpHostEntry[];
+  const allHosts = registry.registry.hosts;
+  let targetIds: string[];
   if (opts.hosts) {
-    const ids = opts.hosts.split(",").map((s) => s.trim()).filter(Boolean);
-    targetHosts = targetHosts.filter((h) => ids.includes(h.id));
-    const missing = ids.filter((id) => !targetHosts.some((h) => h.id === id));
-    if (missing.length > 0) {
-      console.error(`Warning: unknown or non-http host ids: ${missing.join(", ")}`);
+    targetIds = opts.hosts.split(",").map((s) => s.trim()).filter(Boolean);
+    const unknown = targetIds.filter((id) => !allHosts.some((h) => h.id === id));
+    if (unknown.length > 0) {
+      console.error(`Error: unknown host ids: ${unknown.join(", ")}`);
+      process.exitCode = 1;
+      return;
     }
+  } else {
+    targetIds = allHosts.filter((h) => h.transport === "http").map((h) => h.id);
   }
 
   const results: FanOutHostResult[] = await Promise.all(
-    targetHosts.map(async (host): Promise<FanOutHostResult> => {
-      const bearerResult = resolveRemoteBearer(host);
-      if (!bearerResult.ok) {
-        return { host: host.id, ok: false, failedStep: bearerResult.failedStep, error: bearerResult.error };
+    targetIds.map(async (id): Promise<FanOutHostResult> => {
+      const host = allHosts.find((h) => h.id === id);
+      if (!host) return { host: id, ok: false, failedStep: "remote-daemon-unreachable", error: `unknown host ${id}` };
+      if (host.transport !== "http") {
+        return { host: id, ok: false, failedStep: "remote-command-failed", error: `host ${id} uses transport ${host.transport}; HTTP fan-out requires transport: http` };
       }
-      const client = deps.clientFactory(host.url);
+      const httpHost = host as HttpHostEntry;
+      const bearerResult = resolveRemoteBearer(httpHost);
+      if (!bearerResult.ok) {
+        return { host: id, ok: false, failedStep: bearerResult.failedStep, error: bearerResult.error };
+      }
+      const client = deps.clientFactory(httpHost.url);
       try {
-        const res = await client.get<unknown>("/api/ps", {
-          headers: { Authorization: `Bearer ${bearerResult.token}` },
+        const psQuery = opts.includeArchived ? "?includeArchived=true" : "";
+        const res = await client.get<unknown>(`/api/ps${psQuery}`, {
+          headers: buildRemoteHeaders(bearerResult.token),
         });
         const failedStep = classifyHttpFailedStep(res.status);
         if (failedStep !== "none") {
-          return { host: host.id, ok: false, failedStep, error: `HTTP ${res.status}` };
+          return { host: id, ok: false, failedStep, error: `HTTP ${res.status}` };
         }
-        return { host: host.id, ok: true, failedStep: "none", data: res.data };
+        return { host: id, ok: true, failedStep: "none", data: res.data };
       } catch (err) {
-        return { host: host.id, ok: false, failedStep: classifyHttpError(err), error: (err as Error).message };
+        return { host: id, ok: false, failedStep: classifyHttpError(err), error: (err as Error).message };
       }
     }),
   );
