@@ -177,6 +177,23 @@ describe("PL-019 activity-visuals", () => {
       expect(r).toEqual({ state: "running", source: "pane_heuristic" });
     });
 
+    it("unknown pane_heuristic + terminalActive=null => source none (not hook)", () => {
+      const r = getActivityStateWithSource(
+        { state: "unknown", reason: "capture_failed", evidenceSource: "pane_heuristic", sampledAt: "z" },
+        null,
+      );
+      expect(r.source).not.toBe("hook");
+      expect(r).toEqual({ state: "unknown", source: "none" });
+    });
+
+    it("unknown runtime_hook (stale) + terminalActive=null => source hook", () => {
+      const r = getActivityStateWithSource(
+        { state: "unknown", reason: "stale_runtime_hook", evidenceSource: "runtime_hook", sampledAt: "z", stale: true },
+        null,
+      );
+      expect(r).toEqual({ state: "unknown", source: "hook" });
+    });
+
     it("runtime_hook running always source=hook regardless of terminalActive", () => {
       const r = getActivityStateWithSource(
         { state: "running", reason: "x", evidenceSource: "runtime_hook", sampledAt: "z" },

@@ -70,7 +70,10 @@ export function getActivityStateWithSource(
   }
   if (terminalActive === true) return { state: "running", source: "terminal_activity" };
   if (terminalActive === false) return { state: "idle", source: "terminal_activity" };
-  if (activity) return { state: "unknown", source: "hook" };
+  if (activity) {
+    const src = activity.evidenceSource === "runtime_hook" ? "hook" as const : "none" as const;
+    return { state: "unknown", source: src };
+  }
   return { state: "unknown", source: "none" };
 }
 
