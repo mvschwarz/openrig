@@ -180,6 +180,101 @@ describe("rig ps --host HTTP", () => {
     expect(client._calls.length).toBe(0);
     expect(stderr.some((s) => s.includes("cannot be combined"))).toBe(true);
   });
+  it("--nodes --json returns flattened node array (not rig wrappers)", async () => {
+    vi.stubEnv("HOST_B_TOKEN", "tok");
+    const client = mockClient({
+      "/api/ps": { status: 200, data: [{ rigId: "r1", name: "alpha" }, { rigId: "r2", name: "beta" }] },
+      "/api/rigs/r1/nodes": { status: 200, data: [{ logicalId: "dev.a", rigName: "alpha" }] },
+      "/api/rigs/r2/nodes": { status: 200, data: [{ logicalId: "dev.b", rigName: "beta" }] },
+    });
+    const deps: PsDeps = {
+      lifecycleDeps: {} as PsDeps["lifecycleDeps"],
+      clientFactory: () => client,
+      hostRegistryLoader: mockRegistry([
+        { id: "host-b", transport: "http", url: "http://x", bearer_env: "HOST_B_TOKEN" },
+      ]),
+    };
+    const { stdout } = await captureLogs(async () => {
+      await makeCmd(deps).parseAsync(["node", "rig", "ps", "--host", "host-b", "--nodes", "--json"]);
+    });
+    const parsed = JSON.parse(stdout.join(""));
+    expect(Array.isArray(parsed)).toBe(true);
+    expect(parsed.length).toBe(2);
+    expect(parsed[0].logicalId).toBeDefined();
+  });
+
+  it("--nodes --limit 1 --fields logicalId,rigName returns envelope with totalNodes", async () => {
+    vi.stubEnv("HOST_B_TOKEN", "tok");
+    const client = mockClient({
+      "/api/ps": { status: 200, data: [{ rigId: "r1", name: "alpha" }] },
+      "/api/rigs/r1/nodes": { status: 200, data: [
+        { logicalId: "dev.a", rigName: "alpha", runtime: "claude-code" },
+        { logicalId: "dev.b", rigName: "alpha", runtime: "codex" },
+        { logicalId: "dev.c", rigName: "alpha", runtime: "claude-code" },
+      ] },
+    });
+    const deps: PsDeps = {
+      lifecycleDeps: {} as PsDeps["lifecycleDeps"],
+      clientFactory: () => client,
+      hostRegistryLoader: mockRegistry([
+        { id: "host-b", transport: "http", url: "http://x", bearer_env: "HOST_B_TOKEN" },
+      ]),
+    };
+    const { stdout } = await captureLogs(async () => {
+      await makeCmd(deps).parseAsync(["node", "rig", "ps", "--host", "host-b", "--nodes", "--json", "--limit", "1", "--fields", "logicalId,rigName"]);
+    });
+    const parsed = JSON.parse(stdout.join(""));
+    expect(parsed.entries).toBeDefined();
+    expect(parsed.entries.length).toBe(1);
+    expect(parsed.totalNodes).toBe(3);
+    expect(parsed.truncated).toBe(true);
+  });
+
+  it("--nodes --summary --limit 1 counts all nodes before limit", async () => {
+    vi.stubEnv("HOST_B_TOKEN", "tok");
+    const client = mockClient({
+      "/api/ps": { status: 200, data: [{ rigId: "r1", name: "alpha" }] },
+      "/api/rigs/r1/nodes": { status: 200, data: [
+        { logicalId: "dev.a", sessionStatus: "running" },
+        { logicalId: "dev.b", sessionStatus: "running" },
+        { logicalId: "dev.c", sessionStatus: "stopped" },
+      ] },
+    });
+    const deps: PsDeps = {
+      lifecycleDeps: {} as PsDeps["lifecycleDeps"],
+      clientFactory: () => client,
+      hostRegistryLoader: mockRegistry([
+        { id: "host-b", transport: "http", url: "http://x", bearer_env: "HOST_B_TOKEN" },
+      ]),
+    };
+    const { stdout } = await captureLogs(async () => {
+      await makeCmd(deps).parseAsync(["node", "rig", "ps", "--host", "host-b", "--nodes", "--summary", "--limit", "1", "--json"]);
+    });
+    const parsed = JSON.parse(stdout.join(""));
+    expect(parsed.totalNodes).toBe(3);
+  });
+
+  it("--summary --limit 1 counts all rigs before limit", async () => {
+    vi.stubEnv("HOST_B_TOKEN", "tok");
+    const client = mockClient({
+      "/api/ps": { status: 200, data: [
+        { rigId: "r1", name: "a", status: "running" },
+        { rigId: "r2", name: "b", status: "stopped" },
+      ] },
+    });
+    const deps: PsDeps = {
+      lifecycleDeps: {} as PsDeps["lifecycleDeps"],
+      clientFactory: () => client,
+      hostRegistryLoader: mockRegistry([
+        { id: "host-b", transport: "http", url: "http://x", bearer_env: "HOST_B_TOKEN" },
+      ]),
+    };
+    const { stdout } = await captureLogs(async () => {
+      await makeCmd(deps).parseAsync(["node", "rig", "ps", "--host", "host-b", "--summary", "--limit", "1", "--json"]);
+    });
+    const parsed = JSON.parse(stdout.join(""));
+    expect(parsed.totalRigs).toBe(2);
+  });
 });
 
 describe("rig ps --all-hosts fan-out", () => {
