@@ -962,11 +962,40 @@ async function runHttpPs(
     return;
   }
 
+  let effectiveFilter = opts.filter;
+  if (opts.active) {
+    if (effectiveFilter) {
+      console.error("--active and --filter cannot be combined.");
+      process.exitCode = 1;
+      return;
+    }
+    effectiveFilter = "agentActivity.state=running";
+  }
+  let parsedFilter: ParsedFilter | null = null;
+  if (effectiveFilter) {
+    const result = parseFilter(effectiveFilter);
+    if ("error" in result) { console.error(result.error); process.exitCode = 1; return; }
+    parsedFilter = result;
+  }
+  const limit = opts.limit !== undefined ? Number(opts.limit) : null;
+  if (limit !== null && (!Number.isInteger(limit) || limit < 0)) {
+    console.error(`--limit must be a non-negative integer; got '${opts.limit}'`);
+    process.exitCode = 1;
+    return;
+  }
+  let fields: string[] | null = null;
+  if (opts.fields !== undefined) {
+    const fieldsLevel: "rig" | "nodes" = opts.nodes ? "nodes" : "rig";
+    const fieldsAllowed = fieldsLevel === "nodes" ? ALLOWED_NODE_FIELDS : ALLOWED_RIG_FIELDS;
+    const fieldsResult = parseFields(opts.fields, fieldsAllowed, fieldsLevel);
+    if ("error" in fieldsResult) { console.error(fieldsResult.error); process.exitCode = 1; return; }
+    fields = fieldsResult;
+  }
+
   const client = deps.clientFactory(host.url);
   const headers = buildRemoteHeaders(bearerResult.token);
   try {
-    const psQuery = opts.includeArchived ? "?includeArchived=true" : "";
-    const res = await client.get<unknown[]>(`/api/ps${psQuery}`, { headers });
+    const res = await client.get<unknown[]>(psApiPath(opts), { headers });
     const failedStep = classifyHttpFailedStep(res.status);
     if (failedStep !== "none") {
       emitCrossHostError(host.id, failedStep, `HTTP ${res.status}`, opts.json);
@@ -975,16 +1004,7 @@ async function runHttpPs(
     }
 
     let entries = (Array.isArray(res.data) ? res.data : []) as PsEntry[];
-
-    if (opts.filter) {
-      const parsed = parseFilter(opts.filter);
-      if ("error" in parsed) {
-        console.error(`Error: ${parsed.error}`);
-        process.exitCode = 1;
-        return;
-      }
-      entries = applyRigFilter(entries, parsed);
-    }
+    if (parsedFilter) entries = applyRigFilter(entries, parsedFilter);
 
     if (opts.nodes) {
       for (const rig of entries) {
@@ -994,32 +1014,39 @@ async function runHttpPs(
           if (nodesRes.status < 400) {
             (rig as PsEntry & { nodes?: NodeEntry[] }).nodes = nodesRes.data;
           }
-        } catch { /* best effort */ }
+        } catch {}
       }
-      if (opts.filter) {
-        const parsed = parseFilter(opts.filter);
-        if (!("error" in parsed)) {
-          for (const rig of entries) {
-            const nodes = (rig as PsEntry & { nodes?: NodeEntry[] }).nodes;
-            if (nodes) {
-              (rig as PsEntry & { nodes?: NodeEntry[] }).nodes = applyNodeFilter(nodes, parsed);
-            }
-          }
+      if (parsedFilter) {
+        for (const rig of entries) {
+          const nodes = (rig as PsEntry & { nodes?: NodeEntry[] }).nodes;
+          if (nodes) (rig as PsEntry & { nodes?: NodeEntry[] }).nodes = applyNodeFilter(nodes, parsedFilter);
         }
       }
     }
 
-    const limit = opts.limit ? parseInt(opts.limit, 10) : undefined;
-    if (limit && limit > 0) entries = entries.slice(0, limit);
+    if (limit !== null && limit >= 0) entries = entries.slice(0, limit);
+
+    if (opts.summary) {
+      const summary = opts.nodes
+        ? summarizeNodes(entries.flatMap((r) => ((r as PsEntry & { nodes?: NodeEntry[] }).nodes ?? [])))
+        : summarizeRigs(entries);
+      if (opts.json) {
+        console.log(JSON.stringify({ cross_host: { host: host.id, target: host.url }, summary }));
+      } else {
+        console.log(`[via host=${host.id} (${host.url})]`);
+        console.log(JSON.stringify(summary, null, 2));
+      }
+      return;
+    }
 
     let data: unknown = entries;
-    if (opts.fields) {
-      const fields = opts.fields.split(",").map((f) => f.trim());
-      data = entries.map((e) => {
-        const obj: Record<string, unknown> = {};
-        for (const f of fields) if (f in e) obj[f] = (e as unknown as Record<string, unknown>)[f];
-        return obj;
-      });
+    if (fields) {
+      data = opts.nodes
+        ? entries.map((e) => ({
+            ...selectFields([e] as unknown as Record<string, unknown>[], fields!)[0],
+            nodes: selectFields(((e as PsEntry & { nodes?: NodeEntry[] }).nodes ?? []) as unknown as Record<string, unknown>[], fields!),
+          }))
+        : selectFields(entries as unknown as Record<string, unknown>[], fields);
     }
 
     if (opts.json) {

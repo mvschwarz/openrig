@@ -106,6 +106,81 @@ describe("rig ps --host HTTP", () => {
     });
     expect(client._calls.length).toBe(0);
   });
+
+  it("--summary returns summary object", async () => {
+    vi.stubEnv("HOST_B_TOKEN", "tok");
+    const client = mockClient({
+      "/api/ps": { status: 200, data: [{ rigId: "r1", name: "rig", status: "running", nodeCount: 2, runningCount: 2 }] },
+    });
+    const deps: PsDeps = {
+      lifecycleDeps: {} as PsDeps["lifecycleDeps"],
+      clientFactory: () => client,
+      hostRegistryLoader: mockRegistry([
+        { id: "host-b", transport: "http", url: "http://x", bearer_env: "HOST_B_TOKEN" },
+      ]),
+    };
+    const { stdout } = await captureLogs(async () => {
+      await makeCmd(deps).parseAsync(["node", "rig", "ps", "--host", "host-b", "--summary", "--json"]);
+    });
+    const parsed = JSON.parse(stdout.join(""));
+    expect(parsed.summary).toBeDefined();
+    expect(parsed.summary.totalRigs).toBe(1);
+  });
+
+  it("invalid --limit rejected before HTTP request", async () => {
+    vi.stubEnv("HOST_B_TOKEN", "tok");
+    const client = mockClient({});
+    const deps: PsDeps = {
+      lifecycleDeps: {} as PsDeps["lifecycleDeps"],
+      clientFactory: () => client,
+      hostRegistryLoader: mockRegistry([
+        { id: "host-b", transport: "http", url: "http://x", bearer_env: "HOST_B_TOKEN" },
+      ]),
+    };
+    const { stderr } = await captureLogs(async () => {
+      await makeCmd(deps).parseAsync(["node", "rig", "ps", "--host", "host-b", "--limit", "abc", "--json"]);
+    });
+    expect(client._calls.length).toBe(0);
+    expect(stderr.some((s) => s.includes("non-negative integer"))).toBe(true);
+  });
+
+  it("--active sugar works on HTTP path", async () => {
+    vi.stubEnv("HOST_B_TOKEN", "tok");
+    const client = mockClient({
+      "/api/ps": { status: 200, data: [
+        { rigId: "r1", name: "a", status: "running" },
+        { rigId: "r2", name: "b", status: "stopped" },
+      ] },
+    });
+    const deps: PsDeps = {
+      lifecycleDeps: {} as PsDeps["lifecycleDeps"],
+      clientFactory: () => client,
+      hostRegistryLoader: mockRegistry([
+        { id: "host-b", transport: "http", url: "http://x", bearer_env: "HOST_B_TOKEN" },
+      ]),
+    };
+    const { stdout } = await captureLogs(async () => {
+      await makeCmd(deps).parseAsync(["node", "rig", "ps", "--host", "host-b", "--active", "--json"]);
+    });
+    expect(client._calls.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("--active + --filter conflict rejected before HTTP request", async () => {
+    vi.stubEnv("HOST_B_TOKEN", "tok");
+    const client = mockClient({});
+    const deps: PsDeps = {
+      lifecycleDeps: {} as PsDeps["lifecycleDeps"],
+      clientFactory: () => client,
+      hostRegistryLoader: mockRegistry([
+        { id: "host-b", transport: "http", url: "http://x", bearer_env: "HOST_B_TOKEN" },
+      ]),
+    };
+    const { stderr } = await captureLogs(async () => {
+      await makeCmd(deps).parseAsync(["node", "rig", "ps", "--host", "host-b", "--active", "--filter", "status=running", "--json"]);
+    });
+    expect(client._calls.length).toBe(0);
+    expect(stderr.some((s) => s.includes("cannot be combined"))).toBe(true);
+  });
 });
 
 describe("rig ps --all-hosts fan-out", () => {
