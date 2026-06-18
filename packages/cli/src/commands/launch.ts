@@ -48,7 +48,7 @@ export function launchCommand(depsOverride?: StatusDeps): Command {
         let body: unknown;
         if (seatList.length > 0) {
           apiPath = `/api/rigs/${encodeURIComponent(rigId)}/nodes/launch-subset`;
-          body = { targets: seatList, holdReason: opts.holdReason };
+          body = { seats: seatList, ...(opts.holdReason ? { holdReason: opts.holdReason } : {}) };
         } else if (nodeRef) {
           apiPath = `/api/rigs/${encodeURIComponent(rigId)}/nodes/${encodeURIComponent(nodeRef)}/launch`;
           body = {};

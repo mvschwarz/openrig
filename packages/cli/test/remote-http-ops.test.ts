@@ -413,7 +413,7 @@ describe("rig launch --host HTTP", () => {
     });
     const subsetCalls = client._calls.filter((c) => c.path.includes("launch-subset"));
     expect(subsetCalls.length).toBe(1);
-    expect(subsetCalls[0]!.body).toMatchObject({ targets: ["dev.impl", "dev.qa"] });
+    expect(subsetCalls[0]!.body).toMatchObject({ seats: ["dev.impl", "dev.qa"] });
   });
 
   it("missing bearer exits nonzero with no HTTP request", async () => {
