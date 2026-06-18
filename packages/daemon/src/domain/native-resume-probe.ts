@@ -45,12 +45,14 @@ export function buildCodexResumeCore(
   resumeToken: string,
   codexConfigProfile?: string | null,
   useLast?: boolean,
+  extraArgs?: string,
 ): string {
   const profileOrPosture = codexConfigProfile
     ? ` -p ${shellQuote(codexConfigProfile)}`
     : " -a on-request -s danger-full-access";
-  const tokenArg = useLast ? " --last" : ` ${shellQuote(resumeToken)}`;
-  return `codex${profileOrPosture} resume${tokenArg}`;
+  const middle = extraArgs ? `${extraArgs} ` : "";
+  const tokenArg = useLast ? "--last" : shellQuote(resumeToken);
+  return `codex${profileOrPosture} resume ${middle}${tokenArg}`;
 }
 
 export function assessNativeResumeProbe(

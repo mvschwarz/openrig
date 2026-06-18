@@ -128,10 +128,7 @@ function computeRecoveryGuidance(input: {
       commands.push(`cd ${cwd}`);
     }
     if (!resumeToken) {
-      const postureArg = codexConfigProfile
-        ? ` -p ${codexConfigProfile}`
-        : " -a on-request -s danger-full-access";
-      commands.push(`codex${postureArg} resume --last`);
+      commands.push(buildCodexResumeCore("", codexConfigProfile, true));
     }
 
     notes.push("Use workspace and recent prompt text to identify the right conversation.");
@@ -144,8 +141,8 @@ function computeRecoveryGuidance(input: {
 
     return {
       summary: resumeToken
-        ? "Try native Codex resume first, then fall back to the workspace-local Codex picker if needed."
-        : "No stored Codex resume token. Use the workspace-local Codex picker fallback.",
+        ? "Try native Codex resume first; posture flags preserve the approval/sandbox configuration."
+        : "No stored Codex resume token. Try codex resume --last with posture flags.",
       commands,
       notes,
     };

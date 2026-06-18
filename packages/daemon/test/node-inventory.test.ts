@@ -185,7 +185,7 @@ describe("Node Inventory Projection", () => {
     const entries = getNodeInventory(db, "rig-2");
     const entry = entries.find((e) => e.logicalId === "dev.qa");
     expect(entry?.resumeCommand).toBeNull();
-    expect(entry?.recoveryGuidance?.summary).toContain("workspace-local Codex picker fallback");
+    expect(entry?.recoveryGuidance?.summary).toContain("codex resume --last with posture flags");
     expect(entry?.recoveryGuidance?.commands).toEqual(["cd /workspace/app", "codex -a on-request -s danger-full-access resume --last"]);
     expect(entry?.recoveryGuidance?.notes).toContain("Use workspace and recent prompt text to identify the right conversation.");
     expect(entry?.recoveryGuidance?.notes).toContain("If the identity anchor was captured, the picker may include: dev-qa@test-rig");

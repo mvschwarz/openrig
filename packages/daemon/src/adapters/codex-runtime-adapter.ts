@@ -242,7 +242,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     }
 
     const cmd = opts.resumeToken
-      ? `${buildCodexResumeCore(opts.resumeToken, profile)}${queueStateDirArg}`
+      ? buildCodexResumeCore(opts.resumeToken, profile, false, queueStateDirArg.trim() || undefined)
       : profile
         ? `codex${profileArg} -C ${shellQuote(binding.cwd)}${gitDirArg}${queueStateDirArg}${modelArg}`
         : `codex -C ${shellQuote(binding.cwd)}${gitDirArg}${queueStateDirArg}${modelArg} -a on-request -s danger-full-access`;

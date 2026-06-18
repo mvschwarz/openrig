@@ -69,8 +69,8 @@ function expectedFreshLaunchCommand(options: { cwd?: string; model?: string; que
 }
 
 function expectedResumeCommand(token = "sess-456", queueRoot: string | null = testQueueRoot()): string {
-  const queueDirArg = queueRoot === null ? "" : ` --add-dir ${quote(queueRoot)}`;
-  return `codex resume${queueDirArg} ${quote(token)}`;
+  const queueDirArg = queueRoot === null ? "" : `--add-dir ${quote(queueRoot)} `;
+  return `codex -a on-request -s danger-full-access resume ${queueDirArg}${quote(token)}`;
 }
 
 function expectedProfileFreshLaunchCommand(profile: string, options: { cwd?: string; model?: string; queueRoot?: string | null } = {}): string {
@@ -82,8 +82,8 @@ function expectedProfileFreshLaunchCommand(profile: string, options: { cwd?: str
 }
 
 function expectedProfileResumeCommand(profile: string, token = "sess-456", queueRoot: string | null = testQueueRoot()): string {
-  const queueDirArg = queueRoot === null ? "" : ` --add-dir ${quote(queueRoot)}`;
-  return `codex -p ${quote(profile)} resume${queueDirArg} ${quote(token)}`;
+  const queueDirArg = queueRoot === null ? "" : `--add-dir ${quote(queueRoot)} `;
+  return `codex -p ${quote(profile)} resume ${queueDirArg}${quote(token)}`;
 }
 
 afterEach(() => {
