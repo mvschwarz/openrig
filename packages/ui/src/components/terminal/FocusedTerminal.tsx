@@ -186,11 +186,11 @@ export function FocusedTerminal({ sessionName, daemonBaseUrl }: FocusedTerminalP
       mountedRef.current = false;
       if (reconnectTimerRef.current) { clearTimeout(reconnectTimerRef.current); reconnectTimerRef.current = null; }
       resizeObs?.disconnect();
-      ws?.close();
+      const activeWs = wsRef.current;
+      if (activeWs) { activeWs.close(); wsRef.current = null; }
       const term = termRef.current as { dispose(): void } | null;
       term?.dispose();
       termRef.current = null;
-      wsRef.current = null;
       fitAddonRef.current = null;
     };
   }, [connect]);
