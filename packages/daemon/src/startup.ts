@@ -175,6 +175,8 @@ interface DaemonResult {
   db: Database.Database;
   deps: AppDeps;
   contextMonitor: import("./domain/context-monitor.js").ContextMonitor;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  injectWebSocket: (server: any) => void;
 }
 
 const KNOWN_PROVIDER_AUTH_ENV = new Set([
@@ -1287,7 +1289,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const periodicSnapshotScheduler = new PeriodicSnapshotScheduler({ db, snapshotCapture, snapshotRepo });
   deps.periodicSnapshotScheduler = periodicSnapshotScheduler;
 
-  const app = createApp(deps);
+  const { app, injectWebSocket } = createApp(deps);
 
-  return { app, db, deps, contextMonitor };
+  return { app, db, deps, contextMonitor, injectWebSocket };
 }

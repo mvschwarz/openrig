@@ -50,7 +50,7 @@ export async function startServer(port?: number) {
     bindHosts = tailscaleIp ? ["127.0.0.1", tailscaleIp] : ["127.0.0.1"];
   }
 
-  const { app, contextMonitor, deps } = await createDaemon({ dbPath, bearerToken });
+  const { app, contextMonitor, deps, injectWebSocket } = await createDaemon({ dbPath, bearerToken });
 
   // Multi-bind via N serve() instances sharing the same Hono app.
   // Hono's serve() targets a single host:port; for multi-bind we spawn
@@ -76,6 +76,7 @@ export async function startServer(port?: number) {
         startPeriodicSnapshotScheduler(deps);
       }
     });
+    injectWebSocket(srv);
     servers.push(srv);
   }
 

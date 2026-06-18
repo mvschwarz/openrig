@@ -90,6 +90,7 @@ import { getNodeInventory } from "./domain/node-inventory.js";
 import { filesRoutes } from "./routes/files.js";
 import { progressRoutes } from "./routes/progress.js";
 import { scopeAuditRoutes } from "./routes/scope-audit.js";
+import { terminalWsRoutes } from "./routes/terminal-ws.js";
 import { steeringRoutes } from "./routes/steering.js";
 import { healthSummaryRoutes } from "./routes/health-summary.js";
 import type { StreamStore } from "./domain/stream-store.js";
@@ -308,7 +309,8 @@ function isUiAssetRequestPath(requestPath: string): boolean {
     || relativePath === "manifest.webmanifest";
 }
 
-export function createApp(deps: AppDeps): Hono {
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function createApp(deps: AppDeps): { app: Hono; injectWebSocket: (server: any) => void } {
   // Hard runtime invariant: all domain services must share the same db handle.
   if (deps.rigRepo.db !== deps.eventBus.db) {
     throw new Error("createApp: rigRepo and eventBus must share the same db handle");
@@ -495,6 +497,8 @@ export function createApp(deps: AppDeps): Hono {
   app.route("/api/kernel", kernelStatusRoutes);
   app.route("/api/transcripts", transcriptRoutes());
   app.route("/api/transport", transportRoutes({ bearerToken: deps.terminalBearerToken ?? null }));
+  const termWs = terminalWsRoutes({ bearerToken: deps.terminalBearerToken ?? null });
+  app.route("/api/terminal", termWs.app);
   app.route("/api/activity", activityRoutes);
   app.route("/api/ask", askRoutes);
   app.route("/api/specs/review", specReviewRoutes());
@@ -575,5 +579,5 @@ export function createApp(deps: AppDeps): Hono {
     return c.html(injected);
   });
 
-  return app;
+  return { app, injectWebSocket: termWs.injectWebSocket };
 }
