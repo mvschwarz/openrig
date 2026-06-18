@@ -90,7 +90,8 @@ import { getNodeInventory } from "./domain/node-inventory.js";
 import { filesRoutes } from "./routes/files.js";
 import { progressRoutes } from "./routes/progress.js";
 import { scopeAuditRoutes } from "./routes/scope-audit.js";
-import { terminalWsRoutes } from "./routes/terminal-ws.js";
+import { registerTerminalWs } from "./routes/terminal-ws.js";
+import { createNodeWebSocket } from "@hono/node-ws";
 import { steeringRoutes } from "./routes/steering.js";
 import { healthSummaryRoutes } from "./routes/health-summary.js";
 import type { StreamStore } from "./domain/stream-store.js";
@@ -497,8 +498,8 @@ export function createApp(deps: AppDeps): { app: Hono; injectWebSocket: (server:
   app.route("/api/kernel", kernelStatusRoutes);
   app.route("/api/transcripts", transcriptRoutes());
   app.route("/api/transport", transportRoutes({ bearerToken: deps.terminalBearerToken ?? null }));
-  const termWs = terminalWsRoutes({ bearerToken: deps.terminalBearerToken ?? null });
-  app.route("/api/terminal", termWs.app);
+  const { injectWebSocket, upgradeWebSocket } = createNodeWebSocket({ app });
+  registerTerminalWs(app, upgradeWebSocket as never, { bearerToken: deps.terminalBearerToken ?? null });
   app.route("/api/activity", activityRoutes);
   app.route("/api/ask", askRoutes);
   app.route("/api/specs/review", specReviewRoutes());
@@ -579,5 +580,5 @@ export function createApp(deps: AppDeps): { app: Hono; injectWebSocket: (server:
     return c.html(injected);
   });
 
-  return { app, injectWebSocket: termWs.injectWebSocket };
+  return { app, injectWebSocket: injectWebSocket as never };
 }

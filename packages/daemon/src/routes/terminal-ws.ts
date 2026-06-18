@@ -1,7 +1,5 @@
-import { Hono } from "hono";
-import { createNodeWebSocket } from "@hono/node-ws";
+import type { Hono } from "hono";
 import type { TmuxAdapter } from "../adapters/tmux.js";
-import type { SessionRegistry } from "../domain/session-registry.js";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -15,11 +13,17 @@ function constantTimeEqual(a: string, b: string): boolean {
   return crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b));
 }
 
-export function terminalWsRoutes(opts: { bearerToken: string | null }) {
-  const app = new Hono();
-  const { injectWebSocket, upgradeWebSocket } = createNodeWebSocket({ app });
-
-  app.use("*", async (c, next) => {
+export function registerTerminalWs(
+  app: Hono,
+  upgradeWebSocket: Parameters<typeof import("@hono/node-ws").createNodeWebSocket>[0] extends { app: infer _A } ? never : never,
+  opts: { bearerToken: string | null },
+): void;
+export function registerTerminalWs(
+  app: Hono,
+  upgradeWebSocket: (createHandler: (c: unknown) => unknown) => unknown,
+  opts: { bearerToken: string | null },
+): void {
+  const terminalAuthMiddleware = async (c: { req: { header(name: string): string | undefined; query(name: string): string | undefined }; json(data: unknown, status: number): unknown }, next: () => Promise<void>) => {
     const upgrade = c.req.header("Upgrade");
     if (upgrade?.toLowerCase() === "websocket") {
       const origin = c.req.header("Origin");
@@ -28,9 +32,7 @@ export function terminalWsRoutes(opts: { bearerToken: string | null }) {
           const originHost = new URL(origin).hostname;
           const requestHost = c.req.header("Host")?.split(":")[0] ?? "";
           const allowed = originHost === requestHost || originHost === "localhost" || originHost === "127.0.0.1";
-          if (!allowed) {
-            return c.json({ error: "origin_rejected", hint: `Origin ${origin} does not match host` }, 403);
-          }
+          if (!allowed) return c.json({ error: "origin_rejected", hint: `Origin ${origin} does not match host` }, 403);
         } catch {
           return c.json({ error: "origin_rejected", hint: "Malformed Origin header" }, 403);
         }
@@ -46,11 +48,14 @@ export function terminalWsRoutes(opts: { bearerToken: string | null }) {
     const queryToken = c.req.query("token");
     if (queryToken && constantTimeEqual(queryToken.trim(), token)) { await next(); return; }
     return c.json({ error: "unauthorized", hint: "Pass terminal token via Authorization header or ?token= query" }, 401);
-  });
+  };
 
-  app.get(
-    "/:sessionName",
-    upgradeWebSocket((c) => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (app as any).get(
+    "/api/terminal/:sessionName",
+    terminalAuthMiddleware,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (upgradeWebSocket as any)((c: any) => {
       const sessionName = decodeURIComponent(c.req.param("sessionName")!);
       let pipeActive = false;
       let outputPath: string | null = null;
@@ -58,29 +63,18 @@ export function terminalWsRoutes(opts: { bearerToken: string | null }) {
       let lastSize = 0;
 
       return {
-        async onOpen(_evt, ws) {
-          const tmux = c.get("tmuxAdapter" as never) as TmuxAdapter | undefined;
-          if (!tmux) {
-            ws.close(1011, "tmux adapter unavailable");
-            return;
-          }
-
+        async onOpen(_evt: unknown, ws: { send(data: string): void; close(code: number, reason: string): void }) {
+          const tmux = c.get("tmuxAdapter") as TmuxAdapter | undefined;
+          if (!tmux) { ws.close(1011, "tmux adapter unavailable"); return; }
           const hasSession = await tmux.hasSession(sessionName);
-          if (!hasSession) {
-            ws.close(1008, `session not found: ${sessionName}`);
-            return;
-          }
+          if (!hasSession) { ws.close(1008, `session not found: ${sessionName}`); return; }
 
           await tmux.setWindowOption(sessionName, "aggressive-resize", "on").catch(() => {});
 
           outputPath = path.join(os.tmpdir(), `openrig-term-${sessionName.replace(/[^a-zA-Z0-9@-]/g, "_")}-${Date.now()}.log`);
           fs.writeFileSync(outputPath, "", "utf-8");
-
           const pipeResult = await tmux.startPipePane(sessionName, outputPath);
-          if (!pipeResult.ok) {
-            ws.close(1011, `pipe-pane failed: ${pipeResult.message}`);
-            return;
-          }
+          if (!pipeResult.ok) { ws.close(1011, `pipe-pane failed: ${pipeResult.message}`); return; }
           pipeActive = true;
 
           await tmux.sendKeys(sessionName, ["", ""]);
@@ -101,13 +95,11 @@ export function terminalWsRoutes(opts: { bearerToken: string | null }) {
           }, PIPE_PANE_POLL_MS);
         },
 
-        async onMessage(evt, ws) {
-          const tmux = c.get("tmuxAdapter" as never) as TmuxAdapter | undefined;
+        async onMessage(evt: { data: unknown }, _ws: unknown) {
+          const tmux = c.get("tmuxAdapter") as TmuxAdapter | undefined;
           if (!tmux) return;
-
           const data = typeof evt.data === "string" ? evt.data : "";
           if (!data) return;
-
           try {
             const msg = JSON.parse(data) as Record<string, unknown>;
             if (msg.type === "keys" && Array.isArray(msg.keys)) {
@@ -122,7 +114,7 @@ export function terminalWsRoutes(opts: { bearerToken: string | null }) {
 
         async onClose() {
           if (tailInterval) { clearInterval(tailInterval); tailInterval = null; }
-          const tmux = c.get("tmuxAdapter" as never) as TmuxAdapter | undefined;
+          const tmux = c.get("tmuxAdapter") as TmuxAdapter | undefined;
           if (tmux && pipeActive) {
             await tmux.stopPipePane(sessionName).catch(() => {});
             pipeActive = false;
@@ -135,6 +127,4 @@ export function terminalWsRoutes(opts: { bearerToken: string | null }) {
       };
     }),
   );
-
-  return { app, injectWebSocket };
 }
