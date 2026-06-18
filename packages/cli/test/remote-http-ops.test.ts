@@ -368,6 +368,75 @@ describe("rig whoami --all-hosts fan-out", () => {
   });
 });
 
+describe("rig launch --host HTTP", () => {
+  it("single-node launch sends correct API path with bearer", async () => {
+    vi.stubEnv("HOST_B_TOKEN", "remote-tok");
+    const client = mockClient({
+      "/api/rigs/rig-1/nodes/dev.impl/launch": { status: 200, data: { ok: true, sessionName: "dev-impl@rig" } },
+    });
+    const { launchCommand } = await import("../src/commands/launch.js");
+    const prog = new Command();
+    prog.exitOverride();
+    prog.addCommand(launchCommand({
+      lifecycleDeps: {} as any,
+      clientFactory: () => client,
+      hostRegistryLoader: mockRegistry([
+        { id: "host-b", transport: "http", url: "http://remote:7433", bearer_env: "HOST_B_TOKEN" },
+      ]),
+    } as any));
+    await captureLogs(async () => {
+      await prog.parseAsync(["node", "rig", "launch", "rig-1", "dev.impl", "--host", "host-b", "--json"]);
+    });
+    const launchCalls = client._calls.filter((c) => c.path.includes("/launch"));
+    expect(launchCalls.length).toBe(1);
+    expect(launchCalls[0]!.path).toBe("/api/rigs/rig-1/nodes/dev.impl/launch");
+    expect(launchCalls[0]!.headers?.Authorization).toBe("Bearer remote-tok");
+  });
+
+  it("subset launch sends launch-subset with seats", async () => {
+    vi.stubEnv("HOST_B_TOKEN", "remote-tok");
+    const client = mockClient({
+      "/api/rigs/rig-1/nodes/launch-subset": { status: 200, data: { ok: true } },
+    });
+    const { launchCommand } = await import("../src/commands/launch.js");
+    const prog = new Command();
+    prog.exitOverride();
+    prog.addCommand(launchCommand({
+      lifecycleDeps: {} as any,
+      clientFactory: () => client,
+      hostRegistryLoader: mockRegistry([
+        { id: "host-b", transport: "http", url: "http://remote:7433", bearer_env: "HOST_B_TOKEN" },
+      ]),
+    } as any));
+    await captureLogs(async () => {
+      await prog.parseAsync(["node", "rig", "launch", "rig-1", "--seats", "dev.impl,dev.qa", "--host", "host-b", "--json"]);
+    });
+    const subsetCalls = client._calls.filter((c) => c.path.includes("launch-subset"));
+    expect(subsetCalls.length).toBe(1);
+    expect(subsetCalls[0]!.body).toMatchObject({ targets: ["dev.impl", "dev.qa"] });
+  });
+
+  it("missing bearer exits nonzero with no HTTP request", async () => {
+    delete process.env.MISSING_TOK;
+    const client = mockClient({});
+    const { launchCommand } = await import("../src/commands/launch.js");
+    const prog = new Command();
+    prog.exitOverride();
+    prog.addCommand(launchCommand({
+      lifecycleDeps: {} as any,
+      clientFactory: () => client,
+      hostRegistryLoader: mockRegistry([
+        { id: "host-b", transport: "http", url: "http://remote:7433", bearer_env: "MISSING_TOK" },
+      ]),
+    } as any));
+    const { exitCode } = await captureLogs(async () => {
+      await prog.parseAsync(["node", "rig", "launch", "rig-1", "dev.impl", "--host", "host-b", "--json"]);
+    });
+    expect(client._calls.length).toBe(0);
+    expect(exitCode).toBe(1);
+  });
+});
+
 describe("SSH fallback", () => {
   it("cross-host-executor rejects non-ssh transport with honest error", async () => {
     const { runCrossHostCommand } = await import("../src/cross-host-executor.js");

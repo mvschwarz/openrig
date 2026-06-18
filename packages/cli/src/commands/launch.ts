@@ -37,8 +37,39 @@ export function launchCommand(depsOverride?: StatusDeps): Command {
     .option("--seats <ids>", "Comma-separated logical IDs for subset launch")
     .option("--hold-reason <reason>", "Reason for holding non-target seats")
     .option("--json", "JSON output")
-    .action(async (rigId: string, nodeRef: string | undefined, opts: { json?: boolean; holdReason?: string; seats?: string }) => {
+    .option("--host <id>", "Run on a remote host declared in ~/.openrig/hosts.yaml")
+    .action(async (rigId: string, nodeRef: string | undefined, opts: { json?: boolean; holdReason?: string; seats?: string; host?: string }) => {
       const deps = getDeps();
+
+      if (opts.host) {
+        const { runRemoteHttpOp } = await import("../remote-host-ops.js");
+        const seatList = opts.seats ? opts.seats.split(",").map((s) => s.trim()).filter(Boolean) : [];
+        let apiPath: string;
+        let body: unknown;
+        if (seatList.length > 0) {
+          apiPath = `/api/rigs/${encodeURIComponent(rigId)}/nodes/launch-subset`;
+          body = { targets: seatList, holdReason: opts.holdReason };
+        } else if (nodeRef) {
+          apiPath = `/api/rigs/${encodeURIComponent(rigId)}/nodes/${encodeURIComponent(nodeRef)}/launch`;
+          body = {};
+        } else {
+          console.error("Either a node reference or --seats is required for launch --host");
+          process.exitCode = 1;
+          return;
+        }
+        const result = await runRemoteHttpOp(opts.host, "POST", apiPath, body, deps, opts);
+        if (opts.json) {
+          console.log(JSON.stringify(result));
+          if (!result.ok) process.exitCode = 1;
+        } else if (result.ok) {
+          console.log(JSON.stringify(result.data, null, 2));
+        } else {
+          console.error(`Error on host ${opts.host}: ${result.error}`);
+          process.exitCode = 1;
+        }
+        return;
+      }
+
       const client = await getClient(deps);
       if (!client) {
         process.exitCode = 1;
