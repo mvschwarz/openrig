@@ -106,4 +106,33 @@ describe("scope-audit classifier", () => {
     }));
     expect(result.findings.some((f) => f.kind === "id_convention_violation")).toBe(true);
   });
+
+  // MALFORMED RAIL STATUS REGRESSIONS (guard BLOCKING)
+  it("parse error + PROGRESS.md => railStatus malformed (not present)", () => {
+    const result = classifyScopeItem(makeInput({
+      readmeFrontmatterRaw: "id: OPR.broken\nbad: {{yaml",
+      progressFileExists: true,
+    }));
+    expect(result.railStatus).toBe("malformed");
+    expect(result.frontmatterError).not.toBeNull();
+  });
+
+  it("parse error + id line => registration_ghost + malformed", () => {
+    const result = classifyScopeItem(makeInput({
+      readmeFrontmatterRaw: "id: OPR.test\nbroken: {{yaml",
+      isActiveRelease: true,
+    }));
+    expect(result.railStatus).toBe("malformed");
+    expect(result.findings.some((f) => f.kind === "registration_ghost" && f.severity === "high")).toBe(true);
+  });
+
+  it("parse error WITHOUT id line => finding + frontmatterError for UI severity", () => {
+    const result = classifyScopeItem(makeInput({
+      readmeFrontmatterRaw: "broken: {{yaml",
+      isActiveRelease: true,
+    }));
+    expect(result.railStatus).toBe("malformed");
+    expect(result.frontmatterError).not.toBeNull();
+    expect(result.findings.some((f) => f.kind === "registration_ghost")).toBe(true);
+  });
 });

@@ -69,6 +69,7 @@ export function classifyScopeItem(input: ScopeAuditInput): ScopeAuditResult {
 
     if (parseError) {
       frontmatterError = parseError;
+      railStatus = "malformed";
       if (hasIdLine) {
         findings.push({
           kind: "registration_ghost",
@@ -76,6 +77,14 @@ export function classifyScopeItem(input: ScopeAuditInput): ScopeAuditResult {
           path: input.path,
           message: `README has an id: line but frontmatter fails to parse (registration ghost): ${parseError}`,
           remediation: "Fix the YAML frontmatter syntax error so the id can be read",
+        });
+      } else {
+        findings.push({
+          kind: "registration_ghost",
+          severity: input.isActiveRelease ? "high" : "low",
+          path: input.path,
+          message: `README frontmatter fails to parse: ${parseError}`,
+          remediation: "Fix the YAML frontmatter syntax error",
         });
       }
     } else {
