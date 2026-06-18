@@ -780,6 +780,17 @@ function buildAuditCommand(): Command {
                     frontmatterError: null,
                   },
                 });
+              } else {
+                const noReadmeResult = classifyScopeItem({
+                  id: null,
+                  path: sliceDir,
+                  readmeFrontmatterRaw: null,
+                  progressFileExists: false,
+                  readmeOnlyMarker: false,
+                  isActiveRelease: true,
+                  level: "slice",
+                });
+                sliceResults.push({ name: entry, result: noReadmeResult });
               }
               continue;
             }

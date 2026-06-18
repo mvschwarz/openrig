@@ -712,6 +712,17 @@ describe("rig scope audit edge cases (guard BLOCKING fixes)", () => {
     expect(parsed.mission.findings.some((f: { kind: string }) => f.kind === "orphan_progress")).toBe(true);
   });
 
+  it("NN-slug slice dir with no README and no PROGRESS emits findings (not skipped)", async () => {
+    const sliceDir = path.join(substrate.missionsRoot, "release-0.3.2", "slices", "02-bare");
+    fs.mkdirSync(sliceDir, { recursive: true });
+    const result = await run(["audit", "--mission", "release-0.3.2", "--json"], substrate.missionsRoot);
+    const parsed = JSON.parse(result.stdout);
+    const sliceEntry = parsed.slices.find((s: { name: string }) => s.name === "02-bare");
+    expect(sliceEntry).toBeDefined();
+    expect(sliceEntry.findings.some((f: { kind: string }) => f.kind === "missing_id")).toBe(true);
+    expect(sliceEntry.findings.some((f: { kind: string }) => f.kind === "missing_progress")).toBe(true);
+  });
+
   it("non-slice-shaped dir in slices/ with README + PROGRESS emits finding", async () => {
     const sliceDir = path.join(substrate.missionsRoot, "release-0.3.2", "slices", "random-notes");
     fs.mkdirSync(sliceDir, { recursive: true });
