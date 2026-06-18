@@ -66,7 +66,7 @@ export class ResumeMetadataRefresher {
 
         const threadId = await this.captureCodexThreadId(session.sessionName);
         if (threadId) {
-          this.sessionRegistry.updateResumeToken(session.sessionId, "codex_id", threadId);
+          this.sessionRegistry.updateResumeToken(session.sessionId, "codex_id", threadId, "scrape");
         }
         continue;
       }

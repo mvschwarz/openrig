@@ -99,10 +99,43 @@ async function postHookPayload(payload, env = process.env) {
   }
 }
 
+function buildSessionIdentityPayload(providerPayload, env = process.env, now = () => new Date()) {
+  if (!providerPayload || typeof providerPayload !== "object") return null;
+  const hookEvent = firstString(
+    providerPayload.hookEvent, providerPayload.hookEventName,
+    providerPayload.hook_event_name, providerPayload.event, providerPayload.eventName
+  );
+  if (!hookEvent || hookEvent.toLowerCase() !== "sessionstart") return null;
+
+  const sessionId = firstString(providerPayload.session_id, providerPayload.sessionId);
+  if (!sessionId) return null;
+
+  const sessionName = firstString(env.OPENRIG_SESSION_NAME, env.RIGGED_SESSION_NAME);
+  const nodeId = firstString(env.OPENRIG_NODE_ID, env.RIGGED_NODE_ID);
+  const runtime = firstString(env.OPENRIG_RUNTIME, env.RIGGED_RUNTIME);
+
+  if ((!sessionName && !nodeId) || !runtime) return null;
+
+  return {
+    eventFamily: "session_identity",
+    sessionName,
+    nodeId,
+    runtime,
+    hookEvent,
+    sessionId,
+    occurredAt: now().toISOString(),
+  };
+}
+
 async function main() {
   const providerPayload = parseJson(await readStdin());
   const payload = buildOpenRigPayload(providerPayload);
   await postHookPayload(payload);
+
+  const identityPayload = buildSessionIdentityPayload(providerPayload, process.env);
+  if (identityPayload) {
+    await postHookPayload(identityPayload);
+  }
 }
 
 if (require.main === module) {
@@ -111,6 +144,7 @@ if (require.main === module) {
 
 module.exports = {
   buildOpenRigPayload,
+  buildSessionIdentityPayload,
   parseJson,
   postHookPayload,
 };

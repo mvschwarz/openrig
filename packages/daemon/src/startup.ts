@@ -133,6 +133,7 @@ import { queueTargetRepoSchema } from "./db/migrations/039_queue_target_repo.js"
 import { workflowSpecsDiagnosticSchema } from "./db/migrations/040_workflow_specs_diagnostic.js";
 import { rigPolicySchema } from "./db/migrations/041_rig_policy.js";
 import { rigArchiveSchema } from "./db/migrations/042_rig_archive.js";
+import { resumeProvenanceSchema } from "./db/migrations/043_resume_provenance.js";
 import { RigPolicyStore } from "./domain/rig-policy/rig-policy-store.js";
 import { MissionControlActionLog } from "./domain/mission-control/mission-control-action-log.js";
 import { MissionControlWriteContract } from "./domain/mission-control/mission-control-write-contract.js";
@@ -207,7 +208,7 @@ export function collectAllowlistedProviderAuthEnv(
 export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> {
   const dbPath = opts?.dbPath ?? ":memory:";
   const db = createDb(dbPath);
-  migrate(db, [coreSchema, bindingsSessionsSchema, eventsSchema, snapshotsSchema, checkpointsSchema, resumeMetadataSchema, nodeSpecFieldsSchema, packagesSchema, installJournalSchema, journalSeqSchema, bootstrapSchema, discoverySchema, discoveryFkFix, agentspecRebootSchema, startupContextSchema, chatMessagesSchema, podNamespaceSchema, contextUsageSchema, externalCliAttachmentSchema, rigServicesSchema, seatHandoverObservabilitySchema, nodeCodexConfigProfileSchema, streamItemsSchema, queueItemsSchema, queueTransitionsSchema, inboxEntriesSchema, outboxEntriesSchema, projectClassificationsSchema, classifierLeasesSchema, viewsCustomSchema, watchdogJobsSchema, watchdogHistorySchema, workflowSpecsSchema, workflowInstancesSchema, workflowStepTrailsSchema, watchdogPolicyEnumExtensionSchema, missionControlActionsSchema, workspacePrimitiveSchema, queueTargetRepoSchema, workflowSpecsDiagnosticSchema, rigPolicySchema, rigArchiveSchema]);
+  migrate(db, [coreSchema, bindingsSessionsSchema, eventsSchema, snapshotsSchema, checkpointsSchema, resumeMetadataSchema, nodeSpecFieldsSchema, packagesSchema, installJournalSchema, journalSeqSchema, bootstrapSchema, discoverySchema, discoveryFkFix, agentspecRebootSchema, startupContextSchema, chatMessagesSchema, podNamespaceSchema, contextUsageSchema, externalCliAttachmentSchema, rigServicesSchema, seatHandoverObservabilitySchema, nodeCodexConfigProfileSchema, streamItemsSchema, queueItemsSchema, queueTransitionsSchema, inboxEntriesSchema, outboxEntriesSchema, projectClassificationsSchema, classifierLeasesSchema, viewsCustomSchema, watchdogJobsSchema, watchdogHistorySchema, workflowSpecsSchema, workflowInstancesSchema, workflowStepTrailsSchema, watchdogPolicyEnumExtensionSchema, missionControlActionsSchema, workspacePrimitiveSchema, queueTargetRepoSchema, workflowSpecsDiagnosticSchema, rigPolicySchema, rigArchiveSchema, resumeProvenanceSchema]);
 
   const rigRepo = new RigRepository(db);
   const sessionRegistry = new SessionRegistry(db);
@@ -436,7 +437,19 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     ensureDefaultClaudeCompactionFiles(OPENRIG_HOME);
     const settingsStore = new SettingsStore();
     const enabled = settingsStore.resolveOne("runtime.codex.hooks_enabled").value as boolean;
-    codexAdapter.ensureCodexFeatureFlag(enabled);
+    let codexVersion: string | undefined;
+    const codexVersionRow = db.prepare(
+      "SELECT version FROM runtime_verifications WHERE runtime = 'codex' ORDER BY verified_at DESC LIMIT 1"
+    ).get() as { version: string | null } | undefined;
+    if (codexVersionRow?.version) {
+      codexVersion = codexVersionRow.version;
+    } else {
+      try {
+        const verifyResult = await runtimeVerifier.verifyCodex();
+        codexVersion = verifyResult.version ?? undefined;
+      } catch { /* codex not available — skip feature flag */ }
+    }
+    codexAdapter.ensureCodexFeatureFlag(enabled, { codexVersion });
   } catch (err) {
     console.error(`[openrig] runtime setup warning: ${(err as Error).message}`);
   }

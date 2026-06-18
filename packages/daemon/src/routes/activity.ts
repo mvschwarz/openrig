@@ -1,5 +1,7 @@
 import { Hono } from "hono";
 import type { AgentActivityStore } from "../domain/agent-activity-store.js";
+import type { SessionRegistry } from "../domain/session-registry.js";
+import type { EventBus } from "../domain/event-bus.js";
 
 export const activityRoutes = new Hono();
 
@@ -31,6 +33,40 @@ activityRoutes.post("/hooks", async (c) => {
     body = await c.req.json() as Record<string, unknown>;
   } catch {
     return c.json({ ok: false, code: "invalid_json", error: "Request body must be JSON." }, 400);
+  }
+
+  if (body.eventFamily === "session_identity") {
+    const sessionId = typeof body.sessionId === "string" ? body.sessionId : null;
+    const sessionName = stringOrNull(body.sessionName);
+    const runtime = stringOrNull(body.runtime);
+    if (!sessionId || !sessionName) {
+      return c.json({ ok: false, code: "missing_session_identity", error: "session_identity requires sessionId and sessionName" }, 400);
+    }
+
+    const sessionRegistry = c.get("sessionRegistry" as never) as SessionRegistry | undefined;
+    const eventBus = c.get("eventBus" as never) as EventBus | undefined;
+    if (!sessionRegistry || !eventBus) {
+      return c.json({ ok: false, code: "identity_hook_unconfigured", error: "Session registry not available" }, 503);
+    }
+
+    const nodeId = stringOrNull(body.nodeId);
+    const resolved = store.resolveSession({ sessionName, nodeId, runtime });
+    if (!resolved) {
+      return c.json({ ok: false, code: "session_not_found", error: `No session found for ${sessionName}` }, 404);
+    }
+
+    sessionRegistry.updateResumeToken(resolved.sessionId, "codex_id", sessionId, "hook");
+    eventBus.emit({
+      type: "agent.session_identity",
+      rigId: resolved.rigId,
+      nodeId: resolved.nodeId,
+      sessionName: resolved.sessionName,
+      runtime: runtime ?? "codex",
+      sessionId,
+      provenance: "hook",
+    });
+
+    return c.json({ ok: true, sessionId, provenance: "hook" });
   }
 
   const result = store.recordHookEvent({

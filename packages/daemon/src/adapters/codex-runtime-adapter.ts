@@ -71,8 +71,10 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
    * that lived inside the auto-injected activity-hook provisioning path
    * pre-rip (plugin-primitive Phase 3a slice 3.1).
    */
-  ensureCodexFeatureFlag(enabled: boolean): void {
+  ensureCodexFeatureFlag(enabled: boolean, opts?: { codexVersion?: string }): void {
     if (!enabled) return;
+    if (!opts?.codexVersion) return;
+    if (isCodex013xOrLater(opts.codexVersion)) return;
     const homedir = this.fs.homedir;
     if (!homedir) return;
     const configPath = nodePath.join(homedir, ".codex", "config.toml");
@@ -685,6 +687,15 @@ function parseCanonicalSessionName(sessionName: string): { pod: string; member: 
 
 function isSafeQueueSegment(segment: string): boolean {
   return /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(segment);
+}
+
+export function isCodex013xOrLater(version: string): boolean {
+  const match = /^(\d+)\.(\d+)/.exec(version);
+  if (!match) return false;
+  const major = parseInt(match[1]!, 10);
+  const minor = parseInt(match[2]!, 10);
+  if (major > 0) return true;
+  return minor >= 130;
 }
 
 function upsertCodexHooksFeature(content: string): string {

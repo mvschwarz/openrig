@@ -57,7 +57,7 @@ describe("Slice 3.5 — Codex feature flag (runtime.codex.hooks_enabled)", () =>
     const fs = mockCodexFs(/* no existing file */);
     const adapter = new CodexRuntimeAdapter({ tmux: mockTmux(), fsOps: fs });
 
-    adapter.ensureCodexFeatureFlag(true);
+    adapter.ensureCodexFeatureFlag(true, { codexVersion: "0.120.0" });
 
     const written = fs._store["/home/test/.codex/config.toml"];
     expect(written).toBeDefined();
@@ -70,7 +70,7 @@ describe("Slice 3.5 — Codex feature flag (runtime.codex.hooks_enabled)", () =>
     const fs = mockCodexFs({ "/home/test/.codex/config.toml": existing });
     const adapter = new CodexRuntimeAdapter({ tmux: mockTmux(), fsOps: fs });
 
-    adapter.ensureCodexFeatureFlag(true);
+    adapter.ensureCodexFeatureFlag(true, { codexVersion: "0.120.0" });
 
     const written = fs._store["/home/test/.codex/config.toml"]!;
     expect(written).toContain('name = "openai"');
@@ -87,8 +87,8 @@ describe("Slice 3.5 — Codex feature flag (runtime.codex.hooks_enabled)", () =>
     const fs = mockCodexFs();
     const adapter = new CodexRuntimeAdapter({ tmux: mockTmux(), fsOps: fs });
 
-    adapter.ensureCodexFeatureFlag(true);
-    adapter.ensureCodexFeatureFlag(true);
+    adapter.ensureCodexFeatureFlag(true, { codexVersion: "0.120.0" });
+    adapter.ensureCodexFeatureFlag(true, { codexVersion: "0.120.0" });
 
     const written = fs._store["/home/test/.codex/config.toml"]!;
     const matches = written.match(/codex_hooks = true/g) ?? [];
@@ -102,7 +102,7 @@ describe("Slice 3.5 — Codex feature flag (runtime.codex.hooks_enabled)", () =>
     const fs = mockCodexFs({ "/home/test/.codex/config.toml": existing });
     const adapter = new CodexRuntimeAdapter({ tmux: mockTmux(), fsOps: fs });
 
-    adapter.ensureCodexFeatureFlag(true);
+    adapter.ensureCodexFeatureFlag(true, { codexVersion: "0.120.0" });
 
     const written = fs._store["/home/test/.codex/config.toml"]!;
     expect(written).toContain("other_flag = false");
@@ -130,5 +130,35 @@ describe("Slice 3.5 — Codex feature flag (runtime.codex.hooks_enabled)", () =>
     adapter.ensureCodexFeatureFlag(false);
 
     expect(fs._store["/home/test/.codex/config.toml"]).toBe(existing);
+  });
+
+  // OPR.0.4.0.11 version-aware tests
+  it("0.4.0.11 — unknown version (undefined) does NOT write config", () => {
+    const fs = mockCodexFs();
+    const adapter = new CodexRuntimeAdapter({ tmux: mockTmux(), fsOps: fs });
+
+    adapter.ensureCodexFeatureFlag(true, { codexVersion: undefined });
+
+    expect(fs._store["/home/test/.codex/config.toml"]).toBeUndefined();
+  });
+
+  it("0.4.0.11 — 0.139.0 does NOT write config (hooks default-enabled)", () => {
+    const fs = mockCodexFs();
+    const adapter = new CodexRuntimeAdapter({ tmux: mockTmux(), fsOps: fs });
+
+    adapter.ensureCodexFeatureFlag(true, { codexVersion: "0.139.0" });
+
+    expect(fs._store["/home/test/.codex/config.toml"]).toBeUndefined();
+  });
+
+  it("0.4.0.11 — 0.120.0 DOES write config (legacy toggle)", () => {
+    const fs = mockCodexFs();
+    const adapter = new CodexRuntimeAdapter({ tmux: mockTmux(), fsOps: fs });
+
+    adapter.ensureCodexFeatureFlag(true, { codexVersion: "0.120.0" });
+
+    const written = fs._store["/home/test/.codex/config.toml"];
+    expect(written).toBeDefined();
+    expect(written).toContain("codex_hooks = true");
   });
 });

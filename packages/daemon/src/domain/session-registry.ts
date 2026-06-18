@@ -71,15 +71,22 @@ export class SessionRegistry {
     }
   }
 
-  updateResumeToken(sessionId: string, type: string, token: string): void {
+  updateResumeToken(sessionId: string, type: string, token: string, provenance?: "hook" | "scrape"): void {
+    if (provenance === "scrape") {
+      const existing = this.db.prepare(
+        "SELECT resume_provenance FROM sessions WHERE id = ?"
+      ).get(sessionId) as { resume_provenance: string | null } | undefined;
+      if (existing?.resume_provenance === "hook") return;
+    }
+    const prov = provenance ?? null;
     this.db
-      .prepare("UPDATE sessions SET resume_type = ?, resume_token = ? WHERE id = ?")
-      .run(type, token, sessionId);
+      .prepare("UPDATE sessions SET resume_type = ?, resume_token = ?, resume_provenance = COALESCE(?, resume_provenance) WHERE id = ?")
+      .run(type, token, prov, sessionId);
   }
 
   clearResumeToken(sessionId: string): void {
     this.db
-      .prepare("UPDATE sessions SET resume_type = NULL, resume_token = NULL WHERE id = ?")
+      .prepare("UPDATE sessions SET resume_type = NULL, resume_token = NULL, resume_provenance = NULL WHERE id = ?")
       .run(sessionId);
   }
 

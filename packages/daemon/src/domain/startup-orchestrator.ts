@@ -195,7 +195,7 @@ export class StartupOrchestrator {
             const normalizedResumeToken = launchResult.resumeToken?.trim();
             if (normalizedResumeToken) {
               try {
-                this.sessionRegistry.updateResumeToken(input.sessionId, launchResult.resumeType ?? "", normalizedResumeToken);
+                this.sessionRegistry.updateResumeToken(input.sessionId, launchResult.resumeType ?? "", normalizedResumeToken, "scrape");
               } catch { /* best-effort */ }
             }
             break;

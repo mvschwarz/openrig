@@ -57,7 +57,7 @@ export class AgentActivityStore {
       };
     }
 
-    const session = this.resolveSession(input);
+    const session = this._resolveSession(input);
     if (!session) {
       return {
         ok: false,
@@ -93,7 +93,7 @@ export class AgentActivityStore {
     sessionName?: string | null;
     now?: Date;
   }): AgentActivity | null {
-    const nodeId = input.nodeId ?? (input.sessionName ? this.resolveSession({ sessionName: input.sessionName })?.node_id : null);
+    const nodeId = input.nodeId ?? (input.sessionName ? this._resolveSession({ sessionName: input.sessionName })?.node_id : null);
     if (!nodeId) return null;
 
     const row = this.db.prepare(
@@ -129,7 +129,17 @@ export class AgentActivityStore {
     };
   }
 
-  private resolveSession(input: { sessionName?: string | null; nodeId?: string | null }): SessionLookupRow | null {
+  resolveSession(input: { sessionName?: string | null; nodeId?: string | null; runtime?: string | null }): { sessionId: string; rigId: string; nodeId: string; sessionName: string } | null {
+    const row = this._resolveSession(input);
+    if (!row) return null;
+    const sessionRow = this.db.prepare(
+      "SELECT id FROM sessions WHERE session_name = ? ORDER BY id DESC LIMIT 1"
+    ).get(row.session_name) as { id: string } | undefined;
+    if (!sessionRow) return null;
+    return { sessionId: sessionRow.id, rigId: row.rig_id, nodeId: row.node_id, sessionName: row.session_name };
+  }
+
+  private _resolveSession(input: { sessionName?: string | null; nodeId?: string | null }): SessionLookupRow | null {
     if (input.nodeId) {
       const row = this.db.prepare(`
         SELECT n.rig_id, n.id AS node_id, s.session_name, n.runtime
