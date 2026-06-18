@@ -2,42 +2,37 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, cleanup, act } from "@testing-library/react";
 import React from "react";
 
-const createdSockets: Array<{ url: string; closeCalled: boolean; onclose: (() => void) | null; onopen: (() => void) | null }> = [];
+const instances: MockWS[] = [];
 
-class MockWebSocket {
+class MockWS {
   url: string;
   readyState = 1;
-  onopen: (() => void) | null = null;
+  onopen: ((evt?: unknown) => void) | null = null;
   onclose: ((evt: { code: number; reason: string }) => void) | null = null;
   onmessage: ((evt: { data: string }) => void) | null = null;
   onerror: (() => void) | null = null;
-  private _entry: (typeof createdSockets)[0];
+  closeCalled = false;
 
   constructor(url: string) {
     this.url = url;
-    this._entry = { url, closeCalled: false, onclose: null, onopen: null };
-    createdSockets.push(this._entry);
-    setTimeout(() => {
-      this._entry.onopen = this.onopen as () => void;
-      this.onopen?.();
-    }, 0);
+    instances.push(this);
+    setTimeout(() => this.onopen?.(), 0);
   }
   send() {}
-  close() {
-    this._entry.closeCalled = true;
-    this.readyState = 3;
-  }
+  close() { this.closeCalled = true; this.readyState = 3; }
   static OPEN = 1;
 }
 
-vi.stubGlobal("WebSocket", MockWebSocket);
+const terminalWrites: string[] = [];
+
+vi.stubGlobal("WebSocket", MockWS);
 
 vi.mock("@xterm/xterm", () => ({
   Terminal: class {
     open() {}
-    write() {}
-    onData() {}
-    onResize() {}
+    write(data: string) { terminalWrites.push(data); }
+    onData(_cb: (data: string) => void) {}
+    onResize(_cb: (size: { cols: number; rows: number }) => void) {}
     dispose() {}
     loadAddon() {}
     cols = 80;
@@ -46,15 +41,14 @@ vi.mock("@xterm/xterm", () => ({
 }));
 
 vi.mock("@xterm/addon-fit", () => ({
-  FitAddon: class {
-    fit() {}
-  },
+  FitAddon: class { fit() {} },
 }));
 
 vi.mock("@xterm/xterm/css/xterm.css", () => ({}));
 
 beforeEach(() => {
-  createdSockets.length = 0;
+  instances.length = 0;
+  terminalWrites.length = 0;
   window.localStorage.setItem("openrig.terminalBearerToken", "test-tok");
   vi.useFakeTimers();
 });
@@ -67,59 +61,69 @@ afterEach(() => {
 });
 
 describe("FocusedTerminal reconnect behavior", () => {
-  it("creates initial WebSocket with correct URL + reconnects after close", async () => {
+  it("close triggers reconnecting message + new WebSocket after 3s", async () => {
     const { FocusedTerminal } = await import("../src/components/terminal/FocusedTerminal.js");
 
-    const { unmount } = render(
-      React.createElement(FocusedTerminal, { sessionName: "dev-impl@test-rig" }),
-    );
+    render(React.createElement(FocusedTerminal, { sessionName: "dev-impl@test-rig" }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(50); });
 
-    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+    expect(instances.length).toBe(1);
+    expect(instances[0]!.url).toContain("/api/terminal/dev-impl%40test-rig");
+    expect(instances[0]!.url).toContain("token=test-tok");
 
-    expect(createdSockets.length).toBeGreaterThanOrEqual(1);
-    const firstSocket = createdSockets[0]!;
-    expect(firstSocket.url).toContain("/api/terminal/dev-impl%40test-rig");
-    expect(firstSocket.url).toContain("token=test-tok");
+    // Simulate session death -> onclose
+    await act(async () => {
+      instances[0]!.onclose?.({ code: 1001, reason: "tmux session terminated" });
+    });
 
-    const firstWs = createdSockets.length;
+    expect(terminalWrites.some((w) => w.includes("[disconnected - reconnecting...]"))).toBe(true);
 
-    const socketInstance = Object.getPrototypeOf(firstSocket) === Object.prototype
-      ? null
-      : firstSocket;
-    void socketInstance;
+    // Advance 3s -> reconnect
+    await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
 
-    // Trigger onclose to simulate session death
-    const wsInstances = (globalThis as unknown as { WebSocket: typeof MockWebSocket }).WebSocket;
-    void wsInstances;
-
-    // Find the actual MockWebSocket instance and trigger close
-    // Since we can't easily access the instance, simulate by directly calling the component's reconnect path
-    // The component sets ws.onclose which triggers reconnect
-    // Let's unmount and check cleanup instead
-
-    unmount();
-
-    // After unmount, the active socket should be closed
-    const lastSocket = createdSockets[createdSockets.length - 1]!;
-    expect(lastSocket.closeCalled).toBe(true);
+    expect(instances.length).toBe(2);
+    expect(instances[1]!.url).toContain("/api/terminal/dev-impl%40test-rig");
+    expect(instances[1]!.url).toContain("token=test-tok");
   });
 
-  it("unmount clears reconnect timer and closes active socket", async () => {
+  it("unmount after reconnect closes the reconnected socket", async () => {
     const { FocusedTerminal } = await import("../src/components/terminal/FocusedTerminal.js");
 
-    const { unmount } = render(
-      React.createElement(FocusedTerminal, { sessionName: "cleanup-test" }),
-    );
+    const { unmount } = render(React.createElement(FocusedTerminal, { sessionName: "cleanup-test" }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(50); });
 
-    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+    // Trigger close + reconnect
+    await act(async () => { instances[0]!.onclose?.({ code: 1001, reason: "death" }); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
 
-    expect(createdSockets.length).toBeGreaterThanOrEqual(1);
+    expect(instances.length).toBe(2);
 
     unmount();
 
-    // Advance past reconnect timer to prove no new socket is created
-    const countBefore = createdSockets.length;
+    expect(instances[1]!.closeCalled).toBe(true);
+
+    // No third socket after unmount
+    const countAfterUnmount = instances.length;
     await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
-    expect(createdSockets.length).toBe(countBefore);
+    expect(instances.length).toBe(countAfterUnmount);
+  });
+
+  it("unmount before reconnect timer fires prevents new socket", async () => {
+    const { FocusedTerminal } = await import("../src/components/terminal/FocusedTerminal.js");
+
+    const { unmount } = render(React.createElement(FocusedTerminal, { sessionName: "early-unmount" }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(50); });
+
+    // Trigger close to schedule reconnect
+    await act(async () => { instances[0]!.onclose?.({ code: 1001, reason: "death" }); });
+
+    // Unmount before 3s
+    unmount();
+
+    // Advance past reconnect timer
+    await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+
+    // No second socket created
+    expect(instances.length).toBe(1);
   });
 });
