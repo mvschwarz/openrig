@@ -729,9 +729,28 @@ function buildAuditCommand(): Command {
             if (!fs.statSync(sliceDir).isDirectory()) continue;
             const sliceReadme = path.join(sliceDir, "README.md");
             const sliceProgress = path.join(sliceDir, "PROGRESS.md");
-            const sliceFm = fs.existsSync(sliceReadme)
-              ? extractFrontmatterRaw(fs.readFileSync(sliceReadme, "utf-8"))
-              : null;
+
+            if (!fs.existsSync(sliceReadme)) {
+              if (fs.existsSync(sliceProgress)) {
+                sliceResults.push({
+                  name: entry,
+                  result: {
+                    railStatus: "malformed" as const,
+                    findings: [{
+                      kind: "orphan_progress" as const,
+                      severity: "high" as const,
+                      path: sliceDir,
+                      message: `PROGRESS.md exists but no README.md (orphan progress rail, no backing scope item)`,
+                      remediation: `Add a README.md with frontmatter id, or remove the orphan PROGRESS.md`,
+                    }],
+                    frontmatterError: null,
+                  },
+                });
+              }
+              continue;
+            }
+
+            const sliceFm = extractFrontmatterRaw(fs.readFileSync(sliceReadme, "utf-8"));
             const readmeOnlyMarker = sliceFm !== null && /^progress_rail\s*:\s*readme-only/m.test(sliceFm);
 
             sliceResults.push({
@@ -790,7 +809,8 @@ function buildAuditCommand(): Command {
 }
 
 function extractFrontmatterRaw(content: string): string | null {
-  const match = /^---\s*\n([\s\S]*?)\n---/m.exec(content);
+  if (!content.startsWith("---")) return null;
+  const match = /^---\s*\n([\s\S]*?)\n---/.exec(content);
   return match ? match[1]! : null;
 }
 
