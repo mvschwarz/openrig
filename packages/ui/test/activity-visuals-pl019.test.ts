@@ -186,12 +186,12 @@ describe("PL-019 activity-visuals", () => {
       expect(r).toEqual({ state: "unknown", source: "none" });
     });
 
-    it("unknown runtime_hook (stale) + terminalActive=null => source hook", () => {
+    it("unknown runtime_hook (stale) + terminalActive=null => source none (stale hook is not hook-grade)", () => {
       const r = getActivityStateWithSource(
         { state: "unknown", reason: "stale_runtime_hook", evidenceSource: "runtime_hook", sampledAt: "z", stale: true },
         null,
       );
-      expect(r).toEqual({ state: "unknown", source: "hook" });
+      expect(r).toEqual({ state: "unknown", source: "none" });
     });
 
     it("runtime_hook running always source=hook regardless of terminalActive", () => {
