@@ -1235,6 +1235,7 @@ export function SliceScopePage() {
   // unavailable=true and TimelineTab degrades to the auto-captured
   // event feed alone.
   const timelineMd = useSliceTimelineMarkdown(detailQuery.data?.slicePath ?? null);
+  const sliceScopeAudit = useScopeAudit(detailQuery.data?.missionId ?? null);
 
   if (detailQuery.isLoading) {
     return (
@@ -1279,7 +1280,6 @@ export function SliceScopePage() {
   }
 
   const detail = detailQuery.data;
-  const sliceScopeAudit = useScopeAudit(detail.missionId);
   const sliceAuditEntry = sliceScopeAudit.data?.slices.find((s) => s.name === detail.name) ?? null;
 
   return (
