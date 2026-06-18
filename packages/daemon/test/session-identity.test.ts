@@ -166,46 +166,4 @@ describe("clearResumeToken clears provenance", () => {
   });
 });
 
-describe("ensureCodexFeatureFlag version-aware", () => {
-  it("unknown version (no row) does NOT write config", () => {
-    const written: string[] = [];
-    const adapter = {
-      ensureCodexFeatureFlag: (enabled: boolean, opts?: { codexVersion?: string }) => {
-        if (!enabled) return;
-        if (!opts?.codexVersion) return;
-        if (isCodex013xOrLater(opts.codexVersion)) return;
-        written.push("wrote");
-      },
-    };
-    adapter.ensureCodexFeatureFlag(true, { codexVersion: undefined });
-    expect(written).toHaveLength(0);
-  });
-
-  it("confirmed 0.12x writes config", () => {
-    const written: string[] = [];
-    const adapter = {
-      ensureCodexFeatureFlag: (enabled: boolean, opts?: { codexVersion?: string }) => {
-        if (!enabled) return;
-        if (!opts?.codexVersion) return;
-        if (isCodex013xOrLater(opts.codexVersion)) return;
-        written.push("wrote");
-      },
-    };
-    adapter.ensureCodexFeatureFlag(true, { codexVersion: "0.120.0" });
-    expect(written).toHaveLength(1);
-  });
-
-  it("confirmed 0.139 does NOT write config", () => {
-    const written: string[] = [];
-    const adapter = {
-      ensureCodexFeatureFlag: (enabled: boolean, opts?: { codexVersion?: string }) => {
-        if (!enabled) return;
-        if (!opts?.codexVersion) return;
-        if (isCodex013xOrLater(opts.codexVersion)) return;
-        written.push("wrote");
-      },
-    };
-    adapter.ensureCodexFeatureFlag(true, { codexVersion: "0.139.0" });
-    expect(written).toHaveLength(0);
-  });
-});
+// F3 version-aware tests moved to codex-hooks-feature-flag.test.ts using real CodexRuntimeAdapter.
