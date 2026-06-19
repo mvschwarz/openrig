@@ -62,6 +62,13 @@ export function registerTerminalWs(
       let tailInterval: ReturnType<typeof setInterval> | null = null;
       let livenessInterval: ReturnType<typeof setInterval> | null = null;
       let lastSize = 0;
+      let inputQueue: Promise<void> = Promise.resolve();
+
+      const enqueueInput = (op: () => Promise<void>): Promise<void> => {
+        const run = inputQueue.then(op, op);
+        inputQueue = run.catch(() => {});
+        return run;
+      };
 
       return {
         async onOpen(_evt: unknown, ws: { send(data: string): void; close(code: number, reason: string): void }) {
@@ -112,11 +119,15 @@ export function registerTerminalWs(
           try {
             const msg = JSON.parse(data) as Record<string, unknown>;
             if (msg.type === "keys" && Array.isArray(msg.keys)) {
-              await tmux.sendKeys(sessionName, msg.keys as string[]);
+              const keys = msg.keys as string[];
+              await enqueueInput(async () => { await tmux.sendKeys(sessionName, keys); });
             } else if (msg.type === "text" && typeof msg.text === "string") {
-              await tmux.sendText(sessionName, msg.text);
+              const text = msg.text;
+              await enqueueInput(async () => { await tmux.sendText(sessionName, text); });
             } else if (msg.type === "resize" && typeof msg.cols === "number" && typeof msg.rows === "number") {
-              await tmux.resizeWindow(sessionName, msg.cols as number, msg.rows as number);
+              const cols = msg.cols;
+              const rows = msg.rows;
+              await enqueueInput(async () => { await tmux.resizeWindow(sessionName, cols, rows); });
             }
           } catch {}
         },

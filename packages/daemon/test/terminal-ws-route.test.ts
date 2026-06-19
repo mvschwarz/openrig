@@ -98,6 +98,60 @@ describe("terminal WebSocket route (production path)", () => {
   });
 });
 
+describe("terminal WebSocket input ordering", () => {
+  const ORDER_PORT = 19878;
+  const ORDER_TOKEN = "order-test-token";
+  let orderServer: ServerType;
+  const textCompletions: string[] = [];
+
+  beforeAll(async () => {
+    const app3 = new Hono();
+    app3.use("*", async (c, next) => {
+      c.set("tmuxAdapter" as never, {
+        hasSession: async () => true,
+        setWindowOption: async () => ({ ok: true }),
+        startPipePane: async () => ({ ok: true }),
+        stopPipePane: async () => ({ ok: true }),
+        sendKeys: async () => ({ ok: true }),
+        sendText: async (_name: string, text: string) => {
+          await new Promise((resolve) => setTimeout(resolve, text === "e" ? 30 : 0));
+          textCompletions.push(text);
+          return { ok: true };
+        },
+        resizeWindow: async () => ({ ok: true }),
+      });
+      await next();
+    });
+    const { injectWebSocket: inject3, upgradeWebSocket: upgrade3 } = createNodeWebSocket({ app: app3 });
+    registerTerminalWs(app3, upgrade3 as never, { bearerToken: ORDER_TOKEN });
+    orderServer = serve({ fetch: app3.fetch, port: ORDER_PORT, hostname: "127.0.0.1" });
+    inject3(orderServer);
+    await new Promise<void>((resolve) => setTimeout(resolve, 100));
+  });
+
+  afterAll(() => {
+    orderServer?.close();
+  });
+
+  it("serializes rapid text messages before calling tmux", async () => {
+    textCompletions.length = 0;
+    const ws = new WebSocket(`ws://127.0.0.1:${ORDER_PORT}/api/terminal/order-test?token=${ORDER_TOKEN}`);
+    await new Promise<void>((resolve, reject) => {
+      ws.onopen = () => resolve();
+      ws.onerror = () => reject(new Error("websocket failed to open"));
+    });
+
+    for (const text of ["e", "c", "h", "o"]) {
+      ws.send(JSON.stringify({ type: "text", text }));
+    }
+
+    await vi.waitFor(() => {
+      expect(textCompletions.join("")).toBe("echo");
+    }, { timeout: 1000 });
+    ws.close();
+  });
+});
+
 describe("terminal WebSocket lifecycle (session death)", () => {
   const LIFECYCLE_PORT = 19877;
   const LIFECYCLE_TOKEN = "lifecycle-test-token";
