@@ -219,6 +219,7 @@ export interface AppDeps {
    */
   missionControlBearerToken?: string | null;
   terminalBearerToken?: string | null;
+  enableNodeWebSocket?: boolean;
   specReviewService?: SpecReviewService;
   specLibraryService?: SpecLibraryService;
   /**
@@ -498,8 +499,13 @@ export function createApp(deps: AppDeps): { app: Hono; injectWebSocket: (server:
   app.route("/api/kernel", kernelStatusRoutes);
   app.route("/api/transcripts", transcriptRoutes());
   app.route("/api/transport", transportRoutes({ bearerToken: deps.terminalBearerToken ?? null }));
-  const { injectWebSocket, upgradeWebSocket } = createNodeWebSocket({ app });
-  registerTerminalWs(app, upgradeWebSocket as never, { bearerToken: deps.terminalBearerToken ?? null });
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let injectWebSocket: (server: any) => void = () => {};
+  if (deps.enableNodeWebSocket) {
+    const ws = createNodeWebSocket({ app });
+    injectWebSocket = ws.injectWebSocket as never;
+    registerTerminalWs(app, ws.upgradeWebSocket as never, { bearerToken: deps.terminalBearerToken ?? null });
+  }
   app.route("/api/activity", activityRoutes);
   app.route("/api/ask", askRoutes);
   app.route("/api/specs/review", specReviewRoutes());

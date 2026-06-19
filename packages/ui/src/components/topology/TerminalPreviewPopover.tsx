@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type React from "react";
 import { createPortal } from "react-dom";
-import { SessionPreviewPane } from "../preview/SessionPreviewPane.js";
 import { FocusedTerminal } from "../terminal/FocusedTerminal.js";
 import { cn } from "../../lib/utils.js";
 import { ToolMark } from "../graphics/RuntimeMark.js";

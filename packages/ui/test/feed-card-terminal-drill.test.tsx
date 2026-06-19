@@ -60,15 +60,14 @@ describe("FeedCardTerminalDrill (AC-4)", () => {
 
     fireEvent.click(getByTestId("feed-card-drill-card-1"));
 
-    // The popover opened and the preview pane fetched the session-keyed route.
     await waitFor(() => getByTestId("feed-card-drill-card-1-terminal-popover"));
     await waitFor(() => {
-      const previewCalls = mockFetch.mock.calls
-        .map((c) => String(c[0]))
-        .filter((u) => u.includes("/api/sessions/"));
-      expect(previewCalls.length).toBeGreaterThan(0);
-      expect(previewCalls[0]).toContain("/api/sessions/dev-impl%40my-rig/preview");
+      expect(getByTestId("focused-terminal-dev-impl@my-rig")).toBeTruthy();
     });
+    const previewCalls = mockFetch.mock.calls
+      .map((c) => String(c[0]))
+      .filter((u) => u.includes("/preview"));
+    expect(previewCalls).toHaveLength(0);
   });
 
   it("DISCRIMINATOR A: no topology resolution — no /api/rigs/ or agent-activity call is made", async () => {
@@ -100,18 +99,17 @@ describe("FeedCardTerminalDrill (AC-4)", () => {
     expect(previewCalls).toHaveLength(0);
   });
 
-  it("the drill label is honest: says captured/preview, never claims live state", () => {
+  it("the drill label says live terminal (converged from captured preview)", () => {
     const { getByTestId } = withQueryClient(
       <FeedCardTerminalDrill cardId="card-4" sessionName="dev-impl@my-rig" />,
     );
 
     const drill = getByTestId("feed-card-drill-card-4") as HTMLButtonElement;
-    expect(drill.textContent).toContain("terminal preview");
-    expect(drill.title).toContain("captured snapshot");
-    // No live-state overclaim: the visible label never says "live", and the
-    // only "live" in the title is the explicit "not live" disclaimer.
-    expect(drill.textContent).not.toMatch(/live/i);
-    expect(drill.title).toContain("not live");
-    expect(drill.title.replace("not live", "")).not.toMatch(/live/i);
+    expect(drill.textContent).toContain("live terminal");
+    expect(drill.title).toContain("live terminal");
+    expect(drill.textContent).not.toContain("captured");
+    expect(drill.textContent).not.toContain("preview");
+    expect(drill.title).not.toContain("captured");
+    expect(drill.title).not.toContain("snapshot");
   });
 });

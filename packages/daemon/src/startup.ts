@@ -1303,6 +1303,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const periodicSnapshotScheduler = new PeriodicSnapshotScheduler({ db, snapshotCapture, snapshotRepo });
   deps.periodicSnapshotScheduler = periodicSnapshotScheduler;
 
+  deps.enableNodeWebSocket = true;
   const { app, injectWebSocket } = createApp(deps);
 
   return { app, db, deps, contextMonitor, injectWebSocket };
