@@ -172,4 +172,14 @@ describe("AC-4 honesty regression", () => {
     expect(result.state).toBe("needs_input");
     expect(result.source).toBe("pane_heuristic");
   });
+
+  it("pane_heuristic needs_input remains visible when terminalActive=false", () => {
+    const result = getActivityStateWithSource(
+      { state: "needs_input", reason: "selection_prompt", evidenceSource: "pane_heuristic", sampledAt: "z" },
+      false,
+    );
+    expect(result.state).toBe("needs_input");
+    expect(result.source).toBe("pane_heuristic");
+    expect(isHookGradeNeedsInput(result)).toBe(false);
+  });
 });

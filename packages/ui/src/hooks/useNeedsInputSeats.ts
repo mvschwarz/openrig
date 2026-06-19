@@ -20,9 +20,14 @@ export function useNeedsInputSeats() {
       const rigs = (await psRes.json()) as Array<{ rigId: string }>;
       const allSeats: NeedsInputSeatEntry[] = [];
       for (const rig of rigs) {
-        const nodesRes = await fetch(`/api/rigs/${encodeURIComponent(rig.rigId)}/nodes`);
-        if (!nodesRes.ok) continue;
-        const nodes = (await nodesRes.json()) as NodeInventoryEntry[];
+        let nodes: NodeInventoryEntry[];
+        try {
+          const nodesRes = await fetch(`/api/rigs/${encodeURIComponent(rig.rigId)}/nodes`);
+          if (!nodesRes.ok) continue;
+          nodes = (await nodesRes.json()) as NodeInventoryEntry[];
+        } catch {
+          continue;
+        }
         for (const node of nodes) {
           const { state, source } = getActivityStateWithSource(node.agentActivity, node.terminalActive);
           if (state === "needs_input") {

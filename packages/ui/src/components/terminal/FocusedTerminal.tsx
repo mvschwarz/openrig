@@ -1,4 +1,6 @@
 import { useEffect, useRef, useCallback, useState } from "react";
+import { FitAddon } from "@xterm/addon-fit";
+import { Terminal } from "@xterm/xterm";
 import { readTerminalBearerToken } from "../mission-control/missionControlAuth.js";
 import "@xterm/xterm/css/xterm.css";
 
@@ -90,6 +92,13 @@ export function FocusedTerminal({ sessionName, daemonBaseUrl }: FocusedTerminalP
   const generationRef = useRef(0);
   const [error, setError] = useState<string | null>(null);
 
+  const disposeTerminal = useCallback(() => {
+    const term = termRef.current as { dispose(): void } | null;
+    term?.dispose();
+    termRef.current = null;
+    fitAddonRef.current = null;
+  }, []);
+
   const connectForGeneration = useCallback((gen: number) => {
     const base = daemonBaseUrl ?? window.location.origin;
     const wsUrl = base.replace(/^http/, "ws");
@@ -119,6 +128,7 @@ export function FocusedTerminal({ sessionName, daemonBaseUrl }: FocusedTerminalP
       if (generationRef.current !== gen) return;
       const definitive = evt.code === 1008 || evt.code === 1011 || evt.code === 1001;
       if (definitive) {
+        disposeTerminal();
         setError(evt.reason || "Terminal unavailable: session not found on this daemon");
         return;
       }
@@ -135,7 +145,7 @@ export function FocusedTerminal({ sessionName, daemonBaseUrl }: FocusedTerminalP
 
     wsRef.current = ws;
     return ws;
-  }, [sessionName, daemonBaseUrl]);
+  }, [sessionName, daemonBaseUrl, disposeTerminal]);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -147,9 +157,6 @@ export function FocusedTerminal({ sessionName, daemonBaseUrl }: FocusedTerminalP
 
     (async () => {
       try {
-        const { Terminal } = await import("@xterm/xterm");
-        const { FitAddon } = await import("@xterm/addon-fit");
-
         if (cleanedUp) return;
 
         const term = new Terminal({
@@ -199,26 +206,27 @@ export function FocusedTerminal({ sessionName, daemonBaseUrl }: FocusedTerminalP
       resizeObs?.disconnect();
       const activeWs = wsRef.current;
       if (activeWs) { activeWs.close(); wsRef.current = null; }
-      const term = termRef.current as { dispose(): void } | null;
-      term?.dispose();
-      termRef.current = null;
-      fitAddonRef.current = null;
+      disposeTerminal();
     };
-  }, [connectForGeneration]);
+  }, [connectForGeneration, disposeTerminal]);
 
   if (error) {
     return (
       <div
+        key={`focused-terminal-error-${sessionName}`}
         data-testid={`focused-terminal-${sessionName}`}
-        className="h-full w-full min-h-[200px] bg-[#1a1a1a] flex items-center justify-center text-stone-400 font-mono text-xs"
+        className="h-full w-full min-h-[200px] bg-[#1a1a1a] flex items-center justify-center px-4 text-center text-stone-400 font-mono text-xs"
       >
-        Terminal unavailable: {error}
+        <span className="block max-w-[28ch] whitespace-normal break-all leading-relaxed">
+          Terminal unavailable: {error}
+        </span>
       </div>
     );
   }
 
   return (
     <div
+      key={`focused-terminal-live-${sessionName}`}
       ref={containerRef}
       data-testid={`focused-terminal-${sessionName}`}
       className="h-full w-full min-h-[200px] bg-[#1a1a1a]"

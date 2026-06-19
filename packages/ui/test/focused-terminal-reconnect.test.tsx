@@ -24,16 +24,27 @@ class MockWS {
 }
 
 const terminalWrites: string[] = [];
+let terminalDisposeCount = 0;
 
 vi.stubGlobal("WebSocket", MockWS);
 
 vi.mock("@xterm/xterm", () => ({
   Terminal: class {
-    open() {}
+    child: HTMLElement | null = null;
+    open(el: HTMLElement) {
+      this.child = document.createElement("div");
+      this.child.className = "xterm";
+      this.child.textContent = "xterm child";
+      el.appendChild(this.child);
+    }
     write(data: string) { terminalWrites.push(data); }
     onData(_cb: (data: string) => void) {}
     onResize(_cb: (size: { cols: number; rows: number }) => void) {}
-    dispose() {}
+    dispose() {
+      terminalDisposeCount++;
+      this.child?.remove();
+      this.child = null;
+    }
     loadAddon() {}
     cols = 80;
     rows = 24;
@@ -49,6 +60,7 @@ vi.mock("@xterm/xterm/css/xterm.css", () => ({}));
 beforeEach(() => {
   instances.length = 0;
   terminalWrites.length = 0;
+  terminalDisposeCount = 0;
   window.localStorage.setItem("openrig.terminalBearerToken", "test-tok");
   vi.useFakeTimers();
 });
@@ -176,6 +188,8 @@ describe("FocusedTerminal reconnect behavior", () => {
 
     expect(container.textContent).toContain("Terminal unavailable");
     expect(container.textContent).toContain("session not found");
+    expect(container.querySelector(".xterm")).toBeNull();
+    expect(terminalDisposeCount).toBe(1);
 
     const countBefore = instances.length;
     await act(async () => { await vi.advanceTimersByTimeAsync(5000); });

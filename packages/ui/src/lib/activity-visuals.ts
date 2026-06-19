@@ -69,6 +69,9 @@ export function getActivityStateWithSource(
   if (isFreshHook) {
     return { state: activity!.state, source: "hook" };
   }
+  if (activity?.state === "needs_input" && activity.evidenceSource === "pane_heuristic") {
+    return { state: "needs_input", source: "pane_heuristic" };
+  }
   if (terminalActive === true) return { state: "running", source: "terminal_activity" };
   if (terminalActive === false) return { state: "idle", source: "terminal_activity" };
   if (activity && activity.state !== "unknown" && activity.evidenceSource === "pane_heuristic") {
