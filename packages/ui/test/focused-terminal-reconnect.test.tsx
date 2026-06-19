@@ -73,7 +73,7 @@ describe("FocusedTerminal reconnect behavior", () => {
 
     // Simulate session death -> onclose
     await act(async () => {
-      instances[0]!.onclose?.({ code: 1001, reason: "tmux session terminated" });
+      instances[0]!.onclose?.({ code: 1006, reason: "connection lost" });
     });
 
     expect(terminalWrites.some((w) => w.includes("[disconnected - reconnecting...]"))).toBe(true);
@@ -93,7 +93,7 @@ describe("FocusedTerminal reconnect behavior", () => {
     await act(async () => { await vi.advanceTimersByTimeAsync(50); });
 
     // Trigger close + reconnect
-    await act(async () => { instances[0]!.onclose?.({ code: 1001, reason: "death" }); });
+    await act(async () => { instances[0]!.onclose?.({ code: 1006, reason: "connection lost" }); });
     await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
 
     expect(instances.length).toBe(2);
@@ -115,7 +115,7 @@ describe("FocusedTerminal reconnect behavior", () => {
     await act(async () => { await vi.advanceTimersByTimeAsync(50); });
 
     // Trigger close to schedule reconnect
-    await act(async () => { instances[0]!.onclose?.({ code: 1001, reason: "death" }); });
+    await act(async () => { instances[0]!.onclose?.({ code: 1006, reason: "connection lost" }); });
 
     // Unmount before 3s
     unmount();
@@ -156,5 +156,43 @@ describe("FocusedTerminal reconnect behavior", () => {
     // No stale reconnect to old-session
     const oldSessionSockets = instances.filter((i) => i.url.includes("old-session"));
     expect(oldSessionSockets.length).toBe(1);
+  });
+
+  it("definitive close (code 1008 session not found) shows unavailable and does NOT reconnect", async () => {
+    const { FocusedTerminal } = await import("../src/components/terminal/FocusedTerminal.js");
+
+    const { container } = render(
+      React.createElement(FocusedTerminal, { sessionName: "missing-session" }),
+    );
+    await act(async () => { await vi.advanceTimersByTimeAsync(50); });
+
+    expect(instances.length).toBe(1);
+
+    await act(async () => {
+      instances[0]!.onclose?.({ code: 1008, reason: "session not found: missing-session" });
+    });
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+
+    expect(container.textContent).toContain("Terminal unavailable");
+    expect(container.textContent).toContain("session not found");
+
+    const countBefore = instances.length;
+    await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+    expect(instances.length).toBe(countBefore);
+  });
+
+  it("transient close (code 1006) still reconnects", async () => {
+    const { FocusedTerminal } = await import("../src/components/terminal/FocusedTerminal.js");
+
+    render(React.createElement(FocusedTerminal, { sessionName: "transient-test" }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(50); });
+
+    await act(async () => {
+      instances[0]!.onclose?.({ code: 1006, reason: "" });
+    });
+    await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+
+    expect(instances.length).toBe(2);
   });
 });

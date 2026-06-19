@@ -115,8 +115,13 @@ export function FocusedTerminal({ sessionName, daemonBaseUrl }: FocusedTerminalP
       }
     };
 
-    ws.onclose = () => {
+    ws.onclose = (evt) => {
       if (generationRef.current !== gen) return;
+      const definitive = evt.code === 1008 || evt.code === 1011 || evt.code === 1001;
+      if (definitive) {
+        setError(evt.reason || "Terminal unavailable: session not found on this daemon");
+        return;
+      }
       const term = termRef.current as { write(data: string): void } | null;
       if (term) {
         term.write("\r\n\x1b[90m[disconnected - reconnecting...]\x1b[0m\r\n");
