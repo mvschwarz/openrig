@@ -194,7 +194,7 @@ describe("PL-019 ps --filter agentActivity.state + --active", () => {
     const env = JSON.parse(logs.join(""));
     const entries = Array.isArray(env) ? env : env.entries;
     expect(entries).toHaveLength(1);
-    expect(entries[0].logicalId).toBe("alpha");
+    expect(entries[0].canonicalSessionName).toBe("demo-alpha");
     expect(entries[0].agentActivity.state).toBe("running");
   });
 
@@ -220,7 +220,7 @@ describe("PL-019 ps --filter agentActivity.state + --active", () => {
     const env = JSON.parse(logs.join(""));
     const entries = Array.isArray(env) ? env : env.entries;
     expect(entries).toHaveLength(1);
-    expect(entries[0].logicalId).toBe("gamma");
+    expect(entries[0].canonicalSessionName).toBe("demo-gamma");
   });
 
   it("--filter agentActivity.state=invalid fails fast with three-part error and exit 1", async () => {
@@ -262,6 +262,6 @@ describe("PL-019 ps --filter agentActivity.state + --active", () => {
     const env = JSON.parse(logs.join(""));
     const entries = Array.isArray(env) ? env : env.entries;
     expect(entries).toHaveLength(1);
-    expect(entries[0].logicalId).toBe("alpha");
+    expect(entries[0].canonicalSessionName).toBe("demo-alpha");
   });
 });

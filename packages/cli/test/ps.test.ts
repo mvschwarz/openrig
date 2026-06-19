@@ -174,7 +174,7 @@ describe("Ps CLI", () => {
 
   // NS-T08: ps --nodes tests
 
-  it("ps --nodes formats table with rig context and restore columns", async () => {
+  it("ps --nodes --full formats table with rig context and restore columns", async () => {
     psData = [
       { rigId: "rig-1", name: "test-rig", nodeCount: 2, runningCount: 2, status: "running", uptime: "1h", latestSnapshot: null },
     ];
@@ -193,7 +193,7 @@ describe("Ps CLI", () => {
       },
     ];
     const { logs } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes"]);
+      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "--full"]);
     });
     const output = logs.join("\n");
     expect(output).toContain("RIG");
@@ -207,7 +207,7 @@ describe("Ps CLI", () => {
     expect(output).toContain("terminal");
   });
 
-  it("ps --nodes includes rig identifiers so duplicate rig names stay distinguishable", async () => {
+  it("ps --nodes --full includes rig identifiers so duplicate rig names stay distinguishable", async () => {
     psData = [
       { rigId: "rig-old", name: "demo-rig", nodeCount: 1, runningCount: 0, status: "stopped", uptime: null, latestSnapshot: "1m ago" },
       { rigId: "rig-new", name: "demo-rig", nodeCount: 1, runningCount: 1, status: "running", uptime: "10s", latestSnapshot: null },
@@ -229,14 +229,14 @@ describe("Ps CLI", () => {
       },
     ];
     const { logs } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes"]);
+      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "--full"]);
     });
     const output = logs.join("\n");
     expect(output).toContain("demo-rig#rig-old");
     expect(output).toContain("demo-rig#rig-new");
   });
 
-  it("ps --nodes --json produces valid JSON array with restoreOutcome", async () => {
+  it("ps --nodes --json --full produces valid JSON array with restoreOutcome", async () => {
     psData = [
       { rigId: "rig-1", name: "test-rig", nodeCount: 1, runningCount: 1, status: "running", uptime: "1m", latestSnapshot: null },
     ];
@@ -256,7 +256,7 @@ describe("Ps CLI", () => {
       },
     ];
     const { logs } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "--json"]);
+      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "--json", "--full"]);
     });
     const parsed = JSON.parse(logs.join(""));
     expect(Array.isArray(parsed)).toBe(true);
@@ -302,7 +302,7 @@ describe("Ps CLI", () => {
     expect(output).toContain("dev-impl@test-rig");
   });
 
-  it("ps --nodes includes infrastructure nodes", async () => {
+  it("ps --nodes includes infrastructure nodes (compact shows session)", async () => {
     psData = [
       { rigId: "rig-1", name: "test-rig", nodeCount: 1, runningCount: 1, status: "running", uptime: "1m", latestSnapshot: null },
     ];
@@ -318,8 +318,8 @@ describe("Ps CLI", () => {
       await makeCmd().parseAsync(["node", "rig", "ps", "--nodes"]);
     });
     const output = logs.join("\n");
-    expect(output).toContain("infra");
-    expect(output).toContain("terminal");
+    expect(output).toContain("infra-daemon@test-rig");
+    expect(output).toContain("test-rig");
   });
 
   it("ps --nodes truncates long rig and session names so the table stays aligned", async () => {

@@ -129,7 +129,7 @@ describe("PL-012 ps --filter contextUsage.* + CTX field", () => {
     expect(exitCode).toBeUndefined();
     const env = JSON.parse(logs.join(""));
     const entries = Array.isArray(env) ? env : env.entries;
-    expect(entries.map((e: { logicalId: string }) => e.logicalId)).toEqual(["alpha"]);
+    expect(entries.map((e: { canonicalSessionName: string }) => e.canonicalSessionName)).toEqual(["demo-alpha"]);
   });
 
   it("--filter contextUsage.percent<60 picks low/ok seats only", async () => {
@@ -140,7 +140,7 @@ describe("PL-012 ps --filter contextUsage.* + CTX field", () => {
     expect(exitCode).toBeUndefined();
     const env = JSON.parse(logs.join(""));
     const entries = Array.isArray(env) ? env : env.entries;
-    expect(entries.map((e: { logicalId: string }) => e.logicalId)).toEqual(["gamma"]);
+    expect(entries.map((e: { canonicalSessionName: string }) => e.canonicalSessionName)).toEqual(["demo-gamma"]);
   });
 
   it("--filter contextUsage.percent>=N excludes nodes with no sample (unknown availability)", async () => {
@@ -150,7 +150,7 @@ describe("PL-012 ps --filter contextUsage.* + CTX field", () => {
     });
     const env = JSON.parse(logs.join(""));
     const entries = Array.isArray(env) ? env : env.entries;
-    expect(entries.map((e: { logicalId: string }) => e.logicalId)).toEqual(["alpha"]);
+    expect(entries.map((e: { canonicalSessionName: string }) => e.canonicalSessionName)).toEqual(["demo-alpha"]);
   });
 
   it("--filter contextUsage.state=critical maps tier semantics correctly", async () => {
@@ -165,7 +165,7 @@ describe("PL-012 ps --filter contextUsage.* + CTX field", () => {
     });
     const env = JSON.parse(logs.join(""));
     const entries = Array.isArray(env) ? env : env.entries;
-    expect(entries.map((e: { logicalId: string }) => e.logicalId)).toEqual(["alpha"]);
+    expect(entries.map((e: { canonicalSessionName: string }) => e.canonicalSessionName)).toEqual(["demo-alpha"]);
   });
 
   it("--filter contextUsage.state=unknown picks no-sample seats", async () => {
@@ -175,7 +175,7 @@ describe("PL-012 ps --filter contextUsage.* + CTX field", () => {
     });
     const env = JSON.parse(logs.join(""));
     const entries = Array.isArray(env) ? env : env.entries;
-    expect(entries.map((e: { logicalId: string }) => e.logicalId)).toEqual(["delta"]);
+    expect(entries.map((e: { canonicalSessionName: string }) => e.canonicalSessionName)).toEqual(["demo-delta"]);
   });
 
   it("--filter contextUsage.percent>=invalid fails fast with three-part error and exit 1", async () => {
@@ -222,10 +222,10 @@ describe("PL-012 ps --filter contextUsage.* + CTX field", () => {
     expect(entries[0]).toEqual({ logicalId: "alpha", contextUsage: expect.objectContaining({ usedPercentage: 73 }) });
   });
 
-  it("CTX column appears in human output", async () => {
+  it("CTX column appears in --full human output", async () => {
     nodesByRig["rig-1"] = [nodeAt("alpha", 73), nodeAt("delta", null)];
     const { logs, exitCode } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes"]);
+      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "--full"]);
     });
     expect(exitCode).toBeUndefined();
     const out = logs.join("\n");

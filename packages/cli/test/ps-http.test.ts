@@ -200,7 +200,7 @@ describe("rig ps --host HTTP", () => {
     const parsed = JSON.parse(stdout.join(""));
     expect(Array.isArray(parsed)).toBe(true);
     expect(parsed.length).toBe(2);
-    expect(parsed[0].logicalId).toBeDefined();
+    expect(parsed[0].rigName).toBeDefined();
   });
 
   it("--nodes --limit 1 --fields logicalId,rigName returns envelope with totalNodes", async () => {

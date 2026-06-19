@@ -169,6 +169,7 @@ interface PsCliOptions {
   json?: boolean;
   nodes?: boolean;
   full?: boolean;
+  verbose?: boolean;
   limit?: string;
   fields?: string;
   summary?: boolean;
@@ -177,6 +178,8 @@ interface PsCliOptions {
   allHosts?: boolean;
   hosts?: string;
   active?: boolean;
+  rig?: string;
+  session?: string;
   /** OPR.0.3.3.19 - include archived rigs (default excludes them). Parity
    *  with `rig stream list --include-archived`. */
   includeArchived?: boolean;
@@ -380,6 +383,33 @@ function selectFields<T extends Record<string, unknown>>(entries: T[], fields: s
   });
 }
 
+function needsAttention(node: NodeEntry): boolean {
+  return node.lifecycleState === "attention_required"
+    || node.startupStatus === "attention_required"
+    || node.startupStatus === "failed"
+    || node.agentActivity?.state === "needs_input";
+}
+
+function compactNodeProjection(nodes: NodeEntry[]): Array<Record<string, unknown>> {
+  return nodes.map((n) => {
+    const attention = needsAttention(n);
+    const compact: Record<string, unknown> = {
+      rigName: n.rigName,
+      canonicalSessionName: n.canonicalSessionName,
+      lifecycleState: n.lifecycleState,
+      agentActivity: attention
+        ? { state: n.agentActivity?.state ?? "unknown", reason: n.agentActivity?.reason }
+        : { state: n.agentActivity?.state ?? "unknown" },
+      hasAssignedWork: n.hasAssignedWork,
+      pendingWorkCount: n.pendingWorkCount,
+    };
+    if (attention && n.latestError) {
+      compact.latestError = n.latestError;
+    }
+    return compact;
+  });
+}
+
 function summarizeRigs(entries: PsEntry[]): {
   totalRigs: number;
   totalRunning: number;
@@ -449,9 +479,21 @@ export function psCommand(depsOverride?: PsDeps): Command {
   const cmd = new Command("ps")
     .description("List rigs and their status")
     .addHelpText("after", `
+Default frontier source: use 'rig queue list' for pending work items.
+'rig ps' is an observation tool showing fleet state, not a task dispatch surface.
+
+Compact defaults: 'rig ps --nodes' shows a compact summary per node
+(rig, session, lifecycle, activity state, reason when attention, queue counts).
+Use '--full' (or '--verbose') for the complete per-node payload including
+contextUsage, recoveryGuidance, resume commands, and agent references.
+
+Compact field set (--nodes default): rigName, canonicalSessionName,
+lifecycleState, agentActivity.state, agentActivity.reason (when attention),
+hasAssignedWork, pendingWorkCount, latestError (when attention).
+
 Examples:
   rig ps                                          Show all rigs (human; truncated to ${HUMAN_RIG_BUDGET} with footer)
-  rig ps --full                                   Disable human truncation
+  rig ps --full                                   Show all rigs without truncation
   rig ps --json                                   JSON output (bare array; back-compat)
   rig ps --json --limit 20                        Bounded JSON envelope
   rig ps --json --summary                         Aggregate-only JSON (no per-rig entries)
@@ -461,7 +503,11 @@ Examples:
                                                   Show only rigs needing attention
   rig ps --filter status=running                  Show only running rigs
   rig ps --filter name-prefix=demo                Filter by rig-name prefix
-  rig ps --nodes                                  Per-node detail (human; truncated to ${HUMAN_NODE_BUDGET})
+  rig ps --nodes                                  Per-node compact summary (human; truncated to ${HUMAN_NODE_BUDGET})
+  rig ps --nodes --json                           Per-node compact summary (JSON; bare array)
+  rig ps --nodes --json --full                    Complete per-node payload (same as pre-0.4.0 default)
+  rig ps --nodes --json --rig openrig-build       Compact nodes filtered to one rig
+  rig ps --nodes --json --session dev1-impl@myrig Filter to a single session
   rig ps --nodes --json --limit 50                Bounded per-node JSON envelope
   rig ps --include-archived                       Include archived rigs (marked with *); hidden by default
   rig ps --nodes --active                         Show only nodes whose agentActivity.state == running (PL-019)
@@ -471,6 +517,10 @@ Examples:
 
 JSON output entries include both \`name\` and \`rigName\` (alias) for forward
 compatibility; agent code should prefer \`rigName\` (matches per-node JSON).
+
+--rig <name> filters to nodes whose rigName matches (convenience; composes with
+compact and --full). --session <name> filters to the node whose
+canonicalSessionName matches. Both narrow the node set before projection.
 
 --filter accepts: status, lifecycleState, name-prefix, name, agentActivity.state.
 Other keys are rejected. agentActivity.state is node-level (use with --nodes);
@@ -503,17 +553,21 @@ Exit codes:
   cmd
     .option("--json", "JSON output for agents")
     .option("--nodes", "Show per-node detail for all rigs")
-    .option("--full", "Disable default human-output truncation")
+    .option("--full", "Show complete per-node payload (default is compact summary)")
+    .option("--verbose", "Alias for --full")
     .option("--limit <n>", "Limit number of entries (rigs or nodes)")
     .option("--fields <list>", "Comma-separated field list to project (JSON only)")
     .option("--summary", "Emit aggregate-only output (counts by status/lifecycle)")
     .option("--filter <key=value>", "Filter entries; supported keys: status, lifecycleState, name-prefix, name, agentActivity.state")
     .option("--active", "Shortcut for --filter agentActivity.state=running (PL-019)")
+    .option("--rig <name>", "Show only nodes belonging to the named rig")
+    .option("--session <name>", "Show only the node matching this canonical session name")
     .option("--include-archived", "Include archived rigs (default hides them); parity with 'rig stream list --include-archived'")
     .option("--host <id>", "Run on a remote host declared in ~/.openrig/hosts.yaml")
     .option("--all-hosts", "Fan out to all registered HTTP hosts (observation-only)")
     .option("--hosts <ids>", "Fan out to specific hosts (comma-separated)")
     .action(async (opts: PsCliOptions) => {
+      if (opts.verbose) opts.full = true;
       const deps = getDepsF();
 
       if (opts.allHosts || opts.hosts) {
@@ -722,7 +776,11 @@ async function handleNodes(
     allNodes.push(...nodesRes.data);
   }
 
-  const filtered = parsedFilter ? applyNodeFilter(allNodes, parsedFilter) : allNodes;
+  let narrowed = allNodes;
+  if (opts.rig) narrowed = narrowed.filter((n) => n.rigName === opts.rig);
+  if (opts.session) narrowed = narrowed.filter((n) => n.canonicalSessionName === opts.session);
+
+  const filtered = parsedFilter ? applyNodeFilter(narrowed, parsedFilter) : narrowed;
 
   if (opts.summary) {
     const summary = summarizeNodes(filtered);
@@ -738,7 +796,12 @@ async function handleNodes(
 
   const limited = limit !== null ? filtered.slice(0, limit) : filtered;
   const limitTruncated = limit !== null && filtered.length > limit;
-  const projected = fields ? selectFields(limited as unknown as Array<Record<string, unknown>>, fields) : limited;
+  const useCompact = !opts.full && !fields;
+  const projected = fields
+    ? selectFields(limited as unknown as Array<Record<string, unknown>>, fields)
+    : useCompact
+      ? compactNodeProjection(limited)
+      : limited;
 
   if (opts.json) {
     if (useEnvelope) {
@@ -767,31 +830,47 @@ async function handleNodes(
   const humanList = (opts.full || limit !== null) ? limited : limited.slice(0, HUMAN_NODE_BUDGET);
   const humanTruncated = !opts.full && limit === null && filtered.length > HUMAN_NODE_BUDGET;
 
-  const header = padNodeRow("RIG", "POD", "MEMBER", "SESSION", "RUNTIME", "STATUS", "STARTUP", "LIFECYCLE", "TERMINAL", "WORK", "ACTIVITY", "CTX", "RESTORE", "ERROR");
-  console.log(header);
-  for (const n of humanList as NodeEntry[]) {
-    const parts = n.logicalId.split(".");
-    const pod = n.podNamespace ?? (parts.length > 1 ? parts[0]! : "—");
-    const member = parts.length > 1 ? parts.slice(1).join(".") : n.logicalId;
-    const rig = `${n.rigName}#${n.rigId}`;
-    console.log(padNodeRow(
-      rig,
-      pod,
-      member,
-      n.canonicalSessionName ?? "—",
-      n.runtime ?? "—",
-      n.sessionStatus ?? "—",
-      n.startupStatus ?? "—",
-      abbrevNodeLifecycle(n.lifecycleState),
-      // Slice 15 — terminal-active + has-work as DISTINCT columns
-      // (non-inference contract: never collapsed into one signal).
-      formatTerminalActive(n.terminalActive),
-      formatHasWork(n.hasAssignedWork, n.pendingWorkCount),
-      formatActivity(n.agentActivity),
-      formatContextUsage(n.contextUsage),
-      n.restoreOutcome,
-      n.latestError ? truncate(n.latestError, 30) : n.heldReason ? `held: ${truncate(n.heldReason, 25)}` : "—",
-    ));
+  if (useCompact) {
+    console.log(padCompactNodeRow("RIG", "SESSION", "LIFECYCLE", "ACTIVITY", "WORK", "REASON"));
+    for (const n of humanList as NodeEntry[]) {
+      const attn = needsAttention(n);
+      const reason = attn
+        ? (n.latestError ? truncate(n.latestError, 40) : n.agentActivity?.reason ?? "—")
+        : "—";
+      console.log(padCompactNodeRow(
+        n.rigName,
+        n.canonicalSessionName ?? "—",
+        abbrevNodeLifecycle(n.lifecycleState),
+        formatActivity(n.agentActivity),
+        formatHasWork(n.hasAssignedWork, n.pendingWorkCount),
+        reason,
+      ));
+    }
+  } else {
+    const header = padNodeRow("RIG", "POD", "MEMBER", "SESSION", "RUNTIME", "STATUS", "STARTUP", "LIFECYCLE", "TERMINAL", "WORK", "ACTIVITY", "CTX", "RESTORE", "ERROR");
+    console.log(header);
+    for (const n of humanList as NodeEntry[]) {
+      const parts = n.logicalId.split(".");
+      const pod = n.podNamespace ?? (parts.length > 1 ? parts[0]! : "—");
+      const member = parts.length > 1 ? parts.slice(1).join(".") : n.logicalId;
+      const rig = `${n.rigName}#${n.rigId}`;
+      console.log(padNodeRow(
+        rig,
+        pod,
+        member,
+        n.canonicalSessionName ?? "—",
+        n.runtime ?? "—",
+        n.sessionStatus ?? "—",
+        n.startupStatus ?? "—",
+        abbrevNodeLifecycle(n.lifecycleState),
+        formatTerminalActive(n.terminalActive),
+        formatHasWork(n.hasAssignedWork, n.pendingWorkCount),
+        formatActivity(n.agentActivity),
+        formatContextUsage(n.contextUsage),
+        n.restoreOutcome,
+        n.latestError ? truncate(n.latestError, 30) : n.heldReason ? `held: ${truncate(n.heldReason, 25)}` : "—",
+      ));
+    }
   }
   if (humanTruncated) {
     const remaining = filtered.length - HUMAN_NODE_BUDGET;
@@ -854,6 +933,17 @@ function padNodeRow(rig: string, pod: string, member: string, session: string, r
     fitCell(ctx, 6),
     fitCell(restore, 10),
     error,
+  ].join("");
+}
+
+function padCompactNodeRow(rig: string, session: string, lifecycle: string, activity: string, work: string, reason: string): string {
+  return [
+    fitCell(rig, 22),
+    fitCell(session, 38),
+    fitCell(lifecycle, 11),
+    fitCell(activity, 14),
+    fitCell(work, 6),
+    reason,
   ].join("");
 }
 
@@ -923,6 +1013,8 @@ async function runCrossHostPs(
   if (opts.fields !== undefined) argv.push("--fields", opts.fields);
   if (opts.summary) argv.push("--summary");
   if (opts.filter !== undefined) argv.push("--filter", opts.filter);
+  if (opts.rig !== undefined) argv.push("--rig", opts.rig);
+  if (opts.session !== undefined) argv.push("--session", opts.session);
   if (opts.includeArchived) argv.push("--include-archived");
   if (opts.json) argv.push("--json");
 
