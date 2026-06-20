@@ -102,6 +102,39 @@ export class SessionRegistry {
       .run(type, token, prov, sessionId);
   }
 
+  /** OPR.0.4.0.22 — resolve a canonical session name to the context needed to
+   *  set its resume token: the latest session row + its node's runtime + the
+   *  current resume provenance. Returns null when no session matches. */
+  findResumeContextByName(sessionName: string): {
+    sessionId: string;
+    nodeId: string;
+    rigId: string;
+    runtime: string | null;
+    currentProvenance: string | null;
+  } | null {
+    const row = this.db.prepare(
+      `SELECT s.id as session_id, s.node_id, n.rig_id, n.runtime, s.resume_provenance
+       FROM sessions s
+       JOIN nodes n ON n.id = s.node_id
+       WHERE s.session_name = ?
+       ORDER BY s.created_at DESC, s.id DESC LIMIT 1`
+    ).get(sessionName) as {
+      session_id: string;
+      node_id: string;
+      rig_id: string;
+      runtime: string | null;
+      resume_provenance: string | null;
+    } | undefined;
+    if (!row) return null;
+    return {
+      sessionId: row.session_id,
+      nodeId: row.node_id,
+      rigId: row.rig_id,
+      runtime: row.runtime,
+      currentProvenance: row.resume_provenance ?? null,
+    };
+  }
+
   clearResumeToken(sessionId: string): void {
     this.db
       .prepare("UPDATE sessions SET resume_type = NULL, resume_token = NULL, resume_provenance = NULL WHERE id = ?")

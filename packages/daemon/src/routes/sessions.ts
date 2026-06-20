@@ -26,6 +26,8 @@ import { convergeOp } from "../domain/topology-converge.js";
 import type { RestoreOrchestrator } from "../domain/restore-orchestrator.js";
 import { authBearerTokenMiddleware } from "../middleware/auth-bearer-token.js";
 import type { MiddlewareHandler } from "hono";
+import type { EventBus } from "../domain/event-bus.js";
+import { validateResumeToken } from "../domain/resume-token-validation.js";
 
 function terminalAuthGuard(): MiddlewareHandler {
   return async (c, next) => {
@@ -473,6 +475,68 @@ sessionAdminRoutes.post("/:sessionName/clear-attention", async (c) => {
     return c.json(result, result.code === "not_in_attention" ? 409 : 422);
   }
   return c.json(result, 200);
+});
+
+// POST /api/sessions/:sessionName/resume-token — OPR.0.4.0.22.
+// Managed, attested, audited SET of a seat's durable resume token (the
+// host-upgrade de-risk gate; replaces the manual-SQLite-edit anti-pattern).
+// GUARDED by terminalAuthGuard() (credential write). The raw token arrives in
+// the request BODY (the CLI reads it from stdin, never argv) and is NEVER
+// echoed back, placed in an error message, logged, or written to the audit
+// event — it is credential-class.
+sessionAdminRoutes.post("/:sessionName/resume-token", terminalAuthGuard(), async (c) => {
+  const sessionName = decodeURIComponent(c.req.param("sessionName")!);
+  const { sessionRegistry } = getDeps(c);
+  const eventBus = c.get("eventBus" as never) as EventBus | undefined;
+
+  const body: Record<string, unknown> = await c.req.json().catch(() => ({}));
+  const reason = typeof body["reason"] === "string" ? body["reason"].trim() : "";
+  if (!reason) {
+    return c.json({ error: "missing_reason", message: "set-resume-token requires --reason (operator attestation)." }, 400);
+  }
+
+  const ctx = sessionRegistry.findResumeContextByName(sessionName);
+  if (!ctx) {
+    return c.json({ error: "session_not_found", message: `Session '${sessionName}' not found.` }, 404);
+  }
+
+  // FR-2: validate per runtime; reject malformed. The error is redacted (it
+  // never contains the token value).
+  const validation = validateResumeToken(ctx.runtime, body["token"]);
+  if (!validation.ok) {
+    return c.json({ error: "invalid_token", message: validation.error }, 422);
+  }
+
+  // FR-1: operator/attested provenance OUTRANKS hook/scrape.
+  sessionRegistry.updateResumeToken(ctx.sessionId, validation.resumeType, validation.token, "operator");
+
+  // FR-5: append-only audit event — NO raw token.
+  if (eventBus) {
+    eventBus.emit({
+      type: "session.resume_token_set",
+      rigId: ctx.rigId,
+      nodeId: ctx.nodeId,
+      sessionName,
+      sessionId: ctx.sessionId,
+      resumeType: validation.resumeType,
+      previousProvenance: (ctx.currentProvenance as "hook" | "scrape" | "operator" | null) ?? null,
+      newProvenance: "operator",
+      source: "operator_set",
+      reason,
+      redacted: true,
+    });
+  }
+
+  // Response carries NO token (FR-2 redaction).
+  return c.json({
+    ok: true,
+    sessionName,
+    resumeType: validation.resumeType,
+    provenance: "operator",
+    previousProvenance: ctx.currentProvenance ?? null,
+    reason,
+    redacted: true,
+  }, 200);
 });
 
 // POST /api/sessions/:sessionRef/unclaim
