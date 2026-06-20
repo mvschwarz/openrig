@@ -589,6 +589,22 @@ describe("native resume probe", () => {
       expect(result.code).toBe("trust_gate");
     });
 
+    it("classifies the Codex hook review prompt as hook_trust_gate", () => {
+      const result = assessNativeResumeProbe({
+        runtime: "codex",
+        paneCommand: "codex",
+        paneContent: [
+          "Hooks need review",
+          "3 hooks are new or changed.",
+          "1. Review hooks",
+          "2. Trust all and continue",
+          "3. Continue without trusting (hooks won't run)",
+        ].join("\n"),
+      });
+      expect(result.code).toBe("hook_trust_gate");
+      expect(result.status).toBe("inconclusive");
+    });
+
     it("does NOT collide with active_runtime when codex is foreground without auth-refusal text", () => {
       const result = assessNativeResumeProbe({
         runtime: "codex",

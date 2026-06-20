@@ -496,6 +496,121 @@ describe("CodexRuntimeAdapter.launchHarness fork branch", () => {
       expect(result.error).toContain("could not capture new post-fork thread id");
     }
   });
+
+  it("dismisses Codex hook review prompt during fork by sending '2' (Trust all)", async () => {
+    const hookReviewContent = [
+      "Hooks need review",
+      "3 hooks are new or changed.",
+      "1. Review hooks",
+      "2. Trust all and continue",
+      "3. Continue without trusting (hooks won't run)",
+    ].join("\n");
+
+    let callCount = 0;
+    const tmux = {
+      sendText: vi.fn(async () => ({ ok: true as const })),
+      hasSession: vi.fn(async () => true),
+      getPaneCommand: vi.fn(async () => "codex"),
+      capturePaneContent: vi.fn(async () => {
+        callCount++;
+        if (callCount <= 3) return hookReviewContent;
+        return "OpenAI Codex (v0.0.0)";
+      }),
+      createSession: vi.fn(async () => ({ ok: true as const })),
+      killSession: vi.fn(async () => ({ ok: true as const })),
+      listSessions: vi.fn(async () => []),
+      listWindows: vi.fn(async () => []),
+      listPanes: vi.fn(async () => []),
+      sendKeys: vi.fn(async () => ({ ok: true as const })),
+      getPanePid: vi.fn(async () => 900),
+    } as unknown as TmuxAdapter;
+
+    const adapter = new CodexRuntimeAdapter({
+      tmux,
+      fsOps: makeMinimalCodexFs(),
+      listProcesses: () => [
+        { pid: 900, ppid: 1, command: "-zsh" },
+        { pid: 901, ppid: 900, command: "codex" },
+      ],
+      readThreadIdByPid: (pid) => (pid === 901 ? "NEW-THREAD-AFTER-TRUST" : undefined),
+      sleep: async () => {},
+    });
+
+    const result = await adapter.launchHarness(makeBinding(), {
+      name: "dev-impl@test-rig",
+      forkSource: { kind: "native_id", value: "PARENT-THREAD-ABC" },
+    });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.resumeToken).toBe("NEW-THREAD-AFTER-TRUST");
+      expect(result.resumeType).toBe("codex_id");
+    }
+
+    const sendTextCalls = (tmux.sendText as ReturnType<typeof vi.fn>).mock.calls;
+    const trustDismissal = sendTextCalls.find((c) => c[1] === "2");
+    expect(trustDismissal).toBeDefined();
+  });
+
+  it("dismisses delayed hook-trust gate surfacing during captureFreshThreadId polling", async () => {
+    const hookReviewContent = [
+      "Hooks need review",
+      "3 hooks are new or changed.",
+      "1. Review hooks",
+      "2. Trust all and continue",
+      "3. Continue without trusting (hooks won't run)",
+    ].join("\n");
+
+    let captureCount = 0;
+    let threadIdAvailable = false;
+    const tmux = {
+      sendText: vi.fn(async (_sess: string, text: string) => {
+        if (text === "2") threadIdAvailable = true;
+        return { ok: true as const };
+      }),
+      hasSession: vi.fn(async () => true),
+      getPaneCommand: vi.fn(async () => "codex"),
+      capturePaneContent: vi.fn(async () => {
+        captureCount++;
+        if (captureCount <= 2) return "OpenAI Codex (v0.0.0)";
+        if (!threadIdAvailable) return hookReviewContent;
+        return "OpenAI Codex (v0.0.0)";
+      }),
+      createSession: vi.fn(async () => ({ ok: true as const })),
+      killSession: vi.fn(async () => ({ ok: true as const })),
+      listSessions: vi.fn(async () => []),
+      listWindows: vi.fn(async () => []),
+      listPanes: vi.fn(async () => []),
+      sendKeys: vi.fn(async () => ({ ok: true as const })),
+      getPanePid: vi.fn(async () => 900),
+    } as unknown as TmuxAdapter;
+
+    const adapter = new CodexRuntimeAdapter({
+      tmux,
+      fsOps: makeMinimalCodexFs(),
+      listProcesses: () => [
+        { pid: 900, ppid: 1, command: "-zsh" },
+        { pid: 901, ppid: 900, command: "codex" },
+      ],
+      readThreadIdByPid: (pid) => (pid === 901 && threadIdAvailable ? "DELAYED-TRUST-THREAD" : undefined),
+      sleep: async () => {},
+    });
+
+    const result = await adapter.launchHarness(makeBinding(), {
+      name: "dev-impl@test-rig",
+      forkSource: { kind: "native_id", value: "PARENT-DELAYED" },
+    });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.resumeToken).toBe("DELAYED-TRUST-THREAD");
+      expect(result.resumeType).toBe("codex_id");
+    }
+
+    const sendTextCalls = (tmux.sendText as ReturnType<typeof vi.fn>).mock.calls;
+    const trustDismissal = sendTextCalls.find((c) => c[1] === "2");
+    expect(trustDismissal).toBeDefined();
+  });
 });
 
 // ============================================================================

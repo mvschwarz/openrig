@@ -60,6 +60,7 @@ export interface ReadinessResult {
 
 export const ATTENTION_REQUIRED_READINESS_CODES = new Set([
   "trust_gate",
+  "hook_trust_gate",
   "update_gate",
   "login_required",
   "mcp_gate",

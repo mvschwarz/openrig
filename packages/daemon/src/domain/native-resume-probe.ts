@@ -162,6 +162,13 @@ export function assessNativeResumeProbe(
         detail: "Codex is waiting for workspace trust approval before the session can become interactive.",
       };
     }
+    if (looksLikeCodexHookReviewPrompt(paneContent)) {
+      return {
+        status: "inconclusive",
+        code: "hook_trust_gate",
+        detail: "Codex is waiting for hook trust approval before the session can become interactive.",
+      };
+    }
     if (paneContent.includes("Update available!") || paneContent.includes("Updating Codex")) {
       return {
         status: "inconclusive",
@@ -288,6 +295,11 @@ function looksLikeCodexAuthRefusal(paneContent: string): boolean {
 function looksLikeCodexTrustPrompt(paneContent: string): boolean {
   return paneContent.includes("Do you trust the contents of this directory?")
     && paneContent.includes("Yes, continue");
+}
+
+function looksLikeCodexHookReviewPrompt(paneContent: string): boolean {
+  return paneContent.includes("Hooks need review")
+    && paneContent.includes("Trust all and continue");
 }
 
 function looksLikeCodexModelSelectionPrompt(paneContent: string): boolean {

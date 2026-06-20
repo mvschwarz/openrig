@@ -230,7 +230,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       if (!enterResult.ok) {
         return { ok: false, error: `Failed to send Enter: ${enterResult.message}` };
       }
-      await this.dismissSkippableCodexUpdatePrompt(binding.tmuxSession);
+      await this.dismissCodexInteractiveGates(binding.tmuxSession);
       const threadId = await this.captureFreshThreadId(binding);
       if (!threadId) {
         return {
@@ -335,6 +335,45 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     }
 
     return false;
+  }
+
+  private async dismissCodexInteractiveGates(tmuxSession: string, attempts = 8): Promise<void> {
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      const paneCommand = await this.tmux.getPaneCommand(tmuxSession);
+      const paneContent = (await this.tmux.capturePaneContent(tmuxSession, 40)) ?? "";
+      const probe = assessNativeResumeProbe({
+        runtime: "codex",
+        paneCommand,
+        paneContent,
+      });
+
+      if (probe.code === "update_gate") {
+        if (!isSkippableCodexUpdatePrompt(paneContent)) return;
+        const textResult = await this.tmux.sendText(tmuxSession, "3");
+        if (!textResult.ok) return;
+        const enterResult = await this.tmux.sendKeys(tmuxSession, ["Enter"]);
+        if (!enterResult.ok) return;
+        await this.sleep(500);
+        continue;
+      }
+
+      if (probe.code === "hook_trust_gate") {
+        const textResult = await this.tmux.sendText(tmuxSession, "2");
+        if (!textResult.ok) return;
+        const enterResult = await this.tmux.sendKeys(tmuxSession, ["Enter"]);
+        if (!enterResult.ok) return;
+        await this.sleep(500);
+        continue;
+      }
+
+      if (probe.status === "resumed" || probe.code === "trust_gate") {
+        return;
+      }
+
+      if (attempt < attempts - 1) {
+        await this.sleep(200);
+      }
+    }
   }
 
   ensureManagedBootstrap(binding: { cwd?: string | null }): void {
@@ -511,7 +550,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
         }
       }
       if (binding.tmuxSession) {
-        await this.dismissSkippableCodexUpdatePrompt(binding.tmuxSession, 1);
+        await this.dismissCodexInteractiveGates(binding.tmuxSession, 1);
       }
       await this.sleep(250);
     }
