@@ -46,6 +46,20 @@ export interface ContinuityAssertion {
   unprovenCapabilities: string[];
 }
 
+// OPR.0.4.0.29 FR-8 — ready-confidence breakdown by the 5 REAL-enum seat
+// classes. Each derives from a real primitive (no invented status): ready /
+// ready_with_caveats / not_ready come from the seat readiness checks;
+// attention_required from node.startupStatus; unknown is the indeterminate
+// remainder. (The fresh-primed/awaiting-decision SPLIT of ready_with_caveats is
+// the deferred/escalated follow-on — NOT emitted here.)
+export interface ReadinessClassCounts {
+  ready: number;
+  ready_with_caveats: number;
+  not_ready: number;
+  attention_required: number;
+  unknown: number;
+}
+
 export interface RigRestoreRollup {
   rigId: string;
   rigName: string;
@@ -55,6 +69,7 @@ export interface RigRestoreRollup {
   runningReadyNodes: number;
   blockedNodes: number;
   caveatNodes: number;
+  classCounts: ReadinessClassCounts;
   blockingChecks: CheckEntry[];
   caveatChecks: CheckEntry[];
 }
@@ -125,6 +140,8 @@ export interface RestoreCheckResult {
   hostInfra: HostInfraAssertion;
   recovery: RecoveryPlan;
   counts: { red: number; yellow: number; green: number };
+  /** OPR.0.4.0.29 FR-8 — fleet-wide ready-confidence breakdown by class. */
+  classCounts: ReadinessClassCounts;
   checks: CheckEntry[];
   repairPacket: RepairStep[] | null;
 }
@@ -133,6 +150,10 @@ export interface RestoreCheckOpts {
   rig?: string;
   noQueue?: boolean;
   noHooks?: boolean;
+  compact?: boolean;
+  /** OPR.0.4.0.29 FR-2: in compact mode, still assemble ready-seat detail so
+   *  `--ready` shows ready seats without dropping to the full firehose. */
+  includeReady?: boolean;
 }
 
 // --- Deps (framework-free per ADR-0001; reads from existing projections per ADR-0002) ---
@@ -250,6 +271,11 @@ export class RestoreCheckService {
 
   check(opts: RestoreCheckOpts): RestoreCheckResult {
     const checks: CheckEntry[] = [];
+    // rev1-r2 no-false-ready: ready-seat caveat signals that default compact
+    // COMPUTES but does NOT emit (AC-4 token-safe) still count toward the
+    // top-level verdict/readiness/counts, so the headline never reports a false
+    // ready while a rig rollup is ready_with_caveats.
+    const deferredAssessmentChecks: CheckEntry[] = [];
     const rigRollupInputs: RigRollupInput[] = [];
     const recoveryRigInputs: RecoveryRigInput[] = [];
 
@@ -319,6 +345,16 @@ export class RestoreCheckService {
         checks.push(readinessCheck);
         rigChecks.push(readinessCheck);
 
+        // OPR.0.4.0.29: in default compact, ready (green) seats SKIP full per-seat
+        // detail assembly — the FR-3/AC-4 compute "look-above" win (transcript,
+        // resume, queue, hooks are NOT probed). But the FR-8 summary still needs
+        // the restore-readiness caveat signal: a running/ready seat whose startup
+        // context is missing/unrestorable is ready_with_caveats, not ready. So we
+        // compute ONLY checkStartupContext for every seat and feed it to the rig
+        // rollup (rigChecks); it is emitted to the top-level `checks` only when we
+        // are not skipping (full, --ready/includeReady, or a non-ready seat).
+        const omitReadyDetail = opts.compact && !opts.includeReady && readinessCheck.status === "green";
+
         const startupContextCheck = this.checkStartupContext(node);
         if ("unknownChecks" in startupContextCheck) {
           return this.buildUnknown([
@@ -326,8 +362,20 @@ export class RestoreCheckService {
             ...startupContextCheck.unknownChecks,
           ]);
         }
-        checks.push(startupContextCheck.check);
         rigChecks.push(startupContextCheck.check);
+        if (omitReadyDetail) {
+          // Not emitted (AC-4 token-safe), but counts toward the top-level
+          // verdict/readiness/counts (rev1-r2 no-false-ready).
+          deferredAssessmentChecks.push(startupContextCheck.check);
+        } else {
+          checks.push(startupContextCheck.check);
+        }
+
+        // AC-4 / FR-3: default compact does NOT assemble the rest of the
+        // ready-seat detail (the genuine compute skip, not a post-assembly hide).
+        if (omitReadyDetail) {
+          continue;
+        }
 
         const transcriptCheck = this.checkTranscript(rig.name, node);
         checks.push(transcriptCheck);
@@ -366,7 +414,7 @@ export class RestoreCheckService {
       });
     }
 
-    return this.buildResult(checks, rigRollups, hostInfraCheck.hostInfra, recoveryRigInputs);
+    return this.buildResult(checks, rigRollups, hostInfraCheck.hostInfra, recoveryRigInputs, deferredAssessmentChecks);
   }
 
   /** Returns CheckEntry on success/definite-down; null on probe exception
@@ -1075,10 +1123,15 @@ export class RestoreCheckService {
     rigs: RigRestoreRollup[],
     hostInfra?: HostInfraAssertion,
     recoveryInputs: RecoveryRigInput[] = [],
+    assessmentExtra: CheckEntry[] = [],
   ): RestoreCheckResult {
-    const red = checks.filter((c) => c.status === "red").length;
-    const yellow = checks.filter((c) => c.status === "yellow").length;
-    const green = checks.filter((c) => c.status === "green").length;
+    // counts + verdict assess the FULL signal (emitted checks + any computed-but-
+    // omitted ready-seat caveats) so default compact never reports a false ready;
+    // repairPacket/recovery still operate on the EMITTED checks (token-safe).
+    const assessed = assessmentExtra.length > 0 ? [...checks, ...assessmentExtra] : checks;
+    const red = assessed.filter((c) => c.status === "red").length;
+    const yellow = assessed.filter((c) => c.status === "yellow").length;
+    const green = assessed.filter((c) => c.status === "green").length;
 
     let verdict: Verdict;
     if (red > 0) {
@@ -1168,6 +1221,14 @@ export class RestoreCheckService {
       },
       continuity,
       rigs,
+      // FR-8: fleet-wide ready-confidence breakdown = sum of the per-rig class counts.
+      classCounts: rigs.reduce<ReadinessClassCounts>((acc, r) => ({
+        ready: acc.ready + r.classCounts.ready,
+        ready_with_caveats: acc.ready_with_caveats + r.classCounts.ready_with_caveats,
+        not_ready: acc.not_ready + r.classCounts.not_ready,
+        attention_required: acc.attention_required + r.classCounts.attention_required,
+        unknown: acc.unknown + r.classCounts.unknown,
+      }), { ready: 0, ready_with_caveats: 0, not_ready: 0, attention_required: 0, unknown: 0 }),
       hostInfra: result.verdict === "unknown"
         ? {
             status: "unknown",
@@ -1355,17 +1416,44 @@ export class RestoreCheckService {
     let runningReadyNodes = 0;
     let blockedNodes = 0;
     let caveatNodes = 0;
+    // FR-8: per-seat class breakdown (each seat counts toward exactly one class).
+    const classCounts: ReadinessClassCounts = { ready: 0, ready_with_caveats: 0, not_ready: 0, attention_required: 0, unknown: 0 };
+    // unknown/no-snapshot derives from the REAL snapshot primitive: the
+    // rig-level `rig.<name>.snapshot` yellow check (no snapshot found / could
+    // not check). A rig with no snapshot cannot be restored, so its seats'
+    // restore-readiness is unknown (not "ready"), per FR-8/AC-7.
+    const rigNoSnapshot = input.checks.some(
+      (check) => check.check === `rig.${input.rig.name}.snapshot` && check.status === "yellow",
+    );
 
     for (const node of input.nodes) {
       const session = node.canonicalSessionName ?? node.logicalId;
       const nodeChecks = input.checks.filter((check) => check.check.startsWith(`seat.${session}.`));
       const hasBlocking = nodeChecks.some((check) => check.status === "red");
       const hasCaveat = nodeChecks.some((check) => check.status === "yellow");
-      if (node.canonicalSessionName && node.sessionStatus === "running" && node.startupStatus === "ready") {
-        runningReadyNodes += 1;
-      }
+      const runningReady = Boolean(node.canonicalSessionName) && node.sessionStatus === "running" && node.startupStatus === "ready";
+      if (runningReady) runningReadyNodes += 1;
       if (hasBlocking) blockedNodes += 1;
       else if (hasCaveat) caveatNodes += 1;
+
+      // FR-8 class derivation (precedence; each from a real primitive).
+      // attention/not_ready WIN FIRST (a failed/attention seat is surfaced even
+      // in a no-snapshot rig); no-snapshot then overrides ONLY ready/caveat (a
+      // clean seat in an unrestorable rig is unknown); a real yellow caveat then
+      // wins over plain ready so the class count matches the per-rig status +
+      // caveatNodes (a running/ready seat with a yellow check is NOT plain ready):
+      //   attention_required ← node.startupStatus
+      //   not_ready          ← a red seat check (failed/down)
+      //   unknown            ← no-snapshot (rig can't restore)
+      //   ready_with_caveats ← a yellow seat check
+      //   ready              ← running/ready, no caveat
+      //   unknown            ← indeterminate remainder
+      if (node.startupStatus === "attention_required") classCounts.attention_required += 1;
+      else if (hasBlocking) classCounts.not_ready += 1;
+      else if (rigNoSnapshot) classCounts.unknown += 1;
+      else if (hasCaveat) classCounts.ready_with_caveats += 1;
+      else if (runningReady) classCounts.ready += 1;
+      else classCounts.unknown += 1;
     }
 
     let verdict: Verdict;
@@ -1390,6 +1478,7 @@ export class RestoreCheckService {
       runningReadyNodes,
       blockedNodes,
       caveatNodes,
+      classCounts,
       blockingChecks,
       caveatChecks,
     };

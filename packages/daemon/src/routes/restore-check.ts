@@ -127,12 +127,15 @@ function getStartupContext(db: Database.Database, nodeId: string): StartupContex
   }
 }
 
-// GET /api/restore-check?rig=<name>&noQueue=true&noHooks=true
+// GET /api/restore-check?rig=<name>&noQueue=true&noHooks=true&compact=1
 restoreCheckRoutes.get("/", (c) => {
   const deps = getDeps(c);
   const rigFilter = c.req.query("rig") ?? undefined;
   const noQueue = c.req.query("noQueue") === "true";
   const noHooks = c.req.query("noHooks") === "true";
+  const compact = c.req.query("compact") === "1";
+  // OPR.0.4.0.29 FR-2: --ready stays compact but INCLUDES ready-seat detail.
+  const includeReady = c.req.query("ready") === "1";
 
   try {
     const serviceDeps: RestoreCheckDeps = {
@@ -168,7 +171,36 @@ restoreCheckRoutes.get("/", (c) => {
     };
 
     const service = new RestoreCheckService(serviceDeps);
-    const result = service.check({ rig: rigFilter, noQueue, noHooks });
+    const result = service.check({ rig: rigFilter, noQueue, noHooks, compact, includeReady });
+
+    if (compact) {
+      const compactResult = {
+        verdict: result.verdict,
+        readiness: result.readiness,
+        counts: result.counts,
+        classCounts: result.classCounts,
+        rigs: result.rigs.map((r) => ({
+          rigId: r.rigId,
+          rigName: r.rigName,
+          status: r.status,
+          verdict: r.verdict,
+          expectedNodes: r.expectedNodes,
+          runningReadyNodes: r.runningReadyNodes,
+          blockedNodes: r.blockedNodes,
+          caveatNodes: r.caveatNodes,
+        })),
+        // --ready (ready=1) keeps the ready-seat checks in compact mode;
+        // default compact drops the green (ready) checks for token safety.
+        checks: includeReady ? result.checks : result.checks.filter((ch) => ch.status !== "green"),
+        recovery: {
+          status: result.recovery.status,
+          summary: result.recovery.summary,
+          actions: result.recovery.actions,
+          blocked: result.recovery.blocked,
+        },
+      };
+      return c.json(compactResult);
+    }
 
     return c.json(result);
   } catch (err) {

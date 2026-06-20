@@ -628,4 +628,20 @@ describe("Restore check routes", () => {
     expect(body.continuity.evidence).toBeTruthy();
     expect(body.continuity.unprovenCapabilities).toContain("provider_session_resume");
   });
+
+  // OPR.0.4.0.29 — compact vs --ready (ready=1) at the PRODUCTION route (finding 3:
+  // exercise restoreCheckRoutes, not a duplicate test-only path).
+  it("?compact=1 drops green checks (token win); ?compact=1&ready=1 keeps the ready detail", async () => {
+    rigRepo.createRig("test-rig");
+
+    const compact = await (await app.request("/api/restore-check?compact=1")).json();
+    // Green checks (e.g. daemon.reachable) are dropped in compact mode.
+    expect(compact.checks.some((c: { check: string }) => c.check === "daemon.reachable")).toBe(false);
+
+    const compactReady = await (await app.request("/api/restore-check?compact=1&ready=1")).json();
+    // --ready (ready=1) keeps the ready-seat (green) detail while staying compact,
+    // NOT dropping to the full firehose (FR-2 corrective).
+    expect(compactReady.checks.some((c: { check: string }) => c.check === "daemon.reachable")).toBe(true);
+    expect(compactReady.checks.length).toBeGreaterThan(compact.checks.length);
+  });
 });

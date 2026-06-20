@@ -140,7 +140,7 @@ describe("rig restore-check", () => {
   it("human output includes verdict + check details + remediation", async () => {
     const { deps } = makeDeps({ result: { verdict: "restorable_with_caveats" } });
     const cmd = restoreCheckCommand(deps);
-    await cmd.parseAsync(["node", "rig"]);
+    await cmd.parseAsync(["node", "rig", "--full"]);
 
     const output = logs.join("\n");
     expect(output).toContain("RESTORE CHECK");
@@ -210,7 +210,7 @@ describe("rig restore-check", () => {
       },
     });
     const cmd = restoreCheckCommand(deps);
-    await cmd.parseAsync(["node", "rig"]);
+    await cmd.parseAsync(["node", "rig", "--full"]);
 
     const output = logs.join("\n");
     expect(output).toContain("READINESS: ready (all_observable_checks_green_host_infra_declared_not_verified)");
@@ -267,7 +267,7 @@ describe("rig restore-check", () => {
       },
     });
     const cmd = restoreCheckCommand(deps);
-    await cmd.parseAsync(["node", "rig"]);
+    await cmd.parseAsync(["node", "rig", "--full"]);
 
     const output = logs.join("\n");
     expect(output).toContain("RESTORABLE WITH CAVEATS");
@@ -326,7 +326,7 @@ describe("rig restore-check", () => {
       ],
     }});
     const cmd = restoreCheckCommand(deps);
-    await cmd.parseAsync(["node", "rig"]);
+    await cmd.parseAsync(["node", "rig", "--full"]);
 
     const output = logs.join("\n");
     expect(output).toContain("Repair steps: 2");
@@ -440,7 +440,7 @@ describe("rig restore-check", () => {
   it("human output has no FULLY BACK line", async () => {
     const { deps } = makeDeps({});
     const cmd = restoreCheckCommand(deps);
-    await cmd.parseAsync(["node", "rig"]);
+    await cmd.parseAsync(["node", "rig", "--full"]);
 
     const output = logs.join("\n");
     expect(output).not.toContain("FULLY BACK");
@@ -475,5 +475,52 @@ describe("rig restore-check", () => {
       expect(rig.status).not.toBe("fully_back");
       expect(rig.status).not.toBe("not_fully_back");
     }
+  });
+});
+
+describe("OPR.0.4.0.29 — --ready is compact + ready detail (not a no-op, not the firehose)", () => {
+  beforeEach(() => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    process.exitCode = undefined;
+  });
+
+  it("--ready keeps compact AND adds ready=1 (regression: FAILS if --ready is a no-op or drops compact)", async () => {
+    const { deps, requestedPaths } = makeDeps({});
+    await restoreCheckCommand(deps).parseAsync(["node", "rig", "--ready"]);
+    expect(requestedPaths[0]).toContain("compact=1");
+    expect(requestedPaths[0]).toContain("ready=1");
+  });
+
+  it("default is compact WITHOUT ready", async () => {
+    const { deps, requestedPaths } = makeDeps({});
+    await restoreCheckCommand(deps).parseAsync(["node", "rig"]);
+    expect(requestedPaths[0]).toContain("compact=1");
+    expect(requestedPaths[0]).not.toContain("ready=1");
+  });
+
+  it("--full drops compact (the firehose); --ready does NOT", async () => {
+    const full = makeDeps({});
+    await restoreCheckCommand(full.deps).parseAsync(["node", "rig", "--full"]);
+    expect(full.requestedPaths[0]).not.toContain("compact=1");
+  });
+});
+
+describe("OPR.0.4.0.29 FR-8 — class breakdown render", () => {
+  let logs: string[];
+  beforeEach(() => {
+    logs = [];
+    vi.spyOn(console, "log").mockImplementation((...a) => logs.push(a.join(" ")));
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    process.exitCode = undefined;
+  });
+
+  it("compact human output renders the 5-class CLASSES line when classCounts is present", async () => {
+    const { deps } = makeDeps({ result: { classCounts: { ready: 3, ready_with_caveats: 1, not_ready: 2, attention_required: 0, unknown: 0 } } });
+    await restoreCheckCommand(deps).parseAsync(["node", "rig"]);
+    const output = logs.join("\n");
+    expect(output).toContain("CLASSES:");
+    expect(output).toContain("3 ready");
+    expect(output).toContain("2 not_ready");
   });
 });
