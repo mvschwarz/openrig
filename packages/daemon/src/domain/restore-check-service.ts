@@ -271,6 +271,11 @@ export class RestoreCheckService {
 
   check(opts: RestoreCheckOpts): RestoreCheckResult {
     const checks: CheckEntry[] = [];
+    // rev1-r2 no-false-ready: ready-seat caveat signals that default compact
+    // COMPUTES but does NOT emit (AC-4 token-safe) still count toward the
+    // top-level verdict/readiness/counts, so the headline never reports a false
+    // ready while a rig rollup is ready_with_caveats.
+    const deferredAssessmentChecks: CheckEntry[] = [];
     const rigRollupInputs: RigRollupInput[] = [];
     const recoveryRigInputs: RecoveryRigInput[] = [];
 
@@ -358,7 +363,13 @@ export class RestoreCheckService {
           ]);
         }
         rigChecks.push(startupContextCheck.check);
-        if (!omitReadyDetail) checks.push(startupContextCheck.check);
+        if (omitReadyDetail) {
+          // Not emitted (AC-4 token-safe), but counts toward the top-level
+          // verdict/readiness/counts (rev1-r2 no-false-ready).
+          deferredAssessmentChecks.push(startupContextCheck.check);
+        } else {
+          checks.push(startupContextCheck.check);
+        }
 
         // AC-4 / FR-3: default compact does NOT assemble the rest of the
         // ready-seat detail (the genuine compute skip, not a post-assembly hide).
@@ -403,7 +414,7 @@ export class RestoreCheckService {
       });
     }
 
-    return this.buildResult(checks, rigRollups, hostInfraCheck.hostInfra, recoveryRigInputs);
+    return this.buildResult(checks, rigRollups, hostInfraCheck.hostInfra, recoveryRigInputs, deferredAssessmentChecks);
   }
 
   /** Returns CheckEntry on success/definite-down; null on probe exception
@@ -1112,10 +1123,15 @@ export class RestoreCheckService {
     rigs: RigRestoreRollup[],
     hostInfra?: HostInfraAssertion,
     recoveryInputs: RecoveryRigInput[] = [],
+    assessmentExtra: CheckEntry[] = [],
   ): RestoreCheckResult {
-    const red = checks.filter((c) => c.status === "red").length;
-    const yellow = checks.filter((c) => c.status === "yellow").length;
-    const green = checks.filter((c) => c.status === "green").length;
+    // counts + verdict assess the FULL signal (emitted checks + any computed-but-
+    // omitted ready-seat caveats) so default compact never reports a false ready;
+    // repairPacket/recovery still operate on the EMITTED checks (token-safe).
+    const assessed = assessmentExtra.length > 0 ? [...checks, ...assessmentExtra] : checks;
+    const red = assessed.filter((c) => c.status === "red").length;
+    const yellow = assessed.filter((c) => c.status === "yellow").length;
+    const green = assessed.filter((c) => c.status === "green").length;
 
     let verdict: Verdict;
     if (red > 0) {

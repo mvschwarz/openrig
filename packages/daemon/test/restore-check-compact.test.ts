@@ -264,4 +264,35 @@ describe("OPR.0.4.0.29 — restore-check compact via service", () => {
     expect(ready.classCounts.ready_with_caveats).toBe(1);
     expect(ready.classCounts.ready).toBe(0);
   });
+
+  // OPR.0.4.0.29 rev1-r2 BLOCKING (qitem-...f13fc5b4): no-false-ready. A skipped
+  // (computed-but-not-emitted) ready-seat startup-context caveat must STILL drive
+  // the top-level verdict/readiness/counts, or default compact reports a false
+  // top-level ready/restorable while the same payload admits a ready_with_caveats
+  // rig. Clean host (green daemon + green host-infra declaration) so the ONLY
+  // non-green signal is the hidden startup-context caveat.
+  it("AC-4 / no-false-ready: a hidden ready-seat caveat drives the top-level verdict/readiness in default compact", () => {
+    const caveatNode = { ...makeReadyNode("dev.impl"), nodeId: "node-caveat" } as NodeInventoryEntry;
+    const hostInfra = JSON.stringify({ schemaVersion: 1, daemonBootstrap: { mechanism: "launchd", declared: true }, supportingInfra: [] });
+    const deps: RestoreCheckDeps = {
+      ...makeDeps([caveatNode]),
+      hasSnapshot: () => true,
+      exists: () => true,
+      readFile: () => hostInfra,
+      probeDaemonHealth: () => ({ healthy: true, evidence: "Daemon running" }),
+      getStartupContext: () => ({ status: "missing" as const, evidence: "Persisted startup context missing" }),
+    };
+    const result = new RestoreCheckService(deps).check({ compact: true });
+
+    // Top-level must NOT be a false ready/restorable.
+    expect(result.verdict).toBe("restorable_with_caveats");
+    expect(result.readiness.status).toBe("ready_with_caveats");
+    expect(result.readiness.caveatRigCount).toBe(1);
+    expect(result.counts.yellow).toBeGreaterThanOrEqual(1);
+    // Rollup + classCounts agree.
+    expect(result.classCounts.ready_with_caveats).toBe(1);
+    expect(result.classCounts.ready).toBe(0);
+    // AC-4 preserved: the startup-context detail ROW is still not emitted.
+    expect(result.checks.some((c) => c.check.endsWith(".startup-context"))).toBe(false);
+  });
 });
