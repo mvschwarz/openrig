@@ -4,6 +4,7 @@ slice: {{slice_number}}-{{slug}}
 mission: {{mission}}
 status: placeholder
 stage: wip
+verified: {{created_date}} against scaffold (rig scope create)
 created: {{created_date}}
 ---
 

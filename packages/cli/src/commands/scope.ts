@@ -36,6 +36,7 @@ import {
   moveSlice,
   nextSliceNN,
   pad2,
+  readFrontmatter,
   resolveMissionsRoot,
   splitFrontmatter,
   todayDateISO,
@@ -49,6 +50,13 @@ import {
   renderSliceTemplate,
   titleFromSlug,
 } from "../lib/scope/templates.js";
+import {
+  addProgressRow,
+  DEFAULT_PROGRESS_SECTION,
+  parseStatus,
+  PROGRESS_STATUSES,
+  setProgressRow,
+} from "../lib/scope/progress-edit.js";
 
 // ---------------------------------------------------------------------
 // Shared helpers
@@ -869,6 +877,240 @@ function extractFrontmatterRaw(content: string): string | null {
 }
 
 // ---------------------------------------------------------------------
+// rig scope <tier> progress  (OPR.0.4.0.33 FR-3 — deterministic update)
+// ---------------------------------------------------------------------
+
+/** Resolve which file a progress update edits for a scope dir: the
+ *  PROGRESS.md when present, else the README's rail for a readme-only
+ *  scope, else an error directing to create/repair (the verb UPDATES an
+ *  existing surface; it does not scaffold). */
+function resolveProgressTarget(scopeDir: string, level: "mission" | "slice"): {
+  targetPath: string;
+  kind: "progress" | "readme-only";
+} {
+  const progressPath = path.join(scopeDir, "PROGRESS.md");
+  if (fs.existsSync(progressPath)) return { targetPath: progressPath, kind: "progress" };
+  const readmePath = path.join(scopeDir, "README.md");
+  if (fs.existsSync(readmePath)) {
+    const fm = readFrontmatter(readmePath);
+    if (String(fm.progress_rail ?? "") === "readme-only") {
+      return { targetPath: readmePath, kind: "readme-only" };
+    }
+  }
+  throw new ScopeCliError({
+    fact: `${level} at ${scopeDir} has no progress surface (no PROGRESS.md and no readme-only rail).`,
+    consequence: "The progress verb updates an existing surface; it does not scaffold.",
+    action: `Backfill it with: rig scope ${level} repair <target> (creates PROGRESS.md), or rig scope ${level} create.`,
+  });
+}
+
+/** Shared body for slice/mission progress: validate the mutually
+ *  exclusive --add/--set modes, edit the resolved surface, write only
+ *  on change. */
+function runProgressUpdate(
+  scopeDir: string,
+  level: "mission" | "slice",
+  scopeName: string,
+  opts: { add?: string; set?: string; section?: string; status?: string },
+  out: Stdout,
+  json: boolean,
+): void {
+  const hasAdd = typeof opts.add === "string";
+  const hasSet = typeof opts.set === "string";
+  if (hasAdd === hasSet) {
+    throw new ScopeCliError({
+      fact: hasAdd
+        ? "Both --add and --set were given."
+        : "Neither --add nor --set was given.",
+      consequence: "No progress update was made.",
+      action: 'Pass exactly one of --add "<row text>" or --set "<row text>".',
+    });
+  }
+  const status = parseStatus(opts.status ?? "active");
+  const { targetPath, kind } = resolveProgressTarget(scopeDir, level);
+  const before = fs.readFileSync(targetPath, "utf8");
+
+  let result: { content: string; changed: boolean };
+  let operation: "add" | "set";
+  if (hasAdd) {
+    operation = "add";
+    result = addProgressRow(before, {
+      section: opts.section ?? DEFAULT_PROGRESS_SECTION,
+      text: opts.add!,
+      status,
+    });
+  } else {
+    operation = "set";
+    result = setProgressRow(before, { text: opts.set!, status });
+  }
+
+  if (result.changed) fs.writeFileSync(targetPath, result.content, "utf8");
+
+  emit(out, {
+    ok: true,
+    progress: {
+      scope: level,
+      name: scopeName,
+      target: targetPath,
+      kind,
+      operation,
+      status,
+      changed: result.changed,
+    },
+  }, json, [
+    `${result.changed ? "Updated" : "No change"} ${level} ${scopeName} progress (${operation})`,
+    `  target: ${targetPath}`,
+    `  status: ${status}`,
+  ]);
+}
+
+function buildSliceProgressCommand(): Command {
+  return new Command("progress")
+    .description("Update a slice's progress rail deterministically (append a row, or set a row's status)")
+    .argument("<slice-path>", "Slice path (absolute, relative, or NN-slug)")
+    .option("--mission <name>", "Hint mission when slice-path is just NN-slug")
+    .option("--add <text>", "Append a checkbox row with this text")
+    .option("--set <text>", "Set the status of the row whose trimmed text exactly matches")
+    .option("--section <heading>", `Section heading for --add (default: ${DEFAULT_PROGRESS_SECTION})`)
+    .option("--status <status>", `Row status: ${PROGRESS_STATUSES.join(" | ")}`, "active")
+    .option("--json", "Machine-readable output")
+    .action(async (slicePath: string, opts, command) => {
+      const out = makeStdout();
+      const json = Boolean(opts.json);
+      try {
+        const missionsRoot = resolveMissionsRoot({ override: getOpts(command).workspace });
+        const slice = findSlice(missionsRoot, slicePath, opts.mission ?? null);
+        runProgressUpdate(slice.absPath, "slice", slice.name, opts, out, json);
+      } catch (err) {
+        fail(err, json, out);
+      }
+    });
+}
+
+function buildMissionProgressCommand(): Command {
+  return new Command("progress")
+    .description("Update a mission's progress rail deterministically (append a row, or set a row's status)")
+    .argument("<mission>", "Mission name")
+    .option("--add <text>", "Append a checkbox row with this text")
+    .option("--set <text>", "Set the status of the row whose trimmed text exactly matches")
+    .option("--section <heading>", `Section heading for --add (default: ${DEFAULT_PROGRESS_SECTION})`)
+    .option("--status <status>", `Row status: ${PROGRESS_STATUSES.join(" | ")}`, "active")
+    .option("--json", "Machine-readable output")
+    .action(async (missionName: string, opts, command) => {
+      const out = makeStdout();
+      const json = Boolean(opts.json);
+      try {
+        const missionsRoot = resolveMissionsRoot({ override: getOpts(command).workspace });
+        const mission = findMission(missionsRoot, missionName);
+        runProgressUpdate(mission.absPath, "mission", mission.name, opts, out, json);
+      } catch (err) {
+        fail(err, json, out);
+      }
+    });
+}
+
+// ---------------------------------------------------------------------
+// rig scope <tier> repair  (OPR.0.4.0.33 FR-6 — idempotent backfill)
+// ---------------------------------------------------------------------
+
+interface BackfillResult {
+  scope: "mission" | "slice";
+  name: string;
+  created: boolean;
+  reason: string;
+  path: string | null;
+}
+
+/** Mirror the create-time title derivation so a backfilled PROGRESS.md
+ *  is byte-identical to what create would have written. */
+function backfillTitle(level: "mission" | "slice", scopeDir: string): string {
+  const base = path.basename(scopeDir);
+  return level === "mission"
+    ? titleFromSlug(base.replace(/^release-/, ""))
+    : titleFromSlug(base.replace(/^\d+-/, ""));
+}
+
+/** Create a missing PROGRESS.md for a single scope dir. Idempotent
+ *  (skips when one exists) and non-clobbering (skips an intentional
+ *  readme-only scope, and skips README-less dirs that are not declared
+ *  scopes). */
+function backfillScopeProgress(scopeDir: string, level: "mission" | "slice"): BackfillResult {
+  const name = path.basename(scopeDir);
+  const readmePath = path.join(scopeDir, "README.md");
+  if (!fs.existsSync(readmePath)) {
+    return { scope: level, name, created: false, reason: "no-readme (not a declared scope)", path: null };
+  }
+  const progressPath = path.join(scopeDir, "PROGRESS.md");
+  if (fs.existsSync(progressPath)) {
+    return { scope: level, name, created: false, reason: "already-present", path: progressPath };
+  }
+  const fm = readFrontmatter(readmePath);
+  if (String(fm.progress_rail ?? "") === "readme-only") {
+    return { scope: level, name, created: false, reason: "readme-only (intentional opt-out)", path: null };
+  }
+  const title = backfillTitle(level, scopeDir);
+  const body = level === "mission"
+    ? renderMissionProgressTemplate(title)
+    : renderSliceProgressTemplate(title);
+  fs.writeFileSync(progressPath, body, "utf8");
+  return { scope: level, name, created: true, reason: "backfilled", path: progressPath };
+}
+
+function buildSliceRepairCommand(): Command {
+  return new Command("repair")
+    .description("Backfill a missing PROGRESS.md for a slice (idempotent; skips readme-only and existing rails)")
+    .argument("<slice-path>", "Slice path (absolute, relative, or NN-slug)")
+    .option("--mission <name>", "Hint mission when slice-path is just NN-slug")
+    .option("--json", "Machine-readable output")
+    .action(async (slicePath: string, opts, command) => {
+      const out = makeStdout();
+      const json = Boolean(opts.json);
+      try {
+        const missionsRoot = resolveMissionsRoot({ override: getOpts(command).workspace });
+        const slice = findSlice(missionsRoot, slicePath, opts.mission ?? null);
+        const result = backfillScopeProgress(slice.absPath, "slice");
+        emit(out, { ok: true, result }, json, [
+          `${result.created ? "Backfilled" : "Skipped"} ${slice.name}: ${result.reason}`,
+          ...(result.path ? [`  path: ${result.path}`] : []),
+        ]);
+      } catch (err) {
+        fail(err, json, out);
+      }
+    });
+}
+
+function buildMissionRepairCommand(): Command {
+  return new Command("repair")
+    .description("Backfill missing PROGRESS.md for a mission and its slices (idempotent; skips readme-only)")
+    .argument("<mission>", "Mission name")
+    .option("--json", "Machine-readable output")
+    .action(async (missionName: string, opts, command) => {
+      const out = makeStdout();
+      const json = Boolean(opts.json);
+      try {
+        const missionsRoot = resolveMissionsRoot({ override: getOpts(command).workspace });
+        const mission = findMission(missionsRoot, missionName);
+        const results: BackfillResult[] = [];
+        results.push(backfillScopeProgress(mission.absPath, "mission"));
+        const slicesDir = path.join(mission.absPath, "slices");
+        if (fs.existsSync(slicesDir)) {
+          for (const entry of fs.readdirSync(slicesDir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+            if (!entry.isDirectory() || !/^\d+-/.test(entry.name)) continue;
+            results.push(backfillScopeProgress(path.join(slicesDir, entry.name), "slice"));
+          }
+        }
+        const created = results.filter((r) => r.created);
+        emit(out, { ok: true, mission: mission.name, created, results }, json, [
+          `Repaired ${mission.name}: ${created.length} PROGRESS.md backfilled`,
+          ...created.map((r) => `  + ${r.scope}/${r.name}`),
+        ]);
+      } catch (err) {
+        fail(err, json, out);
+      }
+    });
+}
+
+// ---------------------------------------------------------------------
 // Aggregate
 // ---------------------------------------------------------------------
 
@@ -884,12 +1126,16 @@ export function scopeCommand(): Command {
   slice.addCommand(buildSliceShipCommand());
   slice.addCommand(buildSliceCloseCommand());
   slice.addCommand(buildSliceMoveCommand());
+  slice.addCommand(buildSliceProgressCommand());
+  slice.addCommand(buildSliceRepairCommand());
   cmd.addCommand(slice);
 
   const mission = new Command("mission").description("Mission-tier commands");
   mission.addCommand(buildMissionLsCommand());
   mission.addCommand(buildMissionShowCommand());
   mission.addCommand(buildMissionCreateCommand());
+  mission.addCommand(buildMissionProgressCommand());
+  mission.addCommand(buildMissionRepairCommand());
   cmd.addCommand(mission);
   cmd.addCommand(buildAuditCommand());
 

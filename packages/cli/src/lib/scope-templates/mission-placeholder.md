@@ -2,6 +2,7 @@
 id: {{id}}
 mission: {{mission}}
 stage: wip
+verified: {{created_date}} against scaffold (rig scope create)
 created: {{created_date}}
 ---
 
