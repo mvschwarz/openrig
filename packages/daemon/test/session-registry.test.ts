@@ -94,6 +94,56 @@ describe("SessionRegistry", () => {
     expect(updated!.resumeToken).toBe("abc-123-def");
   });
 
+  // OPR.0.4.0.22 — operator/attested provenance OUTRANKS hook + scrape.
+  function provenanceOf(sessionId: string): string | null {
+    const row = db.prepare("SELECT resume_provenance FROM sessions WHERE id = ?").get(sessionId) as { resume_provenance: string | null } | undefined;
+    return row?.resume_provenance ?? null;
+  }
+  function tokenOf(sessionId: string): string | null {
+    const row = db.prepare("SELECT resume_token FROM sessions WHERE id = ?").get(sessionId) as { resume_token: string | null } | undefined;
+    return row?.resume_token ?? null;
+  }
+
+  it("operator provenance overwrites an existing hook token", () => {
+    const s = registry.registerSession("node-1", "dev-impl@test-rig");
+    registry.updateResumeToken(s.id, "claude_id", "hook-tok", "hook");
+    registry.updateResumeToken(s.id, "claude_id", "operator-tok", "operator");
+    expect(tokenOf(s.id)).toBe("operator-tok");
+    expect(provenanceOf(s.id)).toBe("operator");
+  });
+
+  it("operator provenance overwrites an existing scrape token", () => {
+    const s = registry.registerSession("node-1", "dev-impl@test-rig");
+    registry.updateResumeToken(s.id, "claude_id", "scrape-tok", "scrape");
+    registry.updateResumeToken(s.id, "claude_id", "operator-tok", "operator");
+    expect(tokenOf(s.id)).toBe("operator-tok");
+    expect(provenanceOf(s.id)).toBe("operator");
+  });
+
+  it("a hook write does NOT clobber an existing operator token (operator outranks hook)", () => {
+    const s = registry.registerSession("node-1", "dev-impl@test-rig");
+    registry.updateResumeToken(s.id, "claude_id", "operator-tok", "operator");
+    registry.updateResumeToken(s.id, "claude_id", "hook-tok", "hook");
+    expect(tokenOf(s.id)).toBe("operator-tok");
+    expect(provenanceOf(s.id)).toBe("operator");
+  });
+
+  it("a scrape write does NOT clobber an existing operator token", () => {
+    const s = registry.registerSession("node-1", "dev-impl@test-rig");
+    registry.updateResumeToken(s.id, "claude_id", "operator-tok", "operator");
+    registry.updateResumeToken(s.id, "claude_id", "scrape-tok", "scrape");
+    expect(tokenOf(s.id)).toBe("operator-tok");
+    expect(provenanceOf(s.id)).toBe("operator");
+  });
+
+  it("preserves the existing rule: scrape does NOT clobber hook", () => {
+    const s = registry.registerSession("node-1", "dev-impl@test-rig");
+    registry.updateResumeToken(s.id, "claude_id", "hook-tok", "hook");
+    registry.updateResumeToken(s.id, "claude_id", "scrape-tok", "scrape");
+    expect(tokenOf(s.id)).toBe("hook-tok");
+    expect(provenanceOf(s.id)).toBe("hook");
+  });
+
   it("clearResumeToken clears stored resume metadata", () => {
     const session = registry.registerSession("node-1", "r01-dev1-impl");
     registry.updateResumeToken(session.id, "claude_id", "abc-123-def");

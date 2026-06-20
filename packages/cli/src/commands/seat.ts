@@ -1,10 +1,18 @@
 import { Command } from "commander";
-import { DaemonClient } from "../client.js";
+import { DaemonClient, terminalAuthHeaders } from "../client.js";
 import { getDaemonStatus, getDaemonUrl } from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 
 export type SeatDeps = StatusDeps;
+
+/** Read all of STDIN to EOF as a UTF-8 string. Used by set-resume-token so the
+ *  credential never appears in argv / shell history / ps. Injectable for tests. */
+async function defaultReadStdin(): Promise<string> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of process.stdin) chunks.push(Buffer.from(chunk));
+  return Buffer.concat(chunks).toString("utf8");
+}
 
 interface SeatStatusResponse {
   seat_ref: string;
@@ -170,13 +178,14 @@ function printSeatError(error: SeatStatusError, fallback: string): void {
   }
 }
 
-export function seatCommand(depsOverride?: SeatDeps): Command {
+export function seatCommand(depsOverride?: SeatDeps & { readStdin?: () => Promise<string> }): Command {
   const cmd = new Command("seat")
     .description("Inspect OpenRig seat observability state");
   const getDeps = (): SeatDeps => depsOverride ?? {
     lifecycleDeps: realDeps(),
     clientFactory: (url: string) => new DaemonClient(url),
   };
+  const readStdin = depsOverride?.readStdin ?? defaultReadStdin;
 
   cmd
     .command("status")
@@ -325,6 +334,61 @@ Examples:
       const clearedBy = res.data["clearedBy"] as string | undefined;
       const from = res.data["from"] as string | undefined;
       console.log(`Cleared ${session}: ${from} -> ready (${clearedBy})`);
+    });
+
+  // OPR.0.4.0.22 — set a managed seat's durable resume token (attested + audited).
+  // The token is read from STDIN ONLY (never a positional argv, which would leak
+  // via shell history + argv/ps) and is NEVER echoed back.
+  cmd
+    .command("set-resume-token")
+    .argument("<session>", "Canonical session name (e.g. dev-impl@my-rig)")
+    .option("--token-stdin", "Read the resume token from STDIN (the only supported input path)")
+    .requiredOption("--reason <text>", "Operator attestation recorded in the append-only audit event")
+    .option("--json", "JSON output for agents")
+    .description("Set a managed seat's durable resume token (token read from stdin; attested + audited)")
+    .addHelpText("after", `
+The token is read from STDIN only (never an argument). Examples:
+  printf '%s' "$RESUME_TOKEN" | rig seat set-resume-token dev-impl@my-rig --token-stdin --reason "founder re-authed"
+  pbpaste | rig seat set-resume-token dev-qa@my-rig --token-stdin --reason "manual codex thread id" --json
+`)
+    .action(async (session: string, opts: { tokenStdin?: boolean; reason: string; json?: boolean }) => {
+      const deps = getDeps();
+      if (!opts.tokenStdin) {
+        console.error("set-resume-token requires --token-stdin: the token is read from stdin, never passed as an argument (it would leak via shell history / ps). Pipe it in, e.g. printf '%s' \"$TOKEN\" | rig seat set-resume-token <session> --token-stdin --reason \"...\".");
+        process.exitCode = 2;
+        return;
+      }
+      const token = (await readStdin()).trim();
+      if (!token) {
+        console.error("No resume token received on stdin.");
+        process.exitCode = 2;
+        return;
+      }
+      const status = await getDaemonStatus(deps.lifecycleDeps);
+      if (status.state !== "running") {
+        console.error("Daemon not running.");
+        process.exitCode = 1;
+        return;
+      }
+      const client = deps.clientFactory(getDaemonUrl(status));
+      const res = await client.post<Record<string, unknown>>(
+        `/api/sessions/${encodeURIComponent(session)}/resume-token`,
+        { token, reason: opts.reason },
+        { headers: terminalAuthHeaders() },
+      );
+      // The token is NEVER echoed in either output mode (the daemon response is
+      // already redacted).
+      if (opts.json) {
+        console.log(JSON.stringify(res.data));
+        if (res.status >= 400) process.exitCode = 1;
+        return;
+      }
+      if (res.status >= 400) {
+        console.error(`error: ${String(res.data["message"] ?? res.data["error"] ?? "unknown")}`);
+        process.exitCode = 1;
+        return;
+      }
+      console.log(`Set resume token for ${session}: ${String(res.data["resumeType"] ?? "")} (provenance: operator). Token redacted.`);
     });
 
   return cmd;
