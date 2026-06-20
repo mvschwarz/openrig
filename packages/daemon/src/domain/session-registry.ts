@@ -15,6 +15,15 @@ interface BindingFields {
   cmuxSurface?: string;
 }
 
+/** Resume-token provenance precedence (OPR.0.4.0.22). Higher rank wins;
+ *  a lower-rank write never overwrites a higher-rank persisted token.
+ *  operator/attested (deliberate set) > hook (runtime) > scrape (pane). */
+export const RESUME_PROVENANCE_RANK: Record<string, number> = {
+  scrape: 0,
+  hook: 1,
+  operator: 2,
+};
+
 export class SessionRegistry {
   readonly db: Database.Database;
   constructor(db: Database.Database) {
@@ -71,12 +80,21 @@ export class SessionRegistry {
     }
   }
 
-  updateResumeToken(sessionId: string, type: string, token: string, provenance?: "hook" | "scrape"): void {
-    if (provenance === "scrape") {
+  // OPR.0.4.0.22 — resume-token provenance precedence. A deliberate
+  // operator/attested set is authoritative and OUTRANKS both the runtime
+  // hook and the pane scrape; hook outranks scrape (the pre-existing rule).
+  // A lower-rank write must never clobber a higher-rank persisted token.
+  updateResumeToken(sessionId: string, type: string, token: string, provenance?: "hook" | "scrape" | "operator"): void {
+    if (provenance) {
       const existing = this.db.prepare(
         "SELECT resume_provenance FROM sessions WHERE id = ?"
       ).get(sessionId) as { resume_provenance: string | null } | undefined;
-      if (existing?.resume_provenance === "hook") return;
+      const existingProv = existing?.resume_provenance ?? null;
+      if (existingProv) {
+        const existingRank = RESUME_PROVENANCE_RANK[existingProv] ?? -1;
+        const newRank = RESUME_PROVENANCE_RANK[provenance] ?? -1;
+        if (newRank < existingRank) return; // lower-rank cannot overwrite higher-rank
+      }
     }
     const prov = provenance ?? null;
     this.db

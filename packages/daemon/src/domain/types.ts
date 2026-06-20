@@ -112,6 +112,11 @@ export type RigEvent =
   | { type: "restore.outcome_reconciled"; rigId: string; nodeId: string; attemptId: number; from: "failed" | "attention_required"; to: "operator_recovered"; evidence: { tmux: boolean; fgProcess: "claude" | "codex" | string; resumeTokenUsed: boolean; paneState: "usable" } | { source: string; reason?: string; kind?: string; state?: string; runtimeCwdVerified?: boolean } }
   | { type: "agent.activity"; rigId: string; nodeId: string; sessionName: string; runtime: string | null; activity: AgentActivity }
   | { type: "agent.session_identity"; rigId: string; nodeId: string; sessionName: string; runtime: string; sessionId: string; provenance: "hook" | "scrape" }
+  // OPR.0.4.0.22 — append-only audit of a managed resume-token write. Emitted
+  // on an operator set (`operator_set`) and on reconcile capture-on-adopt
+  // (`reconcile_capture`). NEVER carries the raw token (credential-class);
+  // `redacted: true` marks that the token value is intentionally omitted.
+  | { type: "session.resume_token_set"; rigId: string; nodeId: string; sessionName: string; sessionId: string; resumeType: string; previousProvenance: "hook" | "scrape" | "operator" | null; newProvenance: "operator" | "scrape"; source: "operator_set" | "reconcile_capture"; reason?: string; operator?: string; redacted: true }
   | { type: "seat.attention_cleared"; rigId: string; nodeId: string; sessionName: string; from: string; to: "ready"; clearedBy: "evidence" | "operator_attestation"; evidence?: { kind: string; state?: string; reason?: string }; reason?: string; previousError: string | null }
   | { type: "rig.imported"; rigId: string; specName: string; specVersion: string }
   // Package events (cross-rig, no rigId)
