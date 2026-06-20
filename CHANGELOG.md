@@ -8,6 +8,74 @@ deprecations, and behavioral changes. Breaking changes are called out explicitly
 
 ---
 
+## [0.4.0] - 2026-06-20
+
+**Status**: wrap-gate CLEAR; lifecycle push / npm publish / tag held for founder-auth.
+
+### Summary For Installing Agents
+
+- **Package version**: bumps from `0.3.4` at the lifecycle wrap step.
+- **Migrations**: additive only; no schema-breaking migrations. Existing v0.3.4 databases upgrade by running `rig daemon start`.
+- **Node engines**: unchanged.
+- **Backward compatibility**: read-command DEFAULTS change (compact-by-default for `rig ps`, `rig whoami`, `rig queue list`, `rig restore-check`, `rig context`); `--full` returns the v0.3.4 default shapes. `rig queue list` adopts docker / kubectl-aligned grammar (`-a` / `-A` / `--full` / `-o json|wide` / `--mine` / `--source` / `--destination`); the prior unscoped firehose default is retired (opt-in via `-A -a --full`). Existing flag forms continue to work and compose with the new grammar.
+
+### Token-Efficient Defaults (headline)
+
+Five read-commands flip from firehose-by-default to compact-by-default — closes a ~225,000-token aggregate context-window cost on aged hosts.
+
+- **`rig ps`** — compact TL;DR per node (slice 25); `--full` for v0.3.4 shape; `--rig <name>` / `--session <sess>` filters. Daemon-side payload source-dedup (slice 26): `recoveryGuidance` no longer duplicated per-node; `contextUsage` compact in list payload.
+- **`rig whoami`** — compact identity-recovery essentials by default (~192 tokens vs ~909); `--full` (alias `--verbose`) returns v0.3.4 payload. Allowlist projection — future fields default to `--full`.
+- **`rig queue list`** — docker / kubectl grammar (slices 28 + 32): `-a` for history, `-A` for cross-rig breadth, `-o json|wide` for encoding, `--mine` / `--source` / `--destination` for scope. Default is active + compact + current-rig.
+- **`rig restore-check`** — summary counts + not-ready seats only by default (slice 29); `--full` for complete per-seat detail. Closes the largest measured bomb (~79,000 → low thousands).
+- **`rig context`** — compact summary by default (slice 30); `--full` for complete payload.
+
+### New Top-Level CLI Verbs and Subcommands
+
+- **`rig skill audit`** (slice 10) — read-only audit of the skill cascade. Detects `missing` / `stale` / `self-referential` / `invalid-date` / `mirror-drift` across canonical → product mirror → hub cwd → installed plugin. False-green prevention: emits `unable-to-audit` exit `2` rather than reporting `clean` when evidence unavailable.
+- **`rig scope mission|slice progress`** (slice 33) — deterministic `PROGRESS.md` updates through the command surface rather than hand-edited markdown. `rig scope mission|slice create` now scaffold `PROGRESS.md` automatically.
+- **`rig seat clear-attention`** extended to derived projection staleness (slice 16) — reaches the second class of projection staleness (`restoreOutcome=failed` on a live ready session) that v0.3.4 couldn't.
+
+### UI + Topology + Identity
+
+- Real (interactive) terminals (slice 01) — per-seat terminals are interactive; read-only 3-second snapshot view retired for local-host seats.
+- Agent Images library polish (slice 07) — Fork-now + row metadata + nested-failure rendering.
+- Attention / activity detection elite tier (slice 09) — richer `agentActivity` consumption.
+- Topology graph-view ghost render fix (slice 21).
+- Reliable active/idle node state (slice 18) — DOT→terminalActive fallback; dead `pane_silence_flag` retired.
+- Multi-host dogfood hardening (slice 02).
+- Native Codex session-identity capture (slice 11) — foundation for 0.4.1 identity refactor.
+- Codex resume preserves approval posture (slice 17).
+- Scope-backed progress rails (slice 15).
+
+### Bug-Fix Wrap
+
+- Wrap convergence fixes (slice 24) — P1 For-You drill captured/live contract + P2 daemon test-harness WebSocket registration.
+
+### Known Limitations / Carry-Forward
+
+- **Plugin-lineage drift in `openrig-core`** — the openrig-core plugin skill lineage is divergent/stale; full re-sync is OPR.0.4.1.4 (rides 0.4.1). Boot-path layers (canonical + hub cwd) verified current in wrap-gate AC-3 sweep. `rig skill audit` (slice 10) is the runtime mechanism for future drift detection.
+- `rig ps --current-rig` default (slice 34) + `rig scope` stage / verified verbs (slice 35) pushed to 0.4.1.
+
+### What To STOP Using
+
+- Stop using `rig ps --nodes --json` as the casual status check assuming v0.3.4 shape; compact default IS the casual check.
+- Stop using bare `rig queue list` as the cross-rig firehose; default is now active + current-rig.
+- Stop using `rig whoami --json` for the heavy payload on boot; default is compact.
+- Stop using `rig restore-check` as a per-seat-detail fleet scan; default is summary + not-ready only.
+- Stop hand-editing `PROGRESS.md` markdown; use `rig scope ... progress`.
+- Stop applying the `token-efficiency-boot-guardrail` pack's CLI-command prohibitions on hosts running 0.4.0 (host-version workarounds; CLI-prohibitions half retires at host-upgrade). The pack's bounded-local-search + scope/over-flag discipline GRADUATE to a standing convention.
+
+### Verification
+
+- Wrap worktree clean on `8d55ea60`.
+- CLI surfaces source-verified against the command modules at the release SHA.
+- CLI→skill cascade sweep: canonical `openrig-work/skills/openrig-user/SKILL.md` → product mirror at `packages/daemon/specs/agents/shared/skills/core/openrig-user/SKILL.md` → hub cwd `.claude/skills/openrig-user/SKILL.md` + `.agents/skills/openrig-user/SKILL.md` — all byte-identical (md5 `e2aa9176`).
+- cli-reference.md updated for 6 changed commands + new `rig skill` section; `last-verified-against-source` bumped to `8d55ea60`.
+- Stale-pattern grep (`dumps everything` / `--notify required` / `rig down 404`) returned 0 hits across active SKILL.md locations.
+- AC-6 self-check evidence: `substrate/shared-docs/openrig-work/missions/release-0.4.0/slices/36-release-durability-close/AC-6-wrap-gate-self-check-evidence.md`.
+
+---
+
 ## [0.3.4] - 2026-06-15
 
 **Status**: released. npm `@openrig/cli@0.3.4` (latest); GitHub Release

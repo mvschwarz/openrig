@@ -9,8 +9,8 @@ applies-when: |
   JSON output, cross-host, coordination primitives.
 siblings: [README.md, architecture/daemon-core.md]
 prerequisite-reads: [README.md]
-last-verified-against-source: 03a5f915
-last-updated: 2026-06-15
+last-verified-against-source: 8d55ea60
+last-updated: 2026-06-20
 ---
 
 # OpenRig CLI Reference
@@ -359,10 +359,13 @@ Notes:
 ### `rig ps`
 
 Usage:
-- `rig ps [--json] [--full] [--limit <n>] [--fields <list>] [--summary] [--filter <key=value>] [--host <id>]`
-- `rig ps --nodes [--json] [--full] [--limit <n>] [--fields <list>] [--summary] [--filter <key=value>] [--active] [--host <id>]`
+- `rig ps [--json] [--full] [--rig <name>] [--session <sess>] [--limit <n>] [--fields <list>] [--summary] [--filter <key=value>] [--host <id>]`
+- `rig ps --nodes [--json] [--full] [--rig <name>] [--session <sess>] [--limit <n>] [--fields <list>] [--summary] [--filter <key=value>] [--active] [--host <id>]`
 
 Notes:
+- **v0.4.0 — compact-by-default**: the default `--json` output is a compact TL;DR projection per node (slice 25): `session`, `rig`, `activity` (state + reason), `assigned` / `pending` counts. Same breadth as today (all visible nodes still listed) — projection-trim, not scope-narrowing. `--full` returns the complete record (raw byte-equivalent passthrough — preserves the prior shape including `tmuxAttachCommand`, `resumeCommand`, `contextUsage`, `agentActivity` full, `restoreOutcome`, etc.). Closes a ~77,000-token status-glance incident at root; even a narrow status check is now cheap.
+- **`--rig <name>` / `--session <sess>` (slice 25)**: narrow the listing further by rig name or canonical session name.
+- **Daemon node-list payload trimmed at source (slice 26)**: `recoveryGuidance` is no longer serialized as near-identical templated prose on every node — relocated to a guidance-by-reference map at the top level so the 4 current consumers still resolve it. `contextUsage` is a compact summary in the list payload (full telemetry remains retrievable per-node via `rig whoami` / detail queries). Even `--full` and the UI consumers stop paying for the redundant per-node blobs.
 - `rig ps` lists rig summaries. Default human columns: `RIG`, `NODES`, `RUNNING`, `STATUS`, `LIFECYCLE`, `UPTIME`, `SNAPSHOT`. The `LIFECYCLE` column shows the rig-level fold of per-node lifecycle states with codes `run`/`rec`/`stp`/`deg`/`att`.
 - `rig ps --nodes` expands into a cross-rig node inventory. Default human columns include `STATUS`, `STARTUP`, `LIFECYCLE`, `ACTIVITY`, `RESTORE`, `ERROR` so startup-time and live runtime state can be compared side-by-side without composing a separate diagnostic command.
 - JSON output for both rig and node tiers includes a `rigName` alias (equal to `name`) for forward compatibility; agent code should prefer `rigName`. Default `--json` is a bare array (back-compat); the envelope shape `{entries, totalRigs|totalNodes, truncated, hint?}` is only used when `--limit`, `--fields`, `--summary`, or `--filter` is set.
@@ -399,10 +402,12 @@ Notes:
 
 ### `rig restore-check`
 
-Usage: `rig restore-check [--rig <name>] [--no-queue] [--no-hooks] [--json]`
+Usage: `rig restore-check [--rig <name>] [--as <session>] [--full] [--no-queue] [--no-hooks] [--json]`
 
 Notes:
-- Checks restore readiness across running rigs (or one rig with `--rig`).
+- Checks restore readiness across running rigs (or one rig with `--rig` / one seat with `--as`).
+- **v0.4.0 — summary + not-ready default (slice 29)**: default output is a summary block (total seats / ready / not-ready / error-degraded counts) PLUS only the **not-ready** seats listed compactly (seat + readiness reason). `--full` (or `--json --full`) returns today's complete per-seat readiness across the fleet. The daemon skips per-seat detail assembly for ready seats when compact (computes verdict, omits detail). Closes the largest measured token bomb on the read-command surface (~79,000 tokens → low thousands).
+- The summary default correctly identifies EVERY not-ready seat (no false-ready omission) — the actionable signal is lossless even though detail is dropped for ready seats.
 - `--no-queue` skips queue file checks; `--no-hooks` skips hook checks.
 - Exit codes: `0` restorable (or restorable with caveats), `1` not restorable (red blockers found), `2` unknown / probe error.
 
@@ -682,7 +687,7 @@ Notes:
 
 ### `rig whoami`
 
-Usage: `rig whoami [--node-id <id>] [--session <name>] [--host <id>] [--json]`
+Usage: `rig whoami [--node-id <id>] [--session <name>] [--host <id>] [--full | --verbose] [--json]`
 
 Identity resolution order:
 1. `--node-id`
@@ -694,11 +699,14 @@ Identity resolution order:
 7. raw tmux session name
 
 Notes:
+- **v0.4.0 — compact-by-default (slice 27)**: `rig whoami` and `rig whoami --json` default to identity-recovery essentials only — `identity` (rig / pod / member / sessionName / runtime / cwd / logicalId / ids), `peers` (names only: logicalId + sessionName per peer), `edges` (directional `kind` + `to.sessionName`), `transcriptPath`. Daemon skips the `contextUsageStore` lookup and `runtimeContext` build when compact is requested (also saves daemon work). The first command every agent runs on boot + every compaction-restore now costs ~192 tokens instead of ~909.
+- **`--full` (alias `--verbose`)** returns today's complete payload including `contextUsage`, `commands`, `peersNote`, `runtimeContext` — byte / shape parity with the v0.3.4 default (back-compat for any consumer that reads those fields).
+- The compact-default is an ALLOWLIST projection (not a denylist) — future payload fields default to `--full` and cannot silently re-bloat the every-boot path.
 - If the daemon is unreachable but an identity source can still be resolved, `--json` returns a partial result instead of crashing.
-- Human-readable output includes transcript location and context usage when available.
+- Human-readable output (compact default) shows identity + peers + edges + transcript path. `--full` adds context usage block, commands list, peersNote prose, runtimeContext.
 - `peers[]` is this rig's roster excluding self (no edge filter); use `edges{}` for directional relationships and `rig ps --nodes` for node inventory including self + live state.
 - In Claude Code projects, unattended `rig whoami` on boot may require the local permissions allow list to include `Bash(rig:*)`.
-- `--host <id>` routes the same command to a remote host declared in `~/.openrig/hosts.yaml` via single-hop ssh (CLI-side shell-out; daemon untouched). Identity resolution happens on the REMOTE rig (each host has its own daemon + tmux + identity context); local `--node-id`/`--session` flags are forwarded to the remote `rig whoami` invocation. The remote rig's output is verbatim passthrough on success; failure is distinguished into the same `ssh-unreachable` / `permission-gate` / `remote-daemon-unreachable` / `remote-command-failed` enum as `rig ps --host` and `rig send --host`.
+- `--host <id>` routes the same command to a remote host declared in `~/.openrig/hosts.yaml` via single-hop ssh (CLI-side shell-out; daemon untouched). Identity resolution happens on the REMOTE rig (each host has its own daemon + tmux + identity context); local `--node-id`/`--session`/`--full` flags are forwarded to the remote `rig whoami` invocation. The remote rig's output is verbatim passthrough on success; failure is distinguished into the same `ssh-unreachable` / `permission-gate` / `remote-daemon-unreachable` / `remote-command-failed` enum as `rig ps --host` and `rig send --host`.
 
 ### `rig transcript`
 
@@ -850,7 +858,16 @@ Subcommands:
 - `fallback <qitemId> --destination <session> [--reason <text>] [--json]` — reroute to fallback seat
 - `show <qitemId> [--json]`
 - `transitions <qitemId> [--json]` — append-only transition log
-- `list [--destination <session>] [--source <session>] [--state <csv>] [--limit <n>] [--json]`
+- `list [--destination <session>] [--source <session>] [--mine] [--state <csv>] [-a | --all] [-A | --all-rigs] [--full] [-o <json|wide>] [--limit <n>] [--json]` — **v0.4.0 grammar (slices 28 + 32, docker / kubectl-aligned)**:
+  - **`rig queue list`** (no flags) → active states only (`pending` / `in-progress` / `claimed` / `blocked` / `handed-off`; NOT `done` / `canceled`), **current-rig** breadth, compact rows: `qitemId`, `state`, `source→destination` (or `current-owner`), `closure_reason` / `closure_target` (when handed-off / blocked), `mission`, `slice`, `tier` / `priority`, `age` / `updated_at`, short title, capped tags. Excludes: full body, chain_of_record, transition history, proof / artifact blobs.
+  - **`-a` / `--all`** → include closed / done history within the current breadth (docker `-a` axis: history).
+  - **`-A` / `--all-rigs`** → cross-rig breadth (kubectl `-A` axis: breadth). Composable with `-a`, `--mine`, `--full`.
+  - **`--full`** → add body + chain-of-record + full tags + transition history to whichever scope is selected (field-breadth axis).
+  - **`-o json|wide`** → encoding, compact-by-default. `-o json` does NOT imply full body (compact JSON is token-safe + machine-parseable); `--full -o json` returns the full JSON.
+  - **`--mine`** → just the caller's items.
+  - `--destination <s>` / `--source <s>` / `--state <csv>` keep working and compose with the new flags.
+  - The four axes (scope × history × field-breadth × encoding) are orthogonal and composable. The bare unscoped firehose that aggregated cross-rig + full-history (~64,000 tokens on the live host) is retired as a default — opt-in via `-A -a --full`.
+  - Use `rig queue show <qitemId>` for the full single-item view (kubectl `describe` / docker `inspect` pattern).
 - `overdue [--json]` — in-progress qitems past closure_required_at
 - `inbox-drop <destinationSession> --sender <session> --body <text> [--tags <csv>] [--urgency <u>] [--audit <pointer>] [--id <inboxId>] [--json]`
 - `inbox-absorb <inboxId> --receiver <session> [--json]` — promote a pending inbox entry to a queue_item
@@ -948,10 +965,11 @@ Read-only inspection commands for context-window state, compaction planning, wor
 
 ### `rig context`
 
-Usage: `rig context [--rig <name>] [--threshold <pct>] [--refresh] [--json]`
+Usage: `rig context [--rig <name>] [--threshold <pct>] [--refresh] [--full] [--json]`
 
 Notes:
 - Shows context-window usage across running agents.
+- **v0.4.0 — compact-by-default (slice 30)**: default emits a compact summary (the few fields the common use needs); `--full` (or `--full --json`) returns today's complete current payload. Daemon skips the expensive aggregation when compact. Lower leverage than 28 / 29 but keeps the read-command surface compact-by-default after the upgrade.
 - `--rig <name>` narrows to a single rig; `--threshold <pct>` filters to seats at or above the percent (plus unknown + stale).
 - `--refresh` re-samples context usage before displaying instead of reading the latest cached snapshot.
 
@@ -1090,7 +1108,8 @@ Two subcommand groups: `slice` and `mission`.
 `rig scope slice <subcommand>` — slice-tier commands:
 - `ls [--mission <name>] [--state <state>] [--json]` — list slices in a mission (or across all missions). `--state` filter: `active | closed | shipped | all` (default `active`).
 - `show <slice-path> [--mission <name>] [--json]` — inspect a single slice (frontmatter + README + children). `slice-path` is absolute, relative-to-substrate, or `NN-slug`; `--mission` hints the mission when path is just `NN-slug`.
-- `create <mission> <slug> [--template <kind>] [--title <text>] [--json]` — create a new slice in a mission. `--template` default `placeholder`.
+- `create <mission> <slug> [--template <kind>] [--title <text>] [--json]` — create a new slice in a mission. `--template` default `placeholder`. **v0.4.0 (slice 33)**: scaffolds a canonical `PROGRESS.md` (the structure the OpenRig PROGRESS UI page parses) plus a convention-correct README with proper frontmatter per `conventions/scope-and-versioning/README.md`, for EVERY template. Fixes the v0.3.x bug where newly-created slices were missing `PROGRESS.md` entirely.
+- `progress <slice-path> [--mission <name>] [--status <state>] [--milestone <text>] [--owner <session>] [--note <text>] [--json]` — **v0.4.0 (slice 33)** new verb: append / set / update progress entries deterministically. Writes the canonical structure the OpenRig PROGRESS UI page reads. Replaces hand-editing `PROGRESS.md` with markdown.
 - `ship <slice-path> <release-mission> [--mission <name>] [--json]` — ship a slice to a release mission (preserves git history).
 - `close <slice-path> [--note <text>] [--mission <name>] [--json]` — close a slice (move to `<mission>/closed/`, update status). `--note` is an optional closure note.
 - `move <slice-path> <dest-mission> [--mission <name>] [--json]` — move a slice between missions (re-numbers in destination).
@@ -1098,10 +1117,40 @@ Two subcommand groups: `slice` and `mission`.
 `rig scope mission <subcommand>` — mission-tier commands:
 - `ls [--json]` — list missions (top-level folders with `README.md`).
 - `show <mission> [--json]` — inspect a single mission.
-- `create <name> [--template <kind>] [--id <dot-id>] [--title <text>] [--json]` — create a new mission (mints a stable dot-ID into frontmatter). `--template` auto-selects when name matches `release-X.Y.Z`; `--id` overrides name-pattern inference.
+- `create <name> [--template <kind>] [--id <dot-id>] [--title <text>] [--json]` — create a new mission (mints a stable dot-ID into frontmatter). `--template` auto-selects when name matches `release-X.Y.Z`; `--id` overrides name-pattern inference. **v0.4.0 (slice 33)**: scaffolds a canonical `PROGRESS.md` plus a convention-correct README with proper frontmatter, per `conventions/scope-and-versioning/README.md`. Fixes the v0.3.x bug where newly-created missions were missing `PROGRESS.md` entirely.
+- `progress <mission> [--status <state>] [--milestone <text>] [--owner <session>] [--note <text>] [--json]` — **v0.4.0 (slice 33)** new verb: append / set / update progress entries on a mission's `PROGRESS.md` deterministically. UI-valid by construction.
 
 Notes:
-- Surface source-verified against `packages/cli/src/commands/scope.ts` at `53794fbe` (v0.3.3).
+- Surface source-verified against `packages/cli/src/commands/scope.ts` at `8d55ea60` (v0.4.0).
+
+## Skill Cascade Audit (v0.4.0)
+
+One top-level command first shipped in v0.4.0 (slice 10 — skill / knowledge lifecycle curation, Hermes-informed). Defined in `packages/cli/src/commands/skill.ts`. Pairs with the daemon-side audit surface at `packages/daemon/src/routes/skills/audit.ts` + `mirror-drift` detection.
+
+### `rig skill`
+
+Usage: `rig skill <subcommand>`
+
+Subcommands:
+- `audit [--json] [--include-cache] [--severity <level>] [--rig <name>]` — read-only audit of the skill cascade. Detects provenance + freshness issues across the canonical → product mirror → hub cwd → installed plugin chain.
+
+Audit categories surfaced:
+- **`missing`** — a skill location in the cascade lacks a SKILL.md file but a sibling location has one (declares the cascade-relative gap).
+- **`stale`** — a SKILL.md file exists but is older than the canonical or has a content-hash mismatch.
+- **`self-referential`** — a SKILL.md provenance pointer references its own location instead of an upstream source.
+- **`invalid-date`** — frontmatter `last-verified` / `last-updated` is malformed or in the future.
+- **`mirror-drift`** — a downstream mirror copy diverges from canonical with no documented intentional fork.
+
+Notes:
+- **Read-only**: the audit does NOT mutate any skill file. Findings are routed back to the lifecycle (curation-steward) for shaped propagation runs.
+- **False-green prevention**: when mirror-drift evidence is unavailable for any reason (daemon offline, filesystem inaccessible), the CLI emits a clear `unable-to-audit` outcome with exit code `2` rather than reporting `clean`. This closes the failure mode the v0.3.4 wrap-gate AC-3 almost shipped ("Mirror sync verified via `npm run mirror-skills` clean" — that sync did not touch substrate canonical or hub cwd).
+- `--include-cache` includes packaged-installer cache copies in the audit (default skips because those are immutable post-ship).
+- `--severity <level>` filters output: `info` (default; everything), `warn` (stale + mirror-drift only), `error` (invalid-date + self-referential only).
+- `--rig <name>` narrows the audit to a single rig's embedded skill copies.
+- `--json` emits structured findings: `{cascade: [...locations...], findings: [{category, path, evidence, suggested-action}]}`.
+- Exit codes: `0` clean, `1` findings present, `2` unable to audit.
+
+Composes with the existing `scripts/mirror-skills.mjs` guardrails — the audit detects what `mirror-skills` would also catch, plus the canonical / hub cwd layers that script doesn't touch.
 
 ## Operator Context-Mode Bindings (v0.3.2)
 

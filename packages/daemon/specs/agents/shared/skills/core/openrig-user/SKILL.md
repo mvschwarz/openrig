@@ -429,11 +429,114 @@ cmux-backed launches no longer produce silent partial workspace state. When
 parts of the workspace are missing, the launch surfaces partial state
 honestly and the UI exposes a one-click open-missing affordance.
 
+(See also `## Token-Efficient Defaults (v0.4.0+)` below for the compact-by-default read-command surface that lands in 0.4.0.)
+
+## Token-Efficient Defaults (v0.4.0+)
+
+v0.4.0 flips the five most frequently invoked read-commands from firehose-by-default to compact-by-default, and `rig queue list` adopts the docker / kubectl read-command grammar. **All defaults preserve breadth and capability — the firehose is one explicit flag away.**
+
+### `rig ps` — compact-by-default + `--full`
+
+```bash
+rig ps                      # compact rig summaries (default)
+rig ps --json               # compact array (TL;DR per node: session, rig, activity, assigned/pending)
+rig ps --nodes              # compact node inventory
+rig ps --nodes --full       # complete record (the v0.3.4 default shape)
+rig ps --nodes --rig <name> # narrow to one rig
+rig ps --nodes --session <sess>  # narrow to one canonical session
+```
+
+Same breadth as v0.3.4 — all visible nodes still listed. The change is **projection-trim, not scope-narrowing**. Default emits the 80/20 a status glance needs; `--full` returns the complete per-node record (raw byte-equivalent passthrough). Daemon-side payload source-dedup (slice 26) means `recoveryGuidance` is no longer duplicated per-node (relocated to a top-level guidance-by-reference map) — even `--full` benefits.
+
+**STOP using `rig ps --nodes --json` as the casual status check assuming the v0.3.4 shape.** The v0.4.0 default IS the casual check; explicit `--full` is the firehose. The ~77,000-token status-glance incident is closed.
+
+### `rig whoami` — compact-by-default + `--full` (`--verbose` alias)
+
+```bash
+rig whoami                  # compact: identity + peers names + edges + transcript path
+rig whoami --json           # compact JSON (~192 tokens)
+rig whoami --full           # complete payload (~909 tokens; v0.3.4 default shape)
+rig whoami --verbose        # alias of --full
+```
+
+The first command every agent runs on boot AND every compaction-restore. The compact default keeps identity-recovery essentials (`identity`, `peers` names + sessionNames, `edges` directional `kind` + `to.sessionName`, `transcriptPath`). `--full` adds `contextUsage`, `commands`, `peersNote`, `runtimeContext`. The compact-default is an ALLOWLIST projection — future payload fields default to `--full` and cannot silently re-bloat the every-boot path.
+
+### `rig queue list` — active-frontier + docker/kubectl grammar
+
+```bash
+rig queue list                       # active, compact, CURRENT-rig (docker-ps default)
+rig queue list -a                    # + closed/done history within current breadth (docker -a)
+rig queue list -A                    # cross-rig breadth (kubectl -A)
+rig queue list --full                # add body + chain-of-record + transition history
+rig queue list -o json               # compact JSON (token-safe, machine-parseable)
+rig queue list --full -o json        # full JSON
+rig queue list --mine                # just the caller's items
+rig queue list --destination <s>     # destined to <s>
+rig queue list --source <s>          # sourced by <s>
+rig queue show <qitemId>             # full single item (kubectl describe)
+```
+
+Four orthogonal axes (scope × history × field-breadth × encoding), all composable. **STOP using bare `rig queue list` as the cross-rig firehose.** Default is now active + compact + current-rig. The cross-rig + history + full-body firehose (the ~64,000-token bomb on this host) is opt-in via `-A -a --full`.
+
+### `rig restore-check` — summary + not-ready-only default + `--full`
+
+```bash
+rig restore-check               # summary counts + not-ready seats (with reasons) only
+rig restore-check --full        # complete per-seat readiness across the fleet (v0.3.4 default)
+rig restore-check --rig <name>  # narrow
+rig restore-check --as <session>  # narrow to one seat
+```
+
+Closes the largest measured bomb (~79,000 → low thousands). Summary correctly identifies EVERY not-ready seat (no false-ready omission); detail is dropped only for ready seats.
+
+### `rig context` — compact summary + `--full`
+
+```bash
+rig context                # compact summary
+rig context --full         # complete current payload
+rig context --rig <name>   # narrow to one rig
+rig context --threshold 80 # filter to seats at/above 80%
+```
+
+Lower leverage than the others but keeps the read-command surface compact-by-default after the upgrade.
+
+### Why this matters
+
+This release closes the host-version-aged token-burn class: on this host the read-commands accumulated to ~225,000 tokens of context-window cost over a typical orchestrator session, almost all of it firehose-when-a-glance-was-wanted. Compact defaults restore the lean-monitoring doctrine: a narrow status check must be cheap. The full payloads remain one flag away when actually needed.
+
+### Token-efficiency-boot-guardrail pack (interim) — CLI-prohibitions RETIRE at host-upgrade
+
+The interim `token-efficiency-boot-guardrail` pack (the CLI-command prohibitions on `rig queue list` unfiltered, `rig ps --nodes --json` unfiltered, `rig restore-check`, `rig context`, `rig whoami --json`) is a host-version workaround for the bloated defaults this release closes. **The CLI-command-prohibitions half retires when 0.4.0 lands on the host.** The pack's bounded-local-search rule + scope / over-flag discipline GRADUATE to a standing convention (`conventions/bounded-local-search-and-flag-scope`) and continue to apply host-independently.
+
+### `rig scope mission|slice progress` — deterministic progress updates (slice 33)
+
+```bash
+rig scope mission progress <mission> --status <state> --milestone <text>
+rig scope slice progress <slice-path> --status <state> --note <text>
+```
+
+Replaces hand-editing `PROGRESS.md` with markdown. Writes the canonical structure the OpenRig PROGRESS UI page reads. `rig scope mission create` + `rig scope slice create` now scaffold `PROGRESS.md` automatically per `conventions/scope-and-versioning/README.md`.
+
+### `rig skill audit` — skill cascade provenance (slice 10)
+
+```bash
+rig skill audit                  # human report of findings
+rig skill audit --json           # structured findings
+rig skill audit --severity warn  # stale + mirror-drift only
+rig skill audit --rig <name>     # narrow to embedded skill copies for one rig
+```
+
+Read-only audit of the skill cascade. Detects `missing` / `stale` / `self-referential` / `invalid-date` / `mirror-drift` across the canonical `openrig-work/skills/` → product mirror → hub cwd → installed plugin chain. Findings route back to the lifecycle for shaped propagation runs. **False-green prevention**: when audit evidence is unavailable, the CLI emits `unable-to-audit` with exit code `2` rather than reporting `clean`.
+
+### `rig seat clear-attention` — extended to derived projection staleness (slice 16)
+
+v0.3.4 shipped `clear-attention` gating on `session.startupStatus` only. v0.4.0 extends the verb to also reach **restoreOutcome-derived** attention (seat is `startupStatus=ready` + `sessionStatus=running` but carries `restoreOutcome=failed` / `continuityOutcome=failed`). Same evidence-gated audit row applies; the `--reason <text>` operator-attestation override carries the runtime / cwd-uncertainty disclosure honestly.
+
 ## Core Loop
 
 Most work in OpenRig reduces to this loop:
-- recover identity: `rig whoami --json`
-- inspect inventory: `rig ps --nodes --json`
+- recover identity: `rig whoami` (compact default; add `--full` only when you need the heavy payload)
+- inspect inventory: `rig ps --nodes` (compact default; add `--full` only when you need the firehose)
 - read context: `rig transcript ...`, `rig ask ...`, `rig chatroom history ...`
 - act: `rig send`, `rig capture`, `rig broadcast`, lifecycle commands
 
