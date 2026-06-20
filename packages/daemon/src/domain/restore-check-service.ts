@@ -340,14 +340,14 @@ export class RestoreCheckService {
         checks.push(readinessCheck);
         rigChecks.push(readinessCheck);
 
-        // OPR.0.4.0.29: default compact OMITS ready-seat detail from the EMITTED
-        // output (the token win), but it must NOT skip COMPUTING the per-seat
-        // caveat/blocking signals — the rig rollup (status + classCounts) needs
-        // them to count a running/ready seat with a real yellow caveat as
-        // ready_with_caveats (and a failed seat as not_ready). So compute the
-        // detail for every seat and feed it to the rollup (rigChecks); emit it to
-        // the top-level `checks` only when NOT skipping (full, --ready/includeReady,
-        // or a non-ready seat). A probe error still surfaces honest unknown.
+        // OPR.0.4.0.29: in default compact, ready (green) seats SKIP full per-seat
+        // detail assembly — the FR-3/AC-4 compute "look-above" win (transcript,
+        // resume, queue, hooks are NOT probed). But the FR-8 summary still needs
+        // the restore-readiness caveat signal: a running/ready seat whose startup
+        // context is missing/unrestorable is ready_with_caveats, not ready. So we
+        // compute ONLY checkStartupContext for every seat and feed it to the rig
+        // rollup (rigChecks); it is emitted to the top-level `checks` only when we
+        // are not skipping (full, --ready/includeReady, or a non-ready seat).
         const omitReadyDetail = opts.compact && !opts.includeReady && readinessCheck.status === "green";
 
         const startupContextCheck = this.checkStartupContext(node);
@@ -357,15 +357,32 @@ export class RestoreCheckService {
             ...startupContextCheck.unknownChecks,
           ]);
         }
-        const seatDetail: CheckEntry[] = [startupContextCheck.check];
-        seatDetail.push(this.checkTranscript(rig.name, node));
-        seatDetail.push(this.checkResumePath(node));
-        if (!opts.noQueue) seatDetail.push(this.checkQueueFile(rig.name, node));
-        if (!opts.noHooks) seatDetail.push(this.checkHooks(node));
+        rigChecks.push(startupContextCheck.check);
+        if (!omitReadyDetail) checks.push(startupContextCheck.check);
 
-        for (const detailCheck of seatDetail) {
-          rigChecks.push(detailCheck);
-          if (!omitReadyDetail) checks.push(detailCheck);
+        // AC-4 / FR-3: default compact does NOT assemble the rest of the
+        // ready-seat detail (the genuine compute skip, not a post-assembly hide).
+        if (omitReadyDetail) {
+          continue;
+        }
+
+        const transcriptCheck = this.checkTranscript(rig.name, node);
+        checks.push(transcriptCheck);
+        rigChecks.push(transcriptCheck);
+
+        const resumeCheck = this.checkResumePath(node);
+        checks.push(resumeCheck);
+        rigChecks.push(resumeCheck);
+
+        if (!opts.noQueue) {
+          const queueCheck = this.checkQueueFile(rig.name, node);
+          checks.push(queueCheck);
+          rigChecks.push(queueCheck);
+        }
+        if (!opts.noHooks) {
+          const hooksCheck = this.checkHooks(node);
+          checks.push(hooksCheck);
+          rigChecks.push(hooksCheck);
         }
       }
 

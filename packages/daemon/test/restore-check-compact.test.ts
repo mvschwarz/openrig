@@ -230,4 +230,38 @@ describe("OPR.0.4.0.29 — restore-check compact via service", () => {
     // Token-safe: default compact does NOT dump the ready seat's detail rows.
     expect(result.checks.some((c) => c.check.endsWith(".startup-context"))).toBe(false);
   });
+
+  // OPR.0.4.0.29 code-review BLOCKING (qitem-...4f06e820): AC-4/FR-3 require the
+  // daemon to SKIP full ready-seat detail assembly in default compact, not just
+  // hide it after assembling. Default compact computes ONLY the startup-context
+  // caveat signal the FR-8 summary needs; transcript/resume/queue/hooks are NOT
+  // assembled for a green ready seat. Behavioral no-call proof: a green ready
+  // seat with a CLEAN startup context but NO attach command. If default compact
+  // assembled detail it would run checkResumePath -> a yellow resume-path caveat
+  // -> ready_with_caveats. Skipping it keeps the seat plain ready.
+  it("AC-4: default compact does NOT assemble full ready-seat detail (resume/transcript/queue/hooks) for a green ready seat", () => {
+    const cleanReadyNoAttach = { ...makeReadyNode("dev.impl"), nodeId: "node-clean", tmuxAttachCommand: undefined } as NodeInventoryEntry;
+    const deps: RestoreCheckDeps = {
+      ...makeDeps([cleanReadyNoAttach]),
+      hasSnapshot: () => true,
+      exists: () => true,
+      probeDaemonHealth: () => ({ healthy: true, evidence: "Daemon running" }),
+      // ok startup context -> startup-context is GREEN, so it is NOT the caveat.
+      getStartupContext: () => ({ status: "ok" as const, runtime: null, resolvedStartupFiles: [], projectionEntries: [] }),
+    };
+
+    // Default compact: resume-path (and the rest of the detail) is NOT assembled,
+    // so the missing attach command produces no caveat -> plain ready.
+    const compact = new RestoreCheckService(deps).check({ compact: true });
+    expect(compact.classCounts.ready).toBe(1);
+    expect(compact.classCounts.ready_with_caveats).toBe(0);
+    expect(compact.rigs.find((r) => r.rigName === "test-rig")!.status).toBe("ready");
+
+    // --ready/includeReady DOES assemble detail -> the missing attach command is
+    // a yellow resume-path caveat -> ready_with_caveats. Proves the detail set is
+    // real and only the default-compact path skips it.
+    const ready = new RestoreCheckService(deps).check({ compact: true, includeReady: true });
+    expect(ready.classCounts.ready_with_caveats).toBe(1);
+    expect(ready.classCounts.ready).toBe(0);
+  });
 });
