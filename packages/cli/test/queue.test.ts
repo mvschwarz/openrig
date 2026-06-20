@@ -652,7 +652,7 @@ describe("rig queue CLI", () => {
 
   it("list constructs /api/queue/list with filter params", async () => {
     const { deps, calls } = makeDeps({
-      routes: { "GET /api/queue/list?destinationSession=bob%40rig&state=pending&limit=50": { status: 200, data: [] } },
+      routes: { "GET /api/queue/list?compact=1&destinationSession=bob%40rig&state=pending&limit=50": { status: 200, data: [] } },
     });
     const program = createProgram({ queueDeps: deps });
     program.exitOverride();
@@ -668,5 +668,73 @@ describe("rig queue CLI", () => {
     expect(call!.path).toContain("destinationSession=bob%40rig");
     expect(call!.path).toContain("state=pending");
     expect(call!.path).toContain("limit=50");
+    expect(call!.path).toContain("compact=1");
+    expect(call!.path).not.toContain("as=");
+  });
+
+  it("list --all sends no as and no compact (full firehose parity)", async () => {
+    const { deps, calls } = makeDeps();
+    const program = createProgram({ queueDeps: deps });
+    program.exitOverride();
+    await program.parseAsync(["node", "rig", "queue", "list", "--all", "--json"]);
+    const call = calls.find((c) => c.method === "GET" && c.path.startsWith("/api/queue/list"));
+    expect(call).toBeDefined();
+    expect(call!.path).not.toContain("as=");
+    expect(call!.path).not.toContain("compact=");
+  });
+
+  it("list with --destination does not inject implicit --as", async () => {
+    const saved = process.env.OPENRIG_SESSION_NAME;
+    process.env.OPENRIG_SESSION_NAME = "my-seat@my-rig";
+    try {
+      const { deps, calls } = makeDeps();
+      const program = createProgram({ queueDeps: deps });
+      program.exitOverride();
+      await program.parseAsync(["node", "rig", "queue", "list", "--destination", "bob@rig", "--json"]);
+      const call = calls.find((c) => c.method === "GET" && c.path.startsWith("/api/queue/list"));
+      expect(call).toBeDefined();
+      expect(call!.path).toContain("destinationSession=bob%40rig");
+      expect(call!.path).toContain("compact=1");
+      expect(call!.path).not.toContain("as=");
+    } finally {
+      if (saved === undefined) delete process.env.OPENRIG_SESSION_NAME;
+      else process.env.OPENRIG_SESSION_NAME = saved;
+    }
+  });
+
+  it("list with --source does not inject implicit --as", async () => {
+    const saved = process.env.OPENRIG_SESSION_NAME;
+    process.env.OPENRIG_SESSION_NAME = "my-seat@my-rig";
+    try {
+      const { deps, calls } = makeDeps();
+      const program = createProgram({ queueDeps: deps });
+      program.exitOverride();
+      await program.parseAsync(["node", "rig", "queue", "list", "--source", "alice@rig", "--json"]);
+      const call = calls.find((c) => c.method === "GET" && c.path.startsWith("/api/queue/list"));
+      expect(call).toBeDefined();
+      expect(call!.path).toContain("sourceSession=alice%40rig");
+      expect(call!.path).not.toContain("as=");
+    } finally {
+      if (saved === undefined) delete process.env.OPENRIG_SESSION_NAME;
+      else process.env.OPENRIG_SESSION_NAME = saved;
+    }
+  });
+
+  it("list default injects as=OPENRIG_SESSION_NAME + compact=1", async () => {
+    const saved = process.env.OPENRIG_SESSION_NAME;
+    process.env.OPENRIG_SESSION_NAME = "dev1-driver@openrig-delivery";
+    try {
+      const { deps, calls } = makeDeps();
+      const program = createProgram({ queueDeps: deps });
+      program.exitOverride();
+      await program.parseAsync(["node", "rig", "queue", "list", "--json"]);
+      const call = calls.find((c) => c.method === "GET" && c.path.startsWith("/api/queue/list"));
+      expect(call).toBeDefined();
+      expect(call!.path).toContain("as=dev1-driver%40openrig-delivery");
+      expect(call!.path).toContain("compact=1");
+    } finally {
+      if (saved === undefined) delete process.env.OPENRIG_SESSION_NAME;
+      else process.env.OPENRIG_SESSION_NAME = saved;
+    }
   });
 });

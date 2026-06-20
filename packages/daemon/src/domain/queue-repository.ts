@@ -180,6 +180,8 @@ export interface QueueListOptions {
   /** PL-007 — filter qitems by target_repo. Exact match. */
   targetRepo?: string;
   limit?: number;
+  asSession?: string;
+  compact?: boolean;
 }
 
 export class QueueRepositoryError extends Error {
@@ -969,6 +971,10 @@ export class QueueRepository {
     const conditions: string[] = [];
     const params: unknown[] = [];
 
+    if (opts?.asSession) {
+      conditions.push("(destination_session = ? OR source_session = ?)");
+      params.push(opts.asSession, opts.asSession);
+    }
     if (opts?.destinationSession) {
       conditions.push("destination_session = ?");
       params.push(opts.destinationSession);
@@ -989,11 +995,17 @@ export class QueueRepository {
     }
 
     const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+    const columns = opts?.compact
+      ? "qitem_id, ts_created, ts_updated, source_session, destination_session, state, priority, tier, tags, blocked_on, handed_off_to, handed_off_from, expires_at, closure_reason, closure_target, closure_required_at, claimed_at, last_nudge_attempt, last_nudge_result, last_heartbeat, resolution, target_repo"
+      : "*";
+    const orderBy = opts?.asSession
+      ? "CASE WHEN state IN ('pending', 'in-progress', 'blocked') THEN 0 ELSE 1 END, ts_created DESC"
+      : "ts_created DESC";
     params.push(limit);
 
     const rows = this.db
       .prepare(
-        `SELECT * FROM queue_items ${where} ORDER BY ts_created DESC LIMIT ?`
+        `SELECT ${columns} FROM queue_items ${where} ORDER BY ${orderBy} LIMIT ?`
       )
       .all(...params) as QueueItemRow[];
     return rows.map((r) => this.rowToItem(r));
@@ -1192,7 +1204,7 @@ export class QueueRepository {
       handedOffFrom: row.handed_off_from,
       expiresAt: row.expires_at,
       chainOfRecord: row.chain_of_record ? (JSON.parse(row.chain_of_record) as string[]) : null,
-      body: row.body,
+      body: row.body ?? "",
       closureReason: row.closure_reason as ClosureReason | null,
       closureTarget: row.closure_target,
       closureRequiredAt: row.closure_required_at,

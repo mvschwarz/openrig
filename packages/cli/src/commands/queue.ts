@@ -443,14 +443,39 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
 
   cmd
     .command("list")
-    .description("List qitems with filters")
+    .description("List qitems (default: caller-scoped compact summary; --all for full fleet)")
+    .option("--as <session>", "Scope to items where you are destination or source (default: OPENRIG_SESSION_NAME)")
+    .option("--all", "Show all items across all rigs (today's unscoped default)")
+    .option("--all-rigs", "Alias for --all")
+    .option("--full", "Show complete per-item fields (body, chain-of-record)")
     .option("--destination <session>", "Filter by destination session")
     .option("--source <session>", "Filter by source session")
     .option("--state <state>", "Filter by state (comma-separated for multiple)")
     .option("--target-repo <name>", "PL-007: filter qitems by target_repo (exact match)")
     .option("--limit <n>", "Result limit", "100")
     .option("--json", "JSON output for agents")
+    .addHelpText("after", `
+Default: caller-scoped compact summary (items where you are destination or source).
+Uses OPENRIG_SESSION_NAME for the caller scope. Use --all for the full fleet view.
+
+Compact fields: qitemId, state, sourceSession, destinationSession, priority, tier,
+tags, tsCreated, tsUpdated. Use --full for body, chainOfRecord, and all timestamps.
+
+Use 'rig queue show <qitemId>' to read a single item in full.
+Status lives in the queue scoped to you, not fleet-wide dumps.
+
+Examples:
+  rig queue list                          Compact summary of your items
+  rig queue list --all                    Full fleet view (today's default)
+  rig queue list --full                   Your items with complete fields
+  rig queue list --all --full             Full fleet, complete fields
+  rig queue list --state pending          Your pending items
+  rig queue list --as dev1-qa@my-rig      Scope to a different seat`)
     .action(async (opts: {
+      as?: string;
+      all?: boolean;
+      allRigs?: boolean;
+      full?: boolean;
       destination?: string;
       source?: string;
       state?: string;
@@ -459,7 +484,22 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
       json?: boolean;
     }) => {
       const deps = getDeps();
+      const isAll = opts.all || opts.allRigs;
+      const hasExplicitScope = !!(opts.as || opts.destination || opts.source);
       const params = new URLSearchParams();
+
+      if (!isAll && !hasExplicitScope) {
+        const callerScope = readOpenRigEnv("OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME");
+        if (callerScope) {
+          params.set("as", callerScope);
+        }
+      }
+      if (opts.as) {
+        params.set("as", opts.as);
+      }
+      if (!opts.full && !isAll) {
+        params.set("compact", "1");
+      }
       if (opts.destination) params.set("destinationSession", opts.destination);
       if (opts.source) params.set("sourceSession", opts.source);
       if (opts.state) params.set("state", opts.state);
