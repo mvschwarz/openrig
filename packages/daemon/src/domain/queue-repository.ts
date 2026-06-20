@@ -182,6 +182,8 @@ export interface QueueListOptions {
   limit?: number;
   asSession?: string;
   compact?: boolean;
+  rig?: string;
+  activeOnly?: boolean;
 }
 
 export class QueueRepositoryError extends Error {
@@ -971,9 +973,17 @@ export class QueueRepository {
     const conditions: string[] = [];
     const params: unknown[] = [];
 
+    if (opts?.rig) {
+      const escaped = opts.rig.replace(/%/g, "\\%").replace(/_/g, "\\_");
+      conditions.push("(destination_session LIKE ? ESCAPE '\\' OR source_session LIKE ? ESCAPE '\\')");
+      params.push(`%@${escaped}`, `%@${escaped}`);
+    }
     if (opts?.asSession) {
       conditions.push("(destination_session = ? OR source_session = ?)");
       params.push(opts.asSession, opts.asSession);
+    }
+    if (opts?.activeOnly && !opts?.state) {
+      conditions.push("state IN ('pending', 'in-progress', 'blocked')");
     }
     if (opts?.destinationSession) {
       conditions.push("destination_session = ?");
@@ -998,7 +1008,8 @@ export class QueueRepository {
     const columns = opts?.compact
       ? "qitem_id, ts_created, ts_updated, source_session, destination_session, state, priority, tier, tags, blocked_on, handed_off_to, handed_off_from, expires_at, closure_reason, closure_target, closure_required_at, claimed_at, last_nudge_attempt, last_nudge_result, last_heartbeat, resolution, target_repo"
       : "*";
-    const orderBy = opts?.asSession
+    const useActiveFirst = !!(opts?.rig || opts?.asSession || opts?.activeOnly);
+    const orderBy = useActiveFirst
       ? "CASE WHEN state IN ('pending', 'in-progress', 'blocked') THEN 0 ELSE 1 END, ts_created DESC"
       : "ts_created DESC";
     params.push(limit);

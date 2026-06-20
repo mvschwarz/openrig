@@ -140,6 +140,12 @@ function resolveCurrentSession(explicit: string | undefined, optionName: string)
   return undefined;
 }
 
+function extractRigName(sessionName: string): string | undefined {
+  const atIdx = sessionName.lastIndexOf("@");
+  if (atIdx < 0 || atIdx === sessionName.length - 1) return undefined;
+  return sessionName.slice(atIdx + 1);
+}
+
 export function queueCommand(depsOverride?: QueueDeps): Command {
   const cmd = new Command("queue").description("Coordination L3 — owned-work queue + inbox/outbox");
   const getDeps = (): QueueDeps => depsOverride ?? {
@@ -443,39 +449,52 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
 
   cmd
     .command("list")
-    .description("List qitems (default: caller-scoped compact summary; --all for full fleet)")
-    .option("--as <session>", "Scope to items where you are destination or source (default: OPENRIG_SESSION_NAME)")
-    .option("--all", "Show all items across all rigs (today's unscoped default)")
-    .option("--all-rigs", "Alias for --all")
+    .description("List qitems (default: active + compact + current-rig; like 'docker ps')")
+    .option("-a, --all", "Include closed/done history (like 'docker ps -a')")
+    .option("-A, --all-rigs", "Cross-rig breadth (like 'kubectl get --all-namespaces')")
     .option("--full", "Show complete per-item fields (body, chain-of-record)")
+    .option("--mine", "Scope to items where you are destination or source")
+    .option("-o <format>", "Output format: json, wide")
     .option("--destination <session>", "Filter by destination session")
     .option("--source <session>", "Filter by source session")
     .option("--state <state>", "Filter by state (comma-separated for multiple)")
     .option("--target-repo <name>", "PL-007: filter qitems by target_repo (exact match)")
     .option("--limit <n>", "Result limit", "100")
-    .option("--json", "JSON output for agents")
+    .option("--json", "JSON output (compact; use --full --json for complete fields)")
     .addHelpText("after", `
-Default: caller-scoped compact summary (items where you are destination or source).
-Uses OPENRIG_SESSION_NAME for the caller scope. Use --all for the full fleet view.
+Default: active items in your current rig, compact summary (like 'docker ps').
+Current rig is derived from OPENRIG_SESSION_NAME's @<rig> suffix.
 
-Compact fields: qitemId, state, sourceSession, destinationSession, priority, tier,
-tags, tsCreated, tsUpdated. Use --full for body, chainOfRecord, and all timestamps.
+Four orthogonal axes (docker/kubectl pattern):
+  -a, --all         Include closed/done history (state axis)
+  -A, --all-rigs    Cross-rig breadth (scope axis)
+  --full            Include body + chain-of-record (field axis)
+  -o json|wide      Output encoding (default: compact table)
 
-Use 'rig queue show <qitemId>' to read a single item in full.
-Status lives in the queue scoped to you, not fleet-wide dumps.
+Active states: pending, in-progress, blocked.
+History (-a adds): done, canceled, handed-off, failed, denied.
+Use --state <states> to select specific states explicitly.
+
+Depth: use 'rig queue show <qitemId>' for a single item in full.
+Frontier source: 'rig queue list' is the default status surface.
 
 Examples:
-  rig queue list                          Compact summary of your items
-  rig queue list --all                    Full fleet view (today's default)
-  rig queue list --full                   Your items with complete fields
-  rig queue list --all --full             Full fleet, complete fields
-  rig queue list --state pending          Your pending items
-  rig queue list --as dev1-qa@my-rig      Scope to a different seat`)
+  rig queue list                          Active items in your rig (compact)
+  rig queue list -a                       Include closed history in your rig
+  rig queue list -A                       Active items across ALL rigs
+  rig queue list -a -A                    Everything across all rigs
+  rig queue list --full                   Active items with body/chain
+  rig queue list -o json                  Compact JSON (no body)
+  rig queue list --full -o json           Complete JSON (with body)
+  rig queue list --mine                   Items where you are source or destination
+  rig queue list --state pending          Only pending items in your rig
+  rig queue list --full --all --all-rigs  Full firehose (pre-0.4.0 default)`)
     .action(async (opts: {
-      as?: string;
       all?: boolean;
       allRigs?: boolean;
       full?: boolean;
+      mine?: boolean;
+      o?: string;
       destination?: string;
       source?: string;
       state?: string;
@@ -484,20 +503,23 @@ Examples:
       json?: boolean;
     }) => {
       const deps = getDeps();
-      const isAll = opts.all || opts.allRigs;
-      const hasExplicitScope = !!(opts.as || opts.destination || opts.source);
       const params = new URLSearchParams();
+      const sessionName = readOpenRigEnv("OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME");
+      const hasExplicitScope = !!(opts.destination || opts.source);
 
-      if (!isAll && !hasExplicitScope) {
-        const callerScope = readOpenRigEnv("OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME");
-        if (callerScope) {
-          params.set("as", callerScope);
+      if (opts.mine && sessionName) {
+        params.set("as", sessionName);
+      } else if (!opts.allRigs && !hasExplicitScope) {
+        const rigName = sessionName ? extractRigName(sessionName) : undefined;
+        if (rigName) {
+          params.set("rig", rigName);
         }
       }
-      if (opts.as) {
-        params.set("as", opts.as);
+
+      if (!opts.all) {
+        params.set("activeOnly", "1");
       }
-      if (!opts.full && !isAll) {
+      if (!opts.full) {
         params.set("compact", "1");
       }
       if (opts.destination) params.set("destinationSession", opts.destination);
@@ -507,7 +529,8 @@ Examples:
       if (opts.limit) params.set("limit", opts.limit);
       await withClient(deps, async (client) => {
         const res = await client.get<unknown>(`/api/queue/list?${params.toString()}`);
-        printResult(opts.json ?? false, res.data, res.status);
+        const useJson = opts.json || opts.o === "json";
+        printResult(useJson, res.data, res.status);
       });
     });
 

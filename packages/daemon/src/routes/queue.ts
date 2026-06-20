@@ -364,6 +364,8 @@ export function queueRoutes(): Hono {
     const userLimit = c.req.query("limit") ? Number.parseInt(c.req.query("limit")!, 10) : undefined;
     const asSession = c.req.query("as") || undefined;
     const compact = c.req.query("compact") === "1";
+    const rig = c.req.query("rig") || undefined;
+    const activeOnly = c.req.query("activeOnly") === "1";
     const attention = c.req.query("attention") === "1";
 
     const state: QueueState[] | undefined = stateRaw
@@ -381,6 +383,8 @@ export function queueRoutes(): Hono {
         limit: userLimit,
         asSession,
         compact,
+        rig,
+        activeOnly,
       });
       return c.json(items);
     }

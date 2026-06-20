@@ -651,9 +651,7 @@ describe("rig queue CLI", () => {
   });
 
   it("list constructs /api/queue/list with filter params", async () => {
-    const { deps, calls } = makeDeps({
-      routes: { "GET /api/queue/list?compact=1&destinationSession=bob%40rig&state=pending&limit=50": { status: 200, data: [] } },
-    });
+    const { deps, calls } = makeDeps();
     const program = createProgram({ queueDeps: deps });
     program.exitOverride();
     await program.parseAsync([
@@ -670,20 +668,61 @@ describe("rig queue CLI", () => {
     expect(call!.path).toContain("limit=50");
     expect(call!.path).toContain("compact=1");
     expect(call!.path).not.toContain("as=");
+    expect(call!.path).not.toContain("rig=");
   });
 
-  it("list --all sends no as and no compact (full firehose parity)", async () => {
+  it("list -a includes history (no activeOnly param)", async () => {
+    const saved = process.env.OPENRIG_SESSION_NAME;
+    process.env.OPENRIG_SESSION_NAME = "dev1@my-rig";
+    try {
+      const { deps, calls } = makeDeps();
+      const program = createProgram({ queueDeps: deps });
+      program.exitOverride();
+      await program.parseAsync(["node", "rig", "queue", "list", "-a", "--json"]);
+      const call = calls.find((c) => c.method === "GET" && c.path.startsWith("/api/queue/list"));
+      expect(call).toBeDefined();
+      expect(call!.path).not.toContain("activeOnly=");
+      expect(call!.path).toContain("rig=my-rig");
+      expect(call!.path).toContain("compact=1");
+    } finally {
+      if (saved === undefined) delete process.env.OPENRIG_SESSION_NAME;
+      else process.env.OPENRIG_SESSION_NAME = saved;
+    }
+  });
+
+  it("list -A is cross-rig (no rig param)", async () => {
+    const saved = process.env.OPENRIG_SESSION_NAME;
+    process.env.OPENRIG_SESSION_NAME = "dev1@my-rig";
+    try {
+      const { deps, calls } = makeDeps();
+      const program = createProgram({ queueDeps: deps });
+      program.exitOverride();
+      await program.parseAsync(["node", "rig", "queue", "list", "-A", "--json"]);
+      const call = calls.find((c) => c.method === "GET" && c.path.startsWith("/api/queue/list"));
+      expect(call).toBeDefined();
+      expect(call!.path).not.toContain("rig=");
+      expect(call!.path).toContain("activeOnly=1");
+      expect(call!.path).toContain("compact=1");
+    } finally {
+      if (saved === undefined) delete process.env.OPENRIG_SESSION_NAME;
+      else process.env.OPENRIG_SESSION_NAME = saved;
+    }
+  });
+
+  it("list --full --all --all-rigs = firehose (no compact, no active, no rig)", async () => {
     const { deps, calls } = makeDeps();
     const program = createProgram({ queueDeps: deps });
     program.exitOverride();
-    await program.parseAsync(["node", "rig", "queue", "list", "--all", "--json"]);
+    await program.parseAsync(["node", "rig", "queue", "list", "--full", "--all", "--all-rigs", "--json"]);
     const call = calls.find((c) => c.method === "GET" && c.path.startsWith("/api/queue/list"));
     expect(call).toBeDefined();
-    expect(call!.path).not.toContain("as=");
     expect(call!.path).not.toContain("compact=");
+    expect(call!.path).not.toContain("activeOnly=");
+    expect(call!.path).not.toContain("rig=");
+    expect(call!.path).not.toContain("as=");
   });
 
-  it("list with --destination does not inject implicit --as", async () => {
+  it("list with --destination does not inject implicit rig scope", async () => {
     const saved = process.env.OPENRIG_SESSION_NAME;
     process.env.OPENRIG_SESSION_NAME = "my-seat@my-rig";
     try {
@@ -695,6 +734,7 @@ describe("rig queue CLI", () => {
       expect(call).toBeDefined();
       expect(call!.path).toContain("destinationSession=bob%40rig");
       expect(call!.path).toContain("compact=1");
+      expect(call!.path).not.toContain("rig=");
       expect(call!.path).not.toContain("as=");
     } finally {
       if (saved === undefined) delete process.env.OPENRIG_SESSION_NAME;
@@ -702,25 +742,25 @@ describe("rig queue CLI", () => {
     }
   });
 
-  it("list with --source does not inject implicit --as", async () => {
+  it("list --mine scopes to caller session", async () => {
     const saved = process.env.OPENRIG_SESSION_NAME;
-    process.env.OPENRIG_SESSION_NAME = "my-seat@my-rig";
+    process.env.OPENRIG_SESSION_NAME = "dev1-driver@openrig-delivery";
     try {
       const { deps, calls } = makeDeps();
       const program = createProgram({ queueDeps: deps });
       program.exitOverride();
-      await program.parseAsync(["node", "rig", "queue", "list", "--source", "alice@rig", "--json"]);
+      await program.parseAsync(["node", "rig", "queue", "list", "--mine", "--json"]);
       const call = calls.find((c) => c.method === "GET" && c.path.startsWith("/api/queue/list"));
       expect(call).toBeDefined();
-      expect(call!.path).toContain("sourceSession=alice%40rig");
-      expect(call!.path).not.toContain("as=");
+      expect(call!.path).toContain("as=dev1-driver%40openrig-delivery");
+      expect(call!.path).not.toContain("rig=");
     } finally {
       if (saved === undefined) delete process.env.OPENRIG_SESSION_NAME;
       else process.env.OPENRIG_SESSION_NAME = saved;
     }
   });
 
-  it("list default injects as=OPENRIG_SESSION_NAME + compact=1", async () => {
+  it("list default injects rig=<rigName> + activeOnly=1 + compact=1", async () => {
     const saved = process.env.OPENRIG_SESSION_NAME;
     process.env.OPENRIG_SESSION_NAME = "dev1-driver@openrig-delivery";
     try {
@@ -730,8 +770,10 @@ describe("rig queue CLI", () => {
       await program.parseAsync(["node", "rig", "queue", "list", "--json"]);
       const call = calls.find((c) => c.method === "GET" && c.path.startsWith("/api/queue/list"));
       expect(call).toBeDefined();
-      expect(call!.path).toContain("as=dev1-driver%40openrig-delivery");
+      expect(call!.path).toContain("rig=openrig-delivery");
+      expect(call!.path).toContain("activeOnly=1");
       expect(call!.path).toContain("compact=1");
+      expect(call!.path).not.toContain("as=");
     } finally {
       if (saved === undefined) delete process.env.OPENRIG_SESSION_NAME;
       else process.env.OPENRIG_SESSION_NAME = saved;
