@@ -51,6 +51,8 @@ export const SETTINGS_VALID_KEYS = [
   "ui.preview.refresh_interval_seconds",
   "ui.preview.max_pins",
   "ui.preview.default_lines",
+  // OPR.0.4.0.1 — global cap on simultaneously-live terminals (default 2).
+  "ui.terminal.max_live_terminals",
   "recovery.auto_drive_provider_prompts",
   "recovery.provider_auth_env_allowlist",
   // V1 attempt-3 Phase 4 - Advisor / Operator rail icon V1 placeholders
@@ -129,6 +131,7 @@ const ENV_MAP: Record<SettingsValidKey, { primary: string; legacy?: string }> = 
   "ui.preview.refresh_interval_seconds": { primary: "OPENRIG_UI_PREVIEW_REFRESH_INTERVAL_SECONDS" },
   "ui.preview.max_pins": { primary: "OPENRIG_UI_PREVIEW_MAX_PINS" },
   "ui.preview.default_lines": { primary: "OPENRIG_UI_PREVIEW_DEFAULT_LINES" },
+  "ui.terminal.max_live_terminals": { primary: "OPENRIG_UI_TERMINAL_MAX_LIVE_TERMINALS" },
   "recovery.auto_drive_provider_prompts": { primary: "OPENRIG_RECOVERY_AUTO_DRIVE_PROVIDER_PROMPTS" },
   "recovery.provider_auth_env_allowlist": { primary: "OPENRIG_RECOVERY_PROVIDER_AUTH_ENV_ALLOWLIST" },
   "agents.advisor_session": { primary: "OPENRIG_AGENTS_ADVISOR_SESSION" },
@@ -176,6 +179,7 @@ const KEY_TO_PATH: Record<SettingsValidKey, string[]> = {
   "ui.preview.refresh_interval_seconds": ["ui", "preview", "refreshIntervalSeconds"],
   "ui.preview.max_pins": ["ui", "preview", "maxPins"],
   "ui.preview.default_lines": ["ui", "preview", "defaultLines"],
+  "ui.terminal.max_live_terminals": ["ui", "terminal", "maxLiveTerminals"],
   "recovery.auto_drive_provider_prompts": ["recovery", "autoDriveProviderPrompts"],
   "recovery.provider_auth_env_allowlist": ["recovery", "providerAuthEnvAllowlist"],
   "agents.advisor_session": ["agents", "advisorSession"],

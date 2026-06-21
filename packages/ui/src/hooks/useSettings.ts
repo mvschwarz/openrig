@@ -24,6 +24,8 @@ export type SettingsKey =
   | "ui.preview.refresh_interval_seconds"
   | "ui.preview.max_pins"
   | "ui.preview.default_lines"
+  // OPR.0.4.0.1 — global cap on simultaneously-live terminals (default 2).
+  | "ui.terminal.max_live_terminals"
   // V1 Phase 4 ConfigStore allowlist exception (advisor/operator seats).
   | "agents.advisor_session" | "agents.operator_session"
   // V1 Phase 5 P5-3 ConfigStore allowlist exception (For You feed

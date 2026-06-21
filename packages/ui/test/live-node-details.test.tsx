@@ -408,15 +408,19 @@ describe("LiveNodeDetails (slice 25 Overview + Details)", () => {
 
   // HG-5 — black-glass terminal renders inline in Overview (not in a
   // separate tab). The terminal shell wrapper carries the black-glass
-  // chrome class.
-  it("HG-5: black-glass terminal renders inline in Overview", async () => {
+  // chrome class. OPR.0.4.0.1 (round-two QA ruling): the inline terminal now
+  // uses the reusable progressive default-static -> click-inside-to-go-live
+  // ProgressiveTerminal under the global live-terminal cap, so on open it shows
+  // the STATIC preview -- NOT an immediate always-live FocusedTerminal/WebSocket.
+  it("HG-5: black-glass terminal renders inline in Overview (progressive default-static)", async () => {
     mockNodeDetail(NODE_DETAIL);
     renderDetails();
     const terminalShell = await screen.findByTestId("live-terminal-shell");
     expect(terminalShell.className).toContain("bg-stone-950/65");
-    await waitFor(() => {
-      expect(screen.getByTestId(`focused-terminal-${NODE_DETAIL.canonicalSessionName}`)).toBeTruthy();
-    });
+    // Default-static: the ProgressiveTerminal static trigger is present...
+    await screen.findByTestId("node-detail-terminal-static");
+    // ...and NO live xterm/WebSocket terminal is mounted on open.
+    expect(screen.queryByTestId(`focused-terminal-${NODE_DETAIL.canonicalSessionName}`)).toBeNull();
     // The terminal sits inside the Overview section, NOT a separate
     // tab body. The Overview section wraps it.
     const overview = screen.getByTestId("live-overview-section");

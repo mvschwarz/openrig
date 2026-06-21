@@ -22,14 +22,13 @@ import { useMemo, useState } from "react";
 import { useRigSummary } from "../../hooks/useRigSummary.js";
 import { useNodeInventory, type NodeInventoryEntry } from "../../hooks/useNodeInventory.js";
 import { displayAgentName } from "../../lib/display-name.js";
-import { SessionPreviewPane } from "../preview/SessionPreviewPane.js";
+import { ProgressiveTerminal } from "../terminal/ProgressiveTerminal.js";
 import { EmptyState } from "../ui/empty-state.js";
 import { SectionHeader } from "../ui/section-header.js";
 import { cn } from "../../lib/utils.js";
 import { RuntimeBadge } from "../graphics/RuntimeMark.js";
 import { formatCompactTokenCount, formatTokenTotalTitle, sumTokenCounts } from "../../lib/token-format.js";
 import { contextUsageTextClass } from "../ContextUsageRing.js";
-import { TerminalPreviewPopover } from "./TerminalPreviewPopover.js";
 
 const SAFE_N = 12;
 
@@ -85,22 +84,19 @@ function TokenMetric({ seat }: { seat: NodeInventoryEntry }) {
 }
 
 // V0.3.1 slice 14 walk-item 17 — TerminalView card.
-// Click-through opens TerminalPreviewPopover (same black-glass shell
-// used by the graph view), and the card font shrinks via the existing
-// type scale: header text-[10px] → text-[8px] (~20% reduction). The
-// preview pane font hint scales with parent.
-const TERMINAL_PREVIEW_EVENT = "openrig:topology-terminal-preview";
+// OPR.0.4.0.1: the card body IS a ProgressiveTerminal — default-static polling
+// preview, click anywhere inside to go LIVE in place. Multiple cards can be live
+// at once (the grid is where the global cap binds): opening a live terminal past
+// MAX_LIVE_TERMINALS evicts the oldest live card back to static. This replaces
+// the prior single-open popover model (one terminal live at a time), so the
+// founder's "watch A while typing in B" works. Card font scale unchanged; the
+// pulsing-ring active treatment is preserved.
 
 function SeatTerminalCard({ seat }: { seat: NodeInventoryEntry }) {
   const sessionName = seat.canonicalSessionName ?? seat.logicalId;
   const active = isActiveRunning(seat);
   const memberName = displayAgentName(seat.logicalId);
   const previewKey = `${seat.rigId ?? "unknown"}:${seat.logicalId}`;
-  const handleCardClick = () => {
-    window.dispatchEvent(
-      new CustomEvent(TERMINAL_PREVIEW_EVENT, { detail: { key: previewKey } }),
-    );
-  };
   return (
     <div
       data-testid={`terminal-card-${seat.rigId}-${seat.logicalId}`}
@@ -112,31 +108,6 @@ function SeatTerminalCard({ seat }: { seat: NodeInventoryEntry }) {
           : "border-outline-variant",
       )}
     >
-      <button
-        type="button"
-        onClick={handleCardClick}
-        aria-label={`Open ${memberName} terminal preview`}
-        className="absolute inset-0 z-10 cursor-pointer bg-transparent focus:outline-none focus:ring-2 focus:ring-stone-900/20"
-        data-testid={`terminal-card-trigger-${seat.rigId}-${seat.logicalId}`}
-      />
-      {/*
-        TerminalPreviewPopover renders its own sr-only button + popover
-        portal. The card-level button above dispatches the open event;
-        this component listens for the matching key + renders the
-        positioned popover anchored to the wrapper div (top-right of
-        the card via wrapperClassName).
-      */}
-      {seat.rigId ? (
-        <TerminalPreviewPopover
-          rigId={seat.rigId}
-          logicalId={seat.logicalId}
-          sessionName={sessionName}
-          reducedMotion={false}
-          testIdPrefix={`terminal-grid-${seat.rigId}-${seat.logicalId}`}
-          wrapperClassName="absolute right-1 top-1 z-20"
-          renderTrigger={false}
-        />
-      ) : null}
       <header className="relative z-0 flex items-center justify-between gap-2 pointer-events-none">
         <span className="font-mono text-[8px] font-semibold uppercase tracking-[0.10em] text-stone-900 truncate">
           {memberName}
@@ -147,11 +118,12 @@ function SeatTerminalCard({ seat }: { seat: NodeInventoryEntry }) {
           <TokenMetric seat={seat} />
         </span>
       </header>
-      <div className="relative z-0 pointer-events-none">
-        <SessionPreviewPane
+      <div className="relative z-0 min-h-0">
+        <ProgressiveTerminal
           sessionName={sessionName}
+          terminalKey={previewKey}
           lines={20}
-          testIdPrefix={`terminal-preview-${seat.rigId}-${seat.logicalId}`}
+          testIdPrefix={`terminal-grid-${seat.rigId}-${seat.logicalId}`}
         />
       </div>
     </div>

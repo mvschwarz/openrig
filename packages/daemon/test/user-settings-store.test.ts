@@ -91,6 +91,8 @@ describe("SettingsStore (User Settings v0)", () => {
       "workspace.dogfood_evidence_root",
       "files.allowlist", "progress.scan_roots",
       "ui.preview.refresh_interval_seconds", "ui.preview.max_pins", "ui.preview.default_lines",
+      // OPR.0.4.0.1 — global live-terminal cap.
+      "ui.terminal.max_live_terminals",
       "recovery.auto_drive_provider_prompts",
       "recovery.provider_auth_env_allowlist",
       // V1 attempt-3 Phase 4 — Advisor/Operator placeholders.

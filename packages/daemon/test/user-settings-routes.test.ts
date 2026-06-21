@@ -79,8 +79,9 @@ describe("config routes (User Settings v0)", () => {
     // + 1 plugin-primitive Phase 3a slice 3.5 (runtime.codex.hooks_enabled)
     // + 1 V0.3.1 slice 05 (workspace.operator_seat_name)
     // + 7 slice 27 (policies.claude_compaction.*)
-    // + 3 OPR.0.3.4.9 (snapshots.periodic.*) → 39 total.
-    expect(Object.keys(body.settings).length).toBe(39);
+    // + 3 OPR.0.3.4.9 (snapshots.periodic.*)
+    // + 1 OPR.0.4.0.1 (ui.terminal.max_live_terminals) → 40 total.
+    expect(Object.keys(body.settings).length).toBe(40);
     expect(body.settings["daemon.port"]?.source).toBe("default");
     expect(body.settings["ui.preview.refresh_interval_seconds"]?.value).toBe(3);
     expect(body.settings["ui.preview.max_pins"]?.value).toBe(4);

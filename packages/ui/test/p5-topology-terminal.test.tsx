@@ -241,16 +241,16 @@ describe("TerminalView card a11y (slice 14 FF#1)", () => {
     );
     await findByTestId("topology-terminal-grid");
 
-    // Exactly one card-level trigger button per seat.
+    // OPR.0.4.0.1: each card body IS a ProgressiveTerminal; its static-mode view
+    // is the single tab-reachable click-to-go-live trigger (one per seat). The
+    // a11y intent (exactly one trigger per card, no duplicate) is preserved.
     const cardTriggers = container.querySelectorAll(
-      "button[data-testid^='terminal-card-trigger-']",
+      "button[data-testid^='terminal-grid-'][data-testid$='-static']",
     );
     expect(cardTriggers).toHaveLength(2);
 
-    // ZERO duplicate sr-only popover buttons — the FF removes them.
-    // Pre-fix: each card mounted a `terminal-grid-<rig>-<seat>-terminal-open`
-    // button via the popover's default trigger render. With
-    // renderTrigger={false} the popover skips its button entirely.
+    // ZERO popover trigger buttons — the in-place multi-live model removes the
+    // per-card popover (the card body itself goes live in place).
     const popoverTriggerButtons = container.querySelectorAll(
       "button[data-testid$='-terminal-open']",
     );

@@ -146,7 +146,7 @@ describe("P5.3 ActivityRing and HotPotatoEdge", () => {
     expect(screen.getByTestId("hybrid-token-total").textContent).toBe("219k");
   });
 
-  it("hybrid terminal hover action opens a single canvas-local terminal popover", async () => {
+  it("hybrid terminal hover action opens a canvas-local progressive terminal popover (coexisting under the cap)", async () => {
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input: RequestInfo | URL) => {
       const url = String(input);
       if (url === "/api/config") {
@@ -193,6 +193,9 @@ describe("P5.3 ActivityRing and HotPotatoEdge", () => {
     fireEvent.click(screen.getByTestId("hybrid-driver-terminal-open"));
 
     expect(screen.getByTestId("hybrid-driver-terminal-popover")).toBeDefined();
+    // OPR.0.4.0.1: progressive default-static -> click-to-go-live. The popover
+    // opens on the STATIC preview; a click upgrades THAT terminal to live.
+    fireEvent.click(await screen.findByTestId("hybrid-driver-static"));
     await waitFor(() => {
       expect(screen.getByTestId("focused-terminal-velocity-driver@openrig-velocity")).toBeTruthy();
     });
@@ -220,9 +223,13 @@ describe("P5.3 ActivityRing and HotPotatoEdge", () => {
     fireEvent.click(screen.getByTestId("hybrid-driver-terminal-open"));
     expect(screen.getByTestId("hybrid-driver-terminal-popover")).toBeDefined();
 
+    // OPR.0.4.0.1 (rev1-r2): progressive popovers COEXIST under the global cap --
+    // opening the guard popover does NOT force-close the driver popover (the old
+    // single-open TERMINAL_PREVIEW_EVENT did). Both stay open so multi-live is
+    // reachable on the graph/table surfaces.
     fireEvent.click(screen.getByTestId("hybrid-guard-terminal-open"));
     expect(screen.getByTestId("hybrid-guard-terminal-popover")).toBeDefined();
-    expect(screen.queryByTestId("hybrid-driver-terminal-popover")).toBeNull();
+    expect(screen.getByTestId("hybrid-driver-terminal-popover")).toBeDefined();
   });
 
   it("terminal popover flips above the anchor when bottom viewport space would clip it", () => {

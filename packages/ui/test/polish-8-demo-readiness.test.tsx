@@ -8,7 +8,10 @@ describe("polish-8 demo-readiness source guards", () => {
     const src = read("../src/components/LiveNodeDetails.tsx");
     expect(src).not.toContain("LiveIdentityDisplay");
     expect(src).toContain("data-testid=\"live-node-tab-body\"");
-    expect(src).toContain("FocusedTerminal");
+    // OPR.0.4.0.1: the inline terminal is the reusable progressive component
+    // (default-static -> click-to-live under the global cap), not a direct
+    // always-live FocusedTerminal.
+    expect(src).toContain("ProgressiveTerminal");
     expect(src).toContain("bg-stone-950/65");
   });
 

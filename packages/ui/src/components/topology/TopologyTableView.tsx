@@ -268,6 +268,7 @@ function agentColumns(): ColumnDef<AgentRow>[] {
               reducedMotion={false}
               testIdPrefix={`topology-table-${row.original.logicalId}`}
               buttonClassName="inline-flex h-7 w-7 items-center justify-center border border-outline-variant bg-white/65 text-stone-700 shadow-[1px_1px_0_rgba(46,52,46,0.12)] transition-colors hover:bg-stone-100 hover:text-stone-950 focus:outline-none focus:ring-2 focus:ring-stone-900/20"
+              progressive
             />
           ) : null}
         </span>

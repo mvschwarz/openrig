@@ -2,6 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import type React from "react";
 import { createPortal } from "react-dom";
 import { FocusedTerminal } from "../terminal/FocusedTerminal.js";
+import { ProgressiveTerminal } from "../terminal/ProgressiveTerminal.js";
 import { cn } from "../../lib/utils.js";
 import { ToolMark } from "../graphics/RuntimeMark.js";
 
@@ -48,6 +49,11 @@ interface TerminalPreviewPopoverProps {
    *  duplicate keyboard tab stop. Default true preserves the
    *  existing graph-view + table-view button rendering. */
   renderTrigger?: boolean;
+  /** OPR.0.4.0.1: when true, the popover renders the progressive default-static
+   *  -> click-to-go-live ProgressiveTerminal (the topology graph/table surfaces).
+   *  Default false keeps the always-live FocusedTerminal, preserving the
+   *  feed-card live-drill (out of this slice's 3-surface scope). */
+  progressive?: boolean;
 }
 
 function rectFromElement(el: HTMLElement | null): AnchorRect {
@@ -98,6 +104,7 @@ export function TerminalPreviewPopover({
   popoverClassName,
   testIdPrefix,
   renderTrigger = true,
+  progressive = false,
 }: TerminalPreviewPopoverProps) {
   const key = `${rigId ?? "unknown"}:${logicalId}`;
   const rootRef = useRef<HTMLDivElement | null>(null);
@@ -114,6 +121,13 @@ export function TerminalPreviewPopover({
   }, [open]);
 
   useEffect(() => {
+    // OPR.0.4.0.1 (rev1-r2 fix): progressive popovers open via LOCAL state and
+    // COEXIST under the global LiveTerminalRegistry cap, so they do NOT take part
+    // in the single-open TERMINAL_PREVIEW_EVENT -- which force-closes every
+    // sibling popover and would cap the popover surfaces at one live terminal.
+    // Only the non-progressive feed-card drill keeps the one-overlay-at-a-time
+    // single-open behavior.
+    if (progressive) return undefined;
     const handleOpen = (event: Event) => {
       const detail = (event as CustomEvent<TerminalPreviewEventDetail>).detail;
       const nextOpen = detail?.key === key;
@@ -125,7 +139,7 @@ export function TerminalPreviewPopover({
     };
     window.addEventListener(TERMINAL_PREVIEW_EVENT, handleOpen);
     return () => window.removeEventListener(TERMINAL_PREVIEW_EVENT, handleOpen);
-  }, [key]);
+  }, [key, progressive]);
 
   useLayoutEffect(() => {
     if (!open || !popoverRef.current) return;
@@ -157,6 +171,14 @@ export function TerminalPreviewPopover({
       if (!(target instanceof Node)) return;
       if (rootRef.current?.contains(target)) return;
       if (popoverRef.current?.contains(target)) return;
+      // OPR.0.4.0.1 (rev1-r2 fix): a progressive popover must NOT dismiss when the
+      // pointerdown lands inside ANY terminal-preview surface (a sibling popover or
+      // trigger) -- otherwise interacting with B would close A, breaking multi-live.
+      // Only a click fully outside the terminal-preview system dismisses it.
+      if (progressive) {
+        const el = target instanceof Element ? target : target.parentElement;
+        if (el?.closest("[data-terminal-preview-surface]")) return;
+      }
       setOpen(false);
     };
     document.addEventListener("pointerdown", handlePointerDown);
@@ -167,6 +189,18 @@ export function TerminalPreviewPopover({
 
   const openPreview = (event: React.MouseEvent<HTMLButtonElement>) => {
     event.stopPropagation();
+    if (progressive) {
+      // Toggle THIS popover's own open state; do not touch siblings -- multiple
+      // progressive popovers can be open/live at once under the global cap.
+      if (open) {
+        setOpen(false);
+        return;
+      }
+      const nextAnchor = rectFromElement(rootRef.current);
+      setPosition(computeTerminalPopoverPosition(nextAnchor, FALLBACK_POPOVER_WIDTH, FALLBACK_POPOVER_HEIGHT));
+      setOpen(true);
+      return;
+    }
     window.dispatchEvent(new CustomEvent<TerminalPreviewEventDetail>(TERMINAL_PREVIEW_EVENT, { detail: { key } }));
   };
 
@@ -174,6 +208,7 @@ export function TerminalPreviewPopover({
     <div
       ref={popoverRef}
       data-testid={`${testIdPrefix}-terminal-popover`}
+      data-terminal-preview-surface=""
       data-reduced-motion={reducedMotion ? "true" : "false"}
       className={cn(
         "nodrag nopan fixed z-[1000] max-h-[calc(100vh-1rem)] w-[calc(80ch+24px)] max-w-[calc(100vw-1rem)] overflow-hidden bg-stone-950/65 p-1.5 backdrop-blur-sm",
@@ -184,15 +219,22 @@ export function TerminalPreviewPopover({
       onClick={(event) => event.stopPropagation()}
       onPointerDown={(event) => event.stopPropagation()}
     >
-      <div className="h-[400px] w-[600px]">
-        <FocusedTerminal sessionName={sessionName} />
+      {/* OPR.0.4.0.1: progressive surfaces show default-static -> click-to-go-live;
+          a wider optimal terminal width per the styling finding. Non-progressive
+          consumers (feed-card live drill) keep the always-live FocusedTerminal. */}
+      <div className="h-[440px] w-[820px] max-w-[calc(100vw-2rem)]">
+        {progressive ? (
+          <ProgressiveTerminal sessionName={sessionName} terminalKey={key} testIdPrefix={testIdPrefix} />
+        ) : (
+          <FocusedTerminal sessionName={sessionName} />
+        )}
       </div>
     </div>,
     document.body,
   ) : null;
 
   return (
-    <div ref={rootRef} className={cn("relative inline-flex", wrapperClassName)}>
+    <div ref={rootRef} data-terminal-preview-surface="" className={cn("relative inline-flex", wrapperClassName)}>
       {renderTrigger ? (
         <button
           type="button"

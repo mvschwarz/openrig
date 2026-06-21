@@ -163,7 +163,12 @@ export function FocusedTerminal({ sessionName, daemonBaseUrl }: FocusedTerminalP
           cursorBlink: true,
           fontSize: 12,
           fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
-          theme: { background: "#1a1a1a", foreground: "#e0e0e0", cursor: "#e0e0e0" },
+          // OPR.0.4.0.1 styling fix: a TRANSPARENT background so the live terminal
+          // keeps the preview-era "floating smoked-glass plate" aesthetic — the
+          // popover's bg-stone-950/65 backdrop-blur shows through instead of an
+          // opaque dark panel. allowTransparency is required for a non-opaque bg.
+          theme: { background: "rgba(0,0,0,0)", foreground: "#e0e0e0", cursor: "#e0e0e0" },
+          allowTransparency: true,
           allowProposedApi: true,
         });
 
@@ -215,7 +220,7 @@ export function FocusedTerminal({ sessionName, daemonBaseUrl }: FocusedTerminalP
       <div
         key={`focused-terminal-error-${sessionName}`}
         data-testid={`focused-terminal-${sessionName}`}
-        className="h-full w-full min-h-[200px] bg-[#1a1a1a] flex items-center justify-center px-4 text-center text-stone-400 font-mono text-xs"
+        className="h-full w-full min-h-[200px] flex items-center justify-center px-4 text-center text-stone-400 font-mono text-xs"
       >
         <span className="block max-w-[28ch] whitespace-normal break-all leading-relaxed">
           Terminal unavailable: {error}
@@ -229,7 +234,7 @@ export function FocusedTerminal({ sessionName, daemonBaseUrl }: FocusedTerminalP
       key={`focused-terminal-live-${sessionName}`}
       ref={containerRef}
       data-testid={`focused-terminal-${sessionName}`}
-      className="h-full w-full min-h-[200px] bg-[#1a1a1a]"
+      className="h-full w-full min-h-[200px]"
     />
   );
 }

@@ -341,6 +341,7 @@ export function RigNode({ data }: { data: RigNodeData }) {
                 reducedMotion={data.reducedMotion}
                 testIdPrefix={`rig-node-${data.logicalId}`}
                 buttonClassName={toolbarIconButtonClass}
+                progressive
               />
             )}
           </div>

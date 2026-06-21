@@ -31,7 +31,7 @@ import { AgentPluginsList } from "./specs/AgentPluginsList.js";
 // via SessionPreviewPane). PreviewPane is still owned by other
 // surfaces in the codebase; this file simply doesn't reference it.
 import { SessionPreviewPane } from "./preview/SessionPreviewPane.js";
-import { FocusedTerminal } from "./terminal/FocusedTerminal.js";
+import { ProgressiveTerminal } from "./terminal/ProgressiveTerminal.js";
 import { SeatOverviewTable } from "./SeatOverviewTable.js";
 import { SeatOverviewSecondary } from "./SeatOverviewSecondary.js";
 import { SeatNotificationBanner } from "./SeatNotificationBanner.js";
@@ -487,7 +487,15 @@ function InlineTerminal({ data }: { data: NodeDetailData }) {
   }
   return (
     <div data-testid="live-terminal-shell" className="bg-stone-950/65 text-stone-50 backdrop-blur-sm h-[500px]">
-      <FocusedTerminal sessionName={data.canonicalSessionName} />
+      {/* OPR.0.4.0.1 (round-two QA ruling): the node-detail inline terminal joins
+          the reusable progressive default-static -> click-inside-to-go-live model
+          under the global live-terminal cap, instead of an always-live uncapped
+          FocusedTerminal. terminalKey is session-scoped so the registry tracks it. */}
+      <ProgressiveTerminal
+        sessionName={data.canonicalSessionName}
+        terminalKey={`node-detail:${data.canonicalSessionName}`}
+        testIdPrefix="node-detail-terminal"
+      />
     </div>
   );
 }

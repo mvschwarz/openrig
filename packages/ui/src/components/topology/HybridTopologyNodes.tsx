@@ -185,6 +185,7 @@ function HybridAgentNodeInner({ data }: { data: HybridAgentNodeData }) {
           testIdPrefix={`hybrid-${data.logicalId}`}
           wrapperClassName="absolute right-8 top-6 z-20"
           buttonClassName={hoverIconClass}
+          progressive
         />
       ) : null}
       {data.rigId ? (
