@@ -27,6 +27,10 @@ interface ProgressiveTerminalProps {
   lines?: number;
   testIdPrefix?: string;
   className?: string;
+  /** OPR.0.4.0.1: notified when this terminal flips static<->live, so a host
+   *  (e.g. the popover) can size its shell to the wide live plate when live and
+   *  stay compact when static. */
+  onLiveChange?: (isLive: boolean) => void;
 }
 
 export function ProgressiveTerminal({
@@ -35,6 +39,7 @@ export function ProgressiveTerminal({
   lines = 20,
   testIdPrefix = "progressive-terminal",
   className,
+  onLiveChange,
 }: ProgressiveTerminalProps) {
   const [mode, setMode] = useState<"static" | "live">("static");
   const live = useLiveTerminal();
@@ -42,6 +47,12 @@ export function ProgressiveTerminal({
   modeRef.current = mode;
 
   const goStatic = useCallback(() => setMode("static"), []);
+
+  // OPR.0.4.0.1: surface the live/static mode to the host so a popover can widen
+  // its shell to the full live plate when live and stay compact when static.
+  useEffect(() => {
+    onLiveChange?.(mode === "live");
+  }, [mode, onLiveChange]);
 
   const goLive = useCallback(() => {
     if (modeRef.current === "live") return;

@@ -54,6 +54,24 @@ describe("Progressive terminal popovers coexist under the global cap (rev1-r2 fi
     expect(screen.getByTestId("live-b@r")).toBeTruthy();
   });
 
+  it("rev1-r2 fix: the popover shell is COMPACT when static and WIDENS to fit the live plate", () => {
+    render(
+      <LiveTerminalProvider cap={2}>
+        <TerminalPreviewPopover rigId="r1" logicalId="a" sessionName="a@r" testIdPrefix="pa" progressive />
+      </LiveTerminalProvider>,
+    );
+    // open the popover -> STATIC -> shell is compact (NOT the wide live width), so
+    // the static preview stays small.
+    fireEvent.click(screen.getByTestId("pa-terminal-open"));
+    expect(screen.getByTestId("pa-terminal-popover").className).toContain("w-[calc(80ch+24px)]");
+    expect(screen.getByTestId("pa-terminal-popover").className).not.toContain("w-[904px]");
+    // click inside -> LIVE -> the shell WIDENS to fit the 880px live plate (the
+    // overflow-hidden clip is gone).
+    fireEvent.click(screen.getByTestId("pa-static"));
+    expect(screen.getByTestId("pa-terminal-popover").className).toContain("w-[904px]");
+    expect(screen.getByTestId("pa-terminal-popover").className).not.toContain("w-[calc(80ch+24px)]");
+  });
+
   it("a third live progressive popover evicts the OLDEST to static (global cap=2)", () => {
     render(
       <LiveTerminalProvider cap={2}>

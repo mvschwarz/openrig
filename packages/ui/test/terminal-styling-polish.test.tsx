@@ -59,7 +59,10 @@ describe("OPR.0.4.0.1 terminal styling polish", () => {
 
   it("FR-3/FR-4: the popover sets the measured LIVE width + drops its redundant opaque bg (content self-tints)", () => {
     const s = src("../src/components/topology/TerminalPreviewPopover.tsx");
-    expect(s).toContain("w-[880px]");
+    expect(s).toContain("w-[880px]"); // the LIVE inner sizer (optimal width)
+    // OPR.0.4.0.1 (rev1-r2 fix): the shell widens to fit the 880px live plate so
+    // overflow-hidden no longer clips it (the prior fixed compact shell did).
+    expect(s).toContain("w-[904px]");
     expect(s).not.toContain("w-[820px]");
     expect(s).not.toContain("bg-stone-950/65"); // dropped -> transparent-glassy
     expect(s).toContain("backdrop-blur-sm");
