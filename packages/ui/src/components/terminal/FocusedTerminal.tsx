@@ -33,6 +33,8 @@ const ESCAPE_SEQ_MAP: Record<string, string> = {
   "\x1b[2~": "IC",
 };
 
+const SMOKED_TERMINAL_BACKGROUND = "rgba(12,10,9,0.6)";
+
 type WsMessage = { type: "keys"; keys: string[] } | { type: "text"; text: string };
 
 export function mapXtermInput(data: string): WsMessage[] {
@@ -163,11 +165,15 @@ export function FocusedTerminal({ sessionName, daemonBaseUrl }: FocusedTerminalP
           cursorBlink: true,
           fontSize: 12,
           fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
-          // OPR.0.4.0.1 styling fix: a TRANSPARENT background so the live terminal
-          // keeps the preview-era "floating smoked-glass plate" aesthetic — the
-          // popover's bg-stone-950/65 backdrop-blur shows through instead of an
-          // opaque dark panel. allowTransparency is required for a non-opaque bg.
-          theme: { background: "rgba(0,0,0,0)", foreground: "#e0e0e0", cursor: "#e0e0e0" },
+          // OPR.0.4.0.1 styling polish (FR-1): the live terminal CONTENT carries
+          // its OWN translucent smoked-black tint (stone-950 #0c0a09 at ~0.6 alpha)
+          // so it reads as a floating smoked-glass plate on EVERY surface -- incl.
+          // the truly-bare topology-tab + grid-popover surfaces that have no plate
+          // behind them -- not only over the popover/shell backdrop-blur. Foreground
+          // stays OPAQUE (#e0e0e0) so text is fully legible (AC-4 hard constraint);
+          // alpha is the starting point, tuned toward opaque by QA if a busy backdrop
+          // ever fights crispness. allowTransparency is required for a non-opaque bg.
+          theme: { background: SMOKED_TERMINAL_BACKGROUND, foreground: "#e0e0e0", cursor: "#e0e0e0" },
           allowTransparency: true,
           allowProposedApi: true,
         });
@@ -175,6 +181,11 @@ export function FocusedTerminal({ sessionName, daemonBaseUrl }: FocusedTerminalP
         const fitAddon = new FitAddon();
         term.loadAddon(fitAddon);
         term.open(containerRef.current!);
+        // xterm's viewport keeps its own default black background outside the
+        // theme-painted row layer. Keep it aligned with the smoked live content
+        // so live terminals do not regress to an opaque black panel.
+        const viewport = containerRef.current!.querySelector<HTMLElement>(".xterm-viewport");
+        if (viewport) viewport.style.backgroundColor = SMOKED_TERMINAL_BACKGROUND;
         fitAddon.fit();
         termRef.current = term;
         fitAddonRef.current = fitAddon;

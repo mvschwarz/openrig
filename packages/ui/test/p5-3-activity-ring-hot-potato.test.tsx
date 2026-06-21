@@ -203,11 +203,18 @@ describe("P5.3 ActivityRing and HotPotatoEdge", () => {
     expect(driverPopover.parentElement).toBe(document.body);
     expect(driverPopover.className).toContain("fixed");
     expect(driverPopover.className).toContain("z-[1000]");
-    expect(driverPopover.className).toContain("w-[calc(80ch+24px)]");
+    // OPR.0.4.0.1 (rev1-r2 fix): once LIVE, the popover shell widens to fit the
+    // 880px live plate (w-[904px]) so overflow-hidden no longer clips it -- it is
+    // NOT the compact static w-[calc(80ch+24px)] here (this terminal is live).
+    expect(driverPopover.className).toContain("w-[904px]");
+    expect(driverPopover.className).not.toContain("w-[calc(80ch+24px)]");
     expect(driverPopover.className).toContain("max-w-[calc(100vw-1rem)]");
     expect(driverPopover.className).toContain("max-h-[calc(100vh-1rem)]");
     expect(driverPopover.className).toContain("overflow-hidden");
-    expect(driverPopover.className).toContain("bg-stone-950/65");
+    // OPR.0.4.0.1 (FR-4): the popover dropped its redundant bg-stone-950/65 -- the
+    // terminal CONTENT now carries its own smoked-glass tint, so the popover stays
+    // transparent-glassy (backdrop-blur retained) instead of double-tinted opaque.
+    expect(driverPopover.className).not.toContain("bg-stone-950/65");
     expect(driverPopover.className).toContain("font-mono");
     expect(driverPopover.className).toContain("text-[8px]");
     expect(driverPopover.className).toContain("text-stone-50");

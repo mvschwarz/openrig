@@ -22,7 +22,9 @@ import { useMemo, useState } from "react";
 import { useRigSummary } from "../../hooks/useRigSummary.js";
 import { useNodeInventory, type NodeInventoryEntry } from "../../hooks/useNodeInventory.js";
 import { displayAgentName } from "../../lib/display-name.js";
-import { ProgressiveTerminal } from "../terminal/ProgressiveTerminal.js";
+import { SessionPreviewPane } from "../preview/SessionPreviewPane.js";
+import { TerminalPreviewPopover } from "./TerminalPreviewPopover.js";
+import { SMOKED_STATIC_PLATE_CLASS } from "../terminal/ProgressiveTerminal.js";
 import { EmptyState } from "../ui/empty-state.js";
 import { SectionHeader } from "../ui/section-header.js";
 import { cn } from "../../lib/utils.js";
@@ -84,19 +86,21 @@ function TokenMetric({ seat }: { seat: NodeInventoryEntry }) {
 }
 
 // V0.3.1 slice 14 walk-item 17 — TerminalView card.
-// OPR.0.4.0.1: the card body IS a ProgressiveTerminal — default-static polling
-// preview, click anywhere inside to go LIVE in place. Multiple cards can be live
-// at once (the grid is where the global cap binds): opening a live terminal past
-// MAX_LIVE_TERMINALS evicts the oldest live card back to static. This replaces
-// the prior single-open popover model (one terminal live at a time), so the
-// founder's "watch A while typing in B" works. Card font scale unchanged; the
-// pulsing-ring active treatment is preserved.
+// OPR.0.4.0.1 (FR-5 founder amendment — RECONCILES the merged live-in-place model):
+// a TUI-optimal-width live terminal does NOT fit a 1/3-width grid cell, so the card
+// keeps a SMALL static thumbnail (the 3-col overview stays an at-a-glance scan) and
+// reaches the wide LIVE terminal by EXPANDING OUT via the SAME graph/table primitive
+// (TerminalPreviewPopover): the trigger opens the wide popover (static), then the
+// universal click-inside goes live. This REPLACES the prior live-in-place model so
+// every surface (graph/table/grid) opens live the same way. The global cap=2 binds
+// on the inside go-live (2 wide live plates max; a 3rd evicts the oldest); static
+// thumbnails + open popovers are uncapped. The pulsing-ring active treatment is
+// preserved.
 
 function SeatTerminalCard({ seat }: { seat: NodeInventoryEntry }) {
   const sessionName = seat.canonicalSessionName ?? seat.logicalId;
   const active = isActiveRunning(seat);
   const memberName = displayAgentName(seat.logicalId);
-  const previewKey = `${seat.rigId ?? "unknown"}:${seat.logicalId}`;
   return (
     <div
       data-testid={`terminal-card-${seat.rigId}-${seat.logicalId}`}
@@ -118,12 +122,36 @@ function SeatTerminalCard({ seat }: { seat: NodeInventoryEntry }) {
           <TokenMetric seat={seat} />
         </span>
       </header>
-      <div className="relative z-0 min-h-0">
-        <ProgressiveTerminal
+      <div className="relative z-0 min-h-0 flex items-start gap-2">
+        {/* OPR.0.4.0.1 (FR-5): a SMALL static thumbnail keeps the 3-col grid an
+            at-a-glance overview -- NOT widened to TUI width. */}
+        <div
+          data-testid={`terminal-grid-${seat.rigId}-${seat.logicalId}-thumb-plate`}
+          className={cn("min-w-0 flex-1 overflow-hidden", SMOKED_STATIC_PLATE_CLASS)}
+        >
+          {/* The grid is a TRULY BARE surface, so the static thumbnail carries the
+              SAME borderless smoked-glass plate as ProgressiveTerminal's static
+              view (shared SMOKED_STATIC_PLATE_CLASS) -- the compact-terminal
+              SessionPreviewPane is transparent and sits ON this smoke. */}
+          <SessionPreviewPane
+            sessionName={sessionName}
+            lines={6}
+            variant="compact-terminal"
+            testIdPrefix={`terminal-grid-${seat.rigId}-${seat.logicalId}-thumb`}
+          />
+        </div>
+        {/* OPR.0.4.0.1 (FR-5 PINNED expand-OUT): the wide LIVE plate is reached via
+            the SAME graph/table primitive -- the TerminalPreviewPopover trigger
+            opens the wide popover (static), then the universal click-inside goes
+            live. cap=2 binds on that inside go-live (2 wide live plates max; a 3rd
+            evicts the oldest). This REPLACES the prior live-in-place model so all
+            surfaces (graph/table/grid) open live the same way; no new primitive. */}
+        <TerminalPreviewPopover
+          rigId={seat.rigId}
+          logicalId={seat.logicalId}
           sessionName={sessionName}
-          terminalKey={previewKey}
-          lines={20}
           testIdPrefix={`terminal-grid-${seat.rigId}-${seat.logicalId}`}
+          progressive
         />
       </div>
     </div>

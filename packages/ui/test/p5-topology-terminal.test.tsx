@@ -241,20 +241,40 @@ describe("TerminalView card a11y (slice 14 FF#1)", () => {
     );
     await findByTestId("topology-terminal-grid");
 
-    // OPR.0.4.0.1: each card body IS a ProgressiveTerminal; its static-mode view
-    // is the single tab-reachable click-to-go-live trigger (one per seat). The
-    // a11y intent (exactly one trigger per card, no duplicate) is preserved.
+    // OPR.0.4.0.1 (FR-5): each card shows a SMALL static thumbnail + exactly ONE
+    // tab-reachable TerminalPreviewPopover trigger (the wide expand-out, identical
+    // to graph/table). The a11y intent (exactly one trigger per card) is preserved.
     const cardTriggers = container.querySelectorAll(
-      "button[data-testid^='terminal-grid-'][data-testid$='-static']",
+      "button[data-testid^='terminal-grid-'][data-testid$='-terminal-open']",
     );
     expect(cardTriggers).toHaveLength(2);
 
-    // ZERO popover trigger buttons — the in-place multi-live model removes the
-    // per-card popover (the card body itself goes live in place).
-    const popoverTriggerButtons = container.querySelectorAll(
-      "button[data-testid$='-terminal-open']",
+    // The live-in-place model is REMOVED: NO in-place ProgressiveTerminal static
+    // trigger in the card body (going live now happens INSIDE the popover).
+    const inPlaceStatic = container.querySelectorAll(
+      "button[data-testid^='terminal-grid-'][data-testid$='-static']",
     );
-    expect(popoverTriggerButtons).toHaveLength(0);
+    expect(inPlaceStatic).toHaveLength(0);
+  });
+
+  it("OPR.0.4.0.1 (FR-1/FR-4): the grid static thumbnail carries the smoked-glass plate on the bare grid surface", async () => {
+    setupFetch({ rigs: [{ id: "rig-1", name: "test-rig" }], seatsByRig: { "rig-1": [makeSeat({ logicalId: "alpha" })] } });
+    const { findByTestId, container } = withQueryClient(
+      <TopologyTerminalView scope="rig" rigId="rig-1" />,
+    );
+    await findByTestId("topology-terminal-grid");
+
+    // The grid is a TRULY BARE surface (no popover/shell plate behind it), so the
+    // static thumbnail must carry its OWN borderless smoked-glass plate -- NOT a
+    // light card-bg preview. (guard BLOCKING: the FR-5 thumbnail bypassed the smoke.)
+    const thumbPlate = await findByTestId("terminal-grid-rig-1-alpha-thumb-plate");
+    expect(thumbPlate.className).toContain("bg-stone-950/60");
+    expect(thumbPlate.className).toContain("backdrop-blur-sm");
+
+    // ...while still exactly ONE popover trigger + NO in-place ProgressiveTerminal
+    // static button (the FR-5 expand-out model is intact).
+    expect(container.querySelectorAll("button[data-testid$='-terminal-open']")).toHaveLength(1);
+    expect(container.querySelectorAll("button[data-testid$='-static']")).toHaveLength(0);
   });
 });
 
