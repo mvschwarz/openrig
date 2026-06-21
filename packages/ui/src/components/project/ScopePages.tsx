@@ -51,6 +51,7 @@ import { DecisionsTab } from "../slices/tabs/DecisionsTab.js";
 import { TestsVerificationTab } from "../slices/tabs/TestsVerificationTab.js";
 import { TopologyTab } from "../slices/tabs/TopologyTab.js";
 import { HostMultiRigGraph } from "../topology/HostMultiRigGraph.js";
+import { LiveTerminalProvider, useTerminalCap } from "../terminal/LiveTerminalProvider.js";
 import { MissionProgressHeatmap } from "./MissionProgressHeatmap.js";
 import { useScopeAudit } from "../../hooks/useScopeAudit.js";
 import { QueueItemTrigger } from "../drawer-triggers/QueueItemTrigger.js";
@@ -150,7 +151,15 @@ function ScopeShell({
   onSelect: (id: string) => void;
   children: ReactNode;
 }) {
+  // OPR.0.4.0.1 forward-fix (FR-2): mount ONE explicit LiveTerminalProvider for
+  // every project scope page so all of the page's progressive terminals (the
+  // Topology tab + HostMultiRigGraph etc.) share ONE global live-terminal
+  // registry + configured cap, instead of TopologyTab resolving to the separate
+  // module-singleton fallback (which would silently UNSHARE the cap). Mirrors the
+  // topology/ScopePages provider mount.
+  const liveCap = useTerminalCap();
   return (
+    <LiveTerminalProvider cap={liveCap}>
     <div className="mx-auto w-full max-w-[1200px] px-6 py-8">
       <header className="border-b border-outline-variant pb-4 mb-4">
         <SectionHeader tone="muted">{eyebrow}</SectionHeader>
@@ -163,6 +172,7 @@ function ScopeShell({
         {children}
       </div>
     </div>
+    </LiveTerminalProvider>
   );
 }
 

@@ -21,7 +21,7 @@
 import { Link } from "@tanstack/react-router";
 import { useState } from "react";
 import type { SliceDetail, SpecGraphPayload } from "../../../hooks/useSlices.js";
-import { SessionPreviewPane } from "../../preview/SessionPreviewPane.js";
+import { ProgressiveTerminal } from "../../terminal/ProgressiveTerminal.js";
 import { SliceWorkflowGraph } from "./SliceWorkflowGraph.js";
 
 export function TopologyTab({ topology }: { topology: SliceDetail["topology"] }) {
@@ -140,7 +140,16 @@ function SeatRow({ session }: { session: string }) {
       </button>
       {open && (
         <div data-testid={`topology-seat-${session}-preview`} className="mt-1">
-          <SessionPreviewPane sessionName={session} testIdPrefix={`topology-preview-${session}`} />
+          {/* OPR.0.4.0.1 forward-fix: the shared progressive terminal (default-
+              static -> click-inside-to-go-live) under the global cap, replacing
+              the raw static SessionPreviewPane. terminalKey is session-scoped in
+              the topology-tab namespace so the same seat on another surface is a
+              distinct registry entry (matches the node-detail:/topology-grid: pattern). */}
+          <ProgressiveTerminal
+            sessionName={session}
+            terminalKey={`topology-tab:${session}`}
+            testIdPrefix={`topology-preview-${session}`}
+          />
         </div>
       )}
     </li>
