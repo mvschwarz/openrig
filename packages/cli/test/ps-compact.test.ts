@@ -170,8 +170,11 @@ const NODES_BY_RIG: Record<string, unknown[]> = {
 describe("OPR.0.4.0.25 — rig ps token-safe defaults", () => {
   let server: http.Server;
   let port: number;
+  let savedSessionName: string | undefined;
 
   beforeAll(async () => {
+    savedSessionName = process.env.OPENRIG_SESSION_NAME;
+    delete process.env.OPENRIG_SESSION_NAME;
     server = http.createServer((req, res) => {
       const m = req.url?.match(/^\/api\/rigs\/([^/]+)\/nodes(?:\?.*)?$/);
       if (m && req.method === "GET") {
@@ -190,7 +193,10 @@ describe("OPR.0.4.0.25 — rig ps token-safe defaults", () => {
     port = (server.address() as { port: number }).port;
   });
 
-  afterAll(() => server.close());
+  afterAll(() => {
+    server.close();
+    if (savedSessionName !== undefined) process.env.OPENRIG_SESSION_NAME = savedSessionName;
+  });
 
   function makeCmd(): Command {
     const prog = new Command();
@@ -378,7 +384,7 @@ describe("OPR.0.4.0.25 — rig ps token-safe defaults", () => {
     expect(helpOutput).toContain("--full");
     expect(helpOutput).toContain("--rig");
     expect(helpOutput).toContain("--session");
-    expect(helpOutput).toContain("rig queue");
+    expect(helpOutput).toContain("current-rig");
     expect(helpOutput).toContain("compact");
   });
 

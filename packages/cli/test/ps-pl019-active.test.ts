@@ -156,8 +156,11 @@ describe("PL-019 ps --filter agentActivity.state + --active", () => {
   let server: http.Server;
   let port: number;
   let nodesByRig: Record<string, unknown[]>;
+  let savedSessionName: string | undefined;
 
   beforeAll(async () => {
+    savedSessionName = process.env.OPENRIG_SESSION_NAME;
+    delete process.env.OPENRIG_SESSION_NAME;
     nodesByRig = {};
     server = http.createServer((req, res) => {
       const m = req.url?.match(/^\/api\/rigs\/([^/]+)\/nodes(?:\?.*)?$/);
@@ -176,7 +179,10 @@ describe("PL-019 ps --filter agentActivity.state + --active", () => {
     port = (server.address() as { port: number }).port;
   });
 
-  afterAll(() => server.close());
+  afterAll(() => {
+    server.close();
+    if (savedSessionName !== undefined) process.env.OPENRIG_SESSION_NAME = savedSessionName;
+  });
 
   function makeCmd(): Command {
     const prog = new Command();

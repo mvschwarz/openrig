@@ -6,6 +6,7 @@ import type { StatusDeps } from "./status.js";
 import { loadHostRegistry, resolveHost, hostDisplayTarget, resolveRemoteBearer, classifyHttpFailedStep, classifyHttpError, type HttpHostEntry } from "../host-registry.js";
 import { runCrossHostCommand, type RunCrossHostCommandOpts } from "../cross-host-executor.js";
 import { emitCrossHostError, emitCrossHostFailure } from "../cross-host-cli-helpers.js";
+import { readOpenRigEnv } from "../openrig-compat.js";
 
 interface PsEntry {
   rigId: string;
@@ -77,12 +78,25 @@ interface NodeEntry {
     state?: "critical" | "warning" | "low" | "unknown";
     sampledAt: string | null;
   };
+  /** OPR.0.4.0.34 — resume summary from the daemon node-inventory. resumeToken
+   *  is the SECRET: surfaced as a present-boolean in compact, value only in --full. */
+  resumeType?: string | null;
+  resumeToken?: string | null;
+  /** OPR.0.4.0.34 — startup-completion timestamp; the compact `lastActivity`
+   *  fallback when no agentActivity sample exists. */
+  startupCompletedAt?: string | null;
   [key: string]: unknown;
 }
 
 // L3-followup: human-output budgets bound default terminal output for hosts
 // with realistic agent counts. `--full` opts out. JSON output remains
 // unbounded by default for back-compat (Decision C hybrid).
+function extractRigName(sessionName: string): string | undefined {
+  const atIdx = sessionName.lastIndexOf("@");
+  if (atIdx < 0 || atIdx === sessionName.length - 1) return undefined;
+  return sessionName.slice(atIdx + 1);
+}
+
 const HUMAN_RIG_BUDGET = 50;
 const HUMAN_NODE_BUDGET = 100;
 
@@ -178,6 +192,8 @@ interface PsCliOptions {
   allHosts?: boolean;
   hosts?: string;
   active?: boolean;
+  running?: boolean;
+  allRigs?: boolean;
   rig?: string;
   session?: string;
   /** OPR.0.3.3.19 - include archived rigs (default excludes them). Parity
@@ -390,19 +406,40 @@ function needsAttention(node: NodeEntry): boolean {
     || node.agentActivity?.state === "needs_input";
 }
 
+// OPR.0.4.0.34 — the compact orch field set (PRD FR-4). Carries the
+// source-available identity + state + resume-summary fields an orchestrator
+// needs at a glance, WITHOUT leaking the resume token value or resumeCommand
+// (security). recoveryGuidance/currentUsage stay on the node detail (slice 26).
 function compactNodeProjection(nodes: NodeEntry[]): Array<Record<string, unknown>> {
   return nodes.map((n) => {
     const attention = needsAttention(n);
     const compact: Record<string, unknown> = {
+      // identity (rigId/rigName + logicalId + session) — disambiguates under -A.
+      rigId: n.rigId,
       rigName: n.rigName,
+      logicalId: n.logicalId,
       canonicalSessionName: n.canonicalSessionName,
+      // lifecycle + session/startup state.
+      sessionStatus: n.sessionStatus,
+      startupStatus: n.startupStatus,
       lifecycleState: n.lifecycleState,
+      // activity (state always; short reason only when attention — keep it lean).
       agentActivity: attention
         ? { state: n.agentActivity?.state ?? "unknown", reason: n.agentActivity?.reason }
         : { state: n.agentActivity?.state ?? "unknown" },
+      // work counts.
       hasAssignedWork: n.hasAssignedWork,
       pendingWorkCount: n.pendingWorkCount,
+      // resume summary — type + PRESENT boolean only (never the token value).
+      resumeType: n.resumeType ?? null,
+      resumeTokenPresent: Boolean(n.resumeToken),
+      // updated/age proxy. The node-list emits no dedicated `updatedAt`; the
+      // freshest signal is agentActivity.sampledAt, then startupCompletedAt,
+      // else null (documented FR-4 fallback — not a fabricated timestamp).
+      lastActivity: n.agentActivity?.sampledAt ?? n.startupCompletedAt ?? null,
     };
+    // held/attention reason (short) when present.
+    if (n.heldReason) compact.heldReason = n.heldReason;
     if (attention && n.latestError) {
       compact.latestError = n.latestError;
     }
@@ -479,56 +516,57 @@ export function psCommand(depsOverride?: PsDeps): Command {
   const cmd = new Command("ps")
     .description("List rigs and their status")
     .addHelpText("after", `
-Default frontier source: use 'rig queue list' for pending work items.
-'rig ps' is an observation tool showing fleet state, not a task dispatch surface.
+Default: current-rig scope (derived from OPENRIG_SESSION_NAME's @<rig> suffix).
+Shows ALL states (stopped, recoverable, attention, idle — non-running IS the
+actionable signal for topology/readiness). Use -A/--all-rigs for fleet breadth.
 
 Compact defaults: 'rig ps --nodes' shows a compact summary per node
-(rig, session, lifecycle, activity state, reason when attention, queue counts).
-Use '--full' (or '--verbose') for the complete per-node LIST payload
-(contextUsage scalars, resume commands, agent references). Note (OPR.0.4.0.26):
-the node-list payload intentionally carries recoveryGuidance: null and
-contextUsage.currentUsage: null even with --full; fetch the full recovery
-guidance and currentUsage from the single-node detail
-(/api/rigs/:rigId/nodes/:logicalId) or 'rig whoami'.
+(rig, session, lifecycle, activity state, reason when attention, queue counts,
+resume type + present indicator). Resume token values and resumeCommand are
+excluded from compact output (security); use --full to see them.
 
-Compact field set (--nodes default): rigName, canonicalSessionName,
-lifecycleState, agentActivity.state, agentActivity.reason (when attention),
-hasAssignedWork, pendingWorkCount, latestError (when attention).
+Use '--full' (or '--verbose') for the uncompacted per-node payload (contextUsage
+scalars, resume commands/tokens, agent references). Note (OPR.0.4.0.26): the
+node-list payload carries recoveryGuidance: null and contextUsage.currentUsage:
+null even with --full; fetch the full recovery guidance + currentUsage from the
+single-node detail (/api/rigs/:rigId/nodes/:logicalId) or 'rig whoami'.
 
 Examples:
-  rig ps                                          Show all rigs (human; truncated to ${HUMAN_RIG_BUDGET} with footer)
-  rig ps --full                                   Show all rigs without truncation
-  rig ps --json                                   JSON output (bare array; back-compat)
+  rig ps                                          Current rig summary (compact)
+  rig ps -A                                       All rigs (fleet breadth)
+  rig ps --full                                   Current rig, full detail
+  rig ps --json                                   Current rig, compact JSON
+  rig ps -A --json                                All rigs, compact JSON
   rig ps --json --limit 20                        Bounded JSON envelope
-  rig ps --json --summary                         Aggregate-only JSON (no per-rig entries)
+  rig ps --json --summary                         Aggregate-only JSON
   rig ps --json --fields rigName,status,lifecycleState
                                                   Project JSON to named fields
   rig ps --filter lifecycleState=attention_required
                                                   Show only rigs needing attention
   rig ps --filter status=running                  Show only running rigs
   rig ps --filter name-prefix=demo                Filter by rig-name prefix
-  rig ps --nodes                                  Per-node compact summary (human; truncated to ${HUMAN_NODE_BUDGET})
-  rig ps --nodes --json                           Per-node compact summary (JSON; bare array)
+  rig ps --nodes                                  Current rig per-node compact summary
+  rig ps --nodes -A                               All rigs per-node compact summary
+  rig ps --nodes --json                           Current rig per-node compact JSON
   rig ps --nodes --json --full                    Complete per-node LIST payload (guidance/currentUsage relocated to node detail)
-  rig ps --nodes --json --rig openrig-build       Compact nodes filtered to one rig
-  rig ps --nodes --json --session dev1-impl@myrig Filter to a single session
+  rig ps --nodes --json --rig openrig-build       Compact nodes for a specific rig
+  rig ps --nodes --json --session dev1-impl@myrig Filter to a single session (within current rig; use -A for cross-rig)
   rig ps --nodes --json --limit 50                Bounded per-node JSON envelope
-  rig ps --include-archived                       Include archived rigs (marked with *); hidden by default
-  rig ps --nodes --active                         Show only nodes whose agentActivity.state == running (PL-019)
+  rig ps --nodes --active                         Only nodes with agentActivity.state=running
+  rig ps --nodes --running                        Same as --active
   rig ps --nodes --filter agentActivity.state=running
                                                   Same as --active (the explicit form)
-  rig ps --host vm-claude-test --nodes --json     Run on a remote host via single-hop ssh
+  rig ps --host vm-claude-test --nodes --json     Remote host (no current-rig default)
+  rig ps --include-archived                       Include archived rigs (marked with *); hidden by default
 
-JSON output entries include both \`name\` and \`rigName\` (alias) for forward
-compatibility; agent code should prefer \`rigName\` (matches per-node JSON).
+--rig <name> overrides the current-rig default. -A/--all-rigs disables it.
+--session <name> filters within the effective rig scope; use -A if the target
+session is in a different rig.
 
---rig <name> filters to nodes whose rigName matches (convenience; composes with
-compact and --full). --session <name> filters to the node whose
-canonicalSessionName matches. Both narrow the node set before projection.
+--active/--running narrow to agentActivity.state=running. Cannot combine with --filter.
 
---filter accepts: status, lifecycleState, name-prefix, name, agentActivity.state.
-Other keys are rejected. agentActivity.state is node-level (use with --nodes);
-allowed values: running, needs_input, idle, unknown.
+--filter accepts: status, lifecycleState, name-prefix, name, agentActivity.state,
+contextUsage.percent, contextUsage.state. Other keys are rejected.
 
 --fields accepts (rig-level): rigId, name, rigName, nodeCount, runningCount,
 activeCount, hasWorkCount, status, lifecycleState, uptime, latestSnapshot.
@@ -536,17 +574,10 @@ activeCount, hasWorkCount, status, lifecycleState, uptime, latestSnapshot.
 podNamespace, canonicalSessionName, nodeKind, runtime, sessionStatus,
 startupStatus, restoreOutcome, lifecycleState, tmuxAttachCommand,
 resumeCommand, latestError, terminalActive, hasAssignedWork,
-pendingWorkCount, agentActivity. Other keys are rejected.
-\`name\` is rig-level only; for node entries use \`rigName\`. Nested-field
-projection (e.g. \`agentActivity.state\`) is not supported in this slice; pass
-\`agentActivity\` to project the whole object and read the nested value
-downstream.
+pendingWorkCount, agentActivity, contextUsage, heldReason.
 
---host runs the same command on a remote host declared in ~/.openrig/hosts.yaml
-via single-hop ssh (CLI-side shell-out; daemon untouched). The remote rig's
-output is what counts and is surfaced verbatim on success; failure is
-distinguished into ssh-unreachable / permission-gate / remote-daemon-unreachable
-/ remote-command-failed.
+--host runs on a remote host declared in ~/.openrig/hosts.yaml (no current-rig
+default applied; the remote host's rigs are shown).
 
 Exit codes:
   0  Success
@@ -556,14 +587,16 @@ Exit codes:
 
   cmd
     .option("--json", "JSON output for agents")
-    .option("--nodes", "Show per-node detail for all rigs")
-    .option("--full", "Show all node-list fields per node (uncompacted rows; recoveryGuidance/currentUsage live on the node detail, not the list)")
+    .option("--nodes", "Show per-node detail (current rig; -A for all rigs)")
+    .option("--full", "Show all node-list fields per node (uncompacted rows; node-list recoveryGuidance/currentUsage live on the node detail, not the list)")
     .option("--verbose", "Alias for --full")
     .option("--limit <n>", "Limit number of entries (rigs or nodes)")
     .option("--fields <list>", "Comma-separated field list to project (JSON only)")
     .option("--summary", "Emit aggregate-only output (counts by status/lifecycle)")
     .option("--filter <key=value>", "Filter entries; supported keys: status, lifecycleState, name-prefix, name, agentActivity.state")
     .option("--active", "Shortcut for --filter agentActivity.state=running (PL-019)")
+    .option("--running", "Alias for --active")
+    .option("-A, --all-rigs", "Show all rigs (default is current rig only)")
     .option("--rig <name>", "Show only nodes belonging to the named rig")
     .option("--session <name>", "Show only the node matching this canonical session name")
     .option("--include-archived", "Include archived rigs (default hides them); parity with 'rig stream list --include-archived'")
@@ -572,6 +605,13 @@ Exit codes:
     .option("--hosts <ids>", "Fan out to specific hosts (comma-separated)")
     .action(async (opts: PsCliOptions) => {
       if (opts.verbose) opts.full = true;
+      if (opts.running) opts.active = true;
+      const isRemote = !!(opts.host || opts.allHosts || opts.hosts);
+      if (!opts.allRigs && !opts.rig && !isRemote) {
+        const sessionName = readOpenRigEnv("OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME");
+        const callerRig = sessionName ? extractRigName(sessionName) : undefined;
+        if (callerRig) opts.rig = callerRig;
+      }
       const deps = getDepsF();
 
       if (opts.allHosts || opts.hosts) {
@@ -664,8 +704,12 @@ Exit codes:
 
       const all = res.data;
 
+      const rigScoped = opts.rig
+        ? all.filter((e) => (e.rigName ?? e.name) === opts.rig)
+        : all;
+
       // Apply CLI-side filter (Amendment A: prefer CLI shaping).
-      const filtered = parsedFilter ? applyRigFilter(all, parsedFilter) : all;
+      const filtered = parsedFilter ? applyRigFilter(rigScoped, parsedFilter) : rigScoped;
 
       // Summary mode short-circuits per-entry output.
       if (opts.summary) {
@@ -770,8 +814,12 @@ async function handleNodes(
     return;
   }
 
+  const effectiveRigs = opts.rig
+    ? rigRes.data.filter((r) => (r.rigName ?? r.name) === opts.rig)
+    : rigRes.data;
+
   const allNodes: NodeEntry[] = [];
-  for (const rig of rigRes.data) {
+  for (const rig of effectiveRigs) {
     const nodesRes = await client.get<NodeEntry[]>(`/api/rigs/${encodeURIComponent(rig.rigId)}/nodes`, requestHeaders ? { headers: requestHeaders } : undefined);
     if (nodesRes.status >= 400) {
       console.error(`Warning: failed to fetch nodes for rig "${rig.rigName ?? rig.name}" (HTTP ${nodesRes.status}). List rigs with: rig ps`);
@@ -1013,10 +1061,17 @@ async function runCrossHostPs(
   const argv: string[] = ["rig", "ps"];
   if (opts.nodes) argv.push("--nodes");
   if (opts.full) argv.push("--full");
+  // OPR.0.4.0.34: forward the breadth flag so `--host h -A` keeps all-rigs
+  // breadth across the hop (the current-rig default is local-only and never
+  // applied to a remote call, but an explicit -A must still reach the remote).
+  if (opts.allRigs) argv.push("--all-rigs");
   if (opts.limit !== undefined) argv.push("--limit", opts.limit);
   if (opts.fields !== undefined) argv.push("--fields", opts.fields);
   if (opts.summary) argv.push("--summary");
   if (opts.filter !== undefined) argv.push("--filter", opts.filter);
+  // OPR.0.4.0.34: opts.active is the normalized form (set by --active OR
+  // --running). Forward it so the state filter survives the hop.
+  if (opts.active) argv.push("--active");
   if (opts.rig !== undefined) argv.push("--rig", opts.rig);
   if (opts.session !== undefined) argv.push("--session", opts.session);
   if (opts.includeArchived) argv.push("--include-archived");

@@ -555,3 +555,35 @@ describe("whoami --host (cross-host short-circuit)", () => {
     expect(runSpy).not.toHaveBeenCalled();
   });
 });
+
+// ---------------------------------------------------------------------------
+// `rig ps --host <id>` — OPR.0.4.0.34 breadth-flag forwarding over SSH
+// ---------------------------------------------------------------------------
+
+describe("ps --host (cross-host argv forwarding, OPR.0.4.0.34)", () => {
+  function psWithCapture(cap: { argv?: readonly string[] }) {
+    return psCommand(deps({
+      run: async (_h, argv) => {
+        cap.argv = argv;
+        return { ok: true, failedStep: "none", stdout: "[]", stderr: "", remoteExitCode: 0 };
+      },
+    }) as unknown as PsDeps);
+  }
+
+  it("forwards -A/--all-rigs into the remote SSH argv (breadth preserved across the hop)", async () => {
+    const cap: { argv?: readonly string[] } = {};
+    await psWithCapture(cap).parseAsync(["--host", "vm-a", "-A", "--nodes", "--json"], { from: "user" });
+    expect(cap.argv).toContain("--all-rigs");
+    expect(cap.argv).toContain("--nodes");
+  });
+
+  it("forwards --active into the remote SSH argv (also covers --running via normalization)", async () => {
+    const capRunning: { argv?: readonly string[] } = {};
+    await psWithCapture(capRunning).parseAsync(["--host", "vm-a", "--running", "--json"], { from: "user" });
+    expect(capRunning.argv).toContain("--active");
+
+    const capActive: { argv?: readonly string[] } = {};
+    await psWithCapture(capActive).parseAsync(["--host", "vm-a", "--active", "--json"], { from: "user" });
+    expect(capActive.argv).toContain("--active");
+  });
+});

@@ -88,8 +88,11 @@ describe("PL-012 ps --filter contextUsage.* + CTX field", () => {
   let server: http.Server;
   let port: number;
   let nodesByRig: Record<string, unknown[]>;
+  let savedSessionName: string | undefined;
 
   beforeAll(async () => {
+    savedSessionName = process.env.OPENRIG_SESSION_NAME;
+    delete process.env.OPENRIG_SESSION_NAME;
     nodesByRig = {};
     server = http.createServer((req, res) => {
       const m = req.url?.match(/^\/api\/rigs\/([^/]+)\/nodes(?:\?.*)?$/);
@@ -107,7 +110,10 @@ describe("PL-012 ps --filter contextUsage.* + CTX field", () => {
     await new Promise<void>((resolve) => server.listen(0, resolve));
     port = (server.address() as { port: number }).port;
   });
-  afterAll(() => server.close());
+  afterAll(() => {
+    server.close();
+    if (savedSessionName !== undefined) process.env.OPENRIG_SESSION_NAME = savedSessionName;
+  });
 
   function makeCmd(): Command {
     const prog = new Command();

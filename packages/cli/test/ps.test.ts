@@ -57,8 +57,11 @@ describe("Ps CLI", () => {
   let port: number;
   let psData: unknown[];
   let nodesData: Record<string, unknown[]>;
+  let savedSessionName: string | undefined;
 
   beforeAll(async () => {
+    savedSessionName = process.env.OPENRIG_SESSION_NAME;
+    delete process.env.OPENRIG_SESSION_NAME;
     psData = [];
     nodesData = {};
     server = http.createServer(async (req, res) => {
@@ -83,7 +86,10 @@ describe("Ps CLI", () => {
     port = (server.address() as { port: number }).port;
   });
 
-  afterAll(() => { server.close(); });
+  afterAll(() => {
+    server.close();
+    if (savedSessionName !== undefined) process.env.OPENRIG_SESSION_NAME = savedSessionName;
+  });
 
   function makeCmd(): Command {
     const prog = new Command();
