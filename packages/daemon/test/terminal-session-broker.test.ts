@@ -461,3 +461,59 @@ describe("TerminalSessionBroker - shared history ring (AC-5)", () => {
     await vi.waitFor(() => { expect(broker.historyByteLength).toBe(0); }, { timeout: 1000 });
   });
 });
+
+// ---- concurrent attach FAILURE (dev1-guard re-review watchpoint) ------------
+// A concurrent later attach must not be left live on a torn-down broker when
+// the shared open fails. All concurrent attaches await the same open result and
+// every subscriber closes honestly (no-live-terminal-lies).
+describe("TerminalSessionBroker - concurrent attach failure (honest close)", () => {
+  it("concurrent first attaches with a DEAD session close ALL subscribers honestly (1008), none left live", async () => {
+    let evicted = 0;
+    const broker = new TerminalSessionBroker("dead@rig", makeTmux({
+      hasSession: async () => { await new Promise((r) => setTimeout(r, 20)); return false; },
+    }), { pollMs: 10, onEmpty: () => { evicted += 1; } });
+    const a = makeSub();
+    const b = makeSub();
+
+    await Promise.all([broker.attach(a), broker.attach(b)]);
+
+    expect(a.closed[0]?.code).toBe(1008);
+    expect(b.closed[0]?.code).toBe(1008); // the co-waiter is NOT left live
+    expect(broker.subscriberCount).toBe(0);
+    expect(evicted).toBe(1); // evicted exactly once
+  });
+
+  it("concurrent first attaches with a PIPE-START failure close ALL subscribers (1011), no temp leak", async () => {
+    let capturedPath: string | null = null;
+    const broker = new TerminalSessionBroker("dev@rig", makeTmux({
+      startPipePane: async (_n: string, p: string) => {
+        capturedPath = p;
+        await new Promise((r) => setTimeout(r, 20));
+        return { ok: false as const, code: "pipe_fail", message: "pipe boom" };
+      },
+    }), { pollMs: 10 });
+    const a = makeSub();
+    const b = makeSub();
+
+    await Promise.all([broker.attach(a), broker.attach(b)]);
+
+    expect(a.closed[0]?.code).toBe(1011);
+    expect(b.closed[0]?.code).toBe(1011);
+    expect(broker.subscriberCount).toBe(0);
+    if (capturedPath) expect(fs.existsSync(capturedPath)).toBe(false);
+  });
+
+  it("registry: concurrent attaches to a dead session close all and evict the broker (size 0)", async () => {
+    const reg = new TerminalBrokerRegistry(makeTmux({
+      hasSession: async () => { await new Promise((r) => setTimeout(r, 20)); return false; },
+    }), { pollMs: 10 });
+    const a = makeSub();
+    const b = makeSub();
+
+    await Promise.all([reg.attach("dead@rig", a), reg.attach("dead@rig", b)]);
+
+    expect(a.closed[0]?.code).toBe(1008);
+    expect(b.closed[0]?.code).toBe(1008);
+    await vi.waitFor(() => { expect(reg.size).toBe(0); }, { timeout: 1000 });
+  });
+});

@@ -140,7 +140,12 @@ export class TerminalSessionBroker {
   private livenessInterval: ReturnType<typeof setInterval> | null = null;
   private lastSize = 0;
   private inputQueue: Promise<void> = Promise.resolve();
-  private started = false;
+  // Singleflight the pipe-open as a shared promise so EVERY concurrent attach
+  // awaits the SAME open result before it seeds/adds (a bare boolean would let a
+  // later attach add itself before the open result is known, then never be
+  // closed if the open fails). Null until the first attach starts the open.
+  private openPromise: Promise<{ ok: true } | { ok: false; code: number; reason: string }> | null = null;
+  private tailStarted = false;
   private torndown = false;
 
   constructor(sessionName: string, tmux: BrokerTmux, opts: BrokerOptions = {}) {
@@ -179,27 +184,41 @@ export class TerminalSessionBroker {
       sub.close(1011, "terminal broker unavailable");
       return;
     }
-    if (!this.started) {
-      // Synchronous guard: a concurrent second attach sees started=true and
-      // takes the no-new-pipe path even before openPipe() resolves.
-      this.started = true;
-      const open = await this.openPipe();
-      if (!open.ok) {
-        this.torndown = true;
-        this.teardownResources();
-        sub.close(open.code, open.reason);
-        this.onEmpty?.(this.sessionName);
-        return;
-      }
-      await this.seed(sub); // FR-4: seed BEFORE tail/fanout exists
-      this.subscribers.add(sub);
+    // Start the single pipe-open exactly once; every concurrent attach awaits
+    // the SAME result before it seeds/adds.
+    if (!this.openPromise) {
+      this.openPromise = this.openPipe();
+    }
+    const open = await this.openPromise;
+
+    // The broker may have been torn down while we awaited - a co-waiter's open
+    // failed, or the session died. Close this subscriber HONESTLY; never leave a
+    // live-looking subscriber on a dead broker (the no-live-terminal-lies rule).
+    if (this.torndown) {
+      if (open.ok) sub.close(1011, "terminal broker unavailable");
+      else sub.close(open.code, open.reason);
+      return;
+    }
+
+    if (!open.ok) {
+      // Open failed: tear the broker down ONCE, then close THIS subscriber with
+      // the shared honest 1008/1011 reason. Every co-waiter takes the torndown
+      // branch above and is closed with the same reason - none is left live.
+      this.torndown = true;
+      this.teardownResources();
+      this.onEmpty?.(this.sessionName);
+      sub.close(open.code, open.reason);
+      return;
+    }
+
+    // Open succeeded: seed this subscriber (ring replay + current screen) BEFORE
+    // it joins the fanout, then start the single tail + liveness exactly once.
+    await this.seed(sub);
+    this.subscribers.add(sub);
+    if (!this.tailStarted) {
+      this.tailStarted = true;
       this.startTail();
       this.startLiveness();
-    } else {
-      // Later subscriber: its own seed of the current screen, then join the
-      // fanout. No new pipe-pane (FR-1).
-      await this.seed(sub);
-      this.subscribers.add(sub);
     }
   }
 
