@@ -11,6 +11,20 @@ describe("FocusedTerminal lifecycle", () => {
     expect(src).toContain('@xterm/xterm/css/xterm.css');
   });
 
+  it("source guard: OPR.0.4.0.38 FR-7 - no client resize-send to the daemon", async () => {
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const src = fs.readFileSync(
+      path.resolve(import.meta.dirname, "../src/components/terminal/FocusedTerminal.tsx"),
+      "utf-8",
+    );
+    // The broker owns fixed canonical geometry; the client must NOT send a
+    // resize (it would shrink the shared pane for every other viewer).
+    expect(src).not.toMatch(/type:\s*["']resize["']/);
+    // FitAddon still fits the CONTAINER (scroll/pan), just without a resize relay.
+    expect(src).toContain("fitAddon");
+  });
+
   it("source guard: cleanup closes wsRef.current not local ws", async () => {
     const fs = await import("node:fs");
     const path = await import("node:path");

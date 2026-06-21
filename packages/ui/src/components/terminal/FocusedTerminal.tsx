@@ -110,12 +110,12 @@ export function FocusedTerminal({ sessionName, daemonBaseUrl }: FocusedTerminalP
 
     ws.onopen = () => {
       if (generationRef.current !== gen) { ws.close(); return; }
+      // OPR.0.4.0.38 FR-7: fit the CONTAINER for scroll/pan only; do NOT send a
+      // resize. The daemon broker owns fixed canonical geometry (120x40) shared
+      // across every viewer - a client-driven resize would shrink the shared
+      // pane for everyone else. The seed arrives from the broker on attach.
       const fitAddon = fitAddonRef.current as { fit(): void } | null;
-      const term = termRef.current as { cols: number; rows: number } | null;
-      if (fitAddon && term) {
-        fitAddon.fit();
-        ws.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
-      }
+      fitAddon?.fit();
     };
 
     ws.onmessage = (evt) => {
@@ -199,11 +199,9 @@ export function FocusedTerminal({ sessionName, daemonBaseUrl }: FocusedTerminalP
           }
         });
 
-        term.onResize(({ cols, rows }: { cols: number; rows: number }) => {
-          const wsc = wsRef.current;
-          if (!wsc || wsc.readyState !== WebSocket.OPEN) return;
-          wsc.send(JSON.stringify({ type: "resize", cols, rows }));
-        });
+        // OPR.0.4.0.38 FR-7: no term.onResize -> ws resize relay. The pane
+        // geometry is fixed daemon-side; the client only fits its container
+        // viewport (scroll/pan) and never asks the pane to resize.
 
         connectForGeneration(currentGen);
 
