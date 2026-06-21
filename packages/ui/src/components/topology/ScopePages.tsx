@@ -54,6 +54,9 @@ function ActivityRollupBar({ rigId }: { rigId: string }) {
 // the prior placeholder with the multi-rig single-canvas component
 // (rig-collapse affordance; default-all-collapsed; auto-expand on URL).
 import { HostMultiRigGraph } from "./HostMultiRigGraph.js";
+// OPR.0.4.0.1: one global LiveTerminalProvider per scope page bounds the total
+// live terminals across the page's graph + table + terminal tab-surfaces.
+import { LiveTerminalProvider, useTerminalCap } from "../terminal/LiveTerminalProvider.js";
 
 /** Set the AppShell's Explorer overlay mode based on the scope page's
  *  active view-mode. Graph view-mode → overlay (vellum-translucent
@@ -123,8 +126,10 @@ export function HostScopePage() {
   // as table per universal-shell.md L143. The tab nav still shows graph
   // selected (operator may resize to wide and the graph reactivates).
   const effectiveActive = !isWideLayout && active === "graph" ? "table" : active;
+  const liveCap = useTerminalCap();
 
   return (
+    <LiveTerminalProvider cap={liveCap}>
     <ScopeShell
       eyebrow="Topology · Host"
       title="localhost"
@@ -150,6 +155,7 @@ export function HostScopePage() {
       ) : null}
       {effectiveActive === "terminal" ? <TopologyTerminalView scope="host" /> : null}
     </ScopeShell>
+    </LiveTerminalProvider>
   );
 }
 
@@ -162,8 +168,10 @@ export function RigScopePage() {
   useOverlayForActiveTab(active);
 
   const effectiveActive = !isWideLayout && active === "graph" ? "table" : active;
+  const liveCap = useTerminalCap();
 
   return (
+    <LiveTerminalProvider cap={liveCap}>
     <ScopeShell
       eyebrow="Topology · Rig"
       title={rig?.name ?? rigId}
@@ -199,6 +207,7 @@ export function RigScopePage() {
       {effectiveActive === "terminal" ? <TopologyTerminalView scope="rig" rigId={rigId} /> : null}
       {active === "overview" ? <RigOverviewTab rigId={rigId} rigName={rig?.name ?? null} /> : null}
     </ScopeShell>
+    </LiveTerminalProvider>
   );
 }
 

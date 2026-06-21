@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type React from "react";
 import { createPortal } from "react-dom";
-import { FocusedTerminal } from "../terminal/FocusedTerminal.js";
+import { ProgressiveTerminal } from "../terminal/ProgressiveTerminal.js";
 import { cn } from "../../lib/utils.js";
 import { ToolMark } from "../graphics/RuntimeMark.js";
 
@@ -184,8 +184,10 @@ export function TerminalPreviewPopover({
       onClick={(event) => event.stopPropagation()}
       onPointerDown={(event) => event.stopPropagation()}
     >
-      <div className="h-[400px] w-[600px]">
-        <FocusedTerminal sessionName={sessionName} />
+      {/* OPR.0.4.0.1: progressive-live (default-static -> click-to-go-live), and
+          a wider optimal terminal width per the styling finding. */}
+      <div className="h-[440px] w-[820px] max-w-[calc(100vw-2rem)]">
+        <ProgressiveTerminal sessionName={sessionName} terminalKey={key} testIdPrefix={testIdPrefix} />
       </div>
     </div>,
     document.body,
