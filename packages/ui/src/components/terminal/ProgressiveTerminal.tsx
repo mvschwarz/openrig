@@ -33,6 +33,10 @@ interface ProgressiveTerminalProps {
    *  (e.g. the popover) can size its shell to the wide live plate when live and
    *  stay compact when static. */
   onLiveChange?: (isLive: boolean) => void;
+  /** OPR.0.4.0.39: scale-to-fit mode. "width" (default) fits the column width and
+   *  never upscales (grid/graph/table cells). "contain" fills a big dedicated
+   *  container on both axes (capped upscale, centered) - the node-detail panel. */
+  fit?: "width" | "contain";
 }
 
 export function ProgressiveTerminal({
@@ -43,6 +47,7 @@ export function ProgressiveTerminal({
   testIdPrefix = "progressive-terminal",
   className,
   onLiveChange,
+  fit = "width",
 }: ProgressiveTerminalProps) {
   const [mode, setMode] = useState<"static" | "live">("static");
   const live = useLiveTerminal();
@@ -77,7 +82,7 @@ export function ProgressiveTerminal({
   // live xterm appears at the same size in the same place (the mirror).
   if (mode === "live") {
     return (
-      <ScaleToFitTerminal testId={`${testIdPrefix}-fit`} className={className}>
+      <ScaleToFitTerminal testId={`${testIdPrefix}-fit`} className={className} fit={fit}>
         {/* The live div sizes to the xterm's natural 90x40 geometry (FocusedTerminal
             is w-max); ScaleToFitTerminal scales it to the cell, matching the static
             plate exactly - the glass->opaque flip stays the same size in place. */}
@@ -93,7 +98,7 @@ export function ProgressiveTerminal({
   // compact content at the 120-col geometry (FR-1/FR-2); clicking flips it to the
   // OPAQUE #0c0a09 live xterm in place - the glass->opaque activation affordance.
   return (
-    <ScaleToFitTerminal testId={`${testIdPrefix}-fit`} className={className}>
+    <ScaleToFitTerminal testId={`${testIdPrefix}-fit`} className={className} fit={fit}>
       <StaticTerminalPlate
         sessionName={sessionName}
         lines={lines}

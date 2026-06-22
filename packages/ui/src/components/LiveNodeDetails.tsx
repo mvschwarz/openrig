@@ -490,11 +490,16 @@ function InlineTerminal({ data }: { data: NodeDetailData }) {
       {/* OPR.0.4.0.1 (round-two QA ruling): the node-detail inline terminal joins
           the reusable progressive default-static -> click-inside-to-go-live model
           under the global live-terminal cap, instead of an always-live uncapped
-          FocusedTerminal. terminalKey is session-scoped so the registry tracks it. */}
+          FocusedTerminal. terminalKey is session-scoped so the registry tracks it.
+          OPR.0.4.0.39: fit="contain" - this panel gives the terminal a big dedicated
+          500px area, so the 90x27 mirror scales up (capped) to FILL it, centered,
+          instead of sitting small top-left (the grid cells keep the default
+          fit-width). */}
       <ProgressiveTerminal
         sessionName={data.canonicalSessionName}
         terminalKey={`node-detail:${data.canonicalSessionName}`}
         testIdPrefix="node-detail-terminal"
+        fit="contain"
       />
     </div>
   );

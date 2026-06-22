@@ -98,4 +98,22 @@ describe("OPR.0.4.0.1 terminal styling polish", () => {
     expect(s).toContain("import { ProgressiveTerminal }");
     expect(s).not.toContain("TerminalPreviewPopover");
   });
+
+  it("OPR.0.4.0.39 (node-detail fit): ScaleToFitTerminal has a 'contain' mode (fill both axes, capped upscale, centered) that the node-detail panel opts into; the grid keeps fit-width", () => {
+    const scaler = src("../src/components/terminal/ScaleToFitTerminal.tsx");
+    // contain fits BOTH axes (min of width/height ratios), allows a CAPPED upscale,
+    // and centers - so a big dedicated panel is filled, not left small top-left.
+    expect(scaler).toContain('fit?: "width" | "contain"');
+    expect(scaler).toContain("MAX_CONTAIN_SCALE");
+    expect(scaler).toContain("availableHeight / naturalHeight");
+    expect(scaler).toContain("items-center justify-center");
+    // ProgressiveTerminal forwards `fit` to BOTH the static + live scalers (mirror).
+    const prog = src("../src/components/terminal/ProgressiveTerminal.tsx");
+    expect(prog).toContain('fit?: "width" | "contain"');
+    expect((prog.match(/fit=\{fit\}/g) ?? []).length).toBeGreaterThanOrEqual(2);
+    // The node-detail panel (big 500px area) opts into contain; the grid does NOT
+    // (it keeps the default fit-width so cells never upscale).
+    expect(src("../src/components/LiveNodeDetails.tsx")).toContain('fit="contain"');
+    expect(src("../src/components/topology/TopologyTerminalView.tsx")).not.toContain('fit="contain"');
+  });
 });
