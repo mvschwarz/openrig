@@ -105,7 +105,9 @@ function SeatTerminalCard({ seat }: { seat: NodeInventoryEntry }) {
       data-testid={`terminal-card-${seat.rigId}-${seat.logicalId}`}
       data-active={active ? "true" : "false"}
       className={cn(
-        "relative border bg-white/40 p-2 flex flex-col gap-2",
+        // OPR.0.4.0.39 FR-4: tighter card padding + gaps so the grid does not
+        // waste edge space (was p-2/gap-2).
+        "relative border bg-white/40 p-1.5 flex flex-col gap-1.5",
         active
           ? "border-secondary terminal-card-active"
           : "border-outline-variant",
@@ -121,19 +123,25 @@ function SeatTerminalCard({ seat }: { seat: NodeInventoryEntry }) {
           <TokenMetric seat={seat} />
         </span>
       </header>
-      <div className="relative z-0 min-h-0 flex items-start gap-2">
+      <div className="relative z-0 min-h-0 flex items-start gap-1.5">
         {/* OPR.0.4.0.39 FR-1: a SMALL static thumbnail keeps the grid an
             at-a-glance overview -- NOT widened to TUI width. It uses the SHARED
             StaticTerminalPlate (smoked-glass plate + OPAQUE #0c0a09 compact
             content, mirroring the live look) so every static terminal is
             consistent. Click-to-live here is the separate TerminalPreviewPopover
-            trigger (expand-out), so the plate itself is non-interactive. */}
+            trigger (expand-out), so the plate itself is non-interactive.
+            FR-3: origin-top-left + a per-breakpoint CSS scale-down renders the
+            fixed-shape terminal (whitespace-pre, never reflowed) smaller so more
+            of it fits the densest 3-col cells, mirroring the live fixed-geometry
+            scale (FocusedTerminal pins 120x40, no fit/reflow). The scale VALUE is
+            legibility-floored and QA-screenshot-measured at each breakpoint; the
+            xl:scale-90 here is the starting value (forward-fix per QA). */}
         <StaticTerminalPlate
           sessionName={sessionName}
           lines={6}
           plateTestId={`terminal-grid-${seat.rigId}-${seat.logicalId}-thumb-plate`}
           previewTestIdPrefix={`terminal-grid-${seat.rigId}-${seat.logicalId}-thumb`}
-          className="min-w-0 flex-1 overflow-hidden"
+          className="min-w-0 flex-1 overflow-hidden origin-top-left scale-100 xl:scale-90"
         />
         {/* OPR.0.4.0.1 (FR-5 PINNED expand-OUT): the wide LIVE plate is reached via
             the SAME graph/table primitive -- the TerminalPreviewPopover trigger
@@ -194,7 +202,10 @@ function TerminalGrid({
           </button>
         ) : null}
       </div>
-      <div className="grid gap-3 grid-cols-1 md:grid-cols-2 lg:grid-cols-3">
+      {/* OPR.0.4.0.39 FR-2: responsive 1/2/3-col by browser width; 3-col moves to
+          the wider `xl` breakpoint (was `lg`) so a scaled real-terminal static
+          fits 3-across cleanly without cramping. FR-4: tighter inter-card gap. */}
+      <div className="grid gap-2 grid-cols-1 md:grid-cols-2 xl:grid-cols-3">
         {visible.map((seat) => (
           <SeatTerminalCard
             key={`${seat.rigId}-${seat.logicalId}`}
