@@ -223,14 +223,13 @@ describe("TopologyTerminalView P5-7 grid", () => {
   });
 });
 
-// V0.3.1 slice 14 walk-item 17 forward-fix #1 (a11y): each terminal
-// card exposes EXACTLY ONE tabbable trigger control. The TerminalPreview-
-// Popover instance is mounted with `renderTrigger={false}` so the card's
-// full-card overlay button is the sole interaction surface; a duplicate
-// invisible-but-reachable sr-only popover button would fail
-// sensible-tab-order a11y review.
-describe("TerminalView card a11y (slice 14 FF#1)", () => {
-  it("each terminal card exposes exactly one tab-reachable trigger button (no duplicate sr-only popover button)", async () => {
+// OPR.0.4.0.39 (FR-6 founder spec-correction -- REVERSES the slice-01 expand-out):
+// each grid card's static IS the single in-place click-to-live target (a full-width
+// ProgressiveTerminal static button) -- there is NO separate TerminalPreviewPopover
+// trigger. So each card has exactly ONE tab-reachable control (the static itself),
+// preserving the a11y intent (one trigger per card) while restoring live-in-place.
+describe("TerminalView card a11y (OPR.0.4.0.39 in-place click-to-live)", () => {
+  it("each terminal card exposes exactly one tab-reachable control: the in-place static button (no popover trigger)", async () => {
     const seats = [
       makeSeat({ logicalId: "alpha" }),
       makeSeat({ logicalId: "beta" }),
@@ -241,23 +240,21 @@ describe("TerminalView card a11y (slice 14 FF#1)", () => {
     );
     await findByTestId("topology-terminal-grid");
 
-    // OPR.0.4.0.1 (FR-5): each card shows a SMALL static thumbnail + exactly ONE
-    // tab-reachable TerminalPreviewPopover trigger (the wide expand-out, identical
-    // to graph/table). The a11y intent (exactly one trigger per card) is preserved.
-    const cardTriggers = container.querySelectorAll(
-      "button[data-testid^='terminal-grid-'][data-testid$='-terminal-open']",
-    );
-    expect(cardTriggers).toHaveLength(2);
-
-    // The live-in-place model is REMOVED: NO in-place ProgressiveTerminal static
-    // trigger in the card body (going live now happens INSIDE the popover).
+    // FR-6: the static ITSELF is the in-place click-to-live target (ProgressiveTerminal
+    // static, full-width) -- exactly ONE per card.
     const inPlaceStatic = container.querySelectorAll(
       "button[data-testid^='terminal-grid-'][data-testid$='-static']",
     );
-    expect(inPlaceStatic).toHaveLength(0);
+    expect(inPlaceStatic).toHaveLength(2);
+
+    // The separate expand-out popover trigger is REMOVED from the grid.
+    const popoverTriggers = container.querySelectorAll(
+      "button[data-testid^='terminal-grid-'][data-testid$='-terminal-open']",
+    );
+    expect(popoverTriggers).toHaveLength(0);
   });
 
-  it("OPR.0.4.0.1 (FR-1/FR-4): the grid static thumbnail carries the smoked-glass plate on the bare grid surface", async () => {
+  it("OPR.0.4.0.39 (FR-1/FR-6): the grid static carries the smoked-glass plate AND is the in-place click-to-live button", async () => {
     setupFetch({ rigs: [{ id: "rig-1", name: "test-rig" }], seatsByRig: { "rig-1": [makeSeat({ logicalId: "alpha" })] } });
     const { findByTestId, container } = withQueryClient(
       <TopologyTerminalView scope="rig" rigId="rig-1" />,
@@ -265,16 +262,17 @@ describe("TerminalView card a11y (slice 14 FF#1)", () => {
     await findByTestId("topology-terminal-grid");
 
     // The grid is a TRULY BARE surface (no popover/shell plate behind it), so the
-    // static thumbnail must carry its OWN borderless smoked-glass plate -- NOT a
-    // light card-bg preview. (guard BLOCKING: the FR-5 thumbnail bypassed the smoke.)
-    const thumbPlate = await findByTestId("terminal-grid-rig-1-alpha-thumb-plate");
-    expect(thumbPlate.className).toContain("bg-stone-950/60");
-    expect(thumbPlate.className).toContain("backdrop-blur-sm");
+    // static carries its OWN borderless smoked-glass plate; and per FR-6 it IS the
+    // click-to-live button (ProgressiveTerminal static), not a non-interactive
+    // thumbnail beside a separate popover trigger.
+    const staticPlate = await findByTestId("terminal-grid-rig-1-alpha-static");
+    expect(staticPlate.tagName).toBe("BUTTON");
+    expect(staticPlate.className).toContain("bg-stone-950/85");
+    expect(staticPlate.className).toContain("backdrop-blur-sm");
 
-    // ...while still exactly ONE popover trigger + NO in-place ProgressiveTerminal
-    // static button (the FR-5 expand-out model is intact).
-    expect(container.querySelectorAll("button[data-testid$='-terminal-open']")).toHaveLength(1);
-    expect(container.querySelectorAll("button[data-testid$='-static']")).toHaveLength(0);
+    // ...exactly ONE in-place static button + NO expand-out popover trigger.
+    expect(container.querySelectorAll("button[data-testid$='-static']")).toHaveLength(1);
+    expect(container.querySelectorAll("button[data-testid$='-terminal-open']")).toHaveLength(0);
   });
 });
 

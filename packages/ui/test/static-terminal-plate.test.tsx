@@ -32,7 +32,7 @@ describe("StaticTerminalPlate (OPR.0.4.0.39 FR-1)", () => {
     );
     const plate = screen.getByTestId("x-thumb-plate");
     expect(plate.tagName).toBe("DIV");
-    expect(plate.className).toContain("bg-stone-950/60");
+    expect(plate.className).toContain("bg-stone-950/85");
     expect(plate.className).toContain("backdrop-blur-sm");
     expect(plate.className).toContain("overflow-hidden"); // caller className composed in
     const pane = screen.getByTestId("x-thumb-pane");
@@ -54,7 +54,7 @@ describe("StaticTerminalPlate (OPR.0.4.0.39 FR-1)", () => {
     );
     const btn = screen.getByTestId("pt-static");
     expect(btn.tagName).toBe("BUTTON");
-    expect(btn.className).toContain("bg-stone-950/60");
+    expect(btn.className).toContain("bg-stone-950/85");
     expect(btn.getAttribute("aria-label")).toBe("go live");
     fireEvent.click(btn);
     expect(onClick).toHaveBeenCalledOnce();
@@ -62,6 +62,6 @@ describe("StaticTerminalPlate (OPR.0.4.0.39 FR-1)", () => {
   });
 
   it("exports the shared smoke-plate class", () => {
-    expect(SMOKED_STATIC_PLATE_CLASS).toBe("bg-stone-950/60 backdrop-blur-sm");
+    expect(SMOKED_STATIC_PLATE_CLASS).toBe("bg-stone-950/85 backdrop-blur-sm");
   });
 });

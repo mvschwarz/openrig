@@ -31,14 +31,18 @@ const DEFAULT_LIVENESS_MS = 2000;
 const MAX_HISTORY_BYTES = 64 * 1024;
 
 /**
- * Canonical fixed terminal geometry (FR-7). 120 cols is the styling slice's
- * measured live-plate width (~880px at fontSize 12, TerminalPreviewPopover).
- * 40 rows is a comfortable agent-TUI working area; subscribers fit/scroll/pan
- * their viewport but never resize the pane - so multiple viewers cannot shrink
- * the session to the smallest one.
+ * Canonical fixed terminal geometry (FR-7). 90 cols (OPR.0.4.0.39, founder-directed):
+ * Claude Code (Ink) + Codex CLI are RESPONSIVE TUIs that reflow to whatever width they
+ * are given - they have no required width; 80 is the legacy fallback that users find
+ * too narrow, so 90 sits comfortably above the 80 floor while being narrower than 120 so
+ * the scaled static/live mirror reads bigger (more legible) in the topology grid cells.
+ * 27 rows gives the classic-terminal 1.72:1 landscape shape (90x27 = ~650x378px, matching the canonical 80x24 aspect) (founder: classic terminal rectangle) while staying a workable agent-TUI height; subscribers fit/scroll/pan their
+ * viewport but never resize the pane - so multiple viewers cannot shrink the session to
+ * the smallest one. MUST stay in sync with the client mirror LIVE_TERMINAL_COLS
+ * (packages/ui/.../terminal/terminal-geometry.ts) - the xterm grid must match the pane.
  */
-export const CANONICAL_COLS = 120;
-export const CANONICAL_ROWS = 40;
+export const CANONICAL_COLS = 90;
+export const CANONICAL_ROWS = 27;
 
 /** A connected viewer of one broker. The route adapts a WebSocket to this. */
 export interface TerminalSubscriber {
@@ -60,6 +64,9 @@ export interface BrokerTmux {
   sendText(name: string, text: string): Promise<TmuxResult>;
   capturePaneScreen(name: string): Promise<string | null>;
   getPaneCursorPosition(name: string): Promise<TmuxCursorPosition | null>;
+  /** Capture the last `lines` lines INCLUDING scrollback history (tmux
+   *  capture-pane -S -lines). Used for the per-subscriber scroll-back window. */
+  capturePaneContent(name: string, lines: number): Promise<string | null>;
 }
 
 export interface BrokerOptions {
@@ -67,7 +74,7 @@ export interface BrokerOptions {
   pollMs?: number;
   /** Session-liveness probe interval (ms). Default 2000. */
   livenessMs?: number;
-  /** Canonical pane width. Default 120. */
+  /** Canonical pane width. Default 90. */
   cols?: number;
   /** Canonical pane height. Default 40. */
   rows?: number;
@@ -152,6 +159,12 @@ export class TerminalSessionBroker {
   private readonly onEmpty?: (sessionName: string) => void;
 
   private readonly subscribers = new Set<TerminalSubscriber>();
+  // OPR.0.4.0.39: per-subscriber scroll-back offset (lines above the live bottom).
+  // 0/absent = live. A scrolled subscriber is PAINTED a tmux history window and is
+  // SKIPPED by the live fanout (so live output doesn't yank it back); read-only on
+  // the pane (capture-pane), so every viewer scrolls independently and nobody else's
+  // live view is disturbed (multi-subscriber-safe scrollback - vs pane-global copy-mode).
+  private readonly scrollOffsets = new Map<TerminalSubscriber, number>();
   // Broker-owned recent-output ring (AC-5): raw fanned-out bytes, bounded,
   // replayed to late subscribers so their scrollback matches the earlier ones.
   private history: string[] = [];
@@ -278,11 +291,65 @@ export class TerminalSessionBroker {
   }
 
   /**
+   * OPR.0.4.0.39: per-subscriber scroll-back. `offset` = lines above the live
+   * bottom (0 = live). Reads tmux scrollback via capture-pane (READ-ONLY on the
+   * pane, so it never disturbs the live view of OTHER subscribers) and paints the
+   * windowed history to THIS subscriber. At offset 0 it repaints the current screen
+   * and the subscriber rejoins the live fanout.
+   */
+  async scroll(sub: TerminalSubscriber, offset: number): Promise<void> {
+    if (this.torndown || !this.subscribers.has(sub)) return;
+    const clamped = Math.max(0, Math.floor(offset));
+    if (clamped === 0) {
+      this.scrollOffsets.delete(sub);
+      await this.repaintScreen(sub);
+      return;
+    }
+    this.scrollOffsets.set(sub, clamped);
+    // tmux `capture-pane -p -S -(offset+rows)` returns a buffer that ENDS at the live
+    // bottom (verified against real tmux: `-S -N` returns ~N history lines above the
+    // visible screen PLUS the screen, ending at the bottom row). To show a window
+    // `offset` lines ABOVE the live bottom, the slice must be BOTTOM-anchored: drop
+    // the last `offset` lines (toward live) and take the `rows` above them. Slicing
+    // the TOP `rows` would jump a whole extra screen up on the first wheel notch.
+    let content: string | null = null;
+    try {
+      content = await this.tmux.capturePaneContent(this.sessionName, clamped + this.rows);
+    } catch {
+      content = null;
+    }
+    if (content === null) return;
+    const lines = content.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
+    // Drop a single trailing empty line (capture-pane's trailing newline) so the last
+    // element is the true live-bottom row and the offset stays honest.
+    if (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
+    const bottom = lines.length - clamped; // exclusive end: the window sits `offset` up
+    const window = bottom <= this.rows
+      ? lines.slice(0, this.rows) // scrolled at/past the top of history: oldest screenful
+      : lines.slice(bottom - this.rows, bottom);
+    try {
+      sub.send(screenSnapshotEscape(window.join("\n"), null));
+    } catch { /* dead subscriber */ }
+  }
+
+  /** Repaint the current visible screen to ONE subscriber (scroll-back to live). */
+  private async repaintScreen(sub: TerminalSubscriber): Promise<void> {
+    let snapshot: string | null = null;
+    let cursor: TmuxCursorPosition | null = null;
+    try { snapshot = await this.tmux.capturePaneScreen(this.sessionName); } catch { snapshot = null; }
+    try { cursor = await this.tmux.getPaneCursorPosition(this.sessionName); } catch { cursor = null; }
+    if (snapshot !== null) {
+      try { sub.send(screenSnapshotEscape(snapshot, cursor)); } catch { /* dead */ }
+    }
+  }
+
+  /**
    * Detach a subscriber. The broker SURVIVES while other subscribers remain
    * (FR-6); the LAST detach tears the pipe down and deletes the temp file.
    */
   detach(sub: TerminalSubscriber): void {
     if (!this.subscribers.delete(sub)) return;
+    this.scrollOffsets.delete(sub);
     if (this.subscribers.size === 0) {
       void this.teardown();
     }
@@ -294,6 +361,7 @@ export class TerminalSessionBroker {
     this.lastClose = { code: 1011, reason: "terminal broker unavailable" };
     this.torndown = true;
     this.subscribers.clear();
+    this.scrollOffsets.clear();
     if (this.pipeActive) {
       this.pipeActive = false;
       void this.tmux.stopPipePane(this.sessionName).catch(() => {});
@@ -402,6 +470,10 @@ export class TerminalSessionBroker {
     // and it should be detached cleanly (a throwing send means a dead socket).
     let dead: TerminalSubscriber[] | null = null;
     for (const sub of this.subscribers) {
+      // OPR.0.4.0.39: a subscriber scrolled back into history is viewing a static
+      // tmux capture window; skip the live fanout so output does not overwrite it.
+      // It rejoins live when it scrolls back to the bottom (offset 0).
+      if ((this.scrollOffsets.get(sub) ?? 0) > 0) continue;
       try {
         sub.send(data);
       } catch {

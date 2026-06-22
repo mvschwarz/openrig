@@ -206,7 +206,7 @@ describe("P5.3 ActivityRing and HotPotatoEdge", () => {
     // OPR.0.4.0.1 (rev1-r2 fix): once LIVE, the popover shell widens to fit the
     // 880px live plate (w-[904px]) so overflow-hidden no longer clips it -- it is
     // NOT the compact static w-[calc(80ch+24px)] here (this terminal is live).
-    expect(driverPopover.className).toContain("w-[904px]");
+    expect(driverPopover.className).toContain("w-max");
     expect(driverPopover.className).not.toContain("w-[calc(80ch+24px)]");
     expect(driverPopover.className).toContain("max-w-[calc(100vw-1rem)]");
     expect(driverPopover.className).toContain("max-h-[calc(100vh-1rem)]");

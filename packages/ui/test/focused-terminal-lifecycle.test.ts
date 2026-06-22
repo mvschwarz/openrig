@@ -22,7 +22,7 @@ describe("FocusedTerminal lifecycle", () => {
     // resize (it would shrink the shared pane for every other viewer).
     expect(src).not.toMatch(/type:\s*["']resize["']/);
     // OPR.0.4.0.38 forward-fix: the client now PINS to the broker canonical
-    // geometry (cols=120 rows=40) and scrolls/pans its container - FitAddon was
+    // geometry (cols=100 rows=40) and scrolls/pans its container - FitAddon was
     // removed entirely (no container-fit resize-fight), which is the stronger
     // form of fixed-geometry mirroring.
     expect(src).not.toContain("FitAddon");

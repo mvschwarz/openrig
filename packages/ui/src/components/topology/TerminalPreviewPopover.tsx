@@ -3,6 +3,11 @@ import type React from "react";
 import { createPortal } from "react-dom";
 import { FocusedTerminal } from "../terminal/FocusedTerminal.js";
 import { ProgressiveTerminal } from "../terminal/ProgressiveTerminal.js";
+import {
+  LIVE_TERMINAL_COLS,
+  LIVE_TERMINAL_FONT_FAMILY,
+  LIVE_TERMINAL_FONT_SIZE,
+} from "../terminal/terminal-geometry.js";
 import { cn } from "../../lib/utils.js";
 import { ToolMark } from "../graphics/RuntimeMark.js";
 
@@ -111,17 +116,12 @@ export function TerminalPreviewPopover({
   const popoverRef = useRef<HTMLDivElement | null>(null);
   const [open, setOpen] = useState(false);
   const [position, setPosition] = useState<PopoverPosition | null>(null);
-  // OPR.0.4.0.1 (rev1-r2 fix): the popover shell must fit the WIDE live plate when
-  // live (or it clips the FR-3 optimal width via overflow-hidden), and stay compact
-  // when showing the static preview. A non-progressive popover (feed-card) is always
-  // live, so it is always wide.
-  const [liveInside, setLiveInside] = useState(false);
-  const liveWide = !progressive || liveInside;
-
-  // Reset to compact whenever the popover closes (the next open starts static).
-  useEffect(() => {
-    if (!open) setLiveInside(false);
-  }, [open]);
+  // OPR.0.4.0.39 (founder spec): static and live are the SAME 120x40 mirror (same
+  // size, same place) via ProgressiveTerminal -> ScaleToFitTerminal, so the popover
+  // no longer reshapes on go-live. The old compact-static -> wide-live grow was the
+  // "separately shaped, different location" the founder flagged; now the shell holds
+  // the full-terminal width for BOTH states and the static just flips glass->opaque
+  // in place (matching the grid).
 
   const updatePosition = useCallback(() => {
     if (!open) return;
@@ -227,10 +227,10 @@ export function TerminalPreviewPopover({
         // reliable erase/redraw. The popover drops its redundant bg so the wrapper
         // remains the single terminal plate.
         "nodrag nopan fixed z-[1000] max-h-[calc(100vh-1rem)] max-w-[calc(100vw-1rem)] overflow-hidden p-1.5 backdrop-blur-sm",
-        // OPR.0.4.0.1 (rev1-r2 fix): widen the shell to fit the live plate (880px +
-        // padding) when live so overflow-hidden no longer clips it; stay compact for
-        // the static preview.
-        liveWide ? "w-[904px]" : "w-[calc(80ch+24px)]",
+        // OPR.0.4.0.39: the shell sizes to the terminal (w-max) for BOTH static + live
+        // - no reshape on go-live, no loose empty width. The inner is the canonical
+        // geometry width so the shell tracks the column count automatically.
+        "w-max",
         "cursor-default select-text font-mono text-[8px] text-stone-50",
         popoverClassName,
       )}
@@ -238,20 +238,29 @@ export function TerminalPreviewPopover({
       onClick={(event) => event.stopPropagation()}
       onPointerDown={(event) => event.stopPropagation()}
     >
-      {/* OPR.0.4.0.1 (FR-3): the LIVE wide plate width is set to the optimal render
-          width of the Claude Code + Codex CLI TUIs. ~120 cols (the wider of the two)
-          at xterm fontSize 12 ui-monospace (cell ~7.23px) ~= 868px -> 880px sizer.
-          FitAddon propagates cols/rows over the WS so the TUI reflows. This is a
-          computed starting width; QA's fix-loop finalizes it against a REAL agent
-          TUI per the proof bar. Optimal width is LIVE-only -- the static topology
-          grid columns are NOT widened (3-col overview preserved). */}
-      <div className={cn("h-[440px] max-w-[calc(100vw-2rem)]", liveWide ? "w-[880px]" : "w-full")}>
+      {/* OPR.0.4.0.39: the popover holds the full 120-col terminal width (~880px at
+          fontSize 12 ui-monospace, the broker's canonical geometry) for BOTH the
+          static and the live state. ProgressiveTerminal renders the static smoked-
+          glass mirror or the opaque live xterm at the SAME size in place (no reshape).
+          The grid uses a smaller scaled mirror per cell; this popover (graph/table)
+          has room for the near-full-size terminal. */}
+      <div
+        // OPR.0.4.0.39: the inner is the canonical geometry WIDTH (90ch at the live
+        // font) so the static/live mirror fits exactly; height is driven by the
+        // content (ScaleToFitTerminal for progressive, the natural xterm for the feed)
+        // so the bottom is never cut off.
+        className="max-w-[calc(100vw-2rem)]"
+        style={{
+          width: `${LIVE_TERMINAL_COLS}ch`,
+          fontFamily: LIVE_TERMINAL_FONT_FAMILY,
+          fontSize: `${LIVE_TERMINAL_FONT_SIZE}px`,
+        }}
+      >
         {progressive ? (
           <ProgressiveTerminal
             sessionName={sessionName}
             terminalKey={key}
             testIdPrefix={testIdPrefix}
-            onLiveChange={setLiveInside}
           />
         ) : (
           <FocusedTerminal sessionName={sessionName} />

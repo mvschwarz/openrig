@@ -9,9 +9,27 @@
 // node-detail context. Operator dogfood reports needing pin from
 // Loop State / Topology tab → NAMED v0+1 trigger.
 
-import { useLayoutEffect, useRef } from "react";
+import { useLayoutEffect, useRef, type CSSProperties } from "react";
 import { useSessionPreview, isNodePreviewUnavailable } from "../../hooks/useNodePreview.js";
 import { cn } from "../../lib/utils.js";
+import {
+  LIVE_TERMINAL_COLS,
+  LIVE_TERMINAL_FONT_FAMILY,
+  LIVE_TERMINAL_FONT_SIZE,
+  LIVE_TERMINAL_LINE_HEIGHT,
+} from "../terminal/terminal-geometry.js";
+
+// OPR.0.4.0.39: the compact static terminal mirrors the LIVE xterm geometry exactly
+// (same font + 90-col width) so static and live are the SAME shape under the shared
+// ScaleToFitTerminal scaler - only glass (static) vs opaque (live) differs. Width is a
+// fixed 90ch (the live 90-col grid), so the box is always the terminal width
+// regardless of how short the captured lines are - just like a real 90-col terminal.
+const STATIC_TERMINAL_GEOMETRY: CSSProperties = {
+  fontFamily: LIVE_TERMINAL_FONT_FAMILY,
+  fontSize: `${LIVE_TERMINAL_FONT_SIZE}px`,
+  lineHeight: LIVE_TERMINAL_LINE_HEIGHT,
+  width: `${LIVE_TERMINAL_COLS}ch`,
+};
 
 interface SessionPreviewPaneProps {
   sessionName: string;
@@ -59,11 +77,14 @@ export function SessionPreviewPane({
       data-variant={variant}
       className={cn(
         "space-y-1",
-        // OPR.0.4.0.39 FR-1 mirror flip: the compact static content reads OPAQUE
-        // #0c0a09 (matching the live xterm LIVE_TERMINAL_RENDER_BACKGROUND) within
-        // the smoke plate the caller supplies - NOT the old translucent tint.
+        // OPR.0.4.0.39 FR-1 (founder spec-correction): the compact STATIC content is
+        // translucent smoked-GLASS - it lets the caller's SMOKED_STATIC_PLATE_CLASS
+        // (bg-stone-950/85 backdrop-blur) show through (bg-transparent), NOT opaque.
+        // The static <pre> is not an xterm, so it has no cursor-safety reason to be
+        // opaque; opaque #0c0a09 is the LIVE xterm only, and the glass->opaque flip
+        // on click-to-live is the intentional static-vs-live activation affordance.
         compactTerminal
-          ? "border-0 bg-[#0c0a09] p-0 text-stone-50"
+          ? "border-0 bg-transparent p-0 text-stone-50"
           : "border border-stone-300/40 bg-white/8 px-3 py-2",
       )}
     >
@@ -115,16 +136,19 @@ export function SessionPreviewPane({
             ref={contentRef}
             data-testid={`${testIdPrefix}-content`}
             onScroll={handleScroll}
+            style={compactTerminal ? STATIC_TERMINAL_GEOMETRY : undefined}
             className={cn(
               "font-mono",
-              // OPR.0.4.0.39 FR-5: the tmux capture is ALREADY wrapped to the pane
-              // width; whitespace-pre-wrap+break-words re-wrapped it at the
-              // (narrower) container width = double-wrapped/broken line returns.
-              // whitespace-pre renders the tmux lines as-is (matching the live
-              // fixed-geometry xterm) and overflow-x-auto scrolls/pans wider lines.
-              // FR-1 mirror: opaque #0c0a09 content surface.
+              // OPR.0.4.0.39 FR-1/FR-4/FR-5 (founder spec): the compact static renders
+              // at the LIVE xterm geometry (STATIC_TERMINAL_GEOMETRY: same font, fixed
+              // 100-col width) so static and live are the SAME shape - the shared
+              // ScaleToFitTerminal scales the whole fixed block to the column (fit-
+              // width, never clip; no overflow-x pan/cut-off). whitespace-pre renders
+              // the captured lines as-is (no re-wrap = correct line returns; FR-5).
+              // bg-transparent = the smoked GLASS plate shows through (FR-2); opaque
+              // #0c0a09 is the LIVE xterm only - the glass->opaque flip is the affordance.
               compactTerminal
-                ? "scrollbar-none max-h-72 overflow-y-auto overflow-x-auto whitespace-pre bg-[#0c0a09] px-1 py-0.5 text-[8px] leading-[1.2] text-stone-50"
+                ? "scrollbar-none max-h-[420px] overflow-y-auto whitespace-pre bg-transparent text-stone-50"
                 : "max-h-32 overflow-y-auto whitespace-pre-wrap break-all bg-stone-50 px-2 py-1 text-[9px] text-stone-800",
             )}
           >

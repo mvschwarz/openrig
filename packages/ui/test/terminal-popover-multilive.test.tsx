@@ -54,21 +54,21 @@ describe("Progressive terminal popovers coexist under the global cap (rev1-r2 fi
     expect(screen.getByTestId("live-b@r")).toBeTruthy();
   });
 
-  it("rev1-r2 fix: the popover shell is COMPACT when static and WIDENS to fit the live plate", () => {
+  it("OPR.0.4.0.39 (founder spec, REVERSES rev1-r2 reshape): the popover holds the full-terminal width for BOTH static and live (no reshape on go-live)", () => {
     render(
       <LiveTerminalProvider cap={2}>
         <TerminalPreviewPopover rigId="r1" logicalId="a" sessionName="a@r" testIdPrefix="pa" progressive />
       </LiveTerminalProvider>,
     );
-    // open the popover -> STATIC -> shell is compact (NOT the wide live width), so
-    // the static preview stays small.
+    // open the popover -> STATIC -> shell is already the full-terminal width (the
+    // static is the 120-col mirror, not a small compact preview).
     fireEvent.click(screen.getByTestId("pa-terminal-open"));
-    expect(screen.getByTestId("pa-terminal-popover").className).toContain("w-[calc(80ch+24px)]");
-    expect(screen.getByTestId("pa-terminal-popover").className).not.toContain("w-[904px]");
-    // click inside -> LIVE -> the shell WIDENS to fit the 880px live plate (the
-    // overflow-hidden clip is gone).
+    expect(screen.getByTestId("pa-terminal-popover").className).toContain("w-max");
+    expect(screen.getByTestId("pa-terminal-popover").className).not.toContain("w-[calc(80ch+24px)]");
+    // click inside -> LIVE -> SAME width (no reshape / relocation; the static just
+    // flips glass->opaque in place - the founder's mirror requirement).
     fireEvent.click(screen.getByTestId("pa-static"));
-    expect(screen.getByTestId("pa-terminal-popover").className).toContain("w-[904px]");
+    expect(screen.getByTestId("pa-terminal-popover").className).toContain("w-max");
     expect(screen.getByTestId("pa-terminal-popover").className).not.toContain("w-[calc(80ch+24px)]");
   });
 

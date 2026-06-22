@@ -105,6 +105,11 @@ export function registerTerminalWs(
               await broker.input({ type: "keys", keys: msg.keys as string[] });
             } else if (msg.type === "text" && typeof msg.text === "string") {
               await broker.input({ type: "text", text: msg.text });
+            } else if (msg.type === "scroll" && typeof msg.offset === "number") {
+              // OPR.0.4.0.39: per-subscriber scroll-back (tmux capture-pane window).
+              // offset = lines above the live bottom; 0 = live. Per-connection so each
+              // viewer scrolls independently (read-only on the shared pane).
+              if (subscriber) await broker.scroll(subscriber, msg.offset);
             }
             // FR-7: there is intentionally NO resize branch. The broker owns the
             // fixed canonical geometry; a client-driven resize is ignored so

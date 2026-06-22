@@ -45,6 +45,8 @@ vi.mock("@xterm/xterm", () => ({
     // Stub them so the component's setup does not throw in the mock.
     focus() {}
     scrollToBottom() {}
+    // OPR.0.4.0.39: FocusedTerminal attaches a wheel handler for tmux scroll-back.
+    attachCustomWheelEventHandler(_h: (ev: WheelEvent) => boolean) {}
     dispose() {
       terminalDisposeCount++;
       this.child?.remove();

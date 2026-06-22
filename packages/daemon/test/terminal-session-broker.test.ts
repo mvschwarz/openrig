@@ -38,6 +38,7 @@ function makeTmux(overrides: Partial<BrokerTmux> = {}): BrokerTmux {
     sendText: async () => ({ ok: true }),
     capturePaneScreen: async () => null,
     getPaneCursorPosition: async () => null,
+    capturePaneContent: async () => null,
     ...overrides,
   };
 }
@@ -580,5 +581,107 @@ describe("TerminalSessionBroker - teardown during seed (honest close)", () => {
     expect(b.closed[0]?.code).toBe(1001); // honest close with the remembered death reason
     expect(broker.subscriberCount).toBe(0); // B was NOT added to the dead broker
     expect(evicted).toBe(1);
+  });
+});
+
+// ---- OPR.0.4.0.39 per-subscriber scroll-back (tmux capture-pane window) ------
+// The live xterm screen is only the current `rows`; scrolling UP must show tmux
+// SCROLLBACK. Because the broker fans ONE pipe out to many viewers, scroll-back is
+// per-subscriber and READ-ONLY on the pane (capture-pane history window), not a
+// pane-global copy-mode (which would freeze every viewer). A scrolled subscriber is
+// painted a static history window and SKIPPED by the live fanout until it returns to
+// the bottom (offset 0), where it repaints the live screen and rejoins the fanout.
+describe("TerminalSessionBroker - per-subscriber scroll-back (OPR.0.4.0.39)", () => {
+  it("scroll(offset>0) paints a BOTTOM-anchored tmux history window (offset lines up) to ONLY that subscriber", async () => {
+    // Model REAL tmux: `capture-pane -p -S -N` returns a buffer that ENDS at the live
+    // bottom and contains ~N lines of history ABOVE the visible screen PLUS the screen
+    // (so ~N + rows lines). L1..L200 with L200 = the live bottom row.
+    const BUF = Array.from({ length: 200 }, (_, i) => `L${i + 1}`);
+    const ROWS = 3;
+    const capturePaneContent = vi.fn(async (_n: string, n: number) => {
+      const count = Math.min(BUF.length, n + ROWS); // -S -N => ~N + rows lines, bottom-anchored
+      return BUF.slice(BUF.length - count).join("\n");
+    });
+    const broker = track(new TerminalSessionBroker("dev@rig", makeTmux({ capturePaneContent }), { pollMs: 10, rows: ROWS }));
+    const a = makeSub();
+    const b = makeSub();
+    await broker.attach(a);
+    await broker.attach(b);
+    const aBefore = a.received.length;
+    const bBefore = b.received.length;
+
+    await broker.scroll(a, 3); // wheel up 3 lines from the live bottom (L200)
+
+    // Captures (offset + rows) = 3 + 3 = 6 lines back; the painted window is `rows` (3)
+    // lines ending `offset` (3) ABOVE the live bottom: bottom row = L200 - 3 = L197,
+    // so the window is L195..L197 (NOT the older top of the capture, NOT the live tail).
+    expect(capturePaneContent).toHaveBeenCalledWith("dev@rig", 6);
+    expect(a.received.length).toBe(aBefore + 1);
+    const painted = a.received[a.received.length - 1]!;
+    expect(painted.startsWith("\x1b[2J")).toBe(true);
+    expect(painted).toContain("\x1b[1;1HL195");
+    expect(painted).toContain("\x1b[2;1HL196");
+    expect(painted).toContain("\x1b[3;1HL197");
+    expect(painted).not.toContain("L198"); // L198..L200 are within the offset (toward live)
+    expect(painted).not.toContain("L194"); // above the rows-tall window
+    // b (live, never scrolled) is untouched by a's scroll - per-subscriber.
+    expect(b.received.length).toBe(bBefore);
+  });
+
+  it("a scrolled-back subscriber is SKIPPED by the live fanout; the live viewer still streams", async () => {
+    const broker = track(new TerminalSessionBroker("dev@rig", makeTmux({
+      capturePaneContent: async () => "x1\nx2\nx3\nx4",
+    }), { pollMs: 10, rows: 3 }));
+    const a = makeSub();
+    const b = makeSub();
+    await broker.attach(a);
+    await broker.attach(b);
+
+    await broker.scroll(a, 2); // a is now viewing a static history window
+    const aAfterScroll = a.received.length;
+
+    fs.appendFileSync(broker.pipeOutputPath!, "LIVE-AFTER-SCROLL");
+    await vi.waitFor(() => {
+      expect(b.received.join("")).toContain("LIVE-AFTER-SCROLL");
+    }, { timeout: 1000 });
+    // a was scrolled back: the live byte must NOT overwrite its history view.
+    expect(a.received.length).toBe(aAfterScroll);
+    expect(a.received.join("")).not.toContain("LIVE-AFTER-SCROLL");
+  });
+
+  it("scroll(offset 0) repaints the live screen and the subscriber REJOINS the fanout", async () => {
+    const capturePaneScreen = vi.fn(async () => "LIVE SCREEN");
+    const broker = track(new TerminalSessionBroker("dev@rig", makeTmux({
+      capturePaneContent: async () => "g1\ng2\ng3\ng4",
+      capturePaneScreen,
+      getPaneCursorPosition: async () => ({ x: 0, y: 0, width: 90, height: 3 }),
+    }), { pollMs: 10, rows: 3 }));
+    const a = makeSub();
+    await broker.attach(a);
+
+    await broker.scroll(a, 2); // into history (skipped by fanout)
+    capturePaneScreen.mockClear();
+    const beforeReturn = a.received.length;
+
+    await broker.scroll(a, 0); // back to the live bottom
+
+    expect(capturePaneScreen).toHaveBeenCalledWith("dev@rig");
+    expect(a.received.length).toBe(beforeReturn + 1);
+    expect(a.received[a.received.length - 1]!).toContain("LIVE SCREEN");
+
+    // ...and it rejoins the live fanout (no longer skipped).
+    fs.appendFileSync(broker.pipeOutputPath!, "BACK-TO-LIVE-STREAM");
+    await vi.waitFor(() => {
+      expect(a.received.join("")).toContain("BACK-TO-LIVE-STREAM");
+    }, { timeout: 1000 });
+  });
+
+  it("scroll on an UNKNOWN subscriber is a no-op (never throws, sends nothing)", async () => {
+    const broker = track(new TerminalSessionBroker("dev@rig", makeTmux(), { pollMs: 10, rows: 3 }));
+    await broker.attach(makeSub());
+    const ghost = makeSub(); // never attached
+    await broker.scroll(ghost, 5);
+    expect(ghost.received.length).toBe(0);
+    expect(ghost.closed.length).toBe(0);
   });
 });

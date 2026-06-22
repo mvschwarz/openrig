@@ -89,18 +89,28 @@ describe("SessionPreviewPane", () => {
     const content = await screen.findByTestId("compact-terminal-test-content");
 
     expect(pane.getAttribute("data-variant")).toBe("compact-terminal");
-    expect(content.className).toContain("text-[8px]");
     expect(content.className).toContain("text-stone-50");
+    // OPR.0.4.0.39 (founder spec): the compact static renders at the LIVE xterm
+    // geometry (same font, fixed 120-col width) so static and live are the SAME
+    // shape under the shared ScaleToFitTerminal. Font + width are inline (mirror the
+    // live exactly), not utility classes.
+    expect(content.style.fontSize).toBe("12px");
+    expect(content.style.width).toBe("90ch");
+    expect(content.style.fontFamily).toContain("ui-monospace");
+    expect(content.className).not.toContain("text-[8px]");
     // OPR.0.4.0.39 FR-5: the tmux capture is already pane-width-wrapped, so the
     // static <pre> uses whitespace-pre (no re-wrap, mirroring the live fixed-
     // geometry xterm) - NOT whitespace-pre-wrap/break-words (which double-wrapped).
     expect(content.className).toContain("whitespace-pre");
     expect(content.className).not.toContain("whitespace-pre-wrap");
     expect(content.className).not.toContain("break-words");
-    // OPR.0.4.0.39 FR-1 mirror flip: opaque #0c0a09 content (matches the live xterm).
-    expect(content.className).toContain("bg-[#0c0a09]");
+    // OPR.0.4.0.39 FR-1 (founder spec-correction): the static content is translucent
+    // smoked-GLASS (bg-transparent; the SMOKED_STATIC_PLATE_CLASS plate shows
+    // through). Opaque #0c0a09 is the LIVE xterm only; the glass->opaque flip on
+    // click-to-live is the static-vs-live activation affordance.
+    expect(content.className).toContain("bg-transparent");
+    expect(content.className).not.toContain("bg-[#0c0a09]");
     expect(content.className).toContain("scrollbar-none");
-    expect(content.className).toContain("overflow-x-auto");
     expect(content.className).not.toContain("break-all");
     expect(screen.queryByText(/live preview/i)).toBeNull();
     expect(screen.queryByText(/captured/i)).toBeNull();

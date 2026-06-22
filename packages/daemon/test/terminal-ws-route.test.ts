@@ -297,7 +297,7 @@ describe("terminal WebSocket broker (multi-subscriber route)", () => {
     await vi.waitFor(() => {
       expect(resizeWindowCalls).toHaveLength(1);
     }, { timeout: 1000 });
-    expect(resizeWindowCalls[0]).toEqual({ cols: 120, rows: 40 });
+    expect(resizeWindowCalls[0]).toEqual({ cols: 90, rows: 27 });
 
     ws.send(JSON.stringify({ type: "resize", cols: 200, rows: 9 }));
     // Give the message time to (not) be processed.

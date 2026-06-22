@@ -22,8 +22,7 @@ import { useMemo, useState } from "react";
 import { useRigSummary } from "../../hooks/useRigSummary.js";
 import { useNodeInventory, type NodeInventoryEntry } from "../../hooks/useNodeInventory.js";
 import { displayAgentName } from "../../lib/display-name.js";
-import { TerminalPreviewPopover } from "./TerminalPreviewPopover.js";
-import { StaticTerminalPlate } from "../terminal/StaticTerminalPlate.js";
+import { ProgressiveTerminal } from "../terminal/ProgressiveTerminal.js";
 import { EmptyState } from "../ui/empty-state.js";
 import { SectionHeader } from "../ui/section-header.js";
 import { cn } from "../../lib/utils.js";
@@ -85,16 +84,20 @@ function TokenMetric({ seat }: { seat: NodeInventoryEntry }) {
 }
 
 // V0.3.1 slice 14 walk-item 17 — TerminalView card.
-// OPR.0.4.0.1 (FR-5 founder amendment — RECONCILES the merged live-in-place model):
-// a TUI-optimal-width live terminal does NOT fit a 1/3-width grid cell, so the card
-// keeps a SMALL static thumbnail (the 3-col overview stays an at-a-glance scan) and
-// reaches the wide LIVE terminal by EXPANDING OUT via the SAME graph/table primitive
-// (TerminalPreviewPopover): the trigger opens the wide popover (static), then the
-// universal click-inside goes live. This REPLACES the prior live-in-place model so
-// every surface (graph/table/grid) opens live the same way. The global cap=2 binds
-// on the inside go-live (2 wide live plates max; a 3rd evicts the oldest); static
-// thumbnails + open popovers are uncapped. The pulsing-ring active treatment is
-// preserved.
+// OPR.0.4.0.39 (FR-1/FR-3/FR-4/FR-6 founder spec-correction): each grid cell is the
+// agent name + Claude/Codex stats in a header ABOVE a FULL-WIDTH ProgressiveTerminal
+// (static-by-default -> click -> live IN PLACE). The static IS the click-to-live
+// target -- there is NO separate expand-out popover trigger and NO white card
+// wrapper (too contrasty with the terminal). The static renders translucent smoked-
+// GLASS; clicking flips it to the OPAQUE #0c0a09 live xterm in place (the activation
+// affordance). The live xterm scrolls/pans within the cell (38 pins 120x40 +
+// overflow-auto) -- fine; the grid is a scan-and-click-to-intervene view, not for
+// long sessions. The global live cap binds on go-live (shared LiveTerminalProvider).
+// FR-3: origin-top-left + a per-breakpoint CSS scale-down (xl:scale-90 starting
+// value; QA measures the legibility floor + forward-fixes the value) fits the full
+// terminal width in the densest 3-col cells -- prefer too-small over CLIP, never cut
+// off the right edge (no overflow-hidden; the static <pre> pans wider lines). The
+// pulsing-ring active treatment is preserved as the at-a-glance scan signal.
 
 function SeatTerminalCard({ seat }: { seat: NodeInventoryEntry }) {
   const sessionName = seat.canonicalSessionName ?? seat.logicalId;
@@ -105,16 +108,15 @@ function SeatTerminalCard({ seat }: { seat: NodeInventoryEntry }) {
       data-testid={`terminal-card-${seat.rigId}-${seat.logicalId}`}
       data-active={active ? "true" : "false"}
       className={cn(
-        // OPR.0.4.0.39 FR-4: tighter card padding + gaps so the grid does not
-        // waste edge space (was p-2/gap-2).
-        "relative border bg-white/40 p-1.5 flex flex-col gap-1.5",
-        active
-          ? "border-secondary terminal-card-active"
-          : "border-outline-variant",
+        // OPR.0.4.0.39 FR-4: NO white card wrapper (bg-white/40 was too contrasty);
+        // tight p-1.5/gap-1.5 so the grid does not waste edge space. The active
+        // pulsing-ring border stays as the scan signal; inactive is borderless.
+        "relative flex flex-col gap-1.5 p-1.5",
+        active ? "terminal-card-active border border-secondary" : "border border-transparent",
       )}
     >
-      <header className="relative z-0 flex items-center justify-between gap-2 pointer-events-none">
-        <span className="font-mono text-[8px] font-semibold uppercase tracking-[0.10em] text-stone-900 truncate">
+      <header className="flex items-center justify-between gap-2">
+        <span className="font-mono text-[8px] font-semibold uppercase tracking-[0.10em] text-stone-500 truncate">
           {memberName}
         </span>
         <span className="inline-flex shrink-0 items-center gap-1">
@@ -123,40 +125,17 @@ function SeatTerminalCard({ seat }: { seat: NodeInventoryEntry }) {
           <TokenMetric seat={seat} />
         </span>
       </header>
-      <div className="relative z-0 min-h-0 flex items-start gap-1.5">
-        {/* OPR.0.4.0.39 FR-1: a SMALL static thumbnail keeps the grid an
-            at-a-glance overview -- NOT widened to TUI width. It uses the SHARED
-            StaticTerminalPlate (smoked-glass plate + OPAQUE #0c0a09 compact
-            content, mirroring the live look) so every static terminal is
-            consistent. Click-to-live here is the separate TerminalPreviewPopover
-            trigger (expand-out), so the plate itself is non-interactive.
-            FR-3: origin-top-left + a per-breakpoint CSS scale-down renders the
-            fixed-shape terminal (whitespace-pre, never reflowed) smaller so more
-            of it fits the densest 3-col cells, mirroring the live fixed-geometry
-            scale (FocusedTerminal pins 120x40, no fit/reflow). The scale VALUE is
-            legibility-floored and QA-screenshot-measured at each breakpoint; the
-            xl:scale-90 here is the starting value (forward-fix per QA). */}
-        <StaticTerminalPlate
-          sessionName={sessionName}
-          lines={6}
-          plateTestId={`terminal-grid-${seat.rigId}-${seat.logicalId}-thumb-plate`}
-          previewTestIdPrefix={`terminal-grid-${seat.rigId}-${seat.logicalId}-thumb`}
-          className="min-w-0 flex-1 overflow-hidden origin-top-left scale-100 xl:scale-90"
-        />
-        {/* OPR.0.4.0.1 (FR-5 PINNED expand-OUT): the wide LIVE plate is reached via
-            the SAME graph/table primitive -- the TerminalPreviewPopover trigger
-            opens the wide popover (static), then the universal click-inside goes
-            live. cap=2 binds on that inside go-live (2 wide live plates max; a 3rd
-            evicts the oldest). This REPLACES the prior live-in-place model so all
-            surfaces (graph/table/grid) open live the same way; no new primitive. */}
-        <TerminalPreviewPopover
-          rigId={seat.rigId}
-          logicalId={seat.logicalId}
-          sessionName={sessionName}
-          testIdPrefix={`terminal-grid-${seat.rigId}-${seat.logicalId}`}
-          progressive
-        />
-      </div>
+      {/* OPR.0.4.0.39 FR-1/FR-3/FR-6 (founder spec): ProgressiveTerminal IS the
+          in-place click-to-live target (static smoked-glass -> click -> opaque live
+          xterm at the SAME 120x40 geometry, same place). It wraps both states in the
+          shared ScaleToFitTerminal, which measures the fixed 120-col block and scales
+          it to fit the cell width (fit-width, never clip - no hardcoded per-breakpoint
+          scale). No separate popover trigger. */}
+      <ProgressiveTerminal
+        sessionName={sessionName}
+        terminalKey={`${seat.rigId}:${seat.logicalId}`}
+        testIdPrefix={`terminal-grid-${seat.rigId}-${seat.logicalId}`}
+      />
     </div>
   );
 }
@@ -202,10 +181,10 @@ function TerminalGrid({
           </button>
         ) : null}
       </div>
-      {/* OPR.0.4.0.39 FR-2: responsive 1/2/3-col by browser width; 3-col moves to
-          the wider `xl` breakpoint (was `lg`) so a scaled real-terminal static
-          fits 3-across cleanly without cramping. FR-4: tighter inter-card gap. */}
-      <div className="grid gap-2 grid-cols-1 md:grid-cols-2 xl:grid-cols-3">
+      {/* OPR.0.4.0.39 FR-2 (founder: 2 columns MAXIMUM): 1-col narrow / 2-col wider.
+          3-col was dropped - at 3-across the scaled 120-col terminal is too small to
+          read; 2-col keeps each cell wide enough for legible terminals. */}
+      <div className="grid gap-2 grid-cols-1 md:grid-cols-2">
         {visible.map((seat) => (
           <SeatTerminalCard
             key={`${seat.rigId}-${seat.logicalId}`}

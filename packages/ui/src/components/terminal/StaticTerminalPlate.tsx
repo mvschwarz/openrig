@@ -1,13 +1,14 @@
 // OPR.0.4.0.39 - the ONE shared static-terminal component.
 //
-// Backs EVERY static polling-preview terminal (the topology grid thumbnail and
+// Backs EVERY static polling-preview terminal (the topology grid card and
 // ProgressiveTerminal's static mode) with the SAME borderless smoked-glass plate
-// (SMOKED_STATIC_PLATE_CLASS) wrapping the compact SessionPreviewPane. The
-// preview content mirrors the post-38-forward-fix LIVE look (212b4523): OPAQUE
-// #0c0a09 content within the smoke plate - the same opaque terminal content the
-// live xterm now renders, NOT the old translucent tint. Consolidates the
-// duplicated plate+preview pattern so every static terminal is consistent and
-// upgrades to live via the existing click-to-live model (FR-6).
+// (SMOKED_STATIC_PLATE_CLASS = bg-stone-950/60 backdrop-blur) wrapping the compact
+// SessionPreviewPane. The static content is translucent GLASS (bg-transparent;
+// the plate shows through) - the INACTIVE state. Founder spec-correction: the
+// LIVE xterm is opaque #0c0a09, and the glass->opaque flip on click-to-live is the
+// intentional static-vs-live activation affordance (glass = inactive, opaque =
+// live), NOT "mirror the live look". Consolidates the duplicated plate+preview
+// pattern so every static terminal is consistent and upgrades to live in place.
 
 import { SessionPreviewPane } from "../preview/SessionPreviewPane.js";
 import { cn } from "../../lib/utils.js";
@@ -16,7 +17,13 @@ import { cn } from "../../lib/utils.js";
  *  reads as floating glass on the truly-bare surfaces (topology tab / grid),
  *  matching the live look. Defined here as the shared static-terminal home;
  *  ProgressiveTerminal re-exports it for existing importers. */
-export const SMOKED_STATIC_PLATE_CLASS = "bg-stone-950/60 backdrop-blur-sm";
+// OPR.0.4.0.39 (founder spec-correction): the static plate reads as smoked-black
+// GLASS over the LIGHT topology page. At 60% the stone-950 tint over the cream paper
+// rendered a washed-out light gray (the founder's "way too washed out"); 85% reads as
+// rich smoked black (matching the dialed-in graph-popover look) while keeping the glass
+// translucency + backdrop-blur. The LIVE xterm is fully opaque #0c0a09, so the
+// glass->opaque flip stays a visible activation affordance.
+export const SMOKED_STATIC_PLATE_CLASS = "bg-stone-950/85 backdrop-blur-sm";
 
 interface StaticTerminalPlateProps {
   sessionName: string;
@@ -65,7 +72,10 @@ export function StaticTerminalPlate({
         aria-label={ariaLabel}
         title={title}
         onClick={onClick}
-        className={cn("block h-full w-full cursor-pointer text-left", SMOKED_STATIC_PLATE_CLASS, className)}
+        // OPR.0.4.0.39: w-max - the plate sizes to its fixed 120-col content (not
+        // fill), so the shared ScaleToFitTerminal can measure the natural width and
+        // scale the whole block to the column (the static<->live geometry mirror).
+        className={cn("block w-max cursor-pointer text-left", SMOKED_STATIC_PLATE_CLASS, className)}
       >
         {preview}
       </button>
@@ -73,7 +83,7 @@ export function StaticTerminalPlate({
   }
 
   return (
-    <div data-testid={plateTestId} className={cn(SMOKED_STATIC_PLATE_CLASS, className)}>
+    <div data-testid={plateTestId} className={cn("w-max", SMOKED_STATIC_PLATE_CLASS, className)}>
       {preview}
     </div>
   );

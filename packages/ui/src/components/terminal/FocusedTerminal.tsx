@@ -1,6 +1,14 @@
 import { useEffect, useRef, useCallback, useState } from "react";
 import { Terminal } from "@xterm/xterm";
 import { readTerminalBearerToken } from "../mission-control/missionControlAuth.js";
+import {
+  LIVE_TERMINAL_RENDER_BACKGROUND,
+  LIVE_TERMINAL_COLS,
+  LIVE_TERMINAL_ROWS,
+  LIVE_TERMINAL_FONT_SIZE,
+  LIVE_TERMINAL_LINE_HEIGHT,
+  LIVE_TERMINAL_FONT_FAMILY,
+} from "./terminal-geometry.js";
 import "@xterm/xterm/css/xterm.css";
 
 const SPECIAL_KEY_MAP: Record<string, string> = {
@@ -31,10 +39,6 @@ const ESCAPE_SEQ_MAP: Record<string, string> = {
   "\x1b[3~": "DC",
   "\x1b[2~": "IC",
 };
-
-const LIVE_TERMINAL_RENDER_BACKGROUND = "#0c0a09";
-const LIVE_TERMINAL_COLS = 120;
-const LIVE_TERMINAL_ROWS = 40;
 
 type WsMessage = { type: "keys"; keys: string[] } | { type: "text"; text: string };
 
@@ -128,7 +132,18 @@ export function FocusedTerminal({ sessionName, daemonBaseUrl }: FocusedTerminalP
   const mountedRef = useRef(true);
   const generationRef = useRef(0);
   const promptScrollUntilRef = useRef(0);
+  // OPR.0.4.0.39: lines scrolled back from the live bottom (0 = live). Driven by the
+  // wheel handler; the broker paints the matching tmux history window. Typing or
+  // wheeling back to 0 returns to live.
+  const scrollOffsetRef = useRef(0);
   const [error, setError] = useState<string | null>(null);
+
+  const sendScroll = useCallback((offset: number) => {
+    const wsc = wsRef.current;
+    if (wsc && wsc.readyState === WebSocket.OPEN) {
+      wsc.send(JSON.stringify({ type: "scroll", offset }));
+    }
+  }, []);
 
   const disposeTerminal = useCallback(() => {
     const term = termRef.current as { dispose(): void } | null;
@@ -154,8 +169,10 @@ export function FocusedTerminal({ sessionName, daemonBaseUrl }: FocusedTerminalP
 
     ws.onopen = () => {
       if (generationRef.current !== gen) { ws.close(); return; }
-      // The daemon broker owns fixed canonical geometry (120x40). The client
-      // must keep the same grid and let the UI scroll/pan smaller surfaces.
+      // The daemon broker owns fixed canonical geometry (90x27). The client keeps
+      // the same grid and scrolls history server-side (per-subscriber capture-pane).
+      // A (re)connect starts at the live bottom.
+      scrollOffsetRef.current = 0;
       promptScrollUntilRef.current = Date.now() + 2500;
       const term = termRef.current as { scrollToBottom(): void } | null;
       scrollLiveTerminalToPrompt(term);
@@ -210,9 +227,9 @@ export function FocusedTerminal({ sessionName, daemonBaseUrl }: FocusedTerminalP
           cursorBlink: true,
           cols: LIVE_TERMINAL_COLS,
           rows: LIVE_TERMINAL_ROWS,
-          fontSize: 12,
-          lineHeight: 1,
-          fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+          fontSize: LIVE_TERMINAL_FONT_SIZE,
+          lineHeight: LIVE_TERMINAL_LINE_HEIGHT,
+          fontFamily: LIVE_TERMINAL_FONT_FAMILY,
           // xterm erase/redraw needs an opaque cell background. A translucent
           // xterm render surface lets old TUI cells bleed through after clear
           // screen / absolute cursor repaint, which corrupts Claude/Codex views.
@@ -233,10 +250,37 @@ export function FocusedTerminal({ sessionName, daemonBaseUrl }: FocusedTerminalP
         term.onData((data: string) => {
           const wsc = wsRef.current;
           if (!wsc || wsc.readyState !== WebSocket.OPEN) return;
+          // OPR.0.4.0.39: typing returns to the live bottom before sending input.
+          if (scrollOffsetRef.current > 0) {
+            scrollOffsetRef.current = 0;
+            sendScroll(0);
+          }
           const mapped = mapXtermInput(data);
           for (const msg of mapped) {
             wsc.send(JSON.stringify(msg));
           }
+        });
+
+        // OPR.0.4.0.39: wheel = scroll back through tmux history (server-side).
+        // Up increases the offset (paints an older capture-pane window); down
+        // decreases it; reaching 0 resumes live. We handle the wheel ourselves and
+        // return false so xterm's local (empty) scrollback does not interfere.
+        const scrollHandlerTerm = term as {
+          attachCustomWheelEventHandler(handler: (ev: WheelEvent) => boolean): void;
+        };
+        scrollHandlerTerm.attachCustomWheelEventHandler((ev: WheelEvent) => {
+          const wsc = wsRef.current;
+          if (!wsc || wsc.readyState !== WebSocket.OPEN) return true;
+          const STEP = 3;
+          if (ev.deltaY < 0) {
+            scrollOffsetRef.current += STEP;
+          } else if (ev.deltaY > 0) {
+            scrollOffsetRef.current = Math.max(0, scrollOffsetRef.current - STEP);
+          } else {
+            return true;
+          }
+          sendScroll(scrollOffsetRef.current);
+          return false;
         });
 
         // OPR.0.4.0.38 FR-7: no term.onResize -> ws resize relay. The pane
@@ -279,7 +323,14 @@ export function FocusedTerminal({ sessionName, daemonBaseUrl }: FocusedTerminalP
       key={`focused-terminal-live-${sessionName}`}
       ref={containerRef}
       data-testid={`focused-terminal-${sessionName}`}
-      className="h-full w-full min-h-[200px] overflow-auto bg-stone-950/60 backdrop-blur-sm"
+      // OPR.0.4.0.39 (founder fix): size to the xterm's NATURAL full geometry (90x40)
+      // instead of a height-capped (min-h/h-full) overflow-auto container. The capped
+      // container showed only the top ~16 of 40 rows anchored at the top (so the
+      // cursor/prompt at the bottom was hidden until you typed, and you couldn't reach
+      // the rest). At natural size the WHOLE screen is visible (cursor included) and
+      // the shared ScaleToFitTerminal scales it to the cell - matching the static
+      // exactly (no drift). The xterm's own .xterm-viewport handles scrollback.
+      className="w-max bg-stone-950/85 backdrop-blur-sm"
     />
   );
 }
