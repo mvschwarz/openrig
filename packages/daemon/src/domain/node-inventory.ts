@@ -1,5 +1,8 @@
 import type Database from "better-sqlite3";
-import type { NodeInventoryEntry, NodeDetailEntry, NodeDetailPeer, NodeDetailEdge, NodeDetailCompactSpec, NodeRestoreOutcome, NodeLifecycleState, Binding, RestoreResult, NodeRecoveryGuidance, Snapshot, WorkspaceSpec } from "./types.js";
+import type { NodeInventoryEntry, NodeDetailEntry, NodeDetailPeer, NodeDetailEdge, NodeDetailCompactSpec, NodeRestoreOutcome, NodeLifecycleState, Binding, RestoreResult, NodeRecoveryGuidance, Snapshot, WorkspaceSpec, SeatIdentityVerdict, SeatIdentityVerdictKind } from "./types.js";
+import { identityVerdictDownranksRunning } from "./types.js";
+import { SeatIdentityStore } from "./seat-identity-store.js";
+import { deriveOriented } from "./startup-proof.js";
 import type { RuntimeAdapter } from "./runtime-adapter.js";
 import type { ContextUsageStore } from "./context-usage-store.js";
 import type { AgentActivityStore } from "./agent-activity-store.js";
@@ -43,6 +46,7 @@ interface InventoryRow {
   resume_token: string | null;
   startup_completed_at: string | null;
   binding_attachment_type: string | null;
+  binding_tmux_pane: string | null;
 }
 
 interface EventRow {
@@ -175,6 +179,11 @@ export function deriveNodeLifecycleState(input: {
   restoreOutcome: NodeRestoreOutcome;
   nodeId: string;
   usableSnapshot: Snapshot | null;
+  /** OPR.0.4.3.19 — the persisted liveness identity verdict for this node.
+   *  A `mismatch`/`pane_missing` verdict down-ranks a `running` session to
+   *  `attention_required` (no false-green). `verified`, `tmux_unavailable`,
+   *  and an absent verdict leave the projection unchanged. */
+  identityVerdict?: SeatIdentityVerdictKind | null;
 }): NodeLifecycleState {
   // L3: the explicit `attention_required` outcome (Claude resume-selection
   // prompt) and the L2 proxy (failed + alive tmux session) both surface as
@@ -185,7 +194,14 @@ export function deriveNodeLifecycleState(input: {
   ) {
     return "attention_required";
   }
-  if (input.sessionStatus === "running") return "running";
+  if (input.sessionStatus === "running") {
+    // OPR.0.4.3.19 — a `running` session projects `running` ONLY when its
+    // pane process identity is verified (or not-yet-observed). An explicit
+    // mismatch/pane-missing verdict down-ranks to attention_required so a
+    // dead/orphaned/squatted pane never surfaces as healthy green.
+    if (identityVerdictDownranksRunning(input.identityVerdict)) return "attention_required";
+    return "running";
+  }
   if (input.usableSnapshot) {
     const nodeSession = (input.usableSnapshot.data.sessions ?? []).find(
       (s) => s.nodeId === input.nodeId,
@@ -197,11 +213,19 @@ export function deriveNodeLifecycleState(input: {
   return "detached";
 }
 
-function deriveOccupantLifecycle(row: InventoryRow): NodeInventoryEntry["occupantLifecycle"] {
+function deriveOccupantLifecycle(
+  row: InventoryRow,
+  identityVerdict?: SeatIdentityVerdictKind | null,
+): NodeInventoryEntry["occupantLifecycle"] {
   if (row.occupant_lifecycle) {
     return row.occupant_lifecycle as NodeInventoryEntry["occupantLifecycle"];
   }
-  return row.session_status === "running" ? "active" : "unknown";
+  // OPR.0.4.3.19 — the derived `active` occupant requires a verified (or
+  // not-yet-observed) pane identity, mirroring the lifecycleState gate.
+  if (row.session_status === "running" && !identityVerdictDownranksRunning(identityVerdict)) {
+    return "active";
+  }
+  return "unknown";
 }
 
 function deriveContinuityOutcome(
@@ -329,6 +353,32 @@ function mapProjectionEntries(entries: unknown[]): Array<{ id: string; category:
   });
 }
 
+/**
+ * OPR.0.4.3.19 rev1-r2 B1 — gate a durable identity verdict to the CURRENT
+ * binding. The verdict table is keyed only by node_id, so on rebind/relaunch
+ * (same node_id, new session + new pane) the stored verdict describes a pane
+ * that is no longer bound. Serving it for the new pane opens a false-green
+ * window (a stale `verified` suppresses the down-rank a fresh squat/orphan
+ * should trigger; a stale `mismatch` would down-rank a healthy new pane).
+ *
+ * A verdict applies ONLY when it was computed against the current binding:
+ *   verdict.sessionName === row.session_name  AND
+ *   verdict.evidence.registeredPane === row.tmux_pane
+ * Otherwise return null — the projection treats it as ABSENT (fail-open: a
+ * running seat is left unchanged, never down-ranked). This keeps the rev1-r1
+ * fail-open discipline: turning a stale verdict into ABSENT never down-ranks;
+ * only a matching mismatch/pane_missing does.
+ */
+function applicableVerdict(
+  verdict: SeatIdentityVerdict | null,
+  row: Pick<InventoryRow, "session_name" | "binding_tmux_pane">,
+): SeatIdentityVerdict | null {
+  if (!verdict) return null;
+  if (verdict.sessionName !== row.session_name) return null;
+  if (verdict.evidence.registeredPane !== row.binding_tmux_pane) return null;
+  return verdict;
+}
+
 // -- Public API --
 
 /**
@@ -342,6 +392,10 @@ export function getNodeInventory(db: Database.Database, rigId: string): NodeInve
   // PL-007: rig's typed workspace block (if declared) loaded once per
   // projection so per-node kind resolution shares one parse.
   const workspaceSpec = readRigWorkspaceJson(db, rigId);
+  // OPR.0.4.3.19: the persisted per-node liveness identity verdicts, read once
+  // per projection (cheap indexed read, defensive to a missing table). Gates
+  // the running/active green derivations below.
+  const identityVerdicts = new SeatIdentityStore(db).getForRig(rigId);
 
   // Join nodes with newest session (max ULID = max session.id string comparison)
   // and the rig name
@@ -379,7 +433,8 @@ export function getNodeInventory(db: Database.Database, rigId: string): NodeInve
       s.resume_type,
       s.resume_token,
       s.startup_completed_at,
-      b.attachment_type as binding_attachment_type
+      b.attachment_type as binding_attachment_type,
+      b.tmux_pane as binding_tmux_pane
     FROM nodes n
     JOIN rigs r ON r.id = n.rig_id
     LEFT JOIN pods p ON p.id = n.pod_id
@@ -392,11 +447,24 @@ export function getNodeInventory(db: Database.Database, rigId: string): NodeInve
 
   return rows.map((row) => {
     const restoreOutcome = deriveRestoreOutcome(db, rigId, row.node_id);
+    // OPR.0.4.3.19 rev1-r2 B1 — a durable verdict is keyed only by node_id, so
+    // after a rebind/relaunch (same node, NEW session + NEW pane) a stale
+    // `verified` verdict for the OLD pane would otherwise be served for the new
+    // pane until the next 5s reconcile tick, suppressing down-rank and rendering
+    // a fresh squat/orphan false-green. Make applicability LOAD-BEARING at read
+    // time: a stored verdict applies ONLY when it was computed against the
+    // current binding (its sessionName === the latest session AND its
+    // registeredPane === the current binding pane). Otherwise treat it as ABSENT
+    // (null) — a STALE verdict becomes fail-open (never down-ranks a running
+    // seat), it does NOT itself down-rank. Only a MATCHING mismatch/pane_missing
+    // verdict down-ranks.
+    const identityVerdict = applicableVerdict(identityVerdicts.get(row.node_id) ?? null, row);
     const lifecycleState = deriveNodeLifecycleState({
       sessionStatus: row.session_status,
       restoreOutcome,
       nodeId: row.node_id,
       usableSnapshot,
+      identityVerdict: identityVerdict?.verdict ?? null,
     });
     return {
       rigId: row.rig_id,
@@ -411,8 +479,9 @@ export function getNodeInventory(db: Database.Database, rigId: string): NodeInve
       sessionStatus: row.session_status,
       startupStatus: row.startup_status as NodeInventoryEntry["startupStatus"],
       restoreOutcome,
+      oriented: deriveOriented(db, row.node_id),
       lifecycleState,
-      occupantLifecycle: deriveOccupantLifecycle(row),
+      occupantLifecycle: deriveOccupantLifecycle(row, identityVerdict?.verdict ?? null),
       continuityOutcome: deriveContinuityOutcome(row, restoreOutcome),
       handoverResult: row.handover_result as NodeInventoryEntry["handoverResult"] ?? null,
       previousOccupant: row.previous_occupant,
@@ -443,6 +512,9 @@ export function getNodeInventory(db: Database.Database, rigId: string): NodeInve
       // from cwd against the rig's typed workspace block. null when the
       // rig has no workspace declaration.
       workspace: resolveNodeWorkspace({ spec: workspaceSpec, cwd: row.cwd }),
+      // OPR.0.4.3.19 — the liveness identity verdict (third axis). null when
+      // never observed; carries evidence on mismatch/missing.
+      identityVerdict,
       heldReason: deriveHeldReason(db, rigId, row.node_id, row.session_status),
     };
   });
@@ -799,9 +871,27 @@ function readPendingWorkBySession(db: Database.Database): Map<string, number> {
 
 export async function attachAgentActivity(
   entries: NodeInventoryEntry[],
-  deps: { tmuxAdapter: TmuxAdapter; activityStore?: AgentActivityStore; now?: Date },
+  deps: {
+    tmuxAdapter: TmuxAdapter;
+    activityStore?: AgentActivityStore;
+    now?: Date;
+    // OPR.0.4.3 healthz-wedge amplification fix: cheap by default. The per-node
+    // tmux `capturePaneContent` fallback (probeSessionActivity) is the storm that
+    // amplifies fleet-scale under the CLI `rig ps --nodes` fan-out + the graph/nodes
+    // polls. It is ONLY reached for hook-less seats (getLatestForNode returns null),
+    // and it uniquely adds ONLY pane-heuristic `needs_input` for those seats — the
+    // SeatActivityService snapshot (terminalActive) already serves running/idle at a
+    // higher UI precedence, and getLatestForNode serves hook activity (incl.
+    // hook-needs_input). So cheap-default skips the capture and emits an HONEST
+    // `unknown/no_runtime_hook` placeholder (running/idle then come from the snapshot
+    // at render time). Set `captureFallback: true` (via ?full=/?refresh=) to opt into
+    // the per-node tmux capture — needs-input surfaces (useNeedsInputSeats, node
+    // detail) request it explicitly.
+    captureFallback?: boolean;
+  },
 ): Promise<NodeInventoryEntry[]> {
   const sampledAt = deps.now ?? new Date();
+  const captureFallback = deps.captureFallback ?? false;
   return Promise.all(entries.map(async (entry) => {
     const hookActivity = deps.activityStore?.getLatestForNode({
       sessionName: entry.canonicalSessionName,
@@ -811,6 +901,23 @@ export async function attachAgentActivity(
       return {
         ...entry,
         agentActivity: hookActivity,
+      };
+    }
+
+    if (!captureFallback) {
+      // CHEAP DEFAULT — no per-node tmux capture. running/idle is supplied by the
+      // SeatActivityService snapshot (terminalActive) at higher precedence; a
+      // hook-less seat's pane-heuristic needs_input requires ?full/?refresh.
+      return {
+        ...entry,
+        agentActivity: {
+          state: "unknown",
+          reason: "no_runtime_hook",
+          evidenceSource: "session_registry",
+          sampledAt: sampledAt.toISOString(),
+          evidence: null,
+          fallback: true,
+        },
       };
     }
 

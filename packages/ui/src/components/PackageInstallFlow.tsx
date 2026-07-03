@@ -122,10 +122,10 @@ function policyStatusColor(status: string): string {
 
 function policyStatusBg(status: string): string {
   switch (status) {
-    case "approved": return "bg-success/8";
-    case "rejected": return "bg-warning/8";
-    case "deferred": return "bg-foreground-muted/4";
-    case "conflict": return "bg-destructive/8";
+    case "approved": return "bg-success/[0.08]";
+    case "rejected": return "bg-warning/[0.08]";
+    case "deferred": return "bg-foreground-muted/[0.04]";
+    case "conflict": return "bg-destructive/[0.08]";
     default: return "";
   }
 }
@@ -307,7 +307,7 @@ export function PackageInstallFlow() {
                       runtime={rt}
                       size="xs"
                       compact
-                      className="border-white/20 bg-white/10 text-foreground-on-dark"
+                      className="border-white/20 bg-surface-lowest/10 text-foreground-on-dark"
                     />
                   ))}
                 </span>
@@ -380,7 +380,7 @@ export function PackageInstallFlow() {
             </div>
 
             {(manifest.requirements.cliTools.length > 0 || manifest.requirements.systemPackages.length > 0) && (
-              <div data-testid="requirements-section" className="p-spacing-3 bg-foreground/4">
+              <div data-testid="requirements-section" className="p-spacing-3 bg-foreground/[0.04]">
                 <span className="text-label-sm text-foreground-muted uppercase block mb-spacing-1">REQUIREMENTS</span>
                 {manifest.requirements.cliTools.map((t) => (
                   <div key={t.name} className="text-body-sm font-mono">CLI: {t.name}</div>

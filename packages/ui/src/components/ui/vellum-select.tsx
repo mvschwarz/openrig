@@ -13,9 +13,9 @@ export const VellumSelect = React.forwardRef<HTMLSelectElement, VellumSelectProp
         ref={ref}
         data-testid={testId}
         className={cn(
-          "block w-full border border-stone-300 bg-white px-2 py-1 font-mono text-xs text-stone-900",
-          "hover:bg-stone-50 focus:border-stone-900 focus:bg-white focus:outline-none",
-          "disabled:bg-stone-100 disabled:text-stone-400 disabled:cursor-not-allowed",
+          "block w-full border border-outline-variant bg-surface-lowest px-2 py-1 font-mono text-xs text-on-surface",
+          "hover:bg-background focus:border-on-surface focus:bg-surface-lowest focus:outline-none",
+          "disabled:bg-surface-low disabled:text-on-surface-variant disabled:cursor-not-allowed",
           className,
         )}
         {...props}

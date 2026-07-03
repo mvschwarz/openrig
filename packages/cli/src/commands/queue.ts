@@ -42,6 +42,50 @@ function printResult(json: boolean, body: unknown, status: number): void {
   if (status >= 400) process.exitCode = status >= 500 ? 2 : 1;
 }
 
+// OPR.0.4.3.03 — `rig queue show` body preview.
+//
+// Default `show` renders a BOUNDED body preview instead of dumping the whole
+// qitem body into the agent's context; `--full` opts back into the complete
+// body. The bound is a CODE-POINT count (delivery-set, adjustable) per
+// IMPL-SPEC §2.3-2.4.
+const SHOW_BODY_PREVIEW_MAX_CODEPOINTS = 512;
+
+export interface BodyPreview {
+  preview: string;
+  bodyBytes: number;
+  bodyTruncated: boolean;
+}
+
+// Multibyte-SAFE bounded preview (IMPL-SPEC §2.3-2.4). The preview is the first
+// N CODE POINTS: `Array.from(body)` splits by code point (never a surrogate
+// pair / multibyte char), so the slice is inherently multibyte-safe and never
+// emits a partial/invalid UTF-8 sequence. `bodyTruncated` is CODE-POINT-count
+// based (codePointCount > N). `bodyBytes` is the honest TRUE total UTF-8 byte
+// length of the FULL body (never the truncated size).
+export function previewBody(
+  body: string,
+  maxCodePoints = SHOW_BODY_PREVIEW_MAX_CODEPOINTS
+): BodyPreview {
+  const bodyBytes = Buffer.byteLength(body, "utf8");
+  const codePoints = Array.from(body);
+  if (codePoints.length <= maxCodePoints) {
+    return { preview: body, bodyBytes, bodyTruncated: false };
+  }
+  return {
+    preview: codePoints.slice(0, maxCodePoints).join(""),
+    bodyBytes,
+    bodyTruncated: true,
+  };
+}
+
+function isRecordWithStringBody(v: unknown): v is Record<string, unknown> & { body: string } {
+  return (
+    typeof v === "object" &&
+    v !== null &&
+    typeof (v as Record<string, unknown>).body === "string"
+  );
+}
+
 // OPR.0.3.2.21.FR-4(a) — body input resolution. Three accepted shapes:
 //   --body "<text>"               inline (legacy; backtick-prone for raw
 //                                 multiline content)
@@ -162,6 +206,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     .option("--body-file <path>", "Read qitem body from a file path (use - for stdin; mutually exclusive with --body). Kills the backtick-shell-corruption class for multiline bodies.")
     .option("--mission <id>", "First-class mission scope; translated to a mission:<id> tag (composes with --tags)")
     .option("--slice <id>", "First-class slice scope; translated to a slice:<id> tag (composes with --tags)")
+    .option("--gate <role>", "OPR.0.4.3.16: mark this as a gate qitem; translated to a gate:<role> tag (role e.g. guard | spec-review | pm-lead | qa | human). The idle-gate watchdog reads this predicate. Composes with --tags.")
     .option("--priority <priority>", "Priority: routine | urgent | critical", "routine")
     .option("--tier <tier>", "Tier (e.g. fast, routine, deep, critical) — drives SLA")
     .option("--tags <tags>", "Comma-separated tags (composes with --mission and --slice)")
@@ -178,6 +223,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
       bodyFile?: string;
       mission?: string;
       slice?: string;
+      gate?: string;
       priority: string;
       tier?: string;
       tags?: string;
@@ -216,6 +262,10 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
       const fromFlags: string[] = [];
       if (opts.mission) fromFlags.push(`mission:${opts.mission}`);
       if (opts.slice) fromFlags.push(`slice:${opts.slice}`);
+      // OPR.0.4.3.16 — first-class --gate <role> stamps a gate:<role> tag
+      // (the queue-gate-predicate the idle-gate watchdog reads). Same
+      // formalization + de-dup as --mission/--slice.
+      if (opts.gate) fromFlags.push(`gate:${opts.gate}`);
       const merged = [...fromFlags, ...fromTagsArg];
       const seen = new Set<string>();
       const dedupedTags = merged.filter((t) => { if (seen.has(t)) return false; seen.add(t); return true; });
@@ -316,6 +366,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     .option("--priority <priority>", "Override priority for the new qitem")
     .option("--tier <tier>", "Override tier for the new qitem")
     .option("--tags <tags>", "Comma-separated tags for the new qitem")
+    .option("--gate <role>", "OPR.0.4.3.16: mark the new qitem as gate work; translated to a gate:<role> tag (e.g. guard | spec-review). The idle-gate watchdog reads this predicate. Composes with --tags.")
     .option("--target-repo <name>", "PL-007: typed repo scope for the new qitem")
     .option("--summary <text>", "OPR.0.4.1.18: short human-readable 1-2 sentence summary for the new qitem (feeds the Story node; --body stays source of truth). Warned-if-missing.")
     .option("--no-nudge", "Suppress the default nudge to the new destination")
@@ -328,6 +379,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
       priority?: string;
       tier?: string;
       tags?: string;
+      gate?: string;
       targetRepo?: string;
       summary?: string;
       nudge?: boolean;
@@ -343,7 +395,15 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
         );
       }
       const deps = getDeps();
-      const tags = opts.tags ? opts.tags.split(",").map((s) => s.trim()).filter(Boolean) : undefined;
+      // OPR.0.4.3.16 — --gate <role> stamps a gate:<role> tag (composes with
+      // --tags, de-duplicated). Guard code-review + spec-review handoffs use
+      // this so the idle-gate watchdog's predicate has a producer.
+      const explicitTags = opts.tags ? opts.tags.split(",").map((s) => s.trim()).filter(Boolean) : [];
+      const gateTags = opts.gate ? [`gate:${opts.gate}`] : [];
+      const mergedTags = [...gateTags, ...explicitTags];
+      const seenTags = new Set<string>();
+      const dedupedTags = mergedTags.filter((t) => { if (seenTags.has(t)) return false; seenTags.add(t); return true; });
+      const tags = dedupedTags.length > 0 ? dedupedTags : undefined;
       await withClient(deps, async (client) => {
         const res = await client.post<unknown>(`/api/queue/${encodeURIComponent(qitemId)}/handoff`, {
           fromSession: from,
@@ -373,6 +433,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     .option("--priority <priority>", "Override priority for the new qitem")
     .option("--tier <tier>", "Override tier for the new qitem")
     .option("--tags <tags>", "Comma-separated tags for the new qitem")
+    .option("--gate <role>", "OPR.0.4.3.16: mark the new qitem as gate work; translated to a gate:<role> tag (e.g. guard | spec-review). The idle-gate watchdog reads this predicate. Composes with --tags.")
     .option("--target-repo <name>", "PL-007: typed repo scope for the new qitem")
     .option("--summary <text>", "OPR.0.4.1.18: short human-readable 1-2 sentence summary for the new qitem (feeds the Story node; --body stays source of truth). Warned-if-missing.")
     .option("--no-nudge", "Suppress the default nudge to the new destination")
@@ -385,6 +446,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
       priority?: string;
       tier?: string;
       tags?: string;
+      gate?: string;
       targetRepo?: string;
       summary?: string;
       nudge?: boolean;
@@ -400,7 +462,15 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
         );
       }
       const deps = getDeps();
-      const tags = opts.tags ? opts.tags.split(",").map((s) => s.trim()).filter(Boolean) : undefined;
+      // OPR.0.4.3.16 — --gate <role> stamps a gate:<role> tag (composes with
+      // --tags, de-duplicated). Guard code-review + spec-review handoffs use
+      // this so the idle-gate watchdog's predicate has a producer.
+      const explicitTags = opts.tags ? opts.tags.split(",").map((s) => s.trim()).filter(Boolean) : [];
+      const gateTags = opts.gate ? [`gate:${opts.gate}`] : [];
+      const mergedTags = [...gateTags, ...explicitTags];
+      const seenTags = new Set<string>();
+      const dedupedTags = mergedTags.filter((t) => { if (seenTags.has(t)) return false; seenTags.add(t); return true; });
+      const tags = dedupedTags.length > 0 ? dedupedTags : undefined;
       await withClient(deps, async (client) => {
         const res = await client.post<unknown>(`/api/queue/${encodeURIComponent(qitemId)}/handoff-and-complete`, {
           fromSession: from,
@@ -457,13 +527,31 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
 
   cmd
     .command("show <qitemId>")
-    .description("Show one qitem")
+    .description("Show one qitem (bounded body preview by default; --full for the complete body)")
+    .option("--full", "Show the complete body (no preview truncation) + chain fields")
     .option("--json", "JSON output for agents")
-    .action(async (qitemId: string, opts: { json?: boolean }) => {
+    .action(async (qitemId: string, opts: { full?: boolean; json?: boolean }) => {
       const deps = getDeps();
       await withClient(deps, async (client) => {
         const res = await client.get<unknown>(`/api/queue/${encodeURIComponent(qitemId)}`);
-        printResult(opts.json ?? false, res.data, res.status);
+        const json = opts.json ?? false;
+        const item = res.data;
+        // --full is a pure passthrough of today's COMPLETE item shape (the
+        // compatibility contract — body byte-identical to pre-0.4.3.03). Also
+        // passthrough on error responses / non-object payloads, where there is
+        // no string body to preview.
+        if (opts.full || res.status >= 400 || !isRecordWithStringBody(item)) {
+          printResult(json, item, res.status);
+          return;
+        }
+        const { preview, bodyBytes, bodyTruncated } = previewBody(item.body);
+        // Append-only additions: keep `body` in place (now the preview) and add
+        // the honest size + truncation flag. Object otherwise unchanged.
+        const transformed = { ...item, body: preview, bodyBytes, bodyTruncated };
+        printResult(json, transformed, res.status);
+        if (!json && bodyTruncated) {
+          console.log(`… (truncated — ${bodyBytes} bytes total; --full for complete body)`);
+        }
       });
     });
 

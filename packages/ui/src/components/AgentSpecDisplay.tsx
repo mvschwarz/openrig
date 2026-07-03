@@ -61,13 +61,13 @@ export function AgentSpecDisplay({ review, yaml, testIdPrefix = "agent", sourceP
     <>
       {/* Profiles */}
       {profiles.length > 0 && (
-        <div data-testid={`${testIdPrefix}-profiles-section`} className="border border-stone-200 p-3">
+        <div data-testid={`${testIdPrefix}-profiles-section`} className="border border-outline-variant p-3">
           <div className="font-mono text-xs font-bold mb-2">Profiles</div>
           <div className="space-y-1">
             {profiles.map((p) => (
               <div key={p.name} className="font-mono text-[10px] flex justify-between">
                 <span className="font-bold">{p.name}</span>
-                {p.description && <span className="text-stone-500">{p.description}</span>}
+                {p.description && <span className="text-on-surface-variant">{p.description}</span>}
               </div>
             ))}
           </div>
@@ -75,14 +75,14 @@ export function AgentSpecDisplay({ review, yaml, testIdPrefix = "agent", sourceP
       )}
 
       {/* Resources */}
-      <div data-testid={`${testIdPrefix}-resources-section`} className="border border-stone-200 p-3">
+      <div data-testid={`${testIdPrefix}-resources-section`} className="border border-outline-variant p-3">
         <div className="font-mono text-xs font-bold mb-2">Resources</div>
         <div className="space-y-2 font-mono text-[10px]">
           {resources.skills.length > 0 && (
             <div>
-              <span className="text-stone-500">Skills:</span>{" "}
+              <span className="text-on-surface-variant">Skills:</span>{" "}
               {resources.skills.map((s, i) => (
-                <span key={i} className="mr-1 mb-0.5 inline-flex items-center gap-1 bg-stone-100 px-1.5 py-0.5">
+                <span key={i} className="mr-1 mb-0.5 inline-flex items-center gap-1 bg-surface-low px-1.5 py-0.5">
                   <ToolMark tool="file" size="xs" decorative />
                   {s}
                 </span>
@@ -91,7 +91,7 @@ export function AgentSpecDisplay({ review, yaml, testIdPrefix = "agent", sourceP
           )}
           {resources.guidance.length > 0 && (
             <div>
-              <span className="text-stone-500">Guidance:</span>{" "}
+              <span className="text-on-surface-variant">Guidance:</span>{" "}
               {resources.guidance.map((g, i) => (
                 <FileChip
                   key={`${g}-${i}`}
@@ -99,7 +99,7 @@ export function AgentSpecDisplay({ review, yaml, testIdPrefix = "agent", sourceP
                   sourcePath={sourcePath}
                   testId={`${testIdPrefix}-guidance-file-trigger-${g}`}
                 >
-                  <span className="mr-1 mb-0.5 inline-flex items-center gap-1 bg-stone-100 px-1.5 py-0.5 underline decoration-dotted decoration-stone-400">
+                  <span className="mr-1 mb-0.5 inline-flex items-center gap-1 bg-surface-low px-1.5 py-0.5 underline decoration-dotted decoration-outline">
                     <ToolMark tool={g} size="xs" decorative />
                     {g}
                   </span>
@@ -109,9 +109,9 @@ export function AgentSpecDisplay({ review, yaml, testIdPrefix = "agent", sourceP
           )}
           {resources.plugins.length > 0 && (
             <div>
-              <span className="text-stone-500">Plugins:</span>{" "}
+              <span className="text-on-surface-variant">Plugins:</span>{" "}
               {resources.plugins.map((p, i) => (
-                <span key={`${p}-${i}`} className="mr-1 mb-0.5 inline-flex items-center gap-1 bg-stone-100 px-1.5 py-0.5">
+                <span key={`${p}-${i}`} className="mr-1 mb-0.5 inline-flex items-center gap-1 bg-surface-low px-1.5 py-0.5">
                   <ToolMark tool="file" size="xs" decorative />
                   {p}
                 </span>
@@ -123,11 +123,11 @@ export function AgentSpecDisplay({ review, yaml, testIdPrefix = "agent", sourceP
 
       {/* Startup */}
       {(startup.files.length > 0 || startup.actions.length > 0) && (
-        <div data-testid={`${testIdPrefix}-startup-section`} className="border border-stone-200 p-3">
+        <div data-testid={`${testIdPrefix}-startup-section`} className="border border-outline-variant p-3">
           <div className="font-mono text-xs font-bold mb-2">Startup</div>
           {startup.files.length > 0 && (
             <div className="mb-2">
-              <div className="font-mono text-[9px] text-stone-500 uppercase mb-1">Files</div>
+              <div className="font-mono text-[9px] text-on-surface-variant uppercase mb-1">Files</div>
               {startup.files.map((f, i) => (
                 <div key={i} className="font-mono text-[10px]">
                   <FileChip
@@ -135,7 +135,7 @@ export function AgentSpecDisplay({ review, yaml, testIdPrefix = "agent", sourceP
                     sourcePath={sourcePath}
                     testId={`${testIdPrefix}-startup-file-trigger-${f.path}`}
                   >
-                    <span className="inline-flex items-center gap-1 underline decoration-dotted decoration-stone-400">
+                    <span className="inline-flex items-center gap-1 underline decoration-dotted decoration-outline">
                       <ToolMark tool={f.path} size="xs" decorative />
                       {f.path}
                     </span>
@@ -147,10 +147,10 @@ export function AgentSpecDisplay({ review, yaml, testIdPrefix = "agent", sourceP
           )}
           {startup.actions.length > 0 && (
             <div>
-              <div className="font-mono text-[9px] text-stone-500 uppercase mb-1">Actions</div>
+              <div className="font-mono text-[9px] text-on-surface-variant uppercase mb-1">Actions</div>
               {startup.actions.map((a, i) => (
                 <div key={i} className="font-mono text-[10px]">
-                  <span className="inline-flex items-center gap-1 text-stone-500">
+                  <span className="inline-flex items-center gap-1 text-on-surface-variant">
                     <ToolMark tool={a.type.includes("command") ? "terminal" : a.type} size="xs" decorative />
                     {a.type}:
                   </span>{" "}

@@ -31,7 +31,7 @@ export interface ProjectToken {
 }
 
 const toneClass: Record<ProjectMetaTone, string> = {
-  neutral: "border-stone-300 bg-white/55 text-stone-700",
+  neutral: "border-outline-variant bg-surface-lowest/55 text-on-surface",
   info: "border-sky-300 bg-sky-50/75 text-sky-800",
   success: "border-emerald-300 bg-emerald-50/75 text-emerald-800",
   warning: "border-amber-300 bg-amber-50/80 text-amber-800",
@@ -39,7 +39,7 @@ const toneClass: Record<ProjectMetaTone, string> = {
 };
 
 export const statusDotClass: Record<ProjectMetaTone, string> = {
-  neutral: "border-stone-400 bg-stone-300",
+  neutral: "border-outline bg-surface-highest",
   info: "border-sky-400 bg-sky-200",
   success: "border-emerald-500 bg-emerald-400",
   warning: "border-amber-400 bg-amber-300",
@@ -242,7 +242,7 @@ export function QueueCountIcon({
       data-testid={testId}
       title={label}
       aria-label={label}
-      className="inline-flex shrink-0 items-center gap-1 border border-stone-200 bg-white/45 px-1.5 py-0.5 font-mono text-[9px] tabular-nums text-stone-600"
+      className="inline-flex shrink-0 items-center gap-1 border border-outline-variant bg-surface-lowest/45 px-1.5 py-0.5 font-mono text-[9px] tabular-nums text-on-surface-variant"
     >
       <Inbox className="h-3 w-3" strokeWidth={1.5} aria-hidden="true" />
       <span>{count}</span>
@@ -291,7 +291,7 @@ export function ActorChip({
     <span
       className={cn(
         "inline-flex min-w-0 items-center gap-1 border px-1.5 py-0.5 font-mono text-[9px]",
-        muted ? "border-stone-200 bg-white/35 text-stone-500" : "border-stone-300 bg-white/55 text-stone-800",
+        muted ? "border-outline-variant bg-surface-lowest/35 text-on-surface-variant" : "border-outline-variant bg-surface-lowest/55 text-on-surface",
       )}
     >
       <ActorMark actor={session} size="xs" decorative />
@@ -304,7 +304,7 @@ export function DateChip({ value }: { value: string | undefined | null }) {
   return (
     <time
       dateTime={value ?? undefined}
-      className="inline-flex items-center gap-1 border border-stone-200 bg-white/45 px-1.5 py-0.5 font-mono text-[9px] text-stone-600"
+      className="inline-flex items-center gap-1 border border-outline-variant bg-surface-lowest/45 px-1.5 py-0.5 font-mono text-[9px] text-on-surface-variant"
     >
       <CalendarDays className="h-3 w-3" strokeWidth={1.5} />
       {formatFriendlyDate(value)}
@@ -325,7 +325,7 @@ export function FlowChips({
   return (
     <div className="flex min-w-0 flex-wrap items-center gap-1.5">
       <ActorChip session={source ?? "unknown source"} muted={muted} />
-      <ArrowRight className="h-3.5 w-3.5 text-stone-400" strokeWidth={1.4} />
+      <ArrowRight className="h-3.5 w-3.5 text-on-surface-variant" strokeWidth={1.4} />
       <ActorChip session={destination ?? "unresolved target"} muted={muted} />
     </div>
   );
@@ -353,7 +353,7 @@ export function ProofThumbnailGrid({
             data-testid={testIdPrefix ? `${testIdPrefix}-${rel}` : undefined}
             src={proofAssetUrl(sliceName, rel)}
             alt={rel}
-            className="h-24 w-full border border-stone-200 bg-stone-100 object-cover"
+            className="h-24 w-full border border-outline-variant bg-surface-low object-cover"
             loading="lazy"
           />
         );
@@ -363,10 +363,10 @@ export function ProofThumbnailGrid({
             key={rel}
             type="button"
             onClick={() => onSelect(rel)}
-            className="group relative block w-full text-left focus:outline-none focus:ring-2 focus:ring-stone-900/20"
+            className="group relative block w-full text-left focus:outline-none focus:ring-2 focus:ring-on-surface/20"
           >
             {image}
-            <span className="absolute left-1.5 top-1.5 inline-flex items-center gap-1 border border-amber-400/45 bg-white/80 px-1.5 py-0.5 font-mono text-[8px] uppercase tracking-[0.10em] text-amber-950 backdrop-blur-sm">
+            <span className="absolute left-1.5 top-1.5 inline-flex items-center gap-1 border border-amber-400/45 bg-surface-lowest/80 px-1.5 py-0.5 font-mono text-[8px] uppercase tracking-[0.10em] text-amber-950 backdrop-blur-sm">
               <ToolMark tool={rel} size="xs" decorative />
               Proof image
             </span>
@@ -385,7 +385,7 @@ export function ProofPacketHeader({
   badge: string;
 }) {
   return (
-    <div className="flex items-center justify-between gap-2 font-mono text-[9px] uppercase tracking-[0.12em] text-stone-600">
+    <div className="flex items-center justify-between gap-2 font-mono text-[9px] uppercase tracking-[0.12em] text-on-surface-variant">
       <span className="truncate inline-flex items-center gap-1">
         <ToolMark tool="proof" size="xs" />
         {title}

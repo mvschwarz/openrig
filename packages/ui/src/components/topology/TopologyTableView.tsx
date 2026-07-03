@@ -124,10 +124,10 @@ function CmuxButton({ row }: { row: AgentRow }) {
         }
         disabled={cmuxLaunch.isPending}
         data-error={failed || undefined}
-        className={`inline-flex h-7 w-7 items-center justify-center border bg-white/65 shadow-[1px_1px_0_rgba(46,52,46,0.12)] transition-colors focus:outline-none focus:ring-2 focus:ring-stone-900/20 disabled:cursor-wait disabled:opacity-60 ${
+        className={`inline-flex h-7 w-7 items-center justify-center border bg-surface-lowest/65 shadow-[1px_1px_0_rgba(46,52,46,0.12)] transition-colors focus:outline-none focus:ring-2 focus:ring-on-surface/20 disabled:cursor-wait disabled:opacity-60 ${
           failed
             ? "border-rose-400 text-rose-700 hover:bg-rose-50"
-            : "border-outline-variant text-stone-700 hover:bg-stone-100 hover:text-stone-950"
+            : "border-outline-variant text-on-surface hover:bg-surface-low hover:text-on-surface"
         }`}
       >
         <ToolMark tool="cmux" size="sm" />
@@ -218,7 +218,7 @@ const TokenCell = memo(function TokenCell({ row }: { row: AgentRow }) {
   return (
     <span
       data-testid={`topology-table-tokens-${row.logicalId}`}
-      className={`font-mono text-xs font-bold ${tokenLabel ? "text-stone-500" : "text-stone-300"}`}
+      className={`font-mono text-xs font-bold ${tokenLabel ? "text-on-surface-variant" : "text-on-surface-variant"}`}
       title={tokenTitle ?? "Token sample unavailable"}
     >
       {tokenLabel ?? "--"}
@@ -308,7 +308,7 @@ function agentColumns(): ColumnDef<AgentRow>[] {
               sessionName={row.original.sessionName ?? null}
               reducedMotion={false}
               testIdPrefix={`topology-table-${row.original.logicalId}`}
-              buttonClassName="inline-flex h-7 w-7 items-center justify-center border border-outline-variant bg-white/65 text-stone-700 shadow-[1px_1px_0_rgba(46,52,46,0.12)] transition-colors hover:bg-stone-100 hover:text-stone-950 focus:outline-none focus:ring-2 focus:ring-stone-900/20"
+              buttonClassName="inline-flex h-7 w-7 items-center justify-center border border-outline-variant bg-surface-lowest/65 text-on-surface shadow-[1px_1px_0_rgba(46,52,46,0.12)] transition-colors hover:bg-surface-low hover:text-on-surface focus:outline-none focus:ring-2 focus:ring-on-surface/20"
               progressive
             />
           ) : null}
@@ -446,7 +446,7 @@ export function TopologyTableView({ rigIdScope, podNameScope }: { rigIdScope?: s
       </div>
       <div className="border border-outline-variant overflow-x-auto">
         <table className="w-full text-left">
-          <thead className="bg-stone-50 border-b border-outline-variant">
+          <thead className="bg-background border-b border-outline-variant">
             {table.getHeaderGroups().map((hg) => (
               <tr key={hg.id}>
                 {hg.headers.map((h) => (

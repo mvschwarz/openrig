@@ -1,7 +1,93 @@
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { Command } from "commander";
 import { DaemonClient } from "../client.js";
 import { getDaemonStatus, getDaemonUrl, type LifecycleDeps } from "../daemon-lifecycle.js";
+import { getOpenRigHome, isFixtureScopedHome, readOpenRigEnv } from "../openrig-compat.js";
+import { ConfigStore } from "../config-store.js";
 import { realDeps } from "./daemon.js";
+
+// The daemon.port default (DEFAULT_CONFIG in config-store.ts). A fixture
+// target "diverges" when it is resolved from file/env AND is not this value.
+const DEFAULT_DAEMON_PORT = 7433;
+
+interface FixtureLeak {
+  fixtureHome: string;
+  /** The divergent daemon target (port number, or the leaked OPENRIG_URL). */
+  target: string | number;
+  source: string;
+}
+
+/**
+ * OPR.0.4.3.12 — Detect a leaked fixture-scoped home with a divergent daemon
+ * target. Composes the PATH-ONLY `isFixtureScopedHome` predicate (from
+ * openrig-compat, no ConfigStore dependency) with a ConfigStore
+ * divergent-target confirmation HERE (restore-check is downstream of both, so
+ * no import cycle). Returns null unless BOTH hold, so a legit non-default port
+ * under the real home never trips the guard.
+ */
+function detectFixtureLeak(): FixtureLeak | null {
+  const fixtureHome = getOpenRigHome();
+  if (!isFixtureScopedHome(fixtureHome)) return null;
+
+  // A leaked OPENRIG_URL points the status probe at the fixture directly.
+  const leakedUrl = readOpenRigEnv("OPENRIG_URL", "RIGGED_URL");
+  if (leakedUrl) {
+    return { fixtureHome, target: leakedUrl, source: "env (OPENRIG_URL)" };
+  }
+
+  // Otherwise confirm a divergent daemon.port resolved from the fixture's
+  // config.json / OPENRIG_PORT (source !== "default" AND value !== 7433).
+  let resolved: { value: string | number | boolean; source: string } | undefined;
+  try {
+    resolved = new ConfigStore().resolveWithSource("daemon.port");
+  } catch {
+    resolved = undefined;
+  }
+  if (resolved && resolved.source !== "default" && resolved.value !== DEFAULT_DAEMON_PORT) {
+    return { fixtureHome, target: resolved.value as number, source: resolved.source };
+  }
+  return null;
+}
+
+/**
+ * Build the honest, NON-MUTATING both-homes result for a detected fixture
+ * leak — instead of the blocking `rig daemon start` / `scope:"host"` packet.
+ * Names both the fixture home (+ its divergent target/source) and the real
+ * default home (+ default port), with a non-mutating remediation.
+ */
+function fixtureLeakResult(leak: FixtureLeak): RestoreCheckResult {
+  const realHome = join(homedir(), ".openrig");
+  const evidence =
+    `restore-check ran under a fixture-scoped OPENRIG_HOME (${leak.fixtureHome}) whose daemon ` +
+    `target diverges (${leak.source} = ${leak.target}). The real default home is ${realHome} ` +
+    `(daemon.port ${DEFAULT_DAEMON_PORT}). The real kernel was NOT probed — this is a leaked ` +
+    `test fixture, not a host-down condition.`;
+  const remediation =
+    `Unset the leaked OPENRIG_HOME / OPENRIG_PORT / OPENRIG_URL (or re-target to ${realHome}), ` +
+    `then re-run: rig restore-check`;
+  return localRestoreResult({
+    verdict: "unknown",
+    checks: [{ check: "home.fixture-scoped", status: "yellow", evidence, remediation }],
+    repairPacket: [{
+      step: 1,
+      command: remediation,
+      rationale: "Fixture-scoped OPENRIG_HOME leaked into a real-kernel recovery command",
+      safe: true,      // non-mutating: unsetting env / re-targeting, not starting a daemon
+      blocking: false,
+    }],
+    recovery: {
+      status: "unknown",
+      summary:
+        `Recovery state was not inspected: this invocation used a fixture-scoped home ` +
+        `(${leak.fixtureHome}), not the real default home (${realHome}). Clear the leaked ` +
+        `OpenRig home/target env and re-run to inspect the real kernel.`,
+      actions: [],
+      blocked: [],
+      unknown: [],
+    },
+  });
+}
 
 export interface RestoreCheckDeps {
   lifecycleDeps: LifecycleDeps;
@@ -160,6 +246,26 @@ Examples:
       const deps = getDepsF();
       const status = await getDaemonStatus(deps.lifecycleDeps);
       if (status.state !== "running" || status.healthy === false) {
+        // OPR.0.4.3.12 — fixture-home isolation guard. A leaked fixture
+        // OPENRIG_HOME with a divergent daemon target makes getDaemonStatus
+        // probe the WRONG port (connection-refused) and report the real
+        // kernel as down. Detect that precise leak and respond honestly
+        // (both homes named, non-mutating) instead of the blocking
+        // `rig daemon start` / `scope:"host"` host-repair packet. Fires ONLY
+        // under a detected fixture-scoped home + divergent target, so the
+        // genuine daemon-down contract below is preserved for real homes.
+        const leak = detectFixtureLeak();
+        if (leak) {
+          const result = fixtureLeakResult(leak);
+          if (opts.json) {
+            console.log(JSON.stringify(result, null, 2));
+          } else {
+            printHuman(result);
+          }
+          process.exitCode = 2;
+          return;
+        }
+
         // Daemon down — produce a structured not_restorable result
         const result = localRestoreResult({
           verdict: "not_restorable",

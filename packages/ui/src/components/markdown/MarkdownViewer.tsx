@@ -58,8 +58,8 @@ export function MarkdownViewer({ content, assetBasePath, hideFrontmatter = false
             onClick={() => setMode("rendered")}
             className={`border px-2 py-0.5 font-mono text-[9px] uppercase tracking-[0.10em] ${
               mode === "rendered"
-                ? "border-stone-700 bg-stone-700 text-white"
-                : "border-stone-300 text-stone-700 hover:bg-stone-100"
+                ? "border-on-surface bg-inverse-surface text-background"
+                : "border-outline-variant text-on-surface hover:bg-surface-low"
             }`}
           >
             rendered
@@ -71,8 +71,8 @@ export function MarkdownViewer({ content, assetBasePath, hideFrontmatter = false
             onClick={() => setMode("raw")}
             className={`border px-2 py-0.5 font-mono text-[9px] uppercase tracking-[0.10em] ${
               mode === "raw"
-                ? "border-stone-700 bg-stone-700 text-white"
-                : "border-stone-300 text-stone-700 hover:bg-stone-100"
+                ? "border-on-surface bg-inverse-surface text-background"
+                : "border-outline-variant text-on-surface hover:bg-surface-low"
             }`}
           >
             raw
@@ -83,7 +83,7 @@ export function MarkdownViewer({ content, assetBasePath, hideFrontmatter = false
         <FrontmatterHeader frontmatter={parsed.frontmatter} />
       )}
       {mode === "raw" ? (
-        <pre data-testid="markdown-viewer-raw" className="overflow-x-auto whitespace-pre-wrap break-words bg-stone-50 p-3 font-mono text-[10px] text-stone-800">
+        <pre data-testid="markdown-viewer-raw" className="overflow-x-auto whitespace-pre-wrap break-words bg-background p-3 font-mono text-[10px] text-on-surface">
           {content}
         </pre>
       ) : (
@@ -242,16 +242,16 @@ function FrontmatterHeader({ frontmatter }: { frontmatter: Record<string, string
   return (
     <section
       data-testid="markdown-frontmatter"
-      className="mb-4 border border-stone-300 bg-stone-50 p-3"
+      className="mb-4 border border-outline-variant bg-background p-3"
     >
-      <div className="mb-2 font-mono text-[8px] uppercase tracking-[0.18em] text-stone-500">
+      <div className="mb-2 font-mono text-[8px] uppercase tracking-[0.18em] text-on-surface-variant">
         Frontmatter
       </div>
       <dl className="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-1">
         {entries.map(([k, v]) => (
           <Fragment key={k}>
-            <dt className="font-mono text-[10px] font-bold text-stone-700">{k}</dt>
-            <dd className="font-mono text-[10px] text-stone-800 break-all">{v}</dd>
+            <dt className="font-mono text-[10px] font-bold text-on-surface">{k}</dt>
+            <dd className="font-mono text-[10px] text-on-surface break-all">{v}</dd>
           </Fragment>
         ))}
       </dl>
@@ -264,10 +264,10 @@ function BlockRenderer({ block, assetBasePath }: { block: Block; assetBasePath?:
   if (block.type === "heading") {
     const sizes = { 1: "text-lg font-bold", 2: "text-base font-bold", 3: "text-sm font-bold", 4: "text-xs font-bold" } as const;
     const Tag = (`h${block.level}` as "h1" | "h2" | "h3" | "h4");
-    return <Tag data-testid={`md-heading-${block.level}`} className={`${sizes[block.level]} mt-4 text-stone-900`}>{renderInline(block.text, assetBasePath)}</Tag>;
+    return <Tag data-testid={`md-heading-${block.level}`} className={`${sizes[block.level]} mt-4 text-on-surface`}>{renderInline(block.text, assetBasePath)}</Tag>;
   }
   if (block.type === "paragraph") {
-    return <p data-testid="md-paragraph" className="text-[12px] leading-relaxed text-stone-800">{renderInline(block.text, assetBasePath)}</p>;
+    return <p data-testid="md-paragraph" className="text-[12px] leading-relaxed text-on-surface">{renderInline(block.text, assetBasePath)}</p>;
   }
   if (block.type === "code") {
     // 0.3.1 slice 06 — intercept fenced-block grammars before the
@@ -302,7 +302,7 @@ function BlockRenderer({ block, assetBasePath }: { block: Block; assetBasePath?:
   if (block.type === "list") {
     const ListTag = block.ordered ? "ol" : "ul";
     return (
-      <ListTag data-testid={`md-list-${block.ordered ? "ol" : "ul"}`} className={`${block.ordered ? "list-decimal" : "list-disc"} ml-5 space-y-1 text-[12px] text-stone-800`}>
+      <ListTag data-testid={`md-list-${block.ordered ? "ol" : "ul"}`} className={`${block.ordered ? "list-decimal" : "list-disc"} ml-5 space-y-1 text-[12px] text-on-surface`}>
         {block.items.map((item, idx) => (
           <li key={idx} style={{ marginLeft: `${item.depth * 1}rem` }}>
             {renderInline(item.text, assetBasePath)}
@@ -314,14 +314,14 @@ function BlockRenderer({ block, assetBasePath }: { block: Block; assetBasePath?:
   if (block.type === "table") {
     return (
       <div data-testid="md-table-wrapper" className="overflow-x-auto">
-        <table className="w-full border-collapse border border-stone-300 text-[10px]">
-          <thead className="bg-stone-100">
-            <tr>{block.headers.map((h, i) => <th key={i} className="border border-stone-300 px-2 py-1 text-left font-bold text-stone-900">{renderInline(h, assetBasePath)}</th>)}</tr>
+        <table className="w-full border-collapse border border-outline-variant text-[10px]">
+          <thead className="bg-surface-low">
+            <tr>{block.headers.map((h, i) => <th key={i} className="border border-outline-variant px-2 py-1 text-left font-bold text-on-surface">{renderInline(h, assetBasePath)}</th>)}</tr>
           </thead>
           <tbody>
             {block.rows.map((row, ri) => (
-              <tr key={ri} className={ri % 2 === 0 ? "bg-white" : "bg-stone-50"}>
-                {row.map((cell, ci) => <td key={ci} className="border border-stone-300 px-2 py-1 text-stone-800">{renderInline(cell, assetBasePath)}</td>)}
+              <tr key={ri} className={ri % 2 === 0 ? "bg-surface-lowest" : "bg-background"}>
+                {row.map((cell, ci) => <td key={ci} className="border border-outline-variant px-2 py-1 text-on-surface">{renderInline(cell, assetBasePath)}</td>)}
               </tr>
             ))}
           </tbody>
@@ -355,7 +355,7 @@ function renderInline(text: string, assetBasePath?: string): React.ReactNode {
           src={src}
           alt={imgMatch[1] ?? ""}
           loading="lazy"
-          className="my-2 inline-block max-w-full border border-stone-200"
+          className="my-2 inline-block max-w-full border border-outline-variant"
         />,
       );
       i += imgMatch[0].length;
@@ -391,7 +391,7 @@ function renderInline(text: string, assetBasePath?: string): React.ReactNode {
           <code
             key={key++}
             data-testid="md-inline-code"
-            className="bg-stone-100 px-1 font-mono text-[10px] text-stone-900"
+            className="bg-surface-low px-1 font-mono text-[10px] text-on-surface"
           >
             {remaining.slice(1, close)}
           </code>,

@@ -269,23 +269,142 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
     expect(sendText).not.toHaveBeenCalled();
   });
 
-  // Amendment 5: a hook fresh for DISPLAY (under 5min) but older than the 15s send window falls through
-  // to the real-time capture-pane probe and blocks on the prompt it now shows.
-  it("AMEND: a display-fresh but send-stale hook falls through to capture-pane and blocks", async () => {
-    const fixedNow = new Date("2026-06-27T12:00:00.000Z");
-    // Hook says idle, recorded 90s ago: still display-fresh (<5min) but stale for send (>15s).
+  // OPR.0.4.3.28 Part A — REVERSES the pre-slice-28 behavior: a stale-but-latest
+  // `idle` hook (display-fresh <5min, but >15s send window) is now SENDABLE. The
+  // latest-by-seq idle proves no newer activity exists (had the seat started
+  // work, the newest hook would be UserPromptSubmit/PermissionRequest, not idle),
+  // so the send trusts the hook ordering over the flaky real-time pane that Codex
+  // cannot reliably parse (the original no_activity_signal regression). Ratified:
+  // IMPL-SPEC §2.1 + orch-advisor checkpoint 4 (residual hook-didn't-fire risk is
+  // bounded/recoverable — a text paste to a working seat, not prompt-driving —
+  // and Part B makes the hook reliable). Fresh non-idle hooks + fresh
+  // PermissionRequest still block (K-5 tests :178-237, unchanged).
+  function seedStaleIdleHook(fixedNow: Date) {
+    // Hook says idle, recorded 90s ago: display-fresh (<5min) but send-stale (>15s).
     agentActivityStore.recordHookEvent({
       runtime: "claude-code", sessionName: "dev-impl@my-rig", hookEvent: "Stop",
       occurredAt: new Date(fixedNow.getTime() - 90_000).toISOString(),
     });
+  }
+
+  it("Part A: a send-stale IDLE hook + a CLEAN pane sends (the unblock)", async () => {
+    const fixedNow = new Date("2026-06-27T12:00:00.000Z");
+    seedStaleIdleHook(fixedNow);
     const { sendText } = spies();
-    // Real-time pane now shows a prompt.
-    const t = makeTransport(mockTmux({ capturePaneContent: async () => SHIP_PROMPT, sendText }), { now: () => fixedNow });
+    const t = makeTransport(mockTmux({ capturePaneContent: async () => "idle\n❯ ", sendText }), { now: () => fixedNow });
+    const r = await t.send("dev-impl@my-rig", "hi");
+    expect(r.ok).toBe(true);
+    expect(sendText).toHaveBeenCalled();
+  });
+
+  it("Part A: a send-stale IDLE hook + an UNPARSEABLE pane still sends (flaky-Codex case)", async () => {
+    const fixedNow = new Date("2026-06-27T12:00:00.000Z");
+    seedStaleIdleHook(fixedNow);
+    const { sendText } = spies();
+    const t = makeTransport(mockTmux({ capturePaneContent: async () => "xyzzy no prompt here", sendText }), { now: () => fixedNow });
+    const r = await t.send("dev-impl@my-rig", "hi");
+    expect(r.ok).toBe(true); // unknown pane does NOT veto → trust the stale-idle hook
+    expect(sendText).toHaveBeenCalled();
+  });
+
+  // Guard code-review Blocker 1: the narrow picker/permission veto — a stale-idle
+  // hook must NOT paste+Enter onto an actually-visible picker/permission prompt.
+  it("Part A: a send-stale IDLE hook is VETOED by a visible AskUserQuestion picker (refused, nothing typed)", async () => {
+    const fixedNow = new Date("2026-06-27T12:00:00.000Z");
+    seedStaleIdleHook(fixedNow);
+    const { sendText, sendKeys } = spies();
+    const t = makeTransport(mockTmux({ capturePaneContent: async () => SHIP_PROMPT, sendText, sendKeys }), { now: () => fixedNow });
     const r = await t.send("dev-impl@my-rig", "hi");
     expect(r.ok).toBe(false);
     expect(r.reason).toBe("target_needs_input");
-    expect(r.activity?.evidenceSource).toBe("pane_heuristic"); // fell through to real-time capture
     expect(sendText).not.toHaveBeenCalled();
+    expect(sendKeys).not.toHaveBeenCalled();
+  });
+
+  it("Part A: a send-stale IDLE hook is VETOED by a visible Codex approval prompt (refused)", async () => {
+    const fixedNow = new Date("2026-06-27T12:00:00.000Z");
+    seedStaleIdleHook(fixedNow);
+    const { sendText, sendKeys } = spies();
+    const t = makeTransport(mockTmux({ capturePaneContent: async () => CODEX_APPROVAL, sendText, sendKeys }), { now: () => fixedNow });
+    const r = await t.send("dev-impl@my-rig", "hi");
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe("target_needs_input");
+    expect(sendText).not.toHaveBeenCalled();
+  });
+
+  // OPR.0.4.3.28 Part A — a stale NON-idle (running) hook is NOT trusted; it
+  // falls through to the real-time pane probe (unchanged; only stale-idle is new).
+  it("Part A: a stale NON-idle (running) hook falls through to the pane probe", async () => {
+    const fixedNow = new Date("2026-06-27T12:00:00.000Z");
+    agentActivityStore.recordHookEvent({
+      runtime: "claude-code", sessionName: "dev-impl@my-rig", hookEvent: "UserPromptSubmit",
+      occurredAt: new Date(fixedNow.getTime() - 90_000).toISOString(), // stale + running
+    });
+    const { sendText } = spies();
+    // Pane is idle: the stale running hook did NOT block; the send proceeds via the pane.
+    const t = makeTransport(mockTmux({ capturePaneContent: async () => "idle\n❯ ", sendText }), { now: () => fixedNow });
+    const r = await t.send("dev-impl@my-rig", "hi");
+    // Had the stale running hook been trusted, the send would refuse (mid_work).
+    // It proceeded → the stale non-idle hook fell through to the pane (not trusted).
+    expect(r.ok).toBe(true);
+    expect(r.activity?.evidenceSource).not.toBe("runtime_hook");
+    expect(sendText).toHaveBeenCalled();
+  });
+
+  // OPR.0.4.3.28 correction — INVERT fail-closed-on-unknown. `unknown` telemetry
+  // (absent/failed, NOT positive picker evidence) now PROCEEDS with a non-blocking
+  // advisory that still NAMES the failed producer link. Was: refused
+  // target_activity_unknown. Hooks are advisory telemetry, not send authority.
+  it("Part C (inverted): unknown PROCEEDS with an advisory naming the daemon-ingest producer link (no token leak)", async () => {
+    const { sendText } = spies();
+    const t = makeTransport(mockTmux({ capturePaneContent: async () => "xyzzy no prompt here", sendText }));
+    const r = await t.send("dev-impl@my-rig", "hi");
+    expect(r.ok).toBe(true);
+    expect(r.warning).toContain("producer-link:");
+    expect(r.warning).toContain("daemon-ingest link DOWN");
+    expect(sendText).toHaveBeenCalled();
+  });
+
+  // OPR.0.4.3.28 correction — when the seat env lacks the activity vars, the
+  // advisory names the SEAT-ENV link (presence-only, never the token value), and
+  // the send still PROCEEDS (was: refused).
+  it("Part C (inverted): unknown PROCEEDS with an advisory naming the seat-env link when url/token are missing", async () => {
+    const { sendText } = spies();
+    const base = mockTmux({ capturePaneContent: async () => "xyzzy no prompt here", sendText });
+    const tmux = Object.assign({}, base, { hasSessionEnv: async () => false }) as unknown as TmuxAdapter;
+    const t = makeTransport(tmux);
+    const r = await t.send("dev-impl@my-rig", "hi");
+    expect(r.ok).toBe(true);
+    expect(r.warning).toContain("seat-env link DOWN");
+    expect(r.warning).toContain("MISSING"); // names the missing var, not its value
+    expect(sendText).toHaveBeenCalled();
+  });
+
+  // OPR.0.4.3.28 correction — --dangerously-interact no longer REQUIRES --reason for
+  // `unknown` telemetry (it proceeds normally now); the reason gate scopes to the
+  // positive-picker needs_input case only.
+  it("correction: --dangerously-interact WITHOUT --reason PROCEEDS on unknown telemetry (no picker) AND still carries the advisory", async () => {
+    const { sendText } = spies();
+    const t = makeTransport(mockTmux({ capturePaneContent: async () => "xyzzy no prompt here", sendText }));
+    const r = await t.send("dev-impl@my-rig", "hi", { dangerouslyInteract: true });
+    expect(r.ok).toBe(true);
+    // B1 code-review fix: the advisory attaches on unknown telemetry REGARDLESS of
+    // --dangerously-interact — the override branch no longer bypasses unknown handling.
+    expect(r.warning).toContain("producer-link:");
+    expect(sendText).toHaveBeenCalled();
+  });
+
+  // OPR.0.4.3.28 B1 code-review regression — the exact bypass the reviewer caught:
+  // --dangerously-interact WITH --reason on an actually-unknown pane must STILL return
+  // ok:true WITH the advisory warning (previously the dangerouslyInteract branch skipped
+  // the unknown handling and returned no warning).
+  it("B1: --dangerously-interact + --reason on unknown telemetry returns ok:true WITH the advisory", async () => {
+    const { sendText } = spies();
+    const t = makeTransport(mockTmux({ capturePaneContent: async () => "xyzzy no prompt here", sendText }));
+    const r = await t.send("dev-impl@my-rig", "hi", { dangerouslyInteract: true, reason: "driving anyway", actorSession: "orch-lead@my-rig" });
+    expect(r.ok).toBe(true);
+    expect(r.warning).toContain("producer-link:");
+    expect(sendText).toHaveBeenCalled();
   });
 
   it("AMEND: a hook fresh within the send window (idle) is authoritative and the send proceeds", async () => {
@@ -353,17 +472,23 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
   });
 
   // No-regression: idle default still delivers; running + force still delivers.
-  it("NO-REGRESSION: idle target sends by default; running target sends with --force", async () => {
+  it("idle target sends by default; running target now DELIVERS WITH ADVISORY (OPR.0.4.3.28 fast-follow — mid_work downgraded, busy is not a block)", async () => {
     const idleSpy = vi.fn(async () => ({ ok: true as const }));
     const idle = makeTransport(mockTmux({ capturePaneContent: async () => "Done.\n❯ \n  ⏵⏵ accept edits on (shift+tab to cycle)", sendText: idleSpy }));
-    expect((await idle.send("dev-impl@my-rig", "hi")).ok).toBe(true);
+    const idleRes = await idle.send("dev-impl@my-rig", "hi");
+    expect(idleRes.ok).toBe(true);
+    expect(idleRes.warning).toBeUndefined(); // idle → clean send, no advisory
     expect(idleSpy).toHaveBeenCalled();
 
     const runSpy = vi.fn(async () => ({ ok: true as const }));
     const running = makeTransport(mockTmux({ capturePaneContent: async () => "Working on task...\n⠋ Processing\nesc to interrupt", sendText: runSpy }));
+    // Default (non-force) send on a running/busy pane now PROCEEDS with a non-blocking advisory
+    // (was: ok:false mid_work). needs_input remains the ONLY hard refuse.
     const def = await running.send("dev-impl@my-rig", "hi");
-    expect(def.ok).toBe(false);
-    expect(def.reason).toBe("mid_work");
+    expect(def.ok).toBe(true);
+    expect(def.warning).toContain("mid-task");
+    expect(def.warning).toContain("busy is advisory");
+    // --force is now a no-op on this path (kept for back-compat) — still delivers.
     const forced = await running.send("dev-impl@my-rig", "hi", { force: true });
     expect(forced.ok).toBe(true);
     expect(runSpy).toHaveBeenCalled();

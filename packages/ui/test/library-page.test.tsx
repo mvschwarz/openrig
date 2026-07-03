@@ -161,6 +161,33 @@ describe("Library page taxonomy", () => {
     expect(screen.queryByText(/Skill body/)).toBeNull();
   });
 
+  it("shows an aggregate agent-image badge (count + total size) on the Agent Images section (OPR.0.4.3.05)", async () => {
+    const image = (id: string, name: string, sizeBytes: number) => ({
+      id, kind: "agent-image", name, version: "1", runtime: "claude-code", sourceSeat: "s", sourceSessionId: "s",
+      sourceCwd: null, notes: null, createdAt: "2026-05-07T00:00:00.000Z", sourceType: "workspace",
+      sourcePath: `/x/${name}`, relativePath: name, updatedAt: "2026-05-07T00:00:00.000Z",
+      manifestEstimatedTokens: null, derivedEstimatedTokens: 100, files: [], sourceResumeToken: "(redacted)",
+      stats: { forkCount: 0, lastUsedAt: null, estimatedSizeBytes: sizeBytes, lineage: [] }, lineage: [], pinned: false,
+    });
+    mockFetch.mockImplementation(async (url: string) => {
+      if (url === "/api/specs/library" || url === "/api/context-packs/library") return { ok: true, json: async () => [] };
+      if (url === "/api/plugins" || url === "/api/skills/library") return { ok: true, json: async () => [] };
+      if (url === "/api/files/roots") return { ok: true, json: async () => ({ roots: [] }) };
+      if (url === "/api/agent-images/library") {
+        return { ok: true, json: async () => [image("agent-image:a:1", "a", 1048576), image("agent-image:b:1", "b", 3145728)] };
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    });
+
+    renderLibraryPage();
+
+    const badge = await screen.findByTestId("library-section-agent-images-badge");
+    await waitFor(() => {
+      expect(badge.textContent).toContain("2 images");
+      expect(badge.textContent).toContain("MB"); // 1 MB + 3 MB aggregated
+    });
+  });
+
   it("opens a skill as its own viewer and defaults to SKILL.md", async () => {
     mockFetch.mockImplementation(async (url: string) => {
       if (url === "/api/specs/library" || url === "/api/context-packs/library" || url === "/api/agent-images/library") {

@@ -76,15 +76,18 @@ describe("globals.css registration-mark CSS source (DRIFT-2 regression)", () => 
   for (const c of corners) {
     it(`.${c}::before is self-contained (content + position + bg-color)`, () => {
       // Match the standalone selector — NOT the .reg-mark > .${c} parent-qualified one.
+      // OPR.0.4.3.29: the hardcoded #546073 was converted to the (pixel-identical in
+      // light) --secondary token so the marks theme under dark; self-containment intent
+      // is unchanged.
       const re = new RegExp(
-        `(^|[^>\\s])\\s*\\.${c}::before\\s*\\{[^}]*content:\\s*'';[^}]*position:\\s*absolute;[^}]*background-color:\\s*#546073;`,
+        `(^|[^>\\s])\\s*\\.${c}::before\\s*\\{[^}]*content:\\s*'';[^}]*position:\\s*absolute;[^}]*background-color:\\s*hsl\\(var\\(--secondary\\)\\);`,
         "m",
       );
       expect(GLOBALS_CSS).toMatch(re);
     });
     it(`.${c}::after is self-contained (content + position + bg-color)`, () => {
       const re = new RegExp(
-        `(^|[^>\\s])\\s*\\.${c}::after\\s*\\{[^}]*content:\\s*'';[^}]*position:\\s*absolute;[^}]*background-color:\\s*#546073;`,
+        `(^|[^>\\s])\\s*\\.${c}::after\\s*\\{[^}]*content:\\s*'';[^}]*position:\\s*absolute;[^}]*background-color:\\s*hsl\\(var\\(--secondary\\)\\);`,
         "m",
       );
       expect(GLOBALS_CSS).toMatch(re);

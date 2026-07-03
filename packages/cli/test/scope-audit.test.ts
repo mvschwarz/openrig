@@ -292,4 +292,90 @@ describe("scope-audit classifier", () => {
     }));
     expect(result.findings.some((f) => f.kind === "missing_proof")).toBe(false);
   });
+
+  // TIGHTENED: missing_mission_notes gates on ACTIVE mission status
+  it("active mission (no status) without MISSION_NOTES emits missing_mission_notes", () => {
+    const result = classifyScopeItem(makeInput({
+      level: "mission",
+      readmeFrontmatterRaw: "id: OPR.0.4.1",
+      progressFileExists: true,
+      missionNotesExists: false,
+    }));
+    expect(result.findings.some((f) => f.kind === "missing_mission_notes")).toBe(true);
+  });
+
+  it("active mission (explicit active status) without MISSION_NOTES emits missing_mission_notes", () => {
+    const result = classifyScopeItem(makeInput({
+      level: "mission",
+      readmeFrontmatterRaw: "id: OPR.0.4.1\nstatus: active",
+      progressFileExists: true,
+      missionNotesExists: false,
+    }));
+    expect(result.findings.some((f) => f.kind === "missing_mission_notes")).toBe(true);
+  });
+
+  it("terminal mission (shipped/archived/complete) without MISSION_NOTES does NOT emit missing_mission_notes", () => {
+    for (const status of ["shipped", "archived", "complete", "closed", "historical", "superseded"]) {
+      const result = classifyScopeItem(makeInput({
+        level: "mission",
+        readmeFrontmatterRaw: `id: OPR.0.4.1\nstatus: ${status}`,
+        progressFileExists: true,
+        missionNotesExists: false,
+      }));
+      expect(
+        result.findings.some((f) => f.kind === "missing_mission_notes"),
+        `status "${status}" should not flag missing notes`,
+      ).toBe(false);
+    }
+  });
+
+  // NEW: committed-without-PROGRESS (git-derived, CLI-only input)
+  it("slice touched by HEAD without a PROGRESS.md change emits progress_not_updated_on_commit", () => {
+    const result = classifyScopeItem(makeInput({
+      level: "slice",
+      path: "/workspace/missions/release-0.4.1/slices/32-x",
+      readmeFrontmatterRaw: "id: OPR.0.4.1.32\nstatus: wip",
+      progressFileExists: true,
+      sliceTouchedByRecentCommit: true,
+      progressTouchedByRecentCommit: false,
+    }));
+    const finding = result.findings.find((f) => f.kind === "progress_not_updated_on_commit");
+    expect(finding).toMatchObject({
+      severity: "medium",
+      path: "/workspace/missions/release-0.4.1/slices/32-x/PROGRESS.md",
+    });
+    expect(finding?.remediation).toMatch(/PROGRESS\.md/);
+  });
+
+  it("slice touched by HEAD WITH a PROGRESS.md change does not emit progress_not_updated_on_commit", () => {
+    const result = classifyScopeItem(makeInput({
+      level: "slice",
+      readmeFrontmatterRaw: "id: OPR.0.4.1.32\nstatus: wip",
+      progressFileExists: true,
+      sliceTouchedByRecentCommit: true,
+      progressTouchedByRecentCommit: true,
+    }));
+    expect(result.findings.some((f) => f.kind === "progress_not_updated_on_commit")).toBe(false);
+  });
+
+  it("committed-without-PROGRESS is inert when git context is unavailable (both inputs undefined)", () => {
+    const result = classifyScopeItem(makeInput({
+      level: "slice",
+      readmeFrontmatterRaw: "id: OPR.0.4.1.32\nstatus: wip",
+      progressFileExists: true,
+      // sliceTouchedByRecentCommit / progressTouchedByRecentCommit left undefined
+    }));
+    expect(result.findings.some((f) => f.kind === "progress_not_updated_on_commit")).toBe(false);
+  });
+
+  it("committed-without-PROGRESS does not fire when HEAD did not touch the slice", () => {
+    const result = classifyScopeItem(makeInput({
+      level: "slice",
+      readmeFrontmatterRaw: "id: OPR.0.4.1.32\nstatus: wip",
+      progressFileExists: true,
+      sliceTouchedByRecentCommit: false,
+      progressTouchedByRecentCommit: false,
+    }));
+    expect(result.findings.some((f) => f.kind === "progress_not_updated_on_commit")).toBe(false);
+  });
 });

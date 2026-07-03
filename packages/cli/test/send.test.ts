@@ -56,6 +56,7 @@ describe("Send CLI", () => {
   let server: http.Server;
   let port: number;
   let lastSendBody: Record<string, unknown> | null = null;
+  let lastBroadcastBody: Record<string, unknown> | null = null;
 
   beforeAll(async () => {
     server = http.createServer((req, res) => {
@@ -63,6 +64,25 @@ describe("Send CLI", () => {
       let body = "";
       req.on("data", (chunk: Buffer) => { body += chunk; });
       req.on("end", () => {
+        if (req.method === "POST" && url === "/api/transport/broadcast") {
+          const parsed = JSON.parse(body);
+          lastBroadcastBody = parsed;
+          const sessions: string[] = (parsed.sessions as string[] | undefined)
+            ?? ["seat-a@my-rig", "seat-b@my-rig"]; // pod/rig/global resolve to a fixed pair
+          if (parsed.text === "partial") {
+            const results = [
+              { ok: true, sessionName: sessions[0] },
+              { ok: false, sessionName: sessions[1], error: "target needs input" },
+            ];
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ total: 2, sent: 1, failed: 1, results }));
+            return;
+          }
+          const results = sessions.map((s) => ({ ok: true, sessionName: s }));
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ total: results.length, sent: results.length, failed: 0, results }));
+          return;
+        }
         if (req.method === "POST" && url === "/api/transport/send") {
           const parsed = JSON.parse(body);
           lastSendBody = parsed;
@@ -81,6 +101,10 @@ describe("Send CLI", () => {
           } else if (parsed.session === "busy-session") {
             res.writeHead(409, { "Content-Type": "application/json" });
             res.end(JSON.stringify({ ok: false, sessionName: "busy-session", reason: "mid_work", error: "Target pane appears mid-task. Use force: true to send anyway." }));
+          } else if (parsed.session === "unknown-advisory") {
+            // OPR.0.4.3.28 — unknown telemetry now PROCEEDS with a non-blocking advisory (warning).
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ ok: true, sessionName: "unknown-advisory", warning: "producer-link: daemon-ingest link DOWN — activity could not be determined (no_activity_signal); sent anyway (telemetry is advisory)." }));
           } else {
             res.writeHead(404, { "Content-Type": "application/json" });
             res.end(JSON.stringify({ ok: false, error: "not found" }));
@@ -105,6 +129,7 @@ describe("Send CLI", () => {
 
   beforeEach(() => {
     lastSendBody = null;
+    lastBroadcastBody = null;
   });
 
   it("send prints success output", async () => {
@@ -120,6 +145,27 @@ describe("Send CLI", () => {
     });
     expect(logs.join("\n")).toContain("mid-task");
     expect(exitCode).toBe(1);
+  });
+
+  // OPR.0.4.3.28 correction — an unknown-telemetry send PROCEEDS and PRINTS the advisory on
+  // human output (not only in --json).
+  it("prints the Advisory on an unknown-proceed send (human output)", async () => {
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "send", "unknown-advisory", "hello"]);
+    });
+    const output = logs.join("\n");
+    expect(output).toContain("Sent to unknown-advisory");
+    expect(output).toContain("Advisory:");
+    expect(output).toContain("daemon-ingest link DOWN");
+    expect(exitCode).toBeUndefined();
+  });
+
+  it("carries the advisory as `warning` in --json output", async () => {
+    const { logs } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "send", "unknown-advisory", "hello", "--json"]);
+    });
+    const parsed = JSON.parse(logs.join("\n"));
+    expect(parsed.warning).toContain("daemon-ingest link DOWN");
   });
 
   // OPR.99.0.6.3 — honest delivery-outcome vocabulary; legacy Verified: line preserved.
@@ -299,6 +345,114 @@ describe("Send CLI", () => {
     expect(argv[ri + 1]).toBe("why now");
   });
 
+  // OPR.0.4.3.30 — `rig send` fan-out targeting (--to / --pod / --rig).
+  it("send --to a,b fans out to /broadcast with a sessions list and prints per-recipient summary", async () => {
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "send", "--to", "dev-impl@my-rig,dev-qa@my-rig", "hello team"]);
+    });
+    expect(lastSendBody).toBeNull(); // NOT the single-seat path
+    expect(lastBroadcastBody?.sessions).toEqual(["dev-impl@my-rig", "dev-qa@my-rig"]);
+    expect(lastBroadcastBody?.text).toBe("hello team"); // bare — daemon wraps per recipient
+    const output = logs.join("\n");
+    expect(output).toContain("dev-impl@my-rig: sent");
+    expect(output).toContain("dev-qa@my-rig: sent");
+    expect(output).toContain("2/2 delivered");
+    expect(exitCode).toBeUndefined();
+  });
+
+  it("send --to accepts repetition (--to a --to b) and sets the daemon-side envelopeSender", async () => {
+    await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "send", "--to", "dev-impl@my-rig", "--to", "dev-qa@my-rig", "hi"]);
+    });
+    expect(lastBroadcastBody?.sessions).toEqual(["dev-impl@my-rig", "dev-qa@my-rig"]);
+    // Non-raw fan-out: the daemon wraps per recipient, so the CLI passes a sender + BARE text.
+    expect(typeof lastBroadcastBody?.envelopeSender).toBe("string");
+    expect(String(lastBroadcastBody?.text)).not.toContain("To:");
+  });
+
+  it("send --pod posts a pod target to /broadcast", async () => {
+    const { logs } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "send", "--pod", "dev", "pod message"]);
+    });
+    expect(lastBroadcastBody?.pod).toBe("dev");
+    expect(lastBroadcastBody?.text).toBe("pod message");
+    expect(logs.join("\n")).toContain("2/2 delivered");
+  });
+
+  it("send --rig posts a rig target to /broadcast", async () => {
+    const { logs } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "send", "--rig", "my-rig", "rig message"]);
+    });
+    expect(lastBroadcastBody?.rig).toBe("my-rig");
+    expect(logs.join("\n")).toContain("2/2 delivered");
+  });
+
+  it("fan-out with one recipient failing prints which failed, the summary, and exits nonzero", async () => {
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "send", "--to", "seat-a@my-rig,seat-b@my-rig", "partial"]);
+    });
+    const output = logs.join("\n");
+    expect(output).toContain("seat-a@my-rig: sent");
+    expect(output).toContain("seat-b@my-rig: FAILED — target needs input");
+    expect(output).toContain("1/2 delivered");
+    expect(exitCode).toBe(1);
+  });
+
+  it("fan-out --raw sends bare exact text with NO envelopeSender (no per-recipient wrap)", async () => {
+    await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "send", "--to", "dev-impl@my-rig,dev-qa@my-rig", "/compact", "--raw"]);
+    });
+    expect(lastBroadcastBody?.text).toBe("/compact");
+    expect("envelopeSender" in (lastBroadcastBody ?? {})).toBe(false);
+  });
+
+  it("fan-out --dangerously-interact --reason plumbs the danger fields (bare text, no envelope)", async () => {
+    await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "send", "--to", "dev-impl@my-rig,dev-qa@my-rig", "1", "--dangerously-interact", "--reason", "drive stuck prompts"]);
+    });
+    expect(lastBroadcastBody?.dangerouslyInteract).toBe(true);
+    expect(lastBroadcastBody?.reason).toBe("drive stuck prompts");
+    expect(lastBroadcastBody?.text).toBe("1");
+    expect("envelopeSender" in (lastBroadcastBody ?? {})).toBe(false);
+  });
+
+  it("rejects combining a bare seat with a fan-out flag", async () => {
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "send", "dev-impl@my-rig", "hello", "--pod", "dev"]);
+    });
+    expect(logs.join("\n")).toContain("cannot be combined with --to/--pod/--rig");
+    expect(exitCode).toBe(1);
+    expect(lastBroadcastBody).toBeNull();
+    expect(lastSendBody).toBeNull();
+  });
+
+  it("rejects more than one fan-out mode at once", async () => {
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "send", "--pod", "dev", "--rig", "my-rig", "hello"]);
+    });
+    expect(logs.join("\n")).toContain("exactly ONE target");
+    expect(exitCode).toBe(1);
+    expect(lastBroadcastBody).toBeNull();
+  });
+
+  it("rejects --wait-for-idle with a multi/pod/rig target", async () => {
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "send", "--rig", "my-rig", "hello", "--wait-for-idle", "30"]);
+    });
+    expect(logs.join("\n")).toContain("not supported with a multi/pod/rig target");
+    expect(exitCode).toBe(1);
+    expect(lastBroadcastBody).toBeNull();
+  });
+
+  it("single-seat send is UNCHANGED — still posts to /send, byte-identical envelope, no /broadcast", async () => {
+    await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "send", "dev-impl@my-rig", "hello"]);
+    });
+    expect(lastBroadcastBody).toBeNull();
+    expect(lastSendBody?.session).toBe("dev-impl@my-rig");
+    expect(String(lastSendBody?.text)).toContain("To: dev-impl@my-rig");
+  });
+
   it("send --help includes rediscovery examples + the new guard flags", () => {
     const cmd = sendCommand(runningDeps(port));
     const helpText = cmd.helpInformation();
@@ -309,5 +463,23 @@ describe("Send CLI", () => {
     expect(helpText).toContain("--dangerously-interact");
     expect(helpText).toContain("pane only");
     expect(helpText).toContain("dev-impl@my-rig");
+  });
+
+  // OPR.0.4.3.28 B1 code-review fix — the help text must reflect the corrected
+  // proceed-with-advisory behavior, NOT the obsolete fail-closed-on-unknown contract
+  // (which would keep steering operators toward the deprecated --dangerously-interact bridge).
+  // The narrative contract lives in addHelpText("after"), which helpInformation() omits —
+  // capture the FULL `--help` render via configureOutput + exitOverride.
+  it("send --help documents proceed-with-advisory on unknown telemetry, not fail-closed", () => {
+    const cmd = sendCommand(runningDeps(port));
+    let helpText = "";
+    cmd.configureOutput({ writeOut: (s) => { helpText += s; }, writeErr: (s) => { helpText += s; } });
+    cmd.exitOverride();
+    try { cmd.parse(["node", "send", "--help"]); } catch { /* exitOverride throws on --help */ }
+    expect(helpText.toLowerCase()).not.toContain("fails closed");
+    expect(helpText).toContain("advisory");
+    expect(helpText).toMatch(/PROCEEDS with an\s+advisory/); // \s+ tolerates the help line-wrap
+    // The positive-picker refusal contract is still documented.
+    expect(helpText.toLowerCase()).toContain("refused");
   });
 });

@@ -62,7 +62,7 @@ export function AuthorAgentTag({ authorSession, rigId, className, testId }: Auth
       }}
       className={
         className ??
-        "inline-flex items-center gap-1 font-mono text-[10px] text-on-surface-variant hover:text-stone-900 hover:underline"
+        "inline-flex items-center gap-1 font-mono text-[10px] text-on-surface-variant hover:text-on-surface hover:underline"
       }
     >
       {humanActor ? <ActorMark actor={authorSession} size="xs" /> : null}

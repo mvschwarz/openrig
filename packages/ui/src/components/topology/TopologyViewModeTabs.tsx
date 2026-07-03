@@ -65,8 +65,8 @@ export function TopologyViewModeTabs<T extends string>({
           className={cn(
             "py-3 font-mono text-[10px] uppercase tracking-[0.18em] border-b-2",
             active === t.id
-              ? "border-stone-900 text-stone-900"
-              : "border-transparent text-on-surface-variant hover:text-stone-900",
+              ? "border-on-surface text-on-surface"
+              : "border-transparent text-on-surface-variant hover:text-on-surface",
           )}
         >
           {t.label}

@@ -52,6 +52,7 @@ import { contextPackCommand } from "./commands/context-pack.js";
 import { pluginCommand } from "./commands/plugin.js";
 import { skillCommand } from "./commands/skill.js";
 import { agentImageCommand } from "./commands/agent-image.js";
+import { forkCommand } from "./commands/fork.js";
 import { workspaceCommand, type WorkspaceDeps } from "./commands/workspace.js";
 import { whoamiCommand } from "./commands/whoami.js";
 import { unclaimCommand } from "./commands/unclaim.js";
@@ -65,9 +66,11 @@ import { contextCommand } from "./commands/context.js";
 import { restoreCheckCommand } from "./commands/restore-check.js";
 import { restorePacketCommand, type RestorePacketDeps } from "./commands/restore-packet.js";
 import { compactPlanCommand, type CompactPlanDeps } from "./commands/compact-plan.js";
+import { compactCommand, type CompactDeps } from "./commands/compact.js";
 import { heartbeatCommand, type HeartbeatDeps } from "./commands/heartbeat.js";
-import { seatCommand, type SeatDeps } from "./commands/seat.js";
+import { seatCommand, handoverCommand, type SeatDeps } from "./commands/seat.js";
 import { rigPolicyCommand, type RigPolicyDeps } from "./commands/rig-policy.js";
+import { startupProofCommand, type StartupProofDeps } from "./commands/startup-proof.js";
 import type { LifecycleDeps } from "./daemon-lifecycle.js";
 import { CLI_VERSION } from "./version.js";
 
@@ -112,6 +115,7 @@ export interface ProgramDeps {
   pluginDeps?: StatusDeps;
   skillDeps?: StatusDeps;
   agentImageDeps?: StatusDeps;
+  forkDeps?: StatusDeps;
   workspaceDeps?: WorkspaceDeps;
   whoamiDeps?: StatusDeps;
   expandDeps?: StatusDeps;
@@ -126,9 +130,11 @@ export interface ProgramDeps {
   destroyDeps?: DestroyCommandDeps;
   restorePacketDeps?: RestorePacketDeps;
   compactPlanDeps?: CompactPlanDeps;
+  compactDeps?: CompactDeps;
   heartbeatDeps?: HeartbeatDeps;
   seatDeps?: SeatDeps;
   rigPolicyDeps?: RigPolicyDeps;
+  startupProofDeps?: StartupProofDeps;
   startDeps?: StartDeps;
   configPath?: string;
 }
@@ -183,6 +189,7 @@ export function createProgram(depsOverride?: ProgramDeps): Command {
   program.addCommand(pluginCommand(depsOverride?.pluginDeps));
   program.addCommand(skillCommand(depsOverride?.skillDeps));
   program.addCommand(agentImageCommand(depsOverride?.agentImageDeps));
+  program.addCommand(forkCommand(depsOverride?.forkDeps));
   program.addCommand(workspaceCommand(depsOverride?.workspaceDeps));
   program.addCommand(rigPolicyCommand(depsOverride?.rigPolicyDeps));
   program.addCommand(whoamiCommand(depsOverride?.whoamiDeps));
@@ -205,8 +212,11 @@ export function createProgram(depsOverride?: ProgramDeps): Command {
   program.addCommand(restoreCheckCommand());
   program.addCommand(restorePacketCommand(depsOverride?.restorePacketDeps));
   program.addCommand(compactPlanCommand(depsOverride?.compactPlanDeps));
+  program.addCommand(compactCommand(depsOverride?.compactDeps));
   program.addCommand(heartbeatCommand(depsOverride?.heartbeatDeps));
   program.addCommand(seatCommand(depsOverride?.seatDeps));
+  program.addCommand(handoverCommand(depsOverride?.seatDeps));
+  program.addCommand(startupProofCommand(depsOverride?.startupProofDeps));
   // release-0.3.2 slice 12 — rig scope CLI primitive.
   program.addCommand(scopeCommand());
 

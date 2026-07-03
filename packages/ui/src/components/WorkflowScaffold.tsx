@@ -17,10 +17,10 @@ export function WorkflowHeader({
   return (
     <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
       <div className="space-y-3">
-        <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-stone-500">{eyebrow}</p>
-        <h2 className="text-2xl font-bold uppercase tracking-[0.04em] text-stone-900 sm:text-3xl">{title}</h2>
+        <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-on-surface-variant">{eyebrow}</p>
+        <h2 className="text-2xl font-bold uppercase tracking-[0.04em] text-on-surface sm:text-3xl">{title}</h2>
         {description && (
-          <p className="max-w-2xl text-base leading-8 text-stone-600">{description}</p>
+          <p className="max-w-2xl text-base leading-8 text-on-surface-variant">{description}</p>
         )}
       </div>
       {actions ? <div className="flex flex-wrap gap-2">{actions}</div> : null}
@@ -67,7 +67,7 @@ export function WorkflowStepIndicator({
               className={cn(
                 "inline-flex min-h-0 items-center gap-2 border-b-2 px-1 py-1 font-mono text-[10px] uppercase tracking-[0.16em] transition-colors",
                 isCompleted && "border-primary/35 text-foreground-muted",
-                isActive && "border-stone-900 text-foreground",
+                isActive && "border-on-surface text-foreground",
                 isPending && "border-transparent text-foreground-muted/35",
               )}
             >
@@ -82,7 +82,7 @@ export function WorkflowStepIndicator({
                 aria-hidden="true"
                 className={cn(
                   "h-px w-4 shrink-0 sm:w-6",
-                  isCompleted ? "bg-primary/35" : "bg-stone-300/45",
+                  isCompleted ? "bg-primary/35" : "bg-surface-highest/45",
                 )}
               />
             ) : null}
@@ -109,14 +109,14 @@ export function WorkflowSection({
   return (
     <section
       className={cn(
-        "space-y-4 border border-stone-300/45 bg-[rgba(255,255,255,0.62)] p-5 shadow-[0_1px_0_rgba(255,255,255,0.95)_inset,0_10px_26px_rgba(34,34,24,0.035)] sm:p-6",
+        "space-y-4 border border-outline-variant/45 bg-[hsl(var(--surface-container-lowest)/0.62)] p-5 shadow-[0_1px_0_rgba(255,255,255,0.95)_inset,0_10px_26px_rgba(34,34,24,0.035)] sm:p-6",
         className,
       )}
     >
       <div className="space-y-2">
-        <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-stone-500">{title}</div>
+        <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-on-surface-variant">{title}</div>
         {description ? (
-          <p className="text-base leading-8 text-stone-600">{description}</p>
+          <p className="text-base leading-8 text-on-surface-variant">{description}</p>
         ) : null}
       </div>
       {children}
@@ -140,9 +140,9 @@ export function WorkflowSummaryCard({
   testId,
 }: WorkflowSummaryCardProps) {
   return (
-    <div className="border border-stone-300/35 bg-white/10 px-4 py-4">
-      <div className="font-mono text-[8px] uppercase tracking-[0.16em] text-stone-500">{label}</div>
-      <div data-testid={testId} className="mt-2 text-2xl font-semibold uppercase tracking-[0.04em] text-stone-900">
+    <div className="border border-outline-variant/35 bg-surface-lowest/10 px-4 py-4">
+      <div className="font-mono text-[8px] uppercase tracking-[0.16em] text-on-surface-variant">{label}</div>
+      <div data-testid={testId} className="mt-2 text-2xl font-semibold uppercase tracking-[0.04em] text-on-surface">
         {value}
       </div>
     </div>
@@ -164,7 +164,7 @@ export function WorkflowCodePreview({
     <WorkflowSection title={title}>
       <pre
         data-testid={testId}
-        className="overflow-x-auto border border-stone-300/45 bg-white/75 p-4 text-xs leading-6 text-stone-800"
+        className="overflow-x-auto border border-outline-variant/45 bg-surface-lowest/75 p-4 text-xs leading-6 text-on-surface"
       >
         {children}
       </pre>

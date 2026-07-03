@@ -45,6 +45,11 @@ import * as path from "node:path";
  */
 export const DEDUP_WINDOW_MS_DEFAULT = 60_000;
 export const POST_COMPACT_RESTORE_COOLDOWN_MS_DEFAULT = 10 * 60_000;
+// OPR.0.4.3.14 — how long the manual trigger waits for the pre-compact prep
+// turn to complete (seat goes idle) before it sends /compact. Generous ceiling:
+// writing the restore map can take a minute+; the wait returns as soon as the
+// seat is idle, so this only bounds a pathological never-idle case.
+export const MANUAL_PREP_WAIT_MS_DEFAULT = 120_000;
 
 export interface EnforcerInput {
   sessionName: string;
@@ -57,6 +62,30 @@ export interface EnforcerInput {
 export type EnforcerOutcome =
   | { triggered: true }
   | { triggered: false; reason: EnforcerSkipReason };
+
+/**
+ * OPR.0.4.3.14 — manual compaction trigger surfaced stages (AC-3). `preparing`
+ * and `compact-sent` are set synchronously by `triggerManualCompact`; the
+ * later `restore-sent` / `audit-sent` are advanced by the EXISTING post-compact
+ * back-half (drained by the ContextMonitor poll loop) as it drains — never a
+ * second restore path. `skipped-or-failed` carries the reason.
+ */
+export type ManualCompactionStage =
+  | "preparing"
+  | "compact-sent"
+  | "restore-sent"
+  | "audit-sent"
+  | "skipped-or-failed";
+
+export interface ManualCompactionStatus {
+  stage: ManualCompactionStage;
+  reason?: string;
+  updatedAt: number;
+}
+
+export type ManualCompactionOutcome =
+  | { triggered: true; stage: "compact-sent" }
+  | { triggered: false; stage: "skipped-or-failed"; reason: string };
 
 export type EnforcerSkipReason =
   | "runtime_filter"
@@ -253,22 +282,29 @@ export class ClaudeCompactionEnforcer {
   private readonly dedupWindowMs: number;
   private readonly postCompactRestoreCooldownMs: number;
   private readonly openrigHome: string;
+  // OPR.0.4.3.14 — max time to wait for the manual prep turn to complete (seat
+  // idle) before sending /compact. Bounds the two-phase wait-for-idle.
+  private readonly manualPrepWaitMs: number;
   private readonly lastAutoCompactAt = new Map<string, number>();
   private readonly postCompactRestoreCooldownUntil = new Map<string, number>();
   private readonly triggeredAboveThreshold = new Set<string>();
   private readonly pendingPreCompactPrep = new Map<string, PendingPreCompactStage>();
   private readonly pendingPostCompactRestore = new Map<string, PendingPostCompactStage>();
+  // OPR.0.4.3.14 — per-seat manual-trigger surfaced state (AC-3). In-memory,
+  // non-persisted (a daemon restart reset is the safe-failure direction).
+  private readonly manualCompactionState = new Map<string, ManualCompactionStatus>();
 
   constructor(
     settingsStore: SettingsStore,
     sessionTransport: SessionTransport,
-    opts?: { dedupWindowMs?: number; openrigHome?: string; postCompactRestoreCooldownMs?: number },
+    opts?: { dedupWindowMs?: number; openrigHome?: string; postCompactRestoreCooldownMs?: number; manualPrepWaitMs?: number },
   ) {
     this.settingsStore = settingsStore;
     this.sessionTransport = sessionTransport;
     this.dedupWindowMs = opts?.dedupWindowMs ?? DEDUP_WINDOW_MS_DEFAULT;
     this.postCompactRestoreCooldownMs = opts?.postCompactRestoreCooldownMs ?? POST_COMPACT_RESTORE_COOLDOWN_MS_DEFAULT;
     this.openrigHome = opts?.openrigHome ?? defaultOpenRigHome();
+    this.manualPrepWaitMs = opts?.manualPrepWaitMs ?? MANUAL_PREP_WAIT_MS_DEFAULT;
   }
 
   /**
@@ -285,9 +321,6 @@ export class ClaudeCompactionEnforcer {
     }
 
     const policy = this.settingsStore.resolveClaudeCompactionPolicy();
-    if (!policy.enabled) {
-      return { triggered: false, reason: "disabled" };
-    }
     // Defense in depth: the CLI + daemon set() paths reject invalid
     // threshold values, but a hand-edited ~/.openrig/config.json could
     // still inject 0, 101, NaN, or a non-integer. The enforcer treats
@@ -337,6 +370,8 @@ export class ClaudeCompactionEnforcer {
           return { triggered: false, reason: "send_failed" };
         }
         this.pendingPostCompactRestore.set(input.sessionName, "compliance_prompt");
+        // OPR.0.4.3.14 — surface manual-trigger progress (no-op for auto seats).
+        this.advanceManualStage(input.sessionName, "compact-sent", "restore-sent");
         return { triggered: true };
       }
       if (pendingStage === "compliance_prompt") {
@@ -353,11 +388,26 @@ export class ClaudeCompactionEnforcer {
           Date.now() + this.postCompactRestoreCooldownMs,
         );
         this.triggeredAboveThreshold.delete(input.sessionName);
+        // OPR.0.4.3.14 — terminal manual-trigger stage (no-op for auto seats).
+        this.advanceManualStage(input.sessionName, "restore-sent", "audit-sent");
         return { triggered: true };
       }
       this.triggeredAboveThreshold.delete(input.sessionName);
       this.pendingPreCompactPrep.delete(input.sessionName);
       return { triggered: false, reason: "below_threshold" };
+    }
+
+    // OPR.0.4.3.14 — the `enabled` gate moved here (from the top of the method)
+    // so it guards only the auto TRIGGER (this above-threshold path). The
+    // below-threshold back-half above now drains regardless of `enabled`,
+    // because it only advances an ALREADY-INITIATED guided sequence
+    // (`pendingPostCompactRestore` is set only after a /compact was sent — by
+    // auto above OR by the manual trigger). A disabled policy therefore still
+    // never STARTS a compaction (unchanged observable auto behavior for a
+    // constant policy), while a manual trigger's restore/audit half can finish
+    // via this single shared path even when auto-compaction is disabled.
+    if (!policy.enabled) {
+      return { triggered: false, reason: "disabled" };
     }
 
     const now = Date.now();
@@ -406,5 +456,146 @@ export class ClaudeCompactionEnforcer {
     this.pendingPreCompactPrep.delete(input.sessionName);
     this.pendingPostCompactRestore.set(input.sessionName, "turn_boundary");
     return { triggered: true };
+  }
+
+  /**
+   * OPR.0.4.3.14 — MANUAL, operator-initiated compaction for ONE Claude seat.
+   *
+   * Runs the SAME guided lifecycle as the auto policy (pre-compact prep →
+   * `/compact` + trust-bridge → restore → read-depth audit) on demand, WITHOUT
+   * the threshold gate and WITHOUT the `enabled` gate (an explicit operator
+   * action). Reuse-correct:
+   *
+   * - SAME prompt builders + SAME configured messages (`resolveClaudeCompactionPolicy`).
+   * - Two-phase / wait-for-idle: phase 1 sends the prep prompt; phase 2 sends
+   *   `/compact` via `SessionTransport.send(..., { waitForIdleMs })`, which blocks
+   *   until the seat is explicitly idle — so `/compact` can NEVER land before the
+   *   restore-map prep turn completes (IMPL-SPEC §2.2 option (a)).
+   * - Seeds the EXISTING `pendingPostCompactRestore` back-half state machine,
+   *   drained by the same ContextMonitor poll loop as an auto-compact — there is
+   *   NO second restore path.
+   * - Non-Claude runtime → rejected with a clear reason (never a silent no-op).
+   * - Bounded to the one triggered seat; no fan-out, no broadcast.
+   */
+  async triggerManualCompact(input: EnforcerInput): Promise<ManualCompactionOutcome> {
+    // OPR.0.4.3.14 rev1-r2 fix — SAME-SEAT IN-PROGRESS GUARD (race-safe), at the
+    // VERY TOP before ANY recordManualFailure path. This synchronous check-and-set
+    // runs BEFORE the first await; because JS is run-to-completion, two concurrent
+    // rig-compact calls on the same seat, a double-click, or an HTTP retry inside the
+    // 120s wait-for-idle window CANNOT both pass — the second observes the first's
+    // in-progress marker and returns an explicit skipped outcome WITHOUT double-sending
+    // prep + /compact (which would break the single deterministic guided sequence).
+    // CODE-REVIEW-FIX (rev1-r2 fixback B1): the guard MUST precede the runtime/usage
+    // validation. Those paths call recordManualFailure, which sets stage=skipped-or-
+    // failed — a DEGRADED duplicate (e.g. usedPercentage:null from a bad-sidecar
+    // projection while the first call is still preparing) would otherwise ERASE the
+    // first call's active marker, letting a later retry pass the guard and double-send.
+    // Guarding first makes a duplicate return already_in_progress WITHOUT ever touching
+    // state. "In progress" = an active manual stage (preparing/compact-sent/restore-sent)
+    // OR a pending pre/post-compact back-half for this seat. Terminal stages (audit-sent/
+    // skipped-or-failed) + the back-half's map-clearing leave no marker, so a legit
+    // re-trigger after completion or failure still proceeds. The return writes NO state.
+    const activeStage = this.manualCompactionState.get(input.sessionName)?.stage;
+    if (
+      activeStage === "preparing"
+      || activeStage === "compact-sent"
+      || activeStage === "restore-sent"
+      || this.pendingPreCompactPrep.has(input.sessionName)
+      || this.pendingPostCompactRestore.has(input.sessionName)
+    ) {
+      return { triggered: false, stage: "skipped-or-failed", reason: "already_in_progress" };
+    }
+
+    if (input.runtime !== "claude-code") {
+      // Non-Claude runtimes are out of scope (business rule 3). Reject, not no-op.
+      return this.recordManualFailure(input.sessionName, "runtime_filter");
+    }
+    if (input.usedPercentage == null) {
+      // Honest reason: the caller could not read a known context-usage sample
+      // for this seat, so we do not trigger blind (never invent a value).
+      return this.recordManualFailure(input.sessionName, "no_usage_data");
+    }
+
+    // Consume the shipped policy for the SAME configured messages. Manual is
+    // threshold-INDEPENDENT and enabled-INDEPENDENT by design.
+    const policy = this.settingsStore.resolveClaudeCompactionPolicy();
+
+    // Synchronously mark in-progress (the guarded set — no longer a blind write):
+    // this happens before the first await, so it is the marker the guard above reads.
+    this.setManualStage(input.sessionName, "preparing");
+
+    // Phase 1 — pre-compact prep (write the restore map). Normal guarded send.
+    const prep = await this.sessionTransport.send(
+      input.sessionName,
+      buildPreCompactPrepPrompt({
+        usedPercentage: input.usedPercentage,
+        thresholdPercent: policy.thresholdPercent,
+        preCompactInstruction: policy.preCompactInstruction,
+      }),
+    );
+    if (!prep.ok) {
+      return this.recordManualFailure(input.sessionName, prep.reason ?? "send_failed");
+    }
+
+    // Phase 2 — WAIT for the prep turn to complete (seat idle), THEN send
+    // /compact. `waitForIdleMs` makes the transport block on explicit idle
+    // evidence before pasting /compact, guaranteeing prep-before-compact.
+    const compact = await this.sessionTransport.send(
+      input.sessionName,
+      buildCompactCommand(policy.compactInstruction),
+      { waitForIdleMs: this.manualPrepWaitMs },
+    );
+    if (!compact.ok) {
+      return this.recordManualFailure(input.sessionName, compact.reason ?? "send_failed");
+    }
+
+    // Seed the EXISTING post-compact back-half (turn_boundary → restore_prompt
+    // → compliance_prompt), drained by the ContextMonitor poll loop exactly as
+    // an auto-compact. NO second restore path.
+    //
+    // Participate in the SAME auto-tick dedup the auto path uses (forward-fix
+    // B1): record the short-window `lastAutoCompactAt` AND set the durable
+    // `triggeredAboveThreshold` flag. The above-threshold branch of
+    // maybeAutoCompact suppresses on `lastAutoCompactAt` only within
+    // `dedupWindowMs`, then falls through to `triggeredAboveThreshold` for the
+    // durable suppression. Without the latter, an above-threshold auto tick
+    // AFTER the dedup window would start a SECOND pre-compact prep while this
+    // manual restore/audit back-half is still pending — a double-trigger race.
+    // The flag is cleared by the same below-threshold back-half (compliance +
+    // final else both `triggeredAboveThreshold.delete`), so the manual seat
+    // still drains and re-arms exactly like an auto-compacted one.
+    this.lastAutoCompactAt.set(input.sessionName, Date.now());
+    this.triggeredAboveThreshold.add(input.sessionName);
+    this.pendingPreCompactPrep.delete(input.sessionName);
+    this.pendingPostCompactRestore.set(input.sessionName, "turn_boundary");
+    this.setManualStage(input.sessionName, "compact-sent");
+    return { triggered: true, stage: "compact-sent" };
+  }
+
+  /** OPR.0.4.3.14 — read the surfaced manual-trigger state for a seat (AC-3). */
+  getManualCompactionState(sessionName: string): ManualCompactionStatus | null {
+    return this.manualCompactionState.get(sessionName) ?? null;
+  }
+
+  private setManualStage(sessionName: string, stage: ManualCompactionStage, reason?: string): void {
+    this.manualCompactionState.set(sessionName, { stage, reason, updatedAt: Date.now() });
+  }
+
+  private recordManualFailure(sessionName: string, reason: string): ManualCompactionOutcome {
+    this.setManualStage(sessionName, "skipped-or-failed", reason);
+    return { triggered: false, stage: "skipped-or-failed", reason };
+  }
+
+  /**
+   * Advance the surfaced manual stage monotonically, and ONLY when the current
+   * stage matches `from`. This makes the back-half updates a no-op for auto
+   * seats (no manual record) and prevents a later auto-compact drain from
+   * misattributing itself to a completed manual trigger (its stage is already
+   * `audit-sent`, so no `from` matches).
+   */
+  private advanceManualStage(sessionName: string, from: ManualCompactionStage, to: ManualCompactionStage): void {
+    if (this.manualCompactionState.get(sessionName)?.stage === from) {
+      this.setManualStage(sessionName, to);
+    }
   }
 }

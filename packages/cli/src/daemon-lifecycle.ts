@@ -13,12 +13,35 @@ export interface DaemonState {
   startedAt: string;
 }
 
+/**
+ * OPR.0.4.3.21 — event-loop wedge evidence read from the enriched `/healthz`
+ * body. Present only when the daemon actually answered healthz with a monitor
+ * wired; absent when healthz timed out (a wedged loop can't respond — the
+ * evidence in that case is `reason: "unresponsive"`).
+ */
+export interface DaemonEventLoopEvidence {
+  lagMeanMs: number;
+  lagP99Ms: number;
+  utilization: number;
+  lastTickAgeMs: number;
+  healthy: boolean;
+}
+
 export interface DaemonStatus {
   state: "running" | "stopped" | "stale";
   port?: number;
   host?: string;
   pid?: number;
   healthy?: boolean;
+  /**
+   * OPR.0.4.3.21 — why an alive+listening daemon is unhealthy. "unresponsive"
+   * = the process is up but `/healthz` timed out (the honest wedged-loop
+   * signal); "event-loop-starved" = healthz answered but the loop-lag /
+   * last-tick evidence crossed the threshold. Absent when healthy.
+   */
+  reason?: "unresponsive" | "event-loop-starved";
+  /** OPR.0.4.3.21 — event-loop evidence when healthz answered with a monitor. */
+  eventLoop?: DaemonEventLoopEvidence;
 }
 
 /** Build the daemon HTTP URL from status. Uses persisted host or defaults to 127.0.0.1. */
@@ -92,7 +115,10 @@ export interface LifecycleDeps {
     stdio: unknown;
     detached: boolean;
   }) => ChildProcess;
-  fetch: (url: string) => Promise<{ ok: boolean }>;
+  // OPR.0.4.3.21 — optional `json` lets getDaemonStatus read the enriched
+  // /healthz body (event-loop evidence). Optional so existing mocks that
+  // return `{ ok }` are unchanged; production (realDeps) supplies it.
+  fetch: (url: string) => Promise<{ ok: boolean; json?: () => Promise<unknown> }>;
   kill: (pid: number, signal: string) => boolean;
   readFile: (path: string) => string | null;
   writeFile: (path: string, content: string) => void;
@@ -547,8 +573,9 @@ export async function getDaemonStatus(deps: LifecycleDeps): Promise<DaemonStatus
   if (openrigUrl) {
     try {
       const res = await probeHealthzWithSettle(deps, `${openrigUrl}/healthz`);
+      const ev = await readHealthEvidence(res);
       const url = new URL(openrigUrl);
-      return { state: "running", port: Number(url.port) || DEFAULT_PORT, host: url.hostname || DEFAULT_HOST, healthy: res.ok };
+      return { state: "running", port: Number(url.port) || DEFAULT_PORT, host: url.hostname || DEFAULT_HOST, healthy: ev.healthy, reason: ev.reason, eventLoop: ev.eventLoop };
     } catch {
       return { state: "stopped" };
     }
@@ -559,11 +586,14 @@ export async function getDaemonStatus(deps: LifecycleDeps): Promise<DaemonStatus
     const configured = resolveConfiguredDaemonTarget();
     try {
       const res = await probeHealthzWithSettle(deps, `http://${configured.host}:${configured.port}/healthz`);
+      const ev = await readHealthEvidence(res);
       return {
         state: "running",
         port: configured.port,
         host: configured.host,
-        healthy: res.ok,
+        healthy: ev.healthy,
+        reason: ev.reason,
+        eventLoop: ev.eventLoop,
       };
     } catch {
       return { state: "stopped" };
@@ -579,15 +609,23 @@ export async function getDaemonStatus(deps: LifecycleDeps): Promise<DaemonStatus
   // Process alive — check healthz
   const host = state.host ?? DEFAULT_HOST;
   let healthy = false;
+  let reason: DaemonStatus["reason"];
+  let eventLoop: DaemonEventLoopEvidence | undefined;
   try {
     const res = await probeHealthzWithSettle(deps, `http://${host}:${state.port}/healthz`);
-    healthy = res.ok;
+    const ev = await readHealthEvidence(res);
+    healthy = ev.healthy;
+    reason = ev.reason;
+    eventLoop = ev.eventLoop;
   } catch {
-    // healthz unreachable
+    // OPR.0.4.3.21 — pid alive but healthz timed out: the honest wedged-loop
+    // signal. Report process-present/unhealthy (NOT "stopped") with the
+    // "unresponsive" reason so the operator knows it's the control plane.
+    reason = "unresponsive";
   }
 
   // pid alive = running (state file preserved either way)
-  return { state: "running", port: state.port, host, pid: state.pid, healthy };
+  return { state: "running", port: state.port, host, pid: state.pid, healthy, reason, eventLoop };
 }
 
 export function readLogs(deps: LifecycleDeps): string | null {
@@ -609,7 +647,40 @@ export function tailLogs(deps: LifecycleDeps, opts: { follow: boolean }): void {
   child.unref();
 }
 
-async function fetchDaemonProbe(deps: LifecycleDeps, url: string): Promise<{ ok: boolean }> {
+/**
+ * OPR.0.4.3.21 — read event-loop wedge evidence from a healthz probe result.
+ * A plain `{ ok: true }` (mocks, or a monitor-less daemon) → healthy with no
+ * evidence. When the enriched body carries an `eventLoop` block, its `healthy`
+ * verdict is honored (a starved loop that still answers healthz reports
+ * process-present/unhealthy with the loop-lag evidence attached).
+ */
+async function readHealthEvidence(
+  res: { ok: boolean; json?: () => Promise<unknown> },
+): Promise<{ healthy: boolean; reason?: DaemonStatus["reason"]; eventLoop?: DaemonEventLoopEvidence }> {
+  if (!res.ok) return { healthy: false };
+  if (!res.json) return { healthy: true };
+  try {
+    const body = (await res.json()) as { eventLoop?: Partial<DaemonEventLoopEvidence> } | null;
+    const el = body?.eventLoop;
+    if (el && typeof el.healthy === "boolean" && typeof el.lagMeanMs === "number") {
+      const eventLoop: DaemonEventLoopEvidence = {
+        lagMeanMs: el.lagMeanMs,
+        lagP99Ms: typeof el.lagP99Ms === "number" ? el.lagP99Ms : 0,
+        utilization: typeof el.utilization === "number" ? el.utilization : 0,
+        lastTickAgeMs: typeof el.lastTickAgeMs === "number" ? el.lastTickAgeMs : 0,
+        healthy: el.healthy,
+      };
+      return el.healthy
+        ? { healthy: true, eventLoop }
+        : { healthy: false, reason: "event-loop-starved", eventLoop };
+    }
+  } catch {
+    // Body absent / not JSON — treat as plain healthy (res.ok already true).
+  }
+  return { healthy: true };
+}
+
+async function fetchDaemonProbe(deps: LifecycleDeps, url: string): Promise<{ ok: boolean; json?: () => Promise<unknown> }> {
   return await Promise.race([
     deps.fetch(url),
     new Promise<never>((_, reject) => {
@@ -629,7 +700,7 @@ const defaultSleep = (ms: number): Promise<void> => new Promise((resolve) => set
  * masked, never an unbounded wait. Used ONLY by getDaemonStatus; start/stop/checkPid keep their own
  * timing (start already has its own poll loop).
  */
-async function probeHealthzWithSettle(deps: LifecycleDeps, url: string): Promise<{ ok: boolean }> {
+async function probeHealthzWithSettle(deps: LifecycleDeps, url: string): Promise<{ ok: boolean; json?: () => Promise<unknown> }> {
   const sleep = deps.sleep ?? defaultSleep;
   let lastErr: unknown;
   for (let attempt = 1; attempt <= STATUS_PROBE_MAX_ATTEMPTS; attempt++) {

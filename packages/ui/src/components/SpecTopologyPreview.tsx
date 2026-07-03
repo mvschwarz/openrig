@@ -77,7 +77,7 @@ export function SpecTopologyPreview({ graph, testId }: SpecTopologyPreviewProps)
         data: {
           label: (
             <div className="flex h-full min-w-0 flex-col justify-center gap-1 font-mono leading-tight">
-              <div className="truncate text-[10px] font-bold text-stone-900">
+              <div className="truncate text-[10px] font-bold text-on-surface">
                 {n.pod ? `${n.pod} / ` : ""}{n.label}
               </div>
               <RuntimeBadge runtime={n.runtime} size="xs" compact variant="inline" />
@@ -108,7 +108,7 @@ export function SpecTopologyPreview({ graph, testId }: SpecTopologyPreviewProps)
   }, [safeGraph]);
 
   return (
-    <div data-testid={testId ?? "spec-topology-preview"} className="w-full h-[400px] bg-stone-50 border border-stone-200">
+    <div data-testid={testId ?? "spec-topology-preview"} className="w-full h-[400px] bg-background border border-outline-variant">
       <ReactFlow
         nodes={nodes}
         edges={edges}

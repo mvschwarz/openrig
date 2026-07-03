@@ -75,7 +75,7 @@ export function SubscriptionToggleList() {
               className="flex items-center justify-between gap-2"
             >
               <div className="min-w-0">
-                <div className="text-stone-900 truncate">{row.label}</div>
+                <div className="text-on-surface truncate">{row.label}</div>
                 <div className="font-mono text-[9px] text-on-surface-variant truncate">
                   {row.description}
                 </div>
@@ -96,9 +96,9 @@ export function SubscriptionToggleList() {
                     "shrink-0 px-2 py-0.5 border font-mono text-[9px] uppercase tracking-wide " +
                     (value
                       ? "border-success text-success"
-                      : "border-stone-300 text-on-surface-variant") +
+                      : "border-outline-variant text-on-surface-variant") +
                     (interactive
-                      ? " hover:bg-stone-100/60"
+                      ? " hover:bg-surface-low/60"
                       : " opacity-60 cursor-not-allowed")
                   }
                 >
@@ -116,7 +116,7 @@ export function SubscriptionToggleList() {
         >
           Settings endpoint unreachable (legacy daemon &lt; v0.3.0). Toggles render the
           canonical defaults; configure via CLI:
-          <code className="ml-1 text-stone-700">
+          <code className="ml-1 text-on-surface">
             rig config set feed.subscriptions.&lt;kind&gt; true|false
           </code>
         </p>

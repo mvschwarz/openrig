@@ -126,11 +126,50 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     if (!homedir) return;
     const configPath = nodePath.join(homedir, ".codex", "config.toml");
     const existing = this.fs.exists(configPath) ? this.fs.readFile(configPath) : "";
-    const updated = upsertCodexActivityHooks(existing, relay);
-    if (updated !== existing) {
+    const withHooks = upsertCodexActivityHooks(existing, relay);
+    if (withHooks !== existing) {
       this.fs.mkdirp(nodePath.dirname(configPath));
-      this.fs.writeFile(configPath, updated);
+      this.fs.writeFile(configPath, withHooks);
     }
+    // OPR.0.4.3.33 hook-trust-autoclear — pre-write Codex's OWN hook trust record
+    // ([hooks.state."<key>"] trusted_hash) for exactly our 4 authored hooks, on the SAME
+    // seam that provisions them, so the daemon's unmanaged inline hooks are trusted from
+    // clean config on EVERY path a fresh Codex process reads config (launch/adopt/reconcile)
+    // — not just the launch keystroke gate. Layer-2 floor (dismissCodexInteractiveGates)
+    // stays as the fail-safe if a Codex-version drift changes the identity/hash. Idempotent
+    // + non-clobbering; only touches our 4 keys. See applyCodexActivityHookTrust for the RTFM.
+    const trusted = this.applyCodexActivityHookTrust(withHooks, configPath, relay);
+    if (trusted !== withHooks) {
+      this.fs.mkdirp(nodePath.dirname(configPath));
+      this.fs.writeFile(configPath, trusted);
+    }
+  }
+
+  /**
+   * OPR.0.4.3.33 — compute + splice Codex's `[hooks.state."<key>"] trusted_hash` for our 4
+   * authored activity hooks into `content`. `key_source` is the canonicalized config path
+   * (Codex keys trust by `std::fs::canonicalize(config.toml).display()`); we best-effort
+   * `realpathSync` the config path to match — on a miss (file not yet on real disk, or a mock
+   * fs in tests) we fall back to the plain absolute path, and any resulting key mismatch just
+   * degrades to the launch-time trust gate (Layer-2 floor), never a broken run. The command
+   * string is the value Codex deserializes from our TOML literal `'node "<relay>"'` — i.e.
+   * `node "<relay>"` WITHOUT the outer TOML quote delimiters. Timeout=5, matcher/status None.
+   */
+  private applyCodexActivityHookTrust(content: string, configPath: string, relay: string): string {
+    let keySource = configPath;
+    try {
+      keySource = fs.realpathSync(configPath);
+    } catch {
+      // config.toml not on the real filesystem (first write / unit-test mock fs) — the plain
+      // absolute path is the honest best guess; a canonicalization delta is fail-safe (gate reappears).
+    }
+    const command = `node "${relay}"`;
+    let next = content;
+    for (const event of OPENRIG_ACTIVITY_HOOK_EVENTS) {
+      const { key, hash } = computeCodexHookTrust(event, { keySource, command, timeoutSec: 5 });
+      next = upsertCodexHookTrust(next, key, hash);
+    }
+    return next;
   }
 
   /**
@@ -768,6 +807,159 @@ function upsertCodexProjectTrust(content: string, projectPath: string): string {
     lines[trustIndex] = 'trust_level = "trusted"';
   } else {
     lines.splice(headerIndex + 1, 0, 'trust_level = "trusted"');
+  }
+
+  return `${lines.join("\n").replace(/\n*$/, "\n")}`;
+}
+
+// ── OPR.0.4.3.33 hook-trust-autoclear ────────────────────────────────────────────────────
+// Pre-write Codex's OWN hook trust record so the daemon's provisioned (unmanaged) inline
+// activity hooks are trusted on every path (launch/adopt/reconcile) without a manual `/hooks`
+// "Trust all" keystroke. Codex is a private impl; the key+hash below are REPRODUCED from the
+// open source (RTFM, cited) and are PROVISIONAL until pinned by a byte-for-byte read-back of a
+// real Codex `[hooks.state]` after `/hooks`->"Trust all" (the QA VM proof — see the unit test
+// fixture marked PIN-TO-VM). A mismatch is fail-safe: Codex re-shows the gate and the launch-time
+// Layer-2 keystroke floor (dismissCodexInteractiveGates) clears it — never a false-trusted run.
+//
+// RTFM sources (cite):
+//   - https://developers.openai.com/codex/hooks
+//   - openai/codex PR #20321 "hook trust metadata and enforcement" (merge commit 0452dca;
+//     typed-identity commit ffcc9cc) — key file codex-rs/hooks/src/engine/discovery.rs.
+//   - openai/codex issue #21615 (the `[hooks.state]` pre-write workaround for exactly this
+//     local-wrapper-installer case) + #23259 (positional path-keying fragility).
+//
+// KEY — codex-rs/hooks/src/lib.rs `hook_key`:
+//   `{key_source}:{event_label}:{group_index}:{handler_index}`
+//   - key_source: `std::fs::canonicalize(~/.codex/config.toml).display()` (the config source
+//     layer identity; confirmed by codex-rs/app-server/tests/suite/v2/hooks_list.rs which keys
+//     `{canonicalize(config.toml).display()}:pre_tool_use:0:0`).
+//   - event_label: `hook_event_key_label()` — SessionStart→session_start,
+//     UserPromptSubmit→user_prompt_submit, Stop→stop, PermissionRequest→permission_request.
+//   - group_index/handler_index: positional. Our managed block writes exactly one
+//     `[[hooks.<Ev>]]` group (0) with one `[[hooks.<Ev>.hooks]]` handler (0) per event ⇒ 0:0.
+//     (Positional keying is a known upstream fragility (#23259); if a user pre-authored hooks
+//     for the same event in the same layer our index would shift → gate reappears → fail-safe.)
+//
+// HASH — codex-rs/hooks/src/engine/discovery.rs `command_hook_hash`
+//        → codex-rs/config/src/fingerprint.rs `version_for_toml`:
+//   hash = "sha256:" + hex( sha256( canonical_json( toml_value( NormalizedHookIdentity ) ) ) )
+//   NormalizedHookIdentity { event_name: <label>, #[serde(flatten)] group: MatcherGroup }
+//   MatcherGroup { matcher: Option<String>, hooks: Vec<HookHandlerConfig> }
+//   HookHandlerConfig::Command (codex-rs/config/src/hook_config.rs, `#[serde(tag="type")]`,
+//     rename "command"): { command: String, commandWindows: Option, timeout(=timeout_sec):
+//     Option<u64>, async: bool, statusMessage: Option }
+//   Load-bearing serialization facts:
+//     * `TomlValue::try_from` DROPS None fields (TOML has no null) → matcher / commandWindows /
+//       statusMessage are omitted for our hooks; `async` is a plain bool (not Option) so
+//       `async = false` IS present.
+//     * event_name uses the snake_case label (session_start …), NOT the CamelCase event.
+//     * `version_for_toml` converts the TomlValue → serde_json Value, `canonical_json` sorts
+//       every object's keys recursively, then sha256's the COMPACT JSON bytes. serde_json's
+//       compact output (no spaces, `/` unescaped, `"`/`\` JSON-escaped) matches JSON.stringify.
+//   CONFIDENCE: the HASH is fully deterministic from the open source (JSON+sha256) — HIGH.
+//   The KEY's exact key_source canonical form + the positional indices are what the VM
+//   read-back must confirm — PROVISIONAL until then.
+
+/** Recursively sort object keys (mirrors codex-rs fingerprint.rs `canonical_json`). */
+function canonicalizeJsonValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalizeJsonValue);
+  if (value !== null && typeof value === "object") {
+    const src = value as Record<string, unknown>;
+    const out: Record<string, unknown> = {};
+    for (const key of Object.keys(src).sort()) out[key] = canonicalizeJsonValue(src[key]);
+    return out;
+  }
+  return value;
+}
+
+const CODEX_HOOK_EVENT_KEY_LABEL: Record<(typeof OPENRIG_ACTIVITY_HOOK_EVENTS)[number], string> = {
+  SessionStart: "session_start",
+  UserPromptSubmit: "user_prompt_submit",
+  Stop: "stop",
+  PermissionRequest: "permission_request",
+};
+
+export interface CodexHookTrustInput {
+  /** Codex hook_key source identity: canonicalized `~/.codex/config.toml` path. */
+  keySource: string;
+  /** The command as Codex DESERIALIZES it — `node "<relay>"` (no outer TOML quote delimiters). */
+  command: string;
+  /** Our authored hook timeout (seconds). */
+  timeoutSec: number;
+  /** None for our hooks; folded into the hash when present (kept for faithful reproduction). */
+  matcher?: string | null;
+  /** None for our hooks; folded into the hash when present. */
+  statusMessage?: string | null;
+  /** Positional group index within the event's matcher-group list (our hooks: 0). */
+  groupIndex?: number;
+  /** Positional handler index within the group's handler list (our hooks: 0). */
+  handlerIndex?: number;
+}
+
+/**
+ * Reproduce Codex's persisted hook trust `{ key, trusted_hash }` for one authored activity
+ * hook. Pure + deterministic. See the block comment above for the full RTFM derivation and the
+ * PROVISIONAL-until-VM-read-back caveat.
+ */
+export function computeCodexHookTrust(
+  event: (typeof OPENRIG_ACTIVITY_HOOK_EVENTS)[number],
+  input: CodexHookTrustInput,
+): { key: string; hash: string } {
+  const label = CODEX_HOOK_EVENT_KEY_LABEL[event];
+  const groupIndex = input.groupIndex ?? 0;
+  const handlerIndex = input.handlerIndex ?? 0;
+  const key = `${input.keySource}:${label}:${groupIndex}:${handlerIndex}`;
+
+  // Build NormalizedHookIdentity exactly as `TomlValue::try_from` would: None fields dropped.
+  const handler: Record<string, unknown> = {
+    type: "command",
+    command: input.command,
+    timeout: input.timeoutSec,
+    async: false,
+  };
+  if (input.statusMessage != null) handler.statusMessage = input.statusMessage;
+  const identity: Record<string, unknown> = { event_name: label, hooks: [handler] };
+  if (input.matcher != null) identity.matcher = input.matcher;
+
+  const serialized = JSON.stringify(canonicalizeJsonValue(identity));
+  const hex = createHash("sha256").update(serialized, "utf8").digest("hex");
+  return { key, hash: `sha256:${hex}` };
+}
+
+/**
+ * OPR.0.4.3.33 — idempotent, non-clobbering, section-scoped writer for a single
+ * `[hooks.state."<key>"] trusted_hash = "<hash>"` record. Mirrors upsertCodexProjectTrust:
+ * find/create the exact table header, splice ONLY its `trusted_hash` line, leave every other
+ * `[hooks.state]` / `[projects]` entry and the managed hook block byte-identical. Same key+hash
+ * ⇒ no-op. Only ever called for OUR 4 authored hook keys (never a blanket/wildcard trust).
+ */
+export function upsertCodexHookTrust(content: string, key: string, hash: string): string {
+  const header = `[hooks.state.${JSON.stringify(key)}]`;
+  const trustLine = `trusted_hash = ${JSON.stringify(hash)}`;
+  const lines = content.length > 0 ? content.split("\n") : [];
+  const headerIndex = lines.findIndex((line) => line.trim() === header);
+
+  if (headerIndex === -1) {
+    const trimmed = content.trimEnd();
+    const prefix = trimmed.length > 0 ? `${trimmed}\n\n` : "";
+    return `${prefix}${header}\n${trustLine}\n`;
+  }
+
+  let nextSectionIndex = lines.length;
+  for (let i = headerIndex + 1; i < lines.length; i++) {
+    if (lines[i]!.trim().startsWith("[")) {
+      nextSectionIndex = i;
+      break;
+    }
+  }
+
+  const hashIndex = lines.findIndex(
+    (line, index) => index > headerIndex && index < nextSectionIndex && line.trim().startsWith("trusted_hash"),
+  );
+  if (hashIndex >= 0) {
+    lines[hashIndex] = trustLine;
+  } else {
+    lines.splice(headerIndex + 1, 0, trustLine);
   }
 
   return `${lines.join("\n").replace(/\n*$/, "\n")}`;

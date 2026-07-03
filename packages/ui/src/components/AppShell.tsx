@@ -50,6 +50,7 @@ import {
   TopologyOverlayProvider,
   useTopologyOverlay,
 } from "./topology/topology-overlay-context.js";
+import { ThemeSelector } from "./ThemeSelector.js";
 import { useSettings } from "../hooks/useSettings.js";
 import { useActivityFeed } from "../hooks/useActivityFeed.js";
 import { useGlobalEvents } from "../hooks/useGlobalEvents.js";
@@ -292,10 +293,10 @@ function Rail({
           // 40px hitbox at `lg:` (desktop) where mouse precision is
           // the input model, not thumbs.
           "relative flex h-11 w-11 items-center justify-center transition-colors lg:h-10 lg:w-10",
-          "focus-visible:outline focus-visible:outline-2 focus-visible:outline-stone-900 focus-visible:outline-offset-2",
+          "focus-visible:outline focus-visible:outline-2 focus-visible:outline-on-surface focus-visible:outline-offset-2",
           active
-            ? "bg-stone-900 text-stone-50"
-            : "text-stone-700 hover:bg-stone-200/60 hover:text-stone-900",
+            ? "bg-inverse-surface text-background"
+            : "text-on-surface hover:bg-surface-high/60 hover:text-on-surface",
         )}
       >
         {/* Lighter icon line weight: stroke-width 1.25 (default lucide is 2)
@@ -532,15 +533,15 @@ function AppShellInner({ children }: AppShellProps) {
                     aria-label="Toggle navigation"
                     className="flex flex-col gap-[3px] p-2 lg:hidden"
                   >
-                    <span className="block w-4 h-[1.5px] bg-stone-900" />
-                    <span className="block w-4 h-[1.5px] bg-stone-900" />
-                    <span className="block w-3 h-[1.5px] bg-stone-900" />
+                    <span className="block w-4 h-[1.5px] bg-inverse-surface" />
+                    <span className="block w-4 h-[1.5px] bg-inverse-surface" />
+                    <span className="block w-3 h-[1.5px] bg-inverse-surface" />
                   </button>
                 )}
                 <Link
                   to="/"
                   data-testid="brand-home-link"
-                  className="inline-flex items-center bg-stone-950 px-3 py-1 font-mono text-sm font-bold uppercase tracking-[0.08em] text-stone-50 hover:bg-stone-800"
+                  className="inline-flex items-center bg-inverse-surface px-3 py-1 font-mono text-sm font-bold uppercase tracking-[0.08em] text-background hover:bg-inverse-surface"
                 >
                   OPENRIG
                 </Link>
@@ -550,7 +551,7 @@ function AppShellInner({ children }: AppShellProps) {
                   preserve mobile space. */}
               <div
                 data-testid="topbar-right-slot"
-                className="hidden sm:flex items-center gap-2"
+                className="hidden sm:flex items-center gap-3"
               >
                 <span
                   data-testid="topbar-env-indicator"
@@ -558,6 +559,8 @@ function AppShellInner({ children }: AppShellProps) {
                 >
                   localhost
                 </span>
+                {/* OPR.0.4.3.29 — theme selector (placement founder-taste-gated). */}
+                <ThemeSelector />
               </div>
             </header>
 
@@ -702,8 +705,8 @@ function MobileBottomNav({ pathname }: { pathname: string }) {
             className={cn(
               "flex-1 flex flex-col items-center justify-center gap-0.5 py-2 font-mono text-[9px] uppercase tracking-wide",
               active
-                ? "text-stone-900"
-                : "text-on-surface-variant hover:text-stone-900",
+                ? "text-on-surface"
+                : "text-on-surface-variant hover:text-on-surface",
             )}
           >
             <slot.icon className="h-5 w-5" strokeWidth={1.25} aria-hidden="true" />

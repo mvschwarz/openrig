@@ -12,11 +12,22 @@ type LaunchResponse = {
   sessionName?: string;
   error?: string;
   code?: string;
-  launched?: Array<{ nodeId: string; logicalId: string; status: string }>;
+  launched?: Array<{ nodeId: string; logicalId: string; status: string; error?: string }>;
   held?: Array<{ nodeId: string; logicalId: string; reason: string }>;
   alreadyRunning?: Array<{ nodeId: string; logicalId: string }>;
   failedTargets?: Array<{ nodeId: string; logicalId: string; reason: string }>;
+  // OPR.0.4.3.28 correction — non-blocking launch warnings (e.g. liveness_probe_unknown: launched
+  // despite a failed tmux liveness probe). Surfaced as human output WITHOUT a non-zero exit.
+  warnings?: string[];
 };
+
+// OPR.0.4.3.20 FR-7 — a launched-entry status that means NO session is running (the
+// operator must act). These are NOT successful launches — never print "Launched" for
+// them; exit non-zero. Mirrors the daemon's NON_RUNNING_LAUNCH_STATUSES.
+const NON_RUNNING_LAUNCH_STATUSES = new Set(["awaiting-decision", "attention_required", "failed"]);
+function launchStatusRunning(status: string): boolean {
+  return !NON_RUNNING_LAUNCH_STATUSES.has(status);
+}
 
 export function launchCommand(depsOverride?: StatusDeps): Command {
   const cmd = new Command("launch").description("Launch or relaunch a node in a running rig");
@@ -87,16 +98,29 @@ export function launchCommand(depsOverride?: StatusDeps): Command {
           if (res.status >= 400) process.exitCode = 1;
           return;
         }
-        if (res.status >= 400 || !res.data.ok) {
+        // Hard failure (no per-seat result to render — e.g. rig_not_found): error + exit.
+        if (!res.data.launched && !res.data.held && !res.data.alreadyRunning) {
           console.error(res.data.error ?? `Launch failed (HTTP ${res.status})`);
           process.exitCode = 1;
           return;
         }
-        const launchedIds = (res.data.launched ?? []).map((n) => n.logicalId).join(", ");
+        // OPR.0.4.3.20 FR-7 — only actually-running restore outcomes are "Launched".
+        // A seat that landed awaiting-decision / attention_required / failed is NOT
+        // launched (no session running) — print it honestly + exit non-zero.
+        const launchedAll = res.data.launched ?? [];
+        const running = launchedAll.filter((n) => launchStatusRunning(n.status));
+        const needsDecision = launchedAll.filter((n) => !launchStatusRunning(n.status));
         const heldIds = (res.data.held ?? []).map((n) => `${n.logicalId} (${n.reason})`).join(", ");
-        if (launchedIds) console.log(`Launched: ${launchedIds}`);
+        if (running.length) console.log(`Launched: ${running.map((n) => n.logicalId).join(", ")}`);
         if (heldIds) console.log(`Held: ${heldIds}`);
         if (res.data.alreadyRunning?.length) console.log(`Already running: ${res.data.alreadyRunning.map((n) => n.logicalId).join(", ")}`);
+        // OPR.0.4.3.28 correction — proceed-with-warning: print non-blocking launch warnings (e.g.
+        // liveness_probe_unknown) WITHOUT setting a non-zero exit.
+        for (const w of res.data.warnings ?? []) console.warn(`Warning: ${w}`);
+        for (const n of needsDecision) {
+          console.error(`  ${n.logicalId}: ${n.status}${n.error ? ` — ${n.error}` : ""}`);
+        }
+        if (needsDecision.length > 0) process.exitCode = 1;
         if (res.data.failedTargets?.length) {
           console.error(`Failed (liveness unknown): ${res.data.failedTargets.map((n) => n.logicalId).join(", ")}`);
           process.exitCode = 1;
@@ -131,12 +155,19 @@ export function launchCommand(depsOverride?: StatusDeps): Command {
       }
 
       const logicalId = res.data.logicalId ?? nodeRef;
+      // OPR.0.4.3.28 correction — proceed-with-warning: print non-blocking launch warnings (e.g.
+      // liveness_probe_unknown) WITHOUT setting a non-zero exit.
+      const printLaunchWarnings = () => {
+        for (const w of res.data.warnings ?? []) console.warn(`Warning: ${w}`);
+      };
       if (res.data.code === "already_running" || (res.data.alreadyRunning && res.data.alreadyRunning.length > 0)) {
         console.log(`Node ${logicalId} is already running in rig ${rigId} (not relaunched)`);
+        printLaunchWarnings();
         return;
       }
       const sessionSuffix = res.data.sessionName ? ` (${res.data.sessionName})` : "";
       console.log(`Launched node ${logicalId} in rig ${rigId}${sessionSuffix}`);
+      printLaunchWarnings();
     });
 
   return cmd;

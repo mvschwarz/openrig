@@ -52,11 +52,11 @@ export function AuditHistoryView() {
   return (
     <div data-testid="mc-view-audit-history" className="space-y-3 p-3">
       <header className="space-y-0.5">
-        <div className="font-mono text-[10px] uppercase tracking-[0.16em] text-stone-500">
+        <div className="font-mono text-[10px] uppercase tracking-[0.16em] text-on-surface-variant">
           audit-history
         </div>
-        <h2 className="font-headline text-lg text-stone-900">Audit history</h2>
-        <p className="text-xs text-stone-600">
+        <h2 className="font-headline text-lg text-on-surface">Audit history</h2>
+        <p className="text-xs text-on-surface-variant">
           Browse <code>mission_control_actions</code> by qitem, verb, actor,
           and time range. Read-only.
         </p>
@@ -65,7 +65,7 @@ export function AuditHistoryView() {
       {/* Filters */}
       <div
         data-testid="mc-audit-filters"
-        className="grid grid-cols-1 gap-2 border border-stone-200 bg-stone-50 p-2 sm:grid-cols-2"
+        className="grid grid-cols-1 gap-2 border border-outline-variant bg-background p-2 sm:grid-cols-2"
       >
         <input
           type="text"
@@ -73,13 +73,13 @@ export function AuditHistoryView() {
           placeholder="qitem_id (exact)"
           value={qitemId}
           onChange={(e) => setQitemId(e.target.value)}
-          className="border border-stone-300 px-2 py-1 font-mono text-xs"
+          className="border border-outline-variant px-2 py-1 font-mono text-xs"
         />
         <select
           data-testid="mc-audit-filter-action-verb"
           value={actionVerb}
           onChange={(e) => setActionVerb(e.target.value)}
-          className="border border-stone-300 px-2 py-1 font-mono text-xs"
+          className="border border-outline-variant px-2 py-1 font-mono text-xs"
         >
           <option value="">all verbs</option>
           {MISSION_CONTROL_VERBS.map((v) => (
@@ -94,7 +94,7 @@ export function AuditHistoryView() {
           placeholder="actor_session (e.g., operator-alex@kernel)"
           value={actorSession}
           onChange={(e) => setActorSession(e.target.value)}
-          className="border border-stone-300 px-2 py-1 font-mono text-xs"
+          className="border border-outline-variant px-2 py-1 font-mono text-xs"
         />
         <div className="flex items-center gap-1">
           <input
@@ -102,7 +102,7 @@ export function AuditHistoryView() {
             data-testid="mc-audit-filter-since"
             value={since}
             onChange={(e) => setSince(e.target.value)}
-            className="flex-1 border border-stone-300 px-2 py-1 font-mono text-[11px]"
+            className="flex-1 border border-outline-variant px-2 py-1 font-mono text-[11px]"
             title="since"
           />
           <input
@@ -110,7 +110,7 @@ export function AuditHistoryView() {
             data-testid="mc-audit-filter-until"
             value={until}
             onChange={(e) => setUntil(e.target.value)}
-            className="flex-1 border border-stone-300 px-2 py-1 font-mono text-[11px]"
+            className="flex-1 border border-outline-variant px-2 py-1 font-mono text-[11px]"
             title="until"
           />
         </div>
@@ -118,7 +118,7 @@ export function AuditHistoryView() {
           type="button"
           data-testid="mc-audit-filter-apply"
           onClick={applyFilters}
-          className="border border-stone-700 bg-stone-800 px-2 py-1 font-mono text-[10px] uppercase tracking-[0.12em] text-white"
+          className="border border-on-surface bg-inverse-surface px-2 py-1 font-mono text-[10px] uppercase tracking-[0.12em] text-background"
         >
           Apply filters
         </button>
@@ -126,7 +126,7 @@ export function AuditHistoryView() {
 
       {/* Results */}
       {query.isLoading ? (
-        <div data-testid="mc-audit-loading" className="font-mono text-[10px] text-stone-500">
+        <div data-testid="mc-audit-loading" className="font-mono text-[10px] text-on-surface-variant">
           loading...
         </div>
       ) : query.isError ? (
@@ -134,7 +134,7 @@ export function AuditHistoryView() {
           error: {query.error.message}
         </div>
       ) : query.data?.rows.length === 0 ? (
-        <div data-testid="mc-audit-empty" className="font-mono text-[11px] text-stone-500">
+        <div data-testid="mc-audit-empty" className="font-mono text-[11px] text-on-surface-variant">
           No audit entries match these filters.
         </div>
       ) : (
@@ -144,29 +144,29 @@ export function AuditHistoryView() {
               key={row.actionId}
               data-testid="mc-audit-row"
               data-action-id={row.actionId}
-              className="border border-stone-200 bg-white p-2 text-[11px]"
+              className="border border-outline-variant bg-surface-lowest p-2 text-[11px]"
             >
               <div className="flex items-center justify-between gap-2">
-                <span className="font-mono uppercase tracking-[0.1em] text-stone-700">
+                <span className="font-mono uppercase tracking-[0.1em] text-on-surface">
                   {row.actionVerb}
                 </span>
-                <span className="font-mono text-[10px] text-stone-500">
+                <span className="font-mono text-[10px] text-on-surface-variant">
                   {row.actedAt}
                 </span>
               </div>
-              <div className="mt-1 text-stone-700">
+              <div className="mt-1 text-on-surface">
                 qitem: <span className="font-mono">{row.qitemId ?? "—"}</span>
               </div>
-              <div className="text-stone-700">
+              <div className="text-on-surface">
                 actor: <span className="font-mono">{row.actorSession}</span>
               </div>
               {row.reason ? (
-                <div className="text-stone-700">
+                <div className="text-on-surface">
                   reason: <span className="italic">{row.reason}</span>
                 </div>
               ) : null}
               {row.annotation ? (
-                <div className="text-stone-700">
+                <div className="text-on-surface">
                   annotation: <span className="italic">{row.annotation}</span>
                 </div>
               ) : null}
@@ -178,14 +178,14 @@ export function AuditHistoryView() {
       {/* Pagination */}
       <footer
         data-testid="mc-audit-pagination"
-        className="flex items-center justify-between font-mono text-[10px] uppercase tracking-[0.12em] text-stone-500"
+        className="flex items-center justify-between font-mono text-[10px] uppercase tracking-[0.12em] text-on-surface-variant"
       >
         <button
           type="button"
           data-testid="mc-audit-prev-page"
           onClick={prevPage}
           disabled={beforeIdStack.length === 0}
-          className="border border-stone-300 px-2 py-0.5 disabled:opacity-50"
+          className="border border-outline-variant px-2 py-0.5 disabled:opacity-50"
         >
           ← prev
         </button>
@@ -195,7 +195,7 @@ export function AuditHistoryView() {
           data-testid="mc-audit-next-page"
           onClick={nextPage}
           disabled={!query.data?.hasMore}
-          className="border border-stone-300 px-2 py-0.5 disabled:opacity-50"
+          className="border border-outline-variant px-2 py-0.5 disabled:opacity-50"
         >
           next →
         </button>

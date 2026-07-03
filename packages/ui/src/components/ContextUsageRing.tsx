@@ -37,14 +37,14 @@ const TIER_BORDER_CLASS: Record<ContextUsageTier, string> = {
   critical: "border-red-500",
   warning: "border-amber-500",
   low: "border-emerald-500",
-  unknown: "border-stone-400 border-dotted",
+  unknown: "border-outline border-dotted",
 };
 
 const TIER_TEXT_CLASS: Record<ContextUsageTier, string> = {
   critical: "text-red-600",
   warning: "text-amber-600",
   low: "text-green-700",
-  unknown: "text-stone-300",
+  unknown: "text-on-surface-variant",
 };
 
 export function contextUsageTextClass(

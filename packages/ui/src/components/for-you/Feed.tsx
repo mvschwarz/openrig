@@ -372,7 +372,7 @@ export function Feed() {
     <div data-testid="for-you-feed" className="mx-auto w-full max-w-[720px] px-6 py-8">
       <header className="border-b border-outline-variant pb-4 mb-4">
         <SectionHeader tone="muted">Attention</SectionHeader>
-        <h1 className="font-headline text-headline-md font-bold tracking-tight uppercase text-stone-900 mt-1">
+        <h1 className="font-headline text-headline-md font-bold tracking-tight uppercase text-on-surface mt-1">
           For You
         </h1>
       </header>
@@ -403,8 +403,8 @@ export function Feed() {
             className={cn(
               "px-2 py-1 border font-mono text-[9px] uppercase tracking-wide",
               lens === c.id
-                ? "border-stone-900 bg-stone-900 text-stone-50"
-                : "border-outline-variant text-on-surface-variant hover:bg-stone-100",
+                ? "border-on-surface bg-inverse-surface text-background"
+                : "border-outline-variant text-on-surface-variant hover:bg-surface-low",
             )}
           >
             {c.label}

@@ -56,11 +56,11 @@ function SettingsRow({ label, settingKey, resolved, testIdPrefix }: SettingsRowP
   return (
     <div
       data-testid={`${testIdPrefix}-${settingKey}`}
-      className="border border-stone-300/40 bg-white/8 px-3 py-2 space-y-1"
+      className="border border-outline-variant/40 bg-surface-lowest/[0.08] px-3 py-2 space-y-1"
     >
       <div className="flex items-center justify-between gap-2">
-        <span className="font-mono text-[10px] text-stone-700 truncate">{label}</span>
-        <span className="font-mono text-[8px] uppercase tracking-[0.10em] text-stone-500 shrink-0">
+        <span className="font-mono text-[10px] text-on-surface truncate">{label}</span>
+        <span className="font-mono text-[8px] uppercase tracking-[0.10em] text-on-surface-variant shrink-0">
           source: {resolved.source}
         </span>
       </div>
@@ -70,20 +70,20 @@ function SettingsRow({ label, settingKey, resolved, testIdPrefix }: SettingsRowP
             data-testid={`${testIdPrefix}-${settingKey}-input`}
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
-            className="w-full border border-stone-300 bg-white/80 px-2 py-1 font-mono text-[10px]"
+            className="w-full border border-outline-variant bg-surface-lowest/80 px-2 py-1 font-mono text-[10px]"
           />
           <div className="flex gap-2">
             <button
               data-testid={`${testIdPrefix}-${settingKey}-save`}
               onClick={() => void onSave()}
               disabled={setMutation.isPending}
-              className="font-mono text-[8px] uppercase border border-stone-300 px-2 py-0.5 hover:bg-stone-200 disabled:opacity-50"
+              className="font-mono text-[8px] uppercase border border-outline-variant px-2 py-0.5 hover:bg-surface-high disabled:opacity-50"
             >
               Save
             </button>
             <button
               onClick={() => { setEditing(false); setDraft(String(resolved.value ?? "")); setError(null); }}
-              className="font-mono text-[8px] uppercase text-stone-500 hover:text-stone-900"
+              className="font-mono text-[8px] uppercase text-on-surface-variant hover:text-on-surface"
             >
               Cancel
             </button>
@@ -91,13 +91,13 @@ function SettingsRow({ label, settingKey, resolved, testIdPrefix }: SettingsRowP
         </div>
       ) : (
         <div className="space-y-0.5">
-          <div className="font-mono text-[10px] text-stone-800 break-all">{String(resolved.value ?? "")}</div>
-          <div className="font-mono text-[8px] text-stone-500 break-all">default: {String(resolved.defaultValue ?? "")}</div>
+          <div className="font-mono text-[10px] text-on-surface break-all">{String(resolved.value ?? "")}</div>
+          <div className="font-mono text-[8px] text-on-surface-variant break-all">default: {String(resolved.defaultValue ?? "")}</div>
           <div className="flex gap-1 pt-1">
             <button
               data-testid={`${testIdPrefix}-${settingKey}-edit`}
               onClick={() => { setEditing(true); setError(null); }}
-              className="font-mono text-[8px] uppercase border border-stone-300 px-1 py-0.5 hover:bg-stone-200"
+              className="font-mono text-[8px] uppercase border border-outline-variant px-1 py-0.5 hover:bg-surface-high"
             >
               Edit
             </button>
@@ -106,7 +106,7 @@ function SettingsRow({ label, settingKey, resolved, testIdPrefix }: SettingsRowP
                 data-testid={`${testIdPrefix}-${settingKey}-reset`}
                 onClick={() => void onReset()}
                 disabled={resetMutation.isPending}
-                className="font-mono text-[8px] uppercase border border-stone-300 px-1 py-0.5 hover:bg-stone-200 disabled:opacity-50"
+                className="font-mono text-[8px] uppercase border border-outline-variant px-1 py-0.5 hover:bg-surface-high disabled:opacity-50"
               >
                 Reset
               </button>
@@ -122,7 +122,7 @@ function SettingsRow({ label, settingKey, resolved, testIdPrefix }: SettingsRowP
 function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
     <section className="space-y-2">
-      <div className="font-mono text-[8px] uppercase tracking-[0.16em] text-stone-500">{title}</div>
+      <div className="font-mono text-[8px] uppercase tracking-[0.16em] text-on-surface-variant">{title}</div>
       <div className="space-y-1">{children}</div>
     </section>
   );
@@ -146,7 +146,7 @@ export function SettingsTab() {
   };
 
   if (isLoading) {
-    return <div data-testid="settings-loading" className="px-4 py-3 font-mono text-[10px] text-stone-400">Loading settings…</div>;
+    return <div data-testid="settings-loading" className="px-4 py-3 font-mono text-[10px] text-on-surface-variant">Loading settings…</div>;
   }
   if (error || !data) {
     // V1 attempt-3 Phase 3 bounce-fix A2 — soften the failure mode.
@@ -163,20 +163,20 @@ export function SettingsTab() {
       >
         {looksLikeMissingEndpoint ? (
           <>
-            <div className="text-stone-900 font-bold uppercase tracking-wide text-[10px] mb-2">
+            <div className="text-on-surface font-bold uppercase tracking-wide text-[10px] mb-2">
               Settings UI requires daemon ≥ v0.3.0
             </div>
             <p className="mb-2">
               The shipped daemon doesn't expose the settings HTTP route yet.
               Until that lands, configure via the CLI:
             </p>
-            <pre className="font-mono text-[10px] bg-stone-50 border border-outline-variant px-2 py-1 inline-block">
+            <pre className="font-mono text-[10px] bg-background border border-outline-variant px-2 py-1 inline-block">
               rig config get / set / reset
             </pre>
           </>
         ) : (
           <>
-            <div className="text-stone-900 font-bold uppercase tracking-wide text-[10px] mb-2">
+            <div className="text-on-surface font-bold uppercase tracking-wide text-[10px] mb-2">
               Settings unavailable
             </div>
             <p>{errMsg || "Daemon is unreachable."}</p>
@@ -200,11 +200,11 @@ export function SettingsTab() {
           data-testid="settings-init-workspace"
           onClick={() => void onInitWorkspace()}
           disabled={initWorkspace.isPending}
-          className="mt-2 font-mono text-[9px] uppercase border border-stone-400 px-2 py-1 hover:bg-stone-200 disabled:opacity-50"
+          className="mt-2 font-mono text-[9px] uppercase border border-outline px-2 py-1 hover:bg-surface-high disabled:opacity-50"
         >
           {initWorkspace.isPending ? "Initializing…" : "Init Workspace"}
         </button>
-        {initResult && <div data-testid="settings-init-result" className="font-mono text-[9px] text-stone-600">{initResult}</div>}
+        {initResult && <div data-testid="settings-init-result" className="font-mono text-[9px] text-on-surface-variant">{initResult}</div>}
         {initError && <div data-testid="settings-init-error" className="font-mono text-[9px] text-red-600">{initError}</div>}
       </Section>
 

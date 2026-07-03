@@ -124,9 +124,9 @@ function FileViewerBody({
           <ToolMark tool={path} size="sm" decorative />
           <SectionHeader tone="muted">{toolBrand(path).label}</SectionHeader>
         </div>
-        <h3 className="mt-1 font-mono text-xs text-stone-900 break-all">{path}</h3>
+        <h3 className="mt-1 font-mono text-xs text-on-surface break-all">{path}</h3>
         {target && (
-          <div data-testid="file-viewer-root-path" className="mt-1 font-mono text-[9px] text-stone-500 break-all">
+          <div data-testid="file-viewer-root-path" className="mt-1 font-mono text-[9px] text-on-surface-variant break-all">
             {target.root}/{target.path}
           </div>
         )}
@@ -138,12 +138,12 @@ function FileViewerBody({
           </div>
         ) : null}
         {resolvedKind === "yaml" || resolvedKind === "json" ? (
-          <pre className="px-4 py-3 font-mono text-xs text-stone-900 whitespace-pre-wrap">
+          <pre className="px-4 py-3 font-mono text-xs text-on-surface whitespace-pre-wrap">
             {content}
           </pre>
         ) : null}
         {resolvedKind === "text" ? (
-          <pre className="px-4 py-3 font-mono text-xs text-stone-900 whitespace-pre">
+          <pre className="px-4 py-3 font-mono text-xs text-on-surface whitespace-pre">
             {content}
           </pre>
         ) : null}

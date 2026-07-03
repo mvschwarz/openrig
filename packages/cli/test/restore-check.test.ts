@@ -1,4 +1,7 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { join } from "node:path";
 import { restoreCheckCommand, type RestoreCheckDeps } from "../src/commands/restore-check.js";
 
 function makeResult(overrides?: Record<string, unknown>) {
@@ -503,6 +506,101 @@ describe("OPR.0.4.0.29 — --ready is compact + ready detail (not a no-op, not t
     const full = makeDeps({});
     await restoreCheckCommand(full.deps).parseAsync(["node", "rig", "--full"]);
     expect(full.requestedPaths[0]).not.toContain("compact=1");
+  });
+});
+
+describe("OPR.0.4.3.12 — fixture-home isolation guard", () => {
+  let logs: string[];
+  let fixtureHome: string;
+  // Snapshot of the OpenRig target env vars the ambient session may set.
+  const ENV_KEYS = ["OPENRIG_HOME", "OPENRIG_PORT", "OPENRIG_URL", "OPENRIG_HOST", "OPENRIG_DB", "RIGGED_PORT", "RIGGED_URL"];
+  const saved: Record<string, string | undefined> = {};
+
+  beforeEach(() => {
+    logs = [];
+    vi.spyOn(console, "log").mockImplementation((...a) => logs.push(a.join(" ")));
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    process.exitCode = undefined;
+    // Isolate the target env: clear ambient OPENRIG_PORT/URL/etc so the
+    // fixture's config.json is the resolved daemon target, then point HOME
+    // at a fresh fixture dir.
+    for (const k of ENV_KEYS) {
+      saved[k] = process.env[k];
+      delete process.env[k];
+    }
+    fixtureHome = mkdtempSync(join(tmpdir(), "openrig-qa-rc-test-"));
+    writeFileSync(join(fixtureHome, ".openrig-fixture"), "");
+    process.env.OPENRIG_HOME = fixtureHome;
+  });
+
+  afterEach(() => {
+    rmSync(fixtureHome, { recursive: true, force: true });
+    for (const k of ENV_KEYS) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+    vi.restoreAllMocks();
+  });
+
+  it("fixture-scoped home + divergent target → honest both-homes result, non-mutating, no scope:host", async () => {
+    writeFileSync(join(fixtureHome, "config.json"), JSON.stringify({ daemon: { port: 9911 } }));
+    const { getDaemonStatus } = await import("../src/daemon-lifecycle.js");
+    (getDaemonStatus as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ state: "stopped", healthy: false });
+
+    const { deps, requestedPaths } = makeDeps();
+    await restoreCheckCommand(deps).parseAsync(["node", "rig", "--json"]);
+
+    const json = JSON.parse(logs.join(""));
+    expect(json.verdict).toBe("unknown");
+    expect(json.checks[0].check).toBe("home.fixture-scoped");
+    // Names BOTH homes + the divergent port.
+    expect(json.checks[0].evidence).toContain(fixtureHome);
+    expect(json.checks[0].evidence).toContain(join(homedir(), ".openrig"));
+    expect(json.checks[0].evidence).toContain("9911");
+    // Non-mutating remediation — never `rig daemon start`.
+    expect(json.repairPacket[0].blocking).toBe(false);
+    expect(json.repairPacket[0].safe).toBe(true);
+    expect(logs.join("")).not.toContain("rig daemon start");
+    // No scope:host down-signal.
+    expect(json.recovery.status).toBe("unknown");
+    expect(json.recovery.blocked).toEqual([]);
+    // Honest "unknown" exit, not the blocking not_restorable(1).
+    expect(process.exitCode).toBe(2);
+    // Daemon route not called.
+    expect(requestedPaths).toHaveLength(0);
+  });
+
+  it("leaked OPENRIG_URL under a fixture home also triggers the guard", async () => {
+    process.env.OPENRIG_URL = "http://127.0.0.1:9977";
+    const { getDaemonStatus } = await import("../src/daemon-lifecycle.js");
+    (getDaemonStatus as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ state: "stopped", healthy: false });
+
+    const { deps } = makeDeps();
+    await restoreCheckCommand(deps).parseAsync(["node", "rig", "--json"]);
+
+    const json = JSON.parse(logs.join(""));
+    expect(json.verdict).toBe("unknown");
+    expect(json.checks[0].check).toBe("home.fixture-scoped");
+    expect(json.checks[0].evidence).toContain("9977");
+    expect(process.exitCode).toBe(2);
+  });
+
+  it("fixture home but DEFAULT/non-divergent target → falls through to genuine daemon-down packet", async () => {
+    // No config.json → daemon.port resolves to the default 7433 (source
+    // "default") → NOT divergent → guard skipped → existing packet unchanged.
+    const { getDaemonStatus } = await import("../src/daemon-lifecycle.js");
+    (getDaemonStatus as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ state: "stopped", healthy: false });
+
+    const { deps } = makeDeps();
+    await restoreCheckCommand(deps).parseAsync(["node", "rig", "--json"]);
+
+    const json = JSON.parse(logs.join(""));
+    expect(json.verdict).toBe("not_restorable");
+    expect(json.checks[0].check).toBe("daemon.reachable");
+    expect(json.repairPacket[0].command).toContain("rig daemon start");
+    expect(json.repairPacket[0].blocking).toBe(true);
+    expect(json.recovery.blocked[0].scope).toBe("host");
+    expect(process.exitCode).toBe(1);
   });
 });
 

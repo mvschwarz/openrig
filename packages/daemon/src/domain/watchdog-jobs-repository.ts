@@ -26,6 +26,10 @@ export const PHASE_D_POLICIES = [
   "artifact-pool-ready",
   "edge-artifact-required",
   "workflow-keepalive",
+  // OPR.0.4.3.16 — idle-seat gate watchdog. DB-backed (queue_items) +
+  // AgentActivityStore-backed; factory-constructed at startup and injected
+  // via WatchdogPolicyEngine additionalPolicies (like workflow-keepalive).
+  "idle-gate-qitem",
 ] as const;
 
 /** @deprecated since Phase D — use PHASE_D_POLICIES. */

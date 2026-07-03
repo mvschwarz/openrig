@@ -21,17 +21,17 @@ export function MidLayerContent({ hostname = "127.0.0.1" }: MidLayerContentProps
       className="absolute inset-0 z-[10] overflow-hidden pointer-events-none select-none"
     >
       {/* "06° Field Report" copy block — mid-left margin */}
-      <div className="absolute top-[64%] left-[3%] font-mono text-[11px] text-stone-900 leading-tight max-w-[180px]">
+      <div className="absolute top-[64%] left-[3%] font-mono text-[11px] text-on-surface leading-tight max-w-[180px]">
         <div className="font-bold uppercase">▪ 06° Field Report</div>
-        <div className="text-stone-800 mt-1">
+        <div className="text-on-surface mt-1">
           Operator session captured at field station {hostname} — release 0.3.1; daemon trace nominal.
         </div>
       </div>
 
       {/* "Data Streams" small text block */}
-      <div className="absolute bottom-[8%] left-[6%] font-mono text-[11px] text-stone-900 leading-tight max-w-[180px]">
+      <div className="absolute bottom-[8%] left-[6%] font-mono text-[11px] text-on-surface leading-tight max-w-[180px]">
         <div className="font-bold uppercase">Data Streams ⚠⚠</div>
-        <div className="text-stone-800 mt-1 text-[10px]">
+        <div className="text-on-surface mt-1 text-[10px]">
           x-axis(1) y-axis(2) z-axis(3) — synchronized at {hostname}
         </div>
       </div>

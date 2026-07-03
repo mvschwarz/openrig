@@ -57,7 +57,7 @@ export function VellumSheet({
           type="button"
           onClick={onClose}
           aria-label="Close sheet"
-          className="absolute top-2 right-2 z-10 px-2 py-0.5 border border-stone-900 bg-white font-mono text-[10px] hover:bg-stone-100"
+          className="absolute top-2 right-2 z-10 px-2 py-0.5 border border-on-surface bg-surface-lowest font-mono text-[10px] hover:bg-surface-low"
           data-testid={testId ? `${testId}-close` : undefined}
         >
           ×

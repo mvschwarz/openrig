@@ -18,9 +18,13 @@
 
 import { Hono } from "hono";
 import { rmSync } from "node:fs";
+import type Database from "better-sqlite3";
 import type { AgentImageLibraryService } from "../domain/agent-images/agent-image-library-service.js";
 import type { SnapshotCapturer } from "../domain/agent-images/snapshot-capturer.js";
 import { evaluateProtection } from "../domain/agent-images/evidence-guard.js";
+import { discoverResumeToken } from "../domain/agent-images/resume-token-discovery.js";
+import { convergeOp } from "../domain/topology-converge.js";
+import type { PodRigInstantiator } from "../domain/rigspec-instantiator.js";
 import { AgentImageError, type AgentImageEntry } from "../domain/agent-images/agent-image-types.js";
 
 interface PruneBody {
@@ -39,6 +43,50 @@ interface SnapshotBody {
 
 interface DeleteQuery {
   force?: boolean;
+}
+
+interface ForkBody {
+  sourceSession?: string;
+  rigId?: string;
+  pod?: string;
+  /** New member id for the forked successor. */
+  member?: string;
+  rigRoot?: string;
+  /** When true, capture + PIN a durable image and launch via mode:agent_image. */
+  keepImage?: boolean;
+  imageName?: string;
+  imageVersion?: string;
+  edges?: Array<{ from: string; to: string; kind: string }>;
+}
+
+/** The forked successor mirrors the source seat's launch shape. Native resume
+ *  id is resolved separately (discoverResumeToken) and kept daemon-local — it is
+ *  deliberately NOT part of this shape so it can never leak into a response. */
+interface ForkSourceShape {
+  runtime: string | null;
+  agentRef: string | null;
+  profile: string | null;
+  cwd: string | null;
+  codexConfigProfile: string | null;
+}
+
+function resolveForkSourceNode(db: Database.Database, sourceSession: string): ForkSourceShape | null {
+  // SELECT n.* so an older DB missing codex_config_profile simply yields
+  // undefined for that key rather than throwing.
+  const row = db
+    .prepare(
+      `SELECT n.* FROM sessions s JOIN nodes n ON n.id = s.node_id
+       WHERE s.session_name = ? ORDER BY s.id DESC LIMIT 1`,
+    )
+    .get(sourceSession) as Record<string, unknown> | undefined;
+  if (!row) return null;
+  return {
+    runtime: (row["runtime"] as string | null) ?? null,
+    agentRef: (row["agent_ref"] as string | null) ?? null,
+    profile: (row["profile"] as string | null) ?? null,
+    cwd: (row["cwd"] as string | null) ?? null,
+    codexConfigProfile: (row["codex_config_profile"] as string | null) ?? null,
+  };
 }
 
 function redactResumeToken<T extends Pick<AgentImageEntry, "sourceResumeToken">>(entry: T): Omit<T, "sourceResumeToken"> & { sourceResumeToken: string } {
@@ -103,6 +151,135 @@ export function agentImagesRoutes(deps: AgentImageRoutesDeps): Hono {
       }
       return c.json({ error: "snapshot_failed", message: (err as Error).message }, 500);
     }
+  });
+
+  // OPR.0.4.3.05 seat-forking closeout — the narrow daemon fork composer.
+  //
+  // `rig fork <source-session>` posts here. This is the ONLY net-new surface
+  // in the slice: it composes the ALREADY-SHIPPED primitives (resume-token
+  // discovery + add_member converge, or snapshot + pin + add_member) into one
+  // operator verb. It exists server-side because the native resume id is
+  // redacted at every wire boundary by design — the default one-shot fork MUST
+  // resolve the token in-process so the id NEVER leaves the daemon.
+  //
+  //   default            → discoverResumeToken → add_member(mode: fork,
+  //                        native_id) → launch. NO image. Native id stays
+  //                        daemon-local (never serialized into the response).
+  //   { keepImage: true } → snapshot capture → PIN (evidence-guard protection)
+  //                        → add_member(mode: agent_image) → launch.
+  router.post("/fork", async (c) => {
+    const db = c.get("db" as never) as Database.Database | undefined;
+    const podInstantiator = c.get("podInstantiator" as never) as PodRigInstantiator | undefined;
+    if (!db || !podInstantiator) return c.json({ error: "fork_composer_unavailable" }, 503);
+
+    const body = (await c.req.json<ForkBody>().catch(() => ({}))) as ForkBody;
+    const sourceSession = body.sourceSession;
+    const rigId = body.rigId;
+    const pod = body.pod;
+    const member = body.member;
+    if (!sourceSession || !rigId || !pod || !member) {
+      return c.json({
+        error: "missing_required_fields",
+        hint: "POST body must include { sourceSession, rigId, pod, member }",
+      }, 400);
+    }
+    const rigRoot = typeof body.rigRoot === "string" ? body.rigRoot : ".";
+
+    // Resolve the source seat's launch shape so the successor mirrors it
+    // (agent_ref / profile / cwd / codex profile). The native resume id is
+    // NOT read here — it is resolved separately below and kept daemon-local.
+    const source = resolveForkSourceNode(db, sourceSession);
+    if (!source) {
+      return c.json({
+        error: "session_not_found",
+        message: `Source session '${sourceSession}' not found. Run 'rig ps --nodes' to see what's running.`,
+      }, 404);
+    }
+
+    let sessionSource: Record<string, unknown>;
+    let keptImage: { id: string; name: string; version: string; pinned: true } | undefined;
+
+    if (body.keepImage) {
+      // --keep-image: durable image → PIN-ON-KEEP (the evidence guard protects
+      // pinned images from prune/delete) → agent_image launch. Native id is
+      // captured into the manifest (redacted at every route boundary) and is
+      // consumed only in-process by the instantiator — it never leaves here.
+      const capturer = c.get("snapshotCapturer" as never) as SnapshotCapturer | undefined;
+      const lib = c.get("agentImageLibrary" as never) as AgentImageLibraryService | undefined;
+      if (!capturer || !lib) return c.json({ error: "snapshot_capturer_unavailable" }, 503);
+      const imageName = (body.imageName && body.imageName.trim()) || `fork-${member}`;
+      const version = (body.imageVersion && body.imageVersion.trim()) || "1";
+      try {
+        const cap = capturer.capture({ sourceSession, name: imageName, version });
+        // PIN-ON-KEEP: protection is the evidence guard's PINNED reason, an
+        // explicit + shipped mechanism that survives prune/delete.
+        lib.pin(cap.imageId);
+        keptImage = { id: cap.imageId, name: imageName, version, pinned: true };
+      } catch (err) {
+        if (err instanceof AgentImageError) {
+          const status = err.code === "image_not_found" ? 404
+            : err.code === "runtime_mismatch" ? 400
+            : err.code === "image_referenced" ? 409
+            : 500;
+          return c.json({ error: err.code, message: err.message, details: err.details ?? null }, status);
+        }
+        return c.json({ error: "fork_snapshot_failed", message: (err as Error).message }, 500);
+      }
+      sessionSource = { mode: "agent_image", ref: { kind: "image_name", value: imageName, version } };
+    } else {
+      // Default one-shot: resolve the native resume id server-side. Honest
+      // rejection on terminal / no-token — NEVER fabricate (resume-honesty).
+      const discovery = discoverResumeToken(db, sourceSession);
+      if (!discovery.ok) {
+        const status = discovery.failure.code === "session_not_found" ? 404 : 400;
+        return c.json({ error: discovery.failure.code, message: discovery.failure.message }, status);
+      }
+      const nativeId = discovery.result.nativeId;
+      if (!nativeId) {
+        return c.json({
+          error: "resume_token_unavailable",
+          message: `Could not discover a resume token for ${discovery.result.runtime} source session '${sourceSession}'. The seat may not have a native conversation id yet — try again after it has produced output. No token was fabricated and no fresh seat was cold-started.`,
+        }, 409);
+      }
+      // The native id is used ONLY to build the in-process member fragment
+      // below. It is deliberately NOT echoed in the response (kept daemon-local,
+      // consistent with the route redaction boundary).
+      sessionSource = { mode: "fork", ref: { kind: "native_id", value: nativeId } };
+    }
+
+    const memberFragment: Record<string, unknown> = {
+      id: member,
+      runtime: source.runtime,
+      ...(source.agentRef ? { agent_ref: source.agentRef } : {}),
+      ...(source.profile ? { profile: source.profile } : {}),
+      ...(source.cwd ? { cwd: source.cwd } : {}),
+      ...(source.codexConfigProfile ? { codex_config_profile: source.codexConfigProfile } : {}),
+      session_source: sessionSource,
+    };
+
+    const converged = await convergeOp(
+      { instantiator: podInstantiator },
+      rigId,
+      { kind: "add_member", pod, member: memberFragment, edges: body.edges },
+      rigRoot,
+    );
+    if (converged.kind !== "add_member" || !converged.supported) {
+      return c.json({ error: "fork_failed", message: "Unexpected converge result for fork add_member" }, 500);
+    }
+    const outcome = converged.outcome;
+    // The outcome never carries the native id (add_member persists no
+    // session_source; RigRepository.addNode stores no agent-image reference).
+    if (!outcome.ok) {
+      const status =
+        outcome.code === "rig_not_found" || outcome.code === "pod_not_found" ? 404
+        : outcome.code === "member_conflict" ? 409
+        : outcome.code === "edge_unresolved" || outcome.code === "validation_failed" || outcome.code === "preflight_failed" ? 400
+        : 500;
+      // A kept image is already pinned/protected even if launch failed — report
+      // it honestly so the operator knows it was retained.
+      return c.json({ ...outcome, ...(keptImage ? { image: keptImage } : {}) }, status);
+    }
+    return c.json({ ...outcome, ...(keptImage ? { image: keptImage } : {}) }, 201);
   });
 
   router.post("/prune", async (c) => {

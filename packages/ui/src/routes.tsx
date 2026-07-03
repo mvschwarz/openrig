@@ -17,6 +17,7 @@ import {
   useParams,
 } from "@tanstack/react-router";
 import { QueryClientProvider } from "@tanstack/react-query";
+import { DaemonHealthProvider } from "./components/DaemonHealthProvider.js";
 import { queryClient } from "./lib/query-client.js";
 import { AppShell } from "./components/AppShell.js";
 import { RigGraph } from "./components/RigGraph.js";
@@ -74,9 +75,11 @@ import {
 const rootRoute = createRootRoute({
   component: () => (
     <QueryClientProvider client={queryClient}>
-      <AppShell>
-        <Outlet />
-      </AppShell>
+      <DaemonHealthProvider>
+        <AppShell>
+          <Outlet />
+        </AppShell>
+      </DaemonHealthProvider>
     </QueryClientProvider>
   ),
 });

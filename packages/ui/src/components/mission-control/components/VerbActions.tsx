@@ -71,24 +71,24 @@ const verbToneClass: Record<MissionControlVerb, { idle: string; active: string }
     active: "border-tertiary bg-tertiary text-white",
   },
   route: {
-    idle: "border-stone-700 text-stone-700 hover:bg-stone-900 hover:text-white",
-    active: "border-stone-900 bg-stone-900 text-white",
+    idle: "border-on-surface text-on-surface hover:bg-inverse-surface hover:text-background",
+    active: "border-on-surface bg-inverse-surface text-background",
   },
   annotate: {
-    idle: "border-stone-700 text-stone-700 hover:bg-stone-900 hover:text-white",
-    active: "border-stone-900 bg-stone-900 text-white",
+    idle: "border-on-surface text-on-surface hover:bg-inverse-surface hover:text-background",
+    active: "border-on-surface bg-inverse-surface text-background",
   },
   hold: {
     idle: "border-warning text-warning hover:bg-warning hover:text-white",
     active: "border-warning bg-warning text-white",
   },
   drop: {
-    idle: "border-stone-700 text-stone-700 hover:bg-stone-900 hover:text-white",
-    active: "border-stone-900 bg-stone-900 text-white",
+    idle: "border-on-surface text-on-surface hover:bg-inverse-surface hover:text-background",
+    active: "border-on-surface bg-inverse-surface text-background",
   },
   handoff: {
-    idle: "border-stone-700 text-stone-700 hover:bg-stone-900 hover:text-white",
-    active: "border-stone-900 bg-stone-900 text-white",
+    idle: "border-on-surface text-on-surface hover:bg-inverse-surface hover:text-background",
+    active: "border-on-surface bg-inverse-surface text-background",
   },
 };
 
@@ -195,16 +195,16 @@ export function VerbActions({
 
   return (
     <div data-testid="mc-verb-actions" className="space-y-2">
-      <div className="flex flex-wrap items-start justify-between gap-2 border border-outline-variant bg-white/40 px-2 py-1.5 backdrop-blur-sm">
+      <div className="flex flex-wrap items-start justify-between gap-2 border border-outline-variant bg-surface-lowest/40 px-2 py-1.5 backdrop-blur-sm">
         <div>
-          <div className="font-mono text-[9px] uppercase tracking-[0.12em] text-stone-800">Choose response</div>
-          <div className="mt-0.5 font-mono text-[10px] leading-relaxed text-stone-500">
+          <div className="font-mono text-[9px] uppercase tracking-[0.12em] text-on-surface">Choose response</div>
+          <div className="mt-0.5 font-mono text-[10px] leading-relaxed text-on-surface-variant">
             Pick the next move for this queue item.
           </div>
         </div>
         {activeVerb ? (
-          <div className="font-mono text-[9px] uppercase tracking-[0.12em] text-stone-500">
-            Selected: <span className="text-stone-900">{ACTION_VERB_META[activeVerb].label}</span>
+          <div className="font-mono text-[9px] uppercase tracking-[0.12em] text-on-surface-variant">
+            Selected: <span className="text-on-surface">{ACTION_VERB_META[activeVerb].label}</span>
           </div>
         ) : null}
       </div>
@@ -244,8 +244,8 @@ export function VerbActions({
         })}
       </div>
       {activeVerb && (
-        <div className="space-y-1 border border-stone-200 bg-stone-50 p-2">
-          <div data-testid="mc-verb-guidance" className="font-mono text-[10px] leading-relaxed text-stone-600">
+        <div className="space-y-1 border border-outline-variant bg-background p-2">
+          <div data-testid="mc-verb-guidance" className="font-mono text-[10px] leading-relaxed text-on-surface-variant">
             {ACTION_VERB_META[activeVerb].description}
           </div>
           {needsDestination && (
@@ -265,7 +265,7 @@ export function VerbActions({
                     setManualDestination(false);
                     setDestinationSession(e.target.value);
                   }}
-                  className="w-full border border-stone-300 bg-white px-2 py-1 font-mono text-xs"
+                  className="w-full border border-outline-variant bg-surface-lowest px-2 py-1 font-mono text-xs"
                 >
                   <option value="">
                     {destinationListLoading ? "loading destinations..." : "choose destination"}
@@ -285,7 +285,7 @@ export function VerbActions({
                   value={destinationSession}
                   onChange={(e) => setDestinationSession(e.target.value)}
                   placeholder="destination session (member@rig)"
-                  className="w-full border border-stone-300 px-2 py-1 font-mono text-xs"
+                  className="w-full border border-outline-variant px-2 py-1 font-mono text-xs"
                 />
               ) : null}
               {destinationsQuery.isError ? (
@@ -300,7 +300,7 @@ export function VerbActions({
               onChange={(e) => setAnnotation(e.target.value)}
               placeholder="annotation"
               rows={2}
-              className="w-full border border-stone-300 px-2 py-1 font-mono text-xs"
+              className="w-full border border-outline-variant px-2 py-1 font-mono text-xs"
             />
           )}
           {needsReason && (
@@ -310,7 +310,7 @@ export function VerbActions({
               value={reason}
               onChange={(e) => setReason(e.target.value)}
               placeholder={`${activeVerb} reason`}
-              className="w-full border border-stone-300 px-2 py-1 font-mono text-xs"
+              className="w-full border border-outline-variant px-2 py-1 font-mono text-xs"
             />
           )}
           <div className="flex items-center justify-end gap-1">
@@ -318,7 +318,7 @@ export function VerbActions({
               type="button"
               onClick={reset}
               data-testid="mc-verb-cancel"
-              className="border border-stone-300 px-2 py-0.5 font-mono text-[9px] uppercase tracking-[0.12em] text-stone-600"
+              className="border border-outline-variant px-2 py-0.5 font-mono text-[9px] uppercase tracking-[0.12em] text-on-surface-variant"
             >
               Cancel
             </button>
@@ -332,7 +332,7 @@ export function VerbActions({
                 (needsAnnotation && !annotation) ||
                 (needsReason && !reason)
               }
-              className="border border-stone-700 bg-stone-800 px-2 py-0.5 font-mono text-[9px] uppercase tracking-[0.12em] text-white disabled:opacity-50"
+              className="border border-on-surface bg-inverse-surface px-2 py-0.5 font-mono text-[9px] uppercase tracking-[0.12em] text-background disabled:opacity-50"
             >
               {mutation.isPending ? "..." : `Confirm ${ACTION_VERB_META[activeVerb].label}`}
             </button>
@@ -343,7 +343,7 @@ export function VerbActions({
         <div
           data-testid="mc-verb-error"
           role="alert"
-          className="truncate border border-tertiary bg-stone-50/40 px-3 py-2 font-mono text-[10px] uppercase tracking-[0.12em] text-tertiary"
+          className="truncate border border-tertiary bg-background/40 px-3 py-2 font-mono text-[10px] uppercase tracking-[0.12em] text-tertiary"
           title={errorMessage}
         >
           {errorMessage}

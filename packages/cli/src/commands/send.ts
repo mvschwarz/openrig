@@ -42,6 +42,16 @@ function resolveSenderSession(): string | undefined {
   return readOpenRigEnv("OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME");
 }
 
+/**
+ * OPR.0.4.3.30 — Commander collector for `--to`: accepts BOTH a comma-list
+ * (`--to a,b`) and repetition (`--to a --to b`), accumulating into one array.
+ * Blank entries are dropped so a trailing comma is harmless.
+ */
+function collectSessions(value: string, previous: string[]): string[] {
+  const parts = value.split(",").map((s) => s.trim()).filter((s) => s.length > 0);
+  return previous.concat(parts);
+}
+
 export interface SendDeps extends StatusDeps {
   /**
    * Cross-host hooks. Both default to the production loaders/executors; tests
@@ -64,10 +74,16 @@ export function sendCommand(depsOverride?: SendDeps): Command {
   };
 
   cmd
-    .argument("<session>", "Target session name (e.g. dev-impl@my-rig)")
-    .argument("<text>", "Message text to send")
+    // OPR.0.4.3.30 — both positionals are optional so the message can stand alone with a
+    // targeting flag (`rig send --pod x "text"`). Disambiguated in the action: with a
+    // targeting flag the FIRST positional IS the message; without one it's `<session> <text>`.
+    .argument("[session]", "Target session name for a single-seat send (e.g. dev-impl@my-rig)")
+    .argument("[text]", "Message text to send")
+    .option("--to <sessions>", "Multi-recipient: comma-list or repeated (--to a,b or --to a --to b)", collectSessions, [] as string[])
+    .option("--pod <name>", "Send to every seat in a pod (fan-out, per-recipient results)")
+    .option("--rig <name>", "Send to every seat in a rig (fan-out, per-recipient results)")
     .option("--verify", "Verify pane only delivery by checking content after send")
-    .option("--force", "Send even if target pane appears mid-task (does NOT bypass the interactive-prompt/permission guard)")
+    .option("--force", "Back-compat no-op: a mid-task/busy pane already sends-with-advisory by default; --force never bypasses the interactive-prompt/permission guard")
     .option("--wait-for-idle <seconds>", "Wait until the target is explicitly idle before sending")
     .option("--raw", "Send exact text/keystrokes without the From/To messaging envelope (still guarded against interactive prompts)")
     .option("--dangerously-interact", "DANGEROUS: deliberately drive an interactive prompt/permission block (implies --raw; requires --reason). The ONLY override of the prompt/permission guard.")
@@ -78,20 +94,31 @@ export function sendCommand(depsOverride?: SendDeps): Command {
 Examples:
   rig send dev-impl@my-rig "Context update: QA approved. Proceed."
   rig send dev-impl@my-rig "message" --verify
+  rig send --to dev-impl@my-rig,dev-qa@my-rig "message to two seats"
+  rig send --pod dev "message to the whole dev pod"
+  rig send --rig my-rig "message to the whole rig"
   rig send dev-impl@my-rig "safe proof prompt" --wait-for-idle 30 --verify
   rig send dev-impl@my-rig "Stop and read the spec." --force
   rig send dev-impl@my-rig "message" --json
   rig send --host vm-claude-test dev-impl@my-rig "remote message" --verify
 
-The two-step send pattern (paste text, wait, submit Enter) is handled
-automatically. By default a send is REFUSED when the target is at an interactive
-prompt or permission block (so a message can never select/approve another agent's
-prompt), and fails closed when the target's activity can't be determined. Use
---wait-for-idle to send only after explicit idle evidence. Use --verify to confirm
-the message appeared in the pane only; it is not agent acknowledgement.
+Targeting: a bare seat (single send), OR one of --to / --pod / --rig (fan-out).
+Fan-out reports per-recipient results + an "N/M delivered" summary; one recipient's
+guard refusal does NOT block the others. Each recipient gets its own From/To envelope.
 
-Use --force to override the mid-task busy check; it does NOT bypass the
-interactive-prompt/permission guard. Use --raw to send exact text/keystrokes
+The two-step send pattern (paste text, wait, submit Enter) is handled
+automatically. By default a send is REFUSED only on POSITIVE evidence the target
+is at an interactive prompt or permission block (so a message can never
+select/approve another agent's prompt). When the target's activity CANNOT be
+determined (unknown / missing / stale telemetry) the send PROCEEDS with an
+advisory note — telemetry is advisory, not authority over whether agents can
+communicate. Use --wait-for-idle to send only after explicit idle evidence. Use
+--verify to confirm the message appeared in the pane only; it is not agent
+acknowledgement.
+
+A mid-task/busy target now sends-with-advisory by default (busy is not a block);
+--force is a back-compat no-op and never bypasses the interactive-prompt/permission
+guard. Use --raw to send exact text/keystrokes
 without the From/To envelope (e.g. a slash command); it is still guarded. Use
 --dangerously-interact --reason "<why>" to DELIBERATELY drive a prompt (select an
 option, approve a permission, send /compact to a blocked pane) — the only override
@@ -100,7 +127,7 @@ of the prompt guard; it implies --raw and is audit-logged.
 --host runs the same command on a remote host declared in ~/.openrig/hosts.yaml
 via single-hop ssh. SSH success is NOT verify success: the remote rig's
 'Verified: yes/no' line is what counts and is surfaced verbatim.`)
-    .action(async (session: string, text: string, opts: { verify?: boolean; force?: boolean; waitForIdle?: string; raw?: boolean; dangerouslyInteract?: boolean; reason?: string; host?: string; json?: boolean }) => {
+    .action(async (session: string | undefined, text: string | undefined, opts: { to?: string[]; pod?: string; rig?: string; verify?: boolean; force?: boolean; waitForIdle?: string; raw?: boolean; dangerouslyInteract?: boolean; reason?: string; host?: string; json?: boolean }) => {
       const waitForIdleMs = parseWaitForIdleMs(opts.waitForIdle);
       if (opts.force && waitForIdleMs !== undefined) {
         console.error("--wait-for-idle cannot be combined with --force");
@@ -125,7 +152,52 @@ via single-hop ssh. SSH success is NOT verify success: the remote rig's
         return;
       }
 
+      // OPR.0.4.3.30 — targeting-mode resolution. Exactly one of: a bare seat, --to, --pod, --rig.
+      const toList = opts.to && opts.to.length > 0 ? opts.to : undefined;
+      const fanModes = [toList ? "to" : null, opts.pod ? "pod" : null, opts.rig ? "rig" : null].filter(Boolean);
+      if (fanModes.length > 1) {
+        console.error("Choose exactly ONE target: a seat, --to, --pod, or --rig (not several).");
+        process.exitCode = 1;
+        return;
+      }
+      const isFanOut = fanModes.length === 1;
+
       const deps = getDeps();
+
+      if (isFanOut) {
+        // With a targeting flag the FIRST positional IS the message; a second positional (or a
+        // bare seat name) means the caller mixed a single-seat and a fan-out target — reject.
+        if (text !== undefined) {
+          console.error("A bare seat name cannot be combined with --to/--pod/--rig. Provide only the message.");
+          process.exitCode = 1;
+          return;
+        }
+        const message = session;
+        if (message === undefined || message.length === 0) {
+          console.error("Provide a message to send.");
+          process.exitCode = 1;
+          return;
+        }
+        if (opts.host) {
+          console.error("--host (cross-host) supports single-seat sends only; --to/--pod/--rig are local.");
+          process.exitCode = 1;
+          return;
+        }
+        if (waitForIdleMs !== undefined) {
+          console.error("--wait-for-idle is not supported with a multi/pod/rig target (cumulative wait risks a client timeout). Send single-seat, or drop --wait-for-idle.");
+          process.exitCode = 1;
+          return;
+        }
+        await runFanOutSend({ toList, pod: opts.pod, rig: opts.rig, message, opts, deps });
+        return;
+      }
+
+      // --- Single-seat path (byte-identical to pre-0.4.3.30) ---
+      if (session === undefined || text === undefined) {
+        console.error("Usage: rig send <session> <text>  (or --to/--pod/--rig <message> for fan-out)");
+        process.exitCode = 1;
+        return;
+      }
 
       // --- Cross-host short-circuit (CLI-side ssh shell-out; daemon untouched) ---
       if (opts.host) {
@@ -165,6 +237,12 @@ via single-hop ssh. SSH success is NOT verify success: the remote rig's
       }
 
       console.log(`Sent to ${session}`);
+      // OPR.0.4.3.28 correction — an `unknown`-telemetry send now PROCEEDS with a non-blocking
+      // advisory (was a fail-closed refusal). Surface it on the human output, not only in --json.
+      const advisory = res.data["warning"] as string | undefined;
+      if (advisory) {
+        console.log(`Advisory: ${advisory}`);
+      }
       if (opts.verify) {
         // Legacy line preserved verbatim (existing scripts grep `Verified:`);
         // the Delivery line below carries the honest three-outcome vocabulary
@@ -235,6 +313,83 @@ async function runCrossHostSend(
     return;
   }
   emitCrossHostFailure(host.id, hostDisplayTarget(host), result, opts.json);
+}
+
+// OPR.0.4.3.30 — fan-out send (`--to` / `--pod` / `--rig`). Reuses the DAEMON's broadcast
+// machinery (resolve → per-seat send loop → per-recipient results) via /api/transport/broadcast.
+// The message is sent BARE; the daemon wraps each recipient in its OWN From/To envelope
+// (envelopeSender), so every seat gets `To: <that seat>` — byte-identical to a single send.
+// --raw / --dangerously-interact send exact text with NO envelope (envelopeSender omitted).
+// Each recipient is guarded INDEPENDENTLY server-side; one refusal never aborts the set.
+async function runFanOutSend(params: {
+  toList: string[] | undefined;
+  pod: string | undefined;
+  rig: string | undefined;
+  message: string;
+  opts: { verify?: boolean; force?: boolean; raw?: boolean; dangerouslyInteract?: boolean; reason?: string; json?: boolean };
+  deps: SendDeps;
+}): Promise<void> {
+  const { toList, pod, rig, message, opts, deps } = params;
+
+  const status = await getDaemonStatus(deps.lifecycleDeps);
+  if (status.state !== "running" || status.healthy === false) {
+    console.error("Daemon not running. Start it with: rig daemon start");
+    process.exitCode = 1;
+    return;
+  }
+
+  const client = deps.clientFactory(getDaemonUrl(status));
+  const senderSession = resolveSenderSession();
+  const raw = Boolean(opts.raw || opts.dangerouslyInteract);
+
+  const body: Record<string, unknown> = {
+    text: message,
+    verify: opts.verify,
+    force: opts.force,
+    dangerouslyInteract: opts.dangerouslyInteract,
+    reason: opts.reason,
+    actorSession: senderSession ?? null,
+  };
+  if (toList) body.sessions = toList;
+  else if (pod) body.pod = pod;
+  else if (rig) body.rig = rig;
+  // Per-recipient envelope daemon-side unless raw/danger. Always pass a truthy sender (falling
+  // back to the same "<unknown sender>" marker single-send uses) so the wrap fires for parity.
+  if (!raw) {
+    body.envelopeSender = senderSession && senderSession.trim().length > 0 ? senderSession : SENDER_FALLBACK;
+  }
+
+  const res = await client.post<Record<string, unknown>>("/api/transport/broadcast", body, {
+    headers: terminalAuthHeaders(),
+  });
+
+  if (opts.json) {
+    console.log(JSON.stringify(res.data));
+    const results = (res.data["results"] as Array<{ ok: boolean }> | undefined) ?? [];
+    if (res.status >= 400 || results.some((r) => !r.ok)) process.exitCode = 1;
+    return;
+  }
+
+  if (res.status >= 400) {
+    const error = res.data["error"] as string | undefined;
+    console.error(error ?? `Send failed (HTTP ${res.status})`);
+    process.exitCode = res.status >= 500 ? 2 : 1;
+    return;
+  }
+
+  const data = res.data;
+  const results = (data["results"] as Array<{ sessionName: string; ok: boolean; error?: string }>) ?? [];
+  for (const r of results) {
+    if (r.ok) {
+      console.log(`${r.sessionName}: sent`);
+    } else {
+      console.log(`${r.sessionName}: FAILED — ${r.error ?? "unknown error"}`);
+    }
+  }
+  console.log(`${data["sent"]}/${data["total"]} delivered`);
+  if ((data["failed"] as number) > 0 || results.some((r) => !r.ok)) {
+    process.exitCode = 1;
+  }
 }
 
 function parseWaitForIdleMs(value: string | undefined): number | undefined | null {

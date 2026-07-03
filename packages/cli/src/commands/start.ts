@@ -29,6 +29,13 @@ interface PlanPreviewNode {
   logicalId: string;
   intendedAction: string;
   reason?: string;
+  // OPR.0.4.3.20 FR-6 — per-seat token truth on the wire (rig start's picker
+  // only aggregates intendedAction; `rig up --plan` renders these per seat).
+  tokenState?: "present" | "missing" | "stale" | "unverified";
+  provenance?: string | null;
+  lastVerified?: string | null;
+  freshRequired?: boolean;
+  runtimePrompt?: string;
 }
 
 interface PlanPreviewResponse {

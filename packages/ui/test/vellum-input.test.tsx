@@ -15,8 +15,8 @@ describe("VellumInput (Phase 1 primitive)", () => {
   it("applies vellum form classes", () => {
     const { container } = render(<VellumInput testId="vi-c" />);
     const el = container.querySelector("input[data-testid='vi-c']") as HTMLInputElement;
-    expect(el.className).toContain("border-stone-300");
-    expect(el.className).toContain("bg-white");
+    expect(el.className).toContain("border-outline-variant");
+    expect(el.className).toContain("bg-surface-lowest");
     expect(el.className).toContain("font-mono");
     expect(el.className).toContain("text-xs");
   });

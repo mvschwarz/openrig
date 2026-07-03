@@ -58,7 +58,7 @@ const KIND_DOT: Record<CardKind, string> = {
   incident: "bg-tertiary",
   progress: "bg-secondary",
   approval: "bg-warning",
-  concept:  "bg-stone-500",
+  concept:  "bg-outline",
 };
 
 const KIND_LABEL: Record<CardKind, string> = {
@@ -87,7 +87,7 @@ export function CardShell({ testId, kind, title, oneLiner, expanded, drillInHref
       data-card-kind={kind}
       data-expanded={open}
       style={AMBIENT_SHADOW}
-      className="relative bg-stone-100/45 backdrop-blur-[10px] overflow-hidden"
+      className="relative bg-surface-low/45 backdrop-blur-[10px] overflow-hidden"
     >
       {/* L-shaped corner brackets register the card bounds without a hard
           border — vellum vocabulary from the dashboard. */}
@@ -110,7 +110,7 @@ export function CardShell({ testId, kind, title, oneLiner, expanded, drillInHref
               colored pill; the only color is the dot. */}
           <div
             data-testid={`${testId}-pill`}
-            className="flex items-center gap-2 font-mono text-[10px] uppercase tracking-[0.18em] text-stone-700"
+            className="flex items-center gap-2 font-mono text-[10px] uppercase tracking-[0.18em] text-on-surface"
           >
             <span aria-hidden="true" className={`inline-block w-1.5 h-1.5 rounded-full ${KIND_DOT[kind]}`} />
             <span>{KIND_LABEL[kind]}</span>
@@ -119,7 +119,7 @@ export function CardShell({ testId, kind, title, oneLiner, expanded, drillInHref
           {/* Title — display weight, sized for legibility (north star) */}
           <h3
             data-testid={`${testId}-title`}
-            className="mt-2 flex items-center gap-2 font-headline text-[16px] font-bold leading-tight text-stone-900"
+            className="mt-2 flex items-center gap-2 font-headline text-[16px] font-bold leading-tight text-on-surface"
           >
             {leadingAccessory}
             <span className="truncate">{title}</span>
@@ -128,7 +128,7 @@ export function CardShell({ testId, kind, title, oneLiner, expanded, drillInHref
           {/* One-liner — clear body text */}
           <p
             data-testid={`${testId}-one-liner`}
-            className="mt-1.5 font-body text-[12px] leading-relaxed text-stone-700 line-clamp-2"
+            className="mt-1.5 font-body text-[12px] leading-relaxed text-on-surface line-clamp-2"
           >
             {oneLiner}
           </p>
@@ -156,7 +156,7 @@ export function CardShell({ testId, kind, title, oneLiner, expanded, drillInHref
               <a
                 data-testid={`${testId}-drill-in`}
                 href={drillInHref}
-                className="inline-flex items-center gap-1 min-h-[44px] border border-stone-700 px-3 py-2 font-mono text-[10px] uppercase tracking-[0.12em] text-stone-700 hover:bg-stone-900 hover:text-white transition-colors"
+                className="inline-flex items-center gap-1 min-h-[44px] border border-on-surface px-3 py-2 font-mono text-[10px] uppercase tracking-[0.12em] text-on-surface hover:bg-inverse-surface hover:text-background transition-colors"
                 onClick={(e) => e.stopPropagation()}
               >
                 {drillInLabel ?? "Open"} →
@@ -195,16 +195,16 @@ export function ShippedCard({ source }: { source: ShippedCardSource }) {
           <ol className="space-y-2 text-[11px]">
             {source.sections.slice(0, 3).map((s) => (
               <li key={s.number} data-testid={`feed-card-shipped-${source.sliceId}-section-${s.number}`} className="flex gap-2">
-                <span className="font-mono text-[10px] font-bold text-stone-500">{s.number}.</span>
+                <span className="font-mono text-[10px] font-bold text-on-surface-variant">{s.number}.</span>
                 <div>
-                  <div className="font-semibold text-stone-900">{s.heading}</div>
-                  <div className="text-stone-700">{s.summary}</div>
+                  <div className="font-semibold text-on-surface">{s.heading}</div>
+                  <div className="text-on-surface">{s.summary}</div>
                 </div>
               </li>
             ))}
           </ol>
         ) : (
-          <div className="text-[11px] text-stone-600">{source.oneLiner}</div>
+          <div className="text-[11px] text-on-surface-variant">{source.oneLiner}</div>
         )
       }
     />
@@ -229,7 +229,7 @@ const STATUS_DOT: Record<IncidentCardSource["status"], string> = {
   warning: "bg-amber-500",
   danger:  "bg-red-500",
   info:    "bg-sky-500",
-  muted:   "bg-stone-400",
+  muted:   "bg-outline-variant",
 };
 
 export function IncidentCard({ source }: { source: IncidentCardSource }) {
@@ -255,13 +255,13 @@ export function IncidentCard({ source }: { source: IncidentCardSource }) {
             {source.recentEntries.slice(0, 3).map((e, i) => (
               <li key={i} data-testid={`feed-card-incident-${source.sliceId}-entry-${i}`} className="flex items-baseline gap-2">
                 <span className={`inline-block h-2 w-2 rounded-full ${STATUS_DOT[e.status]} shrink-0`} aria-hidden="true" />
-                <span className="font-mono text-[9px] uppercase tracking-[0.10em] text-stone-500 shrink-0">{e.time}</span>
-                <span className="text-stone-900">{e.title}</span>
+                <span className="font-mono text-[9px] uppercase tracking-[0.10em] text-on-surface-variant shrink-0">{e.time}</span>
+                <span className="text-on-surface">{e.title}</span>
               </li>
             ))}
           </ul>
         ) : (
-          <div className="text-[11px] text-stone-600">No recent entries.</div>
+          <div className="text-[11px] text-on-surface-variant">No recent entries.</div>
         )
       }
     />
@@ -307,7 +307,7 @@ export function ProgressCard({
         event.stopPropagation();
         onMarkComplete(source.missionId);
       }}
-      className="min-h-[36px] border border-stone-700 px-3 py-1.5 font-mono text-[10px] uppercase tracking-[0.12em] text-stone-700 hover:bg-stone-900 hover:text-white transition-colors focus:outline-none focus:ring-1 focus:ring-stone-700"
+      className="min-h-[36px] border border-on-surface px-3 py-1.5 font-mono text-[10px] uppercase tracking-[0.12em] text-on-surface hover:bg-inverse-surface hover:text-background transition-colors focus:outline-none focus:ring-1 focus:ring-on-surface"
     >
       Mark complete
     </button>
@@ -326,7 +326,7 @@ export function ProgressCard({
         <div
           data-testid={`feed-card-progress-${source.missionId}-bar`}
           data-percent={pct}
-          className="h-1.5 w-16 shrink-0 border border-outline-variant bg-stone-100 overflow-hidden"
+          className="h-1.5 w-16 shrink-0 border border-outline-variant bg-surface-low overflow-hidden"
           aria-label={`Progress ${pct}%`}
         >
           <div
@@ -338,13 +338,13 @@ export function ProgressCard({
       }
       expanded={
         source.activeSlice ? (
-          <div data-testid={`feed-card-progress-${source.missionId}-active-slice`} className="border border-outline-variant bg-stone-50 px-2 py-2">
-            <div className="font-mono text-[8px] uppercase tracking-[0.18em] text-stone-500">Active slice</div>
-            <div className="mt-1 text-[12px] font-semibold text-stone-900">{source.activeSlice.label}</div>
-            <div className="mt-0.5 font-mono text-[9px] text-stone-600">status: {source.activeSlice.status}</div>
+          <div data-testid={`feed-card-progress-${source.missionId}-active-slice`} className="border border-outline-variant bg-background px-2 py-2">
+            <div className="font-mono text-[8px] uppercase tracking-[0.18em] text-on-surface-variant">Active slice</div>
+            <div className="mt-1 text-[12px] font-semibold text-on-surface">{source.activeSlice.label}</div>
+            <div className="mt-0.5 font-mono text-[9px] text-on-surface-variant">status: {source.activeSlice.status}</div>
           </div>
         ) : (
-          <div className="text-[11px] text-stone-600">No active slice.</div>
+          <div className="text-[11px] text-on-surface-variant">No active slice.</div>
         )
       }
     />
@@ -394,7 +394,7 @@ export function ApprovalCard({ source }: { source: ApprovalCardSource }) {
               type="button"
               data-testid={`feed-card-approval-${source.qitemId}-deny`}
               onClick={source.onDeny}
-              className="min-h-[44px] border border-stone-700 px-3 py-1.5 font-mono text-[10px] uppercase tracking-[0.12em] text-stone-700 hover:bg-stone-900 hover:text-white transition-colors"
+              className="min-h-[44px] border border-on-surface px-3 py-1.5 font-mono text-[10px] uppercase tracking-[0.12em] text-on-surface hover:bg-inverse-surface hover:text-background transition-colors"
             >
               Deny
             </button>
@@ -403,11 +403,11 @@ export function ApprovalCard({ source }: { source: ApprovalCardSource }) {
       }
       expanded={
         source.bodyPreview ? (
-          <pre data-testid={`feed-card-approval-${source.qitemId}-body`} className="overflow-x-auto whitespace-pre-wrap break-words bg-stone-50 p-2 font-body text-[11px] leading-relaxed text-stone-800">
+          <pre data-testid={`feed-card-approval-${source.qitemId}-body`} className="overflow-x-auto whitespace-pre-wrap break-words bg-background p-2 font-body text-[11px] leading-relaxed text-on-surface">
             {source.bodyPreview}
           </pre>
         ) : (
-          <div className="text-[11px] text-stone-600">No body preview.</div>
+          <div className="text-[11px] text-on-surface-variant">No body preview.</div>
         )
       }
     />
@@ -442,24 +442,24 @@ export function ConceptCard({ source }: { source: ConceptCardSource }) {
         source.comparePreview && source.comparePreview.length > 0 ? (
           <table className="w-full border-collapse text-[11px]">
             <thead>
-              <tr className="bg-stone-50">
-                <th className="border border-outline-variant px-2 py-1 text-left font-mono text-[8px] uppercase tracking-[0.12em] text-stone-600"></th>
-                <th className="border border-outline-variant px-2 py-1 text-left font-mono text-[8px] uppercase tracking-[0.12em] text-stone-600">Old</th>
-                <th className="border border-outline-variant px-2 py-1 text-left font-mono text-[8px] uppercase tracking-[0.12em] text-stone-600">New</th>
+              <tr className="bg-background">
+                <th className="border border-outline-variant px-2 py-1 text-left font-mono text-[8px] uppercase tracking-[0.12em] text-on-surface-variant"></th>
+                <th className="border border-outline-variant px-2 py-1 text-left font-mono text-[8px] uppercase tracking-[0.12em] text-on-surface-variant">Old</th>
+                <th className="border border-outline-variant px-2 py-1 text-left font-mono text-[8px] uppercase tracking-[0.12em] text-on-surface-variant">New</th>
               </tr>
             </thead>
             <tbody>
               {source.comparePreview.slice(0, 3).map((row, i) => (
                 <tr key={i}>
-                  <td className="border border-outline-variant px-2 py-1 font-mono text-[10px] font-semibold text-stone-700">{row.label}</td>
-                  <td className="border border-outline-variant px-2 py-1 text-stone-700">{row.valueOld}</td>
-                  <td className="border border-outline-variant px-2 py-1 text-stone-900">{row.valueNew}</td>
+                  <td className="border border-outline-variant px-2 py-1 font-mono text-[10px] font-semibold text-on-surface">{row.label}</td>
+                  <td className="border border-outline-variant px-2 py-1 text-on-surface">{row.valueOld}</td>
+                  <td className="border border-outline-variant px-2 py-1 text-on-surface">{row.valueNew}</td>
                 </tr>
               ))}
             </tbody>
           </table>
         ) : (
-          <div className="text-[11px] text-stone-600">{source.oneLiner}</div>
+          <div className="text-[11px] text-on-surface-variant">{source.oneLiner}</div>
         )
       }
     />
@@ -694,7 +694,7 @@ export function StorytellingFeed({
 }) {
   if (items.length === 0) {
     return (
-      <div data-testid="storytelling-feed-empty" className="border border-dashed border-outline-variant bg-white/35 p-4 font-body text-[11px] text-stone-500">
+      <div data-testid="storytelling-feed-empty" className="border border-dashed border-outline-variant bg-surface-lowest/35 p-4 font-body text-[11px] text-on-surface-variant">
         No items in the feed.
       </div>
     );

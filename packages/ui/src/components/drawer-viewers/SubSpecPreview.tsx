@@ -24,32 +24,32 @@ export function SubSpecPreview({
     <div data-testid="sub-spec-preview" className="flex flex-col h-full">
       <header className="px-4 py-3 border-b border-outline-variant">
         <SectionHeader tone="muted">Referenced spec</SectionHeader>
-        <h3 className="mt-1 font-mono text-xs text-stone-900 break-all">
+        <h3 className="mt-1 font-mono text-xs text-on-surface break-all">
           {specKind}: {specName}
         </h3>
       </header>
       <div className="px-4 py-3 border-b border-outline-variant space-y-1.5 font-mono text-xs">
         <div className="flex items-baseline justify-between gap-3">
           <span className="text-on-surface-variant">Kind</span>
-          <span className="text-stone-900">{specKind}</span>
+          <span className="text-on-surface">{specKind}</span>
         </div>
         {version ? (
           <div className="flex items-baseline justify-between gap-3">
             <span className="text-on-surface-variant">Version</span>
-            <span className="text-stone-900">{version}</span>
+            <span className="text-on-surface">{version}</span>
           </div>
         ) : null}
         {source ? (
           <div className="flex items-baseline justify-between gap-3">
             <span className="text-on-surface-variant">Source</span>
-            <span className="text-stone-900 uppercase">{source.replace("_", " ")}</span>
+            <span className="text-on-surface uppercase">{source.replace("_", " ")}</span>
           </div>
         ) : null}
       </div>
       <div className="px-4 py-3 flex-1 min-h-0 overflow-y-auto">
         <SectionHeader tone="muted">Manifest excerpt</SectionHeader>
         {manifestExcerpt ? (
-          <pre className="mt-2 whitespace-pre-wrap font-mono text-xs text-stone-900">
+          <pre className="mt-2 whitespace-pre-wrap font-mono text-xs text-on-surface">
             {manifestExcerpt}
           </pre>
         ) : (
@@ -62,7 +62,7 @@ export function SubSpecPreview({
             to="/specs/library/$entryId"
             params={{ entryId }}
             data-testid="sub-spec-open-center"
-            className="inline-flex items-center px-3 py-1 border border-outline-variant bg-white font-mono text-[10px] uppercase tracking-wide text-stone-900 hover:bg-stone-100"
+            className="inline-flex items-center px-3 py-1 border border-outline-variant bg-surface-lowest font-mono text-[10px] uppercase tracking-wide text-on-surface hover:bg-surface-low"
           >
             Open in center →
           </Link>

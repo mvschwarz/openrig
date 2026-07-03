@@ -115,8 +115,8 @@ function CopyActionButton({
       className={cn(
         "inline-flex items-center gap-1 px-1.5 py-0.5 border font-mono text-[7px] uppercase transition-colors",
         active
-          ? "bg-stone-900 text-white border-stone-900"
-          : "bg-white text-stone-900 border-stone-300 hover:bg-stone-100",
+          ? "bg-inverse-surface text-background border-on-surface"
+          : "bg-surface-lowest text-on-surface border-outline-variant hover:bg-surface-low",
       )}
     >
       {tool ? <ToolMark tool={tool} size="xs" /> : null}
@@ -208,23 +208,23 @@ export function DiscoveryPanel({
   return (
     <aside
       data-testid="discovery-panel"
-      className="absolute inset-y-0 right-0 z-20 w-80 border-l border-stone-300/25 bg-[rgba(250,249,245,0.035)] supports-[backdrop-filter]:bg-[rgba(250,249,245,0.018)] backdrop-blur-[14px] backdrop-saturate-75 shadow-[-6px_0_14px_rgba(46,52,46,0.04)] flex flex-col overflow-hidden"
+      className="absolute inset-y-0 right-0 z-20 w-80 border-l border-outline-variant/25 bg-[hsl(var(--background)/0.035)] supports-[backdrop-filter]:bg-[hsl(var(--background)/0.018)] backdrop-blur-[14px] backdrop-saturate-75 shadow-[-6px_0_14px_rgba(46,52,46,0.04)] flex flex-col overflow-hidden"
     >
-      <div className="flex items-center justify-between px-4 py-3 border-b border-stone-300/35 shrink-0">
-        <h2 className="min-w-0 font-mono text-xs font-bold text-stone-900 truncate">discovery</h2>
+      <div className="flex items-center justify-between px-4 py-3 border-b border-outline-variant/35 shrink-0">
+        <h2 className="min-w-0 font-mono text-xs font-bold text-on-surface truncate">discovery</h2>
         <button
           data-testid="discovery-close"
           onClick={onClose}
-          className="text-stone-400 hover:text-stone-900 text-sm"
+          className="text-on-surface-variant hover:text-on-surface text-sm"
           aria-label="Close"
         >
           ✕
         </button>
       </div>
 
-      <div className="border-b border-stone-300/35 px-4 py-3 shrink-0 space-y-2">
+      <div className="border-b border-outline-variant/35 px-4 py-3 shrink-0 space-y-2">
         <div className="flex items-center justify-between gap-3">
-          <div className="font-mono text-[8px] uppercase tracking-[0.16em] text-stone-500">Inventory</div>
+          <div className="font-mono text-[8px] uppercase tracking-[0.16em] text-on-surface-variant">Inventory</div>
           <Button
             variant="ghost"
             size="sm"
@@ -239,7 +239,7 @@ export function DiscoveryPanel({
           to="/discovery/inventory"
           data-testid="discovery-open-inventory"
           onClick={onClose}
-          className="inline-flex items-center border border-stone-300 bg-white px-1.5 py-0.5 font-mono text-[7px] uppercase tracking-[0.12em] text-stone-700 transition-colors hover:bg-stone-100 hover:text-stone-900"
+          className="inline-flex items-center border border-outline-variant bg-surface-lowest px-1.5 py-0.5 font-mono text-[7px] uppercase tracking-[0.12em] text-on-surface transition-colors hover:bg-surface-low hover:text-on-surface"
         >
           Legacy Inventory Page
         </Link>
@@ -247,7 +247,7 @@ export function DiscoveryPanel({
 
       <div className="flex-1 overflow-y-auto px-4 py-3 space-y-3">
         {sessions.length === 0 ? (
-          <div data-testid="discovery-empty" className="font-mono text-[10px] text-stone-500">
+          <div data-testid="discovery-empty" className="font-mono text-[10px] text-on-surface-variant">
             No running Claude or Codex sessions are currently visible.
           </div>
         ) : (
@@ -258,20 +258,20 @@ export function DiscoveryPanel({
                 key={session.id}
                 data-testid={`discovery-session-${session.id}`}
                 className={cn(
-                  "border border-stone-200 bg-white/60 px-3 py-3",
+                  "border border-outline-variant bg-surface-lowest/60 px-3 py-3",
                   selected && "border-emerald-500 shadow-[0_10px_24px_rgba(34,197,94,0.16)]",
                 )}
               >
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0 flex-1">
                     <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                      <RuntimeBadge runtime={session.runtimeHint} size="xs" compact className="bg-white/45" />
-                      <div className="font-mono text-[10px] text-stone-900 truncate" title={session.tmuxSession}>
+                      <RuntimeBadge runtime={session.runtimeHint} size="xs" compact className="bg-surface-lowest/45" />
+                      <div className="font-mono text-[10px] text-on-surface truncate" title={session.tmuxSession}>
                         {session.tmuxSession}
                       </div>
                     </div>
                     {session.cwd ? (
-                      <div className="mt-1 font-mono text-[9px] text-stone-500 truncate" title={session.cwd}>
+                      <div className="mt-1 font-mono text-[9px] text-on-surface-variant truncate" title={session.cwd}>
                         {session.cwd}
                       </div>
                     ) : null}
@@ -307,7 +307,7 @@ export function DiscoveryPanel({
                     {selectedCardStatus ? (
                       <div
                         data-testid="discovery-selected-session-status"
-                        className="border border-emerald-300/80 bg-white/70 px-2.5 py-2 font-mono text-[10px] leading-5 text-stone-900"
+                        className="border border-emerald-300/80 bg-surface-lowest/70 px-2.5 py-2 font-mono text-[10px] leading-5 text-on-surface"
                       >
                         {selectedCardStatus}
                       </div>
@@ -323,9 +323,9 @@ export function DiscoveryPanel({
                     ) : null}
 
                     {placementTarget?.eligible ? (
-                      <div className="space-y-2 border border-emerald-300/80 bg-white/70 px-3 py-2" data-testid="discovery-target-card">
+                      <div className="space-y-2 border border-emerald-300/80 bg-surface-lowest/70 px-3 py-2" data-testid="discovery-target-card">
                         <div className="font-mono text-[8px] uppercase tracking-[0.16em] text-emerald-800">Target</div>
-                        <div data-testid="discovery-target-summary" className="font-mono text-[10px] text-stone-900">
+                        <div data-testid="discovery-target-summary" className="font-mono text-[10px] text-on-surface">
                           {placementTarget.kind === "node"
                             ? `${targetNodeLabel(placementTarget.logicalId)} selected`
                             : `${targetPodLabel(placementTarget)} pod selected`}
@@ -340,7 +340,7 @@ export function DiscoveryPanel({
                               data-testid="discovery-member-name-input"
                               value={memberName}
                               onChange={(event) => setMemberName(event.target.value)}
-                              className="w-full bg-transparent border-b border-emerald-300 py-1 font-mono text-[10px] text-stone-900 focus:outline-none focus:border-emerald-700"
+                              className="w-full bg-transparent border-b border-emerald-300 py-1 font-mono text-[10px] text-on-surface focus:outline-none focus:border-emerald-700"
                             />
                           </div>
                         ) : null}

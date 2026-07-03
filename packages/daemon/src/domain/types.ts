@@ -81,6 +81,12 @@ export interface Session {
   status: string;
   resumeType: string | null;
   resumeToken: string | null;
+  // OPR.0.4.3.20 FR-3/FR-6 — resume ledger provenance + verification freshness.
+  // Optional so pre-45 rows and old serialized snapshots degrade (undefined →
+  // treated as missing/unverified in the restore plan), never a crash.
+  resumeProvenance?: string | null;
+  resumeLastVerified?: string | null;
+  resumeLastProbeStatus?: string | null;
   restorePolicy: string;
   lastSeenAt: string | null;
   createdAt: string;
@@ -121,6 +127,20 @@ export type RigEvent =
   // (`reconcile_capture`). NEVER carries the raw token (credential-class);
   // `redacted: true` marks that the token value is intentionally omitted.
   | { type: "session.resume_token_set"; rigId: string; nodeId: string; sessionName: string; sessionId: string; resumeType: string; previousProvenance: "hook" | "scrape" | "operator" | null; newProvenance: "operator" | "scrape"; source: "operator_set" | "reconcile_capture"; reason?: string; operator?: string; redacted: true }
+  // OPR.0.4.3.20 FR-3 — append-only observability of an adoption-boundary
+  // resume-token capture (reconcile / adopt / bind). `captured` records a
+  // successful persist (provenance "adoption"); `preserved` records that a valid
+  // token WAS derived but the provenance guard refused the write because a
+  // higher-rank token (hook/operator) already exists — the ledger is correctly
+  // kept and the event must NOT falsely claim a captured adoption write;
+  // `skipped` records an honest failure (the seat SHOULD have resumed but the
+  // token was not derivable) with a stated reason — the "surfaced loudly, no
+  // silent gap" AC. Terminal/unknown runtimes are exempt and emit NO event.
+  // Carries resumeType/provenance, never the raw token (`redacted: true` = the
+  // token value is intentionally omitted; this is observability, NOT a
+  // secret-boundary control — resume tokens are not treated as secret per the
+  // 2026-07-02 founder ruling).
+  | { type: "session.resume_token_captured"; rigId: string; nodeId: string; sessionName: string; sessionId: string; runtime: string; outcome: "captured" | "preserved" | "skipped"; resumeType?: string; provenance?: "adoption"; reason?: "missing_sidecar" | "parse_error" | "probe_timeout" | "invalid_token" | "higher_rank_present"; redacted: true }
   | { type: "seat.attention_cleared"; rigId: string; nodeId: string; sessionName: string; from: string; to: "ready"; clearedBy: "evidence" | "operator_attestation"; evidence?: { kind: string; state?: string; reason?: string }; reason?: string; previousError: string | null }
   | { type: "rig.imported"; rigId: string; specName: string; specVersion: string }
   // Package events (cross-rig, no rigId)
@@ -157,6 +177,15 @@ export type RigEvent =
   | { type: "node.startup_pending"; rigId: string; nodeId: string }
   | { type: "node.startup_ready"; rigId: string; nodeId: string }
   | { type: "node.startup_failed"; rigId: string; nodeId: string; error: string }
+  // OPR.0.4.3.06 — startup proof (challenge-verified orientation). Append-only.
+  // `node.startup_challenged` freezes this launch's challenge ground truth
+  // (challengeId + contractHash; the expected answer is recomputed, never
+  // stored). `node.startup_proof_verified`/`_rejected` are the verified/rejected
+  // evidence — the ONLY writer of the `oriented` projection. None route through
+  // updateStartupStatus; `ready` never means oriented.
+  | { type: "node.startup_challenged"; rigId: string; nodeId: string; challengeId: string; contractHash: string }
+  | { type: "node.startup_proof_verified"; rigId: string; nodeId: string; sessionId: string; challengeId: string; contractHash: string }
+  | { type: "node.startup_proof_rejected"; rigId: string; nodeId: string; challengeId: string | null; reason: "identity_unbound" | "identity_mismatch" | "challenge_stale" | "contract_mismatch" | "bare_ack" }
   | { type: "continuity.sync"; rigId: string; podId: string; nodeId: string }
   | { type: "continuity.degraded"; rigId: string; podId: string; nodeId: string; reason: string }
   // V0.3.1 slice 05 kernel-rig-as-default — forward-fix #3 architectural.
@@ -372,6 +401,13 @@ export type RestoreOutcome =
 // directly by restore, only emitted via `restore.outcome_reconciled`).
 // OPR.0.3.4.2 - carries the five-term restore vocabulary into `rig ps`.
 export type NodeRestoreOutcome = "resumed" | "rebuilt" | "fresh" | "fresh-primed" | "awaiting-decision" | "failed" | "attention_required" | "operator_recovered" | "n-a";
+
+// OPR.0.4.3.06 — challenge-verified startup orientation, DISTINCT from
+// startupStatus (`ready` = delivered/interactive only). `verified` = a proof
+// answering this launch's challenge was accepted; `missing` = challenged, not
+// yet proven; `rejected` = the latest proof for this challenge was rejected;
+// `n-a` = never challenged (resumed restore / non-agent / skip-harness).
+export type NodeOriented = "verified" | "missing" | "rejected" | "n-a";
 export type OccupantLifecycle = "active" | "retiring" | "retired" | "context_walled" | "compacted" | "crashed" | "unknown";
 export type ContinuityOutcome = "resumed" | "rebuilt" | "forked" | "fresh" | "failed";
 export type HandoverResult = "complete" | "unchanged" | "partial" | "failed" | null;
@@ -408,6 +444,53 @@ export interface NodeRecoveryGuidance {
 // fresh-launch, and surfaces "attention required" for the post-L3 Claude resume-prompt proxy.
 export type NodeLifecycleState = "running" | "detached" | "recoverable" | "attention_required";
 
+/**
+ * OPR.0.4.3.19 — the liveness identity verdict for a managed seat.
+ *
+ * A THIRD axis, orthogonal to slice-15's `terminalActive` (tmux output
+ * recency) and `hasAssignedWork` (queue-derived). It answers: does the process
+ * currently in the seat's registered tmux pane match the seat we are reporting?
+ * Computed by the periodic SeatIdentityReconciler from the pane PID/command vs
+ * the registered `bindings.tmux_pane`, NEVER from queue/classifier/hook
+ * heartbeats. Only `mismatch` and `pane_missing` down-rank a `running`
+ * projection; `verified` and `tmux_unavailable` (and an absent verdict) leave
+ * it unchanged.
+ */
+export type SeatIdentityVerdictKind = "verified" | "mismatch" | "pane_missing" | "tmux_unavailable";
+
+export interface SeatIdentityVerdict {
+  nodeId: string;
+  verdict: SeatIdentityVerdictKind;
+  /** Which observation axis produced the verdict. Null for `verified`. */
+  evidenceSource: "pane_process" | "tmux_session" | null;
+  /** The specific reason for a non-verified verdict. Null for `verified`. */
+  reason:
+    | "process_identity_mismatch"
+    | "pane_pid_gone"
+    | "session_missing"
+    | "tmux_unavailable"
+    | null;
+  evidence: {
+    registeredPane: string | null;
+    observedPid: number | null;
+    observedCommand: string | null;
+    matchedLayer: number | null;
+  };
+  sessionName: string | null;
+  observedAt: string;
+}
+
+/**
+ * OPR.0.4.3.19 — the two verdict kinds that down-rank a `running`/`active`
+ * projection to a non-green state. `verified`, `tmux_unavailable`, and an
+ * ABSENT verdict all leave the projection unchanged (fail-open on unknown).
+ */
+export function identityVerdictDownranksRunning(
+  verdict: SeatIdentityVerdictKind | null | undefined,
+): boolean {
+  return verdict === "mismatch" || verdict === "pane_missing";
+}
+
 // Per-rig lifecycle aggregate folded from per-node states.
 //   running           — every node is running.
 //   recoverable       — every node is non-running and at least one node has a usable snapshot token.
@@ -429,6 +512,9 @@ export interface NodeInventoryEntry {
   sessionStatus: string | null;
   startupStatus: "pending" | "ready" | "attention_required" | "failed" | null;
   restoreOutcome: NodeRestoreOutcome;
+  // OPR.0.4.3.06 — challenge-verified orientation, surfaced beside (never
+  // folded into) startupStatus.
+  oriented: NodeOriented;
   lifecycleState: NodeLifecycleState;
   occupantLifecycle: OccupantLifecycle;
   continuityOutcome: ContinuityOutcome | null;
@@ -482,6 +568,16 @@ export interface NodeInventoryEntry {
   hasAssignedWork?: boolean;
   /** Optional count of pending qitems assigned to this seat (cheap aggregate). */
   pendingWorkCount?: number;
+  /**
+   * OPR.0.4.3.19 — liveness identity verdict (the THIRD axis). Present when
+   * the SeatIdentityReconciler has recorded a verdict for this node; absent
+   * (undefined) when never polled. A `mismatch`/`pane_missing` verdict
+   * down-ranks the node's `lifecycleState`/`occupantLifecycle` away from
+   * running/active and carries the evidence. MUST NOT be derived from
+   * `terminalActive`, `hasAssignedWork`, or any queue/classifier/hook
+   * heartbeat — process identity only.
+   */
+  identityVerdict?: SeatIdentityVerdict | null;
   /** OPR.0.3.4.11 — held reason derived from the latest `node.held` event.
    *  Null when no held event, or superseded by a running session / later launch. */
   heldReason?: string | null;

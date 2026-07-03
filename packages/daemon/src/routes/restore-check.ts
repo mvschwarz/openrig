@@ -127,6 +127,50 @@ function getStartupContext(db: Database.Database, nodeId: string): StartupContex
   }
 }
 
+/**
+ * OPR.0.4.3.22 — build a RestoreCheckService wired to the live daemon
+ * repositories. Extracted so the rig-status compose route can consume the SAME
+ * restore-check readiness signal (RecoveryPlan) the `/api/restore-check` route
+ * emits, rather than re-implementing it (ponytail: one restore-check, composed).
+ */
+export function createRestoreCheckService(
+  rigRepo: RigRepository,
+  snapshotRepo: SnapshotRepository,
+): RestoreCheckService {
+  const serviceDeps: RestoreCheckDeps = {
+    listRigs: () => {
+      const rigs = rigRepo.listRigs();
+      return rigs.map((r) => ({ rigId: r.id, name: r.name }));
+    },
+    getNodeInventory: (rigId: string) => {
+      const nodeIdByLogicalId = getNodeIdMap(rigRepo.db, rigId);
+      return getNodeInventory(rigRepo.db, rigId).map((entry) => ({
+        ...entry,
+        nodeId: nodeIdByLogicalId.get(entry.logicalId) ?? null,
+      })) as NodeInventoryEntry[];
+    },
+    getStartupContext: (nodeId: string) => {
+      return getStartupContext(rigRepo.db, nodeId);
+    },
+    hasSnapshot: (rigId: string) => {
+      return snapshotRepo.listSnapshots(rigId).length > 0;
+    },
+    getLatestSnapshot: (rigId: string) => {
+      const snapshot = snapshotRepo.getLatestSnapshot(rigId);
+      return snapshot ? { id: snapshot.id, kind: snapshot.kind } : null;
+    },
+    probeDaemonHealth: () => {
+      // We're inside the daemon — if this route is responding, daemon is healthy
+      return { healthy: true, evidence: "Daemon running (responding to API requests)" };
+    },
+    exists: (path: string) => {
+      try { return existsSync(path); } catch { return false; }
+    },
+    readFile: (path: string) => readFileSync(path, "utf-8"),
+  };
+  return new RestoreCheckService(serviceDeps);
+}
+
 // GET /api/restore-check?rig=<name>&noQueue=true&noHooks=true&compact=1
 restoreCheckRoutes.get("/", (c) => {
   const deps = getDeps(c);
@@ -138,39 +182,7 @@ restoreCheckRoutes.get("/", (c) => {
   const includeReady = c.req.query("ready") === "1";
 
   try {
-    const serviceDeps: RestoreCheckDeps = {
-      listRigs: () => {
-        const rigs = deps.rigRepo.listRigs();
-        return rigs.map((r) => ({ rigId: r.id, name: r.name }));
-      },
-      getNodeInventory: (rigId: string) => {
-        const nodeIdByLogicalId = getNodeIdMap(deps.rigRepo.db, rigId);
-        return getNodeInventory(deps.rigRepo.db, rigId).map((entry) => ({
-          ...entry,
-          nodeId: nodeIdByLogicalId.get(entry.logicalId) ?? null,
-        })) as NodeInventoryEntry[];
-      },
-      getStartupContext: (nodeId: string) => {
-        return getStartupContext(deps.rigRepo.db, nodeId);
-      },
-      hasSnapshot: (rigId: string) => {
-        return deps.snapshotRepo.listSnapshots(rigId).length > 0;
-      },
-      getLatestSnapshot: (rigId: string) => {
-        const snapshot = deps.snapshotRepo.getLatestSnapshot(rigId);
-        return snapshot ? { id: snapshot.id, kind: snapshot.kind } : null;
-      },
-      probeDaemonHealth: () => {
-        // We're inside the daemon — if this route is responding, daemon is healthy
-        return { healthy: true, evidence: "Daemon running (responding to API requests)" };
-      },
-      exists: (path: string) => {
-        try { return existsSync(path); } catch { return false; }
-      },
-      readFile: (path: string) => readFileSync(path, "utf-8"),
-    };
-
-    const service = new RestoreCheckService(serviceDeps);
+    const service = createRestoreCheckService(deps.rigRepo, deps.snapshotRepo);
     const result = service.check({ rig: rigFilter, noQueue, noHooks, compact, includeReady });
 
     if (compact) {

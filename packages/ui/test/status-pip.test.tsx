@@ -28,7 +28,7 @@ describe("StatusPip (Phase 1 primitive)", () => {
     const root = container.querySelector(`[data-testid='sp-${status}']`) as HTMLElement;
     const dot = root.querySelector("span[aria-hidden]") as HTMLElement;
     if (status === "active" || status === "running") expect(dot.className).toContain("bg-success");
-    if (status === "stopped") expect(dot.className).toContain("bg-stone-400");
+    if (status === "stopped") expect(dot.className).toContain("bg-outline-variant");
     if (status === "warning") expect(dot.className).toContain("bg-warning");
     if (status === "error") expect(dot.className).toContain("bg-tertiary");
     if (status === "info") expect(dot.className).toContain("bg-secondary");

@@ -7,7 +7,7 @@
 // own card showing identity, load, and capabilities.
 //
 // V1 attempt-3 Phase 5 P5-8: refactored to compose VellumCard primitive
-// (Phase 1) — replaces the ad-hoc `border border-stone-300 bg-stone-50`
+// (Phase 1) — replaces the ad-hoc `border border-outline-variant bg-background`
 // chrome with the canonical vellum aesthetic (cream paper background +
 // 1px outline-variant border + RegistrationMarks + hard-shadow). Aligns
 // HumanSeatCard with the V1 tactical-dossier visual language for the
@@ -54,7 +54,7 @@ export function HumanSeatCard({
             <SectionHeader tone="muted">Human seat</SectionHeader>
             <div
               data-testid="mc-human-seat-session"
-              className="mt-1 font-mono text-sm text-stone-900 truncate"
+              className="mt-1 font-mono text-sm text-on-surface truncate"
             >
               {session}
             </div>
@@ -62,7 +62,7 @@ export function HumanSeatCard({
           <div className="text-right shrink-0">
             <div
               data-testid="mc-human-seat-pending"
-              className="font-mono text-2xl font-bold text-stone-900 leading-none"
+              className="font-mono text-2xl font-bold text-on-surface leading-none"
             >
               {pendingCount}
             </div>
@@ -93,7 +93,7 @@ export function HumanSeatCard({
           {capabilities.map((cap) => (
             <span
               key={cap}
-              className="border border-outline-variant px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-[0.1em] text-on-surface-variant bg-white/30"
+              className="border border-outline-variant px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-[0.1em] text-on-surface-variant bg-surface-lowest/30"
             >
               {cap}
             </span>

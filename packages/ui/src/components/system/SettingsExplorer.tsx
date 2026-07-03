@@ -58,7 +58,7 @@ export function SettingsExplorer() {
       <div className="px-2 mb-2">
         <span
           data-testid="settings-explorer-heading"
-          className="block font-mono text-[11px] uppercase tracking-wide text-stone-900 px-2 py-1"
+          className="block font-mono text-[11px] uppercase tracking-wide text-on-surface px-2 py-1"
         >
           {"> "}Settings
         </span>
@@ -75,8 +75,8 @@ export function SettingsExplorer() {
                 className={cn(
                   "block font-mono text-[11px] uppercase tracking-wide px-2 py-1",
                   active
-                    ? "bg-stone-900 text-stone-50"
-                    : "text-stone-700 hover:text-stone-900 hover:bg-surface-low",
+                    ? "bg-inverse-surface text-background"
+                    : "text-on-surface hover:text-on-surface hover:bg-surface-low",
                 )}
               >
                 {item.label}

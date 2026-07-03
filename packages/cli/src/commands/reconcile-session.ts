@@ -4,7 +4,7 @@
 // The repair for "I manually resumed the seat; make the daemon see it again."
 
 import { Command } from "commander";
-import { DaemonClient } from "../client.js";
+import { DaemonClient, terminalAuthHeaders } from "../client.js";
 import { getDaemonStatus, getDaemonUrl } from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
@@ -73,6 +73,7 @@ reported as projection drift; conversation continuity is never claimed.`)
       const res = await client.post<ReconcileResponse>(
         `/api/sessions/${encodeURIComponent(session)}/reconcile`,
         body,
+        { headers: terminalAuthHeaders() },
       );
       const data = res.data;
 

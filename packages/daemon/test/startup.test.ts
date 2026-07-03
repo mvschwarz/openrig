@@ -195,6 +195,35 @@ describe("createDaemon startup composition", () => {
     }
   });
 
+  // OPR.0.4.3.28 Blocker 2 — the self-provisioned OPENRIG_URL must honor an
+  // explicit daemon bind host (the daemon binds only that host), not a hardcoded
+  // loopback that a tailnet/hostname-bound daemon is not listening on.
+  it("self-provisions OPENRIG_URL from an explicit bind host into launched tmux sessions", async () => {
+    vi.stubEnv("OPENRIG_PORT", "17433");
+    vi.stubEnv("OPENRIG_HOST", "100.64.0.5");
+    vi.stubEnv("OPENRIG_URL", ""); // NOT operator-supplied → daemon derives it
+    vi.stubEnv("OPENRIG_ACTIVITY_HOOK_TOKEN", "");
+    const cmuxFactory: CmuxTransportFactory = async () => {
+      throw Object.assign(new Error(""), { code: "ENOENT" });
+    };
+    const tmuxExec = vi.fn<ExecFn>(async () => "");
+    try {
+      const { db, deps } = await createDaemon({ cmuxFactory, tmuxExec });
+      const rig = deps.rigRepo.createRig("url-derive-rig");
+      deps.rigRepo.addNode(rig.id, "worker", { runtime: "codex" });
+      const result = await deps.nodeLauncher.launchNode(rig.id, "worker");
+      expect(result.ok).toBe(true);
+      const newSessionCmd = tmuxExec.mock.calls
+        .map((call) => call[0])
+        .find((cmd) => cmd.includes("tmux new-session"));
+      expect(newSessionCmd).toBeDefined();
+      expect(newSessionCmd).toContain("-e 'OPENRIG_URL=http://100.64.0.5:17433'");
+      db.close();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("passes only explicitly allowlisted provider auth env into launched tmux sessions", async () => {
     vi.stubEnv("OPENRIG_RECOVERY_PROVIDER_AUTH_ENV_ALLOWLIST", "ANTHROPIC_API_KEY,CLAUDE_CODE_OAUTH_TOKEN,OPENAI_API_KEY,BOGUS_TOKEN");
     vi.stubEnv("ANTHROPIC_API_KEY", "anthropic-test-key");

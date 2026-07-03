@@ -77,7 +77,7 @@ describe("PL-slice-story-view-v1 TimelineTab", () => {
     const chip = screen.getByTestId("story-row-phase-doc.edited");
     expect(chip.textContent).toBe("untagged");
     expect(chip.getAttribute("data-phase-id")).toBe("untagged");
-    expect(chip.className).toContain("stone-100");
+    expect(chip.className).toContain("surface-low");
   });
 
   it("when phaseDefinitions is null (unbound slice), spec phase ids on events fall through exactly", () => {

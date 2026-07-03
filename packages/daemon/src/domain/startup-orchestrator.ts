@@ -9,6 +9,7 @@ import type {
 } from "./runtime-adapter.js";
 import { isAttentionRequiredReadinessCode, resolveConcreteHint } from "./runtime-adapter.js";
 import type { ProjectionPlan } from "./projection-planner.js";
+import { issueStartupChallenge } from "./startup-proof.js";
 
 // -- Types --
 
@@ -250,14 +251,34 @@ export class StartupOrchestrator {
       return this.fail(input, "failed", errors);
     }
 
+    // OPR.0.4.3.06 — a fresh or fresh-fallback MANAGED launch is challenged so
+    // orientation can be proved (never assumed). Resumed restores (excluded by
+    // the `fresh` gate) and skip-harness/legacy no-contract paths are NOT
+    // challenged → oriented stays `n-a` (no false-green, no false-downgrade).
+    // Issue BEFORE the prompt is delivered so the ground truth exists first.
     const identityAction = this.extractSessionIdentityAction(input.startupActions, context);
+    const shouldChallenge = continuityOutcome === "fresh" && !input.skipHarnessLaunch;
+    const challenge = shouldChallenge
+      ? issueStartupChallenge(this.eventBus, {
+          rigId: input.rigId,
+          nodeId: input.nodeId,
+          contractSource: JSON.stringify(input.resolvedStartupFiles),
+        })
+      : null;
+
+    // A challenge-only prompt is synthesized (guard caveat — never silently
+    // `n-a`) when a fresh managed launch has no session_identity action to ride
+    // along with; delivered after the post-launch contract files below.
+    let challengeOnlyPrompt: string | null = null;
     if (continuityOutcome === "fresh" && identityAction) {
-      const initialPrompt = await this.deliverInitialSessionPrompt(input.binding, identityAction, postLaunchFiles);
+      const initialPrompt = await this.deliverInitialSessionPrompt(input.binding, identityAction, postLaunchFiles, challenge?.promptBlock ?? null);
       if (!initialPrompt.ok) {
         errors.push(initialPrompt.error);
         return this.fail(input, "failed", errors);
       }
       postLaunchFiles = initialPrompt.remainingFiles;
+    } else if (challenge) {
+      challengeOnlyPrompt = challenge.promptBlock;
     }
 
     // 7. Deliver post-launch files (send_text → TUI, now that harness is ready)
@@ -274,6 +295,13 @@ export class StartupOrchestrator {
         errors.push(`Post-launch delivery error: ${(err as Error).message}`);
         return this.fail(input, "failed", errors);
       }
+    }
+
+    // OPR.0.4.3.06 — deliver the synthesized challenge-only prompt after the
+    // contract files. Best-effort: a failed send leaves oriented `missing`
+    // (honest), it does NOT fail an otherwise-good startup.
+    if (challengeOnlyPrompt && input.binding.tmuxSession) {
+      await this.sendInteractiveText(input.binding.tmuxSession, challengeOnlyPrompt);
     }
 
     // 8. Execute after_files actions
@@ -410,6 +438,7 @@ export class StartupOrchestrator {
     binding: NodeBinding,
     identityAction: StartupAction,
     postLaunchFiles: ResolvedStartupFile[],
+    challengeBlock: string | null,
   ): Promise<{ ok: true; remainingFiles: ResolvedStartupFile[] } | { ok: false; error: string }> {
     if (!binding.tmuxSession) {
       return { ok: false, error: "No tmux session for the initial session identity prompt" };
@@ -431,6 +460,12 @@ export class StartupOrchestrator {
         // Fall back to a standalone identity prompt and let the adapter handle
         // the original startup file using its normal failure semantics.
       }
+    }
+
+    // OPR.0.4.3.06 — the per-launch orientation challenge rides along with the
+    // identity prompt (after the contract) so no extra send is added.
+    if (challengeBlock) {
+      prompt = `${prompt}\n\n${challengeBlock}`;
     }
 
     const sendError = await this.sendInteractiveText(binding.tmuxSession, prompt);

@@ -59,7 +59,7 @@ describe("EmptyState (Phase 1 primitive)", () => {
     // so VellumCard root = body.parentElement.parentElement.
     const wrapper = body.parentElement?.parentElement as HTMLElement;
     expect(wrapper.className).toContain("bg-transparent");
-    expect(wrapper.className).toContain("border-stone-300");
+    expect(wrapper.className).toContain("border-outline-variant");
     // Flat elevation = no hard-shadow.
     expect(wrapper.className).not.toContain("hard-shadow");
   });

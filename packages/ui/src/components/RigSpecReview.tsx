@@ -86,7 +86,7 @@ export function RigSpecReview() {
         )}
 
         {/* Loading / Error */}
-        {isLoading && <div className="font-mono text-[10px] text-stone-400">Loading review...</div>}
+        {isLoading && <div className="font-mono text-[10px] text-on-surface-variant">Loading review...</div>}
         {error && (
           <div className="p-3 bg-red-50 border border-red-200 font-mono text-[10px] text-red-700">
             {(error as Error).message}

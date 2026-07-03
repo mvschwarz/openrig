@@ -32,7 +32,7 @@ export function LogPage() {
               <span className="text-on-surface-variant text-[10px] uppercase tracking-wide w-32 shrink-0 truncate">
                 {evt.type}
               </span>
-              <span className="text-stone-900 truncate" title={formatEventPayload(evt.payload)}>
+              <span className="text-on-surface truncate" title={formatEventPayload(evt.payload)}>
                 {formatEventPayload(evt.payload)}
               </span>
             </li>

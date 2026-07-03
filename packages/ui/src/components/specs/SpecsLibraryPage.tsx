@@ -86,19 +86,26 @@ function LibrarySection({
   rows,
   isLoading,
   emptyLabel,
+  badge,
 }: {
   id: string;
   title: string;
   rows: LibraryRow[];
   isLoading?: boolean;
   emptyLabel?: string;
+  /** Optional aggregate badge shown in the header right slot in place of the
+   *  default item count (e.g. agent-images "3 images · 128 MB"). */
+  badge?: string;
 }) {
   return (
-    <section data-testid={`library-section-${id}`} className="border border-outline-variant bg-white/25 hard-shadow">
-      <header className="flex items-baseline justify-between border-b border-outline-variant bg-white/30 px-3 py-2">
+    <section data-testid={`library-section-${id}`} className="border border-outline-variant bg-surface-lowest/25 hard-shadow">
+      <header className="flex items-baseline justify-between border-b border-outline-variant bg-surface-lowest/30 px-3 py-2">
         <SectionHeader tone="default">{title}</SectionHeader>
-        <span className="font-mono text-[9px] uppercase tracking-[0.12em] text-stone-500">
-          {isLoading ? "loading" : `${rows.length} items`}
+        <span
+          data-testid={`library-section-${id}-badge`}
+          className="shrink-0 font-mono text-[9px] uppercase tracking-[0.12em] text-on-surface-variant"
+        >
+          {isLoading ? "loading" : badge ?? `${rows.length} items`}
         </span>
       </header>
       {rows.length > 0 ? (
@@ -110,7 +117,7 @@ function LibrarySection({
                   to="/specs/library/$entryId"
                   params={{ entryId: row.entryId }}
                   data-testid={`library-row-${id}-${row.id}`}
-                  className="block px-3 py-2 hover:bg-stone-100/50"
+                  className="block px-3 py-2 hover:bg-surface-low/50"
                 >
                   <LibraryRowContent row={row} />
                 </Link>
@@ -127,7 +134,7 @@ function LibrarySection({
           ))}
         </ul>
       ) : (
-        <div className="px-3 py-4 font-mono text-[10px] text-stone-500">
+        <div className="px-3 py-4 font-mono text-[10px] text-on-surface-variant">
           {isLoading ? "Loading..." : emptyLabel ?? "No entries."}
         </div>
       )}
@@ -135,12 +142,21 @@ function LibrarySection({
   );
 }
 
+/** Compact human-readable byte size for the agent-image aggregate badge. */
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  const i = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)));
+  const value = bytes / Math.pow(1024, i);
+  return `${i === 0 ? value : value.toFixed(value >= 100 || i === 0 ? 0 : 1)} ${units[i]}`;
+}
+
 function LibraryRowContent({ row }: { row: LibraryRow }) {
   return (
     <div className="flex min-w-0 items-baseline justify-between gap-3 font-mono">
-      <span className="truncate text-xs font-bold text-stone-900">{row.label}</span>
+      <span className="truncate text-xs font-bold text-on-surface">{row.label}</span>
       {row.meta ? (
-        <span className="shrink-0 text-[9px] uppercase tracking-[0.08em] text-stone-500">
+        <span className="shrink-0 text-[9px] uppercase tracking-[0.08em] text-on-surface-variant">
           {row.meta}
         </span>
       ) : null}
@@ -165,11 +181,11 @@ function PluginsSection({
     <section
       id="library-plugins"
       data-testid="library-section-plugins"
-      className="border border-outline-variant bg-white/25 hard-shadow"
+      className="border border-outline-variant bg-surface-lowest/25 hard-shadow"
     >
-      <header className="flex items-baseline justify-between border-b border-outline-variant bg-white/30 px-3 py-2">
+      <header className="flex items-baseline justify-between border-b border-outline-variant bg-surface-lowest/30 px-3 py-2">
         <SectionHeader tone="default">Plugins</SectionHeader>
-        <span className="shrink-0 font-mono text-[9px] uppercase tracking-[0.12em] text-stone-500">
+        <span className="shrink-0 font-mono text-[9px] uppercase tracking-[0.12em] text-on-surface-variant">
           {isLoading ? "loading" : `${plugins.length} plugins`}
         </span>
       </header>
@@ -192,11 +208,11 @@ function PluginsSection({
                 to="/plugins/$pluginId"
                 params={{ pluginId: plugin.id }}
                 data-testid={`library-plugin-${plugin.id}`}
-                className="flex items-center gap-3 px-3 py-2 font-mono hover:bg-stone-100/50"
+                className="flex items-center gap-3 px-3 py-2 font-mono hover:bg-surface-low/50"
               >
                 <span className="flex min-w-0 items-center gap-2">
                   <ToolMark tool="skill" title={`${plugin.name} plugin`} size="xs" decorative />
-                  <span className="truncate text-xs font-bold text-stone-900">{plugin.name}</span>
+                  <span className="truncate text-xs font-bold text-on-surface">{plugin.name}</span>
                 </span>
               </Link>
             </li>
@@ -218,11 +234,11 @@ function SkillsSection({
     <section
       id="library-skills"
       data-testid="library-section-skills"
-      className="border border-outline-variant bg-white/25 hard-shadow"
+      className="border border-outline-variant bg-surface-lowest/25 hard-shadow"
     >
-      <header className="flex items-baseline justify-between border-b border-outline-variant bg-white/30 px-3 py-2">
+      <header className="flex items-baseline justify-between border-b border-outline-variant bg-surface-lowest/30 px-3 py-2">
         <SectionHeader tone="default">Skills</SectionHeader>
-        <span className="shrink-0 font-mono text-[9px] uppercase tracking-[0.12em] text-stone-500">
+        <span className="shrink-0 font-mono text-[9px] uppercase tracking-[0.12em] text-on-surface-variant">
           {isLoading ? "loading" : `${skills.length} folders`}
         </span>
       </header>
@@ -244,13 +260,13 @@ function SkillsSection({
               <a
                 href={librarySkillHref(skill.id)}
                 data-testid={`library-skill-${skill.name}`}
-                className="flex items-center justify-between gap-3 px-3 py-2 font-mono hover:bg-stone-100/50"
+                className="flex items-center justify-between gap-3 px-3 py-2 font-mono hover:bg-surface-low/50"
               >
                 <span className="flex min-w-0 items-center gap-2">
                   <ToolMark tool="skill" title={`${skill.name} skill`} size="xs" decorative />
-                  <span className="truncate text-xs font-bold text-stone-900">{skill.name}</span>
+                  <span className="truncate text-xs font-bold text-on-surface">{skill.name}</span>
                 </span>
-                <span className="shrink-0 text-[9px] uppercase tracking-[0.08em] text-stone-500">
+                <span className="shrink-0 text-[9px] uppercase tracking-[0.08em] text-on-surface-variant">
                   {skill.files.length} files
                 </span>
               </a>
@@ -278,6 +294,15 @@ export function SpecsLibraryPage() {
     return { rigSpecs, workflowSpecs, agentSpecs, applications };
   }, [specs]);
 
+  // OPR.0.4.3.05 — aggregate agent-image status badge (count + total estimated
+  // size) over the already-in-scope library array. Rendered into the existing
+  // Agent Images section header; no new data wiring, no phantom Steering panel.
+  const agentImageBadge = useMemo(() => {
+    const count = agentImages.length;
+    const totalBytes = agentImages.reduce((sum, e) => sum + (e.stats?.estimatedSizeBytes ?? 0), 0);
+    return `${count} ${count === 1 ? "image" : "images"} · ${formatBytes(totalBytes)}`;
+  }, [agentImages]);
+
   const total =
     sections.rigSpecs.length
     + sections.workflowSpecs.length
@@ -295,10 +320,10 @@ export function SpecsLibraryPage() {
       <header className="mb-5 flex items-start justify-between gap-4">
         <div>
           <SectionHeader tone="muted">Library</SectionHeader>
-          <h1 className="mt-1 font-headline text-2xl font-bold tracking-tight text-stone-900">
+          <h1 className="mt-1 font-headline text-2xl font-bold tracking-tight text-on-surface">
             Library
           </h1>
-          <p className="mt-1 max-w-3xl text-sm text-stone-600">
+          <p className="mt-1 max-w-3xl text-sm text-on-surface-variant">
             Specs, context packs, agent images, applications, and skill folders.
           </p>
         </div>
@@ -311,7 +336,7 @@ export function SpecsLibraryPage() {
               key={a.testId}
               to={a.to}
               data-testid={a.testId}
-              className="border border-outline-variant bg-white/25 px-3 py-1.5 font-mono text-[10px] uppercase tracking-[0.12em] text-stone-700 hard-shadow hover:bg-white/40"
+              className="border border-outline-variant bg-surface-lowest/25 px-3 py-1.5 font-mono text-[10px] uppercase tracking-[0.12em] text-on-surface hard-shadow hover:bg-surface-lowest/40"
             >
               {a.label}
             </Link>
@@ -319,7 +344,7 @@ export function SpecsLibraryPage() {
         </nav>
       </header>
 
-      <div className="mb-4 font-mono text-[10px] uppercase tracking-[0.14em] text-stone-500">
+      <div className="mb-4 font-mono text-[10px] uppercase tracking-[0.14em] text-on-surface-variant">
         {total} library entries visible through current sources
       </div>
 
@@ -364,6 +389,7 @@ export function SpecsLibraryPage() {
           rows={agentImages.map(agentImageRow)}
           isLoading={agentImagesLoading}
           emptyLabel="No agent images found."
+          badge={agentImageBadge}
         />
         <LibrarySection
           id="applications"

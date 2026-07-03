@@ -32,6 +32,13 @@ interface ResumeMetadataRefresherDeps {
   resolveHomeDirByPid?: ResolveHomeDirByPid;
   sleep?: (ms: number) => Promise<void>;
   homeDir?: string;
+  // OPR.0.4.3.20 FR-4 — the Claude status-line sidecar reader, for null-fill of a
+  // Claude session's resume token from live state during snapshot refresh.
+  // Optional + structurally typed (older wirings/tests omit it → Claude null-fill
+  // is a silent no-op, Codex behavior unchanged).
+  contextUsageStore?: {
+    readSidecar(sessionName: string): { ok: true; data: { session_id?: string } } | { ok: false; reason: string };
+  };
 }
 
 export class ResumeMetadataRefresher {
@@ -43,6 +50,7 @@ export class ResumeMetadataRefresher {
   private resolveHomeDirByPid: ResolveHomeDirByPid;
   private sleep: (ms: number) => Promise<void>;
   private homeDir: string;
+  private contextUsageStore: ResumeMetadataRefresherDeps["contextUsageStore"] | null;
 
   constructor(deps: ResumeMetadataRefresherDeps) {
     this.sessionRegistry = deps.sessionRegistry;
@@ -57,12 +65,55 @@ export class ResumeMetadataRefresher {
     this.probeClaudeResume = deps.probeClaudeResume ?? ((sessionName, resumeToken, cwd) => this.defaultProbeClaudeResume(sessionName, resumeToken, cwd));
     this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.homeDir = deps.homeDir ?? os.homedir();
+    this.contextUsageStore = deps.contextUsageStore ?? null;
   }
 
-  async refresh(sessions: ResumeRefreshSession[]): Promise<void> {
+  /**
+   * Refresh the live per-seat resume ledger.
+   *
+   * OPR.0.4.3.20 FR-4 (rev1 fix) — `opts.fillNullOnly` is the **snapshot-refresh**
+   * mode used by the RECURRING snapshot paths (periodic scheduler every ~5min +
+   * manual route). It does exactly two things, both LIGHTWEIGHT (file reads only,
+   * like FR-3's capture — Claude sidecar `readSidecar` + Codex `captureCodexThreadId`
+   * over pid-logs), and NOTHING heavy:
+   *   1. FILL-NULL ONLY — populate a null token from live state; NEVER clear an
+   *      already-present token (rev1-r2). A present-but-not-currently-resumable
+   *      Claude token SURVIVES the routine snapshot (stays in the ledger for FR-6 to
+   *      surface as `stale/unverified — re-verify`) instead of being nulled before
+   *      FR-6 exists. Invariant: **a snapshot refresh never clears a present token.**
+   *   2. NO heavyweight resumability PROBE — it never runs `probeClaudeResume`
+   *      (which spawns a real `claude --resume` tmux session per present Claude seat).
+   *      Spawning N probe processes every periodic tick, forever, against live seats
+   *      is unacceptable recurring blast radius (rev1-r1). Resumability VERIFICATION
+   *      is FR-6's on-demand job, not a recurring-snapshot op.
+   *
+   * Default (`fillNullOnly` falsy) preserves the legacy validate-and-probe-and-clear
+   * behavior for the non-snapshot / teardown auto-pre-down path (a one-time
+   * at-shutdown check — unchanged here; FR-6 §2.1b owns unifying the clear semantics
+   * across all callers).
+   */
+  async refresh(sessions: ResumeRefreshSession[], opts?: { fillNullOnly?: boolean }): Promise<void> {
+    const fillNullOnly = opts?.fillNullOnly === true;
     for (const session of sessions) {
       if (session.runtime === "codex") {
-        if (session.resumeToken) continue;
+        if (session.resumeToken) {
+          // OPR.0.4.3.20 FR-6.1 — lightweight equal-value freshness RE-STAMP on the
+          // periodic (fill-null) path so a present-and-still-valid token does not age
+          // to a FALSE `stale — re-verify` after the FR-6 threshold. Re-derive via the
+          // SAME pure-read helper FR-3 uses (getPanePid → pid-keyed logs; NO probe/spawn,
+          // NO `claude --resume`, NO launch) and refresh freshness ONLY on an EXACT match.
+          if (fillNullOnly) {
+            const derived = await this.captureCodexThreadId(session.sessionName);
+            if (derived && derived === session.resumeToken) {
+              // Present + matching = genuine positive evidence; stamp freshness via the
+              // FR-6 marker (never updateResumeToken → no token/provenance clobber).
+              this.sessionRegistry.markResumeProbeResult(session.sessionId, "resumable");
+            }
+            // DIFFERENT / ABSENT (rolled or underivable) → no-op: no re-stamp, no clobber.
+            // Left honest for FR-6 (stale — re-verify) + FR-7 restore-time rollback.
+          }
+          continue;
+        }
 
         const threadId = await this.captureCodexThreadId(session.sessionName);
         if (threadId) {
@@ -71,16 +122,59 @@ export class ResumeMetadataRefresher {
         continue;
       }
 
-      if (session.runtime === "claude-code" && session.resumeToken) {
-        const probe = await this.probeClaudeResume(session.sessionName, session.resumeToken, session.cwd ?? null);
-        if (probe === "not_resumable") {
-          this.sessionRegistry.clearResumeToken(session.sessionId);
+      if (session.runtime === "claude-code") {
+        if (!session.resumeToken) {
+          // OPR.0.4.3.20 FR-4 — null-fill from the Claude status-line sidecar
+          // (best-effort; missing/parse-error/empty leaves null, never throws).
+          // `scrape` provenance (rank 0) fills a null slot and never clobbers a
+          // higher-trust adoption/hook/operator token (the FR-3 rank guard).
+          const sidecar = this.contextUsageStore?.readSidecar(session.sessionName);
+          if (sidecar?.ok) {
+            const token = sidecar.data.session_id;
+            if (typeof token === "string" && token.trim().length > 0) {
+              this.sessionRegistry.updateResumeToken(session.sessionId, "claude_id", token.trim(), "scrape");
+            }
+          }
+          continue;
         }
+        // Present token.
+        // OPR.0.4.3.20 FR-4 (rev1 fix) — in snapshot-refresh (fill-null-only) mode,
+        // return BEFORE the probe: never spawn the heavyweight `claude --resume`
+        // probe on the recurring snapshot path (rev1-r1), and never clear a present
+        // token (rev1-r2). A present-but-not-resumable token stays in the ledger for
+        // FR-6 to surface as `stale/unverified — re-verify`. Only the legacy/teardown
+        // default path probes + clears (a one-time at-shutdown check).
+        if (fillNullOnly) {
+          // OPR.0.4.3.20 FR-6.1 — equal-value freshness RE-STAMP on the periodic path
+          // (NO probe; never spawns `claude --resume`). Re-derive via the pure-read
+          // status-line sidecar and refresh freshness ONLY on an EXACT match to the
+          // stored token. Different / absent / parse-error / unreadable → no-op: no
+          // re-stamp and no token clobber (left honest for FR-6 + FR-7).
+          const sidecar = this.contextUsageStore?.readSidecar(session.sessionName);
+          if (sidecar?.ok) {
+            const derived = sidecar.data.session_id;
+            if (typeof derived === "string" && derived.trim().length > 0 && derived.trim() === session.resumeToken) {
+              this.sessionRegistry.markResumeProbeResult(session.sessionId, "resumable");
+            }
+          }
+          continue;
+        }
+        const probe = await this.probeClaudeResume(session.sessionName, session.resumeToken, session.cwd ?? null);
+        // OPR.0.4.3.20 FR-6 §2.1b — record the probe result WITHOUT clearing:
+        // `not_resumable`/`inconclusive` marks the present token stale (the plan
+        // surfaces it as `stale — re-verify`), `resumable` stamps freshness. The
+        // token stays put — a rolled-but-present token is no longer silently
+        // nulled; FR-7's rollback catches an actually-unresumable token at restore.
+        this.sessionRegistry.markResumeProbeResult(session.sessionId, probe);
       }
     }
   }
 
-  private async captureCodexThreadId(sessionTarget: string): Promise<string | undefined> {
+  /** Best-effort derive a Codex thread id from live pane state (getPanePid →
+   *  codex descendant pids → pid-keyed logs sqlite). Async, returns undefined
+   *  on timeout/absence. Public for reuse by adoption-boundary capture
+   *  (OPR.0.4.3.20 FR-3) — no behavior change to the teardown-path scrape. */
+  async captureCodexThreadId(sessionTarget: string): Promise<string | undefined> {
     if (!this.tmuxAdapter.getPanePid) return undefined;
 
     for (let attempt = 0; attempt < 8; attempt++) {

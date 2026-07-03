@@ -338,7 +338,7 @@ export function HostMultiRigGraph() {
         data-testid="host-multi-rig-graph-empty"
         className="flex flex-col items-center justify-center h-full font-mono text-[10px] text-on-surface-variant"
       >
-        No rigs registered. Run <code className="ml-1 text-stone-700">rig up</code> to start one.
+        No rigs registered. Run <code className="ml-1 text-on-surface">rig up</code> to start one.
       </div>
     );
   }
@@ -370,7 +370,7 @@ export function HostMultiRigGraph() {
               onClick={expandAllRigs}
               disabled={expandedCount === rigList.length}
               title="Expand all rigs"
-              className="inline-flex h-7 items-center gap-1 border border-transparent px-2 font-mono text-[9px] uppercase tracking-[0.08em] text-stone-700 hover:border-outline-variant hover:bg-white/70 hover:text-stone-950 disabled:pointer-events-none disabled:opacity-35"
+              className="inline-flex h-7 items-center gap-1 border border-transparent px-2 font-mono text-[9px] uppercase tracking-[0.08em] text-on-surface hover:border-outline-variant hover:bg-surface-lowest/70 hover:text-on-surface disabled:pointer-events-none disabled:opacity-35"
             >
               <Maximize2 className="h-3.5 w-3.5" aria-hidden="true" />
               Expand all
@@ -381,7 +381,7 @@ export function HostMultiRigGraph() {
               onClick={collapseAllRigs}
               disabled={expandedCount === 0}
               title="Collapse all rigs"
-              className="inline-flex h-7 items-center gap-1 border border-transparent px-2 font-mono text-[9px] uppercase tracking-[0.08em] text-stone-700 hover:border-outline-variant hover:bg-white/70 hover:text-stone-950 disabled:pointer-events-none disabled:opacity-35"
+              className="inline-flex h-7 items-center gap-1 border border-transparent px-2 font-mono text-[9px] uppercase tracking-[0.08em] text-on-surface hover:border-outline-variant hover:bg-surface-lowest/70 hover:text-on-surface disabled:pointer-events-none disabled:opacity-35"
             >
               <Minimize2 className="h-3.5 w-3.5" aria-hidden="true" />
               Collapse all
@@ -391,7 +391,7 @@ export function HostMultiRigGraph() {
         <Controls
           position="bottom-right"
           showInteractive={false}
-          className="!bg-white/40 !border !border-outline-variant"
+          className="!bg-surface-lowest/40 !border !border-outline-variant"
         />
       </ReactFlow>
     </div>

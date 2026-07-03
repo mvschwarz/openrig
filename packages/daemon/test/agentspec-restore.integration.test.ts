@@ -249,6 +249,10 @@ describe("AS-T09: Continuity + snapshot/restore evolution", () => {
 
     // Mark session exited (rig is stopped)
     ctx.sessionRegistry.updateStatus(session.id, "exited");
+    // FR-7: this seat has no captured token, so a resume_if_possible restore would now
+    // stop-and-ask. This test exercises the DELIBERATE-fresh startup-context replay path
+    // (isRestore=true), so declare relaunch_fresh — a genuine fresh launch that replays.
+    ctx.db.prepare("UPDATE sessions SET restore_policy = 'relaunch_fresh' WHERE id = ?").run(session.id);
 
     // Take snapshot
     const snapshot = ctx.snapshotCapture.captureSnapshot(rig.id, "manual");

@@ -123,8 +123,8 @@ function ProofSliceCard({
 
   if (proofMd.isLoading) {
     return (
-      <section data-testid={`proof-slice-loading-${sliceId}`} className="border border-outline-variant bg-white/25 p-4">
-        <div className="font-mono text-[11px] text-stone-400">Loading proof…</div>
+      <section data-testid={`proof-slice-loading-${sliceId}`} className="border border-outline-variant bg-surface-lowest/25 p-4">
+        <div className="font-mono text-[11px] text-on-surface-variant">Loading proof…</div>
       </section>
     );
   }
@@ -133,11 +133,11 @@ function ProofSliceCard({
     return (
       <section
         data-testid={`proof-slice-empty-${sliceId}`}
-        className="border border-dashed border-outline-variant bg-white/10 p-4"
+        className="border border-dashed border-outline-variant bg-surface-lowest/10 p-4"
       >
         <div className="flex items-baseline justify-between border-b border-outline-variant/60 pb-2">
-          <span className="font-mono text-[12px] uppercase tracking-[0.12em] text-stone-500">{sliceId}</span>
-          <span className="font-mono text-[9px] uppercase tracking-[0.14em] text-stone-400">awaiting proof</span>
+          <span className="font-mono text-[12px] uppercase tracking-[0.12em] text-on-surface-variant">{sliceId}</span>
+          <span className="font-mono text-[9px] uppercase tracking-[0.14em] text-on-surface-variant">awaiting proof</span>
         </div>
         <div className="mt-3">
           <EmptyState
@@ -152,11 +152,11 @@ function ProofSliceCard({
   }
 
   return (
-    <section data-testid={`proof-slice-${sliceId}`} className="border border-outline-variant bg-white/25 p-4">
+    <section data-testid={`proof-slice-${sliceId}`} className="border border-outline-variant bg-surface-lowest/25 p-4">
       <div className="flex flex-wrap items-baseline justify-between gap-2 border-b border-outline-variant pb-2">
         <div className="flex items-baseline gap-2">
-          <span className="font-mono text-[12px] uppercase tracking-[0.12em] text-stone-900">{sliceId}</span>
-          <span className="font-mono text-[10px] text-stone-500">{title}</span>
+          <span className="font-mono text-[12px] uppercase tracking-[0.12em] text-on-surface">{sliceId}</span>
+          <span className="font-mono text-[10px] text-on-surface-variant">{title}</span>
         </div>
         {verdict ? (
           <span
@@ -183,18 +183,18 @@ function ProofSliceCard({
       {/* Artifact gallery — the proof/ captures, browser-viewable via /api/files/asset. */}
       {images.length > 0 ? (
         <div className="mt-3">
-          <div className="mb-1.5 font-mono text-[9px] uppercase tracking-[0.16em] text-stone-500">
+          <div className="mb-1.5 font-mono text-[9px] uppercase tracking-[0.16em] text-on-surface-variant">
             proof/ · {images.length} capture{images.length === 1 ? "" : "s"}
           </div>
           <div data-testid={`proof-gallery-${sliceId}`} className="grid grid-cols-2 gap-2 sm:grid-cols-3">
             {images.map((img) => {
               const url = fileAssetUrl(resolved!.rootName, `${proofRel}/${img.name}`);
               return (
-                <figure key={img.name} data-testid={`proof-thumb-${img.name}`} className="border border-outline-variant bg-white/40">
+                <figure key={img.name} data-testid={`proof-thumb-${img.name}`} className="border border-outline-variant bg-surface-lowest/40">
                   <button type="button" onClick={() => setPreview(url)} className="block w-full" aria-label={`Open ${img.name}`}>
                     <img src={url} alt={img.name} loading="lazy" className="block h-[150px] w-full object-cover object-top" />
                   </button>
-                  <figcaption className="truncate border-t border-outline-variant px-2 py-1 font-mono text-[8px] uppercase tracking-[0.08em] text-stone-500">
+                  <figcaption className="truncate border-t border-outline-variant px-2 py-1 font-mono text-[8px] uppercase tracking-[0.08em] text-on-surface-variant">
                     {img.name}
                   </figcaption>
                 </figure>
@@ -213,7 +213,7 @@ function ProofSliceCard({
                 href={fileAssetUrl(resolved!.rootName, `${proofRel}/${f.name}`)}
                 target="_blank"
                 rel="noreferrer"
-                className="text-stone-600 underline decoration-stone-300 underline-offset-2 hover:text-stone-900"
+                className="text-on-surface-variant underline decoration-outline-variant underline-offset-2 hover:text-on-surface"
               >
                 proof/{f.name}
               </a>

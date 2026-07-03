@@ -24,7 +24,7 @@ export function FloatingTopMarks() {
       {marks.map((m, i) => (
         <span
           key={i}
-          className={`absolute ${m.pos} ${m.size ?? "text-xs"} font-mono text-stone-900 leading-none`}
+          className={`absolute ${m.pos} ${m.size ?? "text-xs"} font-mono text-on-surface leading-none`}
         >
           {m.text}
         </span>
@@ -52,7 +52,7 @@ export function ScatteredMarks({ tier = "mid" }: ScatteredMarksProps) {
       {marks.map((m, i) => (
         <span
           key={i}
-          className={`absolute ${m.pos} ${sizeBase} font-mono text-stone-900 leading-none`}
+          className={`absolute ${m.pos} ${sizeBase} font-mono text-on-surface leading-none`}
         >
           {m.text}
         </span>

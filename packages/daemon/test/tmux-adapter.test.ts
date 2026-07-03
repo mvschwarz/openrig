@@ -903,4 +903,94 @@ describe("TmuxAdapter", () => {
       expect(await negX.getPaneCursorPosition("%0")).toBeNull();
     });
   });
+
+  // OPR.0.4.3.26 — seat-recovery switch-client view retarget. Two new read/switch
+  // seams; VIEW-ONLY (no session mutation, no routing/identity change).
+  describe("listClients", () => {
+    it("calls exec with exact tmux list-clients command and format string", async () => {
+      const exec = vi.fn<ExecFn>().mockResolvedValue("");
+      const adapter = new TmuxAdapter(exec);
+
+      await adapter.listClients();
+
+      expect(exec).toHaveBeenCalledOnce();
+      expect(exec.mock.calls[0]![0]).toBe(
+        'tmux list-clients -F "#{client_name}\t#{client_session}"'
+      );
+    });
+
+    it("parses output into typed TmuxClient objects (name + session)", async () => {
+      const output = [
+        "/dev/ttys003\tdev-impl@my-rig",
+        "/dev/ttys007\tother-session",
+      ].join("\n");
+
+      const adapter = new TmuxAdapter(mockExec({ "list-clients": { stdout: output } }));
+      const clients = await adapter.listClients();
+
+      expect(clients).toHaveLength(2);
+      expect(clients[0]).toEqual({ name: "/dev/ttys003", session: "dev-impl@my-rig" });
+      expect(clients[1]).toEqual({ name: "/dev/ttys007", session: "other-session" });
+    });
+
+    it("returns empty array on 'no server running' error (no attachable client)", async () => {
+      const adapter = new TmuxAdapter(mockExec({ "list-clients": { error: NO_SERVER_ERROR } }));
+      expect(await adapter.listClients()).toEqual([]);
+    });
+
+    it("returns empty array when tmux socket is gone post-reboot", async () => {
+      const adapter = new TmuxAdapter(mockExec({
+        "list-clients": { error: new Error("error connecting to /private/tmp/tmux-501/default (No such file or directory)") },
+      }));
+      expect(await adapter.listClients()).toEqual([]);
+    });
+
+    it("rethrows an unexpected error (permission) rather than reporting no clients", async () => {
+      const adapter = new TmuxAdapter(mockExec({
+        "list-clients": { error: new Error("error connecting to /private/tmp/tmux-501/default (Permission denied)") },
+      }));
+      await expect(adapter.listClients()).rejects.toThrow("Permission denied");
+    });
+
+    it("skips malformed (single-field) lines", async () => {
+      const output = ["garbage-no-tab", "/dev/ttys003\tdev-impl@my-rig", ""].join("\n");
+      const adapter = new TmuxAdapter(mockExec({ "list-clients": { stdout: output } }));
+      const clients = await adapter.listClients();
+      expect(clients).toEqual([{ name: "/dev/ttys003", session: "dev-impl@my-rig" }]);
+    });
+  });
+
+  describe("switchClient", () => {
+    it("calls exec with exact `switch-client -c <client> -t <session>:<window>` command", async () => {
+      const exec = vi.fn<ExecFn>().mockResolvedValue("");
+      const adapter = new TmuxAdapter(exec);
+
+      const result: TmuxResult = await adapter.switchClient("/dev/ttys003", "dev-impl@my-rig:0");
+
+      expect(result).toEqual({ ok: true });
+      expect(exec).toHaveBeenCalledOnce();
+      expect(exec.mock.calls[0]![0]).toBe(
+        "tmux switch-client -c '/dev/ttys003' -t 'dev-impl@my-rig:0'"
+      );
+    });
+
+    it("shell-quotes a client and target with sensitive characters", async () => {
+      const exec = vi.fn<ExecFn>().mockResolvedValue("");
+      const adapter = new TmuxAdapter(exec);
+
+      await adapter.switchClient("client's tty", "dev's-rig:1");
+
+      expect(exec.mock.calls[0]![0]).toBe(
+        "tmux switch-client -c 'client'\"'\"'s tty' -t 'dev'\"'\"'s-rig:1'"
+      );
+    });
+
+    it("returns { ok: false, code: 'session_not_found' } when the target session is gone", async () => {
+      const err = new Error("can't find session: dev-impl@my-rig");
+      const adapter = new TmuxAdapter(mockExec({ "switch-client": { error: err } }));
+      const result = await adapter.switchClient("/dev/ttys003", "dev-impl@my-rig:0");
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.code).toBe("session_not_found");
+    });
+  });
 });

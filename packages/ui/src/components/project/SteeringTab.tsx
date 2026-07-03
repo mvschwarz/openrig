@@ -29,7 +29,7 @@ function SteeringPanel() {
   let body: ReactNode;
   if (isLoading) {
     body = (
-      <div data-testid="steering-panel-loading" className="font-mono text-[11px] text-stone-400">
+      <div data-testid="steering-panel-loading" className="font-mono text-[11px] text-on-surface-variant">
         Loading…
       </div>
     );
@@ -65,7 +65,7 @@ function SteeringPanel() {
           <MarkdownViewer content={ps.content} hideFrontmatter hideRawToggle />
         </div>
         {/* Off-intent → traceable-to-source: the live directive + where it lives. */}
-        <div data-testid="steering-panel-source" className="mt-2 font-mono text-[10px] text-stone-400">
+        <div data-testid="steering-panel-source" className="mt-2 font-mono text-[10px] text-on-surface-variant">
           source: {ps.absolutePath} · updated {new Date(ps.mtime).toLocaleString()}
         </div>
       </>
@@ -82,7 +82,7 @@ function SteeringPanel() {
   }
 
   return (
-    <section data-testid="steering-panel" className="border border-outline-variant bg-white/30 p-4">
+    <section data-testid="steering-panel" className="border border-outline-variant bg-surface-lowest/30 p-4">
       <SectionHeader>Steering · STEERING.md</SectionHeader>
       {body}
     </section>
@@ -133,8 +133,8 @@ function parseBrief(markdown: string): ParsedBrief {
 
 function BriefSectionBlock({ header, body }: { header: string; body: string | undefined }) {
   return (
-    <div data-testid={`brief-section-${header}`} className="border-t border-stone-200/60 py-2">
-      <div className="font-mono text-[11px] uppercase tracking-[0.08em] text-stone-700">{header}</div>
+    <div data-testid={`brief-section-${header}`} className="border-t border-outline-variant/60 py-2">
+      <div className="font-mono text-[11px] uppercase tracking-[0.08em] text-on-surface">{header}</div>
       {body && body.length > 0 ? (
         <div className="mt-1">
           <MarkdownViewer content={body} hideFrontmatter hideRawToggle />
@@ -142,7 +142,7 @@ function BriefSectionBlock({ header, body }: { header: string; body: string | un
       ) : (
         // Missing OR empty canonical section → muted dash (degrade-to-dash; shows the
         // expected shape + tells the populator what to fill).
-        <div data-testid={`brief-section-${header}-dash`} className="mt-1 font-mono text-[12px] text-stone-400">
+        <div data-testid={`brief-section-${header}-dash`} className="mt-1 font-mono text-[12px] text-on-surface-variant">
           —
         </div>
       )}
@@ -159,7 +159,7 @@ function BriefPanel({ missionId }: { missionId: string | null }) {
   let body: ReactNode;
   if (mission.isLoading || brief.isLoading) {
     body = (
-      <div data-testid="brief-panel-loading" className="font-mono text-[11px] text-stone-400">
+      <div data-testid="brief-panel-loading" className="font-mono text-[11px] text-on-surface-variant">
         Loading…
       </div>
     );
@@ -182,9 +182,9 @@ function BriefPanel({ missionId }: { missionId: string | null }) {
     body = (
       <div data-testid="brief-panel-content">
         {parsed.title && (
-          <div className="font-mono text-[13px] uppercase tracking-[0.08em] text-stone-900">{parsed.title}</div>
+          <div className="font-mono text-[13px] uppercase tracking-[0.08em] text-on-surface">{parsed.title}</div>
         )}
-        {parsed.tldr && <p className="mt-0.5 text-[12px] italic text-stone-500">{parsed.tldr}</p>}
+        {parsed.tldr && <p className="mt-0.5 text-[12px] italic text-on-surface-variant">{parsed.tldr}</p>}
         {/* Canonical sections, in contract order, by EXACT header match. */}
         {BRIEF_SECTIONS.map((header) => (
           <BriefSectionBlock key={header} header={header} body={bodyByHeader.get(header)} />
@@ -198,7 +198,7 @@ function BriefPanel({ missionId }: { missionId: string | null }) {
   }
 
   return (
-    <section data-testid="brief-panel" className="border border-outline-variant bg-white/20 p-4">
+    <section data-testid="brief-panel" className="border border-outline-variant bg-surface-lowest/20 p-4">
       <SectionHeader>Brief · human-facing</SectionHeader>
       {body}
     </section>

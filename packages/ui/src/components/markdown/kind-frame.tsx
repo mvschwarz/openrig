@@ -25,8 +25,8 @@ const KIND_ACCENTS: Record<KindName, { ink: string; pill: string; label: string 
   "feature-shipped":     { ink: "text-emerald-800", pill: "bg-emerald-50 border-emerald-300", label: "FEATURE SHIPPED" },
   "implementation-plan": { ink: "text-violet-800",  pill: "bg-violet-50 border-violet-300", label: "IMPLEMENTATION PLAN" },
   "concept-explainer":   { ink: "text-amber-800",   pill: "bg-amber-50 border-amber-300",   label: "CONCEPT EXPLAINER" },
-  "pr-writeup":          { ink: "text-stone-800",   pill: "bg-stone-50 border-stone-300",   label: "PR WRITEUP" },
-  "post-mortem":         { ink: "text-stone-900",   pill: "bg-stone-100 border-stone-400",  label: "POST-MORTEM" },
+  "pr-writeup":          { ink: "text-on-surface",   pill: "bg-background border-outline-variant",   label: "PR WRITEUP" },
+  "post-mortem":         { ink: "text-on-surface",   pill: "bg-surface-low border-outline",  label: "POST-MORTEM" },
 };
 
 export function KindFrame({ kind, frontmatter, children }: KindFrameProps): React.ReactElement {
@@ -48,12 +48,12 @@ export function KindFrame({ kind, frontmatter, children }: KindFrameProps): Reac
           {accent.label}
         </div>
         {title && (
-          <h1 data-testid="kind-frame-title" className="mt-2 text-[16px] font-bold text-stone-900">
+          <h1 data-testid="kind-frame-title" className="mt-2 text-[16px] font-bold text-on-surface">
             {title}
           </h1>
         )}
         {(status || author || date) && (
-          <div data-testid="kind-frame-meta" className="mt-1 flex flex-wrap items-center gap-3 font-mono text-[9px] uppercase tracking-[0.10em] text-stone-500">
+          <div data-testid="kind-frame-meta" className="mt-1 flex flex-wrap items-center gap-3 font-mono text-[9px] uppercase tracking-[0.10em] text-on-surface-variant">
             {status && <span data-testid="kind-frame-meta-status">status: {status}</span>}
             {author && <span data-testid="kind-frame-meta-author">{author}</span>}
             {date && <span data-testid="kind-frame-meta-date">{date}</span>}

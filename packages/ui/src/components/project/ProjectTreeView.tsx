@@ -32,8 +32,8 @@ import {
 function ProjectTreeRefreshHeader() {
   const refresh = useRefreshSlices();
   return (
-    <div className="flex items-center justify-between px-2 pb-2 border-b border-stone-200">
-      <span className="font-mono text-[9px] uppercase tracking-[0.16em] text-stone-500">
+    <div className="flex items-center justify-between px-2 pb-2 border-b border-outline-variant">
+      <span className="font-mono text-[9px] uppercase tracking-[0.16em] text-on-surface-variant">
         Project
       </span>
       <button
@@ -42,7 +42,7 @@ function ProjectTreeRefreshHeader() {
         title="Refresh slice + file caches"
         onClick={() => refresh.mutate()}
         disabled={refresh.isPending}
-        className="flex items-center gap-1 px-1 py-0.5 text-on-surface-variant hover:text-stone-900 disabled:opacity-50"
+        className="flex items-center gap-1 px-1 py-0.5 text-on-surface-variant hover:text-on-surface disabled:opacity-50"
       >
         <RefreshCw
           className={`h-3 w-3 ${refresh.isPending ? "animate-spin" : ""}`}
@@ -164,7 +164,7 @@ export function ProjectTreeView() {
           data-testid="project-no-workspace"
           className="border border-outline-variant bg-surface-low px-3 py-3 font-mono text-[10px]"
         >
-          <div className="text-stone-900 uppercase tracking-wide font-bold mb-1">
+          <div className="text-on-surface uppercase tracking-wide font-bold mb-1">
             No workspace connected
           </div>
           <p className="text-on-surface-variant mb-2">
@@ -173,7 +173,7 @@ export function ProjectTreeView() {
           <Link
             to="/settings"
             data-testid="project-no-workspace-cta"
-            className="inline-flex items-center text-stone-900 hover:underline uppercase"
+            className="inline-flex items-center text-on-surface hover:underline uppercase"
           >
             Open settings →
           </Link>
@@ -217,14 +217,14 @@ export function ProjectTreeView() {
             to="/project/mission/$missionId"
             params={{ missionId: m.id }}
             data-testid={`project-mission-link-${m.id}`}
-            className="font-mono text-[11px] text-stone-900 flex-1 truncate hover:underline"
+            className="font-mono text-[11px] text-on-surface flex-1 truncate hover:underline"
           >
             {m.label}
           </Link>
           <LiveMissionStatusBadge mission={m} />
         </div>
         {missionExpanded ? (
-          <ul className="ml-4 border-l border-stone-200">
+          <ul className="ml-4 border-l border-outline-variant">
             {m.slices.length === 0 ? (
               <li className="px-2 py-0.5 font-mono text-[10px] text-on-surface-variant italic">
                 No slices.
@@ -241,7 +241,7 @@ export function ProjectTreeView() {
                       data-testid={`project-slice-${s.name}`}
                       title={`${s.displayName} — ${meta}`}
                       aria-label={`${s.displayName} (${meta})`}
-                      className="flex items-start gap-2 px-2 py-1 font-mono text-xs text-on-surface hover:text-stone-900 hover:bg-surface-low"
+                      className="flex items-start gap-2 px-2 py-1 font-mono text-xs text-on-surface hover:text-on-surface hover:bg-surface-low"
                     >
                       <span className="min-w-0 flex-1 whitespace-normal break-words leading-snug">{s.displayName}</span>
                       <span
@@ -293,7 +293,7 @@ export function ProjectTreeView() {
             )}
             <span
               data-testid="project-workspace-label"
-              className="font-mono text-[11px] uppercase tracking-wide text-stone-900 flex-1"
+              className="font-mono text-[11px] uppercase tracking-wide text-on-surface flex-1"
             >
               {workspaceLabel}
             </span>
@@ -301,13 +301,13 @@ export function ProjectTreeView() {
               to="/project"
               data-testid="project-workspace-link"
               onClick={(e) => e.stopPropagation()}
-              className="font-mono text-[9px] uppercase tracking-wide text-on-surface-variant hover:text-stone-900"
+              className="font-mono text-[9px] uppercase tracking-wide text-on-surface-variant hover:text-on-surface"
             >
               open
             </Link>
           </button>
           {isExpanded("workspace") ? (
-            <ul className="ml-4 border-l border-stone-200">
+            <ul className="ml-4 border-l border-outline-variant">
               {discovery.unavailable && discovery.hint ? (
                 <li
                   data-testid="project-discovery-degraded"
@@ -325,7 +325,7 @@ export function ProjectTreeView() {
                 <>
                   <li
                     data-testid="project-mission-section-current"
-                    className="px-2 pt-2 pb-1 font-mono text-[9px] uppercase tracking-[0.16em] text-stone-500"
+                    className="px-2 pt-2 pb-1 font-mono text-[9px] uppercase tracking-[0.16em] text-on-surface-variant"
                   >
                     Current Work · {missionSections.current.length}
                   </li>
@@ -341,7 +341,7 @@ export function ProjectTreeView() {
                   )}
                   <li
                     data-testid="project-mission-section-archive"
-                    className="px-2 pt-3 pb-1 font-mono text-[9px] uppercase tracking-[0.16em] text-stone-500"
+                    className="px-2 pt-3 pb-1 font-mono text-[9px] uppercase tracking-[0.16em] text-on-surface-variant"
                   >
                     Archive · {missionSections.archive.length}
                   </li>

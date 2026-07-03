@@ -113,6 +113,41 @@ export function useStartRig(rigId: string) {
   });
 }
 
+/**
+ * OPR.0.4.3.22 — the policy-carrying launch/restore mutation the launch/recovery
+ * modal executes AFTER the operator has seen the read-only plan. POSTs
+ * /api/rigs/:id/up with an explicit body carrying `freshLogicalIds` (the per-seat
+ * fresh list — the LOCK: fresh is only ever a per-seat list, never a global flip).
+ *
+ * This is DISTINCT from `useStartRig`, which stays a bodyless default `/up` POST.
+ * The modal never routes through `useStartRig`, so the default restore behavior
+ * is not silently changed (guard 3).
+ */
+export function useLaunchRig(rigId: string) {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async (freshLogicalIds?: string[]) => {
+      const res = await fetch(`/api/rigs/${encodeURIComponent(rigId)}/up`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(freshLogicalIds && freshLogicalIds.length > 0 ? { freshLogicalIds } : {}),
+      });
+      const data = (await res.json().catch(() => ({}))) as { error?: string; code?: string };
+      if (!res.ok) {
+        throw new RestoreError(data as { code?: string; error?: string }, res.status);
+      }
+      return data;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["rigs", "summary"] });
+      queryClient.invalidateQueries({ queryKey: ["ps"] });
+      queryClient.invalidateQueries({ queryKey: ["rig", rigId] });
+      queryClient.invalidateQueries({ queryKey: ["kernel", "status"] });
+    },
+  });
+}
+
 export function useImportRig() {
   const queryClient = useQueryClient();
 

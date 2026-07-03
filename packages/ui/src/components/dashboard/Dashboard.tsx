@@ -30,6 +30,8 @@ import { useRigSummary } from "../../hooks/useRigSummary.js";
 import { usePsEntries } from "../../hooks/usePsEntries.js";
 import { useSettings } from "../../hooks/useSettings.js";
 import { useDaemonVersion } from "../../hooks/useDaemonVersion.js";
+import { KernelStatusCard } from "../KernelStatusCard.js";
+import { ErrorBoundary } from "../ui/ErrorBoundary.js";
 import {
   TopologyGlyph,
   ProjectGlyph,
@@ -130,6 +132,17 @@ export function Dashboard() {
           />
           <div className="df-reg" aria-hidden="true" />
         </div>
+
+        {/* OPR.0.4.3.22 — kernel status FIRST (from /api/kernel/status, NEVER
+            daemon /healthz), with a Restore-kernel recovery control. */}
+        <section data-testid="dashboard-kernel-section" className="mb-6 max-w-md">
+          <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-secondary mb-2">
+            Host / kernel
+          </div>
+          <ErrorBoundary label="Kernel status">
+            <KernelStatusCard />
+          </ErrorBoundary>
+        </section>
 
         <div className="df-grid" data-testid="dashboard-launcher-grid">
           {DESTINATIONS.map((d) => (

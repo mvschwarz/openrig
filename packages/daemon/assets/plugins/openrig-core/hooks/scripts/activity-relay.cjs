@@ -75,9 +75,48 @@ function buildOpenRigPayload(providerPayload, env = process.env, now = () => new
   };
 }
 
+// OPR.0.4.3.28 B1+B3 — resolve the ingest base URL + token without depending on
+// the operator seeding OPENRIG_URL/OPENRIG_ACTIVITY_HOOK_TOKEN into the shell:
+//   1. env OPENRIG_URL / token (unchanged fast path).
+//   2. B1: synthesize the base URL from OPENRIG_HOST + OPENRIG_PORT (both present
+//      in a launched seat's env) when the URL is absent.
+//   3. B3: file-discovery — read {baseUrl, token} from
+//      OPENRIG_HOME/activity-endpoint.json (default ~/.openrig) for reconcile /
+//      restored seats whose frozen process env lacks the activity vars. The
+//      daemon writes this file at startup. Identity (session/node/runtime) still
+//      comes from env, which previously-launched-then-reconciled seats inherit
+//      from the tmux session env.
+function resolveEndpoint(env = process.env) {
+  let baseUrl = firstString(env.OPENRIG_URL, env.RIGGED_URL);
+  let token = firstString(env.OPENRIG_ACTIVITY_HOOK_TOKEN, env.RIGGED_ACTIVITY_HOOK_TOKEN);
+
+  if (!baseUrl) {
+    const port = firstString(env.OPENRIG_PORT, env.RIGGED_PORT);
+    if (port) {
+      const host = firstString(env.OPENRIG_HOST, env.RIGGED_HOST) || "127.0.0.1";
+      baseUrl = `http://${host}:${port}`;
+    }
+  }
+
+  if (!baseUrl || !token) {
+    try {
+      const fs = require("node:fs");
+      const path = require("node:path");
+      const os = require("node:os");
+      const home = firstString(env.OPENRIG_HOME, env.RIGGED_HOME) || path.join(os.homedir(), ".openrig");
+      const parsed = JSON.parse(fs.readFileSync(path.join(home, "activity-endpoint.json"), "utf8"));
+      if (!baseUrl && typeof parsed.baseUrl === "string" && parsed.baseUrl.length > 0) baseUrl = parsed.baseUrl;
+      if (!token && typeof parsed.token === "string" && parsed.token.length > 0) token = parsed.token;
+    } catch {
+      // absent/malformed — the caller no-ops safely below.
+    }
+  }
+
+  return { baseUrl, token };
+}
+
 async function postHookPayload(payload, env = process.env) {
-  const baseUrl = firstString(env.OPENRIG_URL, env.RIGGED_URL);
-  const token = firstString(env.OPENRIG_ACTIVITY_HOOK_TOKEN, env.RIGGED_ACTIVITY_HOOK_TOKEN);
+  const { baseUrl, token } = resolveEndpoint(env);
   if (!baseUrl || !token || !payload || typeof fetch !== "function") return;
 
   const controller = new AbortController();
@@ -147,4 +186,5 @@ module.exports = {
   buildSessionIdentityPayload,
   parseJson,
   postHookPayload,
+  resolveEndpoint,
 };

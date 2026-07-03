@@ -68,8 +68,8 @@ describe("Ps CLI", () => {
       if (req.url === "/api/ps" && req.method === "GET") {
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify(psData));
-      } else if (req.url?.match(/^\/api\/rigs\/([^/]+)\/nodes$/) && req.method === "GET") {
-        const rigId = decodeURIComponent(req.url.match(/^\/api\/rigs\/([^/]+)\/nodes$/)![1]!);
+      } else if (req.url?.match(/^\/api\/rigs\/([^/]+)\/nodes(?:\?.*)?$/) && req.method === "GET") {
+        const rigId = decodeURIComponent(req.url.match(/^\/api\/rigs\/([^/]+)\/nodes(?:\?.*)?$/)![1]!);
         if (rigId in nodesData) {
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify(nodesData[rigId]));

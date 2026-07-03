@@ -77,16 +77,16 @@ function ResolvedChip({ entry }: { entry: PluginEntry }) {
       to="/plugins/$pluginId"
       params={{ pluginId: entry.id }}
       data-testid={`agent-plugin-chip-${entry.id}`}
-      className="flex items-center justify-between gap-3 border border-outline-variant bg-white/30 px-3 py-2 font-mono text-[11px] hover:bg-stone-100/50"
+      className="flex items-center justify-between gap-3 border border-outline-variant bg-surface-lowest/30 px-3 py-2 font-mono text-[11px] hover:bg-surface-low/50"
     >
       <span className="flex min-w-0 items-center gap-2">
         <ToolMark tool="skill" title={`${entry.name} plugin`} size="xs" decorative />
-        <span className="truncate text-xs font-bold text-stone-900">{entry.name}</span>
-        <span className="shrink-0 text-[9px] uppercase tracking-[0.08em] text-stone-500">
+        <span className="truncate text-xs font-bold text-on-surface">{entry.name}</span>
+        <span className="shrink-0 text-[9px] uppercase tracking-[0.08em] text-on-surface-variant">
           {`v${entry.version}`}
         </span>
       </span>
-      <span className="flex shrink-0 items-center gap-2 text-[9px] uppercase tracking-[0.08em] text-stone-500">
+      <span className="flex shrink-0 items-center gap-2 text-[9px] uppercase tracking-[0.08em] text-on-surface-variant">
         {entry.runtimes.map((rt) => (
           <span
             key={rt}
@@ -107,15 +107,15 @@ function UnresolvedChip({ pluginId }: { pluginId: string }) {
       to="/plugins/$pluginId"
       params={{ pluginId }}
       data-testid={`agent-plugin-chip-${pluginId}`}
-      className="flex items-center justify-between gap-3 border border-dashed border-outline-variant bg-white/20 px-3 py-2 font-mono text-[11px] hover:bg-stone-100/50"
+      className="flex items-center justify-between gap-3 border border-dashed border-outline-variant bg-surface-lowest/20 px-3 py-2 font-mono text-[11px] hover:bg-surface-low/50"
     >
       <span className="flex min-w-0 items-center gap-2">
         <ToolMark tool="skill" title={`${pluginId} plugin (unresolved)`} size="xs" decorative />
-        <span className="truncate text-xs font-bold text-stone-900">{pluginId}</span>
+        <span className="truncate text-xs font-bold text-on-surface">{pluginId}</span>
       </span>
       <span
         data-testid={`agent-plugin-unresolved-${pluginId}`}
-        className="shrink-0 text-[9px] uppercase tracking-[0.08em] text-stone-500"
+        className="shrink-0 text-[9px] uppercase tracking-[0.08em] text-on-surface-variant"
       >
         not discovered
       </span>

@@ -78,9 +78,21 @@ export interface TmuxCursorPosition {
   height: number;
 }
 
+/**
+ * An attached tmux client — the human's terminal/CMUX tile. `name` is the
+ * client identifier accepted by `switch-client -c` (the client tty by default);
+ * `session` is the session the client is CURRENTLY viewing (may be the wrong or
+ * a dead view, which is exactly the recovery case OPR.0.4.3.26 retargets).
+ */
+export interface TmuxClient {
+  name: string;
+  session: string;
+}
+
 const SESSION_FORMAT = "#{session_name}\t#{session_windows}\t#{session_created}\t#{session_attached}";
 const WINDOW_FORMAT = "#{window_index}\t#{window_name}\t#{window_panes}\t#{window_active}";
 const PANE_FORMAT = "#{pane_id}\t#{pane_index}\t#{pane_current_path}\t#{pane_width}\t#{pane_height}\t#{pane_active}";
+const CLIENT_FORMAT = "#{client_name}\t#{client_session}";
 
 function isNoServerError(err: unknown): boolean {
   return err instanceof Error && err.message.includes("no server running");
@@ -147,6 +159,17 @@ function parseSessionLine(line: string): TmuxSession | null {
     windows,
     created: parts[2]!,
     attached: parts[3] === "1",
+  };
+}
+
+function parseClientLine(line: string): TmuxClient | null {
+  const parts = line.split("\t");
+  if (parts.length < 2) return null;
+  const name = parts[0]!;
+  if (name === "") return null;
+  return {
+    name,
+    session: parts[1]!,
   };
 }
 
@@ -382,6 +405,20 @@ export class TmuxAdapter {
     }
   }
 
+  /** OPR.0.4.3.28 Part C — presence-only check for a session-env variable.
+   *  Returns whether the var is SET, NEVER its value (the producer-link
+   *  diagnostic must never surface a token value). `tmux show-environment`
+   *  prints `VAR=value` when set and `-VAR` when explicitly unset. */
+  async hasSessionEnv(sessionName: string, varName: string): Promise<boolean> {
+    try {
+      const output = await this.exec(`tmux show-environment -t ${shellQuote(sessionName)} ${shellQuote(varName)}`);
+      const line = output.trim();
+      return line.length > 0 && !line.startsWith("-") && line.includes("=");
+    } catch {
+      return false;
+    }
+  }
+
   /** Start pipe-pane to capture terminal output to a file. */
   async startPipePane(sessionName: string, outputPath: string): Promise<TmuxResult> {
     // Shell-quote the path for safe injection into the pipe-pane command.
@@ -510,6 +547,40 @@ export class TmuxAdapter {
       return n;
     } catch {
       return null;
+    }
+  }
+
+  /**
+   * OPR.0.4.3.26 — list the tmux clients (human terminals / CMUX tiles) attached
+   * to the server. VIEW-ONLY probe: it never mutates routing, bindings, or
+   * sessions. Mirrors the read/parse/error-swallow shape of `listSessions`:
+   * a "no server running" / socket-absent server yields `[]` (no attachable
+   * client) so the caller emits an honest "attach first" error rather than
+   * crashing. Unexpected failures (permission, etc.) rethrow.
+   */
+  async listClients(): Promise<TmuxClient[]> {
+    try {
+      const output = await this.exec(`tmux list-clients -F "${CLIENT_FORMAT}"`);
+      return parseLines(output, parseClientLine);
+    } catch (err) {
+      if (isNoServerError(err) || isTmuxTransportAbsentError(err)) return [];
+      throw err;
+    }
+  }
+
+  /**
+   * OPR.0.4.3.26 — retarget an already-attached client's VIEW to `target`
+   * (`<session>` or `<session>:<window>`). This is the whole point of the
+   * seat-recovery slice: it changes only what a client SEES; it never creates,
+   * kills, or rebinds a session and never touches OpenRig routing/identity.
+   */
+  async switchClient(client: string, target: string): Promise<TmuxResult> {
+    const cmd = `tmux switch-client -c ${shellQuote(client)} -t ${shellQuote(target)}`;
+    try {
+      await this.exec(cmd);
+      return { ok: true };
+    } catch (err) {
+      return classifyWriteError(err);
     }
   }
 }

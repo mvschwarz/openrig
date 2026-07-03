@@ -110,11 +110,11 @@ export function SettingsSystemStatusPanel() {
         <div className="mt-2 space-y-1.5 font-mono text-xs">
           <div className="flex justify-between">
             <span className="text-on-surface-variant">Total</span>
-            <span className="text-stone-900 font-bold" data-testid="status-rigs-total">{totalRigs}</span>
+            <span className="text-on-surface font-bold" data-testid="status-rigs-total">{totalRigs}</span>
           </div>
           <div className="flex justify-between">
             <span className="text-on-surface-variant">Running</span>
-            <span className="text-stone-900 font-bold" data-testid="status-rigs-running">{runningRigs}</span>
+            <span className="text-on-surface font-bold" data-testid="status-rigs-running">{runningRigs}</span>
           </div>
         </div>
       </section>

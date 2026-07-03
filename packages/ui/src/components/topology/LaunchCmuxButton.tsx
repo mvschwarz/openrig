@@ -125,7 +125,7 @@ export function LaunchCmuxButton({ rigId }: LaunchCmuxButtonProps) {
         type="button"
         data-testid="launch-cmux-button"
         onClick={handleClick}
-        className="border border-stone-700 bg-white px-3 py-2 font-mono text-[10px] uppercase tracking-[0.18em] text-stone-900 hover:bg-stone-100 disabled:opacity-50 disabled:cursor-not-allowed focus:outline-none focus:ring-1 focus:ring-stone-400"
+        className="border border-on-surface bg-surface-lowest px-3 py-2 font-mono text-[10px] uppercase tracking-[0.18em] text-on-surface hover:bg-surface-low disabled:opacity-50 disabled:cursor-not-allowed focus:outline-none focus:ring-1 focus:ring-outline"
       >
         Launch in CMUX
       </button>
@@ -159,7 +159,7 @@ export function LaunchCmuxButton({ rigId }: LaunchCmuxButtonProps) {
             if (openMissingRef.current) openMissingRef.current.disabled = false;
           });
         }}
-        className="border border-stone-700 bg-white px-3 py-2 font-mono text-[10px] uppercase tracking-[0.18em] text-stone-900 hover:bg-stone-100 disabled:opacity-50 disabled:cursor-not-allowed focus:outline-none focus:ring-1 focus:ring-stone-400"
+        className="border border-on-surface bg-surface-lowest px-3 py-2 font-mono text-[10px] uppercase tracking-[0.18em] text-on-surface hover:bg-surface-low disabled:opacity-50 disabled:cursor-not-allowed focus:outline-none focus:ring-1 focus:ring-outline"
       >
         Open missing seats
       </button>

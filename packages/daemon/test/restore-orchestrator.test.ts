@@ -1445,7 +1445,7 @@ describe("RestoreOrchestrator", () => {
     }
   });
 
-  it("pod-aware restore without captured resume metadata falls back to fresh launch", async () => {
+  it("pod-aware restore with a prior session but no captured token lands awaiting-decision, not silent fresh-prime (FR-7 Gap 1)", async () => {
     const rig = rigRepo.createRig("test-rig");
     db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-3", rig.id, "Dev");
     const node = rigRepo.addNode(rig.id, "dev.design", { runtime: "claude-code", podId: "pod-3" });
@@ -1471,6 +1471,65 @@ describe("RestoreOrchestrator", () => {
     expect(result.ok).toBe(true);
     if (result.ok) {
       const nodeResult = result.result.nodes.find((n) => n.nodeId === node.id);
+      // FR-7 Gap 1: a pod-aware seat that HAD a session but no captured token must
+      // stop-and-ask (zero session started), never silently fresh-prime / identity-replace.
+      expect(nodeResult!.status).toBe("awaiting-decision");
+      expect(nodeResult!.error).toContain("--fresh");
+      // No fresh harness was launched — the stop is pre-launch.
+      expect(mockAdapter.launchHarness).not.toHaveBeenCalled();
+    }
+  });
+
+  it("FR-7 Gap 2b: a pod-aware resume seat whose runtime adapter is unavailable fail-closes to awaiting-decision (not fresh-primed)", async () => {
+    const rig = rigRepo.createRig("test-rig");
+    db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-2b", rig.id, "Dev");
+    const node = rigRepo.addNode(rig.id, "dev.design", { runtime: "claude-code", podId: "pod-2b" });
+    const session = sessionRegistry.registerSession(node.id, "dev-design@test-rig");
+    sessionRegistry.updateStatus(session.id, "running");
+    // A real captured token → resume IS requested (resume_if_possible + token).
+    db.prepare("UPDATE sessions SET resume_type = 'claude_id', resume_token = 'tok-abc' WHERE id = ?").run(session.id);
+    db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, ?, ?, ?)").run(node.id, "[]", "[]", "[]", "claude-code");
+    const snap = snapshotCapture.captureSnapshot(rig.id, "test");
+    sessionRegistry.updateStatus(session.id, "exited");
+    db.prepare("DELETE FROM bindings WHERE node_id = ?").run(node.id);
+
+    const orch = createOrchestrator();
+    // adapters map present but WITHOUT the claude-code runtime → continuity cannot
+    // be verified (the node-subset-without-adapters shape). Must NOT fresh-prime.
+    const result = await orch.restore(snap.id, { adapters: {} });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      const nodeResult = result.result.nodes.find((n) => n.nodeId === node.id);
+      expect(nodeResult!.status).toBe("awaiting-decision");
+      expect(nodeResult!.status).not.toBe("fresh-primed");
+      expect(nodeResult!.error).toContain("--fresh");
+    }
+  });
+
+  it("FR-7: explicit --fresh past a no-token seat still fresh-primes (opt-in is the only fresh-prime)", async () => {
+    const rig = rigRepo.createRig("test-rig");
+    db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-fresh", rig.id, "Dev");
+    const node = rigRepo.addNode(rig.id, "dev.design", { runtime: "claude-code", podId: "pod-fresh" });
+    const session = sessionRegistry.registerSession(node.id, "dev-design@test-rig");
+    sessionRegistry.updateStatus(session.id, "running");
+    db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, ?, ?, ?)").run(node.id, "[]", "[]", "[]", "claude-code");
+    const snap = snapshotCapture.captureSnapshot(rig.id, "test");
+    sessionRegistry.updateStatus(session.id, "exited");
+    db.prepare("DELETE FROM bindings WHERE node_id = ?").run(node.id);
+    const mockAdapter = {
+      runtime: "claude-code",
+      listInstalled: vi.fn(async () => []),
+      project: vi.fn(async () => ({ projected: [], skipped: [], failed: [] })),
+      deliverStartup: vi.fn(async () => ({ delivered: 0, failed: [] })),
+      checkReady: vi.fn(async () => ({ ready: true })),
+      launchHarness: vi.fn(async () => ({ ok: true as const, resumeToken: "fresh-token", resumeType: "claude_id" })),
+    };
+    const orch = createOrchestrator();
+    const result = await orch.restore(snap.id, { adapters: { "claude-code": mockAdapter }, freshLogicalIds: ["dev.design"] });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      const nodeResult = result.result.nodes.find((n) => n.nodeId === node.id);
+      // --fresh is the ONLY deliberate fresh-prime — it bypasses the FR-7 stop-and-ask.
       expect(nodeResult!.status).toBe("fresh-primed");
     }
   });
@@ -1492,6 +1551,9 @@ describe("RestoreOrchestrator", () => {
     const node = rigRepo.addNode(rig.id, "dev.qa", { runtime: "codex", podId: "pod-codex-update" });
     const session = sessionRegistry.registerSession(node.id, "dev-qa@test-rig");
     sessionRegistry.updateStatus(session.id, "running");
+    // FR-7: a DELIBERATE fresh launch (relaunch_fresh) so the fresh-startup update-gate
+    // path is still exercised — a no-token resume_if_possible seat now stops-and-asks.
+    db.prepare("UPDATE sessions SET restore_policy = 'relaunch_fresh' WHERE id = ?").run(session.id);
     db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, ?, ?, ?)").run(node.id, "[]", "[]", "[]", "codex");
     const snap = snapshotCapture.captureSnapshot(rig.id, "test");
     sessionRegistry.updateStatus(session.id, "exited");
@@ -1535,6 +1597,9 @@ describe("RestoreOrchestrator", () => {
     const node = rigRepo.addNode(rig.id, "infra.ui", { runtime: "builtin:terminal", podId: "pod-4", cwd: "." });
     const session = sessionRegistry.registerSession(node.id, "infra-ui@test-rig");
     sessionRegistry.updateStatus(session.id, "running");
+    // FR-7: a DELIBERATE fresh launch (relaunch_fresh) so the fresh_start startup-action
+    // replay is still exercised — a no-token resume_if_possible seat now stops-and-asks.
+    db.prepare("UPDATE sessions SET restore_policy = 'relaunch_fresh' WHERE id = ?").run(session.id);
     db.prepare(
       "INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, ?, ?, ?)"
     ).run(
@@ -2748,4 +2813,123 @@ describe("RestoreOrchestrator", () => {
       claudeResume: claude, codexResume: mockCodexResume(),
     });
   }
+
+  describe("OPR.0.4.3.20 FR-5 — durable resume-target pin from the binding row", () => {
+    // Seed a single-node rig whose durable binding name can DIVERGE from the
+    // name restore would re-derive, with a resumable snapshot session so restore
+    // launches (and thus targets) a session.
+    function seedSeat(opts: {
+      logicalId: string;
+      podAware?: boolean;
+      boundName?: string | null; // string → bind that name; null/undefined → no binding row
+      bindEmpty?: boolean;       // create a binding row WITHOUT a tmux_session
+    }): { rigId: string; nodeId: string; snapId: string } {
+      const rig = rigRepo.createRig("r99");
+      if (opts.podAware) {
+        db.prepare("INSERT INTO pods (id, rig_id, namespace, label) VALUES (?, ?, ?, ?)")
+          .run(`pod-${rig.id}`, rig.id, opts.logicalId.split(".")[0], "P");
+      }
+      const node = rigRepo.addNode(rig.id, opts.logicalId, {
+        role: "worker", runtime: "claude-code", cwd: "/tmp",
+        ...(opts.podAware ? { podId: `pod-${rig.id}` } : {}),
+      });
+      const sess = sessionRegistry.registerSession(node.id, "seed@r99-init");
+      db.prepare("UPDATE sessions SET resume_type = ?, resume_token = ?, restore_policy = ? WHERE id = ?")
+        .run("claude_id", "tok-abc", "resume_if_possible", sess.id);
+      if (typeof opts.boundName === "string") {
+        sessionRegistry.updateBinding(node.id, { tmuxSession: opts.boundName });
+      } else if (opts.bindEmpty) {
+        sessionRegistry.updateBinding(node.id, { cmuxSurface: "s1" }); // binding row, tmux_session null
+      }
+      const snap = snapshotCapture.captureSnapshot(rig.id, "manual");
+      return { rigId: rig.id, nodeId: node.id, snapId: snap.id };
+    }
+
+    function createdSessionNames(tmux: TmuxAdapter): string[] {
+      return (tmux.createSession as unknown as { mock: { calls: unknown[][] } }).mock.calls.map((c) => c[0] as string);
+    }
+
+    it("legacy node: restore targets the DURABLY-BOUND name, not the re-derived name", async () => {
+      // derived = deriveSessionName("r99","worker-a") = "r99-worker-a"; bind diverges.
+      const { snapId, nodeId } = seedSeat({ logicalId: "worker-a", boundName: "pinned-legacy@old-rig" });
+      const tmux = mockTmux();
+      const orch = createOrchestrator({ tmux });
+
+      const result = await orch.restore(snapId);
+      expect(result.ok).toBe(true);
+
+      const names = createdSessionNames(tmux);
+      expect(names).toContain("pinned-legacy@old-rig"); // the pinned target
+      expect(names).not.toContain("r99-worker-a");       // never the re-derived name
+      // Drift-amplifier fixed: launcher writes the PINNED name back to the binding.
+      expect(sessionRegistry.getBindingForNode(nodeId)?.tmuxSession).toBe("pinned-legacy@old-rig");
+    });
+
+    it("pod-aware node: restore targets the durably-bound name, not the re-derived canonical name", async () => {
+      // derived = deriveCanonicalSessionName("dev","driver","r99") = "dev-driver@r99"; bind diverges.
+      const { snapId } = seedSeat({ logicalId: "dev.driver", podAware: true, boundName: "pinned-pod@old-rig" });
+      const tmux = mockTmux();
+      const orch = createOrchestrator({ tmux });
+
+      const result = await orch.restore(snapId);
+      expect(result.ok).toBe(true);
+
+      const names = createdSessionNames(tmux);
+      expect(names).toContain("pinned-pod@old-rig");
+      expect(names).not.toContain("dev-driver@r99");
+    });
+
+    it("no binding row: falls back to the derived name, observably", async () => {
+      const { snapId } = seedSeat({ logicalId: "worker-a", boundName: null });
+      const tmux = mockTmux();
+      const orch = createOrchestrator({ tmux });
+
+      const result = await orch.restore(snapId);
+      expect(result.ok).toBe(true);
+      expect(createdSessionNames(tmux)).toContain("r99-worker-a"); // derived fallback
+      expect(result.result.warnings.some((w) => w.includes("FR-5") && w.includes("no durably-bound"))).toBe(true);
+    });
+
+    it("binding row with empty tmux_session: falls back to the derived name, observably", async () => {
+      const { snapId } = seedSeat({ logicalId: "worker-a", bindEmpty: true });
+      const tmux = mockTmux();
+      const orch = createOrchestrator({ tmux });
+
+      const result = await orch.restore(snapId);
+      expect(result.ok).toBe(true);
+      expect(createdSessionNames(tmux)).toContain("r99-worker-a");
+      expect(result.result.warnings.some((w) => w.includes("FR-5") && w.includes("no durably-bound"))).toBe(true);
+    });
+
+    it("invalid pinned name: falls back to the derived name with an observable invalid-pin warning", async () => {
+      const { snapId } = seedSeat({ logicalId: "worker-a", boundName: "bad name!" }); // fails validateSessionName
+      const tmux = mockTmux();
+      const orch = createOrchestrator({ tmux });
+
+      const result = await orch.restore(snapId);
+      expect(result.ok).toBe(true);
+      expect(createdSessionNames(tmux)).toContain("r99-worker-a");
+      expect(result.result.warnings.some((w) => w.includes("FR-5") && w.includes("is invalid"))).toBe(true);
+    });
+
+    it("subset launch surfaces the FR-5 fallback warning (not discarded) — API result + restore.subset_completed event", async () => {
+      const { rigId } = seedSeat({ logicalId: "worker-a", boundName: null }); // no binding → FR-5 fallback
+      const tmux = mockTmux();
+      const orch = createOrchestrator({ tmux });
+      const subsetEvents: Array<{ result?: { warnings?: string[] } }> = [];
+      const unsub = eventBus.subscribe((e) => {
+        if (e.type === "restore.subset_completed") subsetEvents.push(e as unknown as { result?: { warnings?: string[] } });
+      });
+
+      const result = await orch.launchNodeSubset(rigId, ["worker-a"]);
+      unsub();
+
+      expect(result.ok).toBe(true);
+      expect(result.launched?.length ?? 0).toBeGreaterThan(0);
+      // API result carries the aggregated warning (previously discarded).
+      expect(result.warnings?.some((w) => w.includes("FR-5") && w.includes("no durably-bound"))).toBe(true);
+      // The externally-observable event carries it too (was warnings: []).
+      expect(subsetEvents[0]?.result?.warnings?.some((w) => w.includes("FR-5"))).toBe(true);
+    });
+  });
 });

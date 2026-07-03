@@ -1,8 +1,40 @@
 import { existsSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
 const warnedKeys = new Set<string>();
+
+/**
+ * Sentinel file a QA/test fixture drops in its scratch OPENRIG_HOME to mark
+ * the home as fixture-scoped. This is the preferred (most-honest) signal.
+ */
+export const FIXTURE_HOME_MARKER = ".openrig-fixture";
+
+/**
+ * OPR.0.4.3.12 — PATH-ONLY predicate: is `home` a fixture-scoped OpenRig home?
+ *
+ * Recognizes a fixture home by EITHER an explicit sentinel marker file
+ * (`.openrig-fixture`, preferred/most-honest) OR the temp-path QA convention
+ * (an `openrig-qa*` home under a system temp root, e.g.
+ * `OPENRIG_HOME=/tmp/openrig-qa-…-home`).
+ *
+ * Deliberately has NO ConfigStore dependency: `ConfigStore` imports this
+ * module, so importing it here would create a cycle. Callers that need the
+ * divergent-daemon-target confirmation (restore-check) compose this path
+ * predicate with `ConfigStore.resolveWithSource` at the call site.
+ */
+export function isFixtureScopedHome(home: string): boolean {
+  if (!home) return false;
+  // 1. Explicit sentinel marker file in the home — the most honest signal.
+  if (existsSync(join(home, FIXTURE_HOME_MARKER))) return true;
+  // 2. Temp-path QA-fixture convention: an `openrig-qa*` home under a
+  //    system temp root.
+  const tempRoots = [tmpdir(), "/tmp", "/private/tmp", "/var/folders"];
+  const underTemp = tempRoots.some(
+    (root) => home === root || home.startsWith(root.endsWith("/") ? root : `${root}/`),
+  );
+  return underTemp && /(^|\/)openrig-qa[^/]*/.test(home);
+}
 
 export function getOpenRigHome(): string {
   const configured = readOpenRigEnv("OPENRIG_HOME", "RIGGED_HOME");

@@ -41,14 +41,14 @@ export function RigCard({ rig, psEntry, onSelect, onSnapshot, onExport, onDown }
   return (
     <div
       data-testid={`rig-card-${rig.id}`}
-      className="bg-white border border-stone-900 hard-shadow mb-spacing-4 cursor-pointer hover:hard-shadow-hover transition-all relative"
+      className="bg-surface-lowest border border-on-surface hard-shadow mb-spacing-4 cursor-pointer hover:hard-shadow-hover transition-all relative"
       role="button"
       tabIndex={0}
       onClick={() => onSelect(rig.id)}
       onKeyDown={(e) => { if ((e.key === "Enter" || e.key === " ") && e.target === e.currentTarget) { e.preventDefault(); onSelect(rig.id); } }}
     >
       {/* Dark header stripe */}
-      <div className="bg-stone-900 text-white px-4 py-1.5 font-mono text-[10px] flex justify-between items-center">
+      <div className="bg-inverse-surface text-background px-4 py-1.5 font-mono text-[10px] flex justify-between items-center">
         <span>RIG: {rig.name.toUpperCase()}</span>
         <span className="material-symbols-outlined text-[12px]" style={{ fontVariationSettings: "'FILL' 0, 'wght' 300" }}>
           settings
@@ -58,10 +58,10 @@ export function RigCard({ rig, psEntry, onSelect, onSnapshot, onExport, onDown }
       {/* Body */}
       <div className="p-4 space-y-3">
         {/* Name + status */}
-        <div className="flex justify-between items-end border-b border-stone-100 pb-2">
+        <div className="flex justify-between items-end border-b border-outline-variant pb-2">
           <span className="font-headline font-bold text-lg tracking-tight uppercase">{rig.name}</span>
           <span className={`px-2 py-0.5 border font-mono text-[8px] uppercase ${
-            isRunning ? "border-stone-900" : "border-stone-400 text-stone-400"
+            isRunning ? "border-on-surface" : "border-outline text-on-surface-variant"
           }`}>
             {statusLabel}
           </span>
@@ -96,13 +96,13 @@ export function RigCard({ rig, psEntry, onSelect, onSnapshot, onExport, onDown }
         {/* Action buttons */}
         <div className="flex gap-spacing-2 pt-1">
           <button
-            className="px-2 py-0.5 border border-outline font-mono text-[9px] text-secondary hover:border-stone-900 hover:text-stone-900 transition-colors"
+            className="px-2 py-0.5 border border-outline font-mono text-[9px] text-secondary hover:border-on-surface hover:text-on-surface transition-colors"
             onClick={(e) => { e.stopPropagation(); onSnapshot(); }}
           >
             SNAPSHOT
           </button>
           <button
-            className="px-2 py-0.5 border border-outline font-mono text-[9px] text-secondary hover:border-stone-900 hover:text-stone-900 transition-colors"
+            className="px-2 py-0.5 border border-outline font-mono text-[9px] text-secondary hover:border-on-surface hover:text-on-surface transition-colors"
             onClick={(e) => { e.stopPropagation(); onExport(); }}
           >
             EXPORT
@@ -116,7 +116,7 @@ export function RigCard({ rig, psEntry, onSelect, onSnapshot, onExport, onDown }
             </button>
           )}
           <button
-            className="px-2 py-0.5 bg-stone-900 text-white font-mono text-[9px] hover:bg-stone-800 transition-colors ml-auto"
+            className="px-2 py-0.5 bg-inverse-surface text-background font-mono text-[9px] hover:bg-inverse-surface transition-colors ml-auto"
             onClick={(e) => { e.stopPropagation(); onSelect(rig.id); }}
           >
             GRAPH &rarr;

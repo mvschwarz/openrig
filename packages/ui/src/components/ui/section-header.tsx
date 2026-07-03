@@ -13,9 +13,9 @@ export interface SectionHeaderProps extends React.HTMLAttributes<HTMLElement> {
 }
 
 const toneClass: Record<SectionHeaderTone, string> = {
-  default: "text-stone-900",
+  default: "text-on-surface",
   muted: "text-on-surface-variant",
-  strong: "text-stone-900 font-bold",
+  strong: "text-on-surface font-bold",
   alert: "text-tertiary",
 };
 

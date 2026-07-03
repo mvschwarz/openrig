@@ -20,8 +20,8 @@ export interface VellumCardProps extends React.HTMLAttributes<HTMLElement> {
 }
 
 const variantSurface: Record<VellumCardVariant, string> = {
-  primary: "bg-white border border-stone-900",
-  ghost: "bg-transparent border border-stone-300",
+  primary: "bg-surface-lowest border border-on-surface",
+  ghost: "bg-transparent border border-outline-variant",
 };
 
 const elevationShadow: Record<VellumCardElevation, string> = {
@@ -49,7 +49,7 @@ export function VellumCard({
     elevationShadow[elevation],
     "flex flex-col relative",
     isInteractive &&
-      "focus-visible:outline focus-visible:outline-2 focus-visible:outline-stone-900 focus-visible:outline-offset-2",
+      "focus-visible:outline focus-visible:outline-2 focus-visible:outline-on-surface focus-visible:outline-offset-2",
     accentClass,
     className,
   );
@@ -57,7 +57,7 @@ export function VellumCard({
   const inner = (
     <>
       {header ? (
-        <div className="bg-stone-900 text-white px-4 py-1.5 font-mono text-[10px]">
+        <div className="bg-inverse-surface text-background px-4 py-1.5 font-mono text-[10px]">
           {header}
         </div>
       ) : null}

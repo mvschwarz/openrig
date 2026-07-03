@@ -2,6 +2,10 @@ import type { Config } from "tailwindcss";
 
 const config: Config = {
   content: ["./src/**/*.{ts,tsx}", "./index.html"],
+  // OPR.0.4.3.29 — Tailwind v3.4 selector strategy so `dark:` utilities key off
+  // the `.dark` class on <html>. The general theme applies via the token cascade
+  // (globals.css `.dark {}`), not per-utility; this enables `dark:` where used.
+  darkMode: "selector",
   theme: {
     borderRadius: {
       none: "0px",

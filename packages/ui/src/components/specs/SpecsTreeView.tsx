@@ -71,7 +71,7 @@ function Section({
             onClick={onToggle}
             data-testid={`specs-section-toggle-${def.id}`}
             aria-label={`${expanded ? "Collapse" : "Expand"} ${def.label}`}
-            className="inline-flex h-4 w-4 shrink-0 items-center justify-center text-stone-500 hover:text-stone-900"
+            className="inline-flex h-4 w-4 shrink-0 items-center justify-center text-on-surface-variant hover:text-on-surface"
           >
             <Chevron className="h-3 w-3" />
           </button>
@@ -79,7 +79,7 @@ function Section({
             to={navigateTo}
             data-testid={`specs-section-link-${def.id}`}
             onClick={onNavigate}
-            className="font-mono text-[11px] uppercase tracking-wide text-stone-900 flex-1 hover:underline"
+            className="font-mono text-[11px] uppercase tracking-wide text-on-surface flex-1 hover:underline"
           >
             {def.label}
           </Link>
@@ -95,7 +95,7 @@ function Section({
           className="w-full flex items-center gap-1 px-2 py-1 hover:bg-surface-low text-left"
         >
           <Chevron className="h-3 w-3 text-on-surface-variant" />
-          <span className="font-mono text-[11px] uppercase tracking-wide text-stone-900 flex-1">
+          <span className="font-mono text-[11px] uppercase tracking-wide text-on-surface flex-1">
             {def.label}
           </span>
           <span className="font-mono text-[10px] text-on-surface-variant">
@@ -104,7 +104,7 @@ function Section({
         </button>
       )}
       {expanded ? (
-        <ul className="ml-5 border-l border-stone-200">
+        <ul className="ml-5 border-l border-outline-variant">
           {def.entries.length > 0 ? (
             def.entries.map((entry) => (
               <li key={entry.id} className="px-2 py-0.5">
@@ -115,7 +115,7 @@ function Section({
                     data-testid={`specs-leaf-${entry.id}`}
                     title={entryAccessibleLabel(entry)}
                     aria-label={entryAccessibleLabel(entry)}
-                    className="flex min-w-0 items-center justify-between gap-2 truncate font-mono text-xs text-on-surface hover:bg-surface-low hover:text-stone-900"
+                    className="flex min-w-0 items-center justify-between gap-2 truncate font-mono text-xs text-on-surface hover:bg-surface-low hover:text-on-surface"
                   >
                     <LeafContent entry={entry} />
                   </Link>
@@ -126,7 +126,7 @@ function Section({
                     data-testid={`specs-leaf-${entry.id}`}
                     title={entryAccessibleLabel(entry)}
                     aria-label={entryAccessibleLabel(entry)}
-                    className="flex min-w-0 items-center justify-between gap-2 truncate font-mono text-xs text-on-surface hover:bg-surface-low hover:text-stone-900"
+                    className="flex min-w-0 items-center justify-between gap-2 truncate font-mono text-xs text-on-surface hover:bg-surface-low hover:text-on-surface"
                   >
                     <LeafContent entry={entry} />
                   </Link>
@@ -137,7 +137,7 @@ function Section({
                     data-testid={`specs-leaf-${entry.id}`}
                     title={entryAccessibleLabel(entry)}
                     aria-label={entryAccessibleLabel(entry)}
-                    className="flex min-w-0 items-center justify-between gap-2 truncate font-mono text-xs text-on-surface hover:bg-surface-low hover:text-stone-900"
+                    className="flex min-w-0 items-center justify-between gap-2 truncate font-mono text-xs text-on-surface hover:bg-surface-low hover:text-on-surface"
                   >
                     <LeafContent entry={entry} />
                   </Link>
@@ -266,7 +266,7 @@ export function SpecsTreeView() {
         <Link
           to="/specs"
           data-testid="specs-tree-overview-link"
-          className="block font-mono text-[11px] uppercase tracking-wide text-stone-900 px-2 py-1 hover:bg-surface-low"
+          className="block font-mono text-[11px] uppercase tracking-wide text-on-surface px-2 py-1 hover:bg-surface-low"
         >
           {"> "}Library
         </Link>
@@ -306,7 +306,7 @@ export function SpecsTreeView() {
                   onClick={() => toggle("skills")}
                   data-testid="specs-section-toggle-skills"
                   aria-label={`${skillsExpanded ? "Collapse" : "Expand"} Skills`}
-                  className="inline-flex h-4 w-4 shrink-0 items-center justify-center text-stone-500 hover:text-stone-900"
+                  className="inline-flex h-4 w-4 shrink-0 items-center justify-center text-on-surface-variant hover:text-on-surface"
                 >
                   <Chevron className="h-3 w-3" />
                 </button>
@@ -314,7 +314,7 @@ export function SpecsTreeView() {
                   to="/specs/skills"
                   data-testid="specs-section-link-skills"
                   onClick={() => setExpanded((prev) => ({ ...prev, skills: true }))}
-                  className="font-mono text-[11px] uppercase tracking-wide text-stone-900 flex-1 hover:underline"
+                  className="font-mono text-[11px] uppercase tracking-wide text-on-surface flex-1 hover:underline"
                 >
                   Skills
                 </Link>
@@ -379,14 +379,14 @@ function extractCategory(skillId: string): string {
 function SkillsTree({ skills, loading, activeSkillId, expandedCategories, onToggleCategory }: SkillsTreeProps) {
   if (loading && skills.length === 0) {
     return (
-      <ul className="ml-5 border-l border-stone-200">
+      <ul className="ml-5 border-l border-outline-variant">
         <li className="px-2 py-1 font-mono text-[10px] text-on-surface-variant italic">Loading...</li>
       </ul>
     );
   }
   if (skills.length === 0) {
     return (
-      <ul className="ml-5 border-l border-stone-200">
+      <ul className="ml-5 border-l border-outline-variant">
         <li className="px-2 py-1 font-mono text-[10px] text-on-surface-variant italic">No skills yet.</li>
       </ul>
     );
@@ -400,7 +400,7 @@ function SkillsTree({ skills, loading, activeSkillId, expandedCategories, onTogg
   }
   const categories = Array.from(byCategory.entries()).sort(([a], [b]) => a.localeCompare(b));
   return (
-    <ul className="ml-5 border-l border-stone-200" data-testid="skills-category-tree">
+    <ul className="ml-5 border-l border-outline-variant" data-testid="skills-category-tree">
       {categories.map(([category, items]) => {
         const categoryKey = `category:${category}`;
         const isOpen = !!expandedCategories[categoryKey] || items.some((s) => s.id === activeSkillId);
@@ -414,18 +414,18 @@ function SkillsTree({ skills, loading, activeSkillId, expandedCategories, onTogg
               className="w-full flex items-center gap-1 px-2 py-0.5 hover:bg-surface-low text-left"
             >
               <CategoryChevron className="h-3 w-3 text-on-surface-variant" />
-              <span className="font-mono text-[10px] uppercase tracking-wide text-stone-700 flex-1">{category}</span>
+              <span className="font-mono text-[10px] uppercase tracking-wide text-on-surface flex-1">{category}</span>
               <span className="font-mono text-[9px] text-on-surface-variant">{items.length}</span>
             </button>
             {isOpen && (
-              <ul className="ml-4 border-l border-stone-200">
+              <ul className="ml-4 border-l border-outline-variant">
                 {items.map((skill) => (
                   <li key={skill.id} className="px-2 py-0.5">
                     <Link
                       to="/specs/skills/$skillToken"
                       params={{ skillToken: librarySkillToken(skill.id) }}
                       data-testid={`specs-leaf-${skill.id}`}
-                      className="flex min-w-0 items-center gap-1.5 truncate font-mono text-xs text-on-surface hover:bg-surface-low hover:text-stone-900"
+                      className="flex min-w-0 items-center gap-1.5 truncate font-mono text-xs text-on-surface hover:bg-surface-low hover:text-on-surface"
                     >
                       <ToolMark tool="skill" size="xs" title={`${skill.name} skill`} decorative />
                       <span className="truncate">{skill.name}</span>

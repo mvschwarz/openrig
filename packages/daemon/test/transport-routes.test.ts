@@ -163,7 +163,7 @@ describe("transport routes", () => {
     expect(body.outcome).toBe("failed");
   });
 
-  it("POST /send with mid-work refusal returns 409", async () => {
+  it("POST /send to a mid-work pane returns 200 and DELIVERS with a non-blocking advisory (OPR.0.4.3.28 fast-follow — mid_work downgraded)", async () => {
     seedRig();
     const tmux = {
       ...mockTmux(),
@@ -177,10 +177,10 @@ describe("transport routes", () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ session: "dev-impl@my-rig", text: "hello" }),
     });
-    expect(res.status).toBe(409);
+    expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body.ok).toBe(false);
-    expect(body.reason).toBe("mid_work");
+    expect(body.ok).toBe(true);
+    expect(body.warning).toContain("mid-task");
   });
 
   // OPR.0.4.1.10 — prompt/permission guard surfaces through the route as 409 target_needs_input.
@@ -449,6 +449,175 @@ describe("transport routes", () => {
     expect(body.total).toBe(2);
     expect(body.sent).toBe(1);
     expect(body.failed).toBe(1);
+  });
+
+  // OPR.0.4.3.30 — `rig send` fan-out via /broadcast: explicit list target + per-recipient envelope.
+  it("POST /broadcast with a sessions list wraps EACH recipient in its own From/To envelope (B1)", async () => {
+    seedRig(); // dev-impl@my-rig + dev-qa@my-rig
+    const delivered: string[] = [];
+    const tmux = mockTmux({ sendText: async (_target: string, text: string) => { delivered.push(text); return { ok: true as const }; } });
+    const transport = new SessionTransport({ db, rigRepo, sessionRegistry, tmuxAdapter: tmux });
+    const app = createApp({ sessionTransport: transport });
+
+    const res = await app.request("/api/transport/broadcast", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sessions: ["dev-impl@my-rig", "dev-qa@my-rig"],
+        text: "hello team",
+        force: true,
+        envelopeSender: "orch@my-rig",
+      }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.total).toBe(2);
+    expect(body.sent).toBe(2);
+    expect(delivered).toHaveLength(2);
+    const implText = delivered.find((t) => t.includes("To: dev-impl@my-rig"))!;
+    const qaText = delivered.find((t) => t.includes("To: dev-qa@my-rig"))!;
+    expect(implText).toBeDefined();
+    expect(qaText).toBeDefined();
+    // Each recipient's own To: — NOT one shared string.
+    expect(implText).toContain("From: orch@my-rig");
+    expect(implText).not.toContain("To: dev-qa@my-rig");
+    expect(qaText).not.toContain("To: dev-impl@my-rig");
+    expect(implText).toContain("---\nhello team\n---");
+  });
+
+  it("POST /broadcast WITHOUT envelopeSender delivers raw text to all (rig broadcast unchanged)", async () => {
+    seedRig();
+    const delivered: string[] = [];
+    const tmux = mockTmux({ sendText: async (_target: string, text: string) => { delivered.push(text); return { ok: true as const }; } });
+    const transport = new SessionTransport({ db, rigRepo, sessionRegistry, tmuxAdapter: tmux });
+    const app = createApp({ sessionTransport: transport });
+
+    const res = await app.request("/api/transport/broadcast", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ rig: "my-rig", text: "raw msg", force: true }),
+    });
+    expect(res.status).toBe(200);
+    expect(delivered).toHaveLength(2);
+    expect(delivered.every((t) => t === "raw msg")).toBe(true);
+    expect(delivered.some((t) => t.includes("To:"))).toBe(false);
+  });
+
+  it("POST /broadcast with an unknown seat in the list rejects honestly, naming the seat", async () => {
+    seedRig();
+    const tmux = mockTmux();
+    const transport = new SessionTransport({ db, rigRepo, sessionRegistry, tmuxAdapter: tmux });
+    const app = createApp({ sessionTransport: transport });
+
+    const res = await app.request("/api/transport/broadcast", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sessions: ["dev-impl@my-rig", "ghost@my-rig"], text: "x", force: true }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.total).toBe(0);
+    expect(body.results[0].error).toContain("ghost@my-rig");
+  });
+
+  it("POST /broadcast list: one recipient failing does NOT abort the others (independence)", async () => {
+    seedRig();
+    let n = 0;
+    const tmux = mockTmux({
+      sendText: async () => { n++; return n > 1 ? { ok: false as const, code: "e", message: "boom" } : { ok: true as const }; },
+    });
+    const transport = new SessionTransport({ db, rigRepo, sessionRegistry, tmuxAdapter: tmux });
+    const app = createApp({ sessionTransport: transport });
+
+    const res = await app.request("/api/transport/broadcast", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sessions: ["dev-impl@my-rig", "dev-qa@my-rig"], text: "x", force: true, envelopeSender: "orch@my-rig" }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.total).toBe(2);
+    expect(body.sent).toBe(1);
+    expect(body.failed).toBe(1);
+  });
+
+  it("POST /broadcast list keeps per-recipient send guard semantics for unknown telemetry and picker refusal", async () => {
+    seedRig();
+    const delivered: string[] = [];
+    const tmux = mockTmux({
+      capturePaneContent: async (target: string) => {
+        if (target === "dev-impl@my-rig") {
+          return "OpenRig pane capture failed before activity could be classified";
+        }
+        return [
+          "Would you like to run the following command?",
+          "❯ 1. Yes, continue",
+          "  2. No, cancel",
+          "Enter to select · Esc to cancel",
+        ].join("\n");
+      },
+      sendText: async (target: string, text: string) => {
+        delivered.push(`${target}:${text}`);
+        return { ok: true as const };
+      },
+    });
+    const transport = new SessionTransport({ db, rigRepo, sessionRegistry, tmuxAdapter: tmux });
+    const app = createApp({ sessionTransport: transport });
+
+    const res = await app.request("/api/transport/broadcast", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sessions: ["dev-impl@my-rig", "dev-qa@my-rig"],
+        text: "union seam",
+        envelopeSender: "orch@my-rig",
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.total).toBe(2);
+    expect(body.sent).toBe(1);
+    expect(body.failed).toBe(1);
+
+    const impl = body.results.find((r: { sessionName: string }) => r.sessionName === "dev-impl@my-rig");
+    const qa = body.results.find((r: { sessionName: string }) => r.sessionName === "dev-qa@my-rig");
+    expect(impl).toMatchObject({ ok: true, sessionName: "dev-impl@my-rig" });
+    expect(impl.warning).toContain("producer-link:");
+    expect(impl.warning).toContain("sent anyway (telemetry is advisory)");
+    expect(qa).toMatchObject({ ok: false, sessionName: "dev-qa@my-rig", reason: "target_needs_input" });
+    expect(qa.error).toContain("--dangerously-interact --reason");
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]).toContain("dev-impl@my-rig:");
+    expect(delivered[0]).toContain("To: dev-impl@my-rig");
+  });
+
+  it("POST /broadcast plumbs danger/reason/actorSession to EACH recipient send (per-seat, not per-batch)", async () => {
+    seedRig();
+    const tmux = mockTmux();
+    const transport = new SessionTransport({ db, rigRepo, sessionRegistry, tmuxAdapter: tmux });
+    const sendSpy = vi.spyOn(transport, "send");
+    const app = createApp({ sessionTransport: transport });
+
+    await app.request("/api/transport/broadcast", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sessions: ["dev-impl@my-rig", "dev-qa@my-rig"],
+        text: "unblock please",
+        dangerouslyInteract: true,
+        reason: "drive the stuck prompt",
+        actorSession: "orch@my-rig",
+      }),
+    });
+    expect(sendSpy).toHaveBeenCalledTimes(2);
+    for (const call of sendSpy.mock.calls) {
+      expect(call[2]).toMatchObject({
+        dangerouslyInteract: true,
+        reason: "drive the stuck prompt",
+        actorSession: "orch@my-rig",
+      });
+    }
   });
 
   it("POST /broadcast includes external_cli targets as explicit transport_unavailable failures", async () => {

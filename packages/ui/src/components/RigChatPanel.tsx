@@ -22,25 +22,25 @@ export function RigChatPanel({ rigId }: RigChatPanelProps) {
       {/* Messages */}
       <div className="flex-1 overflow-y-auto p-3 space-y-3">
         {isLoading ? (
-          <div className="font-mono text-[10px] text-stone-400 text-center">Loading messages...</div>
+          <div className="font-mono text-[10px] text-on-surface-variant text-center">Loading messages...</div>
         ) : messages.length === 0 ? (
-          <div className="font-mono text-[10px] text-stone-400 text-center italic">No messages yet</div>
+          <div className="font-mono text-[10px] text-on-surface-variant text-center italic">No messages yet</div>
         ) : (
           messages.map((msg) => (
             <div key={msg.id} data-testid={`chat-msg-${msg.id}`}>
               {msg.kind === "topic" ? (
                 <div
                   data-testid={`chat-topic-${msg.id}`}
-                  className="border-t border-b border-stone-300 bg-stone-50 px-2 py-1.5 text-center font-mono text-[9px] uppercase tracking-wider text-stone-500"
+                  className="border-t border-b border-outline-variant bg-background px-2 py-1.5 text-center font-mono text-[9px] uppercase tracking-wider text-on-surface-variant"
                 >
                   {msg.topic}
                 </div>
               ) : (
-                <div className="border-l-2 border-stone-200 pl-2">
-                  <div data-testid={`chat-sender-${msg.id}`} className="font-mono text-[9px] font-bold text-stone-500">
+                <div className="border-l-2 border-outline-variant pl-2">
+                  <div data-testid={`chat-sender-${msg.id}`} className="font-mono text-[9px] font-bold text-on-surface-variant">
                     {msg.sender}
                   </div>
-                  <div className="font-mono text-[10px] leading-relaxed text-stone-800 whitespace-pre-wrap">
+                  <div className="font-mono text-[10px] leading-relaxed text-on-surface whitespace-pre-wrap">
                     {msg.body}
                   </div>
                 </div>
@@ -51,21 +51,21 @@ export function RigChatPanel({ rigId }: RigChatPanelProps) {
       </div>
 
       {/* Send form */}
-      <form data-testid="chat-send-form" onSubmit={handleSubmit} className="border-t border-stone-200 p-2 flex gap-2">
+      <form data-testid="chat-send-form" onSubmit={handleSubmit} className="border-t border-outline-variant p-2 flex gap-2">
         <input
           data-testid="chat-input"
           type="text"
           value={input}
           onChange={(e) => setInput(e.target.value)}
           placeholder="Type a message..."
-          className="flex-1 px-2 py-1 border border-stone-300 font-mono text-[10px]"
+          className="flex-1 px-2 py-1 border border-outline-variant font-mono text-[10px]"
           disabled={isSending}
         />
         <button
           data-testid="chat-send-btn"
           type="submit"
           disabled={isSending || !input.trim()}
-          className="px-3 py-1 border border-stone-300 font-mono text-[9px] uppercase hover:bg-stone-200 disabled:opacity-50"
+          className="px-3 py-1 border border-outline-variant font-mono text-[9px] uppercase hover:bg-surface-high disabled:opacity-50"
         >
           Send
         </button>

@@ -146,6 +146,39 @@ describe("PeriodicSnapshotScheduler", () => {
     expect(scheduler.isActive).toBe(true);
     scheduler.stop();
   });
+
+  // OPR.0.4.3.20 FR-4 — refresh the live per-seat resume ledger before serialize.
+  type Refresher = import("../src/domain/resume-metadata-refresher.js").ResumeMetadataRefresher;
+
+  it("FR-4: tick refreshes live tokens before capturing the periodic snapshot", async () => {
+    const rigId = seedRunningRig("r-fr4");
+    const refresh = vi.fn(async () => {});
+    const fr4 = new PeriodicSnapshotScheduler({
+      db, snapshotCapture, snapshotRepo, sessionRegistry,
+      resumeMetadataRefresher: { refresh } as unknown as Refresher,
+    });
+    await fr4.tick();
+    // refresh ran, and it received the rig's latest live sessions.
+    expect(refresh).toHaveBeenCalledTimes(1);
+    const passed = refresh.mock.calls[0]![0] as Array<{ sessionName: string }>;
+    expect(passed.some((s) => s.sessionName === "worker@r-fr4")).toBe(true);
+    // rev1 fix: the recurring snapshot path calls refresh in fill-null-only mode
+    // (never clears a present token, never spawns a `claude --resume` probe).
+    const opts = refresh.mock.calls[0]![1] as { fillNullOnly?: boolean } | undefined;
+    expect(opts?.fillNullOnly).toBe(true);
+    // and the snapshot was still captured (refresh precedes serialize, not replaces it).
+    expect(snapshotRepo.listSnapshots(rigId, { kind: "auto-periodic" })).toHaveLength(1);
+  });
+
+  it("FR-4: a refresh that THROWS does not skip the snapshot (best-effort, own try/catch)", async () => {
+    const rigId = seedRunningRig("r-fr4-throw");
+    const fr4 = new PeriodicSnapshotScheduler({
+      db, snapshotCapture, snapshotRepo, sessionRegistry,
+      resumeMetadataRefresher: { refresh: vi.fn(async () => { throw new Error("refresh boom"); }) } as unknown as Refresher,
+    });
+    await fr4.tick();
+    expect(snapshotRepo.listSnapshots(rigId, { kind: "auto-periodic" })).toHaveLength(1);
+  });
 });
 
 describe("OPR.0.3.4.9 production wiring: startPeriodicSnapshotScheduler", () => {

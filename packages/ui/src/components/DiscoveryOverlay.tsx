@@ -71,8 +71,8 @@ function DiscoveryActionButton({
       className={cn(
         "inline-flex items-center gap-1.5 px-spacing-2 py-1 border font-mono text-[10px] uppercase transition-colors duration-150 ease-tactical",
         active
-          ? "bg-stone-900 text-white border-stone-900"
-          : "bg-white text-stone-900 border-stone-300 hover:bg-stone-100",
+          ? "bg-inverse-surface text-background border-on-surface"
+          : "bg-surface-lowest text-on-surface border-outline-variant hover:bg-surface-low",
       )}
     >
       {tool ? <ToolMark tool={tool} size="sm" /> : null}
@@ -86,7 +86,7 @@ function DiscoveredSessionCard({ session, onAdopt }: { session: DiscoveredSessio
     <div
       data-testid="discovered-node"
       className={cn(
-        "border-dashed border border-foreground/20 bg-[rgba(255,255,255,0.72)] px-spacing-4 py-spacing-3 mb-spacing-2 shadow-[0_10px_28px_rgba(20,20,20,0.04)] backdrop-blur-sm",
+        "border-dashed border border-foreground/20 bg-[hsl(var(--surface-container-lowest)/0.72)] px-spacing-4 py-spacing-3 mb-spacing-2 shadow-[0_10px_28px_rgba(20,20,20,0.04)] backdrop-blur-sm",
       )}
     >
       <div className="flex flex-col gap-spacing-3 lg:flex-row lg:items-center lg:justify-between">
@@ -326,7 +326,7 @@ export function DiscoveryOverlay() {
                 data-testid="adopt-rig-input"
                 value={rigId}
                 onChange={(e) => setRigId(e.target.value)}
-                className="w-full bg-white border-b border-outline py-spacing-1 text-body-md font-mono focus:outline-none focus:border-stone-900 appearance-none cursor-pointer"
+                className="w-full bg-surface-lowest border-b border-outline py-spacing-1 text-body-md font-mono focus:outline-none focus:border-on-surface appearance-none cursor-pointer"
               >
                 <option value="">Select a rig...</option>
                 {rigs.map((r) => (

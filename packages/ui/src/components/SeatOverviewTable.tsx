@@ -59,8 +59,8 @@ interface ColumnField {
 }
 
 function placeholderOrValue(value: ReactNode | null | undefined): ReactNode {
-  if (value === null || value === undefined) return <span className="text-stone-400">—</span>;
-  if (typeof value === "string" && value.trim() === "") return <span className="text-stone-400">—</span>;
+  if (value === null || value === undefined) return <span className="text-on-surface-variant">—</span>;
+  if (typeof value === "string" && value.trim() === "") return <span className="text-on-surface-variant">—</span>;
   return value;
 }
 
@@ -111,7 +111,7 @@ export function SeatOverviewTable({ data, activityVisual }: SeatOverviewTablePro
       className={
         activityIsActive
           ? "topology-table-active-shimmer text-emerald-600"
-          : "text-stone-700"
+          : "text-on-surface"
       }
     >
       {activityLabel}{timeInState ? ` ${timeInState.label}` : ""}{gradeLabel}
@@ -146,21 +146,21 @@ export function SeatOverviewTable({ data, activityVisual }: SeatOverviewTablePro
   return (
     <section
       data-testid="seat-overview-table"
-      className="border border-outline-variant bg-white/30"
+      className="border border-outline-variant bg-surface-lowest/30"
     >
       <div className="overflow-x-auto">
         <table className="w-full text-left">
           <thead>
             <tr
               data-testid="seat-overview-header-row"
-              className="border-b border-outline-variant/55 bg-stone-50/30"
+              className="border-b border-outline-variant/55 bg-background/30"
             >
               {columnFields.map((field, idx) => (
                 <th
                   key={field.key}
                   scope="col"
                   data-testid={`seat-overview-header-${field.key}`}
-                  className={`px-3 py-1.5 text-left font-mono text-[10px] font-normal lowercase tracking-[0.04em] text-stone-500 ${
+                  className={`px-3 py-1.5 text-left font-mono text-[10px] font-normal lowercase tracking-[0.04em] text-on-surface-variant ${
                     idx < lastIdx ? "border-r border-outline-variant/55" : ""
                   }`}
                 >
@@ -180,7 +180,7 @@ export function SeatOverviewTable({ data, activityVisual }: SeatOverviewTablePro
                   data-testid={`seat-overview-cell-${field.key}`}
                   className={`min-w-0 px-3 py-1.5 align-middle ${
                     field.mono ? "font-mono text-[11px]" : "text-[11px]"
-                  } text-stone-900 ${
+                  } text-on-surface ${
                     idx < lastIdx ? "border-r border-outline-variant/55" : ""
                   }`}
                 >

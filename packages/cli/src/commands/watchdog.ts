@@ -42,7 +42,7 @@ function printResult(json: boolean, body: unknown, status: number): void {
 
 export function watchdogCommand(depsOverride?: WatchdogDeps): Command {
   const cmd = new Command("watchdog").description(
-    "Coordination Watchdog — daemon-native scheduler for periodic-reminder, artifact-pool-ready, edge-artifact-required (PL-004 Phase C; workflow-keepalive ships in Phase D)",
+    "Coordination Watchdog — daemon-native scheduler for periodic-reminder, artifact-pool-ready, edge-artifact-required (PL-004 Phase C; workflow-keepalive + idle-gate-qitem in Phase D)",
   );
   const getDeps = (): WatchdogDeps =>
     depsOverride ?? {
@@ -54,7 +54,7 @@ export function watchdogCommand(depsOverride?: WatchdogDeps): Command {
     .command("register")
     .description("Register a new watchdog job from a YAML spec file")
     .requiredOption("--spec <path>", "Path to YAML spec file (policy + target + interval + context)")
-    .requiredOption("--policy <policy>", "Policy name (one of: periodic-reminder, artifact-pool-ready, edge-artifact-required, workflow-keepalive)")
+    .requiredOption("--policy <policy>", "Policy name (one of: periodic-reminder, artifact-pool-ready, edge-artifact-required, workflow-keepalive, idle-gate-qitem)")
     .requiredOption("--target-session <session>", "Canonical <member>@<rig> target")
     .requiredOption("--interval-seconds <n>", "Evaluation interval (positive integer)")
     .requiredOption("--registered-by <session>", "Registering session (for audit)")

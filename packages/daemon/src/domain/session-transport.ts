@@ -5,6 +5,7 @@ import type { TmuxAdapter } from "../adapters/tmux.js";
 import type { AgentActivityStore } from "./agent-activity-store.js";
 import type { EventBus } from "./event-bus.js";
 import type { AgentActivity } from "./types.js";
+import { wrapPaneEnvelope } from "../lib/pane-envelope.js";
 
 // OPR.0.4.1.10 — send-readiness freshness. The runtime-hook store keeps a 5min freshness for activity
 // DISPLAY, but "safe to send NOW" needs a tight window: a stale "idle" read must not authorize a send
@@ -339,6 +340,10 @@ function countOccurrences(haystack: string, needle: string): number {
 
 export type TargetSpec =
   | { session: string }
+  // OPR.0.4.3.30 — explicit multi-recipient list (`rig send --to a,b`). Resolved via
+  // resolveByList (each name through the single-name resolver, so ambiguity/not-found are
+  // reported honestly against the exact seat).
+  | { sessions: string[] }
   | { rig: string }
   | { pod: string; rig?: string }
   | { global: true };
@@ -359,6 +364,15 @@ export interface SendOpts {
   dangerouslyInteract?: boolean;
   reason?: string;
   actorSession?: string | null;
+}
+
+// OPR.0.4.3.30 — options for the fan-out path (`broadcast()`). Superset of SendOpts.
+// `envelopeSender`, when set, makes the fan-out wrap EACH recipient's text in its own
+// From/To pane envelope (byte-identical to single-send CLI wrapping via wrapPaneEnvelope),
+// so a multi/pod/rig `rig send` gives each seat its own `To:` header. Absent for
+// `rig broadcast` (raw-to-all, unchanged) and for the CLI --raw / --dangerously-interact paths.
+export interface BroadcastOpts extends SendOpts {
+  envelopeSender?: string;
 }
 
 export interface SendResult {
@@ -474,6 +488,9 @@ export class SessionTransport {
     if ("session" in target) {
       return this.resolveBySessionName(target.session);
     }
+    if ("sessions" in target) {
+      return this.resolveByList(target.sessions);
+    }
     if ("pod" in target) {
       return this.resolveByPod(target.pod, target.rig);
     }
@@ -550,6 +567,28 @@ export class SessionTransport {
       ok: true,
       sessions: [{ sessionName, rigName, nodeLogicalId: meta.nodeLogicalId }],
     };
+  }
+
+  // OPR.0.4.3.30 — resolve an explicit list of named seats for a multi-recipient `rig send`.
+  // Each name goes through the single-name resolver so a not-found / ambiguous seat is reported
+  // honestly against that exact name (matching single-send semantics), and the whole command is
+  // rejected rather than silently dropping a mistyped seat. Duplicate names are de-duplicated so
+  // `--to a,a` delivers once. (Per-recipient GUARD independence is a send()-time concern, not a
+  // resolution one — a guard refusal is one ok:false in the fan-out results, never an abort.)
+  private resolveByList(sessionNames: string[]): ResolveResult {
+    const sessions: ResolvedTarget[] = [];
+    const seen = new Set<string>();
+    for (const name of sessionNames) {
+      if (seen.has(name)) continue;
+      seen.add(name);
+      const resolved = this.resolveBySessionName(name);
+      if (!resolved.ok) return resolved;
+      sessions.push(...resolved.sessions);
+    }
+    if (sessions.length === 0) {
+      return { ok: false, code: "not_found", error: "No target sessions provided." };
+    }
+    return { ok: true, sessions };
   }
 
   private resolveByRig(rigName: string): ResolveResult {
@@ -745,9 +784,14 @@ export class SessionTransport {
     // Runs the same detector previously reachable only via --wait-for-idle: fresh runtime-hook primary
     // (within the send-readiness window) + hardened capture-pane fallback. This closes the rig-send
     // prompt-injection footgun — a message can never select/submit/approve another agent's prompt by
-    // default. needs_input/unknown FAIL CLOSED and only --dangerously-interact bypasses them; running
-    // (mid-work) refuses but --force still bypasses (legacy behavior). --force does NOT bypass the
-    // prompt/permission guard (FR-4 — the footgun separation).
+    // default. OPR.0.4.3.28 correction + fast-follow: only POSITIVE picker/approval evidence
+    // (needs_input) FAILS CLOSED (refuse, or an audited --dangerously-interact override). Every other
+    // state now PROCEEDS with a non-blocking advisory: UNKNOWN (absent/stale/failed telemetry) and
+    // RUNNING (mid-work, busy) both send-and-advise — busy/uncertain is not authority to block
+    // communication. --force is a no-op on this path now (kept for back-compat) and never bypasses
+    // the positive-picker guard (FR-4 — the footgun separation). The advisory is carried on the
+    // success result via `warning` so the honest telemetry is surfaced.
+    let sendAdvisory: string | undefined;
     if (waitForIdleMs === undefined) {
       const readiness = await this.classifySendReadiness({
         sessionName,
@@ -755,11 +799,15 @@ export class SessionTransport {
         attachmentType: sessionMeta.attachmentType,
       });
 
-      if (opts?.dangerouslyInteract) {
-        // Deliberate override. For the states it actually bypasses (needs_input / unknown) require a
-        // reason and persist an auditable record BEFORE the send — fail closed if it cannot be audited
-        // (so a post-send failure can never erase the audit, and an unauditable override never sends).
-        if (readiness.state === "needs_input" || readiness.state === "unknown") {
+      // Single state dispatch (B1 code-review fix): flattened so `unknown` ALWAYS attaches the advisory
+      // regardless of whether --dangerously-interact was passed — the deliberate-override branch no
+      // longer bypasses unknown handling.
+      if (readiness.state === "needs_input") {
+        // The POSITIVE picker/approval footgun. --dangerously-interact is the deliberate audited
+        // override (reason required + an auditable record persisted BEFORE the send; fail closed if it
+        // cannot be audited so an unauditable override never sends). Otherwise refuse with the
+        // proceed-path. This is the ONLY state --dangerously-interact bypasses.
+        if (opts?.dangerouslyInteract) {
           if (!opts.reason || opts.reason.trim().length === 0) {
             return {
               ok: false,
@@ -783,10 +831,8 @@ export class SessionTransport {
               error: `Refused: --dangerously-interact requires an auditable override record, which could not be persisted (${audit.reason}). No text was sent.`,
             };
           }
-        }
-        // idle / running: nothing dangerous to override; proceed (CLI sends raw exact text).
-      } else {
-        if (readiness.state === "needs_input") {
+          // audited → proceed to the send.
+        } else {
           return {
             ok: false,
             sessionName,
@@ -795,25 +841,26 @@ export class SessionTransport {
             error: `Refused: '${sessionName}' is at an interactive prompt (${readiness.reason}). A message must not select or approve it. To deliberately drive the prompt: rig send ${sessionName} "<text>" --dangerously-interact --reason "<why>". No text was sent.`,
           };
         }
-        if (readiness.state === "unknown") {
-          return {
-            ok: false,
-            sessionName,
-            reason: "target_activity_unknown",
-            activity: readiness,
-            error: `Refused: '${sessionName}' activity could not be determined (${readiness.reason}); failing closed so a message cannot land on a prompt. Retry once the target settles, or to deliberately drive it: rig send ${sessionName} "<text>" --dangerously-interact --reason "<why>". No text was sent.`,
-          };
-        }
-        if (readiness.state === "running" && !opts?.force) {
-          return {
-            ok: false,
-            sessionName,
-            reason: "mid_work",
-            error: `Target pane appears mid-task. Use force: true to send anyway, or wait for the task to settle.`,
-          };
-        }
-        // idle, or running + force → proceed to send.
+      } else if (readiness.state === "unknown") {
+        // OPR.0.4.3.28 correction — INVERT the fail-closed-on-unknown default. Absent/stale/failed
+        // telemetry is NOT positive picker evidence, so the send PROCEEDS. Diagnose the producer link
+        // and carry it as a NON-blocking advisory (`warning` on the success result) — ALWAYS, whether
+        // or not --dangerously-interact was passed (B1 code-review fix) — so the honest telemetry is
+        // surfaced without ever blocking communication. Hooks are advisory telemetry, not authority
+        // over whether agents can talk.
+        const linkDiagnosis = await this.diagnoseProducerLink(sessionName);
+        sendAdvisory = `producer-link: ${linkDiagnosis} — activity could not be determined (${readiness.reason}); sent anyway (telemetry is advisory).`;
+        // fall through to the send below.
+      } else if (readiness.state === "running") {
+        // OPR.0.4.3.28 fast-follow (advisor audit-catch, pm-ruled a founder-principle residual):
+        // busy is NOT a block. Downgrade the old mid_work HARD REFUSE to a non-blocking advisory —
+        // attach it on the success result + PROCEED (mirrors the unknown inversion). --force is now a
+        // no-op here (the option is kept for back-compat). needs_input (positive picker) remains the
+        // ONLY hard refuse; unknown/stale/missing already proceed-with-advisory above.
+        sendAdvisory = `target pane appears mid-task; sent anyway (busy is advisory, not a block).`;
+        // fall through to the send below.
       }
+      // idle (or running/unknown — now advisory-and-proceed) → proceed to send.
     }
 
     if (opts?.verify) {
@@ -865,13 +912,13 @@ export class SessionTransport {
         const preCount = countOccurrences(preVerifyContent ?? "", snippet);
         const postCount = countOccurrences(content ?? "", snippet);
         const verified = postCount > preCount;
-        return { ok: true, sessionName, verified, outcome: verified ? "delivered" : "rendered-unconfirmed", ...(waitMode ? { sent: true, ...waitEvidence } : {}) };
+        return { ok: true, sessionName, verified, outcome: verified ? "delivered" : "rendered-unconfirmed", ...(sendAdvisory ? { warning: sendAdvisory } : {}), ...(waitMode ? { sent: true, ...waitEvidence } : {}) };
       } catch {
-        return { ok: true, sessionName, verified: false, outcome: "rendered-unconfirmed", ...(waitMode ? { sent: true, ...waitEvidence } : {}) };
+        return { ok: true, sessionName, verified: false, outcome: "rendered-unconfirmed", ...(sendAdvisory ? { warning: sendAdvisory } : {}), ...(waitMode ? { sent: true, ...waitEvidence } : {}) };
       }
     }
 
-    return { ok: true, sessionName, ...(waitMode ? { sent: true, ...waitEvidence } : {}) };
+    return { ok: true, sessionName, ...(sendAdvisory ? { warning: sendAdvisory } : {}), ...(waitMode ? { sent: true, ...waitEvidence } : {}) };
   }
 
   private async waitForIdle(input: {
@@ -949,10 +996,38 @@ export class SessionTransport {
     if (
       hookActivity &&
       hookActivity.evidenceSource === "runtime_hook" &&
-      hookActivity.stale !== true &&
-      this.hookFreshForSend(hookActivity, now)
+      hookActivity.stale !== true
     ) {
-      return hookActivity;
+      // Fresh hook (within the 15s send window): authoritative for any state.
+      if (this.hookFreshForSend(hookActivity, now)) {
+        return hookActivity;
+      }
+      // OPR.0.4.3.28 Part A — a stale-but-latest `idle` hook (older than the 15s
+      // send window but still within the 5-min store window, so stale!==true) is
+      // SENDABLE. getLatestForNode returns the single newest event by seq, so a
+      // latest hook still `idle` proves no newer activity exists (had the seat
+      // started work, the latest hook would be UserPromptSubmit/PermissionRequest).
+      // A stale NON-idle hook (running/needs_input >15s) still falls through to
+      // the pane probe below. No 15s widen; scoped to stale!==true so a
+      // truly-abandoned seat (>5min) still degrades to the probe.
+      if (hookActivity.state === "idle") {
+        // Guard code-review 2026-07-02 (Blocker 1): a NARROW real-time veto
+        // before trusting the stale-idle hook — never paste+Enter onto a VISIBLE
+        // picker/permission prompt. Only a POSITIVE needs_input from the pane
+        // vetoes (→ refuse); an unknown pane (the flaky-Codex case this trust
+        // exists for) or a clean idle pane does NOT veto → trust the stale hook.
+        const paneVeto = await probeSessionActivity({
+          sessionName: input.sessionName,
+          runtime: input.runtime,
+          attachmentType: input.attachmentType as "tmux" | "external_cli" | null | undefined,
+          tmuxAdapter: this.tmuxAdapter,
+          now,
+        });
+        if (paneVeto.state === "needs_input") {
+          return paneVeto;
+        }
+        return hookActivity;
+      }
     }
 
     return probeSessionActivity({
@@ -970,6 +1045,41 @@ export class SessionTransport {
     const eventMs = activity.eventAt ? Date.parse(activity.eventAt) : NaN;
     if (!Number.isFinite(eventMs)) return false;
     return now.getTime() - eventMs <= this.sendReadinessFreshnessMs;
+  }
+
+  // OPR.0.4.3.28 Part C — producer-link diagnostic. When a send fails closed on
+  // `unknown` (no usable activity signal), name WHICH link in the hook→activity
+  // producer chain is broken + the next step, instead of an opaque
+  // `no_activity_signal`. NEVER surfaces a token value — env checks are
+  // presence-only, and the store carries no token.
+  private async diagnoseProducerLink(sessionName: string): Promise<string> {
+    // Link 1 — the SEAT ENV: can the relay even reach the daemon?
+    let hasUrl: boolean | null = null;
+    let hasToken: boolean | null = null;
+    if (typeof this.tmuxAdapter?.hasSessionEnv === "function") {
+      try {
+        hasUrl = await this.tmuxAdapter.hasSessionEnv(sessionName, "OPENRIG_URL");
+        hasToken = await this.tmuxAdapter.hasSessionEnv(sessionName, "OPENRIG_ACTIVITY_HOOK_TOKEN");
+      } catch { /* best-effort — fall through to the store evidence below */ }
+    }
+    if (hasUrl === false || hasToken === false) {
+      return `seat-env link DOWN — OPENRIG_URL ${hasUrl ? "present" : "MISSING"}, OPENRIG_ACTIVITY_HOOK_TOKEN ${hasToken ? "present" : "MISSING"}; the activity relay cannot reach the daemon. Relaunch the seat, or (for a reconciled/restored seat) ensure the daemon's activity-endpoint.json is discoverable`;
+    }
+
+    // Link 2 — the DAEMON INGEST + store: did any hook actually land, and how stale?
+    const store = this.agentActivityStore;
+    if (!store) {
+      return `daemon-ingest link DOWN — the activity store is not configured on this daemon (ingest returns 503)`;
+    }
+    const latest = store.getLatestForNode({ sessionName, now: this.now() });
+    if (!latest || latest.evidenceSource !== "runtime_hook") {
+      return `daemon-ingest link DOWN — no activity hook has ever been received for this seat; the ingest is rejecting posts (token mismatch → 401, or ingest unconfigured → 503) or Codex hook-trust is uncleared. Verify the seat was OpenRig-launched with hook-trust cleared`;
+    }
+    if (latest.stale === true) {
+      const ageS = latest.eventAt ? Math.round((this.now().getTime() - Date.parse(latest.eventAt)) / 1000) : null;
+      return `producer link OK but STALE — the last activity hook arrived ${ageS !== null ? `${ageS}s ago` : "long ago"} (beyond the store window); the seat has gone quiet or its hooks stopped firing`;
+    }
+    return `a recent activity hook exists but the live pane probe could not confirm idle (possible identity mismatch between the seat env, the DB, and the stored payload)`;
   }
 
   // OPR.0.4.1.10 — persist the audit record for a --dangerously-interact prompt override. Audit-all-
@@ -1047,7 +1157,7 @@ export class SessionTransport {
     return { ok: true, sessionName, content, lines };
   }
 
-  async broadcast(target: TargetSpec, text: string, opts?: SendOpts): Promise<BroadcastResult> {
+  async broadcast(target: TargetSpec, text: string, opts?: BroadcastOpts): Promise<BroadcastResult> {
     const resolved = await this.resolveSessions(target);
     if (!resolved.ok) {
       return {
@@ -1065,7 +1175,14 @@ export class SessionTransport {
 
     const results: SendResult[] = [];
     for (const session of resolved.sessions) {
-      const result = await this.send(session.sessionName, text, opts);
+      // OPR.0.4.3.30 — per-recipient From/To envelope for `rig send` fan-out: each recipient
+      // gets its OWN `To:` header rendered daemon-side (the CLI can't wrap per recipient because
+      // it doesn't know each resolved seat). When envelopeSender is absent (`rig broadcast`,
+      // --raw, --dangerously-interact) the text is delivered raw, exactly as before.
+      const perRecipientText = opts?.envelopeSender
+        ? wrapPaneEnvelope(opts.envelopeSender, session.sessionName, text)
+        : text;
+      const result = await this.send(session.sessionName, perRecipientText, opts);
       results.push(result);
     }
 

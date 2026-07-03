@@ -148,24 +148,44 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
     const body = await c.req.json<{
       rig?: string;
       pod?: string;
+      // OPR.0.4.3.30 — explicit multi-recipient list (`rig send --to a,b`).
+      sessions?: string[];
       text: string;
       verify?: boolean;
       force?: boolean;
+      // OPR.0.4.3.30 — plumbed through so `rig send` fan-out carries the same guard/wait
+      // semantics as a single send. Each is applied PER recipient inside broadcast()'s loop
+      // (the danger audit fires once per seat, not once per batch).
+      waitForIdleMs?: number;
+      dangerouslyInteract?: boolean;
+      reason?: string;
+      actorSession?: string | null;
+      // OPR.0.4.3.30 — when set, the fan-out wraps each recipient in its own From/To envelope.
+      // `rig broadcast` never sets it (raw-to-all, unchanged).
+      envelopeSender?: string | null;
     }>();
 
     if (!body.text) {
       return c.json({ error: "Missing required field: text" }, 400);
     }
 
-    const target: TargetSpec = body.pod
-      ? { pod: body.pod, rig: body.rig }
-      : body.rig
-        ? { rig: body.rig }
-        : { global: true };
+    const target: TargetSpec =
+      body.sessions && body.sessions.length > 0
+        ? { sessions: body.sessions }
+        : body.pod
+          ? { pod: body.pod, rig: body.rig }
+          : body.rig
+            ? { rig: body.rig }
+            : { global: true };
 
     const result = await transport.broadcast(target, body.text, {
       verify: body.verify,
       force: body.force,
+      waitForIdleMs: body.waitForIdleMs,
+      dangerouslyInteract: body.dangerouslyInteract,
+      reason: body.reason,
+      actorSession: body.actorSession ?? null,
+      envelopeSender: body.envelopeSender ?? undefined,
     });
 
     return c.json(result);

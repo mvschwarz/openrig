@@ -41,7 +41,7 @@ describe("SectionHeader (Phase 1 primitive)", () => {
   it("tone=strong applies stone-900 + font-bold", () => {
     const { container } = render(<SectionHeader tone="strong">X</SectionHeader>);
     const cls = (container.firstChild as HTMLElement).className;
-    expect(cls).toContain("text-stone-900");
+    expect(cls).toContain("text-on-surface");
     expect(cls).toContain("font-bold");
   });
 

@@ -44,6 +44,8 @@ describe("rig launch --seats", () => {
     errors = [];
     vi.spyOn(console, "log").mockImplementation((...args) => { logs.push(args.join(" ")); });
     vi.spyOn(console, "error").mockImplementation((...args) => { errors.push(args.join(" ")); });
+    // OPR.0.4.3.28 — non-blocking launch warnings print via console.warn (stderr).
+    vi.spyOn(console, "warn").mockImplementation((...args) => { errors.push(args.join(" ")); });
     process.exitCode = undefined;
   });
 
@@ -98,6 +100,46 @@ describe("rig launch --seats", () => {
     expect(process.exitCode).toBe(1);
   });
 
+  it("FR-7: a --seats awaiting-decision restore is NOT printed as Launched and exits non-zero", async () => {
+    const deps = makeDeps({
+      "launch-subset": {
+        status: 409,
+        data: {
+          ok: false,
+          launched: [
+            { nodeId: "n1", logicalId: "dev.driver", status: "fresh" },
+            { nodeId: "n2", logicalId: "dev.guard", status: "awaiting-decision", error: "Original session unresumable: resume requested but runtime continuity could not be verified. Re-run with --fresh dev.guard ..." },
+          ],
+          held: [],
+          alreadyRunning: [],
+          failedTargets: [],
+        },
+      },
+    });
+    const cmd = launchCommand(deps);
+    await cmd.parseAsync(["node", "rig", "rig-1", "--seats", "dev.driver,dev.guard"]);
+    // The running seat is Launched; the awaiting-decision seat is NOT reported as launched.
+    expect(logs.some((l) => l.includes("Launched") && l.includes("dev.driver"))).toBe(true);
+    expect(logs.some((l) => l.includes("Launched") && l.includes("dev.guard"))).toBe(false);
+    // The awaiting-decision seat is surfaced honestly on stderr + the run exits non-zero.
+    expect(errors.some((l) => l.includes("dev.guard") && l.includes("awaiting-decision"))).toBe(true);
+    expect(process.exitCode).toBe(1);
+  });
+
+  it("FR-7: a single-node launch that lands awaiting-decision exits non-zero, not Launched", async () => {
+    const deps = makeDeps({
+      "dev.driver/launch": {
+        status: 409,
+        data: { ok: false, logicalId: "dev.driver", code: "awaiting-decision", status: "awaiting-decision", error: "Original session unresumable: resume requested but no token available. Re-run with --fresh dev.driver ..." },
+      },
+    });
+    const cmd = launchCommand(deps);
+    await cmd.parseAsync(["node", "rig", "rig-1", "dev.driver"]);
+    expect(logs.some((l) => l.includes("Launched node"))).toBe(false);
+    expect(errors.some((l) => l.includes("--fresh"))).toBe(true);
+    expect(process.exitCode).toBe(1);
+  });
+
   it("requires nodeRef or --seats", async () => {
     const deps = makeDeps({});
     const cmd = launchCommand(deps);
@@ -129,6 +171,51 @@ describe("rig launch --seats", () => {
 
     expect(logs.some((l) => l.includes("already running"))).toBe(true);
     expect(logs.some((l) => l.includes("Launched"))).toBe(false);
+  });
+
+  // OPR.0.4.3.28 correction — the liveness_probe_unknown warning is a non-blocking
+  // proceed-with-warning: it prints on human output and does NOT set a non-zero exit.
+  it("prints liveness warnings in --seats human output with exit 0 (proceed-with-warning)", async () => {
+    const deps = makeDeps({
+      "launch-subset": {
+        status: 201,
+        data: {
+          ok: true,
+          launched: [{ nodeId: "n1", logicalId: "dev.driver", status: "fresh" }],
+          held: [],
+          alreadyRunning: [],
+          failedTargets: [],
+          warnings: ["liveness_probe_unknown: launched 'dev.driver' despite a failed tmux liveness probe — verify no live seat was squatted"],
+        },
+      },
+    });
+    const cmd = launchCommand(deps);
+    await cmd.parseAsync(["node", "rig", "rig-1", "--seats", "dev.driver"]);
+    expect(errors.some((l) => l.includes("Warning") && l.includes("liveness_probe_unknown") && l.includes("dev.driver"))).toBe(true);
+    expect(process.exitCode).toBeUndefined();
+  });
+
+  it("prints liveness warnings in single-target human output with exit 0 (proceed-with-warning)", async () => {
+    const deps = makeDeps({
+      "dev.driver/launch": {
+        status: 201,
+        data: {
+          ok: true,
+          rigId: "rig-1",
+          nodeId: "n1",
+          logicalId: "dev.driver",
+          launched: [{ nodeId: "n1", logicalId: "dev.driver", status: "fresh" }],
+          held: [],
+          alreadyRunning: [],
+          warnings: ["liveness_probe_unknown: launched 'dev.driver' despite a failed tmux liveness probe — verify no live seat was squatted"],
+        },
+      },
+    });
+    const cmd = launchCommand(deps);
+    await cmd.parseAsync(["node", "rig", "rig-1", "dev.driver"]);
+    expect(logs.some((l) => l.includes("Launched node") && l.includes("dev.driver"))).toBe(true);
+    expect(errors.some((l) => l.includes("Warning") && l.includes("liveness_probe_unknown"))).toBe(true);
+    expect(process.exitCode).toBeUndefined();
   });
 
   it("reports unmatchedIds in --seats mode", async () => {

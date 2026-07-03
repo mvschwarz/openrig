@@ -50,7 +50,7 @@ describe("slice 20: FilesWorkspace responsive two-pane shape", () => {
     expect(source).toMatch(/sm:max-h-none/);
     // Desktop keeps a right border between tree + content; mobile uses
     // a bottom border instead. Both shapes documented in className.
-    expect(source).toMatch(/border-b border-stone-200/);
+    expect(source).toMatch(/border-b border-outline-variant/);
     expect(source).toMatch(/sm:border-b-0 sm:border-r/);
   });
 });
@@ -66,7 +66,7 @@ describe("slice 20: DocsTab responsive two-pane shape", () => {
     expect(source).toMatch(/w-full max-h-48 shrink-0 overflow-y-auto/);
     expect(source).toMatch(/sm:w-56/);
     expect(source).toMatch(/sm:max-h-none/);
-    expect(source).toMatch(/border-b border-stone-200/);
+    expect(source).toMatch(/border-b border-outline-variant/);
     expect(source).toMatch(/sm:border-b-0 sm:border-r/);
   });
 });

@@ -31,7 +31,7 @@ const COLUMNS: ColumnDef<SpecLibraryEntry>[] = [
       <Link
         to="/specs/library/$entryId"
         params={{ entryId: row.original.id }}
-        className="font-mono text-xs text-stone-900 hover:underline"
+        className="font-mono text-xs text-on-surface hover:underline"
       >
         {row.original.name}
       </Link>
@@ -111,7 +111,7 @@ export function SpecsTable() {
       </div>
       <div className="border border-outline-variant overflow-x-auto">
         <table className="w-full text-left">
-          <thead className="bg-stone-50 border-b border-outline-variant">
+          <thead className="bg-background border-b border-outline-variant">
             {table.getHeaderGroups().map((hg) => (
               <tr key={hg.id}>
                 {hg.headers.map((h) => (

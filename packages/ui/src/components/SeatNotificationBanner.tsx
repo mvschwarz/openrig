@@ -75,7 +75,7 @@ export function SeatNotificationBanner({ data }: SeatNotificationBannerProps) {
       {hasGuidance && data.recoveryGuidance ? (
         <AlertDescription
           data-testid="seat-notification-guidance"
-          className="mt-1 font-mono text-[10px] text-stone-700"
+          className="mt-1 font-mono text-[10px] text-on-surface"
         >
           {data.recoveryGuidance.summary}
         </AlertDescription>

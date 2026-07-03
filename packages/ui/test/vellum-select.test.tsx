@@ -34,8 +34,8 @@ describe("VellumSelect (Phase 1 primitive)", () => {
       </VellumSelect>,
     );
     const el = container.querySelector("select[data-testid='vs-c']") as HTMLSelectElement;
-    expect(el.className).toContain("border-stone-300");
-    expect(el.className).toContain("bg-white");
+    expect(el.className).toContain("border-outline-variant");
+    expect(el.className).toContain("bg-surface-lowest");
     expect(el.className).toContain("font-mono");
   });
 

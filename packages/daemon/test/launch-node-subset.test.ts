@@ -207,7 +207,11 @@ describe("RestoreOrchestrator.launchNodeSubset", () => {
     expect(events).toHaveLength(0);
   });
 
-  it("fail-closed on tmux probe error — does not launch, returns failedTargets", async () => {
+  // OPR.0.4.3.28 correction — INVERT fail-closed-on-unknown for launch liveness. A tmux
+  // probe error is NOT positive evidence of a live seat (only a TRUE hasSession is). Was:
+  // failedTargets + hard 503. Now: PROCEED to launch + surface a non-blocking
+  // liveness_probe_unknown warning so an operator can verify no live seat was squatted.
+  it("proceed-on-unknown: tmux probe error LAUNCHES the node with a liveness warning (not failedTargets)", async () => {
     const { rigId, nodeIds } = seedPodAwareRig();
     seedSnapshot(rigId, nodeIds);
     const session = sessionRegistry.registerSession(nodeIds[0]!, "dev-driver@test-rig");
@@ -217,11 +221,10 @@ describe("RestoreOrchestrator.launchNodeSubset", () => {
     const result = await orchestrator.launchNodeSubset(rigId, ["dev.driver"]);
 
     expect(result.ok).toBe(true);
-    expect(result.launched).toHaveLength(0);
-    expect(result.alreadyRunning).toHaveLength(0);
-    expect(result.failedTargets).toHaveLength(1);
-    expect(result.failedTargets![0].logicalId).toBe("dev.driver");
-    expect(result.failedTargets![0].reason).toBe("tmux_probe_error");
+    expect(result.launched).toHaveLength(1);
+    expect(result.launched![0].logicalId).toBe("dev.driver");
+    expect(result.failedTargets ?? []).toHaveLength(0);
+    expect(result.warnings?.some((w) => w.includes("liveness_probe_unknown") && w.includes("dev.driver"))).toBe(true);
   });
 
   // B1 regression: non-target with tmux probe error does NOT get node.held

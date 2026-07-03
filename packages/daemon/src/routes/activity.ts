@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import type { AgentActivityStore } from "../domain/agent-activity-store.js";
 import type { SessionRegistry } from "../domain/session-registry.js";
 import type { EventBus } from "../domain/event-bus.js";
+import { verifyStartupProof } from "../domain/startup-proof.js";
 
 export const activityRoutes = new Hono();
 
@@ -67,6 +68,32 @@ activityRoutes.post("/hooks", async (c) => {
     });
 
     return c.json({ ok: true, sessionId, provenance: "hook" });
+  }
+
+  // OPR.0.4.3.06 — startup proof ingestion. Mirrors session_identity: reuses
+  // the Bearer auth + relay transport above. Identity-bound + anti-replay +
+  // contract-verified; only a verified proof projects `oriented` (never
+  // `ready`). A bare ACK / wrong / replayed / identity-mismatched proof is an
+  // append-only rejection.
+  if (body.eventFamily === "startup_proof") {
+    const eventBus = c.get("eventBus" as never) as EventBus | undefined;
+    if (!eventBus) {
+      return c.json({ ok: false, code: "startup_proof_unconfigured", error: "Event bus not available" }, 503);
+    }
+    const result = verifyStartupProof({ store, eventBus }, {
+      sessionName: stringOrNull(body.sessionName),
+      nodeId: stringOrNull(body.nodeId),
+      runtime: stringOrNull(body.runtime),
+      challengeId: stringOrNull(body.challengeId),
+      answer: typeof body.answer === "string" ? body.answer : null,
+    });
+    if (!result.ok) {
+      // Identity failures (unknown identity, or a nodeId/sessionName that
+      // resolve to different seats) → 404; verification failures → 422.
+      const status = result.code === "identity_unbound" || result.code === "identity_mismatch" ? 404 : 422;
+      return c.json({ ok: false, code: result.code, error: result.error }, status);
+    }
+    return c.json({ ok: true, oriented: "verified", nodeId: result.nodeId, challengeId: result.challengeId });
   }
 
   const result = store.recordHookEvent({

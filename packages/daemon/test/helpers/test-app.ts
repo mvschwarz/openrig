@@ -34,6 +34,8 @@ import { queueTransitionsSchema } from "../../src/db/migrations/025_queue_transi
 import { rigPolicySchema } from "../../src/db/migrations/041_rig_policy.js";
 import { rigArchiveSchema } from "../../src/db/migrations/042_rig_archive.js";
 import { resumeProvenanceSchema } from "../../src/db/migrations/043_resume_provenance.js";
+import { resumeVerificationSchema } from "../../src/db/migrations/045_resume_verification.js";
+import { seatIdentityVerdictsSchema } from "../../src/db/migrations/046_seat_identity_verdicts.js";
 import { BootstrapRepository } from "../../src/domain/bootstrap-repository.js";
 import { RuntimeVerifier } from "../../src/domain/runtime-verifier.js";
 import { RequirementsProbeRegistry } from "../../src/domain/requirements-probe.js";
@@ -88,7 +90,7 @@ import fs from "node:fs";
 
 export function createFullTestDb(): Database.Database {
   const db = createDb();
-  migrate(db, [coreSchema, bindingsSessionsSchema, eventsSchema, snapshotsSchema, checkpointsSchema, resumeMetadataSchema, nodeSpecFieldsSchema, packagesSchema, installJournalSchema, journalSeqSchema, bootstrapSchema, discoverySchema, discoveryFkFix, agentspecRebootSchema, startupContextSchema, chatMessagesSchema, podNamespaceSchema, contextUsageSchema, externalCliAttachmentSchema, rigServicesSchema, seatHandoverObservabilitySchema, nodeCodexConfigProfileSchema, streamItemsSchema, queueItemsSchema, queueTransitionsSchema, rigPolicySchema, rigArchiveSchema, resumeProvenanceSchema]);
+  migrate(db, [coreSchema, bindingsSessionsSchema, eventsSchema, snapshotsSchema, checkpointsSchema, resumeMetadataSchema, nodeSpecFieldsSchema, packagesSchema, installJournalSchema, journalSeqSchema, bootstrapSchema, discoverySchema, discoveryFkFix, agentspecRebootSchema, startupContextSchema, chatMessagesSchema, podNamespaceSchema, contextUsageSchema, externalCliAttachmentSchema, rigServicesSchema, seatHandoverObservabilitySchema, nodeCodexConfigProfileSchema, streamItemsSchema, queueItemsSchema, queueTransitionsSchema, rigPolicySchema, rigArchiveSchema, resumeProvenanceSchema, resumeVerificationSchema, seatIdentityVerdictsSchema]);
   return db;
 }
 
@@ -97,8 +99,10 @@ export function mockTmuxAdapter(): TmuxAdapter {
     createSession: vi.fn(async () => ({ ok: true as const })),
     killSession: vi.fn(async () => ({ ok: true as const })),
     listSessions: vi.fn(async () => []),
-    listWindows: async () => [],
+    listWindows: vi.fn(async () => []),
     listPanes: async () => [],
+    listClients: vi.fn(async () => []),
+    switchClient: vi.fn(async () => ({ ok: true as const })),
     hasSession: vi.fn(async () => false),
     sendText: vi.fn(async () => ({ ok: true as const })),
     sendKeys: vi.fn(async () => ({ ok: true as const })),
@@ -134,6 +138,11 @@ export function createTestApp(
     adapters?: Partial<Record<string, RuntimeAdapter>>;
     activityHookToken?: string;
     activityFreshnessMs?: number;
+    // OPR.0.4.3.21 — opt-in event-loop health instrumentation for the health/
+    // stress proofs. Omitted by default so every existing test keeps the exact
+    // legacy `/healthz` `{ status: "ok" }` body.
+    eventLoopMonitor?: import("../../src/domain/event-loop-monitor.js").EventLoopMonitor;
+    routeTimingRecorder?: import("../../src/domain/route-timing-recorder.js").RouteTimingRecorder;
     /**
      * Agent Starter v1 vertical M2: optional real-fs upRouter for tests
      * that POST /api/up with a YAML spec on disk. Default behavior
@@ -286,6 +295,8 @@ export function createTestApp(
     nodeCmuxService,
     agentActivityStore,
     activityHookToken: opts?.activityHookToken,
+    eventLoopMonitor: opts?.eventLoopMonitor,
+    routeTimingRecorder: opts?.routeTimingRecorder,
   });
   return {
     app, rigRepo, sessionRegistry, eventBus, nodeLauncher, snapshotRepo,

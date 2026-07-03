@@ -20,6 +20,10 @@ export interface PsEntry {
    */
   hasWorkCount?: number;
   status: "running" | "partial" | "stopped";
+  /** OPR.0.4.3.22 — rig-level lifecycle folded from per-node states. The daemon
+   *  /api/ps projection already populates this; carried here so surfaces can
+   *  distinguish recoverable from plain stopped. */
+  lifecycleState?: "running" | "recoverable" | "stopped" | "degraded" | "attention_required";
   uptime: string | null;
   latestSnapshot: string | null;
 }

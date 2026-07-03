@@ -8,6 +8,76 @@ deprecations, and behavioral changes. Breaking changes are called out explicitly
 
 ---
 
+## [0.4.3] - 2026-07-03
+
+**Status**: shipped; "rigs that survive" theme.
+
+### Summary For Installing Agents
+
+- **Package version**: bumps from `0.4.2`.
+- **Migrations**: additive only. `045_resume_verification`, `046_seat_identity_verdicts`, `047_events_node_type_index`. Existing v0.4.2 databases upgrade by running `rig daemon start` on the new daemon.
+- **Node engines**: unchanged.
+- **Backward compatibility**: `rig send` default posture changes — unknown / stale / missing / busy activity signals now advise-and-send instead of default-blocking; only `needs_input` (a real interactive picker on the target pane) is a hard send-refuse. `--dangerously-interact --reason "..."` override still available for intentional prompted-seat driving.
+
+### Headline
+
+**Rigs actually survive.** Crash-restore ledger (FR-3 → FR-7) survived a real hard power-off (`Tart stop --timeout 0`) → reboot → `rig start`: both Claude and Codex seats restored to their **original** sessions with recalled pre-crash markers, zero fresh-prime. That's the load-bearing "rigs survive" claim, and it's proven at the operating-system level, not just in unit tests.
+
+### Survival Backbone
+
+- **Crash-restore resume-token ledger (FR-3 → FR-7 + FR-6.1)** — capture-on-adoption / snapshot-refresh / restore-target-pin / freshness threshold (1h advisory, `--fresh` re-verify, FR-6.1 periodic re-stamp) / **no-silent-fresh-prime** guarantee on the restore path.
+- **Fixture-home isolation guard** — a fresh-prime that would clobber a live rig's home dir is refused loudly.
+- **Liveness PID-verify** — daemon distinguishes a live seat from a dead-PID ghost.
+- **Daemon event-loop health + terminal broker resilience** — health signal exposed; `TerminalSessionBroker` recovers cleanly across daemon restarts.
+- **Startup-proof** — challenge-verified orientation read; seat can't skip past its orientation material.
+
+### The Deny-by-Default `rig send` Reversal
+
+The 0.4.1 3-layer guard was too strict at the fleet level — unknown / stale / missing / busy all default-blocked, requiring `--dangerously-interact` for routine coordination. Corrected:
+
+- **Only `needs_input` hard-refuses** — that's the actual footgun-point.
+- **Unknown / stale / missing / busy advise-and-send** — peer sends land; operator sees the advisory in output.
+- **`--dangerously-interact --reason` override** — unchanged for intentional prompted-seat driving.
+
+Also: **Codex activity-signal hardening** so idle Codex takes normal sends while the genuine prompt block holds; **hook-trust autoclear** fast-follow for fully-unattended Codex restore.
+
+### `rig send` Unified Targeting
+
+Multi-recipient list + `--pod` + `--rig` — reuses broadcast fan-out + per-recipient guard. Backward-compatible.
+
+### Wave-2 UI + Theming
+
+- **Rig-status + launch-control UI** — start / stop / recover a rig from the workspace surface; launch modal for mixed-plan rigs.
+- **Switch-client view-retarget** — a switch-client action lands on the correct target view.
+- **Dashboard theming (Vellum Dark opt-in)** — `light` = existing `:root` (byte-identical); `dark` = first shipped alternate; token-block + registry scales to N. Uses Tailwind `darkMode: 'selector'`.
+
+### Recovery + Seat Lifecycle
+
+- **Seat-handover full-cycle** — outgoing seat delivers captured context to a fresh successor; resume marker carries via FR-3; loud-unwind on both lanes on failure.
+- **Seat-forking closeout** — fork lifecycle terminates on the shared checkpoint; predecessor + successor named.
+- **Idle-gate watchdog** — idle seat holding a claimable gate qitem is woken with bounded skip-recording.
+
+### Hardening + Bug Pile-ins
+
+- **Session-admin mutation auth-guard** — admin mutation surface no longer reachable without the correct auth posture.
+- **Secret-boundary B1 hardening (`rig auth`)** — fd-first: open the fd + operate on the fd, never re-resolve the path. Closes the check-then-use gap under interruption / concurrent-legitimate-rig-process scenarios (TOCTOU class closed as a consequence). Leak-hunt regression against the real credential file.
+- **`rig queue show` bounded body preview** — long qitem bodies truncated in show view; full body inspectable via the queue-item drawer.
+- **Manual configurable compaction trigger + same-seat guard** — Claude Code seats can be compacted from outside the seat; same-seat mutation refused.
+
+### Doctrine
+
+- **`mission-slice-sop` skill** ships — per-file rules for `PROGRESS.md` / `PROOF.md` / `MISSION_NOTES.md` / `MISSION_BRIEF.md` / `README.md`, the SCAFFOLD/POPULATE/PROJECT/VERIFY lifecycle, hot-potato queue handoffs, `rig scope audit` backstop.
+
+### Known Follow-ons
+
+- Slice-04 real-provider handover VM-marker — code proven at runtime; real-provider end-to-end VM-round-trip is a fast-follow proof capture (not a claim gap; the load-bearing survival proof is the crash-restore capstone).
+- `rig ps` consolidated-default + progressive disclosure — captured for 0.4.4.
+- Deploy-identity: git SHA via `/healthz` + `rig --version` (version-truth-vs-commit-truth observability gap) — captured for 0.4.4 Discovery.
+- Managed-hooks-via-`requirements.toml` — later fast-follow.
+- Skill-layer cut depth (slice-25) + dashboard glyph swap (slice-24) — deferred.
+
+---
+
 ## [0.4.2] - 2026-07-01
 
 **Status**: shipped; targeted CLI hotfix.

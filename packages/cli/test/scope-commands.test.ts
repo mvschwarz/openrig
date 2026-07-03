@@ -856,6 +856,75 @@ describe("rig scope audit edge cases (guard BLOCKING fixes)", () => {
 });
 
 // ---------------------------------------------------------------------
+// OPR.0.4.3.32 — committed-without-PROGRESS (git-derived, CLI-only input)
+// ---------------------------------------------------------------------
+
+describe("rig scope audit — committed-without-PROGRESS (revision basis: HEAD)", () => {
+  let substrate: { root: string; missionsRoot: string };
+  beforeEach(() => { substrate = seedSubstrate(); });
+  afterEach(() => { fs.rmSync(substrate.root, { recursive: true, force: true }); });
+
+  it("HEAD touched a slice but not its PROGRESS.md -> progress_not_updated_on_commit fires", async () => {
+    const sliceDir = path.join(substrate.missionsRoot, "release-0.3.2", "slices", "01-existing");
+    // Baseline: give the slice a PROGRESS.md and commit it.
+    writeFile(path.join(sliceDir, "PROGRESS.md"), "# Progress\n- baseline\n");
+    execFileSync("git", ["-C", substrate.root, "add", "."], { stdio: "ignore" });
+    execFileSync("git", ["-C", substrate.root, "commit", "-m", "baseline progress", "-q"], { stdio: "ignore" });
+    // HEAD: change ONLY the slice README (no PROGRESS.md touch).
+    fs.appendFileSync(path.join(sliceDir, "README.md"), "\nmore work here\n");
+    execFileSync("git", ["-C", substrate.root, "add", path.join(sliceDir, "README.md")], { stdio: "ignore" });
+    execFileSync("git", ["-C", substrate.root, "commit", "-m", "work without progress", "-q"], { stdio: "ignore" });
+
+    const result = await run(["audit", "--mission", "release-0.3.2", "--json"], substrate.missionsRoot);
+    const parsed = JSON.parse(result.stdout);
+    const entry = parsed.slices.find((s: { name: string }) => s.name === "01-existing");
+    const finding = entry.findings.find((f: { kind: string }) => f.kind === "progress_not_updated_on_commit");
+    expect(finding).toBeDefined();
+    expect(finding.severity).toBe("medium");
+    expect(finding.remediation).toMatch(/PROGRESS\.md/);
+  });
+
+  it("HEAD touched both the slice AND its PROGRESS.md -> does not fire", async () => {
+    const sliceDir = path.join(substrate.missionsRoot, "release-0.3.2", "slices", "01-existing");
+    writeFile(path.join(sliceDir, "PROGRESS.md"), "# Progress\n");
+    execFileSync("git", ["-C", substrate.root, "add", "."], { stdio: "ignore" });
+    execFileSync("git", ["-C", substrate.root, "commit", "-m", "baseline", "-q"], { stdio: "ignore" });
+    fs.appendFileSync(path.join(sliceDir, "README.md"), "\nmore work\n");
+    fs.appendFileSync(path.join(sliceDir, "PROGRESS.md"), "- logged the work\n");
+    execFileSync("git", ["-C", substrate.root, "add", "."], { stdio: "ignore" });
+    execFileSync("git", ["-C", substrate.root, "commit", "-m", "work + progress", "-q"], { stdio: "ignore" });
+
+    const result = await run(["audit", "--mission", "release-0.3.2", "--json"], substrate.missionsRoot);
+    const parsed = JSON.parse(result.stdout);
+    const entry = parsed.slices.find((s: { name: string }) => s.name === "01-existing");
+    expect(entry.findings.some((f: { kind: string }) => f.kind === "progress_not_updated_on_commit")).toBe(false);
+  });
+
+  it("no git context (workspace not a repo) -> check is inert (no false-green, no false-positive) and audit still runs", async () => {
+    const root = mktemp(); // deliberately NOT a git repo
+    const missionsRoot = path.join(root, "internal-docs", "missions");
+    writeFile(path.join(missionsRoot, "release-9.9.9", "README.md"), "---\nid: OPR.9.9.9\n---\n# rel\n");
+    const sliceDir = path.join(missionsRoot, "release-9.9.9", "slices", "01-x");
+    writeFile(path.join(sliceDir, "README.md"), "---\nid: OPR.9.9.9.1\nstatus: active\n---\n# x\n");
+    writeFile(path.join(sliceDir, "PROGRESS.md"), "# Progress\n");
+    try {
+      const result = await run(["audit", "--mission", "release-9.9.9", "--json"], missionsRoot);
+      const parsed = JSON.parse(result.stdout);
+      const entry = parsed.slices.find((s: { name: string }) => s.name === "01-x");
+      expect(entry).toBeDefined();
+      // git unavailable -> inputs undefined -> the check never fires
+      const allFindings = [
+        ...parsed.mission.findings,
+        ...parsed.slices.flatMap((s: { findings: Array<{ kind: string }> }) => s.findings),
+      ];
+      expect(allFindings.some((f: { kind: string }) => f.kind === "progress_not_updated_on_commit")).toBe(false);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------
 // OPR.0.4.1.6 — FR-1 stage verb (deterministic maturity)
 // ---------------------------------------------------------------------
 

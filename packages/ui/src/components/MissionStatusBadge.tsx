@@ -26,18 +26,18 @@ export interface MissionStatusBadgeProps {
 
 const toneClass: Record<MissionStatus, string> = {
   active: "border-success text-success",
-  paused: "border-stone-400 text-stone-500",
+  paused: "border-outline text-on-surface-variant",
   shipped: "border-secondary text-secondary",
   blocked: "border-warning text-warning",
-  unknown: "border-stone-300 text-stone-400",
+  unknown: "border-outline-variant text-on-surface-variant",
 };
 
 const toneDot: Record<MissionStatus, string> = {
   active: "bg-success",
-  paused: "bg-stone-400",
+  paused: "bg-outline-variant",
   shipped: "bg-secondary",
   blocked: "bg-warning",
-  unknown: "bg-stone-300",
+  unknown: "bg-surface-highest",
 };
 
 export function MissionStatusBadge({

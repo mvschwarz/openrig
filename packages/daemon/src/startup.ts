@@ -51,6 +51,7 @@ import { LegacyBundleSourceResolver as BundleSourceResolver } from "./domain/bun
 import { PodBundleSourceResolver } from "./domain/bundle-source-resolver.js";
 import { PsProjectionService } from "./domain/ps-projection.js";
 import { SeatActivityService } from "./domain/seat-activity-service.js";
+import { SeatIdentityReconciler } from "./domain/seat-identity-reconciler.js";
 import { UpCommandRouter } from "./domain/up-command-router.js";
 import { RigTeardownOrchestrator } from "./domain/rig-teardown.js";
 import { ResumeMetadataRefresher } from "./domain/resume-metadata-refresher.js";
@@ -74,6 +75,7 @@ import { WatchdogPolicyEngine } from "./domain/watchdog-policy-engine.js";
 import { WatchdogScheduler } from "./domain/watchdog-scheduler.js";
 import { WorkflowRuntime } from "./domain/workflow-runtime.js";
 import { makeWorkflowKeepalivePolicy } from "./domain/policies/workflow-keepalive.js";
+import { makeIdleGateQitemPolicy } from "./domain/policies/idle-gate-qitem.js";
 import { SpecReviewService } from "./domain/spec-review-service.js";
 import { SpecLibraryService } from "./domain/spec-library-service.js";
 // Phase 3a slice 3.3 — plugin discovery service.
@@ -135,6 +137,9 @@ import { rigPolicySchema } from "./db/migrations/041_rig_policy.js";
 import { rigArchiveSchema } from "./db/migrations/042_rig_archive.js";
 import { resumeProvenanceSchema } from "./db/migrations/043_resume_provenance.js";
 import { queueItemSummarySchema } from "./db/migrations/044_queue_item_summary.js";
+import { resumeVerificationSchema } from "./db/migrations/045_resume_verification.js";
+import { seatIdentityVerdictsSchema } from "./db/migrations/046_seat_identity_verdicts.js";
+import { eventsNodeTypeIndexSchema } from "./db/migrations/047_events_node_type_index.js";
 import { RigPolicyStore } from "./domain/rig-policy/rig-policy-store.js";
 import { MissionControlActionLog } from "./domain/mission-control/mission-control-action-log.js";
 import { MissionControlWriteContract } from "./domain/mission-control/mission-control-write-contract.js";
@@ -149,6 +154,7 @@ import { NtfyNotificationAdapter } from "./domain/mission-control/notification-a
 import { WebhookNotificationAdapter } from "./domain/mission-control/notification-adapter-webhook.js";
 import type { NotificationAdapter } from "./domain/mission-control/notification-adapter-types.js";
 import { OPENRIG_HOME } from "./openrig-compat.js";
+import { ensureActivityHookToken, writeActivityEndpointFile, deriveActivityUrl } from "./domain/activity-endpoint.js";
 import {
   getCompatibleOpenRigPath,
   getDefaultOpenRigPath,
@@ -183,6 +189,8 @@ interface DaemonResult {
   db: Database.Database;
   deps: AppDeps;
   contextMonitor: import("./domain/context-monitor.js").ContextMonitor;
+  // OPR.0.4.3.21 — returned so index.ts can stop() it on graceful shutdown.
+  eventLoopMonitor: import("./domain/event-loop-monitor.js").EventLoopMonitor;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   injectWebSocket: (server: any) => void;
 }
@@ -218,7 +226,7 @@ export function collectAllowlistedProviderAuthEnv(
 export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> {
   const dbPath = opts?.dbPath ?? ":memory:";
   const db = createDb(dbPath);
-  migrate(db, [coreSchema, bindingsSessionsSchema, eventsSchema, snapshotsSchema, checkpointsSchema, resumeMetadataSchema, nodeSpecFieldsSchema, packagesSchema, installJournalSchema, journalSeqSchema, bootstrapSchema, discoverySchema, discoveryFkFix, agentspecRebootSchema, startupContextSchema, chatMessagesSchema, podNamespaceSchema, contextUsageSchema, externalCliAttachmentSchema, rigServicesSchema, seatHandoverObservabilitySchema, nodeCodexConfigProfileSchema, streamItemsSchema, queueItemsSchema, queueTransitionsSchema, inboxEntriesSchema, outboxEntriesSchema, projectClassificationsSchema, classifierLeasesSchema, viewsCustomSchema, watchdogJobsSchema, watchdogHistorySchema, workflowSpecsSchema, workflowInstancesSchema, workflowStepTrailsSchema, watchdogPolicyEnumExtensionSchema, missionControlActionsSchema, workspacePrimitiveSchema, queueTargetRepoSchema, workflowSpecsDiagnosticSchema, rigPolicySchema, rigArchiveSchema, resumeProvenanceSchema, queueItemSummarySchema]);
+  migrate(db, [coreSchema, bindingsSessionsSchema, eventsSchema, snapshotsSchema, checkpointsSchema, resumeMetadataSchema, nodeSpecFieldsSchema, packagesSchema, installJournalSchema, journalSeqSchema, bootstrapSchema, discoverySchema, discoveryFkFix, agentspecRebootSchema, startupContextSchema, chatMessagesSchema, podNamespaceSchema, contextUsageSchema, externalCliAttachmentSchema, rigServicesSchema, seatHandoverObservabilitySchema, nodeCodexConfigProfileSchema, streamItemsSchema, queueItemsSchema, queueTransitionsSchema, inboxEntriesSchema, outboxEntriesSchema, projectClassificationsSchema, classifierLeasesSchema, viewsCustomSchema, watchdogJobsSchema, watchdogHistorySchema, workflowSpecsSchema, workflowInstancesSchema, workflowStepTrailsSchema, watchdogPolicyEnumExtensionSchema, missionControlActionsSchema, workspacePrimitiveSchema, queueTargetRepoSchema, workflowSpecsDiagnosticSchema, rigPolicySchema, rigArchiveSchema, resumeProvenanceSchema, queueItemSummarySchema, resumeVerificationSchema, seatIdentityVerdictsSchema, eventsNodeTypeIndexSchema]);
 
   const rigRepo = new RigRepository(db);
   const sessionRegistry = new SessionRegistry(db);
@@ -276,6 +284,14 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     defaultWindowSeconds: 3,
     eventBus,
   });
+  // OPR.0.4.3.19 — SeatIdentityReconciler owns the liveness identity verdict
+  // (the THIRD axis). Reconciles each running seat's pane PID/command against
+  // the registered binding and persists the verdict so node-inventory can gate
+  // the running/active green derivations. Started post-bind in index.ts.
+  const seatIdentityReconciler = new SeatIdentityReconciler({
+    db,
+    tmux: tmuxAdapter,
+  });
   // cmuxFactory takes precedence (for tests), then cmuxExec-based CLI transport, then default
   const cmuxFactory = opts?.cmuxFactory
     ?? createCmuxCliTransport(opts?.cmuxExec ?? execCommand);
@@ -291,6 +307,20 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const activityHookUrl = readOpenRigEnv("OPENRIG_URL", "RIGGED_URL") || undefined;
   const openRigPort = readOpenRigEnv("OPENRIG_PORT", "RIGGED_PORT") || undefined;
   const openRigHost = readOpenRigEnv("OPENRIG_HOST", "RIGGED_HOST") || undefined;
+  // OPR.0.4.3.28 B2 — self-provision a STABLE activity url+token so launched
+  // seats reach the ingest endpoint without operator shell seeding (the
+  // confirmed live break). The token persists across daemon restarts (matches
+  // already-launched seats' frozen env); the URL derives from the daemon's
+  // loopback + port (DEFAULT_PORT 7433 fallback). The SAME token becomes both
+  // the ingest expected-token (server dep below) and the seats' env value, so
+  // hook POSTs authenticate. Also snapshotted to activity-endpoint.json for the
+  // relay file-discovery fallback used by reconcile/restored seats (B3).
+  const resolvedActivityHookToken = activityHookToken ?? ensureActivityHookToken(OPENRIG_HOME);
+  // Derive from the daemon's OWN bound host+port (honors an explicit OPENRIG_HOST
+  // single-host bind; wildcard/absent → loopback) so seats post to a reachable
+  // address — a hardcoded 127.0.0.1 breaks an explicit tailnet/hostname bind.
+  const resolvedActivityHookUrl = activityHookUrl ?? deriveActivityUrl(openRigHost, openRigPort);
+  writeActivityEndpointFile(OPENRIG_HOME, { baseUrl: resolvedActivityHookUrl, token: resolvedActivityHookToken });
   const startupSettings = new ContextPackSettingsStore().resolveConfig();
   const providerAuthEnv = collectAllowlistedProviderAuthEnv(
     startupSettings.recoveryProviderAuthEnvAllowlistRaw,
@@ -301,6 +331,19 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     transcriptsRoot: transcriptsPath,
   });
 
+  // Shared launch identity/activity env — used by NodeLauncher at launch AND
+  // by the seat-handover full-cycle composer when it creates a successor
+  // session (OPR.0.4.3.04), so a handed-over successor self-identifies +
+  // reports activity exactly like a launched seat.
+  const launchSessionEnv: Record<string, string | undefined> = {
+    PATH: process.env.PATH,
+    OPENRIG_HOME,
+    OPENRIG_PORT: openRigPort,
+    OPENRIG_HOST: openRigHost,
+    OPENRIG_URL: resolvedActivityHookUrl,
+    OPENRIG_ACTIVITY_HOOK_TOKEN: resolvedActivityHookToken,
+    ...providerAuthEnv,
+  };
   const nodeLauncher = new NodeLauncher({
     db,
     rigRepo,
@@ -308,15 +351,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     eventBus,
     tmuxAdapter,
     transcriptStore,
-    sessionEnv: {
-      PATH: process.env.PATH,
-      OPENRIG_HOME,
-      OPENRIG_PORT: openRigPort,
-      OPENRIG_HOST: openRigHost,
-      OPENRIG_URL: activityHookUrl,
-      OPENRIG_ACTIVITY_HOOK_TOKEN: activityHookToken,
-      ...providerAuthEnv,
-    },
+    sessionEnv: launchSessionEnv,
   });
 
   const snapshotRepo = new SnapshotRepository(db);
@@ -666,23 +701,36 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     scanner: tmuxScanner, fingerprinter: sessionFingerprinter, enricher: sessionEnricher,
     discoveryRepo, sessionRegistry, eventBus,
   });
-  const resumeMetadataRefresher = new ResumeMetadataRefresher({ sessionRegistry, tmuxAdapter });
+  // Context usage store — constructed ahead of the refresher + ClaimService so the
+  // Claude status-line sidecar reader can be injected into BOTH: FR-3
+  // adoption-boundary capture (ClaimService) and FR-4 snapshot null-fill (refresher).
+  // Also threaded through WhoamiService + routes below (same single instance).
+  const { ContextUsageStore } = await import("./domain/context-usage-store.js");
+  const contextUsageStore = new ContextUsageStore(db, { stateDir: OPENRIG_HOME });
+  // OPR.0.4.3.20 FR-4 — inject contextUsageStore so refresh() can null-fill a
+  // Claude token from the sidecar during periodic/manual snapshot refresh.
+  const resumeMetadataRefresher = new ResumeMetadataRefresher({ sessionRegistry, tmuxAdapter, contextUsageStore });
   const claimService = new ClaimService({
     db, rigRepo, sessionRegistry, discoveryRepo, eventBus, tmuxAdapter, transcriptStore,
     claudeContextProvisioner: claudeAdapter,
+    // OPR.0.4.3.20 FR-3 — adoption-boundary resume-token capture deps
+    // (Claude sidecar reader + Codex thread-id capturer, both reuse).
+    contextUsageStore,
+    resumeTokenCapturer: resumeMetadataRefresher,
   });
   const selfAttachService = new SelfAttachService({
     db, rigRepo, podRepo, sessionRegistry, eventBus, tmuxAdapter, transcriptStore,
     claudeContextProvisioner: claudeAdapter,
+    // OPR.0.4.3.28 B3 — echo the resolved activity url+token into the self-attach
+    // response env so the caller's shell can produce activity signal.
+    activityEnv: { url: resolvedActivityHookUrl, token: resolvedActivityHookToken },
   });
   const rigLifecycleService = new RigLifecycleService({ db, rigRepo, sessionRegistry, discoveryRepo, eventBus, tmuxAdapter });
   const rigExpansionService = new RigExpansionService({ db, rigRepo, eventBus, nodeLauncher, podInstantiator, sessionRegistry });
 
   const specReviewService = new SpecReviewService();
 
-  // Context usage store — created before deps so it can be threaded through WhoamiService + routes
-  const { ContextUsageStore } = await import("./domain/context-usage-store.js");
-  const contextUsageStore = new ContextUsageStore(db, { stateDir: OPENRIG_HOME });
+  // (ContextUsageStore is constructed above, ahead of ClaimService, for FR-3.)
   const whoamiService = new WhoamiService({ db, rigRepo, sessionRegistry, transcriptStore, contextUsageStore });
   const nodeCmuxService = new NodeCmuxService(rigRepo, sessionRegistry, cmuxAdapter, tmuxAdapter);
   const agentActivityStore = new AgentActivityStore({ db, eventBus });
@@ -707,10 +755,12 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     eventBus,
     nodeLauncher,
     tmuxAdapter,
+    sessionEnv: launchSessionEnv,
     cmuxAdapter,
     snapshotCapture,
     snapshotRepo,
     restoreOrchestrator,
+    resumeMetadataRefresher, // OPR.0.4.3.20 FR-4 — manual snapshot refresh-before-serialize
     rigSpecExporter,
     rigSpecPreflight,
     rigInstantiator,
@@ -731,6 +781,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     // + UI surfaces read the latest observation per seat. NEVER reads
     // queue/assignment state (non-inference contract; see slice 15 IMPL-PRD §2.3).
     seatActivityService,
+    seatIdentityReconciler,
     psProjectionService: new PsProjectionService({ db, seatActivity: seatActivityService }),
     upRouter: new UpCommandRouter({
       fsOps: {
@@ -819,7 +870,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     nodeCmuxService,
     agentActivityStore,
     seatAttentionReconciler,
-    activityHookToken,
+    activityHookToken: resolvedActivityHookToken,
     contextUsageStore,
     serviceOrchestrator,
     composeAdapter,
@@ -1271,7 +1322,14 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       // Phase C's three built-in policies. workflow-keepalive reads
       // SQLite workflow_instances directly via the new Phase D tables
       // (audit row 18: SQLite-source-only, no markdown read).
-      additionalPolicies: [makeWorkflowKeepalivePolicy({ db })],
+      // OPR.0.4.3.16: register idle-gate-qitem — joins pending gate:*
+      // qitems (queue_items) with a FRESH idle runtime signal from the
+      // shared AgentActivityStore (constructed above, before the engine)
+      // into one bounded wake. Wakes/flags only; cooldown via engine throttle.
+      additionalPolicies: [
+        makeWorkflowKeepalivePolicy({ db }),
+        makeIdleGateQitemPolicy({ db, agentActivityStore }),
+      ],
     });
     const watchdogScheduler = new WatchdogScheduler({
       jobsRepo: watchdogJobsRepoInstance,
@@ -1299,13 +1357,31 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     codex: codexAdapter,
   });
   deps.contextMonitor = contextMonitor;
+  // OPR.0.4.3.14 — expose the SAME enforcer instance to routes for the manual
+  // compaction trigger. Sharing one instance with ContextMonitor is what makes
+  // the manual back-half drain through the auto poll loop (no second path).
+  deps.compactionEnforcer = compactionEnforcer;
 
   // OPR.0.3.4.9 — periodic snapshot scheduler (crash-insurance floor).
   const { PeriodicSnapshotScheduler } = await import("./domain/periodic-snapshot-scheduler.js");
-  const periodicSnapshotScheduler = new PeriodicSnapshotScheduler({ db, snapshotCapture, snapshotRepo });
+  const periodicSnapshotScheduler = new PeriodicSnapshotScheduler({
+    db, snapshotCapture, snapshotRepo,
+    // OPR.0.4.3.20 FR-4 — refresh live tokens before each periodic snapshot serializes.
+    sessionRegistry, resumeMetadataRefresher,
+  });
   deps.periodicSnapshotScheduler = periodicSnapshotScheduler;
+
+  // OPR.0.4.3.21 — daemon event-loop health instrumentation. Constructed once
+  // per daemon and wired into deps so `/healthz` can surface wedge evidence
+  // (loop lag / last-tick age) and the expensive topology routes are timed.
+  const { EventLoopMonitor } = await import("./domain/event-loop-monitor.js");
+  const { RouteTimingRecorder } = await import("./domain/route-timing-recorder.js");
+  const eventLoopMonitor = new EventLoopMonitor();
+  const routeTimingRecorder = new RouteTimingRecorder();
+  deps.eventLoopMonitor = eventLoopMonitor;
+  deps.routeTimingRecorder = routeTimingRecorder;
 
   const { app, injectWebSocket } = createAppWithWebSocket(deps);
 
-  return { app, db, deps, contextMonitor, injectWebSocket };
+  return { app, db, deps, contextMonitor, eventLoopMonitor, injectWebSocket };
 }

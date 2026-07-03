@@ -66,13 +66,13 @@ function RigGroupNodeInner({ data }: { data: RigGroupNodeData }) {
       className={cn(
         "w-full h-full relative flex flex-col cursor-pointer select-none overflow-visible",
         collapsed
-          ? "border border-outline-variant bg-white/40 backdrop-blur-[8px] hard-shadow hover:bg-white/50"
-          : "border border-outline-variant/70 bg-white/40 backdrop-blur-[8px] shadow-[0_0_0_1px_rgba(84,96,115,0.06)]",
+          ? "border border-outline-variant bg-surface-lowest/40 backdrop-blur-[8px] hard-shadow hover:bg-surface-lowest/50"
+          : "border border-outline-variant/70 bg-surface-lowest/40 backdrop-blur-[8px] shadow-[0_0_0_1px_rgba(84,96,115,0.06)]",
         recentActivity && "rig-activity-frame-pulse",
       )}
     >
       <RegistrationMarks testIdPrefix={`rig-group-${rigId}`} />
-      <header className="absolute -top-8 left-4 z-10 flex items-center gap-2 border border-outline-variant/70 bg-background px-3 py-1.5 font-mono text-[10px] uppercase tracking-[0.10em] text-stone-900 shadow-[2px_2px_0_rgba(46,52,46,0.10)]">
+      <header className="absolute -top-8 left-4 z-10 flex items-center gap-2 border border-outline-variant/70 bg-background px-3 py-1.5 font-mono text-[10px] uppercase tracking-[0.10em] text-on-surface shadow-[2px_2px_0_rgba(46,52,46,0.10)]">
         <div className="flex items-center gap-2 min-w-0">
           <ChevronRight
             className={cn(
@@ -83,7 +83,7 @@ function RigGroupNodeInner({ data }: { data: RigGroupNodeData }) {
           />
           <span
             data-testid={`rig-group-name-${rigId}`}
-            className="font-mono text-[11px] font-bold uppercase tracking-[0.10em] text-stone-900 truncate"
+            className="font-mono text-[11px] font-bold uppercase tracking-[0.10em] text-on-surface truncate"
           >
             {rigName}
           </span>
@@ -99,7 +99,7 @@ function RigGroupNodeInner({ data }: { data: RigGroupNodeData }) {
           params={{ rigId }}
           onClick={(e) => e.stopPropagation()}
           data-testid={`rig-group-drill-${rigId}`}
-          className="shrink-0 p-0.5 text-on-surface-variant hover:text-stone-900 hover:bg-stone-200/60"
+          className="shrink-0 p-0.5 text-on-surface-variant hover:text-on-surface hover:bg-surface-high/60"
           aria-label={`Open ${rigName} rig page`}
         >
           <ArrowUpRight className="h-3 w-3" aria-hidden="true" />
@@ -119,7 +119,7 @@ function RigGroupNodeInner({ data }: { data: RigGroupNodeData }) {
         </div>
       ) : (
         <div
-          className="absolute right-3 top-3 flex items-center gap-2 font-mono text-[8px] uppercase tracking-[0.12em] text-stone-500"
+          className="absolute right-3 top-3 flex items-center gap-2 font-mono text-[8px] uppercase tracking-[0.12em] text-on-surface-variant"
           data-testid={`rig-group-expanded-counts-${rigId}`}
         >
           <span>{podCount !== undefined ? `${podCount} pods` : ""}</span>

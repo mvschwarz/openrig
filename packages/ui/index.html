@@ -6,6 +6,27 @@
     <title>OpenRig</title>
     <link rel="icon" href="data:," />
     <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet" />
+    <!-- OPR.0.4.3.29 — pre-paint theme application (no flash-of-wrong-theme).
+         Runs before the module script so the `.dark` class is on <html> before
+         first paint. Mirrors src/lib/theme.ts EXACTLY: key "openrig.theme";
+         light/dark are explicit and win; "system" (and any unset/malformed
+         value) follows prefers-color-scheme. Keep the two in sync. -->
+    <script>
+      (function () {
+        try {
+          var stored = localStorage.getItem("openrig.theme");
+          var choice = stored === "light" || stored === "dark" || stored === "system" ? stored : "system";
+          var dark =
+            choice === "dark" ||
+            (choice === "system" &&
+              typeof window.matchMedia === "function" &&
+              window.matchMedia("(prefers-color-scheme: dark)").matches);
+          if (dark) document.documentElement.classList.add("dark");
+        } catch (e) {
+          /* localStorage/matchMedia unavailable — default to light (no class). */
+        }
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

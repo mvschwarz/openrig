@@ -87,7 +87,7 @@ function FolderNode({
     <li data-testid={`artifacts-tree-node-${path}`}>
       <div
         className={`flex items-center gap-1 font-mono text-[11px] ${
-          isSelected ? "bg-stone-200/80 text-stone-900" : "text-stone-700 hover:bg-surface-low"
+          isSelected ? "bg-surface-high/80 text-on-surface" : "text-on-surface hover:bg-surface-low"
         }`}
         style={indent(depth)}
       >
@@ -115,7 +115,7 @@ function FolderNode({
       </div>
       {expanded ? (
         list.isLoading ? (
-          <div style={indent(depth + 1)} className="py-0.5 font-mono text-[10px] text-stone-400">
+          <div style={indent(depth + 1)} className="py-0.5 font-mono text-[10px] text-on-surface-variant">
             Loading…
           </div>
         ) : list.isError ? (
@@ -149,7 +149,7 @@ function FolderNode({
                     root={root}
                     path={joinPath(path, e.name)}
                     testId={`artifacts-tree-file-${joinPath(path, e.name)}`}
-                    className="block w-full truncate py-0.5 pl-5 text-left font-mono text-[11px] text-stone-600 hover:text-stone-900 hover:underline"
+                    className="block w-full truncate py-0.5 pl-5 text-left font-mono text-[11px] text-on-surface-variant hover:text-on-surface hover:underline"
                   >
                     {e.name}
                   </FileLink>
@@ -172,18 +172,18 @@ function FolderFileList({ root, path }: { root: string; path: string }) {
     <div data-testid="artifacts-file-list" className="min-w-0 flex-1">
       <div
         data-testid="artifacts-file-list-header"
-        className="border-b border-outline-variant px-3 py-2 font-mono text-[10px] uppercase tracking-[0.12em] text-stone-500"
+        className="border-b border-outline-variant px-3 py-2 font-mono text-[10px] uppercase tracking-[0.12em] text-on-surface-variant"
       >
         {header}
       </div>
       {list.isLoading ? (
-        <div className="px-3 py-2 font-mono text-[10px] text-stone-400">Loading…</div>
+        <div className="px-3 py-2 font-mono text-[10px] text-on-surface-variant">Loading…</div>
       ) : list.isError ? (
         <div data-testid="artifacts-file-list-error" className="px-3 py-2 font-mono text-[10px] text-red-600">
           Error loading folder.
         </div>
       ) : files.length === 0 ? (
-        <div data-testid="artifacts-file-list-empty" className="px-3 py-2 font-mono text-[10px] text-stone-400">
+        <div data-testid="artifacts-file-list-empty" className="px-3 py-2 font-mono text-[10px] text-on-surface-variant">
           No files in this folder.
         </div>
       ) : (
@@ -196,7 +196,7 @@ function FolderFileList({ root, path }: { root: string; path: string }) {
             >
               <span
                 data-testid={`artifacts-file-badge-${f.name}`}
-                className="w-10 shrink-0 border border-outline-variant px-1 py-0.5 text-center text-[8px] uppercase tracking-[0.08em] text-stone-500"
+                className="w-10 shrink-0 border border-outline-variant px-1 py-0.5 text-center text-[8px] uppercase tracking-[0.08em] text-on-surface-variant"
               >
                 {fileBadge(f.name)}
               </span>
@@ -204,15 +204,15 @@ function FolderFileList({ root, path }: { root: string; path: string }) {
                 root={root}
                 path={joinPath(path, f.name)}
                 testId={`artifacts-file-open-${f.name}`}
-                className="min-w-0 flex-1 truncate text-left text-stone-900 hover:underline"
+                className="min-w-0 flex-1 truncate text-left text-on-surface hover:underline"
               >
                 {f.name}
               </FileLink>
-              <span data-testid={`artifacts-file-size-${f.name}`} className="shrink-0 text-stone-500">
+              <span data-testid={`artifacts-file-size-${f.name}`} className="shrink-0 text-on-surface-variant">
                 {formatSize(f.size)}
               </span>
-              <span className="shrink-0 text-stone-400">·</span>
-              <span data-testid={`artifacts-file-mtime-${f.name}`} className="shrink-0 text-stone-400">
+              <span className="shrink-0 text-on-surface-variant">·</span>
+              <span data-testid={`artifacts-file-mtime-${f.name}`} className="shrink-0 text-on-surface-variant">
                 {formatMtime(f.mtime)}
               </span>
             </li>
@@ -236,7 +236,7 @@ export function ArtifactsNavigator({ scopePath, scopeLabel }: { scopePath: strin
 
   if (rootsQuery.isLoading) {
     return (
-      <div data-testid="artifacts-navigator-loading" className="font-mono text-[11px] text-stone-400">
+      <div data-testid="artifacts-navigator-loading" className="font-mono text-[11px] text-on-surface-variant">
         Loading…
       </div>
     );
@@ -282,7 +282,7 @@ export function ArtifactsNavigator({ scopePath, scopeLabel }: { scopePath: strin
   return (
     <div
       data-testid="artifacts-navigator"
-      className="flex min-h-[20rem] border border-outline-variant bg-white/20"
+      className="flex min-h-[20rem] border border-outline-variant bg-surface-lowest/20"
     >
       <aside
         data-testid="artifacts-tree"

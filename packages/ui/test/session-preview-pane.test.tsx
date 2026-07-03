@@ -57,7 +57,10 @@ describe("SessionPreviewPane", () => {
 
     withQueryClient(<SessionPreviewPane sessionName="driver@test-rig" testIdPrefix="terminal-test" />);
 
+    const pane = await screen.findByTestId("terminal-test-pane");
     const content = await screen.findByTestId("terminal-test-content");
+    expect(pane.className).toContain("bg-surface-lowest/[0.08]");
+    expect(pane.className).not.toContain("bg-surface-lowest/8");
     await waitFor(() => {
       expect(content.scrollTop).toBe(240);
     });

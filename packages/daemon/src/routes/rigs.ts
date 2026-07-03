@@ -19,6 +19,10 @@ import type { SeatActivityService } from "../domain/seat-activity-service.js";
 import { deriveRigLifecycleState } from "../domain/ps-projection.js";
 import { assessCurrentStateRehydrateEligibility } from "../domain/rehydrate-eligibility.js";
 import { buildRestorePlanPreview, collectPreviewSessionRows } from "../domain/restore-plan-preview.js";
+import { composeRigStatus, type SeatLifecycleInput } from "../domain/rig-status-compose.js";
+import { createRestoreCheckService } from "./restore-check.js";
+import type { KernelBootTracker, KernelState } from "../domain/kernel-boot-tracker.js";
+import type { RecoveryPlan } from "../domain/restore-check-service.js";
 import type { ContextUsageStore } from "../domain/context-usage-store.js";
 import type { Pod, ExpansionPodFragment } from "../domain/types.js";
 import type { RigExpansionService } from "../domain/rig-expansion-service.js";
@@ -176,6 +180,78 @@ rigsRoutes.get("/summary", (c) => {
   return c.json(enriched);
 });
 
+// OPR.0.4.3.22 — GET /api/rigs/:id/status — the composed rig-status object.
+// A pure FOLD (composeRigStatus) of four SHIPPED signals: ps-lifecycle +
+// restore-plan (read-only forecast) + restore-check readiness + kernel-status
+// (kernel rig only). Status is NEVER inferred from pane text or daemon /healthz;
+// `src[]` carries the composed provenance (the non-inference contract). The fold
+// preserves per-seat truth — a rig never globally flips to fresh (the LOCK).
+rigsRoutes.get("/:id/status", (c) => {
+  const repo = getRepo(c);
+  const rig = repo.getRig(c.req.param("id"));
+  if (!rig) return c.json({ error: `Rig "${c.req.param("id")}" not found` }, 404);
+
+  const snapshotRepo = c.get("snapshotRepo" as never) as SnapshotRepository;
+  const snapshot = snapshotRepo.findLatestRestoreUsable(rig.rig.id) ?? null;
+  // Read-only per-seat forecast (mutated:false) — the restore-plan signal.
+  const plan = buildRestorePlanPreview(rig, snapshot, collectPreviewSessionRows(repo.db, rig, snapshot));
+
+  // ps-lifecycle — per-node lifecycleState (never from pane text).
+  const nodes: SeatLifecycleInput[] = getNodeInventory(repo.db, rig.rig.id).map((e) => ({
+    logicalId: e.logicalId,
+    runtime: e.runtime,
+    lifecycleState: e.lifecycleState,
+  }));
+
+  // restore-check readiness — the RecoveryPlan status. Defensive: a probe throw
+  // contributes nothing (fold still reads plan + lifecycle) rather than 500-ing.
+  let recovery: RecoveryPlan | null = null;
+  try {
+    recovery = createRestoreCheckService(repo, snapshotRepo)
+      .check({ rig: rig.rig.name, noQueue: true, noHooks: true })
+      .recovery;
+  } catch {
+    recovery = null;
+  }
+
+  // kernel-status — folded ONLY for the kernel rig, from the boot tracker.
+  // NEVER inferred from daemon /healthz (guard 4).
+  const isKernel = rig.rig.name === "kernel";
+  let kernelState: KernelState | null = null;
+  if (isKernel) {
+    const tracker = c.get("kernelBootTracker" as never) as KernelBootTracker | undefined;
+    kernelState = tracker ? tracker.getStatus().kernelState : null;
+  }
+
+  return c.json(
+    composeRigStatus({ rigId: rig.rig.id, rigName: rig.rig.name, isKernel, nodes, plan, recovery, kernelState }),
+  );
+});
+
+// OPR.0.4.3.22 — POST /api/rigs/:id/launch-plan — the READ-ONLY per-seat plan.
+// The launch/recovery modal fetches this BEFORE any mutation. This route NEVER
+// restores, creates/kills/replaces/resumes a session, writes a projection, or
+// captures a snapshot — it only forecasts (buildRestorePlanPreview, mutated:false).
+// Optional freshLogicalIds forecasts the fresh-primed plan for an explicit fresh
+// choice (the LOCK: fresh is only ever a per-seat list, never a global flip).
+rigsRoutes.post("/:id/launch-plan", async (c) => {
+  const repo = getRepo(c);
+  const rig = repo.getRig(c.req.param("id"));
+  if (!rig) return c.json({ error: `Rig "${c.req.param("id")}" not found` }, 404);
+
+  const body: Record<string, unknown> = await c.req.json().catch(() => ({}));
+  const freshLogicalIds = Array.isArray(body["freshLogicalIds"])
+    ? (body["freshLogicalIds"] as unknown[]).filter((v): v is string => typeof v === "string")
+    : undefined;
+
+  const snapshotRepo = c.get("snapshotRepo" as never) as SnapshotRepository;
+  const snapshot = snapshotRepo.findLatestRestoreUsable(rig.rig.id) ?? null;
+  return c.json(
+    buildRestorePlanPreview(rig, snapshot, collectPreviewSessionRows(repo.db, rig, snapshot), freshLogicalIds),
+    200,
+  );
+});
+
 rigsRoutes.post("/", async (c) => {
   const body: Record<string, unknown> = await c.req.json().catch(() => ({}));
   const name = body["name"];
@@ -220,8 +296,12 @@ rigsRoutes.get("/:id/graph", async (c) => {
   // /api/rigs/:id/nodes round-trip just to color the topology dots).
   const tmuxAdapter = c.get("tmuxAdapter" as never) as TmuxAdapter | undefined;
   const agentActivityStore = c.get("agentActivityStore" as never) as AgentActivityStore | undefined;
+  // OPR.0.4.3 healthz-wedge amplification fix: cheap by default (no per-node tmux
+  // capture) — the 30s topology poll colors dots from the snapshot (running/idle) +
+  // hook activity; ?full=true opts into the per-node needs_input capture.
+  const graphFull = c.req.query("full") === "true";
   const inventoryWithActivityOnly = tmuxAdapter
-    ? await attachAgentActivity(inventory, { tmuxAdapter, activityStore: agentActivityStore })
+    ? await attachAgentActivity(inventory, { tmuxAdapter, activityStore: agentActivityStore, captureFallback: graphFull })
     : inventory;
   const seatActivityService = c.get("seatActivityService" as never) as SeatActivityService | undefined;
   const inventoryWithActivity = attachTerminalActivityAndWork(inventoryWithActivityOnly, {
@@ -248,6 +328,7 @@ rigsRoutes.get("/:id/graph", async (c) => {
     startupStatus: n.startupStatus,
     canonicalSessionName: n.canonicalSessionName,
     restoreOutcome: n.restoreOutcome,
+    oriented: n.oriented,
     contextUsedPercentage: n.contextUsage?.usedPercentage ?? null,
     contextFresh: n.contextUsage?.fresh ?? false,
     contextAvailability: n.contextUsage?.availability ?? "unknown",
@@ -260,6 +341,7 @@ rigsRoutes.get("/:id/graph", async (c) => {
     terminalActive: n.terminalActive,
     hasAssignedWork: n.hasAssignedWork ?? false,
     pendingWorkCount: n.pendingWorkCount ?? 0,
+    identityVerdict: n.identityVerdict ?? null,
   }));
   const projectedPods: Pod[] = pods.map((pod) => ({
     id: pod.id,

@@ -54,10 +54,10 @@ export function PreviewPane({
       data-rig-id={rigId}
       data-logical-id={logicalId}
       data-paused={paused ? "true" : "false"}
-      className="border border-stone-300/40 bg-white/8 px-3 py-2 space-y-1"
+      className="border border-outline-variant/40 bg-surface-lowest/[0.08] px-3 py-2 space-y-1"
     >
       <div className="flex items-center justify-between gap-2">
-        <span className="font-mono text-[9px] uppercase tracking-[0.10em] text-stone-500 truncate">
+        <span className="font-mono text-[9px] uppercase tracking-[0.10em] text-on-surface-variant truncate">
           live preview · {logicalId}
         </span>
         {!hidePinButton && (
@@ -66,7 +66,7 @@ export function PreviewPane({
             data-testid={`${testIdPrefix}-pin-toggle`}
             data-pinned={pinned ? "true" : "false"}
             onClick={onTogglePin}
-            className="font-mono text-[8px] uppercase border border-stone-300 px-1 py-0.5 hover:bg-stone-200 shrink-0"
+            className="font-mono text-[8px] uppercase border border-outline-variant px-1 py-0.5 hover:bg-surface-high shrink-0"
           >
             {pinned ? "Unpin" : "Pin"}
           </button>
@@ -74,7 +74,7 @@ export function PreviewPane({
       </div>
 
       {preview.isLoading && (
-        <div data-testid={`${testIdPrefix}-loading`} className="font-mono text-[9px] text-stone-400">Loading…</div>
+        <div data-testid={`${testIdPrefix}-loading`} className="font-mono text-[9px] text-on-surface-variant">Loading…</div>
       )}
       {preview.isError && (
         <div data-testid={`${testIdPrefix}-error`} className="font-mono text-[9px] text-red-600">
@@ -82,21 +82,21 @@ export function PreviewPane({
         </div>
       )}
       {isNodePreviewUnavailable(preview.data) && (
-        <div data-testid={`${testIdPrefix}-unavailable`} className="font-mono text-[9px] text-stone-500 space-y-0.5">
+        <div data-testid={`${testIdPrefix}-unavailable`} className="font-mono text-[9px] text-on-surface-variant space-y-0.5">
           <div>Preview unavailable: {preview.data.reason}.</div>
-          {preview.data.hint && <div className="text-stone-400">{preview.data.hint}</div>}
-          <div className="text-stone-400">Use <code>rig capture {logicalId}</code> from terminal as a fallback.</div>
+          {preview.data.hint && <div className="text-on-surface-variant">{preview.data.hint}</div>}
+          <div className="text-on-surface-variant">Use <code>rig capture {logicalId}</code> from terminal as a fallback.</div>
         </div>
       )}
       {!isNodePreviewUnavailable(preview.data) && preview.data && (
         <>
           <pre
             data-testid={`${testIdPrefix}-content`}
-            className={`font-mono text-[9px] text-stone-800 bg-stone-50 px-2 py-1 ${heightClass} overflow-y-auto whitespace-pre-wrap break-all`}
+            className={`font-mono text-[9px] text-on-surface bg-background px-2 py-1 ${heightClass} overflow-y-auto whitespace-pre-wrap break-all`}
           >
             {preview.data.content || "(empty pane)"}
           </pre>
-          <div className="font-mono text-[8px] text-stone-400 flex justify-between">
+          <div className="font-mono text-[8px] text-on-surface-variant flex justify-between">
             <span>captured {new Date(preview.data.capturedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</span>
             <span>{preview.data.lines} lines</span>
           </div>

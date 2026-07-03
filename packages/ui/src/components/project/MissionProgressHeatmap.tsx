@@ -108,13 +108,13 @@ export function MissionProgressHeatmap({
   return (
     <section
       data-testid="mission-progress-heatmap"
-      className="border border-outline-variant bg-white/35 p-4 backdrop-blur-sm"
+      className="border border-outline-variant bg-surface-lowest/35 p-4 backdrop-blur-sm"
     >
       <header className="mb-3 flex items-center justify-between gap-3 border-b border-outline-variant pb-2">
-        <h3 className="font-mono text-[11px] uppercase tracking-[0.16em] text-stone-900">
+        <h3 className="font-mono text-[11px] uppercase tracking-[0.16em] text-on-surface">
           Acceptance heat-map
         </h3>
-        <span className="font-mono text-[10px] text-stone-600">
+        <span className="font-mono text-[10px] text-on-surface-variant">
           {heatmapRows.length} slice{heatmapRows.length === 1 ? "" : "s"} ·
           {" "}
           one cell per acceptance item
@@ -143,7 +143,7 @@ function HeatmapSliceRow({ row }: { row: HeatmapRow }) {
         <Link
           to="/project/slice/$sliceId"
           params={{ sliceId: row.name }}
-          className="block truncate font-mono text-[11px] uppercase tracking-[0.12em] text-stone-900 hover:underline"
+          className="block truncate font-mono text-[11px] uppercase tracking-[0.12em] text-on-surface hover:underline"
           title={row.displayName}
           aria-label={`${row.displayName} (${row.doneItems}/${row.totalItems} acceptance items)`}
         >
@@ -152,7 +152,7 @@ function HeatmapSliceRow({ row }: { row: HeatmapRow }) {
         <ProjectPill token={{ label: row.status, tone }} compact />
       </div>
       <Cells row={row} />
-      <div className="font-mono text-[10px] text-stone-700 tabular-nums whitespace-nowrap">
+      <div className="font-mono text-[10px] text-on-surface tabular-nums whitespace-nowrap">
         {row.doneItems}/{row.totalItems || 0}
         {row.totalItems > 0 ? ` (${row.percentage}%)` : ""}
       </div>
@@ -166,7 +166,7 @@ function Cells({ row }: { row: HeatmapRow }) {
       <div
         data-testid={`mission-progress-heatmap-cells-${row.name}`}
         data-cell-state="empty"
-        className="font-mono text-[10px] italic text-stone-500"
+        className="font-mono text-[10px] italic text-on-surface-variant"
       >
         No acceptance items declared yet.
       </div>
@@ -193,7 +193,7 @@ function Cells({ row }: { row: HeatmapRow }) {
           className={
             item.done
               ? `h-4 w-4 border ${doneClass}`
-              : "h-4 w-4 border border-outline-variant bg-white/35"
+              : "h-4 w-4 border border-outline-variant bg-surface-lowest/35"
           }
         />
       ))}
@@ -209,7 +209,7 @@ function HeatmapLegend() {
   return (
     <footer
       data-testid="mission-progress-heatmap-legend"
-      className="mt-3 flex flex-wrap items-center gap-3 border-t border-outline-variant pt-2 font-mono text-[10px] text-stone-600"
+      className="mt-3 flex flex-wrap items-center gap-3 border-t border-outline-variant pt-2 font-mono text-[10px] text-on-surface-variant"
     >
       <LegendCell label="done (active)" tone="info" testId="legend-active" />
       <LegendCell label="done (complete)" tone="success" testId="legend-complete" />
@@ -232,7 +232,7 @@ function LegendCell({
   testId: string;
 }): ReactNode {
   const swatchClass = notDone
-    ? "border-outline-variant bg-white/35"
+    ? "border-outline-variant bg-surface-lowest/35"
     : doneCellClass(tone!);
   return (
     <span className="flex items-center gap-1.5">

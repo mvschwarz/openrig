@@ -24,10 +24,10 @@ export function CardPreviewsLab() {
   return (
     <div className="mx-auto max-w-5xl space-y-10 px-6 py-10" data-testid="card-previews-lab">
       <header className="space-y-2">
-        <h1 className="font-mono text-[12px] uppercase tracking-[0.18em] text-stone-500">
+        <h1 className="font-mono text-[12px] uppercase tracking-[0.18em] text-on-surface-variant">
           /lab/card-previews
         </h1>
-        <p className="font-mono text-[11px] text-stone-700">
+        <p className="font-mono text-[11px] text-on-surface">
           Visual gallery of for-you card kind variants. Each section renders the
           same card component the live feed uses, with sample data.
         </p>
@@ -137,8 +137,8 @@ export function CardPreviewsLab() {
 function SectionLabel({ title, description }: { title: string; description: string }) {
   return (
     <div className="space-y-1 pt-4">
-      <h2 className="font-mono text-[10px] uppercase tracking-[0.16em] text-stone-900">{title}</h2>
-      <p className="font-mono text-[10px] text-stone-600 max-w-3xl">{description}</p>
+      <h2 className="font-mono text-[10px] uppercase tracking-[0.16em] text-on-surface">{title}</h2>
+      <p className="font-mono text-[10px] text-on-surface-variant max-w-3xl">{description}</p>
     </div>
   );
 }

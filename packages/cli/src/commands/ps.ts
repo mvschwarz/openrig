@@ -46,6 +46,8 @@ interface NodeEntry {
   sessionStatus: string | null;
   startupStatus: "pending" | "ready" | "attention_required" | "failed" | null;
   restoreOutcome: string;
+  // OPR.0.4.3.06 — challenge-verified orientation, distinct from startupStatus.
+  oriented?: string;
   lifecycleState?: "running" | "detached" | "recoverable" | "attention_required";
   tmuxAttachCommand: string | null;
   resumeCommand: string | null;
@@ -167,6 +169,7 @@ const ALLOWED_NODE_FIELDS = new Set([
   "sessionStatus",
   "startupStatus",
   "restoreOutcome",
+  "oriented",
   "lifecycleState",
   "tmuxAttachCommand",
   "resumeCommand",
@@ -422,6 +425,8 @@ function compactNodeProjection(nodes: NodeEntry[]): Array<Record<string, unknown
       // lifecycle + session/startup state.
       sessionStatus: n.sessionStatus,
       startupStatus: n.startupStatus,
+      // OPR.0.4.3.06 — challenge-verified orientation, distinct from ready.
+      oriented: n.oriented ?? "n-a",
       lifecycleState: n.lifecycleState,
       // activity (state always; short reason only when attention — keep it lean).
       agentActivity: attention
@@ -818,9 +823,14 @@ async function handleNodes(
     ? rigRes.data.filter((r) => (r.rigName ?? r.name) === opts.rig)
     : rigRes.data;
 
+  // OPR.0.4.3 healthz-wedge: the daemon nodes route is CHEAP by default (no
+  // per-node tmux capture) — `rig ps --nodes` gets snapshot-based activity. Pass
+  // ?full=true only when the operator asks for --full, which opts into the
+  // per-node pane-heuristic (freshest needs_input) at the fan-out's cost.
+  const nodesQuery = opts.full ? "?full=true" : "";
   const allNodes: NodeEntry[] = [];
   for (const rig of effectiveRigs) {
-    const nodesRes = await client.get<NodeEntry[]>(`/api/rigs/${encodeURIComponent(rig.rigId)}/nodes`, requestHeaders ? { headers: requestHeaders } : undefined);
+    const nodesRes = await client.get<NodeEntry[]>(`/api/rigs/${encodeURIComponent(rig.rigId)}/nodes${nodesQuery}`, requestHeaders ? { headers: requestHeaders } : undefined);
     if (nodesRes.status >= 400) {
       console.error(`Warning: failed to fetch nodes for rig "${rig.rigName ?? rig.name}" (HTTP ${nodesRes.status}). List rigs with: rig ps`);
       continue;
@@ -899,7 +909,7 @@ async function handleNodes(
       ));
     }
   } else {
-    const header = padNodeRow("RIG", "POD", "MEMBER", "SESSION", "RUNTIME", "STATUS", "STARTUP", "LIFECYCLE", "TERMINAL", "WORK", "ACTIVITY", "CTX", "RESTORE", "ERROR");
+    const header = padNodeRow("RIG", "POD", "MEMBER", "SESSION", "RUNTIME", "STATUS", "STARTUP", "ORIENTED", "LIFECYCLE", "TERMINAL", "WORK", "ACTIVITY", "CTX", "RESTORE", "ERROR");
     console.log(header);
     for (const n of humanList as NodeEntry[]) {
       const parts = n.logicalId.split(".");
@@ -914,6 +924,7 @@ async function handleNodes(
         n.runtime ?? "—",
         n.sessionStatus ?? "—",
         n.startupStatus ?? "—",
+        n.oriented ?? "—",
         abbrevNodeLifecycle(n.lifecycleState),
         formatTerminalActive(n.terminalActive),
         formatHasWork(n.hasAssignedWork, n.pendingWorkCount),
@@ -968,7 +979,7 @@ function padRigRow(rig: string, nodes: string, running: string, active: string, 
   ].join("");
 }
 
-function padNodeRow(rig: string, pod: string, member: string, session: string, runtime: string, status: string, startup: string, lifecycle: string, terminal: string, work: string, activity: string, ctx: string, restore: string, error: string): string {
+function padNodeRow(rig: string, pod: string, member: string, session: string, runtime: string, status: string, startup: string, oriented: string, lifecycle: string, terminal: string, work: string, activity: string, ctx: string, restore: string, error: string): string {
   return [
     fitCell(rig, 30),
     fitCell(pod, 10),
@@ -977,6 +988,8 @@ function padNodeRow(rig: string, pod: string, member: string, session: string, r
     fitCell(runtime, 12),
     fitCell(status, 10),
     fitCell(startup, 10),
+    // OPR.0.4.3.06 — challenge-verified orientation, distinct from STARTUP.
+    fitCell(oriented, 9),
     fitCell(lifecycle, 11),
     // Slice 15 — distinct TERMINAL + WORK columns.
     fitCell(terminal, 9),

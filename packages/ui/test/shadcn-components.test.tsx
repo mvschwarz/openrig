@@ -69,8 +69,8 @@ describe("shadcn components", () => {
     render(<Button variant="default" data-testid="pri">Go</Button>);
 
     const btn = screen.getByTestId("pri");
-    expect(btn.className).toContain("bg-stone-900");
-    expect(btn.className).toContain("text-white");
+    expect(btn.className).toContain("bg-inverse-surface");
+    expect(btn.className).toContain("text-background");
   });
 
   // Test 4: Input and textarea use framed field styling
@@ -100,8 +100,8 @@ describe("shadcn components", () => {
     render(<Card data-testid="card">content</Card>);
 
     const card = screen.getByTestId("card");
-    expect(card.className).toContain("bg-white");
-    expect(card.className).toContain("border-stone-900");
+    expect(card.className).toContain("bg-surface-lowest");
+    expect(card.className).toContain("border-on-surface");
     expect(card.className).toContain("hard-shadow");
   });
 

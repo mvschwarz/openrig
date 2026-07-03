@@ -410,9 +410,19 @@ Examples:
         } else if (res.data["wouldCaptureCurrentState"] === true) {
           console.log(`Snapshot: none usable — apply would first capture current DB state as an auto-rehydrate snapshot.`);
         }
-        const planNodes = (res.data["nodes"] as Array<{ logicalId: string; intendedAction: string; reason?: string }>) ?? [];
+        const planNodes = (res.data["nodes"] as Array<{ logicalId: string; intendedAction: string; reason?: string; tokenState?: string; provenance?: string | null; lastVerified?: string | null; freshRequired?: boolean; runtimePrompt?: string }>) ?? [];
         for (const n of planNodes) {
           console.log(`  ${n.logicalId}: ${n.intendedAction}${n.reason ? ` — ${n.reason}` : ""}`);
+          // OPR.0.4.3.20 FR-6 — per-seat token truth: present/missing/stale/unverified
+          // + provenance + freshness + expected runtime prompt + explicit --fresh.
+          if (n.tokenState) {
+            const reverify = (n.tokenState === "stale" || n.tokenState === "unverified") ? " — re-verify" : "";
+            const prov = n.provenance ? ` (${n.provenance})` : "";
+            const verified = n.lastVerified ? `, verified ${n.lastVerified}` : "";
+            const fresh = n.freshRequired ? "; --fresh required" : "";
+            const prompt = n.runtimePrompt ? `; ${n.runtimePrompt}` : "";
+            console.log(`      token: ${n.tokenState}${reverify}${prov}${verified}${fresh}${prompt}`);
+          }
         }
         console.log("No changes made.");
         return;

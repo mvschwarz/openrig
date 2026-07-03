@@ -84,7 +84,7 @@ describe("Dashboard (OPR.0.4.1.14 fidelity refresh)", () => {
     expect(CARD_SRC).toContain("NumeralLayout");
     expect(CARD_SRC).toContain("CornerBracket");
     expect(CARD_SRC).toContain("backdrop-blur-[10px]");
-    expect(CARD_SRC).toContain("bg-stone-100/45");
+    expect(CARD_SRC).toContain("bg-surface-low/45");
   });
 
   it("legacy TopLayerContent keeps its classification chrome (lab primitive intact)", () => {

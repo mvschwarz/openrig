@@ -18,23 +18,23 @@ export function NodeDetailPlaceholder({ rigId, logicalId, onClose }: {
   return (
     <div
       data-testid="node-detail-placeholder"
-      className="w-72 border-l border-stone-300 bg-stone-50 p-4 flex flex-col gap-3 shrink-0"
+      className="w-72 border-l border-outline-variant bg-background p-4 flex flex-col gap-3 shrink-0"
     >
       <div className="flex justify-between items-center">
-        <span className="font-mono text-xs font-bold text-stone-900 uppercase">{logicalId}</span>
-        <button onClick={onClose} className="text-stone-400 hover:text-stone-900 text-sm">&times;</button>
+        <span className="font-mono text-xs font-bold text-on-surface uppercase">{logicalId}</span>
+        <button onClick={onClose} className="text-on-surface-variant hover:text-on-surface text-sm">&times;</button>
       </div>
-      <div className="font-mono text-[9px] text-stone-500">
+      <div className="font-mono text-[9px] text-on-surface-variant">
         Rig: {rigId}
       </div>
       <button
         onClick={handleFocus}
         data-testid="focus-cmux"
-        className="px-3 py-1.5 border border-stone-300 font-mono text-[9px] uppercase hover:bg-stone-200 transition-colors"
+        className="px-3 py-1.5 border border-outline-variant font-mono text-[9px] uppercase hover:bg-surface-high transition-colors"
       >
         Focus in cmux
       </button>
-      <div className="font-mono text-[8px] text-stone-400 mt-auto">
+      <div className="font-mono text-[8px] text-on-surface-variant mt-auto">
         Full detail panel in NS-T11
       </div>
     </div>

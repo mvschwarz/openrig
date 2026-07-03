@@ -79,7 +79,7 @@ function statusColor(startupStatus: string | null): string {
     case "pending": return "text-amber-500";
     case "attention_required": return "text-orange-500";
     case "failed": return "text-red-600";
-    default: return "text-stone-400";
+    default: return "text-on-surface-variant";
   }
 }
 
@@ -87,8 +87,8 @@ function rigStatusColor(status: string): string {
   switch (status) {
     case "running": return "text-green-600";
     case "partial": return "text-amber-500";
-    case "stopped": return "text-stone-400";
-    default: return "text-stone-400";
+    case "stopped": return "text-on-surface-variant";
+    default: return "text-on-surface-variant";
   }
 }
 
@@ -122,7 +122,7 @@ function TreeToggle({
         onClick();
       }}
       aria-label={`${expanded ? "Collapse" : "Expand"} ${label}`}
-      className="inline-flex h-5 w-5 items-center justify-center text-stone-500 transition-colors hover:text-stone-900"
+      className="inline-flex h-5 w-5 items-center justify-center text-on-surface-variant transition-colors hover:text-on-surface"
     >
       <ChevronRight className={cn("h-4 w-4 transition-transform duration-150", expanded && "rotate-90")} />
     </button>
@@ -167,7 +167,7 @@ function NodeActivityIndicator({ node }: { node: NodeInventoryEntry }) {
       <Activity className={cn("h-2.5 w-2.5 shrink-0", textClass, animClass)} strokeWidth={2.4} aria-label={title} />
       {qitems.length > 0 && (
         <span
-          className="font-mono text-[8px] uppercase tracking-[0.10em] text-stone-500"
+          className="font-mono text-[8px] uppercase tracking-[0.10em] text-on-surface-variant"
           data-testid={`node-active-work-${node.logicalId}`}
           aria-label="owns active work"
         >
@@ -255,7 +255,7 @@ function SurfaceBody({
     // unreachable → canonical defaults + CLI hint.
     return (
       <div data-testid="explorer-for-you-subscriptions" className="flex-1 overflow-y-auto py-3 px-3">
-        <div className="font-mono text-[9px] uppercase tracking-[0.14em] text-stone-500 mb-2">
+        <div className="font-mono text-[9px] uppercase tracking-[0.14em] text-on-surface-variant mb-2">
           Advanced · individual toggles
         </div>
         <SubscriptionToggleList />
@@ -314,9 +314,9 @@ export function Explorer({
         onClick={onDesktopToggle}
         className={cn(
           "hidden lg:flex fixed top-[5.5rem] left-[3.5rem] z-30 h-8 w-8 items-center justify-center",
-          "rounded-full border border-outline-variant bg-background/90 text-stone-700",
+          "rounded-full border border-outline-variant bg-background/90 text-on-surface",
           "shadow-[0_2px_8px_rgba(41,37,36,0.08)] backdrop-blur-sm transition-colors",
-          "hover:bg-stone-100 hover:text-stone-900",
+          "hover:bg-surface-low hover:text-on-surface",
         )}
       >
         <ChevronRight className="h-4 w-4" strokeWidth={1.5} />
@@ -360,7 +360,7 @@ export function Explorer({
         // mount-gate reverts at that time.
         isOverlay
           ? "vellum z-30 shadow-[6px_0_14px_rgba(46,52,46,0.06)]"
-          : "z-40 bg-[rgba(250,249,245,0.035)] supports-[backdrop-filter]:bg-[rgba(250,249,245,0.018)] backdrop-blur-[14px] backdrop-saturate-75 shadow-[6px_0_14px_rgba(46,52,46,0.04)]",
+          : "z-40 bg-[hsl(var(--background)/0.035)] supports-[backdrop-filter]:bg-[hsl(var(--background)/0.018)] backdrop-blur-[14px] backdrop-saturate-75 shadow-[6px_0_14px_rgba(46,52,46,0.04)]",
         // Mobile: slide-over from left below the top-bar header (h-14).
         "fixed top-14 bottom-0 left-0 transition-transform duration-200 ease-tactical w-72 max-w-[80vw]",
         open ? "translate-x-0" : "-translate-x-full",
@@ -377,8 +377,8 @@ export function Explorer({
           aria-label="Collapse explorer"
           onClick={onDesktopToggle}
           className={cn(
-            "hidden lg:flex absolute z-10 h-8 w-8 items-center justify-center rounded-full border border-outline-variant bg-background/90 text-stone-700",
-            "shadow-[0_2px_8px_rgba(41,37,36,0.08)] backdrop-blur-sm transition-colors hover:bg-stone-100 hover:text-stone-900",
+            "hidden lg:flex absolute z-10 h-8 w-8 items-center justify-center rounded-full border border-outline-variant bg-background/90 text-on-surface",
+            "shadow-[0_2px_8px_rgba(41,37,36,0.08)] backdrop-blur-sm transition-colors hover:bg-surface-low hover:text-on-surface",
             "right-2 top-3",
           )}
         >

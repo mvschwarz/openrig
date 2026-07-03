@@ -25,7 +25,7 @@ export function SettingsPageShell({ testId, title, children }: SettingsPageShell
     >
       <header className="border-b border-outline-variant pb-4 mb-4">
         <SectionHeader tone="muted">Configuration</SectionHeader>
-        <h1 className="font-headline text-headline-md font-bold tracking-tight uppercase text-stone-900 mt-1">
+        <h1 className="font-headline text-headline-md font-bold tracking-tight uppercase text-on-surface mt-1">
           {title}
         </h1>
       </header>

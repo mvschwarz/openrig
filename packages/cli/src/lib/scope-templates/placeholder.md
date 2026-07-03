@@ -37,3 +37,7 @@ Non-visual slices: mark this section N/A.
 ## Acceptance
 
 - [3-5 bullets]
+
+---
+
+> **How you work this slice (SOP):** track on PROGRESS.md, prove on PROOF.md (+ `proof/`), carry state in the mission's MISSION_NOTES.md, and hand off via `rig queue`. A slice is **not done until PROOF.md exists** and every acceptance bullet has evidence. The full operating procedure lives in the mission README's Mission/Slice SOP section and the `mission-slice-sop` skill. Verify with `rig scope audit`.

@@ -10,6 +10,7 @@ import { resolveConcreteHint } from "../src/domain/runtime-adapter.js";
 import type { ProjectionPlan } from "../src/domain/projection-planner.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import type { StartupAction } from "../src/domain/types.js";
+import { deriveOriented } from "../src/domain/startup-proof.js";
 
 // -- Mocks --
 
@@ -237,7 +238,11 @@ describe("StartupOrchestrator", () => {
     ];
     const result = await orch.startNode(makeInput(seed, { startupActions: actions, isRestore: true }));
     expect(result.ok).toBe(true);
-    expect(tmux.sendText).not.toHaveBeenCalled();
+    // OPR.0.4.3.06 — a fresh-continuity launch is challenged (the orientation
+    // challenge IS sent), but the non-idempotent fresh_start-only action is
+    // still skipped: it must never appear among the sends.
+    const calls = (tmux.sendText as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[1]);
+    expect(calls).not.toContain("/setup-once");
   });
 
   // T7: idempotent restore action replays safely
@@ -433,6 +438,39 @@ describe("StartupOrchestrator", () => {
     expect(sendText).toHaveBeenNthCalledWith(2, "r01-impl", "/rename impl");
   });
 
+  // OPR.0.4.3.06 — a fresh managed launch is challenged (oriented=missing until
+  // proved); the challenge rides along in the identity prompt.
+  it("issues a startup challenge on a fresh launch (oriented=missing, challenge in prompt)", async () => {
+    const seed = seedSession();
+    const sendText = vi.fn(async () => ({ ok: true as const }));
+    const orch = createOrchestrator({ tmux: mockTmux({ sendText }) });
+
+    await orch.startNode(makeInput(seed, {
+      resolvedStartupFiles: [{ path: "role.md", absolutePath: "/tmp/role.md", ownerRoot: "/tmp", deliveryHint: "guidance_merge", required: true, appliesOn: ["fresh_start"] }],
+      startupActions: [makeIdentityAction()],
+    }));
+
+    const challenged = db.prepare("SELECT COUNT(*) AS n FROM events WHERE node_id = ? AND type = 'node.startup_challenged'").get(seed.nodeId) as { n: number };
+    expect(challenged.n).toBe(1);
+    expect(deriveOriented(db, seed.nodeId)).toBe("missing");
+    // The challenge instruction is embedded in the first delivered prompt.
+    expect(sendText.mock.calls[0]?.[1]).toContain("startup orientation challenge");
+  });
+
+  // OPR.0.4.3.06 — a resumed restore is NOT re-challenged (oriented stays n-a).
+  it("does NOT challenge a resumed restore (oriented=n-a)", async () => {
+    const seed = seedSession();
+    const orch = createOrchestrator();
+    await orch.startNode(makeInput(seed, {
+      startupActions: [makeIdentityAction()],
+      isRestore: true,
+      resumeToken: "claude-session-123",
+    }));
+    const challenged = db.prepare("SELECT COUNT(*) AS n FROM events WHERE node_id = ? AND type = 'node.startup_challenged'").get(seed.nodeId) as { n: number };
+    expect(challenged.n).toBe(0);
+    expect(deriveOriented(db, seed.nodeId)).toBe("n-a");
+  });
+
   // T10: launcher does not mark ready before actions complete
   it("startup_status stays pending until orchestrator completes", async () => {
     const seed = seedSession();
@@ -457,11 +495,18 @@ describe("StartupOrchestrator", () => {
         .mockResolvedValueOnce({ ready: true }) // first attempt: ready
         .mockResolvedValueOnce({ ready: true }), // retry: ready
     });
+    // OPR.0.4.3.06 — text-aware mock (robust to the extra orientation-challenge
+    // send on fresh continuity): everything succeeds except the FIRST /configure
+    // (attempt 1's second action), which fails as before.
+    let configureSeen = 0;
     const failTmux = mockTmux({
-      sendText: vi.fn()
-        .mockResolvedValueOnce({ ok: true }) // first attempt: action succeeds
-        .mockResolvedValueOnce({ ok: false, message: "second action fails" }) // first attempt: second action fails
-        .mockResolvedValueOnce({ ok: true }), // retry: idempotent action succeeds
+      sendText: vi.fn(async (_target: string, text: string) => {
+        if (text === "/configure") {
+          configureSeen++;
+          if (configureSeen === 1) return { ok: false as const, message: "second action fails" };
+        }
+        return { ok: true as const };
+      }),
     });
 
     const orch = createOrchestrator(failTmux);

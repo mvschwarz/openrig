@@ -28,7 +28,7 @@ export interface StatusPipProps {
 const toneDot: Record<StatusPipStatus, string> = {
   active: "bg-success",
   running: "bg-success",
-  stopped: "bg-stone-400",
+  stopped: "bg-outline-variant",
   warning: "bg-warning",
   error: "bg-tertiary",
   info: "bg-secondary",
@@ -37,7 +37,7 @@ const toneDot: Record<StatusPipStatus, string> = {
 const tonePill: Record<StatusPipStatus, string> = {
   active: "border-success text-success",
   running: "border-success text-success",
-  stopped: "border-stone-400 text-stone-500",
+  stopped: "border-outline text-on-surface-variant",
   warning: "border-warning text-warning",
   error: "border-tertiary text-tertiary",
   info: "border-secondary text-secondary",

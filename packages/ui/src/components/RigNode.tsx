@@ -11,7 +11,7 @@ import {
   getTimeInState,
   shortQitemTail,
 } from "../lib/activity-visuals.js";
-import type { AgentActivitySummary, CurrentQitemSummary } from "../hooks/useNodeInventory.js";
+import type { AgentActivitySummary, CurrentQitemSummary, SeatIdentityVerdictSummary } from "../hooks/useNodeInventory.js";
 import { ContextUsageRing } from "./ContextUsageRing.js";
 import { ActivityRing } from "./topology/ActivityRing.js";
 import { getActivityCardClasses, getActivityCardSignal } from "./topology/activity-card-visuals.js";
@@ -35,6 +35,9 @@ interface RigNodeData {
   canonicalSessionName?: string | null;
   podId?: string | null;
   restoreOutcome?: string;
+  // OPR.0.4.3.06 — challenge-verified orientation verdict, surfaced BESIDE
+  // startupStatus (never folds into / down-ranks the node health color).
+  oriented?: string;
   resumeToken?: string | null;
   resolvedSpecName?: string | null;
   profile?: string | null;
@@ -54,6 +57,9 @@ interface RigNodeData {
   // currentQitems surfaces in the hover hint when the agent is running.
   agentActivity?: AgentActivitySummary | null;
   terminalActive?: boolean | null;
+  // OPR.0.4.3.19 — liveness identity verdict; a mismatch/pane_missing verdict
+  // overrides terminalActive so the dot never renders active/running green.
+  identityVerdict?: SeatIdentityVerdictSummary | null;
   currentQitems?: CurrentQitemSummary[];
   activityRing?: TopologyActivityVisual;
   reducedMotion?: boolean;
@@ -97,7 +103,7 @@ export function RigNode({ data }: { data: RigNodeData }) {
   // startupStatus retains its independent surface via the ATTN/FAILED badges
   // below \u2014 activity answers "is this agent working?", startup answers "did
   // this agent boot?". Two different questions, two different surfaces.
-  const { state: activityState, source: activitySource } = getActivityStateWithSource(data.agentActivity, data.terminalActive);
+  const { state: activityState, source: activitySource } = getActivityStateWithSource(data.agentActivity, data.terminalActive, data.identityVerdict);
   const activityLabel = getActivityLabel(activityState);
   const activityBgClass = getActivityBgClass(activityState);
   const activityAnimClass = getActivityAnimationClass(activityState);
@@ -153,10 +159,10 @@ export function RigNode({ data }: { data: RigNodeData }) {
   const buttonClass = (kind: "cmux") =>
     `inline-flex items-center gap-1 px-1.5 py-0.5 border font-mono text-[7px] uppercase transition-colors ${
       actionFeedback === kind
-        ? "bg-stone-900 text-white border-stone-900"
-        : "bg-white text-stone-900 border-stone-300 hover:bg-stone-100"
+        ? "bg-inverse-surface text-background border-on-surface"
+        : "bg-surface-lowest text-on-surface border-outline-variant hover:bg-surface-low"
     }`;
-  const toolbarIconButtonClass = "border font-mono text-[7px] uppercase transition-colors bg-white text-stone-900 border-stone-300 hover:bg-stone-100 inline-flex h-6 w-6 items-center justify-center px-0 py-0";
+  const toolbarIconButtonClass = "border font-mono text-[7px] uppercase transition-colors bg-surface-lowest text-on-surface border-outline-variant hover:bg-surface-low inline-flex h-6 w-6 items-center justify-center px-0 py-0";
   const terminalSessionName = data.canonicalSessionName ?? data.binding?.tmuxSession ?? null;
 
   const card = (
@@ -172,7 +178,7 @@ export function RigNode({ data }: { data: RigNodeData }) {
           ? "border-emerald-600 ring-2 ring-emerald-400/70 shadow-[0_0_0_3px_rgba(52,211,153,0.12)]"
           : data.placementState === "available"
             ? "border-emerald-500 ring-1 ring-emerald-300/70"
-            : "border-stone-900",
+            : "border-on-surface",
       )}
       data-activity-card-state={activityCard.state}
       data-activity-card-flash={activityCard.flash ?? "none"}
@@ -184,10 +190,10 @@ export function RigNode({ data }: { data: RigNodeData }) {
       {/* Header stripe — dark for core, muted for infra, light for workers */}
       <div className={`px-3 py-1 font-mono text-[10px] flex justify-between items-center ${
         isInfra
-          ? "bg-stone-500 text-white border-b border-stone-900"
+          ? "bg-outline text-white border-b border-on-surface"
           : core
-            ? "bg-stone-900 text-white"
-            : "bg-stone-200 text-stone-900 border-b border-stone-900"
+            ? "bg-inverse-surface text-background"
+            : "bg-surface-high text-on-surface border-b border-on-surface"
       }`}>
         <span className="font-bold truncate">
           {agentName}
@@ -196,7 +202,7 @@ export function RigNode({ data }: { data: RigNodeData }) {
           {activityIsStale && (
             <span
               data-testid={`activity-staleness-${data.logicalId}`}
-              className="font-mono text-[7px] uppercase tracking-[0.10em] text-stone-300"
+              className="font-mono text-[7px] uppercase tracking-[0.10em] text-on-surface-variant"
               title={`Activity sample is older than threshold; daemon may not be probing this seat`}
             >
               stale
@@ -225,7 +231,7 @@ export function RigNode({ data }: { data: RigNodeData }) {
 
       {/* Body */}
       <div className="space-y-1 px-2 py-1.5">
-        <div className="truncate font-mono text-[8px] leading-tight text-stone-500">
+        <div className="truncate font-mono text-[8px] leading-tight text-on-surface-variant">
           {data.canonicalSessionName ?? data.logicalId}
         </div>
 
@@ -239,7 +245,7 @@ export function RigNode({ data }: { data: RigNodeData }) {
             className="max-w-full"
           />
           {!runtimeTitle && data.profile ? (
-            <span className="ml-1 font-mono text-[8px] uppercase tracking-[0.12em] text-stone-400">
+            <span className="ml-1 font-mono text-[8px] uppercase tracking-[0.12em] text-on-surface-variant">
               {data.profile}
             </span>
           ) : null}
@@ -247,7 +253,7 @@ export function RigNode({ data }: { data: RigNodeData }) {
 
         {/* Spec hint */}
         {data.resolvedSpecName && (
-          <div className="font-mono text-[8px] text-stone-400" data-testid="spec-hint">
+          <div className="font-mono text-[8px] text-on-surface-variant" data-testid="spec-hint">
             {data.resolvedSpecName}{data.profile ? ` · ${data.profile}` : ""}
           </div>
         )}
@@ -267,12 +273,12 @@ export function RigNode({ data }: { data: RigNodeData }) {
               {data.contextUsedPercentage}%
             </div>
           ) : (
-            <div className="font-mono text-xs text-stone-400" data-testid="context-badge-unknown">
+            <div className="font-mono text-xs text-on-surface-variant" data-testid="context-badge-unknown">
               ?
             </div>
           )}
           <div
-            className={`font-mono text-base font-bold leading-none tracking-[0.02em] ${tokenLabel ? "text-stone-500" : "text-stone-300"}`}
+            className={`font-mono text-base font-bold leading-none tracking-[0.02em] ${tokenLabel ? "text-on-surface-variant" : "text-on-surface-variant"}`}
             data-testid="token-total"
             title={tokenTitle ?? "Token sample unavailable"}
           >
@@ -282,8 +288,19 @@ export function RigNode({ data }: { data: RigNodeData }) {
 
         {/* Restore outcome */}
         {data.restoreOutcome && data.restoreOutcome !== "n-a" && (
-          <div className="font-mono text-[8px] text-stone-500">
+          <div className="font-mono text-[8px] text-on-surface-variant">
             RESTORE: {data.restoreOutcome}
+          </div>
+        )}
+
+        {/* OPR.0.4.3.06 startup-proof orientation — a verdict distinct from
+            startupStatus/health. `verified` = proved it read its contract;
+            `missing`/`rejected` are shown as their own labels so a seat is never
+            silently "green + oriented" without a proof. `n-a` (resumed /
+            non-agent) is hidden, mirroring the RESTORE badge. */}
+        {data.oriented && data.oriented !== "n-a" && (
+          <div className="font-mono text-[8px] text-on-surface-variant" data-testid="orientation-badge">
+            ORIENT: {data.oriented}
           </div>
         )}
 
@@ -292,7 +309,7 @@ export function RigNode({ data }: { data: RigNodeData }) {
           <div
             data-testid="package-badge"
             title={data.packageRefs.join(", ")}
-            className="font-mono text-[8px] text-stone-400"
+            className="font-mono text-[8px] text-on-surface-variant"
             onClick={(e) => e.stopPropagation()}
             onKeyDown={(e) => e.stopPropagation()}
           >
@@ -366,7 +383,7 @@ export function RigNode({ data }: { data: RigNodeData }) {
       {hoverHintLines.length > 0 && (
         <div
           data-testid="node-hover-hint"
-          className="pointer-events-none absolute left-2 top-full z-20 mt-2 hidden min-w-[180px] border border-stone-900 bg-white px-2 py-1 font-mono text-[8px] text-stone-700 shadow-[4px_4px_0_rgba(28,25,23,0.14)] group-hover:block"
+          className="pointer-events-none absolute left-2 top-full z-20 mt-2 hidden min-w-[180px] border border-on-surface bg-surface-lowest px-2 py-1 font-mono text-[8px] text-on-surface shadow-[4px_4px_0_rgba(28,25,23,0.14)] group-hover:block"
         >
           {hoverHintLines.map((line) => (
             <div key={line}>{line}</div>

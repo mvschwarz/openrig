@@ -15,14 +15,34 @@ interface BindingFields {
   cmuxSurface?: string;
 }
 
-/** Resume-token provenance precedence (OPR.0.4.0.22). Higher rank wins;
- *  a lower-rank write never overwrites a higher-rank persisted token.
- *  operator/attested (deliberate set) > hook (runtime) > scrape (pane). */
+/** Resume-token provenance precedence (OPR.0.4.0.22; adoption rung added by
+ *  OPR.0.4.3.20 FR-3). Higher rank wins; a lower-rank write never overwrites a
+ *  higher-rank persisted token.
+ *  operator/attested (deliberate set) > hook (runtime self-report) >
+ *  adoption (captured at the reconcile/adopt/bind boundary) > scrape (pane).
+ *  adoption sits BELOW hook deliberately: a live runtime hook self-report is
+ *  fresher than an adoption-time snapshot, so hook must be able to refresh an
+ *  adoption token (FR-3 §2.4 — do not freeze the token at adoption time and
+ *  reintroduce the staleness the survive slice exists to kill). */
 export const RESUME_PROVENANCE_RANK: Record<string, number> = {
   scrape: 0,
-  hook: 1,
-  operator: 2,
+  adoption: 1,
+  hook: 2,
+  operator: 3,
 };
+
+/** OPR.0.4.3.20 FR-4 — the latest live session per node, shape needed by the
+ *  resume-metadata refresher (structurally compatible with ResumeRefreshSession). */
+export interface LatestLiveSession {
+  nodeId: string;
+  sessionId: string;
+  sessionName: string;
+  status: string;
+  runtime: string | null;
+  resumeType: string | null;
+  resumeToken: string | null;
+  cwd: string | null;
+}
 
 export class SessionRegistry {
   readonly db: Database.Database;
@@ -81,10 +101,22 @@ export class SessionRegistry {
   }
 
   // OPR.0.4.0.22 — resume-token provenance precedence. A deliberate
-  // operator/attested set is authoritative and OUTRANKS both the runtime
-  // hook and the pane scrape; hook outranks scrape (the pre-existing rule).
+  // operator/attested set is authoritative and OUTRANKS the runtime hook, the
+  // adoption-boundary capture, and the pane scrape (hook > adoption > scrape).
   // A lower-rank write must never clobber a higher-rank persisted token.
-  updateResumeToken(sessionId: string, type: string, token: string, provenance?: "hook" | "scrape" | "operator"): void {
+  //
+  // OPR.0.4.3.20 FR-3 — validity-before-rank guard: an empty/whitespace token
+  // is a SKIP, never a write. "Flakiness = missing = no-write, not a bad
+  // write." This runs BEFORE the rank comparison so NO caller (a flaky hook,
+  // adoption capture, or scrape) can ever replace a valid stored token with an
+  // empty one, even from a higher-provenance source.
+  //
+  // Returns whether a write actually happened: `true` on UPDATE, `false` on an
+  // empty-token skip or a lower-rank no-op. Callers that only set-and-forget can
+  // ignore it; the adoption-capture path uses it so its audit event never
+  // falsely claims a captured write when the provenance guard refused it.
+  updateResumeToken(sessionId: string, type: string, token: string, provenance?: "hook" | "scrape" | "operator" | "adoption"): boolean {
+    if (typeof token !== "string" || token.trim().length === 0) return false;
     if (provenance) {
       const existing = this.db.prepare(
         "SELECT resume_provenance FROM sessions WHERE id = ?"
@@ -93,13 +125,41 @@ export class SessionRegistry {
       if (existingProv) {
         const existingRank = RESUME_PROVENANCE_RANK[existingProv] ?? -1;
         const newRank = RESUME_PROVENANCE_RANK[provenance] ?? -1;
-        if (newRank < existingRank) return; // lower-rank cannot overwrite higher-rank
+        if (newRank < existingRank) return false; // lower-rank cannot overwrite higher-rank
       }
     }
     const prov = provenance ?? null;
+    // OPR.0.4.3.20 FR-6 — stamp-on-verify (+ equal-value-refresh): a token
+    // (re-)derived from live state IS a verification, so refresh the freshness
+    // marker + mark the last probe `resumable` on EVERY successful write, even
+    // when the token value is unchanged (a re-verified-but-unchanged token must
+    // not look untouched). The plan reads these to compute present/stale.
     this.db
-      .prepare("UPDATE sessions SET resume_type = ?, resume_token = ?, resume_provenance = COALESCE(?, resume_provenance) WHERE id = ?")
+      .prepare(
+        "UPDATE sessions SET resume_type = ?, resume_token = ?, resume_provenance = COALESCE(?, resume_provenance), " +
+          "resume_last_verified = datetime('now'), resume_last_probe_status = 'resumable' WHERE id = ?",
+      )
       .run(type, token, prov, sessionId);
+    return true;
+  }
+
+  /** OPR.0.4.3.20 FR-6 — record a live resume-probe outcome WITHOUT clearing the
+   *  token. On `resumable` it stamps the freshness marker (equal-value-refresh);
+   *  on `not_resumable` / `inconclusive` it marks the PRESENT token stale so the
+   *  restore plan surfaces it as `stale/unverified — re-verify` (never a silent
+   *  null). This replaces the old clear-on-not-resumable behavior (§2.1b) — the
+   *  token stays put; FR-7's blank/fresh rollback catches an actually-unresumable
+   *  token at restore time. */
+  markResumeProbeResult(sessionId: string, status: "resumable" | "not_resumable" | "inconclusive"): void {
+    if (status === "resumable") {
+      this.db
+        .prepare("UPDATE sessions SET resume_last_verified = datetime('now'), resume_last_probe_status = 'resumable' WHERE id = ?")
+        .run(sessionId);
+      return;
+    }
+    this.db
+      .prepare("UPDATE sessions SET resume_last_probe_status = ? WHERE id = ?")
+      .run(status, sessionId);
   }
 
   /** OPR.0.4.0.22 — resolve a canonical session name to the context needed to
@@ -136,8 +196,12 @@ export class SessionRegistry {
   }
 
   clearResumeToken(sessionId: string): void {
+    // OPR.0.4.3.20 FR-6 — also null the verification-freshness columns so a
+    // cleared slot carries no orphan freshness. NOTE: after §2.1b the refresher
+    // validate path marks-stale instead of clearing, so this has no in-tree
+    // caller on the live path; kept for explicit-clear callers/tests.
     this.db
-      .prepare("UPDATE sessions SET resume_type = NULL, resume_token = NULL, resume_provenance = NULL WHERE id = ?")
+      .prepare("UPDATE sessions SET resume_type = NULL, resume_token = NULL, resume_provenance = NULL, resume_last_verified = NULL, resume_last_probe_status = NULL WHERE id = ?")
       .run(sessionId);
   }
 
@@ -164,6 +228,32 @@ export class SessionRegistry {
       .all(rigId) as SessionRow[];
 
     return rows.map((r) => this.rowToSession(r));
+  }
+
+  /** OPR.0.4.3.20 FR-4 — the latest session PER NODE, filtered to live statuses
+   *  (running / idle / unknown), with the fields the resume-metadata refresher
+   *  needs. Lifted from rig-teardown so both the teardown pre-down path and the
+   *  FR-4 periodic/manual snapshot refresh call ONE query (no duplication). */
+  getLatestLiveSessions(rigId: string): LatestLiveSession[] {
+    const rows = this.db.prepare(`
+      SELECT n.id as node_id, s.id as session_id, s.session_name, s.status, n.runtime, n.cwd, s.resume_type, s.resume_token
+      FROM nodes n
+      JOIN sessions s ON s.node_id = n.id
+      WHERE n.rig_id = ?
+        AND s.id = (SELECT s2.id FROM sessions s2 WHERE s2.node_id = n.id ORDER BY s2.created_at DESC, s2.id DESC LIMIT 1)
+        AND s.status IN ('running', 'idle', 'unknown')
+    `).all(rigId) as Array<{ node_id: string; session_id: string; session_name: string; status: string; runtime: string | null; cwd: string | null; resume_type: string | null; resume_token: string | null }>;
+
+    return rows.map((r) => ({
+      nodeId: r.node_id,
+      sessionId: r.session_id,
+      sessionName: r.session_name,
+      status: r.status,
+      runtime: r.runtime,
+      resumeType: r.resume_type,
+      resumeToken: r.resume_token,
+      cwd: r.cwd,
+    }));
   }
 
   getBindingForNode(nodeId: string): Binding | null {
@@ -244,6 +334,12 @@ export class SessionRegistry {
       status: row.status,
       resumeType: row.resume_type ?? null,
       resumeToken: row.resume_token ?? null,
+      // OPR.0.4.3.20 FR-6 — carry provenance + verification freshness so a
+      // snapshot's serialized sessions (and getSessionsForRig) surface token
+      // state in the restore plan. Nullable/degrading for pre-45 rows.
+      resumeProvenance: row.resume_provenance ?? null,
+      resumeLastVerified: row.resume_last_verified ?? null,
+      resumeLastProbeStatus: row.resume_last_probe_status ?? null,
       restorePolicy: row.restore_policy ?? "resume_if_possible",
       lastSeenAt: row.last_seen_at,
       createdAt: row.created_at,
@@ -284,6 +380,10 @@ interface SessionRow {
   origin: string;
   startup_status: string | null;
   startup_completed_at: string | null;
+  // OPR.0.4.3.20 FR-3/FR-6 — resume ledger provenance + verification freshness.
+  resume_provenance?: string | null;
+  resume_last_verified?: string | null;
+  resume_last_probe_status?: string | null;
 }
 
 interface BindingRow {

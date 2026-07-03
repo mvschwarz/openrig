@@ -12,9 +12,23 @@
 // answers "is this agent working?", startup color answers "did this agent
 // boot?". They are not the same question.
 
-import type { AgentActivitySummary } from "../hooks/useNodeInventory.js";
+import type { AgentActivitySummary, SeatIdentityVerdictSummary } from "../hooks/useNodeInventory.js";
 
 export type ActivityState = "running" | "needs_input" | "idle" | "unknown";
+
+/**
+ * OPR.0.4.3.19 — a liveness identity verdict of `mismatch`/`pane_missing`
+ * down-ranks the seat away from any active/running rendering (the process in
+ * the pane is not the registered seat: dead, orphaned, or squatted).
+ * `verified`, `tmux_unavailable`, and an absent verdict leave the projection
+ * unchanged. Mirrors the daemon `identityVerdictDownranksRunning` gate so the
+ * backend and the UI agree on what "no false-green" means.
+ */
+export function identityVerdictDownranksRunning(
+  verdict: SeatIdentityVerdictSummary | null | undefined,
+): boolean {
+  return verdict?.verdict === "mismatch" || verdict?.verdict === "pane_missing";
+}
 
 const ACTIVITY_LABELS: Record<ActivityState, string> = {
   running: "running",
@@ -52,14 +66,24 @@ export interface ActivityStateResult {
 export function getActivityState(
   activity: AgentActivitySummary | null | undefined,
   terminalActive?: boolean | null,
+  identityVerdict?: SeatIdentityVerdictSummary | null,
 ): ActivityState {
-  return getActivityStateWithSource(activity, terminalActive).state;
+  return getActivityStateWithSource(activity, terminalActive, identityVerdict).state;
 }
 
 export function getActivityStateWithSource(
   activity: AgentActivitySummary | null | undefined,
   terminalActive?: boolean | null,
+  identityVerdict?: SeatIdentityVerdictSummary | null,
 ): ActivityStateResult {
+  // OPR.0.4.3.19 — the identity verdict overrides output-derived activity. A
+  // mismatched/dead pane must NEVER render active/running, even when the
+  // (orphan's) tmux output makes terminalActive true — that was the visible
+  // false-green. Checked FIRST, before hook/terminal-activity signals.
+  if (identityVerdictDownranksRunning(identityVerdict)) {
+    return { state: "needs_input", source: "none" };
+  }
+
   const isFreshHook = activity
     && activity.evidenceSource === "runtime_hook"
     && activity.state !== "unknown"

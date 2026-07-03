@@ -60,7 +60,7 @@ interface LibraryReviewProps {
 
 function ProvenanceBadge({ sourcePath, sourceState }: { sourcePath: string; sourceState: string }) {
   return (
-    <div className="font-mono text-[9px] text-stone-500" data-testid="library-provenance">
+    <div className="font-mono text-[9px] text-on-surface-variant" data-testid="library-provenance">
       Source: {sourcePath} · {sourceState}
     </div>
   );
@@ -239,7 +239,7 @@ function LibrarySpecReview({ entryId }: LibraryReviewProps) {
   if (isLoading) {
     return (
       <WorkspacePage>
-        <div className="font-mono text-[10px] text-stone-400">Loading spec review...</div>
+        <div className="font-mono text-[10px] text-on-surface-variant">Loading spec review...</div>
       </WorkspacePage>
     );
   }
@@ -345,8 +345,8 @@ function WorkflowTopologyGraph({
                 <span>{n.stepId}</span>
                 {n.isTerminal ? <ToolMark tool="terminal" size="xs" title="Terminal step" decorative /> : null}
               </div>
-              <div className="text-stone-600">{n.role}</div>
-              {n.preferredTarget && <div className="text-[8px] text-stone-500">→ {n.preferredTarget}</div>}
+              <div className="text-on-surface-variant">{n.role}</div>
+              {n.preferredTarget && <div className="text-[8px] text-on-surface-variant">→ {n.preferredTarget}</div>}
             </div>
           ),
         },
@@ -373,7 +373,7 @@ function WorkflowTopologyGraph({
   }, [topology]);
 
   return (
-    <div data-testid={testId ?? "workflow-topology-graph"} className="w-full h-[400px] bg-stone-50 border border-stone-200">
+    <div data-testid={testId ?? "workflow-topology-graph"} className="w-full h-[400px] bg-background border border-outline-variant">
       <ReactFlow
         nodes={nodes}
         edges={edges}
@@ -473,35 +473,35 @@ function LibraryWorkflowReviewPage({ review }: { review: LibraryWorkflowReview }
           <WorkflowSummaryCard label="Source" value={review.isBuiltIn ? "built-in" : "user file"} testId="lib-wf-source" />
         </WorkflowSummaryGrid>
 
-        <div data-testid="workflow-terminal-rule" className="flex items-center gap-2 border border-stone-300/40 bg-white/10 px-3 py-2 font-mono text-[10px] text-stone-700">
+        <div data-testid="workflow-terminal-rule" className="flex items-center gap-2 border border-outline-variant/40 bg-surface-lowest/10 px-3 py-2 font-mono text-[10px] text-on-surface">
           <ToolMark tool="terminal" size="xs" decorative />
-          <span className="text-stone-500 uppercase tracking-[0.16em] text-[8px]">Coordination Terminal Turn:</span>
+          <span className="text-on-surface-variant uppercase tracking-[0.16em] text-[8px]">Coordination Terminal Turn:</span>
           {review.terminalTurnRule}
         </div>
 
         <WorkflowTopologyGraph topology={review.topology} />
 
         <div className="space-y-2">
-          <div className="font-mono text-[8px] uppercase tracking-[0.16em] text-stone-500">Steps</div>
+          <div className="font-mono text-[8px] uppercase tracking-[0.16em] text-on-surface-variant">Steps</div>
           <div className="space-y-1">
             {review.steps.map((step) => (
               <div
                 key={step.stepId}
                 data-testid={`workflow-step-${step.stepId}`}
-                className="border border-stone-300/40 bg-white/5 px-3 py-2"
+                className="border border-outline-variant/40 bg-surface-lowest/5 px-3 py-2"
               >
                 <div className="flex items-center justify-between">
-                  <span className="font-mono text-[11px] font-bold text-stone-800">{step.stepId}</span>
-                  <span className="font-mono text-[9px] text-stone-500">{step.role}</span>
+                  <span className="font-mono text-[11px] font-bold text-on-surface">{step.stepId}</span>
+                  <span className="font-mono text-[9px] text-on-surface-variant">{step.role}</span>
                 </div>
-                {step.objective && <div className="mt-1 text-[10px] text-stone-600 leading-tight">{step.objective}</div>}
+                {step.objective && <div className="mt-1 text-[10px] text-on-surface-variant leading-tight">{step.objective}</div>}
                 {step.allowedNextSteps.length > 0 && (
-                  <div className="mt-1 font-mono text-[9px] text-stone-500">
+                  <div className="mt-1 font-mono text-[9px] text-on-surface-variant">
                     next: {step.allowedNextSteps.map((n) => `${n.stepId} (${n.role})`).join(", ")}
                   </div>
                 )}
                 {step.allowedExits.length > 0 && (
-                  <div className="font-mono text-[9px] text-stone-400">
+                  <div className="font-mono text-[9px] text-on-surface-variant">
                     exits: {step.allowedExits.join(", ")}
                   </div>
                 )}
@@ -526,7 +526,7 @@ function LibraryContextPackReviewPage({ entryId }: { entryId: string }) {
   if (packsLoading) {
     return (
       <WorkspacePage>
-        <div className="font-mono text-[10px] text-stone-400">Loading context pack…</div>
+        <div className="font-mono text-[10px] text-on-surface-variant">Loading context pack…</div>
       </WorkspacePage>
     );
   }
@@ -631,15 +631,15 @@ function ContextPackReviewBody({
           <WorkflowSummaryCard label="Source" value={entry.sourceType} testId="lib-pack-source" />
         </WorkflowSummaryGrid>
 
-        <div data-testid="lib-pack-source-path" className="font-mono text-[9px] text-stone-500">
+        <div data-testid="lib-pack-source-path" className="font-mono text-[9px] text-on-surface-variant">
           path: {entry.sourcePath}
         </div>
 
-        <section className="border border-stone-300/40 bg-white/8">
-          <header className="border-b border-stone-200 bg-stone-50 px-3 py-2 font-mono text-[10px] uppercase tracking-[0.10em] text-stone-600">
+        <section className="border border-outline-variant/40 bg-surface-lowest/[0.08]">
+          <header className="border-b border-outline-variant bg-background px-3 py-2 font-mono text-[10px] uppercase tracking-[0.10em] text-on-surface-variant">
             Files
           </header>
-          <ul data-testid="lib-pack-file-list" className="divide-y divide-stone-100">
+          <ul data-testid="lib-pack-file-list" className="divide-y divide-outline-variant">
             {entry.files.map((f) => {
               const missing = f.bytes === null;
               return (
@@ -647,16 +647,16 @@ function ContextPackReviewBody({
                   key={f.path}
                   data-testid={`lib-pack-file-${f.path}`}
                   data-missing={missing ? "true" : "false"}
-                  className={`font-mono text-[10px] ${missing ? "text-red-700" : "text-stone-800"}`}
+                  className={`font-mono text-[10px] ${missing ? "text-red-700" : "text-on-surface"}`}
                 >
                   <FileReferenceTrigger
                     data={{ path: f.path, absolutePath: f.absolutePath }}
                     testId={`lib-pack-file-trigger-${f.path}`}
-                    className="block w-full px-3 py-2 text-left hover:bg-stone-100/60 transition-colors"
+                    className="block w-full px-3 py-2 text-left hover:bg-surface-low/60 transition-colors"
                   >
                     <div className="flex items-baseline justify-between gap-2">
-                      <span className="font-bold truncate underline decoration-dotted decoration-stone-400">{f.path}</span>
-                      <span className="font-mono text-[8px] text-stone-500 shrink-0">
+                      <span className="font-bold truncate underline decoration-dotted decoration-outline">{f.path}</span>
+                      <span className="font-mono text-[8px] text-on-surface-variant shrink-0">
                         role: {f.role}
                         {missing
                           ? " · MISSING"
@@ -664,7 +664,7 @@ function ContextPackReviewBody({
                       </span>
                     </div>
                     {f.summary && (
-                      <div className="mt-0.5 text-stone-600 text-[9px]">{f.summary}</div>
+                      <div className="mt-0.5 text-on-surface-variant text-[9px]">{f.summary}</div>
                     )}
                   </FileReferenceTrigger>
                 </li>
@@ -674,11 +674,11 @@ function ContextPackReviewBody({
         </section>
 
         {showSendPicker && (
-          <section data-testid="context-pack-send-modal" className="border border-stone-400 bg-white px-3 py-3 space-y-2">
-            <div className="font-mono text-[10px] uppercase tracking-[0.10em] text-stone-700">Send to seat</div>
+          <section data-testid="context-pack-send-modal" className="border border-outline bg-surface-lowest px-3 py-3 space-y-2">
+            <div className="font-mono text-[10px] uppercase tracking-[0.10em] text-on-surface">Send to seat</div>
             <select
               data-testid="context-pack-send-session"
-              className="w-full font-mono text-[10px] border border-stone-300 px-2 py-1"
+              className="w-full font-mono text-[10px] border border-outline-variant px-2 py-1"
               value={destinationSession}
               onChange={(e) => setDestinationSession(e.target.value)}
             >
@@ -717,7 +717,7 @@ function ContextPackReviewBody({
             {sendStatus === "dry-run-shown" && sendMutation.data?.bundleText && (
               <pre
                 data-testid="context-pack-send-bundle-preview"
-                className="font-mono text-[9px] bg-stone-50 border border-stone-200 px-2 py-1 max-h-64 overflow-y-auto whitespace-pre-wrap"
+                className="font-mono text-[9px] bg-background border border-outline-variant px-2 py-1 max-h-64 overflow-y-auto whitespace-pre-wrap"
               >
                 {sendMutation.data.bundleText}
               </pre>
@@ -725,23 +725,23 @@ function ContextPackReviewBody({
           </section>
         )}
 
-        <section className="border border-stone-300/40 bg-white/8">
-          <header className="border-b border-stone-200 bg-stone-50 px-3 py-2 font-mono text-[10px] uppercase tracking-[0.10em] text-stone-600">
+        <section className="border border-outline-variant/40 bg-surface-lowest/[0.08]">
+          <header className="border-b border-outline-variant bg-background px-3 py-2 font-mono text-[10px] uppercase tracking-[0.10em] text-on-surface-variant">
             Bundle preview
           </header>
           {previewLoading && (
-            <div className="px-3 py-2 font-mono text-[9px] text-stone-400">Loading bundle…</div>
+            <div className="px-3 py-2 font-mono text-[9px] text-on-surface-variant">Loading bundle…</div>
           )}
           {preview && (
             <>
               {preview.missingFiles.length > 0 && (
-                <div data-testid="lib-pack-missing-warning" className="px-3 py-2 font-mono text-[9px] text-red-700 border-b border-stone-200">
+                <div data-testid="lib-pack-missing-warning" className="px-3 py-2 font-mono text-[9px] text-red-700 border-b border-outline-variant">
                   Warning: {preview.missingFiles.length} file{preview.missingFiles.length === 1 ? "" : "s"} referenced by manifest but missing on disk.
                 </div>
               )}
               <pre
                 data-testid="lib-pack-bundle-text"
-                className="font-mono text-[9px] text-stone-800 bg-stone-50 px-3 py-2 max-h-96 overflow-y-auto whitespace-pre-wrap"
+                className="font-mono text-[9px] text-on-surface bg-background px-3 py-2 max-h-96 overflow-y-auto whitespace-pre-wrap"
               >
                 {preview.bundleText}
               </pre>
@@ -766,7 +766,7 @@ function LibraryAgentImageReviewPage({ entryId }: { entryId: string }) {
   if (imagesLoading) {
     return (
       <WorkspacePage>
-        <div className="font-mono text-[10px] text-stone-400">Loading agent image…</div>
+        <div className="font-mono text-[10px] text-on-surface-variant">Loading agent image…</div>
       </WorkspacePage>
     );
   }
@@ -853,7 +853,7 @@ function AgentImageReviewBody({
           <WorkflowSummaryCard label="Size" value={`${entry.stats.estimatedSizeBytes}B`} testId="lib-image-size" />
         </WorkflowSummaryGrid>
 
-        <div data-testid="lib-image-source" className="font-mono text-[9px] text-stone-500 space-y-0.5">
+        <div data-testid="lib-image-source" className="font-mono text-[9px] text-on-surface-variant space-y-0.5">
           <div>source seat: {entry.sourceSeat}</div>
           {/* Surface source_cwd so operators see
             * WHERE the parent session was created. Older
@@ -866,11 +866,11 @@ function AgentImageReviewBody({
         </div>
 
         {entry.lineage.length > 0 && (
-          <section data-testid="lib-image-lineage" className="border border-stone-300/40 bg-white/8">
-            <header className="border-b border-stone-200 bg-stone-50 px-3 py-2 font-mono text-[10px] uppercase tracking-[0.10em] text-stone-600">
+          <section data-testid="lib-image-lineage" className="border border-outline-variant/40 bg-surface-lowest/[0.08]">
+            <header className="border-b border-outline-variant bg-background px-3 py-2 font-mono text-[10px] uppercase tracking-[0.10em] text-on-surface-variant">
               Lineage
             </header>
-            <div className="px-3 py-2 font-mono text-[10px] text-stone-700">
+            <div className="px-3 py-2 font-mono text-[10px] text-on-surface">
               {entry.lineage.join(" → ")} → <span className="font-bold">{entry.name}</span>
             </div>
           </section>
@@ -878,9 +878,9 @@ function AgentImageReviewBody({
 
         <ForkNowAction entry={entry} />
 
-        <section data-testid="lib-image-starter-snippet" className="border border-stone-400 bg-white px-3 py-3 space-y-2">
+        <section data-testid="lib-image-starter-snippet" className="border border-outline bg-surface-lowest px-3 py-3 space-y-2">
           <div className="flex items-center justify-between">
-            <div className="font-mono text-[10px] uppercase tracking-[0.10em] text-stone-700">Use as starter</div>
+            <div className="font-mono text-[10px] uppercase tracking-[0.10em] text-on-surface">Use as starter</div>
             <Button
               variant="outline"
               size="sm"
@@ -891,15 +891,15 @@ function AgentImageReviewBody({
               {snippetCopied ? "Copied" : "Copy snippet"}
             </Button>
           </div>
-          <div className="font-mono text-[9px] text-stone-500">
+          <div className="font-mono text-[9px] text-on-surface-variant">
             Paste into your agent.yaml's session_source. The instantiator resolves the image
             via the daemon AgentImageLibraryService at startup time.
           </div>
-          {previewLoading && <div className="font-mono text-[9px] text-stone-400">Loading snippet…</div>}
+          {previewLoading && <div className="font-mono text-[9px] text-on-surface-variant">Loading snippet…</div>}
           {preview?.starterSnippet && (
             <pre
               data-testid="lib-image-snippet-text"
-              className="font-mono text-[10px] bg-stone-50 border border-stone-200 px-2 py-1 whitespace-pre-wrap"
+              className="font-mono text-[10px] bg-background border border-outline-variant px-2 py-1 whitespace-pre-wrap"
             >
               {preview.starterSnippet}
             </pre>
@@ -911,30 +911,30 @@ function AgentImageReviewBody({
         )}
 
         {entry.files.length > 0 && (
-          <section className="border border-stone-300/40 bg-white/8">
-            <header className="border-b border-stone-200 bg-stone-50 px-3 py-2 font-mono text-[10px] uppercase tracking-[0.10em] text-stone-600">
+          <section className="border border-outline-variant/40 bg-surface-lowest/[0.08]">
+            <header className="border-b border-outline-variant bg-background px-3 py-2 font-mono text-[10px] uppercase tracking-[0.10em] text-on-surface-variant">
               Supplementary files
             </header>
-            <ul className="divide-y divide-stone-100">
+            <ul className="divide-y divide-outline-variant">
               {entry.files.map((f) => (
                 <li
                   key={f.path}
-                  className="font-mono text-[10px] text-stone-800"
+                  className="font-mono text-[10px] text-on-surface"
                   data-testid={`lib-image-file-${f.path}`}
                 >
                   <FileReferenceTrigger
                     data={{ path: f.path, absolutePath: f.absolutePath }}
                     testId={`lib-image-file-trigger-${f.path}`}
-                    className="block w-full px-3 py-2 text-left hover:bg-stone-100/60 transition-colors"
+                    className="block w-full px-3 py-2 text-left hover:bg-surface-low/60 transition-colors"
                   >
                     <div className="flex items-baseline justify-between gap-2">
-                      <span className="font-bold truncate underline decoration-dotted decoration-stone-400">{f.path}</span>
-                      <span className="font-mono text-[8px] text-stone-500 shrink-0">
+                      <span className="font-bold truncate underline decoration-dotted decoration-outline">{f.path}</span>
+                      <span className="font-mono text-[8px] text-on-surface-variant shrink-0">
                         role: {f.role}
                         {f.bytes === null ? " · MISSING" : ` · ${f.bytes}B`}
                       </span>
                     </div>
-                    {f.summary && <div className="mt-0.5 text-stone-600 text-[9px]">{f.summary}</div>}
+                    {f.summary && <div className="mt-0.5 text-on-surface-variant text-[9px]">{f.summary}</div>}
                   </FileReferenceTrigger>
                 </li>
               ))}

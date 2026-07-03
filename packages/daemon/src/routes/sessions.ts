@@ -24,6 +24,7 @@ import type { ClaimService } from "../domain/claim-service.js";
 import type { PodRigInstantiator } from "../domain/rigspec-instantiator.js";
 import { convergeOp } from "../domain/topology-converge.js";
 import type { RestoreOrchestrator } from "../domain/restore-orchestrator.js";
+import { launchStatusIsRunning } from "../domain/restore-orchestrator.js";
 import { authBearerTokenMiddleware } from "../middleware/auth-bearer-token.js";
 import type { MiddlewareHandler } from "hono";
 import type { EventBus } from "../domain/event-bus.js";
@@ -53,6 +54,20 @@ function getDeps(c: { get: (key: string) => unknown }) {
     rigLifecycleService: c.get("rigLifecycleService" as never) as RigLifecycleService | undefined,
     restoreOrchestrator: c.get("restoreOrchestrator" as never) as RestoreOrchestrator | undefined,
   };
+}
+
+// OPR.0.4.3.20 FR-7 (Gap 2a) — build the runtime adapters + fsOps a node-subset
+// launch needs so its pod-aware seats run the SAME resume/continuity verification
+// as a full restore (mirrors routes/snapshots.ts). Without these, launchNodeSubset
+// skipped verification and returned `fresh-primed` — a silent fresh-prime. When no
+// adapters are wired, FR-7's fail-closed lands a resume seat at awaiting-decision.
+async function resumeLaunchOpts(c: { get: (key: string) => unknown }): Promise<{
+  adapters: Record<string, import("../domain/runtime-adapter.js").RuntimeAdapter>;
+  fsOps: { exists(path: string): boolean };
+}> {
+  const adapters = (c.get("runtimeAdapters" as never) as Record<string, import("../domain/runtime-adapter.js").RuntimeAdapter> | undefined) ?? {};
+  const fs = await import("node:fs");
+  return { adapters, fsOps: { exists: (p: string) => fs.existsSync(p) } };
 }
 
 // GET /api/rigs/:rigId/sessions
@@ -95,9 +110,14 @@ nodesRoutes.get("/", async (c) => {
   // composes cleanly with attachAgentActivity. The non-inference
   // contract is preserved at the data layer; this route is purely
   // assembling the JSON response.
+  // OPR.0.4.3 healthz-wedge amplification fix: cheap by default (no per-node tmux
+  // capture). Opt into the per-node fallback with ?full=true / ?refresh=true — the
+  // latter already implies a fresh sweep above.
+  const full = c.req.query("full") === "true" || refresh;
   const withActivity = await attachAgentActivity(inventory, {
     tmuxAdapter: deps.tmuxAdapter,
     activityStore: deps.agentActivityStore,
+    captureFallback: full,
   });
   const withTerminalAndWork = attachTerminalActivityAndWork(withActivity, {
     db: deps.rigRepo.db,
@@ -118,7 +138,9 @@ nodesRoutes.get("/:logicalId", async (c) => {
     ? getNodeDetailWithContext(deps.rigRepo.db, rigId, logicalId, contextUsageStore)
     : getNodeDetail(deps.rigRepo.db, rigId, logicalId);
   if (!detail) return c.json({ error: `Node "${logicalId}" not found in rig "${rigId}". Check node IDs with: rig ps --nodes` }, 404);
-  const [detailWithActivity] = await attachAgentActivity([detail], { tmuxAdapter: deps.tmuxAdapter, activityStore: deps.agentActivityStore });
+  // Node DETAIL is a single node — the per-node tmux capture is cheap here, so
+  // detail always runs the full fallback (freshest needs_input for the one seat).
+  const [detailWithActivity] = await attachAgentActivity([detail], { tmuxAdapter: deps.tmuxAdapter, activityStore: deps.agentActivityStore, captureFallback: true });
   const [detailWithTerminalAndWork] = attachTerminalActivityAndWork(detailWithActivity ? [detailWithActivity] : [detail], {
     db: deps.rigRepo.db,
     seatActivity: deps.seatActivityService,
@@ -185,7 +207,7 @@ nodesRoutes.post("/:logicalId/launch", async (c) => {
       return c.json({ ok: false, code: "internal_error", error: "Restore orchestrator not available" }, 500);
     }
     const body = await c.req.json().catch(() => ({})) as { holdReason?: string };
-    const result = await restoreOrchestrator.launchNodeSubset(rigId, [node.logicalId], { holdReason: body.holdReason });
+    const result = await restoreOrchestrator.launchNodeSubset(rigId, [node.logicalId], { holdReason: body.holdReason, ...(await resumeLaunchOpts(c)) });
     if (!result.ok) {
       return c.json(result, result.code === "rig_not_found" ? 404 : result.code === "no_matching_nodes" ? 404 : 500);
     }
@@ -195,7 +217,17 @@ nodesRoutes.post("/:logicalId/launch", async (c) => {
     }
     const launchedNode = result.launched?.[0];
     if (launchedNode) {
-      return c.json({ ok: true, rigId, nodeId: launchedNode.nodeId, logicalId: launchedNode.logicalId, launched: result.launched, held: result.held, alreadyRunning: result.alreadyRunning }, 201);
+      // OPR.0.4.3.20 FR-7 — a restore that landed awaiting-decision / attention_required
+      // / failed is NOT a successful launch (no session is running). Never report it as
+      // 201 ok:true — surface it honestly so the CLI exits non-zero.
+      if (!launchStatusIsRunning(launchedNode.status)) {
+        return c.json({
+          ok: false, rigId, nodeId: launchedNode.nodeId, logicalId: launchedNode.logicalId,
+          code: launchedNode.status, status: launchedNode.status, error: launchedNode.error,
+          launched: result.launched, held: result.held, warnings: result.warnings,
+        }, launchedNode.status === "failed" ? 500 : 409);
+      }
+      return c.json({ ok: true, rigId, nodeId: launchedNode.nodeId, logicalId: launchedNode.logicalId, launched: result.launched, held: result.held, alreadyRunning: result.alreadyRunning, warnings: result.warnings }, 201);
     }
     const alreadyRunningNode = result.alreadyRunning?.find((n) => n.logicalId === node.logicalId);
     if (alreadyRunningNode) {
@@ -228,12 +260,19 @@ nodesRoutes.post("/launch-subset", async (c) => {
   if (!Array.isArray(body.seats) || body.seats.length === 0) {
     return c.json({ ok: false, code: "invalid_request", error: "Request body must include a non-empty 'seats' array of logical IDs" }, 400);
   }
-  const result = await restoreOrchestrator.launchNodeSubset(rigId, body.seats, { holdReason: body.holdReason });
+  const result = await restoreOrchestrator.launchNodeSubset(rigId, body.seats, { holdReason: body.holdReason, ...(await resumeLaunchOpts(c)) });
   if (!result.ok) {
     return c.json(result, result.code === "rig_not_found" ? 404 : result.code === "no_matching_nodes" ? 404 : 500);
   }
-  const hasLaunched = (result.launched?.length ?? 0) > 0;
-  return c.json(result, hasLaunched ? 201 : 200);
+  // OPR.0.4.3.20 FR-7 — a target that landed awaiting-decision / attention_required /
+  // failed is NOT launched (no running session). Success requires at least one running
+  // launch AND zero non-running targets; otherwise surface ok:false + 409 so the CLI
+  // exits non-zero and never prints a false "Launched".
+  const launchedEntries = result.launched ?? [];
+  const nonRunning = launchedEntries.filter((n) => !launchStatusIsRunning(n.status));
+  const running = launchedEntries.filter((n) => launchStatusIsRunning(n.status));
+  const status = nonRunning.length > 0 ? 409 : running.length > 0 ? 201 : 200;
+  return c.json({ ...result, ok: nonRunning.length === 0 && result.ok }, status);
 });
 
 // GET /api/rigs/:rigId/nodes/:logicalId/preview?lines=N
@@ -419,7 +458,7 @@ sessionAdminRoutes.get("/:sessionName/preview", terminalAuthGuard(), async (c) =
 // Adopt a LIVE hand-resumed canonical session back into its persisted node via
 // the reconcile_session converge op (sugar over the topology spine). Never
 // launches/kills/replays startup or writes input into the target pane.
-sessionAdminRoutes.post("/:sessionName/reconcile", async (c) => {
+sessionAdminRoutes.post("/:sessionName/reconcile", terminalAuthGuard(), async (c) => {
   const sessionName = decodeURIComponent(c.req.param("sessionName")!);
   const claimService = c.get("claimService" as never) as ClaimService | undefined;
   const podInstantiator = c.get("podInstantiator" as never) as PodRigInstantiator | undefined;
@@ -462,7 +501,7 @@ sessionAdminRoutes.post("/:sessionName/reconcile", async (c) => {
 });
 
 // POST /api/sessions/:sessionName/clear-attention — OPR.0.3.4.10.
-sessionAdminRoutes.post("/:sessionName/clear-attention", async (c) => {
+sessionAdminRoutes.post("/:sessionName/clear-attention", terminalAuthGuard(), async (c) => {
   const sessionName = decodeURIComponent(c.req.param("sessionName")!);
   const reconciler = c.get("seatAttentionReconciler" as never) as import("../domain/seat-attention-reconciler.js").SeatAttentionReconciler | undefined;
   if (!reconciler) {
@@ -540,7 +579,7 @@ sessionAdminRoutes.post("/:sessionName/resume-token", terminalAuthGuard(), async
 });
 
 // POST /api/sessions/:sessionRef/unclaim
-sessionAdminRoutes.post("/:sessionRef/unclaim", async (c) => {
+sessionAdminRoutes.post("/:sessionRef/unclaim", terminalAuthGuard(), async (c) => {
   const sessionRef = decodeURIComponent(c.req.param("sessionRef")!);
   const { rigLifecycleService } = getDeps(c);
   if (!rigLifecycleService) {

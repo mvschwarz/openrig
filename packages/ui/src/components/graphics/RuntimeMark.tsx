@@ -36,17 +36,17 @@ const inlineSizeClass = {
 };
 
 const toneClass: Record<RuntimeBrandId, string> = {
-  "claude-code": "border-[#9f5f4e]/40 bg-[#b06a57]/12 text-[#62392f]",
-  codex: "border-stone-400/50 bg-white/75 text-stone-950",
-  terminal: "border-stone-400/45 bg-stone-900/8 text-stone-800",
-  unknown: "border-stone-300 bg-white/55 text-stone-600",
+  "claude-code": "border-[#9f5f4e]/40 bg-[#b06a57]/[0.12] text-[#62392f]",
+  codex: "border-outline/50 bg-surface-lowest/75 text-on-surface",
+  terminal: "border-outline/45 bg-inverse-surface/[0.08] text-on-surface",
+  unknown: "border-outline-variant bg-surface-lowest/55 text-on-surface-variant",
 };
 
 const inlineToneClass: Record<RuntimeBrandId, string> = {
   "claude-code": "text-[#62392f]",
-  codex: "text-stone-950",
-  terminal: "text-stone-800",
-  unknown: "text-stone-600",
+  codex: "text-on-surface",
+  terminal: "text-on-surface",
+  unknown: "text-on-surface-variant",
 };
 
 const toolToneClass: Record<ToolBrandId, string> = {
@@ -55,18 +55,18 @@ const toolToneClass: Record<ToolBrandId, string> = {
   vscode: "border-sky-400/45 bg-sky-50/75 text-sky-950",
   screenshot: "border-amber-400/45 bg-amber-50/75 text-amber-950",
   proof: "border-emerald-400/45 bg-emerald-50/75 text-emerald-950",
-  markdown: "border-stone-300 bg-white/60 text-stone-800",
+  markdown: "border-outline-variant bg-surface-lowest/60 text-on-surface",
   config: "border-sky-300/60 bg-sky-50/70 text-sky-950",
-  code: "border-stone-400/45 bg-stone-900/8 text-stone-900",
-  transcript: "border-stone-400/45 bg-stone-900/8 text-stone-800",
+  code: "border-outline/45 bg-inverse-surface/[0.08] text-on-surface",
+  transcript: "border-outline/45 bg-inverse-surface/[0.08] text-on-surface",
   commit: "border-emerald-400/45 bg-emerald-50/75 text-emerald-950",
-  folder: "border-stone-300 bg-white/55 text-stone-700",
+  folder: "border-outline-variant bg-surface-lowest/55 text-on-surface",
   skill: "border-amber-400/45 bg-amber-50/75 text-amber-950",
   video: "border-sky-400/45 bg-sky-50/75 text-sky-950",
-  trace: "border-stone-400/45 bg-stone-50/75 text-stone-800",
-  terminal: "border-stone-400/45 bg-stone-900/8 text-stone-800",
-  file: "border-stone-300 bg-white/60 text-stone-700",
-  unknown: "border-stone-300 bg-white/55 text-stone-600",
+  trace: "border-outline/45 bg-background/75 text-on-surface",
+  terminal: "border-outline/45 bg-inverse-surface/[0.08] text-on-surface",
+  file: "border-outline-variant bg-surface-lowest/60 text-on-surface",
+  unknown: "border-outline-variant bg-surface-lowest/55 text-on-surface-variant",
 };
 
 const operatorClimberMarkSrc = "/graphics/operator-climber-monochrome.png";

@@ -68,6 +68,21 @@ export function rollupRestoreRigResult(nodes: RestoreNodeResult[]): RestoreRigRe
   return "fully_restored";
 }
 
+/** OPR.0.4.3.20 FR-7 — restore/launch statuses that mean NO session is running and
+ *  the operator must act. The launch API + CLI must NOT report these as a successful
+ *  launch (a subset/single launch that lands `awaiting-decision` is not "Launched"). */
+export const NON_RUNNING_LAUNCH_STATUSES: ReadonlySet<string> = new Set([
+  "awaiting-decision",
+  "attention_required",
+  "failed",
+]);
+
+/** True when a restore/launch status means a session is actually running (a real
+ *  successful launch): resumed / rebuilt / fresh / fresh-primed / operator_recovered. */
+export function launchStatusIsRunning(status: string): boolean {
+  return !NON_RUNNING_LAUNCH_STATUSES.has(status);
+}
+
 interface RestoreOrchestratorDeps {
   db: Database.Database;
   rigRepo: RigRepository;
@@ -284,6 +299,7 @@ export class RestoreOrchestrator {
     alreadyRunning?: Array<{ nodeId: string; logicalId: string }>;
     failedTargets?: Array<{ nodeId: string; logicalId: string; reason: string }>;
     unmatchedIds?: string[];
+    warnings?: string[];
   }> {
     const rig = this.rigRepo.getRig(rigId);
     if (!rig) return { ok: false, code: "rig_not_found", message: `Rig ${rigId} not found` };
@@ -303,6 +319,10 @@ export class RestoreOrchestrator {
     const launched: RestoreNodeResult[] = [];
     const alreadyRunning: Array<{ nodeId: string; logicalId: string }> = [];
     const failedTargets: Array<{ nodeId: string; logicalId: string; reason: string }> = [];
+    // Subset-level aggregate of per-node warnings (incl. FR-5 derived-name
+    // fallback observability). Previously created per-node inside the loop and
+    // discarded, so restore.subset_completed carried warnings: [].
+    const subsetWarnings: string[] = [];
 
     for (const node of targetNodes) {
       const sessions = this.sessionRegistry.getSessionsForRig(rigId)
@@ -325,15 +345,24 @@ export class RestoreOrchestrator {
         continue;
       }
       if (isUnknown) {
-        failedTargets.push({ nodeId: node.id, logicalId: node.logicalId, reason: "tmux_probe_error" });
-        continue;
+        // OPR.0.4.3.28 correction — INVERT the fail-closed-on-unknown launch default. A failed tmux
+        // liveness probe is NOT positive evidence of a live seat (only isLive, above, is). Deny-by-
+        // default here hard-503'd all restore/launch on a transient tmux blip. Instead PROCEED to
+        // launch this node (same path as stale/no-session below) and surface the uncertainty as a
+        // NON-blocking warning so an operator/agent can verify no live seat was squatted. isLive stays
+        // the no-squat guard.
+        subsetWarnings.push(
+          `liveness_probe_unknown: launched '${node.logicalId}' despite a failed tmux liveness probe — verify no live seat was squatted`,
+        );
       }
 
-      // Stale or no session — launchable
+      // Stale or no session (or probe-unknown, per the inversion above) — launchable. Accumulate this
+      // node's warnings into
+      // the subset-level array so they survive to restore.subset_completed + the
+      // API result (FR-5 fallback observability must not be discarded here).
       const planEntry = { node };
-      const warnings: string[] = [];
       const result = await this.restoreNodeWithCompensation(
-        planEntry, rigId, snapshot.id, snapshot.data, { adapters: opts?.adapters, fsOps: opts?.fsOps }, warnings,
+        planEntry, rigId, snapshot.id, snapshot.data, { adapters: opts?.adapters, fsOps: opts?.fsOps }, subsetWarnings,
       );
       launched.push(result);
     }
@@ -345,7 +374,7 @@ export class RestoreOrchestrator {
         preRestoreSnapshotId: null as unknown as string,
         rigResult: rollupRestoreRigResult(launched),
         nodes: launched,
-        warnings: [],
+        warnings: subsetWarnings,
       };
       this.eventBus.emit({ type: "restore.subset_completed", rigId, snapshotId: snapshot.id, result: subsetResult });
     }
@@ -385,7 +414,7 @@ export class RestoreOrchestrator {
       held.push({ nodeId: node.id, logicalId: node.logicalId, reason: holdReasonText });
     }
 
-    return { ok: true, launched, held, alreadyRunning, failedTargets, unmatchedIds: unmatchedIds.length > 0 ? unmatchedIds : undefined };
+    return { ok: true, launched, held, alreadyRunning, failedTargets, unmatchedIds: unmatchedIds.length > 0 ? unmatchedIds : undefined, warnings: subsetWarnings.length > 0 ? subsetWarnings : undefined };
   }
 
   private validatePreRestore(
@@ -747,13 +776,18 @@ export class RestoreOrchestrator {
       }
     }
 
-    // OPR.0.3.4.2 (A) — PRE-LAUNCH stop-and-ask classification. The existing
-    // stop cases (resume requested, recorded resume source, but NO token —
-    // historically returned `failed` AFTER launching) classify BEFORE
-    // clearStaleState / launchNode, so `awaiting-decision` means ZERO session
-    // started and prior state is untouched. Scope is exactly the historical
-    // stop cases: a seat with NO resume record at all has no original
-    // conversation to lose and proceeds to a (named) fresh-primed launch.
+    // OPR.0.3.4.2 (A) + OPR.0.4.3.20 FR-7 — PRE-LAUNCH stop-and-ask classification,
+    // BEFORE clearStaleState / launchNode, so `awaiting-decision` means ZERO session
+    // started and prior state is untouched.
+    //
+    // FR-7 (Gap 1): a `resume_if_possible` seat that HAD a session (a snapshot
+    // session row exists) but has NO usable token stops here — whether or not a
+    // resume SOURCE was recorded. The old scope required a recorded source, so a
+    // crashed seat with a session row but no captured token silently fresh-primed
+    // (identity-replaced while looking healthy). A node with NO session row at all
+    // never ran / has nothing to resume → it legitimately fresh-primes (falls
+    // through). The ONLY default fresh-prime is now: no prior session, a genuinely
+    // non-resume policy (relaunch_fresh / checkpoint_only), or explicit `--fresh`.
     {
       const snapSessions = data.sessions.filter((s) => s.nodeId === nodeId);
       const snapSession = snapSessions.length > 0
@@ -762,12 +796,15 @@ export class RestoreOrchestrator {
       const policy = snapSession?.restorePolicy ?? "resume_if_possible";
       const freshRequested = opts?.freshLogicalIds?.includes(node.logicalId) ?? false;
       const resumeSourceRecorded = !!snapSession?.resumeType && snapSession.resumeType !== "none";
-      if (policy === "resume_if_possible" && resumeSourceRecorded && !snapSession?.resumeToken && !freshRequested) {
+      if (policy === "resume_if_possible" && snapSession && !snapSession.resumeToken && !freshRequested) {
+        const sourceNote = resumeSourceRecorded
+          ? `resume source '${snapSession?.resumeType}' recorded but no token available`
+          : `no resume token was captured for this seat`;
         return {
           nodeId,
           logicalId: node.logicalId,
           status: "awaiting-decision",
-          error: `Original session unresumable: resume source '${snapSession?.resumeType}' recorded but no token available. No session was started. Re-run with --fresh ${node.logicalId} to deliberately start a fresh-primed seat, or restore the original session manually.`,
+          error: `Original session unresumable: ${sourceNote}. No session was started. Re-run with --fresh ${node.logicalId} to deliberately start a fresh-primed seat, or restore the original session manually.`,
         };
       }
     }
@@ -784,20 +821,54 @@ export class RestoreOrchestrator {
       ? { cwd: node.cwd }
       : undefined;
     let expectedSessionName: string | undefined;
-    if (node.podId && rig) {
-      // Pod-aware: derive {pod}-{member}@{rigName} from node identity
-      const parts = node.logicalId.split(".");
-      if (parts.length >= 2) {
-        const podPart = parts[0]!;
-        const memberPart = parts.slice(1).join(".");
-        const { deriveCanonicalSessionName, deriveSessionName } = await import("./session-name.js");
-        expectedSessionName = deriveCanonicalSessionName(podPart, memberPart, rig.rig.name);
+
+    // OPR.0.4.3.20 FR-5 — pin the resume target to the DURABLY-BOUND session.
+    // priorState.binding was captured (above) BEFORE clearStaleState deleted the
+    // binding row, so it is the ONLY surviving copy of the name the seat was
+    // ACTUALLY bound to. Pinning it means a rename/reshape between the binding
+    // and the crash does not silently retarget resume to a re-derived
+    // (wrong/nonexistent) pane — the Class-1 fragility. Setting
+    // launchOpts.sessionName (not just expectedSessionName) is required:
+    // otherwise the launcher re-derives (node-launcher.ts) and writes the
+    // derived name back to the binding, defeating the pin. Selection-only — no
+    // identity re-key, no schema/derive-helper change. Fallback to the existing
+    // derive (below) is observable, never a silent divergence.
+    const pinnedTarget = priorState.binding?.tmuxSession ?? null;
+    let pinnedTargetUsed = false;
+    if (pinnedTarget) {
+      const { validateSessionName } = await import("./session-name.js");
+      if (validateSessionName(pinnedTarget)) {
+        expectedSessionName = pinnedTarget;
         launchOpts = { ...launchOpts, sessionName: expectedSessionName };
+        pinnedTargetUsed = true;
+      } else {
+        // Binding present but the bound name is malformed → observable fallback.
+        warnings?.push(`FR-5: durably-bound session name "${pinnedTarget}" for ${node.logicalId} is invalid; falling back to a derived name.`);
       }
+    } else {
+      // No durably-bound session name (old data / null binding or empty
+      // tmux_session) → observable derived-name fallback (PRD back-compat AC).
+      warnings?.push(`FR-5: no durably-bound session name for ${node.logicalId}; falling back to a derived session name.`);
     }
-    if (!expectedSessionName && rig) {
-      const { deriveSessionName } = await import("./session-name.js");
-      expectedSessionName = deriveSessionName(rig.rig.name, node.logicalId);
+
+    // Derived-name FALLBACK — only when no usable pin. The existing derive,
+    // unchanged (pod-aware then legacy); preserves back-compat for partial-data rigs.
+    if (!pinnedTargetUsed) {
+      if (node.podId && rig) {
+        // Pod-aware: derive {pod}-{member}@{rigName} from node identity
+        const parts = node.logicalId.split(".");
+        if (parts.length >= 2) {
+          const podPart = parts[0]!;
+          const memberPart = parts.slice(1).join(".");
+          const { deriveCanonicalSessionName, deriveSessionName } = await import("./session-name.js");
+          expectedSessionName = deriveCanonicalSessionName(podPart, memberPart, rig.rig.name);
+          launchOpts = { ...launchOpts, sessionName: expectedSessionName };
+        }
+      }
+      if (!expectedSessionName && rig) {
+        const { deriveSessionName } = await import("./session-name.js");
+        expectedSessionName = deriveSessionName(rig.rig.name, node.logicalId);
+      }
     }
 
     // Write transcript boundary marker BEFORE launch (before pipe-pane attaches)
@@ -941,6 +1012,22 @@ export class RestoreOrchestrator {
           logicalId: node.logicalId,
           status: "awaiting-decision",
           error: `Original session unresumable: resume requested but no token available. No session is running. Re-run with --fresh ${node.logicalId} for a deliberate fresh-primed seat, or restore the original session manually.`,
+        };
+      }
+      // OPR.0.4.3.20 FR-7 (Gap 2b) — a pod-aware resume needs the runtime adapter
+      // to verify continuity + relaunch the harness (the startup replay below is
+      // gated on opts.adapters). If the adapter for this seat's runtime is absent
+      // (e.g. a node-subset launch that did not thread adapters), we CANNOT resume
+      // and MUST NOT silently fresh-prime — fail closed to awaiting-decision.
+      // Explicit --fresh and non-resume policies stay the only fresh-prime paths.
+      const resumeAdapter = node.runtime ? opts?.adapters?.[node.runtime] : undefined;
+      if (!resumeAdapter) {
+        await this.rollbackToZeroSession(node.id, sessionName, launchResult?.session.id, priorState);
+        return {
+          nodeId: node.id,
+          logicalId: node.logicalId,
+          status: "awaiting-decision",
+          error: `Original session unresumable: resume requested but runtime continuity could not be verified (no ${node.runtime ?? "runtime"} adapter available). No session is running. Re-run with --fresh ${node.logicalId} for a deliberate fresh-primed seat, or retry restore with runtime adapters.`,
         };
       }
     }

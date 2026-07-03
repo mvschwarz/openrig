@@ -23,7 +23,7 @@ describe("FeedCard typography + vellum-coherent chrome", () => {
     const source = await readSource("src/components/for-you/FeedCard.tsx");
     // Card surface = vellum-coherent (matches CardShell in
     // storytelling-cards.tsx so /for-you reads as one surface).
-    expect(source).toContain("bg-stone-100/45 backdrop-blur-[10px]");
+    expect(source).toContain("bg-surface-low/45 backdrop-blur-[10px]");
     // The old VellumCard + left-stripe chrome is gone.
     expect(source).not.toMatch(/VellumCard/);
     expect(source).not.toMatch(/border-l-4 border-l-/);
@@ -40,23 +40,23 @@ describe("FeedCard typography + vellum-coherent chrome", () => {
 
   it("FeedCard title is 16px font-headline bold (legibility north star)", async () => {
     const source = await readSource("src/components/for-you/FeedCard.tsx");
-    expect(source).toContain("font-headline text-[16px] font-bold leading-tight text-stone-900");
+    expect(source).toContain("font-headline text-[16px] font-bold leading-tight text-on-surface");
   });
 
   it("FeedCard qitem body paragraph is 12px font-body (prose; not font-mono; not 11px)", async () => {
     const source = await readSource("src/components/for-you/FeedCard.tsx");
-    expect(source).toContain("font-body text-[12px] leading-relaxed text-stone-700 whitespace-pre-line");
+    expect(source).toContain("font-body text-[12px] leading-relaxed text-on-surface whitespace-pre-line");
     expect(source).not.toMatch(/font-mono text-xs leading-relaxed text-on-surface-variant whitespace-pre-line/);
   });
 
   it("FeedCard ActionOutcomePanel outcome sentence stays prose font-body 12px", async () => {
     const source = await readSource("src/components/for-you/FeedCard.tsx");
-    expect(source).toContain("font-body text-[12px] leading-relaxed text-stone-800");
+    expect(source).toContain("font-body text-[12px] leading-relaxed text-on-surface");
   });
 
   it("FeedCard 'Your turn' hint copy is prose font-body 12px (bumped from 11px)", async () => {
     const source = await readSource("src/components/for-you/FeedCard.tsx");
-    expect(source).toContain("font-body text-[12px] leading-relaxed text-stone-700");
+    expect(source).toContain("font-body text-[12px] leading-relaxed text-on-surface");
   });
 
   it("FeedCard kind indicator uses mono+leading-dot (no colored pills)", async () => {

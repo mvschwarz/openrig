@@ -93,6 +93,25 @@ const QUIET_SKIP_REASONS = new Set<string>([
   "no_actionable_artifacts",
   "no_missing_edge_artifacts",
   "active_wake_not_due",
+  // OPR.0.4.3.16 idle-gate-qitem routine no-ops — analogues of
+  // no_actionable_artifacts. Suppressed from history/SSE so a per-second
+  // scan does not spam when there is simply nothing to wake about. The
+  // audited signal is the WAKE (fired) path.
+  "no_pending_gate",
+  "seat_active",
+  // OPR.0.4.3.16 rev1-r1 fixback (advisor ruling 2026-07-03): seat_needs_input
+  // and activity_stale_unknown are the COMMON recurring states for this
+  // policy's own target scenario — a gate qitem pending on a seat that has
+  // gone stale/needs-input. Such a seat never becomes fresh-idle, so it never
+  // hits the send throttle; left LOUD it emitted one history row + one SSE per
+  // scan, UNBOUNDED, for as long as the gate stayed pending — contradicting the
+  // slice's bounded/no-spam ACs (BR6/AC2). Quiet here suppresses the per-scan
+  // history+SSE for these routine unwakeable states while the WAKE (send) path
+  // — the signal operators actually need — stays LOUD/audited. Stuck-seat
+  // visibility is served on-demand (pending gate qitems mapped to unwakeable
+  // seats), NOT via a per-scan log.
+  "seat_needs_input",
+  "activity_stale_unknown",
 ]);
 
 export interface EvaluationResult {

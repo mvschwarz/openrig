@@ -7,6 +7,10 @@ import type { EventBus } from "./event-bus.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import { SeatStatusService, type SeatStatus, type SeatStatusResult } from "./seat-status-service.js";
 import { SeatHandoverPlanner, parseHandoverSource, type SeatHandoverPlan, type SeatHandoverSource } from "./seat-handover-planner.js";
+import { SuccessorSessionLauncher } from "./successor-session-launcher.js";
+import { deriveResumeToken, type ResumeTokenCaptureDeps } from "./resume-token-capture.js";
+import { validateResumeToken } from "./resume-token-validation.js";
+import type { RuntimeAdapter } from "./runtime-adapter.js";
 import type { PersistedEvent } from "./types.js";
 
 export interface SeatHandoverMutationResult {
@@ -15,7 +19,10 @@ export interface SeatHandoverMutationResult {
   mutated: true;
   continuityTransferred: false;
   seat: SeatHandoverPlan["seat"];
-  source: SeatHandoverSource & { mode: "discovered"; ref: string };
+  // The source reported to the operator is the ORIGINAL intent
+  // (fresh/rebuild/fork/discovered). Non-discovered sources are internally
+  // routed through a created discovery candidate, but provenance stays honest.
+  source: SeatHandoverSource;
   reason: string;
   operator: string | null;
   previousOccupant: string;
@@ -33,7 +40,7 @@ export interface SeatHandoverMutationResult {
   eventSeq: number;
   sideEffects: {
     departingSessionKilled: false;
-    startupContextDelivered: false;
+    startupContextDelivered: boolean;
     provenanceRecordWritten: false;
   };
 }
@@ -41,15 +48,16 @@ export interface SeatHandoverMutationResult {
 export type SeatHandoverResult =
   | { ok: true; plan: SeatHandoverPlan }
   | { ok: true; result: SeatHandoverMutationResult }
-  | { ok: false; code: "missing_reason" | "invalid_source" | "successor_creation_not_implemented"; message: string; guidance: string }
+  | { ok: false; code: "missing_reason" | "invalid_source" | "successor_creation_not_implemented" | "source_not_supported"; message: string; guidance: string }
   | { ok: false; code: "current_occupant_required" | "discovered_not_active" | "successor_tmux_absent" | "successor_already_managed" | "successor_is_current" | "runtime_mismatch"; message: string; guidance: string }
   | { ok: false; code: "discovered_not_found"; message: string; guidance: string }
-  | { ok: false; code: "tmux_probe_failed" | "handover_commit_failed"; message: string; guidance: string }
+  | { ok: false; code: "tmux_probe_failed" | "handover_commit_failed" | "successor_create_failed" | "context_delivery_failed"; message: string; guidance: string }
   | Extract<SeatStatusResult, { ok: false }>;
 
 interface NodeRow {
   id: string;
   runtime: string | null;
+  cwd: string | null;
 }
 
 interface SessionRow {
@@ -72,6 +80,23 @@ interface SeatHandoverServiceDeps {
   eventBus: EventBus;
   tmuxAdapter: TmuxAdapter;
   now?: () => Date;
+  /** OpenRig identity/activity env stamped onto a created successor session,
+   *  mirroring the launch identity env. Defaults to {} (the three core identity
+   *  vars are always derived internally). */
+  sessionEnv?: Record<string, string | undefined>;
+  /** Injectable id source for the successor session name (tests). */
+  newSuccessorId?: () => string;
+  /** Runtime adapters keyed by runtime — used to launch a fresh successor into
+   *  a LIVE agent (B1) before commit. Absent → fresh handover cannot launch. */
+  runtimeAdapters?: Record<string, RuntimeAdapter>;
+  /** Claude sidecar reader for discovered-mode resume-token capture (B2). */
+  contextUsageStore?: ResumeTokenCaptureDeps["contextUsageStore"];
+  /** Codex thread-id capturer for discovered-mode resume-token capture (B2). */
+  resumeTokenCapturer?: ResumeTokenCaptureDeps["resumeTokenCapturer"];
+  /** Readiness timeout for the successor launch (tests shorten it). */
+  readinessTimeoutMs?: number;
+  /** Injectable sleep for the successor readiness backoff (tests). */
+  sleep?: (ms: number) => Promise<void>;
 }
 
 export class SeatHandoverService {
@@ -83,6 +108,8 @@ export class SeatHandoverService {
   private discoveryRepo: DiscoveryRepository;
   private eventBus: EventBus;
   private tmuxAdapter: TmuxAdapter;
+  private successorLauncher: SuccessorSessionLauncher;
+  private captureDeps: ResumeTokenCaptureDeps;
   private now: () => Date;
 
   constructor(deps: SeatHandoverServiceDeps) {
@@ -99,6 +126,17 @@ export class SeatHandoverService {
     this.now = deps.now ?? (() => new Date());
     this.statusService = new SeatStatusService({ rigRepo: deps.rigRepo });
     this.planner = new SeatHandoverPlanner({ rigRepo: deps.rigRepo });
+    this.successorLauncher = new SuccessorSessionLauncher(deps.tmuxAdapter, deps.discoveryRepo, {
+      sessionEnv: deps.sessionEnv,
+      newId: deps.newSuccessorId,
+      runtimeAdapters: deps.runtimeAdapters,
+      readinessTimeoutMs: deps.readinessTimeoutMs,
+      sleep: deps.sleep,
+    });
+    this.captureDeps = {
+      contextUsageStore: deps.contextUsageStore ?? null,
+      resumeTokenCapturer: deps.resumeTokenCapturer ?? null,
+    };
   }
 
   async handover(input: {
@@ -150,12 +188,21 @@ export class SeatHandoverService {
     if (!parsed.ok) {
       return parsed;
     }
-    if (parsed.source.mode !== "discovered" || !parsed.source.ref) {
+    // B3 — v0 supports `fresh` (launch a live successor) and `discovered`
+    // (operator-prepared live session) ONLY. `fork` and `rebuild` are LOUDLY
+    // REJECTED here — before any successor is created — so a blank successor is
+    // never bound and never reported `complete`. Their population is a tracked
+    // follow-on (fork → slice-05 native-fork primitive; rebuild → apply
+    // session-source artifacts at create). Dry-run planning for all four modes
+    // still returns a plan above (mutates nothing).
+    if (parsed.source.mode === "fork" || parsed.source.mode === "rebuild") {
       return {
         ok: false,
-        code: "successor_creation_not_implemented",
-        message: `Seat handover mutation for source "${parsed.source.raw}" is not implemented in this slice.`,
-        guidance: "For live mutation in this slice, provide an already-created successor with --source discovered:<id>.",
+        code: "source_not_supported",
+        message: `${parsed.source.mode} handover is not supported in v0; use --source fresh or --source discovered:<id>.`,
+        guidance: parsed.source.mode === "fork"
+          ? "fork handover depends on the native-fork primitive (not yet shipped). Use a fresh or discovered successor."
+          : "rebuild handover artifact population is deferred to a follow-on. Use a fresh or discovered successor.",
       };
     }
 
@@ -183,75 +230,296 @@ export class SeatHandoverService {
       };
     }
 
-    const discovered = this.discoveryRepo.getDiscoveredSession(parsed.source.ref);
-    if (!discovered) {
+    const operator = input.operator?.trim() || null;
+
+    // Already-created successor: route straight through the discovered->commit
+    // path with nothing to unwind (byte-identical to the shipped behavior).
+    if (parsed.source.mode === "discovered" && parsed.source.ref) {
+      return this.finalizeWithDiscovered({
+        seatRef: input.seatRef,
+        status: statusResult.status,
+        node,
+        latestSession,
+        discoveredRef: parsed.source.ref,
+        reportedSource: parsed.source,
+        reason,
+        operator,
+        contextDelivered: false,
+        launchToken: null,
+        cleanup: null,
+      });
+    }
+
+    // Full-cycle composer for fresh: capture -> create + LAUNCH a live successor
+    // -> deliver captured context -> verify continuity -> rebind. The original
+    // seat/binding is untouched until the commit inside finalizeWithDiscovered,
+    // which is the SOLE, LAST rebind. (fork/rebuild were rejected above;
+    // discovered was finalized above.)
+
+    // 1. Capture the departing seat's context BEFORE any successor exists.
+    const capturedContext = await this.captureDepartingContext(latestSession.session_name);
+
+    // 2. Create the UNMANAGED, discoverable successor and launch it into a LIVE,
+    //    READY agent (§2.1b seam, B1): createSession -> resolve pane -> real
+    //    runtime startup (launchHarness + readiness) -> upsertDiscoveredSession.
+    //    The successor is a live agent, not a bare shell, before it can commit.
+    const launch = await this.successorLauncher.createSuccessor({
+      node: { id: node.id, runtime: node.runtime, cwd: node.cwd },
+      departingSessionName: latestSession.session_name,
+    });
+    if (!launch.ok) {
       return {
         ok: false,
-        code: "discovered_not_found",
-        message: `Discovery record "${parsed.source.ref}" not found.`,
-        guidance: "Run discovery and list active discovered sessions before retrying.",
+        code: "successor_create_failed",
+        message: `Handover failed at step "${launch.step}": ${launch.message}`,
+        guidance: "No successor was created and the original seat/binding is untouched. Inspect tmux/daemon logs and retry.",
       };
     }
+
+    // 3. fresh: deliver the captured restore packet to the live successor BEFORE
+    //    continuity verify (a blank occupant is a relaunch, not a handover).
+    //    discovered is operator-prepared and needs no delivery.
+    let contextDelivered = false;
+    if (parsed.source.mode === "fresh") {
+      const delivered = await this.deliverRestorePacket(launch.tmuxSession, {
+        seatRef: input.seatRef,
+        reason,
+        departingSession: latestSession.session_name,
+        capturedContext,
+      });
+      if (!delivered.ok) {
+        // Partial: successor created but context never landed — unwind the
+        // unmanaged successor, leave the original binding intact (no false-green).
+        await this.successorLauncher.cleanup(launch.tmuxSession, launch.discoveredId);
+        return {
+          ok: false,
+          code: "context_delivery_failed",
+          message: `Handover failed at step "deliver-restore-packet": ${delivered.message}`,
+          guidance: "The created successor was unwound and the original seat/binding is untouched. Retry after tmux delivery is healthy.",
+        };
+      }
+      contextDelivered = true;
+    }
+
+    // 4. Verify continuity + rebind via the EXISTING discovered->commit path.
+    //    On any failure, unwind the created successor (no binding to unwind).
+    return this.finalizeWithDiscovered({
+      seatRef: input.seatRef,
+      status: statusResult.status,
+      node,
+      latestSession,
+      discoveredRef: launch.discoveredId,
+      reportedSource: parsed.source,
+      reason,
+      operator,
+      contextDelivered,
+      // B2 (launched/fresh): the launch-scraped resume token captured by the
+      // successor launcher is persisted atomically at commit (provenance scrape).
+      launchToken: launch.resumeToken ? { token: launch.resumeToken, resumeType: launch.resumeType } : null,
+      cleanup: () => this.successorLauncher.cleanup(launch.tmuxSession, launch.discoveredId),
+    });
+  }
+
+  /**
+   * The shared discovered->commit path (validation + presence-verify + rebind).
+   * `cleanup` is invoked before returning ANY failure so a composer-created
+   * successor is unwound; the discovered-source caller passes null (nothing to
+   * unwind). The `hasSession` probe here is the continuity/presence verify that
+   * runs BEFORE the commit releases the original binding.
+   */
+  private async finalizeWithDiscovered(input: {
+    seatRef: string;
+    status: SeatStatus;
+    node: NodeRow;
+    latestSession: SessionRow;
+    discoveredRef: string;
+    reportedSource: SeatHandoverSource;
+    reason: string;
+    operator: string | null;
+    contextDelivered: boolean;
+    /** Launch-scraped resume token for a fresh successor (persisted at commit). */
+    launchToken: { token: string; resumeType?: string } | null;
+    cleanup: (() => Promise<void>) | null;
+  }): Promise<SeatHandoverResult> {
+    const fail = async (result: SeatHandoverResult): Promise<SeatHandoverResult> => {
+      if (input.cleanup) await input.cleanup();
+      return result;
+    };
+
+    const discovered = this.discoveryRepo.getDiscoveredSession(input.discoveredRef);
+    if (!discovered) {
+      return fail({
+        ok: false,
+        code: "discovered_not_found",
+        message: `Discovery record "${input.discoveredRef}" not found.`,
+        guidance: "Run discovery and list active discovered sessions before retrying.",
+      });
+    }
     if (discovered.status !== "active") {
-      return {
+      return fail({
         ok: false,
         code: "discovered_not_active",
         message: `Discovery record "${discovered.id}" is ${discovered.status}, not active.`,
         guidance: "Use an active, unclaimed discovered successor session.",
-      };
+      });
     }
-    if (discovered.tmuxSession === latestSession.session_name) {
-      return {
+    if (discovered.tmuxSession === input.latestSession.session_name) {
+      return fail({
         ok: false,
         code: "successor_is_current",
         message: "Discovered successor is already the current occupant for this seat.",
         guidance: "Use a distinct successor session.",
-      };
+      });
     }
 
-    const runtimeMismatch = this.checkRuntimeMismatch(node.runtime, discovered.runtimeHint);
-    if (runtimeMismatch) return runtimeMismatch;
+    const runtimeMismatch = this.checkRuntimeMismatch(input.node.runtime, discovered.runtimeHint);
+    if (runtimeMismatch) return fail(runtimeMismatch);
 
-    const managedOwner = this.lookupManagedOwner(discovered.tmuxSession, node.id);
+    const managedOwner = this.lookupManagedOwner(discovered.tmuxSession, input.node.id);
     if (managedOwner) {
-      return {
+      return fail({
         ok: false,
         code: "successor_already_managed",
         message: `Successor tmux session "${discovered.tmuxSession}" is already managed by ${managedOwner.logical_id}@${managedOwner.rig_name}.`,
         guidance: "Use an unclaimed discovered successor session.",
-      };
+      });
     }
 
     let tmuxPresent: boolean;
     try {
       tmuxPresent = await this.tmuxAdapter.hasSession(discovered.tmuxSession);
     } catch (err) {
-      return {
+      return fail({
         ok: false,
         code: "tmux_probe_failed",
         message: `Could not verify successor tmux session "${discovered.tmuxSession}": ${err instanceof Error ? err.message : String(err)}`,
         guidance: "Retry after tmux health is known; probe failures are not treated as absence.",
-      };
+      });
     }
     if (!tmuxPresent) {
-      return {
+      return fail({
         ok: false,
         code: "successor_tmux_absent",
         message: `Successor tmux session "${discovered.tmuxSession}" is not present.`,
         guidance: "Run discovery again or provide a live discovered successor session.",
-      };
+      });
     }
 
-    return this.commit({
+    const committed = this.commit({
       seatRef: input.seatRef,
-      status: statusResult.status,
-      node,
-      latestSession,
-      source: parsed.source as SeatHandoverSource & { mode: "discovered"; ref: string },
-      reason,
-      operator: input.operator?.trim() || null,
+      status: input.status,
+      node: input.node,
+      latestSession: input.latestSession,
+      reportedSource: input.reportedSource,
+      reason: input.reason,
+      operator: input.operator,
       discovered,
+      contextDelivered: input.contextDelivered,
+      launchToken: input.launchToken,
     });
+    if (!committed.ok) return fail(committed);
+
+    // B2 (discovered): the successor is an operator-prepared live session we did
+    // NOT launch, so no launch token was scraped. Best-effort capture its live
+    // resume token AT COMMIT — reusing the FR-3 pure derive-helper — so a crash
+    // right after handover can still resume (the window FR-3 closes elsewhere).
+    // Post-commit + non-blocking (mirrors FR-3): the async derivation cannot run
+    // inside better-sqlite3's synchronous transaction. Never logs the token.
+    if (input.reportedSource.mode === "discovered" && "result" in committed) {
+      await this.captureDiscoveredResumeToken({
+        rigId: input.status.rig_id,
+        nodeId: input.node.id,
+        sessionId: committed.result.newSessionId,
+        sessionName: discovered.tmuxSession,
+        runtime: input.node.runtime,
+      });
+    }
+    return committed;
+  }
+
+  /**
+   * B2 — best-effort discovered-mode resume-token capture at commit. Derives the
+   * live token via the shared FR-3 derive-helper (pure read), persists it with
+   * provenance "adoption" (the rank guard governs clobber), and emits the same
+   * captured/preserved/skipped events FR-3 uses. Honest failure = persist
+   * nothing + a redacted skip event. NEVER throws, never logs the token.
+   */
+  private async captureDiscoveredResumeToken(input: {
+    rigId: string; nodeId: string; sessionId: string; sessionName: string; runtime: string | null;
+  }): Promise<void> {
+    try {
+      const derived = await deriveResumeToken(
+        { runtime: input.runtime, sessionName: input.sessionName },
+        this.captureDeps,
+      );
+      if (derived.outcome === "exempt" || derived.outcome === "noop") return;
+      const runtime = input.runtime as string; // non-null past exempt
+      if (derived.outcome === "skipped") {
+        this.emitCaptureSkip(input, runtime, derived.reason);
+        return;
+      }
+      const wrote = this.sessionRegistry.updateResumeToken(input.sessionId, derived.resumeType, derived.token, "adoption");
+      try {
+        this.eventBus.emit(wrote
+          ? {
+              type: "session.resume_token_captured",
+              rigId: input.rigId, nodeId: input.nodeId, sessionName: input.sessionName, sessionId: input.sessionId,
+              runtime, outcome: "captured", resumeType: derived.resumeType, provenance: "adoption", redacted: true,
+            }
+          : {
+              type: "session.resume_token_captured",
+              rigId: input.rigId, nodeId: input.nodeId, sessionName: input.sessionName, sessionId: input.sessionId,
+              runtime, outcome: "preserved", resumeType: derived.resumeType, reason: "higher_rank_present", redacted: true,
+            });
+      } catch { /* best-effort */ }
+    } catch {
+      // best-effort — capture never fails or blocks the handover
+    }
+  }
+
+  private emitCaptureSkip(
+    input: { rigId: string; nodeId: string; sessionId: string; sessionName: string },
+    runtime: string,
+    reason: "missing_sidecar" | "parse_error" | "probe_timeout" | "invalid_token",
+  ): void {
+    try {
+      this.eventBus.emit({
+        type: "session.resume_token_captured",
+        rigId: input.rigId, nodeId: input.nodeId, sessionName: input.sessionName, sessionId: input.sessionId,
+        runtime, outcome: "skipped", reason, redacted: true,
+      });
+    } catch { /* best-effort */ }
+  }
+
+  /** Best-effort capture of the departing seat's visible terminal before the
+   *  successor is created. Never throws; an empty capture is honestly recorded
+   *  as "no capture available" in the restore packet. */
+  private async captureDepartingContext(departingSession: string): Promise<string> {
+    try {
+      const screen = await this.tmuxAdapter.capturePaneScreen(departingSession);
+      return screen ?? "";
+    } catch {
+      return "";
+    }
+  }
+
+  /** Deliver the captured restore packet to a fresh successor via the shipped
+   *  interactive-text transport (send_text + Enter), mirroring the startup
+   *  orchestrator's initial-prompt delivery. */
+  private async deliverRestorePacket(
+    successorSession: string,
+    info: { seatRef: string; reason: string; departingSession: string; capturedContext: string },
+  ): Promise<{ ok: true } | { ok: false; message: string }> {
+    const packet = buildRestorePacket({ ...info, handoverAt: this.now().toISOString() });
+    const sent = await this.tmuxAdapter.sendText(successorSession, packet);
+    if (!sent.ok) {
+      return { ok: false, message: (sent as { message?: string }).message ?? "send_text failed" };
+    }
+    const submit = await this.tmuxAdapter.sendKeys(successorSession, ["C-m"]);
+    if (!submit.ok) {
+      return { ok: false, message: (submit as { message?: string }).message ?? "submit failed" };
+    }
+    return { ok: true };
   }
 
   private checkRuntimeMismatch(nodeRuntime: string | null, discoveredRuntime: string): SeatHandoverResult | null {
@@ -268,7 +536,7 @@ export class SeatHandoverService {
 
   private lookupNode(status: SeatStatus): NodeRow {
     return this.db.prepare(
-      "SELECT id, runtime FROM nodes WHERE rig_id = ? AND logical_id = ?"
+      "SELECT id, runtime, cwd FROM nodes WHERE rig_id = ? AND logical_id = ?"
     ).get(status.rig_id, status.logical_id) as NodeRow;
   }
 
@@ -304,10 +572,12 @@ export class SeatHandoverService {
     status: SeatStatus;
     node: NodeRow;
     latestSession: SessionRow;
-    source: SeatHandoverSource & { mode: "discovered"; ref: string };
+    reportedSource: SeatHandoverSource;
     reason: string;
     operator: string | null;
     discovered: ReturnType<DiscoveryRepository["getDiscoveredSession"]> & NonNullable<unknown>;
+    contextDelivered: boolean;
+    launchToken: { token: string; resumeType?: string } | null;
   }): SeatHandoverResult {
     const handoverAt = this.now().toISOString();
     const tx = this.db.transaction(() => {
@@ -329,6 +599,16 @@ export class SeatHandoverService {
         tmuxPane: input.discovered.tmuxPane,
       });
       const newSession = this.sessionRegistry.registerClaimedSession(input.node.id, input.discovered.tmuxSession);
+      // B2 (launched/fresh): persist the launch-scraped resume token atomically
+      // with the claim, provenance "scrape" (mirrors StartupOrchestrator's
+      // launch-token capture). Validity-guarded; a malformed token is dropped,
+      // never a bad write. The token is never logged.
+      if (input.launchToken) {
+        const validated = validateResumeToken(input.node.runtime, input.launchToken.token);
+        if (validated.ok) {
+          this.sessionRegistry.updateResumeToken(newSession.id, validated.resumeType, validated.token, "scrape");
+        }
+      }
       this.discoveryRepo.markClaimed(input.discovered.id, input.node.id);
       this.db.prepare(`
         UPDATE nodes SET
@@ -346,7 +626,7 @@ export class SeatHandoverService {
         logicalId: input.status.logical_id,
         previousOccupant: input.latestSession.session_name,
         currentOccupant: input.discovered.tmuxSession,
-        source: input.source.raw,
+        source: input.reportedSource.raw,
         reason: input.reason,
         operator: input.operator,
       });
@@ -405,7 +685,7 @@ export class SeatHandoverService {
           podNamespace: input.status.pod_namespace,
           runtime: input.status.runtime,
         },
-        source: input.source,
+        source: input.reportedSource,
         reason: input.reason,
         operator: input.operator,
         previousOccupant: input.latestSession.session_name,
@@ -423,7 +703,7 @@ export class SeatHandoverService {
         eventSeq: committed.event.seq,
         sideEffects: {
           departingSessionKilled: false,
-          startupContextDelivered: false,
+          startupContextDelivered: input.contextDelivered,
           provenanceRecordWritten: false,
         },
       },
@@ -451,4 +731,26 @@ export class SeatHandoverService {
       VALUES (?, ?, 'tmux', ?, ?, ?)
     `).run(ulid(), nodeId, fields.tmuxSession, fields.tmuxWindow, fields.tmuxPane);
   }
+}
+
+/** Assemble the restore packet delivered to a fresh successor: seat identity +
+ *  handover reason + predecessor session + the captured predecessor terminal. */
+function buildRestorePacket(info: {
+  seatRef: string;
+  reason: string;
+  departingSession: string;
+  handoverAt: string;
+  capturedContext: string;
+}): string {
+  const captured = info.capturedContext.trim();
+  return [
+    "=== OpenRig seat handover — restore context ===",
+    `Seat: ${info.seatRef}`,
+    `Reason: ${info.reason}`,
+    `Predecessor session: ${info.departingSession}`,
+    `Handover at: ${info.handoverAt}`,
+    "",
+    "--- Predecessor terminal (captured) ---",
+    captured.length > 0 ? captured : "(no capture available)",
+  ].join("\n");
 }

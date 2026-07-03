@@ -596,3 +596,34 @@
     transform: none;
   }
 }
+
+/* ============================================================================
+   === OPR.0.4.3.29 — Vellum Dark for the Dashboard's PRIVATE palette ===
+   ----------------------------------------------------------------------------
+   The Dashboard route is NOT token-driven — it paints via its own `--df-*` vars
+   (scoped under `.df-root`), so the global `.dark {}` token overrides never reach
+   it. The real fix is the SAME technique: override the `--df-*` vars for dark.
+   Block pasted verbatim from the slice 29 twin-mockup dark-theme.css (IMPL-FLAG
+   #4). Scoped under `.dark .df-root`, so light stays pixel-identical when off.
+   ========================================================================== */
+
+.dark .df-root {
+  --df-paper: #121412;   /* #faf9f5 → warm near-black ground */
+  --df-card: #181a18;    /* #fbfaf6 → base card, flat (a hair above paper) */
+  --df-ink: #e4e8e0;     /* #1c1d1a → light primary ink */
+  --df-ink-2: #a3a99f;   /* secondary ink */
+  --df-ink-3: #7d827a;   /* faint ink */
+  --df-line: #34382f;    /* #d7d3c7 → dark hairline */
+  --df-rule: #2a2d27;    /* #cfcabd → darker rule */
+  --df-amber: #d9a441;   /* #b9822f → brighter amber for dark contrast */
+  --df-green: #43c684;   /* #2f9e54 → brighter green for dark contrast */
+}
+
+/* Residual hardcoded near-whites that don't read `--df-card` (IMPL-FLAG #4):
+   the FIELD ENVIRONMENT panel bg + the card :hover "pop to white". Co-located
+   dark overrides (real fix), keeping light untouched. */
+.dark .df-root .df-fieldenv { background: rgba(24, 26, 24, 0.7); }
+.dark .df-root .df-card:hover {
+  background: #1e211e;
+  box-shadow: 6px 6px 0 -1px rgba(0, 0, 0, 0.35), 0 0 0 1px var(--df-line);
+}

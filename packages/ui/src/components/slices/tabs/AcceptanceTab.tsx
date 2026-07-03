@@ -38,14 +38,14 @@ export function AcceptanceTab({ acceptance }: { acceptance: SliceDetail["accepta
       {currentStep && <CurrentStepPanel currentStep={currentStep} />}
       <header className="mb-4">
         <div className="flex items-baseline justify-between">
-          <div className="font-mono text-[11px] uppercase tracking-[0.12em] text-stone-700">
+          <div className="font-mono text-[11px] uppercase tracking-[0.12em] text-on-surface">
             Acceptance
           </div>
-          <div className="font-mono text-[10px] text-stone-500">
+          <div className="font-mono text-[10px] text-on-surface-variant">
             {doneItems} / {totalItems} ({percentage}%)
           </div>
         </div>
-        <div className="mt-2 h-2 w-full bg-stone-100" data-testid="acceptance-progress-bar">
+        <div className="mt-2 h-2 w-full bg-surface-low" data-testid="acceptance-progress-bar">
           <div
             className="h-2 bg-emerald-500 transition-all"
             data-testid="acceptance-progress-fill"
@@ -72,8 +72,8 @@ export function AcceptanceTab({ acceptance }: { acceptance: SliceDetail["accepta
                 onClick={() => setFilter(f)}
                 className={`border px-2 py-1 font-mono text-[9px] uppercase tracking-[0.10em] ${
                   filter === f
-                    ? "border-stone-700 bg-stone-700 text-white"
-                    : "border-stone-300 text-stone-700 hover:bg-stone-100"
+                    ? "border-on-surface bg-inverse-surface text-background"
+                    : "border-outline-variant text-on-surface hover:bg-surface-low"
                 }`}
               >
                 {f}
@@ -83,11 +83,11 @@ export function AcceptanceTab({ acceptance }: { acceptance: SliceDetail["accepta
         )}
       </header>
       {items.length === 0 ? (
-        <div className="font-mono text-[10px] text-stone-400" data-testid="acceptance-empty">
+        <div className="font-mono text-[10px] text-on-surface-variant" data-testid="acceptance-empty">
           No acceptance items found in slice docs (looks for `[ ]` / `[x]` checkbox lines in README / IMPLEMENTATION-PRD / PROGRESS / IMPLEMENTATION).
         </div>
       ) : filtered.length === 0 ? (
-        <div className="font-mono text-[10px] text-stone-400" data-testid="acceptance-filter-empty">
+        <div className="font-mono text-[10px] text-on-surface-variant" data-testid="acceptance-filter-empty">
           No items match filter '{filter}'.
         </div>
       ) : (
@@ -107,48 +107,48 @@ function CurrentStepPanel({ currentStep }: { currentStep: CurrentStepPayload }) 
     <section
       data-testid="acceptance-current-step"
       data-step-id={currentStep.stepId}
-      className="mb-6 border border-stone-300 bg-stone-50 p-3"
+      className="mb-6 border border-outline-variant bg-background p-3"
     >
       <div className="flex items-baseline justify-between">
-        <div className="font-mono text-[11px] uppercase tracking-[0.12em] text-stone-700">
+        <div className="font-mono text-[11px] uppercase tracking-[0.12em] text-on-surface">
           Current step
         </div>
-        <div className="font-mono text-[9px] text-stone-500">
+        <div className="font-mono text-[9px] text-on-surface-variant">
           hop {currentStep.hopCount} · {currentStep.instanceStatus}
         </div>
       </div>
       <div className="mt-2 flex items-baseline gap-2">
         <span
           data-testid="acceptance-current-step-id"
-          className="font-mono text-[12px] font-bold text-stone-900"
+          className="font-mono text-[12px] font-bold text-on-surface"
         >
           {currentStep.stepId}
         </span>
-        <span className="font-mono text-[9px] uppercase tracking-[0.10em] text-stone-500">
+        <span className="font-mono text-[9px] uppercase tracking-[0.10em] text-on-surface-variant">
           role: {currentStep.role}
         </span>
       </div>
       {currentStep.objective && (
         <div
           data-testid="acceptance-current-step-objective"
-          className="mt-2 whitespace-pre-line font-mono text-[10px] text-stone-700"
+          className="mt-2 whitespace-pre-line font-mono text-[10px] text-on-surface"
         >
           {currentStep.objective}
         </div>
       )}
       <div className="mt-3 grid grid-cols-2 gap-3">
         <div data-testid="acceptance-current-step-allowed-exits">
-          <div className="font-mono text-[8px] uppercase tracking-[0.10em] text-stone-500">
+          <div className="font-mono text-[8px] uppercase tracking-[0.10em] text-on-surface-variant">
             Allowed exits
           </div>
           <div className="mt-1 flex flex-wrap gap-1">
             {currentStep.allowedExits.length === 0 ? (
-              <span className="font-mono text-[9px] text-stone-400">(none)</span>
+              <span className="font-mono text-[9px] text-on-surface-variant">(none)</span>
             ) : (
               currentStep.allowedExits.map((exit) => (
                 <span
                   key={exit}
-                  className="border border-stone-300 bg-white px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-[0.10em] text-stone-700"
+                  className="border border-outline-variant bg-surface-lowest px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-[0.10em] text-on-surface"
                 >
                   {exit}
                 </span>
@@ -157,12 +157,12 @@ function CurrentStepPanel({ currentStep }: { currentStep: CurrentStepPayload }) 
           </div>
         </div>
         <div data-testid="acceptance-current-step-allowed-next-steps">
-          <div className="font-mono text-[8px] uppercase tracking-[0.10em] text-stone-500">
+          <div className="font-mono text-[8px] uppercase tracking-[0.10em] text-on-surface-variant">
             Allowed next steps
           </div>
           <div className="mt-1 flex flex-wrap gap-1">
             {currentStep.allowedNextSteps.length === 0 ? (
-              <span className="inline-flex items-center gap-1 font-mono text-[9px] uppercase tracking-[0.10em] text-stone-500">
+              <span className="inline-flex items-center gap-1 font-mono text-[9px] uppercase tracking-[0.10em] text-on-surface-variant">
                 <ToolMark tool="terminal" size="xs" />
                 terminal
               </span>
@@ -193,13 +193,13 @@ function AcceptanceRow({ item, idx }: { item: AcceptanceItem; idx: number }) {
     <li
       data-testid={`acceptance-item-${idx}`}
       data-done={item.done}
-      className="border-b border-stone-100"
+      className="border-b border-outline-variant"
     >
       <button
         type="button"
         onClick={() => setExpanded((v) => !v)}
         data-testid={`acceptance-item-${idx}-toggle`}
-        className="flex w-full items-start gap-2 py-1.5 text-left hover:bg-stone-50"
+        className="flex w-full items-start gap-2 py-1.5 text-left hover:bg-background"
       >
         <span
           data-testid={`acceptance-pill-${idx}`}
@@ -209,15 +209,15 @@ function AcceptanceRow({ item, idx }: { item: AcceptanceItem; idx: number }) {
           <span aria-hidden="true">{pillIcon}</span>
           <span>{pillLabel}</span>
         </span>
-        <span className="flex-1 font-mono text-[10px] text-stone-800">{item.text}</span>
-        <span className="font-mono text-[8px] text-stone-400" title={`${item.source.file}:${item.source.line}`}>
+        <span className="flex-1 font-mono text-[10px] text-on-surface">{item.text}</span>
+        <span className="font-mono text-[8px] text-on-surface-variant" title={`${item.source.file}:${item.source.line}`}>
           {item.source.file}:{item.source.line}
         </span>
       </button>
       {expanded && (
         <div
           data-testid={`acceptance-item-${idx}-detail`}
-          className="ml-2 mt-1 border-l-2 border-stone-300 bg-stone-50 px-3 py-2 font-mono text-[9px] text-stone-700"
+          className="ml-2 mt-1 border-l-2 border-outline-variant bg-background px-3 py-2 font-mono text-[9px] text-on-surface"
         >
           <div>
             <span className="font-bold">Source:</span>{" "}
@@ -226,7 +226,7 @@ function AcceptanceRow({ item, idx }: { item: AcceptanceItem; idx: number }) {
           <div className="mt-1">
             <span className="font-bold">Status:</span> {pillLabel}
           </div>
-          <div className="mt-2 whitespace-pre-line text-stone-800">{item.text}</div>
+          <div className="mt-2 whitespace-pre-line text-on-surface">{item.text}</div>
         </div>
       )}
     </li>
@@ -257,7 +257,7 @@ function pillStyle(done: boolean): { pillClass: string; pillIcon: string; pillLa
     };
   }
   return {
-    pillClass: "border-stone-400 bg-stone-50 text-stone-700",
+    pillClass: "border-outline bg-background text-on-surface",
     pillIcon: "◯",
     pillLabel: "active",
   };

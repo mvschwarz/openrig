@@ -18,6 +18,10 @@ export type SelfAttachSuccess = {
   env: {
     OPENRIG_NODE_ID: string;
     OPENRIG_SESSION_NAME: string;
+    // OPR.0.4.3.28 B3 — activity env echoed for the caller's shell to export.
+    OPENRIG_RUNTIME?: string;
+    OPENRIG_URL?: string;
+    OPENRIG_ACTIVITY_HOOK_TOKEN?: string;
   };
 };
 
@@ -46,6 +50,11 @@ interface SelfAttachServiceDeps {
   claudeContextProvisioner?: {
     ensureContextCollector(binding: { cwd?: string | null; tmuxSession?: string | null }): void;
   };
+  // OPR.0.4.3.28 B3 — the daemon's resolved activity url+token, echoed into the
+  // self-attach RESPONSE env so the caller's shell (and any agent it starts)
+  // can reach the ingest endpoint. This is a returned env for the caller to
+  // export — NOT a mutation of an already-running process.
+  activityEnv?: { url?: string; token?: string };
 }
 
 interface AttachToNodeOptions {
@@ -90,6 +99,7 @@ export class SelfAttachService {
   private tmuxAdapter: TmuxAdapter | null;
   private transcriptStore: TranscriptStore | null;
   private claudeContextProvisioner: SelfAttachServiceDeps["claudeContextProvisioner"] | null;
+  private activityEnv: { url?: string; token?: string };
 
   constructor(deps: SelfAttachServiceDeps) {
     if (deps.db !== deps.rigRepo.db) throw new Error("SelfAttachService: rigRepo must share the same db handle");
@@ -103,6 +113,7 @@ export class SelfAttachService {
     this.eventBus = deps.eventBus;
     this.tmuxAdapter = deps.tmuxAdapter ?? null;
     this.transcriptStore = deps.transcriptStore ?? null;
+    this.activityEnv = deps.activityEnv ?? {};
     this.claudeContextProvisioner = deps.claudeContextProvisioner ?? null;
   }
 
@@ -187,7 +198,7 @@ export class SelfAttachService {
       this.maybeProvisionContextCollector(opts.runtime, opts.cwd, result.sessionName, result.attachmentType);
       await this.maybeStartTranscriptCapture(rig.rig.name, result.sessionName, result.attachmentType);
       this.eventBus.notifySubscribers(result.event);
-      return this.toSuccess(result.nodeId, result.logicalId, result.sessionId, result.sessionName, result.attachmentType);
+      return this.toSuccess(result.nodeId, result.logicalId, result.sessionId, result.sessionName, result.attachmentType, runtime);
     } catch (error) {
       return { ok: false, code: "duplicate_logical_id", error: (error as Error).message };
     }
@@ -236,7 +247,7 @@ export class SelfAttachService {
       this.maybeProvisionContextCollector(runtime, cwd, result.sessionName, result.attachmentType);
       await this.maybeStartTranscriptCapture(rigName, result.sessionName, result.attachmentType);
       this.eventBus.notifySubscribers(result.event);
-      return this.toSuccess(result.nodeId, result.logicalId, result.sessionId, result.sessionName, result.attachmentType);
+      return this.toSuccess(result.nodeId, result.logicalId, result.sessionId, result.sessionName, result.attachmentType, runtime);
     } catch (error) {
       return { ok: false, code: "already_bound", error: (error as Error).message };
     }
@@ -333,7 +344,19 @@ export class SelfAttachService {
     sessionId: string,
     sessionName: string,
     attachmentType: "tmux" | "external_cli",
+    runtime?: string | null,
   ): SelfAttachSuccess {
+    // OPR.0.4.3.28 B3 — echo the activity env so the caller's shell (and any
+    // agent it starts) produces activity signal: OPENRIG_RUNTIME is required by
+    // the relay to build a payload; url+token let it reach the ingest endpoint
+    // directly (file-discovery is the fallback when they are absent).
+    const env: SelfAttachSuccess["env"] = {
+      OPENRIG_NODE_ID: nodeId,
+      OPENRIG_SESSION_NAME: sessionName,
+    };
+    if (runtime) env.OPENRIG_RUNTIME = runtime;
+    if (this.activityEnv.url) env.OPENRIG_URL = this.activityEnv.url;
+    if (this.activityEnv.token) env.OPENRIG_ACTIVITY_HOOK_TOKEN = this.activityEnv.token;
     return {
       ok: true,
       nodeId,
@@ -341,10 +364,7 @@ export class SelfAttachService {
       sessionId,
       sessionName,
       attachmentType,
-      env: {
-        OPENRIG_NODE_ID: nodeId,
-        OPENRIG_SESSION_NAME: sessionName,
-      },
+      env,
     };
   }
 }

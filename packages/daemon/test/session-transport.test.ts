@@ -424,23 +424,27 @@ describe("SessionTransport", () => {
     expect(result.outcome).toBeUndefined();
   });
 
-  // Test 7: send with mid-work detected → refusal
-  it("send with mid-work detected refuses with reason mid_work", async () => {
+  // Test 7: send with mid-work detected → DELIVER WITH ADVISORY (OPR.0.4.3.28 fast-follow —
+  // mid_work downgraded from a hard refuse to a non-blocking advisory; busy is not a block).
+  it("send with mid-work detected DELIVERS with a non-blocking advisory (not a refusal)", async () => {
     seedCanonicalRig();
+    const sendTextSpy = vi.fn(async () => ({ ok: true as const }));
     const tmux = mockTmux({
       capturePaneContent: async () => "Working on task...\n⠋ Processing files\nesc to interrupt",
+      sendText: sendTextSpy,
     });
     const transport = createTransport(tmux);
 
     const result = await transport.send("dev-impl@my-rig", "hello");
-    expect(result.ok).toBe(false);
-    expect(result.reason).toBe("mid_work");
-    expect(result.error).toContain("mid-task");
-    expect(result.error).toContain("force");
+    expect(result.ok).toBe(true);
+    expect(result.warning).toContain("mid-task");
+    expect(result.warning).toContain("busy is advisory");
+    expect(sendTextSpy).toHaveBeenCalled();
   });
 
-  // Test 8: send with mid-work + force sends anyway
-  it("send with mid-work + force sends anyway", async () => {
+  // Test 8: --force on a mid-work pane still sends (now a back-compat no-op — the default path
+  // already delivers-with-advisory, so --force changes nothing but must not break).
+  it("send with mid-work + force still sends anyway (--force is a back-compat no-op now)", async () => {
     seedCanonicalRig();
     const sendTextSpy = vi.fn(async () => ({ ok: true as const }));
     const tmux = mockTmux({
@@ -866,8 +870,8 @@ describe("SessionTransport", () => {
 
     const result = await transport.send("dev-impl@my-rig", "hello");
 
-    expect(result.ok).toBe(false);
-    expect(result.reason).toBe("mid_work");
+    expect(result.ok).toBe(true); // OPR.0.4.3.28 fast-follow — mid_work downgraded to deliver-with-advisory
+    expect(result.warning).toContain("mid-task");
   });
 
   it("send refuses when Codex trust-prompt choice line is the active pane content", async () => {
@@ -953,8 +957,8 @@ describe("SessionTransport", () => {
 
     const result = await transport.send("dev-impl@my-rig", "hello");
 
-    expect(result.ok).toBe(false);
-    expect(result.reason).toBe("mid_work");
+    expect(result.ok).toBe(true); // OPR.0.4.3.28 fast-follow — mid_work downgraded to deliver-with-advisory
+    expect(result.warning).toContain("mid-task");
   });
 
   it("send refuses when a Claude prompt draft is present above an idle footer", async () => {
@@ -1034,8 +1038,8 @@ describe("SessionTransport", () => {
 
     const result = await transport.send("dev-impl@my-rig", "hello");
 
-    expect(result.ok).toBe(false);
-    expect(result.reason).toBe("mid_work");
+    expect(result.ok).toBe(true); // OPR.0.4.3.28 fast-follow — mid_work downgraded to deliver-with-advisory
+    expect(result.warning).toContain("mid-task");
   });
 
   it("realistic: full-screen Codex idle-at-prompt with stale Working in scrollback + padding allows", async () => {
@@ -1091,8 +1095,8 @@ describe("SessionTransport", () => {
 
     const result = await transport.send("dev-impl@my-rig", "hello");
 
-    expect(result.ok).toBe(false);
-    expect(result.reason).toBe("mid_work");
+    expect(result.ok).toBe(true); // OPR.0.4.3.28 fast-follow — mid_work downgraded to deliver-with-advisory
+    expect(result.warning).toContain("mid-task");
   });
 
   it("realistic: full-screen Claude Code idle-at-prompt with stale Working in scrollback + edit-bar allows", async () => {
@@ -1180,8 +1184,8 @@ describe("SessionTransport", () => {
 
     const result = await transport.send("dev-impl@my-rig", "hello");
 
-    expect(result.ok).toBe(false);
-    expect(result.reason).toBe("mid_work");
+    expect(result.ok).toBe(true); // OPR.0.4.3.28 fast-follow — mid_work downgraded to deliver-with-advisory
+    expect(result.warning).toContain("mid-task");
   });
 
   it("send to terminal session with foreground non-shell command refuses with mid_work", async () => {
@@ -1202,10 +1206,11 @@ describe("SessionTransport", () => {
     const transport = createTransport(tmux);
 
     const result = await transport.send("infra-ui@term-rig", "printf 'hello\\n'");
-    expect(result.ok).toBe(false);
-    expect(result.reason).toBe("mid_work");
-    expect(result.error).toContain("mid-task");
-    expect(sendTextSpy).not.toHaveBeenCalled();
+    // OPR.0.4.3.28 fast-follow — a terminal foreground command maps to `running`, which now
+    // delivers-with-advisory (was: mid_work refuse + no send). Busy is not a block.
+    expect(result.ok).toBe(true);
+    expect(result.warning).toContain("mid-task");
+    expect(sendTextSpy).toHaveBeenCalled();
   });
 
   // Test 9: send when tmux unavailable → guided error

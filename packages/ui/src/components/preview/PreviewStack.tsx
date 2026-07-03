@@ -16,13 +16,13 @@ export function PreviewStack({ testIdPrefix = "preview-stack" }: { testIdPrefix?
   return (
     <aside
       data-testid={testIdPrefix}
-      className="absolute inset-y-0 right-0 z-10 w-72 border-l border-stone-300/25 bg-[rgba(250,249,245,0.04)] supports-[backdrop-filter]:bg-[rgba(250,249,245,0.02)] backdrop-blur-[12px] shadow-[-6px_0_14px_rgba(46,52,46,0.04)] flex flex-col overflow-y-auto pointer-events-auto"
+      className="absolute inset-y-0 right-0 z-10 w-72 border-l border-outline-variant/25 bg-[hsl(var(--background)/0.04)] supports-[backdrop-filter]:bg-[hsl(var(--background)/0.02)] backdrop-blur-[12px] shadow-[-6px_0_14px_rgba(46,52,46,0.04)] flex flex-col overflow-y-auto pointer-events-auto"
     >
-      <header className="px-3 py-2 border-b border-stone-300/35 shrink-0">
-        <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-stone-700">
+      <header className="px-3 py-2 border-b border-outline-variant/35 shrink-0">
+        <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-on-surface">
           Pinned previews
         </span>
-        <span className="ml-2 font-mono text-[9px] text-stone-500">
+        <span className="ml-2 font-mono text-[9px] text-on-surface-variant">
           {pins.length} pinned
         </span>
       </header>

@@ -111,7 +111,7 @@ export function ForkNowAction({ entry }: { entry: AgentImageEntry }) {
 
   if (noCwd) {
     return (
-      <div data-testid="fork-now-disabled-no-cwd" className="font-mono text-[9px] text-stone-400">
+      <div data-testid="fork-now-disabled-no-cwd" className="font-mono text-[9px] text-on-surface-variant">
         Fork now unavailable: image lacks source cwd (pre-Finding-2 manifest)
       </div>
     );
@@ -129,17 +129,17 @@ export function ForkNowAction({ entry }: { entry: AgentImageEntry }) {
       </Button>
 
       {open && (
-        <div data-testid="fork-now-modal" className="border border-stone-400 bg-white px-3 py-3 space-y-3 mt-2">
-          <div className="font-mono text-[10px] uppercase tracking-[0.10em] text-stone-700">
+        <div data-testid="fork-now-modal" className="border border-outline bg-surface-lowest px-3 py-3 space-y-3 mt-2">
+          <div className="font-mono text-[10px] uppercase tracking-[0.10em] text-on-surface">
             Fork "{entry.name}" into a running rig
           </div>
 
           <div className="space-y-2">
-            <label className="block font-mono text-[9px] text-stone-500">
+            <label className="block font-mono text-[9px] text-on-surface-variant">
               Target rig
               <select
                 data-testid="fork-now-rig-select"
-                className="block w-full mt-0.5 border border-stone-300 bg-white px-1 py-0.5 font-mono text-[10px]"
+                className="block w-full mt-0.5 border border-outline-variant bg-surface-lowest px-1 py-0.5 font-mono text-[10px]"
                 value={selectedRigId ?? ""}
                 onChange={(e) => { setSelectedRigId(e.target.value || null); setSelectedPod(null); setSelectedSibling(null); }}
               >
@@ -151,11 +151,11 @@ export function ForkNowAction({ entry }: { entry: AgentImageEntry }) {
             </label>
 
             {selectedRigId && (
-              <label className="block font-mono text-[9px] text-stone-500">
+              <label className="block font-mono text-[9px] text-on-surface-variant">
                 Target pod
                 <select
                   data-testid="fork-now-pod-select"
-                  className="block w-full mt-0.5 border border-stone-300 bg-white px-1 py-0.5 font-mono text-[10px]"
+                  className="block w-full mt-0.5 border border-outline-variant bg-surface-lowest px-1 py-0.5 font-mono text-[10px]"
                   value={selectedPod ?? ""}
                   onChange={(e) => { setSelectedPod(e.target.value || null); setSelectedSibling(null); }}
                 >
@@ -174,11 +174,11 @@ export function ForkNowAction({ entry }: { entry: AgentImageEntry }) {
             )}
 
             {selectedPod && podNodes.length > 0 && (
-              <label className="block font-mono text-[9px] text-stone-500">
+              <label className="block font-mono text-[9px] text-on-surface-variant">
                 Clone identity from ({entry.runtime} member)
                 <select
                   data-testid="fork-now-sibling-select"
-                  className="block w-full mt-0.5 border border-stone-300 bg-white px-1 py-0.5 font-mono text-[10px]"
+                  className="block w-full mt-0.5 border border-outline-variant bg-surface-lowest px-1 py-0.5 font-mono text-[10px]"
                   value={selectedSibling ?? ""}
                   onChange={(e) => setSelectedSibling(e.target.value || null)}
                 >
@@ -191,12 +191,12 @@ export function ForkNowAction({ entry }: { entry: AgentImageEntry }) {
             )}
 
             {selectedSibling && (
-              <label className="block font-mono text-[9px] text-stone-500">
+              <label className="block font-mono text-[9px] text-on-surface-variant">
                 New member ID (no dots)
                 <input
                   data-testid="fork-now-member-id"
                   type="text"
-                  className="block w-full mt-0.5 border border-stone-300 bg-white px-1 py-0.5 font-mono text-[10px]"
+                  className="block w-full mt-0.5 border border-outline-variant bg-surface-lowest px-1 py-0.5 font-mono text-[10px]"
                   value={newMemberId}
                   onChange={(e) => setNewMemberId(e.target.value.replace(/\./g, ""))}
                   placeholder="e.g. forked-worker"

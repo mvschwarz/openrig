@@ -1,5 +1,5 @@
 import { Command } from "commander";
-import { DaemonClient } from "../client.js";
+import { DaemonClient, terminalAuthHeaders } from "../client.js";
 import { getDaemonStatus, getDaemonUrl } from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
@@ -32,7 +32,7 @@ Notes:
         return;
       }
 
-      const res = await client.post<Record<string, unknown>>(`/api/sessions/${encodeURIComponent(sessionRef)}/unclaim`, {});
+      const res = await client.post<Record<string, unknown>>(`/api/sessions/${encodeURIComponent(sessionRef)}/unclaim`, {}, { headers: terminalAuthHeaders() });
       if (opts.json) {
         console.log(JSON.stringify(res.data, null, 2));
         if (res.status >= 400) process.exitCode = 1;

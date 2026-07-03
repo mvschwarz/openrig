@@ -5,7 +5,7 @@
 //   - Topographic contour lines (organic flowing curves filling canvas)
 //   - Scattered isometric geometric shapes (line-art icons across canvas)
 //
-// Both use the diffuse vellum setting from iter 4 (bg-white/50 +
+// Both use the diffuse vellum setting from iter 4 (bg-surface-lowest/50 +
 // backdrop-blur-[26px]) — heavy fade so the line art reads as a
 // quiet field, never competing with the cards.
 //
@@ -56,7 +56,7 @@ function HeavyDiffuseVellumSheet() {
     <div
       data-testid="vellum-sheet-heavy-diffuse"
       aria-hidden="true"
-      className="absolute inset-0 z-[5] bg-white/25 backdrop-blur-[8px] pointer-events-none"
+      className="absolute inset-0 z-[5] bg-surface-lowest/25 backdrop-blur-[8px] pointer-events-none"
     />
   );
 }
@@ -135,7 +135,7 @@ function MinimalLargeBackground() {
     <div
       data-testid="back-layer-minimal-large"
       aria-hidden="true"
-      className="absolute inset-0 z-0 overflow-hidden pointer-events-none select-none text-stone-900"
+      className="absolute inset-0 z-0 overflow-hidden pointer-events-none select-none text-on-surface"
     >
       {/* Concentric target, top-left bleed (~800px) — drift A */}
       <svg
@@ -190,24 +190,24 @@ function MinimalLargeBackground() {
 }
 
 function DiffuseVellumSheet() {
-  // Medium (bg-white/35 + blur-[14px]) — used by topo lines variant.
+  // Medium (bg-surface-lowest/35 + blur-[14px]) — used by topo lines variant.
   return (
     <div
       data-testid="vellum-sheet-diffuse"
       aria-hidden="true"
-      className="absolute top-[14px] bottom-[12px] left-[16px] right-[14px] z-[5] bg-white/35 backdrop-blur-[14px] pointer-events-none"
+      className="absolute top-[14px] bottom-[12px] left-[16px] right-[14px] z-[5] bg-surface-lowest/35 backdrop-blur-[14px] pointer-events-none"
     />
   );
 }
 function MoreDiffuseVellumSheet() {
   // Iter 7: more diffuse for the isometric variant per founder request.
-  // Halfway between medium (35/14) and diffuse (50/26) — bg-white/45 +
+  // Halfway between medium (35/14) and diffuse (50/26) — bg-surface-lowest/45 +
   // blur-[22px]. Heavier shapes still read; cards float more.
   return (
     <div
       data-testid="vellum-sheet-more-diffuse"
       aria-hidden="true"
-      className="absolute top-[14px] bottom-[12px] left-[16px] right-[14px] z-[5] bg-white/45 backdrop-blur-[22px] pointer-events-none"
+      className="absolute top-[14px] bottom-[12px] left-[16px] right-[14px] z-[5] bg-surface-lowest/45 backdrop-blur-[22px] pointer-events-none"
     />
   );
 }
@@ -339,7 +339,7 @@ function IsoSvg({ type }: { type: IsoShapeType }) {
   switch (type) {
     case "cube":
       return (
-        <svg className="w-full h-full text-stone-900" viewBox="0 0 60 60" {...sp}>
+        <svg className="w-full h-full text-on-surface" viewBox="0 0 60 60" {...sp}>
           <polygon points="30,8 52,20 52,44 30,56 8,44 8,20" />
           <line x1="30" y1="8" x2="30" y2="32" />
           <line x1="30" y1="32" x2="8" y2="20" />
@@ -348,7 +348,7 @@ function IsoSvg({ type }: { type: IsoShapeType }) {
       );
     case "cylinder-v":
       return (
-        <svg className="w-full h-full text-stone-900" viewBox="0 0 60 60" {...sp}>
+        <svg className="w-full h-full text-on-surface" viewBox="0 0 60 60" {...sp}>
           <ellipse cx="30" cy="14" rx="14" ry="5" />
           <line x1="16" y1="14" x2="16" y2="46" />
           <line x1="44" y1="14" x2="44" y2="46" />
@@ -357,7 +357,7 @@ function IsoSvg({ type }: { type: IsoShapeType }) {
       );
     case "triangle-prism":
       return (
-        <svg className="w-full h-full text-stone-900" viewBox="0 0 60 60" {...sp}>
+        <svg className="w-full h-full text-on-surface" viewBox="0 0 60 60" {...sp}>
           <polygon points="14,46 30,12 46,46" />
           <polygon points="46,46 30,12 38,8 54,42" />
           <line x1="14" y1="46" x2="54" y2="42" />
@@ -365,7 +365,7 @@ function IsoSvg({ type }: { type: IsoShapeType }) {
       );
     case "rod":
       return (
-        <svg className="w-full h-full text-stone-900" viewBox="0 0 60 60" {...sp}>
+        <svg className="w-full h-full text-on-surface" viewBox="0 0 60 60" {...sp}>
           <line x1="12" y1="48" x2="48" y2="12" strokeWidth="1.5" />
           <circle cx="12" cy="48" r="4" />
           <circle cx="48" cy="12" r="4" />
@@ -373,7 +373,7 @@ function IsoSvg({ type }: { type: IsoShapeType }) {
       );
     case "cube-frame":
       return (
-        <svg className="w-full h-full text-stone-900" viewBox="0 0 60 60" {...sp}>
+        <svg className="w-full h-full text-on-surface" viewBox="0 0 60 60" {...sp}>
           <polygon points="30,8 52,20 52,44 30,56 8,44 8,20" />
           <line x1="30" y1="8" x2="30" y2="32" />
           <line x1="30" y1="32" x2="8" y2="20" />
@@ -383,13 +383,13 @@ function IsoSvg({ type }: { type: IsoShapeType }) {
       );
     case "stairs":
       return (
-        <svg className="w-full h-full text-stone-900" viewBox="0 0 60 60" {...sp}>
+        <svg className="w-full h-full text-on-surface" viewBox="0 0 60 60" {...sp}>
           <polyline points="8,52 18,52 18,42 28,42 28,32 38,32 38,22 48,22 48,12 56,12" />
         </svg>
       );
     case "spool":
       return (
-        <svg className="w-full h-full text-stone-900" viewBox="0 0 60 60" {...sp}>
+        <svg className="w-full h-full text-on-surface" viewBox="0 0 60 60" {...sp}>
           <ellipse cx="36" cy="30" rx="14" ry="6" />
           <path d="M 22 30 L 8 30" strokeWidth="1.5" />
           <line x1="36" y1="14" x2="36" y2="22" />
@@ -397,13 +397,13 @@ function IsoSvg({ type }: { type: IsoShapeType }) {
       );
     case "arc-c":
       return (
-        <svg className="w-full h-full text-stone-900" viewBox="0 0 60 60" {...sp}>
+        <svg className="w-full h-full text-on-surface" viewBox="0 0 60 60" {...sp}>
           <path d="M 44 12 A 20 20 0 1 0 44 48" strokeWidth="1.5" />
         </svg>
       );
     case "diamond-row":
       return (
-        <svg className="w-full h-full text-stone-900" viewBox="0 0 60 60" {...sp}>
+        <svg className="w-full h-full text-on-surface" viewBox="0 0 60 60" {...sp}>
           <polygon points="8,30 14,24 20,30 14,36" />
           <polygon points="20,30 26,24 32,30 26,36" />
           <polygon points="32,30 38,24 44,30 38,36" />
@@ -412,13 +412,13 @@ function IsoSvg({ type }: { type: IsoShapeType }) {
       );
     case "plus":
       return (
-        <svg className="w-full h-full text-stone-900" viewBox="0 0 60 60" {...sp}>
+        <svg className="w-full h-full text-on-surface" viewBox="0 0 60 60" {...sp}>
           <polygon points="24,8 36,8 36,24 52,24 52,36 36,36 36,52 24,52 24,36 8,36 8,24 24,24" />
         </svg>
       );
     case "cylinder-h":
       return (
-        <svg className="w-full h-full text-stone-900" viewBox="0 0 60 60" {...sp}>
+        <svg className="w-full h-full text-on-surface" viewBox="0 0 60 60" {...sp}>
           <ellipse cx="14" cy="30" rx="5" ry="14" />
           <line x1="14" y1="16" x2="46" y2="16" />
           <line x1="14" y1="44" x2="46" y2="44" />
@@ -427,7 +427,7 @@ function IsoSvg({ type }: { type: IsoShapeType }) {
       );
     case "wave":
       return (
-        <svg className="w-full h-full text-stone-900" viewBox="0 0 60 60" {...sp}>
+        <svg className="w-full h-full text-on-surface" viewBox="0 0 60 60" {...sp}>
           <path d="M 8 16 Q 18 8 28 16 T 48 16" strokeWidth="1.2" />
           <path d="M 8 30 Q 18 22 28 30 T 48 30" strokeWidth="1.2" />
           <path d="M 8 44 Q 18 36 28 44 T 48 44" strokeWidth="1.2" />
@@ -435,7 +435,7 @@ function IsoSvg({ type }: { type: IsoShapeType }) {
       );
     case "x-prism":
       return (
-        <svg className="w-full h-full text-stone-900" viewBox="0 0 60 60" {...sp}>
+        <svg className="w-full h-full text-on-surface" viewBox="0 0 60 60" {...sp}>
           <polygon points="14,8 24,8 30,18 36,8 46,8 36,22 46,36 36,36 30,26 24,36 14,36 24,22" />
           <line x1="14" y1="36" x2="20" y2="40" />
           <line x1="46" y1="36" x2="52" y2="40" />
@@ -443,7 +443,7 @@ function IsoSvg({ type }: { type: IsoShapeType }) {
       );
     case "tri-stack":
       return (
-        <svg className="w-full h-full text-stone-900" viewBox="0 0 60 60" {...sp} fill="currentColor">
+        <svg className="w-full h-full text-on-surface" viewBox="0 0 60 60" {...sp} fill="currentColor">
           <polygon points="12,40 18,28 24,40" />
           <polygon points="24,40 30,28 36,40" />
           <polygon points="36,40 42,28 48,40" />
@@ -451,7 +451,7 @@ function IsoSvg({ type }: { type: IsoShapeType }) {
       );
     case "L-prism":
       return (
-        <svg className="w-full h-full text-stone-900" viewBox="0 0 60 60" {...sp}>
+        <svg className="w-full h-full text-on-surface" viewBox="0 0 60 60" {...sp}>
           <polygon points="8,28 28,18 48,28 28,38" />
           <polygon points="28,38 48,28 48,44 28,54" />
           <polygon points="8,28 8,44 28,54 28,38" />
@@ -459,7 +459,7 @@ function IsoSvg({ type }: { type: IsoShapeType }) {
       );
     case "arc-stripes":
       return (
-        <svg className="w-full h-full text-stone-900" viewBox="0 0 60 60" {...sp}>
+        <svg className="w-full h-full text-on-surface" viewBox="0 0 60 60" {...sp}>
           <path d="M 12 50 A 22 22 0 0 1 48 14" strokeWidth="1" />
           <path d="M 16 50 A 18 18 0 0 1 48 18" strokeWidth="1" />
           <path d="M 20 50 A 14 14 0 0 1 48 22" strokeWidth="1" />
@@ -468,7 +468,7 @@ function IsoSvg({ type }: { type: IsoShapeType }) {
       );
     case "hex-prism":
       return (
-        <svg className="w-full h-full text-stone-900" viewBox="0 0 60 60" {...sp}>
+        <svg className="w-full h-full text-on-surface" viewBox="0 0 60 60" {...sp}>
           <polygon points="30,8 48,18 48,38 30,48 12,38 12,18" />
           <line x1="30" y1="8" x2="30" y2="48" />
           <line x1="12" y1="18" x2="30" y2="28" />
@@ -477,7 +477,7 @@ function IsoSvg({ type }: { type: IsoShapeType }) {
       );
     case "dot-circle":
       return (
-        <svg className="w-full h-full text-stone-900" viewBox="0 0 60 60" fill="currentColor">
+        <svg className="w-full h-full text-on-surface" viewBox="0 0 60 60" fill="currentColor">
           {Array.from({ length: 16 }).map((_, i) => {
             const angle = (i / 16) * Math.PI * 2;
             const x = 30 + Math.cos(angle) * 22;
@@ -488,7 +488,7 @@ function IsoSvg({ type }: { type: IsoShapeType }) {
       );
     case "wedge":
       return (
-        <svg className="w-full h-full text-stone-900" viewBox="0 0 60 60" {...sp}>
+        <svg className="w-full h-full text-on-surface" viewBox="0 0 60 60" {...sp}>
           <path d="M 30 30 L 30 8 A 22 22 0 0 1 52 30 Z" fill="currentColor" />
           <path d="M 30 30 L 8 30 A 22 22 0 0 1 30 8" />
           <line x1="30" y1="30" x2="14" y2="44" />
@@ -498,7 +498,7 @@ function IsoSvg({ type }: { type: IsoShapeType }) {
       );
     case "down-arrows":
       return (
-        <svg className="w-full h-full text-stone-900" viewBox="0 0 60 60" {...sp} fill="currentColor">
+        <svg className="w-full h-full text-on-surface" viewBox="0 0 60 60" {...sp} fill="currentColor">
           <polygon points="20,8 40,8 30,22" />
           <polygon points="20,22 40,22 30,36" />
           <polygon points="20,36 40,36 30,50" />
@@ -506,7 +506,7 @@ function IsoSvg({ type }: { type: IsoShapeType }) {
       );
     case "donut-dots":
       return (
-        <svg className="w-full h-full text-stone-900" viewBox="0 0 60 60" {...sp}>
+        <svg className="w-full h-full text-on-surface" viewBox="0 0 60 60" {...sp}>
           <circle cx="30" cy="30" r="22" />
           <circle cx="30" cy="30" r="10" />
           <g fill="currentColor">
@@ -520,7 +520,7 @@ function IsoSvg({ type }: { type: IsoShapeType }) {
       );
     case "bowtie":
       return (
-        <svg className="w-full h-full text-stone-900" viewBox="0 0 60 60" {...sp} fill="currentColor">
+        <svg className="w-full h-full text-on-surface" viewBox="0 0 60 60" {...sp} fill="currentColor">
           <polygon points="8,18 22,30 8,42" />
           <polygon points="52,18 38,30 52,42" />
           <circle cx="30" cy="30" r="3" />
@@ -528,7 +528,7 @@ function IsoSvg({ type }: { type: IsoShapeType }) {
       );
     case "dot-grid":
       return (
-        <svg className="w-full h-full text-stone-900" viewBox="0 0 60 60" fill="currentColor">
+        <svg className="w-full h-full text-on-surface" viewBox="0 0 60 60" fill="currentColor">
           {Array.from({ length: 6 }).map((_, r) =>
             Array.from({ length: 6 }).map((_, c) => (
               <circle key={`${r}-${c}`} cx={10 + c * 8} cy={10 + r * 8} r="1.4" />
@@ -538,13 +538,13 @@ function IsoSvg({ type }: { type: IsoShapeType }) {
       );
     case "arc-half":
       return (
-        <svg className="w-full h-full text-stone-900" viewBox="0 0 60 60" {...sp}>
+        <svg className="w-full h-full text-on-surface" viewBox="0 0 60 60" {...sp}>
           <path d="M 8 38 A 22 22 0 0 1 52 38" strokeWidth="1.5" />
         </svg>
       );
     case "cylinder-stripes":
       return (
-        <svg className="w-full h-full text-stone-900" viewBox="0 0 60 60" {...sp}>
+        <svg className="w-full h-full text-on-surface" viewBox="0 0 60 60" {...sp}>
           <ellipse cx="30" cy="14" rx="14" ry="5" />
           <line x1="16" y1="14" x2="16" y2="46" />
           <line x1="44" y1="14" x2="44" y2="46" />
@@ -556,7 +556,7 @@ function IsoSvg({ type }: { type: IsoShapeType }) {
       );
     case "dot-cloud":
       return (
-        <svg className="w-full h-full text-stone-900" viewBox="0 0 60 60" fill="currentColor">
+        <svg className="w-full h-full text-on-surface" viewBox="0 0 60 60" fill="currentColor">
           {[[22, 18], [30, 14], [38, 18], [16, 24], [24, 24], [32, 22], [40, 24], [46, 28], [18, 32], [26, 32], [34, 32], [42, 32], [22, 38], [30, 38], [38, 38], [28, 44], [36, 44]].map(([x, y], i) => (
             <circle key={i} cx={x} cy={y} r="1.5" />
           ))}
@@ -564,7 +564,7 @@ function IsoSvg({ type }: { type: IsoShapeType }) {
       );
     case "pacman":
       return (
-        <svg className="w-full h-full text-stone-900" viewBox="0 0 60 60" {...sp}>
+        <svg className="w-full h-full text-on-surface" viewBox="0 0 60 60" {...sp}>
           <path d="M 30 30 L 52 18 A 22 22 0 1 1 52 42 Z" fill="currentColor" />
           <line x1="20" y1="20" x2="14" y2="14" />
           <line x1="20" y1="40" x2="14" y2="46" />
@@ -573,14 +573,14 @@ function IsoSvg({ type }: { type: IsoShapeType }) {
       );
     case "down-triangles":
       return (
-        <svg className="w-full h-full text-stone-900" viewBox="0 0 60 60" {...sp} fill="currentColor">
+        <svg className="w-full h-full text-on-surface" viewBox="0 0 60 60" {...sp} fill="currentColor">
           <polygon points="22,12 38,12 30,24" />
           <polygon points="22,28 38,28 30,40" />
         </svg>
       );
     case "cube-inset":
       return (
-        <svg className="w-full h-full text-stone-900" viewBox="0 0 60 60" {...sp}>
+        <svg className="w-full h-full text-on-surface" viewBox="0 0 60 60" {...sp}>
           <polygon points="30,4 50,16 50,36 30,48 10,36 10,16" />
           <line x1="30" y1="4" x2="30" y2="48" />
           <line x1="10" y1="16" x2="30" y2="28" />
@@ -590,13 +590,13 @@ function IsoSvg({ type }: { type: IsoShapeType }) {
       );
     case "hex-small":
       return (
-        <svg className="w-full h-full text-stone-900" viewBox="0 0 60 60" {...sp}>
+        <svg className="w-full h-full text-on-surface" viewBox="0 0 60 60" {...sp}>
           <polygon points="30,18 42,24 42,38 30,44 18,38 18,24" />
         </svg>
       );
     case "cylinder-disc":
       return (
-        <svg className="w-full h-full text-stone-900" viewBox="0 0 60 60" {...sp}>
+        <svg className="w-full h-full text-on-surface" viewBox="0 0 60 60" {...sp}>
           <ellipse cx="34" cy="30" rx="14" ry="5" />
           <path d="M 20 30 A 14 5 0 0 1 48 30" />
           <line x1="20" y1="30" x2="20" y2="36" strokeWidth="1.5" />
@@ -606,13 +606,13 @@ function IsoSvg({ type }: { type: IsoShapeType }) {
       );
     case "triangle-solid":
       return (
-        <svg className="w-full h-full text-stone-900" viewBox="0 0 60 60" fill="currentColor">
+        <svg className="w-full h-full text-on-surface" viewBox="0 0 60 60" fill="currentColor">
           <polygon points="30,16 46,44 14,44" />
         </svg>
       );
     case "stairs-iso":
       return (
-        <svg className="w-full h-full text-stone-900" viewBox="0 0 60 60" {...sp}>
+        <svg className="w-full h-full text-on-surface" viewBox="0 0 60 60" {...sp}>
           <polygon points="8,40 16,36 24,40 16,44" />
           <polygon points="16,36 24,32 32,36 24,40" />
           <polygon points="24,32 32,28 40,32 32,36" />
@@ -622,7 +622,7 @@ function IsoSvg({ type }: { type: IsoShapeType }) {
       );
     case "coin":
       return (
-        <svg className="w-full h-full text-stone-900" viewBox="0 0 60 60" {...sp}>
+        <svg className="w-full h-full text-on-surface" viewBox="0 0 60 60" {...sp}>
           <ellipse cx="30" cy="26" rx="14" ry="6" />
           <path d="M 16 26 L 16 34 A 14 6 0 0 0 44 34 L 44 26" />
           <line x1="22" y1="26" x2="22" y2="34" />
@@ -632,7 +632,7 @@ function IsoSvg({ type }: { type: IsoShapeType }) {
       );
     case "cube-ports":
       return (
-        <svg className="w-full h-full text-stone-900" viewBox="0 0 60 60" {...sp}>
+        <svg className="w-full h-full text-on-surface" viewBox="0 0 60 60" {...sp}>
           <polygon points="30,6 52,18 52,42 30,54 8,42 8,18" />
           <line x1="30" y1="6" x2="30" y2="30" />
           <line x1="30" y1="30" x2="8" y2="18" />
@@ -644,27 +644,27 @@ function IsoSvg({ type }: { type: IsoShapeType }) {
       );
     case "arc-bridge":
       return (
-        <svg className="w-full h-full text-stone-900" viewBox="0 0 60 60" {...sp}>
+        <svg className="w-full h-full text-on-surface" viewBox="0 0 60 60" {...sp}>
           <path d="M 8 44 Q 30 8 52 44" strokeWidth="1.5" />
           <circle cx="30" cy="44" r="3" fill="currentColor" />
         </svg>
       );
     case "zigzag-v":
       return (
-        <svg className="w-full h-full text-stone-900" viewBox="0 0 60 60" {...sp}>
+        <svg className="w-full h-full text-on-surface" viewBox="0 0 60 60" {...sp}>
           <polyline points="24,8 36,16 24,24 36,32 24,40 36,48" strokeWidth="1.5" />
           <polyline points="20,12 32,20 20,28 32,36 20,44 32,52" strokeWidth="1.5" />
         </svg>
       );
     case "x-flat":
       return (
-        <svg className="w-full h-full text-stone-900" viewBox="0 0 60 60" {...sp} fill="currentColor">
+        <svg className="w-full h-full text-on-surface" viewBox="0 0 60 60" {...sp} fill="currentColor">
           <polygon points="14,14 22,14 30,22 38,14 46,14 36,28 46,46 38,46 30,34 22,46 14,46 24,28" />
         </svg>
       );
     case "cube-stack":
       return (
-        <svg className="w-full h-full text-stone-900" viewBox="0 0 60 60" {...sp}>
+        <svg className="w-full h-full text-on-surface" viewBox="0 0 60 60" {...sp}>
           <polygon points="14,30 22,26 30,30 22,34" />
           <polygon points="22,34 30,30 30,38 22,42" />
           <polygon points="14,30 14,38 22,42 22,34" />
@@ -675,14 +675,14 @@ function IsoSvg({ type }: { type: IsoShapeType }) {
       );
     case "back-arrows":
       return (
-        <svg className="w-full h-full text-stone-900" viewBox="0 0 60 60" {...sp} fill="currentColor">
+        <svg className="w-full h-full text-on-surface" viewBox="0 0 60 60" {...sp} fill="currentColor">
           <polygon points="42,16 42,44 24,30" />
           <polygon points="28,16 28,44 10,30" />
         </svg>
       );
     case "barrel":
       return (
-        <svg className="w-full h-full text-stone-900" viewBox="0 0 60 60" {...sp}>
+        <svg className="w-full h-full text-on-surface" viewBox="0 0 60 60" {...sp}>
           <ellipse cx="44" cy="30" rx="6" ry="14" />
           <line x1="44" y1="16" x2="14" y2="20" />
           <line x1="44" y1="44" x2="14" y2="40" />
@@ -694,7 +694,7 @@ function IsoSvg({ type }: { type: IsoShapeType }) {
       );
     case "wave-s":
       return (
-        <svg className="w-full h-full text-stone-900" viewBox="0 0 60 60" {...sp}>
+        <svg className="w-full h-full text-on-surface" viewBox="0 0 60 60" {...sp}>
           <path d="M 22 8 Q 32 18 22 28 T 22 48" strokeWidth="1.5" />
           <path d="M 38 8 Q 28 18 38 28 T 38 48" strokeWidth="1.5" />
         </svg>

@@ -104,31 +104,94 @@ function destReplaceable(p: string): boolean {
   return !st.isSymbolicLink() && st.isFile() && st.nlink === 1;
 }
 
-/** Copy `source` onto `dest` so secret bytes (a) never enter JS memory [copyFileSync does the byte
- *  copy] and (b) are never written THROUGH a pre-existing inode at dest: we copy into a freshly
- *  created (COPYFILE_EXCL) temp in dest's dir, then atomically rename over dest. Rename swaps the
- *  directory entry — any pre-existing hardlink/symlink inode is unlinked, never written. Caller must
- *  have already verified dest's parent containment and that dest is replaceable. */
-function copyOntoFresh(source: string, dest: string): boolean {
+/** fd-first copy of `source` onto `dest` (OPR.0.4.3.23 secret-boundary B1 hardening). Closes the
+ *  check-then-use gap that a path-based copy leaves open: an earlier lstat guard, then a copy that
+ *  re-resolves the SOURCE PATH, can be redirected by an inode swap in the window (a crash, or a
+ *  concurrent legitimate rig on the same auth home) — reading the wrong inode, a torn file, or briefly
+ *  leaving a wider-than-0600 temp (CERT FIO45-C). Path-based pre-checks cannot close that race, so the
+ *  authoritative check moves onto the OPENED fd:
+ *   (1) SOURCE: openSync with O_NOFOLLOW (a final-component symlink swap fails closed), then fstat ON
+ *       THE FD and validate the opened inode (regular file, nlink === 1 — a hardlink shares an inode
+ *       that may live outside the boundary), and — when the caller passes its earlier lstat — confirm
+ *       dev/ino still match (the inode was not swapped in the window). Read bytes FROM the fd; the
+ *       source path is never re-resolved after the open.
+ *   (2) DEST: openSync the temp with O_CREAT|O_EXCL (fresh inode; never a pre-existing hardlink/symlink)
+ *       at 0600 AT creation (removes the create-then-chmod window), fchmod on the fd to pin 0600
+ *       regardless of umask, write the source bytes, fsync, then renameSync as the SOLE atomic publish
+ *       (a crash BEFORE the rename leaves the prior dest byte-intact — a strength we preserve).
+ *  The temp stays co-located in dest's dir so the rename never crosses devices. The transient byte
+ *  buffer is the only time secret bytes touch JS memory; it is never printed and is scrubbed in
+ *  `finally`. Caller must still have verified dest's parent containment and that dest is replaceable
+ *  (the lstat pre-checks stay as cheap fail-fast; this fd validation is the authoritative layer).
+ *  Exported for the fd-first / crash-safety leak-hunt tests. */
+export function copyOntoFresh(
+  source: string,
+  dest: string,
+  expectSrc?: { dev: number; ino: number },
+): boolean {
   const tmp = `${dest}.tmp-${process.pid}`;
+  // O_NOFOLLOW fails the open closed if a final-component symlink was swapped in. (O_CLOEXEC is omitted:
+  // it is undefined on macOS Node and absent from @types/node, and no child process is spawned during
+  // this fd's synchronous lifetime, so close-on-exec would be a no-op here.)
+  const NOFOLLOW = fs.constants.O_NOFOLLOW ?? 0;
+  let srcFd = -1;
+  let destFd = -1;
+  let data: Buffer | null = null;
   try {
     try {
-      fs.rmSync(tmp, { force: true });
+      fs.rmSync(tmp, { force: true }); // clear any stale temp so the O_EXCL create below succeeds
     } catch {
       /* ignore */
     }
-    fs.copyFileSync(source, tmp, fs.constants.COPYFILE_EXCL); // fresh inode; never through an existing one
-    fs.chmodSync(tmp, 0o600);
-    fs.renameSync(tmp, dest); // atomic dir-entry swap; old inode unlinked, not written
-    fs.chmodSync(dest, 0o600);
+    // (1) fd-first source read: open, then validate ON THE FD — never re-resolve the source path.
+    srcFd = fs.openSync(source, fs.constants.O_RDONLY | NOFOLLOW);
+    const st = fs.fstatSync(srcFd);
+    if (!st.isFile() || st.nlink !== 1) return false; // authoritative: regular file, single link
+    if (expectSrc && (st.dev !== expectSrc.dev || st.ino !== expectSrc.ino)) return false; // swapped in the window
+    const size = st.size;
+    data = Buffer.allocUnsafe(size);
+    let read = 0;
+    while (read < size) {
+      const n = fs.readSync(srcFd, data, read, size - read, read);
+      if (n === 0) break;
+      read += n;
+    }
+    if (read !== size) return false; // torn/truncated read (the source changed under us) → fail safe
+    // (2) fd-first dest temp: fresh inode (O_EXCL), 0600 AT creation, byte-copy, fsync, atomic rename.
+    destFd = fs.openSync(tmp, fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY | NOFOLLOW, 0o600);
+    fs.fchmodSync(destFd, 0o600); // pin 0600 on the fd regardless of umask (no path chmod window)
+    let written = 0;
+    while (written < size) {
+      written += fs.writeSync(destFd, data, written, size - written);
+    }
+    fs.fsyncSync(destFd); // durability before the sole atomic publish
+    fs.closeSync(destFd);
+    destFd = -1;
+    fs.renameSync(tmp, dest); // atomic dir-entry swap; any old dest inode is unlinked, never written
     return true;
   } catch {
+    return false;
+  } finally {
+    if (srcFd >= 0) {
+      try {
+        fs.closeSync(srcFd);
+      } catch {
+        /* ignore */
+      }
+    }
+    if (destFd >= 0) {
+      try {
+        fs.closeSync(destFd);
+      } catch {
+        /* ignore */
+      }
+    }
+    if (data) data.fill(0); // scrub the secret bytes out of the transient JS buffer
     try {
-      fs.rmSync(tmp, { force: true });
+      fs.rmSync(tmp, { force: true }); // remove any orphan temp (no-op after a successful rename)
     } catch {
       /* ignore */
     }
-    return false;
   }
 }
 
@@ -236,7 +299,8 @@ export type AuthSaveResult =
  *  via copyFileSync — contents never enter JS memory; result reports name/path/mode only. */
 export function authSave(paths: CodexAuthPaths, name: string): AuthSaveResult {
   if (!validateProfileName(name)) return { ok: false, reason: "invalid_profile" };
-  if (!isFile(paths.activeAuth)) return { ok: false, reason: "not_configured" };
+  const srcStat = lstatSafe(paths.activeAuth);
+  if (srcStat === null || !srcStat.isFile()) return { ok: false, reason: "not_configured" };
   const target = path.join(paths.profileDir, `${name}.json`);
   // Refuse a symlinked profile-dir BEFORE mkdir/chmod so we never follow it out of CODEX_HOME or
   // mutate the outside target's mode.
@@ -253,7 +317,9 @@ export function authSave(paths: CodexAuthPaths, name: string): AuthSaveResult {
   // through an inode that lives outside CODEX_HOME).
   if (!realDirContained(paths.profileDir, paths.codexHome)) return { ok: false, reason: "unsafe_path" };
   if (!destReplaceable(target)) return { ok: false, reason: "unsafe_path" };
-  if (!copyOntoFresh(paths.activeAuth, target)) return { ok: false, reason: "io_error" };
+  // Thread the earlier lstat so copyOntoFresh can confirm the opened fd is still the same inode
+  // (dev/ino) it was checked as — a swap of the active auth in the check-then-use window fails safe.
+  if (!copyOntoFresh(paths.activeAuth, target, { dev: srcStat.dev, ino: srcStat.ino })) return { ok: false, reason: "io_error" };
   return { ok: true, name, path: target, mode: "600" };
 }
 
@@ -266,7 +332,8 @@ export type AuthSwitchResult =
 export function authSwitch(paths: CodexAuthPaths, name: string): AuthSwitchResult {
   if (!validateProfileName(name)) return { ok: false, reason: "invalid_profile" };
   const source = path.join(paths.profileDir, `${name}.json`);
-  if (lstatSafe(source) === null) return { ok: false, reason: "missing_profile" };
+  const srcStat = lstatSafe(source);
+  if (srcStat === null) return { ok: false, reason: "missing_profile" };
   if (!isSafeProfileFile(source, paths.profileDir)) return { ok: false, reason: "unsafe_path" };
   // Destination guard: a symlink/non-regular OR hardlinked (nlink>1) active auth would let the copy
   // write the selected profile's SECRET bytes THROUGH an inode living outside CODEX_HOME. Refuse it
@@ -282,7 +349,8 @@ export function authSwitch(paths: CodexAuthPaths, name: string): AuthSwitchResul
     return { ok: false, reason: "io_error" };
   }
   if (!realDirContained(paths.codexHome, paths.codexHome)) return { ok: false, reason: "unsafe_path" };
-  if (!copyOntoFresh(source, paths.activeAuth)) return { ok: false, reason: "io_error" };
+  // dev/ino continuity: the opened profile fd must still be the inode we checked (swap in the window fails safe).
+  if (!copyOntoFresh(source, paths.activeAuth, { dev: srcStat.dev, ino: srcStat.ino })) return { ok: false, reason: "io_error" };
   return {
     ok: true,
     name,

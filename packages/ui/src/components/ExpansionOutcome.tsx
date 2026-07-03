@@ -7,7 +7,7 @@ export function ExpansionOutcome({ result }: { result: ExpandRigResult }) {
         Status: {result.status} — Pod: {result.podNamespace}
       </div>
       {result.nodes?.map((n) => (
-        <div key={n.logicalId} className={n.status === "launched" ? "text-stone-700" : "text-red-600"}>
+        <div key={n.logicalId} className={n.status === "launched" ? "text-on-surface" : "text-red-600"}>
           [{n.status === "launched" ? "OK" : "FAIL"}] {n.logicalId}{n.error ? ` — ${n.error}` : ""}
         </div>
       ))}

@@ -9,7 +9,7 @@ import {
   isActivityStale,
   getTimeInState,
 } from "../../lib/activity-visuals.js";
-import type { AgentActivitySummary } from "../../hooks/useNodeInventory.js";
+import type { AgentActivitySummary, SeatIdentityVerdictSummary } from "../../hooks/useNodeInventory.js";
 import { cn } from "../../lib/utils.js";
 import { useCmuxLaunch } from "../../hooks/useCmuxLaunch.js";
 import { ActivityRing } from "./ActivityRing.js";
@@ -46,6 +46,9 @@ interface HybridAgentNodeData {
   contextTotalOutputTokens?: number | null;
   agentActivity?: AgentActivitySummary | null;
   terminalActive?: boolean | null;
+  // OPR.0.4.3.19 — liveness identity verdict; mismatch/pane_missing overrides
+  // terminalActive so the dot never renders active/running green.
+  identityVerdict?: SeatIdentityVerdictSummary | null;
   currentQitems?: unknown[];
   rigId?: string | null;
   activityRing?: TopologyActivityVisual;
@@ -57,7 +60,7 @@ function isCoreRole(role: string | null | undefined): boolean {
 }
 
 function contextClass(percent: number | null | undefined, fresh: boolean | undefined): string {
-  if (typeof percent !== "number") return "text-stone-300";
+  if (typeof percent !== "number") return "text-on-surface-variant";
   const tone = percent >= 80
     ? "text-red-600"
     : percent >= 60
@@ -75,12 +78,12 @@ function HybridPodGroupNodeInner({ data }: { data: HybridPodGroupNodeData }) {
   return (
     <div
       data-testid="hybrid-pod-group-node"
-      className="relative h-full w-full border border-dashed border-stone-400/55 bg-stone-50/25"
+      className="relative h-full w-full border border-dashed border-outline/55 bg-background/25"
     >
-      <div className="absolute left-2 top-2 flex items-center gap-2 font-mono text-[9px] lowercase tracking-[0.02em] text-stone-600">
+      <div className="absolute left-2 top-2 flex items-center gap-2 font-mono text-[9px] lowercase tracking-[0.02em] text-on-surface-variant">
         <span>{label}</span>
         {typeof data.agentCount === "number" ? (
-          <span className="text-stone-400">{data.agentCount}</span>
+          <span className="text-on-surface-variant">{data.agentCount}</span>
         ) : null}
       </div>
       <Handle type="target" position={Position.Left} className="opacity-0 pointer-events-none" />
@@ -113,7 +116,7 @@ function HybridAgentNodeInner({ data }: { data: HybridAgentNodeData }) {
   const cmuxLaunch = useCmuxLaunch();
   const core = isCoreRole(data.role);
   const isInfra = data.nodeKind === "infrastructure";
-  const { state: activityState, source: activitySource } = getActivityStateWithSource(data.agentActivity, data.terminalActive);
+  const { state: activityState, source: activitySource } = getActivityStateWithSource(data.agentActivity, data.terminalActive, data.identityVerdict);
   const activityLabel = getActivityLabel(activityState);
   const activityBgClass = getActivityBgClass(activityState);
   const activityAnimClass = getActivityAnimationClass(activityState);
@@ -125,7 +128,7 @@ function HybridAgentNodeInner({ data }: { data: HybridAgentNodeData }) {
   const tokenTotal = sumTokenCounts(data.contextTotalInputTokens, data.contextTotalOutputTokens);
   const tokenLabel = formatCompactTokenCount(tokenTotal);
   const tokenTitle = formatTokenTotalTitle(data.contextTotalInputTokens, data.contextTotalOutputTokens);
-  const hoverIconClass = "inline-flex h-6 w-6 items-center justify-center border border-outline-variant bg-white/90 text-stone-700 opacity-0 shadow-[1px_1px_0_rgba(46,52,46,0.14)] transition-opacity hover:bg-stone-100 hover:text-stone-950 focus:!opacity-100 focus:opacity-100 focus:outline-none focus:ring-2 focus:ring-stone-900/20 group-hover:!opacity-100 group-hover:opacity-100 group-focus-within:!opacity-100 group-focus-within:opacity-100";
+  const hoverIconClass = "inline-flex h-6 w-6 items-center justify-center border border-outline-variant bg-surface-lowest/90 text-on-surface opacity-0 shadow-[1px_1px_0_rgba(46,52,46,0.14)] transition-opacity hover:bg-surface-low hover:text-on-surface focus:!opacity-100 focus:opacity-100 focus:outline-none focus:ring-2 focus:ring-on-surface/20 group-hover:!opacity-100 group-hover:opacity-100 group-focus-within:!opacity-100 group-focus-within:opacity-100";
 
   const card = (
     <div
@@ -139,7 +142,7 @@ function HybridAgentNodeInner({ data }: { data: HybridAgentNodeData }) {
       data-activity-card-state={activityCard.state}
       data-activity-card-flash={activityCard.flash ?? "none"}
       className={cn(
-        "group relative h-full w-full select-none border bg-white/40 backdrop-blur-[8px] hard-shadow transition-[background-color,border-color,box-shadow] duration-300",
+        "group relative h-full w-full select-none border bg-surface-lowest/40 backdrop-blur-[8px] hard-shadow transition-[background-color,border-color,box-shadow] duration-300",
         getActivityCardClasses({
           state: activityCard.state,
           flash: activityCard.flash,
@@ -149,7 +152,7 @@ function HybridAgentNodeInner({ data }: { data: HybridAgentNodeData }) {
           ? "border-red-700"
           : data.startupStatus === "attention_required"
             ? "border-amber-700"
-            : "border-stone-900",
+            : "border-on-surface",
       )}
     >
       <Handle type="target" position={Position.Left} className="opacity-0" />
@@ -157,10 +160,10 @@ function HybridAgentNodeInner({ data }: { data: HybridAgentNodeData }) {
         className={cn(
           "flex items-center justify-between gap-1 px-2 py-1 font-mono text-[8px]",
           isInfra
-            ? "bg-stone-500 text-white border-b border-stone-900"
+            ? "bg-outline text-white border-b border-on-surface"
             : core
-              ? "bg-stone-900 text-white"
-              : "border-b border-stone-900 bg-stone-200 text-stone-900",
+              ? "bg-inverse-surface text-background"
+              : "border-b border-on-surface bg-surface-high text-on-surface",
         )}
       >
         <span className="truncate font-bold">{displayAgentName(data.logicalId)}</span>
@@ -241,7 +244,7 @@ function HybridAgentNodeInner({ data }: { data: HybridAgentNodeData }) {
         </>
       ) : null}
       <div className="space-y-1 px-2 py-1.5">
-        <div className="truncate font-mono text-[8px] leading-tight text-stone-500">
+        <div className="truncate font-mono text-[8px] leading-tight text-on-surface-variant">
           {data.canonicalSessionName ?? data.logicalId}
         </div>
         <div className="min-w-0">
@@ -254,7 +257,7 @@ function HybridAgentNodeInner({ data }: { data: HybridAgentNodeData }) {
             className="max-w-full"
           />
           {!runtimeTitle && (data.resolvedSpecName || data.profile) ? (
-            <span className="ml-1 font-mono text-[7px] uppercase tracking-[0.12em] text-stone-400">
+            <span className="ml-1 font-mono text-[7px] uppercase tracking-[0.12em] text-on-surface-variant">
               {data.resolvedSpecName || data.profile}
             </span>
           ) : null}
@@ -269,7 +272,7 @@ function HybridAgentNodeInner({ data }: { data: HybridAgentNodeData }) {
           <div
             className={cn(
               "font-mono text-[13px] font-bold leading-none tracking-[0.02em]",
-              tokenLabel ? "text-stone-500" : "text-stone-300",
+              tokenLabel ? "text-on-surface-variant" : "text-on-surface-variant",
             )}
             data-testid="hybrid-token-total"
             title={tokenTitle ?? "Token sample unavailable"}

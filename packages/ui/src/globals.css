@@ -31,7 +31,7 @@
     --on-surface-variant: 108 5% 36%;   /* #5b615a — secondary text */
 
     /* Technical annotations */
-    --secondary: 213 15% 39%;           /* #546073 — lines, crosshairs, edge connectors */
+    --secondary: 213 15% 39%;           /* hsl(var(--secondary)) — lines, crosshairs, edge connectors */
     --secondary-container: 220 39% 91%; /* #d8e3fa */
 
     /* Stamped alerts */
@@ -99,23 +99,23 @@
   .reg-mark::before,
   .reg-mark::after,
   .reg-mark > .reg-tl::before,
-  .reg-mark > .reg-tl::after { content: ''; position: absolute; background-color: #546073; }
+  .reg-mark > .reg-tl::after { content: ''; position: absolute; background-color: hsl(var(--secondary)); }
 
   .reg-tl { position: absolute; top: 0; left: 0; width: 0; height: 0; }
-  .reg-tl::before { content: ''; position: absolute; top: 0; left: 0; width: 1px; height: 8px; background-color: #546073; }
-  .reg-tl::after  { content: ''; position: absolute; top: 0; left: 0; width: 8px; height: 1px; background-color: #546073; }
+  .reg-tl::before { content: ''; position: absolute; top: 0; left: 0; width: 1px; height: 8px; background-color: hsl(var(--secondary)); }
+  .reg-tl::after  { content: ''; position: absolute; top: 0; left: 0; width: 8px; height: 1px; background-color: hsl(var(--secondary)); }
 
   .reg-tr { position: absolute; top: 0; right: 0; width: 0; height: 0; }
-  .reg-tr::before { content: ''; position: absolute; top: 0; right: 0; width: 1px; height: 8px; background-color: #546073; }
-  .reg-tr::after  { content: ''; position: absolute; top: 0; right: 0; width: 8px; height: 1px; background-color: #546073; }
+  .reg-tr::before { content: ''; position: absolute; top: 0; right: 0; width: 1px; height: 8px; background-color: hsl(var(--secondary)); }
+  .reg-tr::after  { content: ''; position: absolute; top: 0; right: 0; width: 8px; height: 1px; background-color: hsl(var(--secondary)); }
 
   .reg-bl { position: absolute; bottom: 0; left: 0; width: 0; height: 0; }
-  .reg-bl::before { content: ''; position: absolute; bottom: 0; left: 0; width: 1px; height: 8px; background-color: #546073; }
-  .reg-bl::after  { content: ''; position: absolute; bottom: 0; left: 0; width: 8px; height: 1px; background-color: #546073; }
+  .reg-bl::before { content: ''; position: absolute; bottom: 0; left: 0; width: 1px; height: 8px; background-color: hsl(var(--secondary)); }
+  .reg-bl::after  { content: ''; position: absolute; bottom: 0; left: 0; width: 8px; height: 1px; background-color: hsl(var(--secondary)); }
 
   .reg-br { position: absolute; bottom: 0; right: 0; width: 0; height: 0; }
-  .reg-br::before { content: ''; position: absolute; bottom: 0; right: 0; width: 1px; height: 8px; background-color: #546073; }
-  .reg-br::after  { content: ''; position: absolute; bottom: 0; right: 0; width: 8px; height: 1px; background-color: #546073; }
+  .reg-br::before { content: ''; position: absolute; bottom: 0; right: 0; width: 1px; height: 8px; background-color: hsl(var(--secondary)); }
+  .reg-br::after  { content: ''; position: absolute; bottom: 0; right: 0; width: 8px; height: 1px; background-color: hsl(var(--secondary)); }
 }
 
 /* === VELLUM OVERLAYS === */
@@ -137,12 +137,12 @@
   .crosshair::before {
     content: ''; position: absolute;
     top: 50%; left: -5px; right: -5px;
-    height: 0.5px; background: #546073; opacity: 0.5;
+    height: 0.5px; background: hsl(var(--secondary)); opacity: 0.5;
   }
   .crosshair::after {
     content: ''; position: absolute;
     left: 50%; top: -5px; bottom: -5px;
-    width: 0.5px; background: #546073; opacity: 0.5;
+    width: 0.5px; background: hsl(var(--secondary)); opacity: 0.5;
   }
 }
 
@@ -150,7 +150,7 @@
 
 @layer components {
   .hard-shadow { box-shadow: 2px 2px 0px #2e342e; }
-  .hard-shadow-light { box-shadow: 4px 4px 0px #e5e9e2; }
+  .hard-shadow-light { box-shadow: 4px 4px 0px hsl(var(--surface-container-high)); }
   .hard-shadow-hover:hover { box-shadow: 1px 1px 0px #2e342e; translate: 1px 1px; }
 }
 
@@ -307,7 +307,7 @@
     100% { background-position: 200% 0; }
   }
   .shimmer {
-    background: linear-gradient(90deg, #ecefe8 25%, #dfe4dc 50%, #ecefe8 75%);
+    background: linear-gradient(90deg, hsl(var(--surface-container)) 25%, hsl(var(--surface-container-highest)) 50%, hsl(var(--surface-container)) 75%);
     background-size: 200% 100%;
     animation: shimmer 2s ease-in-out infinite;
   }
@@ -336,7 +336,7 @@
     fill: hsl(var(--on-surface)) !important;
   }
   .react-flow__handle {
-    background-color: #546073 !important;
+    background-color: hsl(var(--secondary)) !important;
     border: none !important;
     width: 6px !important;
     height: 6px !important;
@@ -573,3 +573,115 @@
     transform: none;
   }
 }
+
+/* ============================================================================
+   === OPR.0.4.3.29 — VELLUM DARK (the first new theme) ===
+   ----------------------------------------------------------------------------
+   PART A — the `.dark {}` token block. Founder-approved "Vellum Dark" palette
+   (source: slice 29 twin-mockup dark-theme.css Part A, pasted verbatim). It
+   re-declares the same token names `:root` (above) defines with dark values; the
+   `hsl(var(--token))` cascade then flips every token-backed component. Scoped
+   under `.dark`, so this is INERT until the `.dark` class is on <html> — light
+   (`:root`) stays pixel-identical when dark is off (the regression floor).
+
+   Palette principle (founder + PRD): NOT a mechanical invert. Warm-vellum hue
+   family preserved (a dark tactical dossier); backgrounds drop to low lightness,
+   ink rises, and SATURATED accents (blue / red / green) get HIGHER lightness so
+   contrast holds on the dark ground. FLAT / RECESSED elevation — the lightest
+   surface ≈ black; depth is carried by borders + the hard-shadow offset, not a
+   rising gray ramp.
+
+   NOTE ON SCOPE (Part B / token-bypass inventory): the mockup's Part B (raw
+   Tailwind palette utilities in components — bg-white/NN, bg-stone-*, text-stone-*,
+   border-stone-*) is a BYPASS INVENTORY, not shipped here as a shim. It is
+   delivered as a finding doc for a follow-up per-component token conversion. The
+   `.dark` variants below fix ONLY the escape hatches that are hardcoded WITHIN
+   this stylesheet (co-located with their light rule = the real fix, not a
+   `[class*="bg-white/"]` override hack). See the slice PART-B bypass inventory.
+   ========================================================================== */
+
+.dark {
+  /* Paper surfaces → warm charcoal. FLAT / RECESSED (do NOT ramp lighter per
+     nesting): base cards sit a hair above the ground; MORE-nested surfaces go
+     DARKER (toward black). Range compressed to 7.5–9.5% L; depth = borders +
+     hard-shadow offset. */
+  --background: 120 8% 7%;                   /* #111311 — warm near-black ground */
+  --surface-container-lowest: 120 6% 9.5%;   /* #171917 — base card: a hair above ground */
+  --surface-container-low: 120 5% 9%;        /* slightly recessed */
+  --surface-container: 120 5% 8.5%;          /* nested panels recede */
+  --surface-container-high: 120 5% 8%;       /* deeper nesting = darker */
+  --surface-container-highest: 120 4% 7.5%;  /* most-nested ≈ ground */
+
+  /* Ink → high lightness, warm-green tint kept. */
+  --on-surface: 100 10% 90%;               /* #e4e8e0 — primary text */
+  --on-surface-variant: 108 6% 66%;        /* #a3a99f — secondary text */
+
+  /* Technical blue — HIGHER L + a touch more sat to read on dark. */
+  --secondary: 213 30% 70%;                /* #92abcf — lines / crosshairs / edges */
+  --secondary-container: 220 24% 24%;      /* #2f3a4c */
+
+  /* Stamped red — saturated → HIGHER lightness in dark. */
+  --tertiary: 2 72% 64%;                   /* #e26562 — critical / destructive ink */
+  --error: 0 62% 62%;                      /* #dc5b5b */
+
+  /* Interactive — primary lifted to a light warm neutral so it reads on dark. */
+  --primary: 100 6% 76%;                   /* #bfc4bd */
+  --inverse-surface: 100 12% 92%;          /* dark theme's "inverse" is now LIGHT */
+
+  /* Borders → mid, subtle on dark. */
+  --outline: 108 5% 40%;                   /* #616b5f */
+  --outline-variant: 108 6% 32%;           /* #4b5349 — ghost borders at 15% opacity */
+
+  /* Success green — HIGHER lightness for dark contrast. */
+  --success: 145 52% 52%;                  /* #43c684 */
+
+  /* Warning amber — slightly brighter for dark. */
+  --warning: 42 92% 60%;                   /* #f6b13a */
+
+  /* shadcn compat aliases reference the base tokens above (var(--…)) → they
+     inherit the dark values automatically (--foreground/--card/--border/--input/
+     --ring/--muted/--destructive/--accent/--popover). */
+  --destructive-foreground: 0 0% 100%;
+}
+
+/* --- Co-located .dark variants for the hardcoded-hex/rgba escape hatches that
+   live in THIS stylesheet (real fix; no component shim). Unlayered rules win
+   over the @layer components light rules; !important is used only where a rule
+   must beat a keyframe animation (activity cards). --- */
+
+/* Hard-shadow ink #2e342e → black depth on dark. */
+.dark .hard-shadow { box-shadow: 2px 2px 0px #000000; }
+.dark .hard-shadow-hover:hover { box-shadow: 1px 1px 0px #000000; }
+
+/* Body dot-grid #d1d1cf (light) → a faint dark dot on the near-black ground. */
+.dark body {
+  background-image: radial-gradient(hsl(120 6% 22%) 1px, transparent 1px);
+}
+
+/* Vellum translucent overlays were white-tinted → tint dark, or they glow white. */
+.dark .vellum { background: rgba(31, 34, 31, 0.5); }
+.dark .vellum-heavy { background: rgba(31, 34, 31, 0.72); }
+
+/* Topology agent-card fills (activity-card-*) hardcode light pastels + animate
+   the same. Founder direction: STATE is a small accent (the activity DOT + the
+   thin inset ring), NOT a full-card wash — node BODIES stay uniformly dark. The
+   !important beats the running keyframe animations (important author > animation
+   in the cascade), so the body holds dark mid-pulse; the inset colored ring in
+   the base rule remains as the small state accent. */
+.dark .activity-card-surface,
+.dark .activity-card-active,
+.dark .activity-card-needs-input,
+.dark .activity-card-blocked {
+  background-color: hsl(var(--surface-container-lowest)) !important;
+}
+
+/* Pod-group slab (founder-handed, HybridTopologyNodes:78). The visible slab surface
+   is the HybridPodGroupNode component div, now tokenized (bg-background/25 +
+   border-outline), so the token cascade carries dark. xyflow v12 puts NO default
+   background on the .react-flow__node-podGroup wrapper (verified against the installed
+   @xyflow/react/dist/style.css — no node-group / custom-type bg rule), but the mockup
+   warned a STACKED react-flow wrapper could carry a light gray in a future default-style
+   change. Defensively force the wrapper transparent under .dark so no stacked light gray
+   can ever win; the component div's own token surface remains the visible fill. Live-browser
+   QC still owns the final visual confirmation of the stacked-layer behavior. */
+.dark .react-flow__node-podGroup { background: transparent !important; }

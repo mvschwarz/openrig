@@ -66,10 +66,10 @@ export function ClaudeCompactionPolicyForm() {
     return (
       <section
         data-testid="claude-compaction-policy-form"
-        className="border border-outline-variant p-5 bg-white/50"
+        className="border border-outline-variant p-5 bg-surface-lowest/50"
       >
         <SectionHeader tone="muted">Policy</SectionHeader>
-        <h2 className="font-headline text-headline-sm font-bold tracking-tight uppercase text-stone-900 mt-1">
+        <h2 className="font-headline text-headline-sm font-bold tracking-tight uppercase text-on-surface mt-1">
           Claude Auto-Compaction
         </h2>
         {isLoading && (
@@ -142,10 +142,10 @@ function PolicyFormBody({ data, setSetting }: PolicyFormBodyProps) {
   return (
     <section
       data-testid="claude-compaction-policy-form"
-      className="border border-outline-variant p-5 bg-white/50"
+      className="border border-outline-variant p-5 bg-surface-lowest/50"
     >
       <SectionHeader tone="muted">Policy</SectionHeader>
-      <h2 className="font-headline text-headline-sm font-bold tracking-tight uppercase text-stone-900 mt-1">
+      <h2 className="font-headline text-headline-sm font-bold tracking-tight uppercase text-on-surface mt-1">
         Claude Auto-Compaction
       </h2>
       <p className="mt-2 text-sm text-on-surface-variant max-w-prose">
@@ -162,7 +162,7 @@ function PolicyFormBody({ data, setSetting }: PolicyFormBodyProps) {
         onSubmit={handleSubmit}
         data-testid="claude-compaction-policy-form-element"
       >
-        <label className="inline-flex items-center gap-2 text-sm text-stone-900">
+        <label className="inline-flex items-center gap-2 text-sm text-on-surface">
           <input
             type="checkbox"
             data-testid="claude-compaction-enabled"
@@ -173,7 +173,7 @@ function PolicyFormBody({ data, setSetting }: PolicyFormBodyProps) {
         </label>
 
         <div className="flex flex-col gap-1">
-          <label htmlFor="claude-compaction-threshold" className="text-sm font-medium text-stone-900">
+          <label htmlFor="claude-compaction-threshold" className="text-sm font-medium text-on-surface">
             Threshold percentage
           </label>
           <input
@@ -198,7 +198,7 @@ function PolicyFormBody({ data, setSetting }: PolicyFormBodyProps) {
         </div>
 
         <div className="flex flex-col gap-1">
-          <label htmlFor="claude-compaction-pre-compact-instruction" className="text-sm font-medium text-stone-900">
+          <label htmlFor="claude-compaction-pre-compact-instruction" className="text-sm font-medium text-on-surface">
             Pre-compaction prep message
           </label>
           <textarea
@@ -217,7 +217,7 @@ function PolicyFormBody({ data, setSetting }: PolicyFormBodyProps) {
         </div>
 
         <div className="flex flex-col gap-1">
-          <label htmlFor="claude-compaction-compact-instruction" className="text-sm font-medium text-stone-900">
+          <label htmlFor="claude-compaction-compact-instruction" className="text-sm font-medium text-on-surface">
             Compaction instruction
           </label>
           <textarea
@@ -236,7 +236,7 @@ function PolicyFormBody({ data, setSetting }: PolicyFormBodyProps) {
         </div>
 
         <div className="flex flex-col gap-1">
-          <label htmlFor="claude-compaction-inline" className="text-sm font-medium text-stone-900">
+          <label htmlFor="claude-compaction-inline" className="text-sm font-medium text-on-surface">
             Post-compaction restore instruction (inline)
           </label>
           <textarea
@@ -256,7 +256,7 @@ function PolicyFormBody({ data, setSetting }: PolicyFormBodyProps) {
         </div>
 
         <div className="flex flex-col gap-1">
-          <label htmlFor="claude-compaction-file" className="text-sm font-medium text-stone-900">
+          <label htmlFor="claude-compaction-file" className="text-sm font-medium text-on-surface">
             Post-compaction restore instruction (file path)
           </label>
           <input
@@ -276,7 +276,7 @@ function PolicyFormBody({ data, setSetting }: PolicyFormBodyProps) {
         </div>
 
         <div className="flex flex-col gap-1">
-          <label htmlFor="claude-compaction-post-restore-audit" className="text-sm font-medium text-stone-900">
+          <label htmlFor="claude-compaction-post-restore-audit" className="text-sm font-medium text-on-surface">
             Post-restore audit message
           </label>
           <textarea
@@ -299,7 +299,7 @@ function PolicyFormBody({ data, setSetting }: PolicyFormBodyProps) {
             type="submit"
             data-testid="claude-compaction-policy-submit"
             disabled={setSetting.isPending}
-            className="border border-outline px-4 py-2 bg-stone-900 text-white font-medium text-sm disabled:opacity-60"
+            className="border border-outline px-4 py-2 bg-inverse-surface text-background font-medium text-sm disabled:opacity-60"
           >
             {setSetting.isPending ? "Saving…" : "Save policy"}
           </button>

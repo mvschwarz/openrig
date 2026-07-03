@@ -140,8 +140,8 @@ function TabNav<T extends string>({
           className={cn(
             "px-3 py-2 font-mono text-[10px] uppercase tracking-[0.18em] border-b-2 -mb-px shrink-0",
             active === t.id
-              ? "border-stone-900 text-stone-900"
-              : "border-transparent text-on-surface-variant hover:text-stone-900",
+              ? "border-on-surface text-on-surface"
+              : "border-transparent text-on-surface-variant hover:text-on-surface",
           )}
         >
           {t.label}
@@ -178,7 +178,7 @@ function ScopeShell({
     <div className="mx-auto w-full max-w-[1200px] px-6 py-8">
       <header className="border-b border-outline-variant pb-4 mb-4">
         <SectionHeader tone="muted">{eyebrow}</SectionHeader>
-        <h1 className="font-headline text-headline-md font-bold tracking-tight uppercase text-stone-900 mt-1">
+        <h1 className="font-headline text-headline-md font-bold tracking-tight uppercase text-on-surface mt-1">
           {title}
         </h1>
       </header>
@@ -262,13 +262,13 @@ function ScopeProgressRollup({
       {rows.map((row) => {
         const detail = detailsByName.get(row.name);
         return (
-          <article key={row.name} className="border border-outline-variant bg-white/35 p-3 backdrop-blur-sm">
+          <article key={row.name} className="border border-outline-variant bg-surface-lowest/35 p-3 backdrop-blur-sm">
             <div className="flex items-start justify-between gap-3 border-b border-outline-variant pb-2">
               <div className="min-w-0">
                 <Link
                   to="/project/slice/$sliceId"
                   params={{ sliceId: row.name }}
-                  className="font-mono text-[12px] uppercase tracking-[0.12em] text-stone-900 hover:underline"
+                  className="font-mono text-[12px] uppercase tracking-[0.12em] text-on-surface hover:underline"
                 >
                   {row.displayName}
                 </Link>
@@ -279,7 +279,7 @@ function ScopeProgressRollup({
                 </div>
               </div>
             </div>
-            <div className="mt-3 grid gap-2 font-mono text-[10px] text-stone-700 sm:grid-cols-4">
+            <div className="mt-3 grid gap-2 font-mono text-[10px] text-on-surface sm:grid-cols-4">
               <SliceMetric label="Qitems" value={detail?.qitemIds.length ?? row.qitemCount} />
               <SliceMetric label="Proof" value={detail ? detail.tests.proofPackets.length : row.hasProofPacket ? 1 : 0} />
               <SliceMetric label="Progress" value={detail ? `${detail.acceptance.percentage}%` : "unknown"} />
@@ -319,7 +319,7 @@ function ScopeQueueRollup({
   return (
     <div data-testid="scope-queue-rollup">
       {isFetching ? (
-        <div className="mb-2 font-mono text-[10px] uppercase tracking-[0.12em] text-stone-400">
+        <div className="mb-2 font-mono text-[10px] uppercase tracking-[0.12em] text-on-surface-variant">
           Loading queue bodies...
         </div>
       ) : null}
@@ -327,17 +327,17 @@ function ScopeQueueRollup({
         {sortedQitemIds.map((qitemId) => {
           const item = queueItemsById.get(qitemId);
           return (
-            <li key={qitemId} className="bg-white/35 backdrop-blur-sm">
+            <li key={qitemId} className="bg-surface-lowest/35 backdrop-blur-sm">
               <QueueItemTrigger
                 data={queueItemViewerData(qitemId, item)}
                 testId={`scope-queue-trigger-${qitemId}`}
-                className="block w-full px-3 py-2 text-left font-mono text-xs transition-colors hover:bg-white/55"
+                className="block w-full px-3 py-2 text-left font-mono text-xs transition-colors hover:bg-surface-lowest/55"
               >
                 <span className="flex flex-wrap items-center gap-2">
                   {item?.state ? <QueueStateBadge state={item.state} compact /> : <EventBadge kind="queue.item" compact />}
                   <DateChip value={item?.tsCreated} />
                 </span>
-                <span className="mt-2 block whitespace-pre-wrap break-words text-stone-900">
+                <span className="mt-2 block whitespace-pre-wrap break-words text-on-surface">
                   {queueBodyPreview(qitemId, item)}
                 </span>
                 {item ? (
@@ -374,11 +374,11 @@ function ScopeArtifactsRollup({
         const proofCount = detail?.tests.proofPackets.length ?? (row.hasProofPacket ? 1 : 0);
         const screenshotCount = detail?.tests.proofPackets.reduce((count, packet) => count + packet.screenshots.length, 0) ?? 0;
         return (
-          <article key={row.name} className="border border-outline-variant bg-white/35 p-3 backdrop-blur-sm">
+          <article key={row.name} className="border border-outline-variant bg-surface-lowest/35 p-3 backdrop-blur-sm">
             <Link
               to="/project/slice/$sliceId"
               params={{ sliceId: row.name }}
-              className="font-mono text-[12px] uppercase tracking-[0.12em] text-stone-900 hover:underline"
+              className="font-mono text-[12px] uppercase tracking-[0.12em] text-on-surface hover:underline"
             >
               {row.displayName}
             </Link>
@@ -386,7 +386,7 @@ function ScopeArtifactsRollup({
               <ProjectPill token={scopeToken("slice")} compact />
               <ProjectPill token={{ label: row.status, tone: stateTone(row.status) }} compact />
             </div>
-            <div className="mt-3 grid gap-2 font-mono text-[10px] text-stone-700 sm:grid-cols-4">
+            <div className="mt-3 grid gap-2 font-mono text-[10px] text-on-surface sm:grid-cols-4">
               <SliceMetric label="Files" value={detail?.docs.tree.length ?? "unknown"} />
               <SliceMetric label="Commits" value={detail?.commitRefs.length ?? "unknown"} />
               <SliceMetric label="Proof packets" value={proofCount} />
@@ -544,19 +544,19 @@ function WorkspaceOverviewPanel() {
       key={mission.id}
       data-testid={`workspace-overview-mission-${mission.id}`}
       data-mission-bucket={bucket}
-      className="border border-outline-variant bg-white/20 px-3 py-3"
+      className="border border-outline-variant bg-surface-lowest/20 px-3 py-3"
     >
       <div className="flex items-start justify-between gap-3 border-b border-outline-variant pb-2">
         <div className="min-w-0">
-          <h3 className="font-mono text-[12px] uppercase tracking-[0.12em] text-stone-900 truncate">
+          <h3 className="font-mono text-[12px] uppercase tracking-[0.12em] text-on-surface truncate">
             {mission.label}
           </h3>
-          <p className="font-mono text-[9px] uppercase tracking-[0.12em] text-stone-500">
+          <p className="font-mono text-[9px] uppercase tracking-[0.12em] text-on-surface-variant">
             {mission.slices.length} slice{mission.slices.length === 1 ? "" : "s"} ·{" "}
             {formatLastActivity(latestProjectMissionActivity(mission))}
           </p>
         </div>
-        <span className="font-mono text-[9px] uppercase tracking-[0.12em] text-stone-500">
+        <span className="font-mono text-[9px] uppercase tracking-[0.12em] text-on-surface-variant">
           {mission.status}
         </span>
       </div>
@@ -571,7 +571,7 @@ function WorkspaceOverviewPanel() {
                 data-testid={`workspace-overview-slice-${slice.name}`}
                 title={`${slice.displayName} — ${meta}`}
                 aria-label={`${slice.displayName} (${meta})`}
-                className="flex items-start gap-2 px-2 py-1 font-mono text-[11px] text-on-surface hover:bg-surface-low hover:text-stone-900"
+                className="flex items-start gap-2 px-2 py-1 font-mono text-[11px] text-on-surface hover:bg-surface-low hover:text-on-surface"
               >
                 <span className="min-w-0 flex-1 whitespace-normal break-words leading-snug">{slice.displayName}</span>
                 <span
@@ -597,10 +597,10 @@ function WorkspaceOverviewPanel() {
     <div data-testid="workspace-overview-panel" className="grid gap-4 lg:grid-cols-2">
       <section data-testid="workspace-overview-current" className="space-y-3">
         <div className="flex items-center justify-between border-b border-outline-variant pb-2">
-          <h2 className="font-mono text-[11px] uppercase tracking-[0.16em] text-stone-900">
+          <h2 className="font-mono text-[11px] uppercase tracking-[0.16em] text-on-surface">
             Current Work
           </h2>
-          <span className="font-mono text-[10px] text-stone-500">
+          <span className="font-mono text-[10px] text-on-surface-variant">
             {sections.current.length}
           </span>
         </div>
@@ -617,10 +617,10 @@ function WorkspaceOverviewPanel() {
       </section>
       <section data-testid="workspace-overview-archive" className="space-y-3">
         <div className="flex items-center justify-between border-b border-outline-variant pb-2">
-          <h2 className="font-mono text-[11px] uppercase tracking-[0.16em] text-stone-900">
+          <h2 className="font-mono text-[11px] uppercase tracking-[0.16em] text-on-surface">
             Archive
           </h2>
-          <span className="font-mono text-[10px] text-stone-500">
+          <span className="font-mono text-[10px] text-on-surface-variant">
             {sections.archive.length}
           </span>
         </div>
@@ -750,7 +750,7 @@ export function MissionScopePage() {
       {active === "overview" ? (
         <div data-testid="mission-overview-panel" className="space-y-6">
           {missionReadme.content && (
-            <section data-testid="mission-overview-readme" className="border border-outline-variant bg-white/20 p-4">
+            <section data-testid="mission-overview-readme" className="border border-outline-variant bg-surface-lowest/20 p-4">
               <MarkdownViewer content={missionReadme.content} hideFrontmatter hideRawToggle />
             </section>
           )}
@@ -759,7 +759,7 @@ export function MissionScopePage() {
               rollup.rows.map((slice) => {
                 const meta = projectSliceMeta(slice);
                 return (
-                  <article key={slice.name} className="border border-outline-variant bg-white/35 p-3 backdrop-blur-sm">
+                  <article key={slice.name} className="border border-outline-variant bg-surface-lowest/35 p-3 backdrop-blur-sm">
                     <div className="flex items-start gap-3">
                       <Link
                         to="/project/slice/$sliceId"
@@ -767,7 +767,7 @@ export function MissionScopePage() {
                         data-testid={`mission-overview-slice-${slice.name}`}
                         title={`${slice.displayName} — ${meta}`}
                         aria-label={`${slice.displayName} (${meta})`}
-                        className="min-w-0 flex-1 whitespace-normal break-words font-mono text-[12px] uppercase leading-snug tracking-[0.12em] text-stone-900 hover:underline"
+                        className="min-w-0 flex-1 whitespace-normal break-words font-mono text-[12px] uppercase leading-snug tracking-[0.12em] text-on-surface hover:underline"
                       >
                         {slice.displayName}
                       </Link>
@@ -825,7 +825,7 @@ export function MissionScopePage() {
               action={{ label: `rig scope audit --mission ${missionId}` }}
             />
           ) : missionProgress.content ? (
-            <section data-testid="mission-progress-readme" className="border border-outline-variant bg-white/20 p-4">
+            <section data-testid="mission-progress-readme" className="border border-outline-variant bg-surface-lowest/20 p-4">
               <MarkdownViewer content={missionProgress.content} hideFrontmatter hideRawToggle />
             </section>
           ) : !scopeAudit.isLoading ? (
@@ -841,7 +841,7 @@ export function MissionScopePage() {
               <SectionHeader>Scope Audit Findings ({scopeAudit.data.totalFindings})</SectionHeader>
               <ul className="mt-2 space-y-1 font-mono text-[11px]">
                 {[...scopeAudit.data.mission.findings, ...scopeAudit.data.slices.flatMap((s) => s.findings)].map((f, i) => (
-                  <li key={i} className={cn("px-2 py-1", f.severity === "high" ? "text-red-700" : "text-stone-600")}>
+                  <li key={i} className={cn("px-2 py-1", f.severity === "high" ? "text-red-700" : "text-on-surface-variant")}>
                     [{f.severity}] {f.kind}: {f.message}
                   </li>
                 ))}
@@ -954,7 +954,7 @@ function SliceQueueTab({
       {queueItemsFetching ? (
         <div
           data-testid="slice-queue-fetching"
-          className="mb-2 font-mono text-[10px] uppercase tracking-[0.12em] text-stone-400"
+          className="mb-2 font-mono text-[10px] uppercase tracking-[0.12em] text-on-surface-variant"
         >
           Loading queue bodies...
         </div>
@@ -966,23 +966,23 @@ function SliceQueueTab({
         {qitemIds.map((qitemId) => {
           const item = queueItemsById.get(qitemId);
           return (
-            <li key={qitemId} className="bg-white/35 backdrop-blur-sm">
+            <li key={qitemId} className="bg-surface-lowest/35 backdrop-blur-sm">
               <QueueItemTrigger
                 data={queueItemViewerData(qitemId, item)}
                 testId={`slice-queue-trigger-${qitemId}`}
-                className="block w-full px-3 py-2 text-left hover:bg-white/55 transition-colors font-mono text-xs"
+                className="block w-full px-3 py-2 text-left hover:bg-surface-lowest/55 transition-colors font-mono text-xs"
               >
                 <span className="flex flex-wrap items-center gap-2">
                   {item?.state ? <QueueStateBadge state={item.state} compact /> : <EventBadge kind="queue.item" compact />}
                   <DateChip value={item?.tsCreated} />
                 </span>
-                <span className="mt-2 block whitespace-pre-wrap break-words text-stone-900">
+                <span className="mt-2 block whitespace-pre-wrap break-words text-on-surface">
                   {queueBodyPreview(qitemId, item)}
                 </span>
                 {item ? (
                   <span
                     data-testid={`slice-queue-meta-${qitemId}`}
-                    className="mt-2 block space-y-2 text-[10px] text-stone-500"
+                    className="mt-2 block space-y-2 text-[10px] text-on-surface-variant"
                   >
                     <FlowChips source={item.sourceSession} destination={item.destinationSession} muted />
                     <span className="flex flex-wrap gap-1.5">
@@ -1006,9 +1006,9 @@ function formatMaybeDate(ts: string | null): string {
 
 function SliceMetric({ label, value }: { label: string; value: string | number }) {
   return (
-    <div className="border border-outline-variant bg-white/35 p-3 backdrop-blur-sm">
+    <div className="border border-outline-variant bg-surface-lowest/35 p-3 backdrop-blur-sm">
       <div className="font-mono text-[8px] uppercase tracking-[0.14em] text-on-surface-variant">{label}</div>
-      <div className="mt-1 font-mono text-sm font-bold text-stone-900">{value}</div>
+      <div className="mt-1 font-mono text-sm font-bold text-on-surface">{value}</div>
     </div>
   );
 }
@@ -1031,44 +1031,44 @@ function SliceOverviewTab({ detail }: { detail: SliceDetail }) {
       </section>
 
       {readmeMd.content && (
-        <section data-testid="slice-overview-readme" className="border border-outline-variant bg-white/20 p-4">
+        <section data-testid="slice-overview-readme" className="border border-outline-variant bg-surface-lowest/20 p-4">
           <MarkdownViewer content={readmeMd.content} hideFrontmatter hideRawToggle />
         </section>
       )}
 
-      <section data-testid="slice-overview-current-step" className="border border-outline-variant bg-white/20 p-4">
+      <section data-testid="slice-overview-current-step" className="border border-outline-variant bg-surface-lowest/20 p-4">
         <SectionHeader tone="muted">Current Step</SectionHeader>
         {currentStep ? (
-          <div className="mt-3 grid gap-2 font-mono text-[10px] text-stone-700 sm:grid-cols-2">
+          <div className="mt-3 grid gap-2 font-mono text-[10px] text-on-surface sm:grid-cols-2">
             <div>
-              <div className="text-[8px] uppercase tracking-[0.14em] text-stone-400">Step</div>
-              <div className="font-bold text-stone-900">{currentStep.stepId}</div>
+              <div className="text-[8px] uppercase tracking-[0.14em] text-on-surface-variant">Step</div>
+              <div className="font-bold text-on-surface">{currentStep.stepId}</div>
             </div>
             <div>
-              <div className="text-[8px] uppercase tracking-[0.14em] text-stone-400">Role</div>
-              <div className="font-bold text-stone-900">{currentStep.role}</div>
+              <div className="text-[8px] uppercase tracking-[0.14em] text-on-surface-variant">Role</div>
+              <div className="font-bold text-on-surface">{currentStep.role}</div>
             </div>
             <div className="sm:col-span-2">
-              <div className="text-[8px] uppercase tracking-[0.14em] text-stone-400">Objective</div>
+              <div className="text-[8px] uppercase tracking-[0.14em] text-on-surface-variant">Objective</div>
               <div>{currentStep.objective ?? "No objective declared."}</div>
             </div>
             <div>
-              <div className="text-[8px] uppercase tracking-[0.14em] text-stone-400">Allowed exits</div>
+              <div className="text-[8px] uppercase tracking-[0.14em] text-on-surface-variant">Allowed exits</div>
               <div>{currentStep.allowedExits.join(", ") || "-"}</div>
             </div>
             <div>
-              <div className="text-[8px] uppercase tracking-[0.14em] text-stone-400">Hop count</div>
+              <div className="text-[8px] uppercase tracking-[0.14em] text-on-surface-variant">Hop count</div>
               <div>{currentStep.hopCount}</div>
             </div>
           </div>
         ) : (
-          <div className="mt-3 font-mono text-[10px] text-stone-400">No workflow step is currently bound.</div>
+          <div className="mt-3 font-mono text-[10px] text-on-surface-variant">No workflow step is currently bound.</div>
         )}
       </section>
 
-      <section data-testid="slice-overview-readiness" className="border border-outline-variant bg-white/20 p-4">
+      <section data-testid="slice-overview-readiness" className="border border-outline-variant bg-surface-lowest/20 p-4">
         <SectionHeader tone="muted">Readiness</SectionHeader>
-        <div className="mt-3 space-y-2 font-mono text-[10px] text-stone-700">
+        <div className="mt-3 space-y-2 font-mono text-[10px] text-on-surface">
           <div>{detail.acceptance.doneItems} of {detail.acceptance.totalItems} acceptance items complete.</div>
           <div>{detail.tests.aggregate.passCount} proof packets passing / {detail.tests.aggregate.failCount} failing.</div>
           {detail.acceptance.closureCallout && (
@@ -1077,7 +1077,7 @@ function SliceOverviewTab({ detail }: { detail: SliceDetail }) {
             </div>
           )}
           {detail.workflowBinding && (
-            <div className="text-stone-500">
+            <div className="text-on-surface-variant">
               Workflow: {detail.workflowBinding.workflowName} v{detail.workflowBinding.workflowVersion}
             </div>
           )}
@@ -1182,7 +1182,7 @@ export function SliceScopePage() {
               <SectionHeader>Scope Findings ({sliceAuditEntry.findings.length})</SectionHeader>
               <ul className="mt-2 space-y-1 font-mono text-[11px]">
                 {sliceAuditEntry.findings.map((f, i) => (
-                  <li key={i} className={cn("px-2 py-1", f.severity === "high" ? "text-red-700" : "text-stone-600")}>
+                  <li key={i} className={cn("px-2 py-1", f.severity === "high" ? "text-red-700" : "text-on-surface-variant")}>
                     [{f.severity}] {f.kind}: {f.message}
                   </li>
                 ))}

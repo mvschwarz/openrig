@@ -24,6 +24,7 @@ import { SectionHeader } from "../ui/section-header.js";
 import { EmptyState } from "../ui/empty-state.js";
 import { RigGraph } from "../RigGraph.js";
 import { RigSpecDisplay } from "../RigSpecDisplay.js";
+import { RigStatusControl } from "../RigStatusControl.js";
 import { useRigSummary } from "../../hooks/useRigSummary.js";
 import { useSpecLibrary, useLibraryReview, type LibraryRigReview } from "../../hooks/useSpecLibrary.js";
 import { LiveNodeDetails } from "../LiveNodeDetails.js";
@@ -45,7 +46,7 @@ function ActivityRollupBar({ rigId }: { rigId: string }) {
   return (
     <div
       data-testid="activity-rollup-bar"
-      className="px-6 py-2 font-mono text-[10px] text-stone-600 border-b border-outline-variant bg-white/30"
+      className="px-6 py-2 font-mono text-[10px] text-on-surface-variant border-b border-outline-variant bg-surface-lowest/30"
     >
       {formatRollupLabel(rollup)}
     </div>
@@ -189,6 +190,14 @@ export function RigScopePage() {
         />
       }
     >
+      {/* OPR.0.4.3.22 — rig-status + launch/recovery control near the rig title.
+          Terminal-surface actions (Launch in CMUX) render SEPARATELY in the tab
+          bar (trailing, above) and never restore or fresh-prime. */}
+      <div className="px-6 pt-4 max-w-md">
+        <ErrorBoundary label="Rig status">
+          <RigStatusControl rigId={rigId} rigName={rig?.name ?? rigId} />
+        </ErrorBoundary>
+      </div>
       <ActivityRollupBar rigId={rigId} />
       {effectiveActive === "graph" ? (
         <div className="flex-1 min-h-0 relative">
@@ -236,7 +245,7 @@ function RigOverviewTab({ rigId, rigName }: { rigId: string; rigName: string | n
   if (entriesLoading || reviewLoading) {
     return (
       <div className="p-6">
-        <div className="font-mono text-[10px] text-stone-400">Loading rig spec…</div>
+        <div className="font-mono text-[10px] text-on-surface-variant">Loading rig spec…</div>
       </div>
     );
   }

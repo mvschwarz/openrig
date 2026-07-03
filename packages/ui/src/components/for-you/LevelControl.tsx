@@ -28,27 +28,27 @@ function Readout({ level }: { level: DerivedLevel }) {
   if (level === "needs-you") {
     return (
       <>
-        <b className="text-stone-900">Just what needs you</b> · <span className="text-amber-700">action items</span> only
+        <b className="text-on-surface">Just what needs you</b> · <span className="text-amber-700">action items</span> only
       </>
     );
   }
   if (level === "all-activity") {
     return (
       <>
-        <b className="text-stone-900">All activity</b> · <span className="text-amber-700">what needs you</span> + everything, incl. audit log
+        <b className="text-on-surface">All activity</b> · <span className="text-amber-700">what needs you</span> + everything, incl. audit log
       </>
     );
   }
   if (level === "highlights") {
     return (
       <>
-        <b className="text-stone-900">Highlights</b> · <span className="text-amber-700">what needs you</span> + approvals + ships + progress · <span className="text-stone-400">audit hidden</span>
+        <b className="text-on-surface">Highlights</b> · <span className="text-amber-700">what needs you</span> + approvals + ships + progress · <span className="text-on-surface-variant">audit hidden</span>
       </>
     );
   }
   return (
     <>
-      <b className="text-stone-900">Custom</b> · set via the individual toggles below
+      <b className="text-on-surface">Custom</b> · set via the individual toggles below
     </>
   );
 }
@@ -59,11 +59,11 @@ export function LevelControl() {
   const interactive = !unavailable && !isMutating;
 
   return (
-    <div data-testid="level-control" className="border border-stone-300 bg-stone-50">
+    <div data-testid="level-control" className="border border-outline-variant bg-background">
       {/* SHOW ME header — the floor is non-negotiable. */}
-      <div className="flex items-center justify-between bg-stone-900 text-stone-50 font-mono text-[8px] tracking-[0.16em] uppercase px-2.5 py-1.5">
+      <div className="flex items-center justify-between bg-inverse-surface text-background font-mono text-[8px] tracking-[0.16em] uppercase px-2.5 py-1.5">
         <span>Show me</span>
-        <span className="text-stone-300">action items always on</span>
+        <span className="text-on-surface-variant">action items always on</span>
       </div>
 
       {/* The segmented level picker. */}
@@ -83,9 +83,9 @@ export function LevelControl() {
               className={
                 "flex-1 -ml-px first:ml-0 border px-1 py-2 font-mono text-[9px] uppercase tracking-[0.06em] whitespace-nowrap " +
                 (active
-                  ? "bg-stone-900 text-stone-50 border-stone-900 relative z-10"
-                  : "bg-transparent text-stone-500 border-stone-300") +
-                (interactive && !active ? " hover:bg-stone-100" : "") +
+                  ? "bg-inverse-surface text-background border-on-surface relative z-10"
+                  : "bg-transparent text-on-surface-variant border-outline-variant") +
+                (interactive && !active ? " hover:bg-surface-low" : "") +
                 (interactive ? "" : " opacity-60 cursor-not-allowed")
               }
             >
@@ -98,7 +98,7 @@ export function LevelControl() {
       {/* Plain-language readout of what the current level shows. */}
       <div
         data-testid="level-control-readout"
-        className="font-mono text-[8px] tracking-[0.04em] text-stone-500 leading-relaxed px-2.5 pb-2.5 pt-1.5"
+        className="font-mono text-[8px] tracking-[0.04em] text-on-surface-variant leading-relaxed px-2.5 pb-2.5 pt-1.5"
       >
         <Readout level={current} />
       </div>
@@ -106,7 +106,7 @@ export function LevelControl() {
       {unavailable ? (
         <p
           data-testid="level-control-unavailable"
-          className="font-mono text-[8px] text-stone-400 italic px-2.5 pb-2.5"
+          className="font-mono text-[8px] text-on-surface-variant italic px-2.5 pb-2.5"
         >
           Settings endpoint unreachable (legacy daemon). Showing canonical defaults.
         </p>

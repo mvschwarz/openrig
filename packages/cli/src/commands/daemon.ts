@@ -54,7 +54,9 @@ export function realDeps(): LifecycleDeps {
         timeoutMs: 1_500,
         timeoutMessage: `Daemon health probe timed out for ${url}`,
       });
-      return { ok: res.ok };
+      // OPR.0.4.3.21 — expose json() so getDaemonStatus can read the enriched
+      // /healthz event-loop evidence. Bound to this Response instance.
+      return { ok: res.ok, json: () => res.json() };
     },
     kill: (pid, signal) => { process.kill(pid, signal as NodeJS.Signals); return true; },
     readFile: (p) => { try { return fs.readFileSync(p, "utf-8"); } catch { return null; } },
@@ -206,7 +208,23 @@ export function daemonCommand(depsOverride?: LifecycleDeps): Command {
       switch (status.state) {
         case "running":
           if (status.healthy === false) {
-            console.log(`Daemon running on port ${status.port}${pidSuffix} — healthz failed`);
+            // OPR.0.4.3.21 — process-present but unhealthy: name the real
+            // cause (wedged control plane), not a bare "healthz failed", and
+            // attach the event-loop evidence + seat-preserving recovery hint.
+            const cause = status.reason === "unresponsive"
+              ? "unresponsive (event loop may be starved — /healthz timed out)"
+              : status.reason === "event-loop-starved"
+                ? "event-loop starved"
+                : "healthz failed";
+            console.log(`Daemon running on port ${status.port}${pidSuffix} — process present but UNHEALTHY: ${cause}`);
+            if (status.eventLoop) {
+              const el = status.eventLoop;
+              console.log(
+                `  event-loop: lag mean ${el.lagMeanMs.toFixed(1)}ms, p99 ${el.lagP99Ms.toFixed(1)}ms, `
+                + `utilization ${(el.utilization * 100).toFixed(0)}%, last-tick age ${el.lastTickAgeMs.toFixed(0)}ms`,
+              );
+            }
+            console.log("  Recovery: restart the daemon only (`rig daemon stop && rig daemon start`) — this preserves the tmux seats.");
           } else {
             console.log(`Daemon running on port ${status.port}${pidSuffix}`);
           }

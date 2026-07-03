@@ -57,7 +57,7 @@ interface LiveNodeDetailsProps {
   logicalId: string;
 }
 
-const SECTION_CLASS = "border border-outline-variant bg-white/30 p-3";
+const SECTION_CLASS = "border border-outline-variant bg-surface-lowest/30 p-3";
 
 function statusColor(status: string | null): string {
   switch (status) {
@@ -65,7 +65,7 @@ function statusColor(status: string | null): string {
     case "pending": return "text-amber-600";
     case "attention_required": return "text-orange-600";
     case "failed": return "text-red-600";
-    default: return "text-stone-400";
+    default: return "text-on-surface-variant";
   }
 }
 
@@ -86,8 +86,8 @@ function InfoRow({ label, value }: { label: string; value: string | number | nul
   if (value === null || value === undefined || value === "") return null;
   return (
     <div className="flex justify-between gap-3 font-mono text-[10px]">
-      <span className="text-stone-500">{label}</span>
-      <span className="truncate text-right text-stone-900">{value}</span>
+      <span className="text-on-surface-variant">{label}</span>
+      <span className="truncate text-right text-on-surface">{value}</span>
     </div>
   );
 }
@@ -107,7 +107,7 @@ function AgentSpecSection({ data }: { data: NodeDetailData }) {
     <div data-testid="live-agent-spec-section" className="space-y-4">
       {data.compactSpec.name && (
         <section data-testid="detail-compact-spec" className={SECTION_CLASS}>
-          <div className="mb-2 font-mono text-[8px] uppercase tracking-wider text-stone-400">Resolved Agent Spec</div>
+          <div className="mb-2 font-mono text-[8px] uppercase tracking-wider text-on-surface-variant">Resolved Agent Spec</div>
           <div className="space-y-0.5">
             <InfoRow label="Spec" value={data.compactSpec.name} />
             <InfoRow label="Version" value={data.compactSpec.version} />
@@ -119,17 +119,17 @@ function AgentSpecSection({ data }: { data: NodeDetailData }) {
       )}
 
       {!agentName ? (
-        <div data-testid="agent-spec-unavailable" className="p-4 font-mono text-[10px] text-stone-400">No agent spec available</div>
+        <div data-testid="agent-spec-unavailable" className="p-4 font-mono text-[10px] text-on-surface-variant">No agent spec available</div>
       ) : entriesLoading || reviewLoading ? (
-        <div className="p-4 font-mono text-[10px] text-stone-400">Loading agent spec...</div>
+        <div className="p-4 font-mono text-[10px] text-on-surface-variant">Loading agent spec...</div>
       ) : matches.length === 0 ? (
-        <div data-testid="agent-spec-unavailable" className="p-4 font-mono text-[10px] text-stone-400">No agent spec available</div>
+        <div data-testid="agent-spec-unavailable" className="p-4 font-mono text-[10px] text-on-surface-variant">No agent spec available</div>
       ) : matches.length > 1 ? (
         <div data-testid="agent-spec-ambiguous" className="p-4 font-mono text-[10px] text-amber-600">
           Agent spec ambiguous ({matches.length} matches for &quot;{agentName}&quot;)
         </div>
       ) : !review || review.kind !== "agent" ? (
-        <div data-testid="agent-spec-unavailable" className="p-4 font-mono text-[10px] text-stone-400">No agent spec available</div>
+        <div data-testid="agent-spec-unavailable" className="p-4 font-mono text-[10px] text-on-surface-variant">No agent spec available</div>
       ) : (
         <>
           <AgentSpecDisplay
@@ -145,9 +145,9 @@ function AgentSpecSection({ data }: { data: NodeDetailData }) {
               renders empty state on main + populated state post-merge. */}
           <section
             data-testid="live-agent-plugins-section"
-            className="border border-outline-variant bg-white/30 p-3"
+            className="border border-outline-variant bg-surface-lowest/30 p-3"
           >
-            <div className="mb-2 font-mono text-[8px] uppercase tracking-wider text-stone-400">
+            <div className="mb-2 font-mono text-[8px] uppercase tracking-wider text-on-surface-variant">
               Plugins
             </div>
             <AgentPluginsList pluginIds={extractAgentPluginIds(review)} />
@@ -201,7 +201,7 @@ function ActionButtonsRow({ rigId, logicalId, data }: { rigId: string; logicalId
       <button
         onClick={handleOpenCmux}
         data-testid="detail-cmux-open"
-        className="inline-flex min-h-11 items-center gap-1.5 px-3 py-2 border border-outline-variant bg-white/30 font-mono text-[10px] uppercase tracking-wide text-stone-900 hover:bg-stone-100/60"
+        className="inline-flex min-h-11 items-center gap-1.5 px-3 py-2 border border-outline-variant bg-surface-lowest/30 font-mono text-[10px] uppercase tracking-wide text-on-surface hover:bg-surface-low/60"
       >
         <ToolMark tool="cmux" size="sm" />
         Open CMUX
@@ -210,7 +210,7 @@ function ActionButtonsRow({ rigId, logicalId, data }: { rigId: string; logicalId
         <button
           onClick={handleCopyAttach}
           data-testid="detail-copy-attach"
-          className="inline-flex min-h-11 items-center gap-1.5 px-3 py-2 border border-outline-variant bg-white/30 font-mono text-[10px] uppercase tracking-wide text-stone-700 hover:bg-stone-100/60"
+          className="inline-flex min-h-11 items-center gap-1.5 px-3 py-2 border border-outline-variant bg-surface-lowest/30 font-mono text-[10px] uppercase tracking-wide text-on-surface hover:bg-surface-low/60"
         >
           <ToolMark tool="tmux" size="sm" />
           Copy tmux attach
@@ -220,7 +220,7 @@ function ActionButtonsRow({ rigId, logicalId, data }: { rigId: string; logicalId
         <button
           onClick={handleCopyResume}
           data-testid="detail-copy-resume"
-          className="inline-flex min-h-11 items-center gap-1.5 px-3 py-2 border border-outline-variant bg-white/30 font-mono text-[10px] uppercase tracking-wide text-stone-700 hover:bg-stone-100/60"
+          className="inline-flex min-h-11 items-center gap-1.5 px-3 py-2 border border-outline-variant bg-surface-lowest/30 font-mono text-[10px] uppercase tracking-wide text-on-surface hover:bg-surface-low/60"
         >
           <CirclePlay aria-hidden="true" className="h-4 w-4 shrink-0" strokeWidth={1.5} />
           Copy resume command
@@ -238,16 +238,16 @@ function StatusSection({ data }: { data: NodeDetailData }) {
   return (
     <section
       data-testid="live-node-status"
-      className="grid gap-2 border border-outline-variant bg-white/30 p-3 sm:grid-cols-2"
+      className="grid gap-2 border border-outline-variant bg-surface-lowest/30 p-3 sm:grid-cols-2"
     >
       <div className="flex items-baseline gap-2">
-        <span className="font-mono text-[8px] uppercase tracking-wider text-stone-400">Startup</span>
+        <span className="font-mono text-[8px] uppercase tracking-wider text-on-surface-variant">Startup</span>
         <span className={statusColor(data.startupStatus)} data-testid="detail-startup-status">
           {startupStatusLabel(data.startupStatus)}
         </span>
       </div>
       <div className="flex items-baseline gap-2">
-        <span className="font-mono text-[8px] uppercase tracking-wider text-stone-400">Restore</span>
+        <span className="font-mono text-[8px] uppercase tracking-wider text-on-surface-variant">Restore</span>
         <span
           className={`font-mono text-xs font-bold ${getRestoreStatusColorClass(data.restoreOutcome)}`}
           data-testid="detail-restore-outcome"
@@ -284,7 +284,7 @@ function StatusSection({ data }: { data: NodeDetailData }) {
               {data.latestError}
             </div>
           )}
-          <div className="font-mono text-[8px] text-stone-500">
+          <div className="font-mono text-[8px] text-on-surface-variant">
             {data.startupStatus === "attention_required"
               ? `Use rig capture ${data.canonicalSessionName ?? "<session>"} to inspect the prompt, then rig send ${data.canonicalSessionName ?? "<session>"} to clear it.`
               : data.startupStatus === "failed"
@@ -292,19 +292,19 @@ function StatusSection({ data }: { data: NodeDetailData }) {
                 : "Try: rig restore <snapshotId>"}
           </div>
           {data.recoveryGuidance && (
-            <div className="mt-2 border-t border-stone-200 pt-2" data-testid="detail-recovery-guidance">
-              <div className="font-mono text-[8px] font-bold text-stone-700 mb-1">Recovery</div>
-              <div className="font-mono text-[8px] text-stone-600 mb-1">{data.recoveryGuidance.summary}</div>
+            <div className="mt-2 border-t border-outline-variant pt-2" data-testid="detail-recovery-guidance">
+              <div className="font-mono text-[8px] font-bold text-on-surface mb-1">Recovery</div>
+              <div className="font-mono text-[8px] text-on-surface-variant mb-1">{data.recoveryGuidance.summary}</div>
               <div className="space-y-0.5 mb-1">
                 {data.recoveryGuidance.commands.map((command, index) => (
-                  <code key={`${command}-${index}`} className="font-mono text-[8px] text-stone-800 bg-stone-100 px-1 py-0.5 block">
+                  <code key={`${command}-${index}`} className="font-mono text-[8px] text-on-surface bg-surface-low px-1 py-0.5 block">
                     {command}
                   </code>
                 ))}
               </div>
               <div className="space-y-0.5">
                 {data.recoveryGuidance.notes.map((note, index) => (
-                  <div key={`${note}-${index}`} className="font-mono text-[8px] text-stone-500">
+                  <div key={`${note}-${index}`} className="font-mono text-[8px] text-on-surface-variant">
                     {note}
                   </div>
                 ))}
@@ -327,14 +327,14 @@ function RecentEventsSection({ data }: { data: NodeDetailData }) {
   if (!data.recentEvents || data.recentEvents.length === 0) return null;
   return (
     <section data-testid="live-node-recent-events" className={SECTION_CLASS}>
-      <div className="font-mono text-[8px] uppercase tracking-wider text-stone-400 mb-2">
+      <div className="font-mono text-[8px] uppercase tracking-wider text-on-surface-variant mb-2">
         Recent Events
       </div>
       <div className="space-y-0.5">
         {data.recentEvents.slice(0, 10).map((e, i) => (
           <div key={`${e.type}-${i}`} className="font-mono text-[9px] flex justify-between gap-3">
-            <span className="text-stone-700 truncate">{e.type}</span>
-            <span className="text-stone-400 ml-2 shrink-0">{e.createdAt}</span>
+            <span className="text-on-surface truncate">{e.type}</span>
+            <span className="text-on-surface-variant ml-2 shrink-0">{e.createdAt}</span>
           </div>
         ))}
       </div>
@@ -351,20 +351,20 @@ function EdgesSection({ data }: { data: NodeDetailData }) {
   if (outgoing.length === 0 && incoming.length === 0) return null;
   return (
     <section data-testid="detail-edges" className={SECTION_CLASS}>
-      <div className="font-mono text-[8px] text-stone-400 uppercase tracking-wider mb-2">Edges</div>
+      <div className="font-mono text-[8px] text-on-surface-variant uppercase tracking-wider mb-2">Edges</div>
       <div className="space-y-0.5 font-mono text-[10px]">
         {outgoing.map((e, i) => (
           <div key={`out-${i}`} className="flex gap-1">
-            <span className="text-stone-400">-&gt;</span>
-            <span className="text-stone-500">{e.kind}</span>
-            <span className="text-stone-900">{e.to?.logicalId ?? "?"}</span>
+            <span className="text-on-surface-variant">-&gt;</span>
+            <span className="text-on-surface-variant">{e.kind}</span>
+            <span className="text-on-surface">{e.to?.logicalId ?? "?"}</span>
           </div>
         ))}
         {incoming.map((e, i) => (
           <div key={`in-${i}`} className="flex gap-1">
-            <span className="text-stone-400">&lt;-</span>
-            <span className="text-stone-500">{e.kind}</span>
-            <span className="text-stone-900">{e.from?.logicalId ?? "?"}</span>
+            <span className="text-on-surface-variant">&lt;-</span>
+            <span className="text-on-surface-variant">{e.kind}</span>
+            <span className="text-on-surface">{e.from?.logicalId ?? "?"}</span>
           </div>
         ))}
       </div>
@@ -376,16 +376,16 @@ function PeersSection({ data }: { data: NodeDetailData }) {
   if (data.peers.length === 0) return null;
   return (
     <section data-testid="detail-peers" className={SECTION_CLASS}>
-      <div className="font-mono text-[8px] text-stone-400 uppercase tracking-wider mb-2">Peers</div>
+      <div className="font-mono text-[8px] text-on-surface-variant uppercase tracking-wider mb-2">Peers</div>
       <div className="space-y-1 font-mono text-[10px]">
         {data.peers.map((p) => (
           <div key={p.logicalId} className="space-y-0">
             <div className="flex justify-between gap-3">
-              <span className="text-stone-900">{p.logicalId}</span>
-              <span className="text-stone-500">{p.runtime ?? "-"}</span>
+              <span className="text-on-surface">{p.logicalId}</span>
+              <span className="text-on-surface-variant">{p.runtime ?? "-"}</span>
             </div>
             {p.canonicalSessionName && (
-              <div className="text-[9px] text-stone-400 truncate">{p.canonicalSessionName}</div>
+              <div className="text-[9px] text-on-surface-variant truncate">{p.canonicalSessionName}</div>
             )}
           </div>
         ))}
@@ -398,7 +398,7 @@ function ContextUsageSection({ data }: { data: NodeDetailData }) {
   const contextUsage = data.contextUsage;
   return (
     <section data-testid="detail-context-usage" className={SECTION_CLASS}>
-      <div className="font-mono text-[8px] text-stone-400 uppercase tracking-wider mb-2">Context</div>
+      <div className="font-mono text-[8px] text-on-surface-variant uppercase tracking-wider mb-2">Context</div>
       {contextUsage?.availability === "known" ? (
         <div className="space-y-0.5 font-mono text-[10px]">
           <InfoRow label="Used" value={contextUsage.usedPercentage != null ? `${contextUsage.usedPercentage}%` : null} />
@@ -412,7 +412,7 @@ function ContextUsageSection({ data }: { data: NodeDetailData }) {
           )}
         </div>
       ) : (
-        <div className="font-mono text-[10px] text-stone-400">
+        <div className="font-mono text-[10px] text-on-surface-variant">
           unknown{contextUsage?.reason ? ` (${contextUsage.reason})` : ""}
         </div>
       )}
@@ -480,7 +480,7 @@ function DetailsTab({
 function InlineTerminal({ data }: { data: NodeDetailData }) {
   if (!data.canonicalSessionName) {
     return (
-      <div className="font-mono text-[10px] text-stone-400 p-4">
+      <div className="font-mono text-[10px] text-on-surface-variant p-4">
         No canonical session name; terminal preview unavailable.
       </div>
     );
@@ -513,10 +513,10 @@ function StartupContent({ rigId: _rigId, logicalId: _logicalId, data }: { rigId:
 
       {data.infrastructureStartupCommand && (
         <section data-testid="live-node-infra-startup" className={SECTION_CLASS}>
-          <div className="font-mono text-[8px] uppercase tracking-wider text-stone-400 mb-2">
+          <div className="font-mono text-[8px] uppercase tracking-wider text-on-surface-variant mb-2">
             Startup Command
           </div>
-          <code className="font-mono text-[9px] text-stone-700 bg-stone-100 px-2 py-1 block">
+          <code className="font-mono text-[9px] text-on-surface bg-surface-low px-2 py-1 block">
             {data.infrastructureStartupCommand}
           </code>
         </section>
@@ -524,11 +524,11 @@ function StartupContent({ rigId: _rigId, logicalId: _logicalId, data }: { rigId:
 
       {data.startupActions.length > 0 && (
         <section data-testid="live-startup-actions" className={SECTION_CLASS}>
-          <div className="font-mono text-[8px] uppercase tracking-wider text-stone-400 mb-2">Startup Actions</div>
+          <div className="font-mono text-[8px] uppercase tracking-wider text-on-surface-variant mb-2">Startup Actions</div>
           <div className="space-y-1">
             {data.startupActions.map((action, index) => (
-              <div key={`${action.type}-${action.value}-${index}`} className="font-mono text-[10px] text-stone-700">
-                <span className="text-stone-500">{action.type}:</span> {action.value}
+              <div key={`${action.type}-${action.value}-${index}`} className="font-mono text-[10px] text-on-surface">
+                <span className="text-on-surface-variant">{action.type}:</span> {action.value}
               </div>
             ))}
           </div>
@@ -536,7 +536,7 @@ function StartupContent({ rigId: _rigId, logicalId: _logicalId, data }: { rigId:
       )}
 
       {data.startupFiles.length > 0 ? (
-        <section className="border border-outline-variant bg-white/30">
+        <section className="border border-outline-variant bg-surface-lowest/30">
           <div className="px-3 py-2 border-b border-outline-variant font-mono text-xs font-bold">
             Startup Files
           </div>
@@ -549,12 +549,12 @@ function StartupContent({ rigId: _rigId, logicalId: _logicalId, data }: { rigId:
                 <FileReferenceTrigger
                   data={{ path: f.path, absolutePath: f.absolutePath }}
                   testId={`live-startup-file-trigger-${f.path}`}
-                  className="block w-full px-3 py-2 text-left hover:bg-stone-100/60 transition-colors font-mono text-[10px]"
+                  className="block w-full px-3 py-2 text-left hover:bg-surface-low/60 transition-colors font-mono text-[10px]"
                 >
-                  <span className="font-bold underline decoration-dotted decoration-stone-400">
+                  <span className="font-bold underline decoration-dotted decoration-outline">
                     {f.path}
                   </span>
-                  <span className="text-stone-400 ml-2">({f.deliveryHint})</span>
+                  <span className="text-on-surface-variant ml-2">({f.deliveryHint})</span>
                   {f.required && (
                     <span className="text-red-500 text-[8px] ml-1">REQUIRED</span>
                   )}
@@ -564,7 +564,7 @@ function StartupContent({ rigId: _rigId, logicalId: _logicalId, data }: { rigId:
           </ul>
         </section>
       ) : (
-        <div className="font-mono text-[10px] text-stone-400 p-4">
+        <div className="font-mono text-[10px] text-on-surface-variant p-4">
           No startup files declared
         </div>
       )}
@@ -575,7 +575,7 @@ function StartupContent({ rigId: _rigId, logicalId: _logicalId, data }: { rigId:
 function TranscriptContent({ data }: { data: NodeDetailData }) {
   if (!data.transcript.enabled) {
     return (
-      <div data-testid="live-transcript-section" className="font-mono text-[10px] text-stone-400 p-4">
+      <div data-testid="live-transcript-section" className="font-mono text-[10px] text-on-surface-variant p-4">
         Transcript capture not enabled
       </div>
     );
@@ -585,12 +585,12 @@ function TranscriptContent({ data }: { data: NodeDetailData }) {
     <div data-testid="live-transcript-section" className="space-y-4">
       <section data-testid="detail-transcript" className={SECTION_CLASS}>
         <div className="font-mono text-xs font-bold mb-2">Transcript</div>
-        <div className="font-mono text-[10px] text-stone-700">{data.transcript.path ?? "enabled"}</div>
+        <div className="font-mono text-[10px] text-on-surface">{data.transcript.path ?? "enabled"}</div>
         {data.transcript.tailCommand && (
           <button
             type="button"
             onClick={() => copyText(data.transcript.tailCommand!)}
-            className="mt-2 w-full border border-stone-300 bg-white/40 px-2 py-1 text-left font-mono text-[8px] uppercase text-stone-700 hover:bg-stone-100"
+            className="mt-2 w-full border border-outline-variant bg-surface-lowest/40 px-2 py-1 text-left font-mono text-[8px] uppercase text-on-surface hover:bg-surface-low"
           >
             Copy tail command
           </button>
@@ -620,8 +620,8 @@ function TabNav({
           onClick={() => onSelect(tab)}
           className={`min-h-11 px-3 py-2 font-mono text-[10px] uppercase tracking-wider transition-colors ${
             activeTab === tab
-              ? "border-b-2 border-stone-900 text-stone-900 font-bold -mb-px"
-              : "text-stone-500 hover:text-stone-700"
+              ? "border-b-2 border-on-surface text-on-surface font-bold -mb-px"
+              : "text-on-surface-variant hover:text-on-surface"
           }`}
         >
           {tab.replace("-", " ")}
@@ -679,12 +679,12 @@ export function LiveNodeDetails({ rigId, logicalId }: LiveNodeDetailsProps) {
               model={data.model}
               size="sm"
               compact
-              className="bg-white/40 backdrop-blur-sm"
+              className="bg-surface-lowest/40 backdrop-blur-sm"
             />
           ) : null}
         />
 
-        {isLoading && <div className="font-mono text-[10px] text-stone-400">Loading...</div>}
+        {isLoading && <div className="font-mono text-[10px] text-on-surface-variant">Loading...</div>}
         {error && (
           <div className="p-3 bg-red-50 border border-red-200 font-mono text-[10px] text-red-700">
             {(error as Error).message}

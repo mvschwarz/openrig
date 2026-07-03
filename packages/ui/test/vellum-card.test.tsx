@@ -17,8 +17,8 @@ describe("VellumCard (Phase 1 primitive)", () => {
   it("default container carries vellum classes (bg-white + border-stone-900 + hard-shadow)", () => {
     const { container } = render(<VellumCard testId="vc">x</VellumCard>);
     const el = container.querySelector("[data-testid='vc']") as HTMLElement;
-    expect(el.className).toContain("bg-white");
-    expect(el.className).toContain("border-stone-900");
+    expect(el.className).toContain("bg-surface-lowest");
+    expect(el.className).toContain("border-on-surface");
     expect(el.className).toContain("hard-shadow");
   });
 
@@ -99,7 +99,7 @@ describe("VellumCard (Phase 1 primitive)", () => {
     );
     const el = container.querySelector("[data-testid='vc-fv-href']") as HTMLElement;
     expect(el.className).toContain("focus-visible:outline");
-    expect(el.className).toContain("focus-visible:outline-stone-900");
+    expect(el.className).toContain("focus-visible:outline-on-surface");
   });
 
   it("interactive (onClick) carries focus-visible classes", () => {

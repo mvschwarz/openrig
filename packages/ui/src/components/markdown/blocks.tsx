@@ -65,7 +65,7 @@ function FallbackCode({ language, text, reason }: { language: string; text: stri
       <div className="mb-2 font-mono text-[8px] uppercase tracking-[0.18em] text-amber-700">
         {language} block (fallback: {reason})
       </div>
-      <pre className="overflow-x-auto whitespace-pre-wrap break-words font-mono text-[10px] text-stone-800">{text}</pre>
+      <pre className="overflow-x-auto whitespace-pre-wrap break-words font-mono text-[10px] text-on-surface">{text}</pre>
     </div>
   );
 }

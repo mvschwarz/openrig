@@ -54,7 +54,7 @@ export function HotPotatoEdge({
             stroke="rgba(255,255,255,0.88)"
             strokeWidth={crossRig ? 1.75 : 2.25}
             vectorEffect="non-scaling-stroke"
-            className={crossRig ? "fill-stone-500" : "fill-emerald-600"}
+            className={crossRig ? "fill-outline" : "fill-emerald-600"}
           />
         ) : (
           <>
@@ -82,7 +82,7 @@ export function HotPotatoEdge({
               stroke="rgba(255,255,255,0.88)"
               strokeWidth={crossRig ? 1.75 : 2.25}
               vectorEffect="non-scaling-stroke"
-              className={crossRig ? "fill-stone-500 hot-potato-packet-cross" : "fill-emerald-600 hot-potato-packet"}
+              className={crossRig ? "fill-outline hot-potato-packet-cross" : "fill-emerald-600 hot-potato-packet"}
             >
               <animateMotion
                 dur={`${packet.durationMs}ms`}

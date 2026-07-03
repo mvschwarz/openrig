@@ -106,50 +106,50 @@ export function PluginDetailPage({ pluginId }: PluginDetailPageProps) {
       <header className="mb-4">
         <SectionHeader tone="muted">Plugin</SectionHeader>
         <div className="mt-1 flex flex-wrap items-baseline gap-3">
-          <h1 className="font-headline text-2xl font-bold tracking-tight text-stone-900">
+          <h1 className="font-headline text-2xl font-bold tracking-tight text-on-surface">
             {entry.name}
           </h1>
-          <span className="font-mono text-sm text-stone-600">v{entry.version}</span>
+          <span className="font-mono text-sm text-on-surface-variant">v{entry.version}</span>
           {entry.runtimes.map((rt) => (
             <span
               key={rt}
               data-testid={`plugin-detail-runtime-${rt}`}
-              className="inline-block border border-outline-variant bg-white/30 px-2 py-0.5 font-mono text-[10px] uppercase tracking-[0.12em] text-stone-700"
+              className="inline-block border border-outline-variant bg-surface-lowest/30 px-2 py-0.5 font-mono text-[10px] uppercase tracking-[0.12em] text-on-surface"
             >
               {rt}
             </span>
           ))}
           <span
-            className="font-mono text-[10px] uppercase tracking-[0.12em] text-stone-500"
+            className="font-mono text-[10px] uppercase tracking-[0.12em] text-on-surface-variant"
             title={entry.path}
           >
             {entry.sourceLabel}
           </span>
           <span
             data-testid="plugin-detail-skill-count"
-            className="font-mono text-[10px] uppercase tracking-[0.12em] text-stone-500"
+            className="font-mono text-[10px] uppercase tracking-[0.12em] text-on-surface-variant"
           >
             {skillCount} {skillCount === 1 ? "skill" : "skills"}
           </span>
           <span
             data-testid="plugin-detail-used-by-count"
-            className="font-mono text-[10px] uppercase tracking-[0.12em] text-stone-500"
+            className="font-mono text-[10px] uppercase tracking-[0.12em] text-on-surface-variant"
           >
             used by {usedByCount} {usedByCount === 1 ? "agent" : "agents"}
           </span>
         </div>
         {entry.description && (
-          <p className="mt-2 max-w-3xl text-sm text-stone-600">{entry.description}</p>
+          <p className="mt-2 max-w-3xl text-sm text-on-surface-variant">{entry.description}</p>
         )}
       </header>
 
       <div
         data-testid="plugin-detail-docs-browser"
-        className="flex h-[calc(100%-7rem)] flex-col border border-outline-variant bg-white/25 hard-shadow sm:flex-row"
+        className="flex h-[calc(100%-7rem)] flex-col border border-outline-variant bg-surface-lowest/25 hard-shadow sm:flex-row"
       >
         <aside
           data-testid="plugin-detail-tree"
-          className="w-full max-h-64 shrink-0 overflow-y-auto border-b border-outline-variant bg-white/30 sm:w-72 sm:max-h-none sm:border-b-0 sm:border-r"
+          className="w-full max-h-64 shrink-0 overflow-y-auto border-b border-outline-variant bg-surface-lowest/30 sm:w-72 sm:max-h-none sm:border-b-0 sm:border-r"
         >
           <Breadcrumbs
             testId="plugin-detail-breadcrumbs"
@@ -158,7 +158,7 @@ export function PluginDetailPage({ pluginId }: PluginDetailPageProps) {
             onNavigate={(rel) => { setCurrentPath(rel); setSelectedFile(null); }}
           />
           {list.isLoading ? (
-            <div data-testid="plugin-detail-tree-loading" className="p-3 font-mono text-[10px] text-stone-400">
+            <div data-testid="plugin-detail-tree-loading" className="p-3 font-mono text-[10px] text-on-surface-variant">
               Loading…
             </div>
           ) : list.isError ? (
@@ -166,7 +166,7 @@ export function PluginDetailPage({ pluginId }: PluginDetailPageProps) {
               {(list.error as Error)?.message ?? "Error loading directory."}
             </div>
           ) : !list.data || list.data.entries.length === 0 ? (
-            <div data-testid="plugin-detail-tree-empty" className="p-3 font-mono text-[10px] text-stone-400">
+            <div data-testid="plugin-detail-tree-empty" className="p-3 font-mono text-[10px] text-on-surface-variant">
               Empty directory.
             </div>
           ) : (
@@ -177,7 +177,7 @@ export function PluginDetailPage({ pluginId }: PluginDetailPageProps) {
                     type="button"
                     data-testid="plugin-detail-tree-up"
                     onClick={() => { setCurrentPath(parentPath(currentPath)); setSelectedFile(null); }}
-                    className="block w-full px-2 py-1 text-left font-mono text-[10px] text-stone-500 hover:bg-stone-100"
+                    className="block w-full px-2 py-1 text-left font-mono text-[10px] text-on-surface-variant hover:bg-surface-low"
                   >
                     ..
                   </button>
@@ -201,8 +201,8 @@ export function PluginDetailPage({ pluginId }: PluginDetailPageProps) {
                       disabled={fileEntry.type === "other"}
                       className={`block w-full px-2 py-1 text-left font-mono text-[10px] ${
                         fileEntry.type === "other"
-                          ? "text-stone-400"
-                          : `hover:bg-stone-100 ${isSelected ? "bg-stone-200/80 text-stone-900" : "text-stone-700"}`
+                          ? "text-on-surface-variant"
+                          : `hover:bg-surface-low ${isSelected ? "bg-surface-high/80 text-on-surface" : "text-on-surface"}`
                       }`}
                     >
                       {fileEntry.type === "dir" ? `▸ ${fileEntry.name}` : fileEntry.name}
@@ -214,9 +214,9 @@ export function PluginDetailPage({ pluginId }: PluginDetailPageProps) {
           )}
         </aside>
 
-        <main data-testid="plugin-detail-viewer" className="flex-1 min-w-0 overflow-y-auto bg-white">
+        <main data-testid="plugin-detail-viewer" className="flex-1 min-w-0 overflow-y-auto bg-surface-lowest">
           {!selectedFile ? (
-            <div data-testid="plugin-detail-viewer-no-selection" className="p-4 font-mono text-[10px] text-stone-400">
+            <div data-testid="plugin-detail-viewer-no-selection" className="p-4 font-mono text-[10px] text-on-surface-variant">
               Select a file from the tree.
             </div>
           ) : (
@@ -241,7 +241,7 @@ function Breadcrumbs({
 }) {
   const segments = path ? path.split("/") : [];
   return (
-    <nav data-testid={testId} className="flex flex-wrap items-baseline gap-1 border-b border-outline-variant px-2 py-1 font-mono text-[10px] text-stone-700">
+    <nav data-testid={testId} className="flex flex-wrap items-baseline gap-1 border-b border-outline-variant px-2 py-1 font-mono text-[10px] text-on-surface">
       <button type="button" onClick={() => onNavigate("")} className="font-bold hover:underline">
         {pluginName}
       </button>
@@ -249,7 +249,7 @@ function Breadcrumbs({
         const accumulated = segments.slice(0, idx + 1).join("/");
         return (
           <span key={accumulated}>
-            <span className="mx-0.5 text-stone-400">/</span>
+            <span className="mx-0.5 text-on-surface-variant">/</span>
             <button type="button" onClick={() => onNavigate(accumulated)} className="hover:underline">
               {seg}
             </button>
@@ -266,7 +266,7 @@ function PluginFileContent({ pluginId, path }: { pluginId: string; path: string 
 
   if (read.isLoading) {
     return (
-      <div data-testid="plugin-detail-viewer-loading" className="p-4 font-mono text-[10px] text-stone-400">
+      <div data-testid="plugin-detail-viewer-loading" className="p-4 font-mono text-[10px] text-on-surface-variant">
         Loading…
       </div>
     );
@@ -282,9 +282,9 @@ function PluginFileContent({ pluginId, path }: { pluginId: string; path: string 
 
   return (
     <div data-testid="plugin-detail-viewer-content" className="flex h-full flex-col">
-      <header className="flex items-baseline justify-between border-b border-outline-variant bg-white/30 px-3 py-2 font-mono text-[10px]">
-        <div data-testid="plugin-detail-viewer-path" className="text-stone-700">{path}</div>
-        <div className="flex items-baseline gap-3 text-stone-500">
+      <header className="flex items-baseline justify-between border-b border-outline-variant bg-surface-lowest/30 px-3 py-2 font-mono text-[10px]">
+        <div data-testid="plugin-detail-viewer-path" className="text-on-surface">{path}</div>
+        <div className="flex items-baseline gap-3 text-on-surface-variant">
           <span>{read.data.size}b</span>
           <span>{read.data.mtime}</span>
         </div>
@@ -308,7 +308,7 @@ function PluginFileContent({ pluginId, path }: { pluginId: string; path: string 
             <SyntaxHighlight code={read.data.content} language={ext.slice(1)} />
           </div>
         ) : (
-          <pre data-testid="plugin-detail-viewer-text-fallback" className="p-4 whitespace-pre-wrap break-words font-mono text-[10px] text-stone-800">
+          <pre data-testid="plugin-detail-viewer-text-fallback" className="p-4 whitespace-pre-wrap break-words font-mono text-[10px] text-on-surface">
             {read.data.content}
           </pre>
         )}

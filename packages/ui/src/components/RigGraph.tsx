@@ -45,7 +45,7 @@ function PodGroupNode({
             : ""
       }`}
     >
-      <div className="absolute left-4 top-3 inline-flex items-center font-mono text-[12px] font-bold leading-none tracking-[0.08em] text-stone-800">
+      <div className="absolute left-4 top-3 inline-flex items-center font-mono text-[12px] font-bold leading-none tracking-[0.08em] text-on-surface">
         {`${label} pod`}
       </div>
     </div>
@@ -504,9 +504,9 @@ export function RigGraph({
       )}
       {focusMessage && (
         <div className={`absolute top-spacing-4 left-spacing-4 z-20 px-spacing-4 py-spacing-2 font-mono text-[10px] border ${
-          focusMessage.type === "success" ? "bg-white border-stone-900 text-stone-900" :
+          focusMessage.type === "success" ? "bg-surface-lowest border-on-surface text-on-surface" :
           focusMessage.type === "error" ? "bg-tertiary/10 border-tertiary text-tertiary" :
-          "bg-white border-stone-300 text-stone-600"
+          "bg-surface-lowest border-outline-variant text-on-surface-variant"
         }`}>
           {focusMessage.text}
         </div>

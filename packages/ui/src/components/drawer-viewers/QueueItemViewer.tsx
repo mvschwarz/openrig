@@ -92,7 +92,7 @@ export function QueueItemViewer({
     <div data-testid="queue-item-viewer" className="flex flex-col h-full">
       <header className="px-4 py-3 border-b border-outline-variant">
         <SectionHeader tone="muted">Queue item</SectionHeader>
-        <h3 className="mt-1 font-mono text-xs text-stone-900 break-all">{qitemId}</h3>
+        <h3 className="mt-1 font-mono text-xs text-on-surface break-all">{qitemId}</h3>
       </header>
       <div className="px-4 py-3 border-b border-outline-variant space-y-2 font-mono text-xs">
         {source || destination ? (
@@ -139,7 +139,7 @@ export function QueueItemViewer({
         <FieldRow label="Tier" value={tier} show={fullDetail} />
         {closureReason || fullDetail ? (
           <MetaRow label="Closure">
-            <span data-testid="qitem-closure" className={closureReason ? "break-all text-stone-900" : "text-on-surface-variant"}>
+            <span data-testid="qitem-closure" className={closureReason ? "break-all text-on-surface" : "text-on-surface-variant"}>
               {closureReason ? `${closureReason}${closureTarget ? ` → ${closureTarget}` : ""}` : "—"}
             </span>
           </MetaRow>
@@ -160,7 +160,7 @@ export function QueueItemViewer({
             {chain && chain.length > 0 ? (
               <span data-testid="qitem-chain" className="flex min-w-0 flex-col items-end gap-0.5 text-right">
                 {chain.map((id, i) => (
-                  <span key={`${id}-${i}`} className="break-all text-stone-900">
+                  <span key={`${id}-${i}`} className="break-all text-on-surface">
                     {i === 0 ? id : `↳ ${id}`}
                   </span>
                 ))}
@@ -174,7 +174,7 @@ export function QueueItemViewer({
       <div className="px-4 py-3 border-b border-outline-variant flex-1 min-h-0 overflow-y-auto">
         <SectionHeader tone="muted">Body</SectionHeader>
         {body ? (
-          <pre data-testid="qitem-body" className="mt-2 whitespace-pre-wrap font-mono text-xs text-stone-900">
+          <pre data-testid="qitem-body" className="mt-2 whitespace-pre-wrap font-mono text-xs text-on-surface">
             {visibleLines.join("\n")}
           </pre>
         ) : (
@@ -185,7 +185,7 @@ export function QueueItemViewer({
             type="button"
             onClick={() => setShowFull((s) => !s)}
             data-testid="qitem-body-toggle"
-            className="mt-2 font-mono text-[10px] uppercase tracking-wide text-stone-700 hover:text-stone-900 underline"
+            className="mt-2 font-mono text-[10px] uppercase tracking-wide text-on-surface hover:text-on-surface underline"
           >
             {showFull ? "Show less" : `Show full body (${bodyLines.length} lines)`}
           </button>
@@ -202,9 +202,9 @@ export function QueueItemViewer({
                   {r.kind}
                 </span>
                 {r.href ? (
-                  <a href={r.href} className="text-stone-900 hover:underline truncate">{r.label}</a>
+                  <a href={r.href} className="text-on-surface hover:underline truncate">{r.label}</a>
                 ) : (
-                  <span className="text-stone-900 truncate">{r.label}</span>
+                  <span className="text-on-surface truncate">{r.label}</span>
                 )}
               </li>
             ))}
@@ -226,7 +226,7 @@ function MetaRow({ label, children }: { label: string; children: React.ReactNode
   return (
     <div className="flex items-start justify-between gap-3">
       <span className="shrink-0 text-on-surface-variant">{label}</span>
-      <span className="min-w-0 text-stone-900">{children}</span>
+      <span className="min-w-0 text-on-surface">{children}</span>
     </div>
   );
 }
@@ -252,7 +252,7 @@ function FieldRow({
     <MetaRow label={label}>
       <span
         data-testid={testId}
-        className={value ? (mono ? "break-all text-stone-900" : "text-stone-900") : "text-on-surface-variant"}
+        className={value ? (mono ? "break-all text-on-surface" : "text-on-surface") : "text-on-surface-variant"}
       >
         {value ?? "—"}
       </span>

@@ -75,7 +75,7 @@ function TokenMetric({ seat }: { seat: NodeInventoryEntry }) {
   return (
     <span
       data-testid={`terminal-card-tokens-${seat.rigId}-${seat.logicalId}`}
-      className={`font-mono text-[8px] font-bold uppercase tracking-wide ${label ? "text-stone-500" : "text-stone-300"}`}
+      className={`font-mono text-[8px] font-bold uppercase tracking-wide ${label ? "text-on-surface-variant" : "text-on-surface-variant"}`}
       title={title ?? "Token sample unavailable"}
     >
       {label ?? "--"}
@@ -108,7 +108,7 @@ function SeatTerminalCard({ seat }: { seat: NodeInventoryEntry }) {
       data-testid={`terminal-card-${seat.rigId}-${seat.logicalId}`}
       data-active={active ? "true" : "false"}
       className={cn(
-        // OPR.0.4.0.39 FR-4: NO white card wrapper (bg-white/40 was too contrasty);
+        // OPR.0.4.0.39 FR-4: NO white card wrapper (bg-surface-lowest/40 was too contrasty);
         // tight p-1.5/gap-1.5 so the grid does not waste edge space. The active
         // pulsing-ring border stays as the scan signal; inactive is borderless.
         "relative flex flex-col gap-1.5 p-1.5",
@@ -116,7 +116,7 @@ function SeatTerminalCard({ seat }: { seat: NodeInventoryEntry }) {
       )}
     >
       <header className="flex items-center justify-between gap-2">
-        <span className="font-mono text-[8px] font-semibold uppercase tracking-[0.10em] text-stone-500 truncate">
+        <span className="font-mono text-[8px] font-semibold uppercase tracking-[0.10em] text-on-surface-variant truncate">
           {memberName}
         </span>
         <span className="inline-flex shrink-0 items-center gap-1">
@@ -175,7 +175,7 @@ function TerminalGrid({
             type="button"
             data-testid="topology-terminal-show-toggle"
             onClick={() => setShowAll((s) => !s)}
-            className="px-2 py-0.5 border border-outline-variant font-mono text-[9px] uppercase tracking-wide text-stone-700 hover:bg-stone-100/60"
+            className="px-2 py-0.5 border border-outline-variant font-mono text-[9px] uppercase tracking-wide text-on-surface hover:bg-surface-low/60"
           >
             {showAll ? `show first ${SAFE_N}` : `show all ${seats.length}`}
           </button>
@@ -237,17 +237,17 @@ function HostRigPicker({
             type="button"
             data-testid={`topology-terminal-host-rig-${rig.id}`}
             onClick={() => onSelectRig(rig.id)}
-            className="flex items-center justify-between gap-2 border border-outline-variant bg-surface/70 px-3 py-2 text-left hover:bg-stone-100/70"
+            className="flex items-center justify-between gap-2 border border-outline-variant bg-surface/70 px-3 py-2 text-left hover:bg-surface-low/70"
           >
             <span className="min-w-0">
-              <span className="block truncate font-mono text-[10px] font-semibold uppercase tracking-[0.14em] text-stone-700">
+              <span className="block truncate font-mono text-[10px] font-semibold uppercase tracking-[0.14em] text-on-surface">
                 {rig.name}
               </span>
-              <span className="block font-mono text-[9px] uppercase tracking-[0.10em] text-stone-400">
+              <span className="block font-mono text-[9px] uppercase tracking-[0.10em] text-on-surface-variant">
                 {rig.nodeCount} node{rig.nodeCount === 1 ? "" : "s"}
               </span>
             </span>
-            <span className="shrink-0 font-mono text-[9px] uppercase tracking-[0.12em] text-stone-500">
+            <span className="shrink-0 font-mono text-[9px] uppercase tracking-[0.12em] text-on-surface-variant">
               Open
             </span>
           </button>
@@ -286,7 +286,7 @@ export function TopologyTerminalView({ scope, rigId, podName }: TopologyTerminal
             type="button"
             data-testid="topology-terminal-host-back"
             onClick={() => setSelectedHostRigId(null)}
-            className="font-mono text-[9px] uppercase tracking-[0.14em] text-stone-500 hover:text-stone-800"
+            className="font-mono text-[9px] uppercase tracking-[0.14em] text-on-surface-variant hover:text-on-surface"
           >
             Back to rigs
           </button>

@@ -18,6 +18,28 @@ export interface CurrentQitemSummary {
   tier: string | null;
 }
 
+/**
+ * OPR.0.4.3.19 — the seat liveness identity verdict (third axis) as it arrives
+ * on the /nodes + /graph payloads. A `mismatch`/`pane_missing` verdict must
+ * down-rank the seat away from active/running in every UI surface; the daemon
+ * already synthesizes graph startupStatus=attention_required for the ring, and
+ * the activity DOT consumes this verdict directly (getActivityStateWithSource)
+ * so it cannot silently ignore it.
+ */
+export interface SeatIdentityVerdictSummary {
+  verdict: "verified" | "mismatch" | "pane_missing" | "tmux_unavailable";
+  evidenceSource?: string | null;
+  reason?: string | null;
+  evidence?: {
+    registeredPane?: string | null;
+    observedPid?: number | null;
+    observedCommand?: string | null;
+    matchedLayer?: number | null;
+  } | null;
+  sessionName?: string | null;
+  observedAt?: string;
+}
+
 export interface NodeInventoryEntry {
   rigId: string;
   rigName: string;
@@ -50,6 +72,9 @@ export interface NodeInventoryEntry {
   terminalActive?: boolean | null;
   hasAssignedWork?: boolean;
   pendingWorkCount?: number;
+  // OPR.0.4.3.19 — liveness identity verdict (third axis). null/absent when
+  // never observed; mismatch/pane_missing down-ranks the seat non-green.
+  identityVerdict?: SeatIdentityVerdictSummary | null;
   agentRef?: string | null;
   profile?: string | null;
   codexConfigProfile?: string | null;

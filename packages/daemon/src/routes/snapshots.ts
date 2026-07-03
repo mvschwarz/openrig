@@ -3,6 +3,8 @@ import { RigNotFoundError } from "../domain/errors.js";
 import type { SnapshotCapture } from "../domain/snapshot-capture.js";
 import type { SnapshotRepository } from "../domain/snapshot-repository.js";
 import type { RestoreOrchestrator } from "../domain/restore-orchestrator.js";
+import type { SessionRegistry } from "../domain/session-registry.js";
+import type { ResumeMetadataRefresher } from "../domain/resume-metadata-refresher.js";
 
 export const snapshotsRoutes = new Hono();
 export const restoreRoutes = new Hono();
@@ -12,6 +14,9 @@ function getDeps(c: { get: (key: string) => unknown }) {
     snapshotCapture: c.get("snapshotCapture" as never) as SnapshotCapture,
     snapshotRepo: c.get("snapshotRepo" as never) as SnapshotRepository,
     restoreOrchestrator: c.get("restoreOrchestrator" as never) as RestoreOrchestrator,
+    // OPR.0.4.3.20 FR-4 — for refresh-before-serialize on manual snapshots.
+    resumeMetadataRefresher: c.get("resumeMetadataRefresher" as never) as ResumeMetadataRefresher | undefined,
+    sessionRegistry: c.get("sessionRegistry" as never) as SessionRegistry | undefined,
   };
 }
 
@@ -20,9 +25,23 @@ snapshotsRoutes.post("/", async (c) => {
   const rigId = c.req.param("rigId")!;
   const body: Record<string, unknown> = await c.req.json().catch(() => ({}));
   const kind = typeof body["kind"] === "string" ? body["kind"] : "manual";
-  const { snapshotCapture } = getDeps(c);
+  const { snapshotCapture, resumeMetadataRefresher, sessionRegistry } = getDeps(c);
 
   try {
+    // OPR.0.4.3.20 FR-4 — refresh live tokens before serialize, in its OWN
+    // try/catch so a refresh throw NEVER skips the snapshot (guard caveat).
+    if (resumeMetadataRefresher && sessionRegistry) {
+      try {
+        // fillNullOnly: a routine snapshot refresh fills null tokens (lightweight
+        // sidecar/pid-log reads) but NEVER clears a present token nor spawns a
+        // `claude --resume` probe (rev1 fix — keep stale-present for FR-6, no
+        // recurring probe blast radius).
+        await resumeMetadataRefresher.refresh(
+          sessionRegistry.getLatestLiveSessions(rigId),
+          { fillNullOnly: true },
+        );
+      } catch { /* best-effort — the snapshot still writes below */ }
+    }
     const snapshot = snapshotCapture.captureSnapshot(rigId, kind);
     return c.json(snapshot, 201);
   } catch (err) {

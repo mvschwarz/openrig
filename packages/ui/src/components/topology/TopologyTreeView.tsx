@@ -75,8 +75,8 @@ function SeatLeaf({ rigId, logicalId, label, runtime, isActive }: {
         className={cn(
           "flex w-full min-w-0 items-center gap-1.5 font-mono text-xs",
           isActive
-            ? "text-stone-900 font-bold"
-            : "text-on-surface hover:text-stone-900",
+            ? "text-on-surface font-bold"
+            : "text-on-surface hover:text-on-surface",
         )}
       >
         <RuntimeMark runtime={runtime} size="xs" />
@@ -114,14 +114,14 @@ function PodBranch({ rigId, podName, seats, activeRigId, activePodName, activeLo
           to="/topology/pod/$rigId/$podName"
           params={{ rigId, podName }}
           onClick={(e) => e.stopPropagation()}
-          className="font-mono text-[11px] text-stone-900 flex-1 truncate hover:underline"
+          className="font-mono text-[11px] text-on-surface flex-1 truncate hover:underline"
         >
           {displayPodName(podName)}
         </Link>
         <span className="font-mono text-[9px] text-on-surface-variant">{seats.length}</span>
       </button>
       {open ? (
-        <ul className="ml-4 border-l border-stone-200">
+        <ul className="ml-4 border-l border-outline-variant">
           {seats.map((s) => (
             <SeatLeaf
               key={s.logicalId}
@@ -180,13 +180,13 @@ function RigBranch({ rigId, rigName, activeRigId, activePodName, activeLogicalId
           to="/topology/rig/$rigId"
           params={{ rigId }}
           onClick={(e) => e.stopPropagation()}
-          className="font-mono text-[11px] uppercase text-stone-900 flex-1 truncate hover:underline"
+          className="font-mono text-[11px] uppercase text-on-surface flex-1 truncate hover:underline"
         >
           {rigName}
         </Link>
       </button>
       {open ? (
-        <ul className="ml-4 border-l border-stone-200">
+        <ul className="ml-4 border-l border-outline-variant">
           {pods.length === 0 ? (
             <li className="px-2 py-1 font-mono text-[10px] text-on-surface-variant italic">
               Loading…
@@ -282,7 +282,7 @@ export function TopologyTreeView() {
             <Link
               to="/topology"
               onClick={(e) => e.stopPropagation()}
-              className="font-mono text-[11px] uppercase text-stone-900 flex-1 hover:underline"
+              className="font-mono text-[11px] uppercase text-on-surface flex-1 hover:underline"
             >
               localhost
             </Link>

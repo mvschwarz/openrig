@@ -50,6 +50,8 @@ import type { SessionTransport } from "./domain/session-transport.js";
 import type { AgentActivityStore } from "./domain/agent-activity-store.js";
 import { transcriptRoutes } from "./routes/transcripts.js";
 import { transportRoutes } from "./routes/transport.js";
+import { compactionRoutes } from "./routes/compaction.js";
+import type { ClaudeCompactionEnforcer } from "./domain/claude-compaction-enforcer.js";
 import { activityRoutes } from "./routes/activity.js";
 import { askRoutes } from "./routes/ask.js";
 import type { AskService } from "./domain/ask-service.js";
@@ -109,6 +111,7 @@ import type { WorkflowRuntime } from "./domain/workflow-runtime.js";
 import { envRoutes } from "./routes/env.js";
 import type { RigLifecycleService } from "./domain/rig-lifecycle-service.js";
 import { seatRoutes } from "./routes/seat.js";
+import { createRouteTimingMiddleware } from "./domain/route-timing-recorder.js";
 
 export interface AppDeps {
   rigRepo: RigRepository;
@@ -120,6 +123,8 @@ export interface AppDeps {
   snapshotCapture: SnapshotCapture;
   snapshotRepo: SnapshotRepository;
   restoreOrchestrator: RestoreOrchestrator;
+  // OPR.0.4.3.20 FR-4 — for refresh-before-serialize on the manual snapshot route.
+  resumeMetadataRefresher?: import("./domain/resume-metadata-refresher.js").ResumeMetadataRefresher;
   rigSpecExporter: RigSpecExporter;
   rigSpecPreflight: RigSpecPreflight;
   rigInstantiator: RigInstantiator;
@@ -142,6 +147,8 @@ export interface AppDeps {
    * construct AppDeps directly don't need to provide one.
    */
   seatActivityService?: import("./domain/seat-activity-service.js").SeatActivityService;
+  /** OPR.0.4.3.19 — periodic liveness identity reconciler (started post-bind). */
+  seatIdentityReconciler?: import("./domain/seat-identity-reconciler.js").SeatIdentityReconciler;
   psProjectionService: PsProjectionService;
   upRouter: UpCommandRouter;
   teardownOrchestrator: RigTeardownOrchestrator;
@@ -249,6 +256,13 @@ export interface AppDeps {
   whoamiService?: WhoamiService;
   contextUsageStore?: import("./domain/context-usage-store.js").ContextUsageStore;
   contextMonitor?: { pollOnce(): Promise<void> };
+  /**
+   * OPR.0.4.3.14 — Claude compaction enforcer, exposed to routes for the manual
+   * compaction trigger (POST /api/compaction/trigger). Constructed once in
+   * startup.ts and shared with ContextMonitor (same instance, so manual +
+   * auto share one back-half state machine — no second restore path).
+   */
+  compactionEnforcer?: ClaudeCompactionEnforcer;
   nodeCmuxService?: import("./domain/node-cmux-service.js").NodeCmuxService;
   agentActivityStore?: AgentActivityStore;
   seatAttentionReconciler?: import("./domain/seat-attention-reconciler.js").SeatAttentionReconciler;
@@ -265,6 +279,27 @@ export interface AppDeps {
   /** Slice 09 (OPR.0.3.2.9) — operator-context-mode bindings store.
    *  Optional: when absent, the rig-policy routes return 503. */
   rigPolicyStore?: import("./domain/rig-policy/rig-policy-store.js").RigPolicyStore;
+  /**
+   * OPR.0.4.3.21 — daemon event-loop health monitor. Optional: when absent
+   * (e.g. direct-construction test harnesses) `/healthz` keeps its exact
+   * `{ status: "ok" }` body. Constructed once per daemon in startup.ts and
+   * surfaced on the enriched `/healthz` payload as the wedge-detection
+   * evidence (loop lag / last-tick age / utilization / healthy verdict).
+   */
+  eventLoopMonitor?: import("./domain/event-loop-monitor.js").EventLoopMonitor;
+  /**
+   * OPR.0.4.3.21 — request-duration recorder for the expensive topology
+   * routes. Optional (same rationale). When present, one timing middleware is
+   * registered and the rolling last/max per route is surfaced on `/healthz`.
+   */
+  routeTimingRecorder?: import("./domain/route-timing-recorder.js").RouteTimingRecorder;
+  /**
+   * OPR.0.4.3.04 — OpenRig identity/activity env stamped onto a successor
+   * tmux session created by the seat-handover full-cycle composer, mirroring
+   * the env NodeLauncher uses at launch. Optional; the three core identity
+   * vars are always derived internally by the composer.
+   */
+  sessionEnv?: Record<string, string | undefined>;
 }
 
 const MIME_TYPES: Record<string, string> = {
@@ -374,6 +409,7 @@ export function createApp(deps: AppDeps): Hono {
     c.set("eventBus" as never, deps.eventBus);
     c.set("nodeLauncher" as never, deps.nodeLauncher);
     c.set("tmuxAdapter" as never, deps.tmuxAdapter);
+    c.set("sessionEnv" as never, deps.sessionEnv);
     c.set("cmuxAdapter" as never, deps.cmuxAdapter);
     // Slice 24 — per-rig CMUX workspace launcher wiring.
     c.set(
@@ -387,6 +423,7 @@ export function createApp(deps: AppDeps): Hono {
     c.set("snapshotCapture" as never, deps.snapshotCapture);
     c.set("snapshotRepo" as never, deps.snapshotRepo);
     c.set("restoreOrchestrator" as never, deps.restoreOrchestrator);
+    c.set("resumeMetadataRefresher" as never, deps.resumeMetadataRefresher);
     c.set("rigSpecExporter" as never, deps.rigSpecExporter);
     c.set("rigSpecPreflight" as never, deps.rigSpecPreflight);
     c.set("rigInstantiator" as never, deps.rigInstantiator);
@@ -452,6 +489,7 @@ export function createApp(deps: AppDeps): Hono {
     c.set("whoamiService" as never, deps.whoamiService);
     c.set("contextUsageStore" as never, deps.contextUsageStore);
     c.set("contextMonitor" as never, deps.contextMonitor);
+    c.set("compactionEnforcer" as never, deps.compactionEnforcer);
     c.set("nodeCmuxService" as never, deps.nodeCmuxService);
     c.set("agentActivityStore" as never, deps.agentActivityStore);
     c.set("seatAttentionReconciler" as never, deps.seatAttentionReconciler);
@@ -469,8 +507,28 @@ export function createApp(deps: AppDeps): Hono {
     await next();
   });
 
+  // OPR.0.4.3.21 — ONE request-duration middleware for the expensive topology
+  // routes (rigs summary/graph, nodes, ps). Registered only when a recorder is
+  // wired (production); the internal expensiveRouteLabel gate makes it a no-op
+  // for every other path, so cheap routes pay nothing.
+  if (deps.routeTimingRecorder) {
+    app.use("*", createRouteTimingMiddleware(deps.routeTimingRecorder));
+  }
+
   app.get("/healthz", (c) => {
-    return c.json({ status: "ok" });
+    // OPR.0.4.3.21 — enrich the health surface with event-loop wedge evidence
+    // when the monitor is wired. Absent monitor keeps the exact legacy body so
+    // existing probes / tests that assert `{ status: "ok" }` are unchanged.
+    const monitor = deps.eventLoopMonitor;
+    if (!monitor) {
+      return c.json({ status: "ok" });
+    }
+    const eventLoop = monitor.snapshot();
+    return c.json({
+      status: "ok",
+      eventLoop,
+      routeTimings: deps.routeTimingRecorder?.snapshot() ?? {},
+    });
   });
 
   app.route("/api/rigs", rigsRoutes);
@@ -498,6 +556,9 @@ export function createApp(deps: AppDeps): Hono {
   app.route("/api/kernel", kernelStatusRoutes);
   app.route("/api/transcripts", transcriptRoutes());
   app.route("/api/transport", transportRoutes({ bearerToken: deps.terminalBearerToken ?? null }));
+  // OPR.0.4.3.14 — manual compaction trigger (same terminal-bearer posture as
+  // transport, since it drives a send into the target seat).
+  app.route("/api/compaction", compactionRoutes({ bearerToken: deps.terminalBearerToken ?? null }));
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let injectWebSocket: (server: any) => void = () => {};
   if (deps.enableNodeWebSocket) {

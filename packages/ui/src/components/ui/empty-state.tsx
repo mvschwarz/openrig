@@ -22,7 +22,7 @@ export interface EmptyStateProps {
 
 function ActionButton({ action, testId }: { action: EmptyStateAction; testId?: string }) {
   const cls =
-    "inline-flex items-center px-3 py-1 border border-stone-900 bg-white font-mono text-[10px] uppercase hover:bg-stone-100";
+    "inline-flex items-center px-3 py-1 border border-on-surface bg-surface-lowest font-mono text-[10px] uppercase hover:bg-surface-low";
   if (action.href) {
     return (
       <a href={action.href} className={cls} data-testid={testId ? `${testId}-action` : undefined}>
@@ -64,7 +64,7 @@ export function EmptyState({
           {typeof icon === "string" ? <span className="text-2xl">{icon}</span> : icon}
         </div>
       ) : null}
-      <div className="font-headline font-bold uppercase text-stone-900 text-sm tracking-tight">
+      <div className="font-headline font-bold uppercase text-on-surface text-sm tracking-tight">
         {label}
       </div>
       {description ? (

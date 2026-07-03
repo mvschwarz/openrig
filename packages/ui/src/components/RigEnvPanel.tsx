@@ -87,13 +87,13 @@ export function RigEnvPanel({ rigId, envData }: RigEnvPanelProps) {
   return (
     <div className="flex-1 overflow-y-auto" data-testid="env-panel">
       {/* Overall env state */}
-      <section className="px-4 py-3 border-b border-stone-100">
-        <div className="font-mono text-[8px] text-stone-400 uppercase tracking-wider mb-1">Environment</div>
+      <section className="px-4 py-3 border-b border-outline-variant">
+        <div className="font-mono text-[8px] text-on-surface-variant uppercase tracking-wider mb-1">Environment</div>
         <div data-testid="env-state" className={`font-mono text-[12px] font-bold ${
           envState === "Healthy" ? "text-green-700"
             : envState === "Degraded" ? "text-amber-600"
             : envState === "Stopped" ? "text-red-600"
-            : "text-stone-500"
+            : "text-on-surface-variant"
         }`}>
           {envState}
         </div>
@@ -101,13 +101,13 @@ export function RigEnvPanel({ rigId, envData }: RigEnvPanelProps) {
 
       {/* Services */}
       {services.length > 0 && (
-        <section className="px-4 py-3 border-b border-stone-100">
-          <div className="font-mono text-[8px] text-stone-400 uppercase tracking-wider mb-2">Services</div>
+        <section className="px-4 py-3 border-b border-outline-variant">
+          <div className="font-mono text-[8px] text-on-surface-variant uppercase tracking-wider mb-2">Services</div>
           <div className="space-y-1">
             {services.map((svc) => (
               <div key={svc.name} className="flex items-center justify-between font-mono text-[10px]">
-                <span className="text-stone-800">{svc.name}</span>
-                <span className={svc.health === "healthy" ? "text-green-700" : "text-stone-500"}>
+                <span className="text-on-surface">{svc.name}</span>
+                <span className={svc.health === "healthy" ? "text-green-700" : "text-on-surface-variant"}>
                   {svc.health ?? svc.status}
                 </span>
               </div>
@@ -118,13 +118,13 @@ export function RigEnvPanel({ rigId, envData }: RigEnvPanelProps) {
 
       {/* Health gates */}
       {waitFor.length > 0 && (
-        <section className="px-4 py-3 border-b border-stone-100">
-          <div className="font-mono text-[8px] text-stone-400 uppercase tracking-wider mb-2">Health Gates</div>
+        <section className="px-4 py-3 border-b border-outline-variant">
+          <div className="font-mono text-[8px] text-on-surface-variant uppercase tracking-wider mb-2">Health Gates</div>
           <div className="space-y-2">
             {waitFor.map((gate, index) => (
               <div key={`${formatWaitTarget(gate.target)}-${index}`} className="space-y-1 font-mono text-[10px]">
                 <div className="flex items-center justify-between gap-2">
-                  <span className="text-stone-800 break-all">{formatWaitTarget(gate.target)}</span>
+                  <span className="text-on-surface break-all">{formatWaitTarget(gate.target)}</span>
                   <span className={
                     gate.status === "healthy"
                       ? "text-green-700"
@@ -135,7 +135,7 @@ export function RigEnvPanel({ rigId, envData }: RigEnvPanelProps) {
                     {gate.status}
                   </span>
                 </div>
-                {gate.detail && <div className="text-stone-500 break-all">{gate.detail}</div>}
+                {gate.detail && <div className="text-on-surface-variant break-all">{gate.detail}</div>}
               </div>
             ))}
           </div>
@@ -144,12 +144,12 @@ export function RigEnvPanel({ rigId, envData }: RigEnvPanelProps) {
 
       {/* Surfaces */}
       {surfaces && (surfaces.urls?.length || surfaces.commands?.length) && (
-        <section className="px-4 py-3 border-b border-stone-100">
-          <div className="font-mono text-[8px] text-stone-400 uppercase tracking-wider mb-2">Surfaces</div>
+        <section className="px-4 py-3 border-b border-outline-variant">
+          <div className="font-mono text-[8px] text-on-surface-variant uppercase tracking-wider mb-2">Surfaces</div>
           <div className="space-y-1">
             {surfaces.urls?.map((u) => (
               <div key={u.name} className="flex items-center justify-between font-mono text-[10px]">
-                <span className="text-stone-800">{u.name}</span>
+                <span className="text-on-surface">{u.name}</span>
                 <a href={u.url} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline truncate ml-2">
                   {u.url}
                 </a>
@@ -157,8 +157,8 @@ export function RigEnvPanel({ rigId, envData }: RigEnvPanelProps) {
             ))}
             {surfaces.commands?.map((cmd) => (
               <div key={cmd.name} className="flex items-center justify-between font-mono text-[10px]">
-                <span className="text-stone-800">{cmd.name}</span>
-                <span className="text-stone-500 truncate ml-2">{cmd.command}</span>
+                <span className="text-on-surface">{cmd.name}</span>
+                <span className="text-on-surface-variant truncate ml-2">{cmd.command}</span>
               </div>
             ))}
           </div>
@@ -166,7 +166,7 @@ export function RigEnvPanel({ rigId, envData }: RigEnvPanelProps) {
       )}
 
       {/* Actions */}
-      <section className="px-4 py-3 border-b border-stone-100">
+      <section className="px-4 py-3 border-b border-outline-variant">
         <div className="flex gap-2">
           <Button variant="outline" size="sm" onClick={() => void fetchLogs()} disabled={logsLoading}>
             {logsLoading ? "Loading..." : "View Logs"}
@@ -175,7 +175,7 @@ export function RigEnvPanel({ rigId, envData }: RigEnvPanelProps) {
             {downPending ? "Stopping..." : "Stop Env"}
           </Button>
         </div>
-        {downResult && <div className="mt-2 font-mono text-[9px] text-stone-600">{downResult}</div>}
+        {downResult && <div className="mt-2 font-mono text-[9px] text-on-surface-variant">{downResult}</div>}
       </section>
 
       {/* Logs output */}
@@ -186,8 +186,8 @@ export function RigEnvPanel({ rigId, envData }: RigEnvPanelProps) {
       )}
       {logs !== null && !logsError && (
         <section className="px-4 py-3">
-          <div className="font-mono text-[8px] text-stone-400 uppercase tracking-wider mb-2">Logs</div>
-          <pre className="font-mono text-[9px] text-stone-700 whitespace-pre-wrap break-all max-h-64 overflow-y-auto bg-stone-50 p-2 border border-stone-200">
+          <div className="font-mono text-[8px] text-on-surface-variant uppercase tracking-wider mb-2">Logs</div>
+          <pre className="font-mono text-[9px] text-on-surface whitespace-pre-wrap break-all max-h-64 overflow-y-auto bg-background p-2 border border-outline-variant">
             {logs || "(empty)"}
           </pre>
         </section>

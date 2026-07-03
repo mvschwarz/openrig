@@ -12,7 +12,8 @@ export type FindingKind =
   | "missing_mission_brief"
   | "malformed_mission_brief"
   | "missing_mission_notes"
-  | "missing_proof";
+  | "missing_proof"
+  | "progress_not_updated_on_commit";
 
 export interface AuditFinding {
   kind: FindingKind;
@@ -42,6 +43,15 @@ export interface ScopeAuditInput {
   proofDirHasEntries?: boolean;
   hasProofPacket?: boolean;
   sliceStatus?: string | null;
+  // Git-derived, CLI-ONLY inputs for the committed-without-PROGRESS check.
+  // Revision basis: the most recent commit (HEAD). The daemon input-builder has
+  // no git context and leaves these UNDEFINED, so the check is inert daemon-side
+  // and the classifier stays byte-identical (only the input differs). The check
+  // fires only when BOTH are defined AND slice=true / progress=false — i.e. on
+  // POSITIVE evidence that HEAD touched the slice but not its PROGRESS.md. If git
+  // is unavailable the CLI leaves them undefined: no false-green, no false-positive.
+  sliceTouchedByRecentCommit?: boolean;
+  progressTouchedByRecentCommit?: boolean;
 }
 
 export interface ScopeAuditResult {
@@ -93,6 +103,18 @@ function statusRequiresProof(status: string | null | undefined): boolean {
     || normalized.includes("close")
     || normalized.includes("proven")
     || normalized.includes("promoted");
+}
+
+// A mission is ACTIVE unless its status names a terminal / archived state.
+// The SOP wants missing_mission_notes to fire for an ACTIVE mission only — a
+// shipped/archived mission no longer needs a live continuity file. No status
+// => treat as active (still flag), which preserves the pre-tighten behavior for
+// the common status-less mission.
+function missionIsActive(status: string | null | undefined): boolean {
+  if (!status) return true;
+  const normalized = status.toLowerCase();
+  const terminal = ["archiv", "complete", "done", "shipped", "closed", "historical", "superseded", "abandoned"];
+  return !terminal.some((token) => normalized.includes(token));
 }
 
 export function classifyScopeItem(input: ScopeAuditInput): ScopeAuditResult {
@@ -209,7 +231,10 @@ export function classifyScopeItem(input: ScopeAuditInput): ScopeAuditResult {
       });
     }
 
-    if (input.missionNotesExists === false) {
+    if (
+      input.missionNotesExists === false
+      && missionIsActive(parseStatusFromFrontmatter(input.readmeFrontmatterRaw))
+    ) {
       const notesPath = input.missionNotesPath ?? childPath(input.path, "MISSION_NOTES.md");
       findings.push({
         kind: "missing_mission_notes",
@@ -236,6 +261,25 @@ export function classifyScopeItem(input: ScopeAuditInput): ScopeAuditResult {
         path: proofPath,
         message: "Slice is done/proven but does not have complete root PROOF.md plus populated proof/ artifacts.",
         remediation: "Add PROOF.md at the slice root and put verification artifacts under proof/ per the slice-closeout SOP.",
+      });
+    }
+
+    // committed-without-PROGRESS. Fires only on POSITIVE evidence: the most
+    // recent commit (HEAD) touched this slice AND definitively did NOT touch its
+    // PROGRESS.md. Inputs are git-derived and CLI-only; when git context is
+    // unavailable they are left undefined and this branch is inert (no
+    // false-green, no false-positive). See ScopeAuditInput.
+    if (
+      input.sliceTouchedByRecentCommit === true
+      && input.progressTouchedByRecentCommit === false
+    ) {
+      const progressPath = childPath(input.path, "PROGRESS.md");
+      findings.push({
+        kind: "progress_not_updated_on_commit",
+        severity: "medium",
+        path: progressPath,
+        message: "The most recent commit (HEAD) touched this slice but did not update PROGRESS.md.",
+        remediation: "Update PROGRESS.md to reflect the committed change (one line per outcome) and amend or add a follow-up commit. Per the mission-slice-sop, PROGRESS.md is updated on every commit — fix the flag, do not suppress it.",
       });
     }
   }

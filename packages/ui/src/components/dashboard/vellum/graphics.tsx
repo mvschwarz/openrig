@@ -3,7 +3,7 @@
 
 export function StratigraphicGraphic() {
   return (
-    <svg className="w-full h-full text-stone-900" viewBox="0 0 60 60" fill="none" stroke="currentColor" strokeWidth="1">
+    <svg className="w-full h-full text-on-surface" viewBox="0 0 60 60" fill="none" stroke="currentColor" strokeWidth="1">
       <path d="M2 26 Q 18 18 30 22 T 58 18" />
       <path d="M2 36 Q 18 28 30 32 T 58 28" strokeDasharray="2 2" />
       <path d="M2 46 Q 18 40 30 42 T 58 38" strokeDasharray="2 2" />
@@ -16,7 +16,7 @@ export function StratigraphicGraphic() {
 
 export function TreeGraphic() {
   return (
-    <svg className="w-full h-full text-stone-900" viewBox="0 0 60 60" fill="none" stroke="currentColor" strokeWidth="1">
+    <svg className="w-full h-full text-on-surface" viewBox="0 0 60 60" fill="none" stroke="currentColor" strokeWidth="1">
       <rect x="22" y="6" width="16" height="8" />
       <rect x="6" y="28" width="14" height="8" />
       <rect x="40" y="28" width="14" height="8" />
@@ -35,7 +35,7 @@ export function TreeGraphic() {
 
 export function PulseGraphic() {
   return (
-    <svg className="w-full h-full text-stone-900" viewBox="0 0 60 60" fill="none" stroke="currentColor" strokeWidth="1">
+    <svg className="w-full h-full text-on-surface" viewBox="0 0 60 60" fill="none" stroke="currentColor" strokeWidth="1">
       <circle cx="30" cy="30" r="4" fill="currentColor" />
       <circle cx="30" cy="30" r="12" />
       <circle cx="30" cy="30" r="20" strokeDasharray="2 3" />
@@ -51,7 +51,7 @@ export function PulseGraphic() {
 // filled center dot.
 export function SphereGraphic() {
   return (
-    <svg className="w-full h-full text-stone-900" viewBox="0 0 60 60" fill="none" stroke="currentColor" strokeWidth="1">
+    <svg className="w-full h-full text-on-surface" viewBox="0 0 60 60" fill="none" stroke="currentColor" strokeWidth="1">
       <circle cx="30" cy="30" r="26" />
       <ellipse cx="30" cy="30" rx="26" ry="9" />
       <ellipse cx="30" cy="30" rx="9" ry="26" />
@@ -64,7 +64,7 @@ export function SphereGraphic() {
 
 export function MagnifierGraphic() {
   return (
-    <svg className="w-full h-full text-stone-900" viewBox="0 0 60 60" fill="none" stroke="currentColor" strokeWidth="1.2">
+    <svg className="w-full h-full text-on-surface" viewBox="0 0 60 60" fill="none" stroke="currentColor" strokeWidth="1.2">
       <circle cx="24" cy="24" r="14" />
       <line x1="20" y1="24" x2="28" y2="24" />
       <line x1="24" y1="20" x2="24" y2="28" />
@@ -77,7 +77,7 @@ export function MagnifierGraphic() {
 
 export function GearGraphic() {
   return (
-    <svg className="w-full h-full text-stone-900" viewBox="0 0 60 60" fill="none" stroke="currentColor" strokeWidth="1">
+    <svg className="w-full h-full text-on-surface" viewBox="0 0 60 60" fill="none" stroke="currentColor" strokeWidth="1">
       <circle cx="30" cy="30" r="20" />
       <circle cx="30" cy="30" r="12" />
       <circle cx="30" cy="30" r="3" fill="currentColor" />

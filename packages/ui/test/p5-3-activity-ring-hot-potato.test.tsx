@@ -328,14 +328,14 @@ describe("P5.3 ActivityRing and HotPotatoEdge", () => {
     expect(terminalPopover).not.toMatch(/absolute left-full/);
     expect(terminalPopover).not.toMatch(/terminal preview/);
     expect(terminalPopover).not.toMatch(/terminal-close/);
-    expect(rigGroupNode).toMatch(/bg-white\/40/);
-    expect(rigGroupNode).toMatch(/hover:bg-white\/50/);
+    expect(rigGroupNode).toMatch(/bg-surface-lowest\/40/);
+    expect(rigGroupNode).toMatch(/hover:bg-surface-lowest\/50/);
     expect(rigGroupNode).toMatch(/backdrop-blur-\[8px\]/);
     expect(rigGroupNode).not.toMatch(/bg-white\/\[0\.14\]/);
     expect(rigGroupNode).not.toMatch(/hover:bg-white\/60/);
-    expect(hybridNodes).toMatch(/bg-white\/40/);
+    expect(hybridNodes).toMatch(/bg-surface-lowest\/40/);
     expect(hybridNodes).toMatch(/backdrop-blur-\[8px\]/);
-    expect(hybridNodes).toMatch(/bg-stone-50\/25/);
+    expect(hybridNodes).toMatch(/bg-background\/25/);
     expect(activityCards).toMatch(/activity-card-active/);
     expect(css).toMatch(/background-color: rgba\(255, 255, 255, 0\.72\)/);
     expect(css).not.toMatch(/background-color: rgba\(255, 255, 255, 0\.96\)/);

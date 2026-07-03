@@ -58,9 +58,9 @@ export function VellumDestinationCard(props: VellumDestinationCardProps) {
   // Paper tints. All ~/35–/40 alpha so backdrop-blur still does the
   // vellum work but the surface picks up a soft warm/cool cast.
   const tintBg: Record<VellumCardTint, string> = {
-    white: "bg-white/30",
+    white: "bg-surface-lowest/30",
     cream: "bg-amber-50/45",
-    stone: "bg-stone-100/45",
+    stone: "bg-surface-low/45",
     rose:  "bg-rose-50/45",
     slate: "bg-slate-50/50",
     sepia: "bg-yellow-50/45",
@@ -105,7 +105,7 @@ export function VellumDestinationCard(props: VellumDestinationCardProps) {
         <CornerBracket position="br" />
 
         {/* "■ NN°" annotation mark */}
-        <span className="absolute top-2 right-6 font-mono text-[9px] uppercase tracking-[0.18em] text-stone-700 select-none">
+        <span className="absolute top-2 right-6 font-mono text-[9px] uppercase tracking-[0.18em] text-on-surface select-none">
           ■ {num}°
         </span>
 
@@ -155,20 +155,20 @@ interface NumeralLayoutProps {
 function NumeralLayout({ big, numClass, graphic, body, label, icon, to, accent, textClass }: NumeralLayoutProps) {
   return (
     <>
-      <div className={`absolute top-7 left-3 font-headline font-black text-[110px] leading-[0.82] tracking-[-0.06em] text-stone-900 select-none ${numClass}`}>
+      <div className={`absolute top-7 left-3 font-headline font-black text-[110px] leading-[0.82] tracking-[-0.06em] text-on-surface select-none ${numClass}`}>
         {big[0]}
         <sup className="text-[55px] tracking-tight align-super">{big[1]}</sup>
       </div>
       <div className="absolute top-7 right-7 w-[58px] h-[58px]">{graphic}</div>
-      <p className={`absolute bottom-12 right-1 w-[140px] font-mono text-[8.5px] leading-[1.35] uppercase text-stone-900 ${textClass}`}>
+      <p className={`absolute bottom-12 right-1 w-[140px] font-mono text-[8.5px] leading-[1.35] uppercase text-on-surface ${textClass}`}>
         {body}
       </p>
       <div className="absolute bottom-3 left-3 right-3 flex items-baseline gap-2">
-        <span className={accent ? "text-tertiary" : "text-stone-900"}>{icon}</span>
-        <h2 className={`font-headline font-black text-[17px] leading-none uppercase tracking-tight ${textClass} ${accent ? "text-tertiary" : "text-stone-900"}`}>
+        <span className={accent ? "text-tertiary" : "text-on-surface"}>{icon}</span>
+        <h2 className={`font-headline font-black text-[17px] leading-none uppercase tracking-tight ${textClass} ${accent ? "text-tertiary" : "text-on-surface"}`}>
           {label}
         </h2>
-        <span className={`ml-auto font-mono text-[9px] tracking-tight text-stone-500 ${textClass}`}>
+        <span className={`ml-auto font-mono text-[9px] tracking-tight text-on-surface-variant ${textClass}`}>
           [{to}] →
         </span>
       </div>
@@ -189,20 +189,20 @@ interface HeadlineLayoutProps {
 function HeadlineLayout({ label, icon, body, graphic, to, accent, textClass }: HeadlineLayoutProps) {
   return (
     <>
-      <h2 className={`absolute top-6 left-3 right-3 font-headline font-black text-[40px] leading-[0.95] uppercase tracking-tight text-stone-900 ${textClass} ${accent ? "text-tertiary" : ""}`}>
+      <h2 className={`absolute top-6 left-3 right-3 font-headline font-black text-[40px] leading-[0.95] uppercase tracking-tight text-on-surface ${textClass} ${accent ? "text-tertiary" : ""}`}>
         {label}
       </h2>
-      <div className="absolute top-[88px] left-3 right-3 h-px bg-stone-900/30" />
+      <div className="absolute top-[88px] left-3 right-3 h-px bg-inverse-surface/30" />
       <div className="absolute top-[100px] left-3 w-[60px] h-[60px]">{graphic}</div>
-      <p className={`absolute top-[100px] left-[80px] right-1 font-mono text-[8.5px] leading-[1.35] uppercase text-stone-900 ${textClass}`}>
+      <p className={`absolute top-[100px] left-[80px] right-1 font-mono text-[8.5px] leading-[1.35] uppercase text-on-surface ${textClass}`}>
         {body}
       </p>
       <div className="absolute bottom-3 left-3 right-3 flex items-baseline gap-2">
-        <span className={accent ? "text-tertiary" : "text-stone-900"}>{icon}</span>
-        <span className={`font-mono text-[9px] uppercase tracking-[0.16em] text-stone-700 ${textClass}`}>
+        <span className={accent ? "text-tertiary" : "text-on-surface"}>{icon}</span>
+        <span className={`font-mono text-[9px] uppercase tracking-[0.16em] text-on-surface ${textClass}`}>
           Destination · 01°
         </span>
-        <span className={`ml-auto font-mono text-[9px] tracking-tight text-stone-500 ${textClass}`}>
+        <span className={`ml-auto font-mono text-[9px] tracking-tight text-on-surface-variant ${textClass}`}>
           [{to}] →
         </span>
       </div>
@@ -224,17 +224,17 @@ interface StatLayoutProps {
 function StatLayout({ label, num, icon, body, graphic, to, accent, textClass }: StatLayoutProps) {
   return (
     <>
-      <div className="absolute top-3 left-3 font-mono text-[9px] uppercase tracking-[0.16em] text-stone-700 select-none">
+      <div className="absolute top-3 left-3 font-mono text-[9px] uppercase tracking-[0.16em] text-on-surface select-none">
         ▪ {label} · {num}°
       </div>
       <div className="absolute top-9 right-9 w-[36px] h-[36px]">{graphic}</div>
       <div className="absolute top-[44px] left-3 flex items-baseline gap-3">
-        <span className={`font-headline font-black text-[64px] leading-[0.82] tracking-[-0.04em] text-stone-900 tabular-nums ${textClass}`}>
+        <span className={`font-headline font-black text-[64px] leading-[0.82] tracking-[-0.04em] text-on-surface tabular-nums ${textClass}`}>
           38
         </span>
         <div className="flex flex-col leading-tight">
-          <span className="font-mono text-[10px] uppercase tracking-wide text-stone-900">Active</span>
-          <span className="font-mono text-[10px] uppercase tracking-wide text-stone-700">Artifacts</span>
+          <span className="font-mono text-[10px] uppercase tracking-wide text-on-surface">Active</span>
+          <span className="font-mono text-[10px] uppercase tracking-wide text-on-surface">Artifacts</span>
         </div>
       </div>
       <div className="absolute top-[120px] left-3 right-3 grid grid-cols-3 gap-0">
@@ -242,15 +242,15 @@ function StatLayout({ label, num, icon, body, graphic, to, accent, textClass }: 
         <StatCell big="08" small="Plugins" />
         <StatCell big="18" small="Skills" />
       </div>
-      <p className={`absolute bottom-12 left-3 right-1 font-mono text-[8px] leading-[1.3] uppercase text-stone-800 ${textClass}`}>
+      <p className={`absolute bottom-12 left-3 right-1 font-mono text-[8px] leading-[1.3] uppercase text-on-surface ${textClass}`}>
         {body}
       </p>
       <div className="absolute bottom-3 left-3 right-3 flex items-baseline gap-2">
-        <span className={accent ? "text-tertiary" : "text-stone-900"}>{icon}</span>
-        <h2 className={`font-headline font-black text-[15px] leading-none uppercase tracking-tight ${accent ? "text-tertiary" : "text-stone-900"}`}>
+        <span className={accent ? "text-tertiary" : "text-on-surface"}>{icon}</span>
+        <h2 className={`font-headline font-black text-[15px] leading-none uppercase tracking-tight ${accent ? "text-tertiary" : "text-on-surface"}`}>
           {label}
         </h2>
-        <span className="ml-auto font-mono text-[9px] tracking-tight text-stone-500">
+        <span className="ml-auto font-mono text-[9px] tracking-tight text-on-surface-variant">
           [{to}] →
         </span>
       </div>
@@ -259,9 +259,9 @@ function StatLayout({ label, num, icon, body, graphic, to, accent, textClass }: 
 }
 function StatCell({ big, small }: { big: string; small: string }) {
   return (
-    <div className="border-l border-stone-900/30 first:border-l-0 pl-2">
-      <div className="font-mono text-[14px] font-bold tabular-nums text-stone-900 leading-none">{big}</div>
-      <div className="font-mono text-[8px] uppercase tracking-wide text-stone-600 mt-0.5">{small}</div>
+    <div className="border-l border-on-surface/30 first:border-l-0 pl-2">
+      <div className="font-mono text-[14px] font-bold tabular-nums text-on-surface leading-none">{big}</div>
+      <div className="font-mono text-[8px] uppercase tracking-wide text-on-surface-variant mt-0.5">{small}</div>
     </div>
   );
 }
@@ -271,46 +271,46 @@ function CoordinateLayout({ label, num, icon, body, graphic, to, accent, textCla
   const ticks = Array.from({ length: 12 });
   return (
     <>
-      <div className="absolute top-3 left-3 font-mono text-[9px] uppercase tracking-[0.16em] text-stone-700 select-none">
+      <div className="absolute top-3 left-3 font-mono text-[9px] uppercase tracking-[0.16em] text-on-surface select-none">
         ▪ {label} · {num}°
       </div>
       <div className="absolute top-7 left-6 right-6 flex justify-between">
         {ticks.map((_, i) => (
-          <span key={i} className={`w-px h-[6px] ${i % 3 === 0 ? "bg-stone-900" : "bg-stone-900/40"}`} />
+          <span key={i} className={`w-px h-[6px] ${i % 3 === 0 ? "bg-inverse-surface" : "bg-inverse-surface/40"}`} />
         ))}
       </div>
       <div className="absolute bottom-12 left-6 right-6 flex justify-between">
         {ticks.map((_, i) => (
-          <span key={i} className={`w-px h-[6px] ${i % 3 === 0 ? "bg-stone-900" : "bg-stone-900/40"}`} />
+          <span key={i} className={`w-px h-[6px] ${i % 3 === 0 ? "bg-inverse-surface" : "bg-inverse-surface/40"}`} />
         ))}
       </div>
       <div className="absolute top-12 bottom-16 left-3 flex flex-col justify-between">
         {Array.from({ length: 8 }).map((_, i) => (
-          <span key={i} className={`h-px w-[6px] ${i % 2 === 0 ? "bg-stone-900" : "bg-stone-900/40"}`} />
+          <span key={i} className={`h-px w-[6px] ${i % 2 === 0 ? "bg-inverse-surface" : "bg-inverse-surface/40"}`} />
         ))}
       </div>
       <div className="absolute top-12 bottom-16 right-3 flex flex-col justify-between">
         {Array.from({ length: 8 }).map((_, i) => (
-          <span key={i} className={`h-px w-[6px] ${i % 2 === 0 ? "bg-stone-900" : "bg-stone-900/40"}`} />
+          <span key={i} className={`h-px w-[6px] ${i % 2 === 0 ? "bg-inverse-surface" : "bg-inverse-surface/40"}`} />
         ))}
       </div>
       <div className="absolute top-[40px] left-1/2 -translate-x-1/2 w-[72px] h-[72px]">
         {graphic}
       </div>
-      <div className="absolute top-[76px] left-6 right-6 h-px bg-stone-900/30" />
-      <div className="absolute top-[40px] bottom-[80px] left-1/2 w-px bg-stone-900/30" />
-      <span className="absolute top-[120px] left-1/2 ml-1 font-mono text-[8px] text-stone-700">
+      <div className="absolute top-[76px] left-6 right-6 h-px bg-inverse-surface/30" />
+      <div className="absolute top-[40px] bottom-[80px] left-1/2 w-px bg-inverse-surface/30" />
+      <span className="absolute top-[120px] left-1/2 ml-1 font-mono text-[8px] text-on-surface">
         ⟨x: 24, y: 18⟩
       </span>
-      <p className={`absolute bottom-[60px] left-6 right-6 font-mono text-[8px] leading-[1.3] uppercase text-stone-800 text-center ${textClass}`}>
+      <p className={`absolute bottom-[60px] left-6 right-6 font-mono text-[8px] leading-[1.3] uppercase text-on-surface text-center ${textClass}`}>
         {body}
       </p>
       <div className="absolute bottom-3 left-3 right-3 flex items-baseline gap-2">
-        <span className={accent ? "text-tertiary" : "text-stone-900"}>{icon}</span>
-        <h2 className="font-headline font-black text-[15px] leading-none uppercase tracking-tight text-stone-900">
+        <span className={accent ? "text-tertiary" : "text-on-surface"}>{icon}</span>
+        <h2 className="font-headline font-black text-[15px] leading-none uppercase tracking-tight text-on-surface">
           {label}
         </h2>
-        <span className="ml-auto font-mono text-[9px] tracking-tight text-stone-500">
+        <span className="ml-auto font-mono text-[9px] tracking-tight text-on-surface-variant">
           [{to}] →
         </span>
       </div>
@@ -328,7 +328,7 @@ function SchematicLayout({ label, num, icon, body, graphic, to, accent, textClas
   const items = callouts ?? ["A", "B", "C", "D"];
   return (
     <>
-      <div className="absolute top-3 left-3 font-mono text-[9px] uppercase tracking-[0.16em] text-stone-700 select-none">
+      <div className="absolute top-3 left-3 font-mono text-[9px] uppercase tracking-[0.16em] text-on-surface select-none">
         ▪ {label} · {num}°
       </div>
       <div className="absolute top-7 left-1/2 -translate-x-1/2 w-[110px] h-[110px]">
@@ -338,15 +338,15 @@ function SchematicLayout({ label, num, icon, body, graphic, to, accent, textClas
       <Callout num=".02" label={items[1]} positionClass="top-[42px] right-3" align="right" />
       <Callout num=".03" label={items[2]} positionClass="top-[98px] left-3" align="left" />
       <Callout num=".04" label={items[3]} positionClass="top-[98px] right-3" align="right" />
-      <p className={`absolute bottom-12 left-3 right-3 font-mono text-[8px] leading-[1.3] uppercase text-stone-800 text-center ${textClass}`}>
+      <p className={`absolute bottom-12 left-3 right-3 font-mono text-[8px] leading-[1.3] uppercase text-on-surface text-center ${textClass}`}>
         {body}
       </p>
       <div className="absolute bottom-3 left-3 right-3 flex items-baseline gap-2">
-        <span className={accent ? "text-tertiary" : "text-stone-900"}>{icon}</span>
-        <h2 className={`font-headline font-black text-[15px] leading-none uppercase tracking-tight ${washed ? "inky-text" : ""} ${accent ? "text-tertiary" : "text-stone-900"}`}>
+        <span className={accent ? "text-tertiary" : "text-on-surface"}>{icon}</span>
+        <h2 className={`font-headline font-black text-[15px] leading-none uppercase tracking-tight ${washed ? "inky-text" : ""} ${accent ? "text-tertiary" : "text-on-surface"}`}>
           {label}
         </h2>
-        <span className="ml-auto font-mono text-[9px] tracking-tight text-stone-500">
+        <span className="ml-auto font-mono text-[9px] tracking-tight text-on-surface-variant">
           [{to}] →
         </span>
       </div>
@@ -355,9 +355,9 @@ function SchematicLayout({ label, num, icon, body, graphic, to, accent, textClas
 }
 function Callout({ num, label, positionClass, align }: { num: string; label: string; positionClass: string; align: "left" | "right" }) {
   return (
-    <div className={`absolute ${positionClass} font-mono text-[8px] text-stone-700 ${align === "right" ? "text-right" : "text-left"}`}>
+    <div className={`absolute ${positionClass} font-mono text-[8px] text-on-surface ${align === "right" ? "text-right" : "text-left"}`}>
       <span className="block">{num}</span>
-      <span className="block tabular-nums text-stone-900">{label}</span>
+      <span className="block tabular-nums text-on-surface">{label}</span>
     </div>
   );
 }

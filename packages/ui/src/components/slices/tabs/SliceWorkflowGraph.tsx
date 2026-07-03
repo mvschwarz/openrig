@@ -64,17 +64,17 @@ export function SliceWorkflowGraph({ specGraph }: { specGraph: SpecGraphPayload 
       data-spec-name={specGraph.specName}
       data-spec-version={specGraph.specVersion}
       data-layout="react-flow-dagre"
-      className="border border-outline-variant bg-white/20"
+      className="border border-outline-variant bg-surface-lowest/20"
     >
-      <header className="flex items-center justify-between gap-3 border-b border-outline-variant bg-white/30 px-3 py-2">
-        <div className="flex min-w-0 items-center gap-2 font-mono text-[10px] uppercase tracking-[0.10em] text-stone-500">
-          <span className="text-stone-400">Workflow spec</span>
-          <span className="text-stone-300">·</span>
-          <span className="truncate font-semibold text-stone-700">{specGraph.specName}</span>
-          <span className="text-stone-400">v{specGraph.specVersion}</span>
+      <header className="flex items-center justify-between gap-3 border-b border-outline-variant bg-surface-lowest/30 px-3 py-2">
+        <div className="flex min-w-0 items-center gap-2 font-mono text-[10px] uppercase tracking-[0.10em] text-on-surface-variant">
+          <span className="text-on-surface-variant">Workflow spec</span>
+          <span className="text-on-surface-variant">·</span>
+          <span className="truncate font-semibold text-on-surface">{specGraph.specName}</span>
+          <span className="text-on-surface-variant">v{specGraph.specVersion}</span>
           {hasLoopBack && (
             <>
-              <span className="text-stone-300">·</span>
+              <span className="text-on-surface-variant">·</span>
               <span className="inline-flex items-center gap-1 text-[var(--amber,#b9822f)]" style={{ color: LOOPBACK_STROKE }}>
                 ↺ reject→rework loop
               </span>
@@ -82,10 +82,10 @@ export function SliceWorkflowGraph({ specGraph }: { specGraph: SpecGraphPayload 
           )}
         </div>
         <div className="flex shrink-0 items-center gap-2">
-          <span className="font-mono text-[9px] uppercase tracking-[0.10em] text-stone-400">
+          <span className="font-mono text-[9px] uppercase tracking-[0.10em] text-on-surface-variant">
             {specGraph.nodes.length} steps / {specGraph.edges.length} edges
           </span>
-          <span className="border border-outline-variant px-1.5 py-0.5 font-mono text-[8px] uppercase tracking-[0.14em] text-stone-500">
+          <span className="border border-outline-variant px-1.5 py-0.5 font-mono text-[8px] uppercase tracking-[0.14em] text-on-surface-variant">
             read-only
           </span>
         </div>
@@ -183,7 +183,7 @@ export function buildSliceWorkflowGraph(specGraph: SpecGraphPayload): { nodes: S
       letterSpacing: "0.08em",
       textTransform: "uppercase",
     },
-    labelBgStyle: { fill: "#faf9f5", fillOpacity: 0.85 },
+    labelBgStyle: { fill: "hsl(var(--surface-container-lowest))", fillOpacity: 0.85 },
   }));
 
   return { nodes, edges };
@@ -199,30 +199,30 @@ function SliceWorkflowStepNode({ data }: NodeProps<SliceWorkflowNode>) {
       data-is-entry={step.isEntry}
       data-is-terminal={step.isTerminal}
       style={{ width: NODE_WIDTH, height: NODE_HEIGHT }}
-      className={`relative border bg-white font-mono hard-shadow ${
-        active ? "border-emerald-500/70" : "border-stone-400/80"
+      className={`relative border bg-surface-lowest font-mono hard-shadow ${
+        active ? "border-emerald-500/70" : "border-outline/80"
       }`}
     >
       <RegistrationMarks testIdPrefix={`slice-workflow-${step.stepId}`} />
-      <Handle type="target" position={Position.Left} className="!h-2 !w-2 !border-outline-variant !bg-stone-500" />
-      <Handle type="source" position={Position.Right} className="!h-2 !w-2 !border-outline-variant !bg-stone-500" />
+      <Handle type="target" position={Position.Left} className="!h-2 !w-2 !border-outline-variant !bg-outline" />
+      <Handle type="source" position={Position.Right} className="!h-2 !w-2 !border-outline-variant !bg-outline" />
       {/* dark topology-style header: role + live-state affordance */}
-      <div className="flex items-center justify-between bg-stone-900 px-2 py-1 text-stone-50">
+      <div className="flex items-center justify-between bg-inverse-surface px-2 py-1 text-background">
         <span className="truncate text-[10px] tracking-[0.04em]">{step.role}</span>
         <span className="flex shrink-0 items-center gap-1.5">
-          <span className="text-[7px] tracking-[0.14em] text-stone-400">STATE</span>
+          <span className="text-[7px] tracking-[0.14em] text-on-surface-variant">STATE</span>
           <span
             data-testid={`spec-node-${step.stepId}-state-dot`}
             data-active={active ? "true" : "false"}
-            className={`inline-block h-2 w-2 rounded-full ${active ? "bg-emerald-400" : "bg-stone-500"}`}
+            className={`inline-block h-2 w-2 rounded-full ${active ? "bg-emerald-400" : "bg-outline"}`}
           />
-          <span className="inline-block h-2.5 w-2.5 rounded-full border-[1.4px] border-stone-500" />
+          <span className="inline-block h-2.5 w-2.5 rounded-full border-[1.4px] border-outline" />
         </span>
       </div>
       {/* body: step identity + bound seat + lifecycle markers */}
-      <div className={`px-2 py-1.5 ${active ? "bg-emerald-50/70" : "bg-white"}`}>
+      <div className={`px-2 py-1.5 ${active ? "bg-emerald-50/70" : "bg-surface-lowest"}`}>
         <div className="flex items-start justify-between gap-2">
-          <span className="truncate text-[11px] font-bold uppercase tracking-[0.04em] text-stone-950">
+          <span className="truncate text-[11px] font-bold uppercase tracking-[0.04em] text-on-surface">
             {step.stepId}
           </span>
           <span className="flex shrink-0 flex-col items-end gap-0.5">
@@ -245,7 +245,7 @@ function SliceWorkflowStepNode({ data }: NodeProps<SliceWorkflowNode>) {
             {step.isTerminal && (
               <span
                 data-testid={`spec-node-${step.stepId}-terminal-badge`}
-                className="inline-flex items-center gap-1 border border-stone-300 bg-stone-100 px-1 text-[8px] uppercase tracking-[0.10em] text-stone-700"
+                className="inline-flex items-center gap-1 border border-outline-variant bg-surface-low px-1 text-[8px] uppercase tracking-[0.10em] text-on-surface"
               >
                 <ToolMark tool="terminal" size="xs" />
                 terminal
@@ -254,11 +254,11 @@ function SliceWorkflowStepNode({ data }: NodeProps<SliceWorkflowNode>) {
           </span>
         </div>
         {step.preferredTarget && (
-          <div className="mt-1 truncate text-[9px] text-stone-500" title={step.preferredTarget}>
+          <div className="mt-1 truncate text-[9px] text-on-surface-variant" title={step.preferredTarget}>
             {step.preferredTarget}
           </div>
         )}
-        <div className="mt-0.5 line-clamp-2 text-[9px] leading-snug text-stone-600">{step.label}</div>
+        <div className="mt-0.5 line-clamp-2 text-[9px] leading-snug text-on-surface-variant">{step.label}</div>
       </div>
     </div>
   );

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useCallback, useState } from "react";
 import { Terminal } from "@xterm/xterm";
 import { readTerminalBearerToken } from "../mission-control/missionControlAuth.js";
+import { useDaemonHealthSignal } from "../../hooks/useDaemonHealth.js";
 import {
   LIVE_TERMINAL_RENDER_BACKGROUND,
   LIVE_TERMINAL_COLS,
@@ -48,6 +49,18 @@ const ESCAPE_SEQ_MAP: Record<string, string> = {
   "\x1b[3~": "DC",
   "\x1b[2~": "IC",
 };
+
+// OPR.0.4.3.21 — the broker's GENERIC fallback close reason (see
+// TerminalSessionBroker.ts). This is the ONLY message the health-aware
+// disambiguation may replace; specific reasons (`session not found: …`,
+// `pipe-pane failed: …`, `tmux session terminated`, `pipe output file
+// failed: …`) always pass through unchanged.
+const GENERIC_BROKER_UNAVAILABLE = "terminal broker unavailable";
+// The honest control-plane message shown when the broker reported the generic
+// fallback WHILE daemon health is failing. Rendered under the "Terminal
+// unavailable:" prefix.
+const DAEMON_CONTROL_PLANE_UNHEALTHY =
+  "daemon control plane unhealthy (event loop starved) — restart the daemon only; your seats are preserved";
 
 type WsMessage = { type: "keys"; keys: string[] } | { type: "text"; text: string };
 
@@ -164,6 +177,13 @@ export function FocusedTerminal({ sessionName, daemonBaseUrl, fit = "natural" }:
   const scrollOffsetRef = useRef(0);
   const [error, setError] = useState<string | null>(null);
 
+  // OPR.0.4.3.21 — shared daemon-health signal (context; healthy default when
+  // no provider, so standalone terminal tests are unaffected). Held in a ref so
+  // the ws.onclose callback reads the latest value without re-subscribing.
+  const health = useDaemonHealthSignal();
+  const controlPlaneUnhealthyRef = useRef(false);
+  controlPlaneUnhealthyRef.current = health.controlPlaneUnhealthy;
+
   const sendScroll = useCallback((offset: number) => {
     const wsc = wsRef.current;
     if (wsc && wsc.readyState === WebSocket.OPEN) {
@@ -246,7 +266,16 @@ export function FocusedTerminal({ sessionName, daemonBaseUrl, fit = "natural" }:
       const definitive = evt.code === 1008 || evt.code === 1011 || evt.code === 1001;
       if (definitive) {
         disposeTerminal();
-        setError(evt.reason || "Terminal unavailable: session not found on this daemon");
+        // OPR.0.4.3.21 — health-aware disambiguation: replace ONLY the broker's
+        // GENERIC "terminal broker unavailable" fallback, and ONLY when daemon
+        // health positively reports the control plane unhealthy. Every specific
+        // broker/session reason (session not found / pipe-pane failed / tmux
+        // session terminated) is preserved verbatim.
+        if (evt.reason === GENERIC_BROKER_UNAVAILABLE && controlPlaneUnhealthyRef.current) {
+          setError(DAEMON_CONTROL_PLANE_UNHEALTHY);
+        } else {
+          setError(evt.reason || "Terminal unavailable: session not found on this daemon");
+        }
         return;
       }
       const term = termRef.current as { write(data: string): void } | null;

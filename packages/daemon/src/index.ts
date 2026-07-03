@@ -68,7 +68,7 @@ export async function startServer(port?: number) {
     bindHosts = tailscaleIp ? ["127.0.0.1", tailscaleIp] : ["127.0.0.1"];
   }
 
-  const { app, contextMonitor, deps, injectWebSocket } = await createDaemon({
+  const { app, contextMonitor, deps, eventLoopMonitor, injectWebSocket } = await createDaemon({
     dbPath,
     bearerToken,
     terminalBearerToken,
@@ -95,6 +95,10 @@ export async function startServer(port?: number) {
         // PsProjectionService + node-inventory enrichment serve
         // fresh data on each request.
         deps.seatActivityService?.start(deps.rigRepo.db);
+        // OPR.0.4.3.19 — start the liveness identity reconciler (5s default).
+        // Persists the per-seat pane PID/command verdict so node-inventory
+        // gates the running/active projection on verified process identity.
+        deps.seatIdentityReconciler?.start();
         startPeriodicSnapshotScheduler(deps);
       }
     });
@@ -118,9 +122,20 @@ export async function startServer(port?: number) {
       console.error("[seat-activity] shutdown error", err);
     }
     try {
+      deps.seatIdentityReconciler?.stop();
+    } catch (err) {
+      console.error("[seat-identity] shutdown error", err);
+    }
+    try {
       deps.periodicSnapshotScheduler?.stop();
     } catch (err) {
       console.error("[periodic-snapshot] shutdown error", err);
+    }
+    try {
+      // OPR.0.4.3.21 — disable the event-loop histogram + clear its tick interval.
+      eventLoopMonitor.stop();
+    } catch (err) {
+      console.error("[event-loop-monitor] shutdown error", err);
     }
     await Promise.all(
       servers.map(

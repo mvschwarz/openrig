@@ -1,5 +1,7 @@
 # PROOF — {{id}} {{title}}
 
+> **WHO/WHEN:** the impl/QA pair that worked the slice, at slice-close — a slice is NOT done until this file exists and every plan success-criterion has evidence (mapped 1:1, artifacts under `proof/`). See the `mission-slice-sop` skill + the `markdown-control-plane` convention.
+
 Closed by: <seat>   Date: <date>   Verdict: <pass | pass-with-residue | ...>
 
 ## What this proves

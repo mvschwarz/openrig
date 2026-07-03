@@ -6,6 +6,7 @@ import type { EventBus } from "./event-bus.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import type { TranscriptStore } from "./transcript-store.js";
 import { startTmuxTranscriptCapture } from "./transcript-capture.js";
+import { deriveResumeToken } from "./resume-token-capture.js";
 
 export type ClaimResult =
   | { ok: true; nodeId: string; sessionId: string }
@@ -59,6 +60,16 @@ interface ClaimServiceDeps {
   claudeContextProvisioner?: {
     ensureContextCollector(binding: { cwd?: string | null; tmuxSession?: string | null }): void;
   };
+  // OPR.0.4.3.20 FR-3 — adoption-boundary resume-token capture. Both optional
+  // and structurally typed (avoid a domain import cycle; older wirings / tests
+  // that omit them make capture a silent no-op). contextUsageStore reads the
+  // Claude status-line sidecar; resumeTokenCapturer derives the Codex thread id.
+  contextUsageStore?: {
+    readSidecar(sessionName: string): { ok: true; data: { session_id?: string } } | { ok: false; reason: string };
+  };
+  resumeTokenCapturer?: {
+    captureCodexThreadId(sessionName: string): Promise<string | undefined>;
+  };
 }
 
 interface BindOptions {
@@ -89,6 +100,8 @@ export class ClaimService {
   private tmuxAdapter: TmuxAdapter | null;
   private transcriptStore: TranscriptStore | null;
   private claudeContextProvisioner: ClaimServiceDeps["claudeContextProvisioner"] | null;
+  private contextUsageStore: ClaimServiceDeps["contextUsageStore"] | null;
+  private resumeTokenCapturer: ClaimServiceDeps["resumeTokenCapturer"] | null;
 
   constructor(deps: ClaimServiceDeps) {
     if (deps.db !== deps.rigRepo.db) throw new Error("ClaimService: rigRepo must share the same db handle");
@@ -103,6 +116,8 @@ export class ClaimService {
     this.tmuxAdapter = deps.tmuxAdapter ?? null;
     this.transcriptStore = deps.transcriptStore ?? null;
     this.claudeContextProvisioner = deps.claudeContextProvisioner ?? null;
+    this.contextUsageStore = deps.contextUsageStore ?? null;
+    this.resumeTokenCapturer = deps.resumeTokenCapturer ?? null;
   }
 
   /** Best-effort: set OpenRig-owned tmux metadata on an adopted session. */
@@ -138,6 +153,81 @@ export class ClaimService {
       this.claudeContextProvisioner?.ensureContextCollector({
         cwd: cwd ?? undefined,
         tmuxSession,
+      });
+    } catch { /* best-effort */ }
+  }
+
+  /**
+   * OPR.0.4.3.20 FR-3 — best-effort capture of a seat's resume token at the
+   * adoption boundary (reconcile / adopt / bind). Called post-tx, pre-return
+   * from all three ClaimService adoption paths, precisely where an operator has
+   * just re-established a live session they expect to survive the next crash.
+   *
+   * Derivation is REUSE-ONLY and PURE READ — no pane writes, no launch — so it
+   * is consistent with reconcile's no-launch/no-input safety contract:
+   *   claude-code → the status-line sidecar's session_id (a file read)
+   *   codex       → the thread id derived from live pid-keyed logs
+   * Persist via updateResumeToken with provenance "adoption"; the rank guard
+   * governs clobber (operator/hook are never downgraded; the validity guard
+   * blocks an empty write). Honest failure = persist nothing (null token = the
+   * honest missing/unverified state) + a redacted skip event with a stated
+   * reason. Terminal/unknown runtime is exempt (no capture, no event, not a
+   * failure). ANY throw is swallowed — capture NEVER fails or blocks the
+   * adoption (PRD Rule 7).
+   */
+  private async captureResumeTokenOnAdoption(input: {
+    rigId: string; nodeId: string; sessionId: string; sessionName: string; runtime: string | null;
+  }): Promise<void> {
+    try {
+      // Derivation is the shared PURE helper (OPR.0.4.3.04 B2 — reused by the
+      // seat-handover discovered-mode capture); persistence + events stay here so
+      // FR-3's adoption provenance/audit semantics are unchanged.
+      const derived = await deriveResumeToken(
+        { runtime: input.runtime, sessionName: input.sessionName },
+        { contextUsageStore: this.contextUsageStore, resumeTokenCapturer: this.resumeTokenCapturer },
+      );
+      if (derived.outcome === "exempt" || derived.outcome === "noop") return;
+      const runtime = input.runtime as string; // non-null past exempt
+      if (derived.outcome === "skipped") {
+        this.emitCaptureSkip(input, runtime, derived.reason);
+        return;
+      }
+      const validation = { resumeType: derived.resumeType, token: derived.token };
+
+      // Emit "captured" ONLY when the write actually happened. If the provenance
+      // guard refused it (a higher-rank hook/operator token already present —
+      // e.g. a hook fired during the async probe window), the ledger is
+      // correctly preserved and the event must say so, not falsely claim a
+      // captured adoption write at the exact boundary FR-3 makes authoritative.
+      const wrote = this.sessionRegistry.updateResumeToken(input.sessionId, validation.resumeType, validation.token, "adoption");
+      try {
+        this.eventBus.emit(wrote
+          ? {
+              type: "session.resume_token_captured",
+              rigId: input.rigId, nodeId: input.nodeId, sessionName: input.sessionName, sessionId: input.sessionId,
+              runtime, outcome: "captured", resumeType: validation.resumeType, provenance: "adoption", redacted: true,
+            }
+          : {
+              type: "session.resume_token_captured",
+              rigId: input.rigId, nodeId: input.nodeId, sessionName: input.sessionName, sessionId: input.sessionId,
+              runtime, outcome: "preserved", resumeType: validation.resumeType, reason: "higher_rank_present", redacted: true,
+            });
+      } catch { /* best-effort */ }
+    } catch {
+      // best-effort — capture never fails or blocks the adoption (PRD Rule 7)
+    }
+  }
+
+  private emitCaptureSkip(
+    input: { rigId: string; nodeId: string; sessionId: string; sessionName: string },
+    runtime: string,
+    reason: "missing_sidecar" | "parse_error" | "probe_timeout" | "invalid_token",
+  ): void {
+    try {
+      this.eventBus.emit({
+        type: "session.resume_token_captured",
+        rigId: input.rigId, nodeId: input.nodeId, sessionName: input.sessionName, sessionId: input.sessionId,
+        runtime, outcome: "skipped", reason, redacted: true,
       });
     } catch { /* best-effort */ }
   }
@@ -226,6 +316,11 @@ export class ClaimService {
       try {
         await this.deliverClaimHint(discovered.tmuxSession, { rigName: rig!.rig.name, logicalId: opts.logicalId });
       } catch { /* best-effort */ }
+      // OPR.0.4.3.20 FR-3 — capture the resume token at the adoption boundary.
+      await this.captureResumeTokenOnAdoption({
+        rigId: opts.rigId, nodeId, sessionId, sessionName: discovered.tmuxSession,
+        runtime: node.runtime ?? discoveredRuntime ?? null,
+      });
 
       return { ok: true, nodeId, sessionId };
     } catch (err) {
@@ -400,6 +495,14 @@ export class ClaimService {
       try {
         await startTmuxTranscriptCapture(this.tmuxAdapter, this.transcriptStore, rig.rig.name, sessionName);
       } catch { /* best-effort */ }
+      // OPR.0.4.3.20 FR-3 — capture the resume token at the adoption boundary.
+      // Pure reads only (sidecar file / pid-keyed log) — consistent with the
+      // no-launch/no-input contract above; does NOT touch `continuity`
+      // (FR-3 captures a token, it does not assert conversation continuity).
+      await this.captureResumeTokenOnAdoption({
+        rigId: nodeRow.rig_id, nodeId: nodeRow.id, sessionId, sessionName,
+        runtime: nodeRow.runtime,
+      });
 
       return {
         ok: true,
@@ -544,6 +647,11 @@ export class ClaimService {
       try {
         await this.deliverClaimHint(discovered.tmuxSession, { rigName: rig!.rig.name, logicalId });
       } catch { /* best-effort */ }
+      // OPR.0.4.3.20 FR-3 — capture the resume token at the adoption boundary.
+      await this.captureResumeTokenOnAdoption({
+        rigId: opts.rigId, nodeId, sessionId, sessionName: discovered.tmuxSession,
+        runtime: discoveredRuntime ?? null,
+      });
 
       return { ok: true, nodeId, sessionId };
     } catch (err) {

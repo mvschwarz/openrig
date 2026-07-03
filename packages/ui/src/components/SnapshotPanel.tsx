@@ -72,7 +72,7 @@ export function SnapshotPanel({ rigId }: SnapshotPanelProps) {
   return (
     <div
       data-testid="snapshot-panel"
-      className="vellum-heavy border-l-2 border-stone-900 shadow-[-10px_0_30px_rgba(46,52,46,0.05)] p-spacing-6 lg:min-w-[280px] lg:max-w-[320px] overflow-y-auto relative"
+      className="vellum-heavy border-l-2 border-on-surface shadow-[-10px_0_30px_rgba(46,52,46,0.05)] p-spacing-6 lg:min-w-[280px] lg:max-w-[320px] overflow-y-auto relative"
     >
       {/* Crosshair registration marks */}
       <div className="absolute top-2 left-2 w-2 h-2 crosshair" />
@@ -86,12 +86,12 @@ export function SnapshotPanel({ rigId }: SnapshotPanelProps) {
           <h3 className="font-headline text-2xl font-extrabold uppercase tracking-tighter leading-none">
             SNAPSHOTS
           </h3>
-          <div className="font-mono text-[9px] text-stone-500 mt-1">
+          <div className="font-mono text-[9px] text-on-surface-variant mt-1">
             {snapshots.length} capture{snapshots.length !== 1 ? "s" : ""}
           </div>
         </div>
         <button
-          className="px-2 py-0.5 border border-stone-900 font-headline font-bold text-[9px] uppercase tracking-widest bg-white/50 hover:bg-stone-900 hover:text-white transition-all"
+          className="px-2 py-0.5 border border-on-surface font-headline font-bold text-[9px] uppercase tracking-widest bg-surface-lowest/50 hover:bg-inverse-surface hover:text-background transition-all"
           onClick={handleCreate}
           disabled={createSnapshot.isPending}
         >
@@ -109,7 +109,7 @@ export function SnapshotPanel({ rigId }: SnapshotPanelProps) {
       {/* Restore result */}
       {restoreResult && (
         <div data-testid="restore-result" className="mb-spacing-4 p-spacing-3 bg-surface-low">
-          <div className="font-mono text-[9px] text-stone-400 uppercase mb-spacing-2">RESTORE COMPLETE</div>
+          <div className="font-mono text-[9px] text-on-surface-variant uppercase mb-spacing-2">RESTORE COMPLETE</div>
           <div className="space-y-spacing-1">
             {restoreResult.map((n) => (
               <div key={n.nodeId} className="flex items-center justify-between font-mono text-[10px]">
@@ -125,7 +125,7 @@ export function SnapshotPanel({ rigId }: SnapshotPanelProps) {
 
       {/* Restore loading */}
       {restoreSnapshot.isPending && (
-        <div data-testid="restore-loading" className="font-mono text-[10px] text-stone-400 mb-spacing-3">
+        <div data-testid="restore-loading" className="font-mono text-[10px] text-on-surface-variant mb-spacing-3">
           Restoring...
         </div>
       )}
@@ -141,7 +141,7 @@ export function SnapshotPanel({ rigId }: SnapshotPanelProps) {
           ))}
         </div>
       ) : snapshots.length === 0 ? (
-        <div className="font-mono text-[10px] text-stone-400 py-spacing-4 text-center italic">
+        <div className="font-mono text-[10px] text-on-surface-variant py-spacing-4 text-center italic">
           No snapshots yet
         </div>
       ) : (
@@ -153,12 +153,12 @@ export function SnapshotPanel({ rigId }: SnapshotPanelProps) {
                   <div className="font-mono text-[10px] font-bold" data-testid={`snap-id-${snap.id}`}>
                     {snap.id.slice(0, 12)}
                   </div>
-                  <div className="font-mono text-[9px] text-stone-400 mt-0.5">
+                  <div className="font-mono text-[9px] text-on-surface-variant mt-0.5">
                     {snap.kind} &middot; {formatAge(snap.createdAt)}
                   </div>
                 </div>
                 <button
-                  className="font-mono text-[9px] font-bold border-b border-stone-900 hover:bg-stone-900 hover:text-white transition-all px-1"
+                  className="font-mono text-[9px] font-bold border-b border-on-surface hover:bg-inverse-surface hover:text-background transition-all px-1"
                   data-testid={`restore-btn-${snap.id}`}
                   onClick={() => setConfirmRestore(snap.id)}
                 >
@@ -175,7 +175,7 @@ export function SnapshotPanel({ rigId }: SnapshotPanelProps) {
         <DialogContent>
           <DialogHeader>
             <DialogTitle className="font-headline text-xl font-extrabold uppercase tracking-tighter">Restore Snapshot</DialogTitle>
-            <DialogDescription className="text-body-sm text-stone-500">
+            <DialogDescription className="text-body-sm text-on-surface-variant">
               This will restore the rig from snapshot {confirmRestore?.slice(0, 12)}. Existing sessions will be restarted.
             </DialogDescription>
           </DialogHeader>

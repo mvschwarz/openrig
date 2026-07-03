@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import type { QueueDeps } from "../src/commands/queue.js";
-import { resolveQueueBody } from "../src/commands/queue.js";
+import { resolveQueueBody, previewBody } from "../src/commands/queue.js";
 import { createProgram } from "../src/index.js";
 
 /**
@@ -406,6 +406,70 @@ describe("rig queue CLI", () => {
     });
   });
 
+  // OPR.0.4.3.16 — --gate <role> first-class flag stamps a gate:<role> tag,
+  // the producer the idle-gate watchdog's centralized predicate reads.
+  describe("OPR.0.4.3.16 — --gate <role> gate-predicate producer", () => {
+    it("create --gate guard translates to a gate:guard tag", async () => {
+      const { deps, calls } = makeDeps({
+        routes: { "POST /api/queue/create": { status: 201, data: { qitemId: "q-gate-1" } } },
+      });
+      const program = createProgram({ queueDeps: deps });
+      program.exitOverride();
+      await program.parseAsync([
+        "node", "rig", "queue", "create",
+        "--source", "dev@rig",
+        "--destination", "dev-guard@rig",
+        "--body", "review this diff",
+        "--gate", "guard",
+        "--json",
+      ]);
+      const create = calls.find((c) => c.path === "/api/queue/create");
+      expect((create!.body as { tags: string[] }).tags).toEqual(["gate:guard"]);
+    });
+
+    it("create --gate composes with --slice/--tags and de-duplicates", async () => {
+      const { deps, calls } = makeDeps({
+        routes: { "POST /api/queue/create": { status: 201, data: { qitemId: "q-gate-2" } } },
+      });
+      const program = createProgram({ queueDeps: deps });
+      program.exitOverride();
+      await program.parseAsync([
+        "node", "rig", "queue", "create",
+        "--source", "dev@rig",
+        "--destination", "spec-guard@rig",
+        "--body", "x",
+        "--slice", "16",
+        "--gate", "spec-review",
+        "--tags", "gate:spec-review,handoff:per-commit",
+        "--json",
+      ]);
+      const create = calls.find((c) => c.path === "/api/queue/create");
+      expect((create!.body as { tags: string[] }).tags).toEqual([
+        "slice:16",
+        "gate:spec-review",
+        "handoff:per-commit",
+      ]);
+    });
+
+    it("handoff --gate guard translates to a gate:guard tag on the new qitem", async () => {
+      const { deps, calls } = makeDeps({
+        routes: { "POST /api/queue/q-src/handoff": { status: 201, data: { qitemId: "q-new" } } },
+      });
+      const program = createProgram({ queueDeps: deps });
+      program.exitOverride();
+      await program.parseAsync([
+        "node", "rig", "queue", "handoff", "q-src",
+        "--from", "dev@rig",
+        "--to", "dev-guard@rig",
+        "--gate", "guard",
+        "--summary", "code review",
+        "--json",
+      ]);
+      const handoff = calls.find((c) => c.path === "/api/queue/q-src/handoff");
+      expect((handoff!.body as { tags: string[] }).tags).toEqual(["gate:guard"]);
+    });
+  });
+
   it("update --state done WITHOUT --closure-reason renders structured hot-potato error and exits non-zero", async () => {
     const { deps } = makeDeps({
       routes: {
@@ -778,5 +842,146 @@ describe("rig queue CLI", () => {
       if (saved === undefined) delete process.env.OPENRIG_SESSION_NAME;
       else process.env.OPENRIG_SESSION_NAME = saved;
     }
+  });
+
+  // OPR.0.4.3.03 — `rig queue show` body preview + `--full` compatibility.
+  // Bound + bodyTruncated are CODE-POINT-count based (IMPL-SPEC §2.3-2.4);
+  // bodyBytes is the honest TRUE total UTF-8 byte size.
+  describe("queue show body preview (OPR.0.4.3.03)", () => {
+    const PREVIEW_MAX_CODEPOINTS = 512;
+
+    function showRoute(item: unknown, id = "qitem-1") {
+      return makeDeps({ routes: { [`GET /api/queue/${id}`]: { status: 200, data: item } } });
+    }
+
+    // --- previewBody helper (unit) ---
+
+    it("previewBody: empty body → preview '', 0 bytes, not truncated", () => {
+      expect(previewBody("")).toEqual({ preview: "", bodyBytes: 0, bodyTruncated: false });
+    });
+
+    it("previewBody: small body under bound → full body, honest bytes, not truncated", () => {
+      const small = "hello world";
+      expect(previewBody(small)).toEqual({
+        preview: small,
+        bodyBytes: Buffer.byteLength(small, "utf8"),
+        bodyTruncated: false,
+      });
+    });
+
+    it("previewBody: body exactly at 512 code points → not truncated (boundary inclusive)", () => {
+      const exact = "z".repeat(512);
+      expect(previewBody(exact)).toEqual({ preview: exact, bodyBytes: 512, bodyTruncated: false });
+    });
+
+    it("previewBody: oversized body (>512 code points) → truncated, honest bodyBytes = TRUE total, preview = first 512 code points", () => {
+      const body = "x".repeat(1000);
+      const out = previewBody(body);
+      expect(out.bodyTruncated).toBe(true);
+      expect(out.bodyBytes).toBe(1000); // honest total, not the preview length
+      expect(Array.from(out.preview).length).toBe(PREVIEW_MAX_CODEPOINTS);
+      expect(out.preview).toBe("x".repeat(512));
+    });
+
+    it("previewBody: multibyte body >512 code points → 512-code-point slice on a clean code-point boundary (valid UTF-8, no split surrogate)", () => {
+      // 4-byte emoji (astral, surrogate pair in UTF-16). 600 of them = 600 code
+      // points / 2400 bytes → exceeds the 512-CODE-POINT bound.
+      const emoji = "😀"; // 4 UTF-8 bytes, 1 code point, 2 UTF-16 units
+      const body = emoji.repeat(600);
+      const out = previewBody(body);
+      expect(out.bodyTruncated).toBe(true); // 600 code points > 512
+      expect(out.bodyBytes).toBe(2400); // honest total byte size
+      // Preview is exactly the first 512 code points (each a whole emoji)...
+      expect(Array.from(out.preview).length).toBe(512);
+      expect([...out.preview].every((ch) => ch === emoji)).toBe(true);
+      // ...ending on a clean code-point boundary: re-encode round-trips, no
+      // lone surrogate / U+FFFD replacement char from a split sequence.
+      expect(Buffer.byteLength(out.preview, "utf8")).toBe(512 * 4);
+      const roundTrip = Buffer.from(out.preview, "utf8").toString("utf8");
+      expect(roundTrip).toBe(out.preview);
+      expect(roundTrip).not.toContain("�");
+    });
+
+    // --- show command (end-to-end via program) ---
+
+    it("show default: oversized body → preview + marker line + honest bodyBytes + bodyTruncated=true (human)", async () => {
+      const full = "A".repeat(1000);
+      const { deps } = showRoute({ qitemId: "qitem-1", state: "pending", body: full });
+      const program = createProgram({ queueDeps: deps });
+      program.exitOverride();
+      await program.parseAsync(["node", "rig", "queue", "show", "qitem-1"]);
+      const printed = JSON.parse(logs[0]);
+      expect(printed.bodyTruncated).toBe(true);
+      expect(printed.bodyBytes).toBe(1000);
+      expect(Array.from(printed.body).length).toBe(512);
+      // marker line on its OWN line, with the honest total byte size
+      expect(logs.join("\n")).toContain("truncated — 1000 bytes total; --full for complete body");
+    });
+
+    it("show default: small body → full body, NO marker, bodyTruncated=false", async () => {
+      const { deps } = showRoute({ qitemId: "qitem-1", body: "short body" });
+      const program = createProgram({ queueDeps: deps });
+      program.exitOverride();
+      await program.parseAsync(["node", "rig", "queue", "show", "qitem-1"]);
+      const printed = JSON.parse(logs[0]);
+      expect(printed.body).toBe("short body");
+      expect(printed.bodyTruncated).toBe(false);
+      expect(printed.bodyBytes).toBe(10);
+      expect(logs.join("\n")).not.toContain("truncated");
+    });
+
+    it("show default: empty body → bodyBytes 0, bodyTruncated=false, no marker, no crash", async () => {
+      const { deps } = showRoute({ qitemId: "qitem-1", body: "" });
+      const program = createProgram({ queueDeps: deps });
+      program.exitOverride();
+      await program.parseAsync(["node", "rig", "queue", "show", "qitem-1"]);
+      const printed = JSON.parse(logs[0]);
+      expect(printed.body).toBe("");
+      expect(printed.bodyBytes).toBe(0);
+      expect(printed.bodyTruncated).toBe(false);
+      expect(logs.join("\n")).not.toContain("truncated");
+      expect(process.exitCode).not.toBe(1);
+    });
+
+    it("show default --json: carries preview + bodyBytes + bodyTruncated (JSON parity)", async () => {
+      const full = "B".repeat(1000);
+      const { deps } = showRoute({ qitemId: "qitem-1", body: full });
+      const program = createProgram({ queueDeps: deps });
+      program.exitOverride();
+      await program.parseAsync(["node", "rig", "queue", "show", "qitem-1", "--json"]);
+      expect(logs.length).toBe(1); // compact single-line JSON, no separate marker line
+      const printed = JSON.parse(logs[0]);
+      expect(printed.bodyTruncated).toBe(true);
+      expect(printed.bodyBytes).toBe(1000);
+      expect(Array.from(printed.body).length).toBe(PREVIEW_MAX_CODEPOINTS);
+    });
+
+    it("show --full --json: byte-identical COMPLETE item body (compatibility contract — no preview fields)", async () => {
+      const item = { qitemId: "qitem-1", state: "pending", body: "C".repeat(1000), chain_of_record: [{ a: 1 }] };
+      const { deps } = showRoute(item);
+      const program = createProgram({ queueDeps: deps });
+      program.exitOverride();
+      await program.parseAsync(["node", "rig", "queue", "show", "qitem-1", "--full", "--json"]);
+      // Byte-identical to a raw JSON.stringify of the item (today's shape).
+      expect(logs[0]).toBe(JSON.stringify(item));
+      const printed = JSON.parse(logs[0]);
+      expect(printed.body).toBe("C".repeat(1000)); // complete, untruncated
+      expect(printed).not.toHaveProperty("bodyBytes");
+      expect(printed).not.toHaveProperty("bodyTruncated");
+    });
+
+    it("show --full (human): complete body, no preview fields, no marker", async () => {
+      const full = "D".repeat(1000);
+      const item = { qitemId: "qitem-1", body: full, chain_of_record: [] };
+      const { deps } = showRoute(item);
+      const program = createProgram({ queueDeps: deps });
+      program.exitOverride();
+      await program.parseAsync(["node", "rig", "queue", "show", "qitem-1", "--full"]);
+      const printed = JSON.parse(logs[0]);
+      expect(printed.body).toBe(full);
+      expect(printed).not.toHaveProperty("bodyBytes");
+      expect(printed).not.toHaveProperty("bodyTruncated");
+      expect(logs.join("\n")).not.toContain("truncated");
+    });
   });
 });

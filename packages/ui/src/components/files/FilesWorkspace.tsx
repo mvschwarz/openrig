@@ -63,9 +63,9 @@ export function FilesWorkspace() {
 
   return (
     <div data-testid="files-workspace" className="flex h-full flex-col lg:pl-[var(--workspace-left-offset,0px)] lg:pr-[var(--workspace-right-offset,0px)]">
-      <header className="border-b border-stone-200 bg-stone-50 px-4 py-3">
-        <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-stone-500">Workspace</div>
-        <h1 className="font-headline text-xl font-bold tracking-tight text-stone-900">Files</h1>
+      <header className="border-b border-outline-variant bg-background px-4 py-3">
+        <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-on-surface-variant">Workspace</div>
+        <h1 className="font-headline text-xl font-bold tracking-tight text-on-surface">Files</h1>
       </header>
       {/* Slice 20 mobile: at narrow viewports the two-pane
           shape stacks vertically so the document panel claims full width
@@ -73,7 +73,7 @@ export function FilesWorkspace() {
           can scroll past it to the content. Desktop (sm:) layout
           unchanged — horizontal flex + 288px tree column. */}
       <div className="flex flex-1 min-h-0 flex-col sm:flex-row">
-        <aside data-testid="files-tree-pane" className="w-full max-h-48 shrink-0 overflow-y-auto border-b border-stone-200 bg-stone-50 sm:w-72 sm:max-h-none sm:border-b-0 sm:border-r">
+        <aside data-testid="files-tree-pane" className="w-full max-h-48 shrink-0 overflow-y-auto border-b border-outline-variant bg-background sm:w-72 sm:max-h-none sm:border-b-0 sm:border-r">
           <RootSelector roots={roots.data} isLoading={roots.isLoading} selectedRoot={selectedRoot} onSelect={setSelectedRoot} workspace={workspace.data ?? null} />
           {selectedRoot && (
             <>
@@ -88,14 +88,14 @@ export function FilesWorkspace() {
             </>
           )}
         </aside>
-        <main data-testid="files-content-pane" className="flex-1 min-w-0 overflow-y-auto bg-white">
+        <main data-testid="files-content-pane" className="flex-1 min-w-0 overflow-y-auto bg-surface-lowest">
           {!selectedRoot && (
-            <div className="m-auto p-4 font-mono text-[10px] text-stone-400">
+            <div className="m-auto p-4 font-mono text-[10px] text-on-surface-variant">
               Select an allowlist root to browse.
             </div>
           )}
           {selectedRoot && !selectedFile && (
-            <div className="p-4 font-mono text-[10px] text-stone-400" data-testid="files-no-selection">
+            <div className="p-4 font-mono text-[10px] text-on-surface-variant" data-testid="files-no-selection">
               Select a file from the tree.
             </div>
           )}
@@ -126,27 +126,27 @@ function RootSelector({
   onSelect: (name: string) => void;
   workspace: import("../../hooks/useWorkspace.js").WhoamiWorkspaceUI | null;
 }) {
-  if (isLoading) return <div className="p-3 font-mono text-[10px] text-stone-400">Loading roots…</div>;
+  if (isLoading) return <div className="p-3 font-mono text-[10px] text-on-surface-variant">Loading roots…</div>;
   if (!roots) return null;
   if (isUnavailable(roots)) {
     return (
-      <div data-testid="files-roots-unavailable" className="p-3 font-mono text-[10px] text-stone-500">
+      <div data-testid="files-roots-unavailable" className="p-3 font-mono text-[10px] text-on-surface-variant">
         <div>Files routes unavailable.</div>
-        {roots.hint && <div className="mt-1 text-stone-400">{roots.hint}</div>}
+        {roots.hint && <div className="mt-1 text-on-surface-variant">{roots.hint}</div>}
       </div>
     );
   }
   if (roots.roots.length === 0) {
     return (
-      <div data-testid="files-roots-empty" className="p-3 font-mono text-[10px] text-stone-500">
+      <div data-testid="files-roots-empty" className="p-3 font-mono text-[10px] text-on-surface-variant">
         <div>No allowlist roots configured.</div>
-        {roots.hint && <div className="mt-1 text-stone-400">{roots.hint}</div>}
+        {roots.hint && <div className="mt-1 text-on-surface-variant">{roots.hint}</div>}
       </div>
     );
   }
   return (
-    <div data-testid="files-root-selector" className="border-b border-stone-200 p-2">
-      <div className="mb-1 font-mono text-[8px] uppercase tracking-[0.18em] text-stone-500">Roots</div>
+    <div data-testid="files-root-selector" className="border-b border-outline-variant p-2">
+      <div className="mb-1 font-mono text-[8px] uppercase tracking-[0.18em] text-on-surface-variant">Roots</div>
       <ul>
         {roots.roots.map((r: AllowlistRoot) => {
           const kind = resolveKindForPath(r.path, workspace);
@@ -157,8 +157,8 @@ function RootSelector({
                 data-testid={`files-root-${r.name}`}
                 data-active={selectedRoot === r.name}
                 onClick={() => onSelect(r.name)}
-                className={`flex w-full items-center justify-between gap-2 px-2 py-1 text-left font-mono text-[10px] hover:bg-stone-100 ${
-                  selectedRoot === r.name ? "bg-stone-200/80 text-stone-900" : "text-stone-700"
+                className={`flex w-full items-center justify-between gap-2 px-2 py-1 text-left font-mono text-[10px] hover:bg-surface-low ${
+                  selectedRoot === r.name ? "bg-surface-high/80 text-on-surface" : "text-on-surface"
                 }`}
                 title={r.path}
               >
@@ -176,13 +176,13 @@ function RootSelector({
 function Breadcrumbs({ root, path, onNavigate }: { root: string; path: string; onNavigate: (path: string) => void }) {
   const segments = path ? path.split("/") : [];
   return (
-    <nav data-testid="files-breadcrumbs" className="flex flex-wrap items-baseline gap-1 border-b border-stone-200 px-2 py-1 font-mono text-[10px] text-stone-700">
+    <nav data-testid="files-breadcrumbs" className="flex flex-wrap items-baseline gap-1 border-b border-outline-variant px-2 py-1 font-mono text-[10px] text-on-surface">
       <button type="button" onClick={() => onNavigate("")} className="font-bold hover:underline">{root}</button>
       {segments.map((seg, idx) => {
         const accumulated = segments.slice(0, idx + 1).join("/");
         return (
           <span key={accumulated}>
-            <span className="mx-0.5 text-stone-400">/</span>
+            <span className="mx-0.5 text-on-surface-variant">/</span>
             <button type="button" onClick={() => onNavigate(accumulated)} className="hover:underline">
               {seg}
             </button>
@@ -207,10 +207,10 @@ function DirectoryTree({
   selectedFile: string | null;
 }) {
   const list = useFilesList(root, path);
-  if (list.isLoading) return <div className="p-3 font-mono text-[10px] text-stone-400">Loading…</div>;
+  if (list.isLoading) return <div className="p-3 font-mono text-[10px] text-on-surface-variant">Loading…</div>;
   if (list.isError) return <div data-testid="files-list-error" className="p-3 font-mono text-[10px] text-red-600">{(list.error as Error)?.message ?? "Error loading directory."}</div>;
   if (!list.data || list.data.entries.length === 0) {
-    return <div className="p-3 font-mono text-[10px] text-stone-400">Empty directory.</div>;
+    return <div className="p-3 font-mono text-[10px] text-on-surface-variant">Empty directory.</div>;
   }
   return (
     <ul data-testid="files-directory-tree" className="p-1">
@@ -220,7 +220,7 @@ function DirectoryTree({
             type="button"
             data-testid="files-up"
             onClick={() => onEnterDir(parentPath(path))}
-            className="block w-full px-2 py-1 text-left font-mono text-[10px] text-stone-500 hover:bg-stone-100"
+            className="block w-full px-2 py-1 text-left font-mono text-[10px] text-on-surface-variant hover:bg-surface-low"
           >
             ..
           </button>
@@ -240,8 +240,8 @@ function DirectoryTree({
               disabled={entry.type === "other"}
               className={`block w-full px-2 py-1 text-left font-mono text-[10px] ${
                 entry.type === "other"
-                  ? "text-stone-400"
-                  : `hover:bg-stone-100 ${isSelected ? "bg-stone-200/80 text-stone-900" : "text-stone-700"}`
+                  ? "text-on-surface-variant"
+                  : `hover:bg-surface-low ${isSelected ? "bg-surface-high/80 text-on-surface" : "text-on-surface"}`
               }`}
             >
               {entry.type === "dir" ? `▸ ${entry.name}` : entry.name}
@@ -267,9 +267,9 @@ function FileContentPanel({
   const read = useFilesRead(root, path);
   return (
     <div data-testid="files-content-panel" className="flex h-full flex-col">
-      <header className="flex items-center justify-between border-b border-stone-200 bg-stone-50 px-3 py-2 font-mono text-[10px]">
-        <div className="text-stone-700" data-testid="files-content-path">{root}/{path}</div>
-        <div className="flex items-center gap-3 text-stone-500">
+      <header className="flex items-center justify-between border-b border-outline-variant bg-background px-3 py-2 font-mono text-[10px]">
+        <div className="text-on-surface" data-testid="files-content-path">{root}/{path}</div>
+        <div className="flex items-center gap-3 text-on-surface-variant">
           {read.data && (
             <>
               <span data-testid="files-content-size">{read.data.size}b</span>
@@ -284,7 +284,7 @@ function FileContentPanel({
             className={`border px-2 py-0.5 font-mono text-[9px] uppercase tracking-[0.10em] ${
               editMode
                 ? "border-amber-400 bg-amber-50 text-amber-900"
-                : "border-stone-300 text-stone-700 hover:bg-stone-100"
+                : "border-outline-variant text-on-surface hover:bg-surface-low"
             }`}
           >
             {editMode ? "editing" : "edit"}
@@ -292,7 +292,7 @@ function FileContentPanel({
         </div>
       </header>
       <div className="flex-1 min-h-0 overflow-y-auto">
-        {read.isLoading && <div className="p-4 font-mono text-[10px] text-stone-400">Loading…</div>}
+        {read.isLoading && <div className="p-4 font-mono text-[10px] text-on-surface-variant">Loading…</div>}
         {read.isError && <div data-testid="files-read-error" className="p-4 font-mono text-[10px] text-red-600">{(read.error as Error)?.message ?? "Error loading file."}</div>}
         {read.data && (
           editMode
@@ -312,7 +312,7 @@ function FileViewer({ root, path, read }: { root: string; path: string; read: Fi
     return (
       <div data-testid="files-image-view" className="p-4">
         <TruncationMarker read={read} />
-        <img src={fileAssetUrl(root, path)} alt={path} className="max-w-full border border-stone-200" />
+        <img src={fileAssetUrl(root, path)} alt={path} className="max-w-full border border-outline-variant" />
       </div>
     );
   }
@@ -335,7 +335,7 @@ function FileViewer({ root, path, read }: { root: string; path: string; read: Fi
   }
   if (DOWNLOAD_ONLY_EXTENSIONS.has(ext)) {
     return (
-      <div data-testid="files-download-only" className="p-4 font-mono text-[10px] text-stone-700">
+      <div data-testid="files-download-only" className="p-4 font-mono text-[10px] text-on-surface">
         <a href={fileAssetUrl(root, path)} download className="text-blue-700 underline">
           Download {path}
         </a>
@@ -345,7 +345,7 @@ function FileViewer({ root, path, read }: { root: string; path: string; read: Fi
   return (
     <div data-testid="files-text-fallback" className="p-4">
       <TruncationMarker read={read} />
-      <pre className="whitespace-pre-wrap break-words font-mono text-[10px] text-stone-800">{read.content}</pre>
+      <pre className="whitespace-pre-wrap break-words font-mono text-[10px] text-on-surface">{read.content}</pre>
     </div>
   );
 }
@@ -391,7 +391,7 @@ function SpecValidationPanel({ kind, yaml }: { kind: "rig" | "agent"; yaml: stri
   const review = useSpecReview(kind, yaml);
   if (review.isLoading) {
     return (
-      <div data-testid="files-spec-validation-loading" className="mb-3 border border-stone-300 bg-stone-50 px-3 py-2 font-mono text-[10px] text-stone-500">
+      <div data-testid="files-spec-validation-loading" className="mb-3 border border-outline-variant bg-background px-3 py-2 font-mono text-[10px] text-on-surface-variant">
         Validating {kind}.yaml…
       </div>
     );
@@ -460,7 +460,7 @@ function FileEditor({ root, path, read }: { root: string; path: string; read: Fi
 
   return (
     <div data-testid="files-editor" className="flex h-full flex-col">
-      <div className="flex items-center gap-2 border-b border-stone-200 bg-amber-50 px-3 py-1.5 font-mono text-[9px]">
+      <div className="flex items-center gap-2 border-b border-outline-variant bg-amber-50 px-3 py-1.5 font-mono text-[9px]">
         <span className="font-bold text-amber-900" data-testid="files-editor-status">
           {dirty ? "draft (unsaved)" : "no changes"}
         </span>
@@ -504,7 +504,7 @@ function FileEditor({ root, path, read }: { root: string; path: string; read: Fi
           type="button"
           data-testid="files-editor-cancel"
           onClick={() => { setDraft(read.content); setSaveError(null); setConflict(null); }}
-          className="border border-stone-400 bg-white px-2 py-0.5 uppercase tracking-[0.10em] text-stone-700"
+          className="border border-outline bg-surface-lowest px-2 py-0.5 uppercase tracking-[0.10em] text-on-surface"
         >
           cancel
         </button>
@@ -523,7 +523,7 @@ function FileEditor({ root, path, read }: { root: string; path: string; read: Fi
             onClick={() => {
               qc.invalidateQueries({ queryKey: ["files", "read", root, path] });
             }}
-            className="border border-red-500 bg-white px-2 py-0.5 uppercase tracking-[0.10em] text-red-900"
+            className="border border-red-500 bg-surface-lowest px-2 py-0.5 uppercase tracking-[0.10em] text-red-900"
           >
             refresh
           </button>
@@ -538,7 +538,7 @@ function FileEditor({ root, path, read }: { root: string; path: string; read: Fi
         data-testid="files-editor-textarea"
         value={draft}
         onChange={(e) => setDraft(e.target.value)}
-        className="flex-1 min-h-0 resize-none border-0 bg-stone-50 p-3 font-mono text-[11px] leading-relaxed text-stone-900 outline-none"
+        className="flex-1 min-h-0 resize-none border-0 bg-background p-3 font-mono text-[11px] leading-relaxed text-on-surface outline-none"
         spellCheck={false}
       />
     </div>

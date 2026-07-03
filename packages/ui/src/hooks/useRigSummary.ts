@@ -7,6 +7,11 @@ export interface RigSummary {
   hasServices?: boolean;
   latestSnapshotAt: string | null;
   latestSnapshotId: string | null;
+  /** OPR.0.4.3.22 — rig-level lifecycle folded from per-node states
+   *  (running / recoverable / stopped / degraded / attention_required). The
+   *  daemon /api/rigs/summary route already enriches this; carried here so UI
+   *  surfaces can choose the right operator action without a second round trip. */
+  lifecycleState?: "running" | "recoverable" | "stopped" | "degraded" | "attention_required";
 }
 
 async function fetchSummary(): Promise<RigSummary[]> {

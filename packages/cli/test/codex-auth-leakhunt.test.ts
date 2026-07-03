@@ -12,7 +12,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { authCommand } from "../src/commands/auth.js";
-import { resolveCodexHome, authSave, authSwitch } from "../src/lib/codex-auth.js";
+import { resolveCodexHome, authSave, authSwitch, copyOntoFresh } from "../src/lib/codex-auth.js";
 
 // Distinctive, grep-proof: if this string ever lands in command output, the secret boundary broke.
 const SENTINEL = "SENTINEL_TOKEN_LEAK_a1b2c3d4_DO_NOT_PRINT";
@@ -185,5 +185,146 @@ describe("rig auth LEAK-HUNT — hardlink + symlinked-parent escapes (rev1-r2)",
     expect(leaked).toBe(false);
     fs.rmSync(h, { recursive: true, force: true });
     fs.rmSync(outsideDir, { recursive: true, force: true });
+  });
+});
+
+// OPR.0.4.3.23 — secret-boundary B1: the check-then-use gap. The 0.4.1 guards are path-based
+// pre-checks followed by a copy that RE-RESOLVED the source path; a swap/crash/concurrent-legit-rig in
+// the window could redirect the read, copy a torn file, or briefly expose a wider-than-0600 temp
+// (CERT FIO45-C). copyOntoFresh now opens the source, validates ON THE FD (O_NOFOLLOW + fstat: regular,
+// nlink===1, dev/ino), reads from the fd, creates the dest temp O_EXCL at 0600, fsyncs, and renames as
+// the sole atomic publish. These tests exercise the fd layer directly (behind the path pre-checks) and
+// prove no secret escapes on the crash / partial-write / swap paths.
+describe("rig auth LEAK-HUNT — fd-first check-then-use / crash-safety (OPR.0.4.3.23)", () => {
+  let root: string;
+  const orphans = (dir: string, base: string): string[] =>
+    fs.readdirSync(dir).filter((n) => n.startsWith(`${base}.tmp-`));
+
+  beforeEach(() => {
+    root = fs.mkdtempSync(path.join(os.tmpdir(), "codexauth-fdfirst-"));
+  });
+  afterEach(() => {
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it("refuses a SYMLINK source via O_NOFOLLOW at the fd (not just the path pre-check); no read through the swap target", () => {
+    const secret = path.join(root, "secret.json");
+    fs.writeFileSync(secret, JSON.stringify({ k: SENTINEL }), { mode: 0o600 });
+    const srcLink = path.join(root, "source-link.json"); // a symlink swapped in where a regular file was expected
+    fs.symlinkSync(secret, srcLink);
+    const dest = path.join(root, "dest.json");
+    expect(copyOntoFresh(srcLink, dest)).toBe(false); // O_NOFOLLOW fails the open of a symlink final component
+    expect(fs.existsSync(dest)).toBe(false); // nothing published
+    expect(orphans(root, "dest.json")).toEqual([]); // no orphan temp left behind
+  });
+
+  it("refuses a HARDLINKED source (nlink>1) via the fstat-on-fd check (the opened inode may live outside the boundary)", () => {
+    const real = path.join(root, "real.json");
+    fs.writeFileSync(real, JSON.stringify({ k: SENTINEL }), { mode: 0o600 });
+    const hard = path.join(root, "hard.json");
+    fs.linkSync(real, hard); // nlink === 2 on the shared inode
+    const dest = path.join(root, "dest.json");
+    expect(copyOntoFresh(hard, dest)).toBe(false);
+    expect(fs.existsSync(dest)).toBe(false);
+    expect(orphans(root, "dest.json")).toEqual([]);
+  });
+
+  it("refuses when the opened fd's dev/ino no longer matches the caller's earlier lstat (inode swapped in the window)", () => {
+    const src = path.join(root, "src.json");
+    fs.writeFileSync(src, JSON.stringify({ k: SENTINEL }), { mode: 0o600 });
+    const before = fs.lstatSync(src);
+    // Simulate a swap in the check-then-use window: same path, a different inode now.
+    fs.rmSync(src);
+    fs.writeFileSync(src, JSON.stringify({ k: "IMPOSTER" }), { mode: 0o600 });
+    const dest = path.join(root, "dest.json");
+    expect(copyOntoFresh(src, dest, { dev: before.dev, ino: before.ino })).toBe(false);
+    expect(fs.existsSync(dest)).toBe(false);
+  });
+
+  it("happy path: temp is 0600 AT creation and the published dest is 0600 + byte-identical; no orphan temp", () => {
+    const src = path.join(root, "src.json");
+    const body = JSON.stringify({ k: SENTINEL });
+    fs.writeFileSync(src, body, { mode: 0o600 });
+    const dest = path.join(root, "dest.json");
+    expect(copyOntoFresh(src, dest, { dev: fs.lstatSync(src).dev, ino: fs.lstatSync(src).ino })).toBe(true);
+    expect(fs.lstatSync(dest).mode & 0o777).toBe(0o600); // 0600, set at open — no create-then-chmod window
+    expect(fs.readFileSync(dest, "utf8")).toBe(body); // fd read+write reproduces the bytes exactly
+    expect(orphans(root, "dest.json")).toEqual([]);
+  });
+
+  it("a pre-existing dest inode is NOT written through — the fresh O_EXCL temp + rename gives dest a new inode", () => {
+    const src = path.join(root, "src.json");
+    fs.writeFileSync(src, JSON.stringify({ k: SENTINEL }), { mode: 0o600 });
+    const dest = path.join(root, "dest.json");
+    fs.writeFileSync(dest, "OLD", { mode: 0o600 });
+    const alias = path.join(root, "alias.json");
+    fs.linkSync(dest, alias); // alias shares dest's ORIGINAL inode
+    expect(copyOntoFresh(src, dest)).toBe(true);
+    expect(fs.readFileSync(dest, "utf8")).toContain(SENTINEL); // dest points at a fresh inode
+    expect(fs.readFileSync(alias, "utf8")).toBe("OLD"); // the old inode was unlinked from dest, never written
+    expect(fs.readFileSync(alias, "utf8")).not.toContain(SENTINEL);
+  });
+
+  it("a failed copy (source vanished) leaves the prior dest byte-intact and leaves no orphan temp", () => {
+    const dest = path.join(root, "dest.json");
+    fs.writeFileSync(dest, "PRIOR", { mode: 0o600 });
+    const gone = path.join(root, "gone.json"); // never created
+    expect(copyOntoFresh(gone, dest)).toBe(false);
+    expect(fs.readFileSync(dest, "utf8")).toBe("PRIOR"); // crash-before-rename → prior dest intact
+    expect(orphans(root, "dest.json")).toEqual([]);
+  });
+
+  it("a rename failure AFTER the temp is written cleans up the temp so no orphan carries the secret", () => {
+    const src = path.join(root, "src.json");
+    fs.writeFileSync(src, JSON.stringify({ k: SENTINEL }), { mode: 0o600 });
+    // dest is a non-empty directory → the temp is created + written, but renameSync(tmp, dest) fails.
+    const dest = path.join(root, "dest-dir");
+    fs.mkdirSync(dest);
+    fs.writeFileSync(path.join(dest, "occupant"), "x");
+    expect(copyOntoFresh(src, dest)).toBe(false);
+    expect(orphans(root, "dest-dir")).toEqual([]); // the finally cleanup removed the secret-bearing temp
+    // No sibling file anywhere in root outside dest carries the sentinel (the temp was scrubbed away).
+    const leaked = fs
+      .readdirSync(root)
+      .filter((n) => n !== "src.json" && n !== "dest-dir")
+      .some((n) => {
+        try {
+          return fs.readFileSync(path.join(root, n), "utf8").includes(SENTINEL);
+        } catch {
+          return false;
+        }
+      });
+    expect(leaked).toBe(false);
+  });
+
+  it("repeated copyOntoFresh publishes each land a valid 0600 file, never a partial; last write wins", () => {
+    const a = path.join(root, "a.json");
+    const b = path.join(root, "b.json");
+    fs.writeFileSync(a, JSON.stringify({ v: "AAA" }), { mode: 0o600 });
+    fs.writeFileSync(b, JSON.stringify({ v: "BBB" }), { mode: 0o600 });
+    const dest = path.join(root, "dest.json");
+    expect(copyOntoFresh(a, dest)).toBe(true);
+    expect(copyOntoFresh(b, dest)).toBe(true); // second atomic publish over the first
+    expect(fs.lstatSync(dest).mode & 0o777).toBe(0o600);
+    expect(fs.readFileSync(dest, "utf8")).toBe(JSON.stringify({ v: "BBB" })); // full, not a partial
+    expect(orphans(root, "dest.json")).toEqual([]);
+  });
+
+  it("end-to-end save + switch through the public API leave no secret-bearing orphan temp in the auth home", () => {
+    const p = resolveCodexHome({ CODEX_HOME: root });
+    fs.writeFileSync(p.activeAuth, JSON.stringify({ OPENAI_API_KEY: SENTINEL }), { mode: 0o600 });
+    fs.chmodSync(p.activeAuth, 0o600);
+    fs.mkdirSync(p.profileDir, { recursive: true });
+    fs.chmodSync(p.profileDir, 0o700);
+    expect(authSave(p, "work")).toMatchObject({ ok: true, mode: "600" });
+    expect(authSwitch(p, "work")).toMatchObject({ ok: true, mode: "600" });
+    // Scan both the codex home and the profile dir for any lingering *.tmp-* temp files.
+    const scan = (dir: string) =>
+      fs.readdirSync(dir).filter((n) => n.includes(".tmp-"));
+    expect(scan(root)).toEqual([]);
+    expect(scan(p.profileDir)).toEqual([]);
+    // The published files are 0600 and carry the secret only inside the boundary.
+    expect(fs.lstatSync(p.activeAuth).mode & 0o777).toBe(0o600);
+    expect(fs.lstatSync(path.join(p.profileDir, "work.json")).mode & 0o777).toBe(0o600);
   });
 });

@@ -22,8 +22,8 @@ interface SeatOverviewSecondaryProps {
 }
 
 function placeholderOrValue(value: ReactNode | null | undefined): ReactNode {
-  if (value === null || value === undefined) return <span className="text-stone-400">—</span>;
-  if (typeof value === "string" && value.trim() === "") return <span className="text-stone-400">—</span>;
+  if (value === null || value === undefined) return <span className="text-on-surface-variant">—</span>;
+  if (typeof value === "string" && value.trim() === "") return <span className="text-on-surface-variant">—</span>;
   return value;
 }
 
@@ -31,10 +31,10 @@ export function SeatOverviewSecondary({ data }: SeatOverviewSecondaryProps) {
   const currentQitem = data.currentQitems?.[0] ?? null;
   const currentWorkValue: ReactNode | null = currentQitem ? (
     <span className="flex min-w-0 items-baseline gap-2">
-      <span className="shrink-0 font-mono text-[10px] text-stone-500">
+      <span className="shrink-0 font-mono text-[10px] text-on-surface-variant">
         {currentQitem.qitemId}
       </span>
-      <span className="min-w-0 truncate text-[11px] text-stone-900">
+      <span className="min-w-0 truncate text-[11px] text-on-surface">
         {currentQitem.bodyExcerpt}
       </span>
     </span>
@@ -43,7 +43,7 @@ export function SeatOverviewSecondary({ data }: SeatOverviewSecondaryProps) {
   return (
     <section
       data-testid="seat-overview-secondary"
-      className="border border-outline-variant bg-white/30"
+      className="border border-outline-variant bg-surface-lowest/30"
     >
       <dl className="divide-y divide-outline-variant/55">
         <Row
@@ -82,14 +82,14 @@ function Row({
       className="flex min-w-0 items-baseline gap-3 px-3 py-1.5"
       title={titleAttr}
     >
-      <dt className="shrink-0 font-mono text-[10px] lowercase tracking-[0.04em] text-stone-500">
+      <dt className="shrink-0 font-mono text-[10px] lowercase tracking-[0.04em] text-on-surface-variant">
         {label}
       </dt>
       <dd
         data-testid={`seat-overview-secondary-cell-${fieldKey}`}
         className={`min-w-0 flex-1 truncate ${
           mono ? "font-mono text-[11px]" : "text-[11px]"
-        } text-stone-900`}
+        } text-on-surface`}
       >
         {placeholderOrValue(value)}
       </dd>

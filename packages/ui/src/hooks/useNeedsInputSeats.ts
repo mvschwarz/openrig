@@ -22,7 +22,11 @@ export function useNeedsInputSeats() {
       for (const rig of rigs) {
         let nodes: NodeInventoryEntry[];
         try {
-          const nodesRes = await fetch(`/api/rigs/${encodeURIComponent(rig.rigId)}/nodes`);
+          // OPR.0.4.3 healthz-wedge fix: this is the one consumer that needs
+          // pane-heuristic needs_input for hook-less seats (precedence #3), so it
+          // opts into the per-node tmux capture with ?full=true. All other node
+          // consumers (topology graph/table) stay on the cheap snapshot default.
+          const nodesRes = await fetch(`/api/rigs/${encodeURIComponent(rig.rigId)}/nodes?full=true`);
           if (!nodesRes.ok) continue;
           nodes = (await nodesRes.json()) as NodeInventoryEntry[];
         } catch {

@@ -37,11 +37,11 @@ const KIND_DOT: Record<FeedCardKind, string> = {
   approval: "bg-warning",
   shipped: "bg-success",
   progress: "bg-secondary",
-  observation: "bg-stone-500",
+  observation: "bg-outline",
 };
 
 const TONE_DOT: Record<ProjectMetaTone, string> = {
-  neutral: "bg-stone-500",
+  neutral: "bg-outline",
   info: "bg-secondary",
   success: "bg-success",
   warning: "bg-warning",
@@ -66,7 +66,7 @@ const KIND_TOKEN: Record<FeedCardKind, ProjectToken> = {
 
 // OPR.0.4.1.27 Unit 5 — tone → text color (for the kind glyph; mirrors TONE_DOT).
 const TONE_TEXT: Record<ProjectMetaTone, string> = {
-  neutral: "text-stone-500",
+  neutral: "text-on-surface-variant",
   info: "text-secondary",
   success: "text-success",
   warning: "text-warning",
@@ -93,12 +93,12 @@ export function resolveCardTerminalSession(
 /**
  * Card surface — vellum-coherent. Matches CardShell in
  * storytelling-cards.tsx so /for-you reads as one surface.
- *   bg-stone-100/45 + backdrop-blur-[10px]
+ *   bg-surface-low/45 + backdrop-blur-[10px]
  *   ambient 3-stop box-shadow defines the card edges through the vellum
  *   no left-stripe, no outline border
  */
 const CARD_SURFACE_CLASS =
-  "relative bg-stone-100/45 backdrop-blur-[10px] overflow-hidden group";
+  "relative bg-surface-low/45 backdrop-blur-[10px] overflow-hidden group";
 const CARD_SHADOW_STYLE: React.CSSProperties = {
   boxShadow: [
     "0 2px 4px rgba(0, 0, 0, 0.14)",
@@ -232,7 +232,7 @@ function outcomeToken(outcome: FeedActionOutcome): ProjectToken {
 /** Inline meta mark: mono uppercase pill replacement — colored dot + label. */
 function InlineMetaMark({ token }: { token: ProjectToken }) {
   return (
-    <span className="inline-flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-[0.12em] text-stone-700">
+    <span className="inline-flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-[0.12em] text-on-surface">
       <span aria-hidden="true" className={cn("inline-block w-1.5 h-1.5 rounded-full shrink-0", TONE_DOT[token.tone])} />
       {token.label}
     </span>
@@ -243,7 +243,7 @@ function InlineDateMark({ value }: { value: string | undefined | null }) {
   return (
     <time
       dateTime={value ?? undefined}
-      className="inline-flex items-center gap-1 font-mono text-[10px] text-stone-500"
+      className="inline-flex items-center gap-1 font-mono text-[10px] text-on-surface-variant"
     >
       <CalendarDays className="h-3 w-3" strokeWidth={1.5} />
       {formatFriendlyDate(value)}
@@ -253,7 +253,7 @@ function InlineDateMark({ value }: { value: string | undefined | null }) {
 
 function InlineActor({ session }: { session: string | undefined | null }) {
   return (
-    <span className="inline-flex min-w-0 items-center gap-1 font-mono text-[10px] text-stone-600">
+    <span className="inline-flex min-w-0 items-center gap-1 font-mono text-[10px] text-on-surface-variant">
       <ActorMark actor={session} size="xs" decorative />
       <span className="truncate">{compactSessionLabel(session)}</span>
     </span>
@@ -265,7 +265,7 @@ function InlineFlow({ source, destination }: { source?: string | null; destinati
   return (
     <div className="flex min-w-0 flex-wrap items-center gap-1.5">
       <InlineActor session={source ?? "unknown source"} />
-      <ArrowRight className="h-3.5 w-3.5 text-stone-400" strokeWidth={1.4} />
+      <ArrowRight className="h-3.5 w-3.5 text-on-surface-variant" strokeWidth={1.4} />
       <InlineActor session={destination ?? "unresolved target"} />
     </div>
   );
@@ -293,7 +293,7 @@ function outcomeSentence(outcome: FeedActionOutcome): string {
 
 /**
  * Action-outcome receipt strip — vellum-coherent.
- *   subtle bg-stone-50/40 across all tones
+ *   subtle bg-background/40 across all tones
  *   leading colored dot indicates the tone, NOT the whole strip color
  */
 function ActionOutcomePanel({ outcome }: { outcome: FeedActionOutcome }) {
@@ -302,26 +302,26 @@ function ActionOutcomePanel({ outcome }: { outcome: FeedActionOutcome }) {
   return (
     <div
       data-testid="feed-card-action-outcome"
-      className="mt-3 bg-stone-50/40 px-3 py-2"
+      className="mt-3 bg-background/40 px-3 py-2"
     >
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="flex min-w-0 items-start gap-2">
           <span aria-hidden="true" className={cn("mt-2 inline-block w-1.5 h-1.5 rounded-full shrink-0", TONE_DOT[meta.tone])} />
-          <span className="mt-0.5 inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-white/55 text-stone-800">
+          <span className="mt-0.5 inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-surface-lowest/55 text-on-surface">
             <Icon className="h-4 w-4" strokeWidth={1.8} />
           </span>
           <div className="min-w-0">
-            <div className="font-mono text-[10px] uppercase tracking-[0.16em] text-stone-700">
+            <div className="font-mono text-[10px] uppercase tracking-[0.16em] text-on-surface">
               {meta.outcomeLabel}
             </div>
-            <div className="mt-0.5 font-mono text-[9px] uppercase tracking-[0.12em] text-stone-500">
+            <div className="mt-0.5 font-mono text-[9px] uppercase tracking-[0.12em] text-on-surface-variant">
               Decision recorded
             </div>
           </div>
         </div>
         <InlineDateMark value={outcome.actedAt} />
       </div>
-      <p className="mt-3 font-body text-[12px] leading-relaxed text-stone-800">
+      <p className="mt-3 font-body text-[12px] leading-relaxed text-on-surface">
         {outcomeSentence(outcome)}
       </p>
       <div className="mt-2 flex flex-wrap items-center gap-2">
@@ -450,7 +450,7 @@ export function FeedCard({
             <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
               {/* Kind tag — mono uppercase + leading colored dot. Replaces
                   the old colored-pill chrome. */}
-              <span className="inline-flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-[0.16em] text-stone-700">
+              <span className="inline-flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-[0.16em] text-on-surface">
                 {PrimaryIcon ? (
                   <PrimaryIcon aria-hidden="true" strokeWidth={1.7} className={cn("h-3.5 w-3.5 shrink-0", TONE_TEXT[primaryToken.tone])} />
                 ) : (
@@ -470,7 +470,7 @@ export function FeedCard({
               {qitemViewerData?.state ? <InlineMetaMark token={queueStateToken(qitemViewerData.state)} /> : null}
             </div>
             {/* Title — legibility north star: 16px headline bold. */}
-            <h3 className="font-headline text-[16px] font-bold leading-tight text-stone-900 truncate">
+            <h3 className="font-headline text-[16px] font-bold leading-tight text-on-surface truncate">
               {card.title}
             </h3>
           </div>
@@ -482,7 +482,7 @@ export function FeedCard({
                 data-testid="feed-card-dismiss"
                 aria-label="Dismiss card"
                 onClick={handleDismissClick}
-                className="opacity-0 group-hover:opacity-100 focus:opacity-100 focus:outline-none focus:ring-1 focus:ring-stone-400 transition-opacity inline-flex h-5 w-5 items-center justify-center border border-stone-300 bg-white/80 text-stone-600 hover:text-stone-900 hover:border-stone-500"
+                className="opacity-0 group-hover:opacity-100 focus:opacity-100 focus:outline-none focus:ring-1 focus:ring-outline transition-opacity inline-flex h-5 w-5 items-center justify-center border border-outline-variant bg-surface-lowest/80 text-on-surface-variant hover:text-on-surface hover:border-outline"
               >
                 <X className="h-3 w-3" strokeWidth={1.8} />
               </button>
@@ -491,7 +491,7 @@ export function FeedCard({
         </div>
         {body ? (
           // Qitem / event body is prose. 12px body for legibility.
-          <p className="mt-3 font-body text-[12px] leading-relaxed text-stone-700 whitespace-pre-line">
+          <p className="mt-3 font-body text-[12px] leading-relaxed text-on-surface whitespace-pre-line">
             {body}
           </p>
         ) : null}
@@ -506,7 +506,7 @@ export function FeedCard({
         {proofPreview && proofPreview.screenshots.length > 0 ? (
           <div
             data-testid={`feed-card-proof-preview-${card.id}`}
-            className="mt-3 bg-stone-50/40 p-2"
+            className="mt-3 bg-background/40 p-2"
           >
             <ProofPacketHeader
               title={`Proof packet · ${proofPreview.displayName}`}
@@ -526,15 +526,15 @@ export function FeedCard({
         {qitemViewerData && isActionableCard(card.kind, queueItem, renderedOutcome) ? (
           <div
             data-testid={`feed-card-actions-${card.id}`}
-            className="mt-3 bg-stone-50/40 p-3"
+            className="mt-3 bg-background/40 p-3"
           >
             <div className="mb-2 flex flex-wrap items-start justify-between gap-2">
               <div>
-                <div className="inline-flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-[0.14em] text-stone-700">
+                <div className="inline-flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-[0.14em] text-on-surface">
                   <span aria-hidden="true" className={cn("inline-block w-1.5 h-1.5 rounded-full shrink-0", TONE_DOT.danger)} />
                   Your turn
                 </div>
-                <p className="mt-1 max-w-xl font-body text-[12px] leading-relaxed text-stone-700">
+                <p className="mt-1 max-w-xl font-body text-[12px] leading-relaxed text-on-surface">
                   Review the context, then approve, deny, or route this queue item.
                 </p>
               </div>
@@ -555,7 +555,7 @@ export function FeedCard({
             />
           </div>
         ) : null}
-        <div className="mt-3 flex items-center justify-between gap-3 font-mono text-[10px] text-stone-500">
+        <div className="mt-3 flex items-center justify-between gap-3 font-mono text-[10px] text-on-surface-variant">
           <div className="flex items-center gap-2 min-w-0">
             {/* OPR.0.4.1.27 real-data fidelity — when there is no human author
                 session, render nothing here. Previously this fell back to the raw
@@ -569,7 +569,7 @@ export function FeedCard({
               <QueueItemTrigger
                 data={qitemViewerData}
                 testId={`feed-card-show-context-${card.id}`}
-                className="font-mono text-[10px] uppercase tracking-wide text-stone-700 hover:text-stone-900 underline"
+                className="font-mono text-[10px] uppercase tracking-wide text-on-surface hover:text-on-surface underline"
               >
                 show context
               </QueueItemTrigger>

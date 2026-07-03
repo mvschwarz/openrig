@@ -23,7 +23,7 @@ export function CornerBracket({ position }: CornerBracketProps) {
   }[position];
   return (
     <svg
-      className={`absolute ${positionClass} w-2.5 h-2.5 text-stone-900 pointer-events-none select-none`}
+      className={`absolute ${positionClass} w-2.5 h-2.5 text-on-surface pointer-events-none select-none`}
       viewBox="0 0 10 10"
       fill="none"
       stroke="currentColor"

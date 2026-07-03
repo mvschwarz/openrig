@@ -182,7 +182,10 @@ describe("Session routes", () => {
     expect(body.code).toBe("no_usable_snapshot");
   });
 
-  it("POST .../launch returns 503 target_liveness_unknown when tmux probe fails for pod-aware node (OPR.0.3.4.11 B2)", async () => {
+  // OPR.0.4.3.28 correction — INVERT fail-closed-on-unknown. A failed tmux liveness probe is
+  // NOT positive evidence of a live seat, so the launch route no longer hard-503s; it PROCEEDS
+  // to launch and surfaces a non-blocking liveness_probe_unknown warning (verify-no-squat).
+  it("POST .../launch does NOT 503 on tmux-probe-fail — launches with a liveness warning (OPR.0.4.3.28 inversion)", async () => {
     const tmuxMock = {
       createSession: vi.fn(async () => true),
       hasSession: vi.fn(async () => { throw new Error("tmux unavailable"); }),
@@ -222,10 +225,12 @@ describe("Session routes", () => {
       method: "POST",
     });
 
-    expect(res.status).toBe(503);
+    // No longer a hard 503 / target_liveness_unknown deny-by-default.
+    expect(res.status).not.toBe(503);
     const body = await res.json();
-    expect(body.ok).toBe(false);
-    expect(body.code).toBe("target_liveness_unknown");
+    expect(body.code).not.toBe("target_liveness_unknown");
+    // The liveness uncertainty is surfaced as a non-blocking warning, never a block.
+    expect((body.warnings ?? []).some((w: string) => w.includes("liveness_probe_unknown"))).toBe(true);
   });
 
   it("POST .../nodes/launch-subset returns no_usable_snapshot without snapshot", async () => {
@@ -264,8 +269,11 @@ describe("Session routes", () => {
         { id: n2.id, logicalId: "dev.guard", rigId: rig.id, runtime: "codex", podId: pod.id },
       ],
       sessions: [
-        { id: "s1", nodeId: n1.id, sessionName: "dev-driver@multi-rig", status: "running", resumeType: "claude-native", resumeToken: "t1" },
-        { id: "s2", nodeId: n2.id, sessionName: "dev-guard@multi-rig", status: "running", resumeType: "codex-native", resumeToken: "t2" },
+        // Deliberate fresh (relaunch_fresh) → a genuine successful launch. FR-7: a
+        // resume_if_possible seat with a token but no adapter to verify would instead
+        // land awaiting-decision (covered by the next test).
+        { id: "s1", nodeId: n1.id, sessionName: "dev-driver@multi-rig", status: "running", resumeType: "claude-native", resumeToken: "t1", restorePolicy: "relaunch_fresh" },
+        { id: "s2", nodeId: n2.id, sessionName: "dev-guard@multi-rig", status: "running", resumeType: "codex-native", resumeToken: "t2", restorePolicy: "relaunch_fresh" },
       ],
       edges: [],
       checkpoints: {},
@@ -290,6 +298,39 @@ describe("Session routes", () => {
     const payload = JSON.parse(events[0]!.payload);
     const eventIds = payload.result.nodes.map((n: { logicalId: string }) => n.logicalId).sort();
     expect(eventIds).toEqual(["dev.driver", "dev.guard"]);
+  });
+
+  it("POST .../nodes/launch-subset does NOT report an awaiting-decision restore as a successful launch (FR-7)", async () => {
+    const { app, rigRepo } = createTestApp(db);
+    const podRepo = new PodRepository(db);
+    const rig = rigRepo.createRig("fr7-rig");
+    const pod = podRepo.createPod(rig.id, "dev", "Development");
+    const n1 = rigRepo.addNode(rig.id, "dev.driver", { runtime: "claude-code", podId: pod.id });
+    const { SnapshotRepository } = await import("../src/domain/snapshot-repository.js");
+    const snapRepo = new SnapshotRepository(db);
+    snapRepo.createSnapshot(rig.id, "manual", {
+      rig: { id: rig.id, name: "fr7-rig" },
+      nodes: [{ id: n1.id, logicalId: "dev.driver", rigId: rig.id, runtime: "claude-code", podId: pod.id }],
+      // resume_if_possible + token, but the route harness wires NO runtime adapter →
+      // continuity cannot be verified → the seat lands awaiting-decision, NOT a 201.
+      sessions: [{ id: "s1", nodeId: n1.id, sessionName: "dev-driver@fr7-rig", status: "running", resumeType: "claude-native", resumeToken: "t1", restorePolicy: "resume_if_possible" }],
+      edges: [],
+      checkpoints: {},
+    } as any);
+
+    const res = await app.request(`/api/rigs/${rig.id}/nodes/launch-subset`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ seats: ["dev.driver"] }),
+    });
+
+    // FR-7: a target with no running session must NOT be reported as a successful launch.
+    expect(res.status).not.toBe(201);
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body.ok).toBe(false);
+    const driver = body.launched.find((n: { logicalId: string; status: string }) => n.logicalId === "dev.driver");
+    expect(driver.status).toBe("awaiting-decision");
   });
 
   it("POST .../nodes/launch-subset rejects empty seats array", async () => {
@@ -566,7 +607,9 @@ describe("Session routes", () => {
     sessionRegistry.registerSession(node.id, "dev-impl@test-rig");
     sessionRegistry.updateBinding(node.id, { tmuxSession: "dev-impl@test-rig", attachmentType: "tmux" });
 
-    const res = await app.request(`/api/rigs/${rig.id}/nodes`);
+    // OPR.0.4.3 healthz-wedge: the per-node tmux pane-heuristic is now behind
+    // ?full=true (cheap-default skips it) — request full to exercise the probe.
+    const res = await app.request(`/api/rigs/${rig.id}/nodes?full=true`);
 
     expect(res.status).toBe(200);
     const body = await res.json();
@@ -662,7 +705,8 @@ describe("Session routes", () => {
       externalSessionName: "orch-lead@test-rig",
     });
 
-    const res = await app.request(`/api/rigs/${rig.id}/nodes`);
+    // OPR.0.4.3 healthz-wedge: probe classification is behind ?full=true now.
+    const res = await app.request(`/api/rigs/${rig.id}/nodes?full=true`);
 
     expect(res.status).toBe(200);
     const body = await res.json();
@@ -671,6 +715,32 @@ describe("Session routes", () => {
       reason: "unsupported_attachment",
       evidenceSource: "external_cli",
     });
+  });
+
+  it("GET /api/rigs/:rigId/nodes is CHEAP by default (OPR.0.4.3 healthz-wedge) — a hook-less seat gets the unknown/no_runtime_hook placeholder and NO per-node tmux capture", async () => {
+    const tmux = {
+      hasSession: vi.fn(async () => true),
+      capturePaneContent: vi.fn(async () => "Working on task...\nesc to interrupt"),
+    } as unknown as TmuxAdapter;
+    const { app, rigRepo, sessionRegistry } = createTestApp(db, { tmux });
+    const rig = rigRepo.createRig("test-rig");
+    const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code" });
+    sessionRegistry.registerSession(node.id, "dev-impl@test-rig");
+    sessionRegistry.updateBinding(node.id, { tmuxSession: "dev-impl@test-rig", attachmentType: "tmux" });
+
+    // No ?full → cheap default.
+    const res = await app.request(`/api/rigs/${rig.id}/nodes`);
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body[0].agentActivity).toMatchObject({
+      state: "unknown",
+      reason: "no_runtime_hook",
+      evidenceSource: "session_registry",
+      fallback: true,
+    });
+    // THE cure: no per-node tmux capture on the default hot path.
+    expect(tmux.capturePaneContent).not.toHaveBeenCalled();
   });
 
   it("POST /api/activity/hooks requires the configured local hook token", async () => {

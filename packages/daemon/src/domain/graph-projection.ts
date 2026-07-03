@@ -1,4 +1,5 @@
-import type { RigWithRelations, Session, Binding, Pod, AgentActivity } from "./types.js";
+import type { RigWithRelations, Session, Binding, Pod, AgentActivity, SeatIdentityVerdict } from "./types.js";
+import { identityVerdictDownranksRunning } from "./types.js";
 
 export interface RigGraphInput extends RigWithRelations {
   sessions: Session[];
@@ -26,6 +27,8 @@ interface RFNodeData {
   canonicalSessionName: string | null;
   podId: string | null;
   restoreOutcome: string;
+  // OPR.0.4.3.06 — challenge-verified orientation, distinct from startupStatus.
+  oriented: string;
   resumeToken?: string | null;
   resolvedSpecName: string | null;
   profile: string | null;
@@ -40,6 +43,9 @@ interface RFNodeData {
   terminalActive?: boolean | null;
   hasAssignedWork?: boolean;
   pendingWorkCount?: number;
+  /** OPR.0.4.3.19 — liveness identity verdict threaded through so the graph
+   *  surfaces the same non-green mismatch/missing evidence as node inventory. */
+  identityVerdict?: SeatIdentityVerdict | null;
   heldReason?: string | null;
 }
 
@@ -70,6 +76,7 @@ export interface InventoryOverlay {
   startupStatus: "pending" | "ready" | "attention_required" | "failed" | null;
   canonicalSessionName: string | null;
   restoreOutcome: string;
+  oriented?: string;
   contextUsedPercentage?: number | null;
   contextFresh?: boolean;
   contextAvailability?: string;
@@ -80,6 +87,7 @@ export interface InventoryOverlay {
   terminalActive?: boolean | null;
   hasAssignedWork?: boolean;
   pendingWorkCount?: number;
+  identityVerdict?: SeatIdentityVerdict | null;
   heldReason?: string | null;
 }
 
@@ -100,8 +108,21 @@ export function projectRigToGraph(input: RigGraphInput, inventoryOverlay?: Inven
       : null;
 
     const overlay = overlayMap.get(node.logicalId);
-    const effectiveStartupStatus = latestSession?.status === "running"
-      ? (overlay?.startupStatus ?? (latestSession.startupStatus as RFNodeData["startupStatus"]) ?? null)
+    // OPR.0.4.3.19 forward-fix — a down-ranking identity verdict
+    // (mismatch/pane_missing) makes the graph node's effective startup status
+    // `attention_required`, so every UI surface that already treats
+    // startupStatus==="attention_required" as non-green (the activity ring via
+    // getBaselineActivityState, the ATTN badge) renders non-green WITHOUT a new
+    // vocabulary. `getBaselineActivityState` checks attention_required BEFORE
+    // terminalActive, so an orphan's tmux output can no longer paint the ring
+    // active. The raw `status` stays the honest session-row value; the dot
+    // (getActivityStateWithSource, which ignores startupStatus) is gated
+    // separately in the UI via `identityVerdict`.
+    const identityDownranked = identityVerdictDownranksRunning(overlay?.identityVerdict?.verdict);
+    const effectiveStartupStatus: RFNodeData["startupStatus"] = latestSession?.status === "running"
+      ? (identityDownranked
+        ? "attention_required"
+        : (overlay?.startupStatus ?? (latestSession.startupStatus as RFNodeData["startupStatus"]) ?? null))
       : null;
 
     // Track pods
@@ -130,6 +151,7 @@ export function projectRigToGraph(input: RigGraphInput, inventoryOverlay?: Inven
         canonicalSessionName: overlay?.canonicalSessionName ?? latestSession?.sessionName ?? null,
         podId: node.podId ?? null,
         restoreOutcome: overlay?.restoreOutcome ?? "n-a",
+        oriented: overlay?.oriented ?? "n-a",
         resumeToken: latestSession?.resumeToken ?? null,
         resolvedSpecName: node.resolvedSpecName ?? null,
         profile: node.profile ?? null,
@@ -144,6 +166,7 @@ export function projectRigToGraph(input: RigGraphInput, inventoryOverlay?: Inven
         terminalActive: overlay?.terminalActive,
         hasAssignedWork: overlay?.hasAssignedWork ?? false,
         pendingWorkCount: overlay?.pendingWorkCount ?? 0,
+        identityVerdict: overlay?.identityVerdict ?? null,
         heldReason: overlay?.heldReason ?? null,
       },
     };
@@ -171,6 +194,7 @@ export function projectRigToGraph(input: RigGraphInput, inventoryOverlay?: Inven
         canonicalSessionName: null,
         podId,
         restoreOutcome: "n-a",
+        oriented: "n-a",
         resumeToken: null,
         resolvedSpecName: null,
         profile: null,
@@ -185,6 +209,7 @@ export function projectRigToGraph(input: RigGraphInput, inventoryOverlay?: Inven
         terminalActive: null,
         hasAssignedWork: false,
         pendingWorkCount: 0,
+        identityVerdict: null,
         heldReason: null,
       },
     });

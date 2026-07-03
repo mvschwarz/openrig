@@ -7,7 +7,7 @@
 // completes the "object behind paper" trick without sacrificing sheet
 // width. Asymmetric per side for hand-placed feel.
 //
-// Flat bg-white/40 + backdrop-blur-[20px] per founder pick. The visual
+// Flat bg-surface-lowest/40 + backdrop-blur-[20px] per founder pick. The visual
 // gradient appears naturally from the back-content blur showing through
 // unevenly.
 
@@ -16,7 +16,7 @@ export function BackVellumSheet() {
     <div
       data-testid="back-vellum-sheet"
       aria-hidden="true"
-      className="absolute top-[14px] bottom-[12px] left-[16px] right-[14px] z-[5] bg-white/40 backdrop-blur-[20px] pointer-events-none"
+      className="absolute top-[14px] bottom-[12px] left-[16px] right-[14px] z-[5] bg-surface-lowest/40 backdrop-blur-[20px] pointer-events-none"
     />
   );
 }

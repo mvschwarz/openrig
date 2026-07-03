@@ -50,7 +50,7 @@ const DOT_TOKENS: Record<TimelineDotStatus, string> = {
   warning: "bg-amber-500",
   danger:  "bg-red-500",
   info:    "bg-sky-500",
-  muted:   "bg-stone-300",
+  muted:   "bg-surface-highest",
 };
 
 const PHASE_PALETTE: string[] = [
@@ -63,7 +63,7 @@ const PHASE_PALETTE: string[] = [
   "bg-cyan-100 text-cyan-800 border-cyan-300",
   "bg-orange-100 text-orange-800 border-orange-300",
 ];
-const UNTAGGED_CLASS = "bg-stone-100 text-stone-700 border-stone-300";
+const UNTAGGED_CLASS = "bg-surface-low text-on-surface border-outline-variant";
 const PAGE_SIZE = 12;
 
 export function TimelineTab({
@@ -110,15 +110,15 @@ export function TimelineTab({
     return (
       <div
         data-testid="story-empty"
-        className="border border-dashed border-outline-variant bg-white/35 p-4 font-body text-[11px] leading-relaxed text-stone-500"
+        className="border border-dashed border-outline-variant bg-surface-lowest/35 p-4 font-body text-[11px] leading-relaxed text-on-surface-variant"
       >
         {/* Slice 16: empty-state copy is prose; the file-path / frontmatter /
             fence-block markers stay font-mono as code identifiers per
             DESIGN §Typography. */}
-        <div className="mb-1 font-mono uppercase tracking-[0.12em] text-stone-400">No timeline yet</div>
-        <div className="text-stone-700">
-          Author one at <span className="font-mono text-stone-900">&lt;slice-dir&gt;/timeline.md</span> with frontmatter
-          <span className="font-mono text-stone-900"> kind: incident-timeline</span> and a <span className="font-mono text-stone-900">```timeline```</span> fenced block.
+        <div className="mb-1 font-mono uppercase tracking-[0.12em] text-on-surface-variant">No timeline yet</div>
+        <div className="text-on-surface">
+          Author one at <span className="font-mono text-on-surface">&lt;slice-dir&gt;/timeline.md</span> with frontmatter
+          <span className="font-mono text-on-surface"> kind: incident-timeline</span> and a <span className="font-mono text-on-surface">```timeline```</span> fenced block.
         </div>
       </div>
     );
@@ -129,13 +129,13 @@ export function TimelineTab({
       {hasMarkdown && (
         <div
           data-testid="story-timeline-markdown"
-          className="border border-outline-variant bg-white/35 p-3 backdrop-blur-sm"
+          className="border border-outline-variant bg-surface-lowest/35 p-3 backdrop-blur-sm"
         >
           <MarkdownViewer content={timelineMarkdown!} hideFrontmatter hideRawToggle />
         </div>
       )}
       {hasEvents && (
-      <div data-testid="story-step-tree" data-order="newest-first" className="relative border border-outline-variant bg-white/35 p-3 backdrop-blur-sm">
+      <div data-testid="story-step-tree" data-order="newest-first" className="relative border border-outline-variant bg-surface-lowest/35 p-3 backdrop-blur-sm">
         {pagedEvents.map((event, idx) => (
           <StoryStepCard
             key={`${event.ts}-${event.kind}-${idx}`}
@@ -148,7 +148,7 @@ export function TimelineTab({
       </div>
       )}
       {totalPages > 1 ? (
-        <div className="mt-3 flex items-center justify-between border border-outline-variant bg-white/35 px-3 py-2 font-mono text-[10px] uppercase tracking-[0.12em] text-stone-600">
+        <div className="mt-3 flex items-center justify-between border border-outline-variant bg-surface-lowest/35 px-3 py-2 font-mono text-[10px] uppercase tracking-[0.12em] text-on-surface-variant">
           <button
             type="button"
             data-testid="story-page-prev"
@@ -264,7 +264,7 @@ function StoryStepCard({
       <pre
         data-testid={`story-row-body-${event.kind}`}
         data-source={bodyIsQitem ? "qitem" : "event"}
-        className="mt-2 whitespace-pre-wrap break-words font-body text-[12px] leading-relaxed text-stone-950"
+        className="mt-2 whitespace-pre-wrap break-words font-body text-[12px] leading-relaxed text-on-surface"
       >
         {previewText(primaryBody)}
       </pre>
@@ -273,7 +273,7 @@ function StoryStepCard({
         {queueItem?.tags?.slice(0, 4).map((tag) => <TagPill key={tag} tag={tag} />)}
       </div>
       {bodyIsQitem && event.summary !== primaryBody ? (
-        <div data-testid={`story-row-summary-${event.kind}`} className="mt-2 truncate font-mono text-[9px] text-stone-500">
+        <div data-testid={`story-row-summary-${event.kind}`} className="mt-2 truncate font-mono text-[9px] text-on-surface-variant">
           {event.summary}
         </div>
       ) : null}
@@ -304,24 +304,24 @@ function StoryStepCard({
         <QueueItemTrigger
           data={qitemViewerData(event, queueItem)}
           testId={`story-row-${event.kind}`}
-          className="block w-full border border-outline-variant bg-white/45 px-3 py-2 text-left hard-shadow backdrop-blur-sm hover:bg-white/60"
+          className="block w-full border border-outline-variant bg-surface-lowest/45 px-3 py-2 text-left hard-shadow backdrop-blur-sm hover:bg-surface-lowest/60"
         >
           {rowBody}
         </QueueItemTrigger>
       ) : (
         <div
           data-testid={`story-row-${event.kind}`}
-          className="w-full border border-outline-variant bg-white/45 px-3 py-2 text-left hard-shadow backdrop-blur-sm"
+          className="w-full border border-outline-variant bg-surface-lowest/45 px-3 py-2 text-left hard-shadow backdrop-blur-sm"
         >
           {rowBody}
         </div>
       )}
       {event.detail && (
         <details className="mt-1">
-          <summary className="cursor-pointer font-mono text-[9px] uppercase tracking-[0.12em] text-stone-500">
+          <summary className="cursor-pointer font-mono text-[9px] uppercase tracking-[0.12em] text-on-surface-variant">
             Event detail
           </summary>
-          <pre data-testid={`story-row-detail-${event.kind}`} className="mt-1 overflow-x-auto bg-stone-50 p-2 font-mono text-[9px] text-stone-700">
+          <pre data-testid={`story-row-detail-${event.kind}`} className="mt-1 overflow-x-auto bg-background p-2 font-mono text-[9px] text-on-surface">
             {JSON.stringify(event.detail, null, 2)}
           </pre>
         </details>

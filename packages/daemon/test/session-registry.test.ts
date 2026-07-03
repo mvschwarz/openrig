@@ -144,6 +144,148 @@ describe("SessionRegistry", () => {
     expect(provenanceOf(s.id)).toBe("hook");
   });
 
+  // OPR.0.4.3.20 FR-6 — verification freshness stamping + mark-stale-not-clear.
+  function verifiedOf(sessionId: string): string | null {
+    const row = db.prepare("SELECT resume_last_verified FROM sessions WHERE id = ?").get(sessionId) as { resume_last_verified: string | null } | undefined;
+    return row?.resume_last_verified ?? null;
+  }
+  function probeStatusOf(sessionId: string): string | null {
+    const row = db.prepare("SELECT resume_last_probe_status FROM sessions WHERE id = ?").get(sessionId) as { resume_last_probe_status: string | null } | undefined;
+    return row?.resume_last_probe_status ?? null;
+  }
+
+  it("FR-6: updateResumeToken stamps last_verified + probe_status=resumable on write", () => {
+    const s = registry.registerSession("node-1", "dev-impl@test-rig");
+    expect(verifiedOf(s.id)).toBeNull();
+    registry.updateResumeToken(s.id, "claude_id", "tok-1", "adoption");
+    expect(verifiedOf(s.id)).not.toBeNull();
+    expect(probeStatusOf(s.id)).toBe("resumable");
+  });
+
+  it("FR-6: equal-value refresh re-verifies a token previously marked stale", () => {
+    const s = registry.registerSession("node-1", "dev-impl@test-rig");
+    registry.updateResumeToken(s.id, "claude_id", "tok-1", "hook");
+    registry.markResumeProbeResult(s.id, "not_resumable");
+    expect(probeStatusOf(s.id)).toBe("not_resumable");
+    // Same token value, same rank — the write still runs and re-verifies freshness.
+    registry.updateResumeToken(s.id, "claude_id", "tok-1", "hook");
+    expect(tokenOf(s.id)).toBe("tok-1");
+    expect(probeStatusOf(s.id)).toBe("resumable");
+  });
+
+  it("FR-6: markResumeProbeResult(not_resumable) marks stale WITHOUT clearing the token", () => {
+    const s = registry.registerSession("node-1", "dev-impl@test-rig");
+    registry.updateResumeToken(s.id, "claude_id", "tok-1", "adoption");
+    registry.markResumeProbeResult(s.id, "not_resumable");
+    expect(tokenOf(s.id)).toBe("tok-1");          // survival-critical: token SURVIVES (§2.1b)
+    expect(probeStatusOf(s.id)).toBe("not_resumable");
+    expect(provenanceOf(s.id)).toBe("adoption");  // provenance preserved
+  });
+
+  it("FR-6: markResumeProbeResult(inconclusive) marks stale; a later resumable stamps verified", () => {
+    const s = registry.registerSession("node-1", "dev-impl@test-rig");
+    registry.updateResumeToken(s.id, "claude_id", "tok-1", "hook");
+    registry.markResumeProbeResult(s.id, "inconclusive");
+    expect(probeStatusOf(s.id)).toBe("inconclusive");
+    registry.markResumeProbeResult(s.id, "resumable");
+    expect(probeStatusOf(s.id)).toBe("resumable");
+    expect(verifiedOf(s.id)).not.toBeNull();
+    expect(tokenOf(s.id)).toBe("tok-1");
+  });
+
+  it("FR-6: clearResumeToken nulls the freshness columns too", () => {
+    const s = registry.registerSession("node-1", "dev-impl@test-rig");
+    registry.updateResumeToken(s.id, "claude_id", "tok-1", "adoption");
+    registry.clearResumeToken(s.id);
+    expect(tokenOf(s.id)).toBeNull();
+    expect(verifiedOf(s.id)).toBeNull();
+    expect(probeStatusOf(s.id)).toBeNull();
+  });
+
+  // OPR.0.4.3.20 FR-3 — the `adoption` rung: scrape < adoption < hook < operator.
+  it("adoption overwrites an existing scrape token (adoption outranks scrape)", () => {
+    const s = registry.registerSession("node-1", "dev-impl@test-rig");
+    registry.updateResumeToken(s.id, "codex_id", "scrape-tok", "scrape");
+    registry.updateResumeToken(s.id, "codex_id", "adoption-tok", "adoption");
+    expect(tokenOf(s.id)).toBe("adoption-tok");
+    expect(provenanceOf(s.id)).toBe("adoption");
+  });
+
+  it("a hook self-report REFRESHES an adoption token (hook outranks adoption — freshest live token wins)", () => {
+    const s = registry.registerSession("node-1", "dev-impl@test-rig");
+    registry.updateResumeToken(s.id, "codex_id", "adoption-tok", "adoption");
+    registry.updateResumeToken(s.id, "codex_id", "hook-tok", "hook");
+    expect(tokenOf(s.id)).toBe("hook-tok");
+    expect(provenanceOf(s.id)).toBe("hook");
+  });
+
+  it("an adoption write does NOT clobber an existing hook token", () => {
+    const s = registry.registerSession("node-1", "dev-impl@test-rig");
+    registry.updateResumeToken(s.id, "codex_id", "hook-tok", "hook");
+    registry.updateResumeToken(s.id, "codex_id", "adoption-tok", "adoption");
+    expect(tokenOf(s.id)).toBe("hook-tok");
+    expect(provenanceOf(s.id)).toBe("hook");
+  });
+
+  it("an adoption write does NOT clobber an existing operator token", () => {
+    const s = registry.registerSession("node-1", "dev-impl@test-rig");
+    registry.updateResumeToken(s.id, "claude_id", "operator-tok", "operator");
+    registry.updateResumeToken(s.id, "claude_id", "adoption-tok", "adoption");
+    expect(tokenOf(s.id)).toBe("operator-tok");
+    expect(provenanceOf(s.id)).toBe("operator");
+  });
+
+  it("adoption refreshes an equal-rank adoption token (equal rank overwrites — idempotent re-capture)", () => {
+    const s = registry.registerSession("node-1", "dev-impl@test-rig");
+    registry.updateResumeToken(s.id, "codex_id", "adoption-tok-1", "adoption");
+    registry.updateResumeToken(s.id, "codex_id", "adoption-tok-2", "adoption");
+    expect(tokenOf(s.id)).toBe("adoption-tok-2");
+    expect(provenanceOf(s.id)).toBe("adoption");
+  });
+
+  // OPR.0.4.3.20 FR-3 — validity-before-rank guard: an empty/whitespace token
+  // is a SKIP, never a write, and can never clobber a valid stored token even
+  // from a higher-provenance source ("flakiness = missing = no-write").
+  it("an empty token is a no-op write (leaves an existing valid token untouched, even from a higher provenance)", () => {
+    const s = registry.registerSession("node-1", "dev-impl@test-rig");
+    registry.updateResumeToken(s.id, "codex_id", "adoption-tok", "adoption");
+    registry.updateResumeToken(s.id, "codex_id", "", "operator"); // higher provenance, but empty
+    expect(tokenOf(s.id)).toBe("adoption-tok");
+    expect(provenanceOf(s.id)).toBe("adoption");
+  });
+
+  it("a whitespace-only token is a no-op write", () => {
+    const s = registry.registerSession("node-1", "dev-impl@test-rig");
+    registry.updateResumeToken(s.id, "codex_id", "hook-tok", "hook");
+    registry.updateResumeToken(s.id, "codex_id", "   ", "hook");
+    expect(tokenOf(s.id)).toBe("hook-tok");
+  });
+
+  it("an empty token never populates a fresh (null) session", () => {
+    const s = registry.registerSession("node-1", "dev-impl@test-rig");
+    registry.updateResumeToken(s.id, "codex_id", "", "adoption");
+    expect(tokenOf(s.id)).toBeNull();
+    expect(provenanceOf(s.id)).toBeNull();
+  });
+
+  // OPR.0.4.3.20 FR-3 — updateResumeToken reports whether it actually wrote, so
+  // the adoption-capture audit event never falsely claims a captured write when
+  // the provenance guard refused it.
+  it("updateResumeToken returns true on a real write, false on a rank-blocked no-op", () => {
+    const s = registry.registerSession("node-1", "dev-impl@test-rig");
+    expect(registry.updateResumeToken(s.id, "codex_id", "adoption-tok", "adoption")).toBe(true);
+    expect(registry.updateResumeToken(s.id, "codex_id", "hook-tok", "hook")).toBe(true); // hook > adoption
+    expect(registry.updateResumeToken(s.id, "codex_id", "adoption-tok-2", "adoption")).toBe(false); // refused
+    expect(tokenOf(s.id)).toBe("hook-tok");
+  });
+
+  it("updateResumeToken returns false on an empty/whitespace-token no-op", () => {
+    const s = registry.registerSession("node-1", "dev-impl@test-rig");
+    expect(registry.updateResumeToken(s.id, "codex_id", "", "adoption")).toBe(false);
+    registry.updateResumeToken(s.id, "codex_id", "hook-tok", "hook");
+    expect(registry.updateResumeToken(s.id, "codex_id", "   ", "hook")).toBe(false);
+  });
+
   it("clearResumeToken clears stored resume metadata", () => {
     const session = registry.registerSession("node-1", "r01-dev1-impl");
     registry.updateResumeToken(session.id, "claude_id", "abc-123-def");
